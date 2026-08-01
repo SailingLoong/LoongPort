@@ -41,7 +41,8 @@ mod usage_script;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use codex_config::{
-    get_codex_auth_path, get_codex_config_path, read_codex_live_settings, write_codex_live_atomic,
+    get_codex_auth_path, get_codex_config_path, prepare_codex_provider_live_config,
+    read_codex_live_settings, write_codex_live_atomic, write_codex_live_config_atomic,
 };
 pub use commands::open_provider_terminal;
 pub use commands::*;

@@ -377,13 +377,35 @@ pub struct AppSettings {
     /// Whether to show the project profile switcher on the main page header
     #[serde(default = "default_show_profile_switcher")]
     pub show_profile_switcher: bool,
-    /// Keep Codex ChatGPT login material in auth.json when switching to third-party providers.
-    /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
-    #[serde(default)]
+    /// 切到第三方 provider 时保住 `~/.codex/auth.json` 里的官方 ChatGPT 登录凭据。
+    ///
+    /// **LoongPort 默认开（上游默认关）。** `~/.codex/auth.json` 就是 ChatGPT 桌面版的登录
+    /// 凭据所在 —— 那个 app（bundle id `com.openai.codex`）自带一份 codex 核心二进制，与命令行
+    /// codex 共用同一个 `~/.codex`。关掉这个开关意味着每次切分组都整体覆写 auth.json，把用户的
+    /// ChatGPT 登录一起清掉，重开 app 就要求重新登录。
+    ///
+    /// 开着时 sub2api 的 sk 走 `[model_providers.custom].experimental_bearer_token`
+    /// 落在 config.toml 里，auth.json 全程不碰 —— 这也正是「只切 config.toml」要的语义。
+    ///
+    /// 注意默认值要改**两处**：这里的 serde default（决定已有 settings.json 缺这个键时读成
+    /// 什么）与 `Default` impl（决定文件不存在时的新装机值）。只改后者对老用户无效。
+    #[serde(default = "default_true")]
     pub preserve_codex_official_auth_on_switch: bool,
-    /// Run official Codex providers under the shared "custom" model_provider id
-    /// so official sessions share one resume-history bucket with third-party
-    /// providers. Opt-in: defaults to false.
+    /// 让官方 Codex provider 也跑在共享的 `custom` model_provider id 下，从而与第三方
+    /// provider 共用一个会话历史桶。
+    ///
+    /// **LoongPort 保持默认关**，有意为之：
+    ///
+    /// - **切换路径上它对 LoongPort 是 no-op**：注入被 `category == Some("official")` 门控，
+    ///   而 sub2api 分组是第三方；且它们的 config 模板本身就写 `model_provider = "custom"`，
+    ///   已经在同一个桶里了 —— 分组之间的历史合并**天然成立，不需要这个开关**。
+    /// - **但开着它并非无害**：存量迁移那条路（`codex_history_migration`）的门控**不看
+    ///   provider category**，只看 live config.toml 的 `model_provider` 是否等于 `custom` ——
+    ///   而 LoongPort 切任一分组后恰好满足。于是它会真的去改写 ChatGPT 桌面版的历史会话
+    ///   （`sessions/*.jsonl` 与 `state_5.sqlite`），而**漏掉 ChatGPT.app 自己的
+    ///   `~/.codex/sqlite/codex-dev.db`**，在两套元数据之间留下永久不一致。
+    ///
+    /// 用户想让官方订阅的会话与分组会话并列时可以自己打开（UI 里会先弹知情同意）。
     #[serde(default)]
     pub unify_codex_session_history: bool,
     /// User opted in (via the enable dialog checkbox) to migrate existing
@@ -518,7 +540,8 @@ impl Default for AppSettings {
             usage_dashboard_refresh_interval_ms: None,
             enable_failover_toggle: false,
             show_profile_switcher: true,
-            preserve_codex_official_auth_on_switch: false,
+            // 见字段上的说明：这条保的是 ChatGPT 桌面版的登录凭据，LoongPort 必须默认开。
+            preserve_codex_official_auth_on_switch: true,
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
@@ -1147,6 +1170,43 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+
+    #[test]
+    fn preserve_codex_official_auth_defaults_on_in_both_paths() {
+        // 这条守的是「切分组不会打掉 ChatGPT 桌面版的登录」。
+        //
+        // 必须两条路径都验：`Default` impl 管「settings.json 不存在」（新装机），
+        // 字段级 serde default 管「文件存在但缺这个键」（从上游版本升上来的用户）。
+        // 只改一个的话另一条路会静默回落到 false，然后每次切分组覆写 auth.json。
+        assert!(
+            AppSettings::default().preserve_codex_official_auth_on_switch,
+            "新装机默认必须开"
+        );
+
+        let from_partial: AppSettings = serde_json::from_str("{}").expect("空对象应能解析");
+        assert!(
+            from_partial.preserve_codex_official_auth_on_switch,
+            "settings.json 缺这个键时必须读成 true"
+        );
+
+        // 用户显式关掉时要尊重他的选择，不能被默认值强行盖回。
+        let explicit_off: AppSettings =
+            serde_json::from_str(r#"{"preserveCodexOfficialAuthOnSwitch":false}"#)
+                .expect("显式 false 应能解析");
+        assert!(!explicit_off.preserve_codex_official_auth_on_switch);
+    }
+
+    #[test]
+    fn unify_codex_session_history_stays_off_by_default() {
+        // 保持关：分组之间的历史合并靠 config 模板里的 model_provider="custom" 天然成立，
+        // 而开着它会让存量迁移去改写 ChatGPT 桌面版的历史会话（且漏掉它自己那个
+        // codex-dev.db，留下永久不一致）。改成默认 true 前先读该字段的文档。
+        assert!(!AppSettings::default().unify_codex_session_history);
+        let from_partial: AppSettings = serde_json::from_str("{}").expect("空对象应能解析");
+        assert!(!from_partial.unify_codex_session_history);
+        // 破坏性的存量迁移意愿必须保持「未表态」，不能被默认成同意。
+        assert!(from_partial.unify_codex_migrate_existing.is_none());
+    }
 
     #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {

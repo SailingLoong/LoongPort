@@ -183,17 +183,33 @@ pub fn provider_display_name(site_name: &str, group_name: &str) -> String {
 
 /// 生成 codex 的 `config.toml` 片段。
 ///
-/// **`model_provider` 必须是 `custom`**，这有两个后果，都是硬要求：
+/// ## 四条硬要求，每条漏了都会静默走错
 ///
-/// 1. 它是 cc-switch 的「统一会话历史」桶标识 —— 所有 provider 都写 `custom`，切换分组后
-///    历史才在同一个列表里（需求里「聊天记录合并」靠的就是这个，不是某个开关）。
-/// 2. `openai` 在 cc-switch 的保留 id 列表里且比对**大小写不敏感**，所以绝不能照抄 sub2api
-///    面板给的模板（它写 `model_provider = "OpenAI"`）—— 那会让 bearer token 落到顶层而不是
-///    provider 作用域，并且把会话桶从 `custom` 变成 `OpenAI`，历史就此分家。
+/// 1. **`model_provider = "custom"`**：它是 cc-switch 的会话历史桶标识 —— 所有 provider 都写
+///    `custom`，切换分组后历史才在同一个列表里（需求里「聊天记录合并」靠的就是这个，不是
+///    某个设置开关）。绝不能照抄 sub2api 面板给的模板（它写 `model_provider = "OpenAI"`）：
+///    `openai` 在 cc-switch 的保留 id 列表里且比对**大小写不敏感**，照抄会让 bearer token
+///    落到顶层而不是 provider 作用域，并且把桶从 `custom` 变成 `OpenAI`，历史就此分家。
 ///
-/// `disable_response_storage = true` 同样是硬要求：不写它 codex 会发 `previous_response_id`
-/// 续接，而 sub2api 的 HTTP 路径对非空 `previous_response_id` **直接 400**（只有 WebSocket v2
-/// 支持），不是静默忽略。
+/// 2. **不写 `requires_openai_auth`**（实测出来的，与上游预设相反）。上游第三方模板与
+///    sub2api 面板模板都写 `requires_openai_auth = true`，那是给「sk 写进 auth.json」那条路
+///    准备的。而 LoongPort 走的是「sk 只进 config.toml 的 `experimental_bearer_token`、
+///    auth.json 全程不碰」——`codex doctor` 实测三组对照：
+///
+///    | 配置 | reachability mode | 实际打到哪 |
+///    |---|---|---|
+///    | `requires_openai_auth = true` + bearer token | **ChatGPT auth** | chatgpt.com（403，1 fail） |
+///    | 无 `requires_openai_auth` + bearer token | provider auth | 运营商 `/v1`（200，0 fail） |
+///    | `requires_openai_auth = true` + auth.json | API key auth | 运营商 `/v1`（200，0 fail） |
+///
+///    留着它 + 不写 auth.json 是唯一跑不通的组合：codex 会判成 ChatGPT 登录模式，去打
+///    `chatgpt.com/backend-api` 然后报 credentials incomplete。
+///
+/// 3. **`disable_response_storage = true`**：不写它 codex 会发 `previous_response_id` 续接，
+///    而 sub2api 的 HTTP 路径对非空 `previous_response_id` **直接 400**（只有 WebSocket v2
+///    支持），不是静默忽略。
+///
+/// 4. **`base_url` 必须带 `/v1`**，见 [`crate::operator::api::codex_base_url`]。
 pub fn codex_config_toml(display_name: &str, base_url: &str, model: &str) -> String {
     let q = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
     format!(
@@ -205,8 +221,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = {}
 base_url = {}
-wire_api = "responses"
-requires_openai_auth = true"#,
+wire_api = "responses""#,
         q(model),
         q(display_name),
         q(base_url)
@@ -324,13 +339,28 @@ mod tests {
     }
 
     #[test]
-    fn config_toml_has_the_two_mandatory_flags() {
+    fn config_toml_has_the_mandatory_flags() {
         let toml = codex_config_toml("n", "https://x.dev/v1", "m");
         // 漏 disable_response_storage → codex 发 previous_response_id → sub2api 直接 400。
         assert!(toml.contains("disable_response_storage = true"));
         // sub2api 的 openai 网关原生走 responses，chat 是错的。
         assert!(toml.contains(r#"wire_api = "responses""#));
-        assert!(toml.contains("requires_openai_auth = true"));
+    }
+
+    #[test]
+    fn config_toml_must_not_declare_requires_openai_auth() {
+        // 这条是 `codex doctor` 实测出来的，方向与上游预设**相反**，所以特别容易被
+        // 「照抄上游模板」改回去。
+        //
+        // LoongPort 把 sk 放在 config.toml 的 experimental_bearer_token 里、不碰 auth.json。
+        // 那种情况下声明 requires_openai_auth 会让 codex 判成 ChatGPT 登录模式，去打
+        // chatgpt.com/backend-api 拿 403 并报 credentials incomplete —— 实测 1 fail。
+        // 删掉它才走 provider auth 打运营商的 /v1（实测 0 fail）。
+        let toml = codex_config_toml("n", "https://x.dev/v1", "m");
+        assert!(
+            !toml.contains("requires_openai_auth"),
+            "声明了 requires_openai_auth 会让 codex 去打 chatgpt.com 而不是运营商: {toml}"
+        );
     }
 
     #[test]
