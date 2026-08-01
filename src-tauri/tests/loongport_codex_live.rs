@@ -17,11 +17,14 @@
 //! LoongPort 走第二行。第一行是「沿用上游模板 + 开 preserve 开关」会得到的东西 —— 它跑不通，
 //! 但错误现场在 codex 那边（credentials incomplete），从 LoongPort 这边完全看不出来。
 
-use cc_switch_lib::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
+use cc_switch_lib::{
+    get_codex_auth_path, get_codex_config_path, write_codex_live_atomic, AppType, Provider,
+    ProviderMeta, ProviderService,
+};
 
 #[path = "support.rs"]
 mod support;
-use support::{ensure_test_home, reset_test_fs, test_mutex};
+use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
 /// 复刻 `operator::provision::codex_config_toml` 的产物形态。
 ///
@@ -147,5 +150,80 @@ fn writing_live_config_only_leaves_chatgpt_login_untouched() {
     assert!(
         parsed.get("experimental_bearer_token").is_none(),
         "sk 不该落到顶层: {written}"
+    );
+}
+
+/// 整条落地链路：像 `operator_provision` 那样写一条 provider，然后真的切上去，
+/// 断言 `~/.codex/config.toml` 里出现的正是 codex 能用的形态。
+///
+/// 这是唯一覆盖「provision 写库 → ProviderService::switch → 落盘」全程的测试。前面两条
+/// 分别只验「生成的内容对不对」与「auth.json 有没有被动」，都不经过 switch 那条链。
+#[test]
+fn provisioned_provider_switches_and_lands_correct_config() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let state = create_test_state().expect("create test state");
+
+    // 复刻 operator_provision 写库的那条记录（含它那两个容易漏的字段）。
+    let provider_id = "loongport-test0000000001";
+    let provider = Provider {
+        id: provider_id.to_string(),
+        name: "BestApi · Pro 混池".to_string(),
+        settings_config: loongport_provider_settings("sk-provisioned"),
+        website_url: Some("https://bestapi.store".to_string()),
+        // aggregator 而不是 official —— official 会触发一批只对官方订阅成立的逻辑。
+        category: Some("aggregator".to_string()),
+        created_at: Some(1_800_000_000_000),
+        sort_index: Some(0),
+        notes: None,
+        meta: Some(ProviderMeta {
+            // 不写它会落到 ProxyChat profile —— 那是唯一会 spawn codex 子进程的分支。
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &provider)
+        .expect("save provider");
+
+    // 切上去 —— 走的是 cc-switch 既有链路，不是我们自己写文件。
+    ProviderService::switch(&state, AppType::Codex, provider_id).expect("switch should succeed");
+
+    // 落盘的 config.toml 必须是 codex 接受的形态。
+    let written = std::fs::read_to_string(get_codex_config_path()).expect("读 config.toml");
+    let parsed: toml::Value = written.parse().expect("落盘的 config.toml 必须可解析");
+
+    assert_eq!(
+        parsed["model_provider"].as_str(),
+        Some("custom"),
+        "落盘后 model_provider 仍必须是 custom（会话历史的桶标识）"
+    );
+    assert!(
+        parsed["model_providers"]["custom"]
+            .get("requires_openai_auth")
+            .is_none(),
+        "落盘后不得出现 requires_openai_auth，否则 codex 会去打 chatgpt.com: {written}"
+    );
+    assert_eq!(
+        parsed["model_providers"]["custom"]["experimental_bearer_token"].as_str(),
+        Some("sk-provisioned"),
+        "sk 必须落进 provider 作用域"
+    );
+    assert_eq!(
+        parsed["model_providers"]["custom"]["base_url"].as_str(),
+        Some("https://bestapi.store/v1")
+    );
+    assert_eq!(parsed["disable_response_storage"].as_bool(), Some(true));
+
+    // current 也要真的指向它 —— 否则 UI 上显示切了、codex 用的还是别的。
+    assert_eq!(
+        ProviderService::current(&state, AppType::Codex).expect("read current"),
+        provider_id
     );
 }
