@@ -24,6 +24,7 @@ mod mcp;
 mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
+mod operator;
 mod panic_hook;
 mod prompt;
 mod prompt_files;

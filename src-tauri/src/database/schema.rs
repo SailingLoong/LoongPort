@@ -402,6 +402,9 @@ impl Database {
             [],
         );
 
+        // LoongPort：运营商与凭据（单行表）
+        crate::operator::creds::create_table(conn)?;
+
         Ok(())
     }
 
@@ -510,6 +513,11 @@ impl Database {
                         log::info!("迁移数据库从 v15 到 v16（重建 Codex 会话用量）");
                         Self::migrate_v15_to_v16(conn)?;
                         Self::set_user_version(conn, 16)?;
+                    }
+                    16 => {
+                        log::info!("迁移数据库从 v16 到 v17（LoongPort 运营商与凭据表）");
+                        crate::operator::creds::create_table(conn)?;
+                        Self::set_user_version(conn, 17)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
