@@ -79,7 +79,6 @@ import {
 } from "@/components/skills/SkillsPage";
 import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
-import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
 import { OperatorPanel } from "@/components/operator/OperatorPanel";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
@@ -123,7 +122,13 @@ interface SyncStatusUpdatedPayload {
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
-const STORAGE_KEY = "cc-switch-last-app";
+// localStorage 的 key 加 fork 前缀。
+//
+// WebView 的存储按 app identifier 隔离，理论上 fork 拿不到上游的值。但这两个 key 决定
+// 「打开时看到哪一屏」，一旦因为任何原因读到了上游留下的值（同一台机器上装过 cc-switch、
+// 或将来 identifier 有变动），用户就会绕过 LoongPort 主面板直接落在 provider 列表上。
+// 换个 key 是一行的事，比事后排查便宜。
+const STORAGE_KEY = "loongport-last-app";
 const VALID_APPS: AppId[] = [
   "claude",
   "claude-desktop",
@@ -143,7 +148,7 @@ const getInitialApp = (): AppId => {
   return "claude";
 };
 
-const VIEW_STORAGE_KEY = "cc-switch-last-view";
+const VIEW_STORAGE_KEY = "loongport-last-view";
 const VALID_VIEWS: View[] = [
   "loongport",
   "providers",
@@ -1199,10 +1204,11 @@ function App() {
             ) : (
               <div className="flex items-center gap-2">
                 <div className="relative inline-flex items-center">
-                  <a
-                    href="https://ccswitch.io"
-                    target="_blank"
-                    rel="noreferrer"
+                  {/* 品牌名点一下回主面板。不做成外链 —— 上游那个链接指向 ccswitch.io，
+                      而这是 fork，指过去会让用户以为在用上游那个 app。 */}
+                  <button
+                    type="button"
+                    onClick={() => setCurrentView("loongport")}
                     className={cn(
                       "text-xl font-semibold transition-colors",
                       isProxyRunning && isCurrentAppTakeoverActive
@@ -1210,8 +1216,8 @@ function App() {
                         : "text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300",
                     )}
                   >
-                    CC Switch
-                  </a>
+                    LoongPort
+                  </button>
                 </div>
                 {/* LoongPort 主面板入口。这一段只在 providers 视图下渲染（外层三元的
                     else 分支），所以不需要"当前是否 loongport"的高亮 —— 那个条件在这里
@@ -1678,7 +1684,10 @@ function App() {
       />
 
       <DeepLinkImportDialog />
-      <FirstRunNoticeDialog />
+      {/* 上游的首启欢迎弹窗**有意不挂**：它讲的是 CC Switch 怎么在多个供应商之间切换，
+          与 LoongPort 的流程无关；而且它和域名输入弹窗都是「flag 未确认就弹」+ zIndex=top，
+          会叠在一起，用户先看到一屏无关介绍才能摸到真正要填的东西。
+          LoongPort 的首启入口就是 OperatorPanel 的域名弹窗，那才是第一步。 */}
     </div>
   );
 }

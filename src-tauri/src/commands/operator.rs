@@ -32,9 +32,17 @@ const DEFAULT_SITE: &str = "bestapi.store";
 
 /// codex 的默认模型。
 ///
-/// sub2api 面板给的接入片段用 `gpt-5.5`，cc-switch 的第三方模板默认 `gpt-5.6-sol`。取前者
-/// —— 运营商自己的文档更贴近它实际提供的模型。用户要改就在 provider 编辑里改。
-const DEFAULT_MODEL: &str = "gpt-5.5";
+/// 三个来源给了三个不同的值（sub2api 面板片段 `gpt-5.5`、cc-switch 第三方模板 `gpt-5.6-sol`、
+/// 上游 `UniversalProvider` 默认 `gpt-4o`），所以这个值是**查了真实服务端定的**：
+///
+/// - bestapi.store 的 codex 分组（openai 平台）下，`gpt-5.6-sol` 是**全部可调度账号都支持**的
+///   最新一代；`gpt-5.6` 只有一家上游有，选它会让另外几家路由不到。
+/// - 与 `gpt-5.5` 同价（输入 5 / 输出 30 每百万），所以选新的没有额外成本。
+/// - `gpt-4o` 三个候选里唯一没人推荐的，别回退到它。
+///
+/// **这是「默认值」不是「唯一值」**：用户在 provider 编辑里能改，运营商上新一代模型后也该
+/// 跟着调。它只决定「刚 provision 完、用户还没动手」时用哪个。
+const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// 当前状态，前端据此决定显示哪一屏。
 #[derive(Debug, Serialize)]
@@ -118,9 +126,67 @@ pub struct SwitchTierResult {
 }
 
 /// 读当前状态。
+///
+/// **只读本地**，不发网络请求 —— 这是首屏渲染要等的东西，不该卡在网络上。
+/// 「凭据是不是真的还活着」由 [`operator_check_session`] 单独探，前端拿到本地状态先渲染，
+/// 再让探活的结果去修正它。
 #[tauri::command]
 pub fn operator_status(state: State<'_, AppState>) -> Result<OperatorStatus, String> {
     operator_status_impl(state.inner()).map_err(|e| e.to_string())
+}
+
+/// 探一次凭据是不是真的还能用，并处置失效的情况。
+///
+/// 为什么需要这个：[`operator_status`] 的 `logged_in` 只看本地记的过期时间。而凭据可能在
+/// 网页端被撤销、账号被禁用、或会话被踢掉 —— 那些情况下本地看起来一切正常，用户点任何操作
+/// 才会撞到错误。第 2 次打开 app 到第 100 次都走这条路，不能共用第 1 次的假设。
+///
+/// 返回 true 表示凭据可用（可能是刚静默续期过的）。返回 false 表示已清掉本地凭据、前端该回
+/// 到登录入口 —— **不是错误**，用户重新登录一次即可。
+#[tauri::command]
+pub async fn operator_check_session(app_handle: tauri::AppHandle) -> Result<bool, String> {
+    check_session(&app_handle).await.map_err(|e| e.to_string())
+}
+
+async fn check_session(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
+    let has_creds = {
+        let state = app_handle.state::<AppState>();
+        with_conn(&state, creds::load)?
+            .map(|op| !op.auth_token.is_empty())
+            .unwrap_or(false)
+    };
+    if !has_creds {
+        return Ok(false);
+    }
+
+    // usable_operator 会在快过期时先续期；拿 /user/profile 当探活请求（最便宜的鉴权端点）。
+    let probe = async {
+        let op = usable_operator(app_handle).await?;
+        api::Client::new(&op.site_origin, &op.auth_token)?
+            .balance()
+            .await
+    }
+    .await;
+
+    match probe {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            let msg = e.to_string();
+            // 「登录态已失效」是 api 层对不可恢复的那一类 401 的措辞（账号被禁 / 会话被撤销 /
+            // 用户不存在）。这类清掉本地凭据、让用户重新登录。
+            //
+            // 其它失败（网络不通、运营商关了用户面板返 403）**不清凭据** —— 那不是凭据的问题，
+            // 清掉只会逼用户在网络恢复后白重登一次。
+            if msg.contains("登录态已失效") || msg.contains("请重新登录") {
+                let state = app_handle.state::<AppState>();
+                with_conn(&state, creds::clear_credentials)?;
+                log::info!("运营商凭据已失效，已清除本地凭据：{msg}");
+                return Ok(false);
+            }
+            log::warn!("探活失败但保留凭据（可能只是网络问题）：{msg}");
+            Ok(true)
+        }
+    }
 }
 
 fn operator_status_impl(state: &AppState) -> Result<OperatorStatus, AppError> {
@@ -481,12 +547,38 @@ async fn switch_tier_impl(
     }
 
     // 2) 切换。走 cc-switch 既有链路，不另写落盘逻辑。
+    //
+    // **失败时必须把 ChatGPT 开回去**：我们已经把它关掉了，如果这里直接 `?` 返回，用户手上
+    // 就是「ChatGPT 被关了、分组没切成、也没人告诉他现在是什么状态」。切换链路上有真实的
+    // 失败点（settings_config 缺 auth 键、config.toml 语法校验失败），不是理论风险。
+    //
+    // 重开的是**旧 provider** —— 切换失败意味着配置没动，所以开回去就是原样。
+    let switch_outcome = {
+        let state = app_handle.state::<AppState>();
+        ProviderService::switch(&state, AppType::Codex, provider_id)
+    };
+
+    let switched = match switch_outcome {
+        Ok(s) => s,
+        Err(e) => {
+            if was_running {
+                // 恢复失败也要说出来，但主错误是切换失败那条 —— 别让恢复的错盖住它。
+                if let Err(re) = chatgpt_app::relaunch() {
+                    return Err(AppError::Config(format!(
+                        "切换失败：{e}。配置未改动，但重新打开 ChatGPT 也失败了：{re}，请手动打开它。"
+                    )));
+                }
+                return Err(AppError::Config(format!(
+                    "切换失败：{e}。配置未改动，已重新打开 ChatGPT。"
+                )));
+            }
+            return Err(e);
+        }
+    };
+    warnings.extend(switched.warnings);
+
     let provider_name = {
         let state = app_handle.state::<AppState>();
-        let switched = ProviderService::switch(&state, AppType::Codex, provider_id)?;
-        for w in switched.warnings {
-            warnings.push(w);
-        }
         ProviderService::list(&state, AppType::Codex)
             .ok()
             .and_then(|list| list.get(provider_id).map(|p| p.name.clone()))

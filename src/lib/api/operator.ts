@@ -66,6 +66,14 @@ export const operatorApi = {
   probeSite: (site: string): Promise<ProbeResult> =>
     invoke("operator_probe_site", { site }),
 
+  /**
+   * 探一次凭据是不是真的还能用（会先尝试静默续期）。
+   *
+   * 返回 false 表示凭据已失效且本地记录已清掉 —— 不是错误，引导用户重新登录即可。
+   * status 里的 loggedIn 只看本地过期时间，凭据在网页端被撤销时它仍是 true。
+   */
+  checkSession: (): Promise<boolean> => invoke("operator_check_session"),
+
   /** 开登录窗。返回 true 表示拿到凭据，false 表示用户关窗或超时。 */
   login: (): Promise<boolean> => invoke("operator_login"),
 

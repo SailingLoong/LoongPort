@@ -471,17 +471,15 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
 
-            // 注册 Updater 插件（桌面端）；放在 logger 之后，确保失败可诊断。
-            #[cfg(desktop)]
-            {
-                if let Err(e) = app
-                    .handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                {
-                    // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
-                    log::warn!("初始化 Updater 插件失败，已跳过：{e}");
-                }
-            }
+            // Updater 插件**有意不注册**：LoongPort 还没有自己的发布渠道。
+            //
+            // 上游的 `plugins.updater` 端点与 pubkey 都指向 cc-switch 自己的发布源，留着会把
+            // LoongPort 的用户自动升级成 cc-switch —— 所以 `tauri.conf.json` 里那段整块删了。
+            // 而插件在配置缺失时会初始化失败并每次启动打一条 WARN，索然不注册。
+            //
+            // 有了发布渠道之后要做三件事，缺一不可：配 `plugins.updater.endpoints` 指向自己的
+            // latest.json、换成自己的 minisign pubkey、把这段注册加回来。只加回注册会得到一个
+            // 报错的插件，只配端点则永远不检查更新。
 
             // 注入 AppHandle 给 usage_events，让无 AppHandle 持有的写日志路径
             // 也能向前端推送 `usage-log-recorded`。
@@ -1329,6 +1327,7 @@ pub fn run() {
             commands::switch_provider,
             // LoongPort 运营商
             commands::operator_status,
+            commands::operator_check_session,
             commands::operator_probe_site,
             commands::operator_login,
             commands::operator_provision,

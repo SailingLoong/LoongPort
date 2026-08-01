@@ -76,6 +76,30 @@ export function OperatorPanel() {
     void refresh();
   }, [refresh]);
 
+  // 启动时探一次凭据是不是真的还活着。
+  //
+  // status 的 loggedIn 只看本地记的过期时间 —— 凭据在网页端被撤销、账号被禁用时它仍是 true，
+  // 用户会看到界面一切正常、点任何操作才报错。这一次探活把那种状态提前暴露出来。
+  //
+  // 有意不 await 在 refresh 里：首屏该立刻渲染，不该卡在网络请求上。
+  useEffect(() => {
+    let cancelled = false;
+    operatorApi
+      .checkSession()
+      .then((alive) => {
+        // false 表示后端已经清掉失效凭据了，重新读一次状态就会回到登录入口。
+        if (!alive && !cancelled) {
+          toast.info("登录已失效，请重新登录");
+          void refresh();
+        }
+      })
+      // 探活自身失败（网络不通）不打扰用户 —— 凭据没被清掉，操作时会自然报错。
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [refresh]);
+
   const handleProbe = async () => {
     setBusy("probe");
     try {
