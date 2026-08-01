@@ -11,38 +11,55 @@
 //! | `POST /api/v1/keys` | 建新 sk | Bearer |
 //! | `GET /api/v1/user/profile` | 余额 | Bearer |
 //!
-//! ## 三条会静默出错的约定
+//! ## 四条会静默出错的约定
 //!
-//! 1. **响应是信封** `{code, message, data}`，业务数据在 `data` 里。`code` 为
-//!    `"success"` 才算成功——HTTP 200 不代表业务成功。
-//! 2. **`/groups/available` 返回的是平数组**，不是分页信封；`/keys` 才是分页
+//! 1. **响应是信封** `{code, message, data}`，业务数据在 `data` 里，且 **`code` 是整数、
+//!    成功是 `0`**（`message` 才是 `"success"`）。HTTP 200 不代表业务成功。
+//! 2. **鉴权中间件（401/403）用的是另一套信封**，`code` 在那边是**字符串**错误码。所以
+//!    401 的分类不能复用业务信封的解析，见 [`classify_401`]。
+//! 3. **`/groups/available` 返回的是平数组**，不是分页信封；`/keys` 才是分页
 //!    （`{items, total, page, page_size, pages}`）。两者形状不同，别复用同一个解析。
-//! 3. **`base_url` 必须归一到带 `/v1`**：sub2api 后台的 `api_base_url` 可能是空串
+//! 4. **`base_url` 必须归一到带 `/v1`**：sub2api 后台的 `api_base_url` 可能是空串
 //!    （bestapi.store 实测就是），而它前端的 codex 分支不做补 `/v1` 的处理。见
-//!    [`normalize_api_base`]。
+//!    [`codex_base_url`]。
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
 /// sub2api 业务响应信封。
+///
+/// **`code` 是整数，成功是 `0`**（`response.Success` 写 `Code: 0, Message: "success"`）。
+/// 别把 `message` 那个 `"success"` 当成 code —— 实测踩过：判 `code == "success"` 会让每一次
+/// 调用都失败在反序列化上（`code` 解不成 String），整条链路根本跑不起来。
+///
+/// 服务端错误时 `code` 放 HTTP 状态码、字符串错误码在 `reason` 里。
+///
+/// ⚠️ **鉴权中间件（401/403）用的是另一套信封** `{code: <字符串>, message}`，与这个不兼容 ——
+/// 那条路径不走本结构，见 [`classify_401`]。
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
-    code: String,
+    code: i64,
     #[serde(default)]
     message: String,
+    /// 结构化错误码（成功时不存在）。
+    #[serde(default)]
+    reason: String,
     data: Option<T>,
 }
 
 impl<T> Envelope<T> {
-    /// 取出 `data`，`code != "success"` 或 `data` 缺失时报可见错误。
+    /// 取出 `data`，`code != 0` 或 `data` 缺失时报可见错误。
     fn into_data(self, what: &str) -> Result<T, AppError> {
-        if self.code != "success" {
-            let msg = if self.message.is_empty() {
-                self.code
+        if self.code != 0 {
+            let mut msg = if self.message.is_empty() {
+                format!("code {}", self.code)
             } else {
-                format!("{} ({})", self.message, self.code)
+                self.message
             };
+            if !self.reason.is_empty() {
+                msg = format!("{msg} ({})", self.reason);
+            }
             return Err(AppError::Config(format!("{what}失败: {msg}")));
         }
         self.data
@@ -94,14 +111,29 @@ pub struct Group {
     pub status: String,
 }
 
+/// 倍率高于这个值的分组不呈现给用户。
+///
+/// 运营商会建「渠道监控专用分组」这类探针池，故意把 `rate_multiplier` 设成 100 之类的惩罚性
+/// 数值，好让真实流量绝不落进去 —— 而它们同样是 `platform=openai` + `status=active`，
+/// 光按平台过滤会把它们混进档位列表（bestapi.store 实测就有一个 `rate=100` 的
+/// `渠道监控专属分组-GPT`）。用户手滑选中的代价是 100 倍计费。
+///
+/// 阈值取 10：正常档位的倍率在 0.1–2 这个量级（实测线上便宜档是 0.1），10 倍以上不会是
+/// 给人日常用的定价。**这是启发式判断而非契约** —— 服务端没有「这是探针池」的标记字段，
+/// 所以只能按定价异常来认。宁可漏掉一个真的贵档（用户会来问「我的档位怎么没了」，看得见），
+/// 也不能默默把探针池摆上去（用户看不见，直到账单来）。
+const MAX_SANE_RATE_MULTIPLIER: f64 = 10.0;
+
 impl Group {
-    /// codex 能用的分组：platform 必须是 `openai`。
+    /// codex 能用的分组：`openai` 平台、活跃、且定价不是探针池那种惩罚性倍率。
     ///
     /// 服务端**不按 platform 过滤**（`api_key_service.go` 的 `GetAvailableGroups` 只判
     /// 「活跃 + 可绑」），所以这个过滤必须客户端做。`composite` 分组一把 Key 跨多平台，
-    /// 与「一分组一 provider」的展开模型不对齐，由本判定一并排除。
+    /// 与「一分组一 provider」的展开模型不对齐，由 platform 判定一并排除。
     pub fn is_codex_usable(&self) -> bool {
-        self.platform == "openai" && self.status == "active"
+        self.platform == "openai"
+            && self.status == "active"
+            && self.rate_multiplier <= MAX_SANE_RATE_MULTIPLIER
     }
 }
 
@@ -506,6 +538,45 @@ mod tests {
         );
     }
 
+    /// 打真实站点验探测链路。**默认不跑**（`#[ignore]`）—— CI 不该依赖外网可达，
+    /// 而这条要验的恰恰是「真的连得上、字段真的对得上」。
+    ///
+    /// 手动跑：`cargo test --lib probe_live_site -- --ignored --nocapture`
+    ///
+    /// 它守的是**契约漂移**：上游改字段名、运营商换后端版本时，纯函数单测全绿而这条会红。
+    #[test]
+    #[ignore = "需要外网；手动跑 --ignored"]
+    fn probe_live_site_matches_our_narrow_dto() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("建 runtime");
+
+        let origin = normalize_site_origin("bestapi.store").expect("归一化域名");
+        assert_eq!(origin, "https://bestapi.store");
+
+        let settings = rt.block_on(probe_site(&origin)).expect("探测应成功");
+
+        // version 是我们的站点指纹判据 —— 它没了，探测就认不出 sub2api。
+        assert!(!settings.version.is_empty(), "指纹字段 version 必须有值");
+        // site_name 用作运营商展示名。
+        assert!(!settings.site_name.is_empty(), "site_name 应有值");
+
+        // 这条是本测试最想钉住的事实：后台的 api_base_url **可能是空串**，
+        // 补 /v1 的责任在客户端。若哪天它有值了，下面的断言仍成立（codex_base_url 两种都处理）。
+        let base = codex_base_url(&origin, &settings.api_base_url);
+        assert!(
+            base.ends_with("/v1"),
+            "codex base_url 必须以 /v1 结尾，实际 {base}（api_base_url={:?}）",
+            settings.api_base_url
+        );
+
+        println!(
+            "站点 {} / 版本 {} / api_base_url={:?} → codex base_url {}",
+            settings.site_name, settings.version, settings.api_base_url, base
+        );
+    }
+
     #[test]
     fn codex_base_url_falls_back_to_site_origin_when_api_base_is_blank() {
         // bestapi.store 实测 api_base_url 就是空串，这条是它的正面测点。
@@ -535,27 +606,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn group_usable_only_for_active_openai() {
-        let mk = |platform: &str, status: &str| Group {
+    fn group(platform: &str, status: &str, rate: f64) -> Group {
+        Group {
             id: 1,
             name: "t".into(),
             platform: platform.into(),
-            rate_multiplier: 1.0,
+            rate_multiplier: rate,
             status: status.into(),
-        };
-        assert!(mk("openai", "active").is_codex_usable());
+        }
+    }
+
+    #[test]
+    fn group_usable_only_for_active_openai() {
+        assert!(group("openai", "active", 1.0).is_codex_usable());
         // composite 一把 Key 跨多平台，与「一分组一 provider」不对齐，必须排除。
-        assert!(!mk("composite", "active").is_codex_usable());
-        assert!(!mk("anthropic", "active").is_codex_usable());
-        assert!(!mk("openai", "disabled").is_codex_usable());
+        assert!(!group("composite", "active", 1.0).is_codex_usable());
+        assert!(!group("anthropic", "active", 1.0).is_codex_usable());
+        assert!(!group("openai", "disabled", 1.0).is_codex_usable());
+    }
+
+    #[test]
+    fn monitor_probe_pools_are_filtered_out_by_punitive_rate() {
+        // 运营商的「渠道监控专用分组」是 openai + active，只有倍率异常能认出来。
+        // bestapi.store 实测有一个 rate=100 的 `渠道监控专属分组-GPT` —— 不滤掉的话它会
+        // 出现在档位列表里，用户手滑选中就是 100 倍计费。
+        assert!(!group("openai", "active", 100.0).is_codex_usable());
+
+        // 正常档位不受影响：线上便宜档实测 0.1，常规档 1.0-2.0。
+        for rate in [0.1, 1.0, 2.0, 10.0] {
+            assert!(
+                group("openai", "active", rate).is_codex_usable(),
+                "倍率 {rate} 是正常定价，不该被滤掉"
+            );
+        }
     }
 
     #[test]
     fn envelope_rejects_non_success_code() {
-        let env: Envelope<Group> =
-            serde_json::from_str(r#"{"code":"RATE_LIMITED","message":"too many","data":null}"#)
-                .unwrap();
+        let env: Envelope<Group> = serde_json::from_str(
+            r#"{"code":429,"message":"too many","reason":"RATE_LIMITED","data":null}"#,
+        )
+        .unwrap();
         let err = env.into_data("测试").unwrap_err().to_string();
         assert!(err.contains("too many"), "{err}");
         assert!(err.contains("RATE_LIMITED"), "{err}");
@@ -565,8 +656,34 @@ mod tests {
     fn envelope_rejects_success_without_data() {
         // 服务端说成功却没给 data，属契约破裂，必须报错而不是当成空结果。
         let env: Envelope<Vec<Group>> =
-            serde_json::from_str(r#"{"code":"success","message":"","data":null}"#).unwrap();
+            serde_json::from_str(r#"{"code":0,"message":"success","data":null}"#).unwrap();
         assert!(env.into_data("测试").is_err());
+    }
+
+    #[test]
+    fn envelope_parses_the_real_wire_format_byte_for_byte() {
+        // 这条钉住一个**已经踩过**的坑：`code` 是整数、成功是 0，而 `message` 才是 "success"。
+        // 之前把 code 声明成 String 判 == "success"，结果每一次调用都失败在反序列化上
+        // （错误现场是「响应不是 sub2api 格式」，看不出真正原因），而单测因为编码了同一个
+        // 错误假设而全绿 —— 是打真站的那条 ignored 测试才抓出来的。
+        //
+        // 下面这段是 `curl https://bestapi.store/api/v1/settings/public` 的真实形状（截取字段）。
+        let real = r#"{"code":0,"message":"success","data":{
+            "site_name":"百适 BestApi","version":"0.1.169",
+            "api_base_url":"","registration_enabled":true}}"#;
+        let env: Envelope<PublicSettings> = serde_json::from_str(real).expect("必须能解真实响应");
+        let s = env.into_data("探测").expect("code=0 应判为成功");
+        assert_eq!(s.version, "0.1.169");
+        assert_eq!(s.api_base_url, "", "实测这个字段就是空串");
+
+        // 反面：把 message 的 "success" 误当 code 会解不出来 —— 这正是原来的写法。
+        assert!(
+            serde_json::from_str::<Envelope<PublicSettings>>(
+                r#"{"code":"success","message":"","data":{}}"#
+            )
+            .is_err(),
+            "code 是整数，字符串形态不该被接受（否则等于容忍那个旧 bug）"
+        );
     }
 
     #[test]
@@ -593,7 +710,7 @@ mod tests {
         }
 
         let rotated: Envelope<Resp> = serde_json::from_str(
-            r#"{"code":"success","data":{"access_token":"a2","refresh_token":"r2","expires_at":1800000000000}}"#,
+            r#"{"code":0,"data":{"access_token":"a2","refresh_token":"r2","expires_at":1800000000000}}"#,
         )
         .unwrap();
         let d = rotated.into_data("测试").unwrap();
@@ -605,7 +722,7 @@ mod tests {
 
         // 只轮换 access 的形态：refresh 缺失不是错误，调用方应沿用旧的。
         let not_rotated: Envelope<Resp> =
-            serde_json::from_str(r#"{"code":"success","data":{"access_token":"a2"}}"#).unwrap();
+            serde_json::from_str(r#"{"code":0,"data":{"access_token":"a2"}}"#).unwrap();
         let d = not_rotated.into_data("测试").unwrap();
         assert_eq!(d.access_token.as_deref(), Some("a2"));
         assert!(d.refresh_token.is_none());
