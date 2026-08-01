@@ -7,6 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   Settings,
+  Ship,
   ArrowLeft,
   Minus,
   Maximize2,
@@ -79,6 +80,7 @@ import {
 import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
+import { OperatorPanel } from "@/components/operator/OperatorPanel";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
 import { McpIcon } from "@/components/BrandIcons";
@@ -96,6 +98,7 @@ import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
 
 type View =
+  | "loongport"
   | "providers"
   | "settings"
   | "prompts"
@@ -142,6 +145,7 @@ const getInitialApp = (): AppId => {
 
 const VIEW_STORAGE_KEY = "cc-switch-last-view";
 const VALID_VIEWS: View[] = [
+  "loongport",
   "providers",
   "settings",
   "prompts",
@@ -163,7 +167,7 @@ const getInitialView = (): View => {
   if (saved && VALID_VIEWS.includes(saved)) {
     return saved;
   }
-  return "providers";
+  return "loongport";
 };
 
 function App() {
@@ -892,6 +896,8 @@ function App() {
   const renderContent = () => {
     const content = (() => {
       switch (currentView) {
+        case "loongport":
+          return <OperatorPanel />;
         case "settings":
           return (
             <SettingsPage
@@ -1187,6 +1193,7 @@ function App() {
                   {currentView === "openclawAgents" &&
                     t("openclaw.agents.title")}
                   {currentView === "hermesMemory" && t("hermes.memory.title")}
+                  {currentView === "loongport" && "LoongPort"}
                 </h1>
               </div>
             ) : (
@@ -1206,6 +1213,18 @@ function App() {
                     CC Switch
                   </a>
                 </div>
+                {/* LoongPort 主面板入口。这一段只在 providers 视图下渲染（外层三元的
+                    else 分支），所以不需要"当前是否 loongport"的高亮 —— 那个条件在这里
+                    恒假，TS 也会指出来。 */}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setCurrentView("loongport")}
+                  title="LoongPort"
+                  className="hover:bg-black/5 dark:hover:bg-white/5"
+                >
+                  <Ship className="w-4 h-4" />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"

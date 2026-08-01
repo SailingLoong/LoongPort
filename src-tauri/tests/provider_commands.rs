@@ -16,7 +16,7 @@ use support::{
 };
 
 fn settings_path(home: &Path) -> PathBuf {
-    home.join(".cc-switch").join("settings.json")
+    home.join(cc_switch_lib::APP_DIR_NAME).join("settings.json")
 }
 
 fn grokbuild_config(name: &str, endpoint: &str, api_key: &str) -> String {
@@ -597,8 +597,8 @@ fn switch_provider_updates_claude_live_and_state() {
     // 验证数据已持久化到数据库
     let home_dir = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
     let db_path = std::path::Path::new(&home_dir)
-        .join(".cc-switch")
-        .join("cc-switch.db");
+        .join(cc_switch_lib::APP_DIR_NAME)
+        .join(cc_switch_lib::DB_FILE_NAME);
     assert!(
         db_path.exists(),
         "switching provider should persist to cc-switch.db"

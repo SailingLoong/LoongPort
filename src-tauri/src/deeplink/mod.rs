@@ -1,12 +1,20 @@
-//! Deep link import functionality for CC Switch
+//! Deep link import functionality
 //!
-//! This module implements the ccswitch:// protocol for importing configurations
-//! via deep links. Supports importing:
+//! scheme 是 `loongport://`（`tauri.conf.json` 的 `plugins.deep-link`）。
+//!
+//! **LoongPort 的主流程不走这里**：拿到 sk 与 endpoint 之后直接写 provider 记录
+//! （见 `commands::operator::operator_provision`），不经 deeplink 导入。这条链路是从上游
+//! 继承下来的通用导入能力，留着不碍事。
+//!
+//! Supports importing:
 //! - Provider configurations (Claude/Codex/Gemini)
 //! - MCP server configurations
 //! - Prompts
 //! - Skills
 //!
+
+/// 本 app 注册的 scheme（`tauri.conf.json` 的 `plugins.deep-link`）。
+pub const APP_SCHEME: &str = "loongport";
 
 mod mcp;
 mod parser;

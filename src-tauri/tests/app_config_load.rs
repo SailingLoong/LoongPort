@@ -1,14 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 
-use cc_switch_lib::{AppError, MultiAppConfig};
+use cc_switch_lib::{AppError, MultiAppConfig, APP_DIR_NAME};
 
 mod support;
 use support::{ensure_test_home, reset_test_fs, test_mutex};
 
 fn cfg_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
-    PathBuf::from(home).join(".cc-switch").join("config.json")
+    PathBuf::from(home).join(APP_DIR_NAME).join("config.json")
 }
 
 #[test]
@@ -33,7 +33,7 @@ fn load_v1_config_returns_error_and_does_not_write() {
     // 文件不应有任何变化，且不应生成 .bak
     let after = fs::read_to_string(&path).expect("read after");
     assert_eq!(before, after, "config.json should not be modified");
-    let bak = home.join(".cc-switch").join("config.json.bak");
+    let bak = home.join(APP_DIR_NAME).join("config.json.bak");
     assert!(!bak.exists(), ".bak should not be created on load error");
 }
 
@@ -58,7 +58,7 @@ fn load_v1_with_extra_version_still_treated_as_v1() {
 
     let after = std::fs::read_to_string(&path).expect("read after");
     assert_eq!(before, after, "config.json should not be modified");
-    let bak = home.join(".cc-switch").join("config.json.bak");
+    let bak = home.join(APP_DIR_NAME).join("config.json.bak");
     assert!(!bak.exists(), ".bak should not be created on v1-like error");
 }
 
@@ -81,7 +81,7 @@ fn load_invalid_json_returns_parse_error_and_does_not_write() {
 
     let after = fs::read_to_string(&path).expect("read after");
     assert_eq!(before, after, "config.json should remain unchanged");
-    let bak = home.join(".cc-switch").join("config.json.bak");
+    let bak = home.join(APP_DIR_NAME).join("config.json.bak");
     assert!(!bak.exists(), ".bak should not be created on parse error");
 }
 

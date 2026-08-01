@@ -6,6 +6,23 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
+/// 应用私有数据目录名（位于用户主目录下）。
+///
+/// **这是与 cc-switch 隔离的关键，不是外观改名。** V1 踩过：只改了 `tauri.conf.json` 的
+/// `identifier` 就以为数据分开了，结果 LoongPort 一启动就把已装 cc-switch 的
+/// `~/.cc-switch/cc-switch.db` 迁到了更高的 schema 版本，那台机器上的 cc-switch 随即报
+/// 「数据库版本过新」打不开。
+///
+/// 原因是 `identifier` 只决定 `~/Library/Application Support/<identifier>/`（那里只存窗口
+/// 状态与 `app_paths.json`），而**数据库、settings.json、备份、崩溃日志全在本常量指向的
+/// 目录下**，与 identifier 无关。
+///
+/// 改它等于要求已装机数据迁移 —— 属不可逆决定。
+pub const APP_DIR_NAME: &str = ".loongport";
+
+/// 数据库文件名。同样属不可逆决定。
+pub const DB_FILE_NAME: &str = "loongport.db";
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项
@@ -185,7 +202,7 @@ pub fn get_app_config_dir() -> PathBuf {
         return custom;
     }
 
-    let default_dir = get_home_dir().join(".cc-switch");
+    let default_dir = get_home_dir().join(APP_DIR_NAME);
 
     // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
     // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
@@ -193,13 +210,13 @@ pub fn get_app_config_dir() -> PathBuf {
     // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
     #[cfg(windows)]
     {
-        let default_db = default_dir.join("cc-switch.db");
+        let default_db = default_dir.join(DB_FILE_NAME);
         if !default_db.exists() {
             if let Ok(home_env) = std::env::var("HOME") {
                 let trimmed = home_env.trim();
                 if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
-                    if legacy_dir.join("cc-switch.db").exists() {
+                    let legacy_dir = PathBuf::from(trimmed).join(APP_DIR_NAME);
+                    if legacy_dir.join(DB_FILE_NAME).exists() {
                         log::info!(
                             "Detected v3.10.3 legacy database at {}, using it instead of {}",
                             legacy_dir.display(),

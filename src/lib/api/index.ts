@@ -30,3 +30,12 @@ export type {
   ManagedAuthStatus,
   ManagedAuthDeviceCodeResponse,
 } from "./auth";
+export { operatorApi } from "./operator";
+export type {
+  OperatorStatus,
+  ProbeResult,
+  TierInfo,
+  ProvisionSummary,
+  SwitchTierResult,
+  OperatorBalance,
+} from "./operator";

@@ -106,13 +106,14 @@ pub struct FailureInfo {
 #[serde(rename_all = "camelCase")]
 pub struct SwitchTierResult {
     pub provider_name: String,
-    /// ChatGPT 退出前是不是在跑。
+    /// ChatGPT 退出前是不是在跑（决定切换后要不要替用户重开）。
     pub chatgpt_was_running: bool,
-    /// 退出是否超时（通常是 app 弹了确认框）。超时仍会继续切换。
-    pub chatgpt_quit_timed_out: bool,
     /// 有没有重新打开它。
     pub chatgpt_relaunched: bool,
     /// 非致命的问题（如重开失败），如实带给用户。
+    ///
+    /// 「退不掉 ChatGPT」**不在这里** —— 那种情况整个命令返回 Err、配置不动，见
+    /// [`switch_tier_impl`]。
     pub warnings: Vec<String>,
 }
 
@@ -452,24 +453,29 @@ async fn switch_tier_impl(
 ) -> Result<SwitchTierResult, AppError> {
     let mut warnings = Vec::new();
     let mut was_running = false;
-    let mut timed_out = false;
 
-    // 1) 先退 ChatGPT。它启动时读 config.toml，不退就仍连旧分组。
-    if quit_chatgpt && chatgpt_app::is_installed() {
+    // 1) 先退 ChatGPT，**退不掉就中止切换**。
+    //
+    // 为什么中止而不是「照写配置 + 提示手动重启」：ChatGPT 在有进行中的对话时会弹阻塞式
+    // 确认框，用户点 Cancel 就是明确表示「先别动」。而它自己**会回写 config.toml** —— 这时
+    // 硬写配置的结果是两边互相覆盖，用户既没切成、也不知道自己现在连的是哪个分组。
+    if quit_chatgpt {
         match chatgpt_app::quit_and_wait() {
-            Ok(chatgpt_app::QuitOutcome::NotRunning) => {}
+            // 没装 / 没在跑：都不需要重开，切换照常。
+            Ok(chatgpt_app::QuitOutcome::NotInstalled)
+            | Ok(chatgpt_app::QuitOutcome::NotRunning) => {}
             Ok(chatgpt_app::QuitOutcome::Quit) => was_running = true,
-            Ok(chatgpt_app::QuitOutcome::TimedOut) => {
-                was_running = true;
-                timed_out = true;
-                // 不阻断切换：配置照写，用户手动重启一样能生效。
-                warnings.push(
-                    "ChatGPT 没有在预期时间内退出（可能弹了确认框），配置已切换，请手动重启它"
-                        .to_string(),
-                );
+            Ok(chatgpt_app::QuitOutcome::StillRunning) => {
+                return Err(AppError::Config(
+                    "ChatGPT 还在运行（可能弹出了确认退出的对话框，或有进行中的对话）。\
+                     请先手动退出它，然后重试切换。配置未改动。"
+                        .into(),
+                ));
             }
             Err(e) => {
-                warnings.push(format!("退出 ChatGPT 失败：{e}"));
+                return Err(AppError::Config(format!(
+                    "无法退出 ChatGPT：{e}。配置未改动。"
+                )));
             }
         }
     }
@@ -489,9 +495,10 @@ async fn switch_tier_impl(
 
     // 3) 重开 —— 只在我们确实把它关掉了的情况下。用户本来没开着，我们不该替他开。
     let mut relaunched = false;
-    if was_running && !timed_out {
+    if was_running {
         match chatgpt_app::relaunch() {
             Ok(()) => relaunched = true,
+            // 重开失败不回滚：配置已经切好了，用户手动打开 ChatGPT 就能用上新分组。
             Err(e) => warnings.push(format!("重新打开 ChatGPT 失败：{e}")),
         }
     }
@@ -499,7 +506,6 @@ async fn switch_tier_impl(
     Ok(SwitchTierResult {
         provider_name,
         chatgpt_was_running: was_running,
-        chatgpt_quit_timed_out: timed_out,
         chatgpt_relaunched: relaunched,
         warnings,
     })
