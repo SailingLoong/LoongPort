@@ -161,6 +161,12 @@ describe("App integration with MSW", () => {
     resetProviderState();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    // 本文件全部用例测的是 provider 列表那一屏，而 LoongPort 的默认首屏是自己的主面板
+    // （`loongport`）。把「上次看的是 provider 列表」写进 localStorage —— 这既让这些用例
+    // 拿到它们要测的那一屏，也顺带覆盖了「记住上次视图」这个行为本身。
+    //
+    // key 必须与 App.tsx 的 VIEW_STORAGE_KEY 一致（那边加了 loongport- 前缀防止读到上游遗留值）。
+    localStorage.setItem("loongport-last-view", "providers");
   });
 
   it("covers basic provider flows via real hooks", async () => {
