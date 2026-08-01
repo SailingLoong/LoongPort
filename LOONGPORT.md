@@ -29,11 +29,32 @@ pnpm install
 pnpm tauri dev
 
 # 出一个能双击的 app
-pnpm tauri build          # 产物在 src-tauri/target/release/bundle/
+pnpm tauri build --bundles app    # 产物 src-tauri/target/release/bundle/macos/LoongPort.app
 ```
 
 数据落在 `~/.loongport/`（DB 是 `loongport.db`）。**与已装的 cc-switch 完全隔离** —— 那是
 `~/.cc-switch/`，两边互不影响。
+
+同时装了 cc-switch 时注意：两边都有 single-instance 插件，但它按 identifier 区分，所以可以
+同时开。**同一个 app 开两份则第二份会立刻静默退出**（这是插件的正常行为，不是崩溃）——
+debug 版还开着时 release 版起不来，排查时先 `pkill -f LoongPort`。
+
+### dmg 那步会超时，用 hdiutil 手工做
+
+`tauri build`（不带 `--bundles app`）在打 dmg 时会失败：它的 `bundle_dmg.sh` 用 AppleScript
+让 Finder 美化窗口布局，那个 Apple event 会超时（`-1712`，与 `chatgpt_app.rs` 处理的是同一
+个坑）。app 本身**已经打好了**，只是 dmg 那一步挂掉。
+
+要 dmg 就手工做一个（无花哨布局，功能一样）：
+
+```bash
+cd src-tauri/target/release/bundle
+STAGE=$(mktemp -d)/LoongPort && mkdir -p "$STAGE"
+cp -R macos/LoongPort.app "$STAGE/" && ln -s /Applications "$STAGE/Applications"
+hdiutil create -volname LoongPort -srcfolder "$STAGE" -ov -format UDZO \
+  dmg/LoongPort_3.19.1_aarch64.dmg
+rm -rf "$(dirname "$STAGE")"
+```
 
 ## 六个 Tauri 命令
 
