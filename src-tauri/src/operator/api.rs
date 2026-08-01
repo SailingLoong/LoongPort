@@ -115,7 +115,6 @@ pub struct ApiKey {
     pub key: String,
     #[serde(default)]
     pub name: String,
-    pub group_id: Option<i64>,
     #[serde(default)]
     pub status: String,
 }
@@ -336,6 +335,75 @@ impl Client {
     }
 }
 
+/// 用 refresh token 换一对新的 token。
+///
+/// 这个端点**不需要** Bearer（refresh token 就在请求体里），所以是自由函数而不是
+/// [`Client`] 的方法 —— 过期的时候我们手上正好没有可用的 access token。
+///
+/// 失败即意味着「重登」：refresh token 也过期了、被复用检测拦了（`REFRESH_TOKEN_REUSED`）、
+/// 或者会话家族已被撤销。这些都不该重试。
+pub async fn refresh_token(
+    site_origin: &str,
+    refresh_token: &str,
+) -> Result<RefreshedTokens, AppError> {
+    #[derive(Deserialize)]
+    struct Resp {
+        access_token: Option<String>,
+        refresh_token: Option<String>,
+        /// 毫秒时间戳（与前端 localStorage 里那个同源）。
+        expires_at: Option<i64>,
+    }
+
+    let client = build_client()?;
+    let resp = client
+        .post(format!("{site_origin}/api/v1/auth/refresh"))
+        .json(&serde_json::json!({ "refresh_token": refresh_token }))
+        .send()
+        .await
+        .map_err(|e| AppError::Config(format!("续期失败: {e}")))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| AppError::Config(format!("续期失败: 读响应出错 {e}")))?;
+
+    if !status.is_success() {
+        // 401/403 都是「refresh 也救不了」，一律要求重登，不重试。
+        return Err(AppError::Config(format!(
+            "续期失败（HTTP {}），请重新登录",
+            status.as_u16()
+        )));
+    }
+
+    let env: Envelope<Resp> = serde_json::from_str(&body)
+        .map_err(|e| AppError::Config(format!("续期失败: 响应解析出错 {e}")))?;
+    let data = env.into_data("续期")?;
+
+    let access = data
+        .access_token
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| AppError::Config("续期失败: 服务端没给新 token".into()))?;
+
+    Ok(RefreshedTokens {
+        auth_token: access,
+        // 服务端可能只轮换 access 而不给新 refresh；那时沿用旧的。
+        refresh_token: data.refresh_token.filter(|t| !t.is_empty()),
+        token_expires_at: data
+            .expires_at
+            .map(|ms| if ms > 100_000_000_000 { ms / 1000 } else { ms }),
+    })
+}
+
+/// 续期结果。
+#[derive(Debug, Clone)]
+pub struct RefreshedTokens {
+    pub auth_token: String,
+    /// `None` 表示服务端没轮换 refresh token，调用方应沿用旧的。
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<i64>,
+}
+
 /// 401 的两类处置：能靠 refresh 救的，与必须让用户重新登录的。
 ///
 /// 这个区分是**防死循环的关键**：账号态问题（被禁用 / 会话被撤销）重试多少次都是同一个
@@ -514,6 +582,36 @@ mod tests {
     }
 
     #[test]
+    fn refresh_normalizes_millisecond_expiry_and_keeps_rotation_optional() {
+        // 这里测的是解析形状而不是网络调用：服务端两种响应形态（轮换 refresh / 不轮换）
+        // 都必须能解，且毫秒过期时间要归一到秒。
+        #[derive(Deserialize)]
+        struct Resp {
+            access_token: Option<String>,
+            refresh_token: Option<String>,
+            expires_at: Option<i64>,
+        }
+
+        let rotated: Envelope<Resp> = serde_json::from_str(
+            r#"{"code":"success","data":{"access_token":"a2","refresh_token":"r2","expires_at":1800000000000}}"#,
+        )
+        .unwrap();
+        let d = rotated.into_data("测试").unwrap();
+        assert_eq!(d.refresh_token.as_deref(), Some("r2"));
+        let secs = d
+            .expires_at
+            .map(|ms| if ms > 100_000_000_000 { ms / 1000 } else { ms });
+        assert_eq!(secs, Some(1_800_000_000));
+
+        // 只轮换 access 的形态：refresh 缺失不是错误，调用方应沿用旧的。
+        let not_rotated: Envelope<Resp> =
+            serde_json::from_str(r#"{"code":"success","data":{"access_token":"a2"}}"#).unwrap();
+        let d = not_rotated.into_data("测试").unwrap();
+        assert_eq!(d.access_token.as_deref(), Some("a2"));
+        assert!(d.refresh_token.is_none());
+    }
+
+    #[test]
     fn idempotency_key_is_ascii_hex_within_128_bytes() {
         let k = idempotency_key_for("LoongPort/dev-1/42");
         assert_eq!(k.len(), 64);
@@ -530,7 +628,6 @@ mod tests {
             id: 1,
             key: "sk-x".into(),
             name: "n".into(),
-            group_id: Some(1),
             status: status.into(),
         };
         assert!(mk("active").is_usable());

@@ -238,7 +238,6 @@ mod tests {
             id,
             key: format!("sk-{id}"),
             name: name.into(),
-            group_id: Some(1),
             status: status.into(),
         }
     }
