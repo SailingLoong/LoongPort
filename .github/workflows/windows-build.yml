@@ -63,7 +63,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 版本跟随继承来的 release.yml —— 那是上游验证过能跑的组合，别自己挑。
       - uses: pnpm/action-setup@v6
