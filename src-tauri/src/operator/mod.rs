@@ -9,6 +9,7 @@
 //! - [`creds`]：凭据的内存结构与持久化（`loongport_credential` 表）
 //! - [`login`]：登录 WebView（加载运营商真实登录页，从 localStorage 取凭据回传）
 //! - [`provision`]：分组 → sk → codex provider 的展开
+//! - [`managed`]：「这条 provider 是不是托管的」的唯一判据 + 各入口的守卫
 //! - [`chatgpt_app`]：ChatGPT 桌面版（bundle id `com.openai.codex`）的退出与重开
 //!
 //! ## 与 V1 LoongPort 的差异（有意简化，不是遗漏）
@@ -32,4 +33,7 @@ pub mod api;
 pub mod chatgpt_app;
 pub mod creds;
 pub mod login;
+pub mod managed;
 pub mod provision;
+
+pub use managed::{filter_unmanaged, is_managed, reject_if_managed};

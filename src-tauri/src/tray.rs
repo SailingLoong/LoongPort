@@ -381,6 +381,21 @@ fn sort_providers(
     sorted
 }
 
+/// 托盘子菜单里该列出哪些供应商：按上游规则排序后，剔除 LoongPort 托管项。
+///
+/// **托管项必须从这里消失**：托盘点一下就直接调 `ProviderService::switch`，绕过
+/// `operator_switch_tier` 的「退出 ChatGPT → 切换 → 重开」编排 —— 切完 codex 还连着旧分组，
+/// 而用户看到的是「已勾选新档位」。这是唯一一条用户真会误触的绕过路径。
+///
+/// 单独抽成函数是为了可测：`create_tray_menu` 要真的 `AppHandle` 才跑得起来
+///（`MenuItem::with_id` 拿的是 Tauri 运行时），单测只能测到「列表怎么算出来的」这一层，
+/// 测不到「菜单项真的没建出来」。所以这个函数必须是菜单构建的**唯一**列表来源。
+fn tray_menu_providers(
+    providers: &indexmap::IndexMap<String, crate::provider::Provider>,
+) -> Vec<(&String, &crate::provider::Provider)> {
+    crate::operator::filter_unmanaged(sort_providers(providers))
+}
+
 /// 处理项目 Profile 托盘事件，返回是否已处理
 ///
 /// 事件 id 形如 `profile_<scope>_<uuid>`（同一项目在各分组子菜单里各有一项，
@@ -690,8 +705,11 @@ pub fn create_tray_menu(
             crate::settings::get_effective_current_provider(&app_state.db, &section.app_type)?
                 .unwrap_or_default();
 
-        if providers.is_empty() {
+        let menu_providers = tray_menu_providers(&providers);
+
+        if menu_providers.is_empty() {
             // 空供应商：显示禁用的菜单项
+            // （过滤掉托管项后为空也走这里 —— 否则会挂出一个点开什么都没有的空子菜单）
             let label = format!("{} {}", section.header_label, tray_texts.no_providers_label);
             let empty_item = MenuItem::with_id(app, section.empty_id, &label, false, None::<&str>)
                 .map_err(|e| {
@@ -722,7 +740,7 @@ pub fn create_tray_menu(
 
             let mut submenu_builder = SubmenuBuilder::with_id(app, &submenu_id, &submenu_label);
 
-            for (id, provider) in sort_providers(&providers) {
+            for (id, provider) in menu_providers {
                 let is_current = current_id == *id;
                 let is_official_blocked = is_app_taken_over
                     && provider.category.as_deref() == Some("official")
@@ -1125,9 +1143,12 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_script_summary, format_subscription_summary, TRAY_ID, TRAY_SECTIONS};
+    use super::{
+        format_script_summary, format_subscription_summary, tray_menu_providers, TRAY_ID,
+        TRAY_SECTIONS,
+    };
     use crate::app_config::AppType;
-    use crate::provider::{UsageData, UsageResult};
+    use crate::provider::{Provider, UsageData, UsageResult};
     use crate::services::subscription::{
         CredentialStatus, QuotaTier, SubscriptionQuota, TIER_FIVE_HOUR, TIER_GEMINI_FLASH,
         TIER_GEMINI_FLASH_LITE, TIER_GEMINI_PRO, TIER_MONTHLY, TIER_SEVEN_DAY, TIER_SEVEN_DAY_OPUS,
@@ -1138,6 +1159,52 @@ mod tests {
     fn tray_id_is_unique_to_app() {
         assert_eq!(TRAY_ID, "cc-switch");
         assert_ne!(TRAY_ID, "main");
+    }
+
+    fn provider_map(ids: &[&str]) -> indexmap::IndexMap<String, crate::provider::Provider> {
+        ids.iter()
+            .enumerate()
+            .map(|(idx, id)| {
+                let mut p = Provider::with_id(
+                    (*id).to_string(),
+                    (*id).to_string(),
+                    serde_json::json!({}),
+                    None,
+                );
+                // 给定 sort_index 让顺序确定，避免断言依赖 name 兜底排序。
+                p.sort_index = Some(idx);
+                ((*id).to_string(), p)
+            })
+            .collect()
+    }
+
+    /// P0 回归防线：托盘子菜单里绝不能出现 LoongPort 托管档位。
+    ///
+    /// 从托盘点一下会直接调 `ProviderService::switch`，跳过 `operator_switch_tier` 的
+    /// 「退出 ChatGPT → 切换 → 重开」编排 —— 用户切完还连着旧分组且毫不知情。
+    #[test]
+    fn tray_menu_excludes_loongport_managed_providers() {
+        let managed = crate::operator::provision::provider_id_for("https://bestapi.store", 1);
+        let providers = provider_map(&["custom-1", &managed, "codex-official"]);
+
+        let listed = tray_menu_providers(&providers);
+
+        assert_eq!(
+            listed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["custom-1", "codex-official"],
+            "托管档位必须不进托盘菜单，其余项顺序不变"
+        );
+    }
+
+    /// 过滤后为空要能被 `create_tray_menu` 识别成「空供应商」走禁用提示那条分支，
+    /// 而不是挂出一个点开什么都没有的空子菜单。
+    #[test]
+    fn tray_menu_is_empty_when_every_provider_is_managed() {
+        let a = crate::operator::provision::provider_id_for("https://bestapi.store", 1);
+        let b = crate::operator::provision::provider_id_for("https://bestapi.store", 2);
+        let providers = provider_map(&[&a, &b]);
+
+        assert!(tray_menu_providers(&providers).is_empty());
     }
 
     #[test]
