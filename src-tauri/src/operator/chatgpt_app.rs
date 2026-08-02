@@ -33,11 +33,19 @@
 //! （MSIX vs 传统 exe）。加之前先跑一次 `needs_user_attention` 那条注释里的判断 —— 那边现在
 //! 恒为 true，加了实现之后才该按真实安装状态判。
 
+// 只有 macOS 用得到：两个 QUIT_* 常量与轮询逻辑都在那边（Windows 上 gate 掉之后
+// 这个 import 就成了 unused —— `-D warnings` 下同样会把 CI 判红）。
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use crate::error::AppError;
 
 /// ChatGPT 桌面版的 bundle id。**显示名是 ChatGPT，标识符仍是 codex**，别按名字找。
+///
+/// bundle id 是 macOS/Launch Services 的概念，所以这个常量与下面几个 AppleScript 参数一样
+/// 只在 macOS 编译。Windows 上没有等价物（见模块文档末尾那段：那边要发 `WM_CLOSE`），
+/// 无条件定义会让 `-D warnings` 下的 `dead_code` 把 Windows CI 判红。
+#[cfg(target_os = "macos")]
 pub const CHATGPT_BUNDLE_ID: &str = "com.openai.codex";
 
 /// AppleScript 层的超时秒数。
@@ -46,6 +54,7 @@ pub const CHATGPT_BUNDLE_ID: &str = "com.openai.codex";
 /// 当 ChatGPT 弹出确认框把主进程阻塞住时，`osascript` 会一直等到那 120 秒满才以 -1712
 /// 失败。而 `std::process::Command::output()` 是同步阻塞的 —— 那就是把 Tauri command
 /// 卡两分钟。包一层 `with timeout of N seconds` 实测能压到 N。
+#[cfg(target_os = "macos")]
 const APPLESCRIPT_TIMEOUT_SECS: u32 = 3;
 
 /// 轮询「是否已退出」的间隔与上限。
@@ -53,7 +62,9 @@ const APPLESCRIPT_TIMEOUT_SECS: u32 = 3;
 /// 实测：quit 命令本身 0.08 秒返回（它是异步的），目标进程 0.24 秒后消失，150ms 间隔
 /// 只需轮询 1-2 次。5 秒上限留了 20 倍余量；超过它基本只有一种情况 —— app 弹了确认框
 /// 在等用户，那时该把控制权交回用户而不是继续等。
+#[cfg(target_os = "macos")]
 const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
+#[cfg(target_os = "macos")]
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 退出结果。
@@ -66,6 +77,17 @@ const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// - 其余全部**照常切换**，需要时提示用户自己重启。理由：配置写进 `config.toml` 就已经
 ///   生效了，「能不能替用户关掉那个 app」是独立于「配置切没切」的一件事。把它当失败会让
 ///   没实现自动退出的平台、或者权限被拒的机器上**每次切换都失败**。
+/// ## 为什么非 macOS 上要 `allow(dead_code)`
+///
+/// 这个枚举是**跨平台契约**：`commands/operator.rs` 在所有平台上都 match 全部四个分支。
+/// 但当前只有 macOS 的 `quit_and_wait` 会构造 `Quit` / `NotRunning` / `UserDeclined`
+/// （Windows 那条路恒返回 `NeedsManualRestart`），而 `dead_code` 只认「构造」不认「match」——
+/// 于是 Windows 的 `-D warnings` 会把这三个变体判红。
+///
+/// 用 `cfg_attr` 而不是无条件 `allow`：macOS 上这三个确实在构造，那边的 dead_code 检查
+/// 要留着 —— 哪天真没人构造了，该有人知道。加了 Windows 自动退出实现之后（模块文档末尾
+/// 那段）这个 attribute 就该删掉。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitOutcome {
     /// 已退出。切换后应重开。
@@ -118,18 +140,17 @@ pub fn needs_user_attention() -> bool {
 /// 一律用 **bundle id** 而不是显示名：这个 app 的显示名已经从 Codex 改成 ChatGPT 一次了，
 /// 而且实测 `quit application "不存在的名字"` 会**静默返回成功**（rc=0）把故障吞掉，
 /// bundle id 形式则老实报 -1728。
+///
+/// **只在 macOS 存在**：它问的是 Launch Services，其它平台没有等价的一句话查询（这正是
+/// [`needs_user_attention`] 在那些平台上恒为 true 的原因）。以前这里留了一个返回
+/// `Err(unsupported())` 的非 macOS 分支，但没有任何非 macOS 调用点 —— 于是 Windows 上
+/// `-D warnings` 把它判成 dead_code。
+#[cfg(target_os = "macos")]
 pub fn is_running() -> Result<bool, AppError> {
-    #[cfg(target_os = "macos")]
-    {
-        let out = run_osascript(&format!(
-            r#"application id "{CHATGPT_BUNDLE_ID}" is running"#
-        ))?;
-        Ok(out.trim() == "true")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(unsupported())
-    }
+    let out = run_osascript(&format!(
+        r#"application id "{CHATGPT_BUNDLE_ID}" is running"#
+    ))?;
+    Ok(out.trim() == "true")
 }
 
 /// 优雅退出并等它真的退出。
@@ -278,10 +299,15 @@ fn run_osascript(script: &str) -> Result<String, AppError> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn bundle_id_is_the_codex_one_not_a_chatgpt_lookalike() {
         // 这条钉死一个反直觉的事实：app 显示名叫 ChatGPT，bundle id 却是 com.openai.codex。
         // 有人「顺手改成 com.openai.chatgpt」时这条会红。
+        //
+        // 2026-08-02 复核：/Applications/ChatGPT.app 的 CFBundleIdentifier 实测就是
+        // com.openai.codex（CFBundleName 才是 ChatGPT），而 com.openai.chat 在系统里
+        // 根本解析不出来（-1728）。
         assert_eq!(CHATGPT_BUNDLE_ID, "com.openai.codex");
     }
 
@@ -339,6 +365,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn quit_timeout_leaves_room_for_a_normal_quit() {
         // 实测正常退出 0.24 秒完成。超时太短会把正常退出误判成 StillRunning，
@@ -379,12 +406,30 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn is_running_query_does_not_launch_the_app() {
-        // 真机行为：无论 app 在不在跑，这个查询都必须成功返回而不是报错，
-        // 且不得把 app 启动起来（`is running` 是只读的，`tell ... to` 才会唤起）。
+        // 这条要钉的是**只读性**：`is running` 不得把 app 唤起（`tell ... to` 才会）。
+        // 判据是连查两次结果一致 —— 若第一次唤起了它，第二次就会翻成 true。
+        //
+        // ⚠️ **不能断言 `is_ok()`**：那要求这台机器装了 ChatGPT.app。CI 的 macOS runner
+        // 是干净环境，没装，于是查询如实报 -1728（"不能获得 application id"）——
+        // 而 `unknown_bundle_id_is_an_error_not_a_silent_false` 那条测试正是把 -1728
+        // 钉成「没装」的信号。两条一起要求「没装时既要报错、又要不报错」，自相矛盾，
+        // 实测让 CI 的 Backend Checks (macos-latest) 红在这里。
+        //
+        // 所以按「装了 / 没装」分开断言，两种环境下都验到该验的东西。
         let before = is_running();
-        assert!(before.is_ok(), "查询状态不该失败: {before:?}");
-        // 连查两次结果一致 —— 若第一次把 app 唤起了，第二次就会变 true。
-        assert_eq!(is_running().unwrap(), before.unwrap());
+        match before {
+            // 装了：两次查询必须一致（真正的只读性检查）。
+            Ok(first) => assert_eq!(
+                is_running().expect("第一次查得到，第二次也该查得到"),
+                first,
+                "两次查询结果不一致 —— 说明第一次把 app 唤起了"
+            ),
+            // 没装：错误必须是稳定可复现的，而不是时好时坏。
+            Err(_) => assert!(
+                is_running().is_err(),
+                "没装 ChatGPT 时两次查询都该报错（-1728），不该一次成一次败"
+            ),
+        }
     }
 
     #[cfg(target_os = "macos")]
