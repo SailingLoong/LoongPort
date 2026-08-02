@@ -36,6 +36,7 @@
 //! 部分可用优于全部不可用；而回滚本身也可能失败，还得再处理回滚失败。失败项在返回值里如实
 //! 报出来，用户可以重试 —— 重试是幂等的（认领优先，已建的那些直接命中）。
 
+use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::operator::api::{ApiKey, Client, Group};
 
@@ -91,7 +92,12 @@ pub fn claim_key<'a>(
 /// 为所有可用分组备好 sk。
 pub async fn provision(client: &Client, device_id: &str) -> Result<ProvisionResult, AppError> {
     let groups = client.list_groups().await?;
-    let usable: Vec<Group> = groups.into_iter().filter(Group::is_codex_usable).collect();
+    // 本轮 provision 仍只展开 codex（写入路径上还有四处 codex 硬编码，见 spec §一），
+    // 所以这里把 app_type 写死成 `Codex` 而不是加参数 —— 签名吃 platform 是下一轮的事。
+    let usable: Vec<Group> = groups
+        .into_iter()
+        .filter(|g| g.is_usable_for(&AppType::Codex))
+        .collect();
 
     if usable.is_empty() {
         return Err(AppError::Config(
