@@ -55,8 +55,24 @@ pub fn update_provider(
     #[allow(non_snake_case)] originalId: Option<String>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::update(state.inner(), app_type, originalId.as_deref(), provider)
+    update_provider_internal(state.inner(), app_type, originalId.as_deref(), provider)
         .map_err(|e| e.to_string())
+}
+
+fn update_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    original_id: Option<&str>,
+    provider: Provider,
+) -> Result<bool, AppError> {
+    // 托管档位的内容由 provision 从服务端重新生成，手工改了下次 provision 就被覆盖 ——
+    // 与其让用户白改一次，不如当场指路。
+    //
+    // 改名（`originalId` 与新 id 不同）时两头都要判：只判一头就留下「把托管项改名成普通 id
+    // 从而脱管」和「把普通项改成托管 id 从而伪装成托管项」两个口子。
+    crate::operator::reject_if_managed(original_id.unwrap_or(&provider.id))?;
+    crate::operator::reject_if_managed(&provider.id)?;
+    ProviderService::update(state, app_type, original_id, provider)
 }
 
 #[tauri::command]
@@ -66,9 +82,18 @@ pub fn delete_provider(
     id: String,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::delete(state.inner(), app_type, &id)
-        .map(|_| true)
-        .map_err(|e| e.to_string())
+    delete_provider_internal(state.inner(), app_type, &id).map_err(|e| e.to_string())
+}
+
+fn delete_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    id: &str,
+) -> Result<bool, AppError> {
+    // 删掉档位不会让服务端那把 sk 消失，只会让它下次 provision 又原样冒出来（id 由
+    // 站点 + 分组派生、是稳定的）。真要清理得从 LoongPort 页面走。
+    crate::operator::reject_if_managed(id)?;
+    ProviderService::delete(state, app_type, id).map(|_| true)
 }
 
 #[tauri::command]
@@ -88,6 +113,13 @@ fn switch_provider_internal(
     app_type: AppType,
     id: &str,
 ) -> Result<SwitchResult, AppError> {
+    // 切托管档位必须走 `operator_switch_tier` —— 只有它编排「退出 ChatGPT → 切换 → 重开」。
+    // 从这条通用命令切进去的结果是配置改了、ChatGPT 还拿着旧分组的 sk 在跑，界面上却显示
+    // 切换成功，用户无从察觉。
+    //
+    // 守卫落在这一层而不是 `ProviderService::switch`：那是上游代码，且 `operator_switch_tier`
+    // 正当地要调它。
+    crate::operator::reject_if_managed(id)?;
     ProviderService::switch(state, app_type, id)
 }
 
@@ -115,6 +147,84 @@ pub async fn switch_provider(
     })
     .await
     .map_err(|e| format!("供应商切换任务执行失败: {e}"))?
+}
+
+/// 三条通用 provider 命令撞到 LoongPort 托管档位时必须报错，而不是照做。
+///
+/// 只测「守卫拦不拦」这一层：守卫在任何 DB / 文件动作之前返回，所以给一个内存库的 AppState
+/// 就够了 —— 反过来说，普通 id 那条路径这里**不测**（它要真实 HOME 与 live 配置，
+/// 已由 `tests/provider_commands.rs` 的集成测试覆盖）。
+#[cfg(test)]
+mod managed_guard_tests {
+    use super::*;
+    use crate::database::Database;
+    use std::sync::Arc;
+
+    fn empty_state() -> AppState {
+        AppState::new(Arc::new(Database::memory().expect("in-memory database")))
+    }
+
+    /// 真的调生成器拿 id，而不是手写一个 `loongport-xxx` 字面量：
+    /// 这样前缀真变了的那天，测试跟着生成器走、守卫失配才会被别的断言抓到。
+    fn managed_id() -> String {
+        crate::operator::provision::provider_id_for("https://bestapi.store", 42)
+    }
+
+    fn assert_points_to_loongport_page(err: &AppError) {
+        let text = err.to_string();
+        assert!(
+            text.contains("LoongPort"),
+            "错误必须指路到 LoongPort 页面，实际: {text}"
+        );
+    }
+
+    #[test]
+    fn switch_provider_rejects_managed_tier() {
+        let err = switch_provider_internal(&empty_state(), AppType::Codex, &managed_id())
+            .expect_err("切托管档位必须被拦");
+        assert_points_to_loongport_page(&err);
+    }
+
+    #[test]
+    fn update_provider_rejects_managed_tier() {
+        let id = managed_id();
+        let provider = Provider::with_id(
+            id.clone(),
+            "改个名".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        let err = update_provider_internal(&empty_state(), AppType::Codex, None, provider)
+            .expect_err("改托管档位必须被拦");
+        assert_points_to_loongport_page(&err);
+    }
+
+    #[test]
+    fn update_provider_rejects_renaming_managed_tier_to_plain_id() {
+        // `originalId` 是托管的、新 id 是普通的 —— 只判新 id 就会让托管项被改名脱管。
+        let provider = Provider::with_id(
+            "custom-escaped".to_string(),
+            "脱管尝试".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        let managed = managed_id();
+        let err = update_provider_internal(
+            &empty_state(),
+            AppType::Codex,
+            Some(managed.as_str()),
+            provider,
+        )
+        .expect_err("把托管档位改名成普通 id 必须被拦");
+        assert_points_to_loongport_page(&err);
+    }
+
+    #[test]
+    fn delete_provider_rejects_managed_tier() {
+        let err = delete_provider_internal(&empty_state(), AppType::Codex, &managed_id())
+            .expect_err("删托管档位必须被拦");
+        assert_points_to_loongport_page(&err);
+    }
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {

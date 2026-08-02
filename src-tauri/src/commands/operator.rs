@@ -836,10 +836,10 @@ pub async fn operator_balance(app_handle: tauri::AppHandle) -> Result<api::Balan
 
 /// 这条 provider 是不是 LoongPort 管的。
 ///
-/// 判据是 id 前缀 —— 与 [`provision::provider_id_for`] 生成的前缀对应。用前缀而不是往 meta
-/// 里加字段：`ProviderMeta` 是上游的结构，加字段会扩大与上游 merge 的接触面。
+/// 判据本身在 [`crate::operator::managed`]（唯一来源，托盘与命令层守卫也用它）；这里只是
+/// 把「按 `&Provider` 判」这个便利形状留在本地，别在这儿重写前缀。
 fn is_managed(p: &Provider) -> bool {
-    p.id.starts_with("loongport-")
+    crate::operator::is_managed(&p.id)
 }
 
 /// 托管 provider 的 meta。

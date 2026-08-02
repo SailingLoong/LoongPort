@@ -170,6 +170,9 @@ pub fn sort_tiers(tiers: &mut [Tier]) {
 ///
 /// 由 `site_origin + group_id` 派生而不是随机生成：同一个分组重复 provision 必须得到同一个
 /// provider（否则每次都新增一条，列表里堆满重复项）。
+///
+/// 前缀取自 [`managed::MANAGED_ID_PREFIX`](super::managed::MANAGED_ID_PREFIX)，不在这里写
+/// 字面量 —— 它同时是各入口守卫的判据，两处各写一遍就迟早失配（见 [`super::managed`] 模块文档）。
 pub fn provider_id_for(site_origin: &str, group_id: i64) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -177,7 +180,11 @@ pub fn provider_id_for(site_origin: &str, group_id: i64) -> String {
     h.update(b"/");
     h.update(group_id.to_string().as_bytes());
     // 取前 16 个 hex 字符：够避免碰撞，又不至于让 id 长得没法读。
-    format!("loongport-{:.16x}", h.finalize())
+    format!(
+        "{}{:.16x}",
+        crate::operator::managed::MANAGED_ID_PREFIX,
+        h.finalize()
+    )
 }
 
 /// provider 的展示名。
