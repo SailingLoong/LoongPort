@@ -33,6 +33,7 @@ export type {
 export { operatorApi } from "./operator";
 export type {
   OperatorStatus,
+  SiteInfo,
   ProbeResult,
   TierInfo,
   ProvisionSummary,

@@ -168,6 +168,37 @@ pub struct Balance {
     pub frozen_balance: f64,
 }
 
+/// 账号身份（同一个 `GET /api/v1/user/profile` 响应的另一半）。
+///
+/// ## 内部认 `id`，外面显示昵称
+///
+/// - **去重键是 `id`**：数值、服务端主键，改邮箱改昵称都不变。用 email 或 username 做键的话
+///   用户在运营商那边改一次名，我们就会把同一个账号当成两个、给他堆重复 sk。
+/// - **给人看的是 `username`（昵称）**，回落到 `email`。昵称是用户自己设的、他认得；
+///   邮箱在截图或演示时还多一层隐私顾虑。
+#[derive(Debug, Clone, Deserialize)]
+pub struct Account {
+    pub id: i64,
+    #[serde(default)]
+    pub email: String,
+    /// 昵称。运营商可能允许留空，那时回落到邮箱。
+    #[serde(default)]
+    pub username: String,
+}
+
+impl Account {
+    /// 展示名：昵称优先，回落邮箱，都没有就用 `#<id>`（总得有个能指认的东西）。
+    pub fn display_name(&self) -> String {
+        if !self.username.trim().is_empty() {
+            self.username.clone()
+        } else if !self.email.trim().is_empty() {
+            self.email.clone()
+        } else {
+            format!("#{}", self.id)
+        }
+    }
+}
+
 /// 把用户输入的域名归一成面板 origin（`https://host`，无尾斜杠、无路径）。
 ///
 /// 用户可能输入 `bestapi.store` / `https://bestapi.store/` / `http://bestapi.store/login`，
@@ -363,6 +394,13 @@ impl Client {
     /// 余额。
     pub async fn balance(&self) -> Result<Balance, AppError> {
         self.send(self.http.get(self.url("/user/profile")), "获取余额")
+            .await
+    }
+
+    /// 账号身份。与 [`Self::balance`] 打的是同一个端点，只是取另外几个字段 ——
+    /// 两个窄 DTO 各自只解自己要的那部分，比塞一个大结构体好维护。
+    pub async fn account(&self) -> Result<Account, AppError> {
+        self.send(self.http.get(self.url("/user/profile")), "获取账号信息")
             .await
     }
 }

@@ -32,6 +32,7 @@ import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
+  operatorApi,
   providersApi,
   settingsApi,
   type AppId,
@@ -175,6 +176,37 @@ const getInitialView = (): View => {
   return "loongport";
 };
 
+/**
+ * 还没配好站点时，强制回 LoongPort 面板。
+ *
+ * 「记住上次看的那一屏」是个便利，但它不能盖过「这一步必须先做完」。没有可用站点时
+ * provider 列表是空的、切换无从谈起 —— 用户会看到一个什么都干不了的界面，而真正要填的
+ * 东西藏在另一个 view 里。
+ *
+ * 判据用**当前状态**而不是 localStorage：那份记录跨版本留着，且用户清不掉
+ * （它在 `~/Library/WebKit/<identifier>/`，不在应用数据目录里）。
+ */
+function useForceOnboardingView(
+  currentView: View,
+  setCurrentView: (v: View) => void,
+) {
+  const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    operatorApi
+      .status()
+      .then((s) => setNeedsOnboarding(!s.siteOrigin))
+      // 读不到状态时不抢视图 —— 那可能只是后端还没起来，把用户踢走反而更糊。
+      .catch(() => setNeedsOnboarding(false));
+  }, []);
+
+  useEffect(() => {
+    if (needsOnboarding && currentView !== "loongport") {
+      setCurrentView("loongport");
+    }
+  }, [needsOnboarding, currentView, setCurrentView]);
+}
+
 function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -183,6 +215,8 @@ function App() {
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
+  // 没配好站点时把用户拉回 LoongPort 面板 —— 那是唯一能往下走的一步。
+  useForceOnboardingView(currentView, setCurrentView);
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");

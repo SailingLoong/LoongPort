@@ -53,6 +53,11 @@ pub struct OperatorStatus {
     /// 已选定的站点（没选过则为 `None` → 前端弹域名输入框）。
     pub site_origin: Option<String>,
     pub site_name: Option<String>,
+    /// 当前站登录的账号名（昵称优先，回落邮箱）。空串 = 还没登录。
+    ///
+    /// 同一个站可以挂多个账号，所以「登录了」不够 —— 得说清是**哪个**账号。
+    /// 内部去重认的是服务端的数值 id，不是这个标签（用户改昵称不该被当成换了账号）。
+    pub account_label: String,
     /// 是否已有可用凭据（否 → 前端引导去登录）。
     pub logged_in: bool,
     /// 已经备好 sk 的档位数。
@@ -62,6 +67,21 @@ pub struct OperatorStatus {
     /// 不是「装了没有」—— 非 macOS 平台查不到那个事实，那边恒为 true（宁可多问一句，
     /// 也不能让装了 ChatGPT 的用户静默用错分组）。见 `chatgpt_app::needs_user_attention`。
     pub chatgpt_needs_attention: bool,
+}
+
+/// 一个已添加的站点（给站点切换器用）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteInfo {
+    pub id: i64,
+    pub site_origin: String,
+    pub site_name: String,
+    /// 登录后的账号名（昵称优先，回落邮箱），未登录为空串。同一个站挂多个账号时靠它分辨。
+    pub account_label: String,
+    /// 展示名：站名 +（有账号时）邮箱。
+    pub label: String,
+    pub logged_in: bool,
+    pub is_current: bool,
 }
 
 /// 探测结果。
@@ -182,7 +202,13 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<bool, AppError> 
             // 清掉只会逼用户在网络恢复后白重登一次。
             if msg.contains("登录态已失效") || msg.contains("请重新登录") {
                 let state = app_handle.state::<AppState>();
-                with_conn(&state, creds::clear_credentials)?;
+                with_conn(&state, |conn| {
+                    // 只清当前站的凭据 —— 别的站可能还是好的。
+                    match creds::load(conn)? {
+                        Some(op) => creds::clear_credentials(conn, op.id),
+                        None => Ok(()),
+                    }
+                })?;
                 log::info!("运营商凭据已失效，已清除本地凭据：{msg}");
                 return Ok(false);
             }
@@ -203,6 +229,7 @@ fn operator_status_impl(state: &AppState) -> Result<OperatorStatus, AppError> {
             default_site: DEFAULT_SITE.to_string(),
             site_origin: None,
             site_name: None,
+            account_label: String::new(),
             logged_in: false,
             tier_count,
             chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
@@ -210,6 +237,12 @@ fn operator_status_impl(state: &AppState) -> Result<OperatorStatus, AppError> {
         Some(op) => OperatorStatus {
             default_site: DEFAULT_SITE.to_string(),
             logged_in: op.token_looks_valid(chrono::Utc::now().timestamp()),
+            // 有 account_id 才算真的认得这个账号 —— email 可能被运营商留空。
+            account_label: if op.account_id.is_some() {
+                op.account_label.clone()
+            } else {
+                String::new()
+            },
             site_origin: Some(op.site_origin),
             site_name: Some(op.site_name),
             tier_count,
@@ -277,11 +310,13 @@ pub async fn operator_login(app_handle: tauri::AppHandle) -> Result<bool, String
 }
 
 async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
-    let site_origin = {
+    // 登录的是**当前选中的那个站**。同时记下它的行 id —— 凭据要写回这一行，而
+    // `save_credentials` 可能因为发现重复账号而把它合并到别的行去。
+    let (operator_id, site_origin) = {
         let state = app_handle.state::<AppState>();
-        with_conn(&state, creds::load)?
-            .map(|op| op.site_origin)
-            .ok_or_else(|| AppError::Config("请先选择运营商站点".into()))?
+        let op = with_conn(&state, creds::load)?
+            .ok_or_else(|| AppError::Config("请先选择运营商站点".into()))?;
+        (op.id, op.site_origin)
     };
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
@@ -359,10 +394,24 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
 
     match outcome {
         Ok(Some(c)) => {
+            // 先拉一次 profile 拿账号身份 —— 去重键是「域名 + 账号」，而账号只有登录后才知道。
+            //
+            // 拉不到就不存：没有 account_id 的话去重判断无从做起，用户重新添加同一个站会
+            // 堆出重复行、进而给他的账号里堆重复 sk。让他重试一次比留下脏数据好。
+            let account = api::Client::new(&site_origin, &c.auth_token)?
+                .account()
+                .await
+                .map_err(|e| {
+                    AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。"))
+                })?;
+
             let state = app_handle.state::<AppState>();
             with_conn(&state, |conn| {
                 creds::save_credentials(
                     conn,
+                    operator_id,
+                    account.id,
+                    &account.display_name(),
                     &c.auth_token,
                     c.refresh_token.as_deref(),
                     c.token_expires_at,
@@ -422,9 +471,12 @@ async fn usable_operator(app_handle: &tauri::AppHandle) -> Result<creds::Operato
 
     let fresh = api::refresh_token(&op.site_origin, &refresh).await?;
     let state = app_handle.state::<AppState>();
+    // 走 update_tokens 而不是 save_credentials：续期是「同一个账号换一把新 token」，
+    // 账号没变 ⇒ 没有重复可言，不该走那条会查重并可能合并行的路径。
     with_conn(&state, |conn| {
-        creds::save_credentials(
+        creds::update_tokens(
             conn,
+            op.id,
             &fresh.auth_token,
             // 服务端没轮换 refresh 时沿用旧的 —— 覆写成 None 会让下次过期时无法续期。
             fresh.refresh_token.as_deref().or(Some(refresh.as_str())),
@@ -657,10 +709,59 @@ async fn switch_tier_impl(
     })
 }
 
-/// 登出：清凭据，保留站点与 device_id。
+/// 登出当前站：清凭据，保留站点与 device_id。
 #[tauri::command]
 pub fn operator_logout(state: State<'_, AppState>) -> Result<(), String> {
-    with_conn(state.inner(), creds::clear_credentials).map_err(|e| e.to_string())
+    with_conn(state.inner(), |conn| {
+        // 只登出当前站，别的站的登录态不动。
+        match creds::load(conn)? {
+            Some(op) => creds::clear_credentials(conn, op.id),
+            None => Ok(()),
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 列出全部已添加的站点。
+#[tauri::command]
+pub fn operator_list_sites(state: State<'_, AppState>) -> Result<Vec<SiteInfo>, String> {
+    with_conn(state.inner(), |conn| {
+        Ok(creds::list(conn)?
+            .into_iter()
+            .map(|op| SiteInfo {
+                label: op.display_label(),
+                logged_in: op.token_looks_valid(chrono::Utc::now().timestamp()),
+                id: op.id,
+                site_origin: op.site_origin,
+                site_name: op.site_name,
+                account_label: op.account_label,
+                is_current: op.is_current,
+            })
+            .collect())
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 切换当前站点。
+#[tauri::command]
+pub fn operator_switch_site(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    with_conn(state.inner(), |conn| {
+        // 先确认这行还在 —— 用户可能在别处删掉了它。静默成功会让 UI 显示切换成功而实际没切。
+        if creds::get(conn, id)?.is_none() {
+            return Err(AppError::Config("这个站点已经不存在了".into()));
+        }
+        creds::set_current(conn, id)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 删掉一个站点。
+///
+/// **不删它已经生成的 provider 记录** —— 那些是用户可能正在用的配置，删站点不该顺带把
+/// codex 的当前配置抽掉。要清理走 provider 列表。
+#[tauri::command]
+pub fn operator_remove_site(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    with_conn(state.inner(), |conn| creds::remove(conn, id)).map_err(|e| e.to_string())
 }
 
 /// 余额。

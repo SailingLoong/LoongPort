@@ -7,6 +7,13 @@ export interface OperatorStatus {
   /** 已选定的站点；null 表示还没选过（该弹域名输入框）。 */
   siteOrigin: string | null;
   siteName: string | null;
+  /**
+   * 当前站登录的账号名（昵称优先，回落邮箱）。空串 = 还没登录。
+   *
+   * 同一个站可以挂多个账号，所以「登录了」不够 —— 要说清是哪个账号。
+   * 内部去重认的是服务端数值 id，不是这个标签。
+   */
+  accountLabel: string;
   /** 是否已有可用凭据。 */
   loggedIn: boolean;
   /** 已备好密钥的档位数。 */
@@ -17,6 +24,19 @@ export interface OperatorStatus {
    * 不是「装了没有」—— 非 macOS 平台查不到那个事实，那边恒为 true。
    */
   chatgptNeedsAttention: boolean;
+}
+
+/** 一个已添加的站点（给站点切换器用）。 */
+export interface SiteInfo {
+  id: number;
+  siteOrigin: string;
+  siteName: string;
+  /** 登录后的账号名（昵称优先，回落邮箱），未登录为空串。 */
+  accountLabel: string;
+  /** 展示名：站名 +（有账号时）邮箱。 */
+  label: string;
+  loggedIn: boolean;
+  isCurrent: boolean;
 }
 
 export interface ProbeResult {
@@ -93,7 +113,22 @@ export const operatorApi = {
   ): Promise<SwitchTierResult> =>
     invoke("operator_switch_tier", { providerId, quitChatgpt }),
 
+  /** 登出当前站（别的站的登录态不动）。 */
   logout: (): Promise<void> => invoke("operator_logout"),
+
+  listSites: (): Promise<SiteInfo[]> => invoke("operator_list_sites"),
+
+  /** 切换当前站点。 */
+  switchSite: (id: number): Promise<void> =>
+    invoke("operator_switch_site", { id }),
+
+  /**
+   * 删掉一个站点。
+   *
+   * **不会删它已生成的 provider 记录** —— 那些可能是用户正在用的配置。
+   */
+  removeSite: (id: number): Promise<void> =>
+    invoke("operator_remove_site", { id }),
 
   balance: (): Promise<OperatorBalance> => invoke("operator_balance"),
 };

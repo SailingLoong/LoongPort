@@ -519,6 +519,11 @@ impl Database {
                         crate::operator::creds::create_table(conn)?;
                         Self::set_user_version(conn, 17)?;
                     }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（LoongPort 支持多站点）");
+                        crate::operator::creds::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"

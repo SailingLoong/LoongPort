@@ -6,7 +6,9 @@ import {
   KeyRound,
   Loader2,
   LogOut,
+  Plus,
   RefreshCw,
+  Trash2,
   Wallet,
 } from "lucide-react";
 
@@ -24,6 +26,7 @@ import { operatorApi } from "@/lib/api";
 import type {
   OperatorBalance,
   OperatorStatus,
+  SiteInfo,
   TierInfo,
 } from "@/lib/api/operator";
 
@@ -44,17 +47,21 @@ import type {
  */
 export function OperatorPanel() {
   const [status, setStatus] = useState<OperatorStatus | null>(null);
+  const [sites, setSites] = useState<SiteInfo[]>([]);
   const [tiers, setTiers] = useState<TierInfo[]>([]);
   const [balance, setBalance] = useState<OperatorBalance | null>(null);
 
   const [siteInput, setSiteInput] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmSwitch, setConfirmSwitch] = useState<TierInfo | null>(null);
+  // 「添加站点」弹窗。首启那次不用它 —— 那时整屏就是输入框（没有站点可看）。
+  const [addingSite, setAddingSite] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const s = await operatorApi.status();
       setStatus(s);
+      setSites(await operatorApi.listSites());
       if (s.tierCount > 0) {
         setTiers(await operatorApi.listTiers());
       } else {
@@ -105,9 +112,37 @@ export function OperatorPanel() {
     try {
       const r = await operatorApi.probeSite(siteInput);
       toast.success(`已连上 ${r.siteName}`);
+      // 探测成功即成为当前站。清掉输入、关掉添加弹窗。
+      setSiteInput("");
+      setAddingSite(false);
       await refresh();
     } catch (e) {
-      // 探测失败不清输入框 —— 用户可能只是打错一个字母，让他改而不是重打。
+      // 探测失败**不清输入框、不关弹窗** —— 用户可能只是打错一个字母，让他改而不是重打。
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleSwitchSite = async (id: number) => {
+    setBusy(`site:${id}`);
+    try {
+      await operatorApi.switchSite(id);
+      await refresh();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRemoveSite = async (site: SiteInfo) => {
+    setBusy(`site:${site.id}`);
+    try {
+      await operatorApi.removeSite(site.id);
+      toast.success(`已移除 ${site.label}`);
+      await refresh();
+    } catch (e) {
       toast.error(String(e));
     } finally {
       setBusy(null);
@@ -191,51 +226,122 @@ export function OperatorPanel() {
     );
   }
 
+  // 域名输入弹窗。首启（一个站都没有）与「加一个站」共用同一份 —— 差别只在标题与能不能关。
+  const siteDialog = (isFirstRun: boolean) => (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        // 首启那次不给关：一个站都没有的话，关掉它用户就对着空面板了。
+        if (!open && !isFirstRun) {
+          setAddingSite(false);
+          setSiteInput("");
+        }
+      }}
+    >
+      <DialogContent className="max-w-md" zIndex="top">
+        <DialogHeader>
+          <DialogTitle>
+            {isFirstRun ? "选择服务站点" : "添加中转站"}
+          </DialogTitle>
+          <DialogDescription>
+            {isFirstRun ? (
+              <>
+                输入你要使用的中转站域名，留空则用默认的{" "}
+                <code className="text-xs">{status.defaultSite}</code>。
+              </>
+            ) : (
+              <>
+                输入另一个中转站的域名。同一个站可以挂多个账号 ——
+                登录不同账号即可， 重复的会自动合并。
+              </>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <Input
+          placeholder={status.defaultSite}
+          value={siteInput}
+          onChange={(e) => setSiteInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !busy) void handleProbe();
+          }}
+          autoFocus
+        />
+        <DialogFooter>
+          <Button onClick={handleProbe} disabled={busy === "probe"}>
+            {busy === "probe" && (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            )}
+            确定
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+
   // ── 第一步：还没选站 ───────────────────────────────────────────
   if (!status.siteOrigin) {
-    return (
-      <Dialog open>
-        <DialogContent className="max-w-md" zIndex="top">
-          <DialogHeader>
-            <DialogTitle>选择服务站点</DialogTitle>
-            <DialogDescription>
-              输入你要使用的中转站域名，留空则用默认的{" "}
-              <code className="text-xs">{status.defaultSite}</code>。
-            </DialogDescription>
-          </DialogHeader>
-          <Input
-            placeholder={status.defaultSite}
-            value={siteInput}
-            onChange={(e) => setSiteInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !busy) void handleProbe();
-            }}
-            autoFocus
-          />
-          <DialogFooter>
-            <Button onClick={handleProbe} disabled={busy === "probe"}>
-              {busy === "probe" && (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              )}
-              确定
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    );
+    return siteDialog(true);
   }
 
   return (
     <div className="space-y-6 p-6">
-      {/* 站点信息 */}
-      <div className="flex items-center justify-between border-b border-border/40 pb-4">
-        <div>
-          <div className="text-sm font-medium">{status.siteName}</div>
-          <div className="text-xs text-muted-foreground">
-            {status.siteOrigin}
-          </div>
+      {/* 站点切换器 + 添加入口 */}
+      <div className="flex items-start justify-between gap-3 border-b border-border/40 pb-4">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+          {sites.map((site) => (
+            <button
+              key={site.id}
+              onClick={() => {
+                if (!site.isCurrent) void handleSwitchSite(site.id);
+              }}
+              disabled={site.isCurrent || busy === `site:${site.id}`}
+              className={`group inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
+                site.isCurrent
+                  ? "border-blue-500/50 bg-blue-500/5 font-medium"
+                  : "border-border/60 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+              }`}
+              title={site.siteOrigin}
+            >
+              {busy === `site:${site.id}` ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                // 未登录的站点给个提示点 —— 否则用户不知道为什么切过去没有档位。
+                !site.loggedIn && (
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-amber-500"
+                    title="这个站还没登录"
+                  />
+                )
+              )}
+              <span className="truncate">{site.label}</span>
+              {/* 删除按钮只在非当前站上出现：删当前站会连带把档位列表抽掉，
+                  用户更可能是想先切走再删。 */}
+              {!site.isCurrent && (
+                <span
+                  role="button"
+                  tabIndex={-1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleRemoveSite(site);
+                  }}
+                  className="opacity-0 transition-opacity hover:text-destructive group-hover:opacity-60"
+                  title="移除这个站点"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </span>
+              )}
+            </button>
+          ))}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setAddingSite(true)}
+            title="添加另一个中转站"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {balance && (
             <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
               <Wallet className="h-4 w-4" />${balance.balance.toFixed(2)}
@@ -305,7 +411,15 @@ export function OperatorPanel() {
       {tiers.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-medium">选择档位</h3>
+            <h3 className="text-sm font-medium">
+              选择档位
+              {/* 同一个站可以挂多个账号，得说清这些档位属于哪个账号。 */}
+              {status.accountLabel && (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {status.accountLabel}
+                </span>
+              )}
+            </h3>
             <Button
               variant="ghost"
               size="sm"
@@ -402,6 +516,9 @@ export function OperatorPanel() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 「添加中转站」弹窗 —— 与首启那个共用同一份，只是可以关掉。 */}
+      {addingSite && siteDialog(false)}
     </div>
   );
 }

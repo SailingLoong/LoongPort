@@ -1,45 +1,60 @@
-//! 运营商凭据与本机标识的持久化。
+//! 运营商站点与凭据的持久化。
 //!
-//! 一张表 `loongport_operator`（单行，V2 只支持一家运营商在用）：
+//! 一张表 `loongport_operator`，一行一个「站点 × 账号」：
 //!
 //! | 列 | 含义 |
 //! |---|---|
-//! | `id` | 恒为 1（`CHECK` 约束保证单行） |
+//! | `id` | 自增主键 |
 //! | `site_origin` | 面板 origin，如 `https://bestapi.store` |
 //! | `site_name` | 展示名，来自探测结果 |
 //! | `api_base_url` | 归一后的 codex `base_url`（带 `/v1`） |
-//! | `device_id` | 本机 UUID v4，用于 Key 命名 |
+//! | `account_id` | 服务端的用户 id。**登录后才知道**，未登录时为 `NULL` |
+//! | `account_label` | 给人看的账号名（昵称优先，回落邮箱） |
+//! | `device_id` | 本机 UUID v4，用于 Key 命名。**全局共用一个** |
 //! | `auth_token` / `refresh_token` / `token_expires_at` | 登录凭据 |
+//! | `is_current` | 当前选中的那一行（同时只有一行为 1） |
 //!
-//! ## 为什么 device_id 和凭据同表
+//! ## 去重是「域名 + 账号」，不是只看域名
 //!
-//! V1 分了三张表（`loongport_device` / `loongport_credential` / `loongport_operator`），
-//! 因为它要支持多运营商 + 多设备同步过滤。V2 单运营商、不做云同步，三张表的行都是 1:1，
-//! 合成一张是消除 join 而不是牺牲边界。
+//! 同一个站上可以挂多个账号（自己的号 + 测试号），所以 `(site_origin, account_id)` 才是
+//! 唯一键。但 `account_id` **登录之后才拿得到** —— 所以流程是：
 //!
-//! ## 凭据存在 SQLite 明文里，没进 keyring
+//! 1. 添加站点时先建一行，`account_id` 为 `NULL`（"这个站，还不知道是谁"）；
+//! 2. 登录成功、拉到 profile 后回填 `account_id`；
+//! 3. 回填时若发现已有同 `(site_origin, account_id)` 的行，**合并**掉刚建的这条。
 //!
-//! V1 用了 `keyring` crate（三平台原生后端）。V2 第一版不引它，理由是**同一个库里已经躺着
-//! 明文 API Key**：cc-switch 的 `providers.settings_config` 存的就是明文 sk（上游行为），
-//! 把 token 加密而 sk 不加密没有实际收益。这是**知情引入的技术债**，偿还条件见项目
-//! `TODO.md`：要么两者一起进 keyring，要么都不进。
+//! 唯一索引建在 `(site_origin, account_id)` 上。SQLite 的唯一索引把 `NULL` 视为互不相等，
+//! 所以「同一个站的多条未登录行」不会被约束拦住 —— 那正是我们要的（用户可能连点两次添加），
+//! 由 [`save_site`] 自己收口成一行。
+//!
+//! ## device_id 全局一个，不按站分
+//!
+//! 它进 Key 名字表示「这台机器」，与站点无关。按站分会让同一台机器在不同站上有不同身份，
+//! 没有意义。
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::AppError;
 
-/// 一家运营商的完整状态（含凭据）。
+/// 一个站点 × 账号（含凭据）。
 #[derive(Debug, Clone)]
 pub struct Operator {
+    pub id: i64,
     pub site_origin: String,
     pub site_name: String,
     /// codex 用的 API 基址，已归一到带 `/v1`。
     pub api_base_url: String,
+    /// 服务端的用户 id。`None` = 还没登录过。
+    pub account_id: Option<i64>,
+    /// 给人看的账号名：昵称优先，回落邮箱。**不参与去重**（去重认 `account_id`）——
+    /// 用户在运营商那边改昵称不该让我们把同一个账号当成两个。
+    pub account_label: String,
     pub device_id: String,
     pub auth_token: String,
     pub refresh_token: Option<String>,
     /// Unix 秒。`None` 表示服务端没给（降级态：可用但不可续期）。
     pub token_expires_at: Option<i64>,
+    pub is_current: bool,
 }
 
 impl Operator {
@@ -56,87 +71,324 @@ impl Operator {
             Some(exp) => exp > now_unix + 60,
         }
     }
+
+    /// 用户看到的名字。同一个站挂多个账号时要能分辨。
+    pub fn display_label(&self) -> String {
+        if self.account_label.is_empty() {
+            self.site_name.clone()
+        } else {
+            format!("{} · {}", self.site_name, self.account_label)
+        }
+    }
 }
 
-/// 建表（v16→v17 迁移与全新库都走它）。
+/// 这张表是不是已经是 v18 的形态（有 `account_id` 列）。
+fn is_v18_shape(conn: &Connection) -> bool {
+    conn.prepare("SELECT account_id FROM loongport_operator LIMIT 0")
+        .is_ok()
+}
+
+/// 建表 + 索引。全新库与迁移都走它。
+///
+/// ## 为什么索引要单独判一次表形态
+///
+/// **`create_tables_on_conn` 在迁移之前跑**（`Database::init` 先建表再迁移）。升级的库上
+/// `CREATE TABLE IF NOT EXISTS` 会跳过 —— 那时表还是 v17 的形态、没有 `account_id` 列，
+/// 而索引引用了它，`CREATE INDEX` 当场报 `no such column: account_id`，整个 app 起不来
+/// （实测踩过，用户看到的是「数据库错误」弹窗）。
+///
+/// 所以索引只在表确实是 v18 形态时建；旧表那一路由 [`migrate_v17_to_v18`] 建完新表后补上。
 pub fn create_table(conn: &Connection) -> Result<(), AppError> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS loongport_operator (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             site_origin TEXT NOT NULL,
             site_name TEXT NOT NULL DEFAULT '',
             api_base_url TEXT NOT NULL DEFAULT '',
+            account_id INTEGER,
+            account_label TEXT NOT NULL DEFAULT '',
             device_id TEXT NOT NULL,
             auth_token TEXT NOT NULL DEFAULT '',
             refresh_token TEXT,
             token_expires_at INTEGER,
+            is_current INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )
     .map_err(|e| AppError::Database(format!("创建 loongport_operator 表失败: {e}")))?;
+
+    if is_v18_shape(conn) {
+        // 去重键。SQLite 把 NULL 视为互不相等 ⇒ 多条未登录行不受约束，由 save_site 收口。
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_loongport_operator_site_account
+             ON loongport_operator(site_origin, account_id)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 loongport_operator 索引失败: {e}")))?;
+    }
+
     Ok(())
 }
 
-/// 读当前运营商（未配置返回 `None`）。
-pub fn load(conn: &Connection) -> Result<Option<Operator>, AppError> {
-    conn.query_row(
-        "SELECT site_origin, site_name, api_base_url, device_id,
-                auth_token, refresh_token, token_expires_at
-         FROM loongport_operator WHERE id = 1",
+/// v17 的单行表迁到 v18 的多行表。
+///
+/// v17 的表有 `CHECK (id = 1)`，改不动列约束 —— SQLite 的 `ALTER TABLE` 动不了 CHECK。
+/// 所以建新表、搬那一行、换名。
+pub fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+    // 老表不存在（全新库走 create_table 那条路）时什么都不用做。
+    let has_old: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='loongport_operator'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("检查旧表失败: {e}")))?
+        .unwrap_or(false);
+    if !has_old {
+        return create_table(conn);
+    }
+
+    // 已经是新表就不用迁。迁移可能因为上一次中断而重跑。
+    if is_v18_shape(conn) {
+        // 但索引可能还没建上（`create_table` 在旧形态下会跳过它），补一次。
+        return create_table(conn);
+    }
+
+    conn.execute(
+        "ALTER TABLE loongport_operator RENAME TO loongport_operator_v17",
         [],
-        |row| {
-            Ok(Operator {
-                site_origin: row.get(0)?,
-                site_name: row.get(1)?,
-                api_base_url: row.get(2)?,
-                device_id: row.get(3)?,
-                auth_token: row.get(4)?,
-                refresh_token: row.get(5)?,
-                token_expires_at: row.get(6)?,
-            })
-        },
+    )
+    .map_err(|e| AppError::Database(format!("重命名旧表失败: {e}")))?;
+
+    create_table(conn)?;
+
+    // 搬那一行。老表没有 account_id / account_label，留空；它是当前选中项（就它一个）。
+    conn.execute(
+        "INSERT INTO loongport_operator
+            (site_origin, site_name, api_base_url, device_id,
+             auth_token, refresh_token, token_expires_at, is_current, updated_at)
+         SELECT site_origin, site_name, api_base_url, device_id,
+                auth_token, refresh_token, token_expires_at, 1, updated_at
+         FROM loongport_operator_v17",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("迁移运营商数据失败: {e}")))?;
+
+    conn.execute("DROP TABLE loongport_operator_v17", [])
+        .map_err(|e| AppError::Database(format!("删除旧表失败: {e}")))?;
+
+    Ok(())
+}
+
+const SELECT_COLS: &str = "id, site_origin, site_name, api_base_url, account_id, account_label, \
+     device_id, auth_token, refresh_token, token_expires_at, is_current";
+
+fn row_to_operator(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operator> {
+    Ok(Operator {
+        id: row.get(0)?,
+        site_origin: row.get(1)?,
+        site_name: row.get(2)?,
+        api_base_url: row.get(3)?,
+        account_id: row.get(4)?,
+        account_label: row.get(5)?,
+        device_id: row.get(6)?,
+        auth_token: row.get(7)?,
+        refresh_token: row.get(8)?,
+        token_expires_at: row.get(9)?,
+        is_current: row.get::<_, i64>(10)? != 0,
+    })
+}
+
+/// 读当前选中的站点（没有任何站点时返回 `None`）。
+pub fn load(conn: &Connection) -> Result<Option<Operator>, AppError> {
+    // 没有任何行被标为 current 时（理论上不该发生）回落到最早那条，别让 UI 空着。
+    conn.query_row(
+        &format!(
+            "SELECT {SELECT_COLS} FROM loongport_operator
+             ORDER BY is_current DESC, id ASC LIMIT 1"
+        ),
+        [],
+        row_to_operator,
     )
     .optional()
     .map_err(|e| AppError::Database(format!("读取运营商失败: {e}")))
 }
 
-/// 写入运营商站点信息（不碰凭据）。首次调用时生成 `device_id`。
+/// 列出全部站点，当前选中的排在最前。
+pub fn list(conn: &Connection) -> Result<Vec<Operator>, AppError> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {SELECT_COLS} FROM loongport_operator ORDER BY is_current DESC, id ASC"
+        ))
+        .map_err(|e| AppError::Database(format!("准备查询失败: {e}")))?;
+    let rows = stmt
+        .query_map([], row_to_operator)
+        .map_err(|e| AppError::Database(format!("列出运营商失败: {e}")))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| AppError::Database(format!("读取运营商行失败: {e}")))
+}
+
+/// 按 id 读一行。
+pub fn get(conn: &Connection, id: i64) -> Result<Option<Operator>, AppError> {
+    conn.query_row(
+        &format!("SELECT {SELECT_COLS} FROM loongport_operator WHERE id = ?1"),
+        params![id],
+        row_to_operator,
+    )
+    .optional()
+    .map_err(|e| AppError::Database(format!("读取运营商失败: {e}")))
+}
+
+/// 本机 device-id，没有就生成。
 ///
-/// 用 `INSERT ... ON CONFLICT` 而不是先查再插：并发下先查再插会插两行（虽然 V2 是单线程
-/// 调用，但 `CHECK (id = 1)` 之外再多一层保证不花钱）。
+/// 全局一个：它在 Key 名字里表示「这台机器」，与站点无关。
+fn ensure_device_id(conn: &Connection) -> Result<String, AppError> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT device_id FROM loongport_operator WHERE device_id != '' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("读取 device_id 失败: {e}")))?;
+    Ok(existing.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()))
+}
+
+/// 添加或更新一个站点，并把它设为当前选中。返回那一行的 id。
+///
+/// 同一个站点若已有**未登录**的行（`account_id IS NULL`），复用它而不是再插一条 ——
+/// 用户连点两次「添加」不该得到两行。已登录的行不动（那是别的账号，或同一账号的既有配置）。
 pub fn save_site(
     conn: &Connection,
     site_origin: &str,
     site_name: &str,
     api_base_url: &str,
-) -> Result<String, AppError> {
-    let device_id = match load(conn)? {
-        // device_id 一旦生成就不再变：它进了服务端的 Key 名字，换掉就认领不回自己的 Key。
-        Some(op) if !op.device_id.is_empty() => op.device_id,
-        _ => uuid::Uuid::new_v4().to_string(),
-    };
+) -> Result<i64, AppError> {
+    let device_id = ensure_device_id(conn)?;
     let now = now_unix();
 
-    conn.execute(
-        "INSERT INTO loongport_operator
-            (id, site_origin, site_name, api_base_url, device_id, updated_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(id) DO UPDATE SET
-            site_origin = excluded.site_origin,
-            site_name = excluded.site_name,
-            api_base_url = excluded.api_base_url,
-            updated_at = excluded.updated_at",
-        params![site_origin, site_name, api_base_url, &device_id, now],
-    )
-    .map_err(|e| AppError::Database(format!("保存运营商失败: {e}")))?;
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM loongport_operator
+             WHERE site_origin = ?1 AND account_id IS NULL LIMIT 1",
+            params![site_origin],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("查询已有站点失败: {e}")))?;
 
-    Ok(device_id)
+    let id = match existing {
+        Some(id) => {
+            conn.execute(
+                "UPDATE loongport_operator
+                 SET site_name = ?1, api_base_url = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![site_name, api_base_url, now, id],
+            )
+            .map_err(|e| AppError::Database(format!("更新站点失败: {e}")))?;
+            id
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO loongport_operator
+                    (site_origin, site_name, api_base_url, device_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![site_origin, site_name, api_base_url, &device_id, now],
+            )
+            .map_err(|e| AppError::Database(format!("保存站点失败: {e}")))?;
+            conn.last_insert_rowid()
+        }
+    };
+
+    set_current(conn, id)?;
+    Ok(id)
 }
 
-/// 写入登录凭据。站点必须已存在（登录总是发生在选站之后）。
+/// 把某一行设为当前选中（其余置 0）。
+pub fn set_current(conn: &Connection, id: i64) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE loongport_operator SET is_current = CASE WHEN id = ?1 THEN 1 ELSE 0 END",
+        params![id],
+    )
+    .map_err(|e| AppError::Database(format!("切换当前站点失败: {e}")))?;
+    Ok(())
+}
+
+/// 写入登录凭据与账号身份，并在发现重复时合并。
+///
+/// 返回**最终生效的那一行的 id** —— 可能不是传进来的 `id`：如果这个站上已经有同一个账号的
+/// 行（用户重新添加了已配过的站），凭据写进那一行、把刚建的这条删掉。
 pub fn save_credentials(
     conn: &Connection,
+    id: i64,
+    account_id: i64,
+    account_label: &str,
+    auth_token: &str,
+    refresh_token: Option<&str>,
+    token_expires_at: Option<i64>,
+) -> Result<i64, AppError> {
+    let site_origin: String = conn
+        .query_row(
+            "SELECT site_origin FROM loongport_operator WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("读取站点失败: {e}")))?
+        .ok_or_else(|| AppError::Config("保存凭据失败: 站点记录不存在".into()))?;
+
+    // 这个站上是否已有同一个账号的行（排除自己）。
+    let duplicate: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM loongport_operator
+             WHERE site_origin = ?1 AND account_id = ?2 AND id != ?3 LIMIT 1",
+            params![&site_origin, account_id, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("查询重复账号失败: {e}")))?;
+
+    let target = match duplicate {
+        // 已经配过这个「站 × 账号」：凭据写回那一行，删掉这次新建的。
+        Some(existing) => {
+            conn.execute("DELETE FROM loongport_operator WHERE id = ?1", params![id])
+                .map_err(|e| AppError::Database(format!("清理重复站点失败: {e}")))?;
+            log::info!("站点 {site_origin} 的账号 {account_id} 已存在，合并到已有记录");
+            existing
+        }
+        None => id,
+    };
+
+    conn.execute(
+        "UPDATE loongport_operator
+         SET account_id = ?1, account_label = ?2, auth_token = ?3,
+             refresh_token = ?4, token_expires_at = ?5, updated_at = ?6
+         WHERE id = ?7",
+        params![
+            account_id,
+            account_label,
+            auth_token,
+            refresh_token,
+            token_expires_at,
+            now_unix(),
+            target
+        ],
+    )
+    .map_err(|e| AppError::Database(format!("保存凭据失败: {e}")))?;
+
+    set_current(conn, target)?;
+    Ok(target)
+}
+
+/// 只更新 token（续期用），不碰账号身份、不做去重。
+///
+/// 与 [`save_credentials`] 分开是因为语义不同：续期是「同一个账号换一把新 token」，账号没变
+/// ⇒ 没有重复可言。走那条会白查一次重复，还得传一遍已知的 account_id。
+pub fn update_tokens(
+    conn: &Connection,
+    id: i64,
     auth_token: &str,
     refresh_token: Option<&str>,
     token_expires_at: Option<i64>,
@@ -145,31 +397,62 @@ pub fn save_credentials(
         .execute(
             "UPDATE loongport_operator
              SET auth_token = ?1, refresh_token = ?2, token_expires_at = ?3, updated_at = ?4
-             WHERE id = 1",
-            params![auth_token, refresh_token, token_expires_at, now_unix()],
+             WHERE id = ?5",
+            params![auth_token, refresh_token, token_expires_at, now_unix(), id],
         )
-        .map_err(|e| AppError::Database(format!("保存凭据失败: {e}")))?;
-
+        .map_err(|e| AppError::Database(format!("更新 token 失败: {e}")))?;
     if changed == 0 {
-        return Err(AppError::Config(
-            "保存凭据失败: 还没有选择运营商站点".into(),
-        ));
+        return Err(AppError::Config("更新 token 失败: 站点记录不存在".into()));
     }
     Ok(())
 }
 
-/// 清掉凭据但保留站点与 device_id（登出 / 凭据失效后重登用）。
+/// 清掉某一行的凭据但保留站点与 device_id（登出 / 凭据失效后重登用）。
 ///
-/// **device_id 必须留着**：它进了服务端的 Key 名字，清掉会让重登后认领不到自己已建的 Key，
-/// 于是给用户账号里堆一批同分组的重复 sk。
-pub fn clear_credentials(conn: &Connection) -> Result<(), AppError> {
+/// **`account_id` 也清掉**：下次登录可能换成别的账号，留着旧的会让去重判断把新账号误认成它。
+/// **device_id 必须留着** —— 它进了服务端的 Key 名字，清掉会让重登后认领不到自己已建的 Key，
+/// 于是给用户账号里堆一批重复 sk。
+pub fn clear_credentials(conn: &Connection, id: i64) -> Result<(), AppError> {
     conn.execute(
         "UPDATE loongport_operator
-         SET auth_token = '', refresh_token = NULL, token_expires_at = NULL, updated_at = ?1
-         WHERE id = 1",
-        params![now_unix()],
+         SET auth_token = '', refresh_token = NULL, token_expires_at = NULL,
+             account_id = NULL, account_label = '', updated_at = ?1
+         WHERE id = ?2",
+        params![now_unix(), id],
     )
     .map_err(|e| AppError::Database(format!("清除凭据失败: {e}")))?;
+    Ok(())
+}
+
+/// 删掉一个站点。若删的是当前选中项，把剩下最早那条设为当前。
+pub fn remove(conn: &Connection, id: i64) -> Result<(), AppError> {
+    conn.execute("DELETE FROM loongport_operator WHERE id = ?1", params![id])
+        .map_err(|e| AppError::Database(format!("删除站点失败: {e}")))?;
+
+    // 没有 current 了就补一个 —— 否则 load() 虽有回落，但 is_current 语义会一直是脏的。
+    let has_current: bool = conn
+        .query_row(
+            "SELECT 1 FROM loongport_operator WHERE is_current = 1 LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("检查当前站点失败: {e}")))?
+        .unwrap_or(false);
+
+    if !has_current {
+        if let Some(next) = conn
+            .query_row(
+                "SELECT id FROM loongport_operator ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(format!("查询剩余站点失败: {e}")))?
+        {
+            set_current(conn, next)?;
+        }
+    }
     Ok(())
 }
 
@@ -193,83 +476,141 @@ mod tests {
     }
 
     #[test]
-    fn save_site_generates_device_id_once_and_keeps_it() {
+    fn save_site_generates_device_id_once_and_shares_it() {
         let conn = mem();
-        let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        let first = get(&conn, a).unwrap().unwrap().device_id;
         assert!(!first.is_empty());
 
-        // 换站也不换 device_id —— 它进了服务端的 Key 名字，换掉就认领不回已建的 Key。
-        let second = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
-        assert_eq!(first, second);
-
-        let op = load(&conn).unwrap().unwrap();
-        assert_eq!(op.site_origin, "https://b.dev");
-        assert_eq!(op.device_id, first);
+        // 第二个站共用同一个 device_id —— 它表示「这台机器」，与站点无关。
+        let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
+        assert_eq!(get(&conn, b).unwrap().unwrap().device_id, first);
     }
 
     #[test]
-    fn save_site_stays_single_row() {
+    fn adding_the_same_site_twice_before_login_reuses_one_row() {
+        // 用户连点两次「添加」不该得到两行。
         let conn = mem();
-        save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM loongport_operator", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 1);
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        let b = save_site(&conn, "https://a.dev", "A 改名了", "https://a.dev/v1").unwrap();
+        assert_eq!(a, b, "未登录的同站行应被复用");
+        assert_eq!(list(&conn).unwrap().len(), 1);
+        // 顺带更新了展示名。
+        assert_eq!(get(&conn, a).unwrap().unwrap().site_name, "A 改名了");
     }
 
     #[test]
-    fn credentials_roundtrip() {
+    fn same_site_different_accounts_coexist() {
         let conn = mem();
-        save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, "tok", Some("ref"), Some(1_800_000_000)).unwrap();
+        let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, first, 100, "me@x.com", "tok1", None, None).unwrap();
 
-        let op = load(&conn).unwrap().unwrap();
-        assert_eq!(op.auth_token, "tok");
-        assert_eq!(op.refresh_token.as_deref(), Some("ref"));
-        assert_eq!(op.token_expires_at, Some(1_800_000_000));
+        // 再添加同一个站、登录另一个账号 —— 两个都该留着。
+        let second = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        assert_ne!(first, second, "已登录的行不该被复用");
+        let final_id =
+            save_credentials(&conn, second, 200, "alt@x.com", "tok2", None, None).unwrap();
+        assert_eq!(final_id, second);
+
+        assert_eq!(list(&conn).unwrap().len(), 2);
     }
 
     #[test]
-    fn save_credentials_without_site_is_a_visible_error() {
-        // 静默成功会让「登录成功但什么都没存下」变成一个查不出来的问题。
-        let err = save_credentials(&mem(), "tok", None, None).unwrap_err();
-        assert!(err.to_string().contains("还没有选择运营商站点"));
-    }
-
-    #[test]
-    fn clear_credentials_preserves_site_and_device_id() {
+    fn re_adding_a_site_with_the_same_account_merges_instead_of_duplicating() {
+        // 这条是用户明确要的去重：同「域名 + 账号」只留一份。
         let conn = mem();
-        let device = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, "tok", Some("ref"), Some(123)).unwrap();
-        clear_credentials(&conn).unwrap();
+        let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, first, 100, "me@x.com", "old-token", None, None).unwrap();
 
-        let op = load(&conn).unwrap().unwrap();
+        // 用户又添加了一次同一个站，并用同一个账号登录。
+        let second = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        let final_id =
+            save_credentials(&conn, second, 100, "me@x.com", "new-token", None, None).unwrap();
+
+        // 合并到原来那行，新建的那条被删掉。
+        assert_eq!(final_id, first, "应合并回已有记录");
+        assert_eq!(list(&conn).unwrap().len(), 1);
+        // 凭据用的是新的那份。
+        let op = get(&conn, first).unwrap().unwrap();
+        assert_eq!(op.auth_token, "new-token");
+        assert!(op.is_current, "合并后该行应是当前选中");
+    }
+
+    #[test]
+    fn set_current_keeps_exactly_one_row_selected() {
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
+
+        // save_site 会把新站设为当前。
+        assert_eq!(load(&conn).unwrap().unwrap().id, b);
+        set_current(&conn, a).unwrap();
+        assert_eq!(load(&conn).unwrap().unwrap().id, a);
+
+        let selected = list(&conn).unwrap().iter().filter(|o| o.is_current).count();
+        assert_eq!(selected, 1, "同时只能有一行被选中");
+    }
+
+    #[test]
+    fn clear_credentials_drops_account_identity_too() {
+        // account_id 不清的话，下次换账号登录会被去重逻辑误认成同一个账号。
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, a, 100, "me@x.com", "tok", Some("ref"), Some(123)).unwrap();
+        let device = get(&conn, a).unwrap().unwrap().device_id;
+
+        clear_credentials(&conn, a).unwrap();
+        let op = get(&conn, a).unwrap().unwrap();
         assert_eq!(op.auth_token, "");
-        assert!(op.refresh_token.is_none());
-        assert!(op.token_expires_at.is_none());
-        // 这两条是本测试的重点，不是顺带断言。
+        assert!(op.account_id.is_none());
+        assert_eq!(op.account_label, "");
+        // 站点与 device_id 必须活着 —— 后者进了服务端的 Key 名字。
         assert_eq!(op.site_origin, "https://a.dev");
         assert_eq!(op.device_id, device);
     }
 
     #[test]
+    fn removing_the_current_site_promotes_another() {
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
+        assert_eq!(load(&conn).unwrap().unwrap().id, b, "b 是当前");
+
+        remove(&conn, b).unwrap();
+        let now = load(&conn).unwrap().unwrap();
+        assert_eq!(now.id, a);
+        assert!(now.is_current, "剩下的那条要被提为当前，不能留个脏状态");
+    }
+
+    #[test]
+    fn removing_the_last_site_leaves_nothing() {
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        remove(&conn, a).unwrap();
+        assert!(load(&conn).unwrap().is_none());
+        assert!(list(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn save_credentials_on_a_missing_row_is_a_visible_error() {
+        // 静默成功会让「登录成功但什么都没存下」变成查不出来的问题。
+        let err = save_credentials(&mem(), 999, 1, "x@x.com", "tok", None, None).unwrap_err();
+        assert!(err.to_string().contains("站点记录不存在"));
+    }
+
+    #[test]
     fn token_validity_leaves_a_margin_and_tolerates_missing_expiry() {
-        let base = Operator {
-            site_origin: "https://a.dev".into(),
-            site_name: "A".into(),
-            api_base_url: "https://a.dev/v1".into(),
-            device_id: "d".into(),
-            auth_token: "tok".into(),
-            refresh_token: None,
-            token_expires_at: Some(1000),
-        };
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, a, 1, "x@x.com", "tok", None, Some(1000)).unwrap();
+        let base = get(&conn, a).unwrap().unwrap();
+
         assert!(base.token_looks_valid(0));
         // 60 秒余量内算已过期：卡边界发请求只会拿到 401，白跑一趟。
         assert!(!base.token_looks_valid(950));
         assert!(!base.token_looks_valid(1000));
 
-        // 服务端降级态（没给 expiry）不能判成「未就位」去轮询等——那会永远等不到。
+        // 服务端降级态（没给 expiry）不能判成「未就位」去轮询等 —— 那会永远等不到。
         let no_expiry = Operator {
             token_expires_at: None,
             ..base.clone()
@@ -282,5 +623,129 @@ mod tests {
             ..base
         };
         assert!(!empty.token_looks_valid(0));
+    }
+
+    #[test]
+    fn display_label_distinguishes_accounts_on_the_same_site() {
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "BestApi", "https://a.dev/v1").unwrap();
+        // 还没登录：只有站名。
+        assert_eq!(get(&conn, a).unwrap().unwrap().display_label(), "BestApi");
+
+        save_credentials(&conn, a, 1, "me@x.com", "tok", None, None).unwrap();
+        assert_eq!(
+            get(&conn, a).unwrap().unwrap().display_label(),
+            "BestApi · me@x.com"
+        );
+    }
+
+    #[test]
+    fn v17_single_row_table_migrates_into_the_multi_row_shape() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 复刻 v17 的表（含那个 CHECK 约束，正是它逼出这次建新表搬数据）。
+        conn.execute(
+            "CREATE TABLE loongport_operator (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                site_origin TEXT NOT NULL,
+                site_name TEXT NOT NULL DEFAULT '',
+                api_base_url TEXT NOT NULL DEFAULT '',
+                device_id TEXT NOT NULL,
+                auth_token TEXT NOT NULL DEFAULT '',
+                refresh_token TEXT,
+                token_expires_at INTEGER,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO loongport_operator
+                (id, site_origin, site_name, api_base_url, device_id, auth_token, updated_at)
+             VALUES (1, 'https://old.dev', 'Old', 'https://old.dev/v1', 'dev-uuid', 'old-tok', 5)",
+            [],
+        )
+        .unwrap();
+
+        migrate_v17_to_v18(&conn).unwrap();
+
+        // 那一行必须活着、且成为当前选中项 —— 用户升级后不该被要求重新配站与重新登录。
+        let op = load(&conn).unwrap().expect("迁移后应还有那一行");
+        assert_eq!(op.site_origin, "https://old.dev");
+        assert_eq!(
+            op.device_id, "dev-uuid",
+            "device_id 丢了会让已建的 Key 认领不回来"
+        );
+        assert_eq!(op.auth_token, "old-tok", "凭据丢了用户就得重新登录");
+        assert!(op.is_current);
+        assert!(op.account_id.is_none(), "老数据没有账号身份，登录后才回填");
+
+        // 新表能装第二行了（老表的 CHECK 会拦住）。
+        save_site(&conn, "https://new.dev", "New", "https://new.dev/v1").unwrap();
+        assert_eq!(list(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn create_table_then_migrate_is_the_real_startup_order() {
+        // **这条复刻用户实际撞到的崩溃**：`Database::init` 先跑 `create_tables_on_conn`
+        // （里面调 create_table），再跑迁移。升级的库上 `CREATE TABLE IF NOT EXISTS` 跳过，
+        // 那时表还是 v17 形态没有 account_id 列，而索引引用了它 ⇒
+        // `no such column: account_id`，整个 app 起不来。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE loongport_operator (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                site_origin TEXT NOT NULL,
+                site_name TEXT NOT NULL DEFAULT '',
+                api_base_url TEXT NOT NULL DEFAULT '',
+                device_id TEXT NOT NULL,
+                auth_token TEXT NOT NULL DEFAULT '',
+                refresh_token TEXT,
+                token_expires_at INTEGER,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO loongport_operator
+                (id, site_origin, site_name, api_base_url, device_id, auth_token)
+             VALUES (1, 'https://x.dev', 'X', 'https://x.dev/v1', 'dev-1', 'tok')",
+            [],
+        )
+        .unwrap();
+
+        // 启动顺序第一步：建表（旧库上它必须**不炸**）。
+        create_table(&conn).expect("旧表上 create_table 不该失败");
+        // 第二步：迁移。
+        migrate_v17_to_v18(&conn).expect("迁移应成功");
+
+        // 数据在、且索引已补上（补不上的话重复账号就拦不住）。
+        let op = load(&conn).unwrap().expect("那一行应还在");
+        assert_eq!(op.auth_token, "tok");
+        let has_index: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index'
+                 AND name='idx_loongport_operator_site_account'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(false);
+        assert!(has_index, "迁移后必须补上去重索引");
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        // 迁移可能因为上一次中断而重跑，跑两遍不能把数据搞坏。
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, a, 1, "x@x.com", "tok", None, None).unwrap();
+
+        migrate_v17_to_v18(&conn).unwrap();
+        migrate_v17_to_v18(&conn).unwrap();
+
+        assert_eq!(list(&conn).unwrap().len(), 1);
+        assert_eq!(get(&conn, a).unwrap().unwrap().auth_token, "tok");
     }
 }
