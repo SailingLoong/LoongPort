@@ -25,7 +25,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::operator::platform_map::{parse_platform, Platform};
 
 /// sub2api 业务响应信封。
 ///
@@ -125,13 +127,24 @@ pub struct Group {
 const MAX_SANE_RATE_MULTIPLIER: f64 = 10.0;
 
 impl Group {
-    /// codex 能用的分组：`openai` 平台、活跃、且定价不是探针池那种惩罚性倍率。
+    /// 某个 cc-switch app 能用的分组：platform 映射到该 app、活跃、且定价不是探针池那种
+    /// 惩罚性倍率。
     ///
     /// 服务端**不按 platform 过滤**（`api_key_service.go` 的 `GetAvailableGroups` 只判
-    /// 「活跃 + 可绑」），所以这个过滤必须客户端做。`composite` 分组一把 Key 跨多平台，
-    /// 与「一分组一 provider」的展开模型不对齐，由 platform 判定一并排除。
-    pub fn is_codex_usable(&self) -> bool {
-        self.platform == "openai"
+    /// 「活跃 + 可绑」），所以这个过滤必须客户端做。
+    ///
+    /// ⚠️ **参数是 [`AppType`] 而不是 platform 字符串，这是有意的**：`composite`
+    /// （一把 Key 跨多平台，与「一分组一 provider」不对齐）与所有未知 platform 在
+    /// [`crate::operator::platform_map`] 里都取不到 `AppType`，于是它们在这个边界上
+    /// **不可表示** ——
+    /// 无论调用方传什么 app，composite 分组都拿不到 `true`。
+    /// 若参数是 `&str`，`is_usable_for("composite")` 会返回 `true`，从前靠
+    /// `platform == "openai"` 这个等值判断顺带排除 composite 的那道守卫就蒸发了。
+    pub fn is_usable_for(&self, app_type: &AppType) -> bool {
+        parse_platform(&self.platform)
+            .and_then(Platform::app_type)
+            .as_ref()
+            == Some(app_type)
             && self.status == "active"
             && self.rate_multiplier <= MAX_SANE_RATE_MULTIPLIER
     }
@@ -656,11 +669,41 @@ mod tests {
 
     #[test]
     fn group_usable_only_for_active_openai() {
-        assert!(group("openai", "active", 1.0).is_codex_usable());
+        assert!(group("openai", "active", 1.0).is_usable_for(&AppType::Codex));
         // composite 一把 Key 跨多平台，与「一分组一 provider」不对齐，必须排除。
-        assert!(!group("composite", "active", 1.0).is_codex_usable());
-        assert!(!group("anthropic", "active", 1.0).is_codex_usable());
-        assert!(!group("openai", "disabled", 1.0).is_codex_usable());
+        assert!(!group("composite", "active", 1.0).is_usable_for(&AppType::Codex));
+        assert!(!group("anthropic", "active", 1.0).is_usable_for(&AppType::Codex));
+        assert!(!group("openai", "disabled", 1.0).is_usable_for(&AppType::Codex));
+    }
+
+    /// composite 的排除**不依赖调用方传对 app**：从前它是靠 `platform == "openai"` 顺带被
+    /// 排除的，参数化之后这条守卫必须由 `platform_map` 接住 —— 对**每一个** app_type 问
+    /// 一遍，composite 都得是 false。未知 platform 同理（上游加了新平台不该被误绑）。
+    #[test]
+    fn composite_and_unknown_platforms_are_unusable_for_every_app() {
+        for app_type in AppType::all() {
+            assert!(
+                !group("composite", "active", 1.0).is_usable_for(&app_type),
+                "composite 不该对 {} 可用",
+                app_type.as_str()
+            );
+            assert!(
+                !group("bedrock", "active", 1.0).is_usable_for(&app_type),
+                "未知 platform 不该对 {} 可用",
+                app_type.as_str()
+            );
+        }
+    }
+
+    /// 参数化没有把平台判定弄丢：其它平台各自只对自己那个 app 可用。
+    #[test]
+    fn each_mapped_platform_matches_only_its_own_app() {
+        assert!(group("anthropic", "active", 1.0).is_usable_for(&AppType::Claude));
+        assert!(group("gemini", "active", 1.0).is_usable_for(&AppType::Gemini));
+        assert!(group("grok", "active", 1.0).is_usable_for(&AppType::GrokBuild));
+        // 交叉不成立：anthropic 的分组不能被 codex 页拿去用。
+        assert!(!group("anthropic", "active", 1.0).is_usable_for(&AppType::Codex));
+        assert!(!group("openai", "active", 1.0).is_usable_for(&AppType::Claude));
     }
 
     #[test]
@@ -668,12 +711,12 @@ mod tests {
         // 运营商的「渠道监控专用分组」是 openai + active，只有倍率异常能认出来。
         // bestapi.store 实测有一个 rate=100 的 `渠道监控专属分组-GPT` —— 不滤掉的话它会
         // 出现在档位列表里，用户手滑选中就是 100 倍计费。
-        assert!(!group("openai", "active", 100.0).is_codex_usable());
+        assert!(!group("openai", "active", 100.0).is_usable_for(&AppType::Codex));
 
         // 正常档位不受影响：线上便宜档实测 0.1，常规档 1.0-2.0。
         for rate in [0.1, 1.0, 2.0, 10.0] {
             assert!(
-                group("openai", "active", rate).is_codex_usable(),
+                group("openai", "active", rate).is_usable_for(&AppType::Codex),
                 "倍率 {rate} 是正常定价，不该被滤掉"
             );
         }

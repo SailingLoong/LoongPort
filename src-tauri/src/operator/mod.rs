@@ -32,4 +32,5 @@ pub mod api;
 pub mod chatgpt_app;
 pub mod creds;
 pub mod login;
+pub mod platform_map;
 pub mod provision;
