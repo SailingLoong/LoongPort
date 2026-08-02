@@ -29,23 +29,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 把「要出哪几个架构」算成一个 JSON 数组给下面的 matrix 用。
+  #
+  # 为什么不在 job 级 `if` 里判：**`matrix` 在那个上下文里不可用**（GitHub Actions 会报
+  # `Unrecognized named-value: 'matrix'`）—— job 级 `if` 在展开矩阵之前求值。所以过滤必须
+  # 发生在矩阵**生成**的时候，而不是生成之后。
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.pick.outputs.targets }}
+    steps:
+      - id: pick
+        env:
+          # 经 env 传而不是直接插进脚本 —— 这是 workflow 注入的标准防线。
+          # 这里的值本身受 `type: choice` 约束（只能是那三个），但形式上仍照规矩来。
+          ARCH: ${{ github.event.inputs.arch }}
+        run: |
+          x64='{"runner":"windows-2022","arch":"x64","target":"x86_64-pc-windows-msvc"}'
+          arm='{"runner":"windows-11-arm","arch":"arm64","target":"aarch64-pc-windows-msvc"}'
+          case "${ARCH:-both}" in
+            x64)   targets="[$x64]" ;;
+            arm64) targets="[$arm]" ;;
+            *)     targets="[$x64,$arm]" ;;   # both、以及非 workflow_dispatch 触发
+          esac
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: windows-2022
-            arch: x64
-            target: x86_64-pc-windows-msvc
-          - runner: windows-11-arm
-            arch: arm64
-            target: aarch64-pc-windows-msvc
+        include: ${{ fromJSON(needs.plan.outputs.targets) }}
     runs-on: ${{ matrix.runner }}
-    # 手动触发时按用户选的架构过滤；打 tag 时两个都出。
-    if: >-
-      github.event_name != 'workflow_dispatch'
-      || github.event.inputs.arch == 'both'
-      || github.event.inputs.arch == matrix.arch
 
     steps:
       - uses: actions/checkout@v4
