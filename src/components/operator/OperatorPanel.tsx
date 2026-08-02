@@ -119,9 +119,11 @@ export function OperatorPanel() {
     try {
       const ok = await operatorApi.login();
       if (ok) {
-        toast.success("登录成功，正在获取密钥…");
+        // 登录窗**不会自动关闭**（它已经跳到 dashboard，用户可能要在那儿充值或看用量）。
+        // 所以这条提示要说清窗口还开着、可以自己关。
+        toast.success("已连接，正在获取密钥…（登录窗口可以自己关掉）");
         await refresh();
-        // 登录成功后直接把密钥备好 —— 需求要的是「用户无感」，不该再让他点一次。
+        // 直接把密钥备好 —— 需求要的是「用户无感」，不该再让他点一次。
         await handleProvision();
       }
       // ok === false 是用户自己关了窗口，不出提示（他知道自己干了什么）。
@@ -238,6 +240,22 @@ export function OperatorPanel() {
             <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
               <Wallet className="h-4 w-4" />${balance.balance.toFixed(2)}
             </div>
+          )}
+          {/* 常驻的「回运营商网页」入口。
+              登录窗关掉之后，充值 / 看用量 / 查渠道状态就没有别的路了 —— 这些都在运营商
+              的网页上，我们没做也不该做。用普通 <a target="_blank">：Tauri 的 opener 插件
+              会接管它送到系统浏览器（与仓里既有那几处外链同一个写法）。 */}
+          {status.loggedIn && (
+            <a
+              href={status.siteOrigin}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+              title="在浏览器里打开，可以充值、看用量"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              网页端
+            </a>
           )}
           {status.loggedIn && (
             <Button variant="ghost" size="sm" onClick={handleLogout}>

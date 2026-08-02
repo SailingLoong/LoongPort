@@ -292,6 +292,8 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
 
     // 凭据经这个 channel 从导航回调回到本函数。容量 1：只需要第一份。
     let (tx, mut rx) = tokio::sync::mpsc::channel::<login::Credentials>(1);
+    // 用户自己关掉窗口的信号。没有它就只能干等 5 分钟超时。
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let handle_for_nav = app_handle.clone();
     let window = tauri::WebviewWindowBuilder::new(
@@ -324,11 +326,26 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
     .build()
     .map_err(|e| AppError::Config(format!("打开登录窗口失败: {e}")))?;
 
-    // 等凭据。5 分钟够走完注册 + 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
-    let got = tokio::time::timeout(std::time::Duration::from_secs(300), rx.recv()).await;
-    let _ = window.close();
+    // 用户关窗时立刻收工，不用等满超时。
+    //
+    // 只认 `Destroyed`（窗口真的没了）而不是 `CloseRequested`（可被拦下的关闭请求）——
+    // 后者在某些平台上会先于实际销毁触发，甚至可能被取消。
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = closed_tx.try_send(());
+        }
+    });
 
-    match got {
+    // 等凭据或用户关窗。5 分钟够走完注册 + 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        tokio::select! {
+            creds = rx.recv() => creds,
+            _ = closed_rx.recv() => None,
+        }
+    })
+    .await;
+
+    match outcome {
         Ok(Some(c)) => {
             let state = app_handle.state::<AppState>();
             with_conn(&state, |conn| {
@@ -339,10 +356,30 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
                     c.token_expires_at,
                 )
             })?;
+
+            // **不关窗**，把标题改成「已连接」并在页面上浮一条提示。
+            //
+            // 为什么不关：用户拿到凭据的那一刻，页面往往刚跳到 dashboard（sub2api 登录成功后
+            // `router.push(redirectTo)`，注册成功后 `push('/dashboard')`）—— 那上面有余额、
+            // 充值入口、渠道状态，都是他接着要用的东西。我们把窗口关掉等于替他决定「你看完了」。
+            //
+            // 更糟的一种：用户之前登录过，`/login` 的路由守卫会把他直接重定向到 dashboard，
+            // 而注入脚本的轮询会在几百毫秒内拿到已有 token —— 窗口开了就关，用户一眼都没看到。
+            //
+            // 所以改成：凭据已到手、命令正常返回（前端接着去备密钥），窗口留给用户自己关。
+            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
+            let _ = window.eval(login::CONNECTED_BANNER_JS);
+
             Ok(true)
         }
-        // 窗口被用户关掉（sender 随回调一起 drop）或超时。都不是错误。
-        Ok(None) | Err(_) => Ok(false),
+        // 用户关掉了窗口，或超时。都不是错误。
+        //
+        // 这两种情况下窗口要么已经没了、要么用户走开了，主动关掉它是对的 —— 留一个卡在
+        // 登录页的僵尸窗口没有意义。
+        Ok(None) | Err(_) => {
+            let _ = window.close();
+            Ok(false)
+        }
     }
 }
 

@@ -58,6 +58,50 @@ pub struct Credentials {
     pub token_expires_at: Option<i64>,
 }
 
+/// 凭据到手后浮在登录页顶部的提示条。
+///
+/// 存在的理由：**窗口不再自动关闭**（见 `commands::operator::do_login` 里那段说明），所以
+/// 必须告诉用户「这边已经好了，你可以继续用这个页面，也可以关掉它」—— 否则他不知道该干什么，
+/// 只会盯着一个看起来没反应的窗口。
+///
+/// 写成一整段自执行 JS 常量而不是模板：它没有任何需要插值的东西，做成 `format!` 只会引入
+/// 转义风险。
+///
+/// 用 `position: fixed` + 高 `z-index`，不改页面自身的任何 DOM 结构 —— 运营商的页面长什么样
+/// 我们不该假设，只在最上层贴一条。
+pub const CONNECTED_BANNER_JS: &str = r#"(function () {
+  var ID = '__loongport_connected__';
+  if (document.getElementById(ID)) return;
+
+  var bar = document.createElement('div');
+  bar.id = ID;
+  bar.setAttribute('style', [
+    'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
+    'padding:10px 14px', 'background:#10b981', 'color:#fff',
+    'font:500 13px/1.5 -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif',
+    'display:flex', 'align-items:center', 'gap:10px',
+    'box-shadow:0 1px 6px rgba(0,0,0,.2)'
+  ].join(';'));
+
+  var text = document.createElement('span');
+  text.style.flex = '1';
+  text.textContent = 'LoongPort 已连接，正在准备密钥。你可以继续在这里充值或查看用量，用完直接关掉此窗口。';
+  bar.appendChild(text);
+
+  var btn = document.createElement('button');
+  btn.textContent = '知道了';
+  btn.setAttribute('style', [
+    'flex:none', 'cursor:pointer', 'border:0', 'border-radius:4px',
+    'padding:4px 10px', 'background:rgba(255,255,255,.22)', 'color:#fff',
+    'font:inherit'
+  ].join(';'));
+  btn.onclick = function () { bar.remove(); };
+  bar.appendChild(btn);
+
+  (document.body || document.documentElement).appendChild(bar);
+})();
+"#;
+
 /// 生成注入脚本。
 ///
 /// `site_origin` 用于 origin 守卫：脚本只在运营商自己的页面上生效，跳到第三方（OAuth 授权页
@@ -104,8 +148,25 @@ pub fn login_script(site_origin: &str) -> String {
       refresh_token: window.localStorage.getItem(K_REFRESH),
       token_expires_at: window.localStorage.getItem(K_EXPIRES)
     }});
-    // 这次跳转会被原生侧的 on_navigation 拦下，页面不会真的走掉。
-    window.location.href = '{CREDS_SCHEME}://ok?d=' + b64url(payload);
+
+    // 用一个隐藏 iframe 发这次跳转，而不是改 window.location。
+    //
+    // 两者都会触发原生侧的 on_navigation（回调对子框架的导航同样生效），但改
+    // window.location 会让**当前页面**进入导航状态 —— 即使 on_navigation 返回 false 拦下了，
+    // 页面也已经被打断一次（表单里填的东西、正在播的动画都可能没了）。用 iframe 则完全不碰
+    // 主文档：用户该看的页面原样留着，凭据在背后送出去。
+    try {{
+      var f = document.createElement('iframe');
+      f.style.display = 'none';
+      f.src = '{CREDS_SCHEME}://ok?d=' + b64url(payload);
+      (document.body || document.documentElement).appendChild(f);
+      // 立刻移除：src 一赋值导航就已经发起，DOM 里留着它没有意义。
+      setTimeout(function () {{ try {{ f.remove(); }} catch (e) {{}} }}, 0);
+    }} catch (e) {{
+      // iframe 建不起来（极早期、body 还没有）时退回改 location —— 拿到凭据比
+      // 保住页面完整更重要，这条路至少不会让整个流程卡死。
+      window.location.href = '{CREDS_SCHEME}://ok?d=' + b64url(payload);
+    }}
   }}
 
   // 劫持 setItem：登录成功的那一刻四个键会陆续写进来。
@@ -322,6 +383,38 @@ mod tests {
         assert!(s.contains("window.top !== window.self"));
         assert!(s.contains("auth_token"));
         assert!(s.contains(CREDS_SCHEME));
+    }
+
+    #[test]
+    fn creds_are_sent_through_an_iframe_not_by_navigating_the_page() {
+        // 凭据回传必须走隐藏 iframe。改 window.location 即使被 on_navigation 拦下，
+        // 主文档也已经被打断一次 —— 用户正在填的表、正在看的 dashboard 都可能受影响。
+        // 而拿到凭据的时刻往往正是页面刚跳到 dashboard，那一下最不该被打断。
+        let s = login_script("https://bestapi.store");
+        assert!(s.contains("createElement('iframe')"), "必须用 iframe 回传");
+        assert!(s.contains("style.display = 'none'"), "iframe 必须隐藏");
+        // location 那条只留作 iframe 建不起来时的兜底，不能是主路径。
+        let iframe_at = s.find("createElement('iframe')").expect("有 iframe");
+        let location_at = s.find("window.location.href =").expect("有兜底");
+        assert!(
+            iframe_at < location_at,
+            "iframe 必须在前（主路径），location 只是兜底"
+        );
+    }
+
+    #[test]
+    fn connected_banner_is_self_contained_and_idempotent() {
+        // 这条提示条是「窗口不再自动关闭」的配套 —— 没有它用户不知道该干什么。
+        let js = CONNECTED_BANNER_JS;
+        // 幂等：eval 可能被调多次（用户重新登录），不能叠出两条。
+        assert!(js.contains("getElementById(ID)"), "必须先查再插，避免重复");
+        // 得告诉用户两件事：这边好了、窗口可以自己关。
+        assert!(js.contains("已连接"), "要说清已经连上了");
+        assert!(js.contains("关掉此窗口"), "要告诉用户可以自己关");
+        // 不改页面自身结构 —— 运营商页面长什么样我们不该假设。
+        assert!(js.contains("position:fixed"), "浮层不该挤占页面布局");
+        // 它是整段 JS 常量，不做插值 —— 若有人改成模板，这条会提醒他注意转义。
+        assert!(!js.contains("{}"), "不该有插值占位符");
     }
 
     #[test]
