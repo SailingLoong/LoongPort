@@ -16,6 +16,20 @@ export interface OperatorStatus {
   accountLabel: string;
   /** 是否已有可用凭据。 */
   loggedIn: boolean;
+  /**
+   * **登录过、但凭据已经不能用了** —— 据此提示「登录已过期，请重新登录」，
+   * 而不是像从没登录过一样只摆一个「登录」按钮。
+   *
+   * 与 `!loggedIn` 不同：那个把「从没登录」与「登录过但过期」混成一件事，而对用户是两种
+   * 处境。还有 refresh token 时下一次请求会自动续期、用户不必管，那种情况**不算过期**。
+   */
+  sessionExpired: boolean;
+  /**
+   * 重新登录时预填进登录框的值（空串 = 没有，让用户自己输）。
+   *
+   * 是登录标识本身而不是 `accountLabel`：后者昵称优先，设了昵称的用户拿它填登录框是错的。
+   */
+  loginIdentifier: string;
   /** 已备好密钥的档位数。 */
   tierCount: number;
   /**

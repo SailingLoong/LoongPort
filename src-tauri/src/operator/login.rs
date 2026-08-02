@@ -106,9 +106,23 @@ pub const CONNECTED_BANNER_JS: &str = r#"(function () {
 ///
 /// `site_origin` 用于 origin 守卫：脚本只在运营商自己的页面上生效，跳到第三方（OAuth 授权页
 /// 之类）时不执行 —— 那些页面的 localStorage 里没有我们要的东西，读它只是徒增攻击面。
-pub fn login_script(site_origin: &str) -> String {
+///
+/// `login_identifier` 是重登时预填进登录框的值（空串 = 不预填）。
+///
+/// ## 预填为什么要派 `input` 事件
+///
+/// sub2api 的登录页是 Vue（`LoginView.vue`，输入框 `id="email"` + `v-model="formData.email"`）。
+/// 只设 `input.value` 的话 DOM 上看得见字、但 `formData.email` 仍是空的 —— 提交上去是空邮箱。
+/// `v-model` 监听的是 `input` 事件，所以必须派一个 `bubbles: true` 的 `Event('input')`
+/// 让框架的监听器收到。
+///
+/// **只填不提交**：密码与人机验证（Turnstile）都得用户自己来，这里只省掉输邮箱那一步。
+pub fn login_script(site_origin: &str, login_identifier: &str) -> String {
     // JSON 编码 origin 而不是直接插进单引号里：origin 来自用户输入，含引号就会破坏脚本语法。
     let origin_literal = serde_json::to_string(site_origin).unwrap_or_else(|_| "\"\"".to_string());
+    // 同理 JSON 编码：这个值来自服务端返回的账号信息，含引号就会破坏脚本语法。
+    let identifier_literal =
+        serde_json::to_string(login_identifier).unwrap_or_else(|_| "\"\"".to_string());
 
     format!(
         r#"(function () {{
@@ -119,6 +133,41 @@ pub fn login_script(site_origin: &str) -> String {
 
   var ALLOWED_ORIGIN = {origin_literal};
   if (window.location.origin !== ALLOWED_ORIGIN) return;
+
+  // 重登时把登录标识填回去，用户只需补密码与人机验证。空串 = 首次登录，不填。
+  var PREFILL = {identifier_literal};
+
+  // 只认登录标识那个框，别碰密码框。
+  //
+  // 选择器按「最稳」到「最泛」排：sub2api 的框是 id="email" + type="email"
+  // （LoginView.vue 实测），new-api 那类可能叫 username —— 都试一遍，命中第一个就停。
+  // 不用 [name=...]：Vue 的 v-model 不要求写 name，实测那个框就没有。
+  var PREFILL_SELECTORS = [
+    '#email',
+    'input[type=email]',
+    'input[autocomplete=email]',
+    '#username',
+    'input[autocomplete=username]'
+  ];
+
+  var prefilled = false;
+
+  function tryPrefill() {{
+    if (prefilled || !PREFILL) return;
+    for (var i = 0; i < PREFILL_SELECTORS.length; i++) {{
+      var el = document.querySelector(PREFILL_SELECTORS[i]);
+      if (!el) continue;
+      // 用户已经自己输了东西就别覆盖 —— 他可能正要换个账号登。
+      if (el.value) {{ prefilled = true; return; }}
+      el.value = PREFILL;
+      // **必须派事件**：只设 .value 的话 DOM 上有字但 Vue 的 formData 还是空的，
+      // 提交上去就是空邮箱。v-model 听的是 input 事件。
+      el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+      el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+      prefilled = true;
+      return;
+    }}
+  }}
 
   // sub2api 前端的凭据键名（frontend/src/stores/auth.ts）。
   var K_TOKEN = 'auth_token';
@@ -181,9 +230,12 @@ pub fn login_script(site_origin: &str) -> String {
   var timer = setInterval(function () {{
     polls++;
     trySend();
+    // 预填搭同一个轮询：SPA 的登录表单是异步渲染的，脚本跑的时候那个框往往还不存在。
+    tryPrefill();
     if (sent || polls > 600) clearInterval(timer);
   }}, 500);
   trySend();
+  tryPrefill();
 }})();
 "#
     )
@@ -370,7 +422,7 @@ mod tests {
 
     #[test]
     fn script_guards_on_origin_and_targets_sub2api_keys() {
-        let s = login_script("https://bestapi.store");
+        let s = login_script("https://bestapi.store", "");
         assert!(s.contains(r#"ALLOWED_ORIGIN = "https://bestapi.store""#));
         assert!(s.contains("window.top !== window.self"));
         assert!(s.contains("auth_token"));
@@ -387,7 +439,7 @@ mod tests {
         //
         // 这条测试是防回归的：iframe 看起来「更干净」（不碰主文档），我自己就写过一版，
         // 是查了线上响应头才发现走不通。
-        let s = login_script("https://bestapi.store");
+        let s = login_script("https://bestapi.store", "");
         assert!(
             s.contains("window.location.href ="),
             "凭据回传必须走顶层导航"
@@ -416,8 +468,64 @@ mod tests {
     #[test]
     fn script_json_encodes_origin_so_quotes_cannot_break_out() {
         // origin 来自用户输入。带引号的输入若被直接插进字符串字面量，就是脚本注入。
-        let s = login_script("https://evil\" + alert(1) + \"");
+        let s = login_script("https://evil\" + alert(1) + \"", "");
         assert!(!s.contains("\" + alert(1) + \""), "origin 没被转义: {s}");
+    }
+
+    #[test]
+    fn prefill_dispatches_an_input_event_not_just_a_value_assignment() {
+        // 这条钉住最容易漏的那一步：sub2api 登录页是 Vue，输入框绑 v-model="formData.email"。
+        // 只设 el.value 的话 DOM 上看得见字、但 formData.email 仍是空的 —— 提交上去是空邮箱，
+        // 而且表现是「明明填了却说邮箱必填」，非常难查。v-model 听的是 input 事件。
+        let s = login_script("https://bestapi.store", "me@x.com");
+        assert!(s.contains(r#"PREFILL = "me@x.com""#), "预填值该传进脚本");
+        assert!(
+            s.contains("new Event('input'"),
+            "必须派 input 事件，否则 Vue 的 v-model 收不到: {s}"
+        );
+        assert!(s.contains("bubbles: true"), "事件必须冒泡才能被框架监听到");
+    }
+
+    #[test]
+    fn prefill_never_touches_the_password_field() {
+        // 预填只该碰登录标识那个框。选择器若写宽成 `input` 或带 type=password，
+        // 就会把邮箱填进密码框 —— 用户看到一串明文，还得自己清掉。
+        let s = login_script("https://bestapi.store", "me@x.com");
+        assert!(!s.contains("type=password"), "选择器不该匹配密码框: {s}");
+        assert!(s.contains("'#email'"), "sub2api 的框是 id=email");
+        // new-api 那类用 username（实测 LoginRequest.Username，无 email 校验），也要覆盖。
+        assert!(s.contains("'#username'"), "多运营商要能兼容 username 形式");
+    }
+
+    #[test]
+    fn prefill_is_skipped_when_there_is_nothing_to_fill() {
+        // 首次登录没有可预填的值。此时脚本仍要正常工作（凭据回传不受影响），
+        // 只是不填 —— 而不是填一个空串把用户已输入的东西清掉。
+        let s = login_script("https://bestapi.store", "");
+        assert!(s.contains(r#"PREFILL = """#));
+        assert!(
+            s.contains("if (prefilled || !PREFILL) return;"),
+            "空值要早退"
+        );
+        // 凭据回传那半不受预填影响。
+        assert!(s.contains(CREDS_SCHEME));
+    }
+
+    #[test]
+    fn prefill_json_encodes_the_identifier_so_quotes_cannot_break_out() {
+        // 这个值来自服务端返回的账号信息 —— 同样不能直接插进脚本。
+        let s = login_script("https://bestapi.store", "a\" + alert(1) + \"");
+        assert!(!s.contains("\" + alert(1) + \""), "登录标识没被转义: {s}");
+    }
+
+    #[test]
+    fn prefill_does_not_overwrite_what_the_user_already_typed() {
+        // 用户可能正要换个账号登录。已经有值就别覆盖。
+        let s = login_script("https://bestapi.store", "me@x.com");
+        assert!(
+            s.contains("if (el.value)"),
+            "已有输入时必须让用户自己的输入胜出: {s}"
+        );
     }
 
     #[test]

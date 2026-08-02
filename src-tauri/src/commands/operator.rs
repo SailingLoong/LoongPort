@@ -60,6 +60,20 @@ pub struct OperatorStatus {
     pub account_label: String,
     /// 是否已有可用凭据（否 → 前端引导去登录）。
     pub logged_in: bool,
+    /// **登录过、但凭据已经不能用了** —— 前端据此提示「登录已过期，请重新登录」，
+    /// 而不是像从没登录过一样只摆一个「登录」按钮。
+    ///
+    /// 与 `!logged_in` 不同：那个把「从没登录」与「登录过但过期」混成一件事，而对用户是
+    /// 两种处境（前者要输邮箱+密码，后者只需确认一下密码与人机验证）。
+    ///
+    /// 判据是「有 `account_id`（登录过）但 token 不可用」。`refresh_token` 还在时下一次
+    /// 请求会自动续期、用户根本不必管，所以那种情况**不算过期**。
+    pub session_expired: bool,
+    /// 重新登录时预填进登录框的值（空串 = 没有，让用户自己输）。
+    ///
+    /// 存的是登录标识本身而不是 `account_label`：后者昵称优先，设了昵称的用户拿它填
+    /// 登录框是错的。见 `creds::Operator::login_identifier`。
+    pub login_identifier: String,
     /// 已经备好 sk 的档位数。
     pub tier_count: usize,
     /// 切换分组前要不要先提示用户处理 ChatGPT。
@@ -231,23 +245,36 @@ fn operator_status_impl(state: &AppState) -> Result<OperatorStatus, AppError> {
             site_name: None,
             account_label: String::new(),
             logged_in: false,
+            session_expired: false,
+            login_identifier: String::new(),
             tier_count,
             chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
         },
-        Some(op) => OperatorStatus {
-            default_site: DEFAULT_SITE.to_string(),
-            logged_in: op.token_looks_valid(chrono::Utc::now().timestamp()),
-            // 有 account_id 才算真的认得这个账号 —— email 可能被运营商留空。
-            account_label: if op.account_id.is_some() {
-                op.account_label.clone()
-            } else {
-                String::new()
-            },
-            site_origin: Some(op.site_origin),
-            site_name: Some(op.site_name),
-            tier_count,
-            chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
-        },
+        Some(op) => {
+            let logged_in = op.token_looks_valid(chrono::Utc::now().timestamp());
+            OperatorStatus {
+                default_site: DEFAULT_SITE.to_string(),
+                logged_in,
+                // 「登录过但用不了了」才算过期。还有 refresh_token 的话下次请求会自动续期、
+                // 用户不必管，所以不报过期 —— 报了他会白跑一次重登。
+                session_expired: !logged_in
+                    && op.account_id.is_some()
+                    && op.refresh_token.is_none(),
+                // 预填值与 account_id 无关：即使凭据已清空（clear_credentials 会清
+                // account_id），登录标识仍留着，那正是重登时要用的。
+                login_identifier: op.login_identifier.clone(),
+                // 有 account_id 才算真的认得这个账号 —— email 可能被运营商留空。
+                account_label: if op.account_id.is_some() {
+                    op.account_label.clone()
+                } else {
+                    String::new()
+                },
+                site_origin: Some(op.site_origin),
+                site_name: Some(op.site_name),
+                tier_count,
+                chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
+            }
+        }
     })
 }
 
@@ -312,11 +339,12 @@ pub async fn operator_login(app_handle: tauri::AppHandle) -> Result<bool, String
 async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
     // 登录的是**当前选中的那个站**。同时记下它的行 id —— 凭据要写回这一行，而
     // `save_credentials` 可能因为发现重复账号而把它合并到别的行去。
-    let (operator_id, site_origin) = {
+    // 顺带取出登录标识：重登时预填进登录框，用户只需补密码与人机验证。
+    let (operator_id, site_origin, login_identifier) = {
         let state = app_handle.state::<AppState>();
         let op = with_conn(&state, creds::load)?
             .ok_or_else(|| AppError::Config("请先选择运营商站点".into()))?;
-        (op.id, op.site_origin)
+        (op.id, op.site_origin, op.login_identifier)
     };
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
@@ -352,7 +380,7 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
     .inner_size(480.0, 720.0)
     .resizable(true)
     .user_agent(login::WEBVIEW_USER_AGENT)
-    .initialization_script(login::login_script(&site_origin))
+    .initialization_script(login::login_script(&site_origin, &login_identifier))
     .on_navigation(move |url| {
         match login::parse_creds_navigation(url) {
             // 普通导航，放行。
@@ -410,8 +438,13 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
                 creds::save_credentials(
                     conn,
                     operator_id,
-                    account.id,
-                    &account.display_name(),
+                    creds::AccountIdentity {
+                        id: account.id,
+                        label: &account.display_name(),
+                        // 登录标识单独存：display_name() 昵称优先，设了昵称的用户拿它
+                        // 预填登录框就填错了（sub2api 那个框要邮箱格式）。
+                        login_identifier: &account.email,
+                    },
                     &c.auth_token,
                     c.refresh_token.as_deref(),
                     c.token_expires_at,
@@ -484,12 +517,39 @@ async fn usable_operator(app_handle: &tauri::AppHandle) -> Result<creds::Operato
         )
     })?;
 
-    Ok(creds::Operator {
+    let mut renewed = creds::Operator {
         auth_token: fresh.auth_token,
         refresh_token: fresh.refresh_token.or(Some(refresh)),
         token_expires_at: fresh.token_expires_at,
         ..op
-    })
+    };
+
+    // 顺手刷一次账号身份：用户可能在运营商那边改了昵称或邮箱，而续期响应里没有账号信息
+    // （`/auth/refresh` 只回 token），所以只有在这里额外打一次 profile 才发现得了。
+    // 不刷的话站点选择器上会一直挂着旧标签 —— 而他改邮箱的动机往往就是「换个能认的」。
+    //
+    // **失败不影响续期**：token 已经换好、库也写了，标签陈旧只是显示问题。为它把整次
+    // 续期判失败会让用户在「明明能用」的时候被挡住。
+    match api::Client::new(&renewed.site_origin, &renewed.auth_token) {
+        Ok(client) => match client.account().await {
+            Ok(account) => {
+                let label = account.display_name();
+                let state = app_handle.state::<AppState>();
+                if let Err(e) = with_conn(&state, |conn| {
+                    creds::refresh_account_identity(conn, renewed.id, &label, &account.email)
+                }) {
+                    log::warn!("续期后刷新账号信息失败（不影响使用）: {e}");
+                } else {
+                    renewed.account_label = label;
+                    renewed.login_identifier = account.email;
+                }
+            }
+            Err(e) => log::warn!("续期后读取账号信息失败（不影响使用）: {e}"),
+        },
+        Err(e) => log::warn!("续期后构造客户端失败（不影响使用）: {e}"),
+    }
+
+    Ok(renewed)
 }
 
 /// 拉分组、为每组备好 sk、写成 codex provider。

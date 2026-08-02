@@ -10,6 +10,7 @@
 //! | `api_base_url` | 归一后的 codex `base_url`（带 `/v1`） |
 //! | `account_id` | 服务端的用户 id。**登录后才知道**，未登录时为 `NULL` |
 //! | `account_label` | 给人看的账号名（昵称优先，回落邮箱） |
+//! | `login_identifier` | 重登时预填进登录框的值。**给机器填表单用**，见字段注释 |
 //! | `device_id` | 本机 UUID v4，用于 Key 命名。**全局共用一个** |
 //! | `auth_token` / `refresh_token` / `token_expires_at` | 登录凭据 |
 //! | `is_current` | 当前选中的那一行（同时只有一行为 1） |
@@ -49,6 +50,24 @@ pub struct Operator {
     /// 给人看的账号名：昵称优先，回落邮箱。**不参与去重**（去重认 `account_id`）——
     /// 用户在运营商那边改昵称不该让我们把同一个账号当成两个。
     pub account_label: String,
+    /// 重新登录时预填进登录框的那个值。**给机器填表单用，不是给人看的**
+    /// （给人看的是 [`Operator::account_label`]）。
+    ///
+    /// ## 为什么叫 `login_identifier` 而不是 `account_email`
+    ///
+    /// 各家运营商的登录标识不同名也不同语义，实测两个上游就已经分岔：
+    ///
+    /// | 运营商 | 字段 | 校验 | 语义 |
+    /// |---|---|---|---|
+    /// | sub2api | `email` | `binding:"required,email"` | 必须邮箱格式 |
+    /// | new-api | `username` | 无 | 用户名，也可能是邮箱 |
+    ///
+    /// 叫 `account_email` 会把 sub2api 的实现细节固化进 schema，而**列名进了持久化 schema，
+    /// 改它是迁移不是重构**。用中立名字现在零成本，将来接 new-api 不必动库。
+    /// （`login_identifier` 对齐 OIDC 的 `login_hint` —— 那是「预填登录框的值」的正式术语。）
+    ///
+    /// 空串 = 还没登录过，或是 v18 之前的旧库还没回填（那时不预填，让用户自己输）。
+    pub login_identifier: String,
     pub device_id: String,
     pub auth_token: String,
     pub refresh_token: Option<String>,
@@ -88,6 +107,39 @@ fn is_v18_shape(conn: &Connection) -> bool {
         .is_ok()
 }
 
+/// 这张表是不是已经是 v19 的形态（有 `login_identifier` 列）。
+fn is_v19_shape(conn: &Connection) -> bool {
+    conn.prepare("SELECT login_identifier FROM loongport_operator LIMIT 0")
+        .is_ok()
+}
+
+/// v18 → v19：补 `login_identifier` 列。
+///
+/// 与 v17→v18 不同，这次不必重建表 —— 只是加一列，`ALTER TABLE ADD COLUMN` 就够
+/// （那次要重建是因为 v17 有 `CHECK (id = 1)`，SQLite 改不动列约束）。
+///
+/// 旧库补上的列是空串：**已登录的行不会因此掉线**（登录标识只用于「重新登录时预填」，
+/// 不参与鉴权也不参与去重），只是下次要重登时不预填，等那次登录成功后自然回填。
+pub fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
+    // 全新库走 create_table 那条路，表里本来就有这一列。
+    if !is_v18_shape(conn) {
+        return create_table(conn);
+    }
+    // 迁移可能因为上一次中断而重跑。
+    if is_v19_shape(conn) {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE loongport_operator
+         ADD COLUMN login_identifier TEXT NOT NULL DEFAULT ''",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("添加 login_identifier 列失败: {e}")))?;
+
+    Ok(())
+}
+
 /// 建表 + 索引。全新库与迁移都走它。
 ///
 /// ## 为什么索引要单独判一次表形态
@@ -107,6 +159,7 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
             api_base_url TEXT NOT NULL DEFAULT '',
             account_id INTEGER,
             account_label TEXT NOT NULL DEFAULT '',
+            login_identifier TEXT NOT NULL DEFAULT '',
             device_id TEXT NOT NULL,
             auth_token TEXT NOT NULL DEFAULT '',
             refresh_token TEXT,
@@ -182,7 +235,8 @@ pub fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
-const SELECT_COLS: &str = "id, site_origin, site_name, api_base_url, account_id, account_label, \
+const SELECT_COLS: &str =
+    "id, site_origin, site_name, api_base_url, account_id, account_label, login_identifier, \
      device_id, auth_token, refresh_token, token_expires_at, is_current";
 
 fn row_to_operator(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operator> {
@@ -193,11 +247,12 @@ fn row_to_operator(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operator> {
         api_base_url: row.get(3)?,
         account_id: row.get(4)?,
         account_label: row.get(5)?,
-        device_id: row.get(6)?,
-        auth_token: row.get(7)?,
-        refresh_token: row.get(8)?,
-        token_expires_at: row.get(9)?,
-        is_current: row.get::<_, i64>(10)? != 0,
+        login_identifier: row.get(6)?,
+        device_id: row.get(7)?,
+        auth_token: row.get(8)?,
+        refresh_token: row.get(9)?,
+        token_expires_at: row.get(10)?,
+        is_current: row.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -316,6 +371,21 @@ pub fn set_current(conn: &Connection, id: i64) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 登录成功后拿到的账号身份。
+///
+/// 打成一个结构体而不是三个平铺参数：`label` 与 `login_identifier` 都是 `&str`、意思却相反
+/// （一个给人看、一个给机器填表单），平铺时相邻的两个同类型参数**调换了编译器也不会报**，
+/// 而后果是把昵称填进登录框。带字段名就调不错了。
+#[derive(Debug, Clone, Copy)]
+pub struct AccountIdentity<'a> {
+    /// 服务端的用户 id。**去重认这个**，改邮箱改昵称都不变。
+    pub id: i64,
+    /// 给人看的名字（昵称优先，回落邮箱）。
+    pub label: &'a str,
+    /// 重登时预填进登录框的值。见 [`Operator::login_identifier`]。
+    pub login_identifier: &'a str,
+}
+
 /// 写入登录凭据与账号身份，并在发现重复时合并。
 ///
 /// 返回**最终生效的那一行的 id** —— 可能不是传进来的 `id`：如果这个站上已经有同一个账号的
@@ -323,12 +393,16 @@ pub fn set_current(conn: &Connection, id: i64) -> Result<(), AppError> {
 pub fn save_credentials(
     conn: &Connection,
     id: i64,
-    account_id: i64,
-    account_label: &str,
+    account: AccountIdentity<'_>,
     auth_token: &str,
     refresh_token: Option<&str>,
     token_expires_at: Option<i64>,
 ) -> Result<i64, AppError> {
+    let AccountIdentity {
+        id: account_id,
+        label: account_label,
+        login_identifier,
+    } = account;
     let site_origin: String = conn
         .query_row(
             "SELECT site_origin FROM loongport_operator WHERE id = ?1",
@@ -363,12 +437,13 @@ pub fn save_credentials(
 
     conn.execute(
         "UPDATE loongport_operator
-         SET account_id = ?1, account_label = ?2, auth_token = ?3,
-             refresh_token = ?4, token_expires_at = ?5, updated_at = ?6
-         WHERE id = ?7",
+         SET account_id = ?1, account_label = ?2, login_identifier = ?3, auth_token = ?4,
+             refresh_token = ?5, token_expires_at = ?6, updated_at = ?7
+         WHERE id = ?8",
         params![
             account_id,
             account_label,
+            login_identifier,
             auth_token,
             refresh_token,
             token_expires_at,
@@ -407,11 +482,46 @@ pub fn update_tokens(
     Ok(())
 }
 
+/// 刷新账号的展示名与登录标识（用户在运营商那边改了昵称 / 邮箱之后）。
+///
+/// ## 为什么单独一个函数，而不是让 `update_tokens` 一起刷
+///
+/// **续期响应里没有账号信息** —— `/api/v1/auth/refresh` 只回 `access_token` /
+/// `refresh_token` / `expires_at`（实测，见 [`crate::operator::api::refresh_token`]）。
+/// 想刷标签就得额外打一次 `/user/profile`，那是独立的一次网络请求，不该塞进
+/// 「只写库、不联网」的 `update_tokens` 里。
+///
+/// ## 不碰 `account_id`
+///
+/// 改邮箱改昵称时服务端主键不变，所以这里只更新展示与预填用的两个字段。**账号真的换了**
+/// 是另一回事，走 [`save_credentials`]（它会查重、可能合并行）。
+pub fn refresh_account_identity(
+    conn: &Connection,
+    id: i64,
+    account_label: &str,
+    login_identifier: &str,
+) -> Result<(), AppError> {
+    let changed = conn
+        .execute(
+            "UPDATE loongport_operator
+             SET account_label = ?1, login_identifier = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![account_label, login_identifier, now_unix(), id],
+        )
+        .map_err(|e| AppError::Database(format!("刷新账号信息失败: {e}")))?;
+    if changed == 0 {
+        return Err(AppError::Config("刷新账号信息失败: 站点记录不存在".into()));
+    }
+    Ok(())
+}
+
 /// 清掉某一行的凭据但保留站点与 device_id（登出 / 凭据失效后重登用）。
 ///
 /// **`account_id` 也清掉**：下次登录可能换成别的账号，留着旧的会让去重判断把新账号误认成它。
 /// **device_id 必须留着** —— 它进了服务端的 Key 名字，清掉会让重登后认领不到自己已建的 Key，
 /// 于是给用户账号里堆一批重复 sk。
+/// **`login_identifier` 也必须留着** —— 它存在的全部理由就是「重登时预填」，
+/// 而这个函数正是重登前的那一步；清掉它等于让用户重新输一遍邮箱。
 pub fn clear_credentials(conn: &Connection, id: i64) -> Result<(), AppError> {
     conn.execute(
         "UPDATE loongport_operator
@@ -470,6 +580,17 @@ mod tests {
         conn
     }
 
+    /// 省点样板。多数测试不关心 label 与登录标识的区别，传同一个值即可；
+    /// 关心那个区别的（`login_identifier_is_stored_separately_from_the_display_label`）
+    /// 显式传两个不同的值。
+    fn ident<'a>(id: i64, label: &'a str, login_identifier: &'a str) -> AccountIdentity<'a> {
+        AccountIdentity {
+            id,
+            label,
+            login_identifier,
+        }
+    }
+
     #[test]
     fn load_returns_none_before_any_site_saved() {
         assert!(load(&mem()).unwrap().is_none());
@@ -503,13 +624,28 @@ mod tests {
     fn same_site_different_accounts_coexist() {
         let conn = mem();
         let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, first, 100, "me@x.com", "tok1", None, None).unwrap();
+        save_credentials(
+            &conn,
+            first,
+            ident(100, "me@x.com", "me@x.com"),
+            "tok1",
+            None,
+            None,
+        )
+        .unwrap();
 
         // 再添加同一个站、登录另一个账号 —— 两个都该留着。
         let second = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         assert_ne!(first, second, "已登录的行不该被复用");
-        let final_id =
-            save_credentials(&conn, second, 200, "alt@x.com", "tok2", None, None).unwrap();
+        let final_id = save_credentials(
+            &conn,
+            second,
+            ident(200, "alt@x.com", "alt@x.com"),
+            "tok2",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(final_id, second);
 
         assert_eq!(list(&conn).unwrap().len(), 2);
@@ -520,12 +656,27 @@ mod tests {
         // 这条是用户明确要的去重：同「域名 + 账号」只留一份。
         let conn = mem();
         let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, first, 100, "me@x.com", "old-token", None, None).unwrap();
+        save_credentials(
+            &conn,
+            first,
+            ident(100, "me@x.com", "me@x.com"),
+            "old-token",
+            None,
+            None,
+        )
+        .unwrap();
 
         // 用户又添加了一次同一个站，并用同一个账号登录。
         let second = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        let final_id =
-            save_credentials(&conn, second, 100, "me@x.com", "new-token", None, None).unwrap();
+        let final_id = save_credentials(
+            &conn,
+            second,
+            ident(100, "me@x.com", "me@x.com"),
+            "new-token",
+            None,
+            None,
+        )
+        .unwrap();
 
         // 合并到原来那行，新建的那条被删掉。
         assert_eq!(final_id, first, "应合并回已有记录");
@@ -556,7 +707,15 @@ mod tests {
         // account_id 不清的话，下次换账号登录会被去重逻辑误认成同一个账号。
         let conn = mem();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, a, 100, "me@x.com", "tok", Some("ref"), Some(123)).unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(100, "me@x.com", "me@x.com"),
+            "tok",
+            Some("ref"),
+            Some(123),
+        )
+        .unwrap();
         let device = get(&conn, a).unwrap().unwrap().device_id;
 
         clear_credentials(&conn, a).unwrap();
@@ -594,7 +753,15 @@ mod tests {
     #[test]
     fn save_credentials_on_a_missing_row_is_a_visible_error() {
         // 静默成功会让「登录成功但什么都没存下」变成查不出来的问题。
-        let err = save_credentials(&mem(), 999, 1, "x@x.com", "tok", None, None).unwrap_err();
+        let err = save_credentials(
+            &mem(),
+            999,
+            ident(1, "x@x.com", "x@x.com"),
+            "tok",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("站点记录不存在"));
     }
 
@@ -602,7 +769,15 @@ mod tests {
     fn token_validity_leaves_a_margin_and_tolerates_missing_expiry() {
         let conn = mem();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, a, 1, "x@x.com", "tok", None, Some(1000)).unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(1, "x@x.com", "x@x.com"),
+            "tok",
+            None,
+            Some(1000),
+        )
+        .unwrap();
         let base = get(&conn, a).unwrap().unwrap();
 
         assert!(base.token_looks_valid(0));
@@ -632,7 +807,15 @@ mod tests {
         // 还没登录：只有站名。
         assert_eq!(get(&conn, a).unwrap().unwrap().display_label(), "BestApi");
 
-        save_credentials(&conn, a, 1, "me@x.com", "tok", None, None).unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(1, "me@x.com", "me@x.com"),
+            "tok",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             get(&conn, a).unwrap().unwrap().display_label(),
             "BestApi · me@x.com"
@@ -740,12 +923,126 @@ mod tests {
         // 迁移可能因为上一次中断而重跑，跑两遍不能把数据搞坏。
         let conn = mem();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, a, 1, "x@x.com", "tok", None, None).unwrap();
+        save_credentials(&conn, a, ident(1, "x@x.com", "x@x.com"), "tok", None, None).unwrap();
 
         migrate_v17_to_v18(&conn).unwrap();
         migrate_v17_to_v18(&conn).unwrap();
 
         assert_eq!(list(&conn).unwrap().len(), 1);
         assert_eq!(get(&conn, a).unwrap().unwrap().auth_token, "tok");
+    }
+
+    /// 建一张 v18 形态的表（没有 `login_identifier` 列），用于验 v18→v19。
+    fn v18_table() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE loongport_operator (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site_origin TEXT NOT NULL,
+                site_name TEXT NOT NULL DEFAULT '',
+                api_base_url TEXT NOT NULL DEFAULT '',
+                account_id INTEGER,
+                account_label TEXT NOT NULL DEFAULT '',
+                device_id TEXT NOT NULL,
+                auth_token TEXT NOT NULL DEFAULT '',
+                refresh_token TEXT,
+                token_expires_at INTEGER,
+                is_current INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn v19_migration_keeps_existing_logins_working() {
+        // 升级不该把人踢下线：补的那一列只用于「重登时预填」，不参与鉴权。
+        let conn = v18_table();
+        conn.execute(
+            "INSERT INTO loongport_operator
+                (site_origin, site_name, api_base_url, account_id, account_label,
+                 device_id, auth_token, is_current, updated_at)
+             VALUES ('https://a.dev', 'A', 'https://a.dev/v1', 7, '张三',
+                     'dev-uuid', 'tok', 1, 5)",
+            [],
+        )
+        .unwrap();
+
+        migrate_v18_to_v19(&conn).unwrap();
+
+        let op = load(&conn).unwrap().expect("迁移后那一行该还在");
+        assert_eq!(op.auth_token, "tok", "凭据丢了用户就得重新登录");
+        assert_eq!(op.account_id, Some(7));
+        assert_eq!(op.account_label, "张三");
+        assert_eq!(
+            op.device_id, "dev-uuid",
+            "device_id 丢了会让已建的 Key 认领不回来"
+        );
+        // 旧库没有这个值，只能等下次登录回填 —— 那时不预填而不是预填一个错的。
+        assert_eq!(op.login_identifier, "");
+    }
+
+    #[test]
+    fn v19_migration_is_idempotent() {
+        let conn = v18_table();
+        migrate_v18_to_v19(&conn).unwrap();
+        migrate_v18_to_v19(&conn).expect("重跑不该报 duplicate column");
+        assert!(is_v19_shape(&conn));
+    }
+
+    #[test]
+    fn login_identifier_is_stored_separately_from_the_display_label() {
+        // 这条是这个字段存在的理由：设了昵称的用户，label 是昵称而不是邮箱 ——
+        // 拿 label 去预填登录框就填错了（sub2api 那个框要邮箱格式）。
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, a, ident(7, "张三", "me@x.com"), "tok", None, None).unwrap();
+
+        let op = get(&conn, a).unwrap().unwrap();
+        assert_eq!(op.account_label, "张三", "给人看的是昵称");
+        assert_eq!(op.login_identifier, "me@x.com", "填表单用的是登录标识");
+    }
+
+    #[test]
+    fn clearing_credentials_keeps_the_login_identifier() {
+        // clear_credentials 正是「重登前的那一步」，把预填值一起清掉等于让用户重新输邮箱。
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, a, ident(7, "张三", "me@x.com"), "tok", None, None).unwrap();
+
+        clear_credentials(&conn, a).unwrap();
+
+        let op = get(&conn, a).unwrap().unwrap();
+        assert_eq!(op.auth_token, "", "凭据该清掉");
+        assert_eq!(op.account_id, None, "account_id 该清掉（下次可能换账号）");
+        assert_eq!(
+            op.login_identifier, "me@x.com",
+            "登录标识必须留着 —— 它就是给重登预填用的"
+        );
+    }
+
+    #[test]
+    fn refreshing_identity_updates_label_and_identifier_but_not_account_id() {
+        // 用户在运营商那边改了昵称与邮箱：服务端主键不变 ⇒ 仍是同一个账号，
+        // 只有展示与预填要跟上。续期路径靠这个函数刷，否则站点选择器一直挂旧标签。
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(&conn, a, ident(7, "老名字", "old@x.com"), "tok", None, None).unwrap();
+
+        refresh_account_identity(&conn, a, "新名字", "new@x.com").unwrap();
+
+        let op = get(&conn, a).unwrap().unwrap();
+        assert_eq!(op.account_label, "新名字");
+        assert_eq!(op.login_identifier, "new@x.com");
+        assert_eq!(op.account_id, Some(7), "改邮箱不是换账号，主键不该动");
+        assert_eq!(op.auth_token, "tok", "刷身份不该碰凭据");
+    }
+
+    #[test]
+    fn refreshing_identity_on_a_missing_row_is_an_error() {
+        let err = refresh_account_identity(&mem(), 999, "n", "e@x.com").unwrap_err();
+        assert!(err.to_string().contains("站点记录不存在"), "{err}");
     }
 }
