@@ -57,8 +57,11 @@ pub struct OperatorStatus {
     pub logged_in: bool,
     /// 已经备好 sk 的档位数。
     pub tier_count: usize,
-    /// ChatGPT 桌面版装了没有。没装则切换时不做退出/重开编排。
-    pub chatgpt_installed: bool,
+    /// 切换分组前要不要先提示用户处理 ChatGPT。
+    ///
+    /// 不是「装了没有」—— 非 macOS 平台查不到那个事实，那边恒为 true（宁可多问一句，
+    /// 也不能让装了 ChatGPT 的用户静默用错分组）。见 `chatgpt_app::needs_user_attention`。
+    pub chatgpt_needs_attention: bool,
 }
 
 /// 探测结果。
@@ -202,7 +205,7 @@ fn operator_status_impl(state: &AppState) -> Result<OperatorStatus, AppError> {
             site_name: None,
             logged_in: false,
             tier_count,
-            chatgpt_installed: chatgpt_app::is_installed(),
+            chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
         },
         Some(op) => OperatorStatus {
             default_site: DEFAULT_SITE.to_string(),
@@ -210,7 +213,7 @@ fn operator_status_impl(state: &AppState) -> Result<OperatorStatus, AppError> {
             site_origin: Some(op.site_origin),
             site_name: Some(op.site_name),
             tier_count,
-            chatgpt_installed: chatgpt_app::is_installed(),
+            chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
         },
     })
 }
@@ -564,21 +567,21 @@ async fn switch_tier_impl(
     // 硬写配置的结果是两边互相覆盖，用户既没切成、也不知道自己现在连的是哪个分组。
     if quit_chatgpt {
         match chatgpt_app::quit_and_wait() {
-            // 没装 / 没在跑：都不需要重开，切换照常。
-            Ok(chatgpt_app::QuitOutcome::NotInstalled)
-            | Ok(chatgpt_app::QuitOutcome::NotRunning) => {}
-            Ok(chatgpt_app::QuitOutcome::Quit) => was_running = true,
-            Ok(chatgpt_app::QuitOutcome::StillRunning) => {
+            // 没装 / 没在跑：不需要重开，切换照常。
+            chatgpt_app::QuitOutcome::NotRunning => {}
+            chatgpt_app::QuitOutcome::Quit => was_running = true,
+            // 自动退出没成功（平台没实现 / 权限被拒 / 命令出错）：**照常切换**，提示用户
+            // 自己重启。配置写进 config.toml 就已经生效，手动重启一样能用。
+            chatgpt_app::QuitOutcome::NeedsManualRestart(why) => {
+                warnings.push(format!("{why}，配置已切换，请手动重启 ChatGPT 让它生效。"));
+            }
+            // 唯一中止切换的情况：用户在确认框里点了取消，明确表示「先别动」。
+            chatgpt_app::QuitOutcome::UserDeclined => {
                 return Err(AppError::Config(
-                    "ChatGPT 还在运行（可能弹出了确认退出的对话框，或有进行中的对话）。\
+                    "ChatGPT 还在运行（它可能弹出了确认退出的对话框，或有进行中的对话）。\
                      请先手动退出它，然后重试切换。配置未改动。"
                         .into(),
                 ));
-            }
-            Err(e) => {
-                return Err(AppError::Config(format!(
-                    "无法退出 ChatGPT：{e}。配置未改动。"
-                )));
             }
         }
     }

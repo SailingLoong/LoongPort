@@ -11,8 +11,12 @@ export interface OperatorStatus {
   loggedIn: boolean;
   /** 已备好密钥的档位数。 */
   tierCount: number;
-  /** ChatGPT 桌面版装了没有。没装则切换时不做退出/重开。 */
-  chatgptInstalled: boolean;
+  /**
+   * 切换分组前要不要先提示用户处理 ChatGPT。
+   *
+   * 不是「装了没有」—— 非 macOS 平台查不到那个事实，那边恒为 true。
+   */
+  chatgptNeedsAttention: boolean;
 }
 
 export interface ProbeResult {

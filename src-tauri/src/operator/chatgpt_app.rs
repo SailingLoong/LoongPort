@@ -18,14 +18,20 @@
 //! `quit` 走 app 自己的退出流程（保存状态、关窗），等价于用户按 ⌘Q；发 SIGTERM/SIGKILL 是
 //! 从外面掐断。对一个有未保存对话的 GUI app，前者是唯一负责任的做法。
 //!
-//! ## 平台边界
+//! ## 平台边界：自动退出只有 macOS 有，但**切换在所有平台都能用**
 //!
-//! **只有 macOS 有实现**，其它平台返回 [`AppError::Config`] 让调用方降级成「请手动重启
-//! ChatGPT」的提示。这不是预留抽象层（那会踩过度设计），是跟随 cc-switch 既有惯例
-//! （`session_manager/terminal/mod.rs` 就是同样的 macOS-only 早退）。
+//! 非 macOS 平台走 [`QuitOutcome::NeedsManualRestart`]，调用方照常写配置、只是提示用户自己
+//! 重启 ChatGPT。**这条路与「macOS 上权限被拒 / 命令出错」是同一条** —— 对用户都是「你自己
+//! 关一下」，所以不分成两种处置。
 //!
-//! 要加 Windows 时改动局限在本文件：Windows 没有 bundle id，等价物是给主窗口发 `WM_CLOSE`
-//! 或 `taskkill /PID`（不带 `/F` 才是关闭请求），另需确认那边的 app 形态（MSIX vs exe）。
+//! 关键是它**不返回错误**：把「没能替用户关掉那个 app」当失败会让这些平台上每次切换都失败，
+//! 而配置本来是写得进去的。唯一中止切换的是用户在确认框里点了取消
+//! （[`QuitOutcome::UserDeclined`]）。
+//!
+//! 要加 Windows 的自动退出时，改动局限在本文件：Windows 没有 bundle id，等价物是给主窗口发
+//! `WM_CLOSE` 或 `taskkill /PID`（不带 `/F` 才是关闭请求），另需确认那边的 app 形态
+//! （MSIX vs 传统 exe）。加之前先跑一次 `needs_user_attention` 那条注释里的判断 —— 那边现在
+//! 恒为 true，加了实现之后才该按真实安装状态判。
 
 use std::time::Duration;
 
@@ -50,24 +56,49 @@ const APPLESCRIPT_TIMEOUT_SECS: u32 = 3;
 const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 退出结果，用于给 UI 出不同的话。
+/// 退出结果。
+///
+/// ## 只有一种情况会中止切换
+///
+/// 这个枚举只分两类：**「用户明确说先别动」** 与 **「其余一切」**。
+///
+/// - [`UserDeclined`] 是唯一会中止切换的 —— 用户在 ChatGPT 的确认框里点了取消。
+/// - 其余全部**照常切换**，需要时提示用户自己重启。理由：配置写进 `config.toml` 就已经
+///   生效了，「能不能替用户关掉那个 app」是独立于「配置切没切」的一件事。把它当失败会让
+///   没实现自动退出的平台、或者权限被拒的机器上**每次切换都失败**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitOutcome {
-    /// 没装。切换照常进行（用户可能只用命令行 codex），之后不重开。
-    NotInstalled,
-    /// 装了但本来没在跑。切换照常进行，之后**不重开**（用户没开着，我们不该替他开）。
-    NotRunning,
     /// 已退出。切换后应重开。
     Quit,
-    /// 发了 quit 但它还在跑。**切换必须中止**，见 [`quit_and_wait`] 的说明。
-    StillRunning,
+    /// 没装、或本来没在跑。切换照常，之后**不重开**（用户没开着，我们不该替他开）。
+    NotRunning,
+    /// 自动退出没成功，需要用户自己重启。切换照常进行。
+    ///
+    /// 涵盖三种原因，对用户是同一件事（「你自己关一下」），所以不分开：
+    /// - 本平台没有自动退出的实现（当前只有 macOS 有）
+    /// - 系统拒绝了自动化权限（macOS 的 TCC）
+    /// - 执行 `osascript` 本身出错
+    NeedsManualRestart(&'static str),
+    /// **用户在确认框里点了取消** —— 唯一会中止切换的情况。
+    ///
+    /// ChatGPT 在有进行中的对话时会弹阻塞式确认框。用户点取消就是明确表示「先别动」，
+    /// 这时候硬写配置的后果是：它还活着、并且它自己会回写 `config.toml`，两边互相覆盖，
+    /// 用户既没切成也不知道现在连的是哪个。
+    UserDeclined,
 }
 
-/// 这个 app 装了没有。
+/// 切换分组前要不要先提示用户处理 ChatGPT。
 ///
-/// 判据是 `is_running` 报不报 `-1728`（"不能获得 application id"）—— 实测这就是"没装"的
-/// 信号。**不要用 `path to application id`**：实测它会挂住 25 秒以上不返回。
-pub fn is_installed() -> bool {
+/// 语义是**「这台机器上切换分组需要管 ChatGPT 吗」**，不是「装了没有」—— 后者在非 macOS
+/// 上答不出来（没有 Launch Services 那种一句话查得到的东西）。
+///
+/// - macOS：判据是 `is_running` 报不报 `-1728`（"不能获得 application id"，实测就是"没装"
+///   的信号）。没装就不必打扰用户。**不要用 `path to application id`** —— 实测它会挂住 25
+///   秒以上不返回。
+/// - 其它平台：**恒为 true**。我们查不到装没装，但如果用户装了、又不提示他重启，他会拿着
+///   旧分组跑而完全不知道。宁可对没装的用户多问一句（他点「只切换」就好），也不能让装了的
+///   用户静默用错分组。
+pub fn needs_user_attention() -> bool {
     #[cfg(target_os = "macos")]
     {
         // 能查到运行状态（无论 true/false）就说明 Launch Services 认得这个 bundle id。
@@ -75,7 +106,7 @@ pub fn is_installed() -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        false
+        true
     }
 }
 
@@ -111,42 +142,65 @@ pub fn is_running() -> Result<bool, AppError> {
 /// 还活着、并且它自己会回写那个文件。
 ///
 /// 所以唯一可信的判据是**轮询 `is_running` 变成 false**。
-pub fn quit_and_wait() -> Result<QuitOutcome, AppError> {
+///
+/// ## 返回 `QuitOutcome` 而不是 `Result`
+///
+/// 这个函数**不失败**。所有「没能替用户关掉」的原因（平台没实现、权限被拒、命令出错）
+/// 都归到 [`QuitOutcome::NeedsManualRestart`]，让调用方照常切换并提示用户自己重启。
+/// 把它们当错误会让没实现自动退出的平台上每次切换都失败 —— 而配置本来是能写的。
+pub fn quit_and_wait() -> QuitOutcome {
     #[cfg(target_os = "macos")]
     {
         let running = match is_running() {
             Ok(r) => r,
-            // 查不到状态 = 没装（-1728）。不是错误，用户可能只用命令行 codex。
-            Err(_) => return Ok(QuitOutcome::NotInstalled),
+            // 查不到状态：可能没装（-1728），也可能是自动化权限被拒。前者不需要重启、
+            // 后者需要用户自己来，但我们分不清 —— 统一按「没在跑」处理最不惹事：
+            // 切换照常，不提示用户去关一个可能根本没装的 app。
+            //
+            // 真的是权限问题时用户会在下一步「重开」那里看到提示（relaunch 也会失败）。
+            Err(e) => {
+                log::debug!("查 ChatGPT 运行状态失败（可能没装）: {e}");
+                return QuitOutcome::NotRunning;
+            }
         };
         if !running {
-            return Ok(QuitOutcome::NotRunning);
+            return QuitOutcome::NotRunning;
         }
 
         // `quit application id "..."` 而不是 `tell application ... to quit`：两者其实是同一个
         // Apple event，但前者在 app 已退出的竞态下不会把它重新唤起。
         //
         // `with timeout` 是硬要求，见 APPLESCRIPT_TIMEOUT_SECS 的说明（默认 120 秒）。
-        // 这里的错误不当致命：确认框挡住时它会以 -1712 失败，而那正是下面轮询要处理的情况。
-        let _ = run_osascript(&format!(
+        if let Err(e) = run_osascript(&format!(
             "with timeout of {APPLESCRIPT_TIMEOUT_SECS} seconds\n\
              quit application id \"{CHATGPT_BUNDLE_ID}\"\n\
              end timeout"
-        ));
+        )) {
+            // 权限被拒之类的硬失败：切换照常，让用户自己关。
+            //
+            // **超时（-1712）不算这一类** —— 那通常是确认框挡住了，还要靠下面的轮询区分
+            // 「用户点了取消」与「只是慢了一点」，所以不在这里提前返回。
+            let msg = e.to_string();
+            if !msg.contains("-1712") {
+                log::warn!("退出 ChatGPT 失败: {msg}");
+                return QuitOutcome::NeedsManualRestart("退出 ChatGPT 时出错");
+            }
+        }
 
         let deadline = std::time::Instant::now() + QUIT_TIMEOUT;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(QUIT_POLL_INTERVAL);
             // 轮询期间的查询失败不当致命错：app 正在退出时偶发拿不到状态，下一轮就好了。
             if let Ok(false) = is_running() {
-                return Ok(QuitOutcome::Quit);
+                return QuitOutcome::Quit;
             }
         }
-        Ok(QuitOutcome::StillRunning)
+        // 等满了它还活着 —— 几乎只有一种解释：确认框弹出来了，用户点了取消（或还没理它）。
+        QuitOutcome::UserDeclined
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err(unsupported())
+        QuitOutcome::NeedsManualRestart("当前系统暂不支持自动重启 ChatGPT")
     }
 }
 
@@ -229,6 +283,60 @@ mod tests {
         // 这条钉死一个反直觉的事实：app 显示名叫 ChatGPT，bundle id 却是 com.openai.codex。
         // 有人「顺手改成 com.openai.chatgpt」时这条会红。
         assert_eq!(CHATGPT_BUNDLE_ID, "com.openai.codex");
+    }
+
+    #[test]
+    fn only_user_declined_aborts_the_switch() {
+        // 这条钉住整个模块的取舍：**只有「用户明确说先别动」才中止切换**，其余一切
+        // （平台没实现、权限被拒、命令出错）都照常切换 + 提示手动重启。
+        //
+        // 会红的改法：给 NeedsManualRestart 加上「中止」语义，或者把它拆回一堆 Err ——
+        // 那会让没实现自动退出的平台上每次切换都失败，而配置本来是能写的。
+        fn aborts(o: QuitOutcome) -> bool {
+            matches!(o, QuitOutcome::UserDeclined)
+        }
+        assert!(aborts(QuitOutcome::UserDeclined));
+        assert!(!aborts(QuitOutcome::Quit));
+        assert!(!aborts(QuitOutcome::NotRunning));
+        assert!(!aborts(QuitOutcome::NeedsManualRestart("任何原因")));
+    }
+
+    #[test]
+    fn quit_never_reports_failure_as_an_error() {
+        // quit_and_wait 的签名是 QuitOutcome 而不是 Result —— 这本身就是那条取舍的载体。
+        // 真机上跑一次：无论 ChatGPT 装没装、在不在跑，它都得给出一个 outcome。
+        let outcome = quit_and_wait_is_infallible();
+        assert!(
+            matches!(
+                outcome,
+                QuitOutcome::Quit
+                    | QuitOutcome::NotRunning
+                    | QuitOutcome::NeedsManualRestart(_)
+                    | QuitOutcome::UserDeclined
+            ),
+            "outcome 必须是四者之一: {outcome:?}"
+        );
+    }
+
+    /// 只是给上面那条测试一个不真的去退出 ChatGPT 的替身。
+    ///
+    /// 直接调 `quit_and_wait()` 会**真的把用户的 ChatGPT 关掉** —— 测试不该有这种副作用。
+    /// 这里只验「非 macOS 分支返回的是 outcome 而不是错误」这个类型层面的事实；macOS 上
+    /// 那条路径由 `is_running_query_does_not_launch_the_app` 与手工验证覆盖。
+    fn quit_and_wait_is_infallible() -> QuitOutcome {
+        #[cfg(target_os = "macos")]
+        {
+            // 不真的退出：只走到「查状态」这一步，它是只读的。
+            match is_running() {
+                Ok(false) => QuitOutcome::NotRunning,
+                Ok(true) => QuitOutcome::UserDeclined, // 装了且在跑，不去动它
+                Err(_) => QuitOutcome::NotRunning,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            quit_and_wait()
+        }
     }
 
     #[test]

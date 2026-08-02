@@ -326,7 +326,7 @@ export function OperatorPanel() {
               onClick={() => {
                 if (tier.isCurrent) return;
                 // ChatGPT 没装就不必问「要不要关它」，直接切。
-                if (status.chatgptInstalled) {
+                if (status.chatgptNeedsAttention) {
                   setConfirmSwitch(tier);
                 } else {
                   void doSwitch(tier, false);
@@ -373,6 +373,14 @@ export function OperatorPanel() {
               <br />
               如果它有进行中的对话，会弹出确认框 —— 在那里点取消的话，
               本次切换会中止、配置不会改动。
+              <br />
+              {/* 「自动退出」目前只有 macOS 实现。其它平台点这个按钮也不会报错：
+                  配置照样切好，只是会提示用户自己重启 ChatGPT。文案要说清这件事，
+                  不然 Windows 用户点了「退出并切换」发现 ChatGPT 还开着，会以为坏了。 */}
+              <span className="text-xs">
+                部分系统上无法代为退出，那时配置仍会切好，只需你手动重启
+                ChatGPT。
+              </span>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
