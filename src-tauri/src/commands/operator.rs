@@ -16,6 +16,11 @@
 //! 「退出 ChatGPT → 切换 → 重开」如果写在前端的按钮回调里，那么**托盘快切、deeplink 导入、
 //! 项目快照**这三条路径都会绕过它（它们在 Rust 侧直接调 `ProviderService::switch`），用户
 //! 从托盘切完就会发现 codex 还连着旧分组。放在这一层是让「切换分组」只有一个入口。
+//!
+//! ⚠️ 编排在这一层**不等于**别处进不来 —— 那要靠 [`crate::operator::managed`] 的守卫。
+//! 已收口的是托盘（列表里剔掉托管项）与 `switch_provider` / `update_provider` /
+//! `delete_provider` 三条通用命令；**deeplink 导入与项目快照仍直接调
+//! `ProviderService::switch`，尚未收口**（要构造 deep link 或存快照才碰得到，优先级低于托盘）。
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
