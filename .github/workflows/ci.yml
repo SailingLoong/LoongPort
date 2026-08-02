@@ -59,7 +59,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        # ⚠️ **macos-latest 有意不在这里**（2026-08-02 去掉）。
+        #
+        # GitHub Actions 的计费倍率：ubuntu 1× / windows 2× / **macOS 10×**。
+        # 三平台矩阵一次 push 约 107 分钟额度，其中 macOS 那格独占 80（76%）——
+        # 2000 分钟/月的额度按这个烧法只够 18 次 push，实测一个月就用到 91%。
+        #
+        # 去掉它损失多少：几乎为零。cargo test / clippy / fmt 在三个平台上验的是同一套
+        # 代码，真正只有 macOS 能验的是 chatgpt_app.rs 的 AppleScript 分支，而那部分
+        # **维护者本机就是 macOS，六道闸本来就在本机先跑一遍**（见 CLAUDE.md §四）。
+        # windows-latest 留着，因为那些 `#[cfg(target_os = "windows")]` 分支本机验不了
+        # （踩过：6f027168 修的 6 个 dead_code 就只有 CI 的 windows 格能发现）。
+        #
+        # 打 tag 出包时 release.yml 仍会在 macOS 上真正编译，所以「能不能在 mac 上构建」
+        # 这件事没有失去覆盖 —— 失去的只是「每次 push 都重复验一遍」。
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6

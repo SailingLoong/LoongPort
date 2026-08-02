@@ -8,8 +8,20 @@
 //!
 //! 因为 `&str` 没有**基数**。表若以字符串为键，服务端加第 7 个 platform 时不会有任何东西
 //! 报错 —— 那张自称「数据」的表会退化成一个无人看守的 `match`，新平台被静默当成未知丢掉。
-//! 有了 enum，`PLATFORM_MAP.len() == Platform::all().count()` 这条断言就成了强制闸：
-//! 加变体的人必须同时给表加一行，否则测试红。
+//! 有了 enum，[`map_platform`] 的**穷尽 `match`** 就成了强制闸：加变体 ⇒ **编译失败**。
+//!
+//! ⚠️ **这道闸曾经是假的，别改回去**（2026-08-02 三路对抗性审查抓出，两路各自编译验证）：
+//! 原先它是 `const PLATFORM_MAP: &[(Platform, PlatformMapping)]` 数组 + `.find()` +
+//! `unwrap_or(NotPresented)`，闸写成断言 `PLATFORM_MAP.len() == Platform::all().count()`。
+//! 那条断言**恒真** —— `all()` 是手写数组，加变体时它不会自己变长，两边同时停在 6。
+//! 实测：加一个变体 + 给 `parse_platform` 加一行，不动表也不动 `all()`，**测试全绿**，
+//! 运行期靠 `unwrap_or` 把新平台静默当「有意不呈现」丢掉，正是这张表声称要防的那件事。
+//! （V1 那份也是手写数组，同样挡不住；V1 真正的闸是 `as_str()` 里的穷尽 `match`，
+//! 本轮移植时把它丢了，闸随之失效。）
+//!
+//! 所以现在**映射数据就写在那个 `match` 里**：它仍是「唯一一处映射数据」（模块文档开头那句
+//! 说的是不许散落到各消费点，不是不许用 `match`），但多了编译器强制。没有 fail-closed
+//! 兜底分支 —— 不需要，漏一格根本编译不过。
 
 use crate::app_config::AppType;
 
@@ -48,27 +60,13 @@ pub enum PlatformMapping {
     NotPresented,
 }
 
-/// spec §一 那张映射表的**唯一**代码形态。改它之前先回查 spec §一。
-///
-/// 基数由 `map_len_equals_platform_cardinality` 守：加 [`Platform`] 变体不加这里的行 ⇒ 测试红。
-const PLATFORM_MAP: &[(Platform, PlatformMapping)] = &[
-    (Platform::OpenAI, PlatformMapping::Mapped(AppType::Codex)),
-    (
-        Platform::Anthropic,
-        PlatformMapping::Mapped(AppType::Claude),
-    ),
-    (Platform::Gemini, PlatformMapping::Mapped(AppType::Gemini)),
-    (Platform::Grok, PlatformMapping::Mapped(AppType::GrokBuild)),
-    // cc-switch 侧没有 antigravity 对应的 app。将来接了就把这行改成 `Mapped(...)`，
-    // 这正是「加平台只改这张表」的兑现方式。
-    (Platform::Antigravity, PlatformMapping::Unmapped),
-    (Platform::Composite, PlatformMapping::NotPresented),
-];
-
 /// 服务端字符串 → enum。未知取值返回 `None`，由调用方计入「本客户端不呈现」。
 ///
 /// **不做大小写与空白的宽容处理**：服务端给的是固定小写标识，宽容只会掩盖协议变化 ——
 /// 上游哪天把 `openai` 改成 `OpenAI`，我们要在这里当场认不出来，而不是模糊匹配过去。
+///
+/// 注意这里的 `_ => None` 是**对服务端字符串**兜底（上游新加平台走这条），
+/// 与 [`map_platform`] 那个不许有兜底分支的 `match` 不是一回事。
 pub fn parse_platform(s: &str) -> Option<Platform> {
     match s {
         "openai" => Some(Platform::OpenAI),
@@ -81,15 +79,30 @@ pub fn parse_platform(s: &str) -> Option<Platform> {
     }
 }
 
-/// 查表得出呈现方式。**表驱动而不是 `match`** —— 保证映射数据只有一处。
+/// spec §一 那张映射表的**唯一**代码形态。改它之前先回查 spec §一。
+///
+/// ## 为什么是 `match` 而不是 `&[(Platform, PlatformMapping)]` 数组
+///
+/// 因为**只有穷尽 `match` 能让编译器当闸**：加一个 [`Platform`] 变体不在这里加分支 ⇒
+/// `error[E0004]: non-exhaustive patterns` ⇒ 当场编译失败，不可能漏。
+///
+/// 数组版做不到 —— 它得靠 `.find()` 查表，查不到就落到某个兜底分支，于是漏一格是
+/// **运行期静默行为**而不是编译错误。原先那版就是数组 + 断言
+/// `PLATFORM_MAP.len() == Platform::all().count()`，而那条断言恒真（`all()` 是手写数组，
+/// 加变体时不会自己变长）。详见模块文档开头那段。
+///
+/// **不许加 `_ =>` 兜底分支** —— 加了就等于把这道闸拆掉，退回原来那个假闸的状态。
 pub fn map_platform(platform: Platform) -> PlatformMapping {
-    PLATFORM_MAP
-        .iter()
-        .find(|(candidate, _)| *candidate == platform)
-        .map(|(_, mapping)| mapping.clone())
-        // 表覆盖全部变体，由基数闸守。真漏一格时按「不呈现」处理（fail-closed：
-        // 宁可不展开，也不能误绑到某个 CLI 上去）。
-        .unwrap_or(PlatformMapping::NotPresented)
+    match platform {
+        Platform::OpenAI => PlatformMapping::Mapped(AppType::Codex),
+        Platform::Anthropic => PlatformMapping::Mapped(AppType::Claude),
+        Platform::Gemini => PlatformMapping::Mapped(AppType::Gemini),
+        Platform::Grok => PlatformMapping::Mapped(AppType::GrokBuild),
+        // cc-switch 侧没有 antigravity 对应的 app。将来接了就把这行改成 `Mapped(...)`，
+        // 这正是「加平台只改这一处」的兑现方式。
+        Platform::Antigravity => PlatformMapping::Unmapped,
+        Platform::Composite => PlatformMapping::NotPresented,
+    }
 }
 
 impl Platform {
@@ -103,9 +116,13 @@ impl Platform {
 
     /// 遍历全部 platform。
     ///
-    /// **只有 `#[cfg(test)]` 调用方**（基数闸那几条断言），所以 lib target 会报 `dead_code`。
-    /// **不删**：删了那条基数断言就只能写成手写数字 `6`，而手写的数字不会在加第七个
-    /// platform 时报错 —— 那等于把这张表的唯一守卫拆掉。
+    /// **只有 `#[cfg(test)]` 调用方**，所以 lib target 会报 `dead_code`。
+    ///
+    /// ⚠️ **这个数组不是闸，别再让它当闸**：它是手写的，加 [`Platform`] 变体时不会自己变长
+    /// （原先 `PLATFORM_MAP.len() == all().count()` 就是因此恒真）。真正的闸是
+    /// [`map_platform`] 的穷尽 `match`。这里留着只为让测试能遍历全部变体做**逐格断言**
+    /// （每格映射到 spec §一 指定的 app_type、映射目标不得是 additive 模式），
+    /// 漏加一项最多让某格漏测，不会让错误的映射蒙混过关。
     #[allow(dead_code)]
     pub fn all() -> impl Iterator<Item = Platform> {
         [
@@ -124,23 +141,30 @@ impl Platform {
 mod tests {
     use super::*;
 
-    /// spec §六 第 1 条：**基数闸**。这是这张表唯一真正的守卫 —— 服务端加第 7 个 platform、
-    /// 有人给 enum 加了变体却忘了加表行时，就靠这条报红。
+    /// spec §六 第 1 条的**替代物**：那条要求的「基数闸」现在由编译器执行
+    /// （[`map_platform`] 的穷尽 `match`：加变体不加分支 ⇒ `error[E0004]`），
+    /// 不再需要、也**不可能**用运行期断言表达 —— 这正是原来那条断言恒真的原因。
+    ///
+    /// 这条测试改为守另一件事：`all()` 与 `parse_platform` 的**往返一致**。
+    /// `all()` 是手写数组，漏加一项会让下面那些逐格断言少测一格；让它与
+    /// `parse_platform` 对账，漏加的那项就会在这里露出来（因为加变体的人几乎一定会
+    /// 记得改 `parse_platform` —— 不改的话服务端那个平台压根解析不出来）。
     #[test]
-    fn map_len_equals_platform_cardinality() {
-        assert_eq!(
-            PLATFORM_MAP.len(),
-            Platform::all().count(),
-            "映射表与 Platform 枚举的基数必须一致：加平台时两处都要改"
-        );
-        // 每个变体有且只有一条记录：光比长度挡不住「复制粘贴写重了一行、另一行漏了」
-        // ——那时长度仍然相等，而被重复的那格会静默遮蔽 `find` 的后一条。
+    fn all_variants_round_trip_through_parse() {
         for platform in Platform::all() {
-            let hits = PLATFORM_MAP
-                .iter()
-                .filter(|(candidate, _)| *candidate == platform)
-                .count();
-            assert_eq!(hits, 1, "{platform:?} 在映射表里出现 {hits} 次");
+            let raw = match platform {
+                Platform::OpenAI => "openai",
+                Platform::Anthropic => "anthropic",
+                Platform::Gemini => "gemini",
+                Platform::Grok => "grok",
+                Platform::Antigravity => "antigravity",
+                Platform::Composite => "composite",
+            };
+            assert_eq!(
+                parse_platform(raw),
+                Some(platform),
+                "{platform:?} 的服务端标识 {raw:?} 解析不回来"
+            );
         }
     }
 

@@ -90,6 +90,36 @@ mod tests {
         reject_if_managed("custom-1").expect("普通 id 不该被拦");
     }
 
+    /// 故障转移队列的准入：托管档位不得进队列。
+    ///
+    /// 这条守的是一条**自动发生**的路径：队列里有托管项时，熔断会让
+    /// `FailoverSwitchManager` 在用户没点任何按钮的情况下切到它，跳过
+    /// 「退出 ChatGPT → 切换 → 重开」的编排（托盘菜单过滤在这条路上完全无效，
+    /// 因为切换不是从菜单点出来的）。
+    ///
+    /// 队列有**两个准入口**，都必须拦（commands/failover.rs）：
+    /// `add_to_failover_queue` 命令（用户手动加），以及 `set_auto_failover_enabled`
+    /// 里「队列为空时自动把当前 provider 作为 P1 加入」那段 —— 后者直接调
+    /// `state.db`，绕过前者的守卫，所以是独立的一道。
+    #[test]
+    fn managed_tiers_are_rejected_from_failover_queue() {
+        let real = provision::provider_id_for("https://bestapi.store", 3);
+
+        // 准入口 1：手动加入 —— 走 reject_if_managed。
+        assert!(
+            reject_if_managed(&real).is_err(),
+            "托管档位必须被挡在故障转移队列之外"
+        );
+        // 准入口 2：自动作为 P1 加入 —— 走 is_managed 判断后给专门的文案。
+        assert!(is_managed(&real));
+
+        // 普通 provider 不受影响：故障转移对它们是正常功能，别顺手拦死。
+        for id in ["custom-1", "codex-official"] {
+            assert!(reject_if_managed(id).is_ok(), "id: {id}");
+            assert!(!is_managed(id), "id: {id}");
+        }
+    }
+
     #[test]
     fn filter_unmanaged_drops_managed_and_keeps_order() {
         let managed = provider_with_id(&provision::provider_id_for("https://bestapi.store", 1));
