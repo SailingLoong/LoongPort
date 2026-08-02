@@ -44,6 +44,13 @@ pub struct Operator {
     pub site_origin: String,
     pub site_name: String,
     /// codex 用的 API 基址，已归一到带 `/v1`。
+    ///
+    /// ⚠️ **这是「codex 的 base」，不是「这个站的 base」** —— Anthropic / Gemini 在同一个站上
+    /// 要不同的 base 路径。多平台展开那轮要么新增按平台分的列、要么改成 JSON 列，
+    /// 那时是**一次迁移**（已持久化的列），不是重构。
+    ///
+    /// 现在不提前分化：当前只有 codex 会填它，按平台存一组 base 的那层抽象没有实现填充它
+    /// （尺子3：这层现在就有实现填充它吗？没有 ⇒ 只切边界不加抽象）。
     pub api_base_url: String,
     /// 服务端的用户 id。`None` = 还没登录过。
     pub account_id: Option<i64>,
