@@ -437,9 +437,15 @@ mod tests {
     }
 
     #[test]
-    fn login_window_label_is_not_a_config_declared_window() {
-        // 与 tauri.conf.json 的 app.windows 里的 label 重名会在 setup 里 panic。
-        // 配置里那个是 "main"。
-        assert_ne!(LOGIN_WINDOW_LABEL, "main");
+    fn login_window_label_is_not_the_main_window() {
+        // 两件事都靠这个不等式：
+        //
+        // 1. 与 `tauri.conf.json` 的 `app.windows` 里的 label 重名会在 setup 里 panic。
+        // 2. **`lib.rs` 的全局 `CloseRequested` 回调用 `MAIN_WINDOW_LABEL` 当守卫** ——
+        //    只有主窗口才走「最小化到托盘」。若登录窗的 label 变成了 `main`，它关闭时会被
+        //    `prevent_close` 吃掉、隐藏后仍占 label，用户再点登录就卡死。
+        //
+        // 引用常量而不是写死 "main"：那样改常量时这条测试跟着走。
+        assert_ne!(LOGIN_WINDOW_LABEL, crate::MAIN_WINDOW_LABEL);
     }
 }

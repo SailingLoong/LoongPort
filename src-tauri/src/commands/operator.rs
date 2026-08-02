@@ -284,10 +284,19 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
             .ok_or_else(|| AppError::Config("请先选择运营商站点".into()))?
     };
 
-    // 已经开着就聚焦它，不要开第二个 —— 两个窗口各自注入脚本会重复回传。
-    if let Some(existing) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
-        let _ = existing.set_focus();
-        return Ok(false);
+    // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
+    //
+    // 「聚焦已有的」听起来更礼貌，但它会卡死：残留窗口可能是隐藏状态（被别处 hide 过、
+    // 或某次 close 请求被拦下），而 `set_focus` 对不可见窗口是 no-op —— 用户点了登录什么
+    // 都没发生，且因为 label 被占，再点多少次都一样，只能重启 app。
+    //
+    // 直接销毁重开则总能给用户一个可见的窗口。代价是「他正在填的表单没了」，但能走到这里
+    // 说明上一轮的 `do_login` 已经返回（否则那边还持有窗口），也就是那个窗口已经没人在等它
+    // 的凭据了 —— 留着它反而是个陷阱。
+    if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
+        log::info!("发现残留的登录窗口，销毁后重开");
+        // destroy 而不是 close：close 是可被拦截的请求，见下方 destroy 那处的说明。
+        let _ = stale.destroy();
     }
 
     let url = url::Url::parse(&login::login_url(&site_origin))
@@ -377,10 +386,15 @@ async fn do_login(app_handle: &tauri::AppHandle) -> Result<bool, AppError> {
         }
         // 用户关掉了窗口，或超时。都不是错误。
         //
-        // 这两种情况下窗口要么已经没了、要么用户走开了，主动关掉它是对的 —— 留一个卡在
-        // 登录页的僵尸窗口没有意义。
+        // 用 `destroy()` 而不是 `close()`：后者派的是可被拦截的关闭**请求**，会经过
+        // `lib.rs` 里那个全局 `CloseRequested` 回调 —— 一旦将来有人放宽那道 label 守卫，
+        // `close()` 就会被 `prevent_close` 吃掉，留下一个隐藏但仍占着 label 的僵尸窗口，
+        // 而它会让下一次 `operator_login` 命中上面「已开着就聚焦」的早退，登录卡死。
+        // `destroy()` 直接销毁、不发事件、拦不住。
+        //
+        // 超时那条也走这里：用户走开了，留一个卡在登录页的窗口没有意义。
         Ok(None) | Err(_) => {
-            let _ = window.close();
+            let _ = window.destroy();
             Ok(false)
         }
     }

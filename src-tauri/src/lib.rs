@@ -71,6 +71,7 @@ pub use services::{
 };
 pub use settings::{update_settings, AppSettings};
 pub use store::AppState;
+
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -81,6 +82,14 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::RunEvent;
 use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+
+/// 主窗口的 label（`tauri.conf.json` 的 `app.windows[0].label`）。
+///
+/// 提成常量的理由：`lib.rs` 里有多处按它取窗口，而**全局 `CloseRequested` 回调用它当守卫**
+/// —— 那条守卫决定「最小化到托盘」只作用于主窗口。写错一个字母，登录窗关闭时会被
+/// `prevent_close` 吃掉、隐藏后仍占 label，用户再点登录就卡死（见 `commands::operator`
+/// 里 `do_login` 对残留窗口的处置）。
+pub const MAIN_WINDOW_LABEL: &str = "main";
 
 #[cfg(target_os = "windows")]
 fn set_windows_app_user_model_id(app: &tauri::AppHandle) {
@@ -259,7 +268,7 @@ fn handle_deeplink_url(
             }
 
             if focus_main_window {
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                     let _ = window.unminimize();
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -360,7 +369,7 @@ pub fn run() {
             }
 
             // Show and focus window regardless
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -378,6 +387,21 @@ pub fn run() {
         // 拦截窗口关闭：根据设置决定是否最小化到托盘
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // **这个回调对每个窗口都生效**（Tauri 把 Builder 级的监听器挂到所有窗口），
+                // 而下面那套「最小化到托盘 / 关闭即退出」的语义只对主窗口成立。
+                //
+                // 不加这道守卫的后果，两条分支各咬一次：
+                // - `minimize_to_tray_on_close = true`（默认）：登录窗被 prevent_close + hide，
+                //   `Destroyed` 永不触发 ⇒ 等它的 `do_login` 干等满 300 秒超时；而隐藏的窗口
+                //   仍占着 label，用户再点登录会命中「已开着就聚焦」的早退，`set_focus` 对不可见
+                //   窗口是 no-op ⇒ **登录彻底卡死，只能重启 app**。
+                // - `= false`：关一个登录窗把整个 app 退掉。
+                //
+                // 所以：非主窗口一律放行，让它正常关闭。
+                if window.label() != MAIN_WINDOW_LABEL {
+                    return;
+                }
+
                 // 数据库版本过新的恢复模式下没有托盘可唤回，关闭即退出，避免应用隐身后台
                 let in_db_recovery = crate::init_status::get_init_error()
                     .map(|p| p.kind.as_deref() == Some("db_version_too_new"))
@@ -546,7 +570,7 @@ pub fn run() {
                         supported_version: Some(crate::database::SCHEMA_VERSION),
                     });
                     // 主窗口默认 visible:false，恢复界面必须强制显示
-                    if let Some(window) = app.get_webview_window("main") {
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
@@ -1272,7 +1296,7 @@ pub fn run() {
             // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
             #[cfg(target_os = "linux")]
             {
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                     let _ = window.with_webview(|webview| {
                         use webkit2gtk::{WebViewExt, SettingsExt, HardwareAccelerationPolicy};
                         let wk_webview = webview.inner();
@@ -1286,7 +1310,7 @@ pub fn run() {
 
             // 静默启动：根据设置决定是否显示主窗口
             let settings = crate::settings::get_settings();
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 // 在窗口首次显示前同步装饰状态，避免前端加载后再切换导致标题栏闪烁
                 // 仅 Linux 生效：解决 Wayland 下系统窗口按钮不可用的问题
                 #[cfg(target_os = "linux")]
