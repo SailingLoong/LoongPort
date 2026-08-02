@@ -131,16 +131,33 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Tauri signing key
+        # 缺密钥就跳过后续逻辑，而不是让 workflow 挂掉。
+        #
+        # 这个密钥是给**自动更新包**签名的，而 LoongPort **有意不注册 updater 插件**
+        # （上游端点会把用户升级成 cc-switch，见 src-tauri/src/lib.rs 里那段说明）。
+        # 所以它对当前产品无用 —— 原来那个 `exit 1` 等于让整个 release workflow 永远起不来，
+        # 一个能出包的通道被一个用不上的 secret 卡死。
+        #
+        # 保留整步而不是删掉：将来真搭了发布渠道（配 endpoints + 换自己的 pubkey + 把插件
+        # 注册加回来，三件缺一不可），配上 secret 它就自动开始签名，不必再改 workflow。
+        #
+        # ⚠️ **判空必须在 `run:` 里做，不能写成步骤级 `if: secrets.X != ''`** ——
+        # `secrets` 上下文在步骤级 `if` 里**不可用**（同类陷阱：`matrix` 在 job 级 `if` 里
+        # 也不可用，见 d237a7aa）。secret 经 `env:` 传进来再判，这也是避免注入的标准写法。
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: bash
         run: |
-          # 调试：检查 Secret 是否存在
-          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
-            echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret 为空或不存在" >&2
-            echo "请检查 GitHub 仓库 Settings > Secrets and variables > Actions" >&2
-            exit 1
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "○ 未配置 TAURI_SIGNING_PRIVATE_KEY —— 跳过更新包签名。"
+            echo "  当前产品不注册 updater 插件，这个 secret 用不上；要用时见本步注释。"
+            exit 0
           fi
-          
-          RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+
+          # 用 env 传进来的值，不直插 ${{ secrets.* }} —— 直插会把内容写进 shell 脚本文本，
+          # 含特殊字符时可能破坏语法（也是 workflow 注入的标准防线）。
+          RAW="$SIGNING_KEY"
           # 目标：提供正确的私钥“文件路径”给 Tauri CLI，避免内容解码歧义
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
           # 情况 1：原始两行文本（第一行以 "untrusted comment:" 开头）
@@ -181,19 +198,36 @@ jobs:
             exit 1
           fi
           echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
-          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> $GITHUB_ENV
+          if [ -n "$SIGNING_KEY_PASSWORD" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$SIGNING_KEY_PASSWORD" >> "$GITHUB_ENV"
           fi
           echo "✅ Tauri signing key prepared"
 
       - name: Import Apple signing certificate
+        # 与上一步同理：没配证书就跳过，而不是让整个 macOS job 挂掉。
+        #
+        # 原来这步在缺 secret 时必挂（`set -euo pipefail` + 空串喂给 base64 + 后面
+        # `find-identity` 找不到身份就 `exit 1`），于是 macOS 那条腿永远出不了包。
+        # 跳过之后出的是**未签名未公证**的包：本机编译能直接开，但经网络传给别人后
+        # Gatekeeper 会拦（报「已损坏」而不是可绕过的「未知开发者」）。
+        # 代价与偿还路径见 ../LoongPort-design/TODO.md 里「Apple 代码签名 + 公证」那条。
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "○ 未配置 APPLE_CERTIFICATE —— 跳过 macOS 代码签名与公证。"
+            echo "  产物可用但未签名：经网络分发时 Gatekeeper 会拦，接收方需右键「打开」"
+            echo "  或 xattr -dr com.apple.quarantine <app>。配齐 6 个 secret 即自动启用签名。"
+            exit 0
+          fi
           # Decode .p12 certificate from base64
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          printf '%s' "${{ secrets.APPLE_CERTIFICATE }}" | (base64 --decode 2>/dev/null || base64 -D) > "$CERT_PATH"
+          printf '%s' "$APPLE_CERTIFICATE" | (base64 --decode 2>/dev/null || base64 -D) > "$CERT_PATH"
 
           # Save original default keychain for cleanup
           ORIGINAL_DEFAULT_KEYCHAIN=$(security default-keychain -d user | tr -d '"' | xargs)
@@ -201,18 +235,18 @@ jobs:
 
           # Create temporary keychain
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
-          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Import certificate
           security import "$CERT_PATH" \
             -k "$KEYCHAIN_PATH" \
-            -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Dynamically resolve signing identity (must be "Developer ID Application")
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
@@ -295,24 +329,34 @@ jobs:
             fi
           done
 
+          # `.tar.gz` 是**自动更新产物**，只在 `tauri.conf.json` 配了
+          # `bundle.createUpdaterArtifacts` 时才产出 —— 本产品有意不注册 updater 插件，
+          # 所以那个键没配、这个文件根本不会存在。原来这里 `exit 1`，等于让 macOS 那条腿
+          # 永远出不了包。降级成「有则带上」：真搭了发布渠道之后它会自动出现并被带进 release。
           if [ -z "$TAR_GZ" ]; then
-            echo "❌ No macOS .tar.gz updater artifact found" >&2
-            exit 1
+            echo "○ 没有 .tar.gz 更新包产物（未启用 updater），跳过它，只发 .app / .dmg"
           fi
           if [ -z "$APP_PATH" ]; then
             echo "❌ No .app found" >&2
             exit 1
           fi
 
-          # Staple notarization ticket to .app (Tauri already notarized it)
-          xcrun stapler staple "$APP_PATH"
-          echo "✅ .app stapled"
+          # Staple notarization ticket to .app（Tauri 已公证过它）。
+          # 未签名时没有公证票可 staple —— 那条路径下这步会失败，所以跟着签名条件走。
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            xcrun stapler staple "$APP_PATH"
+            echo "✅ .app stapled"
+          else
+            echo "○ 未签名，跳过 stapler（没有公证票）"
+          fi
 
-          # 1) Collect .tar.gz (updater artifact)
-          NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
-          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
-          [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
-          echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          # 1) Collect .tar.gz (updater artifact) —— 没启用 updater 时它不存在，跳过
+          if [ -n "$TAR_GZ" ]; then
+            NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
+            cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+            [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
+            echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          fi
 
           # 2) Collect .app as zip
           NEW_ZIP="CC-Switch-${VERSION}-macOS.zip"
@@ -320,17 +364,25 @@ jobs:
           echo "macOS zip ready: $NEW_ZIP"
 
           # 3) Create styled DMG with create-dmg (Tauri's built-in DMG styling doesn't work on CI)
-          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "❌ APPLE_SIGNING_IDENTITY is missing before DMG creation" >&2
-            exit 1
-          fi
-
+          #
+          # 未签名时**照样出 DMG**，只是不带 --codesign —— 原来这里 exit 1，等于「没证书就
+          # 连包都不给你」。而未签名的 DMG 对自己测试、给能跑一条命令的人试用是够用的
+          # （接收方右键「打开」或 xattr -dr com.apple.quarantine）。
           HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
           NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
           ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
+
+          # --codesign 只在有身份时加。用数组拼参数而不是拼字符串 ——
+          # 后者在身份名含空格时会被词法拆开（"Developer ID Application: 某某 (TEAMID)" 必含空格）。
+          CODESIGN_ARGS=()
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            CODESIGN_ARGS=(--codesign "$APPLE_SIGNING_IDENTITY")
+          else
+            echo "○ 未签名，DMG 不做 codesign"
+          fi
 
           create-dmg \
             --volname "CC Switch" \
@@ -341,7 +393,7 @@ jobs:
             --icon "CC Switch.app" 180 220 \
             --hide-extension "CC Switch.app" \
             --app-drop-link 480 220 \
-            --codesign "$APPLE_SIGNING_IDENTITY" \
+            "${CODESIGN_ARGS[@]}" \
             --no-internet-enable \
             "release-assets/$NEW_DMG" \
             "$DMG_STAGE_DIR"
@@ -350,7 +402,9 @@ jobs:
           echo "✅ Styled DMG created: $NEW_DMG"
 
       - name: Notarize macOS DMG
-        if: runner.os == 'macOS'
+        # 与签名校验同理：没签名的包送去公证必然被拒（Apple 要求先签名再公证）。
+        # 判据同样用 `APPLE_SIGNING_IDENTITY` —— 它只在证书导入成功时才有值。
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
         shell: bash
         timeout-minutes: 30
         env:
@@ -392,7 +446,11 @@ jobs:
           done
 
       - name: Verify macOS code signing and notarization
-        if: runner.os == 'macOS'
+        # 这步是**签名的配套校验**，没签名就没有签名可验（`codesign --verify` 当场失败）。
+        # 所以跟着上面那步一起条件化：`APPLE_SIGNING_IDENTITY` 只在证书导入成功时被写进
+        # `$GITHUB_ENV`，用它当「这次到底签没签」的判据 —— 比再判一次 secret 更准确
+        # （证书配了但 find-identity 没找到 Developer ID 时也该跳过）。
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
         shell: bash
         run: |
           set -euo pipefail
