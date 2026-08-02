@@ -149,24 +149,16 @@ pub fn login_script(site_origin: &str) -> String {
       token_expires_at: window.localStorage.getItem(K_EXPIRES)
     }});
 
-    // 用一个隐藏 iframe 发这次跳转，而不是改 window.location。
+    // 改 window.location 发这次跳转。
     //
-    // 两者都会触发原生侧的 on_navigation（回调对子框架的导航同样生效），但改
-    // window.location 会让**当前页面**进入导航状态 —— 即使 on_navigation 返回 false 拦下了，
-    // 页面也已经被打断一次（表单里填的东西、正在播的动画都可能没了）。用 iframe 则完全不碰
-    // 主文档：用户该看的页面原样留着，凭据在背后送出去。
-    try {{
-      var f = document.createElement('iframe');
-      f.style.display = 'none';
-      f.src = '{CREDS_SCHEME}://ok?d=' + b64url(payload);
-      (document.body || document.documentElement).appendChild(f);
-      // 立刻移除：src 一赋值导航就已经发起，DOM 里留着它没有意义。
-      setTimeout(function () {{ try {{ f.remove(); }} catch (e) {{}} }}, 0);
-    }} catch (e) {{
-      // iframe 建不起来（极早期、body 还没有）时退回改 location —— 拿到凭据比
-      // 保住页面完整更重要，这条路至少不会让整个流程卡死。
-      window.location.href = '{CREDS_SCHEME}://ok?d=' + b64url(payload);
-    }}
+    // **不能用隐藏 iframe**（试过，会被 CSP 拦掉）：sub2api 全站带
+    // `frame-src challenges.cloudflare.com https://*.stripe.com ...` 的白名单，
+    // `{CREDS_SCHEME}://` 不在其中，iframe 的 src 直接被浏览器阻断，凭据根本发不出去。
+    // 同一条 CSP 还有 `frame-ancestors 'none'` 与 `X-Frame-Options: DENY`。
+    //
+    // 顶层导航则不受这条 CSP 管（它没有 `navigate-to` 指令），而且 `on_navigation` 返回
+    // false 会**拦下**这次导航 —— 页面不会真的走掉，用户看到的内容原样留着。
+    window.location.href = '{CREDS_SCHEME}://ok?d=' + b64url(payload);
   }}
 
   // 劫持 setItem：登录成功的那一刻四个键会陆续写进来。
@@ -386,19 +378,23 @@ mod tests {
     }
 
     #[test]
-    fn creds_are_sent_through_an_iframe_not_by_navigating_the_page() {
-        // 凭据回传必须走隐藏 iframe。改 window.location 即使被 on_navigation 拦下，
-        // 主文档也已经被打断一次 —— 用户正在填的表、正在看的 dashboard 都可能受影响。
-        // 而拿到凭据的时刻往往正是页面刚跳到 dashboard，那一下最不该被打断。
+    fn creds_are_sent_by_top_level_navigation_not_an_iframe() {
+        // **不能用 iframe** —— 实测 sub2api 全站带 `frame-src` 白名单
+        // （challenges.cloudflare.com / *.stripe.com / checkout.airwallex.com），
+        // `loongport-creds://` 不在其中，iframe 的 src 会被 CSP 直接阻断，凭据发不出去。
+        // 顶层导航不受这条 CSP 管（无 `navigate-to` 指令），且 on_navigation 返回 false
+        // 会拦下它 —— 页面不会真的走掉。
+        //
+        // 这条测试是防回归的：iframe 看起来「更干净」（不碰主文档），我自己就写过一版，
+        // 是查了线上响应头才发现走不通。
         let s = login_script("https://bestapi.store");
-        assert!(s.contains("createElement('iframe')"), "必须用 iframe 回传");
-        assert!(s.contains("style.display = 'none'"), "iframe 必须隐藏");
-        // location 那条只留作 iframe 建不起来时的兜底，不能是主路径。
-        let iframe_at = s.find("createElement('iframe')").expect("有 iframe");
-        let location_at = s.find("window.location.href =").expect("有兜底");
         assert!(
-            iframe_at < location_at,
-            "iframe 必须在前（主路径），location 只是兜底"
+            s.contains("window.location.href ="),
+            "凭据回传必须走顶层导航"
+        );
+        assert!(
+            !s.contains("createElement('iframe')"),
+            "不能用 iframe —— 会被 sub2api 的 frame-src CSP 拦掉"
         );
     }
 
