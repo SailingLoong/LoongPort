@@ -85,7 +85,7 @@ jobs:
         # 只出 msi。nsis 那条要额外下载安装器工具链，给人试用不需要两种包。
         run: pnpm tauri build --target ${{ matrix.target }} --bundles msi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: LoongPort-windows-${{ matrix.arch }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
