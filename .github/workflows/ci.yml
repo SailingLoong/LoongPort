@@ -1,10 +1,22 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
+  # ⏸ **自动触发临时关闭**（2026-08-02）——  Actions 额度本计费周期已用 91%
+  # （1823/2000 分钟），9 月 1 日重置。原来的 `push` + `pull_request` 各触发一次，
+  # 一次约 27 分钟（去掉 macOS 格之后；之前是 107），剩余额度撑不到重置。
+  #
+  # 关掉不等于不验：六道闸本来就要求本机先全跑一遍（见 CLAUDE.md §四），
+  # CI 的作用是兜住「本机验不了的平台」—— 目前只剩 windows 那格有独立价值。
+  # 需要时用下面的 workflow_dispatch 手动点一次（Actions 页 → CI → Run workflow）。
+  #
+  # ⚠️ **恢复条件：额度重置（2026-09-01）之后就把下面两行取消注释**。
+  # 别让「临时」变成永久 —— 自动 CI 是防「本机忘了跑闸就推」的唯一防线，
+  # 而那种事迟早会发生。
+  workflow_dispatch:
+  # pull_request:
+  #   branches: [main]
+  # push:
+  #   branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
