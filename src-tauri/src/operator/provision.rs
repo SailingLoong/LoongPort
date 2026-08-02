@@ -13,16 +13,19 @@
 //! ## Key 命名契约
 //!
 //! ```text
-//! LoongPort/<device-id>/<group-id>
+//! LoongPort/<device-id>/<platform>/<group-id>
 //! ```
 //!
-//! 三段合起来表达「这台机器上、这个分组的、由 LoongPort 管理的一把 Key」。
+//! 四段合起来表达「这台机器上、这个平台的、这个分组的、由 LoongPort 管理的一把 Key」。
 //!
 //! - **`device-id` 不能省**：多台机器共用一个账号时，各自认领自己那把 —— 否则 A 机器改了
 //!   Key，B 机器的配置就悄悄失效。
+//! - **`platform` 不能省**：分组 id 只在平台内唯一，跨平台会撞号。第一版只展开 `openai`，
+//!   但下一步「站点 × 分组」页要按当前 tab 的平台展开 codex / claude / gemini —— 那时同号
+//!   分组分属不同平台，靠三段名字认领会互相顶掉对方的 Key。
 //! - **`group-id` 用数值 ID 不用分组名**：名字由运营商随时可改，改了就认领不到自己的 Key。
-//! - **比 V1 少一段**：V1 是 `LoongPort/<device>/<platform>/<group>`，因为它支持三个平台。
-//!   V2 只有 `openai`，那一段恒定即冗余。
+//! - **与 V1 同为四段**：V1 那四段是对的，V2 第一版曾砍成三段（理由是「只有一个 platform，
+//!   那段恒定即冗余」），多平台之后该理由不成立，2026-08-02 改回四段。
 //!
 //! ⚠️ **这个名字进了服务端、是跨端可见的**。改它等于所有已建 Key 认领不回来，于是给用户
 //! 账号里堆一批重复 sk —— 属不可逆决定，别顺手改。
@@ -61,8 +64,8 @@ pub struct ProvisionResult {
 }
 
 /// 一个分组对应的 Key 名字。
-pub fn key_name_for(device_id: &str, group_id: i64) -> String {
-    format!("{MANAGED_PREFIX}/{device_id}/{group_id}")
+pub fn key_name_for(device_id: &str, platform: &str, group_id: i64) -> String {
+    format!("{MANAGED_PREFIX}/{device_id}/{platform}/{group_id}")
 }
 
 /// 在已有 Key 里认领属于本机 + 本分组的那把。
@@ -72,8 +75,13 @@ pub fn key_name_for(device_id: &str, group_id: i64) -> String {
 ///
 /// 命中多把时取 `id` 最大的那把（服务端 `name` 无唯一约束，同名可以无限建）。其余不自动删：
 /// 删别人的东西要有更强的依据，这里只是「我认得出哪把是我的」。
-pub fn claim_key<'a>(keys: &'a [ApiKey], device_id: &str, group_id: i64) -> Option<&'a ApiKey> {
-    let want = key_name_for(device_id, group_id);
+pub fn claim_key<'a>(
+    keys: &'a [ApiKey],
+    device_id: &str,
+    platform: &str,
+    group_id: i64,
+) -> Option<&'a ApiKey> {
+    let want = key_name_for(device_id, platform, group_id);
     keys.iter()
         .filter(|k| k.name == want && k.is_usable())
         // 非 active 的不得认领：否则「认领到废 Key → 调用失败 → 再认领同一把」就是个环。
@@ -124,11 +132,11 @@ async fn ensure_key_for(
     group: &Group,
     existing: &[ApiKey],
 ) -> Result<Tier, AppError> {
-    let (api_key, created) = match claim_key(existing, device_id, group.id) {
+    let (api_key, created) = match claim_key(existing, device_id, &group.platform, group.id) {
         // 正常路径：认领到了就直接用，不发任何写请求。
         Some(k) => (k.key.clone(), false),
         None => {
-            let name = key_name_for(device_id, group.id);
+            let name = key_name_for(device_id, &group.platform, group.id);
             let created = client.create_key(&name, group.id).await?;
             if created.key.is_empty() {
                 return Err(AppError::Config("服务端返回的密钥是空的".into()));
@@ -258,8 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn key_name_is_three_segments() {
-        assert_eq!(key_name_for("dev-1", 42), "LoongPort/dev-1/42");
+    fn key_name_is_four_segments_with_platform() {
+        assert_eq!(
+            key_name_for("dev-1", "openai", 42),
+            "LoongPort/dev-1/openai/42"
+        );
     }
 
     #[test]
@@ -267,35 +278,44 @@ mod tests {
         // 子串/前缀匹配会让 .../42 命中 .../420。服务端的 search 就是子串匹配，
         // 所以这道精确比对是唯一防线。
         let keys = vec![
-            key(1, "LoongPort/dev-1/420", "active"),
-            key(2, "LoongPort/dev-1/42", "active"),
+            key(1, "LoongPort/dev-1/openai/420", "active"),
+            key(2, "LoongPort/dev-1/openai/42", "active"),
         ];
-        assert_eq!(claim_key(&keys, "dev-1", 42).unwrap().id, 2);
+        assert_eq!(claim_key(&keys, "dev-1", "openai", 42).unwrap().id, 2);
     }
 
     #[test]
     fn claim_never_crosses_devices() {
         // 「绝不动别的设备那把 Key」的正面测点。
-        let keys = vec![key(1, "LoongPort/other-device/42", "active")];
-        assert!(claim_key(&keys, "dev-1", 42).is_none());
+        let keys = vec![key(1, "LoongPort/other-device/openai/42", "active")];
+        assert!(claim_key(&keys, "dev-1", "openai", 42).is_none());
+    }
+
+    #[test]
+    fn claim_never_crosses_platforms() {
+        // platform 段存在的全部理由：分组 id 只在平台内唯一，跨平台会撞号。少了这一段，
+        // codex 页与 claude 页的同号分组会互相顶掉对方的 Key（认领到别的平台那把 →
+        // 写进 config 的 sk 属于错平台 → 调用失败）。
+        let keys = vec![key(1, "LoongPort/dev-1/anthropic/42", "active")];
+        assert!(claim_key(&keys, "dev-1", "openai", 42).is_none());
     }
 
     #[test]
     fn claim_skips_unusable_keys() {
         // 认领到废 Key 会形成环：调用失败 → 重新认领 → 又是同一把。
-        let keys = vec![key(1, "LoongPort/dev-1/42", "disabled")];
-        assert!(claim_key(&keys, "dev-1", 42).is_none());
+        let keys = vec![key(1, "LoongPort/dev-1/openai/42", "disabled")];
+        assert!(claim_key(&keys, "dev-1", "openai", 42).is_none());
     }
 
     #[test]
     fn claim_takes_the_newest_when_duplicated() {
         // 服务端 name 无唯一约束，同名可以无限建。
         let keys = vec![
-            key(1, "LoongPort/dev-1/42", "active"),
-            key(9, "LoongPort/dev-1/42", "active"),
-            key(5, "LoongPort/dev-1/42", "active"),
+            key(1, "LoongPort/dev-1/openai/42", "active"),
+            key(9, "LoongPort/dev-1/openai/42", "active"),
+            key(5, "LoongPort/dev-1/openai/42", "active"),
         ];
-        assert_eq!(claim_key(&keys, "dev-1", 42).unwrap().id, 9);
+        assert_eq!(claim_key(&keys, "dev-1", "openai", 42).unwrap().id, 9);
     }
 
     #[test]
