@@ -442,6 +442,43 @@ pub fn serve(provider_id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// ⚠️ **这个 crate 的 logger 写 stdout，而 stdout 是 MCP 的协议通道。**
+    ///
+    /// 当前安全**只是因为 logger 在 [`crate::run`] 里才初始化**
+    /// （`tauri_plugin_log` 带 `TargetKind::Stdout`），而 MCP 模式在 `run()` 之前就
+    /// 分流走了 ⇒ 这个进程里根本没有 logger，`log::` 全是空操作。
+    ///
+    /// 但那是**很脆的安全**：谁把日志初始化提到 `main()` 开头（很自然的想法：
+    /// 「让启动早期的问题也能记下来」），MCP 就会往协议通道里吐日志行 ⇒
+    /// 宿主解析不了那一行 ⇒ **断连**。而症状是「codex 里生图工具时好时坏」，
+    /// 没有任何东西会报错。
+    ///
+    /// 这道闸盯的是那个前提：`lib.rs` 里的 stdout target 必须仍然在 `run()` 内部。
+    /// 它红了说明**要么**把那个 target 去掉、**要么**在 MCP 模式下显式装一个
+    /// 只写文件的 logger，别只是把断言改绿。
+    #[test]
+    fn the_stdout_logger_must_stay_inside_run_or_mcp_breaks() {
+        let lib_rs = include_str!("../lib.rs");
+        let stdout_target = "Target::new(TargetKind::Stdout)";
+        assert!(
+            lib_rs.contains(stdout_target),
+            "lib.rs 里找不到 {stdout_target} —— 这道闸的前提变了，\
+             请重新确认「MCP 模式下没有 logger 往 stdout 写」是否仍然成立"
+        );
+
+        // 那个 target 必须出现在 `pub fn run()` 之后 —— 即它属于 run 的初始化，
+        // 而不是被提到了模块层 / main 里。
+        let run_at = lib_rs
+            .find("pub fn run()")
+            .expect("lib.rs 里应当有 pub fn run()");
+        let target_at = lib_rs.find(stdout_target).expect("上面已经断言过它存在");
+        assert!(
+            target_at > run_at,
+            "stdout 日志 target 被移到了 run() 之前 ⇒ MCP 模式会往协议通道写日志、\
+             导致宿主断连。要么去掉那个 target，要么给 MCP 模式装一个只写文件的 logger。"
+        );
+    }
+
     /// `model` 的前缀与 `model_provider` / `model_reasoning_effort` 撞车 ——
     /// 抠错了会把 `"custom"` 当成模型名发出去（服务端 404，而错误信息里看不出原因）。
     #[test]

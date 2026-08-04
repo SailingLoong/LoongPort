@@ -895,6 +895,87 @@ pub fn patch_api_key(
     true
 }
 
+/// 把一个**已存在**档位里过时的模型名修正过来。返回是否真的改了。
+///
+/// # 为什么需要它（实测踩出来的）
+///
+/// `do_provision` 对已存在的档位**只 patch sk、不覆盖配置** —— 那条规则是为了不冲掉
+/// 用户在编辑页改过的东西，是对的。但它有个副作用：**我们自己写错的模型名也永远不会
+/// 被修正**。
+///
+/// 实测就是这个场景：`pick_model` 上线前，纯生图分组被写了 `DEFAULT_MODEL`
+/// （一个文本模型）⇒ 选中即 404、生图工具的入口判据也不成立。用户点「刷新档位与密钥」
+/// 毫无变化，因为那条路只换 sk。⇒ **老用户永远拿不到这个修复**，而界面上没有任何
+/// 迹象说明为什么。
+///
+/// # 判据：只修「用户没改过」的档位
+///
+/// 用 [`is_user_edited`] 判 —— 它已经是「当前配置 ≠ 我们会生成的默认配置」这个语义的
+/// 唯一实现。`Some(false)`（确认没改过）才修：
+///
+/// | `is_user_edited` | 含义 | 修不修 |
+/// |---|---|---|
+/// | `Some(false)` | 配置就是我们写的默认值 | **修** —— 那个默认值现在错了 |
+/// | `Some(true)` | 用户改过 | 不修（他的编辑优先，即使模型名不理想） |
+/// | `None` | 判不了（读不出 sk / 这个 CLI 没默认形状） | 不修 —— 不确定时别动用户的配置 |
+///
+/// ⚠️ **不是「模型名不等于期望值就改」**：那样会把用户手工设的模型名每次刷新都冲掉，
+/// 正好是上面那条规则要防的事。
+///
+/// # 为什么只修模型名，不顺手把整份配置刷成最新默认值
+///
+/// 那会越权：`is_user_edited` 为 `Some(false)` 只说明「整份配置等于**某个**历史默认值」
+/// （见 [`candidate_models`]），把它整份重写等于替用户做了「恢复默认」这个显式动作。
+/// 这里只改一处**已知写错了**的字段，其余原样留着。
+pub fn repair_stale_model(
+    settings_config: &mut serde_json::Value,
+    app_type: &AppType,
+    display_name: &str,
+    base_url: &str,
+    want_model: &str,
+) -> bool {
+    // 只有 codex 的配置里有 `model` 这一行（其它 CLI 的形状里没有它）。
+    if !matches!(app_type, AppType::Codex) {
+        return false;
+    }
+    // 已经是想要的值 ⇒ 什么都不做（绝大多数情形走这条）。
+    if extract_model(settings_config).as_deref() == Some(want_model) {
+        return false;
+    }
+    // 用户改过 / 判不了 ⇒ 不动。
+    //
+    // ⚠️ **基准的模型名传 [`DEFAULT_MODEL`] 而不是 `want_model`**（测试抓出来的）：
+    // 这里要问的是「这份配置**现在**是不是我们写的默认值」，而它当初被写入时用的正是
+    // `DEFAULT_MODEL`（或某个历史默认值，那些由 [`candidate_models`] 认）。
+    // 传 `want_model` 是在拿**修完之后**的期望值去比**修之前**的配置 ⇒ 必然不相等
+    // ⇒ 每个待修的档位都被判成「用户改过」⇒ 这个函数恒不生效。
+    if is_user_edited(
+        settings_config,
+        app_type,
+        display_name,
+        base_url,
+        DEFAULT_MODEL,
+    ) != Some(false)
+    {
+        return false;
+    }
+
+    // 到这里：配置等于某个历史默认值，而当前正解是 `want_model` ⇒ 重写成新的默认配置。
+    //
+    // **整份重写而不是只替换那一行文本**：默认配置由 `settings_config_for` 一个函数
+    // 决定，拿它产出的结果才保证形状正确（手工改一行会漏掉将来新增的字段）。
+    // sk 从原配置里取，不换。
+    let Some(api_key) = extract_api_key(settings_config, app_type) else {
+        return false;
+    };
+    let Some(fixed) = settings_config_for(app_type, &api_key, display_name, base_url, want_model)
+    else {
+        return false;
+    };
+    *settings_config = fixed;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1093,6 +1174,66 @@ mod tests {
             "gpt-image-1".to_string(),
         ];
         assert_eq!(pick_model(Some(&a)), pick_model(Some(&b)));
+    }
+
+    /// **老档位的过时模型名要被刷新修正。**
+    ///
+    /// 这是实测踩出来的缺口：`do_provision` 对已存在的档位只 patch sk，所以
+    /// `pick_model` 上线前被写成文本模型的纯生图档位，用户点多少次「刷新档位与密钥」
+    /// 都不会变好 —— 选中即 404，生图工具的入口判据也一直不成立，而界面上没有任何
+    /// 迹象说明为什么。
+    #[test]
+    fn a_stale_default_model_is_repaired_on_refresh() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        // 老版本 provision 写出来的：纯生图分组却配了文本模型。
+        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, DEFAULT_MODEL)
+            .expect("codex 必须有默认形状");
+
+        assert!(
+            repair_stale_model(&mut cfg, &app, "生图档", base, "gpt-image-2"),
+            "过时的模型名没被修正 —— 老用户永远拿不到这个修复"
+        );
+        assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
+        // sk 必须原样保留（修配置不是换密钥）。
+        assert_eq!(extract_api_key(&cfg, &app).as_deref(), Some("sk-1"));
+    }
+
+    /// 但**用户改过的配置不许动** —— 那正是「只换 sk」那条规则要保护的东西。
+    #[test]
+    fn a_user_edited_config_is_never_repaired() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "我的档位", base, DEFAULT_MODEL)
+            .expect("codex 必须有默认形状");
+        // 用户把 reasoning effort 改了 —— 这份配置从此归他维护。
+        let edited = cfg["config"].as_str().unwrap().replace(
+            "model_reasoning_effort = \"high\"",
+            "model_reasoning_effort = \"low\"",
+        );
+        cfg["config"] = edited.clone().into();
+
+        assert!(
+            !repair_stale_model(&mut cfg, &app, "我的档位", base, "gpt-image-2"),
+            "改写了用户手工维护的配置"
+        );
+        assert_eq!(cfg["config"].as_str().unwrap(), edited, "配置内容被动过了");
+    }
+
+    /// 已经是正解时不做任何事（绝大多数刷新走这条，不该产生无谓的写操作）。
+    #[test]
+    fn a_config_already_on_the_right_model_is_left_alone() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, "gpt-image-2")
+            .expect("codex 必须有默认形状");
+        assert!(!repair_stale_model(
+            &mut cfg,
+            &app,
+            "生图档",
+            base,
+            "gpt-image-2"
+        ));
     }
 
     /// 生图档位**不该**显示「已手动维护」。

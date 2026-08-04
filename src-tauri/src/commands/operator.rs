@@ -966,6 +966,27 @@ async fn do_provision(
                 // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落到默认配置。
                 // 否则用户会留着一把旧 sk 却以为刷新成功了。
                 if provision::patch_api_key(&mut kept, app_type, &tier.api_key) {
+                    // ⚠️ **顺手修正过时的模型名**（只在用户没改过配置时）。
+                    //
+                    // 上面那条「已存在的档位只换 sk」的规则本意是不冲掉用户的编辑，
+                    // 但它连**我们自己写错的值**也一起保护了 ⇒ `pick_model` 上线前
+                    // 被写成文本模型的纯生图档位，用户点多少次刷新都不会变好
+                    // （实测：选中即 404，且生图工具的入口判据一直不成立）。
+                    //
+                    // 判据在 `repair_stale_model` 里（`is_user_edited == Some(false)`
+                    // 才动），所以用户改过的档位仍然不受影响。
+                    if provision::repair_stale_model(
+                        &mut kept,
+                        app_type,
+                        &display_name,
+                        &op.api_base_url,
+                        &tier.model,
+                    ) {
+                        log::info!(
+                            "{display_name} 的模型名已修正为 {}（原值是过时的默认值，用户未改过配置）",
+                            tier.model
+                        );
+                    }
                     kept
                 } else {
                     log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
