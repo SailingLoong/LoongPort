@@ -839,9 +839,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           <div className="flex items-center gap-8">
             <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-2">
-                <img src={appIcon} alt="CC Switch" className="h-5 w-5" />
+                {/* 产品名写死、不走 i18n：它在任何语言下都是 LoongPort。
+                    上游这里原本是「CC Switch」—— 而这一屏正是用户打开来回答
+                    「我在运行什么」的地方，issue 模板也让报告者来这里看版本号。 */}
+                <img src={appIcon} alt="LoongPort" className="h-5 w-5" />
                 <h4 className="text-lg font-semibold text-foreground">
-                  CC Switch
+                  LoongPort
                 </h4>
               </div>
               <div className="flex items-center gap-2">
