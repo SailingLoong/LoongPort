@@ -443,6 +443,12 @@ jobs:
 
           # --codesign 只在有身份时加。用数组拼参数而不是拼字符串 ——
           # 后者在身份名含空格时会被词法拆开（"Developer ID Application: 某某 (TEAMID)" 必含空格）。
+          #
+          # ⚠️ 展开处必须写成 `${ARR[@]+"${ARR[@]}"}`，不能是裸的 `"${ARR[@]}"` ——
+          # 本步骤有 `set -u`，而**空数组的展开会被当成「引用未定义变量」**：
+          # macOS runner 上实测报 `CODESIGN_ARGS[@]: unbound variable` 后 exit 1
+          # （2026-08-04，未签名路径正好走到数组为空那支 ⇒ 一定触发）。
+          # bash 4.4+ 修了这个行为，但 macOS 自带的是 3.2，别指望。
           CODESIGN_ARGS=()
           if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
             CODESIGN_ARGS=(--codesign "$APPLE_SIGNING_IDENTITY")
@@ -459,7 +465,7 @@ jobs:
             --icon "LoongPort.app" 180 220 \
             --hide-extension "LoongPort.app" \
             --app-drop-link 480 220 \
-            "${CODESIGN_ARGS[@]}" \
+            ${CODESIGN_ARGS[@]+"${CODESIGN_ARGS[@]}"} \
             --no-internet-enable \
             "release-assets/$NEW_DMG" \
             "$DMG_STAGE_DIR"
