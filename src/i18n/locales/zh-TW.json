@@ -3056,7 +3056,8 @@
       "remove": "刪除這個帳號（連帶它的方案）",
       "removeBlockedByCurrent": "它有方案正在使用，先切到其他方案再刪",
       "removeConfirmTitle": "刪除這個帳號？",
-      "removeConfirmMessage": "會刪掉「{{label}}」的登入狀態，連帶它已產生的 {{count}} 個方案。已充值的餘額留在營運商那邊，重新登入就能再用。"
+      "removeConfirmMessage": "會刪掉「{{label}}」的登入狀態，連帶它已產生的 {{count}} 個方案。已充值的餘額留在營運商那邊，重新登入就能再用。",
+      "removeConfirmMessageNeverLoggedIn": "會刪掉「{{label}}」這一行，連帶它已產生的 {{count}} 個方案。這個帳號從沒登入過，隨時可以重新新增。"
     },
     "tier": {
       "rateUnknown": "倍率未知",
@@ -3099,6 +3100,7 @@
     "provision": {
       "ready": "已備好 {{count}} 個方案",
       "readyWithKeys": "已備好 {{count}} 個方案，新建 {{keys}} 把金鑰",
+      "landedOnOtherPlatforms": "這個帳號有 {{count}} 個分組，但都不屬於目前這個 CLI。切到上方對應的標籤頁查看。",
       "groupFailed": "{{group}}：{{reason}}",
       "refreshed": "已重新整理 {{operators}} 個營運商，共 {{tiers}} 個方案",
       "refreshFailedWithReason": "{{name}} 重新整理失敗：{{reason}}",

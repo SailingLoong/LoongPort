@@ -3055,7 +3055,8 @@
       "remove": "删除这个账号（连带它的档位）",
       "removeBlockedByCurrent": "它有档位正在使用，先切到别的档位再删",
       "removeConfirmTitle": "删除这个账号？",
-      "removeConfirmMessage": "会删掉「{{label}}」的登录态，连带它已生成的 {{count}} 个档位。已充值的余额留在运营商那边，重新登录就能再用。"
+      "removeConfirmMessage": "会删掉「{{label}}」的登录态，连带它已生成的 {{count}} 个档位。已充值的余额留在运营商那边，重新登录就能再用。",
+      "removeConfirmMessageNeverLoggedIn": "会删掉「{{label}}」这一行，连带它已生成的 {{count}} 个档位。这个账号从没登录过，随时可以重新添加。"
     },
     "tier": {
       "rateUnknown": "倍率未知",
@@ -3098,6 +3099,7 @@
     "provision": {
       "ready": "已备好 {{count}} 个档位",
       "readyWithKeys": "已备好 {{count}} 个档位，新建 {{keys}} 把密钥",
+      "landedOnOtherPlatforms": "这个账号有 {{count}} 个分组，但都不属于当前这个 CLI。切到上方对应的标签页查看。",
       "groupFailed": "{{group}}：{{reason}}",
       "refreshed": "已刷新 {{operators}} 个运营商，共 {{tiers}} 个档位",
       "refreshFailedWithReason": "{{name}} 刷新失败：{{reason}}",

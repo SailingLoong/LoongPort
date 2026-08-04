@@ -43,6 +43,12 @@ const requiredKeys = [
   "row.removeBlockedByCurrent",
   "row.removeConfirmTitle",
   "row.removeConfirmMessage",
+  // 从没登录过的行走另一句 —— 无条件那句会说错两处（不存在的登录态、没充过的
+  // 余额）。判据见 `components/operator/removeConfirmWording.ts`。
+  "row.removeConfirmMessageNeverLoggedIn",
+  // 「分组都落在别的平台了」—— 缺了它用户会一遍遍点「获取密钥」，
+  // 而那条路对他永远不会有结果（债 11）。
+  "provision.landedOnOtherPlatforms",
   // ⚠️ `tier.current` / `tier.use` **有意不在这里** —— 那两处文案复用上游的
   // `provider.inUse` / `provider.enable`（四 locale 早就齐了）。
   // 自建一份会让同一个操作在 provider 页叫「启用」、在这里叫「使用」。

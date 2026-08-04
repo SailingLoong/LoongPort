@@ -3055,7 +3055,8 @@
       "remove": "このアカウントを削除（プランも一緒に）",
       "removeBlockedByCurrent": "使用中のプランがあります。先に別のプランに切り替えてください",
       "removeConfirmTitle": "このアカウントを削除しますか？",
-      "removeConfirmMessage": "「{{label}}」のログイン情報と、生成済みの {{count}} 件のプランを削除します。チャージ済みの残高は事業者側に残るため、再ログインすれば引き続き使えます。"
+      "removeConfirmMessage": "「{{label}}」のログイン情報と、生成済みの {{count}} 件のプランを削除します。チャージ済みの残高は事業者側に残るため、再ログインすれば引き続き使えます。",
+      "removeConfirmMessageNeverLoggedIn": "「{{label}}」の行と、生成済みの {{count}} 件のプランを削除します。このアカウントは未ログインのため、いつでも再度追加できます。"
     },
     "tier": {
       "rateUnknown": "倍率不明",
@@ -3098,6 +3099,7 @@
     "provision": {
       "ready": "{{count}} 件のプランを準備しました",
       "readyWithKeys": "{{count}} 件のプランを準備し、{{keys}} 個のキーを作成しました",
+      "landedOnOtherPlatforms": "このアカウントには {{count}} 件のグループがありますが、現在の CLI 向けのものはありません。上部の該当タブに切り替えてご確認ください。",
       "groupFailed": "{{group}}：{{reason}}",
       "refreshed": "{{operators}} 件のプロバイダーを更新し、合計 {{tiers}} 件のプランを取得しました",
       "refreshFailedWithReason": "{{name}} の更新に失敗しました：{{reason}}",

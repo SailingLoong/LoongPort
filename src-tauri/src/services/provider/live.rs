@@ -1704,6 +1704,71 @@ pub(crate) fn remove_opencode_provider_from_live(provider_id: &str) -> Result<()
     Ok(())
 }
 
+/// live config 导入时该不该跳过这个 id —— **三个 live import 的共用判据**。
+///
+/// ## 为什么必须有这一道（review 抓出，2026-08-04）
+///
+/// 三个 `import_*_providers_from_live` 的 provider id **就是用户自己 CLI 配置文件里
+/// 的 key**（`~/.config/opencode/opencode.json` 等），而它们直接
+/// `state.db.save_provider(...)`，**不过命令层的 `reject_if_managed`**，且在启动时
+/// 无条件跑（见 `lib.rs`）。⇒ 用户在自己的配置里起个叫 `loongport-0123456789abcdef`
+/// 的 provider，下次启动它就进库了，而托管判据会认它：
+///
+/// - `ProviderList` 把它滤掉 ⇒ 看不见
+/// - `update_provider` / `delete_provider` 被 `reject_if_managed` 拦下 ⇒ 删不掉
+/// - 运营商区也不显示它（那里还要求 `website_url` 匹配某个站）
+///
+/// 合起来 = **一条不可见也不可删的孤儿**，UI 上无逃生路径。
+///
+/// ## 与「收紧 `is_managed`」的分工
+///
+/// 判据收紧（前缀 + 16 位小写 hex）挡掉了绝大多数误撞 —— 用户起名叫
+/// `loongport-mine` 不再命中。但那**不是全称保护**：恰好 16 位小写 hex 的 key
+/// 完全合法，那时判据无从分辨。所以这一道补的是另一半：
+/// **判据管「像不像我们生成的」，这里管「到底是不是从我们这儿来的」** ——
+/// 从用户 CLI 配置文件读进来的，定义上就不是。
+///
+/// ## ⚠️ 它同时挡住两种情形，而两者**理由不同**
+///
+/// 判据放在 `existing_ids` 分支**之前**，所以「新建」与「更新已有」都跳过。
+/// 这是有意的，但要说清各自的理由 —— 否则下一个人会以为其中一种是漏考虑：
+///
+/// 1. **库里还没有这条**（用户 CLI 配置里的 key 恰好撞上托管形状）——
+///    跳过是为了不制造上面说的那种孤儿。
+/// 2. **库里已经有这条**：那它就是**我们自己写进 live config 的**托管 provider
+///    （vendor 侧的 `DEEPSEEK_APPS` 含 Hermes / OpenClaw / OpenCode，切到它时
+///    `set_typed_provider(&provider.id, ..)` 会把 `loongport-vendor-<hex>` 写进
+///    那份配置）。这一支跳过的理由**不是防孤儿，而是防反向覆盖**：
+///    那条分支会用 live config 里的内容改写 DB 的 `settings_config`，而托管配置
+///    的真相源是 `provision`（下次刷新本来就会重写它）。让 live 覆盖它等于
+///    「用派生物覆盖真相源」。
+///
+/// ## 为什么是跳过 + warn，不是报错
+///
+/// 报错会让整次 live import 中止 ⇒ 一条撞名的 provider 会连带阻止其余全部导入。
+/// 跳过它、把原因写进日志，其余照常 —— 与这三个函数里「单条失败只 warn 不中断」
+/// 的既有形状一致。
+fn live_import_should_skip(id: &str, app: &str, already_in_db: bool) -> bool {
+    if !crate::operator::is_managed(id) {
+        return false;
+    }
+    // 文案必须分开：情形 2 是我们自己写的 id，叫用户「改个 key」是错的指路
+    // （他改不了，那是 LoongPort 生成的），而且那条记录**本来就该**在库里。
+    if already_in_db {
+        log::debug!(
+            "{app} 的 live provider '{id}' 是 LoongPort 托管的，不从 live config 回读 —— \
+             它的配置由 provision 生成，让 live 覆盖会用派生物覆盖真相源。"
+        );
+    } else {
+        log::warn!(
+            "跳过 {app} 的 live provider '{id}'：它命中了 LoongPort 托管 id 的形状，\
+             而库里没有这条记录。导入会让它在界面上不可见也不可删 —— \
+             请在 {app} 自己的配置里改个 key。"
+        );
+    }
+    true
+}
+
 /// Import all providers from OpenCode live config to database
 ///
 /// This imports existing providers from ~/.config/opencode/opencode.json
@@ -1722,6 +1787,9 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
     let existing_ids = state.db.get_provider_ids("opencode")?;
 
     for (id, config) in providers {
+        if live_import_should_skip(&id, "OpenCode", existing_ids.contains(&id)) {
+            continue;
+        }
         // Convert to Value for settings_config
         let settings_config = match serde_json::to_value(&config) {
             Ok(v) => v,
@@ -1797,6 +1865,9 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
     let existing_ids = state.db.get_provider_ids("openclaw")?;
 
     for (id, config) in providers {
+        if live_import_should_skip(&id, "OpenClaw", existing_ids.contains(&id)) {
+            continue;
+        }
         // Validate: skip entries with empty id or no models
         if id.trim().is_empty() {
             log::warn!("Skipping OpenClaw provider with empty id");
@@ -1885,6 +1956,9 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
     let existing_ids = state.db.get_provider_ids("hermes")?;
 
     for (name, config) in providers {
+        if live_import_should_skip(&name, "Hermes", existing_ids.contains(&name)) {
+            continue;
+        }
         // Validate: skip entries with empty name
         if name.trim().is_empty() {
             log::warn!("Skipping Hermes provider with empty name");
@@ -2614,5 +2688,66 @@ base_url = "https://a.example/v1"
 
         assert!(!config_text.contains("mcp_servers"));
         assert!(config_text.contains("model = \"grok-4.5\""));
+    }
+    /// ⭐ **live config 导入不许把用户的 provider 变成不可管理的孤儿。**
+    ///
+    /// ## 它守的是什么（review 抓出，2026-08-04）
+    ///
+    /// 三个 `import_*_providers_from_live` 的 provider id **就是用户自己 CLI
+    /// 配置文件里的 key**，而它们直接 `save_provider`，**不过命令层的
+    /// `reject_if_managed`**（那道守卫只在 `add_provider` / `update_provider` /
+    /// `delete_provider` 上），且启动时无条件跑。
+    ///
+    /// ⇒ 用户在 `~/.config/opencode/opencode.json` 里起个恰好命中托管形状的 key，
+    /// 下次启动它就进库，然后：列表里被滤掉、编辑删除被拦、托盘里没有、运营商区
+    /// 也不显示它 ⇒ **不可见也不可删**。
+    ///
+    /// ⚠️ **收紧 `is_managed` 挡不住这一类**：`loongport-0123456789abcdef` 是
+    /// 完全合法的 opencode key，形状上与我们生成的一模一样，判据无从分辨。
+    /// 所以这道守卫补的是「来源」那一半 —— 从用户 CLI 配置读进来的，定义上不是我们生成的。
+    #[test]
+    fn live_import_skips_ids_that_would_become_unmanageable_orphans() {
+        // 情形 1：库里还没有 —— 形状与我们生成的一致（前缀 + 16 位小写 hex），
+        // 用户完全填得出来。跳过是为了不制造孤儿。
+        assert!(
+            live_import_should_skip("loongport-0123456789abcdef", "OpenCode", false),
+            "命中托管形状的 key 必须跳过，否则那条记录进库后不可见也不可删"
+        );
+
+        // 情形 2：库里已经有 —— 那是**我们自己**写进 live config 的托管 provider
+        // （vendor 的 `DEEPSEEK_APPS` 含 Hermes / OpenClaw / OpenCode，切到它时
+        // `set_typed_provider(&provider.id, ..)` 就写进去了）。同样跳过，但理由不同：
+        // 那条分支会用 live config 改写 DB 的 `settings_config`，而托管配置的真相源
+        // 是 `provision` ⇒ 让 live 覆盖它就是用派生物覆盖真相源。
+        assert!(
+            live_import_should_skip("loongport-vendor-fedcba9876543210", "Hermes", true),
+            "已在库里的托管 provider 也不许从 live config 回读 —— 那会覆盖 provision 写的配置"
+        );
+        // 同一个 id、库里没有时也跳过（两条理由都指向跳过，只是日志级别不同）。
+        assert!(live_import_should_skip(
+            "loongport-vendor-fedcba9876543210",
+            "Hermes",
+            false
+        ));
+
+        // 反面：普通 key **一个都不许**被拦 —— 这是上游的正常功能，
+        // 拦错了用户会发现自己 CLI 里配的 provider 莫名不出现在 LoongPort 里。
+        for id in [
+            "my-gateway",
+            "openrouter",
+            // 只是碰巧以前缀开头，但不是我们的形状 ⇒ 判据已经收紧，它是安全的，
+            // 用户照样能在列表里看到并管理它。
+            "loongport-mine",
+            "loongport-1785818820765",
+            "",
+        ] {
+            // 两种在库状态都不许拦 —— 普通 provider 的 live 回读是上游的正常功能。
+            for already_in_db in [false, true] {
+                assert!(
+                    !live_import_should_skip(id, "OpenCode", already_in_db),
+                    "普通 key 被误拦，用户的 provider 会凭空不出现 / 不再同步：{id}"
+                );
+            }
+        }
     }
 }

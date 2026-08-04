@@ -22,7 +22,7 @@ import type { AppId } from "@/lib/api";
 import { providersApi } from "@/lib/api/providers";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { useDragSort } from "@/hooks/useDragSort";
-import { MANAGED_PROVIDER_ID_PREFIX } from "@/config/constants";
+import { isManagedProviderId } from "@/config/managedProviderId";
 import {
   useOpenClawLiveProviderIds,
   useOpenClawDefaultModel,
@@ -95,21 +95,25 @@ export function ProviderList({
   const { t } = useTranslation();
   const { checkProvider, isChecking } = useStreamCheck(appId);
 
-  // LoongPort 托管的档位不在这个列表里出现 —— 它们有自己的页面（OperatorTierList）。
+  // LoongPort 托管的档位不在这个列表里出现 —— 它们在本页**顶部**那一区
+  // （`OperatorSection`）。⚠️ 别再写成「它们有自己的页面」：那个独立页
+  // 2026-08-04 已删，现在两者同在供应商页上，只是分上下两区。
   //
   // **为什么必须滤**：这里的每张卡都带编辑/删除/拖拽排序，而托管项那三样都不适用
   // （配置由 provision 生成，改了下次刷新就被覆盖；顺序由倍率决定）。Rust 侧虽然已经
   // 收了口（`reject_if_managed`，那些命令会报错），但把按钮摆在那儿本身就是陷阱 ——
-  // 用户点了才被拒，而错误文案指向另一个页面。
+  // 用户点了才被拒，而错误文案指向另一个区。
+  //
+  // ⚠️ **判据走 `isManagedProviderId` 而不是裸前缀** —— 前缀会把用户手填的
+  // `loongport-mine` 也滤掉（opencode / openclaw / hermes 的 id 就是用户填的 key），
+  // 那条 provider 于是从界面上消失，而他没有任何办法把它找回来。
   //
   // 滤在 useDragSort **之前**：下游的排序、渲染、拖拽索引全都继承这个结果，
   // 只需这一处。这也是「改上游文件时改动面越小越好」（CLAUDE.md §一）。
   const unmanagedProviders = useMemo(
     () =>
       Object.fromEntries(
-        Object.entries(providers).filter(
-          ([, p]) => !p.id.startsWith(MANAGED_PROVIDER_ID_PREFIX),
-        ),
+        Object.entries(providers).filter(([, p]) => !isManagedProviderId(p.id)),
       ),
     [providers],
   );

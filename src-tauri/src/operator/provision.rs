@@ -868,7 +868,10 @@ mod tests {
         assert_ne!(a, provider_id_for("https://bestapi.store", Some(1), 43));
         // 不同站的同号分组必须不同 id。
         assert_ne!(a, provider_id_for("https://other.dev", Some(1), 42));
-        assert!(a.starts_with("loongport-"));
+        // 走**真判据**而不是 `starts_with(前缀)` —— 判据已收紧成「前缀 + 16 位小写
+        // hex」，只验前缀的断言比它弱，改坏格式时不会红（形状那条由
+        // `generated_ids_always_have_exactly_sixteen_lowercase_hex_chars` 专门钉）。
+        assert!(crate::operator::is_managed(&a), "id: {a}");
     }
 
     /// ⭐ **同一个站上两个账号的同号分组必须是不同的 provider。**
@@ -899,6 +902,73 @@ mod tests {
             provider_id_for(site, Some(12), 3),
             "拼接必须有分隔符，否则 (1,23) 与 (12,3) 会撞号"
         );
+    }
+
+    /// ⭐ **生成的 id 恒是「前缀 + 16 位小写 hex」—— 那是托管判据的地基。**
+    ///
+    /// ## 为什么这条闸必须有
+    ///
+    /// `managed::is_managed` 从「只判前缀」收紧成「前缀 + 恰好 16 位小写 hex」之后，
+    /// **这个格式成了契约**：某个 hash 值若产出 15 位或带大写，那条记录当场脱管 ——
+    /// 守卫全线失效（能从托盘直接切、能被删）、且下次 provision 会为同一分组
+    /// 再插一条新 id（旧的永远留在库里，不可见也不可删）。
+    ///
+    /// ## 它验的具体是什么
+    ///
+    /// `format!("{:.16x}", h.finalize())` 里的 `.16` 是**精度**，而精度对不同类型
+    /// 语义不同：对**整数**它被忽略（`format!("{:.16x}", 1u128)` 得到 `"1"`，不补零
+    /// 也不截断），对**字符串式 Display** 才是截断。sha256 的 `finalize()` 返回
+    /// `GenericArray`，它的 `LowerHex` 按字节逐个输出两位十六进制（含前导零）⇒
+    /// 全长恒 64 位 ⇒ 截断到 16 位恒成立。
+    ///
+    /// 这个推理链依赖第三方 crate 的 impl 细节（`generic-array` / `sha2`），
+    /// 所以不能只靠读文档 —— 扫一批真实输入把它钉住。bump 那两个 crate 时若语义变了，
+    /// 本条会红，而那正是需要被通知的时刻。
+    #[test]
+    fn generated_ids_always_have_exactly_sixteen_lowercase_hex_chars() {
+        let prefix = crate::operator::managed::MANAGED_ID_PREFIX;
+
+        // 扫一批输入：不同站点、账号（含未登录的 `None`）、分组号。
+        // 2000 组足够覆盖「首字节为 0」这类前导零情形（概率 1/256，期望约 8 次）。
+        for i in 0..2000i64 {
+            for (site, account) in [("https://bestapi.store", Some(i)), ("https://x.dev", None)] {
+                let id = provider_id_for(site, account, i);
+                let hex = id
+                    .strip_prefix(prefix)
+                    .expect("id 必须带托管前缀，否则守卫认不出它");
+
+                assert_eq!(
+                    hex.len(),
+                    16,
+                    "hex 段不是 16 位 ⇒ 这条记录会脱管（守卫失效 + 重复插记录）：{id}"
+                );
+                // 大小写敏感是判据的一部分（`{:x}` 恒小写，放行大写会把判据
+                // 重新放宽到用户填得出的形状上）。
+                assert!(
+                    hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                    "hex 段含非小写十六进制字符：{id}"
+                );
+                // 端到端：判据本身必须认它。
+                assert!(
+                    crate::operator::is_managed(&id),
+                    "生成的 id 没被判据认出来：{id}"
+                );
+            }
+        }
+
+        // vendor 那支形状不同（多一段 `vendor-`），同样钉住。
+        for i in 0..500 {
+            let id = crate::vendor::provision::provider_id_for("deepseek", &format!("acct-{i}"));
+            let hex = id
+                .strip_prefix(prefix)
+                .and_then(|r| r.strip_prefix("vendor-"))
+                .unwrap_or_else(|| panic!("vendor id 形状变了：{id}"));
+            assert_eq!(hex.len(), 16, "vendor 的 hex 段不是 16 位：{id}");
+            assert!(
+                crate::operator::is_managed(&id),
+                "vendor id 没被认出来：{id}"
+            );
+        }
     }
 
     #[test]

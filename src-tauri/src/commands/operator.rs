@@ -155,6 +155,18 @@ pub struct ProbeResult {
 #[serde(rename_all = "camelCase")]
 pub struct TierInfo {
     pub provider_id: String,
+    /// 这个档位落在哪个 CLI 上（`AppType::as_str()`，如 `"codex"` / `"claude"`）。
+    ///
+    /// ## 为什么必须有它
+    ///
+    /// [`do_provision`] 一次探**全部平台**，返回的 `tiers` 是全平台的，而 UI 那一行
+    /// 只显示当前 app 的档位。没有这个字段，前端拿到一堆档位却分不出哪条是自己的
+    /// ⇒ 「这个站没有该平台的分组」与「拉取失败」在界面上长得一样（都是零档位），
+    /// 而前者重试一百次也不会有、后者重试有意义。
+    ///
+    /// [`list_tiers_impl`] 那条路填的是它被查询的那个 app（那条命令按 app 查，
+    /// 结果天然同质），所以两条路的语义一致：**这条档位属于哪个 CLI**。
+    pub app_id: String,
     pub group_name: String,
     pub display_name: String,
     pub rate_multiplier: Option<f64>,
@@ -1005,6 +1017,9 @@ async fn do_provision(
         tiers.push(TierInfo {
             is_current,
             provider_id,
+            // **这条分组自己的 app_type**，不是调用方给的 —— 这一整段循环的前提就是
+            // 「一次 provision 探全部平台」，写错会让前端把别的平台的档位算成自己的。
+            app_id: app_type.as_str().to_string(),
             group_name: tier.group_name.clone(),
             display_name,
             rate_multiplier: Some(tier.rate_multiplier),
@@ -1100,7 +1115,7 @@ fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
 ///
 /// 三道判据缺一不可：
 ///
-/// - `is_managed` —— 我们生成的（只查 id 前缀，不校验哈希形状）。用户手工加的 provider
+/// - `is_managed` —— 我们生成的（前缀 + 恰好 16 位小写 hex，即校验哈希形状）。用户手工加的 provider
 ///   一律不碰，错删它是不可挽回的。
 /// - `website_url == site_origin` —— 只认这个站的。`provider_id` 是哈希，单向不可逆，
 ///   反推不出它属于谁。
@@ -1200,7 +1215,7 @@ fn apps_using_this_accounts_tiers(
 ///
 /// 删除条件是**三个都成立**：
 ///
-/// - `is_managed(id)` —— 是我们生成的（前缀（**只查前缀，不校验哈希形状**）），用户手工加的 provider
+/// - `is_managed(id)` —— 是我们生成的（**前缀 + 恰好 16 位小写 hex**），用户手工加的 provider
 ///   一律不碰。这是最重要的一道：错删用户自己配的 provider 是不可挽回的。
 /// - `website_url == 这次的 site_origin` —— **只清这个运营商的**。别的站的档位这次
 ///   压根没查（`provision` 只拉当前这一个站的分组），凭「这次没生成」删它们是错的。
@@ -1702,6 +1717,11 @@ fn tiers_of_site(
             (None, Some(_)) => false,
         })
         .map(|owned| TierInfo {
+            // ⚠️ **`app_id` 靠 `..owned.tier.clone()` 隐式继承**（来自
+            // `list_tiers_impl`，那条路按 app 查所以值天然正确）。改成显式构造、
+            // 或在中间插一层跨 app 的合并时**必须重新想清楚它** —— 那时它会静默
+            // 变错（前端据它筛「属于当前那一屏的档位」），而没有测试会红。
+            //
             // 基准用档位**当前**的名字（`owned.display_name`），不是默认名 ——
             // 见那个字段的文档：用默认名会让改过名的档位永远显示「已手动维护」。
             user_edited: provision::is_user_edited(
@@ -1726,6 +1746,9 @@ fn tiers_of_site(
 fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>, AppError> {
     // AppType 没派生 Copy（上游结构，别为此改它），所以 clone 一份给第二个调用点。
     let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
+    // 这条路按 app 查，所以结果天然同质 —— 每条档位的 `app_id` 就是被查的那个。
+    // 先取出来：`app_type` 下一行就被 move 进 `list` 了。
+    let app_id = app_type.as_str().to_string();
     let providers = ProviderService::list(state, app_type)?;
 
     let mut tiers: Vec<OwnedTier> = providers
@@ -1734,6 +1757,7 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
         .map(|p| OwnedTier {
             tier: TierInfo {
                 provider_id: p.id.clone(),
+                app_id: app_id.clone(),
                 // 倍率不在本地存 —— 它是服务端的定价，可能已经变了。要看倍率就重新
                 // provision，那时会从服务端拿到当前值。这里返回 None 让 UI 知道
                 // "不知道"，而不是编一个 0。
@@ -2456,6 +2480,49 @@ mod tests {
         );
     }
 
+    /// ⭐ **`TierInfo` 必须说清自己落在哪个 CLI 上。**
+    ///
+    /// ## 它守的是什么缺陷（TODO 债 11）
+    ///
+    /// [`do_provision`] 一次探**全部平台**，`tiers` 收的是全平台的结果，而 UI 那一行
+    /// 只显示**当前 app** 的档位。于是「这个站没有 anthropic 分组」与「拉取失败」
+    /// 在界面上长得一样（都是零档位 + 「该账号在此平台下没有可用分组」）——
+    /// 而前者重试一百次也不会有，后者重试有意义。
+    ///
+    /// 区分它们所需的信息 provision 时**本来就在手上**（每个分组的 `app_type`），
+    /// 少的只是把它发给前端。没有这个字段，前端拿到一堆 tiers 却分不出哪条是自己的。
+    ///
+    /// ## 为什么键名是 `appId`
+    ///
+    /// 前端那边这个概念叫 `AppId`（`lib/api/types.ts`），命令层签名也一直吃
+    /// `app_id`。发 `appType` 会让同一个东西在两侧各有一个名字。
+    #[test]
+    fn tier_info_tells_the_frontend_which_cli_it_landed_on() {
+        let tier = TierInfo {
+            provider_id: "loongport-0123456789abcdef".into(),
+            app_id: AppType::Claude.as_str().to_string(),
+            group_name: "pro池".into(),
+            display_name: "站 · pro池".into(),
+            rate_multiplier: Some(1.0),
+            is_current: false,
+            user_edited: None,
+        };
+
+        let json = serde_json::to_value(&tier).expect("要能序列化");
+        let obj = json.as_object().expect("是个对象");
+
+        assert_eq!(
+            obj.get("appId").and_then(|v| v.as_str()),
+            Some("claude"),
+            "前端要靠 appId 判断这条档位是不是属于它当前那一屏，实际：{:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !obj.contains_key("app_id"),
+            "别把 snake_case 键发给前端（TS 那边按 camelCase 读）"
+        );
+    }
+
     #[test]
     fn managed_detection_matches_generated_ids_only() {
         // 正面：provision 生成的 id 必须被认出来。
@@ -2471,6 +2538,8 @@ mod tests {
     fn tier(id: &str) -> TierInfo {
         TierInfo {
             provider_id: id.into(),
+            // 归属测试只关心「哪条属于哪个站/账号」，与落在哪个 CLI 无关。
+            app_id: AppType::Codex.as_str().to_string(),
             group_name: id.into(),
             display_name: id.into(),
             rate_multiplier: None,

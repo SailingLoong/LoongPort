@@ -105,34 +105,24 @@ pub fn import_provider_from_deeplink(
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect::<String>()
         .to_lowercase();
-    // ⚠️ **id 里的名字是用户给的，必须挡住托管前缀**（review 抓出）。
+    // ## 用户可以随便起名，包括 `LoongPort`（2026-08-04 去掉了那道改写）
     //
-    // 判据「这条 provider 是不是 LoongPort 托管的」只看 id 前缀
-    // （`operator::managed::is_managed`）。而这里的 id 是 `<用户给的名字>-<时间戳>` ⇒
-    // 名字取 `loongport` 或 `loongport-*` 时，生成的 id 恰好命中那个前缀，于是这条
-    // **普通** provider 被当成托管的：
+    // 这里曾经有一段：`candidate` 命中 `is_managed` 时加个前导下划线。它防的是
+    // 「用户给的名字让 id 撞上托管判据」⇒ 那条普通 provider 被当成托管的
+    // （列表里过滤掉、编辑删除被守卫拦下、而运营商区又不显示它）= 一条不可见也
+    // 不可管理的孤儿。
     //
-    // - provider 列表按前缀把它过滤掉（`ProviderList.tsx`）⇒ 看不见；
-    // - `update_provider` / `delete_provider` 被 `reject_if_managed` 拦下 ⇒ 删不掉；
-    // - 而它没有运营商归属（`meta.loongportAccountId` 为空），所以运营商区也不显示它，
-    //   `prune_stale_tiers` 也不会清它（那里还要求 `website_url` 匹配某个站）。
+    // **那个问题已经从根上修掉了**：判据不再只看前缀，而是「前缀 + 我们真正会生成的
+    // 那两种形状」（16 位小写 hex，见 `operator::managed::is_managed`）。
+    // `loongport-<时间戳>` 的时间戳是 13 位十进制 ⇒ 压根不命中。
     //
-    // 合起来 = **一条永久留在库里、完全不可见也不可管理的记录**。
+    // ⚠️ 挡住它的是**长度**（13 ≠ 16），不是字符集 —— 十进制数字必然满足 hex
+    // 的字符集。所以哪天时间戳真变成 16 位就会命中（毫秒时间戳进 14 位要到公元
+    // 5138 年，16 位更远，所以这不是需要现在处理的风险，但改这段时要知道判据靠的是哪一条）。
     //
-    // 修在生成端而不是放宽判据：那个前缀是不可逆契约（`MANAGED_ID_PREFIX` 的文档写了
-    // 「改它等于所有已生成的 provider 当场脱管」），而这里只是给 id 换个安全的开头。
-    //
-    // ⚠️ **判的是拼好的 id，不是名字本身** —— 名字 `loongport`（不带连字符）自己
-    // 并不命中前缀，但拼上 `-<时间戳>` 之后正好变成 `loongport-1700…` ⇒ 命中。
-    // 只查名字会漏掉这一类，而它恰恰是最自然的输入。
-    let candidate = format!("{sanitized_name}-{timestamp}");
-    provider.id = if crate::operator::is_managed(&candidate) {
-        // 加前导下划线而不是截掉那一段：截掉会让 `loongport` 与 `loongport-abc`
-        // 生成同名 id（前者变空串），而下划线保住了用户给的名字仍能被认出来。
-        format!("_{candidate}")
-    } else {
-        candidate
-    };
+    // 所以这道改写现在挡的是一个不存在的问题，留着只会让用户名为 `LoongPort` 时
+    // 凭空多一个下划线，且让「什么算托管」在两处各说一遍。判据归 `managed.rs` 一处。
+    provider.id = format!("{sanitized_name}-{timestamp}");
 
     let provider_id = provider.id.clone();
 

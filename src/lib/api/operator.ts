@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { AppId } from "./types";
+
 /**
  * 「加站弹窗要什么」+「切档位前要不要提醒处理 ChatGPT」。
  *
@@ -58,8 +60,14 @@ export interface Sponsor {
 
 export interface TierInfo {
   providerId: string;
-  /** 只有刚 provision 过才有值；列表命令返回 null（倍率不在本地存）。 */
-  groupId: number | null;
+  /**
+   * 这个档位落在哪个 CLI 上（`"codex"` / `"claude"` / …）。
+   *
+   * ⚠️ **`provision` 返回的 tiers 是全平台的** —— 它一次探全部平台，每个分组按自己的
+   * `platform` 落到对应 CLI。所以读这个字段筛出「属于当前那一屏的」，别假设全都是。
+   * `listOperators` / `listTiers` 那两条路按 app 查，结果天然同质。
+   */
+  appId: AppId;
   groupName: string;
   displayName: string;
   /** 计费倍率，越小越便宜。null = 未知，不要当 0 显示。 */

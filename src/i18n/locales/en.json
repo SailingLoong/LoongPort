@@ -3055,7 +3055,8 @@
       "remove": "Remove this account (and its tiers)",
       "removeBlockedByCurrent": "One of its tiers is in use — switch to another tier first",
       "removeConfirmTitle": "Remove this account?",
-      "removeConfirmMessage": "This removes the login for “{{label}}” along with the {{count}} tier(s) it generated. Any balance stays with the provider — sign in again to use it."
+      "removeConfirmMessage": "This removes the login for “{{label}}” along with the {{count}} tier(s) it generated. Any balance stays with the provider — sign in again to use it.",
+      "removeConfirmMessageNeverLoggedIn": "This removes the “{{label}}” row along with the {{count}} tier(s) it generated. This account was never signed in, so you can add it again any time."
     },
     "tier": {
       "rateUnknown": "Rate unknown",
@@ -3098,6 +3099,7 @@
     "provision": {
       "ready": "{{count}} tier(s) ready",
       "readyWithKeys": "{{count}} tier(s) ready, {{keys}} key(s) created",
+      "landedOnOtherPlatforms": "This account has {{count}} group(s), but none of them are for the current CLI. Switch to the matching tab above to see them.",
       "groupFailed": "{{group}}: {{reason}}",
       "refreshed": "Refreshed {{operators}} provider(s), {{tiers}} tier(s) total",
       "refreshFailedWithReason": "Failed to refresh {{name}}: {{reason}}",

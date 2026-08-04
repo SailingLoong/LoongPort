@@ -98,6 +98,7 @@ function renderDialog(overrides: { onAdded?: () => void } = {}) {
       onClose={() => {}}
       onAdded={overrides.onAdded ?? (() => {})}
       defaultSite="790053500.com"
+      appId="codex"
     />,
   );
 }

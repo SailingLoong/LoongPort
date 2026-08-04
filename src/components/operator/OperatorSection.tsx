@@ -9,6 +9,7 @@ import { PURCHASE_CLOSED_EVENT } from "@/lib/api/operator";
 import type { AppId, ProviderSwitchEvent } from "@/lib/api";
 import type {
   OperatorRow as OperatorRowData,
+  ProvisionSummary,
   TierInfo,
 } from "@/lib/api/operator";
 import {
@@ -26,6 +27,8 @@ import { AddSiteDialog } from "./AddSiteDialog";
 import { openInBrowser } from "./openInBrowser";
 import { OperatorTierList } from "./OperatorTierList";
 import { balanceRowsKey, parseBalanceRowsKey } from "./balanceRowsKey";
+import { sumTiersForApp } from "./provisionScope";
+import { removeConfirmMessageKey } from "./removeConfirmWording";
 import { reportProvision } from "./reportProvision";
 import { type RowKey, rowKey } from "./rowKey";
 import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
@@ -759,7 +762,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
           // 登录窗不会自动关闭（它已跳到 dashboard，用户可能要在那儿充值或看用量）。
           toast.success(t("loongport.session.connected"));
           // 直接把密钥备好 —— 不该再让用户点一次。
-          reportProvision(t, await operatorApi.provision(operatorId));
+          reportProvision(t, await operatorApi.provision(operatorId), appId);
         }
         // ok === false 是用户自己关了窗口，不出提示（他知道自己干了什么）。
         await reload(operators.find((op) => op.id === operatorId)?.siteOrigin);
@@ -772,7 +775,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   const handleProvision = (operatorId: number) =>
     run(`provision:${operatorId}`, async () => {
       try {
-        reportProvision(t, await operatorApi.provision(operatorId));
+        reportProvision(t, await operatorApi.provision(operatorId), appId);
         // 只刷这一个运营商的倍率 —— 别的账号没变，重查它们纯属浪费请求。
         await reload(operators.find((op) => op.id === operatorId)?.siteOrigin);
       } catch (e) {
@@ -811,7 +814,6 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
         targets.map((op) => operatorApi.provision(op.id)),
       );
 
-      let tierTotal = 0;
       let keysCreated = 0;
       // ⚠️ **成功数必须自己数，不能用 `targets.length`**（review 抓出）。
       //
@@ -823,10 +825,13 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
       // 整个丢掉，而后端那条路径也不落日志 ⇒ 两处一叠，用户只看到「<站名> 刷新失败」，
       // 定位一次要手工从 DB 取 token 逐个端点 curl。
       const failed: { name: string; reason: string }[] = [];
+      // 成功项单独收一份 —— 档位数的累加交给 `sumTiersForApp`（见它的文档：
+      // 内联 `+=` 那种写法没有任何闸钉得住，实测改错了 678 条测试全绿）。
+      const ok: ProvisionSummary[] = [];
       results.forEach((r, i) => {
         if (r.status === "fulfilled") {
           succeeded += 1;
-          tierTotal += r.value.tiers.length;
+          ok.push(r.value);
           keysCreated += r.value.keysCreated;
           for (const f of r.value.failures) {
             toast.warning(
@@ -843,6 +848,11 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
           });
         }
       });
+
+      // ⚠️ **只数当前平台的** —— `tiers` 是全平台的（provision 一次探全部平台）。
+      // 累总数会说出「共 9 个档位」而用户眼前那一屏只有 3 个，且那句是绿色的
+      // 成功语气 ⇒ 他分不清是提示错了还是界面漏了。
+      const tierTotal = sumTiersForApp(ok, appId);
 
       // ⚠️ 这四条文案原来是**中文硬编码**（en/ja/zh-TW 用户看到中文），已接进 i18n
       // （复用 `provision.*` 那批按语义命名的 key，见 `reportProvision` 上方）。
@@ -1054,6 +1064,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
           onClose={() => setAddingSite(false)}
           onAdded={() => void reload()}
           defaultSite={defaultSite}
+          appId={appId}
           isFirstRun
         />
       </>
@@ -1130,14 +1141,23 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
       <ConfirmDialog
         isOpen={confirmRemove !== null}
         title={t("loongport.row.removeConfirmTitle")}
-        message={t("loongport.row.removeConfirmMessage", {
-          label:
-            confirmRemove?.accountLabel ||
-            confirmRemove?.siteName ||
-            confirmRemove?.siteOrigin ||
-            "",
-          count: confirmRemove?.tiers.length ?? 0,
-        })}
+        // 文案按「这一行登录过没有」分两句 —— 判据见 `removeConfirmWording.ts`
+        // （从没登录的行既没有登录态也没有余额，无条件那句话会说错两处）。
+        // `confirmRemove` 为 null 时弹窗不显示，此处的兜底值不会被看到。
+        message={t(
+          removeConfirmMessageKey({
+            loggedIn: confirmRemove?.loggedIn ?? false,
+            sessionExpired: confirmRemove?.sessionExpired ?? false,
+          }),
+          {
+            label:
+              confirmRemove?.accountLabel ||
+              confirmRemove?.siteName ||
+              confirmRemove?.siteOrigin ||
+              "",
+            count: confirmRemove?.tiers.length ?? 0,
+          },
+        )}
         confirmText={t("common.delete")}
         onConfirm={() => {
           if (confirmRemove) void doRemoveOperator(confirmRemove);
@@ -1162,6 +1182,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
         onClose={() => setAddingSite(false)}
         onAdded={() => void reload()}
         defaultSite={defaultSite}
+        appId={appId}
       />
 
       {/* 「编辑配置」的警告 + cc-switch 编辑页（见 useTierEditGuard）。 */}

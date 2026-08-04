@@ -308,16 +308,20 @@ describe("ProviderList Component", () => {
   });
 
   it("hides LoongPort managed tiers from the provider list", () => {
-    // 托管档位有自己的页面（OperatorTierList）。留在这个列表里的问题不是"重复显示"，
-    // 而是**这里每张卡都带编辑/删除/拖拽**，那三样对托管项都不适用（配置由 provision
-    // 生成、改了下次刷新被覆盖；顺序由倍率决定）。Rust 侧虽已收口，把按钮摆在那儿
-    // 本身就是陷阱 —— 用户点了才被拒，且错误文案指向另一个页面。
+    // 托管档位显示在供应商页**顶部**那一区（`OperatorSection`）。留在这个列表里的
+    // 问题不是"重复显示"，而是**这里每张卡都带编辑/删除/拖拽**，那三样对托管项都
+    // 不适用（配置由 provision 生成、改了下次刷新被覆盖；顺序由倍率决定）。
+    // Rust 侧虽已收口，把按钮摆在那儿本身就是陷阱 —— 用户点了才被拒。
+    //
+    // ⚠️ 托管 id 必须写**真形状**（前缀 + 16 位小写 hex）：判据是
+    // `isManagedProviderId` 而不是裸前缀，手编一个 12 位的 hex 段过不了它 ——
+    // 那不是判据的 bug，是这个 fixture 没代表真实数据（见下一条用例）。
     renderWithQueryClient(
       <ProviderList
         providers={{
           alpha: createProvider({ id: "alpha", name: "Alpha" }),
-          "loongport-abc123def456": createProvider({
-            id: "loongport-abc123def456",
+          "loongport-abc123def4567890": createProvider({
+            id: "loongport-abc123def4567890",
             name: "BestApi · Pro",
           }),
         }}
@@ -338,5 +342,40 @@ describe("ProviderList Component", () => {
       unknown
     >;
     expect(Object.keys(passedProviders)).toEqual(["alpha"]);
+  });
+
+  /**
+   * ⭐ **用户手填的 `loongport-…` 不许被滤掉。**
+   *
+   * live config 导入（Rust 侧 `import_*_providers_from_live`）的 provider id
+   * **就是用户自己 CLI 配置文件里的 key**，且那条路绕过命令层守卫、启动时无条件跑
+   * （表单那条路早有 `reject_if_managed`，填不进来）。裸前缀过滤会让那条
+   * provider 从列表里**凭空消失** —— 而它不在运营商区（那里只有真托管项），
+   * 于是他既看不到也删不掉，UI 上无逃生路径。
+   */
+  it("keeps user-authored ids that merely start with the prefix", () => {
+    renderWithQueryClient(
+      <ProviderList
+        providers={{
+          "loongport-mine": createProvider({
+            id: "loongport-mine",
+            name: "My own gateway",
+          }),
+        }}
+        currentProviderId=""
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    const passedProviders = useDragSortMock.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(passedProviders)).toEqual(["loongport-mine"]);
   });
 });

@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { operatorApi } from "@/lib/api";
+import type { AppId } from "@/lib/api";
 // 类型从具体模块拿 —— `@/lib/api` 那个 barrel 只导出 `operatorApi`
 // （与 `OperatorRow` / `OperatorTierList` 同一写法）。
 import type { SiteInfo, Sponsor } from "@/lib/api/operator";
@@ -31,6 +32,14 @@ import { reportProvision } from "./reportProvision";
  */
 export interface AddSiteDialogProps {
   open: boolean;
+  /**
+   * 当前 tab 的 app_type。
+   *
+   * 用来判断「这次 provision 拉到的分组有没有当前平台的」—— provision 一次探
+   * 全部平台，报「已备好 N 个档位」时若拿全平台总数，用户面前那一屏可能还是空的。
+   * 见 `reportProvision`。
+   */
+  appId: AppId;
   /** 关闭请求。 */
   onClose: () => void;
   /** 探测成功后调用，宿主据此 refresh。 */
@@ -53,6 +62,7 @@ export interface AddSiteDialogProps {
 
 export function AddSiteDialog({
   open,
+  appId,
   onClose,
   onAdded,
   defaultSite,
@@ -172,7 +182,7 @@ export function AddSiteDialog({
         // 播报走**共用的** `reportProvision`（与 `OperatorSection` 同一个函数）：
         // 部分分组建密钥失败时要逐条点名，静默吞掉会让用户以为全部备好了。
         try {
-          reportProvision(t, await operatorApi.provision(r.operatorId));
+          reportProvision(t, await operatorApi.provision(r.operatorId), appId);
         } catch (e) {
           toast.error(String(e));
         }
