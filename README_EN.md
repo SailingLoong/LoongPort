@@ -27,6 +27,10 @@ LoongPort collapses that into two steps — **enter a domain, sign in once.** It
 provisions a key for every tier your account can reach, writes each CLI's config in
 its own shape, and switching tiers becomes a single click.
 
+If your site has an image tier, you can also
+[**generate images right inside your CLI**](#generating-images-in-your-cli) — without
+giving up the tier you chat on.
+
 <div align="center">
   <img src="assets/screenshots/main-zh.png" alt="LoongPort main window: the operator list, each row showing its balance and tier count" width="820">
   <br>
@@ -138,6 +142,39 @@ Credentials and site data live in a local SQLite database under `~/.loongport/` 
 sent only to the relay site you chose, as the Bearer token on its API calls. LoongPort
 has no account system and no server of its own, so it never receives them.
 
+## Generating images in your CLI
+
+A tier that only serves image models carries an extra **use for images** button. Click
+it and LoongPort registers its built-in image tool (an MCP server) with Codex, Claude
+Code and Gemini CLI — after that, asking for an image in conversation just works.
+
+Three things worth knowing:
+
+- **Your chat tier does not step aside.** Chat goes to `/v1/responses` with the active
+  tier's key; images go to `/v1/images/generations` with the image tier's key — two
+  independent "current" selections, and switching one never disturbs the other. You
+  keep chatting on the cheap text tier.
+- **Switching image tiers needs no CLI restart.** The MCP entry stores no tier id; the
+  choice lives in LoongPort's own database and is read fresh on every generation. Only
+  the **very first activation** needs a new terminal (that is when the entry is added
+  to the CLI's config, and CLIs only read their config at startup).
+- **A site with no image group shows none of this**, and your CLI configs are left
+  untouched. Picking between a 1K and a 4K tier is a spending decision, so LoongPort
+  never picks for you.
+
+## Updating
+
+**The installer (msi) and the macOS build check for updates on their own**: a few
+seconds after launch they ask once in the background, and a newer version shows up
+under Settings → About — one click downloads, installs and restarts. A failed check
+never bothers you (being offline or unable to reach GitHub is common enough), and you
+can press "check for updates" yourself at any time.
+
+> **The Windows portable build does not update in place** — it cannot replace itself
+> while running. It still tells you a new version exists, but you download the new zip
+> from [Releases](../../releases). That is the trade-off for the portable build: no
+> install step, so nothing for security software to block.
+
 ## What it supports
 
 | | Shipped | In progress |
@@ -145,6 +182,10 @@ has no account system and no server of its own, so it never receives them.
 | **Relay services** | sub2api | new-api |
 | **AI CLIs** | codex · claude | gemini · grok |
 | **Platforms** | macOS · Windows | Linux |
+
+> **The "AI CLIs" row is about chat tiers.** The image tool registers with codex,
+> claude **and gemini** — "gemini in progress" means it cannot yet be the target of a
+> chat tier (its config shape is not written yet), not that it is untouched.
 
 You can point it at your own site domain; a working one is preset by default. macOS and
 Windows have the same feature set.
