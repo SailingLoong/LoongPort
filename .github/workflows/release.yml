@@ -103,22 +103,24 @@ jobs:
       - name: Setup pnpm (Windows ARM64)
         if: runner.os == 'Windows' && matrix.arch == 'arm64'
         shell: pwsh
-        # ARM64 单独走 corepack 而不是 `pnpm/action-setup` —— 那是继承来的做法，别动。
+        # ARM64 这格不能用 `pnpm/action-setup`（那个 action 在 windows-11-arm 上装不上），
+        # 所以单独装一次 pnpm。版本与上面那步的 `pnpm/action-setup` 保持一致。
         #
-        # ⚠️ **必须先把 corepack 自己升级再 prepare。** Node 22.12.0 自带的 corepack
-        # 里烧死的 npm registry 公钥已经过期，而 registry 现在用新 key 签 pnpm ⇒
-        # `corepack prepare` 在验签那步炸，报 `Internal Error: Cannot find matching keyid`
-        # （2026-08-04 实测，日志里能看到它在 node\22.12.0\arm64\node_modules\corepack 下）。
-        # 换一个带新公钥的 corepack 就好。
+        # ⚠️ **不要走 corepack。** 那是继承来的写法，2026-08-04 连撞两个坑：
+        #   1. `corepack prepare` 验签失败 —— Node 22.12.0 自带的 corepack 里烧死的
+        #      npm registry 公钥已过期，registry 现在用新 key 签 pnpm ⇒
+        #      `Internal Error: Cannot find matching keyid`。
+        #   2. 想换新 corepack 也不行 —— `npm install -g corepack@<新版>` 报
+        #      `EEXIST: C:\npm\prefix\yarn.cmd`（corepack 带 yarn/pnpm 的 shim，
+        #      runner 镜像里已存在，npm 拒绝覆盖），且 0.35.0 还要 Node ^22.22.2
+        #      而本仓钉 22.12.0 ⇒ `EBADENGINE`。
+        # `npm install -g pnpm@<版本>` 不经过 corepack 的验签与 shim 机制，两个坑都不碰。
         #
-        # **钉版本、不用 `@latest`**：要的只是「带新公钥」这一个属性，而 `@latest` 等于
-        # 让每次构建都拉当天最新版 —— 那是对未来所有版本无条件信任，供应链上白送一个
-        # 可变输入。0.35.0 发布于 2026-05-15。
+        # `--force` 是为了第 2 个坑的同类情形：runner 镜像预装了 pnpm，`pnpm.cmd` 已存在
+        # ⇒ 不加就同样报 EEXIST。这里覆盖它正是我们要的（要的就是钉住的那个版本）。
         run: |
           $ErrorActionPreference = 'Stop'
-          npm install -g corepack@0.35.0
-          corepack enable
-          corepack prepare pnpm@10.12.3 --activate
+          npm install -g --force pnpm@10.12.3
           node --version
           pnpm --version
 
