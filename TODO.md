@@ -181,3 +181,25 @@ WAL 模式下读写可并行。
 然后复核三处：① `database/backup.rs` 的备份是否仍完整（WAL 下要 checkpoint 或用
 sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store` 换数据目录那条路径；
 ③ Windows 上多进程访问同一个 WAL 库的行为。
+
+---
+
+## 连通检测的探测结论是硬编码中文，没走 i18n
+
+**what**：`services/stream_check.rs` 的 `probe_models` 直接返回中文串
+（`"密钥已失效（401）"` / `"只能生图（…），不能对话"` / `"N 个模型（…）"` 等 5 条），
+原样显示在 toast 里 ⇒ en / ja / zh-TW 用户看到中文。
+
+**why 当时没做**：这个功能其余部分的用户可见文案都过了 i18n（7 个 key × 4 语言齐全），
+所以这是个真的不一致，不是有意为之。但它是**诊断按钮的附加信息**（description 那一行），
+非中文用户看到中文仍然读得懂关键部分（`401` / `gpt-image-2` 这些是符号），
+且不影响任何判定 —— 按尺子2 不值得为它在发版前引入一层 enum + 前端格式化。
+
+顺带：这一层的既有后端文案是英文的（`"Reachable"` / `"Check failed"`），
+所以现在两个方向都不一致。
+
+**how-to-repay**：`probe_models` 改为返回一个小 enum + 模型列表
+（如 `ProbeVerdict::KeyExpired` / `ImageOnly(Vec<String>)` / `Models { total, head }`），
+在 `useStreamCheck.ts` 里用 `t()` 格式化。四个语言文件各加 4-5 个 key。
+`StreamCheckResult.model_used` 那个 TEXT 列要么存 enum 的判别式 + JSON、
+要么另加一列 —— 注意它同时是 `stream_check_logs` 的历史数据，改格式要考虑旧行怎么读。

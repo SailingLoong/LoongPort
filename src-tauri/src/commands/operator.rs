@@ -2540,9 +2540,15 @@ pub async fn operator_current_image_tier(
         return Ok(None);
     };
 
-    let still_there = ProviderService::list(&state, AppType::Codex)
-        .map(|list| list.values().any(|p| p.id == provider_id))
-        .unwrap_or(false);
+    // ⚠️ **读失败不能当成「档位没了」**（review 抓出）：那会让一次瞬时的数据库错误
+    // （锁中毒 / IO 抖动）触发下面那段**写操作** —— 清掉标记、删掉 MCP 记录，
+    // 即在一个**读命令**里静默卸掉用户的生图工具，而恢复它还得再新开一次终端。
+    //
+    // 与本模块对 `user_edited` / `allow_image_generation` 的处理同一条原则：
+    // **不知道就别断言**。读不出来就把错误报上去，让调用方知道「这次没查到」，
+    // 而不是替它下一个「已经没了」的结论。
+    let list = ProviderService::list(&state, AppType::Codex).map_err(|e| e.to_string())?;
+    let still_there = list.values().any(|p| p.id == provider_id);
 
     if !still_there {
         // 顺手把这个死标记与 MCP 记录一起清掉 —— 留着它只会让下一次读取重复这段判断，

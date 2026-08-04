@@ -50,6 +50,11 @@ export function useStreamCheck(appId: AppId) {
               responseTimeMs: result.responseTimeMs,
               defaultValue: `${providerName} 连通但较慢 (${result.responseTimeMs}ms)`,
             }),
+            // ⚠️ 这一支**同样要显示** `modelUsed`（review 抓出）——「慢」与「坏」是两件
+            // 独立的事：一个响应慢的档位同样可能密钥已失效、或只挂了生图模型。
+            // 漏在这里等于让这个功能在最需要它的那一类档位上静默失效
+            // （结论算出来了、写进日志了，就是不给用户看）。
+            { description: result.modelUsed || undefined },
           );
         } else {
           // 仅当无法建立连接（DNS / 连接被拒 / TLS / 超时）才会到这里
