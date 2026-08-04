@@ -436,6 +436,23 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        // Updater 插件。2026-08-04 接上自己的发布渠道时启用 —— 在此之前有意不注册，
+        // 因为上游那套端点与 pubkey 指向 cc-switch 自己的发布源，留着会把 LoongPort
+        // 的用户自动升级成 cc-switch。
+        //
+        // **三样配置缺一不可**（只注册插件会得到一个报错的插件；只配端点则永远检查不到）：
+        //   1. 这行注册
+        //   2. `tauri.conf.json` 的 `plugins.updater` —— `endpoints` 指向本仓 Releases 的
+        //      `latest.json`，`pubkey` 是**我们自己的** minisign 公钥
+        //      （key id `4D82BF9D32D1F237`；私钥只在维护者本机与仓库 secret 里）
+        //   3. `bundle.createUpdaterArtifacts: true` —— 不开就不出 `.sig`，而
+        //      `release.yml` 的 `assemble-latest-json` 正是靠遍历 `.sig` 组装
+        //      `latest.json`（没有 .sig ⇒ platforms 为空 ⇒ 那步会跳过上传）
+        //
+        // ⚠️ **pubkey 换不得**：老版本只认烧在自己二进制里的那把公钥，换了之后用新私钥
+        // 签的更新在老客户端上验不过 ⇒ 它们永久收不到更新（与 `operator/remote_config.rs`
+        // 那把 Ed25519 公钥同一个性质）。私钥丢了或泄露都是真正的麻烦事。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_flags())
@@ -524,15 +541,6 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
 
-            // Updater 插件**有意不注册**：LoongPort 还没有自己的发布渠道。
-            //
-            // 上游的 `plugins.updater` 端点与 pubkey 都指向 cc-switch 自己的发布源，留着会把
-            // LoongPort 的用户自动升级成 cc-switch —— 所以 `tauri.conf.json` 里那段整块删了。
-            // 而插件在配置缺失时会初始化失败并每次启动打一条 WARN，索然不注册。
-            //
-            // 有了发布渠道之后要做三件事，缺一不可：配 `plugins.updater.endpoints` 指向自己的
-            // latest.json、换成自己的 minisign pubkey、把这段注册加回来。只加回注册会得到一个
-            // 报错的插件，只配端点则永远不检查更新。
 
             // 注入 AppHandle 给 usage_events，让无 AppHandle 持有的写日志路径
             // 也能向前端推送 `usage-log-recorded`。

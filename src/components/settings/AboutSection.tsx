@@ -239,9 +239,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   );
   const [showInstallCommands, setShowInstallCommands] = useState(false);
 
-  // 不取 `checkUpdate` —— 那是 updater 插件的入口，LoongPort 有意不注册它
-  // （见 `handleCheckUpdate` 里的说明）。检查更新走后端的 `settingsApi.checkUpdates()`。
-  const { hasUpdate, updateInfo, resetDismiss, isChecking } = useUpdate();
+  const { hasUpdate, updateInfo, resetDismiss, isChecking, checkUpdate } =
+    useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -489,19 +488,29 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       return;
     }
 
-    // 走后端的 `check_for_updates`（开 GitHub releases 页），**不要走
-    // `checkUpdate()`（updater 插件）** —— LoongPort 有意不注册那个插件：上游的
-    // `plugins.updater` 端点指向 cc-switch 自己的发布源，留着会把用户升级成 cc-switch
-    // （见 `lib.rs` 里那段说明）。插件没注册时 `check()` 必抛，而这里原本 catch 住弹
-    // 「检查更新失败，请稍后重试」⇒ **用户每次点都看到一个假报错**，而其实是
-    // 有意不做自动更新。
+    // 真的去问一次（`checkUpdate()` → updater 插件 → 本仓 Releases 的 latest.json）。
+    // 2026-08-04 之前这里走的是 `settingsApi.checkUpdates()`（只是开 Releases 页）——
+    // 那时 updater 插件有意不注册，`check()` 必抛。现在插件与端点都配好了，
+    // 该问就问；**问不到才回落到开页面**，让用户至少有路可走（离线、GitHub 不可达、
+    // 或免安装版被放在只读位置都会走到这里）。
     try {
-      await settingsApi.checkUpdates();
+      const found = await checkUpdate();
+      if (!found) {
+        toast.success(t("settings.upToDate"), { closeButton: true });
+      }
     } catch (error) {
-      console.error("[AboutSection] Failed to open releases page", error);
-      toast.error(t("settings.checkUpdateFailed"));
+      console.error("[AboutSection] Update check failed", error);
+      try {
+        await settingsApi.checkUpdates();
+      } catch (fallbackError) {
+        console.error(
+          "[AboutSection] Failed to open releases page",
+          fallbackError,
+        );
+        toast.error(t("settings.checkUpdateFailed"));
+      }
     }
-  }, [hasUpdate, isPortable, resetDismiss, t]);
+  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t]);
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {

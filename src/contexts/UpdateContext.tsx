@@ -115,14 +115,28 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(LEGACY_DISMISSED_KEY);
   }, []);
 
-  // 启动时的自动检查：**LoongPort 不做**。
+  // 启动时自动检查一次。2026-08-04 接上自己的发布渠道后启用（在此之前 updater 插件
+  // 有意不注册，`check()` 必抛 ⇒ 那时这段每次启动只会吐一条错误，所以当时是删掉的）。
   //
-  // 后端有意不注册 `tauri-plugin-updater`（上游的 `plugins.updater` 端点指向
-  // cc-switch 自己的发布源，留着会把用户升级成 cc-switch —— 见 `lib.rs` 那段说明）。
-  // 插件没注册时 `check()` 必抛，所以这段每次启动只会往 console 吐一条错误，
-  // 不可能有别的结果。留着它不是"以后接上就能用"，而是**每次启动一条噪音**。
+  // 三个刻意的选择：
   //
-  // 接上自己的发布渠道那天，把这段恢复即可（`checkUpdate` 本身没动）。
+  // **延迟 5 秒**，不跟启动争资源 —— 首屏要渲染、数据库要迁移、托盘要建，
+  // 而"有没有新版本"不着急这几秒。
+  //
+  // **失败完全静默**（`checkUpdate` 内部把错误收进 `error` 状态，这里不弹任何东西）。
+  // 检查更新要发网络，而离线、GitHub 不可达、公司网络拦截都是**常态而非异常** ——
+  // 为此弹一个"检查更新失败"是拿用户不关心的事打扰他。用户主动点"检查更新"时才提示，
+  // 那时他在等一个答复（见 `AboutSection` 的 `handleCheckUpdate`）。
+  //
+  // **只查一次，不设轮询**。这是个桌面工具、不是常驻服务，用户重开就再查一次；
+  // 定时轮询要多一套"上次查询时间"的持久化状态，收益却只是"挂着不关也能收到提醒"。
+  // 真需要时再加（那时判据是：有多少用户会连着挂几天不重启）。
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void checkUpdate();
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [checkUpdate]);
 
   const value: UpdateContextValue = {
     hasUpdate,

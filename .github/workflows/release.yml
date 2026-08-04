@@ -156,15 +156,15 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Tauri signing key
-        # 缺密钥就跳过后续逻辑，而不是让 workflow 挂掉。
+        # 给**自动更新包**签名的密钥。2026-08-04 起真的在用（那天接上了自己的发布渠道：
+        # 注册 updater 插件 + 配 `plugins.updater` 的自有 endpoints/pubkey +
+        # 开 `createUpdaterArtifacts`）。secret 已配：`TAURI_SIGNING_PRIVATE_KEY`
+        # 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，minisign key id `4D82BF9D32D1F237`。
         #
-        # 这个密钥是给**自动更新包**签名的，而 LoongPort **有意不注册 updater 插件**
-        # （上游端点会把用户升级成 cc-switch，见 src-tauri/src/lib.rs 里那段说明）。
-        # 所以它对当前产品无用 —— 原来那个 `exit 1` 等于让整个 release workflow 永远起不来，
-        # 一个能出包的通道被一个用不上的 secret 卡死。
-        #
-        # 保留整步而不是删掉：将来真搭了发布渠道（配 endpoints + 换自己的 pubkey + 把插件
-        # 注册加回来，三件缺一不可），配上 secret 它就自动开始签名，不必再改 workflow。
+        # **缺密钥仍然只跳过、不让 workflow 挂**，这条不变：那样至少还能出安装包
+        # （只是不出 `.sig` ⇒ `assemble-latest-json` 会跳过上传 latest.json ⇒
+        # 这一版的用户收不到自动更新，但装机与使用都不受影响）。
+        # 原来上游那个 `exit 1` 等于让整条发布通道被一个 secret 卡死。
         #
         # ⚠️ **判空必须在 `run:` 里做，不能写成步骤级 `if: secrets.X != ''`** ——
         # `secrets` 上下文在步骤级 `if` 里**不可用**（同类陷阱：`matrix` 在 job 级 `if` 里
@@ -175,8 +175,8 @@ jobs:
         shell: bash
         run: |
           if [ -z "$SIGNING_KEY" ]; then
-            echo "○ 未配置 TAURI_SIGNING_PRIVATE_KEY —— 跳过更新包签名。"
-            echo "  当前产品不注册 updater 插件，这个 secret 用不上；要用时见本步注释。"
+            echo "⚠️ 未配置 TAURI_SIGNING_PRIVATE_KEY —— 跳过更新包签名。"
+            echo "   安装包照出，但不会有 .sig ⇒ 不上传 latest.json ⇒ 这一版收不到自动更新。"
             exit 0
           fi
 
@@ -606,7 +606,7 @@ jobs:
             Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
             Write-Host "Signature copied: $dest.sig"
           } else {
-            Write-Host "○ 没有 .sig（updater 未启用），跳过"
+            Write-Host "○ 没有 .sig（签名密钥未配？updater 自 2026-08-04 起已启用），跳过"
           }
 
           # 绿色版（portable）：仅可执行文件打 zip（不参与 Updater）
@@ -676,7 +676,7 @@ jobs:
           if [ -f "$APPIMAGE.sig" ]; then
             cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig"
           else
-            echo "○ 没有 .sig（updater 未启用），跳过"
+            echo "○ 没有 .sig（签名密钥未配？updater 自 2026-08-04 起已启用），跳过"
           fi
           echo "AppImage copied: $NEW_APPIMAGE"
           # 额外上传 .deb（用于手动安装，不参与 Updater）
