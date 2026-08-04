@@ -103,8 +103,16 @@ jobs:
       - name: Setup pnpm (Windows ARM64)
         if: runner.os == 'Windows' && matrix.arch == 'arm64'
         shell: pwsh
+        # ARM64 单独走 corepack 而不是 `pnpm/action-setup` —— 那是继承来的做法，别动。
+        #
+        # ⚠️ **必须先把 corepack 自己升级再 prepare。** Node 22.12.0 自带的 corepack
+        # 里烧死的 npm registry 公钥已经过期，而 registry 现在用新 key 签 pnpm ⇒
+        # `corepack prepare` 在验签那步炸，报 `Internal Error: Cannot find matching keyid`
+        # （2026-08-04 实测，日志里能看到它在 node\22.12.0\arm64\node_modules\corepack 下）。
+        # 装最新的 corepack 就带上了新公钥。
         run: |
           $ErrorActionPreference = 'Stop'
+          npm install -g corepack@latest
           corepack enable
           corepack prepare pnpm@10.12.3 --activate
           node --version
