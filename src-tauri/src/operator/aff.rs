@@ -90,7 +90,10 @@ pub(super) fn lookup_host(site_origin: &str) -> String {
 /// 查这个站有没有我们的 aff 码。
 ///
 /// `None` = 表里没有 ⇒ 调用方**什么都不做**（不写那个键、不改 URL）。
-/// 绝大多数站都会走这条路，包括 `DEFAULT_SITE`（维护者自己的站）。
+/// 绝大多数站都会走这条路。
+///
+/// ⚠️ **但默认站不走这条路** —— `DEFAULT_SITE` 现在是 `790053500.com`（在表里、有码），
+/// 不再是维护者自己的站。这句话 2026-08-04 之前反过来，别按旧印象改代码。
 pub fn aff_code_for(site_origin: &str) -> Option<&'static str> {
     let host = lookup_host(site_origin);
     AFF_CODES
@@ -117,9 +120,13 @@ mod tests {
 
     #[test]
     fn the_maintainers_own_site_is_deliberately_absent() {
-        // ⭐ 这条是**有意的缺席**，不是遗漏。它同时是 `DEFAULT_SITE`（最可能被用到的
-        // 那个站），所以很容易被人「顺手补上」—— 而服务端会拒自己邀请自己
-        // （`affiliate_service.go:300`），补了是给服务端日志里塞一条错误。
+        // ⭐ 这条是**有意的缺席**，不是遗漏：服务端会拒自己邀请自己
+        // （`affiliate_service.go:300`），补上是给服务端日志里塞一条错误。
+        //
+        // ⚠️ 这个理由**只适用于维护者自己的站**，别推广到「默认站」——
+        // 2026-08-04 之前两者恰好是同一个站，这条注释原来写着「它同时是 DEFAULT_SITE」，
+        // 那个巧合已经不成立了（默认站现在是 `790053500.com`，在表里且必须有码，
+        // 由 `commands::operator` 的 `the_default_site_carries_an_affiliate_code` 钉住）。
         for origin in [
             "https://bestapi.store",
             "https://www.bestapi.store",

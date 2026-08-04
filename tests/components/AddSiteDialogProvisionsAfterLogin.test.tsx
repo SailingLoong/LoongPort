@@ -97,7 +97,7 @@ function renderDialog(overrides: { onAdded?: () => void } = {}) {
       open
       onClose={() => {}}
       onAdded={overrides.onAdded ?? (() => {})}
-      defaultSite="bestapi.store"
+      defaultSite="790053500.com"
     />,
   );
 }
@@ -112,8 +112,8 @@ describe("「添加中转站」登录后就地备好密钥", () => {
     vi.clearAllMocks();
     probeSite.mockResolvedValue({
       operatorId: 7,
-      siteOrigin: "https://bestapi.store",
-      siteName: "百适",
+      siteOrigin: "https://790053500.com",
+      siteName: "鑫旺",
     });
     listSponsors.mockResolvedValue([]);
     listSites.mockResolvedValue([]);
