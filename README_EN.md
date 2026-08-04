@@ -51,10 +51,20 @@ derivation with caveats:
 LoongPort itself is free. It never handles your payment and takes nothing out of your
 balance — it only writes the config correctly. You top up with the relay provider.
 
-> **One relationship, stated up front**: registration links carry our referral code
-> (a compile-time table in `src-tauri/src/operator/aff.rs` — visible in the source),
-> and we may earn a rebate from the relay site as a result. **This does not affect your
-> price and nothing is deducted from your balance** — but you deserve to know it exists.
+> **Two relationships, stated up front** (both are compile-time tables in the source,
+> also visible via `strings` on the binary):
+>
+> 1. **Referral codes**: registration links carry our referral code
+>    (`src-tauri/src/operator/aff.rs`), and we may earn a rebate from the relay site.
+> 2. **One of the sites is ours** — `bestapi.store`. It is also the only entry in the
+>    built-in promo table (`src-tauri/src/operator/promo.rs`); that `LOONGPORT` code is
+>    a new-user credit we created in our own backend. It is precisely the one site we
+>    earn no referral rebate from (the server rejects self-referral), which is why the
+>    two tables treat it in deliberately opposite ways.
+>
+> **Neither affects your price, and nothing is deducted from your balance.** The default
+> domain points at the site with the largest user base, not at ours, and you can type any
+> domain you like into the field — but you deserve to know these exist.
 
 ## Your official accounts stay untouched
 

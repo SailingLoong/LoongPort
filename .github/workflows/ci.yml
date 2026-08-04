@@ -1,22 +1,17 @@
 name: CI
 
 on:
-  # ⏸ **自动触发临时关闭**（2026-08-02）——  Actions 额度本计费周期已用 91%
-  # （1823/2000 分钟），9 月 1 日重置。原来的 `push` + `pull_request` 各触发一次，
-  # 一次约 27 分钟（去掉 macOS 格之后；之前是 107），剩余额度撑不到重置。
+  # 2026-08-02 曾因 Actions 额度用到 91%（1823/2000 分钟）把自动触发整个关掉，只留手动。
+  # 2026-08-04 转开源后恢复 —— **public 仓的标准 runner 不计费**，那条约束不存在了。
   #
-  # 关掉不等于不验：六道闸本来就要求本机先全跑一遍（见 CLAUDE.md §四），
-  # CI 的作用是兜住「本机验不了的平台」—— 目前只剩 windows 那格有独立价值。
-  # 需要时用下面的 workflow_dispatch 手动点一次（Actions 页 → CI → Run workflow）。
-  #
-  # ⚠️ **恢复条件：额度重置（2026-09-01）之后就把下面两行取消注释**。
-  # 别让「临时」变成永久 —— 自动 CI 是防「本机忘了跑闸就推」的唯一防线，
-  # 而那种事迟早会发生。
+  # 更要紧的是：开源仓收 fork PR，而 PR 作者的本机不跑我们的六道闸（CLAUDE.md §四 那条
+  # 「本机先全跑一遍」只约束得到维护者）⇒ **自动 CI 是外部改动唯一的验证点**，
+  # 不是「防自己忘了跑」的冗余。别再为省额度关它。
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
-  # pull_request:
-  #   branches: [main]
-  # push:
-  #   branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -71,21 +66,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ⚠️ **macos-latest 有意不在这里**（2026-08-02 去掉）。
+        # 三平台全跑。**开源仓的 Actions 标准 runner 不计费**（不是额度更大，是压根不进
+        # 计费）⇒ ubuntu 1× / windows 2× / macOS 10× 那套倍率对本仓不适用。
         #
-        # GitHub Actions 的计费倍率：ubuntu 1× / windows 2× / **macOS 10×**。
-        # 三平台矩阵一次 push 约 107 分钟额度，其中 macOS 那格独占 80（76%）——
-        # 2000 分钟/月的额度按这个烧法只够 18 次 push，实测一个月就用到 91%。
-        #
-        # 去掉它损失多少：几乎为零。cargo test / clippy / fmt 在三个平台上验的是同一套
-        # 代码，真正只有 macOS 能验的是 chatgpt_app.rs 的 AppleScript 分支，而那部分
-        # **维护者本机就是 macOS，六道闸本来就在本机先跑一遍**（见 CLAUDE.md §四）。
-        # windows-latest 留着，因为那些 `#[cfg(target_os = "windows")]` 分支本机验不了
-        # （踩过：6f027168 修的 6 个 dead_code 就只有 CI 的 windows 格能发现）。
-        #
-        # 打 tag 出包时 release.yml 仍会在 macOS 上真正编译，所以「能不能在 mac 上构建」
-        # 这件事没有失去覆盖 —— 失去的只是「每次 push 都重复验一遍」。
-        os: [ubuntu-22.04, windows-latest]
+        # 2026-08-02 曾为省额度去掉 macOS（当时是 private 仓，三平台一次 push 约 107 分钟、
+        # macOS 独占 80，2000 分钟/月只够 18 次）。2026-08-04 转开源后加回来 —— 理由不是
+        # 「现在免费了所以顺手多跑」，而是**当初的替代方案随开源失效了**：那时的论证是
+        # 「只有 macOS 能验的 chatgpt_app.rs AppleScript 分支，维护者本机就是 macOS，
+        # 六道闸本来就在本机先跑一遍」。开源后 PR 来自外部贡献者，他们的本机不一定是
+        # macOS，「维护者本机会先跑」这个前提不再覆盖所有改动 ⇒ 那条分支必须由 CI 兜住。
+        os: [ubuntu-22.04, windows-latest, macos-14]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
