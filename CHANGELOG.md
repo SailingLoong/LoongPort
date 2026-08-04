@@ -113,7 +113,27 @@ LoongPort 的首个版本。以下是本 fork 在 cc-switch v3.19.2 之上新增
   （本地代理、MCP、Skills、Prompts、会话管理），且引用它的 issue 编号 —— 那些编号在本仓
   会指向无关的 issue。那段历史现在在哪见「溯源」。
 
+- **Upstream's Flatpak manifest and two orphaned release scripts.** The Flatpak
+  files carried cc-switch's app id, name and feature list, and no build step ever
+  invoked them. The two scripts served an upstream website and the updater this
+  fork removed; nothing called either.
+
+  **上游的 Flatpak 清单与两个孤立的发布脚本。** Flatpak 那几个文件带的是 cc-switch 的
+  app id、名字与功能列表，而且从来没有构建步骤调用它们；两个脚本服务的是上游官网与本
+  fork 已删掉的 updater，两者都无人调用。
+
 ### Fixed / 修复
+
+- **The About screen said "CC Switch".** Settings → About hardcoded the upstream
+  name next to the LoongPort icon and version — the one screen a user opens to
+  answer "what am I running". Twenty-odd further strings across all four locales
+  said it too, and two of those also pointed at `~/.cc-switch/` for skills and
+  backups, a directory this app never writes to.
+
+  **「关于」那一屏写着 CC Switch。** 设置 → 关于把上游的名字硬编码在 LoongPort 图标与
+  版本号旁边 —— 而那正是用户打开来回答「我在运行什么」的地方。四种语言里另有 20 多处
+  同样问题，其中两处还把技能与备份目录指向 `~/.loongport/` 之外的 `~/.cc-switch/`，
+  那是本应用从不写入的位置。
 
 - **"No tiers here" no longer looks the same as "the fetch failed".** Provisioning
   probes every platform at once and each tier lands on the CLI its own platform
