@@ -25,6 +25,10 @@
 LoongPort 把这些压成两步 —— **填一个域名，登录一次。** 它会为你账号能用的每个档位
 备好 key、按各 CLI 的形状把配置写好，之后换档位就是点一下。
 
+<div align="center">
+  <img src="assets/screenshots/main-zh.png" alt="LoongPort 主界面：运营商与档位列表，每行显示余额与档位数" width="820">
+</div>
+
 ## 为什么便宜这么多
 
 两层优惠，Codex 吃到两层，Claude 只吃到一层：

@@ -27,6 +27,12 @@ LoongPort collapses that into two steps — **enter a domain, sign in once.** It
 provisions a key for every tier your account can reach, writes each CLI's config in
 its own shape, and switching tiers becomes a single click.
 
+<div align="center">
+  <img src="assets/screenshots/main-zh.png" alt="LoongPort main window: the operator list, each row showing its balance and tier count" width="820">
+  <br>
+  <sub>Chinese UI shown; the app also ships English, Traditional Chinese and Japanese.</sub>
+</div>
+
 ## Why it costs so much less
 
 Two discount layers — Codex gets both, Claude gets one:
