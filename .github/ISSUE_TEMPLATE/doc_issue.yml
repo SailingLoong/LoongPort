@@ -34,7 +34,7 @@ body:
       description: |
         Which file or section is affected? Provide a link or file path.
         涉及哪个文件或章节？请提供链接或文件路径。
-      placeholder: "e.g. README.md#faq or docs/user-manual/zh/..."
+      placeholder: "e.g. README.md — Install section, or LOONGPORT.md"
     validations:
       required: true
 

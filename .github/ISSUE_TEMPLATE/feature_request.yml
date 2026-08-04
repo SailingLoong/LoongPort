@@ -10,8 +10,8 @@ body:
       label: Self Checks / 自检
       options:
         - label: |
-            I have read the [FAQ](https://github.com/SailingLoong/LoongPort#faq) section in README.
-            我已阅读 README 中的[常见问题](https://github.com/SailingLoong/LoongPort#常见问题)。
+            I have read the [README](https://github.com/SailingLoong/LoongPort/blob/main/README_EN.md) — the Install and How it works sections.
+            我已读过 [README](https://github.com/SailingLoong/LoongPort/blob/main/README.md) 的「安装」与「怎么用」两节。
           required: true
         - label: |
             I have searched for [existing issues](https://github.com/SailingLoong/LoongPort/issues), including closed ones.
@@ -28,9 +28,6 @@ body:
       options:
         - Claude Code
         - Codex
-        - Gemini CLI
-        - OpenCode
-        - OpenClaw
         - General / 通用
     validations:
       required: true

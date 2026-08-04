@@ -2,20 +2,20 @@
 
 ## Supported Versions / 支持的版本
 
-Only the latest release of CC Switch receives security updates.
+Only the latest release of LoongPort receives security updates.
 
-仅最新版本的 CC Switch 会收到安全更新。
+仅最新版本的 LoongPort 会收到安全更新。
 
 | Version / 版本 | Supported / 是否支持 |
 |----------------|---------------------|
-| Latest 3.x     | ✅ Yes / 是          |
-| < 3.0          | ❌ No / 否           |
+| Latest release / 最新发布版 | ✅ Yes / 是 |
+| Anything older / 任何更早版本 | ❌ No / 否 |
 
 ## Threat Model / 威胁模型
 
-CC Switch is a local desktop application. It manages configuration files for AI coding CLIs on the user's own machine. There is no project-operated cloud backend, no multi-user model, and no privilege separation from the user who runs it.
+LoongPort is a local desktop application. It manages configuration files for AI coding CLIs on the user's own machine. There is no project-operated cloud backend, no multi-user model, and no privilege separation from the user who runs it.
 
-CC Switch 是一个本地桌面应用，用于管理本机上各 AI 编程 CLI 的配置文件。本项目不运营任何云端后端，没有多用户模型，也不与运行它的用户之间存在权限隔离。
+LoongPort 是一个本地桌面应用，用于管理本机上各 AI 编程 CLI 的配置文件。本项目不运营任何云端后端，没有多用户模型，也不与运行它的用户之间存在权限隔离。
 
 It does, however, run a **local HTTP proxy** whose listen address and port are user-configurable and **may be bound to a non-loopback interface**. Requests arriving at that listener are untrusted input and are in scope — see Scope below.
 
@@ -23,9 +23,9 @@ It does, however, run a **local HTTP proxy** whose listen address and port are u
 
 ### The bundled renderer is inside the trust boundary / 打包的渲染进程属于信任边界之内
 
-The bundled WebView renderer is treated as a trusted component. This is a **scoping decision, supported by the facts below rather than derived from them** — the facts are what make the decision checkable, and if any ceases to hold the decision must be revisited. Verified against v3.18.0:
+The bundled WebView renderer is treated as a trusted component. This is a **scoping decision, supported by the facts below rather than derived from them** — the facts are what make the decision checkable, and if any ceases to hold the decision must be revisited. Verified against v3.19.2:
 
-打包的 WebView 渲染进程被视为可信组件。这是一项**范围划定决策，由下列事实支撑，而非从中必然推出**——这些事实的作用是让该决策可被核验；一旦任一条不再成立，该决策必须重新评估。已针对 v3.18.0 核实：
+打包的 WebView 渲染进程被视为可信组件。这是一项**范围划定决策，由下列事实支撑，而非从中必然推出**——这些事实的作用是让该决策可被核验；一旦任一条不再成立，该决策必须重新评估。已针对 v3.19.2 核实：
 
 1. **No remote executable content is loaded.** `frontendDist` is bundled at build time (`src-tauri/tauri.conf.json`); the codebase contains no `<iframe>`, no `<webview>`, and no remote script or stylesheet URL. The application *does* retrieve remote **data** — model pricing JSON and provider avatars — which CSP permits via `connect-src`/`img-src`; such data is treated as untrusted input, not as content.
    前端资源在构建期打包，代码库中不存在 `<iframe>`、`<webview>` 或远程脚本/样式地址。应用**确实**会获取远程**数据**（模型定价 JSON、供应商头像），CSP 经 `connect-src`/`img-src` 允许之；此类数据按不可信输入对待，不作为内容。
@@ -40,9 +40,9 @@ The bundled WebView renderer is treated as a trusted component. This is a **scop
 
 **它排除什么、不排除什么。** 不在范围内的是：抵达 IPC 接口的**唯一途径**为**从 DevTools 或本地改造过的前端直接调用**的报告。处于该位置的人已经控制了这台机器。
 
-**Still in scope:** any complete, demonstrable chain in which an *untrusted* source — a `ccswitch://` deep link, a remote sync payload, remote data, an inbound proxy request, or an XSS — reaches a high-privilege IPC command. The trust placed in the renderer covers the code we ship, not arbitrary values that flow through it.
+**Still in scope:** any complete, demonstrable chain in which an *untrusted* source — a `loongport://` deep link, a remote sync payload, remote data, an inbound proxy request, or an XSS — reaches a high-privilege IPC command. The trust placed in the renderer covers the code we ship, not arbitrary values that flow through it.
 
-**仍在范围内**：任何完整、可演示的利用链，其中**不可信来源**——`ccswitch://` deeplink、远程同步载荷、远程数据、代理入站请求或 XSS——抵达高权限 IPC 命令。对渲染进程的信任覆盖的是我们发布的代码，而非流经其中的任意值。
+**仍在范围内**：任何完整、可演示的利用链，其中**不可信来源**——`loongport://` deeplink、远程同步载荷、远程数据、代理入站请求或 XSS——抵达高权限 IPC 命令。对渲染进程的信任覆盖的是我们发布的代码，而非流经其中的任意值。
 
 ### Invalidation triggers / 声明失效条件
 
@@ -69,7 +69,7 @@ Inputs that genuinely cross a trust boundary:
 
 真正跨越信任边界的输入：
 
-- `ccswitch://` deep link payloads / deeplink 载荷（由第三方构造，经浏览器抵达）
+- `loongport://` deep link payloads / deeplink 载荷（由第三方构造，经浏览器抵达）
 - **Inbound requests to the local HTTP proxy**, including from other hosts when it is configured to bind a non-loopback address / **抵达本地 HTTP 代理的入站请求**，包括配置为绑定非 loopback 地址时来自其他主机的请求
 - Remote sync payloads restored from WebDAV / S3 / 从 WebDAV、S3 还原的同步数据
 - Imported files: SQL import/export, provider and MCP config import / 导入文件：SQL 导入导出、供应商与 MCP 配置导入

@@ -4,11 +4,11 @@
 
 ## How to Get Help
 
-CC Switch is an open-source project maintained by volunteers. We're happy to help, but please use the right channel so we can respond efficiently.
+LoongPort is an open-source project maintained in spare time. We're happy to help, but please use the right channel so we can respond efficiently.
 
 ### Before Asking
 
-1. **Read the [FAQ](https://github.com/SailingLoong/LoongPort#faq)** — most common questions are answered there.
+1. **Read the [README](https://github.com/SailingLoong/LoongPort/blob/main/README_EN.md)** — the Install section covers the first-launch warnings on both platforms, and How it works covers the setup flow.
 2. **Search [existing issues](https://github.com/SailingLoong/LoongPort/issues)** (including closed ones) — someone may have had the same question.
 
 ### Asking a Question
@@ -34,11 +34,11 @@ CC Switch is an open-source project maintained by volunteers. We're happy to hel
 
 ## 如何获取帮助
 
-CC Switch 是一个由志愿者维护的开源项目。我们很乐意提供帮助，但请使用合适的渠道，以便我们高效响应。
+LoongPort 是一个业余时间维护的开源项目。我们很乐意提供帮助，但请使用合适的渠道，以便我们高效响应。
 
 ### 提问之前
 
-1. **阅读 [常见问题](https://github.com/SailingLoong/LoongPort#常见问题)** — 大多数常见问题都已在其中解答。
+1. **先读 [README](https://github.com/SailingLoong/LoongPort/blob/main/README.md)** — 「安装」一节写了两个平台首次打开会被拦的处理办法，「怎么用」一节写了完整流程。
 2. **搜索 [已有的 Issue](https://github.com/SailingLoong/LoongPort/issues)**（包括已关闭的） — 可能已经有人问过相同的问题。
 
 ### 提问

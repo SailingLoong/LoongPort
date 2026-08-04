@@ -1,8 +1,8 @@
 //! DeepSeek 开放平台（`platform.deepseek.com`）的契约实现。
 //!
 //! 全部事实来自 2026-08-03 真机实测（含一次授权的 create+delete 写操作），
-//! bundle `main.50ec61b52a.js` / `commit-id: a274378`。完整调研见
-//! `../LoongPort-design/spec-官网直连账号与API-Key补充.md` §二。
+//! bundle `main.50ec61b52a.js` / `commit-id: a274378`。DeepSeek 平台是闭源的，
+//! 拿不到源码当契约 —— 下面每条都是实测结论，改之前先复测。
 //!
 //! ## 四条会静默出错的约定
 //!

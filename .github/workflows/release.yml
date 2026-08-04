@@ -218,7 +218,7 @@ jobs:
         # `find-identity` 找不到身份就 `exit 1`），于是 macOS 那条腿永远出不了包。
         # 跳过之后出的是**未签名未公证**的包：本机编译能直接开，但经网络传给别人后
         # Gatekeeper 会拦（报「已损坏」而不是可绕过的「未知开发者」）。
-        # 代价与偿还路径见 ../LoongPort-design/TODO.md 里「Apple 代码签名 + 公证」那条。
+        # 偿还路径：配齐上面那三个 secret（证书 + 公证凭据）后本步骤自动走签名分支。
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -739,6 +739,11 @@ jobs:
           # ⚠️ 下面的「下载」清单必须与 matrix 实际跑的平台一致 —— 列出不存在的文件名
           # 等于让用户照着下载然后 404。Linux 两条现在是注释状态，所以这里也没有 Linux；
           # 放回 matrix 时把那句「Linux 包暂未提供」换成 AppImage / .deb / .rpm 三件套说明。
+          #
+          # 那段 macOS「未签名 + xattr」说明是本 fork 自己的：上游写的是「已通过签名和公证」，
+          # 那对 cc-switch 成立、对这里不成立。配齐上面三个 Apple secret 后本 workflow 会
+          # 自动走签名分支，那时这段就该换掉。（备注写在这里而不是 body 里 —— body 是给
+          # 下载者看的，维护者的待办放进去等于让每个 Release 页面都挂着一条内部备忘。）
           body: |
             ## LoongPort ${{ github.ref_name }}
 
@@ -764,10 +769,6 @@ jobs:
             ```
             xattr -dr com.apple.quarantine /Applications/LoongPort.app
             ```
-
-            > 这句上游写的是「已通过签名和公证」—— 那对 cc-switch 成立，对本 fork
-            > 不成立（见 LoongPort-design/TODO.md）。配齐 Apple secrets 后 release.yml
-            > 会自动签名，那时把这段换回去。
 
             ---
             ⚠️ **Windows：装新版本时若报「无法设置文件安全性 / could not set file security」**
