@@ -2553,6 +2553,26 @@ pub async fn operator_current_image_tier(
         }
         return Ok(None);
     }
+
+    // ⚠️ **顺手补齐 MCP 记录**，让「标记在、记录不在」这个状态能自愈。
+    //
+    // `set_image_tier_impl` 是两步（写标记 → upsert 记录）。第二步失败时（`current_exe()`
+    // 拿不到、MCP 同步写文件失败）标记已经写了 ⇒ 界面显示「生图中」而 CLI 里其实没有那个
+    // 工具 ⇒ 用户说「生成一张图」，模型答「我没有这个工具」，而 LoongPort 看起来一切正常。
+    //
+    // 不做「失败就回滚标记」是因为回滚本身也可能失败，那时状态更难说清。而这里补齐是
+    // **幂等**的（`upsert_server` 覆盖同 id），且每次读都会走一遍 —— 用户下次打开界面
+    // 就自动修好了，不必知道发生过什么。
+    //
+    // 失败只记日志：这是个读命令，为一次补齐失败而让「查当前生图档位」整个失败是错的。
+    if let Some(p) = ProviderService::list(&state, AppType::Codex)
+        .ok()
+        .and_then(|list| list.values().find(|p| p.id == provider_id).cloned())
+    {
+        if let Err(e) = ensure_imagegen_mcp_registered(&state, &p.name) {
+            log::warn!("补齐生图 MCP 记录失败（生图可能暂时用不了）: {e}");
+        }
+    }
     Ok(Some(provider_id))
 }
 

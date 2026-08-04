@@ -411,8 +411,11 @@ async fn generate_image(
     if saved.is_empty() {
         return Err("生图接口没有返回任何图片".into());
     }
-    // 顺手修剪 —— 见 `prune_old_images`。失败只记一行：修剪不成功不影响这次出图。
-    if let Err(e) = prune_old_images(&dir) {
+    // 顺手修剪 —— 见 `prune_old_images`。**把这次刚写的排除在外**：它们的 mtime 是最新的，
+    // 正常不会被当成「最旧」删掉，但目录恰好满员时没有必要让「刚生成的图」参与这场竞争
+    // （返回给宿主的路径必须还在）。失败只记一行：修剪不成功不影响这次出图。
+    let just_written: Vec<&std::path::Path> = saved.iter().map(|i| i.path.as_path()).collect();
+    if let Err(e) = prune_old_images(&dir, &just_written) {
         diag!("清理旧图片失败（不影响本次生成）: {e}");
     }
     Ok(saved)
@@ -435,11 +438,21 @@ const MAX_KEPT_IMAGES: usize = 200;
 /// 东西会清它** —— 那就是「知情引入却没留痕的占位」，属技术债（本函数就是那笔债的偿还）。
 ///
 /// 按 mtime 排序删最旧的。读不到 mtime 的排最前（当最旧）—— 那种文件多半是异常留下的。
-fn prune_old_images(dir: &std::path::Path) -> Result<(), String> {
+///
+/// ## 并发是安全的
+///
+/// codex 与 claude 各起一个 MCP 进程时，两边可能同时修剪。这不会互相删掉对方的图：
+/// 判据是 mtime，而另一个进程**刚写的图 mtime 是最新的**，排在末尾。删不掉的（已被
+/// 对方删了）只记一行，不当错误 —— 修剪是收尾动作，不该影响出图。
+///
+/// `keep` 是本次调用刚写的那些，一律排除（见调用处）。
+fn prune_old_images(dir: &std::path::Path, keep: &[&std::path::Path]) -> Result<(), String> {
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
         .map_err(|e| format!("读出图目录失败: {e}"))?
         .filter_map(Result::ok)
         .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
+        // 这次刚写的不参与 —— 调用方要把它们的路径返回给宿主。
+        .filter(|e| !keep.contains(&e.path().as_path()))
         .map(|e| {
             let mtime = e
                 .metadata()
