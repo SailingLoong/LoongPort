@@ -43,20 +43,11 @@ Claude 是 `1 × 1/6.7 ≈ 0.15`，约为**官方 API 的 15%**。上面写「�
 都留了余量，因为倍率随档位和站点浮动。完整推导与几点说明：
 **[loongport.dev/zh/pricing](https://loongport.dev/zh/pricing)**
 
-LoongPort 本身免费，不经手你的付款、也不从你的余额里抽成 —— 它只是替你把配置写对。
-你充值给的是中转服务商。
+LoongPort 免费，不经手付款、不从你的余额抽成。你充值给的是中转服务商。
 
-> **两层关系先说清**（都在源码里，编译期常量表，`strings` 一下也看得到）：
->
-> 1. **邀请码**：注册链接会带上我们的邀请码（`src-tauri/src/operator/aff.rs`），
->    我们可能因此从中转站获得返利。
-> 2. **其中一个站是我们自己运营的** —— `bestapi.store`。它也是内置优惠码表
->    （`src-tauri/src/operator/promo.rs`）里目前唯一的站，那个 `LOONGPORT` 码
->    是我们在自己后台建的新用户赠额。我们不从别的站拿邀请返利的那一个，正是它
->    （服务端拒绝自己邀请自己），所以两张表对它的处理有意相反。
->
-> **两层都不影响你的价格，也不会从你的余额里扣。** 默认域名指向的是用户量最大的
-> 那个站、不是我们自己的站，而域名输入框里你填谁都行 —— 但你有权知道这些存在。
+> 注册链接会带上我们的邀请码，我们可能因此从中转站获得返利；其中 `bestapi.store`
+> 是我们自己的站，内置的 `LOONGPORT` 优惠码是那里的新用户赠额。都不影响你的价格，
+> 域名填谁都行。两张表在 `src-tauri/src/operator/` 的 `aff.rs` 与 `promo.rs` 里。
 
 ## 不占用官方账号
 
@@ -121,13 +112,12 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个，�
    所以反复点刷新不会在你账号里堆垃圾 key。
 4. **选 CLI 和档位** —— Codex 用 OpenAI 分组、Claude 用 Anthropic 分组，点一下就把
    对应的配置写好（`~/.codex/config.toml` 或 Claude 的 settings）。
-5. **继续用** —— Codex 或 Claude Code 直接就能跑。**切 Codex 档位时**它还会替你退出
-   并重开 ChatGPT 桌面版 —— 那个 app 启动时读配置、运行中改配置不会重新加载，
-   所以这一步才是让新档位真正生效的关键。切 Claude 档位不涉及它，不会碰你开着的窗口。
+5. **继续用** —— Codex 或 Claude Code 直接就能跑。**切 Codex 档位时**会自动退出并
+   重开 ChatGPT 桌面版（它只在启动时读配置，不重启新档位不生效）。切 Claude 档位
+   不涉及它。
 
-凭据与站点信息存在本机 `~/.loongport/` 下的 SQLite 里，且**只发给你选的那个中转站**
-（作为它 API 调用的 Bearer token —— 账号能用靠的就是这个）。LoongPort 自己没有账号
-体系、没有服务端，拿不到你的凭据。
+凭据与站点信息存在本机 `~/.loongport/` 的 SQLite 里，只作为 Bearer token 发给你选的
+那个中转站。LoongPort 没有账号体系、没有服务端，拿不到你的凭据。
 
 ## 支持范围
 
@@ -144,33 +134,19 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个，�
 > 确认框，你可以取消（那次切换随之中止）；**Windows 上是强制结束进程**，不会弹框，
 > 所以切换前应用会先告知你一次。
 
-## 致谢与上游项目
+## 上游项目
 
-LoongPort 站在两个别人的项目上，这里说清各自的关系。
+**[cc-switch](https://github.com/farion1231/cc-switch)**（作者
+[@farion1231](https://github.com/farion1231)，MIT）—— 本项目的基座，从 v3.19.1
+fork、已合并上游至 v3.19.2，图标衍生自它，版权声明保留在 [LICENSE](LICENSE) 里。
 
-### cc-switch —— 本项目的基座
+cc-switch 是通用的多供应商管理器，管所有 CLI 的所有供应商，还有本地代理、MCP、
+Skills、Prompts、会话管理。LoongPort 只做「用中转服务省钱跑 AI CLI」这一条链路。
+两者数据目录分开（`~/.cc-switch/` 与 `~/.loongport/`），可以同时装、同时开。
 
-LoongPort 最初在 [cc-switch](https://github.com/farion1231/cc-switch)（作者
-[@farion1231](https://github.com/farion1231)）v3.19.1 上 fork，之后合并上游至
-v3.19.2，许可证同为 MIT，其版权声明保留在 [LICENSE](LICENSE) 里，图标也衍生自它。
-**这个仓里绝大部分代码是它的** —— 一个成熟的基座省掉了大量重复工作，
-没有它就没有这个项目。
-
-**两者做的是不同的事。** cc-switch 是通用的多供应商管理器，管所有 CLI 的所有供应商，
-功能面大得多 —— 本地代理、MCP、Skills、Prompts、会话管理。LoongPort 只把「用中转
-服务省钱跑 AI CLI」这一条链路做到全自动。**想要那个全能工具就去用 cc-switch**，
-它仍在活跃维护。两者数据目录分开（`~/.cc-switch/` 与 `~/.loongport/`），
-可以同时装、同时开。
-
-### sub2api —— 对接的中转站后端
-
-多数中转站跑的是 [sub2api](https://github.com/Wei-Shaw/sub2api)（LGPL-3.0）。
-LoongPort 与它的关系是**纯 HTTP 客户端** —— 不链接、不包含、也没有复用它的任何代码，
-只依据它公开的接口（端点、字段、鉴权方式）来调用。它把接口做得清楚，
-才让「自动建 key、自动读分组」这件事成立。
-
-LoongPort 不是 sub2api 的官方客户端，也与其作者无关联；用它遇到的问题请提到本仓，
-别去打扰上游。
+**[sub2api](https://github.com/Wei-Shaw/sub2api)**（LGPL-3.0）—— 多数中转站跑的
+后端。LoongPort 是它的**纯 HTTP 客户端**，不链接、不包含、也没有复用它的代码，
+只依据其公开接口调用。非官方客户端，与其作者无关联 —— 用它遇到的问题请提到本仓。
 
 ## 从源码构建
 
@@ -214,12 +190,11 @@ pnpm tsc --noEmit                                 # 类型检查
 
 ## 参与贡献
 
-欢迎提 issue 与 PR。动运营商那条链路之前请先读 [`LOONGPORT.md`](LOONGPORT.md) ——
-里面记了几条**看着像写错、其实必须那样写**的地方（为什么 `model_provider` 必须是
-`custom`、为什么不能声明 `requires_openai_auth`、为什么退 ChatGPT 要按 bundle id 而
-不是进程名）。每条都有测试钉着，改错会当场报错而不是静默走歪。
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。动运营商那条链路前先读
+[`LOONGPORT.md`](LOONGPORT.md)，里面记了几处**看着像写错、其实必须那样写**的约束
+（`model_provider` 为何必须是 `custom`、为何不能声明 `requires_openai_auth`、
+退 ChatGPT 为何按 bundle id）。每条都有测试钉着。
 
 ## 许可证
 
-[MIT](LICENSE)，与上游 cc-switch 一致。[LICENSE](LICENSE) 里并列两条版权声明 ——
-上游作者的那条按 MIT 要求原样保留，另一条是本项目自己的改动部分。
+[MIT](LICENSE)。

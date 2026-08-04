@@ -2,7 +2,7 @@
 
 > [中文版本](#贡献指南)
 
-Thank you for your interest in contributing to LoongPort! Please read our [Code of Conduct](./CODE_OF_CONDUCT.md) before participating.
+Please read the [Code of Conduct](./CODE_OF_CONDUCT.md) before participating.
 
 ## How to Contribute
 
@@ -131,7 +131,7 @@ LoongPort ships four languages. When modifying user-facing text:
 
 > [English Version](#contributing-to-loongport)
 
-感谢你对 LoongPort 的贡献兴趣！参与之前请阅读我们的[行为准则](./CODE_OF_CONDUCT.md)。
+参与之前请阅读[行为准则](./CODE_OF_CONDUCT.md)。
 
 ## 如何贡献
 

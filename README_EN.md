@@ -48,23 +48,13 @@ Claude at `1 × 1/6.7 ≈ 0.15`, about **15% of official cost**. The headline sa
 derivation with caveats:
 **[loongport.dev/en/pricing](https://loongport.dev/en/pricing)**
 
-LoongPort itself is free. It never handles your payment and takes nothing out of your
-balance — it only writes the config correctly. You top up with the relay provider.
+LoongPort is free. It never handles your payment and takes nothing out of your balance.
+You top up with the relay provider.
 
-> **Two relationships, stated up front** (both are compile-time tables in the source,
-> also visible via `strings` on the binary):
->
-> 1. **Referral codes**: registration links carry our referral code
->    (`src-tauri/src/operator/aff.rs`), and we may earn a rebate from the relay site.
-> 2. **One of the sites is ours** — `bestapi.store`. It is also the only entry in the
->    built-in promo table (`src-tauri/src/operator/promo.rs`); that `LOONGPORT` code is
->    a new-user credit we created in our own backend. It is precisely the one site we
->    earn no referral rebate from (the server rejects self-referral), which is why the
->    two tables treat it in deliberately opposite ways.
->
-> **Neither affects your price, and nothing is deducted from your balance.** The default
-> domain points at the site with the largest user base, not at ours, and you can type any
-> domain you like into the field — but you deserve to know these exist.
+> Registration links carry our referral code, which may earn us a rebate from the relay
+> site; `bestapi.store` is our own site, and the built-in `LOONGPORT` promo code is a
+> new-user credit there. Neither affects your price, and you can use any domain. Both
+> tables live in `src-tauri/src/operator/` — `aff.rs` and `promo.rs`.
 
 ## Your official accounts stay untouched
 
@@ -140,15 +130,13 @@ On ARM64 Windows machines (Snapdragon laptops and the like), use the two files w
 4. **Pick a CLI and tier** — Codex uses OpenAI tiers, Claude uses Anthropic tiers. One
    click writes the matching config (`~/.codex/config.toml`, or Claude's settings).
 5. **Keep working** — Codex or Claude Code just works. **When switching a Codex tier**,
-   the ChatGPT desktop app is quit and reopened for you as well: it reads its
-   configuration at startup and will not reload changes made while running, so that step
-   is what makes the new tier actually take effect. Claude tier switches do not involve
-   it and leave your open windows alone.
+   the ChatGPT desktop app is quit and reopened automatically (it only reads its config
+   at startup, so without a restart the new tier has no effect). Claude tier switches do
+   not involve it.
 
-Credentials and site data live in a local SQLite database under `~/.loongport/`, and are
-sent only to the relay site you chose (as the Bearer token on its API calls — that is
-what makes the account work). LoongPort has no account system and no server of its own,
-so it never receives them.
+Credentials and site data live in a local SQLite database under `~/.loongport/` and are
+sent only to the relay site you chose, as the Bearer token on its API calls. LoongPort
+has no account system and no server of its own, so it never receives them.
 
 ## What it supports
 
@@ -167,37 +155,23 @@ Windows have the same feature set.
 > confirmation dialog and you can cancel (which aborts that switch); **on Windows the
 > process is force-terminated**, with no dialog, so the app warns you before switching.
 
-## Acknowledgements and upstream projects
+## Upstream projects
 
-LoongPort stands on two other people's projects. Here is where each one fits.
+**[cc-switch](https://github.com/farion1231/cc-switch)** (by
+[@farion1231](https://github.com/farion1231), MIT) — the base this is built on, forked
+at v3.19.1 and merged upstream through v3.19.2. The icon is derived from theirs and
+their copyright notice is kept in [LICENSE](LICENSE).
 
-### cc-switch — the base this is built on
+cc-switch is a general multi-provider manager covering every CLI and every provider,
+plus proxy mode, MCP, Skills, Prompts and Session Manager. LoongPort does exactly one
+path: running an AI CLI cheaply through a relay service. The two install side by side
+with separate data directories (`~/.cc-switch/` vs `~/.loongport/`) and can run at the
+same time.
 
-LoongPort was originally forked from
-[cc-switch](https://github.com/farion1231/cc-switch) (by
-[@farion1231](https://github.com/farion1231)) v3.19.1 and has since merged upstream
-through v3.19.2; it is MIT-licensed too, their copyright notice is kept in
-[LICENSE](LICENSE), and the icon is derived from theirs. **Most of the code in this
-repository is theirs** — a mature base saved a great deal of duplicated work, and this
-project would not exist without it.
-
-**They do different jobs.** cc-switch is a general multi-provider manager covering
-every CLI and every provider, with a far wider feature set — proxy mode, MCP, Skills,
-Prompts, Session Manager. LoongPort fully automates exactly one path: running an AI CLI
-cheaply through a relay service. **If you want the broad tool, go use cc-switch** — it
-is still actively maintained. The two install side by side with separate data
-directories (`~/.cc-switch/` vs `~/.loongport/`) and can run at the same time.
-
-### sub2api — the relay backend it talks to
-
-Most relay sites run [sub2api](https://github.com/Wei-Shaw/sub2api) (LGPL-3.0).
-LoongPort is a **plain HTTP client** of it — it does not link against, bundle, or reuse
-any of its code; it only calls the interfaces sub2api documents (endpoints, fields, auth
-scheme). Those interfaces being clear is what makes "provision keys and read tiers
-automatically" possible at all.
-
-LoongPort is not an official sub2api client and is not affiliated with its author.
-Please report problems you hit with LoongPort here, not upstream.
+**[sub2api](https://github.com/Wei-Shaw/sub2api)** (LGPL-3.0) — the backend most relay
+sites run. LoongPort is a **plain HTTP client** of it: it does not link against, bundle,
+or reuse any of its code, only calls its documented interfaces. Not an official client
+and not affiliated with its author — report problems you hit with LoongPort here.
 
 ## Build from source
 
@@ -243,15 +217,11 @@ pnpm tsc --noEmit                                 # type check
 
 ## Contributing
 
-Issues and pull requests are welcome. Before touching the relay-account path, please
-read [`LOONGPORT.md`](LOONGPORT.md) — it documents several behaviours that look wrong
-until you know why they are that way (why `model_provider` must be `custom`, why
-`requires_openai_auth` must be absent, why quitting ChatGPT goes by bundle id rather
-than process name). Each one has a test pinning it, so changing them fails loudly
-rather than silently.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Before touching the relay-account path, read
+[`LOONGPORT.md`](LOONGPORT.md) — it documents constraints that look wrong until you know
+why (`model_provider` must be `custom`, `requires_openai_auth` must be absent, quitting
+ChatGPT goes by bundle id). Each has a test pinning it.
 
 ## License
 
-[MIT](LICENSE), same as upstream cc-switch. [LICENSE](LICENSE) carries two copyright
-lines — the upstream author's, kept verbatim as MIT requires, and this project's own for
-the changes made here.
+[MIT](LICENSE).
