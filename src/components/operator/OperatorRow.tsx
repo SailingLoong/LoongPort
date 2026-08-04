@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   GripVertical,
+  Image as ImageIcon,
   Loader2,
   Pencil,
   PencilLine,
@@ -128,6 +129,15 @@ export interface OperatorRowProps {
    */
   onEditTier: (tier: TierInfo) => void;
   /**
+   * 给这个档位装 / 卸生图工具（一条 MCP server 记录）。
+   *
+   * 装完用户在 codex / claude 里说「生成一张图」就能出图，**不必切到这个档位** ——
+   * 生图是独立的 MCP 工具，对话仍走他当前用的那个档位。
+   */
+  onToggleImagegen: (tier: TierInfo, installed: boolean) => void;
+  /** 已经装了生图工具的档位 id。前端据此把按钮显示成「装」还是「已装」。 */
+  imagegenInstalled: ReadonlySet<string>;
+  /**
    * 删掉这一行（这个「站点 × 账号」）连带它名下的托管档位。
    *
    * **名下有档位正在使用时不会被调用** —— 那种情况按钮渲染成不可点（见 `RowDelete`）。
@@ -155,6 +165,8 @@ export function OperatorRow({
   isCheckingTier,
   onResetTier,
   onEditTier,
+  onToggleImagegen,
+  imagegenInstalled,
   onDelete,
   dragHandleProps,
 }: OperatorRowProps) {
@@ -300,6 +312,10 @@ export function OperatorRow({
               checking={isCheckingTier(tier.providerId)}
               onReset={() => onResetTier(tier)}
               onEdit={() => onEditTier(tier)}
+              imagegenInstalled={imagegenInstalled.has(tier.providerId)}
+              onToggleImagegen={() =>
+                onToggleImagegen(tier, imagegenInstalled.has(tier.providerId))
+              }
             />
           ))}
         </CollapsibleContent>
@@ -614,6 +630,8 @@ function TierItem({
   checking,
   onReset,
   onEdit,
+  imagegenInstalled,
+  onToggleImagegen,
 }: {
   tier: TierInfo;
   busy: ReadonlySet<string>;
@@ -622,6 +640,8 @@ function TierItem({
   checking: boolean;
   onReset: () => void;
   onEdit: () => void;
+  imagegenInstalled: boolean;
+  onToggleImagegen: () => void;
 }) {
   const { t } = useTranslation();
   // 只禁**这一个档位**正在切换的那个按钮。原来是 `disabled={anyBusy}`，
@@ -634,6 +654,23 @@ function TierItem({
   // 没有默认形状）。`null` 时什么都不显示：显示「未手动维护」是在断言
   // 「刷新不会覆盖你的改动」，而事实是不知道 —— 让用户误信比不说更糟。
   const userEdited = tier.userEdited === true;
+  const togglingImagegen = busy.has(`imagegen:${tier.providerId}`);
+
+  // 生图工具该不该在这个档位上给入口。
+  //
+  // 判据是**两个字段的并**，因为它们各覆盖一类能生图的档位：
+  //
+  // | 档位 | isImageModel | allowImageGeneration | 能生图吗 |
+  // |---|---|---|---|
+  // | 纯生图分组（只挂 gpt-image-*） | true | true | ✅ |
+  // | 混合分组（有文本模型，如 pro池） | false | **true** | ✅（走中转站的生图桥）|
+  // | 普通文本分组（生图关掉的） | false | false | ❌ |
+  //
+  // ⚠️ `allowImageGeneration` 是 `null` 时（首屏只读本地那条路拿不到服务端字段）
+  // **仍然给入口**，只要 `isImageModel` 为真 —— 后者本地就能算。反过来，
+  // 纯文本档位在首屏不给入口，等 provision 拿到真值再出现。
+  const canGenerateImages =
+    tier.isImageModel || tier.allowImageGeneration === true;
 
   return (
     <div
@@ -677,6 +714,41 @@ function TierItem({
             >
               <PencilLine className="h-2.5 w-2.5" />
               {t("loongport.tier.userEdited")}
+            </span>
+          )}
+          {/* 「生图」标记：只给**纯生图分组**（`/v1/models` 里没有文本模型）。
+              混合分组不标 —— 它主业是对话，生图是附加能力，标了会让用户以为
+              这一档不能聊天。
+
+              ## 颜色为什么是 violet
+              蓝（当前在用）/ 绿（代理接管）/ amber（手动维护）在这个仓里已经有主，
+              violet 是唯一没被这三种状态占用的。上游 `ProviderCard.tsx` 确实也用了
+              violet 做一个徽标，但那在「手工 provider 卡片」上，与托管档位行不同屏
+              共现 —— 判据是**同一屏内不撞车**，不是全仓独占。
+
+              ## 为什么不禁用「启用」按钮
+              这类档位当对话供应商用会 404（它没挂文本模型）。但**是否禁用取决于
+              上游挂了什么，那是我们看不到的** —— 实测同一条路在有的中转站上通、
+              有的 502。禁用等于替用户断言一件我们不确定的事；标出来让他知道
+              「这一档是生图用的」，够了。 */}
+          {tier.isImageModel && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-violet-600 ring-1 ring-inset ring-violet-500/30 dark:text-violet-400"
+              title={t("loongport.tier.imageOnlyHint")}
+            >
+              <ImageIcon className="h-2.5 w-2.5" />
+              {t("loongport.tier.imageOnly")}
+            </span>
+          )}
+          {/* 「已装生图」标记。**常驻**，与「已手动维护」同一条判据：
+              它是状态不是动作，藏进 hover 用户就得逐行试探才知道装在哪一档了。 */}
+          {imagegenInstalled && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 ring-1 ring-inset ring-emerald-500/30 dark:text-emerald-400"
+              title={t("loongport.tier.imagegenInstalledHint")}
+            >
+              <Check className="h-2.5 w-2.5" />
+              {t("loongport.tier.imagegenInstalled")}
             </span>
           )}
         </div>
@@ -777,6 +849,41 @@ function TierItem({
             <Activity className="h-3.5 w-3.5" />
           )}
         </Button>
+
+        {/* 「装 / 卸生图工具」：只在能生图的档位上出现（判据见 `canGenerateImages`）。
+
+            点一下就把一条 MCP server 记录写进库，各 CLI 的配置由后端同步 ——
+            用户之后在 codex / claude 里直接说「生成一张图」即可，**不必切档位**
+            （生图是独立工具，对话仍走他当前那个）。
+
+            已装的那些走 emerald（与上面那个标记同色，让「哪个按钮解除这个状态」
+            一眼可见 —— 与「恢复默认」用 amber 呼应 amber 标记同一个手法）。 */}
+        {canGenerateImages && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className={cn(
+              "h-7 w-7 shrink-0 p-1",
+              imagegenInstalled
+                ? "text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            disabled={togglingImagegen}
+            onClick={onToggleImagegen}
+            title={
+              imagegenInstalled
+                ? t("loongport.tier.imagegenUninstall")
+                : t("loongport.tier.imagegenInstall")
+            }
+          >
+            {togglingImagegen ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ImageIcon className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        )}
 
         {/* 「编辑配置」：跳 cc-switch 现成的编辑页 —— 那页支持全部字段，我们不重做
             （CLAUDE.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），

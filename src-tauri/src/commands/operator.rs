@@ -37,7 +37,7 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::operator::{api, chatgpt_app, creds, login, provision, purchase};
 use crate::provider::Provider;
-use crate::services::ProviderService;
+use crate::services::{McpService, ProviderService};
 use crate::store::AppState;
 
 /// 默认运营商域名。域名输入框的底纹词，用户直接点确定就用它。
@@ -57,27 +57,10 @@ use crate::store::AppState;
 // （两路 review 各抓一次）。指「本模块 tests 里」而不指名字，改名就不会让它悬空。
 const DEFAULT_SITE: &str = "790053500.com";
 
-/// codex 的默认模型。
-///
-/// 三个来源给了三个不同的值（sub2api 面板片段 `gpt-5.5`、cc-switch 第三方模板 `gpt-5.6-sol`、
-/// 上游 `UniversalProvider` 默认 `gpt-4o`），所以这个值是**查了真实服务端定的**：
-///
-/// - bestapi.store 的 codex 分组（openai 平台）下，`gpt-5.6-sol` 是**全部可调度账号都支持**的
-///   最新一代；`gpt-5.6` 只有一家上游有，选它会让另外几家路由不到。
-/// - 与 `gpt-5.5` 同价（输入 5 / 输出 30 每百万），所以选新的没有额外成本。
-/// - `gpt-4o` 三个候选里唯一没人推荐的，别回退到它。
-///
-/// **这是「默认值」不是「唯一值」**：用户在 provider 编辑里能改，运营商上新一代模型后也该
-/// 跟着调。它只决定「刚 provision 完、用户还没动手」时用哪个。
-///
-/// ## ⚠️ 改这个值时必须把旧值加进 [`provision::HISTORICAL_DEFAULT_MODELS`]
-///
-/// 已存在的档位**不会**被 provision 改写模型名（只换 sk），所以改了这个常量之后，
-/// 它们的配置里还是旧模型 ⇒ 与「用户改过没有」的比对基准对不上 ⇒
-/// **界面上每一个档位都显示「已手动维护」**，而用户一个字都没改过。
-///
-/// 那个数组就是为此存在的（「读宽写窄」：认全部历史值，写入只产出当前值）。
-const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+// `DEFAULT_MODEL` 住在 `provision` 里 —— 它与 `HISTORICAL_DEFAULT_MODELS`、`pick_model`
+// 互为前提（前者的文档要求改值时同步后者；`pick_model` 要在「问不出模型列表」时回落到它），
+// 三者分居两个文件迟早分叉。这里只 `use`。
+use provision::DEFAULT_MODEL;
 
 /// 等用户走完登录流程的上限（秒）。
 ///
@@ -184,6 +167,28 @@ pub struct TierInfo {
     /// `creds` 里按站点存）。[`operator_list_tiers`] 那条路恒为 `None` ——
     /// 它的调用方不显示这个标记，见该命令的文档。
     pub user_edited: Option<bool>,
+    /// 这个档位的模型是生图模型（`gpt-image-*`）吗。
+    ///
+    /// 判据是**配置里的 `model`**（[`provision::is_image_model`]），不是「拉一次
+    /// `/v1/models` 看看」—— 因为 [`list_operators_impl`] 那条路是「只读本地不发网络」
+    /// 的首屏契约。而模型名就在本地 `settings_config` 里，两条路都拿得到，
+    /// 无需异步填空、无首屏空窗。
+    ///
+    /// 为真 ⇒ 这是纯生图分组（provision 只在该分组没挂文本模型时才写生图模型名，
+    /// 见 [`provision::pick_model`]）。
+    pub is_image_model: bool,
+    /// 服务端说这个分组允许生图（`allow_image_generation`）。
+    ///
+    /// ⚠️ **与 [`Self::is_image_model`] 是两件事**：混合分组（有文本模型，如实测的
+    /// `pro池`）也是 `true` —— 它的生图走中转站的 codex 生图桥。压成一个字段就分不回来。
+    ///
+    /// `None` = **判不了**：这是纯服务端信息（分组的开关），本地配置里没有它。
+    /// 只有 provision 那条路填得出，[`list_operators_impl`] 恒为 `None`。
+    /// UI 在 `None` 时不显示标记 —— 与 `user_edited` 同一条原则：不知道就别断言。
+    ///
+    /// 这个不对称是有意的：**少显示一个信息性标记无害**，而 `is_image_model`
+    /// 若在首屏未知会让「装生图工具」的入口忽隐忽现，那是有害的。
+    pub allow_image_generation: Option<bool>,
 }
 
 /// 「运营商 × 分组」页的一行运营商，连带它在当前 app 下的档位。
@@ -924,12 +929,16 @@ async fn do_provision(
 
         // 认不出配置形状的 CLI 直接跳过并如实报出来 —— 不能写一条形状不对的记录
         // （那是「看着像成功、调用必失败」）。
+        //
+        // ⚠️ **模型名用 `tier.model` 而不是 `DEFAULT_MODEL`**：纯生图分组
+        // （`/v1/models` 里只有 `gpt-image-*`）写文本模型名就是必定 404。
+        // 那个值由 `provision::pick_model` 按该分组的真实模型列表定，见它的文档。
         let Some(defaults) = provision::settings_config_for(
             app_type,
             &tier.api_key,
             &display_name,
             &op.api_base_url,
-            DEFAULT_MODEL,
+            &tier.model,
         ) else {
             result.failures.push((
                 tier.group_name.clone(),
@@ -1001,12 +1010,16 @@ async fn do_provision(
 
         // 这条路上判据算得**准**：`settings_config` 就在手边，`op.api_base_url` 也有，
         // 不需要像 `list_operators_impl` 那样绕一圈。
+        //
+        // ⚠️ 基准的模型名同样用 `tier.model` —— 拿 `DEFAULT_MODEL` 去比对生图档位，
+        // 会让**每个生图档位都显示「已手动维护」**而用户一个字没改过
+        // （与 `HISTORICAL_DEFAULT_MODELS` 文档里描述的误报同一形状）。
         let user_edited = provision::is_user_edited(
             &provider.settings_config,
             app_type,
             &display_name,
             &op.api_base_url,
-            DEFAULT_MODEL,
+            &tier.model,
         );
 
         let is_current = current == provider_id;
@@ -1024,6 +1037,10 @@ async fn do_provision(
             display_name,
             rate_multiplier: Some(tier.rate_multiplier),
             user_edited,
+            // 这条路上两个字段都有真值：模型名刚由 `pick_model` 算出来，
+            // 生图开关刚从 `/groups/available` 拉到。
+            is_image_model: provision::is_image_model(&tier.model),
+            allow_image_generation: Some(tier.allow_image_generation),
         });
     }
 
@@ -1768,6 +1785,12 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                 // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
                 // 由 `tiers_of_site` 在按站分组时填。见该字段的文档。
                 user_edited: None,
+                // **这个在本地就能算**（判据是配置里的 `model`），所以首屏就有真值 ——
+                // 不像倍率那样留 None 等异步填。见该字段的文档：入口忽隐忽现是有害的。
+                is_image_model: provision::extract_model(&p.settings_config)
+                    .is_some_and(|m| provision::is_image_model(&m)),
+                // 纯服务端信息，本地推不出来 ⇒ None（UI 不显示标记）。
+                allow_image_generation: None,
             },
             site_origin: p.website_url.clone(),
             account_id: p.meta.as_ref().and_then(|m| m.loongport_account_id),
@@ -2424,6 +2447,209 @@ fn with_conn<T>(
     f(&conn)
 }
 
+// ============================================================================
+// 生图工具（MCP）
+// ============================================================================
+
+/// 生图 MCP 在 `mcp_servers` 表里的 id 前缀。
+///
+/// 带上档位的 provider_id 组成完整 id ⇒ **一个档位一条记录**，用户可以给便宜的档位和
+/// 高清的档位各装一个，互不覆盖。
+///
+/// ⚠️ 这个 id 会进 CLI 的配置文件（成为 `[mcp_servers.<id>]` 的表名），属跨出进程边界
+/// 的标识 —— 改它等于让已装用户的旧配置成为孤儿（库里删不到、CLI 里还留着）。
+const IMAGEGEN_MCP_ID_PREFIX: &str = "loongport-imagegen-";
+
+/// 启动 MCP server 模式的命令行开关。**与 `main.rs` 里那个判断必须一致**。
+///
+/// 两处各写一遍字面量迟早分叉（改了一处另一处没跟上 ⇒ 写出去的配置启动不了 server，
+/// 而症状是宿主那边"启动超时"，看不出是拼写问题）。所以这里是唯一定义，
+/// `main.rs` 用 `cc_switch_lib::IMAGEGEN_MCP_FLAG` 引它。
+pub const IMAGEGEN_MCP_FLAG: &str = "--mcp-image-gen";
+
+/// 装好之后返回给前端的信息。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagegenMcpResult {
+    /// 写进 `mcp_servers` 的那条记录的 id。
+    pub server_id: String,
+    /// 装到了哪些 CLI（`AppType::as_str()`）。
+    pub apps: Vec<String>,
+}
+
+/// 给某个档位装上生图工具（写一条 MCP server 记录）。
+///
+/// ## 为什么走 MCP 而不是把档位的 `model` 改成 `gpt-image-*`
+///
+/// 那两条链路要求上游提供的模型不同，详见
+/// [`crate::operator::imagegen_mcp`] 的模块文档。简言之：改 `model` 那条走
+/// `/v1/responses`，上游必须挂着 `gpt-5.4-mini`（sub2api 归一化写死的目标），
+/// 而只挂生图模型的中转站上**必然 502**（实测）。MCP 走
+/// `/v1/images/generations`，要的就是 `gpt-image-*` 本身。
+///
+/// 更要紧的是**对话档位不必让位**：改 `model` 会让那个档位没法聊天，
+/// 而 MCP 是独立工具，用户照旧用便宜的文本档位对话。
+///
+/// ## 为什么写 `mcp_servers` 表而不是直接改 CLI 的配置文件
+///
+/// MCP 的 SSOT 就是那张表，各 CLI 的 `config.toml` / `mcp.json` 只是它的投影
+/// （`codex_config.rs` 的 `strip_codex_mcp_servers_from_settings` 那段注释钉过这条）。
+/// 自己去写配置文件会被下一次同步覆盖掉，而且绕过了「切档位时重投影」那套逻辑。
+///
+/// ## sk 不进配置
+///
+/// `args` 里只写 `--tier <provider_id>`，sk 由 server 启动时从库里现读。
+/// 好处是双份的：明文 sk 不落进 `~/.codex/config.toml`，且**档位刷新换了 sk
+/// 自动生效**，不需要任何同步逻辑。
+///
+/// `apps` = 装到哪些 CLI；`None` 或空列表 = 全部支持 stdio MCP 的那三个
+/// （codex / claude / gemini）。
+#[tauri::command]
+pub async fn operator_install_imagegen_mcp(
+    app_handle: tauri::AppHandle,
+    provider_id: String,
+    apps: Option<Vec<String>>,
+) -> Result<ImagegenMcpResult, String> {
+    install_imagegen_mcp_impl(&app_handle, &provider_id, apps).map_err(|e| e.to_string())
+}
+
+fn install_imagegen_mcp_impl(
+    app_handle: &tauri::AppHandle,
+    provider_id: &str,
+    apps: Option<Vec<String>>,
+) -> Result<ImagegenMcpResult, AppError> {
+    let state = app_handle.state::<AppState>();
+
+    // 档位得真的存在，且能读出 sk —— 否则装出来是个必定失败的工具。
+    // **两道检查都在写配置之前**：宁可现在报错，也不要让用户在 codex 里
+    // 看到一个启动就挂的工具（那时配置已经写进 CLI 了）。
+    let provider = ProviderService::list(&state, AppType::Codex)?
+        .values()
+        .find(|p| p.id == provider_id)
+        .cloned()
+        .ok_or_else(|| AppError::Config(format!("找不到档位 {provider_id}，请先「获取密钥」")))?;
+
+    // **只给托管档位装。** 这是与 `reject_if_managed` 相反方向的守卫：那些入口拦的是
+    // 「别对托管项做手工操作」，这里拦的是「别对手工 provider 做托管操作」——
+    // 生图 MCP 启动时按 provider_id 去库里找 sk 与 base_url，而那套形状只有托管档位
+    // 保证有（用户手建的 provider 可以是任意形状）。
+    if !is_managed(&provider) {
+        return Err(AppError::Config(
+            "生图工具只能装在 LoongPort 托管的运营商档位上。".into(),
+        ));
+    }
+
+    if provision::extract_api_key(&provider.settings_config, &AppType::Codex).is_none() {
+        return Err(AppError::Config(
+            "这个档位的配置里读不出密钥，请先用「获取密钥」重新生成它。".into(),
+        ));
+    }
+
+    // 当前可执行文件的绝对路径。macOS 上这是 `.app/Contents/MacOS/<bin>`，
+    // 正是 CLI 该去启动的东西。
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::Message(format!("获取可执行文件路径失败: {e}")))?;
+    let exe_str = exe
+        .to_str()
+        .ok_or_else(|| AppError::Message("可执行文件路径不是有效的 UTF-8".into()))?;
+
+    let server_id = format!("{IMAGEGEN_MCP_ID_PREFIX}{provider_id}");
+    let spec = serde_json::json!({
+        "type": "stdio",
+        "command": exe_str,
+        "args": [IMAGEGEN_MCP_FLAG, "--tier", provider_id],
+    });
+
+    // 默认装到 codex + claude + gemini：这三个都支持 stdio MCP，而用户"要生图"这件事
+    // 与他在哪个 CLI 里干活无关。不装 opencode / hermes ——
+    // 那两个的配置形状要另外验，没验过的不写。
+    let mut mcp_apps = crate::app_config::McpApps::default();
+    match apps {
+        Some(list) if !list.is_empty() => {
+            for name in &list {
+                match AppType::from_str(name) {
+                    Ok(app) => mcp_apps.set_enabled_for(&app, true),
+                    Err(_) => {
+                        return Err(AppError::Config(format!("不认识的 CLI: {name}")));
+                    }
+                }
+            }
+        }
+        _ => {
+            mcp_apps.codex = true;
+            mcp_apps.claude = true;
+            mcp_apps.gemini = true;
+        }
+    }
+
+    let enabled: Vec<String> = mcp_apps
+        .enabled_apps()
+        .iter()
+        .map(|a| a.as_str().to_string())
+        .collect();
+
+    McpService::upsert_server(
+        &state,
+        crate::app_config::McpServer {
+            id: server_id.clone(),
+            // 名字带档位名 —— 用户在 MCP 面板里要能认出这条是哪个档位的。
+            name: format!("生图 · {}", provider.name),
+            server: spec,
+            apps: mcp_apps,
+            description: Some(format!(
+                "用「{}」这个档位生图（gpt-image 系列）。由 LoongPort 自动维护，\
+                 密钥不写进 CLI 配置。",
+                provider.name
+            )),
+            homepage: None,
+            docs: None,
+            tags: vec!["loongport".into(), "image".into()],
+        },
+    )?;
+
+    log::info!(
+        "已为档位 {provider_id}（{}）装上生图 MCP，目标 CLI: {:?}",
+        provider.name,
+        enabled
+    );
+
+    Ok(ImagegenMcpResult {
+        server_id,
+        apps: enabled,
+    })
+}
+
+/// 卸掉某个档位的生图工具。
+///
+/// 走 [`McpService::delete_server`] 而不是只删库里那行 —— 它会把各 CLI 配置里的投影
+/// 一并清掉。只删库的后果是 CLI 里留着一条指向已删记录的 server，启动时报错。
+#[tauri::command]
+pub async fn operator_uninstall_imagegen_mcp(
+    app_handle: tauri::AppHandle,
+    provider_id: String,
+) -> Result<bool, String> {
+    let state = app_handle.state::<AppState>();
+    let server_id = format!("{IMAGEGEN_MCP_ID_PREFIX}{provider_id}");
+    McpService::delete_server(&state, &server_id).map_err(|e| e.to_string())
+}
+
+/// 这些档位已经装了生图工具。
+///
+/// 前端据此把按钮显示成「装」还是「已装」。**返回 provider_id 列表而不是布尔** ——
+/// 一次查完整屏，避免每行各发一次 invoke。
+#[tauri::command]
+pub async fn operator_list_imagegen_mcp(
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<String>, String> {
+    let state = app_handle.state::<AppState>();
+    let servers = McpService::get_all_servers(&state).map_err(|e| e.to_string())?;
+    Ok(servers
+        .keys()
+        .filter_map(|id| id.strip_prefix(IMAGEGEN_MCP_ID_PREFIX))
+        .map(str::to_string)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2506,6 +2732,8 @@ mod tests {
             rate_multiplier: Some(1.0),
             is_current: false,
             user_edited: None,
+            is_image_model: false,
+            allow_image_generation: None,
         };
 
         let json = serde_json::to_value(&tier).expect("要能序列化");
@@ -2546,6 +2774,9 @@ mod tests {
             is_current: false,
             // 归属测试不关心它 —— `tiers_of_site` 会自己算出来覆盖掉这个值。
             user_edited: None,
+            // 同上：归属判定与生图无关。
+            is_image_model: false,
+            allow_image_generation: None,
         }
     }
 

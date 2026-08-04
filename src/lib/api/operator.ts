@@ -87,6 +87,36 @@ export interface TierInfo {
    * 而那是按站点存的，只有分组到运营商之后才拿得到。
    */
   userEdited: boolean | null;
+  /**
+   * 这个档位的模型是生图模型（`gpt-image-*`）吗。
+   *
+   * 由后端按档位配置里的 `model` 判（那是 provision 按该分组真实的模型列表写进去的）。
+   * 为真表示这是个**纯生图分组** —— 它没挂文本模型，当对话供应商用会 404。
+   *
+   * UI 据此显示「生图」标记 + 把「装生图工具」按钮突出出来。
+   * **不禁用「启用」按钮**：用户真想切过去是他的选择，而且换个站可能就能用
+   * （取决于上游挂了什么）。
+   */
+  isImageModel: boolean;
+  /**
+   * 服务端说这个分组允许生图（`allow_image_generation`）。
+   *
+   * ⚠️ **不等于 `isImageModel`**：实测混合分组（有文本模型，如 `pro池`）也是 `true` ——
+   * 它的生图靠中转站的 codex 生图桥。而 `allow_image_generation=false` 的档位
+   * 生图会拿 403，装了工具也用不了。
+   *
+   * `null` = **判不了**（只有 provision 那条路拿得到这个字段，`listOperators`
+   * 是只读本地的）。`null` 时不显示任何标记 —— 与 `userEdited` 同一条处理原则：
+   * 不知道就别断言。
+   */
+  allowImageGeneration: boolean | null;
+}
+
+/** 装生图工具的结果。 */
+export interface ImagegenMcpResult {
+  serverId: string;
+  /** 装到了哪些 CLI（`"codex"` / `"claude"` / `"gemini"`）。 */
+  apps: AppId[];
 }
 
 /**
@@ -335,6 +365,35 @@ export const operatorApi = {
    */
   resetTierConfig: (providerId: string, app: string): Promise<void> =>
     invoke("operator_reset_tier_config", { providerId, app }),
+
+  /**
+   * 给某个档位装上生图工具（写一条 MCP server 记录，各 CLI 的配置由后端同步）。
+   *
+   * 装完用户在 codex / claude 里直接说「生成一张图」就能用 —— **不必切档位**，
+   * 对话仍走他当前那个（生图是独立的 MCP 工具）。
+   *
+   * 密钥不写进任何 CLI 配置文件：配置里只有档位 id，密钥在工具启动时从库里现读。
+   * 所以档位刷新换了密钥也不用重装。
+   *
+   * `apps` 省略 = 装到全部支持 stdio MCP 的那三个（codex / claude / gemini）。
+   */
+  installImagegenMcp: (
+    providerId: string,
+    apps?: AppId[],
+  ): Promise<ImagegenMcpResult> =>
+    invoke("operator_install_imagegen_mcp", { providerId, apps }),
+
+  /** 卸掉某个档位的生图工具（连各 CLI 配置里的投影一起清）。 */
+  uninstallImagegenMcp: (providerId: string): Promise<boolean> =>
+    invoke("operator_uninstall_imagegen_mcp", { providerId }),
+
+  /**
+   * 已经装了生图工具的档位 id 列表。
+   *
+   * **一次查完整屏**而不是每行各问一次 —— 前端据此把按钮显示成「装」还是「已装」。
+   */
+  listImagegenMcp: (): Promise<string[]> =>
+    invoke("operator_list_imagegen_mcp"),
 
   /**
    * 一键「切回官方登录」：清 codex 的第三方路由与登录态。

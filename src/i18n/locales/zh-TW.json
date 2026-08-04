@@ -3070,7 +3070,15 @@
       "userEdited": "已手動維護",
       "userEditedHint": "這個檔位的設定你改過。重新整理分組不會覆寫它（只更新金鑰）。點這裡恢復預設設定。",
       "editMissing": "這個檔位的記錄已經不在了，請點「取得金鑰」重新產生。",
-      "editCurrentNote": "這是目前正在使用的檔位。改完如果沒生效，結束並重新開啟 ChatGPT 桌面版 —— 它在執行時會把 codex 的設定改回去。"
+      "editCurrentNote": "這是目前正在使用的檔位。改完如果沒生效，結束並重新開啟 ChatGPT 桌面版 —— 它在執行時會把 codex 的設定改回去。",
+      "imageOnly": "生圖",
+      "imageOnlyHint": "這個檔位只掛了生圖模型（gpt-image 系列），當對話供應商用會失敗。裝上生圖工具後，在 codex / claude 裡直接說「生成一張圖」即可，不必切到這個檔位。",
+      "imagegenInstall": "裝生圖工具",
+      "imagegenUninstall": "卸掉生圖工具",
+      "imagegenInstalled": "已裝生圖",
+      "imagegenInstalledHint": "這個檔位的生圖工具已裝好。在 codex / claude 裡直接說「生成一張圖」即可 —— 對話仍走你目前用的檔位。點這裡卸掉。",
+      "imagegenInstalledToast": "已為「{{name}}」裝上生圖工具（{{apps}}）。新開一個終端後，直接說「生成一張圖」即可。",
+      "imagegenUninstalled": "已卸掉「{{name}}」的生圖工具"
     },
     "stats": {
       "title": "協助改進 LoongPort",

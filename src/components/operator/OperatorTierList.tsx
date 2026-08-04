@@ -141,6 +141,14 @@ export interface OperatorTierListProps {
   onResetTier: (tier: TierInfo) => void;
   /** 编辑某个档位的配置（跳 cc-switch 的编辑页）。宿主负责先弹事前警告。 */
   onEditTier: (tier: TierInfo) => void;
+  /**
+   * 给某个档位装 / 卸生图工具（一条 MCP server 记录）。
+   *
+   * 只在能生图的档位上有入口（判据在 `OperatorRow` 的 `TierItem` 里）。
+   */
+  onToggleImagegen: (tier: TierInfo, installed: boolean) => void;
+  /** 已装生图工具的档位 id 集合，由宿主一次查完整屏。 */
+  imagegenInstalled: ReadonlySet<string>;
   /** 删掉某一行（连带它名下的托管档位）。有档位在用的行不会触发它（按钮不可点）。 */
   onRemoveOperator: (operatorId: number) => void;
 }
@@ -218,6 +226,8 @@ export function OperatorTierList({
   isCheckingTier,
   onResetTier,
   onEditTier,
+  onToggleImagegen,
+  imagegenInstalled,
   onRemoveOperator,
 }: OperatorTierListProps) {
   const { t } = useTranslation();
@@ -379,6 +389,8 @@ export function OperatorTierList({
                   isCheckingTier={isCheckingTier}
                   onResetTier={onResetTier}
                   onEditTier={onEditTier}
+                  onToggleImagegen={onToggleImagegen}
+                  imagegenInstalled={imagegenInstalled}
                   onDelete={() => onRemoveOperator(op.id)}
                 />
               ))}
