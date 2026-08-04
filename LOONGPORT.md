@@ -1,17 +1,34 @@
 # LoongPort
 
-> **同样的 Codex，成本省 95% 以上，国内直连**
-> *The same Codex — over 95% cheaper, no extra network setup.*
+> **Codex 只花官方的 5%，Claude 只花 20%，国内直连**
+> *Codex at 5% of official cost, Claude at 20%, no extra network setup.*
 
 这两句是**固定副标题**，README / 官网 / GitHub description 第一行都用它，别每处另写一版。
 产品名只承担识别（同 Docker / Vercel，不自我描述），"它是什么"由副标题讲 ——
 少了这句，`Port` 容易被读成"移植版"，正好是最不想要的解读。
 
-⚠️ **视角是用户的（我用 Codex，我省钱），不是实现的。** 上一版写的是「一个运营商账号，
-直接变成任意 AI CLI 的可用供应商」—— 那句描述的是软件内部干了什么，而用户关心的是自己
-得到什么。改这句要同步改三处：`README.md`（中文，GitHub 首页展示的那份）/
+⚠️ **视角是用户的（我用 Codex / Claude，我省钱），不是实现的。** 上一版写的是「一个运营商
+账号，直接变成任意 AI CLI 的可用供应商」—— 那句描述的是软件内部干了什么，而用户关心的是
+自己得到什么。改这句要同步改三处：`README.md`（中文，GitHub 首页展示的那份）/
 `README_EN.md` 的标题下方，
 以及官网 `src/i18n/translations.ts` 的 `TAGLINE`。
+
+⚠️ **一律用「只花官方的 N%」这个 level 口径，别改回「省 N%」那个 delta 口径**
+（两者等价：花 5% ⟺ 省 95%）。选 level 的三条理由：
+
+1. **与官网 /pricing 的推导同单位** —— 那页算出来的就是「成本约为官方的 1.5%」。
+   首屏说 delta，读者从钩子走到证明要自己心算一次 95% ↔ 1.5%。
+2. **上限比下限更像买家要的承诺** —— 他想知道「我最多掏多少」。保守表述也随之
+   自然：「5% 以内」而实际约 1.5%。
+3. **折扣百分比是广告的形状，level 是事实陈述的形状** —— 这产品整个立意是可核性，
+   越像促销越触发骗子警报。
+
+也别把两种口径并排写（「只花 5%（省 95%）」）—— 同一件事说两遍。
+
+⚠️ **两个数字别合并成一个**（如笼统取上界写「只花 20%」）：Codex 与 Claude 的成本
+来源不同 —— Codex 吃到档位倍率折扣（×0.1）与汇率两层，Claude 只吃到汇率那层
+（Anthropic 分组无倍率折扣）。取上界砍掉 Codex 主卖点的一半，取下界则让 Claude
+用户按 5% 预期然后落空。
 
 两条**不要**写进对外文案的表述，即使它们更抓人：
 - **「无惧封号」** —— 隐含「官方会封号、用我们不会」，是承诺一个 LoongPort 控制不了的
@@ -31,7 +48,7 @@
 | 维度 | 已实现 | 在做 / 待做 |
 |---|---|---|
 | 运营商 | sub2api | new-api（登录标识已按它设计成中立的 `login_identifier`） |
-| CLI | codex | claude / gemini / grok（`platform_map` 映射表已建全，缺各自的配置写入形状） |
+| CLI | codex · claude | gemini / grok（`platform_map` 映射表已建全，缺各自的配置写入形状） |
 | 平台 | macOS · Windows | Linux |
 
 **Windows 自 2026-08-03 起可用**（MSI 已在维护者机器上打出并验证）。
@@ -51,8 +68,12 @@
 
 ⚠️ **别把「当前只实现了 X」读成「设计上只支持 X」** —— 数据层已按多运营商多平台设计
 （四段式 Key 契约含 platform 段、`platform_map` 六个平台全覆盖、命令层签名都吃 `app_id`）。
-真正的缺口只在**配置写入形状**：`settings_config_for` 生成的是 codex 的 TOML，
-接 claude 要另写一份。
+
+**配置写入形状**：codex 那份由 `settings_config_for` 里的专属分支写（多一行
+`requires_openai_auth`，见那个函数上方的说明）；claude 与其余 CLI 走上游
+`build_provider_from_request` 构造 —— sk 落在 `env.ANTHROPIC_AUTH_TOKEN`，
+位置由 `api_key_location` 统一定义（`patch_api_key` 与 `extract_api_key` 共用它，
+免得两处分叉）。gemini / grok 还缺各自的落法。
 
 上游那份 `README.md` 描述的是 cc-switch 本身（8 个 CLI、本地代理、MCP/Skills 全套），本文件
 只讲 LoongPort 自己加的那条链路。

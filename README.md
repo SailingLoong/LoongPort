@@ -4,7 +4,7 @@
 
 # LoongPort
 
-### 同样的 Codex，成本省 95% 以上，国内直连
+### Codex 只花官方的 5%，Claude 只花 20%，国内直连
 
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](../../releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
@@ -18,24 +18,25 @@
 
 ## 它替你做什么
 
-你想用 Codex CLI，但不想按官方 API 的价付钱。照常规做法这意味着：去中转站注册、
-找到控制台、手建一把 API Key、把 `base_url` 抄对、翻出 `~/.codex/config.toml`、
-把 `wire_api` 和 `model_provider` 写对。想换个档位，再来一遍。
+你想用 Codex CLI 或 Claude Code，但不想按官方 API 的价付钱。照常规做法这意味着：
+去中转站注册、找到控制台、手建一把 API Key、把 `base_url` 抄对、翻出配置文件、
+把字段写对。换个 CLI 或档位，再来一遍。
 
 LoongPort 把这些压成两步 —— **填一个域名，登录一次。** 它会为你账号能用的每个档位
-备好 key、把配置文件写好，之后换档位就是点一下。
+备好 key、按各 CLI 的形状把配置写好，之后换档位就是点一下。
 
 ## 为什么便宜这么多
 
-两件事叠加：
+两层优惠，Codex 吃到两层，Claude 只吃到一层：
 
-| 因素 | | 为什么 |
-|---|---|---|
-| 档位倍率 | **×0.1** | 多数 GPT 档位的计费倍率是 0.1 —— 同样的 token 用量，按官方价的一折计费 |
-| 汇率口径 | **×1/6.7** | 中转站普遍按「1 人民币抵 1 美元」计价，而实际汇率约 1 美元兑 6.7 人民币 |
+| 因素 | | 谁吃得到 | 为什么 |
+|---|---|---|---|
+| 档位倍率 | **×0.1** | 只有 Codex | 多数 GPT 档位的计费倍率是 0.1 —— 同样的 token 用量，按官方价的一折计费。Anthropic 分组没有这个折扣，倍率是 1 |
+| 汇率口径 | **×1/6.7** | Codex 与 Claude 都有 | 中转站普遍按「1 人民币抵 1 美元」计价，而实际汇率约 1 美元兑 6.7 人民币 |
 
-`0.1 × 1/6.7 ≈ 0.015` —— 成本约为**官方 API 的 1.5%**，即省下约 98.5%。这里写
-「95% 以上」是因为倍率随档位和站点浮动，留了余量。完整推导与几点说明：
+所以 Codex 是 `0.1 × 1/6.7 ≈ 0.015`，成本约为**官方 API 的 1.5%**；
+Claude 是 `1 × 1/6.7 ≈ 0.15`，约为**官方 API 的 15%**。上面写「只花 5%」和「只花 20%」
+都留了余量，因为倍率随档位和站点浮动。完整推导与几点说明：
 **[loongport.dev/zh/pricing](https://loongport.dev/zh/pricing)**
 
 LoongPort 本身免费，不经手你的付款、也不从你的余额里抽成 —— 它只是替你把配置写对。
@@ -47,9 +48,13 @@ LoongPort 本身免费，不经手你的付款、也不从你的余额里抽成 
 
 ## 不占用官方账号
 
-ChatGPT 桌面版与命令行 `codex` 共用同一份凭据文件（`~/.codex/auth.json`）。
-LoongPort 默认保留它，切换档位时不会写它 —— 所以你的官方订阅还在原处，想用随时
-切回去，不必手改任何东西。
+两边的官方登录都留在原处，想用随时切回去，不必手改任何东西 —— 但两者靠的机制不同：
+
+- **Codex**：ChatGPT 桌面版与命令行 `codex` **共用同一份**凭据文件
+  （`~/.codex/auth.json`），所以这里需要显式保留 —— LoongPort 默认开启保留，
+  切档位时不写它。
+- **Claude**：官方登录在 `~/.claude/.credentials.json`，而切档位写的是同目录的
+  `settings.json`，**两个文件本来就分开** —— 不存在被覆盖的问题。
 
 ## 安装
 
@@ -102,9 +107,11 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个，�
    是登录后的凭据，不经手你的密码。
 3. **自动备 key** —— 每个可用档位一把。先复用你账号里名字匹配的，找不到才新建，
    所以反复点刷新不会在你账号里堆垃圾 key。
-4. **选档位** —— 点一下就写好 `~/.codex/config.toml`。
-5. **继续用** —— Codex 直接就能跑。它还会替你退出并重开 ChatGPT 桌面版 —— 那个 app
-   启动时读配置、运行中改配置不会重新加载，所以这一步才是让新档位真正生效的关键。
+4. **选 CLI 和档位** —— Codex 用 OpenAI 分组、Claude 用 Anthropic 分组，点一下就把
+   对应的配置写好（`~/.codex/config.toml` 或 Claude 的 settings）。
+5. **继续用** —— Codex 或 Claude Code 直接就能跑。**切 Codex 档位时**它还会替你退出
+   并重开 ChatGPT 桌面版 —— 那个 app 启动时读配置、运行中改配置不会重新加载，
+   所以这一步才是让新档位真正生效的关键。切 Claude 档位不涉及它，不会碰你开着的窗口。
 
 凭据与站点信息存在本机 `~/.loongport/` 下的 SQLite 里，且**只发给你选的那个中转站**
 （作为它 API 调用的 Bearer token —— 账号能用靠的就是这个）。LoongPort 自己没有账号
@@ -115,25 +122,43 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个，�
 | | 已支持 | 在做 |
 |---|---|---|
 | **中转服务** | sub2api | new-api |
-| **AI CLI** | codex | claude · gemini · grok |
+| **AI CLI** | codex · claude | gemini · grok |
 | **平台** | macOS · Windows | Linux |
 
 站点域名可以自己填，默认预置一个可用的。macOS 与 Windows 功能一致。
 
-> 一处细节差异：替你重启 ChatGPT 桌面版这一步，**macOS 上是「请求退出」**——
-> 它有进行中的对话时会弹自己的确认框，你可以取消（那次切换随之中止）；
-> **Windows 上是强制结束进程**，不会弹框，所以切换前应用会先告知你一次。
+> 一处细节差异，只在**切 Codex 档位**时涉及（那一步要替你重启 ChatGPT 桌面版；
+> 切 Claude 档位不碰它）：**macOS 上是「请求退出」**—— 它有进行中的对话时会弹自己的
+> 确认框，你可以取消（那次切换随之中止）；**Windows 上是强制结束进程**，不会弹框，
+> 所以切换前应用会先告知你一次。
 
-## 与 cc-switch 的关系
+## 致谢与上游项目
 
-LoongPort 最初在 [cc-switch](https://github.com/farion1231/cc-switch) v3.19.1 上 fork，
-之后合并上游至 v3.19.2，许可证同为 MIT —— 一个成熟的基座省掉了大量重复工作，
-图标也衍生自它。
+LoongPort 站在两个别人的项目上，这里说清各自的关系。
+
+### cc-switch —— 本项目的基座
+
+LoongPort 最初在 [cc-switch](https://github.com/farion1231/cc-switch)（作者
+[@farion1231](https://github.com/farion1231)）v3.19.1 上 fork，之后合并上游至
+v3.19.2，许可证同为 MIT，其版权声明保留在 [LICENSE](LICENSE) 里，图标也衍生自它。
+**这个仓里绝大部分代码是它的** —— 一个成熟的基座省掉了大量重复工作，
+没有它就没有这个项目。
 
 **两者做的是不同的事。** cc-switch 是通用的多供应商管理器，管所有 CLI 的所有供应商，
 功能面大得多 —— 本地代理、MCP、Skills、Prompts、会话管理。LoongPort 只把「用中转
-服务省钱跑 Codex」这一条链路做到全自动。想要那个全能工具就用 cc-switch。两者数据
-目录分开（`~/.cc-switch/` 与 `~/.loongport/`），可以同时装、同时开。
+服务省钱跑 AI CLI」这一条链路做到全自动。**想要那个全能工具就去用 cc-switch**，
+它仍在活跃维护。两者数据目录分开（`~/.cc-switch/` 与 `~/.loongport/`），
+可以同时装、同时开。
+
+### sub2api —— 对接的中转站后端
+
+多数中转站跑的是 [sub2api](https://github.com/Wei-Shaw/sub2api)（LGPL-3.0）。
+LoongPort 与它的关系是**纯 HTTP 客户端** —— 不链接、不包含、也没有复用它的任何代码，
+只依据它公开的接口（端点、字段、鉴权方式）来调用。它把接口做得清楚，
+才让「自动建 key、自动读分组」这件事成立。
+
+LoongPort 不是 sub2api 的官方客户端，也与其作者无关联；用它遇到的问题请提到本仓，
+别去打扰上游。
 
 ## 从源码构建
 
@@ -184,4 +209,5 @@ pnpm tsc --noEmit                                 # 类型检查
 
 ## 许可证
 
-[MIT](LICENSE) —— 继承自 cc-switch，其版权声明已保留。
+[MIT](LICENSE)，与上游 cc-switch 一致。[LICENSE](LICENSE) 里并列两条版权声明 ——
+上游作者的那条按 MIT 要求原样保留，另一条是本项目自己的改动部分。
