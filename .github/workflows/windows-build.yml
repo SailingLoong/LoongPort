@@ -1,15 +1,17 @@
-# 出一个能给人试用的 Windows 安装包。
+# 不打 tag 也能出一个 Windows 安装包 —— 拿任意分支的代码给人试用时用它。
 #
-# **有意与继承来的 `release.yml` 分开**：那个跑五平台矩阵、要 Tauri 签名私钥 + Apple 证书 +
-# 公证凭据，一个 secret 都没配的话第一步就红。这个 workflow 零 secrets，只干一件事 ——
-# 出 Windows msi。
+# **与 `release.yml` 的分工**：那个由 tag 触发，出全平台产物并建 GitHub Release；
+# 这个只手动触发、只出 Windows msi，不建 Release、不碰 tag。
+# （两者在零 secrets 下都能跑绿 —— 2026-08-04 用 `v3.19.2-rc.1` 演练验过。）
 #
 # 不签名的代价：用户第一次运行会看到 SmartScreen 的「未知发布者」警告，要点「更多信息 →
 # 仍要运行」。给朋友试用可以接受；真要对外发布得另配代码签名证书。
 name: Windows Build
 
 on:
-  # 手动触发为主 —— 出包是个有意的动作，不该每次 push 都烧 CI 额度。
+  # **只手动触发。** 出包是个有意的动作，不该每次 push 都烧 CI 额度；
+  # 打 tag 那条路归 `release.yml` —— 它已经出 msi + 免安装版、x64 + arm64 四个产物，
+  # 这个 workflow 再跟着 tag 跑一遍就是白编两次 Windows（实测 17 分钟起）。
   workflow_dispatch:
     inputs:
       arch:
@@ -17,9 +19,6 @@ on:
         type: choice
         default: x64
         options: [x64, arm64, both]
-  # 打 tag 时也出一份，方便对着版本号找包。
-  push:
-    tags: ['v*']
 
 permissions:
   contents: read
@@ -47,10 +46,10 @@ jobs:
         run: |
           x64='{"runner":"windows-2022","arch":"x64","target":"x86_64-pc-windows-msvc"}'
           arm='{"runner":"windows-11-arm","arch":"arm64","target":"aarch64-pc-windows-msvc"}'
-          case "${ARCH:-both}" in
+          case "$ARCH" in
             x64)   targets="[$x64]" ;;
             arm64) targets="[$arm]" ;;
-            *)     targets="[$x64,$arm]" ;;   # both、以及非 workflow_dispatch 触发
+            *)     targets="[$x64,$arm]" ;;   # both
           esac
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
