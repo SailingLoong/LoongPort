@@ -169,6 +169,17 @@ export const operatorApi = {
   status: (): Promise<OperatorStatus> => invoke("operator_status"),
 
   /**
+   * 匿名统计的上报端点配好了没。
+   *
+   * `false` 时**同意与不同意的实际后果完全相同**（后端上报任务第一道闸就是这个），
+   * 所以首启告知那一屏不该弹 —— 见 `StatsNoticeDialog` 的文档。
+   *
+   * 有意不并进 `status()`：那条命令在首屏关键路径上，这个事实只有告知那屏要用。
+   */
+  statsEndpointConfigured: (): Promise<boolean> =>
+    invoke("operator_stats_endpoint_configured"),
+
+  /**
    * 推荐运营商（首启屏那几个按钮）。
    *
    * **空数组是正常结果**，不是错误 —— 三种情形都会空：首启那几秒还没拉到、

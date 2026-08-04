@@ -1475,6 +1475,7 @@ pub fn run() {
             // LoongPort 运营商
             commands::operator_status,
             commands::operator_check_session,
+            commands::operator_stats_endpoint_configured,
             commands::operator_list_sponsors,
             commands::operator_probe_site,
             commands::operator_login,

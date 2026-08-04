@@ -10,7 +10,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { settingsApi } from "@/lib/api";
+import { operatorApi, settingsApi } from "@/lib/api";
 import { generateUUID } from "@/utils/uuid";
 import type { Settings } from "@/types";
 
@@ -26,6 +26,21 @@ import type { Settings } from "@/types";
  * 所以：**在第一次上报发生之前**弹一次，明确列出报什么、不报什么，两个按钮同等显眼
  * （「不参与」是 ghost 而非小字链接：两个都可见、主次分明，
  * 不做把拒绝按钮藏起来那种暗黑模式）。
+ *
+ * ## ⚠️ 端点还没配时**这一屏根本不弹**（2026-08-04 加的前置条件）
+ *
+ * `stats::ENDPOINT` 目前还是占位（含 `.invalid`），上报端还没建 ⇒
+ * **同意与不同意的实际后果完全相同**，一个字节都不会发出去。
+ *
+ * 那时弹这一屏是**向用户征求一个没有意义的同意**：消耗掉用户对弹窗的注意力与信任，
+ * 却换不到任何数据。所以触发条件是「端点已配 且 用户没表态过」两条。
+ *
+ * ⇒ **端点配好那天自动开始弹**，不需要有人记得回来撤掉一个开关 ——
+ * 判据是端点本身（`operatorApi.statsEndpointConfigured`，后端同一个
+ * `stats::is_configured`，与上报任务那道闸共用），不是另行维护的标记。
+ *
+ * ⚠️ **别因为「现在不弹」就把这一屏、后端上报链路或文案删掉** —— 端点建好之后
+ * 立刻就要用。它现在是完整可用的，只是在等一个外部条件（记在 `TODO.md`）。
  *
  * ## 上报在用户表态之前不会发生
  *
@@ -46,17 +61,18 @@ export function StatsNoticeDialog() {
 
   useEffect(() => {
     let cancelled = false;
-    settingsApi
-      .get()
-      .then((s) => {
+    // 两个事实都要：端点配好了没（后端 `stats::is_configured`）、用户表过态没。
+    Promise.all([operatorApi.statsEndpointConfigured(), settingsApi.get()])
+      .then(([endpointConfigured, s]) => {
         if (cancelled) return;
         setSettings(s);
-        // `undefined` = 还没表态过。**只认这一个条件** ——
-        // 已经表过态的（无论选了什么）都不该再被打扰。
-        setOpen(s.statsNoticeConfirmed === undefined);
+        // 两个条件都成立才弹：
+        // - 端点已配 —— 没配时同意与不同意后果相同，问了也白问（见组件文档）
+        // - `undefined` = 还没表态过；已经表过态的（无论选了什么）不该再被打扰
+        setOpen(endpointConfigured && s.statsNoticeConfirmed === undefined);
       })
-      // 读设置失败就不弹：宁可这次不告知（那时也不会上报，因为门禁读的是同一份设置），
-      // 也不能因为一个统计功能在启动时弹一个报错。
+      // 任何一个读失败就不弹：宁可这次不告知（那时也不会上报，因为门禁读的是同一份
+      // 设置与同一个端点判据），也不能因为一个统计功能在启动时弹一个报错。
       .catch(() => {});
     return () => {
       cancelled = true;
