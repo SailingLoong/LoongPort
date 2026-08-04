@@ -669,8 +669,21 @@ function TierItem({
   // ⚠️ `allowImageGeneration` 是 `null` 时（首屏只读本地那条路拿不到服务端字段）
   // **仍然给入口**，只要 `isImageModel` 为真 —— 后者本地就能算。反过来，
   // 纯文本档位在首屏不给入口，等 provision 拿到真值再出现。
+  //
+  // ⚠️ **还要限定 codex**（review 抓出）：后端那条命令按 `AppType::Codex` 查 provider，
+  // 而档位是按分组自己的 platform 落到各 CLI 的（anthropic→claude、grok→grokbuild）——
+  // 那些档位**没有 codex 那一行**。而 grok 分组的 `allow_image_generation` 在服务端
+  // **默认就是 true**（sub2api `defaultAllowImageGenerationForPlatform`：
+  // `return platform == PlatformGrok`）⇒ 不限定的话 grok 档位会显示按钮、点了却报
+  // 「找不到档位，请先获取密钥」—— 对一个刚刚 provision 成功的档位说这句话，
+  // 是把用户引向一个不解决问题的动作。
+  //
+  // 限定在**前端**而不是让后端放宽：生图 MCP 读的是 codex 形状的配置
+  // （`auth.OPENAI_API_KEY` + config.toml 里的 base_url），claude / grok 的形状不同，
+  // 让它们也能装等于要在 MCP 里再实现两套读取 —— 那是尺子2 该拦的。
   const canGenerateImages =
-    tier.isImageModel || tier.allowImageGeneration === true;
+    tier.appId === "codex" &&
+    (tier.isImageModel || tier.allowImageGeneration === true);
 
   return (
     <div

@@ -29,7 +29,10 @@ fn mcp_image_gen_tier() -> Option<String> {
         }
         if arg == "--tier" {
             if let Some(v) = iter.next() {
-                if !v.is_empty() {
+                // `!starts_with("--")` 是为了兑现上面那句「用户可能手改」——
+                // `--tier --tier x` 不该把 `--tier` 自己当成档位 id
+                // （那会走到「库里没有档位 --tier」这个莫名其妙的错误上）。
+                if !v.is_empty() && !v.starts_with("--") {
                     return Some(v.clone());
                 }
             }

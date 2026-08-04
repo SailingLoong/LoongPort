@@ -765,9 +765,14 @@ pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// 生图模型的名字前缀。
 ///
-/// 与上游 sub2api 的 `isOpenAIImageGenerationModel`（`service/openai_images.go`：
-/// `strings.HasPrefix(model, "gpt-image-")`）**逐字一致** —— 那是判据的来源，
-/// 别在这里自造一套（如加上 `dall-e`：sub2api 不认它，我们认了只会写出转发不了的配置）。
+/// 判据来自上游 sub2api 的 `IsGPTImageGenerationModel`（`service/openai_images.go`）——
+/// **它先 `strings.ToLower` + `strings.TrimSpace` 再比前缀**，所以本仓的比较也必须
+/// 归一化，见 [`is_image_model`]。别在这里自造一套（如加上 `dall-e`：sub2api 不认它，
+/// 我们认了只会写出转发不了的配置）。
+///
+/// ⚠️ 有意**只对齐 GPT 那一族**，不含上游 `isOpenAIImageGenerationModel` 另外认的三个
+/// grok 别名（`grok-imagine` / `-edit` / `-image*`）—— 生图工具只装在 codex 档位上
+/// （openai 平台），grok 档位落的是另一个 CLI。
 const IMAGE_MODEL_PREFIX: &str = "gpt-image-";
 
 /// 该给这条档位的 `config.toml` 写什么模型名。
@@ -797,7 +802,8 @@ pub fn pick_model(available: Option<&[String]>) -> String {
         return DEFAULT_MODEL.to_string();
     };
     // 有任何一个非生图模型 ⇒ 这不是纯生图分组，照旧写默认文本模型。
-    if models.iter().any(|m| !m.starts_with(IMAGE_MODEL_PREFIX)) {
+    // 走 `is_image_model` 而不是裸 `starts_with` —— 归一化在那个函数里，见它的文档。
+    if !models.iter().all(|m| is_image_model(m)) {
         return DEFAULT_MODEL.to_string();
     }
     models
@@ -814,8 +820,24 @@ pub fn pick_model(available: Option<&[String]>) -> String {
 /// UI 据此显示「生图档位」标记。判据放在**模型名**而不是「拉一次 `/v1/models` 看看」，
 /// 是因为 `operator_list_operators` 那条路**只读本地不发网络**（首屏契约）——
 /// 而模型名就在本地 `settings_config` 里，两条路都拿得到，无需异步填空。
+///
+/// ## ⚠️ 必须先归一化再比前缀（review 抓出）
+///
+/// 上游 `IsGPTImageGenerationModel` 是 `ToLower` + `TrimSpace` 之后才比的。裸比前缀会在
+/// **危险的方向**上失败：某个运营商的 `/v1/models` 若返回 `GPT-Image-2` 或
+/// `" gpt-image-2"`，我们判它**不是**生图模型 ⇒ [`pick_model`] 以为「这个分组有文本
+/// 模型」⇒ 写 [`DEFAULT_MODEL`] ⇒ **正是这套代码要修的那个 404 又回来了**。
+///
+/// 连带的第二个后果：本函数也是 [`candidate_models`] 那个放宽的闸，认不出来会让
+/// 「已手动维护」的误报一起回来。
+///
+/// **只归一化比较，不改写要写入的值** —— 服务端给什么名字就照原样写进配置，
+/// 那是它认得的形式。
 pub fn is_image_model(model: &str) -> bool {
-    model.starts_with(IMAGE_MODEL_PREFIX)
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with(IMAGE_MODEL_PREFIX)
 }
 
 /// sk 在各 CLI 的 `settings_config` 里的位置。[`patch_api_key`] 与
@@ -1296,6 +1318,33 @@ mod tests {
         )
         .expect("codex 必须有默认形状");
         assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
+    }
+
+    /// **大小写与空白要归一化后再比前缀** —— 上游 `IsGPTImageGenerationModel` 就是
+    /// `ToLower` + `TrimSpace` 之后比的。
+    ///
+    /// 裸比前缀会在危险方向失败：运营商返回 `GPT-Image-2` 时我们判它不是生图模型 ⇒
+    /// `pick_model` 以为这个分组有文本模型 ⇒ 写 `DEFAULT_MODEL` ⇒ **404 又回来了**，
+    /// 正是这套代码要修的那个 bug。（review 抓出）
+    #[test]
+    fn the_image_model_predicate_normalizes_case_and_whitespace() {
+        assert!(is_image_model("GPT-Image-2"), "大写没被归一化");
+        assert!(is_image_model("  gpt-image-2  "), "空白没被裁掉");
+        assert!(is_image_model("GPT-IMAGE-1.5"));
+        // 归一化不该把无关的名字也放进来。
+        assert!(!is_image_model("gpt-5.6-sol"));
+        assert!(!is_image_model("image-gpt-2"));
+    }
+
+    /// 同一条归一化要贯穿到 `pick_model`，否则大写的纯生图列表会被判成「有文本模型」。
+    #[test]
+    fn pick_model_handles_non_lowercase_model_ids() {
+        let shouty = vec!["GPT-Image-2".to_string()];
+        assert_eq!(
+            pick_model(Some(&shouty)),
+            "GPT-Image-2",
+            "大写的纯生图分组被误判成有文本模型 ⇒ 写回了默认文本模型"
+        );
     }
 
     /// `is_image_model` 是 UI 判据（显示「生图档位」标记），别把文本模型认成生图的。

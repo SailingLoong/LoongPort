@@ -51,6 +51,29 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
+/// 本模块的诊断输出：**写 stderr**。
+///
+/// ## 为什么不用 `log::`（review 抓出的一个真空档）
+///
+/// 这个 crate 的 logger 由 `tauri_plugin_log` 在 [`crate::run`] 的 setup 里安装，而
+/// MCP 模式**在 `run()` 之前就分流走了** ⇒ 这个进程里根本没有 logger ⇒ 所有 `log::`
+/// 宏都是**空操作**。原来那几行 `log::info!` 一个字都没落下来，而模块文档却宣称
+/// 「诊断走 log（落文件）」—— 那是最糟的状态：承诺了一条不存在的通道。
+///
+/// ## 为什么是 stderr 而不是自己装一个文件 logger
+///
+/// 1. **stderr 天然是 MCP server 的诊断通道**：宿主（codex / claude）会捕获子进程的
+///    stderr 落进自己的会话日志，用户报问题时那份日志本来就要看 —— 比让他去翻我们
+///    另一个目录里的文件更可能被找到。
+/// 2. **它不在协议通道上**，没有污染 stdout 的风险（那是本模块最怕的事）。
+/// 3. 自己装 logger 要么引新依赖，要么把 `tauri_plugin_log` 的初始化挪到 `run()` 之外
+///    —— 后者恰好会把它那个 stdout target 带进 MCP 进程，即**制造**我们要防的故障。
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        eprintln!("[loongport-imagegen] {}", format!($($arg)*))
+    };
+}
+
 /// 走哪个模型生图。
 ///
 /// **不是常量而是从档位配置里读**：档位的 `model` 已经由 provision 写成了该分组真实的
@@ -106,15 +129,28 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
     )
     .map_err(|e| format!("打开数据库失败: {e}"))?;
 
+    // ⚠️ **`app_type` 必须参与查询**（review 抓出）—— `providers` 的主键是
+    // `(id, app_type)`，一个 `provider_id` **真的会有多行**：实测维护者库里
+    // `loongport-vendor-…` 那条有 6 行（claude / claude-desktop / codex / hermes /
+    // openclaw / opencode）。
+    //
+    // 不带这个条件的后果：`query_row` 拿到的是 SQLite 先返回的那一行，若是 claude 那行，
+    // 下面 `extract_api_key(.., Codex)` 读不出 `auth.OPENAI_API_KEY` ⇒ 报
+    // 「配置里读不出密钥，请点获取密钥重新生成」—— 而**那条建议永远修不好它**
+    // （重新 provision 只会再造出同样的多行），且成败取决于返回顺序、无法复现。
+    //
+    // 取 codex 是因为**写入侧就是按 codex 找的**
+    // （`commands::operator::install_imagegen_mcp_impl` 用 `AppType::Codex` 查 provider）。
+    // 两侧必须是同一个答案，否则装得上、跑不起来。
     let (name, settings_raw): (String, String) = conn
         .query_row(
-            "SELECT name, settings_config FROM providers WHERE id = ?1",
-            [provider_id],
+            "SELECT name, settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
+            rusqlite::params![provider_id, crate::app_config::AppType::Codex.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => format!(
-                "库里没有档位 {provider_id}。它可能已被删除 —— \
+                "库里没有 codex 档位 {provider_id}。它可能已被删除 —— \
                  请在 LoongPort 里重新点「装生图工具」。"
             ),
             other => format!("读取档位失败: {other}"),
@@ -143,7 +179,7 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
     // 读不出 model 不是错误：老档位（本功能上线前 provision 的）可能没有生图模型名，
     // 回落到默认值让它仍然能用。
     let model = extract_toml_string(config_toml, "model").unwrap_or_else(|| {
-        log::warn!("档位「{name}」读不出 model，生图回落 {FALLBACK_IMAGE_MODEL}");
+        diag!("档位「{name}」读不出 model，生图回落 {FALLBACK_IMAGE_MODEL}");
         FALLBACK_IMAGE_MODEL.to_string()
     });
 
@@ -214,11 +250,19 @@ async fn generate_image(
         .build()
         .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
 
+    // ⚠️ **显式要 `b64_json`**（review 抓出）：下面的解析只认那个字段，而
+    // `/v1/images/generations` 的**默认响应格式是 `url`** —— 不写这一行等于赌服务端
+    // 恰好回 base64。实测那个档位确实回的，但那只说明那一个分组的行为（上游 sub2api
+    // 的响应解析同时接受 `b64_json` 与 `url`，说明两种都可能出现）。
+    //
+    // 要 base64 而不是下 URL：省掉「再发一次 HTTP 取图」那条路径，连带省掉它的超时、
+    // 重定向、鉴权与临时链接过期这一整套失败面。
     let body = json!({
         "model": tier.model,
         "prompt": prompt,
         "n": 1,
         "size": size.unwrap_or(DEFAULT_SIZE),
+        "response_format": "b64_json",
     });
 
     let resp = client
@@ -392,10 +436,11 @@ async fn handle_tool_call(tier: &Tier, req: &Value) -> Result<Value, String> {
 /// MCP server 主循环：stdin 读一行一条 JSON-RPC，stdout 写一行一条响应。
 ///
 /// ⚠️ **stdout 只许写协议消息** —— 宿主按行解析 JSON，掺一句日志进去它就断连。
-/// 所以本模块所有诊断信息走 `log`（落文件）或 stderr，绝不 `println!`。
+/// 本模块的诊断一律走 **stderr**（[`diag!`]），绝不 `println!`、也不用 `log::`
+/// （见 [`diag!`] 的文档：那个宏在这个进程里是空操作）。
 pub fn serve(provider_id: &str) -> Result<(), String> {
     let tier = load_tier(provider_id)?;
-    log::info!(
+    diag!(
         "生图 MCP 启动：档位「{}」，模型 {}，端点 {}",
         tier.display_name,
         tier.model,
@@ -420,7 +465,7 @@ pub fn serve(provider_id: &str) -> Result<(), String> {
             Ok(v) => v,
             Err(e) => {
                 // 解析不了就跳过 —— 宿主发了坏消息不该让 server 死掉。
-                log::warn!("收到无法解析的消息（已跳过）: {e}");
+                diag!("收到无法解析的消息（已跳过）: {e}");
                 continue;
             }
         };
@@ -434,7 +479,7 @@ pub fn serve(provider_id: &str) -> Result<(), String> {
             stdout.flush().map_err(|e| format!("flush 失败: {e}"))?;
         }
     }
-    log::info!("生图 MCP 退出（stdin 关闭）");
+    diag!("生图 MCP 退出（stdin 关闭）");
     Ok(())
 }
 

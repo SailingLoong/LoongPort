@@ -1525,12 +1525,27 @@ async fn reset_tier_config_impl(
             AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
         })?;
 
+    // ⚠️ **生图档位要保住它自己的模型名**（review 抓出）。
+    //
+    // 这条路拿不到分组数据（手上只有本地 `settings_config`），所以原来无条件写
+    // `DEFAULT_MODEL` —— 那会把纯生图档位重置成一个**必定 404** 的形状，
+    // 即「恢复默认」这个专门用来救砖的按钮，反过来把生图档位弄砖。
+    //
+    // 判据用配置里现有的模型名：是 `gpt-image-*` 就留着（那个值本就是这个档位的正解，
+    // 由 `provision::pick_model` 按服务端的模型列表定），否则回落 `DEFAULT_MODEL`。
+    //
+    // 这**不是**「保留用户改的模型名」—— 用户把模型改成任何文本模型时仍然会被重置成
+    // 默认值，那正是这个按钮该做的事。
+    let model = provision::extract_model(&existing.settings_config)
+        .filter(|m| provision::is_image_model(m))
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
     let settings_config = provision::settings_config_for(
         &app_type,
         &api_key,
         &existing.name,
         &op.api_base_url,
-        DEFAULT_MODEL,
+        &model,
     )
     .ok_or_else(|| {
         AppError::Config(format!(
