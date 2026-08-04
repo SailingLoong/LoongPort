@@ -178,7 +178,7 @@ fn current_image_tier_id() -> Result<String, String> {
         .map_err(|e| format!("读取当前生图档位失败: {e}"))?;
 
     value.filter(|v| !v.is_empty()).ok_or_else(|| {
-        "还没有选定用哪个档位生图。请在 LoongPort 的运营商列表里，         在一个「生图」档位上点「启用生图」。"
+        "还没有选定用哪个档位生图。请在 LoongPort 的运营商列表里，在一个「生图」档位上点「启用生图」。"
             .to_string()
     })
 }
@@ -228,8 +228,7 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
             // 主程序那侧读 `operator_current_image_tier` 时会校验并自动清掉这个死标记，
             // 所以这里只要把话说清楚：让用户去重选，而不是去「获取密钥」。
             rusqlite::Error::QueryReturnedNoRows => format!(
-                "生图档位 {provider_id} 已经不在了（可能被删除，或运营商下架了那个分组）。\
-                 请在 LoongPort 的运营商列表里，在一个「生图」档位上点「启用生图」。"
+                "生图档位 {provider_id} 已经不在了（可能被删除，或运营商下架了那个分组）。请在 LoongPort 的运营商列表里，在一个「生图」档位上点「启用生图」。"
             ),
             other => format!("读取档位失败: {other}"),
         })?;
@@ -242,8 +241,7 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
     let api_key = super::provision::extract_api_key(&settings, &crate::app_config::AppType::Codex)
         .ok_or_else(|| {
             format!(
-                "档位「{name}」的配置里读不出密钥。\
-                 请在 LoongPort 里对它点「获取密钥」重新生成。"
+                "档位「{name}」的配置里读不出密钥。请在 LoongPort 里对它点「获取密钥」重新生成。"
             )
         })?;
 
@@ -492,8 +490,7 @@ fn first_line(s: &str) -> String {
 fn tools_list() -> Value {
     json!([{
         "name": "generate_image",
-        "description": "用 LoongPort 绑定的运营商档位生成图片（gpt-image 系列模型）。\
-                        返回保存到本地的 PNG 文件路径。",
+        "description": "用 LoongPort 绑定的运营商档位生成图片（gpt-image 系列模型）。直接返回图片本身，同时给出保存到本地的路径。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -503,8 +500,7 @@ fn tools_list() -> Value {
                 },
                 "size": {
                     "type": "string",
-                    "description": "图片尺寸，形如 1024x1024 或 1536x1024。省略则用 1024x1024。\
-                                    注意上游可能返回与请求不同的实际尺寸。"
+                    "description": "图片尺寸，形如 1024x1024 或 1536x1024。省略则用 1024x1024。注意上游可能返回与请求不同的实际尺寸。"
                 }
             },
             "required": ["prompt"]
