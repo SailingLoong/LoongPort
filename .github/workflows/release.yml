@@ -228,9 +228,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "○ 未配置 APPLE_CERTIFICATE —— 跳过 macOS 代码签名与公证。"
-            echo "  产物可用但未签名：经网络分发时 Gatekeeper 会拦，接收方需右键「打开」"
-            echo "  或 xattr -dr com.apple.quarantine <app>。配齐 6 个 secret 即自动启用签名。"
+            echo "○ 未配置 APPLE_CERTIFICATE —— 跳过 macOS 代码签名与公证（当前有意如此）。"
+            echo "  产物可用但未签名：经网络分发时 Gatekeeper 会拦，接收方需执行一次"
+            echo "  xattr -dr com.apple.quarantine /Applications/LoongPort.app"
+            echo "  ⚠️ 别建议「右键→打开」：macOS 15 起已移除该绕行，且本包是**签名校验失败**"
+            echo "  （ad-hoc + Sealed Resources=none）⇒ 报「已损坏」而非「未知开发者」，"
+            echo "  那类连「仍要打开」都可能不出现。配齐 6 个 secret 即自动启用签名。"
             exit 0
           fi
           # Decode .p12 certificate from base64
