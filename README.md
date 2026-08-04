@@ -150,13 +150,14 @@ Skills、Prompts、会话管理。LoongPort 只做「用中转服务省钱跑 AI
 
 ## 从源码构建
 
-需要 Node.js 20+ 与 Rust 工具链（1.85+）。
+需要 Node.js 22（见 `.node-version`）与 Rust 工具链（版本由 `rust-toolchain.toml`
+锁定，rustup 会自动装）。
 
 ```bash
 git clone https://github.com/SailingLoong/LoongPort.git
 cd LoongPort
 pnpm install
-pnpm tauri dev     # 开发模式，前端热更新
+pnpm dev           # 开发模式，前端热更新
 ```
 
 打包命令分平台 —— `--bundles app` 出的是 macOS 的 `.app`，在 Windows 上没用：

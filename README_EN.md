@@ -175,13 +175,14 @@ and not affiliated with its author — report problems you hit with LoongPort he
 
 ## Build from source
 
-Requires Node.js 20+ and the Rust toolchain (1.85+).
+Requires Node.js 22 (see `.node-version`) and the Rust toolchain (version pinned by
+`rust-toolchain.toml`; rustup installs it automatically).
 
 ```bash
 git clone https://github.com/SailingLoong/LoongPort.git
 cd LoongPort
 pnpm install
-pnpm tauri dev     # dev mode, hot reload
+pnpm dev           # dev mode, hot reload
 ```
 
 Packaging differs per platform — `--bundles app` produces a macOS `.app` and does
