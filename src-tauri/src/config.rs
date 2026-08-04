@@ -6,6 +6,44 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
+/// 应用私有数据目录名（位于用户主目录下）。
+///
+/// **这是与 cc-switch 隔离的关键，不是外观改名。** V1 踩过：只改了 `tauri.conf.json` 的
+/// `identifier` 就以为数据分开了，结果 LoongPort 一启动就把已装 cc-switch 的
+/// `~/.cc-switch/cc-switch.db` 迁到了更高的 schema 版本，那台机器上的 cc-switch 随即报
+/// 「数据库版本过新」打不开。
+///
+/// 原因是 `identifier` 只决定 `~/Library/Application Support/<identifier>/`（那里只存窗口
+/// 状态与 `app_paths.json`），而**数据库、settings.json、备份、崩溃日志全在本常量指向的
+/// 目录下**，与 identifier 无关。
+///
+/// 改它等于要求已装机数据迁移 —— 属不可逆决定。
+pub const APP_DIR_NAME: &str = ".loongport";
+
+/// 数据库文件名。同样属不可逆决定。
+pub const DB_FILE_NAME: &str = "loongport.db";
+
+// ============================================================================
+// 品牌常量：**前端 `src/config/constants.ts` 有等价副本**
+//
+// 跨语言没法共享常量，所以两边各存一份。而「同一事实散在多处」是静默失效的温床
+// （见 CLAUDE.md §三点六）—— 所以本文件末尾有一道 `include_str!` 比对的测试，
+// 任一边改了另一边没跟上就测试红。**新增这类常量时一并往那道闸里加一行。**
+// ============================================================================
+
+/// LoongPort 官网。
+///
+/// ⚠️ 域名已定但站点还没上线，现在点开会 404。留着入口而不是去掉那个按钮：
+/// 那是上游的 UI 结构，去掉要改上游文件（merge 时得重新处理），换 URL 只有一行。
+pub const OFFICIAL_WEBSITE: &str = "https://loongport.dev";
+
+/// LoongPort 的 GitHub 仓库。
+///
+/// ⚠️ **当前是私有仓** —— 未授权的用户点开看到 404。仍然指它而不是指上游
+/// （`farion1231/cc-switch`）：指上游更糟 —— 那边的 v3.19.x release notes 是
+/// **另一份内容**，用户会以为那就是 LoongPort 的更新说明并装错 app。404 至少不误导。
+pub const GITHUB_REPO: &str = "https://github.com/SailingLoong/LoongPort";
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项
@@ -185,7 +223,7 @@ pub fn get_app_config_dir() -> PathBuf {
         return custom;
     }
 
-    let default_dir = get_home_dir().join(".cc-switch");
+    let default_dir = get_home_dir().join(APP_DIR_NAME);
 
     // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
     // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
@@ -193,13 +231,13 @@ pub fn get_app_config_dir() -> PathBuf {
     // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
     #[cfg(windows)]
     {
-        let default_db = default_dir.join("cc-switch.db");
+        let default_db = default_dir.join(DB_FILE_NAME);
         if !default_db.exists() {
             if let Ok(home_env) = std::env::var("HOME") {
                 let trimmed = home_env.trim();
                 if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
-                    if legacy_dir.join("cc-switch.db").exists() {
+                    let legacy_dir = PathBuf::from(trimmed).join(APP_DIR_NAME);
+                    if legacy_dir.join(DB_FILE_NAME).exists() {
                         log::info!(
                             "Detected v3.10.3 legacy database at {}, using it instead of {}",
                             legacy_dir.display(),
@@ -553,5 +591,98 @@ pub fn get_claude_config_status() -> ConfigStatus {
     ConfigStatus {
         exists: path.exists(),
         path: path.to_string_lossy().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod brand_constant_consistency {
+    /// 前后端各存一份的品牌常量**必须一致**。
+    ///
+    /// 跨语言编译器管不到 `.ts`，不一致时不报错、不崩溃 —— 只是某个按钮跳到错的地方，
+    /// 或前后端一个拦一个不拦。这道闸把那类问题从「静默失效」变成「测试红」。
+    ///
+    /// **新增这类常量时往下面的表里加一行。** 判据（CLAUDE.md §三点六）：
+    /// 凡「同一事实同时存在于 Rust 与非 Rust 文件」，就该在这里对上。
+    #[test]
+    fn frontend_copies_match() {
+        let ts = include_str!("../../src/config/constants.ts");
+
+        // (TS 里的常量名, Rust 侧的值)
+        let pairs: &[(&str, &str)] = &[
+            ("OFFICIAL_WEBSITE", super::OFFICIAL_WEBSITE),
+            ("GITHUB_REPO", super::GITHUB_REPO),
+        ];
+
+        for (ts_name, rust_value) in pairs {
+            let expected = format!("{ts_name} = \"{rust_value}\"");
+            assert!(
+                ts.contains(&expected),
+                "src/config/constants.ts 的 {ts_name} 与 Rust 侧不一致\n  \
+                 Rust 侧的值: {rust_value}\n  \
+                 期望 TS 里出现: {expected}"
+            );
+        }
+    }
+
+    /// ⭐ **版本号三处必须一致** —— 而不一致要等打包 20 分钟后才知道。
+    ///
+    /// `package.json` / `Cargo.toml` / `tauri.conf.json` 各存一份。Tauri 自己有
+    /// npm↔crate 的校验，但**它只在 `tauri build` 时触发** —— `cargo test` 与
+    /// `clippy` 全绿也测不到（`CLAUDE.md` §四 记着这条，2026-08-02 踩过，`ca82a908`）。
+    ///
+    /// 这条闸把「打包到最后一步才炸」提前成 `cargo test` 秒红。
+    ///
+    /// 会红的改法：只 bump 其中一处或两处。
+    #[test]
+    fn the_version_is_the_same_in_all_three_manifests() {
+        // Cargo.toml 的版本由 cargo 注入，不用再读文件。
+        let cargo_version = env!("CARGO_PKG_VERSION");
+
+        let pkg: serde_json::Value =
+            serde_json::from_str(include_str!("../../package.json")).expect("package.json 合法");
+        let pkg_version = pkg["version"].as_str().expect("package.json 有 version");
+
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 合法");
+        let conf_version = conf["version"]
+            .as_str()
+            .expect("tauri.conf.json 有 version");
+
+        assert_eq!(
+            cargo_version, pkg_version,
+            "Cargo.toml ({cargo_version}) 与 package.json ({pkg_version}) 的版本不一致 —— \
+             Tauri 的 npm↔crate 校验只在打包时触发，不修会在 build 最后一步才炸"
+        );
+        assert_eq!(
+            cargo_version, conf_version,
+            "Cargo.toml ({cargo_version}) 与 tauri.conf.json ({conf_version}) 的版本不一致 —— \
+             产物文件名与收敛目录都按 tauri.conf.json 的版本走，不一致会装错包"
+        );
+    }
+
+    /// ⭐ **主窗口 label 必须与 `tauri.conf.json` 一致** —— 失配会让登录窗彻底卡死。
+    ///
+    /// `MAIN_WINDOW_LABEL` 被当**守卫**用：全局 `CloseRequested` 回调靠它判断
+    /// 「最小化到托盘」只作用于主窗口（`lib.rs` 那段注释写明了后果）。写错一个字母：
+    /// 登录窗关闭时被 `prevent_close` 吃掉、hide 后仍占着 label ⇒ 用户再点登录
+    /// 打不开也关不掉，**只能重启 app**。
+    ///
+    /// 上游改这个 label 的概率低，但后果是 P0 且不报错 —— 5 行的闸换掉这个风险很值。
+    #[test]
+    fn the_main_window_label_matches_tauri_conf() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 合法");
+        let labels: Vec<&str> = conf["app"]["windows"]
+            .as_array()
+            .expect("tauri.conf.json 有 app.windows")
+            .iter()
+            .filter_map(|w| w["label"].as_str())
+            .collect();
+        assert!(
+            labels.contains(&crate::MAIN_WINDOW_LABEL),
+            "tauri.conf.json 的窗口 label {labels:?} 里没有 MAIN_WINDOW_LABEL ({}) —— \
+             CloseRequested 那条守卫会失配，登录窗关不掉且再也打不开",
+            crate::MAIN_WINDOW_LABEL
+        );
     }
 }

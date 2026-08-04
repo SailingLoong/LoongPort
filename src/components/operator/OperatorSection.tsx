@@ -1,0 +1,1177 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
+import { Loader2, Plus } from "lucide-react";
+
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { operatorApi, providersApi } from "@/lib/api";
+import { PURCHASE_CLOSED_EVENT } from "@/lib/api/operator";
+import type { AppId, ProviderSwitchEvent } from "@/lib/api";
+import type {
+  OperatorRow as OperatorRowData,
+  TierInfo,
+} from "@/lib/api/operator";
+import {
+  vendorApi,
+  vendorSupportsApp,
+  DEEPSEEK_API_KEYS_URL,
+  DEEPSEEK_VENDOR_ID,
+  VENDOR_LOGIN_ERROR_EVENT,
+  type VendorAccountRow,
+} from "@/lib/api/vendor";
+import { useStreamCheck } from "@/hooks/useStreamCheck";
+import { useTauriEvent } from "@/hooks/useTauriEvent";
+
+import { AddSiteDialog } from "./AddSiteDialog";
+import { openInBrowser } from "./openInBrowser";
+import { OperatorTierList } from "./OperatorTierList";
+import { balanceRowsKey, parseBalanceRowsKey } from "./balanceRowsKey";
+import { reportProvision } from "./reportProvision";
+import { type RowKey, rowKey } from "./rowKey";
+import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
+import { useRowBusy } from "./useRowBusy";
+import { useTierEditGuard } from "./useTierEditGuard";
+import { vendorBusyKey } from "./VendorRow";
+
+/**
+ * 「运营商 × 分组」区，**自带全部状态**，供 provider 页顶部直接挂载。
+ *
+ * ## 为什么是自带状态的容器
+ *
+ * 它要挂进 `App.tsx`（上游文件）。如果把 `operators` / `busy` / 那几个行内 handler
+ * 摊在那里，等于把 operator 的实现搬进上游文件 —— 将来 merge 上游时那一片全是冲突。
+ * 收在这个组件里，`App.tsx` 只需一行 `<OperatorSection appId={activeApp} />`
+ * （CLAUDE.md §一「改上游文件时改动面越小越好」）。
+ *
+ * ## 它是运营商链路唯一的宿主（2026-08-04）
+ *
+ * 原来还有个 LoongPort 独立页（`OperatorPanel`）并存，它管首启引导、站点切换器、
+ * 登出；本组件只管「选档位用起来」。那个页面已删 —— 加站 / 登录 / 获取密钥 /
+ * 切档位现在全在这一区，用户不必为任何一步跳页。
+ *
+ * 删它的理由：站点切换器与「登出」都是那个页面自造的概念（凭据按
+ * `site_origin × account_id` 去重，换账号直接登录就是新增一行，不需要先登出），
+ * 而剩下的能力这一区本来就有。唯一不可替代的「切回官方登录」搬去了设置页 auth tab。
+ *
+ * ## 运营商之间没有依赖（2026-08-03 修）
+ *
+ * 三个行内命令（login / provision / listTierRates）**全部显式带 operatorId**，
+ * 不再靠改全局「当前站」来定位。所以：
+ *
+ * - 禁用只作用于自己那一行（`useRowBusy`），别的行照常可点
+ * - 多个运营商可以真并发获取密钥，互不干扰
+ * - 不再需要 `focusOperator`（那个函数已删）—— 它靠 `set_current` 副作用定位，
+ *   既会串目标，又会因为排序而让行序跳动
+ */
+export interface OperatorSectionProps {
+  /**
+   * 当前 tab 的 app_type。决定拉哪个 app 下的档位、切换写哪个 app 的配置。
+   *
+   * **类型是 `AppId` 而不是 `string`**：连通检测的 `useStreamCheck(appId)` 要求 `AppId`，
+   * 而唯一的调用点（`App.tsx`）传的 `activeApp` 本来就是 `AppId` —— 收窄它零风险，
+   * 且把「这是个受限取值域」这个事实写进类型里。
+   */
+  appId: AppId;
+}
+
+/**
+ * 「这个进程里已经自动弹过引导了」——**模块级变量，有意不是 state / ref**。
+ *
+ * 需求是「以进程被打开为计算，进程不消亡就不重复弹」。而这个组件会**反复挂载卸载**：
+ * `App.tsx` 只在 provider 视图下渲染它，用户切到设置页再切回来、或切换 app tab
+ * （`appId` 变化本身不重挂，但视图切换会）都会走一次新的挂载。
+ *
+ * 所以标志不能放组件内：`useState` / `useRef` 随卸载一起丢 ⇒ 用户每次回到这一页
+ * 都被弹一次。放模块作用域，生命周期正好等于「这个 JS 上下文」= 这个进程
+ * （app 重启 / 更新后 WebView 重新加载模块，标志自然回到 false —— 那正是要的）。
+ *
+ * ⚠️ 用 `localStorage` 是**错的**：那会跨进程持久化 ⇒ 用户第一次关掉引导之后，
+ * 以后每次启动都不再提醒，即使他一个站都还没配。
+ */
+let autoPromptedThisProcess = false;
+
+export function OperatorSection({ appId }: OperatorSectionProps) {
+  const [operators, setOperators] = useState<OperatorRowData[]>([]);
+  /**
+   * 待确认的切换：**显示名 + 真正执行它的函数**，`null` = 不弹。
+   *
+   * ## 为什么不存 `TierInfo`（2026-08-04 改）
+   *
+   * 原来它是 `TierInfo | null`，于是这道「要不要先退 ChatGPT」的确认框**只有中转站
+   * 档位那条路能用**。官网直连账号（vendor / DeepSeek）手上是 `rowId` 不是 `TierInfo`，
+   * 塞不进来 ⇒ `handleVendorUse` 当初就硬编码了 `quitChatgpt: false`
+   * ⇒ **用户在 codex tab 切到 DeepSeek，ChatGPT 桌面版永远不会被重启**，
+   * 而它只在启动时读 `~/.codex/config.toml` ⇒ 新配置对它完全不生效，且不报任何错。
+   *
+   * 那道编排该绑在「切到某个 codex 配置」这个**动作**上，不绑在「切的是哪一类账号」上
+   * —— 两类账号写的是同一个文件、面对的是同一个 ChatGPT 进程。
+   * `SwitchTierConfirmDialog` 早就为 cc-switch 那条路解绑成「显示名 + 回调」了，
+   * 这里跟上它：存一个闭包，谁调用都行。
+   */
+  const [confirmSwitch, setConfirmSwitch] = useState<{
+    name: string;
+    run: (quitChatgpt: boolean) => void;
+  } | null>(null);
+  const [chatgptNeedsAttention, setChatgptNeedsAttention] = useState(false);
+  const [addingSite, setAddingSite] = useState(false);
+  // 域名输入框的底纹词，来自 operator_status。
+  const [defaultSite, setDefaultSite] = useState("");
+  // 各行的余额。**与倍率同一个模式**：不进 listOperators（那条命令只读本地、
+  // 首屏不卡网络），渲染完再异步逐行补。
+  //
+  // 键是**判别式 RowKey**（`"operator:3"`）而不是裸 number：这个 map 与官网行的
+  // 那个共处一个列表，而两张表的自增 id 必然重叠 —— 用 number 会让 DeepSeek 的
+  // 余额显示到同 id 的中转站行上，且没有任何报错。
+  const [balances, setBalances] = useState<Record<RowKey, number | null>>({});
+  // `loadBalance` 要在**请求返回时**读到最新的 operators（判账号还是不是同一个），
+  // 而它是 useCallback([]) —— 闭包里的 operators 会是旧值。用 ref 取当前值。
+  const operatorsRef = useRef<OperatorRowData[]>([]);
+  operatorsRef.current = operators;
+
+  // ── 官网直连账号（vendor）──────────────────────────────────────────
+  //
+  // **与 operator 平级并列的一份状态**，不合进上面那些：两边的命令、DTO 与余额
+  // 类型全不同（余额那边是后端格式化好的字符串），合起来只会让每处多一个分支。
+  const [vendors, setVendors] = useState<VendorAccountRow[]>([]);
+  // 官网行的余额。**值是 string**（`"¥547.08"`，后端已格式化）—— 与上面那条
+  // `number` 契约有意分开：改 operator 那条要动 sub2api 那半边，属范围蔓延。
+  const [vendorBalances, setVendorBalances] = useState<
+    Record<RowKey, string | null>
+  >({});
+  // 当前 tab 正在用的 provider id。官网行靠它判「在用」（`isCurrent` 那个 DB 列
+  // 至今没有写入方，判不了当前态）。
+  const [currentProviderId, setCurrentProviderId] = useState<string | null>(
+    null,
+  );
+  // 每个官网账号行对应的 provider id。**六个平台共用一个**，由 `vendor_provision`
+  // 返回 —— 前端算不出（它是 `sha256(vendor_id + "/" + account_id)`，而行 DTO 里
+  // 没有 account_id）。所以「切换」这条路必须先 provision 拿 id 再切。
+  //
+  // **是 state 不是 ref**：「在用」高亮读它，ref 变了不会触发重渲染 ⇒ 高亮要等
+  // 下一次别的状态变化才浮现。
+  const [vendorProviderIds, setVendorProviderIds] = useState<
+    Record<number, string>
+  >({});
+  const [confirmRemoveVendor, setConfirmRemoveVendor] =
+    useState<VendorAccountRow | null>(null);
+  // 与 `operatorsRef` 同理：`loadVendorBalance` 请求返回时要判这一行还是不是同一个账号。
+  const vendorsRef = useRef<VendorAccountRow[]>([]);
+  vendorsRef.current = vendors;
+  // reload 的请求序号 —— 只让最后一次的结果落地，见 `reload` 里的说明。
+  const reloadSeqRef = useRef(0);
+  const { t } = useTranslation();
+  const { busy, run } = useRowBusy();
+  // 待确认「恢复默认配置」的档位。存整个 tier：确认框里要显示它的名字。
+  const [confirmReset, setConfirmReset] = useState<TierInfo | null>(null);
+  // 待确认删除的运营商行。存整行：确认框里要显示它的名字与档位数。
+  const [confirmRemove, setConfirmRemove] = useState<OperatorRowData | null>(
+    null,
+  );
+  // 连通检测整套复用上游的 hook —— 它自带 toast、i18n 与 per-id 的 checking 状态。
+  const { checkProvider, isChecking } = useStreamCheck(appId);
+
+  /**
+   * 读本地档位列表 + 异步补倍率。**不发 provision**（不重拉分组）。
+   *
+   * `onlySite` 限定只查哪个站的倍率 —— 每个档位一次 HTTP，用户给账号 A 获取
+   * 密钥时不该把 B / C 的也全重查一遍。
+   */
+  const reload = useCallback(
+    async (onlySite?: string) => {
+      // ⚠️ **请求序号：只让最后一次 reload 的结果落地。**
+      //
+      // 这一区在每个动作后都 reload，而它们会重叠 —— 典型的一串是
+      // 「保存编辑 → reload B」撞上更早开始的「获取密钥 → reload A」。
+      // 没有守卫的话 A 后返回就用**旧行**覆盖 B 的新行 ⇒ 用户刚保存的编辑在界面上
+      // 「没生效」（`userEdited` 标记闪一下又消失），而库里其实是对的。（review 抓出）
+      const seq = ++reloadSeqRef.current;
+      const isStale = () => seq !== reloadSeqRef.current;
+
+      try {
+        const rows = await operatorApi.listOperators(appId);
+        if (isStale()) return;
+        setOperators(rows);
+
+        // 倍率单独异步补：listOperators 只读本地（首屏不卡网络），倍率必须发请求。
+        // **有意不 await** —— 先渲染出来，倍率随后把「倍率未知」换成数字。
+        // 失败不提示：倍率是附加信息，为它弹 toast 会打断主流程。
+        if (rows.some((op) => op.tiers.length > 0)) {
+          operatorApi
+            .listTierRates(appId, onlySite)
+            .then((rates) => {
+              // 倍率回来时可能已经有新一轮 reload 换掉了行 —— 那时这些倍率
+              // 属于旧的一批档位，往新行上贴是错的。
+              if (isStale()) return;
+              const byId = new Map(rates.map((r) => [r.providerId, r]));
+              setOperators((prev) =>
+                prev.map((op) => ({
+                  ...op,
+                  tiers: op.tiers.map((tier) => {
+                    const hit = byId.get(tier.providerId);
+                    // 查不到的保持 null（继续显示「倍率未知」），别覆盖成 0。
+                    return hit
+                      ? { ...tier, rateMultiplier: hit.rateMultiplier }
+                      : tier;
+                  }),
+                })),
+              );
+            })
+            .catch(() => {});
+        }
+      } catch (e) {
+        toast.error(String(e));
+      }
+    },
+    [appId],
+  );
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  // 「编辑配置」的事前警告 + 编辑页 + 保存后刷新（见 useTierEditGuard）。
+  // 保存后必须 reload：「已手动维护」标记由后端按当前配置现算，不刷新拿不到新值。
+  const { requestEdit, editDialogs } = useTierEditGuard(appId, reload);
+
+  /**
+   * 拉某一行的余额。**逐行拉，而且只拉已登录的行。**
+   *
+   * 为什么不在 `reload` 里对所有行无条件拉：每行一次 HTTP，而 `reload` 在每次登录 /
+   * 获取密钥 / 切档位后都会跑 —— 那会把「刷新一次 = N 个请求」放大到每个动作上。
+   * 已登录才拉：没登录的行必然拿不到（`usable_operator` 会 Err），白打一次还报错。
+   *
+   * 失败静默存 `null`：运营商可能关了用户面板、这一行可能刚过期。
+   * **余额是附加信息，为它弹 toast 会打断主流程**（与倍率同一条纪律）。
+   *
+   * ## `accountLabel` 快照防的是一个真实竞态（review 抓出）
+   *
+   * 同一个 id 可以先后属于两个账号：用户在这一行登出 A、再登录 B，行 id 不变。
+   * 若 A 那次慢请求在 B 登录之后才返回，就会把 **A 的余额显示在 B 的行上**。
+   * 所以落状态前比一次账号标签，变了就丢弃这次结果。
+   */
+  const loadBalance = useCallback(
+    async (operatorId: number, accountAtRequest: string) => {
+      // ⚠️ **这处 `find` 保持 number 不动**：`operatorId` 只在 operator 这一类里
+      // 流转（调用方传的就是 `op.id`），不参与跨类索引。改成 RowKey 只是扩大
+      // 改动面。真正需要判别式键的是下面 `setBalances` 的那个 Record。
+      const stillSameAccount = () =>
+        operatorsRef.current.find((op) => op.id === operatorId)
+          ?.accountLabel === accountAtRequest;
+      const key = rowKey("operator", operatorId);
+      try {
+        const b = await operatorApi.balance(operatorId);
+        if (!stillSameAccount()) return;
+        setBalances((prev) => ({ ...prev, [key]: b.balance }));
+      } catch {
+        if (!stillSameAccount()) return;
+        setBalances((prev) => ({ ...prev, [key]: null }));
+      }
+    },
+    [],
+  );
+
+  // 行列表变了就补齐余额。依赖是**已登录行的摘要字符串**而不是 `operators` ——
+  // 后者每次 reload 都是新对象引用，会让这个 effect 每次都跑、把 N 个请求重发一遍。
+  // 编解码收在 `balanceRowsKey`（那里写了为什么不能用逗号拼接：昵称含逗号会造出一个
+  // id 为 NaN 的伪造条目，症状是那一行永远没有余额、于是也没有充值入口）。
+  const loggedInRowsKey = balanceRowsKey(
+    operators.filter((op) => op.loggedIn).map((op) => [op.id, op.accountLabel]),
+  );
+  useEffect(() => {
+    for (const [id, accountLabel] of parseBalanceRowsKey(loggedInRowsKey)) {
+      void loadBalance(id, accountLabel);
+    }
+  }, [loggedInRowsKey, loadBalance]);
+
+  /**
+   * 充值窗关掉了 → 刷那一行的余额（充完钱余额该涨）。
+   *
+   * **有意不做支付成功感知**（维护者裁决）：不认订单状态、不轮询、不判 tab。
+   * 关窗刷一次就够 —— 用户没充值的话数字不变，也没有副作用。
+   *
+   * payload 带 operatorId，所以只刷那一行，不整页 reload（那会连带重查所有倍率）。
+   */
+  useTauriEvent<number | null>(PURCHASE_CLOSED_EVENT, (operatorId) => {
+    if (typeof operatorId !== "number") return;
+    const row = operatorsRef.current.find((op) => op.id === operatorId);
+    // 行已经不在了（用户删掉了它）就别拉 —— 那次请求必然报错，且没有地方显示结果。
+    if (row) void loadBalance(operatorId, row.accountLabel);
+  });
+
+  /**
+   * 供应商切换后重新拉行 —— 「当前在用」那个高亮靠它更新。
+   *
+   * ## 为什么必须监听（2026-08-04 加，`OperatorPanel` 删除时接过来的）
+   *
+   * 本组件自己那个「使用」按钮走 `handleUse`，切完会 `reload()`。但**还有三条
+   * 路径绕过前端**（都在 Rust 侧直接调 `ProviderService::switch`）：
+   * 托盘快切、deeplink 导入、项目快照。
+   *
+   * 那三条路径过后，界面上的「当前在用」还指着旧的那一个 —— 用户从托盘切完
+   * 回到这一页，看到的是错的状态。原来这个监听在 `OperatorPanel` 里，
+   * 那个页面删掉之后就没人接了。
+   *
+   * ## 只在事件属于本 tab 那个 app 时才刷
+   *
+   * 不过滤会让「切 claude 的供应商」也触发 codex 这一区重新拉一遍 ——
+   * 多余的网络请求（每个档位一次倍率查询）。
+   */
+  useTauriEvent<ProviderSwitchEvent>("provider-switched", (payload) => {
+    if (payload?.appType !== appId) return;
+    void reload();
+  });
+
+  // 切换档位前要不要问「先退 ChatGPT 吗」。只读一次（它探的是「装了没有」这类事实，
+  // 不随操作变化），失败当作「不必问」—— 那时切换照常，只是不弹确认框。
+  useEffect(() => {
+    operatorApi
+      .status()
+      .then((s) => {
+        setChatgptNeedsAttention(s.chatgptNeedsAttention);
+        setDefaultSite(s.defaultSite);
+      })
+      .catch(() => {});
+  }, []);
+
+  /**
+   * 启动时探一次凭据是不是真的还活着。
+   *
+   * `status.loggedIn` 只看本地记的**过期时间**。凭据在网页端被撤销、账号被禁用、
+   * 会话被踢掉时它仍是 true ⇒ 用户看到界面一切正常，点任何操作才报错。
+   * 这一次探活把那种状态提前暴露出来（后端探到失效会清掉本地凭据）。
+   *
+   * 有意不 await 进 `reload`：首屏该立刻渲染，不该卡在网络请求上。
+   *
+   * ⚠️ 2026-08-04 从已删的 LoongPort 独立页接过来 —— 那个页面删掉之后
+   * 这个探活一度没人调，于是「凭据在服务端已失效」这件事又只能靠用户撞错误发现。
+   */
+  useEffect(() => {
+    let cancelled = false;
+    operatorApi
+      .checkSession()
+      .then((expiredIds) => {
+        // 返回的是**这次被清掉凭据的行 id**，空数组 = 全都还好。
+        if (expiredIds.length === 0 || cancelled) return;
+        // 一条 toast 说清有几个账号需要重新登录 —— 逐行弹会在多行同时过期时
+        // 糊满屏幕，而具体是哪几行界面上已经各自标出来了（`sessionExpired` 分支）。
+        toast.info(
+          t("loongport.session.expired", { count: expiredIds.length }),
+        );
+        void reload();
+      })
+      // 探活自身失败（网络不通）不打扰用户 —— 凭据没被清掉，操作时会自然报错。
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [reload, t]);
+
+  // ══ 官网直连账号（vendor）══════════════════════════════════════════
+
+  /**
+   * 拉官网账号列表。**只读本地不发网络**（与 `listOperators` 同一条契约）。
+   *
+   * `vendor_list_accounts` 有意不吃 app 参数（一把 sk 展开到全部平台），所以
+   * 在不支持 DeepSeek 的两个 tab（gemini / grokbuild）下**压根不调它** ——
+   * 那两个 tab 里官网行不该出现，拉回来也只能扔掉。
+   */
+  const reloadVendors = useCallback(async () => {
+    if (!vendorSupportsApp(appId)) {
+      setVendors([]);
+      return;
+    }
+    try {
+      setVendors(await vendorApi.list());
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }, [appId]);
+
+  useEffect(() => {
+    void reloadVendors();
+  }, [reloadVendors]);
+
+  /**
+   * 一个站点都没有时自动弹「添加站点」引导。**每个进程只弹一次。**
+   *
+   * ## 判据为什么是「全局有没有站点」而不是这一区渲染出了几行
+   *
+   * 这个组件是 per-tab 的（`appId`），而两类行都会被 tab 过滤掉：
+   * `operators` 只含**当前 app 下**有档位的运营商，`vendors` 在 gemini /
+   * grokbuild 两个 tab 下**恒为空数组**（`reloadVendors` 里直接短路，官网行在那两个
+   * tab 不该出现）。拿它们当判据的话，用户在 gemini tab 下会被弹一次引导 ——
+   * 而他明明已经配好了 DeepSeek。
+   *
+   * 所以判据走两条**不吃 app 参数**的命令：`operator_list_sites`（含未登录的占位行 ——
+   * 「加了站但还没登录」也算配过，不该再弹引导）与 `vendor_list_accounts`。
+   *
+   * ## 失败时不弹
+   *
+   * 两条命令读的都是本地 SQLite，失败基本只有「库坏了」。那时弹引导是错的方向 ——
+   * 用户加站也会失败，只会收到第二条错误。
+   */
+  useEffect(() => {
+    if (autoPromptedThisProcess) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [sites, vendorRows] = await Promise.all([
+          operatorApi.listSites(),
+          vendorApi.list(),
+        ]);
+        if (cancelled || autoPromptedThisProcess) return;
+        if (sites.length === 0 && vendorRows.length === 0) {
+          // 先置标志再开弹窗：用户关掉之后这个 effect 可能因为重挂再跑一次，
+          // 标志已经是 true 就不会再弹。
+          autoPromptedThisProcess = true;
+          setAddingSite(true);
+        }
+      } catch {
+        // 见上：读不出来时什么都不做。
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * 读当前 tab 正在用的 provider id —— 官网行的「在用」高亮靠它。
+   *
+   * ⚠️ **不用行 DTO 的 `isCurrent`**：那个字段读的是 `loongport_vendor.is_current`
+   * 列，而 `vendor/creds.rs` 里**没有任何一处写这一列**（只有 `DEFAULT 0`）⇒
+   * 它恒为 false。真正的事实是「上游 providers 表里当前是哪条」，那才是切换命令
+   * 真正改的东西。
+   */
+  const reloadCurrentProvider = useCallback(async () => {
+    try {
+      setCurrentProviderId(await providersApi.getCurrent(appId));
+    } catch {
+      // 拿不到只是判不出「在用」高亮，不该打断主流程。
+      setCurrentProviderId(null);
+    }
+  }, [appId]);
+
+  useEffect(() => {
+    void reloadCurrentProvider();
+  }, [reloadCurrentProvider]);
+
+  /**
+   * 拉一行官网账号的余额。
+   *
+   * 与 operator 那条同形（逐行拉、失败静默存 null、落状态前比一次账号标签防串行），
+   * 差别只有两处：值是**已格式化的字符串**（前端不碰）、判据是 `loggedIn`
+   * 而不是 `keyReady` —— 余额要网页登录态，sk 有效但登录过期的行拉不到。
+   */
+  const loadVendorBalance = useCallback(
+    async (rowId: number, accountAtRequest: string) => {
+      const stillSameAccount = () =>
+        vendorsRef.current.find((v) => v.id === rowId)?.accountLabel ===
+        accountAtRequest;
+      const key = rowKey("vendor", rowId);
+      try {
+        const b = await vendorApi.balance(rowId);
+        if (!stillSameAccount()) return;
+        setVendorBalances((prev) => ({ ...prev, [key]: b }));
+      } catch {
+        if (!stillSameAccount()) return;
+        setVendorBalances((prev) => ({ ...prev, [key]: null }));
+      }
+    },
+    [],
+  );
+
+  // 与 operator 侧那个 effect 同形，编解码共用 `balanceRowsKey`（同一份往返逻辑，
+  // 别在这里另写一遍 —— 两份里有一份没跟上正是那个逗号 bug 的形状）。
+  const loggedInVendorsKey = balanceRowsKey(
+    vendors.filter((v) => v.loggedIn).map((v) => [v.id, v.accountLabel]),
+  );
+  useEffect(() => {
+    for (const [id, accountLabel] of parseBalanceRowsKey(loggedInVendorsKey)) {
+      void loadVendorBalance(id, accountLabel);
+    }
+  }, [loggedInVendorsKey, loadVendorBalance]);
+
+  /**
+   * 登录窗的凭据回传解析失败了。
+   *
+   * **必须报出来**：这条路径上用户看到的现象是「走完登录流程，界面什么都没发生」——
+   * 不说的话他会反复重登。事件名是 vendor 自己那条（与 operator 有意不同）。
+   */
+  useTauriEvent<string>(VENDOR_LOGIN_ERROR_EVENT, (message) => {
+    toast.error(t("loongport.vendor.loginFailed", { reason: message }));
+  });
+
+  /**
+   * 备好一行官网账号的密钥。返回 provider id（切换要用）。
+   *
+   * ⚠️ **只在 `keyCreated` 时提示「已在官网新建密钥」** —— 本地已有明文时这条命令
+   * 是零请求的正常路径，每次都提示会让用户以为在重复建 key。
+   *
+   * 超上限（官网 100 把）时 toast 带一个「去官网删」的入口 —— 指路而不是只说不允许。
+   * ⚠️ 判据只能靠文案匹配：`vendor_provision` 把 `VendorError` 经 `AppError` 拍成了
+   * 字符串，前端拿不到变体名。所以这里认后端那句文案里的「100」+「官网」两个特征，
+   * 匹配不上就退化成普通错误 toast（不会误报，最坏是少一个按钮）。
+   */
+  const doVendorProvision = useCallback(
+    async (rowId: number): Promise<string | null> => {
+      try {
+        const r = await vendorApi.provision(rowId);
+        setVendorProviderIds((prev) => ({ ...prev, [rowId]: r.providerId }));
+        toast.success(
+          r.keyCreated
+            ? t("loongport.vendor.keyCreated", { count: r.platforms.length })
+            : t("loongport.vendor.keyReady", { count: r.platforms.length }),
+        );
+        return r.providerId;
+      } catch (e) {
+        const msg = String(e);
+        if (msg.includes("100") && msg.includes("官网")) {
+          // ⚠️ **外链必须走真实的 `<a target="_blank">` 点击**，不能用 `window.open`：
+          // Tauri 的 opener 插件是在 Rust 侧接管 **DOM 里的链接点击**的，而它的
+          // **JS 包（`@tauri-apps/plugin-opener`）本仓没装** —— 所以既没有
+          // `openUrl()` 可调，`window.open` 在 WebView 里也不保证被送到系统浏览器
+          // （最坏是被吞掉，按钮点了什么都不发生）。仓里既有的四处外链
+          // （`ApiKeySection` / `CodexOAuthSection` / …）全是 `<a target="_blank">`，
+          // 那是本仓唯一验证过的路子，照它做。
+          //
+          // toast 的 action 只吃 onClick ⇒ 在 onClick 里合成一次 <a> 点击。
+          // 这不是 hack 而是同一条路径的程序化触发：走的还是 DOM 点击那条链。
+          toast.error(msg, {
+            action: {
+              label: t("loongport.vendor.openKeyPage"),
+              onClick: () => openInBrowser(DEEPSEEK_API_KEYS_URL),
+            },
+          });
+        } else {
+          toast.error(msg);
+        }
+        return null;
+      }
+    },
+    [t],
+  );
+
+  /**
+   * 登录（或重新登录）一个官网账号。
+   *
+   * ⚠️ **入口是「添加官网账号」按钮时没有行**（行是登录成功后由后端建的），所以
+   * `rowId` 为 null 表示新增。`vendor_open_login` 吃的是 `vendorId` 而不是行 id，
+   * 天然支持这两种情形 —— 同账号重登会合并回同一行（唯一索引 `(vendor_id, account_id)`）。
+   */
+  const handleVendorLogin = (vendorId: string, rowId: number | null) =>
+    run(
+      rowId === null ? "vendorLogin:new" : vendorBusyKey("login", rowId),
+      async () => {
+        // 新增那条路：**登录前先记下已有的行 id**，登录后靠差集认出新建的那行。
+        //
+        // ⚠️ 不能靠「列表里最后一个该 vendorId 的行」—— `creds::list` 按
+        // `sort_index, id` 排序，用户拖动过之后新行不一定在末尾 ⇒ 会给**别的账号**
+        // 备密钥（那个账号的 sk 被换成新建的，而新登录的账号什么也没拿到）。
+        //
+        // 差集在「新增」这条路上是准的：唯一索引是 `(vendor_id, account_id)`，
+        // 所以要么多出一行（新账号），要么行数不变（登录的是已存在的账号 ——
+        // 那种情况下差集为空，落到下面的 `existing` 分支按 account_label 找回来）。
+        const idsBefore = new Set(vendorsRef.current.map((v) => v.id));
+        try {
+          const ok = await vendorApi.openLogin(vendorId);
+          // false = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
+          if (!ok) return;
+          toast.success(t("loongport.session.connected"));
+          // 先刷列表再 provision：登录成功后行才存在（新增那条路），而
+          // provision 要拿行 id。
+          const rows = await vendorApi.list();
+          setVendors(rows);
+
+          const target =
+            rowId !== null
+              ? // 重登：就是原来那一行（后端按 `(vendor_id, account_id)` 合并回它）。
+                rows.find((v) => v.id === rowId)
+              : // 新增：差集里那一行。用户点「添加账号」但登的是已存在的账号时
+                // 差集为空 —— 那种情况下 `openLogin` 已经把 token 更新到那一行了，
+                // 靠 vendorId + 有登录态定位（同厂商多账号时可能有多行满足，
+                // 但它们的 sk 各自独立、provision 是幂等的，挑错也不会串账号）。
+                (rows.find((v) => !idsBefore.has(v.id)) ??
+                rows.find((v) => v.vendorId === vendorId && v.loggedIn));
+          if (!target) return;
+          // 直接把密钥备好 —— 不该再让用户点一次。
+          await doVendorProvision(target.id);
+          await reloadVendors();
+        } catch (e) {
+          toast.error(String(e));
+        }
+      },
+    );
+
+  const handleVendorProvision = (rowId: number) =>
+    run(vendorBusyKey("provision", rowId), async () => {
+      await doVendorProvision(rowId);
+      await reloadVendors();
+    });
+
+  /**
+   * 切到某个官网账号的配置。
+   *
+   * ## ⚠️ 必须走 `operator_switch_tier`，**不能**走上游的 `switch_provider`
+   *
+   * 初版写的是 `providersApi.switch`，论证是「vendor 的产物就是普通 provider 记录，
+   * 切换零改动复用上游」。**那条路 100% 走不通**（final review 实测抓出）：
+   *
+   * `switch_provider`（`commands/provider.rs:153`）第一件事就是
+   * `reject_if_managed(id)`，而 vendor 的 id 是 `loongport-vendor-<hash>`、
+   * 命中 `MANAGED_ID_PREFIX` ⇒ 直接返回守卫那条「请在运营商区操作」——
+   * 而用户**就在**运营商区，那句指路等于告诉他「去你已经在的地方」，
+   * 他没有任何路径能切到 DeepSeek。
+   *
+   * 实测：`reject_if_managed("loongport-vendor-0c0a4a3c49b25d60")` → `Err`。
+   *
+   * `operator_switch_tier` 在守卫**之内**（它就是那个「运营商区里的操作」），
+   * 且顺带拿到「退 ChatGPT → 切 → 重开」那套编排 —— codex 是 DeepSeek 六平台之一、
+   * ChatGPT 桌面版与命令行 codex 共用 `~/.codex`，所以那道编排对 vendor 同样成立。
+   *
+   * ⚠️ 先 `provision` 拿 provider id：那个 id 是 `sha256(vendor_id + "/" + account_id)`，
+   * 前端算不出（行 DTO 里没有 account_id，也没有 sha256）。这一步在本地已有明文时
+   * 是**零请求**的，所以不是额外的网络开销。
+   *
+   * ## ⚠️ 「要不要先退 ChatGPT」这道确认框对官网账号同样成立（2026-08-04 修的 bug）
+   *
+   * 这里原来硬编码 `quitChatgpt: false`，理由写的是「那道确认框归中转站档位那条路」。
+   * **那个理由是错的**：两类账号写的是同一个 `~/.codex/config.toml`、面对的是同一个
+   * ChatGPT 桌面版进程，而它**只在启动时读那个文件**。所以不重启它 ⇒ 用户在 codex tab
+   * 切到 DeepSeek 之后，桌面版仍连着旧配置，且**不报任何错**（静默失效）。
+   *
+   * 判据该是「切的是不是 codex 配置」（`chatgptNeedsAttention` 已经包含这个事实），
+   * 不是「切的是哪一类账号」。所以走与 `handleSwitchTier` 完全同一条路。
+   */
+  const handleVendorUse = (rowId: number) => {
+    const row = vendorsRef.current.find((v) => v.id === rowId);
+    const name = row?.vendorName ?? String(rowId);
+    // ChatGPT 没装就不必问，直接切（与 `handleSwitchTier` 同一判据）。
+    if (chatgptNeedsAttention) {
+      setConfirmSwitch({
+        name,
+        run: (quitChatgpt) => void doVendorSwitch(rowId, quitChatgpt),
+      });
+    } else {
+      void doVendorSwitch(rowId, false);
+    }
+  };
+
+  /** `handleVendorUse` 确认之后真正执行的那一步（与 `doSwitch` 对位）。 */
+  const doVendorSwitch = (rowId: number, quitChatgpt: boolean) => {
+    setConfirmSwitch(null);
+    return run(vendorBusyKey("switch", rowId), async () => {
+      try {
+        // 优先用行 DTO 的 id（后端派生、app 重启后仍有效）；
+        // 空串说明还没登录过 ⇒ 回落到 provision（它本地有明文时是零请求）。
+        const row0 = vendorsRef.current.find((v) => v.id === rowId);
+        const providerId =
+          row0?.providerId ||
+          vendorProviderIds[rowId] ||
+          (await doVendorProvision(rowId));
+        if (!providerId) return;
+        const r = await operatorApi.switchTier(providerId, appId, quitChatgpt);
+        const row = vendorsRef.current.find((v) => v.id === rowId);
+        const name = row?.vendorName ?? providerId;
+        // 三个分支与 `doSwitch` 同形 —— 原来这里恒用 `switch.done`，
+        // 于是替用户重开了 ChatGPT 也不说、没重开也不提醒他自己重启。
+        toast.success(
+          r.chatgptRelaunched
+            ? t("loongport.switch.doneRelaunched", { name })
+            : r.chatgptWasRunning
+              ? t("loongport.switch.doneNeedsRestart", { name })
+              : t("loongport.switch.done", { name }),
+        );
+        for (const w of r.warnings) toast.warning(w);
+        await reloadCurrentProvider();
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+  };
+
+  const doRemoveVendor = (row: VendorAccountRow) =>
+    run(vendorBusyKey("removeVendor", row.id), async () => {
+      try {
+        await vendorApi.remove(row.id);
+        toast.success(
+          t("loongport.vendor.removed", {
+            label: row.accountLabel || row.vendorName,
+          }),
+        );
+        setVendorProviderIds((prev) => {
+          const next = { ...prev };
+          delete next[row.id];
+          return next;
+        });
+        await reloadVendors();
+        // 删掉的可能正是当前在用的那条 ⇒ 重读一次，否则高亮会停在一个不存在的行上。
+        await reloadCurrentProvider();
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+
+  /**
+   * 保存官网行的顺序。**只传官网行的 id**（走 `vendor_reorder`）——
+   * 两类行的 `sort_index` 各自存在自己的表里，没有共同的序。
+   */
+  const handleVendorReorder = async (ids: number[]) => {
+    try {
+      await vendorApi.reorder(ids);
+      await reloadVendors();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  /**
+   * 这一行的配置是不是当前 tab 正在用的那个。
+   *
+   * **provider id 优先取行 DTO 的 `providerId`**（后端用
+   * `provision::provider_id_for(vendor_id, account_id)` 派生，前端算不出来）——
+   * 那让高亮在 **app 重启后依然正确**。
+   *
+   * 回落到 `vendorProviderIds`（本次会话 provision 返回的）只为覆盖一种情形：
+   * 行还没登录过 ⇒ 没有 `account_id` ⇒ 后端给空串。那种行本来也不该高亮。
+   *
+   * ⚠️ **不用行 DTO 的 `isCurrent`** —— 那个字段读的是 `loongport_vendor.is_current`
+   * 列，而**没有任何代码写过那一列**（只有建表的 `DEFAULT 0`）⇒ 恒 false。
+   * 当前态的唯一事实源是 `providers` 表（上游 `ProviderService::current`）。
+   *
+   * 空 id 一律不高亮 —— 猜错会让两行同时显示「在用」，比不高亮更糟。
+   */
+  const isVendorCurrent = useCallback(
+    (rowId: number) => {
+      const row = vendors.find((v) => v.id === rowId);
+      const providerId = row?.providerId || vendorProviderIds[rowId];
+      return !!providerId && providerId === currentProviderId;
+    },
+    [vendors, vendorProviderIds, currentProviderId],
+  );
+
+  const handleLogin = (operatorId: number) =>
+    run(`login:${operatorId}`, async () => {
+      try {
+        // 显式传 id —— 不传会作用到「当前站」，可能是别的行。
+        const ok = await operatorApi.login(operatorId);
+        if (ok) {
+          // 登录窗不会自动关闭（它已跳到 dashboard，用户可能要在那儿充值或看用量）。
+          toast.success(t("loongport.session.connected"));
+          // 直接把密钥备好 —— 不该再让用户点一次。
+          reportProvision(t, await operatorApi.provision(operatorId));
+        }
+        // ok === false 是用户自己关了窗口，不出提示（他知道自己干了什么）。
+        await reload(operators.find((op) => op.id === operatorId)?.siteOrigin);
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+
+  /** 重新拉这个运营商的可用分组（真的打 sub2api 的 `/groups/available`）。 */
+  const handleProvision = (operatorId: number) =>
+    run(`provision:${operatorId}`, async () => {
+      try {
+        reportProvision(t, await operatorApi.provision(operatorId));
+        // 只刷这一个运营商的倍率 —— 别的账号没变，重查它们纯属浪费请求。
+        await reload(operators.find((op) => op.id === operatorId)?.siteOrigin);
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+
+  /**
+   * 顶部「刷新」：**对所有已登录的运营商重新拉分组**。
+   *
+   * ## 为什么它必须真的重拉（用户实测发现）
+   *
+   * 原来这个按钮只跑 `listOperators`（读本地 DB）+ `listTierRates`（只查倍率），
+   * **没有任何一条路会重新拉 `/groups/available`** ⇒ 运营商在网页端新增了一个
+   * 分组，点「刷新」永远看不到；而「获取密钥」按钮只在 `tiers.length === 0`
+   * 时才显示，已有档位的行压根没有重拉入口。一个叫「刷新」的按钮刷不出新数据，
+   * 是名不符实。
+   *
+   * 并发跑（`Promise.allSettled`）而不是串行：运营商之间无依赖，串行会让 N 个
+   * 站的等待时间叠加。用 allSettled 而不是 all —— 一个站失败（网络/登录过期）
+   * 不该让别的站的结果一起丢掉。
+   *
+   * 未登录的行跳过：它必然没有分组，白打一次请求还会报错。
+   */
+  const handleRefreshAll = () =>
+    run("refresh:all", async () => {
+      const targets = operators.filter((op) => op.loggedIn);
+      if (targets.length === 0) {
+        // 一个都没登录时退化成纯本地重载 —— 至少把别的 tab 里 provision 出来的
+        // 档位显示出来（那种情况本地 DB 确实有新数据）。
+        await reload();
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        targets.map((op) => operatorApi.provision(op.id)),
+      );
+
+      let tierTotal = 0;
+      let keysCreated = 0;
+      // ⚠️ **成功数必须自己数，不能用 `targets.length`**（review 抓出）。
+      //
+      // 那是「发起了几个请求」，不是「成功了几个」⇒ 全部失败时也会先弹一句
+      // 「已刷新 3 个运营商」，紧接着再弹 3 条错误。用户看到的第一句话是假的，
+      // 而那句恰好是绿色的成功提示 —— 比不提示更糟。
+      let succeeded = 0;
+      // ⚠️ **连原因一起收**（维护者实测抓出）：原来只 push 站名、把 `r.reason`
+      // 整个丢掉，而后端那条路径也不落日志 ⇒ 两处一叠，用户只看到「<站名> 刷新失败」，
+      // 定位一次要手工从 DB 取 token 逐个端点 curl。
+      const failed: { name: string; reason: string }[] = [];
+      results.forEach((r, i) => {
+        if (r.status === "fulfilled") {
+          succeeded += 1;
+          tierTotal += r.value.tiers.length;
+          keysCreated += r.value.keysCreated;
+          for (const f of r.value.failures) {
+            toast.warning(
+              t("loongport.provision.groupFailed", {
+                group: f.groupName,
+                reason: f.reason,
+              }),
+            );
+          }
+        } else {
+          failed.push({
+            name: targets[i].siteName || targets[i].siteOrigin,
+            reason: String(r.reason),
+          });
+        }
+      });
+
+      // ⚠️ 这四条文案原来是**中文硬编码**（en/ja/zh-TW 用户看到中文），已接进 i18n
+      // （复用 `provision.*` 那批按语义命名的 key，见 `reportProvision` 上方）。
+      //
+      // `readyWithKeys` / `refreshed` 分开取而不是拼一个「，新建 N 把密钥」后缀：
+      // 那种拼法在英/日语序下会散架（那也是当初 `provision.*` 拆成完整句分支的理由）。
+      //
+      // **一个都没成功时整句不弹**：那种情况下面的错误 toast 已经把每一条都点名了，
+      // 再来一句「已刷新 0 个运营商」纯属噪音（而且是绿色的）。
+      if (succeeded > 0) {
+        toast.success(
+          keysCreated > 0
+            ? t("loongport.provision.refreshedWithKeys", {
+                operators: succeeded,
+                tiers: tierTotal,
+                keys: keysCreated,
+              })
+            : t("loongport.provision.refreshed", {
+                operators: succeeded,
+                tiers: tierTotal,
+              }),
+        );
+      }
+      // 失败的如实点名**并带原因** —— 只说「刷新失败」等于让用户去猜，
+      // 而他能做的处置（重新登录 / 检查网络 / 等运营商恢复）完全取决于原因。
+      for (const { name, reason } of failed) {
+        toast.error(
+          t("loongport.provision.refreshFailedWithReason", { name, reason }),
+        );
+      }
+
+      // 全量重载（含倍率）—— 这是显式的全局刷新，用户愿意等。
+      await reload();
+
+      // ⚠️ **余额也要重拉**（review 抓出的死路）。
+      //
+      // 余额只由那个 `loggedInRowsKey` effect 触发，而它的依赖是 `id:accountLabel` ——
+      // 一旦某行的余额请求失败过（网络抖动），那个键不变 ⇒ **effect 永远不会再跑**，
+      // 那一行整个会话都没有余额；而充值按钮只在有余额时才存在 ⇒ 用户连入口都看不到，
+      // 点「刷新」也没用。这里补上正是因为「刷新」就是用户表达「把这页弄成最新」的动作。
+      for (const op of targets) {
+        void loadBalance(op.id, op.accountLabel);
+      }
+    });
+
+  /**
+   * 把一个档位的配置恢复成默认值。
+   *
+   * 「编辑配置」那条路的回头路 —— 用户接手维护一个档位后改坏了，这是唯一的退路
+   * （`useTierEditGuard` 那道事前警告就是拿它做承诺的）。
+   */
+  const handleResetTier = (tier: TierInfo) => {
+    setConfirmReset(null);
+    return run(`reset:${tier.providerId}`, async () => {
+      try {
+        await operatorApi.resetTierConfig(tier.providerId, appId);
+        toast.success(
+          t("loongport.tier.resetDone", { name: tier.displayName }),
+        );
+        await reload();
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+  };
+
+  /** 删掉一行运营商（连带档位）。有档位在用的行按钮不可点，走不到这里。 */
+  const doRemoveOperator = (row: OperatorRowData) =>
+    run(`removeOperator:${row.id}`, async () => {
+      try {
+        await operatorApi.removeSite(row.id);
+        toast.success(
+          t("loongport.site.removed", {
+            label: row.accountLabel || row.siteName || row.siteOrigin,
+          }),
+        );
+        await reload();
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+
+  const doSwitch = (tier: TierInfo, quitChatgpt: boolean) => {
+    setConfirmSwitch(null);
+    return run(`switch:${tier.providerId}`, async () => {
+      try {
+        const r = await operatorApi.switchTier(
+          tier.providerId,
+          appId,
+          quitChatgpt,
+        );
+        // 三个分支各取一个**完整句**的 key，不拼后缀 —— 与 `provision.ready*` 同理
+        // （中文靠前置逗号粘接，英/日语序下会散架）。
+        toast.success(
+          r.chatgptRelaunched
+            ? t("loongport.switch.doneRelaunched", { name: r.providerName })
+            : r.chatgptWasRunning
+              ? t("loongport.switch.doneNeedsRestart", {
+                  name: r.providerName,
+                })
+              : t("loongport.switch.done", { name: r.providerName }),
+        );
+        for (const w of r.warnings) toast.warning(w);
+        await reload();
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+  };
+
+  /**
+   * 保存用户拖出来的运营商行序。
+   *
+   * 立刻落库（schema v20 的 `sort_index`）——排序不是纯 UI 状态，
+   * 换台机器/重开 app 都该记得。失败要提示：用户明确做了一个动作，
+   * 静默失败会让他下次打开发现顺序没变、以为是 bug。
+   */
+  const handleReorder = async (operatorIds: number[]) => {
+    try {
+      await operatorApi.reorder(operatorIds);
+      await reload();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  /**
+   * 带登录态开这一行的充值页。
+   *
+   * busy 标记只覆盖「开窗」这一小段（取一次 profile + 建窗），**不等用户付完钱** ——
+   * 窗口开出来之后命令就返回了。所以这个转圈是短的，它防的是连点开出两个窗
+   * （后端也会 destroy 残留窗口兜一层）。
+   */
+  const handlePurchase = (operatorId: number) =>
+    run(`purchase:${operatorId}`, async () => {
+      try {
+        await operatorApi.purchase(operatorId);
+      } catch (e) {
+        // 这个失败要说出来：用户明确点了「充值」，窗口没开出来他得知道为什么
+        // （常见原因是登录过期 —— 那时该去重新登录，而不是盯着没反应的界面）。
+        toast.error(String(e));
+      }
+    });
+
+  const handleSwitchTier = (_operatorId: number, tier: TierInfo) => {
+    if (tier.isCurrent) return;
+    // ChatGPT 没装就不必问「要不要关它」，直接切。
+    if (chatgptNeedsAttention) {
+      setConfirmSwitch({
+        name: tier.displayName,
+        run: (quitChatgpt) => void doSwitch(tier, quitChatgpt),
+      });
+    } else {
+      void doSwitch(tier, false);
+    }
+  };
+
+  /**
+   * 「添加官网账号」按钮。**在两种布局里都要出现**，所以提成一个局部片段。
+   *
+   * 只在支持 DeepSeek 的 tab 里显示 —— gemini / grokbuild 那两个 tab 加了也生不出
+   * 记录（上游无 preset、协议不兼容），摆一个点了没用的按钮是骗人。
+   */
+  const addVendorButton = vendorSupportsApp(appId) ? (
+    <button
+      type="button"
+      onClick={() => void handleVendorLogin(DEEPSEEK_VENDOR_ID, null)}
+      disabled={busy.has("vendorLogin:new")}
+      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-border p-3 text-sm text-muted-foreground transition-colors hover:border-border-active hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {busy.has("vendorLogin:new") ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Plus className="h-3.5 w-3.5" />
+      )}
+      {t("loongport.vendor.add")}
+    </button>
+  ) : null;
+
+  // 两类行都没有时**只渲染入口按钮**，不摆一个空的列表。
+  //
+  // 原本这里是 `return null`，理由写的是「引导加站点是 LoongPort 页的事」——
+  // 那个理由站不住：LoongPort 页大概率会被下掉/改造，而且**返回 null 会让「添加中转站」
+  // 按钮也一起消失** ⇒ 新用户在这一页压根没有入口。
+  //
+  // 摆一整个空列表也不对（那是干扰），所以只留按钮。
+  // ⚠️ 判据是**两类都空**：只有官网账号、没加过中转站的用户（vendor-only）
+  // 也得看到自己那些行 —— 只判 operators 会把它们整个藏起来。
+  if (operators.length === 0 && vendors.length === 0) {
+    return (
+      <>
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setAddingSite(true)}
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-border p-3 text-sm text-muted-foreground transition-colors hover:border-border-active hover:text-foreground"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t("loongport.tierList.addSite")}
+          </button>
+          {addVendorButton}
+        </div>
+
+        {/* `isFirstRun`：走到这个分支就意味着这一区一行都没有 ⇒ 弹窗该出引导文案
+            （「选择服务站点」而不是「添加另一个中转站」）。**它只换文案，仍然可关闭**
+            —— 见 `AddSiteDialogProps.isFirstRun` 的文档。 */}
+        <AddSiteDialog
+          open={addingSite}
+          onClose={() => setAddingSite(false)}
+          onAdded={() => void reload()}
+          defaultSite={defaultSite}
+          isFirstRun
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <OperatorTierList
+        operators={operators}
+        busy={busy}
+        onAddSite={() => setAddingSite(true)}
+        onRefresh={() => void handleRefreshAll()}
+        onLogin={(operatorId) => void handleLogin(operatorId)}
+        onProvision={(operatorId) => void handleProvision(operatorId)}
+        onReorder={(ids) => void handleReorder(ids)}
+        onSwitchTier={(operatorId, tier) =>
+          void handleSwitchTier(operatorId, tier)
+        }
+        balances={balances}
+        onPurchase={(operatorId) => void handlePurchase(operatorId)}
+        // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
+        // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
+        onCheckTier={(tier) =>
+          void checkProvider(tier.providerId, tier.displayName)
+        }
+        isCheckingTier={isChecking}
+        onResetTier={(tier) => setConfirmReset(tier)}
+        onEditTier={requestEdit}
+        onRemoveOperator={(operatorId) => {
+          // ⚠️ **这处 `find` 保持 number 不动**：`operatorId` 从 `OperatorRow` 的
+          // `onDelete` 一路传回来，只在 operator 这一类里流转。官网行走的是
+          // `onRemoveVendor` 那条独立回调，不经过这里。
+          const row = operators.find((op) => op.id === operatorId);
+          if (row) setConfirmRemove(row);
+        }}
+        vendor={{
+          accounts: vendors,
+          balances: vendorBalances,
+          isCurrent: isVendorCurrent,
+          onLogin: (rowId) => {
+            const row = vendors.find((v) => v.id === rowId);
+            if (row) void handleVendorLogin(row.vendorId, rowId);
+          },
+          onProvision: (rowId) => void handleVendorProvision(rowId),
+          onUse: (rowId) => void handleVendorUse(rowId),
+          onRemove: (rowId) => {
+            const row = vendors.find((v) => v.id === rowId);
+            if (row) setConfirmRemoveVendor(row);
+          },
+          onReorder: (ids) => void handleVendorReorder(ids),
+        }}
+      />
+
+      {addVendorButton}
+
+      <ConfirmDialog
+        isOpen={confirmRemoveVendor !== null}
+        title={t("loongport.vendor.removeConfirmTitle")}
+        message={t("loongport.vendor.removeConfirmMessage", {
+          label:
+            confirmRemoveVendor?.accountLabel ||
+            confirmRemoveVendor?.vendorName ||
+            "",
+        })}
+        confirmText={t("common.delete")}
+        onConfirm={() => {
+          if (confirmRemoveVendor) void doRemoveVendor(confirmRemoveVendor);
+          setConfirmRemoveVendor(null);
+        }}
+        onCancel={() => setConfirmRemoveVendor(null)}
+      />
+
+      <ConfirmDialog
+        isOpen={confirmRemove !== null}
+        title={t("loongport.row.removeConfirmTitle")}
+        message={t("loongport.row.removeConfirmMessage", {
+          label:
+            confirmRemove?.accountLabel ||
+            confirmRemove?.siteName ||
+            confirmRemove?.siteOrigin ||
+            "",
+          count: confirmRemove?.tiers.length ?? 0,
+        })}
+        confirmText={t("common.delete")}
+        onConfirm={() => {
+          if (confirmRemove) void doRemoveOperator(confirmRemove);
+          setConfirmRemove(null);
+        }}
+        onCancel={() => setConfirmRemove(null)}
+      />
+
+      <ConfirmDialog
+        isOpen={confirmReset !== null}
+        title={t("loongport.tier.resetConfirmTitle")}
+        message={t("loongport.tier.resetConfirmMessage", {
+          name: confirmReset?.displayName ?? "",
+        })}
+        confirmText={t("loongport.tier.resetConfirmButton")}
+        onConfirm={() => confirmReset && void handleResetTier(confirmReset)}
+        onCancel={() => setConfirmReset(null)}
+      />
+
+      <AddSiteDialog
+        open={addingSite}
+        onClose={() => setAddingSite(false)}
+        onAdded={() => void reload()}
+        defaultSite={defaultSite}
+      />
+
+      {/* 「编辑配置」的警告 + cc-switch 编辑页（见 useTierEditGuard）。 */}
+      {editDialogs}
+
+      <SwitchTierConfirmDialog
+        targetName={confirmSwitch?.name ?? null}
+        onCancel={() => setConfirmSwitch(null)}
+        onSwitch={(quitChatgpt) => confirmSwitch?.run(quitChatgpt)}
+      />
+    </>
+  );
+}

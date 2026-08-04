@@ -235,12 +235,12 @@ describe("ProviderList Component", () => {
     // Drag attributes from useSortable
     expect(
       providerCardRenderSpy.mock.calls[0][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("b");
     expect(
       providerCardRenderSpy.mock.calls[1][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("a");
 
@@ -305,5 +305,38 @@ describe("ProviderList Component", () => {
     expect(
       screen.getByText("No providers match your search."),
     ).toBeInTheDocument();
+  });
+
+  it("hides LoongPort managed tiers from the provider list", () => {
+    // 托管档位有自己的页面（OperatorTierList）。留在这个列表里的问题不是"重复显示"，
+    // 而是**这里每张卡都带编辑/删除/拖拽**，那三样对托管项都不适用（配置由 provision
+    // 生成、改了下次刷新被覆盖；顺序由倍率决定）。Rust 侧虽已收口，把按钮摆在那儿
+    // 本身就是陷阱 —— 用户点了才被拒，且错误文案指向另一个页面。
+    renderWithQueryClient(
+      <ProviderList
+        providers={{
+          alpha: createProvider({ id: "alpha", name: "Alpha" }),
+          "loongport-abc123def456": createProvider({
+            id: "loongport-abc123def456",
+            name: "BestApi · Pro",
+          }),
+        }}
+        currentProviderId=""
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    // 断言在 useDragSort 的入参上：过滤发生在它之前，所以下游的排序、渲染、
+    // 拖拽索引全都继承这个结果。滤漏了这里就会看到那条托管 id。
+    const passedProviders = useDragSortMock.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(passedProviders)).toEqual(["alpha"]);
   });
 });

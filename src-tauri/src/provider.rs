@@ -87,6 +87,17 @@ impl Provider {
             || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
     }
 
+    /// Whether the provider form's "auth field" was explicitly set to
+    /// ANTHROPIC_API_KEY. The form only persists `meta.apiKeyField` for the
+    /// non-default choice, so `None` means the default ANTHROPIC_AUTH_TOKEN.
+    pub fn claude_uses_api_key_field(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.api_key_field.as_deref())
+            .map(|field| field.eq_ignore_ascii_case("ANTHROPIC_API_KEY"))
+            .unwrap_or(false)
+    }
+
     fn provider_type(&self) -> Option<&str> {
         self.meta.as_ref().and_then(|m| m.provider_type.as_deref())
     }
@@ -530,6 +541,37 @@ pub struct ProviderMeta {
     /// 用于多账号支持，关联到特定的 GitHub 账号
     #[serde(rename = "githubAccountId", skip_serializing_if = "Option::is_none")]
     pub github_account_id: Option<String>,
+    /// LoongPort 托管档位所属的运营商账号 id（服务端的 user id）。
+    ///
+    /// ## 为什么必须有它
+    ///
+    /// 托管档位的归属原本只有 `website_url`（站点）一个依据，而**同一个站可以挂多个
+    /// 账号** —— 于是「清理不再存在的档位」「重建档位配置」「删站点连带清档位」三处
+    /// 都会把同站**另一个账号**的档位当成自己的处理（删掉 / 用错的凭据重建）。
+    ///
+    /// `provider_id` 反推不出账号（它是 sha256 的前 16 位 hex，单向），所以归属必须
+    /// 显式记下来。命名与用途对齐上游的 [`Self::github_account_id`] —— 那是同一个
+    /// 问题（多账号归属）的既有解法。
+    ///
+    /// `None` = 旧数据或非托管 provider。**判据必须容忍 `None`**：那种记录只能靠
+    /// `website_url` 判站点，不能凭「账号对不上」就删（宁可漏删不可错删）。
+    #[serde(rename = "loongportAccountId", skip_serializing_if = "Option::is_none")]
+    pub loongport_account_id: Option<i64>,
+    /// vendor（官网直连）账号归属。
+    ///
+    /// ⚠️ **不能复用 [`Self::loongport_account_id`]** —— 那是 `i64`，而 DeepSeek 的
+    /// account_id 是 UUID 字符串。形状对齐上游既有的 [`Self::github_account_id`]
+    /// （也是 `Option<String>`，注释写着「用于多账号支持」）—— 字符串型账号 id
+    /// 在本结构里本来就有先例。
+    ///
+    /// 归属依据的理由与 `loongport_account_id` 同：一个厂商可以挂多个账号，而
+    /// `website_url` 只记站点（DeepSeek 那个还是编译期常量），少了它就分不出
+    /// 哪条 provider 属于哪个账号。`None` = 旧数据或非 vendor provider。
+    #[serde(
+        rename = "loongportVendorAccount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub loongport_vendor_account: Option<String>,
 }
 
 /// 解析 Provider 级自定义 User-Agent 字符串（单一真理来源）。

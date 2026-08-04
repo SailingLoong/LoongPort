@@ -1,12 +1,20 @@
-//! Deep link import functionality for CC Switch
+//! Deep link import functionality
 //!
-//! This module implements the ccswitch:// protocol for importing configurations
-//! via deep links. Supports importing:
+//! scheme 是 `loongport://`（`tauri.conf.json` 的 `plugins.deep-link`）。
+//!
+//! **LoongPort 的主流程不走这里**：拿到 sk 与 endpoint 之后直接写 provider 记录
+//! （见 `commands::operator::operator_provision`），不经 deeplink 导入。这条链路是从上游
+//! 继承下来的通用导入能力，留着不碍事。
+//!
+//! Supports importing:
 //! - Provider configurations (Claude/Codex/Gemini)
 //! - MCP server configurations
 //! - Prompts
 //! - Skills
 //!
+
+/// 本 app 注册的 scheme（`tauri.conf.json` 的 `plugins.deep-link`）。
+pub const APP_SCHEME: &str = "loongport";
 
 mod mcp;
 mod parser;
@@ -25,6 +33,9 @@ pub use mcp::import_mcp_from_deeplink;
 pub use parser::parse_deeplink_url;
 pub use prompt::import_prompt_from_deeplink;
 pub use provider::{import_provider_from_deeplink, parse_and_merge_config};
+// LoongPort 加的一行：`operator::provision` 复用这套「按 CLI 分派 settings_config」的构造，
+// 免得自己再写一份 8 分支的 match（上游加新 CLI 时我们免费拿到）。
+pub(crate) use provider::build_provider_from_request;
 pub use skill::import_skill_from_deeplink;
 
 /// Deep link import request model
@@ -136,4 +147,36 @@ pub struct DeepLinkImportRequest {
     /// Auto query interval in minutes (0 to disable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_auto_interval: Option<u64>,
+}
+
+#[cfg(test)]
+mod scheme_consistency_tests {
+    use super::APP_SCHEME;
+
+    /// deeplink 的 scheme 声明在**三处**，任一处不同就静默失效（不报错、不崩溃，
+    /// 只是导入链接点了没反应）。2026-08-02 踩过：`Info.plist` 漏改还写着上游的
+    /// `ccswitch`，而这里与 `tauri.conf.json` 都已是 `loongport` ⇒ 系统把
+    /// `ccswitch://` 交给我们、代码不认；`loongport://` 系统压根不路由给我们。
+    ///
+    /// 这条测试读那两个文件做字面比对 —— 它们不是 Rust 代码，编译器管不到。
+    #[test]
+    fn scheme_matches_info_plist_and_tauri_conf() {
+        let plist = include_str!("../../Info.plist");
+        assert!(
+            plist.contains(&format!("<string>{APP_SCHEME}</string>")),
+            "Info.plist 里注册的 scheme 与 APP_SCHEME ({APP_SCHEME}) 不一致 —— \
+             deeplink 会静默失效"
+        );
+
+        let conf = include_str!("../../tauri.conf.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(conf).expect("tauri.conf.json 必须是合法 JSON");
+        let schemes = parsed["plugins"]["deep-link"]["desktop"]["schemes"]
+            .as_array()
+            .expect("tauri.conf.json 必须声明 plugins.deep-link.desktop.schemes");
+        assert!(
+            schemes.iter().any(|s| s.as_str() == Some(APP_SCHEME)),
+            "tauri.conf.json 的 schemes {schemes:?} 不含 APP_SCHEME ({APP_SCHEME})"
+        );
+    }
 }

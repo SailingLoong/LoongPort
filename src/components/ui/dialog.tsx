@@ -1,5 +1,7 @@
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 
 const Dialog = DialogPrimitive.Root;
@@ -43,6 +45,23 @@ const DialogContent = React.forwardRef<
     zIndex?: "base" | "nested" | "alert" | "top";
     variant?: "default" | "fullscreen";
     overlayClassName?: string;
+    /**
+     * 右上角那个 X。**默认给**（shadcn 官方模板本来就带，这个 fork 当初去掉了）。
+     *
+     * 只有两种情况该传 `false`：弹窗自己在别处已经放了关闭控件（`SessionToc` 的
+     * header 里有一个、`BasicFormFields` 的图标选择器用返回箭头当关闭），
+     * 那时再加一个就是两个紧邻控件做同一件事。
+     *
+     * ⚠️ **不要为「这一步不该让用户跳过」而传 false** —— 那个诉求该用「关掉之后
+     * 还能从别处进来」满足，而不是靠堵死出口。本仓 `onInteractOutside` 已经
+     * `preventDefault()`（不让点遮罩关），X 没了就只剩 Esc 这个隐藏操作。
+     */
+    showCloseButton?: boolean;
+    /**
+     * X 的无障碍标签。默认取 `common.close`（四个 locale 都有），
+     * 只在某个弹窗需要更具体的措辞时才传。
+     */
+    closeButtonLabel?: string;
   }
 >(
   (
@@ -52,10 +71,19 @@ const DialogContent = React.forwardRef<
       zIndex = "base",
       variant = "default",
       overlayClassName,
+      showCloseButton = true,
+      closeButtonLabel,
       ...props
     },
     ref,
   ) => {
+    // ⚠️ **走 `useTranslation` 而不是直接 import `@/i18n`**：后者会把 i18n 的
+    // 初始化（`i18n.use(initReactI18next).init(...)`）拖进这个模块的依赖图，
+    // 而仓里有 10 个测试文件 `vi.mock("react-i18next")` 且不导出
+    // `initReactI18next` ⇒ 凡渲染任何弹窗的测试当场崩在 `src/i18n/index.ts:79`。
+    // 实测踩过（4 个测试文件同时红）。这是本目录第一个用 hook 的组件，
+    // 破例的理由就是它：mock 提供 `useTranslation`，不提供那个初始化导出。
+    const { t } = useTranslation();
     const zIndexMap = {
       base: "z-40",
       nested: "z-50",
@@ -83,6 +111,21 @@ const DialogContent = React.forwardRef<
           {...props}
         >
           {children}
+          {/* 放在 children **之后**：它是绝对定位的，DOM 顺序只影响 Tab 焦点次序 ——
+              排在末尾才不会抢在弹窗主内容之前拿到焦点。
+
+              `z-10` 是必需的：`DialogHeader` 带 `bg-muted/20` 背景，同层级下
+              后面的兄弟节点会盖住它，但 header 是 flex 布局里的实体块 ——
+              不提层的话 X 会被 header 的背景吃掉一半。样式抄 `SessionToc` 那份
+              （仓里已有的同形范例，CLAUDE.md §一「视觉 token 抄上游」）。 */}
+          {showCloseButton && (
+            <DialogPrimitive.Close
+              className="absolute right-4 top-4 z-10 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:pointer-events-none"
+              aria-label={closeButtonLabel ?? t("common.close")}
+            >
+              <X className="size-4" />
+            </DialogPrimitive.Close>
+          )}
         </DialogPrimitive.Content>
       </DialogPortal>
     );

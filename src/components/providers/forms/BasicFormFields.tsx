@@ -81,6 +81,9 @@ export function BasicFormFields({
             zIndex="top"
             overlayClassName="bg-[hsl(var(--background))] backdrop-blur-0"
             className="p-0 sm:rounded-none"
+            // 这个全屏选择器已有两个出口：左上返回箭头与底部「完成」。
+            // 它是全屏的，右上角再放一个 X 会与系统窗口的关闭按钮位置重叠。
+            showCloseButton={false}
           >
             <div className="flex h-full flex-col">
               <div className="flex-shrink-0 py-4 border-b border-border-default bg-muted/40">

@@ -27,6 +27,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
 import { settingsApi } from "@/lib/api";
+import { GITHUB_REPO, OFFICIAL_WEBSITE } from "@/config/constants";
 import type {
   ToolInstallation,
   ToolInstallationReport,
@@ -238,8 +239,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   );
   const [showInstallCommands, setShowInstallCommands] = useState(false);
 
-  const { hasUpdate, updateInfo, checkUpdate, resetDismiss, isChecking } =
-    useUpdate();
+  // 不取 `checkUpdate` —— 那是 updater 插件的入口，LoongPort 有意不注册它
+  // （见 `handleCheckUpdate` 里的说明）。检查更新走后端的 `settingsApi.checkUpdates()`。
+  const { hasUpdate, updateInfo, resetDismiss, isChecking } = useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -436,14 +438,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           : "";
 
       if (!displayVersion) {
-        await settingsApi.openExternal(
-          "https://github.com/farion1231/cc-switch/releases",
-        );
+        await settingsApi.openExternal(`${GITHUB_REPO}/releases`);
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/farion1231/cc-switch/releases/tag/${displayVersion}`,
+        `${GITHUB_REPO}/releases/tag/${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
@@ -489,16 +489,19 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       return;
     }
 
+    // 走后端的 `check_for_updates`（开 GitHub releases 页），**不要走
+    // `checkUpdate()`（updater 插件）** —— LoongPort 有意不注册那个插件：上游的
+    // `plugins.updater` 端点指向 cc-switch 自己的发布源，留着会把用户升级成 cc-switch
+    // （见 `lib.rs` 里那段说明）。插件没注册时 `check()` 必抛，而这里原本 catch 住弹
+    // 「检查更新失败，请稍后重试」⇒ **用户每次点都看到一个假报错**，而其实是
+    // 有意不做自动更新。
     try {
-      const available = await checkUpdate();
-      if (!available) {
-        toast.success(t("settings.upToDate"), { closeButton: true });
-      }
+      await settingsApi.checkUpdates();
     } catch (error) {
-      console.error("[AboutSection] Check update failed", error);
+      console.error("[AboutSection] Failed to open releases page", error);
       toast.error(t("settings.checkUpdateFailed"));
     }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t]);
+  }, [hasUpdate, isPortable, resetDismiss, t]);
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {
@@ -867,7 +870,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => settingsApi.openExternal("https://ccswitch.io")}
+              onClick={() => settingsApi.openExternal(OFFICIAL_WEBSITE)}
               className="h-8 gap-1.5 text-xs"
             >
               <Globe className="h-3.5 w-3.5" />
@@ -877,11 +880,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() =>
-                settingsApi.openExternal(
-                  "https://github.com/farion1231/cc-switch",
-                )
-              }
+              onClick={() => settingsApi.openExternal(GITHUB_REPO)}
               className="h-8 gap-1.5 text-xs"
             >
               <Github className="h-3.5 w-3.5" />

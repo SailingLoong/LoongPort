@@ -15,11 +15,53 @@ use toml_edit::DocumentMut;
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 /// Temporary model-provider id used while the built-in `codex-official`
-/// provider is routed through CC Switch.  A dedicated id is an ownership
+/// provider is routed through LoongPort.  A dedicated id is an ownership
 /// marker: unlike a generic localhost `base_url`, it can be detected and
 /// cleaned up without mistaking a user's own local provider for takeover.
-pub const CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID: &str = "cc-switch-official";
-pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+///
+/// ⚠️ **这个值会写进用户的 `~/.codex/config.toml`**（见
+/// `set_codex_official_proxy_route`），所以它是**持久化契约** —— 改它必须同时把旧值
+/// 留在 [`LEGACY_OFFICIAL_PROXY_PROVIDER_IDS`] 里，否则老用户机器上那条认不出来，
+/// 崩溃后的兜底清理会失效、残留一条指向本地代理的死配置（codex 报连不上）。
+///
+/// 这是上游自己用的模式（见 `codex_history_migration.rs` 的
+/// `CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS`）：新值一个常量、旧值列进数组、识别时都认。
+pub const CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID: &str = "loongport-official";
+
+/// 曾经用过的官方接管标记 id。**只增不删** —— 每一项都对应「某个版本的用户机器上
+/// 可能存在的值」，删掉就等于放弃清理那批用户的残留配置。
+///
+/// - `cc-switch-official`：上游 cc-switch 与 LoongPort 改名前用的值
+///   （2026-08-02 之前打的包都写这个）
+const LEGACY_OFFICIAL_PROXY_PROVIDER_IDS: &[&str] = &["cc-switch-official"];
+
+/// 这个 model_provider id 是不是「我们接管官方订阅」留下的标记（含历史值）。
+///
+/// 识别用它、**写入用 [`CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID`]** ——
+/// 那是「读宽写窄」：认得出所有历史版本，但只产出当前值。
+pub fn is_official_proxy_provider_id(id: &str) -> bool {
+    id == CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID
+        || LEGACY_OFFICIAL_PROXY_PROVIDER_IDS.contains(&id)
+}
+
+/// 我们生成的 model catalog 文件名。
+///
+/// ⚠️ **同样是持久化契约**：它会写进用户 `~/.codex/config.toml` 的
+/// `model_catalog_json`，而且「这个 catalog 是不是我们生成的」正是靠文件名判的
+/// （用户自管的 catalog 要原样留着，不能反向解析成简化表 —— 那是降级）。
+/// 所以改它必须同时把旧名留在 [`LEGACY_MODEL_CATALOG_FILENAMES`] 里。
+pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "loongport-model-catalog.json";
+
+/// 曾经用过的 catalog 文件名。**只增不删**，理由同
+/// [`LEGACY_OFFICIAL_PROXY_PROVIDER_IDS`]。
+const LEGACY_MODEL_CATALOG_FILENAMES: &[&str] = &["cc-switch-model-catalog.json"];
+
+/// 这个文件名是不是「我们生成的 catalog」（含历史名）。
+///
+/// 读宽写窄：认得出所有历史版本生成的文件，但只产出当前名。
+pub fn is_our_model_catalog_filename(name: &str) -> bool {
+    name == CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME || LEGACY_MODEL_CATALOG_FILENAMES.contains(&name)
+}
 const CODEX_PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 #[cfg(target_os = "windows")]
@@ -1255,8 +1297,12 @@ fn set_codex_model_catalog_json_field(
                 .get("model_catalog_json")
                 .and_then(|item| item.as_str())
                 .map(|path| {
-                    Path::new(path).file_name().and_then(|name| name.to_str())
-                        == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+                    // 认历史名：老配置里引用的是 cc-switch-model-catalog.json，
+                    // 只认当前名会让那份「我们生成的」catalog 被当成用户自管的、清不掉。
+                    Path::new(path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(is_our_model_catalog_filename)
                 })
                 .unwrap_or(false);
             if should_remove {
@@ -1395,9 +1441,13 @@ pub(crate) fn resolve_cc_switch_catalog_path(
         .filter(|s| !s.is_empty())?;
 
     let referenced_path = Path::new(catalog_path_str);
-    let is_cc_switch_owned = referenced_path.file_name().and_then(|name| name.to_str())
-        == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
-    if !is_cc_switch_owned {
+    // 认历史名 —— 否则老用户那份 catalog 会被当成「用户自管的」而不反向解析，
+    // 界面上就看不到他之前配的模型表了。
+    let is_ours = referenced_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_our_model_catalog_filename);
+    if !is_ours {
         return None;
     }
 
@@ -1772,11 +1822,11 @@ pub fn apply_codex_official_proxy_route(
     Ok(doc.to_string())
 }
 
-/// Whether a live Codex config is the official route projected by CC Switch.
+/// Whether a live Codex config is the official route projected by LoongPort.
+///
+/// **认历史值**（[`is_official_proxy_provider_id`]）：老用户机器上写的是
+/// `cc-switch-official`，只认当前值会让那批配置检测不出来、清理不掉。
 pub fn codex_config_has_official_proxy_route(config_text: &str) -> bool {
-    if !config_text.contains(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID) {
-        return false;
-    }
     config_text
         .parse::<DocumentMut>()
         .ok()
@@ -1785,21 +1835,26 @@ pub fn codex_config_has_official_proxy_route(config_text: &str) -> bool {
                 .and_then(|item| item.as_str())
                 .map(str::to_string)
         })
-        .as_deref()
-        == Some(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
+        .is_some_and(|id| is_official_proxy_provider_id(&id))
 }
 
-/// Remove only the official takeover route owned by CC Switch. This is a
+/// Remove only the official takeover route owned by LoongPort. This is a
 /// last-resort crash cleanup when no live backup or provider SSOT is usable.
+///
+/// **同样认历史值** —— 这个函数是崩溃后的兜底清理，认不出旧标记就等于放弃清理
+/// 那批用户的残留配置（codex 会一直指着一个不再监听的本地端口）。
 pub fn remove_codex_official_proxy_route(config_text: &str) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
-    if doc.get("model_provider").and_then(|item| item.as_str())
-        != Some(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
-    {
+    let Some(route_id) = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .filter(|id| is_official_proxy_provider_id(id))
+        .map(str::to_string)
+    else {
         return Ok(config_text.to_string());
-    }
+    };
 
     doc.as_table_mut().remove("model_provider");
     if let Some(item) = doc.as_table_mut().remove("model_providers") {
@@ -1808,7 +1863,8 @@ pub fn remove_codex_official_proxy_route(config_text: &str) -> Result<String, Ap
                 "Invalid Codex config.toml: model_providers must be a table".to_string(),
             )
         })?;
-        providers.remove(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID);
+        // 删的是**实际读到的那个 id**，不是当前常量 —— 老配置里的键名是旧值。
+        providers.remove(route_id.as_str());
         remove_codex_proxy_placeholders_from_providers(&mut providers);
         if !providers.is_empty() {
             doc["model_providers"] = toml_edit::Item::Table(providers);
@@ -4253,6 +4309,52 @@ model_catalog_json = "cc-switch-model-catalog.json"
         assert!(
             parsed.get("model_catalog_json").is_none(),
             "None arm should remove relative cc-switch-owned field"
+        );
+    }
+    /// 「读宽写窄」：识别认历史值，写入只产出当前值。
+    ///
+    /// 这是**改持久化契约的唯一安全姿势**。2026-08-02 把
+    /// `cc-switch-official` 改成 `loongport-official` 时建立 ——
+    /// 老用户的 `~/.codex/config.toml` 里写的是旧值，只认新值会让崩溃后的兜底清理
+    /// 失效，残留一条指向已停止的本地代理的死配置（codex 报连不上，用户不知为何）。
+    #[test]
+    fn official_proxy_id_reads_wide_writes_narrow() {
+        // 写：只产出当前值。
+        assert_eq!(
+            CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID,
+            "loongport-official"
+        );
+
+        // 读：当前值与全部历史值都认。
+        assert!(is_official_proxy_provider_id("loongport-official"));
+        assert!(
+            is_official_proxy_provider_id("cc-switch-official"),
+            "必须认得改名前写下的旧标记，否则老用户的残留配置清理不掉"
+        );
+
+        // 不误伤：用户自己的 provider 不能被当成我们的接管标记（那会被删掉）。
+        for id in ["custom", "openai", "my-local", "", "loongport", "official"] {
+            assert!(!is_official_proxy_provider_id(id), "id: {id}");
+        }
+    }
+
+    /// 兜底清理必须能删掉**旧标记**写下的那条路由。
+    #[test]
+    fn cleanup_removes_the_legacy_route_too() {
+        let legacy = r#"model_provider = "cc-switch-official"
+
+[model_providers.cc-switch-official]
+name = "x"
+base_url = "http://127.0.0.1:9999/v1"
+"#;
+        assert!(
+            codex_config_has_official_proxy_route(legacy),
+            "旧标记必须被识别成「我们接管的」"
+        );
+        let cleaned = remove_codex_official_proxy_route(legacy).expect("清理不该失败");
+        assert!(
+            !cleaned.contains("cc-switch-official"),
+            "旧标记那条路由必须被删掉，否则 codex 一直指着一个不再监听的端口: {cleaned}"
         );
     }
 }

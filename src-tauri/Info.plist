@@ -2,15 +2,24 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- 注册 ccswitch:// 自定义 URL 协议，用于深链接导入 -->
+  <!-- 注册 loongport:// 自定义 URL 协议，用于深链接导入。
+
+       ⚠️ scheme **必须与另两处一致**，任一处不同 deeplink 就静默失效：
+         1. 本文件 —— 向 macOS 注册，决定系统把哪个 scheme 交给我们
+         2. tauri.conf.json 的 plugins.deep-link.desktop.schemes
+         3. src-tauri/src/deeplink/mod.rs 的 APP_SCHEME（解析时比对）
+
+       2026-08-02 修：本文件曾漏改、还写着上游的 ccswitch，而另两处已是 loongport
+       ⇒ 系统把 ccswitch:// 交给我们、代码不认；loongport:// 系统压根不路由给我们
+       ⇒ **deeplink 导入完全不工作**。这类不一致不报错，只静默失效。 -->
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
       <key>CFBundleURLName</key>
-      <string>CC Switch Deep Link</string>
+      <string>LoongPort Deep Link</string>
       <key>CFBundleURLSchemes</key>
       <array>
-        <string>ccswitch</string>
+        <string>loongport</string>
       </array>
     </dict>
   </array>

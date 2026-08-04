@@ -55,8 +55,11 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
 pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
     handle
         .opener()
+        // 指 LoongPort 自己的发布页，不是上游的 —— 上游那边的版本号与我们同名
+        // （都是 3.19.x）但内容不同，指过去用户会装错 app。
+        // 与前端 `src/config/constants.ts` 的 `GITHUB_REPO` 保持一致。
         .open_url(
-            "https://github.com/farion1231/cc-switch/releases/latest",
+            format!("{}/releases/latest", crate::config::GITHUB_REPO),
             None::<String>,
         )
         .map_err(|e| format!("打开更新页面失败: {e}"))?;

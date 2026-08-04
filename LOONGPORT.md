@@ -1,0 +1,196 @@
+# LoongPort
+
+> **同样的 Codex，成本省 95% 以上，国内直连**
+> *The same Codex — over 95% cheaper, no extra network setup.*
+
+这两句是**固定副标题**，README / 官网 / GitHub description 第一行都用它，别每处另写一版。
+产品名只承担识别（同 Docker / Vercel，不自我描述），"它是什么"由副标题讲 ——
+少了这句，`Port` 容易被读成"移植版"，正好是最不想要的解读。
+
+⚠️ **视角是用户的（我用 Codex，我省钱），不是实现的。** 上一版写的是「一个运营商账号，
+直接变成任意 AI CLI 的可用供应商」—— 那句描述的是软件内部干了什么，而用户关心的是自己
+得到什么。改这句要同步改三处：`README.md`（中文，GitHub 首页展示的那份）/
+`README_EN.md` 的标题下方，
+以及官网 `src/i18n/translations.ts` 的 `TAGLINE`。
+
+两条**不要**写进对外文案的表述，即使它们更抓人：
+- **「无惧封号」** —— 隐含「官方会封号、用我们不会」，是承诺一个 LoongPort 控制不了的
+  结果（封号权在运营商与上游）。可自证的说法是「不占用官方账号」：
+  `preserveCodexOfficialAuthOnSwitch` 默认开，切档位不动 `auth.json`。
+- **「不用科学上网」** —— 会把产品定位成规避网络管制的工具。行业通用表述是
+  「国内直连」/「无需额外网络配置」，传达同样的信息。
+
+最初在 [cc-switch](https://github.com/farion1231/cc-switch) v3.19.1 上 fork、之后合并
+上游至 v3.19.2 的客户端：
+把一个**运营商账号**变成 CLI 可用的多档位供应商 —— 用户填域名、登录、拿到分组，
+不必自己建 key、抄 base_url、配 config。
+
+**目标形态是多运营商 × 多 CLI**（sub2api / new-api / … × codex / claude / gemini / …）。
+当前进度：
+
+| 维度 | 已实现 | 在做 / 待做 |
+|---|---|---|
+| 运营商 | sub2api | new-api（登录标识已按它设计成中立的 `login_identifier`） |
+| CLI | codex | claude / gemini / grok（`platform_map` 映射表已建全，缺各自的配置写入形状） |
+| 平台 | macOS · Windows | Linux |
+
+**Windows 自 2026-08-03 起可用**（MSI 已在维护者机器上打出并验证）。
+
+**ChatGPT 自动退出/重开两个平台都已实现**（Windows 于 2026-08-04 补完）。
+但**手段与语义不同，写对外文案时别当成完全等价**：
+
+| | 手段 | 用户能否拒绝 |
+|---|---|---|
+| macOS | AppleScript `quit`（协作式） | **能** —— 有进行中对话时它会弹自己的确认框，用户点取消即中止切换（`UserDeclined`） |
+| Windows | `taskkill /F`（强制） | **不能** —— 所以切换前的告知弹窗是必需的，不是可选的 |
+
+`quit_and_wait` **不返回错误**：退出失败（macOS 权限被拒 / Windows 罕见杀不掉）归到
+`NeedsManualRestart`，切换照常进行 + 提示用户自己重启 —— 把「没替用户关掉那个 app」
+当失败，会让权限被拒的机器上每次切换都失败，而配置本来是写得进去的。
+详见 `chatgpt_app.rs` 顶部那张表与「`WM_CLOSE` 这条路已被实测证伪」那节。
+
+⚠️ **别把「当前只实现了 X」读成「设计上只支持 X」** —— 数据层已按多运营商多平台设计
+（四段式 Key 契约含 platform 段、`platform_map` 六个平台全覆盖、命令层签名都吃 `app_id`）。
+真正的缺口只在**配置写入形状**：`settings_config_for` 生成的是 codex 的 TOML，
+接 claude 要另写一份。
+
+上游那份 `README.md` 描述的是 cc-switch 本身（8 个 CLI、本地代理、MCP/Skills 全套），本文件
+只讲 LoongPort 自己加的那条链路。
+
+## 它替你做什么
+
+```
+①填域名（底纹 bestapi.store，可改，留空用默认）
+   └→ ②弹窗加载该站登录页，注册或登录
+        └→ ③自动为每个可用分组备好 sk（用户无感）
+             └→ ④点一个分组就切过去
+                  └→ ⑤切换前退出 ChatGPT，切完自动开回来
+```
+
+第 ③ 步是「认领优先」：先在你账号里找名字匹配的 Key 复用，找不到才建新的。所以重复点
+「刷新」不会给你的账号堆垃圾 Key。
+
+## 跑起来
+
+```bash
+# 依赖（首次）
+pnpm install
+
+# 开发模式（前端热更新）
+pnpm tauri dev
+
+# 出一个能双击的 app
+pnpm tauri build --bundles app    # 产物 src-tauri/target/release/bundle/macos/LoongPort.app
+```
+
+数据落在 `~/.loongport/`（DB 是 `loongport.db`）。**与已装的 cc-switch 完全隔离** —— 那是
+`~/.cc-switch/`，两边互不影响。
+
+同时装了 cc-switch 时注意：两边都有 single-instance 插件，但它按 identifier 区分，所以可以
+同时开。**同一个 app 开两份则第二份会立刻静默退出**（这是插件的正常行为，不是崩溃）——
+debug 版还开着时 release 版起不来，排查时先 `pkill -f LoongPort`。
+
+### dmg 那步会超时，用 hdiutil 手工做
+
+`tauri build`（不带 `--bundles app`）在打 dmg 时会失败：它的 `bundle_dmg.sh` 用 AppleScript
+让 Finder 美化窗口布局，那个 Apple event 会超时（`-1712`，与 `chatgpt_app.rs` 处理的是同一
+个坑）。app 本身**已经打好了**，只是 dmg 那一步挂掉。
+
+要 dmg 就手工做一个（无花哨布局，功能一样）：
+
+```bash
+cd src-tauri/target/release/bundle
+# 版本号从 tauri.conf.json 读，别写死 —— 写死的那个会随每次升版过期，
+# 而产出一个名字与内容不符的 dmg 是不会报错的。
+VER=$(python3 -c "import json;print(json.load(open('../../../tauri.conf.json'))['version'])")
+STAGE=$(mktemp -d)/LoongPort && mkdir -p "$STAGE"
+cp -R macos/LoongPort.app "$STAGE/" && ln -s /Applications "$STAGE/Applications"
+hdiutil create -volname LoongPort -srcfolder "$STAGE" -ov -format UDZO \
+  "dmg/LoongPort_${VER}_aarch64.dmg"
+rm -rf "$(dirname "$STAGE")"
+```
+
+## 六个 Tauri 命令
+
+| 命令 | 干什么 |
+|---|---|
+| `operator_status` | 只读本地，决定 UI 显示哪一屏 |
+| `operator_check_session` | 探活 + 静默续期；凭据真失效时清掉本地记录 |
+| `operator_probe_site` | 探测域名是不是 sub2api 站，成功即存为当前站点 |
+| `operator_login` | 开登录 WebView，等凭据回来 |
+| `operator_provision` | 拉分组 → 每组备 sk → 写成 codex provider |
+| `operator_list_tiers` | 列已备好的档位 |
+| `operator_switch_tier` | 退 ChatGPT → 切换 → 重开 |
+| `operator_logout` | 清凭据（保留站点与 device-id） |
+
+## 改代码前必读的几条
+
+这些都是实测踩出来的，改错了不会有编译错误、只会静默走歪。每条在源码里都有对应的测试
+钉住。
+
+### 1. codex 的 `config.toml` 不能声明 `requires_openai_auth`
+
+`codex doctor` 三组对照：
+
+| config.toml | reachability mode | 实际打到哪 |
+|---|---|---|
+| `requires_openai_auth = true` + bearer token | ChatGPT auth | chatgpt.com（403，1 fail） |
+| 无 `requires_openai_auth` + bearer token | provider auth | 运营商 `/v1`（200，0 fail） |
+| `requires_openai_auth = true` + auth.json 有 key | API key auth | 运营商 `/v1`（200，0 fail） |
+
+LoongPort 走第二行（sk 只进 config.toml，不碰 auth.json）。上游预设与 sub2api 面板给的模板
+都写 `requires_openai_auth = true`，因为它们走第三行 —— **照抄会落到唯一跑不通的第一行**。
+
+### 2. `model_provider` 必须是 `custom`
+
+它是会话历史的桶标识：所有 provider 都写 `custom`，切换分组后历史才在同一个列表里
+（「聊天记录合并」靠的是这个，不是某个设置开关）。
+
+sub2api 面板模板写的是 `model_provider = "OpenAI"` —— `openai` 在 codex 的保留 id 列表里且
+比对大小写不敏感，照抄会让 bearer token 落到顶层而非 provider 作用域，且把桶变成 `OpenAI`。
+
+### 3. `~/.codex/auth.json` 是 ChatGPT 桌面版的登录凭据
+
+那个 app（bundle id **`com.openai.codex`**，显示名才叫 ChatGPT）自带一份 codex 核心二进制，
+与命令行 codex 共用同一个 `~/.codex`。所以 `preserveCodexOfficialAuthOnSwitch` 在 LoongPort
+**默认开**（上游默认关）—— 关掉意味着每次切分组都把你的 ChatGPT 登录清掉。
+
+### 4. 退 ChatGPT 一律按 bundle id，且判据是轮询
+
+- 它内部那份 codex 二进制与命令行 codex **同名**，`pkill -9 -x codex` 实测会把它一起杀掉。
+- `quit` 是异步的，且它在有进行中对话时会弹阻塞式确认框；用户点 Cancel 时 `osascript`
+  **仍可能返回 rc=0**。所以「已退出」的唯一判据是轮询 `is running` 变 false。
+- AppleScript 必须包 `with timeout`：AppleEvent 默认超时是 **120 秒**，不包就是在确认框弹出时
+  把 Tauri command 卡两分钟。
+
+### 5. sub2api 的响应信封 `code` 是整数，成功是 `0`
+
+`message` 才是 `"success"`。把它当成 code 会让每一次 API 调用都失败在反序列化上。
+
+而**鉴权中间件（401/403）用的是另一套信封**，那边 `code` 是字符串错误码 —— 两套不能混。
+
+### 6. `api_base_url` 可能是空串
+
+bestapi.store 实测就是。补 `/v1` 的责任在客户端，别指望后台配对。
+
+## 测试
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml          # 全量（不含联网那条）
+cargo test --manifest-path src-tauri/Cargo.toml --lib probe_live_site -- --ignored --nocapture
+```
+
+最后那条打真实站点，验的是**契约漂移** —— 上游改字段名时纯函数单测全绿而它会红。它默认
+`#[ignore]`（CI 不该依赖外网可达）。
+
+`tests/loongport_codex_live.rs` 三条守整条落盘链路，其中一条断言切换分组后 `auth.json`
+**逐字节未变**。
+
+## 已知不做的
+
+- **本地代理 / failover**：sub2api 原生支持 codex 的 `/v1/responses`，不需要协议转换。
+  `proxy/` 那套留在仓里但不接线。
+- **自动更新**：`plugins.updater` 整块删了（上游端点会把用户升级成 cc-switch）。有自己的
+  发布渠道之后要同时配 endpoints + pubkey + 加回 `lib.rs` 里那段注册，缺一个都不行。
+- **凭据加密**：token 明文存 SQLite。同一个库里已经躺着明文 sk（上游行为），只加密 token
+  没有实际收益。要做就两者一起进 keyring。

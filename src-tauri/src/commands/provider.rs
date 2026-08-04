@@ -43,8 +43,30 @@ pub fn add_provider(
     #[allow(non_snake_case)] addToLive: Option<bool>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::add(state.inner(), app_type, provider, addToLive.unwrap_or(true))
+    add_provider_internal(state.inner(), app_type, provider, addToLive.unwrap_or(true))
         .map_err(|e| e.to_string())
+}
+
+fn add_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    provider: Provider,
+    add_to_live: bool,
+) -> Result<bool, AppError> {
+    // ⚠️ **新增一条 `loongport-*` id 的 provider 必须拒**（review 抓出这里一直没守卫）。
+    //
+    // 那些 id 由 `provision::provider_id_for` 从「站点 + 账号 + 分组」派生，只有
+    // provision 有资格生成。手工造一条同前缀的记录会**伪装成托管档位**：
+    // 它从普通 provider 列表里消失（前端按前缀过滤）、转而出现在运营商区里，
+    // 而那一区的「恢复默认配置」会拿运营商的默认值把用户自己配的东西整份覆盖掉。
+    //
+    // 这个口子不是本轮引入的（`add` 从来就没拦），但手已经伸到这个文件、现在做得了
+    // ⇒ 一并清掉（CLAUDE.md defer 准入闸的空间维度）。
+    //
+    // provision 自己不走这条命令（它直调 `state.db.save_provider`），所以拦这里
+    // 不影响正常的档位生成。
+    crate::operator::reject_if_managed(&provider.id)?;
+    ProviderService::add(state, app_type, provider, add_to_live)
 }
 
 #[tauri::command]
@@ -55,8 +77,60 @@ pub fn update_provider(
     #[allow(non_snake_case)] originalId: Option<String>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::update(state.inner(), app_type, originalId.as_deref(), provider)
+    update_provider_internal(state.inner(), app_type, originalId.as_deref(), provider)
         .map_err(|e| e.to_string())
+}
+
+fn update_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    original_id: Option<&str>,
+    provider: Provider,
+) -> Result<bool, AppError> {
+    // ## 托管档位**可以**改内容，但**不许改 id**
+    //
+    // 原来这里两头都拦（连内容编辑一起拒），理由写的是「手工改了下次 provision 就被
+    // 覆盖，与其让用户白改一次不如当场指路」。**那个前提后来不成立了**：provision
+    // 改成了「已存在的档位只换 sk、保住用户的编辑」（`provision::patch_api_key`），
+    // 所以手工编辑现在是安全的、能留住的 —— 拦着它只是在挡一件已经做对了的事。
+    //
+    // 运营商区的「编辑配置」按钮走的正是这条命令（跳 cc-switch 的编辑页，
+    // 那页支持全部字段，我们不重做）。用户点它之前会先看到一道警告：保存后这个档位
+    // 归他自己维护，出问题用「恢复默认配置」退回来。
+    //
+    // ## 但**不许凭空造出一个托管 id**
+    //
+    // id 是托管判据本身（`provision::provider_id_for` 生成的前缀），所以：
+    //
+    // - 托管 → 普通 id：那条记录**脱管** —— provision 认不出它，于是给同一个分组
+    //   再插一条新记录，用户会看到两个一模一样的档位，而旧那条永远清不掉。
+    // - 普通 → 托管 id：**伪装成托管项** —— 它会出现在运营商区里，
+    //   而「恢复默认配置」会拿运营商的默认值把用户自己配的东西整份覆盖掉。
+    //
+    // ⚠️ **判据不能是「id 变了没有」** —— review 抓出那样有个绕过口子：
+    // `original_id` 传 `None` 时 `ProviderService::update` 会拿 `provider.id`
+    // 自己当原 id（`services/provider/mod.rs:2608`），于是「不是改名」成立、
+    // 守卫不介入，而 `save_provider` 是 **upsert** ⇒ 一条自选的 `loongport-*`
+    // 记录被凭空写进库里。
+    //
+    // 正确判据是**这个托管 id 得对应一条已经存在的托管记录**：
+    // 就地编辑（id 早在库里）放行，凭空造一个新的托管 id 拒掉。
+    // 这同时覆盖了上面两种改名 —— 不必再单独判「改没改名」。
+    if crate::operator::is_managed(&provider.id)
+        && state
+            .db
+            .get_provider_by_id(&provider.id, app_type.as_str())?
+            .is_none()
+    {
+        return Err(AppError::Message(
+            "不能把供应商改成 LoongPort 托管档位的 id —— 那个 id 由 LoongPort 生成".to_string(),
+        ));
+    }
+    // 反向：把**已存在的**托管记录改成别的 id（脱管）。这条仍按老判据拦。
+    if let Some(old) = original_id.filter(|old| *old != provider.id) {
+        crate::operator::reject_if_managed(old)?;
+    }
+    ProviderService::update(state, app_type, original_id, provider)
 }
 
 #[tauri::command]
@@ -66,9 +140,18 @@ pub fn delete_provider(
     id: String,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::delete(state.inner(), app_type, &id)
-        .map(|_| true)
-        .map_err(|e| e.to_string())
+    delete_provider_internal(state.inner(), app_type, &id).map_err(|e| e.to_string())
+}
+
+fn delete_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    id: &str,
+) -> Result<bool, AppError> {
+    // 删掉档位不会让服务端那把 sk 消失，只会让它下次 provision 又原样冒出来（id 由
+    // 站点 + 分组派生、是稳定的）。真要清理得从运营商区那条「删除站点」走。
+    crate::operator::reject_if_managed(id)?;
+    ProviderService::delete(state, app_type, id).map(|_| true)
 }
 
 #[tauri::command]
@@ -88,6 +171,13 @@ fn switch_provider_internal(
     app_type: AppType,
     id: &str,
 ) -> Result<SwitchResult, AppError> {
+    // 切托管档位必须走 `operator_switch_tier` —— 只有它编排「退出 ChatGPT → 切换 → 重开」。
+    // 从这条通用命令切进去的结果是配置改了、ChatGPT 还拿着旧分组的 sk 在跑，界面上却显示
+    // 切换成功，用户无从察觉。
+    //
+    // 守卫落在这一层而不是 `ProviderService::switch`：那是上游代码，且 `operator_switch_tier`
+    // 正当地要调它。
+    crate::operator::reject_if_managed(id)?;
     ProviderService::switch(state, app_type, id)
 }
 
@@ -100,21 +190,319 @@ pub fn switch_provider_test_hook(
     switch_provider_internal(state, app_type, id)
 }
 
+/// 切换供应商。
+///
+/// ## `quit_chatgpt`：切 codex 的供应商时也要退 ChatGPT
+///
+/// **不只是 LoongPort 的托管档位需要这个。** ChatGPT 桌面版自带一份 codex 核心、与命令行
+/// codex 共用同一个 `~/.codex`，所以它在跑的时候切**任何** codex 供应商（包括 cc-switch
+/// 自带的那些）都有同一个问题：它启动时读了旧的 `config.toml`，不重启就仍连旧的；
+/// 而且**它退出时会回写那个文件**，可能把我们刚写的覆盖掉。
+///
+/// 原来只有 `operator_switch_tier` 编排了「退 → 切 → 重开」，于是从 provider 页切
+/// cc-switch 自带的供应商时没有这层保护 —— 维护者实测指出的正是这一点。
+///
+/// 编排复用 [`crate::operator::chatgpt_app::around`]（与切档位共用同一份实现，
+/// 不复制第二遍）。`abort_on_unconfirmed_exit = false`：切供应商只写 `config.toml`，
+/// 退不掉也照常切 + 提示手动重启。
+///
+/// **`None` = 不碰 ChatGPT**，这是给托盘快切 / deeplink 导入 / 项目快照那些既有调用点留的
+/// 默认行为（它们没有弹确认框的机会，而未经用户同意就关掉他正开着的 app 是不能接受的）。
+/// 只有前端在弹过确认框、用户同意之后才传 `Some(true)`。
 #[tauri::command]
 pub async fn switch_provider(
     app_handle: tauri::AppHandle,
     app: String,
     id: String,
+    quit_chatgpt: Option<bool>,
 ) -> Result<SwitchResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
+    // 与 `operator_switch_tier` 同一条判据：**只有 codex 才需要管 ChatGPT**
+    // （那个 app 只读 `~/.codex`，切 claude / gemini 时去退它是扰民 ——
+    // 关掉用户正开着的、与本次切换毫无关系的对话）。
+    let quit_chatgpt = quit_chatgpt.unwrap_or(false) && matches!(app_type, AppType::Codex);
+
+    let emit_handle = app_handle.clone();
+    let emit_app_type = app_type.clone();
+    let emit_id = id.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle
             .try_state::<AppState>()
             .ok_or_else(|| "应用状态不可用".to_string())?;
-        switch_provider_internal(state.inner(), app_type, &id).map_err(|e| e.to_string())
+
+        let switch_once = || switch_provider_internal(state.inner(), app_type.clone(), &id);
+
+        if !quit_chatgpt {
+            return switch_once().map_err(|e| e.to_string());
+        }
+
+        let (mut switched, chatgpt) =
+            crate::operator::chatgpt_app::around(false, switch_once).map_err(|e| e.to_string())?;
+        // ChatGPT 那边的非致命问题（平台没实现自动退出、重开失败）要一起带给用户 ——
+        // 前端已经在 toast 里逐条显示 warnings。
+        switched.warnings.extend(chatgpt.warnings);
+        Ok(switched)
     })
     .await
-    .map_err(|e| format!("供应商切换任务执行失败: {e}"))?
+    .map_err(|e| format!("供应商切换任务执行失败: {e}"))?;
+
+    // 切成功了就广播 —— **不只给 provider 页看**，见 `emit_provider_switched` 的文档。
+    if result.is_ok() {
+        emit_provider_switched(&emit_handle, &emit_app_type, &emit_id);
+    }
+    result
+}
+
+/// 广播「当前供应商变了」。
+///
+/// ## 为什么这条命令必须发（2026-08-04 修的 bug）
+///
+/// 上游只在**托盘快切 / 故障转移 / 应用项目**三处发 `provider-switched`，
+/// 而 `switch_provider`（provider 页那个「启用」按钮）**不发** —— 上游没事，
+/// 因为它的 provider 页自己就是 mutation 的调用方、`onSuccess` 里 invalidate 掉缓存就够了。
+///
+/// **但 LoongPort 多了一个消费者**：`OperatorSection`（供应商页顶部那一区）用自己的
+/// `useState` + 手工 `reload()`（不走 react-query），所以那次 invalidate 与它无关。症状是：
+///
+/// 1. 用户在运营商区看到某个托管档位是「当前使用中」；
+/// 2. 他在同一页下方启用了一个 cc-switch 自建的 sk；
+/// 3. 运营商区那边 —— **那个档位仍显示「使用中」，运营商行的删除按钮仍是灰的**，
+///    `title` 还写着「要先切走」。他明明已经切走了，却删不掉这一行。
+///
+/// 而后端其实是对的：`ProviderService::switch` 已经更新了 current，
+/// 重开窗口就正常了。坏的只有「不重开就看不到」这一段 —— 属**静默的界面陈旧**，
+/// 不报错、不崩，用户会以为是删除功能坏了。
+///
+/// ## 为什么补在这里，而不是让前端去 refresh
+///
+/// 让 `useSwitchProviderMutation` 的 `onSuccess` 直接调 operator 的刷新，等于在
+/// react-query 与非 react-query 两套状态之间私接一根线，且每多一个消费者就要再接一根。
+/// 发事件是**上游已有的机制**（三个发射点 + `providersApi.onSwitched` 封装都在），
+/// 缺的只是这一个发射点 —— 补它同时让将来任何监听者都能收到。
+///
+/// payload 形状照前端 `ProviderSwitchEvent` 的契约（`appType` + `providerId`）。
+/// 上游那三处各带了些额外字段（`proxyEnabled` / `source`…），前端一个都没用，
+/// 这里不跟着带 —— 多带的字段是没人消费的噪音。
+pub(crate) fn emit_provider_switched(
+    app_handle: &tauri::AppHandle,
+    app_type: &AppType,
+    provider_id: &str,
+) {
+    let payload = serde_json::json!({
+        "appType": app_type.as_str(),
+        "providerId": provider_id,
+    });
+    if let Err(e) = app_handle.emit("provider-switched", payload) {
+        // 发不出去只是界面不刷新（用户重开面板就好），不该让切换本身失败 ——
+        // 配置已经写进去了，报错会让用户以为没切成功而再切一次。
+        log::warn!("发射 provider-switched 事件失败: {e}");
+    }
+}
+
+/// 三条通用 provider 命令撞到 LoongPort 托管档位时必须报错，而不是照做。
+///
+/// 只测「守卫拦不拦」这一层：守卫在任何 DB / 文件动作之前返回，所以给一个内存库的 AppState
+/// 就够了 —— 反过来说，普通 id 那条路径这里**不测**（它要真实 HOME 与 live 配置，
+/// 已由 `tests/provider_commands.rs` 的集成测试覆盖）。
+#[cfg(test)]
+mod managed_guard_tests {
+    use super::*;
+    use crate::database::Database;
+    use std::sync::Arc;
+
+    fn empty_state() -> AppState {
+        AppState::new(Arc::new(Database::memory().expect("in-memory database")))
+    }
+
+    /// 库里**已经有**那条托管档位的 state。
+    ///
+    /// 就地编辑那几条测试必须用它：新守卫的判据是「这个托管 id 对应一条已存在的
+    /// 记录吗」，空库里当然对应不上 —— 用 `empty_state` 测就会把「正常编辑」
+    /// 和「凭空造一个托管 id」混为一谈（那正是这道守卫要区分的两件事）。
+    fn state_with_managed_tier(id: &str) -> AppState {
+        let state = empty_state();
+        let existing = Provider::with_id(
+            id.to_string(),
+            "provision 生成的名字".to_string(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "sk-orig"}}),
+            None,
+        );
+        state
+            .db
+            .save_provider(AppType::Codex.as_str(), &existing)
+            .expect("预置托管档位");
+        state
+    }
+
+    /// 真的调生成器拿 id，而不是手写一个 `loongport-xxx` 字面量：
+    /// 这样前缀真变了的那天，测试跟着生成器走、守卫失配才会被别的断言抓到。
+    fn managed_id() -> String {
+        crate::operator::provision::provider_id_for("https://bestapi.store", Some(1), 42)
+    }
+
+    fn assert_managed_guard_error(err: &AppError) {
+        let text = err.to_string();
+        assert!(
+            text.contains("LoongPort"),
+            "错误必须是托管守卫那条（指路到运营商区），实际: {text}"
+        );
+    }
+
+    #[test]
+    fn switch_provider_rejects_managed_tier() {
+        let err = switch_provider_internal(&empty_state(), AppType::Codex, &managed_id())
+            .expect_err("切托管档位必须被拦");
+        assert_managed_guard_error(&err);
+    }
+
+    /// ⭐ **改托管档位的内容不再被拦**（2026-08-03 放开）。
+    ///
+    /// 旧行为是连内容编辑一起拒，理由是「手工改了下次 provision 就被覆盖」。
+    /// 那个前提后来不成立了：provision 改成「已存在的档位只换 sk、保住用户的编辑」
+    /// （`provision::patch_api_key`）—— 于是那道守卫变成在挡一件已经安全的事。
+    ///
+    /// 运营商区的「编辑配置」按钮走的就是这条命令。它红了说明守卫被改回原样，
+    /// 而那会让那个按钮的保存**静默失败**（用户改完点保存，收到一条「请在供应商页
+    /// 顶部的运营商区操作」—— 而他就在那一区里）。
+    ///
+    /// 断言的是**没被守卫拦下**，不是整体成功：这里的 state 是空库，
+    /// 所以 `ProviderService::update` 自己会因为「provider 不存在 / 缺 auth 配置」
+    /// 报错。判据是那条错误**不是**守卫那条指路文案。
+    #[test]
+    fn update_provider_allows_editing_a_managed_tier_in_place() {
+        let id = managed_id();
+        let provider = Provider::with_id(
+            id.clone(),
+            "用户改的名字".to_string(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "sk-1"}}),
+            None,
+        );
+        // id 不变（`original_id` 传的就是同一个）⇒ 不是改名 ⇒ 守卫不该介入。
+        let state = state_with_managed_tier(&id);
+        let result = update_provider_internal(&state, AppType::Codex, Some(id.as_str()), provider);
+
+        if let Err(e) = result {
+            let text = e.to_string();
+            assert!(
+                !text.contains("LoongPort"),
+                "内容编辑被托管守卫拦下了 —— 「编辑配置」那个按钮会保存失败。实际: {text}"
+            );
+        }
+    }
+
+    /// `original_id` 为 `None`（调用方没说改没改名）时**也不该拦**。
+    ///
+    /// 上游的编辑页在 id 未变时就是这么传的（`App.tsx` 的 `handleEditProvider`
+    /// 只在改过 id 时给 `originalId`）—— 拿 `None` 当「可能改名」来拦，
+    /// 等于把最常见的那条编辑路径又堵回去了。
+    #[test]
+    fn update_provider_allows_a_managed_tier_when_original_id_is_omitted() {
+        let id = managed_id();
+        let provider = Provider::with_id(
+            id.clone(),
+            "改个名".to_string(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "sk-1"}}),
+            None,
+        );
+        let state = state_with_managed_tier(&id);
+        if let Err(e) = update_provider_internal(&state, AppType::Codex, None, provider) {
+            let text = e.to_string();
+            assert!(
+                !text.contains("LoongPort"),
+                "originalId 省略时被误当成改名拦下了。实际: {text}"
+            );
+        }
+    }
+
+    /// ⭐ **review 抓出的绕过**：`originalId` 省略 + 自选一个托管 id ⇒ 凭空造出托管项。
+    ///
+    /// 初版判据是「id 变了没有」（`original_id.is_some_and(|old| old != provider.id)`），
+    /// 而 `original_id` 传 `None` 时 `ProviderService::update` 会拿 `provider.id`
+    /// 自己当原 id（`services/provider/mod.rs:2608`）⇒「不是改名」成立 ⇒ 守卫不介入
+    /// ⇒ `save_provider` 是 upsert ⇒ 一条 `loongport-*` 记录被写进库。
+    ///
+    /// 后果：那条记录从普通 provider 列表里消失（前端按前缀过滤）、转而出现在
+    /// 运营商区里，而那一区的「恢复默认配置」会拿运营商的默认值把用户自己配的
+    /// 东西整份覆盖掉。
+    ///
+    /// 现在的判据是「这个托管 id 得对应一条**已存在**的记录」，所以空库里必拒。
+    #[test]
+    fn update_provider_rejects_inventing_a_managed_id_out_of_thin_air() {
+        let provider = Provider::with_id(
+            managed_id(),
+            "凭空造的".to_string(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "sk-1"}}),
+            None,
+        );
+        // `original_id = None`（初版正是这条路绕过去的），库里也没有这个 id。
+        let err = update_provider_internal(&empty_state(), AppType::Codex, None, provider)
+            .expect_err("凭空造一个托管 id 必须被拦");
+        assert_managed_guard_error(&err);
+    }
+
+    /// `add_provider` 也不许造托管 id。
+    ///
+    /// 这个口子**不是本轮引入的** —— `add` 从来就没有守卫，所以上面那条绕过就算堵了，
+    /// 走 `add_provider` 仍能一步到位造出伪装的托管项。手已经伸到这个文件、现在
+    /// 做得了 ⇒ 一并清（CLAUDE.md defer 准入闸的空间维度）。
+    #[test]
+    fn add_provider_rejects_a_managed_id() {
+        let provider = Provider::with_id(
+            managed_id(),
+            "伪装尝试".to_string(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "sk-1"}}),
+            None,
+        );
+        let err = add_provider_internal(&empty_state(), AppType::Codex, provider, false)
+            .expect_err("新增托管 id 必须被拦");
+        assert_managed_guard_error(&err);
+    }
+
+    /// 反向那个口子：把**普通** provider 改成托管 id ⇒ 伪装成托管项。
+    ///
+    /// 后果不是显示错乱那么轻：它会出现在运营商区里，而那一区的
+    /// 「恢复默认配置」会拿运营商的默认值把用户自己配的东西**整份覆盖**。
+    #[test]
+    fn update_provider_rejects_renaming_a_plain_provider_into_a_managed_id() {
+        let provider = Provider::with_id(
+            managed_id(),
+            "伪装尝试".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        let err =
+            update_provider_internal(&empty_state(), AppType::Codex, Some("custom-1"), provider)
+                .expect_err("把普通 provider 改成托管 id 必须被拦");
+        assert_managed_guard_error(&err);
+    }
+
+    #[test]
+    fn update_provider_rejects_renaming_managed_tier_to_plain_id() {
+        // `originalId` 是托管的、新 id 是普通的 —— 只判新 id 就会让托管项被改名脱管。
+        let provider = Provider::with_id(
+            "custom-escaped".to_string(),
+            "脱管尝试".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        let managed = managed_id();
+        let err = update_provider_internal(
+            &empty_state(),
+            AppType::Codex,
+            Some(managed.as_str()),
+            provider,
+        )
+        .expect_err("把托管档位改名成普通 id 必须被拦");
+        assert_managed_guard_error(&err);
+    }
+
+    #[test]
+    fn delete_provider_rejects_managed_tier() {
+        let err = delete_provider_internal(&empty_state(), AppType::Codex, &managed_id())
+            .expect_err("删托管档位必须被拦");
+        assert_managed_guard_error(&err);
+    }
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {

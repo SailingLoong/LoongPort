@@ -13,8 +13,12 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { GITHUB_REPO } from "@/config/constants";
 
-const RELEASES_URL = "https://github.com/farion1231/cc-switch/releases";
+// ⚠️ **必须是 LoongPort 自己的发布页，不能是上游的** —— 这个界面出现的场景是
+// 「数据库被更新版本升级过、当前 app 太旧读不了」。指向上游会让用户去装 cc-switch，
+// 而那个装了照样读不了我们的库（schema 已经分叉），他会卡在同一个界面上。
+const RELEASES_URL = `${GITHUB_REPO}/releases`;
 
 interface DatabaseUpgradeProps {
   payload: {

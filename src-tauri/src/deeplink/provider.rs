@@ -105,7 +105,34 @@ pub fn import_provider_from_deeplink(
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect::<String>()
         .to_lowercase();
-    provider.id = format!("{sanitized_name}-{timestamp}");
+    // ⚠️ **id 里的名字是用户给的，必须挡住托管前缀**（review 抓出）。
+    //
+    // 判据「这条 provider 是不是 LoongPort 托管的」只看 id 前缀
+    // （`operator::managed::is_managed`）。而这里的 id 是 `<用户给的名字>-<时间戳>` ⇒
+    // 名字取 `loongport` 或 `loongport-*` 时，生成的 id 恰好命中那个前缀，于是这条
+    // **普通** provider 被当成托管的：
+    //
+    // - provider 列表按前缀把它过滤掉（`ProviderList.tsx`）⇒ 看不见；
+    // - `update_provider` / `delete_provider` 被 `reject_if_managed` 拦下 ⇒ 删不掉；
+    // - 而它没有运营商归属（`meta.loongportAccountId` 为空），所以运营商区也不显示它，
+    //   `prune_stale_tiers` 也不会清它（那里还要求 `website_url` 匹配某个站）。
+    //
+    // 合起来 = **一条永久留在库里、完全不可见也不可管理的记录**。
+    //
+    // 修在生成端而不是放宽判据：那个前缀是不可逆契约（`MANAGED_ID_PREFIX` 的文档写了
+    // 「改它等于所有已生成的 provider 当场脱管」），而这里只是给 id 换个安全的开头。
+    //
+    // ⚠️ **判的是拼好的 id，不是名字本身** —— 名字 `loongport`（不带连字符）自己
+    // 并不命中前缀，但拼上 `-<时间戳>` 之后正好变成 `loongport-1700…` ⇒ 命中。
+    // 只查名字会漏掉这一类，而它恰恰是最自然的输入。
+    let candidate = format!("{sanitized_name}-{timestamp}");
+    provider.id = if crate::operator::is_managed(&candidate) {
+        // 加前导下划线而不是截掉那一段：截掉会让 `loongport` 与 `loongport-abc`
+        // 生成同名 id（前者变空串），而下划线保住了用户给的名字仍能被认出来。
+        format!("_{candidate}")
+    } else {
+        candidate
+    };
 
     let provider_id = provider.id.clone();
 

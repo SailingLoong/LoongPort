@@ -7,7 +7,8 @@ release/
 .env.local
 *.tsbuildinfo
 .npmrc
-CLAUDE.md
+# CLAUDE.md 有意入库：它是项目级架构约束（复用上游、技术栈事实、验收闸），
+# 不是个人偏好 —— 换机器 / 新协作者开会话都得有。AGENTS.md / GEMINI.md 仍不入库。
 AGENTS.md
 GEMINI.md
 /.claude

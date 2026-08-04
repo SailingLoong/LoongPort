@@ -1248,3 +1248,51 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod app_type_all_tests {
+    use super::AppType;
+    use std::str::FromStr;
+
+    /// ⚠️ `AppType::all()` 是**手工数组**，不是从 enum 派生的。
+    ///
+    /// 漏改它的后果是**静默失效**：那个 app 下的托管脏记录永远不被
+    /// `commands::operator::prune_stale_tiers` 清理（它靠 `all()` 遍历），
+    /// 而编译器管不到「数组少了一项」。
+    ///
+    /// 判据：`all()` 里每一项都能 round-trip，且**每一个能被 `from_str` 解出来的
+    /// app 字符串都在 `all()` 里** —— 后者才是真正的覆盖性检查。
+    #[test]
+    fn app_type_all_covers_every_variant() {
+        let all: Vec<AppType> = AppType::all().collect();
+
+        // round-trip：as_str 出去、from_str 回来，必须是同一个。
+        for app in &all {
+            let s = app.as_str();
+            let back = AppType::from_str(s).unwrap_or_else(|e| panic!("{s} 解不回来: {e}"));
+            assert_eq!(&back, app, "{s} round-trip 不一致");
+        }
+
+        // 覆盖性：枚举所有已知 app 字符串，每个都必须在 all() 里。
+        // 加新 variant 时**这里也要加**，而那正是这条闸要提醒的事 ——
+        // 两处都漏才会静默，只漏一处会红。
+        let known = [
+            "claude",
+            "claude-desktop",
+            "codex",
+            "gemini",
+            "grokbuild",
+            "opencode",
+            "openclaw",
+            "hermes",
+        ];
+        for s in known {
+            let app = AppType::from_str(s).unwrap_or_else(|e| panic!("{s} 该能解析: {e}"));
+            assert!(
+                all.contains(&app),
+                "{s} 能被解析但不在 AppType::all() 里 —— 那个 app 下的脏档位永远不会被清理"
+            );
+        }
+        assert_eq!(all.len(), known.len(), "all() 的长度与已知 app 列表不一致");
+    }
+}

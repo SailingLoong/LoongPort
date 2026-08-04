@@ -23,10 +23,18 @@ jobs:
           - os: windows-2022
           - os: windows-11-arm
             arch: arm64
-          - os: ubuntu-22.04
-          - os: ubuntu-22.04-arm
-            arch: arm64
           - os: macos-14
+          # ⚠️ Linux 两条暂时摘掉，等维护者验证过 Linux 包再放回来：
+          #   - os: ubuntu-22.04
+          #   - os: ubuntu-22.04-arm
+          #     arch: arm64
+          #
+          # 不能「留着让它失败」—— publish-release 是 `needs: release` 且没有
+          # `if: always()`，任一 matrix 分支失败就会把它 skip 掉 ⇒ 连已经编好的
+          # Windows / macOS 包也发不出去（fail-fast: false 只保证其它分支跑完，
+          # 不改变汇总那步的 skip 行为）。
+          # 放回来时把上面三行取消注释即可，下面那些 `if: runner.os == 'Linux'`
+          # 的步骤一直都在，不用动。
 
     steps:
       - name: Checkout
@@ -131,16 +139,33 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Tauri signing key
+        # 缺密钥就跳过后续逻辑，而不是让 workflow 挂掉。
+        #
+        # 这个密钥是给**自动更新包**签名的，而 LoongPort **有意不注册 updater 插件**
+        # （上游端点会把用户升级成 cc-switch，见 src-tauri/src/lib.rs 里那段说明）。
+        # 所以它对当前产品无用 —— 原来那个 `exit 1` 等于让整个 release workflow 永远起不来，
+        # 一个能出包的通道被一个用不上的 secret 卡死。
+        #
+        # 保留整步而不是删掉：将来真搭了发布渠道（配 endpoints + 换自己的 pubkey + 把插件
+        # 注册加回来，三件缺一不可），配上 secret 它就自动开始签名，不必再改 workflow。
+        #
+        # ⚠️ **判空必须在 `run:` 里做，不能写成步骤级 `if: secrets.X != ''`** ——
+        # `secrets` 上下文在步骤级 `if` 里**不可用**（同类陷阱：`matrix` 在 job 级 `if` 里
+        # 也不可用，见 d237a7aa）。secret 经 `env:` 传进来再判，这也是避免注入的标准写法。
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: bash
         run: |
-          # 调试：检查 Secret 是否存在
-          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
-            echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret 为空或不存在" >&2
-            echo "请检查 GitHub 仓库 Settings > Secrets and variables > Actions" >&2
-            exit 1
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "○ 未配置 TAURI_SIGNING_PRIVATE_KEY —— 跳过更新包签名。"
+            echo "  当前产品不注册 updater 插件，这个 secret 用不上；要用时见本步注释。"
+            exit 0
           fi
-          
-          RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+
+          # 用 env 传进来的值，不直插 ${{ secrets.* }} —— 直插会把内容写进 shell 脚本文本，
+          # 含特殊字符时可能破坏语法（也是 workflow 注入的标准防线）。
+          RAW="$SIGNING_KEY"
           # 目标：提供正确的私钥“文件路径”给 Tauri CLI，避免内容解码歧义
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
           # 情况 1：原始两行文本（第一行以 "untrusted comment:" 开头）
@@ -181,19 +206,36 @@ jobs:
             exit 1
           fi
           echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
-          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> $GITHUB_ENV
+          if [ -n "$SIGNING_KEY_PASSWORD" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$SIGNING_KEY_PASSWORD" >> "$GITHUB_ENV"
           fi
           echo "✅ Tauri signing key prepared"
 
       - name: Import Apple signing certificate
+        # 与上一步同理：没配证书就跳过，而不是让整个 macOS job 挂掉。
+        #
+        # 原来这步在缺 secret 时必挂（`set -euo pipefail` + 空串喂给 base64 + 后面
+        # `find-identity` 找不到身份就 `exit 1`），于是 macOS 那条腿永远出不了包。
+        # 跳过之后出的是**未签名未公证**的包：本机编译能直接开，但经网络传给别人后
+        # Gatekeeper 会拦（报「已损坏」而不是可绕过的「未知开发者」）。
+        # 代价与偿还路径见 ../LoongPort-design/TODO.md 里「Apple 代码签名 + 公证」那条。
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "○ 未配置 APPLE_CERTIFICATE —— 跳过 macOS 代码签名与公证。"
+            echo "  产物可用但未签名：经网络分发时 Gatekeeper 会拦，接收方需右键「打开」"
+            echo "  或 xattr -dr com.apple.quarantine <app>。配齐 6 个 secret 即自动启用签名。"
+            exit 0
+          fi
           # Decode .p12 certificate from base64
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          printf '%s' "${{ secrets.APPLE_CERTIFICATE }}" | (base64 --decode 2>/dev/null || base64 -D) > "$CERT_PATH"
+          printf '%s' "$APPLE_CERTIFICATE" | (base64 --decode 2>/dev/null || base64 -D) > "$CERT_PATH"
 
           # Save original default keychain for cleanup
           ORIGINAL_DEFAULT_KEYCHAIN=$(security default-keychain -d user | tr -d '"' | xargs)
@@ -201,18 +243,18 @@ jobs:
 
           # Create temporary keychain
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
-          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Import certificate
           security import "$CERT_PATH" \
             -k "$KEYCHAIN_PATH" \
-            -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Dynamically resolve signing identity (must be "Developer ID Application")
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
@@ -264,10 +306,23 @@ jobs:
           WINDOWS_RELEASE_ARCH: ${{ matrix.arch || 'x86_64' }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # ⚠️ 两个参数都不能省，x64 与 arm64 同构：
+          #
+          # `--bundles msi`：tauri.conf.json 的 bundle.targets 是 "all"，裸 build 会连 NSIS
+          # 一起打，而 NSIS 要额外下载工具链（见 windows-build.yml 的注释）。给人试用只需 msi。
+          #
+          # `--target`：本仓用 per-user WiX 模板（src-tauri/wix/per-user-main.wxs，上游自带），
+          # 在默认 target 目录布局下过不了 WiX 的 ICE 校验 ——
+          # `error LGHT0204 : ICE38: Component ... installs to user profile. It must use
+          # a registry key under HKCU as its KeyPath, not a file`。
+          # 显式指定 target triple 换掉目录布局才能过（2026-08-03 在维护者 Windows 机上实测）。
+          #
+          # 改这里要连带改 "Prepare Windows Assets" 的 $targetRoot —— 带 --target 的产物落在
+          # target/<triple>/release/ 而不是 target/release/，只改一处等于白改。
           if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
             pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
           } else {
-            pnpm tauri build
+            pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi
           }
 
       - name: Build Tauri App (Linux)
@@ -295,53 +350,71 @@ jobs:
             fi
           done
 
+          # `.tar.gz` 是**自动更新产物**，只在 `tauri.conf.json` 配了
+          # `bundle.createUpdaterArtifacts` 时才产出 —— 本产品有意不注册 updater 插件，
+          # 所以那个键没配、这个文件根本不会存在。原来这里 `exit 1`，等于让 macOS 那条腿
+          # 永远出不了包。降级成「有则带上」：真搭了发布渠道之后它会自动出现并被带进 release。
           if [ -z "$TAR_GZ" ]; then
-            echo "❌ No macOS .tar.gz updater artifact found" >&2
-            exit 1
+            echo "○ 没有 .tar.gz 更新包产物（未启用 updater），跳过它，只发 .app / .dmg"
           fi
           if [ -z "$APP_PATH" ]; then
             echo "❌ No .app found" >&2
             exit 1
           fi
 
-          # Staple notarization ticket to .app (Tauri already notarized it)
-          xcrun stapler staple "$APP_PATH"
-          echo "✅ .app stapled"
+          # Staple notarization ticket to .app（Tauri 已公证过它）。
+          # 未签名时没有公证票可 staple —— 那条路径下这步会失败，所以跟着签名条件走。
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            xcrun stapler staple "$APP_PATH"
+            echo "✅ .app stapled"
+          else
+            echo "○ 未签名，跳过 stapler（没有公证票）"
+          fi
 
-          # 1) Collect .tar.gz (updater artifact)
-          NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
-          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
-          [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
-          echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          # 1) Collect .tar.gz (updater artifact) —— 没启用 updater 时它不存在，跳过
+          if [ -n "$TAR_GZ" ]; then
+            NEW_TAR_GZ="LoongPort-${VERSION}-macOS.tar.gz"
+            cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+            [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
+            echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          fi
 
           # 2) Collect .app as zip
-          NEW_ZIP="CC-Switch-${VERSION}-macOS.zip"
+          NEW_ZIP="LoongPort-${VERSION}-macOS.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
           echo "macOS zip ready: $NEW_ZIP"
 
           # 3) Create styled DMG with create-dmg (Tauri's built-in DMG styling doesn't work on CI)
-          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "❌ APPLE_SIGNING_IDENTITY is missing before DMG creation" >&2
-            exit 1
-          fi
-
+          #
+          # 未签名时**照样出 DMG**，只是不带 --codesign —— 原来这里 exit 1，等于「没证书就
+          # 连包都不给你」。而未签名的 DMG 对自己测试、给能跑一条命令的人试用是够用的
+          # （接收方右键「打开」或 xattr -dr com.apple.quarantine）。
           HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
-          NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
+          NEW_DMG="LoongPort-${VERSION}-macOS.dmg"
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
-          ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
+          ditto "$APP_PATH" "$DMG_STAGE_DIR/LoongPort.app"
+
+          # --codesign 只在有身份时加。用数组拼参数而不是拼字符串 ——
+          # 后者在身份名含空格时会被词法拆开（"Developer ID Application: 某某 (TEAMID)" 必含空格）。
+          CODESIGN_ARGS=()
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            CODESIGN_ARGS=(--codesign "$APPLE_SIGNING_IDENTITY")
+          else
+            echo "○ 未签名，DMG 不做 codesign"
+          fi
 
           create-dmg \
-            --volname "CC Switch" \
+            --volname "LoongPort" \
             --background "src-tauri/icons/dmg-background.png" \
             --window-size 660 400 \
             --window-pos 200 120 \
             --icon-size 80 \
-            --icon "CC Switch.app" 180 220 \
-            --hide-extension "CC Switch.app" \
+            --icon "LoongPort.app" 180 220 \
+            --hide-extension "LoongPort.app" \
             --app-drop-link 480 220 \
-            --codesign "$APPLE_SIGNING_IDENTITY" \
+            "${CODESIGN_ARGS[@]}" \
             --no-internet-enable \
             "release-assets/$NEW_DMG" \
             "$DMG_STAGE_DIR"
@@ -350,7 +423,9 @@ jobs:
           echo "✅ Styled DMG created: $NEW_DMG"
 
       - name: Notarize macOS DMG
-        if: runner.os == 'macOS'
+        # 与签名校验同理：没签名的包送去公证必然被拒（Apple 要求先签名再公证）。
+        # 判据同样用 `APPLE_SIGNING_IDENTITY` —— 它只在证书导入成功时才有值。
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
         shell: bash
         timeout-minutes: 30
         env:
@@ -392,7 +467,11 @@ jobs:
           done
 
       - name: Verify macOS code signing and notarization
-        if: runner.os == 'macOS'
+        # 这步是**签名的配套校验**，没签名就没有签名可验（`codesign --verify` 当场失败）。
+        # 所以跟着上面那步一起条件化：`APPLE_SIGNING_IDENTITY` 只在证书导入成功时被写进
+        # `$GITHUB_ENV`，用它当「这次到底签没签」的判据 —— 比再判一次 secret 更准确
+        # （证书配了但 find-identity 没找到 Developer ID 时也该跳过）。
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -446,71 +525,81 @@ jobs:
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
           $VERSION = $env:GITHUB_REF_NAME  # e.g., v3.5.0
           $isArm64 = $env:WINDOWS_RELEASE_ARCH -eq 'arm64'
-          $targetRoot = if ($isArm64) { 'src-tauri/target/aarch64-pc-windows-msvc/release' } else { 'src-tauri/target/release' }
+          # 两个分支都带 target triple —— 构建步骤对 x64 也传了 `--target`（见那里的注释）,
+          # 产物因此落在 target/<triple>/release/ 而不是 target/release/。
+          $targetRoot = if ($isArm64) { 'src-tauri/target/aarch64-pc-windows-msvc/release' } else { 'src-tauri/target/x86_64-pc-windows-msvc/release' }
           $assetSuffix = if ($isArm64) { '-arm64' } else { '' }
 
-          # 仅打包 MSI 安装器 + .sig（用于 Updater）
+          # MSI 安装器（+ `.sig`，仅在启用 updater 时才有，见下）
           $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/msi') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($null -eq $msi) {
             # 兜底：全局搜索 .msi
             $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           }
-          if ($null -ne $msi) {
-            $dest = "CC-Switch-$VERSION-Windows$assetSuffix.msi"
-            Copy-Item $msi.FullName (Join-Path release-assets $dest)
-            Write-Host "Installer copied: $dest"
-            $sigPath = "$($msi.FullName).sig"
-            if (Test-Path $sigPath) {
-              Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
-              Write-Host "Signature copied: $dest.sig"
-            } elseif ($isArm64) {
-              throw "Signature not found for $($msi.Name)"
-            } else {
-              Write-Warning "Signature not found for $($msi.Name)"
-            }
-          } elseif ($isArm64) {
-            throw 'No Windows ARM64 MSI installer found'
+          # 缺 MSI 对两个架构都是硬失败：原先 x64 只 Write-Warning，于是 release 会**静默**
+          # 少一个 Windows 安装包（fail-fast: false 之下其它平台照常发完，没人注意到）。
+          if ($null -eq $msi) {
+            throw "No Windows MSI installer found under $targetRoot/bundle"
+          }
+          $dest = "LoongPort-$VERSION-Windows$assetSuffix.msi"
+          Copy-Item $msi.FullName (Join-Path release-assets $dest)
+          Write-Host "Installer copied: $dest"
+          # `.sig` 缺失对两个架构都只是提示，不是失败：
+          # updater 插件**有意未启用**（见 src-tauri/src/lib.rs 那段说明 —— 上游端点会把用户
+          # 升级成 cc-switch），`createUpdaterArtifacts` 也没开，所以 `.sig` 现在必然不存在。
+          # 原先 arm64 分支在这里 throw ⇒ 那个 job 必然失败。启用 updater 后它会自动出现。
+          $sigPath = "$($msi.FullName).sig"
+          if (Test-Path $sigPath) {
+            Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
+            Write-Host "Signature copied: $dest.sig"
           } else {
-            Write-Warning 'No Windows MSI installer found'
+            Write-Host "○ 没有 .sig（updater 未启用），跳过"
           }
 
           # 绿色版（portable）：仅可执行文件打 zip（不参与 Updater）
-          $exeCandidates = if ($isArm64) {
-            @('src-tauri/target/aarch64-pc-windows-msvc/release/cc-switch.exe')
+          #
+          # ⚠️ 这个名字由 **tauri.conf.json 的 `mainBinaryName`** 决定，不是 crate name。
+          #
+          # 2026-08-04 之前它叫 `cc-switch.exe`（Cargo 默认跟 `[package] name`），
+          # 这里也曾写着「别改成 LoongPort.exe」—— 那句话在设了 `mainBinaryName` 之后
+          # **已经反过来了**：现在 Tauri 会把产物重命名成 `LoongPort.exe`，
+          # 还写 `cc-switch.exe` 才会让 Test-Path 落空 ⇒ 下面那条 throw 让整个 job 红
+          # （硬失败是有意的，见那里）。
+          #
+          # ⚠️ 改这个名字要三处同步：`mainBinaryName`、这里、以及本机打包脚本
+          # （build-scripts/win-collect.ps1 —— 它按 *.exe 通配所以不受影响，但注释里
+          # 提到了这个名字）。crate name 仍是 `cc-switch`，**别去动它**（118 处引用、
+          # 改了收益为零，见仓 CLAUDE.md「三点五」那节）。
+          #
+          # 路径复用上面的 $targetRoot，别再单独列一份候选路径：那份在 x64 加 `--target` 那次
+          # 就已经过时了（还把空的 target/release/ 排在第一位）。同一事实两处写等着分叉。
+          $exePath = Join-Path $targetRoot 'LoongPort.exe'
+          # 缺 exe 对两个架构都是硬失败，理由同 MSI：release notes 承诺了绿色版，
+          # 静默少一个包比整个 job 红更难发现。
+          if (-not (Test-Path $exePath)) {
+            throw "Portable exe not found: $exePath"
+          }
+          $portableDir = 'release-assets/LoongPort-Portable'
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item $exePath $portableDir
+          $portableIniPath = Join-Path $portableDir 'portable.ini'
+          $portableContent = if ($isArm64) {
+            @(
+              '# LoongPort portable ARM64 build marker',
+              'portable=true',
+              'arch=arm64'
+            )
           } else {
             @(
-              'src-tauri/target/release/cc-switch.exe',
-              'src-tauri/target/x86_64-pc-windows-msvc/release/cc-switch.exe'
+              '# LoongPort portable build marker',
+              'portable=true'
             )
           }
-          $exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if ($null -ne $exePath) {
-            $portableDir = 'release-assets/CC-Switch-Portable'
-            New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-            Copy-Item $exePath $portableDir
-            $portableIniPath = Join-Path $portableDir 'portable.ini'
-            $portableContent = if ($isArm64) {
-              @(
-                '# CC Switch portable ARM64 build marker',
-                'portable=true',
-                'arch=arm64'
-              )
-            } else {
-              @(
-                '# CC Switch portable build marker',
-                'portable=true'
-              )
-            }
-            $portableContent | Set-Content -Path $portableIniPath -Encoding UTF8
-            $portableZip = "release-assets/CC-Switch-$VERSION-Windows$assetSuffix-Portable.zip"
-            Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
-            Remove-Item -Recurse -Force $portableDir
-            Write-Host "Windows portable zip created: CC-Switch-$VERSION-Windows$assetSuffix-Portable.zip"
-          } elseif ($isArm64) {
-            throw 'Portable ARM64 exe not found'
-          } else {
-            Write-Warning 'Portable exe not found'
-          }
+          $portableContent | Set-Content -Path $portableIniPath -Encoding UTF8
+          $portableZip = "release-assets/LoongPort-$VERSION-Windows$assetSuffix-Portable.zip"
+          Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
+          Remove-Item -Recurse -Force $portableDir
+          Write-Host "Windows portable zip created: LoongPort-$VERSION-Windows$assetSuffix-Portable.zip"
 
       - name: Prepare Linux Assets
         if: runner.os == 'Linux'
@@ -520,29 +609,36 @@ jobs:
           mkdir -p release-assets
           VERSION="${GITHUB_REF_NAME}"  # e.g., v3.5.0
           ARCH="${{ matrix.arch || 'x86_64' }}"
-          # Updater artifact: AppImage（含对应 .sig）
+          # AppImage（`.sig` 仅在启用 updater 后才有 —— 现在有意未启用，见 src-tauri/src/lib.rs）
+          #
+          # 缺 AppImage 是硬失败：它是 Linux 的主推包，原先只往 stderr 写一行就继续，
+          # 于是 release 会静默少掉这个平台的包而 job 仍然是绿的。
           APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
-          if [ -n "$APPIMAGE" ]; then
-            NEW_APPIMAGE="CC-Switch-${VERSION}-Linux-${ARCH}.AppImage"
-            cp "$APPIMAGE" "release-assets/$NEW_APPIMAGE"
-            [ -f "$APPIMAGE.sig" ] && cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig" || echo ".sig for AppImage not found"
-            echo "AppImage copied: $NEW_APPIMAGE"
-          else
+          if [ -z "$APPIMAGE" ]; then
             echo "No AppImage found under target/release/bundle" >&2
+            exit 1
           fi
+          NEW_APPIMAGE="LoongPort-${VERSION}-Linux-${ARCH}.AppImage"
+          cp "$APPIMAGE" "release-assets/$NEW_APPIMAGE"
+          if [ -f "$APPIMAGE.sig" ]; then
+            cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig"
+          else
+            echo "○ 没有 .sig（updater 未启用），跳过"
+          fi
+          echo "AppImage copied: $NEW_APPIMAGE"
           # 额外上传 .deb（用于手动安装，不参与 Updater）
           DEB=$(find src-tauri/target/release/bundle -name "*.deb" | head -1 || true)
           if [ -n "$DEB" ]; then
-            cp "$DEB" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.deb"
-            echo "Deb package copied: CC-Switch-${VERSION}-Linux-${ARCH}.deb"
+            cp "$DEB" "release-assets/LoongPort-${VERSION}-Linux-${ARCH}.deb"
+            echo "Deb package copied: LoongPort-${VERSION}-Linux-${ARCH}.deb"
           else
             echo "No .deb found (optional)"
           fi
           # 额外上传 .rpm（用于 Fedora/RHEL/openSUSE 等，不参与 Updater）
           RPM=$(find src-tauri/target/release/bundle -name "*.rpm" | head -1 || true)
           if [ -n "$RPM" ]; then
-            cp "$RPM" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.rpm"
-            echo "RPM package copied: CC-Switch-${VERSION}-Linux-${ARCH}.rpm"
+            cp "$RPM" "release-assets/LoongPort-${VERSION}-Linux-${ARCH}.rpm"
+            echo "RPM package copied: LoongPort-${VERSION}-Linux-${ARCH}.rpm"
           else
             echo "No .rpm found (optional)"
           fi
@@ -608,27 +704,62 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: CC Switch ${{ github.ref_name }}
+          name: LoongPort ${{ github.ref_name }}
           prerelease: true
+          # ⚠️ 下面的「下载」清单必须与 matrix 实际跑的平台一致 —— 列出不存在的文件名
+          # 等于让用户照着下载然后 404。Linux 两条现在是注释状态，所以这里也没有 Linux；
+          # 放回 matrix 时把那句「Linux 包暂未提供」换成 AppImage / .deb / .rpm 三件套说明。
           body: |
-            ## CC Switch ${{ github.ref_name }}
+            ## LoongPort ${{ github.ref_name }}
 
-            🌐 **Only Official Website / 唯一官方网站 / 唯一の公式サイト**: [ccswitch.io](https://ccswitch.io)
+            🌐 **唯一官方网站 / Only Official Website**: [loongport.dev](https://loongport.dev)
 
-            Claude Code 供应商切换工具
+            把一个运营商账号变成 codex 可用的多档位供应商
 
             ### 下载
 
-            - **macOS**: `CC-Switch-${{ github.ref_name }}-macOS.dmg`（推荐）或 `CC-Switch-${{ github.ref_name }}-macOS.zip`（解压即用）
-            - **Windows (x86_64)**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
-            - **Windows (ARM64)**: `CC-Switch-${{ github.ref_name }}-Windows-arm64.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
-            - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
-            - **Linux (ARM64)**: `CC-Switch-${{ github.ref_name }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
+            - **macOS**: `LoongPort-${{ github.ref_name }}-macOS.dmg`（推荐）或 `LoongPort-${{ github.ref_name }}-macOS.zip`（解压即用）
+            - **Windows (x86_64)**: `LoongPort-${{ github.ref_name }}-Windows.msi`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
+            - **Windows (ARM64)**: `LoongPort-${{ github.ref_name }}-Windows-arm64.msi`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
 
-            > `.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。
+            > Linux 包暂未提供。
+
+            > 暂无应用内自动更新，新版本请回本页下载。
 
             ---
-            macOS 版本已通过 Apple 代码签名和公证，可直接安装使用。
+            ⚠️ **macOS 版本未经 Apple 签名与公证**（那需要 Apple Developer Program）。
+            下载后 Gatekeeper 会拦，报「已损坏，应移到废纸篓」——**不是真的损坏**。
+            打开「终端」执行一次即可：
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/LoongPort.app
+            ```
+
+            > 这句上游写的是「已通过签名和公证」—— 那对 cc-switch 成立，对本 fork
+            > 不成立（见 LoongPort-design/TODO.md）。配齐 Apple secrets 后 release.yml
+            > 会自动签名，那时把这段换回去。
+
+            ---
+            ⚠️ **Windows：装新版本时若报「无法设置文件安全性 / could not set file security」**
+
+            少数装了安全软件（如腾讯电脑管家）的机器上，**覆盖安装**旧版本会失败：
+
+            ```
+            could not set file security for file 'D:\Config.Msi\xxxxxxx.rbf'  Error: 5
+            ```
+
+            那是安全软件拦住了安装程序**备份旧文件**的动作，**不是安装包坏了**。
+            两个办法，任选一个：
+
+            1. **先卸载旧版本再装**（设置 → 应用 → 卸载 LoongPort，然后双击新安装包）。
+               全新安装不需要备份旧文件，就不会被拦。**账号和配置不会丢** ——
+               它们存在用户目录下，卸载不动它们，装回来仍是登录状态。
+               <!-- 2026-08-04 在维护者的 Windows 机上实测过这条路：卸载 + 全新装
+                    退出码 0，且 Config.Msi 里一个 .rbf 都没写（全新装无旧文件可备份
+                    ⇒ 压根不触发那一步）；~/.loongport 前后都是 8 个文件。 -->
+            2. **用绿色版**（上面的 `-Portable.zip`），解压即用，不经过 Windows 安装程序。
+
+            > 首次安装的用户不会遇到这个 —— 它只在覆盖旧版本时出现。
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -730,8 +861,16 @@ jobs:
             echo '}'
           } > "$tmp_json"
           echo "Generated latest.json:" && cat "$tmp_json"
+          # updater 未启用时一个 .sig 都不会有 ⇒ platforms 是空对象。那种 latest.json 传上去
+          # 只会让人以为应用内更新已经能用（实际 lib.rs 里连插件都没注册），所以不传。
+          # 启用 updater 后 .sig 自然出现，这里就会照常上传。
+          if [ $first -eq 1 ]; then
+            echo "○ 没有任何 .sig（updater 未启用）—— 不上传空的 latest.json"
+            echo "SKIP_UPLOAD=1" >> "$GITHUB_ENV"
+          fi
           mv "$tmp_json" latest.json
       - name: Upload latest.json to release
+        if: env.SKIP_UPLOAD != '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

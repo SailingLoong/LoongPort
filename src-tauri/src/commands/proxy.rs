@@ -281,6 +281,16 @@ pub async fn switch_proxy_provider(
     app_type: String,
     provider_id: String,
 ) -> Result<(), String> {
+    // 托管档位不许从这条路切。**这是与 `switch_provider` 并列的第二条切换实现** ——
+    // 它自己走 hot_switch_provider + set_current_provider 落盘，不经 ProviderService::switch，
+    // 所以那边的守卫在这里一点作用都没有。少了这道，代理接管态下点「启用」就会跳过
+    // 「退出 ChatGPT → 切换 → 重开」的编排：界面显示切了，ChatGPT 还连着旧分组的 sk。
+    //
+    // 守卫加在**命令层**而不是 `hot_switch_provider_inner`：接管态下
+    // `operator_switch_tier` → `ProviderService::switch` → `_inner`（services/provider/mod.rs:3044）
+    // 是**正当路径**，加在 `_inner` 会把唯一的合法入口也拦死。
+    crate::operator::reject_if_managed(&provider_id).map_err(|e| e.to_string())?;
+
     // Codex's built-in official provider can use the client's native OpenAI
     // login through takeover. Other official providers remain blocked.
     let provider = state

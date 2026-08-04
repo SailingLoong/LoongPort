@@ -87,8 +87,23 @@ export const providersApi = {
     return await invoke("remove_provider_from_live_config", { id, app: appId });
   },
 
-  async switch(id: string, appId: AppId): Promise<SwitchResult> {
-    return await invoke("switch_provider", { id, app: appId });
+  /**
+   * 切换供应商。
+   *
+   * `quitChatgpt` = 用户在确认框里选了「退出并切换」。**只对 codex 有意义**
+   * （ChatGPT 桌面版只读 `~/.codex`），后端会再判一次 app_type，前端照实传即可。
+   * 不传 = 不碰 ChatGPT，那是托盘快切 / deeplink 那些没机会弹确认框的路径的默认行为。
+   */
+  async switch(
+    id: string,
+    appId: AppId,
+    quitChatgpt?: boolean,
+  ): Promise<SwitchResult> {
+    return await invoke("switch_provider", {
+      id,
+      app: appId,
+      quitChatgpt: quitChatgpt ?? null,
+    });
   },
 
   async importDefault(appId: AppId): Promise<boolean> {

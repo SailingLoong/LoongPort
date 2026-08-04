@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { CodexIcon } from "@/components/BrandIcons";
 import { CopilotAuthSection } from "@/components/providers/forms/CopilotAuthSection";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
+import { RestoreOfficialLoginButton } from "@/components/operator/RestoreOfficialLoginButton";
 import { XaiOAuthSection } from "@/components/providers/forms/XaiOAuthSection";
 import { ProviderIcon } from "@/components/ProviderIcon";
 
@@ -70,6 +71,12 @@ export function AuthCenterPanel() {
         </div>
 
         <CodexOAuthSection />
+
+        {/* 「切回 ChatGPT 官方登录」——**LoongPort 自己的东西**，收在
+            `components/operator/` 下（这里只挂一行，见 CLAUDE.md §一）。
+            放这一节是因为语义对口：它做的就是「把 codex 从运营商切回 ChatGPT 官方」，
+            而用户在 ChatGPT 里点「注销」是没用的（配的是 provider auth 模式）。 */}
+        <RestoreOfficialLoginButton />
       </section>
 
       <section className="rounded-xl border border-border/60 bg-card/60 p-6">

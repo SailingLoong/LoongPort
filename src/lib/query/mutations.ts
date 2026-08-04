@@ -281,8 +281,19 @@ export const useSwitchProviderMutation = (appId: AppId) => {
   const { t } = useTranslation();
 
   return useMutation({
-    mutationFn: async (providerId: string): Promise<SwitchResult> => {
-      return await providersApi.switch(providerId, appId);
+    mutationFn: async (input: {
+      providerId: string;
+      /**
+       * 用户在确认框里选了「退出并切换」。只对 codex 有意义（ChatGPT 桌面版只读
+       * `~/.codex`），后端会再判一次 app_type。省略 = 不碰 ChatGPT。
+       */
+      quitChatgpt?: boolean;
+    }): Promise<SwitchResult> => {
+      return await providersApi.switch(
+        input.providerId,
+        appId,
+        input.quitChatgpt,
+      );
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });

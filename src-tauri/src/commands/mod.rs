@@ -17,6 +17,7 @@ mod misc;
 mod model_fetch;
 mod omo;
 mod openclaw;
+mod operator;
 mod plugin;
 mod profile;
 mod prompt;
@@ -28,6 +29,11 @@ pub mod skill;
 mod stream_check;
 mod subscription;
 mod sync_support;
+// ⚠️ **不能写成 `pub mod vendor;`**：`crate::vendor`（契约层）已经占了这个模块名，
+// 而 lib.rs 有一句 `pub use commands::*` ⇒ 两个 `vendor` 撞在同一个命名空间里，
+// rustc 报 `hidden_glob_reexports`，而 `-D warnings` 把它当错误。
+// 与本目录其它模块同一形状：模块私有、符号 glob 导出。
+mod vendor;
 mod xai_oauth;
 
 mod lightweight;
@@ -53,6 +59,7 @@ pub use misc::*;
 pub use model_fetch::*;
 pub use omo::*;
 pub use openclaw::*;
+pub use operator::*;
 pub use plugin::*;
 pub use profile::*;
 pub use prompt::*;
@@ -63,6 +70,7 @@ pub use settings::*;
 pub use skill::*;
 pub use stream_check::*;
 pub use subscription::*;
+pub use vendor::*;
 pub use xai_oauth::*;
 
 pub use lightweight::*;

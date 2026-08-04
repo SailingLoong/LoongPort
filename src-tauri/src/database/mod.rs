@@ -25,6 +25,8 @@
 
 pub(crate) mod backup;
 mod dao;
+/// LoongPort 自己的迁移，与上游 cc-switch 的完全分离（各记各的版本号）。
+pub(crate) mod loongport_schema;
 mod migration;
 mod schema;
 
@@ -53,6 +55,13 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
+/// **上游 cc-switch 的** schema 版本，写在 `PRAGMA user_version` 里。
+///
+/// ⚠️ **这个数归上游，LoongPort 自己的迁移不许往上加** —— 那是抢占上游号段，
+/// 撞上之后是静默缺表而不是报错。我们那套走
+/// [`loongport_schema`](self::loongport_schema)，各记各的版本。
+///
+/// 合并上游时这个值跟着上游走（它现在停在 16）。
 pub(crate) const SCHEMA_VERSION: i32 = 16;
 
 /// 安全地序列化 JSON，避免 unwrap panic
@@ -98,7 +107,7 @@ impl Database {
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let db_path = get_app_config_dir().join(crate::config::DB_FILE_NAME);
         let db_exists = db_path.exists();
 
         // 确保父目录存在
@@ -140,6 +149,12 @@ impl Database {
         }
 
         db.apply_schema_migrations()?;
+        // LoongPort 自己那套 —— **在上游之后跑**：我们的表可能引用上游的表，
+        // 反之不会（上游不知道我们存在）。它用自己的版本号，不碰 `user_version`。
+        {
+            let conn = lock_conn!(db.conn);
+            loongport_schema::apply(&conn)?;
+        }
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }
@@ -197,6 +212,15 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.create_tables()?;
+        // 与 `init` / 导入路径一致地把 LoongPort 的版本号 stamp 上。
+        //
+        // 少了这一行，**全部单测都跑在「表在、版本停在 0」的库上** —— 那是生产里
+        // 不存在的形态，等于测试保真度有个缺口：将来加 v1→v2 的迁移时，单测覆盖不到
+        // 「已经是最新形态的表又被迁一次」这条真实路径。
+        {
+            let conn = lock_conn!(db.conn);
+            loongport_schema::apply(&conn)?;
+        }
         db.ensure_model_pricing_seeded()?;
 
         Ok(db)

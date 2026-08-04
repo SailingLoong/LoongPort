@@ -387,6 +387,40 @@ impl ProfileService {
                                 "[{app_str}] switch provider '{target_pid}' failed: {e}"
                             )),
                         }
+                        // ⚠️ **切 codex 时 ChatGPT 桌面版必须重启，否则新配置对它不生效**。
+                        //
+                        // 那个 app 与命令行 codex 共用 `~/.codex`，而它**只在启动时读
+                        // `config.toml`**（Windows 侧实测过，见 `chatgpt_app` 模块文档那张表）
+                        // ⇒ 不重启它就一直连旧的供应商，而**没有任何东西会提示用户**。
+                        //
+                        // ## 为什么这里只提示，不像 `operator_switch_tier` 那样替他退掉
+                        //
+                        // 那条路上用户刚点过一个确认框（同意退出 ChatGPT）。而应用项目快照
+                        // 是**一次动作切一批 app**，用户点的是「切到这个项目」——
+                        // 把它读成「同意关掉我正开着的 ChatGPT」是过度解释。
+                        // `switch_provider` 的文档已经把这条定死了：`None` = 不碰 ChatGPT，
+                        // 「未经用户同意就关掉他正开着的 app 是不能接受的」。
+                        //
+                        // 所以这里取两者之间那条：**配置照切（它本来就切得成），但把
+                        // 「你得重启 ChatGPT」如实说出来**。warnings 会经
+                        // `profiles.applyWarnings` 那条 toast 到达用户（`lib/query/profiles.ts`），
+                        // 所以这不是往日志里写一句没人看的话。
+                        //
+                        // 判据走 `needs_user_attention()` —— 那是为「这台机器上要不要管
+                        // ChatGPT」专设的跨平台封装（`is_running` 只在 macOS 存在，直接调它
+                        // 会让 Windows 构建挂掉，而本机 `cargo build` 查不出来）。
+                        //
+                        // 它在查不到装没装的平台上恒为 true，是有意的：装了却不提示，
+                        // 用户会拿着旧供应商跑而完全不知道；而对没装的用户多说一句的代价，
+                        // 只是 toast 里多一行。
+                        if matches!(app, AppType::Codex)
+                            && crate::operator::chatgpt_app::needs_user_attention()
+                        {
+                            warnings.push(format!(
+                                "[{app_str}] ChatGPT 桌面版正在运行 —— 它只在启动时读配置，\
+                                 请重启它让新供应商生效。"
+                            ));
+                        }
                     }
                 }
             }
@@ -628,6 +662,51 @@ mod tests {
             }
         }
         assert_eq!(ProfileScope::for_app(&AppType::Gemini), None);
+    }
+
+    /// ⭐ **切 codex 的供应商时必须提示用户重启 ChatGPT 桌面版**。
+    ///
+    /// 那个 app 与命令行 codex 共用 `~/.codex`，而它**只在启动时读 `config.toml`**
+    /// ⇒ 不重启就一直连旧供应商，而没有任何东西会提示用户（症状：快照切了、
+    /// 界面显示新供应商、ChatGPT 里用的还是旧的）。
+    ///
+    /// ## 为什么读源码而不是调 `apply`
+    ///
+    /// `apply` 要一个装好的 `AppState` 且会真的写 live 文件、动 MCP/Skills ——
+    /// 在单测里跑它等于跑半个应用。而这里要守的只有一件事：**那句提示还接着吗**。
+    /// 与 `commands::operator` 那条
+    /// `refresh_live_for_current_tiers_is_wired_into_both_commands` 同一形态与理由。
+    ///
+    /// ⚠️ 判据必须是 `needs_user_attention()` 而不是 `is_running()` ——
+    /// 后者**只在 macOS 存在**（`#[cfg(target_os = "macos")]`），直接调它会让 Windows
+    /// 构建挂掉，而本机 `cargo build` 查不出来。这条断言把那个坑也钉住了。
+    #[test]
+    fn applying_a_snapshot_warns_that_chatgpt_needs_a_restart() {
+        let src = include_str!("profile.rs");
+        let apply_body = {
+            let start = src.find("pub fn apply(").expect("apply 还在吗");
+            let end = src[start..]
+                .find("\n    /// 删除项目")
+                .or_else(|| src[start..].find("\n}"))
+                .expect("apply 之后总有别的东西");
+            &src[start..start + end]
+        };
+
+        assert!(
+            apply_body.contains("chatgpt_app::needs_user_attention()"),
+            "⭐ 应用快照切 codex 供应商后不再提示重启 ChatGPT —— \
+             用户会拿着旧供应商跑而完全不知道（那个 app 只在启动时读配置）"
+        );
+        assert!(
+            !apply_body.contains("chatgpt_app::is_running()"),
+            "别用 `is_running()` —— 它只在 macOS 存在，Windows 构建会挂，\
+             而本机 cargo build 查不出来。用跨平台的 `needs_user_attention()`"
+        );
+        assert!(
+            apply_body.contains("matches!(app, AppType::Codex)"),
+            "只有 codex 该提示 —— ChatGPT 桌面版只读 `~/.codex`，\
+             切 claude 时提示它是扰民"
+        );
     }
 
     #[test]

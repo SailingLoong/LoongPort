@@ -1,6 +1,7 @@
 import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { LAST_APP_STORAGE_KEY } from "@/config/constants";
 import { cn } from "@/lib/utils";
 import { Monitor, Terminal } from "lucide-react";
 
@@ -27,7 +28,6 @@ const ALL_APPS: AppId[] = [
   "openclaw",
   "hermes",
 ];
-const STORAGE_KEY = "cc-switch-last-app";
 
 export function AppSwitcher({
   activeApp,
@@ -36,7 +36,9 @@ export function AppSwitcher({
 }: AppSwitcherProps) {
   const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
-    localStorage.setItem(STORAGE_KEY, app);
+    // key 从 `@/config/constants` 来，别在这里重新写一份字面量 ——
+    // 上游就是各写一份，改名时漏了这处，读写指向不同 key 整段静默失效。
+    localStorage.setItem(LAST_APP_STORAGE_KEY, app);
     onSwitch(app);
   };
   const iconSize = 20;

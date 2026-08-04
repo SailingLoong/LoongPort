@@ -875,7 +875,9 @@
       "defaultCostMultiplierRequired": "デフォルト倍率は必須です",
       "defaultCostMultiplierInvalid": "デフォルト倍率の形式が正しくありません"
     },
-    "saveFailedGeneric": "保存に失敗しました。もう一度お試しください"
+    "saveFailedGeneric": "保存に失敗しました。もう一度お試しください",
+    "anonymousStats": "利用統計",
+    "anonymousStatsDescription": "追加した中継サイトのドメインとアカウント数を送信し、対応の優先順位付けに役立てます。重複集計用のランダムな識別子を含みます。アカウント・残高・キーは含みません。"
   },
   "apps": {
     "claude": "Claude",
@@ -1058,8 +1060,7 @@
       "qiniu": "Qiniu Cloud（七牛云）はマルチプロトコル対応の AI 中継プラットフォームです。1つのキーでネイティブの Claude・GPT・Gemini モデルを利用でき、Anthropic／OpenAI／Gemini の各 API に対応します。",
       "fenno": "Fenno.ai は安定・高効率な API 中継サービスで、幅広い主要モデルを利用できます。CC Switch 利用者限定特典：このリンクから 9.9 元（150 ドル相当）の Coding Plan を購入できます！",
       "zetaapi": "ZetaAPI はモデルを水増し・劣化させず、公式価格の 35% から利用できます。CC Switch 利用者限定特典：このリンクから登録し、初回チャージ時にプロモコード CC-SWITCH を使うと初回チャージ 10% オフ！",
-      "teamorouter": "TeamoRouter はエンタープライズグレードの Agentic LLM ゲートウェイで、料金は最大 90% オフ。CC Switch ユーザーに特別特典を提供しています：このリンクから新規登録すると初回チャージが 10% オフ！",
-      "unity2": "Unity2.ai は CC Switch ユーザーに専属特典を提供しています：このリンクから登録すると $2 分のクレジット、公式グループ参加でさらに $10、最大 $12 の無料クレジットがもらえます！"
+      "teamorouter": "TeamoRouter はエンタープライズグレードの Agentic LLM ゲートウェイで、料金は最大 90% オフ。CC Switch ユーザーに特別特典を提供しています：このリンクから新規登録すると初回チャージが 10% オフ！"
     },
     "presets": {
       "ucloud": "Compshare",
@@ -3029,5 +3030,126 @@
     "expiredHint": "{{tool}}コマンドを実行してログインを更新してください",
     "queryFailed": "クエリに失敗しました",
     "refresh": "更新"
+  },
+  "loongport": {
+    "tierList": {
+      "title": "プロバイダーとプラン",
+      "empty": "中継サイトがまだ追加されていません",
+      "addSite": "中継サイトを追加",
+      "refresh": "プランとキーを更新"
+    },
+    "row": {
+      "expand": "展開",
+      "collapse": "折りたたむ",
+      "notLoggedIn": "未ログイン",
+      "login": "ログイン",
+      "sessionExpired": "ログインの有効期限が切れました",
+      "reLogin": "再ログイン",
+      "noTiers": "このアカウントにはこのプラットフォーム用のグループがありません",
+      "getKeys": "キーを取得",
+      "tierCount": "{{count}} 件のプラン",
+      "dragHandle": "ドラッグして並び替え",
+      "refetchGroups": "利用可能なグループを再取得",
+      "purchaseHint": "クリックしてチャージ（このサイトの購入ページをアプリ内で開きます）",
+      "lowBalanceHint": "残高が ${{threshold}} 未満です。クリックしてチャージ",
+      "remove": "このアカウントを削除（プランも一緒に）",
+      "removeBlockedByCurrent": "使用中のプランがあります。先に別のプランに切り替えてください",
+      "removeConfirmTitle": "このアカウントを削除しますか？",
+      "removeConfirmMessage": "「{{label}}」のログイン情報と、生成済みの {{count}} 件のプランを削除します。チャージ済みの残高は事業者側に残るため、再ログインすれば引き続き使えます。"
+    },
+    "tier": {
+      "rateUnknown": "倍率不明",
+      "rate": "{{value}} 倍",
+      "switching": "切り替え中…",
+      "checkConnectivity": "接続を確認",
+      "resetConfig": "デフォルト設定に戻す",
+      "resetConfirmTitle": "デフォルト設定に戻しますか？",
+      "resetConfirmMessage": "「{{name}}」への編集はすべて LoongPort のデフォルト設定で上書きされます。API キーは保持されます。",
+      "resetConfirmButton": "デフォルトに戻す",
+      "resetDone": "「{{name}}」をデフォルト設定に戻しました",
+      "edit": "設定を編集",
+      "editConfirmTitle": "「{{name}}」の設定を手動で編集しますか？",
+      "editConfirmMessage": "保存すると、この枠はご自身での管理になります。以降「キーを取得」はキーのみを更新し、その他の変更は上書きしません。\n\n編集後に接続できなくなった場合は、枠の行にある「デフォルト設定に戻す」で既定値に戻せます（キーは保持されます）。",
+      "editConfirmButton": "編集を続ける",
+      "userEdited": "手動管理中",
+      "userEditedHint": "この枠の設定を編集済みです。グループを更新しても上書きされません（キーのみ更新）。クリックでデフォルト設定に戻せます。",
+      "editMissing": "この枠のレコードが見つかりません。「キーを取得」で再生成してください。",
+      "editCurrentNote": "これは現在使用中の枠です。変更が反映されない場合は ChatGPT デスクトップ版を終了して開き直してください —— 起動中は Codex の設定を書き戻します。"
+    },
+    "stats": {
+      "title": "LoongPort の改善に協力",
+      "intro": "どの中継サイトが実際に使われているかを知り、対応の優先順位を決めたいと考えています。",
+      "sendsLabel": "送信される情報",
+      "sendsBody": "追加した中継サイトのドメイン、アカウント数、アプリのバージョン、OS の種類。",
+      "neverLabel": "送信されない情報",
+      "neverBody": "アカウント、メールアドレス、残高、キー、利用記録。",
+      "canChange": "「設定 → 一般」からいつでも無効にできます。",
+      "accept": "同意する",
+      "decline": "参加しない",
+      "idNote": "重複集計のためランダムなインストール識別子を含みます（中継サイトのアカウントとは無関係です）。"
+    },
+    "site": {
+      "removed": "{{label}} を削除しました"
+    },
+    "session": {
+      "expired": "{{count}} 件のアカウントのログインが無効になりました。再度ログインしてください",
+      "connected": "接続しました。キーを取得中…（ログインウィンドウは閉じても大丈夫です）"
+    },
+    "provision": {
+      "ready": "{{count}} 件のプランを準備しました",
+      "readyWithKeys": "{{count}} 件のプランを準備し、{{keys}} 個のキーを作成しました",
+      "groupFailed": "{{group}}：{{reason}}",
+      "refreshed": "{{operators}} 件のプロバイダーを更新し、合計 {{tiers}} 件のプランを取得しました",
+      "refreshFailedWithReason": "{{name}} の更新に失敗しました：{{reason}}",
+      "refreshedWithKeys": "{{operators}} 件の事業者を更新しました（枠 {{tiers}} 件、新規キー {{keys}} 本）"
+    },
+    "switch": {
+      "done": "{{name}} に切り替えました",
+      "doneRelaunched": "{{name}} に切り替え、ChatGPT を再起動しました",
+      "doneNeedsRestart": "{{name}} に切り替えました。ChatGPT を手動で再起動してください"
+    },
+    "official": {
+      "button": "公式ログインに戻す",
+      "hint": "LoongPort が書き込んだルーティングを消し、自分の ChatGPT アカウントを使います",
+      "confirmTitle": "公式ログインに戻しますか？",
+      "confirmMessage": "ChatGPT を終了し、LoongPort が書き込んだルーティング設定を消して、現在の codex ログイン情報を削除します（削除前に自動バックアップします）。その後は自分で ChatGPT にログインしてください。",
+      "confirmButton": "公式に戻す",
+      "done": "公式ログインに戻しました。ChatGPT にログインしてください",
+      "doneWithBackup": "公式ログインに戻しました。以前のログイン情報は {{path}} にバックアップしました"
+    },
+    "quitConfirm": {
+      "title": "{{name}} に切り替え",
+      "body": "ChatGPT は起動時にしか設定を読まないため、いったん終了してから切り替え、その後で開き直します。",
+      "declineNote": "進行中の会話がある場合は確認ダイアログが出ます。そこでキャンセルすると切り替えは中止され、設定は変更されません。",
+      "forceKillWarning": "⚠️ Windows では ChatGPT を強制終了するしかありません（通常の終了要求に応じないため）。保存の確認は出ないので、進行中の会話は先に保存してください。終了後は開き直します。",
+      "platformNote": "代わりに終了できなかった場合も設定は切り替わるので、ChatGPT はご自身で再起動してください。",
+      "switchOnly": "切り替えのみ（自分で再起動）",
+      "quitAndSwitch": "終了して切り替え"
+    },
+    "addSite": {
+      "firstRunTitle": "中継サイトを選択",
+      "firstRunBody": "使用する中継サイトのドメインを入力してください。空欄の場合は既定値 {{site}} を使います。",
+      "title": "中継サイトを追加",
+      "body": "別の中継サイトのドメインを入力してください。同じサイトに複数のアカウントを紐付けられます（別のアカウントでログインするだけです。重複は自動的に統合されます）。",
+      "connected": "{{name}} に接続しました",
+      "inputLabel": "サイトのドメイン",
+      "inputLabelWithSponsors": "または手動でドメインを入力",
+      "sponsorsLabel": "おすすめのサイト",
+      "sponsorAddAnother": "アカウント {{count}} 件 · さらに追加"
+    },
+    "vendor": {
+      "add": "公式アカウントを追加（DeepSeek）",
+      "remove": "この公式アカウントを削除（設定も一緒に）",
+      "removeConfirmTitle": "この公式アカウントを削除しますか？",
+      "removeConfirmMessage": "「{{label}}」のログイン情報とローカルのキー、および 6 つのプラットフォーム向けに生成した設定を削除します。公式サイト側の API キーは残るので、再度ログインすれば使えます。",
+      "removed": "{{label}} を削除しました",
+      "noKey": "キーが未準備です",
+      "keyReady": "{{count}} 個のプラットフォームの設定を準備しました",
+      "keyCreated": "公式サイトで新しいキーを作成し、{{count}} 個のプラットフォームの設定を準備しました",
+      "refreshKey": "キーを再準備する",
+      "sessionExpiredUsable": "ログインは期限切れですが、キーはまだ使えます（残高だけ取得できません）。ここをクリックして再ログインできます。",
+      "loginFailed": "ログインが完了しませんでした：{{reason}}",
+      "openKeyPage": "公式サイトで整理する"
+    }
   }
 }

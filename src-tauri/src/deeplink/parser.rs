@@ -19,9 +19,10 @@ pub fn parse_deeplink_url(url_str: &str) -> Result<DeepLinkImportRequest, AppErr
 
     // Validate scheme
     let scheme = url.scheme();
-    if scheme != "ccswitch" {
+    if scheme != crate::deeplink::APP_SCHEME {
         return Err(AppError::InvalidInput(format!(
-            "Invalid scheme: expected 'ccswitch', got '{scheme}'"
+            "Invalid scheme: expected '{}', got '{scheme}'",
+            crate::deeplink::APP_SCHEME
         )));
     }
 

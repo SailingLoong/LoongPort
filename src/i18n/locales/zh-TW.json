@@ -876,7 +876,9 @@
       "defaultCostMultiplierRequired": "預設倍率不能為空",
       "defaultCostMultiplierInvalid": "預設倍率格式不正確"
     },
-    "saveFailedGeneric": "儲存失敗，請重試"
+    "saveFailedGeneric": "儲存失敗，請重試",
+    "anonymousStats": "使用統計",
+    "anonymousStatsDescription": "上報你新增的中轉站網域與帳號數量，協助決定優先適配對象。含一個隨機安裝識別碼用於去重；不含帳號、餘額或密鑰。"
   },
   "apps": {
     "claude": "Claude",
@@ -1059,8 +1061,7 @@
       "qiniu": "七牛雲是多協定 AI 中轉平台，一個 Key 即可呼叫原生 Claude、GPT、Gemini 模型，相容 Anthropic、OpenAI、Gemini 多種介面。",
       "fenno": "Fenno.ai 是穩定高效的 API 中轉服務商，可接入多種主流模型。CC Switch 使用者專屬福利：透過此連結訂閱 9.9 元 /150 刀額度的超值 Coding Plan！",
       "zetaapi": "ZetaAPI 主打模型不摻水、不降智，價格低至官方價 35 折。CC Switch 使用者專屬福利：透過此連結註冊，首次充值使用優惠碼 CC-SWITCH 即可享受九折優惠！",
-      "teamorouter": "TeamoRouter 是企業級 Agentic LLM 閘道，價格最高可達 90% 折扣。為 CC Switch 的使用者提供了特別福利：新使用者透過此連結註冊，首次充值享 10% 折扣！",
-      "unity2": "Unity2.ai 為 CC Switch 使用者提供專屬福利：透過此連結註冊可領取 $2 餘額，加入官方群再送 $10，最高可領 $12 免費額度！"
+      "teamorouter": "TeamoRouter 是企業級 Agentic LLM 閘道，價格最高可達 90% 折扣。為 CC Switch 的使用者提供了特別福利：新使用者透過此連結註冊，首次充值享 10% 折扣！"
     },
     "presets": {
       "ucloud": "優雲智算",
@@ -3030,5 +3031,126 @@
     "expiredHint": "請執行 {{tool}} 命令重新整理登入",
     "queryFailed": "查詢失敗",
     "refresh": "重新整理"
+  },
+  "loongport": {
+    "tierList": {
+      "title": "營運商與方案",
+      "empty": "還沒有新增任何中轉站",
+      "addSite": "新增中轉站",
+      "refresh": "重新整理檔位與金鑰"
+    },
+    "row": {
+      "expand": "展開",
+      "collapse": "收合",
+      "notLoggedIn": "還沒登入",
+      "login": "前往登入",
+      "sessionExpired": "登入已過期",
+      "reLogin": "重新登入",
+      "noTiers": "該帳號在此平台下沒有可用群組",
+      "getKeys": "取得密鑰",
+      "tierCount": "{{count}} 個方案",
+      "dragHandle": "拖動排序",
+      "refetchGroups": "重新拉取可用群組",
+      "purchaseHint": "點擊充值（在應用內開啟該站點的充值頁）",
+      "lowBalanceHint": "餘額不足 ${{threshold}}，點擊充值",
+      "remove": "刪除這個帳號（連帶它的方案）",
+      "removeBlockedByCurrent": "它有方案正在使用，先切到其他方案再刪",
+      "removeConfirmTitle": "刪除這個帳號？",
+      "removeConfirmMessage": "會刪掉「{{label}}」的登入狀態，連帶它已產生的 {{count}} 個方案。已充值的餘額留在營運商那邊，重新登入就能再用。"
+    },
+    "tier": {
+      "rateUnknown": "倍率未知",
+      "rate": "{{value}} 倍",
+      "switching": "切換中…",
+      "checkConnectivity": "檢測連通",
+      "resetConfig": "恢復預設設定",
+      "resetConfirmTitle": "恢復預設設定？",
+      "resetConfirmMessage": "會用 LoongPort 的預設設定覆蓋「{{name}}」的全部編輯，金鑰保留不變。",
+      "resetConfirmButton": "恢復預設",
+      "resetDone": "已恢復「{{name}}」的預設設定",
+      "edit": "編輯設定",
+      "editConfirmTitle": "手動編輯「{{name}}」的設定？",
+      "editConfirmMessage": "儲存後這個檔位就歸你自己維護：以後「取得金鑰」只會更新它的金鑰，不再覆寫你改的其它內容。\n\n如果改完連不上，用檔位列上的「恢復預設設定」退回預設值（金鑰保留不變）。",
+      "editConfirmButton": "繼續編輯",
+      "userEdited": "已手動維護",
+      "userEditedHint": "這個檔位的設定你改過。重新整理分組不會覆寫它（只更新金鑰）。點這裡恢復預設設定。",
+      "editMissing": "這個檔位的記錄已經不在了，請點「取得金鑰」重新產生。",
+      "editCurrentNote": "這是目前正在使用的檔位。改完如果沒生效，結束並重新開啟 ChatGPT 桌面版 —— 它在執行時會把 codex 的設定改回去。"
+    },
+    "stats": {
+      "title": "協助改進 LoongPort",
+      "intro": "我們想知道大家實際在用哪些中轉站，據此決定優先適配誰。",
+      "sendsLabel": "會上報",
+      "sendsBody": "你新增的中轉站網域、帳號數量、應用版本與作業系統類型。",
+      "neverLabel": "不會上報",
+      "neverBody": "帳號、電子郵件、餘額、密鑰、用量記錄。",
+      "canChange": "可以隨時在「設定 → 一般」中關閉。",
+      "accept": "好",
+      "decline": "不參與",
+      "idNote": "會帶一個隨機產生的安裝識別碼（用於去重統計，與你在中轉站的帳號無關）。"
+    },
+    "site": {
+      "removed": "已移除 {{label}}"
+    },
+    "session": {
+      "expired": "{{count}} 個帳號的登入已失效，請重新登入",
+      "connected": "已連線，正在取得金鑰…（登入視窗可以自己關掉）"
+    },
+    "provision": {
+      "ready": "已備好 {{count}} 個方案",
+      "readyWithKeys": "已備好 {{count}} 個方案，新建 {{keys}} 把金鑰",
+      "groupFailed": "{{group}}：{{reason}}",
+      "refreshed": "已重新整理 {{operators}} 個營運商，共 {{tiers}} 個方案",
+      "refreshFailedWithReason": "{{name}} 重新整理失敗：{{reason}}",
+      "refreshedWithKeys": "已重新整理 {{operators}} 個營運商，共 {{tiers}} 個檔位，新建 {{keys}} 把金鑰"
+    },
+    "switch": {
+      "done": "已切換到 {{name}}",
+      "doneRelaunched": "已切換到 {{name}}，已重新開啟 ChatGPT",
+      "doneNeedsRestart": "已切換到 {{name}}，請手動重啟 ChatGPT"
+    },
+    "official": {
+      "button": "切回官方登入",
+      "hint": "清掉 LoongPort 寫入的路由，改用你自己的 ChatGPT 帳號",
+      "confirmTitle": "切回官方登入？",
+      "confirmMessage": "會結束 ChatGPT、清掉 LoongPort 寫入的路由設定，並刪除目前的 codex 登入狀態（刪除前會自動備份）。之後需要你自己登入 ChatGPT。",
+      "confirmButton": "切回官方",
+      "done": "已切回官方登入，請自己登入 ChatGPT",
+      "doneWithBackup": "已切回官方登入。原登入狀態已備份至 {{path}}"
+    },
+    "quitConfirm": {
+      "title": "切換到 {{name}}",
+      "body": "ChatGPT 啟動時才讀取設定，所以要先結束它、切換完再開啟。",
+      "declineNote": "如果它有進行中的對話，會彈出確認框 —— 在那裡點取消的話，本次切換會中止、設定不會改動。",
+      "forceKillWarning": "⚠️ Windows 上只能強制關閉 ChatGPT（它不回應普通的關閉請求），不會提示你儲存 —— 有正在進行的對話請先自己儲存。關掉後會再幫你開啟。",
+      "platformNote": "萬一沒能替你關掉，設定仍會切好，只需你手動重啟 ChatGPT。",
+      "switchOnly": "只切換，我自己重啟",
+      "quitAndSwitch": "結束並切換"
+    },
+    "addSite": {
+      "firstRunTitle": "選擇服務站點",
+      "firstRunBody": "輸入你要使用的中轉站網域，留空則用預設的 {{site}}。",
+      "title": "新增中轉站",
+      "body": "輸入另一個中轉站的網域。同一個站可以掛多個帳號 —— 登入不同帳號即可，重複的會自動合併。",
+      "connected": "已連上 {{name}}",
+      "inputLabel": "站點網域",
+      "inputLabelWithSponsors": "或手動輸入網域",
+      "sponsorsLabel": "推薦站點",
+      "sponsorAddAnother": "已有 {{count}} 個帳號 · 再加一個"
+    },
+    "vendor": {
+      "add": "新增官網帳號（DeepSeek）",
+      "remove": "刪除這個官網帳號（連帶它的設定）",
+      "removeConfirmTitle": "刪除這個官網帳號？",
+      "removeConfirmMessage": "會刪掉「{{label}}」的登入狀態與本機金鑰，連帶它在六個平台產生的設定。官網上那把 API 金鑰不會被刪，重新登入就能再用。",
+      "removed": "已刪除 {{label}}",
+      "noKey": "還沒備好金鑰",
+      "keyReady": "已備好 {{count}} 個平台的設定",
+      "keyCreated": "已在官網新建金鑰，並備好 {{count}} 個平台的設定",
+      "refreshKey": "重新備一次金鑰",
+      "sessionExpiredUsable": "登入已過期，但金鑰仍然可用（只是查不到餘額）。點這裡重新登入。",
+      "loginFailed": "登入沒能完成：{{reason}}",
+      "openKeyPage": "去官網刪除"
+    }
   }
 }

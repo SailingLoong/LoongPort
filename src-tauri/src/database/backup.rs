@@ -66,21 +66,42 @@ fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hoo
 }
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
+///
+/// ⚠️ **LoongPort 的两张表在这里，理由与上游那几张不同**：上游列进来的是「本机专属 /
+/// 可重建」的日志与缓存，我们列进来的是**明文凭据**（见下方 `loongport_*` 两项）。
 const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
     "proxy_live_backup",
     "usage_daily_rollups",
+    // ↓ LoongPort 自己的两张表：**存明文凭据，绝不出本机**。
+    //
+    // `loongport_operator` 有 `auth_token` / `refresh_token`，`loongport_vendor` 有
+    // `api_key`。`dump_sql` 是按 `sqlite_master` **通用枚举**所有表的（不在这个列表里
+    // 就整表导出），所以新建的表**默认会进同步文件** —— 用户开了 WebDAV/S3 之后，
+    // 登录态就明文躺在他自己配的云端，而他不会收到任何提示。
+    //
+    // 不同步不影响多机复用：Key 的命名是**账号粒度**的
+    // （`operator/provision.rs` 的 `key_name_for`，不含机器标识），所以另一台机器
+    // 登录同一个账号会 claim 到**同一把 key**，只是要重新登录一次。
+    // 拿「少登录一次」换「凭据上云」不值得。
+    "loongport_operator",
+    "loongport_vendor",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
 /// Excludes ephemeral tables like provider_health that can safely rebuild at runtime.
+///
+/// ⚠️ 两张 `loongport_*` 表也在这里：**导入别人的备份不该把本机登录态冲掉**。
+/// 只进 `SYNC_SKIP_TABLES` 只挡住了导出方向，导入方向仍会用备份里的空值覆盖本机。
 const SYNC_PRESERVE_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "loongport_operator",
+    "loongport_vendor",
 ];
 
 /// A database backup entry for the UI
@@ -180,6 +201,10 @@ impl Database {
         // 补齐缺失表/索引并进行基础校验
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
+        // LoongPort 那套迁移也要跑 —— **每一条建库路径都得跑，漏一条就是一个版本号
+        // 停在 0 的库**。上游只有两步，它不知道有第三步，所以这一行必须手工补齐；
+        // 守它的闸在 `super::loongport_schema` 的 `every_database_entry_point_*`。
+        crate::database::loongport_schema::apply(&temp_conn)?;
         Self::validate_basic_state(&temp_conn)?;
         if let Some(local_snapshot) = local_snapshot.as_ref() {
             Self::restore_tables(local_snapshot, &temp_conn, preserve_tables)?;
@@ -352,7 +377,7 @@ impl Database {
 
     /// 生成一致性快照备份，返回备份文件路径（不存在主库时返回 None）
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let db_path = get_app_config_dir().join(crate::config::DB_FILE_NAME);
         if !db_path.exists() {
             return Ok(None);
         }
@@ -749,6 +774,64 @@ mod tests {
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
     use serial_test::serial;
+
+    /// ⭐ **存凭据的表必须两个同步列表都在。**
+    ///
+    /// ## 为什么这条必须是闸，而不是"记得加"
+    ///
+    /// `dump_sql` 按 `sqlite_master` **通用枚举**所有表 —— 不在 [`SYNC_SKIP_TABLES`]
+    /// 里就整表导出。也就是说**默认行为是「同步」**，新建一张表什么都不做就进了同步文件。
+    /// 对日志表无所谓，对存 token 的表就是「用户的登录态明文上了他自己配的云端，
+    /// 而他不会收到任何提示」。
+    ///
+    /// 判据故意做成**扫建表 SQL 找凭据列名**而不是硬写死两个表名：这样将来新建第三张
+    /// 含凭据的表时，这条闸会自己红，不依赖谁记得。
+    ///
+    /// 会红的改法：把 `loongport_operator` / `loongport_vendor` 从任一列表里删掉；
+    /// 或新建一张有 `auth_token` / `api_key` 列的表而不加进列表。
+    #[test]
+    fn tables_holding_credentials_never_leave_the_machine() {
+        /// 出现这些列名就算"存凭据"。
+        const CREDENTIAL_COLUMNS: &[&str] =
+            &["auth_token", "refresh_token", "api_key ", "api_key\n"];
+
+        // LoongPort 的建表 SQL 都在这两处（各一张表）。
+        let sources = [
+            (
+                "loongport_operator",
+                include_str!("../operator/creds.rs") as &str,
+            ),
+            ("loongport_vendor", include_str!("../vendor/creds.rs")),
+        ];
+
+        let mut found = 0;
+        for (table, src) in sources {
+            // 先确认它真的建了这张表、且真的含凭据列 —— 否则这条闸在空转。
+            let creates = src.contains(&format!("CREATE TABLE IF NOT EXISTS {table}"));
+            let has_cred = CREDENTIAL_COLUMNS.iter().any(|c| src.contains(c));
+            if !creates || !has_cred {
+                continue;
+            }
+            found += 1;
+
+            assert!(
+                super::SYNC_SKIP_TABLES.contains(&table),
+                "{table} 存明文凭据却不在 SYNC_SKIP_TABLES 里 —— \
+                 开了 WebDAV/S3 同步就会把 token 明文传到用户的云端，且他不会知道"
+            );
+            assert!(
+                super::SYNC_PRESERVE_TABLES.contains(&table),
+                "{table} 不在 SYNC_PRESERVE_TABLES 里 —— \
+                 只进 skip 只挡住导出方向，导入别人的备份仍会用空值把本机登录态冲掉"
+            );
+        }
+
+        assert_eq!(
+            found, 2,
+            "该找到 2 张存凭据的 LoongPort 表，实际 {found} —— \
+             要么匹配规则失效（闸空转变绿），要么建表 SQL 挪走了，两种都得看"
+        );
+    }
 
     #[test]
     fn import_rejects_cross_file_statements_and_leaves_no_file_behind() -> Result<(), AppError> {

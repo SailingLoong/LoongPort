@@ -61,7 +61,7 @@ impl Drop for TestHomeGuard {
 
 #[test]
 fn test_parse_valid_claude_deeplink() {
-    let url = "ccswitch://v1/import?resource=provider&app=claude&name=Test%20Provider&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com&apiKey=sk-test-123&icon=claude";
+    let url = "loongport://v1/import?resource=provider&app=claude&name=Test%20Provider&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com&apiKey=sk-test-123&icon=claude";
 
     let request = parse_deeplink_url(url).unwrap();
 
@@ -80,7 +80,7 @@ fn test_parse_valid_claude_deeplink() {
 
 #[test]
 fn test_parse_deeplink_with_notes() {
-    let url = "ccswitch://v1/import?resource=provider&app=codex&name=Codex&homepage=https%3A%2F%2Fcodex.com&endpoint=https%3A%2F%2Fapi.codex.com&apiKey=key123&notes=Test%20notes";
+    let url = "loongport://v1/import?resource=provider&app=codex&name=Codex&homepage=https%3A%2F%2Fcodex.com&endpoint=https%3A%2F%2Fapi.codex.com&apiKey=key123&notes=Test%20notes";
 
     let request = parse_deeplink_url(url).unwrap();
 
@@ -91,7 +91,7 @@ fn test_parse_deeplink_with_notes() {
 fn test_parse_grokbuild_provider() {
     use super::provider::build_provider_from_request;
 
-    let url = "ccswitch://v1/import?resource=provider&app=grokbuild&name=Grok%20Relay&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=secret&model=grok-4.5";
+    let url = "loongport://v1/import?resource=provider&app=grokbuild&name=Grok%20Relay&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=secret&model=grok-4.5";
 
     let request = parse_deeplink_url(url).unwrap();
 
@@ -130,8 +130,19 @@ fn test_parse_invalid_scheme() {
 }
 
 #[test]
+fn test_upstream_ccswitch_scheme_is_rejected() {
+    // fork 注册的是 loongport://，上游那个 scheme 归上游的 app。两个 app 同时装在一台机器上
+    // 时，系统按注册决定谁响应 —— 我们不该去抢 ccswitch:// 的链接。
+    let url = "ccswitch://v1/import?resource=provider&app=codex&name=Test";
+
+    let result = parse_deeplink_url(url);
+    assert!(result.is_err(), "不该接受上游的 scheme");
+    assert!(result.unwrap_err().to_string().contains("Invalid scheme"));
+}
+
+#[test]
 fn test_parse_unsupported_version() {
-    let url = "ccswitch://v2/import?resource=provider&app=claude&name=Test";
+    let url = "loongport://v2/import?resource=provider&app=claude&name=Test";
 
     let result = parse_deeplink_url(url);
     assert!(result.is_err());
@@ -144,7 +155,7 @@ fn test_parse_unsupported_version() {
 #[test]
 fn test_parse_missing_required_field() {
     // Name is still required even in v3.8+ (only homepage/endpoint/apiKey are optional)
-    let url = "ccswitch://v1/import?resource=provider&app=claude";
+    let url = "loongport://v1/import?resource=provider&app=claude";
 
     let result = parse_deeplink_url(url);
     assert!(result.is_err());
@@ -821,7 +832,7 @@ fn test_build_claude_provider_without_config_unchanged() {
 #[serial_test::serial]
 fn test_import_prompt_allows_space_in_base64_content() {
     let _test_home = TestHomeGuard::new();
-    let url = "ccswitch://v1/import?resource=prompt&app=codex&name=PromptPlus&content=Pj4+";
+    let url = "loongport://v1/import?resource=prompt&app=codex&name=PromptPlus&content=Pj4+";
     let request = parse_deeplink_url(url).unwrap();
 
     // URL decoded content may have "+" become space
@@ -869,7 +880,7 @@ fn test_parse_prompt_deeplink() {
     let content = "Hello World";
     let content_b64 = BASE64_STANDARD.encode(content);
     let url = format!(
-        "ccswitch://v1/import?resource=prompt&app=claude&name=test&content={}&description=desc&enabled=true",
+        "loongport://v1/import?resource=prompt&app=claude&name=test&content={}&description=desc&enabled=true",
         content_b64
     );
 
@@ -886,7 +897,7 @@ fn test_parse_prompt_deeplink() {
 fn test_parse_grokbuild_prompt_deeplink() {
     let content_b64 = BASE64_STANDARD.encode("Grok instructions");
     let url = format!(
-        "ccswitch://v1/import?resource=prompt&app=grokbuild&name=test&content={content_b64}"
+        "loongport://v1/import?resource=prompt&app=grokbuild&name=test&content={content_b64}"
     );
 
     let request = parse_deeplink_url(&url).expect("parse Grok Build prompt deeplink");
@@ -899,7 +910,7 @@ fn test_parse_mcp_deeplink() {
     let config = r#"{"mcpServers":{"test":{"command":"echo"}}}"#;
     let config_b64 = BASE64_STANDARD.encode(config);
     let url = format!(
-        "ccswitch://v1/import?resource=mcp&apps=claude,codex&config={}&enabled=true",
+        "loongport://v1/import?resource=mcp&apps=claude,codex&config={}&enabled=true",
         config_b64
     );
 
@@ -915,7 +926,7 @@ fn test_parse_grokbuild_mcp_deeplink() {
     let config = r#"{"mcpServers":{"test":{"command":"echo"}}}"#;
     let config_b64 = BASE64_STANDARD.encode(config);
     let url = format!(
-        "ccswitch://v1/import?resource=mcp&apps=grokbuild&config={config_b64}&enabled=true"
+        "loongport://v1/import?resource=mcp&apps=grokbuild&config={config_b64}&enabled=true"
     );
 
     let request = parse_deeplink_url(&url).expect("parse Grok Build MCP deeplink");
@@ -925,7 +936,7 @@ fn test_parse_grokbuild_mcp_deeplink() {
 
 #[test]
 fn test_parse_skill_deeplink() {
-    let url = "ccswitch://v1/import?resource=skill&repo=owner/repo&directory=skills&branch=dev";
+    let url = "loongport://v1/import?resource=skill&repo=owner/repo&directory=skills&branch=dev";
     let request = parse_deeplink_url(url).unwrap();
 
     assert_eq!(request.resource, "skill");
@@ -940,7 +951,7 @@ fn test_parse_skill_deeplink() {
 
 #[test]
 fn test_parse_multiple_endpoints_comma_separated() {
-    let url = "ccswitch://v1/import?resource=provider&app=claude&name=Test&endpoint=https%3A%2F%2Fapi1.example.com,https%3A%2F%2Fapi2.example.com,https%3A%2F%2Fapi3.example.com&apiKey=sk-test";
+    let url = "loongport://v1/import?resource=provider&app=claude&name=Test&endpoint=https%3A%2F%2Fapi1.example.com,https%3A%2F%2Fapi2.example.com,https%3A%2F%2Fapi3.example.com&apiKey=sk-test";
 
     let request = parse_deeplink_url(url).unwrap();
 
@@ -955,7 +966,7 @@ fn test_parse_multiple_endpoints_comma_separated() {
 #[test]
 fn test_parse_single_endpoint_backward_compatible() {
     // Old format with single endpoint should still work
-    let url = "ccswitch://v1/import?resource=provider&app=claude&name=Test&endpoint=https%3A%2F%2Fapi.example.com&apiKey=sk-test";
+    let url = "loongport://v1/import?resource=provider&app=claude&name=Test&endpoint=https%3A%2F%2Fapi.example.com&apiKey=sk-test";
 
     let request = parse_deeplink_url(url).unwrap();
 
@@ -967,7 +978,7 @@ fn test_parse_single_endpoint_backward_compatible() {
 
 #[test]
 fn test_parse_endpoints_with_spaces_trimmed() {
-    let url = "ccswitch://v1/import?resource=provider&app=claude&name=Test&endpoint=https%3A%2F%2Fapi1.example.com%20,%20https%3A%2F%2Fapi2.example.com&apiKey=sk-test";
+    let url = "loongport://v1/import?resource=provider&app=claude&name=Test&endpoint=https%3A%2F%2Fapi1.example.com%20,%20https%3A%2F%2Fapi2.example.com&apiKey=sk-test";
 
     let request = parse_deeplink_url(url).unwrap();
 

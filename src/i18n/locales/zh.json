@@ -875,7 +875,9 @@
       "defaultCostMultiplierRequired": "默认倍率不能为空",
       "defaultCostMultiplierInvalid": "默认倍率格式不正确"
     },
-    "saveFailedGeneric": "保存失败，请重试"
+    "saveFailedGeneric": "保存失败，请重试",
+    "anonymousStats": "使用统计",
+    "anonymousStatsDescription": "上报你添加的中转站域名与账号个数，帮助决定优先适配谁。含一个随机安装标识用于去重；不含账号、余额或密钥。"
   },
   "apps": {
     "claude": "Claude",
@@ -1058,8 +1060,7 @@
       "qiniu": "七牛云是多协议 AI 中转平台，一个 Key 即可调用原生 Claude、GPT、Gemini 模型，兼容 Anthropic、OpenAI、Gemini 多种接口。",
       "fenno": "Fenno.ai 是稳定高效的 API 中转服务商，可接入多种主流模型。CC Switch 用户专属福利：通过此链接订阅 9.9 元 /150 刀额度的超值 Coding Plan！",
       "zetaapi": "ZetaAPI 主打模型不掺水、不降智，价格低至官方价 35 折。CC Switch 用户专属福利：通过此链接注册，首次充值使用优惠码 CC-SWITCH 即可享受九折优惠！",
-      "teamorouter": "TeamoRouter 是企业级 Agentic LLM 网关，价格最高可达 90% 折扣。为 CC Switch 的用户提供了特别福利：新用户通过此链接注册，首次充值享 10% 折扣！",
-      "unity2": "Unity2.ai 为 CC Switch 用户提供专属福利：通过此链接注册可领取 $2 余额，加入官方群再送 $10，最高可领 $12 免费额度！"
+      "teamorouter": "TeamoRouter 是企业级 Agentic LLM 网关，价格最高可达 90% 折扣。为 CC Switch 的用户提供了特别福利：新用户通过此链接注册，首次充值享 10% 折扣！"
     },
     "presets": {
       "ucloud": "优云智算",
@@ -3029,5 +3030,126 @@
     "expiredHint": "请运行 {{tool}} 命令刷新登录",
     "queryFailed": "查询失败",
     "refresh": "刷新"
+  },
+  "loongport": {
+    "tierList": {
+      "title": "运营商与档位",
+      "empty": "还没有添加任何中转站",
+      "addSite": "添加中转站",
+      "refresh": "刷新档位与密钥"
+    },
+    "row": {
+      "expand": "展开",
+      "collapse": "折叠",
+      "notLoggedIn": "还没登录",
+      "login": "去登录",
+      "sessionExpired": "登录已过期",
+      "reLogin": "重新登录",
+      "noTiers": "该账号在此平台下没有可用分组",
+      "getKeys": "获取密钥",
+      "tierCount": "{{count}} 个档位",
+      "dragHandle": "拖动排序",
+      "refetchGroups": "重新拉取可用分组",
+      "purchaseHint": "点击充值（在应用内打开该站点的充值页）",
+      "lowBalanceHint": "余额不足 ${{threshold}}，点击充值",
+      "remove": "删除这个账号（连带它的档位）",
+      "removeBlockedByCurrent": "它有档位正在使用，先切到别的档位再删",
+      "removeConfirmTitle": "删除这个账号？",
+      "removeConfirmMessage": "会删掉「{{label}}」的登录态，连带它已生成的 {{count}} 个档位。已充值的余额留在运营商那边，重新登录就能再用。"
+    },
+    "tier": {
+      "rateUnknown": "倍率未知",
+      "rate": "{{value}} 倍",
+      "switching": "切换中…",
+      "checkConnectivity": "检测连通",
+      "resetConfig": "恢复默认配置",
+      "resetConfirmTitle": "恢复默认配置？",
+      "resetConfirmMessage": "会用 LoongPort 的默认配置覆盖「{{name}}」的全部编辑，密钥保留不变。",
+      "resetConfirmButton": "恢复默认",
+      "resetDone": "已恢复「{{name}}」的默认配置",
+      "edit": "编辑配置",
+      "editConfirmTitle": "手动编辑「{{name}}」的配置？",
+      "editConfirmMessage": "保存后这个档位就归你自己维护：以后「获取密钥」只会更新它的密钥，不再覆盖你改的其它内容。\n\n如果改完连不上，用档位行上的「恢复默认配置」退回默认值（密钥保留不变）。",
+      "editConfirmButton": "继续编辑",
+      "userEdited": "已手动维护",
+      "userEditedHint": "这个档位的配置你改过。刷新分组不会覆盖它（只更新密钥）。点这里恢复默认配置。",
+      "editMissing": "这个档位的记录已经不在了，请点「获取密钥」重新生成。",
+      "editCurrentNote": "这是当前正在使用的档位。改完如果没生效，退出并重开 ChatGPT 桌面版 —— 它在跑的时候会把 codex 的配置改回去。"
+    },
+    "stats": {
+      "title": "帮助改进 LoongPort",
+      "intro": "我们想知道大家实际在用哪些中转站，据此决定优先适配谁。",
+      "sendsLabel": "会上报",
+      "sendsBody": "你添加的中转站域名、账号个数、应用版本与操作系统类型。",
+      "neverLabel": "不会上报",
+      "neverBody": "账号、邮箱、余额、密钥、用量记录。",
+      "canChange": "可以随时在「设置 → 通用」里关掉。",
+      "accept": "好",
+      "decline": "不参与",
+      "idNote": "会带一个随机生成的安装标识（用于去重统计，与你在中转站的账号无关）。"
+    },
+    "site": {
+      "removed": "已移除 {{label}}"
+    },
+    "session": {
+      "expired": "{{count}} 个账号的登录已失效，请重新登录",
+      "connected": "已连接，正在获取密钥…（登录窗口可以自己关掉）"
+    },
+    "provision": {
+      "ready": "已备好 {{count}} 个档位",
+      "readyWithKeys": "已备好 {{count}} 个档位，新建 {{keys}} 把密钥",
+      "groupFailed": "{{group}}：{{reason}}",
+      "refreshed": "已刷新 {{operators}} 个运营商，共 {{tiers}} 个档位",
+      "refreshFailedWithReason": "{{name}} 刷新失败：{{reason}}",
+      "refreshedWithKeys": "已刷新 {{operators}} 个运营商，共 {{tiers}} 个档位，新建 {{keys}} 把密钥"
+    },
+    "switch": {
+      "done": "已切换到 {{name}}",
+      "doneRelaunched": "已切换到 {{name}}，已重新打开 ChatGPT",
+      "doneNeedsRestart": "已切换到 {{name}}，请手动重启 ChatGPT"
+    },
+    "official": {
+      "button": "切回官方登录",
+      "hint": "清掉 LoongPort 写入的路由，改用你自己的 ChatGPT 账号",
+      "confirmTitle": "切回官方登录？",
+      "confirmMessage": "会退出 ChatGPT、清掉 LoongPort 写入的路由配置，并删除当前的 codex 登录态（删前会自动备份）。之后需要你自己登录 ChatGPT。",
+      "confirmButton": "切回官方",
+      "done": "已切回官方登录，请自己登录 ChatGPT",
+      "doneWithBackup": "已切回官方登录。原登录态已备份到 {{path}}"
+    },
+    "quitConfirm": {
+      "title": "切换到 {{name}}",
+      "body": "ChatGPT 启动时才读取配置，所以要先退出它、切换完再打开。",
+      "declineNote": "如果它有进行中的对话，会弹出确认框 —— 在那里点取消的话，本次切换会中止、配置不会改动。",
+      "forceKillWarning": "⚠️ Windows 上只能强制关闭 ChatGPT（它不响应普通的关闭请求），不会提示你保存 —— 有正在进行的对话请先自己保存。关掉后会再帮你打开。",
+      "platformNote": "万一没能替你关掉，配置仍会切好，只需你手动重启 ChatGPT。",
+      "switchOnly": "只切换，我自己重启",
+      "quitAndSwitch": "退出并切换"
+    },
+    "addSite": {
+      "firstRunTitle": "选择服务站点",
+      "firstRunBody": "输入你要使用的中转站域名，留空则用默认的 {{site}}。",
+      "title": "添加中转站",
+      "body": "输入另一个中转站的域名。同一个站可以挂多个账号 —— 登录不同账号即可，重复的会自动合并。",
+      "connected": "已连上 {{name}}",
+      "inputLabel": "站点域名",
+      "inputLabelWithSponsors": "或手动输入域名",
+      "sponsorsLabel": "推荐站点",
+      "sponsorAddAnother": "已有 {{count}} 个账号 · 再加一个"
+    },
+    "vendor": {
+      "add": "添加官网账号（DeepSeek）",
+      "remove": "删除这个官网账号（连带它的配置）",
+      "removeConfirmTitle": "删除这个官网账号？",
+      "removeConfirmMessage": "会删掉「{{label}}」的登录态与本地密钥，连带它在六个平台生成的配置。官网上那把 API key 不会被删，重新登录就能再用。",
+      "removed": "已删除 {{label}}",
+      "noKey": "还没备好密钥",
+      "keyReady": "已备好 {{count}} 个平台的配置",
+      "keyCreated": "已在官网新建密钥，并备好 {{count}} 个平台的配置",
+      "refreshKey": "重新备一次密钥",
+      "sessionExpiredUsable": "登录已过期，但密钥仍然可用（只是查不到余额）。点这里重新登录。",
+      "loginFailed": "登录没能完成：{{reason}}",
+      "openKeyPage": "去官网删除"
+    }
   }
 }

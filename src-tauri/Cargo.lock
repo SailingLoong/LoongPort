@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "cc-switch"
-version = "3.19.1"
+version = "3.19.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -789,6 +789,7 @@ dependencies = [
  "once_cell",
  "regex",
  "reqwest 0.12.28",
+ "ring",
  "rquickjs",
  "rusqlite",
  "rust_decimal",

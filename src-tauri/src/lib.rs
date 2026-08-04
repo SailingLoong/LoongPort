@@ -24,6 +24,7 @@ mod mcp;
 mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
+mod operator;
 mod panic_hook;
 mod prompt;
 mod prompt_files;
@@ -37,14 +38,18 @@ mod store;
 mod tray;
 mod usage_events;
 mod usage_script;
+mod vendor;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use codex_config::{
-    get_codex_auth_path, get_codex_config_path, read_codex_live_settings, write_codex_live_atomic,
+    get_codex_auth_path, get_codex_config_path, prepare_codex_provider_live_config,
+    read_codex_live_settings, write_codex_live_atomic, write_codex_live_config_atomic,
 };
 pub use commands::open_provider_terminal;
 pub use commands::*;
-pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file};
+pub use config::{
+    get_claude_mcp_path, get_claude_settings_path, read_json_file, APP_DIR_NAME, DB_FILE_NAME,
+};
 pub use database::{Database, Profile};
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
 pub use error::AppError;
@@ -67,6 +72,7 @@ pub use services::{
 };
 pub use settings::{update_settings, AppSettings};
 pub use store::AppState;
+
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -77,6 +83,14 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::RunEvent;
 use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+
+/// 主窗口的 label（`tauri.conf.json` 的 `app.windows[0].label`）。
+///
+/// 提成常量的理由：`lib.rs` 里有多处按它取窗口，而**全局 `CloseRequested` 回调用它当守卫**
+/// —— 那条守卫决定「最小化到托盘」只作用于主窗口。写错一个字母，登录窗关闭时会被
+/// `prevent_close` 吃掉、隐藏后仍占 label，用户再点登录就卡死（见 `commands::operator`
+/// 里 `do_login` 对残留窗口的处置）。
+pub const MAIN_WINDOW_LABEL: &str = "main";
 
 #[cfg(target_os = "windows")]
 fn set_windows_app_user_model_id(app: &tauri::AppHandle) {
@@ -230,7 +244,7 @@ fn handle_deeplink_url(
     focus_main_window: bool,
     source: &str,
 ) -> bool {
-    if !url_str.starts_with("ccswitch://") {
+    if !url_str.starts_with(&format!("{}://", crate::deeplink::APP_SCHEME)) {
         return false;
     }
 
@@ -255,7 +269,7 @@ fn handle_deeplink_url(
             }
 
             if focus_main_window {
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                     let _ = window.unminimize();
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -356,7 +370,7 @@ pub fn run() {
             }
 
             // Show and focus window regardless
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -374,6 +388,21 @@ pub fn run() {
         // 拦截窗口关闭：根据设置决定是否最小化到托盘
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // **这个回调对每个窗口都生效**（Tauri 把 Builder 级的监听器挂到所有窗口），
+                // 而下面那套「最小化到托盘 / 关闭即退出」的语义只对主窗口成立。
+                //
+                // 不加这道守卫的后果，两条分支各咬一次：
+                // - `minimize_to_tray_on_close = true`（默认）：登录窗被 prevent_close + hide，
+                //   `Destroyed` 永不触发 ⇒ 等它的 `do_login` 干等满 300 秒超时；而隐藏的窗口
+                //   仍占着 label，用户再点登录会命中「已开着就聚焦」的早退，`set_focus` 对不可见
+                //   窗口是 no-op ⇒ **登录彻底卡死，只能重启 app**。
+                // - `= false`：关一个登录窗把整个 app 退掉。
+                //
+                // 所以：非主窗口一律放行，让它正常关闭。
+                if window.label() != MAIN_WINDOW_LABEL {
+                    return;
+                }
+
                 // 数据库版本过新的恢复模式下没有托盘可唤回，关闭即退出，避免应用隐身后台
                 let in_db_recovery = crate::init_status::get_init_error()
                     .map(|p| p.kind.as_deref() == Some("db_version_too_new"))
@@ -410,8 +439,36 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_flags())
+                // ⚠️ **登录窗不进状态跟踪**（2026-08-03 实测发现它已经在踩 bug）。
+                //
+                // 插件默认跟踪**每一个**窗口，于是登录窗也被记了尺寸 —— 而它撞的正是
+                // `discard_broken_window_state` 那个 Retina 物理/逻辑像素 bug。
+                // 实测本机状态文件里 `loongport-login` 被存成 `960x1440`，
+                // 恰好是 `.inner_size(480, 720)` 的两倍（存的是物理像素、读时按逻辑用）
+                // ⇒ 每次打开都会翻倍，最终撑满屏幕。而那道清理**只判
+                // `MAIN_WINDOW_LABEL`**，救不了它。
+                //
+                // 对登录窗而言「记住用户调过的大小」本来就没价值：那个尺寸是按登录表单
+                // 的宽度定的，每次打开都该是它。所以不是「修 bug」而是**它压根不该被跟踪**。
+                //
+                // 用插件原生的 `with_denylist` / `with_filter` 而不是自己在保存前过滤：
+                // 那是它为这件事提供的 happy path，手写过滤等于重造一遍它
+                // `on_window_ready` 里的同一个判断。
+                .with_denylist(&[operator::login::LOGIN_WINDOW_LABEL])
+                // 充值窗**每个运营商一个**（label 是 `loongport-purchase-<id>`），
+                // label 不是定值 ⇒ 只能按前缀判，用 `with_filter` 而不是 denylist。
+                // 返回 false = 不保存这个窗口的状态。
+                .with_filter(|label| {
+                    !label.starts_with(operator::purchase::PURCHASE_WINDOW_LABEL_PREFIX)
+                })
                 .build(),
         )
+        // ⚠️ 这道清理**必须在 window-state 插件读文件之前**跑。插件在
+        // `RunEvent::Ready` 之前就恢复窗口几何，放进 `.setup()` 里已经太晚了。
+        .setup(|app| {
+            discard_broken_window_state(app.config());
+            Ok(())
+        })
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -444,7 +501,7 @@ pub fn run() {
                             Target::new(TargetKind::Stdout),
                             Target::new(TargetKind::Folder {
                                 path: log_dir,
-                                file_name: Some("cc-switch".into()),
+                                file_name: Some("loongport".into()),
                             }),
                         ])
                         // KeepSome(4) 保留 4 个轮转归档，加上当前文件最多约 100 MiB。
@@ -457,7 +514,7 @@ pub fn run() {
 
                 // 用户配置存在数据库中，数据库尚未打开时使用保守的 Info 级别。
                 log::set_max_level(log::LevelFilter::Info);
-                log::info!("=== CC Switch v{} started ===", env!("CARGO_PKG_VERSION"));
+                log::info!("=== LoongPort v{} started ===", env!("CARGO_PKG_VERSION"));
             }
 
             // 首次读取覆盖路径时 logger 尚未可用；此处重放一次，
@@ -467,17 +524,15 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
 
-            // 注册 Updater 插件（桌面端）；放在 logger 之后，确保失败可诊断。
-            #[cfg(desktop)]
-            {
-                if let Err(e) = app
-                    .handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                {
-                    // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
-                    log::warn!("初始化 Updater 插件失败，已跳过：{e}");
-                }
-            }
+            // Updater 插件**有意不注册**：LoongPort 还没有自己的发布渠道。
+            //
+            // 上游的 `plugins.updater` 端点与 pubkey 都指向 cc-switch 自己的发布源，留着会把
+            // LoongPort 的用户自动升级成 cc-switch —— 所以 `tauri.conf.json` 里那段整块删了。
+            // 而插件在配置缺失时会初始化失败并每次启动打一条 WARN，索然不注册。
+            //
+            // 有了发布渠道之后要做三件事，缺一不可：配 `plugins.updater.endpoints` 指向自己的
+            // latest.json、换成自己的 minisign pubkey、把这段注册加回来。只加回注册会得到一个
+            // 报错的插件，只配端点则永远不检查更新。
 
             // 注入 AppHandle 给 usage_events，让无 AppHandle 持有的写日志路径
             // 也能向前端推送 `usage-log-recorded`。
@@ -486,7 +541,7 @@ pub fn run() {
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
-            let db_path = app_config_dir.join("cc-switch.db");
+            let db_path = app_config_dir.join(crate::config::DB_FILE_NAME);
             let json_path = app_config_dir.join("config.json");
 
             // 检查是否需要从 config.json 迁移到 SQLite
@@ -544,7 +599,7 @@ pub fn run() {
                         supported_version: Some(crate::database::SCHEMA_VERSION),
                     });
                     // 主窗口默认 visible:false，恢复界面必须强制显示
-                    if let Some(window) = app.get_webview_window("main") {
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
@@ -1036,7 +1091,7 @@ pub fn run() {
 
             // 构建托盘
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("CC Switch") // 鼠标悬停提示
+                .tooltip("LoongPort") // 鼠标悬停提示
                 .on_tray_icon_event(|tray, event| match event {
                     // 鼠标悬停/点击到托盘图标时，后台异步刷新用量缓存，
                     // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
@@ -1160,6 +1215,100 @@ pub fn run() {
                 }
             }
 
+            // 远端配置：启动后拉一次（赞助商列表 + 邀请码），验签通过才落盘缓存。
+            //
+            // **失败完全无声**：拉不到 / 超时 / 验签不过都只是让本次启动继续用
+            // 「上次的缓存 or 编译期内置」那两层（见 `remote_config` 模块文档那张表）。
+            //
+            // 延迟 5 秒：比统计上报早（配置会影响用户看到什么），但仍让首屏先渲染完。
+            // 端点未配时它自己就 return，一个字节都不发。
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Some(cfg) = crate::operator::remote_config::refresh_and_cache().await {
+                    log::info!(
+                        "远端配置已更新：{} 个赞助运营商、{} 条邀请码",
+                        cfg.sponsors.len(),
+                        cfg.aff_codes.len()
+                    );
+                }
+            });
+
+            // 匿名使用统计：启动后延迟一次性上报（只报站点 host 与个数）。
+            //
+            // **一次性、不定时重复**：它答的是「用户在用哪几家中转站」，那不是
+            // 高频变化的事实 —— 每次开 app 报一次已经够，加定时器只是多打请求。
+            //
+            // 延迟 30 秒：启动那一刻要抢的是首屏渲染与凭据探活，统计排在最后。
+            // 整条链路失败静默（`stats::send` 自己只返 Err 给日志）—— 它是我们的需求
+            // 不是用户要的功能，绝不能影响任何用户流程。
+            let db_for_stats = app.state::<AppState>().db.clone();
+            // 版本号**在 spawn 之前**取好：`AppHandle` 持有的运行时句柄不是 `Send`，
+            // 把它带进 async 块会让整个 future 变成 non-Send（编译不过）。
+            // 我们只要一个 String，不需要把整个 handle 搬进去。
+            let stats_app_version = app.package_info().version.to_string();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+                // 端点还没配时整条链路 no-op，连读设置都不必。
+                if !crate::operator::stats::is_configured() {
+                    log::debug!("匿名统计端点未配置，跳过上报");
+                    return;
+                }
+
+                let settings = crate::settings::get_settings();
+                if !settings.enable_anonymous_stats {
+                    return;
+                }
+                // 用户还没看过首启告知就先不报 —— 告知之前上报等于没告知。
+                if settings.stats_notice_confirmed != Some(true) {
+                    log::debug!("用户还没确认统计告知，本次不上报");
+                    return;
+                }
+
+                let Some(install_id) = settings.stats_install_id.clone() else {
+                    // id 由前端在用户确认告知那一刻生成并存下。没有就说明流程没走完。
+                    log::debug!("还没有 install_id，本次不上报");
+                    return;
+                };
+
+                // 读站点列表。**在 `spawn_blocking` 里读**，两个理由：
+                //
+                // 1. `MutexGuard` 不是 `Send` —— 在 async 块里持有它（哪怕只在一个
+                //    内层作用域）会让整个 future 变成 non-Send，`spawn` 直接编译不过
+                // 2. SQLite 读是阻塞 IO，本来就该离开 async 执行器
+                let origins = match tauri::async_runtime::spawn_blocking(move || {
+                    let conn = db_for_stats
+                        .conn
+                        .lock()
+                        .map_err(|e| format!("获取数据库连接失败: {e}"))?;
+                    crate::operator::creds::list(&conn)
+                        .map(|ops| ops.into_iter().map(|o| o.site_origin).collect::<Vec<_>>())
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                {
+                    Ok(Ok(origins)) => origins,
+                    Ok(Err(e)) => {
+                        log::debug!("统计读站点列表失败（跳过）: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        log::debug!("统计读站点列表的任务失败（跳过）: {e}");
+                        return;
+                    }
+                };
+
+                let report = crate::operator::stats::build_report(
+                    install_id,
+                    stats_app_version,
+                    &origins,
+                );
+                if let Err(e) = crate::operator::stats::send(&report).await {
+                    // 只记 log，不重试、不排队补发。拿不到这次就算了。
+                    log::debug!("匿名统计上报失败（不影响使用）: {e}");
+                }
+            });
+
             // 异常退出恢复 + 代理状态自动恢复
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1270,7 +1419,7 @@ pub fn run() {
             // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
             #[cfg(target_os = "linux")]
             {
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                     let _ = window.with_webview(|webview| {
                         use webkit2gtk::{WebViewExt, SettingsExt, HardwareAccelerationPolicy};
                         let wk_webview = webview.inner();
@@ -1284,7 +1433,7 @@ pub fn run() {
 
             // 静默启动：根据设置决定是否显示主窗口
             let settings = crate::settings::get_settings();
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 // 在窗口首次显示前同步装饰状态，避免前端加载后再切换导致标题栏闪烁
                 // 仅 Linux 生效：解决 Wayland 下系统窗口按钮不可用的问题
                 #[cfg(target_os = "linux")]
@@ -1323,6 +1472,30 @@ pub fn run() {
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
+            // LoongPort 运营商
+            commands::operator_status,
+            commands::operator_check_session,
+            commands::operator_list_sponsors,
+            commands::operator_probe_site,
+            commands::operator_login,
+            commands::operator_provision,
+            commands::operator_list_operators,
+            commands::operator_list_tier_rates,
+            commands::operator_reorder,
+            commands::operator_reset_tier_config,
+            commands::operator_switch_tier,
+            commands::operator_list_sites,
+            commands::operator_remove_site,
+            commands::operator_balance,
+            commands::operator_purchase,
+            commands::operator_restore_official_login,
+            // LoongPort 官网直连账号（vendor）
+            commands::vendor_list_accounts,
+            commands::vendor_open_login,
+            commands::vendor_provision,
+            commands::vendor_balance,
+            commands::vendor_remove,
+            commands::vendor_reorder,
             commands::import_default_config,
             commands::get_claude_desktop_status,
             commands::get_claude_desktop_default_routes,
@@ -1741,7 +1914,9 @@ pub fn run() {
                             url_for_log(&url_str)
                         );
 
-                        if url_str.starts_with("ccswitch://") {
+                        if url_str
+                            .starts_with(&format!("{}://", crate::deeplink::APP_SCHEME))
+                        {
                             if crate::lightweight::is_lightweight_mode() {
                                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
                                 {
@@ -2036,7 +2211,7 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
         format!(
             "从旧版本迁移配置时发生错误：\n\n{error}\n\n\
             您的数据尚未丢失，旧配置文件仍然保留。\n\
-            建议回退到旧版本 CC Switch 以保护数据。\n\n\
+            建议回退到旧版本 LoongPort 以保护数据。\n\n\
             点击「重试」重新尝试迁移\n\
             点击「退出」关闭程序（可回退版本后重新打开）"
         )
@@ -2044,7 +2219,7 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
         format!(
             "An error occurred while migrating configuration:\n\n{error}\n\n\
             Your data is NOT lost - the old config file is still preserved.\n\
-            Consider rolling back to an older CC Switch version.\n\n\
+            Consider rolling back to an older LoongPort version.\n\n\
             Click 'Retry' to attempt migration again\n\
             Click 'Exit' to close the program"
         )
@@ -2094,7 +2269,7 @@ fn show_database_init_error_dialog(
             您的数据尚未丢失，应用不会自动删除数据库文件。\n\
             常见原因包括：数据库版本过新、文件损坏、权限不足、磁盘空间不足等。\n\n\
             建议：\n\
-            1) 先备份整个配置目录（包含 cc-switch.db）\n\
+            1) 先备份整个配置目录（包含 loongport.db）\n\
             2) 如果提示“数据库版本过新”，请升级到更新版本\n\
             3) 如果刚升级出现异常，可回退旧版本导出/备份后再升级\n\n\
             点击「重试」重新尝试初始化\n\
@@ -2108,8 +2283,8 @@ fn show_database_init_error_dialog(
             Your data is NOT lost - the app will not delete the database automatically.\n\
             Common causes include: newer database version, corrupted file, permission issues, or low disk space.\n\n\
             Suggestions:\n\
-            1) Back up the entire config directory (including cc-switch.db)\n\
-            2) If you see “database version is newer”, please upgrade CC Switch\n\
+            1) Back up the entire config directory (including loongport.db)\n\
+            2) If you see “database version is newer”, please upgrade LoongPort\n\
             3) If this happened right after upgrading, consider rolling back to export/backup then upgrade again\n\n\
             Click 'Retry' to attempt initialization again\n\
             Click 'Exit' to close the program",
@@ -2172,6 +2347,61 @@ fn classify_exit_request(code: Option<i32>) -> ExitRequestAction {
 // ============================================================
 // 在应用主动退出前显式持久化窗口状态
 // ============================================================
+
+/// 启动前丢弃**明显坏掉**的窗口状态。
+///
+/// ## 为什么需要这道防护（2026-08-02 实测踩过）
+///
+/// `tauri-plugin-window-state` 在 Retina 上**存物理像素、读时按物理像素用** ——
+/// 于是每次启动窗口都变成上次的一半：1000 → 500 → 250 → 125 → 62 → 15 …
+/// 最后小到看不见、且位置漂到屏幕外（实测存到过 `15x10 @ (-28,33)`）。
+/// 用户看到的现象是**「app 打开了但找不到窗口」**，而日志一切正常
+/// （`主窗口已显示`），进程也在跑 —— 极难排查。
+///
+/// 判据只用 `minWidth` / `minHeight`：那是 `tauri.conf.json` 里声明的「窗口不该
+/// 小于这个」，比任何我们自己编的阈值都可靠。低于它就是坏值 ⇒ 删掉状态文件，
+/// 让插件回落到 `tauri.conf.json` 的默认尺寸。
+///
+/// **只在明显坏时才动**：正常尺寸（含用户自己调小到接近下限的）一律不碰 ——
+/// 记住窗口位置是这个插件的全部价值。
+fn discard_broken_window_state(app_config: &tauri::Config) {
+    let Some(window) = app_config.app.windows.first() else {
+        return;
+    };
+    // 这两个在 tauri.conf.json 里都声明了；没声明时不做判断（无从判断）。
+    let (Some(min_w), Some(min_h)) = (window.min_width, window.min_height) else {
+        return;
+    };
+
+    let Some(dir) = dirs::data_dir().map(|d| d.join(&app_config.identifier)) else {
+        return;
+    };
+    let state_file = dir.join(".window-state.json");
+    let Ok(text) = std::fs::read_to_string(&state_file) else {
+        return; // 首次启动没有这个文件，正常。
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        // 文件坏了也删 —— 插件读不动它反而会静默用默认值，删掉更干净。
+        let _ = std::fs::remove_file(&state_file);
+        return;
+    };
+
+    let too_small = json
+        .get(MAIN_WINDOW_LABEL)
+        .and_then(|m| {
+            let w = m.get("width")?.as_f64()?;
+            let h = m.get("height")?.as_f64()?;
+            Some(w < min_w || h < min_h)
+        })
+        .unwrap_or(false);
+
+    if too_small {
+        log::warn!(
+            "窗口状态小于 tauri.conf.json 声明的下限（{min_w}x{min_h}），已丢弃并回落到默认尺寸"
+        );
+        let _ = std::fs::remove_file(&state_file);
+    }
+}
 
 fn window_state_flags() -> StateFlags {
     StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED

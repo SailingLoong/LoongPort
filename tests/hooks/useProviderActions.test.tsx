@@ -189,7 +189,9 @@ describe("useProviderActions", () => {
       await result.current.switchProvider(provider);
     });
 
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: provider.id,
+    });
     expect(settingsApiGetMock).not.toHaveBeenCalled();
     expect(settingsApiApplyMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalledWith(
@@ -217,7 +219,9 @@ describe("useProviderActions", () => {
     });
 
     expect(toastWarningMock).toHaveBeenCalledTimes(1);
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: provider.id,
+    });
   });
 
   it("warns but still switches Codex full URL providers when proxy is not running", async () => {
@@ -239,7 +243,9 @@ describe("useProviderActions", () => {
     });
 
     expect(toastWarningMock).toHaveBeenCalledTimes(1);
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: provider.id,
+    });
   });
 
   it("warns when switching a Codex Anthropic-format provider without proxy", async () => {
@@ -261,7 +267,9 @@ describe("useProviderActions", () => {
     expect(toastWarningMock).toHaveBeenCalledWith(
       expect.stringContaining("Anthropic Messages"),
     );
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: provider.id,
+    });
   });
 
   it("warns for Grok providers that require the Responses router", async () => {
@@ -323,7 +331,9 @@ describe("useProviderActions", () => {
     expect(toastWarningMock).toHaveBeenCalledWith(
       expect.stringContaining("托管 OAuth"),
     );
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: provider.id,
+    });
   });
 
   it("does not warn for managed OAuth after the current Code app is taken over", async () => {
@@ -347,7 +357,9 @@ describe("useProviderActions", () => {
     });
 
     expect(toastWarningMock).not.toHaveBeenCalled();
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: provider.id,
+    });
   });
 
   it("uses proxy process readiness for Claude Desktop routing", async () => {
@@ -397,7 +409,9 @@ describe("useProviderActions", () => {
       await result.current.switchProvider(provider);
     });
 
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith("codex-official");
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: "codex-official",
+    });
     expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
@@ -457,7 +471,9 @@ describe("useProviderActions", () => {
       await result.current.switchProvider(provider);
     });
 
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+      providerId: provider.id,
+    });
     expect(settingsApiGetMock).toHaveBeenCalledTimes(1);
     expect(settingsApiApplyMock).toHaveBeenCalledWith({ official: true });
   });

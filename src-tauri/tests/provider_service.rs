@@ -706,13 +706,17 @@ wire_api = "responses"
 }
 
 #[test]
-fn provider_service_switch_codex_default_overwrites_official_auth_when_preservation_off() {
+fn provider_service_switch_codex_default_preserves_official_auth() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    // Intentionally do NOT enable preservation: this locks the default opt-out
-    // behavior where switching to a third-party provider rewrites auth.json,
-    // discarding the user's ChatGPT OAuth login. It is the dual of
-    // `provider_service_switch_codex_preserves_oauth_and_backfills_api_key_from_live_token`.
+    // LoongPort **反转了上游这个默认值**（上游默认关，这里默认开），所以本测试断言的方向
+    // 与上游相反 —— 上游那版叫 `..._overwrites_official_auth_when_preservation_off`。
+    //
+    // 理由：`~/.codex/auth.json` 就是 ChatGPT 桌面版的登录凭据（那个 app 自带一份 codex
+    // 核心二进制、与命令行 codex 共用同一个 `~/.codex`）。默认覆写它意味着用户每次切分组都
+    // 被登出一次，而 LoongPort 的核心流程就是频繁切分组。
+    //
+    // 默认值本身由 `settings.rs` 的单测钉住（两条路径都验），这里验的是**切换链路真的照它走**。
     let _home = ensure_test_home();
 
     let live_auth = json!({
@@ -782,14 +786,18 @@ requires_openai_auth = true
 
     let auth_value: serde_json::Value =
         read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
-    assert_eq!(
-        auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
-        Some("third-party-key"),
-        "default (preservation off) should overwrite auth.json with the third-party API key"
-    );
+    // 第三方的 key 不该进 auth.json —— 它走 config.toml 的 experimental_bearer_token。
     assert!(
-        auth_value.pointer("/tokens/access_token").is_none(),
-        "default switch must clear the official ChatGPT OAuth token from live auth.json"
+        auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()) != Some("third-party-key"),
+        "第三方 key 不该被写进 auth.json（LoongPort 默认只碰 config.toml）: {auth_value}"
+    );
+    // 而用户的 ChatGPT OAuth token 必须原样活着 —— 这是本测试的重点。
+    assert_eq!(
+        auth_value
+            .pointer("/tokens/access_token")
+            .and_then(|v| v.as_str()),
+        Some("official-oauth-token"),
+        "切到第三方 provider 不得清掉 ChatGPT 桌面版的登录凭据"
     );
 }
 

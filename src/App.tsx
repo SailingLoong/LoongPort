@@ -37,6 +37,10 @@ import {
   type ProviderSwitchEvent,
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
+import {
+  LAST_APP_STORAGE_KEY,
+  LAST_VIEW_STORAGE_KEY,
+} from "@/config/constants";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
 import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
@@ -78,7 +82,9 @@ import {
 } from "@/components/skills/SkillsPage";
 import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
-import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
+import { OperatorSection } from "@/components/operator/OperatorSection";
+import { StatsNoticeDialog } from "@/components/operator/StatsNoticeDialog";
+import { useCodexSwitchGuard } from "@/components/operator/useCodexSwitchGuard";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
 import { McpIcon } from "@/components/BrandIcons";
@@ -120,7 +126,8 @@ interface SyncStatusUpdatedPayload {
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
-const STORAGE_KEY = "cc-switch-last-app";
+// 两个 localStorage key 的定义在 `@/config/constants` —— 别在这里重新写字面量。
+// 写入端在 `AppSwitcher.tsx`，那次分叉就是因为它们各写一份（见常量那边的文档）。
 const VALID_APPS: AppId[] = [
   "claude",
   "claude-desktop",
@@ -133,14 +140,13 @@ const VALID_APPS: AppId[] = [
 ];
 
 const getInitialApp = (): AppId => {
-  const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
+  const saved = localStorage.getItem(LAST_APP_STORAGE_KEY) as AppId | null;
   if (saved && VALID_APPS.includes(saved)) {
     return saved;
   }
   return "claude";
 };
 
-const VIEW_STORAGE_KEY = "cc-switch-last-view";
 const VALID_VIEWS: View[] = [
   "providers",
   "settings",
@@ -159,10 +165,12 @@ const VALID_VIEWS: View[] = [
 ];
 
 const getInitialView = (): View => {
-  const saved = localStorage.getItem(VIEW_STORAGE_KEY) as View | null;
+  const saved = localStorage.getItem(LAST_VIEW_STORAGE_KEY) as View | null;
   if (saved && VALID_VIEWS.includes(saved)) {
     return saved;
   }
+  // 首启落 providers —— 运营商行就在它顶部（加站 / 登录 / 获取密钥 / 切档位
+  // 全在那儿）。2026-08-04 之前默认落已删除的 LoongPort 独立页。
   return "providers";
 };
 
@@ -181,7 +189,7 @@ function App() {
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem(VIEW_STORAGE_KEY, currentView);
+    localStorage.setItem(LAST_VIEW_STORAGE_KEY, currentView);
   }, [currentView]);
 
   const { data: settingsData } = useSettingsQuery();
@@ -308,6 +316,15 @@ function App() {
     activeApp,
     isProxyRunning,
     isProxyRunning && isCurrentAppTakeoverActive,
+  );
+
+  // 切 codex 的供应商时也走「退 ChatGPT → 切 → 重开」——**包括 cc-switch 自带的那些**。
+  // ChatGPT 桌面版与命令行 codex 共用同一个 `~/.codex`，它在跑的时候切任何 codex 供应商
+  // 都会撞上「它启动时读的旧配置还在生效，而且它退出时会回写 config.toml」。
+  // 判据与 LoongPort 档位切换完全一致（同一个页面两种行为不该不一样）。
+  const { guardedSwitch, switchDialog } = useCodexSwitchGuard(
+    activeApp,
+    switchProvider,
   );
 
   const disableOmoMutation = useDisableCurrentOmo();
@@ -978,6 +995,12 @@ function App() {
                     transition={{ duration: 0.15 }}
                     className="space-y-4"
                   >
+                    {/* LoongPort 的「运营商 × 分组」区，装在手工 provider 列表**上方**。
+                        它自带全部状态（见 OperatorSection 的文档）—— 这里只挂一行，
+                        不把 operator 的逻辑摊进这个上游文件。
+                        没有任何运营商时它自己返回 null，这一页与原来完全一样。 */}
+                    <OperatorSection appId={activeApp} />
+
                     <ProviderList
                       providers={providers}
                       currentProviderId={currentProviderId}
@@ -988,7 +1011,7 @@ function App() {
                         isProxyRunning && isCurrentAppTakeoverActive
                       }
                       activeProviderId={activeProviderId}
-                      onSwitch={switchProvider}
+                      onSwitch={guardedSwitch}
                       onEdit={(provider) => {
                         setEditingProvider(provider);
                       }}
@@ -1192,10 +1215,16 @@ function App() {
             ) : (
               <div className="flex items-center gap-2">
                 <div className="relative inline-flex items-center">
-                  <a
-                    href="https://ccswitch.io"
-                    target="_blank"
-                    rel="noreferrer"
+                  {/* 品牌名点一下回主面板，**有意不做成外链**。
+                      上游那里是指向官网的外链；这里换成「回主页」是因为点品牌名
+                      回首页是更常见的桌面应用行为，而官网入口在「关于」页与托盘里
+                      已经各有一个（`OFFICIAL_WEBSITE`）——同一个目的地不必三个入口。
+
+                      2026-08-04：原来指向已删除的 LoongPort 独立页，现在回 providers
+                      —— 那本来就是主页（运营商行也在它顶部）。 */}
+                  <button
+                    type="button"
+                    onClick={() => setCurrentView("providers")}
                     className={cn(
                       "text-xl font-semibold transition-colors",
                       isProxyRunning && isCurrentAppTakeoverActive
@@ -1203,8 +1232,8 @@ function App() {
                         : "text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300",
                     )}
                   >
-                    CC Switch
-                  </a>
+                    LoongPort
+                  </button>
                 </div>
                 <Button
                   variant="ghost"
@@ -1659,7 +1688,21 @@ function App() {
       />
 
       <DeepLinkImportDialog />
-      <FirstRunNoticeDialog />
+
+      {/* 匿名统计的首启告知。统计**默认开**，所以这一屏是它的知情前提 ——
+          在第一次上报发生之前必须弹过（后端那个上报任务的门禁读的就是这一屏写下的
+          `statsNoticeConfirmed`，没表态就一个字节都不发）。
+          它自带「读设置 → 判要不要弹」的全部状态，这里只挂一行。 */}
+      <StatsNoticeDialog />
+
+      {/* 切 codex 供应商前的「要不要退 ChatGPT」确认框。它由 `useCodexSwitchGuard`
+          持有全部状态（弹不弹、切哪个），这里只挂一行 —— 与上面那个同一个模式。 */}
+      {switchDialog}
+
+      {/* 上游的首启欢迎弹窗**有意不挂**：它讲的是 CC Switch 怎么在多个供应商之间切换，
+          与 LoongPort 的流程无关；而且它和域名输入弹窗都是「flag 未确认就弹」+ zIndex=top，
+          会叠在一起，用户先看到一屏无关介绍才能摸到真正要填的东西。
+          LoongPort 的首启入口是 provider 页顶部那一区的「添加站点」。 */}
     </div>
   );
 }

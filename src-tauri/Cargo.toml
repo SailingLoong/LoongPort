@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch"
-version = "3.19.1"
+version = "3.19.2"
 description = "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 authors = ["Jason Young"]
 license = "MIT"
@@ -78,6 +78,13 @@ indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
 uuid = { version = "1.11", features = ["v4"] }
 sha2 = "0.10"
+# Ed25519 验签（远端配置的签名校验，见 `operator::remote_config`）。
+#
+# **显式依赖而不是蹭 rustls 带进来的那份**：间接依赖的版本不由我们控制，
+# 上游哪天换 TLS 后端（aws-lc-rs 之类）它就消失了，而验签是安全边界不能这样断。
+# 选 ring 而不是 ed25519-dalek：它已经在依赖树里（rustls 用它），
+# 且 `lib.rs` 已经在调它的 crypto provider —— 零新增编译单元。
+ring = "0.17"
 hmac = "0.12"
 json5 = "0.4"
 json-five = "0.3.1"

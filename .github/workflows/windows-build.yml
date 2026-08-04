@@ -1,0 +1,108 @@
+# 出一个能给人试用的 Windows 安装包。
+#
+# **有意与继承来的 `release.yml` 分开**：那个跑五平台矩阵、要 Tauri 签名私钥 + Apple 证书 +
+# 公证凭据，一个 secret 都没配的话第一步就红。这个 workflow 零 secrets，只干一件事 ——
+# 出 Windows msi。
+#
+# 不签名的代价：用户第一次运行会看到 SmartScreen 的「未知发布者」警告，要点「更多信息 →
+# 仍要运行」。给朋友试用可以接受；真要对外发布得另配代码签名证书。
+name: Windows Build
+
+on:
+  # 手动触发为主 —— 出包是个有意的动作，不该每次 push 都烧 CI 额度。
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 目标架构
+        type: choice
+        default: x64
+        options: [x64, arm64, both]
+  # 打 tag 时也出一份，方便对着版本号找包。
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 把「要出哪几个架构」算成一个 JSON 数组给下面的 matrix 用。
+  #
+  # 为什么不在 job 级 `if` 里判：**`matrix` 在那个上下文里不可用**（GitHub Actions 会报
+  # `Unrecognized named-value: 'matrix'`）—— job 级 `if` 在展开矩阵之前求值。所以过滤必须
+  # 发生在矩阵**生成**的时候，而不是生成之后。
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.pick.outputs.targets }}
+    steps:
+      - id: pick
+        env:
+          # 经 env 传而不是直接插进脚本 —— 这是 workflow 注入的标准防线。
+          # 这里的值本身受 `type: choice` 约束（只能是那三个），但形式上仍照规矩来。
+          ARCH: ${{ github.event.inputs.arch }}
+        run: |
+          x64='{"runner":"windows-2022","arch":"x64","target":"x86_64-pc-windows-msvc"}'
+          arm='{"runner":"windows-11-arm","arch":"arm64","target":"aarch64-pc-windows-msvc"}'
+          case "${ARCH:-both}" in
+            x64)   targets="[$x64]" ;;
+            arm64) targets="[$arm]" ;;
+            *)     targets="[$x64,$arm]" ;;   # both、以及非 workflow_dispatch 触发
+          esac
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.targets) }}
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本跟随继承来的 release.yml —— 那是上游验证过能跑的组合，别自己挑。
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.12.3
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      # rust-toolchain.toml 锁了 channel，这里只要补目标平台。
+      - name: 装 Rust 工具链
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - run: pnpm install --frozen-lockfile
+
+      # 编译前先过一遍闸。Windows 上有一批 `#[cfg(target_os = "windows")]` 分支是 macOS
+      # 开发时编译器根本看不到的，让它们在这里暴露，而不是在 tauri build 中途。
+      - name: 编译检查（Windows 侧的 cfg 分支只有这里能验）
+        run: |
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: 打包
+        # 只出 msi。nsis 那条要额外下载安装器工具链，给人试用不需要两种包。
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LoongPort-windows-${{ matrix.arch }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 30

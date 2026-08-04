@@ -29,7 +29,7 @@ pub fn reset_test_fs() {
     for sub in [
         ".claude",
         ".codex",
-        ".cc-switch",
+        cc_switch_lib::APP_DIR_NAME,
         ".gemini",
         ".grok",
         ".config",

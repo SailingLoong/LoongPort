@@ -115,15 +115,14 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(LEGACY_DISMISSED_KEY);
   }, []);
 
-  // 应用启动时自动检查更新
-  useEffect(() => {
-    // 延迟1秒后检查，避免影响启动体验
-    const timer = setTimeout(() => {
-      checkUpdate().catch(console.error);
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [checkUpdate]);
+  // 启动时的自动检查：**LoongPort 不做**。
+  //
+  // 后端有意不注册 `tauri-plugin-updater`（上游的 `plugins.updater` 端点指向
+  // cc-switch 自己的发布源，留着会把用户升级成 cc-switch —— 见 `lib.rs` 那段说明）。
+  // 插件没注册时 `check()` 必抛，所以这段每次启动只会往 console 吐一条错误，
+  // 不可能有别的结果。留着它不是"以后接上就能用"，而是**每次启动一条噪音**。
+  //
+  // 接上自己的发布渠道那天，把这段恢复即可（`checkUpdate` 本身没动）。
 
   const value: UpdateContextValue = {
     hasUpdate,

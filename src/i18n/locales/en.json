@@ -875,7 +875,9 @@
       "defaultCostMultiplierRequired": "Default multiplier is required",
       "defaultCostMultiplierInvalid": "Invalid multiplier format"
     },
-    "saveFailedGeneric": "Save failed, please try again"
+    "saveFailedGeneric": "Save failed, please try again",
+    "anonymousStats": "Usage statistics",
+    "anonymousStatsDescription": "Reports the relay site domains you added and how many accounts, to help prioritise support. Includes a random install ID for de-duplication; never accounts, balances, or keys."
   },
   "apps": {
     "claude": "Claude",
@@ -1058,8 +1060,7 @@
       "qiniu": "Qiniu Cloud is a multi-protocol AI relay: one key for native Claude, GPT, and Gemini models, with the Anthropic, OpenAI, and Gemini APIs all supported.",
       "fenno": "Fenno.ai is a stable, efficient API relay giving you access to a wide range of mainstream models. Exclusive CC Switch offer: subscribe via this link to the ¥9.9 Coding Plan worth $150 in credits!",
       "zetaapi": "ZetaAPI delivers real, undegraded models at as low as 35% of official pricing. Exclusive CC Switch offer: register via this link and use promo code CC-SWITCH for 10% off your first top-up!",
-      "teamorouter": "TeamoRouter is an enterprise-grade Agentic LLM gateway with pricing up to 90% off. It offers exclusive benefits for CC Switch users: register via this link as a new user for 10% off your first top-up!",
-      "unity2": "Unity2.ai offers exclusive benefits for CC Switch users: register via this link to get $2 in credits, plus another $10 for joining the official group — up to $12 in free credits!"
+      "teamorouter": "TeamoRouter is an enterprise-grade Agentic LLM gateway with pricing up to 90% off. It offers exclusive benefits for CC Switch users: register via this link as a new user for 10% off your first top-up!"
     },
     "presets": {
       "ucloud": "Compshare",
@@ -3029,5 +3030,126 @@
     "expiredHint": "Run the {{tool}} command to refresh your login",
     "queryFailed": "Query failed",
     "refresh": "Refresh"
+  },
+  "loongport": {
+    "tierList": {
+      "title": "Providers & Tiers",
+      "empty": "No relay site added yet",
+      "addSite": "Add relay site",
+      "refresh": "Refresh tiers & keys"
+    },
+    "row": {
+      "expand": "Expand",
+      "collapse": "Collapse",
+      "notLoggedIn": "Not signed in",
+      "login": "Sign in",
+      "sessionExpired": "Session expired",
+      "reLogin": "Sign in again",
+      "noTiers": "This account has no available group for this platform",
+      "getKeys": "Get keys",
+      "tierCount": "{{count}} tier(s)",
+      "dragHandle": "Drag to reorder",
+      "refetchGroups": "Re-fetch available groups",
+      "purchaseHint": "Click to top up (opens this site’s purchase page in-app)",
+      "lowBalanceHint": "Balance below ${{threshold}} — click to top up",
+      "remove": "Remove this account (and its tiers)",
+      "removeBlockedByCurrent": "One of its tiers is in use — switch to another tier first",
+      "removeConfirmTitle": "Remove this account?",
+      "removeConfirmMessage": "This removes the login for “{{label}}” along with the {{count}} tier(s) it generated. Any balance stays with the provider — sign in again to use it."
+    },
+    "tier": {
+      "rateUnknown": "Rate unknown",
+      "rate": "{{value}}x",
+      "switching": "Switching…",
+      "checkConnectivity": "Check connectivity",
+      "resetConfig": "Restore default config",
+      "resetConfirmTitle": "Restore default config?",
+      "resetConfirmMessage": "This overwrites every edit you made to “{{name}}” with LoongPort's defaults. Your API key is kept.",
+      "resetConfirmButton": "Restore defaults",
+      "resetDone": "Restored default config for “{{name}}”",
+      "edit": "Edit config",
+      "editConfirmTitle": "Edit the config for “{{name}}” manually?",
+      "editConfirmMessage": "Once you save, this tier is yours to maintain: “Fetch keys” will only refresh its API key from then on, and will no longer overwrite your other changes.\n\nIf it stops working after your edits, use “Restore default config” on the tier row to go back to the defaults (your API key is kept).",
+      "editConfirmButton": "Continue to edit",
+      "userEdited": "Manually maintained",
+      "userEditedHint": "You have edited this tier's config. Refreshing groups will not overwrite it (only the API key is updated). Click here to restore the default config.",
+      "editMissing": "That tier's record no longer exists — use “Fetch keys” to regenerate it.",
+      "editCurrentNote": "This is the tier you're currently using. If your changes don't take effect, quit and reopen the ChatGPT desktop app — while it's running it rewrites Codex's config."
+    },
+    "stats": {
+      "title": "Help improve LoongPort",
+      "intro": "We would like to know which relay sites people actually use, so we can prioritise support.",
+      "sendsLabel": "What is sent",
+      "sendsBody": "The relay site domains you added, how many accounts, the app version and your OS type.",
+      "neverLabel": "What is never sent",
+      "neverBody": "Accounts, emails, balances, keys, or usage records.",
+      "canChange": "You can turn this off at any time in Settings → General.",
+      "accept": "Sounds good",
+      "decline": "No thanks",
+      "idNote": "A randomly generated install ID is included, used only to de-duplicate reports. It is unrelated to your relay-site accounts."
+    },
+    "site": {
+      "removed": "Removed {{label}}"
+    },
+    "session": {
+      "expired": "{{count}} account(s) signed out — please sign in again",
+      "connected": "Connected, fetching keys… (you can close the sign-in window)"
+    },
+    "provision": {
+      "ready": "{{count}} tier(s) ready",
+      "readyWithKeys": "{{count}} tier(s) ready, {{keys}} key(s) created",
+      "groupFailed": "{{group}}: {{reason}}",
+      "refreshed": "Refreshed {{operators}} provider(s), {{tiers}} tier(s) total",
+      "refreshFailedWithReason": "Failed to refresh {{name}}: {{reason}}",
+      "refreshedWithKeys": "Refreshed {{operators}} operator(s), {{tiers}} tier(s) total, {{keys}} new key(s)"
+    },
+    "switch": {
+      "done": "Switched to {{name}}",
+      "doneRelaunched": "Switched to {{name}}, ChatGPT reopened",
+      "doneNeedsRestart": "Switched to {{name}} — please restart ChatGPT manually"
+    },
+    "official": {
+      "button": "Switch back to official login",
+      "hint": "Clear the routing LoongPort wrote and use your own ChatGPT account",
+      "confirmTitle": "Switch back to official login?",
+      "confirmMessage": "This quits ChatGPT, clears the routing config LoongPort wrote, and deletes the current codex login (backed up first). You'll need to sign in to ChatGPT yourself afterwards.",
+      "confirmButton": "Switch to official",
+      "done": "Switched back to official login — please sign in to ChatGPT",
+      "doneWithBackup": "Switched back to official login. Previous login backed up to {{path}}"
+    },
+    "quitConfirm": {
+      "title": "Switch to {{name}}",
+      "body": "ChatGPT only reads its config at startup, so it has to be quit first and reopened after the switch.",
+      "declineNote": "If it has an ongoing conversation it will ask you to confirm — cancelling there aborts this switch and leaves your config untouched.",
+      "forceKillWarning": "⚠️ On Windows, ChatGPT can only be force-closed (it ignores normal close requests) and you won't be asked to save — save any conversation in progress first. We'll reopen it for you afterwards.",
+      "platformNote": "If we can't close it for you, the config still switches — just restart ChatGPT yourself.",
+      "switchOnly": "Switch only, I'll restart it",
+      "quitAndSwitch": "Quit and switch"
+    },
+    "addSite": {
+      "firstRunTitle": "Choose a relay site",
+      "firstRunBody": "Enter the relay site domain you want to use, or leave it blank to use the default {{site}}.",
+      "title": "Add relay site",
+      "body": "Enter another relay site's domain. One site can hold several accounts — just sign in with a different one; duplicates are merged automatically.",
+      "connected": "Connected to {{name}}",
+      "inputLabel": "Site domain",
+      "inputLabelWithSponsors": "Or enter a domain manually",
+      "sponsorsLabel": "Recommended sites",
+      "sponsorAddAnother": "{{count}} account(s) · add another"
+    },
+    "vendor": {
+      "add": "Add an official account (DeepSeek)",
+      "remove": "Remove this official account (and its configs)",
+      "removeConfirmTitle": "Remove this official account?",
+      "removeConfirmMessage": "Removes the session and local key for “{{label}}”, along with the configs it generated for six platforms. The API key on the vendor's site is kept — sign in again to reuse it.",
+      "removed": "Removed {{label}}",
+      "noKey": "No key yet",
+      "keyReady": "Configs ready for {{count}} platform(s)",
+      "keyCreated": "Created a new key on the vendor's site and set up {{count}} platform(s)",
+      "refreshKey": "Set up the key again",
+      "sessionExpiredUsable": "Your session expired, but the key still works (only the balance is unavailable). Click to sign in again.",
+      "loginFailed": "Sign-in did not complete: {{reason}}",
+      "openKeyPage": "Manage keys on the site"
+    }
   }
 }

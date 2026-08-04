@@ -6,3 +6,11 @@ onlyBuiltDependencies:
 
 ignoredBuiltDependencies:
   - msw
+
+# pnpm 10 会在遇到未表态的构建脚本时中止 install（连带把 `pnpm run xxx` 全挡住，
+# 因为它们跑之前都会做一次 deps 检查）。这两条是显式表态：
+#   esbuild 必须能构建 —— 它是 vite 的原生依赖，不 build 就没有二进制可用；
+#   msw 只在测试里做请求打桩，不需要它的 postinstall。
+allowBuilds:
+  esbuild: true
+  msw: false

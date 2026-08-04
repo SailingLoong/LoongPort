@@ -402,6 +402,12 @@ impl Database {
             [],
         );
 
+        // LoongPort：运营商与凭据（单行表）
+        crate::operator::creds::create_table(conn)?;
+
+        // LoongPort：官网直连账号（vendor 层）
+        crate::vendor::creds::create_table(conn)?;
+
         Ok(())
     }
 
@@ -3222,7 +3228,9 @@ mod tests {
 
         Database::apply_schema_migrations_on_conn(&conn)?;
 
-        assert_eq!(Database::get_user_version(&conn)?, 16);
+        // 跟着 SCHEMA_VERSION 走而不是写死数字：迁移是一路跑到最新版的，写死会在每次加
+        // 迁移时红一次，而它本来要验的是「v15→v16 这一级只重置 codex 会话用量」。
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
         let counts: (i64, i64, i64, i64) = conn.query_row(
             "SELECT
                 (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'),

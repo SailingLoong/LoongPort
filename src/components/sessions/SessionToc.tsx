@@ -94,6 +94,9 @@ export function SessionTocDialog({
         zIndex="alert"
         onInteractOutside={() => onOpenChange(false)}
         onEscapeKeyDown={() => onOpenChange(false)}
+        // header 里已经有一个 X（下面那个 `DialogClose`）—— 不要 `DialogContent`
+        // 再叠一个：这个弹窗的 header 是紧凑的 `py-3`，两个 X 会挨在一起。
+        showCloseButton={false}
       >
         <DialogHeader className="px-4 py-3 relative border-b">
           <DialogTitle className="flex items-center gap-2 text-base font-semibold">

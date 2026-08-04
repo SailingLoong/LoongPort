@@ -158,8 +158,22 @@ export function useProviderActions(
   );
 
   // 切换供应商
+  /**
+   * 切换供应商。
+   *
+   * `quitChatgpt` 由调用方在弹过确认框、用户同意之后传 true —— 它让后端走
+   * 「退 ChatGPT → 切 → 重开」那套编排（与 LoongPort 档位切换共用同一份实现）。
+   *
+   * **为什么 codex 也需要这个**：ChatGPT 桌面版自带一份 codex 核心、与命令行 codex
+   * 共用同一个 `~/.codex`。它在跑的时候切任何 codex 供应商（不只是 LoongPort 的托管
+   * 档位）都有同一个问题：它启动时读了旧 `config.toml` 不重启就仍连旧的，而且**它退出
+   * 时会回写那个文件**、可能把刚写的覆盖掉。
+   *
+   * 不传 = 不碰 ChatGPT。托盘快切 / deeplink 导入没有弹确认框的机会，而未经用户同意
+   * 就关掉他正开着的 app 是不能接受的。
+   */
   const switchProvider = useCallback(
-    async (provider: Provider) => {
+    async (provider: Provider, quitChatgpt?: boolean) => {
       const isCopilotProvider =
         activeApp === "claude" &&
         provider.meta?.providerType === "github_copilot";
@@ -287,7 +301,10 @@ export function useProviderActions(
       }
 
       try {
-        const result = await switchProviderMutation.mutateAsync(provider.id);
+        const result = await switchProviderMutation.mutateAsync({
+          providerId: provider.id,
+          quitChatgpt,
+        });
         await syncClaudePlugin(provider);
 
         // Show backfill warning if present
