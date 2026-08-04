@@ -43,7 +43,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          # 同 ci.yml：跟 `.node-version` 走。出正式包的这条腿更不该用与 CI 不同的 Node。
+          node-version-file: .node-version
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

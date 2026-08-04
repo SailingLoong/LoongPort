@@ -206,7 +206,7 @@ Gatekeeper stays out of the way.
 
 **Frontend**: React 18 · TypeScript 5 · Vite 7 · TailwindCSS 3.4 · TanStack Query v5 · shadcn/ui
 
-**Backend**: Tauri 2.8 · Rust (edition 2021, 1.85+) · serde · tokio · SQLite
+**Backend**: Tauri 2.8 · Rust (edition 2021, version pinned by `rust-toolchain.toml`) · serde · tokio · SQLite
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml   # backend

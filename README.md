@@ -179,7 +179,7 @@ macOS 上本机构建出来的应用不带隔离标记，Gatekeeper 不会介入
 
 **前端**：React 18 · TypeScript 5 · Vite 7 · TailwindCSS 3.4 · TanStack Query v5 · shadcn/ui
 
-**后端**：Tauri 2.8 · Rust（edition 2021，1.85+）· serde · tokio · SQLite
+**后端**：Tauri 2.8 · Rust（edition 2021，版本见 `rust-toolchain.toml`）· serde · tokio · SQLite
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml   # 后端

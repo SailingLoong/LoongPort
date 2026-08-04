@@ -28,7 +28,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          # 跟 `.node-version` 走，别写死 —— 三个 workflow 曾经是三种写法
+          # （这里与 release.yml 写死 20、windows-build.yml 读文件），
+          # 于是 CI 验的、出包用的、贡献者本机装的可能是三个不同版本。
+          node-version-file: .node-version
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
