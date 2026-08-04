@@ -11,7 +11,7 @@ LoongPort's first release is 3.19.2 rather than 0.1.0.
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)。版本号延续上游的序列
 （见文末「溯源」），所以 LoongPort 的第一个版本是 3.19.2 而不是 0.1.0。
 
-## [3.19.2] — Unreleased / 未发布
+## [3.19.2] — 2026-08-04
 
 First LoongPort release. What follows is what this fork adds on top of cc-switch
 v3.19.2; the inherited base is not re-listed.
@@ -83,13 +83,17 @@ LoongPort 的首个版本。以下是本 fork 在 cc-switch v3.19.2 之上新增
   **省钱口径改为「只花百分之几」。** 用户可见文案是「Codex 只花官方的 5%、Claude 只花
   20%」而不是「省 95%」—— 推导与说明在定价页。
 
-- **Referral relationship disclosed in the README.** Registration links carry a
-  referral code from a compile-time table
-  (`src-tauri/src/operator/aff.rs`, visible in the source). It does not affect
-  the user's price and nothing is deducted from their balance.
+- **Both commercial relationships disclosed in the README.** Registration links
+  carry a referral code from a compile-time table
+  (`src-tauri/src/operator/aff.rs`), and one preset site — the only entry in the
+  built-in promo-code table (`operator/promo.rs`) — is run by the maintainer.
+  Both tables are compiled into the binary and visible in the source. Neither
+  affects the user's price and nothing is deducted from their balance.
 
-  **README 里明说返利关系。** 注册链接带编译期常量表里的邀请码
-  （`src-tauri/src/operator/aff.rs`，源码里看得到）。它不影响用户的价格，也不从余额里扣。
+  **README 里把两层商业关系都说清。** 一是注册链接带编译期常量表里的邀请码
+  （`src-tauri/src/operator/aff.rs`）；二是有一个预置站点由维护者自己运营，它也是内置
+  优惠码表（`operator/promo.rs`）里唯一的一条。两张表都编译进二进制、源码里看得到。
+  两者都不影响用户的价格，也不从余额里扣。
 
 ### Removed / 移除
 
@@ -108,6 +112,37 @@ LoongPort 的首个版本。以下是本 fork 在 cc-switch v3.19.2 之上新增
   **上游的 changelog、release notes、用户手册与指南。** 它们记的是 cc-switch 自己的功能面
   （本地代理、MCP、Skills、Prompts、会话管理），且引用它的 issue 编号 —— 那些编号在本仓
   会指向无关的 issue。那段历史现在在哪见「溯源」。
+
+### Fixed / 修复
+
+- **"No tiers here" no longer looks the same as "the fetch failed".** Provisioning
+  probes every platform at once and each tier lands on the CLI its own platform
+  maps to, so a site with no Anthropic tiers leaves the Claude tab empty — which
+  read identically to a genuine fetch failure. Retrying is pointless in the first
+  case and worthwhile in the second, so the two now say different things.
+
+  **「分组落在别的平台」不再和「拉取失败」长得一样。** provision 一次探全部平台，每个
+  分组按自己的平台落到对应 CLI ⇒ 某个站没有 anthropic 分组时 claude 那一屏是零档位，
+  而它与真的拉失败此前显示同一句话。前者再点一百次也不会有（该切 tab 或换站），后者
+  重试有意义，所以两种处境现在说的是两句话。
+
+- **A user's own provider could be mistaken for a managed one.** The frontend
+  decided "did we generate this record" by matching an id prefix — a shape test
+  standing in for a provenance question. Live-config import writes provider ids
+  taken straight from the user's own CLI config, so a colliding prefix was
+  genuinely reachable. The check now goes by provenance.
+
+  **用户自己的 provider 可能被误判成托管项。** 前端判「这条记录是不是我们生成的」靠的是
+  id 前缀 —— 那判的是形状，而问题问的是来源。live config 导入的 provider id 直接取自
+  用户自己的 CLI 配置，所以撞上前缀是真实可达的。判据改为按来源判。
+
+- **The delete confirmation said untrue things about a never-signed-in row.** It
+  claimed the sign-in state would be removed and could be restored by signing in
+  again — wrong for a row that had never been signed into. Split into two
+  wordings chosen by state.
+
+  **删除确认对「从没登录过」的行说错话。** 原文案说「会删掉登录态…重新登录就能再用」，
+  而那一行可能从没登录过。按状态拆成两条文案。
 
 ---
 
