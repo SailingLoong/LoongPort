@@ -109,10 +109,14 @@ jobs:
         # 里烧死的 npm registry 公钥已经过期，而 registry 现在用新 key 签 pnpm ⇒
         # `corepack prepare` 在验签那步炸，报 `Internal Error: Cannot find matching keyid`
         # （2026-08-04 实测，日志里能看到它在 node\22.12.0\arm64\node_modules\corepack 下）。
-        # 装最新的 corepack 就带上了新公钥。
+        # 换一个带新公钥的 corepack 就好。
+        #
+        # **钉版本、不用 `@latest`**：要的只是「带新公钥」这一个属性，而 `@latest` 等于
+        # 让每次构建都拉当天最新版 —— 那是对未来所有版本无条件信任，供应链上白送一个
+        # 可变输入。0.35.0 发布于 2026-05-15。
         run: |
           $ErrorActionPreference = 'Stop'
-          npm install -g corepack@latest
+          npm install -g corepack@0.35.0
           corepack enable
           corepack prepare pnpm@10.12.3 --activate
           node --version
