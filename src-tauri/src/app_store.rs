@@ -229,7 +229,22 @@ mod tests {
             .expect("tauri.conf.json 里必须有 identifier —— 没有它就推不出 store 位置");
         assert!(!identifier.is_empty(), "identifier 是空的");
 
-        let path = tauri_store_path().expect("推不出 store 路径");
+        // ⚠️ **`None` 是合法返回值，不能 `expect`。** 这个函数依赖 OS 的用户目录探测
+        // （Windows 走 `dirs::config_dir()` → `FOLDERID_RoamingAppData`），探不到时它
+        // 有意返回 `None` 让上层回落到默认目录 —— 那是**环境事实，不是不变量**。
+        //
+        // 2026-08-05 在 CI 的 windows-latest 上实测到了：2596 个测试全过、只这一条
+        // `panicked at ...: 推不出 store 路径`。原来的 `expect` 把「这台机器能否探到
+        // 用户目录」当成了断言对象，而这条测试真正要守的是**路径的形状**
+        // （以 `app_paths.json` 结尾、含 identifier）—— 那才是「改了 identifier 却忘了
+        // 同步」会破坏的东西。
+        //
+        // ⇒ 探不到就跳过形状检查。这不是放宽标准：拿不到 base 的机器上根本没有
+        // 「形状」可言，而 identifier 那两条前置断言（存在、非空）仍然无条件生效。
+        let Some(path) = tauri_store_path() else {
+            eprintln!("○ 这台机器探不到用户配置目录，跳过路径形状检查（identifier 已验）");
+            return;
+        };
         assert!(
             path.ends_with("app_paths.json"),
             "store 文件名与 `store_builder(\"app_paths.json\")` 那处不一致：{}",
