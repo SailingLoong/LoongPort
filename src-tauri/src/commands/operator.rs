@@ -42,19 +42,14 @@ use crate::store::AppState;
 
 /// 默认运营商域名。域名输入框的底纹词，用户直接点确定就用它。
 ///
-/// ## ⚠️ 这个站**不是**维护者自己的站（2026-08-04 改成这样）
+/// ⚠️ **它不再是维护者自己的站**（2026-08-04 从 `bestapi.store` 改过来，
+/// 理由是用户量：默认值该指向最可能被用到的那个）。那个巧合曾让好几处文档把
+/// 「默认站」与「维护者自己的站」写成一件事 —— 别再绑回去。
 ///
-/// 原来是 `bestapi.store`（维护者自己的站）。改成 `790053500.com` 的理由是**用户量** ——
-/// 那家站在用的人多得多，默认值该指向最可能被用到的那个。
-///
-/// 这个区别有实际后果，别把两件事再绑回去：
-///
-/// - **它在 [`super::super::operator::aff`] 的码表里**（维护者自己的站有意不在）
-///   ⇒ 走「留空点确定」这条路会带上邀请码，而这是**要的**行为。
-/// - **它不在 [`super::super::operator::promo`] 的码表里** ⇒ 不预填优惠码。
-///   那张表只有维护者自己建过码的站，别的站主建了什么我们无从知晓（见那个模块的文档）。
-///
-/// ⇒ **改这个值时不需要动那两张表**：它们各自按 host 查，与「谁是默认站」无关。
+/// ⇒ 换这个值时**要重新确认它在 [`crate::operator::aff`] / [`crate::operator::promo`]
+/// 两张内置表里各该有什么**（两张表各自按 host 查，彼此独立，但都与「谁是默认站」
+/// 有关：默认站是最常被走到的那条路）。当前这个站在 aff 表里、不在 promo 表里，
+/// 由 `the_default_site_carries_an_affiliate_code` 钉住前者。
 const DEFAULT_SITE: &str = "790053500.com";
 
 /// codex 的默认模型。
@@ -321,6 +316,28 @@ fn operator_status_impl(_state: &AppState) -> Result<OperatorStatus, AppError> {
         default_site: DEFAULT_SITE.to_string(),
         chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
     })
+}
+
+/// 匿名统计的上报端点配好了没。
+///
+/// ## 为什么前端需要这个事实
+///
+/// 首启告知弹窗（`StatsNoticeDialog`）在问用户「同不同意上传」。而端点还是占位
+/// （`stats::ENDPOINT` 含 `.invalid`）时，**同意与不同意的实际后果完全相同** ——
+/// 一个字节都不会发出去（`lib.rs` 那个上报任务第一道闸就是 `is_configured`）。
+///
+/// 那时弹这一屏是**向用户征求一个没有意义的同意**：它消耗用户对弹窗的信任，
+/// 却换不到任何数据。所以前端拿这个值当弹窗的前置条件。
+///
+/// ⚠️ **有意不把它并进 [`OperatorStatus`]**：那条命令是**首屏渲染要等的东西**
+/// （它的文档为此删掉过一个有遍历开销的字段），而这个事实只有统计告知那一屏要用。
+/// 单独一条命令让它不参与首屏的关键路径。
+///
+/// ⇒ **端点配好那天这里自动放行**，不需要有人记得回来撤掉什么开关 ——
+/// 判据就是端点本身，不是一个另行维护的标记。
+#[tauri::command]
+pub fn operator_stats_endpoint_configured() -> bool {
+    crate::operator::stats::is_configured()
 }
 
 /// 推荐运营商（首启屏那几个按钮）。
@@ -2661,18 +2678,23 @@ mod tests {
         assert_eq!(DEFAULT_SITE, "790053500.com");
     }
 
-    /// ⭐ 钉住「默认站带邀请码」—— 这与它上一版的规则**正好相反**。
+    /// ⭐ 钉住「默认站在 aff **内置表**里有码」—— 这与它上一版的规则**正好相反**。
     ///
     /// 默认站曾是维护者自己的站，那时它**有意不在** aff 表里（服务端拒绝自己邀请自己）。
-    /// 换成 `790053500.com` 之后那条理由不再适用，带码才是对的 —— 但
+    /// 换成 `790053500.com` 之后那条理由不再适用，有码才是对的 —— 但
     /// [`crate::operator::aff`] 的测试里仍留着「维护者自己的站不该有码」那条，
     /// 很容易有人按类比把默认站也从表里划掉，而那**不报任何错**，
     /// 只是每一次「留空点确定」都白丢一笔返利。
+    ///
+    /// ⚠️ **它守的是内置那一层，不是运行时的最终取值**（codex review 纠正）：
+    /// 实际取码走 [`crate::operator::remote_config::resolve_aff_code`] 的两层回落，
+    /// 远端配置命中就用远端的，且**远端给空串 = 撤销、不回落到内置**。
+    /// 所以本条断言不能、也不该保证「线上一定带码」—— 那取决于维护者当天发的配置。
     #[test]
-    fn the_default_site_carries_an_affiliate_code() {
+    fn the_default_site_has_a_builtin_affiliate_code() {
         assert!(
             crate::operator::aff::aff_code_for(&format!("https://{DEFAULT_SITE}")).is_some(),
-            "{DEFAULT_SITE} 是默认站且不是维护者自己的站，必须在 aff 表里"
+            "{DEFAULT_SITE} 是默认站且不是维护者自己的站，必须在 aff 内置表里"
         );
     }
 

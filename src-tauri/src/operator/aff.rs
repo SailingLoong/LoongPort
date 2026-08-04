@@ -90,10 +90,11 @@ pub(super) fn lookup_host(site_origin: &str) -> String {
 /// 查这个站有没有我们的 aff 码。
 ///
 /// `None` = 表里没有 ⇒ 调用方**什么都不做**（不写那个键、不改 URL）。
-/// 绝大多数站都会走这条路。
+/// 绝大多数站都会走这条路 —— 但**默认站在表里、有码**（2026-08-04 起它不再是
+/// 维护者自己的站，那之前这句话是反的）。
 ///
-/// ⚠️ **但默认站不走这条路** —— `DEFAULT_SITE` 现在是 `790053500.com`（在表里、有码），
-/// 不再是维护者自己的站。这句话 2026-08-04 之前反过来，别按旧印象改代码。
+/// ⚠️ 这是**内置那一层**，不是最终取值：调用方走
+/// [`super::remote_config::resolve_aff_code`] 的两层回落，远端配置能覆盖也能撤销它。
 pub fn aff_code_for(site_origin: &str) -> Option<&'static str> {
     let host = lookup_host(site_origin);
     AFF_CODES
@@ -124,9 +125,8 @@ mod tests {
         // （`affiliate_service.go:300`），补上是给服务端日志里塞一条错误。
         //
         // ⚠️ 这个理由**只适用于维护者自己的站**，别推广到「默认站」——
-        // 2026-08-04 之前两者恰好是同一个站，这条注释原来写着「它同时是 DEFAULT_SITE」，
-        // 那个巧合已经不成立了（默认站现在是 `790053500.com`，在表里且必须有码，
-        // 由 `commands::operator` 的 `the_default_site_carries_an_affiliate_code` 钉住）。
+        // 2026-08-04 之前两者恰好是同一个站，那个巧合已经不成立了
+        // （见 `commands::operator` 的 `the_default_site_has_a_builtin_affiliate_code`）。
         for origin in [
             "https://bestapi.store",
             "https://www.bestapi.store",
