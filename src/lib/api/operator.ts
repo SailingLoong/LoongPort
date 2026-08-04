@@ -112,13 +112,6 @@ export interface TierInfo {
   allowImageGeneration: boolean | null;
 }
 
-/** 装生图工具的结果。 */
-export interface ImagegenMcpResult {
-  serverId: string;
-  /** 装到了哪些 CLI（`"codex"` / `"claude"` / `"gemini"`）。 */
-  apps: AppId[];
-}
-
 /**
  * 「运营商 × 分组」页的一行运营商，连带它在当前 app 下的档位。
  *
@@ -367,33 +360,24 @@ export const operatorApi = {
     invoke("operator_reset_tier_config", { providerId, app }),
 
   /**
-   * 给某个档位装上生图工具（写一条 MCP server 记录，各 CLI 的配置由后端同步）。
+   * 「用哪个档位生图」。`null` = 用户还没选（那时 CLI 里没有生图工具）。
    *
-   * 装完用户在 codex / claude 里直接说「生成一张图」就能用 —— **不必切档位**，
-   * 对话仍走他当前那个（生图是独立的 MCP 工具）。
-   *
-   * 密钥不写进任何 CLI 配置文件：配置里只有档位 id，密钥在工具启动时从库里现读。
-   * 所以档位刷新换了密钥也不用重装。
-   *
-   * `apps` 省略 = 装到全部支持 stdio MCP 的那三个（codex / claude / gemini）。
+   * **与「当前对话档位」是两套独立的当前项** —— 生图走 `/v1/images/generations`
+   * 且自带密钥，对话走 `/v1/responses` 用当前档位的密钥，两条链路互不影响。
    */
-  installImagegenMcp: (
-    providerId: string,
-    apps?: AppId[],
-  ): Promise<ImagegenMcpResult> =>
-    invoke("operator_install_imagegen_mcp", { providerId, apps }),
-
-  /** 卸掉某个档位的生图工具（连各 CLI 配置里的投影一起清）。 */
-  uninstallImagegenMcp: (providerId: string): Promise<boolean> =>
-    invoke("operator_uninstall_imagegen_mcp", { providerId }),
+  currentImageTier: (): Promise<string | null> =>
+    invoke("operator_current_image_tier"),
 
   /**
-   * 已经装了生图工具的档位 id 列表。
+   * 启用 / 停用某个档位的生图。`null` = 停用。
    *
-   * **一次查完整屏**而不是每行各问一次 —— 前端据此把按钮显示成「装」还是「已装」。
+   * 启用后用户在 codex / claude 里直接说「生成一张图」即可，**对话仍走他当前用的档位**。
+   *
+   * **换档位不必重启 CLI**：后端只改一个标记，CLI 的配置文件不动 —— 生图工具在每次
+   * 调用时现读那个标记。密钥也是现读的，所以刷新档位换了密钥同样自动生效。
    */
-  listImagegenMcp: (): Promise<string[]> =>
-    invoke("operator_list_imagegen_mcp"),
+  setImageTier: (providerId: string | null): Promise<void> =>
+    invoke("operator_set_image_tier", { providerId }),
 
   /**
    * 一键「切回官方登录」：清 codex 的第三方路由与登录态。

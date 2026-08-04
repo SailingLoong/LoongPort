@@ -129,14 +129,14 @@ export interface OperatorRowProps {
    */
   onEditTier: (tier: TierInfo) => void;
   /**
-   * 给这个档位装 / 卸生图工具（一条 MCP server 记录）。
+   * 把生图切到这个档位（或停用生图，当它已是当前生图档位时）。
    *
-   * 装完用户在 codex / claude 里说「生成一张图」就能出图，**不必切到这个档位** ——
-   * 生图是独立的 MCP 工具，对话仍走他当前用的那个档位。
+   * **与 `onSwitchTier` 是两回事**：那个换的是「用哪个档位对话」，这个换的是
+   * 「图从哪个档位出」。两者互不影响，也各有自己的当前项。
    */
-  onToggleImagegen: (tier: TierInfo, installed: boolean) => void;
-  /** 已经装了生图工具的档位 id。前端据此把按钮显示成「装」还是「已装」。 */
-  imagegenInstalled: ReadonlySet<string>;
+  onUseForImages: (tier: TierInfo, isCurrent: boolean) => void;
+  /** 当前用哪个档位生图。`null` = 用户还没选，此时 CLI 里没有生图工具。 */
+  currentImageTier: string | null;
   /**
    * 删掉这一行（这个「站点 × 账号」）连带它名下的托管档位。
    *
@@ -165,8 +165,8 @@ export function OperatorRow({
   isCheckingTier,
   onResetTier,
   onEditTier,
-  onToggleImagegen,
-  imagegenInstalled,
+  onUseForImages,
+  currentImageTier,
   onDelete,
   dragHandleProps,
 }: OperatorRowProps) {
@@ -312,9 +312,9 @@ export function OperatorRow({
               checking={isCheckingTier(tier.providerId)}
               onReset={() => onResetTier(tier)}
               onEdit={() => onEditTier(tier)}
-              imagegenInstalled={imagegenInstalled.has(tier.providerId)}
-              onToggleImagegen={() =>
-                onToggleImagegen(tier, imagegenInstalled.has(tier.providerId))
+              isCurrentImageTier={currentImageTier === tier.providerId}
+              onUseForImages={() =>
+                onUseForImages(tier, currentImageTier === tier.providerId)
               }
             />
           ))}
@@ -630,8 +630,8 @@ function TierItem({
   checking,
   onReset,
   onEdit,
-  imagegenInstalled,
-  onToggleImagegen,
+  isCurrentImageTier,
+  onUseForImages,
 }: {
   tier: TierInfo;
   busy: ReadonlySet<string>;
@@ -640,8 +640,8 @@ function TierItem({
   checking: boolean;
   onReset: () => void;
   onEdit: () => void;
-  imagegenInstalled: boolean;
-  onToggleImagegen: () => void;
+  isCurrentImageTier: boolean;
+  onUseForImages: () => void;
 }) {
   const { t } = useTranslation();
   // 只禁**这一个档位**正在切换的那个按钮。原来是 `disabled={anyBusy}`，
@@ -654,36 +654,7 @@ function TierItem({
   // 没有默认形状）。`null` 时什么都不显示：显示「未手动维护」是在断言
   // 「刷新不会覆盖你的改动」，而事实是不知道 —— 让用户误信比不说更糟。
   const userEdited = tier.userEdited === true;
-  const togglingImagegen = busy.has(`imagegen:${tier.providerId}`);
-
-  // 生图工具该不该在这个档位上给入口。
-  //
-  // 判据是**两个字段的并**，因为它们各覆盖一类能生图的档位：
-  //
-  // | 档位 | isImageModel | allowImageGeneration | 能生图吗 |
-  // |---|---|---|---|
-  // | 纯生图分组（只挂 gpt-image-*） | true | true | ✅ |
-  // | 混合分组（有文本模型，如 pro池） | false | **true** | ✅（走中转站的生图桥）|
-  // | 普通文本分组（生图关掉的） | false | false | ❌ |
-  //
-  // ⚠️ `allowImageGeneration` 是 `null` 时（首屏只读本地那条路拿不到服务端字段）
-  // **仍然给入口**，只要 `isImageModel` 为真 —— 后者本地就能算。反过来，
-  // 纯文本档位在首屏不给入口，等 provision 拿到真值再出现。
-  //
-  // ⚠️ **还要限定 codex**（review 抓出）：后端那条命令按 `AppType::Codex` 查 provider，
-  // 而档位是按分组自己的 platform 落到各 CLI 的（anthropic→claude、grok→grokbuild）——
-  // 那些档位**没有 codex 那一行**。而 grok 分组的 `allow_image_generation` 在服务端
-  // **默认就是 true**（sub2api `defaultAllowImageGenerationForPlatform`：
-  // `return platform == PlatformGrok`）⇒ 不限定的话 grok 档位会显示按钮、点了却报
-  // 「找不到档位，请先获取密钥」—— 对一个刚刚 provision 成功的档位说这句话，
-  // 是把用户引向一个不解决问题的动作。
-  //
-  // 限定在**前端**而不是让后端放宽：生图 MCP 读的是 codex 形状的配置
-  // （`auth.OPENAI_API_KEY` + config.toml 里的 base_url），claude / grok 的形状不同，
-  // 让它们也能装等于要在 MCP 里再实现两套读取 —— 那是尺子2 该拦的。
-  const canGenerateImages =
-    tier.appId === "codex" &&
-    (tier.isImageModel || tier.allowImageGeneration === true);
+  const switchingImages = busy.has(`imagegen:${tier.providerId}`);
 
   return (
     <div
@@ -753,17 +724,6 @@ function TierItem({
               {t("loongport.tier.imageOnly")}
             </span>
           )}
-          {/* 「已装生图」标记。**常驻**，与「已手动维护」同一条判据：
-              它是状态不是动作，藏进 hover 用户就得逐行试探才知道装在哪一档了。 */}
-          {imagegenInstalled && (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 ring-1 ring-inset ring-emerald-500/30 dark:text-emerald-400"
-              title={t("loongport.tier.imagegenInstalledHint")}
-            >
-              <Check className="h-2.5 w-2.5" />
-              {t("loongport.tier.imagegenInstalled")}
-            </span>
-          )}
         </div>
         <div className="text-xs text-muted-foreground">
           {tier.rateMultiplier === null
@@ -811,11 +771,51 @@ function TierItem({
             的 `isCurrent` 分支：`variant="secondary"` + `Check` + `bg-gray-200`），
             不再是一段裸文字 —— 两者在同一屏并排时，文字与按钮混排看着像没对齐。
             当前态本身由行的蓝色边框表达（与上游卡片同一个做法）。 */}
-        {tier.isCurrent ? (
+        {/* 主按钮。**生图档位与聊天档位是两套语义**：
+            - 聊天档位：「启用」= 换成用它对话（`onSwitch`）
+            - 生图档位：「启用生图」= 换成用它出图（`onUseForImages`）
+
+            为什么必须分开：纯生图分组**没有文本模型**，切过去对话会 404
+            （维护者实测两次踩到 503：装好工具后顺手点了「启用」）。而它的存在意义
+            正是出图 —— 那个能力挂在另一条链路上（`/v1/images/generations`），
+            与「用哪个档位对话」无关。所以同一个位置、同一个视觉，语义随档位类型走。
+
+            violet 呼应这一行的「生图」标记 —— 让「这个按钮管的是生图那件事」
+            靠颜色就能看出来，不必读文字。 */}
+        {tier.isImageModel ? (
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant={isCurrentImageTier ? "outline" : "default"}
+            className={cn(
+              "h-7 shrink-0",
+              isCurrentImageTier
+                ? "border-violet-500/40 text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300"
+                : "bg-violet-600 text-white hover:bg-violet-700",
+            )}
+            disabled={switchingImages}
+            onClick={onUseForImages}
+            title={
+              isCurrentImageTier
+                ? t("loongport.tier.imageInUseHint")
+                : t("loongport.tier.useForImagesHint")
+            }
+          >
+            {switchingImages ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : isCurrentImageTier ? (
+              <Check className="mr-1 h-3.5 w-3.5" />
+            ) : (
+              <ImageIcon className="mr-1 h-3.5 w-3.5" />
+            )}
+            {isCurrentImageTier
+              ? t("loongport.tier.imageInUse")
+              : t("loongport.tier.useForImages")}
+          </Button>
+        ) : tier.isCurrent ? (
+          <Button
+            type="button"
+            size="sm"
             className="h-7 shrink-0 cursor-not-allowed bg-gray-200 text-muted-foreground hover:bg-gray-200 hover:text-muted-foreground dark:bg-gray-700 dark:hover:bg-gray-700"
             disabled
           >
@@ -862,41 +862,6 @@ function TierItem({
             <Activity className="h-3.5 w-3.5" />
           )}
         </Button>
-
-        {/* 「装 / 卸生图工具」：只在能生图的档位上出现（判据见 `canGenerateImages`）。
-
-            点一下就把一条 MCP server 记录写进库，各 CLI 的配置由后端同步 ——
-            用户之后在 codex / claude 里直接说「生成一张图」即可，**不必切档位**
-            （生图是独立工具，对话仍走他当前那个）。
-
-            已装的那些走 emerald（与上面那个标记同色，让「哪个按钮解除这个状态」
-            一眼可见 —— 与「恢复默认」用 amber 呼应 amber 标记同一个手法）。 */}
-        {canGenerateImages && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className={cn(
-              "h-7 w-7 shrink-0 p-1",
-              imagegenInstalled
-                ? "text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            disabled={togglingImagegen}
-            onClick={onToggleImagegen}
-            title={
-              imagegenInstalled
-                ? t("loongport.tier.imagegenUninstall")
-                : t("loongport.tier.imagegenInstall")
-            }
-          >
-            {togglingImagegen ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <ImageIcon className="h-3.5 w-3.5" />
-            )}
-          </Button>
-        )}
 
         {/* 「编辑配置」：跳 cc-switch 现成的编辑页 —— 那页支持全部字段，我们不重做
             （CLAUDE.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），

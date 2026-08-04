@@ -3071,13 +3071,14 @@
       "editMissing": "这个档位的记录已经不在了，请点「获取密钥」重新生成。",
       "editCurrentNote": "这是当前正在使用的档位。改完如果没生效，退出并重开 ChatGPT 桌面版 —— 它在跑的时候会把 codex 的配置改回去。",
       "imageOnly": "生图",
-      "imageOnlyHint": "这个档位只挂了生图模型（gpt-image 系列），当对话供应商用会失败。装上生图工具后，在 codex / claude 里直接说「生成一张图」即可，不必切到这个档位。",
-      "imagegenInstall": "装生图工具",
-      "imagegenUninstall": "卸掉生图工具",
-      "imagegenInstalled": "已装生图",
-      "imagegenInstalledHint": "这个档位的生图工具已装好。在 codex / claude 里直接说「生成一张图」即可 —— 对话仍走你当前用的档位。点这里卸掉。",
-      "imagegenInstalledToast": "已为「{{name}}」装上生图工具（{{apps}}）。新开一个终端后，直接说「生成一张图」即可。",
-      "imagegenUninstalled": "已卸掉「{{name}}」的生图工具"
+      "imageOnlyHint": "这个档位只挂了生图模型（gpt-image 系列），不能用来对话。点右边的「启用生图」，之后在 codex / claude 里说「生成一张图」即可 —— 对话仍走你当前用的档位。",
+      "useForImages": "启用生图",
+      "useForImagesHint": "把生图切到这个档位。对话不受影响，仍走你当前用的档位。",
+      "imageInUse": "生图中",
+      "imageInUseHint": "当前正用这个档位生图。点一下停用。",
+      "imageEnabledFirstTime": "生图已启用（用「{{name}}」）。新开一个终端后，在 codex / claude 里直接说「生成一张图」即可。",
+      "imageSwitched": "生图已切到「{{name}}」，立即生效（不用重启）。",
+      "imageDisabled": "已停用生图"
     },
     "stats": {
       "title": "帮助改进 LoongPort",

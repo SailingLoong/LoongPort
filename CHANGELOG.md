@@ -11,6 +11,57 @@ LoongPort's first release is 3.19.2 rather than 0.1.0.
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)。版本号延续上游的序列
 （见文末「溯源」），所以 LoongPort 的第一个版本是 3.19.2 而不是 0.1.0。
 
+## [3.20.0] — 2026-08-05
+
+### Added / 新增
+
+- **Image generation from inside your CLI, without giving up a chat tier.**
+  Tiers that can generate images now carry an install button; one click registers
+  a built-in MCP server with Codex, Claude Code and Gemini CLI, after which
+  "generate an image" just works in conversation. **Your chat keeps running on
+  whichever tier is active** — image generation is a separate tool, so a cheap
+  text tier and an image tier are no longer mutually exclusive.
+
+  The API key never lands in a CLI config file: the MCP entry stores only the
+  tier id, and the key is read from LoongPort's own database at launch. Refreshing
+  tiers rotates the key with no reinstall.
+
+  在 CLI 里生图，**不必让出对话档位**。能生图的档位上多了一个安装按钮，点一下就把内置的
+  生图工具注册进 Codex / Claude Code / Gemini CLI，之后在对话里说「生成一张图」即可。
+  对话仍走你当前启用的那个档位 —— 生图是独立工具，所以「用便宜的文本档位聊天」与
+  「要图」不再互斥。
+
+  密钥不落进任何 CLI 配置文件：MCP 条目里只存档位 id，密钥在工具启动时从 LoongPort
+  自己的数据库现读。刷新档位换了密钥也不用重装。
+
+### Fixed / 修复
+
+- **Image-only tiers were written with a text model, so selecting one 404'd.**
+  Provisioning now asks each group which models it actually serves and writes the
+  group's real `gpt-image-*` name when it serves nothing else. Existing tiers get
+  corrected on the next refresh — but only when their config is still untouched,
+  so a tier you have edited yourself is left alone.
+
+  纯生图分组原先被写入了文本模型名，选中即 404。现在 provision 会问每个分组它真正提供
+  哪些模型，只挂生图模型的分组就写它自己的 `gpt-image-*`。已存在的档位在下次刷新时会
+  被修正 —— 但仅限配置未被改动过的，你自己编辑过的档位不会被动。
+
+- **"Restore default config" no longer breaks an image tier.** It used to write
+  the text default back, i.e. the button meant for un-bricking a tier bricked
+  image ones instead.
+
+  「恢复默认配置」不再弄坏生图档位 —— 它原先会把文本默认值写回去，也就是专门用来救砖的
+  按钮反过来把生图档位弄砖了。
+
+- **Tauri's npm and crate versions had drifted apart, so no platform could be
+  packaged.** `@tauri-apps/api` is pinned back to the crate's minor. This had been
+  broken since the `tauri 2.11.1` dependency bump; CI does not run `tauri build`,
+  and Tauri only checks this pairing at package time.
+
+  Tauri 的 npm 包与 crate 版本已经漂开，导致两个平台都打不出包。`@tauri-apps/api` 已对回
+  crate 的 minor。这个问题自 `tauri 2.11.1` 那次依赖升级起就存在 —— CI 不跑
+  `tauri build`，而 Tauri 只在打包时校验这一对版本。
+
 ## [3.19.2] — 2026-08-04
 
 First LoongPort release. What follows is what this fork adds on top of cc-switch

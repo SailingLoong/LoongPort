@@ -3071,13 +3071,14 @@
       "editMissing": "この枠のレコードが見つかりません。「キーを取得」で再生成してください。",
       "editCurrentNote": "これは現在使用中の枠です。変更が反映されない場合は ChatGPT デスクトップ版を終了して開き直してください —— 起動中は Codex の設定を書き戻します。",
       "imageOnly": "画像生成",
-      "imageOnlyHint": "このティアは画像生成モデル（gpt-image 系）のみを提供しているため、チャット用プロバイダーとしては失敗します。画像ツールを入れれば codex / claude で「画像を生成して」と言うだけで使えます。このティアに切り替える必要はありません。",
-      "imagegenInstall": "画像ツールを入れる",
-      "imagegenUninstall": "画像ツールを外す",
-      "imagegenInstalled": "画像ツール導入済み",
-      "imagegenInstalledHint": "このティアの画像ツールは導入済みです。codex / claude で「画像を生成して」と言うだけで使えます（チャットは現在のティアのまま）。ここをクリックで外せます。",
-      "imagegenInstalledToast": "「{{name}}」に画像ツールを入れました（{{apps}}）。新しいターミナルを開いてから「画像を生成して」と言ってください。",
-      "imagegenUninstalled": "「{{name}}」の画像ツールを外しました"
+      "imageOnlyHint": "このティアは画像生成モデル（gpt-image 系）のみを提供しており、チャットには使えません。右の「画像生成に使う」を押せば、codex / claude で「画像を生成して」と言うだけで使えます（チャットは現在のティアのまま）。",
+      "useForImages": "画像生成に使う",
+      "useForImagesHint": "画像生成をこのティアに切り替えます。チャットは影響を受けず、現在のティアのままです。",
+      "imageInUse": "画像生成中",
+      "imageInUseHint": "現在このティアで画像を生成しています。クリックで停止します。",
+      "imageEnabledFirstTime": "画像生成を有効にしました（「{{name}}」を使用）。新しいターミナルを開いてから「画像を生成して」と言ってください。",
+      "imageSwitched": "画像生成を「{{name}}」に切り替えました。再起動不要で即時反映されます。",
+      "imageDisabled": "画像生成を停止しました"
     },
     "stats": {
       "title": "LoongPort の改善に協力",

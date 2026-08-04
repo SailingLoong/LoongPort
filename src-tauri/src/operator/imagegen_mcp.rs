@@ -49,6 +49,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 /// 本模块的诊断输出：**写 stderr**。
@@ -91,6 +92,14 @@ const DEFAULT_SIZE: &str = "1024x1024";
 /// MCP 协议版本。跟着 codex-cli 0.146 实际发的那个走。
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// 一张生成好的图。
+struct GeneratedImage {
+    /// 落盘位置。
+    path: PathBuf,
+    /// 原始 base64。**要回给宿主当 image content block** —— 见 [`handle_tool_call`]。
+    b64: String,
+}
+
 /// 这次运行绑定的档位。
 struct Tier {
     /// 明文 sk。
@@ -103,6 +112,35 @@ struct Tier {
     display_name: String,
 }
 
+/// 这个进程该用哪个数据目录。
+///
+/// ⚠️ **不能直接用 [`crate::config::get_app_config_dir`]**（review 抓出）：它查的是
+/// `app_store` 里那个**进程内缓存**，而缓存只由 `refresh_app_config_dir_override`
+/// （要 `AppHandle`）填 —— MCP 进程在 `run()` 之前就分流走了，没有 Tauri app ⇒
+/// 缓存永远空 ⇒ 设过「LoongPort 配置目录」的用户会读到默认目录下的旧库（或读不到库），
+/// 两种都不报错。
+///
+/// 所以走 [`crate::app_store::read_app_config_dir_override_without_tauri`]：
+/// 直接读那个 store 文件。没设过覆盖时回落到默认目录 —— 与主程序一致。
+fn app_dir() -> PathBuf {
+    crate::app_store::read_app_config_dir_override_without_tauri()
+        .unwrap_or_else(crate::config::get_app_config_dir)
+}
+
+/// 「当前生图档位」在 `settings` 表里的键。
+///
+/// ## 为什么 MCP 配置里不直接写档位 id
+///
+/// 那样每次换生图档位都会改到 CLI 的配置文件，而 **codex 只在启动时读它** ⇒ 用户切完
+/// 必须新开一个终端才生效，否则「我明明换了高清档，出的还是 1K」。
+///
+/// 存成库里的一个标记之后：切档位只动这一行、CLI 配置文件不变 ⇒ **下一次生图调用
+/// 自然就用新的了，不用重启任何东西**。sk 轮换同理（本来就是启动时现读）。
+///
+/// ⚠️ 这个键名跨进程共享（主程序写、MCP 进程读），所以它是**唯一定义在这里**，
+/// 由 `commands::operator` 引用 —— 两处各写一遍字面量迟早分叉，而症状是「切了没反应」。
+pub const CURRENT_IMAGE_TIER_KEY: &str = "loongport_current_image_tier";
+
 /// 从 LoongPort 库里读出某个档位的 sk / base_url / model。
 ///
 /// ## 为什么直接读 sqlite 而不复用 `ProviderService`
@@ -113,21 +151,58 @@ struct Tier {
 /// 代价是这里对 `providers` 表的形状有了第二处依赖。可接受：读的是 `id` /
 /// `settings_config` 这两个最稳定的列（`settings_config` 的结构还共用
 /// [`super::provision::extract_api_key`]，没有另写一份解析）。
-fn load_tier(provider_id: &str) -> Result<Tier, String> {
-    let db_path: PathBuf = crate::config::get_app_config_dir().join(crate::config::DB_FILE_NAME);
+/// 读出**当前**该用哪个档位生图。
+///
+/// ⚠️ **每次生图都重新调它**，不缓存 —— 那正是「切生图档位不用重启 codex」的实现：
+/// 用户在 LoongPort 里换了档位，下一次工具调用就读到新的。缓存一次就把这个好处抵消了。
+///
+/// 没有任何生图档位被启用时返回 `Err`，文案引导用户去 LoongPort 里选一个 ——
+/// **不自动挑一个**：用户可能压根不想用生图（他那个站可能没有生图分组），
+/// 替他选一个等于替他决定花钱。
+fn load_current_tier() -> Result<Tier, String> {
+    let provider_id = current_image_tier_id()?;
+    load_tier(&provider_id)
+}
+
+/// 从 `settings` 表读出用户选定的生图档位 id。
+fn current_image_tier_id() -> Result<String, String> {
+    let db_path: PathBuf = app_dir().join(crate::config::DB_FILE_NAME);
+    let conn = open_readonly(&db_path)?;
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [CURRENT_IMAGE_TIER_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("读取当前生图档位失败: {e}"))?;
+
+    value.filter(|v| !v.is_empty()).ok_or_else(|| {
+        "还没有选定用哪个档位生图。请在 LoongPort 的运营商列表里，         在一个「生图」档位上点「启用生图」。"
+            .to_string()
+    })
+}
+
+/// 只读打开数据库。
+///
+/// 只读是必须的：这个进程与主程序可能同时在跑，绝不能拿写锁。
+fn open_readonly(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     if !db_path.exists() {
         return Err(format!(
             "找不到 LoongPort 数据库（{}）。请先启动 LoongPort 并登录运营商。",
             db_path.display()
         ));
     }
-
-    // 只读打开：这个进程与主程序可能同时在跑，绝不能拿写锁。
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
+    rusqlite::Connection::open_with_flags(
+        db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
-    .map_err(|e| format!("打开数据库失败: {e}"))?;
+    .map_err(|e| format!("打开数据库失败: {e}"))
+}
+
+fn load_tier(provider_id: &str) -> Result<Tier, String> {
+    let db_path: PathBuf = app_dir().join(crate::config::DB_FILE_NAME);
+    let conn = open_readonly(&db_path)?;
 
     // ⚠️ **`app_type` 必须参与查询**（review 抓出）—— `providers` 的主键是
     // `(id, app_type)`，一个 `provider_id` **真的会有多行**：实测维护者库里
@@ -149,9 +224,12 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| match e {
+            // 标记指向的档位没了（用户删了账号 / 运营商下架了那个分组）。
+            // 主程序那侧读 `operator_current_image_tier` 时会校验并自动清掉这个死标记，
+            // 所以这里只要把话说清楚：让用户去重选，而不是去「获取密钥」。
             rusqlite::Error::QueryReturnedNoRows => format!(
-                "库里没有 codex 档位 {provider_id}。它可能已被删除 —— \
-                 请在 LoongPort 里重新点「装生图工具」。"
+                "生图档位 {provider_id} 已经不在了（可能被删除，或运营商下架了那个分组）。\
+                 请在 LoongPort 的运营商列表里，在一个「生图」档位上点「启用生图」。"
             ),
             other => format!("读取档位失败: {other}"),
         })?;
@@ -235,7 +313,9 @@ fn images_url(base_url: &str) -> String {
 /// 放 `~/.loongport/generated_images/`：与数据库同目录，用户找得到，也不会污染他当前
 /// 的工作目录（Agent 常在用户仓库里跑，往那里丢文件会进 git status）。
 fn output_dir() -> PathBuf {
-    crate::config::get_app_config_dir().join("generated_images")
+    // 同样走 `app_dir()` —— 用户把数据目录挪走了，图也该跟着落在那里，
+    // 而不是散在默认目录（他会找不到）。
+    app_dir().join("generated_images")
 }
 
 /// 调一次生图，返回落盘后的文件路径。
@@ -243,26 +323,36 @@ async fn generate_image(
     tier: &Tier,
     prompt: &str,
     size: Option<&str>,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Vec<GeneratedImage>, String> {
     let client = reqwest::Client::builder()
         // 生图慢（实测 30-90s），默认超时会在出图前就断。
-        .timeout(std::time::Duration::from_secs(300))
+        //
+        // **240 而不是 300**：codex 的 MCP 工具超时默认正好是 300s
+        // （`codex-rs/codex-mcp/src/rmcp_client.rs` 的 `DEFAULT_TOOL_TIMEOUT`，
+        // 本机 0.146 实测：310s 的调用在 300.16s 被它切断）。两边同为 300 时，
+        // 真的超时那次是宿主先报它自己那句泛泛的超时，我们这句「请求生图接口失败」
+        // 反而抢不到 —— 留 60s 余量让**更具体的那条**错误信息先到用户眼前。
+        .timeout(std::time::Duration::from_secs(240))
         .build()
         .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
 
-    // ⚠️ **显式要 `b64_json`**（review 抓出）：下面的解析只认那个字段，而
-    // `/v1/images/generations` 的**默认响应格式是 `url`** —— 不写这一行等于赌服务端
-    // 恰好回 base64。实测那个档位确实回的，但那只说明那一个分组的行为（上游 sub2api
-    // 的响应解析同时接受 `b64_json` 与 `url`，说明两种都可能出现）。
+    // ⚠️ **有意不发 `response_format`** —— 这里曾经加过 `"b64_json"`，是个过度修正
+    // （第二轮 review 抓出）：
     //
-    // 要 base64 而不是下 URL：省掉「再发一次 HTTP 取图」那条路径，连带省掉它的超时、
-    // 重定向、鉴权与临时链接过期这一整套失败面。
+    // - `gpt-image-*` **只返回 base64，没有 url 模式**，所以下面只认 `b64_json` 的解析
+    //   本来就是对的，不需要这个字段来保证。
+    // - 而官方 `/v1/images/generations` 对 `gpt-image-*` 带这个字段**直接 400**
+    //   （`Unknown parameter: 'response_format'` —— 它是给已下线的 `dall-e-*` 留的）。
+    // - sub2api 把请求体**原样透传**给上游（只改 `model`，见其
+    //   `rewriteOpenAIImagesModel`）⇒ 上游是 API-key 类账号时那个 400 会真的打回来。
+    //
+    // ⚠️ **本地测出 200 不能证明它安全**：调度器挑到 OAuth 类账号时该字段被丢弃，
+    // 于是同一个档位在不同的调度结果下表现不同。不发它则两条路都对。
     let body = json!({
         "model": tier.model,
         "prompt": prompt,
         "n": 1,
         "size": size.unwrap_or(DEFAULT_SIZE),
-        "response_format": "b64_json",
     });
 
     let resp = client
@@ -312,13 +402,68 @@ async fn generate_image(
         let name = format!("gpt-image-{}-{idx}.png", short_hash(&bytes));
         let path = dir.join(name);
         std::fs::write(&path, &bytes).map_err(|e| format!("写图片文件失败: {e}"))?;
-        saved.push(path);
+        // base64 原样留着 —— 下面要作为 MCP 的 image content block 回给宿主，
+        // 让模型**真的看到图**而不只是拿到一个路径。见 `handle_tool_call`。
+        saved.push(GeneratedImage {
+            path,
+            b64: b64.to_string(),
+        });
     }
 
     if saved.is_empty() {
         return Err("生图接口没有返回任何图片".into());
     }
+    // 顺手修剪 —— 见 `prune_old_images`。失败只记一行：修剪不成功不影响这次出图。
+    if let Err(e) = prune_old_images(&dir) {
+        diag!("清理旧图片失败（不影响本次生成）: {e}");
+    }
     Ok(saved)
+}
+
+/// 出图目录最多留多少张。
+///
+/// 一张 1024² 的 PNG 实测 0.7–2 MB，200 张约 150–400 MB —— 对「随手生成的中间产物」
+/// 这个量级够用，也不至于让用户某天发现家目录里躺了几十 G。
+///
+/// **不按时间修剪**：用户可能几个月才生一次图，按天数删会把他唯一那几张删掉；
+/// 而按数量删的语义清楚 ——「留最近的 N 张」。
+const MAX_KEPT_IMAGES: usize = 200;
+
+/// 把出图目录修剪到 [`MAX_KEPT_IMAGES`] 张，删最旧的。
+///
+/// ## 为什么要有它
+///
+/// 文件名是内容哈希，所以同图不会重复占位；但不同 prompt 会一直堆积，而**没有任何
+/// 东西会清它** —— 那就是「知情引入却没留痕的占位」，属技术债（本函数就是那笔债的偿还）。
+///
+/// 按 mtime 排序删最旧的。读不到 mtime 的排最前（当最旧）—— 那种文件多半是异常留下的。
+fn prune_old_images(dir: &std::path::Path) -> Result<(), String> {
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .map_err(|e| format!("读出图目录失败: {e}"))?
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
+        .map(|e| {
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (mtime, e.path())
+        })
+        .collect();
+
+    if files.len() <= MAX_KEPT_IMAGES {
+        return Ok(());
+    }
+    // 旧的在前，删掉超出的那些。
+    files.sort_by_key(|(mtime, _)| *mtime);
+    let excess = files.len() - MAX_KEPT_IMAGES;
+    for (_, path) in files.iter().take(excess) {
+        if let Err(e) = std::fs::remove_file(path) {
+            diag!("删不掉旧图片 {}: {e}", path.display());
+        }
+    }
+    diag!("出图目录已修剪：删掉 {excess} 张最旧的，保留 {MAX_KEPT_IMAGES} 张");
+    Ok(())
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
@@ -368,7 +513,7 @@ fn tools_list() -> Value {
 }
 
 /// 处理一条 JSON-RPC 请求，返回要写回去的响应（`None` = 这是个通知，不必回）。
-async fn handle_request(tier: &Tier, req: &Value) -> Option<Value> {
+async fn handle_request(req: &Value) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     // 通知（没有 id）不需要响应。`notifications/initialized` 就是这种。
     let id = req.get("id")?.clone();
@@ -380,7 +525,7 @@ async fn handle_request(tier: &Tier, req: &Value) -> Option<Value> {
             "serverInfo": { "name": "loongport-imagegen", "version": env!("CARGO_PKG_VERSION") }
         })),
         "tools/list" => Ok(json!({ "tools": tools_list() })),
-        "tools/call" => handle_tool_call(tier, req).await,
+        "tools/call" => handle_tool_call(req).await,
         // ping 是协议里的保活，必须答。
         "ping" => Ok(json!({})),
         other => Err(format!("不支持的方法: {other}")),
@@ -397,7 +542,7 @@ async fn handle_request(tier: &Tier, req: &Value) -> Option<Value> {
     })
 }
 
-async fn handle_tool_call(tier: &Tier, req: &Value) -> Result<Value, String> {
+async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     let params = req.get("params").ok_or("tools/call 缺 params")?;
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     if name != "generate_image" {
@@ -415,22 +560,48 @@ async fn handle_tool_call(tier: &Tier, req: &Value) -> Result<Value, String> {
         .ok_or("generate_image 需要非空的 prompt")?;
     let size = args.get("size").and_then(Value::as_str);
 
-    let paths = generate_image(tier, prompt, size).await?;
-    let list = paths
+    // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
+    // 档位，下一次生图就该用新的，**不必重启 codex**。见 `CURRENT_IMAGE_TIER_KEY`。
+    let tier = load_current_tier()?;
+    let images = generate_image(&tier, prompt, size).await?;
+    let list = images
         .iter()
-        .map(|p| p.display().to_string())
+        .map(|i| i.path.display().to_string())
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok(json!({
-        "content": [{
-            "type": "text",
-            "text": format!(
-                "已生成 {} 张图片（档位：{}，模型：{}）：\n{list}",
-                paths.len(), tier.display_name, tier.model
-            )
-        }]
-    }))
+    // ⚠️ **必须回 `image` content block，不能只给文件路径**（review 抓出）。
+    //
+    // 两个原因，缺一个这功能就是半残的：
+    //
+    // 1. **模型看不见图**。只给路径的话它只能去读文件，而 codex 默认沙箱是
+    //    `workspace-write` / `read-only` ⇒ `~/.loongport/` 在工作区之外，
+    //    它**连读都读不到**那个路径。于是「生成一张图」的结果是一句它自己也打不开的
+    //    文字，更没法据此迭代（「把猫改成橘色的」）。
+    // 2. **宿主本来就支持**：codex 0.146 实现了完整的 `ContentBlock` 联合类型
+    //    （`TextContent | ImageContent | AudioContent | ResourceLink |
+    //    EmbeddedResource`），还有它自己的 `_meta: {"codex/imageDetail": ...}` 扩展。
+    //    不发等于白放着能力不用。
+    //
+    // bytes 在写文件前就在手上，所以这不额外发请求。
+    let mut content = vec![json!({
+        "type": "text",
+        "text": format!(
+            "已生成 {} 张图片（档位：{}，模型：{}），已存到：\n{list}",
+            images.len(),
+            tier.display_name,
+            tier.model
+        )
+    })];
+    for img in &images {
+        content.push(json!({
+            "type": "image",
+            "data": img.b64,
+            "mimeType": "image/png",
+        }));
+    }
+
+    Ok(json!({ "content": content }))
 }
 
 /// MCP server 主循环：stdin 读一行一条 JSON-RPC，stdout 写一行一条响应。
@@ -438,14 +609,20 @@ async fn handle_tool_call(tier: &Tier, req: &Value) -> Result<Value, String> {
 /// ⚠️ **stdout 只许写协议消息** —— 宿主按行解析 JSON，掺一句日志进去它就断连。
 /// 本模块的诊断一律走 **stderr**（[`diag!`]），绝不 `println!`、也不用 `log::`
 /// （见 [`diag!`] 的文档：那个宏在这个进程里是空操作）。
-pub fn serve(provider_id: &str) -> Result<(), String> {
-    let tier = load_tier(provider_id)?;
-    diag!(
-        "生图 MCP 启动：档位「{}」，模型 {}，端点 {}",
-        tier.display_name,
-        tier.model,
-        images_url(&tier.base_url)
-    );
+pub fn serve() -> Result<(), String> {
+    // ⚠️ **启动时不要求「已选定生图档位」** —— 那会让没选过的用户在 codex 里看到
+    // 「工具启动失败」，而正确的表达是「工具在，但你还没选用哪个档位」：
+    // 前者像是软件坏了，后者是一句他能照做的话。所以这里只记一行诊断，
+    // 真正的检查推迟到 `tools/call`（那时报的错会作为工具结果显示给模型与用户）。
+    match load_current_tier() {
+        Ok(tier) => diag!(
+            "生图 MCP 启动：档位「{}」，模型 {}，端点 {}",
+            tier.display_name,
+            tier.model,
+            images_url(&tier.base_url)
+        ),
+        Err(e) => diag!("生图 MCP 启动（尚未选定档位）：{e}"),
+    }
 
     // 自建 runtime：这个进程没走 Tauri，没有现成的 async 环境。
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -469,7 +646,7 @@ pub fn serve(provider_id: &str) -> Result<(), String> {
                 continue;
             }
         };
-        if let Some(resp) = runtime.block_on(handle_request(&tier, &req)) {
+        if let Some(resp) = runtime.block_on(handle_request(&req)) {
             let mut out =
                 serde_json::to_string(&resp).map_err(|e| format!("序列化响应失败: {e}"))?;
             out.push('\n');

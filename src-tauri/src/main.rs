@@ -1,7 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-/// `--mcp-image-gen --tier <provider_id>`：不开窗口，当生图 MCP server 跑。
+/// `--mcp-image-gen`：不开窗口，当生图 MCP server 跑。
 ///
 /// ## ⚠️ 必须在 [`cc_switch_lib::run`] **之前**分流
 ///
@@ -11,48 +11,21 @@
 ///
 /// 所以这里不碰 Tauri 的任何东西：自建 tokio runtime、直接读库、走 stdin/stdout。
 ///
-/// 返回 `None` = 不是 MCP 模式，照常启动 GUI。
-fn mcp_image_gen_tier() -> Option<String> {
-    // 开关名从 lib 引 —— 写配置那侧（装工具时填进 args）用的是同一个常量。
+/// ## 为什么不带「用哪个档位」这个参数
+///
+/// 用哪个档位生图存在库里（`imagegen_mcp::CURRENT_IMAGE_TIER_KEY`），由 MCP 进程
+/// **每次生图时现读**。写进命令行参数的话，用户每换一次生图档位都会改到 CLI 的配置
+/// 文件，而 codex 只在启动时读它 ⇒ 必须新开终端才生效。
+fn is_imagegen_mcp_mode() -> bool {
     let flag = cc_switch_lib::IMAGEGEN_MCP_FLAG;
-    let args: Vec<String> = std::env::args().collect();
-    if !args.iter().any(|a| a == flag) {
-        return None;
-    }
-    // `--tier <id>` 与 `--tier=<id>` 都接受：写配置的是我们自己，但用户可能手改。
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if let Some(rest) = arg.strip_prefix("--tier=") {
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-        if arg == "--tier" {
-            if let Some(v) = iter.next() {
-                // `!starts_with("--")` 是为了兑现上面那句「用户可能手改」——
-                // `--tier --tier x` 不该把 `--tier` 自己当成档位 id
-                // （那会走到「库里没有档位 --tier」这个莫名其妙的错误上）。
-                if !v.is_empty() && !v.starts_with("--") {
-                    return Some(v.clone());
-                }
-            }
-        }
-    }
-    // 有 `--mcp-image-gen` 却没给档位 ⇒ 这是配置错误，不能静默退化成开 GUI
-    // （用户会看到窗口莫名弹出，而真正的问题是配置少了一个参数）。
-    // 用空串表达"要求了 MCP 模式但没说哪个档位"，由调用方报错退出。
-    Some(String::new())
+    std::env::args().any(|a| a == flag)
 }
 
 fn main() {
-    // MCP 模式最先判：见 `mcp_image_gen_tier` 的文档（走进 run() 会被 single-instance 截走）。
-    if let Some(provider_id) = mcp_image_gen_tier() {
-        if provider_id.is_empty() {
+    // MCP 模式最先判：见 `is_imagegen_mcp_mode` 的文档（走进 run() 会被 single-instance 截走）。
+    if is_imagegen_mcp_mode() {
+        if let Err(e) = cc_switch_lib::run_imagegen_mcp() {
             // stderr 而不是 stdout —— 后者是 MCP 协议通道，掺一句人话进去宿主会断连。
-            eprintln!("--mcp-image-gen 需要 --tier <provider_id>");
-            std::process::exit(2);
-        }
-        if let Err(e) = cc_switch_lib::run_imagegen_mcp(&provider_id) {
             eprintln!("生图 MCP 启动失败: {e}");
             std::process::exit(1);
         }

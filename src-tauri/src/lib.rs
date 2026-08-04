@@ -346,8 +346,8 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 ///
 /// 一个转发函数只暴露真正要暴露的东西，`main.rs` 那侧读起来也更清楚
 /// ——「这个二进制有两种启动方式」正好对应这里的两个 `pub fn`。
-pub fn run_imagegen_mcp(provider_id: &str) -> Result<(), String> {
-    operator::imagegen_mcp::serve(provider_id)
+pub fn run_imagegen_mcp() -> Result<(), String> {
+    operator::imagegen_mcp::serve()
 }
 
 /// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
@@ -1515,9 +1515,8 @@ pub fn run() {
             commands::operator_list_tier_rates,
             commands::operator_reorder,
             commands::operator_reset_tier_config,
-            commands::operator_install_imagegen_mcp,
-            commands::operator_uninstall_imagegen_mcp,
-            commands::operator_list_imagegen_mcp,
+            commands::operator_set_image_tier,
+            commands::operator_current_image_tier,
             commands::operator_switch_tier,
             commands::operator_list_sites,
             commands::operator_remove_site,

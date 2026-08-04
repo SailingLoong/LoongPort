@@ -26,6 +26,75 @@ pub fn get_app_config_dir_override() -> Option<PathBuf> {
     override_cache().read().ok()?.clone()
 }
 
+/// **不依赖 Tauri** 地读出用户设的数据目录覆盖。
+///
+/// ## 为什么需要它（review 抓出的一个静默失效）
+///
+/// [`get_app_config_dir_override`] 读的是**进程内的缓存**，而那个缓存只由
+/// [`refresh_app_config_dir_override`] 填 —— 它要 `AppHandle`，也就是只在
+/// `run()` 里能调。
+///
+/// 生图 MCP server 是同一个二进制的另一个入口（`--mcp-image-gen`），它**在 `run()`
+/// 之前就分流走了**、没有 Tauri app ⇒ 那个缓存永远是空的 ⇒
+/// [`crate::config::get_app_config_dir`] 回落到默认 `~/.loongport`。
+///
+/// 于是设过「LoongPort 配置目录」的用户会遇到两种**都不报错**的结果：
+/// - 默认路径下没有库 ⇒ MCP 报「找不到数据库，请先启动 LoongPort 并登录」，
+///   而他明明已经登录了 —— 一句他照做也没用的话；
+/// - 默认路径下还留着**旧库** ⇒ 读到过期的档位与密钥，静默用错账号。
+///
+/// 所以这里绕过缓存，直接读 `app_paths.json` 那个 store 文件 —— 它就是覆盖值的落盘处，
+/// 纯 JSON（`tauri-plugin-store` 不加密），位置由 bundle identifier 推出来。
+///
+/// 返回 `None` = 没设过覆盖（绝大多数用户），调用方用默认目录。
+pub fn read_app_config_dir_override_without_tauri() -> Option<PathBuf> {
+    let store_path = tauri_store_path()?;
+    let raw = std::fs::read_to_string(&store_path).ok()?;
+    let json: Value = serde_json::from_str(&raw).ok()?;
+    let path_str = json.get(STORE_KEY_APP_CONFIG_DIR)?.as_str()?.trim();
+    if path_str.is_empty() {
+        return None;
+    }
+    let path = resolve_path(path_str);
+    // 与 `read_override_from_store` 同一条判据：路径不存在就当没设
+    // （用户可能把那个目录删了 / 拔了外置盘，那时用默认目录比报错好）。
+    path.is_dir().then_some(path)
+}
+
+/// `app_paths.json` 在磁盘上的位置。
+///
+/// **与 `tauri-plugin-store` 的默认落盘位置必须一致** —— 它把 store 放在
+/// `app_config_dir()` 下，而那是 OS 约定 + `tauri.conf.json` 的 `identifier` 推出来的：
+///
+/// | 平台 | 位置 |
+/// |---|---|
+/// | macOS | `~/Library/Application Support/<identifier>/` |
+/// | Windows | `%APPDATA%\<identifier>\` |
+/// | Linux | `~/.config/<identifier>/` |
+///
+/// ⚠️ identifier 从 `tauri.conf.json` 编译期读进来（`include_str!` + 解析），
+/// **不写字面量** —— 那个值改了这里不跟着改就会静默读不到覆盖，而症状是
+/// 「设了数据目录但生图还是用默认库」。
+fn tauri_store_path() -> Option<PathBuf> {
+    const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+    let identifier = serde_json::from_str::<Value>(TAURI_CONF)
+        .ok()?
+        .get("identifier")?
+        .as_str()?
+        .to_string();
+
+    #[cfg(target_os = "macos")]
+    let base = dirs::home_dir()?
+        .join("Library")
+        .join("Application Support");
+    #[cfg(target_os = "windows")]
+    let base = dirs::config_dir()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = dirs::config_dir()?;
+
+    Some(base.join(identifier).join("app_paths.json"))
+}
+
 fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
     let store = match app.store_builder("app_paths.json").build() {
         Ok(store) => store,
@@ -132,4 +201,44 @@ pub fn migrate_app_config_dir_from_settings(app: &tauri::AppHandle) -> Result<()
 
     let _ = refresh_app_config_dir_override(app);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `app_paths.json` 的位置由 `tauri.conf.json` 的 `identifier` 推出来，
+    /// 而那是**跨文件的同一事实**（CLAUDE.md §三点六）。
+    ///
+    /// 这道闸盯住三件事，任一条破了 `read_app_config_dir_override_without_tauri`
+    /// 就会静默读不到覆盖 —— 症状是「用户设了数据目录，但生图 MCP 还是用默认库」，
+    /// 没有任何东西会报错：
+    ///
+    /// 1. `tauri.conf.json` 里仍有 `identifier`（不是被挪进平台专属的 conf 文件了）
+    /// 2. 它非空
+    /// 3. 拼出来的路径确实以 `app_paths.json` 结尾（`tauri-plugin-store` 的默认落盘名，
+    ///    与 `read_override_from_store` 里那个 `store_builder("app_paths.json")` 同一个）
+    #[test]
+    fn the_store_path_tracks_the_bundle_identifier() {
+        const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+        let identifier = serde_json::from_str::<Value>(TAURI_CONF)
+            .expect("tauri.conf.json 必须是合法 JSON")
+            .get("identifier")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .expect("tauri.conf.json 里必须有 identifier —— 没有它就推不出 store 位置");
+        assert!(!identifier.is_empty(), "identifier 是空的");
+
+        let path = tauri_store_path().expect("推不出 store 路径");
+        assert!(
+            path.ends_with("app_paths.json"),
+            "store 文件名与 `store_builder(\"app_paths.json\")` 那处不一致：{}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().contains(&identifier),
+            "store 路径里没有 identifier（{identifier}）：{}",
+            path.display()
+        );
+    }
 }

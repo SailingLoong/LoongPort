@@ -806,13 +806,51 @@ pub fn pick_model(available: Option<&[String]>) -> String {
     if !models.iter().all(|m| is_image_model(m)) {
         return DEFAULT_MODEL.to_string();
     }
+    // 取**最新的那一代**，见 `image_model_rank`。
+    // 空列表在 `list_models` 里已经归成 `None` 了，走不到这里；真走到也回落默认值。
     models
         .iter()
-        .min()
+        .max_by(|a, b| {
+            image_model_rank(a)
+                .cmp(&image_model_rank(b))
+                // 同代时按名字定序，让结果是该分组的一个确定函数（不随
+                // `/v1/models` 的返回顺序抖动 —— 那个顺序实测不稳定，而抖动会让
+                // `is_user_edited` 的基准跟着抖 ⇒ 「已手动维护」标记随机出现又消失）。
+                .then_with(|| a.as_str().cmp(b.as_str()))
+        })
         .cloned()
-        // 空列表在 `list_models` 里已经归成 `None` 了，走不到这里；
-        // 真走到也回落默认值而不是 panic。
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
+/// 生图模型的「代」，用于在多个 `gpt-image-*` 里挑最新的那个。
+///
+/// ## 为什么不能直接比字符串（review 抓出）
+///
+/// 原来这里是 `models.iter().min()`，而它选的是**字典序最小**的 ——
+/// `min(["gpt-image-2", "gpt-image-3"])` 得到 `gpt-image-2`，即**最老的那一代**。
+/// 而文档写着「运营商上 `gpt-image-3` 那天自动跟上」，正好相反。
+/// （原来那条测试只喂了单元素列表，所以 `min` / `max` 都能过 —— 假绿。）
+///
+/// 换成 `max()` 也不对：字典序下 `"gpt-image-10" < "gpt-image-2"`。
+///
+/// 所以按数字段比：`gpt-image-1.5` → `[1, 5]`、`gpt-image-2` → `[2]`、
+/// `gpt-image-10` → `[10]`。逐段比较，段数不同时短的算小（`1` < `1.5`）。
+/// 认不出数字的排最后（那种名字我们无从判断新旧，让它输给能判的）。
+fn image_model_rank(model: &str) -> Vec<u32> {
+    let normalized = model.trim().to_ascii_lowercase();
+    let Some(rest) = normalized.strip_prefix(IMAGE_MODEL_PREFIX) else {
+        return Vec::new();
+    };
+    // `1.5-mini` → 只取前面连续的数字与点，后缀（`-mini` 之类）不参与比较。
+    let version: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    version
+        .split('.')
+        .filter(|seg| !seg.is_empty())
+        .filter_map(|seg| seg.parse::<u32>().ok())
+        .collect()
 }
 
 /// 这个模型名是生图模型吗（[`IMAGE_MODEL_PREFIX`] 前缀）。
@@ -1141,14 +1179,41 @@ mod tests {
     }
 
     /// 取真实值而不是硬编码 `gpt-image-2` —— 运营商上新一代时要自动跟上。
+    ///
+    /// ⚠️ **必须喂多元素列表**：单元素时 `min` 与 `max` 都能过，那样这条测试就是假绿
+    /// （review 抓出 —— 原来它只喂一个，而实现是 `min()`，即选**最老**的那一代）。
     #[test]
     fn a_newer_image_model_is_picked_up_without_a_code_change() {
-        let models = vec!["gpt-image-3".to_string()];
+        // 运营商加了新一代、同时留着老的 —— 最现实的情形。
+        let both = vec!["gpt-image-2".to_string(), "gpt-image-3".to_string()];
         assert_eq!(
-            pick_model(Some(&models)),
+            pick_model(Some(&both)),
             "gpt-image-3",
-            "硬编码了 gpt-image-2，运营商上新一代就跟不上了"
+            "选了旧的那一代 —— 「运营商上新一代自动跟上」这个承诺没兑现"
         );
+    }
+
+    /// 版本号按**数字**比，不按字典序 —— 否则 `gpt-image-10 < gpt-image-2`。
+    #[test]
+    fn image_model_versions_compare_numerically_not_lexically() {
+        let two_vs_ten = vec!["gpt-image-2".to_string(), "gpt-image-10".to_string()];
+        assert_eq!(
+            pick_model(Some(&two_vs_ten)),
+            "gpt-image-10",
+            "字典序把 gpt-image-10 排在 gpt-image-2 前面了"
+        );
+        // 小数段：1.5 比 1 新、比 2 旧。
+        let minor = vec!["gpt-image-1".to_string(), "gpt-image-1.5".to_string()];
+        assert_eq!(pick_model(Some(&minor)), "gpt-image-1.5");
+        let across = vec!["gpt-image-1.5".to_string(), "gpt-image-2".to_string()];
+        assert_eq!(pick_model(Some(&across)), "gpt-image-2");
+    }
+
+    /// 认不出版本号的排最后 —— 让能判新旧的那些先被选中。
+    #[test]
+    fn an_unparsable_image_model_loses_to_a_versioned_one() {
+        let mixed = vec!["gpt-image-preview".to_string(), "gpt-image-2".to_string()];
+        assert_eq!(pick_model(Some(&mixed)), "gpt-image-2");
     }
 
     /// 有文本模型 ⇒ 这不是纯生图分组，照旧写默认文本模型。

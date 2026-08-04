@@ -167,14 +167,12 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   // 待确认「恢复默认配置」的档位。存整个 tier：确认框里要显示它的名字。
   const [confirmReset, setConfirmReset] = useState<TierInfo | null>(null);
   /**
-   * 已装生图工具的档位 id。
+   * 当前用哪个档位生图。`null` = 用户还没选（那时 CLI 里没有生图工具）。
    *
-   * **一次查完整屏**（`listImagegenMcp`）而不是每行各问一次 —— 档位可能有十几个，
-   * 逐行 invoke 是十几次 IPC。
+   * **与「当前对话档位」是两个独立的当前项** —— 生图与对话走不同的端点、各用各的
+   * 密钥，互不影响。
    */
-  const [imagegenInstalled, setImagegenInstalled] = useState<
-    ReadonlySet<string>
-  >(() => new Set());
+  const [currentImageTier, setCurrentImageTier] = useState<string | null>(null);
   // 待确认删除的运营商行。存整行：确认框里要显示它的名字与档位数。
   const [confirmRemove, setConfirmRemove] = useState<OperatorRowData | null>(
     null,
@@ -231,14 +229,14 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
             .catch(() => {});
         }
 
-        // 生图工具的安装状态同样异步补 —— 它只读本地库（`mcp_servers` 表），
-        // 但没必要让首屏等它。失败不提示：拿不到就是所有按钮显示成「未装」，
-        // 用户点了会走 upsert（幂等），不会坏事。
+        // 当前生图档位同样异步补 —— 只读本地库（一个 settings 键），但没必要让首屏
+        // 等它。失败不提示：拿不到就是所有生图档位显示成「启用生图」，
+        // 用户点了会走同一条设置路径，不会坏事。
         operatorApi
-          .listImagegenMcp()
-          .then((ids) => {
+          .currentImageTier()
+          .then((id) => {
             if (isStale()) return;
-            setImagegenInstalled(new Set(ids));
+            setCurrentImageTier(id);
           })
           .catch(() => {});
       } catch (e) {
@@ -940,40 +938,46 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   };
 
   /**
-   * 装 / 卸某个档位的生图工具。
+   * 把生图切到某个档位，或停用生图（点当前那个）。
    *
-   * ## 为什么装完要提示「新开终端」
+   * ## 为什么第一次启用要提示「新开终端」，之后换档位不用
    *
-   * MCP server 是 CLI **启动时**读配置的 —— 已经在跑的 codex / claude 会话不会热加载
-   * 新增的 server。不说这句的话用户装完立刻去问「生成一张图」，模型答"我没有这个工具"，
-   * 而配置其实完全正确。
+   * 第一次启用会往 CLI 的配置里**新增**一条 MCP 记录，而 codex 只在启动时读它 ⇒
+   * 已经在跑的会话看不到这个工具。而**换档位只改库里一个标记**、CLI 配置文件不动 ⇒
+   * 生图工具在每次调用时现读那个标记，立即生效。
    *
-   * ## 为什么卸载不用二次确认
+   * 所以提示只在「从没有到有」那一次给 —— 每次换档位都提醒重启是错的（不需要），
+   * 而第一次不提醒也是错的（用户会以为没生效）。
    *
-   * 与「恢复默认配置」不同（那个会覆盖用户的手工编辑，所以有确认弹窗），
-   * 卸生图工具**不丢任何用户数据** —— 已经生成的图片留在磁盘上，再点一次就装回来。
-   * 为一个可逆且无损的操作加确认是噪音。
+   * ## 为什么停用不用二次确认
+   *
+   * 它不丢任何东西：生成的图片留在磁盘上，再点一次就回来了。为一个可逆且无损的
+   * 操作加确认是噪音（对比「恢复默认配置」——那个会覆盖用户的手工编辑，所以有确认）。
    */
-  const handleToggleImagegen = (tier: TierInfo, installed: boolean) =>
+  const handleUseForImages = (tier: TierInfo, isCurrent: boolean) =>
     run(`imagegen:${tier.providerId}`, async () => {
+      const wasUnset = currentImageTier === null;
       try {
-        if (installed) {
-          await operatorApi.uninstallImagegenMcp(tier.providerId);
-          toast.success(
-            t("loongport.tier.imagegenUninstalled", { name: tier.displayName }),
-          );
+        if (isCurrent) {
+          await operatorApi.setImageTier(null);
+          // ⚠️ **乐观更新，不回查**（review 抓出的竞态）：`reload()` 里那次
+          // `currentImageTier()` 带 `isStale` 守卫，而这里若也发一次查询，
+          // 一个**更早**开始的 reload 后返回就会用旧值覆盖掉刚设好的新值 ——
+          // 界面上表现为「点了没反应」。而命令成功就意味着结果已确定，
+          // 回查一次只是多一个可能被乱序覆盖的写入点。
+          setCurrentImageTier(null);
+          toast.success(t("loongport.tier.imageDisabled"));
         } else {
-          const r = await operatorApi.installImagegenMcp(tier.providerId);
+          await operatorApi.setImageTier(tier.providerId);
+          setCurrentImageTier(tier.providerId);
           toast.success(
-            t("loongport.tier.imagegenInstalledToast", {
-              name: tier.displayName,
-              apps: r.apps.join(" / "),
-            }),
+            wasUnset
+              ? t("loongport.tier.imageEnabledFirstTime", {
+                  name: tier.displayName,
+                })
+              : t("loongport.tier.imageSwitched", { name: tier.displayName }),
           );
         }
-        // 只刷这一个开关的状态，不整屏 reload —— 装 / 卸不影响档位本身的任何字段。
-        const ids = await operatorApi.listImagegenMcp();
-        setImagegenInstalled(new Set(ids));
       } catch (e) {
         toast.error(String(e));
       }
@@ -1154,8 +1158,8 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
         isCheckingTier={isChecking}
         onResetTier={(tier) => setConfirmReset(tier)}
         onEditTier={requestEdit}
-        onToggleImagegen={handleToggleImagegen}
-        imagegenInstalled={imagegenInstalled}
+        onUseForImages={handleUseForImages}
+        currentImageTier={currentImageTier}
         onRemoveOperator={(operatorId) => {
           // ⚠️ **这处 `find` 保持 number 不动**：`operatorId` 从 `OperatorRow` 的
           // `onDelete` 一路传回来，只在 operator 这一类里流转。官网行走的是
