@@ -278,13 +278,38 @@ jobs:
         shell: bash
         timeout-minutes: 60
         env:
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          # ⚠️ **`APPLE_SIGNING_IDENTITY` 有意不在这里声明。**
+          #
+          # 上一步导入成功时已把它写进 `$GITHUB_ENV`，所以它本来就在 job 环境里；再补一行
+          # `${{ env.APPLE_SIGNING_IDENTITY }}` 唯一的效果是**没配证书时把它声明成空串** ——
+          # 而 tauri-bundler 判的是「这个环境变量存不存在」，不是「有没有值」⇒ 它认为要签名
+          # ⇒ 拿空身份去调 `codesign` ⇒ `error: The specified item could not be found in
+          # the keychain.` 必挂。
+          #
+          # 2026-08-04 用 `v3.19.2-rc.1` 演练时踩到：macOS 那格重试三次全红，日志里是
+          # `APPLE_SIGNING_IDENTITY:` （空）+ `Signing with identity ""`。
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          # 同一个陷阱的另一半：上面三个 secret 没配时也是空串，而 bundler 见它们「存在」
+          # 就会去公证 —— 未签名的包送公证必被 Apple 拒。所以未签名路径必须把它们抹掉，
+          # 「留空」不等于「没有」。
+          # 重试**只对签名+公证的构建有意义** —— 那条路会走网络（notarytool 提交 Apple），
+          # 抖一下重来是对的。未签名构建全程离线，失败一定是确定性的（代码编不过、
+          # bundler 配置不对），重试只会把同一个错重演一遍。
+          #
+          # 而这里重演的代价按 macOS 的 **10× 计费倍率**算：演练那次三轮全量重编耗 47 分钟
+          # 真实时间 ⇒ 470 分钟额度 ⇒ 月配额的 23%，换来的信息量为零。
           max_attempts=3
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            # 同一个陷阱的另一半：上面三个 secret 没配时也是空串，而 bundler 见它们「存在」
+            # 就会去公证 —— 未签名的包送公证必被 Apple 拒。「留空」不等于「没有」。
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+            max_attempts=1
+            echo "○ 未签名构建 —— 已抹掉三个 Apple 公证变量，且不重试（失败必为确定性）。"
+          fi
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS build/notarization attempt ${attempt}/${max_attempts} ==="
             if pnpm tauri build --target universal-apple-darwin; then
@@ -293,7 +318,7 @@ jobs:
             fi
 
             if [ "$attempt" -eq "$max_attempts" ]; then
-              echo "❌ macOS build/notarization failed after ${max_attempts} attempts" >&2
+              echo "❌ macOS build/notarization failed (${max_attempts} 次尝试用尽)" >&2
               exit 1
             fi
 
@@ -391,7 +416,9 @@ jobs:
           #
           # 未签名时**照样出 DMG**，只是不带 --codesign —— 原来这里 exit 1，等于「没证书就
           # 连包都不给你」。而未签名的 DMG 对自己测试、给能跑一条命令的人试用是够用的
-          # （接收方右键「打开」或 xattr -dr com.apple.quarantine）。
+          # （接收方执行一次 `xattr -dr com.apple.quarantine`；**别说「右键→打开」**，
+          # macOS 15 起已移除该绕行，且本包是签名校验失败 ⇒ 报「已损坏」，
+          # 同 "Import Apple signing certificate" 那步的跳过提示）。
           HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
           NEW_DMG="LoongPort-${VERSION}-macOS.dmg"
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
