@@ -58,29 +58,42 @@ LoongPort 默认保留它，切换档位时不会写它 —— 所以你的官�
 | **Windows** | Windows 10 或更高 |
 | **macOS** | macOS 12（Monterey）或更高 |
 
-到 [Releases](../../releases) 页面下载：
+到 [Releases](../../releases) 页面下载。每个版本都由 GitHub Actions 自动构建，
+Windows 与 macOS 各有产物：
 
-- **Windows**：`LoongPort-v{version}-Windows.msi`（安装版）或 `-Windows-Portable.zip`（绿色版）
-- **macOS**：`LoongPort-v{version}-macOS.dmg`
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| **Windows** | `LoongPort-v{version}-Windows-Portable.zip` | **免安装版，推荐** —— 解压出一个 `LoongPort.exe` 就能跑，不经过 Windows 安装程序 |
+| | `LoongPort-v{version}-Windows.msi` | 安装版（会建开始菜单项） |
+| **macOS** | `LoongPort-v{version}-macOS.dmg` | — |
 
-> **macOS 首次打开会被拦一下。** 还没做 Apple 代码签名与公证（需要 Apple 开发者
-> 账号，正在办），所以 Gatekeeper 会报「已损坏」—— **不是真的损坏**。终端里执行
-> 一次即可：
+ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个，同样是安装版与免安装版各一。
+
+> **Windows 建议直接用免安装版。** 它解压出来只有一个 exe（WebView2 loader 已静态链接，
+> 同目录不需要额外 DLL），放到任意位置双击即可。装机的安全软件有时会拦
+> Windows 安装程序**备份旧文件**的动作（报 `could not set file security for file
+> '...\Config.Msi\xxxxxxx.rbf'  Error: 5`）—— 免安装版没有安装步骤，也就没有可拦的动作。
+>
+> 前提是系统有 WebView2 运行时，Windows 10 及以上基本自带。
+
+> **macOS 首次打开会被拦一下。** macOS 版未做 Apple 代码签名与公证，所以 Gatekeeper
+> 会报「已损坏」—— **不是真的损坏**。终端里执行一次即可，**只需做这一次**：
 >
 > ```bash
 > xattr -dr com.apple.quarantine /Applications/LoongPort.app
 > ```
+>
+> 签名与公证需要 Apple 开发者账号（$99/年），会在后续版本补上 —— 它影响的只是安装
+> 这一步，装好之后功能与 Windows 完全一致。
 
-> **Windows 装新版本时若报「无法设置文件安全性」。** 少数装了安全软件（如腾讯电脑
-> 管家）的机器上，**覆盖安装**旧版本会失败：`could not set file security for file
-> '...\Config.Msi\xxxxxxx.rbf'  Error: 5`。那是安全软件拦住了安装程序**备份旧文件**
-> 的动作，**不是安装包坏了**。两个办法任选一个：
+> **已经在用安装版、升级时报「无法设置文件安全性」怎么办。** 少数装了安全软件（如
+> 腾讯电脑管家）的机器上，**覆盖安装**旧版本会失败：`could not set file security for
+> file '...\Config.Msi\xxxxxxx.rbf'  Error: 5` —— 那是安全软件拦住了安装程序**备份
+> 旧文件**的动作，**不是安装包坏了**。先在「设置 → 应用」里卸载旧版本，再双击新安装包：
+> 全新安装不需要备份旧文件，就不会被拦。**账号和配置不会丢** —— 它们在用户目录下，
+> 卸载不动它们，装回来仍是登录状态。
 >
-> 1. **先卸载旧版本再装**（设置 → 应用 → 卸载，然后双击新安装包）。全新安装不需要
->    备份旧文件，就不会被拦。**账号和配置不会丢** —— 它们在用户目录下，卸载不动它们。
-> 2. **用绿色版**（`-Windows-Portable.zip`），解压即用，不经过 Windows 安装程序。
->
-> 首次安装的用户不会遇到这个 —— 它只在覆盖旧版本时出现。
+> 首次安装、以及用免安装版的用户都不会遇到这个 —— 它只在覆盖旧版本时出现。
 
 ## 怎么用
 

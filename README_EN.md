@@ -63,32 +63,50 @@ time without editing anything by hand.
 | **Windows** | Windows 10 or later |
 | **macOS** | macOS 12 (Monterey) or later |
 
-Download from the [Releases](../../releases) page:
+Download from the [Releases](../../releases) page. Every release is built automatically
+by GitHub Actions, for both Windows and macOS:
 
-- **Windows**: `LoongPort-v{version}-Windows.msi` (installer) or `-Windows-Portable.zip`
-- **macOS**: `LoongPort-v{version}-macOS.dmg`
+| Platform | File | Notes |
+|---|---|---|
+| **Windows** | `LoongPort-v{version}-Windows-Portable.zip` | **Portable, recommended** — unzip to get a single `LoongPort.exe` and run it; no Windows Installer involved |
+| | `LoongPort-v{version}-Windows.msi` | Installer (adds a Start menu entry) |
+| **macOS** | `LoongPort-v{version}-macOS.dmg` | — |
 
-> **macOS blocks the first launch.** The build is not yet code-signed and notarized by
-> Apple (that needs an Apple Developer account, which is in progress), so Gatekeeper
-> reports the app as "damaged" — it is not. Run this once in Terminal:
+On ARM64 Windows machines (Snapdragon laptops and the like), use the two files with
+`-arm64` in the name — again one installer and one portable build.
+
+> **On Windows, prefer the portable build.** It unzips to a single exe (the WebView2 loader is
+> statically linked, so no extra DLLs are needed next to it) — put it anywhere and
+> double-click. Security software sometimes blocks the Windows Installer from
+> **backing up old files** (reported as `could not set file security for file
+> '...\Config.Msi\xxxxxxx.rbf'  Error: 5`); the portable build has no install step, so
+> there is nothing to block.
+>
+> It does need the WebView2 runtime, which Windows 10 and later generally ship with.
+
+> **macOS blocks the first launch.** The macOS build is not code-signed or notarized by
+> Apple, so Gatekeeper reports the app as "damaged" — it is not. Run this once in
+> Terminal; **once is enough**:
 >
 > ```bash
 > xattr -dr com.apple.quarantine /Applications/LoongPort.app
 > ```
+>
+> Signing and notarization need an Apple Developer account ($99/year) and will come in a
+> later release — it only affects this one installation step, and once installed the app
+> works exactly as it does on Windows.
 
-> **Windows: "could not set file security" when installing an update.** On a few
-> machines running security software (Tencent PC Manager, for one), installing *over*
-> an older version fails with `could not set file security for file
-> '...\Config.Msi\xxxxxxx.rbf'  Error: 5`. That is the security software blocking the
-> installer from **backing up the old files** — the package itself is fine. Either:
+> **Already on the installer and an upgrade fails with "could not set file security".**
+> On a few machines running security software (Tencent PC Manager, for one), installing
+> *over* an older version fails with `could not set file security for file
+> '...\Config.Msi\xxxxxxx.rbf'  Error: 5` — that is the security software blocking the
+> installer from **backing up the old files**, not a broken package. Uninstall the old
+> version first (Settings → Apps), then run the new installer: a fresh install has
+> nothing to back up, so nothing gets blocked. **Your account and settings are kept** —
+> they live in your user folder, untouched by uninstall, so you stay signed in.
 >
-> 1. **Uninstall the old version first**, then run the new installer (Settings → Apps).
->    A fresh install has nothing to back up, so nothing gets blocked. **Your account
->    and settings are kept** — they live in your user folder, untouched by uninstall.
-> 2. **Use the portable build** (`-Windows-Portable.zip`) — unzip and run, no Windows
->    Installer involved.
->
-> First-time installs are unaffected; this only happens when overwriting an older version.
+> First-time installs and the portable build are both unaffected; this only happens when
+> overwriting an older version.
 
 ## How it works
 

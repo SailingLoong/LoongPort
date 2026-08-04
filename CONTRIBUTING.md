@@ -8,9 +8,9 @@ Thank you for your interest in contributing to CC Switch! Please read our [Code 
 
 There are many ways to contribute:
 
-- **Report bugs** — Found something broken? [Open a bug report](https://github.com/farion1231/cc-switch/issues/new?template=bug_report.yml).
-- **Suggest features** — Have an idea? [Submit a feature request](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml).
-- **Improve docs** — Spot a typo or missing info? [Report a doc issue](https://github.com/farion1231/cc-switch/issues/new?template=doc_issue.yml).
+- **Report bugs** — Found something broken? [Open a bug report](https://github.com/SailingLoong/LoongPort/issues/new?template=bug_report.yml).
+- **Suggest features** — Have an idea? [Submit a feature request](https://github.com/SailingLoong/LoongPort/issues/new?template=feature_request.yml).
+- **Improve docs** — Spot a typo or missing info? [Report a doc issue](https://github.com/SailingLoong/LoongPort/issues/new?template=doc_issue.yml).
 - **Contribute code** — Fix bugs or implement features via pull requests.
 - **Translate** — Help us improve translations for English, Chinese, and Japanese.
 
@@ -121,8 +121,8 @@ CC Switch supports three languages. When modifying user-facing text:
 
 ## Questions?
 
-- [Open a question](https://github.com/farion1231/cc-switch/issues/new?template=question.yml)
-- [GitHub Discussions](https://github.com/farion1231/cc-switch/discussions)
+- [Open a question](https://github.com/SailingLoong/LoongPort/issues/new?template=question.yml)
+- [GitHub Discussions](https://github.com/SailingLoong/LoongPort/discussions)
 
 ---
 
@@ -136,9 +136,9 @@ CC Switch supports three languages. When modifying user-facing text:
 
 你可以通过多种方式参与贡献：
 
-- **报告 Bug** — 发现问题？[提交 Bug 报告](https://github.com/farion1231/cc-switch/issues/new?template=bug_report.yml)。
-- **建议功能** — 有想法？[提交功能请求](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml)。
-- **改进文档** — 发现错误或缺失？[报告文档问题](https://github.com/farion1231/cc-switch/issues/new?template=doc_issue.yml)。
+- **报告 Bug** — 发现问题？[提交 Bug 报告](https://github.com/SailingLoong/LoongPort/issues/new?template=bug_report.yml)。
+- **建议功能** — 有想法？[提交功能请求](https://github.com/SailingLoong/LoongPort/issues/new?template=feature_request.yml)。
+- **改进文档** — 发现错误或缺失？[报告文档问题](https://github.com/SailingLoong/LoongPort/issues/new?template=doc_issue.yml)。
 - **贡献代码** — 通过 Pull Request 修复 Bug 或实现新功能。
 - **翻译** — 帮助改进英文、中文和日文的翻译。
 
@@ -249,5 +249,5 @@ CC Switch 支持三种语言。修改用户可见文本时：
 
 ## 有疑问？
 
-- [提问](https://github.com/farion1231/cc-switch/issues/new?template=question.yml)
-- [GitHub 讨论区](https://github.com/farion1231/cc-switch/discussions)
+- [提问](https://github.com/SailingLoong/LoongPort/issues/new?template=question.yml)
+- [GitHub 讨论区](https://github.com/SailingLoong/LoongPort/discussions)
