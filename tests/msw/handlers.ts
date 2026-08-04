@@ -382,4 +382,29 @@ export const handlers = [
   ),
   http.post(`${TAURI_ENDPOINT}/reset_circuit_breaker`, () => success(true)),
   http.post(`${TAURI_ENDPOINT}/get_circuit_breaker_stats`, () => success(null)),
+
+  // ── LoongPort 自己的命令 ──────────────────────────────────────────────
+  //
+  // App 首屏无条件调这几个（operator 面板 + 统计告知的前置判断）。**漏配的后果不是
+  // 「少一个 mock」而是整条测试红**：MSW 对未注册的请求会放它走真网络 ⇒ 打向
+  // `http://tauri.local` 这个不存在的主机 ⇒ `TypeError: fetch failed` 进
+  // console.error ⇒ 撞上 `App.test.tsx` 那条「不许有 console.error」的断言。
+  //
+  // 2026-08-04 就是这样在 CI 上红的（本机跑到的是同一批错，只是当时 CI 关着没人看）。
+  // ⇒ **以后新增 LoongPort 的 Tauri 命令，若会被首屏调用，就在这里补一条。**
+  //
+  // 返回的形状照前端契约（`src/lib/api/operator.ts` / `vendor.ts`），空集合优先 ——
+  // 这些 handler 只为「首屏能渲染完」，具体行为由各自的专项测试覆盖。
+  http.post(`${TAURI_ENDPOINT}/operator_status`, () =>
+    success({ defaultSite: "example.com", chatgptNeedsAttention: false }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/operator_list_operators`, () => success([])),
+  http.post(`${TAURI_ENDPOINT}/operator_list_sites`, () => success([])),
+  http.post(`${TAURI_ENDPOINT}/operator_check_session`, () => success([])),
+  // 端点未配 ⇒ 整条上报链路与那个告知弹窗都不启用（见 `operator/stats.rs`）。
+  // 测试里固定 false：让测试依赖「有没有配上报端点」是不对的。
+  http.post(`${TAURI_ENDPOINT}/operator_stats_endpoint_configured`, () =>
+    success(false),
+  ),
+  http.post(`${TAURI_ENDPOINT}/vendor_list_accounts`, () => success([])),
 ];

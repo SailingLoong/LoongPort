@@ -66,6 +66,37 @@ function ensureScripts(): void {
   );
 }
 
+/**
+ * 素材备得出来吗。
+ *
+ * **为什么要这个判断，而不是让 `ensureScripts()` 直接抛**：这条测试要能编 Rust
+ * （`cargo test --lib` 会编整个 crate），而 CI 的 `Frontend Checks` 跑在 ubuntu 上、
+ * 只装 Node —— Linux 下编这个 crate 需要 GTK / glib / webkit2gtk 全套系统库
+ * （那些只装在 `Backend Checks` 里）⇒ 前端那个 job 里必然编不过。
+ *
+ * 2026-08-04 实测到的正是这个：`The system library glib-2.0 required by crate
+ * glib-sys was not found` ⇒ 这条测试的 10 个用例在 CI 全红，而**本机一直是绿的**
+ * —— 因为本机 `src-tauri/target/` 里躺着之前生成的素材，每次都走上面那个 `return`
+ * 短路、从不真的调 cargo。典型的「本机有状态、CI 干净」。
+ *
+ * ⇒ 备不出素材时**显式 skip 并把原因打出来**，不静默也不误报成失败。
+ * 真正跑它的是 CI 里 `Backend Checks` 那个 job（有 Rust 环境，见 ci.yml），
+ * 以及维护者本机的六道闸。
+ */
+function scriptsAvailable(): boolean {
+  try {
+    ensureScripts();
+    return true;
+  } catch (e) {
+    const why = e instanceof Error ? e.message.split("\n")[0] : String(e);
+    console.warn(
+      `⚠️ 跳过「登录注入脚本能真的执行」——素材备不出来（需要能编 Rust）：${why}\n` +
+        `   这条测试由 CI 的 Backend Checks 与本机六道闸负责，见本文件顶部说明。`,
+    );
+    return false;
+  }
+}
+
 /** 记录脚本碰了哪些 DOM 点，供断言检查。 */
 interface Trace {
   promoValue: string | null;
@@ -183,11 +214,9 @@ function runScript(js: string, opts: { promoFieldExists: boolean }): Trace {
   return trace;
 }
 
-describe("登录注入脚本能真的执行", () => {
-  const read = (name: string) => {
-    ensureScripts();
-    return readFileSync(resolve(SCRIPT_DIR, `login-script-${name}.js`), "utf8");
-  };
+describe.runIf(scriptsAvailable())("登录注入脚本能真的执行", () => {
+  const read = (name: string) =>
+    readFileSync(resolve(SCRIPT_DIR, `login-script-${name}.js`), "utf8");
 
   /**
    * ⭐⭐ **这条就是那个 P0 的回归闸。**
