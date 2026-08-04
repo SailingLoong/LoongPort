@@ -124,3 +124,37 @@ ARM64 那格在 `corepack prepare` 验签处炸了（`Cannot find matching keyid
 3. 跑一次 tag 构建验证三个平台（**不能只跑 CI**：ARM64 那格只在 release.yml 里）
 4. `CONTRIBUTING.md` 写的是「Node 22（见 `.node-version`）」，指向文件而非具体号码，
    ⇒ 升版本不用改文档
+
+---
+
+## dependabot 的 25 条告警：分三类，只有一类要紧（2026-08-04 记）
+
+仓库转公开、开了 dependabot alerts 之后一次性冒出 25 条（2 critical / 10 high /
+12 medium / 3 low）。**分类核过一遍，别被 critical 那个词带着走**：
+
+**（1）npm 那 21 条全是 `development` scope** —— vite / vitest / rollup / postcss /
+esbuild / ws / form-data / picomatch / @babel/core。两个 critical 都是 vitest，且是
+**Vitest UI server** 的漏洞（监听端口时可任意读文件），而本仓 CI 与本机都只跑
+`vitest run`（不带 UI、不监听）。这批不进产物，但**该升** —— 它们是每天在用的工具链，
+dependabot 已自动开 PR，跟着合就行（`pull_request` 触发 2026-08-04 恢复了，PR 有 CI 验）。
+
+**（2）Rust 里有 6 条指向压根没人依赖的包**：`openssl`（8 条中的大部分）与
+`quinn-proto`。`cargo tree -i openssl` / `-i quinn-proto` 都打印 "nothing to print"
+—— 它们是 `Cargo.lock` 里的陈旧条目，dependabot 从 lock 文件读所以报了，实际编不进
+产物。**升它们没有实际收益**（但也无害，dependabot 的 PR 合了能让告警清零、省得每次
+看到 Security 页上一堆红字）。
+
+**（3）真在依赖树里的 Rust 包**：`aws-lc-sys` ×5、`rustls-webpki` ×4、`tar` ×3、
+`tauri`、`serde_with`、`glib`、`rand`。这批是 reqwest / rustls / tauri 的传递依赖，
+**跟着 dependabot 的 PR 升**（PR #10~#15 已开）。
+
+**⚠️ 顺带发现的一笔独立债：`tauri-plugin-updater` 还在依赖里且代码在用。**
+`Cargo.toml:37` 声明它、`commands/settings.rs:4` 引 `UpdaterExt`、`capabilities/
+default.json` 也给了权限 —— **但 `tauri.conf.json` 的 `plugins` 只有 `deep-link`**，
+插件没注册 ⇒ 那条「检查更新」链路运行时必然失败。它也是上面 rustls / aws-lc 那批
+漏洞的引入路径之一。
+
+**how-to-repay**：定「要不要自己的更新渠道」。要 → 配 endpoints + 换自己的 pubkey +
+注册插件（三件缺一不可，`release.yml` 的 `Prepare Tauri signing key` 那步注释里写了）；
+不要 → 把依赖、`UpdaterExt` 那条链路、capabilities 权限一起删干净，别留「声明了但
+不工作」的中间态。**需要维护者决策**（产品问题：靠 GitHub Releases 手动更新够不够）。
