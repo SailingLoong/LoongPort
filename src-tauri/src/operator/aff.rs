@@ -125,8 +125,10 @@ mod tests {
         // （`affiliate_service.go:300`），补上是给服务端日志里塞一条错误。
         //
         // ⚠️ 这个理由**只适用于维护者自己的站**，别推广到「默认站」——
-        // 2026-08-04 之前两者恰好是同一个站，那个巧合已经不成立了
-        // （见 `commands::operator` 的 `the_default_site_has_a_builtin_affiliate_code`）。
+        // 2026-08-04 之前两者恰好是同一个站，那个巧合已经不成立了：默认站现在**必须**
+        // 在表里有码，`commands::operator` 的 `DEFAULT_SITE` 那里有闸钉着。
+        // （指到那个常量而不是那条测试的名字：测试名改了没有任何东西能验，
+        //   而常量名是真代码，rustdoc 与编译器都管得到。）
         for origin in [
             "https://bestapi.store",
             "https://www.bestapi.store",
