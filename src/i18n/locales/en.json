@@ -3069,7 +3069,15 @@
       "userEdited": "Manually maintained",
       "userEditedHint": "You have edited this tier's config. Refreshing groups will not overwrite it (only the API key is updated). Click here to restore the default config.",
       "editMissing": "That tier's record no longer exists — use “Fetch keys” to regenerate it.",
-      "editCurrentNote": "This is the tier you're currently using. If your changes don't take effect, quit and reopen the ChatGPT desktop app — while it's running it rewrites Codex's config."
+      "editCurrentNote": "This is the tier you're currently using. If your changes don't take effect, quit and reopen the ChatGPT desktop app — while it's running it rewrites Codex's config.",
+      "imageOnly": "Image",
+      "imageOnlyHint": "This tier only serves image models (gpt-image family), so it will fail as a chat provider. Install the image tool and just say “generate an image” in codex / claude — no need to switch to this tier.",
+      "imagegenInstall": "Install image tool",
+      "imagegenUninstall": "Remove image tool",
+      "imagegenInstalled": "Image tool ready",
+      "imagegenInstalledHint": "The image tool for this tier is installed. Just say “generate an image” in codex / claude — your chat still uses whichever tier is active. Click here to remove it.",
+      "imagegenInstalledToast": "Image tool installed for “{{name}}” ({{apps}}). Open a new terminal, then just say “generate an image”.",
+      "imagegenUninstalled": "Removed the image tool for “{{name}}”"
     },
     "stats": {
       "title": "Help improve LoongPort",

@@ -56,6 +56,7 @@ pub mod aff;
 pub mod api;
 pub mod chatgpt_app;
 pub mod creds;
+pub mod imagegen_mcp;
 pub mod login;
 pub mod managed;
 pub mod platform_map;

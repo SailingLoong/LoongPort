@@ -124,6 +124,20 @@ pub struct Group {
     pub rate_multiplier: f64,
     #[serde(default)]
     pub status: String,
+    /// 这个分组允许生图吗（服务端 `allow_image_generation`）。
+    ///
+    /// ⚠️ **它不等于「这是个纯生图分组」** —— 实测 `pro池`（6 个文本模型）也是 `true`：
+    /// 它的生图走 sub2api 的 codex 生图桥（给 `/v1/responses` 请求注入
+    /// `image_generation` tool），主模型仍是文本模型。而纯生图分组是「`/v1/models`
+    /// 里只有 `gpt-image-*`」，那是另一件事（见 [`super::provision::pick_model`]）。
+    ///
+    /// 两者压成一个字段就分不回来了：`福利Pro-禁luna` 是 `false`（选它生图会拿 403
+    /// `permission_error`），而它同样不是纯生图分组。
+    ///
+    /// `#[serde(default)]` ⇒ 老版本服务端没这个字段时取 `false`，即不显示「支持生图」
+    /// 标记。保守方向：漏说一个能力无害，错说一个不存在的能力会让用户白试。
+    #[serde(default)]
+    pub allow_image_generation: bool,
 }
 
 /// 倍率高于这个值的分组不呈现给用户。
@@ -424,6 +438,15 @@ impl Client {
         self.account_id
     }
 
+    /// 这个 client 连的站点（形如 `https://example.com`，无路径）。
+    ///
+    /// 给需要打 `/v1` 下端点的调用方用（[`list_models`] / [`key_billing`]）——
+    /// 那些不走 [`Self::url`]（它拼的是 `/api/v1`）。**从 client 取而不是让调用方另传**：
+    /// 「用哪个站建 Key」与「用哪个站查模型」必须是同一个答案，两处各传一遍就可能不一致。
+    pub fn site_origin(&self) -> &str {
+        &self.site_origin
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}/api/v1{}", self.site_origin, path)
     }
@@ -610,6 +633,89 @@ pub async fn key_billing(site_origin: &str, api_key: &str) -> Result<Option<KeyB
     serde_json::from_str::<KeyBilling>(&body)
         .map(Some)
         .map_err(|e| AppError::Config(format!("查询倍率失败: 响应解析出错 {e}")))
+}
+
+/// 用某把 sk 拉「这个分组能调哪些模型」（`GET /v1/models`）。
+///
+/// ## 为什么需要它：决定该给这条档位写什么模型名
+///
+/// 档位的 `model` 原来无条件写 `DEFAULT_MODEL`（一个文本模型）。而运营商会建
+/// **纯生图分组** —— `/v1/models` 里只有 `gpt-image-*`，一个文本模型都没挂。
+/// 给那种分组写文本模型名的后果是选中即 **404**（实测 `鑫旺Neko API · image原生 2/4k生图`
+/// 配 `gpt-5.6-sol`：`Upstream request failed`）。
+///
+/// 而写对之后 codex 对话内生图是通的（维护者在 `vokotoken.cc` 上实测：config.toml 里
+/// `model = "gpt-image-2"` ⇒ 对话里直接出图）—— 上游会把 image-only 主模型的请求
+/// 归一化成带 `image_generation` tool 的形状再转发
+/// （sub2api `service/openai_codex_transform.go` 的 `normalizeOpenAIResponsesImageOnlyModel`）。
+///
+/// ## 与 [`key_billing`] 同一条路
+///
+/// 都是「用 sk 打 `/v1` 下的端点」：**不走 [`Client::url`]**（那个拼 `/api/v1`），
+/// 401/403/404 返回 `Ok(None)` 而不是错误。
+///
+/// 返回 `None` = 查不到（没这个端点 / 权限不够 / 解析不了）。调用方据此**回落到
+/// `DEFAULT_MODEL`** —— 那正是本函数出现之前的行为，所以查不到不会让任何事变糟。
+pub async fn list_models(
+    site_origin: &str,
+    api_key: &str,
+) -> Result<Option<Vec<String>>, AppError> {
+    /// `{"object":"list","data":[{"id":"gpt-image-2",...}]}`（OpenAI 兼容形状）。
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        #[serde(default)]
+        id: String,
+    }
+
+    let url = format!("{site_origin}/v1/models");
+    let resp = build_client()?
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|e| AppError::Config(format!("获取模型列表失败: {}", describe_send_error(&e))))?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::UNAUTHORIZED
+    {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Config(format!(
+            "获取模型列表失败: HTTP {} {}",
+            status.as_u16(),
+            first_line(&body)
+        )));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| AppError::Config(format!("获取模型列表失败: 读响应出错 {e}")))?;
+    let parsed: Resp = serde_json::from_str(&body)
+        .map_err(|e| AppError::Config(format!("获取模型列表失败: 响应解析出错 {e}")))?;
+
+    // 空 id 丢掉（服务端不该给，但给了就别让它污染判据）。
+    let ids: Vec<String> = parsed
+        .data
+        .into_iter()
+        .map(|m| m.id)
+        .filter(|id| !id.is_empty())
+        .collect();
+    // **空列表与「查不到」同义** —— 都表示「问不出这个分组有什么」，
+    // 让调用方走同一条回落路径，不必在两处各判一次。
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ids))
 }
 
 /// 用 refresh token 换一对新的 token。
@@ -939,6 +1045,8 @@ mod tests {
             platform: platform.into(),
             rate_multiplier: rate,
             status: status.into(),
+            // 这些测试只关心 platform / status / 倍率那三道过滤，生图开关与它们无关。
+            allow_image_generation: false,
         }
     }
 

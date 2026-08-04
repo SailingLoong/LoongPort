@@ -86,6 +86,15 @@ pub struct Tier {
     pub api_key: String,
     /// 这把 Key 是刚建的还是认领到的（只用于日志与 UI 提示，不参与逻辑）。
     pub key_was_created: bool,
+    /// 该写进这条档位配置的模型名。见 [`pick_model`]。
+    ///
+    /// **不是常量** —— 纯生图分组要写它自己的 `gpt-image-*`，写 [`DEFAULT_MODEL`]
+    /// 会让它选中即 404。
+    pub model: String,
+    /// 服务端说这个分组允许生图（`allow_image_generation`）。
+    ///
+    /// 与「这是纯生图档位」是两件事，见 [`super::api::Group::allow_image_generation`]。
+    pub allow_image_generation: bool,
 }
 
 /// 展开的整体结果。**失败项不阻断成功项**，两者都如实带出来。
@@ -261,12 +270,43 @@ async fn ensure_key_for(
         }
     };
 
+    // 拉这个分组能调哪些模型 —— 只为决定写什么模型名（纯生图分组必须写它自己的
+    // `gpt-image-*`，写文本模型会 404）。
+    //
+    // ⚠️ **查失败不算错**：回落到 `DEFAULT_MODEL` = 本功能出现之前的行为。
+    // 为一个「模型名可能不理想」中断整个分组的 provision 是把小问题放大成大问题
+    // （用户会看到「获取密钥失败」而不是「某个档位模型名不对」）。
+    let models = match super::api::list_models(client.site_origin(), &api_key).await {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!(
+                "分组 {}（{}）的模型列表拉不到，模型名回落默认值（不影响使用）: {e}",
+                group.id,
+                group.name,
+            );
+            None
+        }
+    };
+    let model = pick_model(models.as_deref());
+    if model != DEFAULT_MODEL {
+        // 写了非默认模型是**要留痕的判断**：它决定这条档位能不能用，
+        // 而判据（模型列表）是网络来的、事后无从复现。
+        log::info!(
+            "分组 {}（{}）是纯生图分组，模型名写 {model}（可选 {:?}）",
+            group.id,
+            group.name,
+            models.as_deref().unwrap_or_default(),
+        );
+    }
+
     Ok(Tier {
         group_id: group.id,
         group_name: group.name.clone(),
         rate_multiplier: group.rate_multiplier,
         api_key,
         key_was_created: created,
+        model,
+        allow_image_generation: group.allow_image_generation,
     })
 }
 
@@ -542,14 +582,83 @@ pub fn is_user_edited(
     // 全部档位集体误报「已手动维护」。
     let current = normalize_for_comparison(settings_config);
     let mut matched_any = false;
-    for candidate in std::iter::once(model).chain(HISTORICAL_DEFAULT_MODELS.iter().copied()) {
-        let defaults = settings_config_for(app_type, &api_key, display_name, base_url, candidate)?;
+    for candidate in candidate_models(settings_config, model) {
+        let defaults = settings_config_for(app_type, &api_key, display_name, base_url, &candidate)?;
         if current == normalize_for_comparison(&defaults) {
             matched_any = true;
             break;
         }
     }
     Some(!matched_any)
+}
+
+/// 比对基准里要试哪些模型名。
+///
+/// 顺序：调用方给的那个 → 全部历史默认值 → **配置里那个（仅当它是生图模型）**。
+///
+/// ## 最后那一项为什么必要，以及为什么必须限定条件
+///
+/// 生图档位的模型名由 [`pick_model`] 按**服务端的模型列表**定（如 `gpt-image-2`），
+/// 那是一次网络查询的结果。而三个调用方里有两个拿不到它：
+/// `list_operators_impl`（只读本地的首屏契约）与 `reset_tier_config`
+/// （手上只有本地 `settings_config`）。它们只能传 [`DEFAULT_MODEL`] ⇒
+/// **每个生图档位都会显示「已手动维护」**，而用户一个字没改过。
+///
+/// ⚠️ **绝不能无条件把配置里的模型名加进候选** —— 那样 `model` 这一行就
+/// **结构上不可能不同**（它同时是被比对的值和生成基准的输入），于是
+/// 「用户手改了模型名」永远检测不出来。`real_edits_are_detected` 的第一个 case
+/// 钉的正是这条。
+///
+/// 所以限定 [`is_image_model`]：生图模型名是**我们自己按服务端数据写进去的**，
+/// 用户手工填一个 `gpt-image-*` 进去当然也会被当成"没改过"—— 但那个值本就是
+/// 这个档位的正解，把它判成「已手动维护」才是错的。而用户改成任何文本模型名
+/// （`gpt-5.4` 之类）仍然照常检测得出来。
+fn candidate_models(settings_config: &serde_json::Value, model: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(HISTORICAL_DEFAULT_MODELS.len() + 2);
+    out.push(model.to_string());
+    out.extend(HISTORICAL_DEFAULT_MODELS.iter().map(|m| m.to_string()));
+
+    if let Some(in_config) = extract_model(settings_config) {
+        if is_image_model(&in_config) && !out.contains(&in_config) {
+            out.push(in_config);
+        }
+    }
+    out
+}
+
+/// 从一份 `settings_config` 里读出 codex 的 `model`。
+///
+/// 与 [`extract_api_key`] 对称：都是「从一份配置里抠出一个我们自己写进去的值」。
+///
+/// 两个消费方：[`candidate_models`]（判「这是不是生图档位的模型名」）与
+/// `list_operators_impl`（填 `TierInfo::is_image_model`，那条路只读本地）。
+///
+/// 只看 codex 的形状 —— 其它 CLI 的配置里没有 `gpt-image-*` 这回事。
+///
+/// **不引 toml 解析器**：要读的是 `key = "值"` 这种最简形状，由
+/// [`codex_config_toml`] 生成，形状我们自己定的。
+pub fn extract_model(settings_config: &serde_json::Value) -> Option<String> {
+    let config = settings_config.get("config")?.as_str()?;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        // 严格相等：`model_provider` / `model_reasoning_effort` 都以 `model` 开头。
+        if lhs.trim() != "model" {
+            continue;
+        }
+        let value = rhs.trim();
+        let unquoted = value.strip_prefix('"')?.strip_suffix('"')?;
+        if unquoted.is_empty() {
+            return None;
+        }
+        return Some(unquoted.to_string());
+    }
+    None
 }
 
 /// 比对前的归一化：抹掉「配置在系统里走一圈」会产生的无语义差异。
@@ -629,6 +738,107 @@ fn normalize_for_comparison(settings_config: &serde_json::Value) -> serde_json::
 /// 而第一次改模型时加一项就自动生效。
 pub(crate) const HISTORICAL_DEFAULT_MODELS: &[&str] = &[];
 
+/// codex 的默认模型（**文本对话**用）。
+///
+/// 三个来源给了三个不同的值（sub2api 面板片段 `gpt-5.5`、cc-switch 第三方模板 `gpt-5.6-sol`、
+/// 上游 `UniversalProvider` 默认 `gpt-4o`），所以这个值是**查了真实服务端定的**：
+///
+/// - bestapi.store 的 codex 分组（openai 平台）下，`gpt-5.6-sol` 是**全部可调度账号都支持**的
+///   最新一代；`gpt-5.6` 只有一家上游有，选它会让另外几家路由不到。
+/// - 与 `gpt-5.5` 同价（输入 5 / 输出 30 每百万），所以选新的没有额外成本。
+/// - `gpt-4o` 三个候选里唯一没人推荐的，别回退到它。
+///
+/// **这是「默认值」不是「唯一值」**：用户在 provider 编辑里能改，运营商上新一代模型后也该
+/// 跟着调。它只决定「刚 provision 完、用户还没动手」时用哪个。
+///
+/// ⚠️ **它不再无条件套给每条 codex 档位** —— 纯生图分组（`/v1/models` 里只有
+/// `gpt-image-*`）写它就是必定 404。选哪个模型走 [`pick_model`]，本常量是那里的回落值。
+///
+/// ## ⚠️ 改这个值时必须把旧值加进 [`HISTORICAL_DEFAULT_MODELS`]
+///
+/// 已存在的档位**不会**被 provision 改写模型名（只换 sk），所以改了这个常量之后，
+/// 它们的配置里还是旧模型 ⇒ 与「用户改过没有」的比对基准对不上 ⇒
+/// **界面上每一个档位都显示「已手动维护」**，而用户一个字都没改过。
+///
+/// 那个数组就是为此存在的（「读宽写窄」：认全部历史值，写入只产出当前值）。
+pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+
+/// 生图模型的名字前缀。
+///
+/// 判据来自上游 sub2api 的 `IsGPTImageGenerationModel`（`service/openai_images.go`）——
+/// **它先 `strings.ToLower` + `strings.TrimSpace` 再比前缀**，所以本仓的比较也必须
+/// 归一化，见 [`is_image_model`]。别在这里自造一套（如加上 `dall-e`：sub2api 不认它，
+/// 我们认了只会写出转发不了的配置）。
+///
+/// ⚠️ 有意**只对齐 GPT 那一族**，不含上游 `isOpenAIImageGenerationModel` 另外认的三个
+/// grok 别名（`grok-imagine` / `grok-imagine-edit` / `grok-imagine-image*`）——
+/// 生图工具只装在 codex 档位上（openai 平台），grok 档位走的是另一个 CLI。
+const IMAGE_MODEL_PREFIX: &str = "gpt-image-";
+
+/// 该给这条档位的 `config.toml` 写什么模型名。
+///
+/// ## 判据：这个分组有没有非生图模型
+///
+/// - 有文本模型（或问不出来）⇒ [`DEFAULT_MODEL`]，即本函数出现之前的行为
+/// - **一个文本模型都没有**（全是 `gpt-image-*`）⇒ 其中排序最前的那个
+///
+/// ⚠️ **取真实值而不是硬编码 `"gpt-image-2"`**：运营商上 `gpt-image-3` 那天自动跟上，
+/// 不必改代码。这与 [`DEFAULT_MODEL`] 那条「读宽写窄」的取舍不同 —— 那个值我们无从
+///查证（要跨所有站点都可用），而这个值服务端刚刚告诉了我们。
+///
+/// ## 为什么排序后取第一个而不是随手取一个
+///
+/// `/v1/models` 的顺序**不保证稳定**（实测同一分组两次请求顺序不同）。不排序的话，
+/// 同一个档位每次 provision 可能写进不同的模型名 ⇒ [`is_user_edited`] 的基准跟着抖 ⇒
+/// 界面上「已手动维护」标记会随机出现又消失。排序让它成为该分组的一个确定函数。
+///
+/// ## 为什么「问不出来」回落到 [`DEFAULT_MODEL`] 而不是报错
+///
+/// `list_models` 可能因为站点没这个端点、权限不够、或临时故障而返回 `None`。
+/// 那时回落到旧行为：**最坏情况是退化成现状**（纯生图分组写错模型名、选中 404），
+/// 而报错会让整个「获取密钥」失败，把一个「某个档位模型名不对」放大成「一个档位都没有」。
+pub fn pick_model(available: Option<&[String]>) -> String {
+    let Some(models) = available else {
+        return DEFAULT_MODEL.to_string();
+    };
+    // 有任何一个非生图模型 ⇒ 这不是纯生图分组，照旧写默认文本模型。
+    if !models.iter().all(|m| is_image_model(m)) {
+        return DEFAULT_MODEL.to_string();
+    }
+    models
+        .iter()
+        .min()
+        .cloned()
+        // 空列表在 `list_models` 里已经归成 `None` 了，走不到这里；
+        // 真走到也回落默认值而不是 panic。
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
+/// 这个模型名是生图模型吗（[`IMAGE_MODEL_PREFIX`] 前缀）。
+///
+/// UI 据此显示「生图档位」标记。判据放在**模型名**而不是「拉一次 `/v1/models` 看看」，
+/// 是因为 `operator_list_operators` 那条路**只读本地不发网络**（首屏契约）——
+/// 而模型名就在本地 `settings_config` 里，两条路都拿得到，无需异步填空。
+///
+/// ## ⚠️ 必须先归一化再比前缀（review 抓出）
+///
+/// 上游 `IsGPTImageGenerationModel` 是 `ToLower` + `TrimSpace` 之后才比的。裸比前缀
+/// 会在**危险的方向**上失败：某个运营商的 `/v1/models` 若返回 `GPT-Image-2`
+/// 或 `" gpt-image-2"`，我们判它**不是**生图模型 ⇒ [`pick_model`] 以为「这个分组有
+/// 文本模型」⇒ 写 [`DEFAULT_MODEL`] ⇒ **正是这套代码要修的那个 404 又回来了**。
+///
+/// 连带的第二个后果：本函数也是 [`candidate_models`] 那个放宽的闸，认不出来会让
+/// 「已手动维护」的误报也一起回来。
+///
+/// **只归一化比较，不改写要写入的值** —— 服务端给什么名字就照原样写进配置，
+/// 那是它认得的形式。
+pub fn is_image_model(model: &str) -> bool {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with(IMAGE_MODEL_PREFIX)
+}
+
 /// sk 在各 CLI 的 `settings_config` 里的位置。[`patch_api_key`] 与
 /// [`extract_api_key`] 共用这一处定义 —— 两处各写一遍迟早分叉（一处改了另一处没改 ⇒
 /// 写进去的和读出来的不是同一个字段）。
@@ -703,6 +913,87 @@ pub fn patch_api_key(
         return false;
     };
     map.insert(field.to_string(), serde_json::json!(api_key));
+    true
+}
+
+/// 把一个**已存在**档位里过时的模型名修正过来。返回是否真的改了。
+///
+/// # 为什么需要它（实测踩出来的）
+///
+/// `do_provision` 对已存在的档位**只 patch sk、不覆盖配置** —— 那条规则是为了不冲掉
+/// 用户在编辑页改过的东西，是对的。但它有个副作用：**我们自己写错的模型名也永远不会
+/// 被修正**。
+///
+/// 实测就是这个场景：`pick_model` 上线前，纯生图分组被写了 `DEFAULT_MODEL`
+/// （一个文本模型）⇒ 选中即 404、生图工具的入口判据也不成立。用户点「刷新档位与密钥」
+/// 毫无变化，因为那条路只换 sk。⇒ **老用户永远拿不到这个修复**，而界面上没有任何
+/// 迹象说明为什么。
+///
+/// # 判据：只修「用户没改过」的档位
+///
+/// 用 [`is_user_edited`] 判 —— 它已经是「当前配置 ≠ 我们会生成的默认配置」这个语义的
+/// 唯一实现。`Some(false)`（确认没改过）才修：
+///
+/// | `is_user_edited` | 含义 | 修不修 |
+/// |---|---|---|
+/// | `Some(false)` | 配置就是我们写的默认值 | **修** —— 那个默认值现在错了 |
+/// | `Some(true)` | 用户改过 | 不修（他的编辑优先，即使模型名不理想） |
+/// | `None` | 判不了（读不出 sk / 这个 CLI 没默认形状） | 不修 —— 不确定时别动用户的配置 |
+///
+/// ⚠️ **不是「模型名不等于期望值就改」**：那样会把用户手工设的模型名每次刷新都冲掉，
+/// 正好是上面那条规则要防的事。
+///
+/// # 为什么只修模型名，不顺手把整份配置刷成最新默认值
+///
+/// 那会越权：`is_user_edited` 为 `Some(false)` 只说明「整份配置等于**某个**历史默认值」
+/// （见 [`candidate_models`]），把它整份重写等于替用户做了「恢复默认」这个显式动作。
+/// 这里只改一处**已知写错了**的字段，其余原样留着。
+pub fn repair_stale_model(
+    settings_config: &mut serde_json::Value,
+    app_type: &AppType,
+    display_name: &str,
+    base_url: &str,
+    want_model: &str,
+) -> bool {
+    // 只有 codex 的配置里有 `model` 这一行（其它 CLI 的形状里没有它）。
+    if !matches!(app_type, AppType::Codex) {
+        return false;
+    }
+    // 已经是想要的值 ⇒ 什么都不做（绝大多数情形走这条）。
+    if extract_model(settings_config).as_deref() == Some(want_model) {
+        return false;
+    }
+    // 用户改过 / 判不了 ⇒ 不动。
+    //
+    // ⚠️ **基准的模型名传 [`DEFAULT_MODEL`] 而不是 `want_model`**（测试抓出来的）：
+    // 这里要问的是「这份配置**现在**是不是我们写的默认值」，而它当初被写入时用的正是
+    // `DEFAULT_MODEL`（或某个历史默认值，那些由 [`candidate_models`] 认）。
+    // 传 `want_model` 是在拿**修完之后**的期望值去比**修之前**的配置 ⇒ 必然不相等
+    // ⇒ 每个待修的档位都被判成「用户改过」⇒ 这个函数恒不生效。
+    if is_user_edited(
+        settings_config,
+        app_type,
+        display_name,
+        base_url,
+        DEFAULT_MODEL,
+    ) != Some(false)
+    {
+        return false;
+    }
+
+    // 到这里：配置等于某个历史默认值，而当前正解是 `want_model` ⇒ 重写成新的默认配置。
+    //
+    // **整份重写而不是只替换那一行文本**：默认配置由 `settings_config_for` 一个函数
+    // 决定，拿它产出的结果才保证形状正确（手工改一行会漏掉将来新增的字段）。
+    // sk 从原配置里取，不换。
+    let Some(api_key) = extract_api_key(settings_config, app_type) else {
+        return false;
+    };
+    let Some(fixed) = settings_config_for(app_type, &api_key, display_name, base_url, want_model)
+    else {
+        return false;
+    };
+    *settings_config = fixed;
     true
 }
 
@@ -838,6 +1129,234 @@ mod tests {
         assert_eq!(claim_key(&keys, Some(13), "openai", 42).unwrap().id, 9);
     }
 
+    /// 纯生图分组（`/v1/models` 全是 `gpt-image-*`）要拿到它自己那个模型名。
+    ///
+    /// 写 `DEFAULT_MODEL` 的后果是**选中即 404** —— 那个分组根本没挂文本模型。
+    /// 这是本功能存在的理由，必须钉住。
+    #[test]
+    fn an_image_only_group_gets_its_own_image_model() {
+        let models = vec!["gpt-image-2".to_string()];
+        assert_eq!(pick_model(Some(&models)), "gpt-image-2");
+    }
+
+    /// 取真实值而不是硬编码 `gpt-image-2` —— 运营商上新一代时要自动跟上。
+    #[test]
+    fn a_newer_image_model_is_picked_up_without_a_code_change() {
+        let models = vec!["gpt-image-3".to_string()];
+        assert_eq!(
+            pick_model(Some(&models)),
+            "gpt-image-3",
+            "硬编码了 gpt-image-2，运营商上新一代就跟不上了"
+        );
+    }
+
+    /// 有文本模型 ⇒ 这不是纯生图分组，照旧写默认文本模型。
+    ///
+    /// ⚠️ 混合分组（既有文本又有生图，如实测的 `pro池`）**必须走这条** ——
+    /// 它的生图靠 sub2api 的 codex 生图桥（给文本请求注入 `image_generation` tool），
+    /// 主模型写成 `gpt-image-*` 反而会把对话能力弄坏。
+    #[test]
+    fn a_group_with_text_models_keeps_the_default_text_model() {
+        let mixed = vec![
+            "gpt-image-2".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "gpt-5.4".to_string(),
+        ];
+        assert_eq!(pick_model(Some(&mixed)), DEFAULT_MODEL);
+    }
+
+    /// 问不出模型列表 ⇒ 回落默认值（= 本功能出现之前的行为），不 panic 不报错。
+    #[test]
+    fn an_unknown_model_list_falls_back_to_the_default() {
+        assert_eq!(pick_model(None), DEFAULT_MODEL);
+        assert_eq!(
+            pick_model(Some(&[])),
+            DEFAULT_MODEL,
+            "空列表也要回落 —— 否则会写一个空 model 出去"
+        );
+    }
+
+    /// 多个生图模型时取值**稳定**。
+    ///
+    /// `/v1/models` 的顺序不保证稳定（实测同一分组两次请求顺序不同）。不排序的话同一个
+    /// 档位每次 provision 可能写进不同模型名 ⇒ `is_user_edited` 的基准跟着抖 ⇒
+    /// 界面上「已手动维护」标记随机出现又消失。
+    #[test]
+    fn picking_among_several_image_models_is_deterministic() {
+        let a = vec![
+            "gpt-image-2".to_string(),
+            "gpt-image-1".to_string(),
+            "gpt-image-1.5".to_string(),
+        ];
+        // 同一集合、不同顺序，必须得到同一个答案。
+        let b = vec![
+            "gpt-image-1.5".to_string(),
+            "gpt-image-2".to_string(),
+            "gpt-image-1".to_string(),
+        ];
+        assert_eq!(pick_model(Some(&a)), pick_model(Some(&b)));
+    }
+
+    /// **老档位的过时模型名要被刷新修正。**
+    ///
+    /// 这是实测踩出来的缺口：`do_provision` 对已存在的档位只 patch sk，所以
+    /// `pick_model` 上线前被写成文本模型的纯生图档位，用户点多少次「刷新档位与密钥」
+    /// 都不会变好 —— 选中即 404，生图工具的入口判据也一直不成立，而界面上没有任何
+    /// 迹象说明为什么。
+    #[test]
+    fn a_stale_default_model_is_repaired_on_refresh() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        // 老版本 provision 写出来的：纯生图分组却配了文本模型。
+        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, DEFAULT_MODEL)
+            .expect("codex 必须有默认形状");
+
+        assert!(
+            repair_stale_model(&mut cfg, &app, "生图档", base, "gpt-image-2"),
+            "过时的模型名没被修正 —— 老用户永远拿不到这个修复"
+        );
+        assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
+        // sk 必须原样保留（修配置不是换密钥）。
+        assert_eq!(extract_api_key(&cfg, &app).as_deref(), Some("sk-1"));
+    }
+
+    /// 但**用户改过的配置不许动** —— 那正是「只换 sk」那条规则要保护的东西。
+    #[test]
+    fn a_user_edited_config_is_never_repaired() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "我的档位", base, DEFAULT_MODEL)
+            .expect("codex 必须有默认形状");
+        // 用户把 reasoning effort 改了 —— 这份配置从此归他维护。
+        let edited = cfg["config"].as_str().unwrap().replace(
+            "model_reasoning_effort = \"high\"",
+            "model_reasoning_effort = \"low\"",
+        );
+        cfg["config"] = edited.clone().into();
+
+        assert!(
+            !repair_stale_model(&mut cfg, &app, "我的档位", base, "gpt-image-2"),
+            "改写了用户手工维护的配置"
+        );
+        assert_eq!(cfg["config"].as_str().unwrap(), edited, "配置内容被动过了");
+    }
+
+    /// 已经是正解时不做任何事（绝大多数刷新走这条，不该产生无谓的写操作）。
+    #[test]
+    fn a_config_already_on_the_right_model_is_left_alone() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, "gpt-image-2")
+            .expect("codex 必须有默认形状");
+        assert!(!repair_stale_model(
+            &mut cfg,
+            &app,
+            "生图档",
+            base,
+            "gpt-image-2"
+        ));
+    }
+
+    /// 生图档位**不该**显示「已手动维护」。
+    ///
+    /// 两个调用方（`list_operators_impl` / `reset_tier_config`）拿不到分组数据，
+    /// 只能传 `DEFAULT_MODEL` 当基准。不认配置里那个生图模型名的话，
+    /// **每个生图档位都会挂上 amber 标记**而用户一个字没改过。
+    #[test]
+    fn an_image_only_tier_is_not_reported_as_user_edited() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        // provision 按 `pick_model` 写出来的那份配置。
+        let cfg = settings_config_for(&app, "sk-1", "生图档", base, "gpt-image-2")
+            .expect("codex 必须有默认形状");
+
+        assert_eq!(
+            // 调用方只能给 DEFAULT_MODEL —— 它拿不到分组的模型列表。
+            is_user_edited(&cfg, &app, "生图档", base, DEFAULT_MODEL),
+            Some(false),
+            "生图档位被误报成「已手动维护」—— 每个生图档位都会挂 amber 标记"
+        );
+    }
+
+    /// 但**用户真改了模型名**仍然要检测得出来。
+    ///
+    /// ⚠️ 这是上一条那个放宽的边界：若无条件把配置里的模型名当基准，
+    /// `model` 那一行就结构上不可能不同，这条会静默失效。
+    #[test]
+    fn changing_the_model_to_another_text_model_is_still_detected() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "普通档", base, DEFAULT_MODEL)
+            .expect("codex 必须有默认形状");
+        // 用户在编辑页把模型换成了另一个文本模型。
+        let config = cfg["config"].as_str().unwrap().replace(
+            &format!("model = \"{DEFAULT_MODEL}\""),
+            "model = \"gpt-4o\"",
+        );
+        cfg["config"] = config.into();
+
+        assert_eq!(
+            is_user_edited(&cfg, &app, "普通档", base, DEFAULT_MODEL),
+            Some(true),
+            "用户改了模型名却没被检测出来 —— 那个放宽条件放得太松了"
+        );
+    }
+
+    /// `extract_model` 别把 `model_provider` 当成 `model`。
+    ///
+    /// 抠错了会拿 `"custom"` 去判 `is_image_model`（恒 false，于是上面那条放宽失效，
+    /// 生图档位又开始误报），而没有任何东西会报错。
+    #[test]
+    fn extract_model_matches_the_whole_key_not_a_prefix() {
+        let cfg = settings_config_for(
+            &AppType::Codex,
+            "sk",
+            "t",
+            "https://x.dev/v1",
+            "gpt-image-2",
+        )
+        .expect("codex 必须有默认形状");
+        assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
+    }
+
+    /// **大小写与空白要归一化后再比前缀** —— 上游 `IsGPTImageGenerationModel` 就是
+    /// `ToLower` + `TrimSpace` 之后比的。
+    ///
+    /// 裸比前缀会在危险方向失败：运营商返回 `GPT-Image-2` 时我们判它不是生图模型 ⇒
+    /// `pick_model` 以为这个分组有文本模型 ⇒ 写 `DEFAULT_MODEL` ⇒ **404 又回来了**，
+    /// 正是这套代码要修的那个 bug。（review 抓出）
+    #[test]
+    fn the_image_model_predicate_normalizes_case_and_whitespace() {
+        assert!(is_image_model("GPT-Image-2"), "大写没被归一化");
+        assert!(is_image_model("  gpt-image-2  "), "空白没被裁掉");
+        assert!(is_image_model("GPT-IMAGE-1.5"));
+        // 归一化不该把无关的名字也放进来。
+        assert!(!is_image_model("gpt-5.6-sol"));
+        assert!(!is_image_model("image-gpt-2"));
+    }
+
+    /// 同一条归一化要贯穿到 `pick_model` —— 否则大写的生图模型列表会被判成
+    /// 「有文本模型」而写回默认值。
+    #[test]
+    fn pick_model_handles_non_lowercase_model_ids() {
+        let shouty = vec!["GPT-Image-2".to_string()];
+        assert_eq!(
+            pick_model(Some(&shouty)),
+            "GPT-Image-2",
+            "大写的纯生图分组被误判成有文本模型 ⇒ 写回了默认文本模型"
+        );
+    }
+
+    /// `is_image_model` 是 UI 判据（显示「生图档位」标记），别把文本模型认成生图的。
+    #[test]
+    fn is_image_model_only_matches_the_image_prefix() {
+        assert!(is_image_model("gpt-image-2"));
+        assert!(is_image_model("gpt-image-3-turbo"));
+        assert!(!is_image_model(DEFAULT_MODEL));
+        assert!(!is_image_model("gpt-5.4-mini"));
+        assert!(!is_image_model(""));
+    }
+
     #[test]
     fn tiers_sort_cheapest_first_and_are_stable() {
         let mk = |id: i64, rate: f64| Tier {
@@ -846,6 +1365,9 @@ mod tests {
             rate_multiplier: rate,
             api_key: "sk".into(),
             key_was_created: false,
+            // 排序只看倍率与 group_id，模型名与生图开关都不参与。
+            model: DEFAULT_MODEL.into(),
+            allow_image_generation: false,
         };
         let targeted = |id: i64, rate: f64| TargetedTier {
             tier: mk(id, rate),

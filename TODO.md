@@ -158,3 +158,26 @@ default.json` 也给了权限 —— **但 `tauri.conf.json` 的 `plugins` 只�
 注册插件（三件缺一不可，`release.yml` 的 `Prepare Tauri signing key` 那步注释里写了）；
 不要 → 把依赖、`UpdaterExt` 那条链路、capabilities 权限一起删干净，别留「声明了但
 不工作」的中间态。**需要维护者决策**（产品问题：靠 GitHub Releases 手动更新够不够）。
+
+---
+
+## 数据库仍是 rollback-journal 模式，而现在有第二个进程会读它
+
+**what**：`database/mod.rs` 建连接时设了 `foreign_keys` 与 `auto_vacuum`，但**没设
+`journal_mode = WAL`**。rollback 模式下写者持 EXCLUSIVE 锁会**直接阻塞读者**；
+WAL 模式下读写可并行。
+
+**why 现在才成为问题**：生图 MCP（`operator/imagegen_mcp.rs`，2026-08-05 加）是
+**第一份从第二个进程读这个库**的代码。它已经做对了两件事 —— 以 `SQLITE_OPEN_READ_ONLY`
+打开（绝不拿写锁）、依赖 rusqlite 默认的 5s `busy_timeout`。但主程序一次**长写**
+（迁移 / 备份 / 启动时的 `incremental_vacuum`）仍可能让它等超 5s ⇒ MCP 启动报
+「打开数据库失败」⇒ 宿主那侧看到的是「生图工具起不来」。
+
+概率低（要正好撞上那几秒），且**属既存设计**而非本次引入，所以按 defer 准入闸记在这里
+而不是顺手改 journal 模式 —— 那是全库行为的变更，值得单独一轮验证（WAL 会多出
+`-wal` / `-shm` 两个文件，备份与「换数据目录」那两条路径都要重新验）。
+
+**how-to-repay**：在 `database/mod.rs` 的连接初始化里加
+`PRAGMA journal_mode = WAL`，然后复核三处：① `database/backup.rs` 的备份是否仍完整
+（WAL 下要 checkpoint 或用 sqlite 的备份 API，直接拷主文件会丢最近的写）；
+② `app_store` 换数据目录那条路径；③ Windows 上多进程访问同一个 WAL 库的行为。

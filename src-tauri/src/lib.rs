@@ -334,6 +334,29 @@ fn macos_tray_icon() -> Option<Image<'static>> {
     }
 }
 
+/// 生图 MCP server 模式的入口（`--mcp-image-gen`），见
+/// [`operator::imagegen_mcp`] 的模块文档。
+///
+/// ## 为什么是这么一个转发函数，而不是把 `mod operator` 改成 `pub`
+///
+/// 这个 crate 里除 `hermes_config` 外**所有模块都是私有的** —— 那是上游的形状。
+/// 为了让 `main.rs` 够到一个函数就把整个 `operator`（12 个子模块、含凭据处理）
+/// 公开出去，等于为一行调用扩大了一整片 API 面，而且是在上游文件上留改动
+/// （merge 时要重新处理）。
+///
+/// 一个转发函数只暴露真正要暴露的东西，`main.rs` 那侧读起来也更清楚
+/// ——「这个二进制有两种启动方式」正好对应这里的两个 `pub fn`。
+pub fn run_imagegen_mcp(provider_id: &str) -> Result<(), String> {
+    operator::imagegen_mcp::serve(provider_id)
+}
+
+/// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
+///
+/// **唯一定义在 [`commands::IMAGEGEN_MCP_FLAG`]** —— 写配置的那一侧（装工具时填进
+/// `args`）与读参数的这一侧（`main.rs` 的分流判断）必须是同一个字符串，
+/// 两处各写一遍字面量迟早分叉，而症状是宿主那边"启动超时"，看不出是拼写问题。
+pub use commands::IMAGEGEN_MCP_FLAG;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
@@ -1492,6 +1515,9 @@ pub fn run() {
             commands::operator_list_tier_rates,
             commands::operator_reorder,
             commands::operator_reset_tier_config,
+            commands::operator_install_imagegen_mcp,
+            commands::operator_uninstall_imagegen_mcp,
+            commands::operator_list_imagegen_mcp,
             commands::operator_switch_tier,
             commands::operator_list_sites,
             commands::operator_remove_site,

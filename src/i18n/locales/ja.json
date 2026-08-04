@@ -3069,7 +3069,15 @@
       "userEdited": "手動管理中",
       "userEditedHint": "この枠の設定を編集済みです。グループを更新しても上書きされません（キーのみ更新）。クリックでデフォルト設定に戻せます。",
       "editMissing": "この枠のレコードが見つかりません。「キーを取得」で再生成してください。",
-      "editCurrentNote": "これは現在使用中の枠です。変更が反映されない場合は ChatGPT デスクトップ版を終了して開き直してください —— 起動中は Codex の設定を書き戻します。"
+      "editCurrentNote": "これは現在使用中の枠です。変更が反映されない場合は ChatGPT デスクトップ版を終了して開き直してください —— 起動中は Codex の設定を書き戻します。",
+      "imageOnly": "画像生成",
+      "imageOnlyHint": "このティアは画像生成モデル（gpt-image 系）のみを提供しているため、チャット用プロバイダーとしては失敗します。画像ツールを入れれば codex / claude で「画像を生成して」と言うだけで使えます。このティアに切り替える必要はありません。",
+      "imagegenInstall": "画像ツールを入れる",
+      "imagegenUninstall": "画像ツールを外す",
+      "imagegenInstalled": "画像ツール導入済み",
+      "imagegenInstalledHint": "このティアの画像ツールは導入済みです。codex / claude で「画像を生成して」と言うだけで使えます（チャットは現在のティアのまま）。ここをクリックで外せます。",
+      "imagegenInstalledToast": "「{{name}}」に画像ツールを入れました（{{apps}}）。新しいターミナルを開いてから「画像を生成して」と言ってください。",
+      "imagegenUninstalled": "「{{name}}」の画像ツールを外しました"
     },
     "stats": {
       "title": "LoongPort の改善に協力",

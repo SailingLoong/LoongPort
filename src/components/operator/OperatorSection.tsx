@@ -166,6 +166,15 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   const { busy, run } = useRowBusy();
   // 待确认「恢复默认配置」的档位。存整个 tier：确认框里要显示它的名字。
   const [confirmReset, setConfirmReset] = useState<TierInfo | null>(null);
+  /**
+   * 已装生图工具的档位 id。
+   *
+   * **一次查完整屏**（`listImagegenMcp`）而不是每行各问一次 —— 档位可能有十几个，
+   * 逐行 invoke 是十几次 IPC。
+   */
+  const [imagegenInstalled, setImagegenInstalled] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   // 待确认删除的运营商行。存整行：确认框里要显示它的名字与档位数。
   const [confirmRemove, setConfirmRemove] = useState<OperatorRowData | null>(
     null,
@@ -221,6 +230,17 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
             })
             .catch(() => {});
         }
+
+        // 生图工具的安装状态同样异步补 —— 它只读本地库（`mcp_servers` 表），
+        // 但没必要让首屏等它。失败不提示：拿不到就是所有按钮显示成「未装」，
+        // 用户点了会走 upsert（幂等），不会坏事。
+        operatorApi
+          .listImagegenMcp()
+          .then((ids) => {
+            if (isStale()) return;
+            setImagegenInstalled(new Set(ids));
+          })
+          .catch(() => {});
       } catch (e) {
         toast.error(String(e));
       }
@@ -919,6 +939,46 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
     });
   };
 
+  /**
+   * 装 / 卸某个档位的生图工具。
+   *
+   * ## 为什么装完要提示「新开终端」
+   *
+   * MCP server 是 CLI **启动时**读配置的 —— 已经在跑的 codex / claude 会话不会热加载
+   * 新增的 server。不说这句的话用户装完立刻去问「生成一张图」，模型答"我没有这个工具"，
+   * 而配置其实完全正确。
+   *
+   * ## 为什么卸载不用二次确认
+   *
+   * 与「恢复默认配置」不同（那个会覆盖用户的手工编辑，所以有确认弹窗），
+   * 卸生图工具**不丢任何用户数据** —— 已经生成的图片留在磁盘上，再点一次就装回来。
+   * 为一个可逆且无损的操作加确认是噪音。
+   */
+  const handleToggleImagegen = (tier: TierInfo, installed: boolean) =>
+    run(`imagegen:${tier.providerId}`, async () => {
+      try {
+        if (installed) {
+          await operatorApi.uninstallImagegenMcp(tier.providerId);
+          toast.success(
+            t("loongport.tier.imagegenUninstalled", { name: tier.displayName }),
+          );
+        } else {
+          const r = await operatorApi.installImagegenMcp(tier.providerId);
+          toast.success(
+            t("loongport.tier.imagegenInstalledToast", {
+              name: tier.displayName,
+              apps: r.apps.join(" / "),
+            }),
+          );
+        }
+        // 只刷这一个开关的状态，不整屏 reload —— 装 / 卸不影响档位本身的任何字段。
+        const ids = await operatorApi.listImagegenMcp();
+        setImagegenInstalled(new Set(ids));
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+
   /** 删掉一行运营商（连带档位）。有档位在用的行按钮不可点，走不到这里。 */
   const doRemoveOperator = (row: OperatorRowData) =>
     run(`removeOperator:${row.id}`, async () => {
@@ -1094,6 +1154,8 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
         isCheckingTier={isChecking}
         onResetTier={(tier) => setConfirmReset(tier)}
         onEditTier={requestEdit}
+        onToggleImagegen={handleToggleImagegen}
+        imagegenInstalled={imagegenInstalled}
         onRemoveOperator={(operatorId) => {
           // ⚠️ **这处 `find` 保持 number 不动**：`operatorId` 从 `OperatorRow` 的
           // `onDelete` 一路传回来，只在 operator 这一类里流转。官网行走的是
