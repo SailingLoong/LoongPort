@@ -1002,6 +1002,26 @@ pub fn repair_stale_model(
     if extract_model(settings_config).as_deref() == Some(want_model) {
         return false;
     }
+
+    // ⚠️ **只修「生图性变了」这一类**（review 抓出的一个将来会踩的坑）。
+    //
+    // 本函数存在的理由是一个具体的错误：纯生图分组被写了文本模型名 ⇒ 选中即 404。
+    // 但守卫只有 `is_user_edited == Some(false)` 的话，**等 [`HISTORICAL_DEFAULT_MODELS`]
+    // 有了值之后它会顺带改写所有文本档位的模型名** —— 那时历史默认值会被认成「没改过」，
+    // 于是每次刷新都把老档位迁移到新的 `DEFAULT_MODEL`。
+    //
+    // 那超出了本函数的本意，而且与四处文档里写的不变量矛盾（`do_provision`、
+    // `HISTORICAL_DEFAULT_MODELS`、`DEFAULT_MODEL`、`is_user_edited` 都写着
+    // 「已存在的档位只换 sk、不改写模型名」）。
+    //
+    // 所以再加一道：**当前值与期望值必须在「是不是生图模型」上不同**。
+    // 那正好覆盖要修的那一类（文本名 → 生图名），且天然排除「文本换文本」的迁移。
+    let current_is_image = extract_model(settings_config)
+        .map(|m| is_image_model(&m))
+        .unwrap_or(false);
+    if current_is_image == is_image_model(want_model) {
+        return false;
+    }
     // 用户改过 / 判不了 ⇒ 不动。
     //
     // ⚠️ **基准的模型名传 [`DEFAULT_MODEL`] 而不是 `want_model`**（测试抓出来的）：
@@ -1284,6 +1304,49 @@ mod tests {
         assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
         // sk 必须原样保留（修配置不是换密钥）。
         assert_eq!(extract_api_key(&cfg, &app).as_deref(), Some("sk-1"));
+    }
+
+    /// **文本换文本不修** —— 那是模型迁移，不是本函数的职责。
+    ///
+    /// ⚠️ 这条钉住的是一个**将来**才会踩的坑：等 `HISTORICAL_DEFAULT_MODELS` 有了值，
+    /// 老档位的模型名会被认成「没改过」⇒ 若只有 `is_user_edited` 那道守卫，
+    /// 每次刷新都会把所有文本档位迁移到新的 `DEFAULT_MODEL`，而四处文档都写着
+    /// 「已存在的档位只换 sk、不改写模型名」。（review 抓出）
+    #[test]
+    fn a_text_to_text_model_change_is_not_a_repair() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "普通档", base, DEFAULT_MODEL)
+            .expect("codex 必须有默认形状");
+        let before = cfg.clone();
+
+        // 期望值是另一个**文本**模型 —— 那是迁移，本函数不该插手。
+        assert!(
+            !repair_stale_model(&mut cfg, &app, "普通档", base, "gpt-5.7"),
+            "把文本档位的模型名迁移了 —— 那超出了这个函数的职责"
+        );
+        assert_eq!(cfg, before, "配置被动过了");
+    }
+
+    /// 反过来也不修：生图档位不会被改成另一个生图模型名。
+    ///
+    /// 换代（`gpt-image-2` → `gpt-image-3`）由 `pick_model` 在**新建**时决定；
+    /// 已存在的档位保持原样，与「只换 sk」那条规则一致。
+    #[test]
+    fn an_image_to_image_model_change_is_not_a_repair() {
+        let app = AppType::Codex;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, "gpt-image-2")
+            .expect("codex 必须有默认形状");
+        let before = cfg.clone();
+        assert!(!repair_stale_model(
+            &mut cfg,
+            &app,
+            "生图档",
+            base,
+            "gpt-image-3"
+        ));
+        assert_eq!(cfg, before);
     }
 
     /// 但**用户改过的配置不许动** —— 那正是「只换 sk」那条规则要保护的东西。
