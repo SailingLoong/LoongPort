@@ -147,13 +147,120 @@ impl StreamCheckService {
         let timeout = std::time::Duration::from_secs(config.timeout_secs);
         let ua = Self::custom_user_agent(provider);
 
-        let result = Self::probe_reachability(&client, &base_url, timeout, ua).await;
+        let result = Self::probe_reachability(&client, &base_url, timeout, ua.clone()).await;
         let response_time = start.elapsed().as_millis() as u64;
-        Ok(Self::build_result(
-            result,
-            response_time,
-            config.degraded_threshold_ms,
-        ))
+        let mut checked = Self::build_result(result, response_time, config.degraded_threshold_ms);
+
+        // 可达之后再问一句「这个档位到底能调什么」—— 见 `probe_models`。
+        // 只在**托管档位**上做：判据要 sk，而那套形状只有托管项保证有；
+        // 用户手工建的 provider 密钥可能在任意位置。
+        if checked.success && crate::operator::is_managed(&provider.id) {
+            if let Some(summary) =
+                Self::probe_models(&client, app_type, provider, &base_url, timeout, ua).await
+            {
+                checked.model_used = summary;
+            }
+        }
+        Ok(checked)
+    }
+
+    /// 问这个档位**真正能调哪些模型**（`GET {base_url}/models`），零成本。
+    ///
+    /// # 为什么可达性探测不够
+    ///
+    /// [`probe_reachability`] 只答「端口通不通」—— 它对任何 HTTP 响应都算成功。而档位
+    /// 真正的失效方式往往在**那之后**：
+    ///
+    /// | 失效方式 | 可达性探测 | 本探测 |
+    /// |---|---|---|
+    /// | 域名挂了 / 端口不通 | ✅ 抓得到 | ✅ |
+    /// | sk 被删 / 过期（401） | ❌ 说"可达" | ✅ |
+    /// | 分组没挂任何模型（调用必失败） | ❌ 说"可达" | ✅ |
+    /// | 分组只挂了生图模型却当对话档位用 | ❌ 说"可达" | ✅ |
+    ///
+    /// 最后那条是实测踩到的：鑫旺 Neko API 的两个生图分组在可达性探测里全是"正常"，
+    /// 而拿它们对话稳定 502。**用户是在账单或报错里才知道的** —— 那正是这个探测要
+    /// 提前告诉他的事。
+    ///
+    /// # 为什么零成本
+    ///
+    /// `/v1/models` 是**列表接口，不计费**（不产生 token、不触发调度）。所以它可以随手点、
+    /// 可以对每个档位都点，与「真发一次推理去试」有本质区别 —— 后者要花钱，因而不可能
+    /// 做成一个用户随时能按的按钮。
+    ///
+    /// # 返回值放进 `model_used`（一个原本恒空的字段）
+    ///
+    /// `StreamCheckResult::model_used` 是 `stream_check_logs` 表里的既有列，改成真实检查
+    /// 之后它一直是空串。填上它 ⇒ 前端与历史日志**不用改结构**就能看到这条信息，
+    /// 而这正是那个字段当初的用意。
+    ///
+    /// 返回 `None` = 问不出来（站点没这个端点 / 网络抖动）。**那时不改判定** ——
+    /// 探测不到不等于档位坏了，把「我不知道」报成「不可用」比不报更糟。
+    async fn probe_models(
+        client: &Client,
+        app_type: &AppType,
+        provider: &Provider,
+        base_url: &str,
+        timeout: std::time::Duration,
+        custom_ua: Option<HeaderValue>,
+    ) -> Option<String> {
+        // 密钥位置按 CLI 分派，复用那一处定义（硬编码 codex 的位置会让 claude 档位
+        // 永远探不出来，而且是静默的）。
+        let api_key =
+            crate::operator::provision::extract_api_key(&provider.settings_config, app_type)?;
+
+        let url = format!("{}/models", base_url.trim_end_matches('/'));
+        let mut req = client
+            .get(&url)
+            .bearer_auth(&api_key)
+            .timeout(timeout)
+            .header("accept", "application/json");
+        if let Some(ua) = custom_ua {
+            req = req.header("user-agent", ua);
+        }
+
+        let resp = req.send().await.ok()?;
+        let status = resp.status();
+        if !status.is_success() {
+            // 401 / 403 是**确定的坏消息**（密钥失效 / 无权限），值得报出来 ——
+            // 它正是可达性探测看不见的那一类。其余非 2xx 说明这个站没有这个端点，
+            // 那不是档位的问题，按「问不出来」处理。
+            return match status.as_u16() {
+                401 => Some("密钥已失效（401）".to_string()),
+                403 => Some("这个档位无权访问（403）".to_string()),
+                _ => None,
+            };
+        }
+
+        let body = resp.text().await.ok()?;
+        let models: Vec<String> = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()?
+            .get("data")?
+            .as_array()?
+            .iter()
+            .filter_map(|m| m.get("id")?.as_str().map(str::to_string))
+            .filter(|id| !id.is_empty())
+            .collect();
+
+        if models.is_empty() {
+            return Some("这个档位没有可调用的模型".to_string());
+        }
+
+        // 只挂生图模型 ⇒ 当对话档位用必定失败。这句话要说得让用户能照做。
+        let all_image = models
+            .iter()
+            .all(|m| crate::operator::provision::is_image_model(m));
+        if all_image {
+            return Some(format!("只能生图（{}），不能对话", models.join(" / ")));
+        }
+
+        // 正常情况：报个数 + 头几个名字。全列出来会把 toast 撑爆（实测有 13 个的分组）。
+        const SHOWN: usize = 3;
+        let mut head: Vec<&str> = models.iter().take(SHOWN).map(String::as_str).collect();
+        if models.len() > SHOWN {
+            head.push("…");
+        }
+        Some(format!("{} 个模型（{}）", models.len(), head.join(" / ")))
     }
 
     /// 解析供应商 `base_url`。

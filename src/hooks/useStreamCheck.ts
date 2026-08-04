@@ -35,7 +35,13 @@ export function useStreamCheck(appId: AppId) {
               responseTimeMs: result.responseTimeMs,
               defaultValue: `${providerName} 连通正常 (${result.responseTimeMs}ms)`,
             }),
-            { closeButton: true },
+            {
+              closeButton: true,
+              // 「真正能调什么」—— 后端零成本探出来的（见 `modelUsed` 的文档）。
+              // **可达 ≠ 可用**：密钥失效、分组没挂模型、只挂生图模型这三种，
+              // 可达性探测都报「正常」，而这一行会说清楚。
+              description: result.modelUsed || undefined,
+            },
           );
         } else if (result.status === "degraded") {
           toast.warning(
