@@ -74,10 +74,12 @@ jobs:
             patchelf \
             libssl-dev \
             rpm \
-            flatpak \
-            flatpak-builder \
             elfutils \
             xdg-utils
+          # flatpak / flatpak-builder 2026-08-04 去掉 —— 上游那份 Flatpak 清单
+          # （`flatpak/com.ccswitch.desktop.*`）通篇是 CC Switch 的 app id 与功能描述、
+          # 且从来没有构建步骤调用它，已随开源清理一起删。真做 Linux 包时按 LoongPort
+          # 自己的 app id 重新生成一份，比改那份快。
           # GTK/GLib stack for gdk-3.0, glib-2.0, gio-2.0
           sudo apt-get install -y --no-install-recommends \
             libgtk-3-dev \
