@@ -15,43 +15,82 @@ LoongPort's first release is 3.19.2 rather than 0.1.0.
 
 ### Added / 新增
 
-- **Image generation from inside your CLI, without giving up a chat tier.**
-  Tiers that can generate images now carry an install button; one click registers
-  a built-in MCP server with Codex, Claude Code and Gemini CLI, after which
-  "generate an image" just works in conversation. **Your chat keeps running on
-  whichever tier is active** — image generation is a separate tool, so a cheap
-  text tier and an image tier are no longer mutually exclusive.
+- **Image generation inside your CLI, without giving up a chat tier.** Tiers that
+  only serve image models now carry an **Use for images** button. Click it and
+  LoongPort registers a built-in MCP server with Codex, Claude Code and Gemini
+  CLI — after that, "generate an image" just works in conversation.
 
-  The API key never lands in a CLI config file: the MCP entry stores only the
-  tier id, and the key is read from LoongPort's own database at launch. Refreshing
-  tiers rotates the key with no reinstall.
+  **Two independent "current" selections.** Which tier you chat on and which tier
+  images come from are separate choices that don't interfere: chat goes to
+  `/v1/responses` with the active tier's key, images go to
+  `/v1/images/generations` with the image tier's key. Switching one never
+  disturbs the other.
 
-  在 CLI 里生图，**不必让出对话档位**。能生图的档位上多了一个安装按钮，点一下就把内置的
-  生图工具注册进 Codex / Claude Code / Gemini CLI，之后在对话里说「生成一张图」即可。
-  对话仍走你当前启用的那个档位 —— 生图是独立工具，所以「用便宜的文本档位聊天」与
-  「要图」不再互斥。
+  **Switching image tiers needs no CLI restart.** The MCP entry stores no tier
+  id; the choice lives in LoongPort's database and is read fresh on every
+  generation. Only the very first activation needs a new terminal (that's when
+  the MCP entry is added, and CLIs only read their config at startup).
 
-  密钥不落进任何 CLI 配置文件：MCP 条目里只存档位 id，密钥在工具启动时从 LoongPort
-  自己的数据库现读。刷新档位换了密钥也不用重装。
+  **Nothing is pushed on you.** A relay with no image group shows no image UI at
+  all and your CLI configs are left untouched. Picking between a 1K and a 4K tier
+  is a spending decision, so LoongPort never picks for you.
+
+  **CLI 里生图，不必让出对话档位。** 只提供生图模型的档位上多了一个「启用生图」按钮。
+  点一下，LoongPort 就把内置的生图工具注册进 Codex / Claude Code / Gemini CLI，
+  之后在对话里说「生成一张图」即可。
+
+  **两个各自独立的「当前项」。** 「用哪个档位对话」与「图从哪个档位出」是两个互不干扰的
+  选择：对话走 `/v1/responses` 用当前档位的密钥，生图走 `/v1/images/generations` 用生图
+  档位的密钥。切换任一个都不影响另一个。
+
+  **换生图档位不用重启 CLI。** MCP 条目里不存档位 id，选择存在 LoongPort 自己的库里、
+  每次生图时现读。只有第一次启用需要新开终端（那时才往配置里新增条目，而 CLI 只在启动时
+  读配置）。
+
+  **不主动塞给你。** 没有生图分组的中转站完全不显示生图相关的东西，你的 CLI 配置一个字
+  不动。而 1K 与 4K 之间怎么选是花钱的决定，LoongPort 不替你选。
+
+- **Connectivity check now tells you what a tier can actually serve.** The check
+  used to answer only "is the host reachable" — which reports *healthy* for a
+  tier whose key has expired, that serves no models at all, or that serves only
+  image models while being used for chat. It now also asks the tier what it can
+  serve (a listing endpoint, so it costs nothing and stays a button you can press
+  freely) and says so: `6 models (…)`, `image generation only — not usable for
+  chat`, or `key has expired (401)`.
+
+  **连通检测现在会告诉你这个档位到底能调什么。** 原来它只回答「主机通不通」——
+  而密钥已过期、分组没挂任何模型、或只挂了生图模型却被当对话档位用，这三种它都报
+  「连通正常」。现在它会额外问一句这个档位能提供什么（列表接口，零成本，所以仍是一个
+  可以随手按的按钮），并如实说出来：`6 个模型（…）`、`只能生图，不能对话`、
+  `密钥已失效（401）`。
 
 ### Fixed / 修复
 
-- **Image-only tiers were written with a text model, so selecting one 404'd.**
+- **Image-only tiers were provisioned with a text model, so selecting one 404'd.**
   Provisioning now asks each group which models it actually serves and writes the
-  group's real `gpt-image-*` name when it serves nothing else. Existing tiers get
-  corrected on the next refresh — but only when their config is still untouched,
-  so a tier you have edited yourself is left alone.
+  group's real `gpt-image-*` name when it serves nothing else — picking the newest
+  generation by numeric version, not lexical order. Existing tiers are corrected
+  on the next refresh, but only when their config is still untouched, so a tier
+  you edited yourself is left alone.
 
   纯生图分组原先被写入了文本模型名，选中即 404。现在 provision 会问每个分组它真正提供
-  哪些模型，只挂生图模型的分组就写它自己的 `gpt-image-*`。已存在的档位在下次刷新时会
-  被修正 —— 但仅限配置未被改动过的，你自己编辑过的档位不会被动。
+  哪些模型，只挂生图模型的分组就写它自己的 `gpt-image-*`（按版本号数值取最新的一代，
+  不是字典序）。已存在的档位在下次刷新时会被修正 —— 但仅限配置未被改动过的，
+  你自己编辑过的档位不会被动。
 
-- **"Restore default config" no longer breaks an image tier.** It used to write
-  the text default back, i.e. the button meant for un-bricking a tier bricked
-  image ones instead.
+- **"Restore default config" no longer breaks an image tier.** It used to write the
+  text default back, i.e. the button meant for un-bricking a tier bricked image
+  ones instead.
 
   「恢复默认配置」不再弄坏生图档位 —— 它原先会把文本默认值写回去，也就是专门用来救砖的
   按钮反过来把生图档位弄砖了。
+
+- **A custom data directory is now honoured by the image tool.** It used to read
+  the default `~/.loongport` regardless, so anyone who had moved their data
+  directory got "database not found" or a stale tier — silently, in both cases.
+
+  自定义数据目录现在对生图工具也生效了。它原先一律读默认的 `~/.loongport`，
+  所以挪过数据目录的用户会遇到「找不到数据库」或读到过期档位 —— 两种都不报错。
 
 - **Tauri's npm and crate versions had drifted apart, so no platform could be
   packaged.** `@tauri-apps/api` is pinned back to the crate's minor. This had been

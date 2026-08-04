@@ -3,7 +3,7 @@
 # （裁决见 CLAUDE.md「三点五」）。面向用户的二进制名走 tauri.conf.json 的
 # `mainBinaryName`（已是 `LoongPort`）。
 name = "cc-switch"
-version = "3.19.2"
+version = "3.20.0"
 description = "同样的 Codex，成本省 95% 以上 —— 填一个域名、登录一次，其余自动配好"
 authors = ["SailingLoong", "Jason Young"]
 license = "MIT"
