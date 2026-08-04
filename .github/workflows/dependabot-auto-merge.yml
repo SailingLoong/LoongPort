@@ -1,0 +1,70 @@
+# dependabot 的 PR 过了 CI 就自动合，不用人一个个点。
+#
+# **为什么需要它**：`dependabot.yml` 里配了 `groups: patterns: ["*"]`，本以为每周只来
+# 一个合并 PR —— 但**安全更新不受 groups 约束**，GitHub 总是为每条告警单独开 PR。
+# 2026-08-04 转公开、开了 dependabot alerts 之后一次性来了 8 个，往后每有新告警还会来。
+# 手工点不可持续，而"攒着不管"等于让 Security 页长期挂着一堆红字、真有要紧的也看不见。
+#
+# **安全前提（这条比自动化本身重要）**：auto-merge 是"等必需检查全绿再合"，不是"直接合"。
+# main 的分支保护里配了四个必需检查（Frontend + 三个平台的 Backend），所以这里挂上
+# auto-merge 之后，PR 仍然要过 tsc / prettier / vitest / cargo test / clippy -D warnings
+# 才会进 main。**闸没少一道，只是不用人守着点按钮。**
+#
+# 判据用 dependabot 自己给的元数据（`dependabot/fetch-metadata`），不靠解析 PR 标题 ——
+# 标题格式是它的实现细节，会变。
+name: Dependabot auto-merge
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    # ⚠️ **这个 `if` 是安全边界，不是优化。** `pull_request_target` 跑在**基分支**的
+    # 上下文里、带着写权限 —— 任何人都能开 PR 触发它，所以必须先确认发起者真的是
+    # dependabot（`github.actor` 由 GitHub 填，PR 作者伪造不了）。
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      # 只读 PR 的元数据，不 checkout PR 的代码 —— `pull_request_target` 下 checkout
+      # 不可信分支再执行其中的脚本是那类经典提权漏洞，这里从头就不需要代码。
+      - name: Fetch metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # **major 不自动合。** 大版本升级会带 breaking change，而 CI 只能验"编得过、
+      # 测试没红"，验不了"行为没变"（例如某个依赖改了默认值、废弃了一个我们在用的 API
+      # 但仍保留兼容层）。那种要人读一遍 changelog。
+      #
+      # patch 与 minor 交给 CI：语义化版本承诺它们向后兼容，而四道检查会当场证伪。
+      - name: Enable auto-merge (patch / minor only)
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # major 的不静默放过 —— 留一条评论说明为什么等人，否则它会安静地挂在那里，
+      # 而"没有人知道自己该做什么"是这类自动化最常见的失败方式。
+      - name: Leave a note on major bumps
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        # 依赖名与版本号经 `env:` 传入、在 shell 里用 `"$VAR"` 引用，**不直插进
+        # `run:` 的脚本文本**。它们来自 dependabot 而非攻击者，但这是 workflow 注入的
+        # 标准防线：一旦某天换成来源不可信的值，写法本身仍然是安全的。
+        run: |
+          {
+            echo "这是一个 **major** 升级（\`$DEP_NAMES\` → \`$NEW_VERSION\`），按约定**不自动合并**"
+            echo "—— 大版本会带 breaking change，而 CI 只能验「编得过、测试没红」，验不了「行为没变」。"
+            echo
+            echo "请读一遍上游的 changelog 再手动合。"
+          } > body.md
+          gh pr comment "$PR_URL" --body-file body.md
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEP_NAMES: ${{ steps.meta.outputs.dependency-names }}
+          NEW_VERSION: ${{ steps.meta.outputs.new-version }}
