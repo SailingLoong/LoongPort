@@ -395,12 +395,12 @@ jobs:
             fi
           done
 
-          # `.tar.gz` 是**自动更新产物**，只在 `tauri.conf.json` 配了
-          # `bundle.createUpdaterArtifacts` 时才产出 —— 本产品有意不注册 updater 插件，
-          # 所以那个键没配、这个文件根本不会存在。原来这里 `exit 1`，等于让 macOS 那条腿
-          # 永远出不了包。降级成「有则带上」：真搭了发布渠道之后它会自动出现并被带进 release。
+          # `.tar.gz` 是**自动更新产物**，由 `tauri.conf.json` 的
+          # `bundle.createUpdaterArtifacts` 控制 —— 2026-08-04 起已开启，所以正常情况下
+          # 它一定存在。这里仍不 `exit 1`（上游原本是）：缺它只意味着这一版收不到自动更新，
+          # 而安装包本身是好的，不该因此让整条发布通道断掉。
           if [ -z "$TAR_GZ" ]; then
-            echo "○ 没有 .tar.gz 更新包产物（未启用 updater），跳过它，只发 .app / .dmg"
+            echo "⚠️ 没有 .tar.gz 更新包产物（签名密钥未配？）—— 只发 .app / .dmg，这一版收不到自动更新"
           fi
           if [ -z "$APP_PATH" ]; then
             echo "❌ No .app found" >&2
@@ -786,7 +786,8 @@ jobs:
 
             > Linux 包暂未提供。
 
-            > 暂无应用内自动更新，新版本请回本页下载。
+            > 应用内会自动检查更新（启动后几秒，失败静默）；也可在「设置 → 关于」手动检查。
+            > 免安装版不做原地更新 —— 它会带你回本页下载新版。
 
             ---
             ⚠️ **macOS 版本未经 Apple 签名与公证**（那需要 Apple Developer Program）。

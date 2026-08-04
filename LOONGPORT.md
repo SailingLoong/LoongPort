@@ -233,7 +233,5 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib probe_live_site -- --ignor
 
 - **本地代理 / failover**：sub2api 原生支持 codex 的 `/v1/responses`，不需要协议转换。
   `proxy/` 那套留在仓里但不接线。
-- **自动更新**：`plugins.updater` 整块删了（上游端点会把用户升级成 cc-switch）。有自己的
-  发布渠道之后要同时配 endpoints + pubkey + 加回 `lib.rs` 里那段注册，缺一个都不行。
 - **凭据加密**：token 明文存 SQLite。同一个库里已经躺着明文 sk（上游行为），只加密 token
   没有实际收益。要做就两者一起进 keyring。
