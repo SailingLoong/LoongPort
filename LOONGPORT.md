@@ -131,18 +131,40 @@ hdiutil create -volname LoongPort -srcfolder "$STAGE" -ov -format UDZO \
 rm -rf "$(dirname "$STAGE")"
 ```
 
-## 六个 Tauri 命令
+## Tauri 命令
+
+**唯一权威是 `lib.rs` 的 `invoke_handler` 注册表**（`generate_handler!` 那一段）——
+表里没有的就是不存在，别信任何文档里的清单，包括这一份。
+
+### 中转站（operator）
 
 | 命令 | 干什么 |
 |---|---|
-| `operator_status` | 只读本地，决定 UI 显示哪一屏 |
-| `operator_check_session` | 探活 + 静默续期；凭据真失效时清掉本地记录 |
-| `operator_probe_site` | 探测域名是不是 sub2api 站，成功即存为当前站点 |
-| `operator_login` | 开登录 WebView，等凭据回来 |
-| `operator_provision` | 拉分组 → 每组备 sk → 写成 codex provider |
-| `operator_list_tiers` | 列已备好的档位 |
-| `operator_switch_tier` | 退 ChatGPT → 切换 → 重开 |
-| `operator_logout` | 清凭据（保留站点与 device-id） |
+| `operator_status` | **只读本地、不发网络** —— 首屏渲染等的就是它 |
+| `operator_check_session` | 探活 + 静默续期；凭据真失效时清掉那一行的本地记录并回传 id |
+| `operator_probe_site` | 探测域名是不是 sub2api 站，成功即存为站点 |
+| `operator_login` | 开登录 WebView，等凭据回来。**按行 id 定位，不回落到「当前站」** |
+| `operator_provision` | 拉分组 → 每组备 sk → 按分组自己的平台写成对应 CLI 的 provider |
+| `operator_list_operators` | 列已加的运营商与档位（同样不发网络） |
+| `operator_list_tier_rates` | 档位倍率 —— 必须发网络，所以从上一条拆出来、首屏之后再填 |
+| `operator_switch_tier` | 退 ChatGPT → 切换 → 重开（只有切 Codex 档位才动 ChatGPT） |
+| `operator_reset_tier_config` | 重写某档位的 CLI 配置，**复用原 sk 不换新的** |
+| `operator_balance` / `operator_purchase` | 查余额 / 打开充值页 |
+| `operator_reorder` | 拖拽排序（只在用户明确拖动时调，选档位不重排） |
+| `operator_list_sites` / `operator_remove_site` | 列 / 删站点行 |
+| `operator_list_sponsors` | 赞助运营商列表（走远端配置，有缓存与内置两层回落） |
+| `operator_stats_endpoint_configured` | 匿名统计端点配没配 —— 没配则整条链路与告知弹窗都不启用 |
+| `operator_restore_official_login` | 恢复被切走的 Codex 官方登录 |
+
+### 官网直连（vendor）
+
+| 命令 | 干什么 |
+|---|---|
+| `vendor_list_accounts` | 列已加的官网账号 |
+| `vendor_open_login` | 开该平台的登录页 |
+| `vendor_provision` | 建/取 key 并写进所有能用它的 CLI。**本地已有明文则零请求** |
+| `vendor_balance` | 查余额（币种与类型都与中转站那侧不同） |
+| `vendor_remove` / `vendor_reorder` | 删 / 排序 |
 
 ## 改代码前必读的几条
 
