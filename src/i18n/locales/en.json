@@ -3149,8 +3149,6 @@
       "openKeyPage": "Manage keys on the site"
     },
     "imageTab": {
-      "title": "Image tiers",
-      "intro": "This page holds image-only tiers (the ones whose model is a gpt-image variant). Click \"Enable\" to pick which tier your images come from.",
       "companionNotice": "This page is not usable on its own — it works alongside Codex chat.",
       "companionDetail": "Image generation runs through the tool (MCP) bundled with LoongPort: say \"generate an image\" in codex / claude and it uses the tier selected here. Chat still goes through whichever tier you picked on the Codex page — the two are independent, so you can chat with DeepSeek or any other site.",
       "howTo": "Switching image tiers needs no CLI restart — the next generation uses the new one. Only the very first image tier requires a fresh terminal so codex picks up the tool.",

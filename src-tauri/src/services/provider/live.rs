@@ -2147,6 +2147,46 @@ mod tests {
             .expect("写 live 对生图栏该是空操作，不该报错");
     }
 
+    /// ⭐ **导入配置 / 云同步恢复不该在生图栏上整条中断。**
+    ///
+    /// `sync_current_to_live` 遍历 `AppType::all()` 并用 `?` 传播错误 —— 生图栏若报错，
+    /// **它之后的每个 app 都不会被同步**（`AppType::all()` 里排在它后面的是 gemini /
+    /// grokbuild / opencode / openclaw / hermes）。而 DB 那边已经导入完了 ⇒
+    /// 状态半生效：claude/codex 的 live 更新了，gemini 及之后的还是旧的。
+    ///
+    /// 触发条件很平常：生图栏有当前项（迁移之后、或用户点过一次「启用」的正常状态），
+    /// 然后点「导入配置」或触发云同步恢复。
+    ///
+    /// 这条闸从 `sync_current_to_live` 那一层验，而不是只验 `write_live_with_common_config`
+    /// —— 后者是修复所在的位置，前者才是用户实际走的路径。
+    #[test]
+    fn syncing_all_apps_to_live_survives_a_current_image_tier() {
+        let state = crate::store::AppState::new(std::sync::Arc::new(
+            Database::memory().expect("create memory db"),
+        ));
+        let id = "loongport-aaaaaaaaaaaaaaaa";
+        let provider = Provider::with_id(
+            id.to_string(),
+            "生图档".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model = \"gpt-image-2\"\n",
+            }),
+            None,
+        );
+        state
+            .db
+            .save_provider(AppType::CodexImage.as_str(), &provider)
+            .expect("存生图档位");
+        state
+            .db
+            .set_current_provider(AppType::CodexImage.as_str(), id)
+            .expect("设成当前项");
+
+        // 整条遍历必须成功 —— 报错会让排在生图栏之后的 app 全都同步不到。
+        sync_current_to_live(&state).expect("导入后的全量同步不该被生图栏中断");
+    }
+
     /// 而 `write_live_snapshot` 本身仍然必须拒绝生图栏。
     ///
     /// 它是上一条那个空操作的**兜底**：万一有人绕过 `write_live_with_common_config`

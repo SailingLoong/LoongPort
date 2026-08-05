@@ -152,7 +152,7 @@ fn load_current_tier() -> Result<Tier, String> {
 
 /// 「没选生图档位」时给用户的话。定义一次，两个调用点共用。
 const NO_IMAGE_TIER_HINT: &str =
-    "还没有选定用哪个档位生图。请打开 LoongPort 的「生图」标签页，在一个档位上点「切换」。";
+    "还没有选定用哪个档位生图。请打开 LoongPort 的「Codex 生图」标签页，在一个档位上点「启用」。";
 
 /// 当前该用哪个档位生图 = `codex-image` 栏的当前项。
 ///
@@ -294,10 +294,19 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
         )
         .map_err(|e| match e {
             // 标记指向的档位没了（用户删了账号 / 运营商下架了那个分组）。
-            // 主程序那侧读 `operator_current_image_tier` 时会校验并自动清掉这个死标记，
+            // ⚠️ **没有任何东西会自动清掉这个悬空的 `is_current`**（review 抓出）。
+            // 设备级那层读的时候会校验存在性并跳过（见 `current_image_tier_id`），
+            // 但库里那一行 `is_current = 1` 会一直留着 —— 删档位的路径（`remove_site_impl` /
+            // `prune_stale_tiers` / 用户手工删）都只删记录，不管这个标记。
+            //
+            // 不为它加一条清理：`ProviderService::delete` 删掉那行之后
+            // `is_current` 自然就查不到了（它是那一行上的列，不是一个独立指针）。
+            // 走到这条错误分支说明记录**已经不在**，所以下次读就会落到
+            // 「还没有选定」那条提示上 —— 状态自然收敛，不需要额外的清理逻辑。
+            //
             // 所以这里只要把话说清楚：让用户去重选，而不是去「获取密钥」。
             rusqlite::Error::QueryReturnedNoRows => format!(
-                "生图档位 {provider_id} 已经不在了（可能被删除，或运营商下架了那个分组）。请打开 LoongPort 的「生图」标签页，在一个档位上点「切换」。"
+                "生图档位 {provider_id} 已经不在了（可能被删除，或运营商下架了那个分组）。请打开 LoongPort 的「Codex 生图」标签页，在一个档位上点「启用」。"
             ),
             other => format!("读取档位失败: {other}"),
         })?;
@@ -639,7 +648,7 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     let size = args.get("size").and_then(Value::as_str);
 
     // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
-    // 档位，下一次生图就该用新的，**不必重启 codex**。见 `CURRENT_IMAGE_TIER_KEY`。
+    // 档位，下一次生图就该用新的，**不必重启 codex**。见 `current_image_tier_id`。
     let tier = load_current_tier()?;
     let images = generate_image(&tier, prompt, size).await?;
     let list = images

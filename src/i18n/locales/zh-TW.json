@@ -3150,8 +3150,6 @@
       "openKeyPage": "去官網刪除"
     },
     "imageTab": {
-      "title": "生圖檔位",
-      "intro": "這一頁只放生圖分組（模型是 gpt-image 系列的那些）。點「切換」選定用哪個檔位出圖。",
       "companionNotice": "這一頁不能單獨使用，要配合 codex 聊天一起用。",
       "companionDetail": "生圖靠 LoongPort 自帶的工具（MCP）完成：你在 codex / claude 裡說「生成一張圖」，它就用這裡選定的檔位出圖。而對話仍走 Codex 標籤頁裡選的那個檔位 —— 兩者各自獨立，聊天可以用 DeepSeek 或任何別的站。",
       "howTo": "換生圖檔位不用重啟 CLI，下一次生成就用新的。只有第一次有生圖檔位時要新開一個終端，讓 codex 讀到那個工具。",

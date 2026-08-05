@@ -2061,6 +2061,19 @@ fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
         Err(e) => log::warn!("删除站点 {site_origin} 时清理档位失败（站点仍会删掉）: {e}"),
     }
 
+    // 生图工具跟着对齐一次 —— **这条路必须自己调**（review 抓出）。
+    //
+    // 另一个调用点在 `do_provision` 收尾，但那条路依赖「还会再 provision 一次」。
+    // 删掉的正是拥有生图档位的那个账号时，**不会再有下一次** ⇒ `loongport-imagegen`
+    // 这条 MCP 记录永久留在用户的 CLI 配置里，而它每次被调用都报「还没有选定用哪个
+    // 档位生图」—— 一个删不掉的坏工具。
+    //
+    // 失败只 warn：站点记录马上就删了，不该因为一个 MCP 记录撤不掉而让「删站点」失败
+    // （与上面那段清理档位同一条原则）。
+    if let Err(e) = sync_imagegen_mcp(state) {
+        log::warn!("删除站点 {site_origin} 后同步生图工具记录失败: {e}");
+    }
+
     with_conn(state, |conn| creds::remove(conn, id))
 }
 

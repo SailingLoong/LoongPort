@@ -649,7 +649,7 @@ fn candidate_models(settings_config: &serde_json::Value, model: &str) -> Vec<Str
 /// 与 [`extract_api_key`] 对称：都是「从一份配置里抠出一个我们自己写进去的值」。
 ///
 /// 两个消费方：[`candidate_models`]（判「这是不是生图档位的模型名」）与
-/// `list_operators_impl`（填 `TierInfo::is_image_model`，那条路只读本地）。
+/// 数据库迁移（`database::loongport_schema` 里判「这条 codex 档位该搬去生图栏吗」）。
 ///
 /// 只看 codex 的形状 —— 其它 CLI 的配置里没有 `gpt-image-*` 这回事。
 ///
@@ -793,23 +793,6 @@ pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 /// （openai 平台），grok 档位落的是另一个 CLI。
 const IMAGE_MODEL_PREFIX: &str = "gpt-image-";
 
-/// 该给这条档位的 `config.toml` 写什么模型名。
-///
-/// ## 判据：这个分组有没有非生图模型
-///
-/// - 有文本模型（或问不出来）⇒ [`DEFAULT_MODEL`]，即本函数出现之前的行为
-/// - **一个文本模型都没有**（全是 `gpt-image-*`）⇒ 其中排序最前的那个
-///
-/// ⚠️ **取真实值而不是硬编码 `"gpt-image-2"`**：运营商上 `gpt-image-3` 那天自动跟上，
-/// 不必改代码。这与 [`DEFAULT_MODEL`] 那条「读宽写窄」的取舍不同 —— 那个值我们无从
-///查证（要跨所有站点都可用），而这个值服务端刚刚告诉了我们。
-///
-/// ## 为什么排序后取第一个而不是随手取一个
-///
-/// `/v1/models` 的顺序**不保证稳定**（实测同一分组两次请求顺序不同）。不排序的话，
-/// 同一个档位每次 provision 可能写进不同的模型名 ⇒ [`is_user_edited`] 的基准跟着抖 ⇒
-/// 界面上「已手动维护」标记会随机出现又消失。排序让它成为该分组的一个确定函数。
-///
 /// 一条档位该落到哪一栏：纯生图的进 [`AppType::CodexImage`]，其余原样返回。
 ///
 /// ## 判据是模型名，不是分组的 `allow_image_generation`
@@ -836,6 +819,23 @@ pub fn image_tier_app_type(app_type: &AppType, model: &str) -> AppType {
     }
 }
 
+/// 该给这条档位的 `config.toml` 写什么模型名。
+///
+/// ## 判据：这个分组有没有非生图模型
+///
+/// - 有文本模型（或问不出来）⇒ [`DEFAULT_MODEL`]，即本函数出现之前的行为
+/// - **一个文本模型都没有**（全是 `gpt-image-*`）⇒ 其中排序最前的那个
+///
+/// ⚠️ **取真实值而不是硬编码 `"gpt-image-2"`**：运营商上 `gpt-image-3` 那天自动跟上，
+/// 不必改代码。这与 [`DEFAULT_MODEL`] 那条「读宽写窄」的取舍不同 —— 那个值我们无从
+///查证（要跨所有站点都可用），而这个值服务端刚刚告诉了我们。
+///
+/// ## 为什么排序后取第一个而不是随手取一个
+///
+/// `/v1/models` 的顺序**不保证稳定**（实测同一分组两次请求顺序不同）。不排序的话，
+/// 同一个档位每次 provision 可能写进不同的模型名 ⇒ [`is_user_edited`] 的基准跟着抖 ⇒
+/// 界面上「已手动维护」标记会随机出现又消失。排序让它成为该分组的一个确定函数。
+///
 /// ## 为什么「问不出来」回落到 [`DEFAULT_MODEL`] 而不是报错
 ///
 /// `list_models` 可能因为站点没这个端点、权限不够、或临时故障而返回 `None`。
