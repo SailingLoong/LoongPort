@@ -1,0 +1,109 @@
+# 盯住 loongport.dev 上**会被别人改掉**的那几条对外事实。
+#
+# 为什么需要它：这些设置不在本仓里，改动来自 Cloudflare 面板或它的默认策略变更 ——
+# **改了不会有任何提示，而症状是「搜索不到」或「AI 不认识这个项目」**，都属于
+# 半年后才察觉的那类。2026-08-05 就踩过一次：Cloudflare 的托管 robots.txt
+# 默认往我们的文件前面插了 8 条 `Disallow` + `Content-Signal: ai-train=no`，
+# 而我们同时在维护 `public/llms.txt` 给 AI 爬虫读 —— 两者直接矛盾，且没人会主动发现。
+#
+# 为什么放在**产品仓**而不是官网仓：官网仓是私有的 ⇒ Actions 计费，而这个仓是公开的
+# ⇒ 标准 runner 免费不计额度。监控本身与产品仓无关，纯粹是找一个免费的定时器。
+name: Site guard
+
+on:
+  schedule:
+    # 每天一次（UTC 03:00 ≈ 北京时间 11:00）。这类漂移是「哪天被改了」而不是
+    # 「哪一分钟」，一天一次足够；查得更密只是多烧 runner。
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  robots:
+    name: robots.txt 没被注入
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取线上 robots.txt 并核对
+        shell: bash
+        run: |
+          set -euo pipefail
+          # cache-buster：Cloudflare 会缓存这个文件，读到旧值会让监控失去意义。
+          body=$(curl -fsS --max-time 20 "https://loongport.dev/robots.txt?ci=${GITHUB_RUN_ID}")
+          echo "──── 线上内容 ────"
+          echo "$body"
+          echo "──────────────────"
+
+          fail=0
+
+          # 判据一：**没有被注入的内容**。用「有没有多出东西」而不是「等于某个字符串」
+          # —— 后者会在我们自己正常改 robots.txt 时误报，那是噪音不是信号。
+          if grep -qi 'Content-Signal' <<<"$body"; then
+            echo "::error::robots.txt 里出现了 Content-Signal —— Cloudflare 的「内容信号策略」被打开了。它会声明 ai-train=no 等限制，与我们维护 llms.txt 的立场矛盾。关法：Cloudflare → loongport.dev → Security → Settings → 筛 Bot traffic → 关掉那个 robots.txt 开关。"
+            fail=1
+          fi
+          if grep -qi 'Cloudflare Managed' <<<"$body"; then
+            echo "::error::robots.txt 里出现了 Cloudflare 托管内容 —— 那个开关被重新打开了（它会往我们的文件前面插一批 Disallow）。关法同上。"
+            fail=1
+          fi
+
+          # 判据二：**该允许的仍然允许**。上面两条查的是「没多出东西」，这条查
+          # 「原有的还在」—— 两者都要，因为注入之外还有「文件被整个替换」这种可能。
+          if ! grep -qE '^[[:space:]]*Allow:[[:space:]]*/[[:space:]]*$' <<<"$body"; then
+            echo "::error::robots.txt 里找不到 'Allow: /' —— 全站可能已被禁止抓取。"
+            fail=1
+          fi
+          if ! grep -qi 'Sitemap: https://loongport.dev/sitemap.xml' <<<"$body"; then
+            echo "::error::robots.txt 里的 Sitemap 声明不见了 —— 搜索引擎会失去页面清单。"
+            fail=1
+          fi
+
+          # 判据三：**没有针对具体爬虫的 Disallow**。我们的策略是「全部允许」，
+          # 出现任何 Disallow 都说明有人（或某个默认策略）加了限制。
+          if grep -qE '^[[:space:]]*Disallow:[[:space:]]*/' <<<"$body"; then
+            echo "::error::robots.txt 里出现了 'Disallow: /' —— 有爬虫被挡住了。当前策略是全部允许（含 AI 爬虫，见 public/llms.txt）。"
+            fail=1
+          fi
+
+          [ "$fail" -eq 0 ] && echo "✓ robots.txt 是我们期望的那份"
+          exit "$fail"
+
+  indexable:
+    name: 页面可被搜索引擎索引
+    runs-on: ubuntu-latest
+    steps:
+      - name: 三语首页 + sitemap
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # sitemap 是搜索引擎拿页面清单的入口，它 404 等于新页面永远不被发现。
+          code=$(curl -o /dev/null -sS --max-time 20 -w '%{http_code}' \
+            "https://loongport.dev/sitemap.xml?ci=${GITHUB_RUN_ID}")
+          if [ "$code" != "200" ]; then
+            echo "::error::sitemap.xml 返回 $code（应为 200）"
+            fail=1
+          else
+            echo "✓ sitemap.xml 200"
+          fi
+
+          for lang in zh en ja; do
+            url="https://loongport.dev/$lang/?ci=${GITHUB_RUN_ID}"
+            # -D 拿响应头、-o 拿正文：noindex 可以出现在**两个地方**，只查一个会漏。
+            headers=$(mktemp); html=$(curl -fsS --max-time 20 -L -D "$headers" -o - "$url")
+
+            if grep -qi 'x-robots-tag:.*noindex' "$headers"; then
+              echo "::error::/$lang/ 的响应头带 X-Robots-Tag: noindex"
+              fail=1
+            elif grep -qiE '<meta[^>]+name="robots"[^>]+content="[^"]*noindex' <<<"$html"; then
+              echo "::error::/$lang/ 的 HTML 里有 meta robots noindex"
+              fail=1
+            else
+              echo "✓ /$lang/ 可索引"
+            fi
+            rm -f "$headers"
+          done
+
+          exit "$fail"
