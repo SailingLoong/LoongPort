@@ -1515,8 +1515,6 @@ pub fn run() {
             commands::operator_list_tier_rates,
             commands::operator_reorder,
             commands::operator_reset_tier_config,
-            commands::operator_set_image_tier,
-            commands::operator_current_image_tier,
             commands::operator_switch_tier,
             commands::operator_list_sites,
             commands::operator_remove_site,

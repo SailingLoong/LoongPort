@@ -11,6 +11,10 @@ import type { CustomEndpoint, EndpointCandidate } from "@/types";
 // 端点测速超时配置（秒）
 const ENDPOINT_TIMEOUT_SECS: Record<AppId, number> = {
   codex: 12,
+  // 与 codex 同一个值：生图档位的端点就是同一个中转站（`/v1/images/generations`
+  // 与 `/v1/responses` 同域）。这个表被 provider 编辑页用，走到这里说明用户在编辑
+  // 一条生图档位的配置 —— 那是合法操作。
+  "codex-image": 12,
   claude: 8,
   "claude-desktop": 8,
   gemini: 8,

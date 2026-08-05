@@ -141,13 +141,6 @@ export interface OperatorTierListProps {
   onResetTier: (tier: TierInfo) => void;
   /** 编辑某个档位的配置（跳 cc-switch 的编辑页）。宿主负责先弹事前警告。 */
   onEditTier: (tier: TierInfo) => void;
-  /**
-   * 把生图切到某个档位（或停用生图）。**与 `onSwitchTier` 是两回事** ——
-   * 那个换的是「用哪个档位对话」，这个换的是「图从哪个档位出」。
-   */
-  onUseForImages: (tier: TierInfo, isCurrent: boolean) => void;
-  /** 当前用哪个档位生图。`null` = 用户还没选。 */
-  currentImageTier: string | null;
   /** 删掉某一行（连带它名下的托管档位）。有档位在用的行不会触发它（按钮不可点）。 */
   onRemoveOperator: (operatorId: number) => void;
 }
@@ -225,8 +218,6 @@ export function OperatorTierList({
   isCheckingTier,
   onResetTier,
   onEditTier,
-  onUseForImages,
-  currentImageTier,
   onRemoveOperator,
 }: OperatorTierListProps) {
   const { t } = useTranslation();
@@ -388,8 +379,6 @@ export function OperatorTierList({
                   isCheckingTier={isCheckingTier}
                   onResetTier={onResetTier}
                   onEditTier={onEditTier}
-                  onUseForImages={onUseForImages}
-                  currentImageTier={currentImageTier}
                   onDelete={() => onRemoveOperator(op.id)}
                 />
               ))}

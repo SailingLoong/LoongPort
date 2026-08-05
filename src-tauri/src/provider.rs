@@ -163,7 +163,7 @@ impl Provider {
         let (base_url, api_key) = match app_type {
             // Codex keeps its key in `auth.OPENAI_API_KEY` and its base URL
             // inside a TOML `config` string, not in an `env` map.
-            AppType::Codex => {
+            AppType::Codex | AppType::CodexImage => {
                 let auth = settings.get("auth");
                 let config_text = settings.get("config").and_then(|v| v.as_str());
                 let api_key = crate::codex_config::extract_codex_api_key(auth, config_text)

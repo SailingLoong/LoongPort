@@ -6,7 +6,6 @@ import {
   ChevronDown,
   ChevronRight,
   GripVertical,
-  Image as ImageIcon,
   Loader2,
   Pencil,
   PencilLine,
@@ -129,15 +128,6 @@ export interface OperatorRowProps {
    */
   onEditTier: (tier: TierInfo) => void;
   /**
-   * 把生图切到这个档位（或停用生图，当它已是当前生图档位时）。
-   *
-   * **与 `onSwitchTier` 是两回事**：那个换的是「用哪个档位对话」，这个换的是
-   * 「图从哪个档位出」。两者互不影响，也各有自己的当前项。
-   */
-  onUseForImages: (tier: TierInfo, isCurrent: boolean) => void;
-  /** 当前用哪个档位生图。`null` = 用户还没选，此时 CLI 里没有生图工具。 */
-  currentImageTier: string | null;
-  /**
    * 删掉这一行（这个「站点 × 账号」）连带它名下的托管档位。
    *
    * **名下有档位正在使用时不会被调用** —— 那种情况按钮渲染成不可点（见 `RowDelete`）。
@@ -165,8 +155,6 @@ export function OperatorRow({
   isCheckingTier,
   onResetTier,
   onEditTier,
-  onUseForImages,
-  currentImageTier,
   onDelete,
   dragHandleProps,
 }: OperatorRowProps) {
@@ -312,10 +300,6 @@ export function OperatorRow({
               checking={isCheckingTier(tier.providerId)}
               onReset={() => onResetTier(tier)}
               onEdit={() => onEditTier(tier)}
-              isCurrentImageTier={currentImageTier === tier.providerId}
-              onUseForImages={() =>
-                onUseForImages(tier, currentImageTier === tier.providerId)
-              }
             />
           ))}
         </CollapsibleContent>
@@ -630,8 +614,6 @@ function TierItem({
   checking,
   onReset,
   onEdit,
-  isCurrentImageTier,
-  onUseForImages,
 }: {
   tier: TierInfo;
   busy: ReadonlySet<string>;
@@ -640,8 +622,6 @@ function TierItem({
   checking: boolean;
   onReset: () => void;
   onEdit: () => void;
-  isCurrentImageTier: boolean;
-  onUseForImages: () => void;
 }) {
   const { t } = useTranslation();
   // 只禁**这一个档位**正在切换的那个按钮。原来是 `disabled={anyBusy}`，
@@ -654,7 +634,6 @@ function TierItem({
   // 没有默认形状）。`null` 时什么都不显示：显示「未手动维护」是在断言
   // 「刷新不会覆盖你的改动」，而事实是不知道 —— 让用户误信比不说更糟。
   const userEdited = tier.userEdited === true;
-  const switchingImages = busy.has(`imagegen:${tier.providerId}`);
 
   return (
     <div
@@ -698,30 +677,6 @@ function TierItem({
             >
               <PencilLine className="h-2.5 w-2.5" />
               {t("loongport.tier.userEdited")}
-            </span>
-          )}
-          {/* 「生图」标记：只给**纯生图分组**（`/v1/models` 里没有文本模型）。
-              混合分组不标 —— 它主业是对话，生图是附加能力，标了会让用户以为
-              这一档不能聊天。
-
-              ## 颜色为什么是 violet
-              蓝（当前在用）/ 绿（代理接管）/ amber（手动维护）在这个仓里已经有主，
-              violet 是唯一没被这三种状态占用的。上游 `ProviderCard.tsx` 确实也用了
-              violet 做一个徽标，但那在「手工 provider 卡片」上，与托管档位行不同屏
-              共现 —— 判据是**同一屏内不撞车**，不是全仓独占。
-
-              ## 为什么不禁用「启用」按钮
-              这类档位当对话供应商用会 404（它没挂文本模型）。但**是否禁用取决于
-              上游挂了什么，那是我们看不到的** —— 实测同一条路在有的中转站上通、
-              有的 502。禁用等于替用户断言一件我们不确定的事；标出来让他知道
-              「这一档是生图用的」，够了。 */}
-          {tier.isImageModel && (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-violet-600 ring-1 ring-inset ring-violet-500/30 dark:text-violet-400"
-              title={t("loongport.tier.imageOnlyHint")}
-            >
-              <ImageIcon className="h-2.5 w-2.5" />
-              {t("loongport.tier.imageOnly")}
             </span>
           )}
         </div>
@@ -771,48 +726,7 @@ function TierItem({
             的 `isCurrent` 分支：`variant="secondary"` + `Check` + `bg-gray-200`），
             不再是一段裸文字 —— 两者在同一屏并排时，文字与按钮混排看着像没对齐。
             当前态本身由行的蓝色边框表达（与上游卡片同一个做法）。 */}
-        {/* 主按钮。**生图档位与聊天档位是两套语义**：
-            - 聊天档位：「启用」= 换成用它对话（`onSwitch`）
-            - 生图档位：「启用生图」= 换成用它出图（`onUseForImages`）
-
-            为什么必须分开：纯生图分组**没有文本模型**，切过去对话会 404
-            （维护者实测两次踩到 503：装好工具后顺手点了「启用」）。而它的存在意义
-            正是出图 —— 那个能力挂在另一条链路上（`/v1/images/generations`），
-            与「用哪个档位对话」无关。所以同一个位置、同一个视觉，语义随档位类型走。
-
-            violet 呼应这一行的「生图」标记 —— 让「这个按钮管的是生图那件事」
-            靠颜色就能看出来，不必读文字。 */}
-        {tier.isImageModel ? (
-          <Button
-            type="button"
-            size="sm"
-            variant={isCurrentImageTier ? "outline" : "default"}
-            className={cn(
-              "h-7 shrink-0",
-              isCurrentImageTier
-                ? "border-violet-500/40 text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300"
-                : "bg-violet-600 text-white hover:bg-violet-700",
-            )}
-            disabled={switchingImages}
-            onClick={onUseForImages}
-            title={
-              isCurrentImageTier
-                ? t("loongport.tier.imageInUseHint")
-                : t("loongport.tier.useForImagesHint")
-            }
-          >
-            {switchingImages ? (
-              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-            ) : isCurrentImageTier ? (
-              <Check className="mr-1 h-3.5 w-3.5" />
-            ) : (
-              <ImageIcon className="mr-1 h-3.5 w-3.5" />
-            )}
-            {isCurrentImageTier
-              ? t("loongport.tier.imageInUse")
-              : t("loongport.tier.useForImages")}
-          </Button>
-        ) : tier.isCurrent ? (
+        {tier.isCurrent ? (
           <Button
             type="button"
             size="sm"

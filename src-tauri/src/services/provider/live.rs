@@ -527,7 +527,9 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::ClaudeDesktop => false,
+        | AppType::ClaudeDesktop
+        // 生图栏不写 live 配置，所以「通用配置」这套对它无意义。
+        | AppType::CodexImage => false,
     }
 }
 
@@ -601,7 +603,8 @@ pub(crate) fn remove_common_config_from_settings(
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::ClaudeDesktop => Ok(settings.clone()),
+        | AppType::ClaudeDesktop
+        | AppType::CodexImage => Ok(settings.clone()),
     }
 }
 
@@ -660,7 +663,8 @@ fn apply_common_config_to_settings(
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::ClaudeDesktop => Ok(settings.clone()),
+        | AppType::ClaudeDesktop
+        | AppType::CodexImage => Ok(settings.clone()),
     }
 }
 
@@ -1020,6 +1024,16 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             let settings = sanitize_claude_settings_for_live(&provider.settings_config);
             write_json_file(&path, &settings)?;
         }
+        AppType::CodexImage => {
+            // **明确报错而不是委托给 codex** —— 后者会用生图档位的配置覆盖用户
+            // 正在用的 `~/.codex/config.toml`，把聊天档位换成一个只能生图的模型。
+            // 生图栏根本不写 live：`switch_image_tier_impl` 只更新 is_current。
+            return Err(AppError::localized(
+                "codex_image.live.not_written",
+                "生图档位不写入任何 CLI 配置：生图靠 LoongPort 自带的 MCP 工具，它自己去库里读当前生图档位。",
+                "Image tiers write no CLI config: image generation goes through LoongPort's built-in MCP tool, which reads the current image tier from the database.",
+            ));
+        }
         AppType::ClaudeDesktop => {
             return Err(AppError::localized(
                 "claude_desktop.live.requires_db_context",
@@ -1335,6 +1349,14 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             }
             read_json_file(&path)
         }
+        // 生图栏没有 live 配置可读（它不写 live，见 AppType::CodexImage 的文档）。
+        // 报错而不是返回 codex 的 —— 后者会让「从 live 导入」把 codex 的聊天配置
+        // 抓成一条生图档位。
+        AppType::CodexImage => Err(AppError::localized(
+            "codex_image.live.read_unsupported",
+            "生图档位没有独立的 CLI 配置可读。",
+            "Image tiers have no CLI config of their own to read.",
+        )),
         AppType::ClaudeDesktop => Err(AppError::localized(
             "claude_desktop.live.read_unsupported",
             "Claude Desktop 3P 配置不支持作为通用 live 配置导入，请使用“从 Claude 导入兼容供应商”。",
@@ -1431,6 +1453,13 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
         return Ok(false);
     }
 
+    // 生图栏没有 live 文件可导（它不写 live）。它的档位只由「获取密钥」产生，
+    // 走 `Ok(false)`（= 跳过）而不是报错：本函数在**启动编排**里对每个 app 各调一次，
+    // 报错会让启动流程多一条无意义的告警。
+    if matches!(app_type, AppType::CodexImage) {
+        return Ok(false);
+    }
+
     // 允许 "只有官方 seed 预设" 的情况下继续导入 live：
     // - 启动编排顺序是先 import 后 seed，新用户启动时 providers 为空，导入照常
     // - 老用户已有非 seed provider，跳过导入（正确）
@@ -1456,6 +1485,9 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     }
 
     let settings_config = match app_type {
+        // 生图栏在上面就已经 `return Ok(false)` 了（它没有 live 文件可导）——
+        // 这条只是让 match 穷尽，编译器不追踪那个早退。
+        AppType::CodexImage => return Ok(false),
         AppType::Codex => crate::codex_config::read_codex_live_settings()?,
         AppType::GrokBuild => {
             let mut settings = crate::grok_config::read_grok_live_settings()?;

@@ -879,6 +879,7 @@
     "claudeDesktop": "Claude Desktop",
     "claude-desktop": "Claude Desktop",
     "codex": "Codex",
+    "codex-image": "Codex Images",
     "gemini": "Gemini",
     "grokbuild": "Grok Build",
     "opencode": "OpenCode",
@@ -3069,16 +3070,7 @@
       "userEdited": "Manually maintained",
       "userEditedHint": "You have edited this tier's config. Refreshing groups will not overwrite it (only the API key is updated). Click here to restore the default config.",
       "editMissing": "That tier's record no longer exists — use “Fetch keys” to regenerate it.",
-      "editCurrentNote": "This is the tier you're currently using. If your changes don't take effect, quit and reopen the ChatGPT desktop app — while it's running it rewrites Codex's config.",
-      "imageOnly": "Image",
-      "imageOnlyHint": "This tier only serves image models (gpt-image family) and cannot be used for chat. Click “Use for images”, then just say “generate an image” in codex / claude — your chat keeps running on whichever tier is active.",
-      "useForImages": "Use for images",
-      "useForImagesHint": "Generate images from this tier. Your chat is unaffected and keeps using whichever tier is active.",
-      "imageInUse": "Images on",
-      "imageInUseHint": "Images currently come from this tier. Click to turn off.",
-      "imageEnabledFirstTime": "Image generation is on, using “{{name}}”. Open a new terminal, then just say “generate an image” in codex / claude.",
-      "imageSwitched": "Images now come from “{{name}}” — effective immediately, no restart needed.",
-      "imageDisabled": "Image generation turned off"
+      "editCurrentNote": "This is the tier you're currently using. If your changes don't take effect, quit and reopen the ChatGPT desktop app — while it's running it rewrites Codex's config."
     },
     "stats": {
       "title": "Help improve LoongPort",
@@ -3155,6 +3147,15 @@
       "sessionExpiredUsable": "Your session expired, but the key still works (only the balance is unavailable). Click to sign in again.",
       "loginFailed": "Sign-in did not complete: {{reason}}",
       "openKeyPage": "Manage keys on the site"
+    },
+    "imageTab": {
+      "title": "Image tiers",
+      "intro": "This page holds image-only tiers (the ones whose model is a gpt-image variant). Click \"Enable\" to pick which tier your images come from.",
+      "companionNotice": "This page is not usable on its own — it works alongside Codex chat.",
+      "companionDetail": "Image generation runs through the tool (MCP) bundled with LoongPort: say \"generate an image\" in codex / claude and it uses the tier selected here. Chat still goes through whichever tier you picked on the Codex page — the two are independent, so you can chat with DeepSeek or any other site.",
+      "howTo": "Switching image tiers needs no CLI restart — the next generation uses the new one. Only the very first image tier requires a fresh terminal so codex picks up the tool.",
+      "emptyTitle": "No image tiers yet",
+      "emptyBody": "Image tiers are detected automatically when you fetch keys: if your provider has a group that only serves gpt-image models, it shows up here. Your site may not offer image groups at all — then this page simply stays empty and nothing is added to your CLI config."
     }
   }
 }

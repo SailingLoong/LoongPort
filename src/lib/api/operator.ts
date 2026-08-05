@@ -88,22 +88,12 @@ export interface TierInfo {
    */
   userEdited: boolean | null;
   /**
-   * 这个档位的模型是生图模型（`gpt-image-*`）吗。
-   *
-   * 由后端按档位配置里的 `model` 判（那是 provision 按该分组真实的模型列表写进去的）。
-   * 为真表示这是个**纯生图分组** —— 它没挂文本模型，当对话供应商用会 404。
-   *
-   * UI 据此显示「生图」标记 + 把「装生图工具」按钮突出出来。
-   * **不禁用「启用」按钮**：用户真想切过去是他的选择，而且换个站可能就能用
-   * （取决于上游挂了什么）。
-   */
-  isImageModel: boolean;
-  /**
    * 服务端说这个分组允许生图（`allow_image_generation`）。
    *
-   * ⚠️ **不等于 `isImageModel`**：实测混合分组（有文本模型，如 `pro池`）也是 `true` ——
-   * 它的生图靠中转站的 codex 生图桥。而 `allow_image_generation=false` 的档位
-   * 生图会拿 403，装了工具也用不了。
+   * ⚠️ **纯生图分组不靠这个字段识别** —— 它们在「生图」那个 tab 下（后端
+   * `AppType::CodexImage`），所在的列表本身就说明了这件事。这个字段的价值在
+   * **混合分组**：实测 `pro池` 这类有文本模型的分组也是 `true`，它们留在 codex tab 里
+   * 而同时支持生图。
    *
    * `null` = **判不了**（只有 provision 那条路拿得到这个字段，`listOperators`
    * 是只读本地的）。`null` 时不显示任何标记 —— 与 `userEdited` 同一条处理原则：
@@ -358,26 +348,6 @@ export const operatorApi = {
    */
   resetTierConfig: (providerId: string, app: string): Promise<void> =>
     invoke("operator_reset_tier_config", { providerId, app }),
-
-  /**
-   * 「用哪个档位生图」。`null` = 用户还没选（那时 CLI 里没有生图工具）。
-   *
-   * **与「当前对话档位」是两套独立的当前项** —— 生图走 `/v1/images/generations`
-   * 且自带密钥，对话走 `/v1/responses` 用当前档位的密钥，两条链路互不影响。
-   */
-  currentImageTier: (): Promise<string | null> =>
-    invoke("operator_current_image_tier"),
-
-  /**
-   * 启用 / 停用某个档位的生图。`null` = 停用。
-   *
-   * 启用后用户在 codex / claude 里直接说「生成一张图」即可，**对话仍走他当前用的档位**。
-   *
-   * **换档位不必重启 CLI**：后端只改一个标记，CLI 的配置文件不动 —— 生图工具在每次
-   * 调用时现读那个标记。密钥也是现读的，所以刷新档位换了密钥同样自动生效。
-   */
-  setImageTier: (providerId: string | null): Promise<void> =>
-    invoke("operator_set_image_tier", { providerId }),
 
   /**
    * 一键「切回官方登录」：清 codex 的第三方路由与登录态。

@@ -80,7 +80,9 @@ pub async fn get_config_status(
                 path: status.config_library_path.unwrap_or_default(),
             })
         }
-        AppType::Codex => {
+        // 生图栏与 codex 共用配置目录（它的 MCP 记录投影在 codex 的 config.toml 里），
+        // 所以「配置在不在」这个问题的答案跟 codex 一样。
+        AppType::Codex | AppType::CodexImage => {
             let auth_path = codex_config::get_codex_auth_path();
             let config_text = codex_config::read_codex_config_text().unwrap_or_default();
             let exists = auth_path.exists() || !config_text.trim().is_empty();
@@ -150,7 +152,8 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
         AppType::ClaudeDesktop => {
             crate::claude_desktop_config::get_config_library_path().map_err(|e| e.to_string())?
         }
-        AppType::Codex => codex_config::get_codex_config_dir(),
+        // 生图栏没有自己的配置目录：它的 MCP 记录投影在 codex 的 config.toml 里。
+        AppType::Codex | AppType::CodexImage => codex_config::get_codex_config_dir(),
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
         AppType::GrokBuild => crate::grok_config::get_grok_config_dir(),
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
@@ -168,7 +171,8 @@ pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, 
         AppType::ClaudeDesktop => {
             crate::claude_desktop_config::get_config_library_path().map_err(|e| e.to_string())?
         }
-        AppType::Codex => codex_config::get_codex_config_dir(),
+        // 生图栏没有自己的配置目录：它的 MCP 记录投影在 codex 的 config.toml 里。
+        AppType::Codex | AppType::CodexImage => codex_config::get_codex_config_dir(),
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
         AppType::GrokBuild => crate::grok_config::get_grok_config_dir(),
         AppType::OpenCode => crate::opencode_config::get_opencode_dir(),

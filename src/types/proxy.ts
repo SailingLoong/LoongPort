@@ -45,6 +45,11 @@ export interface ProxyTakeoverStatus {
   claude: boolean;
   "claude-desktop"?: boolean;
   codex: boolean;
+  /**
+   * 生图栏**永远不会被代理接管** —— 它不写任何 live 配置，没有可劫持的东西。
+   * 标成可选（后端不发这个键），读到 `undefined` 即「没接管」，那正确。
+   */
+  "codex-image"?: boolean;
   gemini: boolean;
   grokbuild: boolean;
   opencode: boolean;

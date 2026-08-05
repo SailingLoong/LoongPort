@@ -35,7 +35,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
-use crate::operator::{api, chatgpt_app, creds, imagegen_mcp, login, provision, purchase};
+use crate::operator::{api, chatgpt_app, creds, login, provision, purchase};
 use crate::provider::Provider;
 use crate::services::{McpService, ProviderService};
 use crate::store::AppState;
@@ -167,27 +167,16 @@ pub struct TierInfo {
     /// `creds` 里按站点存）。[`operator_list_tiers`] 那条路恒为 `None` ——
     /// 它的调用方不显示这个标记，见该命令的文档。
     pub user_edited: Option<bool>,
-    /// 这个档位的模型是生图模型（`gpt-image-*`）吗。
-    ///
-    /// 判据是**配置里的 `model`**（[`provision::is_image_model`]），不是「拉一次
-    /// `/v1/models` 看看」—— 因为 [`list_operators_impl`] 那条路是「只读本地不发网络」
-    /// 的首屏契约。而模型名就在本地 `settings_config` 里，两条路都拿得到，
-    /// 无需异步填空、无首屏空窗。
-    ///
-    /// 为真 ⇒ 这是纯生图分组（provision 只在该分组没挂文本模型时才写生图模型名，
-    /// 见 [`provision::pick_model`]）。
-    pub is_image_model: bool,
     /// 服务端说这个分组允许生图（`allow_image_generation`）。
     ///
-    /// ⚠️ **与 [`Self::is_image_model`] 是两件事**：混合分组（有文本模型，如实测的
-    /// `pro池`）也是 `true` —— 它的生图走中转站的 codex 生图桥。压成一个字段就分不回来。
+    /// ⚠️ **纯生图分组不靠这个字段识别** —— 它们在 `codex-image` 那一栏，
+    /// 所在的列表本身就说明了这件事（见 [`provision::image_tier_app_type`]）。
+    /// 这个字段的价值在**混合分组**：实测 `pro池` 这类有文本模型的分组也是 `true`，
+    /// 它们留在 codex 栏而同时支持生图。
     ///
     /// `None` = **判不了**：这是纯服务端信息（分组的开关），本地配置里没有它。
     /// 只有 provision 那条路填得出，[`list_operators_impl`] 恒为 `None`。
     /// UI 在 `None` 时不显示标记 —— 与 `user_edited` 同一条原则：不知道就别断言。
-    ///
-    /// 这个不对称是有意的：**少显示一个信息性标记无害**，而 `is_image_model`
-    /// 若在首屏未知会让「装生图工具」的入口忽隐忽现，那是有害的。
     pub allow_image_generation: Option<bool>,
 }
 
@@ -1060,7 +1049,6 @@ async fn do_provision(
             user_edited,
             // 这条路上两个字段都有真值：模型名刚由 `pick_model` 算出来，
             // 生图开关刚从 `/groups/available` 拉到。
-            is_image_model: provision::is_image_model(&tier.model),
             allow_image_generation: Some(tier.allow_image_generation),
         });
     }
@@ -1087,6 +1075,18 @@ async fn do_provision(
     let removed = prune_stale_tiers(&state, &op.site_origin, op.account_id, &keep)?;
     if removed > 0 {
         log::info!("清理了 {removed} 个不再存在的档位（{}）", op.site_origin);
+    }
+
+    // 生图工具跟着「生图栏里有没有档位」对齐一次。见 `sync_imagegen_mcp` 的文档。
+    //
+    // ⚠️ **必须在 `prune_stale_tiers` 之后** —— 判据是「生图栏里还有档位吗」，
+    // 而清理正是让最后一条生图档位消失的那一步。反过来的话，运营商下架全部生图分组后
+    // 那个工具会留到下一次 provision 才撤掉，期间它每次调用都报「档位已经不在了」。
+    //
+    // 失败只 warn：档位已经存对了，不该因为一个 MCP 记录写不下去就把「获取密钥」
+    // 整个报成失败（用户会以为连密钥都没拿到）。
+    if let Err(e) = sync_imagegen_mcp(&state) {
+        log::warn!("同步生图工具记录失败（生图可能暂时用不了）: {e}");
     }
 
     Ok(ProvisionSummary {
@@ -1823,8 +1823,6 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                 user_edited: None,
                 // **这个在本地就能算**（判据是配置里的 `model`），所以首屏就有真值 ——
                 // 不像倍率那样留 None 等异步填。见该字段的文档：入口忽隐忽现是有害的。
-                is_image_model: provision::extract_model(&p.settings_config)
-                    .is_some_and(|m| provision::is_image_model(&m)),
                 // 纯服务端信息，本地推不出来 ⇒ None（UI 不显示标记）。
                 allow_image_generation: None,
             },
@@ -2491,9 +2489,9 @@ fn with_conn<T>(
 ///
 /// ## 为什么是**一条固定记录**而不是「一个档位一条」
 ///
-/// 「用哪个档位生图」存在 [`imagegen_mcp::CURRENT_IMAGE_TIER_KEY`] 那个 settings 键里，
-/// MCP 进程**每次生图时现读**。所以这条 MCP 记录的内容与档位无关，只回答
-/// 「这个宿主要不要有生图工具」—— 换档位不必改它。
+/// 「用哪个档位生图」= 生图栏（`codex-image`）的当前项，MCP 进程**每次生图时现读**
+/// （见 `imagegen_mcp::current_image_tier_id`）。所以这条 MCP 记录的内容与档位无关，
+/// 只回答「这个宿主要不要有生图工具」—— 换档位不必改它。
 ///
 /// 那正是「切生图档位不用重启 codex」的来源：codex 只在启动时读它的 `config.toml`，
 /// 若档位 id 写在这条记录里，用户每换一次都得新开终端。
@@ -2509,157 +2507,18 @@ const IMAGEGEN_MCP_ID: &str = "loongport-imagegen";
 /// `main.rs` 用 `cc_switch_lib::IMAGEGEN_MCP_FLAG` 引它。
 pub const IMAGEGEN_MCP_FLAG: &str = "--mcp-image-gen";
 
-/// 「用哪个档位生图」。`None` = 用户还没选，或选的那个档位已经不在了。
+/// 生图工具的安装 / 撤销，跟着「生图栏里有没有档位」自动走。
 ///
-/// ## 为什么要**校验档位还在**（而不是把标记原样返回）
+/// ## 为什么不再有「启用生图」这个显式动作
 ///
-/// 那个档位可能被删掉了 —— 用户删了整个运营商账号，或 provision 的清理路径
-/// （`prune_stale_tiers`）把它剪掉了（运营商下架了那个分组）。标记会**留在
-/// `settings` 里指向一个不存在的 id**。
+/// 上一版有一对命令（`operator_set_image_tier` / `operator_current_image_tier`）在
+/// `settings` 表里维护「用哪个档位生图」。分栏之后那套是纯粹的重复：
+/// 「当前是哪一档」由 `providers.is_current` 表达，而它**每个 app_type 一栏** ——
+/// 生图栏天然就有自己的一份，用户点「切换」走的就是与聊天档位同一条路
+/// （`operator_switch_tier`）。
 ///
-/// 不校验的后果：界面上那一行档位已经没了，而生图仍宣称「用某个档位」；用户想换也
-/// 无从下手（没有那一行可点）。而 MCP 那侧到生图时才报「库里没有 codex 档位 …」——
-/// 一个他从没见过的 id。
-///
-/// **在读取处校验而不是在删除处清理**，是因为删除有多条路径
-/// （`remove_site_impl` / `prune_stale_tiers` / 用户在 provider 页手工删），
-/// 每条都记得清理这一个标记是迟早会漏的；而「读的时候确认它还在」只有一处。
-/// 这也是 `is_current` 那类状态的通行做法：**由真值推导，不靠各处同步维护**。
-#[tauri::command]
-pub async fn operator_current_image_tier(
-    app_handle: tauri::AppHandle,
-) -> Result<Option<String>, String> {
-    let state = app_handle.state::<AppState>();
-    let stored = state
-        .db
-        .get_setting(imagegen_mcp::CURRENT_IMAGE_TIER_KEY)
-        .map_err(|e| e.to_string())?
-        .filter(|s| !s.is_empty());
-
-    let Some(provider_id) = stored else {
-        return Ok(None);
-    };
-
-    // ⚠️ **读失败不能当成「档位没了」**（review 抓出）：那会让一次瞬时的数据库错误
-    // （锁中毒 / IO 抖动）触发下面那段**写操作** —— 清掉标记、删掉 MCP 记录，
-    // 即在一个**读命令**里静默卸掉用户的生图工具，而恢复它还得再新开一次终端。
-    //
-    // 与本模块对 `user_edited` / `allow_image_generation` 的处理同一条原则：
-    // **不知道就别断言**。读不出来就把错误报上去，让调用方知道「这次没查到」，
-    // 而不是替它下一个「已经没了」的结论。
-    let list = ProviderService::list(&state, AppType::Codex).map_err(|e| e.to_string())?;
-    let still_there = list.values().any(|p| p.id == provider_id);
-
-    if !still_there {
-        // 顺手把这个死标记与 MCP 记录一起清掉 —— 留着它只会让下一次读取重复这段判断，
-        // 而 CLI 那侧还挂着一个必定报错的工具。
-        log::info!("生图档位 {provider_id} 已不存在，停用生图");
-        if let Err(e) = set_image_tier_impl(&app_handle, None) {
-            log::warn!("清理失效的生图档位标记失败（不影响本次返回）: {e}");
-        }
-        return Ok(None);
-    }
-
-    // ⚠️ **顺手补齐 MCP 记录**，让「标记在、记录不在」这个状态能自愈。
-    //
-    // `set_image_tier_impl` 是两步（写标记 → upsert 记录）。第二步失败时（`current_exe()`
-    // 拿不到、MCP 同步写文件失败）标记已经写了 ⇒ 界面显示「生图中」而 CLI 里其实没有那个
-    // 工具 ⇒ 用户说「生成一张图」，模型答「我没有这个工具」，而 LoongPort 看起来一切正常。
-    //
-    // 不做「失败就回滚标记」是因为回滚本身也可能失败，那时状态更难说清。而这里补齐是
-    // **幂等**的（`upsert_server` 覆盖同 id），且每次读都会走一遍 —— 用户下次打开界面
-    // 就自动修好了，不必知道发生过什么。
-    //
-    // 失败只记日志：这是个读命令，为一次补齐失败而让「查当前生图档位」整个失败是错的。
-    if let Some(p) = ProviderService::list(&state, AppType::Codex)
-        .ok()
-        .and_then(|list| list.values().find(|p| p.id == provider_id).cloned())
-    {
-        if let Err(e) = ensure_imagegen_mcp_registered(&state, &p.name) {
-            log::warn!("补齐生图 MCP 记录失败（生图可能暂时用不了）: {e}");
-        }
-    }
-    Ok(Some(provider_id))
-}
-
-/// 启用 / 停用某个档位的生图。
-///
-/// `provider_id` 为 `None` = 停用生图（撤掉 MCP 记录 + 清空那个 settings 键）。
-///
-/// ## 为什么「启用生图」与「启用对话」是两套独立的当前项
-///
-/// 纯生图分组**没有文本模型**，当对话供应商用会 404 —— 所以它的「启用」不可能是
-/// 「切到这一档聊天」。反过来，用户在用哪个档位聊天与「图从哪来」也无关：
-/// 生图走 `/v1/images/generations` 且自带 sk，对话走 `/v1/responses` 用当前档位的 sk，
-/// 两条链路互不影响。
-///
-/// 所以这里维护的是**第二个当前项**，而不是复用 `operator_switch_tier`。
-///
-/// ## 为什么不自动替用户选一个
-///
-/// 用户那个站可能压根没有生图分组（实测 bestapi.store 就没有）—— 替他装一个
-/// 「用不了的工具」等于在 codex 的工具列表里塞垃圾。而有生图分组的用户里，
-/// 选 1K 还是 2/4k 是**花钱的决定**，不该由我们替他做。
-///
-/// ⇒ 没选过 = codex 配置里没有这条记录 = 完全无感。
-#[tauri::command]
-pub async fn operator_set_image_tier(
-    app_handle: tauri::AppHandle,
-    provider_id: Option<String>,
-) -> Result<(), String> {
-    set_image_tier_impl(&app_handle, provider_id.as_deref()).map_err(|e| e.to_string())
-}
-
-fn set_image_tier_impl(
-    app_handle: &tauri::AppHandle,
-    provider_id: Option<&str>,
-) -> Result<(), AppError> {
-    let state = app_handle.state::<AppState>();
-
-    let Some(provider_id) = provider_id else {
-        // 停用：先清标记再撤记录 —— 顺序无所谓（两者都幂等），但清标记更便宜，
-        // 万一撤记录失败也不会留下「工具在、却指向一个已停用的档位」。
-        state
-            .db
-            .set_setting(imagegen_mcp::CURRENT_IMAGE_TIER_KEY, "")?;
-        McpService::delete_server(&state, IMAGEGEN_MCP_ID)?;
-        log::info!("已停用生图（撤掉 MCP 记录）");
-        return Ok(());
-    };
-
-    // 档位得真的存在、是托管的、且能读出 sk —— **三道都在写配置之前**：
-    // 宁可现在报错，也不要让用户在 codex 里看到一个启动就挂的工具。
-    let provider = ProviderService::list(&state, AppType::Codex)?
-        .values()
-        .find(|p| p.id == provider_id)
-        .cloned()
-        .ok_or_else(|| AppError::Config(format!("找不到档位 {provider_id}，请先「获取密钥」")))?;
-
-    // 与 `reject_if_managed` 相反方向的守卫：那些入口拦的是「别对托管项做手工操作」，
-    // 这里拦的是「别对手工 provider 做托管操作」—— 生图 MCP 按 provider_id 去库里找
-    // sk 与 base_url，而那套形状只有托管档位保证有。
-    if !is_managed(&provider) {
-        return Err(AppError::Config(
-            "生图只能用 LoongPort 托管的运营商档位。".into(),
-        ));
-    }
-    if provision::extract_api_key(&provider.settings_config, &AppType::Codex).is_none() {
-        return Err(AppError::Config(
-            "这个档位的配置里读不出密钥，请先用「获取密钥」重新生成它。".into(),
-        ));
-    }
-
-    // 先写标记，再确保 MCP 记录在 —— 反过来的话，记录写好而标记还是旧的那一瞬间，
-    // 用户的生图会用错档位。
-    state
-        .db
-        .set_setting(imagegen_mcp::CURRENT_IMAGE_TIER_KEY, provider_id)?;
-    ensure_imagegen_mcp_registered(&state, &provider.name)?;
-
-    log::info!("生图已切到档位「{}」（{provider_id}）", provider.name);
-    Ok(())
-}
-
+/// 所以现在只剩一个问题：**这个宿主要不要有生图工具**。答案由生图栏里有没有档位决定，
+/// 在 provision 收尾时对齐一次（见 [`sync_imagegen_mcp`]）。用户不必学第二套操作。
 /// 确保生图 MCP 记录在库里（进而被同步进各 CLI 的配置）。
 ///
 /// ## 为什么写 `mcp_servers` 表而不是直接改 CLI 的配置文件
@@ -2668,9 +2527,37 @@ fn set_image_tier_impl(
 /// （`codex_config.rs` 的 `strip_codex_mcp_servers_from_settings` 那段注释钉过这条）。
 /// 自己去写配置文件会被下一次同步覆盖，而且绕过了「切档位时重投影」那套逻辑。
 ///
-/// **幂等**：`upsert_server` 会覆盖同 id 的记录，所以重复调用只是把内容刷成最新的
-/// （档位名变了时描述文案会跟着更新）。
-fn ensure_imagegen_mcp_registered(state: &AppState, tier_name: &str) -> Result<(), AppError> {
+/// **幂等**：装的那一支走 `upsert_server`（覆盖同 id），撤的那一支走 `delete_server`
+/// （不存在时返回 `Ok(false)`）。所以每次 provision 收尾都能无条件调它。
+///
+/// ## 「有没有生图档位」是唯一判据
+///
+/// 用户那个站可能压根没有生图分组（实测 bestapi.store 就没有）—— 那时生图栏是空的，
+/// 这里把 MCP 记录撤掉 ⇒ **CLI 的配置里一个字都不多**，完全无感。
+/// 有生图分组的用户则自动获得那个工具，不必学一个额外的「启用生图」动作。
+///
+/// ⚠️ **不看「有没有选当前项」** —— 那会让「装工具」依赖一个用户可能还没做的选择，
+/// 而工具在没选档位时本来就会给出一句可操作的提示（`NO_IMAGE_TIER_HINT`）。
+/// 反过来（有档位却没工具）才是真的坏：用户说「画一只猫」，模型答「我没有这个工具」。
+fn sync_imagegen_mcp(state: &AppState) -> Result<(), AppError> {
+    let has_image_tiers = ProviderService::list(state, AppType::CodexImage)
+        .map(|list| list.values().any(is_managed))
+        .unwrap_or(false);
+
+    if !has_image_tiers {
+        // 撤掉。**不因为它本来就不在而算失败** —— `delete_server` 返回 `Ok(false)`。
+        let removed = McpService::delete_server(state, IMAGEGEN_MCP_ID)?;
+        if removed {
+            log::info!("生图栏里没有档位了，撤掉生图 MCP 记录");
+        }
+        return Ok(());
+    }
+
+    install_imagegen_mcp(state)
+}
+
+/// 把生图 MCP 记录写进库（幂等）。
+fn install_imagegen_mcp(state: &AppState) -> Result<(), AppError> {
     // 当前可执行文件的绝对路径。macOS 上这是 `.app/Contents/MacOS/<bin>`，
     // 正是 CLI 该去启动的东西。
     let exe = std::env::current_exe()
@@ -2703,10 +2590,13 @@ fn ensure_imagegen_mcp_registered(state: &AppState, tier_name: &str) -> Result<(
             name: "LoongPort 生图".to_string(),
             server: spec,
             apps,
-            description: Some(format!(
-                "用「{tier_name}」这个档位生图（gpt-image 系列）。由 LoongPort 自动维护，\
-                 密钥不写进 CLI 配置 —— 换档位也不必重启 CLI。"
-            )),
+            // ⚠️ **描述里不提某个档位名** —— 这条记录与档位无关（换档位不改它），
+            // 写了档位名就得在每次切换时刷新它，而那正是「不必重启 CLI」要避免的事。
+            description: Some(
+                "用 LoongPort「生图」标签页里当前那个档位生图（gpt-image 系列）。\
+                 由 LoongPort 自动维护，密钥不写进 CLI 配置 —— 换档位也不必重启 CLI。"
+                    .to_string(),
+            ),
             homepage: None,
             docs: None,
             tags: vec!["loongport".into(), "image".into()],
@@ -2796,7 +2686,6 @@ mod tests {
             rate_multiplier: Some(1.0),
             is_current: false,
             user_edited: None,
-            is_image_model: false,
             allow_image_generation: None,
         };
 
@@ -2839,7 +2728,6 @@ mod tests {
             // 归属测试不关心它 —— `tiers_of_site` 会自己算出来覆盖掉这个值。
             user_edited: None,
             // 同上：归属判定与生图无关。
-            is_image_model: false,
             allow_image_generation: None,
         }
     }

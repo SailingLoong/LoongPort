@@ -162,7 +162,8 @@ pub fn config_for(app: &AppType) -> Option<(&'static str, &'static str)> {
         AppType::OpenClaw | AppType::OpenCode => {
             Some(("https://api.deepseek.com/v1", "deepseek-v4-pro"))
         }
-        AppType::Gemini | AppType::GrokBuild => None,
+        // 生图栏不适用：DeepSeek 没有 gpt-image-* 模型，展开一条进去只会得到一个必然 404 的档位。
+        AppType::Gemini | AppType::GrokBuild | AppType::CodexImage => None,
     }
 }
 

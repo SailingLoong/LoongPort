@@ -879,6 +879,7 @@
     "claudeDesktop": "Claude Desktop",
     "claude-desktop": "Claude Desktop",
     "codex": "Codex",
+    "codex-image": "Codex 画像生成",
     "gemini": "Gemini",
     "grokbuild": "Grok Build",
     "opencode": "OpenCode",
@@ -3069,16 +3070,7 @@
       "userEdited": "手動管理中",
       "userEditedHint": "この枠の設定を編集済みです。グループを更新しても上書きされません（キーのみ更新）。クリックでデフォルト設定に戻せます。",
       "editMissing": "この枠のレコードが見つかりません。「キーを取得」で再生成してください。",
-      "editCurrentNote": "これは現在使用中の枠です。変更が反映されない場合は ChatGPT デスクトップ版を終了して開き直してください —— 起動中は Codex の設定を書き戻します。",
-      "imageOnly": "画像生成",
-      "imageOnlyHint": "このティアは画像生成モデル（gpt-image 系）のみを提供しており、チャットには使えません。右の「画像生成に使う」を押せば、codex / claude で「画像を生成して」と言うだけで使えます（チャットは現在のティアのまま）。",
-      "useForImages": "画像生成に使う",
-      "useForImagesHint": "画像生成をこのティアに切り替えます。チャットは影響を受けず、現在のティアのままです。",
-      "imageInUse": "画像生成中",
-      "imageInUseHint": "現在このティアで画像を生成しています。クリックで停止します。",
-      "imageEnabledFirstTime": "画像生成を有効にしました（「{{name}}」を使用）。新しいターミナルを開いてから「画像を生成して」と言ってください。",
-      "imageSwitched": "画像生成を「{{name}}」に切り替えました。再起動不要で即時反映されます。",
-      "imageDisabled": "画像生成を停止しました"
+      "editCurrentNote": "これは現在使用中の枠です。変更が反映されない場合は ChatGPT デスクトップ版を終了して開き直してください —— 起動中は Codex の設定を書き戻します。"
     },
     "stats": {
       "title": "LoongPort の改善に協力",
@@ -3155,6 +3147,15 @@
       "sessionExpiredUsable": "ログインは期限切れですが、キーはまだ使えます（残高だけ取得できません）。ここをクリックして再ログインできます。",
       "loginFailed": "ログインが完了しませんでした：{{reason}}",
       "openKeyPage": "公式サイトで整理する"
+    },
+    "imageTab": {
+      "title": "画像生成のティア",
+      "intro": "このページには画像生成専用のティア（モデルが gpt-image 系のもの）だけが並びます。「切り替え」で、どのティアで画像を出すかを選んでください。",
+      "companionNotice": "このページは単独では使えません。codex のチャットと併せて使います。",
+      "companionDetail": "画像生成は LoongPort 同梱のツール（MCP）が担います。codex / claude で「画像を生成して」と言えば、ここで選んだティアで出力されます。会話は Codex タブで選んだティアのまま —— 両者は独立しているので、チャットは DeepSeek でも他のサイトでも構いません。",
+      "howTo": "画像生成のティアを切り替えても CLI の再起動は不要で、次回の生成から新しいティアが使われます。初めて画像ティアを持ったときだけ、codex にツールを認識させるため新しいターミナルを開いてください。",
+      "emptyTitle": "画像生成のティアはまだありません",
+      "emptyBody": "画像ティアは「キーを取得」時に自動判定されます。gpt-image 系モデルだけを持つグループがあれば、ここに現れます。ご利用のサイトに画像グループが無い場合もあります —— そのときはこのページは空のままで、CLI の設定には何も追加されません。"
     }
   }
 }

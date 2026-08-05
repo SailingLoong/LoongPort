@@ -880,6 +880,7 @@
     "claudeDesktop": "Claude Desktop",
     "claude-desktop": "Claude Desktop",
     "codex": "Codex",
+    "codex-image": "Codex 生圖",
     "gemini": "Gemini",
     "grokbuild": "Grok Build",
     "opencode": "OpenCode",
@@ -3070,16 +3071,7 @@
       "userEdited": "已手動維護",
       "userEditedHint": "這個檔位的設定你改過。重新整理分組不會覆寫它（只更新金鑰）。點這裡恢復預設設定。",
       "editMissing": "這個檔位的記錄已經不在了，請點「取得金鑰」重新產生。",
-      "editCurrentNote": "這是目前正在使用的檔位。改完如果沒生效，結束並重新開啟 ChatGPT 桌面版 —— 它在執行時會把 codex 的設定改回去。",
-      "imageOnly": "生圖",
-      "imageOnlyHint": "這個檔位只掛了生圖模型（gpt-image 系列），不能用來對話。點右邊的「啟用生圖」，之後在 codex / claude 裡說「生成一張圖」即可 —— 對話仍走你目前用的檔位。",
-      "useForImages": "啟用生圖",
-      "useForImagesHint": "把生圖切到這個檔位。對話不受影響，仍走你目前用的檔位。",
-      "imageInUse": "生圖中",
-      "imageInUseHint": "目前正用這個檔位生圖。點一下停用。",
-      "imageEnabledFirstTime": "生圖已啟用（用「{{name}}」）。新開一個終端後，在 codex / claude 裡直接說「生成一張圖」即可。",
-      "imageSwitched": "生圖已切到「{{name}}」，立即生效（不用重啟）。",
-      "imageDisabled": "已停用生圖"
+      "editCurrentNote": "這是目前正在使用的檔位。改完如果沒生效，結束並重新開啟 ChatGPT 桌面版 —— 它在執行時會把 codex 的設定改回去。"
     },
     "stats": {
       "title": "協助改進 LoongPort",
@@ -3156,6 +3148,15 @@
       "sessionExpiredUsable": "登入已過期，但金鑰仍然可用（只是查不到餘額）。點這裡重新登入。",
       "loginFailed": "登入沒能完成：{{reason}}",
       "openKeyPage": "去官網刪除"
+    },
+    "imageTab": {
+      "title": "生圖檔位",
+      "intro": "這一頁只放生圖分組（模型是 gpt-image 系列的那些）。點「切換」選定用哪個檔位出圖。",
+      "companionNotice": "這一頁不能單獨使用，要配合 codex 聊天一起用。",
+      "companionDetail": "生圖靠 LoongPort 自帶的工具（MCP）完成：你在 codex / claude 裡說「生成一張圖」，它就用這裡選定的檔位出圖。而對話仍走 Codex 標籤頁裡選的那個檔位 —— 兩者各自獨立，聊天可以用 DeepSeek 或任何別的站。",
+      "howTo": "換生圖檔位不用重啟 CLI，下一次生成就用新的。只有第一次有生圖檔位時要新開一個終端，讓 codex 讀到那個工具。",
+      "emptyTitle": "還沒有生圖檔位",
+      "emptyBody": "生圖檔位由「取得密鑰」自動識別：運營商那邊有只掛 gpt-image 模型的分組時，它就出現在這裡。你的站點可能沒有提供生圖分組 —— 那樣這一頁保持空著就好，CLI 的設定裡不會多出任何東西。"
     }
   }
 }

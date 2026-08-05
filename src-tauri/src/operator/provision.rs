@@ -202,7 +202,20 @@ pub async fn provision(client: &Client) -> Result<ProvisionResult, AppError> {
     let mut result = ProvisionResult::default();
     for (group, app_type) in usable {
         match ensure_key_for(client, account_id, &group, &existing).await {
-            Ok(tier) => result.tiers.push(TargetedTier { tier, app_type }),
+            Ok(tier) => {
+                // **纯生图分组落到生图那一栏**，不是 codex。
+                //
+                // 判据用 `tier.model`（= [`pick_model`] 的产物）而不是分组的
+                // `allow_image_generation`：后者只说「这个分组允许生图」，而**允许生图的
+                // 混合分组仍然能聊天**（它有文本模型）—— 那种该留在 codex 栏。真正
+                // 只能生图的是「一个文本模型都没有」，而那正是 `pick_model` 写出
+                // `gpt-image-*` 的唯一条件。
+                //
+                // 分栏的理由见 [`AppType::CodexImage`](crate::app_config::AppType::CodexImage)：
+                // 挤在 codex 栏里会让两者抢同一个 `is_current`，且 switch 的回填互相污染。
+                let app_type = image_tier_app_type(&app_type, &tier.model);
+                result.tiers.push(TargetedTier { tier, app_type })
+            }
             // 一个分组失败不影响其它分组 —— 部分可用优于全部不可用。
             Err(e) => result.failures.push((group.name.clone(), e.to_string())),
         }
@@ -466,7 +479,12 @@ pub fn settings_config_for(
     model: &str,
 ) -> Option<serde_json::Value> {
     // codex 例外：上游那份多一行 requires_openai_auth，见上面那段。
-    if matches!(app_type, AppType::Codex) {
+    //
+    // ⚠️ **生图栏必须与 codex 走同一条**（测试 `the_image_column_shares_the_codex_config_shape`
+    // 钉着）：生图 MCP 按 codex 的形状去读 sk 与 base_url。掉进下面那条上游分支会
+    // 得到一份 claude/gemini 形状的配置 ⇒ 生图在运行时读不出密钥，而那是只有真机
+    // 才发现得了的失败。
+    if matches!(app_type, AppType::Codex | AppType::CodexImage) {
         return Some(serde_json::json!({
             "auth": { "OPENAI_API_KEY": api_key },
             "config": codex_config_toml(display_name, base_url, model),
@@ -792,6 +810,32 @@ const IMAGE_MODEL_PREFIX: &str = "gpt-image-";
 /// 同一个档位每次 provision 可能写进不同的模型名 ⇒ [`is_user_edited`] 的基准跟着抖 ⇒
 /// 界面上「已手动维护」标记会随机出现又消失。排序让它成为该分组的一个确定函数。
 ///
+/// 一条档位该落到哪一栏：纯生图的进 [`AppType::CodexImage`]，其余原样返回。
+///
+/// ## 判据是模型名，不是分组的 `allow_image_generation`
+///
+/// 后者只说「这个分组**允许**生图」，而允许生图的**混合**分组仍然能聊天（它有文本模型）——
+/// 那种该留在 codex 栏，用户既能用它对话也能用它出图。真正只能生图的是「一个文本模型都
+/// 没有」，而那正是 [`pick_model`] 写出 `gpt-image-*` 的唯一条件 ⇒ 直接看它的产物。
+///
+/// ## 只对 codex 生效
+///
+/// `gpt-image-*` 是 openai 平台的事。claude / gemini / grok 的档位即便模型名恰好以
+/// 那个前缀开头（不会发生，但判据不该依赖「不会发生」），也不该被搬去生图栏 ——
+/// 生图工具走的是 `/v1/images/generations`，那是 openai 的端点。
+///
+/// ## 为什么不在 [`AppType`] 上做成方法
+///
+/// 它需要两个输入（当前 app_type + 模型名），而 `AppType` 是上游的类型 ——
+/// 给它加一个只有 LoongPort 用得上的方法会扩大与上游的接触面（CLAUDE.md §一）。
+pub fn image_tier_app_type(app_type: &AppType, model: &str) -> AppType {
+    if matches!(app_type, AppType::Codex) && is_image_model(model) {
+        AppType::CodexImage
+    } else {
+        app_type.clone()
+    }
+}
+
 /// ## 为什么「问不出来」回落到 [`DEFAULT_MODEL`] 而不是报错
 ///
 /// `list_models` 可能因为站点没这个端点、权限不够、或临时故障而返回 `None`。
@@ -885,7 +929,10 @@ pub fn is_image_model(model: &str) -> bool {
 /// 返回 `None` = 这个 CLI 还没接。
 fn api_key_location(app_type: &AppType) -> Option<(&'static str, &'static str)> {
     match app_type {
-        AppType::Codex => Some(("auth", "OPENAI_API_KEY")),
+        // 生图栏与 codex 同形（见 `settings_config_for`），sk 在同一个位置。
+        // 漏了它的后果是**静默的**：`_ => None` 会让 `is_user_edited` 对每条生图档位
+        // 都返回「判不了」，`extract_api_key` 也读不出 sk ⇒ 生图工具起不来。
+        AppType::Codex | AppType::CodexImage => Some(("auth", "OPENAI_API_KEY")),
         AppType::Claude => Some(("env", "ANTHROPIC_AUTH_TOKEN")),
         AppType::Gemini => Some(("env", "GEMINI_API_KEY")),
         _ => None,
@@ -994,8 +1041,13 @@ pub fn repair_stale_model(
     base_url: &str,
     want_model: &str,
 ) -> bool {
-    // 只有 codex 的配置里有 `model` 这一行（其它 CLI 的形状里没有它）。
-    if !matches!(app_type, AppType::Codex) {
+    // 只有 codex 那套形状的配置里有 `model` 这一行（生图栏与它同形）。
+    //
+    // ⚠️ **生图栏也要放行** —— 分栏之后待修的档位落在 `CodexImage` 下：一条
+    // 「模型名被写成文本模型」的生图档位，迁移会把它搬到生图栏（模型名不变，
+    // 迁移只改 app_type），随后靠这个函数把名字修对。只认 `Codex` 会让那些档位
+    // 永远修不好，而症状恰好是本轮要治的那个：选中即 404。
+    if !matches!(app_type, AppType::Codex | AppType::CodexImage) {
         return false;
     }
     // 已经是想要的值 ⇒ 什么都不做（绝大多数情形走这条）。
@@ -1281,6 +1333,90 @@ mod tests {
             "gpt-image-1".to_string(),
         ];
         assert_eq!(pick_model(Some(&a)), pick_model(Some(&b)));
+    }
+
+    /// **纯生图分组落到生图栏，混合分组留在 codex 栏。**
+    ///
+    /// 这是分栏的核心判据。搞错的两个方向都有具体代价：
+    /// - 混合分组被搬进生图栏 ⇒ 用户少了一个能聊天的档位（它有文本模型，本该能聊）。
+    /// - 纯生图分组留在 codex 栏 ⇒ 回到本轮要修的病根（抢同一个 `is_current`、
+    ///   switch 回填互相污染 ⇒ 界面显示「已手动维护」）。
+    #[test]
+    fn only_image_only_tiers_move_to_the_image_column() {
+        // 纯生图：`pick_model` 写出 gpt-image-* ⇒ 进生图栏。
+        assert_eq!(
+            image_tier_app_type(&AppType::Codex, "gpt-image-2"),
+            AppType::CodexImage,
+        );
+        // 混合分组（有文本模型）：`pick_model` 写出 DEFAULT_MODEL ⇒ 留在 codex。
+        // ⚠️ 这条分组的 `allow_image_generation` 可能是 true —— 判据不看它，
+        // 看的是「有没有文本模型能聊天」。
+        assert_eq!(
+            image_tier_app_type(&AppType::Codex, DEFAULT_MODEL),
+            AppType::Codex,
+        );
+    }
+
+    /// 其它 CLI 不受影响 —— 即便模型名恰好带那个前缀。
+    ///
+    /// `/v1/images/generations` 是 openai 的端点，把一条 claude 档位搬进生图栏
+    /// 会让生图工具拿 anthropic 形状的配置去打那个端点。
+    #[test]
+    fn non_codex_apps_never_move_to_the_image_column() {
+        for app in [AppType::Claude, AppType::Gemini, AppType::GrokBuild] {
+            assert_eq!(
+                image_tier_app_type(&app, "gpt-image-2"),
+                app,
+                "{app:?} 被搬进生图栏了 —— 生图只走 openai 平台"
+            );
+        }
+    }
+
+    /// 已经在生图栏的档位不会被再搬一次（幂等）。
+    #[test]
+    fn the_image_column_is_a_fixed_point() {
+        assert_eq!(
+            image_tier_app_type(&AppType::CodexImage, "gpt-image-2"),
+            AppType::CodexImage,
+        );
+    }
+
+    /// **生图栏里的过时模型名照样要被修。**
+    ///
+    /// 分栏之后，待修的那些档位（老版本写成文本模型名的纯生图分组）由迁移搬到
+    /// `CodexImage` 下 —— 迁移只改 app_type，不动模型名。若 `repair_stale_model`
+    /// 只认 `Codex`，它们就永远修不好，症状正是本轮要治的那个：选中即 404。
+    #[test]
+    fn a_stale_model_in_the_image_column_is_still_repaired() {
+        let app = AppType::CodexImage;
+        let base = "https://api.x.dev/v1";
+        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, DEFAULT_MODEL)
+            .expect("生图栏与 codex 同形，必须有默认形状");
+
+        assert!(
+            repair_stale_model(&mut cfg, &app, "生图档", base, "gpt-image-2"),
+            "生图栏里的过时模型名没被修 —— 迁移过来的老档位会一直 404"
+        );
+        assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
+        assert_eq!(extract_api_key(&cfg, &app).as_deref(), Some("sk-1"));
+    }
+
+    /// 生图栏与 codex 栏的配置形状必须**逐字节相同**。
+    ///
+    /// 生图 MCP 按 codex 的形状去读 sk 与 base_url（`extract_api_key` /
+    /// `extract_codex_base_url`）。两边形状一分叉，生图就在运行时读不出密钥，
+    /// 而那是一个只有真机能发现的失败。
+    #[test]
+    fn the_image_column_shares_the_codex_config_shape() {
+        let base = "https://api.x.dev/v1";
+        let codex = settings_config_for(&AppType::Codex, "sk-1", "档", base, "gpt-image-2")
+            .expect("codex 必须有形状");
+        let image = settings_config_for(&AppType::CodexImage, "sk-1", "档", base, "gpt-image-2")
+            .expect("生图栏必须有形状");
+        assert_eq!(
+            codex, image,
+            "生图栏的配置形状与 codex 分叉了 —— 生图 MCP 会读不出 sk"
+        );
     }
 
     /// **老档位的过时模型名要被刷新修正。**

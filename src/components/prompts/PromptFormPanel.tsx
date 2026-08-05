@@ -28,6 +28,9 @@ const PromptFormPanel: React.FC<PromptFormPanelProps> = ({
     claude: "CLAUDE.md",
     "claude-desktop": "CLAUDE.md",
     codex: "AGENTS.md",
+    // 生图栏没有 prompt 文件（后端 `prompt_file_path` 对它直接报错）。
+    // 这一项只为让 Record 穷尽 —— Prompts 面板的 app 列表里没有它，走不到。
+    "codex-image": "AGENTS.md",
     gemini: "GEMINI.md",
     grokbuild: "AGENTS.md",
     opencode: "AGENTS.md",

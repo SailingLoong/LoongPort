@@ -118,6 +118,10 @@ impl McpService {
             AppType::ClaudeDesktop => {
                 log::debug!("Claude Desktop 3P profiles do not use CC Switch MCP sync, skipping");
             }
+            AppType::CodexImage => {
+                // 生图栏本身不是一个装 MCP 的 CLI —— 生图工具装进 codex/claude/gemini。
+                log::debug!("生图栏不同步 MCP，跳过");
+            }
             AppType::Codex => {
                 // Codex uses TOML format, must use the correct function
                 mcp::sync_single_server_to_codex(&Default::default(), &server.id, &server.server)?;
@@ -169,6 +173,9 @@ impl McpService {
             AppType::Claude => mcp::remove_server_from_claude(id)?,
             AppType::ClaudeDesktop => {
                 log::debug!("Claude Desktop 3P profiles do not use CC Switch MCP sync, skipping");
+            }
+            AppType::CodexImage => {
+                log::debug!("生图栏不同步 MCP，跳过");
             }
             AppType::Codex => mcp::remove_server_from_codex(id)?,
             AppType::Gemini => mcp::remove_server_from_gemini(id)?,

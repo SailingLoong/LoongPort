@@ -36,6 +36,18 @@ pub struct VisibleApps {
     pub claude_desktop: bool,
     #[serde(default = "default_true")]
     pub codex: bool,
+    /// 生图标签是否可见。
+    ///
+    /// **默认可见**（与 codex 同步）：它不给用户增加负担 —— 没有任何生图分组时那一页
+    /// 只有一句说明，不会误导人去买东西。反过来默认隐藏的话，买了生图分组的用户
+    /// 找不到入口（上一版就是这么踩的：入口藏在 hover 里，用户报「没看到哪里有生图按钮」）。
+    #[serde(
+        rename = "codex-image",
+        alias = "codexImage",
+        alias = "codex_image",
+        default = "default_true"
+    )]
+    pub codex_image: bool,
     #[serde(default = "default_true")]
     pub gemini: bool,
     #[serde(default = "default_true")]
@@ -54,6 +66,7 @@ impl Default for VisibleApps {
             claude: true,
             claude_desktop: true,
             codex: true,
+            codex_image: true,
             gemini: true,
             grokbuild: true,
             opencode: true,
@@ -70,6 +83,7 @@ impl VisibleApps {
             AppType::Claude => self.claude,
             AppType::ClaudeDesktop => self.claude_desktop,
             AppType::Codex => self.codex,
+            AppType::CodexImage => self.codex_image,
             AppType::Gemini => self.gemini,
             AppType::GrokBuild => self.grokbuild,
             AppType::OpenCode => self.opencode,
@@ -488,6 +502,12 @@ pub struct AppSettings {
     /// 当前 Codex 供应商 ID（本地存储，优先于数据库 is_current）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_codex: Option<String>,
+    /// 当前**生图**档位 ID（本地存储，优先于数据库 is_current）。
+    ///
+    /// 与 `current_provider_codex` **各自独立**：用户可以一边用 DeepSeek 聊天、
+    /// 一边用鑫旺的 4K 分组生图。见 [`AppType::CodexImage`](crate::app_config::AppType::CodexImage)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_codex_image: Option<String>,
     /// 当前 Gemini 供应商 ID（本地存储，优先于数据库 is_current）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_gemini: Option<String>,
@@ -596,6 +616,7 @@ impl Default for AppSettings {
             current_provider_claude: None,
             current_provider_claude_desktop: None,
             current_provider_codex: None,
+            current_provider_codex_image: None,
             current_provider_gemini: None,
             current_provider_grokbuild: None,
             current_provider_opencode: None,
@@ -1025,6 +1046,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
         AppType::Claude => settings.current_provider_claude.clone(),
         AppType::ClaudeDesktop => settings.current_provider_claude_desktop.clone(),
         AppType::Codex => settings.current_provider_codex.clone(),
+        AppType::CodexImage => settings.current_provider_codex_image.clone(),
         AppType::Gemini => settings.current_provider_gemini.clone(),
         AppType::GrokBuild => settings.current_provider_grokbuild.clone(),
         AppType::OpenCode => settings.current_provider_opencode.clone(),
@@ -1043,6 +1065,7 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
         AppType::Claude => settings.current_provider_claude = id_owned.clone(),
         AppType::ClaudeDesktop => settings.current_provider_claude_desktop = id_owned.clone(),
         AppType::Codex => settings.current_provider_codex = id_owned.clone(),
+        AppType::CodexImage => settings.current_provider_codex_image = id_owned.clone(),
         AppType::Gemini => settings.current_provider_gemini = id_owned.clone(),
         AppType::GrokBuild => settings.current_provider_grokbuild = id_owned.clone(),
         AppType::OpenCode => settings.current_provider_opencode = id_owned.clone(),

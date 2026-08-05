@@ -535,6 +535,8 @@ impl SkillService {
                 }
             }
             AppType::ClaudeDesktop => {}
+            // 生图栏没有 skills 目录：它不是一个能读 SKILL.md 的 CLI。
+            AppType::CodexImage => {}
             AppType::Codex => {
                 if let Some(custom) = crate::settings::get_codex_override_dir() {
                     return Ok(custom.join("skills"));
@@ -575,7 +577,9 @@ impl SkillService {
         Ok(match app {
             AppType::Claude => home.join(".claude").join("skills"),
             AppType::ClaudeDesktop => home.join(".claude-desktop").join("skills"),
-            AppType::Codex => home.join(".codex").join("skills"),
+            // 与 codex 同一个目录：那一栏没有自己的 CLI，真要落 skill 也只能落在 codex 下。
+            // 实际走不到这里 —— SkillApps 不含它（`is_enabled_for` 返回 false）。
+            AppType::Codex | AppType::CodexImage => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::GrokBuild => home.join(".grok").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),

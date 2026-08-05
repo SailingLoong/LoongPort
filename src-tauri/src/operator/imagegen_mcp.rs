@@ -127,20 +127,6 @@ fn app_dir() -> PathBuf {
         .unwrap_or_else(crate::config::get_app_config_dir)
 }
 
-/// 「当前生图档位」在 `settings` 表里的键。
-///
-/// ## 为什么 MCP 配置里不直接写档位 id
-///
-/// 那样每次换生图档位都会改到 CLI 的配置文件，而 **codex 只在启动时读它** ⇒ 用户切完
-/// 必须新开一个终端才生效，否则「我明明换了高清档，出的还是 1K」。
-///
-/// 存成库里的一个标记之后：切档位只动这一行、CLI 配置文件不变 ⇒ **下一次生图调用
-/// 自然就用新的了，不用重启任何东西**。sk 轮换同理（本来就是启动时现读）。
-///
-/// ⚠️ 这个键名跨进程共享（主程序写、MCP 进程读），所以它是**唯一定义在这里**，
-/// 由 `commands::operator` 引用 —— 两处各写一遍字面量迟早分叉，而症状是「切了没反应」。
-pub const CURRENT_IMAGE_TIER_KEY: &str = "loongport_current_image_tier";
-
 /// 从 LoongPort 库里读出某个档位的 sk / base_url / model。
 ///
 /// ## 为什么直接读 sqlite 而不复用 `ProviderService`
@@ -164,23 +150,95 @@ fn load_current_tier() -> Result<Tier, String> {
     load_tier(&provider_id)
 }
 
-/// 从 `settings` 表读出用户选定的生图档位 id。
+/// 「没选生图档位」时给用户的话。定义一次，两个调用点共用。
+const NO_IMAGE_TIER_HINT: &str =
+    "还没有选定用哪个档位生图。请打开 LoongPort 的「生图」标签页，在一个档位上点「切换」。";
+
+/// 当前该用哪个档位生图 = `codex-image` 栏的当前项。
+///
+/// ## 为什么与聊天档位共用同一套机制
+///
+/// 「哪个档位生图」和「哪个档位聊天」是**同一类事实**（当前项），只是分属两栏。
+/// 上一版为它另存了一个 `settings` 表的键（`loongport_current_image_tier`），那等于
+/// 同一个概念有两套实现 —— 而分栏之后 `providers.is_current` 天然就是每栏一份，
+/// 那个键成了纯粹的重复。已删除，不留兼容读取：它只在测试期存在过。
+///
+/// ## 两层来源，与主程序 `get_effective_current_provider` 严格对齐
+///
+/// | 层 | 位置 | 优先级 |
+/// |---|---|---|
+/// | 设备级 | `~/.loongport/settings.json` 的 `currentProviderCodexImage` | 高 |
+/// | 库 | `providers.is_current`（`app_type='codex-image'`） | 低（fallback） |
+///
+/// ⚠️ **两层都要读**：主程序 `switch` 时两处都写（`settings::set_current_provider` 与
+/// `db.set_current_provider`），所以只读 DB 那层在多数情况下也对。但设备级那层的存在
+/// 意义正是「这台机器上用哪个」—— 云同步把另一台机器的 `is_current` 带过来时，本机
+/// settings 才是对的。只读 DB 会让生图用错档位，而用户看界面（它读的是同一套两层逻辑）
+/// 会觉得没问题。
+///
+/// ⚠️ **每次生图都重新调它**，不缓存 —— 那正是「切生图档位不用重启 codex」的实现：
+/// 用户在 LoongPort 里换了档位，下一次工具调用就读到新的。缓存一次就把这个好处抵消了。
+///
+/// 一个都没有时返回 `Err`，文案引导用户去选 —— **不自动挑一个**：用户可能压根不想生图
+/// （他那个站可能没有生图分组），替他选一个等于替他决定花钱。
 fn current_image_tier_id() -> Result<String, String> {
     let db_path: PathBuf = app_dir().join(crate::config::DB_FILE_NAME);
     let conn = open_readonly(&db_path)?;
+
+    // 第一层：设备级 settings.json。读不到 / 解析失败都只是「没有覆盖」，不是错误。
+    if let Some(id) = device_level_image_tier() {
+        // 与主程序同一条校验：本机记的那个档位得真的还在库里，否则回落到 DB
+        // （`get_effective_current_provider` 在那种情况下会清掉本机的记录）。
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM providers WHERE id = ?1 AND app_type = ?2",
+                rusqlite::params![&id, IMAGE_APP_TYPE],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if exists > 0 {
+            return Ok(id);
+        }
+    }
+
+    // 第二层：库里的 is_current。
     let value: Option<String> = conn
         .query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            [CURRENT_IMAGE_TIER_KEY],
+            "SELECT id FROM providers WHERE app_type = ?1 AND is_current = 1",
+            [IMAGE_APP_TYPE],
             |row| row.get(0),
         )
         .optional()
         .map_err(|e| format!("读取当前生图档位失败: {e}"))?;
 
-    value.filter(|v| !v.is_empty()).ok_or_else(|| {
-        "还没有选定用哪个档位生图。请在 LoongPort 的运营商列表里，在一个「生图」档位上点「启用生图」。"
-            .to_string()
-    })
+    value
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| NO_IMAGE_TIER_HINT.to_string())
+}
+
+/// 生图栏的 `app_type` 字符串。**从枚举取，不写字面量** —— 那个值同时用在
+/// 三条 SQL 与写入侧，各写一遍迟早分叉，而症状是「切了没反应」。
+const IMAGE_APP_TYPE: &str = crate::app_config::AppType::CODEX_IMAGE_STR;
+
+/// 读设备级 settings.json 里记的生图档位。
+///
+/// ## 为什么不复用 `crate::settings::get_current_provider`
+///
+/// 那一层走一个进程内的 `OnceLock` 缓存（`settings_store()`），而它是在**主程序**
+/// 启动时填的。这个进程没有那段启动流程 ⇒ 拿到的是 `Default`（全 `None`）⇒
+/// 恒返回 `None`，而那是个静默的错误答案：生图会一直用 DB 那层，云同步场景下用错档位。
+///
+/// 所以直接读文件。路径与 `AppSettings::settings_path()` 必须一致 ——
+/// 已加闸 `the_settings_path_matches_the_main_programs`。
+fn device_level_image_tier() -> Option<String> {
+    let path = crate::config::get_home_dir()
+        .join(crate::config::APP_DIR_NAME)
+        .join("settings.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // 键名由 `AppSettings` 的 `#[serde(rename_all = "camelCase")]` 决定。
+    let id = json.get("currentProviderCodexImage")?.as_str()?.trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// 只读打开数据库。
@@ -214,13 +272,13 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
     // 「配置里读不出密钥，请点获取密钥重新生成」—— 而**那条建议永远修不好它**
     // （重新 provision 只会再造出同样的多行），且成败取决于返回顺序、无法复现。
     //
-    // 取 codex 是因为**写入侧就是按 codex 找的**
-    // （`commands::operator::install_imagegen_mcp_impl` 用 `AppType::Codex` 查 provider）。
-    // 两侧必须是同一个答案，否则装得上、跑不起来。
+    // 取 `codex-image` 是因为**生图档位就存在那一栏**（provision 按
+    // `provision::image_tier_app_type` 分流）。取 codex 会查不到，症状是
+    // 「档位已经不在了」而它明明在界面上。
     let (name, settings_raw): (String, String) = conn
         .query_row(
             "SELECT name, settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
-            rusqlite::params![provider_id, crate::app_config::AppType::Codex.as_str()],
+            rusqlite::params![provider_id, IMAGE_APP_TYPE],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| match e {
@@ -228,7 +286,7 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
             // 主程序那侧读 `operator_current_image_tier` 时会校验并自动清掉这个死标记，
             // 所以这里只要把话说清楚：让用户去重选，而不是去「获取密钥」。
             rusqlite::Error::QueryReturnedNoRows => format!(
-                "生图档位 {provider_id} 已经不在了（可能被删除，或运营商下架了那个分组）。请在 LoongPort 的运营商列表里，在一个「生图」档位上点「启用生图」。"
+                "生图档位 {provider_id} 已经不在了（可能被删除，或运营商下架了那个分组）。请打开 LoongPort 的「生图」标签页，在一个档位上点「切换」。"
             ),
             other => format!("读取档位失败: {other}"),
         })?;
@@ -712,6 +770,38 @@ mod tests {
 
     /// `model` 的前缀与 `model_provider` / `model_reasoning_effort` 撞车 ——
     /// 抠错了会把 `"custom"` 当成模型名发出去（服务端 404，而错误信息里看不出原因）。
+    /// ⭐ **settings.json 的路径必须与主程序一致。**
+    ///
+    /// 这个进程读设备级「当前生图档位」是**自己拼路径读文件**（不能复用
+    /// `crate::settings`，见 [`device_level_image_tier`] 的文档）。路径一分叉，
+    /// 读到的永远是「没有覆盖」⇒ 静默回落到 DB 那层 ⇒ 云同步场景下生图用错档位，
+    /// 而界面显示的是对的（它走两层逻辑），没有任何东西会报错。
+    #[test]
+    fn the_settings_path_matches_the_main_programs() {
+        let settings_rs = include_str!("../settings.rs");
+        // 主程序那份是三段拼接：home / APP_DIR_NAME / "settings.json"。
+        assert!(
+            settings_rs.contains("crate::config::APP_DIR_NAME")
+                && settings_rs.contains("\"settings.json\""),
+            "主程序的 settings.json 路径拼法变了 —— 生图 MCP 那份手抄的跟着改，\
+             否则设备级「当前生图档位」永远读不到"
+        );
+    }
+
+    /// ⭐ **那个 JSON 键名必须与 `AppSettings` 的字段对得上。**
+    ///
+    /// 键名由 `#[serde(rename_all = "camelCase")]` 从字段名派生，所以这里是一份手抄。
+    /// 抄错的后果同上：静默读不到。
+    #[test]
+    fn the_device_level_key_matches_the_settings_field() {
+        let settings_rs = include_str!("../settings.rs");
+        assert!(
+            settings_rs.contains("pub current_provider_codex_image: Option<String>"),
+            "`AppSettings::current_provider_codex_image` 改名了 —— \
+             `device_level_image_tier` 里那个 camelCase 键名跟着改"
+        );
+    }
+
     #[test]
     fn extract_toml_string_matches_the_whole_key_not_a_prefix() {
         let toml = r#"
