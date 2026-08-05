@@ -204,7 +204,18 @@ fn current_image_tier_id() -> Result<String, String> {
     // 第二层：库里的 is_current。
     let value: Option<String> = conn
         .query_row(
-            "SELECT id FROM providers WHERE app_type = ?1 AND is_current = 1",
+            // ⚠️ **`ORDER BY id LIMIT 1`** —— 不省。
+            //
+            // 正常情况下这一栏只有一行 `is_current = 1`（`set_current_provider` 会先清
+            // 其余的）。但「正常情况」是个不变量，不是保证：迁移、云同步导入、外部改库
+            // 都可能留下两行，而 review 的探针实测抓到过一次（迁移换栏时带过去了 codex
+            // 栏的 is_current）。那时裸 `query_row` 拿的是 SQLite 的返回顺序 ⇒
+            // **用户选 4K 档、出的是 1K 的图，且换台机器结果不同、无法复现**。
+            //
+            // 排序不能修正「选错了哪一个」，但能让它**确定** —— 一个稳定的错比一个
+            // 随机的错好查一个量级。真正的修正在迁移那侧（清零 is_current）。
+            "SELECT id FROM providers WHERE app_type = ?1 AND is_current = 1 \
+             ORDER BY id LIMIT 1",
             [IMAGE_APP_TYPE],
             |row| row.get(0),
         )

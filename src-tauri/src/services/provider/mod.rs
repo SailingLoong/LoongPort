@@ -3144,16 +3144,11 @@ impl ProviderService {
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
         //
-        // ⚠️ **生图栏跳过这一步** —— 它没有 live 配置（生图靠 LoongPort 自带的 MCP 工具，
-        // 那个工具自己去库里读这一栏的 is_current）。不跳过的话
-        // `write_live_snapshot` 会返回它那条明确的错误 ⇒ 切换报错，而 `is_current`
-        // 已经写进去了 ⇒ 用户看到「切换失败」但列表里高亮已经变了。
-        //
-        // 这也是「换生图档位不用重启 CLI」的实现：CLI 的配置文件一个字都不动，
-        // 只有库里那一行 is_current 变了，而 MCP 工具每次生图都重新读它。
-        if !matches!(app_type, AppType::CodexImage) {
-            write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
-        }
+        // 生图栏在 `write_live_with_common_config` 里就返回了（见那边的说明）——
+        // 所以这里**不必**再判一次。那也是「换生图档位不用重启 CLI」的实现：
+        // CLI 的配置文件一个字都不动，只有库里那一行 is_current 变了，
+        // 而生图 MCP 每次生图都重新读它。
+        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
 
         // A material-less official Codex provider gets a config-only live
         // write, which can leave the previous third-party key in

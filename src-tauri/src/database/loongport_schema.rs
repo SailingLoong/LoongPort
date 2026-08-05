@@ -251,7 +251,20 @@ fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppErro
         let sql = if exists_in_new > 0 {
             "DELETE FROM providers WHERE id = ?1 AND app_type = 'codex'"
         } else {
-            "UPDATE providers SET app_type = 'codex-image' WHERE id = ?1 AND app_type = 'codex'"
+            // ⚠️ **`is_current` 必须清零**（review 的探针抓出）。
+            //
+            // 生图档位在 codex 栏本来可能就是当前项 —— 那正是本轮要治的场景
+            // （用户点错「启用」把聊天切成了生图档位）。原样带过去的话，生图栏会有
+            // **两个** `is_current = 1`：一个来自 codex 栏的旧状态，一个由
+            // `inherit_the_old_current_image_tier` 按旧 settings 键设的。
+            //
+            // 而生图 MCP 那侧是 `SELECT id … WHERE is_current = 1` 取第一行 ⇒ 拿到哪个
+            // 取决于 SQLite 的返回顺序 ⇒ **用户选的是 4K 档、出的可能是 1K 的图**，
+            // 且换台机器结果可能不同。实测探针：旧键指向 B，实际拿到 A。
+            //
+            // 清零之后「当前生图档位」只由 `inherit_the_old_current_image_tier` 一处决定。
+            "UPDATE providers SET app_type = 'codex-image', is_current = 0 \
+             WHERE id = ?1 AND app_type = 'codex'"
         };
         conn.execute(sql, [&id])
             .map_err(|e| AppError::Database(format!("把档位 {id} 搬到生图栏失败: {e}")))?;
@@ -581,6 +594,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0, "旧键指向的档位已不存在，不该随便挑一条设成当前项");
+    }
+
+    /// ⭐ **生图栏里只能有一个当前项。**
+    ///
+    /// ## 这条闸守的是 review 探针抓出的一个不可复现的 bug
+    ///
+    /// 生图档位在 codex 栏本来可能就是 `is_current`（用户点错「启用」的结果 ——
+    /// 那正是本轮要治的场景）。换栏时若原样带过去，生图栏就有**两个** `is_current = 1`：
+    /// 一个是 codex 栏的旧状态，一个是 `inherit_the_old_current_image_tier` 按旧
+    /// settings 键设的。
+    ///
+    /// 而生图 MCP 那侧是 `SELECT id … WHERE is_current = 1` 取第一行 ⇒ 拿到哪个取决于
+    /// SQLite 的返回顺序 ⇒ **用户选的是 4K 档，出的可能是 1K 的图**，而且换台机器
+    /// 结果可能不同。实测：旧键指向 B，而未修时实际拿到 A。
+    #[test]
+    fn the_image_column_ends_up_with_exactly_one_current() {
+        let conn = mem();
+        providers_table(&conn);
+        let a = "loongport-aaaa1111aaaa1111";
+        let b = "loongport-bbbb2222bbbb2222";
+        insert_codex_tier(&conn, a, "A生图", "gpt-image-2");
+        insert_codex_tier(&conn, b, "B生图", "gpt-image-2");
+        // A 在 codex 栏是当前项（用户点错「启用」留下的状态）。
+        conn.execute("UPDATE providers SET is_current = 1 WHERE id = ?1", [a])
+            .unwrap();
+        // 而上一版那个 settings 键指向 B —— B 才是用户真正选来生图的那个。
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('loongport_current_image_tier', ?1)",
+            [b],
+        )
+        .unwrap();
+
+        apply(&conn).expect("迁移");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM providers WHERE app_type = 'codex-image' AND is_current = 1 \
+                 ORDER BY id",
+            )
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![b.to_string()],
+            "生图栏该只有一个当前项、且必须是用户真正选的那个（旧 settings 键指向的）"
+        );
     }
 
     #[test]

@@ -704,6 +704,30 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    // ⚠️ **生图栏在这里就返回** —— 它没有 live 配置（生图靠 LoongPort 自带的 MCP 工具，
+    // 那个工具自己去库里读这一栏的 is_current）。
+    //
+    // ## 为什么拦在这一层，而不是在调用方各判一次
+    //
+    // 本函数是**全部写 live 路径的唯一收口**（11 个调用点：switch、save、update、
+    // 代理接管的三条、`sync_current_provider_for_app_to_live` …）。逐个加判断的话，
+    // 漏一个就是一条真实的失败路径 —— 实测漏掉的正是「用户编辑一个当前生图档位并保存」：
+    // `ProviderService::update` 判出 `is_current` 为真 ⇒ 写 live ⇒
+    // `write_live_snapshot` 对生图栏返回 Err ⇒ **保存报错，而 DB 里已经存好了**。
+    //
+    // ## 为什么是静默跳过而不是报错
+    //
+    // 调用方的语义是「让落地配置追上 DB」，而生图栏**根本没有落地配置** ⇒
+    // 「什么都不做」就是正确结果，不是失败。`write_live_snapshot` 里那条 Err 仍然留着，
+    // 它守的是另一件事：有人绕过本函数直接调它（那是真的该报错，见那边的说明）。
+    if matches!(app_type, AppType::CodexImage) {
+        log::debug!(
+            "生图档位 '{}' 不写 live 配置（它靠生图 MCP 现读库）",
+            provider.id
+        );
+        return Ok(());
+    }
+
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
@@ -1632,6 +1656,13 @@ pub fn should_import_default_config_on_startup(
         return Ok(false);
     }
 
+    // 生图栏没有 live 文件可导（`import_default_config` 也会拦，这里提前答「不用」
+    // 只是让启动日志说得准 —— 否则它会记一行「○ codex-image already has providers;
+    // live import skipped」，而真实原因是「这一栏压根没有 live 配置」）。
+    if matches!(app_type, AppType::CodexImage) {
+        return Ok(false);
+    }
+
     Ok(!state.db.has_any_provider_for_app(app_type.as_str())?)
 }
 
@@ -2083,6 +2114,60 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// ⭐ **写 live 对生图栏是个空操作，不是错误。**
+    ///
+    /// ## 这条闸守的是一条实测漏掉的路径
+    ///
+    /// 生图栏没有 live 配置，所以 `write_live_snapshot` 对它返回 `Err`（那是对的：
+    /// 真写下去会用生图档位的配置覆盖用户正在用的 `~/.codex/config.toml`）。
+    /// 但**写 live 有 11 个调用点**，逐个加「跳过生图栏」的判断必然漏。
+    ///
+    /// 漏掉的那条：用户在生图页点「编辑配置」改点东西再保存 ⇒
+    /// `ProviderService::update` 判出 `is_current` 为真 ⇒ 写 live ⇒ 报错，
+    /// **而 DB 里已经存好了** ⇒ 界面提示「保存失败」但改动其实生效了，
+    /// 用户再点一次还是报错。
+    ///
+    /// 所以判断收在 `write_live_with_common_config`（唯一收口）。这条闸钉住它。
+    #[test]
+    fn writing_live_for_an_image_tier_is_a_no_op() {
+        let db = Database::memory().expect("create memory db");
+        let provider = Provider::with_id(
+            "loongport-aaaaaaaaaaaaaaaa".to_string(),
+            "生图档".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model = \"gpt-image-2\"\n",
+            }),
+            None,
+        );
+
+        // 必须 Ok —— 报错会让「编辑并保存一个当前生图档位」失败。
+        write_live_with_common_config(&db, &AppType::CodexImage, &provider)
+            .expect("写 live 对生图栏该是空操作，不该报错");
+    }
+
+    /// 而 `write_live_snapshot` 本身仍然必须拒绝生图栏。
+    ///
+    /// 它是上一条那个空操作的**兜底**：万一有人绕过 `write_live_with_common_config`
+    /// 直接调它（新增一条路径时很容易这么写），必须当场炸掉而不是静默把生图档位的
+    /// 配置写进 `~/.codex/config.toml` —— 那会把用户的聊天档位换成一个只能生图的模型。
+    #[test]
+    fn writing_a_live_snapshot_for_an_image_tier_is_refused() {
+        let provider = Provider::with_id(
+            "loongport-aaaaaaaaaaaaaaaa".to_string(),
+            "生图档".to_string(),
+            json!({ "config": "model = \"gpt-image-2\"\n" }),
+            None,
+        );
+        let err = write_live_snapshot(&AppType::CodexImage, &provider)
+            .expect_err("直接写 live 快照必须被拒绝");
+        // 只断言「报了错」而不是错误文案 —— 文案会随 i18n 变，判据是「拒绝了」。
+        assert!(
+            format!("{err}").contains("生图"),
+            "错误信息该说清是生图档位的缘故，实际：{err}"
+        );
+    }
 
     #[test]
     fn kimi_for_coding_effective_settings_backfill_256k_context() {
