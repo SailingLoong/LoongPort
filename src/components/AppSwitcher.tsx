@@ -3,13 +3,17 @@ import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { LAST_APP_STORAGE_KEY } from "@/config/constants";
 import { cn } from "@/lib/utils";
-import { Monitor, Terminal } from "lucide-react";
+import { Image as ImageIcon, Monitor, Terminal } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 const APP_BADGE_ICON: Partial<
   Record<AppId, { icon: typeof Terminal; offsetY?: number }>
 > = {
   claude: { icon: Terminal },
   "claude-desktop": { icon: Monitor, offsetY: 0.5 },
+  // 与 claude-desktop 同一个手法：同品牌图标 + 一个角标说明「这是那个 CLI 的另一面」。
+  // 角标是图片而不是文字，因为它要在 20px 的图标上认得出来。
+  "codex-image": { icon: ImageIcon, offsetY: 0.5 },
 };
 
 interface AppSwitcherProps {
@@ -22,6 +26,7 @@ const ALL_APPS: AppId[] = [
   "claude",
   "claude-desktop",
   "codex",
+  "codex-image",
   "gemini",
   "grokbuild",
   "opencode",
@@ -34,6 +39,7 @@ export function AppSwitcher({
   onSwitch,
   visibleApps,
 }: AppSwitcherProps) {
+  const { t } = useTranslation();
   const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
     // key 从 `@/config/constants` 来，别在这里重新写一份字面量 ——
@@ -46,6 +52,7 @@ export function AppSwitcher({
     claude: "claude",
     "claude-desktop": "claude",
     codex: "openai",
+    "codex-image": "openai",
     gemini: "gemini",
     grokbuild: "grok",
     opencode: "opencode",
@@ -56,6 +63,9 @@ export function AppSwitcher({
     claude: "Claude Code",
     "claude-desktop": "Claude Desktop",
     codex: "Codex",
+    // ⚠️ **只有这一个走 i18n** —— 其余都是产品名（不翻译），而「生图」是一个
+    // 功能描述，四语各有说法。硬编码中文会让英文界面上冒出两个汉字。
+    "codex-image": t("apps.codex-image"),
     gemini: "Gemini",
     grokbuild: "Grok Build",
     opencode: "OpenCode",

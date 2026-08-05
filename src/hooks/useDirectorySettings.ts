@@ -5,7 +5,14 @@ import { homeDir, join } from "@tauri-apps/api/path";
 import { settingsApi, type AppId } from "@/lib/api";
 import type { SettingsFormState } from "./useSettingsForm";
 
-export type DirectoryAppId = Exclude<AppId, "claude-desktop">;
+/**
+ * 有「配置目录」这个概念的 app。
+ *
+ * 排除两个：`claude-desktop`（它的配置由 claude_desktop_config 管），
+ * `codex-image`（生图栏与 codex 共用 `~/.codex`，没有自己的目录 ——
+ * 给它一个可改的目录设置只会让用户以为那是两个独立的地方）。
+ */
+export type DirectoryAppId = Exclude<AppId, "claude-desktop" | "codex-image">;
 type AppDirectoryKey =
   | "claude"
   | "codex"

@@ -25,6 +25,7 @@ import { useTauriEvent } from "@/hooks/useTauriEvent";
 
 import { AddSiteDialog } from "./AddSiteDialog";
 import { openInBrowser } from "./openInBrowser";
+import { ImageTabNotice } from "./ImageTabNotice";
 import { OperatorTierList } from "./OperatorTierList";
 import { balanceRowsKey, parseBalanceRowsKey } from "./balanceRowsKey";
 import { sumTiersForApp } from "./provisionScope";
@@ -94,6 +95,17 @@ export interface OperatorSectionProps {
 let autoPromptedThisProcess = false;
 
 export function OperatorSection({ appId }: OperatorSectionProps) {
+  /**
+   * 当前这一屏是不是生图页。
+   *
+   * 生图页与其它页的差异只有两点（都在 UI 层）：顶部多一段说明、空态不引导「添加站点」。
+   * 数据链路完全一样 —— 档位、切换、连通检测、恢复默认全部走同一套命令，只是
+   * `appId` 是 `"codex-image"`（后端据它查 `providers` 表那一栏）。
+   *
+   * 这正是分栏这个做法的好处：**没有一条平行实现**。上一版为生图另做了一套按钮 +
+   * 一对命令 + 一个 settings 键，那些现在全删了。
+   */
+  const isImageTab = appId === "codex-image";
   const [operators, setOperators] = useState<OperatorRowData[]>([]);
   /**
    * 待确认的切换：**显示名 + 真正执行它的函数**，`null` = 不弹。
@@ -166,13 +178,6 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   const { busy, run } = useRowBusy();
   // 待确认「恢复默认配置」的档位。存整个 tier：确认框里要显示它的名字。
   const [confirmReset, setConfirmReset] = useState<TierInfo | null>(null);
-  /**
-   * 当前用哪个档位生图。`null` = 用户还没选（那时 CLI 里没有生图工具）。
-   *
-   * **与「当前对话档位」是两个独立的当前项** —— 生图与对话走不同的端点、各用各的
-   * 密钥，互不影响。
-   */
-  const [currentImageTier, setCurrentImageTier] = useState<string | null>(null);
   // 待确认删除的运营商行。存整行：确认框里要显示它的名字与档位数。
   const [confirmRemove, setConfirmRemove] = useState<OperatorRowData | null>(
     null,
@@ -228,17 +233,6 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
             })
             .catch(() => {});
         }
-
-        // 当前生图档位同样异步补 —— 只读本地库（一个 settings 键），但没必要让首屏
-        // 等它。失败不提示：拿不到就是所有生图档位显示成「启用生图」，
-        // 用户点了会走同一条设置路径，不会坏事。
-        operatorApi
-          .currentImageTier()
-          .then((id) => {
-            if (isStale()) return;
-            setCurrentImageTier(id);
-          })
-          .catch(() => {});
       } catch (e) {
         toast.error(String(e));
       }
@@ -937,52 +931,6 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
     });
   };
 
-  /**
-   * 把生图切到某个档位，或停用生图（点当前那个）。
-   *
-   * ## 为什么第一次启用要提示「新开终端」，之后换档位不用
-   *
-   * 第一次启用会往 CLI 的配置里**新增**一条 MCP 记录，而 codex 只在启动时读它 ⇒
-   * 已经在跑的会话看不到这个工具。而**换档位只改库里一个标记**、CLI 配置文件不动 ⇒
-   * 生图工具在每次调用时现读那个标记，立即生效。
-   *
-   * 所以提示只在「从没有到有」那一次给 —— 每次换档位都提醒重启是错的（不需要），
-   * 而第一次不提醒也是错的（用户会以为没生效）。
-   *
-   * ## 为什么停用不用二次确认
-   *
-   * 它不丢任何东西：生成的图片留在磁盘上，再点一次就回来了。为一个可逆且无损的
-   * 操作加确认是噪音（对比「恢复默认配置」——那个会覆盖用户的手工编辑，所以有确认）。
-   */
-  const handleUseForImages = (tier: TierInfo, isCurrent: boolean) =>
-    run(`imagegen:${tier.providerId}`, async () => {
-      const wasUnset = currentImageTier === null;
-      try {
-        if (isCurrent) {
-          await operatorApi.setImageTier(null);
-          // ⚠️ **乐观更新，不回查**（review 抓出的竞态）：`reload()` 里那次
-          // `currentImageTier()` 带 `isStale` 守卫，而这里若也发一次查询，
-          // 一个**更早**开始的 reload 后返回就会用旧值覆盖掉刚设好的新值 ——
-          // 界面上表现为「点了没反应」。而命令成功就意味着结果已确定，
-          // 回查一次只是多一个可能被乱序覆盖的写入点。
-          setCurrentImageTier(null);
-          toast.success(t("loongport.tier.imageDisabled"));
-        } else {
-          await operatorApi.setImageTier(tier.providerId);
-          setCurrentImageTier(tier.providerId);
-          toast.success(
-            wasUnset
-              ? t("loongport.tier.imageEnabledFirstTime", {
-                  name: tier.displayName,
-                })
-              : t("loongport.tier.imageSwitched", { name: tier.displayName }),
-          );
-        }
-      } catch (e) {
-        toast.error(String(e));
-      }
-    });
-
   /** 删掉一行运营商（连带档位）。有档位在用的行按钮不可点，走不到这里。 */
   const doRemoveOperator = (row: OperatorRowData) =>
     run(`removeOperator:${row.id}`, async () => {
@@ -1106,6 +1054,13 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   // ⚠️ 判据是**两类都空**：只有官网账号、没加过中转站的用户（vendor-only）
   // 也得看到自己那些行 —— 只判 operators 会把它们整个藏起来。
   if (operators.length === 0 && vendors.length === 0) {
+    // 生图页的空态**不引导「添加站点」** —— 生图档位不是单独添加的，它由现有站点里
+    // 「只挂 gpt-image 模型的分组」自动产生（`provision::image_tier_app_type`）。
+    // 在这里摆一个「添加中转站」按钮会让用户以为要再加一个站，而正确的动作是
+    // 去 codex 页点「获取密钥」，或者根本不做（他那个站可能没有生图分组）。
+    if (isImageTab) {
+      return <ImageTabNotice empty />;
+    }
     return (
       <>
         <div className="space-y-2">
@@ -1137,6 +1092,9 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
 
   return (
     <>
+      {/* 生图页顶部的说明。**只在这一页出现** —— 见 `ImageTabNotice` 的文档：
+          它是唯一一个不能独立使用的标签，那件事必须写出来。 */}
+      {isImageTab && <ImageTabNotice empty={false} />}
       <OperatorTierList
         operators={operators}
         busy={busy}
@@ -1158,8 +1116,6 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
         isCheckingTier={isChecking}
         onResetTier={(tier) => setConfirmReset(tier)}
         onEditTier={requestEdit}
-        onUseForImages={handleUseForImages}
-        currentImageTier={currentImageTier}
         onRemoveOperator={(operatorId) => {
           // ⚠️ **这处 `find` 保持 number 不动**：`operatorId` 从 `OperatorRow` 的
           // `onDelete` 一路传回来，只在 operator 这一类里流转。官网行走的是

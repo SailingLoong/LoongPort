@@ -279,6 +279,8 @@ export interface VisibleApps {
   claude: boolean;
   "claude-desktop": boolean;
   codex: boolean;
+  /** 生图标签（默认可见，与 codex 同步）。后端 `VisibleApps::codex_image`。 */
+  "codex-image": boolean;
   gemini: boolean;
   grokbuild: boolean;
   opencode: boolean;
@@ -505,6 +507,11 @@ export interface McpApps {
   claude: boolean;
   "claude-desktop"?: boolean;
   codex: boolean;
+  /**
+   * 生图栏**不是一个装 MCP 的 CLI** —— 生图工具装进 codex/claude/gemini。
+   * 后端 `McpApps` 没有这个字段，所以标可选（读到 `undefined` = 没装，正确）。
+   */
+  "codex-image"?: boolean;
   gemini: boolean;
   grokbuild?: boolean;
   opencode: boolean;

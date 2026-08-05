@@ -415,6 +415,55 @@ mod managed_guard_tests {
         }
     }
 
+    /// ⭐ **编辑一个「当前」生图档位并保存必须成功。**
+    ///
+    /// ## 这条闸守的是实测漏掉的一条路径
+    ///
+    /// 生图栏没有 live 配置，所以 `write_live_snapshot` 对它返回 `Err`。而
+    /// `ProviderService::update` 在「这条正是当前项」时会去写 live ⇒ 保存报错，
+    /// **可 DB 里已经存好了** ⇒ 界面提示「保存失败」而改动其实生效了，用户再点
+    /// 一次还是报错，永远得不到成功的反馈。
+    ///
+    /// 判断收在 `write_live_with_common_config`（全部写 live 路径的唯一收口）。
+    /// 这条闸从命令层验它真的通了 —— `update_provider_allows_editing_a_managed_tier_in_place`
+    /// 抓不到：它对 `Err` 只断言「文案不含 LoongPort」，而这个失败的文案是
+    /// 「生图档位不写入任何 CLI 配置…」。
+    #[test]
+    fn editing_the_current_image_tier_saves_without_error() {
+        let id = managed_id();
+        let state = empty_state();
+        let existing = Provider::with_id(
+            id.clone(),
+            "生图档".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-orig" },
+                "config": "model = \"gpt-image-2\"\n",
+            }),
+            None,
+        );
+        state
+            .db
+            .save_provider(AppType::CodexImage.as_str(), &existing)
+            .expect("预置生图档位");
+        // **设成当前项** —— 那正是触发写 live 的条件。
+        state
+            .db
+            .set_current_provider(AppType::CodexImage.as_str(), &id)
+            .expect("设当前项");
+
+        let edited = Provider::with_id(
+            id.clone(),
+            "我改的名字".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-orig" },
+                "config": "model = \"gpt-image-2\"\nmodel_reasoning_effort = \"low\"\n",
+            }),
+            None,
+        );
+        update_provider_internal(&state, AppType::CodexImage, Some(id.as_str()), edited)
+            .expect("编辑当前生图档位必须能保存 —— 它没有 live 配置，写 live 该是空操作");
+    }
+
     /// ⭐ **review 抓出的绕过**：`originalId` 省略 + 自选一个托管 id ⇒ 凭空造出托管项。
     ///
     /// 初版判据是「id 变了没有」（`original_id.is_some_and(|old| old != provider.id)`），

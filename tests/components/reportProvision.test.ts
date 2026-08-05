@@ -46,7 +46,6 @@ function tier(appId: TierInfo["appId"], n: number): TierInfo {
     rateMultiplier: null,
     isCurrent: false,
     userEdited: null,
-    isImageModel: false,
     allowImageGeneration: null,
   };
 }

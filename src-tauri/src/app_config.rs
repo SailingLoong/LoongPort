@@ -33,6 +33,8 @@ impl McpApps {
             AppType::OpenClaw => false, // OpenClaw doesn't support MCP
             AppType::Hermes => self.hermes,
             AppType::ClaudeDesktop => false,
+            // 生图栏不是一个装 MCP 的 CLI（生图工具装进 codex/claude/gemini）。
+            AppType::CodexImage => false,
         }
     }
 
@@ -47,6 +49,7 @@ impl McpApps {
             AppType::OpenClaw => {} // OpenClaw doesn't support MCP, ignore
             AppType::Hermes => self.hermes = enabled,
             AppType::ClaudeDesktop => {} // Claude Desktop 3P provider config doesn't support MCP here
+            AppType::CodexImage => {}    // 生图栏不装 MCP
         }
     }
 
@@ -114,6 +117,8 @@ impl SkillApps {
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => false, // OpenClaw doesn't support Skills
             AppType::ClaudeDesktop => false,
+            // 生图栏不是一个能读 SKILL.md 的 CLI。
+            AppType::CodexImage => false,
         }
     }
 
@@ -128,6 +133,7 @@ impl SkillApps {
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => {} // OpenClaw doesn't support Skills, ignore
             AppType::ClaudeDesktop => {} // Claude Desktop 3P profiles don't use CC Switch skill sync
+            AppType::CodexImage => {}    // 生图栏不装 Skill
         }
     }
 
@@ -376,6 +382,32 @@ pub enum AppType {
     )]
     ClaudeDesktop,
     Codex,
+    /// codex 的**生图**档位（`gpt-image-*`），单独一栏。
+    ///
+    /// ## 为什么是一个 AppType 而不是 codex 栏里的一个标记
+    ///
+    /// 生图档位和聊天档位是**两个各自独立的当前项**：用户可以一边用 DeepSeek 聊天、
+    /// 一边用鑫旺的 4K 分组生图。而「当前是哪一档」由 `providers` 表的 `is_current`
+    /// 表达，**那是每个 app_type 一栏**（`set_current_provider` 按 app_type 写）。
+    /// 挤在 codex 那一栏里的后果实测过两条：
+    ///
+    /// 1. **切换互斥** —— 点了生图档位再点聊天档位，只有后者留得下 `is_current`。
+    /// 2. **回填串台** —— `switch` 切走时会把 live 的 `config.toml` 快照写回*上一个*
+    ///    current 档位（`ProviderService::switch` 的 backfill）。生图档位当过 current
+    ///    的话，live 里那一坨（`[mcp_servers]` / `notify` / `[projects.*]` /
+    ///    `experimental_bearer_token`）就被拌进它的存储配置 ⇒ 与默认基准比对不上 ⇒
+    ///    界面上显示「已手动维护」，而用户一个字没改过。
+    ///
+    /// 分栏之后两者天然隔离：`is_current` 各一份，backfill 各自只碰自己栏里的档位。
+    ///
+    /// ## 它**不写任何 live 配置**
+    ///
+    /// 与 [`AppType::ClaudeDesktop`] 同一类：一个「不能独立使用」的标签。生图靠
+    /// `LoongPort --mcp-image-gen` 那个 MCP 工具干活，它自己去库里读这一栏的
+    /// `is_current` 与其 sk。所以本类型在 live 写入 / MCP 同步 / skill / prompt /
+    /// 代理接管的每一处 match 里都走「不适用」分支 —— 那不是没实现，是设计如此。
+    #[serde(rename = "codex-image", alias = "codex_image", alias = "codexImage")]
+    CodexImage,
     Gemini,
     GrokBuild,
     OpenCode,
@@ -384,11 +416,19 @@ pub enum AppType {
 }
 
 impl AppType {
+    /// `AppType::CodexImage.as_str()` 的常量形式。
+    ///
+    /// `as_str` 拿不到 `const`（它 match `&self`），而生图 MCP 那边要在
+    /// `const` 上下文里用这个值。两处必须是同一个字符串 ——
+    /// 已加闸 `the_codex_image_const_matches_as_str`。
+    pub const CODEX_IMAGE_STR: &'static str = "codex-image";
+
     pub fn as_str(&self) -> &str {
         match self {
             AppType::Claude => "claude",
             AppType::ClaudeDesktop => "claude-desktop",
             AppType::Codex => "codex",
+            AppType::CodexImage => "codex-image",
             AppType::Gemini => "gemini",
             AppType::GrokBuild => "grokbuild",
             AppType::OpenCode => "opencode",
@@ -414,6 +454,7 @@ impl AppType {
             AppType::Claude,
             AppType::ClaudeDesktop,
             AppType::Codex,
+            AppType::CodexImage,
             AppType::Gemini,
             AppType::GrokBuild,
             AppType::OpenCode,
@@ -433,6 +474,7 @@ impl FromStr for AppType {
             "claude" => Ok(AppType::Claude),
             "claude-desktop" | "claude_desktop" | "claudedesktop" => Ok(AppType::ClaudeDesktop),
             "codex" => Ok(AppType::Codex),
+            "codex-image" | "codex_image" | "codeximage" => Ok(AppType::CodexImage),
             "gemini" => Ok(AppType::Gemini),
             "grokbuild" | "grok-build" | "grok_build" | "grok" => Ok(AppType::GrokBuild),
             "opencode" => Ok(AppType::OpenCode),
@@ -440,8 +482,8 @@ impl FromStr for AppType {
             "hermes" => Ok(AppType::Hermes),
             other => Err(AppError::localized(
                 "unsupported_app",
-                format!("不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, gemini, grokbuild, opencode, openclaw, hermes。"),
-                format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, gemini, grokbuild, opencode, openclaw, hermes."),
+                format!("不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, codex-image, gemini, grokbuild, opencode, openclaw, hermes。"),
+                format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, codex-image, gemini, grokbuild, opencode, openclaw, hermes."),
             )),
         }
     }
@@ -475,6 +517,8 @@ impl CommonConfigSnippets {
         match app {
             AppType::Claude => self.claude.as_ref(),
             AppType::ClaudeDesktop => None,
+            // 生图栏不写 live 配置，「通用配置」这套对它无意义。
+            AppType::CodexImage => None,
             AppType::Codex => self.codex.as_ref(),
             AppType::Gemini => self.gemini.as_ref(),
             AppType::GrokBuild => None,
@@ -489,6 +533,7 @@ impl CommonConfigSnippets {
         match app {
             AppType::Claude => self.claude = snippet,
             AppType::ClaudeDesktop => {}
+            AppType::CodexImage => {}
             AppType::Codex => self.codex = snippet,
             AppType::Gemini => self.gemini = snippet,
             AppType::GrokBuild => {}
@@ -696,7 +741,9 @@ impl MultiAppConfig {
         match app {
             AppType::Claude => &self.mcp.claude,
             AppType::ClaudeDesktop => &self.mcp.claude_desktop,
-            AppType::Codex => &self.mcp.codex,
+            // 借 codex 那份：本方法是上游 legacy JSON 配置时代的遗留（现在 MCP 走 DB），
+            // 全仓无调用方。给一个形状正确的值，不为它加第九个 McpConfig 字段。
+            AppType::Codex | AppType::CodexImage => &self.mcp.codex,
             AppType::Gemini => &self.mcp.gemini,
             AppType::GrokBuild => &self.mcp.grokbuild,
             AppType::OpenCode => &self.mcp.opencode,
@@ -710,7 +757,7 @@ impl MultiAppConfig {
         match app {
             AppType::Claude => &mut self.mcp.claude,
             AppType::ClaudeDesktop => &mut self.mcp.claude_desktop,
-            AppType::Codex => &mut self.mcp.codex,
+            AppType::Codex | AppType::CodexImage => &mut self.mcp.codex,
             AppType::Gemini => &mut self.mcp.gemini,
             AppType::GrokBuild => &mut self.mcp.grokbuild,
             AppType::OpenCode => &mut self.mcp.opencode,
@@ -840,7 +887,8 @@ impl MultiAppConfig {
         let prompts = match app {
             AppType::Claude => &mut config.prompts.claude.prompts,
             AppType::ClaudeDesktop => &mut config.prompts.claude_desktop.prompts,
-            AppType::Codex => &mut config.prompts.codex.prompts,
+            // 走不到：`prompt_file_path` 对生图栏直接报错，上面那个循环也不含它。
+            AppType::Codex | AppType::CodexImage => &mut config.prompts.codex.prompts,
             AppType::Gemini => &mut config.prompts.gemini.prompts,
             AppType::GrokBuild => &mut config.prompts.grokbuild.prompts,
             AppType::OpenCode => &mut config.prompts.opencode.prompts,
@@ -889,6 +937,7 @@ impl MultiAppConfig {
                 AppType::OpenCode => &self.mcp.opencode.servers,
                 AppType::OpenClaw => continue, // OpenClaw MCP is still in development, skip
                 AppType::Hermes => continue,   // Hermes didn't exist in v3.6.x, skip
+                AppType::CodexImage => continue, // 生图栏 v3.6.x 时不存在，且不装 MCP
             };
 
             for (id, entry) in old_servers {
@@ -1280,6 +1329,7 @@ mod app_type_all_tests {
             "claude",
             "claude-desktop",
             "codex",
+            "codex-image",
             "gemini",
             "grokbuild",
             "opencode",
@@ -1294,5 +1344,15 @@ mod app_type_all_tests {
             );
         }
         assert_eq!(all.len(), known.len(), "all() 的长度与已知 app 列表不一致");
+    }
+
+    /// [`AppType::CODEX_IMAGE_STR`] 必须等于 `CodexImage.as_str()`。
+    ///
+    /// 那个常量存在的唯一理由是「`as_str` 不能用在 const 上下文」，所以它是一份
+    /// **手抄**。抄错的后果是静默的：生图 MCP 拿着一个不存在的 app_type 去查库
+    /// ⇒ 永远查不到当前档位 ⇒ 用户看到「还没有选定用哪个档位生图」，而他明明选了。
+    #[test]
+    fn the_codex_image_const_matches_as_str() {
+        assert_eq!(AppType::CODEX_IMAGE_STR, AppType::CodexImage.as_str());
     }
 }

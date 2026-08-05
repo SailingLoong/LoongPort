@@ -3143,6 +3143,11 @@ impl ProviderService {
         }
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
+        //
+        // 生图栏在 `write_live_with_common_config` 里就返回了（见那边的说明）——
+        // 所以这里**不必**再判一次。那也是「换生图档位不用重启 CLI」的实现：
+        // CLI 的配置文件一个字都不动，只有库里那一行 is_current 变了，
+        // 而生图 MCP 每次生图都重新读它。
         write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
 
         // A material-less official Codex provider gets a config-only live
@@ -3483,6 +3488,8 @@ impl ProviderService {
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(&provider.settings_config),
             AppType::ClaudeDesktop => Ok(String::new()),
+            // 生图栏不写 live，也就没有「通用配置」可抽。
+            AppType::CodexImage => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(&provider.settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(&provider.settings_config),
             AppType::GrokBuild => Ok(String::new()),
@@ -3500,6 +3507,7 @@ impl ProviderService {
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(settings_config),
             AppType::ClaudeDesktop => Ok(String::new()),
+            AppType::CodexImage => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
             AppType::GrokBuild => Ok(String::new()),
@@ -4169,7 +4177,9 @@ impl ProviderService {
             AppType::ClaudeDesktop => {
                 crate::claude_desktop_config::validate_provider(provider)?;
             }
-            AppType::Codex => {
+            // 生图档位与 codex 配置同形（见 AppType::CodexImage 的文档），
+            // 所以校验规则完全一样 —— 少了这条校验，一条读不出 sk 的生图档位会静默存进库里。
+            AppType::Codex | AppType::CodexImage => {
                 let settings = provider.settings_config.as_object().ok_or_else(|| {
                     AppError::localized(
                         "provider.codex.settings.not_object",
@@ -4362,7 +4372,8 @@ impl ProviderService {
                     crate::claude_desktop_config::direct_gateway_credentials(provider)?;
                 Ok((credentials.api_key, credentials.base_url))
             }
-            AppType::Codex => {
+            // 与 codex 配置同形，凭据抽取规则一样。
+            AppType::Codex | AppType::CodexImage => {
                 let _auth = provider
                     .settings_config
                     .get("auth")

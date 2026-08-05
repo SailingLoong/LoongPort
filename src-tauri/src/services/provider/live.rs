@@ -527,7 +527,9 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::ClaudeDesktop => false,
+        | AppType::ClaudeDesktop
+        // 生图栏不写 live 配置，所以「通用配置」这套对它无意义。
+        | AppType::CodexImage => false,
     }
 }
 
@@ -601,7 +603,8 @@ pub(crate) fn remove_common_config_from_settings(
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::ClaudeDesktop => Ok(settings.clone()),
+        | AppType::ClaudeDesktop
+        | AppType::CodexImage => Ok(settings.clone()),
     }
 }
 
@@ -660,7 +663,8 @@ fn apply_common_config_to_settings(
         | AppType::OpenCode
         | AppType::OpenClaw
         | AppType::Hermes
-        | AppType::ClaudeDesktop => Ok(settings.clone()),
+        | AppType::ClaudeDesktop
+        | AppType::CodexImage => Ok(settings.clone()),
     }
 }
 
@@ -700,6 +704,30 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    // ⚠️ **生图栏在这里就返回** —— 它没有 live 配置（生图靠 LoongPort 自带的 MCP 工具，
+    // 那个工具自己去库里读这一栏的 is_current）。
+    //
+    // ## 为什么拦在这一层，而不是在调用方各判一次
+    //
+    // 本函数是**全部写 live 路径的唯一收口**（11 个调用点：switch、save、update、
+    // 代理接管的三条、`sync_current_provider_for_app_to_live` …）。逐个加判断的话，
+    // 漏一个就是一条真实的失败路径 —— 实测漏掉的正是「用户编辑一个当前生图档位并保存」：
+    // `ProviderService::update` 判出 `is_current` 为真 ⇒ 写 live ⇒
+    // `write_live_snapshot` 对生图栏返回 Err ⇒ **保存报错，而 DB 里已经存好了**。
+    //
+    // ## 为什么是静默跳过而不是报错
+    //
+    // 调用方的语义是「让落地配置追上 DB」，而生图栏**根本没有落地配置** ⇒
+    // 「什么都不做」就是正确结果，不是失败。`write_live_snapshot` 里那条 Err 仍然留着，
+    // 它守的是另一件事：有人绕过本函数直接调它（那是真的该报错，见那边的说明）。
+    if matches!(app_type, AppType::CodexImage) {
+        log::debug!(
+            "生图档位 '{}' 不写 live 配置（它靠生图 MCP 现读库）",
+            provider.id
+        );
+        return Ok(());
+    }
+
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
@@ -1020,6 +1048,16 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             let settings = sanitize_claude_settings_for_live(&provider.settings_config);
             write_json_file(&path, &settings)?;
         }
+        AppType::CodexImage => {
+            // **明确报错而不是委托给 codex** —— 后者会用生图档位的配置覆盖用户
+            // 正在用的 `~/.codex/config.toml`，把聊天档位换成一个只能生图的模型。
+            // 生图栏根本不写 live：`switch_image_tier_impl` 只更新 is_current。
+            return Err(AppError::localized(
+                "codex_image.live.not_written",
+                "生图档位不写入任何 CLI 配置：生图靠 LoongPort 自带的 MCP 工具，它自己去库里读当前生图档位。",
+                "Image tiers write no CLI config: image generation goes through LoongPort's built-in MCP tool, which reads the current image tier from the database.",
+            ));
+        }
         AppType::ClaudeDesktop => {
             return Err(AppError::localized(
                 "claude_desktop.live.requires_db_context",
@@ -1335,6 +1373,14 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             }
             read_json_file(&path)
         }
+        // 生图栏没有 live 配置可读（它不写 live，见 AppType::CodexImage 的文档）。
+        // 报错而不是返回 codex 的 —— 后者会让「从 live 导入」把 codex 的聊天配置
+        // 抓成一条生图档位。
+        AppType::CodexImage => Err(AppError::localized(
+            "codex_image.live.read_unsupported",
+            "生图档位没有独立的 CLI 配置可读。",
+            "Image tiers have no CLI config of their own to read.",
+        )),
         AppType::ClaudeDesktop => Err(AppError::localized(
             "claude_desktop.live.read_unsupported",
             "Claude Desktop 3P 配置不支持作为通用 live 配置导入，请使用“从 Claude 导入兼容供应商”。",
@@ -1431,6 +1477,13 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
         return Ok(false);
     }
 
+    // 生图栏没有 live 文件可导（它不写 live）。它的档位只由「获取密钥」产生，
+    // 走 `Ok(false)`（= 跳过）而不是报错：本函数在**启动编排**里对每个 app 各调一次，
+    // 报错会让启动流程多一条无意义的告警。
+    if matches!(app_type, AppType::CodexImage) {
+        return Ok(false);
+    }
+
     // 允许 "只有官方 seed 预设" 的情况下继续导入 live：
     // - 启动编排顺序是先 import 后 seed，新用户启动时 providers 为空，导入照常
     // - 老用户已有非 seed provider，跳过导入（正确）
@@ -1456,6 +1509,9 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     }
 
     let settings_config = match app_type {
+        // 生图栏在上面就已经 `return Ok(false)` 了（它没有 live 文件可导）——
+        // 这条只是让 match 穷尽，编译器不追踪那个早退。
+        AppType::CodexImage => return Ok(false),
         AppType::Codex => crate::codex_config::read_codex_live_settings()?,
         AppType::GrokBuild => {
             let mut settings = crate::grok_config::read_grok_live_settings()?;
@@ -1597,6 +1653,13 @@ pub fn should_import_default_config_on_startup(
     app_type: &AppType,
 ) -> Result<bool, AppError> {
     if app_type.is_additive_mode() {
+        return Ok(false);
+    }
+
+    // 生图栏没有 live 文件可导（`import_default_config` 也会拦，这里提前答「不用」
+    // 只是让启动日志说得准 —— 否则它会记一行「○ codex-image already has providers;
+    // live import skipped」，而真实原因是「这一栏压根没有 live 配置」）。
+    if matches!(app_type, AppType::CodexImage) {
         return Ok(false);
     }
 
@@ -2051,6 +2114,100 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// ⭐ **写 live 对生图栏是个空操作，不是错误。**
+    ///
+    /// ## 这条闸守的是一条实测漏掉的路径
+    ///
+    /// 生图栏没有 live 配置，所以 `write_live_snapshot` 对它返回 `Err`（那是对的：
+    /// 真写下去会用生图档位的配置覆盖用户正在用的 `~/.codex/config.toml`）。
+    /// 但**写 live 有 11 个调用点**，逐个加「跳过生图栏」的判断必然漏。
+    ///
+    /// 漏掉的那条：用户在生图页点「编辑配置」改点东西再保存 ⇒
+    /// `ProviderService::update` 判出 `is_current` 为真 ⇒ 写 live ⇒ 报错，
+    /// **而 DB 里已经存好了** ⇒ 界面提示「保存失败」但改动其实生效了，
+    /// 用户再点一次还是报错。
+    ///
+    /// 所以判断收在 `write_live_with_common_config`（唯一收口）。这条闸钉住它。
+    #[test]
+    fn writing_live_for_an_image_tier_is_a_no_op() {
+        let db = Database::memory().expect("create memory db");
+        let provider = Provider::with_id(
+            "loongport-aaaaaaaaaaaaaaaa".to_string(),
+            "生图档".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model = \"gpt-image-2\"\n",
+            }),
+            None,
+        );
+
+        // 必须 Ok —— 报错会让「编辑并保存一个当前生图档位」失败。
+        write_live_with_common_config(&db, &AppType::CodexImage, &provider)
+            .expect("写 live 对生图栏该是空操作，不该报错");
+    }
+
+    /// ⭐ **导入配置 / 云同步恢复不该在生图栏上整条中断。**
+    ///
+    /// `sync_current_to_live` 遍历 `AppType::all()` 并用 `?` 传播错误 —— 生图栏若报错，
+    /// **它之后的每个 app 都不会被同步**（`AppType::all()` 里排在它后面的是 gemini /
+    /// grokbuild / opencode / openclaw / hermes）。而 DB 那边已经导入完了 ⇒
+    /// 状态半生效：claude/codex 的 live 更新了，gemini 及之后的还是旧的。
+    ///
+    /// 触发条件很平常：生图栏有当前项（迁移之后、或用户点过一次「启用」的正常状态），
+    /// 然后点「导入配置」或触发云同步恢复。
+    ///
+    /// 这条闸从 `sync_current_to_live` 那一层验，而不是只验 `write_live_with_common_config`
+    /// —— 后者是修复所在的位置，前者才是用户实际走的路径。
+    #[test]
+    fn syncing_all_apps_to_live_survives_a_current_image_tier() {
+        let state = crate::store::AppState::new(std::sync::Arc::new(
+            Database::memory().expect("create memory db"),
+        ));
+        let id = "loongport-aaaaaaaaaaaaaaaa";
+        let provider = Provider::with_id(
+            id.to_string(),
+            "生图档".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model = \"gpt-image-2\"\n",
+            }),
+            None,
+        );
+        state
+            .db
+            .save_provider(AppType::CodexImage.as_str(), &provider)
+            .expect("存生图档位");
+        state
+            .db
+            .set_current_provider(AppType::CodexImage.as_str(), id)
+            .expect("设成当前项");
+
+        // 整条遍历必须成功 —— 报错会让排在生图栏之后的 app 全都同步不到。
+        sync_current_to_live(&state).expect("导入后的全量同步不该被生图栏中断");
+    }
+
+    /// 而 `write_live_snapshot` 本身仍然必须拒绝生图栏。
+    ///
+    /// 它是上一条那个空操作的**兜底**：万一有人绕过 `write_live_with_common_config`
+    /// 直接调它（新增一条路径时很容易这么写），必须当场炸掉而不是静默把生图档位的
+    /// 配置写进 `~/.codex/config.toml` —— 那会把用户的聊天档位换成一个只能生图的模型。
+    #[test]
+    fn writing_a_live_snapshot_for_an_image_tier_is_refused() {
+        let provider = Provider::with_id(
+            "loongport-aaaaaaaaaaaaaaaa".to_string(),
+            "生图档".to_string(),
+            json!({ "config": "model = \"gpt-image-2\"\n" }),
+            None,
+        );
+        let err = write_live_snapshot(&AppType::CodexImage, &provider)
+            .expect_err("直接写 live 快照必须被拒绝");
+        // 只断言「报了错」而不是错误文案 —— 文案会随 i18n 变，判据是「拒绝了」。
+        assert!(
+            format!("{err}").contains("生图"),
+            "错误信息该说清是生图档位的缘故，实际：{err}"
+        );
+    }
 
     #[test]
     fn kimi_for_coding_effective_settings_backfill_256k_context() {

@@ -17,6 +17,11 @@ export interface SkillApps {
   claude: boolean;
   "claude-desktop"?: boolean;
   codex: boolean;
+  /**
+   * 生图栏**不是一个能读 SKILL.md 的 CLI**。后端 `SkillApps` 没有这个字段，
+   * 标可选（读到 `undefined` = 没装，正确）。
+   */
+  "codex-image"?: boolean;
   gemini: boolean;
   grokbuild?: boolean;
   opencode: boolean;

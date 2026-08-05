@@ -114,16 +114,14 @@ const UnifiedSkillsPanel = React.forwardRef<
   }, [skillUpdates]);
 
   const enabledCounts = useMemo(() => {
-    const counts = {
-      claude: 0,
-      "claude-desktop": 0,
-      codex: 0,
-      gemini: 0,
-      grokbuild: 0,
-      opencode: 0,
-      openclaw: 0,
-      hermes: 0,
-    };
+    // ⚠️ **从 SKILLS_APP_IDS 派生，不写字面量对象** —— 原来是手写的九个键，
+    // 而循环体索引的是 `SKILLS_APP_IDS` 里的项：两者一分叉就是编译期 TS7053
+    // （这次生图栏加进 AppId 时正是这么炸的），而它本可以由类型系统自动跟上。
+    const counts: Record<(typeof SKILLS_APP_IDS)[number], number> =
+      Object.fromEntries(SKILLS_APP_IDS.map((app) => [app, 0])) as Record<
+        (typeof SKILLS_APP_IDS)[number],
+        number
+      >;
     if (!skills) return counts;
     skills.forEach((skill) => {
       for (const app of SKILLS_APP_IDS) {

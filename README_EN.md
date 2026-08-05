@@ -144,21 +144,25 @@ has no account system and no server of its own, so it never receives them.
 
 ## Generating images in your CLI
 
-A tier that only serves image models carries an extra **use for images** button. Click
-it and LoongPort registers its built-in image tool (an MCP server) with Codex, Claude
-Code and Gemini CLI — after that, asking for an image in conversation just works.
+Tiers that only serve image models are collected on their own **Codex Images** tab
+(next to Codex). Click **Enable** on one of them, and asking for an image in
+conversation just works in Codex, Claude Code or Gemini CLI — the generation runs
+through LoongPort's built-in image tool (an MCP server).
 
-Three things worth knowing:
+Four things worth knowing:
 
-- **Your chat tier does not step aside.** Chat goes to `/v1/responses` with the active
-  tier's key; images go to `/v1/images/generations` with the image tier's key — two
-  independent "current" selections, and switching one never disturbs the other. You
-  keep chatting on the cheap text tier.
-- **Switching image tiers needs no CLI restart.** The MCP entry stores no tier id; the
-  choice lives in LoongPort's own database and is read fresh on every generation. Only
-  the **very first activation** needs a new terminal (that is when the entry is added
-  to the CLI's config, and CLIs only read their config at startup).
-- **A site with no image group shows none of this**, and your CLI configs are left
+- **This tab is not usable on its own** — it works alongside a chat tier. All it
+  decides is which tier your images come from.
+- **Your chat tier does not step aside.** Chat goes to `/v1/responses` with whichever
+  tier you picked on the Codex page; images go to `/v1/images/generations` with
+  whichever you picked here — two independent "current" selections, and switching one
+  never disturbs the other. So you can chat through DeepSeek while images come from a
+  relay's 4K group.
+- **Switching image tiers needs no CLI restart.** The choice lives in LoongPort's own
+  database and is read fresh on every generation; the CLI's config file is not touched.
+  Only the **very first** image tier needs a new terminal (that is when the tool is
+  added to the CLI's config, and CLIs only read their config at startup).
+- **A site with no image group leaves this tab empty**, and your CLI configs are left
   untouched. Picking between a 1K and a 4K tier is a spending decision, so LoongPort
   never picks for you.
 

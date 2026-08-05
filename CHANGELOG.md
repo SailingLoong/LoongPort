@@ -11,6 +11,77 @@ LoongPort's first release is 3.19.2 rather than 0.1.0.
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)。版本号延续上游的序列
 （见文末「溯源」），所以 LoongPort 的第一个版本是 3.19.2 而不是 0.1.0。
 
+## [3.21.0] — 2026-08-05
+
+### Changed / 变更
+
+- **Image tiers now live on their own tab, next to Codex.** 3.20.0 put them in the
+  Codex list with a separate "Use for images" button — two "current" selections
+  sharing one list. That turned out to be wrong in two ways, both hit in testing:
+  the entry was hard to find (a button that only appeared on hover), and once
+  found it sat next to a regular **Enable** button that switches your *chat* tier
+  to an image-only model (a 502, twice).
+
+  The real problem was underneath: both kinds of tier shared one row in the
+  provider table, so they competed for a single "current" flag, and switching away
+  wrote the live `config.toml` snapshot back onto whichever tier was current
+  before — polluting an image tier's stored config and making the UI report
+  **manually maintained** when the user had changed nothing.
+
+  Image tiers are now a distinct app type (like Claude Desktop is), so the two
+  have separate "current" flags and separate backfill. Picking an image tier uses
+  the same **Enable** button as everywhere else; the extra button, the extra pair
+  of commands and the extra settings key from 3.20.0 are all gone. Existing image
+  tiers move over automatically on first launch, keeping whichever one you had
+  selected.
+
+  The tab carries a notice saying what it is: it is not usable on its own, it
+  works alongside Codex chat, and your chat tier is unaffected — so you can chat
+  through DeepSeek while images come from a relay's 4K group. Switching image
+  tiers still needs no CLI restart. A relay with no image group leaves the tab
+  empty and your CLI configs untouched.
+
+  **生图档位挪到了自己的标签页，紧邻 Codex。** 3.20.0 把它们放在 Codex 列表里、
+  另给一个「启用生图」按钮 —— 两个「当前项」共用一个列表。实测证明那样有两处不对：
+  入口难找（一个 hover 才出现的按钮），找到之后它又紧挨着一个会把**聊天**档位切成
+  纯生图模型的「启用」按钮（连着两次 502）。
+
+  真正的问题在底下：两类档位共用 provider 表的同一栏，于是抢同一个「当前项」标记；
+  而切走时会把 live `config.toml` 的快照回填给之前那个当前项 —— 污染生图档位的存储
+  配置，让界面报「已手动维护」，而用户一个字没改过。
+
+  现在生图档位是一个独立的 app 类型（与 Claude Desktop 同理），两者各有自己的
+  「当前项」与各自的回填。选生图档位用的是与别处一样的「启用」按钮；3.20.0 那个额外的
+  按钮、那对额外的命令、那个额外的 settings 键全部删掉。已有的生图档位在首次启动时
+  自动挪过去，并沿用你原来选定的那个。
+
+  标签页上写明了它是什么：不能单独使用、要配合 Codex 聊天、你的聊天档位不受影响 ——
+  所以可以一边用 DeepSeek 聊天、一边用中转站的 4K 分组出图。换生图档位仍然不用重启
+  CLI。没有生图分组的中转站会让这一页保持空着，CLI 配置一个字不动。
+
+### Fixed / 修复
+
+- **Editing the current image tier reported a failure that had in fact succeeded.**
+  Saving an image tier that was the current one tried to write a live config it
+  doesn't have, so the save reported an error after the database had already been
+  updated — and retrying reported the same error again.
+
+  编辑当前那个生图档位会报一个其实已经成功了的失败。保存一个正是当前项的生图档位时，
+  它会去写一份它根本没有的 live 配置，于是在数据库已经更新之后报错 —— 再点一次还是
+  同样的错误。
+
+- **The migration could leave two tiers marked current, so images came from the
+  wrong one.** If an image tier had been made the chat current (which 3.20.0's
+  layout made easy to do by accident), moving it to the new tab carried that flag
+  along, giving the image tab two current tiers. Which one images came from then
+  depended on the database's row order — so picking the 4K tier could produce a 1K
+  image, differently on different machines.
+
+  迁移可能留下两个被标为当前的档位，于是图从错的那个出。如果某个生图档位曾被设成聊天
+  的当前项（3.20.0 的布局让这件事很容易误做），把它挪到新标签页时会把那个标记一起带过去，
+  使生图页有两个当前档位。此时图从哪个出取决于数据库的行顺序 —— 所以选了 4K 档可能
+  出 1K 的图，而且不同机器上结果还不一样。
+
 ## [3.20.0] — 2026-08-05
 
 ### Added / 新增

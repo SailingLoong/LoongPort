@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 1;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 2;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -120,6 +120,12 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 crate::vendor::creds::create_table(conn)?;
                 set_version(conn, 1)?;
             }
+            // v1 → v2：把纯生图档位从 codex 栏搬到 codex-image 栏。
+            1 => {
+                log::info!("LoongPort 数据迁移 v1 → v2（生图档位独立成一栏）");
+                move_image_tiers_to_their_own_column(conn)?;
+                set_version(conn, 2)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -132,12 +138,512 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 把纯生图档位（`model` 是 `gpt-image-*` 的托管 codex 档位）搬到 `codex-image` 栏。
+///
+/// ## 为什么需要迁移，而不是等用户点一次「获取密钥」
+///
+/// 不迁移的话，老档位会**滞留在 codex 栏**直到用户主动刷新，期间两处都能看到生图
+/// 档位（codex 栏里那条是旧的、生图栏里空着）—— 比分栏之前更让人困惑。而用户没有
+/// 理由知道要去点刷新。
+///
+/// ## 顺带洗掉被 switch 回填污染的配置
+///
+/// 这是本轮要治的症状：生图档位当过 `is_current` 的话，`ProviderService::switch` 切走时
+/// 会把 live 的 `config.toml` 快照写回它（`[mcp_servers]` / `notify` / `[projects.*]` /
+/// `experimental_bearer_token` 全拌进去）⇒ 与默认基准比对不上 ⇒ 界面显示「已手动维护」，
+/// 而用户一个字没改过。
+///
+/// **判据是 [`provision::is_user_edited`] 而不是「配置里有没有那些键」**：后者要穷举
+/// 污染源（漏一个就洗不干净），前者问的是「这份配置等于我们会生成的默认值吗」——
+/// 那是同一个语义的唯一实现，也保证**真·用户编辑不会被洗掉**。
+///
+/// ## 幂等
+///
+/// 两条都幂等：`UPDATE ... WHERE app_type='codex'` 在第二次跑时已经没有匹配行；
+/// 配置重写只在 `is_user_edited == Some(false)` 且内容确实不同时发生。
+///
+/// ## 为什么走裸 SQL 而不是 `ProviderService`
+///
+/// 迁移跑在 `Database::init` 里，那时 `AppState` 还不存在（`ProviderService` 要它）。
+/// 这也是上游全部迁移的做法。
+fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppError> {
+    use crate::operator::provision;
+
+    // ⚠️ **`providers` 表不存在时直接返回**，不报错。
+    //
+    // 实际启动顺序里它一定在（上游的 `create_tables_on_conn` 跑在本模块之前），
+    // 但迁移不该依赖那个假设 —— 一旦上游调整顺序，报错会让 `Database::init` 失败、
+    // **app 起不来**，而这一步的语义本来就是「没有档位就没什么可搬的」。
+    let has_providers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='providers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_providers == 0 {
+        return Ok(());
+    }
+
+    // 先挑出候选：codex 栏下的**托管**档位（`loongport-` 前缀）。
+    // 非托管的手工 provider 不动 —— 用户自己配的 gpt-image 档位归他管，
+    // 而生图栏只接受托管档位（`is_managed` 是生图工具读 sk 的前提）。
+    let mut rows: Vec<(String, String, String)> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, name, settings_config FROM providers WHERE app_type = 'codex'")
+            .map_err(|e| AppError::Database(format!("查 codex 档位失败: {e}")))?;
+        let mapped = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(format!("查 codex 档位失败: {e}")))?;
+        for r in mapped {
+            rows.push(r.map_err(|e| AppError::Database(format!("读 codex 档位失败: {e}")))?);
+        }
+    }
+
+    let mut moved = 0usize;
+    for (id, name, settings_json) in rows {
+        if !crate::operator::is_managed(&id) {
+            continue;
+        }
+        let Ok(settings) = serde_json::from_str::<serde_json::Value>(&settings_json) else {
+            // 配置存的不是合法 JSON（库被外部改过）⇒ 跳过。迁移不该因为一条坏记录中止，
+            // 那会让 app 起不来。
+            log::warn!("档位 {id} 的 settings_config 不是合法 JSON，迁移跳过它");
+            continue;
+        };
+        let Some(model) = provision::extract_model(&settings) else {
+            continue;
+        };
+        if !provision::is_image_model(&model) {
+            continue;
+        }
+
+        // 只搬栏，**不重写配置**。
+        //
+        // 想过顺带洗掉回填污染（那是本轮症状的直接来源），但判不了：`is_user_edited`
+        // 对「被回填污染」和「用户真改过」返回同一个 `Some(true)` —— 两者在这一层
+        // 分不开（污染进来的键与用户可能加的键没有形状差别）。
+        //
+        // 所以按代价定：错洗掉用户的编辑**不可逆**，而留着污染只是多一个「已手动维护」
+        // 标记 —— 界面上那条档位有「恢复默认配置」按钮，一点就干净。宁可留标记。
+        //
+        // 而且分栏本身就止住了污染的源头：生图栏与 codex 栏各有自己的 `is_current`，
+        // switch 的回填只碰自己栏里的档位，往后不会再有新的污染。
+
+        // 换栏。主键是 `(id, app_type)`，所以这是一次真正的 UPDATE，不是 INSERT。
+        //
+        // ⚠️ **可能撞主键**：生图栏下已经有同 id 的行（用户在新版跑过一次 provision
+        // 之后又回滚到旧版、再升上来）。那时新栏那条是更新的，删掉旧栏这条即可。
+        let exists_in_new: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM providers WHERE id = ?1 AND app_type = 'codex-image'",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let sql = if exists_in_new > 0 {
+            "DELETE FROM providers WHERE id = ?1 AND app_type = 'codex'"
+        } else {
+            // ⚠️ **`is_current` 必须清零**（review 的探针抓出）。
+            //
+            // 生图档位在 codex 栏本来可能就是当前项 —— 那正是本轮要治的场景
+            // （用户点错「启用」把聊天切成了生图档位）。原样带过去的话，生图栏会有
+            // **两个** `is_current = 1`：一个来自 codex 栏的旧状态，一个由
+            // `inherit_the_old_current_image_tier` 按旧 settings 键设的。
+            //
+            // 而生图 MCP 那侧是 `SELECT id … WHERE is_current = 1` 取第一行 ⇒ 拿到哪个
+            // 取决于 SQLite 的返回顺序 ⇒ **用户选的是 4K 档、出的可能是 1K 的图**，
+            // 且换台机器结果可能不同。实测探针：旧键指向 B，实际拿到 A。
+            //
+            // 清零之后「当前生图档位」只由 `inherit_the_old_current_image_tier` 一处决定。
+            "UPDATE providers SET app_type = 'codex-image', is_current = 0 \
+             WHERE id = ?1 AND app_type = 'codex'"
+        };
+        conn.execute(sql, [&id])
+            .map_err(|e| AppError::Database(format!("把档位 {id} 搬到生图栏失败: {e}")))?;
+        moved += 1;
+        log::info!("生图档位「{name}」（{id}，model={model}）已移入生图栏");
+    }
+
+    if moved > 0 {
+        log::info!("生图档位迁移完成：搬了 {moved} 条到生图栏");
+    }
+
+    inherit_the_old_current_image_tier(conn)?;
+    Ok(())
+}
+
+/// 把上一版那个 settings 键里记的「当前生图档位」变成新栏的 `is_current`。
+///
+/// ## 为什么必须做（实测抓出来的缺口）
+///
+/// 上一版用 `settings` 表的 `loongport_current_image_tier` 记「用哪个档位生图」。
+/// 分栏之后那个概念由 `providers.is_current` 表达，而**换栏的 UPDATE 不会顺带设它**
+/// ⇒ 升级后 `is_current` 全是 0 ⇒ 用户明明选过 1K 档，生图却报「还没有选定用哪个
+/// 档位生图」。他得再点一次 —— 那是个没必要的回退。
+///
+/// 实测维护者的库：`loongport_current_image_tier = loongport-9ac36958c41ffe96`，
+/// 而只搬栏之后那两条生图档位的 `is_current` 都是 0。
+///
+/// ## 只写库那一层，不写 settings.json
+///
+/// 设备级那层（`~/.loongport/settings.json` 的 `currentProviderCodexImage`）由主程序
+/// 的 `switch` 维护，迁移跑在 `Database::init` 里、碰不到那个文件（也不该碰：迁移的
+/// 作用域是数据库）。而 `get_effective_current_provider` 在设备级缺失时**正是回落到
+/// 库里的 `is_current`** —— 所以只写这一层就够了，用户下次切换时那一层会自动补上。
+///
+/// ## 清掉旧键
+///
+/// 做减法（CLAUDE.md：清包袱不在旧的旁边加一层）：值已经搬到新位置，留着它只会让
+/// 将来读代码的人怀疑「是不是还有第二个来源」。
+fn inherit_the_old_current_image_tier(conn: &Connection) -> Result<(), AppError> {
+    const OLD_KEY: &str = "loongport_current_image_tier";
+
+    // `settings` 表可能不存在 —— 与上面那道 `providers` 守卫同一个理由：
+    // 报错会让 `Database::init` 失败、app 起不来，而这一步没什么非做不可的。
+    let has_settings: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_settings == 0 {
+        return Ok(());
+    }
+
+    let old: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [OLD_KEY],
+            |r| r.get(0),
+        )
+        .ok()
+        .filter(|v: &String| !v.is_empty());
+
+    let Some(provider_id) = old else {
+        return Ok(());
+    };
+
+    // 只在那条档位真的落到了新栏时才设 —— 它可能已经被删掉了（旧键不会跟着清）。
+    let affected = conn
+        .execute(
+            "UPDATE providers SET is_current = 1 WHERE id = ?1 AND app_type = 'codex-image'",
+            [&provider_id],
+        )
+        .map_err(|e| AppError::Database(format!("继承当前生图档位失败: {e}")))?;
+
+    if affected > 0 {
+        log::info!("当前生图档位沿用旧设置：{provider_id}");
+    } else {
+        log::info!("旧设置里的生图档位 {provider_id} 已不存在，跳过继承");
+    }
+
+    // 旧键一律清掉（哪怕上面没匹配上）—— 它已经没有任何读者了。
+    let _ = conn.execute("DELETE FROM settings WHERE key = ?1", [OLD_KEY]);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn mem() -> Connection {
         Connection::open_in_memory().expect("内存库")
+    }
+
+    /// 造一张 providers 表 + 一条 codex 档位，用于迁移测试。
+    fn providers_table(conn: &Connection) {
+        crate::Database::create_tables_on_conn(conn).expect("建表");
+    }
+
+    fn insert_codex_tier(conn: &Connection, id: &str, name: &str, model: &str) {
+        let settings = crate::operator::provision::settings_config_for(
+            &crate::app_config::AppType::Codex,
+            "sk-test",
+            name,
+            "https://api.x.dev/v1",
+            model,
+        )
+        .expect("codex 必须有形状");
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, website_url, category)
+             VALUES (?1, 'codex', ?2, ?3, 'https://x.dev', 'aggregator')",
+            rusqlite::params![id, name, serde_json::to_string(&settings).unwrap()],
+        )
+        .expect("插档位");
+    }
+
+    fn app_type_of(conn: &Connection, id: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT app_type FROM providers WHERE id = ?1 ORDER BY app_type")
+            .unwrap();
+        let rows = stmt
+            .query_map([id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows
+    }
+
+    /// ⭐ **纯生图档位被搬到生图栏，聊天档位留在原处。**
+    ///
+    /// 这是迁移的全部意义：不搬的话老档位滞留在 codex 栏，用户在两处都看到生图档位
+    /// （旧的那条在 codex 栏、生图栏空着）—— 比分栏之前更让人困惑，而他没有理由知道
+    /// 要去点一次「获取密钥」。
+    #[test]
+    fn image_tiers_move_and_chat_tiers_stay() {
+        let conn = mem();
+        providers_table(&conn);
+        // 一条纯生图 + 一条聊天，都是托管 id（16 位小写 hex）。
+        insert_codex_tier(&conn, "loongport-aaaaaaaaaaaaaaaa", "生图档", "gpt-image-2");
+        insert_codex_tier(
+            &conn,
+            "loongport-bbbbbbbbbbbbbbbb",
+            "聊天档",
+            crate::operator::provision::DEFAULT_MODEL,
+        );
+
+        apply(&conn).expect("迁移");
+
+        assert_eq!(
+            app_type_of(&conn, "loongport-aaaaaaaaaaaaaaaa"),
+            vec!["codex-image"],
+            "生图档位没被搬进生图栏"
+        );
+        assert_eq!(
+            app_type_of(&conn, "loongport-bbbbbbbbbbbbbbbb"),
+            vec!["codex"],
+            "聊天档位被误搬了 —— 用户会少一个能对话的档位"
+        );
+    }
+
+    /// **非托管的 provider 不动** —— 用户自己配的 gpt-image 档位归他管。
+    ///
+    /// 生图栏只接受托管档位（`is_managed` 是生图工具按 provider_id 去库里读 sk 的前提），
+    /// 把一条手工 provider 搬进去只会让它在那一页里点不动。
+    #[test]
+    fn hand_made_providers_are_left_alone() {
+        let conn = mem();
+        providers_table(&conn);
+        insert_codex_tier(&conn, "my-own-image-provider", "我自己配的", "gpt-image-2");
+
+        apply(&conn).expect("迁移");
+
+        assert_eq!(
+            app_type_of(&conn, "my-own-image-provider"),
+            vec!["codex"],
+            "手工 provider 被搬进了生图栏"
+        );
+    }
+
+    /// **可重复执行**：第二次跑不该报错、也不该改变结果。
+    ///
+    /// 迁移链本身有版本号挡着，但备份导入 / 回滚再升级都会让它重跑一次，
+    /// 而 `apply_is_idempotent` 只验了空库。
+    #[test]
+    fn the_image_tier_migration_is_idempotent() {
+        let conn = mem();
+        providers_table(&conn);
+        insert_codex_tier(&conn, "loongport-cccccccccccccccc", "生图档", "gpt-image-2");
+
+        move_image_tiers_to_their_own_column(&conn).expect("第一次");
+        move_image_tiers_to_their_own_column(&conn).expect("第二次不该报错");
+
+        assert_eq!(
+            app_type_of(&conn, "loongport-cccccccccccccccc"),
+            vec!["codex-image"],
+        );
+    }
+
+    /// **两栏都已有同 id 的行时，删旧栏那条而不是撞主键。**
+    ///
+    /// 场景：用户在新版跑过 provision（生图栏已有这条）、回滚到旧版、再升上来
+    /// （旧版又往 codex 栏写了一条）。裸 `UPDATE` 会撞 `(id, app_type)` 主键
+    /// ⇒ 迁移报错 ⇒ `Database::init` 返回 Err ⇒ **app 起不来**。
+    #[test]
+    fn a_duplicate_in_the_new_column_does_not_break_the_migration() {
+        let conn = mem();
+        providers_table(&conn);
+        let id = "loongport-dddddddddddddddd";
+        insert_codex_tier(&conn, id, "生图档（旧栏）", "gpt-image-2");
+        // 生图栏里已经有一条更新的。
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config)
+             VALUES (?1, 'codex-image', '生图档（新栏）', '{}')",
+            [id],
+        )
+        .expect("插新栏那条");
+
+        move_image_tiers_to_their_own_column(&conn).expect("不该撞主键");
+
+        assert_eq!(
+            app_type_of(&conn, id),
+            vec!["codex-image"],
+            "旧栏那条该被删掉，只留新栏的"
+        );
+        // 留下的必须是新栏原本那条（更新的），不是被 UPDATE 搬过去的旧的。
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM providers WHERE id = ?1 AND app_type = 'codex-image'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "生图档（新栏）", "新栏那条被旧的覆盖了");
+    }
+
+    /// **坏记录不该让迁移中止** —— 那会让 `Database::init` 失败、app 起不来。
+    #[test]
+    fn a_corrupt_settings_config_does_not_abort_the_migration() {
+        let conn = mem();
+        providers_table(&conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config)
+             VALUES ('loongport-eeeeeeeeeeeeeeee', 'codex', '坏记录', 'not json at all')",
+            [],
+        )
+        .unwrap();
+        insert_codex_tier(&conn, "loongport-ffffffffffffffff", "生图档", "gpt-image-2");
+
+        apply(&conn).expect("坏记录不该让整次迁移失败");
+
+        // 坏的那条原样留着，好的那条照样搬走了。
+        assert_eq!(
+            app_type_of(&conn, "loongport-eeeeeeeeeeeeeeee"),
+            vec!["codex"]
+        );
+        assert_eq!(
+            app_type_of(&conn, "loongport-ffffffffffffffff"),
+            vec!["codex-image"],
+        );
+    }
+
+    /// ⭐ **用户上一版选好的生图档位要沿用，不该让他再点一次。**
+    ///
+    /// 实测抓出来的缺口：换栏的 UPDATE 不碰 `is_current`，所以只搬栏的话升级后
+    /// 那一栏一个当前项都没有 ⇒ 生图报「还没有选定用哪个档位生图」，而用户明明选过。
+    #[test]
+    fn the_previously_selected_image_tier_is_inherited() {
+        let conn = mem();
+        providers_table(&conn);
+        let chosen = "loongport-1111111111111111";
+        let other = "loongport-2222222222222222";
+        insert_codex_tier(&conn, chosen, "1K生图", "gpt-image-2");
+        insert_codex_tier(&conn, other, "4K生图", "gpt-image-2");
+        // 上一版那个 settings 键。
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('loongport_current_image_tier', ?1)",
+            [chosen],
+        )
+        .expect("插旧键");
+
+        apply(&conn).expect("迁移");
+
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT id FROM providers WHERE app_type = 'codex-image' AND is_current = 1",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(
+            current.as_deref(),
+            Some(chosen),
+            "用户上一版选的生图档位没被沿用 —— 他得再点一次"
+        );
+        // 旧键清掉了（做减法：值已经搬到新位置）。
+        let leftover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = 'loongport_current_image_tier'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0, "旧键该被清掉，留着会让人怀疑有第二个来源");
+    }
+
+    /// 旧键指向一个**已经不存在**的档位时，不该设错任何一条的 `is_current`。
+    ///
+    /// 那个档位可能被删了（运营商下架分组 / 用户删了账号），而旧键不会跟着清。
+    #[test]
+    fn a_dangling_old_key_selects_nothing() {
+        let conn = mem();
+        providers_table(&conn);
+        insert_codex_tier(&conn, "loongport-3333333333333333", "生图档", "gpt-image-2");
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('loongport_current_image_tier', 'loongport-deaddeaddeaddead')",
+            [],
+        )
+        .unwrap();
+
+        apply(&conn).expect("迁移");
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM providers WHERE app_type = 'codex-image' AND is_current = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "旧键指向的档位已不存在，不该随便挑一条设成当前项");
+    }
+
+    /// ⭐ **生图栏里只能有一个当前项。**
+    ///
+    /// ## 这条闸守的是 review 探针抓出的一个不可复现的 bug
+    ///
+    /// 生图档位在 codex 栏本来可能就是 `is_current`（用户点错「启用」的结果 ——
+    /// 那正是本轮要治的场景）。换栏时若原样带过去，生图栏就有**两个** `is_current = 1`：
+    /// 一个是 codex 栏的旧状态，一个是 `inherit_the_old_current_image_tier` 按旧
+    /// settings 键设的。
+    ///
+    /// 而生图 MCP 那侧是 `SELECT id … WHERE is_current = 1` 取第一行 ⇒ 拿到哪个取决于
+    /// SQLite 的返回顺序 ⇒ **用户选的是 4K 档，出的可能是 1K 的图**，而且换台机器
+    /// 结果可能不同。实测：旧键指向 B，而未修时实际拿到 A。
+    #[test]
+    fn the_image_column_ends_up_with_exactly_one_current() {
+        let conn = mem();
+        providers_table(&conn);
+        let a = "loongport-aaaa1111aaaa1111";
+        let b = "loongport-bbbb2222bbbb2222";
+        insert_codex_tier(&conn, a, "A生图", "gpt-image-2");
+        insert_codex_tier(&conn, b, "B生图", "gpt-image-2");
+        // A 在 codex 栏是当前项（用户点错「启用」留下的状态）。
+        conn.execute("UPDATE providers SET is_current = 1 WHERE id = ?1", [a])
+            .unwrap();
+        // 而上一版那个 settings 键指向 B —— B 才是用户真正选来生图的那个。
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('loongport_current_image_tier', ?1)",
+            [b],
+        )
+        .unwrap();
+
+        apply(&conn).expect("迁移");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM providers WHERE app_type = 'codex-image' AND is_current = 1 \
+                 ORDER BY id",
+            )
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![b.to_string()],
+            "生图栏该只有一个当前项、且必须是用户真正选的那个（旧 settings 键指向的）"
+        );
     }
 
     #[test]

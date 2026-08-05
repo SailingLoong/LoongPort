@@ -125,6 +125,10 @@ impl ConfigService {
             AppType::ClaudeDesktop => {
                 // Claude Desktop 3P profiles are managed by claude_desktop_config.
             }
+            AppType::CodexImage => {
+                // 生图栏不写任何 live 配置：生图靠 `--mcp-image-gen` 那个 MCP 工具，
+                // 它自己去库里读这一栏的 is_current 与其 sk。见 AppType::CodexImage 的文档。
+            }
             AppType::Gemini => Self::sync_gemini_live(config, &current_id, &provider)?,
             AppType::GrokBuild => crate::grok_config::write_grok_provider_live(&provider)?,
             AppType::OpenCode => {

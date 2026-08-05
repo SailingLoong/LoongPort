@@ -163,7 +163,9 @@ pub(crate) fn build_provider_from_request(
 ) -> Result<Provider, AppError> {
     let settings_config = match app_type {
         AppType::Claude | AppType::ClaudeDesktop => build_claude_settings(request),
-        AppType::Codex => build_codex_settings(request),
+        // 生图档位的配置与 codex 同形（sk 在 auth、base_url 在 config 那段 TOML）——
+        // 生图 MCP 就是按这个形状去读 sk 与 endpoint 的。
+        AppType::Codex | AppType::CodexImage => build_codex_settings(request),
         AppType::Gemini => build_gemini_settings(request),
         AppType::GrokBuild => build_grokbuild_settings(request),
         AppType::OpenCode => build_opencode_settings(request),

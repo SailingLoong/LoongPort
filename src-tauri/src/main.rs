@@ -13,8 +13,8 @@
 ///
 /// ## 为什么不带「用哪个档位」这个参数
 ///
-/// 用哪个档位生图存在库里（`imagegen_mcp::CURRENT_IMAGE_TIER_KEY`），由 MCP 进程
-/// **每次生图时现读**。写进命令行参数的话，用户每换一次生图档位都会改到 CLI 的配置
+/// 用哪个档位生图 = 库里 `codex-image` 那一栏的当前项，由 MCP 进程
+/// **每次生图时现读**（`imagegen_mcp::current_image_tier_id`）。写进命令行参数的话，用户每换一次生图档位都会改到 CLI 的配置
 /// 文件，而 codex 只在启动时读它 ⇒ 必须新开终端才生效。
 fn is_imagegen_mcp_mode() -> bool {
     let flag = cc_switch_lib::IMAGEGEN_MCP_FLAG;
