@@ -202,6 +202,41 @@ Windows have the same feature set.
 > confirmation dialog and you can cancel (which aborts that switch); **on Windows the
 > process is force-terminated**, with no dialog, so the app warns you before switching.
 
+## If you run a relay service
+
+**You can hand this to your users as the client for your own site.** No code changes
+needed — a user typing your domain already works.
+
+| What a user does | The usual way | With LoongPort |
+|---|---|---|
+| Get a working CLI | sign up → find the console → create a key by hand → copy base_url → track down the config file → get the fields right → repeat for the next tier | paste a domain → sign up on your site → click a tier |
+| Top up | find the page, sign in again | click the button next to the balance, already signed in |
+
+Three things it takes off your plate, each checkable in the source:
+
+- **One domain gets them in** — pasting the whole thing straight from the address bar
+  works; `https://`, `www.` and any trailing path are stripped
+  (`operator/api.rs`, `normalize_site_origin`).
+- **Self-service signup on your own registration page** — it opens your site's real page,
+  not a form imitating it: a fresh site lands on `/register`, a returning one on `/login`,
+  and your referral and promo codes ride along in the URL (`operator/login.rs`).
+- **Self-service top-up without signing in again** — the button next to the balance opens
+  `{your-domain}/purchase` with the session injected (`operator/purchase.rs`). Below $5
+  the client tells the user unprompted.
+
+**What you do not give up**: LoongPort has no account system and no server of its own, and
+handles neither the traffic nor the money. Users register with you and pay you; credentials
+live in a local SQLite database on their own machine. The client only writes the config
+correctly — requests go straight from the user's CLI to your endpoint.
+
+**To have users land on your site by default**: the client fetches a signed remote config
+that can carry a "recommended sites" list — it appears at the top of the "choose a service"
+screen, one tap to connect, no domain to paste; the same config can carry your referral and
+promo codes. [Open an issue](../../issues) and say the word.
+
+Full details (technical prerequisites and how to get on board):
+**[loongport.dev/en/for-relays](https://loongport.dev/en/for-relays)**
+
 ## Upstream projects
 
 **[cc-switch](https://github.com/farion1231/cc-switch)** (by
