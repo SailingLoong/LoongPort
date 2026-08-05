@@ -304,11 +304,36 @@ impl Account {
     }
 }
 
-/// 把用户输入的域名归一成面板 origin（`https://host`，无尾斜杠、无路径）。
+/// 把用户输入的域名归一成面板 origin（`https://host`，无尾斜杠、无路径、无 `www.`）。
 ///
-/// 用户可能输入 `bestapi.store` / `https://bestapi.store/` / `http://bestapi.store/login`，
-/// 全部归一到 `https://bestapi.store`。**一律升到 https**：sub2api 站点都跑 TLS，而登录
-/// 页要过 WebView，明文 http 会被拦。
+/// 用户实际会粘贴的形态（实测列举）：
+///
+/// | 输入 | 归一到 |
+/// |---|---|
+/// | `bestapi.store` | `https://bestapi.store` |
+/// | `https://bestapi.store/` | 同上 |
+/// | `http://bestapi.store/login?next=/` | 同上（路径与查询串都丢掉） |
+/// | `https://www.790053500.com/usage` | `https://790053500.com` |
+///
+/// **一律升到 https**：sub2api 站点都跑 TLS，而登录页要过 WebView，明文 http 会被拦。
+///
+/// ## ⚠️ `www.` 必须剥掉（实测抓出）
+///
+/// 用户从浏览器地址栏复制过来的多半带 `www.`（`https://www.790053500.com/usage`）。
+/// 不剥的后果不是报错，是**同一个站变成两行**：`site_origin` 是站点行的主键的一部分
+/// （`creds.rs` 的 `UNIQUE(site_origin, account_id)`），于是
+///
+/// - 界面上出现两行同名运营商，用户分不清该点哪个；
+/// - 每行各存一套凭据、各自登录一次；
+/// - 档位 id 也跟着分叉（`provision::provider_id_for` 拿 `site_origin` 做哈希）⇒
+///   同一个分组在两行下各有一条档位记录，而 `prune_stale_tiers` 按站点归属清理，
+///   清不掉另一行那条。
+///
+/// 本仓另外两处（`aff.rs` / `stats.rs` 的域名归一）早就在剥 `www.` 了 ——
+/// 这个入口漏了它，是三处里唯一一处不一致。
+///
+/// **只剥 `www.` 这一个前缀**，不动别的子域：`api.x.com` / `panel.x.com` 是真的不同主机，
+/// 剥掉会连到错的地方。`www` 是唯一一个「按惯例等价于裸域」的标签。
 pub fn normalize_site_origin(input: &str) -> Result<String, AppError> {
     let raw = input.trim();
     if raw.is_empty() {
@@ -330,6 +355,10 @@ pub fn normalize_site_origin(input: &str) -> Result<String, AppError> {
     if host.split('.').any(|label| label.is_empty()) || !host.contains('.') {
         return Err(AppError::InvalidInput(format!("主机名不合法: {host}")));
     }
+    // 剥 `www.`（见函数文档：不剥会让同一个站变成两行、两套凭据、两套档位 id）。
+    // **在合法性校验之后**：`www.` 本身也可能是畸形输入的一部分（`www..x.com`），
+    // 先剥会让那种输入绕过上面那道检查。
+    let host = host.strip_prefix("www.").unwrap_or(host);
     // `origin().ascii_serialization()` 而不是 `to_string()`：后者恒带尾斜杠。
     let mut origin = format!("https://{host}");
     if let Some(port) = url.port() {
@@ -935,6 +964,10 @@ mod tests {
             "https://bestapi.store/",
             "http://bestapi.store/login",
             "  bestapi.store  ",
+            // 用户从浏览器地址栏复制过来的形态 —— 带 www.、带路径、带查询串。
+            "www.bestapi.store",
+            "https://www.bestapi.store/usage",
+            "https://www.bestapi.store/login?next=/panel",
         ] {
             assert_eq!(
                 normalize_site_origin(input).unwrap(),
@@ -942,6 +975,39 @@ mod tests {
                 "input: {input}"
             );
         }
+    }
+
+    /// ⭐ **`www.` 必须剥掉，否则同一个站变成两行。**
+    ///
+    /// `site_origin` 进了站点行的唯一索引（`creds.rs` 的 `UNIQUE(site_origin, account_id)`）
+    /// 也进了档位 id 的哈希（`provision::provider_id_for`）。带不带 `www.` 若算两个站：
+    /// 界面上出现两行同名运营商、各存一套凭据、同一个分组在两行下各有一条档位记录，
+    /// 而 `prune_stale_tiers` 按站点归属清理，清不掉另一行那条。
+    ///
+    /// 实测的入口正是用户会做的事：从浏览器地址栏复制 `https://www.790053500.com/usage`。
+    #[test]
+    fn the_www_prefix_never_forks_a_site_into_two() {
+        assert_eq!(
+            normalize_site_origin("https://www.790053500.com/usage").unwrap(),
+            normalize_site_origin("790053500.com").unwrap(),
+            "带 www. 与不带被当成了两个站"
+        );
+    }
+
+    /// 但**只剥 `www.` 这一个标签**，别的子域是真的不同主机。
+    ///
+    /// `api.x.com` / `panel.x.com` 剥掉会连到错的地方 —— 有些运营商的面板就挂在子域上。
+    #[test]
+    fn other_subdomains_are_preserved() {
+        assert_eq!(
+            normalize_site_origin("https://panel.relay.dev").unwrap(),
+            "https://panel.relay.dev"
+        );
+        // `wwwx.` 不是 `www.` —— 前缀匹配不能误伤它。
+        assert_eq!(
+            normalize_site_origin("https://wwwx.relay.dev").unwrap(),
+            "https://wwwx.relay.dev"
+        );
     }
 
     #[test]

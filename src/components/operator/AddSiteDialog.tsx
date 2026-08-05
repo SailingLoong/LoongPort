@@ -313,6 +313,13 @@ export function AddSiteDialog({
               // 有推荐时不抢焦点 —— 那会让光标停在退路上而不是主路径上。
               autoFocus={sponsors.length === 0}
             />
+            {/* 举一个**带 www. 和路径**的例子。
+                后端的 `normalize_site_origin` 会把它们全剥掉（那是实测抓出的：
+                用户从浏览器地址栏复制过来的多半长这样），但用户不知道 ——
+                不写出来他会先手工删成裸域，而删错就连不上。 */}
+            <p className="text-xs text-muted-foreground">
+              {t("loongport.addSite.inputHint")}
+            </p>
           </div>
         </div>
         <DialogFooter>
