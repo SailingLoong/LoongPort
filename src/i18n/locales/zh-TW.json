@@ -3147,7 +3147,9 @@
       "refreshKey": "重新備一次金鑰",
       "sessionExpiredUsable": "登入已過期，但金鑰仍然可用（只是查不到餘額）。點這裡重新登入。",
       "loginFailed": "登入沒能完成：{{reason}}",
-      "openKeyPage": "去官網刪除"
+      "openKeyPage": "去官網刪除",
+      "userEditedHint": "這個帳號在目前這個應用下的設定你改過。「取得金鑰」不會覆寫它（只更新金鑰）。點這裡恢復預設設定。",
+      "editConfirmMessage": "儲存後這個帳號在目前這個應用下的設定就歸你自己維護：以後「取得金鑰」只會更新它的金鑰，不再覆寫你改的其它內容。\n\n如果改完連不上，用這一列上的「恢復預設設定」退回預設值（金鑰保留不變）。"
     },
     "imageTab": {
       "companionNotice": "這一頁不能單獨使用，要配合 codex 聊天一起用。",

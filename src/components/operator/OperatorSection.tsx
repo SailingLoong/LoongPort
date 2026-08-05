@@ -202,8 +202,20 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   const reloadSeqRef = useRef(0);
   const { t } = useTranslation();
   const { busy, run } = useRowBusy();
-  // 待确认「恢复默认配置」的档位。存整个 tier：确认框里要显示它的名字。
-  const [confirmReset, setConfirmReset] = useState<TierInfo | null>(null);
+  // 待确认「恢复默认配置」的目标。
+  //
+  // **两类行共用一个确认框**（文案、按钮、语义完全相同 —— 都是「用默认配置覆盖你的
+  // 编辑，密钥保留」），只有真正执行时走的命令不同。分成两个 state + 两个
+  // `<ConfirmDialog>` 会让同一句文案有两处副本，改一处漏一处。
+  //
+  // `kind` 决定调 `operatorApi.resetTierConfig` 还是 `vendorApi.resetTierConfig`；
+  // `busyKey` 由调用方给（两类行的 busy key 规则不同，见 `vendorBusyKey`）。
+  const [confirmReset, setConfirmReset] = useState<{
+    kind: "tier" | "vendor";
+    providerId: string;
+    displayName: string;
+    busyKey: string;
+  } | null>(null);
   // 待确认删除的运营商行。存整行：确认框里要显示它的名字与档位数。
   const [confirmRemove, setConfirmRemove] = useState<OperatorRowData | null>(
     null,
@@ -412,9 +424,12 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   /**
    * 拉官网账号列表。**只读本地不发网络**（与 `listOperators` 同一条契约）。
    *
-   * `vendor_list_accounts` 有意不吃 app 参数（一把 sk 展开到全部平台），所以
    * 在不支持 DeepSeek 的两个 tab（gemini / grokbuild）下**压根不调它** ——
    * 那两个 tab 里官网行不该出现，拉回来也只能扔掉。
+   *
+   * `appId` 传给后端**只为算 `userEdited`**（一行背后六条 provider 记录，「改过
+   * 没有」必须按平台问）。**不是用它过滤行** —— 一把 sk 展开到全部平台，
+   * 「这一行在哪些 tab 出现」仍由上面那个 `vendorSupportsApp` 判。
    */
   const reloadVendors = useCallback(async () => {
     if (!vendorSupportsApp(appId)) {
@@ -422,7 +437,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
       return;
     }
     try {
-      setVendors(await vendorApi.list());
+      setVendors(await vendorApi.list(appId));
     } catch (e) {
       toast.error(String(e));
     }
@@ -458,7 +473,9 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
       try {
         const [sites, vendorRows] = await Promise.all([
           operatorApi.listSites(),
-          vendorApi.list(),
+          // 这里只数 `length`（判「一个都没配过」），`userEdited` 用不上 ——
+          // 但参数是必填的，给当前 tab 就行。
+          vendorApi.list(appId),
         ]);
         if (cancelled || autoPromptedThisProcess) return;
         if (sites.length === 0 && vendorRows.length === 0) {
@@ -621,7 +638,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
           toast.success(t("loongport.session.connected"));
           // 先刷列表再 provision：登录成功后行才存在（新增那条路），而
           // provision 要拿行 id。
-          const rows = await vendorApi.list();
+          const rows = await vendorApi.list(appId);
           setVendors(rows);
 
           const target =
@@ -938,18 +955,26 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
     });
 
   /**
-   * 把一个档位的配置恢复成默认值。
+   * 把一个档位 / 官网账号的配置恢复成默认值。
    *
-   * 「编辑配置」那条路的回头路 —— 用户接手维护一个档位后改坏了，这是唯一的退路
+   * 「编辑配置」那条路的回头路 —— 用户接手维护后改坏了，这是唯一的退路
    * （`useTierEditGuard` 那道事前警告就是拿它做承诺的）。
+   *
+   * 两类行合在一处：除了调哪条命令，其余（清确认态、busy、toast、reload）完全相同。
+   * 官网那条**只恢复当前 tab 那个平台** —— 一行背后六条记录，一次全恢复会把用户
+   * 在别的 tab 里的编辑一起冲掉（见 `vendorApi.resetTierConfig`）。
    */
-  const handleResetTier = (tier: TierInfo) => {
+  const handleResetTier = (target: NonNullable<typeof confirmReset>) => {
     setConfirmReset(null);
-    return run(`reset:${tier.providerId}`, async () => {
+    return run(target.busyKey, async () => {
       try {
-        await operatorApi.resetTierConfig(tier.providerId, appId);
+        if (target.kind === "vendor") {
+          await vendorApi.resetTierConfig(target.providerId, appId);
+        } else {
+          await operatorApi.resetTierConfig(target.providerId, appId);
+        }
         toast.success(
-          t("loongport.tier.resetDone", { name: tier.displayName }),
+          t("loongport.tier.resetDone", { name: target.displayName }),
         );
         await reload();
       } catch (e) {
@@ -1142,7 +1167,14 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
           void checkProvider(tier.providerId, tier.displayName)
         }
         isCheckingTier={isChecking}
-        onResetTier={(tier) => setConfirmReset(tier)}
+        onResetTier={(tier) =>
+          setConfirmReset({
+            kind: "tier",
+            providerId: tier.providerId,
+            displayName: tier.displayName,
+            busyKey: `reset:${tier.providerId}`,
+          })
+        }
         onEditTier={requestEdit}
         onRemoveOperator={(operatorId) => {
           // ⚠️ **这处 `find` 保持 number 不动**：`operatorId` 从 `OperatorRow` 的
@@ -1165,6 +1197,23 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
             const row = vendors.find((v) => v.id === rowId);
             if (row) setConfirmRemoveVendor(row);
           },
+          // 编辑走与档位**同一个** `useTierEditGuard`（同一道事前警告、同一个
+          // cc-switch 编辑页）。`accountLabel` 空时回落厂商名 —— 弹窗标题里
+          // 空字符串会读成「手动编辑「」的配置」。
+          onEdit: (account) =>
+            requestEdit({
+              kind: "vendor",
+              providerId: account.providerId,
+              displayName: account.accountLabel || account.vendorName,
+              isCurrent: isVendorCurrent(account.id),
+            }),
+          onReset: (account) =>
+            setConfirmReset({
+              kind: "vendor",
+              providerId: account.providerId,
+              displayName: account.accountLabel || account.vendorName,
+              busyKey: vendorBusyKey("resetVendor", account.id),
+            }),
           onReorder: (ids) => void handleVendorReorder(ids),
         }}
       />

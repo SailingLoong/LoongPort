@@ -3146,7 +3146,9 @@
       "refreshKey": "Set up the key again",
       "sessionExpiredUsable": "Your session expired, but the key still works (only the balance is unavailable). Click to sign in again.",
       "loginFailed": "Sign-in did not complete: {{reason}}",
-      "openKeyPage": "Manage keys on the site"
+      "openKeyPage": "Manage keys on the site",
+      "userEditedHint": "You have edited this account's config for the current app. “Fetch keys” will not overwrite it (only the API key is updated). Click here to restore the default config.",
+      "editConfirmMessage": "Once you save, this account's config for the current app is yours to maintain: “Fetch keys” will only refresh its API key from then on, and will no longer overwrite your other changes.\n\nIf it stops working after your edits, use “Restore default config” on this row to go back to the defaults (your API key is kept)."
     },
     "imageTab": {
       "companionNotice": "This page is not usable on its own — it works alongside Codex chat.",

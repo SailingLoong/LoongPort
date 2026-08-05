@@ -361,6 +361,20 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
             json!(opus_model),
         );
     }
+    // LoongPort 新增的两个角色（见 `DeepLinkImportRequest::fable_model`）。
+    // ⚠️ subagent 那个键**不带 `ANTHROPIC_DEFAULT_` 前缀**。
+    if let Some(fable_model) = &request.fable_model {
+        env.insert(
+            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+            json!(fable_model),
+        );
+    }
+    if let Some(subagent_model) = &request.subagent_model {
+        env.insert(
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            json!(subagent_model),
+        );
+    }
 
     json!({ "env": env })
 }
@@ -741,6 +755,21 @@ fn merge_claude_config(
     if request.opus_model.is_none() {
         request.opus_model = env
             .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    // LoongPort 新增的两个角色（见 `DeepLinkImportRequest::fable_model`）。
+    // 漏了这里的后果：带 `config=<base64>` 的 deeplink 里这两个键会被
+    // 「回填 → 重新写入」这一轮悄悄丢掉。
+    if request.fable_model.is_none() {
+        request.fable_model = env
+            .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    if request.subagent_model.is_none() {
+        request.subagent_model = env
+            .get("CLAUDE_CODE_SUBAGENT_MODEL")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
     }

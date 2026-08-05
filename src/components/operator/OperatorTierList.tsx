@@ -52,11 +52,14 @@ import { VendorRow } from "./VendorRow";
  * （spec §6.2 已裁决）。所以拖动结果按类别分派给两条 reorder 命令，
  * 跨类拖动直接忽略。
  *
- * ## props 控制在 6 个以内（spec §四）
+ * ## props 比 `ProviderList` 少（它有 19 个）
  *
- * 对比 `ProviderList` 的 19 个 —— 托管档位**没有**拖拽排序、没有 failover、
- * 没有编辑/删除，那些 props 全部不适用。这不是「简化」，是那些能力对托管项
- * 语义上不存在。
+ * 托管档位**没有**档位级的拖拽排序、没有 failover、没有删除 —— 那些能力对托管项
+ * 语义上不存在（档位由 provision 生成与回收，不由用户增删）。
+ *
+ * ⚠️ **「编辑」是例外，它有**：2026-08-05 起托管档位与官网直连行都能手工编辑配置
+ * （走 `useTierEditGuard` → cc-switch 的编辑页），编辑过的显示「已手动维护」并可
+ * 一键恢复默认。所以别再照「托管项不可编辑」那条老假设加拦截。
  *
  * ## 折叠状态存 localStorage，不进 DB
  *
@@ -90,6 +93,15 @@ export interface VendorListSlice {
   /** 切到某个官网账号的配置。 */
   onUse: (rowId: number) => void;
   onRemove: (rowId: number) => void;
+  /**
+   * 编辑某个官网账号在**当前 tab 那个平台**上的配置。
+   *
+   * 传整行而不是 rowId：宿主要拿 `providerId` / `accountLabel` / `isCurrent`
+   * 去喂 `useTierEditGuard`（它吃 `EditableTier`），只给 id 还得再 find 回来。
+   */
+  onEdit: (account: VendorAccountRow) => void;
+  /** 把某个官网账号在当前 tab 那个平台上的配置恢复成默认值。 */
+  onReset: (account: VendorAccountRow) => void;
   /** 官网行的排序（**只含官网行的 id**，走另一条命令）。 */
   onReorder: (rowIds: number[]) => void;
 }
@@ -395,6 +407,8 @@ export function OperatorTierList({
                   onProvision={() => vendor.onProvision(v.id)}
                   onUse={() => vendor.onUse(v.id)}
                   onDelete={() => vendor.onRemove(v.id)}
+                  onEdit={() => vendor.onEdit(v)}
+                  onReset={() => vendor.onReset(v)}
                 />
               ))}
             </div>

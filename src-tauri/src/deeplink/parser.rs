@@ -121,6 +121,10 @@ fn parse_provider_deeplink(
     let haiku_model = params.get("haikuModel").cloned();
     let sonnet_model = params.get("sonnetModel").cloned();
     let opus_model = params.get("opusModel").cloned();
+    // LoongPort 新增两个角色，见 `DeepLinkImportRequest::fable_model`。
+    // 参数名跟随上游那三个的 camelCase 惯例。
+    let fable_model = params.get("fableModel").cloned();
+    let subagent_model = params.get("subagentModel").cloned();
     let icon = params
         .get("icon")
         .map(|v| v.trim().to_lowercase())
@@ -158,6 +162,8 @@ fn parse_provider_deeplink(
         haiku_model,
         sonnet_model,
         opus_model,
+        fable_model,
+        subagent_model,
         content: None,
         description: None,
         apps: None,
@@ -230,6 +236,8 @@ fn parse_prompt_deeplink(
         haiku_model: None,
         sonnet_model: None,
         opus_model: None,
+        fable_model: None,
+        subagent_model: None,
         apps: None,
         repo: None,
         directory: None,
@@ -303,6 +311,8 @@ fn parse_mcp_deeplink(
         haiku_model: None,
         sonnet_model: None,
         opus_model: None,
+        fable_model: None,
+        subagent_model: None,
         content: None,
         description: None,
         repo: None,
@@ -358,6 +368,8 @@ fn parse_skill_deeplink(
         haiku_model: None,
         sonnet_model: None,
         opus_model: None,
+        fable_model: None,
+        subagent_model: None,
         content: None,
         description: None,
         apps: None,

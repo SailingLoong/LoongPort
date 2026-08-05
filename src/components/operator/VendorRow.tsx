@@ -3,9 +3,12 @@ import {
   Check,
   GripVertical,
   Loader2,
+  Pencil,
+  PencilLine,
   Play,
   RefreshCw,
   Trash2,
+  Undo2,
   Wallet,
 } from "lucide-react";
 
@@ -62,6 +65,15 @@ export interface VendorRowProps {
   /** 切到这个账号的配置。 */
   onUse: () => void;
   onDelete: () => void;
+  /**
+   * 编辑**当前 tab 那个平台**的配置（跳 cc-switch 的编辑页）。
+   *
+   * 一行背后六条 provider 记录，编辑的是当前页那一条 —— 用户要改 Claude 的模型
+   * 映射时本来就在 Claude 页。与 operator 档位同一条路（`useTierEditGuard`）。
+   */
+  onEdit: () => void;
+  /** 把当前 tab 那个平台的配置恢复成默认值（密钥保留）。 */
+  onReset: () => void;
   /** dnd-kit 的拖动手柄 props（由 `SortableVendorRow` 注入）。 */
   dragHandleProps?: {
     attributes?: DraggableAttributes;
@@ -95,10 +107,24 @@ export function VendorRow({
   onProvision,
   onUse,
   onDelete,
+  onEdit,
+  onReset,
   dragHandleProps,
 }: VendorRowProps) {
   const { t } = useTranslation();
   const removing = busy.has(vendorBusyKey("removeVendor", account.id));
+  const resetting = busy.has(vendorBusyKey("resetVendor", account.id));
+
+  // ⚠️ **`=== true` 而不是 `??` 或直接判真值** —— 三态，照 `OperatorRow:636`：
+  // `true`（改过）/ `false`（没改）/ `null`（**判不了**：还没 provision、
+  // 这个平台不适用、或读不出密钥）。`null` 时什么都不显示 —— 显示「未手动维护」
+  // 是在断言「刷新不会覆盖你的改动」，而事实是不知道，让用户误信比不说更糟。
+  const userEdited = account.userEdited === true;
+
+  // 编辑与恢复都要读那条 provider 记录 —— 还没 provision 过就没有它。
+  // 那种行显示的是「获取密钥」引导态（下面 `keyReady` 那几个分支），
+  // 摆一个点了必然报错的编辑按钮是骗人。
+  const canEditConfig = account.keyReady && account.providerId !== "";
 
   return (
     <div
@@ -112,7 +138,12 @@ export function VendorRow({
             ? // 当前在用的行用蓝框，与 `TierItem` 的当前态同一个 token
               // （`ProviderCard.tsx:306`）—— 用户扫一眼列表首先要找到在用的那个。
               "border-blue-500/60 shadow-sm shadow-blue-500/10"
-            : "border-border hover:border-border-active",
+            : userEdited
+              ? // 已手动维护：amber，与 `OperatorRow` 的档位行同一套语义
+                // （蓝 = 在用、绿 = 代理接管都已有主，amber = 需要留意）。
+                // **优先级低于「当前在用」**，同那边的三态排序。
+                "border-amber-500/50 bg-amber-500/5 hover:border-amber-500/70"
+              : "border-border hover:border-border-active",
       )}
     >
       <div className="flex items-center gap-2">
@@ -137,9 +168,26 @@ export function VendorRow({
             所以是纯文本而不是 `role="button"` —— 做成看起来能点的样子是骗人。
             两行式的布局与 `OperatorRow` 一致（站名 / 账号名）。 */}
         <div className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">
-            {account.vendorName}
-          </span>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-sm font-medium">
+              {account.vendorName}
+            </span>
+            {/* 「已手动维护」标记。视觉逐字抄 `OperatorRow:673`。
+                **常驻不藏进 hover** —— 它是状态不是动作，藏起来用户就得逐行
+                hover 才知道哪些配置脱离了自动维护。
+
+                ⚠️ 文案说的是**当前这个 tab 的平台**（`userEdited` 按平台算）——
+                同一行在 Claude 页可能有标记、在 Codex 页没有，那是对的。 */}
+            {userEdited && (
+              <span
+                className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-600 ring-1 ring-inset ring-amber-500/30 dark:text-amber-400"
+                title={t("loongport.vendor.userEditedHint")}
+              >
+                <PencilLine className="h-2.5 w-2.5" />
+                {t("loongport.tier.userEdited")}
+              </span>
+            )}
+          </div>
           {account.accountLabel && (
             <span className="block truncate text-xs text-muted-foreground">
               {account.accountLabel}
@@ -170,9 +218,45 @@ export function VendorRow({
           className={cn(
             "flex shrink-0 items-center",
             HOVER_ACTIONS_BASE,
-            removing ? HOVER_ACTIONS_PINNED : ROW_HOVER_ACTIONS,
+            removing || resetting ? HOVER_ACTIONS_PINNED : ROW_HOVER_ACTIONS,
           )}
         >
+          {/* 「编辑配置」—— 跳 cc-switch 的编辑页（含事前警告，见
+              `useTierEditGuard`）。视觉抄 `OperatorRow:790` 那个。 */}
+          {canEditConfig && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+              onClick={onEdit}
+              title={t("loongport.tier.edit")}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+          )}
+
+          {/* 「恢复默认配置」的 hover 版，给**没手动维护过**的那些。
+              手动维护过的走下面常驻的那个 —— 两处互斥（`!userEdited` / `userEdited`），
+              不会同时出现两个恢复按钮。同 `OperatorRow:797` 的分法。 */}
+          {canEditConfig && !userEdited && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+              disabled={resetting}
+              onClick={onReset}
+              title={t("loongport.tier.resetConfig")}
+            >
+              {resetting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Undo2 className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
+
           <Button
             type="button"
             variant="ghost"
@@ -193,6 +277,28 @@ export function VendorRow({
             )}
           </Button>
         </div>
+
+        {/* 「恢复默认配置」的**常驻**版，只给已手动维护的那些。
+            理由同 `OperatorRow:825` 那段：对普通行它是兜底（没改过，没什么可恢复），
+            而对手动维护过的行，它是那个状态**唯一的出口** —— 用户改坏了配置要退回
+            默认值，不该先猜「hover 一下会不会冒出个按钮」。 */}
+        {canEditConfig && userEdited && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 p-1 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+            disabled={resetting}
+            onClick={onReset}
+            title={t("loongport.vendor.userEditedHint")}
+          >
+            {resetting ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Undo2 className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        )}
 
         <VendorStatus
           account={account}

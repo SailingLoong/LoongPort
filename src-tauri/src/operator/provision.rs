@@ -471,12 +471,60 @@ wire_api = "responses""#,
 /// `build_provider_from_request` 对 8 个 CLI 都有分支，所以这里几乎不会是 `None`。
 /// 保留 `Option` 是让调用方那道闸有东西可判（"这个 CLI 接了没有"），
 /// 而不必在两处硬编码同一份 CLI 清单。
+/// Claude 各模型角色分别用哪个模型名。
+///
+/// ## 为什么需要这个，而不是让三个别名都等于主模型
+///
+/// [`settings_config_for`] 默认把 haiku / sonnet / opus 全指向同一个 `model`，
+/// 理由写在那里：**运营商的分组是「一个 sk 一档价」**，没有「便宜的 haiku、贵的 opus」
+/// 这种分层，硬分会让用户以为能选。
+///
+/// ⭐ **那条对运营商成立，对官网直连不成立。** DeepSeek 官方的 `deepseek-v4-pro`
+/// 与 `-flash` 是**真实的两档模型、两个价格**，用户按角色分档是有意义的
+/// （见 [`crate::vendor::deepseek::claude_role_models`]）。
+///
+/// ## 为什么必须走这个参数，不能在 vendor 层「后置 patch」
+///
+/// ⚠️ [`is_user_edited`] 内部调 [`settings_config_for`] **重算比对基准**。
+/// 在 vendor 层生成完再补两个键的话，基准里没有它们 ⇒ **每个 DeepSeek 的 Claude
+/// 档位都会误报「已手工维护」**，而用户一个字没改过。生成与基准必须走同一条路。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaudeRoleModels {
+    pub haiku: &'static str,
+    pub sonnet: &'static str,
+    pub opus: &'static str,
+    pub fable: &'static str,
+    /// 写进 `CLAUDE_CODE_SUBAGENT_MODEL`。
+    ///
+    /// ⚠️ **这个键不在 `ANTHROPIC_DEFAULT_*` 系列里**，照抄前缀会写出一个
+    /// Claude Code 不认的名字。
+    pub subagent: &'static str,
+}
+
 pub fn settings_config_for(
     app_type: &AppType,
     api_key: &str,
     display_name: &str,
     base_url: &str,
     model: &str,
+) -> Option<serde_json::Value> {
+    settings_config_with_roles(app_type, api_key, display_name, base_url, model, None)
+}
+
+/// [`settings_config_for`] 加一个「Claude 角色分档」的入口。
+///
+/// `roles = None` ⇒ 与 [`settings_config_for`] 完全等价（三别名全指主模型，
+/// 不写 fable / subagent）。官网直连传 `Some(..)`，见 [`ClaudeRoleModels`]
+/// 那段「为什么不能在 vendor 层后置 patch」。
+///
+/// `roles` 只对 Claude 系生效 —— 其余 CLI 没有这套角色别名，传了也无处可写。
+pub fn settings_config_with_roles(
+    app_type: &AppType,
+    api_key: &str,
+    display_name: &str,
+    base_url: &str,
+    model: &str,
+    roles: Option<ClaudeRoleModels>,
 ) -> Option<serde_json::Value> {
     // codex 例外：上游那份多一行 requires_openai_auth，见上面那段。
     //
@@ -500,16 +548,22 @@ pub fn settings_config_for(
         endpoint: Some(base_url.to_string()),
         api_key: Some(api_key.to_string()),
         model: Some(model.to_string()),
-        // ⚠️ **三个别名必须显式给**：上游只在请求里带了才写这几个 env
+        // ⚠️ **别名必须显式给**：上游只在请求里带了才写这几个 env
         // （`build_claude_settings` 的 `if let Some(haiku_model)`）。不给的话
         // Claude Code 会按 haiku/sonnet/opus 各自的默认名去请求，而运营商那边
         // 通常只认一个模型名 ⇒ 用户切到 sonnet 就报「模型不存在」。
         //
-        // 全部指向同一个 model 而不是各给一个：运营商的分组是「一个 sk 一档价」，
-        // 没有「便宜的 haiku、贵的 opus」这种分层，硬分会让用户以为能选。
-        haiku_model: Some(model.to_string()),
-        sonnet_model: Some(model.to_string()),
-        opus_model: Some(model.to_string()),
+        // 默认（`roles = None`）全部指向同一个 model：运营商的分组是「一个 sk
+        // 一档价」，没有「便宜的 haiku、贵的 opus」这种分层，硬分会让用户以为能选。
+        // 官网直连例外 —— 见 [`ClaudeRoleModels`]。
+        haiku_model: Some(roles.map_or(model, |r| r.haiku).to_string()),
+        sonnet_model: Some(roles.map_or(model, |r| r.sonnet).to_string()),
+        opus_model: Some(roles.map_or(model, |r| r.opus).to_string()),
+        // 这两个**只在分档时写**：`roles = None`（运营商）那条路保持原样，
+        // 不给已有档位凭空多两个键 —— 那会让全部存量档位的整份比对失配，
+        // 集体误报「已手工维护」。
+        fable_model: roles.map(|r| r.fable.to_string()),
+        subagent_model: roles.map(|r| r.subagent.to_string()),
         homepage: None,
         ..Default::default()
     };
@@ -569,6 +623,33 @@ pub fn is_user_edited(
     base_url: &str,
     model: &str,
 ) -> Option<bool> {
+    is_user_edited_with_roles(
+        settings_config,
+        app_type,
+        display_name,
+        base_url,
+        model,
+        None,
+    )
+}
+
+/// [`is_user_edited`] 加一个「Claude 角色分档」的入口。
+///
+/// ⚠️ **官网直连必须走这个**，且 `roles` 要与生成配置时传的**完全一致**
+/// （两边都取 `vendor::provision::claude_roles_for`）。
+///
+/// 不一致的后果不是报错，是**每个 DeepSeek 的 Claude 档位都显示「已手工维护」**：
+/// 基准里没有 `ANTHROPIC_DEFAULT_FABLE_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL`
+/// 这两个键，而实际配置有 ⇒ 整份比对失配（`normalize_for_comparison` 只抹首尾空白，
+/// **结构差异照算**，见它的文档）。而用户一个字都没改过。
+pub fn is_user_edited_with_roles(
+    settings_config: &serde_json::Value,
+    app_type: &AppType,
+    display_name: &str,
+    base_url: &str,
+    model: &str,
+    roles: Option<ClaudeRoleModels>,
+) -> Option<bool> {
     // ⚠️ **「这个 CLI 没接」与「sk 位置被改坏了」必须分开** —— review 抓出初版把两者
     // 混成同一个 `None`，而后者恰恰是「确定被改过」里最危险的一种：
     //
@@ -601,7 +682,14 @@ pub fn is_user_edited(
     let current = normalize_for_comparison(settings_config);
     let mut matched_any = false;
     for candidate in candidate_models(settings_config, model) {
-        let defaults = settings_config_for(app_type, &api_key, display_name, base_url, &candidate)?;
+        let defaults = settings_config_with_roles(
+            app_type,
+            &api_key,
+            display_name,
+            base_url,
+            &candidate,
+            roles,
+        )?;
         if current == normalize_for_comparison(&defaults) {
             matched_any = true;
             break;
@@ -933,8 +1021,21 @@ fn api_key_location(app_type: &AppType) -> Option<(&'static str, &'static str)> 
         // 漏了它的后果是**静默的**：`_ => None` 会让 `is_user_edited` 对每条生图档位
         // 都返回「判不了」，`extract_api_key` 也读不出 sk ⇒ 生图工具起不来。
         AppType::Codex | AppType::CodexImage => Some(("auth", "OPENAI_API_KEY")),
-        AppType::Claude => Some(("env", "ANTHROPIC_AUTH_TOKEN")),
+        // ⚠️ **ClaudeDesktop 与 Claude 同形，两个都要在这里**（2026-08-05 补）。
+        //
+        // 它们走同一个 `deeplink::build_claude_settings`（`provider.rs:165` 的
+        // `AppType::Claude | AppType::ClaudeDesktop =>`），sk 都落在
+        // `env.ANTHROPIC_AUTH_TOKEN`。原来只写了 `Claude` ⇒ ClaudeDesktop 掉进
+        // 下面那个 `_ => None`，后果与漏掉生图栏那条完全一样、而且**同样是静默的**：
+        // `is_user_edited` 恒为「判不了」⇒ 界面上永远不显示「已手动维护」标记；
+        // `extract_api_key` 读不出 sk ⇒ 「恢复默认配置」直接报错。
+        AppType::Claude | AppType::ClaudeDesktop => Some(("env", "ANTHROPIC_AUTH_TOKEN")),
         AppType::Gemini => Some(("env", "GEMINI_API_KEY")),
+        // ⚠️ hermes / openclaw / opencode **还没接**，见代码仓 `TODO.md`：
+        // 它们的 sk 在**顶层**（hermes 是 `api_key`、openclaw 是 `apiKey`）或
+        // 嵌在别的结构里（opencode 是 `options.apiKey`），而本函数的
+        // `(section, field)` 两段结构表达不了「顶层」。补它要动
+        // `patch_api_key` / `extract_api_key` 的签名与 operator 侧全部调用方。
         _ => None,
     }
 }

@@ -3146,7 +3146,9 @@
       "refreshKey": "重新备一次密钥",
       "sessionExpiredUsable": "登录已过期，但密钥仍然可用（只是查不到余额）。点这里重新登录。",
       "loginFailed": "登录没能完成：{{reason}}",
-      "openKeyPage": "去官网删除"
+      "openKeyPage": "去官网删除",
+      "userEditedHint": "这个账号在当前这个应用下的配置你改过。「获取密钥」不会覆盖它（只更新密钥）。点这里恢复默认配置。",
+      "editConfirmMessage": "保存后这个账号在当前这个应用下的配置就归你自己维护：以后「获取密钥」只会更新它的密钥，不再覆盖你改的其它内容。\n\n如果改完连不上，用这一行上的「恢复默认配置」退回默认值（密钥保留不变）。"
     },
     "imageTab": {
       "companionNotice": "这一页不能单独使用，要配合 codex 聊天一起用。",
