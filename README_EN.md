@@ -78,104 +78,51 @@ by hand. The mechanism differs between the two:
 
 | Platform | Requirement |
 |---|---|
-| **Windows** | Windows 10 or later |
+| **Windows** | Windows 10 or later (needs the WebView2 runtime, which Windows 10 and later generally ship with) |
 | **macOS** | macOS 12 (Monterey) or later |
 
 Download from the [Releases](../../releases) page. Every release is built automatically
-by GitHub Actions, for both Windows and macOS:
+by GitHub Actions:
 
 | Platform | File | Notes |
 |---|---|---|
-| **Windows** | `LoongPort-v{version}-Windows-Portable.zip` | **Portable, recommended** — unzip to get a single `LoongPort.exe` and run it; no Windows Installer involved |
-| | `LoongPort-v{version}-Windows.msi` | Installer (adds a Start menu entry) |
-| **macOS** | `LoongPort-v{version}-macOS.dmg` | — |
+| **Windows** | `…-Windows-Portable.zip` | **Recommended** — unzips to a single exe; no install step, so there is nothing for security software to block |
+| | `…-Windows.msi` | Installer, adds a Start menu entry |
+| **macOS** | `…-macOS.dmg` | Universal binary |
 
 On ARM64 Windows machines (Snapdragon laptops and the like), use the two files with
-`-arm64` in the name — again one installer and one portable build.
+`-arm64` in the name.
 
-> **On Windows, prefer the portable build.** It unzips to a single exe (the WebView2 loader is
-> statically linked, so no extra DLLs are needed next to it) — put it anywhere and
-> double-click. Security software sometimes blocks the Windows Installer from
-> **backing up old files** (reported as `could not set file security for file
-> '...\Config.Msi\xxxxxxx.rbf'  Error: 5`); the portable build has no install step, so
-> there is nothing to block.
+> **macOS blocks the first launch.** The build is not signed or notarized by Apple, so
+> Gatekeeper reports it as "damaged" — it is not damaged, it is unsigned. **Drag it into
+> Applications first, do not open it**, then run this once in Terminal:
 >
-> It does need the WebView2 runtime, which Windows 10 and later generally ship with.
-
-> **macOS blocks the first launch — follow this order and you only do it once.**
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/LoongPort.app
+> ```
 >
-> The macOS build is not code-signed or notarized by Apple, so Gatekeeper reports the app
-> as "damaged and should be moved to the Trash" — **it is not damaged**, it is unsigned.
-> **The order matters.** Four steps:
->
-> 1. **Quit LoongPort if it is already running** (from a previous version). Click its
->    menu-bar/tray icon → Quit, or press <kbd>⌘</kbd><kbd>Q</kbd>. **Skip this and step 2
->    cannot replace the copy that is still running.**
-> 2. **Open the dmg and drag LoongPort into Applications — but do not open it yet.**
->    Double-clicking now is exactly what produces the "damaged" dialog, and on some
->    machines being refused once makes the rest more annoying. Install it and leave it.
-> 3. **Open Terminal** (search for it in Spotlight), **paste this one line and press
->    Return**:
->
->    ```bash
->    xattr -dr com.apple.quarantine /Applications/LoongPort.app
->    ```
->
->    No output means it worked (the Unix convention: silence is success). If you get
->    `No such file or directory`, step 2 did not land — check that `LoongPort` is really
->    in your Applications folder.
-> 4. **Now open it.** Every launch after this is normal, and **these four steps are a
->    one-time thing** — until you install the next version, when you start again at step 1.
->
-> <details>
-> <summary>What that command actually does (click to expand)</summary>
->
-> Anything you download through a browser gets tagged by macOS with an extended attribute
-> called `com.apple.quarantine`. Gatekeeper sees that tag, goes looking for a signature,
-> finds none — and the wording it picks for an unsigned app happens to be the most
-> misleading one available: "damaged".
->
-> `xattr -dr com.apple.quarantine` simply **removes that tag** (`-d` delete, `-r` recurse
-> through everything inside the bundle). It does not modify the program, and it does not
-> turn off any system-wide security setting — it says "I know where this one came from"
-> about **one** app.
->
-> Which means the safety of this command rests entirely on **whether you trust the
-> source**. Please only run it on builds downloaded from
-> [this project's Releases page](../../releases).
->
-> </details>
->
-> Signing and notarization need an Apple Developer account ($99/year) and will come in a
-> later release — after which these four steps collapse into "drag to Applications,
-> double-click". It only affects this installation step; once installed the app works
-> exactly as it does on Windows.
-
-> **Already on the installer and an upgrade fails with "could not set file security".**
-> On a few machines running security software (Tencent PC Manager, for one), installing
-> *over* an older version fails with `could not set file security for file
-> '...\Config.Msi\xxxxxxx.rbf'  Error: 5` — that is the security software blocking the
-> installer from **backing up the old files**, not a broken package. Uninstall the old
-> version first (Settings → Apps), then run the new installer: a fresh install has
-> nothing to back up, so nothing gets blocked. **Your account and settings are kept** —
-> they live in your user folder, untouched by uninstall, so you stay signed in.
->
-> First-time installs and the portable build are both unaffected; this only happens when
-> overwriting an older version.
+> It opens normally after that, and you only do this once. What that command does, why it
+> is safe, and how to handle the "could not set file security" error when upgrading are
+> all covered at **[loongport.dev/en/download](https://loongport.dev/en/download)**.
 
 ## How it works
 
-1. **Enter a domain** — your relay provider's site. Leave it blank to use the default.
+1. **Enter a domain** — your relay provider's site. Pasting straight from the address bar
+   works; leave it blank to use the default.
 2. **Sign in** — the provider's real login page loads in a window; register or sign in
    right there. LoongPort receives the resulting credentials and never sees your password.
 3. **Keys provisioned** — one per available tier. Existing keys with matching names are
    reused before new ones get created, so hitting refresh never litters your account.
-4. **Pick a CLI and tier** — Codex uses OpenAI tiers, Claude uses Anthropic tiers. One
-   click writes the matching config (`~/.codex/config.toml`, or Claude's settings).
-5. **Keep working** — Codex or Claude Code just works. **When switching a Codex tier**,
-   the ChatGPT desktop app is quit and reopened automatically (it only reads its config
-   at startup, so without a restart the new tier has no effect). Claude tier switches do
-   not involve it.
+4. **Click the tier you want** — Codex uses OpenAI tiers, Claude uses Anthropic tiers.
+   One click writes the matching config (`~/.codex/config.toml`, or Claude's settings),
+   and Codex or Claude Code just works from there.
+
+> **When switching a Codex tier**, the ChatGPT desktop app is quit and reopened for you —
+> it only reads its config at startup, so without a restart the new tier has no effect.
+> **On macOS it asks the app to quit**: if ChatGPT has a conversation in progress it shows
+> its own confirmation dialog and you can cancel (which aborts that switch). **On Windows
+> the process is force-terminated**, with no dialog, so the app warns you before switching.
+> Claude tier switches do not involve it.
 
 Credentials and site data live in a local SQLite database under `~/.loongport/` and are
 sent only to the relay site you chose, as the Bearer token on its API calls. LoongPort
@@ -196,7 +143,7 @@ Four things worth knowing:
   tier you picked on the Codex page; images go to `/v1/images/generations` with
   whichever you picked here — two independent "current" selections, and switching one
   never disturbs the other. So you can chat through DeepSeek while images come from a
-  relay's 4K group.
+  relay's 4K tier.
 - **Switching image tiers needs no CLI restart.** The choice lives in LoongPort's own
   database and is read fresh on every generation; the CLI's config file is not touched.
   Only the **very first** image tier needs a new terminal (that is when the tool is
@@ -241,46 +188,22 @@ can press "check for updates" yourself at any time.
 You can point it at your own site domain; a working one is preset by default. macOS and
 Windows have the same feature set.
 
-> One detail differs, and only when switching a **Codex** tier (that is the step which
-> restarts the ChatGPT desktop app for you; Claude switches leave it alone): **on macOS
-> it asks the app to quit** — if ChatGPT has a conversation in progress it shows its own
-> confirmation dialog and you can cancel (which aborts that switch); **on Windows the
-> process is force-terminated**, with no dialog, so the app warns you before switching.
-
 ## If you run a relay service
 
-**You can hand this to your users as the client for your own site.** No code changes
-needed — a user typing your domain already works.
+**You can hand this to your users as the client for your own site** — no code changes
+needed, a user typing your domain already works. LoongPort has no account system and no
+server of its own, and handles neither the traffic nor the money: users register with you
+and pay you, and credentials live in a local SQLite database on their own machine.
 
-| What a user does | The usual way | With LoongPort |
-|---|---|---|
-| Get a working CLI | sign up → find the console → create a key by hand → copy base_url → track down the config file → get the fields right → repeat for the next tier | paste a domain → sign up on your site → click a tier |
-| Top up | find the page, sign in again | click the button next to the balance, already signed in |
+Three things it takes off your plate, each checkable in the source: `normalize_site_origin`
+(`operator/api.rs` — a domain pasted straight from the address bar is accepted),
+self-service signup on your own registration page (`operator/login.rs` — a fresh site
+lands on `/register`, a returning one on `/login`, referral codes riding along in the URL),
+and self-service top-up with the session injected (`operator/purchase.rs` — it opens
+`{your-domain}/purchase`).
 
-Three things it takes off your plate, each checkable in the source:
-
-- **One domain gets them in** — pasting the whole thing straight from the address bar
-  works; `https://`, `www.` and any trailing path are stripped
-  (`operator/api.rs`, `normalize_site_origin`).
-- **Self-service signup on your own registration page** — it opens your site's real page,
-  not a form imitating it: a fresh site lands on `/register`, a returning one on `/login`,
-  and your referral and promo codes ride along in the URL (`operator/login.rs`).
-- **Self-service top-up without signing in again** — the button next to the balance opens
-  `{your-domain}/purchase` with the session injected (`operator/purchase.rs`). Below $5
-  the client tells the user unprompted.
-
-**What you do not give up**: LoongPort has no account system and no server of its own, and
-handles neither the traffic nor the money. Users register with you and pay you; credentials
-live in a local SQLite database on their own machine. The client only writes the config
-correctly — requests go straight from the user's CLI to your endpoint.
-
-**To have users land on your site by default**: the client fetches a signed remote config
-that can carry a "recommended sites" list — it appears at the top of the "choose a service"
-screen, one tap to connect, no domain to paste; the same config can carry your referral and
-promo codes. [Open an issue](../../issues) and say the word.
-
-Full details (technical prerequisites and how to get on board):
-**[loongport.dev/en/for-relays](https://loongport.dev/en/for-relays)**
+The benefits, the concerns, the technical prerequisites and how to get on board are all at
+**[loongport.dev/en/for-relays](https://loongport.dev/en/for-relays)**.
 
 ## Upstream projects
 
