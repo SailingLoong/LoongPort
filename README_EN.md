@@ -102,17 +102,54 @@ On ARM64 Windows machines (Snapdragon laptops and the like), use the two files w
 >
 > It does need the WebView2 runtime, which Windows 10 and later generally ship with.
 
-> **macOS blocks the first launch.** The macOS build is not code-signed or notarized by
-> Apple, so Gatekeeper reports the app as "damaged" — it is not. Run this once in
-> Terminal; **once is enough**:
+> **macOS blocks the first launch — follow this order and you only do it once.**
 >
-> ```bash
-> xattr -dr com.apple.quarantine /Applications/LoongPort.app
-> ```
+> The macOS build is not code-signed or notarized by Apple, so Gatekeeper reports the app
+> as "damaged and should be moved to the Trash" — **it is not damaged**, it is unsigned.
+> **The order matters.** Four steps:
+>
+> 1. **Quit LoongPort if it is already running** (from a previous version). Click its
+>    menu-bar/tray icon → Quit, or press <kbd>⌘</kbd><kbd>Q</kbd>. **Skip this and step 2
+>    cannot replace the copy that is still running.**
+> 2. **Open the dmg and drag LoongPort into Applications — but do not open it yet.**
+>    Double-clicking now is exactly what produces the "damaged" dialog, and on some
+>    machines being refused once makes the rest more annoying. Install it and leave it.
+> 3. **Open Terminal** (search for it in Spotlight), **paste this one line and press
+>    Return**:
+>
+>    ```bash
+>    xattr -dr com.apple.quarantine /Applications/LoongPort.app
+>    ```
+>
+>    No output means it worked (the Unix convention: silence is success). If you get
+>    `No such file or directory`, step 2 did not land — check that `LoongPort` is really
+>    in your Applications folder.
+> 4. **Now open it.** Every launch after this is normal, and **these four steps are a
+>    one-time thing** — until you install the next version, when you start again at step 1.
+>
+> <details>
+> <summary>What that command actually does (click to expand)</summary>
+>
+> Anything you download through a browser gets tagged by macOS with an extended attribute
+> called `com.apple.quarantine`. Gatekeeper sees that tag, goes looking for a signature,
+> finds none — and the wording it picks for an unsigned app happens to be the most
+> misleading one available: "damaged".
+>
+> `xattr -dr com.apple.quarantine` simply **removes that tag** (`-d` delete, `-r` recurse
+> through everything inside the bundle). It does not modify the program, and it does not
+> turn off any system-wide security setting — it says "I know where this one came from"
+> about **one** app.
+>
+> Which means the safety of this command rests entirely on **whether you trust the
+> source**. Please only run it on builds downloaded from
+> [this project's Releases page](../../releases).
+>
+> </details>
 >
 > Signing and notarization need an Apple Developer account ($99/year) and will come in a
-> later release — it only affects this one installation step, and once installed the app
-> works exactly as it does on Windows.
+> later release — after which these four steps collapse into "drag to Applications,
+> double-click". It only affects this installation step; once installed the app works
+> exactly as it does on Windows.
 
 > **Already on the installer and an upgrade fails with "could not set file security".**
 > On a few machines running security software (Tencent PC Manager, for one), installing
@@ -192,6 +229,14 @@ can press "check for updates" yourself at any time.
 > **The "AI CLIs" row is about chat tiers.** The image tool registers with codex,
 > claude **and gemini** — "gemini in progress" means it cannot yet be the target of a
 > chat tier (its config shape is not written yet), not that it is untouched.
+
+> **"In progress" is not a wishlist.** Take new-api: the login identifier is already
+> modelled as a neutral `login_identifier` (rather than hardcoding sub2api's field name),
+> and the `platform_map` table is complete — what is missing is the adapter for its own
+> API surface. **If you run a new-api site, or you are its developer,
+> [opening an issue](../../issues) would move this along considerably**: what we need is a
+> site to test against and confirmation of a few endpoint shapes. The same goes for any
+> other relay backend.
 
 You can point it at your own site domain; a working one is preset by default. macOS and
 Windows have the same feature set.
