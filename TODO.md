@@ -203,3 +203,34 @@ sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store`
 在 `useStreamCheck.ts` 里用 `t()` 格式化。四个语言文件各加 4-5 个 key。
 `StreamCheckResult.model_used` 那个 TEXT 列要么存 enum 的判别式 + JSON、
 要么另加一列 —— 注意它同时是 `stream_check_logs` 的历史数据，改格式要考虑旧行怎么读。
+
+---
+
+## HSTS 的 max_age 还是观察期的 1 天（2026-08-05 记）
+
+**what**：loongport.dev 的 HSTS 于 2026-08-05 开启，但 `max-age=86400`（1 天）——
+那是**渐进上线的观察期值**，不是最终配置。业界标准是 1 年（`31536000`）。
+
+**why 当时不直接上 1 年**：HSTS 是那类**难以撤销**的设置 —— 浏览器会记住 max_age，
+期间即使在 Cloudflare 关掉，已访问过的用户浏览器仍拒绝走 HTTP。用 1 天起步意味着
+万一撞上意外（例如将来某个子域没证书），等一天就能恢复而不是等一年。
+
+**why 现在还没调**：需要先观察一周确认无异常 —— 而「无异常」的判据是时间，
+不是能立刻做完的事（defer 准入闸时间维度第 2 类）。
+
+**how-to-repay**（前置条件链）：
+
+1. 2026-08-12 之后确认这一周没有 HTTPS 相关的访问异常
+2. Cloudflare → loongport.dev → SSL/TLS → Edge Certificates → HSTS，
+   把 max_age 改成 `31536000`（1 年）。**或用 API**（token 有 Zone Settings:Edit）：
+   `PATCH /zones/{zone}/settings/security_header`，
+   `{"value":{"strict_transport_security":{"enabled":true,"max_age":31536000,...}}}`
+3. `include_subdomains` 与 `preload` **仍建议保持 false**：
+   - 前者会把 HSTS 强加到所有子域，而 `config.loongport.dev` 那类将来可能另做安排
+   - 后者一旦进了浏览器内置的 preload 列表，**移除要等数月**，对一个还在演进的
+     项目不值得
+4. 验证：`curl -sI https://loongport.dev/ | grep -i strict-transport`
+   应看到 `max-age=31536000`
+
+**⚠️ 别把这条当成「可以不做」**：停在 1 天不算错（安全收益已经拿到大部分），
+但那意味着每个用户的保护每天过期一次。要么调上去，要么明确决定就停在这儿并删掉本条。
