@@ -127,37 +127,41 @@ ARM64 那格在 `corepack prepare` 验签处炸了（`Cannot find matching keyid
 
 ---
 
-## dependabot 的 25 条告警：分三类，只有一类要紧（2026-08-04 记）
+## 剩下 2 条 dependabot 告警：被上游 semver 卡住，不是没修（2026-08-05 记）
 
-仓库转公开、开了 dependabot alerts 之后一次性冒出 25 条（2 critical / 10 high /
-12 medium / 3 low）。**分类核过一遍，别被 critical 那个词带着走**：
+2026-08-04 转公开时一次性冒出 25 条，绝大多数已经清掉（dependabot 自己的 PR
+#8~#18，加上 2026-08-05 手工顶 `aws-lc-rs` 那次）。**剩下的 2 条不是漏了，是
+`cargo update` 拒绝动它们** —— 上游包的 caret 约束把版本钉死了：
 
-**（1）npm 那 21 条全是 `development` scope** —— vite / vitest / rollup / postcss /
-esbuild / ws / form-data / picomatch / @babel/core。两个 critical 都是 vitest，且是
-**Vitest UI server** 的漏洞（监听端口时可任意读文件），而本仓 CI 与本机都只跑
-`vitest run`（不带 UI、不监听）。这批不进产物，但**该升** —— 它们是每天在用的工具链，
-dependabot 已自动开 PR，跟着合就行（`pull_request` 触发 2026-08-04 恢复了，PR 有 CI 验）。
+| 包 | 现在 | 需要 | 谁钉住它 | 实际暴露面 |
+|---|---|---|---|---|
+| `glib` 0.18.5 | medium | ≥ 0.20.0 | `webkit2gtk` 2.0.2 要 `^0.18` | **macOS / Windows 编不到它** |
+| `rand` 0.7.3 | low | ≥ 0.8.6 | `phf_generator` 0.8.0 要 `^0.7` | **只有 build-dependency 边** |
 
-**（2）Rust 里有 6 条指向压根没人依赖的包**：`openssl`（8 条中的大部分）与
-`quinn-proto`。`cargo tree -i openssl` / `-i quinn-proto` 都打印 "nothing to print"
-—— 它们是 `Cargo.lock` 里的陈旧条目，dependabot 从 lock 文件读所以报了，实际编不进
-产物。**升它们没有实际收益**（但也无害，dependabot 的 PR 合了能让告警清零、省得每次
-看到 Security 页上一堆红字）。
+两条都验证过，不是推测：
 
-**（3）真在依赖树里的 Rust 包**：`aws-lc-sys` ×5、`rustls-webpki` ×4、`tar` ×3、
-`tauri`、`serde_with`、`glib`、`rand`。这批是 reqwest / rustls / tauri 的传递依赖，
-**跟着 dependabot 的 PR 升**（PR #10~#15 已开）。
+```sh
+# glib 在两个发布 target 下都是 "nothing to print"（它走 gtk，Linux only）
+cargo tree -i glib --target aarch64-apple-darwin
+cargo tree -i glib --target x86_64-pc-windows-msvc
+# rand 0.7.3 只在 --edges build 时出现，normal 边为空（走 phf_codegen 的编译期代码生成）
+cargo tree -i rand@0.7.3 --edges normal --target all
+```
 
-**⚠️ 顺带发现的一笔独立债：`tauri-plugin-updater` 还在依赖里且代码在用。**
-`Cargo.toml:37` 声明它、`commands/settings.rs:4` 引 `UpdaterExt`、`capabilities/
-default.json` 也给了权限 —— **但 `tauri.conf.json` 的 `plugins` 只有 `deep-link`**，
-插件没注册 ⇒ 那条「检查更新」链路运行时必然失败。它也是上面 rustls / aws-lc 那批
-漏洞的引入路径之一。
+⇒ 两条**都不进用户拿到的产物**：`glib` 那条要等我们真出 Linux 包才有意义
+（「支持范围」表里 Linux 还在「在做」），`rand` 那条只在编译我们自己的机器上跑。
 
-**how-to-repay**：定「要不要自己的更新渠道」。要 → 配 endpoints + 换自己的 pubkey +
-注册插件（三件缺一不可，`release.yml` 的 `Prepare Tauri signing key` 那步注释里写了）；
-不要 → 把依赖、`UpdaterExt` 那条链路、capabilities 权限一起删干净，别留「声明了但
-不工作」的中间态。**需要维护者决策**（产品问题：靠 GitHub Releases 手动更新够不够）。
+**how-to-repay**（都不是我们能推的，等上游）：
+
+- `glib` → 等 `webkit2gtk` crate 放宽到 `^0.20`。它由 `tauri` 拉进来，所以实际是等
+  Tauri 那条链升 gtk 生态 —— **跟着 tauri 的版本走即可，别自己 patch**。
+- `rand` → 等 `kuchikiki` / `selectors` 升 `phf` 到 0.11+（`tauri-utils` 的依赖）。同上。
+- **判断「是否可以动了」的办法**：`cargo update -p glib --precise <版本> --dry-run`，
+  它会把拦住的那条约束链整条打印出来，比翻上游 issue 快。
+
+⚠️ **别为这两条改 `Cargo.toml` 加 `[patch]`** —— 收益是「Security 页少两行红字」，
+代价是我们自己维护一条 fork 的依赖线、且下次 tauri 升级时冲突。上面已经算清了
+它们编不进产物，写在这里就是为了让下一个人不用重算一遍。
 
 ---
 
