@@ -39,6 +39,47 @@ giving up the tier you chat on.
   <sub>Chinese UI shown; the app also ships English, Traditional Chinese and Japanese.</sub>
 </div>
 
+## Three minutes to first run
+
+> **If you run a relay**: feel free to forward this section to your users. They do **not**
+> need cc-switch and do **not** need an account with us — going from download to a working
+> CLI is the four steps below, and they only ever deal with **your** site.
+> To have them land on your site by default, see [If you run a relay](#if-you-run-a-relay).
+
+1. **Download and open it** — see [Install](#install). On first launch you get a
+   "pick a service site" dialog.
+2. **Paste the relay's domain** — copying straight from your browser's address bar works
+   (`https://bestapi.store/usage` and the like; any trailing path is stripped for you).
+3. **Register or sign in** — LoongPort opens **that site's own** registration page.
+   If you already have an account, a banner at the top takes you to the sign-in page in
+   one click. The whole thing happens on the site's real pages; LoongPort receives the
+   post-login credentials and **never handles your password**.
+4. **Done** — every tier your account can use already has a key, and the configs are
+   written. From there:
+   - **Switch tiers**: one click on **Enable**
+   - **Top up**: the button next to the balance opens the site's own payment page
+   - **Generate images** (when the site has image tiers): see
+     [Generating images in your CLI](#generating-images-in-your-cli)
+
+No config files to edit, no API keys to create by hand, no `base_url` to remember.
+
+## If you run a relay
+
+You can hand LoongPort to your users as **a client for your own site** — it is a generic
+sub2api client and is not tied to any particular relay:
+
+- **It replaces your setup guide.** Users no longer follow a tutorial to create a key,
+  copy a `base_url`, and hunt down a config file. The four steps above are the whole
+  thing, and three of them happen on your site.
+- **It does not come between you and your users.** LoongPort has no accounts and no
+  server. Users register on **your** site, top up through **your** payment page, and
+  their credentials never leave their own machine (SQLite under `~/.loongport/`).
+- **To have users land on your site by default**: LoongPort fetches a signed remote
+  config that can carry a "recommended sites" list — it appears at the top of the
+  "pick a service site" screen, one click to connect. Just [open an issue](../../issues).
+- **Affiliate and promo codes are supported too**: the same config can carry your
+  referral code and a registration promo code, applied automatically at sign-up.
+
 ## Why it costs so much less
 
 Two discount layers — Codex gets both, Claude gets one:

@@ -3125,12 +3125,13 @@
     },
     "addSite": {
       "firstRunTitle": "选择服务站点",
-      "firstRunBody": "输入你要使用的中转站域名，留空则用默认的 {{site}}。",
+      "firstRunBody": "把中转站的域名粘进来就行 —— 从浏览器地址栏直接复制也可以，网址后面的路径会自动去掉。留空则用默认的 {{site}}。",
       "title": "添加中转站",
-      "body": "输入另一个中转站的域名。同一个站可以挂多个账号 —— 登录不同账号即可，重复的会自动合并。",
+      "body": "把另一个中转站的域名粘进来。同一个站可以挂多个账号 —— 登录不同账号即可，重复的会自动合并。",
       "connected": "已连上 {{name}}",
       "inputLabel": "站点域名",
       "inputLabelWithSponsors": "或手动输入域名",
+      "inputHint": "例如 bestapi.store，或直接粘 https://bestapi.store/usage",
       "sponsorsLabel": "推荐站点",
       "sponsorAddAnother": "已有 {{count}} 个账号 · 再加一个"
     },

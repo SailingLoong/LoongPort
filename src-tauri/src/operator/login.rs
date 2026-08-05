@@ -225,6 +225,12 @@ pub fn login_script(
         .map(promo_prefill_snippet)
         .unwrap_or_else(|| "  function tryPrefillPromo() {}\n".to_string());
 
+    // 注册页顶部的横幅。**无条件生成**（与 `aff_snippet` 那种有条件的不同）——
+    // 它自己判「当前在不在 /register」，重登落 `/login` 时那段就是个空转的定时器。
+    // 判据放在 JS 里而不是这里，是因为 SPA 路由切换不重跑脚本：用户可能从
+    // `/login` 点「去注册」过去，那时也该有横幅。
+    let register_hint_snippet = register_hint_banner_snippet();
+
     format!(
         r#"(function () {{
   'use strict';
@@ -281,6 +287,7 @@ pub fn login_script(
 
 {promo_snippet}
 {aff_snippet}
+{register_hint_snippet}
   // sub2api 前端的凭据键名。**从 Rust 常量插进来** —— 充值窗要写同样这几个键
   // （见 AUTH_TOKEN_KEY 那组的文档），两处各写一遍字面量迟早会漂。
   var K_TOKEN = '{AUTH_TOKEN_KEY}';
@@ -452,6 +459,174 @@ fn promo_prefill_snippet(code: &str) -> String {
   }}
 "#
     )
+}
+
+/// 注册页顶部那条「这是注册页，有账号请去登录」的横幅。
+///
+/// ## 为什么需要它（用户提的）
+///
+/// 新站落 `/register`（见 [`login_url`]）。sub2api 的注册页**确实有**一个「已有账号？
+/// 去登录」的链接，但它在 `<template #footer>` 里 —— 用户得滚到页底才看得见。
+/// 于是已有账号的人在注册页上填一遍，被告知邮箱已注册，才发现走错了页。
+///
+/// ## 文案**复用页面自己的**，不自带 i18n
+///
+/// 横幅里那两句话直接取页脚那个链接及其前面那句提示的文字
+/// （`RegisterView.vue` 的 `t('auth.alreadyHaveAccount')` + `t('auth.signIn')`）——
+/// 那已经是**站点当前语言**的正确说法。
+///
+/// 自带一份四语文案是错的两次：Rust 侧没有 i18n 机制（要为它引一套），
+/// 而且 LoongPort 的界面语言与站点的语言可能不同 —— 站点是英文界面时，
+/// 横幅冒出两句中文比没有横幅更糟。
+///
+/// 取不到那个链接（站点改版 / 关闭了注册入口）⇒ **整段不显示**，
+/// 而不是回落到硬编码文案：宁可没有这个提示，也不要显示一句可能是错的话。
+///
+/// ## 点击走站内路由，不整页跳
+///
+/// 横幅的按钮**模拟点击页脚那个 `router-link`**，而不是 `location.href = '/login'`。
+/// 后者是整页刷新 ⇒ 重新执行注入脚本、重新读 localStorage，而更要紧的是
+/// **`?aff=` 那套关系在整页跳转里会丢**（见 [`aff_seed_snippet`]：我们靠 localStorage
+/// 种它，而整页刷新后站点的 `resolveAffiliateReferralCode` 会重跑一遍）。
+/// 点现成的链接让 Vue Router 处理，与用户自己点它完全等价。
+///
+/// ## 只在 `/register` 显示，路由切走就撤掉
+///
+/// 脚本注一次、SPA 路由切换**不重跑**（这是本模块反复踩到的事实，见
+/// [`promo_prefill_snippet`] 的文档）。所以横幅自己盯 `location.pathname`：
+/// 不在 `/register` 就移除。否则用户点了「去登录」，横幅会跟着留在登录页上，
+/// 说着一句已经不成立的话。
+fn register_hint_banner_snippet() -> String {
+    // ⚠️ `r##` 而不是 `r#`：下面的选择器里有 `$="#/login"`，
+    // 那个 `"#` 会提前终止 `r#"…"#`（编译器报的是「unknown prefix `login`」，
+    // 看着完全不像引号问题）。
+    r##"
+  // 注册页顶部的横幅：文案取自页面自己的「已有账号？去登录」，见 Rust 侧
+  // register_hint_banner_snippet 的文档（为什么不自带 i18n、为什么点现成的链接）。
+  try {
+    var BANNER_ID = 'loongport-register-hint';
+
+    function findSignInLink() {
+      var links = document.querySelectorAll('a[href="/login"], a[href$="#/login"]');
+      for (var i = 0; i < links.length; i++) {
+        // 可见且有文字的那个才是页脚那条（隐藏的、空的都跳过）。
+        if (links[i].offsetParent !== null && links[i].textContent.trim()) return links[i];
+      }
+      return null;
+    }
+
+    // 是我们设过 body 的 paddingTop 吗。撤横幅时要还原它，而**只还原自己设的那次** ——
+    // 站点自己可能也用这个属性（横幅在时我们只在它为空串时才设，见 syncBanner）。
+    var paddedByUs = false;
+
+    function removeBanner() {
+      var old = document.getElementById(BANNER_ID);
+      if (old) old.remove();
+      // ⚠️ **必须还原**（review 抓出）：登录窗在拿到凭据后**有意不关**
+      // （见 commands/operator.rs 那段「不关窗」的说明：dashboard 上有余额与充值入口，
+      // 用户还要接着用）。不还原的话，他会带着一条 40px 的空白条浏览登录页、
+      // dashboard、充值页 —— 而那条横幅早就不在了。
+      if (paddedByUs) {
+        document.body.style.paddingTop = '';
+        paddedByUs = false;
+      }
+    }
+
+    function syncBanner() {
+      // 只在注册页显示。`indexOf` 而不是 `===`：站点可能跑在 hash 路由下
+      // （`/#/register`），那时 pathname 是 `/`、路径在 hash 里。
+      var onRegister = window.location.pathname.indexOf('/register') !== -1
+        || window.location.hash.indexOf('/register') !== -1;
+      if (!onRegister) { removeBanner(); return; }
+      if (document.getElementById(BANNER_ID)) return;
+
+      var link = findSignInLink();
+      // 取不到就不显示 —— 见文档：宁可没提示也不要一句可能是错的话。
+      if (!link) return;
+
+      var prompt = '';
+      // 链接前面那句提示（`已有账号？`）在同一个父节点的文本里。
+      var parentText = link.parentNode ? link.parentNode.textContent : '';
+      if (parentText) prompt = parentText.replace(link.textContent, '').trim();
+
+      var bar = document.createElement('div');
+      bar.id = BANNER_ID;
+      bar.setAttribute('role', 'status');
+      // 内联样式：站点的 CSS 类名不稳定（改版就失效），而这条横幅必须一直看得见。
+      bar.style.cssText = [
+        'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
+        'display:flex', 'align-items:center', 'justify-content:center', 'gap:10px',
+        'padding:10px 16px', 'background:#dc2626', 'color:#fff',
+        'font:500 14px/1.5 system-ui,-apple-system,sans-serif',
+        'box-shadow:0 1px 3px rgba(0,0,0,.2)'
+      ].join(';');
+
+      var text = document.createElement('span');
+      text.textContent = prompt || link.textContent;
+      bar.appendChild(text);
+
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = link.textContent.trim();
+      btn.style.cssText = [
+        'padding:4px 12px', 'border:1px solid rgba(255,255,255,.6)', 'border-radius:6px',
+        'background:rgba(255,255,255,.15)', 'color:#fff', 'cursor:pointer',
+        'font:inherit'
+      ].join(';');
+      btn.addEventListener('click', function () {
+        // **点现成的链接**，让 Vue Router 处理 —— 见文档：整页跳会丢 aff 关系。
+        // 每次点都重新查一遍：SPA 里那个节点可能已经被替换过。
+        var fresh = findSignInLink();
+        if (fresh) fresh.click();
+      });
+      bar.appendChild(btn);
+
+      document.body.appendChild(bar);
+      // 别盖住页面顶部的内容。只在站点自己没设过这个属性时才动它，
+      // 并记下「是我们设的」—— `removeBanner` 靠那个标志决定要不要还原。
+      if (document.body.style.paddingTop === '') {
+        document.body.style.paddingTop = bar.offsetHeight + 'px';
+        paddedByUs = true;
+      }
+    }
+
+    // 首屏 + 之后每 500ms 同步一次。
+    //
+    // **不用 MutationObserver / popstate**：这是个 Vue SPA，路由切换既不发
+    // `popstate`（`router.push` 走的是 `history.pushState`）也不一定改动我们
+    // 盯得住的节点。轮询是这个脚本里已有的模式（`trySend` / `tryPrefill` 同样如此），
+    // 500ms × 一个 querySelector 的开销可以忽略。
+    //
+    // ⚠️ **必须设上限**（review 抓出我写错的一个前提）。原来这里写的是「登录窗的
+    // 生命周期就是用户这一次登录，窗口关掉定时器随之消失」—— **那不成立**：
+    // 拿到凭据后窗口**有意不关**（见 commands/operator.rs 那段「不关窗」），
+    // 用户会在里面接着看 dashboard、充值页，想看多久看多久。于是这个定时器会
+    // 一直轮询下去。
+    //
+    // 上限用 5 分钟（600 × 500ms），与主脚本那个轮询同一个数量级：横幅只在
+    // 注册/登录这一小段里有意义，用户走到 dashboard 之后它永远不会再显示。
+    // 到点前若已经离开注册页，撤掉横幅并停表。
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', syncBanner);
+    } else {
+      syncBanner();
+    }
+    var polls = 0;
+    var timer = setInterval(function () {
+      polls++;
+      if (polls > 600) {
+        clearInterval(timer);
+        removeBanner();
+        return;
+      }
+      syncBanner();
+    }, 500);
+  } catch (e) {
+    // 横幅是个提示，不是登录必需的一步。它坏了绝不能影响凭据回传。
+    console.warn('[LoongPort] 注册页横幅未能显示:', e);
+  }
+"##
+    .to_string()
 }
 
 /// 生成「把邀请码种进 localStorage」的那一小段脚本。
@@ -913,6 +1088,116 @@ mod tests {
             assert!(s.contains(CREDS_SCHEME), "凭据回传那半必须在");
             assert!(s.contains(AUTH_TOKEN_KEY), "读凭据那半照旧");
         }
+    }
+
+    /// ⭐ **注册页横幅不许影响凭据回传。**
+    ///
+    /// 它是个提示，而凭据回传是这个脚本存在的理由。`promo_snippet` 那次
+    /// review 抓出的 P0 正是这一类：一段辅助功能把主流程带崩了
+    /// （那次是留空导致 `ReferenceError` ⇒ 定时器永不清除）。
+    ///
+    /// 横幅这段是**自包含**的（整段 `try { … }`，主脚本里没有对它的调用点），
+    /// 与 `aff_snippet` 同一形状。这条闸钉住那个性质。
+    #[test]
+    fn the_register_banner_never_breaks_the_credential_relay() {
+        // 四种组合都验：横幅是无条件生成的，不该被 aff / promo 的有无影响。
+        for aff in [Some("4PAUD8SSZXG7"), None] {
+            for promo in [Some("LOONGPORT"), None] {
+                let s = login_script("https://bestapi.store", "", aff, promo);
+                assert!(s.contains(CREDS_SCHEME), "凭据回传那半必须在");
+                assert!(s.contains(AUTH_TOKEN_KEY), "读凭据那半照旧");
+                assert!(
+                    s.contains("loongport-register-hint"),
+                    "横幅那段该无条件生成（它自己判在不在 /register）"
+                );
+            }
+        }
+    }
+
+    /// 横幅的文案**必须取自页面自己的链接**，不能自带硬编码文案。
+    ///
+    /// LoongPort 的界面语言与站点的语言可能不同 —— 站点是英文界面时冒出两句中文，
+    /// 比没有横幅更糟。这条闸的判据是「脚本里没有中文字面量的文案」：
+    /// 它只允许出现在注释里，不允许进 `textContent`。
+    ///
+    /// 会红的改法：图省事往 `text.textContent = '已有账号？'` 里塞一句话。
+    #[test]
+    fn the_register_banner_takes_its_wording_from_the_page() {
+        let s = register_hint_banner_snippet();
+        // 必须从页面上找那个链接。
+        assert!(
+            s.contains(r#"a[href="/login"]"#),
+            "横幅要复用页面自己的「去登录」链接（文案与跳转都靠它）"
+        );
+        // 文案来自那个链接的 textContent，而不是字面量。
+        assert!(
+            s.contains("link.textContent"),
+            "文案必须取自那个链接，不能自带一份"
+        );
+        // 点击走站内路由（点现成的链接），不是整页跳 —— 后者会丢 aff 关系。
+        assert!(
+            s.contains("fresh.click()"),
+            "要点现成的 router-link，别用 location.href（整页跳会丢邀请码关系）"
+        );
+        assert!(
+            !s.contains("location.href"),
+            "不许整页跳转：那会重跑注入脚本并丢掉 localStorage 里的邀请码关系"
+        );
+    }
+
+    /// ⭐ **横幅撤掉时必须还原 `body.paddingTop`。**
+    ///
+    /// 登录窗在拿到凭据后**有意不关**（`commands/operator.rs` 那段「不关窗」：dashboard 上
+    /// 有余额与充值入口，用户还要接着用）。所以不还原的话，他会带着一条 40px 的空白条
+    /// 浏览登录页、dashboard、充值页 —— 而那条横幅早就不在了。
+    #[test]
+    fn the_banner_restores_the_body_padding_it_added() {
+        let s = register_hint_banner_snippet();
+        assert!(
+            s.contains("paddedByUs"),
+            "要记下「是我们设的 paddingTop」——否则不知道该不该还原（站点自己也可能设过）"
+        );
+        assert!(
+            s.contains("document.body.style.paddingTop = ''"),
+            "removeBanner 必须还原 paddingTop"
+        );
+    }
+
+    /// ⭐ **轮询必须有上限。**
+    ///
+    /// 这条闸对应我写错的一个前提：原注释说「登录窗的生命周期就是这一次登录，窗口关掉
+    /// 定时器随之消失」—— 而窗口**有意不关**，用户想看多久看多久。没有上限意味着那个
+    /// 定时器会一直跑下去。
+    ///
+    /// 主脚本里那个轮询有 600 次上限，这里同一个数量级 —— 横幅只在注册/登录那一小段
+    /// 有意义，走到 dashboard 之后它永远不会再显示。
+    #[test]
+    fn the_banner_poll_is_bounded() {
+        let s = register_hint_banner_snippet();
+        assert!(
+            s.contains("clearInterval"),
+            "定时器要能停 —— 登录窗不会自动关，无上限的轮询会一直跑"
+        );
+        assert!(
+            s.contains("polls > 600"),
+            "上限与主脚本那个轮询同一个数量级（600 × 500ms = 5 分钟）"
+        );
+    }
+
+    /// 横幅只在注册页显示，路由切走要撤掉。
+    ///
+    /// 脚本注一次、SPA 路由切换不重跑（本模块反复踩到的事实）。所以横幅必须
+    /// 自己盯路径 —— 否则用户点了「去登录」，横幅跟着留在登录页上，
+    /// 说着一句已经不成立的话。
+    #[test]
+    fn the_register_banner_is_scoped_to_the_register_route() {
+        let s = register_hint_banner_snippet();
+        assert!(s.contains("'/register'"), "要判当前是不是注册页");
+        assert!(
+            s.contains("window.location.hash"),
+            "hash 路由的站点（`/#/register`）也要认 —— 那时 pathname 是 `/`"
+        );
+        assert!(s.contains("removeBanner"), "不在注册页时要撤掉横幅");
     }
 
     #[test]

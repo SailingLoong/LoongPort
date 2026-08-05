@@ -3125,12 +3125,13 @@
     },
     "addSite": {
       "firstRunTitle": "Choose a relay site",
-      "firstRunBody": "Enter the relay site domain you want to use, or leave it blank to use the default {{site}}.",
+      "firstRunBody": "Paste the relay’s domain — copying straight from your browser’s address bar works too; any trailing path is stripped for you. Leave it empty to use {{site}}.",
       "title": "Add relay site",
-      "body": "Enter another relay site's domain. One site can hold several accounts — just sign in with a different one; duplicates are merged automatically.",
+      "body": "Paste another relay’s domain. One site can hold several accounts — just log in with a different one; duplicates are merged automatically.",
       "connected": "Connected to {{name}}",
       "inputLabel": "Site domain",
       "inputLabelWithSponsors": "Or enter a domain manually",
+      "inputHint": "e.g. bestapi.store, or paste https://bestapi.store/usage directly",
       "sponsorsLabel": "Recommended sites",
       "sponsorAddAnother": "{{count}} account(s) · add another"
     },
