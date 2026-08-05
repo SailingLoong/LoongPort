@@ -102,6 +102,18 @@ pub struct VendorAccountRow {
     ///
     /// 空串 = 还没登录过（没有 `account_id` 就派生不出 id）。
     pub provider_id: String,
+    /// **当前 tab 那个平台**的配置是不是被用户改过。
+    ///
+    /// ⚠️ **按平台算，不是整行一个值** —— 一行背后六条 provider 记录各自能被独立
+    /// 编辑。这里给的是 `vendor_list_accounts` 收到的那个 `app_id` 对应的那一条。
+    ///
+    /// `None` = 判不了（没 provision 过 / 这个平台不适用 / 判据本身判不了），
+    /// **UI 在 `None` 时不显示标记** —— 同 operator 的 `TierInfo.user_edited`：
+    /// 不知道就别断言。
+    ///
+    /// 判据见 [`user_edited_for`]，它不存标记、靠与默认配置整份比对
+    /// （所以用户把配置改回默认，标记会自动消失）。
+    pub user_edited: Option<bool>,
 }
 
 impl From<creds::VendorRow> for VendorAccountRow {
@@ -124,6 +136,9 @@ impl From<creds::VendorRow> for VendorAccountRow {
             vendor_id: row.vendor_id,
             vendor_name,
             id: row.id,
+            // 这个 `From` 是纯转换、拿不到 DB。命令层用 `user_edited_for` 填它
+            // （要读 provider 记录才算得出来）。
+            user_edited: None,
         }
     }
 }
@@ -147,13 +162,68 @@ pub struct VendorProvisionSummary {
 ///
 /// **契约：只读本地、不发网络**（与 `operator_list_operators` 一致）—— 首屏不能卡在
 /// 网络上。余额走 [`vendor_balance`]，由前端渲染完再异步填。
+///
+/// ## `app_id` 是干什么的
+///
+/// **只用来算 `user_edited`** —— 一行官网账号背后是六条 provider 记录（六个平台），
+/// 各自能被用户独立编辑，所以「改过没有」这件事**必须按平台问**。
+///
+/// ⚠️ 别把它理解成「按 app 过滤行」：一把 sk 展开到全部平台，一行在哪些 tab 出现
+/// 是纯展示判断，仍然由前端 `VENDOR_APPS` 决定（那条注释还成立）。
 #[tauri::command]
 pub async fn vendor_list_accounts(
     state: State<'_, AppState>,
+    app_id: String,
 ) -> Result<Vec<VendorAccountRow>, String> {
+    // 认不出的 app_id 不该让整条列表失败 —— 首屏契约是「只读本地、不卡」。
+    // 那种情况下 `user_edited` 全给 `None`（判不了就别断言）。
+    let app_type: Option<AppType> = app_id.parse().ok();
     with_conn(state.inner(), creds::list)
-        .map(|rows| rows.into_iter().map(VendorAccountRow::from).collect())
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| {
+                    let mut out = VendorAccountRow::from(row);
+                    out.user_edited = app_type
+                        .as_ref()
+                        .and_then(|app| user_edited_for(state.inner(), &out, app));
+                    out
+                })
+                .collect()
+        })
         .map_err(|e| e.to_string())
+}
+
+/// 这一行在 `app_type` 这个平台上的配置**是不是被用户改过**。
+///
+/// `None` = 判不了：还没 provision（没有 provider 记录）、这个平台不适用
+/// （`config_for` 返回 `None`，如 gemini），或 `is_user_edited` 自己判不了。
+/// UI 在 `None` 时不显示标记 —— 与 operator 的 `TierInfo.user_edited` 同一条原则：
+/// **不知道就别断言**。
+///
+/// ## ⚠️ `roles` 必须与生成配置时用的完全一致
+///
+/// 两边都取 [`crate::vendor::provision::claude_roles_for`]。不一致 ⇒ 基准里缺
+/// fable / subagent 两个键 ⇒ 整份比对失配 ⇒ **每个 Claude 档位都误报「已手工维护」**。
+/// 那个函数的文档写了完整理由。
+fn user_edited_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType) -> Option<bool> {
+    if row.provider_id.is_empty() {
+        return None; // 还没登录过，派生不出 provider id。
+    }
+    let (base_url, model) = crate::vendor::deepseek::config_for(app_type)?;
+    let existing = state
+        .db
+        .get_provider_by_id(&row.provider_id, app_type.as_str())
+        .ok()??;
+    crate::operator::provision::is_user_edited_with_roles(
+        &existing.settings_config,
+        app_type,
+        // 基准用档位**当前**的名字，不是默认名 —— 与 operator 那边同一个理由：
+        // 用默认名会让改过名的档位永远显示「已手工维护」。
+        &existing.name,
+        base_url,
+        model,
+        crate::vendor::provision::claude_roles_for(app_type),
+    )
 }
 
 /// 开登录窗，等凭据回来，存成一行账号。
@@ -490,6 +560,106 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
         platforms,
         key_created,
     })
+}
+
+/// 把**一个平台**的配置恢复成 LoongPort 生成的默认值。**密钥保留不变。**
+///
+/// ## 为什么不复用 `operator_reset_tier_config`
+///
+/// 那条路有三段硬依赖运营商模型，vendor 一样都没有（`commands/operator.rs:1456` 起）：
+///
+/// | 它要什么 | 为什么 vendor 没有 |
+/// |---|---|
+/// | `existing.website_url` 定站点归属 | vendor 的 base_url 由 `deepseek::config_for` 直接给，不需要反查 |
+/// | `creds::list` 找运营商账号 | 那是 operator 的凭据表，vendor 的在 `vendor::creds` |
+/// | `meta.loongportAccountId` 认账号 | vendor 一个 provider_id 就唯一确定账号（它是 `sha256(vendor+account)`） |
+///
+/// 硬塞会把「运营商归属」这套概念带进 vendor 层。所以照它的**形状**写一份短的
+/// （含 `is_managed` 那道正向判据），而不是共用它的**实现**。
+///
+/// ## 只动传入的这一个平台
+///
+/// 一行背后六条记录，用户点的是「当前 tab 这个平台的恢复」（`user_edited` 也是按平台
+/// 算的）。一次恢复六条会把他在别的 tab 里的编辑一起冲掉，而界面上没有任何地方
+/// 告诉过他这一点。
+#[tauri::command]
+pub async fn vendor_reset_tier_config(
+    state: State<'_, AppState>,
+    provider_id: String,
+    app_id: String,
+) -> Result<(), String> {
+    vendor_reset_tier_config_impl(state.inner(), &provider_id, &app_id).map_err(|e| e.to_string())
+}
+
+fn vendor_reset_tier_config_impl(
+    state: &AppState,
+    provider_id: &str,
+    app_id: &str,
+) -> Result<(), AppError> {
+    // 用正向判据 `is_managed`（照 operator 那条的注释：别拿 `reject_if_managed`
+    // 的 Err 反着判 —— 那个函数语义是「撞到托管项就拦下」，这里要的恰好相反）。
+    if !crate::operator::is_managed(provider_id) {
+        return Err(AppError::Config(
+            "只有 LoongPort 托管的档位才能恢复默认配置".into(),
+        ));
+    }
+
+    let app_type: AppType = app_id.parse()?;
+    let (base_url, model) = deepseek::config_for(&app_type).ok_or_else(|| {
+        AppError::Config(format!(
+            "{app_id} 这个平台没有 DeepSeek 配置，恢复不了默认值"
+        ))
+    })?;
+
+    let existing = state
+        .db
+        .get_provider_by_id(provider_id, app_type.as_str())
+        .map_err(|e| AppError::Database(format!("读取档位失败: {e}")))?
+        .ok_or_else(|| AppError::Config("这个档位不存在".into()))?;
+
+    // sk 从现有配置里取（照 operator 那条）。取不到就让用户走「获取密钥」重建 ——
+    // 生成一份没有 sk 的「默认配置」比保持现状更糟（那是一条必定 401 的记录）。
+    let api_key = crate::operator::provision::extract_api_key(&existing.settings_config, &app_type)
+        .ok_or_else(|| {
+            AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
+        })?;
+
+    // ⚠️ **`roles` 必须与生成时一致**，否则「恢复默认」写出的配置与
+    // `user_edited` 的基准不同 ⇒ 恢复完立刻又显示「已手工维护」。
+    let defaults = crate::operator::provision::settings_config_with_roles(
+        &app_type,
+        &api_key,
+        &existing.name,
+        base_url,
+        model,
+        provision::claude_roles_for(&app_type),
+    )
+    .ok_or_else(|| AppError::Config(format!("{app_id} 这个平台生成不出默认配置")))?;
+
+    let restored = Provider {
+        settings_config: defaults,
+        ..existing
+    };
+    state
+        .db
+        .save_provider(app_type.as_str(), &restored)
+        .map_err(|e| AppError::Database(format!("保存配置失败: {e}")))?;
+
+    // 恢复的若正是当前在用的那条，落地文件要跟着走 —— 不刷的话 CLI 读到的仍是
+    // 用户改坏的那份，而「恢复默认」恰恰是他在档位坏了时点的按钮。
+    // 失败只 warn：DB 已经存对了，手工切一次就能生效（同 provision 结尾那段）。
+    // `current` 给的是 id 字符串本身（不是 Provider），照本文件 provision 结尾那处写。
+    let is_current = ProviderService::current(state, app_type.clone())
+        .ok()
+        .as_deref()
+        == Some(provider_id);
+    if is_current {
+        if let Err(e) = ProviderService::sync_current_provider_for_app(state, app_type.clone()) {
+            log::warn!("恢复默认配置后刷新 {} 落地配置失败: {e}", app_type.as_str());
+        }
+    }
+
+    Ok(())
 }
 
 /// 查一行的余额。`None` = 拿不到（没有钱包 / 金额解不动）—— **不是显示 0**。

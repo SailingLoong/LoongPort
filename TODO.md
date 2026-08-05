@@ -5,6 +5,98 @@
 
 ---
 
+## 一键从 cc-switch 同步配置与数据（2026-08-05 记，维护者定了「要做」）
+
+**what**：cc-switch 老用户装上 LoongPort 后看到的是**全空的**，得把 provider、MCP、
+skills、prompt 一件件重新配。两边的数据目录完全隔离：
+
+| | 目录 | 数据库 |
+|---|---|---|
+| cc-switch | `~/.cc-switch/` | `cc-switch.db` |
+| LoongPort | `~/.loongport/`（`config.rs:21` `APP_DIR_NAME`） | `loongport.db`（`config.rs:24`） |
+
+⚠️ **这个隔离是有意的、别改**：两个 app 可以同时装、同时跑，共用一个库会互相踩
+（`app_config.rs` 那些 `~/.cc-switch` 引用是**旧数据识别**用的兜底，属 CLAUDE.md
+§三点五「它本身就是兜底」那一类，绝不能改）。要的是**一次性拷过来**，不是共用。
+
+**要做的**：设置页给一个「从 cc-switch 导入」按钮 —— 检测到 `~/.cc-switch/cc-switch.db`
+存在就显示，点了把配置与数据搬过来。
+
+**why 现在才记**：本轮在收尾首个公开发布，之前的假设是「新用户为主」。但 LoongPort 是
+cc-switch 的 fork，**实际盘子里很大一部分人本来就是 cc-switch 用户** —— 让他们手工重配
+一遍是最劝退的一步，且这一步发生在他们对产品还没有任何信任的时候。
+
+**how-to-repay**（前置条件链）：
+
+1. **先定范围：哪些表该搬、哪些不该。**（**需要维护者决策**，这是本项唯一的真问题）
+   - 该搬：provider 配置、MCP、skills、prompt —— 用户自己攒的东西。
+   - **不该搬**：LoongPort 自己的表（`loongport_*` / operator 凭据 / `device-id`），
+     cc-switch 里压根没有。
+   - **要单独想**：cc-switch 里那些**指向别家中转站**的 provider。照搬进来会与
+     LoongPort 托管的档位混在一列里，而两者语义不同（见 CLAUDE.md「§什么时候可以不复用」
+     里 `ProviderCard` vs 托管项那段）。是全搬、只搬官方直连、还是让用户勾选？
+2. **复用 `import_config_from_file`**（`commands/import_export.rs:42`）**别新写一套** ——
+   它已有 `db.import_sql` + `run_post_import_sync` + 自动建备份（返回 `backup_id`）
+   三件事。新命令做的应该只是「把 `~/.cc-switch/cc-switch.db` 导成 SQL 再喂给它」，
+   或直接走 `db.import_sql` 的同一条路。
+3. **导入前必须先备份自己的库** —— 复用第 2 步那条路径自带的备份，
+   失败要能 `restore_db_backup`（`import_export.rs:152`，已有）。
+4. 前端入口跟着上游的形状放（`DeepLinkImportDialog.tsx` 是同类交互的现成参照）。
+   文案要说清「这会把 cc-switch 的配置**复制**过来，不动 cc-switch 那边」。
+5. ⚠️ **schema 会分叉**：两边的 `cc-switch.db` / `loongport.db` 迁移版本可能不同步
+   （LoongPort 加了自己的表和迁移）。导入时**必须校验源库版本**，比自己旧就先跑迁移、
+   比自己新就拒绝并说明原因 —— 不能直接灌进去。这条是实现上最容易出错的地方。
+
+### 冲突归属规则（2026-08-05 维护者定的，本项的核心语义）
+
+**规则**：同一把 key 若既存在于导入进来的 cc-switch 配置里、又属于 LoongPort 管的
+运营商 / 官网直连模块，则**归 LoongPort 那一侧维护**（运营商 / DeepSeek 官网模块），
+不留成两条并存的记录。两个方向都适用：
+
+- **导入时**：cc-switch 那条与已有托管项撞了 ⇒ 托管项胜，那条不导入。
+- **导入后新加运营商**（注册 / 登录 / provision）：新建的 key 与已导入的 cc-switch 条目
+   撞了 ⇒ 转由运营商模块维护，把那条 cc-switch 记录收编掉。
+
+**为什么不能并存**：两条指向同一个上游的记录，用户看到的是重复档位，
+而其中一条不受 provision 管（改模型 / 换 sk 都不会跟着动）⇒ 用哪条完全看运气。
+这与 CLAUDE.md §三点六「同一事实散在多处」是同一类病。
+
+**判据（维护者给的）**：`域名 + sk 密钥` 两者合起来做唯一键 —— 单看 sk 可能撞
+（不同站点的 key 格式相同），单看域名会把同站点的多个档位误并成一个，合起来不会重复。
+
+⚠️ **但这个键不能直接当持久化主键，因为 sk 会变**（`provision` 会「只换 sk」——
+见 `provision.rs:607` / `:830-838` 那两处文档）。换一次 sk，同一个档位的键就变了。
+所以正确用法是**分两层**：
+
+| 用途 | 用什么 |
+|---|---|
+| **持久身份**（provider_id、DB 主键） | 保持现状：`SHA256(site_origin/account_id/group_id)`（`provision.rs:362`）、vendor 侧 `provider_id_for(vendor_id, account_id)`（`vendor/provision.rs:40`）。**换 sk 不变**，这是它比 sk 更适合当身份的原因 |
+| **冲突检测**（判「这条 cc-switch 记录是不是同一个东西」） | 维护者给的 `域名 + sk` —— 只在导入 / provision 那一刻比一次，比完就按上表的持久 id 落库 |
+
+即：**`域名 + sk` 是识别用的指纹，不是身份。** 别拿它建唯一索引，否则每次
+provision 换 sk 都会变成「插入一条新的」而不是「更新已有的那条」。
+
+**⚠️ 取域名与 sk 本身就是个活儿，别假设有现成字段**：cc-switch 的 provider
+**没有 `base_url` / `api_key` 列** —— 全塞在 `settings_config`（`provider.rs:15`，
+一个 `serde_json::Value`）里，且**每种 app 的形状都不同**（Codex 是 TOML 片段、
+Claude 是 JSON、Gemini 又一套）。所以：
+
+- **取 base_url 复用上游的 adapter trait**：`proxy/providers/adapter.rs:21` 的
+  `extract_base_url(&Provider)`，各 app 已各自实现（`codex.rs:672` / `claude.rs:703` /
+  `gemini.rs:165`）。别自己解析 `settings_config`，那等于把上游三套解析逻辑重写一遍。
+- **取 sk 复用我们已有的** `provision.rs:1028` 的
+  `extract_api_key(settings_config, app_type)`。
+- 拿到 base_url 后**要归一化到 origin 再比**（去掉 path、统一大小写、剥末尾斜杠与
+  默认端口）：cc-switch 那侧是 `https://bestapi.store/v1` 这种带 path 的，
+  托管项那侧是 `site_origin`（`https://bestapi.store`），不归一化会全部漏检。
+
+**被收编的那条要怎么处理**（**需要维护者决策**，第 1 步那个「别家中转站 provider」
+的范围问题会先决定这里）：直接删、还是保留但标记「已由 LoongPort 接管」？
+删了用户在 cc-switch 里的自定义（改过的模型名 / 别名）就没了；留着又回到「两条并存」。
+倾向是**删并在导入报告里列出「这 N 条已由 LoongPort 接管」**，让用户知道去哪找它们。
+
+---
+
 ## 低余额的**系统通知**（2026-08-04 记，维护者定了「后面要做」）
 
 **what**：余额低于 $5 时只在**应用内**提醒（`OperatorRow` 里那个琥珀色叹号）。
@@ -238,3 +330,79 @@ sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store`
 
 **⚠️ 别把这条当成「可以不做」**：停在 1 天不算错（安全收益已经拿到大部分），
 但那意味着每个用户的保护每天过期一次。要么调上去，要么明确决定就停在这儿并删掉本条。
+---
+
+## 档位配置（尤其模型映射）应由远端配置文件下发（2026-08-05 记，维护者定了「将来要做」）
+
+**what**：每个档位的默认配置现在是**编译期 Rust 字面量** —— 官网直连那份在
+`vendor/deepseek.rs` 的 `config_for`（六个平台的 `(base_url, model)`），Claude 的模型
+映射（opus/fable → pro、sonnet/haiku/subagent → flash）也在同一处。
+⇒ **模型改名或新增档位，只能靠发版**。
+
+**why 现在这样**：远端配置那套（`operator/remote_config.rs`）已经跑着了，
+但它当前的 schema 只有三个键（`sponsors` / `affCodes` / `promoCodes`），
+不含档位配置。本轮改的是模型映射的**取值**，把整套配置搬去远端是另一件事，
+按尺子2 不塞进这次。
+
+**为什么值得做**（不是投机预留）：厂商改模型名这件事**已经在发生** ——
+`deepseek-v4-pro` / `-flash` 这两个名字本身就是上游 preset 跟着 DeepSeek 改过来的。
+每次改名都要求用户升级客户端，而配置下发本就是 `remote_config` 存在的理由。
+
+**how-to-repay**：
+
+1. `RemoteConfig` 加一个键（如 `tierConfigs`），**必须带 `#[serde(default)]`** ——
+   同 `promo_codes` 那条注释的双向兼容理由（旧客户端读新配置 / 新客户端读旧配置）。
+2. 取值处改成「远端有就用远端、否则回落到内置字面量」：
+   `vendor/deepseek.rs::config_for` 与 Claude 模型映射那处。
+   **内置那份要留着**（首次启动、离线、验签失败都得能工作 —— 三层回落是
+   `remote_config` 已有的设计，别绕过它）。
+3. 配置源文件与签名脚本在档案仓 `remote-config/`，改 schema 要同步那份 + 重新签名。
+4. ⚠️ **与「已手工维护」的判据有交互**：`is_user_edited` 是「跟默认值比对」，
+   而默认值一旦能远端变更，同一份配置可能今天算「默认」、明天算「已改过」。
+   `candidate_models` 现在靠「当前默认 + 全部历史默认值」链式比对来兜
+   `DEFAULT_MODEL` 变更那天的误报 —— 远端下发后这条链要能容纳远端给过的历史值，
+   否则用户会看到档位集体误报「已手工维护」。**这是本项真正的难点，别当成加个字段。**
+
+---
+
+## `is_user_edited` 不覆盖 hermes / openclaw / opencode（2026-08-05 记，加 vendor 编辑功能时暴露）
+
+**what**：`operator/provision.rs` 的 `api_key_location` 只认 codex / codex-image /
+claude / claude-desktop / gemini。剩下三个平台落到 `_ => None` ⇒ 对它们：
+
+| 受影响的能力 | 症状 |
+|---|---|
+| 「已手动维护」标记 | `is_user_edited` 恒为 `None` ⇒ **界面上永远不显示标记**，即使用户改过 |
+| 「恢复默认配置」 | `extract_api_key` 读不出 sk ⇒ 命令直接报「读不出密钥」 |
+| provision 的「只换 sk」 | `patch_api_key` 失败 ⇒ **回落到全量重写**，把用户的编辑整份冲掉 |
+
+第三条最糟：它不是「功能缺失」而是**静默的数据丢失**，且发生在用户点「获取密钥」
+（他以为只是刷新一下）的时候。
+
+⚠️ **2026-08-05 顺手修了 claude-desktop 那个**（它与 claude 同形、加一行就够）。
+剩下三个是结构问题，见下。
+
+**why 现在不做**：`api_key_location` 返回 `(section, field)` **两段**，而这三个平台的
+sk 位置表达不了：
+
+| 平台 | sk 在哪 | 出处 |
+|---|---|---|
+| hermes | **顶层** `api_key` | `deeplink/provider.rs:604` |
+| openclaw | **顶层** `apiKey` | 同上 `:563`（`build_additive_app_settings`） |
+| opencode | `options.apiKey`（两层，且 `options` 嵌在 provider 名字下） | 同上 `:534` |
+
+补它要把那个返回类型改成能表达「顶层」与「多层路径」的形状（如 `&[&str]` 路径），
+**连带动 `patch_api_key` / `extract_api_key` 的签名与 operator 侧全部调用方** ——
+属「借清债名义翻修无关模块」，不在加 vendor 编辑功能这一轮的手伸到的范围内。
+
+**how-to-repay**：
+
+1. `api_key_location` 改成返回字段路径（`Option<&'static [&'static str]>`），
+   codex 那条变 `["auth", "OPENAI_API_KEY"]`、hermes 变 `["api_key"]`、
+   opencode 变 `["options", "apiKey"]`（⚠️ opencode 的 provider 名字是动态的，
+   得先确认那一层的键怎么定 —— 看 `build_opencode_settings` 的 `json!` 结构）。
+2. `patch_api_key` / `extract_api_key` 跟着走路径而不是两段。
+3. **有一条测试正等着这个修完**：`vendor::provision::tests::`
+   `user_edited_is_currently_undecidable_for_three_platforms` 钉的是**当前**行为
+   （那三个平台返回 `None`）。补完之后它会红 —— 那时把断言改成 `Some(false)`，
+   **别当成回归**（测试文档里也写了这句）。

@@ -6,8 +6,37 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { providersApi } from "@/lib/api";
 import type { AppId } from "@/lib/api";
-import type { TierInfo } from "@/lib/api/operator";
 import type { Provider } from "@/types";
+
+/**
+ * 这个 hook 需要被编辑对象提供的**全部**信息。
+ *
+ * 有意收窄成三个字段而不是吃整个 `TierInfo`：官网直连行（`VendorAccountRow`）
+ * 走的是同一套编辑流程，但它不是档位、没有 `TierInfo` 那些字段（倍率、分组名、
+ * websiteUrl）。收窄之后两类行都传得进来，且不必为 vendor 造一个假 `TierInfo`
+ * ——那种造法会让「哪些字段是真的」变得不可判。
+ *
+ * `TierInfo` 与 `VendorAccountRow` 都结构性满足它，不需要各自加 `implements`。
+ */
+export interface EditableTier {
+  /** 要编辑的那条 provider 记录的 id。 */
+  providerId: string;
+  /** 弹窗标题里显示的名字。 */
+  displayName: string;
+  /** 是不是当前 tab 正在用的那条 —— 决定要不要多给一句 ChatGPT 重启提示。 */
+  isCurrent: boolean;
+  /**
+   * 警告文案用哪一套。**只影响文案，流程完全相同。**
+   *
+   * - `"tier"`（默认）：中转站档位 —— 文案提「档位」与「刷新分组」。
+   * - `"vendor"`：官网直连账号 —— 它不是档位、没有分组，且一行对应六个平台，
+   *   所以文案要说「这个账号在当前这个应用下的配置」。
+   *
+   * 沿用同一套文案会让官网行的用户看到「刷新分组不会覆盖它」——而那个动作
+   * 在他那一行压根不存在（他按的是「获取密钥」）。
+   */
+  kind?: "tier" | "vendor";
+}
 
 /**
  * 「编辑档位配置」的完整流程：**先警告 → 再开 cc-switch 的编辑页 → 保存后刷新**。
@@ -43,11 +72,11 @@ export function useTierEditGuard(
 ) {
   const { t } = useTranslation();
   // 待确认的档位（警告弹窗阶段）。
-  const [pending, setPending] = useState<TierInfo | null>(null);
+  const [pending, setPending] = useState<EditableTier | null>(null);
   // 正在编辑的 provider（已确认，编辑页阶段）。
   const [editing, setEditing] = useState<Provider | null>(null);
 
-  const requestEdit = useCallback((tier: TierInfo) => {
+  const requestEdit = useCallback((tier: EditableTier) => {
     setPending(tier);
   }, []);
 
@@ -60,7 +89,7 @@ export function useTierEditGuard(
    * 而编辑是低频动作，多一次查询无所谓。
    */
   const confirmEdit = useCallback(
-    async (tier: TierInfo) => {
+    async (tier: EditableTier) => {
       setPending(null);
       try {
         const all = await providersApi.getAll(appId);
@@ -144,13 +173,17 @@ export function useTierEditGuard(
         // `update_provider`（扩大 merge 接触面），而且会让**每一次**编辑都弹
         // 「要不要退出 ChatGPT」——包括编辑非当前档位（那种情况根本不写 live）。
         // 一句话说清 + 用户自己决定要不要重启，成本与收益匹配（尺子2）。
-        message={
-          pending?.isCurrent
-            ? `${t("loongport.tier.editConfirmMessage")}\n\n${t(
-                "loongport.tier.editCurrentNote",
-              )}`
-            : t("loongport.tier.editConfirmMessage")
-        }
+        // 主文案按 `kind` 取（见 `EditableTier.kind`）。ChatGPT 那句附注两类共用 ——
+        // 它讲的是 ChatGPT 桌面版会回写 `~/.codex`，与「被编辑的是档位还是官网账号」无关。
+        message={(() => {
+          const main =
+            pending?.kind === "vendor"
+              ? t("loongport.vendor.editConfirmMessage")
+              : t("loongport.tier.editConfirmMessage");
+          return pending?.isCurrent
+            ? `${main}\n\n${t("loongport.tier.editCurrentNote")}`
+            : main;
+        })()}
         confirmText={t("loongport.tier.editConfirmButton")}
         onConfirm={() => pending && void confirmEdit(pending)}
         onCancel={() => setPending(null)}

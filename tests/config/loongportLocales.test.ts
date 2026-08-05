@@ -164,6 +164,11 @@ const requiredKeys = [
   "vendor.sessionExpiredUsable",
   "vendor.loginFailed",
   "vendor.openKeyPage",
+  // 官网行专用的两条编辑文案。**不能复用 `tier.*` 那两条** —— 它们写死了
+  // 「档位」与「刷新分组」，而官网行不是档位、没有分组（他按的是「获取密钥」），
+  // 且一行对应六个平台，所以要说「这个账号在当前这个应用下的配置」。
+  "vendor.userEditedHint",
+  "vendor.editConfirmMessage",
 ] as const;
 
 type Translations = Record<string, unknown>;

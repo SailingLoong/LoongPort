@@ -154,16 +154,57 @@ pub fn validate_plaintext_key(s: &str) -> Result<String, VendorError> {
 /// preset 默认主模型就是 pro。
 pub fn config_for(app: &AppType) -> Option<(&'static str, &'static str)> {
     match app {
-        AppType::Codex => Some(("https://api.deepseek.com", "deepseek-v4-flash")),
+        AppType::Codex => Some(("https://api.deepseek.com", FLASH)),
         AppType::Claude | AppType::ClaudeDesktop => {
-            Some(("https://api.deepseek.com/anthropic", "deepseek-v4-pro"))
+            Some(("https://api.deepseek.com/anthropic", PRO))
         }
-        AppType::Hermes => Some(("https://api.deepseek.com", "deepseek-v4-pro")),
-        AppType::OpenClaw | AppType::OpenCode => {
-            Some(("https://api.deepseek.com/v1", "deepseek-v4-pro"))
-        }
+        AppType::Hermes => Some(("https://api.deepseek.com", PRO)),
+        AppType::OpenClaw | AppType::OpenCode => Some(("https://api.deepseek.com/v1", PRO)),
         // 生图栏不适用：DeepSeek 没有 gpt-image-* 模型，展开一条进去只会得到一个必然 404 的档位。
         AppType::Gemini | AppType::GrokBuild | AppType::CodexImage => None,
+    }
+}
+
+/// DeepSeek 官方两档模型：贵的那档。
+const PRO: &str = "deepseek-v4-pro";
+/// DeepSeek 官方两档模型：便宜的那档。
+const FLASH: &str = "deepseek-v4-flash";
+
+/// Claude 系各模型角色分别用哪一档。
+///
+/// ## 为什么这里要分档，而运营商那条不分
+///
+/// 运营商的分组是「一个 sk 一档价」，所以 [`settings_config_for`] 默认让三个别名
+/// 全指主模型（那里的注释写了理由）。**DeepSeek 是官网直连**，`pro` 与 `flash`
+/// 是官方真实的两档模型、两个价格 ⇒ 按角色分档是有意义的，把便宜活派给便宜那档。
+///
+/// ## 配比是维护者定的，⚠️ **别「对齐上游」把它改回去**
+///
+/// 与上游 cc-switch 的 DeepSeek preset（`claudeProviderPresets.ts:812`）逐行对照：
+///
+/// | 角色 | 上游 preset | 这里 | |
+/// |---|---|---|---|
+/// | 主模型 | `pro` | `pro` | 同 |
+/// | Opus | `pro` | `pro` | 同 |
+/// | Haiku | `flash` | `flash` | 同 |
+/// | **Sonnet** | **`pro`** | **`flash`** | ← **有意不同** |
+/// | **Fable** | 未写 | `pro` | ← 上游 preset 没这个键 |
+/// | **Subagent** | 未写 | `flash` | ← 同上 |
+///
+/// Sonnet 走 flash 是**维护者选的性价比配比**（日常对话用便宜那档，重活留给
+/// opus/fable）。上游那份把 Sonnet 归 pro，两者都不算错 —— 但这是产品决定，
+/// 不是「跟上游不一致的 bug」。
+///
+/// Fable / Subagent 上游 preset 没写，但**上游认这两个 env**
+/// （`proxy/model_mapper.rs` 读它们），我们把它们接到了 deeplink 上
+/// （`DeepLinkImportRequest::fable_model`）。
+pub fn claude_role_models() -> crate::operator::provision::ClaudeRoleModels {
+    crate::operator::provision::ClaudeRoleModels {
+        opus: PRO,
+        fable: PRO,
+        sonnet: FLASH,
+        haiku: FLASH,
+        subagent: FLASH,
     }
 }
 
@@ -1205,6 +1246,48 @@ mod tests {
                 config_for(&app).is_none(),
                 "{app:?} 该返回 None —— 上游没有 DeepSeek preset（Gemini CLI 认 Google 自家\
                  协议、GrokBuild 认 xAI 的），凭猜给一个端点会让用户切过去 401"
+            );
+        }
+    }
+
+    /// ⭐ **角色分档的配比是产品决定，钉住它。**
+    ///
+    /// 特别是 **Sonnet 走 flash** 这一条与上游 preset 有意不同
+    /// （上游把 Sonnet 归 `pro`，见 [`claude_role_models`] 的对照表）。
+    /// 不钉的话，下一个「对齐上游 preset」的改动会把它悄悄改回 `pro` ——
+    /// 用户不会收到任何信号，只是日常对话突然贵了几倍。
+    #[test]
+    fn claude_roles_split_pro_and_flash_as_the_maintainer_chose() {
+        let r = claude_role_models();
+
+        assert_eq!(r.opus, PRO, "opus 该走贵的那档");
+        assert_eq!(r.fable, PRO, "fable 该走贵的那档");
+        assert_eq!(
+            r.sonnet, FLASH,
+            "sonnet 该走 flash —— **这条与上游 preset 有意不同**（它是 pro）。\
+             这是维护者选的性价比配比，不是漂移，别「对齐上游」改回去"
+        );
+        assert_eq!(r.haiku, FLASH, "haiku 该走便宜的那档");
+        assert_eq!(r.subagent, FLASH, "subagent 该走便宜的那档");
+    }
+
+    /// 两个模型名本身仍要在上游 preset 里出现过。
+    ///
+    /// 与 [`the_six_values_still_match_the_upstream_presets`] 同一个理由（那条只覆盖
+    /// `config_for` 的主模型），但这里守的是**分档用到的两个值**：DeepSeek 把 `v4`
+    /// 升成 `v5` 那天，上游 preset 会先改，这条闸让我们收到信号。
+    ///
+    /// **只比值出现过、不比它落在哪个角色上** —— 角色映射由上面那条测试守，
+    /// 而它有意与上游不同，两条闸的职责不能混。
+    #[test]
+    fn both_tiers_still_exist_in_the_upstream_preset() {
+        let preset = include_str!("../../../src/config/claudeProviderPresets.ts");
+        for model in [PRO, FLASH] {
+            assert!(
+                preset.contains(&format!("\"{model}\"")),
+                "{model} 在上游 claudeProviderPresets.ts 里找不到 —— \
+                 上游很可能升了模型版本，我们这份字面量已经过期，\
+                 用户切过去会报「模型不存在」"
             );
         }
     }

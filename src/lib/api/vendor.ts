@@ -48,6 +48,17 @@ export interface VendorAccountRow {
    * 空串 = 还没登录过（没有 accountId 就派生不出 id）。
    */
   providerId: string;
+  /**
+   * **当前 tab 那个平台**的配置是不是被用户改过（`vendorApi.list` 的 `appId`）。
+   *
+   * ⚠️ **按平台算，不是整行一个值** —— 一行背后六条 provider 记录各自能被独立编辑。
+   *
+   * `null` = 判不了（没 provision 过 / 这个平台不适用）。**`null` 时不显示标记** ——
+   * 与 operator 的 `TierInfo.userEdited` 同一条原则：不知道就别断言。
+   *
+   * 后端不存这个标记，靠与默认配置整份比对现算 ⇒ 用户把配置改回默认，标记会自动消失。
+   */
+  userEdited: boolean | null;
 }
 
 /** `vendorApi.provision` 的结果。 */
@@ -123,10 +134,22 @@ export const vendorApi = {
   /**
    * 列出已添加的官网账号。
    *
-   * **不吃 app 参数** —— 官网账号在 `VENDOR_APPS` 那六个 tab 都出现，
-   * 过滤用 `vendorSupportsApp` 在前端做。
+   * `appId` **只用来算 `userEdited`**（一行背后六条 provider 记录，「改过没有」
+   * 必须按平台问）。**不是用它过滤行** —— 官网账号在 `VENDOR_APPS` 那六个 tab
+   * 都出现，那个判断仍由前端 `vendorSupportsApp` 做。
    */
-  list: (): Promise<VendorAccountRow[]> => invoke("vendor_list_accounts"),
+  list: (appId: AppId): Promise<VendorAccountRow[]> =>
+    invoke("vendor_list_accounts", { appId }),
+
+  /**
+   * 把**一个平台**的配置恢复成 LoongPort 的默认值。**密钥保留不变。**
+   *
+   * 只动 `appId` 那一条 —— 一行背后六条记录，用户点的是当前 tab 那个平台的恢复
+   * （`userEdited` 也是按平台算的）。一次恢复六条会把他在别的 tab 里的编辑一起
+   * 冲掉，而界面上没有任何地方告诉过他这一点。
+   */
+  resetTierConfig: (providerId: string, appId: AppId): Promise<void> =>
+    invoke("vendor_reset_tier_config", { providerId, appId }),
 
   /**
    * 开登录窗，等凭据回来，存成一行账号。

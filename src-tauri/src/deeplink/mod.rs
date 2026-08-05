@@ -89,6 +89,23 @@ pub struct DeepLinkImportRequest {
     /// Optional Opus model (Claude only, v3.7.1+)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opus_model: Option<String>,
+    /// Optional Fable model (Claude only) — writes `ANTHROPIC_DEFAULT_FABLE_MODEL`.
+    ///
+    /// LoongPort 新增（上游只有 haiku/sonnet/opus 三个别名）。加它是因为官网直连的
+    /// DeepSeek 有 pro / flash 两档真实模型，要按角色分档写入
+    /// （`vendor::deepseek::config_for`），而 deeplink 是生成配置的唯一通路。
+    ///
+    /// **上游本来就认这个 env** —— `proxy/model_mapper.rs` 读 `fable_model`
+    /// 与 `subagent_model`，只是 deeplink 这条路没给传。所以这不是发明新键，
+    /// 是把已有的键接到 deeplink 上。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fable_model: Option<String>,
+    /// Optional subagent model (Claude only) — writes `CLAUDE_CODE_SUBAGENT_MODEL`.
+    ///
+    /// ⚠️ **这个键不在 `ANTHROPIC_DEFAULT_*` 系列里**，照抄前缀会写出一个
+    /// Claude Code 不认的名字。见 `fable_model` 那段说明。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
 
     // ============ Prompt-specific fields ============
     /// Base64 encoded Markdown content
