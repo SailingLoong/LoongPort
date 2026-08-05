@@ -6,6 +6,8 @@
 
 ### Codex 只花官方的 5%，Claude 只花 20%，国内直连
 
+[![下载最新版](https://img.shields.io/github/v/release/SailingLoong/LoongPort?label=%E4%B8%8B%E8%BD%BD%E6%9C%80%E6%96%B0%E7%89%88&color=2ea44f&style=for-the-badge)](../../releases/latest)
+
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](../../releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
