@@ -106,6 +106,32 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
    * 一对命令 + 一个 settings 键，那些现在全删了。
    */
   const isImageTab = appId === "codex-image";
+  /**
+   * 这一屏切档位会不会动到 `~/.codex/` —— 也就是**要不要理 ChatGPT 桌面版**。
+   *
+   * ## 为什么必须按 app 判，而不是只看 `chatgptNeedsAttention`
+   *
+   * `chatgptNeedsAttention` 的语义是「这台机器上要不要提示处理 ChatGPT」——
+   * 它只关**平台与安装状态**（非 macOS 恒为 true，见 `chatgpt_app::needs_user_attention`），
+   * **完全不含「切的是哪个 app」**。
+   *
+   * 于是 2026-08-05 维护者实测到：**在 claude 页面切档位，也会弹「要不要退出 ChatGPT」
+   * 的确认框，选完还提示「请手动重启 ChatGPT」** —— 而 claude 档位写的是
+   * `~/.claude/settings.json`，跟 ChatGPT 毫无关系。用户被要求为一件不存在的因果做决定。
+   *
+   * （这一处此前有句注释说 `chatgptNeedsAttention`「已经包含这个事实」，那是不属实的。）
+   *
+   * ## 判据
+   *
+   * ChatGPT 桌面版与命令行 codex **共用 `~/.codex`**，而它只在启动时读那个目录 ⇒
+   * 只有会改到 codex 主配置的那一屏才需要这道编排。
+   *
+   * ⚠️ **`codex-image` 有意不算在内。** 生图档位落的是 MCP 条目、不改 codex 的主模型
+   * 与 `base_url`，ChatGPT 桌面版并不消费它 —— 而首次注册那一步本来就要用户新开终端
+   * （见 README「在 CLI 里生图」那节），不需要再借道这个确认框。若将来发现桌面版
+   * 确实受影响，把它加进来即可，但要先有实测依据，不靠推测。
+   */
+  const touchesCodexConfig = appId === "codex";
   const [operators, setOperators] = useState<OperatorRowData[]>([]);
   /**
    * 待确认的切换：**显示名 + 真正执行它的函数**，`null` = 不弹。
@@ -661,8 +687,9 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   const handleVendorUse = (rowId: number) => {
     const row = vendorsRef.current.find((v) => v.id === rowId);
     const name = row?.vendorName ?? String(rowId);
-    // ChatGPT 没装就不必问，直接切（与 `handleSwitchTier` 同一判据）。
-    if (chatgptNeedsAttention) {
+    // 两个条件都要成立才问：这一屏会动 codex 配置，且这台机器上装着 ChatGPT。
+    // 少了前者就会在 claude 页面问一件无关的事（见 `touchesCodexConfig` 的说明）。
+    if (touchesCodexConfig && chatgptNeedsAttention) {
       setConfirmSwitch({
         name,
         run: (quitChatgpt) => void doVendorSwitch(rowId, quitChatgpt),
@@ -1011,8 +1038,9 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
 
   const handleSwitchTier = (_operatorId: number, tier: TierInfo) => {
     if (tier.isCurrent) return;
-    // ChatGPT 没装就不必问「要不要关它」，直接切。
-    if (chatgptNeedsAttention) {
+    // 两个条件都要成立才问，见 `touchesCodexConfig` 的说明 ——
+    // 只看 `chatgptNeedsAttention` 会在 claude / gemini 页面问一件无关的事。
+    if (touchesCodexConfig && chatgptNeedsAttention) {
       setConfirmSwitch({
         name: tier.displayName,
         run: (quitChatgpt) => void doSwitch(tier, quitChatgpt),
