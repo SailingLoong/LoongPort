@@ -461,20 +461,6 @@ fn promo_prefill_snippet(code: &str) -> String {
     )
 }
 
-/// 生成「把邀请码种进 localStorage」的那一小段脚本。
-///
-/// ## 三条克制（每条都有理由，别"改进"它们）
-///
-/// 1. **只在键不存在或已过期时写** —— 用户可能是**别人邀请来的**（他自己带着
-///    `?aff=` 进过这个站，站点已经存了那个码）。覆盖它等于抢别人的邀请关系。
-///    判据用站点自己的语义（`expiresAt <= Date.now()` 视为没有），不自己发明。
-/// 2. **`expiresAt` 用与站点相同的 30 天 TTL**，不写成永久 —— 写成永久会让一个
-///    早已过期的码在站点看来仍然有效，那是在给它塞脏数据。
-/// 3. **整段包在 try 里，失败什么都不做**：邀请码是**我们的收益**，不是用户要的功能。
-///    为它打断登录流程是本末倒置。
-///
-/// 与凭据回传那半**完全解耦**：它读、这段写，互不依赖 —— 邀请码这段整个删掉，
-/// 登录照样工作。
 /// 注册页顶部那条「这是注册页，有账号请去登录」的横幅。
 ///
 /// ## 为什么需要它（用户提的）
@@ -529,9 +515,21 @@ fn register_hint_banner_snippet() -> String {
       return null;
     }
 
+    // 是我们设过 body 的 paddingTop 吗。撤横幅时要还原它，而**只还原自己设的那次** ——
+    // 站点自己可能也用这个属性（横幅在时我们只在它为空串时才设，见 syncBanner）。
+    var paddedByUs = false;
+
     function removeBanner() {
       var old = document.getElementById(BANNER_ID);
       if (old) old.remove();
+      // ⚠️ **必须还原**（review 抓出）：登录窗在拿到凭据后**有意不关**
+      // （见 commands/operator.rs 那段「不关窗」的说明：dashboard 上有余额与充值入口，
+      // 用户还要接着用）。不还原的话，他会带着一条 40px 的空白条浏览登录页、
+      // dashboard、充值页 —— 而那条横幅早就不在了。
+      if (paddedByUs) {
+        document.body.style.paddingTop = '';
+        paddedByUs = false;
+      }
     }
 
     function syncBanner() {
@@ -584,9 +582,11 @@ fn register_hint_banner_snippet() -> String {
       bar.appendChild(btn);
 
       document.body.appendChild(bar);
-      // 别盖住页面顶部的内容。
+      // 别盖住页面顶部的内容。只在站点自己没设过这个属性时才动它，
+      // 并记下「是我们设的」—— `removeBanner` 靠那个标志决定要不要还原。
       if (document.body.style.paddingTop === '') {
         document.body.style.paddingTop = bar.offsetHeight + 'px';
+        paddedByUs = true;
       }
     }
 
@@ -597,14 +597,30 @@ fn register_hint_banner_snippet() -> String {
     // 盯得住的节点。轮询是这个脚本里已有的模式（`trySend` / `tryPrefill` 同样如此），
     // 500ms × 一个 querySelector 的开销可以忽略。
     //
-    // **不设上限**：登录窗的生命周期就是用户这一次登录，窗口关掉进程内的定时器
-    // 随之消失。而主脚本里那个轮询有 600 次上限是因为它要在凭据到手后停下来。
+    // ⚠️ **必须设上限**（review 抓出我写错的一个前提）。原来这里写的是「登录窗的
+    // 生命周期就是用户这一次登录，窗口关掉定时器随之消失」—— **那不成立**：
+    // 拿到凭据后窗口**有意不关**（见 commands/operator.rs 那段「不关窗」），
+    // 用户会在里面接着看 dashboard、充值页，想看多久看多久。于是这个定时器会
+    // 一直轮询下去。
+    //
+    // 上限用 5 分钟（600 × 500ms），与主脚本那个轮询同一个数量级：横幅只在
+    // 注册/登录这一小段里有意义，用户走到 dashboard 之后它永远不会再显示。
+    // 到点前若已经离开注册页，撤掉横幅并停表。
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', syncBanner);
     } else {
       syncBanner();
     }
-    setInterval(syncBanner, 500);
+    var polls = 0;
+    var timer = setInterval(function () {
+      polls++;
+      if (polls > 600) {
+        clearInterval(timer);
+        removeBanner();
+        return;
+      }
+      syncBanner();
+    }, 500);
   } catch (e) {
     // 横幅是个提示，不是登录必需的一步。它坏了绝不能影响凭据回传。
     console.warn('[LoongPort] 注册页横幅未能显示:', e);
@@ -613,6 +629,20 @@ fn register_hint_banner_snippet() -> String {
     .to_string()
 }
 
+/// 生成「把邀请码种进 localStorage」的那一小段脚本。
+///
+/// ## 三条克制（每条都有理由，别"改进"它们）
+///
+/// 1. **只在键不存在或已过期时写** —— 用户可能是**别人邀请来的**（他自己带着
+///    `?aff=` 进过这个站，站点已经存了那个码）。覆盖它等于抢别人的邀请关系。
+///    判据用站点自己的语义（`expiresAt <= Date.now()` 视为没有），不自己发明。
+/// 2. **`expiresAt` 用与站点相同的 30 天 TTL**，不写成永久 —— 写成永久会让一个
+///    早已过期的码在站点看来仍然有效，那是在给它塞脏数据。
+/// 3. **整段包在 try 里，失败什么都不做**：邀请码是**我们的收益**，不是用户要的功能。
+///    为它打断登录流程是本末倒置。
+///
+/// 与凭据回传那半**完全解耦**：它读、这段写，互不依赖 —— 邀请码这段整个删掉，
+/// 登录照样工作。
 fn aff_seed_snippet(code: &str) -> String {
     // 码来自我们自己的编译期常量表，但仍然 JSON 编码 —— 那张表是人手录的，
     // 哪天录进一个带引号的值不该变成脚本注入。
@@ -1112,6 +1142,45 @@ mod tests {
         assert!(
             !s.contains("location.href"),
             "不许整页跳转：那会重跑注入脚本并丢掉 localStorage 里的邀请码关系"
+        );
+    }
+
+    /// ⭐ **横幅撤掉时必须还原 `body.paddingTop`。**
+    ///
+    /// 登录窗在拿到凭据后**有意不关**（`commands/operator.rs` 那段「不关窗」：dashboard 上
+    /// 有余额与充值入口，用户还要接着用）。所以不还原的话，他会带着一条 40px 的空白条
+    /// 浏览登录页、dashboard、充值页 —— 而那条横幅早就不在了。
+    #[test]
+    fn the_banner_restores_the_body_padding_it_added() {
+        let s = register_hint_banner_snippet();
+        assert!(
+            s.contains("paddedByUs"),
+            "要记下「是我们设的 paddingTop」——否则不知道该不该还原（站点自己也可能设过）"
+        );
+        assert!(
+            s.contains("document.body.style.paddingTop = ''"),
+            "removeBanner 必须还原 paddingTop"
+        );
+    }
+
+    /// ⭐ **轮询必须有上限。**
+    ///
+    /// 这条闸对应我写错的一个前提：原注释说「登录窗的生命周期就是这一次登录，窗口关掉
+    /// 定时器随之消失」—— 而窗口**有意不关**，用户想看多久看多久。没有上限意味着那个
+    /// 定时器会一直跑下去。
+    ///
+    /// 主脚本里那个轮询有 600 次上限，这里同一个数量级 —— 横幅只在注册/登录那一小段
+    /// 有意义，走到 dashboard 之后它永远不会再显示。
+    #[test]
+    fn the_banner_poll_is_bounded() {
+        let s = register_hint_banner_snippet();
+        assert!(
+            s.contains("clearInterval"),
+            "定时器要能停 —— 登录窗不会自动关，无上限的轮询会一直跑"
+        );
+        assert!(
+            s.contains("polls > 600"),
+            "上限与主脚本那个轮询同一个数量级（600 × 500ms = 5 分钟）"
         );
     }
 

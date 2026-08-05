@@ -3126,13 +3126,13 @@
     },
     "addSite": {
       "firstRunTitle": "選擇服務站點",
-      "firstRunBody": "把中轉站的網域貼進來就行 —— 從瀏覽器網址欄直接複製也可以（帶 https://、www.、後面的路徑都會自動去掉）。留空則用預設的 {{site}}。",
+      "firstRunBody": "把中轉站的網域貼進來就行 —— 從瀏覽器網址欄直接複製也可以，網址後面的路徑會自動去掉。留空則用預設的 {{site}}。",
       "title": "新增中轉站",
       "body": "把另一個中轉站的網域貼進來。同一個站可以掛多個帳號 —— 登入不同帳號即可，重複的會自動合併。",
       "connected": "已連上 {{name}}",
       "inputLabel": "站點網域",
       "inputLabelWithSponsors": "或手動輸入網域",
-      "inputHint": "例如 bestapi.store，或直接貼 https://www.bestapi.store/usage",
+      "inputHint": "例如 bestapi.store，或直接貼 https://bestapi.store/usage",
       "sponsorsLabel": "推薦站點",
       "sponsorAddAnother": "已有 {{count}} 個帳號 · 再加一個"
     },

@@ -105,7 +105,17 @@ pub struct PublicSettings {
     /// 后台配置的 API 基址。**可能是空串**，不可盲信，见 [`normalize_api_base`]。
     #[serde(default)]
     pub api_base_url: String,
-    /// 是否开放注册。关闭时 `/register` 是死页（只显示黄条），所以登录窗一律加载 `/login`。
+    /// 是否开放注册。**当前没有消费方** —— 留着是因为它就在
+    /// `/settings/public` 的响应里，删掉这个字段只是让我们看不见它。
+    ///
+    /// ⚠️ 这里原来写着「关闭时 `/register` 是死页（只显示黄条），所以登录窗一律加载
+    /// `/login`」，**两句都不属实**（2026-08-05 review 抓出）：
+    ///
+    /// - [`super::login::login_url`] 从不查这个标志 —— 新站一律落 `/register`，
+    ///   重登一律落 `/login`，判据是「这一行有没有 `login_identifier`」。
+    /// - 关闭注册时那一页也不是死页：sub2api 的 `RegisterView.vue` 只把**表单**换成一条
+    ///   提示，而页脚那个「已有账号？去登录」的 `router-link` 由 `AuthLayout` 无条件渲染
+    ///   （它是个兄弟 slot）。所以那一页仍然走得通 —— 我们那条横幅也照样能显示。
     #[serde(default)]
     pub registration_enabled: bool,
 }
@@ -304,7 +314,7 @@ impl Account {
     }
 }
 
-/// 把用户输入的域名归一成面板 origin（`https://host`，无尾斜杠、无路径、无 `www.`）。
+/// 把用户输入的域名归一成面板 origin（`https://host`，无尾斜杠、无路径）。
 ///
 /// 用户实际会粘贴的形态（实测列举）：
 ///
@@ -313,27 +323,39 @@ impl Account {
 /// | `bestapi.store` | `https://bestapi.store` |
 /// | `https://bestapi.store/` | 同上 |
 /// | `http://bestapi.store/login?next=/` | 同上（路径与查询串都丢掉） |
-/// | `https://www.790053500.com/usage` | `https://790053500.com` |
+/// | `https://www.790053500.com/usage` | `https://www.790053500.com`（**`www.` 保留**，见下） |
 ///
 /// **一律升到 https**：sub2api 站点都跑 TLS，而登录页要过 WebView，明文 http 会被拦。
 ///
-/// ## ⚠️ `www.` 必须剥掉（实测抓出）
+/// ## ⚠️ **不要剥 `www.`** —— 试过一次，是个 P0
 ///
-/// 用户从浏览器地址栏复制过来的多半带 `www.`（`https://www.790053500.com/usage`）。
-/// 不剥的后果不是报错，是**同一个站变成两行**：`site_origin` 是站点行的主键的一部分
-/// （`creds.rs` 的 `UNIQUE(site_origin, account_id)`），于是
+/// 直觉上该剥：带不带 `www.` 会让同一个站变成两行（`site_origin` 进了
+/// `creds.rs` 的 `UNIQUE(site_origin, account_id)`，也进了
+/// [`super::provision::provider_id_for`] 的哈希）⇒ 界面上两行同名运营商、
+/// 各存一套凭据、同一分组在两行下各有一条档位。那个困扰是真的。
 ///
-/// - 界面上出现两行同名运营商，用户分不清该点哪个；
-/// - 每行各存一套凭据、各自登录一次；
-/// - 档位 id 也跟着分叉（`provision::provider_id_for` 拿 `site_origin` 做哈希）⇒
-///   同一个分组在两行下各有一条档位记录，而 `prune_stale_tiers` 按站点归属清理，
-///   清不掉另一行那条。
+/// **但剥掉的代价高一个量级，而且是静默的**（2026-08-05 review 抓出）：
 ///
-/// 本仓另外两处（`aff.rs` / `stats.rs` 的域名归一）早就在剥 `www.` 了 ——
-/// 这个入口漏了它，是三处里唯一一处不一致。
+/// 本函数的产出**就是我们要连的那个 origin** —— 它同时是探测地址、登录窗的 URL，
+/// 以及注入脚本里那个 `ALLOWED_ORIGIN` 守卫的比较基准（[`super::login::login_script`]）。
+/// 而**有些站把裸域 301 到 `www.`**（实测 `gnu.org` → `https://www.gnu.org/`）：
 ///
-/// **只剥 `www.` 这一个前缀**，不动别的子域：`api.x.com` / `panel.x.com` 是真的不同主机，
-/// 剥掉会连到错的地方。`www` 是唯一一个「按惯例等价于裸域」的标签。
+/// 1. 用户粘 `https://www.relay.com/usage`，剥成 `https://relay.com`；
+/// 2. 探测**成功** —— `build_client` 没设 redirect policy，reqwest 默认跟随 10 次跳转；
+/// 3. 登录窗打开 `https://relay.com/register`，站点 301 到 `https://www.relay.com/register`；
+/// 4. 脚本里 `window.location.origin !== ALLOWED_ORIGIN` ⇒ **整段 return**；
+/// 5. 用户看到一个完全正常的注册页，注册、登录 —— 而**凭据永远不回传**，
+///    `do_login` 干等到 5 分钟超时才报「没拿到凭据」。
+///
+/// 那正是 `login_script` 里那条 early-return 的注释早就点名的白屏成因。剥 `www.`
+/// 等于**主动制造**它，而症状里没有任何东西指向域名归一化。
+///
+/// 反过来「两行」是**可见**的困扰：用户看得到那两行、删得掉一行。可见的困扰比静默的
+/// 失败便宜得多。所以这一层只做「一定安全」的归一（scheme / 路径 / 查询串），
+/// 去重要做也得在 `creds::save_site` 那一层做（那里不决定连哪个地址）。
+///
+/// ⚠️ 本仓另外两处剥 `www.`（`aff.rs` / `stats.rs`）**不构成反例**：那两处剥出来的
+/// 字符串只当查表的 key 用，从不拿去发请求。三处不是同一种归一化。
 pub fn normalize_site_origin(input: &str) -> Result<String, AppError> {
     let raw = input.trim();
     if raw.is_empty() {
@@ -355,10 +377,6 @@ pub fn normalize_site_origin(input: &str) -> Result<String, AppError> {
     if host.split('.').any(|label| label.is_empty()) || !host.contains('.') {
         return Err(AppError::InvalidInput(format!("主机名不合法: {host}")));
     }
-    // 剥 `www.`（见函数文档：不剥会让同一个站变成两行、两套凭据、两套档位 id）。
-    // **在合法性校验之后**：`www.` 本身也可能是畸形输入的一部分（`www..x.com`），
-    // 先剥会让那种输入绕过上面那道检查。
-    let host = host.strip_prefix("www.").unwrap_or(host);
     // `origin().ascii_serialization()` 而不是 `to_string()`：后者恒带尾斜杠。
     let mut origin = format!("https://{host}");
     if let Some(port) = url.port() {
@@ -964,10 +982,6 @@ mod tests {
             "https://bestapi.store/",
             "http://bestapi.store/login",
             "  bestapi.store  ",
-            // 用户从浏览器地址栏复制过来的形态 —— 带 www.、带路径、带查询串。
-            "www.bestapi.store",
-            "https://www.bestapi.store/usage",
-            "https://www.bestapi.store/login?next=/panel",
         ] {
             assert_eq!(
                 normalize_site_origin(input).unwrap(),
@@ -977,36 +991,48 @@ mod tests {
         }
     }
 
-    /// ⭐ **`www.` 必须剥掉，否则同一个站变成两行。**
+    /// ⭐ **`www.` 必须原样保留** —— 剥它试过一次，是个 P0。
     ///
-    /// `site_origin` 进了站点行的唯一索引（`creds.rs` 的 `UNIQUE(site_origin, account_id)`）
-    /// 也进了档位 id 的哈希（`provision::provider_id_for`）。带不带 `www.` 若算两个站：
-    /// 界面上出现两行同名运营商、各存一套凭据、同一个分组在两行下各有一条档位记录，
-    /// 而 `prune_stale_tiers` 按站点归属清理，清不掉另一行那条。
+    /// 本函数的产出就是我们要连的 origin，同时也是注入脚本里 `ALLOWED_ORIGIN` 的基准。
+    /// 而有些站把裸域 301 到 `www.`（实测 `gnu.org`）⇒ 剥掉之后：探测成功（reqwest 默认
+    /// 跟随跳转）、登录窗被 301 到 `www.` 那个 origin、脚本的 origin 守卫失配整段 return
+    /// ⇒ **用户在一个看起来完全正常的注册页上登录，而凭据永远不回传**，
+    /// `do_login` 干等 5 分钟超时。
     ///
-    /// 实测的入口正是用户会做的事：从浏览器地址栏复制 `https://www.790053500.com/usage`。
+    /// 那是 `login_script` 那条 early-return 早就点名的白屏成因，症状里没有任何东西
+    /// 指向域名归一化。相比之下「同一站变两行」是可见的、用户删得掉的困扰。
+    ///
+    /// 会红的改法：为了去重在这里加 `strip_prefix("www.")`。**去重要做请在
+    /// `creds::save_site` 那一层做** —— 那里不决定连哪个地址。
     #[test]
-    fn the_www_prefix_never_forks_a_site_into_two() {
-        assert_eq!(
-            normalize_site_origin("https://www.790053500.com/usage").unwrap(),
-            normalize_site_origin("790053500.com").unwrap(),
-            "带 www. 与不带被当成了两个站"
-        );
+    fn the_www_prefix_is_preserved_because_it_decides_what_we_connect_to() {
+        // 路径与查询串照旧剥掉，`www.` 原样留着。
+        for (input, want) in [
+            ("www.bestapi.store", "https://www.bestapi.store"),
+            (
+                "https://www.bestapi.store/usage",
+                "https://www.bestapi.store",
+            ),
+            (
+                "https://www.bestapi.store/login?next=/panel",
+                "https://www.bestapi.store",
+            ),
+        ] {
+            assert_eq!(
+                normalize_site_origin(input).unwrap(),
+                want,
+                "input: {input} —— `www.` 被剥掉了，那会让 301 到 www. 的站凭据永不回传"
+            );
+        }
     }
 
-    /// 但**只剥 `www.` 这一个标签**，别的子域是真的不同主机。
-    ///
-    /// `api.x.com` / `panel.x.com` 剥掉会连到错的地方 —— 有些运营商的面板就挂在子域上。
+    /// 子域原样保留 —— `api.x.com` / `panel.x.com` 是真的不同主机，
+    /// 有些运营商的面板就挂在子域上。
     #[test]
     fn other_subdomains_are_preserved() {
         assert_eq!(
             normalize_site_origin("https://panel.relay.dev").unwrap(),
             "https://panel.relay.dev"
-        );
-        // `wwwx.` 不是 `www.` —— 前缀匹配不能误伤它。
-        assert_eq!(
-            normalize_site_origin("https://wwwx.relay.dev").unwrap(),
-            "https://wwwx.relay.dev"
         );
     }
 

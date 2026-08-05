@@ -47,8 +47,7 @@ giving up the tier you chat on.
 1. **Download and open it** — see [Install](#install). On first launch you get a
    "pick a service site" dialog.
 2. **Paste the relay's domain** — copying straight from your browser's address bar works
-   (`https://www.bestapi.store/usage` and the like; `https://`, `www.` and any trailing
-   path are stripped for you).
+   (`https://bestapi.store/usage` and the like; any trailing path is stripped for you).
 3. **Register or sign in** — LoongPort opens **that site's own** registration page.
    If you already have an account, a banner at the top takes you to the sign-in page in
    one click. The whole thing happens on the site's real pages; LoongPort receives the
