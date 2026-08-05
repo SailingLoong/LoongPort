@@ -34,6 +34,13 @@ mod services;
 mod session_manager;
 mod settings;
 mod store;
+/// 「支持范围」那张表的真相源 + 钉住各处文档副本的闸。
+///
+/// **只在测试时编译**：这个模块的全部内容就是那张表与守它的断言，运行期没有任何
+/// 消费者。不加 `cfg(test)` 的话 clippy 会把六个常量全报成 `never used`
+/// （`-D warnings` 下即编译失败）。
+#[cfg(test)]
+mod support_matrix;
 
 mod tray;
 mod usage_events;
