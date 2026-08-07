@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Loader2, Plus } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { operatorApi, providersApi } from "@/lib/api";
+import { operatorApi } from "@/lib/api";
 import { PURCHASE_CLOSED_EVENT } from "@/lib/api/operator";
 import type { AppId, ProviderSwitchEvent } from "@/lib/api";
 import type {
@@ -179,17 +179,13 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   const [vendorBalances, setVendorBalances] = useState<
     Record<RowKey, string | null>
   >({});
-  // 当前 tab 正在用的 provider id。官网行靠它判「在用」（`isCurrent` 那个 DB 列
-  // 至今没有写入方，判不了当前态）。
-  const [currentProviderId, setCurrentProviderId] = useState<string | null>(
-    null,
-  );
   // 每个官网账号行对应的 provider id。**六个平台共用一个**，由 `vendor_provision`
   // 返回 —— 前端算不出（它是 `sha256(vendor_id + "/" + account_id)`，而行 DTO 里
   // 没有 account_id）。所以「切换」这条路必须先 provision 拿 id 再切。
   //
-  // **是 state 不是 ref**：「在用」高亮读它，ref 变了不会触发重渲染 ⇒ 高亮要等
-  // 下一次别的状态变化才浮现。
+  // **是 state 不是 ref**：切换时要在它里面找 id，变了得触发重渲染。
+  // ⚠️ 它不参与「在用」高亮 —— 那件事由后端 `vendor.list` 返回的 `isCurrent` 现算
+  // （与中转站档位同源），前端不再自维护当前态。
   const [vendorProviderIds, setVendorProviderIds] = useState<
     Record<number, string>
   >({});
@@ -224,10 +220,36 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   const { checkProvider, isChecking } = useStreamCheck(appId);
 
   /**
+   * 拉官网账号列表。**只读本地不发网络**（与 `listOperators` 同一条契约）。
+   *
+   * 在不支持 DeepSeek 的两个 tab（gemini / grokbuild）下**压根不调它** ——
+   * 那两个 tab 里官网行不该出现，拉回来也只能扔掉。
+   *
+   * `appId` 传给后端**只为算 `userEdited` / `isCurrent`**（一行背后六条 provider
+   * 记录，「改过没有」「是不是在用」必须按平台问）。**不是用它过滤行** —— 一把 sk
+   * 展开到全部平台，「这一行在哪些 tab 出现」仍由上面那个 `vendorSupportsApp` 判。
+   */
+  const reloadVendors = useCallback(async () => {
+    if (!vendorSupportsApp(appId)) {
+      setVendors([]);
+      return;
+    }
+    try {
+      setVendors(await vendorApi.list(appId));
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }, [appId]);
+
+  /**
    * 读本地档位列表 + 异步补倍率。**不发 provision**（不重拉分组）。
    *
    * `onlySite` 限定只查哪个站的倍率 —— 每个档位一次 HTTP，用户给账号 A 获取
    * 密钥时不该把 B / C 的也全重查一遍。
+   *
+   * ⚠️ **顺带刷新官网账号列表**（见函数体末尾）：两类行的「当前在用」现在都由后端
+   * 现算（`tier.isCurrent` 与 vendor 的 `isCurrent` 同源），一次动作后必须把两类行
+   * 一起刷齐，否则切档位后 DeepSeek 行会停在旧高亮上（2026-08-07 修的互斥 bug）。
    */
   const reload = useCallback(
     async (onlySite?: string) => {
@@ -274,8 +296,11 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
       } catch (e) {
         toast.error(String(e));
       }
+      // ⚠️ **官网行必须跟档位一起刷**（见上方 doc）：两类行的「当前在用」同源，
+      // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
+      void reloadVendors();
     },
-    [appId],
+    [appId, reloadVendors],
   );
 
   useEffect(() => {
@@ -422,32 +447,6 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   // ══ 官网直连账号（vendor）══════════════════════════════════════════
 
   /**
-   * 拉官网账号列表。**只读本地不发网络**（与 `listOperators` 同一条契约）。
-   *
-   * 在不支持 DeepSeek 的两个 tab（gemini / grokbuild）下**压根不调它** ——
-   * 那两个 tab 里官网行不该出现，拉回来也只能扔掉。
-   *
-   * `appId` 传给后端**只为算 `userEdited`**（一行背后六条 provider 记录，「改过
-   * 没有」必须按平台问）。**不是用它过滤行** —— 一把 sk 展开到全部平台，
-   * 「这一行在哪些 tab 出现」仍由上面那个 `vendorSupportsApp` 判。
-   */
-  const reloadVendors = useCallback(async () => {
-    if (!vendorSupportsApp(appId)) {
-      setVendors([]);
-      return;
-    }
-    try {
-      setVendors(await vendorApi.list(appId));
-    } catch (e) {
-      toast.error(String(e));
-    }
-  }, [appId]);
-
-  useEffect(() => {
-    void reloadVendors();
-  }, [reloadVendors]);
-
-  /**
    * 一个站点都没有时自动弹「添加站点」引导。**每个进程只弹一次。**
    *
    * ## 判据为什么是「全局有没有站点」而不是这一区渲染出了几行
@@ -492,27 +491,6 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
       cancelled = true;
     };
   }, []);
-
-  /**
-   * 读当前 tab 正在用的 provider id —— 官网行的「在用」高亮靠它。
-   *
-   * ⚠️ **不用行 DTO 的 `isCurrent`**：那个字段读的是 `loongport_vendor.is_current`
-   * 列，而 `vendor/creds.rs` 里**没有任何一处写这一列**（只有 `DEFAULT 0`）⇒
-   * 它恒为 false。真正的事实是「上游 providers 表里当前是哪条」，那才是切换命令
-   * 真正改的东西。
-   */
-  const reloadCurrentProvider = useCallback(async () => {
-    try {
-      setCurrentProviderId(await providersApi.getCurrent(appId));
-    } catch {
-      // 拿不到只是判不出「在用」高亮，不该打断主流程。
-      setCurrentProviderId(null);
-    }
-  }, [appId]);
-
-  useEffect(() => {
-    void reloadCurrentProvider();
-  }, [reloadCurrentProvider]);
 
   /**
    * 拉一行官网账号的余额。
@@ -742,7 +720,8 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
               : t("loongport.switch.done", { name }),
         );
         for (const w of r.warnings) toast.warning(w);
-        await reloadCurrentProvider();
+        // 切到官网行会同时改两类行的「在用」：`reload` 顺带刷 vendors（见其 doc）。
+        await reload();
       } catch (e) {
         toast.error(String(e));
       }
@@ -763,9 +742,9 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
           delete next[row.id];
           return next;
         });
-        await reloadVendors();
-        // 删掉的可能正是当前在用的那条 ⇒ 重读一次，否则高亮会停在一个不存在的行上。
-        await reloadCurrentProvider();
+        // 删掉的可能正是当前在用的那条 ⇒ 全量重读（`reload` 顺带刷 vendors），
+        // 否则高亮会停在一个不存在的行上。
+        await reload();
       } catch (e) {
         toast.error(String(e));
       }
@@ -787,26 +766,19 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
   /**
    * 这一行的配置是不是当前 tab 正在用的那个。
    *
-   * **provider id 优先取行 DTO 的 `providerId`**（后端用
-   * `provision::provider_id_for(vendor_id, account_id)` 派生，前端算不出来）——
-   * 那让高亮在 **app 重启后依然正确**。
+   * ⚠️ **直接读后端算好的 `isCurrent`** —— `vendorApi.list(appId)` 返回的 DTO 里，
+   * 后端已按 `providers.is_current` 现算（与中转站档位的 `tier.isCurrent` 同源）。
+   * 前端**不再自维护 / 不自比较** current 值 —— 曾经历过「前端自己算 current」导致
+   * 切档位后 DeepSeek 行高亮停在上一个值、与档位同时显示「在用」的 bug（2026-08-07）。
    *
-   * 回落到 `vendorProviderIds`（本次会话 provision 返回的）只为覆盖一种情形：
-   * 行还没登录过 ⇒ 没有 `account_id` ⇒ 后端给空串。那种行本来也不该高亮。
-   *
-   * ⚠️ **不用行 DTO 的 `isCurrent`** —— 那个字段读的是 `loongport_vendor.is_current`
-   * 列，而**没有任何代码写过那一列**（只有建表的 `DEFAULT 0`）⇒ 恒 false。
-   * 当前态的唯一事实源是 `providers` 表（上游 `ProviderService::current`）。
-   *
-   * 空 id 一律不高亮 —— 猜错会让两行同时显示「在用」，比不高亮更糟。
+   * 空 id / 未登录的行后端给 `false` —— 那种行本来也不该高亮。
    */
   const isVendorCurrent = useCallback(
     (rowId: number) => {
       const row = vendors.find((v) => v.id === rowId);
-      const providerId = row?.providerId || vendorProviderIds[rowId];
-      return !!providerId && providerId === currentProviderId;
+      return row?.isCurrent ?? false;
     },
-    [vendors, vendorProviderIds, currentProviderId],
+    [vendors],
   );
 
   const handleLogin = (operatorId: number) =>
