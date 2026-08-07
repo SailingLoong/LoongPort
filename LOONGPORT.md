@@ -131,6 +131,27 @@ hdiutil create -volname LoongPort -srcfolder "$STAGE" -ov -format UDZO \
 rm -rf "$(dirname "$STAGE")"
 ```
 
+### 产物归档：mac 落 `~/下载`、windows 落 `D:\`，两边同一个约定
+
+产物别留在 `src-tauri/target/release/bundle/`（构建中间目录，下次 build 会清掉），
+打完了**复制到固定位置**再试用 / 分发 —— 归档位置就是「装到哪、从哪试」：
+
+| 平台 | 归档目录 | 产物 |
+|---|---|---|
+| macOS | `~/下载` | `LoongPort.app`（整个 .app 目录） |
+| Windows | `D:\`（D 盘根） | `LoongPort_<ver>_x64.msi` / `.exe` |
+
+```bash
+# mac：把 .app 复制到 ~/下载
+cp -R src-tauri/target/release/bundle/macos/LoongPort.app ~/下载/
+
+# windows（在 Windows 机器 / CI 上）：复制到 D 盘根
+# copy /Y src-tauri\target\release\bundle\nsis\LoongPort_*.exe D:\
+```
+
+版本号从 `src-tauri/tauri.conf.json` 读，别写死；产物名里带架构后缀
+（`aarch64` / `x64`），归档时**别去掉** —— 分发时要能一眼看出是哪个架构的。
+
 ## Tauri 命令
 
 **唯一权威是 `lib.rs` 的 `invoke_handler` 注册表**（`generate_handler!` 那一段）——
