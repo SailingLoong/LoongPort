@@ -98,7 +98,7 @@ fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&s
         }),
     };
 
-    if let Err(err) = app.emit("s3-sync-status-updated", payload) {
+    if let Err(err) = app.emit(crate::events::S3_SYNC_STATUS_UPDATED, payload) {
         log::debug!("[S3] failed to emit sync status update event: {err}");
     }
 }

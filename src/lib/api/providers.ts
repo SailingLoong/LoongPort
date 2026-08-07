@@ -6,6 +6,7 @@ import type {
   UniversalProvidersMap,
 } from "@/types";
 import type { AppId } from "./types";
+import { PROVIDER_SWITCHED } from "./events";
 
 export interface ProviderSortUpdate {
   id: string;
@@ -148,7 +149,7 @@ export const providersApi = {
   async onSwitched(
     handler: (event: ProviderSwitchEvent) => void,
   ): Promise<UnlistenFn> {
-    return await listen("provider-switched", (event) => {
+    return await listen(PROVIDER_SWITCHED, (event) => {
       const payload = event.payload as ProviderSwitchEvent;
       handler(payload);
     });

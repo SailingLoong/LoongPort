@@ -1,4 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { USAGE_CACHE_UPDATED } from "@/lib/api/events";
 import type { AppId } from "@/lib/api/types";
 import type { UsageResult } from "@/types";
 import type { SubscriptionQuota } from "@/types/subscription";
@@ -27,7 +28,7 @@ type UsageCacheUpdatedPayload =
 export function useUsageCacheBridge() {
   const queryClient = useQueryClient();
 
-  useTauriEvent<UsageCacheUpdatedPayload>("usage-cache-updated", (payload) => {
+  useTauriEvent<UsageCacheUpdatedPayload>(USAGE_CACHE_UPDATED, (payload) => {
     if (payload.kind === "script") {
       queryClient.setQueryData<UsageResult>(
         usageKeys.script(payload.providerId, payload.appType),

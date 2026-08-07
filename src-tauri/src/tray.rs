@@ -9,6 +9,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::events::{PROFILE_APPLIED, PROVIDER_SWITCHED};
 use crate::store::AppState;
 
 use crate::config::OFFICIAL_WEBSITE;
@@ -420,10 +421,10 @@ pub fn handle_profile_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool
         }
         // 通知主窗口刷新（profileId=null 表示该分组已清除当前项目）
         if let Err(e) = app.emit(
-            "profile-applied",
+            PROFILE_APPLIED,
             serde_json::json!({ "profileId": null, "scope": scope.as_str() }),
         ) {
-            log::error!("发射 profile-applied 事件失败: {e}");
+            log::error!("发射 {PROFILE_APPLIED} 事件失败: {e}");
         }
         refresh_tray_menu(app);
         return true;
@@ -602,8 +603,8 @@ fn handle_auto_click(app: &tauri::AppHandle, app_type: &AppType) -> Result<(), A
             log::error!("发射 proxy-flags-changed 事件失败: {e}");
         }
         // 发射 provider-switched 事件（保持向后兼容，Auto 切换也算一种切换）
-        if let Err(e) = app.emit("provider-switched", event_data) {
-            log::error!("发射 provider-switched 事件失败: {e}");
+        if let Err(e) = app.emit(PROVIDER_SWITCHED, event_data) {
+            log::error!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
         }
     }
     Ok(())
@@ -646,8 +647,8 @@ fn handle_provider_click(
             log::error!("发射 proxy-flags-changed 事件失败: {e}");
         }
         // 发射 provider-switched 事件（保持向后兼容）
-        if let Err(e) = app.emit("provider-switched", event_data) {
-            log::error!("发射 provider-switched 事件失败: {e}");
+        if let Err(e) = app.emit(PROVIDER_SWITCHED, event_data) {
+            log::error!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
         }
     }
     Ok(())

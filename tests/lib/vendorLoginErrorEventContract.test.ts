@@ -2,8 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { PURCHASE_CLOSED_EVENT } from "@/lib/api/operator";
-import { VENDOR_LOGIN_ERROR_EVENT } from "@/lib/api/vendor";
+import { PURCHASE_CLOSED, VENDOR_LOGIN_ERROR } from "@/lib/api/events";
 
 /**
  * 闸：**官网登录出错事件的名字，Rust 侧与 TS 侧必须逐字一致**。
@@ -15,24 +14,27 @@ import { VENDOR_LOGIN_ERROR_EVENT } from "@/lib/api/vendor";
  *
  * CLAUDE.md §三点六：新增任何「跨语言 / 跨文件的同一事实」时一并加闸 ——
  * 否则它迟早分叉，而分叉那天没人会收到通知。
+ *
+ * 2026-08-07 前 `VENDOR_LOGIN_ERROR_EVENT` 定义在 `commands/vendor.rs`，迁入
+ * `events.rs` / `events.ts` 统一管理（名字也随迁为 `VENDOR_LOGIN_ERROR`）。
  */
 describe("官网登录出错事件的跨语言契约", () => {
-  it("Rust 侧的 LOGIN_ERROR_EVENT 与 TS 侧逐字相同", () => {
+  it("Rust 侧的 VENDOR_LOGIN_ERROR 与 TS 侧逐字相同", () => {
     const rustSource = readFileSync(
-      resolve(process.cwd(), "src-tauri/src/commands/vendor.rs"),
+      resolve(process.cwd(), "src-tauri/src/events.rs"),
       "utf8",
     );
 
     const match = rustSource.match(
-      /pub const LOGIN_ERROR_EVENT:\s*&str\s*=\s*"([^"]+)"/,
+      /pub const VENDOR_LOGIN_ERROR:\s*&str\s*=\s*"([^"]+)"/,
     );
 
     expect(
       match,
-      "在 commands/vendor.rs 里找不到 LOGIN_ERROR_EVENT —— 它被改名或删了？",
+      "在 src-tauri/src/events.rs 里找不到 VENDOR_LOGIN_ERROR —— 它被改名或删了？",
     ).not.toBeNull();
 
-    expect(match![1]).toBe(VENDOR_LOGIN_ERROR_EVENT);
+    expect(match![1]).toBe(VENDOR_LOGIN_ERROR);
   });
 
   /**
@@ -42,7 +44,7 @@ describe("官网登录出错事件的跨语言契约", () => {
    * 另一边的界面上 —— 而 Rust 侧已有测试钉着 vendor 那条的取值。
    */
   it("与 operator 的事件名不同（两条链路各自独立）", () => {
-    expect(VENDOR_LOGIN_ERROR_EVENT).not.toBe(PURCHASE_CLOSED_EVENT);
-    expect(VENDOR_LOGIN_ERROR_EVENT).not.toBe("operator-login-error");
+    expect(VENDOR_LOGIN_ERROR).not.toBe(PURCHASE_CLOSED);
+    expect(VENDOR_LOGIN_ERROR).not.toBe("operator-login-error");
   });
 });

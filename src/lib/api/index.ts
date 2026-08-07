@@ -1,4 +1,5 @@
 export type { AppId } from "./types";
+export * from "./events";
 export { providersApi, universalProvidersApi } from "./providers";
 export { settingsApi } from "./settings";
 export { backupsApi } from "./settings";

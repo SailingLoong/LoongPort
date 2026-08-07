@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { PURCHASE_CLOSED_EVENT } from "@/lib/api/operator";
+import { PURCHASE_CLOSED } from "@/lib/api/events";
 
 /**
  * 闸：**充值窗关闭事件的名字，Rust 侧与 TS 侧必须逐字一致**。
@@ -16,39 +16,36 @@ import { PURCHASE_CLOSED_EVENT } from "@/lib/api/operator";
  *   的附加信息，所以既不报错也不弹 toast
  * - `tsc` 管不到（两边是各自合法的字符串字面量）、单测也不会碰到（没有人断言它）
  *
- * 那个 Rust 常量的文档注释自己就预言过这件事。既然预言了就该配一道闸，
- * 而不是只写一句警告 —— 警告拦不住重命名。
- *
- * ⚠️ **本仓此前没有「测试读 `src-tauri/`」的先例**（这是第一处）。选它而不是
- * 「靠人记得同步改两处」，判据是：这条契约的失效是静默的，而静默失效必须有闸。
- * Rust 侧同样有一份镜像闸（`config.rs` 的 `brand_constant_consistency`
- * 就是反方向读 `constants.ts` 的同一个模式），所以这不是新发明的模式。
+ * 事件名常量统一收在 `src-tauri/src/events.rs`（Rust）与 `src/lib/api/events.ts`（TS），
+ * 两端各自的镜像闸（Rust 侧 `events::consistency_tests`、本测试）保证它们逐字一致。
+ * 2026-08-07 前 `PURCHASE_CLOSED_EVENT` 定义在 `commands/operator.rs`，迁入 `events.rs`
+ * 统一管理（名字也随迁为 `PURCHASE_CLOSED`）。
  */
 describe("充值窗关闭事件的跨语言契约", () => {
-  it("Rust 侧的 PURCHASE_CLOSED_EVENT 与 TS 侧逐字相同", () => {
+  it("Rust 侧的 PURCHASE_CLOSED 与 TS 侧逐字相同", () => {
     // 从仓库根解析（vitest 的 cwd 就是根）。**不用 `import.meta.url`** ——
     // 本仓的 vitest 配置下它不是 `file:` scheme，`fileURLToPath` 会抛
     // `ERR_INVALID_URL_SCHEME`（实测踩过）。
     const rustSource = readFileSync(
-      resolve(process.cwd(), "src-tauri/src/commands/operator.rs"),
+      resolve(process.cwd(), "src-tauri/src/events.rs"),
       "utf8",
     );
 
-    // 匹配 `pub const PURCHASE_CLOSED_EVENT: &str = "...";`
+    // 匹配 `pub const PURCHASE_CLOSED: &str = "...";`
     const match = rustSource.match(
-      /pub const PURCHASE_CLOSED_EVENT:\s*&str\s*=\s*"([^"]+)"/,
+      /pub const PURCHASE_CLOSED:\s*&str\s*=\s*"([^"]+)"/,
     );
 
     // 找不到本身就是失败：常量被改名或删掉时，这条要红而不是静默跳过。
     expect(
       match,
-      "在 commands/operator.rs 里找不到 PURCHASE_CLOSED_EVENT —— 它被改名或删了？",
+      "在 src-tauri/src/events.rs 里找不到 PURCHASE_CLOSED —— 它被改名或删了？",
     ).not.toBeNull();
 
-    expect(match![1]).toBe(PURCHASE_CLOSED_EVENT);
+    expect(match![1]).toBe(PURCHASE_CLOSED);
   });
 
   it("事件名不是空串（空串会让 listen 匹配到意外的东西）", () => {
-    expect(PURCHASE_CLOSED_EVENT.length).toBeGreaterThan(0);
+    expect(PURCHASE_CLOSED.length).toBeGreaterThan(0);
   });
 });

@@ -171,16 +171,6 @@ export interface RestoreOfficialLoginResult {
   warnings: string[];
 }
 
-/**
- * 充值窗关闭的事件名。**与 Rust 侧 `commands::operator::PURCHASE_CLOSED_EVENT`
- * 必须逐字一致**，payload 是 `operatorId`。
- *
- * 定在这一层（而不是各组件各写一份）是因为对不上的后果**完全静默**：
- * 关窗后余额永远不刷，编译过、测试绿、没有任何东西报错。
- * 组件从这里 import，三份字面量减成一份。
- */
-export const PURCHASE_CLOSED_EVENT = "operator-purchase-closed";
-
 export interface OperatorBalance {
   balance: number;
   frozenBalance: number;

@@ -42,6 +42,7 @@ mod store;
 #[cfg(test)]
 mod support_matrix;
 
+mod events;
 mod tray;
 mod usage_events;
 mod usage_script;
@@ -269,7 +270,7 @@ fn handle_deeplink_url(
                 request.name
             );
 
-            if let Err(e) = app.emit("deeplink-import", &request) {
+            if let Err(e) = app.emit(crate::events::DEEPLINK_IMPORT, &request) {
                 log::error!("✗ Failed to emit deeplink-import event: {e}");
             } else {
                 log::info!("✓ Emitted deeplink-import event to frontend");
@@ -1974,7 +1975,7 @@ pub fn run() {
                                     );
 
                                     if let Err(e) =
-                                        app_handle.emit("deeplink-import", &request)
+                                        app_handle.emit(crate::events::DEEPLINK_IMPORT, &request)
                                     {
                                         log::error!(
                                             "Failed to emit deep link event from RunEvent::Opened: {e}"

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { DEEPLINK_IMPORT } from "@/lib/api/events";
 import { DeepLinkImportRequest, deeplinkApi } from "@/lib/api/deeplink";
 import { parseDeepLinkConfigPreview } from "@/utils/deepLinkConfigPreview";
 import {
@@ -60,7 +61,7 @@ export function DeepLinkImportDialog() {
   useEffect(() => {
     // Listen for deep link import events
     const unlistenImport = listen<DeepLinkImportRequest>(
-      "deeplink-import",
+      DEEPLINK_IMPORT,
       async (event) => {
         // If config is present, merge it to get the complete configuration
         if (event.payload.config || event.payload.configUrl) {

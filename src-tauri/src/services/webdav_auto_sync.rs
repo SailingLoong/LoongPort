@@ -98,7 +98,7 @@ fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&s
         }),
     };
 
-    if let Err(err) = app.emit("webdav-sync-status-updated", payload) {
+    if let Err(err) = app.emit(crate::events::WEBDAV_SYNC_STATUS_UPDATED, payload) {
         log::debug!("[WebDAV] failed to emit sync status update event: {err}");
     }
 }
