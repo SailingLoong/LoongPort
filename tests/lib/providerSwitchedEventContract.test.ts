@@ -42,11 +42,16 @@ const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
 describe("provider-switched 的跨页面契约", () => {
   it("两条切换命令都广播事件", () => {
     // `switch_provider`（provider 页那个「启用」）—— 上游漏的就是这处。
-    const providerRs = read("src-tauri/src/commands/provider.rs");
+    // ⚠️ emit_provider_switched 的实现定义在 events.rs（2026-08-07 从 commands/provider.rs
+    // 移过去，因为 deeplink 等 crate 级模块访问不到私有的 commands::provider），
+    // 命令层 import 它来发事件。
+    const eventsRs = read("src-tauri/src/events.rs");
     expect(
-      providerRs,
-      "commands/provider.rs 里找不到 emit_provider_switched 的定义",
+      eventsRs,
+      "events.rs 里找不到 emit_provider_switched 的定义",
     ).toMatch(/fn emit_provider_switched/);
+
+    const providerRs = read("src-tauri/src/commands/provider.rs");
     expect(
       providerRs,
       "switch_provider 成功后没有广播 —— 启用别的 provider 之后，" +
@@ -72,9 +77,8 @@ describe("provider-switched 的跨页面契约", () => {
       /pub const PROVIDER_SWITCHED:\s*&str\s*=\s*"provider-switched"/,
     );
 
-    const providerRs = read("src-tauri/src/commands/provider.rs");
     expect(
-      providerRs,
+      eventsRs,
       "emit_provider_switched 该用 PROVIDER_SWITCHED 常量 —— 裸字面量会让事件名失去唯一源",
     ).toMatch(/\.emit\(PROVIDER_SWITCHED,\s*payload\)/);
 
@@ -93,11 +97,10 @@ describe("provider-switched 的跨页面契约", () => {
   });
 
   it("payload 带 appType 与 providerId（前端契约要求的两个字段）", () => {
-    const providerRs = read("src-tauri/src/commands/provider.rs");
+    // 函数定义在 events.rs（见上面那个 it 的说明）。
+    const eventsRs = read("src-tauri/src/events.rs");
     // 从 emit_provider_switched 的函数体里取 payload 那段。
-    const body = providerRs.slice(
-      providerRs.indexOf("fn emit_provider_switched"),
-    );
+    const body = eventsRs.slice(eventsRs.indexOf("fn emit_provider_switched"));
     const payload = body.slice(0, body.indexOf(".emit("));
     expect(
       payload,
