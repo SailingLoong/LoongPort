@@ -195,13 +195,15 @@ mod tests {
         let env = cfg.get("env").expect("claude 配置该有 env");
 
         let expect: &[(&str, &str)] = &[
+            // 主模型不带 [1M]：它来自 `config_for`，同时被 codex 复用（codex 的
+            // config.toml 模型名不能带后缀）。只有角色对齐带。
             ("ANTHROPIC_MODEL", "deepseek-v4-pro"),
-            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "deepseek-v4-pro"),
-            ("ANTHROPIC_DEFAULT_FABLE_MODEL", "deepseek-v4-pro"),
-            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "deepseek-v4-flash"),
-            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "deepseek-v4-flash"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "deepseek-v4-pro[1M]"),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL", "deepseek-v4-pro[1M]"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "deepseek-v4-flash[1M]"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "deepseek-v4-flash[1M]"),
             // ⚠️ 这个键**不带 `ANTHROPIC_DEFAULT_` 前缀**。
-            ("CLAUDE_CODE_SUBAGENT_MODEL", "deepseek-v4-flash"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "deepseek-v4-flash[1M]"),
         ];
         for (key, want) in expect {
             assert_eq!(
