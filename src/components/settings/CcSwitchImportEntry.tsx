@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Download } from "lucide-react";
+import { Import } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { settingsApi, ccSwitchImportApi } from "@/lib/api";
@@ -89,7 +89,7 @@ export function CcSwitchImportEntry() {
           })}
           className="hover:bg-black/5 dark:hover:bg-white/5"
         >
-          <Download className="w-4 h-4" />
+          <Import className="w-4 h-4" />
         </Button>
       ) : null}
 

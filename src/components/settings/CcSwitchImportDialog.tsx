@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Loader2,
-  Download,
+  Import,
   CheckCircle2,
   XCircle,
   AlertTriangle,
@@ -11,8 +11,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
-  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -77,45 +75,49 @@ export function CcSwitchImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Download className="h-5 w-5 text-blue-500" />
-            {t("settings.ccSwitchImport.title", {
-              defaultValue: "从 cc-switch 导入",
-            })}
-          </DialogTitle>
-          <DialogDescription>
-            {t("settings.ccSwitchImport.description", {
-              defaultValue:
-                "这会把 cc-switch 的配置复制到 LoongPort，不会动 cc-switch 那边。",
-            })}
-          </DialogDescription>
-        </DialogHeader>
+      {/* 不用 DialogHeader / DialogFooter 分区壳 —— 与 StatsNoticeDialog 同一条理由：
+          那两个壳自带 border-b / border-t + bg-muted/20，是给表单类弹窗设计的分区。
+          用在这（一段要读的说明 + 预览/报告）上会把内容切成三段，像系统报错框
+          而不是一个邀请。直接在 DialogContent 里排版，仍用官方组件。 */}
+      <DialogContent className="sm:max-w-lg gap-0 p-6">
+        <DialogTitle className="flex items-center gap-2 text-base font-semibold">
+          <Import className="h-5 w-5 text-blue-500" />
+          {t("settings.ccSwitchImport.title", {
+            defaultValue: "从 cc-switch 导入",
+          })}
+        </DialogTitle>
+        <DialogDescription className="mt-1.5 text-sm leading-relaxed">
+          {t("settings.ccSwitchImport.description", {
+            defaultValue:
+              "这会把 cc-switch 的配置复制到 LoongPort，不会动 cc-switch 那边。",
+          })}
+        </DialogDescription>
 
-        {loading && (
-          <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
-            <Loader2 className="h-5 w-5 animate-spin" />
-            {t("settings.ccSwitchImport.loading", {
-              defaultValue: "正在读取 cc-switch 数据…",
-            })}
-          </div>
-        )}
+        <div className="mt-4">
+          {loading && (
+            <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
+              <Loader2 className="h-5 w-5 animate-spin" />
+              {t("settings.ccSwitchImport.loading", {
+                defaultValue: "正在读取 cc-switch 数据…",
+              })}
+            </div>
+          )}
 
-        {!loading && errorMessage && !report && (
-          <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-600">
-            <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{errorMessage}</span>
-          </div>
-        )}
+          {!loading && errorMessage && !report && (
+            <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-600">
+              <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
 
-        {!loading && !errorMessage && !report && preview && (
-          <PreviewBody preview={preview} />
-        )}
+          {!loading && !errorMessage && !report && preview && (
+            <PreviewBody preview={preview} />
+          )}
 
-        {!loading && report && <ReportBody report={report} />}
+          {!loading && report && <ReportBody report={report} />}
+        </div>
 
-        <DialogFooter>
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end sm:items-center">
           {showReport ? (
             <Button type="button" onClick={handleClose}>
               {t("common.close", { defaultValue: "关闭" })}
@@ -140,7 +142,7 @@ export function CcSwitchImportDialog({
                 {isImporting ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 ) : (
-                  <Download className="mr-2 h-4 w-4" />
+                  <Import className="mr-2 h-4 w-4" />
                 )}
                 {isImporting
                   ? t("settings.ccSwitchImport.importing", {
@@ -152,7 +154,7 @@ export function CcSwitchImportDialog({
               </Button>
             </>
           )}
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );

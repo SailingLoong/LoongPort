@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Download, Loader2 } from "lucide-react";
+import { Import, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCcSwitchImport } from "@/hooks/useCcSwitchImport";
@@ -50,7 +50,7 @@ export function CcSwitchImportSection() {
           <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
         ) : sourceExists ? (
           <Button type="button" onClick={() => setDialogOpen(true)}>
-            <Download className="mr-2 h-4 w-4" />
+            <Import className="mr-2 h-4 w-4" />
             {t("settings.ccSwitchImport.button", {
               defaultValue: "从 cc-switch 导入",
             })}
