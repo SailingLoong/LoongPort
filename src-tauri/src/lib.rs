@@ -1645,6 +1645,9 @@ pub fn run() {
             // theirs: config import/export and dialogs
             commands::export_config_to_file,
             commands::import_config_from_file,
+            // LoongPort：从 cc-switch 一键导入（拷贝，只读源库）
+            commands::get_cc_switch_import_preview,
+            commands::import_from_cc_switch,
             commands::webdav_test_connection,
             commands::webdav_sync_upload,
             commands::webdav_sync_download,

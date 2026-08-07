@@ -374,6 +374,8 @@ export interface Settings {
   enableAnonymousStats?: boolean;
   /** 用户看过那条统计告知了没。`undefined` = 还没看过 ⇒ 弹一次。 */
   statsNoticeConfirmed?: boolean;
+  /** 首启「是否一键导入 cc-switch」问过没。`undefined` = 还没问过 ⇒ 第一次打开时弹一次。 */
+  ccSwitchImportPrompted?: boolean;
   /**
    * 统计**专属**的随机安装 id。
    *

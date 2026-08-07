@@ -5,7 +5,20 @@
 
 ---
 
-## 一键从 cc-switch 同步配置与数据（2026-08-05 记，维护者定了「要做」）
+## 一键从 cc-switch 同步配置与数据（2026-08-05 记，2026-08-07 **导入时合并已落地**）
+
+> **已完成（2026-08-07，`feat/cc-switch-import`）**：`operator/cc_switch_import.rs` 实现
+> 覆盖式导入（复用 `import_sql_string_preserving`：备份 + 原子替换 + 迁移 + 版本校验），
+> 三个入口（设置页按钮 / LoongPort 图标旁按钮 / 首启弹窗）共用
+> `CcSwitchImportDialog`。源库只读打开、绝不动 cc-switch 那边。**导入时**的冲突归属
+> （同指纹 `域名 + sk` ⇒ 托管侧胜、不导入、报告列出）已做，集成测试钉着源库字节不变 +
+> 「已手动维护」判定不变。
+>
+> **剩下的一半是「provision 时收编」**（direction 2，维护者定了下轮做）：导入**后**新加
+> 运营商、provision 建出的新档位与**已导入的 cc-switch 条目**同指纹时，把那条 cc-switch
+> 记录收编（删 + 报告）。实现要点见下方「冲突归属规则」第二段；本轮有意不做 ——
+> provision 生成的 key 是 `LoongPort/<账号>/<平台>/<分组>` 命名，与用户手工配的 sk 撞上
+> 概率低，且要动 operator/vendor 的 provision 热路径。
 
 **what**：cc-switch 老用户装上 LoongPort 后看到的是**全空的**，得把 provider、MCP、
 skills、prompt 一件件重新配。两边的数据目录完全隔离：
@@ -53,9 +66,12 @@ cc-switch 的 fork，**实际盘子里很大一部分人本来就是 cc-switch �
 运营商 / 官网直连模块，则**归 LoongPort 那一侧维护**（运营商 / DeepSeek 官网模块），
 不留成两条并存的记录。两个方向都适用：
 
-- **导入时**：cc-switch 那条与已有托管项撞了 ⇒ 托管项胜，那条不导入。
+- **导入时**：cc-switch 那条与已有托管项撞了 ⇒ 托管项胜，那条不导入。✅ **2026-08-07 已落地**
+  （`operator/cc_switch_import.rs`，指纹判据见下）。
 - **导入后新加运营商**（注册 / 登录 / provision）：新建的 key 与已导入的 cc-switch 条目
-   撞了 ⇒ 转由运营商模块维护，把那条 cc-switch 记录收编掉。
+   撞了 ⇒ 转由运营商模块维护，把那条 cc-switch 记录收编掉。⏳ **下轮做** —— 挂点：
+   operator provision 的 `save_provider`（`commands/operator.rs:1008`）与 vendor 的
+   （`commands/vendor.rs:543`）写档位之前，扫同 `(origin, sk)` 指纹的**非托管**条目收编之。
 
 **为什么不能并存**：两条指向同一个上游的记录，用户看到的是重复档位，
 而其中一条不受 provision 管（改模型 / 换 sk 都不会跟着动）⇒ 用哪条完全看运气。

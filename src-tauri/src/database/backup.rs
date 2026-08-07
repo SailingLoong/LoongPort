@@ -162,6 +162,20 @@ impl Database {
         self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES)
     }
 
+    /// 用自定义的「保留表」清单导入 SQL。
+    ///
+    /// `pub(crate)`：cc-switch 导入要走同一条路径（备份 + 原子替换 + 迁移 + authorizer +
+    /// 版本校验），但保留的本地表与 WebDAV 同步那份不同 —— 它要多保住 `settings`（LoongPort
+    /// 的 current-provider / config snippet，不该被 cc-switch 的覆盖），见
+    /// `operator/cc_switch_import.rs` 的 `PRESERVE_TABLES`。
+    pub(crate) fn import_sql_string_preserving(
+        &self,
+        sql_raw: &str,
+        preserve_tables: &[&str],
+    ) -> Result<String, AppError> {
+        self.import_sql_string_inner(sql_raw, preserve_tables)
+    }
+
     fn import_sql_string_inner(
         &self,
         sql_raw: &str,
@@ -465,7 +479,10 @@ impl Database {
     }
 
     /// 导出数据库为 SQL 文本
-    fn dump_sql(conn: &Connection, skip_tables: &[&str]) -> Result<String, AppError> {
+    ///
+    /// `pub(crate)`：cc-switch 导入（`operator/cc_switch_import.rs`）要在一个**只读打开的
+    /// 外部库**（cc-switch.db）上复用这份导出，把它导成 SQL 后喂回本程序的导入路径。
+    pub(crate) fn dump_sql(conn: &Connection, skip_tables: &[&str]) -> Result<String, AppError> {
         let mut output = String::new();
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let user_version: i64 = conn

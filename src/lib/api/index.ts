@@ -32,6 +32,13 @@ export type {
   ManagedAuthDeviceCodeResponse,
 } from "./auth";
 export { operatorApi } from "./operator";
+export { ccSwitchImportApi } from "./ccSwitchImport";
+export type {
+  CcSwitchImportPreview,
+  CcSwitchImportReport,
+  SkippedProvider,
+  ProviderPlan,
+} from "./ccSwitchImport";
 export type {
   OperatorStatus,
   SiteInfo,

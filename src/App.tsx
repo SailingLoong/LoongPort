@@ -87,6 +87,7 @@ import {
 } from "@/components/skills/SkillsPage";
 import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
+import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { OperatorSection } from "@/components/operator/OperatorSection";
 import { StatsNoticeDialog } from "@/components/operator/StatsNoticeDialog";
 import { useCodexSwitchGuard } from "@/components/operator/useCodexSwitchGuard";
@@ -1232,6 +1233,9 @@ function App() {
                     LoongPort
                   </button>
                 </div>
+                {/* 从 cc-switch 导入：LoongPort 图标旁的小入口 + 首启弹窗。
+                    检测到 ~/.cc-switch/cc-switch.db 才显示图标。 */}
+                <CcSwitchImportEntry />
                 <Button
                   variant="ghost"
                   size="icon"
