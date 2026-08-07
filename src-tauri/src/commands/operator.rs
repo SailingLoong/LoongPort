@@ -35,7 +35,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
-use crate::events::PURCHASE_CLOSED;
+use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::operator::{api, chatgpt_app, creds, login, provision, purchase};
 use crate::provider::Provider;
 use crate::services::{McpService, ProviderService};
@@ -1941,7 +1941,7 @@ async fn switch_tier_impl(
     //
     // 两条切换路径都发，共用 `commands::provider::emit_provider_switched` 那一份实现 ——
     // payload 形状复制第二遍的必然结局是两份分叉（那边的文档写了完整理由）。
-    crate::commands::provider::emit_provider_switched(app_handle, &app_type_for_event, provider_id);
+    emit_provider_switched(app_handle, &app_type_for_event, provider_id);
 
     Ok(SwitchTierResult {
         provider_name,
@@ -2409,7 +2409,7 @@ async fn restore_official_login_impl(
     // 补在后端而不是让 `RestoreOfficialLoginButton` 自己刷：那个按钮在设置页，
     // 与运营商区互不相识；发事件是上游已有的机制，一处发射喂到全部监听者
     // （`provider.rs::emit_provider_switched` 的文档写了完整论证）。
-    crate::commands::provider::emit_provider_switched(
+    emit_provider_switched(
         app_handle,
         &AppType::Codex,
         crate::database::CODEX_OFFICIAL_PROVIDER_ID,

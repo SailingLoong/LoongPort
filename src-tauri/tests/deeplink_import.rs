@@ -18,7 +18,7 @@ fn deeplink_import_claude_provider_persists_to_db() {
     let db = Arc::new(Database::memory().expect("create memory db"));
     let state = AppState::new(db.clone());
 
-    let provider_id = import_provider_from_deeplink(&state, request.clone())
+    let (provider_id, _) = import_provider_from_deeplink(&state, request.clone())
         .expect("import provider from deeplink");
 
     // Verify DB state
@@ -54,7 +54,7 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
     let db = Arc::new(Database::memory().expect("create memory db"));
     let state = AppState::new(db.clone());
 
-    let provider_id = import_provider_from_deeplink(&state, request.clone())
+    let (provider_id, _) = import_provider_from_deeplink(&state, request.clone())
         .expect("import provider from deeplink");
 
     let providers = db.get_all_providers("codex").expect("get providers");
@@ -143,7 +143,7 @@ fn deeplink_cannot_forge_a_managed_provider_id() {
 
         let db = Arc::new(Database::memory().expect("create memory db"));
         let state = AppState::new(db.clone());
-        let provider_id =
+        let (provider_id, _) =
             import_provider_from_deeplink(&state, request).expect("import should succeed");
 
         assert!(

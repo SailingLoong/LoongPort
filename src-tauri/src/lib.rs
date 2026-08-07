@@ -1723,7 +1723,6 @@ pub fn run() {
             commands::set_pricing_model_source,
             commands::is_proxy_running,
             commands::is_live_takeover_active,
-            commands::switch_proxy_provider,
             // Proxy failover commands
             commands::get_provider_health,
             commands::reset_circuit_breaker,
