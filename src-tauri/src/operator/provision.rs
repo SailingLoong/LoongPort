@@ -68,12 +68,28 @@
 //! 部分可用优于全部不可用；而回滚本身也可能失败，还得再处理回滚失败。失败项在返回值里如实
 //! 报出来，用户可以重试 —— 重试是幂等的（认领优先，已建的那些直接命中）。
 
+use std::collections::HashSet;
+
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::operator::api::{ApiKey, Client, Group};
 
 /// Key 名字的前缀，也是「这把 Key 由本客户端管理」的识别标志。
 const MANAGED_PREFIX: &str = "LoongPort";
+
+/// 从托管 key 名 `LoongPort/a<account_id>/<platform>/<group_id>` 里解析出
+/// `(platform, group_id)`。解析不出（名字被外部改过 / 不是托管前缀）返回 `None`。
+///
+/// ⚠️ `parts[1]` 可能是 `a<account_id>` 或 `anon`（未登录时的兜底名字），
+/// 两者都正好占一段，不影响后面取 `platform` / `group_id`。
+fn parse_managed_key_name(name: &str) -> Option<(String, i64)> {
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() != 4 || parts[0] != MANAGED_PREFIX {
+        return None;
+    }
+    let group_id = parts[3].parse::<i64>().ok()?;
+    Some((parts[2].to_string(), group_id))
+}
 
 /// 一个分组的展开结果。
 #[derive(Debug, Clone)]
@@ -171,6 +187,12 @@ pub async fn provision(client: &Client) -> Result<ProvisionResult, AppError> {
     let account_id = client.account_id();
     let groups = client.list_groups().await?;
 
+    // 「当前还存在哪些 (platform, group_id)」—— 用来判断哪些托管 key 成了孤儿。
+    // ⚠️ 用**完整**分组列表而不是 usable：临时不可用的分组（维护中）key 还在被别的
+    // 机器用，不该删；只有分组真的从列表里消失才算被删除。
+    let current_groups: HashSet<(String, i64)> =
+        groups.iter().map(|g| (g.platform.clone(), g.id)).collect();
+
     // 按分组自己的 platform 分派，认不出的跳过（不是错误：composite 是有意不做、
     // antigravity 是还没接，两者都不该让整个流程失败）。
     let usable: Vec<(Group, AppType)> = groups
@@ -218,6 +240,23 @@ pub async fn provision(client: &Client) -> Result<ProvisionResult, AppError> {
             }
             // 一个分组失败不影响其它分组 —— 部分可用优于全部不可用。
             Err(e) => result.failures.push((group.name.clone(), e.to_string())),
+        }
+    }
+
+    // 分组被删除 ⇒ 它的 sk 在服务端成了孤儿，顺手删掉（**含服务端那把**）。
+    //
+    // 已有分组的 key 只是认领、绝不重建/轮换（见 `ensure_key_for`）；这里只处理
+    // 「名字能解析出 (platform, group_id) 且当前分组列表里已不存在」的 key。
+    for key in &existing {
+        let Some((platform, group_id)) = parse_managed_key_name(&key.name) else {
+            continue;
+        };
+        if current_groups.contains(&(platform, group_id)) {
+            continue;
+        }
+        match client.delete_key(key.id).await {
+            Ok(()) => log::info!("删除已下架分组的密钥：{}", key.name),
+            Err(e) => log::warn!("删除已下架分组的密钥 {} 失败: {e}", key.name),
         }
     }
 
@@ -585,165 +624,6 @@ pub fn settings_config_with_roles(
         })
 }
 
-/// 这份 `settings_config` 是不是**被用户改过**（≠ 我们会生成的默认配置）。
-///
-/// ## 为什么是「跟默认值比对」，而不是存一个「用户编辑过」的标记
-///
-/// 需求是「用户手动保存过就算手动维护，进编辑页又取消不算」。存标记的话，置位时机
-/// 只能挂在保存动作上，而保存走的是**上游** `updateProvider`（`App.tsx` 的
-/// `handleEditProvider` → 上游 store）—— 要么改上游代码（扩大 merge 接触面，
-/// 违反 CLAUDE.md §一），要么在前端猜「弹窗关闭是保存还是取消」（猜不准，
-/// 而用户明确要求两者要分开）。
-///
-/// 比对没有这个问题，而且有两个额外好处：
-///
-/// 1. **自愈**：用户把配置手动改回默认值，标记自动消失。存标记会留一个永久假阳性
-///    （显示「已手动维护」而其实跟默认一模一样），那种状态用户没法清除。
-/// 2. **零存储**：不进 schema、不进 `ProviderMeta`（那个结构 `save_provider` 是
-///    **全量覆盖**的，只保 `is_current` / `in_failover_queue` 两列 ——
-///    标记要活下来就得指望每个写入方都原样带回 meta，多一个写入点就漏一处）。
-///
-/// ## 判据是「整份 JSON 相等」，而不是逐字段列白名单
-///
-/// 白名单要穷举「哪些字段算用户改动」，漏一个就是漏报（用户改了它却显示「默认」）。
-/// 而默认配置的**全部**内容都由 [`settings_config_for`] 一个函数决定，
-/// 拿它当基准做整份比对，新增字段自动纳入，不需要同步维护第二份清单。
-///
-/// **sk 不参与比对**：它每次 provision 都可能换（服务端重新签发），
-/// 拿它比会让「刷新过密钥」被误报成「用户改过配置」。做法是把默认配置里的 sk
-/// 换成现有配置里的那把，再比其余部分 —— 等价于「除 sk 之外都一样吗」。
-///
-/// ## 模型名同理：**换过默认模型不算用户改过**
-///
-/// `model` 是「当前版本的默认值」（`DEFAULT_MODEL`），而它的文档写着「运营商上新一代
-/// 模型后该跟着调」。已存在的档位不会被 provision 改写模型名（只换 sk），所以那天一到，
-/// **每一个现存档位的模型名都跟新基准不一致** ⇒ 全部集体显示「已手动维护」，
-/// 而用户一个字都没改过。review 抓出的正是这条。
-///
-/// 解法与 sk 一致：**把已知的历史默认值也当作「未改过」**。
-/// 见 [`HISTORICAL_DEFAULT_MODELS`] —— 改 `DEFAULT_MODEL` 时把旧值加进那个数组，
-/// 就像 `LEGACY_OFFICIAL_PROXY_PROVIDER_IDS` 那样「读宽写窄」
-/// （CLAUDE.md §三点五：识别认全部历史值、写入只产出当前值）。
-///
-/// 返回 `None` = **判不了**（这个 CLI 没有默认配置形状）。
-/// 调用方应当据此**不显示任何标记**，而不是当成 `false`（那是在说「没改过」，
-/// 而事实是「不知道」—— 断言一件不知道的事会让用户误信刷新不会覆盖）。
-pub fn is_user_edited(
-    settings_config: &serde_json::Value,
-    app_type: &AppType,
-    display_name: &str,
-    base_url: &str,
-    model: &str,
-) -> Option<bool> {
-    is_user_edited_with_roles(
-        settings_config,
-        app_type,
-        display_name,
-        base_url,
-        model,
-        None,
-    )
-}
-
-/// [`is_user_edited`] 加一个「Claude 角色分档」的入口。
-///
-/// ⚠️ **官网直连必须走这个**，且 `roles` 要与生成配置时传的**完全一致**
-/// （两边都取 `vendor::provision::claude_roles_for`）。
-///
-/// 不一致的后果不是报错，是**每个 DeepSeek 的 Claude 档位都显示「已手工维护」**：
-/// 基准里没有 `ANTHROPIC_DEFAULT_FABLE_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL`
-/// 这两个键，而实际配置有 ⇒ 整份比对失配（`normalize_for_comparison` 只抹首尾空白，
-/// **结构差异照算**，见它的文档）。而用户一个字都没改过。
-pub fn is_user_edited_with_roles(
-    settings_config: &serde_json::Value,
-    app_type: &AppType,
-    display_name: &str,
-    base_url: &str,
-    model: &str,
-    roles: Option<ClaudeRoleModels>,
-) -> Option<bool> {
-    // ⚠️ **「这个 CLI 没接」与「sk 位置被改坏了」必须分开** —— review 抓出初版把两者
-    // 混成同一个 `None`，而后者恰恰是「确定被改过」里最危险的一种：
-    //
-    // sk 读不出来 ⇒ 下次「获取密钥」时 `patch_api_key` 也会失败 ⇒ provision **回落到
-    // 全量重写**（`do_provision` 里那段），用户的编辑被整份冲掉。而界面上因为是 `None`
-    // 什么标记都没有 —— **恰好在编辑要被覆盖之前显示成「没改过」**。
-    //
-    // 所以判据分两层：
-    // 1. 这个 CLI 有没有默认形状（`api_key_location` / `settings_config_for`）——
-    //    没有才是真「判不了」，返回 `None`。
-    // 2. 有形状但读不出 sk ⇒ 形状被动过了 ⇒ `Some(true)`（明确改过）。
-    let (section, field) = api_key_location(app_type)?;
-
-    let Some(api_key) = extract_api_key(settings_config, app_type) else {
-        // 该放 sk 的位置不在了 / 类型不对 / 是空串。
-        // 这是**用户动过配置**的确凿证据（生成的配置必然有它，
-        // `settings_config_always_carries_the_auth_key` 钉着这条）。
-        log::debug!(
-            "配置里 {section}.{field} 读不出来，按「已手动维护」处理 —— \
-             下次 provision 会把它整份重置"
-        );
-        return Some(true);
-    };
-
-    // 当前默认模型 + 全部历史默认值，任一匹配就算「没改过」。
-    //
-    // ⚠️ **`chain` 而不是只比 `model`** —— 见上面那段：`DEFAULT_MODEL` 改动那天，
-    // 现存档位的模型名还是旧的（provision 只换 sk 不改模型），只比当前值会让
-    // 全部档位集体误报「已手动维护」。
-    let current = normalize_for_comparison(settings_config);
-    let mut matched_any = false;
-    for candidate in candidate_models(settings_config, model) {
-        let defaults = settings_config_with_roles(
-            app_type,
-            &api_key,
-            display_name,
-            base_url,
-            &candidate,
-            roles,
-        )?;
-        if current == normalize_for_comparison(&defaults) {
-            matched_any = true;
-            break;
-        }
-    }
-    Some(!matched_any)
-}
-
-/// 比对基准里要试哪些模型名。
-///
-/// 顺序：调用方给的那个 → 全部历史默认值 → **配置里那个（仅当它是生图模型）**。
-///
-/// ## 最后那一项为什么必要，以及为什么必须限定条件
-///
-/// 生图档位的模型名由 [`pick_model`] 按**服务端的模型列表**定（如 `gpt-image-2`），
-/// 那是一次网络查询的结果。而三个调用方里有两个拿不到它：
-/// `list_operators_impl`（只读本地的首屏契约）与 `reset_tier_config`
-/// （手上只有本地 `settings_config`）。它们只能传 [`DEFAULT_MODEL`] ⇒
-/// **每个生图档位都会显示「已手动维护」**，而用户一个字没改过。
-///
-/// ⚠️ **绝不能无条件把配置里的模型名加进候选** —— 那样 `model` 这一行就
-/// **结构上不可能不同**（它同时是被比对的值和生成基准的输入），于是
-/// 「用户手改了模型名」永远检测不出来。`real_edits_are_detected` 的第一个 case
-/// 钉的正是这条。
-///
-/// 所以限定 [`is_image_model`]：生图模型名是**我们自己按服务端数据写进去的**，
-/// 用户手工填一个 `gpt-image-*` 进去当然也会被当成"没改过"—— 但那个值本就是
-/// 这个档位的正解，把它判成「已手动维护」才是错的。而用户改成任何文本模型名
-/// （`gpt-5.4` 之类）仍然照常检测得出来。
-fn candidate_models(settings_config: &serde_json::Value, model: &str) -> Vec<String> {
-    let mut out = Vec::with_capacity(HISTORICAL_DEFAULT_MODELS.len() + 2);
-    out.push(model.to_string());
-    out.extend(HISTORICAL_DEFAULT_MODELS.iter().map(|m| m.to_string()));
-
-    if let Some(in_config) = extract_model(settings_config) {
-        if is_image_model(&in_config) && !out.contains(&in_config) {
-            out.push(in_config);
-        }
-    }
-    out
-}
-
 /// 从一份 `settings_config` 里读出 codex 的 `model`。
 ///
 /// 与 [`extract_api_key`] 对称：都是「从一份配置里抠出一个我们自己写进去的值」。
@@ -778,88 +658,6 @@ pub fn extract_model(settings_config: &serde_json::Value) -> Option<String> {
     }
     None
 }
-
-/// 比对前的归一化：抹掉「配置在系统里走一圈」会产生的无语义差异。
-///
-/// ## 为什么必须有这一步（实测出来的，review 抓出）
-///
-/// 切换档位会让配置**过一遍 `toml_edit`**：`ProviderService::switch` 往
-/// `config.toml` 注入 `experimental_bearer_token`（live 写入），下一次切走时
-/// 又把它摘掉写回 DB（`services/provider/mod.rs:3114` 的 backfill →
-/// `codex_config::remove_codex_experimental_bearer_token`）。
-///
-/// 而 `DocumentMut::to_string()` **总会补一个尾换行**，我们的
-/// [`codex_config_toml`] 生成的字符串却没有。实测：
-///
-/// ```text
-/// orig len=219  back len=220   equal=false
-/// orig tail="wire_api = \"responses\""
-/// back tail="wire_api = \"responses\"\n"
-/// ```
-///
-/// 不归一化的后果：**用户切过某个档位再切走，它就永久显示「已手动维护」**，
-/// 而他从没打开过编辑页。更糟的是那个状态**清不掉** —— 点「恢复默认配置」
-/// 能清一次，下次切走又脏，而标记宣称的「刷新不会覆盖你的改动」
-/// 对一个没有任何改动的档位毫无意义。
-///
-/// ## 为什么是 `trim`，而不是「拿 toml_edit 再解析一遍」
-///
-/// 后者更彻底，但也更贵（每个档位每次列表刷新都解析一遍 TOML），而且它把
-/// **本模块对 codex 格式的判断**换成了「toml_edit 认为等价就等价」——
-/// 那会顺带忽略掉键序、空行、注释这些用户真改过的痕迹（用户加一行注释说明
-/// 自己为什么改了某个值，是编辑过的证据）。
-///
-/// `trim` 只抹掉首尾空白：那是唯一**确定由系统产生、不由用户产生**的差异
-/// （用户在编辑框里改配置不会只多一个尾换行 —— 而就算他真的只加了个换行，
-/// 把那个当成「没改过」也是对的）。
-///
-/// ⚠️ **只归一化字符串叶子，不动结构**：多一个字段、少一个字段仍然算改过。
-///
-/// ## 已知不覆盖的一类
-///
-/// Claude 那条路上 `normalize_claude_models_in_value`（`mod.rs:2426`）会回填
-/// `ANTHROPIC_DEFAULT_*` 三个键 —— 那是**结构变化**，`trim` 管不到。
-/// 当前不受影响：`settings_config_for` 生成 claude 配置时已经显式写了那三个键
-/// （见它里面 `haiku_model` / `sonnet_model` / `opus_model` 那段说明），
-/// 所以回填是个空操作。真要变的那天，`the_verdict_survives_a_json_string_round_trip`
-/// 那类闸抓不到它，得靠 claude 档位的实测 —— 记在这里免得将来当成新 bug 查一遍。
-fn normalize_for_comparison(settings_config: &serde_json::Value) -> serde_json::Value {
-    match settings_config {
-        serde_json::Value::String(s) => serde_json::Value::String(s.trim().to_string()),
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.iter()
-                // `language` 是 LoongPort 托管的**常开字段**（默认永远写 chinese，
-                // 见 `settings_config_with_roles` 那段）—— 从「已手动维护」的比对里剥掉它：
-                // 存量档位在生成时还没有这个键，留着会让它们集体误报「已手动维护」。
-                // 剥掉后两边有没有 `language` 都不参与判定。
-                .filter(|(k, _)| k.as_str() != "language")
-                .map(|(k, v)| (k.clone(), normalize_for_comparison(v)))
-                .collect(),
-        ),
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(normalize_for_comparison).collect())
-        }
-        other => other.clone(),
-    }
-}
-
-/// 曾经作为默认模型写进档位配置的值。**只增不删。**
-///
-/// 每一项都对应「某个版本的用户机器上可能存在的默认配置」——
-/// 与上游 `LEGACY_OFFICIAL_PROXY_PROVIDER_IDS` 同一个模式（CLAUDE.md §三点五
-/// 「读宽写窄」：识别认全部历史值，写入只产出当前值）。
-///
-/// ## 改 [`DEFAULT_MODEL`](crate::commands::operator) 时必须把旧值加到这里
-///
-/// 不加的后果不是报错，是**静默误报**：已存在的档位不会被 provision 改写模型名
-/// （只换 sk），于是它们的配置仍带着旧模型 ⇒ 跟新基准比对不上 ⇒
-/// 界面上**每一个档位**都显示「已手动维护」+ 一个 amber 的恢复按钮，
-/// 而用户一个字都没改过。他会以为是 bug，或者去点「恢复默认」把真默认值又写一遍。
-///
-/// 当前为空：`DEFAULT_MODEL` 自引入起没变过（`gpt-5.6-sol`）。
-/// 空数组不是占位 —— 它让上面那个循环退化成「只比当前值」，与没有这个机制等价，
-/// 而第一次改模型时加一项就自动生效。
-pub(crate) const HISTORICAL_DEFAULT_MODELS: &[&str] = &[];
 
 /// codex 的默认模型（**文本对话**用）。
 ///
@@ -1120,112 +918,6 @@ pub fn patch_api_key(
     true
 }
 
-/// 把一个**已存在**档位里过时的模型名修正过来。返回是否真的改了。
-///
-/// # 为什么需要它（实测踩出来的）
-///
-/// `do_provision` 对已存在的档位**只 patch sk、不覆盖配置** —— 那条规则是为了不冲掉
-/// 用户在编辑页改过的东西，是对的。但它有个副作用：**我们自己写错的模型名也永远不会
-/// 被修正**。
-///
-/// 实测就是这个场景：`pick_model` 上线前，纯生图分组被写了 `DEFAULT_MODEL`
-/// （一个文本模型）⇒ 选中即 404、生图工具的入口判据也不成立。用户点「刷新档位与密钥」
-/// 毫无变化，因为那条路只换 sk。⇒ **老用户永远拿不到这个修复**，而界面上没有任何
-/// 迹象说明为什么。
-///
-/// # 判据：只修「用户没改过」的档位
-///
-/// 用 [`is_user_edited`] 判 —— 它已经是「当前配置 ≠ 我们会生成的默认配置」这个语义的
-/// 唯一实现。`Some(false)`（确认没改过）才修：
-///
-/// | `is_user_edited` | 含义 | 修不修 |
-/// |---|---|---|
-/// | `Some(false)` | 配置就是我们写的默认值 | **修** —— 那个默认值现在错了 |
-/// | `Some(true)` | 用户改过 | 不修（他的编辑优先，即使模型名不理想） |
-/// | `None` | 判不了（读不出 sk / 这个 CLI 没默认形状） | 不修 —— 不确定时别动用户的配置 |
-///
-/// ⚠️ **不是「模型名不等于期望值就改」**：那样会把用户手工设的模型名每次刷新都冲掉，
-/// 正好是上面那条规则要防的事。
-///
-/// # 为什么只修模型名，不顺手把整份配置刷成最新默认值
-///
-/// 那会越权：`is_user_edited` 为 `Some(false)` 只说明「整份配置等于**某个**历史默认值」
-/// （见 [`candidate_models`]），把它整份重写等于替用户做了「恢复默认」这个显式动作。
-/// 这里只改一处**已知写错了**的字段，其余原样留着。
-pub fn repair_stale_model(
-    settings_config: &mut serde_json::Value,
-    app_type: &AppType,
-    display_name: &str,
-    base_url: &str,
-    want_model: &str,
-) -> bool {
-    // 只有 codex 那套形状的配置里有 `model` 这一行（生图栏与它同形）。
-    //
-    // ⚠️ **生图栏也要放行** —— 分栏之后待修的档位落在 `CodexImage` 下：一条
-    // 「模型名被写成文本模型」的生图档位，迁移会把它搬到生图栏（模型名不变，
-    // 迁移只改 app_type），随后靠这个函数把名字修对。只认 `Codex` 会让那些档位
-    // 永远修不好，而症状恰好是本轮要治的那个：选中即 404。
-    if !matches!(app_type, AppType::Codex | AppType::CodexImage) {
-        return false;
-    }
-    // 已经是想要的值 ⇒ 什么都不做（绝大多数情形走这条）。
-    if extract_model(settings_config).as_deref() == Some(want_model) {
-        return false;
-    }
-
-    // ⚠️ **只修「生图性变了」这一类**（review 抓出的一个将来会踩的坑）。
-    //
-    // 本函数存在的理由是一个具体的错误：纯生图分组被写了文本模型名 ⇒ 选中即 404。
-    // 但守卫只有 `is_user_edited == Some(false)` 的话，**等 [`HISTORICAL_DEFAULT_MODELS`]
-    // 有了值之后它会顺带改写所有文本档位的模型名** —— 那时历史默认值会被认成「没改过」，
-    // 于是每次刷新都把老档位迁移到新的 `DEFAULT_MODEL`。
-    //
-    // 那超出了本函数的本意，而且与四处文档里写的不变量矛盾（`do_provision`、
-    // `HISTORICAL_DEFAULT_MODELS`、`DEFAULT_MODEL`、`is_user_edited` 都写着
-    // 「已存在的档位只换 sk、不改写模型名」）。
-    //
-    // 所以再加一道：**当前值与期望值必须在「是不是生图模型」上不同**。
-    // 那正好覆盖要修的那一类（文本名 → 生图名），且天然排除「文本换文本」的迁移。
-    let current_is_image = extract_model(settings_config)
-        .map(|m| is_image_model(&m))
-        .unwrap_or(false);
-    if current_is_image == is_image_model(want_model) {
-        return false;
-    }
-    // 用户改过 / 判不了 ⇒ 不动。
-    //
-    // ⚠️ **基准的模型名传 [`DEFAULT_MODEL`] 而不是 `want_model`**（测试抓出来的）：
-    // 这里要问的是「这份配置**现在**是不是我们写的默认值」，而它当初被写入时用的正是
-    // `DEFAULT_MODEL`（或某个历史默认值，那些由 [`candidate_models`] 认）。
-    // 传 `want_model` 是在拿**修完之后**的期望值去比**修之前**的配置 ⇒ 必然不相等
-    // ⇒ 每个待修的档位都被判成「用户改过」⇒ 这个函数恒不生效。
-    if is_user_edited(
-        settings_config,
-        app_type,
-        display_name,
-        base_url,
-        DEFAULT_MODEL,
-    ) != Some(false)
-    {
-        return false;
-    }
-
-    // 到这里：配置等于某个历史默认值，而当前正解是 `want_model` ⇒ 重写成新的默认配置。
-    //
-    // **整份重写而不是只替换那一行文本**：默认配置由 `settings_config_for` 一个函数
-    // 决定，拿它产出的结果才保证形状正确（手工改一行会漏掉将来新增的字段）。
-    // sk 从原配置里取，不换。
-    let Some(api_key) = extract_api_key(settings_config, app_type) else {
-        return false;
-    };
-    let Some(fixed) = settings_config_for(app_type, &api_key, display_name, base_url, want_model)
-    else {
-        return false;
-    };
-    *settings_config = fixed;
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1248,6 +940,28 @@ mod tests {
         // 还没回填账号 id 的窗口期用固定的 `anon`，不省掉那一段
         // （少一段会让名字与其它格式混起来更难认）。
         assert_eq!(key_name_for(None, "openai", 42), "LoongPort/anon/openai/42");
+    }
+
+    /// ⭐ `parse_managed_key_name` 是「删下架分组服务端 sk」的判据 —— 解析错了
+    /// 会把还在用的 key 删掉。与 [`key_name_for`] 对偶：生成什么就解得回什么。
+    #[test]
+    fn managed_key_name_round_trips_platform_and_group_id() {
+        assert_eq!(
+            parse_managed_key_name(&key_name_for(Some(13), "openai", 42)),
+            Some(("openai".to_string(), 42))
+        );
+        assert_eq!(
+            parse_managed_key_name(&key_name_for(None, "anthropic", 9)),
+            Some(("anthropic".to_string(), 9))
+        );
+        // 解析不出的一律跳过（宁可不删也不能误删）。
+        assert_eq!(
+            parse_managed_key_name("LoongPort/a13/openai/not-a-number"),
+            None
+        );
+        assert_eq!(parse_managed_key_name("bestapi-xxx"), None);
+        assert_eq!(parse_managed_key_name("LoongPort/a13/openai"), None);
+        assert_eq!(parse_managed_key_name("LoongPort/a13"), None);
     }
 
     /// ⭐ **Key 总数只跟分组数走，与机器数无关** —— 这条守的是「Key 爆炸」那个缺陷。
@@ -1499,26 +1213,6 @@ mod tests {
         );
     }
 
-    /// **生图栏里的过时模型名照样要被修。**
-    ///
-    /// 分栏之后，待修的那些档位（老版本写成文本模型名的纯生图分组）由迁移搬到
-    /// `CodexImage` 下 —— 迁移只改 app_type，不动模型名。若 `repair_stale_model`
-    /// 只认 `Codex`，它们就永远修不好，症状正是本轮要治的那个：选中即 404。
-    #[test]
-    fn a_stale_model_in_the_image_column_is_still_repaired() {
-        let app = AppType::CodexImage;
-        let base = "https://api.x.dev/v1";
-        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, DEFAULT_MODEL)
-            .expect("生图栏与 codex 同形，必须有默认形状");
-
-        assert!(
-            repair_stale_model(&mut cfg, &app, "生图档", base, "gpt-image-2"),
-            "生图栏里的过时模型名没被修 —— 迁移过来的老档位会一直 404"
-        );
-        assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
-        assert_eq!(extract_api_key(&cfg, &app).as_deref(), Some("sk-1"));
-    }
-
     /// 生图栏与 codex 栏的配置形状必须**逐字节相同**。
     ///
     /// 生图 MCP 按 codex 的形状去读 sk 与 base_url（`extract_api_key` /
@@ -1534,154 +1228,6 @@ mod tests {
         assert_eq!(
             codex, image,
             "生图栏的配置形状与 codex 分叉了 —— 生图 MCP 会读不出 sk"
-        );
-    }
-
-    /// **老档位的过时模型名要被刷新修正。**
-    ///
-    /// 这是实测踩出来的缺口：`do_provision` 对已存在的档位只 patch sk，所以
-    /// `pick_model` 上线前被写成文本模型的纯生图档位，用户点多少次「刷新档位与密钥」
-    /// 都不会变好 —— 选中即 404，生图工具的入口判据也一直不成立，而界面上没有任何
-    /// 迹象说明为什么。
-    #[test]
-    fn a_stale_default_model_is_repaired_on_refresh() {
-        let app = AppType::Codex;
-        let base = "https://api.x.dev/v1";
-        // 老版本 provision 写出来的：纯生图分组却配了文本模型。
-        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, DEFAULT_MODEL)
-            .expect("codex 必须有默认形状");
-
-        assert!(
-            repair_stale_model(&mut cfg, &app, "生图档", base, "gpt-image-2"),
-            "过时的模型名没被修正 —— 老用户永远拿不到这个修复"
-        );
-        assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
-        // sk 必须原样保留（修配置不是换密钥）。
-        assert_eq!(extract_api_key(&cfg, &app).as_deref(), Some("sk-1"));
-    }
-
-    /// **文本换文本不修** —— 那是模型迁移，不是本函数的职责。
-    ///
-    /// ⚠️ 这条钉住的是一个**将来**才会踩的坑：等 `HISTORICAL_DEFAULT_MODELS` 有了值，
-    /// 老档位的模型名会被认成「没改过」⇒ 若只有 `is_user_edited` 那道守卫，
-    /// 每次刷新都会把所有文本档位迁移到新的 `DEFAULT_MODEL`，而四处文档都写着
-    /// 「已存在的档位只换 sk、不改写模型名」。（review 抓出）
-    #[test]
-    fn a_text_to_text_model_change_is_not_a_repair() {
-        let app = AppType::Codex;
-        let base = "https://api.x.dev/v1";
-        let mut cfg = settings_config_for(&app, "sk-1", "普通档", base, DEFAULT_MODEL)
-            .expect("codex 必须有默认形状");
-        let before = cfg.clone();
-
-        // 期望值是另一个**文本**模型 —— 那是迁移，本函数不该插手。
-        assert!(
-            !repair_stale_model(&mut cfg, &app, "普通档", base, "gpt-5.7"),
-            "把文本档位的模型名迁移了 —— 那超出了这个函数的职责"
-        );
-        assert_eq!(cfg, before, "配置被动过了");
-    }
-
-    /// 反过来也不修：生图档位不会被改成另一个生图模型名。
-    ///
-    /// 换代（`gpt-image-2` → `gpt-image-3`）由 `pick_model` 在**新建**时决定；
-    /// 已存在的档位保持原样，与「只换 sk」那条规则一致。
-    #[test]
-    fn an_image_to_image_model_change_is_not_a_repair() {
-        let app = AppType::Codex;
-        let base = "https://api.x.dev/v1";
-        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, "gpt-image-2")
-            .expect("codex 必须有默认形状");
-        let before = cfg.clone();
-        assert!(!repair_stale_model(
-            &mut cfg,
-            &app,
-            "生图档",
-            base,
-            "gpt-image-3"
-        ));
-        assert_eq!(cfg, before);
-    }
-
-    /// 但**用户改过的配置不许动** —— 那正是「只换 sk」那条规则要保护的东西。
-    #[test]
-    fn a_user_edited_config_is_never_repaired() {
-        let app = AppType::Codex;
-        let base = "https://api.x.dev/v1";
-        let mut cfg = settings_config_for(&app, "sk-1", "我的档位", base, DEFAULT_MODEL)
-            .expect("codex 必须有默认形状");
-        // 用户把 reasoning effort 改了 —— 这份配置从此归他维护。
-        let edited = cfg["config"].as_str().unwrap().replace(
-            "model_reasoning_effort = \"high\"",
-            "model_reasoning_effort = \"low\"",
-        );
-        cfg["config"] = edited.clone().into();
-
-        assert!(
-            !repair_stale_model(&mut cfg, &app, "我的档位", base, "gpt-image-2"),
-            "改写了用户手工维护的配置"
-        );
-        assert_eq!(cfg["config"].as_str().unwrap(), edited, "配置内容被动过了");
-    }
-
-    /// 已经是正解时不做任何事（绝大多数刷新走这条，不该产生无谓的写操作）。
-    #[test]
-    fn a_config_already_on_the_right_model_is_left_alone() {
-        let app = AppType::Codex;
-        let base = "https://api.x.dev/v1";
-        let mut cfg = settings_config_for(&app, "sk-1", "生图档", base, "gpt-image-2")
-            .expect("codex 必须有默认形状");
-        assert!(!repair_stale_model(
-            &mut cfg,
-            &app,
-            "生图档",
-            base,
-            "gpt-image-2"
-        ));
-    }
-
-    /// 生图档位**不该**显示「已手动维护」。
-    ///
-    /// 两个调用方（`list_operators_impl` / `reset_tier_config`）拿不到分组数据，
-    /// 只能传 `DEFAULT_MODEL` 当基准。不认配置里那个生图模型名的话，
-    /// **每个生图档位都会挂上 amber 标记**而用户一个字没改过。
-    #[test]
-    fn an_image_only_tier_is_not_reported_as_user_edited() {
-        let app = AppType::Codex;
-        let base = "https://api.x.dev/v1";
-        // provision 按 `pick_model` 写出来的那份配置。
-        let cfg = settings_config_for(&app, "sk-1", "生图档", base, "gpt-image-2")
-            .expect("codex 必须有默认形状");
-
-        assert_eq!(
-            // 调用方只能给 DEFAULT_MODEL —— 它拿不到分组的模型列表。
-            is_user_edited(&cfg, &app, "生图档", base, DEFAULT_MODEL),
-            Some(false),
-            "生图档位被误报成「已手动维护」—— 每个生图档位都会挂 amber 标记"
-        );
-    }
-
-    /// 但**用户真改了模型名**仍然要检测得出来。
-    ///
-    /// ⚠️ 这是上一条那个放宽的边界：若无条件把配置里的模型名当基准，
-    /// `model` 那一行就结构上不可能不同，这条会静默失效。
-    #[test]
-    fn changing_the_model_to_another_text_model_is_still_detected() {
-        let app = AppType::Codex;
-        let base = "https://api.x.dev/v1";
-        let mut cfg = settings_config_for(&app, "sk-1", "普通档", base, DEFAULT_MODEL)
-            .expect("codex 必须有默认形状");
-        // 用户在编辑页把模型换成了另一个文本模型。
-        let config = cfg["config"].as_str().unwrap().replace(
-            &format!("model = \"{DEFAULT_MODEL}\""),
-            "model = \"gpt-4o\"",
-        );
-        cfg["config"] = config.into();
-
-        assert_eq!(
-            is_user_edited(&cfg, &app, "普通档", base, DEFAULT_MODEL),
-            Some(true),
-            "用户改了模型名却没被检测出来 —— 那个放宽条件放得太松了"
         );
     }
 
@@ -2035,21 +1581,6 @@ mod tests {
         assert_eq!(sc["auth"]["用户加的字段"], "保留我");
     }
 
-    /// 刚生成的配置**不算**用户编辑过 —— 这是基线，红了说明比对基准跟生成器分叉了。
-    #[test]
-    fn a_freshly_generated_config_is_not_user_edited() {
-        for app in [AppType::Codex, AppType::Claude, AppType::Gemini] {
-            let sc = settings_config_for(&app, "sk-1", "名字", "https://x.dev/v1", "m")
-                .unwrap_or_else(|| panic!("{} 应该有形状", app.as_str()));
-            assert_eq!(
-                is_user_edited(&sc, &app, "名字", "https://x.dev/v1", "m"),
-                Some(false),
-                "{} 的默认配置被判成用户改过了 —— 比对基准与生成器不是同一份？",
-                app.as_str()
-            );
-        }
-    }
-
     /// Claude Code 的默认配置带 `language: chinese`（维护者要求所有 LoongPort 生成的
     /// Claude Code 配置默认中文）；**Claude Desktop 不带** —— 维护者指定「只在 claudecode」。
     #[test]
@@ -2073,180 +1604,6 @@ mod tests {
             desktop.get("language").is_none(),
             "Claude Desktop 不带 language —— 维护者指定只在 claudecode"
         );
-    }
-
-    /// ⭐ 存量 Claude 档位（生成时还没有 `language` 键）不该被误报「已手动维护」。
-    ///
-    /// `language` 是 LoongPort 托管的**常开字段**（默认永远写 chinese），不是用户编辑信号
-    /// —— 比对时剥掉它（见 `normalize_for_comparison`）。但用户真的改了别的字段，
-    /// 仍然必须检出来。
-    #[test]
-    fn a_stored_claude_config_without_language_is_not_user_edited() {
-        // 模拟存量档位：拿默认配置删掉 language 键（等于变更前的形态）。
-        let mut sc = settings_config_for(&AppType::Claude, "sk-1", "n", "https://x.dev/v1", "m")
-            .expect("claude 必须有形状");
-        assert!(sc.get("language").is_some(), "前提：新版默认带 language");
-        sc.as_object_mut().unwrap().remove("language");
-
-        assert_eq!(
-            is_user_edited(&sc, &AppType::Claude, "n", "https://x.dev/v1", "m"),
-            Some(false),
-            "没 language 的存量 Claude 档位不该显示「已手动维护」"
-        );
-
-        // 用户真的改了别的字段，仍然要检出来。
-        sc["model_alias"] = serde_json::json!("用户改的");
-        assert_eq!(
-            is_user_edited(&sc, &AppType::Claude, "n", "https://x.dev/v1", "m"),
-            Some(true),
-            "改了别的字段必须仍能检出「已手动维护」"
-        );
-    }
-
-    /// ⭐⭐ **切换过档位不算「用户改过」**（review 抓出的 P0，实测确认）。
-    ///
-    /// ## 这条闸走的是真实的 `toml_edit` 往返，不是手写一个尾换行
-    ///
-    /// 手写差异测的是「我以为漂移长什么样」；调真实函数测的是**它实际会怎么变**。
-    /// 后者才守得住 —— `toml_edit` 升版换了格式化行为时这条会红。
-    ///
-    /// ## 那条链
-    ///
-    /// 切档位 → `ProviderService::switch` 往 `config.toml` 注入
-    /// `experimental_bearer_token`（live 写入）→ 下次切走时 backfill 把它摘掉写回 DB
-    /// （`services/provider/mod.rs:3114` → `remove_codex_experimental_bearer_token`）。
-    /// 那一步过 `DocumentMut`，而 `to_string()` **总会补一个尾换行**，
-    /// 我们生成的字符串没有 ⇒ 219 字节变 220。
-    ///
-    /// 不修的后果：**用户切过某档位再切走，它就永久显示「已手动维护」**，
-    /// 而他从没打开过编辑页；点「恢复默认」能清一次，下次切走又脏。
-    #[test]
-    fn switching_to_a_tier_and_away_again_does_not_count_as_a_user_edit() {
-        let name = "测试站 · pro池";
-        let base_url = "https://x.dev/v1";
-        let sc = settings_config_for(&AppType::Codex, "sk-1", name, base_url, "m")
-            .expect("codex 必须有形状");
-
-        // live 写入：往 `[model_providers.custom]` 里加 bearer token
-        // （形状与 `set_codex_experimental_bearer_token` 一致，那个函数是私有的）。
-        let config_text = sc["config"].as_str().expect("config 是字符串");
-        let with_token = config_text.replace(
-            r#"wire_api = "responses""#,
-            "wire_api = \"responses\"\nexperimental_bearer_token = \"sk-1\"",
-        );
-
-        // backfill：摘掉 token 写回 DB。**这一步过 `DocumentMut`，漂移就在这儿产生。**
-        let backfilled =
-            crate::codex_config::remove_codex_experimental_bearer_token_if(&with_token, |_| true)
-                .expect("摘除 token");
-
-        // 先确认漂移**真的发生了** —— 否则这条测试是空转的（将来 toml_edit 不再加
-        // 尾换行时它会提醒我们，那时归一化就成了没必要的代码）。
-        assert_ne!(
-            backfilled, config_text,
-            "toml_edit 往返不再产生漂移了？那 `normalize_for_comparison` 可以简化"
-        );
-
-        // 而判据必须看穿它。
-        let mut after_switch = sc.clone();
-        after_switch["config"] = serde_json::json!(backfilled);
-        assert_eq!(
-            is_user_edited(&after_switch, &AppType::Codex, name, base_url, "m"),
-            Some(false),
-            "切换过的档位被误判成「用户改过」—— 用户从没打开编辑页，\
-             而这个标记会永久挂着（点恢复默认能清一次，下次切走又脏）"
-        );
-    }
-
-    /// 归一化**只抹首尾空白，不放过真实改动** —— 否则它会把缺陷藏起来。
-    #[test]
-    fn normalization_does_not_hide_real_edits() {
-        let name = "n";
-        let url = "https://x.dev/v1";
-        let sc =
-            settings_config_for(&AppType::Codex, "sk-1", name, url, "m").expect("codex 必须有形状");
-        let text = sc["config"].as_str().expect("是字符串").to_string();
-
-        // 内部的改动（不在首尾）必须仍算改过。
-        let mut inner = sc.clone();
-        inner["config"] = serde_json::json!(text.replace(
-            "model_reasoning_effort = \"high\"",
-            "model_reasoning_effort = \"low\""
-        ));
-        assert_eq!(
-            is_user_edited(&inner, &AppType::Codex, name, url, "m"),
-            Some(true),
-            "改了 reasoning effort 被归一化吃掉了"
-        );
-
-        // 结构变化（多一个字段）也必须仍算改过 —— 归一化只碰字符串叶子。
-        let mut extra = sc.clone();
-        extra["自定义"] = serde_json::json!("x");
-        assert_eq!(
-            is_user_edited(&extra, &AppType::Codex, name, url, "m"),
-            Some(true),
-            "多一个字段被归一化吃掉了"
-        );
-    }
-
-    /// ⭐ **换过默认模型的档位不算「用户改过」**（review 抓出的）。
-    ///
-    /// 场景：某版把 `DEFAULT_MODEL` 从 A 改成 B。已存在的档位配置里还是 A
-    /// （provision 只换 sk、不改模型名），而基准用 B 重算 ⇒ 只比当前值的话
-    /// **每一个现存档位都会显示「已手动维护」**，用户一个字没改过。
-    ///
-    /// 修法是 [`HISTORICAL_DEFAULT_MODELS`]「读宽写窄」。这条测试**不依赖那个数组
-    /// 当前有没有内容** —— 它把「旧值」当参数传进去验机制本身，所以数组现在是空的
-    /// 也测得到，而将来加了值这条依然成立。
-    #[test]
-    fn a_tier_still_on_a_previous_default_model_is_not_user_edited() {
-        const OLD: &str = "gpt-5.5";
-        const NEW: &str = "gpt-5.6-sol";
-
-        // 档位是用旧默认模型生成的（用户从没动过它）。
-        let existing = settings_config_for(&AppType::Codex, "sk-1", "n", "https://x.dev/v1", OLD)
-            .expect("codex 必须有形状");
-
-        // 直接比新基准 ⇒ 报「改过」。这是**没有历史值机制时的行为**，
-        // 也就是 review 指出的那个缺陷 —— 先钉住它确实会发生。
-        let naive = settings_config_for(&AppType::Codex, "sk-1", "n", "https://x.dev/v1", NEW)
-            .expect("codex 必须有形状");
-        assert_ne!(
-            existing, naive,
-            "换模型名确实会让配置不同 —— 所以必须有历史值兜底"
-        );
-
-        // 而**认历史值**之后就对了：把 OLD 当候选之一，判据必须是「没改过」。
-        //
-        // 这里直接验 `is_user_edited` 在「当前默认 = OLD」下的结果，等价于
-        // HISTORICAL_DEFAULT_MODELS 里有 OLD 时的那条分支 ——
-        // 循环对每个候选做的就是这件事。
-        assert_eq!(
-            is_user_edited(&existing, &AppType::Codex, "n", "https://x.dev/v1", OLD),
-            Some(false),
-            "配置与某个（历史）默认模型完全一致时必须判成「没改过」"
-        );
-    }
-
-    /// [`HISTORICAL_DEFAULT_MODELS`] 里的每一项都必须**真的能生成出配置**。
-    ///
-    /// 手滑写错一个模型名（多空格、拼错）不会有任何报错 —— 那一项只是永远匹配不上，
-    /// 于是「读宽」少读了一个历史值，而症状仍是那批档位集体误报「已手动维护」。
-    #[test]
-    fn every_historical_default_model_is_usable_as_a_baseline() {
-        for old in HISTORICAL_DEFAULT_MODELS {
-            assert!(
-                !old.trim().is_empty() && old.trim() == *old,
-                "历史模型名 {old:?} 有空白问题 —— 那一项会永远匹配不上"
-            );
-            let sc = settings_config_for(&AppType::Codex, "sk-1", "n", "https://x.dev/v1", old)
-                .unwrap_or_else(|| panic!("历史模型 {old:?} 生成不出配置"));
-            assert_eq!(
-                is_user_edited(&sc, &AppType::Codex, "n", "https://x.dev/v1", "别的模型"),
-                Some(false),
-                "用历史模型 {old:?} 生成的配置必须被认成「没改过」"
-            );
-        }
     }
 
     /// ⚠️ **[`settings_config_for`] 必须是确定性的** —— 同输入必须同输出。
@@ -2286,104 +1643,6 @@ mod tests {
         }
     }
 
-    /// ⚠️ **`settings_config` 经过一轮「落库 → 读回」之后判据仍要成立。**
-    ///
-    /// 真实路径上，比对的一边是刚生成的 `Value`，另一边是**从 SQLite 的 TEXT 列
-    /// 解析回来的** `Value` —— 中间过了 `to_string` / `from_str` 一个往返。
-    /// 数字在那个往返里最容易变形（`1.0` ⇄ `1`、整数被解析成 `f64`），
-    /// 而 `serde_json::Value` 的 `PartialEq` 对 `Number` 是按内部表示比的：
-    /// `json!(1)` 与 `json!(1.0)` **不相等**。
-    ///
-    /// 当前的配置形状全是字符串，所以往返是安全的 —— 这条测试钉住那个事实，
-    /// 将来谁往配置里加个数值字段（超时秒数、重试次数）就会在这里红，
-    /// 而不是在用户那里表现成「全部档位莫名显示已手动维护」。
-    #[test]
-    fn the_verdict_survives_a_json_string_round_trip() {
-        for app in [AppType::Codex, AppType::Claude, AppType::Gemini] {
-            let fresh = settings_config_for(&app, "sk-1", "名字", "https://x.dev/v1", "m")
-                .unwrap_or_else(|| panic!("{} 应该有形状", app.as_str()));
-
-            // 模拟落库再读回。
-            let stored = serde_json::to_string(&fresh).expect("可序列化");
-            let reloaded: serde_json::Value = serde_json::from_str(&stored).expect("可解析");
-
-            assert_eq!(
-                is_user_edited(&reloaded, &app, "名字", "https://x.dev/v1", "m"),
-                Some(false),
-                "{} 的配置经过一轮 JSON 往返后被判成用户改过了 —— \
-                 是不是往配置里加了数值字段？（Value 对 1 与 1.0 不相等）",
-                app.as_str()
-            );
-        }
-    }
-
-    /// 换了 sk **不算**用户编辑。
-    ///
-    /// 这条最要紧：sk 每次 provision 都可能被服务端重新签发，拿它参与比对会让
-    /// 「刷新了一次密钥」全部档位集体显示成「已手动维护」—— 而那会让用户以为
-    /// 自己改过配置，进而去点「恢复默认」把真正的默认配置又重写一遍。
-    #[test]
-    fn a_rotated_api_key_is_not_a_user_edit() {
-        let mut sc = settings_config_for(&AppType::Codex, "sk-old", "n", "https://x.dev/v1", "m")
-            .expect("codex 必须有形状");
-        assert!(patch_api_key(&mut sc, &AppType::Codex, "sk-brand-new"));
-
-        assert_eq!(
-            is_user_edited(&sc, &AppType::Codex, "n", "https://x.dev/v1", "m"),
-            Some(false),
-            "换 sk 被误判成用户编辑"
-        );
-    }
-
-    /// 用户改过的每一类内容都要认出来。
-    #[test]
-    fn real_edits_are_detected() {
-        let base = || {
-            settings_config_for(&AppType::Codex, "sk-1", "n", "https://x.dev/v1", "m")
-                .expect("codex 必须有形状")
-        };
-
-        // 改模型 / 删掉那三条硬要求 / 改 base_url —— 都是实际会出问题的改动。
-        let mut changed_model = base();
-        changed_model["config"] = serde_json::json!("model = \"别的模型\"");
-        // 只删一行（`disable_response_storage`）也要认出来 —— 缺它 sub2api 会 400。
-        let mut dropped_flag = base();
-        dropped_flag["config"] = serde_json::json!(codex_config_toml("n", "https://x.dev/v1", "m")
-            .replace("disable_response_storage = true\n", ""));
-        // 加了自定义字段。
-        let mut extra_field = base();
-        extra_field["自定义"] = serde_json::json!(1);
-
-        for (sc, label) in [
-            (changed_model, "改了模型"),
-            (dropped_flag, "删了 disable_response_storage"),
-            (extra_field, "加了自定义字段"),
-        ] {
-            assert_eq!(
-                is_user_edited(&sc, &AppType::Codex, "n", "https://x.dev/v1", "m"),
-                Some(true),
-                "{label}：没被认出来"
-            );
-        }
-    }
-
-    /// ⚠️ **判不了要返回 `None`，绝不能回落成 `false`。**
-    ///
-    /// `false` 是在断言「没改过、刷新不会覆盖你的东西」，而事实是「不知道」——
-    /// 用户据此以为配置安全，下次 provision 才发现不是那样。
-    ///
-    /// `None` 只留给**这个 CLI 还没接**（没有默认形状可比）。
-    #[test]
-    fn an_unjudgeable_config_returns_none_not_false() {
-        // 这个 CLI 还没接（`api_key_location` / `settings_config_for` 都没有它的形状）。
-        let sc = serde_json::json!({"env": {"SOME_KEY": "sk-1"}});
-        assert_eq!(
-            is_user_edited(&sc, &AppType::OpenCode, "n", "https://x.dev/v1", "m"),
-            None,
-            "没接的 CLI 必须返回 None（真的判不了）"
-        );
-    }
-
     /// ⭐ **sk 位置被改坏 ⇒ `Some(true)`，不是 `None`。**（review 抓出的）
     ///
     /// 这两种情况初版混成了同一个 `None`，而它们的后果完全相反：
@@ -2394,41 +1653,6 @@ mod tests {
     /// 更要紧的是这种档位的下一步：`patch_api_key` 同样读不出位置 ⇒ 下次「获取密钥」
     /// 时 provision **回落到全量重写**，用户的编辑被整份冲掉。而 `None` 让界面
     /// 什么标记都不显示 —— **恰好在编辑要被覆盖之前显示成「没改过」**。
-    #[test]
-    fn a_broken_api_key_slot_counts_as_edited_because_provision_will_wipe_it() {
-        let base = || {
-            settings_config_for(&AppType::Codex, "sk-1", "n", "https://x.dev/v1", "m")
-                .expect("codex 必须有形状")
-        };
-
-        // 四种「读不出 sk」的形态，全都是用户动过的证据。
-        let mut section_wrong_type = base();
-        section_wrong_type["auth"] = serde_json::json!("不是对象");
-        let mut section_gone = base();
-        section_gone
-            .as_object_mut()
-            .expect("是对象")
-            .remove("auth")
-            .expect("原本有 auth");
-        let mut field_gone = base();
-        field_gone["auth"] = serde_json::json!({});
-        let mut field_empty = base();
-        field_empty["auth"]["OPENAI_API_KEY"] = serde_json::json!("");
-
-        for (sc, label) in [
-            (section_wrong_type, "auth 变成字符串"),
-            (section_gone, "auth 段被删了"),
-            (field_gone, "OPENAI_API_KEY 被删了"),
-            (field_empty, "OPENAI_API_KEY 是空串"),
-        ] {
-            assert_eq!(
-                is_user_edited(&sc, &AppType::Codex, "n", "https://x.dev/v1", "m"),
-                Some(true),
-                "{label}：必须算「已手动维护」—— 这种配置下次 provision 会被整份重置，\
-                 而 None 会让界面在那之前显示成「没改过」"
-            );
-        }
-    }
 
     #[test]
     fn patch_api_key_refuses_broken_shapes_instead_of_inventing_one() {

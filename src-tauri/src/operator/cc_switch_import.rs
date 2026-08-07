@@ -817,30 +817,18 @@ mod tests {
             );
         }
 
-        // 4. 「已手动维护」解耦：回填的托管档位 settings_config 原样
-        //    ⇒ `is_user_edited`（纯内容函数）判定不变。
+        // 4. 「已手工维护」解耦：导入**不写** `user_edited` 存库标记 —— 那是「用户手工
+        //    编辑」的专属来源（编辑页置位、恢复默认复位）。导入是拷贝不是编辑，
+        //    回填的托管档位配置原样、标记仍为 false。
         let reinserted = providers.get("loongport-aaaaaaaaaaaaaaaa").unwrap();
         assert_eq!(
             reinserted.settings_config, managed_settings,
-            "回填不改 settings_config —— 「已手动维护」是按内容比的，不能被导入改变"
+            "回填不改 settings_config —— 导入不该改写托管档位的配置"
         );
-        let edited_before = provision::is_user_edited(
-            &managed_settings,
-            &AppType::Codex,
-            "托管档",
-            "https://bestapi.store/v1",
-            "gpt-5.6-sol",
-        );
-        let edited_after = provision::is_user_edited(
-            &reinserted.settings_config,
-            &AppType::Codex,
-            "托管档",
-            "https://bestapi.store/v1",
-            "gpt-5.6-sol",
-        );
-        assert_eq!(
-            edited_after, edited_before,
-            "导入不该改变「已手动维护」的判定"
+        assert!(
+            !db.get_user_edited("codex", "loongport-aaaaaaaaaaaaaaaa")
+                .expect("读标记"),
+            "导入不置「已手工维护」标记 —— 它只在用户手工编辑时置位"
         );
 
         // 5. 报告。

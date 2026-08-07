@@ -593,6 +593,20 @@ impl Client {
             .await
     }
 
+    /// 删除一把 Key（分组下架后清掉服务端孤儿 sk）。
+    ///
+    /// ⚠️ **有副作用的删除**：调用方必须确认这把 key 对应的分组真的不存在了
+    /// （不是临时不可用）。见 `provision::provision` 里 stale 清理那段。
+    pub async fn delete_key(&self, key_id: i64) -> Result<(), AppError> {
+        let _: serde_json::Value = self
+            .send(
+                self.http.delete(self.url(&format!("/keys/{key_id}"))),
+                "删除密钥",
+            )
+            .await?;
+        Ok(())
+    }
+
     /// 余额。
     pub async fn balance(&self) -> Result<Balance, AppError> {
         self.send(self.http.get(self.url("/user/profile")), "获取余额")

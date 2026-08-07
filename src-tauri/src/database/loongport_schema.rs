@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 2;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 3;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -126,6 +126,18 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 move_image_tiers_to_their_own_column(conn)?;
                 set_version(conn, 2)?;
             }
+            // v2 → v3：providers 加 `user_edited` 列 ——「已手工维护」从内容比对改成存库标记。
+            //
+            // ⚠️ 全新库也走这一步（`create_tables_on_conn` 建的是上游形态、没有这列），
+            // 所以**不要**顺手把列加进上游 `schema.rs` 的 providers CREATE ——
+            // 那会扩大与上游 merge 的接触面，而这列本来就是 LoongPort 自己的。
+            2 => {
+                log::info!(
+                    "LoongPort 数据迁移 v2 → v3（「已手工维护」落库为 providers.user_edited）"
+                );
+                add_user_edited_column(conn)?;
+                set_version(conn, 3)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -153,14 +165,13 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
 /// `experimental_bearer_token` 全拌进去）⇒ 与默认基准比对不上 ⇒ 界面显示「已手动维护」，
 /// 而用户一个字没改过。
 ///
-/// **判据是 [`provision::is_user_edited`] 而不是「配置里有没有那些键」**：后者要穷举
-/// 污染源（漏一个就洗不干净），前者问的是「这份配置等于我们会生成的默认值吗」——
-/// 那是同一个语义的唯一实现，也保证**真·用户编辑不会被洗掉**。
+/// **判据是「已手工维护」（现在存库为 `providers.user_edited`，编辑页置位、恢复默认
+/// 复位）而不是「配置里有没有那些键」**：后者要穷举污染源（漏一个就洗不干净）。
 ///
 /// ## 幂等
 ///
 /// 两条都幂等：`UPDATE ... WHERE app_type='codex'` 在第二次跑时已经没有匹配行；
-/// 配置重写只在 `is_user_edited == Some(false)` 且内容确实不同时发生。
+/// 配置重写只在标记「未手工维护」且内容确实不同时发生。
 ///
 /// ## 为什么走裸 SQL 而不是 `ProviderService`
 ///
@@ -227,9 +238,9 @@ fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppErro
 
         // 只搬栏，**不重写配置**。
         //
-        // 想过顺带洗掉回填污染（那是本轮症状的直接来源），但判不了：`is_user_edited`
-        // 对「被回填污染」和「用户真改过」返回同一个 `Some(true)` —— 两者在这一层
-        // 分不开（污染进来的键与用户可能加的键没有形状差别）。
+        // 想过顺带洗掉回填污染（那是本轮症状的直接来源），但当时判不了「被回填污染」
+        // 与「用户真改过」—— 现在「已手工维护」已存库（`providers.user_edited`），
+        // 但这条迁移跑在库升级时，不该为一次历史数据搬移引入新依赖。
         //
         // 所以按代价定：错洗掉用户的编辑**不可逆**，而留着污染只是多一个「已手动维护」
         // 标记 —— 界面上那条档位有「恢复默认配置」按钮，一点就干净。宁可留标记。
@@ -277,6 +288,44 @@ fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppErro
     }
 
     inherit_the_old_current_image_tier(conn)?;
+    Ok(())
+}
+
+/// 给 providers 表加 `user_edited` 列（「已手工维护」的存库标记，默认 0 = 没手动维护过）。
+///
+/// ⚠️ **列不放进上游 `create_tables_on_conn` 的 providers CREATE** —— 全新库靠这一步
+/// （迁移链）补上，与 v0→v1 建 loongport 两张表的模式一致，也不扩大与上游 merge 的接触面。
+fn add_user_edited_column(conn: &Connection) -> Result<(), AppError> {
+    // providers 表不存在时直接返回，不报错 —— 与 `move_image_tiers_to_their_own_column`
+    // 同一个理由：迁移不该因为缺表让 `Database::init` 失败、app 起不来。
+    let has_providers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='providers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_providers == 0 {
+        return Ok(());
+    }
+
+    // 幂等：列已存在（手工加过 / 重跑）就跳过，别让迁移崩掉。
+    let has_column: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name='user_edited'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_column > 0 {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE providers ADD COLUMN user_edited INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("给 providers 加 user_edited 列失败: {e}")))?;
     Ok(())
 }
 
@@ -668,6 +717,46 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{table} 该被建出来");
         }
+    }
+
+    /// ⭐ v2→v3 给 providers 加 `user_edited` 列（「已手工维护」存库）。
+    ///
+    /// ⚠️ 前提钉住：`create_tables_on_conn`（上游建表）**不带**这列 —— 它由 LoongPort
+    /// 自己的迁移加，不扩大与上游 merge 的接触面。哪天有人把列加进上游 CREATE，
+    /// 这条的前提断言会先红，提醒「别那样做」。
+    #[test]
+    fn v2_to_v3_adds_user_edited_column_to_providers() {
+        let conn = mem();
+        crate::Database::create_tables_on_conn(&conn).unwrap();
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('providers') \
+                 WHERE name='user_edited'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has, 0,
+            "前提：create_tables 不该带 user_edited —— 那是 LoongPort 迁移的活"
+        );
+
+        // 模拟一个停在 v2 的老库。
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 2).unwrap();
+
+        apply(&conn).unwrap();
+
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('providers') \
+                 WHERE name='user_edited'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1, "迁移后 providers 必须有 user_edited 列");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 
     #[test]
