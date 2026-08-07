@@ -88,7 +88,8 @@
 ### 查 sub2api 的行为：先找它的 Go 源码，别逆推线上 JS
 
 对接 sub2api（端点、字段、鉴权、计费规则）时，**优先看 sub2api 后端的 Go 源码**
-（开源，`Wei-Shaw/sub2api`；维护者本机已 clone，路径见工作区那份 CLAUDE.md）。
+（开源，`Wei-Shaw/sub2api`；源码在本机 design 仓的 `upstream/sub2api` 子模块，
+路径见工作区那份 CLAUDE.md —— 维护者本机布局唯一源）。
 它是契约本身，比读线上 SPA 的 minified bundle、比历史实测记录都权威一个量级 ——
 能给到「哪个 handler 第几行填了哪个字段」级别的证据。
 
