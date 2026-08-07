@@ -2,8 +2,9 @@ use crate::deeplink::{
     import_mcp_from_deeplink, import_prompt_from_deeplink, import_provider_from_deeplink,
     import_skill_from_deeplink, parse_deeplink_url, DeepLinkImportRequest,
 };
+use crate::events::emit_provider_switched;
 use crate::store::AppState;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 /// Parse a deep link URL and return the parsed request for frontend confirmation
 #[tauri::command]
@@ -25,6 +26,7 @@ pub fn merge_deeplink_config(
 /// Import a provider from a deep link request (legacy, kept for compatibility)
 #[tauri::command]
 pub fn import_from_deeplink(
+    app: AppHandle,
     state: State<AppState>,
     request: DeepLinkImportRequest,
 ) -> Result<String, String> {
@@ -34,7 +36,20 @@ pub fn import_from_deeplink(
         request.app
     );
 
-    let provider_id = import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+    let target_app = request.app.clone();
+    let (provider_id, did_switch_current) =
+        import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+
+    // ⚠️ 切了 current 就必须广播 provider-switched：OperatorSection 靠它 reload，
+    // 否则托管档位高亮停留在旧项（deeplink 导入改了 current 却没人通知界面）。
+    if did_switch_current {
+        if let Some(app_str) = target_app {
+            let app_type = app_str
+                .parse::<crate::AppType>()
+                .map_err(|e| e.to_string())?;
+            emit_provider_switched(&app, &app_type, &provider_id);
+        }
+    }
 
     log::info!("Successfully imported provider with ID: {provider_id}");
 
@@ -44,6 +59,7 @@ pub fn import_from_deeplink(
 /// Import resource from a deep link request (unified handler)
 #[tauri::command]
 pub async fn import_from_deeplink_unified(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: DeepLinkImportRequest,
 ) -> Result<serde_json::Value, String> {
@@ -51,8 +67,20 @@ pub async fn import_from_deeplink_unified(
 
     match request.resource.as_str() {
         "provider" => {
-            let provider_id =
+            let target_app = request.app.clone();
+            let (provider_id, did_switch_current) =
                 import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
+
+            // ⚠️ 同上：切了 current 必须广播，OperatorSection 靠它 reload。
+            if did_switch_current {
+                if let Some(app_str) = target_app {
+                    let app_type = app_str
+                        .parse::<crate::AppType>()
+                        .map_err(|e| e.to_string())?;
+                    emit_provider_switched(&app, &app_type, &provider_id);
+                }
+            }
+
             Ok(serde_json::json!({
                 "type": "provider",
                 "id": provider_id

@@ -59,6 +59,48 @@ pub async fn import_config_from_file(
     .map_err(|e: AppError| e.to_string())
 }
 
+/// 从 cc-switch 一键导入的**预览**：读 `~/.cc-switch/cc-switch.db`（只读）+ 本地托管行，
+/// 算「域名 + sk」冲突，返回会搬什么、跳过什么。**不写任何东西**。
+///
+/// 源库不存在 ⇒ `sourceExists: false`（前端据此决定显不显入口）。
+#[tauri::command]
+pub async fn get_cc_switch_import_preview(
+    state: State<'_, AppState>,
+) -> Result<crate::operator::cc_switch_import::ImportPlan, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::operator::cc_switch_import::plan_import(
+            &db,
+            &crate::operator::cc_switch_import::cc_switch_db_path(),
+        )
+    })
+    .await
+    .map_err(|e| format!("获取 cc-switch 导入预览失败: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+/// 从 cc-switch 一键导入（**拷贝，不动 cc-switch 那边**）。
+///
+/// 覆盖式：providers / MCP / prompts / skills 以 cc-switch 为准整体替换；LoongPort 的
+/// `loongport_operator` / `loongport_vendor` / `settings` 保留；本地托管档位回填；
+/// 与托管档位同指纹（域名 + sk）的 cc-switch 条目不导入、报告列出。
+/// 导入前自动备份（返回 `backupId`），失败可 `restore_db_backup` 恢复。
+#[tauri::command]
+pub async fn import_from_cc_switch(
+    state: State<'_, AppState>,
+) -> Result<crate::operator::cc_switch_import::ImportReport, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::operator::cc_switch_import::execute_import(
+            db,
+            &crate::operator::cc_switch_import::cc_switch_db_path(),
+        )
+    })
+    .await
+    .map_err(|e| format!("从 cc-switch 导入失败: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<Value, String> {
     let db = state.db.clone();

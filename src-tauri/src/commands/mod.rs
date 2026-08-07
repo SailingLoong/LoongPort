@@ -28,7 +28,9 @@ mod settings;
 pub mod skill;
 mod stream_check;
 mod subscription;
-mod sync_support;
+// `pub(crate)`：`operator::cc_switch_import` 的导入流程在导入后要调
+// `run_post_import_sync`（见 `import_export.rs` 的 `import_config_from_file` 同款后置）。
+pub(crate) mod sync_support;
 // ⚠️ **不能写成 `pub mod vendor;`**：`crate::vendor`（契约层）已经占了这个模块名，
 // 而 lib.rs 有一句 `pub use commands::*` ⇒ 两个 `vendor` 撞在同一个命名空间里，
 // rustc 报 `hidden_glob_reexports`，而 `-D warnings` 把它当错误。

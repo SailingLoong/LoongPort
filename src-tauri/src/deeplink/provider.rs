@@ -20,10 +20,14 @@ use std::str::FromStr;
 /// 3. Converts it to a Provider structure
 /// 4. Delegates to ProviderService for actual import
 /// 5. Optionally sets as current provider if enabled=true
+///
+/// 返回 `(provider_id, did_switch_current)` —— 第二个值表示「enabled=true 且已把
+/// 这个 provider 设成当前项」。调用方（命令层，有 AppHandle）据此广播
+/// `provider-switched` 事件；**本函数不发事件**（它是纯逻辑，测试里没有 AppHandle）。
 pub fn import_provider_from_deeplink(
     state: &AppState,
     request: DeepLinkImportRequest,
-) -> Result<String, AppError> {
+) -> Result<(String, bool), AppError> {
     // Verify this is a provider request
     if request.resource != "provider" {
         return Err(AppError::InvalidInput(format!(
@@ -148,12 +152,15 @@ pub fn import_provider_from_deeplink(
     }
 
     // If enabled=true, set as current provider
-    if merged_request.enabled.unwrap_or(false) {
+    let did_switch_current = if merged_request.enabled.unwrap_or(false) {
         ProviderService::switch(state, app_type.clone(), &provider_id)?;
         log::info!("Provider '{provider_id}' set as current for {app_type:?}");
-    }
+        true
+    } else {
+        false
+    };
 
-    Ok(provider_id)
+    Ok((provider_id, did_switch_current))
 }
 
 /// Build a Provider structure from a deep link request
