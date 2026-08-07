@@ -196,15 +196,18 @@ pub fn is_official_proxy_provider_id(id: &str) -> bool { /* 认新旧两个 */ }
 cd src-tauri
 cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
 cd ..
-npx tsc --noEmit && npx prettier --check "src/**/*.{js,jsx,ts,tsx,css,json}" && npx vitest run
+npx tsc --noEmit && npx prettier --check "{src,tests}/**/*.{js,jsx,ts,tsx,css,json,html}" && npx vitest run
 ```
 
 两个坑（都踩过）：
 
 - **`cargo` 不在默认 PATH 里**，先 `export PATH="$HOME/.cargo/bin:$PATH"`，
   否则拿到的是 `command not found` 而非真实结果。
-- **prettier 要用 CI 那个 glob**（`"src/**/*.{js,jsx,ts,tsx,css,json}"`）。
-  直接 `prettier --check src` 会把 `src/index.html` 也扫进来报 warn，那个不在闸内。
+- **prettier 的 glob 必须与 CI 一致**（`"{src,tests}/**/*.{js,jsx,ts,tsx,css,json,html}"`，
+  即 `package.json` 的 `format:check`）。别缩成 `src/**` —— 那会漏掉
+  `tests/` 与 `.html`，本地全绿而 CI 红（2026-08-07 实测：`tests/components/…`
+  的格式问题本地闸从来没扫到，合并时才被线上拦下）。直接跑
+  `pnpm format:check` 最省事，别手写 glob。
 
 **`cargo test` / `clippy` 全绿不代表能打包** —— CI 的 Backend Checks 不跑 `tauri build`，
 Tauri 的 npm↔crate 版本校验只在打包时触发（已踩过，见 `ca82a908`）。
