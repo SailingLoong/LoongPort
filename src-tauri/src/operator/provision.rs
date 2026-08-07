@@ -570,7 +570,19 @@ pub fn settings_config_with_roles(
 
     crate::deeplink::build_provider_from_request(app_type, &request)
         .ok()
-        .map(|p| p.settings_config)
+        .map(|p| {
+            let mut config = p.settings_config;
+            // 只有 Claude Code（CLI）默认带 `language: chinese`：维护者要求 LoongPort
+            // 生成的所有 Claude Code 配置默认中文（Claude Desktop 形状不同、不带这个键）。
+            //
+            // ⚠️ **加在生成侧，并让 `normalize_for_comparison` 在比对时剥掉它**（见
+            // `is_user_edited` 文档）：language 是 LoongPort 托管的常开字段，不是用户编辑
+            // 信号 —— 存量档位（生成时还没有这键）不该因此集体误报「已手动维护」。
+            if matches!(app_type, AppType::Claude) {
+                config["language"] = serde_json::json!("chinese");
+            }
+            config
+        })
 }
 
 /// 这份 `settings_config` 是不是**被用户改过**（≠ 我们会生成的默认配置）。
@@ -816,6 +828,11 @@ fn normalize_for_comparison(settings_config: &serde_json::Value) -> serde_json::
         serde_json::Value::String(s) => serde_json::Value::String(s.trim().to_string()),
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.iter()
+                // `language` 是 LoongPort 托管的**常开字段**（默认永远写 chinese，
+                // 见 `settings_config_with_roles` 那段）—— 从「已手动维护」的比对里剥掉它：
+                // 存量档位在生成时还没有这个键，留着会让它们集体误报「已手动维护」。
+                // 剥掉后两边有没有 `language` 都不参与判定。
+                .filter(|(k, _)| k.as_str() != "language")
                 .map(|(k, v)| (k.clone(), normalize_for_comparison(v)))
                 .collect(),
         ),
@@ -2031,6 +2048,59 @@ mod tests {
                 app.as_str()
             );
         }
+    }
+
+    /// Claude Code 的默认配置带 `language: chinese`（维护者要求所有 LoongPort 生成的
+    /// Claude Code 配置默认中文）；**Claude Desktop 不带** —— 维护者指定「只在 claudecode」。
+    #[test]
+    fn claude_default_carries_language_chinese_but_desktop_does_not() {
+        let claude = settings_config_for(&AppType::Claude, "sk-1", "n", "https://x.dev/v1", "m")
+            .expect("claude 必须有形状");
+        assert_eq!(
+            claude["language"], "chinese",
+            "Claude Code 默认配置该带 language: chinese"
+        );
+
+        let desktop = settings_config_for(
+            &AppType::ClaudeDesktop,
+            "sk-1",
+            "n",
+            "https://x.dev/v1",
+            "m",
+        )
+        .expect("claude-desktop 必须有形状");
+        assert!(
+            desktop.get("language").is_none(),
+            "Claude Desktop 不带 language —— 维护者指定只在 claudecode"
+        );
+    }
+
+    /// ⭐ 存量 Claude 档位（生成时还没有 `language` 键）不该被误报「已手动维护」。
+    ///
+    /// `language` 是 LoongPort 托管的**常开字段**（默认永远写 chinese），不是用户编辑信号
+    /// —— 比对时剥掉它（见 `normalize_for_comparison`）。但用户真的改了别的字段，
+    /// 仍然必须检出来。
+    #[test]
+    fn a_stored_claude_config_without_language_is_not_user_edited() {
+        // 模拟存量档位：拿默认配置删掉 language 键（等于变更前的形态）。
+        let mut sc = settings_config_for(&AppType::Claude, "sk-1", "n", "https://x.dev/v1", "m")
+            .expect("claude 必须有形状");
+        assert!(sc.get("language").is_some(), "前提：新版默认带 language");
+        sc.as_object_mut().unwrap().remove("language");
+
+        assert_eq!(
+            is_user_edited(&sc, &AppType::Claude, "n", "https://x.dev/v1", "m"),
+            Some(false),
+            "没 language 的存量 Claude 档位不该显示「已手动维护」"
+        );
+
+        // 用户真的改了别的字段，仍然要检出来。
+        sc["model_alias"] = serde_json::json!("用户改的");
+        assert_eq!(
+            is_user_edited(&sc, &AppType::Claude, "n", "https://x.dev/v1", "m"),
+            Some(true),
+            "改了别的字段必须仍能检出「已手动维护」"
+        );
     }
 
     /// ⭐⭐ **切换过档位不算「用户改过」**（review 抓出的 P0，实测确认）。
