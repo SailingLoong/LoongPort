@@ -130,13 +130,17 @@ export function VendorBlock({ vendor, busy, onAddVendor }: VendorBlockProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1">
-          {/* 「添加官网账号」入口。文案 vendor 无关 —— 将来不只是 DeepSeek。 */}
+        <div className="flex items-center gap-1.5">
+          <h2 className="text-sm font-medium">
+            {t("loongport.sections.official")}
+          </h2>
+          {/* 「添加官网账号」入口。文案 vendor 无关 —— 将来不只是 DeepSeek。
+              + 图标跟在标题后面，与「中转站」块同构。 */}
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="h-6 w-6"
             onClick={onAddVendor}
             title={t("loongport.vendor.add")}
             aria-label={t("loongport.vendor.add")}
@@ -148,9 +152,6 @@ export function VendorBlock({ vendor, busy, onAddVendor }: VendorBlockProps) {
               <Plus className="h-3.5 w-3.5" />
             )}
           </Button>
-          <h2 className="text-sm font-medium">
-            {t("loongport.sections.official")}
-          </h2>
         </div>
       </div>
 
