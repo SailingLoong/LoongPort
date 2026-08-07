@@ -170,6 +170,17 @@ const PRO: &str = "deepseek-v4-pro";
 /// DeepSeek 官方两档模型：便宜的那档。
 const FLASH: &str = "deepseek-v4-flash";
 
+/// 带 `[1M]` 后缀的版本，供 [`claude_role_models`] 用。
+///
+/// cc-switch 用模型名上的 `[1M]` 后缀声明「支持 1M 上下文」：Claude Code 直接认
+/// （`ONE_M_CONTEXT_MARKER`），Claude Desktop 侧由 `suggested_claude_desktop_routes`
+/// 剥掉后缀并翻译成 `supports1m`。DeepSeek v4 官方模型支持 1M，所以默认配置
+/// 直接带上，省得用户进表单逐个勾。**只加在角色对齐上，不加在主模型**
+/// （`ANTHROPIC_MODEL` 来自 `config_for`，同时被 codex 复用，codex 的 config.toml
+/// 模型名不能带后缀）。
+const PRO_1M: &str = "deepseek-v4-pro[1M]";
+const FLASH_1M: &str = "deepseek-v4-flash[1M]";
+
 /// Claude 系各模型角色分别用哪一档。
 ///
 /// ## 为什么这里要分档，而运营商那条不分
@@ -198,13 +209,18 @@ const FLASH: &str = "deepseek-v4-flash";
 /// Fable / Subagent 上游 preset 没写，但**上游认这两个 env**
 /// （`proxy/model_mapper.rs` 读它们），我们把它们接到了 deeplink 上
 /// （`DeepLinkImportRequest::fable_model`）。
+///
+/// 五个角色都带 `[1M]` 后缀（`PRO_1M` / `FLASH_1M`）：DeepSeek 官方模型支持
+/// 1M 上下文，默认配置就该声明它 —— 复用 cc-switch 的 `[1M]` 后缀机制
+/// （Claude Code 认后缀、Claude Desktop 由 `suggested_claude_desktop_routes`
+/// 翻译成 `supports1m`），我们自己不写判定逻辑。
 pub fn claude_role_models() -> crate::operator::provision::ClaudeRoleModels {
     crate::operator::provision::ClaudeRoleModels {
-        opus: PRO,
-        fable: PRO,
-        sonnet: FLASH,
-        haiku: FLASH,
-        subagent: FLASH,
+        opus: PRO_1M,
+        fable: PRO_1M,
+        sonnet: FLASH_1M,
+        haiku: FLASH_1M,
+        subagent: FLASH_1M,
     }
 }
 
@@ -1260,15 +1276,26 @@ mod tests {
     fn claude_roles_split_pro_and_flash_as_the_maintainer_chose() {
         let r = claude_role_models();
 
-        assert_eq!(r.opus, PRO, "opus 该走贵的那档");
-        assert_eq!(r.fable, PRO, "fable 该走贵的那档");
+        assert_eq!(r.opus, PRO_1M, "opus 该走贵的那档，且带 1M 声明");
+        assert_eq!(r.fable, PRO_1M, "fable 该走贵的那档，且带 1M 声明");
         assert_eq!(
-            r.sonnet, FLASH,
+            r.sonnet, FLASH_1M,
             "sonnet 该走 flash —— **这条与上游 preset 有意不同**（它是 pro）。\
              这是维护者选的性价比配比，不是漂移，别「对齐上游」改回去"
         );
-        assert_eq!(r.haiku, FLASH, "haiku 该走便宜的那档");
-        assert_eq!(r.subagent, FLASH, "subagent 该走便宜的那档");
+        assert_eq!(r.haiku, FLASH_1M, "haiku 该走便宜的那档，且带 1M 声明");
+        assert_eq!(
+            r.subagent, FLASH_1M,
+            "subagent 该走便宜的那档，且带 1M 声明"
+        );
+
+        // 五个角色都要带 1M 后缀 —— 剥掉后落到底层那两档模型名。
+        for v in [r.opus, r.fable, r.sonnet, r.haiku, r.subagent] {
+            assert!(
+                v.ends_with("[1M]"),
+                "角色模型名 {v} 必须带 [1M] 后缀（声明支持 1M 上下文）"
+            );
+        }
     }
 
     /// 两个模型名本身仍要在上游 preset 里出现过。
