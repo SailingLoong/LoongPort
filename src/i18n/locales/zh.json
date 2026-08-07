@@ -3027,8 +3027,12 @@
     "refresh": "刷新"
   },
   "loongport": {
+    "sections": {
+      "relay": "中转站",
+      "official": "官方 API",
+      "other": "其他"
+    },
     "tierList": {
-      "title": "运营商与档位",
       "empty": "还没有添加任何中转站",
       "addSite": "添加中转站",
       "refresh": "刷新档位与密钥"
@@ -3136,7 +3140,8 @@
       "sponsorAddAnother": "已有 {{count}} 个账号 · 再加一个"
     },
     "vendor": {
-      "add": "添加官网账号（DeepSeek）",
+      "add": "添加官网账号",
+      "empty": "还没有添加任何官网账号",
       "remove": "删除这个官网账号（连带它的配置）",
       "removeConfirmTitle": "删除这个官网账号？",
       "removeConfirmMessage": "会删掉「{{label}}」的登录态与本地密钥，连带它在六个平台生成的配置。官网上那把 API key 不会被删，重新登录就能再用。",

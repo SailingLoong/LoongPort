@@ -3027,8 +3027,12 @@
     "refresh": "Refresh"
   },
   "loongport": {
+    "sections": {
+      "relay": "Relay Stations",
+      "official": "Official API",
+      "other": "Others"
+    },
     "tierList": {
-      "title": "Providers & Tiers",
       "empty": "No relay site added yet",
       "addSite": "Add relay site",
       "refresh": "Refresh tiers & keys"
@@ -3136,7 +3140,8 @@
       "sponsorAddAnother": "{{count}} account(s) · add another"
     },
     "vendor": {
-      "add": "Add an official account (DeepSeek)",
+      "add": "Add an official account",
+      "empty": "No official account added yet",
       "remove": "Remove this official account (and its configs)",
       "removeConfirmTitle": "Remove this official account?",
       "removeConfirmMessage": "Removes the session and local key for “{{label}}”, along with the configs it generated for six platforms. The API key on the vendor's site is kept — sign in again to reuse it.",

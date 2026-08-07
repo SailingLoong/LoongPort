@@ -3028,8 +3028,12 @@
     "refresh": "重新整理"
   },
   "loongport": {
+    "sections": {
+      "relay": "中轉站",
+      "official": "官方 API",
+      "other": "其他"
+    },
     "tierList": {
-      "title": "營運商與方案",
       "empty": "還沒有新增任何中轉站",
       "addSite": "新增中轉站",
       "refresh": "重新整理檔位與金鑰"
@@ -3137,7 +3141,8 @@
       "sponsorAddAnother": "已有 {{count}} 個帳號 · 再加一個"
     },
     "vendor": {
-      "add": "新增官網帳號（DeepSeek）",
+      "add": "新增官網帳號",
+      "empty": "還沒有新增任何官網帳號",
       "remove": "刪除這個官網帳號（連帶它的設定）",
       "removeConfirmTitle": "刪除這個官網帳號？",
       "removeConfirmMessage": "會刪掉「{{label}}」的登入狀態與本機金鑰，連帶它在六個平台產生的設定。官網上那把 API 金鑰不會被刪，重新登入就能再用。",

@@ -3027,8 +3027,12 @@
     "refresh": "更新"
   },
   "loongport": {
+    "sections": {
+      "relay": "中継",
+      "official": "公式API",
+      "other": "その他"
+    },
     "tierList": {
-      "title": "プロバイダーとプラン",
       "empty": "中継サイトがまだ追加されていません",
       "addSite": "中継サイトを追加",
       "refresh": "プランとキーを更新"
@@ -3136,7 +3140,8 @@
       "sponsorAddAnother": "アカウント {{count}} 件 · さらに追加"
     },
     "vendor": {
-      "add": "公式アカウントを追加（DeepSeek）",
+      "add": "公式アカウントを追加",
+      "empty": "公式アカウントがまだ追加されていません",
       "remove": "この公式アカウントを削除（設定も一緒に）",
       "removeConfirmTitle": "この公式アカウントを削除しますか？",
       "removeConfirmMessage": "「{{label}}」のログイン情報とローカルのキー、および 6 つのプラットフォーム向けに生成した設定を削除します。公式サイト側の API キーは残るので、再度ログインすれば使えます。",

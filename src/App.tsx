@@ -995,8 +995,17 @@ function App() {
                     {/* LoongPort 的「运营商 × 分组」区，装在手工 provider 列表**上方**。
                         它自带全部状态（见 OperatorSection 的文档）—— 这里只挂一行，
                         不把 operator 的逻辑摊进这个上游文件。
-                        没有任何运营商时它自己返回 null，这一页与原来完全一样。 */}
+                        它内部已按「中转站 / 官方 API」两大块渲染（各自带区块头与
+                        区块内的添加入口），空时也各自显示区块内的占位。 */}
                     <OperatorSection appId={activeApp} />
+
+                    {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口仍是顶栏 +。
+                        生图页（codex-image）保持改动前的形态，不套三大块布局。 */}
+                    {activeApp !== "codex-image" && (
+                      <h2 className="text-sm font-medium">
+                        {t("loongport.sections.other")}
+                      </h2>
+                    )}
 
                     <ProviderList
                       providers={providers}

@@ -18,7 +18,10 @@ import zh from "@/i18n/locales/zh.json";
  * 照 `toolManagementLocales.test.ts` / `xaiOauthLocales.test.ts` 的形状写（仓库已有惯例）。
  */
 const requiredKeys = [
-  "tierList.title",
+  // 三大块的区块标题。
+  "sections.relay",
+  "sections.official",
+  "sections.other",
   "tierList.empty",
   "tierList.addSite",
   "tierList.refresh",
@@ -153,6 +156,8 @@ const requiredKeys = [
   // - `openKeyPage` —— 超上限时那个「去官网删」的入口（spec §4.3 要求指路而不是
   //   只说不允许），它是个 toast action 的 label，退化成 key 名按钮就没法读
   "vendor.add",
+  // 官方 API 块的空态占位。
+  "vendor.empty",
   "vendor.remove",
   "vendor.removeConfirmTitle",
   "vendor.removeConfirmMessage",

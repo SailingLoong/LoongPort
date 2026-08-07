@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Loader2, Plus } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -38,6 +37,7 @@ import { type RowKey, rowKey } from "./rowKey";
 import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
 import { useRowBusy } from "./useRowBusy";
 import { useTierEditGuard } from "./useTierEditGuard";
+import { VendorBlock } from "./VendorBlock";
 import { vendorBusyKey } from "./VendorRow";
 
 /**
@@ -1050,72 +1050,17 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
     }
   };
 
-  /**
-   * 「添加官网账号」按钮。**在两种布局里都要出现**，所以提成一个局部片段。
-   *
-   * 只在支持 DeepSeek 的 tab 里显示 —— gemini / grokbuild 那两个 tab 加了也生不出
-   * 记录（上游无 preset、协议不兼容），摆一个点了没用的按钮是骗人。
-   */
-  const addVendorButton = vendorSupportsApp(appId) ? (
-    <button
-      type="button"
-      onClick={() => void handleVendorLogin(DEEPSEEK_VENDOR_ID, null)}
-      disabled={busy.has("vendorLogin:new")}
-      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-border p-3 text-sm text-muted-foreground transition-colors hover:border-border-active hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
-    >
-      {busy.has("vendorLogin:new") ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : (
-        <Plus className="h-3.5 w-3.5" />
-      )}
-      {t("loongport.vendor.add")}
-    </button>
-  ) : null;
+  // 两个区块的添加入口都在各自区块头（`OperatorTierList` 的 + / `VendorBlock` 的 +），
+  // 所以不再有「两类都空时单摆按钮」的空态分支 —— 空态由各区块内部的占位承接。
+  const bothEmpty = operators.length === 0 && vendors.length === 0;
 
-  // 两类行都没有时**只渲染入口按钮**，不摆一个空的列表。
-  //
-  // 原本这里是 `return null`，理由写的是「引导加站点是 LoongPort 页的事」——
-  // 那个理由站不住：LoongPort 页大概率会被下掉/改造，而且**返回 null 会让「添加中转站」
-  // 按钮也一起消失** ⇒ 新用户在这一页压根没有入口。
-  //
-  // 摆一整个空列表也不对（那是干扰），所以只留按钮。
-  // ⚠️ 判据是**两类都空**：只有官网账号、没加过中转站的用户（vendor-only）
-  // 也得看到自己那些行 —— 只判 operators 会把它们整个藏起来。
-  if (operators.length === 0 && vendors.length === 0) {
-    // 生图页的空态**不引导「添加站点」** —— 生图档位不是单独添加的，它由现有站点里
-    // 「只挂 gpt-image 模型的分组」自动产生（`provision::image_tier_app_type`）。
-    // 在这里摆一个「添加中转站」按钮会让用户以为要再加一个站，而正确的动作是
-    // 去 codex 页点「获取密钥」，或者根本不做（他那个站可能没有生图分组）。
-    if (isImageTab) {
-      return <ImageTabNotice empty />;
-    }
-    return (
-      <>
-        <div className="space-y-2">
-          <button
-            type="button"
-            onClick={() => setAddingSite(true)}
-            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-border p-3 text-sm text-muted-foreground transition-colors hover:border-border-active hover:text-foreground"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {t("loongport.tierList.addSite")}
-          </button>
-          {addVendorButton}
-        </div>
-
-        {/* `isFirstRun`：走到这个分支就意味着这一区一行都没有 ⇒ 弹窗该出引导文案
-            （「选择服务站点」而不是「添加另一个中转站」）。**它只换文案，仍然可关闭**
-            —— 见 `AddSiteDialogProps.isFirstRun` 的文档。 */}
-        <AddSiteDialog
-          open={addingSite}
-          onClose={() => setAddingSite(false)}
-          onAdded={() => void reload()}
-          defaultSite={defaultSite}
-          appId={appId}
-          isFirstRun
-        />
-      </>
-    );
+  // 生图页的空态**不引导「添加站点」** —— 生图档位不是单独添加的，它由现有站点里
+  // 「只挂 gpt-image 模型的分组」自动产生（`provision::image_tier_app_type`）。
+  // 在这里摆一个「添加中转站」按钮会让用户以为要再加一个站，而正确的动作是
+  // 去 codex 页点「获取密钥」，或者根本不做（他那个站可能没有生图分组）。
+  // codex-image 整页保持改动前的形态，不套三大块布局。
+  if (isImageTab && bothEmpty) {
+    return <ImageTabNotice empty />;
   }
 
   return (
@@ -1158,42 +1103,49 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
           const row = operators.find((op) => op.id === operatorId);
           if (row) setConfirmRemove(row);
         }}
-        vendor={{
-          accounts: vendors,
-          balances: vendorBalances,
-          isCurrent: isVendorCurrent,
-          onLogin: (rowId) => {
-            const row = vendors.find((v) => v.id === rowId);
-            if (row) void handleVendorLogin(row.vendorId, rowId);
-          },
-          onProvision: (rowId) => void handleVendorProvision(rowId),
-          onUse: (rowId) => void handleVendorUse(rowId),
-          onRemove: (rowId) => {
-            const row = vendors.find((v) => v.id === rowId);
-            if (row) setConfirmRemoveVendor(row);
-          },
-          // 编辑走与档位**同一个** `useTierEditGuard`（同一道事前警告、同一个
-          // cc-switch 编辑页）。`accountLabel` 空时回落厂商名 —— 弹窗标题里
-          // 空字符串会读成「手动编辑「」的配置」。
-          onEdit: (account) =>
-            requestEdit({
-              kind: "vendor",
-              providerId: account.providerId,
-              displayName: account.accountLabel || account.vendorName,
-              isCurrent: isVendorCurrent(account.id),
-            }),
-          onReset: (account) =>
-            setConfirmReset({
-              kind: "vendor",
-              providerId: account.providerId,
-              displayName: account.accountLabel || account.vendorName,
-              busyKey: vendorBusyKey("resetVendor", account.id),
-            }),
-          onReorder: (ids) => void handleVendorReorder(ids),
-        }}
       />
 
-      {addVendorButton}
+      {/* 官网直连账号块 —— 只在支持厂商的 tab 出现（gemini / grokbuild 无 preset，
+          摆了也是骗人）。「添加官网账号」入口在它自己的区块头。 */}
+      {vendorSupportsApp(appId) && (
+        <VendorBlock
+          vendor={{
+            accounts: vendors,
+            balances: vendorBalances,
+            isCurrent: isVendorCurrent,
+            onLogin: (rowId) => {
+              const row = vendors.find((v) => v.id === rowId);
+              if (row) void handleVendorLogin(row.vendorId, rowId);
+            },
+            onProvision: (rowId) => void handleVendorProvision(rowId),
+            onUse: (rowId) => void handleVendorUse(rowId),
+            onRemove: (rowId) => {
+              const row = vendors.find((v) => v.id === rowId);
+              if (row) setConfirmRemoveVendor(row);
+            },
+            // 编辑走与档位**同一个** `useTierEditGuard`（同一道事前警告、同一个
+            // cc-switch 编辑页）。`accountLabel` 空时回落厂商名 —— 弹窗标题里
+            // 空字符串会读成「手动编辑「」的配置」。
+            onEdit: (account) =>
+              requestEdit({
+                kind: "vendor",
+                providerId: account.providerId,
+                displayName: account.accountLabel || account.vendorName,
+                isCurrent: isVendorCurrent(account.id),
+              }),
+            onReset: (account) =>
+              setConfirmReset({
+                kind: "vendor",
+                providerId: account.providerId,
+                displayName: account.accountLabel || account.vendorName,
+                busyKey: vendorBusyKey("resetVendor", account.id),
+              }),
+            onReorder: (ids) => void handleVendorReorder(ids),
+          }}
+          busy={busy}
+          onAddVendor={() => void handleVendorLogin(DEEPSEEK_VENDOR_ID, null)}
+        />
+      )}
 
       <ConfirmDialog
         isOpen={confirmRemoveVendor !== null}
@@ -1251,12 +1203,16 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
         onCancel={() => setConfirmReset(null)}
       />
 
+      {/* `isFirstRun`：一个站都没有时（两个区块都空）弹窗出引导文案
+          （「选择服务站点」而不是「添加另一个中转站」）。**它只换文案，仍然可关闭**
+          —— 见 `AddSiteDialogProps.isFirstRun` 的文档。 */}
       <AddSiteDialog
         open={addingSite}
         onClose={() => setAddingSite(false)}
         onAdded={() => void reload()}
         defaultSite={defaultSite}
         appId={appId}
+        isFirstRun={bothEmpty}
       />
 
       {/* 「编辑配置」的警告 + cc-switch 编辑页（见 useTierEditGuard）。 */}

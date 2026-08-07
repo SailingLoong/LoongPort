@@ -24,33 +24,26 @@ import type {
   OperatorRow as OperatorRowData,
   TierInfo,
 } from "@/lib/api/operator";
-import type { VendorAccountRow } from "@/lib/api/vendor";
 
 import { OperatorRow } from "./OperatorRow";
 import { parseRowKey, type RowKey, rowKey } from "./rowKey";
-import { VendorRow } from "./VendorRow";
 
 /**
- * 「运营商 × 分组」列表：一行一个运营商，点击折叠/展开，展开后档位排在它下面。
+ * 「中转站」块：一行一个中转站运营商，点击折叠/展开，展开后档位排在它下面。
  *
- * ## 两类行混在一个列表里（2026-08-04 加）
+ * 2026-08-07 起**只含中转站行** —— 官网直连行拆去了 `VendorBlock`（官方 API 块）。
+ * 两个区块各归各的 dnd 列表，不再混列。
  *
- * 中转站行（`OperatorRow`，可展开、有档位）与官网直连行（`VendorRow`，一个 endpoint、
- * 不可展开）**并列显示**，官网行排在中转站行之后。
+ * ## 区块头
  *
- * ⚠️ **两张表的自增 id 都从 1 起、必然重叠**，所以凡是「会同时装两类行」的地方
- * （React `key`、dnd-kit 的 `items`、`openState` / `balances` 的 Record 键）
- * 一律用判别式的 `RowKey`（`"operator:3"` / `"vendor:3"`），不用裸 number ——
- * 撞了会让官网行的余额显示到同 id 的中转站行上，且没有任何报错。
+ * 标题左侧一个 `+` 图标按钮（tooltip 是「添加中转站」），右侧是「刷新档位与密钥」
+ * —— 刷新只属于中转站块（它要对每个已登录运营商重拉分组）。
  *
- * 只在 operator 内部流转的 id（`onLogin(op.id)` 传出去、回调里 find 回来）
- * **仍是 number**：那些不参与跨类索引。
+ * ## dnd id 仍是判别式 `RowKey`
  *
- * ## 排序：两类各自内部可拖，跨类不可
- *
- * 两类行的 `sort_index` 各自存在自己的表里，本来就没有一个共同的序
- * （spec §6.2 已裁决）。所以拖动结果按类别分派给两条 reorder 命令，
- * 跨类拖动直接忽略。
+ * 块内虽然只有一类行了，但 `openState` / `balances` 的键、dnd 的 `items` 与
+ * `useSortable` 的 id 一路用的都是 `rowKey("operator", id)` —— 保持同形，
+ * 别退回裸 number（`parseRowKey` 也因此还用得上）。
  *
  * ## props 比 `ProviderList` 少（它有 19 个）
  *
@@ -66,50 +59,8 @@ import { VendorRow } from "./VendorRow";
  * 纯 UI 偏好，不值得进 schema。key 带运营商 id（`loongport:collapsed:<id>`）而不是
  * 数组下标 —— 否则「折叠了第一个站」在站点顺序变化后会错位到别的站。
  */
-/**
- * 官网直连行那半边的全部数据与动作。
- *
- * ## 为什么收成一个对象而不是 8 个平铺 prop
- *
- * 这 8 项要么全给要么全不给（给一半的列表是坏的）—— 那就是一个单位而不是 8 个
- * 独立选项。收成一个对象让类型层面就说得清这件事，平铺 8 个 prop 说不清。
- */
-export interface VendorListSlice {
-  /**
-   * 官网直连账号行。**排在中转站行之后**，两类行在同一个 dnd 上下文里但不可跨类拖。
-   */
-  accounts: VendorAccountRow[];
-  /**
-   * 官网行的余额，按 `RowKey` 索引。**值是后端格式化好的字符串**（`"¥547.08"`）——
-   * 与 operator 那条 `number` 契约有意分开（改后者要动 sub2api 那半边）。
-   */
-  balances: Readonly<Record<RowKey, string | null>>;
-  /** 某个官网账号的配置是不是当前 tab 正在用的那个。 */
-  isCurrent: (rowId: number) => boolean;
-  /** 登录 / 重新登录某个官网账号。 */
-  onLogin: (rowId: number) => void;
-  /** 备好某个官网账号的密钥（也是「刷新密钥」的实现）。 */
-  onProvision: (rowId: number) => void;
-  /** 切到某个官网账号的配置。 */
-  onUse: (rowId: number) => void;
-  onRemove: (rowId: number) => void;
-  /**
-   * 编辑某个官网账号在**当前 tab 那个平台**上的配置。
-   *
-   * 传整行而不是 rowId：宿主要拿 `providerId` / `accountLabel` / `isCurrent`
-   * 去喂 `useTierEditGuard`（它吃 `EditableTier`），只给 id 还得再 find 回来。
-   */
-  onEdit: (account: VendorAccountRow) => void;
-  /** 把某个官网账号在当前 tab 那个平台上的配置恢复成默认值。 */
-  onReset: (account: VendorAccountRow) => void;
-  /** 官网行的排序（**只含官网行的 id**，走另一条命令）。 */
-  onReorder: (rowIds: number[]) => void;
-}
-
 export interface OperatorTierListProps {
   operators: OperatorRowData[];
-  /** 官网直连行那半边。 */
-  vendor: VendorListSlice;
   /**
    * 正在进行的操作集合（`"provision:3"` / `"switch:<providerId>"` / `"refresh:all"`）。
    *
@@ -134,8 +85,8 @@ export interface OperatorTierListProps {
    * 而余额必须发请求 —— 混进去会破坏那条契约（首屏就得等网络）。
    * 与倍率同一个模式：先渲染，再异步填。
    *
-   * ⚠️ **官网行的余额不在这里** —— 它是后端格式化好的 `string`（`"¥547.08"`），
-   * 与这条 `number` 契约不同（那边前端不做任何格式化）。走 `vendorBalances`。
+   * ⚠️ **官网行的余额不在这里** —— 官网行已拆去 `VendorBlock`，那边是后端格式化好的
+   * `string`（`"¥547.08"`），与这条 `number` 契约不同（那边前端不做任何格式化）。
    */
   balances: Readonly<Record<RowKey, number | null>>;
   /** 点某一行的余额 → 带登录态开那一行的充值页。 */
@@ -200,8 +151,7 @@ function initialOpenState(
 ): Record<RowKey, boolean> {
   const state: Record<RowKey, boolean> = {};
   for (const op of operators) {
-    // 键是判别式 RowKey：这个 Record 与列表里的两类行共存，
-    // 裸 number 会让官网行 3 的存在影响中转站行 3 的展开态。
+    // 键是判别式 RowKey（与 `VendorBlock` 那块的键同一套命名，分块后也不会撞）。
     // localStorage 的键仍按 operator id 存（那份偏好只有中转站行有）。
     const key = rowKey("operator", op.id);
     const stored = readCollapsed(op.id);
@@ -216,7 +166,6 @@ function initialOpenState(
 
 export function OperatorTierList({
   operators,
-  vendor,
   busy,
   onAddSite,
   onRefresh,
@@ -234,7 +183,6 @@ export function OperatorTierList({
 }: OperatorTierListProps) {
   const { t } = useTranslation();
   const refreshing = busy.has("refresh:all");
-  const vendors = vendor.accounts;
 
   // 与 `useDragSort`（ProviderList 用的那个）同样的 sensor 配置 —— 视觉与手感一致。
   const sensors = useSensors(
@@ -245,12 +193,11 @@ export function OperatorTierList({
   );
 
   /**
-   * 拖动结束。**两类行各自内部排序，跨类拖动忽略。**
+   * 拖动结束：只重排中转站行（本区块只有这一类）。
    *
-   * dnd-kit 的 id 现在是 `RowKey` 字符串（`"vendor:3"`）而不是裸 number ——
-   * 后者在两类行混列时会撞（两张表的 id 都从 1 起）。所以先解析出类别：
-   * 不同类就直接返回（不是「移动到那个位置」而是「这个操作没有意义」——
-   * 两类行的 `sort_index` 存在不同的表里，没有一个共同的序可写）。
+   * dnd id 仍是 `RowKey` 字符串（`"operator:3"`）—— 用 `parseRowKey` 取回数字 id。
+   * 立刻落库 —— 排序不是纯 UI 状态，换台机器/重开 app 都该记得。
+   * 不做乐观更新：父组件 refresh 后列表就是新序，多一次渲染而已。
    */
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
@@ -258,23 +205,14 @@ export function OperatorTierList({
       if (!over || active.id === over.id) return;
       const from = parseRowKey(String(active.id));
       const to = parseRowKey(String(over.id));
-      if (from.kind !== to.kind) return;
-
-      const ids =
-        from.kind === "operator"
-          ? operators.map((op) => op.id)
-          : vendors.map((v) => v.id);
+      const ids = operators.map((op) => op.id);
       const fromIdx = ids.indexOf(from.id);
       const toIdx = ids.indexOf(to.id);
       if (fromIdx < 0 || toIdx < 0) return;
 
-      // 立刻落库 —— 排序不是纯 UI 状态，换台机器/重开 app 都该记得。
-      // 不做乐观更新：父组件 refresh 后列表就是新序，多一次渲染而已。
-      const next = arrayMove(ids, fromIdx, toIdx);
-      if (from.kind === "operator") onReorder(next);
-      else vendor.onReorder(next);
+      onReorder(arrayMove(ids, fromIdx, toIdx));
     },
-    [operators, vendors, onReorder, vendor],
+    [operators, onReorder],
   );
 
   // 只认 id 集合的变化，不认整个 operators 数组 —— 后者每次 refresh 都是新对象，
@@ -319,40 +257,44 @@ export function OperatorTierList({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium">{t("loongport.tierList.title")}</h2>
-        <div className="flex items-center gap-2">
-          {/* 全局刷新会对每个已登录运营商各发一轮请求，所以它自己进行中时要禁用
-              （防连点）；但**别的行的操作不该禁它**，也不该被它禁 ——
-              运营商之间无依赖。 */}
+        <div className="flex items-center gap-1">
+          {/* 「添加中转站」入口。与「官方 API」块同构：+ 图标贴在标题左侧。 */}
           <Button
             type="button"
             variant="ghost"
-            size="sm"
-            className="h-7 gap-1"
-            disabled={refreshing}
-            onClick={onRefresh}
-          >
-            {refreshing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            {t("loongport.tierList.refresh")}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1"
+            size="icon"
+            className="h-7 w-7"
             onClick={onAddSite}
+            title={t("loongport.tierList.addSite")}
+            aria-label={t("loongport.tierList.addSite")}
           >
             <Plus className="h-3.5 w-3.5" />
-            {t("loongport.tierList.addSite")}
           </Button>
+          <h2 className="text-sm font-medium">
+            {t("loongport.sections.relay")}
+          </h2>
         </div>
+        {/* 全局刷新会对每个已登录运营商各发一轮请求，所以它自己进行中时要禁用
+            （防连点）；但**别的行的操作不该禁它**，也不该被它禁 ——
+            运营商之间无依赖。 */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1"
+          disabled={refreshing}
+          onClick={onRefresh}
+        >
+          {refreshing ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" />
+          )}
+          {t("loongport.tierList.refresh")}
+        </Button>
       </div>
 
-      {operators.length === 0 && vendors.length === 0 ? (
+      {operators.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
           {t("loongport.tierList.empty")}
         </p>
@@ -362,14 +304,10 @@ export function OperatorTierList({
           collisionDetection={closestCenter}
           onDragEnd={handleDragEnd}
         >
-          {/* dnd 的 id 是**判别式 RowKey 字符串**，不是裸 number ——
-              两类行混在一个 SortableContext 里，裸 number 会撞
-              （两张表的自增 id 都从 1 起）。跨类拖动由 `handleDragEnd` 忽略。 */}
+          {/* dnd 的 id 仍是判别式 `RowKey` 字符串（`"operator:3"`）——
+              与 `openState` / `balances` 的键同形，别退回裸 number。 */}
           <SortableContext
-            items={[
-              ...operators.map((op) => rowKey("operator", op.id)),
-              ...vendors.map((v) => rowKey("vendor", v.id)),
-            ]}
+            items={operators.map((op) => rowKey("operator", op.id))}
             strategy={verticalListSortingStrategy}
           >
             <div className="space-y-3">
@@ -392,23 +330,6 @@ export function OperatorTierList({
                   onResetTier={onResetTier}
                   onEditTier={onEditTier}
                   onDelete={() => onRemoveOperator(op.id)}
-                />
-              ))}
-              {/* 官网直连行排在中转站行**之后**：中转站是主线（有档位、有倍率、
-                  用户日常在这一层选），官网账号是补充的一条直连路径。 */}
-              {vendors.map((v) => (
-                <SortableVendorRow
-                  key={rowKey("vendor", v.id)}
-                  account={v}
-                  busy={busy}
-                  balance={vendor.balances[rowKey("vendor", v.id)] ?? null}
-                  isCurrent={vendor.isCurrent(v.id)}
-                  onLogin={() => vendor.onLogin(v.id)}
-                  onProvision={() => vendor.onProvision(v.id)}
-                  onUse={() => vendor.onUse(v.id)}
-                  onDelete={() => vendor.onRemove(v.id)}
-                  onEdit={() => vendor.onEdit(v)}
-                  onReset={() => vendor.onReset(v)}
                 />
               ))}
             </div>
@@ -449,33 +370,6 @@ function SortableOperatorRow(
       className={isDragging ? "z-10" : undefined}
     >
       <OperatorRow
-        {...props}
-        dragHandleProps={{ attributes, listeners, isDragging }}
-      />
-    </div>
-  );
-}
-
-/** 给 `VendorRow` 套同一层 sortable 壳（与上面那个逐字同形）。 */
-function SortableVendorRow(
-  props: Omit<React.ComponentProps<typeof VendorRow>, "dragHandleProps">,
-) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: rowKey("vendor", props.account.id) });
-
-  return (
-    <div
-      ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={isDragging ? "z-10" : undefined}
-    >
-      <VendorRow
         {...props}
         dragHandleProps={{ attributes, listeners, isDragging }}
       />
