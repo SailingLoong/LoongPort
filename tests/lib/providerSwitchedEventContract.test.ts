@@ -37,8 +37,6 @@ import { describe, expect, it } from "vitest";
  * 会红的改法：任一条切换路径不再发事件；`OperatorSection` 不再监听；
  * 事件名在任一侧被改。
  */
-const EVENT_NAME = "provider-switched";
-
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
 
 describe("provider-switched 的跨页面契约", () => {
@@ -64,20 +62,31 @@ describe("provider-switched 的跨页面契约", () => {
   });
 
   it("发射用的事件名与前端监听的逐字相同", () => {
-    const providerRs = read("src-tauri/src/commands/provider.rs");
-    const emitted = providerRs.match(/\.emit\("([^"]+)",\s*payload\)/);
-    expect(
-      emitted,
-      "在 emit_provider_switched 里找不到 emit(...) —— 它被改写了？",
-    ).not.toBeNull();
-    expect(emitted![1]).toBe(EVENT_NAME);
+    // 事件名常量收在 events.rs / events.ts 两侧（一致性闸在 events.rs 的
+    // consistency_tests 里守逐字一致）。这里验证三件事：
+    // 1) 两侧常量值确实是 "provider-switched"
+    // 2) emit_provider_switched 用的是常量而不是裸字面量（以后改事件名只改一处）
+    // 3) 前端两个消费者都从常量 import，而不是自己写裸字符串
+    const eventsRs = read("src-tauri/src/events.rs");
+    expect(eventsRs).toMatch(/pub const PROVIDER_SWITCHED:\s*&str\s*=\s*"provider-switched"/);
 
-    // 前端两个消费者都用这个名字。
-    expect(read("src/lib/api/providers.ts")).toContain(
-      `listen("${EVENT_NAME}"`,
+    const providerRs = read("src-tauri/src/commands/provider.rs");
+    expect(
+      providerRs,
+      "emit_provider_switched 该用 PROVIDER_SWITCHED 常量 —— 裸字面量会让事件名失去唯一源",
+    ).toMatch(/\.emit\(PROVIDER_SWITCHED,\s*payload\)/);
+
+    const eventsTs = read("src/lib/api/events.ts");
+    expect(eventsTs).toMatch(
+      /export const PROVIDER_SWITCHED\s*=\s*"provider-switched"/,
     );
-    expect(read("src/components/operator/OperatorSection.tsx")).toContain(
-      `"${EVENT_NAME}"`,
+
+    // 前端两个消费者都用常量。
+    expect(read("src/lib/api/providers.ts")).toMatch(
+      /listen\(PROVIDER_SWITCHED/,
+    );
+    expect(read("src/components/operator/OperatorSection.tsx")).toMatch(
+      /useTauriEvent<ProviderSwitchEvent>\(PROVIDER_SWITCHED/,
     );
   });
 

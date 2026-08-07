@@ -88,16 +88,6 @@ export interface VendorProvisionSummary {
 }
 
 /**
- * 登录窗凭据回传解析失败的事件名。**与 Rust 侧
- * `commands::vendor::LOGIN_ERROR_EVENT` 必须逐字一致**，payload 是错误字符串。
- *
- * ⚠️ 与 operator 那条 `"operator-login-error"` **有意不同**（两条链路的登录窗各自独立，
- * 混用会让一边的错误弹在另一边的界面上）。定在这一层的理由同 `PURCHASE_CLOSED_EVENT`：
- * 对不上的后果完全静默 —— 编译过、测试绿、只是登录失败永远没有提示。
- */
-export const VENDOR_LOGIN_ERROR_EVENT = "vendor-login-error";
-
-/**
  * 官网行会出现在哪些 tab。
  *
  * ⚠️ **`gemini` 与 `grokbuild` 不在里面** —— 上游没有 DeepSeek preset，协议不兼容

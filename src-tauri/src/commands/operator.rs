@@ -35,6 +35,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::events::PURCHASE_CLOSED;
 use crate::operator::{api, chatgpt_app, creds, login, provision, purchase};
 use crate::provider::Provider;
 use crate::services::{McpService, ProviderService};
@@ -2217,7 +2218,7 @@ async fn open_purchase_window(
     // 只 emit 事件、不在这里查余额：查余额要发 HTTP，而这个回调不能 await。
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            let _ = handle_for_close.emit(PURCHASE_CLOSED_EVENT, closed_operator_id);
+            let _ = handle_for_close.emit(PURCHASE_CLOSED, closed_operator_id);
         }
     });
 
@@ -2443,13 +2444,6 @@ fn backup_codex_auth(auth_path: &std::path::Path) -> Result<Option<String>, AppE
     crate::config::copy_file(auth_path, &dest)?;
     Ok(Some(dest.to_string_lossy().to_string()))
 }
-
-/// 充值窗关闭的事件名。**payload 是 `operator_id`（i64）** —— 前端据此只刷那一行的余额。
-///
-/// 提成常量是因为它是跨语言契约：前端 `useTauriEvent(PURCHASE_CLOSED_EVENT, ...)` 那边
-/// 写的是同一个字符串，两处各写一遍字面量的话，改名时会变成「关窗后余额永远不刷」——
-/// 而那是个静默失效，没有任何东西会报错。
-pub const PURCHASE_CLOSED_EVENT: &str = "operator-purchase-closed";
 
 /// 这条 provider 是不是 LoongPort 管的。
 ///

@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
-/// 前端监听的事件名
-pub const EVENT_USAGE_LOG_RECORDED: &str = "usage-log-recorded";
+use crate::events::USAGE_LOG_RECORDED;
 
 /// 防抖窗口：合并 200ms 内的多次通知。
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(200);
@@ -64,8 +63,8 @@ pub fn notify_log_recorded() {
         // 下一轮防抖窗口会重新调度，不会丢失。
         EMIT_SCHEDULED.store(false, Ordering::Release);
 
-        if let Err(e) = handle.emit(EVENT_USAGE_LOG_RECORDED, ()) {
-            log::warn!("emit {EVENT_USAGE_LOG_RECORDED} 失败: {e}");
+        if let Err(e) = handle.emit(USAGE_LOG_RECORDED, ()) {
+            log::warn!("emit {USAGE_LOG_RECORDED} 失败: {e}");
         }
     });
 }

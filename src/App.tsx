@@ -34,6 +34,10 @@ import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
   settingsApi,
+  PROFILE_APPLIED,
+  S3_SYNC_STATUS_UPDATED,
+  UNIVERSAL_PROVIDER_SYNCED,
+  WEBDAV_SYNC_STATUS_UPDATED,
   type AppId,
   type ProviderSwitchEvent,
 } from "@/lib/api";
@@ -384,7 +388,7 @@ function App() {
     };
   }, [activeApp, refetch]);
 
-  useTauriEvent("universal-provider-synced", async () => {
+  useTauriEvent(UNIVERSAL_PROVIDER_SYNCED, async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
     try {
       await providersApi.updateTrayMenu();
@@ -395,7 +399,7 @@ function App() {
 
   // 应用项目后刷新相关缓存（providers 由既有 provider-switched 监听承接；
   // proxy 状态由后端直接改 DB，不走 mutation，必须显式刷新）
-  useTauriEvent("profile-applied", async () => {
+  useTauriEvent(PROFILE_APPLIED, async () => {
     await queryClient.invalidateQueries({ queryKey: ["profiles"] });
     await queryClient.invalidateQueries({ queryKey: ["mcp", "all"] });
     await queryClient.invalidateQueries({ queryKey: ["skills"] });
@@ -409,7 +413,7 @@ function App() {
   });
 
   useTauriEvent<SyncStatusUpdatedPayload | null | undefined>(
-    "webdav-sync-status-updated",
+    WEBDAV_SYNC_STATUS_UPDATED,
     async (payload) => {
       const statusPayload = payload ?? {};
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
@@ -425,7 +429,7 @@ function App() {
   );
 
   useTauriEvent<SyncStatusUpdatedPayload | null | undefined>(
-    "s3-sync-status-updated",
+    S3_SYNC_STATUS_UPDATED,
     async (payload) => {
       const statusPayload = payload ?? {};
       await queryClient.invalidateQueries({ queryKey: ["settings"] });

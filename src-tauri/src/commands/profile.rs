@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
 use crate::database::Profile;
+use crate::events::{PROFILE_APPLIED, PROVIDER_SWITCHED};
 use crate::services::profile::{ProfilePayload, ProfileScope, ProfileService};
 use crate::store::AppState;
 
@@ -79,15 +80,15 @@ pub fn emit_profile_apply_events(
             "autoFailoverEnabled": auto_failover_enabled,
             "providerId": provider_id,
         });
-        if let Err(e) = app.emit("provider-switched", event_data) {
-            log::error!("发射 provider-switched 事件失败: {e}");
+        if let Err(e) = app.emit(PROVIDER_SWITCHED, event_data) {
+            log::error!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
         }
     }
     if let Err(e) = app.emit(
-        "profile-applied",
+        PROFILE_APPLIED,
         serde_json::json!({ "profileId": profile_id, "scope": scope.as_str() }),
     ) {
-        log::error!("发射 profile-applied 事件失败: {e}");
+        log::error!("发射 {PROFILE_APPLIED} 事件失败: {e}");
     }
     crate::tray::refresh_tray_menu(app);
 }

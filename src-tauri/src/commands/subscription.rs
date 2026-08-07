@@ -29,8 +29,11 @@ pub async fn get_subscription_quota(
                 "appType": app_type.as_str(),
                 "data": snapshot,
             });
-            if let Err(e) = app.emit("usage-cache-updated", payload) {
-                log::error!("emit usage-cache-updated (subscription) 失败: {e}");
+            if let Err(e) = app.emit(crate::events::USAGE_CACHE_UPDATED, payload) {
+                log::error!(
+                    "emit {} (subscription) 失败: {e}",
+                    crate::events::USAGE_CACHE_UPDATED
+                );
             }
             state
                 .usage_cache

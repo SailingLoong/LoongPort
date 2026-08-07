@@ -4,8 +4,12 @@ import { toast } from "sonner";
 import { Loader2, Plus } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { operatorApi } from "@/lib/api";
-import { PURCHASE_CLOSED_EVENT } from "@/lib/api/operator";
+import {
+  operatorApi,
+  PURCHASE_CLOSED,
+  VENDOR_LOGIN_ERROR,
+  PROVIDER_SWITCHED,
+} from "@/lib/api";
 import type { AppId, ProviderSwitchEvent } from "@/lib/api";
 import type {
   OperatorRow as OperatorRowData,
@@ -17,7 +21,6 @@ import {
   vendorSupportsApp,
   DEEPSEEK_API_KEYS_URL,
   DEEPSEEK_VENDOR_ID,
-  VENDOR_LOGIN_ERROR_EVENT,
   type VendorAccountRow,
 } from "@/lib/api/vendor";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
@@ -369,7 +372,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
    *
    * payload 带 operatorId，所以只刷那一行，不整页 reload（那会连带重查所有倍率）。
    */
-  useTauriEvent<number | null>(PURCHASE_CLOSED_EVENT, (operatorId) => {
+  useTauriEvent<number | null>(PURCHASE_CLOSED, (operatorId) => {
     if (typeof operatorId !== "number") return;
     const row = operatorsRef.current.find((op) => op.id === operatorId);
     // 行已经不在了（用户删掉了它）就别拉 —— 那次请求必然报错，且没有地方显示结果。
@@ -394,7 +397,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
    * 不过滤会让「切 claude 的供应商」也触发 codex 这一区重新拉一遍 ——
    * 多余的网络请求（每个档位一次倍率查询）。
    */
-  useTauriEvent<ProviderSwitchEvent>("provider-switched", (payload) => {
+  useTauriEvent<ProviderSwitchEvent>(PROVIDER_SWITCHED, (payload) => {
     if (payload?.appType !== appId) return;
     void reload();
   });
@@ -534,7 +537,7 @@ export function OperatorSection({ appId }: OperatorSectionProps) {
    * **必须报出来**：这条路径上用户看到的现象是「走完登录流程，界面什么都没发生」——
    * 不说的话他会反复重登。事件名是 vendor 自己那条（与 operator 有意不同）。
    */
-  useTauriEvent<string>(VENDOR_LOGIN_ERROR_EVENT, (message) => {
+  useTauriEvent<string>(VENDOR_LOGIN_ERROR, (message) => {
     toast.error(t("loongport.vendor.loginFailed", { reason: message }));
   });
 

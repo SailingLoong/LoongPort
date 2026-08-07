@@ -30,17 +30,11 @@ use tauri::{Emitter, Manager, State};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::events::VENDOR_LOGIN_ERROR;
 use crate::provider::Provider;
 use crate::services::ProviderService;
 use crate::store::AppState;
 use crate::vendor::{creds, deepseek, provision, Vendor, VendorError};
-
-/// 登录出错时发给前端的事件名。
-///
-/// 提成常量是因为它是**跨语言契约**：前端 `useTauriEvent` 那边写同一个字符串，
-/// 两处各写一遍字面量的话，改名会变成「登录失败永远没有提示」——
-/// 而那是个静默失效，没有任何东西会报错（同型于 `PURCHASE_CLOSED_EVENT`）。
-pub const LOGIN_ERROR_EVENT: &str = "vendor-login-error";
 
 /// 等用户走完登录流程的上限。5 分钟够走完注册 + 短信验证码 + 微信扫码。
 ///
@@ -333,7 +327,7 @@ async fn do_login(
             }
             Some(Err(e)) => {
                 log::warn!("官网凭据回传解析失败: {e}");
-                let _ = handle_for_nav.emit(LOGIN_ERROR_EVENT, e.to_string());
+                let _ = handle_for_nav.emit(VENDOR_LOGIN_ERROR, e.to_string());
                 false
             }
         }
@@ -1134,9 +1128,9 @@ mod tests {
     /// 事件名是跨语言契约（前端 `useTauriEvent` 写同一个字符串）。
     #[test]
     fn the_login_error_event_name_is_stable() {
-        assert_eq!(LOGIN_ERROR_EVENT, "vendor-login-error");
+        assert_eq!(VENDOR_LOGIN_ERROR, "vendor-login-error");
         assert_ne!(
-            LOGIN_ERROR_EVENT, "operator-login-error",
+            VENDOR_LOGIN_ERROR, "operator-login-error",
             "两个登录窗各发自己的事件，撞名会让中转站的弹窗显示官网的错"
         );
     }

@@ -5,6 +5,7 @@ use crate::app_config::AppType;
 use crate::commands::copilot::CopilotAuthState;
 use crate::commands::xai_oauth::XaiOAuthState;
 use crate::error::AppError;
+use crate::events::{PROVIDER_SWITCHED, UNIVERSAL_PROVIDER_SYNCED, USAGE_CACHE_UPDATED};
 use crate::provider::{ClaudeDesktopMode, Provider};
 use crate::services::{
     EndpointLatency, ProviderService, ProviderSortUpdate, SpeedtestService, SwitchResult,
@@ -293,10 +294,10 @@ pub(crate) fn emit_provider_switched(
         "appType": app_type.as_str(),
         "providerId": provider_id,
     });
-    if let Err(e) = app_handle.emit("provider-switched", payload) {
+    if let Err(e) = app_handle.emit(PROVIDER_SWITCHED, payload) {
         // 发不出去只是界面不刷新（用户重开面板就好），不该让切换本身失败 ——
         // 配置已经写进去了，报错会让用户以为没切成功而再切一次。
-        log::warn!("发射 provider-switched 事件失败: {e}");
+        log::warn!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
     }
 }
 
@@ -908,8 +909,8 @@ pub async fn queryProviderUsage(
             "providerId": &providerId,
             "data": snapshot,
         });
-        if let Err(e) = app_handle.emit("usage-cache-updated", payload) {
-            log::error!("emit usage-cache-updated (script) 失败: {e}");
+        if let Err(e) = app_handle.emit(USAGE_CACHE_UPDATED, payload) {
+            log::error!("emit {USAGE_CACHE_UPDATED} (script) 失败: {e}");
         }
         state
             .usage_cache
@@ -1302,7 +1303,7 @@ pub struct UniversalProviderSyncedEvent {
 
 fn emit_universal_provider_synced(app: &AppHandle, action: &str, id: &str) {
     let _ = app.emit(
-        "universal-provider-synced",
+        UNIVERSAL_PROVIDER_SYNCED,
         UniversalProviderSyncedEvent {
             action: action.to_string(),
             id: id.to_string(),

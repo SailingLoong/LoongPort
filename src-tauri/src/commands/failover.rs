@@ -3,6 +3,7 @@
 //! 管理代理模式下的故障转移队列（基于 providers 表的 in_failover_queue 字段）
 
 use crate::database::FailoverQueueItem;
+use crate::events::PROVIDER_SWITCHED;
 use crate::provider::Provider;
 use crate::store::AppState;
 use std::str::FromStr;
@@ -201,7 +202,7 @@ pub async fn set_auto_failover_enabled(
             "providerId": p1_provider_id,
             "source": "failoverEnabled"
         });
-        let _ = app.emit("provider-switched", event_data);
+        let _ = app.emit(PROVIDER_SWITCHED, event_data);
     }
 
     // 刷新托盘菜单，确保状态同步
