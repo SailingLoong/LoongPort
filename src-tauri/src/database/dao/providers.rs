@@ -2,7 +2,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 
 type OmoProviderRow = (
@@ -306,6 +306,32 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 读「已手工维护」标记。行不存在按 `false` 处理（调用方都应知道行在，
+    /// 这条只是防御：读不到不等于报错）。
+    pub fn get_user_edited(&self, app_type: &str, id: &str) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let edited: Option<bool> = conn
+            .query_row(
+                "SELECT user_edited FROM providers WHERE id = ?1 AND app_type = ?2",
+                params![id, app_type],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(edited.unwrap_or(false))
+    }
+
+    /// 写「已手工维护」标记。置位：手工编辑保存；复位：「恢复默认配置」。
+    pub fn set_user_edited(&self, app_type: &str, id: &str, value: bool) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE providers SET user_edited = ?1 WHERE id = ?2 AND app_type = ?3",
+            params![value, id, app_type],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
 

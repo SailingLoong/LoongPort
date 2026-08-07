@@ -54,6 +54,24 @@ fn add_provider_internal(
     provider: Provider,
     add_to_live: bool,
 ) -> Result<bool, AppError> {
+    let provider_id = provider.id.clone();
+    // `app_type` 下一步会被 move 进 impl，先扣出字符串给 set_user_edited 用。
+    let app_type_name = app_type.as_str().to_string();
+    let result = add_provider_internal_impl(state, app_type, provider, add_to_live)?;
+    // 用户手工新建的 provider 归他维护 ⇒ 置「已手工维护」标记。
+    // provision 不走这条命令（直调 save_provider），所以托管档位不会被误置位。
+    state
+        .db
+        .set_user_edited(&app_type_name, &provider_id, true)?;
+    Ok(result)
+}
+
+fn add_provider_internal_impl(
+    state: &AppState,
+    app_type: AppType,
+    provider: Provider,
+    add_to_live: bool,
+) -> Result<bool, AppError> {
     // ⚠️ **新增一条 `loongport-*` id 的 provider 必须拒**（review 抓出这里一直没守卫）。
     //
     // 那些 id 由 `provision::provider_id_for` 从「站点 + 账号 + 分组」派生，只有
@@ -131,7 +149,16 @@ fn update_provider_internal(
     if let Some(old) = original_id.filter(|old| *old != provider.id) {
         crate::operator::reject_if_managed(old)?;
     }
-    ProviderService::update(state, app_type, original_id, provider)
+    let provider_id = provider.id.clone();
+    // `app_type` 下一步会被 move 进 update，先扣出字符串给 set_user_edited 用。
+    let app_type_name = app_type.as_str().to_string();
+    let result = ProviderService::update(state, app_type, original_id, provider)?;
+    // 用户手工编辑保存 ⇒ 置「已手工维护」标记（即使改得跟默认一样，见需求）。
+    // 更新后的行 id 是 `provider.id`（改名时 original_id 指向旧行）。
+    state
+        .db
+        .set_user_edited(&app_type_name, &provider_id, true)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -506,6 +533,70 @@ mod managed_guard_tests {
         let err = delete_provider_internal(&empty_state(), AppType::Codex, &managed_id())
             .expect_err("删托管档位必须被拦");
         assert_managed_guard_error(&err);
+    }
+
+    /// ⭐「已手工维护」存库标记的 round-trip + 核心语义。
+    ///
+    /// - `save_provider`（provision 直调的那条路）**不碰** `user_edited` ⇒ 托管档位
+    ///   默认 0、不会被 provision 误置位。
+    /// - `set_user_edited` / `get_user_edited` 是对偶：置位→读到 true，复位→false。
+    /// - **核心语义**：把配置手动改得和默认一样，只要走过「编辑保存」置了位，标签仍在
+    ///   （不是内容比对，见 plan）。这里用置位后不改内容来钉「标记独立于内容」。
+    #[test]
+    fn user_edited_flag_round_trips_independent_of_config_content() {
+        let state = empty_state();
+        assert!(
+            !state
+                .db
+                .get_user_edited(AppType::Codex.as_str(), "不存在的行")
+                .unwrap(),
+            "不存在的行按 false（调用方都知道行在，这只是防御）"
+        );
+
+        // 直接 save_provider 模拟 provision 直调：标记必须默认 0。
+        let p = Provider::with_id(
+            "my-provider".into(),
+            "名字".into(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "sk"}}),
+            None,
+        );
+        state
+            .db
+            .save_provider(AppType::Codex.as_str(), &p)
+            .expect("save_provider");
+        assert!(
+            !state
+                .db
+                .get_user_edited(AppType::Codex.as_str(), "my-provider")
+                .unwrap(),
+            "save_provider 不该写标记 —— provision 直调这条路不能误置位"
+        );
+
+        // 置位 → true；**内容没变**也还是 true（核心语义：标记不是内容比对）。
+        state
+            .db
+            .set_user_edited(AppType::Codex.as_str(), "my-provider", true)
+            .expect("置位");
+        assert!(
+            state
+                .db
+                .get_user_edited(AppType::Codex.as_str(), "my-provider")
+                .unwrap(),
+            "置位后必须读到 true，且与配置内容无关"
+        );
+
+        // 复位 → false。
+        state
+            .db
+            .set_user_edited(AppType::Codex.as_str(), "my-provider", false)
+            .expect("复位");
+        assert!(
+            !state
+                .db
+                .get_user_edited(AppType::Codex.as_str(), "my-provider")
+                .unwrap(),
+            "复位后必须读到 false"
+        );
     }
 }
 

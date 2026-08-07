@@ -209,21 +209,12 @@ fn user_edited_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType)
     if row.provider_id.is_empty() {
         return None; // 还没登录过，派生不出 provider id。
     }
-    let (base_url, model) = crate::vendor::deepseek::config_for(app_type)?;
-    let existing = state
+    // 读存库标记 ——「已手工维护」的唯一来源（编辑页置位、恢复默认复位）。
+    // 读失败返回 None（不知道就别断言，同原语义）。
+    state
         .db
-        .get_provider_by_id(&row.provider_id, app_type.as_str())
-        .ok()??;
-    crate::operator::provision::is_user_edited_with_roles(
-        &existing.settings_config,
-        app_type,
-        // 基准用档位**当前**的名字，不是默认名 —— 与 operator 那边同一个理由：
-        // 用默认名会让改过名的档位永远显示「已手工维护」。
-        &existing.name,
-        base_url,
-        model,
-        crate::vendor::provision::claude_roles_for(app_type),
-    )
+        .get_user_edited(app_type.as_str(), &row.provider_id)
+        .ok()
 }
 
 /// 这一行在 `app_type` 这个平台下**是不是正在用的那个**。
@@ -662,6 +653,12 @@ fn vendor_reset_tier_config_impl(
         .db
         .save_provider(app_type.as_str(), &restored)
         .map_err(|e| AppError::Database(format!("保存配置失败: {e}")))?;
+
+    // 「恢复默认配置」= 回到 LoongPort 的默认 ⇒ 清掉「已手工维护」标记。
+    state
+        .db
+        .set_user_edited(app_type.as_str(), provider_id, false)
+        .map_err(|e| AppError::Database(format!("清除已手工维护标记失败: {e}")))?;
 
     // 恢复的若正是当前在用的那条，落地文件要跟着走 —— 不刷的话 CLI 读到的仍是
     // 用户改坏的那份，而「恢复默认」恰恰是他在档位坏了时点的按钮。

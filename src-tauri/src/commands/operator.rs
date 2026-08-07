@@ -58,9 +58,8 @@ use crate::store::AppState;
 // （两路 review 各抓一次）。指「本模块 tests 里」而不指名字，改名就不会让它悬空。
 const DEFAULT_SITE: &str = "790053500.com";
 
-// `DEFAULT_MODEL` 住在 `provision` 里 —— 它与 `HISTORICAL_DEFAULT_MODELS`、`pick_model`
-// 互为前提（前者的文档要求改值时同步后者；`pick_model` 要在「问不出模型列表」时回落到它），
-// 三者分居两个文件迟早分叉。这里只 `use`。
+// `DEFAULT_MODEL` 住在 `provision` 里 —— `pick_model` 要在「问不出模型列表」时
+// 回落到它。这里只 `use`，避免在命令层另写一份。
 use provision::DEFAULT_MODEL;
 
 /// 等用户走完登录流程的上限（秒）。
@@ -157,10 +156,10 @@ pub struct TierInfo {
     pub is_current: bool,
     /// 用户在 cc-switch 编辑页改过这个档位的配置吗。
     ///
-    /// 判据是「当前 `settings_config` ≠ 我们会生成的默认配置（sk 除外）」——
-    /// 见 [`provision::is_user_edited`] 那段「为什么不存标记」。
+    /// 判据是**存库标记** `providers.user_edited`（编辑页置位、恢复默认复位），
+    /// 不是内容比对 —— 手动改到和默认一样也仍算「已手工维护」。
     ///
-    /// `None` = **判不了**（读不出 sk / 这个 CLI 没有默认形状）。UI 在 `None` 时
+    /// `None` = 读标记失败（防御）。UI 在 `None` 时
     /// 什么标记都不显示：`false` 是在断言「刷新不会覆盖你的改动」，
     /// 而事实是「不知道」—— 让用户误信比不说更糟。
     ///
@@ -937,13 +936,12 @@ async fn do_provision(
             continue;
         };
 
-        // ⚠️ **已存在的档位只换 sk，不覆盖用户的编辑**。
+        // ⚠️ **已手工维护的档位只换 sk、保留配置；其余整份重写为当前默认**。
         //
-        // `save_provider` 是全量覆盖 `settings_config` 的，所以照写默认配置会把用户在
-        // cc-switch 编辑页改过的模型名 / reasoning effort / 自定义端点**全冲掉** ——
-        // 而他点「获取密钥」通常只是想刷新档位列表。
-        //
-        // 要回到默认值走 `operator_reset_tier_config`（显式动作），不是这条路的副作用。
+        // `save_provider` 是全量覆盖 `settings_config` 的。区分靠 `user_edited` 标记：
+        // 已标记（用户在编辑页维护过）⇒ 只换 sk，别把用户改的模型名 / reasoning effort /
+        // 自定义端点冲掉；未标记（LoongPort 托管的）⇒ 重写成默认，顺便吸收模型改名等
+        // 默认值变更（`repair_stale_model` 被这次全量重写吸收，已删）。
         let existing = state
             .db
             .get_provider_by_id(&provider_id, app_type.as_str())
@@ -952,34 +950,20 @@ async fn do_provision(
 
         let settings_config = match existing {
             Some(old) => {
-                let mut kept = old.settings_config;
-                // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落到默认配置。
-                // 否则用户会留着一把旧 sk 却以为刷新成功了。
-                if provision::patch_api_key(&mut kept, app_type, &tier.api_key) {
-                    // ⚠️ **顺手修正过时的模型名**（只在用户没改过配置时）。
-                    //
-                    // 上面那条「已存在的档位只换 sk」的规则本意是不冲掉用户的编辑，
-                    // 但它连**我们自己写错的值**也一起保护了 ⇒ `pick_model` 上线前
-                    // 被写成文本模型的纯生图档位，用户点多少次刷新都不会变好
-                    // （实测：选中即 404，且生图工具的入口判据一直不成立）。
-                    //
-                    // 判据在 `repair_stale_model` 里（`is_user_edited == Some(false)`
-                    // 才动），所以用户改过的档位仍然不受影响。
-                    if provision::repair_stale_model(
-                        &mut kept,
-                        app_type,
-                        &display_name,
-                        &op.api_base_url,
-                        &tier.model,
-                    ) {
-                        log::info!(
-                            "{display_name} 的模型名已修正为 {}（原值是过时的默认值，用户未改过配置）",
-                            tier.model
-                        );
+                // 已手工维护（`user_edited` 标记）⇒ 只换 sk、保留用户的配置。
+                // 未标记（LoongPort 托管的）⇒ 整份重写为当前默认配置 —— 拿最新模型 /
+                // 端点；`repair_stale_model` 被这次全量重写吸收（删掉了，见 git log）。
+                if state.db.get_user_edited(app_type.as_str(), &provider_id)? {
+                    let mut kept = old.settings_config;
+                    // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落到默认配置。
+                    // 否则用户会留着一把旧 sk 却以为刷新成功了。
+                    if provision::patch_api_key(&mut kept, app_type, &tier.api_key) {
+                        kept
+                    } else {
+                        log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
+                        defaults
                     }
-                    kept
                 } else {
-                    log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
                     defaults
                 }
             }
@@ -1019,19 +1003,8 @@ async fn do_provision(
         // 那正是用户实测「点刷新 claude 页下仍挂着 codex 的分组」的真根因。
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
-        // 这条路上判据算得**准**：`settings_config` 就在手边，`op.api_base_url` 也有，
-        // 不需要像 `list_operators_impl` 那样绕一圈。
-        //
-        // ⚠️ 基准的模型名同样用 `tier.model` —— 拿 `DEFAULT_MODEL` 去比对生图档位，
-        // 会让**每个生图档位都显示「已手动维护」**而用户一个字没改过
-        // （与 `HISTORICAL_DEFAULT_MODELS` 文档里描述的误报同一形状）。
-        let user_edited = provision::is_user_edited(
-            &provider.settings_config,
-            app_type,
-            &display_name,
-            &op.api_base_url,
-            &tier.model,
-        );
+        // 读存库标记 ——「已手工维护」的唯一来源（编辑页置位、恢复默认复位）。
+        let user_edited = state.db.get_user_edited(app_type.as_str(), &provider_id)?;
 
         let is_current = current == provider_id;
         if is_current {
@@ -1047,7 +1020,7 @@ async fn do_provision(
             group_name: tier.group_name.clone(),
             display_name,
             rate_multiplier: Some(tier.rate_multiplier),
-            user_edited,
+            user_edited: Some(user_edited),
             // 这条路上两个字段都有真值：模型名刚由 `pick_model` 算出来，
             // 生图开关刚从 `/groups/available` 拉到。
             allow_image_generation: Some(tier.allow_image_generation),
@@ -1377,17 +1350,11 @@ fn list_operators_impl(state: &AppState, app_type: AppType) -> Result<Vec<Operat
     let tiers = list_tiers_impl(state, app_type.clone())?;
     let now = chrono::Utc::now().timestamp();
 
-    Ok(operators
+    operators
         .into_iter()
-        .map(|op| {
-            let mine = tiers_of_site(
-                &tiers,
-                &op.site_origin,
-                op.account_id,
-                &op.api_base_url,
-                &app_type,
-            );
-            OperatorRow {
+        .map(|op| -> Result<OperatorRow, AppError> {
+            let mine = tiers_of_site(state, &tiers, &op.site_origin, op.account_id, &app_type)?;
+            Ok(OperatorRow {
                 id: op.id,
                 site_origin: op.site_origin.clone(),
                 site_name: op.site_name.clone(),
@@ -1400,9 +1367,9 @@ fn list_operators_impl(state: &AppState, app_type: AppType) -> Result<Vec<Operat
                 logged_in: op.token_looks_valid(now),
                 session_expired: op.session_expired(now),
                 tiers: mine,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// 把一个托管档位的配置**恢复成默认值**。
@@ -1571,6 +1538,12 @@ async fn reset_tier_config_impl(
         .save_provider(app_type.as_str(), &restored)
         .map_err(|e| AppError::Database(format!("恢复默认配置失败: {e}")))?;
 
+    // 「恢复默认配置」= 回到 LoongPort 的默认 ⇒ 清掉「已手工维护」标记。
+    state
+        .db
+        .set_user_edited(app_type.as_str(), &restored.id, false)
+        .map_err(|e| AppError::Database(format!("清除已手工维护标记失败: {e}")))?;
+
     // 重置的正是当前项 ⇒ 把默认配置落到 live 文件上。
     //
     // ⚠️ **这一步不可省，否则这个命令对当前项整体无效**：这个按钮的全部意义就是
@@ -1717,17 +1690,6 @@ struct OwnedTier {
     /// provision 时写下的运营商账号 id（`meta.loongportAccountId`）。
     /// `None` = 升级前生成的档位（那时还没记账号）。
     account_id: Option<i64>,
-    /// 这条档位当前的 `settings_config`，供 [`tiers_of_site`] 判「用户改过没有」。
-    ///
-    /// 判据需要 `api_base_url`（属于站点、存在 `creds` 里），而这里只有 provider
-    /// 记录 —— 所以判据不能在 [`list_tiers_impl`] 里算，得把原料带到按站分组那一步。
-    settings_config: serde_json::Value,
-    /// 判据的另一半原料：档位**当前**的显示名。
-    ///
-    /// ⚠️ **必须用当前名字，不能用默认名重算** —— 名字会进 codex 的
-    /// `config.toml`（`[model_providers.custom] name`），用默认名当基准的话，
-    /// 用户改过名的档位会**永远**显示「已手动维护」，哪怕其余配置一字未动。
-    display_name: String,
 }
 
 /// 从档位列表里挑出属于某一行运营商（站点 × 账号）的那些，保持原有顺序。
@@ -1749,16 +1711,14 @@ struct OwnedTier {
 ///
 /// `account_id` 为 `None` 的档位（升级前生成的）**按站点归属**：那时还没记账号，
 /// 不显示它们等于让老档位在界面上凭空消失。它们在下次 provision 后就带上标记了。
-/// `api_base_url` / `app_type` 只用来判「用户改过配置没有」（[`provision::is_user_edited`]）——
-/// 归属判据不需要它们。`api_base_url` 属于站点（存在 `creds` 里），所以只有到了
-/// 按站分组这一步才拿得到，见 [`OwnedTier::settings_config`] 的文档。
+/// `app_type` 只用来读「已手工维护」标记（存库，见 `providers.user_edited`）。
 fn tiers_of_site(
+    state: &AppState,
     tiers: &[OwnedTier],
     site_origin: &str,
     account_id: Option<i64>,
-    api_base_url: &str,
     app_type: &AppType,
-) -> Vec<TierInfo> {
+) -> Result<Vec<TierInfo>, AppError> {
     tiers
         .iter()
         .filter(|owned| owned.site_origin.as_deref() == Some(site_origin))
@@ -1770,22 +1730,28 @@ fn tiers_of_site(
             // 这一行还没登录（没有 account_id），而档位有主 ⇒ 不是它的。
             (None, Some(_)) => false,
         })
-        .map(|owned| TierInfo {
-            // ⚠️ **`app_id` 靠 `..owned.tier.clone()` 隐式继承**（来自
-            // `list_tiers_impl`，那条路按 app 查所以值天然正确）。改成显式构造、
-            // 或在中间插一层跨 app 的合并时**必须重新想清楚它** —— 那时它会静默
-            // 变错（前端据它筛「属于当前那一屏的档位」），而没有测试会红。
-            //
-            // 基准用档位**当前**的名字（`owned.display_name`），不是默认名 ——
-            // 见那个字段的文档：用默认名会让改过名的档位永远显示「已手动维护」。
-            user_edited: provision::is_user_edited(
-                &owned.settings_config,
-                app_type,
-                &owned.display_name,
-                api_base_url,
-                DEFAULT_MODEL,
-            ),
-            ..owned.tier.clone()
+        .map(|owned| -> Result<TierInfo, AppError> {
+            Ok(TierInfo {
+                // ⚠️ **`app_id` 靠 `..owned.tier.clone()` 隐式继承**（来自
+                // `list_tiers_impl`，那条路按 app 查所以值天然正确）。改成显式构造、
+                // 或在中间插一层跨 app 的合并时**必须重新想清楚它** —— 那时它会静默
+                // 变错（前端据它筛「属于当前那一屏的档位」），而没有测试会红。
+                //
+                // 「已手工维护」读存库标记（编辑页置位、恢复默认复位）。
+                user_edited: {
+                    let v = state
+                        .db
+                        .get_user_edited(app_type.as_str(), &owned.tier.provider_id)?;
+                    eprintln!(
+                        "DEBUG-inside {} {} -> {:?}",
+                        owned.tier.provider_id,
+                        app_type.as_str(),
+                        v
+                    );
+                    Some(v)
+                },
+                ..owned.tier.clone()
+            })
         })
         .collect()
 }
@@ -1829,8 +1795,6 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
             },
             site_origin: p.website_url.clone(),
             account_id: p.meta.as_ref().and_then(|m| m.loongport_account_id),
-            settings_config: p.settings_config.clone(),
-            display_name: p.name.clone(),
         })
         .collect();
 
@@ -2739,92 +2703,66 @@ mod tests {
         }
     }
 
-    /// 这些归属测试用的站点 base_url 与 app_type。
-    ///
-    /// 它们只喂给「用户改过配置没有」那个判据，与归属判定无关 —— 但得给个值。
-    const TEST_BASE_URL: &str = "https://bestapi.store/v1";
     fn test_app() -> AppType {
         AppType::Codex
     }
 
     /// 构造一条带归属的档位。`account` 为 `None` 表示升级前生成的旧档位。
-    ///
-    /// `settings_config` 给一份**默认配置**（不是空 JSON）：空的会让判据返回
-    /// `None`（读不出 sk），那样这些测试就悄悄测不到「判据被填上了」这件事。
     fn owned(id: &str, site: Option<&str>, account: Option<i64>) -> OwnedTier {
         OwnedTier {
             tier: tier(id),
             site_origin: site.map(str::to_string),
             account_id: account,
-            settings_config: provision::settings_config_for(
-                &test_app(),
-                "sk-test",
-                id,
-                TEST_BASE_URL,
-                DEFAULT_MODEL,
-            )
-            .expect("codex 必须有默认形状"),
-            display_name: id.into(),
         }
     }
 
-    /// `tiers_of_site` 的两个新参数在归属测试里恒定，包一层省得每处重复。
+    /// `tiers_of_site` 的归属参数在归属测试里恒定，包一层省得每处重复。
+    /// 它内部造一个空内存库当 state（`tiers_of_site` 要读「已手工维护」标记；
+    /// 这些归属测试不关心标记，空库读出来全是 false 即可）。
     fn tiers_of(tiers: &[OwnedTier], site: &str, account: Option<i64>) -> Vec<TierInfo> {
-        tiers_of_site(tiers, site, account, TEST_BASE_URL, &test_app())
+        let state = AppState::new(std::sync::Arc::new(
+            crate::database::Database::memory().expect("内存库"),
+        ));
+        tiers_of_site(&state, tiers, site, account, &test_app()).expect("tiers_of_site 不该失败")
     }
 
-    /// ⭐ **`tiers_of_site` 必须真的算出 `user_edited`，不能原样透传 `None`。**
+    /// ⭐ **`tiers_of_site` 的 `user_edited` 来自存库标记，不是内容比对。**
     ///
-    /// 这条守的是一处**静默退化**：`list_tiers_impl` 构造 `OwnedTier` 时把
-    /// `tier.user_edited` 填成 `None`（那一步拿不到 `api_base_url`），指望
-    /// `tiers_of_site` 在按站分组时覆盖掉。哪天那行 `user_edited: …` 被误删或
-    /// 改成 `..owned.tier.clone()` 一把带过，字段就恒为 `None` ⇒
-    /// **界面上所有标记集体消失**，而编译器、类型检查、其余测试全都不会红。
+    /// 旧实现靠比对 settings_config 与默认值算出「用户改过没有」；现在改为读
+    /// `providers.user_edited`（编辑页置位、恢复默认复位）。这条钉住：分组时
+    /// `user_edited` 如实反映库里标记，而不是原样透传 `None`。
     #[test]
-    fn grouping_computes_the_user_edited_flag_instead_of_passing_none_through() {
+    fn grouping_reads_the_user_edited_flag_from_the_database(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("内存库"));
+        let state = AppState::new(db.clone());
+        // 先造两条 provider 行（get_user_edited 读的是 providers 表，不是空表）。
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config) \
+                 VALUES ('t-default','codex','t-default','{}'), ('t-edited','codex','t-edited','{}')",
+                [],
+            )
+            .expect("插行");
+        }
+        // 库里只给 t-edited 置位；t-default 不置。
+        db.set_user_edited(AppType::Codex.as_str(), "t-edited", true)
+            .expect("置位");
 
-        // 一条默认配置的档位 + 一条被改过的。
-        let mut edited = owned("t-edited", Some(site), Some(1));
-        edited.settings_config["config"] = serde_json::json!("model = \"用户改的\"");
-        let tiers = vec![owned("t-default", Some(site), Some(1)), edited];
-
-        let got = tiers_of(&tiers, site, Some(1));
+        let tiers = vec![
+            owned("t-default", Some(site), Some(1)),
+            owned("t-edited", Some(site), Some(1)),
+        ];
+        let got = tiers_of_site(&state, &tiers, site, Some(1), &test_app()).expect("分组不该失败");
         let flags: Vec<_> = got.iter().map(|t| t.user_edited).collect();
-
         assert_eq!(
             flags,
             vec![Some(false), Some(true)],
-            "user_edited 没被算出来（全 None = 那行赋值丢了；全同值 = 判据没用上每条自己的配置）"
+            "user_edited 该读库里标记（t-default 没置位=false，t-edited 置位=true）"
         );
-    }
-
-    /// 换过 sk 的档位不该被判成「用户改过」—— 与 `provision` 那条同一个性质，
-    /// 但走的是**完整的分组路径**（含 `display_name` 当基准这一环）。
-    ///
-    /// ⚠️ 顺带钉住「基准用当前名字」：改过名的档位如果拿默认名重算基准，
-    /// 会**永远**显示「已手动维护」。
-    #[test]
-    fn a_renamed_tier_with_a_rotated_key_is_still_not_user_edited() {
-        let site = "https://bestapi.store";
-        let mut renamed = owned("t-1", Some(site), Some(1));
-        // 用户在编辑页改了显示名 —— 那个名字会进 config.toml，所以配置内容确实变了，
-        // 但它不是「改坏配置」，基准必须跟着用新名字。
-        renamed.display_name = "我自己起的名字".into();
-        renamed.settings_config = provision::settings_config_for(
-            &test_app(),
-            "sk-rotated",
-            "我自己起的名字",
-            TEST_BASE_URL,
-            DEFAULT_MODEL,
-        )
-        .expect("codex 必须有默认形状");
-
-        assert_eq!(
-            tiers_of(&[renamed], site, Some(1))[0].user_edited,
-            Some(false),
-            "改过名 + 换过 sk 被误判成「用户改坏了配置」"
-        );
+        Ok(())
     }
 
     #[test]
