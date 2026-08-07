@@ -257,22 +257,22 @@ export function OperatorTierList({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1">
-          {/* 「添加中转站」入口。与「官方 API」块同构：+ 图标贴在标题左侧。 */}
+        <div className="flex items-center gap-1.5">
+          <h2 className="text-sm font-medium">
+            {t("loongport.sections.relay")}
+          </h2>
+          {/* 「添加中转站」入口。与「官方 API」块同构：+ 图标跟在标题后面。 */}
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="h-6 w-6"
             onClick={onAddSite}
             title={t("loongport.tierList.addSite")}
             aria-label={t("loongport.tierList.addSite")}
           >
             <Plus className="h-3.5 w-3.5" />
           </Button>
-          <h2 className="text-sm font-medium">
-            {t("loongport.sections.relay")}
-          </h2>
         </div>
         {/* 全局刷新会对每个已登录运营商各发一轮请求，所以它自己进行中时要禁用
             （防连点）；但**别的行的操作不该禁它**，也不该被它禁 ——

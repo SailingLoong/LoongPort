@@ -1220,7 +1220,7 @@ function App() {
                 </h1>
               </div>
             ) : (
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-1.5">
                 <div className="relative inline-flex items-center">
                   {/* 品牌名点一下回主面板，**有意不做成外链**。
                       上游那里是指向官网的外链；这里换成「回主页」是因为点品牌名
@@ -1306,7 +1306,7 @@ function App() {
                 </div>
               )}
             {currentView === "providers" &&
-              (settingsData?.showProfileSwitcher ?? true) && (
+              (settingsData?.showProfileSwitcher ?? false) && (
                 <div
                   className="flex shrink-0 items-center"
                   style={{ WebkitAppRegion: "no-drag" } as any}
