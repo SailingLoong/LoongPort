@@ -103,7 +103,9 @@ describe("编辑流程复用 useTierEditGuard", () => {
   it("保存失败仍然 throw —— 不能只 toast", () => {
     // `EditProviderDialog` 是 `await onSubmit(); onOpenChange(false)`：
     // 吃掉错误会让它照常关窗，用户刚敲的一屏配置全丢。
-    expect(EDIT_GUARD).toMatch(/toast\.error\(String\(e\)\);\s*\n\s*\/\/[^\n]*\n\s*throw e;/);
+    expect(EDIT_GUARD).toMatch(
+      /toast\.error\(String\(e\)\);\s*\n\s*\/\/[^\n]*\n\s*throw e;/,
+    );
   });
 });
 

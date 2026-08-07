@@ -95,13 +95,17 @@ pub struct VendorAccountRow {
     /// 缺了它的后果（Task 6 实现时撞到的）：官网行的**「当前在用」高亮判不了**
     /// —— 前端只能靠「本次会话 provision 过」临时记住那个 id，app 一重启就没了。
     ///
-    /// ⚠️ 当前态的唯一事实源是 `providers` 表里那条记录（上游
-    /// `ProviderService::current`），前端拿这个 id 与它比即可。**本行没有 `is_current`
-    /// 这种字段** —— 库里那一列 2026-08-04 已删（从来没人写它，恒为 false），
-    /// 理由见 `vendor::creds::create_table` 的文档。
-    ///
     /// 空串 = 还没登录过（没有 `account_id` 就派生不出 id）。
     pub provider_id: String,
+    /// **当前 tab 那个 app** 下，这一行是不是正在用的那个。
+    ///
+    /// 判据是「`providers` 表里 `app_id` 那一栏的当前项 == 本行的 `provider_id`」——
+    /// 由后端在 `vendor_list_accounts` 里按 `app_id` 现算（同 `user_edited` 的时机），
+    /// **前端不自己维护**。与中转站档位的 `tier.is_current` 共用同一个事实源
+    /// （上游 `ProviderService::current`），所以一个 app 下所有组天然互斥。
+    ///
+    /// `false` 也可能是还没登录（`provider_id` 为空）—— 未登录的行不可能在用。
+    pub is_current: bool,
     /// **当前 tab 那个平台**的配置是不是被用户改过。
     ///
     /// ⚠️ **按平台算，不是整行一个值** —— 一行背后六条 provider 记录各自能被独立
@@ -136,9 +140,10 @@ impl From<creds::VendorRow> for VendorAccountRow {
             vendor_id: row.vendor_id,
             vendor_name,
             id: row.id,
-            // 这个 `From` 是纯转换、拿不到 DB。命令层用 `user_edited_for` 填它
-            // （要读 provider 记录才算得出来）。
+            // 这个 `From` 是纯转换、拿不到 DB。命令层用 `user_edited_for` / `is_current_for`
+            // 填它们（要读 provider 记录才算得出来）。
             user_edited: None,
+            is_current: false,
         }
     }
 }
@@ -176,16 +181,17 @@ pub async fn vendor_list_accounts(
     app_id: String,
 ) -> Result<Vec<VendorAccountRow>, String> {
     // 认不出的 app_id 不该让整条列表失败 —— 首屏契约是「只读本地、不卡」。
-    // 那种情况下 `user_edited` 全给 `None`（判不了就别断言）。
+    // 那种情况下 `user_edited` 全给 `None`、`is_current` 全给 `false`（判不了就别断言）。
     let app_type: Option<AppType> = app_id.parse().ok();
     with_conn(state.inner(), creds::list)
         .map(|rows| {
             rows.into_iter()
                 .map(|row| {
                     let mut out = VendorAccountRow::from(row);
-                    out.user_edited = app_type
-                        .as_ref()
-                        .and_then(|app| user_edited_for(state.inner(), &out, app));
+                    if let Some(app) = app_type.as_ref() {
+                        out.user_edited = user_edited_for(state.inner(), &out, app);
+                        out.is_current = is_current_for(state.inner(), &out, app);
+                    }
                     out
                 })
                 .collect()
@@ -224,6 +230,24 @@ fn user_edited_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType)
         model,
         crate::vendor::provision::claude_roles_for(app_type),
     )
+}
+
+/// 这一行在 `app_type` 这个平台下**是不是正在用的那个**。
+///
+/// 判据与中转站档位的 `is_current` **同源**：`providers` 表里该 `app_type` 的当前项
+/// （上游 `ProviderService::current`）== 本行的 `provider_id`。所以「DeepSeek 官方组」
+/// 与「中转站档位 / 手工 provider」共享同一份互斥，一个 app 下永远只有一个在用。
+///
+/// ⚠️ **`provider_id` 为空时必须返回 `false`**：未登录的行派生不出 id（给空串），
+/// 而 `ProviderService::current` 在无当前项时也返回空串 —— 不守卫会让「从未登录」
+/// 的行被误判成当前项（空 == 空）。
+fn is_current_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType) -> bool {
+    if row.provider_id.is_empty() {
+        return false;
+    }
+    ProviderService::current(state, app_type.clone())
+        .map(|current| current == row.provider_id)
+        .unwrap_or(false)
 }
 
 /// 开登录窗，等凭据回来，存成一行账号。
@@ -879,6 +903,54 @@ mod tests {
         r.vendor_id = "kimi".into();
         let dto = VendorAccountRow::from(r);
         assert_eq!(dto.vendor_name, "kimi", "认不出也要有个名字显示，不能空着");
+    }
+
+    // ─────────────── 当前在用：与中转站档位同源互斥 ───────────────
+
+    /// DeepSeek 行的「在用」必须与 `providers.is_current` 同源 —— 只有那样它才与
+    /// 中转站档位、手工 provider 一起互斥，一个 app 下只亮一个。
+    #[test]
+    fn is_current_tracks_the_providers_current_of_the_app() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let in_use = VendorAccountRow::from(row("tok", "sk", Some("uuid-a")));
+        let idle = VendorAccountRow::from(row("tok", "sk", Some("uuid-b")));
+
+        db.save_provider(
+            "claude",
+            &crate::provider::Provider {
+                id: in_use.provider_id.clone(),
+                name: "DeepSeek".into(),
+                settings_config: serde_json::json!({}),
+                website_url: Some("https://platform.deepseek.com".into()),
+                category: Some("cn_official".into()),
+                created_at: None,
+                sort_index: Some(0),
+                notes: None,
+                meta: None,
+                icon: Some("deepseek".into()),
+                icon_color: None,
+                in_failover_queue: false,
+            },
+        )
+        .expect("save provider");
+        db.set_current_provider("claude", &in_use.provider_id)
+            .expect("set current");
+
+        assert!(is_current_for(&state, &in_use, &AppType::Claude));
+        assert!(!is_current_for(&state, &idle, &AppType::Claude));
+    }
+
+    /// 未登录的行（provider_id 为空）绝不能被判成当前项 ——
+    /// `ProviderService::current` 在无当前项时返回空串，空 == 空 会误判。
+    #[test]
+    fn an_unlogged_row_is_never_current() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let never = VendorAccountRow::from(row("", "", None));
+        assert!(never.provider_id.is_empty());
+        assert!(!is_current_for(&state, &never, &AppType::Claude));
     }
 
     // ─────────────── meta ───────────────

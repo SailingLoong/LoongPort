@@ -43,11 +43,22 @@ export interface VendorAccountRow {
    *
    * 由后端派生（`sha256(vendorId + "/" + accountId)`）——
    * **前端算不出来**：DTO 有意不给 accountId，也没有 sha256。
-   * 官网行的「当前在用」高亮靠它与 `providersApi.getCurrent(appId)` 比。
+   *
+   * ⚠️ **不再用它判「当前在用」** —— 那件事改由下面的 `isCurrent`（后端现算）
+   * 表达。它只在「编辑 / 恢复默认 / 切换」时用（这几条命令吃 providerId）。
    *
    * 空串 = 还没登录过（没有 accountId 就派生不出 id）。
    */
   providerId: string;
+  /**
+   * **当前 tab 那个 app** 下，这一行是不是正在用的那个。
+   *
+   * 由后端按 `appId` 现算（判据与中转站档位的 `isCurrent` 同源 —— 都是
+   * `providers` 表的 `is_current`）。**前端不自己维护、也不拿它跟别的值比较**。
+   * 所以 DeepSeek 官网组与中转站档位 / 手工 provider 共享同一份互斥：
+   * 一个 app 下永远只有一个「在用」。
+   */
+  isCurrent: boolean;
   /**
    * **当前 tab 那个平台**的配置是不是被用户改过（`vendorApi.list` 的 `appId`）。
    *
