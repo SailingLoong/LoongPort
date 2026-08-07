@@ -68,7 +68,9 @@ describe("provider-switched 的跨页面契约", () => {
     // 2) emit_provider_switched 用的是常量而不是裸字面量（以后改事件名只改一处）
     // 3) 前端两个消费者都从常量 import，而不是自己写裸字符串
     const eventsRs = read("src-tauri/src/events.rs");
-    expect(eventsRs).toMatch(/pub const PROVIDER_SWITCHED:\s*&str\s*=\s*"provider-switched"/);
+    expect(eventsRs).toMatch(
+      /pub const PROVIDER_SWITCHED:\s*&str\s*=\s*"provider-switched"/,
+    );
 
     const providerRs = read("src-tauri/src/commands/provider.rs");
     expect(
