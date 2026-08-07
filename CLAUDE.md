@@ -208,3 +208,28 @@ npx tsc --noEmit && npx prettier --check "src/**/*.{js,jsx,ts,tsx,css,json}" && 
 
 **`cargo test` / `clippy` 全绿不代表能打包** —— CI 的 Backend Checks 不跑 `tauri build`，
 Tauri 的 npm↔crate 版本校验只在打包时触发（已踩过，见 `ca82a908`）。
+
+### 合并到远程 main：走 PR，且要过线上 4 个必需检查
+
+改动要进 `main` 一律走 PR（`gh pr create`），不要直接 push 到 `main`。
+**线上闸门是 4 个必需检查**（`Frontend Checks` + 三平台 `Backend Checks`，
+内容就是上面那六道闸，见 `.github/workflows/ci.yml`）—— 本地全绿不代表远程会绿，
+外部改动（fork PR）的验证点只有它。合并方式与仓库惯例一致用 merge commit
+（dependabot 的自动合才是 squash，见下）。
+
+标准流程（本地六道闸全过之后）：
+
+```
+git fetch origin main && git checkout -b fix/xxx origin/main
+# ...改动 + 本地六道闸...
+git push -u origin fix/xxx
+gh pr create --base main --head fix/xxx --title "..." --body-file pr_body.md
+gh pr merge fix/xxx --auto --merge    # 等 4 个必需检查全绿后自动合
+```
+
+`--auto` 只负责"检查绿了自动合"，**一道闸都没省**：main 的分支保护把 4 个
+必需检查设为 required，任何一个不过都不会合。`--merge`（merge commit）是
+人工 PR 的惯例；`dependabot-auto-merge.yml` 里那条用 `--squash` 是给
+dependabot 的，别照搬。PR 模板在 `.github/pull_request_template.md`。
+**main 只接受通过 PR 的改动** —— 这条与 design 仓无关（流程知识跟着代码走，
+不抄进档案仓，见全局准则 §1.4 唯一数据源）。
