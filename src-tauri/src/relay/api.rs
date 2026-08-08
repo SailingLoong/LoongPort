@@ -410,28 +410,28 @@ pub fn codex_base_url(site_origin: &str, api_base_url: &str) -> String {
     format!("{}/v1", site_api_root(site_origin, api_base_url))
 }
 
-/// Claude Code 形状的 `base_url`：就是站点 API 根，**不带 `/v1`**。
-///
-/// ⚠️ **带上 `/v1` 不是「多一段无害路径」，而是整条链路失效**：Claude Code 自己拼
-/// `/v1/messages` 与 `/v1/models`，base 再带一段就打成 `{root}/v1/v1/models` ⇒ 404 ⇒
-/// 它拉不到可用模型列表 ⇒ **不管用户选哪个模型**都报
-/// `Model 'X' is not in the list of available models`。这正是 2026-08-08 那个
-/// 「中转站档位选任何模型都说模型不存在，cc-switch 导入的同站点档位却能用」的真因。
-pub fn claude_base_url(site_origin: &str, api_base_url: &str) -> String {
-    site_api_root(site_origin, api_base_url)
-}
-
 /// 由站点信息算出**某个 CLI** 该用的 `base_url`。
 ///
-/// 分派判据是「客户端自己拼不拼版本段」，不是平台名：
-/// - **Claude Code 自己拼** `/v1/…` ⇒ 给它站点根（[`claude_base_url`]）。
-/// - **codex / 生图 / 其余** 要求 base 自带 `/v1`（[`codex_base_url`]）。
+/// 分派判据是「**客户端自己拼不拼版本段**」，不是平台名：
+///
+/// | CLI | 客户端会拼 | 该给的 base |
+/// |---|---|---|
+/// | Claude Code | `/v1/messages`、`/v1/models` | 站点根 |
+/// | Gemini CLI | `/v1beta/…` | 站点根 |
+/// | codex / 生图 / grok | 不拼 | 站点根 + `/v1` |
+///
+/// ⚠️ **给会自己拼的客户端带上 `/v1` 不是「多一段无害路径」，而是整条链路失效**：
+/// base 再带一段就打成 `{root}/v1/v1/…` ⇒ 404。claude 那条的表现是拉不到模型列表 ⇒
+/// **不管用户选哪个模型**都报 `Model 'X' is not in the list of available models`
+/// （2026-08-08 线上 bug 的真因）；gemini 那条同理。实测 `{root}/v1beta/models` 通、
+/// `{root}/v1/v1beta/models` 返回 `404 page not found`。
 ///
 /// 存在的意义是**让调用方无从选错**：`loongport_relay` 只有一列地址，此前三个调用点
-/// 都把它直接当 `ANTHROPIC_BASE_URL` 传，于是 claude 档位整片带上多余的 `/v1`。
+/// 都把它直接当成品端点传，于是 claude / gemini 档位整片带上多余的 `/v1`。
 pub fn base_url_for(app_type: &AppType, site_origin: &str, api_base_url: &str) -> String {
     match app_type {
-        AppType::Claude => claude_base_url(site_origin, api_base_url),
+        // 自己拼版本段的客户端 ⇒ 站点根原样给它。
+        AppType::Claude | AppType::Gemini => site_api_root(site_origin, api_base_url),
         _ => codex_base_url(site_origin, api_base_url),
     }
 }
@@ -1179,34 +1179,40 @@ mod tests {
         );
     }
 
-    /// claude 的 base **绝不能带 `/v1`**。
+    /// 自己拼版本段的客户端（claude / gemini），base **绝不能带 `/v1`**。
     ///
     /// 这是 2026-08-08 那个线上 bug 的回归钉：`loongport_relay.api_base_url` 存的是
-    /// codex 形态（带 `/v1`），三个调用点直接把它当 `ANTHROPIC_BASE_URL` 传 ⇒ Claude Code
-    /// 自己再拼一段 ⇒ `/v1/v1/models` 404 ⇒ 模型列表拉空 ⇒ **选任何模型**都报
-    /// 「不在可用列表里」。实测：`https://api.guazi.shop/v1/models` 200、
-    /// `https://api.guazi.shop/v1/v1/models` 404。
+    /// codex 形态（带 `/v1`），三个调用点直接把它当成品端点传 ⇒ 客户端自己再拼一段 ⇒
+    /// `/v1/v1/…` 404。claude 那条的表现是模型列表拉空 ⇒ **选任何模型**都报
+    /// 「不在可用列表里」。
+    ///
+    /// 实测（瓜子站）：`/v1/models` 200、`/v1/v1/models` 404；
+    /// `/v1beta/models` 通（返回真实 gemini 路由错误）、`/v1/v1beta/models`
+    /// 返回 `404 page not found`。
     ///
     /// 两种存量行（带 `/v1` 的旧行、不带的新行）必须读出同一个根 —— 所以不需要数据迁移。
     #[test]
-    fn claude_base_url_never_carries_v1() {
-        for stored in [
-            "https://api.guazi.shop",
-            "https://api.guazi.shop/v1",
-            "https://api.guazi.shop/v1/",
-            "https://api.guazi.shop/",
-        ] {
-            assert_eq!(
-                claude_base_url("https://guazi.shop", stored),
+    fn version_appending_clients_never_get_v1() {
+        for app_type in [AppType::Claude, AppType::Gemini] {
+            for stored in [
                 "https://api.guazi.shop",
-                "存量形态 {stored} 必须读出同一个站点根"
+                "https://api.guazi.shop/v1",
+                "https://api.guazi.shop/v1/",
+                "https://api.guazi.shop/",
+            ] {
+                assert_eq!(
+                    base_url_for(&app_type, "https://guazi.shop", stored),
+                    "https://api.guazi.shop",
+                    "{} + 存量形态 {stored} 必须读出同一个站点根",
+                    app_type.as_str()
+                );
+            }
+            // 后台声明为空时回落面板 origin（bestapi.store 实测那条路）。
+            assert_eq!(
+                base_url_for(&app_type, "https://bestapi.store", ""),
+                "https://bestapi.store"
             );
         }
-        // 后台声明为空时回落面板 origin（bestapi.store 实测那条路）。
-        assert_eq!(
-            claude_base_url("https://bestapi.store", ""),
-            "https://bestapi.store"
-        );
     }
 
     /// `/v1` 只剥一段：`/v1/v1` 是畸形配置，不替它猜。
@@ -1223,19 +1229,23 @@ mod tests {
         );
     }
 
-    /// 分派闸：同一行存量数据，claude 拿到根、其余拿到带 `/v1` 的。
+    /// 分派闸：同一行存量数据，自己拼版本段的拿到根、其余拿到带 `/v1` 的。
     ///
     /// 钉的是「调用方无从选错」这件事本身 —— 此前三个调用点各自传 `op.api_base_url`，
     /// 任何一处漏改都会复发。
     #[test]
-    fn base_url_for_splits_claude_from_the_v1_shaped_clients() {
+    fn base_url_for_splits_version_appending_clients_from_the_v1_shaped_ones() {
         const ORIGIN: &str = "https://guazi.shop";
         const STORED: &str = "https://api.guazi.shop";
 
-        assert_eq!(
-            base_url_for(&AppType::Claude, ORIGIN, STORED),
-            "https://api.guazi.shop"
-        );
+        for app_type in [AppType::Claude, AppType::Gemini] {
+            assert_eq!(
+                base_url_for(&app_type, ORIGIN, STORED),
+                "https://api.guazi.shop",
+                "{} 自己拼版本段，base 不能带 /v1",
+                app_type.as_str()
+            );
+        }
         for app_type in [AppType::Codex, AppType::CodexImage, AppType::GrokBuild] {
             assert_eq!(
                 base_url_for(&app_type, ORIGIN, STORED),
