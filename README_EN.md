@@ -127,8 +127,8 @@ by GitHub Actions:
 
 | Platform | File | Notes |
 |---|---|---|
-| **Windows** | `…-Windows-Portable.zip` | **Recommended** — unzips to a single exe; no install step, so there is nothing for security software to block |
-| | `…-Windows.msi` | Installer, adds a Start menu entry |
+| **Windows** | `…-Windows-Setup.exe` | **Recommended** — installer with a Start menu entry and in-app updates |
+| | `…-Windows-Portable.zip` | No-install build; download new versions manually |
 | **macOS** | `…-macOS.dmg` | Universal binary |
 
 On ARM64 Windows machines (Snapdragon laptops and the like), use the two files with
@@ -142,8 +142,8 @@ On ARM64 Windows machines (Snapdragon laptops and the like), use the two files w
 > xattr -dr com.apple.quarantine /Applications/LoongPort.app
 > ```
 >
-> It opens normally after that, and you only do this once. What that command does, why it
-> is safe, and how to handle the "could not set file security" error when upgrading are
+> It opens normally after that, and you only do this once. What that command does and why it
+> is safe are
 > all covered at **[loongport.dev/en/download](https://loongport.dev/en/download)**.
 
 ## How it works
@@ -195,7 +195,7 @@ Four things worth knowing:
 
 ## Updating
 
-**The installer (msi) and the macOS build check for updates on their own**: a few
+**The Windows Setup and the macOS build check for updates on their own**: a few
 seconds after launch they ask once in the background, and a newer version shows up
 under Settings → About — one click downloads, installs and restarts. A failed check
 never bothers you (being offline or unable to reach GitHub is common enough), and you
@@ -283,10 +283,8 @@ nothing useful on Windows:
 # macOS
 pnpm tauri build --bundles app
 
-# Windows — both flags are required. Bare `pnpm tauri build` fails at the MSI link
-# step (WiX ICE38) because of this repo's per-user WiX template, and `bundle.targets`
-# is "all", so it would also try to fetch the NSIS toolchain.
-pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi
+# Windows x64 NSIS Setup (the in-app updater uses the same installer type)
+pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
 ```
 
 On macOS, a build produced on your own machine carries no quarantine flag, so

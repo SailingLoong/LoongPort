@@ -1,7 +1,7 @@
 # 不打 tag 也能出一个 Windows 安装包 —— 拿任意分支的代码给人试用时用它。
 #
 # **与 `release.yml` 的分工**：那个由 tag 触发，出全平台产物并建 GitHub Release；
-# 这个只手动触发、只出 Windows msi，不建 Release、不碰 tag。
+# 这个只手动触发、只出 Windows NSIS Setup，不建 Release、不碰 tag。
 # （两者在零 secrets 下都能跑绿 —— 2026-08-04 用 `v3.19.2-rc.1` 演练验过。）
 #
 # 不签名的代价：用户第一次运行会看到 SmartScreen 的「未知发布者」警告，要点「更多信息 →
@@ -10,7 +10,7 @@ name: Windows Build
 
 on:
   # **只手动触发。** 出包是个有意的动作，不该每次 push 都烧 CI 额度；
-  # 打 tag 那条路归 `release.yml` —— 它已经出 msi + 免安装版、x64 + arm64 四个产物，
+  # 打 tag 那条路归 `release.yml` —— 它已经出 Setup + 免安装版、x64 + arm64 四个产物，
   # 这个 workflow 再跟着 tag 跑一遍就是白编两次 Windows（实测 17 分钟起）。
   workflow_dispatch:
     inputs:
@@ -96,12 +96,13 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: 打包
-        # 只出 msi。nsis 那条要额外下载安装器工具链，给人试用不需要两种包。
-        run: pnpm tauri build --target ${{ matrix.target }} --bundles msi
+        # 手动测试包不参与自动更新，所以显式关闭 updater artifact；否则没有 release
+        # signing secret 的 workflow 会在安装包已生成后因缺私钥返回失败。
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - uses: actions/upload-artifact@v4
         with:
           name: LoongPort-windows-${{ matrix.arch }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
           retention-days: 30

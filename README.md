@@ -109,8 +109,8 @@ LoongPort 免费，不经手付款、不从你的余额抽成。你充值给的�
 
 | 平台 | 文件 | 说明 |
 |---|---|---|
-| **Windows** | `…-Windows-Portable.zip` | **推荐** —— 解压出一个 exe 就能跑，没有安装步骤，也就没有会被安全软件拦住的动作 |
-| | `…-Windows.msi` | 安装版，会建开始菜单项 |
+| **Windows** | `…-Windows-Setup.exe` | **推荐** —— 安装版，会建开始菜单项并支持应用内自动升级 |
+| | `…-Windows-Portable.zip` | 免安装版，解压即用；发现新版后需手动下载 |
 | **macOS** | `…-macOS.dmg` | 两种芯片通用 |
 
 ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个。
@@ -122,8 +122,7 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个。
 > xattr -dr com.apple.quarantine /Applications/LoongPort.app
 > ```
 >
-> 之后正常打开，只做这一次。这条命令做了什么、为什么安全，以及升级时
-> 「无法设置文件安全性」那个报错怎么处理，都在
+> 之后正常打开，只做这一次。这条命令做了什么、为什么安全，都在
 > **[loongport.dev/zh/download](https://loongport.dev/zh/download)**。
 
 ## 怎么用
@@ -165,7 +164,7 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个。
 
 ## 怎么升级
 
-**安装版（msi）与 macOS 版会自己检查更新**：启动几秒后在后台问一次，有新版本就在
+**Windows Setup 安装版与 macOS 版会自己检查更新**：启动几秒后在后台问一次，有新版本就在
 「设置 → 关于」提示，点一下即下载、安装、重启。检查失败不打扰你（离线、连不上 GitHub
 都很常见），也可以随时手动点「检查更新」。
 
@@ -238,10 +237,8 @@ pnpm dev           # 开发模式，前端热更新
 # macOS
 pnpm tauri build --bundles app
 
-# Windows —— 两个参数都不能省。裸 `pnpm tauri build` 会在 MSI 链接那步炸
-# （WiX ICE38，本仓用的是 per-user WiX 模板），且 bundle.targets 是 "all"，
-# 还会去下载 NSIS 工具链。
-pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi
+# Windows x64 NSIS Setup（应用内更新也使用同一种安装器）
+pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
 ```
 
 macOS 上本机构建出来的应用不带隔离标记，Gatekeeper 不会介入。
