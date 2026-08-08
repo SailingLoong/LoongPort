@@ -445,6 +445,8 @@
       "statSkills": "Skills",
       "skippedTitle": "以下の {{count}} 件は LoongPort が管理済みのため再インポートされません：",
       "skippedAfterTitle": "この {{count}} 件は LoongPort が管理します — 運営者エリアで確認できます：",
+      "mergedToOperatorTitle": "以下の {{count}} 件はサイトが運営者グループで管理済みのため、インポートされません：",
+      "mergedToOperatorAfterTitle": "この {{count}} 件はサイトが運営者グループで管理されています — 運営者エリアで確認できます：",
       "importSuccess": "インポート完了",
       "reportSummary": "{{providers}} 件の provider、{{mcp}} 件の MCP、{{prompts}} 件の prompt、{{skills}} 件の skill をインポートしました。",
       "backupId": "インポート前にバックアップを作成しました：{{backupId}}"

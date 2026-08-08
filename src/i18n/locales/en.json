@@ -445,6 +445,8 @@
       "statSkills": "Skills",
       "skippedTitle": "These {{count}} are already managed by LoongPort and won't be imported again:",
       "skippedAfterTitle": "These {{count}} are now managed by LoongPort — find them in the operator section:",
+      "mergedToOperatorTitle": "These {{count}} share a site with an operator group and are managed there, so they won't be imported:",
+      "mergedToOperatorAfterTitle": "These {{count}} share a site with an operator group — find them in the operator section:",
       "importSuccess": "Import complete",
       "reportSummary": "Imported {{providers}} providers, {{mcp}} MCP servers, {{prompts}} prompts, {{skills}} skills.",
       "backupId": "A backup was created before import: {{backupId}}"

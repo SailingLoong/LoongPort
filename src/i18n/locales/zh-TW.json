@@ -445,6 +445,8 @@
       "statSkills": "Skills",
       "skippedTitle": "以下 {{count}} 筆已由 LoongPort 接管，不會重複匯入：",
       "skippedAfterTitle": "這 {{count}} 筆已由 LoongPort 接管，請在運營商區查看：",
+      "mergedToOperatorTitle": "以下 {{count}} 筆的站點已由運營商組維護，統一在運營商區管理，不重複匯入：",
+      "mergedToOperatorAfterTitle": "這 {{count}} 筆的站點已由運營商組維護，請在運營商區查看：",
       "importSuccess": "匯入完成",
       "reportSummary": "匯入 {{providers}} 個 provider、{{mcp}} 個 MCP、{{prompts}} 個 prompt、{{skills}} 個 skill。",
       "backupId": "匯入前已自動備份：{{backupId}}"

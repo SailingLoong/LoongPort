@@ -13,19 +13,26 @@
 //! 版本校验全在里头）；`loongport_operator` / `loongport_vendor` / `settings` 通过
 //! preserve 保住；本地**托管档位**的 provider 记录（`loongport-*`）在导入后回填。
 //!
-//! ## 冲突归属：`域名 + sk` 指纹
+//! ## 不导入的两类：站点归并 与 指纹冲突
 //!
-//! 同指纹（`(origin, sk)`，base_url 归一化到 origin 再比）的 cc-switch provider 与托管
-//! 档位 ⇒ 托管侧胜，那条不导入、报告列出。**指纹只用于导入这一刻比一次**，不建唯一索引
-//! —— sk 会变（provision「只换 sk」），身份仍是派生 provider_id，见 `TODO.md` 冲突归属规则。
+//! 判定顺序（命中即停，见 [`classify_source`]）：
 //!
-//! ## 与「已手动维护」（`is_user_edited`）的解耦
+//! 1. **站点归并**：cc-switch provider 的 base_url 归一化 origin 命中某个**已登录运营商**的
+//!    `api_base_url`（如 `https://api.guazi.shop`）⇒ 那个站点已由运营商组整体维护，
+//!    导入一份只会让用户在界面上看到两个「瓜子内部 api」。归入 `merged_to_operator`。
+//! 2. **指纹冲突**：同指纹（`(origin, sk)`，base_url 归一化到 origin 再比）的 cc-switch
+//!    provider 与托管档位 ⇒ 托管侧胜，归入 `skipped`。
+//!
+//! 两类都不导入、都在报告里列出。**指纹只用于导入这一刻比一次**，不建唯一索引 —— sk 会变
+//! （provision「只换 sk」），身份仍是派生 provider_id，见 `TODO.md` 冲突归属规则。
+//!
+//! ## 与「已手动维护」（`user_edited`）的解耦
 //!
 //! 导入**不改写任何 settings_config**：cc-switch 的按原样入库；托管档位回填走裸
 //! [`Database::save_provider`]（不做 `ProviderService::add` 那套 normalize / live 写入）。
-//! `is_user_edited` 是纯内容函数（比对 settings_config 与再生成的默认值，sk 除外），
-//! 不认来源 —— 所以导入不改变任何档位的「已手动维护」判定：跟默认没差别的照样不显示，
-//! 有差别的照样显示。集成测试用「回填后 is_user_edited 不变」钉着这条。
+//! `user_edited` 是 providers 表上的**存库列**，只在用户手工编辑时置位、恢复默认时复位，
+//! `save_provider` 不碰它 —— 所以导入不改变任何档位的「已手动维护」判定。集成测试用
+//! 「回填后 `get_user_edited` 仍为 false」钉着这条。
 
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -75,6 +82,8 @@ pub struct ProviderPlan {
     pub will_import: usize,
     /// 因与托管档位同指纹而跳过不导入的。
     pub skipped: Vec<SkippedProvider>,
+    /// 站点命中已登录运营商（base_url 同源）而**归入运营商组维护**、不导入的。
+    pub merged_to_operator: Vec<SkippedProvider>,
     /// 取不到指纹（base_url / sk 提取失败）的条数，这些原样导入、不参与冲突检测。
     pub cannot_fingerprint: usize,
 }
@@ -88,6 +97,8 @@ pub struct ImportReport {
     pub backup_id: String,
     pub providers_imported: usize,
     pub providers_skipped: Vec<SkippedProvider>,
+    /// 站点命中已登录运营商、归入运营商组维护而未导入的。
+    pub operators_merged: Vec<SkippedProvider>,
     pub mcp_imported: i64,
     pub prompts_imported: i64,
     pub skills_imported: i64,
@@ -134,16 +145,33 @@ fn fingerprint_of(provider: &Provider, app_type: &AppType) -> Option<(String, St
     Some((origin, sk))
 }
 
-/// 把读到的 source provider 按「是否与托管档位同指纹」分类。
+/// 一条 cc-switch provider 的分类结果。四类互斥。
+#[derive(Debug, Default)]
+struct SourceClass {
+    /// 取到指纹且不与托管档位冲突 —— 原样导入。
+    will_import: Vec<usize>,
+    /// 与托管档位同指纹（域名 + sk）—— 托管侧胜，跳过。
+    skipped: Vec<usize>,
+    /// base_url 站点命中已登录运营商 —— 归入运营商组维护，跳过导入。
+    merged_to_operator: Vec<usize>,
+    /// 取不到指纹 —— 原样导入、不参与冲突检测。
+    cannot_fingerprint: Vec<usize>,
+}
+
+/// 把读到的 source provider 按「与托管档位 / 已登录运营商的关系」分类。
 ///
-/// 返回三个下标集合：`will_import`（指纹存在且不冲突）、`skipped`（指纹命中托管档位）、
-/// `cannot_fingerprint`（指纹取不到，原样导入）。按 app_type 分组比：托管档位在
-/// codex / anthropic / gemini / grok 各平台是**不同**的 key（`key_name_for` 带 platform），
-/// 所以一条 cc-switch codex provider 只跟托管 codex 行比。
+/// 判定顺序（命中即停）：
+/// 1. **站点归并优先**：base_url 归一化 origin 命中某运营商的 `api_base_url`
+///    （如 `https://api.guazi.shop` 命中瓜子内部 api）⇒ 归入运营商组，不导入为独立
+///    provider —— 同一个站点已被运营商组维护，导入一份只会让用户看到两个「瓜子内部 api」。
+/// 2. **指纹冲突**：域名 + sk 命中托管档位 ⇒ 托管侧胜，跳过（按 app_type 分组比：
+///    托管档位在 codex / anthropic / gemini / grok 各平台是**不同**的 key）。
+/// 3. 否则原样导入（取不到指纹的归入 `cannot_fingerprint`）。
 fn classify_source(
     source: &[SourceProvider],
     managed: &[SourceProvider],
-) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    operator_origins: &HashSet<String>,
+) -> SourceClass {
     let mut managed_fp: HashMap<AppType, HashSet<(String, String)>> = HashMap::new();
     for m in managed {
         if let Some(fp) = fingerprint_of(&m.provider, &m.app_type) {
@@ -151,23 +179,49 @@ fn classify_source(
         }
     }
 
-    let mut will_import = Vec::new();
-    let mut skipped = Vec::new();
-    let mut cannot_fingerprint = Vec::new();
+    let mut out = SourceClass::default();
     for (i, s) in source.iter().enumerate() {
+        // 站点归并优先 —— 同一站点已被运营商组维护。
+        if let Some(origin) = source_origin(s) {
+            if operator_origins.contains(&origin) {
+                out.merged_to_operator.push(i);
+                continue;
+            }
+        }
         match fingerprint_of(&s.provider, &s.app_type) {
             Some(fp)
                 if managed_fp
                     .get(&s.app_type)
                     .is_some_and(|set| set.contains(&fp)) =>
             {
-                skipped.push(i)
+                out.skipped.push(i)
             }
-            Some(_) => will_import.push(i),
-            None => cannot_fingerprint.push(i),
+            Some(_) => out.will_import.push(i),
+            None => out.cannot_fingerprint.push(i),
         }
     }
-    (will_import, skipped, cannot_fingerprint)
+    out
+}
+
+/// source provider 的 base_url 归一化 origin（站点归并判据用）。
+fn source_origin(s: &SourceProvider) -> Option<String> {
+    let base_url = crate::proxy::providers::get_adapter(&s.app_type)
+        .extract_base_url(&s.provider)
+        .ok()?;
+    crate::operator::api::normalize_site_origin(&base_url).ok()
+}
+
+/// 已登录运营商的 `api_base_url` 归一化 origin 集合（站点归并判据）。
+///
+/// `api_base_url` 是「归一后的 codex base_url（带 /v1）」（见 `creds.rs` 模块文档），
+/// 与 cc-switch provider 的 base_url 经 `normalize_site_origin` 后可比。
+fn managed_operator_origins(db: &Database) -> Result<HashSet<String>, AppError> {
+    let conn = db.conn.lock().unwrap();
+    let ops = crate::operator::creds::list(&conn)?;
+    Ok(ops
+        .iter()
+        .filter_map(|op| crate::operator::api::normalize_site_origin(&op.api_base_url).ok())
+        .collect())
 }
 
 /// 把一条 `providers` 行还原成 `Provider`。
@@ -292,6 +346,7 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
             providers: ProviderPlan {
                 will_import: 0,
                 skipped: Vec::new(),
+                merged_to_operator: Vec::new(),
                 cannot_fingerprint: 0,
             },
             mcp_servers: 0,
@@ -304,13 +359,23 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
     let conn = open_source_read_only(source_path)?;
     let source = read_source(&conn)?;
     let managed = read_managed_rows(db)?;
-    let (will_import, skipped, cannot_fingerprint) = classify_source(&source, &managed);
+    let operator_origins = managed_operator_origins(db)?;
+    let classified = classify_source(&source, &managed, &operator_origins);
 
     let version: i64 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap_or(0);
 
-    let skipped_list = skipped
+    let skipped_list = classified
+        .skipped
+        .iter()
+        .map(|&i| SkippedProvider {
+            name: source[i].provider.name.clone(),
+            app_type: source[i].app_type.as_str().to_string(),
+        })
+        .collect::<Vec<_>>();
+    let merged_list = classified
+        .merged_to_operator
         .iter()
         .map(|&i| SkippedProvider {
             name: source[i].provider.name.clone(),
@@ -319,11 +384,11 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
         .collect::<Vec<_>>();
 
     let mut notes = Vec::new();
-    if !cannot_fingerprint.is_empty() {
+    if !classified.cannot_fingerprint.is_empty() {
         notes.push(format!(
             "{n} 条 provider 取不到指纹（base_url / sk 提取失败，\
              或 hermes / opencode / openclaw 尚未接线），将原样导入、不参与冲突合并",
-            n = cannot_fingerprint.len()
+            n = classified.cannot_fingerprint.len()
         ));
     }
 
@@ -331,9 +396,10 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
         source_exists: true,
         source_version: Some(version),
         providers: ProviderPlan {
-            will_import: will_import.len() + cannot_fingerprint.len(),
+            will_import: classified.will_import.len() + classified.cannot_fingerprint.len(),
             skipped: skipped_list,
-            cannot_fingerprint: cannot_fingerprint.len(),
+            merged_to_operator: merged_list,
+            cannot_fingerprint: classified.cannot_fingerprint.len(),
         },
         mcp_servers: count_table_if_exists(&conn, "mcp_servers"),
         prompts: count_table_if_exists(&conn, "prompts"),
@@ -354,7 +420,8 @@ pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportRep
     let conn = open_source_read_only(source_path)?;
     let source = read_source(&conn)?;
     let managed = read_managed_rows(&db)?;
-    let (will_import, skipped, cannot_fingerprint) = classify_source(&source, &managed);
+    let operator_origins = managed_operator_origins(&db)?;
+    let classified = classify_source(&source, &managed, &operator_origins);
 
     let mcp = count_table_if_exists(&conn, "mcp_servers");
     let prompts = count_table_if_exists(&conn, "prompts");
@@ -368,6 +435,7 @@ pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportRep
             backup_id: String::new(),
             providers_imported: 0,
             providers_skipped: Vec::new(),
+            operators_merged: Vec::new(),
             mcp_imported: 0,
             prompts_imported: 0,
             skills_imported: 0,
@@ -394,7 +462,13 @@ pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportRep
             );
         }
     }
-    for &i in &skipped {
+    // 同指纹跳过的（托管侧胜）与归入运营商的（站点已被运营商组维护）都不该留下，
+    // 一并删掉 —— 它们只是「不该作为独立 provider 存在」，不是要保留的东西。
+    for &i in classified
+        .skipped
+        .iter()
+        .chain(&classified.merged_to_operator)
+    {
         let s = &source[i];
         if let Err(e) = db.delete_provider(s.app_type.as_str(), &s.provider.id) {
             warnings.push(format!("删除重复档位「{}」失败: {e}", s.provider.name));
@@ -410,7 +484,16 @@ pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportRep
         log::warn!("[cc-switch-import] post-import sync: {e}");
     }
 
-    let skipped_list = skipped
+    let skipped_list = classified
+        .skipped
+        .iter()
+        .map(|&i| SkippedProvider {
+            name: source[i].provider.name.clone(),
+            app_type: source[i].app_type.as_str().to_string(),
+        })
+        .collect::<Vec<_>>();
+    let merged_list = classified
+        .merged_to_operator
         .iter()
         .map(|&i| SkippedProvider {
             name: source[i].provider.name.clone(),
@@ -421,8 +504,9 @@ pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportRep
     Ok(ImportReport {
         success: true,
         backup_id,
-        providers_imported: will_import.len() + cannot_fingerprint.len(),
+        providers_imported: classified.will_import.len() + classified.cannot_fingerprint.len(),
         providers_skipped: skipped_list,
+        operators_merged: merged_list,
         mcp_imported: mcp,
         prompts_imported: prompts,
         skills_imported: skills,
@@ -597,10 +681,74 @@ mod tests {
             },
         ];
 
-        let (will, skipped, cannot) = classify_source(&source, &managed);
-        assert_eq!(will, vec![1], "不同 sk 的那条该导入");
-        assert_eq!(skipped, vec![0], "同指纹那条该跳过");
-        assert_eq!(cannot, vec![2], "取不到指纹那条该归入 cannot");
+        let out = classify_source(&source, &managed, &HashSet::new());
+        assert_eq!(out.will_import, vec![1], "不同 sk 的那条该导入");
+        assert_eq!(out.skipped, vec![0], "同指纹那条该跳过");
+        assert_eq!(
+            out.cannot_fingerprint,
+            vec![2],
+            "取不到指纹那条该归入 cannot"
+        );
+        assert!(
+            out.merged_to_operator.is_empty(),
+            "没登录运营商，不该有归并"
+        );
+    }
+
+    #[test]
+    fn classify_merges_providers_whose_site_is_an_operator() {
+        // 站点已被运营商组维护 ⇒ 无论 sk 是不是同一个，都归入运营商组、不导入。
+        let operator_origins: HashSet<String> =
+            ["https://api.guazi.shop".to_string()].into_iter().collect();
+        let source = [
+            SourceProvider {
+                app_type: AppType::Codex,
+                // 同站、sk 与任何托管档位都不同 —— 旧逻辑会当成新 provider 导入。
+                provider: provider(
+                    "guazi",
+                    "瓜子",
+                    codex_settings("https://api.guazi.shop/v1", "sk-a90e"),
+                    Some("https://api.guazi.shop"),
+                ),
+            },
+            SourceProvider {
+                app_type: AppType::Codex,
+                // 别的站点 ⇒ 照常导入。
+                provider: provider(
+                    "other",
+                    "Other",
+                    codex_settings("https://bestapi.store/v1", "sk-b"),
+                    Some("https://bestapi.store"),
+                ),
+            },
+        ];
+
+        let out = classify_source(&source, &[], &operator_origins);
+        assert_eq!(
+            out.merged_to_operator,
+            vec![0],
+            "站点命中运营商的那条该归入运营商组"
+        );
+        assert_eq!(out.will_import, vec![1], "别的站点照常导入");
+    }
+
+    #[test]
+    fn classify_merges_by_origin_regardless_of_base_url_path() {
+        // 运营商存的是裸 origin，cc-switch 那条带 `/v1` —— 归一后必须命中。
+        let operator_origins: HashSet<String> =
+            ["https://api.guazi.shop".to_string()].into_iter().collect();
+        let source = [SourceProvider {
+            app_type: AppType::Claude,
+            provider: provider(
+                "guazi-claude",
+                "瓜子 Claude",
+                json!({"env": {"ANTHROPIC_BASE_URL": "https://api.guazi.shop/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-z"}}),
+                Some("https://api.guazi.shop"),
+            ),
+        }];
+        let out = classify_source(&source, &[], &operator_origins);
+        assert_eq!(out.merged_to_operator, vec![0]);
+        assert!(out.will_import.is_empty());
     }
 
     #[test]
@@ -624,13 +772,13 @@ mod tests {
                 Some("https://bestapi.store"),
             ),
         }];
-        let (will, skipped, _) = classify_source(&source, &managed);
+        let out = classify_source(&source, &managed, &HashSet::new());
         assert_eq!(
-            skipped,
+            out.skipped,
             Vec::<usize>::new(),
             "codex 与 claude 是不同平台，不该跨栏并"
         );
-        assert_eq!(will, vec![0]);
+        assert_eq!(out.will_import, vec![0]);
     }
 
     // ─── 集成测试 ────────────────────────────────────────────
@@ -672,7 +820,7 @@ mod tests {
                 Some("https://bestapi.store"),
             ),
         );
-        // 不同 sk ⇒ 导入。
+        // 同站点、不同 sk ⇒ 站点已由运营商组维护 ⇒ 归入运营商组，不导入。
         insert_provider(
             &conn,
             "codex",
@@ -681,6 +829,17 @@ mod tests {
                 "Other",
                 codex_settings("https://bestapi.store/v1", "sk-other"),
                 Some("https://bestapi.store"),
+            ),
+        );
+        // 别的站点，与任何运营商 / 托管档位都不沾 ⇒ 照常导入。
+        insert_provider(
+            &conn,
+            "codex",
+            &provider(
+                "elsewhere",
+                "Elsewhere",
+                codex_settings("https://other-vendor.example/v1", "sk-elsewhere"),
+                Some("https://other-vendor.example"),
             ),
         );
 
@@ -770,10 +929,10 @@ mod tests {
         let after = std::fs::read(src.path()).expect("重读源库字节");
         assert_eq!(after, before, "cc-switch.db 绝不能被改动");
 
-        // 2. providers：非冲突的进来了、托管档位回填了、同指纹的没进来。
+        // 2. providers：非冲突的进来了、托管档位回填了、同站点的归入运营商组没进来。
         let providers = db.get_all_providers("codex").expect("读 codex 档位");
         assert!(
-            providers.contains_key("other"),
+            providers.contains_key("elsewhere"),
             "非冲突的 cc-switch provider 该被导入"
         );
         assert!(
@@ -782,7 +941,21 @@ mod tests {
         );
         assert!(
             !providers.contains_key("bestapi"),
-            "与托管档位同指纹的条目不导入"
+            "站点已由运营商组维护的条目不导入"
+        );
+        assert!(
+            !providers.contains_key("other"),
+            "同站点不同 sk 的也归入运营商组，不另起一条"
+        );
+        let merged: Vec<&str> = report
+            .operators_merged
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            merged.len(),
+            2,
+            "bestapi / Other 两条都该报成「归入运营商组」，实际：{merged:?}"
         );
 
         // 3. LoongPort 自己的表 / settings 保留。
@@ -833,9 +1006,11 @@ mod tests {
 
         // 5. 报告。
         assert!(report.success);
-        assert_eq!(report.providers_imported, 1, "只有 other 一条该导入");
-        assert_eq!(report.providers_skipped.len(), 1);
-        assert_eq!(report.providers_skipped[0].name, "BestAPI");
+        assert_eq!(report.providers_imported, 1, "只有 Elsewhere 一条该导入");
+        assert!(
+            report.providers_skipped.is_empty(),
+            "同站点先被运营商归并接走，不再落到「同指纹跳过」"
+        );
         assert_eq!(report.mcp_imported, 1, "MCP 该搬进来");
         Ok(())
     }
