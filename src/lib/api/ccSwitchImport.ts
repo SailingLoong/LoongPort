@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/** 一条不导入的 cc-switch provider（同指纹跳过，或同站点归入运营商组）。 */
+/** 一条不导入的 cc-switch provider（同指纹跳过，或同站点归入中转站组）。 */
 export interface SkippedProvider {
   name: string;
   appType: string;
@@ -11,8 +11,8 @@ export interface ProviderPlan {
   willImport: number;
   /** 与托管档位同指纹而跳过的。 */
   skipped: SkippedProvider[];
-  /** 站点命中已登录运营商（base_url 同源）而归入运营商组维护、不导入的。 */
-  mergedToOperator: SkippedProvider[];
+  /** 站点命中已登录中转站（base_url 同源）而归入中转站组维护、不导入的。 */
+  mergedToRelay: SkippedProvider[];
   /** 取不到指纹的条数（这些原样导入、不参与冲突合并）。 */
   cannotFingerprint: number;
 }
@@ -37,8 +37,8 @@ export interface CcSwitchImportReport {
   backupId: string;
   providersImported: number;
   providersSkipped: SkippedProvider[];
-  /** 站点命中已登录运营商、归入运营商组维护而未导入的。 */
-  operatorsMerged: SkippedProvider[];
+  /** 站点命中已登录中转站、归入中转站组维护而未导入的。 */
+  relaysMerged: SkippedProvider[];
   mcpImported: number;
   promptsImported: number;
   skillsImported: number;

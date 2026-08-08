@@ -387,7 +387,7 @@ fn sort_providers(
 /// 托盘子菜单里该列出哪些供应商：按上游规则排序后，剔除 LoongPort 托管项。
 ///
 /// **托管项必须从这里消失**：托盘点一下就直接调 `ProviderService::switch`，绕过
-/// `operator_switch_tier` 的「退出 ChatGPT → 切换 → 重开」编排 —— 切完 codex 还连着旧分组，
+/// `relay_switch_tier` 的「退出 ChatGPT → 切换 → 重开」编排 —— 切完 codex 还连着旧分组，
 /// 而用户看到的是「已勾选新档位」。这是唯一一条用户真会误触的绕过路径。
 ///
 /// 单独抽成函数是为了可测：`create_tray_menu` 要真的 `AppHandle` 才跑得起来
@@ -396,7 +396,7 @@ fn sort_providers(
 fn tray_menu_providers(
     providers: &indexmap::IndexMap<String, crate::provider::Provider>,
 ) -> Vec<(&String, &crate::provider::Provider)> {
-    crate::operator::filter_unmanaged(sort_providers(providers))
+    crate::relay::filter_unmanaged(sort_providers(providers))
 }
 
 /// 处理项目 Profile 托盘事件，返回是否已处理
@@ -1183,12 +1183,11 @@ mod tests {
 
     /// P0 回归防线：托盘子菜单里绝不能出现 LoongPort 托管档位。
     ///
-    /// 从托盘点一下会直接调 `ProviderService::switch`，跳过 `operator_switch_tier` 的
+    /// 从托盘点一下会直接调 `ProviderService::switch`，跳过 `relay_switch_tier` 的
     /// 「退出 ChatGPT → 切换 → 重开」编排 —— 用户切完还连着旧分组且毫不知情。
     #[test]
     fn tray_menu_excludes_loongport_managed_providers() {
-        let managed =
-            crate::operator::provision::provider_id_for("https://bestapi.store", Some(1), 1);
+        let managed = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 1);
         let providers = provider_map(&["custom-1", &managed, "codex-official"]);
 
         let listed = tray_menu_providers(&providers);
@@ -1204,8 +1203,8 @@ mod tests {
     /// 而不是挂出一个点开什么都没有的空子菜单。
     #[test]
     fn tray_menu_is_empty_when_every_provider_is_managed() {
-        let a = crate::operator::provision::provider_id_for("https://bestapi.store", Some(1), 1);
-        let b = crate::operator::provision::provider_id_for("https://bestapi.store", Some(1), 2);
+        let a = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 1);
+        let b = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 2);
         let providers = provider_map(&[&a, &b]);
 
         assert!(tray_menu_providers(&providers).is_empty());

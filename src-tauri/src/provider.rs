@@ -541,7 +541,7 @@ pub struct ProviderMeta {
     /// 用于多账号支持，关联到特定的 GitHub 账号
     #[serde(rename = "githubAccountId", skip_serializing_if = "Option::is_none")]
     pub github_account_id: Option<String>,
-    /// LoongPort 托管档位所属的运营商账号 id（服务端的 user id）。
+    /// LoongPort 托管档位所属的中转站账号 id（服务端的 user id）。
     ///
     /// ## 为什么必须有它
     ///

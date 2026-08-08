@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
- * 低余额提醒**只对中转站（operator）行生效，不对官网直连（vendor）行生效**。
+ * 低余额提醒**只对中转站（relay）行生效，不对官网直连（vendor）行生效**。
  *
  * ## 为什么这是个正确性问题，不是产品偏好
  *
@@ -11,14 +11,14 @@ import { resolve } from "node:path";
  *
  * | | 类型 | 值的样子 | 币种 |
  * |---|---|---|---|
- * | operator | `number \| null` | `547.08` | **美元**（sub2api 的 balance 就是 USD 计价） |
+ * | relay | `number \| null` | `547.08` | **美元**（sub2api 的 balance 就是 USD 计价） |
  * | vendor | `string \| null` | `"¥547.08"` | **人民币**（DeepSeek 官网） |
  *
  * 拿人民币余额跟一个 5 **美元**的阈值比是错的（差着汇率）。而且 vendor 那侧是
  * 后端已格式化好的字符串，前端要比较就得反解析它 —— 那会把「格式化在 Rust 侧做完」
  * 这条设计打破。
  *
- * ⚠️ 2026-08-04 维护者明确要求：「只对运营商生效，对 deepseek 之类的不生效」。
+ * ⚠️ 2026-08-04 维护者明确要求：「只对中转站生效，对 deepseek 之类的不生效」。
  *
  * ## 为什么读源码断言，而不是渲染组件
  *
@@ -32,16 +32,16 @@ describe("低余额提醒的作用域", () => {
     readFileSync(resolve(__dirname, "../../src", rel), "utf8");
 
   it("VendorRow 不引入低余额判据 —— 那边余额是人民币字符串，比不了美元阈值", () => {
-    const vendorRow = read("components/operator/VendorRow.tsx");
+    const vendorRow = read("components/relay/VendorRow.tsx");
     expect(vendorRow).not.toContain("isLowBalance");
     expect(vendorRow).not.toContain("LOW_BALANCE_THRESHOLD");
     expect(vendorRow).not.toContain("lowBalanceHint");
   });
 
-  it("OperatorRow 引入了它 —— 提醒要真的出现在中转站行上", () => {
-    const operatorRow = read("components/operator/OperatorRow.tsx");
-    expect(operatorRow).toContain("isLowBalance");
-    expect(operatorRow).toContain("lowBalanceHint");
+  it("RelayRow 引入了它 —— 提醒要真的出现在中转站行上", () => {
+    const relayRow = read("components/relay/RelayRow.tsx");
+    expect(relayRow).toContain("isLowBalance");
+    expect(relayRow).toContain("lowBalanceHint");
   });
 
   /**
@@ -55,9 +55,9 @@ describe("低余额提醒的作用域", () => {
    * 那道「两处判据必须一致」的断言随那个页面一起去掉了。现在只有这一处。
    */
   it("余额为 0 时不被 falsy 判据吞掉", () => {
-    const operatorRow = read("components/operator/OperatorRow.tsx");
-    expect(operatorRow).toContain("balance === null) return null");
-    expect(operatorRow).not.toContain("{balance && (");
+    const relayRow = read("components/relay/RelayRow.tsx");
+    expect(relayRow).toContain("balance === null) return null");
+    expect(relayRow).not.toContain("{balance && (");
   });
 
   /**
@@ -69,7 +69,7 @@ describe("低余额提醒的作用域", () => {
    * 这个有意的设计（见 Rust 侧 `VendorBalance` 的文档：只有一个字段）。
    */
   it("vendor 的余额契约仍是「已格式化的字符串」", () => {
-    const vendorRow = read("components/operator/VendorRow.tsx");
+    const vendorRow = read("components/relay/VendorRow.tsx");
     expect(vendorRow).toContain("balance: string | null");
   });
 });

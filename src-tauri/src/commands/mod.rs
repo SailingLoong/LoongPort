@@ -17,18 +17,18 @@ mod misc;
 mod model_fetch;
 mod omo;
 mod openclaw;
-mod operator;
 mod plugin;
 mod profile;
 mod prompt;
 mod provider;
 mod proxy;
+mod relay;
 mod session_manager;
 mod settings;
 pub mod skill;
 mod stream_check;
 mod subscription;
-// `pub(crate)`：`operator::cc_switch_import` 的导入流程在导入后要调
+// `pub(crate)`：`relay::cc_switch_import` 的导入流程在导入后要调
 // `run_post_import_sync`（见 `import_export.rs` 的 `import_config_from_file` 同款后置）。
 pub(crate) mod sync_support;
 // ⚠️ **不能写成 `pub mod vendor;`**：`crate::vendor`（契约层）已经占了这个模块名，
@@ -61,12 +61,12 @@ pub use misc::*;
 pub use model_fetch::*;
 pub use omo::*;
 pub use openclaw::*;
-pub use operator::*;
 pub use plugin::*;
 pub use profile::*;
 pub use prompt::*;
 pub use provider::*;
 pub use proxy::*;
+pub use relay::*;
 pub use session_manager::*;
 pub use settings::*;
 pub use skill::*;

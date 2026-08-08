@@ -1779,7 +1779,7 @@ pub(crate) fn remove_opencode_provider_from_live(provider_id: &str) -> Result<()
 ///
 /// - `ProviderList` 把它滤掉 ⇒ 看不见
 /// - `update_provider` / `delete_provider` 被 `reject_if_managed` 拦下 ⇒ 删不掉
-/// - 运营商区也不显示它（那里还要求 `website_url` 匹配某个站）
+/// - 中转站区也不显示它（那里还要求 `website_url` 匹配某个站）
 ///
 /// 合起来 = **一条不可见也不可删的孤儿**，UI 上无逃生路径。
 ///
@@ -1812,7 +1812,7 @@ pub(crate) fn remove_opencode_provider_from_live(provider_id: &str) -> Result<()
 /// 跳过它、把原因写进日志，其余照常 —— 与这三个函数里「单条失败只 warn 不中断」
 /// 的既有形状一致。
 fn live_import_should_skip(id: &str, app: &str, already_in_db: bool) -> bool {
-    if !crate::operator::is_managed(id) {
+    if !crate::relay::is_managed(id) {
         return false;
     }
     // 文案必须分开：情形 2 是我们自己写的 id，叫用户「改个 key」是错的指路
@@ -2856,7 +2856,7 @@ base_url = "https://a.example/v1"
     /// `delete_provider` 上），且启动时无条件跑。
     ///
     /// ⇒ 用户在 `~/.config/opencode/opencode.json` 里起个恰好命中托管形状的 key，
-    /// 下次启动它就进库，然后：列表里被滤掉、编辑删除被拦、托盘里没有、运营商区
+    /// 下次启动它就进库，然后：列表里被滤掉、编辑删除被拦、托盘里没有、中转站区
     /// 也不显示它 ⇒ **不可见也不可删**。
     ///
     /// ⚠️ **收紧 `is_managed` 挡不住这一类**：`loongport-0123456789abcdef` 是

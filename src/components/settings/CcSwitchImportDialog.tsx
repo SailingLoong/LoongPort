@@ -209,14 +209,14 @@ function PreviewBody({
         />
       </div>
 
-      {providers.mergedToOperator.length > 0 && (
+      {providers.mergedToRelay.length > 0 && (
         <NotImportedList
-          title={t("settings.ccSwitchImport.mergedToOperatorTitle", {
+          title={t("settings.ccSwitchImport.mergedToRelayTitle", {
             defaultValue:
-              "以下 {{count}} 条的站点已由运营商组维护，统一在运营商区管理，不重复导入：",
-            count: providers.mergedToOperator.length,
+              "以下 {{count}} 条的站点已由中转站组维护，统一在中转站区管理，不重复导入：",
+            count: providers.mergedToRelay.length,
           })}
-          items={providers.mergedToOperator}
+          items={providers.mergedToRelay}
         />
       )}
 
@@ -276,14 +276,14 @@ function ReportBody({
         </div>
       </div>
 
-      {report.operatorsMerged.length > 0 && (
+      {report.relaysMerged.length > 0 && (
         <NotImportedList
-          title={t("settings.ccSwitchImport.mergedToOperatorAfterTitle", {
+          title={t("settings.ccSwitchImport.mergedToRelayAfterTitle", {
             defaultValue:
-              "这 {{count}} 条的站点已由运营商组维护，请在运营商区查看：",
-            count: report.operatorsMerged.length,
+              "这 {{count}} 条的站点已由中转站组维护，请在中转站区查看：",
+            count: report.relaysMerged.length,
           })}
-          items={report.operatorsMerged}
+          items={report.relaysMerged}
         />
       )}
 
@@ -291,7 +291,7 @@ function ReportBody({
         <NotImportedList
           title={t("settings.ccSwitchImport.skippedAfterTitle", {
             defaultValue:
-              "这 {{count}} 条已由 LoongPort 接管，请在运营商区查看：",
+              "这 {{count}} 条已由 LoongPort 接管，请在中转站区查看：",
             count: report.providersSkipped.length,
           })}
           items={report.providersSkipped}
@@ -308,7 +308,7 @@ function ReportBody({
   );
 }
 
-/** 一组「不导入」的 provider 及其原因标题（同指纹跳过 / 同站点归入运营商组）。 */
+/** 一组「不导入」的 provider 及其原因标题（同指纹跳过 / 同站点归入中转站组）。 */
 function NotImportedList({
   title,
   items,

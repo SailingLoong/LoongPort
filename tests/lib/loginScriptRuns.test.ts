@@ -9,7 +9,7 @@ import vm from "node:vm";
  *
  * ## 为什么需要这条测试
  *
- * `src-tauri/src/operator/login.rs` 生成的是**另一门语言的代码**，而 Rust 侧
+ * `src-tauri/src/relay/login.rs` 生成的是**另一门语言的代码**，而 Rust 侧
  * 那批测试全是字符串断言 —— 它们能验「该出现的出现了」，验不了「这段 JS
  * 跑得起来」。
  *

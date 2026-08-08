@@ -444,9 +444,9 @@
       "statPrompts": "Prompts",
       "statSkills": "Skills",
       "skippedTitle": "以下の {{count}} 件は LoongPort が管理済みのため再インポートされません：",
-      "skippedAfterTitle": "この {{count}} 件は LoongPort が管理します — 運営者エリアで確認できます：",
-      "mergedToOperatorTitle": "以下の {{count}} 件はサイトが運営者グループで管理済みのため、インポートされません：",
-      "mergedToOperatorAfterTitle": "この {{count}} 件はサイトが運営者グループで管理されています — 運営者エリアで確認できます：",
+      "skippedAfterTitle": "この {{count}} 件は LoongPort が管理します — 中継サイトエリアで確認できます：",
+      "mergedToRelayTitle": "以下の {{count}} 件はサイトが中継サイトグループで管理済みのため、インポートされません：",
+      "mergedToRelayAfterTitle": "この {{count}} 件はサイトが中継サイトグループで管理されています — 中継サイトエリアで確認できます：",
       "importSuccess": "インポート完了",
       "reportSummary": "{{providers}} 件の provider、{{mcp}} 件の MCP、{{prompts}} 件の prompt、{{skills}} 件の skill をインポートしました。",
       "backupId": "インポート前にバックアップを作成しました：{{backupId}}"
@@ -3078,7 +3078,7 @@
       "remove": "このアカウントを削除（プランも一緒に）",
       "removeBlockedByCurrent": "使用中のプランがあります。先に別のプランに切り替えてください",
       "removeConfirmTitle": "このアカウントを削除しますか？",
-      "removeConfirmMessage": "「{{label}}」のログイン情報と、生成済みの {{count}} 件のプランを削除します。チャージ済みの残高は事業者側に残るため、再ログインすれば引き続き使えます。",
+      "removeConfirmMessage": "「{{label}}」のログイン情報と、生成済みの {{count}} 件のプランを削除します。チャージ済みの残高は中継サイト側に残るため、再ログインすれば引き続き使えます。",
       "removeConfirmMessageNeverLoggedIn": "「{{label}}」の行と、生成済みの {{count}} 件のプランを削除します。このアカウントは未ログインのため、いつでも再度追加できます。"
     },
     "tier": {
@@ -3124,9 +3124,9 @@
       "readyWithKeys": "{{count}} 件のプランを準備し、{{keys}} 個のキーを作成しました",
       "landedOnOtherPlatforms": "このアカウントには {{count}} 件のグループがありますが、現在の CLI 向けのものはありません。上部の該当タブに切り替えてご確認ください。",
       "groupFailed": "{{group}}：{{reason}}",
-      "refreshed": "{{operators}} 件のプロバイダーを更新し、合計 {{tiers}} 件のプランを取得しました",
+      "refreshed": "{{relays}} 件の中継サイトを更新し、合計 {{tiers}} 件のプランを取得しました",
       "refreshFailedWithReason": "{{name}} の更新に失敗しました：{{reason}}",
-      "refreshedWithKeys": "{{operators}} 件の事業者を更新しました（枠 {{tiers}} 件、新規キー {{keys}} 本）"
+      "refreshedWithKeys": "{{relays}} 件の中継サイトを更新しました（枠 {{tiers}} 件、新規キー {{keys}} 本）"
     },
     "switch": {
       "done": "{{name}} に切り替えました",

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TFunction } from "i18next";
-import type { ProvisionSummary, TierInfo } from "@/lib/api/operator";
+import type { ProvisionSummary, TierInfo } from "@/lib/api/relay";
 
 /**
  * 闸：**「备好密钥」这一步的播报说的是当前那一屏的事实。**
@@ -29,9 +29,7 @@ vi.mock("sonner", () => ({
   },
 }));
 
-const { reportProvision } = await import(
-  "@/components/operator/reportProvision"
-);
+const { reportProvision } = await import("@/components/relay/reportProvision");
 
 /** 把 key 与插值拼进返回值 —— 断言才管得到「说出的数字对不对」。 */
 const t = ((key: string, options?: Record<string, unknown>) =>

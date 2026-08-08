@@ -13,7 +13,7 @@ import { isManagedProviderId } from "@/config/managedProviderId";
  * - 只收紧前端：后端仍拦 ⇒ 列表里看得见、点编辑保存报错，指向一个没有它的页面。
  *
  * 所以这条判据必须两侧同时收紧。同一事实散在 Rust 与 TS 两处的通用解法见
- * `src-tauri/src/operator/managed.rs` 的 `prefix_matches_the_frontend_copy`
+ * `src-tauri/src/relay/managed.rs` 的 `prefix_matches_the_frontend_copy`
  * （`include_str!` 字面比对）—— 那道闸守常量，这道守行为。
  */
 describe("前端托管 provider 判据", () => {
@@ -24,7 +24,7 @@ describe("前端托管 provider 判据", () => {
    * 加上本文件与 `prefix_matches_the_frontend_copy` 钉住前缀。
    */
   it("认出两个生成端的 id", () => {
-    // operator：前缀 + 16 位小写 hex
+    // relay：前缀 + 16 位小写 hex
     expect(isManagedProviderId("loongport-0123456789abcdef")).toBe(true);
     // vendor：前缀 + "vendor-" + 16 位小写 hex
     expect(isManagedProviderId("loongport-vendor-fedcba9876543210")).toBe(true);

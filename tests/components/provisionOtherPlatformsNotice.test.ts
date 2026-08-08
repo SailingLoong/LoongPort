@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { ProvisionSummary, TierInfo } from "@/lib/api/operator";
+import type { ProvisionSummary, TierInfo } from "@/lib/api/relay";
 import {
   countTiersForApp,
   sumTiersForApp,
   tiersLandedElsewhere,
-} from "@/components/operator/provisionScope";
+} from "@/components/relay/provisionScope";
 
 /**
  * 闸：**provision 拉到了分组、但一个都不属于当前平台时，要说清楚。**
@@ -166,11 +166,11 @@ describe("数出落在当前平台的档位", () => {
 /**
  * ⭐ 顶部「刷新」那条**批量**路径的同一个缺陷。
  *
- * 它对每个已登录运营商各跑一次 provision，然后把结果累加成一句
- * 「已刷新 N 个运营商，共 M 个档位」。而 `M` 原来累的是 `r.value.tiers.length`
+ * 它对每个已登录中转站各跑一次 provision，然后把结果累加成一句
+ * 「已刷新 N 个中转站，共 M 个档位」。而 `M` 原来累的是 `r.value.tiers.length`
  * —— **全平台总数**。
  *
- * 失败场景：三个运营商各有 codex/claude/gemini 三种分组，用户在 codex 屏点「刷新」
+ * 失败场景：三个中转站各有 codex/claude/gemini 三种分组，用户在 codex 屏点「刷新」
  * ⇒ 提示「共 9 个档位」，而他眼前那一屏只有 3 个。数字对不上时用户没法判断是
  * 提示错了还是界面漏了，而这条提示是绿色的成功语气。
  */
@@ -193,22 +193,22 @@ describe("批量刷新的档位计数", () => {
     };
   }
 
-  it("跨多个运营商累加时也只数当前平台的", () => {
-    const perOperator = [
+  it("跨多个中转站累加时也只数当前平台的", () => {
+    const perRelay = [
       summaryFor(["codex", "claude", "gemini"]),
       summaryFor(["codex", "codex", "claude"]),
       summaryFor(["claude"]),
     ];
 
     // codex：1 + 2 + 0 = 3。退化成 `tiers.length` 会得 3+3+1 = 7。
-    expect(sumTiersForApp(perOperator, "codex")).toBe(3);
-    expect(sumTiersForApp(perOperator, "claude")).toBe(3);
-    expect(sumTiersForApp(perOperator, "gemini")).toBe(1);
+    expect(sumTiersForApp(perRelay, "codex")).toBe(3);
+    expect(sumTiersForApp(perRelay, "claude")).toBe(3);
+    expect(sumTiersForApp(perRelay, "gemini")).toBe(1);
     // 一条都没有的平台必须是 0，不能跟着总数走。
-    expect(sumTiersForApp(perOperator, "hermes")).toBe(0);
+    expect(sumTiersForApp(perRelay, "hermes")).toBe(0);
   });
 
-  it("空列表是 0（一个运营商都没登录时）", () => {
+  it("空列表是 0（一个中转站都没登录时）", () => {
     expect(sumTiersForApp([], "codex")).toBe(0);
   });
 });

@@ -154,7 +154,7 @@ impl StreamCheckService {
         // 可达之后再问一句「这个档位到底能调什么」—— 见 `probe_models`。
         // 只在**托管档位**上做：判据要 sk，而那套形状只有托管项保证有；
         // 用户手工建的 provider 密钥可能在任意位置。
-        if checked.success && crate::operator::is_managed(&provider.id) {
+        if checked.success && crate::relay::is_managed(&provider.id) {
             if let Some(summary) =
                 Self::probe_models(&client, app_type, provider, &base_url, timeout, ua).await
             {
@@ -207,7 +207,7 @@ impl StreamCheckService {
         // 密钥位置按 CLI 分派，复用那一处定义（硬编码 codex 的位置会让 claude 档位
         // 永远探不出来，而且是静默的）。
         let api_key =
-            crate::operator::provision::extract_api_key(&provider.settings_config, app_type)?;
+            crate::relay::provision::extract_api_key(&provider.settings_config, app_type)?;
 
         let url = format!("{}/models", base_url.trim_end_matches('/'));
         let mut req = client
@@ -249,7 +249,7 @@ impl StreamCheckService {
         // 只挂生图模型 ⇒ 当对话档位用必定失败。这句话要说得让用户能照做。
         let all_image = models
             .iter()
-            .all(|m| crate::operator::provision::is_image_model(m));
+            .all(|m| crate::relay::provision::is_image_model(m));
         if all_image {
             return Some(format!("只能生图（{}），不能对话", models.join(" / ")));
         }

@@ -34,7 +34,7 @@ If your site has an image tier, you can also
 giving up the tier you chat on.
 
 <div align="center">
-  <img src="assets/screenshots/main-zh.png" alt="LoongPort main window: the operator list, each row showing its balance and tier count" width="820">
+  <img src="assets/screenshots/main-zh.png" alt="LoongPort main window: the relay list, each row showing its balance and tier count" width="820">
   <br>
   <sub>Chinese UI shown; the app also ships English, Traditional Chinese and Japanese.</sub>
 </div>
@@ -101,7 +101,7 @@ You top up with the relay provider.
 > Registration links carry our referral code, which may earn us a rebate from the relay
 > site; `bestapi.store` is our own site, and the built-in `LOONGPORT` promo code is a
 > new-user credit there. Neither affects your price, and you can use any domain. Both
-> tables live in `src-tauri/src/operator/` — `aff.rs` and `promo.rs`.
+> tables live in `src-tauri/src/relay/` — `aff.rs` and `promo.rs`.
 
 ## Your official accounts stay untouched
 
@@ -237,10 +237,10 @@ server of its own, and handles neither the traffic nor the money: users register
 and pay you, and credentials live in a local SQLite database on their own machine.
 
 Three things it takes off your plate, each checkable in the source: `normalize_site_origin`
-(`operator/api.rs` — a domain pasted straight from the address bar is accepted),
-self-service signup on your own registration page (`operator/login.rs` — a fresh site
+(`relay/api.rs` — a domain pasted straight from the address bar is accepted),
+self-service signup on your own registration page (`relay/login.rs` — a fresh site
 lands on `/register`, a returning one on `/login`, referral codes riding along in the URL),
-and self-service top-up with the session injected (`operator/purchase.rs` — it opens
+and self-service top-up with the session injected (`relay/purchase.rs` — it opens
 `{your-domain}/purchase`).
 
 The benefits, the concerns, the technical prerequisites and how to get on board are all at

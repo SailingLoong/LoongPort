@@ -444,9 +444,9 @@
       "statPrompts": "Prompts",
       "statSkills": "Skills",
       "skippedTitle": "以下 {{count}} 条已由 LoongPort 接管，不会重复导入：",
-      "skippedAfterTitle": "这 {{count}} 条已由 LoongPort 接管，请在运营商区查看：",
-      "mergedToOperatorTitle": "以下 {{count}} 条的站点已由运营商组维护，统一在运营商区管理，不重复导入：",
-      "mergedToOperatorAfterTitle": "这 {{count}} 条的站点已由运营商组维护，请在运营商区查看：",
+      "skippedAfterTitle": "这 {{count}} 条已由 LoongPort 接管，请在中转站区查看：",
+      "mergedToRelayTitle": "以下 {{count}} 条的站点已由中转站组维护，统一在中转站区管理，不重复导入：",
+      "mergedToRelayAfterTitle": "这 {{count}} 条的站点已由中转站组维护，请在中转站区查看：",
       "importSuccess": "导入完成",
       "reportSummary": "导入 {{providers}} 个 provider、{{mcp}} 个 MCP、{{prompts}} 个 prompt、{{skills}} 个 skill。",
       "backupId": "导入前已自动备份：{{backupId}}"
@@ -3078,7 +3078,7 @@
       "remove": "删除这个账号（连带它的档位）",
       "removeBlockedByCurrent": "它有档位正在使用，先切到别的档位再删",
       "removeConfirmTitle": "删除这个账号？",
-      "removeConfirmMessage": "会删掉「{{label}}」的登录态，连带它已生成的 {{count}} 个档位。已充值的余额留在运营商那边，重新登录就能再用。",
+      "removeConfirmMessage": "会删掉「{{label}}」的登录态，连带它已生成的 {{count}} 个档位。已充值的余额留在中转站那边，重新登录就能再用。",
       "removeConfirmMessageNeverLoggedIn": "会删掉「{{label}}」这一行，连带它已生成的 {{count}} 个档位。这个账号从没登录过，随时可以重新添加。"
     },
     "tier": {
@@ -3124,9 +3124,9 @@
       "readyWithKeys": "已备好 {{count}} 个档位，新建 {{keys}} 把密钥",
       "landedOnOtherPlatforms": "这个账号有 {{count}} 个分组，但都不属于当前这个 CLI。切到上方对应的标签页查看。",
       "groupFailed": "{{group}}：{{reason}}",
-      "refreshed": "已刷新 {{operators}} 个运营商，共 {{tiers}} 个档位",
+      "refreshed": "已刷新 {{relays}} 个中转站，共 {{tiers}} 个档位",
       "refreshFailedWithReason": "{{name}} 刷新失败：{{reason}}",
-      "refreshedWithKeys": "已刷新 {{operators}} 个运营商，共 {{tiers}} 个档位，新建 {{keys}} 把密钥"
+      "refreshedWithKeys": "已刷新 {{relays}} 个中转站，共 {{tiers}} 个档位，新建 {{keys}} 把密钥"
     },
     "switch": {
       "done": "已切换到 {{name}}",
@@ -3185,7 +3185,7 @@
       "companionDetail": "生图靠 LoongPort 自带的工具（MCP）完成：你在 codex / claude 里说「生成一张图」，它就用这里选定的档位出图。而对话仍走 Codex 标签页里选的那个档位 —— 两者各自独立，聊天可以用 DeepSeek 或任何别的站。",
       "howTo": "换生图档位不用重启 CLI，下一次生成就用新的。只有第一次有生图档位时要新开一个终端，让 codex 读到那个工具。",
       "emptyTitle": "还没有生图档位",
-      "emptyBody": "生图档位由「获取密钥」自动识别：运营商那边有只挂 gpt-image 模型的分组时，它就出现在这里。你的站点可能没有提供生图分组 —— 那样这一页保持空着就好，CLI 的配置里不会多出任何东西。"
+      "emptyBody": "生图档位由「获取密钥」自动识别：中转站那边有只挂 gpt-image 模型的分组时，它就出现在这里。你的站点可能没有提供生图分组 —— 那样这一页保持空着就好，CLI 的配置里不会多出任何东西。"
     }
   }
 }

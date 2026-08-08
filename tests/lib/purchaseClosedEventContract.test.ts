@@ -18,7 +18,7 @@ import { PURCHASE_CLOSED } from "@/lib/api/events";
  *
  * 事件名常量统一收在 `src-tauri/src/events.rs`（Rust）与 `src/lib/api/events.ts`（TS），
  * 两端各自的镜像闸（Rust 侧 `events::consistency_tests`、本测试）保证它们逐字一致。
- * 2026-08-07 前 `PURCHASE_CLOSED_EVENT` 定义在 `commands/operator.rs`，迁入 `events.rs`
+ * 2026-08-07 前 `PURCHASE_CLOSED_EVENT` 定义在 `commands/relay.rs`，迁入 `events.rs`
  * 统一管理（名字也随迁为 `PURCHASE_CLOSED`）。
  */
 describe("充值窗关闭事件的跨语言契约", () => {

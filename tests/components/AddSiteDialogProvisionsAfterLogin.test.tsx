@@ -9,13 +9,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * 用户在网页上登录完，界面却提示「该账号在此平台下没有可用分组」，非要再点一次
  * 「刷新」/「获取密钥」才补上。根因在这一条路少了一步：
  *
- * `probeSite` 只建**站点行**（`creds::save_site`），`operator_login` 只写**凭据** ——
- * 两条都不碰分组。而拉分组只有 `operator_provision` 这一条路（真打
+ * `probeSite` 只建**站点行**（`creds::save_site`），`relay_login` 只写**凭据** ——
+ * 两条都不碰分组。而拉分组只有 `relay_provision` 这一条路（真打
  * `/groups/available` 再逐组建 sk）。少了它，宿主随后那次 refresh 读的是本地 DB，
  * 里头一个档位都没有 ⇒ 那一行落到 `loggedIn && tiers.length === 0` 分支，
  * 显示的正是那句「没有可用分组」。
  *
- * 而那句话此刻是**不属实的**：账号在运营商那边有分组，只是本地还没去拉。
+ * 而那句话此刻是**不属实的**：账号在中转站那边有分组，只是本地还没去拉。
  *
  * ## 为什么是渲染测试而不是读源码断言
  *
@@ -36,7 +36,7 @@ const { login, provision, probeSite, listSponsors, listSites } = vi.hoisted(
 );
 
 vi.mock("@/lib/api", () => ({
-  operatorApi: { login, provision, probeSite, listSponsors, listSites },
+  relayApi: { login, provision, probeSite, listSponsors, listSites },
 }));
 
 // 全局 setup 里的 i18n 资源是**空的** ⇒ `t()` 只回 key、把插值丢掉，
@@ -86,7 +86,7 @@ vi.mock("@/components/ui/dialog", () => ({
   ),
 }));
 
-const { AddSiteDialog } = await import("@/components/operator/AddSiteDialog");
+const { AddSiteDialog } = await import("@/components/relay/AddSiteDialog");
 
 /** 一份空的 provision 结果 —— 这些测试关心的是「有没有调它」，不是它返回什么。 */
 const emptySummary = { tiers: [], keysCreated: 0, failures: [] };
@@ -112,7 +112,7 @@ describe("「添加中转站」登录后就地备好密钥", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     probeSite.mockResolvedValue({
-      operatorId: 7,
+      relayId: 7,
       siteOrigin: "https://790053500.com",
       siteName: "鑫旺",
     });
@@ -127,9 +127,9 @@ describe("「添加中转站」登录后就地备好密钥", () => {
     clickConfirm();
 
     // 少了这一步，那一行就停在「该账号在此平台下没有可用分组」——
-    // 而那句话不属实（分组在运营商那边有，只是本地没去拉）。
+    // 而那句话不属实（分组在中转站那边有，只是本地没去拉）。
     //
-    // 断言**带上 id**：`provision` 的 operatorId 是必填的（「当前站」那条回落已随
+    // 断言**带上 id**：`provision` 的 relayId 是必填的（「当前站」那条回落已随
     // `is_current` 一起删掉），而它必须是 `probeSite` 返回的那一行 ——
     // 传错行就是给别的账号建 sk。
     await waitFor(() => expect(provision).toHaveBeenCalledWith(7));
@@ -180,7 +180,7 @@ describe("「添加中转站」登录后就地备好密钥", () => {
 
     // 静默吞掉 failures 的后果：用户以为全部分组都备好了，而 `pro池` 那条
     // 压根没生成 —— 他要到点它、拿到一个看不懂的 401 时才发现。
-    // `OperatorSection` 的 `reportProvision`（行内登录 / 获取密钥两条路共用它）
+    // `RelaySection` 的 `reportProvision`（行内登录 / 获取密钥两条路共用它）
     // 都逐条 warning，这条路不该更沉默。
     await waitFor(() =>
       expect(toastWarning).toHaveBeenCalledWith(

@@ -19,7 +19,7 @@ import { MANAGED_PROVIDER_ID_PREFIX } from "./constants";
  *
  * ## ⚠️ 这份判据必须与 Rust 侧同形
  *
- * 权威定义在 `src-tauri/src/operator/managed.rs` 的 `is_managed`。跨语言没法共享
+ * 权威定义在 `src-tauri/src/relay/managed.rs` 的 `is_managed`。跨语言没法共享
  * 实现，而**两侧不一致不会报错，只会换一种死局**：只有一边收紧时，用户的 provider
  * 要么「看不见但能改」，要么「看得见但改不了」。
  *

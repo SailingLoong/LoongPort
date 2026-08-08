@@ -81,7 +81,7 @@ indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
 uuid = { version = "1.11", features = ["v4"] }
 sha2 = "0.10"
-# Ed25519 验签（远端配置的签名校验，见 `operator::remote_config`）。
+# Ed25519 验签（远端配置的签名校验，见 `relay::remote_config`）。
 #
 # **显式依赖而不是蹭 rustls 带进来的那份**：间接依赖的版本不由我们控制，
 # 上游哪天换 TLS 后端（aws-lc-rs 之类）它就消失了，而验签是安全边界不能这样断。

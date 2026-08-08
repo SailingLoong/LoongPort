@@ -391,7 +391,7 @@ pub struct AppSettings {
     /// 默认关的实际参与率通常不到 5%，那时数据严重偏向折腾型用户，**比没有数据更误导**。
     /// 首启一次性告知（`stats_notice_confirmed`）+ 这里随时可关保证知情与可退出。
     ///
-    /// 报什么/不报什么的硬边界见 `operator::stats` 的模块文档。
+    /// 报什么/不报什么的硬边界见 `relay::stats` 的模块文档。
     /// 注意默认值要改**两处**：这里的 serde default（决定已有 settings.json 缺这个键时
     /// 读成什么）与 `Default` impl（决定新装机值）。只改后者对老用户无效。
     #[serde(default = "default_true")]
@@ -403,10 +403,10 @@ pub struct AppSettings {
     pub stats_notice_confirmed: Option<bool>,
     /// 匿名统计**专属**的随机安装 id。
     ///
-    /// ⚠️ **绝不复用 `creds` 的 `device_id`**，也别拿运营商账号 id 当它。
+    /// ⚠️ **绝不复用 `creds` 的 `device_id`**，也别拿中转站账号 id 当它。
     ///
-    /// 原来的理由是「`device_id` 会被写进运营商服务器上的 API key 名
-    /// （`LoongPort/<device_id>/…`），看得到它的运营商就能把一条上报对回一个付费账号」。
+    /// 原来的理由是「`device_id` 会被写进中转站服务器上的 API key 名
+    /// （`LoongPort/<device_id>/…`），看得到它的中转站就能把一条上报对回一个付费账号」。
     /// 那个命名 2026-08-04 起改成了按账号（`LoongPort/a<account-id>/…`），
     /// 所以 `device_id` 现在不出现在任何服务端数据里 —— **但这条禁令照旧**：
     /// 统计 id 与任何「能对回某个人」的标识永不交叉，是这个字段存在的全部理由，

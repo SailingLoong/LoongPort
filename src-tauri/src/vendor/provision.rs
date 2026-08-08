@@ -14,7 +14,7 @@
 //!
 //! 1. **删了才建，不能反过来** —— 先建后删的话中途失败会留下两把都在，
 //!    而本地只记得一把 ⇒ 下次又多一把。
-//! 2. **删失败不阻断建** —— 删是清理，建是目的。与 `operator::provision`
+//! 2. **删失败不阻断建** —— 删是清理，建是目的。与 `relay::provision`
 //!    的「尽力而为 + 全量回报，不回滚」语义一致。
 
 use serde_json::Value;
@@ -36,7 +36,7 @@ pub const DEEPSEEK_APPS: [AppType; 6] = [
 ///
 /// ⚠️ **分隔符不能省** —— 没有它 `(vendor="a", account="bc")` 与
 /// `(vendor="ab", account="c")` 喂进哈希的字节流完全相同
-/// （同型于 `operator::provision::provider_id_for` 那个闸）。
+/// （同型于 `relay::provision::provider_id_for` 那个闸）。
 pub fn provider_id_for(vendor_id: &str, account_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -45,7 +45,7 @@ pub fn provider_id_for(vendor_id: &str, account_id: &str) -> String {
     h.update(account_id.as_bytes());
     format!(
         "{}vendor-{:.16x}",
-        crate::operator::managed::MANAGED_ID_PREFIX,
+        crate::relay::managed::MANAGED_ID_PREFIX,
         h.finalize()
     )
 }
@@ -53,7 +53,7 @@ pub fn provider_id_for(vendor_id: &str, account_id: &str) -> String {
 /// 从官网 key 列表里筛出「本客户端为**这个账号**建过的」那些。
 ///
 /// ⚠️ **精确相等，不是 `starts_with`** —— 用前缀匹配会命中
-/// `LoongPort专用/a123-old` 之类（同型于 `operator::provision::claim_key`
+/// `LoongPort专用/a123-old` 之类（同型于 `relay::provision::claim_key`
 /// 那个「`.../42` 会被 `.../420` 命中」的坑）。
 ///
 /// ⚠️ **必须带 `account_id`** —— 裸 `LoongPort专用/` 会把**别的账号**那把也删掉。
@@ -82,18 +82,18 @@ pub fn keys_to_delete(all: &[VendorKey], account_id: &str) -> Vec<VendorKey> {
 /// ## ⚠️ 生成配置与 `is_user_edited` 的基准**必须都走这个函数**
 ///
 /// `is_user_edited` 靠「与重算的默认值整份比对」判断用户改没改过
-/// （`operator::provision::is_user_edited`）。两边算法只要有一处不一致，
+/// （`relay::provision::is_user_edited`）。两边算法只要有一处不一致，
 /// 结果就是**每个 DeepSeek 的 Claude 档位都显示「已手工维护」**，而用户一个字没改过。
 ///
 /// 所以这个判断收在一个 pub 函数里，两个调用方（`provider_rows_for` 与
 /// vendor 侧算 `user_edited` 那处）共用它，而不是各写一遍 `matches!(app, Claude | ..)`。
-pub fn claude_roles_for(app: &AppType) -> Option<crate::operator::provision::ClaudeRoleModels> {
+pub fn claude_roles_for(app: &AppType) -> Option<crate::relay::provision::ClaudeRoleModels> {
     matches!(app, AppType::Claude | AppType::ClaudeDesktop).then(deepseek::claude_role_models)
 }
 
 /// 一把 sk 展开成六条 `(app_type, settings_config)`。
 ///
-/// 走 `operator::provision::settings_config_with_roles` —— 它的非 codex 分支复用上游
+/// 走 `relay::provision::settings_config_with_roles` —— 它的非 codex 分支复用上游
 /// `deeplink::build_provider_from_request`，而那个 match 覆盖全部 8 个平台
 /// （`deeplink/provider.rs:147`）⇒ 我们要的六个都在里面，不需要新写分派。
 pub fn provider_rows_for(vendor: Vendor, api_key: &str) -> Vec<(AppType, Value)> {
@@ -102,7 +102,7 @@ pub fn provider_rows_for(vendor: Vendor, api_key: &str) -> Vec<(AppType, Value)>
         .iter()
         .filter_map(|app| {
             let (base_url, model) = deepseek::config_for(app)?;
-            let cfg = crate::operator::provision::settings_config_with_roles(
+            let cfg = crate::relay::provision::settings_config_with_roles(
                 app,
                 api_key,
                 display,
@@ -299,12 +299,12 @@ mod tests {
     fn provider_id_is_recognised_as_managed() {
         let id = provider_id_for("deepseek", "uuid-a");
         assert!(
-            crate::operator::managed::is_managed(&id),
+            crate::relay::managed::is_managed(&id),
             "要命中 MANAGED_ID_PREFIX，守卫/前端过滤/托盘菜单才免费继承"
         );
     }
 
-    /// ⚠️ **精确相等，不是前缀** —— `a12` 不能命中 `a123`（同型于 operator 侧
+    /// ⚠️ **精确相等，不是前缀** —— `a12` 不能命中 `a123`（同型于 relay 侧
     /// 那个「`.../42` 会被 `.../420` 命中」的坑）。
     #[test]
     fn keys_to_delete_matches_exactly_not_by_prefix() {

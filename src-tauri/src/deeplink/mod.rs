@@ -3,7 +3,7 @@
 //! scheme 是 `loongport://`（`tauri.conf.json` 的 `plugins.deep-link`）。
 //!
 //! **LoongPort 的主流程不走这里**：拿到 sk 与 endpoint 之后直接写 provider 记录
-//! （见 `commands::operator::operator_provision`），不经 deeplink 导入。这条链路是从上游
+//! （见 `commands::relay::relay_provision`），不经 deeplink 导入。这条链路是从上游
 //! 继承下来的通用导入能力，留着不碍事。
 //!
 //! Supports importing:
@@ -33,7 +33,7 @@ pub use mcp::import_mcp_from_deeplink;
 pub use parser::parse_deeplink_url;
 pub use prompt::import_prompt_from_deeplink;
 pub use provider::{import_provider_from_deeplink, parse_and_merge_config};
-// LoongPort 加的一行：`operator::provision` 复用这套「按 CLI 分派 settings_config」的构造，
+// LoongPort 加的一行：`relay::provision` 复用这套「按 CLI 分派 settings_config」的构造，
 // 免得自己再写一份 8 分支的 match（上游加新 CLI 时我们免费拿到）。
 pub(crate) use provider::build_provider_from_request;
 pub use skill::import_skill_from_deeplink;

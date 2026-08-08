@@ -77,16 +77,16 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "usage_daily_rollups",
     // ↓ LoongPort 自己的两张表：**存明文凭据，绝不出本机**。
     //
-    // `loongport_operator` 有 `auth_token` / `refresh_token`，`loongport_vendor` 有
+    // `loongport_relay` 有 `auth_token` / `refresh_token`，`loongport_vendor` 有
     // `api_key`。`dump_sql` 是按 `sqlite_master` **通用枚举**所有表的（不在这个列表里
     // 就整表导出），所以新建的表**默认会进同步文件** —— 用户开了 WebDAV/S3 之后，
     // 登录态就明文躺在他自己配的云端，而他不会收到任何提示。
     //
     // 不同步不影响多机复用：Key 的命名是**账号粒度**的
-    // （`operator/provision.rs` 的 `key_name_for`，不含机器标识），所以另一台机器
+    // （`relay/provision.rs` 的 `key_name_for`，不含机器标识），所以另一台机器
     // 登录同一个账号会 claim 到**同一把 key**，只是要重新登录一次。
     // 拿「少登录一次」换「凭据上云」不值得。
-    "loongport_operator",
+    "loongport_relay",
     "loongport_vendor",
 ];
 
@@ -100,7 +100,7 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "stream_check_logs",
     "proxy_live_backup",
     "usage_daily_rollups",
-    "loongport_operator",
+    "loongport_relay",
     "loongport_vendor",
 ];
 
@@ -167,7 +167,7 @@ impl Database {
     /// `pub(crate)`：cc-switch 导入要走同一条路径（备份 + 原子替换 + 迁移 + authorizer +
     /// 版本校验），但保留的本地表与 WebDAV 同步那份不同 —— 它要多保住 `settings`（LoongPort
     /// 的 current-provider / config snippet，不该被 cc-switch 的覆盖），见
-    /// `operator/cc_switch_import.rs` 的 `PRESERVE_TABLES`。
+    /// `relay/cc_switch_import.rs` 的 `PRESERVE_TABLES`。
     pub(crate) fn import_sql_string_preserving(
         &self,
         sql_raw: &str,
@@ -480,7 +480,7 @@ impl Database {
 
     /// 导出数据库为 SQL 文本
     ///
-    /// `pub(crate)`：cc-switch 导入（`operator/cc_switch_import.rs`）要在一个**只读打开的
+    /// `pub(crate)`：cc-switch 导入（`relay/cc_switch_import.rs`）要在一个**只读打开的
     /// 外部库**（cc-switch.db）上复用这份导出，把它导成 SQL 后喂回本程序的导入路径。
     pub(crate) fn dump_sql(conn: &Connection, skip_tables: &[&str]) -> Result<String, AppError> {
         let mut output = String::new();
@@ -804,7 +804,7 @@ mod tests {
     /// 判据故意做成**扫建表 SQL 找凭据列名**而不是硬写死两个表名：这样将来新建第三张
     /// 含凭据的表时，这条闸会自己红，不依赖谁记得。
     ///
-    /// 会红的改法：把 `loongport_operator` / `loongport_vendor` 从任一列表里删掉；
+    /// 会红的改法：把 `loongport_relay` / `loongport_vendor` 从任一列表里删掉；
     /// 或新建一张有 `auth_token` / `api_key` 列的表而不加进列表。
     #[test]
     fn tables_holding_credentials_never_leave_the_machine() {
@@ -814,10 +814,7 @@ mod tests {
 
         // LoongPort 的建表 SQL 都在这两处（各一张表）。
         let sources = [
-            (
-                "loongport_operator",
-                include_str!("../operator/creds.rs") as &str,
-            ),
+            ("loongport_relay", include_str!("../relay/creds.rs") as &str),
             ("loongport_vendor", include_str!("../vendor/creds.rs")),
         ];
 

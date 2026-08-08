@@ -11,6 +11,29 @@ LoongPort's first release is 3.19.2 rather than 0.1.0.
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)。版本号延续上游的序列
 （见文末「溯源」），所以 LoongPort 的第一个版本是 3.19.2 而不是 0.1.0。
 
+## [Unreleased]
+
+### Changed / 变更
+
+- **One name for one thing: "relay" (中转站), everywhere.** The UI had already
+  settled on 中转站 / relay site, but the code underneath still called the same
+  thing an *operator* — a Rust module, a React folder, 17 Tauri commands, an
+  event name and the `loongport_operator` table — while a handful of strings in
+  all four languages still said 运营商 / operator / 運営者. One concept with two
+  names is how a codebase starts lying to the person reading it, so the second
+  name is gone: `relay` in code, 中转站 / relay / 中継サイト in the UI.
+
+  Nothing changes for you. Your relays, logins, balances and tiers are carried
+  over by a schema migration that renames the table and touches no rows.
+
+  界面早就统一说「中转站」了，代码底下却还叫 operator（一个 Rust 模块、一个 React
+  目录、17 个 Tauri 命令、一个事件名、`loongport_operator` 表），四种语言里也各留着
+  几条「运营商 / operator / 運営者」的漏网文案。同一个东西两个名字，读代码的人迟早
+  被它误导 —— 所以这次把第二个名字整个去掉：代码里叫 `relay`，界面上叫中转站 /
+  relay / 中継サイト。
+
+  对使用没有任何影响：中转站、登录态、余额与档位由一步纯改名的迁移原样带过去。
+
 ## [3.21.0] — 2026-08-05
 
 ### Changed / 变更

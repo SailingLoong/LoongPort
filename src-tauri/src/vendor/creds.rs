@@ -1,10 +1,10 @@
 //! `loongport_vendor` 表：一行一个「厂商 × 账号」。
 //!
-//! ## 为什么不复用 `loongport_operator`
+//! ## 为什么不复用 `loongport_relay`
 //!
 //! 那张表有 `site_origin` / `api_base_url` 这些对 vendor 无意义的 NOT NULL 列，
 //! 而 vendor 需要它没有的 `vendor_id`；且 `account_id` 类型不同 ——
-//! **vendor 是 TEXT**（DeepSeek 给 UUID），operator 是 INTEGER。
+//! **vendor 是 TEXT**（DeepSeek 给 UUID），relay 是 INTEGER。
 //! 合表要么塞一堆可空列 + 一个 kind 判别列，要么互相污染语义，
 //! 而**列进了 schema、改它是迁移不是重构**。
 //!
@@ -15,10 +15,10 @@
 //!
 //! （曾经还列过一条 `device_id`，那是 2026-08-04 之前的事：那时 Key 名字里带机器
 //! 标识。现在**命名是账号粒度的**，机器标识整个概念都没了 —— 见
-//! `operator/provision.rs` 的 `key_name_for` 与那边的「Key 爆炸」那段。）
+//! `relay/provision.rs` 的 `key_name_for` 与那边的「Key 爆炸」那段。）
 //! - **`refresh_token` / `token_expires_at`** —— DeepSeek 两样都没有。
 //!   「schema 不可逆所以现在加」那个论证站不住：加可空列是**局部重构**
-//!   （本仓已两次这么干，`operator/creds.rs:181` / `:205`），不是数据迁移。
+//!   （本仓已两次这么干，`relay/creds.rs:181` / `:205`），不是数据迁移。
 //!   将来第一家有 refresh 语义的厂商进来时再加，那时才知道真实类型与轮换语义。
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -34,7 +34,7 @@ pub struct VendorRow {
     /// 厂商侧用户 id。`None` = 还没登录过。**TEXT**（DeepSeek 给 UUID）。
     pub account_id: Option<String>,
     pub account_label: String,
-    /// 重登时预填的值（DeepSeek 是手机号）。中立命名，与 operator 同义。
+    /// 重登时预填的值（DeepSeek 是手机号）。中立命名，与 relay 同义。
     pub login_identifier: String,
     pub auth_token: String,
     /// **明文 sk**。列表接口拿不回来，所以必须自己存。
@@ -63,7 +63,7 @@ fn row_to_vendor(row: &rusqlite::Row<'_>) -> rusqlite::Result<VendorRow> {
 /// ⚠️ **索引与建表要放在一起判**：`create_tables_on_conn` 在迁移**之前**跑
 /// （`Database::init` 先建表再迁移），升级的库上 `CREATE TABLE IF NOT EXISTS`
 /// 会跳过。本表是本版本新增的、没有旧形态，所以这里可以直接建索引 ——
-/// 但**将来给它加列时要照 `operator/creds.rs:218` 那个 `is_v18_shape` 模式**，
+/// 但**将来给它加列时要照 `relay/creds.rs:218` 那个 `is_v18_shape` 模式**，
 /// 否则索引引用新列会当场报 `no such column` 让 app 起不来（那边踩过）。
 ///
 /// ## ⚠️ 没有 `is_current` 列，别再加回来（2026-08-04 删）
@@ -95,7 +95,7 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
     .map_err(|e| AppError::Database(format!("创建 loongport_vendor 表失败: {e}")))?;
 
     // 去重键。SQLite 把 NULL 视为互不相等 ⇒ 多条未登录行不受约束，
-    // 由 `save_account` 收口（与 operator 的 `save_site` 同一模式）。
+    // 由 `save_account` 收口（与 relay 的 `save_site` 同一模式）。
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_loongport_vendor_account
          ON loongport_vendor(vendor_id, account_id)",
@@ -209,7 +209,7 @@ pub fn clear_token(conn: &Connection, row_id: i64) -> Result<(), AppError> {
 /// 保存行的手工顺序。`ids` 是拖动后的完整顺序，下标即新的 `sort_index`。
 ///
 /// **这是唯一会写 `sort_index` 的地方** —— 只有用户拖动才改顺序（`list` 排的就是它）。
-/// 理由与 `operator::creds::reorder` 相同：顺序若跟着 `is_current` 之类会变的东西排，
+/// 理由与 `relay::creds::reorder` 相同：顺序若跟着 `is_current` 之类会变的东西排，
 /// 用户点一下某行就会看到整个列表跳动。
 ///
 /// ⚠️ **只排本表的行**：中转站行在另一张表里，两类行没有共同的序（spec §6.2 已裁决
@@ -375,8 +375,8 @@ mod tests {
     #[test]
     fn an_upgraded_database_gets_the_table() {
         let conn = Connection::open_in_memory().expect("内存库");
-        // 模拟 v20：只建 operator 的表，不建 vendor 的
-        crate::operator::creds::create_table(&conn).expect("operator 表");
+        // 模拟 v20：只建 relay 的表，不建 vendor 的
+        crate::relay::creds::create_table(&conn).expect("relay 表");
         assert!(
             list(&conn).is_err(),
             "前提：升级前本表不存在（否则这条闸没有判别力）"

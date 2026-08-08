@@ -28,7 +28,7 @@ export const GITHUB_REPO = "https://github.com/SailingLoong/LoongPort";
  * ⚠️ **改它等于所有已生成的 provider 记录当场脱管**（判据失配 ⇒ 过滤全线失效，
  * 且 provision 会为同一分组再插一条新 id）。与 Key 命名契约同属不可逆决定。
  *
- * Rust 侧的权威定义在 `src-tauri/src/operator/managed.rs` 的 `MANAGED_ID_PREFIX`，
+ * Rust 侧的权威定义在 `src-tauri/src/relay/managed.rs` 的 `MANAGED_ID_PREFIX`，
  * 那边还有 `is_managed` / `reject_if_managed` 两个守卫。跨语言没法共享常量，
  * 改一边必须改另一边。
  */

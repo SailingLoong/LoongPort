@@ -39,14 +39,14 @@
 //! （反方向不做检查：文档里多写一个词不算错，那可能只是叙述。）
 
 /// 中转服务：已支持的。
-const OPERATORS_SHIPPED: &[&str] = &["sub2api"];
+const RELAYS_SHIPPED: &[&str] = &["sub2api"];
 
 /// 中转服务：在做的。
 ///
 /// ⚠️ **`new-api` 在这里是一句对外承诺**，不是随手写的占位 —— 登录标识已按它设计成
 /// 中立的 `login_identifier`（而不是 sub2api 那侧的具体字段名）。删它之前先想清楚
 /// 那个设计还要不要。
-const OPERATORS_PLANNED: &[&str] = &["new-api"];
+const RELAYS_PLANNED: &[&str] = &["new-api"];
 
 /// AI CLI：已支持的（**指对话档位**）。
 const CLIS_SHIPPED: &[&str] = &["codex", "claude"];
@@ -80,8 +80,8 @@ mod tests {
     /// 那不构成错误。
     fn assert_all_present(doc: &str, doc_name: &str) {
         for (label, items) in [
-            ("已支持的中转服务", OPERATORS_SHIPPED),
-            ("在做的中转服务", OPERATORS_PLANNED),
+            ("已支持的中转服务", RELAYS_SHIPPED),
+            ("在做的中转服务", RELAYS_PLANNED),
             ("已支持的 CLI", CLIS_SHIPPED),
             ("在做的 CLI", CLIS_PLANNED),
             ("已支持的平台", PLATFORMS_SHIPPED),
@@ -123,8 +123,8 @@ mod tests {
     #[test]
     fn the_gate_itself_is_not_vacuous() {
         for (name, items) in [
-            ("OPERATORS_SHIPPED", OPERATORS_SHIPPED),
-            ("OPERATORS_PLANNED", OPERATORS_PLANNED),
+            ("RELAYS_SHIPPED", RELAYS_SHIPPED),
+            ("RELAYS_PLANNED", RELAYS_PLANNED),
             ("CLIS_SHIPPED", CLIS_SHIPPED),
             ("CLIS_PLANNED", CLIS_PLANNED),
             ("PLATFORMS_SHIPPED", PLATFORMS_SHIPPED),

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
- * vendor 的「使用」按钮必须走 `operator_switch_tier`，不能走上游的 `switch_provider`。
+ * vendor 的「使用」按钮必须走 `relay_switch_tier`，不能走上游的 `switch_provider`。
  *
  * ## 为什么需要这条闸
  *
@@ -21,7 +21,7 @@ import { resolve } from "node:path";
  */
 describe("vendor 切换入口", () => {
   const src = readFileSync(
-    resolve(__dirname, "../../src/components/operator/OperatorSection.tsx"),
+    resolve(__dirname, "../../src/components/relay/RelaySection.tsx"),
     "utf8",
   );
 
@@ -35,8 +35,8 @@ describe("vendor 切换入口", () => {
     return src.slice(start, end);
   })();
 
-  it("走 operatorApi.switchTier（在守卫之内）", () => {
-    expect(vendorUseBody).toContain("operatorApi.switchTier");
+  it("走 relayApi.switchTier（在守卫之内）", () => {
+    expect(vendorUseBody).toContain("relayApi.switchTier");
   });
 
   it("不走 providersApi.switch（会被 reject_if_managed 拦下）", () => {

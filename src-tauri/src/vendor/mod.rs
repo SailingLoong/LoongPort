@@ -1,6 +1,6 @@
-//! 官网直连账号（vendor）层。与 [`crate::operator`]（中转站）**平级并列**。
+//! 官网直连账号（vendor）层。与 [`crate::relay`]（中转站）**平级并列**。
 //!
-//! ## 为什么不复用 operator 的 Client
+//! ## 为什么不复用 relay 的 Client
 //!
 //! 差异不在 HTTP 形状，在语义：中转站一个账号给**多个分组**（多档位、有倍率）、
 //! key 列表明文可认领、站点域名要用户输入并探测；官网一个账号就**一个 endpoint**、
@@ -11,7 +11,7 @@
 //!
 //! `async fn` in trait 返回 RPITIT ⇒ **不是 dyn-compatible** ⇒ `Box<dyn _>` 不成立，
 //! 而「按 vendor_id 取一个实现」正需要它；`async-trait` 不是本仓的直接依赖。
-//! enum 静态分派零新依赖、编译期穷尽，与 [`crate::operator::platform_map`] 的风格一致。
+//! enum 静态分派零新依赖、编译期穷尽，与 [`crate::relay::platform_map`] 的风格一致。
 //! 加第二家厂商 = 加一个变体 + 编译器把所有没覆盖的 match 点报出来。
 
 pub mod creds;
@@ -114,7 +114,7 @@ impl From<VendorError> for crate::error::AppError {
 /// ## 为什么按**账号**而不按机器（2026-08-04 改，维护者实测推翻原设计）
 ///
 /// 初版第二段是 `device_id`，理由是「多台机器各认自己那把，否则 A 机器改了 Key、
-/// B 机器的配置就悄悄失效」。**那个理由站不住** —— 维护者在 operator 侧实测证伪：
+/// B 机器的配置就悄悄失效」。**那个理由站不住** —— 维护者在 relay 侧实测证伪：
 ///
 /// `provision` **从不改动已有 Key**（认领到就直接用），能换掉 sk 的只有「用户去
 /// 网页端手工删了重建」，而那种情况下不论按机器还是按账号，其它机器都一样要重新
@@ -123,10 +123,10 @@ impl From<VendorError> for crate::error::AppError {
 /// 代价是真的：他一个 sub2api 账号下堆了 11 把、只有 3 把在用。
 /// DeepSeek 这边上限 100 把，三台 Mac 各建一套同样是白耗。
 ///
-/// 前缀 `a` 让人一眼看出哪段是账号（对齐 operator 侧
+/// 前缀 `a` 让人一眼看出哪段是账号（对齐 relay 侧
 /// `LoongPort/a<account-id>/<platform>/<group-id>` 的写法）。
 ///
-/// ## 与 operator 的差异：无 platform / group 段
+/// ## 与 relay 的差异：无 platform / group 段
 ///
 /// DeepSeek 的一把 sk **六个平台通吃**（同一把同时能请求 `/v1`、`/anthropic`、
 /// 根路径），所以没有「每平台一把」的概念 —— 两段就够。

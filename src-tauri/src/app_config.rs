@@ -1306,7 +1306,7 @@ mod app_type_all_tests {
     /// ⚠️ `AppType::all()` 是**手工数组**，不是从 enum 派生的。
     ///
     /// 漏改它的后果是**静默失效**：那个 app 下的托管脏记录永远不被
-    /// `commands::operator::prune_stale_tiers` 清理（它靠 `all()` 遍历），
+    /// `commands::relay::prune_stale_tiers` 清理（它靠 `all()` 遍历），
     /// 而编译器管不到「数组少了一项」。
     ///
     /// 判据：`all()` 里每一项都能 round-trip，且**每一个能被 `from_str` 解出来的
