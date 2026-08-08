@@ -921,14 +921,30 @@ async fn do_provision(
         //
         // ⚠️ **模型名用 `tier.model` 而不是 `DEFAULT_MODEL`**：纯生图分组
         // （`/v1/models` 里只有 `gpt-image-*`）写文本模型名就是必定 404。
-        // 那个值由 `provision::pick_model` 按该分组的真实模型列表定，见它的文档。
-        let Some(defaults) = provision::settings_config_for(
-            app_type,
-            &tier.api_key,
-            &display_name,
-            &op.api_base_url,
-            &tier.model,
-        ) else {
+        // 那个值由 `provision::pick_tier_models` 按该分组的真实模型列表 + 平台定，见它的文档。
+        //
+        // ⚠️ **claude 档位带角色模型**（`tier.roles`）：provision 按该分组模型列表挑出的
+        // opus/sonnet/haiku/fable/subagent 各写各的，而不是全指向同一个主模型 ——
+        // 否则 Anthropic 分组明明返回 claude 模型，档位却全写 gpt-5.6-sol。
+        let defaults = if matches!(app_type, AppType::Claude) {
+            provision::settings_config_with_roles(
+                app_type,
+                &tier.api_key,
+                &display_name,
+                &op.api_base_url,
+                &tier.model,
+                tier.roles.clone(),
+            )
+        } else {
+            provision::settings_config_for(
+                app_type,
+                &tier.api_key,
+                &display_name,
+                &op.api_base_url,
+                &tier.model,
+            )
+        };
+        let Some(defaults) = defaults else {
             result.failures.push((
                 tier.group_name.clone(),
                 format!("还不能为 {} 生成配置", app_type.as_str()),
