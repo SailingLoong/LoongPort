@@ -205,6 +205,17 @@ export function VendorRow({
           </span>
         )}
 
+        {/* 状态动作（含「使用 / 在用」主按钮）。**放在动作组最前**，对齐
+            cc-switch 的「主按钮在左、图标组在右」（`ProviderActions` 内部次序）。 */}
+        <VendorStatus
+          account={account}
+          busy={busy}
+          isCurrent={isCurrent}
+          onLogin={onLogin}
+          onProvision={onProvision}
+          onUse={onUse}
+        />
+
         {/* 删除。**hover 才出**，与 `OperatorRow` 同一条规矩（破坏性动作值得藏）。
 
             与 operator 行的区别：这里**前端不预先判「在用所以不能删」**，由后端
@@ -299,15 +310,6 @@ export function VendorRow({
             )}
           </Button>
         )}
-
-        <VendorStatus
-          account={account}
-          busy={busy}
-          isCurrent={isCurrent}
-          onLogin={onLogin}
-          onProvision={onProvision}
-          onUse={onUse}
-        />
       </div>
     </div>
   );
@@ -358,48 +360,49 @@ function VendorStatus({
   if (account.keyReady) {
     return (
       <div className="flex shrink-0 items-center gap-2">
-        {/* 主按钮。**文案与图标复用上游的 `provider.enable` / `provider.inUse`**
-            （四 locale 早就齐了）—— 与 `TierItem` 里那两支逐字相同，
-            否则同一个操作会在两种行上有两种叫法。 */}
-        {isCurrent ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="secondary"
-            className="h-7 shrink-0 cursor-not-allowed bg-gray-200 text-muted-foreground hover:bg-gray-200 hover:text-muted-foreground dark:bg-gray-700 dark:hover:bg-gray-700"
-            disabled
-          >
-            <Check className="mr-1 h-3.5 w-3.5" />
-            {t("provider.inUse")}
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            size="sm"
-            className="h-7 shrink-0"
-            disabled={switching}
-            onClick={onUse}
-          >
-            {switching ? (
-              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Play className="mr-1 h-3.5 w-3.5" />
-            )}
-            {switching ? t("loongport.tier.switching") : t("provider.enable")}
-          </Button>
-        )}
-
-        {/* 次要动作组，**hover 才出**（与 `OperatorRow` 的「重新拉分组」同一条规矩：
-            动作藏进 hover，信息常驻）。进行中钉住可见。 */}
+        {/* 主按钮（「使用 / 在用」）+ 次要动作，**整组 hover 才出** —— 与
+            `TierItem:712` / cc-switch `ProviderCard` 同一形态：没 hover 时
+            右侧是空的，「在用」态靠行上的蓝色边框表达。进行中钉住可见。 */}
         <div
           className={cn(
             "flex shrink-0 items-center gap-0.5",
             HOVER_ACTIONS_BASE,
-            provisioning || loggingIn
+            switching || provisioning || loggingIn
               ? HOVER_ACTIONS_PINNED
               : ROW_HOVER_ACTIONS,
           )}
         >
+          {/* 主按钮。**文案与图标复用上游的 `provider.enable` / `provider.inUse`**
+              （四 locale 早就齐了）—— 与 `TierItem` 里那两支逐字相同，
+              否则同一个操作会在两种行上有两种叫法。 */}
+          {isCurrent ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="h-7 shrink-0 cursor-not-allowed bg-gray-200 text-muted-foreground hover:bg-gray-200 hover:text-muted-foreground dark:bg-gray-700 dark:hover:bg-gray-700"
+              disabled
+            >
+              <Check className="mr-1 h-3.5 w-3.5" />
+              {t("provider.inUse")}
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 shrink-0"
+              disabled={switching}
+              onClick={onUse}
+            >
+              {switching ? (
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Play className="mr-1 h-3.5 w-3.5" />
+              )}
+              {switching ? t("loongport.tier.switching") : t("provider.enable")}
+            </Button>
+          )}
+
           {/* 登录态过期但 sk 还在用的行：给一条重登的路，但**不催**。
               唯一的实际损失是余额拉不到，title 就说这件事。 */}
           {account.sessionExpired && (
