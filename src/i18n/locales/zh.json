@@ -445,6 +445,8 @@
       "statSkills": "Skills",
       "skippedTitle": "以下 {{count}} 条已由 LoongPort 接管，不会重复导入：",
       "skippedAfterTitle": "这 {{count}} 条已由 LoongPort 接管，请在运营商区查看：",
+      "mergedToOperatorTitle": "以下 {{count}} 条的站点已由运营商组维护，统一在运营商区管理，不重复导入：",
+      "mergedToOperatorAfterTitle": "这 {{count}} 条的站点已由运营商组维护，请在运营商区查看：",
       "importSuccess": "导入完成",
       "reportSummary": "导入 {{providers}} 个 provider、{{mcp}} 个 MCP、{{prompts}} 个 prompt、{{skills}} 个 skill。",
       "backupId": "导入前已自动备份：{{backupId}}"

@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useCcSwitchImport } from "@/hooks/useCcSwitchImport";
+import type { SkippedProvider } from "@/lib/api/ccSwitchImport";
 
 interface CcSwitchImportDialogProps {
   open: boolean;
@@ -208,24 +209,25 @@ function PreviewBody({
         />
       </div>
 
+      {providers.mergedToOperator.length > 0 && (
+        <NotImportedList
+          title={t("settings.ccSwitchImport.mergedToOperatorTitle", {
+            defaultValue:
+              "以下 {{count}} 条的站点已由运营商组维护，统一在运营商区管理，不重复导入：",
+            count: providers.mergedToOperator.length,
+          })}
+          items={providers.mergedToOperator}
+        />
+      )}
+
       {providers.skipped.length > 0 && (
-        <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
-          <p className="flex items-center gap-1.5 font-medium text-amber-700">
-            <AlertTriangle className="h-4 w-4" />
-            {t("settings.ccSwitchImport.skippedTitle", {
-              defaultValue: "以下 N 条已由 LoongPort 接管，不会重复导入：",
-              count: providers.skipped.length,
-            })}
-          </p>
-          <ul className="list-disc pl-5 text-muted-foreground">
-            {providers.skipped.map((s) => (
-              <li key={`${s.appType}-${s.name}`}>
-                {s.name}
-                <span className="text-xs">（{s.appType}）</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <NotImportedList
+          title={t("settings.ccSwitchImport.skippedTitle", {
+            defaultValue: "以下 N 条已由 LoongPort 接管，不会重复导入：",
+            count: providers.skipped.length,
+          })}
+          items={providers.skipped}
+        />
       )}
 
       {preview.notes.map((note, i) => (
@@ -274,25 +276,26 @@ function ReportBody({
         </div>
       </div>
 
+      {report.operatorsMerged.length > 0 && (
+        <NotImportedList
+          title={t("settings.ccSwitchImport.mergedToOperatorAfterTitle", {
+            defaultValue:
+              "这 {{count}} 条的站点已由运营商组维护，请在运营商区查看：",
+            count: report.operatorsMerged.length,
+          })}
+          items={report.operatorsMerged}
+        />
+      )}
+
       {report.providersSkipped.length > 0 && (
-        <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
-          <p className="flex items-center gap-1.5 font-medium text-amber-700">
-            <AlertTriangle className="h-4 w-4" />
-            {t("settings.ccSwitchImport.skippedAfterTitle", {
-              defaultValue:
-                "这 {{count}} 条已由 LoongPort 接管，请在运营商区查看：",
-              count: report.providersSkipped.length,
-            })}
-          </p>
-          <ul className="list-disc pl-5 text-muted-foreground">
-            {report.providersSkipped.map((s) => (
-              <li key={`${s.appType}-${s.name}`}>
-                {s.name}
-                <span className="text-xs">（{s.appType}）</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <NotImportedList
+          title={t("settings.ccSwitchImport.skippedAfterTitle", {
+            defaultValue:
+              "这 {{count}} 条已由 LoongPort 接管，请在运营商区查看：",
+            count: report.providersSkipped.length,
+          })}
+          items={report.providersSkipped}
+        />
       )}
 
       {report.warnings.map((w, i) => (
@@ -301,6 +304,32 @@ function ReportBody({
           {w}
         </p>
       ))}
+    </div>
+  );
+}
+
+/** 一组「不导入」的 provider 及其原因标题（同指纹跳过 / 同站点归入运营商组）。 */
+function NotImportedList({
+  title,
+  items,
+}: {
+  title: string;
+  items: SkippedProvider[];
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+      <p className="flex items-center gap-1.5 font-medium text-amber-700">
+        <AlertTriangle className="h-4 w-4" />
+        {title}
+      </p>
+      <ul className="list-disc pl-5 text-muted-foreground">
+        {items.map((s) => (
+          <li key={`${s.appType}-${s.name}`}>
+            {s.name}
+            <span className="text-xs">（{s.appType}）</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
