@@ -3,7 +3,13 @@ import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { LAST_APP_STORAGE_KEY } from "@/config/constants";
 import { cn } from "@/lib/utils";
-import { Image as ImageIcon, Monitor, Terminal } from "lucide-react";
+import {
+  ChevronDown,
+  Image as ImageIcon,
+  Monitor,
+  Terminal,
+} from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 const APP_BADGE_ICON: Partial<
@@ -33,6 +39,13 @@ const ALL_APPS: AppId[] = [
   "openclaw",
   "hermes",
 ];
+
+/**
+ * 固定显示的平台数：claude / claude-desktop / codex / codex-image 前 4 个常驻，
+ * 从这一位起的平台（gemini、grokbuild、opencode、openclaw、hermes）折叠进「更多」。
+ * 跟 `ALL_APPS` 的排列顺序绑定 —— 别按名字猜「4 个」。
+ */
+const COLLAPSED_START_INDEX = 4;
 
 export function AppSwitcher({
   activeApp,
@@ -79,57 +92,87 @@ export function AppSwitcher({
     return visibleApps[app];
   });
 
+  // 前 4 个固定显示，其余折叠进「更多」。
+  const pinnedApps = appsToShow.slice(0, COLLAPSED_START_INDEX);
+  const collapsedApps = appsToShow.slice(COLLAPSED_START_INDEX);
+  // 当前激活的平台在折叠组里时**自动展开** —— 否则切到 gemini 却看不到它被收在哪。
+  const activeInCollapsed = collapsedApps.includes(activeApp);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const showCollapsed = moreOpen || activeInCollapsed;
+
+  const appButton = (app: AppId) => {
+    const badgeConfig = APP_BADGE_ICON[app];
+    const BadgeIcon = badgeConfig?.icon;
+    const isActive = activeApp === app;
+    return (
+      <button
+        key={app}
+        type="button"
+        onClick={() => handleSwitch(app)}
+        title={appDisplayName[app]}
+        aria-label={appDisplayName[app]}
+        className={cn(
+          "group inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
+          isActive
+            ? "bg-background text-foreground shadow-sm"
+            : "text-muted-foreground hover:text-foreground hover:bg-background/50",
+        )}
+      >
+        <span className="relative inline-flex shrink-0">
+          <ProviderIcon
+            icon={appIconName[app]}
+            name={appDisplayName[app]}
+            size={iconSize}
+          />
+          {BadgeIcon && (
+            <span
+              className={cn(
+                "absolute -bottom-0.5 -right-0.5 flex items-center justify-center rounded-[3px] border h-[11px] w-[11px]",
+                isActive
+                  ? "bg-background border-border text-foreground"
+                  : "bg-muted border-background text-muted-foreground group-hover:bg-background group-hover:text-foreground",
+              )}
+              aria-hidden="true"
+            >
+              <BadgeIcon
+                className="h-[8px] w-[8px]"
+                strokeWidth={2.5}
+                style={
+                  badgeConfig?.offsetY
+                    ? { transform: `translateY(${badgeConfig.offsetY}px)` }
+                    : undefined
+                }
+              />
+            </span>
+          )}
+        </span>
+      </button>
+    );
+  };
+
   return (
     <div className="inline-flex bg-muted rounded-xl p-1 gap-1">
-      {appsToShow.map((app) => {
-        const badgeConfig = APP_BADGE_ICON[app];
-        const BadgeIcon = badgeConfig?.icon;
-        const isActive = activeApp === app;
-        return (
-          <button
-            key={app}
-            type="button"
-            onClick={() => handleSwitch(app)}
-            title={appDisplayName[app]}
-            aria-label={appDisplayName[app]}
+      {pinnedApps.map(appButton)}
+      {collapsedApps.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setMoreOpen((v) => !v)}
+          aria-expanded={showCollapsed}
+          aria-label={t("apps.more")}
+          title={t("apps.more")}
+          className={cn(
+            "group inline-flex items-center px-2 h-8 rounded-md text-muted-foreground transition-all duration-200 hover:text-foreground hover:bg-background/50",
+          )}
+        >
+          <ChevronDown
             className={cn(
-              "group inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
-              isActive
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground hover:bg-background/50",
+              "h-4 w-4 transition-transform duration-200",
+              showCollapsed && "rotate-180",
             )}
-          >
-            <span className="relative inline-flex shrink-0">
-              <ProviderIcon
-                icon={appIconName[app]}
-                name={appDisplayName[app]}
-                size={iconSize}
-              />
-              {BadgeIcon && (
-                <span
-                  className={cn(
-                    "absolute -bottom-0.5 -right-0.5 flex items-center justify-center rounded-[3px] border h-[11px] w-[11px]",
-                    isActive
-                      ? "bg-background border-border text-foreground"
-                      : "bg-muted border-background text-muted-foreground group-hover:bg-background group-hover:text-foreground",
-                  )}
-                  aria-hidden="true"
-                >
-                  <BadgeIcon
-                    className="h-[8px] w-[8px]"
-                    strokeWidth={2.5}
-                    style={
-                      badgeConfig?.offsetY
-                        ? { transform: `translateY(${badgeConfig.offsetY}px)` }
-                        : undefined
-                    }
-                  />
-                </span>
-              )}
-            </span>
-          </button>
-        );
-      })}
+          />
+        </button>
+      )}
+      {showCollapsed && collapsedApps.map(appButton)}
     </div>
   );
 }
