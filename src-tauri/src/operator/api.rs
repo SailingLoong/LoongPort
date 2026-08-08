@@ -32,9 +32,9 @@
 //!    401 的分类不能复用业务信封的解析，见 [`classify_401`]。
 //! 3. **`/groups/available` 返回的是平数组**，不是分页信封；`/keys` 才是分页
 //!    （`{items, total, page, page_size, pages}`）。两者形状不同，别复用同一个解析。
-//! 4. **`base_url` 必须归一到带 `/v1`**：sub2api 后台的 `api_base_url` 可能是空串
-//!    （bestapi.store 实测就是），而它前端的 codex 分支不做补 `/v1` 的处理。见
-//!    [`codex_base_url`]。
+//! 4. **`base_url` 按 CLI 分形状**：sub2api 后台的 `api_base_url` 可能是空串
+//!    （bestapi.store 实测），且 codex 要 `/v1` 结尾而 Claude Code 要不带 `/v1` 的站点根
+//!    （它自己拼 `/v1/messages`）。一律走 [`base_url_for`]，别直接用 `api_base_url`。
 
 use serde::{Deserialize, Serialize};
 
@@ -385,19 +385,54 @@ pub fn normalize_site_origin(input: &str) -> Result<String, AppError> {
     Ok(origin)
 }
 
-/// 由面板 origin 与后台声明的 `api_base_url` 算出 codex `base_url`（必须以 `/v1` 结尾）。
+/// 站点的 **API 根**：sub2api 的两套路由都挂在它下面（OpenAI 兼容在 `{root}/v1/…`，
+/// Anthropic 在 `{root}/v1/messages`）。这是「这个站点的接口地址」这一事实的唯一形态，
+/// 各 CLI 的 `base_url` 一律由它派生，见 [`base_url_for`]。
 ///
-/// 为什么不能直接用 `api_base_url`：它可能是空串（bestapi.store 实测），而 sub2api 前端
-/// 生成 codex 配置时**偏偏不对它做补 `/v1` 的处理**（grok / gemini 分支都做了），等于把
-/// 责任推给后台配置。所以这里自己兜：空则回落面板 origin，然后统一补 `/v1`。
-pub fn codex_base_url(site_origin: &str, api_base_url: &str) -> String {
+/// 两处要兜：
+/// - 后台声明的 `api_base_url` **可能是空串**（bestapi.store 实测）⇒ 回落面板 origin。
+/// - 历史上 `loongport_operator.api_base_url` 存的是**已经补过 `/v1` 的 codex 形态**
+///   ⇒ 这里把尾部 `/v1` 剥掉，让新旧两种存量行读出同一个根（所以不需要数据迁移）。
+pub fn site_api_root(site_origin: &str, api_base_url: &str) -> String {
     let base = api_base_url.trim();
     let root = if base.is_empty() { site_origin } else { base };
     let root = root.trim_end_matches('/');
-    if root.ends_with("/v1") {
-        root.to_string()
-    } else {
-        format!("{root}/v1")
+    // `strip_suffix` 而不是 `trim_end_matches`：后者会把 `/v1/v1` 一路剥光，
+    // 那是在替一个畸形配置做「猜」。只剥一段，剥不掉就原样。
+    root.strip_suffix("/v1").unwrap_or(root).to_string()
+}
+
+/// codex 形状的 `base_url`（必须以 `/v1` 结尾）。
+///
+/// sub2api 前端生成 codex 配置时**偏偏不对 `api_base_url` 做补 `/v1` 的处理**
+/// （grok / gemini 分支都做了），等于把责任推给后台配置。所以这里自己兜。
+pub fn codex_base_url(site_origin: &str, api_base_url: &str) -> String {
+    format!("{}/v1", site_api_root(site_origin, api_base_url))
+}
+
+/// Claude Code 形状的 `base_url`：就是站点 API 根，**不带 `/v1`**。
+///
+/// ⚠️ **带上 `/v1` 不是「多一段无害路径」，而是整条链路失效**：Claude Code 自己拼
+/// `/v1/messages` 与 `/v1/models`，base 再带一段就打成 `{root}/v1/v1/models` ⇒ 404 ⇒
+/// 它拉不到可用模型列表 ⇒ **不管用户选哪个模型**都报
+/// `Model 'X' is not in the list of available models`。这正是 2026-08-08 那个
+/// 「运营商档位选任何模型都说模型不存在，cc-switch 导入的同站点档位却能用」的真因。
+pub fn claude_base_url(site_origin: &str, api_base_url: &str) -> String {
+    site_api_root(site_origin, api_base_url)
+}
+
+/// 由站点信息算出**某个 CLI** 该用的 `base_url`。
+///
+/// 分派判据是「客户端自己拼不拼版本段」，不是平台名：
+/// - **Claude Code 自己拼** `/v1/…` ⇒ 给它站点根（[`claude_base_url`]）。
+/// - **codex / 生图 / 其余** 要求 base 自带 `/v1`（[`codex_base_url`]）。
+///
+/// 存在的意义是**让调用方无从选错**：`loongport_operator` 只有一列地址，此前三个调用点
+/// 都把它直接当 `ANTHROPIC_BASE_URL` 传，于是 claude 档位整片带上多余的 `/v1`。
+pub fn base_url_for(app_type: &AppType, site_origin: &str, api_base_url: &str) -> String {
+    match app_type {
+        AppType::Claude => claude_base_url(site_origin, api_base_url),
+        _ => codex_base_url(site_origin, api_base_url),
     }
 }
 
@@ -1142,6 +1177,73 @@ mod tests {
             codex_base_url("https://x.dev", "https://api.x.dev/v1/"),
             "https://api.x.dev/v1"
         );
+    }
+
+    /// claude 的 base **绝不能带 `/v1`**。
+    ///
+    /// 这是 2026-08-08 那个线上 bug 的回归钉：`loongport_operator.api_base_url` 存的是
+    /// codex 形态（带 `/v1`），三个调用点直接把它当 `ANTHROPIC_BASE_URL` 传 ⇒ Claude Code
+    /// 自己再拼一段 ⇒ `/v1/v1/models` 404 ⇒ 模型列表拉空 ⇒ **选任何模型**都报
+    /// 「不在可用列表里」。实测：`https://api.guazi.shop/v1/models` 200、
+    /// `https://api.guazi.shop/v1/v1/models` 404。
+    ///
+    /// 两种存量行（带 `/v1` 的旧行、不带的新行）必须读出同一个根 —— 所以不需要数据迁移。
+    #[test]
+    fn claude_base_url_never_carries_v1() {
+        for stored in [
+            "https://api.guazi.shop",
+            "https://api.guazi.shop/v1",
+            "https://api.guazi.shop/v1/",
+            "https://api.guazi.shop/",
+        ] {
+            assert_eq!(
+                claude_base_url("https://guazi.shop", stored),
+                "https://api.guazi.shop",
+                "存量形态 {stored} 必须读出同一个站点根"
+            );
+        }
+        // 后台声明为空时回落面板 origin（bestapi.store 实测那条路）。
+        assert_eq!(
+            claude_base_url("https://bestapi.store", ""),
+            "https://bestapi.store"
+        );
+    }
+
+    /// `/v1` 只剥一段：`/v1/v1` 是畸形配置，不替它猜。
+    #[test]
+    fn site_api_root_strips_at_most_one_v1() {
+        assert_eq!(
+            site_api_root("https://x.dev", "https://api.x.dev/v1/v1"),
+            "https://api.x.dev/v1"
+        );
+        // `apiv1` 结尾不是 `/v1`，不许误伤。
+        assert_eq!(
+            site_api_root("https://x.dev", "https://api.x.dev/apiv1"),
+            "https://api.x.dev/apiv1"
+        );
+    }
+
+    /// 分派闸：同一行存量数据，claude 拿到根、其余拿到带 `/v1` 的。
+    ///
+    /// 钉的是「调用方无从选错」这件事本身 —— 此前三个调用点各自传 `op.api_base_url`，
+    /// 任何一处漏改都会复发。
+    #[test]
+    fn base_url_for_splits_claude_from_the_v1_shaped_clients() {
+        const ORIGIN: &str = "https://guazi.shop";
+        const STORED: &str = "https://api.guazi.shop";
+
+        assert_eq!(
+            base_url_for(&AppType::Claude, ORIGIN, STORED),
+            "https://api.guazi.shop"
+        );
+        for app_type in [AppType::Codex, AppType::CodexImage, AppType::GrokBuild] {
+            assert_eq!(
+                base_url_for(&app_type, ORIGIN, STORED),
+                "https://api.guazi.shop/v1",
+                "{} 的 base 必须自带 /v1",
+                app_type.as_str()
+            );
+        }
     }
 
     fn group(platform: &str, status: &str, rate: f64) -> Group {

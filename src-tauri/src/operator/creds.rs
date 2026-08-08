@@ -7,7 +7,7 @@
 //! | `id` | 自增主键 |
 //! | `site_origin` | 面板 origin，如 `https://bestapi.store` |
 //! | `site_name` | 展示名，来自探测结果 |
-//! | `api_base_url` | 归一后的 codex `base_url`（带 `/v1`） |
+//! | `api_base_url` | 站点 **API 根**（不带 `/v1`）。各 CLI 的成品 `base_url` 由它派生，见 [`crate::operator::api::base_url_for`] |
 //! | `account_id` | 服务端的用户 id。**登录后才知道**，未登录时为 `NULL` |
 //! | `account_label` | 给人看的账号名（昵称优先，回落邮箱） |
 //! | `login_identifier` | 重登时预填进登录框的值。**给机器填表单用**，见字段注释 |
