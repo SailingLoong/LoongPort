@@ -71,6 +71,7 @@
 use std::collections::HashSet;
 
 use crate::app_config::AppType;
+use crate::claude_desktop_config::ONE_M_CONTEXT_MARKER;
 use crate::error::AppError;
 use crate::operator::api::{ApiKey, Client, Group};
 
@@ -834,6 +835,7 @@ const CODEX_MAIN_CANDIDATES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.
 ///
 /// - **claude**：按角色档位（opus/fable/main、sonnet/subagent、haiku）从候选里取第一个
 ///   命中的；取不到顺延低档。列表是 gpt 家族时按「opus↔sol、sonnet↔terra、haiku↔luna」对齐。
+///   挑出的模型名对支持 1M 的新一代模型附 `[1M]` 后缀声明（见 [`maybe_one_m`]）。
 /// - **codex**：主模型候选顺延（首位 `DEFAULT_MODEL` 命中即保持现状）。
 /// - **其它平台**：模型列表第一个文本模型。
 /// - **纯生图分组**（只有 `gpt-image-*`）：仍写最新的生图模型（复用作 `pick_model`）。
@@ -882,15 +884,20 @@ fn pick_claude_tier_models(models: &[String]) -> TierModels {
     let opus = opus.unwrap_or_else(|| main.clone());
     let sonnet = sonnet.unwrap_or_else(|| main.clone());
     let haiku = haiku.unwrap_or_else(|| main.clone());
+    // claude 平台档位声明 1M 上下文：对支持 1M 的模型附 `[1M]` 后缀。
+    //
+    // `[1M]` 是 Claude Code 认的本地能力声明（转发到上游前剥掉），
+    // codex 档位的 config.toml 不认后缀 —— 所以只在这里（claude 平台）加。
+    let one_m = |m: String| maybe_one_m(&m);
     TierModels {
         claude_roles: Some(ClaudeRoleModels {
-            opus: opus.clone(),
-            fable: opus,
-            sonnet: sonnet.clone(),
-            subagent: sonnet,
-            haiku,
+            opus: one_m(opus.clone()),
+            fable: one_m(opus),
+            sonnet: one_m(sonnet.clone()),
+            subagent: one_m(sonnet),
+            haiku: one_m(haiku),
         }),
-        main,
+        main: one_m(main),
     }
 }
 
@@ -900,6 +907,46 @@ fn first_hit(candidates: &[&str], models: &[String]) -> Option<String> {
         .iter()
         .find(|c| models.iter().any(|m| m == *c))
         .map(|c| c.to_string())
+}
+
+/// 该模型是否支持 1M 上下文 —— claude 平台档位给它附 `[1M]` 后缀声明。
+///
+/// 名单是**新一代旗舰模型**：Anthropic 官方这些模型统一 1M 窗口（opus-5 / sonnet-5 /
+/// haiku-4-5 / fable-5）、gpt-5.6 是 OpenAI 新一代（用户确认瓜子 api 支持 1M）、
+/// deepseek-v4 官网直连已确认（`vendor/deepseek.rs` 的 `PRO_1M`）。
+///
+/// ⚠️ `[1M]` 是**本地能力声明**：Claude Code 认它、转发到上游前剥掉
+/// （`proxy/model_mapper.rs::strip_one_m_suffix_for_upstream`）。声明错了不会报错、
+/// 只是让 Claude Code 按更大的窗口跑 —— 所以名单宁保守、别乱扩。
+///
+/// ⚠️ 只匹配**带子模型后缀**的形态（`gpt-5.6-sol` 等）：裸 `gpt-5.6` 不是可访问的
+/// 模型 id（运营商只认 luna / sol / terra 这些子模型），不该被当成「它支持 1M」。
+fn supports_one_m(model: &str) -> bool {
+    const ONE_M_MODEL_PREFIXES: &[&str] = &[
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+        // 这两个家族的裸名（`gpt-5.6` / `deepseek-v4`）**不是可访问的模型 id** ——
+        // 必须带子模型后缀（luna/sol/terra、pro/flash）。前缀带尾连字符，
+        // 只命中子模型形态，不会把裸名误判成「它支持 1M」。
+        "gpt-5.6-",
+        "deepseek-v4-",
+    ];
+    let m = model.trim();
+    ONE_M_MODEL_PREFIXES.iter().any(|p| m.starts_with(p))
+}
+
+/// claude 平台档位用：模型支持 1M 则附 `[1M]` 后缀，否则原样返回。
+///
+/// 后缀复用 [`crate::claude_desktop_config::ONE_M_CONTEXT_MARKER`]（小写 `[1m]`，
+/// Claude Code 匹配大小写不敏感）。
+fn maybe_one_m(model: &str) -> String {
+    if supports_one_m(model) {
+        format!("{model}{ONE_M_CONTEXT_MARKER}")
+    } else {
+        model.to_string()
+    }
 }
 
 /// 生图模型的「代」，用于在多个 `gpt-image-*` 里挑最新的那个。
@@ -1463,12 +1510,12 @@ mod tests {
             ])),
         );
         let roles = picked.claude_roles.expect("claude 必须有角色模型");
-        assert_eq!(picked.main, "claude-opus-5");
-        assert_eq!(roles.opus, "claude-opus-5");
-        assert_eq!(roles.fable, "claude-opus-5");
-        assert_eq!(roles.sonnet, "claude-sonnet-5");
-        assert_eq!(roles.subagent, "claude-sonnet-5");
-        assert_eq!(roles.haiku, "claude-haiku-4-5");
+        assert_eq!(picked.main, "claude-opus-5[1m]");
+        assert_eq!(roles.opus, "claude-opus-5[1m]");
+        assert_eq!(roles.fable, "claude-opus-5[1m]");
+        assert_eq!(roles.sonnet, "claude-sonnet-5[1m]");
+        assert_eq!(roles.subagent, "claude-sonnet-5[1m]");
+        assert_eq!(roles.haiku, "claude-haiku-4-5[1m]");
     }
 
     /// 列表是 gpt 家族时按「opus↔sol、sonnet↔terra、haiku↔luna」对齐（瓜子内部 api 的 GPT 分组）。
@@ -1485,10 +1532,10 @@ mod tests {
             ])),
         );
         let roles = picked.claude_roles.expect("claude 必须有角色模型");
-        assert_eq!(picked.main, "gpt-5.6-sol");
-        assert_eq!(roles.opus, "gpt-5.6-sol");
-        assert_eq!(roles.sonnet, "gpt-5.6-terra");
-        assert_eq!(roles.haiku, "gpt-5.6-luna");
+        assert_eq!(picked.main, "gpt-5.6-sol[1m]");
+        assert_eq!(roles.opus, "gpt-5.6-sol[1m]");
+        assert_eq!(roles.sonnet, "gpt-5.6-terra[1m]");
+        assert_eq!(roles.haiku, "gpt-5.6-luna[1m]");
     }
 
     /// 列表是国产家族（deepseek/kimi）时按 pro/flash 分档。
@@ -1503,10 +1550,10 @@ mod tests {
             ])),
         );
         let roles = picked.claude_roles.expect("claude 必须有角色模型");
-        assert_eq!(picked.main, "deepseek-v4-pro");
-        assert_eq!(roles.opus, "deepseek-v4-pro");
-        assert_eq!(roles.sonnet, "deepseek-v4-flash");
-        assert_eq!(roles.haiku, "deepseek-v4-flash");
+        assert_eq!(picked.main, "deepseek-v4-pro[1m]");
+        assert_eq!(roles.opus, "deepseek-v4-pro[1m]");
+        assert_eq!(roles.sonnet, "deepseek-v4-flash[1m]");
+        assert_eq!(roles.haiku, "deepseek-v4-flash[1m]");
     }
 
     /// 高档位取不到时主模型顺延到低档（用户指定：取不到就写相邻档位可取的模型）。
@@ -1514,10 +1561,10 @@ mod tests {
     fn claude_tier_falls_to_lower_tier_when_top_is_absent() {
         let picked = pick_tier_models(&AppType::Claude, Some(&models(&["claude-sonnet-5"])));
         let roles = picked.claude_roles.expect("claude 必须有角色模型");
-        assert_eq!(picked.main, "claude-sonnet-5");
-        assert_eq!(roles.opus, "claude-sonnet-5");
-        assert_eq!(roles.sonnet, "claude-sonnet-5");
-        assert_eq!(roles.haiku, "claude-sonnet-5");
+        assert_eq!(picked.main, "claude-sonnet-5[1m]");
+        assert_eq!(roles.opus, "claude-sonnet-5[1m]");
+        assert_eq!(roles.sonnet, "claude-sonnet-5[1m]");
+        assert_eq!(roles.haiku, "claude-sonnet-5[1m]");
     }
 
     /// codex：列表里有 `DEFAULT_MODEL` 保持现状；没有则顺延，不写一个不存在的模型。
@@ -1577,6 +1624,25 @@ mod tests {
 
     /// 端到端：瓜子 Anthropic 分组（模型列表全是 claude）→ 生成配置必须写 claude 模型。
     ///
+    /// `[1M]` 只声明给支持 1M 的新一代模型，且裸名（gpt-5.6 / deepseek-v4）不算数。
+    #[test]
+    fn one_m_suffix_only_for_supported_generations() {
+        assert_eq!(maybe_one_m("claude-opus-5"), "claude-opus-5[1m]");
+        assert_eq!(maybe_one_m("claude-sonnet-5"), "claude-sonnet-5[1m]");
+        assert_eq!(maybe_one_m("claude-haiku-4-5"), "claude-haiku-4-5[1m]");
+        assert_eq!(maybe_one_m("gpt-5.6-sol"), "gpt-5.6-sol[1m]");
+        assert_eq!(maybe_one_m("gpt-5.6-terra"), "gpt-5.6-terra[1m]");
+        assert_eq!(maybe_one_m("deepseek-v4-flash"), "deepseek-v4-flash[1m]");
+        // 旧代 / 裸名 / 其它家族：不声明。
+        assert_eq!(maybe_one_m("gpt-5.4"), "gpt-5.4");
+        assert_eq!(maybe_one_m("claude-sonnet-4-5"), "claude-sonnet-4-5");
+        assert_eq!(maybe_one_m("gemini-3-pro"), "gemini-3-pro");
+        // 裸 gpt-5.6 不是可访问的模型 id，不该被当成「支持 1M」。
+        assert!(!supports_one_m("gpt-5.6"));
+        assert!(!supports_one_m("deepseek-v4"));
+        assert!(supports_one_m("gpt-5.6-luna"));
+    }
+
     /// 这是「claude 档位写 gpt-5.6-sol」bug 的直接回归：挑模型 + 生成配置整条链路。
     #[test]
     fn claude_tier_flows_into_generated_settings_config() {
@@ -1598,11 +1664,12 @@ mod tests {
         )
         .expect("claude 必须有形状");
         let env = &cfg["env"];
-        assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-5");
-        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-5");
-        assert_eq!(env["ANTHROPIC_DEFAULT_FABLE_MODEL"], "claude-opus-5");
-        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5");
-        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5");
+        // 支持 1M 的 claude 新一代模型自动带 `[1m]` 后缀声明（转发时剥掉）。
+        assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-5[1m]");
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-5[1m]");
+        assert_eq!(env["ANTHROPIC_DEFAULT_FABLE_MODEL"], "claude-opus-5[1m]");
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5[1m]");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5[1m]");
         // 修复前这里是 gpt-5.6-sol —— 模型列表明明全 claude，档位却写 openai 模型。
         assert_ne!(env["ANTHROPIC_MODEL"], "gpt-5.6-sol");
     }
