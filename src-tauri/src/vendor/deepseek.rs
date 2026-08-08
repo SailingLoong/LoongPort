@@ -216,11 +216,11 @@ const FLASH_1M: &str = "deepseek-v4-flash[1M]";
 /// 翻译成 `supports1m`），我们自己不写判定逻辑。
 pub fn claude_role_models() -> crate::operator::provision::ClaudeRoleModels {
     crate::operator::provision::ClaudeRoleModels {
-        opus: PRO_1M,
-        fable: PRO_1M,
-        sonnet: FLASH_1M,
-        haiku: FLASH_1M,
-        subagent: FLASH_1M,
+        opus: PRO_1M.to_string(),
+        fable: PRO_1M.to_string(),
+        sonnet: FLASH_1M.to_string(),
+        haiku: FLASH_1M.to_string(),
+        subagent: FLASH_1M.to_string(),
     }
 }
 
