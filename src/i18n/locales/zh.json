@@ -905,7 +905,8 @@
     "grokbuild": "Grok Build",
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
-    "hermes": "Hermes"
+    "hermes": "Hermes",
+    "more": "更多"
   },
   "grokBuild": {
     "apiBackend": "API Backend",

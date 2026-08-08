@@ -17,6 +17,17 @@ interface ProviderIconProps {
   showFallback?: boolean; // 是否显示 fallback
 }
 
+/**
+ * 剥掉注入 SVG 里的 `<title>` —— 浏览器悬停时 SVG title 会作为**原生 tooltip**
+ * 显示，优先于外层 span 的 `title={name}`。于是图标左半边提示的是 SVG 里的
+ * 名字（如 openai.svg 的 `OpenAI`），而不是组件想给的供应商名（如「Codex 生图」）。
+ * 已确认 `extracted/` 里 56 个 SVG 带 `<title>`，统一剥掉是根修 ——
+ * 悬停提示交给外层 `title={name}` 一处负责。
+ */
+function stripSvgTitle(svg: string): string {
+  return svg.replace(/<title[^>]*>[\s\S]*?<\/title>/gi, "");
+}
+
 export const ProviderIcon: React.FC<ProviderIconProps> = ({
   icon,
   name,
@@ -28,7 +39,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
   // 获取内联 SVG 字符串
   const iconSvg = useMemo(() => {
     if (icon && !isUrlIcon(icon) && hasIcon(icon)) {
-      return getIcon(icon);
+      return stripSvgTitle(getIcon(icon));
     }
     return "";
   }, [icon]);
