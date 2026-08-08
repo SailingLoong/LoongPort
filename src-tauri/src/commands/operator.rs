@@ -397,7 +397,10 @@ async fn probe_and_save(
 ) -> Result<ProbeResult, AppError> {
     let site_origin = api::normalize_site_origin(input)?;
     let settings = api::probe_site(&site_origin).await?;
-    let api_base_url = api::codex_base_url(&site_origin, &settings.api_base_url);
+    // 存**站点 API 根**（不带 `/v1`），不是某个 CLI 的成品端点：各 CLI 形状不同
+    // （claude 要根、codex 要带 `/v1`），存成其中一种就必然被另一种误用 —— 那正是
+    // 存量 claude 档位整片带上多余 `/v1` 的来源。派生一律走 `api::base_url_for`。
+    let api_base_url = api::site_api_root(&site_origin, &settings.api_base_url);
 
     let site_name = if settings.site_name.trim().is_empty() {
         // 运营商可能没配站名。回落到主机名而不是留空 —— 空名字会让 UI 里那家没有标识。
@@ -926,12 +929,16 @@ async fn do_provision(
         // ⚠️ **claude 档位带角色模型**（`tier.roles`）：provision 按该分组模型列表挑出的
         // opus/sonnet/haiku/fable/subagent 各写各的，而不是全指向同一个主模型 ——
         // 否则 Anthropic 分组明明返回 claude 模型，档位却全写 gpt-5.6-sol。
+        //
+        // ⚠️ **端点走 `api::base_url_for` 而不是直接用 `op.api_base_url`**：claude 要不带
+        // `/v1` 的站点根，codex 要带。直接传那一列的后果见 [`api::claude_base_url`]。
+        let base_url = api::base_url_for(app_type, &op.site_origin, &op.api_base_url);
         let defaults = if matches!(app_type, AppType::Claude) {
             provision::settings_config_with_roles(
                 app_type,
                 &tier.api_key,
                 &display_name,
-                &op.api_base_url,
+                &base_url,
                 &tier.model,
                 tier.roles.clone(),
             )
@@ -940,7 +947,7 @@ async fn do_provision(
                 app_type,
                 &tier.api_key,
                 &display_name,
-                &op.api_base_url,
+                &base_url,
                 &tier.model,
             )
         };
@@ -1528,7 +1535,7 @@ async fn reset_tier_config_impl(
         &app_type,
         &api_key,
         &existing.name,
-        &op.api_base_url,
+        &api::base_url_for(&app_type, &op.site_origin, &op.api_base_url),
         &model,
     )
     .ok_or_else(|| {
