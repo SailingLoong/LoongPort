@@ -36,7 +36,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "publisher": "SailingLoong",
+    "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
@@ -46,6 +47,10 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "nsis": {
+        "installerHooks": "nsis/installer-hooks.nsh",
+        "languages": ["English", "SimpChinese", "TradChinese", "Japanese"]
+      },
       "wix": {
         "template": "wix/per-user-main.wxs"
       }

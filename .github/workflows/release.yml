@@ -353,8 +353,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # ⚠️ 两个参数都不能省，x64 与 arm64 同构：
           #
-          # `--bundles msi`：tauri.conf.json 的 bundle.targets 是 "all"，裸 build 会连 NSIS
-          # 一起打，而 NSIS 要额外下载工具链（见 windows-build.yml 的注释）。给人试用只需 msi。
+          # `--bundles nsis`：普通用户与应用内自动更新统一走 NSIS，避开 MSI 每次升级
+          # 都写 Config.Msi 回滚文件、从而被部分安全软件拦截的路径。
           #
           # `--target`：本仓用 per-user WiX 模板（src-tauri/wix/per-user-main.wxs，上游自带），
           # 在默认 target 目录布局下过不了 WiX 的 ICE 校验 ——
@@ -365,9 +365,9 @@ jobs:
           # 改这里要连带改 "Prepare Windows Assets" 的 $targetRoot —— 带 --target 的产物落在
           # target/<triple>/release/ 而不是 target/release/，只改一处等于白改。
           if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
-            pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
+            pnpm tauri build --target aarch64-pc-windows-msvc --bundles nsis
           } else {
-            pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi
+            pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
           }
 
       - name: Build Tauri App (Linux)
@@ -583,30 +583,30 @@ jobs:
           $targetRoot = if ($isArm64) { 'src-tauri/target/aarch64-pc-windows-msvc/release' } else { 'src-tauri/target/x86_64-pc-windows-msvc/release' }
           $assetSuffix = if ($isArm64) { '-arm64' } else { '' }
 
-          # MSI 安装器（+ `.sig`，仅在启用 updater 时才有，见下）
-          $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/msi') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($null -eq $msi) {
-            # 兜底：全局搜索 .msi
-            $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          # NSIS 安装器（+ `.sig`，供 updater 校验）。旧 MSI 用户第一次收到这个包时，
+          # installer hook 会按历史 UpgradeCode 卸载 per-user MSI，再继续安装；之后均为
+          # NSIS → NSIS 更新，不再经过 Config.Msi。
+          $installer = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/nsis') -Recurse -Include *-setup.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $installer) {
+            # 兜底：全局搜索 NSIS setup
+            $installer = Get-ChildItem -Path (Join-Path $targetRoot 'bundle') -Recurse -Include *-setup.exe -ErrorAction SilentlyContinue | Select-Object -First 1
           }
-          # 缺 MSI 对两个架构都是硬失败：原先 x64 只 Write-Warning，于是 release 会**静默**
+          # 缺 Setup 对两个架构都是硬失败：原先 x64 只 Write-Warning，于是 release 会**静默**
           # 少一个 Windows 安装包（fail-fast: false 之下其它平台照常发完，没人注意到）。
-          if ($null -eq $msi) {
-            throw "No Windows MSI installer found under $targetRoot/bundle"
+          if ($null -eq $installer) {
+            throw "No Windows NSIS installer found under $targetRoot/bundle"
           }
-          $dest = "LoongPort-$VERSION-Windows$assetSuffix.msi"
-          Copy-Item $msi.FullName (Join-Path release-assets $dest)
+          $dest = "LoongPort-$VERSION-Windows$assetSuffix-Setup.exe"
+          Copy-Item $installer.FullName (Join-Path release-assets $dest)
           Write-Host "Installer copied: $dest"
-          # `.sig` 缺失对两个架构都只是提示，不是失败：
-          # updater 插件**有意未启用**（见 src-tauri/src/lib.rs 那段说明 —— 上游端点会把用户
-          # 升级成 cc-switch），`createUpdaterArtifacts` 也没开，所以 `.sig` 现在必然不存在。
-          # 原先 arm64 分支在这里 throw ⇒ 那个 job 必然失败。启用 updater 后它会自动出现。
-          $sigPath = "$($msi.FullName).sig"
+          # `.sig` 缺失对两个架构都只是提示，不是失败：没有 release signing secret 时
+          # 仍保留可手动安装的 Setup，但 assemble-latest-json 不会把它放进自动更新清单。
+          $sigPath = "$($installer.FullName).sig"
           if (Test-Path $sigPath) {
             Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
             Write-Host "Signature copied: $dest.sig"
           } else {
-            Write-Host "○ 没有 .sig（签名密钥未配？updater 自 2026-08-04 起已启用），跳过"
+            Write-Host "○ 没有 .sig（未配置自动更新签名密钥），跳过"
           }
 
           # 绿色版（portable）：仅可执行文件打 zip（不参与 Updater）
@@ -627,7 +627,7 @@ jobs:
           # 路径复用上面的 $targetRoot，别再单独列一份候选路径：那份在 x64 加 `--target` 那次
           # 就已经过时了（还把空的 target/release/ 排在第一位）。同一事实两处写等着分叉。
           $exePath = Join-Path $targetRoot 'LoongPort.exe'
-          # 缺 exe 对两个架构都是硬失败，理由同 MSI：release notes 承诺了绿色版，
+          # 缺 exe 对两个架构都是硬失败：release notes 承诺了绿色版，
           # 静默少一个包比整个 job 红更难发现。
           if (-not (Test-Path $exePath)) {
             throw "Portable exe not found: $exePath"
@@ -781,8 +781,8 @@ jobs:
             ### 下载
 
             - **macOS**: `LoongPort-${{ github.ref_name }}-macOS.dmg`（推荐）或 `LoongPort-${{ github.ref_name }}-macOS.zip`（解压即用）
-            - **Windows (x86_64)**: `LoongPort-${{ github.ref_name }}-Windows.msi`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
-            - **Windows (ARM64)**: `LoongPort-${{ github.ref_name }}-Windows-arm64.msi`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
+            - **Windows (x86_64)**: `LoongPort-${{ github.ref_name }}-Windows-Setup.exe`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
+            - **Windows (ARM64)**: `LoongPort-${{ github.ref_name }}-Windows-arm64-Setup.exe`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
 
             > Linux 包暂未提供。
 
@@ -799,26 +799,9 @@ jobs:
             ```
 
             ---
-            ⚠️ **Windows：装新版本时若报「无法设置文件安全性 / could not set file security」**
-
-            少数装了安全软件（如腾讯电脑管家）的机器上，**覆盖安装**旧版本会失败：
-
-            ```
-            could not set file security for file 'D:\Config.Msi\xxxxxxx.rbf'  Error: 5
-            ```
-
-            那是安全软件拦住了安装程序**备份旧文件**的动作，**不是安装包坏了**。
-            两个办法，任选一个：
-
-            1. **先卸载旧版本再装**（设置 → 应用 → 卸载 LoongPort，然后双击新安装包）。
-               全新安装不需要备份旧文件，就不会被拦。**账号和配置不会丢** ——
-               它们存在用户目录下，卸载不动它们，装回来仍是登录状态。
-               <!-- 2026-08-04 在维护者的 Windows 机上实测过这条路：卸载 + 全新装
-                    退出码 0，且 Config.Msi 里一个 .rbf 都没写（全新装无旧文件可备份
-                    ⇒ 压根不触发那一步）；~/.loongport 前后都是 8 个文件。 -->
-            2. **用绿色版**（上面的 `-Portable.zip`），解压即用，不经过 Windows 安装程序。
-
-            > 首次安装的用户不会遇到这个 —— 它只在覆盖旧版本时出现。
+            > 从旧 MSI 版首次升级时，Setup 会先卸载旧安装登记再安装新版；账号和配置位于
+            > 用户目录，不会被删除。完成这次迁移后，后续自动更新均走 NSIS，不再使用
+            > `Config.Msi` 回滚目录。
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -869,9 +852,9 @@ jobs:
               *.tar.gz)
                 # 视为 macOS updater artifact
                 mac_url="$url"; mac_sig="$sig_content";;
-              *-Windows-arm64.msi)
+              *-Windows-arm64-Setup.exe)
                 win_arm64_url="$url"; win_arm64_sig="$sig_content";;
-              *-Windows.msi)
+              *-Windows-Setup.exe)
                 win_x64_url="$url"; win_x64_sig="$sig_content";;
               *-Linux-arm64.AppImage|*-Linux-arm64.appimage)
                 linux_arm64_url="$url"; linux_arm64_sig="$sig_content";;

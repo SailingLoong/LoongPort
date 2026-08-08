@@ -51,7 +51,7 @@
 | CLI | codex · claude | gemini / grok（`platform_map` 映射表已建全，缺各自的配置写入形状） |
 | 平台 | macOS · Windows | Linux |
 
-**Windows 自 2026-08-03 起可用**（MSI 已在维护者机器上打出并验证）。
+**Windows 自 2026-08-03 起可用**（安装包已在维护者机器上打出并验证）。
 
 **ChatGPT 自动退出/重开两个平台都已实现**（Windows 于 2026-08-04 补完）。
 但**手段与语义不同，写对外文案时别当成完全等价**：
@@ -139,7 +139,7 @@ rm -rf "$(dirname "$STAGE")"
 | 平台 | 归档目录 | 产物 |
 |---|---|---|
 | macOS | `~/下载` | `LoongPort.app`（整个 .app 目录） |
-| Windows | `D:\`（D 盘根） | `LoongPort_<ver>_x64.msi` / `.exe` |
+| Windows | `D:\`（D 盘根） | `LoongPort_<ver>_x64-setup.exe` / Portable `.zip` |
 
 ```bash
 # mac：把 .app 复制到 ~/下载
