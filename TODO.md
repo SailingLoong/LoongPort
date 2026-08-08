@@ -7,7 +7,7 @@
 
 ## 一键从 cc-switch 同步配置与数据（2026-08-05 记，2026-08-07 **导入时合并已落地**）
 
-> **已完成（2026-08-07，`feat/cc-switch-import`）**：`operator/cc_switch_import.rs` 实现
+> **已完成（2026-08-07，`feat/cc-switch-import`）**：`relay/cc_switch_import.rs` 实现
 > 覆盖式导入（复用 `import_sql_string_preserving`：备份 + 原子替换 + 迁移 + 版本校验），
 > 三个入口（设置页按钮 / LoongPort 图标旁按钮 / 首启弹窗）共用
 > `CcSwitchImportDialog`。源库只读打开、绝不动 cc-switch 那边。**导入时**的冲突归属
@@ -15,10 +15,10 @@
 > 「已手动维护」判定不变。
 >
 > **剩下的一半是「provision 时收编」**（direction 2，维护者定了下轮做）：导入**后**新加
-> 运营商、provision 建出的新档位与**已导入的 cc-switch 条目**同指纹时，把那条 cc-switch
+> 中转站、provision 建出的新档位与**已导入的 cc-switch 条目**同指纹时，把那条 cc-switch
 > 记录收编（删 + 报告）。实现要点见下方「冲突归属规则」第二段；本轮有意不做 ——
 > provision 生成的 key 是 `LoongPort/<账号>/<平台>/<分组>` 命名，与用户手工配的 sk 撞上
-> 概率低，且要动 operator/vendor 的 provision 热路径。
+> 概率低，且要动 relay/vendor 的 provision 热路径。
 
 **what**：cc-switch 老用户装上 LoongPort 后看到的是**全空的**，得把 provider、MCP、
 skills、prompt 一件件重新配。两边的数据目录完全隔离：
@@ -43,7 +43,7 @@ cc-switch 的 fork，**实际盘子里很大一部分人本来就是 cc-switch �
 
 1. **先定范围：哪些表该搬、哪些不该。**（**需要维护者决策**，这是本项唯一的真问题）
    - 该搬：provider 配置、MCP、skills、prompt —— 用户自己攒的东西。
-   - **不该搬**：LoongPort 自己的表（`loongport_*` / operator 凭据 / `device-id`），
+   - **不该搬**：LoongPort 自己的表（`loongport_*` / relay 凭据 / `device-id`），
      cc-switch 里压根没有。
    - **要单独想**：cc-switch 里那些**指向别家中转站**的 provider。照搬进来会与
      LoongPort 托管的档位混在一列里，而两者语义不同（见 CLAUDE.md「§什么时候可以不复用」
@@ -63,14 +63,14 @@ cc-switch 的 fork，**实际盘子里很大一部分人本来就是 cc-switch �
 ### 冲突归属规则（2026-08-05 维护者定的，本项的核心语义）
 
 **规则**：同一把 key 若既存在于导入进来的 cc-switch 配置里、又属于 LoongPort 管的
-运营商 / 官网直连模块，则**归 LoongPort 那一侧维护**（运营商 / DeepSeek 官网模块），
+中转站 / 官网直连模块，则**归 LoongPort 那一侧维护**（中转站 / DeepSeek 官网模块），
 不留成两条并存的记录。两个方向都适用：
 
 - **导入时**：cc-switch 那条与已有托管项撞了 ⇒ 托管项胜，那条不导入。✅ **2026-08-07 已落地**
-  （`operator/cc_switch_import.rs`，指纹判据见下）。
-- **导入后新加运营商**（注册 / 登录 / provision）：新建的 key 与已导入的 cc-switch 条目
-   撞了 ⇒ 转由运营商模块维护，把那条 cc-switch 记录收编掉。⏳ **下轮做** —— 挂点：
-   operator provision 的 `save_provider`（`commands/operator.rs:1008`）与 vendor 的
+  （`relay/cc_switch_import.rs`，指纹判据见下）。
+- **导入后新加中转站**（注册 / 登录 / provision）：新建的 key 与已导入的 cc-switch 条目
+   撞了 ⇒ 转由中转站模块维护，把那条 cc-switch 记录收编掉。⏳ **下轮做** —— 挂点：
+   relay provision 的 `save_provider`（`commands/relay.rs:1008`）与 vendor 的
    （`commands/vendor.rs:543`）写档位之前，扫同 `(origin, sk)` 指纹的**非托管**条目收编之。
 
 **为什么不能并存**：两条指向同一个上游的记录，用户看到的是重复档位，
@@ -115,7 +115,7 @@ Claude 是 JSON、Gemini 又一套）。所以：
 
 ## 低余额的**系统通知**（2026-08-04 记，维护者定了「后面要做」）
 
-**what**：余额低于 $5 时只在**应用内**提醒（`OperatorRow` 里那个琥珀色叹号）。
+**what**：余额低于 $5 时只在**应用内**提醒（`RelayRow` 里那个琥珀色叹号）。
 **还没有桌面系统通知** —— 用户不打开 app 就看不到。
 
 **why 现在不做**：不是做不了，是**这一块的产品语义还没定**。它不是「加个 API 调用」，
@@ -135,19 +135,19 @@ Claude 是 JSON、Gemini 又一套）。所以：
 1. 定上面三个语义（**需要维护者决策**，客户端这边定不了）
 2. 装 `tauri-plugin-notification`（`src-tauri/Cargo.toml` + `src-tauri/capabilities/`
    加权限，macOS 首次调用会弹系统授权框 —— 那个体验也要维护者过一眼）
-3. 触发点在余额刷新那条链路上（`src/components/operator/OperatorSection.tsx` 里
-   拉 `balances` 的地方），判据**复用** `components/operator/lowBalance.ts` 的
+3. 触发点在余额刷新那条链路上（`src/components/relay/RelaySection.tsx` 里
+   拉 `balances` 的地方），判据**复用** `components/relay/lowBalance.ts` 的
    `isLowBalance` —— 别再写一份阈值比较（那会变成两个可能不同步的真相源）
 4. 去重状态要落库还是只在内存（app 重启后重新提醒可以接受吗）—— 跟着第 1 步的答案定
 
-**⚠️ 作用域与应用内提醒一致**：只对中转站（operator）行，不对官网直连（vendor）行。
+**⚠️ 作用域与应用内提醒一致**：只对中转站（relay）行，不对官网直连（vendor）行。
 理由见 `tests/lib/lowBalanceScopeContract.test.ts` 的文档（两侧余额币种与类型都不同）。
 
 ---
 
 ## 匿名统计的**接收端还没建**（2026-08-04 记，`stats.rs` 一直指着这条却没人写下来）
 
-**what**：`src-tauri/src/operator/stats.rs` 的 `ENDPOINT` 还是占位
+**what**：`src-tauri/src/relay/stats.rs` 的 `ENDPOINT` 还是占位
 `https://stats.invalid/v1/ping`（`.invalid` 是 RFC 2606 保留 TLD，万一判断失灵也
 打不到真实主机）。客户端这一侧**已经完整可用**：载荷、假名化、失败静默、首启告知
 弹窗、设置里的开关都在，只差一个接收端。
@@ -202,7 +202,7 @@ Claude 是 JSON、Gemini 又一套）。所以：
    （承担影响其它机器的后果），还是自动探活（承担成本与误判）**需要维护者决策**
 2. 若走「显式换一把」：加 `vendor_reset_key` 命令 —— 清 `loongport_vendor.api_key`
    后复用 `provision_impl`（它第 2 步会因为空值而走建新的那条路，**不必新写建 key 逻辑**）
-3. 前端在 `src/components/operator/VendorRow.tsx` 加入口，文案要说清「会让其它机器
+3. 前端在 `src/components/relay/VendorRow.tsx` 加入口，文案要说清「会让其它机器
    上的这把 key 失效」
 4. 若走「自动探活」：先确认 DeepSeek 有没有便宜的 key 校验端点
    （DeepSeek 是闭源的，拿不到源码当契约 —— 只能实测）
@@ -279,7 +279,7 @@ cargo tree -i rand@0.7.3 --edges normal --target all
 `journal_mode = WAL`**。rollback 模式下写者持 EXCLUSIVE 锁会**直接阻塞读者**；
 WAL 模式下读写可并行。
 
-**why 现在才成为问题**：生图 MCP（`operator/imagegen_mcp.rs`，2026-08-05 加）是
+**why 现在才成为问题**：生图 MCP（`relay/imagegen_mcp.rs`，2026-08-05 加）是
 **第一份从第二个进程读这个库**的代码。它已经做对了两件事 —— 以 `SQLITE_OPEN_READ_ONLY`
 打开（绝不拿写锁）、依赖 rusqlite 默认的 5s `busy_timeout`。但主程序一次**长写**
 （迁移 / 备份 / 启动时的 `incremental_vacuum`）仍可能让它等超 5s ⇒ MCP 启动报
@@ -355,7 +355,7 @@ sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store`
 映射（opus/fable → pro、sonnet/haiku/subagent → flash）也在同一处。
 ⇒ **模型改名或新增档位，只能靠发版**。
 
-**why 现在这样**：远端配置那套（`operator/remote_config.rs`）已经跑着了，
+**why 现在这样**：远端配置那套（`relay/remote_config.rs`）已经跑着了，
 但它当前的 schema 只有三个键（`sponsors` / `affCodes` / `promoCodes`），
 不含档位配置。本轮改的是模型映射的**取值**，把整套配置搬去远端是另一件事，
 按尺子2 不塞进这次。
@@ -383,7 +383,7 @@ sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store`
 
 ## `is_user_edited` 不覆盖 hermes / openclaw / opencode（2026-08-05 记，加 vendor 编辑功能时暴露）
 
-**what**：`operator/provision.rs` 的 `api_key_location` 只认 codex / codex-image /
+**what**：`relay/provision.rs` 的 `api_key_location` 只认 codex / codex-image /
 claude / claude-desktop / gemini。剩下三个平台落到 `_ => None` ⇒ 对它们：
 
 | 受影响的能力 | 症状 |
@@ -408,7 +408,7 @@ sk 位置表达不了：
 | opencode | `options.apiKey`（两层，且 `options` 嵌在 provider 名字下） | 同上 `:534` |
 
 补它要把那个返回类型改成能表达「顶层」与「多层路径」的形状（如 `&[&str]` 路径），
-**连带动 `patch_api_key` / `extract_api_key` 的签名与 operator 侧全部调用方** ——
+**连带动 `patch_api_key` / `extract_api_key` 的签名与 relay 侧全部调用方** ——
 属「借清债名义翻修无关模块」，不在加 vendor 编辑功能这一轮的手伸到的范围内。
 
 **how-to-repay**：

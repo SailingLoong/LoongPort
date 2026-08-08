@@ -5,7 +5,7 @@ import type { AppId } from "./types";
 /**
  * 一个已添加的官网直连账号（`loongport_vendor` 的一行）。
  *
- * **只读本地、不发网络**（与 `listOperators` 同一条契约）—— 首屏不卡在网络上。
+ * **只读本地、不发网络**（与 `listRelays` 同一条契约）—— 首屏不卡在网络上。
  * 余额走 `vendorApi.balance`，由前端渲染完再异步填。
  *
  * ⚠️ **不含 `authToken` 与 `apiKey`** —— 凭据不出 Rust 侧。给前端明文 sk 只会让
@@ -65,7 +65,7 @@ export interface VendorAccountRow {
    * ⚠️ **按平台算，不是整行一个值** —— 一行背后六条 provider 记录各自能被独立编辑。
    *
    * `null` = 判不了（没 provision 过 / 这个平台不适用）。**`null` 时不显示标记** ——
-   * 与 operator 的 `TierInfo.userEdited` 同一条原则：不知道就别断言。
+   * 与 relay 的 `TierInfo.userEdited` 同一条原则：不知道就别断言。
    *
    * 后端不存这个标记，靠与默认配置整份比对现算 ⇒ 用户把配置改回默认，标记会自动消失。
    */
@@ -180,7 +180,7 @@ export const vendorApi = {
    * （没有钱包 / 金额解不动），**不是 0**。
    *
    * 失败要 catch 掉并把那一行留空，不要弹 toast —— 余额是附加信息
-   * （与 operator 侧同一条纪律）。
+   * （与 relay 侧同一条纪律）。
    */
   balance: (rowId: number): Promise<string | null> =>
     invoke("vendor_balance", { rowId }),

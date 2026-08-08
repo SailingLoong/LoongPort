@@ -7,11 +7,11 @@
 //! 就是抢占上游的号段。撞上之后的后果是**静默数据损坏**，不是报错：
 //!
 //! ```text
-//! 用户库 stamp = 17（我们建 operator 表时写的）
+//! 用户库 stamp = 17（我们建 relay 表时写的）
 //!   ↓ 上游发布它自己的 v17（比如加一张表）
 //! merge 上游 → schema.rs 里 `17 =>` 分支冲突，无论怎么解都不对：
 //!   - 保我们的 ⇒ 上游那张表永远不建
-//!   - 保上游的 ⇒ 我们的 operator 表永远不建
+//!   - 保上游的 ⇒ 我们的 relay 表永远不建
 //!   - 两个都放 ⇒ 已经 stamp 到 17 的库跳过整段，两张表都不建
 //! 而 `user_version` 显示「已是最新」，用户看不到任何异常，
 //! 直到碰到用那张表的功能才崩。
@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 3;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 4;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -115,8 +115,8 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
             // （它跑在迁移之前）。它真正服务的是「上游那套表已在、我们的还没建」
             // 那种库，即从 cc-switch 迁过来的用户。
             0 => {
-                log::info!("LoongPort 数据迁移 v0 → v1（运营商凭据 + 官网直连账号两张表）");
-                crate::operator::creds::create_table(conn)?;
+                log::info!("LoongPort 数据迁移 v0 → v1（中转站凭据 + 官网直连账号两张表）");
+                crate::relay::creds::create_table(conn)?;
                 crate::vendor::creds::create_table(conn)?;
                 set_version(conn, 1)?;
             }
@@ -137,6 +137,12 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 );
                 add_user_edited_column(conn)?;
                 set_version(conn, 3)?;
+            }
+            // v3 → v4：`loongport_operator` 改名成 `loongport_relay`（术语统一到「中转站」）。
+            3 => {
+                log::info!("LoongPort 数据迁移 v3 → v4（loongport_operator → loongport_relay）");
+                rename_operator_table_to_relay(conn)?;
+                set_version(conn, 4)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -178,7 +184,7 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
 /// 迁移跑在 `Database::init` 里，那时 `AppState` 还不存在（`ProviderService` 要它）。
 /// 这也是上游全部迁移的做法。
 fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppError> {
-    use crate::operator::provision;
+    use crate::relay::provision;
 
     // ⚠️ **`providers` 表不存在时直接返回**，不报错。
     //
@@ -220,7 +226,7 @@ fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppErro
 
     let mut moved = 0usize;
     for (id, name, settings_json) in rows {
-        if !crate::operator::is_managed(&id) {
+        if !crate::relay::is_managed(&id) {
             continue;
         }
         let Ok(settings) = serde_json::from_str::<serde_json::Value>(&settings_json) else {
@@ -329,6 +335,86 @@ fn add_user_edited_column(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 把 `loongport_operator` 改名成 `loongport_relay`（连同它的唯一索引）。
+///
+/// 纯改名，不动任何一行数据 —— 「运营商」这个词整仓统一成了「中转站 / relay」，
+/// 表名是最后一处旧词。
+///
+/// ## ⚠️ 必须先删掉那张刚建出来的空表
+///
+/// `create_tables_on_conn` 跑在迁移**之前**，它已经按新形态
+/// `CREATE TABLE IF NOT EXISTS loongport_relay` 建了一张**空表**。此时老库里
+/// `loongport_operator` 还在 ⇒ 直接 `RENAME TO loongport_relay` 会撞
+/// 「table already exists」，迁移失败、app 起不来。
+///
+/// 所以顺序是：老表在 ⇒ 先删掉那张空的新表，再把老表改过去。
+/// **删之前断言它确实是空的** —— 真有数据说明遇到了没预料到的库形态
+/// （两张表同时有行），那时宁可报错也不能悄悄删掉用户的登录态。
+///
+/// ## 索引要显式重建
+///
+/// SQLite 的 `ALTER TABLE ... RENAME TO` 会把索引带过去，但**不改索引的名字**
+/// ⇒ 改完仍叫 `idx_loongport_operator_site_account`。留着它不会出错（唯一约束照旧
+/// 生效），但下一个人 `.schema` 一看就会以为还有张 operator 表。删掉重建成新名字。
+///
+/// ## 幂等
+///
+/// 老表不存在（全新库、或迁移重跑）时整个函数空转。
+fn rename_operator_table_to_relay(conn: &Connection) -> Result<(), AppError> {
+    let has_old: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='loongport_operator'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_old == 0 {
+        return Ok(());
+    }
+
+    let has_new: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='loongport_relay'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_new > 0 {
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM loongport_relay", [], |r| r.get(0))
+            .unwrap_or(0);
+        if rows > 0 {
+            return Err(AppError::Database(
+                "loongport_operator 与 loongport_relay 同时有数据，无法自动改名 —— \
+                 请备份数据库后联系维护者"
+                    .to_string(),
+            ));
+        }
+        conn.execute("DROP TABLE loongport_relay", [])
+            .map_err(|e| AppError::Database(format!("删除空的 loongport_relay 表失败: {e}")))?;
+    }
+
+    conn.execute(
+        "ALTER TABLE loongport_operator RENAME TO loongport_relay",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("loongport_operator 改名失败: {e}")))?;
+
+    conn.execute(
+        "DROP INDEX IF EXISTS idx_loongport_operator_site_account",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("删除旧的中转站唯一索引失败: {e}")))?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_loongport_relay_site_account
+         ON loongport_relay(site_origin, account_id)",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("重建 loongport_relay 索引失败: {e}")))?;
+
+    Ok(())
+}
+
 /// 把上一版那个 settings 键里记的「当前生图档位」变成新栏的 `is_current`。
 ///
 /// ## 为什么必须做（实测抓出来的缺口）
@@ -414,7 +500,7 @@ mod tests {
     }
 
     fn insert_codex_tier(conn: &Connection, id: &str, name: &str, model: &str) {
-        let settings = crate::operator::provision::settings_config_for(
+        let settings = crate::relay::provision::settings_config_for(
             &crate::app_config::AppType::Codex,
             "sk-test",
             name,
@@ -457,7 +543,7 @@ mod tests {
             &conn,
             "loongport-bbbbbbbbbbbbbbbb",
             "聊天档",
-            crate::operator::provision::DEFAULT_MODEL,
+            crate::relay::provision::DEFAULT_MODEL,
         );
 
         apply(&conn).expect("迁移");
@@ -621,7 +707,7 @@ mod tests {
 
     /// 旧键指向一个**已经不存在**的档位时，不该设错任何一条的 `is_current`。
     ///
-    /// 那个档位可能被删了（运营商下架分组 / 用户删了账号），而旧键不会跟着清。
+    /// 那个档位可能被删了（中转站下架分组 / 用户删了账号），而旧键不会跟着清。
     #[test]
     fn a_dangling_old_key_selects_nothing() {
         let conn = mem();
@@ -707,7 +793,7 @@ mod tests {
         apply(&conn).expect("迁移");
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
         // 两张表都得建出来。
-        for table in ["loongport_operator", "loongport_vendor"] {
+        for table in ["loongport_relay", "loongport_vendor"] {
             let n: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -756,6 +842,120 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has, 1, "迁移后 providers 必须有 user_edited 列");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+    }
+
+    /// ⭐ v3→v4 把 `loongport_operator` 改名成 `loongport_relay`，**一行数据都不能丢**。
+    ///
+    /// ⚠️ 这条特意先跑 `create_tables_on_conn` 再造老表 —— 复现真实启动顺序：建表在迁移
+    /// **之前**，所以迁移开跑时新名字的空表已经存在。少了这一步，`RENAME TO` 撞
+    /// 「table already exists」的那个坑测不出来。
+    #[test]
+    fn v3_to_v4_renames_the_operator_table_and_keeps_its_rows() {
+        let conn = mem();
+        // 建表先跑（新形态：loongport_relay 空表），与真实启动顺序一致。
+        crate::Database::create_tables_on_conn(&conn).unwrap();
+
+        // 再造一张停在 v3 的老库该有的 loongport_operator，塞两行。
+        conn.execute(
+            "CREATE TABLE loongport_operator (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site_origin TEXT NOT NULL,
+                site_name TEXT NOT NULL DEFAULT '',
+                api_base_url TEXT NOT NULL DEFAULT '',
+                account_id INTEGER,
+                account_label TEXT NOT NULL DEFAULT '',
+                login_identifier TEXT NOT NULL DEFAULT '',
+                auth_token TEXT NOT NULL DEFAULT '',
+                refresh_token TEXT,
+                token_expires_at INTEGER,
+                sort_index INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_loongport_operator_site_account
+             ON loongport_operator(site_origin, account_id)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO loongport_operator (site_origin, account_label, auth_token)
+             VALUES ('https://a.example', '甲', 'tok-a'), ('https://b.example', '乙', 'tok-b')",
+            [],
+        )
+        .unwrap();
+
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 3).unwrap();
+
+        apply(&conn).unwrap();
+
+        // 老表没了，新表在。
+        let old: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='loongport_operator'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, 0, "改完不该还留着 loongport_operator");
+
+        // 两行原样在，凭据没被那张空表冲掉。
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT site_origin, auth_token FROM loongport_relay ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("https://a.example".to_string(), "tok-a".to_string()),
+                ("https://b.example".to_string(), "tok-b".to_string()),
+            ],
+            "改名是纯改名 —— 行内容必须原样保留"
+        );
+
+        // 索引跟着改了名（RENAME 不改索引名，得显式重建）。
+        let idx: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_loongport_%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            idx.contains(&"idx_loongport_relay_site_account".to_string()),
+            "新索引该在：{idx:?}"
+        );
+        assert!(
+            !idx.contains(&"idx_loongport_operator_site_account".to_string()),
+            "旧索引名该没了：{idx:?}"
+        );
+
+        // 唯一约束还管用（同站同账号插不进第二条）。
+        conn.execute(
+            "INSERT INTO loongport_relay (site_origin, account_id) VALUES ('https://c.example', 7)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO loongport_relay (site_origin, account_id) \
+                 VALUES ('https://c.example', 7)",
+                [],
+            )
+            .is_err(),
+            "去重索引重建后必须仍然生效"
+        );
+
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 

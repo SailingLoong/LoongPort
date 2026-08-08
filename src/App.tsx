@@ -88,9 +88,9 @@ import {
 import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
-import { OperatorSection } from "@/components/operator/OperatorSection";
-import { StatsNoticeDialog } from "@/components/operator/StatsNoticeDialog";
-import { useCodexSwitchGuard } from "@/components/operator/useCodexSwitchGuard";
+import { RelaySection } from "@/components/relay/RelaySection";
+import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
+import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
 import { McpIcon } from "@/components/BrandIcons";
@@ -175,7 +175,7 @@ const getInitialView = (): View => {
   if (saved && VALID_VIEWS.includes(saved)) {
     return saved;
   }
-  // 首启落 providers —— 运营商行就在它顶部（加站 / 登录 / 获取密钥 / 切档位
+  // 首启落 providers —— 中转站行就在它顶部（加站 / 登录 / 获取密钥 / 切档位
   // 全在那儿）。2026-08-04 之前默认落已删除的 LoongPort 独立页。
   return "providers";
 };
@@ -993,12 +993,12 @@ function App() {
                     transition={{ duration: 0.15 }}
                     className="space-y-4"
                   >
-                    {/* LoongPort 的「运营商 × 分组」区，装在手工 provider 列表**上方**。
-                        它自带全部状态（见 OperatorSection 的文档）—— 这里只挂一行，
-                        不把 operator 的逻辑摊进这个上游文件。
+                    {/* LoongPort 的「中转站 × 分组」区，装在手工 provider 列表**上方**。
+                        它自带全部状态（见 RelaySection 的文档）—— 这里只挂一行，
+                        不把 relay 的逻辑摊进这个上游文件。
                         它内部已按「中转站 / 官方 API」两大块渲染（各自带区块头与
                         区块内的添加入口），空时也各自显示区块内的占位。 */}
-                    <OperatorSection appId={activeApp} />
+                    <RelaySection appId={activeApp} />
 
                     {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口仍是顶栏 +。
                         生图页（codex-image）保持改动前的形态，不套三大块布局。 */}
@@ -1228,7 +1228,7 @@ function App() {
                       已经各有一个（`OFFICIAL_WEBSITE`）——同一个目的地不必三个入口。
 
                       2026-08-04：原来指向已删除的 LoongPort 独立页，现在回 providers
-                      —— 那本来就是主页（运营商行也在它顶部）。 */}
+                      —— 那本来就是主页（中转站行也在它顶部）。 */}
                   <button
                     type="button"
                     onClick={() => setCurrentView("providers")}

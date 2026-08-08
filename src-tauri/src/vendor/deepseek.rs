@@ -19,7 +19,7 @@
 //! 实测裸 curl UA、无 cookie、不带那五个 `x-client-*` 头照样 200 ⇒ 用普通
 //! HTTP 客户端直连即可，WebView 只用于登录那一步。
 //!
-//! ⚠️ **不要照抄 `operator::login::WEBVIEW_USER_AGENT` 的「必须写死」那条理由** ——
+//! ⚠️ **不要照抄 `relay::login::WEBVIEW_USER_AGENT` 的「必须写死」那条理由** ——
 //! 那是因为 **sub2api 有会话绑定**（token 里带 `SHA256(clientIP + UA)`，可选特性、
 //! 默认关）。DeepSeek 没有这个约束。
 
@@ -31,12 +31,12 @@ use crate::vendor::{VendorAccount, VendorBalance, VendorError, VendorKey};
 
 /// 凭据回传用的自定义 scheme。
 ///
-/// ⚠️ **与 operator 那条（`loongport-creds`）不同名**：两个登录窗可能同时开着，
+/// ⚠️ **与 relay 那条（`loongport-creds`）不同名**：两个登录窗可能同时开着，
 /// 同名会让一边的回传被另一边的 `on_navigation` 认走 —— 而它们的 payload 形状不同
 /// （这边多 `account_id` / `login_identifier`），认错就是解析失败。
 const CREDS_SCHEME: &str = "loongport-vendor-creds";
 
-/// 登录窗的 label。⚠️ **不得与 operator 的 `loongport-login` 重名** ——
+/// 登录窗的 label。⚠️ **不得与 relay 的 `loongport-login` 重名** ——
 /// label 是 Tauri 的窗口唯一键，撞名会让 `build()` 直接失败。
 pub const LOGIN_WINDOW_LABEL: &str = "loongport-vendor-login";
 
@@ -183,9 +183,9 @@ const FLASH_1M: &str = "deepseek-v4-flash[1M]";
 
 /// Claude 系各模型角色分别用哪一档。
 ///
-/// ## 为什么这里要分档，而运营商那条不分
+/// ## 为什么这里要分档，而中转站那条不分
 ///
-/// 运营商的分组是「一个 sk 一档价」，所以 [`settings_config_for`] 默认让三个别名
+/// 中转站的分组是「一个 sk 一档价」，所以 [`settings_config_for`] 默认让三个别名
 /// 全指主模型（那里的注释写了理由）。**DeepSeek 是官网直连**，`pro` 与 `flash`
 /// 是官方真实的两档模型、两个价格 ⇒ 按角色分档是有意义的，把便宜活派给便宜那档。
 ///
@@ -214,8 +214,8 @@ const FLASH_1M: &str = "deepseek-v4-flash[1M]";
 /// 1M 上下文，默认配置就该声明它 —— 复用 cc-switch 的 `[1M]` 后缀机制
 /// （Claude Code 认后缀、Claude Desktop 由 `suggested_claude_desktop_routes`
 /// 翻译成 `supports1m`），我们自己不写判定逻辑。
-pub fn claude_role_models() -> crate::operator::provision::ClaudeRoleModels {
-    crate::operator::provision::ClaudeRoleModels {
+pub fn claude_role_models() -> crate::relay::provision::ClaudeRoleModels {
+    crate::relay::provision::ClaudeRoleModels {
         opus: PRO_1M.to_string(),
         fable: PRO_1M.to_string(),
         sonnet: FLASH_1M.to_string(),
@@ -405,13 +405,13 @@ fn round_decimal_string(raw: &str) -> Option<String> {
 
 /// 鉴权只要 Bearer（见模块文档），所以是个普通 HTTP 客户端。
 ///
-/// UA 复用 `operator::login::WEBVIEW_USER_AGENT`（现在是按平台的 `cfg` 常量）。
+/// UA 复用 `relay::login::WEBVIEW_USER_AGENT`（现在是按平台的 `cfg` 常量）。
 /// ⚠️ **别照抄 sub2api 那条「必须与 WebView 一字不差否则撤销整个会话家族」的理由** ——
 /// 那是它的会话绑定特性，DeepSeek 没有。这里复用只是为了不再多一份 UA 字面量。
 fn build_client() -> Result<reqwest::Client, AppError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent(crate::operator::login::WEBVIEW_USER_AGENT)
+        .user_agent(crate::relay::login::WEBVIEW_USER_AGENT)
         .build()
         .map_err(|e| AppError::Config(format!("创建 HTTP 客户端失败: {e}")))
 }
@@ -513,7 +513,7 @@ pub async fn balance(token: &str) -> Result<Option<VendorBalance>, VendorError> 
 
 /// 登录窗回传的凭据。
 ///
-/// ⚠️ **不复用 `operator::login::Credentials`** —— 那个装不下 `account_id` 与
+/// ⚠️ **不复用 `relay::login::Credentials`** —— 那个装不下 `account_id` 与
 /// `login_identifier`，而给它加字段会把 sub2api 那半边的接触面一起扩大
 /// （那三个字段在它那边是「登录后再拉一次 profile」拿的，形状不同）。
 ///
@@ -534,7 +534,7 @@ pub struct VendorCreds {
 ///
 /// 返回 `None` = 普通导航（调用方放行）；`Some` = 回传（调用方拦下）。
 ///
-/// ⚠️ **不复用 `operator::login::parse_creds_navigation`**：scheme 不同、payload 形状
+/// ⚠️ **不复用 `relay::login::parse_creds_navigation`**：scheme 不同、payload 形状
 /// 不同（见 [`VendorCreds`]）。两边共用一个 scheme 才是真正的坑 —— 两个登录窗同时开着
 /// 时会互相认走对方的回传。
 pub fn parse_creds_navigation(url: &url::Url) -> Option<Result<VendorCreds, AppError>> {
@@ -1001,7 +1001,7 @@ mod tests {
 
     /// scheme 撞名会让两个登录窗互相认走对方的回传，而两边 payload 形状不同。
     #[test]
-    fn the_creds_scheme_differs_from_the_operator_one() {
+    fn the_creds_scheme_differs_from_the_relay_one() {
         assert_eq!(CREDS_SCHEME, "loongport-vendor-creds");
         assert!(
             login_script("").contains(CREDS_SCHEME),
@@ -1061,7 +1061,7 @@ mod tests {
             parse_creds_navigation(&url).is_none(),
             "普通导航必须放行，否则用户在窗口里什么都点不动"
         );
-        // operator 那条 scheme 也不能被我们认走。
+        // relay 那条 scheme 也不能被我们认走。
         let other = url::Url::parse("loongport-creds://ok?d=abc").expect("URL");
         assert!(
             parse_creds_navigation(&other).is_none(),

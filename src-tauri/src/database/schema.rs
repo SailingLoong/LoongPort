@@ -402,8 +402,8 @@ impl Database {
             [],
         );
 
-        // LoongPort：运营商与凭据（单行表）
-        crate::operator::creds::create_table(conn)?;
+        // LoongPort：中转站与凭据（单行表）
+        crate::relay::creds::create_table(conn)?;
 
         // LoongPort：官网直连账号（vendor 层）
         crate::vendor::creds::create_table(conn)?;

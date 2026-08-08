@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
-import { useRowBusy } from "@/components/operator/useRowBusy";
+import { useRowBusy } from "@/components/relay/useRowBusy";
 
 /**
  * 闸：**两个操作并发时不能互相覆盖 busy 标记**。
  *
- * 这是 `useRowBusy` 存在的全部理由 —— 运营商之间没有依赖，A 在获取密钥时
+ * 这是 `useRowBusy` 存在的全部理由 —— 中转站之间没有依赖，A 在获取密钥时
  * B 也该能点。而它有一个极易写错的退化写法：
  *
  * ```ts
@@ -23,7 +23,7 @@ describe("useRowBusy", () => {
   it("并发的两个操作各自记账，互不覆盖", async () => {
     const { result } = renderHook(() => useRowBusy());
 
-    // 两个手工控制的 promise —— 模拟两个运营商同时在 provision。
+    // 两个手工控制的 promise —— 模拟两个中转站同时在 provision。
     let releaseA!: () => void;
     let releaseB!: () => void;
     const a = new Promise<void>((r) => (releaseA = r));

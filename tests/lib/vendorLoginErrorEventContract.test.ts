@@ -38,13 +38,13 @@ describe("官网登录出错事件的跨语言契约", () => {
   });
 
   /**
-   * 两条事件名**有意不同**（vendor 与 operator 的登录窗各自独立）。
+   * 两条事件名**有意不同**（vendor 与 relay 的登录窗各自独立）。
    *
    * 钉住它是因为「统一成一个」看起来像是清理重复，实际会让一边的登录错误弹在
    * 另一边的界面上 —— 而 Rust 侧已有测试钉着 vendor 那条的取值。
    */
-  it("与 operator 的事件名不同（两条链路各自独立）", () => {
+  it("与 relay 的事件名不同（两条链路各自独立）", () => {
     expect(VENDOR_LOGIN_ERROR).not.toBe(PURCHASE_CLOSED);
-    expect(VENDOR_LOGIN_ERROR).not.toBe("operator-login-error");
+    expect(VENDOR_LOGIN_ERROR).not.toBe("relay-login-error");
   });
 });

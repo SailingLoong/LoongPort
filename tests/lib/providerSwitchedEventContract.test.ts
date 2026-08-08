@@ -14,17 +14,17 @@ import { describe, expect, it } from "vitest";
  * | 消费者 | 状态机制 | 靠什么刷新 |
  * |---|---|---|
  * | provider 列表 | react-query `["providers", app]` | mutation 的 `onSuccess` invalidate |
- * | 运营商区（`OperatorSection`） | 自己的 `useState` + 手工 `reload()` | **只有自己的动作** |
+ * | 中转站区（`RelaySection`） | 自己的 `useState` + 手工 `reload()` | **只有自己的动作** |
  *
- * 于是启用一个 cc-switch 的 sk 之后，运营商区里那个托管档位仍显示「使用中」
- * ⇒ `hasCurrentTier` 仍为 true ⇒ **运营商行的删除按钮一直是灰的**，
+ * 于是启用一个 cc-switch 的 sk 之后，中转站区里那个托管档位仍显示「使用中」
+ * ⇒ `hasCurrentTier` 仍为 true ⇒ **中转站行的删除按钮一直是灰的**，
  * 用户明明切走了却删不掉。反方向同理（切档位后 provider 列表陈旧）。
  *
  * 后端一直是对的（`ProviderService::switch` 确实更新了 current），坏的只是
  * 「不重开窗口就看不到」这一段 —— **静默的界面陈旧**，不报错不崩，
  * 用户会以为是删除功能坏了。
  *
- * ⚠️ 两个消费者现在同处一页（运营商区在 provider 页顶部），但**事件仍然必须发** ——
+ * ⚠️ 两个消费者现在同处一页（中转站区在 provider 页顶部），但**事件仍然必须发** ——
  * 它们是两套独立的状态，同页不等于同步。
  *
  * ## 为什么是闸而不是「记得发」
@@ -34,7 +34,7 @@ import { describe, expect, it } from "vitest";
  * 切换路径时同样不会想到我们这个额外消费者。所以判据要做成
  * 「凡切换路径必发事件」，而不是钉死当前那两处。
  *
- * 会红的改法：任一条切换路径不再发事件；`OperatorSection` 不再监听；
+ * 会红的改法：任一条切换路径不再发事件；`RelaySection` 不再监听；
  * 事件名在任一侧被改。
  */
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
@@ -53,14 +53,14 @@ describe("provider-switched 的跨页面契约", () => {
     expect(
       providerRs,
       "switch_provider 成功后没有广播 —— 启用别的 provider 之后，" +
-        "运营商区里那个档位会一直显示「使用中」、删除按钮一直是灰的",
+        "中转站区里那个档位会一直显示「使用中」、删除按钮一直是灰的",
     ).toMatch(/emit_provider_switched\(&emit_handle/);
 
-    // `operator_switch_tier`（运营商区切档位）—— 镜像方向。
-    const operatorRs = read("src-tauri/src/commands/operator.rs");
+    // `relay_switch_tier`（中转站区切档位）—— 镜像方向。
+    const relayRs = read("src-tauri/src/commands/relay.rs");
     expect(
-      operatorRs,
-      "operator_switch_tier 没有广播 —— 切完档位之后 provider 列表会陈旧",
+      relayRs,
+      "relay_switch_tier 没有广播 —— 切完档位之后 provider 列表会陈旧",
     ).toMatch(/emit_provider_switched\(/);
   });
 
@@ -89,7 +89,7 @@ describe("provider-switched 的跨页面契约", () => {
     expect(read("src/lib/api/providers.ts")).toMatch(
       /listen\(PROVIDER_SWITCHED/,
     );
-    expect(read("src/components/operator/OperatorSection.tsx")).toMatch(
+    expect(read("src/components/relay/RelaySection.tsx")).toMatch(
       /useTauriEvent<ProviderSwitchEvent>\(PROVIDER_SWITCHED/,
     );
   });
@@ -106,10 +106,10 @@ describe("provider-switched 的跨页面契约", () => {
     expect(payload, "payload 少了 providerId").toContain('"providerId"');
   });
 
-  it("OperatorSection 只在事件属于本 tab 那个 app 时才刷新", () => {
+  it("RelaySection 只在事件属于本 tab 那个 app 时才刷新", () => {
     // 不过滤会让「切 claude 的供应商」也触发 codex 这一区重新拉一遍 —— 多余的
     // 网络请求（每个档位一次倍率查询）。
-    const section = read("src/components/operator/OperatorSection.tsx");
+    const section = read("src/components/relay/RelaySection.tsx");
     expect(section).toMatch(/appType\s*!==\s*appId/);
     expect(section).toMatch(/void reload\(\)/);
   });

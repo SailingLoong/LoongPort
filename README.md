@@ -31,7 +31,7 @@ LoongPort 把这些压成两步 —— **填一个域名，登录一次。** 它
 而且不用让出你的对话档位。
 
 <div align="center">
-  <img src="assets/screenshots/main-zh.png" alt="LoongPort 主界面：运营商与档位列表，每行显示余额与档位数" width="820">
+  <img src="assets/screenshots/main-zh.png" alt="LoongPort 主界面：中转站与档位列表，每行显示余额与档位数" width="820">
 </div>
 
 ## 三分钟上手
@@ -86,7 +86,7 @@ LoongPort 免费，不经手付款、不从你的余额抽成。你充值给的�
 
 > 注册链接会带上我们的邀请码，我们可能因此从中转站获得返利；其中 `bestapi.store`
 > 是我们自己的站，内置的 `LOONGPORT` 优惠码是那里的新用户赠额。都不影响你的价格，
-> 域名填谁都行。两张表在 `src-tauri/src/operator/` 的 `aff.rs` 与 `promo.rs` 里。
+> 域名填谁都行。两张表在 `src-tauri/src/relay/` 的 `aff.rs` 与 `promo.rs` 里。
 
 ## 不占用官方账号
 
@@ -199,9 +199,9 @@ LoongPort 没有账号体系、没有服务端，不经手流量也不经手钱�
 凭据只存在他自己电脑的 SQLite 里。
 
 它替你做的三件事，每条都可以在源码里核：`normalize_site_origin`
-（`operator/api.rs`，域名从地址栏整条粘过来也认）、落你自己注册页的自助注册
-（`operator/login.rs`，新站 `/register`、老用户 `/login`，邀请码随 URL 带上）、
-注入登录态的自助充值（`operator/purchase.rs`，开 `{你的域名}/purchase`）。
+（`relay/api.rs`，域名从地址栏整条粘过来也认）、落你自己注册页的自助注册
+（`relay/login.rs`，新站 `/register`、老用户 `/login`，邀请码随 URL 带上）、
+注入登录态的自助充值（`relay/purchase.rs`，开 `{你的域名}/purchase`）。
 
 好处、顾虑、技术前提与接入步骤都在
 **[loongport.dev/zh/for-relays](https://loongport.dev/zh/for-relays)**。
@@ -263,7 +263,7 @@ pnpm tsc --noEmit                                 # 类型检查
 
 ## 参与贡献
 
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。动运营商那条链路前先读
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。动中转站那条链路前先读
 [`LOONGPORT.md`](LOONGPORT.md)，里面记了几处**看着像写错、其实必须那样写**的约束
 （`model_provider` 为何必须是 `custom`、为何不能声明 `requires_openai_auth`、
 退 ChatGPT 为何按 bundle id）。每条都有测试钉着。

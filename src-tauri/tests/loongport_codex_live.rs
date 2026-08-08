@@ -11,8 +11,8 @@
 //! | config.toml | reachability mode | 实际打到哪 |
 //! |---|---|---|
 //! | `requires_openai_auth = true` + bearer token | **ChatGPT auth** | chatgpt.com（403，1 fail） |
-//! | 无 `requires_openai_auth` + bearer token | provider auth | 运营商 `/v1`（200，0 fail） |
-//! | `requires_openai_auth = true` + auth.json 有 key | API key auth | 运营商 `/v1`（200，0 fail） |
+//! | 无 `requires_openai_auth` + bearer token | provider auth | 中转站 `/v1`（200，0 fail） |
+//! | `requires_openai_auth = true` + auth.json 有 key | API key auth | 中转站 `/v1`（200，0 fail） |
 //!
 //! LoongPort 走第二行。第一行是「沿用上游模板 + 开 preserve 开关」会得到的东西 —— 它跑不通，
 //! 但错误现场在 codex 那边（credentials incomplete），从 LoongPort 这边完全看不出来。
@@ -26,7 +26,7 @@ use cc_switch_lib::{
 mod support;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
-/// 复刻 `operator::provision::codex_config_toml` 的产物形态。
+/// 复刻 `relay::provision::codex_config_toml` 的产物形态。
 ///
 /// 有意不直接调那个函数：这里要断言的是「落到磁盘上的 config.toml 长什么样」，
 /// 复刻一份输入能让测试在有人改了生成器时**照样跑**，然后由断言指出行为变了。
@@ -70,7 +70,7 @@ fn generated_config_is_a_shape_codex_accepts() {
     );
 
     // 3) 绝不能声明 requires_openai_auth。见文件头那张表：它 + 不写 auth.json 是唯一
-    //    跑不通的组合（codex 会去打 chatgpt.com 而不是运营商）。
+    //    跑不通的组合（codex 会去打 chatgpt.com 而不是中转站）。
     assert!(
         parsed["model_providers"]["custom"]
             .get("requires_openai_auth")
@@ -90,7 +90,7 @@ fn generated_config_is_a_shape_codex_accepts() {
         "sub2api 的 openai 网关原生走 responses"
     );
 
-    // 5) base_url 必须带 /v1：运营商后台的 api_base_url 可能是空串，补 /v1 的责任在客户端。
+    // 5) base_url 必须带 /v1：中转站后台的 api_base_url 可能是空串，补 /v1 的责任在客户端。
     let base_url = parsed["model_providers"]["custom"]["base_url"]
         .as_str()
         .expect("base_url 应存在");
@@ -153,7 +153,7 @@ fn writing_live_config_only_leaves_chatgpt_login_untouched() {
     );
 }
 
-/// 整条落地链路：像 `operator_provision` 那样写一条 provider，然后真的切上去，
+/// 整条落地链路：像 `relay_provision` 那样写一条 provider，然后真的切上去，
 /// 断言 `~/.codex/config.toml` 里出现的正是 codex 能用的形态。
 ///
 /// 这是唯一覆盖「provision 写库 → ProviderService::switch → 落盘」全程的测试。前面两条
@@ -166,7 +166,7 @@ fn provisioned_provider_switches_and_lands_correct_config() {
 
     let state = create_test_state().expect("create test state");
 
-    // 复刻 operator_provision 写库的那条记录（含它那两个容易漏的字段）。
+    // 复刻 relay_provision 写库的那条记录（含它那两个容易漏的字段）。
     let provider_id = "loongport-test0000000001";
     let provider = Provider {
         id: provider_id.to_string(),
@@ -232,7 +232,7 @@ fn provisioned_provider_switches_and_lands_correct_config() {
 ///
 /// ## 这条测试守的缺陷（review 抓出）
 ///
-/// `operator_provision` 与 `operator_reset_tier_config` 原来都只 `db.save_provider`。
+/// `relay_provision` 与 `relay_reset_tier_config` 原来都只 `db.save_provider`。
 /// 而 CLI 读的是 `~/.codex/config.toml`，不是我们的 DB ⇒ 服务端那把 sk 被撤销、
 /// provision 重建了一把之后：**界面提示刷新成功、库里确实是新密钥，codex 仍拿旧的去请求**。
 ///
@@ -287,7 +287,7 @@ fn refreshing_the_current_tiers_key_updates_the_live_config() {
         .expect("save rebuilt provider");
 
     // ⚠️ 这里调的是**服务层**那一步，而命令层（`do_provision` / `reset_tier_config_impl`）
-    // 有没有真的调它，由 `commands::operator` 里那条
+    // 有没有真的调它，由 `commands::relay` 里那条
     // `refresh_live_for_current_tiers_is_wired_into_both_commands` 钉住 ——
     // 那两个函数都吃 `&tauri::AppHandle`（集成测试里也造不出来），所以命令层那一步
     // 只能靠「源码里那两处调用还在吗」来守。两条测试合起来才覆盖完整链路。

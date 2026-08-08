@@ -24,12 +24,12 @@ mod mcp;
 mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
-mod operator;
 mod panic_hook;
 mod prompt;
 mod prompt_files;
 mod provider;
 mod proxy;
+mod relay;
 mod services;
 mod session_manager;
 mod settings;
@@ -96,7 +96,7 @@ use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 ///
 /// 提成常量的理由：`lib.rs` 里有多处按它取窗口，而**全局 `CloseRequested` 回调用它当守卫**
 /// —— 那条守卫决定「最小化到托盘」只作用于主窗口。写错一个字母，登录窗关闭时会被
-/// `prevent_close` 吃掉、隐藏后仍占 label，用户再点登录就卡死（见 `commands::operator`
+/// `prevent_close` 吃掉、隐藏后仍占 label，用户再点登录就卡死（见 `commands::relay`
 /// 里 `do_login` 对残留窗口的处置）。
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -343,19 +343,19 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 }
 
 /// 生图 MCP server 模式的入口（`--mcp-image-gen`），见
-/// [`operator::imagegen_mcp`] 的模块文档。
+/// [`relay::imagegen_mcp`] 的模块文档。
 ///
-/// ## 为什么是这么一个转发函数，而不是把 `mod operator` 改成 `pub`
+/// ## 为什么是这么一个转发函数，而不是把 `mod relay` 改成 `pub`
 ///
 /// 这个 crate 里除 `hermes_config` 外**所有模块都是私有的** —— 那是上游的形状。
-/// 为了让 `main.rs` 够到一个函数就把整个 `operator`（12 个子模块、含凭据处理）
+/// 为了让 `main.rs` 够到一个函数就把整个 `relay`（12 个子模块、含凭据处理）
 /// 公开出去，等于为一行调用扩大了一整片 API 面，而且是在上游文件上留改动
 /// （merge 时要重新处理）。
 ///
 /// 一个转发函数只暴露真正要暴露的东西，`main.rs` 那侧读起来也更清楚
 /// ——「这个二进制有两种启动方式」正好对应这里的两个 `pub fn`。
 pub fn run_imagegen_mcp() -> Result<(), String> {
-    operator::imagegen_mcp::serve()
+    relay::imagegen_mcp::serve()
 }
 
 /// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
@@ -481,7 +481,7 @@ pub fn run() {
         //      `latest.json`（没有 .sig ⇒ platforms 为空 ⇒ 那步会跳过上传）
         //
         // ⚠️ **pubkey 换不得**：老版本只认烧在自己二进制里的那把公钥，换了之后用新私钥
-        // 签的更新在老客户端上验不过 ⇒ 它们永久收不到更新（与 `operator/remote_config.rs`
+        // 签的更新在老客户端上验不过 ⇒ 它们永久收不到更新（与 `relay/remote_config.rs`
         // 那把 Ed25519 公钥同一个性质）。私钥丢了或泄露都是真正的麻烦事。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -502,12 +502,12 @@ pub fn run() {
                 // 用插件原生的 `with_denylist` / `with_filter` 而不是自己在保存前过滤：
                 // 那是它为这件事提供的 happy path，手写过滤等于重造一遍它
                 // `on_window_ready` 里的同一个判断。
-                .with_denylist(&[operator::login::LOGIN_WINDOW_LABEL])
-                // 充值窗**每个运营商一个**（label 是 `loongport-purchase-<id>`），
+                .with_denylist(&[relay::login::LOGIN_WINDOW_LABEL])
+                // 充值窗**每个中转站一个**（label 是 `loongport-purchase-<id>`），
                 // label 不是定值 ⇒ 只能按前缀判，用 `with_filter` 而不是 denylist。
                 // 返回 false = 不保存这个窗口的状态。
                 .with_filter(|label| {
-                    !label.starts_with(operator::purchase::PURCHASE_WINDOW_LABEL_PREFIX)
+                    !label.starts_with(relay::purchase::PURCHASE_WINDOW_LABEL_PREFIX)
                 })
                 .build(),
         )
@@ -1263,9 +1263,9 @@ pub fn run() {
             // 端点未配时它自己就 return，一个字节都不发。
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                if let Some(cfg) = crate::operator::remote_config::refresh_and_cache().await {
+                if let Some(cfg) = crate::relay::remote_config::refresh_and_cache().await {
                     log::info!(
-                        "远端配置已更新：{} 个赞助运营商、{} 条邀请码",
+                        "远端配置已更新：{} 个赞助中转站、{} 条邀请码",
                         cfg.sponsors.len(),
                         cfg.aff_codes.len()
                     );
@@ -1289,7 +1289,7 @@ pub fn run() {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
                 // 端点还没配时整条链路 no-op，连读设置都不必。
-                if !crate::operator::stats::is_configured() {
+                if !crate::relay::stats::is_configured() {
                     log::debug!("匿名统计端点未配置，跳过上报");
                     return;
                 }
@@ -1320,7 +1320,7 @@ pub fn run() {
                         .conn
                         .lock()
                         .map_err(|e| format!("获取数据库连接失败: {e}"))?;
-                    crate::operator::creds::list(&conn)
+                    crate::relay::creds::list(&conn)
                         .map(|ops| ops.into_iter().map(|o| o.site_origin).collect::<Vec<_>>())
                         .map_err(|e| e.to_string())
                 })
@@ -1337,12 +1337,12 @@ pub fn run() {
                     }
                 };
 
-                let report = crate::operator::stats::build_report(
+                let report = crate::relay::stats::build_report(
                     install_id,
                     stats_app_version,
                     &origins,
                 );
-                if let Err(e) = crate::operator::stats::send(&report).await {
+                if let Err(e) = crate::relay::stats::send(&report).await {
                     // 只记 log，不重试、不排队补发。拿不到这次就算了。
                     log::debug!("匿名统计上报失败（不影响使用）: {e}");
                 }
@@ -1511,24 +1511,24 @@ pub fn run() {
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
-            // LoongPort 运营商
-            commands::operator_status,
-            commands::operator_check_session,
-            commands::operator_stats_endpoint_configured,
-            commands::operator_list_sponsors,
-            commands::operator_probe_site,
-            commands::operator_login,
-            commands::operator_provision,
-            commands::operator_list_operators,
-            commands::operator_list_tier_rates,
-            commands::operator_reorder,
-            commands::operator_reset_tier_config,
-            commands::operator_switch_tier,
-            commands::operator_list_sites,
-            commands::operator_remove_site,
-            commands::operator_balance,
-            commands::operator_purchase,
-            commands::operator_restore_official_login,
+            // LoongPort 中转站
+            commands::relay_status,
+            commands::relay_check_session,
+            commands::relay_stats_endpoint_configured,
+            commands::relay_list_sponsors,
+            commands::relay_probe_site,
+            commands::relay_login,
+            commands::relay_provision,
+            commands::relay_list_relays,
+            commands::relay_list_tier_rates,
+            commands::relay_reorder,
+            commands::relay_reset_tier_config,
+            commands::relay_switch_tier,
+            commands::relay_list_sites,
+            commands::relay_remove_site,
+            commands::relay_balance,
+            commands::relay_purchase,
+            commands::relay_restore_official_login,
             // LoongPort 官网直连账号（vendor）
             commands::vendor_list_accounts,
             commands::vendor_open_login,

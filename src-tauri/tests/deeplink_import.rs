@@ -95,7 +95,7 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
 ///
 /// - provider 列表过滤掉（`ProviderList.tsx`）⇒ 看不见；
 /// - `update_provider` / `delete_provider` 的 `reject_if_managed` 拦下 ⇒ 删不掉；
-/// - 而它没有运营商归属，所以运营商区不显示它、`prune_stale_tiers` 也不清它。
+/// - 而它没有中转站归属，所以中转站区不显示它、`prune_stale_tiers` 也不清它。
 ///
 /// 合起来是一条**永久留在库里、完全不可管理**的记录。
 ///
@@ -107,7 +107,7 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
 /// （`deeplink/provider.rs`），于是那条断言会红 —— 而功能是好的。
 ///
 /// 现在断言的是**真需求**：用户给的名字生成的 id 不能符合托管形状。
-/// `operator` 模块是 crate 私有的（有意如此，它不是对外 API），所以这里只能自己写
+/// `relay` 模块是 crate 私有的（有意如此，它不是对外 API），所以这里只能自己写
 /// 一份同形的影子实现。
 ///
 /// ⚠️ **别以为 `managed.rs` 那几条闸能钉住「影子与真判据同形」** —— 它们钉的是

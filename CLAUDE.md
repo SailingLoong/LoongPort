@@ -8,7 +8,7 @@
 设计文档、进度、spec 不在本仓，在同级的档案仓里（需要时用 `/add-dir` 单次挂载，别常驻）。
 维护者本机的具体布局见工作区那份 `CLAUDE.md`（不入任何仓）。
 
-**上一代实现是「参考不复用」**：它的 operator 层比现在这版复杂一个数量级（云同步边界、
+**上一代实现是「参考不复用」**：它的 relay 层比现在这版复杂一个数量级（云同步边界、
 多 app 展开、更多分支裁决），照搬会把这版简化的成果丢掉。查它的**结论**（实测记录、
 某个设计为什么那样分）是对的，照抄它的**实现**是错的；那边带行号的引用基于旧的子模块
 指针，引用前先 `grep -n` 复核。
@@ -28,7 +28,7 @@
    判据：新页面和旧页面放一起，看不出是两个人写的。
 3. **上游已有的模式**（数据流、命令命名、错误处理形状）→ 照它的形状写。
 4. 以上都没有 → 才新建，且**新建的东西尽量收在自己的目录里**
-   （`src/components/operator/`、`src-tauri/src/operator/`），别散进上游文件。
+   （`src/components/relay/`、`src-tauri/src/relay/`），别散进上游文件。
 
 ### 改上游文件时：改动面越小越好
 
@@ -65,7 +65,7 @@
 | 项目 | 许可证 | 我们能做什么 |
 |---|---|---|
 | **cc-switch**（本仓 fork 源） | **MIT** | **可自由复用代码** —— §一「能复用就复用」讲的就是它 |
-| **sub2api**（对接的运营商后端） | **LGPL-3.0 或更高** | **只能读，不能抄代码进本仓** |
+| **sub2api**（对接的中转站后端） | **LGPL-3.0 或更高** | **只能读，不能抄代码进本仓** |
 
 **为什么读它没问题**：我们与 sub2api 的关系是**HTTP 客户端**，不链接、不包含它的代码 ——
 跟浏览器访问一个 LGPL 网站一样，不构成衍生作品。
@@ -122,10 +122,10 @@
 ## 三、LoongPort 自己的代码在哪
 
 ```
-src-tauri/src/operator/     ← 运营商链路（api / creds / login / provision / chatgpt_app）
-src-tauri/src/commands/operator.rs
-src/components/operator/    ← 前端面板
-src/lib/api/operator.ts     ← 前端类型与 invoke 封装
+src-tauri/src/relay/     ← 中转站链路（api / creds / login / provision / chatgpt_app）
+src-tauri/src/commands/relay.rs
+src/components/relay/    ← 前端面板
+src/lib/api/relay.ts     ← 前端类型与 invoke 封装
 ```
 
 碰这几处之外的文件时，先问一句「这是在改上游吗、改动面能不能更小」。
@@ -133,7 +133,7 @@ src/lib/api/operator.ts     ← 前端类型与 invoke 封装
 ### 这是 fork，不是「把 cc-switch 当依赖引入」
 
 16.9 万行 Rust 里我们自己写的只有 **5621 行（3.3%）** —— 上游代码是**躯干**，我们在它身上
-加东西。所以别把它想成 `import cc_switch`：没有那层边界，`operator/` 与上游代码在同一个
+加东西。所以别把它想成 `import cc_switch`：没有那层边界，`relay/` 与上游代码在同一个
 crate、共享 `AppState`、共用它的 `ProviderService` / `write_live_snapshot` / deeplink 构造。
 
 **这正是 §一「能复用就复用」的物理基础**，也是「改上游文件要改动面最小」的原因。
@@ -183,7 +183,7 @@ pub fn is_official_proxy_provider_id(id: &str) -> bool { /* 认新旧两个 */ }
 | 闸 | 守什么 |
 |---|---|
 | `deeplink::scheme_consistency_tests` | `APP_SCHEME` 必须同时在 `Info.plist` 与 `tauri.conf.json` 里 |
-| `operator::managed::prefix_matches_the_frontend_copy` | `MANAGED_ID_PREFIX` 必须与 `src/config/constants.ts` 一致 |
+| `relay::managed::prefix_matches_the_frontend_copy` | `MANAGED_ID_PREFIX` 必须与 `src/config/constants.ts` 一致 |
 
 **新增任何「跨语言/跨文件的同一事实」时，一并加闸** —— 否则它迟早分叉，
 而分叉那天没人会收到通知。已知还有一处同类：`OFFICIAL_WEBSITE`

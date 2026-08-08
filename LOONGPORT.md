@@ -7,7 +7,7 @@
 产品名只承担识别（同 Docker / Vercel，不自我描述），"它是什么"由副标题讲 ——
 少了这句，`Port` 容易被读成"移植版"，正好是最不想要的解读。
 
-⚠️ **视角是用户的（我用 Codex / Claude，我省钱），不是实现的。** 上一版写的是「一个运营商
+⚠️ **视角是用户的（我用 Codex / Claude，我省钱），不是实现的。** 上一版写的是「一个中转站
 账号，直接变成任意 AI CLI 的可用供应商」—— 那句描述的是软件内部干了什么，而用户关心的是
 自己得到什么。改这句要同步改三处：`README.md`（中文，GitHub 首页展示的那份）/
 `README_EN.md` 的标题下方，
@@ -32,22 +32,22 @@
 
 两条**不要**写进对外文案的表述，即使它们更抓人：
 - **「无惧封号」** —— 隐含「官方会封号、用我们不会」，是承诺一个 LoongPort 控制不了的
-  结果（封号权在运营商与上游）。可自证的说法是「不占用官方账号」：
+  结果（封号权在中转站与上游）。可自证的说法是「不占用官方账号」：
   `preserveCodexOfficialAuthOnSwitch` 默认开，切档位不动 `auth.json`。
 - **「不用科学上网」** —— 会把产品定位成规避网络管制的工具。行业通用表述是
   「国内直连」/「无需额外网络配置」，传达同样的信息。
 
 最初在 [cc-switch](https://github.com/farion1231/cc-switch) v3.19.1 上 fork、之后合并
 上游至 v3.19.2 的客户端：
-把一个**运营商账号**变成 CLI 可用的多档位供应商 —— 用户填域名、登录、拿到分组，
+把一个**中转站账号**变成 CLI 可用的多档位供应商 —— 用户填域名、登录、拿到分组，
 不必自己建 key、抄 base_url、配 config。
 
-**目标形态是多运营商 × 多 CLI**（sub2api / new-api / … × codex / claude / gemini / …）。
+**目标形态是多中转站 × 多 CLI**（sub2api / new-api / … × codex / claude / gemini / …）。
 当前进度：
 
 | 维度 | 已实现 | 在做 / 待做 |
 |---|---|---|
-| 运营商 | sub2api | new-api（登录标识已按它设计成中立的 `login_identifier`） |
+| 中转站 | sub2api | new-api（登录标识已按它设计成中立的 `login_identifier`） |
 | CLI | codex · claude | gemini / grok（`platform_map` 映射表已建全，缺各自的配置写入形状） |
 | 平台 | macOS · Windows | Linux |
 
@@ -66,7 +66,7 @@
 当失败，会让权限被拒的机器上每次切换都失败，而配置本来是写得进去的。
 详见 `chatgpt_app.rs` 顶部那张表与「`WM_CLOSE` 这条路已被实测证伪」那节。
 
-⚠️ **别把「当前只实现了 X」读成「设计上只支持 X」** —— 数据层已按多运营商多平台设计
+⚠️ **别把「当前只实现了 X」读成「设计上只支持 X」** —— 数据层已按多中转站多平台设计
 （四段式 Key 契约含 platform 段、`platform_map` 六个平台全覆盖、命令层签名都吃 `app_id`）。
 
 **配置写入形状**：codex 那份由 `settings_config_for` 里的专属分支写（多一行
@@ -157,25 +157,25 @@ cp -R src-tauri/target/release/bundle/macos/LoongPort.app ~/下载/
 **唯一权威是 `lib.rs` 的 `invoke_handler` 注册表**（`generate_handler!` 那一段）——
 表里没有的就是不存在，别信任何文档里的清单，包括这一份。
 
-### 中转站（operator）
+### 中转站（relay）
 
 | 命令 | 干什么 |
 |---|---|
-| `operator_status` | **只读本地、不发网络** —— 首屏渲染等的就是它 |
-| `operator_check_session` | 探活 + 静默续期；凭据真失效时清掉那一行的本地记录并回传 id |
-| `operator_probe_site` | 探测域名是不是 sub2api 站，成功即存为站点 |
-| `operator_login` | 开登录 WebView，等凭据回来。**按行 id 定位，不回落到「当前站」** |
-| `operator_provision` | 拉分组 → 每组备 sk → 按分组自己的平台写成对应 CLI 的 provider |
-| `operator_list_operators` | 列已加的运营商与档位（同样不发网络） |
-| `operator_list_tier_rates` | 档位倍率 —— 必须发网络，所以从上一条拆出来、首屏之后再填 |
-| `operator_switch_tier` | 退 ChatGPT → 切换 → 重开（只有切 Codex 档位才动 ChatGPT） |
-| `operator_reset_tier_config` | 重写某档位的 CLI 配置，**复用原 sk 不换新的** |
-| `operator_balance` / `operator_purchase` | 查余额 / 打开充值页 |
-| `operator_reorder` | 拖拽排序（只在用户明确拖动时调，选档位不重排） |
-| `operator_list_sites` / `operator_remove_site` | 列 / 删站点行 |
-| `operator_list_sponsors` | 赞助运营商列表（走远端配置，有缓存与内置两层回落） |
-| `operator_stats_endpoint_configured` | 匿名统计端点配没配 —— 没配则整条链路与告知弹窗都不启用 |
-| `operator_restore_official_login` | 恢复被切走的 Codex 官方登录 |
+| `relay_status` | **只读本地、不发网络** —— 首屏渲染等的就是它 |
+| `relay_check_session` | 探活 + 静默续期；凭据真失效时清掉那一行的本地记录并回传 id |
+| `relay_probe_site` | 探测域名是不是 sub2api 站，成功即存为站点 |
+| `relay_login` | 开登录 WebView，等凭据回来。**按行 id 定位，不回落到「当前站」** |
+| `relay_provision` | 拉分组 → 每组备 sk → 按分组自己的平台写成对应 CLI 的 provider |
+| `relay_list_relays` | 列已加的中转站与档位（同样不发网络） |
+| `relay_list_tier_rates` | 档位倍率 —— 必须发网络，所以从上一条拆出来、首屏之后再填 |
+| `relay_switch_tier` | 退 ChatGPT → 切换 → 重开（只有切 Codex 档位才动 ChatGPT） |
+| `relay_reset_tier_config` | 重写某档位的 CLI 配置，**复用原 sk 不换新的** |
+| `relay_balance` / `relay_purchase` | 查余额 / 打开充值页 |
+| `relay_reorder` | 拖拽排序（只在用户明确拖动时调，选档位不重排） |
+| `relay_list_sites` / `relay_remove_site` | 列 / 删站点行 |
+| `relay_list_sponsors` | 赞助中转站列表（走远端配置，有缓存与内置两层回落） |
+| `relay_stats_endpoint_configured` | 匿名统计端点配没配 —— 没配则整条链路与告知弹窗都不启用 |
+| `relay_restore_official_login` | 恢复被切走的 Codex 官方登录 |
 
 ### 官网直连（vendor）
 
@@ -199,8 +199,8 @@ cp -R src-tauri/target/release/bundle/macos/LoongPort.app ~/下载/
 | config.toml | reachability mode | 实际打到哪 |
 |---|---|---|
 | `requires_openai_auth = true` + bearer token | ChatGPT auth | chatgpt.com（403，1 fail） |
-| 无 `requires_openai_auth` + bearer token | provider auth | 运营商 `/v1`（200，0 fail） |
-| `requires_openai_auth = true` + auth.json 有 key | API key auth | 运营商 `/v1`（200，0 fail） |
+| 无 `requires_openai_auth` + bearer token | provider auth | 中转站 `/v1`（200，0 fail） |
+| `requires_openai_auth = true` + auth.json 有 key | API key auth | 中转站 `/v1`（200，0 fail） |
 
 LoongPort 走第二行（sk 只进 config.toml，不碰 auth.json）。上游预设与 sub2api 面板给的模板
 都写 `requires_openai_auth = true`，因为它们走第三行 —— **照抄会落到唯一跑不通的第一行**。

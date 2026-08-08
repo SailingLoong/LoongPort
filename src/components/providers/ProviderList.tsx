@@ -96,7 +96,7 @@ export function ProviderList({
   const { checkProvider, isChecking } = useStreamCheck(appId);
 
   // LoongPort 托管的档位不在这个列表里出现 —— 它们在本页**顶部**那一区
-  // （`OperatorSection`）。⚠️ 别再写成「它们有自己的页面」：那个独立页
+  // （`RelaySection`）。⚠️ 别再写成「它们有自己的页面」：那个独立页
   // 2026-08-04 已删，现在两者同在供应商页上，只是分上下两区。
   //
   // **为什么必须滤**：这里的每张卡都带编辑/删除/拖拽排序，而托管项那三样都不适用

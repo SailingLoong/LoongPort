@@ -17,13 +17,13 @@ import { resolve } from "node:path";
  * `chatgpt_app::needs_user_attention`），**完全不含「切的是哪个 app」**。
  * 那一处此前的注释声称它「已经包含这个事实」，那是不属实的。
  *
- * 后端一直是对的（`operator.rs` 那句「不需要碰 ChatGPT（非 codex，或用户选了只切换）」），
+ * 后端一直是对的（`relay.rs` 那句「不需要碰 ChatGPT（非 codex，或用户选了只切换）」），
  * 只是前端没把 app 这一维传进判据。
  *
  * ## 为什么用读源码断言而不是渲染组件
  *
  * 与 `SwitchTierConfirmDialogPlatformCopy.test.ts` 同一套路：要守的是**判据里含 app
- * 这一维**这件事本身。渲染要搭一整套 operator 数据（站点、档位、余额、mock 六个命令），
+ * 这一维**这件事本身。渲染要搭一整套 relay 数据（站点、档位、余额、mock 六个命令），
  * 而那些与这条判据无关 —— 搭出来的复杂度会掩盖它真正在守什么。
  *
  * ⚠️ 这类断言的已知弱点是**改写法就失效**（把 `&&` 换成提前 return 也是对的实现，
@@ -31,7 +31,7 @@ import { resolve } from "node:path";
  * 两种失败里前者可修，后者是这条测试存在的理由。
  */
 const source = readFileSync(
-  resolve(__dirname, "../../src/components/operator/OperatorSection.tsx"),
+  resolve(__dirname, "../../src/components/relay/RelaySection.tsx"),
   "utf-8",
 );
 
@@ -39,7 +39,7 @@ describe("ChatGPT 确认框只在 codex 那一屏出现", () => {
   it("判据里含 app 这一维，不只看 chatgptNeedsAttention", () => {
     expect(
       source,
-      "OperatorSection 里应有一个按 appId 判断的派生值（当前叫 touchesCodexConfig）—— " +
+      "RelaySection 里应有一个按 appId 判断的派生值（当前叫 touchesCodexConfig）—— " +
         "少了它就会在 claude / gemini 页面问一件与 ChatGPT 无关的事",
     ).toContain("touchesCodexConfig");
   });

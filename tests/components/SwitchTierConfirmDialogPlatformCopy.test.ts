@@ -10,7 +10,7 @@ import { resolve } from "node:path";
  * 这个弹窗是**强制关闭 ChatGPT 的知情同意书** —— 用户点「退出并切换」之后，
  * Windows 上会 `taskkill /F` 直接终止它（那边没有任何优雅手段：`WM_CLOSE` 被
  * minimize-to-tray 吃掉、官方无 reload 接口、当不了父进程 —— 逐条实测见
- * `src-tauri/src/operator/chatgpt_app.rs` 的模块文档）。
+ * `src-tauri/src/relay/chatgpt_app.rs` 的模块文档）。
  *
  * 而 macOS 那句 `declineNote` 承诺的是「有进行中的对话会弹确认框，在那里点取消
  * 就会中止」。**把那句话摆给 Windows 用户看就是骗他签字**：那边不会弹任何确认框，
@@ -22,10 +22,7 @@ import { resolve } from "node:path";
  * 渲染只能覆盖其中一个平台分支。
  */
 const dialogSource = readFileSync(
-  resolve(
-    __dirname,
-    "../../src/components/operator/SwitchTierConfirmDialog.tsx",
-  ),
+  resolve(__dirname, "../../src/components/relay/SwitchTierConfirmDialog.tsx"),
   "utf-8",
 );
 

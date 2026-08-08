@@ -367,7 +367,7 @@ export interface Settings {
   usageDashboardRefreshIntervalMs?: number;
   // Whether to show the failover toggle independently on the main page
   /**
-   * 匿名使用统计：**只上报「添加了哪些中转站」与站点个数**（`operator::stats` 有硬边界）。
+   * 匿名使用统计：**只上报「添加了哪些中转站」与站点个数**（`relay::stats` 有硬边界）。
    *
    * 默认开（后端 serde default 与 `Default` impl 都是 true），首启告知一次、随时可关。
    */
@@ -379,7 +379,7 @@ export interface Settings {
   /**
    * 统计**专属**的随机安装 id。
    *
-   * ⚠️ 与运营商那边的 `device_id` 是两个东西、永不交叉 —— 那个会写进运营商服务器上的
+   * ⚠️ 与中转站那边的 `device_id` 是两个东西、永不交叉 —— 那个会写进中转站服务器上的
    * API key 名，复用它就能把上报对回一个付费账号。
    */
   statsInstallId?: string;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { removeConfirmMessageKey } from "@/components/operator/removeConfirmWording";
+import { removeConfirmMessageKey } from "@/components/relay/removeConfirmWording";
 
 /**
  * 闸：**删除确认框不能对没登录过的行说「会删掉登录态」。**
@@ -7,7 +7,7 @@ import { removeConfirmMessageKey } from "@/components/operator/removeConfirmWord
  * ## 它守的是什么缺陷（用户实测指出）
  *
  * 那句文案原来是无条件的一句：「会删掉「X」的**登录态**，连带它已生成的 N 个档位。
- * 已充值的余额留在运营商那边，重新登录就能再用。」—— **它不看那一行有没有登录态**。
+ * 已充值的余额留在中转站那边，重新登录就能再用。」—— **它不看那一行有没有登录态**。
  *
  * 于是用户删一个只探测过、从没登录的占位行时，被告知要删掉一个不存在的登录态、
  * 以及一笔他从没充过的余额。三句话里有两句不属实。

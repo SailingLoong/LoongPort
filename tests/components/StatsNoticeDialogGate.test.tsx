@@ -33,11 +33,11 @@ const { statsEndpointConfigured, getSettings, saveSettings } = vi.hoisted(
 );
 
 vi.mock("@/lib/api", () => ({
-  operatorApi: { statsEndpointConfigured },
+  relayApi: { statsEndpointConfigured },
   settingsApi: { get: getSettings, save: saveSettings },
 }));
 
-import { StatsNoticeDialog } from "@/components/operator/StatsNoticeDialog";
+import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
 
 /** 一份「还没表过态」的设置（`statsNoticeConfirmed` 缺席即未表态）。 */
 const notYetAsked = { enableAnonymousStats: true };

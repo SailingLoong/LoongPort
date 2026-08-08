@@ -40,7 +40,7 @@ pub fn import_from_deeplink(
     let (provider_id, did_switch_current) =
         import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
 
-    // ⚠️ 切了 current 就必须广播 provider-switched：OperatorSection 靠它 reload，
+    // ⚠️ 切了 current 就必须广播 provider-switched：RelaySection 靠它 reload，
     // 否则托管档位高亮停留在旧项（deeplink 导入改了 current 却没人通知界面）。
     if did_switch_current {
         if let Some(app_str) = target_app {
@@ -71,7 +71,7 @@ pub async fn import_from_deeplink_unified(
             let (provider_id, did_switch_current) =
                 import_provider_from_deeplink(&state, request).map_err(|e| e.to_string())?;
 
-            // ⚠️ 同上：切了 current 必须广播，OperatorSection 靠它 reload。
+            // ⚠️ 同上：切了 current 必须广播，RelaySection 靠它 reload。
             if did_switch_current {
                 if let Some(app_str) = target_app {
                     let app_type = app_str

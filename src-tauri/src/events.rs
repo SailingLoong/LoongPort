@@ -15,7 +15,7 @@
 //! ## 什么时候该进这个模块
 //!
 //! **只在 Rust 侧 emit、前端不监听**的事件名（如 `proxy-flags-changed`、
-//! `operator-login-error`）**不要进** —— 单侧事实没有分叉风险，收进来只是噪音
+//! `relay-login-error`）**不要进** —— 单侧事实没有分叉风险，收进来只是噪音
 //! （尺子 2：不为不存在的跨语言契约预建）。判断标准：跨语言 = Rust emit + 前端 listen
 //! 两侧都有。
 
@@ -23,7 +23,7 @@ use tauri::Emitter;
 
 use crate::app_config::AppType;
 
-/// 当前供应商切换后通知前端（`providersApi.onSwitched` / `OperatorSection` 监听）。
+/// 当前供应商切换后通知前端（`providersApi.onSwitched` / `RelaySection` 监听）。
 pub const PROVIDER_SWITCHED: &str = "provider-switched";
 /// 项目应用完成后的统一收尾事件（`App.tsx` / `PromptPanel` 监听）。
 pub const PROFILE_APPLIED: &str = "profile-applied";
@@ -40,9 +40,9 @@ pub const UNIVERSAL_PROVIDER_SYNCED: &str = "universal-provider-synced";
 pub const WEBDAV_SYNC_STATUS_UPDATED: &str = "webdav-sync-status-updated";
 /// S3 云同步状态变化（`App.tsx` 监听）。
 pub const S3_SYNC_STATUS_UPDATED: &str = "s3-sync-status-updated";
-/// 充值窗关闭（`OperatorSection` 监听）。原名 `commands::operator::PURCHASE_CLOSED_EVENT`。
-pub const PURCHASE_CLOSED: &str = "operator-purchase-closed";
-/// 官网直连登录窗凭据解析失败（`OperatorSection` 监听）。原名
+/// 充值窗关闭（`RelaySection` 监听）。原名 `commands::relay::PURCHASE_CLOSED_EVENT`。
+pub const PURCHASE_CLOSED: &str = "relay-purchase-closed";
+/// 官网直连登录窗凭据解析失败（`RelaySection` 监听）。原名
 /// `commands::vendor::LOGIN_ERROR_EVENT`。
 pub const VENDOR_LOGIN_ERROR: &str = "vendor-login-error";
 
@@ -54,12 +54,12 @@ pub const VENDOR_LOGIN_ERROR: &str = "vendor-login-error";
 /// 而 `switch_provider`（provider 页那个「启用」按钮）**不发** —— 上游没事，
 /// 因为它的 provider 页自己就是 mutation 的调用方、`onSuccess` 里 invalidate 掉缓存就够了。
 ///
-/// **但 LoongPort 多了一个消费者**：`OperatorSection`（供应商页顶部那一区）用自己的
+/// **但 LoongPort 多了一个消费者**：`RelaySection`（供应商页顶部那一区）用自己的
 /// `useState` + 手工 `reload()`（不走 react-query），所以那次 invalidate 与它无关。症状是：
 ///
-/// 1. 用户在运营商区看到某个托管档位是「当前使用中」；
+/// 1. 用户在中转站区看到某个托管档位是「当前使用中」；
 /// 2. 他在同一页下方启用了一个 cc-switch 自建的 sk；
-/// 3. 运营商区那边 —— **那个档位仍显示「使用中」，运营商行的删除按钮仍是灰的**，
+/// 3. 中转站区那边 —— **那个档位仍显示「使用中」，中转站行的删除按钮仍是灰的**，
 ///    `title` 还写着「要先切走」。他明明已经切走了，却删不掉这一行。
 ///
 /// 而后端其实是对的：`ProviderService::switch` 已经更新了 current，
@@ -68,7 +68,7 @@ pub const VENDOR_LOGIN_ERROR: &str = "vendor-login-error";
 ///
 /// ## 为什么补在这里，而不是让前端去 refresh
 ///
-/// 让 `useSwitchProviderMutation` 的 `onSuccess` 直接调 operator 的刷新，等于在
+/// 让 `useSwitchProviderMutation` 的 `onSuccess` 直接调 relay 的刷新，等于在
 /// react-query 与非 react-query 两套状态之间私接一根线，且每多一个消费者就要再接一根。
 /// 发事件是**上游已有的机制**（三个发射点 + `providersApi.onSwitched` 封装都在），
 /// 缺的只是这一个发射点 —— 补它同时让将来任何监听者都能收到。

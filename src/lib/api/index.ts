@@ -31,7 +31,7 @@ export type {
   ManagedAuthStatus,
   ManagedAuthDeviceCodeResponse,
 } from "./auth";
-export { operatorApi } from "./operator";
+export { relayApi } from "./relay";
 export { ccSwitchImportApi } from "./ccSwitchImport";
 export type {
   CcSwitchImportPreview,
@@ -40,11 +40,11 @@ export type {
   ProviderPlan,
 } from "./ccSwitchImport";
 export type {
-  OperatorStatus,
+  RelayStatus,
   SiteInfo,
   ProbeResult,
   TierInfo,
   ProvisionSummary,
   SwitchTierResult,
-  OperatorBalance,
-} from "./operator";
+  RelayBalance,
+} from "./relay";

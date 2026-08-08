@@ -308,7 +308,7 @@ describe("ProviderList Component", () => {
   });
 
   it("hides LoongPort managed tiers from the provider list", () => {
-    // 托管档位显示在供应商页**顶部**那一区（`OperatorSection`）。留在这个列表里的
+    // 托管档位显示在供应商页**顶部**那一区（`RelaySection`）。留在这个列表里的
     // 问题不是"重复显示"，而是**这里每张卡都带编辑/删除/拖拽**，那三样对托管项都
     // 不适用（配置由 provision 生成、改了下次刷新被覆盖；顺序由倍率决定）。
     // Rust 侧虽已收口，把按钮摆在那儿本身就是陷阱 —— 用户点了才被拒。
@@ -350,7 +350,7 @@ describe("ProviderList Component", () => {
    * live config 导入（Rust 侧 `import_*_providers_from_live`）的 provider id
    * **就是用户自己 CLI 配置文件里的 key**，且那条路绕过命令层守卫、启动时无条件跑
    * （表单那条路早有 `reject_if_managed`，填不进来）。裸前缀过滤会让那条
-   * provider 从列表里**凭空消失** —— 而它不在运营商区（那里只有真托管项），
+   * provider 从列表里**凭空消失** —— 而它不在中转站区（那里只有真托管项），
    * 于是他既看不到也删不掉，UI 上无逃生路径。
    */
   it("keeps user-authored ids that merely start with the prefix", () => {

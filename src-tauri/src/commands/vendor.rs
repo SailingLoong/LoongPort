@@ -1,4 +1,4 @@
-//! 官网直连账号（vendor）的 Tauri 命令层。与 [`super::operator`] **平级并列**。
+//! 官网直连账号（vendor）的 Tauri 命令层。与 [`super::relay`] **平级并列**。
 //!
 //! 六个命令：
 //!
@@ -11,7 +11,7 @@
 //! | [`vendor_remove`] | 删一行（连带清它的 provider 记录）|
 //! | [`vendor_reorder`] | 保存行序 |
 //!
-//! ## 为什么另起一个命令模块而不是塞进 `commands/operator.rs`
+//! ## 为什么另起一个命令模块而不是塞进 `commands/relay.rs`
 //!
 //! 那个文件已经 2700 行，而两边**没有一个命令能共用**：中转站要探测域名、选分组、
 //! 退 ChatGPT 再切；官网这边域名是编译期常量、无分组、无倍率。硬合只会让每个命令
@@ -106,7 +106,7 @@ pub struct VendorAccountRow {
     /// 编辑。这里给的是 `vendor_list_accounts` 收到的那个 `app_id` 对应的那一条。
     ///
     /// `None` = 判不了（没 provision 过 / 这个平台不适用 / 判据本身判不了），
-    /// **UI 在 `None` 时不显示标记** —— 同 operator 的 `TierInfo.user_edited`：
+    /// **UI 在 `None` 时不显示标记** —— 同 relay 的 `TierInfo.user_edited`：
     /// 不知道就别断言。
     ///
     /// 判据见 [`user_edited_for`]，它不存标记、靠与默认配置整份比对
@@ -159,7 +159,7 @@ pub struct VendorProvisionSummary {
 
 /// 列出已添加的官网账号。
 ///
-/// **契约：只读本地、不发网络**（与 `operator_list_operators` 一致）—— 首屏不能卡在
+/// **契约：只读本地、不发网络**（与 `relay_list_relays` 一致）—— 首屏不能卡在
 /// 网络上。余额走 [`vendor_balance`]，由前端渲染完再异步填。
 ///
 /// ## `app_id` 是干什么的
@@ -197,7 +197,7 @@ pub async fn vendor_list_accounts(
 ///
 /// `None` = 判不了：还没 provision（没有 provider 记录）、这个平台不适用
 /// （`config_for` 返回 `None`，如 gemini），或 `is_user_edited` 自己判不了。
-/// UI 在 `None` 时不显示标记 —— 与 operator 的 `TierInfo.user_edited` 同一条原则：
+/// UI 在 `None` 时不显示标记 —— 与 relay 的 `TierInfo.user_edited` 同一条原则：
 /// **不知道就别断言**。
 ///
 /// ## ⚠️ `roles` 必须与生成配置时用的完全一致
@@ -239,7 +239,7 @@ fn is_current_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType) 
 ///
 /// 返回 `true` = 拿到凭据并已入库；`false` = 用户关窗或超时（**都不是错误**）。
 ///
-/// ## 为什么不像 operator 那样先建行再登录
+/// ## 为什么不像 relay 那样先建行再登录
 ///
 /// 那边要先让用户输域名（一行 = 一个站），所以行先于登录存在。这边域名是编译期常量，
 /// 「一行」的唯一身份是 `account_id` —— 而它只有登录后才知道。所以行是登录成功后
@@ -279,7 +279,7 @@ async fn do_login(
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
     // 残留窗口可能是隐藏状态，而 `set_focus` 对不可见窗口是 no-op ⇒ 用户点了登录
-    // 什么都没发生，且 label 被占，再点多少次都一样（照 `operator::do_login` 那段）。
+    // 什么都没发生，且 label 被占，再点多少次都一样（照 `relay::do_login` 那段）。
     if let Some(stale) = app_handle.get_webview_window(deepseek::LOGIN_WINDOW_LABEL) {
         log::info!("发现残留的官网登录窗口，销毁后重开");
         let _ = stale.destroy();
@@ -299,13 +299,13 @@ async fn do_login(
     .title(format!("登录 {}", vendor.display_name()))
     .inner_size(480.0, 720.0)
     .resizable(true)
-    // ⚠️ **每次登录都必须是全新的登录态**。理由与 `operator::do_login` 那处逐条相同
+    // ⚠️ **每次登录都必须是全新的登录态**。理由与 `relay::do_login` 那处逐条相同
     // （详见那段长注释）：不加的话 WebView 用的是全 app 共享的**持久** profile，
     // 于是「删掉账号 → 重新添加」会被官网的 SPA 认成已登录直接跳走 ⇒
     // **同一个厂商永远只能挂第一个登录过的账号**，而多账号正是本表唯一索引
     // `(vendor_id, account_id)` 特意支持的能力。
     .incognito(true)
-    .user_agent(crate::operator::login::WEBVIEW_USER_AGENT)
+    .user_agent(crate::relay::login::WEBVIEW_USER_AGENT)
     .initialization_script(deepseek::login_script(login_hint))
     .on_navigation(move |url| {
         match deepseek::parse_creds_navigation(url) {
@@ -361,7 +361,7 @@ async fn do_login(
     // 都是他接着要用的东西。把窗口关掉等于替他决定「你看完了」。
     // 改成把标题写清楚 + 页面上浮一条提示，窗口留给用户自己关。
     let _ = window.set_title(&format!("已连接 {} — 可关闭此窗口", vendor.display_name()));
-    let _ = window.eval(crate::operator::login::CONNECTED_BANNER_JS);
+    let _ = window.eval(crate::relay::login::CONNECTED_BANNER_JS);
 
     Ok(true)
 }
@@ -488,7 +488,7 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
     {
         // ⚠️ **已存在的记录只换 sk，不覆盖用户的编辑**：`save_provider` 是全量覆盖
         // `settings_config` 的，照写默认配置会把用户改过的模型名 / 自定义端点全冲掉 ——
-        // 而他点「获取密钥」通常只是想刷新一下（照 `operator::provision_impl` 那段）。
+        // 而他点「获取密钥」通常只是想刷新一下（照 `relay::provision_impl` 那段）。
         let existing = state
             .db
             .get_provider_by_id(&provider_id, app_type.as_str())
@@ -500,7 +500,7 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
                 let mut kept = old.settings_config;
                 // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落默认配置。
                 // 否则用户会留着一把旧 sk 却以为刷新成功了。
-                if crate::operator::provision::patch_api_key(&mut kept, &app_type, &api_key) {
+                if crate::relay::provision::patch_api_key(&mut kept, &app_type, &api_key) {
                     kept
                 } else {
                     log::warn!(
@@ -547,7 +547,7 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
     // （它本来就是当前项），只是让落地配置追上 DB。那个 API 内部已处理代理接管
     // （接管时更新备份而不是覆盖 live 文件），而 `switch` 会多跑一遍切换语义
     // （接管态下走 `hot_switch_provider_inner`）—— 那不是这里要的。
-    // `commands::operator` 的两条同型路径也用它，三处一份写法。
+    // `commands::relay` 的两条同型路径也用它，三处一份写法。
     for app_type in provision::DEEPSEEK_APPS {
         let is_current = ProviderService::current(state, app_type.clone())
             .ok()
@@ -573,17 +573,17 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
 
 /// 把**一个平台**的配置恢复成 LoongPort 生成的默认值。**密钥保留不变。**
 ///
-/// ## 为什么不复用 `operator_reset_tier_config`
+/// ## 为什么不复用 `relay_reset_tier_config`
 ///
-/// 那条路有三段硬依赖运营商模型，vendor 一样都没有（`commands/operator.rs:1456` 起）：
+/// 那条路有三段硬依赖中转站模型，vendor 一样都没有（`commands/relay.rs:1456` 起）：
 ///
 /// | 它要什么 | 为什么 vendor 没有 |
 /// |---|---|
 /// | `existing.website_url` 定站点归属 | vendor 的 base_url 由 `deepseek::config_for` 直接给，不需要反查 |
-/// | `creds::list` 找运营商账号 | 那是 operator 的凭据表，vendor 的在 `vendor::creds` |
+/// | `creds::list` 找中转站账号 | 那是 relay 的凭据表，vendor 的在 `vendor::creds` |
 /// | `meta.loongportAccountId` 认账号 | vendor 一个 provider_id 就唯一确定账号（它是 `sha256(vendor+account)`） |
 ///
-/// 硬塞会把「运营商归属」这套概念带进 vendor 层。所以照它的**形状**写一份短的
+/// 硬塞会把「中转站归属」这套概念带进 vendor 层。所以照它的**形状**写一份短的
 /// （含 `is_managed` 那道正向判据），而不是共用它的**实现**。
 ///
 /// ## 只动传入的这一个平台
@@ -605,9 +605,9 @@ fn vendor_reset_tier_config_impl(
     provider_id: &str,
     app_id: &str,
 ) -> Result<(), AppError> {
-    // 用正向判据 `is_managed`（照 operator 那条的注释：别拿 `reject_if_managed`
+    // 用正向判据 `is_managed`（照 relay 那条的注释：别拿 `reject_if_managed`
     // 的 Err 反着判 —— 那个函数语义是「撞到托管项就拦下」，这里要的恰好相反）。
-    if !crate::operator::is_managed(provider_id) {
+    if !crate::relay::is_managed(provider_id) {
         return Err(AppError::Config(
             "只有 LoongPort 托管的档位才能恢复默认配置".into(),
         ));
@@ -626,16 +626,16 @@ fn vendor_reset_tier_config_impl(
         .map_err(|e| AppError::Database(format!("读取档位失败: {e}")))?
         .ok_or_else(|| AppError::Config("这个档位不存在".into()))?;
 
-    // sk 从现有配置里取（照 operator 那条）。取不到就让用户走「获取密钥」重建 ——
+    // sk 从现有配置里取（照 relay 那条）。取不到就让用户走「获取密钥」重建 ——
     // 生成一份没有 sk 的「默认配置」比保持现状更糟（那是一条必定 401 的记录）。
-    let api_key = crate::operator::provision::extract_api_key(&existing.settings_config, &app_type)
+    let api_key = crate::relay::provision::extract_api_key(&existing.settings_config, &app_type)
         .ok_or_else(|| {
             AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
         })?;
 
     // ⚠️ **`roles` 必须与生成时一致**，否则「恢复默认」写出的配置与
     // `user_edited` 的基准不同 ⇒ 恢复完立刻又显示「已手工维护」。
-    let defaults = crate::operator::provision::settings_config_with_roles(
+    let defaults = crate::relay::provision::settings_config_with_roles(
         &app_type,
         &api_key,
         &existing.name,
@@ -710,10 +710,10 @@ pub async fn vendor_balance(
 ///
 /// ## ⚠️ 名下有 provider 正在被某个平台用着 ⇒ 一条都不删，报错
 ///
-/// 与 `operator::remove_site_impl` 同一条不变量（那边写了完整推理）：删掉一份**还能用**的
+/// 与 `relay::remove_site_impl` 同一条不变量（那边写了完整推理）：删掉一份**还能用**的
 /// 当前配置，会让那个 CLI 的落地文件指向一条已经不存在的记录，而用户不会收到任何提示。
 ///
-/// 这条路比 operator 那条更容易撞上：**六个平台共用同一个 `provider_id`**，所以这一行
+/// 这条路比 relay 那条更容易撞上：**六个平台共用同一个 `provider_id`**，所以这一行
 /// 只要在任何一个平台上被选中，删账号就会毁掉那个平台的当前配置 —— 而官网行的删除按钮
 /// 原来连前端那道提示都没有（`VendorRow` 有意不拦，理由是「确认框里写清了会清掉配置」，
 /// 但那句话说的是「清掉这个账号的配置」，用户读不出「你 codex 现在就在用它」）。
@@ -733,7 +733,7 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
         let provider_id = provision::provider_id_for(vendor.vendor_id(), &account_id);
 
         // 闸：先扫一遍六个平台，撞上当前项就整条路中止（全有或全无 —— 半删会留下
-        // 用户再也处置不了的孤儿记录，见 `operator::remove_site_impl` 那段）。
+        // 用户再也处置不了的孤儿记录，见 `relay::remove_site_impl` 那段）。
         let in_use: Vec<&str> = provision::DEEPSEEK_APPS
             .iter()
             .filter(|app_type| {
@@ -812,7 +812,7 @@ fn on_vendor_error(state: &AppState, row_id: i64, e: &VendorError) {
 
 /// 取数据库连接。
 ///
-/// 自己写这三行而不是把 `commands::operator::with_conn` 改成 `pub`：那会让一个私有
+/// 自己写这三行而不是把 `commands::relay::with_conn` 改成 `pub`：那会让一个私有
 /// 辅助函数变成两个模块之间的接口，而它就是三行。
 fn with_conn<T>(
     state: &AppState,
@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(meta.loongport_vendor_account.as_deref(), Some(uuid));
         assert!(
             meta.loongport_account_id.is_none(),
-            "那是运营商的 i64 字段，不该被 vendor 占用"
+            "那是中转站的 i64 字段，不该被 vendor 占用"
         );
 
         let json = serde_json::to_string(&meta).expect("序列化");
@@ -1059,10 +1059,10 @@ mod tests {
         }
     }
 
-    // ─────────────── 与 operator 的清理路径隔离 ───────────────
+    // ─────────────── 与 relay 的清理路径隔离 ───────────────
 
     /// vendor 的 provider 命中 `MANAGED_ID_PREFIX`（守卫要继承），但**不能**被
-    /// operator 的 `prune_stale_tiers` 当成某个站的档位删掉。
+    /// relay 的 `prune_stale_tiers` 当成某个站的档位删掉。
     ///
     /// 当前的隔离靠 `website_url` 不相等（`platform.deepseek.com` 永不等于任何 sub2api
     /// origin）—— 那是**巧合不是设计**，所以要有闸钉住：改了 `SITE_ORIGIN` 就得重新
@@ -1090,7 +1090,7 @@ mod tests {
             "必须与 provision 算出的 id 一致 —— 不一致则前端比不出当前态"
         );
         assert!(
-            crate::operator::is_managed(&dto.provider_id),
+            crate::relay::is_managed(&dto.provider_id),
             "顺带钉住它仍命中托管前缀"
         );
     }
@@ -1114,7 +1114,7 @@ mod tests {
     #[test]
     fn vendor_provider_website_url_never_matches_a_sub2api_origin() {
         let id = provision::provider_id_for("deepseek", "uuid-a");
-        assert!(crate::operator::managed::is_managed(&id), "守卫要认它");
+        assert!(crate::relay::managed::is_managed(&id), "守卫要认它");
         assert_eq!(
             deepseek::SITE_ORIGIN,
             "https://platform.deepseek.com",
@@ -1127,7 +1127,7 @@ mod tests {
     fn the_login_error_event_name_is_stable() {
         assert_eq!(VENDOR_LOGIN_ERROR, "vendor-login-error");
         assert_ne!(
-            VENDOR_LOGIN_ERROR, "operator-login-error",
+            VENDOR_LOGIN_ERROR, "relay-login-error",
             "两个登录窗各发自己的事件，撞名会让中转站的弹窗显示官网的错"
         );
     }
@@ -1270,9 +1270,9 @@ mod tests {
         }
     }
 
-    /// ⭐ **删官网账号不许毁掉正在用的配置** —— 与 `operator::remove_site_impl` 同一条不变量。
+    /// ⭐ **删官网账号不许毁掉正在用的配置** —— 与 `relay::remove_site_impl` 同一条不变量。
     ///
-    /// 这条路比 operator 那条更容易撞上：**六个平台共用同一个 `provider_id`**，所以这一行
+    /// 这条路比 relay 那条更容易撞上：**六个平台共用同一个 `provider_id`**，所以这一行
     /// 只要在任何一个平台上被选中，删账号就会清掉那个平台的当前配置。而官网行原来连前端
     /// 那道提示都没有（`VendorRow` 有意不拦）⇒ 后端是唯一的闸。
     ///

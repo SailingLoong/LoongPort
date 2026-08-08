@@ -393,7 +393,7 @@ impl ProfileService {
                         // `config.toml`**（Windows 侧实测过，见 `chatgpt_app` 模块文档那张表）
                         // ⇒ 不重启它就一直连旧的供应商，而**没有任何东西会提示用户**。
                         //
-                        // ## 为什么这里只提示，不像 `operator_switch_tier` 那样替他退掉
+                        // ## 为什么这里只提示，不像 `relay_switch_tier` 那样替他退掉
                         //
                         // 那条路上用户刚点过一个确认框（同意退出 ChatGPT）。而应用项目快照
                         // 是**一次动作切一批 app**，用户点的是「切到这个项目」——
@@ -414,7 +414,7 @@ impl ProfileService {
                         // 用户会拿着旧供应商跑而完全不知道；而对没装的用户多说一句的代价，
                         // 只是 toast 里多一行。
                         if matches!(app, AppType::Codex)
-                            && crate::operator::chatgpt_app::needs_user_attention()
+                            && crate::relay::chatgpt_app::needs_user_attention()
                         {
                             warnings.push(format!(
                                 "[{app_str}] ChatGPT 桌面版正在运行 —— 它只在启动时读配置，\
@@ -674,7 +674,7 @@ mod tests {
     ///
     /// `apply` 要一个装好的 `AppState` 且会真的写 live 文件、动 MCP/Skills ——
     /// 在单测里跑它等于跑半个应用。而这里要守的只有一件事：**那句提示还接着吗**。
-    /// 与 `commands::operator` 那条
+    /// 与 `commands::relay` 那条
     /// `refresh_live_for_current_tiers_is_wired_into_both_commands` 同一形态与理由。
     ///
     /// ⚠️ 判据必须是 `needs_user_attention()` 而不是 `is_running()` ——
