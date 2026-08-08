@@ -927,8 +927,8 @@ async fn do_provision(
         // opus/sonnet/haiku/fable/subagent 各写各的，而不是全指向同一个主模型 ——
         // 否则 Anthropic 分组明明返回 claude 模型，档位却全写 gpt-5.6-sol。
         //
-        // ⚠️ **端点走 `api::base_url_for` 而不是直接用 `op.api_base_url`**：claude 要不带
-        // `/v1` 的站点根，codex 要带。直接传那一列的后果见 [`api::claude_base_url`]。
+        // ⚠️ **端点走 `api::base_url_for` 而不是直接用 `op.api_base_url`**：claude / gemini
+        // 自己拼版本段，要不带 `/v1` 的站点根；codex 系要带。后果见 [`api::base_url_for`]。
         let base_url = api::base_url_for(app_type, &op.site_origin, &op.api_base_url);
         let defaults = if matches!(app_type, AppType::Claude) {
             provision::settings_config_with_roles(
