@@ -31,7 +31,7 @@ export interface ModelVerificationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onRunningChange?: (running: boolean) => void;
-  initialReport?: VerificationReport | null;
+  report: VerificationReport | null;
 }
 
 type ModelsState = "idle" | "loading" | "ready" | "error";
@@ -43,18 +43,14 @@ export function ModelVerificationDialog({
   open,
   onOpenChange,
   onRunningChange,
-  initialReport,
+  report,
 }: ModelVerificationDialogProps) {
   const { t } = useTranslation();
   const [models, setModels] = useState<string[]>([]);
   const [modelsState, setModelsState] = useState<ModelsState>("idle");
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
   const requestRef = useRef(0);
-  const run = useModelVerificationRun({
-    providerId,
-    appType,
-    initialReport,
-  });
+  const run = useModelVerificationRun({ providerId, appType });
 
   useEffect(() => {
     onRunningChange?.(run.isRunning);
@@ -204,12 +200,12 @@ export function ModelVerificationDialog({
             </p>
           )}
 
-          {run.report && (
+          {report && (
             <div className="space-y-3 border-t border-border-default pt-4">
               <p className="text-sm font-medium">
-                {t(`loongport.modelVerification.verdict.${run.report.verdict}`)}
+                {t(`loongport.modelVerification.verdict.${report.verdict}`)}
               </p>
-              <VerificationEvidenceList report={run.report} />
+              <VerificationEvidenceList report={report} />
             </div>
           )}
         </div>

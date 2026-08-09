@@ -12,9 +12,7 @@ const api = vi.hoisted(() => ({
   listModels: vi.fn(),
   start: vi.fn(),
   cancel: vi.fn(),
-  listResults: vi.fn(),
   onProgress: vi.fn(),
-  onChanged: vi.fn(),
 }));
 
 vi.mock("@/lib/api/modelVerification", () => ({ modelVerificationApi: api }));
@@ -102,16 +100,21 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import { ModelVerificationDialog } from "../ModelVerificationDialog";
+import type {
+  VerificationReport,
+  VerificationVerdict,
+} from "@/lib/api/modelVerification";
 
 let progressListener: ((event: unknown) => void) | undefined;
-let changedListener: ((event: unknown) => void) | undefined;
 
 function DialogHarness({
   open = true,
   tierName = "旗舰",
+  report = null,
 }: {
   open?: boolean;
   tierName?: string;
+  report?: VerificationReport | null;
 }) {
   return (
     <ModelVerificationDialog
@@ -120,6 +123,7 @@ function DialogHarness({
       tierDisplayName={tierName}
       open={open}
       onOpenChange={() => {}}
+      report={report}
     />
   );
 }
@@ -135,6 +139,7 @@ function ReopenHarness() {
         tierDisplayName="旗舰"
         open={open}
         onOpenChange={setOpen}
+        report={null}
       />
       {!open && (
         <button type="button" onClick={() => setOpen(true)}>
@@ -145,7 +150,7 @@ function ReopenHarness() {
   );
 }
 
-const report = (verdict: string) => ({
+const report = (verdict: VerificationVerdict): VerificationReport => ({
   target: { providerId: "provider-a", appType: "codex", model: "gpt-5" },
   verdict,
   evidenceLevel: "protocolBehavior",
@@ -163,20 +168,12 @@ describe("ModelVerificationDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     progressListener = undefined;
-    changedListener = undefined;
     api.listModels.mockResolvedValue(["gpt-5"]);
     api.start.mockResolvedValue({ runId: "run-1", state: "queued" });
-    api.listResults.mockResolvedValue([]);
     api.cancel.mockResolvedValue(undefined);
     api.onProgress.mockImplementation(
       async (listener: (event: unknown) => void) => {
         progressListener = listener;
-        return () => {};
-      },
-    );
-    api.onChanged.mockImplementation(
-      async (listener: (event: unknown) => void) => {
-        changedListener = listener;
         return () => {};
       },
     );
@@ -224,6 +221,7 @@ describe("ModelVerificationDialog", () => {
         tierDisplayName="旗舰"
         open
         onOpenChange={onOpenChange}
+        report={null}
       />,
     );
     await openModelOptions();
@@ -260,7 +258,7 @@ describe("ModelVerificationDialog", () => {
   });
 
   it("renders sanitized failures and every finite report verdict", async () => {
-    render(<DialogHarness />);
+    const { rerender } = render(<DialogHarness />);
     const option = await openModelOptions();
     fireEvent.click(option);
     fireEvent.click(screen.getByRole("button", { name: "开始验证" }));
@@ -285,11 +283,8 @@ describe("ModelVerificationDialog", () => {
       ["suspicious", "可疑"],
       ["anomaly", "异常"],
       ["inconclusive", "结论不足"],
-    ]) {
-      api.listResults.mockResolvedValueOnce([report(verdict)]);
-      await act(async () => {
-        await changedListener?.({ providerId: "provider-a", appType: "codex" });
-      });
+    ] as const) {
+      rerender(<DialogHarness report={report(verdict)} />);
       await screen.findByText(label);
     }
   });

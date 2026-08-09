@@ -4,9 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({
   start: vi.fn(),
   cancel: vi.fn(),
-  listResults: vi.fn(),
   onProgress: vi.fn(),
-  onChanged: vi.fn(),
 }));
 
 vi.mock("@/lib/api/modelVerification", () => ({ modelVerificationApi: api }));
@@ -14,9 +12,7 @@ vi.mock("@/lib/api/modelVerification", () => ({ modelVerificationApi: api }));
 import { useModelVerificationRun } from "../useModelVerificationRun";
 
 let progressListener: ((event: unknown) => void) | undefined;
-let changedListener: ((event: unknown) => void) | undefined;
 let stopProgress = vi.fn();
-let stopChanged = vi.fn();
 
 const target = { providerId: "provider-a", appType: "codex", model: "gpt-5" };
 
@@ -34,27 +30,18 @@ describe("useModelVerificationRun", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     progressListener = undefined;
-    changedListener = undefined;
     stopProgress = vi.fn();
-    stopChanged = vi.fn();
     api.start.mockResolvedValue({ runId: "run-1", state: "queued" });
     api.cancel.mockResolvedValue(undefined);
-    api.listResults.mockResolvedValue([]);
     api.onProgress.mockImplementation(
       async (listener: (event: unknown) => void) => {
         progressListener = listener;
         return stopProgress;
       },
     );
-    api.onChanged.mockImplementation(
-      async (listener: (event: unknown) => void) => {
-        changedListener = listener;
-        return stopChanged;
-      },
-    );
   });
 
-  it("tracks only the active run and target, then fetches persisted reports after a matching change", async () => {
+  it("tracks only the active run and target", async () => {
     const { result } = renderHook(() =>
       useModelVerificationRun({
         providerId: target.providerId,
@@ -75,23 +62,9 @@ describe("useModelVerificationRun", () => {
 
     act(() => progressListener?.(runningEvent()));
     expect(result.current.progress?.completedChecks).toBe(1);
-
-    api.listResults.mockResolvedValueOnce([
-      { target, verdict: "trusted", facts: [] },
-    ]);
-    await act(async () => {
-      await changedListener?.({ providerId: "provider-a", appType: "codex" });
-    });
-    await waitFor(() =>
-      expect(api.listResults).toHaveBeenCalledWith(["provider-a"]),
-    );
-    await waitFor(() => expect(result.current.report?.verdict).toBe("trusted"));
   });
 
   it("keeps terminal events emitted before start resolves", async () => {
-    api.listResults.mockResolvedValueOnce([
-      { target, verdict: "trusted", facts: [] },
-    ]);
     api.start.mockImplementation(async () => {
       progressListener?.(
         runningEvent({
@@ -99,10 +72,6 @@ describe("useModelVerificationRun", () => {
           completedChecks: 3,
         }),
       );
-      changedListener?.({
-        providerId: target.providerId,
-        appType: target.appType,
-      });
       return { runId: "run-1", state: "queued" };
     });
 
@@ -121,7 +90,6 @@ describe("useModelVerificationRun", () => {
       expect(result.current.progress?.state).toBe("completed"),
     );
     expect(result.current.isRunning).toBe(false);
-    await waitFor(() => expect(result.current.report?.verdict).toBe("trusted"));
   });
 
   it("keeps an early terminal failure when start later binds the run ID", async () => {
@@ -169,7 +137,6 @@ describe("useModelVerificationRun", () => {
 
     rerender({ open: false });
     expect(stopProgress).not.toHaveBeenCalled();
-    expect(stopChanged).not.toHaveBeenCalled();
 
     rerender({ open: true });
     act(() => priorListener?.(runningEvent({ state: "completed" })));

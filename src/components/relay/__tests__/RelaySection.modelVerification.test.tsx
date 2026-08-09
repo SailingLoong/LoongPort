@@ -19,7 +19,6 @@ const api = vi.hoisted(() => ({
   start: vi.fn(),
   cancel: vi.fn(),
   onProgress: vi.fn(),
-  onChanged: vi.fn(),
   list: vi.fn(),
 }));
 const dialogState = vi.hoisted(() => ({
@@ -49,7 +48,6 @@ vi.mock("@/lib/api/modelVerification", () => ({
     start: api.start,
     cancel: api.cancel,
     onProgress: api.onProgress,
-    onChanged: api.onChanged,
   },
 }));
 vi.mock("@/components/ui/dialog", () => ({
@@ -184,14 +182,12 @@ const report = (providerId: string, verdict: string, model = "gpt-5") => ({
 });
 
 let progressListener: ((event: any) => void) | undefined;
-let changedListener: ((event: any) => void) | undefined;
 
 describe("RelaySection model verification ownership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     eventHandlers.clear();
     progressListener = undefined;
-    changedListener = undefined;
     api.listRelays.mockResolvedValue([relay]);
     api.listTierRates.mockResolvedValue([]);
     api.checkSession.mockResolvedValue([]);
@@ -219,10 +215,6 @@ describe("RelaySection model verification ownership", () => {
         return () => {};
       },
     );
-    api.onChanged.mockImplementation(async (listener: (event: any) => void) => {
-      changedListener = listener;
-      return () => {};
-    });
   });
 
   it("reduces reports from the initial and refreshed relay fetch, with one dialog owner", async () => {
@@ -304,7 +296,10 @@ describe("RelaySection model verification ownership", () => {
         totalChecks: 4,
         failure: null,
       });
-      changedListener?.({ providerId: "provider-a", appType: "codex" });
+      eventHandlers.get("model-verification-changed")?.({
+        providerId: "provider-a",
+        appType: "codex",
+      });
     });
 
     fireEvent.click(
@@ -314,6 +309,106 @@ describe("RelaySection model verification ownership", () => {
       await screen.findByText("loongport.modelVerification.verdict.trusted"),
     ).toBeInTheDocument();
     expect(api.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the prior persisted report visible when a rerun fails", async () => {
+    render(<RelaySection appId="codex" />);
+    await waitFor(() =>
+      screen.getByRole("button", { name: "verify provider-a" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "verify provider-a" }));
+    expect(
+      await screen.findByText("loongport.modelVerification.verdict.anomaly"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("option", { name: "gpt-5" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "loongport.modelVerification.actions.start",
+      }),
+    );
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(progressListener).toBeDefined());
+
+    act(() => {
+      progressListener?.({
+        runId: "run-1",
+        providerId: "provider-a",
+        appType: "codex",
+        model: "gpt-5",
+        state: "failed",
+        completedChecks: 1,
+        totalChecks: 4,
+        failure: "authentication",
+      });
+    });
+
+    expect(
+      screen.getByText("loongport.modelVerification.verdict.anomaly"),
+    ).toBeInTheDocument();
+  });
+
+  it("reopens with the persisted highest-severity model after another model completes", async () => {
+    api.listResults.mockResolvedValue([
+      report("provider-a", "suspicious", "model-a"),
+      report("provider-a", "anomaly", "model-b"),
+    ]);
+    api.listModels.mockResolvedValue(["model-a"]);
+
+    render(<RelaySection appId="codex" />);
+    await waitFor(() =>
+      screen.getByRole("button", { name: "verify provider-a" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "verify provider-a" }));
+    expect(
+      await screen.findByText("loongport.modelVerification.verdict.anomaly"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("option", { name: "model-a" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "loongport.modelVerification.actions.start",
+      }),
+    );
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(progressListener).toBeDefined());
+    fireEvent.click(
+      screen.getByRole("button", { name: "close verification dialog" }),
+    );
+
+    api.listResults.mockResolvedValue([
+      report("provider-a", "trusted", "model-a"),
+      report("provider-a", "anomaly", "model-b"),
+    ]);
+    await act(async () => {
+      progressListener?.({
+        runId: "run-1",
+        providerId: "provider-a",
+        appType: "codex",
+        model: "model-a",
+        state: "completed",
+        completedChecks: 4,
+        totalChecks: 4,
+        failure: null,
+      });
+      eventHandlers.get("model-verification-changed")?.({
+        providerId: "provider-a",
+        appType: "codex",
+      });
+    });
+    await waitFor(() =>
+      expect(api.listResults.mock.calls.length).toBeGreaterThan(1),
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "verify provider-a" }),
+    );
+    expect(
+      await screen.findByText("loongport.modelVerification.verdict.anomaly"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("loongport.modelVerification.verdict.trusted"),
+    ).not.toBeInTheDocument();
   });
 
   it.each([

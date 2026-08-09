@@ -4,14 +4,12 @@ import {
   modelVerificationApi,
   type RunFailureKind,
   type VerificationProgressEvent,
-  type VerificationReport,
   type VerificationTarget,
 } from "@/lib/api/modelVerification";
 
 export interface UseModelVerificationRunOptions {
   providerId: string;
   appType: string;
-  initialReport?: VerificationReport | null;
 }
 
 const runFailures = new Set<RunFailureKind>([
@@ -46,16 +44,12 @@ function targetsMatch(
 export function useModelVerificationRun({
   providerId,
   appType,
-  initialReport = null,
 }: UseModelVerificationRunOptions) {
   const [runId, setRunId] = useState<string | null>(null);
   const [progress, setProgress] = useState<VerificationProgressEvent | null>(
     null,
   );
   const [failure, setFailure] = useState<RunFailureKind | null>(null);
-  const [report, setReport] = useState<VerificationReport | null>(
-    initialReport,
-  );
   const [stopping, setStopping] = useState(false);
   const generationRef = useRef(0);
   const activeRunRef = useRef<{
@@ -64,43 +58,12 @@ export function useModelVerificationRun({
   } | null>(null);
   const pendingTargetRef = useRef<VerificationTarget | null>(null);
   const pendingRunIdRef = useRef<string | null>(null);
-  const pendingChangedRef = useRef(false);
   const pendingTerminalRef = useRef(false);
-
-  const loadReport = useCallback(
-    async (target: VerificationTarget, generation: number) => {
-      try {
-        const reports = await modelVerificationApi.listResults([providerId]);
-        const activeRun = activeRunRef.current;
-        if (
-          generation !== generationRef.current ||
-          !activeRun ||
-          !targetsMatch(activeRun.target, target)
-        ) {
-          return;
-        }
-        setReport(
-          reports.find((candidate) => targetsMatch(candidate.target, target)) ??
-            null,
-        );
-      } catch {
-        // Progress remains usable. A later changed event retries the persisted read.
-      }
-    },
-    [providerId],
-  );
-
-  useEffect(() => {
-    if (!activeRunRef.current && !pendingTargetRef.current) {
-      setReport(initialReport);
-    }
-  }, [initialReport]);
 
   useEffect(() => {
     let active = true;
     const generation = generationRef.current;
     let stopProgress: (() => void) | undefined;
-    let stopChanged: (() => void) | undefined;
 
     const isCurrent = () => active && generation === generationRef.current;
 
@@ -143,36 +106,12 @@ export function useModelVerificationRun({
         else unlisten();
       });
 
-    void modelVerificationApi
-      .onChanged((scope) => {
-        if (
-          !isCurrent() ||
-          scope.providerId !== providerId ||
-          scope.appType !== appType
-        ) {
-          return;
-        }
-
-        const activeRun = activeRunRef.current;
-        if (activeRun) {
-          void loadReport(activeRun.target, generation);
-          return;
-        }
-
-        if (pendingTargetRef.current) pendingChangedRef.current = true;
-      })
-      .then((unlisten) => {
-        if (isCurrent()) stopChanged = unlisten;
-        else unlisten();
-      });
-
     return () => {
       active = false;
       generationRef.current += 1;
       stopProgress?.();
-      stopChanged?.();
     };
-  }, [appType, loadReport, providerId]);
+  }, [appType, providerId]);
 
   const start = useCallback(
     async (nextModel: string) => {
@@ -181,12 +120,10 @@ export function useModelVerificationRun({
       activeRunRef.current = null;
       pendingTargetRef.current = target;
       pendingRunIdRef.current = null;
-      pendingChangedRef.current = false;
       pendingTerminalRef.current = false;
       setRunId(null);
       setProgress(null);
       setFailure(null);
-      setReport(null);
       setStopping(false);
 
       let response;
@@ -199,7 +136,6 @@ export function useModelVerificationRun({
         ) {
           pendingTargetRef.current = null;
           pendingRunIdRef.current = null;
-          pendingChangedRef.current = false;
           pendingTerminalRef.current = false;
           setFailure(asRunFailure(error));
         }
@@ -212,25 +148,19 @@ export function useModelVerificationRun({
       const acceptedEarlyEvents =
         pendingRunIdRef.current === null ||
         pendingRunIdRef.current === response.runId;
-      const changedBeforeStartResolved = pendingChangedRef.current;
       const terminalBeforeStartResolved = pendingTerminalRef.current;
       activeRunRef.current = { runId: response.runId, target };
       pendingTargetRef.current = null;
       pendingRunIdRef.current = null;
-      pendingChangedRef.current = false;
       pendingTerminalRef.current = false;
       setRunId(response.runId);
       if (!acceptedEarlyEvents) setProgress(null);
       if (!acceptedEarlyEvents || !terminalBeforeStartResolved) {
         setFailure(null);
-        setReport(null);
       }
       setStopping(false);
-      if (acceptedEarlyEvents && changedBeforeStartResolved) {
-        void loadReport(target, generation);
-      }
     },
-    [appType, loadReport, providerId],
+    [appType, providerId],
   );
 
   const stop = useCallback(async () => {
@@ -254,7 +184,6 @@ export function useModelVerificationRun({
     failure,
     isRunning,
     progress,
-    report,
     start,
     stop,
     stopping,

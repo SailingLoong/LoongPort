@@ -1283,7 +1283,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
           open={verificationDialogOpen}
           onOpenChange={setVerificationDialogOpen}
           onRunningChange={handleVerificationRunningChange}
-          initialReport={selectedVerificationReport}
+          report={selectedVerificationReport}
         />
       )}
 
