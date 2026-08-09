@@ -248,7 +248,25 @@ mod tests {
     }
 
     #[test]
-    fn runtime_types_use_finite_camel_case_values() {
+    fn list_leases_rejects_unsupported_persisted_app() -> Result<(), AppError> {
+        let db = Database::memory().unwrap();
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 INSERT INTO model_verification_proxy_leases (app_type, acquired_at)
+                 VALUES ('gemini', 10);
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .unwrap();
+        }
+
+        assert!(list_leases(&db).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_types_serialize_as_finite_camel_case_values() {
         assert_eq!(
             serde_json::to_value(RuntimeAppType::Codex).unwrap(),
             serde_json::json!("codex")
@@ -280,6 +298,19 @@ mod tests {
             .unwrap(),
             serde_json::json!({"appType": "codex", "acquiredAt": 10})
         );
+        assert!(
+            serde_json::from_value::<RuntimeAppState>(serde_json::json!({
+                "appType": "gemini",
+                "status": "active",
+                "reason": null
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<ProxyLease>(serde_json::json!({
+            "appType": "gemini",
+            "acquiredAt": 10
+        }))
+        .is_err());
         assert_eq!(
             serde_json::to_value(RuntimeAppStatus::Active).unwrap(),
             serde_json::json!("active")
