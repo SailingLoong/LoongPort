@@ -639,8 +639,8 @@ fn vendor_reset_tier_config_impl(
         &app_type,
         &api_key,
         &existing.name,
-        base_url,
-        model,
+        &base_url,
+        &model,
         provision::claude_roles_for(&app_type),
     )
     .ok_or_else(|| AppError::Config(format!("{app_id} 这个平台生成不出默认配置")))?;
