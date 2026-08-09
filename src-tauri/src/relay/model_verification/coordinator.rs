@@ -164,7 +164,6 @@ impl ModelVerificationCoordinator {
             },
         );
         drop(state);
-        drop(_mutation);
 
         self.emit_progress(progress_event(
             &target,
@@ -174,6 +173,7 @@ impl ModelVerificationCoordinator {
             0,
             None,
         ));
+        drop(_mutation);
 
         let coordinator = Arc::clone(self);
         let spawned_run_id = run_id.clone();
@@ -214,7 +214,6 @@ impl ModelVerificationCoordinator {
                 .find_map(|(target, run)| (run.run_id == run_id).then(|| target.clone()));
             target.and_then(|target| state.active.remove(&target).map(|run| (target, run)))
         };
-        drop(_mutation);
         if let Some((target, run)) = cancelled {
             run.abort_handle.abort();
             self.emit_progress(progress_event(
@@ -226,7 +225,34 @@ impl ModelVerificationCoordinator {
                 Some(RunFailureKind::Cancelled),
             ));
         }
+        drop(_mutation);
         Ok(())
+    }
+
+    pub fn cancel_scope(&self, scope: &TargetScope) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .expect("model verification mutation mutex poisoned");
+        let cancelled = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("model verification state mutex poisoned");
+            remove_scope_runs(&mut state, scope)
+        };
+        for (target, run) in cancelled {
+            run.abort_handle.abort();
+            self.emit_progress(progress_event(
+                &target,
+                &run.run_id,
+                RunState::Cancelled,
+                0,
+                0,
+                Some(RunFailureKind::Cancelled),
+            ));
+        }
+        drop(_mutation);
     }
 
     pub fn clear_scope(&self, scope: &TargetScope) -> Result<(), RunFailureKind> {
@@ -244,18 +270,8 @@ impl ModelVerificationCoordinator {
                 .expect("model verification state mutex poisoned");
             let generation = state.generations.entry(scope.clone()).or_default();
             *generation = generation.saturating_add(1);
-            let matching: Vec<_> = state
-                .active
-                .keys()
-                .filter(|target| scope_for(target) == *scope)
-                .cloned()
-                .collect();
-            matching
-                .into_iter()
-                .filter_map(|target| state.active.remove(&target).map(|run| (target, run)))
-                .collect::<Vec<_>>()
+            remove_scope_runs(&mut state, scope)
         };
-        drop(_mutation);
         for (target, run) in cancelled {
             run.abort_handle.abort();
             self.emit_progress(progress_event(
@@ -268,6 +284,7 @@ impl ModelVerificationCoordinator {
             ));
         }
         self.emit_changed(scope);
+        drop(_mutation);
         Ok(())
     }
 
@@ -280,73 +297,49 @@ impl ModelVerificationCoordinator {
     ) {
         match result {
             Ok(Ok(report)) if report.target == target => {
-                let checks = u8::try_from(report.facts.len()).unwrap_or(u8::MAX);
-                match self.persist_if_current_with(&target, &run_id, generation, &report, || {
+                let _ = self.persist_if_current_with(&target, &run_id, generation, &report, || {
                     crate::relay::model_verification::store::upsert_active(&self.db, &report)
                         .map_err(|_| RunFailureKind::InvalidResponse)
-                }) {
-                    Ok(true) => {
-                        self.emit_progress(progress_event(
-                            &target,
-                            &run_id,
-                            RunState::Completed,
-                            checks,
-                            checks,
-                            None,
-                        ));
-                        self.emit_changed(&scope_for(&target));
-                    }
-                    Err(failure) => self.emit_progress(progress_event(
-                        &target,
-                        &run_id,
-                        RunState::Failed,
-                        0,
-                        0,
-                        Some(failure),
-                    )),
-                    Ok(false) => {}
-                }
+                });
             }
             Ok(Err(failure)) => {
-                if self.remove_if_current(&target, &run_id, generation) {
-                    self.emit_progress(progress_event(
-                        &target,
-                        &run_id,
-                        RunState::Failed,
-                        0,
-                        0,
-                        Some(failure),
-                    ));
-                }
+                self.remove_if_current_and_emit(
+                    &target,
+                    &run_id,
+                    generation,
+                    RunState::Failed,
+                    failure,
+                );
             }
             Ok(Ok(_)) => {
-                if self.remove_if_current(&target, &run_id, generation) {
-                    self.emit_progress(progress_event(
-                        &target,
-                        &run_id,
-                        RunState::Failed,
-                        0,
-                        0,
-                        Some(RunFailureKind::InvalidResponse),
-                    ));
-                }
+                self.remove_if_current_and_emit(
+                    &target,
+                    &run_id,
+                    generation,
+                    RunState::Failed,
+                    RunFailureKind::InvalidResponse,
+                );
             }
             Err(_) => {
-                if self.remove_if_current(&target, &run_id, generation) {
-                    self.emit_progress(progress_event(
-                        &target,
-                        &run_id,
-                        RunState::Cancelled,
-                        0,
-                        0,
-                        Some(RunFailureKind::Cancelled),
-                    ));
-                }
+                self.remove_if_current_and_emit(
+                    &target,
+                    &run_id,
+                    generation,
+                    RunState::Cancelled,
+                    RunFailureKind::Cancelled,
+                );
             }
         }
     }
 
-    fn remove_if_current(&self, target: &TargetKey, run_id: &str, generation: u64) -> bool {
+    fn remove_if_current_and_emit(
+        &self,
+        target: &TargetKey,
+        run_id: &str,
+        generation: u64,
+        run_state: RunState,
+        failure: RunFailureKind,
+    ) {
         let _mutation = self
             .mutation
             .lock()
@@ -357,9 +350,15 @@ impl ModelVerificationCoordinator {
             .expect("model verification state mutex poisoned");
         if run_is_current(&state, target, run_id, generation) {
             state.active.remove(target);
-            true
-        } else {
-            false
+            drop(state);
+            self.emit_progress(progress_event(
+                target,
+                run_id,
+                run_state,
+                0,
+                0,
+                Some(failure),
+            ));
         }
     }
 
@@ -368,7 +367,7 @@ impl ModelVerificationCoordinator {
         target: &TargetKey,
         run_id: &str,
         generation: u64,
-        _report: &VerificationReport,
+        report: &VerificationReport,
         persist: impl FnOnce() -> Result<(), RunFailureKind>,
     ) -> Result<bool, RunFailureKind> {
         let _mutation = self
@@ -393,7 +392,34 @@ impl ModelVerificationCoordinator {
         if run_is_current(&state, target, run_id, generation) {
             state.active.remove(target);
         }
-        persisted.map(|()| true)
+        drop(state);
+
+        match persisted {
+            Ok(()) => {
+                let checks = u8::try_from(report.facts.len()).unwrap_or(u8::MAX);
+                self.emit_progress(progress_event(
+                    target,
+                    run_id,
+                    RunState::Completed,
+                    checks,
+                    checks,
+                    None,
+                ));
+                self.emit_changed(&scope_for(target));
+                Ok(true)
+            }
+            Err(failure) => {
+                self.emit_progress(progress_event(
+                    target,
+                    run_id,
+                    RunState::Failed,
+                    0,
+                    0,
+                    Some(failure),
+                ));
+                Err(failure)
+            }
+        }
     }
 
     fn emit_progress(&self, event: VerificationProgressEvent) {
@@ -451,6 +477,22 @@ fn run_is_current(
             .is_some_and(|run| run.run_id == run_id && run.generation == generation)
 }
 
+fn remove_scope_runs(
+    state: &mut CoordinatorState,
+    scope: &TargetScope,
+) -> Vec<(TargetKey, ActiveRun)> {
+    let matching: Vec<_> = state
+        .active
+        .keys()
+        .filter(|target| scope_for(target) == *scope)
+        .cloned()
+        .collect();
+    matching
+        .into_iter()
+        .filter_map(|target| state.active.remove(&target).map(|run| (target, run)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -496,6 +538,51 @@ mod tests {
             self.changed.lock().unwrap().push(scope.clone());
             Ok(())
         }
+    }
+
+    struct BlockingProgressSink {
+        blocked_state: crate::relay::model_verification::types::RunState,
+        entered: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl VerificationEventSink for BlockingProgressSink {
+        fn emit_progress(
+            &self,
+            event: &crate::relay::model_verification::types::VerificationProgressEvent,
+        ) -> Result<(), ()> {
+            if event.state == self.blocked_state {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+            }
+            Ok(())
+        }
+
+        fn emit_changed(&self, _scope: &TargetScope) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    fn blocking_sink(
+        blocked_state: crate::relay::model_verification::types::RunState,
+    ) -> (
+        Arc<BlockingProgressSink>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        (
+            Arc::new(BlockingProgressSink {
+                blocked_state,
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(release_rx),
+            }),
+            entered_rx,
+            release_tx,
+        )
     }
 
     struct BlockedVerifier {
@@ -670,6 +757,63 @@ mod tests {
         let rows = coordinator.list_results(&["provider-a".into()]).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].verdict, Verdict::Suspicious);
+    }
+
+    #[tokio::test]
+    async fn cancel_scope_stops_only_matching_runs_without_clearing_results_or_generation() {
+        let db = database_with_providers(&[("provider-a", "codex"), ("provider-b", "codex")]);
+        let prior = VerificationReport {
+            verdict: Verdict::Suspicious,
+            ..completed_report(target())
+        };
+        crate::relay::model_verification::store::upsert_active(&db, &prior).unwrap();
+        let verifier = Arc::new(BlockedVerifier::new());
+        let coordinator = Arc::new(ModelVerificationCoordinator::with_verifier(
+            db,
+            verifier.clone(),
+        ));
+        let matching = target();
+        let other = TargetKey::new("provider-b", "codex", "gpt-5.4");
+
+        coordinator.start(matching.clone()).await.unwrap();
+        let generation_before = coordinator
+            .state
+            .lock()
+            .unwrap()
+            .generations
+            .get(&TargetScope::new("provider-a", "codex"))
+            .copied();
+        coordinator.start(other.clone()).await.unwrap();
+
+        coordinator.cancel_scope(&TargetScope::new("provider-a", "codex"));
+
+        assert_eq!(
+            coordinator
+                .state
+                .lock()
+                .unwrap()
+                .generations
+                .get(&TargetScope::new("provider-a", "codex"))
+                .copied(),
+            generation_before,
+            "cancel must not advance the reset generation"
+        );
+        assert_eq!(
+            coordinator
+                .list_results(&["provider-a".into()])
+                .unwrap()
+                .len(),
+            1,
+            "cancel must preserve the prior report"
+        );
+        assert!(verifier.complete(&other, Ok(completed_report(other.clone()))));
+        wait_until(|| {
+            coordinator
+                .list_results(&["provider-b".into()])
+                .is_ok_and(|rows| rows.len() == 1)
+        })
+        .await;
+        assert!(!verifier.complete(&matching, Ok(completed_report(matching.clone()))));
     }
 
     #[tokio::test]
@@ -897,6 +1041,100 @@ mod tests {
                 && event.failure == Some(RunFailureKind::Cancelled)
         }));
         assert!(sink.changed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_waits_until_the_cancel_transition_is_published() {
+        let verifier = Arc::new(BlockedVerifier::new());
+        let (sink, entered, release) =
+            blocking_sink(crate::relay::model_verification::types::RunState::Cancelled);
+        let coordinator = Arc::new(ModelVerificationCoordinator::with_dependencies(
+            Arc::new(Database::memory().unwrap()),
+            verifier,
+            sink,
+        ));
+        let run = coordinator.start(target()).await.unwrap();
+
+        let cancel_coordinator = coordinator.clone();
+        let cancel = tokio::task::spawn_blocking(move || cancel_coordinator.cancel(&run.run_id));
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
+            .await
+            .unwrap();
+
+        let restart_coordinator = coordinator.clone();
+        let mut restart = tokio::spawn(async move { restart_coordinator.start(target()).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut restart)
+                .await
+                .is_err()
+        );
+
+        release.send(()).unwrap();
+        cancel.await.unwrap().unwrap();
+        restart.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_cannot_overtake_running_progress() {
+        let verifier = Arc::new(BlockedVerifier::new());
+        let (sink, entered, release) =
+            blocking_sink(crate::relay::model_verification::types::RunState::Running);
+        let coordinator = Arc::new(ModelVerificationCoordinator::with_dependencies(
+            Arc::new(Database::memory().unwrap()),
+            verifier,
+            sink,
+        ));
+
+        let start_coordinator = coordinator.clone();
+        let start = tokio::spawn(async move { start_coordinator.start(target()).await });
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
+            .await
+            .unwrap();
+
+        let clear_coordinator = coordinator.clone();
+        let mut clear = tokio::task::spawn_blocking(move || {
+            clear_coordinator.clear_scope(&TargetScope::new("provider-a", "codex"))
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut clear)
+                .await
+                .is_err()
+        );
+
+        release.send(()).unwrap();
+        start.await.unwrap().unwrap();
+        clear.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_cannot_overtake_completed_progress() {
+        let verifier = Arc::new(BlockedVerifier::new());
+        let (sink, entered, release) =
+            blocking_sink(crate::relay::model_verification::types::RunState::Completed);
+        let coordinator = Arc::new(ModelVerificationCoordinator::with_dependencies(
+            database_with_providers(&[("provider-a", "codex")]),
+            verifier.clone(),
+            sink,
+        ));
+
+        coordinator.start(target()).await.unwrap();
+        assert!(verifier.complete(&target(), Ok(completed_report(target()))));
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
+            .await
+            .unwrap();
+
+        let clear_coordinator = coordinator.clone();
+        let mut clear = tokio::task::spawn_blocking(move || {
+            clear_coordinator.clear_scope(&TargetScope::new("provider-a", "codex"))
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut clear)
+                .await
+                .is_err()
+        );
+
+        release.send(()).unwrap();
+        clear.await.unwrap().unwrap();
     }
 
     #[allow(dead_code)]

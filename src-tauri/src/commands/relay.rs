@@ -1421,6 +1421,15 @@ async fn reset_tier_config_impl(
     provider_id: &str,
     app_type: AppType,
 ) -> Result<(), AppError> {
+    let state = app_handle.state::<AppState>();
+    reset_tier_config_in_state(state.inner(), provider_id, app_type)
+}
+
+fn reset_tier_config_in_state(
+    state: &AppState,
+    provider_id: &str,
+    app_type: AppType,
+) -> Result<(), AppError> {
     // 只对托管档位有效 —— 用户自建的 provider 没有「默认配置」这个概念。
     // 用正向判据 `is_managed`，不要拿 `reject_if_managed` 的 Err 反着判 ——
     // 那个函数的语义是「撞到托管项就拦下」（给通用命令用），这里要的恰好相反
@@ -1431,7 +1440,9 @@ async fn reset_tier_config_impl(
         ));
     }
 
-    let state = app_handle.state::<AppState>();
+    let verification_scope =
+        crate::relay::model_verification::types::TargetScope::new(provider_id, app_type.as_str());
+    state.model_verification.cancel_scope(&verification_scope);
     let existing = state
         .db
         .get_provider_by_id(provider_id, app_type.as_str())
@@ -1471,7 +1482,7 @@ async fn reset_tier_config_impl(
     // `None` = 旧数据：那时只能按站点回落，且**只在该站只有一行时**才敢用 ——
     // 有多行还猜就是重演这个 bug。
     let account_id = existing.meta.as_ref().and_then(|m| m.loongport_account_id);
-    let candidates: Vec<_> = with_conn(state.inner(), creds::list)?
+    let candidates: Vec<_> = with_conn(state, creds::list)?
         .into_iter()
         .filter(|candidate| candidate.site_origin == site_origin)
         .collect();
@@ -1561,6 +1572,11 @@ async fn reset_tier_config_impl(
         .set_user_edited(app_type.as_str(), &restored.id, false)
         .map_err(|e| AppError::Database(format!("清除已手工维护标记失败: {e}")))?;
 
+    state
+        .model_verification
+        .clear_scope(&verification_scope)
+        .map_err(|_| AppError::Database("清除模型验证结果失败".into()))?;
+
     // 重置的正是当前项 ⇒ 把默认配置落到 live 文件上。
     //
     // ⚠️ **这一步不可省，否则这个命令对当前项整体无效**：这个按钮的全部意义就是
@@ -1572,11 +1588,11 @@ async fn reset_tier_config_impl(
     // 与 `do_provision` 同一条路（见那边关于为什么用 `sync_current_provider_for_app`
     // 而不是 `switch` 的说明）。失败只 warn：DB 已经是对的，切一次即生效，
     // 不该因为落地文件写不下去就报「恢复失败」。
-    let is_current = ProviderService::current(&state, app_type.clone())
+    let is_current = ProviderService::current(state, app_type.clone())
         .map(|current| current == restored.id)
         .unwrap_or(false);
     if is_current {
-        refresh_live_for_current_tiers(&state, std::slice::from_ref(&app_type));
+        refresh_live_for_current_tiers(state, std::slice::from_ref(&app_type));
     }
 
     Ok(())
@@ -2592,6 +2608,21 @@ fn install_imagegen_mcp(state: &AppState) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::HashMap,
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+
+    use futures::channel::oneshot;
+
+    use crate::relay::model_verification::{
+        coordinator::{ActiveVerifier, ModelVerificationCoordinator, VerificationFuture},
+        types::{
+            EvidenceLevel, RunFailureKind, TargetKey, Verdict, VerificationReport, RULES_VERSION,
+        },
+    };
 
     fn provider_with_id(id: &str) -> Provider {
         Provider {
@@ -3148,40 +3179,254 @@ mod tests {
     /// 这正是它需要一条测试的原因。
     ///
     /// 会红的改法：把归属判据换回 `creds::load()` / 任何「全局当前」的东西。
-    #[test]
-    fn reset_resolves_the_owning_site_not_the_current_one() {
-        // 判据本身：从 provider 的 `website_url` 认主人，而不是问「现在哪个站是当前」。
-        fn owner_of(existing: &Provider) -> Option<&str> {
-            existing.website_url.as_deref()
+    struct ResetVerifier {
+        senders:
+            Mutex<HashMap<TargetKey, oneshot::Sender<Result<VerificationReport, RunFailureKind>>>>,
+    }
+
+    impl ResetVerifier {
+        fn new() -> Self {
+            Self {
+                senders: Mutex::new(HashMap::new()),
+            }
         }
 
-        let site_a = "https://a.example";
-        let site_b = "https://b.example";
+        fn complete(&self, target: &TargetKey, report: VerificationReport) -> bool {
+            self.senders
+                .lock()
+                .unwrap()
+                .remove(target)
+                .is_some_and(|sender| sender.send(Ok(report)).is_ok())
+        }
+    }
 
-        let tier_of_b = seeded(
-            &provision::provider_id_for(site_b, Some(1), 7),
-            "B 的档位",
-            Some(site_b),
-        );
+    impl ActiveVerifier for ResetVerifier {
+        fn prepare(&self, target: TargetKey) -> Result<VerificationFuture, RunFailureKind> {
+            let (sender, receiver) = oneshot::channel();
+            self.senders.lock().unwrap().insert(target, sender);
+            let future: Pin<
+                Box<
+                    dyn Future<Output = Result<VerificationReport, RunFailureKind>>
+                        + Send
+                        + 'static,
+                >,
+            > = Box::pin(async move { receiver.await.unwrap() });
+            Ok(future)
+        }
+    }
 
+    fn verification_report(target: TargetKey, verdict: Verdict) -> VerificationReport {
+        VerificationReport {
+            target,
+            verdict,
+            evidence_level: EvidenceLevel::ProtocolBehavior,
+            facts: Vec::new(),
+            rules_version: RULES_VERSION,
+            checked_at: 1_786_214_400,
+        }
+    }
+
+    fn reset_state(valid_key: bool) -> (AppState, Arc<ResetVerifier>, String, String, TargetKey) {
+        let site = "https://reset.example";
+        let db = Arc::new(crate::database::Database::memory().expect("init db"));
+        let verifier = Arc::new(ResetVerifier::new());
+        let mut state = AppState::new(db.clone());
+        state.model_verification = Arc::new(ModelVerificationCoordinator::with_verifier(
+            db.clone(),
+            verifier.clone(),
+        ));
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "Reset", "https://reset.example/v1")
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "reset@example.com",
+                    login_identifier: "reset@example.com",
+                },
+                "token",
+                None,
+                None,
+            )
+        })
+        .expect("save credentials");
+
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let other_provider_id = provision::provider_id_for(site, Some(7), 2);
+        let settings_config = if valid_key {
+            provision::settings_config_for(
+                &AppType::Codex,
+                "sk-reset",
+                "Reset tier",
+                "https://reset.example/v1",
+                DEFAULT_MODEL,
+            )
+            .expect("codex config")
+        } else {
+            serde_json::json!({"model_provider":"custom"})
+        };
+        let provider = Provider {
+            settings_config,
+            ..seeded_owned(&provider_id, "Reset tier", Some(site), 7)
+        };
+        db.save_provider("codex", &provider).expect("save provider");
+        db.save_provider(
+            "codex",
+            &Provider {
+                settings_config: provision::settings_config_for(
+                    &AppType::Codex,
+                    "sk-other",
+                    "Other tier",
+                    "https://reset.example/v1",
+                    DEFAULT_MODEL,
+                )
+                .expect("other config"),
+                ..seeded_owned(&other_provider_id, "Other tier", Some(site), 7)
+            },
+        )
+        .expect("save other provider");
+        db.set_user_edited("codex", &provider_id, true)
+            .expect("mark edited");
+
+        let running = TargetKey::new(&provider_id, "codex", "gpt-running");
+        for report in [
+            verification_report(
+                TargetKey::new(&provider_id, "codex", "gpt-a"),
+                Verdict::Suspicious,
+            ),
+            verification_report(
+                TargetKey::new(&provider_id, "codex", "gpt-b"),
+                Verdict::Anomaly,
+            ),
+            verification_report(
+                TargetKey::new(&other_provider_id, "codex", "gpt-other"),
+                Verdict::Trusted,
+            ),
+        ] {
+            crate::relay::model_verification::store::upsert_active(&db, &report)
+                .expect("seed verification report");
+        }
+
+        (state, verifier, provider_id, other_provider_id, running)
+    }
+
+    #[tokio::test]
+    async fn reset_tier_config_validation_failure_cancels_run_but_preserves_all_reports() {
+        let (state, verifier, provider_id, other_provider_id, running) = reset_state(false);
+        state
+            .model_verification
+            .start(running.clone())
+            .await
+            .expect("start run");
+
+        let error = reset_tier_config_in_state(&state, &provider_id, AppType::Codex)
+            .expect_err("missing key must reject reset");
+
+        assert!(error.to_string().contains("密钥"));
         assert_eq!(
-            owner_of(&tier_of_b),
-            Some(site_b),
-            "B 的档位必须认 B 作主人 —— 哪怕此刻的「当前站」是 A"
+            state
+                .model_verification
+                .list_results(&[provider_id.clone(), other_provider_id.clone()])
+                .expect("list reports")
+                .len(),
+            3
         );
-        assert_ne!(
-            owner_of(&tier_of_b),
-            Some(site_a),
-            "绝不能解析到别的站：那会把 B 的 sk 配上 A 的端点，每次调用都 401"
+        let _ = verifier.complete(
+            &running,
+            verification_report(running.clone(), Verdict::Trusted),
         );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state
+                .model_verification
+                .list_results(&[provider_id, other_provider_id])
+                .expect("reports after late completion")
+                .len(),
+            3
+        );
+    }
 
-        // 没有 website_url 的档位（旧版本写的脏记录）要报错而不是猜一个站 ——
-        // 猜错的代价与上面那条一样，而且用户根本不知道发生了什么。
-        let orphan = seeded("loongport-orphan", "没有归属", None);
-        assert!(
-            owner_of(&orphan).is_none(),
-            "认不出主人时必须为 None（调用方据此报错引导重新获取密钥），不能回落到当前站"
+    #[tokio::test]
+    async fn reset_tier_config_save_failure_cancels_run_but_preserves_all_reports() {
+        let (state, verifier, provider_id, other_provider_id, running) = reset_state(true);
+        state
+            .model_verification
+            .start(running.clone())
+            .await
+            .expect("start run");
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_reset BEFORE UPDATE ON providers
+                 BEGIN SELECT RAISE(FAIL, 'reject reset'); END;",
+            )
+            .expect("install failure trigger");
+
+        let error = reset_tier_config_in_state(&state, &provider_id, AppType::Codex)
+            .expect_err("provider save must fail");
+
+        assert!(matches!(error, AppError::Database(_)));
+        assert_eq!(
+            state
+                .model_verification
+                .list_results(&[provider_id.clone(), other_provider_id.clone()])
+                .expect("list reports")
+                .len(),
+            3
         );
+        let _ = verifier.complete(
+            &running,
+            verification_report(running.clone(), Verdict::Trusted),
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state
+                .model_verification
+                .list_results(&[provider_id, other_provider_id])
+                .expect("reports after late completion")
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_tier_config_success_clears_only_target_scope_and_rejects_late_completion() {
+        let (state, verifier, provider_id, other_provider_id, running) = reset_state(true);
+        state
+            .model_verification
+            .start(running.clone())
+            .await
+            .expect("start run");
+
+        reset_tier_config_in_state(&state, &provider_id, AppType::Codex).expect("reset succeeds");
+
+        let rows = state
+            .model_verification
+            .list_results(&[provider_id.clone(), other_provider_id.clone()])
+            .expect("list reports");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target.provider_id, other_provider_id);
+        assert!(!state
+            .db
+            .get_user_edited("codex", &provider_id)
+            .expect("edited flag"));
+        let _ = verifier.complete(
+            &running,
+            verification_report(running.clone(), Verdict::Trusted),
+        );
+        tokio::task::yield_now().await;
+        assert!(state
+            .model_verification
+            .list_results(&[provider_id])
+            .expect("target reports")
+            .is_empty());
     }
 
     /// 备份是「删 auth.json」之前的唯一后路，所以它必须真的把内容拷出来。
@@ -3270,9 +3515,10 @@ mod tests {
     ///
     /// ## 为什么这条测试读源码而不是调函数
     ///
-    /// `do_provision` 与 `reset_tier_config_impl` 都吃 `&tauri::AppHandle`，单测与集成
-    /// 测试里都造不出来 ⇒ 命令层这一步**没有任何测试能直接执行到**。第二路 review 实测
-    /// 证明了这个盲区的代价：把那两处调用注释掉，2578 条测试**全绿**——
+    /// `do_provision` 仍吃 `&tauri::AppHandle`；reset 的数据库与协调器路径已经下沉到
+    /// `reset_tier_config_in_state` 并由真实行为测试覆盖，但“当前项刷新 live 文件”会触碰
+    /// 用户配置，单元测试不能安全执行。第二路 review 实测证明了这条接线盲区的代价：
+    /// 把那两处调用注释掉，2578 条测试**全绿**——
     /// 那条集成测试（`loongport_codex_live.rs`）自己调服务层，所以它测的是服务层，
     /// 不是「命令层有没有调服务层」。
     ///
@@ -3299,11 +3545,11 @@ mod tests {
              sk 被撤销重建后，CLI 会一直用旧密钥，而用户点不动那个档位（UI 认为它已是当前项）"
         );
 
-        // 取 `reset_tier_config_impl` 那段。
+        // 取真正执行重置的 state helper 那段。
         let reset = {
             let start = src
-                .find("async fn reset_tier_config_impl")
-                .expect("reset_tier_config_impl 还在吗");
+                .find("fn reset_tier_config_in_state")
+                .expect("reset_tier_config_in_state 还在吗");
             let end = src[start..]
                 .find("\n/// 保存中转站行的手工顺序")
                 .expect("reset 之后那个命令还在吗");
