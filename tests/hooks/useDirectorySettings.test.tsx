@@ -46,6 +46,8 @@ const createSettings = (
   showInTray: true,
   minimizeToTrayOnClose: true,
   enableClaudePluginIntegration: false,
+  preserveCodexOfficialAuthOnSwitch: true,
+  unifyCodexSessionHistory: true,
   claudeConfigDir: "/claude/custom",
   codexConfigDir: "/codex/custom",
   grokConfigDir: "/grok/custom",

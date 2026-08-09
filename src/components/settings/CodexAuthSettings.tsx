@@ -99,7 +99,7 @@ export function CodexAuthSettings({
         icon={<KeyRound className="h-4 w-4 text-emerald-500" />}
         title={t("settings.preserveCodexOfficialAuthOnSwitch")}
         description={t("settings.preserveCodexOfficialAuthOnSwitchDescription")}
-        checked={settings.preserveCodexOfficialAuthOnSwitch ?? false}
+        checked={settings.preserveCodexOfficialAuthOnSwitch}
         onCheckedChange={(value) =>
           onChange({ preserveCodexOfficialAuthOnSwitch: value })
         }
@@ -109,7 +109,7 @@ export function CodexAuthSettings({
         icon={<History className="h-4 w-4 text-sky-500" />}
         title={t("settings.unifyCodexSessionHistory")}
         description={t("settings.unifyCodexSessionHistoryDescription")}
-        checked={settings.unifyCodexSessionHistory ?? false}
+        checked={settings.unifyCodexSessionHistory}
         onCheckedChange={handleUnifyHistoryChange}
       />
 
