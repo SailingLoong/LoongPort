@@ -48,6 +48,13 @@ Pre-flight review: no blocking requirement contradictions. Execution order is 1 
 - Focused verification: event consistency passed; store 8 passed; compile, formatting, and diff checks passed.
 - Runtime Task 9 is next.
 
+## Runtime Task 9 — complete
+
+- Implementation commit: pending (`feat(model-verification): expose global runtime detection`)
+- Independent review: completed locally; no blocking findings.
+- Focused verification: typecheck passed; full Vitest run 732 passed.
+- Runtime Task 10 is next.
+
 ## Runtime Task 2 — complete
 
 - Implementation commit: pending (`feat(model-verification): reconcile proxy leases safely`)

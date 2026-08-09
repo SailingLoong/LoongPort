@@ -3202,6 +3202,14 @@
       },
       "actions": { "start": "開始驗證", "stop": "停止驗證", "retry": "重試" },
       "status": { "running": "正在驗證 {{completed}} / {{total}}" },
+      "runtime": {
+        "autoLabel": "執行時自動檢測（全域）",
+        "autoHelp": "對所有中轉分組和模型生效。開啟後，LoongPort 會透過本機代理觀察 Codex 和 Claude 的實際回應；不會額外發送檢測請求，也不會保存對話內容。",
+        "loadError": "執行時檢測狀態載入失敗",
+        "anomalyToast": "{{app}} 的模型 {{model}} 檢測到異常，請開啟模型驗證查看。",
+        "apps": { "codex": "Codex", "claude": "Claude" },
+        "status": { "active": "已啟用", "waiting": "等待中", "error": "錯誤" }
+      },
       "tierVerdict": {
         "suspicious": "模型存疑",
         "anomaly": "模型異常",

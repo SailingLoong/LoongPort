@@ -3205,6 +3205,14 @@
         "retry": "Retry"
       },
       "status": { "running": "Verifying {{completed}} / {{total}}" },
+      "runtime": {
+        "autoLabel": "Automatic runtime verification (global)",
+        "autoHelp": "Applies to all relay groups and models. LoongPort observes actual Codex and Claude responses through the local proxy; it sends no extra probes and never saves conversation content.",
+        "loadError": "Could not load runtime verification status.",
+        "anomalyToast": "An anomaly was detected for {{app}} model {{model}}. Open Verify model for details.",
+        "apps": { "codex": "Codex", "claude": "Claude" },
+        "status": { "active": "Active", "waiting": "Waiting", "error": "Error" }
+      },
       "tierVerdict": {
         "suspicious": "Model suspicious",
         "anomaly": "Model anomaly",

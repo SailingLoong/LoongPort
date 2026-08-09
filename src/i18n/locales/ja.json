@@ -3205,6 +3205,14 @@
         "retry": "再試行"
       },
       "status": { "running": "検証中 {{completed}} / {{total}}" },
+      "runtime": {
+        "autoLabel": "実行時の自動検証（グローバル）",
+        "autoHelp": "すべてのリレーグループとモデルに適用されます。LoongPort はローカルプロキシ経由で Codex と Claude の実際の応答を監視します。追加の検証リクエストは送信せず、会話内容も保存しません。",
+        "loadError": "実行時検証の状態を読み込めませんでした。",
+        "anomalyToast": "{{app}} のモデル {{model}} で異常を検出しました。モデル検証を開いて確認してください。",
+        "apps": { "codex": "Codex", "claude": "Claude" },
+        "status": { "active": "有効", "waiting": "待機中", "error": "エラー" }
+      },
       "tierVerdict": {
         "suspicious": "モデルに疑い",
         "anomaly": "モデル異常",
