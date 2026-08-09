@@ -27,7 +27,7 @@ pub(crate) async fn run_balanced(
     let tool = send_message(client, &endpoint, target.api_key(), tool_request(&model)).await?;
     facts.push(parse_tool_response(&tool));
 
-    let mut stream_facts = StreamReducer::new(&model, profile);
+    let mut stream_facts = StreamReducer::new(&model);
     send_stream(
         client,
         &endpoint,
@@ -292,35 +292,33 @@ fn failed(code: EvidenceCode) -> EvidenceFact {
 
 struct StreamReducer<'a> {
     expected_model: &'a str,
-    profile: &'a CapabilityProfile,
     saw_message_start: bool,
     saw_content_start: bool,
     saw_message_delta: bool,
     saw_message_stop: bool,
+    open_content_block: Option<u64>,
+    open_block_has_delta: bool,
     lifecycle_order_valid: bool,
     model_matches: Option<bool>,
     usage_consistent: bool,
     saw_usage: bool,
-    saw_thinking: bool,
-    saw_signature: bool,
     foreign_protocol: bool,
 }
 
 impl<'a> StreamReducer<'a> {
-    fn new(expected_model: &'a str, profile: &'a CapabilityProfile) -> Self {
+    fn new(expected_model: &'a str) -> Self {
         Self {
             expected_model,
-            profile,
             saw_message_start: false,
             saw_content_start: false,
             saw_message_delta: false,
             saw_message_stop: false,
+            open_content_block: None,
+            open_block_has_delta: false,
             lifecycle_order_valid: true,
             model_matches: None,
             usage_consistent: true,
             saw_usage: false,
-            saw_thinking: false,
-            saw_signature: false,
             foreign_protocol: false,
         }
     }
@@ -363,43 +361,56 @@ impl<'a> StreamReducer<'a> {
                 self.observe_usage(message.get("usage"));
             }
             Some("content_block_start") => {
-                if !self.saw_message_start || self.saw_message_delta || self.saw_message_stop {
+                let index = event_index(&value);
+                if !self.saw_message_start
+                    || self.saw_message_delta
+                    || self.saw_message_stop
+                    || self.open_content_block.is_some()
+                    || index.is_none()
+                {
                     self.lifecycle_order_valid = false;
                 }
                 self.saw_content_start = true;
-                if value
-                    .get("content_block")
-                    .and_then(|block| block.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("thinking")
-                {
-                    self.saw_thinking = true;
+                if let Some(index) = index {
+                    self.open_content_block = Some(index);
+                    self.open_block_has_delta = false;
                 }
             }
-            Some("content_block_delta")
-                if value
-                    .get("delta")
-                    .and_then(|delta| delta.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("signature_delta")
-                    && value
-                        .get("delta")
-                        .and_then(|delta| delta.get("signature"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|signature| !signature.is_empty())
-                    && self.saw_thinking =>
-            {
-                self.saw_signature = true;
+            Some("content_block_delta") => {
+                if self.open_content_block.is_none()
+                    || self.open_content_block != event_index(&value)
+                {
+                    self.lifecycle_order_valid = false;
+                } else {
+                    self.open_block_has_delta = true;
+                }
+            }
+            Some("content_block_stop") => {
+                if self.open_content_block.is_none()
+                    || self.open_content_block != event_index(&value)
+                    || !self.open_block_has_delta
+                {
+                    self.lifecycle_order_valid = false;
+                } else {
+                    self.open_content_block = None;
+                    self.open_block_has_delta = false;
+                }
             }
             Some("message_delta") => {
-                if !self.saw_content_start || self.saw_message_stop {
+                if !self.saw_content_start
+                    || self.saw_message_stop
+                    || self.open_content_block.is_some()
+                {
                     self.lifecycle_order_valid = false;
                 }
                 self.saw_message_delta = true;
                 self.observe_usage(value.get("usage"));
             }
             Some("message_stop") => {
-                if !self.saw_message_delta || self.saw_message_stop {
+                if !self.saw_message_delta
+                    || self.saw_message_stop
+                    || self.open_content_block.is_some()
+                {
                     self.lifecycle_order_valid = false;
                 }
                 self.saw_message_stop = true;
@@ -422,6 +433,7 @@ impl<'a> StreamReducer<'a> {
             && self.saw_content_start
             && self.saw_message_delta
             && self.saw_message_stop
+            && self.open_content_block.is_none()
         {
             passed(EvidenceCode::StreamLifecycle)
         } else {
@@ -439,13 +451,6 @@ impl<'a> StreamReducer<'a> {
         } else {
             failed(EvidenceCode::UsageConsistency)
         });
-        if self.profile.supports_thinking_signature {
-            facts.push(if self.saw_thinking && self.saw_signature {
-                passed(EvidenceCode::ThinkingSignature)
-            } else {
-                failed(EvidenceCode::ThinkingSignature)
-            });
-        }
         if self.foreign_protocol {
             facts.push(failed(EvidenceCode::ForeignProtocol));
         }
@@ -453,12 +458,16 @@ impl<'a> StreamReducer<'a> {
     }
 }
 
+fn event_index(value: &Value) -> Option<u64> {
+    value.get("index").and_then(Value::as_u64)
+}
+
 pub(crate) fn parse_stream(
     stream: &str,
     expected_model: &str,
-    profile: &CapabilityProfile,
+    _profile: &CapabilityProfile,
 ) -> Result<Vec<EvidenceFact>, RunFailure> {
-    let mut reducer = StreamReducer::new(expected_model, profile);
+    let mut reducer = StreamReducer::new(expected_model);
     for event in stream.split("\n\n") {
         if !event.trim().is_empty() {
             reducer.observe(event)?;
@@ -470,11 +479,12 @@ pub(crate) fn parse_stream(
 #[cfg(test)]
 mod tests {
     use std::{
+        convert::Infallible,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
-    use super::REPORT_PROBE;
+    use super::{reduce_thinking_response, stream_request, thinking_request, REPORT_PROBE};
 
     use crate::{
         app_config::AppType,
@@ -491,12 +501,14 @@ mod tests {
         },
     };
     use axum::{
+        body::Body,
         extract::{OriginalUri, State},
         http::{HeaderMap, HeaderValue, StatusCode},
         response::{IntoResponse, Response},
         routing::post,
         Json, Router,
     };
+    use bytes::Bytes;
     use serde_json::{json, Value};
 
     #[derive(Debug, Clone)]
@@ -505,25 +517,23 @@ mod tests {
         api_key: Option<HeaderValue>,
         version: Option<HeaderValue>,
         content_type: Option<HeaderValue>,
+        accept: Option<HeaderValue>,
         body: Value,
     }
 
     type Requests = Arc<Mutex<Vec<RecordedRequest>>>;
 
     #[test]
-    fn stream_reduces_an_opaque_thinking_signature_to_a_fact() {
+    fn thinking_response_reduces_an_opaque_signature_to_a_fact() {
         let signature = "SENTINEL_SIGNATURE_MUST_NOT_PERSIST";
-        let stream = format!(
-            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"type\":\"message\",\"model\":\"claude-haiku-4-5\",\"usage\":{{\"input_tokens\":3,\"output_tokens\":0}}}}}}\n\nevent: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"private\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"signature_delta\",\"signature\":\"{signature}\"}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":2}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        let response = format!(
+            "{{\"type\":\"message\",\"model\":\"claude-haiku-4-5\",\"content\":[{{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"{signature}\"}}],\"usage\":{{\"input_tokens\":3,\"output_tokens\":2}}}}"
         );
-        let profile = CapabilityProfile::for_target(&AppType::Claude, "claude-haiku-4-5");
 
-        let facts = parse_stream(&stream, "claude-haiku-4-5", &profile).unwrap();
+        let (fact, _) = reduce_thinking_response(response.as_bytes());
 
-        assert!(facts.iter().any(|fact| {
-            fact.code == EvidenceCode::ThinkingSignature && fact.outcome == EvidenceOutcome::Passed
-        }));
-        assert!(!serde_json::to_string(&facts).unwrap().contains(signature));
+        assert_eq!(fact, passed(EvidenceCode::ThinkingSignature));
+        assert!(!serde_json::to_string(&fact).unwrap().contains(signature));
     }
 
     #[test]
@@ -554,7 +564,9 @@ mod tests {
         let stream = concat!(
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"future-model-x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
             "event: ping\ndata: {\"type\":\"ping\",\"metadata\":{\"ignored\":true}}\n\n",
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ready\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
         );
@@ -563,6 +575,18 @@ mod tests {
 
         assert!(facts.contains(&passed(EvidenceCode::StreamLifecycle)));
         assert!(facts.contains(&passed(EvidenceCode::ModelMatch)));
+    }
+
+    #[test]
+    fn ordinary_stream_does_not_evaluate_thinking_for_a_known_model() {
+        let profile = CapabilityProfile::for_target(&AppType::Claude, "claude-haiku-4-5");
+        let stream = ordinary_stream("claude-haiku-4-5");
+
+        let facts = parse_stream(&stream, "claude-haiku-4-5", &profile).unwrap();
+
+        assert!(!facts
+            .iter()
+            .any(|fact| fact.code == EvidenceCode::ThinkingSignature));
     }
 
     #[test]
@@ -579,7 +603,30 @@ mod tests {
         let facts = parse_stream(stream, "claude-haiku-4-5", &profile).unwrap();
 
         assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
-        assert!(facts.contains(&failed(EvidenceCode::ThinkingSignature)));
+    }
+
+    #[test]
+    fn stream_requires_a_delta_and_matching_stop_for_each_content_block() {
+        let profile = CapabilityProfile::for_target(&AppType::Claude, "future-model-x");
+        for stream in [
+            concat!(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"future-model-x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            ),
+            concat!(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"future-model-x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ready\"}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            ),
+        ] {
+            let facts = parse_stream(stream, "future-model-x", &profile).unwrap();
+            assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
+        }
     }
 
     #[tokio::test]
@@ -625,6 +672,27 @@ mod tests {
         let continuation = &requests[4].body["messages"][1]["content"][0];
         assert_eq!(continuation["signature"], "SENTINEL_SIGNATURE");
         assert_eq!(continuation["thinking"], "SENTINEL_THINKING");
+        assert_eq!(requests[2].accept.as_ref().unwrap(), "text/event-stream");
+        assert!(requests[2].body.get("thinking").is_none());
+        assert_eq!(
+            requests[3].body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024})
+        );
+    }
+
+    #[test]
+    fn thinking_requests_use_manual_haiku_and_adaptive_opus_or_sonnet_shapes() {
+        assert!(stream_request("claude-haiku-4-5").get("thinking").is_none());
+        assert_eq!(
+            thinking_request("claude-haiku-4-5")["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024})
+        );
+        for model in ["claude-opus-5", "claude-sonnet-5"] {
+            assert_eq!(
+                thinking_request(model)["thinking"],
+                json!({"type": "adaptive"})
+            );
+        }
     }
 
     #[tokio::test]
@@ -664,6 +732,20 @@ mod tests {
             assert_eq!(error, expected);
             assert!(!format!("{error:?}").contains("SENTINEL"));
         }
+    }
+
+    #[tokio::test]
+    async fn utf8_split_across_sse_chunks_is_reduced_like_one_complete_event() {
+        let endpoint =
+            spawn_server(Router::new().route("/v1/messages", post(utf8_split_handler))).await;
+        let target = target_for(&endpoint, "SENTINEL_API_KEY");
+        let profile = CapabilityProfile::for_target(&AppType::Claude, "future-model-x");
+
+        let facts = run_balanced(&reqwest::Client::new(), &target, &profile)
+            .await
+            .unwrap();
+
+        assert!(facts.contains(&passed(EvidenceCode::StreamLifecycle)));
     }
 
     #[tokio::test]
@@ -798,6 +880,7 @@ mod tests {
             api_key: headers.get("x-api-key").cloned(),
             version: headers.get("anthropic-version").cloned(),
             content_type: headers.get("content-type").cloned(),
+            accept: headers.get("accept").cloned(),
             body: body.clone(),
         });
         if body.get("stream") == Some(&Value::Bool(true)) {
@@ -833,6 +916,26 @@ mod tests {
         }
     }
 
+    async fn utf8_split_handler(Json(body): Json<Value>) -> Response {
+        if body.get("stream") != Some(&Value::Bool(true)) {
+            if body.get("tools").is_some() {
+                return Json(json!({"type": "message", "model": "claude-haiku-4-5", "content": [{"type": "tool_use", "name": REPORT_PROBE, "input": {}}], "usage": {"input_tokens": 1, "output_tokens": 1}})).into_response();
+            }
+            return message_response("claude-haiku-4-5");
+        }
+
+        let stream = async_stream::stream! {
+            yield Ok::<_, Infallible>(Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\",\"note\":\"\xE4"));
+            yield Ok(Bytes::from_static(b"\xBD\xA0\"}\n\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ready\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+        };
+        let mut response = Body::from_stream(stream).into_response();
+        response.headers_mut().insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream"),
+        );
+        response
+    }
+
     fn message_response(model: &str) -> Response {
         Json(json!({
             "type": "message", "model": model, "content": [{"type": "text", "text": "report ready"}],
@@ -843,10 +946,17 @@ mod tests {
     fn happy_stream() -> String {
         concat!(
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"thinking\"}}\n\n",
-            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"SENTINEL_SIGNATURE\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"SENTINEL_SIGNATURE\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
         ).into()
+    }
+
+    fn ordinary_stream(model: &str) -> String {
+        format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":0}}}}}}\n\nevent: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"ready\"}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":1}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        )
     }
 }

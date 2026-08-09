@@ -59,26 +59,27 @@ pub(crate) async fn read_sse(
     response: Response,
     mut on_event: impl FnMut(&str) -> Result<(), RunFailure>,
 ) -> Result<(), RunFailure> {
-    let mut event = String::new();
-    let mut pending = String::new();
+    let mut event = Vec::new();
+    let mut pending = Vec::new();
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(map_transport_failure)?;
-        let chunk = std::str::from_utf8(&chunk).map_err(|_| RunFailure::InvalidResponse)?;
-        pending.push_str(chunk);
+        pending.extend_from_slice(&chunk);
 
-        while let Some(newline) = pending.find('\n') {
-            let mut line = pending.drain(..=newline).collect::<String>();
-            if line.ends_with('\n') {
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = pending.drain(..=newline).collect();
+            if line.last() == Some(&b'\n') {
                 line.pop();
             }
-            if line.ends_with('\r') {
+            if line.last() == Some(&b'\r') {
                 line.pop();
             }
             if line.is_empty() {
                 if !event.is_empty() {
-                    on_event(&event)?;
+                    on_event(
+                        std::str::from_utf8(&event).map_err(|_| RunFailure::InvalidResponse)?,
+                    )?;
                     event.clear();
                 }
                 continue;
@@ -86,8 +87,8 @@ pub(crate) async fn read_sse(
             if event.len().saturating_add(line.len()).saturating_add(1) > MAX_SSE_EVENT_BYTES {
                 return Err(RunFailure::ResponseTooLarge);
             }
-            event.push_str(&line);
-            event.push('\n');
+            event.extend_from_slice(&line);
+            event.push(b'\n');
         }
 
         if pending.len().saturating_add(event.len()) > MAX_SSE_EVENT_BYTES {
@@ -99,10 +100,10 @@ pub(crate) async fn read_sse(
         if event.len().saturating_add(pending.len()) > MAX_SSE_EVENT_BYTES {
             return Err(RunFailure::ResponseTooLarge);
         }
-        event.push_str(&pending);
+        event.extend_from_slice(&pending);
     }
     if !event.is_empty() {
-        on_event(&event)?;
+        on_event(std::str::from_utf8(&event).map_err(|_| RunFailure::InvalidResponse)?)?;
     }
     Ok(())
 }
