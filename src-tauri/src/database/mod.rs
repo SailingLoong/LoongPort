@@ -102,6 +102,25 @@ fn register_db_change_hook(conn: &Connection) {
     ));
 }
 
+/// Prefer WAL so read-only companion processes can read while the app writes.
+///
+/// SQLite may reject WAL on some filesystems (for example, a read-only or
+/// otherwise limited mount). That is a compatibility condition, not a reason
+/// to prevent the app from starting, so callers decide whether to warn or fail.
+fn configure_wal_mode(conn: &Connection) -> Result<(), AppError> {
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL;", [], |row| row.get(0))
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+    if mode.eq_ignore_ascii_case("wal") {
+        Ok(())
+    } else {
+        Err(AppError::Database(format!(
+            "SQLite did not enable WAL journal mode (reported: {mode})"
+        )))
+    }
+}
+
 impl Database {
     /// 初始化数据库连接并创建表
     ///
@@ -116,6 +135,10 @@ impl Database {
         }
 
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
+
+        if let Err(e) = configure_wal_mode(&conn) {
+            log::warn!("Failed to enable SQLite WAL journal mode, continuing with fallback: {e}");
+        }
 
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])

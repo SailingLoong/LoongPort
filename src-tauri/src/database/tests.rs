@@ -919,3 +919,16 @@ fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
         "file db should persist INCREMENTAL auto_vacuum after VACUUM rebuild"
     );
 }
+
+#[test]
+fn configure_wal_mode_enables_wal_for_file_db() {
+    let temp = NamedTempFile::new().expect("create temp db file");
+    let conn = Connection::open(temp.path()).expect("open temp db");
+
+    super::configure_wal_mode(&conn).expect("enable WAL journal mode");
+
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+        .expect("read journal mode");
+    assert_eq!(mode.to_ascii_lowercase(), "wal");
+}
