@@ -31,10 +31,7 @@ pub struct RuntimeVerificationSnapshot {
 pub async fn get_runtime_verification_setting(
     state: tauri::State<'_, AppState>,
 ) -> Result<RuntimeVerificationSnapshot, String> {
-    let (setting, apps) = state
-        .model_verification
-        .runtime_status(&state.proxy_service)
-        .await?;
+    let (setting, apps) = state.model_verification.runtime_status().await?;
     Ok(RuntimeVerificationSnapshot { setting, apps })
 }
 

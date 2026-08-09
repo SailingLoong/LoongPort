@@ -1198,15 +1198,7 @@ pub fn run() {
             model_verification.start_passive_worker();
             let proxy_service = app.state::<AppState>().proxy_service.clone();
             tauri::async_runtime::spawn(async move {
-                if let Ok(setting) = crate::relay::model_verification::store::get_runtime_setting(
-                    &model_verification.database(),
-                ) {
-                    if setting.runtime_auto_enabled {
-                        let _ = model_verification
-                            .set_runtime_enabled(&proxy_service, true)
-                            .await;
-                    }
-                }
+                let _ = model_verification.reconcile_all(&proxy_service).await;
             });
 
             // 初始化 SkillService
