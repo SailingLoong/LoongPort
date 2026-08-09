@@ -2774,7 +2774,14 @@
     "timeout": "逾時時間（秒）",
     "maxRetries": "最大重試次數",
     "degradedThreshold": "緩慢閾值（毫秒）",
-    "error": "{{providerName}} 檢查出錯：{{error}}"
+    "error": "{{providerName}} 檢查出錯：{{error}}",
+    "modelProbe": {
+      "keyExpired": "金鑰已失效（{{status}}）",
+      "forbidden": "此檔位無權存取模型清單（{{status}}）",
+      "noModels": "此檔位沒有可呼叫的模型",
+      "imageOnly": "只能生成圖片（{{models}}），不能對話",
+      "models": "{{total}} 個模型（{{models}}）"
+    }
   },
   "proxyConfig": {
     "proxyEnabled": "路由總開關",

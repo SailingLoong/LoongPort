@@ -2773,7 +2773,14 @@
     "timeout": "タイムアウト（秒）",
     "maxRetries": "最大リトライ回数",
     "degradedThreshold": "低速判定しきい値（ミリ秒）",
-    "error": "{{providerName}} のチェックでエラーが発生しました: {{error}}"
+    "error": "{{providerName}} のチェックでエラーが発生しました: {{error}}",
+    "modelProbe": {
+      "keyExpired": "API キーが失効しています（{{status}}）",
+      "forbidden": "このティアはモデル一覧にアクセスできません（{{status}}）",
+      "noModels": "このティアに呼び出し可能なモデルはありません",
+      "imageOnly": "画像生成のみ（{{models}}）。チャットは利用できません",
+      "models": "{{total}} 個のモデル（{{models}}）"
+    }
   },
   "proxyConfig": {
     "proxyEnabled": "ルーティング総スイッチ",

@@ -35,6 +35,26 @@ pub enum HealthStatus {
     Failed,
 }
 
+/// `/models` 探测的结构化结论。
+///
+/// 该值会序列化进既有的 `stream_check_logs.model_used` TEXT 列；这样不需要迁移数据库，
+/// 前端仍能按当前语言渲染文案。旧日志里的纯文本值由前端作为 legacy 值回退显示。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ModelProbeVerdict {
+    KeyExpired { status: u16 },
+    Forbidden { status: u16 },
+    NoModels,
+    ImageOnly { models: Vec<String> },
+    Models { total: usize, head: Vec<String> },
+}
+
+impl ModelProbeVerdict {
+    fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
 /// 连通性检查配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,7 +89,7 @@ pub struct StreamCheckResult {
     pub message: String,
     pub response_time_ms: Option<u64>,
     pub http_status: Option<u16>,
-    /// 保留字段以兼容 `stream_check_logs` 表结构；连通性检查恒为空串。
+    /// 兼容 `stream_check_logs` 表结构的探测结论 JSON；未探测到时为空串。
     pub model_used: String,
     pub tested_at: i64,
     pub retry_count: u32,
@@ -155,10 +175,10 @@ impl StreamCheckService {
         // 只在**托管档位**上做：判据要 sk，而那套形状只有托管项保证有；
         // 用户手工建的 provider 密钥可能在任意位置。
         if checked.success && crate::relay::is_managed(&provider.id) {
-            if let Some(summary) =
+            if let Some(verdict) =
                 Self::probe_models(&client, app_type, provider, &base_url, timeout, ua).await
             {
-                checked.model_used = summary;
+                checked.model_used = verdict.encode();
             }
         }
         Ok(checked)
@@ -188,11 +208,11 @@ impl StreamCheckService {
     /// 可以对每个档位都点，与「真发一次推理去试」有本质区别 —— 后者要花钱，因而不可能
     /// 做成一个用户随时能按的按钮。
     ///
-    /// # 返回值放进 `model_used`（一个原本恒空的字段）
+    /// # 返回值序列化后放进 `model_used`（一个原本恒空的字段）
     ///
     /// `StreamCheckResult::model_used` 是 `stream_check_logs` 表里的既有列，改成真实检查
-    /// 之后它一直是空串。填上它 ⇒ 前端与历史日志**不用改结构**就能看到这条信息，
-    /// 而这正是那个字段当初的用意。
+    /// 之后它一直是空串。填上结构化 JSON ⇒ 前端与历史日志**不用改结构**就能看到这条信息，
+    /// 而这正是那个字段当初的用意。旧行若仍是纯文本，由调用方按 legacy 值处理。
     ///
     /// 返回 `None` = 问不出来（站点没这个端点 / 网络抖动）。**那时不改判定** ——
     /// 探测不到不等于档位坏了，把「我不知道」报成「不可用」比不报更糟。
@@ -203,7 +223,7 @@ impl StreamCheckService {
         base_url: &str,
         timeout: std::time::Duration,
         custom_ua: Option<HeaderValue>,
-    ) -> Option<String> {
+    ) -> Option<ModelProbeVerdict> {
         // 密钥位置按 CLI 分派，复用那一处定义（硬编码 codex 的位置会让 claude 档位
         // 永远探不出来，而且是静默的）。
         let api_key =
@@ -226,8 +246,8 @@ impl StreamCheckService {
             // 它正是可达性探测看不见的那一类。其余非 2xx 说明这个站没有这个端点，
             // 那不是档位的问题，按「问不出来」处理。
             return match status.as_u16() {
-                401 => Some("密钥已失效（401）".to_string()),
-                403 => Some("这个档位无权访问（403）".to_string()),
+                401 => Some(ModelProbeVerdict::KeyExpired { status: 401 }),
+                403 => Some(ModelProbeVerdict::Forbidden { status: 403 }),
                 _ => None,
             };
         }
@@ -243,7 +263,7 @@ impl StreamCheckService {
             .collect();
 
         if models.is_empty() {
-            return Some("这个档位没有可调用的模型".to_string());
+            return Some(ModelProbeVerdict::NoModels);
         }
 
         // 只挂生图模型 ⇒ 当对话档位用必定失败。这句话要说得让用户能照做。
@@ -251,16 +271,19 @@ impl StreamCheckService {
             .iter()
             .all(|m| crate::relay::provision::is_image_model(m));
         if all_image {
-            return Some(format!("只能生图（{}），不能对话", models.join(" / ")));
+            return Some(ModelProbeVerdict::ImageOnly { models });
         }
 
         // 正常情况：报个数 + 头几个名字。全列出来会把 toast 撑爆（实测有 13 个的分组）。
         const SHOWN: usize = 3;
-        let mut head: Vec<&str> = models.iter().take(SHOWN).map(String::as_str).collect();
+        let mut head: Vec<String> = models.iter().take(SHOWN).cloned().collect();
         if models.len() > SHOWN {
-            head.push("…");
+            head.push("…".to_string());
         }
-        Some(format!("{} 个模型（{}）", models.len(), head.join(" / ")))
+        Some(ModelProbeVerdict::Models {
+            total: models.len(),
+            head,
+        })
     }
 
     /// 解析供应商 `base_url`。
@@ -498,6 +521,23 @@ mod tests {
         assert_eq!(config.max_retries, 1);
         // 降级阈值沿用旧尺度，避免把 1 秒多的正常延迟误判为"较慢"
         assert_eq!(config.degraded_threshold_ms, 6000);
+    }
+
+    #[test]
+    fn model_probe_verdict_serializes_for_existing_log_column() {
+        let verdict = ModelProbeVerdict::Models {
+            total: 4,
+            head: vec!["alpha".to_string(), "beta".to_string(), "…".to_string()],
+        };
+
+        assert_eq!(
+            verdict.encode(),
+            r#"{"kind":"models","total":4,"head":["alpha","beta","…"]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ModelProbeVerdict>(&verdict.encode()).unwrap(),
+            verdict
+        );
     }
 
     #[test]

@@ -2773,7 +2773,14 @@
     "timeout": "Timeout (seconds)",
     "maxRetries": "Max Retries",
     "degradedThreshold": "Slow-response threshold (ms)",
-    "error": "{{providerName}} check error: {{error}}"
+    "error": "{{providerName}} check error: {{error}}",
+    "modelProbe": {
+      "keyExpired": "API key expired ({{status}})",
+      "forbidden": "This tier cannot access the models endpoint ({{status}})",
+      "noModels": "This tier has no callable models",
+      "imageOnly": "Image generation only ({{models}}); chat is unavailable",
+      "models": "{{total}} models ({{models}})"
+    }
   },
   "proxyConfig": {
     "proxyEnabled": "Routing Master Switch",
