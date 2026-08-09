@@ -1005,37 +1005,72 @@ pub fn is_image_model(model: &str) -> bool {
         .starts_with(IMAGE_MODEL_PREFIX)
 }
 
-/// sk 在各 CLI 的 `settings_config` 里的位置。[`patch_api_key`] 与
-/// [`extract_api_key`] 共用这一处定义 —— 两处各写一遍迟早分叉（一处改了另一处没改 ⇒
-/// 写进去的和读出来的不是同一个字段）。
+/// sk 在各 CLI 的 `settings_config` 里的字段路径。[`patch_api_key`]、
+/// [`extract_api_key`] 与 [`ensure_api_key`] 共用这一处定义，避免读写逻辑各自维护一份。
+///
+/// 一个 CLI 可能有多个兼容字段（例如 Claude 的 token / api key）；它们都存在时会
+/// 一起更新，避免运行时和倍率查询读到不同的凭据。
 ///
 /// 返回 `None` = 这个 CLI 还没接。
-fn api_key_locations(app_type: &AppType) -> Option<&'static [(&'static str, &'static str)]> {
+fn api_key_locations(app_type: &AppType) -> Option<&'static [&'static [&'static str]]> {
+    const CODEX: &[&str] = &["auth", "OPENAI_API_KEY"];
+    const CLAUDE_AUTH_TOKEN: &[&str] = &["env", "ANTHROPIC_AUTH_TOKEN"];
+    const CLAUDE_API_KEY: &[&str] = &["env", "ANTHROPIC_API_KEY"];
+    const GEMINI: &[&str] = &["env", "GEMINI_API_KEY"];
+    const HERMES: &[&str] = &["api_key"];
+    const OPENCLAW: &[&str] = &["apiKey"];
+    const OPENCODE: &[&str] = &["options", "apiKey"];
+
     match app_type {
         // 生图栏与 codex 同形（见 `settings_config_for`），sk 在同一个位置。
-        // 漏了它的后果是**静默的**：`_ => None` 会让 `is_user_edited` 对每条生图档位
+        // 漏了它的后果是**静默的**：缺少路径会让 `is_user_edited` 对每条生图档位
         // 都返回「判不了」，`extract_api_key` 也读不出 sk ⇒ 生图工具起不来。
-        AppType::Codex | AppType::CodexImage => Some(&[("auth", "OPENAI_API_KEY")]),
+        AppType::Codex | AppType::CodexImage => Some(&[CODEX]),
         // ⚠️ **ClaudeDesktop 与 Claude 同形，两个都要在这里**（2026-08-05 补）。
         //
         // 它们走同一个 `deeplink::build_claude_settings`（`provider.rs:165` 的
         // `AppType::Claude | AppType::ClaudeDesktop =>`），sk 都落在
-        // `env.ANTHROPIC_AUTH_TOKEN`。原来只写了 `Claude` ⇒ ClaudeDesktop 掉进
-        // 下面那个 `_ => None`，后果与漏掉生图栏那条完全一样、而且**同样是静默的**：
+        // `env.ANTHROPIC_AUTH_TOKEN`。漏掉 ClaudeDesktop 的后果与漏掉生图栏那条
+        // 完全一样、而且**同样是静默的**：
         // `is_user_edited` 恒为「判不了」⇒ 界面上永远不显示「已手动维护」标记；
         // `extract_api_key` 读不出 sk ⇒ 「恢复默认配置」直接报错。
-        AppType::Claude | AppType::ClaudeDesktop => Some(&[
-            ("env", "ANTHROPIC_AUTH_TOKEN"),
-            ("env", "ANTHROPIC_API_KEY"),
-        ]),
-        AppType::Gemini => Some(&[("env", "GEMINI_API_KEY")]),
-        // ⚠️ hermes / openclaw / opencode **还没接**，见代码仓 `TODO.md`：
-        // 它们的 sk 在**顶层**（hermes 是 `api_key`、openclaw 是 `apiKey`）或
-        // 嵌在别的结构里（opencode 是 `options.apiKey`），而本函数的
-        // `(section, field)` 两段结构表达不了「顶层」。补它要动
-        // `patch_api_key` / `extract_api_key` 的签名与 relay 侧全部调用方。
-        _ => None,
+        AppType::Claude | AppType::ClaudeDesktop => Some(&[CLAUDE_AUTH_TOKEN, CLAUDE_API_KEY]),
+        AppType::Gemini => Some(&[GEMINI]),
+        AppType::Hermes => Some(&[HERMES]),
+        AppType::OpenClaw => Some(&[OPENCLAW]),
+        AppType::OpenCode => Some(&[OPENCODE]),
+        AppType::GrokBuild => None,
     }
+}
+
+fn value_at_path<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    path.iter().try_fold(root, |value, key| value.get(*key))
+}
+
+fn object_at_parent_path<'a>(
+    root: &'a mut serde_json::Value,
+    path: &[&str],
+) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let (_, parent) = path.split_last()?;
+    let parent = parent
+        .iter()
+        .try_fold(root, |value, key| value.get_mut(*key))?;
+    parent.as_object_mut()
+}
+
+fn ensure_object_at_parent_path<'a>(
+    root: &'a mut serde_json::Value,
+    path: &[&str],
+) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let (_, parent) = path.split_last()?;
+    let mut current = root.as_object_mut()?;
+    for key in parent {
+        let value = current
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        current = value.as_object_mut()?;
+    }
+    Some(current)
 }
 
 /// 从一份 `settings_config` 里读出 sk。
@@ -1044,16 +1079,12 @@ fn api_key_locations(app_type: &AppType) -> Option<&'static [(&'static str, &'st
 /// 返回 `None` 表示配置形状里找不到 sk（被改坏了 / 这个 CLI 还没接）——
 /// 调用方应当报错而不是继续，生成一份没有 sk 的配置是条必定 401 的记录。
 pub fn extract_api_key(settings_config: &serde_json::Value, app_type: &AppType) -> Option<String> {
-    api_key_locations(app_type)?
-        .iter()
-        .find_map(|(section, field)| {
-            settings_config
-                .get(*section)?
-                .get(*field)?
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
+    api_key_locations(app_type)?.iter().find_map(|path| {
+        value_at_path(settings_config, path)?
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
 }
 
 /// 把新 sk 塞进一份**已存在的** `settings_config`，其余部分原样保留。
@@ -1095,16 +1126,13 @@ pub fn patch_api_key(
     // 所有已经存在的候选字段都改成同一把 key。Claude 配置若意外同时含两种字段，
     // 只改一个会让运行时与倍率查询各读到不同的凭据。
     let mut patched = false;
-    for (section, field) in locations {
-        let Some(map) = settings_config
-            .get_mut(*section)
-            .and_then(serde_json::Value::as_object_mut)
-        else {
-            continue;
-        };
-        if map.contains_key(*field) {
-            map.insert((*field).to_string(), serde_json::json!(api_key));
-            patched = true;
+    for path in locations {
+        if let Some(map) = object_at_parent_path(settings_config, path) {
+            let field = *path.last().expect("API key path is not empty");
+            if map.contains_key(field) {
+                map.insert(field.to_string(), serde_json::json!(api_key));
+                patched = true;
+            }
         }
     }
     if patched {
@@ -1112,13 +1140,10 @@ pub fn patch_api_key(
     }
 
     // section 存在但 key 被用户删掉时，补回默认字段，避免下一次倍率查询丢凭据。
-    let (section, field) = locations[0];
-    let Some(map) = settings_config
-        .get_mut(section)
-        .and_then(serde_json::Value::as_object_mut)
-    else {
+    let Some(map) = object_at_parent_path(settings_config, locations[0]) else {
         return false;
     };
+    let field = *locations[0].last().expect("API key path is not empty");
     map.insert(field.to_string(), serde_json::json!(api_key));
     true
 }
@@ -1137,20 +1162,14 @@ pub fn ensure_api_key(
         return true;
     }
 
-    let Some((section, field)) =
-        api_key_locations(app_type).and_then(|locations| locations.first().copied())
+    let Some(path) = api_key_locations(app_type).and_then(|locations| locations.first().copied())
     else {
         return false;
     };
-    let Some(root) = settings_config.as_object_mut() else {
+    let Some(map) = ensure_object_at_parent_path(settings_config, path) else {
         return false;
     };
-    let section = root
-        .entry(section.to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let Some(map) = section.as_object_mut() else {
-        return false;
-    };
+    let field = *path.last().expect("API key path is not empty");
     map.insert(field.to_string(), serde_json::json!(api_key));
     true
 }
@@ -2128,7 +2147,14 @@ mod tests {
     fn extract_api_key_round_trips_for_every_supported_cli() {
         // 「恢复默认」要先把 sk 读出来再塞回去 —— 读写必须认同一个字段。
         // 两处各写一遍字段名迟早分叉，所以它们共用 api_key_location；这条测试守住往返。
-        for app_type in [AppType::Codex, AppType::Claude, AppType::Gemini] {
+        for app_type in [
+            AppType::Codex,
+            AppType::Claude,
+            AppType::Gemini,
+            AppType::Hermes,
+            AppType::OpenClaw,
+            AppType::OpenCode,
+        ] {
             let sc = settings_config_for(&app_type, "sk-abc", "n", "https://x.dev/v1", "m")
                 .unwrap_or_else(|| panic!("{app_type:?} 必须有形状"));
             assert_eq!(
@@ -2145,6 +2171,39 @@ mod tests {
         assert_eq!(extract_api_key(&blank, &AppType::Codex), None);
         blank["auth"] = serde_json::json!({});
         assert_eq!(extract_api_key(&blank, &AppType::Codex), None);
+    }
+
+    #[test]
+    fn patch_api_key_supports_top_level_and_nested_additive_configs() {
+        for app_type in [AppType::Hermes, AppType::OpenClaw, AppType::OpenCode] {
+            let mut settings =
+                settings_config_for(&app_type, "sk-old", "n", "https://x.dev/v1", "m")
+                    .unwrap_or_else(|| panic!("{app_type:?} 必须有形状"));
+
+            assert!(patch_api_key(&mut settings, &app_type, "sk-new"));
+            assert_eq!(
+                extract_api_key(&settings, &app_type).as_deref(),
+                Some("sk-new")
+            );
+        }
+
+        let mut missing_options = serde_json::json!({ "models": {} });
+        assert!(!patch_api_key(
+            &mut missing_options,
+            &AppType::OpenCode,
+            "sk-new"
+        ));
+        assert!(missing_options.get("options").is_none());
+
+        assert!(ensure_api_key(
+            &mut missing_options,
+            &AppType::OpenCode,
+            "sk-new"
+        ));
+        assert_eq!(
+            extract_api_key(&missing_options, &AppType::OpenCode).as_deref(),
+            Some("sk-new")
+        );
     }
 
     #[test]
