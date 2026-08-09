@@ -11,6 +11,7 @@ use crate::proxy::{
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
     ProxyError,
 };
+use crate::relay::model_verification::passive::{reduce_request_meta, PassiveRequestMeta};
 use axum::http::HeaderMap;
 use std::time::Instant;
 
@@ -33,6 +34,8 @@ pub struct StreamingTimeoutConfig {
 /// - 日志标签
 /// - Session ID（用于日志关联）
 pub struct RequestContext {
+    /// Sanitized protocol capability flags; never contains request content.
+    pub passive_request_meta: PassiveRequestMeta,
     /// 请求开始时间
     pub start_time: Instant,
     /// 应用级代理配置（per-app，包含重试次数和超时配置）
@@ -158,6 +161,7 @@ impl RequestContext {
         );
 
         Ok(Self {
+            passive_request_meta: reduce_request_meta(&app_type, body),
             start_time,
             app_config,
             provider,

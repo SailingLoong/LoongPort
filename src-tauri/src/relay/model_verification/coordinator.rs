@@ -7,9 +7,11 @@ use std::{
 
 use futures::future::{AbortHandle, Abortable};
 use tauri::Emitter;
+use tokio::sync::mpsc;
 
 use crate::{
     database::Database,
+    relay::model_verification::passive::{EvidenceBatch, VerificationIngress},
     relay::model_verification::types::{
         RunFailureKind, RunState, StartRunResponse, TargetKey, TargetScope,
         VerificationProgressEvent, VerificationReport,
@@ -39,7 +41,7 @@ pub trait VerificationEventSink: Send + Sync {
     fn emit_changed(&self, scope: &TargetScope) -> Result<(), ()>;
 }
 
-struct NoopEventSink;
+pub(crate) struct NoopEventSink;
 
 impl VerificationEventSink for NoopEventSink {
     fn emit_progress(&self, _event: &VerificationProgressEvent) -> Result<(), ()> {
@@ -97,6 +99,8 @@ pub struct ModelVerificationCoordinator {
     event_sink: Arc<dyn VerificationEventSink>,
     mutation: Mutex<()>,
     state: Mutex<CoordinatorState>,
+    passive_receiver: Mutex<Option<mpsc::Receiver<EvidenceBatch>>>,
+    passive_ingress: VerificationIngress,
 }
 
 #[derive(Default)]
@@ -130,13 +134,45 @@ impl ModelVerificationCoordinator {
         verifier: Arc<dyn ActiveVerifier>,
         event_sink: Arc<dyn VerificationEventSink>,
     ) -> Self {
+        let (passive_ingress, passive_receiver) = VerificationIngress::channel();
         Self {
             db,
             verifier,
             event_sink,
             mutation: Mutex::new(()),
             state: Mutex::new(CoordinatorState::default()),
+            passive_receiver: Mutex::new(Some(passive_receiver)),
+            passive_ingress,
         }
+    }
+
+    pub(crate) fn with_passive_ingress(
+        db: Arc<Database>,
+        verifier: Arc<dyn ActiveVerifier>,
+        event_sink: Arc<dyn VerificationEventSink>,
+        passive_ingress: VerificationIngress,
+        passive_receiver: mpsc::Receiver<EvidenceBatch>,
+    ) -> Self {
+        Self {
+            db,
+            verifier,
+            event_sink,
+            mutation: Mutex::new(()),
+            state: Mutex::new(CoordinatorState::default()),
+            passive_receiver: Mutex::new(Some(passive_receiver)),
+            passive_ingress,
+        }
+    }
+
+    pub fn passive_ingress(&self) -> VerificationIngress {
+        self.passive_ingress.clone()
+    }
+
+    pub fn take_passive_receiver(&self) -> Option<mpsc::Receiver<EvidenceBatch>> {
+        self.passive_receiver
+            .lock()
+            .expect("model verification passive receiver lock poisoned")
+            .take()
     }
 
     pub fn attach_app_handle(&self, app_handle: tauri::AppHandle) {

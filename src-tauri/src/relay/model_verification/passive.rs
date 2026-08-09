@@ -1,9 +1,19 @@
-use std::{collections::BTreeSet, fmt, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use serde::{
     de::{SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
+use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::{
     app_config::AppType,
@@ -25,6 +35,143 @@ pub struct PassiveRequestMeta {
     pub thinking_requested: bool,
     pub tools_requested: bool,
     pub structured_output_requested: bool,
+}
+
+pub const PASSIVE_INGRESS_CAPACITY: usize = 128;
+
+/// The only object passed into proxy request handling for passive verification.
+/// It owns no database or coordinator state and only accepts sanitized batches.
+#[derive(Clone)]
+pub struct VerificationIngress {
+    sender: mpsc::Sender<EvidenceBatch>,
+    enabled: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+}
+
+/// A request-scoped handle carrying only the target and generation barrier.
+pub struct VerificationTap {
+    ingress: VerificationIngress,
+    target: TargetKey,
+    generation: u64,
+}
+
+impl VerificationIngress {
+    pub fn channel() -> (Self, mpsc::Receiver<EvidenceBatch>) {
+        let (sender, receiver) = mpsc::channel(PASSIVE_INGRESS_CAPACITY);
+        (Self::new(sender), receiver)
+    }
+
+    pub fn disabled() -> Self {
+        let (sender, receiver) = mpsc::channel(PASSIVE_INGRESS_CAPACITY);
+        drop(receiver);
+        Self {
+            sender,
+            enabled: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn new(sender: mpsc::Sender<EvidenceBatch>) -> Self {
+        Self {
+            sender,
+            enabled: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        let previous = self.enabled.swap(enabled, Ordering::AcqRel);
+        if previous != enabled {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn begin(&self, target: TargetKey) -> Option<VerificationTap> {
+        if !self.enabled.load(Ordering::Acquire)
+            || AppType::from_str(&target.app_type)
+                .ok()
+                .is_none_or(|app_type| !matches!(app_type, AppType::Codex | AppType::Claude))
+        {
+            return None;
+        }
+        Some(VerificationTap {
+            ingress: self.clone(),
+            target,
+            generation: self.generation.load(Ordering::Acquire),
+        })
+    }
+
+    /// Enqueues sanitized evidence without ever backpressuring the real response.
+    /// Returns whether the batch was accepted; queue-full and disabled are ordinary drops.
+    pub fn try_submit(&self, batch: EvidenceBatch) -> bool {
+        if !self.enabled.load(Ordering::Acquire)
+            || batch.generation != self.generation.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        self.sender.try_send(batch).is_ok()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.sender.capacity()
+    }
+}
+
+impl VerificationTap {
+    pub fn submit(
+        &self,
+        completed: bool,
+        facts: impl IntoIterator<Item = EvidenceFact>,
+        observed_at: i64,
+    ) -> bool {
+        self.ingress.try_submit(EvidenceBatch::new(
+            self.target.clone(),
+            self.generation,
+            completed,
+            facts,
+            observed_at,
+        ))
+    }
+}
+
+/// Reduce protocol request capability flags without retaining any request content.
+pub fn reduce_request_meta(app_type: &AppType, body: &Value) -> PassiveRequestMeta {
+    let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let tools_requested = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+        || body
+            .get("tool_choice")
+            .is_some_and(|choice| !choice.is_null());
+
+    match app_type {
+        AppType::Claude => PassiveRequestMeta {
+            stream_requested,
+            thinking_requested: body
+                .get("thinking")
+                .and_then(Value::as_object)
+                .and_then(|thinking| thinking.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "enabled"),
+            tools_requested,
+            structured_output_requested: false,
+        },
+        AppType::Codex => PassiveRequestMeta {
+            stream_requested,
+            thinking_requested: false,
+            tools_requested,
+            structured_output_requested: body
+                .get("text")
+                .and_then(Value::as_object)
+                .and_then(|text| text.get("format"))
+                .and_then(Value::as_object)
+                .and_then(|format| format.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind != "text"),
+        },
+        _ => PassiveRequestMeta::default(),
+    }
 }
 
 /// A finite, canonical fact set with at most one outcome for each evidence code.
@@ -320,16 +467,18 @@ pub fn resolve_with_active(
 
 #[cfg(test)]
 mod tests {
+    use crate::app_config::AppType;
     use crate::relay::model_verification::{
         passive::{
-            merge_report, reduce_batch, AnomalyFingerprint, EvidenceBatch, PassiveAggregate,
-            PassiveRequestMeta,
+            merge_report, reduce_batch, reduce_request_meta, AnomalyFingerprint, EvidenceBatch,
+            PassiveAggregate, PassiveRequestMeta, VerificationIngress, PASSIVE_INGRESS_CAPACITY,
         },
         types::{
             EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, TargetKey, Verdict,
             VerificationReport, RULES_VERSION,
         },
     };
+    use tokio::sync::mpsc;
 
     fn batch(completed: bool, facts: Vec<EvidenceFact>) -> EvidenceBatch {
         EvidenceBatch::new(
@@ -476,5 +625,110 @@ mod tests {
                 "structuredOutputRequested": false,
             })
         );
+    }
+
+    #[test]
+    fn request_reduction_discards_prompt_tool_arguments_and_secrets() {
+        let body = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "stream": true,
+            "input": [{"role": "user", "content": "PROMPT_SENTINEL"}],
+            "tools": [{"type": "function", "name": "tool", "parameters": {"secret": "ARG_SENTINEL"}}],
+            "tool_choice": {"type": "function", "name": "tool"},
+            "text": {"format": {"type": "json_schema", "name": "output", "schema": {"secret": "SCHEMA_SENTINEL"}}},
+            "api_key": "SECRET_SENTINEL"
+        });
+        let metadata = reduce_request_meta(&AppType::Codex, &body);
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&serialized).unwrap(),
+            serde_json::json!({
+                "streamRequested": true,
+                "thinkingRequested": false,
+                "toolsRequested": true,
+                "structuredOutputRequested": true,
+            })
+        );
+        for sentinel in [
+            "PROMPT_SENTINEL",
+            "ARG_SENTINEL",
+            "SCHEMA_SENTINEL",
+            "SECRET_SENTINEL",
+        ] {
+            assert!(!serialized.contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn unsupported_protocols_reduce_to_default_metadata() {
+        let body = serde_json::json!({
+            "stream": true,
+            "thinking": {"type": "enabled"},
+            "tools": [{"name": "tool"}],
+            "text": {"format": {"type": "json_schema"}},
+        });
+        assert_eq!(
+            reduce_request_meta(&AppType::Gemini, &body),
+            PassiveRequestMeta::default()
+        );
+    }
+
+    #[test]
+    fn ingress_is_bounded_fail_open_and_generation_scoped() {
+        let disabled = VerificationIngress::disabled();
+        assert_eq!(disabled.capacity(), PASSIVE_INGRESS_CAPACITY);
+        assert!(disabled
+            .begin(TargetKey::new("provider", "codex", "model"))
+            .is_none());
+
+        let (sender, mut receiver) = mpsc::channel(PASSIVE_INGRESS_CAPACITY);
+        let ingress = VerificationIngress::new(sender);
+        ingress.set_enabled(true);
+        let tap = ingress
+            .begin(TargetKey::new("provider", "codex", "model"))
+            .expect("enabled ingress should begin a supported tap");
+        assert_eq!(ingress.capacity(), PASSIVE_INGRESS_CAPACITY);
+        assert!(tap.submit(true, [], 1));
+        let _ = receiver
+            .try_recv()
+            .expect("submitted batch should be readable");
+
+        let batch =
+            EvidenceBatch::new(TargetKey::new("provider", "codex", "model"), 0, true, [], 1);
+        assert!(
+            !ingress.try_submit(batch),
+            "stale generation must be dropped"
+        );
+        ingress.set_enabled(false);
+        assert!(!ingress.try_submit(EvidenceBatch::new(
+            TargetKey::new("provider", "codex", "model"),
+            1,
+            true,
+            [],
+            1,
+        )));
+    }
+
+    #[test]
+    fn ingress_try_submit_drops_when_queue_is_full() {
+        let (sender, _receiver) = mpsc::channel(PASSIVE_INGRESS_CAPACITY);
+        let ingress = VerificationIngress::new(sender);
+        ingress.set_enabled(true);
+        for _ in 0..PASSIVE_INGRESS_CAPACITY {
+            assert!(ingress.try_submit(EvidenceBatch::new(
+                TargetKey::new("provider", "codex", "model"),
+                1,
+                true,
+                [],
+                1,
+            )));
+        }
+        assert!(!ingress.try_submit(EvidenceBatch::new(
+            TargetKey::new("provider", "codex", "model"),
+            1,
+            true,
+            [],
+            1,
+        )));
     }
 }
