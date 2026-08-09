@@ -111,18 +111,14 @@ pub fn emit_provider_switched(
         log::warn!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
     }
     if matches!(app_type, AppType::Codex | AppType::Claude) {
+        let runtime_app =
+            crate::relay::model_verification::types::RuntimeAppType::try_from(app_type.as_str())
+                .expect("supported runtime app");
         if let Some(state) = app_handle.try_state::<crate::AppState>() {
             let coordinator = state.model_verification.clone();
             let proxy = state.proxy_service.clone();
             tauri::async_runtime::spawn(async move {
-                if crate::relay::model_verification::store::get_runtime_setting(
-                    &coordinator.database(),
-                )
-                .map(|setting| setting.runtime_auto_enabled)
-                .unwrap_or(false)
-                {
-                    let _ = coordinator.set_runtime_enabled(&proxy, true).await;
-                }
+                let _ = coordinator.reconcile_app(&proxy, runtime_app).await;
             });
         }
     }

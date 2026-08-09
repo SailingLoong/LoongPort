@@ -8,7 +8,7 @@ use std::{
 
 use futures::future::{AbortHandle, Abortable};
 use tauri::Emitter;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::{
     database::Database,
@@ -35,6 +35,19 @@ pub trait ActiveVerifier: Send + Sync {
         target: TargetKey,
         progress: ProbeProgress,
     ) -> Result<PreparedVerification, RunFailureKind>;
+}
+
+/// Narrow port used by runtime reconciliation. Keeping takeover behind this boundary makes the
+/// lease saga deterministic in tests and keeps the coordinator independent from proxy internals.
+#[allow(async_fn_in_trait)]
+pub(crate) trait TakeoverControl: Send + Sync {
+    async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String>;
+}
+
+impl TakeoverControl for crate::services::ProxyService {
+    async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
+        crate::services::ProxyService::set_takeover_for_app(self, app_type, enabled).await
+    }
 }
 
 pub trait VerificationEventSink: Send + Sync {
@@ -122,6 +135,7 @@ pub struct ModelVerificationCoordinator {
     state: Mutex<CoordinatorState>,
     passive_receiver: Mutex<Option<mpsc::Receiver<EvidenceBatch>>>,
     passive_ingress: VerificationIngress,
+    runtime_mutation: AsyncMutex<()>,
 }
 
 #[derive(Default)]
@@ -164,6 +178,7 @@ impl ModelVerificationCoordinator {
             state: Mutex::new(CoordinatorState::default()),
             passive_receiver: Mutex::new(Some(passive_receiver)),
             passive_ingress,
+            runtime_mutation: AsyncMutex::new(()),
         }
     }
 
@@ -182,6 +197,7 @@ impl ModelVerificationCoordinator {
             state: Mutex::new(CoordinatorState::default()),
             passive_receiver: Mutex::new(Some(passive_receiver)),
             passive_ingress,
+            runtime_mutation: AsyncMutex::new(()),
         }
     }
 
@@ -249,93 +265,322 @@ impl ModelVerificationCoordinator {
         self.event_sink.attach_app_handle(app_handle);
     }
 
-    pub async fn runtime_status(
+    pub(crate) async fn runtime_status(
         &self,
-        proxy: &crate::services::ProxyService,
     ) -> Result<(RuntimeVerificationSetting, Vec<RuntimeAppState>), String> {
+        let _guard = self.runtime_mutation.lock().await;
         let setting = crate::relay::model_verification::store::get_runtime_setting(&self.db)
             .map_err(|error| error.to_string())?;
         let mut apps = Vec::new();
         for app in [RuntimeAppType::Codex, RuntimeAppType::Claude] {
-            let app_name = app.as_str();
-            let state = match crate::settings::get_effective_current_provider(
-                &self.db,
-                &crate::app_config::AppType::from_str(app_name).map_err(|e| e.to_string())?,
-            )? {
-                None => RuntimeAppState {
-                    app_type: app,
-                    status: RuntimeAppStatus::Waiting,
-                    reason: Some(RuntimeAppReason::NoCurrentProvider),
-                },
-                Some(_) => match self.db.get_proxy_config_for_app(app_name).await {
-                    Ok(config) if config.enabled => RuntimeAppState {
-                        app_type: app,
-                        status: RuntimeAppStatus::Active,
-                        reason: None,
-                    },
-                    Ok(_) => RuntimeAppState {
-                        app_type: app,
-                        status: RuntimeAppStatus::Waiting,
-                        reason: Some(RuntimeAppReason::ClientUnavailable),
-                    },
-                    Err(_) => RuntimeAppState {
-                        app_type: app,
-                        status: RuntimeAppStatus::Error,
-                        reason: Some(RuntimeAppReason::RecoveryFailed),
-                    },
-                },
-            };
-            let _ = proxy;
-            apps.push(state);
+            apps.push(self.inspect_runtime_app(app).await);
         }
         Ok((setting, apps))
     }
 
-    pub async fn set_runtime_enabled(
+    pub(crate) async fn set_runtime_enabled<P: TakeoverControl>(
         &self,
-        proxy: &crate::services::ProxyService,
+        proxy: &P,
         enabled: bool,
     ) -> Result<(RuntimeVerificationSetting, Vec<RuntimeAppState>), String> {
-        crate::relay::model_verification::store::set_runtime_setting(&self.db, enabled)
-            .map_err(|error| error.to_string())?;
-        self.passive_ingress.set_enabled(enabled);
+        let setting =
+            crate::relay::model_verification::store::set_runtime_setting(&self.db, enabled)
+                .map_err(|error| error.to_string())?;
+        let apps = self.reconcile_all(proxy).await;
+        Ok((setting, apps))
+    }
+
+    pub(crate) async fn reconcile_all<P: TakeoverControl>(
+        &self,
+        proxy: &P,
+    ) -> Vec<RuntimeAppState> {
+        let _guard = self.runtime_mutation.lock().await;
+        let setting = match crate::relay::model_verification::store::get_runtime_setting(&self.db) {
+            Ok(value) => value.runtime_auto_enabled,
+            Err(_) => {
+                self.passive_ingress.set_enabled(false);
+                return [RuntimeAppType::Codex, RuntimeAppType::Claude]
+                    .into_iter()
+                    .map(|app_type| RuntimeAppState {
+                        app_type,
+                        status: RuntimeAppStatus::Error,
+                        reason: Some(RuntimeAppReason::RecoveryFailed),
+                    })
+                    .collect();
+            }
+        };
+        self.passive_ingress.set_enabled(setting);
+        let mut states = Vec::with_capacity(2);
         for app in [RuntimeAppType::Codex, RuntimeAppType::Claude] {
-            let name = app.as_str();
-            if !enabled {
-                if crate::relay::model_verification::store::has_lease(&self.db, name)
-                    .unwrap_or(false)
-                {
-                    let _ = proxy.set_takeover_for_app(name, false).await;
-                    let _ = crate::relay::model_verification::store::delete_lease(&self.db, name);
+            states.push(self.reconcile_app_locked(proxy, app, setting).await);
+        }
+        states
+    }
+
+    pub(crate) async fn reconcile_app<P: TakeoverControl>(
+        &self,
+        proxy: &P,
+        app: RuntimeAppType,
+    ) -> RuntimeAppState {
+        let _guard = self.runtime_mutation.lock().await;
+        let setting = match crate::relay::model_verification::store::get_runtime_setting(&self.db) {
+            Ok(value) => value.runtime_auto_enabled,
+            Err(_) => {
+                self.passive_ingress.set_enabled(false);
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
+                };
+            }
+        };
+        self.passive_ingress.set_enabled(setting);
+        self.reconcile_app_locked(proxy, app, setting).await
+    }
+
+    async fn inspect_runtime_app(&self, app: RuntimeAppType) -> RuntimeAppState {
+        let app_name = app.as_str();
+        let current = match crate::settings::get_effective_current_provider(
+            &self.db,
+            &crate::app_config::AppType::from_str(app_name).expect("runtime app type is valid"),
+        ) {
+            Ok(current) => current,
+            Err(_) => {
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
                 }
-                continue;
             }
-            let app_enum = crate::app_config::AppType::from_str(name).map_err(|e| e.to_string())?;
-            if crate::settings::get_effective_current_provider(&self.db, &app_enum)
-                .map_err(|e| e.to_string())?
-                .is_none()
-            {
-                continue;
+        };
+        let Some(provider_id) = current else {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Waiting,
+                reason: Some(RuntimeAppReason::NoCurrentProvider),
+            };
+        };
+        if !crate::relay::is_managed(&provider_id) {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Waiting,
+                reason: Some(RuntimeAppReason::CurrentProviderUnsupported),
+            };
+        }
+        match self.db.get_proxy_config_for_app(app_name).await {
+            Ok(config) if config.enabled => RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Active,
+                reason: None,
+            },
+            Ok(_) => RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Waiting,
+                reason: Some(RuntimeAppReason::ClientUnavailable),
+            },
+            Err(_) => RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Error,
+                reason: Some(RuntimeAppReason::RecoveryFailed),
+            },
+        }
+    }
+
+    async fn reconcile_app_locked<P: TakeoverControl>(
+        &self,
+        proxy: &P,
+        app: RuntimeAppType,
+        enabled: bool,
+    ) -> RuntimeAppState {
+        let app_name = app.as_str();
+        let current = match crate::settings::get_effective_current_provider(
+            &self.db,
+            &crate::app_config::AppType::from_str(app_name).expect("runtime app type is valid"),
+        ) {
+            Ok(current) => current,
+            Err(_) => {
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
+                };
             }
-            let config = self
-                .db
-                .get_proxy_config_for_app(name)
-                .await
-                .map_err(|e| e.to_string())?;
-            if config.enabled {
-                continue;
+        };
+
+        if !enabled {
+            return self.release_owned_lease(proxy, app).await;
+        }
+
+        let Some(provider_id) = current else {
+            return self
+                .release_owned_lease_with_fallback(
+                    proxy,
+                    app,
+                    RuntimeAppStatus::Waiting,
+                    RuntimeAppReason::NoCurrentProvider,
+                )
+                .await;
+        };
+        if !crate::relay::is_managed(&provider_id) {
+            return self
+                .release_owned_lease_with_fallback(
+                    proxy,
+                    app,
+                    RuntimeAppStatus::Waiting,
+                    RuntimeAppReason::CurrentProviderUnsupported,
+                )
+                .await;
+        }
+
+        let config = match self.db.get_proxy_config_for_app(app_name).await {
+            Ok(config) => config,
+            Err(_) => {
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
+                }
             }
-            crate::relay::model_verification::store::insert_lease(
-                &self.db,
-                name,
-                chrono::Utc::now().timestamp(),
-            )
-            .map_err(|error| error.to_string())?;
-            if proxy.set_takeover_for_app(name, true).await.is_err() {
-                let _ = crate::relay::model_verification::store::delete_lease(&self.db, name);
+        };
+        if config.enabled {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Active,
+                reason: None,
+            };
+        }
+        if crate::relay::model_verification::store::insert_lease(
+            &self.db,
+            app_name,
+            chrono::Utc::now().timestamp(),
+        )
+        .is_err()
+        {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Error,
+                reason: Some(RuntimeAppReason::RecoveryFailed),
+            };
+        }
+        match proxy.set_takeover_for_app(app_name, true).await {
+            Ok(()) => RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Active,
+                reason: None,
+            },
+            Err(_) => {
+                let _ = crate::relay::model_verification::store::delete_lease(&self.db, app_name);
+                RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::TakeoverFailed),
+                }
             }
         }
-        self.runtime_status(proxy).await
+    }
+
+    async fn release_owned_lease<P: TakeoverControl>(
+        &self,
+        proxy: &P,
+        app: RuntimeAppType,
+    ) -> RuntimeAppState {
+        let app_name = app.as_str();
+        let has_lease = match crate::relay::model_verification::store::has_lease(&self.db, app_name)
+        {
+            Ok(has_lease) => has_lease,
+            Err(_) => {
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
+                };
+            }
+        };
+        if !has_lease {
+            return self.inspect_runtime_app(app).await;
+        }
+        let config = match self.db.get_proxy_config_for_app(app_name).await {
+            Ok(config) => config,
+            Err(_) => {
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
+                }
+            }
+        };
+        if config.enabled && proxy.set_takeover_for_app(app_name, false).await.is_err() {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Error,
+                reason: Some(RuntimeAppReason::RecoveryFailed),
+            };
+        }
+        if crate::relay::model_verification::store::delete_lease(&self.db, app_name).is_err() {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Error,
+                reason: Some(RuntimeAppReason::RecoveryFailed),
+            };
+        }
+        self.inspect_runtime_app(app).await
+    }
+
+    async fn release_owned_lease_with_fallback<P: TakeoverControl>(
+        &self,
+        proxy: &P,
+        app: RuntimeAppType,
+        status: RuntimeAppStatus,
+        reason: RuntimeAppReason,
+    ) -> RuntimeAppState {
+        let app_name = app.as_str();
+        let has_lease = match crate::relay::model_verification::store::has_lease(&self.db, app_name)
+        {
+            Ok(has_lease) => has_lease,
+            Err(_) => {
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
+                };
+            }
+        };
+        if !has_lease {
+            return RuntimeAppState {
+                app_type: app,
+                status,
+                reason: Some(reason),
+            };
+        }
+        let config = match self.db.get_proxy_config_for_app(app_name).await {
+            Ok(config) => config,
+            Err(_) => {
+                return RuntimeAppState {
+                    app_type: app,
+                    status: RuntimeAppStatus::Error,
+                    reason: Some(RuntimeAppReason::RecoveryFailed),
+                }
+            }
+        };
+        if config.enabled && proxy.set_takeover_for_app(app_name, false).await.is_err() {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Error,
+                reason: Some(RuntimeAppReason::RecoveryFailed),
+            };
+        }
+        if crate::relay::model_verification::store::delete_lease(&self.db, app_name).is_err() {
+            return RuntimeAppState {
+                app_type: app,
+                status: RuntimeAppStatus::Error,
+                reason: Some(RuntimeAppReason::RecoveryFailed),
+            };
+        }
+        RuntimeAppState {
+            app_type: app,
+            status,
+            reason: Some(reason),
+        }
     }
 
     pub async fn start(
@@ -769,7 +1014,7 @@ mod tests {
         pin::Pin,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, Mutex,
+            Arc, Mutex, OnceLock,
         },
     };
 
@@ -778,14 +1023,14 @@ mod tests {
     use crate::{
         database::Database,
         relay::model_verification::types::{
-            EvidenceLevel, RunFailureKind, TargetKey, TargetScope, Verdict, VerificationReport,
-            RULES_VERSION,
+            EvidenceLevel, RunFailureKind, RuntimeAppReason, RuntimeAppStatus, RuntimeAppType,
+            TargetKey, TargetScope, Verdict, VerificationReport, RULES_VERSION,
         },
     };
 
     use super::{
         ActiveVerifier, ModelVerificationCoordinator, PreparedVerification, ProbeProgress,
-        VerificationEventSink,
+        TakeoverControl, VerificationEventSink,
     };
 
     #[derive(Default)]
@@ -929,6 +1174,67 @@ mod tests {
         }
     }
 
+    struct FakeTakeover {
+        db: Arc<Database>,
+        calls: Mutex<Vec<(String, bool)>>,
+        failures: Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl FakeTakeover {
+        fn new(db: Arc<Database>) -> Self {
+            Self {
+                db,
+                calls: Mutex::new(Vec::new()),
+                failures: Mutex::new(std::collections::HashSet::new()),
+            }
+        }
+
+        fn fail_for(&self, app_type: &str) {
+            self.failures.lock().unwrap().insert(app_type.to_string());
+        }
+    }
+
+    impl TakeoverControl for FakeTakeover {
+        async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((app_type.to_string(), enabled));
+            if self.failures.lock().unwrap().contains(app_type) {
+                return Err("takeover failed".to_string());
+            }
+            let mut config = self
+                .db
+                .get_proxy_config_for_app(app_type)
+                .await
+                .map_err(|error| error.to_string())?;
+            config.enabled = enabled;
+            self.db
+                .update_proxy_config_for_app(config)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    async fn runtime_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        let guard = LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        crate::settings::set_current_provider(&crate::app_config::AppType::Codex, None).unwrap();
+        guard
+    }
+
+    fn managed_runtime_db(current_provider: &str) -> Arc<Database> {
+        let db = database_with_providers(&[
+            ("loongport-0123456789abcdef", "codex"),
+            ("custom-provider", "codex"),
+        ]);
+        db.set_current_provider("codex", current_provider).unwrap();
+        db
+    }
+
     fn target() -> TargetKey {
         TargetKey::new("provider-a", "codex", "gpt-5.6-sol")
     }
@@ -957,6 +1263,104 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         panic!("condition was not reached");
+    }
+
+    #[tokio::test]
+    async fn runtime_reconcile_takes_over_only_a_managed_current_provider() {
+        let _guard = runtime_test_guard().await;
+        let db = managed_runtime_db("loongport-0123456789abcdef");
+        let fake = FakeTakeover::new(db.clone());
+        let coordinator = ModelVerificationCoordinator::with_verifier(
+            db.clone(),
+            Arc::new(BlockedVerifier::new()),
+        );
+
+        let (_, states) = coordinator.set_runtime_enabled(&fake, true).await.unwrap();
+        assert_eq!(states[0].status, RuntimeAppStatus::Active);
+        assert_eq!(
+            fake.calls.lock().unwrap().as_slice(),
+            [("codex".into(), true)]
+        );
+        assert!(crate::relay::model_verification::store::has_lease(&db, "codex").unwrap());
+
+        db.set_current_provider("codex", "custom-provider").unwrap();
+        let state = coordinator
+            .reconcile_app(&fake, RuntimeAppType::Codex)
+            .await;
+        assert_eq!(state.status, RuntimeAppStatus::Waiting);
+        assert_eq!(
+            state.reason,
+            Some(RuntimeAppReason::CurrentProviderUnsupported)
+        );
+        assert_eq!(
+            fake.calls.lock().unwrap().as_slice(),
+            [("codex".into(), true), ("codex".into(), false)]
+        );
+        assert!(!crate::relay::model_verification::store::has_lease(&db, "codex").unwrap());
+    }
+
+    #[tokio::test]
+    async fn runtime_disable_preserves_user_owned_takeover() {
+        let _guard = runtime_test_guard().await;
+        let db = managed_runtime_db("loongport-0123456789abcdef");
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        let fake = FakeTakeover::new(db.clone());
+        let coordinator = ModelVerificationCoordinator::with_verifier(
+            db.clone(),
+            Arc::new(BlockedVerifier::new()),
+        );
+
+        let (_, states) = coordinator.set_runtime_enabled(&fake, false).await.unwrap();
+        assert_eq!(states[0].status, RuntimeAppStatus::Active);
+        assert!(fake.calls.lock().unwrap().is_empty());
+        assert!(!crate::relay::model_verification::store::has_lease(&db, "codex").unwrap());
+        assert!(db.get_proxy_config_for_app("codex").await.unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn runtime_takeover_failure_removes_the_pending_lease() {
+        let _guard = runtime_test_guard().await;
+        let db = managed_runtime_db("loongport-0123456789abcdef");
+        let fake = FakeTakeover::new(db.clone());
+        fake.fail_for("codex");
+        let coordinator = ModelVerificationCoordinator::with_verifier(
+            db.clone(),
+            Arc::new(BlockedVerifier::new()),
+        );
+
+        let (_, states) = coordinator.set_runtime_enabled(&fake, true).await.unwrap();
+        assert_eq!(states[0].status, RuntimeAppStatus::Error);
+        assert_eq!(states[0].reason, Some(RuntimeAppReason::TakeoverFailed));
+        assert!(!crate::relay::model_verification::store::has_lease(&db, "codex").unwrap());
+    }
+
+    #[tokio::test]
+    async fn runtime_reconcile_recovers_a_pending_lease_after_startup() {
+        let _guard = runtime_test_guard().await;
+        let db = managed_runtime_db("loongport-0123456789abcdef");
+        crate::relay::model_verification::store::set_runtime_setting(&db, true).unwrap();
+        crate::relay::model_verification::store::insert_lease(
+            &db,
+            "codex",
+            chrono::Utc::now().timestamp(),
+        )
+        .unwrap();
+        let fake = FakeTakeover::new(db.clone());
+        let coordinator = ModelVerificationCoordinator::with_verifier(
+            db.clone(),
+            Arc::new(BlockedVerifier::new()),
+        );
+
+        let states = coordinator.reconcile_all(&fake).await;
+
+        assert_eq!(states[0].status, RuntimeAppStatus::Active);
+        assert_eq!(
+            fake.calls.lock().unwrap().as_slice(),
+            [("codex".into(), true)]
+        );
+        assert!(db.get_proxy_config_for_app("codex").await.unwrap().enabled);
     }
 
     #[tokio::test]
