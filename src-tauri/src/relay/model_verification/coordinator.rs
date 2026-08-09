@@ -62,7 +62,7 @@ impl VerificationEventSink for NoopEventSink {
 }
 
 #[derive(Default)]
-struct TauriEventSink {
+pub(crate) struct TauriEventSink {
     app_handle: RwLock<Option<tauri::AppHandle>>,
 }
 

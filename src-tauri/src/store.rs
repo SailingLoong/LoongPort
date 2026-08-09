@@ -23,7 +23,7 @@ impl AppState {
         let model_verification = Arc::new(ModelVerificationCoordinator::with_passive_ingress(
             db.clone(),
             verifier,
-            Arc::new(crate::relay::model_verification::coordinator::NoopEventSink),
+            Arc::new(crate::relay::model_verification::coordinator::TauriEventSink::default()),
             ingress,
             receiver,
         ));
