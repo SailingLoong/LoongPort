@@ -2,9 +2,28 @@ use crate::{
     app_config::AppType,
     relay::model_verification::{
         capability_profiles::CapabilityProfile,
+        passive::PassiveAggregate,
         types::{EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, Verdict},
     },
 };
+
+/// The only passive failures that can become high-confidence anomalies.
+pub(crate) fn is_high_confidence_anomaly(code: EvidenceCode) -> bool {
+    matches!(
+        code,
+        EvidenceCode::ForeignProtocol
+            | EvidenceCode::ModelMatch
+            | EvidenceCode::ThinkingSignature
+            | EvidenceCode::SignatureContinuation
+            | EvidenceCode::StreamLifecycle
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergedReport {
+    pub verdict: Verdict,
+    pub evidence_level: EvidenceLevel,
+}
 
 /// Reduces finite verification evidence to its single user-facing verdict.
 ///
@@ -57,6 +76,71 @@ fn is_critical_contradiction(code: EvidenceCode) -> bool {
     )
 }
 
+/// Merges bounded passive state with the latest active report. All precedence and confidence
+/// thresholds live here; storage is deliberately policy-free.
+pub fn merge(
+    active: Option<&crate::relay::model_verification::types::VerificationReport>,
+    passive: Option<&PassiveAggregate>,
+) -> MergedReport {
+    let passive = passive.map(passive_report).unwrap_or(MergedReport {
+        verdict: Verdict::Inconclusive,
+        evidence_level: EvidenceLevel::Insufficient,
+    });
+    let active = active.map(|report| MergedReport {
+        verdict: report.verdict,
+        evidence_level: report.evidence_level,
+    });
+
+    match passive.verdict {
+        Verdict::Anomaly => passive,
+        Verdict::Suspicious => match active {
+            Some(active) if active.verdict == Verdict::Anomaly => active,
+            _ => passive,
+        },
+        Verdict::Trusted => match active {
+            Some(active) if active.verdict != Verdict::Inconclusive => active,
+            _ => passive,
+        },
+        Verdict::Inconclusive => active.unwrap_or(passive),
+    }
+}
+
+fn passive_report(aggregate: &PassiveAggregate) -> MergedReport {
+    if aggregate
+        .unresolved_fingerprints()
+        .iter()
+        .any(|fingerprint| is_high_confidence_anomaly(fingerprint.code()))
+    {
+        return MergedReport {
+            verdict: Verdict::Anomaly,
+            evidence_level: EvidenceLevel::Insufficient,
+        };
+    }
+    if !aggregate.unresolved_fingerprints().is_empty() {
+        return MergedReport {
+            verdict: Verdict::Suspicious,
+            evidence_level: EvidenceLevel::Insufficient,
+        };
+    }
+    if EvidenceCode::ALL
+        .iter()
+        .any(|code| aggregate.clean_streak(*code) >= 3)
+    {
+        return MergedReport {
+            verdict: Verdict::Trusted,
+            evidence_level: if aggregate.clean_streak(EvidenceCode::SignatureContinuation) >= 3 {
+                EvidenceLevel::Cryptographic
+            } else {
+                EvidenceLevel::ProtocolBehavior
+            },
+        };
+    }
+    MergedReport {
+        verdict: Verdict::Inconclusive,
+        evidence_level: EvidenceLevel::Insufficient,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -67,7 +151,11 @@ mod tests {
         },
     };
 
-    use super::evaluate;
+    use super::{evaluate, merge};
+    use crate::relay::model_verification::{
+        passive::{reduce_batch, resolve_with_active, EvidenceBatch, PassiveAggregate},
+        types::{TargetKey, VerificationReport, RULES_VERSION},
+    };
 
     fn passed(code: EvidenceCode) -> EvidenceFact {
         EvidenceFact {
@@ -85,6 +173,159 @@ mod tests {
 
     fn codex_profile(model: &str) -> CapabilityProfile {
         CapabilityProfile::for_target(&AppType::Codex, model)
+    }
+
+    fn active(facts: Vec<EvidenceFact>, verdict: Verdict) -> VerificationReport {
+        VerificationReport {
+            target: TargetKey::new("provider-a", "codex", "gpt-5.6-sol"),
+            verdict,
+            evidence_level: EvidenceLevel::ProtocolBehavior,
+            facts,
+            rules_version: RULES_VERSION,
+            checked_at: 100,
+        }
+    }
+
+    fn observation(facts: Vec<EvidenceFact>) -> EvidenceBatch {
+        EvidenceBatch {
+            target: TargetKey::new("provider-a", "codex", "gpt-5.6-sol"),
+            generation: 0,
+            completed: true,
+            facts,
+            observed_at: 100,
+        }
+    }
+
+    #[test]
+    fn inconclusive_passive_data_never_replaces_a_valid_active_report() {
+        let aggregate = PassiveAggregate::default();
+        assert_eq!(
+            merge(
+                Some(&active(
+                    vec![passed(EvidenceCode::BasicEnvelope)],
+                    Verdict::Trusted
+                )),
+                Some(&aggregate),
+            )
+            .verdict,
+            Verdict::Trusted
+        );
+    }
+
+    #[test]
+    fn suspicious_fingerprint_needs_three_complete_clean_observations_to_resolve() {
+        let mut aggregate = PassiveAggregate::default();
+        reduce_batch(
+            &mut aggregate,
+            &observation(vec![failed(EvidenceCode::UsageConsistency)]),
+        );
+        for _ in 0..2 {
+            reduce_batch(
+                &mut aggregate,
+                &observation(vec![passed(EvidenceCode::UsageConsistency)]),
+            );
+        }
+        assert_eq!(merge(None, Some(&aggregate)).verdict, Verdict::Suspicious);
+
+        reduce_batch(
+            &mut aggregate,
+            &observation(vec![passed(EvidenceCode::UsageConsistency)]),
+        );
+        assert_eq!(merge(None, Some(&aggregate)).verdict, Verdict::Trusted);
+    }
+
+    #[test]
+    fn high_confidence_anomaly_survives_clean_traffic_until_same_code_active_pass() {
+        let mut aggregate = PassiveAggregate::default();
+        reduce_batch(
+            &mut aggregate,
+            &observation(vec![failed(EvidenceCode::ForeignProtocol)]),
+        );
+        for _ in 0..5 {
+            reduce_batch(
+                &mut aggregate,
+                &observation(vec![passed(EvidenceCode::ForeignProtocol)]),
+            );
+        }
+        assert_eq!(merge(None, Some(&aggregate)).verdict, Verdict::Anomaly);
+
+        let active = active(
+            vec![passed(EvidenceCode::ForeignProtocol)],
+            Verdict::Trusted,
+        );
+        resolve_with_active(&mut aggregate, &active);
+        assert_eq!(
+            merge(Some(&active), Some(&aggregate)).verdict,
+            Verdict::Trusted
+        );
+    }
+
+    #[test]
+    fn deterministic_contradiction_beats_positive_evidence() {
+        let mut aggregate = PassiveAggregate::default();
+        reduce_batch(
+            &mut aggregate,
+            &observation(vec![failed(EvidenceCode::ModelMatch)]),
+        );
+        assert_eq!(
+            merge(
+                Some(&active(
+                    vec![passed(EvidenceCode::BasicEnvelope)],
+                    Verdict::Trusted
+                )),
+                Some(&aggregate),
+            )
+            .verdict,
+            Verdict::Anomaly
+        );
+    }
+
+    #[test]
+    fn active_pass_only_resolves_its_matching_fingerprint() {
+        let mut aggregate = PassiveAggregate::default();
+        reduce_batch(
+            &mut aggregate,
+            &observation(vec![
+                failed(EvidenceCode::ForeignProtocol),
+                failed(EvidenceCode::UsageConsistency),
+            ]),
+        );
+
+        let active = active(
+            vec![passed(EvidenceCode::UsageConsistency)],
+            Verdict::Trusted,
+        );
+        resolve_with_active(&mut aggregate, &active);
+
+        assert_eq!(
+            merge(Some(&active), Some(&aggregate)).verdict,
+            Verdict::Anomaly
+        );
+    }
+
+    #[test]
+    fn supported_anthropic_signature_can_raise_passive_evidence_level() {
+        let mut aggregate = PassiveAggregate::default();
+        let batch = |model: &str| EvidenceBatch {
+            target: TargetKey::new("provider-a", "claude", model),
+            generation: 0,
+            completed: true,
+            facts: vec![passed(EvidenceCode::SignatureContinuation)],
+            observed_at: 100,
+        };
+        for _ in 0..3 {
+            reduce_batch(&mut aggregate, &batch("claude-sonnet-5"));
+        }
+        assert_eq!(
+            merge(None, Some(&aggregate)).evidence_level,
+            EvidenceLevel::Cryptographic
+        );
+
+        let mut unknown = PassiveAggregate::default();
+        for _ in 0..3 {
+            reduce_batch(&mut unknown, &batch("future-model-x"));
+        }
+        assert_eq!(merge(None, Some(&unknown)).verdict, Verdict::Inconclusive);
     }
 
     #[test]

@@ -57,7 +57,7 @@ pub enum EvidenceLevel {
     Insufficient,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EvidenceCode {
     BasicEnvelope,
@@ -70,6 +70,38 @@ pub enum EvidenceCode {
     SignatureContinuation,
     ForeignProtocol,
     ForeignSelfIdentification,
+}
+
+impl EvidenceCode {
+    pub const ALL: [Self; 10] = [
+        Self::BasicEnvelope,
+        Self::ModelMatch,
+        Self::StreamLifecycle,
+        Self::UsageConsistency,
+        Self::ToolCallShape,
+        Self::StructuredOutput,
+        Self::ThinkingSignature,
+        Self::SignatureContinuation,
+        Self::ForeignProtocol,
+        Self::ForeignSelfIdentification,
+    ];
+
+    pub const CARDINALITY: usize = Self::ALL.len();
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::BasicEnvelope => 0,
+            Self::ModelMatch => 1,
+            Self::StreamLifecycle => 2,
+            Self::UsageConsistency => 3,
+            Self::ToolCallShape => 4,
+            Self::StructuredOutput => 5,
+            Self::ThinkingSignature => 6,
+            Self::SignatureContinuation => 7,
+            Self::ForeignProtocol => 8,
+            Self::ForeignSelfIdentification => 9,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
