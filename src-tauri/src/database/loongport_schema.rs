@@ -505,10 +505,22 @@ mod tests {
         crate::Database::create_tables_on_conn(conn).expect("建表");
     }
 
+    fn legacy_providers_table(conn: &Connection) {
+        conn.execute(
+            "CREATE TABLE providers (
+                id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                PRIMARY KEY (id, app_type)
+            )",
+            [],
+        )
+        .expect("造 v4 providers 表");
+    }
+
     #[test]
     fn v4_to_v5_creates_results_table_without_touching_user_version() {
         let conn = mem();
-        providers_table(&conn);
+        legacy_providers_table(&conn);
         conn.execute("PRAGMA user_version = 16", [])
             .expect("设置上游版本");
         ensure_version_table(&conn).expect("建版本表");
