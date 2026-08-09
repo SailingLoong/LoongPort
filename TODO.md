@@ -273,7 +273,7 @@ cargo tree -i rand@0.7.3 --edges normal --target all
 
 ---
 
-## 数据库仍是 rollback-journal 模式，而现在有第二个进程会读它
+## 数据库仍是 rollback-journal 模式，而现在有第二个进程会读它 → ✅ 已完成（2026-08-10）
 
 **what**：`database/mod.rs` 建连接时设了 `foreign_keys` 与 `auto_vacuum`，但**没设
 `journal_mode = WAL`**。rollback 模式下写者持 EXCLUSIVE 锁会**直接阻塞读者**；
@@ -293,6 +293,10 @@ WAL 模式下读写可并行。
 然后复核三处：① `database/backup.rs` 的备份是否仍完整（WAL 下要 checkpoint 或用
 sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store` 换数据目录那条路径；
 ③ Windows 上多进程访问同一个 WAL 库的行为。
+
+**已完成**：连接初始化优先启用 WAL，不能启用时保留 rollback 兼容启动；备份与恢复继续
+复用 SQLite Backup API，覆盖 WAL 下的一致性快照。新增文件数据库 WAL 回归测试，数据库
+模块测试与 Clippy 均通过。
 
 ---
 
