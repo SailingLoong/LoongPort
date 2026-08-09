@@ -320,6 +320,11 @@ sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store`
 `StreamCheckResult.model_used` 那个 TEXT 列要么存 enum 的判别式 + JSON、
 要么另加一列 —— 注意它同时是 `stream_check_logs` 的历史数据，改格式要考虑旧行怎么读。
 
+**已完成（2026-08-10）**：`model_used` 现在存带 `kind` 的结构化 JSON（不改表结构），
+前端解析后通过四份 locale 渲染密钥失效、无权访问、无模型、仅生图和模型列表五类结论。
+旧日志里的纯文本值继续作为 legacy 文案回退显示；新增 Rust 序列化、前端解析和 locale
+对称性测试。
+
 ---
 
 ## HSTS 的 max_age 还是观察期的 1 天（2026-08-05 记）

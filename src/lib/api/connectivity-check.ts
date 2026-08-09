@@ -31,10 +31,65 @@ export interface StreamCheckResult {
    * 密钥失效（401）、分组没挂任何模型、或只挂了生图模型却被当对话档位用
    * （实测这三种在可达性探测里全显示「正常」）。
    *
-   * 字段名沿用后端 `stream_check_logs` 表的既有列（原本恒为空串），所以历史日志
-   * 与批量检查不必改结构就能带上这条信息。
+   * 字段名沿用后端 `stream_check_logs` 表的既有列（原本恒为空串）。新结果是带 `kind`
+   * 的 JSON，历史行里的纯文本仍可作为 legacy 值回退显示，因此不需要改数据库结构。
    */
   modelUsed?: string;
+}
+
+export type ModelProbeVerdict =
+  | { kind: "keyExpired"; status: number }
+  | { kind: "forbidden"; status: number }
+  | { kind: "noModels" }
+  | { kind: "imageOnly"; models: string[] }
+  | { kind: "models"; total: number; head: string[] };
+
+/** Parse the structured verdict stored in the legacy `modelUsed` field. */
+export function parseModelProbeVerdict(
+  value: string | undefined,
+): ModelProbeVerdict | null {
+  if (!value) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || !("kind" in parsed)) {
+      return null;
+    }
+
+    const candidate = parsed as Record<string, unknown>;
+    switch (candidate.kind) {
+      case "keyExpired":
+      case "forbidden":
+        return typeof candidate.status === "number"
+          ? { kind: candidate.kind, status: candidate.status }
+          : null;
+      case "noModels":
+        return { kind: "noModels" };
+      case "imageOnly":
+      case "models":
+        if (
+          !Array.isArray(candidate.models) &&
+          !Array.isArray(candidate.head)
+        ) {
+          return null;
+        }
+        if (candidate.kind === "imageOnly") {
+          return Array.isArray(candidate.models) &&
+            candidate.models.every((model) => typeof model === "string")
+            ? { kind: "imageOnly", models: candidate.models }
+            : null;
+        }
+        return typeof candidate.total === "number" &&
+          Array.isArray(candidate.head) &&
+          candidate.head.every((model) => typeof model === "string")
+          ? { kind: "models", total: candidate.total, head: candidate.head }
+          : null;
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
 }
 
 // ===== 连通性检查 API =====

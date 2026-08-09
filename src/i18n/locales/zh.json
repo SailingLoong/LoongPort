@@ -2773,7 +2773,14 @@
     "timeout": "超时时间（秒）",
     "maxRetries": "最大重试次数",
     "degradedThreshold": "较慢阈值（毫秒）",
-    "error": "{{providerName}} 检查出错: {{error}}"
+    "error": "{{providerName}} 检查出错: {{error}}",
+    "modelProbe": {
+      "keyExpired": "密钥已失效（{{status}}）",
+      "forbidden": "这个档位无权访问（{{status}}）",
+      "noModels": "这个档位没有可调用的模型",
+      "imageOnly": "只能生图（{{models}}），不能对话",
+      "models": "{{total}} 个模型（{{models}}）"
+    }
   },
   "proxyConfig": {
     "proxyEnabled": "路由总开关",
