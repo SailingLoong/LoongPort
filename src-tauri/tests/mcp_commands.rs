@@ -4,9 +4,10 @@ use std::fs;
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_mcp_path, get_claude_mcp_status, get_claude_settings_path, get_grok_config_path,
-    import_default_config_test_hook, read_claude_mcp_config, update_settings, AppError,
-    AppSettings, AppType, McpApps, McpServer, McpService, MultiAppConfig, ProviderService,
+    get_claude_mcp_path, get_claude_mcp_status, get_claude_settings_path, get_codex_config_path,
+    get_grok_config_path, import_default_config_test_hook, read_claude_mcp_config, update_settings,
+    AppError, AppSettings, AppType, McpApps, McpServer, McpService, MultiAppConfig,
+    ProviderService,
 };
 
 #[path = "support.rs"]
@@ -518,6 +519,45 @@ fn import_from_all_apps_reports_broken_app_but_imports_the_rest() {
     assert!(
         entry.apps.claude,
         "imported server should have Claude app enabled"
+    );
+}
+
+#[test]
+fn upsert_reports_broken_claude_but_still_projects_to_codex() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    fs::write(get_claude_mcp_path(), "{broken json").expect("seed broken Claude config");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create Codex config dir");
+    fs::write(get_codex_config_path(), "").expect("seed Codex config");
+
+    let state = create_test_state().expect("create test state");
+    let error = McpService::upsert_server(
+        &state,
+        McpServer {
+            id: "imagegen".to_string(),
+            name: "Imagegen".to_string(),
+            server: json!({ "type": "stdio", "command": "imagegen" }),
+            apps: McpApps {
+                claude: true,
+                codex: true,
+                ..Default::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )
+    .expect_err("the broken Claude projection must still be reported");
+
+    assert!(error.to_string().contains("claude"));
+    let codex = fs::read_to_string(get_codex_config_path()).expect("read Codex config");
+    assert!(
+        codex.contains("mcp_servers.imagegen"),
+        "Claude failure must not short-circuit the Codex projection: {codex}"
     );
 }
 

@@ -360,10 +360,10 @@ pub fn run_imagegen_mcp() -> Result<(), String> {
 
 /// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
 ///
-/// **唯一定义在 [`commands::IMAGEGEN_MCP_FLAG`]** —— 写配置的那一侧（装工具时填进
+/// **唯一定义在 [`relay::imagegen_mcp::IMAGEGEN_MCP_FLAG`]** —— 写配置的那一侧（装工具时填进
 /// `args`）与读参数的这一侧（`main.rs` 的分流判断）必须是同一个字符串，
 /// 两处各写一遍字面量迟早分叉，而症状是宿主那边"启动超时"，看不出是拼写问题。
-pub use commands::IMAGEGEN_MCP_FLAG;
+pub use relay::imagegen_mcp::IMAGEGEN_MCP_FLAG;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -922,6 +922,12 @@ pub fn run() {
                 }
                 Ok(_) => log::debug!("○ No Hermes provider changes from live config"),
                 Err(e) => log::warn!("✗ Failed to import Hermes providers: {e}"),
+            }
+
+            // 生图 MCP 是「生图栏里是否有托管档位」的派生状态。启动时无条件对齐一次，
+            // 覆盖升级后已有档位但从未再次 provision、以及应用升级后可执行路径变化的情况。
+            if let Err(e) = crate::relay::imagegen_mcp::sync_registration(&app_state) {
+                log::warn!("启动时同步生图 MCP 失败（进入生图页时会重试）: {e}");
             }
 
             // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
@@ -1523,6 +1529,7 @@ pub fn run() {
             commands::relay_list_tier_rates,
             commands::relay_reorder,
             commands::relay_reset_tier_config,
+            commands::relay_sync_imagegen_mcp,
             commands::relay_switch_tier,
             commands::relay_list_sites,
             commands::relay_remove_site,

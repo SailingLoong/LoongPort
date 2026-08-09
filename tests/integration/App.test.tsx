@@ -2,7 +2,9 @@ import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { http, HttpResponse } from "msw";
 import { providersApi } from "@/lib/api/providers";
+import { LAST_APP_STORAGE_KEY } from "@/config/constants";
 import {
   resetProviderState,
   setCurrentProviderId,
@@ -10,6 +12,7 @@ import {
   setProviders,
 } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
+import { server } from "../msw/server";
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -123,6 +126,9 @@ vi.mock("@/components/AppSwitcher", () => ({
       <span>{activeApp}</span>
       <button onClick={() => onSwitch("claude")}>switch-claude</button>
       <button onClick={() => onSwitch("codex")}>switch-codex</button>
+      <button onClick={() => onSwitch("codex-image")}>
+        switch-codex-image
+      </button>
       <button onClick={() => onSwitch("openclaw")}>switch-openclaw</button>
     </div>
   ),
@@ -167,6 +173,44 @@ describe("App integration with MSW", () => {
     //
     // key 必须与 App.tsx 的 VIEW_STORAGE_KEY 一致（那边加了 loongport- 前缀防止读到上游遗留值）。
     localStorage.setItem("loongport-last-view", "providers");
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+  });
+
+  it("restores the image page and reconciles its MCP registration on startup", async () => {
+    let syncCalls = 0;
+    server.use(
+      http.post("http://tauri.local/relay_sync_imagegen_mcp", () => {
+        syncCalls += 1;
+        return HttpResponse.json(null);
+      }),
+    );
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "codex-image");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-switcher")).toHaveTextContent(
+        "codex-image",
+      );
+      expect(syncCalls).toBe(1);
+    });
+  });
+
+  it("reconciles the image MCP registration when switching to the image page", async () => {
+    let syncCalls = 0;
+    server.use(
+      http.post("http://tauri.local/relay_sync_imagegen_mcp", () => {
+        syncCalls += 1;
+        return HttpResponse.json(null);
+      }),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    fireEvent.click(await screen.findByText("switch-codex-image"));
+
+    await waitFor(() => expect(syncCalls).toBe(1));
   });
 
   it("covers basic provider flows via real hooks", async () => {
