@@ -151,6 +151,45 @@ pub struct RuntimeVerificationSetting {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeAppType {
+    Codex,
+    Claude,
+}
+
+/// Short alias for callers that refer to the supported runtime clients as apps.
+pub type RuntimeApp = RuntimeAppType;
+
+impl RuntimeAppType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+}
+
+impl TryFrom<&str> for RuntimeAppType {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            _ => Err("unsupported runtime app type"),
+        }
+    }
+}
+
+impl TryFrom<String> for RuntimeAppType {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeAppStatus {
@@ -172,7 +211,7 @@ pub enum RuntimeAppReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeAppState {
-    pub app_type: String,
+    pub app_type: RuntimeAppType,
     pub status: RuntimeAppStatus,
     pub reason: Option<RuntimeAppReason>,
 }
@@ -180,6 +219,6 @@ pub struct RuntimeAppState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyLease {
-    pub app_type: String,
+    pub app_type: RuntimeAppType,
     pub acquired_at: i64,
 }

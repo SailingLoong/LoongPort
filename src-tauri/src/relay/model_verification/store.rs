@@ -2,7 +2,7 @@ use crate::{
     database::{lock_conn, Database},
     error::AppError,
     relay::model_verification::types::{
-        ProxyLease, RuntimeVerificationSetting, TargetScope, VerificationReport,
+        ProxyLease, RuntimeAppType, RuntimeVerificationSetting, TargetScope, VerificationReport,
     },
 };
 use rusqlite::{params, params_from_iter, Connection};
@@ -71,13 +71,12 @@ fn unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-fn validate_lease_app(app_type: &str) -> Result<(), AppError> {
-    match app_type {
-        "codex" | "claude" => Ok(()),
-        _ => Err(AppError::InvalidInput(format!(
+fn validate_lease_app(app_type: &str) -> Result<RuntimeAppType, AppError> {
+    RuntimeAppType::try_from(app_type).map_err(|_| {
+        AppError::InvalidInput(format!(
             "unsupported model verification app type: {app_type}"
-        ))),
-    }
+        ))
+    })
 }
 
 pub fn get_runtime_setting(db: &Database) -> Result<RuntimeVerificationSetting, AppError> {
@@ -126,52 +125,62 @@ pub fn list_leases(db: &Database) -> Result<Vec<ProxyLease>, AppError> {
              ORDER BY app_type",
         )
         .map_err(|error| AppError::Database(format!("查询模型验证代理租约失败: {error}")))?;
-    let leases = statement
+    let rows = statement
         .query_map([], |row| {
-            Ok(ProxyLease {
-                app_type: row.get(0)?,
-                acquired_at: row.get(1)?,
-            })
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .map_err(|error| AppError::Database(format!("读取模型验证代理租约失败: {error}")))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| AppError::Database(format!("解析模型验证代理租约失败: {error}")))?;
-    Ok(leases)
+    rows.into_iter()
+        .map(|(app_type, acquired_at)| {
+            RuntimeAppType::try_from(app_type.as_str())
+                .map(|app_type| ProxyLease {
+                    app_type,
+                    acquired_at,
+                })
+                .map_err(|_| {
+                    AppError::Database(format!(
+                        "model verification lease has unsupported app type: {app_type}"
+                    ))
+                })
+        })
+        .collect()
 }
 
 pub fn insert_lease(db: &Database, app_type: &str, acquired_at: i64) -> Result<(), AppError> {
-    validate_lease_app(app_type)?;
+    let app_type = validate_lease_app(app_type)?;
     let conn = lock_conn!(db.conn);
     conn.execute(
         "INSERT INTO model_verification_proxy_leases (app_type, acquired_at)
          VALUES (?1, ?2)
          ON CONFLICT(app_type) DO UPDATE SET acquired_at = excluded.acquired_at",
-        params![app_type, acquired_at],
+        params![app_type.as_str(), acquired_at],
     )
     .map_err(|error| AppError::Database(format!("保存模型验证代理租约失败: {error}")))?;
     Ok(())
 }
 
 pub fn delete_lease(db: &Database, app_type: &str) -> Result<(), AppError> {
-    validate_lease_app(app_type)?;
+    let app_type = validate_lease_app(app_type)?;
     let conn = lock_conn!(db.conn);
     conn.execute(
         "DELETE FROM model_verification_proxy_leases WHERE app_type = ?1",
-        [app_type],
+        [app_type.as_str()],
     )
     .map_err(|error| AppError::Database(format!("删除模型验证代理租约失败: {error}")))?;
     Ok(())
 }
 
 pub fn has_lease(db: &Database, app_type: &str) -> Result<bool, AppError> {
-    validate_lease_app(app_type)?;
+    let app_type = validate_lease_app(app_type)?;
     let conn = lock_conn!(db.conn);
     let exists: i64 = conn
         .query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM model_verification_proxy_leases WHERE app_type = ?1
             )",
-            [app_type],
+            [app_type.as_str()],
             |row| row.get(0),
         )
         .map_err(|error| AppError::Database(format!("查询模型验证代理租约失败: {error}")))?;
@@ -181,7 +190,9 @@ pub fn has_lease(db: &Database, app_type: &str) -> Result<bool, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::relay::model_verification::types::{RuntimeAppReason, RuntimeAppStatus};
+    use crate::relay::model_verification::types::{
+        ProxyLease, RuntimeAppReason, RuntimeAppState, RuntimeAppStatus, RuntimeAppType,
+    };
 
     #[test]
     fn runtime_setting_defaults_off() {
@@ -220,7 +231,7 @@ mod tests {
             list_leases(&db)
                 .unwrap()
                 .into_iter()
-                .find(|lease| lease.app_type == "codex")
+                .find(|lease| lease.app_type == RuntimeAppType::Codex)
                 .unwrap()
                 .acquired_at,
             20
@@ -238,6 +249,37 @@ mod tests {
 
     #[test]
     fn runtime_types_use_finite_camel_case_values() {
+        assert_eq!(
+            serde_json::to_value(RuntimeAppType::Codex).unwrap(),
+            serde_json::json!("codex")
+        );
+        assert_eq!(
+            serde_json::to_value(RuntimeAppType::Claude).unwrap(),
+            serde_json::json!("claude")
+        );
+        assert!(serde_json::from_str::<RuntimeAppType>("\"gemini\"").is_err());
+        assert_eq!(RuntimeAppType::Codex.as_str(), "codex");
+        let state = RuntimeAppState {
+            app_type: RuntimeAppType::Claude,
+            status: RuntimeAppStatus::Waiting,
+            reason: Some(RuntimeAppReason::CurrentProviderUnsupported),
+        };
+        assert_eq!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::json!({
+                "appType": "claude",
+                "status": "waiting",
+                "reason": "currentProviderUnsupported"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ProxyLease {
+                app_type: RuntimeAppType::Codex,
+                acquired_at: 10,
+            })
+            .unwrap(),
+            serde_json::json!({"appType": "codex", "acquiredAt": 10})
+        );
         assert_eq!(
             serde_json::to_value(RuntimeAppStatus::Active).unwrap(),
             serde_json::json!("active")
