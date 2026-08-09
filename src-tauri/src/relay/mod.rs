@@ -60,6 +60,9 @@ pub mod creds;
 pub mod imagegen_mcp;
 pub mod login;
 pub mod managed;
+// Phase 1 defines this crate-internal contract before Phase 2 consumes it.
+#[allow(dead_code)]
+pub mod model_verification;
 pub mod platform_map;
 pub mod promo;
 pub mod provision;
