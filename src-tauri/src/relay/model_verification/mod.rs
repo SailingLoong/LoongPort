@@ -1,4 +1,5 @@
 pub mod capability_profiles;
+pub(crate) mod protocols;
 pub mod store;
 pub(crate) mod target;
 pub mod types;
