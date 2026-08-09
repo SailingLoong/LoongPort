@@ -1010,12 +1010,12 @@ pub fn is_image_model(model: &str) -> bool {
 /// 写进去的和读出来的不是同一个字段）。
 ///
 /// 返回 `None` = 这个 CLI 还没接。
-fn api_key_location(app_type: &AppType) -> Option<(&'static str, &'static str)> {
+fn api_key_locations(app_type: &AppType) -> Option<&'static [(&'static str, &'static str)]> {
     match app_type {
         // 生图栏与 codex 同形（见 `settings_config_for`），sk 在同一个位置。
         // 漏了它的后果是**静默的**：`_ => None` 会让 `is_user_edited` 对每条生图档位
         // 都返回「判不了」，`extract_api_key` 也读不出 sk ⇒ 生图工具起不来。
-        AppType::Codex | AppType::CodexImage => Some(("auth", "OPENAI_API_KEY")),
+        AppType::Codex | AppType::CodexImage => Some(&[("auth", "OPENAI_API_KEY")]),
         // ⚠️ **ClaudeDesktop 与 Claude 同形，两个都要在这里**（2026-08-05 补）。
         //
         // 它们走同一个 `deeplink::build_claude_settings`（`provider.rs:165` 的
@@ -1024,8 +1024,11 @@ fn api_key_location(app_type: &AppType) -> Option<(&'static str, &'static str)> 
         // 下面那个 `_ => None`，后果与漏掉生图栏那条完全一样、而且**同样是静默的**：
         // `is_user_edited` 恒为「判不了」⇒ 界面上永远不显示「已手动维护」标记；
         // `extract_api_key` 读不出 sk ⇒ 「恢复默认配置」直接报错。
-        AppType::Claude | AppType::ClaudeDesktop => Some(("env", "ANTHROPIC_AUTH_TOKEN")),
-        AppType::Gemini => Some(("env", "GEMINI_API_KEY")),
+        AppType::Claude | AppType::ClaudeDesktop => Some(&[
+            ("env", "ANTHROPIC_AUTH_TOKEN"),
+            ("env", "ANTHROPIC_API_KEY"),
+        ]),
+        AppType::Gemini => Some(&[("env", "GEMINI_API_KEY")]),
         // ⚠️ hermes / openclaw / opencode **还没接**，见代码仓 `TODO.md`：
         // 它们的 sk 在**顶层**（hermes 是 `api_key`、openclaw 是 `apiKey`）或
         // 嵌在别的结构里（opencode 是 `options.apiKey`），而本函数的
@@ -1041,13 +1044,16 @@ fn api_key_location(app_type: &AppType) -> Option<(&'static str, &'static str)> 
 /// 返回 `None` 表示配置形状里找不到 sk（被改坏了 / 这个 CLI 还没接）——
 /// 调用方应当报错而不是继续，生成一份没有 sk 的配置是条必定 401 的记录。
 pub fn extract_api_key(settings_config: &serde_json::Value, app_type: &AppType) -> Option<String> {
-    let (section, field) = api_key_location(app_type)?;
-    settings_config
-        .get(section)?
-        .get(field)?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    api_key_locations(app_type)?
+        .iter()
+        .find_map(|(section, field)| {
+            settings_config
+                .get(*section)?
+                .get(*field)?
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// 把新 sk 塞进一份**已存在的** `settings_config`，其余部分原样保留。
@@ -1082,16 +1088,67 @@ pub fn patch_api_key(
     app_type: &AppType,
     api_key: &str,
 ) -> bool {
-    let Some((section, field)) = api_key_location(app_type) else {
+    let Some(locations) = api_key_locations(app_type) else {
         return false;
     };
 
-    // 只在那个 section 本来就是对象时改 —— 不存在就说明形状不对，让调用方全量重写，
-    // 别在这里凭空造一个 section（那会拼出一份半新半旧的配置）。
+    // 所有已经存在的候选字段都改成同一把 key。Claude 配置若意外同时含两种字段，
+    // 只改一个会让运行时与倍率查询各读到不同的凭据。
+    let mut patched = false;
+    for (section, field) in locations {
+        let Some(map) = settings_config
+            .get_mut(*section)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        if map.contains_key(*field) {
+            map.insert((*field).to_string(), serde_json::json!(api_key));
+            patched = true;
+        }
+    }
+    if patched {
+        return true;
+    }
+
+    // section 存在但 key 被用户删掉时，补回默认字段，避免下一次倍率查询丢凭据。
+    let (section, field) = locations[0];
     let Some(map) = settings_config
         .get_mut(section)
         .and_then(serde_json::Value::as_object_mut)
     else {
+        return false;
+    };
+    map.insert(field.to_string(), serde_json::json!(api_key));
+    true
+}
+
+/// 确保手工编辑后的托管档位仍带有由 LoongPort 管理的 sk。
+///
+/// 与 [`patch_api_key`] 的区别是：编辑器可能把整个认证 section 删掉；此时仍应把
+/// 托管凭据补回去，而不是让倍率/连通检测静默失效。若根配置不是对象，返回 `false`
+/// 交给调用方报出明确错误。
+pub fn ensure_api_key(
+    settings_config: &mut serde_json::Value,
+    app_type: &AppType,
+    api_key: &str,
+) -> bool {
+    if patch_api_key(settings_config, app_type, api_key) {
+        return true;
+    }
+
+    let Some((section, field)) =
+        api_key_locations(app_type).and_then(|locations| locations.first().copied())
+    else {
+        return false;
+    };
+    let Some(root) = settings_config.as_object_mut() else {
+        return false;
+    };
+    let section = root
+        .entry(section.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(map) = section.as_object_mut() else {
         return false;
     };
     map.insert(field.to_string(), serde_json::json!(api_key));
@@ -1940,6 +1997,41 @@ mod tests {
         // 重复 provision 走全量覆盖会把它们冲掉，而用户点「获取密钥」通常只想刷新列表。
         assert_eq!(sc["config"], "model = \"用户改过的模型\"\n自定义 = 1");
         assert_eq!(sc["auth"]["用户加的字段"], "保留我");
+    }
+
+    #[test]
+    fn claude_api_key_field_is_supported_by_read_and_patch() {
+        let mut sc = serde_json::json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "sk-old",
+                "ANTHROPIC_MODEL": "用户改过的模型"
+            }
+        });
+
+        assert_eq!(
+            extract_api_key(&sc, &AppType::Claude).as_deref(),
+            Some("sk-old")
+        );
+        assert!(patch_api_key(&mut sc, &AppType::Claude, "sk-new"));
+        assert_eq!(sc["env"]["ANTHROPIC_API_KEY"], "sk-new");
+        assert!(sc["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert_eq!(sc["env"]["ANTHROPIC_MODEL"], "用户改过的模型");
+
+        sc["env"]["ANTHROPIC_AUTH_TOKEN"] = serde_json::json!("sk-stale");
+        assert!(patch_api_key(&mut sc, &AppType::Claude, "sk-unified"));
+        assert_eq!(sc["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-unified");
+        assert_eq!(sc["env"]["ANTHROPIC_API_KEY"], "sk-unified");
+    }
+
+    #[test]
+    fn ensure_api_key_recreates_a_missing_auth_section() {
+        let mut sc = serde_json::json!({
+            "config": "model = \"用户改过的模型\""
+        });
+
+        assert!(ensure_api_key(&mut sc, &AppType::Codex, "sk-managed"));
+        assert_eq!(sc["auth"]["OPENAI_API_KEY"], "sk-managed");
+        assert_eq!(sc["config"], "model = \"用户改过的模型\"");
     }
 
     /// Claude Code 的默认配置带 `language: chinese`（维护者要求所有 LoongPort 生成的
