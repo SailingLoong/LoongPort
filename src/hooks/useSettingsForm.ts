@@ -5,8 +5,24 @@ import type { Settings } from "@/types";
 
 type Language = "zh" | "zh-TW" | "en" | "ja";
 
-export type SettingsFormState = Omit<Settings, "language"> & {
-  language: Language;
+type CodexAppEnhancementSettings = Required<
+  Pick<
+    Settings,
+    "preserveCodexOfficialAuthOnSwitch" | "unifyCodexSessionHistory"
+  >
+>;
+
+export type SettingsFormState = Omit<
+  Settings,
+  "language" | "preserveCodexOfficialAuthOnSwitch" | "unifyCodexSessionHistory"
+> &
+  CodexAppEnhancementSettings & {
+    language: Language;
+  };
+
+const DEFAULT_CODEX_APP_ENHANCEMENTS: CodexAppEnhancementSettings = {
+  preserveCodexOfficialAuthOnSwitch: true,
+  unifyCodexSessionHistory: true,
 };
 
 const normalizeLanguage = (lang?: string | null): Language => {
@@ -117,8 +133,11 @@ export function useSettingsForm(): UseSettingsFormResult {
       silentStartup: data.silentStartup ?? false,
       skipClaudeOnboarding: data.skipClaudeOnboarding ?? false,
       preserveCodexOfficialAuthOnSwitch:
-        data.preserveCodexOfficialAuthOnSwitch ?? false,
-      unifyCodexSessionHistory: data.unifyCodexSessionHistory ?? false,
+        data.preserveCodexOfficialAuthOnSwitch ??
+        DEFAULT_CODEX_APP_ENHANCEMENTS.preserveCodexOfficialAuthOnSwitch,
+      unifyCodexSessionHistory:
+        data.unifyCodexSessionHistory ??
+        DEFAULT_CODEX_APP_ENHANCEMENTS.unifyCodexSessionHistory,
       claudeConfigDir: sanitizeDir(data.claudeConfigDir),
       codexConfigDir: sanitizeDir(data.codexConfigDir),
       geminiConfigDir: sanitizeDir(data.geminiConfigDir),
@@ -144,8 +163,7 @@ export function useSettingsForm(): UseSettingsFormResult {
             useAppWindowControls: false,
             enableClaudePluginIntegration: false,
             skipClaudeOnboarding: false,
-            preserveCodexOfficialAuthOnSwitch: false,
-            unifyCodexSessionHistory: false,
+            ...DEFAULT_CODEX_APP_ENHANCEMENTS,
             language: readPersistedLanguage(),
           } as SettingsFormState);
 
@@ -184,8 +202,11 @@ export function useSettingsForm(): UseSettingsFormResult {
         silentStartup: serverData.silentStartup ?? false,
         skipClaudeOnboarding: serverData.skipClaudeOnboarding ?? false,
         preserveCodexOfficialAuthOnSwitch:
-          serverData.preserveCodexOfficialAuthOnSwitch ?? false,
-        unifyCodexSessionHistory: serverData.unifyCodexSessionHistory ?? false,
+          serverData.preserveCodexOfficialAuthOnSwitch ??
+          DEFAULT_CODEX_APP_ENHANCEMENTS.preserveCodexOfficialAuthOnSwitch,
+        unifyCodexSessionHistory:
+          serverData.unifyCodexSessionHistory ??
+          DEFAULT_CODEX_APP_ENHANCEMENTS.unifyCodexSessionHistory,
         claudeConfigDir: sanitizeDir(serverData.claudeConfigDir),
         codexConfigDir: sanitizeDir(serverData.codexConfigDir),
         geminiConfigDir: sanitizeDir(serverData.geminiConfigDir),

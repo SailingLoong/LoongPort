@@ -51,6 +51,8 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
+    expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
+    expect(settings.unifyCodexSessionHistory).toBe(true);
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
@@ -79,6 +81,30 @@ describe("useSettingsForm Hook", () => {
 
     expect(result.current.initialLanguage).toBe("ja");
     expect(changeLanguageSpy).toHaveBeenCalledWith("ja");
+  });
+
+  it("should preserve explicitly disabled Codex app enhancements", async () => {
+    useSettingsQueryMock.mockReturnValue({
+      data: {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        preserveCodexOfficialAuthOnSwitch: false,
+        unifyCodexSessionHistory: false,
+        language: "zh",
+      },
+      isLoading: false,
+    });
+
+    const { result } = renderHook(() => useSettingsForm());
+
+    await waitFor(() => {
+      expect(result.current.settings).not.toBeNull();
+    });
+
+    expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
+      false,
+    );
+    expect(result.current.settings?.unifyCodexSessionHistory).toBe(false);
   });
 
   it("should support traditional chinese language preference aliases", async () => {
@@ -131,6 +157,10 @@ describe("useSettingsForm Hook", () => {
     });
 
     expect(result.current.settings?.showInTray).toBe(false);
+    expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
+      true,
+    );
+    expect(result.current.settings?.unifyCodexSessionHistory).toBe(true);
 
     changeLanguageSpy.mockClear();
     act(() => {
@@ -178,6 +208,8 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(false);
     expect(settings.minimizeToTrayOnClose).toBe(false);
     expect(settings.enableClaudePluginIntegration).toBe(true);
+    expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
+    expect(settings.unifyCodexSessionHistory).toBe(true);
     expect(settings.claudeConfigDir).toBe("/reset");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("zh");
