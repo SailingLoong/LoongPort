@@ -1,6 +1,8 @@
+pub mod capability_profiles;
 pub mod store;
 pub(crate) mod target;
 pub mod types;
+pub mod verdict;
 
 #[cfg(test)]
 mod tests {
