@@ -212,12 +212,12 @@ Claude 是 JSON、Gemini 又一套）。所以：
 
 ---
 
-## Node 钉在 22.12.0，已旧 11 个 minor（2026-08-04 记）
+## Node 钉在 22.12.0，已旧 11 个 minor → ✅ 已完成（2026-08-10）
 
-**what**：`.node-version` 是 `22.12.0`，而 Node 22 已发布到 `22.23.2`。三个 workflow
+**what**：`.node-version` 曾是 `22.12.0`，而 Node 22 已发布到 `22.23.2`。三个 workflow
 现在都跟着这个文件走（2026-08-04 统一的），所以升它是一处改动、三处生效。
 
-**why 现在不做**：**不是做不了，是这一轮不该顺手做**。当前这轮在收尾首个公开发布，
+**why 当时不做**：**不是做不了，是那一轮不该顺手做**。当时在收尾首个公开发布，
 升 Node 会同时影响 CI、出正式包的那条腿、以及贡献者的本机环境 —— 撞出问题会把发布
 一起卡住。已经踩过一次：把 Node 从写死的 20 改成跟文件走（22.12.0）之后，Windows
 ARM64 那格在 `corepack prepare` 验签处炸了（`Cannot find matching keyid`，Node 自带
@@ -225,13 +225,16 @@ ARM64 那格在 `corepack prepare` 验签处炸了（`Cannot find matching keyid
 
 **how-to-repay**（前置条件链）：
 
-1. 选定目标版本（22.x 最新的 LTS patch），改 `.node-version` **一处**
+1. 选定目标版本（22.x 最新的 LTS patch），改 `.node-version` **一处** ✅ `22.23.2`
 2. 顺手验证能否**删掉** `release.yml` 里 `Setup pnpm (Windows ARM64)` 那步的
    `npm install -g corepack@0.35.0` —— 如果新 Node 自带的 corepack 已带新公钥，
    那一行就是多余的（不确定哪个版本开始带，只能实测）
 3. 跑一次 tag 构建验证三个平台（**不能只跑 CI**：ARM64 那格只在 release.yml 里）
 4. `CONTRIBUTING.md` 写的是「Node 22（见 `.node-version`）」，指向文件而非具体号码，
    ⇒ 升版本不用改文档
+
+**已完成**：`.node-version` 已升级到 `22.23.2`；现有发布 workflow 已直接安装 pnpm，
+不再依赖旧 Corepack。CI 将继续验证三个后端平台和前端构建。
 
 ---
 
