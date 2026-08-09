@@ -712,6 +712,9 @@ pub fn run() {
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
+            app_state
+                .model_verification
+                .attach_app_handle(app.handle().clone());
 
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
@@ -1189,6 +1192,23 @@ pub fn run() {
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
 
+            // 启动一次有界被动验证 worker，并恢复持久化的运行时意图。失败只影响
+            // 被动验证，不阻塞应用启动。
+            let model_verification = app.state::<AppState>().model_verification.clone();
+            model_verification.start_passive_worker();
+            let proxy_service = app.state::<AppState>().proxy_service.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(setting) = crate::relay::model_verification::store::get_runtime_setting(
+                    &model_verification.database(),
+                ) {
+                    if setting.runtime_auto_enabled {
+                        let _ = model_verification
+                            .set_runtime_enabled(&proxy_service, true)
+                            .await;
+                    }
+                }
+            });
+
             // 初始化 SkillService
             let skill_service = SkillService::new();
             app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));
@@ -1536,6 +1556,12 @@ pub fn run() {
             commands::relay_balance,
             commands::relay_purchase,
             commands::relay_restore_official_login,
+            commands::list_verification_models,
+            commands::get_runtime_verification_setting,
+            commands::set_runtime_verification_enabled,
+            commands::start_model_verification,
+            commands::cancel_model_verification,
+            commands::get_model_verification_results,
             // LoongPort 官网直连账号（vendor）
             commands::vendor_list_accounts,
             commands::vendor_open_login,

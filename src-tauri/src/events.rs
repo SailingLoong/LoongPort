@@ -19,9 +19,11 @@
 //! （尺子 2：不为不存在的跨语言契约预建）。判断标准：跨语言 = Rust emit + 前端 listen
 //! 两侧都有。
 
-use tauri::Emitter;
+use serde::Serialize;
+use tauri::{Emitter, Manager};
 
 use crate::app_config::AppType;
+use crate::relay::model_verification::passive::AnomalyFingerprint;
 
 /// 当前供应商切换后通知前端（`providersApi.onSwitched` / `RelaySection` 监听）。
 pub const PROVIDER_SWITCHED: &str = "provider-switched";
@@ -45,6 +47,20 @@ pub const PURCHASE_CLOSED: &str = "relay-purchase-closed";
 /// 官网直连登录窗凭据解析失败（`RelaySection` 监听）。原名
 /// `commands::vendor::LOGIN_ERROR_EVENT`。
 pub const VENDOR_LOGIN_ERROR: &str = "vendor-login-error";
+/// 主动模型验证任务进度变化（模型验证弹窗监听）。
+pub const MODEL_VERIFICATION_PROGRESS: &str = "model-verification-progress";
+/// 模型验证持久化结果变化（档位行与模型验证弹窗监听）。
+pub const MODEL_VERIFICATION_CHANGED: &str = "model-verification-changed";
+pub const MODEL_VERIFICATION_ANOMALY: &str = "model-verification-anomaly";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelVerificationAnomalyEvent {
+    pub provider_id: String,
+    pub app_type: String,
+    pub model: String,
+    pub fingerprint: AnomalyFingerprint,
+}
 
 /// 广播「当前供应商变了」。
 ///
@@ -94,6 +110,22 @@ pub fn emit_provider_switched(
         // 配置已经写进去了，报错会让用户以为没切成功而再切一次。
         log::warn!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
     }
+    if matches!(app_type, AppType::Codex | AppType::Claude) {
+        if let Some(state) = app_handle.try_state::<crate::AppState>() {
+            let coordinator = state.model_verification.clone();
+            let proxy = state.proxy_service.clone();
+            tauri::async_runtime::spawn(async move {
+                if crate::relay::model_verification::store::get_runtime_setting(
+                    &coordinator.database(),
+                )
+                .map(|setting| setting.runtime_auto_enabled)
+                .unwrap_or(false)
+                {
+                    let _ = coordinator.set_runtime_enabled(&proxy, true).await;
+                }
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +160,18 @@ mod consistency_tests {
             ("S3_SYNC_STATUS_UPDATED", super::S3_SYNC_STATUS_UPDATED),
             ("PURCHASE_CLOSED", super::PURCHASE_CLOSED),
             ("VENDOR_LOGIN_ERROR", super::VENDOR_LOGIN_ERROR),
+            (
+                "MODEL_VERIFICATION_PROGRESS",
+                super::MODEL_VERIFICATION_PROGRESS,
+            ),
+            (
+                "MODEL_VERIFICATION_CHANGED",
+                super::MODEL_VERIFICATION_CHANGED,
+            ),
+            (
+                "MODEL_VERIFICATION_ANOMALY",
+                super::MODEL_VERIFICATION_ANOMALY,
+            ),
         ];
 
         for (ts_name, rust_value) in pairs {

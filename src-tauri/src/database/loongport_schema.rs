@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 4;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 6;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -143,6 +143,18 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 log::info!("LoongPort 数据迁移 v3 → v4（loongport_operator → loongport_relay）");
                 rename_operator_table_to_relay(conn)?;
                 set_version(conn, 4)?;
+            }
+            // v4 → v5：模型验证结果（主动报告 + 为第二阶段预留的被动聚合列）。
+            4 => {
+                log::info!("LoongPort 数据迁移 v4 → v5（模型验证结果）");
+                crate::relay::model_verification::store::create_results_table(conn)?;
+                set_version(conn, 5)?;
+            }
+            // v5 → v6：运行时自动验证全局设置与代理接管租约。
+            5 => {
+                log::info!("LoongPort 数据迁移 v5 → v6（运行时验证设置与代理租约）");
+                crate::relay::model_verification::store::create_runtime_tables(conn)?;
+                set_version(conn, 6)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -497,6 +509,91 @@ mod tests {
     /// 造一张 providers 表 + 一条 codex 档位，用于迁移测试。
     fn providers_table(conn: &Connection) {
         crate::Database::create_tables_on_conn(conn).expect("建表");
+    }
+
+    fn legacy_providers_table(conn: &Connection) {
+        conn.execute(
+            "CREATE TABLE providers (
+                id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                PRIMARY KEY (id, app_type)
+            )",
+            [],
+        )
+        .expect("造 v4 providers 表");
+    }
+
+    #[test]
+    fn v4_to_v6_creates_runtime_tables_without_touching_user_version() {
+        let conn = mem();
+        legacy_providers_table(&conn);
+        conn.execute("PRAGMA user_version = 16", [])
+            .expect("设置上游版本");
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, 4).expect("设为 v4");
+
+        apply(&conn).expect("迁移到最新版本");
+
+        let result_table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'model_verification_results'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("查询模型验证表");
+        let settings_table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'model_verification_settings'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("查询运行时验证设置表");
+        let leases_table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'model_verification_proxy_leases'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("查询运行时验证租约表");
+        let user_version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("读取上游版本");
+
+        assert!(result_table_exists, "v4 → v5 必须创建模型验证结果表");
+        assert!(settings_table_exists, "v5 → v6 必须创建运行时验证设置表");
+        assert!(leases_table_exists, "v5 → v6 必须创建运行时验证租约表");
+        assert_eq!(user_version, 16, "LoongPort 迁移不许修改上游版本号");
+        assert_eq!(current_version(&conn).unwrap(), 6);
+    }
+
+    #[test]
+    fn v5_to_v6_is_idempotent_and_seeds_setting() {
+        let conn = mem();
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, 5).expect("设为 v5");
+
+        apply(&conn).expect("第一次迁移");
+        apply(&conn).expect("第二次迁移不应报错");
+
+        let setting: (i64, i64) = conn
+            .query_row(
+                "SELECT runtime_auto_enabled, singleton
+                 FROM model_verification_settings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("读取默认设置");
+        assert_eq!(setting, (0, 1));
+        assert_eq!(current_version(&conn).unwrap(), 6);
     }
 
     fn insert_codex_tier(conn: &Connection, id: &str, name: &str, model: &str) {

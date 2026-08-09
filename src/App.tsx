@@ -53,6 +53,8 @@ import { hermesApi } from "@/lib/api/hermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
+import { MODEL_VERIFICATION_ANOMALY } from "@/lib/api/events";
+import type { ModelVerificationAnomalyEvent } from "@/lib/api/modelVerification";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -439,6 +441,19 @@ function App() {
         t("notifications.proxyOfficialWarning", {
           name: payload.providerName,
           defaultValue: `当前供应商 ${payload.providerName} 是官方供应商，建议切换到第三方供应商后再使用代理接管`,
+        }),
+        { duration: 8000 },
+      );
+    },
+  );
+
+  useTauriEvent<ModelVerificationAnomalyEvent>(
+    MODEL_VERIFICATION_ANOMALY,
+    (payload) => {
+      toast.warning(
+        t("loongport.modelVerification.runtime.anomalyToast", {
+          app: payload.appType,
+          model: payload.model,
         }),
         { duration: 8000 },
       );

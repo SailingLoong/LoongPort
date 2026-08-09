@@ -18,6 +18,7 @@ use super::{
     ProxyError,
 };
 use crate::database::Database;
+use crate::relay::model_verification::passive::VerificationIngress;
 use axum::{
     extract::DefaultBodyLimit,
     routing::{any, get, post},
@@ -48,6 +49,7 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    pub verification_ingress: VerificationIngress,
 }
 
 /// 代理HTTP服务器
@@ -60,10 +62,20 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
+    #[allow(dead_code)]
     pub fn new(
         config: ProxyConfig,
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
+    ) -> Self {
+        Self::new_with_verification(config, db, app_handle, VerificationIngress::disabled())
+    }
+
+    pub fn new_with_verification(
+        config: ProxyConfig,
+        db: Arc<Database>,
+        app_handle: Option<tauri::AppHandle>,
+        verification_ingress: VerificationIngress,
     ) -> Self {
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
@@ -81,6 +93,7 @@ impl ProxyServer {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle,
             failover_manager,
+            verification_ingress,
         };
 
         Self {

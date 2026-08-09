@@ -3186,6 +3186,81 @@
       "howTo": "Switching image tiers needs no CLI restart — the next generation uses the new one. Only the very first image tier requires a fresh terminal so codex picks up the tool.",
       "emptyTitle": "No image tiers yet",
       "emptyBody": "Image tiers are detected automatically when you fetch keys: if your relay has a group that only serves gpt-image models, it shows up here. Your site may not offer image groups at all — then this page simply stays empty and nothing is added to your CLI config."
+    },
+    "modelVerification": {
+      "title": "Verify model",
+      "titleWithTier": "Verify model · {{tierName}}",
+      "description": "Run a verification against one model configured for this provider.",
+      "globalScopeNote": "Apply automatic verification to all configured models.",
+      "model": {
+        "label": "Model",
+        "placeholder": "Select a model",
+        "loading": "Loading models…",
+        "empty": "No models are available to verify.",
+        "error": "Could not load models."
+      },
+      "actions": {
+        "start": "Start verification",
+        "stop": "Stop verification",
+        "retry": "Retry"
+      },
+      "status": { "running": "Verifying {{completed}} / {{total}}" },
+      "runtime": {
+        "autoLabel": "Automatic runtime verification (global)",
+        "autoHelp": "Applies to all relay groups and models. LoongPort observes actual Codex and Claude responses through the local proxy; it sends no extra probes and never saves conversation content.",
+        "loadError": "Could not load runtime verification status.",
+        "anomalyToast": "An anomaly was detected for {{app}} model {{model}}. Open Verify model for details.",
+        "apps": { "codex": "Codex", "claude": "Claude" },
+        "status": { "active": "Active", "waiting": "Waiting", "error": "Error" }
+      },
+      "tierVerdict": {
+        "suspicious": "Model suspicious",
+        "anomaly": "Model anomaly",
+        "suspiciousHint": "Verification found suspicious behavior. Select Verify model for details.",
+        "anomalyHint": "Verification found an anomaly. Select Verify model for details."
+      },
+      "verdict": {
+        "trusted": "Trusted",
+        "suspicious": "Suspicious",
+        "anomaly": "Anomaly",
+        "inconclusive": "Inconclusive"
+      },
+      "evidence": {
+        "title": "Evidence",
+        "level": {
+          "cryptographic": "Cryptographic evidence",
+          "protocolBehavior": "Protocol behavior evidence",
+          "insufficient": "Insufficient evidence"
+        },
+        "outcome": {
+          "passed": "Passed",
+          "failed": "Failed",
+          "skipped": "Skipped"
+        },
+        "fact": {
+          "basicEnvelope": "Basic response envelope",
+          "modelMatch": "Model identity",
+          "streamLifecycle": "Streaming lifecycle",
+          "usageConsistency": "Usage consistency",
+          "toolCallShape": "Tool-call shape",
+          "structuredOutput": "Structured output",
+          "thinkingSignature": "Reasoning signature",
+          "signatureContinuation": "Signature continuation",
+          "foreignProtocol": "Foreign protocol",
+          "foreignSelfIdentification": "Foreign self-identification"
+        }
+      },
+      "failure": {
+        "authentication": "Authentication failed.",
+        "rateLimited": "The provider rate limited this verification.",
+        "insufficientBalance": "Insufficient balance to verify this model.",
+        "network": "Network connection failed.",
+        "upstream": "The provider could not complete verification.",
+        "timeout": "Verification timed out.",
+        "modelUnavailable": "This model is unavailable.",
+        "cancelled": "Verification was stopped.",
+        "invalidResponse": "The provider returned an invalid response."
+      }
     }
   }
 }

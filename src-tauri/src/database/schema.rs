@@ -45,6 +45,9 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        crate::relay::model_verification::store::create_results_table(conn)?;
+        crate::relay::model_verification::store::create_runtime_tables(conn)?;
+
         // 2. Provider Endpoints 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS provider_endpoints (
