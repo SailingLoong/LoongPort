@@ -142,9 +142,8 @@ mod tests {
                     passed(EvidenceCode::ModelMatch),
                     failed(EvidenceCode::ThinkingSignature),
                 ],
-            )
-            .0,
-            Verdict::Trusted
+            ),
+            (Verdict::Trusted, EvidenceLevel::ProtocolBehavior)
         );
     }
 
@@ -181,14 +180,16 @@ mod tests {
     }
 
     #[test]
-    fn no_applicable_pass_is_inconclusive() {
-        assert_eq!(
-            evaluate(
-                AppType::Claude,
-                &CapabilityProfile::for_target(&AppType::Claude, "future-model-x"),
-                &[passed(EvidenceCode::ThinkingSignature)],
-            ),
-            (Verdict::Inconclusive, EvidenceLevel::Insufficient)
-        );
+    fn no_applicable_pass_is_inconclusive_for_both_active_protocols() {
+        for app_type in [AppType::Codex, AppType::Claude] {
+            assert_eq!(
+                evaluate(
+                    app_type.clone(),
+                    &CapabilityProfile::for_target(&app_type, "future-model-x"),
+                    &[passed(EvidenceCode::ThinkingSignature)],
+                ),
+                (Verdict::Inconclusive, EvidenceLevel::Insufficient)
+            );
+        }
     }
 }

@@ -8,6 +8,9 @@ pub mod types;
 pub mod verdict;
 
 #[cfg(test)]
+mod privacy_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         store::{clear_scope, list_for_provider_ids, list_for_providers, upsert_active},

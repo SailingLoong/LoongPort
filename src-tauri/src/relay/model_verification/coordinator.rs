@@ -705,27 +705,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifier_failure_leaves_an_existing_completed_report_unchanged() {
-        let db = database_with_providers(&[("provider-a", "codex")]);
-        let prior = VerificationReport {
-            verdict: Verdict::Suspicious,
-            ..completed_report(target())
-        };
-        crate::relay::model_verification::store::upsert_active(&db, &prior).unwrap();
-        let verifier = Arc::new(BlockedVerifier::new());
-        let coordinator = Arc::new(ModelVerificationCoordinator::with_verifier(
-            db,
-            verifier.clone(),
-        ));
+    async fn every_core_failure_leaves_an_existing_completed_report_unchanged() {
+        for failure in [
+            RunFailureKind::Authentication,
+            RunFailureKind::RateLimited,
+            RunFailureKind::InsufficientBalance,
+            RunFailureKind::Network,
+            RunFailureKind::Upstream,
+            RunFailureKind::Timeout,
+            RunFailureKind::ModelUnavailable,
+            RunFailureKind::InvalidResponse,
+        ] {
+            let db = database_with_providers(&[("provider-a", "codex")]);
+            let prior = VerificationReport {
+                verdict: Verdict::Suspicious,
+                ..completed_report(target())
+            };
+            crate::relay::model_verification::store::upsert_active(&db, &prior).unwrap();
+            let verifier = Arc::new(BlockedVerifier::new());
+            let coordinator = Arc::new(ModelVerificationCoordinator::with_verifier(
+                db,
+                verifier.clone(),
+            ));
 
-        coordinator.start(target()).await.unwrap();
-        assert!(verifier.complete(&target(), Err(RunFailureKind::Network)));
-        wait_until(|| verifier.senders.lock().unwrap().is_empty()).await;
-        tokio::task::yield_now().await;
+            coordinator.start(target()).await.unwrap();
+            assert!(verifier.complete(&target(), Err(failure)));
+            wait_until(|| verifier.senders.lock().unwrap().is_empty()).await;
+            tokio::task::yield_now().await;
 
-        let rows = coordinator.list_results(&["provider-a".into()]).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].verdict, Verdict::Suspicious);
+            let rows = coordinator.list_results(&["provider-a".into()]).unwrap();
+            assert_eq!(rows.len(), 1, "failure {failure:?}");
+            assert_eq!(rows[0].verdict, Verdict::Suspicious, "failure {failure:?}");
+        }
     }
 
     #[tokio::test]
