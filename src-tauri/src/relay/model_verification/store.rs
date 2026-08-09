@@ -346,16 +346,16 @@ mod tests {
             .unwrap();
         }
         let target = TargetKey::new("provider-a", "codex", "gpt-5.6-sol");
-        let batch = EvidenceBatch {
-            target: target.clone(),
-            generation: 0,
-            completed: true,
-            facts: vec![EvidenceFact {
+        let batch = EvidenceBatch::new(
+            target.clone(),
+            0,
+            true,
+            vec![EvidenceFact {
                 code: EvidenceCode::ForeignProtocol,
                 outcome: EvidenceOutcome::Failed,
             }],
-            observed_at: 100,
-        };
+            100,
+        );
 
         assert_eq!(
             upsert_passive(&db, &batch).unwrap().verdict,

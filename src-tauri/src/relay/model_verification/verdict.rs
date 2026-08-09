@@ -2,7 +2,7 @@ use crate::{
     app_config::AppType,
     relay::model_verification::{
         capability_profiles::CapabilityProfile,
-        passive::PassiveAggregate,
+        passive::{PassiveAggregate, CLEAN_STREAK_RESOLUTION_COUNT},
         types::{EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, Verdict},
     },
 };
@@ -124,11 +124,13 @@ fn passive_report(aggregate: &PassiveAggregate) -> MergedReport {
     }
     if EvidenceCode::ALL
         .iter()
-        .any(|code| aggregate.clean_streak(*code) >= 3)
+        .any(|code| aggregate.clean_streak(*code) >= CLEAN_STREAK_RESOLUTION_COUNT)
     {
         return MergedReport {
             verdict: Verdict::Trusted,
-            evidence_level: if aggregate.clean_streak(EvidenceCode::SignatureContinuation) >= 3 {
+            evidence_level: if aggregate.clean_streak(EvidenceCode::SignatureContinuation)
+                >= CLEAN_STREAK_RESOLUTION_COUNT
+            {
                 EvidenceLevel::Cryptographic
             } else {
                 EvidenceLevel::ProtocolBehavior
@@ -153,7 +155,10 @@ mod tests {
 
     use super::{evaluate, merge};
     use crate::relay::model_verification::{
-        passive::{reduce_batch, resolve_with_active, EvidenceBatch, PassiveAggregate},
+        passive::{
+            reduce_batch, resolve_with_active, EvidenceBatch, PassiveAggregate,
+            CLEAN_STREAK_RESOLUTION_COUNT,
+        },
         types::{TargetKey, VerificationReport, RULES_VERSION},
     };
 
@@ -187,13 +192,13 @@ mod tests {
     }
 
     fn observation(facts: Vec<EvidenceFact>) -> EvidenceBatch {
-        EvidenceBatch {
-            target: TargetKey::new("provider-a", "codex", "gpt-5.6-sol"),
-            generation: 0,
-            completed: true,
+        EvidenceBatch::new(
+            TargetKey::new("provider-a", "codex", "gpt-5.6-sol"),
+            0,
+            true,
             facts,
-            observed_at: 100,
-        }
+            100,
+        )
     }
 
     #[test]
@@ -219,7 +224,7 @@ mod tests {
             &mut aggregate,
             &observation(vec![failed(EvidenceCode::UsageConsistency)]),
         );
-        for _ in 0..2 {
+        for _ in 0..usize::from(CLEAN_STREAK_RESOLUTION_COUNT - 1) {
             reduce_batch(
                 &mut aggregate,
                 &observation(vec![passed(EvidenceCode::UsageConsistency)]),
@@ -306,14 +311,16 @@ mod tests {
     #[test]
     fn supported_anthropic_signature_can_raise_passive_evidence_level() {
         let mut aggregate = PassiveAggregate::default();
-        let batch = |model: &str| EvidenceBatch {
-            target: TargetKey::new("provider-a", "claude", model),
-            generation: 0,
-            completed: true,
-            facts: vec![passed(EvidenceCode::SignatureContinuation)],
-            observed_at: 100,
+        let batch = |model: &str| {
+            EvidenceBatch::new(
+                TargetKey::new("provider-a", "claude", model),
+                0,
+                true,
+                vec![passed(EvidenceCode::SignatureContinuation)],
+                100,
+            )
         };
-        for _ in 0..3 {
+        for _ in 0..CLEAN_STREAK_RESOLUTION_COUNT {
             reduce_batch(&mut aggregate, &batch("claude-sonnet-5"));
         }
         assert_eq!(
@@ -322,7 +329,7 @@ mod tests {
         );
 
         let mut unknown = PassiveAggregate::default();
-        for _ in 0..3 {
+        for _ in 0..CLEAN_STREAK_RESOLUTION_COUNT {
             reduce_batch(&mut unknown, &batch("future-model-x"));
         }
         assert_eq!(merge(None, Some(&unknown)).verdict, Verdict::Inconclusive);

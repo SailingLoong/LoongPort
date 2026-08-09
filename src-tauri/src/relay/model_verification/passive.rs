@@ -1,6 +1,9 @@
-use std::{collections::BTreeSet, str::FromStr};
+use std::{collections::BTreeSet, fmt, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 
 use crate::{
     app_config::AppType,
@@ -12,7 +15,7 @@ use crate::{
 };
 
 pub const PASSIVE_AGGREGATE_SCHEMA_VERSION: u8 = 1;
-const CLEAN_STREAK_RESOLUTION_COUNT: u8 = 3;
+pub(crate) const CLEAN_STREAK_RESOLUTION_COUNT: u8 = 3;
 
 /// Sanitized request capabilities. This intentionally contains no request content.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +27,90 @@ pub struct PassiveRequestMeta {
     pub structured_output_requested: bool,
 }
 
+/// A finite, canonical fact set with at most one outcome for each evidence code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FiniteEvidenceFacts(Vec<EvidenceFact>);
+
+impl FiniteEvidenceFacts {
+    pub fn new(facts: impl IntoIterator<Item = EvidenceFact>) -> Self {
+        let mut outcomes = [None; EvidenceCode::CARDINALITY];
+        for fact in facts {
+            Self::record(&mut outcomes, fact);
+        }
+        Self::from_outcomes(outcomes)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &EvidenceFact> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn record(
+        outcomes: &mut [Option<EvidenceOutcome>; EvidenceCode::CARDINALITY],
+        fact: EvidenceFact,
+    ) {
+        let outcome = &mut outcomes[fact.code.index()];
+        *outcome = match (*outcome, fact.outcome) {
+            (Some(EvidenceOutcome::Failed), _) | (_, EvidenceOutcome::Failed) => {
+                Some(EvidenceOutcome::Failed)
+            }
+            (Some(EvidenceOutcome::Passed), _) | (_, EvidenceOutcome::Passed) => {
+                Some(EvidenceOutcome::Passed)
+            }
+            _ => Some(EvidenceOutcome::Skipped),
+        };
+    }
+
+    fn from_outcomes(outcomes: [Option<EvidenceOutcome>; EvidenceCode::CARDINALITY]) -> Self {
+        Self(
+            EvidenceCode::ALL
+                .into_iter()
+                .filter_map(|code| {
+                    outcomes[code.index()].map(|outcome| EvidenceFact { code, outcome })
+                })
+                .collect(),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for FiniteEvidenceFacts {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FactsVisitor;
+
+        impl<'de> Visitor<'de> for FactsVisitor {
+            type Value = FiniteEvidenceFacts;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a sequence of evidence facts")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut outcomes = [None; EvidenceCode::CARDINALITY];
+                while let Some(fact) = sequence.next_element()? {
+                    FiniteEvidenceFacts::record(&mut outcomes, fact);
+                }
+                Ok(FiniteEvidenceFacts::from_outcomes(outcomes))
+            }
+        }
+
+        deserializer.deserialize_seq(FactsVisitor)
+    }
+}
+
 /// One finite observation produced after a proxied response has completed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,8 +118,26 @@ pub struct EvidenceBatch {
     pub target: TargetKey,
     pub generation: u64,
     pub completed: bool,
-    pub facts: Vec<EvidenceFact>,
+    pub facts: FiniteEvidenceFacts,
     pub observed_at: i64,
+}
+
+impl EvidenceBatch {
+    pub fn new(
+        target: TargetKey,
+        generation: u64,
+        completed: bool,
+        facts: impl IntoIterator<Item = EvidenceFact>,
+        observed_at: i64,
+    ) -> Self {
+        Self {
+            target,
+            generation,
+            completed,
+            facts: FiniteEvidenceFacts::new(facts),
+            observed_at,
+        }
+    }
 }
 
 /// A persisted issue identifier is only an existing evidence code, never response content.
@@ -138,7 +243,7 @@ pub fn reduce_batch(aggregate: &mut PassiveAggregate, batch: &EvidenceBatch) {
     }
 
     let mut outcomes = [None; EvidenceCode::CARDINALITY];
-    for fact in &batch.facts {
+    for fact in batch.facts.iter() {
         if !profile.applies(fact.code) {
             continue;
         }
@@ -185,6 +290,14 @@ pub fn reduce_batch(aggregate: &mut PassiveAggregate, batch: &EvidenceBatch) {
     }
 }
 
+/// Merges passive state with the latest active report using the policy owned by `verdict`.
+pub fn merge_report(
+    active: Option<&VerificationReport>,
+    passive: Option<&PassiveAggregate>,
+) -> verdict::MergedReport {
+    verdict::merge(active, passive)
+}
+
 /// Resolves only the fingerprints that an applicable active probe has positively checked.
 pub fn resolve_with_active(
     aggregate: &mut PassiveAggregate,
@@ -209,19 +322,23 @@ pub fn resolve_with_active(
 mod tests {
     use crate::relay::model_verification::{
         passive::{
-            reduce_batch, AnomalyFingerprint, EvidenceBatch, PassiveAggregate, PassiveRequestMeta,
+            merge_report, reduce_batch, AnomalyFingerprint, EvidenceBatch, PassiveAggregate,
+            PassiveRequestMeta,
         },
-        types::{EvidenceCode, EvidenceFact, EvidenceOutcome, TargetKey},
+        types::{
+            EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, TargetKey, Verdict,
+            VerificationReport, RULES_VERSION,
+        },
     };
 
     fn batch(completed: bool, facts: Vec<EvidenceFact>) -> EvidenceBatch {
-        EvidenceBatch {
-            target: TargetKey::new("provider-a", "codex", "gpt-5.6-sol"),
-            generation: 7,
+        EvidenceBatch::new(
+            TargetKey::new("provider-a", "codex", "gpt-5.6-sol"),
+            7,
             completed,
             facts,
-            observed_at: 100,
-        }
+            100,
+        )
     }
 
     fn passed(code: EvidenceCode) -> EvidenceFact {
@@ -264,6 +381,63 @@ mod tests {
         );
         assert_eq!(aggregate.complete_observations(), 1);
         assert_eq!(aggregate.unresolved_fingerprints().len(), 2);
+    }
+
+    #[test]
+    fn evidence_batches_are_bounded_and_failures_win_during_construction_and_deserialization() {
+        let facts = EvidenceCode::ALL.into_iter().flat_map(|code| {
+            [
+                passed(code),
+                EvidenceFact {
+                    code,
+                    outcome: EvidenceOutcome::Skipped,
+                },
+                failed(code),
+            ]
+        });
+        let batch = batch(true, facts.collect());
+        assert_eq!(batch.facts.len(), EvidenceCode::CARDINALITY);
+        assert!(batch
+            .facts
+            .iter()
+            .all(|fact| fact.outcome == EvidenceOutcome::Failed));
+
+        let restored: EvidenceBatch = serde_json::from_value(serde_json::json!({
+            "target": {"providerId": "provider-a", "appType": "codex", "model": "gpt-5.6-sol"},
+            "generation": 7,
+            "completed": true,
+            "facts": [
+                {"code": "modelMatch", "outcome": "passed"},
+                {"code": "modelMatch", "outcome": "failed"}
+            ],
+            "observedAt": 100
+        }))
+        .unwrap();
+        assert_eq!(restored.facts.len(), 1);
+        assert_eq!(
+            restored.facts.iter().next().unwrap().outcome,
+            EvidenceOutcome::Failed
+        );
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap()["facts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn merge_report_delegates_to_the_verdict_policy() {
+        let active = VerificationReport {
+            target: TargetKey::new("provider-a", "codex", "gpt-5.6-sol"),
+            verdict: Verdict::Trusted,
+            evidence_level: EvidenceLevel::ProtocolBehavior,
+            facts: vec![],
+            rules_version: RULES_VERSION,
+            checked_at: 100,
+        };
+        assert_eq!(merge_report(Some(&active), None).verdict, Verdict::Trusted);
     }
 
     #[test]
