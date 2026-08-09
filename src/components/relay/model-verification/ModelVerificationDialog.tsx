@@ -28,6 +28,7 @@ export interface ModelVerificationDialogProps {
   appType: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onRunningChange?: (running: boolean) => void;
 }
 
 type ModelsState = "idle" | "loading" | "ready" | "error";
@@ -37,6 +38,7 @@ export function ModelVerificationDialog({
   appType,
   open,
   onOpenChange,
+  onRunningChange,
 }: ModelVerificationDialogProps) {
   const { t } = useTranslation();
   const [models, setModels] = useState<string[]>([]);
@@ -44,6 +46,11 @@ export function ModelVerificationDialog({
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
   const requestRef = useRef(0);
   const run = useModelVerificationRun({ open, providerId, appType });
+
+  useEffect(() => {
+    onRunningChange?.(run.isRunning);
+    return () => onRunningChange?.(false);
+  }, [onRunningChange, run.isRunning]);
 
   const loadModels = useCallback(() => {
     const request = ++requestRef.current;

@@ -3204,6 +3204,7 @@
         "retry": "再試行"
       },
       "status": { "running": "検証中 {{completed}} / {{total}}" },
+      "tierVerdict": { "suspicious": "モデルに疑い", "anomaly": "モデル異常" },
       "verdict": {
         "trusted": "信頼済み",
         "suspicious": "疑わしい",

@@ -3204,6 +3204,10 @@
         "retry": "Retry"
       },
       "status": { "running": "Verifying {{completed}} / {{total}}" },
+      "tierVerdict": {
+        "suspicious": "Model suspicious",
+        "anomaly": "Model anomaly"
+      },
       "verdict": {
         "trusted": "Trusted",
         "suspicious": "Suspicious",

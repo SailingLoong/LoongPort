@@ -3201,6 +3201,7 @@
       },
       "actions": { "start": "開始驗證", "stop": "停止驗證", "retry": "重試" },
       "status": { "running": "正在驗證 {{completed}} / {{total}}" },
+      "tierVerdict": { "suspicious": "模型存疑", "anomaly": "模型異常" },
       "verdict": {
         "trusted": "可信",
         "suspicious": "可疑",

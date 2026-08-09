@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Fingerprint,
   GripVertical,
   Loader2,
   Pencil,
@@ -27,6 +28,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
+import type { VerificationVerdict } from "@/lib/api/modelVerification";
 import { isLowBalance, LOW_BALANCE_THRESHOLD_USD } from "./lowBalance";
 
 /**
@@ -110,6 +112,14 @@ export interface RelayRowProps {
   onCheckTier: (tier: TierInfo) => void;
   /** 某个档位是不是正在检测中（来自 `useStreamCheck` 的 `isChecking`）。 */
   isCheckingTier: (providerId: string) => boolean;
+  /** 档位当前的有限模型验证结论；结果归父级管理，行只负责呈现。 */
+  verificationVerdictForTier?: (
+    tier: TierInfo,
+  ) => VerificationVerdict | undefined;
+  /** 打开父级持有的模型验证弹窗。 */
+  onVerifyTier?: (tier: TierInfo) => void;
+  /** 目标档位是否正由该弹窗中的验证任务执行。 */
+  isVerifyingTier?: (providerId: string) => boolean;
   /**
    * 把某个档位的配置恢复成默认值（用户在编辑页改坏之后的回头路）。
    *
@@ -150,6 +160,9 @@ export function RelayRow({
   onPurchase,
   onCheckTier,
   isCheckingTier,
+  verificationVerdictForTier,
+  onVerifyTier,
+  isVerifyingTier,
   onResetTier,
   onEditTier,
   onDelete,
@@ -295,6 +308,14 @@ export function RelayRow({
               onSwitch={() => onSwitchTier(tier)}
               onCheck={() => onCheckTier(tier)}
               checking={isCheckingTier(tier.providerId)}
+              verificationVerdict={verificationVerdictForTier?.(tier)}
+              onVerify={
+                onVerifyTier &&
+                (tier.appId === "codex" || tier.appId === "claude")
+                  ? () => onVerifyTier(tier)
+                  : undefined
+              }
+              verifying={isVerifyingTier?.(tier.providerId) ?? false}
               onReset={() => onResetTier(tier)}
               onEdit={() => onEditTier(tier)}
             />
@@ -609,6 +630,9 @@ function TierItem({
   onSwitch,
   onCheck,
   checking,
+  verificationVerdict,
+  onVerify,
+  verifying,
   onReset,
   onEdit,
 }: {
@@ -617,6 +641,9 @@ function TierItem({
   onSwitch: () => void;
   onCheck: () => void;
   checking: boolean;
+  verificationVerdict?: VerificationVerdict;
+  onVerify?: () => void;
+  verifying: boolean;
   onReset: () => void;
   onEdit: () => void;
 }) {
@@ -625,6 +652,10 @@ function TierItem({
   // 于是别的中转站在获取密钥时，这里所有「使用」按钮都灰掉了。
   const switching = busy.has(`switch:${tier.providerId}`);
   const resetting = busy.has(`reset:${tier.providerId}`);
+  const verificationProblem =
+    verificationVerdict === "anomaly" || verificationVerdict === "suspicious"
+      ? verificationVerdict
+      : undefined;
 
   // ⚠️ **`=== true` 而不是 `??` 或直接判真值** —— `userEdited` 是三态：
   // `true`（改过）/ `false`（没改）/ `null`（**判不了**，读不出密钥或这个 CLI
@@ -676,6 +707,20 @@ function TierItem({
               {t("loongport.tier.userEdited")}
             </span>
           )}
+          {verificationProblem && (
+            <span
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
+                verificationProblem === "anomaly"
+                  ? "text-red-600 ring-red-500/30 dark:text-red-400"
+                  : "text-amber-600 ring-amber-500/30 dark:text-amber-400",
+              )}
+            >
+              {t(
+                `loongport.modelVerification.tierVerdict.${verificationProblem}`,
+              )}
+            </span>
+          )}
         </div>
         <div className="text-xs text-muted-foreground">
           {tier.rateMultiplier === null
@@ -712,7 +757,9 @@ function TierItem({
           HOVER_ACTIONS_BASE,
           checking || resetting || switching
             ? HOVER_ACTIONS_PINNED
-            : TIER_HOVER_ACTIONS,
+            : verifying
+              ? HOVER_ACTIONS_PINNED
+              : TIER_HOVER_ACTIONS,
         )}
       >
         {/* 主按钮。**文案与图标复用上游的 `provider.enable` / `provider.inUse`** ——
@@ -773,6 +820,24 @@ function TierItem({
             <Activity className="h-3.5 w-3.5" />
           )}
         </Button>
+
+        {onVerify && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+            disabled={verifying}
+            onClick={onVerify}
+            title={t("loongport.modelVerification.title")}
+          >
+            {verifying ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Fingerprint className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        )}
 
         {/* 「编辑配置」：跳 cc-switch 现成的编辑页 —— 那页支持全部字段，我们不重做
             （CLAUDE.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），

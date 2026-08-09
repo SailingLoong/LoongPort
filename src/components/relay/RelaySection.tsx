@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -16,6 +16,14 @@ import type {
   TierInfo,
 } from "@/lib/api/relay";
 import {
+  modelVerificationApi,
+  type VerificationReport,
+  type VerificationScope,
+  type VerificationTarget,
+  type VerificationVerdict,
+} from "@/lib/api/modelVerification";
+import { MODEL_VERIFICATION_CHANGED } from "@/lib/api/events";
+import {
   vendorApi,
   vendorSupportsApp,
   DEEPSEEK_API_KEYS_URL,
@@ -26,6 +34,7 @@ import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
 import { AddSiteDialog } from "./AddSiteDialog";
+import { ModelVerificationDialog } from "./model-verification/ModelVerificationDialog";
 import { openInBrowser } from "./openInBrowser";
 import { ImageTabNotice } from "./ImageTabNotice";
 import { RelayTierList } from "./RelayTierList";
@@ -97,6 +106,36 @@ export interface RelaySectionProps {
  */
 let autoPromptedThisProcess = false;
 
+type TierVerificationVerdict = Extract<
+  VerificationVerdict,
+  "suspicious" | "anomaly"
+>;
+
+function verificationReportKey({
+  providerId,
+  appType,
+  model,
+}: VerificationTarget): string {
+  return `${providerId}\u0000${appType}\u0000${model}`;
+}
+
+function reduceTierVerificationVerdicts(
+  reports: Readonly<Record<string, VerificationReport>>,
+): Readonly<Record<string, TierVerificationVerdict>> {
+  const verdicts: Record<string, TierVerificationVerdict> = {};
+  for (const report of Object.values(reports)) {
+    if (report.verdict === "anomaly") {
+      verdicts[report.target.providerId] = "anomaly";
+    } else if (
+      report.verdict === "suspicious" &&
+      verdicts[report.target.providerId] !== "anomaly"
+    ) {
+      verdicts[report.target.providerId] = "suspicious";
+    }
+  }
+  return verdicts;
+}
+
 export function RelaySection({ appId }: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
@@ -135,7 +174,16 @@ export function RelaySection({ appId }: RelaySectionProps) {
    * 确实受影响，把它加进来即可，但要先有实测依据，不靠推测。
    */
   const touchesCodexConfig = appId === "codex";
+  const supportsModelVerification = appId === "codex" || appId === "claude";
   const [relays, setRelays] = useState<RelayRowData[]>([]);
+  const [verificationReports, setVerificationReports] = useState<
+    Record<string, VerificationReport>
+  >({});
+  const [selectedVerificationTier, setSelectedVerificationTier] =
+    useState<TierInfo | null>(null);
+  const [verifyingProviderId, setVerifyingProviderId] = useState<string | null>(
+    null,
+  );
   /**
    * 待确认的切换：**显示名 + 真正执行它的函数**，`null` = 不弹。
    *
@@ -199,6 +247,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
   vendorsRef.current = vendors;
   // reload 的请求序号 —— 只让最后一次的结果落地，见 `reload` 里的说明。
   const reloadSeqRef = useRef(0);
+  const verificationRequestRef = useRef(0);
   const { t } = useTranslation();
   const { busy, run } = useRowBusy();
   // 待确认「恢复默认配置」的目标。
@@ -219,6 +268,72 @@ export function RelaySection({ appId }: RelaySectionProps) {
   const [confirmRemove, setConfirmRemove] = useState<RelayRowData | null>(null);
   // 连通检测整套复用上游的 hook —— 它自带 toast、i18n 与 per-id 的 checking 状态。
   const { checkProvider, isChecking } = useStreamCheck(appId);
+
+  const loadVerificationReports = useCallback(
+    async (rows: RelayRowData[]) => {
+      const request = ++verificationRequestRef.current;
+      if (!supportsModelVerification) {
+        setVerificationReports({});
+        return;
+      }
+
+      const providerIds = [
+        ...new Set(
+          rows.flatMap((row) =>
+            row.tiers
+              .filter((tier) => tier.appId === appId)
+              .map((tier) => tier.providerId),
+          ),
+        ),
+      ];
+      if (providerIds.length === 0) {
+        setVerificationReports({});
+        return;
+      }
+
+      try {
+        const reports = await modelVerificationApi.listResults(providerIds);
+        if (request !== verificationRequestRef.current) return;
+        setVerificationReports(
+          Object.fromEntries(
+            reports
+              .filter(
+                (report) =>
+                  report.target.appType === appId &&
+                  providerIds.includes(report.target.providerId),
+              )
+              .map((report) => [verificationReportKey(report.target), report]),
+          ),
+        );
+      } catch {
+        // Verification summaries are secondary status; retain the last complete backend view.
+      }
+    },
+    [appId, supportsModelVerification],
+  );
+
+  const verificationVerdicts = useMemo(
+    () => reduceTierVerificationVerdicts(verificationReports),
+    [verificationReports],
+  );
+
+  const verificationVerdictForTier = useCallback(
+    (tier: TierInfo) => verificationVerdicts[tier.providerId],
+    [verificationVerdicts],
+  );
+
+  const handleVerifyTier = useCallback((tier: TierInfo) => {
+    setSelectedVerificationTier(tier);
+  }, []);
+
+  const handleVerificationRunningChange = useCallback(
+    (running: boolean) => {
+      setVerifyingProviderId(
+        running ? (selectedVerificationTier?.providerId ?? null) : null,
+      );
+    },
+    [selectedVerificationTier],
+  );
 
   /**
    * 拉官网账号列表。**只读本地不发网络**（与 `listRelays` 同一条契约）。
@@ -267,6 +382,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
         const rows = await relayApi.listRelays(appId);
         if (isStale()) return;
         setRelays(rows);
+        void loadVerificationReports(rows);
 
         // 倍率单独异步补：listRelays 只读本地（首屏不卡网络），倍率必须发请求。
         // **有意不 await** —— 先渲染出来，倍率随后把「倍率未知」换成数字。
@@ -301,7 +417,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
       // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
       void reloadVendors();
     },
-    [appId, reloadVendors],
+    [appId, loadVerificationReports, reloadVendors],
   );
 
   useEffect(() => {
@@ -398,6 +514,19 @@ export function RelaySection({ appId }: RelaySectionProps) {
   useTauriEvent<ProviderSwitchEvent>(PROVIDER_SWITCHED, (payload) => {
     if (payload?.appType !== appId) return;
     void reload();
+  });
+
+  useTauriEvent<VerificationScope>(MODEL_VERIFICATION_CHANGED, (scope) => {
+    if (
+      !supportsModelVerification ||
+      scope?.appType !== appId ||
+      !relaysRef.current.some((row) =>
+        row.tiers.some((tier) => tier.providerId === scope.providerId),
+      )
+    ) {
+      return;
+    }
+    void loadVerificationReports(relaysRef.current);
   });
 
   // 切换档位前要不要问「先退 ChatGPT 吗」。只读一次（它探的是「装了没有」这类事实，
@@ -1083,6 +1212,9 @@ export function RelaySection({ appId }: RelaySectionProps) {
           void checkProvider(tier.providerId, tier.displayName)
         }
         isCheckingTier={isChecking}
+        verificationVerdictForTier={verificationVerdictForTier}
+        onVerifyTier={supportsModelVerification ? handleVerifyTier : undefined}
+        isVerifyingTier={(providerId) => providerId === verifyingProviderId}
         onResetTier={(tier) =>
           setConfirmReset({
             kind: "tier",
@@ -1100,6 +1232,19 @@ export function RelaySection({ appId }: RelaySectionProps) {
           if (row) setConfirmRemove(row);
         }}
       />
+
+      {selectedVerificationTier && (
+        <ModelVerificationDialog
+          key={`${selectedVerificationTier.providerId}:${appId}`}
+          providerId={selectedVerificationTier.providerId}
+          appType={appId}
+          open
+          onOpenChange={(open) => {
+            if (!open) setSelectedVerificationTier(null);
+          }}
+          onRunningChange={handleVerificationRunningChange}
+        />
+      )}
 
       {/* 官网直连账号块 —— 只在支持厂商的 tab 出现（gemini / grokbuild 无 preset，
           摆了也是骗人）。「添加官网账号」入口在它自己的区块头。 */}
