@@ -152,16 +152,39 @@ pub fn validate_plaintext_key(s: &str) -> Result<String, VendorError> {
 /// ⚠️ **codex 那条钉 flash**：上游注释记着 pro 的 **Codex 集成**未开通，
 /// 切过去会上游报错。**这条限制只作用于 codex** —— claude / opencode 的
 /// preset 默认主模型就是 pro。
-pub fn config_for(app: &AppType) -> Option<(&'static str, &'static str)> {
-    match app {
-        AppType::Codex => Some(("https://api.deepseek.com", FLASH)),
-        AppType::Claude | AppType::ClaudeDesktop => {
-            Some(("https://api.deepseek.com/anthropic", PRO))
-        }
-        AppType::Hermes => Some(("https://api.deepseek.com", PRO)),
-        AppType::OpenClaw | AppType::OpenCode => Some(("https://api.deepseek.com/v1", PRO)),
+pub fn config_for(app: &AppType) -> Option<(String, String)> {
+    let builtin = builtin_config_for(app)?;
+
+    let key = format!("deepseek/{}", app.as_str());
+    let remote = crate::relay::remote_config::load_cached()
+        .and_then(|config| config.tier_configs.get(&key).cloned())
+        .filter(remote_config_is_usable);
+
+    Some(select_config(builtin, remote.as_ref()))
+}
+
+fn builtin_config_for(app: &AppType) -> Option<(&'static str, &'static str)> {
+    Some(match app {
+        AppType::Codex => ("https://api.deepseek.com", FLASH),
+        AppType::Claude | AppType::ClaudeDesktop => ("https://api.deepseek.com/anthropic", PRO),
+        AppType::Hermes => ("https://api.deepseek.com", PRO),
+        AppType::OpenClaw | AppType::OpenCode => ("https://api.deepseek.com/v1", PRO),
         // 生图栏不适用：DeepSeek 没有 gpt-image-* 模型，展开一条进去只会得到一个必然 404 的档位。
-        AppType::Gemini | AppType::GrokBuild | AppType::CodexImage => None,
+        AppType::Gemini | AppType::GrokBuild | AppType::CodexImage => return None,
+    })
+}
+
+fn remote_config_is_usable(config: &crate::relay::remote_config::RemoteTierConfig) -> bool {
+    config.base_url.starts_with("https://") && !config.model.trim().is_empty()
+}
+
+fn select_config(
+    builtin: (&str, &str),
+    remote: Option<&crate::relay::remote_config::RemoteTierConfig>,
+) -> (String, String) {
+    match remote.filter(|config| remote_config_is_usable(config)) {
+        Some(config) => (config.base_url.clone(), config.model.clone()),
+        None => (builtin.0.to_string(), builtin.1.to_string()),
     }
 }
 
@@ -215,12 +238,42 @@ const FLASH_1M: &str = "deepseek-v4-flash[1M]";
 /// （Claude Code 认后缀、Claude Desktop 由 `suggested_claude_desktop_routes`
 /// 翻译成 `supports1m`），我们自己不写判定逻辑。
 pub fn claude_role_models() -> crate::relay::provision::ClaudeRoleModels {
-    crate::relay::provision::ClaudeRoleModels {
+    let builtin = crate::relay::provision::ClaudeRoleModels {
         opus: PRO_1M.to_string(),
         fable: PRO_1M.to_string(),
         sonnet: FLASH_1M.to_string(),
         haiku: FLASH_1M.to_string(),
         subagent: FLASH_1M.to_string(),
+    };
+    let Some(remote) = crate::relay::remote_config::load_cached()
+        .and_then(|config| config.tier_configs.get("deepseek/claude").cloned())
+        .filter(remote_config_is_usable)
+        .and_then(|config| config.claude_roles)
+    else {
+        return builtin;
+    };
+
+    crate::relay::provision::ClaudeRoleModels {
+        opus: remote
+            .opus
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(builtin.opus),
+        fable: remote
+            .fable
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(builtin.fable),
+        sonnet: remote
+            .sonnet
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(builtin.sonnet),
+        haiku: remote
+            .haiku
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(builtin.haiku),
+        subagent: remote
+            .subagent
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(builtin.subagent),
     }
 }
 
@@ -863,50 +916,81 @@ mod tests {
     #[test]
     fn claude_gets_the_anthropic_suffix_and_codex_stays_bare() {
         assert_eq!(
-            config_for(&AppType::Claude).expect("claude").0,
+            builtin_config_for(&AppType::Claude).expect("claude").0,
             "https://api.deepseek.com/anthropic"
         );
         assert_eq!(
-            config_for(&AppType::ClaudeDesktop).expect("desktop").0,
+            builtin_config_for(&AppType::ClaudeDesktop)
+                .expect("desktop")
+                .0,
             "https://api.deepseek.com/anthropic"
         );
         assert_eq!(
-            config_for(&AppType::Codex).expect("codex").0,
+            builtin_config_for(&AppType::Codex).expect("codex").0,
             "https://api.deepseek.com"
         );
         assert_eq!(
-            config_for(&AppType::OpenClaw).expect("openclaw").0,
+            builtin_config_for(&AppType::OpenClaw).expect("openclaw").0,
             "https://api.deepseek.com/v1"
         );
         assert_eq!(
-            config_for(&AppType::OpenCode).expect("opencode").0,
+            builtin_config_for(&AppType::OpenCode).expect("opencode").0,
             "https://api.deepseek.com/v1"
         );
         assert_eq!(
-            config_for(&AppType::Hermes).expect("hermes").0,
+            builtin_config_for(&AppType::Hermes).expect("hermes").0,
             "https://api.deepseek.com"
         );
     }
 
     #[test]
     fn gemini_and_grokbuild_have_no_deepseek_config() {
-        assert!(config_for(&AppType::Gemini).is_none());
-        assert!(config_for(&AppType::GrokBuild).is_none());
+        assert!(builtin_config_for(&AppType::Gemini).is_none());
+        assert!(builtin_config_for(&AppType::GrokBuild).is_none());
     }
 
     #[test]
     fn codex_is_the_only_platform_pinned_to_flash() {
         assert_eq!(
-            config_for(&AppType::Codex).expect("codex").1,
+            builtin_config_for(&AppType::Codex).expect("codex").1,
             "deepseek-v4-flash"
         );
         for app in [AppType::Claude, AppType::ClaudeDesktop, AppType::OpenCode] {
             assert_eq!(
-                config_for(&app).expect("pro 平台").1,
+                builtin_config_for(&app).expect("pro 平台").1,
                 "deepseek-v4-pro",
                 "{app:?} 该用 pro —— 「不给 pro」那条只对 codex 成立"
             );
         }
+    }
+
+    #[test]
+    fn remote_tier_config_overrides_valid_values_and_rejects_invalid_values() {
+        let remote = crate::relay::remote_config::RemoteTierConfig {
+            base_url: "https://remote.example/v1".to_string(),
+            model: "remote-model".to_string(),
+            claude_roles: None,
+        };
+        assert_eq!(
+            select_config(("https://builtin.example", "builtin-model"), Some(&remote)),
+            (
+                "https://remote.example/v1".to_string(),
+                "remote-model".to_string()
+            )
+        );
+
+        let invalid = crate::relay::remote_config::RemoteTierConfig {
+            base_url: "http://remote.example/v1".to_string(),
+            model: "remote-model".to_string(),
+            claude_roles: None,
+        };
+        assert_eq!(
+            select_config(("https://builtin.example", "builtin-model"), Some(&invalid)),
+            (
+                "https://builtin.example".to_string(),
+                "builtin-model".to_string()
+            )
+        );
     }
 
     #[test]
@@ -1239,7 +1323,7 @@ mod tests {
 
         for (app, preset_name, preset_src) in cases {
             let (base_url, model) =
-                config_for(app).unwrap_or_else(|| panic!("{app:?} 该有 DeepSeek 配置"));
+                builtin_config_for(app).unwrap_or_else(|| panic!("{app:?} 该有 DeepSeek 配置"));
 
             assert!(
                 preset_src.contains(&format!("\"{base_url}\"")),
@@ -1259,7 +1343,7 @@ mod tests {
         // 钉住它，别哪天有人"顺手补全"两个猜出来的端点。
         for app in [AppType::Gemini, AppType::GrokBuild] {
             assert!(
-                config_for(&app).is_none(),
+                builtin_config_for(&app).is_none(),
                 "{app:?} 该返回 None —— 上游没有 DeepSeek preset（Gemini CLI 认 Google 自家\
                  协议、GrokBuild 认 xAI 的），凭猜给一个端点会让用户切过去 401"
             );

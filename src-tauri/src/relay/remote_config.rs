@@ -169,6 +169,28 @@ pub struct Sponsor {
     pub tagline: String,
 }
 
+/// 一个 vendor/app 组合的默认档位配置。
+///
+/// `tier_configs` 的 key 是稳定的 `<vendor>/<app_type>`（例如
+/// `deepseek/claude`）。未知 key 会被忽略，新增 vendor 不需要改客户端 schema。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RemoteTierConfig {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub claude_roles: Option<RemoteClaudeRoleModels>,
+}
+
+/// Claude 角色模型默认值。字段全部可选，允许远端只覆盖部分角色；调用方负责回落内置值。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RemoteClaudeRoleModels {
+    pub opus: Option<String>,
+    pub fable: Option<String>,
+    pub sonnet: Option<String>,
+    pub haiku: Option<String>,
+    pub subagent: Option<String>,
+}
+
 /// 远端配置的全文。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct RemoteConfig {
@@ -202,6 +224,12 @@ pub struct RemoteConfig {
     /// ⇒ 结论仍是「新增字段而不改老字段的形状」，只是两个方向各有各的靠山。
     #[serde(default)]
     pub promo_codes: std::collections::BTreeMap<String, String>,
+    /// vendor/app → 默认 base URL、主模型和（可选）Claude 角色模型。
+    ///
+    /// `#[serde(default)]` 保证旧线上配置与新客户端双向兼容；未知 vendor/app key
+    /// 由调用方忽略，远端配置只覆盖它明确提供且通过基本校验的值。
+    #[serde(default)]
+    pub tier_configs: std::collections::BTreeMap<String, RemoteTierConfig>,
 }
 
 /// 端点与公钥都配好了没。任一没配就整条链路 no-op（走缓存/内置）。
@@ -732,6 +760,7 @@ mod tests {
             sponsors: vec![],
             aff_codes,
             promo_codes: std::collections::BTreeMap::new(),
+            tier_configs: std::collections::BTreeMap::new(),
         }
     }
 
@@ -743,7 +772,44 @@ mod tests {
             sponsors: vec![],
             aff_codes: std::collections::BTreeMap::new(),
             promo_codes,
+            tier_configs: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn old_config_without_tier_configs_remains_compatible() {
+        let config: RemoteConfig = serde_json::from_str(
+            r#"{"sponsors":[],"aff_codes":{"example.com":"CODE"},"promo_codes":{}}"#,
+        )
+        .expect("旧配置应能被新客户端读取");
+        assert!(config.tier_configs.is_empty());
+        assert_eq!(
+            config.aff_codes.get("example.com"),
+            Some(&"CODE".to_string())
+        );
+    }
+
+    #[test]
+    fn tier_config_contract_preserves_deepseek_defaults_and_partial_roles() {
+        let config: RemoteConfig = serde_json::from_str(
+            r#"{
+                "tier_configs": {
+                    "deepseek/claude": {
+                        "base_url": "https://api.deepseek.com/anthropic",
+                        "model": "deepseek-v4-pro",
+                        "claude_roles": {"sonnet": "deepseek-v4-flash[1M]"}
+                    }
+                }
+            }"#,
+        )
+        .expect("档位配置契约应能解析");
+        let tier = config.tier_configs.get("deepseek/claude").unwrap();
+        assert_eq!(tier.model, "deepseek-v4-pro");
+        assert_eq!(
+            tier.claude_roles.as_ref().unwrap().sonnet.as_deref(),
+            Some("deepseek-v4-flash[1M]")
+        );
+        assert!(tier.claude_roles.as_ref().unwrap().opus.is_none());
     }
 
     #[test]

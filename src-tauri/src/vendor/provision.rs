@@ -106,8 +106,8 @@ pub fn provider_rows_for(vendor: Vendor, api_key: &str) -> Vec<(AppType, Value)>
                 app,
                 api_key,
                 display,
-                base_url,
-                model,
+                &base_url,
+                &model,
                 claude_roles_for(app),
             )?;
             Some((app.clone(), cfg))
