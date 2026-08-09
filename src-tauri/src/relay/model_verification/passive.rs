@@ -39,6 +39,13 @@ pub struct PassiveRequestMeta {
 
 pub const PASSIVE_INGRESS_CAPACITY: usize = 128;
 
+/// Maximum bytes retained for one in-flight server-sent event.
+pub const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;
+/// Maximum bytes retained while looking for a fixed self-identification phrase.
+pub const SELF_ID_TAIL_BYTES: usize = 256;
+/// Maximum bytes inspected by the non-streaming reducer.
+pub const MAX_RESPONSE_INSPECTION_BYTES: usize = 2 * 1024 * 1024;
+
 /// The only object passed into proxy request handling for passive verification.
 /// It owns no database or coordinator state and only accepts sanitized batches.
 #[derive(Clone)]
@@ -49,7 +56,7 @@ pub struct VerificationIngress {
 }
 
 /// A request-scoped handle carrying only the target and generation barrier.
-pub struct VerificationTap {
+pub struct IngressTap {
     ingress: VerificationIngress,
     target: TargetKey,
     generation: u64,
@@ -86,7 +93,7 @@ impl VerificationIngress {
         }
     }
 
-    pub fn begin(&self, target: TargetKey) -> Option<VerificationTap> {
+    pub fn begin(&self, target: TargetKey) -> Option<IngressTap> {
         if !self.enabled.load(Ordering::Acquire)
             || AppType::from_str(&target.app_type)
                 .ok()
@@ -94,7 +101,7 @@ impl VerificationIngress {
         {
             return None;
         }
-        Some(VerificationTap {
+        Some(IngressTap {
             ingress: self.clone(),
             target,
             generation: self.generation.load(Ordering::Acquire),
@@ -117,7 +124,7 @@ impl VerificationIngress {
     }
 }
 
-impl VerificationTap {
+impl IngressTap {
     pub fn submit(
         &self,
         completed: bool,

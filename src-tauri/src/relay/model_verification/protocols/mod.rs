@@ -1,13 +1,95 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use futures::StreamExt;
 use reqwest::{RequestBuilder, Response, StatusCode};
 
 pub(crate) mod anthropic;
+pub(crate) mod anthropic_passive;
 pub(crate) mod openai_responses;
+pub(crate) mod openai_responses_passive;
 
-pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-pub(crate) const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;
+use crate::{
+    app_config::AppType,
+    relay::model_verification::{
+        passive::{
+            EvidenceBatch, MAX_RESPONSE_INSPECTION_BYTES,
+            MAX_SSE_EVENT_BYTES as PASSIVE_MAX_SSE_EVENT_BYTES,
+        },
+        types::TargetKey,
+    },
+};
+
+/// Protocol-neutral passive observer. It only retains bounded parser state and finite facts.
+pub(crate) enum VerificationTap {
+    Anthropic(anthropic_passive::AnthropicPassiveTap),
+    OpenAiResponses(openai_responses_passive::OpenAiResponsesPassiveTap),
+}
+
+impl VerificationTap {
+    pub(crate) fn new(target: TargetKey, generation: u64) -> Option<Self> {
+        match AppType::from_str(target.app_type.as_str()).ok()? {
+            AppType::Claude => Some(Self::Anthropic(
+                anthropic_passive::AnthropicPassiveTap::new(target, generation),
+            )),
+            AppType::Codex => Some(Self::OpenAiResponses(
+                openai_responses_passive::OpenAiResponsesPassiveTap::new(target, generation),
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn observe_chunk(&mut self, chunk: &[u8]) {
+        match self {
+            Self::Anthropic(tap) => tap.observe_chunk(chunk),
+            Self::OpenAiResponses(tap) => tap.observe_chunk(chunk),
+        }
+    }
+
+    pub(crate) fn finish(self, completed: bool, observed_at: i64) -> EvidenceBatch {
+        match self {
+            Self::Anthropic(tap) => tap.finish(completed, observed_at),
+            Self::OpenAiResponses(tap) => tap.finish(completed, observed_at),
+        }
+    }
+
+    pub(crate) fn reduce_non_streaming(
+        target: TargetKey,
+        generation: u64,
+        body: &[u8],
+        observed_at: i64,
+    ) -> Option<EvidenceBatch> {
+        match AppType::from_str(target.app_type.as_str()).ok()? {
+            AppType::Claude => Some(
+                anthropic_passive::AnthropicPassiveTap::reduce_non_streaming(
+                    target,
+                    generation,
+                    body,
+                    observed_at,
+                ),
+            ),
+            AppType::Codex => Some(
+                openai_responses_passive::OpenAiResponsesPassiveTap::reduce_non_streaming(
+                    target,
+                    generation,
+                    body,
+                    observed_at,
+                ),
+            ),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Anthropic(tap) => tap.retained_bytes(),
+            Self::OpenAiResponses(tap) => tap.retained_bytes(),
+        }
+    }
+}
+
+pub(crate) const MAX_RESPONSE_BYTES: usize = MAX_RESPONSE_INSPECTION_BYTES;
+pub(crate) const MAX_SSE_EVENT_BYTES: usize = PASSIVE_MAX_SSE_EVENT_BYTES;
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Finite, body-free reasons that an active protocol probe could not finish.

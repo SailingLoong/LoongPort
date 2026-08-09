@@ -26,3 +26,10 @@ Pre-flight review: no blocking requirement contradictions. Execution order is 1 
 - Independent review: completed locally against the task brief; no blocking findings.
 - Focused verification: passive 9 passed; handler context 9 passed; proxy service 58 passed; formatting and diff checks passed.
 - Runtime Task 6 is next.
+
+## Runtime Task 6 — complete
+
+- Implementation commit: pending (`feat(model-verification): observe supported protocols passively`)
+- Independent review: completed locally; no Critical/Important/Minor findings.
+- Focused verification: protocol suite 42 passed; formatting and diff checks passed.
+- Runtime Task 7 is next.
