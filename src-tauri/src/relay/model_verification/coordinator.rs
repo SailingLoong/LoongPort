@@ -949,11 +949,12 @@ mod tests {
     }
 
     async fn wait_until(mut predicate: impl FnMut() -> bool) {
-        for _ in 0..100 {
+        // Give spawned coordinator tasks real scheduler time on slower CI runners.
+        for _ in 0..5_000 {
             if predicate() {
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         panic!("condition was not reached");
     }
