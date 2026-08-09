@@ -385,7 +385,7 @@ sqlite 的备份 API，直接拷主文件会丢最近的写）；② `app_store`
 
 ---
 
-## `is_user_edited` 不覆盖 hermes / openclaw / opencode（2026-08-05 记，加 vendor 编辑功能时暴露）
+## `is_user_edited` 不覆盖 hermes / openclaw / opencode → ✅ 已完成（2026-08-10）
 
 **what**：`relay/provision.rs` 的 `api_key_location` 只认 codex / codex-image /
 claude / claude-desktop / gemini。剩下三个平台落到 `_ => None` ⇒ 对它们：
@@ -400,9 +400,9 @@ claude / claude-desktop / gemini。剩下三个平台落到 `_ => None` ⇒ 对�
 （他以为只是刷新一下）的时候。
 
 ⚠️ **2026-08-05 顺手修了 claude-desktop 那个**（它与 claude 同形、加一行就够）。
-剩下三个是结构问题，见下。
+剩下三个是结构问题，已在本轮一并收口。
 
-**why 现在不做**：`api_key_location` 返回 `(section, field)` **两段**，而这三个平台的
+**why 当时没做**：`api_key_location` 返回 `(section, field)` **两段**，而这三个平台的
 sk 位置表达不了：
 
 | 平台 | sk 在哪 | 出处 |
@@ -413,16 +413,14 @@ sk 位置表达不了：
 
 补它要把那个返回类型改成能表达「顶层」与「多层路径」的形状（如 `&[&str]` 路径），
 **连带动 `patch_api_key` / `extract_api_key` 的签名与 relay 侧全部调用方** ——
-属「借清债名义翻修无关模块」，不在加 vendor 编辑功能这一轮的手伸到的范围内。
+属「借清债名义翻修无关模块」，已在本轮按路径抽象一并收口。
 
 **how-to-repay**：
 
-1. `api_key_location` 改成返回字段路径（`Option<&'static [&'static str]>`），
-   codex 那条变 `["auth", "OPENAI_API_KEY"]`、hermes 变 `["api_key"]`、
-   opencode 变 `["options", "apiKey"]`（⚠️ opencode 的 provider 名字是动态的，
-   得先确认那一层的键怎么定 —— 看 `build_opencode_settings` 的 `json!` 结构）。
-2. `patch_api_key` / `extract_api_key` 跟着走路径而不是两段。
-3. **有一条测试正等着这个修完**：`vendor::provision::tests::`
-   `user_edited_is_currently_undecidable_for_three_platforms` 钉的是**当前**行为
-   （那三个平台返回 `None`）。补完之后它会红 —— 那时把断言改成 `Some(false)`，
-   **别当成回归**（测试文档里也写了这句）。
+1. `api_key_location` 改成返回字段路径，codex 走 `auth.OPENAI_API_KEY`、hermes 走
+   `api_key`、opencode 走 `options.apiKey`。
+2. `patch_api_key` / `extract_api_key` / `ensure_api_key` 统一按路径读写。
+3. 新增 Hermes、OpenClaw、OpenCode 的往返与缺失中间对象测试，避免再次静默回退。
+
+**已完成**：路径 owner 已收口到 `api_key_locations`，三个 additive CLI 的读取、刷新密钥、
+恢复默认配置共用同一套路径遍历；生成配置与用户编辑内容均保持不变。
