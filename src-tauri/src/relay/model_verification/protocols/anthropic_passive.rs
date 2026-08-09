@@ -103,6 +103,8 @@ impl AnthropicPassiveTap {
             .get("type")
             .and_then(Value::as_str)
             .is_some_and(|kind| kind.starts_with("response."))
+            || value.get("object").and_then(Value::as_str) == Some("chat.completion")
+            || value.get("choices").is_some()
         {
             self.record(EvidenceCode::ForeignProtocol, EvidenceOutcome::Failed);
             return;
@@ -318,6 +320,16 @@ mod tests {
                 && f.outcome == EvidenceOutcome::Failed));
         let serialized = serde_json::to_string(&batch).unwrap();
         assert!(!serialized.contains("I am Claude"));
+    }
+
+    #[test]
+    fn chat_completions_shape_is_foreign_protocol() {
+        let mut tap = AnthropicPassiveTap::new(TargetKey::new("p", "claude", "m"), 1);
+        tap.observe_chunk(b"data: {\"object\":\"chat.completion\",\"choices\":[]}\n\n");
+        let batch = tap.finish(true, 0);
+        assert!(batch.facts.iter().any(|fact| {
+            fact.code == EvidenceCode::ForeignProtocol && fact.outcome == EvidenceOutcome::Failed
+        }));
     }
 
     #[test]
