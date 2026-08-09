@@ -143,3 +143,43 @@ pub struct VerificationProgressEvent {
     pub total_checks: u8,
     pub failure: Option<RunFailureKind>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeVerificationSetting {
+    pub runtime_auto_enabled: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeAppStatus {
+    Active,
+    Waiting,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeAppReason {
+    CurrentProviderUnsupported,
+    ClientUnavailable,
+    NoCurrentProvider,
+    TakeoverFailed,
+    RecoveryFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAppState {
+    pub app_type: String,
+    pub status: RuntimeAppStatus,
+    pub reason: Option<RuntimeAppReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyLease {
+    pub app_type: String,
+    pub acquired_at: i64,
+}
