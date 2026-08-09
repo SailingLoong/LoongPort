@@ -373,6 +373,9 @@ impl<'a> StreamReducer<'a> {
                 self.saw_completed = true;
                 self.observe_response(value.get("response"), true);
             }
+            Some("response.failed" | "response.incomplete") => {
+                self.lifecycle_order_valid = false;
+            }
             Some("response.output_item.added") => {
                 self.advance_text_stream(
                     &value,
@@ -760,6 +763,44 @@ mod openai_responses_tests {
             let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
             assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
         }
+    }
+
+    #[test]
+    fn failed_stream_cannot_be_followed_by_a_passing_completion() {
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol");
+        let stream = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n",
+            "data: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"model\":\"gpt-5.6-sol\"}}\n\n",
+            "data: {\"type\":\"response.content_part.done\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+        );
+
+        let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
+
+        assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
+    }
+
+    #[test]
+    fn incomplete_stream_cannot_be_followed_by_a_passing_completion() {
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol");
+        let stream = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n",
+            "data: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"object\":\"response\",\"status\":\"incomplete\",\"model\":\"gpt-5.6-sol\"}}\n\n",
+            "data: {\"type\":\"response.content_part.done\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+        );
+
+        let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
+
+        assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
     }
 
     #[test]
