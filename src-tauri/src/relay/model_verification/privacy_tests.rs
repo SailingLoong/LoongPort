@@ -185,11 +185,17 @@ async fn unsupported_apps_and_user_providers_are_rejected_before_network_io() {
     let verifier = BalancedActiveVerifier::new(db);
 
     assert!(matches!(
-        verifier.prepare(TargetKey::new(PROVIDER_ID, "gemini", "gemini-2.5")),
+        verifier.prepare(
+            TargetKey::new(PROVIDER_ID, "gemini", "gemini-2.5"),
+            Arc::new(|_| {}),
+        ),
         Err(RunFailureKind::InvalidResponse)
     ));
     assert!(matches!(
-        verifier.prepare(TargetKey::new("user-provider", "codex", "gpt-5.6-sol")),
+        verifier.prepare(
+            TargetKey::new("user-provider", "codex", "gpt-5.6-sol"),
+            Arc::new(|_| {}),
+        ),
         Err(RunFailureKind::InvalidResponse)
     ));
     tokio::task::yield_now().await;

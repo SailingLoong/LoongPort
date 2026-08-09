@@ -830,7 +830,6 @@ function TierItem({
             variant="ghost"
             size="icon"
             className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
-            disabled={verifying}
             onClick={onVerify}
             title={t("loongport.modelVerification.title")}
           >

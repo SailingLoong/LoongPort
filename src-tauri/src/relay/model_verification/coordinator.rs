@@ -18,9 +18,19 @@ use crate::{
 
 pub type VerificationFuture =
     Pin<Box<dyn Future<Output = Result<VerificationReport, RunFailureKind>> + Send + 'static>>;
+pub type ProbeProgress = Arc<dyn Fn(u8) + Send + Sync + 'static>;
+
+pub struct PreparedVerification {
+    pub total_checks: u8,
+    pub future: VerificationFuture,
+}
 
 pub trait ActiveVerifier: Send + Sync {
-    fn prepare(&self, target: TargetKey) -> Result<VerificationFuture, RunFailureKind>;
+    fn prepare(
+        &self,
+        target: TargetKey,
+        progress: ProbeProgress,
+    ) -> Result<PreparedVerification, RunFailureKind>;
 }
 
 pub trait VerificationEventSink: Send + Sync {
@@ -99,6 +109,8 @@ struct ActiveRun {
     run_id: String,
     generation: u64,
     abort_handle: AbortHandle,
+    completed_checks: u8,
+    total_checks: u8,
 }
 
 impl ModelVerificationCoordinator {
@@ -150,17 +162,35 @@ impl ModelVerificationCoordinator {
             });
         }
 
-        let future = self.verifier.prepare(target.clone())?;
         let run_id = uuid::Uuid::new_v4().to_string();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let scope = scope_for(&target);
         let generation = state.generations.get(&scope).copied().unwrap_or_default();
+        let weak_coordinator = Arc::downgrade(self);
+        let progress_target = target.clone();
+        let progress_run_id = run_id.clone();
+        let progress: ProbeProgress = Arc::new(move |completed_checks| {
+            if let Some(coordinator) = weak_coordinator.upgrade() {
+                coordinator.report_probe_progress(
+                    &progress_target,
+                    &progress_run_id,
+                    generation,
+                    completed_checks,
+                );
+            }
+        });
+        let prepared = self.verifier.prepare(target.clone(), progress)?;
+        if prepared.total_checks == 0 {
+            return Err(RunFailureKind::InvalidResponse);
+        }
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
         state.active.insert(
             target.clone(),
             ActiveRun {
                 run_id: run_id.clone(),
                 generation,
                 abort_handle,
+                completed_checks: 0,
+                total_checks: prepared.total_checks,
             },
         );
         drop(state);
@@ -170,7 +200,7 @@ impl ModelVerificationCoordinator {
             &run_id,
             RunState::Running,
             0,
-            0,
+            prepared.total_checks,
             None,
         ));
         drop(_mutation);
@@ -179,7 +209,7 @@ impl ModelVerificationCoordinator {
         let spawned_run_id = run_id.clone();
         let spawned_target = target.clone();
         tauri::async_runtime::spawn(async move {
-            let result = Abortable::new(future, abort_registration).await;
+            let result = Abortable::new(prepared.future, abort_registration).await;
             coordinator.finish(spawned_target, spawned_run_id, generation, result);
         });
 
@@ -219,8 +249,8 @@ impl ModelVerificationCoordinator {
                 &target,
                 &run.run_id,
                 RunState::Cancelled,
-                0,
-                0,
+                run.completed_checks,
+                run.total_checks,
                 Some(RunFailureKind::Cancelled),
             ));
         }
@@ -246,8 +276,8 @@ impl ModelVerificationCoordinator {
                 &target,
                 &run.run_id,
                 RunState::Cancelled,
-                0,
-                0,
+                run.completed_checks,
+                run.total_checks,
                 Some(RunFailureKind::Cancelled),
             ));
         }
@@ -277,8 +307,8 @@ impl ModelVerificationCoordinator {
                 &target,
                 &run.run_id,
                 RunState::Cancelled,
-                0,
-                0,
+                run.completed_checks,
+                run.total_checks,
                 Some(RunFailureKind::Cancelled),
             ));
         }
@@ -296,7 +326,7 @@ impl ModelVerificationCoordinator {
     ) {
         match result {
             Ok(Ok(report)) if report.target == target => {
-                let _ = self.persist_if_current_with(&target, &run_id, generation, &report, || {
+                let _ = self.persist_if_current_with(&target, &run_id, generation, || {
                     crate::relay::model_verification::store::upsert_active(&self.db, &report)
                         .map_err(|_| RunFailureKind::InvalidResponse)
                 });
@@ -348,14 +378,17 @@ impl ModelVerificationCoordinator {
             .lock()
             .expect("model verification state mutex poisoned");
         if run_is_current(&state, target, run_id, generation) {
-            state.active.remove(target);
+            let run = state
+                .active
+                .remove(target)
+                .expect("current model verification run must exist");
             drop(state);
             self.emit_progress(progress_event(
                 target,
                 run_id,
                 run_state,
-                0,
-                0,
+                run.completed_checks,
+                run.total_checks,
                 Some(failure),
             ));
         }
@@ -366,7 +399,6 @@ impl ModelVerificationCoordinator {
         target: &TargetKey,
         run_id: &str,
         generation: u64,
-        report: &VerificationReport,
         persist: impl FnOnce() -> Result<(), RunFailureKind>,
     ) -> Result<bool, RunFailureKind> {
         let _mutation = self
@@ -388,20 +420,23 @@ impl ModelVerificationCoordinator {
             .state
             .lock()
             .expect("model verification state mutex poisoned");
-        if run_is_current(&state, target, run_id, generation) {
-            state.active.remove(target);
-        }
+        let run = run_is_current(&state, target, run_id, generation)
+            .then(|| state.active.remove(target))
+            .flatten();
         drop(state);
+
+        let Some(run) = run else {
+            return Ok(false);
+        };
 
         match persisted {
             Ok(()) => {
-                let checks = u8::try_from(report.facts.len()).unwrap_or(u8::MAX);
                 self.emit_progress(progress_event(
                     target,
                     run_id,
                     RunState::Completed,
-                    checks,
-                    checks,
+                    run.completed_checks,
+                    run.total_checks,
                     None,
                 ));
                 self.emit_changed(&scope_for(target));
@@ -412,13 +447,51 @@ impl ModelVerificationCoordinator {
                     target,
                     run_id,
                     RunState::Failed,
-                    0,
-                    0,
+                    run.completed_checks,
+                    run.total_checks,
                     Some(failure),
                 ));
                 Err(failure)
             }
         }
+    }
+
+    fn report_probe_progress(
+        &self,
+        target: &TargetKey,
+        run_id: &str,
+        generation: u64,
+        completed_checks: u8,
+    ) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .expect("model verification mutation mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("model verification state mutex poisoned");
+        if !run_is_current(&state, target, run_id, generation) {
+            return;
+        }
+        let run = state
+            .active
+            .get_mut(target)
+            .expect("current model verification run must exist");
+        if completed_checks <= run.completed_checks || completed_checks > run.total_checks {
+            return;
+        }
+        run.completed_checks = completed_checks;
+        let total_checks = run.total_checks;
+        drop(state);
+        self.emit_progress(progress_event(
+            target,
+            run_id,
+            RunState::Running,
+            completed_checks,
+            total_checks,
+            None,
+        ));
     }
 
     fn emit_progress(&self, event: VerificationProgressEvent) {
@@ -515,7 +588,8 @@ mod tests {
     };
 
     use super::{
-        ActiveVerifier, ModelVerificationCoordinator, VerificationEventSink, VerificationFuture,
+        ActiveVerifier, ModelVerificationCoordinator, PreparedVerification, ProbeProgress,
+        VerificationEventSink,
     };
 
     #[derive(Default)]
@@ -584,10 +658,14 @@ mod tests {
         )
     }
 
+    type BlockedCompletion = (
+        oneshot::Sender<Result<VerificationReport, RunFailureKind>>,
+        ProbeProgress,
+    );
+
     struct BlockedVerifier {
         calls: AtomicUsize,
-        senders:
-            Mutex<HashMap<TargetKey, oneshot::Sender<Result<VerificationReport, RunFailureKind>>>>,
+        senders: Mutex<HashMap<TargetKey, BlockedCompletion>>,
     }
 
     impl BlockedVerifier {
@@ -607,15 +685,40 @@ mod tests {
                 .lock()
                 .unwrap()
                 .remove(target)
-                .is_some_and(|sender| sender.send(result).is_ok())
+                .is_some_and(|(sender, progress)| {
+                    if result.is_ok() {
+                        for completed in 1..=3 {
+                            progress(completed);
+                        }
+                    }
+                    sender.send(result).is_ok()
+                })
+        }
+
+        fn advance(&self, target: &TargetKey, completed_checks: u8) -> bool {
+            self.senders
+                .lock()
+                .unwrap()
+                .get(target)
+                .is_some_and(|(_, progress)| {
+                    progress(completed_checks);
+                    true
+                })
         }
     }
 
     impl ActiveVerifier for BlockedVerifier {
-        fn prepare(&self, target: TargetKey) -> Result<VerificationFuture, RunFailureKind> {
+        fn prepare(
+            &self,
+            target: TargetKey,
+            progress: ProbeProgress,
+        ) -> Result<PreparedVerification, RunFailureKind> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let (sender, receiver) = oneshot::channel();
-            self.senders.lock().unwrap().insert(target, sender);
+            self.senders
+                .lock()
+                .unwrap()
+                .insert(target, (sender, progress));
             let future: Pin<
                 Box<
                     dyn Future<Output = Result<VerificationReport, RunFailureKind>>
@@ -623,7 +726,10 @@ mod tests {
                         + 'static,
                 >,
             > = Box::pin(async move { receiver.await.unwrap() });
-            Ok(future)
+            Ok(PreparedVerification {
+                total_checks: 3,
+                future,
+            })
         }
     }
 
@@ -903,7 +1009,6 @@ mod tests {
                 &persist_target,
                 &persist_run_id,
                 generation,
-                &report,
                 || {
                     entered_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
@@ -988,15 +1093,26 @@ mod tests {
         wait_until(|| sink.changed.lock().unwrap().len() == 1).await;
 
         let progress = sink.progress.lock().unwrap().clone();
-        assert_eq!(progress.len(), 2);
+        assert_eq!(progress.len(), 5);
         assert_eq!(progress[0].run_id, run.run_id);
+        assert_eq!(progress[0].completed_checks, 0);
+        assert_eq!(progress[0].total_checks, 3);
         assert_eq!(
             progress[0].state,
             crate::relay::model_verification::types::RunState::Running
         );
         assert_eq!(
-            progress[1].state,
+            progress[4].state,
             crate::relay::model_verification::types::RunState::Completed
+        );
+        assert_eq!(progress[4].completed_checks, 3);
+        assert_eq!(progress[4].total_checks, 3);
+        assert_eq!(
+            progress
+                .iter()
+                .map(|event| event.completed_checks)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 3]
         );
         assert_eq!(
             sink.changed.lock().unwrap().as_slice(),
@@ -1029,10 +1145,27 @@ mod tests {
         let cancelled_target = TargetKey::new("provider-b", "codex", "gpt-5.4");
 
         coordinator.start(failed_target.clone()).await.unwrap();
-        let cancelled = coordinator.start(cancelled_target).await.unwrap();
+        let cancelled = coordinator.start(cancelled_target.clone()).await.unwrap();
+        assert!(verifier.advance(&failed_target, 1));
+        assert!(verifier.advance(&cancelled_target, 2));
         assert!(verifier.complete(&failed_target, Err(RunFailureKind::Authentication)));
         coordinator.cancel(&cancelled.run_id).unwrap();
-        wait_until(|| sink.progress.lock().unwrap().len() >= 4).await;
+        wait_until(|| {
+            sink.progress
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.state,
+                        crate::relay::model_verification::types::RunState::Failed
+                            | crate::relay::model_verification::types::RunState::Cancelled
+                    )
+                })
+                .count()
+                == 2
+        })
+        .await;
 
         let terminal: Vec<_> = sink
             .progress
@@ -1052,10 +1185,14 @@ mod tests {
         assert!(terminal.iter().any(|event| {
             event.state == crate::relay::model_verification::types::RunState::Failed
                 && event.failure == Some(RunFailureKind::Authentication)
+                && event.completed_checks == 1
+                && event.total_checks == 3
         }));
         assert!(terminal.iter().any(|event| {
             event.state == crate::relay::model_verification::types::RunState::Cancelled
                 && event.failure == Some(RunFailureKind::Cancelled)
+                && event.completed_checks == 2
+                && event.total_checks == 3
         }));
         assert!(sink.changed.lock().unwrap().is_empty());
     }

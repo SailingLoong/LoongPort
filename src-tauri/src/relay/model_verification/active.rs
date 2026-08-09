@@ -5,7 +5,7 @@ use crate::{
     database::Database,
     relay::model_verification::{
         capability_profiles::CapabilityProfile,
-        coordinator::{ActiveVerifier, VerificationFuture},
+        coordinator::{ActiveVerifier, PreparedVerification, ProbeProgress},
         protocols::{self, RunFailure},
         target::ResolvedTarget,
         types::{RunFailureKind, TargetKey, VerificationReport, RULES_VERSION},
@@ -28,7 +28,11 @@ impl BalancedActiveVerifier {
 }
 
 impl ActiveVerifier for BalancedActiveVerifier {
-    fn prepare(&self, target: TargetKey) -> Result<VerificationFuture, RunFailureKind> {
+    fn prepare(
+        &self,
+        target: TargetKey,
+        progress: ProbeProgress,
+    ) -> Result<PreparedVerification, RunFailureKind> {
         let app_type = AppType::from_str(&target.app_type)
             .ok()
             .filter(|app_type| matches!(app_type, AppType::Codex | AppType::Claude))
@@ -36,15 +40,33 @@ impl ActiveVerifier for BalancedActiveVerifier {
         let resolved = ResolvedTarget::resolve(&self.db, target.clone())
             .map_err(|_| RunFailureKind::InvalidResponse)?;
         let profile = CapabilityProfile::for_target(&app_type, &target.model);
+        let total_checks = profile.active_probe_count();
         let client = self.client.clone();
 
-        Ok(Box::pin(async move {
+        let future = Box::pin(async move {
+            let mut completed_checks = 0_u8;
+            let mut probe_completed = || {
+                completed_checks = completed_checks.saturating_add(1);
+                progress(completed_checks);
+            };
             let facts = match app_type {
                 AppType::Codex => {
-                    protocols::openai_responses::run_balanced(&client, &resolved, &profile).await
+                    protocols::openai_responses::run_balanced_with_progress(
+                        &client,
+                        &resolved,
+                        &profile,
+                        &mut probe_completed,
+                    )
+                    .await
                 }
                 AppType::Claude => {
-                    protocols::anthropic::run_balanced(&client, &resolved, &profile).await
+                    protocols::anthropic::run_balanced_with_progress(
+                        &client,
+                        &resolved,
+                        &profile,
+                        &mut probe_completed,
+                    )
+                    .await
                 }
                 _ => unreachable!("supported app type checked before preparing the run"),
             }
@@ -58,7 +80,11 @@ impl ActiveVerifier for BalancedActiveVerifier {
                 rules_version: RULES_VERSION,
                 checked_at: chrono::Utc::now().timestamp(),
             })
-        }))
+        });
+        Ok(PreparedVerification {
+            total_checks,
+            future,
+        })
     }
 }
 
@@ -144,13 +170,15 @@ mod tests {
         }
         let verifier = BalancedActiveVerifier::new(db);
 
-        let unsupported = verifier.prepare(TargetKey::new(
-            "loongport-0123456789abcdef",
-            "gemini",
-            "gemini-2.5",
-        ));
+        let unsupported = verifier.prepare(
+            TargetKey::new("loongport-0123456789abcdef", "gemini", "gemini-2.5"),
+            Arc::new(|_| {}),
+        );
         assert!(matches!(unsupported, Err(RunFailureKind::InvalidResponse)));
-        let unmanaged = verifier.prepare(TargetKey::new("manual-provider", "codex", "gpt-5.6-sol"));
+        let unmanaged = verifier.prepare(
+            TargetKey::new("manual-provider", "codex", "gpt-5.6-sol"),
+            Arc::new(|_| {}),
+        );
         assert!(matches!(unmanaged, Err(RunFailureKind::InvalidResponse)));
     }
 
@@ -178,12 +206,12 @@ mod tests {
         let verifier = BalancedActiveVerifier::new(managed_codex_db(&endpoint, "SENTINEL_KEY"));
 
         let failure = verifier
-            .prepare(TargetKey::new(
-                "loongport-0123456789abcdef",
-                "codex",
-                "missing-model",
-            ))
+            .prepare(
+                TargetKey::new("loongport-0123456789abcdef", "codex", "missing-model"),
+                Arc::new(|_| {}),
+            )
             .unwrap()
+            .future
             .await
             .unwrap_err();
 

@@ -53,9 +53,7 @@ pub fn evaluate(
 fn is_critical_contradiction(code: EvidenceCode) -> bool {
     matches!(
         code,
-        EvidenceCode::ModelMatch
-            | EvidenceCode::ForeignProtocol
-            | EvidenceCode::ForeignSelfIdentification
+        EvidenceCode::ModelMatch | EvidenceCode::ForeignProtocol
     )
 }
 
@@ -122,6 +120,19 @@ mod tests {
                 AppType::Codex,
                 &codex_profile("gpt-5.6-sol"),
                 &[failed(EvidenceCode::StreamLifecycle)],
+            )
+            .0,
+            Verdict::Suspicious
+        );
+    }
+
+    #[test]
+    fn foreign_self_identification_alone_is_suspicious() {
+        assert_eq!(
+            evaluate(
+                AppType::Codex,
+                &codex_profile("gpt-5.6-sol"),
+                &[failed(EvidenceCode::ForeignSelfIdentification)],
             )
             .0,
             Verdict::Suspicious

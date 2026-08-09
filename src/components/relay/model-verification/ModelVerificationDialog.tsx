@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { modelVerificationApi } from "@/lib/api/modelVerification";
+import type { VerificationReport } from "@/lib/api/modelVerification";
 
 import { VerificationEvidenceList } from "./VerificationEvidenceList";
 import { useModelVerificationRun } from "./useModelVerificationRun";
@@ -30,6 +31,7 @@ export interface ModelVerificationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onRunningChange?: (running: boolean) => void;
+  initialReport?: VerificationReport | null;
 }
 
 type ModelsState = "idle" | "loading" | "ready" | "error";
@@ -41,13 +43,18 @@ export function ModelVerificationDialog({
   open,
   onOpenChange,
   onRunningChange,
+  initialReport,
 }: ModelVerificationDialogProps) {
   const { t } = useTranslation();
   const [models, setModels] = useState<string[]>([]);
   const [modelsState, setModelsState] = useState<ModelsState>("idle");
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
   const requestRef = useRef(0);
-  const run = useModelVerificationRun({ open, providerId, appType });
+  const run = useModelVerificationRun({
+    providerId,
+    appType,
+    initialReport,
+  });
 
   useEffect(() => {
     onRunningChange?.(run.isRunning);

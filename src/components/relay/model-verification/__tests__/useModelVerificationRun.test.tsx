@@ -57,7 +57,6 @@ describe("useModelVerificationRun", () => {
   it("tracks only the active run and target, then fetches persisted reports after a matching change", async () => {
     const { result } = renderHook(() =>
       useModelVerificationRun({
-        open: true,
         providerId: target.providerId,
         appType: target.appType,
       }),
@@ -109,7 +108,6 @@ describe("useModelVerificationRun", () => {
 
     const { result } = renderHook(() =>
       useModelVerificationRun({
-        open: true,
         providerId: target.providerId,
         appType: target.appType,
       }),
@@ -126,11 +124,38 @@ describe("useModelVerificationRun", () => {
     await waitFor(() => expect(result.current.report?.verdict).toBe("trusted"));
   });
 
-  it("unsubscribes when closed and ignores a prior dialog instance completion", async () => {
+  it("keeps an early terminal failure when start later binds the run ID", async () => {
+    api.start.mockImplementation(async () => {
+      progressListener?.(
+        runningEvent({
+          state: "failed",
+          completedChecks: 1,
+          failure: "authentication",
+        }),
+      );
+      return { runId: "run-1", state: "running" };
+    });
+
+    const { result } = renderHook(() =>
+      useModelVerificationRun({
+        providerId: target.providerId,
+        appType: target.appType,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.start(target.model);
+    });
+
+    expect(result.current.progress?.state).toBe("failed");
+    expect(result.current.failure).toBe("authentication");
+    expect(result.current.isRunning).toBe(false);
+  });
+
+  it("keeps the active run subscribed while its persistent dialog is closed", async () => {
     const { result, rerender } = renderHook(
-      ({ open }) =>
+      ({ open: _open }) =>
         useModelVerificationRun({
-          open,
           providerId: target.providerId,
           appType: target.appType,
         }),
@@ -143,17 +168,13 @@ describe("useModelVerificationRun", () => {
     const priorListener = progressListener;
 
     rerender({ open: false });
-    expect(stopProgress).toHaveBeenCalled();
-    expect(stopChanged).toHaveBeenCalled();
-    expect(result.current.progress).toBeNull();
+    expect(stopProgress).not.toHaveBeenCalled();
+    expect(stopChanged).not.toHaveBeenCalled();
 
     rerender({ open: true });
-    await act(async () => {
-      await result.current.start(target.model);
-    });
     act(() => priorListener?.(runningEvent({ state: "completed" })));
 
-    expect(result.current.progress).toBeNull();
-    expect(api.listResults).not.toHaveBeenCalled();
+    expect(result.current.progress?.state).toBe("completed");
+    expect(api.start).toHaveBeenCalledTimes(1);
   });
 });

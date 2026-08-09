@@ -73,7 +73,9 @@ mod tests {
     use crate::{
         database::Database,
         relay::model_verification::{
-            coordinator::{ActiveVerifier, ModelVerificationCoordinator, VerificationFuture},
+            coordinator::{
+                ActiveVerifier, ModelVerificationCoordinator, PreparedVerification, ProbeProgress,
+            },
             store::upsert_active,
             types::{
                 EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind,
@@ -93,7 +95,11 @@ mod tests {
     }
 
     impl ActiveVerifier for RejectingVerifier {
-        fn prepare(&self, target: TargetKey) -> Result<VerificationFuture, RunFailureKind> {
+        fn prepare(
+            &self,
+            target: TargetKey,
+            _progress: ProbeProgress,
+        ) -> Result<PreparedVerification, RunFailureKind> {
             *self.target.lock().unwrap() = Some(target);
             Err(RunFailureKind::Authentication)
         }

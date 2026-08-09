@@ -127,18 +127,21 @@ function DialogHarness({
 function ReopenHarness() {
   const [open, setOpen] = useState(true);
 
-  return open ? (
-    <ModelVerificationDialog
-      providerId="provider-a"
-      appType="codex"
-      tierDisplayName="旗舰"
-      open
-      onOpenChange={setOpen}
-    />
-  ) : (
-    <button type="button" onClick={() => setOpen(true)}>
-      reopen dialog
-    </button>
+  return (
+    <>
+      <ModelVerificationDialog
+        providerId="provider-a"
+        appType="codex"
+        tierDisplayName="旗舰"
+        open={open}
+        onOpenChange={setOpen}
+      />
+      {!open && (
+        <button type="button" onClick={() => setOpen(true)}>
+          reopen dialog
+        </button>
+      )}
+    </>
   );
 }
 
@@ -300,7 +303,7 @@ describe("ModelVerificationDialog", () => {
     await waitFor(() => expect(api.listModels).toHaveBeenCalledTimes(2));
   });
 
-  it("accepts the same backend run ID after closing and reopening a tier dialog", async () => {
+  it("reopens the same active run without starting another request", async () => {
     render(<ReopenHarness />);
     fireEvent.click(await openModelOptions());
     fireEvent.click(screen.getByRole("button", { name: "开始验证" }));
@@ -310,9 +313,7 @@ describe("ModelVerificationDialog", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "reopen dialog" }),
     );
-    fireEvent.click(await openModelOptions());
-    fireEvent.click(screen.getByRole("button", { name: "开始验证" }));
-    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
 
     act(() => {
       progressListener?.({

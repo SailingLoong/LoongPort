@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -9,7 +15,18 @@ const api = vi.hoisted(() => ({
   status: vi.fn(),
   listSites: vi.fn(),
   listResults: vi.fn(),
+  listModels: vi.fn(),
+  start: vi.fn(),
+  cancel: vi.fn(),
+  onProgress: vi.fn(),
+  onChanged: vi.fn(),
   list: vi.fn(),
+}));
+const dialogState = vi.hoisted(() => ({
+  onOpenChange: (_open: boolean) => {},
+}));
+const selectState = vi.hoisted(() => ({
+  onValueChange: (_value: string) => {},
 }));
 const eventHandlers = vi.hoisted(
   () => new Map<string, (payload: any) => void>(),
@@ -26,7 +43,54 @@ vi.mock("@/lib/api/vendor", () => ({
   vendorSupportsApp: () => false,
 }));
 vi.mock("@/lib/api/modelVerification", () => ({
-  modelVerificationApi: { listResults: api.listResults },
+  modelVerificationApi: {
+    listResults: api.listResults,
+    listModels: api.listModels,
+    start: api.start,
+    cancel: api.cancel,
+    onProgress: api.onProgress,
+    onChanged: api.onChanged,
+  },
+}));
+vi.mock("@/components/ui/dialog", () => ({
+  Dialog: ({ open, onOpenChange, children }: any) => {
+    dialogState.onOpenChange = onOpenChange;
+    return open ? children : null;
+  },
+  DialogContent: ({ children }: any) => (
+    <div role="dialog">
+      {children}
+      <button type="button" onClick={() => dialogState.onOpenChange(false)}>
+        close verification dialog
+      </button>
+    </div>
+  ),
+  DialogDescription: ({ children }: any) => <p>{children}</p>,
+  DialogFooter: ({ children }: any) => <div>{children}</div>,
+  DialogHeader: ({ children }: any) => <div>{children}</div>,
+  DialogTitle: ({ children }: any) => <h2>{children}</h2>,
+}));
+vi.mock("@/components/ui/select", () => ({
+  Select: ({ onValueChange, children }: any) => {
+    selectState.onValueChange = onValueChange;
+    return <div>{children}</div>;
+  },
+  SelectTrigger: ({ children }: any) => (
+    <button type="button" role="combobox">
+      {children}
+    </button>
+  ),
+  SelectValue: ({ placeholder }: any) => <span>{placeholder}</span>,
+  SelectContent: ({ children }: any) => <div>{children}</div>,
+  SelectItem: ({ value, children }: any) => (
+    <button
+      type="button"
+      role="option"
+      onClick={() => selectState.onValueChange(value)}
+    >
+      {children}
+    </button>
+  ),
 }));
 vi.mock("@/hooks/useStreamCheck", () => ({
   useStreamCheck: () => ({ checkProvider: vi.fn(), isChecking: () => false }),
@@ -57,7 +121,9 @@ vi.mock("@/components/relay/RelayTierList", () => ({
             </span>
             {props.onVerifyTier && (
               <button type="button" onClick={() => props.onVerifyTier(tier)}>
-                verify {tier.providerId}
+                {props.isVerifyingTier(tier.providerId)
+                  ? `reopen ${tier.providerId}`
+                  : `verify ${tier.providerId}`}
               </button>
             )}
             <button type="button" onClick={props.onRefresh}>
@@ -66,17 +132,6 @@ vi.mock("@/components/relay/RelayTierList", () => ({
           </div>
         )),
       )}
-    </div>
-  ),
-}));
-vi.mock("../model-verification/ModelVerificationDialog", () => ({
-  ModelVerificationDialog: (props: any) => (
-    <div data-testid="verification-dialog">
-      <span data-testid="dialog-tier">{props.tierDisplayName}</span>
-      <span data-testid="dialog-run-id">run-1</span>
-      <button type="button" onClick={() => props.onOpenChange(false)}>
-        close dialog
-      </button>
     </div>
   ),
 }));
@@ -128,10 +183,15 @@ const report = (providerId: string, verdict: string, model = "gpt-5") => ({
   checkedAt: 1,
 });
 
+let progressListener: ((event: any) => void) | undefined;
+let changedListener: ((event: any) => void) | undefined;
+
 describe("RelaySection model verification ownership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     eventHandlers.clear();
+    progressListener = undefined;
+    changedListener = undefined;
     api.listRelays.mockResolvedValue([relay]);
     api.listTierRates.mockResolvedValue([]);
     api.checkSession.mockResolvedValue([]);
@@ -150,6 +210,19 @@ describe("RelaySection model verification ownership", () => {
       report("provider-a", "suspicious", "one"),
       report("provider-a", "anomaly", "two"),
     ]);
+    api.listModels.mockResolvedValue(["gpt-5"]);
+    api.start.mockResolvedValue({ runId: "run-1", state: "running" });
+    api.cancel.mockResolvedValue(undefined);
+    api.onProgress.mockImplementation(
+      async (listener: (event: any) => void) => {
+        progressListener = listener;
+        return () => {};
+      },
+    );
+    api.onChanged.mockImplementation(async (listener: (event: any) => void) => {
+      changedListener = listener;
+      return () => {};
+    });
   });
 
   it("reduces reports from the initial and refreshed relay fetch, with one dialog owner", async () => {
@@ -160,15 +233,15 @@ describe("RelaySection model verification ownership", () => {
     expect(screen.getByTestId("verdict-provider-a")).toHaveTextContent(
       "anomaly",
     );
-    expect(screen.queryAllByTestId("verification-dialog")).toHaveLength(0);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "refresh" }));
     await waitFor(() => expect(api.listRelays).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(api.listResults).toHaveBeenCalledTimes(2));
 
     fireEvent.click(screen.getByRole("button", { name: "verify provider-a" }));
-    expect(screen.getAllByTestId("verification-dialog")).toHaveLength(1);
-    expect(screen.getByTestId("dialog-tier")).toHaveTextContent("provider-a");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    await screen.findByRole("combobox");
   });
 
   it("clears a reset badge only after the matching backend change event", async () => {
@@ -190,17 +263,57 @@ describe("RelaySection model verification ownership", () => {
     );
   });
 
-  it("keeps one owner through close and reopen of the same backend run", async () => {
+  it("keeps one real run owner through close, terminal completion, and reopen", async () => {
     render(<RelaySection appId="codex" />);
     await waitFor(() =>
       screen.getByRole("button", { name: "verify provider-a" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "verify provider-a" }));
-    expect(screen.getByTestId("dialog-run-id")).toHaveTextContent("run-1");
-    fireEvent.click(screen.getByRole("button", { name: "close dialog" }));
-    fireEvent.click(screen.getByRole("button", { name: "verify provider-a" }));
-    expect(screen.getAllByTestId("verification-dialog")).toHaveLength(1);
-    expect(screen.getByTestId("dialog-run-id")).toHaveTextContent("run-1");
+    expect(
+      await screen.findByText("loongport.modelVerification.verdict.anomaly"),
+    ).toBeInTheDocument();
+    expect(api.start).not.toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByRole("option", { name: "gpt-5" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "loongport.modelVerification.actions.start",
+      }),
+    );
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "reopen provider-a" }),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "close verification dialog" }),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    api.listResults.mockResolvedValueOnce([report("provider-a", "trusted")]);
+    await act(async () => {
+      progressListener?.({
+        runId: "run-1",
+        providerId: "provider-a",
+        appType: "codex",
+        model: "gpt-5",
+        state: "completed",
+        completedChecks: 4,
+        totalChecks: 4,
+        failure: null,
+      });
+      changedListener?.({ providerId: "provider-a", appType: "codex" });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "verify provider-a" }),
+    );
+    expect(
+      await screen.findByText("loongport.modelVerification.verdict.trusted"),
+    ).toBeInTheDocument();
+    expect(api.start).toHaveBeenCalledTimes(1);
   });
 
   it.each([

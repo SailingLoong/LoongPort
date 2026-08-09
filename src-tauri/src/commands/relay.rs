@@ -2618,7 +2618,9 @@ mod tests {
     use futures::channel::oneshot;
 
     use crate::relay::model_verification::{
-        coordinator::{ActiveVerifier, ModelVerificationCoordinator, VerificationFuture},
+        coordinator::{
+            ActiveVerifier, ModelVerificationCoordinator, PreparedVerification, ProbeProgress,
+        },
         types::{
             EvidenceLevel, RunFailureKind, TargetKey, Verdict, VerificationReport, RULES_VERSION,
         },
@@ -3201,7 +3203,11 @@ mod tests {
     }
 
     impl ActiveVerifier for ResetVerifier {
-        fn prepare(&self, target: TargetKey) -> Result<VerificationFuture, RunFailureKind> {
+        fn prepare(
+            &self,
+            target: TargetKey,
+            progress: ProbeProgress,
+        ) -> Result<PreparedVerification, RunFailureKind> {
             let (sender, receiver) = oneshot::channel();
             self.senders.lock().unwrap().insert(target, sender);
             let future: Pin<
@@ -3211,7 +3217,19 @@ mod tests {
                         + 'static,
                 >,
             > = Box::pin(async move { receiver.await.unwrap() });
-            Ok(future)
+            let future = Box::pin(async move {
+                let result = future.await;
+                if result.is_ok() {
+                    for completed in 1..=3 {
+                        progress(completed);
+                    }
+                }
+                result
+            });
+            Ok(PreparedVerification {
+                total_checks: 3,
+                future,
+            })
         }
     }
 

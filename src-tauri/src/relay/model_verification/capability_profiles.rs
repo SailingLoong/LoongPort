@@ -10,6 +10,7 @@ use super::types::EvidenceCode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityProfile {
     pub supports_structured_output: bool,
+    pub supports_low_reasoning_effort: bool,
     pub supports_thinking_signature: bool,
     pub supports_signature_continuation: bool,
 }
@@ -19,6 +20,7 @@ impl CapabilityProfile {
         if matches!(app_type, AppType::Codex) && supports_codex_structured_output(model) {
             return Self {
                 supports_structured_output: true,
+                supports_low_reasoning_effort: true,
                 supports_thinking_signature: false,
                 supports_signature_continuation: false,
             };
@@ -27,6 +29,7 @@ impl CapabilityProfile {
         if matches!(app_type, AppType::Claude) && supports_anthropic_signature_continuation(model) {
             return Self {
                 supports_structured_output: false,
+                supports_low_reasoning_effort: false,
                 supports_thinking_signature: true,
                 supports_signature_continuation: true,
             };
@@ -34,6 +37,7 @@ impl CapabilityProfile {
 
         Self {
             supports_structured_output: false,
+            supports_low_reasoning_effort: false,
             supports_thinking_signature: false,
             supports_signature_continuation: false,
         }
@@ -52,6 +56,12 @@ impl CapabilityProfile {
             | EvidenceCode::ForeignProtocol
             | EvidenceCode::ForeignSelfIdentification => true,
         }
+    }
+
+    pub fn active_probe_count(&self) -> u8 {
+        3 + u8::from(self.supports_structured_output)
+            + u8::from(self.supports_thinking_signature)
+            + u8::from(self.supports_signature_continuation)
     }
 }
 
@@ -158,6 +168,38 @@ mod tests {
         assert!(
             !CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-terra-20260809")
                 .supports_structured_output
+        );
+    }
+
+    #[test]
+    fn low_reasoning_effort_is_limited_to_known_codex_routes() {
+        assert!(
+            CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol")
+                .supports_low_reasoning_effort
+        );
+        assert!(
+            !CapabilityProfile::for_target(&AppType::Codex, "future-model-x")
+                .supports_low_reasoning_effort
+        );
+        assert!(
+            !CapabilityProfile::for_target(&AppType::Claude, "claude-sonnet-5")
+                .supports_low_reasoning_effort
+        );
+    }
+
+    #[test]
+    fn active_probe_totals_follow_the_capability_profile() {
+        assert_eq!(
+            CapabilityProfile::for_target(&AppType::Codex, "future-model-x").active_probe_count(),
+            3
+        );
+        assert_eq!(
+            CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol").active_probe_count(),
+            4
+        );
+        assert_eq!(
+            CapabilityProfile::for_target(&AppType::Claude, "claude-sonnet-5").active_probe_count(),
+            5
         );
     }
 }

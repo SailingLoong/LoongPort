@@ -136,6 +136,25 @@ function reduceTierVerificationVerdicts(
   return verdicts;
 }
 
+function highestSeverityReportForTier(
+  reports: Readonly<Record<string, VerificationReport>>,
+  providerId: string,
+): VerificationReport | null {
+  const severity: Record<VerificationVerdict, number> = {
+    trusted: 0,
+    inconclusive: 1,
+    suspicious: 2,
+    anomaly: 3,
+  };
+  return (
+    Object.values(reports)
+      .filter((report) => report.target.providerId === providerId)
+      .sort(
+        (left, right) => severity[right.verdict] - severity[left.verdict],
+      )[0] ?? null
+  );
+}
+
 export function RelaySection({ appId }: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
@@ -181,6 +200,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
   >({});
   const [selectedVerificationTier, setSelectedVerificationTier] =
     useState<TierInfo | null>(null);
+  const [verificationDialogOpen, setVerificationDialogOpen] = useState(false);
   const [verifyingProviderId, setVerifyingProviderId] = useState<string | null>(
     null,
   );
@@ -322,9 +342,30 @@ export function RelaySection({ appId }: RelaySectionProps) {
     [verificationVerdicts],
   );
 
-  const handleVerifyTier = useCallback((tier: TierInfo) => {
-    setSelectedVerificationTier(tier);
-  }, []);
+  const handleVerifyTier = useCallback(
+    (tier: TierInfo) => {
+      if (
+        verifyingProviderId !== null &&
+        selectedVerificationTier?.providerId !== tier.providerId
+      ) {
+        return;
+      }
+      setSelectedVerificationTier(tier);
+      setVerificationDialogOpen(true);
+    },
+    [selectedVerificationTier, verifyingProviderId],
+  );
+
+  const selectedVerificationReport = useMemo(
+    () =>
+      selectedVerificationTier
+        ? highestSeverityReportForTier(
+            verificationReports,
+            selectedVerificationTier.providerId,
+          )
+        : null,
+    [selectedVerificationTier, verificationReports],
+  );
 
   const handleVerificationRunningChange = useCallback(
     (running: boolean) => {
@@ -1239,11 +1280,10 @@ export function RelaySection({ appId }: RelaySectionProps) {
           providerId={selectedVerificationTier.providerId}
           appType={appId}
           tierDisplayName={selectedVerificationTier.displayName}
-          open
-          onOpenChange={(open) => {
-            if (!open) setSelectedVerificationTier(null);
-          }}
+          open={verificationDialogOpen}
+          onOpenChange={setVerificationDialogOpen}
           onRunningChange={handleVerificationRunningChange}
+          initialReport={selectedVerificationReport}
         />
       )}
 

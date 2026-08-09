@@ -319,6 +319,29 @@ mod tests {
     }
 
     #[test]
+    fn clear_scope_preserves_the_same_provider_id_for_another_app() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        insert_provider(&db, "provider-a", "claude")?;
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+        upsert_active(
+            &db,
+            &report("provider-a", "claude", "claude-a", Verdict::Suspicious),
+        )?;
+
+        clear_scope(&db, &TargetScope::new("provider-a", "codex"))?;
+
+        assert!(list_for_providers(&db, "codex", &["provider-a".into()])?.is_empty());
+        let claude = list_for_providers(&db, "claude", &["provider-a".into()])?;
+        assert_eq!(claude.len(), 1);
+        assert_eq!(claude[0].target.model, "claude-a");
+        Ok(())
+    }
+
+    #[test]
     fn list_for_providers_returns_empty_for_no_provider_ids() -> Result<(), AppError> {
         let db = Database::memory()?;
         assert!(list_for_providers(&db, "codex", &[])?.is_empty());

@@ -113,6 +113,7 @@ describe("RelayRow model verification", () => {
   });
 
   it("pins a spinner for the running tier and keeps problem labels independent from manual maintenance", () => {
+    const onVerifyTier = vi.fn();
     const { rerender } = renderRow({
       relay: { ...relayWithTier({ userEdited: true }) },
       verificationVerdictForTier: () => "suspicious",
@@ -127,13 +128,18 @@ describe("RelayRow model verification", () => {
     rerender(
       <RelayRow
         {...rowProps({
+          onVerifyTier,
           isVerifyingTier: () => true,
           verificationVerdictForTier: () => "anomaly",
         })}
       />,
     );
     const verify = screen.getByTitle("模型验证");
-    expect(verify).toBeDisabled();
+    expect(verify).toBeEnabled();
+    fireEvent.click(verify);
+    expect(onVerifyTier).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "provider-a" }),
+    );
     expect(verify.querySelector(".animate-spin")).toBeInTheDocument();
     expect(screen.getByText("模型异常")).toBeInTheDocument();
     expect(

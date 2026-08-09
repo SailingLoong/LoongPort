@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use crate::proxy::model_mapper::strip_one_m_suffix_for_upstream;
@@ -9,30 +11,59 @@ use crate::relay::model_verification::{
 };
 
 const REPORT_PROBE: &str = "report_probe";
+const CORE_STREAM_OUTPUT_TOKENS: u16 = 512;
+const TOOL_STRUCTURED_OUTPUT_TOKENS: u16 = 1024;
 
 pub(crate) async fn run_balanced(
     client: &reqwest::Client,
     target: &ResolvedTarget,
     profile: &CapabilityProfile,
 ) -> Result<Vec<EvidenceFact>, RunFailure> {
+    run_balanced_with_progress(client, target, profile, &mut || {}).await
+}
+
+pub(crate) async fn run_balanced_with_progress(
+    client: &reqwest::Client,
+    target: &ResolvedTarget,
+    profile: &CapabilityProfile,
+    on_probe_complete: &mut impl FnMut(),
+) -> Result<Vec<EvidenceFact>, RunFailure> {
     let model = upstream_model(&target.target().model);
     let endpoint = format!("{}/responses", target.protocol_base().trim_end_matches('/'));
 
-    let core = send_response(client, &endpoint, target.api_key(), core_request(&model)).await?;
+    let core = send_response(
+        client,
+        &endpoint,
+        target.api_key(),
+        core_request(&model, profile),
+    )
+    .await?;
+    reject_incomplete_response(&core)?;
     let mut facts = parse_core_response(&core, &model);
+    on_probe_complete();
 
-    let tool = send_response(client, &endpoint, target.api_key(), tool_request(&model)).await?;
+    let tool = send_response(
+        client,
+        &endpoint,
+        target.api_key(),
+        tool_request(&model, profile),
+    )
+    .await?;
+    reject_incomplete_response(&tool)?;
     facts.push(parse_tool_response(&tool));
+    on_probe_complete();
 
     if profile.supports_structured_output {
         let structured = send_response(
             client,
             &endpoint,
             target.api_key(),
-            structured_output_request(&model),
+            structured_output_request(&model, profile),
         )
         .await?;
+        reject_incomplete_response(&structured)?;
         facts.push(parse_structured_response(&structured));
+        on_probe_complete();
     }
 
     let mut stream = StreamReducer::new(&model);
@@ -40,11 +71,12 @@ pub(crate) async fn run_balanced(
         client,
         &endpoint,
         target.api_key(),
-        stream_request(&model),
+        stream_request(&model, profile),
         |event| stream.observe(event),
     )
     .await?;
     facts.extend(stream.finish());
+    on_probe_complete();
     Ok(facts)
 }
 
@@ -82,67 +114,99 @@ async fn send_stream(
     .await
 }
 
-fn core_request(model: &str) -> Value {
-    json!({
-        "model": model,
-        "input": "Reply with ready.",
-        "max_output_tokens": 32,
-        "store": false,
-    })
+fn core_request(model: &str, profile: &CapabilityProfile) -> Value {
+    with_reasoning_effort(
+        json!({
+            "model": model,
+            "input": "Reply with ready.",
+            "max_output_tokens": CORE_STREAM_OUTPUT_TOKENS,
+            "store": false,
+        }),
+        profile,
+    )
 }
 
-fn tool_request(model: &str) -> Value {
-    json!({
-        "model": model,
-        "input": "Call report_probe with ready set to true.",
-        "max_output_tokens": 64,
-        "store": false,
-        "tools": [{
-            "type": "function",
-            "name": REPORT_PROBE,
-            "description": "Return the fixed verification object.",
-            "parameters": {
-                "type": "object",
-                "properties": {"ready": {"type": "boolean"}},
-                "required": ["ready"],
-                "additionalProperties": false,
-            },
-            "strict": true,
-        }],
-        "tool_choice": {"type": "function", "name": REPORT_PROBE},
-    })
-}
-
-fn structured_output_request(model: &str) -> Value {
-    json!({
-        "model": model,
-        "input": "Return the fixed verification object.",
-        "max_output_tokens": 64,
-        "store": false,
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "loongport_probe",
-                "strict": true,
-                "schema": {
+fn tool_request(model: &str, profile: &CapabilityProfile) -> Value {
+    with_reasoning_effort(
+        json!({
+            "model": model,
+            "input": "Call report_probe with ready set to true.",
+            "max_output_tokens": TOOL_STRUCTURED_OUTPUT_TOKENS,
+            "store": false,
+            "tools": [{
+                "type": "function",
+                "name": REPORT_PROBE,
+                "description": "Return the fixed verification object.",
+                "parameters": {
                     "type": "object",
                     "properties": {"ready": {"type": "boolean"}},
                     "required": ["ready"],
                     "additionalProperties": false,
                 },
-            },
-        },
-    })
+                "strict": true,
+            }],
+            "tool_choice": {"type": "function", "name": REPORT_PROBE},
+        }),
+        profile,
+    )
 }
 
-fn stream_request(model: &str) -> Value {
-    json!({
-        "model": model,
-        "input": "Reply with stream.",
-        "max_output_tokens": 32,
-        "store": false,
-        "stream": true,
-    })
+fn structured_output_request(model: &str, profile: &CapabilityProfile) -> Value {
+    with_reasoning_effort(
+        json!({
+            "model": model,
+            "input": "Return the fixed verification object.",
+            "max_output_tokens": TOOL_STRUCTURED_OUTPUT_TOKENS,
+            "store": false,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "loongport_probe",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"ready": {"type": "boolean"}},
+                        "required": ["ready"],
+                        "additionalProperties": false,
+                    },
+                },
+            },
+        }),
+        profile,
+    )
+}
+
+fn stream_request(model: &str, profile: &CapabilityProfile) -> Value {
+    with_reasoning_effort(
+        json!({
+            "model": model,
+            "input": "Reply with stream.",
+            "max_output_tokens": CORE_STREAM_OUTPUT_TOKENS,
+            "store": false,
+            "stream": true,
+        }),
+        profile,
+    )
+}
+
+fn with_reasoning_effort(mut request: Value, profile: &CapabilityProfile) -> Value {
+    if profile.supports_low_reasoning_effort {
+        request
+            .as_object_mut()
+            .expect("probe request must be an object")
+            .insert("reasoning".into(), json!({"effort":"low"}));
+    }
+    request
+}
+
+fn reject_incomplete_response(body: &[u8]) -> Result<(), RunFailure> {
+    let Ok(response) = serde_json::from_slice::<Value>(body) else {
+        return Ok(());
+    };
+    match response.get("status").and_then(Value::as_str) {
+        Some("incomplete" | "failed") => Err(RunFailure::InvalidResponse),
+        _ => Ok(()),
+    }
 }
 
 fn upstream_model(model: &str) -> String {
@@ -311,7 +375,8 @@ struct StreamReducer<'a> {
     expected_model: &'a str,
     saw_created: bool,
     saw_completed: bool,
-    text_progress: TextStreamProgress,
+    items: HashMap<u64, OutputItemLifecycle>,
+    completed_messages: u8,
     lifecycle_order_valid: bool,
     model_matches: Option<bool>,
     usage_consistent: bool,
@@ -325,7 +390,8 @@ impl<'a> StreamReducer<'a> {
             expected_model,
             saw_created: false,
             saw_completed: false,
-            text_progress: TextStreamProgress::AwaitItem,
+            items: HashMap::new(),
+            completed_messages: 0,
             lifecycle_order_valid: true,
             model_matches: None,
             usage_consistent: true,
@@ -365,7 +431,8 @@ impl<'a> StreamReducer<'a> {
             }
             Some("response.completed") => {
                 if !self.saw_created
-                    || self.text_progress != TextStreamProgress::Closed
+                    || self.items.values().any(|item| !item.closed)
+                    || self.completed_messages != 1
                     || self.saw_completed
                 {
                     self.lifecycle_order_valid = false;
@@ -374,72 +441,67 @@ impl<'a> StreamReducer<'a> {
                 self.observe_response(value.get("response"), true);
             }
             Some("response.failed" | "response.incomplete") => {
-                self.lifecycle_order_valid = false;
+                return Err(RunFailure::InvalidResponse);
             }
             Some("response.output_item.added") => {
-                self.advance_text_stream(
-                    &value,
-                    TextStreamProgress::AwaitItem,
-                    TextStreamProgress::AwaitContentPart,
-                    "item",
-                    "message",
-                );
+                self.add_output_item(&value);
             }
             Some("response.content_part.added") => {
-                self.advance_text_stream(
-                    &value,
-                    TextStreamProgress::AwaitContentPart,
-                    TextStreamProgress::AwaitTextDelta,
-                    "part",
-                    "output_text",
-                );
-            }
-            Some("response.output_text.delta") => {
-                if !self.in_active_text_stream()
-                    || !matches!(
-                        self.text_progress,
-                        TextStreamProgress::AwaitTextDelta | TextStreamProgress::TextStreaming
+                if value
+                    .get("part")
+                    .and_then(|part| part.get("type"))
+                    .and_then(Value::as_str)
+                    != Some("output_text")
+                    || !self.advance_message(
+                        &value,
+                        TextStreamProgress::AwaitContentPart,
+                        TextStreamProgress::AwaitTextDelta,
                     )
                 {
                     self.lifecycle_order_valid = false;
-                } else {
-                    self.text_progress = TextStreamProgress::TextStreaming;
+                }
+            }
+            Some("response.output_text.delta") => {
+                if !self.advance_message_one_of(
+                    &value,
+                    &[
+                        TextStreamProgress::AwaitTextDelta,
+                        TextStreamProgress::TextStreaming,
+                    ],
+                    TextStreamProgress::TextStreaming,
+                ) {
+                    self.lifecycle_order_valid = false;
                 }
             }
             Some("response.output_text.done") => {
-                if !self.in_active_text_stream()
-                    || self.text_progress != TextStreamProgress::TextStreaming
-                {
+                if !self.message_is_at(&value, TextStreamProgress::TextStreaming) {
                     self.lifecycle_order_valid = false;
                 }
             }
             Some("response.content_part.done") => {
-                if !self.in_active_text_stream()
-                    || self.text_progress != TextStreamProgress::TextStreaming
-                {
+                if !self.advance_message(
+                    &value,
+                    TextStreamProgress::TextStreaming,
+                    TextStreamProgress::AwaitItemDone,
+                ) {
                     self.lifecycle_order_valid = false;
-                } else {
-                    self.text_progress = TextStreamProgress::AwaitItemDone;
                 }
             }
             Some("response.output_item.done") => {
-                if !self.in_active_text_stream()
-                    || self.text_progress != TextStreamProgress::AwaitItemDone
-                {
-                    self.lifecycle_order_valid = false;
-                } else {
-                    self.text_progress = TextStreamProgress::Closed;
-                }
+                self.complete_output_item(&value);
             }
             Some(
                 "response.function_call_arguments.delta" | "response.function_call_arguments.done",
             ) => {
-                if !self.in_active_text_stream() {
+                if self
+                    .find_open_item_index(&value, OutputItemType::FunctionCall)
+                    .is_none()
+                {
                     self.lifecycle_order_valid = false;
                 }
             }
             Some(kind) if kind.starts_with("response.") => {
-                if !self.in_active_text_stream() {
+                if !self.in_active_response() {
                     self.lifecycle_order_valid = false;
                 }
             }
@@ -448,30 +510,131 @@ impl<'a> StreamReducer<'a> {
         Ok(())
     }
 
-    fn in_active_text_stream(&self) -> bool {
+    fn in_active_response(&self) -> bool {
         self.saw_created && !self.saw_completed
     }
 
-    fn advance_text_stream(
+    fn add_output_item(&mut self, value: &Value) {
+        let item_type = value
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            .and_then(OutputItemType::from_wire);
+        let index = value
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .or_else(|| self.items.is_empty().then_some(0));
+        let (Some(index), Some(item_type)) = (index, item_type) else {
+            self.lifecycle_order_valid = false;
+            return;
+        };
+        if !self.in_active_response() || self.items.contains_key(&index) {
+            self.lifecycle_order_valid = false;
+            return;
+        }
+        let progress = match item_type {
+            OutputItemType::Message => Some(TextStreamProgress::AwaitContentPart),
+            OutputItemType::Reasoning | OutputItemType::FunctionCall => None,
+        };
+        self.items.insert(
+            index,
+            OutputItemLifecycle {
+                item_type,
+                text_progress: progress,
+                closed: false,
+            },
+        );
+    }
+
+    fn complete_output_item(&mut self, value: &Value) {
+        let requested_type = value
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            .and_then(OutputItemType::from_wire);
+        let index = value
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                let mut open = self
+                    .items
+                    .iter()
+                    .filter_map(|(index, item)| (!item.closed).then_some(*index));
+                let only = open.next();
+                (open.next().is_none()).then_some(only).flatten()
+            });
+        let Some(item) = index.and_then(|index| self.items.get_mut(&index)) else {
+            self.lifecycle_order_valid = false;
+            return;
+        };
+        if item.closed
+            || requested_type.is_some_and(|item_type| item_type != item.item_type)
+            || (item.item_type == OutputItemType::Message
+                && item.text_progress != Some(TextStreamProgress::AwaitItemDone))
+        {
+            self.lifecycle_order_valid = false;
+            return;
+        }
+        item.closed = true;
+        if item.item_type == OutputItemType::Message {
+            self.completed_messages = self.completed_messages.saturating_add(1);
+        }
+    }
+
+    fn find_open_item_index(&self, value: &Value, item_type: OutputItemType) -> Option<u64> {
+        if !self.in_active_response() {
+            return None;
+        }
+        if let Some(index) = value.get("output_index").and_then(Value::as_u64) {
+            return self
+                .items
+                .get(&index)
+                .is_some_and(|item| item.item_type == item_type && !item.closed)
+                .then_some(index);
+        }
+        let mut matches = self.items.iter().filter_map(|(index, item)| {
+            (item.item_type == item_type && !item.closed).then_some(*index)
+        });
+        let only = matches.next()?;
+        matches.next().is_none().then_some(only)
+    }
+
+    fn message_is_at(&self, value: &Value, expected: TextStreamProgress) -> bool {
+        self.find_open_item_index(value, OutputItemType::Message)
+            .and_then(|index| self.items.get(&index))
+            .is_some_and(|item| item.text_progress == Some(expected))
+    }
+
+    fn advance_message(
         &mut self,
         value: &Value,
         expected: TextStreamProgress,
         next: TextStreamProgress,
-        field: &str,
-        expected_type: &str,
-    ) {
-        if !self.in_active_text_stream()
-            || self.text_progress != expected
-            || value
-                .get(field)
-                .and_then(|item| item.get("type"))
-                .and_then(Value::as_str)
-                != Some(expected_type)
+    ) -> bool {
+        self.advance_message_one_of(value, &[expected], next)
+    }
+
+    fn advance_message_one_of(
+        &mut self,
+        value: &Value,
+        expected: &[TextStreamProgress],
+        next: TextStreamProgress,
+    ) -> bool {
+        let Some(index) = self.find_open_item_index(value, OutputItemType::Message) else {
+            return false;
+        };
+        let item = self
+            .items
+            .get_mut(&index)
+            .expect("resolved item must exist");
+        if !item
+            .text_progress
+            .is_some_and(|progress| expected.contains(&progress))
         {
-            self.lifecycle_order_valid = false;
-        } else {
-            self.text_progress = next;
+            return false;
         }
+        item.text_progress = Some(next);
+        true
     }
 
     fn observe_response(&mut self, response: Option<&Value>, terminal: bool) {
@@ -501,7 +664,8 @@ impl<'a> StreamReducer<'a> {
     fn finish(self) -> Vec<EvidenceFact> {
         let mut facts = vec![if self.lifecycle_order_valid
             && self.saw_created
-            && self.text_progress == TextStreamProgress::Closed
+            && self.items.values().all(|item| item.closed)
+            && self.completed_messages == 1
             && self.saw_completed
         {
             passed(EvidenceCode::StreamLifecycle)
@@ -529,12 +693,34 @@ impl<'a> StreamReducer<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextStreamProgress {
-    AwaitItem,
     AwaitContentPart,
     AwaitTextDelta,
     TextStreaming,
     AwaitItemDone,
-    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputItemType {
+    Message,
+    Reasoning,
+    FunctionCall,
+}
+
+impl OutputItemType {
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "message" => Some(Self::Message),
+            "reasoning" => Some(Self::Reasoning),
+            "function_call" => Some(Self::FunctionCall),
+            _ => None,
+        }
+    }
+}
+
+struct OutputItemLifecycle {
+    item_type: OutputItemType,
+    text_progress: Option<TextStreamProgress>,
+    closed: bool,
 }
 
 fn passed(code: EvidenceCode) -> EvidenceFact {
@@ -572,7 +758,7 @@ mod openai_responses_tests {
         protocols::{
             openai_responses::{
                 parse_core_response, parse_stream, parse_structured_response, parse_tool_response,
-                run_balanced, upstream_model,
+                run_balanced, run_balanced_with_progress, upstream_model,
             },
             RunFailure, MAX_RESPONSE_BYTES, MAX_SSE_EVENT_BYTES,
         },
@@ -729,7 +915,6 @@ mod openai_responses_tests {
             "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\"}}\n\n",
             "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n",
             "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\"}}\n\n",
-            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"SENTINEL_ARGUMENT\"}\n\n",
             "event: response.future_output.delta\ndata: {\"type\":\"response.future_output.delta\",\"delta\":\"ignored\"}\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n",
             "event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\"}\n\n",
@@ -745,6 +930,34 @@ mod openai_responses_tests {
         assert!(!serde_json::to_string(&facts)
             .unwrap()
             .contains("SENTINEL_ARGUMENT"));
+    }
+
+    #[test]
+    fn reasoning_and_function_items_can_precede_the_message_item() {
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol");
+        let stream = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\"}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"SENTINEL_REASONING\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"SENTINEL_ARGUMENT\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":1,\"arguments\":\"SENTINEL_ARGUMENT\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\"}}\n\n",
+            "data: {\"type\":\"response.content_part.added\",\"output_index\":2,\"part\":{\"type\":\"output_text\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":2,\"delta\":\"ready\"}\n\n",
+            "data: {\"type\":\"response.output_text.done\",\"output_index\":2,\"text\":\"ready\"}\n\n",
+            "data: {\"type\":\"response.content_part.done\",\"output_index\":2,\"part\":{\"type\":\"output_text\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n"
+        );
+
+        let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
+
+        assert!(facts.contains(&passed(EvidenceCode::StreamLifecycle)));
+        let serialized = serde_json::to_string(&facts).unwrap();
+        assert!(!serialized.contains("SENTINEL"));
     }
 
     #[test]
@@ -779,9 +992,10 @@ mod openai_responses_tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
         );
 
-        let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
-
-        assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
+        assert_eq!(
+            parse_stream(stream, "gpt-5.6-sol", &profile),
+            Err(RunFailure::InvalidResponse)
+        );
     }
 
     #[test]
@@ -798,9 +1012,10 @@ mod openai_responses_tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
         );
 
-        let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
-
-        assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
+        assert_eq!(
+            parse_stream(stream, "gpt-5.6-sol", &profile),
+            Err(RunFailure::InvalidResponse)
+        );
     }
 
     #[test]
@@ -867,7 +1082,12 @@ mod openai_responses_tests {
             .build()
             .unwrap();
 
-        let facts = run_balanced(&client, &target, &profile).await.unwrap();
+        let mut completed_probes = 0;
+        let facts = run_balanced_with_progress(&client, &target, &profile, &mut || {
+            completed_probes += 1;
+        })
+        .await
+        .unwrap();
 
         for code in [
             EvidenceCode::BasicEnvelope,
@@ -881,6 +1101,7 @@ mod openai_responses_tests {
         }
         let serialized = serde_json::to_string(&facts).unwrap();
         assert!(!serialized.contains("SENTINEL"));
+        assert_eq!(completed_probes, 4);
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 4);
@@ -892,7 +1113,12 @@ mod openai_responses_tests {
             );
             assert_eq!(request.content_type.as_ref().unwrap(), "application/json");
             assert_eq!(request.body["store"], false);
+            assert_eq!(request.body["reasoning"], json!({"effort":"low"}));
         }
+        assert_eq!(requests[0].body["max_output_tokens"], 512);
+        assert_eq!(requests[1].body["max_output_tokens"], 1024);
+        assert_eq!(requests[2].body["max_output_tokens"], 1024);
+        assert_eq!(requests[3].body["max_output_tokens"], 512);
         for request in &requests[..3] {
             assert_eq!(request.accept.as_ref().unwrap(), "application/json");
         }
@@ -911,6 +1137,58 @@ mod openai_responses_tests {
         assert_eq!(requests[2].body["text"]["format"]["strict"], true);
         assert_eq!(requests[3].accept.as_ref().unwrap(), "text/event-stream");
         assert_eq!(requests[3].body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn unknown_models_do_not_receive_unestablished_reasoning_fields() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = spawn_server(
+            Router::new()
+                .route("/v1/responses", post(happy_handler))
+                .with_state(requests.clone()),
+        )
+        .await;
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "future-model-x");
+
+        run_balanced(
+            &reqwest::Client::new(),
+            &target_for_model(&endpoint, "key", "future-model-x"),
+            &profile,
+        )
+        .await
+        .unwrap();
+
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.body.get("reasoning").is_none()));
+    }
+
+    #[tokio::test]
+    async fn incomplete_success_response_is_a_finite_run_failure() {
+        let endpoint = spawn_server(Router::new().route(
+            "/v1/responses",
+            post(|| async {
+                Json(json!({
+                    "object":"response",
+                    "status":"incomplete",
+                    "incomplete_details":{"reason":"max_output_tokens"},
+                    "model":"gpt-5.6-sol",
+                    "output":[]
+                }))
+            }),
+        ))
+        .await;
+
+        let result = run_balanced(
+            &reqwest::Client::new(),
+            &target_for_model(&endpoint, "key", "gpt-5.6-sol"),
+            &CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol"),
+        )
+        .await;
+
+        assert_eq!(result, Err(RunFailure::InvalidResponse));
     }
 
     #[tokio::test]

@@ -15,6 +15,15 @@ pub(crate) async fn run_balanced(
     target: &ResolvedTarget,
     profile: &CapabilityProfile,
 ) -> Result<Vec<EvidenceFact>, RunFailure> {
+    run_balanced_with_progress(client, target, profile, &mut || {}).await
+}
+
+pub(crate) async fn run_balanced_with_progress(
+    client: &reqwest::Client,
+    target: &ResolvedTarget,
+    profile: &CapabilityProfile,
+    on_probe_complete: &mut impl FnMut(),
+) -> Result<Vec<EvidenceFact>, RunFailure> {
     let model = upstream_model(&target.target().model);
     let endpoint = format!(
         "{}/v1/messages",
@@ -23,9 +32,11 @@ pub(crate) async fn run_balanced(
 
     let core = send_message(client, &endpoint, target.api_key(), core_request(&model)).await?;
     let mut facts = parse_core_response(&core, &model);
+    on_probe_complete();
 
     let tool = send_message(client, &endpoint, target.api_key(), tool_request(&model)).await?;
     facts.push(parse_tool_response(&tool));
+    on_probe_complete();
 
     let mut stream_facts = StreamReducer::new(&model);
     send_stream(
@@ -37,6 +48,7 @@ pub(crate) async fn run_balanced(
     )
     .await?;
     facts.extend(stream_facts.finish());
+    on_probe_complete();
 
     if profile.supports_thinking_signature {
         let thinking = send_message(
@@ -48,6 +60,7 @@ pub(crate) async fn run_balanced(
         .await?;
         let (thinking_fact, signed_thinking_block) = reduce_thinking_response(&thinking);
         facts.push(thinking_fact);
+        on_probe_complete();
 
         if profile.supports_signature_continuation {
             facts.push(match signed_thinking_block {
@@ -71,6 +84,7 @@ pub(crate) async fn run_balanced(
                 }
                 None => failed(EvidenceCode::SignatureContinuation),
             });
+            on_probe_complete();
         }
     }
 
@@ -493,7 +507,9 @@ mod tests {
         relay::model_verification::{
             capability_profiles::CapabilityProfile,
             protocols::{
-                anthropic::{parse_core_response, parse_stream, run_balanced},
+                anthropic::{
+                    parse_core_response, parse_stream, run_balanced, run_balanced_with_progress,
+                },
                 RunFailure, MAX_RESPONSE_BYTES, MAX_SSE_EVENT_BYTES,
             },
             target::ResolvedTarget,
@@ -645,12 +661,18 @@ mod tests {
             .unwrap();
         let profile = CapabilityProfile::for_target(&AppType::Claude, "claude-haiku-4-5");
 
-        let facts = run_balanced(&client, &target, &profile).await.unwrap();
+        let mut completed_probes = 0;
+        let facts = run_balanced_with_progress(&client, &target, &profile, &mut || {
+            completed_probes += 1;
+        })
+        .await
+        .unwrap();
 
         assert!(facts.contains(&passed(EvidenceCode::ToolCallShape)));
         assert!(facts.contains(&passed(EvidenceCode::StreamLifecycle)));
         assert!(facts.contains(&passed(EvidenceCode::ThinkingSignature)));
         assert!(facts.contains(&passed(EvidenceCode::SignatureContinuation)));
+        assert_eq!(completed_probes, 5);
         let serialized = serde_json::to_string(&facts).unwrap();
         for private_value in [
             "SENTINEL_API_KEY",
