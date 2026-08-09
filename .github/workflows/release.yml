@@ -329,7 +329,9 @@ jobs:
           fi
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS build/notarization attempt ${attempt}/${max_attempts} ==="
-            if pnpm tauri build --target universal-apple-darwin; then
+            # tauri.conf.json keeps the global target list at NSIS for Windows releases;
+            # select the macOS app bundle explicitly so the asset-preparation step gets a .app.
+            if pnpm tauri build --target universal-apple-darwin --bundles app; then
               echo "✅ macOS build/notarization succeeded"
               exit 0
             fi
