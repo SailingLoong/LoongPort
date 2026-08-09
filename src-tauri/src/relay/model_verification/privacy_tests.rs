@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
@@ -31,20 +32,6 @@ const ASSISTANT_SENTINEL: &str = "SENTINEL_PRIVACY_ASSISTANT_946AF0";
 const THINKING_SENTINEL: &str = "SENTINEL_PRIVACY_THINKING_8ED315";
 const SIGNATURE_SENTINEL: &str = "SENTINEL_PRIVACY_SIGNATURE_F625BC";
 const TOOL_ARGUMENTS_SENTINEL: &str = "SENTINEL_PRIVACY_TOOL_ARGUMENTS_0CA479";
-
-const CODEX_PROMPTS: &[&str] = &[
-    "Reply with ready.",
-    "Call report_probe with ready set to true.",
-    "Return the fixed verification object.",
-    "Reply with stream.",
-];
-const CLAUDE_PROMPTS: &[&str] = &[
-    "Reply with the word ready.",
-    "Call report_probe with an object containing ready: true.",
-    "Reply with the word stream.",
-    "Think briefly, then reply ready.",
-    "Continue and reply ready.",
-];
 
 #[derive(Clone, Copy)]
 enum MockProtocol {
@@ -116,20 +103,11 @@ static LOGGER_INIT: Once = Once::new();
 async fn active_protocols_keep_private_request_and_response_material_out_of_every_sink() {
     init_logger();
     LOGGER.records.lock().unwrap().clear();
+    let mut all_request_private_strings = BTreeSet::new();
 
-    for (protocol, app_type, model, prompts) in [
-        (
-            MockProtocol::Codex,
-            AppType::Codex,
-            "gpt-5.6-sol",
-            CODEX_PROMPTS,
-        ),
-        (
-            MockProtocol::Claude,
-            AppType::Claude,
-            "claude-sonnet-5",
-            CLAUDE_PROMPTS,
-        ),
+    for (protocol, app_type, model) in [
+        (MockProtocol::Codex, AppType::Codex, "gpt-5.6-sol"),
+        (MockProtocol::Claude, AppType::Claude, "claude-sonnet-5"),
     ] {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let (endpoint, server) = spawn_mock(protocol, requests.clone()).await;
@@ -150,29 +128,23 @@ async fn active_protocols_keep_private_request_and_response_material_out_of_ever
             .unwrap();
 
         let captured = requests.lock().unwrap();
-        let captured_debug = format!("{captured:?}");
-        assert!(captured_debug.contains(URL_SENTINEL));
-        assert!(captured_debug.contains(API_KEY_SENTINEL));
-        for prompt in prompts {
-            assert!(
-                captured_debug.contains(prompt),
-                "mock did not observe request prompt {prompt:?}"
-            );
-        }
+        assert_protocol_requests(protocol, &captured);
+        let request_private_strings = observed_request_private_strings(protocol, &captured);
+        all_request_private_strings.extend(request_private_strings.iter().cloned());
         drop(captured);
 
         let returned = serde_json::to_string(&(start, &reports)).unwrap();
-        assert_no_private_values("returned start/report", &returned, prompts);
+        assert_no_private_values("returned start/report", &returned, &request_private_strings);
 
         let persisted = persisted_row(&db);
-        assert_no_private_values("SQLite result row", &persisted, prompts);
+        assert_no_private_values("SQLite result row", &persisted, &request_private_strings);
 
         let emitted = serde_json::to_string(&(
             sink.progress.lock().unwrap().clone(),
             sink.changed.lock().unwrap().clone(),
         ))
         .unwrap();
-        assert_no_private_values("progress/change events", &emitted, prompts);
+        assert_no_private_values("progress/change events", &emitted, &request_private_strings);
 
         assert_eq!(reports.len(), 1);
         server.abort();
@@ -181,11 +153,7 @@ async fn active_protocols_keep_private_request_and_response_material_out_of_ever
     let logged = LOGGER.records.lock().unwrap().join("\n");
     assert!(logged.contains("模型验证进度事件发送失败"));
     assert!(logged.contains("模型验证结果变化事件发送失败"));
-    assert_no_private_values(
-        "captured log output",
-        &logged,
-        &[CODEX_PROMPTS, CLAUDE_PROMPTS].concat(),
-    );
+    assert_no_private_values("captured log output", &logged, &all_request_private_strings);
 }
 
 #[tokio::test]
@@ -278,6 +246,119 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn assert_protocol_requests(protocol: MockProtocol, requests: &[CapturedRequest]) {
+    let expected_path = match protocol {
+        MockProtocol::Codex => format!("/{URL_SENTINEL}/v1/responses"),
+        MockProtocol::Claude => format!("/{URL_SENTINEL}/v1/messages"),
+    };
+    let expected_authorization = format!("Bearer {API_KEY_SENTINEL}");
+    let mut request_kinds = BTreeSet::new();
+
+    for request in requests {
+        assert_eq!(request.path, expected_path);
+        match protocol {
+            MockProtocol::Codex => {
+                assert_eq!(
+                    request.authorization.as_deref(),
+                    Some(expected_authorization.as_str())
+                );
+                assert!(request.api_key.is_none());
+                assert!(request.body.get("input").is_some());
+                request_kinds.insert(if request.body["stream"] == true {
+                    "stream"
+                } else if request.body.get("tools").is_some() {
+                    "tool"
+                } else if request.body.get("text").is_some() {
+                    "structured"
+                } else {
+                    "core"
+                });
+            }
+            MockProtocol::Claude => {
+                assert!(request.authorization.is_none());
+                assert_eq!(request.api_key.as_deref(), Some(API_KEY_SENTINEL));
+                assert!(request.body["messages"].is_array());
+                request_kinds.insert(if request.body["stream"] == true {
+                    "stream"
+                } else if request.body.get("tools").is_some() {
+                    "tool"
+                } else if request.body.get("thinking").is_some() {
+                    "thinking"
+                } else if is_claude_continuation(&request.body) {
+                    "continuation"
+                } else {
+                    "core"
+                });
+            }
+        }
+    }
+
+    let expected_kinds = match protocol {
+        MockProtocol::Codex => BTreeSet::from(["core", "stream", "structured", "tool"]),
+        MockProtocol::Claude => {
+            BTreeSet::from(["continuation", "core", "stream", "thinking", "tool"])
+        }
+    };
+    assert_eq!(requests.len(), expected_kinds.len());
+    assert_eq!(request_kinds, expected_kinds);
+}
+
+fn observed_request_private_strings(
+    protocol: MockProtocol,
+    requests: &[CapturedRequest],
+) -> BTreeSet<String> {
+    let mut all_strings = BTreeSet::new();
+    for request in requests {
+        let mut request_strings = BTreeSet::new();
+        match protocol {
+            MockProtocol::Codex => {
+                collect_private_content(&request.body["input"], &mut request_strings);
+            }
+            MockProtocol::Claude => {
+                for message in request.body["messages"].as_array().unwrap() {
+                    collect_private_content(&message["content"], &mut request_strings);
+                }
+            }
+        }
+        assert!(
+            !request_strings.is_empty(),
+            "every active probe request must carry private prompt content"
+        );
+        all_strings.extend(request_strings);
+    }
+    assert!(!all_strings.is_empty());
+    all_strings
+}
+
+fn collect_private_content(value: &Value, strings: &mut BTreeSet<String>) {
+    match value {
+        Value::String(value) if !value.is_empty() => {
+            strings.insert(value.clone());
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_private_content(value, strings);
+            }
+        }
+        Value::Object(object) => {
+            for key in ["content", "input", "text", "thinking", "signature"] {
+                if let Some(value) = object.get(key) {
+                    collect_private_content(value, strings);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_claude_continuation(body: &Value) -> bool {
+    body["messages"].as_array().is_some_and(|messages| {
+        messages
+            .iter()
+            .any(|message| message["role"] == "assistant")
+    })
+}
+
 fn private_echo(request: &Value) -> Value {
     json!({
         "request": request,
@@ -362,11 +443,7 @@ fn claude_response(body: &Value) -> Response {
         .into_response();
     }
 
-    let is_continuation = body["messages"].as_array().is_some_and(|messages| {
-        messages
-            .iter()
-            .any(|message| message["role"] == "assistant")
-    });
+    let is_continuation = is_claude_continuation(body);
     let content = if body.get("tools").is_some() {
         json!([{
             "type":"tool_use",
@@ -450,20 +527,26 @@ async fn wait_for_change(sink: &RecordingSink) {
 
 fn persisted_row(db: &Database) -> String {
     let conn = db.conn.lock().unwrap();
-    conn.query_row(
-        "SELECT provider_id, app_type, model, active_report_json, passive_aggregate_json, verdict, evidence_level, rules_version, active_checked_at, passive_observed_at, updated_at, notified_fingerprints_json FROM model_verification_results",
-        [],
-        |row| {
-            (0..12)
+    let mut statement = conn
+        .prepare("SELECT * FROM model_verification_results")
+        .unwrap();
+    let column_count = statement.column_count();
+    assert!(column_count > 0);
+    statement
+        .query_row([], |row| {
+            (0..column_count)
                 .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
                 .collect::<Result<Vec<_>, _>>()
                 .map(|values| values.join("|"))
-        },
-    )
-    .unwrap()
+        })
+        .unwrap()
 }
 
-fn assert_no_private_values(label: &str, material: &str, prompts: &[&str]) {
+fn assert_no_private_values(
+    label: &str,
+    material: &str,
+    request_private_strings: &BTreeSet<String>,
+) {
     for sentinel in [
         URL_SENTINEL,
         API_KEY_SENTINEL,
@@ -473,11 +556,16 @@ fn assert_no_private_values(label: &str, material: &str, prompts: &[&str]) {
         TOOL_ARGUMENTS_SENTINEL,
     ]
     .into_iter()
-    .chain(prompts.iter().copied())
     {
         assert!(
             !material.contains(sentinel),
             "{label} leaked private sentinel {sentinel:?}"
+        );
+    }
+    for private_string in request_private_strings {
+        assert!(
+            !material.contains(private_string),
+            "{label} leaked captured request content {private_string:?}"
         );
     }
 }

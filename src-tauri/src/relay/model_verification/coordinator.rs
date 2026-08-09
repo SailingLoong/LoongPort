@@ -723,19 +723,26 @@ mod tests {
             };
             crate::relay::model_verification::store::upsert_active(&db, &prior).unwrap();
             let verifier = Arc::new(BlockedVerifier::new());
-            let coordinator = Arc::new(ModelVerificationCoordinator::with_verifier(
+            let sink = Arc::new(RecordingSink::default());
+            let coordinator = Arc::new(ModelVerificationCoordinator::with_dependencies(
                 db,
                 verifier.clone(),
+                sink.clone(),
             ));
 
-            coordinator.start(target()).await.unwrap();
+            let run = coordinator.start(target()).await.unwrap();
             assert!(verifier.complete(&target(), Err(failure)));
-            wait_until(|| verifier.senders.lock().unwrap().is_empty()).await;
-            tokio::task::yield_now().await;
+            wait_until(|| {
+                sink.progress.lock().unwrap().iter().any(|event| {
+                    event.run_id == run.run_id
+                        && event.state == crate::relay::model_verification::types::RunState::Failed
+                        && event.failure == Some(failure)
+                })
+            })
+            .await;
 
             let rows = coordinator.list_results(&["provider-a".into()]).unwrap();
-            assert_eq!(rows.len(), 1, "failure {failure:?}");
-            assert_eq!(rows[0].verdict, Verdict::Suspicious, "failure {failure:?}");
+            assert_eq!(rows, vec![prior], "failure {failure:?}");
         }
     }
 
