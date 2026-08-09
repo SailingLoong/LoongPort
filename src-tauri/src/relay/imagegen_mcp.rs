@@ -32,7 +32,7 @@
 //! | 独立 Rust sidecar | 每平台多一份二进制，macOS 上要多签名 + 公证一个 |
 //! | **本模块** | **零新增**：已经签好的那个二进制自己就是 server |
 //!
-//! 所以入口是 `LoongPort --mcp-image-gen --tier <provider_id>`，
+//! 所以入口是 `LoongPort --mcp-image-gen`，
 //! 在 [`crate::run`] **之前**分流（见那里的说明：走进去会被 single-instance 插件
 //! 当成第二个实例而唤起主窗口）。
 //!
@@ -51,6 +51,69 @@ use std::path::PathBuf;
 
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+
+use crate::app_config::{AppType, McpApps, McpServer};
+use crate::error::AppError;
+use crate::services::{McpService, ProviderService};
+use crate::store::AppState;
+
+/// 生图 MCP 在统一 MCP 数据源里的稳定 id。
+pub const IMAGEGEN_MCP_ID: &str = "loongport-imagegen";
+
+/// 启动 MCP server 模式的命令行开关。
+pub const IMAGEGEN_MCP_FLAG: &str = "--mcp-image-gen";
+
+/// 让生图 MCP 注册状态与生图档位保持一致，并投影到支持它的 CLI。
+///
+/// 这是生图 MCP 生命周期的唯一入口。provision、删站、应用启动与进入生图页都调用它；
+/// 函数本身幂等，因此这些入口可以按各自生命周期无条件对齐。
+pub fn sync_registration(state: &AppState) -> Result<(), AppError> {
+    let has_image_tiers = ProviderService::list(state, AppType::CodexImage)?
+        .values()
+        .any(|provider| crate::relay::is_managed(&provider.id));
+
+    if !has_image_tiers {
+        let removed = McpService::delete_server(state, IMAGEGEN_MCP_ID)?;
+        if removed {
+            log::info!("生图栏里没有档位了，撤掉生图 MCP 记录");
+        }
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::Message(format!("获取可执行文件路径失败: {e}")))?;
+    let exe_str = exe
+        .to_str()
+        .ok_or_else(|| AppError::Message("可执行文件路径不是有效的 UTF-8".into()))?;
+
+    McpService::upsert_server(state, registration_server(exe_str))
+}
+
+fn registration_server(exe: &str) -> McpServer {
+    McpServer {
+        id: IMAGEGEN_MCP_ID.to_string(),
+        name: "LoongPort 生图".to_string(),
+        server: json!({
+            "type": "stdio",
+            "command": exe,
+            "args": [IMAGEGEN_MCP_FLAG],
+        }),
+        apps: McpApps {
+            codex: true,
+            claude: true,
+            gemini: true,
+            ..Default::default()
+        },
+        description: Some(
+            "用 LoongPort「生图」标签页里当前那个档位生图（gpt-image 系列）。\
+             由 LoongPort 自动维护，密钥不写进 CLI 配置 —— 换档位也不必重启 CLI。"
+                .to_string(),
+        ),
+        homepage: None,
+        docs: None,
+        tags: vec!["loongport".into(), "image".into()],
+    }
+}
 
 /// 本模块的诊断输出：**写 stderr**。
 ///
@@ -750,6 +813,23 @@ pub fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_targets_supported_hosts_without_binding_a_tier() {
+        let server = registration_server("/Applications/LoongPort.app/Contents/MacOS/LoongPort");
+
+        assert_eq!(server.id, IMAGEGEN_MCP_ID);
+        assert!(server.apps.codex && server.apps.claude && server.apps.gemini);
+        assert!(!server.apps.opencode && !server.apps.hermes);
+        assert_eq!(
+            server.server,
+            json!({
+                "type": "stdio",
+                "command": "/Applications/LoongPort.app/Contents/MacOS/LoongPort",
+                "args": [IMAGEGEN_MCP_FLAG],
+            })
+        );
+    }
 
     /// ⚠️ **这个 crate 的 logger 写 stdout，而 stdout 是 MCP 的协议通道。**
     ///

@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
-import { ALL_APPS_VISIBLE } from "@/config/appConfig";
+import { ALL_APPS_VISIBLE, APP_IDS } from "@/config/appConfig";
 import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
@@ -134,20 +134,9 @@ const HEADER_HEIGHT = 64; // px
 
 // 两个 localStorage key 的定义在 `@/config/constants` —— 别在这里重新写字面量。
 // 写入端在 `AppSwitcher.tsx`，那次分叉就是因为它们各写一份（见常量那边的文档）。
-const VALID_APPS: AppId[] = [
-  "claude",
-  "claude-desktop",
-  "codex",
-  "gemini",
-  "grokbuild",
-  "opencode",
-  "openclaw",
-  "hermes",
-];
-
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(LAST_APP_STORAGE_KEY) as AppId | null;
-  if (saved && VALID_APPS.includes(saved)) {
+  if (saved && APP_IDS.includes(saved)) {
     return saved;
   }
   return "claude";
@@ -206,23 +195,21 @@ function App() {
   const visibleApps: VisibleApps =
     settingsData?.visibleApps ?? ALL_APPS_VISIBLE;
 
-  const getFirstVisibleApp = (): AppId => {
-    if (visibleApps.claude) return "claude";
-    if (visibleApps["claude-desktop"]) return "claude-desktop";
-    if (visibleApps.codex) return "codex";
-    if (visibleApps.gemini) return "gemini";
-    if (visibleApps.grokbuild) return "grokbuild";
-    if (visibleApps.opencode) return "opencode";
-    if (visibleApps.openclaw) return "openclaw";
-    if (visibleApps.hermes) return "hermes";
-    return "claude"; // fallback
-  };
+  const firstVisibleApp = APP_IDS.find((app) => visibleApps[app]) ?? "claude";
 
   useEffect(() => {
     if (!visibleApps[activeApp]) {
-      setActiveApp(getFirstVisibleApp());
+      setActiveApp(firstVisibleApp);
     }
-  }, [visibleApps, activeApp]);
+  }, [visibleApps, activeApp, firstVisibleApp]);
+
+  useEffect(() => {
+    if (activeApp !== "codex-image") return;
+
+    void invoke("relay_sync_imagegen_mcp").catch((error) => {
+      console.error("[App] Failed to sync image generation MCP", error);
+    });
+  }, [activeApp]);
 
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {

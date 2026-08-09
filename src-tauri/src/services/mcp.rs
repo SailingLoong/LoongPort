@@ -94,11 +94,22 @@ impl McpService {
 
     /// 将 MCP 服务器同步到所有启用的应用
     fn sync_server_to_apps(_state: &AppState, server: &McpServer) -> Result<(), AppError> {
+        let mut failures = Vec::new();
         for app in server.apps.enabled_apps() {
-            Self::sync_server_to_app_no_config(server, &app)?;
+            if let Err(err) = Self::sync_server_to_app_no_config(server, &app) {
+                log::warn!("同步 MCP '{}' 到 {app:?} 失败: {err}", server.id);
+                failures.push(format!("{}: {err}", app.as_str()));
+            }
         }
 
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(format!(
+                "部分应用 MCP 同步失败: {}",
+                failures.join("; ")
+            )))
+        }
     }
 
     /// 将 MCP 服务器同步到指定应用

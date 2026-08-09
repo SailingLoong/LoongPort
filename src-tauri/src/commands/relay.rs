@@ -37,8 +37,8 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
-use crate::relay::{api, chatgpt_app, creds, login, provision, purchase};
-use crate::services::{McpService, ProviderService};
+use crate::relay::{api, chatgpt_app, creds, imagegen_mcp, login, provision, purchase};
+use crate::services::ProviderService;
 use crate::store::AppState;
 
 /// 默认中转站域名。域名输入框的底纹词，用户直接点确定就用它。
@@ -1079,7 +1079,7 @@ async fn do_provision(
     //
     // 失败只 warn：档位已经存对了，不该因为一个 MCP 记录写不下去就把「获取密钥」
     // 整个报成失败（用户会以为连密钥都没拿到）。
-    if let Err(e) = sync_imagegen_mcp(&state) {
+    if let Err(e) = imagegen_mcp::sync_registration(&state) {
         log::warn!("同步生图工具记录失败（生图可能暂时用不了）: {e}");
     }
 
@@ -2052,7 +2052,7 @@ fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
     //
     // 失败只 warn：站点记录马上就删了，不该因为一个 MCP 记录撤不掉而让「删站点」失败
     // （与上面那段清理档位同一条原则）。
-    if let Err(e) = sync_imagegen_mcp(state) {
+    if let Err(e) = imagegen_mcp::sync_registration(state) {
         log::warn!("删除站点 {site_origin} 后同步生图工具记录失败: {e}");
     }
 
@@ -2470,123 +2470,10 @@ fn with_conn<T>(
 // 生图工具（MCP）
 // ============================================================================
 
-/// 生图 MCP 在 `mcp_servers` 表里的 id。
-///
-/// ## 为什么是**一条固定记录**而不是「一个档位一条」
-///
-/// 「用哪个档位生图」= 生图栏（`codex-image`）的当前项，MCP 进程**每次生图时现读**
-/// （见 `imagegen_mcp::current_image_tier_id`）。所以这条 MCP 记录的内容与档位无关，
-/// 只回答「这个宿主要不要有生图工具」—— 换档位不必改它。
-///
-/// 那正是「切生图档位不用重启 codex」的来源：codex 只在启动时读它的 `config.toml`，
-/// 若档位 id 写在这条记录里，用户每换一次都得新开终端。
-///
-/// ⚠️ 这个 id 会成为 `[mcp_servers.<id>]` 的表名，**跨出了进程边界** ——
-/// 改它等于让已装用户的旧配置成为孤儿（库里删不到、CLI 里还留着一条起不来的 server）。
-const IMAGEGEN_MCP_ID: &str = "loongport-imagegen";
-
-/// 启动 MCP server 模式的命令行开关。**与 `main.rs` 里那个判断必须一致**。
-///
-/// 两处各写一遍字面量迟早分叉（改了一处另一处没跟上 ⇒ 写出去的配置启动不了 server，
-/// 而症状是宿主那边"启动超时"，看不出是拼写问题）。所以这里是唯一定义，
-/// `main.rs` 用 `cc_switch_lib::IMAGEGEN_MCP_FLAG` 引它。
-pub const IMAGEGEN_MCP_FLAG: &str = "--mcp-image-gen";
-
-/// 生图工具的安装 / 撤销，跟着「生图栏里有没有档位」自动走。
-///
-/// ## 为什么不再有「启用生图」这个显式动作
-///
-/// 上一版有一对命令（`relay_set_image_tier` / `relay_current_image_tier`）在
-/// `settings` 表里维护「用哪个档位生图」。分栏之后那套是纯粹的重复：
-/// 「当前是哪一档」由 `providers.is_current` 表达，而它**每个 app_type 一栏** ——
-/// 生图栏天然就有自己的一份，用户点「切换」走的就是与聊天档位同一条路
-/// （`relay_switch_tier`）。
-///
-/// 所以现在只剩一个问题：**这个宿主要不要有生图工具**。答案由生图栏里有没有档位决定，
-/// 在 provision 收尾时对齐一次（见 [`sync_imagegen_mcp`]）。用户不必学第二套操作。
-/// 确保生图 MCP 记录在库里（进而被同步进各 CLI 的配置）。
-///
-/// ## 为什么写 `mcp_servers` 表而不是直接改 CLI 的配置文件
-///
-/// 那张表是 MCP 的 SSOT，各 CLI 的 `config.toml` / `mcp.json` 只是它的投影
-/// （`codex_config.rs` 的 `strip_codex_mcp_servers_from_settings` 那段注释钉过这条）。
-/// 自己去写配置文件会被下一次同步覆盖，而且绕过了「切档位时重投影」那套逻辑。
-///
-/// **幂等**：装的那一支走 `upsert_server`（覆盖同 id），撤的那一支走 `delete_server`
-/// （不存在时返回 `Ok(false)`）。所以每次 provision 收尾都能无条件调它。
-///
-/// ## 「有没有生图档位」是唯一判据
-///
-/// 用户那个站可能压根没有生图分组（实测 bestapi.store 就没有）—— 那时生图栏是空的，
-/// 这里把 MCP 记录撤掉 ⇒ **CLI 的配置里一个字都不多**，完全无感。
-/// 有生图分组的用户则自动获得那个工具，不必学一个额外的「启用生图」动作。
-///
-/// ⚠️ **不看「有没有选当前项」** —— 那会让「装工具」依赖一个用户可能还没做的选择，
-/// 而工具在没选档位时本来就会给出一句可操作的提示（`NO_IMAGE_TIER_HINT`）。
-/// 反过来（有档位却没工具）才是真的坏：用户说「画一只猫」，模型答「我没有这个工具」。
-fn sync_imagegen_mcp(state: &AppState) -> Result<(), AppError> {
-    let has_image_tiers = ProviderService::list(state, AppType::CodexImage)
-        .map(|list| list.values().any(is_managed))
-        .unwrap_or(false);
-
-    if !has_image_tiers {
-        // 撤掉。**不因为它本来就不在而算失败** —— `delete_server` 返回 `Ok(false)`。
-        let removed = McpService::delete_server(state, IMAGEGEN_MCP_ID)?;
-        if removed {
-            log::info!("生图栏里没有档位了，撤掉生图 MCP 记录");
-        }
-        return Ok(());
-    }
-
-    install_imagegen_mcp(state)
-}
-
-/// 把生图 MCP 记录写进库（幂等）。
-fn install_imagegen_mcp(state: &AppState) -> Result<(), AppError> {
-    // 当前可执行文件的绝对路径。macOS 上这是 `.app/Contents/MacOS/<bin>`，
-    // 正是 CLI 该去启动的东西。
-    let exe = std::env::current_exe()
-        .map_err(|e| AppError::Message(format!("获取可执行文件路径失败: {e}")))?;
-    let exe_str = exe
-        .to_str()
-        .ok_or_else(|| AppError::Message("可执行文件路径不是有效的 UTF-8".into()))?;
-
-    // ⚠️ **args 里不带档位 id** —— 见 `IMAGEGEN_MCP_ID` 的文档：带了就等于每次换档位都
-    // 改 CLI 配置文件，而 codex 只在启动时读它。
-    let spec = serde_json::json!({
-        "type": "stdio",
-        "command": exe_str,
-        "args": [IMAGEGEN_MCP_FLAG],
-    });
-
-    // 装到 codex + claude + gemini：这三个都支持 stdio MCP，而「要生图」与用户在哪个
-    // CLI 里干活无关。不装 opencode / hermes —— 那两个的配置形状要另外验，没验过的不写。
-    let apps = crate::app_config::McpApps {
-        codex: true,
-        claude: true,
-        gemini: true,
-        ..Default::default()
-    };
-
-    McpService::upsert_server(
-        state,
-        crate::app_config::McpServer {
-            id: IMAGEGEN_MCP_ID.to_string(),
-            name: "LoongPort 生图".to_string(),
-            server: spec,
-            apps,
-            // ⚠️ **描述里不提某个档位名** —— 这条记录与档位无关（换档位不改它），
-            // 写了档位名就得在每次切换时刷新它，而那正是「不必重启 CLI」要避免的事。
-            description: Some(
-                "用 LoongPort「生图」标签页里当前那个档位生图（gpt-image 系列）。\
-                 由 LoongPort 自动维护，密钥不写进 CLI 配置 —— 换档位也不必重启 CLI。"
-                    .to_string(),
-            ),
-            homepage: None,
-            docs: None,
-            tags: vec!["loongport".into(), "image".into()],
-        },
-    )
+/// 重新对齐生图 MCP。进入生图页时调用，用来修复应用运行期间被外部改掉的投影。
+#[tauri::command]
+pub fn relay_sync_imagegen_mcp(state: State<'_, AppState>) -> Result<(), AppError> {
+    imagegen_mcp::sync_registration(&state)
 }
 
 #[cfg(test)]
