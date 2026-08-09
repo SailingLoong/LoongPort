@@ -1216,9 +1216,12 @@ mod tests {
         }
     }
 
-    fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    async fn runtime_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        let guard = LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         crate::settings::set_current_provider(&crate::app_config::AppType::Codex, None).unwrap();
         guard
     }
@@ -1264,7 +1267,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_reconcile_takes_over_only_a_managed_current_provider() {
-        let _guard = runtime_test_guard();
+        let _guard = runtime_test_guard().await;
         let db = managed_runtime_db("loongport-0123456789abcdef");
         let fake = FakeTakeover::new(db.clone());
         let coordinator = ModelVerificationCoordinator::with_verifier(
@@ -1298,7 +1301,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_disable_preserves_user_owned_takeover() {
-        let _guard = runtime_test_guard();
+        let _guard = runtime_test_guard().await;
         let db = managed_runtime_db("loongport-0123456789abcdef");
         let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
         config.enabled = true;
@@ -1318,7 +1321,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_takeover_failure_removes_the_pending_lease() {
-        let _guard = runtime_test_guard();
+        let _guard = runtime_test_guard().await;
         let db = managed_runtime_db("loongport-0123456789abcdef");
         let fake = FakeTakeover::new(db.clone());
         fake.fail_for("codex");
@@ -1335,7 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_reconcile_recovers_a_pending_lease_after_startup() {
-        let _guard = runtime_test_guard();
+        let _guard = runtime_test_guard().await;
         let db = managed_runtime_db("loongport-0123456789abcdef");
         crate::relay::model_verification::store::set_runtime_setting(&db, true).unwrap();
         crate::relay::model_verification::store::insert_lease(
