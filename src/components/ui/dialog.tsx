@@ -12,37 +12,38 @@ const DialogPortal = DialogPrimitive.Portal;
 
 const DialogClose = DialogPrimitive.Close;
 
+// Modal layers start above the app header (50) and custom window drag region (70).
+const DIALOG_Z_INDEX_CLASS = {
+  base: "z-[80]",
+  nested: "z-[90]",
+  alert: "z-[100]",
+  top: "z-[110]",
+} as const;
+
+type DialogZIndex = keyof typeof DIALOG_Z_INDEX_CLASS;
+
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay> & {
-    zIndex?: "base" | "nested" | "alert" | "top";
+    zIndex?: DialogZIndex;
   }
->(({ className, zIndex = "base", ...props }, ref) => {
-  const zIndexMap = {
-    base: "z-40",
-    nested: "z-50",
-    alert: "z-[60]",
-    top: "z-[110]",
-  };
-
-  return (
-    <DialogPrimitive.Overlay
-      ref={ref}
-      className={cn(
-        "fixed inset-0 bg-black/50 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
-        zIndexMap[zIndex],
-        className,
-      )}
-      {...props}
-    />
-  );
-});
+>(({ className, zIndex = "base", ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 bg-black/50 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      DIALOG_Z_INDEX_CLASS[zIndex],
+      className,
+    )}
+    {...props}
+  />
+));
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
-    zIndex?: "base" | "nested" | "alert" | "top";
+    zIndex?: DialogZIndex;
     variant?: "default" | "fullscreen";
     overlayClassName?: string;
     /**
@@ -84,13 +85,6 @@ const DialogContent = React.forwardRef<
     // 实测踩过（4 个测试文件同时红）。这是本目录第一个用 hook 的组件，
     // 破例的理由就是它：mock 提供 `useTranslation`，不提供那个初始化导出。
     const { t } = useTranslation();
-    const zIndexMap = {
-      base: "z-40",
-      nested: "z-50",
-      alert: "z-[60]",
-      top: "z-[110]",
-    };
-
     const variantClass = {
       default:
         "fixed left-1/2 top-1/2 flex flex-col w-full max-w-lg max-h-[90vh] translate-x-[-50%] translate-y-[-50%] border border-border-default bg-background text-foreground shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
@@ -103,7 +97,7 @@ const DialogContent = React.forwardRef<
         <DialogOverlay zIndex={zIndex} className={overlayClassName} />
         <DialogPrimitive.Content
           ref={ref}
-          className={cn(variantClass, zIndexMap[zIndex], className)}
+          className={cn(variantClass, DIALOG_Z_INDEX_CLASS[zIndex], className)}
           onInteractOutside={(e) => {
             // 防止点击遮罩层关闭对话框
             e.preventDefault();
