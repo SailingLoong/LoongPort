@@ -1225,6 +1225,57 @@ export function RelaySection({ appId }: RelaySectionProps) {
     }
   };
 
+  const doSelectTierModel = (
+    tier: TierInfo,
+    model: string,
+    quitChatgpt: boolean,
+  ) => {
+    setConfirmSwitch(null);
+    return run(`model:${tier.providerId}`, async () => {
+      try {
+        const result = await relayApi.switchTierModel(
+          tier.providerId,
+          appId,
+          model,
+          quitChatgpt,
+        );
+        toast.success(
+          result.chatgptRelaunched
+            ? t("loongport.switch.modelDoneRelaunched", {
+                name: result.providerName,
+                model,
+              })
+            : result.chatgptWasRunning
+              ? t("loongport.switch.modelDoneNeedsRestart", {
+                  name: result.providerName,
+                  model,
+                })
+              : t("loongport.switch.modelDone", {
+                  name: result.providerName,
+                  model,
+                }),
+        );
+        for (const warning of result.warnings) toast.warning(warning);
+        await reload();
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+  };
+
+  const handleSelectTierModel = (tier: TierInfo, model: string) => {
+    if (!touchesCodexConfig || tier.model === model) return;
+    const name = `${tier.displayName} · ${model}`;
+    if (touchesCodexConfig && chatgptNeedsAttention) {
+      setConfirmSwitch({
+        name,
+        run: (quitChatgpt) => void doSelectTierModel(tier, model, quitChatgpt),
+      });
+    } else {
+      void doSelectTierModel(tier, model, false);
+    }
+  };
+
   // 两个区块的添加入口都在各自区块头（`RelayTierList` 的 + / `VendorBlock` 的 +），
   // 所以不再有「两类都空时单摆按钮」的空态分支 —— 空态由各区块内部的占位承接。
   const bothEmpty = relays.length === 0 && vendors.length === 0;
@@ -1252,6 +1303,9 @@ export function RelaySection({ appId }: RelaySectionProps) {
         onProvision={(relayId) => void handleProvision(relayId)}
         onReorder={(ids) => void handleReorder(ids)}
         onSwitchTier={(relayId, tier) => void handleSwitchTier(relayId, tier)}
+        onSelectTierModel={(tier, model) =>
+          void handleSelectTierModel(tier, model)
+        }
         balances={balances}
         onPurchase={(relayId) => void handlePurchase(relayId)}
         // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。

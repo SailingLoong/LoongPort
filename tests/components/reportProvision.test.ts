@@ -41,6 +41,8 @@ function tier(appId: TierInfo["appId"], n: number): TierInfo {
     appId,
     groupName: `g${n}`,
     displayName: `g${n}`,
+    model: "gpt-5.6-sol",
+    models: ["gpt-5.6-sol"],
     rateMultiplier: null,
     isCurrent: false,
     userEdited: null,

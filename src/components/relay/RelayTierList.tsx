@@ -73,6 +73,7 @@ export interface RelayTierListProps {
   onLogin: (relayId: number) => void;
   onProvision: (relayId: number) => void;
   onSwitchTier: (relayId: number, tier: TierInfo) => void;
+  onSelectTierModel: (tier: TierInfo, model: string) => void;
   /** 拖动结束后的新顺序（完整 id 序列，下标即 sort_index）。 */
   onReorder: (relayIds: number[]) => void;
   /**
@@ -174,6 +175,7 @@ export function RelayTierList({
   onLogin,
   onProvision,
   onSwitchTier,
+  onSelectTierModel,
   onReorder,
   balances,
   onPurchase,
@@ -323,6 +325,7 @@ export function RelayTierList({
                   onLogin={() => onLogin(op.id)}
                   onProvision={() => onProvision(op.id)}
                   onSwitchTier={(tier) => onSwitchTier(op.id, tier)}
+                  onSelectTierModel={onSelectTierModel}
                   // `?? null` 而不是 `?? undefined`：缺键与「拉失败」在 UI 上是
                   // 同一件事（都不显示余额），统一成 null 让行组件只判一种。
                   balance={balances[rowKey("relay", op.id)] ?? null}

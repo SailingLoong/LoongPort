@@ -140,10 +140,10 @@ describe("RelayRow hover-reveal actions", () => {
   });
 
   it("pins the group visible while an action is running", () => {
-    // 操作进行中鼠标一移开就看不到自己点的东西还在跑 —— 三个 busy 标志都要算。
+    // 操作进行中鼠标一移开就看不到自己点的东西还在跑 —— 四个 busy 标志都要算。
     expect(source).toContain("HOVER_ACTIONS_PINNED");
     expect(source).toMatch(
-      /checking \|\| resetting \|\| switching\s*\n?\s*\?\s*HOVER_ACTIONS_PINNED/,
+      /checking \|\| resetting \|\| switching \|\| modelSwitching\s*\n?\s*\?\s*HOVER_ACTIONS_PINNED/,
     );
   });
 

@@ -1543,6 +1543,7 @@ pub fn run() {
             commands::relay_reset_tier_config,
             commands::relay_sync_imagegen_mcp,
             commands::relay_switch_tier,
+            commands::relay_switch_tier_model,
             commands::relay_list_sites,
             commands::relay_remove_site,
             commands::relay_balance,

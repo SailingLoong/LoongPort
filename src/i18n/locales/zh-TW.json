@@ -3092,6 +3092,9 @@
     "tier": {
       "rateUnknown": "倍率未知",
       "rate": "{{value}} 倍",
+      "models": "支援的模型",
+      "selectModel": "切換至模型 {{model}}",
+      "modelSelected": "目前模型",
       "switching": "切換中…",
       "checkConnectivity": "檢測連通",
       "resetConfig": "恢復預設設定",
@@ -3140,7 +3143,10 @@
     "switch": {
       "done": "已切換到 {{name}}",
       "doneRelaunched": "已切換到 {{name}}，已重新開啟 ChatGPT",
-      "doneNeedsRestart": "已切換到 {{name}}，請手動重啟 ChatGPT"
+      "doneNeedsRestart": "已切換到 {{name}}，請手動重啟 ChatGPT",
+      "modelDone": "已切換至 {{name}} 的模型 {{model}}",
+      "modelDoneRelaunched": "已切換至 {{name}} 的模型 {{model}}，已重新開啟 ChatGPT",
+      "modelDoneNeedsRestart": "已切換至 {{name}} 的模型 {{model}}，請手動重啟 ChatGPT"
     },
     "official": {
       "button": "切回官方登入",

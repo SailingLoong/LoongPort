@@ -70,6 +70,13 @@ export interface TierInfo {
   appId: AppId;
   groupName: string;
   displayName: string;
+  /** The model currently written into this provider's config. */
+  model: string;
+  /**
+   * Codex conversation models discovered from this tier's `/v1/models` endpoint.
+   * Empty for other apps or when no complete remote catalog was fetched.
+   */
+  models: string[];
   /** 计费倍率，越小越便宜。null = 未知，不要当 0 显示。 */
   rateMultiplier: number | null;
   isCurrent: boolean;
@@ -290,6 +297,24 @@ export const relayApi = {
     quitChatgpt: boolean,
   ): Promise<SwitchTierResult> =>
     invoke("relay_switch_tier", { providerId, app, quitChatgpt }),
+
+  /**
+   * Select one of the models advertised by a managed Codex tier. The backend
+   * validates membership in the persisted catalog before switching, so a
+   * stale UI cannot point Codex at an unsupported model.
+   */
+  switchTierModel: (
+    providerId: string,
+    app: string,
+    model: string,
+    quitChatgpt: boolean,
+  ): Promise<SwitchTierResult> =>
+    invoke("relay_switch_tier_model", {
+      providerId,
+      app,
+      model,
+      quitChatgpt,
+    }),
 
   listSites: (): Promise<SiteInfo[]> => invoke("relay_list_sites"),
 
