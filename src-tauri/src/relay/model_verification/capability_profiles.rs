@@ -1,4 +1,4 @@
-use crate::app_config::AppType;
+use crate::{app_config::AppType, proxy::model_mapper::strip_one_m_suffix_for_upstream};
 
 use super::types::EvidenceCode;
 
@@ -67,11 +67,17 @@ const ANTHROPIC_SIGNATURE_CONTINUATION_PREFIXES: &[&str] =
 ///
 /// This intentionally does not match a broad `gpt-` family: future routes must remain on the
 /// protocol core until their capability is independently established.
-const CODEX_STRUCTURED_OUTPUT_PREFIXES: &[&str] =
-    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4"];
+const CODEX_STRUCTURED_OUTPUT_PREFIXES: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.4",
+    "gpt-5.4-2026-03-05",
+];
 
 fn supports_codex_structured_output(model: &str) -> bool {
-    supports_known_model_with_display_suffix(model, CODEX_STRUCTURED_OUTPUT_PREFIXES)
+    let upstream_model = strip_one_m_suffix_for_upstream(model).trim();
+    CODEX_STRUCTURED_OUTPUT_PREFIXES.contains(&upstream_model)
 }
 
 fn supports_anthropic_signature_continuation(model: &str) -> bool {
@@ -136,9 +142,10 @@ mod tests {
     fn current_codex_routes_enable_structured_output_only_for_known_ids() {
         for model in [
             "gpt-5.6-sol",
-            "gpt-5.6-terra-20260809",
-            "gpt-5.6-luna[1M]",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna[1m]",
             "gpt-5.4",
+            "gpt-5.4-2026-03-05[1M]",
         ] {
             assert!(
                 CapabilityProfile::for_target(&AppType::Codex, model).supports_structured_output
@@ -146,6 +153,10 @@ mod tests {
         }
         assert!(
             !CapabilityProfile::for_target(&AppType::Codex, "gpt-5.7-future")
+                .supports_structured_output
+        );
+        assert!(
+            !CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-terra-20260809")
                 .supports_structured_output
         );
     }

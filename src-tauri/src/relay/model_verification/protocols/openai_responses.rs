@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use crate::proxy::model_mapper::strip_one_m_suffix_for_upstream;
 use crate::relay::model_verification::{
     capability_profiles::CapabilityProfile,
     protocols::{send_and_read, send_sse, RunFailure},
@@ -53,7 +54,14 @@ async fn send_response(
     api_key: &str,
     payload: Value,
 ) -> Result<Vec<u8>, RunFailure> {
-    send_and_read(client.post(endpoint).bearer_auth(api_key).json(&payload)).await
+    send_and_read(
+        client
+            .post(endpoint)
+            .bearer_auth(api_key)
+            .header("accept", "application/json")
+            .json(&payload),
+    )
+    .await
 }
 
 async fn send_stream(
@@ -138,11 +146,7 @@ fn stream_request(model: &str) -> Value {
 }
 
 fn upstream_model(model: &str) -> String {
-    model
-        .trim()
-        .strip_suffix("[1M]")
-        .unwrap_or(model.trim())
-        .to_string()
+    strip_one_m_suffix_for_upstream(model).to_string()
 }
 
 pub(crate) fn parse_core_response(body: &[u8], expected_model: &str) -> Vec<EvidenceFact> {
@@ -177,6 +181,9 @@ pub(crate) fn parse_tool_response(body: &[u8]) -> EvidenceFact {
     let Ok(response) = serde_json::from_slice::<Value>(body) else {
         return failed(EvidenceCode::ToolCallShape);
     };
+    if has_foreign_protocol_fingerprint(&response) {
+        return failed(EvidenceCode::ForeignProtocol);
+    }
     if !is_response_envelope(&response) {
         return failed(EvidenceCode::ToolCallShape);
     }
@@ -187,7 +194,10 @@ pub(crate) fn parse_tool_response(body: &[u8]) -> EvidenceFact {
             items.iter().any(|item| {
                 item.get("type").and_then(Value::as_str) == Some("function_call")
                     && item.get("name").and_then(Value::as_str) == Some(REPORT_PROBE)
-                    && item.get("arguments").and_then(Value::as_str).is_some()
+                    && item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .is_some_and(fixed_probe_payload_matches_schema)
             })
         });
     if valid_tool_call {
@@ -201,6 +211,9 @@ pub(crate) fn parse_structured_response(body: &[u8]) -> EvidenceFact {
     let Ok(response) = serde_json::from_slice::<Value>(body) else {
         return failed(EvidenceCode::StructuredOutput);
     };
+    if has_foreign_protocol_fingerprint(&response) {
+        return failed(EvidenceCode::ForeignProtocol);
+    }
     if !is_response_envelope(&response) {
         return failed(EvidenceCode::StructuredOutput);
     }
@@ -216,7 +229,10 @@ pub(crate) fn parse_structured_response(body: &[u8]) -> EvidenceFact {
                         .is_some_and(|parts| {
                             parts.iter().any(|part| {
                                 part.get("type").and_then(Value::as_str) == Some("output_text")
-                                    && part.get("text").and_then(Value::as_str).is_some()
+                                    && part
+                                        .get("text")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(fixed_probe_payload_matches_schema)
                             })
                         })
             })
@@ -230,6 +246,7 @@ pub(crate) fn parse_structured_response(body: &[u8]) -> EvidenceFact {
 
 fn is_response_envelope(value: &Value) -> bool {
     value.get("object").and_then(Value::as_str) == Some("response")
+        && value.get("status").and_then(Value::as_str) == Some("completed")
         && value.get("model").and_then(Value::as_str).is_some()
         && value
             .get("output")
@@ -250,6 +267,16 @@ fn has_foreign_protocol_fingerprint(value: &Value) -> bool {
         || value.get("choices").is_some()
         || (value.get("type").and_then(Value::as_str) == Some("message")
             && value.get("content").and_then(Value::as_array).is_some())
+}
+
+fn fixed_probe_payload_matches_schema(payload: &str) -> bool {
+    serde_json::from_str::<Value>(payload)
+        .ok()
+        .is_some_and(|value| {
+            value.as_object().is_some_and(|object| {
+                object.len() == 1 && object.get("ready") == Some(&Value::Bool(true))
+            })
+        })
 }
 
 fn usage_is_consistent(usage: Option<&Value>) -> bool {
@@ -283,8 +310,8 @@ pub(crate) fn parse_stream(
 struct StreamReducer<'a> {
     expected_model: &'a str,
     saw_created: bool,
-    saw_additive_event: bool,
     saw_completed: bool,
+    text_progress: TextStreamProgress,
     lifecycle_order_valid: bool,
     model_matches: Option<bool>,
     usage_consistent: bool,
@@ -297,8 +324,8 @@ impl<'a> StreamReducer<'a> {
         Self {
             expected_model,
             saw_created: false,
-            saw_additive_event: false,
             saw_completed: false,
+            text_progress: TextStreamProgress::AwaitItem,
             lifecycle_order_valid: true,
             model_matches: None,
             usage_consistent: true,
@@ -330,27 +357,86 @@ impl<'a> StreamReducer<'a> {
 
         match value.get("type").and_then(Value::as_str) {
             Some("response.created") => {
-                if self.saw_created || self.saw_additive_event || self.saw_completed {
+                if self.saw_created || self.saw_completed {
                     self.lifecycle_order_valid = false;
                 }
                 self.saw_created = true;
-                self.observe_response(value.get("response"));
+                self.observe_response(value.get("response"), false);
             }
             Some("response.completed") => {
-                if !self.saw_created || !self.saw_additive_event || self.saw_completed {
+                if !self.saw_created
+                    || self.text_progress != TextStreamProgress::Closed
+                    || self.saw_completed
+                {
                     self.lifecycle_order_valid = false;
                 }
                 self.saw_completed = true;
-                self.observe_response(value.get("response"));
+                self.observe_response(value.get("response"), true);
             }
-            Some(kind) if is_additive_event(kind) => {
-                if !self.saw_created || self.saw_completed {
+            Some("response.output_item.added") => {
+                self.advance_text_stream(
+                    &value,
+                    TextStreamProgress::AwaitItem,
+                    TextStreamProgress::AwaitContentPart,
+                    "item",
+                    "message",
+                );
+            }
+            Some("response.content_part.added") => {
+                self.advance_text_stream(
+                    &value,
+                    TextStreamProgress::AwaitContentPart,
+                    TextStreamProgress::AwaitTextDelta,
+                    "part",
+                    "output_text",
+                );
+            }
+            Some("response.output_text.delta") => {
+                if !self.in_active_text_stream()
+                    || !matches!(
+                        self.text_progress,
+                        TextStreamProgress::AwaitTextDelta | TextStreamProgress::TextStreaming
+                    )
+                {
+                    self.lifecycle_order_valid = false;
+                } else {
+                    self.text_progress = TextStreamProgress::TextStreaming;
+                }
+            }
+            Some("response.output_text.done") => {
+                if !self.in_active_text_stream()
+                    || self.text_progress != TextStreamProgress::TextStreaming
+                {
                     self.lifecycle_order_valid = false;
                 }
-                self.saw_additive_event = true;
+            }
+            Some("response.content_part.done") => {
+                if !self.in_active_text_stream()
+                    || self.text_progress != TextStreamProgress::TextStreaming
+                {
+                    self.lifecycle_order_valid = false;
+                } else {
+                    self.text_progress = TextStreamProgress::AwaitItemDone;
+                }
+            }
+            Some("response.output_item.done") => {
+                if !self.in_active_text_stream()
+                    || self.text_progress != TextStreamProgress::AwaitItemDone
+                {
+                    self.lifecycle_order_valid = false;
+                } else {
+                    self.text_progress = TextStreamProgress::Closed;
+                }
+            }
+            Some(
+                "response.function_call_arguments.delta" | "response.function_call_arguments.done",
+            ) => {
+                if !self.in_active_text_stream() {
+                    self.lifecycle_order_valid = false;
+                }
             }
             Some(kind) if kind.starts_with("response.") => {
-                if !self.saw_created || self.saw_completed {
+                if !self.in_active_text_stream() {
                     self.lifecycle_order_valid = false;
                 }
             }
@@ -359,7 +445,33 @@ impl<'a> StreamReducer<'a> {
         Ok(())
     }
 
-    fn observe_response(&mut self, response: Option<&Value>) {
+    fn in_active_text_stream(&self) -> bool {
+        self.saw_created && !self.saw_completed
+    }
+
+    fn advance_text_stream(
+        &mut self,
+        value: &Value,
+        expected: TextStreamProgress,
+        next: TextStreamProgress,
+        field: &str,
+        expected_type: &str,
+    ) {
+        if !self.in_active_text_stream()
+            || self.text_progress != expected
+            || value
+                .get(field)
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                != Some(expected_type)
+        {
+            self.lifecycle_order_valid = false;
+        } else {
+            self.text_progress = next;
+        }
+    }
+
+    fn observe_response(&mut self, response: Option<&Value>, terminal: bool) {
         let Some(response) = response else {
             self.lifecycle_order_valid = false;
             return;
@@ -368,7 +480,11 @@ impl<'a> StreamReducer<'a> {
             || response.get("object").and_then(Value::as_str) != Some("response")
         {
             self.foreign_protocol = true;
+            self.lifecycle_order_valid = false;
             return;
+        }
+        if terminal && response.get("status").and_then(Value::as_str) != Some("completed") {
+            self.lifecycle_order_valid = false;
         }
         if let Some(model) = response.get("model").and_then(Value::as_str) {
             self.model_matches = Some(model == self.expected_model);
@@ -382,7 +498,7 @@ impl<'a> StreamReducer<'a> {
     fn finish(self) -> Vec<EvidenceFact> {
         let mut facts = vec![if self.lifecycle_order_valid
             && self.saw_created
-            && self.saw_additive_event
+            && self.text_progress == TextStreamProgress::Closed
             && self.saw_completed
         {
             passed(EvidenceCode::StreamLifecycle)
@@ -408,9 +524,14 @@ impl<'a> StreamReducer<'a> {
     }
 }
 
-fn is_additive_event(kind: &str) -> bool {
-    kind.starts_with("response.")
-        && (kind.ends_with(".added") || kind.ends_with(".delta") || kind.ends_with(".done"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextStreamProgress {
+    AwaitItem,
+    AwaitContentPart,
+    AwaitTextDelta,
+    TextStreaming,
+    AwaitItemDone,
+    Closed,
 }
 
 fn passed(code: EvidenceCode) -> EvidenceFact {
@@ -448,7 +569,7 @@ mod openai_responses_tests {
         protocols::{
             openai_responses::{
                 parse_core_response, parse_stream, parse_structured_response, parse_tool_response,
-                run_balanced,
+                run_balanced, upstream_model,
             },
             RunFailure, MAX_RESPONSE_BYTES, MAX_SSE_EVENT_BYTES,
         },
@@ -480,7 +601,7 @@ mod openai_responses_tests {
     fn response_envelope_reduces_message_reasoning_and_usage_without_output_text() {
         let facts = parse_core_response(
             br#"{
-                "object":"response","model":"gpt-5.6-sol",
+                "object":"response","status":"completed","model":"gpt-5.6-sol",
                 "output":[
                     {"type":"reasoning","summary":[]},
                     {"type":"message","content":[{"type":"output_text","text":"SENTINEL_OUTPUT"}]}
@@ -496,6 +617,17 @@ mod openai_responses_tests {
         assert!(!serde_json::to_string(&facts)
             .unwrap()
             .contains("SENTINEL_OUTPUT"));
+
+        for status in [None, Some("incomplete"), Some("failed")] {
+            let status_field = status
+                .map(|status| format!("\"status\":\"{status}\","))
+                .unwrap_or_default();
+            let response = format!(
+                "{{\"object\":\"response\",{status_field}\"model\":\"gpt-5.6-sol\",\"output\":[{{\"type\":\"message\",\"content\":[]}}],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}"
+            );
+            assert!(parse_core_response(response.as_bytes(), "gpt-5.6-sol")
+                .contains(&failed(EvidenceCode::BasicEnvelope)));
+        }
     }
 
     #[test]
@@ -518,19 +650,43 @@ mod openai_responses_tests {
     }
 
     #[test]
+    fn upstream_model_reuses_case_insensitive_one_m_normalization() {
+        assert_eq!(upstream_model("gpt-5.6-sol[1m]"), "gpt-5.6-sol");
+    }
+
+    #[test]
     fn function_and_structured_output_reducers_only_emit_finite_facts() {
         let tool = parse_tool_response(
-            br#"{"object":"response","model":"gpt-5.6-sol","output":[{"type":"function_call","name":"report_probe","arguments":"SENTINEL_ARGUMENT"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
+            br#"{"object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","name":"report_probe","arguments":"{\"ready\":true}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
         );
         let structured = parse_structured_response(
-            br#"{"object":"response","model":"gpt-5.6-sol","output":[{"type":"message","content":[{"type":"output_text","text":"SENTINEL_JSON"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
+            br#"{"object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ready\":true}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
         );
 
         assert_eq!(tool, passed(EvidenceCode::ToolCallShape));
         assert_eq!(structured, passed(EvidenceCode::StructuredOutput));
         let serialized = serde_json::to_string(&[tool, structured]).unwrap();
-        assert!(!serialized.contains("SENTINEL_ARGUMENT"));
-        assert!(!serialized.contains("SENTINEL_JSON"));
+        assert!(!serialized.contains("ready"));
+        for invalid_payload in [
+            "not-json",
+            "{\"ready\":false}",
+            "{\"ready\":true,\"extra\":1}",
+        ] {
+            let tool = format!(
+                "{{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"output\":[{{\"type\":\"function_call\",\"name\":\"report_probe\",\"arguments\":{invalid_payload:?}}}],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}"
+            );
+            let structured = format!(
+                "{{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"output\":[{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"text\":{invalid_payload:?}}}]}}],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}"
+            );
+            assert_eq!(
+                parse_tool_response(tool.as_bytes()),
+                failed(EvidenceCode::ToolCallShape)
+            );
+            assert_eq!(
+                parse_structured_response(structured.as_bytes()),
+                failed(EvidenceCode::StructuredOutput)
+            );
+        }
         assert_eq!(
             parse_tool_response(
                 br#"{"output":[{"type":"function_call","name":"report_probe","arguments":"{}"}]}"#
@@ -543,6 +699,24 @@ mod openai_responses_tests {
             ),
             failed(EvidenceCode::StructuredOutput)
         );
+        assert_eq!(
+            parse_structured_response(
+                br#"{"object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","content":[{"type":"refusal","refusal":"no"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#
+            ),
+            failed(EvidenceCode::StructuredOutput)
+        );
+    }
+
+    #[test]
+    fn foreign_protocol_shapes_from_optional_probes_are_verdict_facts() {
+        assert_eq!(
+            parse_tool_response(br#"{"object":"chat.completion","choices":[]}"#),
+            failed(EvidenceCode::ForeignProtocol)
+        );
+        assert_eq!(
+            parse_structured_response(br#"{"type":"message","content":[]}"#),
+            failed(EvidenceCode::ForeignProtocol)
+        );
     }
 
     #[test]
@@ -554,7 +728,10 @@ mod openai_responses_tests {
             "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\"}}\n\n",
             "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"SENTINEL_ARGUMENT\"}\n\n",
             "event: response.future_output.delta\ndata: {\"type\":\"response.future_output.delta\",\"delta\":\"ignored\"}\n\n",
-            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n"
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n",
+            "event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n"
         );
 
         let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
@@ -577,10 +754,58 @@ mod openai_responses_tests {
             ),
             concat!(
                 "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\"}}\n\n",
-                "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n"
+                "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n"
             ),
         ] {
             let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
+            assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
+        }
+    }
+
+    #[test]
+    fn unknown_or_out_of_order_events_cannot_satisfy_fixed_text_stream_lifecycle() {
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol");
+        for stream in [
+            concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"status\":\"in_progress\"}}\n\n",
+                "data: {\"type\":\"response.future.added\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+            ),
+            concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"status\":\"in_progress\"}}\n\n",
+                "data: {\"type\":\"response.content_part.added\"}\n\n",
+                "data: {\"type\":\"response.output_item.added\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\"}\n\n",
+                "data: {\"type\":\"response.content_part.done\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+            ),
+        ] {
+            let facts = parse_stream(stream, "gpt-5.6-sol", &profile).unwrap();
+            assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
+        }
+    }
+
+    #[test]
+    fn terminal_response_requires_completed_status() {
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol");
+        for status in [None, Some("incomplete"), Some("failed")] {
+            let status_field = status
+                .map(|status| format!("\"status\":\"{status}\","))
+                .unwrap_or_default();
+            let stream = format!(
+                concat!(
+                    "data: {{\"type\":\"response.created\",\"response\":{{\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\"}}}}\n\n",
+                    "data: {{\"type\":\"response.output_item.added\",\"item\":{{\"type\":\"message\"}}}}\n\n",
+                    "data: {{\"type\":\"response.content_part.added\",\"part\":{{\"type\":\"output_text\"}}}}\n\n",
+                    "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}}\n\n",
+                    "data: {{\"type\":\"response.content_part.done\"}}\n\n",
+                    "data: {{\"type\":\"response.output_item.done\"}}\n\n",
+                    "data: {{\"type\":\"response.completed\",\"response\":{{\"object\":\"response\",{status_field}\"model\":\"gpt-5.6-sol\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n"
+                ),
+                status_field = status_field
+            );
+            let facts = parse_stream(&stream, "gpt-5.6-sol", &profile).unwrap();
             assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
         }
     }
@@ -626,6 +851,9 @@ mod openai_responses_tests {
             );
             assert_eq!(request.content_type.as_ref().unwrap(), "application/json");
             assert_eq!(request.body["store"], false);
+        }
+        for request in &requests[..3] {
+            assert_eq!(request.accept.as_ref().unwrap(), "application/json");
         }
         assert_eq!(requests[1].body["tools"][0]["type"], "function");
         assert_eq!(requests[1].body["tools"][0]["name"], "report_probe");
@@ -880,14 +1108,22 @@ mod openai_responses_tests {
         }
         if body.get("tools").is_some() {
             return Json(json!({
-                "object":"response", "model":"gpt-5.6-sol",
-                "output":[{"type":"function_call","name":"report_probe","arguments":"SENTINEL_ARGUMENT"}],
+                "object":"response", "status":"completed", "model":"gpt-5.6-sol",
+                "output":[{"type":"function_call","name":"report_probe","arguments":"{\"ready\":true}"}],
+                "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+            }))
+            .into_response();
+        }
+        if body.get("text").is_some() {
+            return Json(json!({
+                "object":"response", "status":"completed", "model":"gpt-5.6-sol",
+                "output":[{"type":"message","content":[{"type":"output_text","text":"{\"ready\":true}"}]}],
                 "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
             }))
             .into_response();
         }
         Json(json!({
-            "object":"response", "model":"gpt-5.6-sol",
+            "object":"response", "status":"completed", "model":"gpt-5.6-sol",
             "output":[{"type":"message","content":[{"type":"output_text","text":"SENTINEL_OUTPUT"}]}],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         }))
@@ -914,8 +1150,8 @@ mod openai_responses_tests {
     fn normal_response(body: &Value) -> Response {
         if body.get("tools").is_some() {
             return Json(json!({
-                "object":"response", "model":"future-model-x",
-                "output":[{"type":"function_call","name":"report_probe","arguments":"SENTINEL_ARGUMENT"}],
+                "object":"response", "status":"completed", "model":"future-model-x",
+                "output":[{"type":"function_call","name":"report_probe","arguments":"{\"ready\":true}"}],
                 "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
             }))
             .into_response();
@@ -928,7 +1164,7 @@ mod openai_responses_tests {
                 .into_response();
         }
         Json(json!({
-            "object":"response", "model":"future-model-x",
+            "object":"response", "status":"completed", "model":"future-model-x",
             "output":[{"type":"message","content":[{"type":"output_text","text":"SENTINEL_OUTPUT"}]}],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         }))
@@ -937,19 +1173,26 @@ mod openai_responses_tests {
 
     fn happy_stream() -> String {
         concat!(
-            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\"}}\n\n",
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\"}}\n\n",
             "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n",
+            "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\"}}\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"SENTINEL_STREAM_TEXT\"}\n\n",
-            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+            "event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
         )
         .into()
     }
 
     fn future_model_stream() -> String {
         concat!(
-            "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"model\":\"future-model-x\"}}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"future-model-x\"}}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"model\":\"future-model-x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+            "data: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n",
+            "data: {\"type\":\"response.content_part.done\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"model\":\"future-model-x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
         )
         .into()
     }
