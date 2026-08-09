@@ -3187,6 +3187,62 @@
       "howTo": "換生圖檔位不用重啟 CLI，下一次生成就用新的。只有第一次有生圖檔位時要新開一個終端，讓 codex 讀到那個工具。",
       "emptyTitle": "還沒有生圖檔位",
       "emptyBody": "生圖檔位由「取得密鑰」自動識別：中轉站那邊有只掛 gpt-image 模型的分組時，它就出現在這裡。你的站點可能沒有提供生圖分組 —— 那樣這一頁保持空著就好，CLI 的設定裡不會多出任何東西。"
+    },
+    "modelVerification": {
+      "title": "模型驗證",
+      "description": "驗證這個供應商已設定的一個模型。",
+      "globalScopeNote": "對所有已設定模型啟用自動驗證。",
+      "model": {
+        "label": "選擇模型",
+        "placeholder": "請選擇模型",
+        "loading": "正在載入模型…",
+        "empty": "沒有可驗證的模型",
+        "error": "模型清單載入失敗"
+      },
+      "actions": { "start": "開始驗證", "stop": "停止驗證", "retry": "重試" },
+      "status": { "running": "正在驗證 {{completed}} / {{total}}" },
+      "verdict": {
+        "trusted": "可信",
+        "suspicious": "可疑",
+        "anomaly": "異常",
+        "inconclusive": "結論不足"
+      },
+      "evidence": {
+        "title": "驗證依據",
+        "level": {
+          "cryptographic": "密碼學依據",
+          "protocolBehavior": "協定行為依據",
+          "insufficient": "依據不足"
+        },
+        "outcome": {
+          "passed": "通過",
+          "failed": "未通過",
+          "skipped": "已跳過"
+        },
+        "fact": {
+          "basicEnvelope": "基礎回應結構",
+          "modelMatch": "模型身分",
+          "streamLifecycle": "串流回應生命週期",
+          "usageConsistency": "用量一致性",
+          "toolCallShape": "工具呼叫結構",
+          "structuredOutput": "結構化輸出",
+          "thinkingSignature": "推理特徵",
+          "signatureContinuation": "特徵延續",
+          "foreignProtocol": "外部協定",
+          "foreignSelfIdentification": "外部自我識別"
+        }
+      },
+      "failure": {
+        "authentication": "驗證失敗",
+        "rateLimited": "供應商限制了本次驗證",
+        "insufficientBalance": "餘額不足，無法驗證此模型",
+        "network": "網路連線失敗",
+        "upstream": "供應商無法完成驗證",
+        "timeout": "驗證逾時",
+        "modelUnavailable": "此模型不可用",
+        "cancelled": "驗證已停止",
+        "invalidResponse": "供應商回傳了無效回應"
+      }
     }
   }
 }

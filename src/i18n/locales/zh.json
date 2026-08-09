@@ -3186,6 +3186,62 @@
       "howTo": "换生图档位不用重启 CLI，下一次生成就用新的。只有第一次有生图档位时要新开一个终端，让 codex 读到那个工具。",
       "emptyTitle": "还没有生图档位",
       "emptyBody": "生图档位由「获取密钥」自动识别：中转站那边有只挂 gpt-image 模型的分组时，它就出现在这里。你的站点可能没有提供生图分组 —— 那样这一页保持空着就好，CLI 的配置里不会多出任何东西。"
+    },
+    "modelVerification": {
+      "title": "模型验证",
+      "description": "验证这个供应商已配置的一个模型。",
+      "globalScopeNote": "对所有已配置模型启用自动验证。",
+      "model": {
+        "label": "选择模型",
+        "placeholder": "请选择模型",
+        "loading": "正在加载模型…",
+        "empty": "没有可验证的模型",
+        "error": "模型列表加载失败"
+      },
+      "actions": { "start": "开始验证", "stop": "停止验证", "retry": "重试" },
+      "status": { "running": "正在验证 {{completed}} / {{total}}" },
+      "verdict": {
+        "trusted": "可信",
+        "suspicious": "可疑",
+        "anomaly": "异常",
+        "inconclusive": "结论不足"
+      },
+      "evidence": {
+        "title": "验证依据",
+        "level": {
+          "cryptographic": "密码学依据",
+          "protocolBehavior": "协议行为依据",
+          "insufficient": "依据不足"
+        },
+        "outcome": {
+          "passed": "通过",
+          "failed": "未通过",
+          "skipped": "已跳过"
+        },
+        "fact": {
+          "basicEnvelope": "基础响应结构",
+          "modelMatch": "模型身份",
+          "streamLifecycle": "流式响应生命周期",
+          "usageConsistency": "用量一致性",
+          "toolCallShape": "工具调用结构",
+          "structuredOutput": "结构化输出",
+          "thinkingSignature": "推理特征",
+          "signatureContinuation": "特征延续",
+          "foreignProtocol": "外部协议",
+          "foreignSelfIdentification": "外部自我标识"
+        }
+      },
+      "failure": {
+        "authentication": "认证失败",
+        "rateLimited": "供应商限制了本次验证",
+        "insufficientBalance": "余额不足，无法验证此模型",
+        "network": "网络连接失败",
+        "upstream": "供应商无法完成验证",
+        "timeout": "验证超时",
+        "modelUnavailable": "此模型不可用",
+        "cancelled": "验证已停止",
+        "invalidResponse": "供应商返回了无效响应"
+      }
     }
   }
 }

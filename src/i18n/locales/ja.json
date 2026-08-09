@@ -3186,6 +3186,66 @@
       "howTo": "画像生成のティアを切り替えても CLI の再起動は不要で、次回の生成から新しいティアが使われます。初めて画像ティアを持ったときだけ、codex にツールを認識させるため新しいターミナルを開いてください。",
       "emptyTitle": "画像生成のティアはまだありません",
       "emptyBody": "画像ティアは「キーを取得」時に自動判定されます。gpt-image 系モデルだけを持つグループがあれば、ここに現れます。ご利用のサイトに画像グループが無い場合もあります —— そのときはこのページは空のままで、CLI の設定には何も追加されません。"
+    },
+    "modelVerification": {
+      "title": "モデルを検証",
+      "description": "このプロバイダーに設定されたモデルを 1 つ検証します。",
+      "globalScopeNote": "設定済みのすべてのモデルに自動検証を適用します。",
+      "model": {
+        "label": "モデルを選択",
+        "placeholder": "モデルを選択してください",
+        "loading": "モデルを読み込み中…",
+        "empty": "検証できるモデルはありません",
+        "error": "モデル一覧を読み込めませんでした"
+      },
+      "actions": {
+        "start": "検証を開始",
+        "stop": "検証を停止",
+        "retry": "再試行"
+      },
+      "status": { "running": "検証中 {{completed}} / {{total}}" },
+      "verdict": {
+        "trusted": "信頼済み",
+        "suspicious": "疑わしい",
+        "anomaly": "異常",
+        "inconclusive": "判断不能"
+      },
+      "evidence": {
+        "title": "検証根拠",
+        "level": {
+          "cryptographic": "暗号学的根拠",
+          "protocolBehavior": "プロトコル動作の根拠",
+          "insufficient": "根拠不足"
+        },
+        "outcome": {
+          "passed": "合格",
+          "failed": "不合格",
+          "skipped": "スキップ"
+        },
+        "fact": {
+          "basicEnvelope": "基本応答構造",
+          "modelMatch": "モデル識別",
+          "streamLifecycle": "ストリーミングのライフサイクル",
+          "usageConsistency": "使用量の一貫性",
+          "toolCallShape": "ツール呼び出しの構造",
+          "structuredOutput": "構造化出力",
+          "thinkingSignature": "推論シグネチャ",
+          "signatureContinuation": "シグネチャの継続",
+          "foreignProtocol": "外部プロトコル",
+          "foreignSelfIdentification": "外部自己識別"
+        }
+      },
+      "failure": {
+        "authentication": "認証に失敗しました",
+        "rateLimited": "プロバイダーにより検証が制限されました",
+        "insufficientBalance": "残高不足のためこのモデルを検証できません",
+        "network": "ネットワーク接続に失敗しました",
+        "upstream": "プロバイダーは検証を完了できませんでした",
+        "timeout": "検証がタイムアウトしました",
+        "modelUnavailable": "このモデルは利用できません",
+        "cancelled": "検証を停止しました",
+        "invalidResponse": "プロバイダーが無効な応答を返しました"
+      }
     }
   }
 }
