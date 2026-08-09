@@ -89,6 +89,43 @@ describe("useModelVerificationRun", () => {
     await waitFor(() => expect(result.current.report?.verdict).toBe("trusted"));
   });
 
+  it("keeps terminal events emitted before start resolves", async () => {
+    api.listResults.mockResolvedValueOnce([
+      { target, verdict: "trusted", facts: [] },
+    ]);
+    api.start.mockImplementation(async () => {
+      progressListener?.(
+        runningEvent({
+          state: "completed",
+          completedChecks: 3,
+        }),
+      );
+      changedListener?.({
+        providerId: target.providerId,
+        appType: target.appType,
+      });
+      return { runId: "run-1", state: "queued" };
+    });
+
+    const { result } = renderHook(() =>
+      useModelVerificationRun({
+        open: true,
+        providerId: target.providerId,
+        appType: target.appType,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.start(target.model);
+    });
+
+    await waitFor(() =>
+      expect(result.current.progress?.state).toBe("completed"),
+    );
+    expect(result.current.isRunning).toBe(false);
+    await waitFor(() => expect(result.current.report?.verdict).toBe("trusted"));
+  });
+
   it("unsubscribes when closed and ignores a prior dialog instance completion", async () => {
     const { result, rerender } = renderHook(
       ({ open }) =>
