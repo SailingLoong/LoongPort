@@ -1,7 +1,7 @@
 use crate::{
     relay::model_verification::{
         target,
-        types::{RunFailureKind, StartRunResponse, TargetKey, VerificationSummary},
+        types::{RunFailureKind, StartRunResponse, TargetKey, VerificationReport},
     },
     AppState,
 };
@@ -55,14 +55,14 @@ fn cancel_model_verification_impl(state: &AppState, run_id: String) -> Result<()
 pub fn get_model_verification_results(
     state: tauri::State<'_, AppState>,
     provider_ids: Vec<String>,
-) -> Result<Vec<VerificationSummary>, RunFailureKind> {
+) -> Result<Vec<VerificationReport>, RunFailureKind> {
     get_model_verification_results_impl(&state, provider_ids)
 }
 
 fn get_model_verification_results_impl(
     state: &AppState,
     provider_ids: Vec<String>,
-) -> Result<Vec<VerificationSummary>, RunFailureKind> {
+) -> Result<Vec<VerificationReport>, RunFailureKind> {
     state.model_verification.list_results(&provider_ids)
 }
 
@@ -74,7 +74,11 @@ mod tests {
         database::Database,
         relay::model_verification::{
             coordinator::{ActiveVerifier, ModelVerificationCoordinator, VerificationFuture},
-            types::{RunFailureKind, TargetKey},
+            store::upsert_active,
+            types::{
+                EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind,
+                TargetKey, Verdict, VerificationReport, RULES_VERSION,
+            },
         },
         AppState,
     };
@@ -141,5 +145,54 @@ mod tests {
         assert!(get_model_verification_results_impl(&state, Vec::new())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn result_boundary_preserves_persisted_finite_evidence() {
+        let verifier = Arc::new(RejectingVerifier {
+            target: Mutex::new(None),
+        });
+        let state = state_with_verifier(verifier);
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, app_type, name, settings_config) VALUES (?1, ?2, ?3, '{}')",
+                rusqlite::params!["provider-a", "codex", "provider-a"],
+            )
+            .unwrap();
+        let fact = EvidenceFact {
+            code: EvidenceCode::ModelMatch,
+            outcome: EvidenceOutcome::Passed,
+        };
+        upsert_active(
+            &state.db,
+            &VerificationReport {
+                target: TargetKey::new("provider-a", "codex", "gpt-a"),
+                verdict: Verdict::Trusted,
+                evidence_level: EvidenceLevel::ProtocolBehavior,
+                facts: vec![fact.clone()],
+                rules_version: RULES_VERSION,
+                checked_at: 1_700_000_000,
+            },
+        )
+        .unwrap();
+
+        let results =
+            get_model_verification_results_impl(&state, vec!["provider-a".into()]).unwrap();
+
+        assert_eq!(
+            results,
+            vec![VerificationReport {
+                target: TargetKey::new("provider-a", "codex", "gpt-a"),
+                verdict: Verdict::Trusted,
+                evidence_level: EvidenceLevel::ProtocolBehavior,
+                facts: vec![fact],
+                rules_version: RULES_VERSION,
+                checked_at: 1_700_000_000,
+            }]
+        );
     }
 }

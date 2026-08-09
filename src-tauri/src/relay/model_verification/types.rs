@@ -98,28 +98,6 @@ pub struct VerificationReport {
     pub checked_at: i64,
 }
 
-impl VerificationReport {
-    pub fn summary(&self) -> VerificationSummary {
-        VerificationSummary {
-            target: self.target.clone(),
-            verdict: self.verdict,
-            evidence_level: self.evidence_level,
-            rules_version: self.rules_version,
-            checked_at: self.checked_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VerificationSummary {
-    pub target: TargetKey,
-    pub verdict: Verdict,
-    pub evidence_level: EvidenceLevel,
-    pub rules_version: i32,
-    pub checked_at: i64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]

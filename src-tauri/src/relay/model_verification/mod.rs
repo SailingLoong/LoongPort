@@ -14,7 +14,7 @@ mod tests {
         types::{
             EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind, RunState,
             StartRunResponse, TargetKey, TargetScope, Verdict, VerificationProgressEvent,
-            VerificationReport, VerificationSummary, RULES_VERSION,
+            VerificationReport, RULES_VERSION,
         },
     };
     use crate::{
@@ -178,11 +178,10 @@ mod tests {
     }
 
     #[test]
-    fn report_summary_and_run_statuses_serialize_as_finite_camel_case_values() {
-        let summary: VerificationSummary =
-            report("provider-a", "codex", "gpt-a", Verdict::Trusted).summary();
+    fn report_and_run_statuses_serialize_as_finite_camel_case_values() {
+        let report = report("provider-a", "codex", "gpt-a", Verdict::Trusted);
 
-        assert_eq!(summary.target.model, "gpt-a");
+        assert_eq!(report.target.model, "gpt-a");
         assert_eq!(
             serde_json::to_value(RunFailureKind::InvalidResponse).unwrap(),
             serde_json::json!("invalidResponse")

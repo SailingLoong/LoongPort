@@ -1,7 +1,7 @@
 use crate::{
     database::{lock_conn, Database},
     error::AppError,
-    relay::model_verification::types::{TargetScope, VerificationReport, VerificationSummary},
+    relay::model_verification::types::{TargetScope, VerificationReport},
 };
 use rusqlite::{params, params_from_iter, Connection};
 
@@ -72,7 +72,7 @@ pub fn list_for_providers(
     db: &Database,
     app_type: &str,
     provider_ids: &[String],
-) -> Result<Vec<VerificationSummary>, AppError> {
+) -> Result<Vec<VerificationReport>, AppError> {
     if provider_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -103,19 +103,18 @@ pub fn list_for_providers(
         .flatten()
         .map(|report_json| {
             serde_json::from_str::<VerificationReport>(&report_json)
-                .map(|report| report.summary())
                 .map_err(|error| AppError::Config(format!("解析验证报告失败: {error}")))
         })
         .collect()
 }
 
-/// Lists the latest sanitized active summaries for the requested providers across every app.
+/// Lists the latest sanitized active reports for the requested providers across every app.
 ///
 /// Only placeholder count is formatted into the SQL. Provider IDs are always bound values.
 pub fn list_for_provider_ids(
     db: &Database,
     provider_ids: &[String],
-) -> Result<Vec<VerificationSummary>, AppError> {
+) -> Result<Vec<VerificationReport>, AppError> {
     if provider_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -143,7 +142,6 @@ pub fn list_for_provider_ids(
         .flatten()
         .map(|report_json| {
             serde_json::from_str::<VerificationReport>(&report_json)
-                .map(|report| report.summary())
                 .map_err(|error| AppError::Config(format!("解析验证报告失败: {error}")))
         })
         .collect()

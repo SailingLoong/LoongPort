@@ -192,8 +192,7 @@ impl ModelVerificationCoordinator {
     pub fn list_results(
         &self,
         provider_ids: &[String],
-    ) -> Result<Vec<crate::relay::model_verification::types::VerificationSummary>, RunFailureKind>
-    {
+    ) -> Result<Vec<VerificationReport>, RunFailureKind> {
         crate::relay::model_verification::store::list_for_provider_ids(&self.db, provider_ids)
             .map_err(|_| RunFailureKind::InvalidResponse)
     }
