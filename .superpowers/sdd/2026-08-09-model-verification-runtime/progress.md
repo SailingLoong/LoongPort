@@ -47,3 +47,16 @@ Pre-flight review: no blocking requirement contradictions. Execution order is 1 
 - Independent review: completed locally; no blocking findings.
 - Focused verification: event consistency passed; store 8 passed; compile, formatting, and diff checks passed.
 - Runtime Task 9 is next.
+
+## Runtime Task 2 — complete
+
+- Implementation commit: pending (`feat(model-verification): reconcile proxy leases safely`)
+- Independent review: completed locally; no blocking findings.
+- Focused verification: command 3 passed; store 8 passed; compile and formatting checks passed.
+
+## Runtime Task 3 — complete
+
+- Implementation commit: pending (`feat(model-verification): recover runtime observation state`)
+- Independent review: completed locally; provider-switch and startup hooks are fail-open and centralized.
+- Focused verification: event consistency passed; compile and formatting checks passed.
+- Runtime Task 9 is next.

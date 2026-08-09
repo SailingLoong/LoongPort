@@ -20,7 +20,7 @@
 //! 两侧都有。
 
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::app_config::AppType;
 use crate::relay::model_verification::passive::AnomalyFingerprint;
@@ -109,6 +109,22 @@ pub fn emit_provider_switched(
         // 发不出去只是界面不刷新（用户重开面板就好），不该让切换本身失败 ——
         // 配置已经写进去了，报错会让用户以为没切成功而再切一次。
         log::warn!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
+    }
+    if matches!(app_type, AppType::Codex | AppType::Claude) {
+        if let Some(state) = app_handle.try_state::<crate::AppState>() {
+            let coordinator = state.model_verification.clone();
+            let proxy = state.proxy_service.clone();
+            tauri::async_runtime::spawn(async move {
+                if crate::relay::model_verification::store::get_runtime_setting(
+                    &coordinator.database(),
+                )
+                .map(|setting| setting.runtime_auto_enabled)
+                .unwrap_or(false)
+                {
+                    let _ = coordinator.set_runtime_enabled(&proxy, true).await;
+                }
+            });
+        }
     }
 }
 
