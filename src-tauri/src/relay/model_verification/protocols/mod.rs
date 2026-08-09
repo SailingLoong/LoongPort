@@ -4,6 +4,7 @@ use futures::StreamExt;
 use reqwest::{RequestBuilder, Response, StatusCode};
 
 pub(crate) mod anthropic;
+pub(crate) mod openai_responses;
 
 pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;

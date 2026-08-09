@@ -16,6 +16,14 @@ pub struct CapabilityProfile {
 
 impl CapabilityProfile {
     pub fn for_target(app_type: &AppType, model: &str) -> Self {
+        if matches!(app_type, AppType::Codex) && supports_codex_structured_output(model) {
+            return Self {
+                supports_structured_output: true,
+                supports_thinking_signature: false,
+                supports_signature_continuation: false,
+            };
+        }
+
         if matches!(app_type, AppType::Claude) && supports_anthropic_signature_continuation(model) {
             return Self {
                 supports_structured_output: false,
@@ -55,20 +63,33 @@ impl CapabilityProfile {
 const ANTHROPIC_SIGNATURE_CONTINUATION_PREFIXES: &[&str] =
     &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"];
 
+/// Current managed Codex routes documented to support Responses structured outputs.
+///
+/// This intentionally does not match a broad `gpt-` family: future routes must remain on the
+/// protocol core until their capability is independently established.
+const CODEX_STRUCTURED_OUTPUT_PREFIXES: &[&str] =
+    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4"];
+
+fn supports_codex_structured_output(model: &str) -> bool {
+    supports_known_model_with_display_suffix(model, CODEX_STRUCTURED_OUTPUT_PREFIXES)
+}
+
 fn supports_anthropic_signature_continuation(model: &str) -> bool {
+    supports_known_model_with_display_suffix(model, ANTHROPIC_SIGNATURE_CONTINUATION_PREFIXES)
+}
+
+fn supports_known_model_with_display_suffix(model: &str, prefixes: &[&str]) -> bool {
     let normalized = model.trim().to_ascii_lowercase();
     let normalized = normalized
         .strip_suffix("[1m]")
         .unwrap_or(&normalized)
         .trim();
-    ANTHROPIC_SIGNATURE_CONTINUATION_PREFIXES
-        .iter()
-        .any(|prefix| {
-            normalized == *prefix
-                || normalized
-                    .strip_prefix(prefix)
-                    .is_some_and(is_compact_release_date_suffix)
-        })
+    prefixes.iter().any(|prefix| {
+        normalized == *prefix
+            || normalized
+                .strip_prefix(prefix)
+                .is_some_and(is_compact_release_date_suffix)
+    })
 }
 
 fn is_compact_release_date_suffix(suffix: &str) -> bool {
@@ -108,6 +129,24 @@ mod tests {
         assert!(
             !CapabilityProfile::for_target(&AppType::Claude, "claude-sonnet-5-future")
                 .supports_signature_continuation
+        );
+    }
+
+    #[test]
+    fn current_codex_routes_enable_structured_output_only_for_known_ids() {
+        for model in [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra-20260809",
+            "gpt-5.6-luna[1M]",
+            "gpt-5.4",
+        ] {
+            assert!(
+                CapabilityProfile::for_target(&AppType::Codex, model).supports_structured_output
+            );
+        }
+        assert!(
+            !CapabilityProfile::for_target(&AppType::Codex, "gpt-5.7-future")
+                .supports_structured_output
         );
     }
 }
