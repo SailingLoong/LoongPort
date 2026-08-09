@@ -104,7 +104,7 @@ fn update_provider_internal(
     state: &AppState,
     app_type: AppType,
     original_id: Option<&str>,
-    provider: Provider,
+    mut provider: Provider,
 ) -> Result<bool, AppError> {
     // ## 托管档位**可以**改内容，但**不许改 id**
     //
@@ -135,20 +135,50 @@ fn update_provider_internal(
     // 正确判据是**这个托管 id 得对应一条已经存在的托管记录**：
     // 就地编辑（id 早在库里）放行，凭空造一个新的托管 id 拒掉。
     // 这同时覆盖了上面两种改名 —— 不必再单独判「改没改名」。
-    if crate::relay::is_managed(&provider.id)
-        && state
+    let existing_managed = if crate::relay::is_managed(&provider.id) {
+        match state
             .db
             .get_provider_by_id(&provider.id, app_type.as_str())?
-            .is_none()
-    {
-        return Err(AppError::Message(
-            "不能把供应商改成 LoongPort 托管档位的 id —— 那个 id 由 LoongPort 生成".to_string(),
-        ));
-    }
+        {
+            Some(existing) => Some(existing),
+            None => {
+                return Err(AppError::Message(
+                    "不能把供应商改成 LoongPort 托管档位的 id —— 那个 id 由 LoongPort 生成"
+                        .to_string(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     // 反向：把**已存在的**托管记录改成别的 id（脱管）。这条仍按老判据拦。
     if let Some(old) = original_id.filter(|old| *old != provider.id) {
         crate::relay::reject_if_managed(old)?;
     }
+
+    // 托管档位的站点归属与 sk 由 LoongPort 管，不属于用户可编辑配置。
+    //
+    // 倍率查询会从 `website_url` 定位 `/v1/sub2api/billing`，再从
+    // `settings_config` 提取 sk。若直接保存编辑器提交的整份 Provider，用户只改模型
+    // 也可能因表单 round-trip 丢掉认证 section，结果是倍率/连通检测一起静默失效。
+    // 这里保留这两个 owner 字段，其余配置仍照用户提交的保存。
+    if let Some(existing) = existing_managed {
+        provider.website_url = existing.website_url;
+        if let Some(api_key) =
+            crate::relay::provision::extract_api_key(&existing.settings_config, &app_type)
+        {
+            if !crate::relay::provision::ensure_api_key(
+                &mut provider.settings_config,
+                &app_type,
+                &api_key,
+            ) {
+                return Err(AppError::Config(
+                    "托管档位的配置必须是对象，无法保留由 LoongPort 管理的密钥".to_string(),
+                ));
+            }
+        }
+    }
+
     let provider_id = provider.id.clone();
     // `app_type` 下一步会被 move 进 update，先扣出字符串给 set_user_edited 用。
     let app_type_name = app_type.as_str().to_string();
@@ -395,6 +425,68 @@ mod managed_guard_tests {
                 "originalId 省略时被误当成改名拦下了。实际: {text}"
             );
         }
+    }
+
+    #[test]
+    fn managed_tier_edit_preserves_relay_origin_and_api_key() {
+        let id = managed_id();
+        let state = empty_state();
+        let site_origin = "https://bestapi.store";
+        let existing_settings = crate::relay::provision::settings_config_for(
+            &AppType::Codex,
+            "sk-managed",
+            "provision 生成的名字",
+            "https://bestapi.store/v1",
+            "gpt-5.6-sol",
+        )
+        .expect("codex 托管档位必须有配置形状");
+        let existing = Provider::with_id(
+            id.clone(),
+            "provision 生成的名字".to_string(),
+            existing_settings.clone(),
+            Some(site_origin.to_string()),
+        );
+        state
+            .db
+            .save_provider(AppType::Codex.as_str(), &existing)
+            .expect("预置托管档位");
+
+        // 模拟编辑器的整份 Provider 回写：用户改了配置，同时 payload 里的站点与 sk
+        // 也被改掉。后两项是 LoongPort 的 owner 字段，不能随表单落库。
+        let mut edited_settings = existing_settings;
+        let config = edited_settings["config"]
+            .as_str()
+            .expect("codex 配置应是 TOML 字符串");
+        edited_settings["config"] =
+            serde_json::json!(format!("{config}\nmodel_reasoning_effort = \"low\"\n"));
+        edited_settings["auth"]["OPENAI_API_KEY"] = serde_json::json!("sk-user-overwrite");
+        let edited = Provider::with_id(
+            id.clone(),
+            "用户改的名字".to_string(),
+            edited_settings,
+            Some("https://wrong.example/v1".to_string()),
+        );
+
+        update_provider_internal(&state, AppType::Codex, Some(id.as_str()), edited)
+            .expect("编辑托管档位应成功");
+
+        let saved = state
+            .db
+            .get_provider_by_id(&id, AppType::Codex.as_str())
+            .expect("读取保存结果")
+            .expect("托管档位仍应存在");
+        assert_eq!(saved.website_url.as_deref(), Some(site_origin));
+        assert_eq!(
+            crate::relay::provision::extract_api_key(&saved.settings_config, &AppType::Codex)
+                .as_deref(),
+            Some("sk-managed")
+        );
+        assert!(
+            saved.settings_config["config"]
+                .as_str()
+                .is_some_and(|config| config.contains("model_reasoning_effort = \"low\"")),
+            "除 LoongPort 管理的站点与 sk 外，用户编辑必须保留"
+        );
     }
 
     /// ⭐ **编辑一个「当前」生图档位并保存必须成功。**
