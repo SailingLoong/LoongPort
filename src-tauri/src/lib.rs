@@ -1529,6 +1529,7 @@ pub fn run() {
             commands::relay_balance,
             commands::relay_purchase,
             commands::relay_restore_official_login,
+            commands::list_verification_models,
             // LoongPort 官网直连账号（vendor）
             commands::vendor_list_accounts,
             commands::vendor_open_login,
