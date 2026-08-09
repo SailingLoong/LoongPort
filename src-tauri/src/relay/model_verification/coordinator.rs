@@ -175,6 +175,39 @@ impl ModelVerificationCoordinator {
             .take()
     }
 
+    /// Starts the single bounded passive worker. A second call is a no-op because ownership of
+    /// the receiver is consumed exactly once.
+    pub fn start_passive_worker(self: &Arc<Self>) -> bool {
+        let Some(mut receiver) = self.take_passive_receiver() else {
+            return false;
+        };
+        let coordinator = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            while let Some(batch) = receiver.recv().await {
+                if batch.generation != coordinator.passive_ingress.generation() {
+                    continue;
+                }
+                let scope = TargetScope::new(
+                    batch.target.provider_id.clone(),
+                    batch.target.app_type.clone(),
+                );
+                match crate::relay::model_verification::store::upsert_passive(
+                    &coordinator.db,
+                    &batch,
+                ) {
+                    Ok(_) => coordinator.emit_changed(&scope),
+                    Err(_error) => log::warn!(
+                        "model verification passive persistence failed for {}:{} ({})",
+                        batch.target.provider_id,
+                        batch.target.app_type,
+                        "database"
+                    ),
+                }
+            }
+        });
+        true
+    }
+
     pub fn attach_app_handle(&self, app_handle: tauri::AppHandle) {
         self.event_sink.attach_app_handle(app_handle);
     }

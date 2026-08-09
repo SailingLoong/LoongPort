@@ -93,6 +93,14 @@ impl VerificationIngress {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     pub fn begin(&self, target: TargetKey) -> Option<IngressTap> {
         if !self.enabled.load(Ordering::Acquire)
             || AppType::from_str(&target.app_type)
