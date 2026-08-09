@@ -51,8 +51,12 @@ export function ModelVerificationDialog({
   const [modelsState, setModelsState] = useState<ModelsState>("idle");
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
   const [runtimeAutoEnabled, setRuntimeAutoEnabled] = useState(false);
-  const [runtimeApps, setRuntimeApps] = useState<Awaited<ReturnType<typeof modelVerificationApi.getRuntimeSetting>>["apps"]>([]);
-  const [runtimeState, setRuntimeState] = useState<"idle" | "loading" | "error">("idle");
+  const [runtimeApps, setRuntimeApps] = useState<
+    Awaited<ReturnType<typeof modelVerificationApi.getRuntimeSetting>>["apps"]
+  >([]);
+  const [runtimeState, setRuntimeState] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
   const requestRef = useRef(0);
   const run = useModelVerificationRun({ providerId, appType });
 
@@ -112,7 +116,8 @@ export function ModelVerificationDialog({
     if (!selectedModel) return;
     try {
       if (typeof modelVerificationApi.setRuntimeEnabled === "function") {
-        const snapshot = await modelVerificationApi.setRuntimeEnabled(runtimeAutoEnabled);
+        const snapshot =
+          await modelVerificationApi.setRuntimeEnabled(runtimeAutoEnabled);
         setRuntimeApps(snapshot.apps);
       }
       await run.start(selectedModel);
@@ -140,11 +145,16 @@ export function ModelVerificationDialog({
             <Checkbox
               id="model-verification-runtime-auto"
               checked={runtimeAutoEnabled}
-              onCheckedChange={(checked) => setRuntimeAutoEnabled(checked === true)}
+              onCheckedChange={(checked) =>
+                setRuntimeAutoEnabled(checked === true)
+              }
               disabled={runtimeState === "loading" || run.isRunning}
             />
             <div className="space-y-1">
-              <label htmlFor="model-verification-runtime-auto" className="text-sm font-medium">
+              <label
+                htmlFor="model-verification-runtime-auto"
+                className="text-sm font-medium"
+              >
                 {t("loongport.modelVerification.runtime.autoLabel")}
               </label>
               <p className="text-xs text-muted-foreground">
@@ -159,10 +169,23 @@ export function ModelVerificationDialog({
           )}
           <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
             {runtimeApps.map((app) => (
-              <div key={app.appType} className="flex items-center justify-between rounded border border-border-default px-2 py-1.5">
-                <span>{t(`loongport.modelVerification.runtime.apps.${app.appType}`)}</span>
-                <span className={app.status === "error" ? "text-destructive" : "text-muted-foreground"}>
-                  {t(`loongport.modelVerification.runtime.status.${app.status}`)}
+              <div
+                key={app.appType}
+                className="flex items-center justify-between rounded border border-border-default px-2 py-1.5"
+              >
+                <span>
+                  {t(`loongport.modelVerification.runtime.apps.${app.appType}`)}
+                </span>
+                <span
+                  className={
+                    app.status === "error"
+                      ? "text-destructive"
+                      : "text-muted-foreground"
+                  }
+                >
+                  {t(
+                    `loongport.modelVerification.runtime.status.${app.status}`,
+                  )}
                 </span>
               </div>
             ))}

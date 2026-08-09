@@ -195,6 +195,7 @@ pub fn has_lease(db: &Database, app_type: &str) -> Result<bool, AppError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::relay::model_verification::types::{

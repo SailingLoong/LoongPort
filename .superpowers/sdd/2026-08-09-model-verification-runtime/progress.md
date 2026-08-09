@@ -55,6 +55,13 @@ Pre-flight review: no blocking requirement contradictions. Execution order is 1 
 - Focused verification: typecheck passed; full Vitest run 732 passed.
 - Runtime Task 10 is next.
 
+## Runtime Task 10 — complete
+
+- Implementation commit: pending (`test(model-verification): enforce passive privacy and fail-open behavior`)
+- Independent review: completed locally; no blocking findings.
+- All six repository gates passed; full Rust suite 2784 passed and full frontend suite 732 passed.
+- Runtime implementation todo list is complete.
+
 ## Runtime Task 2 — complete
 
 - Implementation commit: pending (`feat(model-verification): reconcile proxy leases safely`)

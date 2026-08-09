@@ -2,7 +2,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
 import {
-  MODEL_VERIFICATION_ANOMALY, MODEL_VERIFICATION_CHANGED,
+  MODEL_VERIFICATION_ANOMALY,
+  MODEL_VERIFICATION_CHANGED,
   MODEL_VERIFICATION_PROGRESS,
 } from "./events";
 

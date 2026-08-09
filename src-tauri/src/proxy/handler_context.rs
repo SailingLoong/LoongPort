@@ -35,6 +35,7 @@ pub struct StreamingTimeoutConfig {
 /// - Session ID（用于日志关联）
 pub struct RequestContext {
     /// Sanitized protocol capability flags; never contains request content.
+    #[allow(dead_code)]
     pub passive_request_meta: PassiveRequestMeta,
     /// 请求开始时间
     pub start_time: Instant,

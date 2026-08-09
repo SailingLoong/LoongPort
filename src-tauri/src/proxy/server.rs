@@ -62,6 +62,7 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
+    #[allow(dead_code)]
     pub fn new(
         config: ProxyConfig,
         db: Arc<Database>,

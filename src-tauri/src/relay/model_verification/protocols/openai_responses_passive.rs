@@ -171,7 +171,7 @@ impl OpenAiResponsesPassiveTap {
             Some("function_call") => {
                 self.record(EvidenceCode::ToolCallShape, EvidenceOutcome::Passed)
             }
-            Some("message") => {
+            Some("message")
                 if item
                     .get("content")
                     .and_then(Value::as_array)
@@ -179,10 +179,9 @@ impl OpenAiResponsesPassiveTap {
                         parts.iter().any(|part| {
                             part.get("type").and_then(Value::as_str) == Some("output_text")
                         })
-                    })
-                {
-                    self.record(EvidenceCode::StructuredOutput, EvidenceOutcome::Passed);
-                }
+                    }) =>
+            {
+                self.record(EvidenceCode::StructuredOutput, EvidenceOutcome::Passed);
             }
             _ => {}
         }
