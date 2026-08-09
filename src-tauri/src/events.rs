@@ -45,6 +45,10 @@ pub const PURCHASE_CLOSED: &str = "relay-purchase-closed";
 /// 官网直连登录窗凭据解析失败（`RelaySection` 监听）。原名
 /// `commands::vendor::LOGIN_ERROR_EVENT`。
 pub const VENDOR_LOGIN_ERROR: &str = "vendor-login-error";
+/// 主动模型验证任务进度变化（模型验证弹窗监听）。
+pub const MODEL_VERIFICATION_PROGRESS: &str = "model-verification-progress";
+/// 模型验证持久化结果变化（档位行与模型验证弹窗监听）。
+pub const MODEL_VERIFICATION_CHANGED: &str = "model-verification-changed";
 
 /// 广播「当前供应商变了」。
 ///
@@ -128,6 +132,14 @@ mod consistency_tests {
             ("S3_SYNC_STATUS_UPDATED", super::S3_SYNC_STATUS_UPDATED),
             ("PURCHASE_CLOSED", super::PURCHASE_CLOSED),
             ("VENDOR_LOGIN_ERROR", super::VENDOR_LOGIN_ERROR),
+            (
+                "MODEL_VERIFICATION_PROGRESS",
+                super::MODEL_VERIFICATION_PROGRESS,
+            ),
+            (
+                "MODEL_VERIFICATION_CHANGED",
+                super::MODEL_VERIFICATION_CHANGED,
+            ),
         ];
 
         for (ts_name, rust_value) in pairs {

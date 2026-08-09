@@ -1,4 +1,6 @@
+pub mod active;
 pub mod capability_profiles;
+pub mod coordinator;
 pub(crate) mod protocols;
 pub mod store;
 pub(crate) mod target;
@@ -8,11 +10,11 @@ pub mod verdict;
 #[cfg(test)]
 mod tests {
     use super::{
-        store::{clear_scope, list_for_providers, upsert_active},
+        store::{clear_scope, list_for_provider_ids, list_for_providers, upsert_active},
         types::{
             EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind, RunState,
-            TargetKey, TargetScope, Verdict, VerificationReport, VerificationSummary,
-            RULES_VERSION,
+            StartRunResponse, TargetKey, TargetScope, Verdict, VerificationProgressEvent,
+            VerificationReport, VerificationSummary, RULES_VERSION,
         },
     };
     use crate::{
@@ -189,6 +191,66 @@ mod tests {
             serde_json::to_value(RunState::Completed).unwrap(),
             serde_json::json!("completed")
         );
+        assert_eq!(
+            serde_json::to_value([
+                RunFailureKind::Authentication,
+                RunFailureKind::RateLimited,
+                RunFailureKind::InsufficientBalance,
+                RunFailureKind::Timeout,
+                RunFailureKind::ModelUnavailable,
+                RunFailureKind::Cancelled,
+                RunFailureKind::Network,
+                RunFailureKind::Upstream,
+                RunFailureKind::InvalidResponse,
+            ])
+            .unwrap(),
+            serde_json::json!([
+                "authentication",
+                "rateLimited",
+                "insufficientBalance",
+                "timeout",
+                "modelUnavailable",
+                "cancelled",
+                "network",
+                "upstream",
+                "invalidResponse"
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(RunState::Cancelled).unwrap(),
+            serde_json::json!("cancelled")
+        );
+        assert_eq!(
+            serde_json::to_value(StartRunResponse {
+                run_id: "run-1".into(),
+                state: RunState::Running,
+            })
+            .unwrap(),
+            serde_json::json!({"runId":"run-1","state":"running"})
+        );
+        assert_eq!(
+            serde_json::to_value(VerificationProgressEvent {
+                run_id: "run-1".into(),
+                provider_id: "provider-a".into(),
+                app_type: "codex".into(),
+                model: "gpt-5.6-sol".into(),
+                state: RunState::Failed,
+                completed_checks: 0,
+                total_checks: 0,
+                failure: Some(RunFailureKind::Authentication),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "runId":"run-1",
+                "providerId":"provider-a",
+                "appType":"codex",
+                "model":"gpt-5.6-sol",
+                "state":"failed",
+                "completedChecks":0,
+                "totalChecks":0,
+                "failure":"authentication"
+            })
+        );
     }
 
     #[test]
@@ -258,6 +320,49 @@ mod tests {
     fn list_for_providers_returns_empty_for_no_provider_ids() -> Result<(), AppError> {
         let db = Database::memory()?;
         assert!(list_for_providers(&db, "codex", &[])?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_id_query_returns_all_stored_app_types_and_binds_ids() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        insert_provider(&db, "provider-a", "claude")?;
+        insert_provider(&db, "provider-b') OR 1=1 --", "codex")?;
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Trusted),
+        )?;
+        upsert_active(
+            &db,
+            &report("provider-a", "claude", "claude-a", Verdict::Suspicious),
+        )?;
+        upsert_active(
+            &db,
+            &report("provider-b') OR 1=1 --", "codex", "gpt-b", Verdict::Anomaly),
+        )?;
+
+        let provider_a = list_for_provider_ids(&db, &["provider-a".into()])?;
+        assert_eq!(provider_a.len(), 2);
+        assert!(provider_a.iter().any(|row| row.target.app_type == "codex"));
+        assert!(provider_a.iter().any(|row| row.target.app_type == "claude"));
+
+        let literal_id = list_for_provider_ids(&db, &["provider-b') OR 1=1 --".into()])?;
+        assert_eq!(literal_id.len(), 1);
+        assert_eq!(literal_id[0].target.model, "gpt-b");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_provider_id_query_returns_before_touching_sql() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.conn
+            .lock()
+            .map_err(|error| AppError::Database(error.to_string()))?
+            .execute("DROP TABLE model_verification_results", [])
+            .map_err(|error| AppError::Database(error.to_string()))?;
+
+        assert!(list_for_provider_ids(&db, &[])?.is_empty());
         Ok(())
     }
 

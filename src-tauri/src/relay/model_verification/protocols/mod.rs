@@ -22,6 +22,7 @@ pub(crate) enum RunFailure {
     Upstream,
     Network,
     Timeout,
+    ModelUnavailable,
     InvalidResponse,
     ResponseTooLarge,
 }
@@ -116,6 +117,7 @@ pub(crate) fn classify_http_failure(status: StatusCode, body: &[u8]) -> RunFailu
         StatusCode::PAYMENT_REQUIRED if indicates_insufficient_balance(body) => {
             RunFailure::InsufficientBalance
         }
+        StatusCode::NOT_FOUND => RunFailure::ModelUnavailable,
         status if status.is_server_error() => RunFailure::Upstream,
         _ => RunFailure::InvalidResponse,
     }

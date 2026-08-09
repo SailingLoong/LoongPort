@@ -124,8 +124,13 @@ pub struct VerificationSummary {
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub enum RunFailureKind {
+    Authentication,
+    RateLimited,
+    InsufficientBalance,
     Network,
+    Upstream,
     Timeout,
+    ModelUnavailable,
     Cancelled,
     InvalidResponse,
 }
@@ -137,5 +142,26 @@ pub enum RunState {
     Queued,
     Running,
     Completed,
+    Cancelled,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRunResponse {
+    pub run_id: String,
+    pub state: RunState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationProgressEvent {
+    pub run_id: String,
+    pub provider_id: String,
+    pub app_type: String,
+    pub model: String,
+    pub state: RunState,
+    pub completed_checks: u8,
+    pub total_checks: u8,
+    pub failure: Option<RunFailureKind>,
 }

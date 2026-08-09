@@ -109,6 +109,46 @@ pub fn list_for_providers(
         .collect()
 }
 
+/// Lists the latest sanitized active summaries for the requested providers across every app.
+///
+/// Only placeholder count is formatted into the SQL. Provider IDs are always bound values.
+pub fn list_for_provider_ids(
+    db: &Database,
+    provider_ids: &[String],
+) -> Result<Vec<VerificationSummary>, AppError> {
+    if provider_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = vec!["?"; provider_ids.len()].join(", ");
+    let sql = format!(
+        "SELECT active_report_json FROM model_verification_results
+         WHERE provider_id IN ({placeholders})
+         ORDER BY provider_id, app_type, model"
+    );
+    let conn = lock_conn!(db.conn);
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| AppError::Database(format!("查询模型验证结果失败: {error}")))?;
+    let report_jsons = statement
+        .query_map(params_from_iter(provider_ids.iter()), |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .map_err(|error| AppError::Database(format!("读取模型验证结果失败: {error}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| AppError::Database(format!("解析模型验证结果失败: {error}")))?;
+
+    report_jsons
+        .into_iter()
+        .flatten()
+        .map(|report_json| {
+            serde_json::from_str::<VerificationReport>(&report_json)
+                .map(|report| report.summary())
+                .map_err(|error| AppError::Config(format!("解析验证报告失败: {error}")))
+        })
+        .collect()
+}
+
 pub fn clear_scope(db: &Database, scope: &TargetScope) -> Result<(), AppError> {
     let conn = lock_conn!(db.conn);
     conn.execute(

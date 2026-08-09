@@ -712,6 +712,9 @@ pub fn run() {
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
+            app_state
+                .model_verification
+                .attach_app_handle(app.handle().clone());
 
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
@@ -1530,6 +1533,9 @@ pub fn run() {
             commands::relay_purchase,
             commands::relay_restore_official_login,
             commands::list_verification_models,
+            commands::start_model_verification,
+            commands::cancel_model_verification,
+            commands::get_model_verification_results,
             // LoongPort 官网直连账号（vendor）
             commands::vendor_list_accounts,
             commands::vendor_open_login,
