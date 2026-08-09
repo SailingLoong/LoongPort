@@ -3189,6 +3189,7 @@
     },
     "modelVerification": {
       "title": "Verify model",
+      "titleWithTier": "Verify model · {{tierName}}",
       "description": "Run a verification against one model configured for this provider.",
       "globalScopeNote": "Apply automatic verification to all configured models.",
       "model": {
@@ -3206,7 +3207,9 @@
       "status": { "running": "Verifying {{completed}} / {{total}}" },
       "tierVerdict": {
         "suspicious": "Model suspicious",
-        "anomaly": "Model anomaly"
+        "anomaly": "Model anomaly",
+        "suspiciousHint": "Verification found suspicious behavior. Select Verify model for details.",
+        "anomalyHint": "Verification found an anomaly. Select Verify model for details."
       },
       "verdict": {
         "trusted": "Trusted",

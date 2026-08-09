@@ -10,6 +10,10 @@ vi.mock("react-i18next", () => ({
           "loongport.modelVerification.title": "模型验证",
           "loongport.modelVerification.tierVerdict.suspicious": "模型存疑",
           "loongport.modelVerification.tierVerdict.anomaly": "模型异常",
+          "loongport.modelVerification.tierVerdict.suspiciousHint":
+            "模型验证结果存疑，请点击「模型验证」查看详情",
+          "loongport.modelVerification.tierVerdict.anomalyHint":
+            "模型验证发现异常，请点击「模型验证」查看详情",
           "loongport.tier.checkConnectivity": "检测连通",
           "loongport.tier.userEdited": "已手工维护",
           "loongport.tier.userEditedHint": "手工维护说明",
@@ -116,6 +120,9 @@ describe("RelayRow model verification", () => {
     });
     expect(screen.getByText("已手工维护")).toBeInTheDocument();
     expect(screen.getByText("模型存疑")).toBeInTheDocument();
+    expect(
+      screen.getByTitle("模型验证结果存疑，请点击「模型验证」查看详情"),
+    ).toBeInTheDocument();
 
     rerender(
       <RelayRow
@@ -129,6 +136,9 @@ describe("RelayRow model verification", () => {
     expect(verify).toBeDisabled();
     expect(verify.querySelector(".animate-spin")).toBeInTheDocument();
     expect(screen.getByText("模型异常")).toBeInTheDocument();
+    expect(
+      screen.getByTitle("模型验证发现异常，请点击「模型验证」查看详情"),
+    ).toBeInTheDocument();
   });
 
   it.each(["trusted", "inconclusive"] as const)(

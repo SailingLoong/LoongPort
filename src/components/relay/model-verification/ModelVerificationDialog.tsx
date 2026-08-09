@@ -26,6 +26,7 @@ import { useModelVerificationRun } from "./useModelVerificationRun";
 export interface ModelVerificationDialogProps {
   providerId: string;
   appType: string;
+  tierDisplayName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onRunningChange?: (running: boolean) => void;
@@ -36,6 +37,7 @@ type ModelsState = "idle" | "loading" | "ready" | "error";
 export function ModelVerificationDialog({
   providerId,
   appType,
+  tierDisplayName,
   open,
   onOpenChange,
   onRunningChange,
@@ -90,7 +92,11 @@ export function ModelVerificationDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[30rem] gap-0 p-0">
         <DialogHeader>
-          <DialogTitle>{t("loongport.modelVerification.title")}</DialogTitle>
+          <DialogTitle>
+            {t("loongport.modelVerification.titleWithTier", {
+              tierName: tierDisplayName,
+            })}
+          </DialogTitle>
           <DialogDescription>
             {t("loongport.modelVerification.description")}
           </DialogDescription>

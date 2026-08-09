@@ -715,6 +715,9 @@ function TierItem({
                   ? "text-red-600 ring-red-500/30 dark:text-red-400"
                   : "text-amber-600 ring-amber-500/30 dark:text-amber-400",
               )}
+              title={t(
+                `loongport.modelVerification.tierVerdict.${verificationProblem}Hint`,
+              )}
             >
               {t(
                 `loongport.modelVerification.tierVerdict.${verificationProblem}`,

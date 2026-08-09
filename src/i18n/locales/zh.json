@@ -3189,6 +3189,7 @@
     },
     "modelVerification": {
       "title": "模型验证",
+      "titleWithTier": "验证模型 · {{tierName}}",
       "description": "验证这个供应商已配置的一个模型。",
       "globalScopeNote": "对所有已配置模型启用自动验证。",
       "model": {
@@ -3200,7 +3201,12 @@
       },
       "actions": { "start": "开始验证", "stop": "停止验证", "retry": "重试" },
       "status": { "running": "正在验证 {{completed}} / {{total}}" },
-      "tierVerdict": { "suspicious": "模型存疑", "anomaly": "模型异常" },
+      "tierVerdict": {
+        "suspicious": "模型存疑",
+        "anomaly": "模型异常",
+        "suspiciousHint": "模型验证结果存疑，请点击「模型验证」查看详情",
+        "anomalyHint": "模型验证发现异常，请点击「模型验证」查看详情"
+      },
       "verdict": {
         "trusted": "可信",
         "suspicious": "可疑",

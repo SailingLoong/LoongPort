@@ -1238,6 +1238,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
           key={`${selectedVerificationTier.providerId}:${appId}`}
           providerId={selectedVerificationTier.providerId}
           appType={appId}
+          tierDisplayName={selectedVerificationTier.displayName}
           open
           onOpenChange={(open) => {
             if (!open) setSelectedVerificationTier(null);

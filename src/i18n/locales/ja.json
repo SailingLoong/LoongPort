@@ -3189,6 +3189,7 @@
     },
     "modelVerification": {
       "title": "モデルを検証",
+      "titleWithTier": "モデルを検証 · {{tierName}}",
       "description": "このプロバイダーに設定されたモデルを 1 つ検証します。",
       "globalScopeNote": "設定済みのすべてのモデルに自動検証を適用します。",
       "model": {
@@ -3204,7 +3205,12 @@
         "retry": "再試行"
       },
       "status": { "running": "検証中 {{completed}} / {{total}}" },
-      "tierVerdict": { "suspicious": "モデルに疑い", "anomaly": "モデル異常" },
+      "tierVerdict": {
+        "suspicious": "モデルに疑い",
+        "anomaly": "モデル異常",
+        "suspiciousHint": "検証で疑わしい挙動が見つかりました。モデルを検証で詳細を確認してください。",
+        "anomalyHint": "検証で異常が見つかりました。モデルを検証で詳細を確認してください。"
+      },
       "verdict": {
         "trusted": "信頼済み",
         "suspicious": "疑わしい",

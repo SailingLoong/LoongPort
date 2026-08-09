@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -23,6 +24,7 @@ vi.mock("react-i18next", () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       const strings: Record<string, string> = {
         "loongport.modelVerification.title": "模型验证",
+        "loongport.modelVerification.titleWithTier": "验证模型 · {{tierName}}",
         "loongport.modelVerification.model.label": "选择模型",
         "loongport.modelVerification.model.loading": "正在加载模型…",
         "loongport.modelVerification.model.empty": "没有可验证的模型",
@@ -104,14 +106,39 @@ import { ModelVerificationDialog } from "../ModelVerificationDialog";
 let progressListener: ((event: unknown) => void) | undefined;
 let changedListener: ((event: unknown) => void) | undefined;
 
-function DialogHarness({ open = true }: { open?: boolean }) {
+function DialogHarness({
+  open = true,
+  tierName = "旗舰",
+}: {
+  open?: boolean;
+  tierName?: string;
+}) {
   return (
     <ModelVerificationDialog
       providerId="provider-a"
       appType="codex"
+      tierDisplayName={tierName}
       open={open}
       onOpenChange={() => {}}
     />
+  );
+}
+
+function ReopenHarness() {
+  const [open, setOpen] = useState(true);
+
+  return open ? (
+    <ModelVerificationDialog
+      providerId="provider-a"
+      appType="codex"
+      tierDisplayName="旗舰"
+      open
+      onOpenChange={setOpen}
+    />
+  ) : (
+    <button type="button" onClick={() => setOpen(true)}>
+      reopen dialog
+    </button>
   );
 }
 
@@ -152,6 +179,14 @@ describe("ModelVerificationDialog", () => {
     );
   });
 
+  it("identifies the selected tier in the localized dialog title", async () => {
+    render(<DialogHarness tierName="旗舰分组" />);
+
+    expect(
+      await screen.findByRole("heading", { name: "验证模型 · 旗舰分组" }),
+    ).toBeInTheDocument();
+  });
+
   it("requires an explicit model selection", async () => {
     render(<DialogHarness />);
 
@@ -183,6 +218,7 @@ describe("ModelVerificationDialog", () => {
       <ModelVerificationDialog
         providerId="provider-a"
         appType="codex"
+        tierDisplayName="旗舰"
         open
         onOpenChange={onOpenChange}
       />,
@@ -262,5 +298,34 @@ describe("ModelVerificationDialog", () => {
     rerender(<DialogHarness />);
 
     await waitFor(() => expect(api.listModels).toHaveBeenCalledTimes(2));
+  });
+
+  it("accepts the same backend run ID after closing and reopening a tier dialog", async () => {
+    render(<ReopenHarness />);
+    fireEvent.click(await openModelOptions());
+    fireEvent.click(screen.getByRole("button", { name: "开始验证" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "common.close" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "reopen dialog" }),
+    );
+    fireEvent.click(await openModelOptions());
+    fireEvent.click(screen.getByRole("button", { name: "开始验证" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(2));
+
+    act(() => {
+      progressListener?.({
+        runId: "run-1",
+        providerId: "provider-a",
+        appType: "codex",
+        model: "gpt-5",
+        state: "running",
+        completedChecks: 1,
+        totalChecks: 4,
+        failure: null,
+      });
+    });
+    await screen.findByText("正在验证 1 / 4");
   });
 });

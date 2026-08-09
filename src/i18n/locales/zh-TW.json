@@ -3190,6 +3190,7 @@
     },
     "modelVerification": {
       "title": "模型驗證",
+      "titleWithTier": "驗證模型 · {{tierName}}",
       "description": "驗證這個供應商已設定的一個模型。",
       "globalScopeNote": "對所有已設定模型啟用自動驗證。",
       "model": {
@@ -3201,7 +3202,12 @@
       },
       "actions": { "start": "開始驗證", "stop": "停止驗證", "retry": "重試" },
       "status": { "running": "正在驗證 {{completed}} / {{total}}" },
-      "tierVerdict": { "suspicious": "模型存疑", "anomaly": "模型異常" },
+      "tierVerdict": {
+        "suspicious": "模型存疑",
+        "anomaly": "模型異常",
+        "suspiciousHint": "模型驗證結果存疑，請點擊「模型驗證」查看詳情",
+        "anomalyHint": "模型驗證發現異常，請點擊「模型驗證」查看詳情"
+      },
       "verdict": {
         "trusted": "可信",
         "suspicious": "可疑",
