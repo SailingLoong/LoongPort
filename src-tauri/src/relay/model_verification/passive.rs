@@ -101,6 +101,10 @@ impl VerificationIngress {
         self.generation.load(Ordering::Acquire)
     }
 
+    pub fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn begin(&self, target: TargetKey) -> Option<IngressTap> {
         if !self.enabled.load(Ordering::Acquire)
             || AppType::from_str(&target.app_type)

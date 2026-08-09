@@ -39,6 +39,12 @@ pub trait VerificationEventSink: Send + Sync {
     fn attach_app_handle(&self, _app_handle: tauri::AppHandle) {}
     fn emit_progress(&self, event: &VerificationProgressEvent) -> Result<(), ()>;
     fn emit_changed(&self, scope: &TargetScope) -> Result<(), ()>;
+    fn emit_anomaly(
+        &self,
+        _event: &crate::events::ModelVerificationAnomalyEvent,
+    ) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 pub(crate) struct NoopEventSink;
@@ -88,6 +94,19 @@ impl VerificationEventSink for TauriEventSink {
         app_handle.map_or(Ok(()), |app_handle| {
             app_handle
                 .emit(crate::events::MODEL_VERIFICATION_CHANGED, scope)
+                .map_err(|_| ())
+        })
+    }
+
+    fn emit_anomaly(&self, event: &crate::events::ModelVerificationAnomalyEvent) -> Result<(), ()> {
+        let app_handle = self
+            .app_handle
+            .read()
+            .expect("model verification app handle lock poisoned")
+            .clone();
+        app_handle.map_or(Ok(()), |app_handle| {
+            app_handle
+                .emit(crate::events::MODEL_VERIFICATION_ANOMALY, event)
                 .map_err(|_| ())
         })
     }
@@ -191,11 +210,23 @@ impl ModelVerificationCoordinator {
                     batch.target.provider_id.clone(),
                     batch.target.app_type.clone(),
                 );
-                match crate::relay::model_verification::store::upsert_passive(
+                match crate::relay::model_verification::store::upsert_passive_with_notifications(
                     &coordinator.db,
                     &batch,
                 ) {
-                    Ok(_) => coordinator.emit_changed(&scope),
+                    Ok((_merged, fingerprints)) => {
+                        for fingerprint in fingerprints {
+                            let _ = coordinator.event_sink.emit_anomaly(
+                                &crate::events::ModelVerificationAnomalyEvent {
+                                    provider_id: batch.target.provider_id.clone(),
+                                    app_type: batch.target.app_type.clone(),
+                                    model: batch.target.model.clone(),
+                                    fingerprint,
+                                },
+                            );
+                        }
+                        coordinator.emit_changed(&scope)
+                    }
                     Err(_error) => log::warn!(
                         "model verification passive persistence failed for {}:{} ({})",
                         batch.target.provider_id,
@@ -358,6 +389,7 @@ impl ModelVerificationCoordinator {
             .mutation
             .lock()
             .expect("model verification mutation mutex poisoned");
+        self.passive_ingress.bump_generation();
         crate::relay::model_verification::store::clear_scope(&self.db, scope)
             .map_err(|_| RunFailureKind::InvalidResponse)?;
 

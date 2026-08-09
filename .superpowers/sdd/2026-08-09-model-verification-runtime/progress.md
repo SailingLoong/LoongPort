@@ -40,3 +40,10 @@ Pre-flight review: no blocking requirement contradictions. Execution order is 1 
 - Independent review: completed locally; no blocking findings.
 - Focused verification: response processor 8 passed; protocol suite 42 passed; compile, formatting, and diff checks passed.
 - Runtime Task 8 is next.
+
+## Runtime Task 8 — complete
+
+- Implementation commit: pending (`feat(model-verification): deduplicate runtime anomaly alerts`)
+- Independent review: completed locally; no blocking findings.
+- Focused verification: event consistency passed; store 8 passed; compile, formatting, and diff checks passed.
+- Runtime Task 9 is next.

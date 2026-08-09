@@ -19,9 +19,11 @@
 //! （尺子 2：不为不存在的跨语言契约预建）。判断标准：跨语言 = Rust emit + 前端 listen
 //! 两侧都有。
 
+use serde::Serialize;
 use tauri::Emitter;
 
 use crate::app_config::AppType;
+use crate::relay::model_verification::passive::AnomalyFingerprint;
 
 /// 当前供应商切换后通知前端（`providersApi.onSwitched` / `RelaySection` 监听）。
 pub const PROVIDER_SWITCHED: &str = "provider-switched";
@@ -49,6 +51,16 @@ pub const VENDOR_LOGIN_ERROR: &str = "vendor-login-error";
 pub const MODEL_VERIFICATION_PROGRESS: &str = "model-verification-progress";
 /// 模型验证持久化结果变化（档位行与模型验证弹窗监听）。
 pub const MODEL_VERIFICATION_CHANGED: &str = "model-verification-changed";
+pub const MODEL_VERIFICATION_ANOMALY: &str = "model-verification-anomaly";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelVerificationAnomalyEvent {
+    pub provider_id: String,
+    pub app_type: String,
+    pub model: String,
+    pub fingerprint: AnomalyFingerprint,
+}
 
 /// 广播「当前供应商变了」。
 ///
@@ -139,6 +151,10 @@ mod consistency_tests {
             (
                 "MODEL_VERIFICATION_CHANGED",
                 super::MODEL_VERIFICATION_CHANGED,
+            ),
+            (
+                "MODEL_VERIFICATION_ANOMALY",
+                super::MODEL_VERIFICATION_ANOMALY,
             ),
         ];
 

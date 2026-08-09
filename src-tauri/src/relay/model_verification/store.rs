@@ -448,27 +448,44 @@ pub fn upsert_active(db: &Database, report: &VerificationReport) -> Result<(), A
 
 /// Persists a bounded aggregate and its policy-owned merged verdict for one target.
 pub fn upsert_passive(db: &Database, batch: &EvidenceBatch) -> Result<MergedReport, AppError> {
+    upsert_passive_with_notifications(db, batch).map(|(merged, _)| merged)
+}
+
+pub fn upsert_passive_with_notifications(
+    db: &Database,
+    batch: &EvidenceBatch,
+) -> Result<(MergedReport, Vec<AnomalyFingerprint>), AppError> {
     let conn = lock_conn!(db.conn);
-    let (existing, _) = load_passive_state(&conn, &batch.target)?;
+    let (existing, notified) = load_passive_state(&conn, &batch.target)?;
     let mut aggregate = existing.unwrap_or_default();
     reduce_batch(&mut aggregate, batch);
     let active = load_active_report(&conn, &batch.target)?;
     let merged = verdict::merge(active.as_ref(), Some(&aggregate));
+    let newly_claimed = aggregate
+        .unresolved_fingerprints()
+        .iter()
+        .copied()
+        .filter(|fingerprint| verdict::is_high_confidence_anomaly(fingerprint.code()))
+        .filter(|fingerprint| !notified.contains(fingerprint))
+        .collect::<Vec<_>>();
+    let mut notified = notified;
+    notified.extend(newly_claimed.iter().copied());
     let passive_aggregate_json = serde_json::to_string(&aggregate)
         .map_err(|error| AppError::Config(format!("序列化被动验证聚合失败: {error}")))?;
 
     conn.execute(
         "INSERT INTO model_verification_results (
             provider_id, app_type, model, passive_aggregate_json, verdict, evidence_level,
-            rules_version, passive_observed_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            rules_version, passive_observed_at, updated_at, notified_fingerprints_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(provider_id, app_type, model) DO UPDATE SET
             passive_aggregate_json = excluded.passive_aggregate_json,
             verdict = excluded.verdict,
             evidence_level = excluded.evidence_level,
             rules_version = excluded.rules_version,
             passive_observed_at = excluded.passive_observed_at,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            notified_fingerprints_json = excluded.notified_fingerprints_json",
         params![
             &batch.target.provider_id,
             &batch.target.app_type,
@@ -479,10 +496,11 @@ pub fn upsert_passive(db: &Database, batch: &EvidenceBatch) -> Result<MergedRepo
             RULES_VERSION,
             batch.observed_at,
             batch.observed_at,
+            serialize_fingerprints(&notified)?,
         ],
     )
     .map_err(|error| AppError::Database(format!("保存被动模型验证结果失败: {error}")))?;
-    Ok(merged)
+    Ok((merged, newly_claimed))
 }
 
 fn load_passive_state(
