@@ -89,3 +89,133 @@ Ran in `/Users/allen/code/LoongPort-workspace/LoongPort/.worktrees/newapi-relay/
 ## commit hash
 
 `ad714e70` (`Add native NewAPI HTTP session client`)
+
+---
+
+## Fix round 1 (2026-08-10)
+
+### status
+
+DONE_WITH_CONCERNS
+
+### files changed in fix round 1
+
+- `src-tauri/src/relay/newapi.rs`
+- `.superpowers/sdd/2026-08-10-newapi-relay/task-4a-newapi-http-report.md`
+
+### findings addressed
+
+1. `refresh_session()` now preserves HTTP status/error-class handling before enforcing rotated-cookie presence; rotated `new_api_refresh` is only required on the success path.
+2. The report now includes explicit review-time reconstructed RED evidence for the previously undocumented Task 4a behaviors, clearly labeled as reconstruction rather than original chronology.
+3. Token pagination now starts at `p=1` and advances `p=2`, `p=3`, ... so it matches upstream NewAPI pagination semantics and avoids repeating page 1.
+
+### fix round 1 RED -> GREEN evidence
+
+#### A. refresh HTTP status is reported before rotated-cookie enforcement
+
+- RED command:
+  - `cargo test relay::newapi::tests::failed_refresh_reports_http_status_before_cookie_rotation_requirement --lib`
+- RED summary:
+  - FAILED
+  - `thread 'relay::newapi::tests::failed_refresh_reports_http_status_before_cookie_rotation_requirement' ... panicked ... 配置错误: newapi refresh 响应缺少 rotated new_api_refresh cookie`
+  - This proved the implementation was checking for a rotated cookie before returning the required `HTTP 401` context.
+- GREEN command:
+  - `cargo test relay::newapi::tests::failed_refresh_reports_http_status_before_cookie_rotation_requirement --lib`
+- GREEN summary:
+  - `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2855 filtered out; finished in 0.05s`
+
+#### B. token pagination starts at page 1 and advances monotonically
+
+- RED command:
+  - `cargo test relay::newapi::tests::token_listing_starts_at_page_one_and_stops_on_empty_page --lib`
+- RED summary:
+  - FAILED
+  - `assertion 'left == right' failed`
+  - `left: "/api/token/?p=0&size=100"`
+  - `right: "/api/token/?p=1&size=100"`
+- GREEN command:
+  - `cargo test relay::newapi::tests::token_listing_starts_at_page_one_and_stops_on_empty_page --lib`
+- GREEN summary:
+  - `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2855 filtered out; finished in 0.05s`
+
+### review-time reconstructed RED evidence for missing Task 4a chronology
+
+This section is intentionally labeled **reconstructed**. It is **not** the original Task 4a chronology.
+
+On **Monday, August 10, 2026**, I created an isolated temporary source snapshot from base commit `362f8a6fd3a18e365f9cdea3030491bc3084d99d` at:
+
+- `/tmp/task4a-red-repro.UYg1Z7`
+
+Method:
+
+- archived the repository at the Task 4a base commit;
+- kept the base commit's production `src-tauri/src/relay/newapi.rs`;
+- grafted in the current `#[cfg(test)]` module so the required Task 4a tests could be compiled against the pre-implementation source without rewriting history.
+
+This cannot retroactively recreate the original test-first sequence, but it does provide the strongest reproducible RED evidence I can honestly supply now.
+
+#### Reconstructed refresh-behavior REDs
+
+Commands run against `/tmp/task4a-red-repro.UYg1Z7/src-tauri`:
+
+- `cargo test relay::newapi::tests::successful_refresh_requires_rotated_refresh_cookie --lib`
+- `cargo test relay::newapi::tests::malformed_and_failed_refresh_responses_do_not_leak_secrets --lib`
+
+Reconstructed RED reason:
+
+- compile FAILED with `error[E0425]: cannot find function 'refresh_session' in this scope`
+- cargo compiles the whole unit-test module, so the command also surfaced the other missing `refresh_session` call sites from the grafted refresh tests in the same compile pass
+
+#### Reconstructed authenticated-client REDs
+
+Commands run against `/tmp/task4a-red-repro.UYg1Z7/src-tauri`:
+
+- `cargo test relay::newapi::tests::token_listing_starts_at_page_one_and_stops_on_empty_page --lib`
+- `cargo test relay::newapi::tests::create_token_sends_the_upstream_unlimited_payload --lib`
+- `cargo test relay::newapi::tests::reveal_and_delete_use_the_expected_endpoints --lib`
+- `cargo test relay::newapi::tests::authenticated_failures_do_not_leak_response_or_access_secrets --lib`
+
+Reconstructed RED reason:
+
+- compile FAILED with `error[E0433]: use of undeclared type 'NewApiClient'`
+- because the base snapshot predates the concrete authenticated client, cargo again surfaced the full batch of missing `NewApiClient` references from the grafted test module during each compile attempt
+
+Representative compile trailer observed on the reconstructed commands:
+
+- `error: could not compile 'cc-switch' (lib test) due to 12 previous errors`
+
+### fix round 1 implementation summary
+
+- moved refresh HTTP status/body handling ahead of rotated-cookie enforcement by cloning headers, reading status/body, returning `HTTP <code>` failures first, and only then parsing the rotated cookie on the success path
+- changed token pagination from `for page in 0..TOKEN_PAGE_LIMIT` to `for page in 1..=TOKEN_PAGE_LIMIT`
+- added one new focused listener regression for refresh error ordering
+- updated the token-list listener regression to assert upstream page-1/page-2/page-3 sequencing
+
+### fix round 1 final verification
+
+Ran in `/Users/allen/code/LoongPort-workspace/LoongPort/.worktrees/newapi-relay/src-tauri` on **Monday, August 10, 2026**:
+
+1. `cargo test relay::newapi::tests --lib`
+   - PASS
+   - Summary: `test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 2841 filtered out; finished in 0.06s`
+2. `cargo fmt --check`
+   - PASS
+   - Summary: exited successfully with no diff-producing output
+3. `cargo clippy --lib -- -D warnings`
+   - PASS
+   - Summary: `Finished dev profile [unoptimized + debuginfo] target(s) in 5.97s`
+
+### fix round 1 self-review
+
+- Reviewer finding 1 is fixed at the root: refresh no longer misclassifies HTTP failures as rotated-cookie failures.
+- Controller-confirmed pagination finding is fixed at the wire-contract level and now pinned by the listener test on page numbering.
+- Reviewer finding 2 is only partially remediable because the original chronology already happened. The appended reconstructed section is explicit about that limitation and avoids inventing history.
+
+### fix round 1 concerns
+
+- Strict historical test-first compliance for the previously omitted Task 4a behaviors cannot be retroactively restored; the reconstructed temporary-base evidence is the strongest honest substitute, and this remains a real concern in the record.
+- `#![allow(dead_code)]` and `relay_uses_newapi_backend(...)` remain deferred exactly as directed by the controller; this fix round did not touch them.
+
+### fix round 1 commit hash
+
+PENDING_FIX_ROUND_1_COMMIT

@@ -308,8 +308,8 @@ pub async fn refresh_session(
             describe_send_error(&error)
         ))
     })?;
-    let rotated_cookie = extract_rotated_refresh_cookie(response.headers())?;
     let status = response.status();
+    let headers = response.headers().clone();
     let body = response
         .text()
         .await
@@ -339,6 +339,7 @@ pub async fn refresh_session(
         ));
     }
     validate_self_account(&refreshed.user, "refresh")?;
+    let rotated_cookie = extract_rotated_refresh_cookie(&headers)?;
 
     Ok(RefreshedSession {
         access_token: refreshed.access_token,
@@ -452,7 +453,7 @@ impl NewApiClient {
 
     pub async fn list_tokens(&self) -> Result<Vec<Token>, AppError> {
         let mut items = Vec::new();
-        for page in 0..TOKEN_PAGE_LIMIT {
+        for page in 1..=TOKEN_PAGE_LIMIT {
             let body = self
                 .send(
                     self.request(
@@ -804,6 +805,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_refresh_reports_http_status_before_cookie_rotation_requirement() {
+        let request_secret = "sid-401.previous-secret";
+        let response_secret = "sid-401.response-secret";
+        let server = TestServer::spawn(vec![TestResponse {
+            status: StatusCode::UNAUTHORIZED,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: format!(r#"{{"success":false,"message":"bad {response_secret}"}}"#),
+        }])
+        .await;
+
+        let error = match refresh_session(&server.origin, request_secret, None).await {
+            Ok(_) => panic!("refresh should fail with HTTP status context"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("HTTP 401"), "{error}");
+        assert!(!error.contains("rotated new_api_refresh cookie"), "{error}");
+        assert!(!error.contains("previous-secret"), "{error}");
+        assert!(!error.contains("response-secret"), "{error}");
+    }
+
+    #[tokio::test]
     async fn successful_refresh_requires_rotated_refresh_cookie() {
         let server = TestServer::spawn(vec![TestResponse::json(
             r#"{
@@ -963,11 +986,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_listing_paginates_and_stops_on_empty_page() {
+    async fn token_listing_starts_at_page_one_and_stops_on_empty_page() {
         let server = TestServer::spawn(vec![
             TestResponse::json(
                 r#"{"success":true,"message":"","data":{
-                    "page":0,"page_size":100,"total":250,
+                    "page":1,"page_size":100,"total":250,
                     "items":[
                         {"id":1,"name":"managed-1","key":"sk-***","status":1,"group":"vip"},
                         {"id":2,"name":"managed-2","key":"sk-***","status":1,"group":"vip"}
@@ -976,7 +999,7 @@ mod tests {
             ),
             TestResponse::json(
                 r#"{"success":true,"message":"","data":{
-                    "page":1,"page_size":100,"total":250,
+                    "page":2,"page_size":100,"total":250,
                     "items":[
                         {"id":3,"name":"managed-3","key":"sk-***","status":1,"group":"vip"}
                     ]
@@ -984,7 +1007,7 @@ mod tests {
             ),
             TestResponse::json(
                 r#"{"success":true,"message":"","data":{
-                    "page":2,"page_size":100,"total":250,"items":[]
+                    "page":3,"page_size":100,"total":250,"items":[]
                 }}"#,
             ),
         ])
@@ -999,9 +1022,9 @@ mod tests {
         );
         let requests = server.requests().await;
         assert_eq!(requests.len(), 3);
-        assert_eq!(requests[0].path_and_query, "/api/token/?p=0&size=100");
-        assert_eq!(requests[1].path_and_query, "/api/token/?p=1&size=100");
-        assert_eq!(requests[2].path_and_query, "/api/token/?p=2&size=100");
+        assert_eq!(requests[0].path_and_query, "/api/token/?p=1&size=100");
+        assert_eq!(requests[1].path_and_query, "/api/token/?p=2&size=100");
+        assert_eq!(requests[2].path_and_query, "/api/token/?p=3&size=100");
     }
 
     #[tokio::test]
