@@ -251,6 +251,18 @@ function interpolationVariables(value: string): string[] {
   ).sort();
 }
 
+function flattenStringValues(root: unknown): string[] {
+  if (typeof root === "string") return [root];
+  if (root == null || typeof root !== "object") return [];
+  return Object.values(root as Translations).flatMap(flattenStringValues);
+}
+
+function visibleCopy(root: unknown): string {
+  return flattenStringValues(root)
+    .map((value) => value.replace(/\{\{[^}]+\}\}/g, ""))
+    .join("\n");
+}
+
 describe("LoongPort tier page locale coverage", () => {
   it.each(locales)("defines every loongport key in %s", (_locale, ns) => {
     const missing = requiredKeys.filter((key) => {
@@ -277,6 +289,148 @@ describe("LoongPort tier page locale coverage", () => {
       });
 
       expect(mismatched).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["zh", zh.loongport, "接入配置", /档位/u],
+    ["zh-TW", zhTW.loongport, "連線設定檔", /檔位|方案/u],
+    ["en", en.loongport, "connection profile", /\btier(?:s)?\b/iu],
+    ["ja", ja.loongport, "接続プロファイル", /プラン|ティア|枠/u],
+  ] as const)(
+    "%s uses the approved connection-profile terminology",
+    (_locale, ns, approvedTerm, deprecatedTerm) => {
+      const copy = visibleCopy(ns);
+
+      expect(copy).toContain(approvedTerm);
+      expect(copy).not.toMatch(deprecatedTerm);
+    },
+  );
+
+  it.each([
+    ["zh", zh.loongport, /去登录|收编|会上报|不会上报|本地代理观察/u],
+    ["zh-TW", zhTW.loongport, /去登入|收編|會上報|不會上報|本機代理/u],
+    ["en", en.loongport, /Get keys|Re-fetch available groups|local proxy/iu],
+    ["ja", ja.loongport, /キーを取得|ローカルプロキシ/u],
+  ] as const)(
+    "%s omits internal and conversational wording",
+    (_locale, ns, deprecatedWording) => {
+      expect(visibleCopy(ns)).not.toMatch(deprecatedWording);
+    },
+  );
+
+  it.each([
+    [
+      "zh",
+      zh.loongport,
+      {
+        trusted: "验证通过",
+        suspicious: "需要复核",
+        anomaly: "检测到异常",
+        inconclusive: "证据不足",
+      },
+    ],
+    [
+      "zh-TW",
+      zhTW.loongport,
+      {
+        trusted: "驗證通過",
+        suspicious: "需要複核",
+        anomaly: "偵測到異常",
+        inconclusive: "證據不足",
+      },
+    ],
+    [
+      "en",
+      en.loongport,
+      {
+        trusted: "Verified",
+        suspicious: "Review needed",
+        anomaly: "Anomaly detected",
+        inconclusive: "Insufficient evidence",
+      },
+    ],
+    [
+      "ja",
+      ja.loongport,
+      {
+        trusted: "検証済み",
+        suspicious: "要確認",
+        anomaly: "異常を検出",
+        inconclusive: "証拠不足",
+      },
+    ],
+  ] as const)(
+    "%s keeps the approved model-verification verdict semantics",
+    (_locale, ns, expectedVerdicts) => {
+      expect(ns.modelVerification.verdict).toMatchObject(expectedVerdicts);
+    },
+  );
+
+  it.each([
+    [
+      "zh",
+      zh.loongport,
+      {
+        sendsLabel: "将收集",
+        neverLabel: "不会收集",
+        accept: "允许分享",
+        decline: "不分享",
+        noExtraRequest: "不额外发送验证请求",
+        noConversationStorage: "不保存对话内容",
+      },
+    ],
+    [
+      "zh-TW",
+      zhTW.loongport,
+      {
+        sendsLabel: "將收集",
+        neverLabel: "不會收集",
+        accept: "允許分享",
+        decline: "不分享",
+        noExtraRequest: "不會另外傳送驗證請求",
+        noConversationStorage: "不會儲存對話內容",
+      },
+    ],
+    [
+      "en",
+      en.loongport,
+      {
+        sendsLabel: "Will collect",
+        neverLabel: "Will not collect",
+        accept: "Allow sharing",
+        decline: "Don't share",
+        noExtraRequest: "does not send additional verification requests",
+        noConversationStorage: "does not save conversation content",
+      },
+    ],
+    [
+      "ja",
+      ja.loongport,
+      {
+        sendsLabel: "収集する情報",
+        neverLabel: "収集しない情報",
+        accept: "共有を許可",
+        decline: "共有しない",
+        noExtraRequest: "追加の検証リクエストは送信せず",
+        noConversationStorage: "会話内容は保存しません",
+      },
+    ],
+  ] as const)(
+    "%s states the approved privacy facts and consent actions",
+    (_locale, ns, expected) => {
+      expect(ns.stats).toMatchObject({
+        sendsLabel: expected.sendsLabel,
+        neverLabel: expected.neverLabel,
+        accept: expected.accept,
+        decline: expected.decline,
+      });
+      expect(ns.modelVerification.runtime.autoHelp).toContain(
+        expected.noExtraRequest,
+      );
+      expect(ns.modelVerification.runtime.autoHelp).toContain(
+        expected.noConversationStorage,
+      );
     },
   );
 });

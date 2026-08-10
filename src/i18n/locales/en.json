@@ -3059,197 +3059,210 @@
   },
   "loongport": {
     "sections": {
-      "relay": "Relay Stations",
+      "relay": "Relay services",
       "official": "Official API",
-      "other": "Others"
+      "other": "Other"
     },
     "tierList": {
-      "empty": "No relay site added yet",
-      "addSite": "Add relay site",
-      "refresh": "Refresh tiers & keys"
+      "empty": "No relay services added",
+      "addSite": "Add relay service",
+      "refresh": "Update connection profiles"
     },
     "row": {
       "expand": "Expand",
       "collapse": "Collapse",
       "notLoggedIn": "Not signed in",
       "login": "Sign in",
-      "sessionExpired": "Session expired",
+      "sessionExpired": "Sign-in session expired",
       "reLogin": "Sign in again",
-      "noTiers": "This account has no available group for this platform",
-      "getKeys": "Get keys",
-      "tierCount": "{{count}} tier(s)",
+      "noTiers": "This account has no groups available for the current platform",
+      "getKeys": "Create connection profiles",
+      "tierCount": "{{count}} connection profiles",
       "dragHandle": "Drag to reorder",
-      "refetchGroups": "Re-fetch available groups",
-      "purchaseHint": "Click to top up (opens this site’s purchase page in-app)",
-      "lowBalanceHint": "Balance below ${{threshold}} — click to top up",
-      "remove": "Remove this account (and its tiers)",
-      "removeBlockedByCurrent": "One of its tiers is in use — switch to another tier first",
-      "removeConfirmTitle": "Remove this account?",
-      "removeConfirmMessage": "This removes the login for “{{label}}” along with the {{count}} tier(s) it generated. Any balance stays with the relay — sign in again to use it.",
-      "removeConfirmMessageNeverLoggedIn": "This removes the “{{label}}” row along with the {{count}} tier(s) it generated. This account was never signed in, so you can add it again any time."
+      "more": "More actions",
+      "refetchGroups": "Update available groups",
+      "purchaseHint": "Open the relay service's top-up page",
+      "lowBalanceHint": "Balance is below ${{threshold}}. Select to top up",
+      "remove": "Delete account and connection profiles",
+      "removeBlockedByCurrent": "A connection profile from this account is in use. Switch to another profile before deleting it",
+      "removeConfirmTitle": "Delete this account?",
+      "removeConfirmMessage": "This deletes the sign-in session for “{{label}}” and its {{count}} connection profiles. Your balance remains with the relay service, and you can sign in again later.",
+      "removeConfirmMessageNeverLoggedIn": "This deletes “{{label}}” and its {{count}} connection profiles. You can add the account again later."
     },
     "tier": {
       "rateUnknown": "Rate unknown",
-      "rate": "{{value}}x",
+      "rate": "{{value}}×",
       "models": "Supported models",
-      "selectModel": "Switch to model {{model}}",
+      "selectModel": "Switch to {{model}}",
       "modelSelected": "Current model",
       "switching": "Switching…",
-      "checkConnectivity": "Check connectivity",
-      "resetConfig": "Restore default config",
-      "resetConfirmTitle": "Restore default config?",
-      "resetConfirmMessage": "This overwrites every edit you made to “{{name}}” with LoongPort's defaults. Your API key is kept.",
+      "checkConnectivity": "Test connection",
+      "resetConfig": "Restore default configuration",
+      "resetConfirmTitle": "Restore default configuration?",
+      "resetConfirmMessage": "This replaces all manual changes to “{{name}}” with the LoongPort defaults. The API key is preserved.",
       "resetConfirmButton": "Restore defaults",
-      "resetDone": "Restored default config for “{{name}}”",
-      "edit": "Edit config",
-      "editConfirmTitle": "Edit the config for “{{name}}” manually?",
-      "editConfirmMessage": "Once you save, this tier is yours to maintain: “Fetch keys” will only refresh its API key from then on, and will no longer overwrite your other changes.\n\nIf it stops working after your edits, use “Restore default config” on the tier row to go back to the defaults (your API key is kept).",
-      "editConfirmButton": "Continue to edit",
+      "resetDone": "Restored the default configuration for “{{name}}”",
+      "edit": "Edit connection profile",
+      "editConfirmTitle": "Edit the “{{name}}” connection profile?",
+      "editConfirmMessage": "After you save, LoongPort will no longer overwrite manual changes to this connection profile. Future group updates will update only the API key.\n\nTo undo your changes, select “Restore default configuration.” The API key is preserved.",
+      "editConfirmButton": "Continue editing",
       "userEdited": "Manually maintained",
-      "userEditedHint": "You have edited this tier's config. Refreshing groups will not overwrite it (only the API key is updated). Click here to restore the default config.",
-      "editMissing": "That tier's record no longer exists — use “Fetch keys” to regenerate it.",
-      "editCurrentNote": "This is the tier you're currently using. If your changes don't take effect, quit and reopen the ChatGPT desktop app — while it's running it rewrites Codex's config."
+      "userEditedHint": "This connection profile contains manual changes. Group updates change only the API key and preserve all other settings. Select to restore the defaults.",
+      "editMissing": "This connection profile could not be found. Create the connection profiles again.",
+      "editCurrentNote": "This connection profile is in use. If your changes do not take effect, quit and reopen the ChatGPT desktop app; a running ChatGPT app may overwrite the Codex configuration."
     },
     "stats": {
       "title": "Help improve LoongPort",
-      "intro": "We would like to know which relay sites people actually use, so we can prioritise support.",
-      "sendsLabel": "What is sent",
-      "sendsBody": "The relay site domains you added, how many accounts, the app version and your OS type.",
-      "neverLabel": "What is never sent",
-      "neverBody": "Accounts, emails, balances, keys, or usage records.",
-      "canChange": "You can turn this off at any time in Settings → General.",
-      "accept": "Sounds good",
-      "decline": "No thanks",
-      "idNote": "A randomly generated install ID is included, used only to de-duplicate reports. It is unrelated to your relay-site accounts."
+      "intro": "To prioritize relay service support, we would like to understand how LoongPort is being used.",
+      "sendsLabel": "Will collect",
+      "sendsBody": "Relay service domains, account counts, app version, and operating system.",
+      "neverLabel": "Will not collect",
+      "neverBody": "Sign-in details, email addresses, balances, API keys, or usage records.",
+      "canChange": "You can change this at any time in Settings → General.",
+      "accept": "Allow sharing",
+      "decline": "Don't share",
+      "idNote": "The data includes a randomly generated installation ID for deduplication. It is not linked to your relay service accounts."
     },
     "site": {
       "removed": "Removed {{label}}"
     },
     "session": {
-      "expired": "{{count}} account(s) signed out — please sign in again",
-      "connected": "Connected, fetching keys… (you can close the sign-in window)"
+      "expired": "The sign-in sessions for {{count}} accounts have expired. Sign in again.",
+      "connected": "Connected. Creating connection profiles. You can close the sign-in window now."
     },
     "provision": {
-      "ready": "{{count}} tier(s) ready",
-      "readyWithKeys": "{{count}} tier(s) ready, {{keys}} key(s) created",
-      "landedOnOtherPlatforms": "This account has {{count}} group(s), but none of them are for the current CLI. Switch to the matching tab above to see them.",
+      "ready": "Synced {{count}} connection profiles",
+      "readyWithKeys": "Synced {{count}} connection profiles and created {{keys}} API keys",
+      "landedOnOtherPlatforms": "This account has {{count}} groups, but none are available for the current platform. Select the corresponding platform above to view them.",
       "groupFailed": "{{group}}: {{reason}}",
-      "mergedProviders": "Adopted {{count}} duplicate provider(s) from cc-switch",
-      "refreshed": "Refreshed {{relays}} relay(s), {{tiers}} tier(s) total",
-      "refreshFailedWithReason": "Failed to refresh {{name}}: {{reason}}",
-      "refreshedWithKeys": "Refreshed {{relays}} relay(s), {{tiers}} tier(s) total, {{keys}} new key(s)"
+      "mergedProviders": "Merged {{count}} duplicate configurations",
+      "refreshed": "Updated {{relays}} relay services and synced {{tiers}} connection profiles",
+      "refreshFailedWithReason": "Could not update {{name}}: {{reason}}",
+      "refreshedWithKeys": "Updated {{relays}} relay services, synced {{tiers}} connection profiles, and created {{keys}} API keys"
     },
     "switch": {
       "done": "Switched to {{name}}",
-      "doneRelaunched": "Switched to {{name}}, ChatGPT reopened",
-      "doneNeedsRestart": "Switched to {{name}} — please restart ChatGPT manually",
-      "modelDone": "Switched {{name}} to model {{model}}",
-      "modelDoneRelaunched": "Switched {{name}} to model {{model}}, ChatGPT reopened",
-      "modelDoneNeedsRestart": "Switched {{name}} to model {{model}} — please restart ChatGPT manually"
+      "doneRelaunched": "Switched to {{name}} and reopened ChatGPT",
+      "doneNeedsRestart": "Switched to {{name}}. Restart ChatGPT manually",
+      "modelDone": "Switched {{name}} to {{model}}",
+      "modelDoneRelaunched": "Switched {{name}} to {{model}} and reopened ChatGPT",
+      "modelDoneNeedsRestart": "Switched {{name}} to {{model}}. Restart ChatGPT manually"
     },
     "official": {
-      "button": "Switch back to official login",
-      "hint": "Clear the routing LoongPort wrote and use your own ChatGPT account",
-      "confirmTitle": "Switch back to official login?",
-      "confirmMessage": "This quits ChatGPT, clears the routing config LoongPort wrote, and deletes the current codex login (backed up first). You'll need to sign in to ChatGPT yourself afterwards.",
-      "confirmButton": "Switch to official",
-      "done": "Switched back to official login — please sign in to ChatGPT",
-      "doneWithBackup": "Switched back to official login. Previous login backed up to {{path}}"
+      "button": "Restore official sign-in",
+      "hint": "Remove LoongPort routing and sign in with your official ChatGPT account",
+      "confirmTitle": "Restore official sign-in?",
+      "confirmMessage": "This quits ChatGPT, removes LoongPort routing, and deletes the current Codex sign-in session after backing it up. You will need to sign in to ChatGPT again.",
+      "confirmButton": "Restore official sign-in",
+      "done": "Official sign-in restored. Sign in to ChatGPT again",
+      "doneWithBackup": "Official sign-in restored. The previous sign-in session was backed up to {{path}}"
     },
     "quitConfirm": {
       "title": "Switch to {{name}}",
-      "body": "ChatGPT only reads its config at startup, so it has to be quit first and reopened after the switch.",
-      "declineNote": "If it has an ongoing conversation it will ask you to confirm — cancelling there aborts this switch and leaves your config untouched.",
-      "forceKillWarning": "⚠️ On Windows, ChatGPT can only be force-closed (it ignores normal close requests) and you won't be asked to save — save any conversation in progress first. We'll reopen it for you afterwards.",
-      "platformNote": "If we can't close it for you, the config still switches — just restart ChatGPT yourself.",
-      "switchOnly": "Switch only, I'll restart it",
-      "quitAndSwitch": "Quit and switch"
+      "body": "ChatGPT reads connection profiles only at startup. LoongPort will quit ChatGPT, switch profiles, and then reopen it.",
+      "declineNote": "On macOS, ChatGPT may ask for confirmation when a conversation is in progress. Selecting Cancel stops the switch and leaves the configuration unchanged.",
+      "forceKillWarning": "⚠️ On Windows, ChatGPT must be force-closed and will not show a save prompt. Save any conversation in progress first; LoongPort will reopen ChatGPT after the switch.",
+      "platformNote": "If LoongPort cannot close ChatGPT, the connection profile will still be switched. Restart ChatGPT manually to apply it.",
+      "switchOnly": "Switch only",
+      "quitAndSwitch": "Quit ChatGPT and switch"
     },
     "addSite": {
-      "firstRunTitle": "Choose a relay site",
-      "firstRunBody": "Paste the relay’s domain — copying straight from your browser’s address bar works too; any trailing path is stripped for you. Leave it empty to use {{site}}.",
-      "title": "Add relay site",
-      "body": "Paste another relay’s domain. One site can hold several accounts — just log in with a different one; duplicates are merged automatically.",
+      "firstRunTitle": "Choose a relay service",
+      "firstRunBody": "Paste a relay service domain or full URL. LoongPort removes the path automatically. Leave it blank to use the default relay service, {{site}}.",
+      "title": "Add relay service",
+      "body": "Enter another relay service domain. You can add multiple accounts for the same service; duplicate accounts are merged automatically.",
       "connected": "Connected to {{name}}",
-      "inputLabel": "Site domain",
-      "inputLabelWithSponsors": "Or enter a domain manually",
-      "inputHint": "e.g. bestapi.store, or paste https://bestapi.store/usage directly",
-      "sponsorsLabel": "Recommended sites",
-      "sponsorAddAnother": "{{count}} account(s) · add another"
+      "inputLabel": "Relay service domain",
+      "inputLabelWithSponsors": "Or enter a relay service domain",
+      "inputHint": "For example, bestapi.store or https://bestapi.store/usage",
+      "sponsorsLabel": "Recommended relay services",
+      "sponsorAddAnother": "{{count}} accounts added · Add another"
     },
     "vendor": {
-      "add": "Add an official account",
-      "empty": "No official account added yet",
-      "remove": "Remove this official account (and its configs)",
-      "removeConfirmTitle": "Remove this official account?",
-      "removeConfirmMessage": "Removes the session and local key for “{{label}}”, along with the configs it generated for six platforms. The API key on the vendor's site is kept — sign in again to reuse it.",
-      "removed": "Removed {{label}}",
-      "noKey": "No key yet",
-      "keyReady": "Configs ready for {{count}} platform(s)",
-      "keyCreated": "Created a new key on the vendor's site and set up {{count}} platform(s)",
-      "refreshKey": "Set up the key again",
-      "sessionExpiredUsable": "Your session expired, but the key still works (only the balance is unavailable). Click to sign in again.",
-      "loginFailed": "Sign-in did not complete: {{reason}}",
-      "openKeyPage": "Manage keys on the site",
-      "userEditedHint": "You have edited this account's config for the current app. “Fetch keys” will not overwrite it (only the API key is updated). Click here to restore the default config.",
-      "editConfirmMessage": "Once you save, this account's config for the current app is yours to maintain: “Fetch keys” will only refresh its API key from then on, and will no longer overwrite your other changes.\n\nIf it stops working after your edits, use “Restore default config” on this row to go back to the defaults (your API key is kept)."
+      "add": "Add provider account",
+      "empty": "No provider accounts added",
+      "remove": "Delete provider account and connection profiles",
+      "removeConfirmTitle": "Delete this provider account?",
+      "removeConfirmMessage": "This deletes the sign-in session and local API key for “{{label}}”, along with its connection profiles for six platforms. The API key on the provider website is not deleted, and you can sign in again later.",
+      "removed": "Deleted {{label}}",
+      "noKey": "No API key configured",
+      "keyReady": "Created connection profiles for {{count}} platforms",
+      "keyCreated": "Created an API key on the provider website and connection profiles for {{count}} platforms",
+      "refreshKey": "Reapply key configuration",
+      "sessionExpiredUsable": "The sign-in session has expired, but the API key still works. Balance information is temporarily unavailable. Select to sign in again.",
+      "loginFailed": "Sign-in failed: {{reason}}",
+      "openKeyPage": "Manage API key",
+      "userEditedHint": "This provider account has manual changes for the current platform. Reapplying the key configuration updates only the API key and preserves all other settings. Select to restore the defaults.",
+      "editConfirmMessage": "After you save, LoongPort will no longer overwrite manual changes for this provider account on the current platform. Reapplying the key configuration will update only the API key.\n\nTo undo your changes, select “Restore default configuration.” The API key is preserved."
     },
     "imageTab": {
-      "companionNotice": "This page is not usable on its own — it works alongside Codex chat.",
-      "companionDetail": "Image generation runs through the tool (MCP) bundled with LoongPort: say \"generate an image\" in codex / claude and it uses the tier selected here. Chat still goes through whichever tier you picked on the Codex page — the two are independent, so you can chat with DeepSeek or any other site.",
-      "howTo": "Switching image tiers needs no CLI restart — the next generation uses the new one. Only the very first image tier requires a fresh terminal so codex picks up the tool.",
-      "emptyTitle": "No image tiers yet",
-      "emptyBody": "Image tiers are detected automatically when you fetch keys: if your relay has a group that only serves gpt-image models, it shows up here. Your site may not offer image groups at all — then this page simply stays empty and nothing is added to your CLI config."
+      "companionNotice": "Image generation works with Codex or Claude.",
+      "companionDetail": "Image generation uses the connection profile selected on this page. Chat uses the profile selected on the Codex or Claude page, so the two selections do not affect each other.",
+      "howTo": "You do not need to restart after switching image-generation profiles; the next generation uses the new profile. After creating your first image-generation profile, open a new terminal to load image-generation support.",
+      "emptyTitle": "No image-generation connection profiles",
+      "emptyBody": "When you create connection profiles, LoongPort identifies groups that support only gpt-image models. If your relay service does not offer such a group, this page remains empty."
     },
     "modelVerification": {
-      "title": "Verify model",
-      "titleWithTier": "Verify model · {{tierName}}",
-      "description": "Run a verification against one model configured for this provider.",
-      "globalScopeNote": "Apply automatic verification to all configured models.",
+      "title": "Model verification",
+      "titleWithTier": "Model verification · {{tierName}}",
+      "description": "Verify the response characteristics of the model selected for this connection profile.",
+      "globalScopeNote": "Automatic verification applies to all configured models.",
       "model": {
-        "label": "Model",
+        "label": "Select model",
         "placeholder": "Select a model",
         "loading": "Loading models…",
-        "empty": "No models are available to verify.",
-        "error": "Could not load models."
+        "empty": "No models are available for verification",
+        "error": "Could not load the model list. Try again."
       },
       "actions": {
         "start": "Start verification",
         "stop": "Stop verification",
-        "retry": "Retry"
+        "retry": "Try again"
       },
-      "status": { "running": "Verifying {{completed}} / {{total}}" },
+      "status": {
+        "running": "Verifying {{completed}} of {{total}}"
+      },
       "runtime": {
-        "autoLabel": "Automatic runtime verification (global)",
-        "autoHelp": "Applies to all relay groups and models. LoongPort observes actual Codex and Claude responses through the local proxy; it sends no extra probes and never saves conversation content.",
-        "loadError": "Could not load runtime verification status.",
-        "anomalyToast": "An anomaly was detected for {{app}} model {{model}}. Open Verify model for details.",
-        "apps": { "codex": "Codex", "claude": "Claude" },
-        "status": { "active": "Active", "waiting": "Waiting", "error": "Error" }
+        "autoLabel": "Automatic verification",
+        "autoHelp": "Automatically verifies all relay groups and models from actual Codex and Claude responses. It does not send additional verification requests and does not save conversation content.",
+        "loadError": "Could not load the automatic verification status. Try again.",
+        "anomalyToast": "An anomaly was detected for {{model}} in {{app}}. Open Model verification for details.",
+        "apps": {
+          "codex": "Codex",
+          "claude": "Claude"
+        },
+        "status": {
+          "active": "Enabled",
+          "waiting": "Waiting for an available response",
+          "error": "Not running correctly"
+        }
       },
       "history": {
-        "title": "Latest 5 verification results",
+        "title": "5 most recent verification results",
         "loading": "Loading verification results…",
-        "empty": "No verification results yet.",
-        "error": "Could not load verification results.",
-        "source": { "active": "Active check", "runtime": "Runtime check" }
+        "empty": "No verification results yet",
+        "error": "Could not load verification results. Try again.",
+        "source": {
+          "active": "Current verification",
+          "runtime": "Automatic verification"
+        }
       },
       "tierVerdict": {
-        "trusted": "Model verified",
-        "suspicious": "Model suspicious",
-        "anomaly": "Model anomaly",
-        "trustedHint": "Model verification passed. Select Verify model for details.",
-        "suspiciousHint": "Verification found suspicious behavior. Select Verify model for details.",
-        "anomalyHint": "Verification found an anomaly. Select Verify model for details."
+        "trusted": "Verified",
+        "suspicious": "Review needed",
+        "anomaly": "Anomaly detected",
+        "trustedHint": "The available evidence passed verification. Open Model verification for details.",
+        "suspiciousHint": "The current result needs manual review. Open Model verification for details.",
+        "anomalyHint": "An inconsistent response was detected. Open Model verification for details."
       },
       "verdict": {
-        "trusted": "Trusted",
-        "suspicious": "Suspicious",
-        "anomaly": "Anomaly",
-        "inconclusive": "Inconclusive"
+        "trusted": "Verified",
+        "suspicious": "Review needed",
+        "anomaly": "Anomaly detected",
+        "inconclusive": "Insufficient evidence"
       },
       "evidence": {
-        "title": "Evidence",
+        "title": "Verification evidence",
         "level": {
           "cryptographic": "Cryptographic evidence",
           "protocolBehavior": "Protocol behavior evidence",
@@ -3257,32 +3270,32 @@
         },
         "outcome": {
           "passed": "Passed",
-          "failed": "Failed",
+          "failed": "Did not pass",
           "skipped": "Skipped"
         },
         "fact": {
-          "basicEnvelope": "Basic response envelope",
+          "basicEnvelope": "Basic response structure",
           "modelMatch": "Model identity",
           "streamLifecycle": "Streaming lifecycle",
           "usageConsistency": "Usage consistency",
-          "toolCallShape": "Tool-call shape",
+          "toolCallShape": "Tool-call structure",
           "structuredOutput": "Structured output",
           "thinkingSignature": "Reasoning signature",
-          "signatureContinuation": "Signature continuation",
-          "foreignProtocol": "Foreign protocol",
-          "foreignSelfIdentification": "Foreign self-identification"
+          "signatureContinuation": "Signature continuity",
+          "foreignProtocol": "Other protocol characteristics",
+          "foreignSelfIdentification": "Other model self-identification"
         }
       },
       "failure": {
-        "authentication": "Authentication failed.",
-        "rateLimited": "The provider rate limited this verification.",
-        "insufficientBalance": "Insufficient balance to verify this model.",
-        "network": "Network connection failed.",
-        "upstream": "The provider could not complete verification.",
-        "timeout": "Verification timed out.",
-        "modelUnavailable": "This model is unavailable.",
-        "cancelled": "Verification was stopped.",
-        "invalidResponse": "The provider returned an invalid response."
+        "authentication": "Authentication failed. Check the sign-in session or API key and try again.",
+        "rateLimited": "The request was rate-limited. Try again later.",
+        "insufficientBalance": "The balance is too low to verify this model. Top up and try again.",
+        "network": "The network connection failed. Check your connection and try again.",
+        "upstream": "The provider could not complete verification. Try again later.",
+        "timeout": "Verification timed out. Try again later.",
+        "modelUnavailable": "This model is unavailable. Select another model.",
+        "cancelled": "Verification stopped.",
+        "invalidResponse": "The provider's response could not be verified. Try again later or review it manually."
       }
     }
   }

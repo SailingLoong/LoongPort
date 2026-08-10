@@ -12,7 +12,6 @@ import {
   Pencil,
   PencilLine,
   Play,
-  RefreshCw,
   Trash2,
   Undo2,
   Wallet,
@@ -31,6 +30,7 @@ import { cn } from "@/lib/utils";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
 import type { VerificationVerdict } from "@/lib/api/modelVerification";
 import { isLowBalance, LOW_BALANCE_THRESHOLD_USD } from "./lowBalance";
+import { RefreshActionMenu } from "./RefreshActionMenu";
 
 /**
  * 一行中转站 + 可折叠的档位列表。
@@ -558,34 +558,13 @@ function RowStatus({
       <span className="text-xs text-muted-foreground">
         {t("loongport.row.tierCount", { count: relay.tiers.length })}
       </span>
-      {/* 「重新拉分组」。用 ghost + 图标（不是 outline + 文字）——
-          这一行已经有档位了，它是个补充动作，不该抢「用哪个档位」的注意力。
-
-          **hover 才出**：同上一条规矩，它是动作而非信息。
-          左边那个「N 个档位」是信息，所以留在组外常驻。 */}
-      <div
-        className={cn(
-          "flex shrink-0 items-center",
-          HOVER_ACTIONS_BASE,
-          provisioning ? HOVER_ACTIONS_PINNED : ROW_HOVER_ACTIONS,
-        )}
-      >
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1 px-2"
-          disabled={provisioning}
-          onClick={onProvision}
-          title={t("loongport.row.refetchGroups")}
-        >
-          {provisioning ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="h-3.5 w-3.5" />
-          )}
-        </Button>
-      </div>
+      {/* 重拉分组不是普通的「刷新当前显示」，而是一次远端重新发现。
+          收进有明确文案的菜单，避免与顶部的全局刷新混淆。 */}
+      <RefreshActionMenu
+        actionLabel={t("loongport.row.refetchGroups")}
+        loading={provisioning}
+        onAction={onProvision}
+      />
     </div>
   );
 }

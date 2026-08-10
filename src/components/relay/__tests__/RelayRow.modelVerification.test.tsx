@@ -8,18 +8,18 @@ vi.mock("react-i18next", () => ({
       (
         ({
           "loongport.modelVerification.title": "模型验证",
-          "loongport.modelVerification.tierVerdict.trusted": "模型已验证",
-          "loongport.modelVerification.tierVerdict.suspicious": "模型存疑",
-          "loongport.modelVerification.tierVerdict.anomaly": "模型异常",
+          "loongport.modelVerification.tierVerdict.trusted": "验证通过",
+          "loongport.modelVerification.tierVerdict.suspicious": "需要复核",
+          "loongport.modelVerification.tierVerdict.anomaly": "检测到异常",
           "loongport.modelVerification.tierVerdict.trustedHint":
-            "模型验证通过，请点击「模型验证」查看详情",
+            "现有证据验证通过。打开“模型验证”查看详情。",
           "loongport.modelVerification.tierVerdict.suspiciousHint":
-            "模型验证结果存疑，请点击「模型验证」查看详情",
+            "现有结果需要人工复核。打开“模型验证”查看详情。",
           "loongport.modelVerification.tierVerdict.anomalyHint":
-            "模型验证发现异常，请点击「模型验证」查看详情",
-          "loongport.tier.checkConnectivity": "检测连通",
-          "loongport.tier.userEdited": "已手工维护",
-          "loongport.tier.userEditedHint": "手工维护说明",
+            "检测到响应不一致。打开“模型验证”查看详情。",
+          "loongport.tier.checkConnectivity": "测试连接",
+          "loongport.tier.userEdited": "手动维护",
+          "loongport.tier.userEditedHint": "此接入配置包含手动修改。",
           "loongport.tier.rate": "{{value}} 倍",
           "loongport.tier.rateUnknown": "倍率未知",
           "loongport.tier.edit": "编辑配置",
@@ -89,7 +89,7 @@ describe("RelayRow model verification", () => {
   it("shows the managed Codex action immediately after connectivity in the existing hover group", () => {
     const { onVerifyTier } = renderRow();
 
-    const connectivity = screen.getByTitle("检测连通");
+    const connectivity = screen.getByTitle("测试连接");
     const verify = screen.getByTitle("模型验证");
     expect(connectivity.nextElementSibling).toBe(verify);
     expect(verify.parentElement?.className).toContain(
@@ -125,10 +125,10 @@ describe("RelayRow model verification", () => {
       verificationVerdictForTier: () => "suspicious",
       isVerifyingTier: () => false,
     });
-    expect(screen.getByText("已手工维护")).toBeInTheDocument();
-    expect(screen.getByText("模型存疑")).toBeInTheDocument();
+    expect(screen.getByText("手动维护")).toBeInTheDocument();
+    expect(screen.getByText("需要复核")).toBeInTheDocument();
     expect(
-      screen.getByTitle("模型验证结果存疑，请点击「模型验证」查看详情"),
+      screen.getByTitle("现有结果需要人工复核。打开“模型验证”查看详情。"),
     ).toBeInTheDocument();
 
     rerender(
@@ -147,29 +147,29 @@ describe("RelayRow model verification", () => {
       expect.objectContaining({ providerId: "provider-a" }),
     );
     expect(verify.querySelector(".animate-spin")).toBeInTheDocument();
-    expect(screen.getByText("模型异常")).toBeInTheDocument();
+    expect(screen.getByText("检测到异常")).toBeInTheDocument();
     expect(
-      screen.getByTitle("模型验证发现异常，请点击「模型验证」查看详情"),
+      screen.getByTitle("检测到响应不一致。打开“模型验证”查看详情。"),
     ).toBeInTheDocument();
   });
 
   it("shows a success-colored label for a verified model", () => {
     renderRow({ verificationVerdictForTier: () => "trusted" });
 
-    const label = screen.getByText("模型已验证").closest("span");
+    const label = screen.getByText("验证通过").closest("span");
     expect(label).toHaveClass("text-emerald-600");
     expect(
-      screen.getByTitle("模型验证通过，请点击「模型验证」查看详情"),
+      screen.getByTitle("现有证据验证通过。打开“模型验证”查看详情。"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("模型存疑")).not.toBeInTheDocument();
+    expect(screen.queryByText("需要复核")).not.toBeInTheDocument();
   });
 
   it("does not render a tier label for an inconclusive result", () => {
     renderRow({ verificationVerdictForTier: () => "inconclusive" });
 
-    expect(screen.queryByText("模型已验证")).not.toBeInTheDocument();
-    expect(screen.queryByText("模型存疑")).not.toBeInTheDocument();
-    expect(screen.queryByText("模型异常")).not.toBeInTheDocument();
+    expect(screen.queryByText("验证通过")).not.toBeInTheDocument();
+    expect(screen.queryByText("需要复核")).not.toBeInTheDocument();
+    expect(screen.queryByText("检测到异常")).not.toBeInTheDocument();
   });
 });
 

@@ -3065,221 +3065,238 @@
       "other": "其他"
     },
     "tierList": {
-      "empty": "還沒有新增任何中轉站",
+      "empty": "尚未新增中轉站",
       "addSite": "新增中轉站",
-      "refresh": "重新整理檔位與金鑰"
+      "refresh": "更新連線設定檔"
     },
     "row": {
       "expand": "展開",
       "collapse": "收合",
-      "notLoggedIn": "還沒登入",
-      "login": "前往登入",
+      "notLoggedIn": "尚未登入",
+      "login": "登入",
       "sessionExpired": "登入已過期",
       "reLogin": "重新登入",
-      "noTiers": "該帳號在此平台下沒有可用群組",
-      "getKeys": "取得密鑰",
-      "tierCount": "{{count}} 個方案",
-      "dragHandle": "拖動排序",
-      "refetchGroups": "重新拉取可用群組",
-      "purchaseHint": "點擊充值（在應用內開啟該站點的充值頁）",
-      "lowBalanceHint": "餘額不足 ${{threshold}}，點擊充值",
-      "remove": "刪除這個帳號（連帶它的方案）",
-      "removeBlockedByCurrent": "它有方案正在使用，先切到其他方案再刪",
-      "removeConfirmTitle": "刪除這個帳號？",
-      "removeConfirmMessage": "會刪掉「{{label}}」的登入狀態，連帶它已產生的 {{count}} 個方案。已充值的餘額留在中轉站那邊，重新登入就能再用。",
-      "removeConfirmMessageNeverLoggedIn": "會刪掉「{{label}}」這一行，連帶它已產生的 {{count}} 個方案。這個帳號從沒登入過，隨時可以重新新增。"
+      "noTiers": "此帳號在目前平台沒有可用群組",
+      "getKeys": "建立連線設定檔",
+      "tierCount": "{{count}} 個連線設定檔",
+      "dragHandle": "拖曳排序",
+      "more": "更多操作",
+      "refetchGroups": "更新可用群組",
+      "purchaseHint": "開啟中轉站儲值頁面",
+      "lowBalanceHint": "餘額低於 ${{threshold}}，點一下儲值",
+      "remove": "刪除帳號與連線設定檔",
+      "removeBlockedByCurrent": "此帳號有連線設定檔正在使用，請先切換至其他連線設定檔",
+      "removeConfirmTitle": "刪除此帳號？",
+      "removeConfirmMessage": "將刪除「{{label}}」的登入資訊及其 {{count}} 個連線設定檔。中轉站內的餘額不會受到影響；之後可重新登入繼續使用。",
+      "removeConfirmMessageNeverLoggedIn": "將刪除「{{label}}」及其 {{count}} 個連線設定檔。之後可重新新增此帳號。"
     },
     "tier": {
       "rateUnknown": "倍率未知",
       "rate": "{{value}} 倍",
       "models": "支援的模型",
-      "selectModel": "切換至模型 {{model}}",
+      "selectModel": "切換至 {{model}}",
       "modelSelected": "目前模型",
-      "switching": "切換中…",
-      "checkConnectivity": "檢測連通",
-      "resetConfig": "恢復預設設定",
-      "resetConfirmTitle": "恢復預設設定？",
-      "resetConfirmMessage": "會用 LoongPort 的預設設定覆蓋「{{name}}」的全部編輯，金鑰保留不變。",
-      "resetConfirmButton": "恢復預設",
-      "resetDone": "已恢復「{{name}}」的預設設定",
-      "edit": "編輯設定",
-      "editConfirmTitle": "手動編輯「{{name}}」的設定？",
-      "editConfirmMessage": "儲存後這個檔位就歸你自己維護：以後「取得金鑰」只會更新它的金鑰，不再覆寫你改的其它內容。\n\n如果改完連不上，用檔位列上的「恢復預設設定」退回預設值（金鑰保留不變）。",
+      "switching": "正在切換…",
+      "checkConnectivity": "測試連線",
+      "resetConfig": "還原預設設定",
+      "resetConfirmTitle": "還原預設設定？",
+      "resetConfirmMessage": "將使用 LoongPort 預設設定覆蓋「{{name}}」的手動修改。API 金鑰會保留。",
+      "resetConfirmButton": "還原預設設定",
+      "resetDone": "已還原「{{name}}」的預設設定",
+      "edit": "編輯連線設定檔",
+      "editConfirmTitle": "編輯「{{name}}」的連線設定檔？",
+      "editConfirmMessage": "儲存後，LoongPort 將不再覆蓋此連線設定檔的手動修改；後續更新群組時只會更新 API 金鑰。\n\n若要撤銷修改，請選擇「還原預設設定」。API 金鑰會保留。",
       "editConfirmButton": "繼續編輯",
-      "userEdited": "已手動維護",
-      "userEditedHint": "這個檔位的設定你改過。重新整理分組不會覆寫它（只更新金鑰）。點這裡恢復預設設定。",
-      "editMissing": "這個檔位的記錄已經不在了，請點「取得金鑰」重新產生。",
-      "editCurrentNote": "這是目前正在使用的檔位。改完如果沒生效，結束並重新開啟 ChatGPT 桌面版 —— 它在執行時會把 codex 的設定改回去。"
+      "userEdited": "手動維護",
+      "userEditedHint": "此連線設定檔包含手動修改。更新群組時只會更新 API 金鑰，不會覆蓋其他內容。點一下可還原預設設定。",
+      "editMissing": "找不到此連線設定檔。請重新建立連線設定檔。",
+      "editCurrentNote": "這是正在使用的連線設定檔。若修改未生效，請結束並重新開啟 ChatGPT 桌面版；執行中的 ChatGPT 可能會覆蓋 Codex 設定。"
     },
     "stats": {
       "title": "協助改進 LoongPort",
-      "intro": "我們想知道大家實際在用哪些中轉站，據此決定優先適配誰。",
-      "sendsLabel": "會上報",
-      "sendsBody": "你新增的中轉站網域、帳號數量、應用版本與作業系統類型。",
-      "neverLabel": "不會上報",
-      "neverBody": "帳號、電子郵件、餘額、密鑰、用量記錄。",
-      "canChange": "可以隨時在「設定 → 一般」中關閉。",
-      "accept": "好",
-      "decline": "不參與",
-      "idNote": "會帶一個隨機產生的安裝識別碼（用於去重統計，與你在中轉站的帳號無關）。"
+      "intro": "為了決定優先支援的中轉站，我們想瞭解 LoongPort 的實際使用情況。",
+      "sendsLabel": "將收集",
+      "sendsBody": "已新增的中轉站網域、帳號數量、應用程式版本與作業系統類型。",
+      "neverLabel": "不會收集",
+      "neverBody": "帳號登入資訊、電子郵件、餘額、API 金鑰與用量記錄。",
+      "canChange": "可隨時在「設定 → 一般」中變更此選項。",
+      "accept": "允許分享",
+      "decline": "不分享",
+      "idNote": "資料包含隨機產生的安裝識別碼，僅用於去重統計，與中轉站帳號無關。"
     },
     "site": {
       "removed": "已移除 {{label}}"
     },
     "session": {
-      "expired": "{{count}} 個帳號的登入已失效，請重新登入",
-      "connected": "已連線，正在取得金鑰…（登入視窗可以自己關掉）"
+      "expired": "{{count}} 個帳號的登入已過期，請重新登入",
+      "connected": "已連線，正在建立連線設定檔。現在可以關閉登入視窗。"
     },
     "provision": {
-      "ready": "已備好 {{count}} 個方案",
-      "readyWithKeys": "已備好 {{count}} 個方案，新建 {{keys}} 把金鑰",
-      "landedOnOtherPlatforms": "這個帳號有 {{count}} 個分組，但都不屬於目前這個 CLI。切到上方對應的標籤頁查看。",
+      "ready": "已同步 {{count}} 個連線設定檔",
+      "readyWithKeys": "已同步 {{count}} 個連線設定檔，其中建立了 {{keys}} 個 API 金鑰",
+      "landedOnOtherPlatforms": "此帳號有 {{count}} 個群組，但都不適用於目前平台。請切換至上方對應的平台查看。",
       "groupFailed": "{{group}}：{{reason}}",
-      "mergedProviders": "已從 cc-switch 收編 {{count}} 個重複設定",
-      "refreshed": "已重新整理 {{relays}} 個中轉站，共 {{tiers}} 個方案",
-      "refreshFailedWithReason": "{{name}} 重新整理失敗：{{reason}}",
-      "refreshedWithKeys": "已重新整理 {{relays}} 個中轉站，共 {{tiers}} 個檔位，新建 {{keys}} 把金鑰"
+      "mergedProviders": "已合併 {{count}} 個重複設定",
+      "refreshed": "已更新 {{relays}} 個中轉站，共同步 {{tiers}} 個連線設定檔",
+      "refreshFailedWithReason": "無法更新 {{name}}：{{reason}}",
+      "refreshedWithKeys": "已更新 {{relays}} 個中轉站，共同步 {{tiers}} 個連線設定檔，其中建立了 {{keys}} 個 API 金鑰"
     },
     "switch": {
-      "done": "已切換到 {{name}}",
-      "doneRelaunched": "已切換到 {{name}}，已重新開啟 ChatGPT",
-      "doneNeedsRestart": "已切換到 {{name}}，請手動重啟 ChatGPT",
-      "modelDone": "已切換至 {{name}} 的模型 {{model}}",
-      "modelDoneRelaunched": "已切換至 {{name}} 的模型 {{model}}，已重新開啟 ChatGPT",
-      "modelDoneNeedsRestart": "已切換至 {{name}} 的模型 {{model}}，請手動重啟 ChatGPT"
+      "done": "已切換至 {{name}}",
+      "doneRelaunched": "已切換至 {{name}}，並重新開啟 ChatGPT",
+      "doneNeedsRestart": "已切換至 {{name}}。請手動重新啟動 ChatGPT",
+      "modelDone": "已將 {{name}} 切換至模型 {{model}}",
+      "modelDoneRelaunched": "已將 {{name}} 切換至模型 {{model}}，並重新開啟 ChatGPT",
+      "modelDoneNeedsRestart": "已將 {{name}} 切換至模型 {{model}}。請手動重新啟動 ChatGPT"
     },
     "official": {
-      "button": "切回官方登入",
-      "hint": "清掉 LoongPort 寫入的路由，改用你自己的 ChatGPT 帳號",
-      "confirmTitle": "切回官方登入？",
-      "confirmMessage": "會結束 ChatGPT、清掉 LoongPort 寫入的路由設定，並刪除目前的 codex 登入狀態（刪除前會自動備份）。之後需要你自己登入 ChatGPT。",
-      "confirmButton": "切回官方",
-      "done": "已切回官方登入，請自己登入 ChatGPT",
-      "doneWithBackup": "已切回官方登入。原登入狀態已備份至 {{path}}"
+      "button": "還原官方登入",
+      "hint": "移除 LoongPort 路由，改用 ChatGPT 官方帳號登入",
+      "confirmTitle": "還原官方登入？",
+      "confirmMessage": "將結束 ChatGPT、移除 LoongPort 路由，並在備份後刪除目前的 Codex 登入狀態。完成後需要重新登入 ChatGPT。",
+      "confirmButton": "還原官方登入",
+      "done": "已還原官方登入。請重新登入 ChatGPT",
+      "doneWithBackup": "已還原官方登入。原登入狀態已備份至 {{path}}"
     },
     "quitConfirm": {
-      "title": "切換到 {{name}}",
-      "body": "ChatGPT 啟動時才讀取設定，所以要先結束它、切換完再開啟。",
-      "declineNote": "如果它有進行中的對話，會彈出確認框 —— 在那裡點取消的話，本次切換會中止、設定不會改動。",
-      "forceKillWarning": "⚠️ Windows 上只能強制關閉 ChatGPT（它不回應普通的關閉請求），不會提示你儲存 —— 有正在進行的對話請先自己儲存。關掉後會再幫你開啟。",
-      "platformNote": "萬一沒能替你關掉，設定仍會切好，只需你手動重啟 ChatGPT。",
-      "switchOnly": "只切換，我自己重啟",
-      "quitAndSwitch": "結束並切換"
+      "title": "切換至 {{name}}",
+      "body": "ChatGPT 只會在啟動時讀取連線設定檔。LoongPort 將先結束 ChatGPT，完成切換後再重新開啟。",
+      "declineNote": "在 macOS 上，若 ChatGPT 有進行中的對話，系統可能顯示結束確認。選擇「取消」將中止切換，設定不會變更。",
+      "forceKillWarning": "⚠️ Windows 上必須強制關閉 ChatGPT，且不會顯示儲存提醒。請先儲存進行中的對話；切換完成後 LoongPort 會重新開啟 ChatGPT。",
+      "platformNote": "如果 LoongPort 無法關閉 ChatGPT，連線設定檔仍會完成切換。請手動重新啟動 ChatGPT 使其生效。",
+      "switchOnly": "僅切換",
+      "quitAndSwitch": "結束 ChatGPT 並切換"
     },
     "addSite": {
-      "firstRunTitle": "選擇服務站點",
-      "firstRunBody": "把中轉站的網域貼進來就行 —— 從瀏覽器網址欄直接複製也可以，網址後面的路徑會自動去掉。留空則用預設的 {{site}}。",
+      "firstRunTitle": "選擇中轉站",
+      "firstRunBody": "貼上中轉站網域或完整網址，LoongPort 會自動移除路徑。留白將使用預設中轉站 {{site}}。",
       "title": "新增中轉站",
-      "body": "把另一個中轉站的網域貼進來。同一個站可以掛多個帳號 —— 登入不同帳號即可，重複的會自動合併。",
-      "connected": "已連上 {{name}}",
-      "inputLabel": "站點網域",
-      "inputLabelWithSponsors": "或手動輸入網域",
-      "inputHint": "例如 bestapi.store，或直接貼 https://bestapi.store/usage",
-      "sponsorsLabel": "推薦站點",
-      "sponsorAddAnother": "已有 {{count}} 個帳號 · 再加一個"
+      "body": "輸入另一個中轉站的網域。同一中轉站可新增多個帳號，重複帳號會自動合併。",
+      "connected": "已連線至 {{name}}",
+      "inputLabel": "中轉站網域",
+      "inputLabelWithSponsors": "或輸入中轉站網域",
+      "inputHint": "例如 bestapi.store，或 https://bestapi.store/usage",
+      "sponsorsLabel": "推薦中轉站",
+      "sponsorAddAnother": "已有 {{count}} 個帳號 · 再新增一個"
     },
     "vendor": {
-      "add": "新增官網帳號",
-      "empty": "還沒有新增任何官網帳號",
-      "remove": "刪除這個官網帳號（連帶它的設定）",
-      "removeConfirmTitle": "刪除這個官網帳號？",
-      "removeConfirmMessage": "會刪掉「{{label}}」的登入狀態與本機金鑰，連帶它在六個平台產生的設定。官網上那把 API 金鑰不會被刪，重新登入就能再用。",
+      "add": "新增服務商帳號",
+      "empty": "尚未新增服務商帳號",
+      "remove": "刪除服務商帳號與連線設定檔",
+      "removeConfirmTitle": "刪除此服務商帳號？",
+      "removeConfirmMessage": "將刪除「{{label}}」的登入資訊、本機 API 金鑰，以及為六個平台建立的連線設定檔。服務商網站上的 API 金鑰不會被刪除；之後可重新登入繼續使用。",
       "removed": "已刪除 {{label}}",
-      "noKey": "還沒備好金鑰",
-      "keyReady": "已備好 {{count}} 個平台的設定",
-      "keyCreated": "已在官網新建金鑰，並備好 {{count}} 個平台的設定",
-      "refreshKey": "重新備一次金鑰",
-      "sessionExpiredUsable": "登入已過期，但金鑰仍然可用（只是查不到餘額）。點這裡重新登入。",
-      "loginFailed": "登入沒能完成：{{reason}}",
-      "openKeyPage": "去官網刪除",
-      "userEditedHint": "這個帳號在目前這個應用下的設定你改過。「取得金鑰」不會覆寫它（只更新金鑰）。點這裡恢復預設設定。",
-      "editConfirmMessage": "儲存後這個帳號在目前這個應用下的設定就歸你自己維護：以後「取得金鑰」只會更新它的金鑰，不再覆寫你改的其它內容。\n\n如果改完連不上，用這一列上的「恢復預設設定」退回預設值（金鑰保留不變）。"
+      "noKey": "尚未設定 API 金鑰",
+      "keyReady": "已為 {{count}} 個平台建立連線設定檔",
+      "keyCreated": "已在服務商網站建立 API 金鑰，並為 {{count}} 個平台建立連線設定檔",
+      "refreshKey": "重新套用金鑰設定",
+      "sessionExpiredUsable": "登入已過期，但 API 金鑰仍可使用；暫時無法查詢餘額。點一下重新登入。",
+      "loginFailed": "登入失敗：{{reason}}",
+      "openKeyPage": "管理 API 金鑰",
+      "userEditedHint": "此服務商帳號在目前平台的連線設定檔包含手動修改。重新套用金鑰設定時只會更新 API 金鑰，不會覆蓋其他內容。點一下可還原預設設定。",
+      "editConfirmMessage": "儲存後，LoongPort 將不再覆蓋此服務商帳號在目前平台的手動修改；後續重新套用金鑰設定時只會更新 API 金鑰。\n\n若要撤銷修改，請選擇「還原預設設定」。API 金鑰會保留。"
     },
     "imageTab": {
-      "companionNotice": "這一頁不能單獨使用，要配合 codex 聊天一起用。",
-      "companionDetail": "生圖靠 LoongPort 自帶的工具（MCP）完成：你在 codex / claude 裡說「生成一張圖」，它就用這裡選定的檔位出圖。而對話仍走 Codex 標籤頁裡選的那個檔位 —— 兩者各自獨立，聊天可以用 DeepSeek 或任何別的站。",
-      "howTo": "換生圖檔位不用重啟 CLI，下一次生成就用新的。只有第一次有生圖檔位時要新開一個終端，讓 codex 讀到那個工具。",
-      "emptyTitle": "還沒有生圖檔位",
-      "emptyBody": "生圖檔位由「取得密鑰」自動識別：中轉站那邊有只掛 gpt-image 模型的分組時，它就出現在這裡。你的站點可能沒有提供生圖分組 —— 那樣這一頁保持空著就好，CLI 的設定裡不會多出任何東西。"
+      "companionNotice": "圖像生成需要搭配 Codex 或 Claude 使用。",
+      "companionDetail": "圖像生成會使用此頁面選取的連線設定檔；聊天則使用 Codex 或 Claude 頁面選取的連線設定檔，兩者互不影響。",
+      "howTo": "切換圖像生成連線設定檔後不必重新啟動，下次生成起生效。首次建立圖像生成連線設定檔後，請開啟新的終端機以載入圖像生成功能。",
+      "emptyTitle": "尚無圖像生成連線設定檔",
+      "emptyBody": "建立連線設定檔時，LoongPort 會識別只支援 gpt-image 模型的群組。若中轉站未提供這類群組，此頁面將保持空白。"
     },
     "modelVerification": {
       "title": "模型驗證",
-      "titleWithTier": "驗證模型 · {{tierName}}",
-      "description": "驗證這個供應商已設定的一個模型。",
-      "globalScopeNote": "對所有已設定模型啟用自動驗證。",
+      "titleWithTier": "模型驗證 · {{tierName}}",
+      "description": "驗證目前連線設定檔所選模型的回應特徵。",
+      "globalScopeNote": "自動驗證適用於所有已設定的模型。",
       "model": {
         "label": "選擇模型",
         "placeholder": "請選擇模型",
         "loading": "正在載入模型…",
         "empty": "沒有可驗證的模型",
-        "error": "模型清單載入失敗"
+        "error": "無法載入模型清單。請再試一次。"
       },
-      "actions": { "start": "開始驗證", "stop": "停止驗證", "retry": "重試" },
-      "status": { "running": "正在驗證 {{completed}} / {{total}}" },
+      "actions": {
+        "start": "開始驗證",
+        "stop": "停止驗證",
+        "retry": "再試一次"
+      },
+      "status": {
+        "running": "正在驗證 {{completed}} / {{total}}"
+      },
       "runtime": {
-        "autoLabel": "執行時自動檢測（全域）",
-        "autoHelp": "對所有中轉分組和模型生效。開啟後，LoongPort 會透過本機代理觀察 Codex 和 Claude 的實際回應；不會額外發送檢測請求，也不會保存對話內容。",
-        "loadError": "執行時檢測狀態載入失敗",
-        "anomalyToast": "{{app}} 的模型 {{model}} 檢測到異常，請開啟模型驗證查看。",
-        "apps": { "codex": "Codex", "claude": "Claude" },
-        "status": { "active": "已啟用", "waiting": "等待中", "error": "錯誤" }
+        "autoLabel": "自動驗證",
+        "autoHelp": "根據 Codex 與 Claude 的實際回應，自動驗證所有中轉站群組與模型；不會另外傳送驗證請求，也不會儲存對話內容。",
+        "loadError": "無法載入自動驗證狀態。請再試一次。",
+        "anomalyToast": "{{app}} 的模型 {{model}} 偵測到異常。請開啟模型驗證查看詳細資料。",
+        "apps": {
+          "codex": "Codex",
+          "claude": "Claude"
+        },
+        "status": {
+          "active": "已啟用",
+          "waiting": "等待可用回應",
+          "error": "執行異常"
+        }
       },
       "history": {
         "title": "最近 5 筆驗證記錄",
         "loading": "正在載入驗證記錄…",
-        "empty": "暫無驗證記錄",
-        "error": "驗證記錄載入失敗",
-        "source": { "active": "主動檢測", "runtime": "使用時檢測" }
+        "empty": "尚無驗證記錄",
+        "error": "無法載入驗證記錄。請再試一次。",
+        "source": {
+          "active": "目前驗證",
+          "runtime": "自動驗證"
+        }
       },
       "tierVerdict": {
-        "trusted": "模型已驗證",
-        "suspicious": "模型存疑",
-        "anomaly": "模型異常",
-        "trustedHint": "模型驗證通過，請點擊「模型驗證」查看詳情",
-        "suspiciousHint": "模型驗證結果存疑，請點擊「模型驗證」查看詳情",
-        "anomalyHint": "模型驗證發現異常，請點擊「模型驗證」查看詳情"
+        "trusted": "驗證通過",
+        "suspicious": "需要複核",
+        "anomaly": "偵測到異常",
+        "trustedHint": "現有證據已通過驗證。開啟「模型驗證」查看詳細資料。",
+        "suspiciousHint": "現有結果需要人工複核。開啟「模型驗證」查看詳細資料。",
+        "anomalyHint": "偵測到回應不一致。開啟「模型驗證」查看詳細資料。"
       },
       "verdict": {
-        "trusted": "可信",
-        "suspicious": "可疑",
-        "anomaly": "異常",
-        "inconclusive": "結論不足"
+        "trusted": "驗證通過",
+        "suspicious": "需要複核",
+        "anomaly": "偵測到異常",
+        "inconclusive": "證據不足"
       },
       "evidence": {
         "title": "驗證依據",
         "level": {
-          "cryptographic": "密碼學依據",
-          "protocolBehavior": "協定行為依據",
-          "insufficient": "依據不足"
+          "cryptographic": "加密證據",
+          "protocolBehavior": "通訊協定行為證據",
+          "insufficient": "證據不足"
         },
         "outcome": {
           "passed": "通過",
           "failed": "未通過",
-          "skipped": "已跳過"
+          "skipped": "已略過"
         },
         "fact": {
-          "basicEnvelope": "基礎回應結構",
-          "modelMatch": "模型身分",
+          "basicEnvelope": "基本回應結構",
+          "modelMatch": "模型識別",
           "streamLifecycle": "串流回應生命週期",
           "usageConsistency": "用量一致性",
           "toolCallShape": "工具呼叫結構",
           "structuredOutput": "結構化輸出",
-          "thinkingSignature": "推理特徵",
-          "signatureContinuation": "特徵延續",
-          "foreignProtocol": "外部協定",
-          "foreignSelfIdentification": "外部自我識別"
+          "thinkingSignature": "推理簽章",
+          "signatureContinuation": "簽章連續性",
+          "foreignProtocol": "其他通訊協定特徵",
+          "foreignSelfIdentification": "其他模型自我識別"
         }
       },
       "failure": {
-        "authentication": "驗證失敗",
-        "rateLimited": "供應商限制了本次驗證",
-        "insufficientBalance": "餘額不足，無法驗證此模型",
-        "network": "網路連線失敗",
-        "upstream": "供應商無法完成驗證",
-        "timeout": "驗證逾時",
-        "modelUnavailable": "此模型不可用",
-        "cancelled": "驗證已停止",
-        "invalidResponse": "供應商回傳了無效回應"
+        "authentication": "身分驗證失敗。請檢查登入資訊或 API 金鑰後再試一次。",
+        "rateLimited": "請求頻率受限。請稍後再試。",
+        "insufficientBalance": "餘額不足，無法驗證此模型。請儲值後再試。",
+        "network": "網路連線失敗。請檢查網路後再試。",
+        "upstream": "服務商暫時無法完成驗證。請稍後再試。",
+        "timeout": "驗證逾時。請稍後再試。",
+        "modelUnavailable": "此模型無法使用。請選擇其他模型。",
+        "cancelled": "驗證已停止。",
+        "invalidResponse": "服務商傳回的回應無法驗證。請稍後再試或人工複核。"
       }
     }
   }
