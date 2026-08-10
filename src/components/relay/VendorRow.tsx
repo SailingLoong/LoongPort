@@ -6,7 +6,6 @@ import {
   Pencil,
   PencilLine,
   Play,
-  RefreshCw,
   Trash2,
   Undo2,
   Wallet,
@@ -19,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { VendorAccountRow } from "@/lib/api/vendor";
 
+import { RefreshActionMenu } from "./RefreshActionMenu";
 import { rowKey } from "./rowKey";
 
 /**
@@ -321,7 +321,7 @@ export function VendorRow({
  *
  * | 条件 | 显示 | 为什么这个顺序 |
  * |---|---|---|
- * | `keyReady` | 使用 / 在用 + 刷新 | ⚠️ **优先于 `sessionExpired`** —— 见下 |
+ * | `keyReady` | 使用 / 在用 + 更多 | ⚠️ **优先于 `sessionExpired`** —— 见下 |
  * | `sessionExpired` | 「登录已过期」+ 重新登录 | 预填已就绪，用户只需补验证 |
  * | `!loggedIn` | 「还没登录」+ 登录 | 从没登录过 |
  * | `loggedIn` | 「获取密钥」 | 登录了但还没备好 sk |
@@ -422,32 +422,16 @@ function VendorStatus({
               )}
             </Button>
           )}
-          {/* 「重新备一次密钥」= 把本地这把 sk 重新写进六个平台的配置。
-
-              ⚠️ **它不会去官网换一把新 key**：`vendor_provision` 只在本地
-              `api_key` 为空时才联网建（见它第 2 步「本地已有明文 ⇒ 零请求」）。
-              所以用户在官网手动删/撤销了 key 之后，点这个按钮是**无效**的 ——
-              它会把同一把已失效的 sk 再写一遍。那种情况目前只能删掉这一行再重新添加
-              （没有「换一把 key」的入口，已记在 `TODO.md`）。
-
-              这个按钮真正有用的场景：配置被改坏、或某个平台的记录写失败了，
-              重新展开一次把六个平台补齐。 */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1 px-2"
-            disabled={provisioning}
-            onClick={onProvision}
-            title={t("loongport.vendor.refreshKey")}
-          >
-            {provisioning ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-          </Button>
         </div>
+
+        {/* 「重新备一次密钥」只是把本地已有的 sk 重新写入六个平台配置，
+            不会去官网换新 key。收进明确命名的菜单，避免一个裸刷新图标让用户
+            误以为它会更新密钥本身。 */}
+        <RefreshActionMenu
+          actionLabel={t("loongport.vendor.refreshKey")}
+          loading={provisioning}
+          onAction={onProvision}
+        />
       </div>
     );
   }

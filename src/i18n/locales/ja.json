@@ -3059,14 +3059,14 @@
   },
   "loongport": {
     "sections": {
-      "relay": "中継",
-      "official": "公式API",
+      "relay": "中継サービス",
+      "official": "公式 API",
       "other": "その他"
     },
     "tierList": {
-      "empty": "中継サイトがまだ追加されていません",
-      "addSite": "中継サイトを追加",
-      "refresh": "プランとキーを更新"
+      "empty": "中継サービスはまだ追加されていません",
+      "addSite": "中継サービスを追加",
+      "refresh": "接続プロファイルを更新"
     },
     "row": {
       "expand": "展開",
@@ -3075,185 +3075,198 @@
       "login": "ログイン",
       "sessionExpired": "ログインの有効期限が切れました",
       "reLogin": "再ログイン",
-      "noTiers": "このアカウントにはこのプラットフォーム用のグループがありません",
-      "getKeys": "キーを取得",
-      "tierCount": "{{count}} 件のプラン",
-      "dragHandle": "ドラッグして並び替え",
-      "refetchGroups": "利用可能なグループを再取得",
-      "purchaseHint": "クリックしてチャージ（このサイトの購入ページをアプリ内で開きます）",
+      "noTiers": "このアカウントには現在のプラットフォームで利用できるグループがありません",
+      "getKeys": "接続プロファイルを作成",
+      "tierCount": "接続プロファイル {{count}} 件",
+      "dragHandle": "ドラッグして並べ替え",
+      "more": "その他の操作",
+      "refetchGroups": "利用可能なグループを更新",
+      "purchaseHint": "中継サービスのチャージページを開く",
       "lowBalanceHint": "残高が ${{threshold}} 未満です。クリックしてチャージ",
-      "remove": "このアカウントを削除（プランも一緒に）",
-      "removeBlockedByCurrent": "使用中のプランがあります。先に別のプランに切り替えてください",
+      "remove": "アカウントと接続プロファイルを削除",
+      "removeBlockedByCurrent": "このアカウントの接続プロファイルが使用中です。別のプロファイルに切り替えてから削除してください",
       "removeConfirmTitle": "このアカウントを削除しますか？",
-      "removeConfirmMessage": "「{{label}}」のログイン情報と、生成済みの {{count}} 件のプランを削除します。チャージ済みの残高は中継サイト側に残るため、再ログインすれば引き続き使えます。",
-      "removeConfirmMessageNeverLoggedIn": "「{{label}}」の行と、生成済みの {{count}} 件のプランを削除します。このアカウントは未ログインのため、いつでも再度追加できます。"
+      "removeConfirmMessage": "「{{label}}」のログイン情報と {{count}} 件の接続プロファイルを削除します。中継サービスの残高は保持され、後から再ログインできます。",
+      "removeConfirmMessageNeverLoggedIn": "「{{label}}」と {{count}} 件の接続プロファイルを削除します。後からこのアカウントを再度追加できます。"
     },
     "tier": {
       "rateUnknown": "倍率不明",
       "rate": "{{value}} 倍",
       "models": "対応モデル",
-      "selectModel": "モデル {{model}} に切り替え",
+      "selectModel": "{{model}} に切り替え",
       "modelSelected": "現在のモデル",
       "switching": "切り替え中…",
-      "checkConnectivity": "接続を確認",
+      "checkConnectivity": "接続テスト",
       "resetConfig": "デフォルト設定に戻す",
       "resetConfirmTitle": "デフォルト設定に戻しますか？",
-      "resetConfirmMessage": "「{{name}}」への編集はすべて LoongPort のデフォルト設定で上書きされます。API キーは保持されます。",
+      "resetConfirmMessage": "「{{name}}」への手動変更を LoongPort のデフォルト設定で上書きします。API キーは保持されます。",
       "resetConfirmButton": "デフォルトに戻す",
       "resetDone": "「{{name}}」をデフォルト設定に戻しました",
-      "edit": "設定を編集",
-      "editConfirmTitle": "「{{name}}」の設定を手動で編集しますか？",
-      "editConfirmMessage": "保存すると、この枠はご自身での管理になります。以降「キーを取得」はキーのみを更新し、その他の変更は上書きしません。\n\n編集後に接続できなくなった場合は、枠の行にある「デフォルト設定に戻す」で既定値に戻せます（キーは保持されます）。",
+      "edit": "接続プロファイルを編集",
+      "editConfirmTitle": "「{{name}}」の接続プロファイルを編集しますか？",
+      "editConfirmMessage": "保存後、LoongPort はこの接続プロファイルへの手動変更を上書きしません。今後グループを更新しても、API キーだけが更新されます。\n\n変更を取り消すには「デフォルト設定に戻す」を選択してください。API キーは保持されます。",
       "editConfirmButton": "編集を続ける",
-      "userEdited": "手動管理中",
-      "userEditedHint": "この枠の設定を編集済みです。グループを更新しても上書きされません（キーのみ更新）。クリックでデフォルト設定に戻せます。",
-      "editMissing": "この枠のレコードが見つかりません。「キーを取得」で再生成してください。",
-      "editCurrentNote": "これは現在使用中の枠です。変更が反映されない場合は ChatGPT デスクトップ版を終了して開き直してください —— 起動中は Codex の設定を書き戻します。"
+      "userEdited": "手動管理",
+      "userEditedHint": "この接続プロファイルには手動変更が含まれています。グループを更新しても API キーだけが更新され、その他の設定は保持されます。クリックするとデフォルト設定に戻せます。",
+      "editMissing": "この接続プロファイルが見つかりません。接続プロファイルを作成し直してください。",
+      "editCurrentNote": "これは使用中の接続プロファイルです。変更が反映されない場合は、ChatGPT デスクトップアプリを終了して再度開いてください。起動中の ChatGPT が Codex の設定を上書きすることがあります。"
     },
     "stats": {
       "title": "LoongPort の改善に協力",
-      "intro": "どの中継サイトが実際に使われているかを知り、対応の優先順位を決めたいと考えています。",
-      "sendsLabel": "送信される情報",
-      "sendsBody": "追加した中継サイトのドメイン、アカウント数、アプリのバージョン、OS の種類。",
-      "neverLabel": "送信されない情報",
-      "neverBody": "アカウント、メールアドレス、残高、キー、利用記録。",
-      "canChange": "「設定 → 一般」からいつでも無効にできます。",
-      "accept": "同意する",
-      "decline": "参加しない",
-      "idNote": "重複集計のためランダムなインストール識別子を含みます（中継サイトのアカウントとは無関係です）。"
+      "intro": "優先して対応する中継サービスを判断するため、LoongPort の利用状況を確認したいと考えています。",
+      "sendsLabel": "収集する情報",
+      "sendsBody": "追加した中継サービスのドメイン、アカウント数、アプリのバージョン、OS の種類。",
+      "neverLabel": "収集しない情報",
+      "neverBody": "ログイン情報、メールアドレス、残高、API キー、利用履歴。",
+      "canChange": "この設定は「設定 → 一般」でいつでも変更できます。",
+      "accept": "共有を許可",
+      "decline": "共有しない",
+      "idNote": "データには重複集計を防ぐためのランダムなインストール ID が含まれます。中継サービスのアカウントとは関連付けられません。"
     },
     "site": {
       "removed": "{{label}} を削除しました"
     },
     "session": {
-      "expired": "{{count}} 件のアカウントのログインが無効になりました。再度ログインしてください",
-      "connected": "接続しました。キーを取得中…（ログインウィンドウは閉じても大丈夫です）"
+      "expired": "{{count}} 件のアカウントでログインの有効期限が切れました。再ログインしてください。",
+      "connected": "接続しました。接続プロファイルを作成しています。ログインウィンドウは閉じて構いません。"
     },
     "provision": {
-      "ready": "{{count}} 件のプランを準備しました",
-      "readyWithKeys": "{{count}} 件のプランを準備し、{{keys}} 個のキーを作成しました",
-      "landedOnOtherPlatforms": "このアカウントには {{count}} 件のグループがありますが、現在の CLI 向けのものはありません。上部の該当タブに切り替えてご確認ください。",
+      "ready": "接続プロファイル {{count}} 件を同期しました",
+      "readyWithKeys": "接続プロファイル {{count}} 件を同期し、API キー {{keys}} 件を作成しました",
+      "landedOnOtherPlatforms": "このアカウントには {{count}} 件のグループがありますが、現在のプラットフォームでは利用できません。上部で該当するプラットフォームに切り替えて確認してください。",
       "groupFailed": "{{group}}：{{reason}}",
-      "mergedProviders": "cc-switch の重複プロバイダー {{count}} 件を取り込みました",
-      "refreshed": "{{relays}} 件の中継サイトを更新し、合計 {{tiers}} 件のプランを取得しました",
-      "refreshFailedWithReason": "{{name}} の更新に失敗しました：{{reason}}",
-      "refreshedWithKeys": "{{relays}} 件の中継サイトを更新しました（枠 {{tiers}} 件、新規キー {{keys}} 本）"
+      "mergedProviders": "重複する設定 {{count}} 件を統合しました",
+      "refreshed": "中継サービス {{relays}} 件を更新し、接続プロファイル {{tiers}} 件を同期しました",
+      "refreshFailedWithReason": "{{name}} を更新できませんでした：{{reason}}",
+      "refreshedWithKeys": "中継サービス {{relays}} 件を更新し、接続プロファイル {{tiers}} 件を同期して、API キー {{keys}} 件を作成しました"
     },
     "switch": {
       "done": "{{name}} に切り替えました",
-      "doneRelaunched": "{{name}} に切り替え、ChatGPT を再起動しました",
+      "doneRelaunched": "{{name}} に切り替え、ChatGPT を再度開きました",
       "doneNeedsRestart": "{{name}} に切り替えました。ChatGPT を手動で再起動してください",
-      "modelDone": "{{name}} のモデルを {{model}} に切り替えました",
-      "modelDoneRelaunched": "{{name}} のモデルを {{model}} に切り替え、ChatGPT を再起動しました",
-      "modelDoneNeedsRestart": "{{name}} のモデルを {{model}} に切り替えました。ChatGPT を手動で再起動してください"
+      "modelDone": "{{name}} をモデル {{model}} に切り替えました",
+      "modelDoneRelaunched": "{{name}} をモデル {{model}} に切り替え、ChatGPT を再度開きました",
+      "modelDoneNeedsRestart": "{{name}} をモデル {{model}} に切り替えました。ChatGPT を手動で再起動してください"
     },
     "official": {
       "button": "公式ログインに戻す",
-      "hint": "LoongPort が書き込んだルーティングを消し、自分の ChatGPT アカウントを使います",
+      "hint": "LoongPort のルーティングを削除し、ChatGPT の公式アカウントでログインします",
       "confirmTitle": "公式ログインに戻しますか？",
-      "confirmMessage": "ChatGPT を終了し、LoongPort が書き込んだルーティング設定を消して、現在の codex ログイン情報を削除します（削除前に自動バックアップします）。その後は自分で ChatGPT にログインしてください。",
-      "confirmButton": "公式に戻す",
-      "done": "公式ログインに戻しました。ChatGPT にログインしてください",
-      "doneWithBackup": "公式ログインに戻しました。以前のログイン情報は {{path}} にバックアップしました"
+      "confirmMessage": "ChatGPT を終了し、LoongPort のルーティングを削除します。現在の Codex ログイン情報はバックアップ後に削除されるため、完了後に ChatGPT へ再ログインしてください。",
+      "confirmButton": "公式ログインに戻す",
+      "done": "公式ログインに戻しました。ChatGPT に再ログインしてください",
+      "doneWithBackup": "公式ログインに戻しました。元のログイン情報は {{path}} にバックアップされています"
     },
     "quitConfirm": {
       "title": "{{name}} に切り替え",
-      "body": "ChatGPT は起動時にしか設定を読まないため、いったん終了してから切り替え、その後で開き直します。",
-      "declineNote": "進行中の会話がある場合は確認ダイアログが出ます。そこでキャンセルすると切り替えは中止され、設定は変更されません。",
-      "forceKillWarning": "⚠️ Windows では ChatGPT を強制終了するしかありません（通常の終了要求に応じないため）。保存の確認は出ないので、進行中の会話は先に保存してください。終了後は開き直します。",
-      "platformNote": "代わりに終了できなかった場合も設定は切り替わるので、ChatGPT はご自身で再起動してください。",
-      "switchOnly": "切り替えのみ（自分で再起動）",
-      "quitAndSwitch": "終了して切り替え"
+      "body": "ChatGPT は起動時にのみ接続プロファイルを読み込みます。LoongPort は ChatGPT を終了し、切り替え後に再度開きます。",
+      "declineNote": "macOS では、進行中の会話があると ChatGPT が終了確認を表示することがあります。「キャンセル」を選ぶと切り替えは中止され、設定は変更されません。",
+      "forceKillWarning": "⚠️ Windows では ChatGPT を強制終了する必要があり、保存の確認は表示されません。進行中の会話を先に保存してください。切り替え後、LoongPort が ChatGPT を再度開きます。",
+      "platformNote": "LoongPort が ChatGPT を終了できなかった場合も、接続プロファイルの切り替えは完了します。反映するには ChatGPT を手動で再起動してください。",
+      "switchOnly": "切り替えのみ",
+      "quitAndSwitch": "ChatGPT を終了して切り替え"
     },
     "addSite": {
-      "firstRunTitle": "中継サイトを選択",
-      "firstRunBody": "中継サイトのドメインを貼り付けてください —— ブラウザのアドレスバーからそのままコピーしても大丈夫です（末尾のパスは自動で取り除きます）。空欄なら {{site}} を使います。",
-      "title": "中継サイトを追加",
-      "body": "別の中継サイトのドメインを貼り付けてください。同じサイトに複数アカウントを持てます —— 別のアカウントでログインするだけで、重複は自動的にまとめられます。",
+      "firstRunTitle": "中継サービスを選択",
+      "firstRunBody": "中継サービスのドメインまたは URL を貼り付けてください。パスは自動的に削除されます。空欄の場合は既定の中継サービス {{site}} を使用します。",
+      "title": "中継サービスを追加",
+      "body": "別の中継サービスのドメインを入力します。同じサービスに複数のアカウントを追加でき、重複するアカウントは自動的に統合されます。",
       "connected": "{{name}} に接続しました",
-      "inputLabel": "サイトのドメイン",
-      "inputLabelWithSponsors": "または手動でドメインを入力",
-      "inputHint": "例：bestapi.store、または https://bestapi.store/usage をそのまま貼り付け",
-      "sponsorsLabel": "おすすめのサイト",
-      "sponsorAddAnother": "アカウント {{count}} 件 · さらに追加"
+      "inputLabel": "中継サービスのドメイン",
+      "inputLabelWithSponsors": "または中継サービスのドメインを入力",
+      "inputHint": "例：bestapi.store、https://bestapi.store/usage",
+      "sponsorsLabel": "おすすめの中継サービス",
+      "sponsorAddAnother": "{{count}} 件のアカウントを追加済み · もう 1 件追加"
     },
     "vendor": {
-      "add": "公式アカウントを追加",
-      "empty": "公式アカウントがまだ追加されていません",
-      "remove": "この公式アカウントを削除（設定も一緒に）",
-      "removeConfirmTitle": "この公式アカウントを削除しますか？",
-      "removeConfirmMessage": "「{{label}}」のログイン情報とローカルのキー、および 6 つのプラットフォーム向けに生成した設定を削除します。公式サイト側の API キーは残るので、再度ログインすれば使えます。",
+      "add": "プロバイダーアカウントを追加",
+      "empty": "プロバイダーアカウントはまだ追加されていません",
+      "remove": "プロバイダーアカウントと接続プロファイルを削除",
+      "removeConfirmTitle": "このプロバイダーアカウントを削除しますか？",
+      "removeConfirmMessage": "「{{label}}」のログイン情報とローカル API キー、および 6 つのプラットフォーム用の接続プロファイルを削除します。プロバイダーの Web サイトにある API キーは削除されず、後から再ログインできます。",
       "removed": "{{label}} を削除しました",
-      "noKey": "キーが未準備です",
-      "keyReady": "{{count}} 個のプラットフォームの設定を準備しました",
-      "keyCreated": "公式サイトで新しいキーを作成し、{{count}} 個のプラットフォームの設定を準備しました",
-      "refreshKey": "キーを再準備する",
-      "sessionExpiredUsable": "ログインは期限切れですが、キーはまだ使えます（残高だけ取得できません）。ここをクリックして再ログインできます。",
-      "loginFailed": "ログインが完了しませんでした：{{reason}}",
-      "openKeyPage": "公式サイトで整理する",
-      "userEditedHint": "このアカウントの現在のアプリ向け設定を編集済みです。「キーを取得」しても上書きされません（キーのみ更新）。クリックでデフォルト設定に戻せます。",
-      "editConfirmMessage": "保存すると、このアカウントの現在のアプリ向け設定はご自身での管理になります。以降「キーを取得」はキーのみを更新し、その他の変更は上書きしません。\n\n編集後に接続できなくなった場合は、この行にある「デフォルト設定に戻す」で既定値に戻せます（キーは保持されます）。"
+      "noKey": "API キーが設定されていません",
+      "keyReady": "{{count}} 個のプラットフォーム用に接続プロファイルを作成しました",
+      "keyCreated": "プロバイダーの Web サイトで API キーを作成し、{{count}} 個のプラットフォーム用に接続プロファイルを作成しました",
+      "refreshKey": "キー設定を再適用",
+      "sessionExpiredUsable": "ログインの有効期限が切れていますが、API キーは引き続き使用できます。残高は一時的に確認できません。クリックして再ログインしてください。",
+      "loginFailed": "ログインできませんでした：{{reason}}",
+      "openKeyPage": "API キーを管理",
+      "userEditedHint": "このプロバイダーアカウントには、現在のプラットフォーム用の手動変更があります。キー設定を再適用しても API キーだけが更新され、その他の設定は保持されます。クリックするとデフォルト設定に戻せます。",
+      "editConfirmMessage": "保存後、LoongPort は現在のプラットフォームに対するこのプロバイダーアカウントの手動変更を上書きしません。キー設定を再適用しても API キーだけが更新されます。\n\n変更を取り消すには「デフォルト設定に戻す」を選択してください。API キーは保持されます。"
     },
     "imageTab": {
-      "companionNotice": "このページは単独では使えません。codex のチャットと併せて使います。",
-      "companionDetail": "画像生成は LoongPort 同梱のツール（MCP）が担います。codex / claude で「画像を生成して」と言えば、ここで選んだティアで出力されます。会話は Codex タブで選んだティアのまま —— 両者は独立しているので、チャットは DeepSeek でも他のサイトでも構いません。",
-      "howTo": "画像生成のティアを切り替えても CLI の再起動は不要で、次回の生成から新しいティアが使われます。初めて画像ティアを持ったときだけ、codex にツールを認識させるため新しいターミナルを開いてください。",
-      "emptyTitle": "画像生成のティアはまだありません",
-      "emptyBody": "画像ティアは「キーを取得」時に自動判定されます。gpt-image 系モデルだけを持つグループがあれば、ここに現れます。ご利用のサイトに画像グループが無い場合もあります —— そのときはこのページは空のままで、CLI の設定には何も追加されません。"
+      "companionNotice": "画像生成は Codex または Claude と組み合わせて使用します。",
+      "companionDetail": "画像生成にはこのページで選択した接続プロファイルが使用されます。チャットには Codex または Claude ページで選択したプロファイルが使用されるため、2 つの選択は互いに影響しません。",
+      "howTo": "画像生成用の接続プロファイルを切り替えても再起動は不要で、次回の生成から反映されます。初めて画像生成用プロファイルを作成した後は、新しいターミナルを開いて画像生成機能を読み込んでください。",
+      "emptyTitle": "画像生成用の接続プロファイルがありません",
+      "emptyBody": "接続プロファイルの作成時に、LoongPort は gpt-image モデルのみに対応するグループを識別します。中継サービスに該当するグループがない場合、このページは空のままです。"
     },
     "modelVerification": {
-      "title": "モデルを検証",
-      "titleWithTier": "モデルを検証 · {{tierName}}",
-      "description": "このプロバイダーに設定されたモデルを 1 つ検証します。",
-      "globalScopeNote": "設定済みのすべてのモデルに自動検証を適用します。",
+      "title": "モデル検証",
+      "titleWithTier": "モデル検証 · {{tierName}}",
+      "description": "この接続プロファイルで選択されているモデルの応答特性を検証します。",
+      "globalScopeNote": "自動検証は設定済みのすべてのモデルに適用されます。",
       "model": {
         "label": "モデルを選択",
         "placeholder": "モデルを選択してください",
         "loading": "モデルを読み込み中…",
         "empty": "検証できるモデルはありません",
-        "error": "モデル一覧を読み込めませんでした"
+        "error": "モデル一覧を読み込めませんでした。もう一度お試しください。"
       },
       "actions": {
         "start": "検証を開始",
         "stop": "検証を停止",
         "retry": "再試行"
       },
-      "status": { "running": "検証中 {{completed}} / {{total}}" },
+      "status": {
+        "running": "{{completed}} / {{total}} を検証中"
+      },
       "runtime": {
-        "autoLabel": "実行時の自動検証（グローバル）",
-        "autoHelp": "すべてのリレーグループとモデルに適用されます。LoongPort はローカルプロキシ経由で Codex と Claude の実際の応答を監視します。追加の検証リクエストは送信せず、会話内容も保存しません。",
-        "loadError": "実行時検証の状態を読み込めませんでした。",
-        "anomalyToast": "{{app}} のモデル {{model}} で異常を検出しました。モデル検証を開いて確認してください。",
-        "apps": { "codex": "Codex", "claude": "Claude" },
-        "status": { "active": "有効", "waiting": "待機中", "error": "エラー" }
+        "autoLabel": "自動検証",
+        "autoHelp": "Codex と Claude の実際の応答に基づき、すべての中継サービスのグループとモデルを自動検証します。追加の検証リクエストは送信せず、会話内容は保存しません。",
+        "loadError": "自動検証の状態を読み込めませんでした。もう一度お試しください。",
+        "anomalyToast": "{{app}} のモデル {{model}} で異常を検出しました。モデル検証を開いて詳細を確認してください。",
+        "apps": {
+          "codex": "Codex",
+          "claude": "Claude"
+        },
+        "status": {
+          "active": "有効",
+          "waiting": "利用可能な応答を待機中",
+          "error": "正常に動作していません"
+        }
       },
       "history": {
         "title": "直近 5 件の検証結果",
-        "loading": "検証結果を読み込んでいます…",
-        "empty": "検証結果はまだありません。",
-        "error": "検証結果を読み込めませんでした。",
-        "source": { "active": "手動検証", "runtime": "使用時の検証" }
+        "loading": "検証結果を読み込み中…",
+        "empty": "検証結果はまだありません",
+        "error": "検証結果を読み込めませんでした。もう一度お試しください。",
+        "source": {
+          "active": "現在の検証",
+          "runtime": "自動検証"
+        }
       },
       "tierVerdict": {
-        "trusted": "モデル検証済み",
-        "suspicious": "モデルに疑い",
-        "anomaly": "モデル異常",
-        "trustedHint": "モデル検証に合格しました。モデルを検証で詳細を確認してください。",
-        "suspiciousHint": "検証で疑わしい挙動が見つかりました。モデルを検証で詳細を確認してください。",
-        "anomalyHint": "検証で異常が見つかりました。モデルを検証で詳細を確認してください。"
+        "trusted": "検証済み",
+        "suspicious": "要確認",
+        "anomaly": "異常を検出",
+        "trustedHint": "現在の証拠では検証に合格しています。「モデル検証」を開いて詳細を確認してください。",
+        "suspiciousHint": "現在の結果は手動確認が必要です。「モデル検証」を開いて詳細を確認してください。",
+        "anomalyHint": "応答の不整合を検出しました。「モデル検証」を開いて詳細を確認してください。"
       },
       "verdict": {
-        "trusted": "信頼済み",
-        "suspicious": "疑わしい",
-        "anomaly": "異常",
-        "inconclusive": "判断不能"
+        "trusted": "検証済み",
+        "suspicious": "要確認",
+        "anomaly": "異常を検出",
+        "inconclusive": "証拠不足"
       },
       "evidence": {
         "title": "検証根拠",
         "level": {
-          "cryptographic": "暗号学的根拠",
-          "protocolBehavior": "プロトコル動作の根拠",
-          "insufficient": "根拠不足"
+          "cryptographic": "暗号学的証拠",
+          "protocolBehavior": "プロトコル動作の証拠",
+          "insufficient": "証拠不足"
         },
         "outcome": {
           "passed": "合格",
@@ -3268,21 +3281,21 @@
           "toolCallShape": "ツール呼び出しの構造",
           "structuredOutput": "構造化出力",
           "thinkingSignature": "推論シグネチャ",
-          "signatureContinuation": "シグネチャの継続",
-          "foreignProtocol": "外部プロトコル",
-          "foreignSelfIdentification": "外部自己識別"
+          "signatureContinuation": "シグネチャの連続性",
+          "foreignProtocol": "他のプロトコル特性",
+          "foreignSelfIdentification": "他のモデルによる自己識別"
         }
       },
       "failure": {
-        "authentication": "認証に失敗しました",
-        "rateLimited": "プロバイダーにより検証が制限されました",
-        "insufficientBalance": "残高不足のためこのモデルを検証できません",
-        "network": "ネットワーク接続に失敗しました",
-        "upstream": "プロバイダーは検証を完了できませんでした",
-        "timeout": "検証がタイムアウトしました",
-        "modelUnavailable": "このモデルは利用できません",
-        "cancelled": "検証を停止しました",
-        "invalidResponse": "プロバイダーが無効な応答を返しました"
+        "authentication": "認証に失敗しました。ログイン情報または API キーを確認して、もう一度お試しください。",
+        "rateLimited": "リクエストが制限されました。しばらくしてからもう一度お試しください。",
+        "insufficientBalance": "残高不足のため、このモデルを検証できません。チャージしてからもう一度お試しください。",
+        "network": "ネットワーク接続に失敗しました。接続を確認して、もう一度お試しください。",
+        "upstream": "プロバイダーが検証を完了できませんでした。しばらくしてからもう一度お試しください。",
+        "timeout": "検証がタイムアウトしました。しばらくしてからもう一度お試しください。",
+        "modelUnavailable": "このモデルは利用できません。別のモデルを選択してください。",
+        "cancelled": "検証を停止しました。",
+        "invalidResponse": "プロバイダーの応答を検証できませんでした。しばらくしてから再試行するか、手動で確認してください。"
       }
     }
   }

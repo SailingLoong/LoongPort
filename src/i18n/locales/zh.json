@@ -3064,192 +3064,209 @@
       "other": "其他"
     },
     "tierList": {
-      "empty": "还没有添加任何中转站",
+      "empty": "尚未添加中转站",
       "addSite": "添加中转站",
-      "refresh": "刷新档位与密钥"
+      "refresh": "更新接入配置"
     },
     "row": {
       "expand": "展开",
       "collapse": "折叠",
-      "notLoggedIn": "还没登录",
-      "login": "去登录",
+      "notLoggedIn": "未登录",
+      "login": "登录",
       "sessionExpired": "登录已过期",
       "reLogin": "重新登录",
-      "noTiers": "该账号在此平台下没有可用分组",
-      "getKeys": "获取密钥",
-      "tierCount": "{{count}} 个档位",
+      "noTiers": "此账号在当前平台没有可用分组",
+      "getKeys": "创建接入配置",
+      "tierCount": "{{count}} 个接入配置",
       "dragHandle": "拖动排序",
-      "refetchGroups": "重新拉取可用分组",
-      "purchaseHint": "点击充值（在应用内打开该站点的充值页）",
-      "lowBalanceHint": "余额不足 ${{threshold}}，点击充值",
-      "remove": "删除这个账号（连带它的档位）",
-      "removeBlockedByCurrent": "它有档位正在使用，先切到别的档位再删",
-      "removeConfirmTitle": "删除这个账号？",
-      "removeConfirmMessage": "会删掉「{{label}}」的登录态，连带它已生成的 {{count}} 个档位。已充值的余额留在中转站那边，重新登录就能再用。",
-      "removeConfirmMessageNeverLoggedIn": "会删掉「{{label}}」这一行，连带它已生成的 {{count}} 个档位。这个账号从没登录过，随时可以重新添加。"
+      "more": "更多操作",
+      "refetchGroups": "更新可用分组",
+      "purchaseHint": "打开中转站充值页面",
+      "lowBalanceHint": "余额低于 ${{threshold}}，点击充值",
+      "remove": "删除账号及接入配置",
+      "removeBlockedByCurrent": "此账号有接入配置正在使用，请先切换到其他接入配置",
+      "removeConfirmTitle": "删除此账号？",
+      "removeConfirmMessage": "将删除「{{label}}」的登录信息及其 {{count}} 个接入配置。中转站中的余额不会受影响；之后可重新登录恢复使用。",
+      "removeConfirmMessageNeverLoggedIn": "将删除「{{label}}」及其 {{count}} 个接入配置。之后可重新添加此账号。"
     },
     "tier": {
       "rateUnknown": "倍率未知",
       "rate": "{{value}} 倍",
       "models": "支持的模型",
-      "selectModel": "切换到模型 {{model}}",
+      "selectModel": "切换到 {{model}}",
       "modelSelected": "当前模型",
-      "switching": "切换中…",
-      "checkConnectivity": "检测连通",
+      "switching": "正在切换…",
+      "checkConnectivity": "测试连接",
       "resetConfig": "恢复默认配置",
       "resetConfirmTitle": "恢复默认配置？",
-      "resetConfirmMessage": "会用 LoongPort 的默认配置覆盖「{{name}}」的全部编辑，密钥保留不变。",
-      "resetConfirmButton": "恢复默认",
+      "resetConfirmMessage": "将使用 LoongPort 默认配置覆盖「{{name}}」的手动修改。API 密钥会保留。",
+      "resetConfirmButton": "恢复默认配置",
       "resetDone": "已恢复「{{name}}」的默认配置",
-      "edit": "编辑配置",
-      "editConfirmTitle": "手动编辑「{{name}}」的配置？",
-      "editConfirmMessage": "保存后这个档位就归你自己维护：以后「获取密钥」只会更新它的密钥，不再覆盖你改的其它内容。\n\n如果改完连不上，用档位行上的「恢复默认配置」退回默认值（密钥保留不变）。",
+      "edit": "编辑接入配置",
+      "editConfirmTitle": "编辑「{{name}}」的接入配置？",
+      "editConfirmMessage": "保存后，LoongPort 将不再覆盖此接入配置的手动修改；后续更新分组时只会更新 API 密钥。\n\n如需撤销修改，请选择“恢复默认配置”。API 密钥会保留。",
       "editConfirmButton": "继续编辑",
-      "userEdited": "已手动维护",
-      "userEditedHint": "这个档位的配置你改过。刷新分组不会覆盖它（只更新密钥）。点这里恢复默认配置。",
-      "editMissing": "这个档位的记录已经不在了，请点「获取密钥」重新生成。",
-      "editCurrentNote": "这是当前正在使用的档位。改完如果没生效，退出并重开 ChatGPT 桌面版 —— 它在跑的时候会把 codex 的配置改回去。"
+      "userEdited": "手动维护",
+      "userEditedHint": "此接入配置包含手动修改。更新分组时只会更新 API 密钥，不会覆盖其他内容。点击可恢复默认配置。",
+      "editMissing": "未找到此接入配置。请重新创建接入配置。",
+      "editCurrentNote": "这是正在使用的接入配置。若修改未生效，请退出并重新打开 ChatGPT 桌面版；运行中的 ChatGPT 可能会覆盖 Codex 配置。"
     },
     "stats": {
       "title": "帮助改进 LoongPort",
-      "intro": "我们想知道大家实际在用哪些中转站，据此决定优先适配谁。",
-      "sendsLabel": "会上报",
-      "sendsBody": "你添加的中转站域名、账号个数、应用版本与操作系统类型。",
-      "neverLabel": "不会上报",
-      "neverBody": "账号、邮箱、余额、密钥、用量记录。",
-      "canChange": "可以随时在「设置 → 通用」里关掉。",
-      "accept": "好",
-      "decline": "不参与",
-      "idNote": "会带一个随机生成的安装标识（用于去重统计，与你在中转站的账号无关）。"
+      "intro": "为了确定优先适配的中转站，我们希望了解 LoongPort 的实际使用情况。",
+      "sendsLabel": "将收集",
+      "sendsBody": "已添加的中转站域名、账号数量、应用版本和操作系统类型。",
+      "neverLabel": "不会收集",
+      "neverBody": "账号登录信息、电子邮箱、余额、API 密钥和用量记录。",
+      "canChange": "可随时在“设置 → 通用”中更改此选项。",
+      "accept": "允许分享",
+      "decline": "不分享",
+      "idNote": "数据包含随机生成的安装标识，仅用于去重统计，与中转站账号无关。"
     },
     "site": {
       "removed": "已移除 {{label}}"
     },
     "session": {
-      "expired": "{{count}} 个账号的登录已失效，请重新登录",
-      "connected": "已连接，正在获取密钥…（登录窗口可以自己关掉）"
+      "expired": "{{count}} 个账号的登录已过期，请重新登录",
+      "connected": "已连接，正在创建接入配置。现在可以关闭登录窗口。"
     },
     "provision": {
-      "ready": "已备好 {{count}} 个档位",
-      "readyWithKeys": "已备好 {{count}} 个档位，新建 {{keys}} 把密钥",
-      "landedOnOtherPlatforms": "这个账号有 {{count}} 个分组，但都不属于当前这个 CLI。切到上方对应的标签页查看。",
+      "ready": "已同步 {{count}} 个接入配置",
+      "readyWithKeys": "已同步 {{count}} 个接入配置，其中创建了 {{keys}} 个 API 密钥",
+      "landedOnOtherPlatforms": "此账号有 {{count}} 个分组，但均不适用于当前平台。请切换到上方对应的平台查看。",
       "groupFailed": "{{group}}：{{reason}}",
-      "mergedProviders": "已从 cc-switch 收编 {{count}} 个重复配置",
-      "refreshed": "已刷新 {{relays}} 个中转站，共 {{tiers}} 个档位",
-      "refreshFailedWithReason": "{{name}} 刷新失败：{{reason}}",
-      "refreshedWithKeys": "已刷新 {{relays}} 个中转站，共 {{tiers}} 个档位，新建 {{keys}} 把密钥"
+      "mergedProviders": "已合并 {{count}} 个重复配置",
+      "refreshed": "已更新 {{relays}} 个中转站，共同步 {{tiers}} 个接入配置",
+      "refreshFailedWithReason": "无法更新 {{name}}：{{reason}}",
+      "refreshedWithKeys": "已更新 {{relays}} 个中转站，共同步 {{tiers}} 个接入配置，其中创建了 {{keys}} 个 API 密钥"
     },
     "switch": {
-      "done": "已切换到 {{name}}",
-      "doneRelaunched": "已切换到 {{name}}，已重新打开 ChatGPT",
-      "doneNeedsRestart": "已切换到 {{name}}，请手动重启 ChatGPT",
-      "modelDone": "已切换到 {{name}} 的模型 {{model}}",
-      "modelDoneRelaunched": "已切换到 {{name}} 的模型 {{model}}，已重新打开 ChatGPT",
-      "modelDoneNeedsRestart": "已切换到 {{name}} 的模型 {{model}}，请手动重启 ChatGPT"
+      "done": "已切换至 {{name}}",
+      "doneRelaunched": "已切换至 {{name}}，并重新打开 ChatGPT",
+      "doneNeedsRestart": "已切换至 {{name}}。请手动重启 ChatGPT",
+      "modelDone": "已将 {{name}} 切换至模型 {{model}}",
+      "modelDoneRelaunched": "已将 {{name}} 切换至模型 {{model}}，并重新打开 ChatGPT",
+      "modelDoneNeedsRestart": "已将 {{name}} 切换至模型 {{model}}。请手动重启 ChatGPT"
     },
     "official": {
-      "button": "切回官方登录",
-      "hint": "清掉 LoongPort 写入的路由，改用你自己的 ChatGPT 账号",
-      "confirmTitle": "切回官方登录？",
-      "confirmMessage": "会退出 ChatGPT、清掉 LoongPort 写入的路由配置，并删除当前的 codex 登录态（删前会自动备份）。之后需要你自己登录 ChatGPT。",
-      "confirmButton": "切回官方",
-      "done": "已切回官方登录，请自己登录 ChatGPT",
-      "doneWithBackup": "已切回官方登录。原登录态已备份到 {{path}}"
+      "button": "恢复官方登录",
+      "hint": "移除 LoongPort 路由，改用 ChatGPT 官方账号登录",
+      "confirmTitle": "恢复官方登录？",
+      "confirmMessage": "将退出 ChatGPT，移除 LoongPort 路由，并在备份后删除当前 Codex 登录状态。完成后需要重新登录 ChatGPT。",
+      "confirmButton": "恢复官方登录",
+      "done": "已恢复官方登录。请重新登录 ChatGPT",
+      "doneWithBackup": "已恢复官方登录。原登录状态已备份至 {{path}}"
     },
     "quitConfirm": {
-      "title": "切换到 {{name}}",
-      "body": "ChatGPT 启动时才读取配置，所以要先退出它、切换完再打开。",
-      "declineNote": "如果它有进行中的对话，会弹出确认框 —— 在那里点取消的话，本次切换会中止、配置不会改动。",
-      "forceKillWarning": "⚠️ Windows 上只能强制关闭 ChatGPT（它不响应普通的关闭请求），不会提示你保存 —— 有正在进行的对话请先自己保存。关掉后会再帮你打开。",
-      "platformNote": "万一没能替你关掉，配置仍会切好，只需你手动重启 ChatGPT。",
-      "switchOnly": "只切换，我自己重启",
-      "quitAndSwitch": "退出并切换"
+      "title": "切换至 {{name}}",
+      "body": "ChatGPT 仅在启动时读取接入配置。LoongPort 将先退出 ChatGPT，完成切换后再重新打开。",
+      "declineNote": "在 macOS 上，若 ChatGPT 有进行中的对话，系统可能显示退出确认框。选择“取消”将中止切换，配置不会更改。",
+      "forceKillWarning": "⚠️ Windows 上需要强制关闭 ChatGPT，且不会显示保存提醒。请先保存正在进行的对话；切换完成后 LoongPort 会重新打开 ChatGPT。",
+      "platformNote": "如果 LoongPort 无法关闭 ChatGPT，接入配置仍会完成切换。请手动重启 ChatGPT 使其生效。",
+      "switchOnly": "仅切换",
+      "quitAndSwitch": "退出 ChatGPT 并切换"
     },
     "addSite": {
-      "firstRunTitle": "选择服务站点",
-      "firstRunBody": "把中转站的域名粘进来就行 —— 从浏览器地址栏直接复制也可以，网址后面的路径会自动去掉。留空则用默认的 {{site}}。",
+      "firstRunTitle": "选择中转站",
+      "firstRunBody": "粘贴中转站域名或完整网址，LoongPort 会自动移除路径。留空将使用默认中转站 {{site}}。",
       "title": "添加中转站",
-      "body": "把另一个中转站的域名粘进来。同一个站可以挂多个账号 —— 登录不同账号即可，重复的会自动合并。",
-      "connected": "已连上 {{name}}",
-      "inputLabel": "站点域名",
-      "inputLabelWithSponsors": "或手动输入域名",
-      "inputHint": "例如 bestapi.store，或直接粘 https://bestapi.store/usage",
-      "sponsorsLabel": "推荐站点",
-      "sponsorAddAnother": "已有 {{count}} 个账号 · 再加一个"
+      "body": "输入另一个中转站的域名。同一中转站可添加多个账号，重复账号会自动合并。",
+      "connected": "已连接 {{name}}",
+      "inputLabel": "中转站域名",
+      "inputLabelWithSponsors": "或输入中转站域名",
+      "inputHint": "例如 bestapi.store，或 https://bestapi.store/usage",
+      "sponsorsLabel": "推荐中转站",
+      "sponsorAddAnother": "已有 {{count}} 个账号 · 再添加一个"
     },
     "vendor": {
-      "add": "添加官网账号",
-      "empty": "还没有添加任何官网账号",
-      "remove": "删除这个官网账号（连带它的配置）",
-      "removeConfirmTitle": "删除这个官网账号？",
-      "removeConfirmMessage": "会删掉「{{label}}」的登录态与本地密钥，连带它在六个平台生成的配置。官网上那把 API key 不会被删，重新登录就能再用。",
+      "add": "添加服务商账号",
+      "empty": "尚未添加服务商账号",
+      "remove": "删除服务商账号及接入配置",
+      "removeConfirmTitle": "删除此服务商账号？",
+      "removeConfirmMessage": "将删除「{{label}}」的登录信息、本地 API 密钥及其为六个平台生成的接入配置。服务商网站上的 API 密钥不会被删除；之后可重新登录恢复使用。",
       "removed": "已删除 {{label}}",
-      "noKey": "还没备好密钥",
-      "keyReady": "已备好 {{count}} 个平台的配置",
-      "keyCreated": "已在官网新建密钥，并备好 {{count}} 个平台的配置",
-      "refreshKey": "重新备一次密钥",
-      "sessionExpiredUsable": "登录已过期，但密钥仍然可用（只是查不到余额）。点这里重新登录。",
-      "loginFailed": "登录没能完成：{{reason}}",
-      "openKeyPage": "去官网删除",
-      "userEditedHint": "这个账号在当前这个应用下的配置你改过。「获取密钥」不会覆盖它（只更新密钥）。点这里恢复默认配置。",
-      "editConfirmMessage": "保存后这个账号在当前这个应用下的配置就归你自己维护：以后「获取密钥」只会更新它的密钥，不再覆盖你改的其它内容。\n\n如果改完连不上，用这一行上的「恢复默认配置」退回默认值（密钥保留不变）。"
+      "noKey": "尚未配置 API 密钥",
+      "keyReady": "已为 {{count}} 个平台创建接入配置",
+      "keyCreated": "已在服务商网站创建 API 密钥，并为 {{count}} 个平台创建接入配置",
+      "refreshKey": "重新应用密钥配置",
+      "sessionExpiredUsable": "登录已过期，但 API 密钥仍可使用；余额暂时无法查询。点击重新登录。",
+      "loginFailed": "登录失败：{{reason}}",
+      "openKeyPage": "管理 API 密钥",
+      "userEditedHint": "此服务商账号在当前平台的接入配置包含手动修改。重新应用密钥配置时只会更新 API 密钥，不会覆盖其他内容。点击可恢复默认配置。",
+      "editConfirmMessage": "保存后，LoongPort 将不再覆盖此服务商账号在当前平台的手动修改；后续重新应用密钥配置时只会更新 API 密钥。\n\n如需撤销修改，请选择“恢复默认配置”。API 密钥会保留。"
     },
     "imageTab": {
-      "companionNotice": "这一页不能单独使用，要配合 codex 聊天一起用。",
-      "companionDetail": "生图靠 LoongPort 自带的工具（MCP）完成：你在 codex / claude 里说「生成一张图」，它就用这里选定的档位出图。而对话仍走 Codex 标签页里选的那个档位 —— 两者各自独立，聊天可以用 DeepSeek 或任何别的站。",
-      "howTo": "换生图档位不用重启 CLI，下一次生成就用新的。只有第一次有生图档位时要新开一个终端，让 codex 读到那个工具。",
-      "emptyTitle": "还没有生图档位",
-      "emptyBody": "生图档位由「获取密钥」自动识别：中转站那边有只挂 gpt-image 模型的分组时，它就出现在这里。你的站点可能没有提供生图分组 —— 那样这一页保持空着就好，CLI 的配置里不会多出任何东西。"
+      "companionNotice": "图像生成需要与 Codex 或 Claude 配合使用。",
+      "companionDetail": "图像生成使用此页面选择的接入配置；聊天使用 Codex 或 Claude 页面选择的接入配置，两者互不影响。",
+      "howTo": "切换图像生成接入配置后无需重启，下次生成起生效。首次创建图像生成接入配置后，请新开终端以加载图像生成功能。",
+      "emptyTitle": "尚无图像生成接入配置",
+      "emptyBody": "创建接入配置时，LoongPort 会识别仅支持 gpt-image 模型的分组。若中转站未提供这类分组，本页将保持为空。"
     },
     "modelVerification": {
       "title": "模型验证",
-      "titleWithTier": "验证模型 · {{tierName}}",
-      "description": "验证这个供应商已配置的一个模型。",
-      "globalScopeNote": "对所有已配置模型启用自动验证。",
+      "titleWithTier": "模型验证 · {{tierName}}",
+      "description": "验证当前接入配置所选模型的响应特征。",
+      "globalScopeNote": "自动验证适用于所有已配置的模型。",
       "model": {
         "label": "选择模型",
         "placeholder": "请选择模型",
         "loading": "正在加载模型…",
         "empty": "没有可验证的模型",
-        "error": "模型列表加载失败"
+        "error": "无法加载模型列表。请重试。"
       },
-      "actions": { "start": "开始验证", "stop": "停止验证", "retry": "重试" },
-      "status": { "running": "正在验证 {{completed}} / {{total}}" },
+      "actions": {
+        "start": "开始验证",
+        "stop": "停止验证",
+        "retry": "重试"
+      },
+      "status": {
+        "running": "正在验证 {{completed}} / {{total}}"
+      },
       "runtime": {
-        "autoLabel": "运行时自动检测（全局）",
-        "autoHelp": "对所有中转分组和模型生效。开启后，LoongPort 会通过本地代理观察 Codex 和 Claude 的实际响应；不会额外发送检测请求，也不会保存对话内容。",
-        "loadError": "运行时检测状态加载失败",
-        "anomalyToast": "{{app}} 的模型 {{model}} 检测到异常，请打开模型验证查看。",
-        "apps": { "codex": "Codex", "claude": "Claude" },
-        "status": { "active": "已启用", "waiting": "等待中", "error": "异常" }
+        "autoLabel": "自动验证",
+        "autoHelp": "根据 Codex 和 Claude 的实际响应自动验证所有中转站分组和模型；不额外发送验证请求，也不保存对话内容。",
+        "loadError": "无法加载自动验证状态。请重试。",
+        "anomalyToast": "{{app}} 的模型 {{model}} 检测到异常。请打开模型验证查看详情。",
+        "apps": {
+          "codex": "Codex",
+          "claude": "Claude"
+        },
+        "status": {
+          "active": "已启用",
+          "waiting": "等待可用响应",
+          "error": "运行异常"
+        }
       },
       "history": {
         "title": "最近 5 条验证记录",
         "loading": "正在加载验证记录…",
         "empty": "暂无验证记录",
-        "error": "验证记录加载失败",
-        "source": { "active": "主动检测", "runtime": "使用时检测" }
+        "error": "无法加载验证记录。请重试。",
+        "source": {
+          "active": "当前验证",
+          "runtime": "自动验证"
+        }
       },
       "tierVerdict": {
-        "trusted": "模型已验证",
-        "suspicious": "模型存疑",
-        "anomaly": "模型异常",
-        "trustedHint": "模型验证通过，请点击「模型验证」查看详情",
-        "suspiciousHint": "模型验证结果存疑，请点击「模型验证」查看详情",
-        "anomalyHint": "模型验证发现异常，请点击「模型验证」查看详情"
+        "trusted": "验证通过",
+        "suspicious": "需要复核",
+        "anomaly": "检测到异常",
+        "trustedHint": "现有证据验证通过。打开“模型验证”查看详情。",
+        "suspiciousHint": "现有结果需要人工复核。打开“模型验证”查看详情。",
+        "anomalyHint": "检测到响应不一致。打开“模型验证”查看详情。"
       },
       "verdict": {
-        "trusted": "可信",
-        "suspicious": "可疑",
-        "anomaly": "异常",
-        "inconclusive": "结论不足"
+        "trusted": "验证通过",
+        "suspicious": "需要复核",
+        "anomaly": "检测到异常",
+        "inconclusive": "证据不足"
       },
       "evidence": {
         "title": "验证依据",
         "level": {
-          "cryptographic": "密码学依据",
-          "protocolBehavior": "协议行为依据",
-          "insufficient": "依据不足"
+          "cryptographic": "加密证据",
+          "protocolBehavior": "协议行为证据",
+          "insufficient": "证据不足"
         },
         "outcome": {
           "passed": "通过",
@@ -3258,27 +3275,27 @@
         },
         "fact": {
           "basicEnvelope": "基础响应结构",
-          "modelMatch": "模型身份",
+          "modelMatch": "模型标识",
           "streamLifecycle": "流式响应生命周期",
           "usageConsistency": "用量一致性",
           "toolCallShape": "工具调用结构",
           "structuredOutput": "结构化输出",
-          "thinkingSignature": "推理特征",
-          "signatureContinuation": "特征延续",
-          "foreignProtocol": "外部协议",
-          "foreignSelfIdentification": "外部自我标识"
+          "thinkingSignature": "推理签名",
+          "signatureContinuation": "签名连续性",
+          "foreignProtocol": "其他协议特征",
+          "foreignSelfIdentification": "其他模型自我标识"
         }
       },
       "failure": {
-        "authentication": "认证失败",
-        "rateLimited": "供应商限制了本次验证",
-        "insufficientBalance": "余额不足，无法验证此模型",
-        "network": "网络连接失败",
-        "upstream": "供应商无法完成验证",
-        "timeout": "验证超时",
-        "modelUnavailable": "此模型不可用",
-        "cancelled": "验证已停止",
-        "invalidResponse": "供应商返回了无效响应"
+        "authentication": "身份验证失败。请检查登录信息或 API 密钥后重试。",
+        "rateLimited": "请求频率受限。请稍后重试。",
+        "insufficientBalance": "余额不足，无法验证此模型。请充值后重试。",
+        "network": "网络连接失败。请检查网络后重试。",
+        "upstream": "服务商暂时无法完成验证。请稍后重试。",
+        "timeout": "验证超时。请稍后重试。",
+        "modelUnavailable": "此模型不可用。请选择其他模型。",
+        "cancelled": "验证已停止。",
+        "invalidResponse": "服务商返回的响应无法验证。请稍后重试或人工复核。"
       }
     }
   }
