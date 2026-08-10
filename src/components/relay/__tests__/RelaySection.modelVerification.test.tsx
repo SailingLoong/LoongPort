@@ -195,6 +195,7 @@ describe("RelaySection model verification ownership", () => {
       tiers: [],
       failures: [],
       keysCreated: 0,
+      mergedProviders: [],
     });
     api.status.mockResolvedValue({
       defaultSite: "",

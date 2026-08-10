@@ -3131,6 +3131,7 @@
       "readyWithKeys": "已备好 {{count}} 个档位，新建 {{keys}} 把密钥",
       "landedOnOtherPlatforms": "这个账号有 {{count}} 个分组，但都不属于当前这个 CLI。切到上方对应的标签页查看。",
       "groupFailed": "{{group}}：{{reason}}",
+      "mergedProviders": "已从 cc-switch 收编 {{count}} 个重复配置",
       "refreshed": "已刷新 {{relays}} 个中转站，共 {{tiers}} 个档位",
       "refreshFailedWithReason": "{{name}} 刷新失败：{{reason}}",
       "refreshedWithKeys": "已刷新 {{relays}} 个中转站，共 {{tiers}} 个档位，新建 {{keys}} 把密钥"

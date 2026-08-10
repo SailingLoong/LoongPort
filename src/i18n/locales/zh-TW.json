@@ -3132,6 +3132,7 @@
       "readyWithKeys": "已備好 {{count}} 個方案，新建 {{keys}} 把金鑰",
       "landedOnOtherPlatforms": "這個帳號有 {{count}} 個分組，但都不屬於目前這個 CLI。切到上方對應的標籤頁查看。",
       "groupFailed": "{{group}}：{{reason}}",
+      "mergedProviders": "已從 cc-switch 收編 {{count}} 個重複設定",
       "refreshed": "已重新整理 {{relays}} 個中轉站，共 {{tiers}} 個方案",
       "refreshFailedWithReason": "{{name}} 重新整理失敗：{{reason}}",
       "refreshedWithKeys": "已重新整理 {{relays}} 個中轉站，共 {{tiers}} 個檔位，新建 {{keys}} 把金鑰"

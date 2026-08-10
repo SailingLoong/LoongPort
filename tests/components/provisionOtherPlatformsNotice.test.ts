@@ -145,6 +145,7 @@ describe("数出落在当前平台的档位", () => {
       })),
       failures: [],
       keysCreated: 0,
+      mergedProviders: [],
     };
   }
 
@@ -190,6 +191,7 @@ describe("批量刷新的档位计数", () => {
       })),
       failures: [],
       keysCreated: 0,
+      mergedProviders: [],
     };
   }
 

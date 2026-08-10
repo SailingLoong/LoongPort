@@ -3131,6 +3131,7 @@
       "readyWithKeys": "{{count}} 件のプランを準備し、{{keys}} 個のキーを作成しました",
       "landedOnOtherPlatforms": "このアカウントには {{count}} 件のグループがありますが、現在の CLI 向けのものはありません。上部の該当タブに切り替えてご確認ください。",
       "groupFailed": "{{group}}：{{reason}}",
+      "mergedProviders": "cc-switch の重複プロバイダー {{count}} 件を取り込みました",
       "refreshed": "{{relays}} 件の中継サイトを更新し、合計 {{tiers}} 件のプランを取得しました",
       "refreshFailedWithReason": "{{name}} の更新に失敗しました：{{reason}}",
       "refreshedWithKeys": "{{relays}} 件の中継サイトを更新しました（枠 {{tiers}} 件、新規キー {{keys}} 本）"

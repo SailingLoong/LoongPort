@@ -49,7 +49,7 @@ function tier(appId: TierInfo["appId"], n: number): TierInfo {
 }
 
 function summary(over: Partial<ProvisionSummary> = {}): ProvisionSummary {
-  return { tiers: [], failures: [], keysCreated: 0, ...over };
+  return { tiers: [], failures: [], keysCreated: 0, mergedProviders: [], ...over };
 }
 
 describe("provision 结果的播报", () => {
@@ -121,6 +121,26 @@ describe("provision 结果的播报", () => {
     );
     expect(toastSuccess).toHaveBeenCalledWith(
       expect.stringContaining('"keys":2'),
+    );
+  });
+
+  it("收编重复配置时明确报告，不让删除行为静默发生", () => {
+    reportProvision(
+      t,
+      summary({
+        mergedProviders: [
+          { name: "Imported duplicate", appId: "codex" },
+          { name: "Another duplicate", appId: "claude" },
+        ],
+      }),
+      "codex",
+    );
+
+    expect(toastInfo).toHaveBeenCalledWith(
+      expect.stringContaining("mergedProviders"),
+    );
+    expect(toastInfo).toHaveBeenCalledWith(
+      expect.stringContaining('"count":2'),
     );
   });
 });
