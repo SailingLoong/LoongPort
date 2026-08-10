@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use serde_json::{json, Value};
 
 use crate::proxy::model_mapper::strip_one_m_suffix_for_upstream;
@@ -13,6 +14,25 @@ use crate::relay::model_verification::{
 const REPORT_PROBE: &str = "report_probe";
 const CORE_STREAM_OUTPUT_TOKENS: u16 = 512;
 const TOOL_STRUCTURED_OUTPUT_TOKENS: u16 = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ProbeKind {
+    Core,
+    Tool,
+    Structured,
+    Stream,
+}
+
+impl ProbeKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Tool => "tool",
+            Self::Structured => "structured",
+            Self::Stream => "stream",
+        }
+    }
+}
 
 pub(crate) async fn run_balanced(
     client: &reqwest::Client,
@@ -30,53 +50,93 @@ pub(crate) async fn run_balanced_with_progress(
 ) -> Result<Vec<EvidenceFact>, RunFailure> {
     let model = upstream_model(&target.target().model);
     let endpoint = format!("{}/responses", target.protocol_base().trim_end_matches('/'));
-
-    let core = send_response(
-        client,
-        &endpoint,
-        target.api_key(),
-        core_request(&model, profile),
-    )
-    .await?;
-    reject_incomplete_response(&core)?;
-    let mut facts = parse_core_response(&core, &model);
-    on_probe_complete();
-
-    let tool = send_response(
-        client,
-        &endpoint,
-        target.api_key(),
-        tool_request(&model, profile),
-    )
-    .await?;
-    reject_incomplete_response(&tool)?;
-    facts.push(parse_tool_response(&tool));
-    on_probe_complete();
-
+    let api_key = target.api_key();
+    let mut probes = FuturesUnordered::new();
+    probes.push(
+        async {
+            let result = async {
+                let body = send_response(client, &endpoint, api_key, core_request(&model, profile))
+                    .await?;
+                reject_incomplete_response(&body)?;
+                Ok(parse_core_response(&body, &model))
+            }
+            .await;
+            (ProbeKind::Core, result)
+        }
+        .boxed(),
+    );
+    probes.push(
+        async {
+            let result = async {
+                let body = send_response(client, &endpoint, api_key, tool_request(&model, profile))
+                    .await?;
+                reject_incomplete_response(&body)?;
+                Ok(vec![parse_tool_response(&body)])
+            }
+            .await;
+            (ProbeKind::Tool, result)
+        }
+        .boxed(),
+    );
     if profile.supports_structured_output {
-        let structured = send_response(
-            client,
-            &endpoint,
-            target.api_key(),
-            structured_output_request(&model, profile),
-        )
-        .await?;
-        reject_incomplete_response(&structured)?;
-        facts.push(parse_structured_response(&structured));
+        probes.push(
+            async {
+                let result = async {
+                    let body = send_response(
+                        client,
+                        &endpoint,
+                        api_key,
+                        structured_output_request(&model, profile),
+                    )
+                    .await?;
+                    reject_incomplete_response(&body)?;
+                    Ok(vec![parse_structured_response(&body)])
+                }
+                .await;
+                (ProbeKind::Structured, result)
+            }
+            .boxed(),
+        );
+    }
+    probes.push(
+        async {
+            let result = async {
+                let stream = send_stream(
+                    client,
+                    &endpoint,
+                    api_key,
+                    stream_request(&model, profile),
+                    || StreamReducer::new(&model),
+                    |stream, event| stream.observe(event),
+                )
+                .await?;
+                Ok(stream.finish())
+            }
+            .await;
+            (ProbeKind::Stream, result)
+        }
+        .boxed(),
+    );
+
+    let mut results = BTreeMap::new();
+    while let Some((probe, result)) = probes.next().await {
         on_probe_complete();
+        if let Err(failure) = result {
+            log::warn!(
+                "[model-verification] responses probe failed: probe={} failure={failure:?}",
+                probe.name()
+            );
+        }
+        results.insert(probe, result);
     }
 
-    let mut stream = StreamReducer::new(&model);
-    send_stream(
-        client,
-        &endpoint,
-        target.api_key(),
-        stream_request(&model, profile),
-        |event| stream.observe(event),
-    )
-    .await?;
-    facts.extend(stream.finish());
-    on_probe_complete();
+    let mut facts = Vec::new();
+    for result in results.into_values() {
+        match result {
+            Ok(probe_facts) => facts.extend(probe_facts),
+            Err(failure) => return Err(failure),
+        }
+    }
     Ok(facts)
 }
 
@@ -96,19 +156,21 @@ async fn send_response(
     .await
 }
 
-async fn send_stream(
+async fn send_stream<State>(
     client: &reqwest::Client,
     endpoint: &str,
     api_key: &str,
     payload: Value,
-    on_event: impl FnMut(&str) -> Result<(), RunFailure>,
-) -> Result<(), RunFailure> {
+    new_state: impl FnMut() -> State,
+    on_event: impl FnMut(&mut State, &str) -> Result<(), RunFailure>,
+) -> Result<State, RunFailure> {
     send_sse(
         client
             .post(endpoint)
             .bearer_auth(api_key)
             .header("accept", "text/event-stream")
             .json(&payload),
+        new_state,
         on_event,
     )
     .await
@@ -752,6 +814,7 @@ mod openai_responses_tests {
         Json, Router,
     };
     use serde_json::{json, Value};
+    use tokio::sync::Barrier;
 
     use crate::relay::model_verification::{
         capability_profiles::CapabilityProfile,
@@ -1115,28 +1178,143 @@ mod openai_responses_tests {
             assert_eq!(request.body["store"], false);
             assert_eq!(request.body["reasoning"], json!({"effort":"low"}));
         }
-        assert_eq!(requests[0].body["max_output_tokens"], 512);
-        assert_eq!(requests[1].body["max_output_tokens"], 1024);
-        assert_eq!(requests[2].body["max_output_tokens"], 1024);
-        assert_eq!(requests[3].body["max_output_tokens"], 512);
-        for request in &requests[..3] {
+        let core = requests
+            .iter()
+            .find(|request| {
+                request.body["stream"] != true
+                    && request.body.get("tools").is_none()
+                    && request.body.get("text").is_none()
+            })
+            .unwrap();
+        let tool = requests
+            .iter()
+            .find(|request| request.body.get("tools").is_some())
+            .unwrap();
+        let structured = requests
+            .iter()
+            .find(|request| request.body.get("text").is_some())
+            .unwrap();
+        let stream = requests
+            .iter()
+            .find(|request| request.body["stream"] == true)
+            .unwrap();
+        assert_eq!(core.body["max_output_tokens"], 512);
+        assert_eq!(tool.body["max_output_tokens"], 1024);
+        assert_eq!(structured.body["max_output_tokens"], 1024);
+        assert_eq!(stream.body["max_output_tokens"], 512);
+        for request in requests
+            .iter()
+            .filter(|request| request.body["stream"] != true)
+        {
             assert_eq!(request.accept.as_ref().unwrap(), "application/json");
         }
-        assert_eq!(requests[1].body["tools"][0]["type"], "function");
-        assert_eq!(requests[1].body["tools"][0]["name"], "report_probe");
-        assert_eq!(requests[1].body["tools"][0]["strict"], true);
+        assert_eq!(tool.body["tools"][0]["type"], "function");
+        assert_eq!(tool.body["tools"][0]["name"], "report_probe");
+        assert_eq!(tool.body["tools"][0]["strict"], true);
         assert_eq!(
-            requests[1].body["tool_choice"],
+            tool.body["tool_choice"],
             json!({"type":"function","name":"report_probe"})
         );
-        assert_eq!(requests[2].body["text"]["format"]["type"], "json_schema");
+        assert_eq!(structured.body["text"]["format"]["type"], "json_schema");
+        assert_eq!(structured.body["text"]["format"]["name"], "loongport_probe");
+        assert_eq!(structured.body["text"]["format"]["strict"], true);
+        assert_eq!(stream.accept.as_ref().unwrap(), "text/event-stream");
+        assert_eq!(stream.body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn balanced_probe_runs_independent_requests_concurrently() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = spawn_server(
+            Router::new()
+                .route("/v1/responses", post(barrier_happy_handler))
+                .with_state(ConcurrentState {
+                    requests,
+                    barrier: Arc::new(Barrier::new(4)),
+                }),
+        )
+        .await;
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            run_balanced(
+                &reqwest::Client::new(),
+                &target_for(&endpoint, "key"),
+                &profile,
+            ),
+        )
+        .await
+        .expect("four independent probes should run concurrently")
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn balanced_probe_reduces_results_in_protocol_order() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = spawn_server(
+            Router::new()
+                .route("/v1/responses", post(delayed_happy_handler))
+                .with_state(requests),
+        )
+        .await;
+        let facts = run_balanced(
+            &reqwest::Client::new(),
+            &target_for(&endpoint, "key"),
+            &CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol"),
+        )
+        .await
+        .unwrap();
+
         assert_eq!(
-            requests[2].body["text"]["format"]["name"],
-            "loongport_probe"
+            facts,
+            [
+                passed(EvidenceCode::BasicEnvelope),
+                passed(EvidenceCode::ModelMatch),
+                passed(EvidenceCode::UsageConsistency),
+                passed(EvidenceCode::ToolCallShape),
+                passed(EvidenceCode::StructuredOutput),
+                passed(EvidenceCode::StreamLifecycle),
+                passed(EvidenceCode::ModelMatch),
+                passed(EvidenceCode::UsageConsistency),
+            ]
         );
-        assert_eq!(requests[2].body["text"]["format"]["strict"], true);
-        assert_eq!(requests[3].accept.as_ref().unwrap(), "text/event-stream");
-        assert_eq!(requests[3].body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn balanced_probe_returns_first_failure_in_protocol_order() {
+        let endpoint = spawn_server(Router::new().route(
+            "/v1/responses",
+            post(|Json(body): Json<Value>| async move {
+                if body["stream"] == true {
+                    return (
+                        StatusCode::OK,
+                        [("content-type", "text/event-stream")],
+                        happy_stream(),
+                    )
+                        .into_response();
+                }
+                if body.get("tools").is_some() {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+                if body.get("text").is_some() {
+                    return normal_response(&body);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                StatusCode::NOT_FOUND.into_response()
+            }),
+        ))
+        .await;
+
+        let failure = run_balanced(
+            &reqwest::Client::new(),
+            &target_for(&endpoint, "key"),
+            &CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(failure, RunFailure::ModelUnavailable);
     }
 
     #[tokio::test]
@@ -1360,6 +1538,12 @@ mod openai_responses_tests {
 
     type Requests = Arc<Mutex<Vec<RecordedRequest>>>;
 
+    #[derive(Clone)]
+    struct ConcurrentState {
+        requests: Requests,
+        barrier: Arc<Barrier>,
+    }
+
     async fn spawn_server(app: Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1447,6 +1631,35 @@ mod openai_responses_tests {
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         }))
         .into_response()
+    }
+
+    async fn barrier_happy_handler(
+        State(state): State<ConcurrentState>,
+        uri: OriginalUri,
+        headers: HeaderMap,
+        body: Json<Value>,
+    ) -> Response {
+        state.barrier.wait().await;
+        happy_handler(State(state.requests), uri, headers, body).await
+    }
+
+    async fn delayed_happy_handler(
+        state: State<Requests>,
+        uri: OriginalUri,
+        headers: HeaderMap,
+        body: Json<Value>,
+    ) -> Response {
+        let delay = if body["stream"] == true {
+            Duration::ZERO
+        } else if body.get("tools").is_some() {
+            Duration::from_millis(10)
+        } else if body.get("text").is_some() {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_millis(50)
+        };
+        tokio::time::sleep(delay).await;
+        happy_handler(state, uri, headers, body).await
     }
 
     async fn foreign_then_complete_handler(

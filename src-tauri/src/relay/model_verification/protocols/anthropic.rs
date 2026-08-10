@@ -38,13 +38,13 @@ pub(crate) async fn run_balanced_with_progress(
     facts.push(parse_tool_response(&tool));
     on_probe_complete();
 
-    let mut stream_facts = StreamReducer::new(&model);
-    send_stream(
+    let stream_facts = send_stream(
         client,
         &endpoint,
         target.api_key(),
         stream_request(&model),
-        |event| stream_facts.observe(event),
+        || StreamReducer::new(&model),
+        |stream, event| stream.observe(event),
     )
     .await?;
     facts.extend(stream_facts.finish());
@@ -107,13 +107,14 @@ async fn send_message(
     .await
 }
 
-async fn send_stream(
+async fn send_stream<State>(
     client: &reqwest::Client,
     endpoint: &str,
     api_key: &str,
     payload: Value,
-    on_event: impl FnMut(&str) -> Result<(), RunFailure>,
-) -> Result<(), RunFailure> {
+    new_state: impl FnMut() -> State,
+    on_event: impl FnMut(&mut State, &str) -> Result<(), RunFailure>,
+) -> Result<State, RunFailure> {
     send_sse(
         client
             .post(endpoint)
@@ -121,6 +122,7 @@ async fn send_stream(
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("accept", "text/event-stream")
             .json(&payload),
+        new_state,
         on_event,
     )
     .await
