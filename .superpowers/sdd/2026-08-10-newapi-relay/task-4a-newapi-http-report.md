@@ -88,4 +88,4 @@ Ran in `/Users/allen/code/LoongPort-workspace/LoongPort/.worktrees/newapi-relay/
 
 ## commit hash
 
-PENDING_COMMIT
+`ad714e70` (`Add native NewAPI HTTP session client`)
