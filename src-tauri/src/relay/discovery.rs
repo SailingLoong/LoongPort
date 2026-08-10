@@ -5,25 +5,40 @@
 //! 将来接 new-api 时，只需增加候选与 detector，不改“打开网页 → 用户验证”的共用流程。
 
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::relay::api;
+use crate::relay::newapi;
 
 pub const PROBE_SCHEME: &str = "loongport-probe";
 const SUB2API_CANDIDATE_ID: &str = "sub2api";
+const NEWAPI_CANDIDATE_ID: &str = "newapi";
 const MAX_PROBE_BODY_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    Sub2Api,
+    NewApi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ProbeCandidate {
     pub id: &'static str,
     pub path: &'static str,
 }
 
-pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[ProbeCandidate {
-    id: SUB2API_CANDIDATE_ID,
-    path: "/api/v1/settings/public",
-}];
+pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
+    ProbeCandidate {
+        id: SUB2API_CANDIDATE_ID,
+        path: "/api/v1/settings/public",
+    },
+    ProbeCandidate {
+        id: NEWAPI_CANDIDATE_ID,
+        path: "/api/status",
+    },
+];
 
 /// 严格 detector 已确认的协议及其协议专属公开信息。
 ///
@@ -31,6 +46,21 @@ pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[ProbeCandidate {
 #[derive(Debug, Clone)]
 pub enum DetectedSite {
     Sub2Api(api::PublicSettings),
+}
+
+#[derive(Debug, Clone)]
+pub enum DetectedBackend {
+    Sub2Api(api::PublicSettings),
+    NewApi(newapi::Status),
+}
+
+impl DetectedBackend {
+    pub fn backend_kind(&self) -> BackendKind {
+        match self {
+            Self::Sub2Api(_) => BackendKind::Sub2Api,
+            Self::NewApi(_) => BackendKind::NewApi,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +160,19 @@ pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeResponse, Ap
 /// 任何传输失败、非成功状态或 detector 不匹配都只意味着“这个候选没有识别出来”；
 /// 不在这里把某次失败宣判成站点类型。全部候选都不匹配时，调用方可切到可见 WebView。
 pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, AppError> {
+    match discover_site(site_origin).await? {
+        DetectedBackend::Sub2Api(settings) => Ok(DetectedSite::Sub2Api(settings)),
+        DetectedBackend::NewApi(_) => Err(AppError::Config(format!(
+            "{site_origin} 是 newapi 站点，当前命令入口尚未接入该协议"
+        ))),
+    }
+}
+
+/// 原生 HTTP 探测所有候选，再复用 WebView 原始回传使用的同一收敛规则。
+pub async fn discover_site(site_origin: &str) -> Result<DetectedBackend, AppError> {
     let client = api::build_client()?;
+    let mut responses = Vec::new();
+
     for candidate in PROBE_CANDIDATES {
         let url = format!("{site_origin}{}", candidate.path);
         let Ok(response) = client.get(&url).send().await else {
@@ -142,26 +184,57 @@ pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, AppError> {
         let Ok(body) = response.text().await else {
             continue;
         };
-        if let Some(site) = detect_site(candidate.id, &body) {
-            return Ok(site);
-        }
+        responses.push(ProbeResponse {
+            candidate_id: candidate.id.to_string(),
+            body,
+        });
     }
 
-    Err(AppError::Config(format!(
-        "{site_origin} 的原生探测未识别出受支持的站点协议"
-    )))
+    converge_probe_responses(&responses)
 }
 
 /// 在 Rust 侧按候选 id 分派严格 detector。
 ///
 /// 未知候选或形状不匹配都返回 `None`。浏览器层永远不根据端点存在、HTTP 状态或通用字段
 /// 直接认定协议，因此 new-api 的响应不会被 sub2api detector 误收。
-pub fn detect_site(candidate_id: &str, body: &str) -> Option<DetectedSite> {
+pub fn detect_candidate(candidate_id: &str, body: &str) -> Option<DetectedBackend> {
     match candidate_id {
         SUB2API_CANDIDATE_ID => api::parse_sub2api_public_settings(body)
             .ok()
-            .map(DetectedSite::Sub2Api),
+            .map(DetectedBackend::Sub2Api),
+        NEWAPI_CANDIDATE_ID => newapi::parse_status(body).ok().map(DetectedBackend::NewApi),
         _ => None,
+    }
+}
+
+/// 旧命令层的兼容入口：只暴露现有 sub2api 结果，不把 newapi 伪装成 sub2api。
+pub fn detect_site(candidate_id: &str, body: &str) -> Option<DetectedSite> {
+    match detect_candidate(candidate_id, body)? {
+        DetectedBackend::Sub2Api(settings) => Some(DetectedSite::Sub2Api(settings)),
+        DetectedBackend::NewApi(_) => None,
+    }
+}
+
+/// 汇总所有原始候选响应，去重后严格收敛为一个协议结果。
+pub fn converge_probe_responses(responses: &[ProbeResponse]) -> Result<DetectedBackend, AppError> {
+    let mut detected = Vec::new();
+    for response in responses {
+        let Some(candidate) = detect_candidate(&response.candidate_id, &response.body) else {
+            continue;
+        };
+        if detected
+            .iter()
+            .any(|item: &DetectedBackend| item.backend_kind() == candidate.backend_kind())
+        {
+            continue;
+        }
+        detected.push(candidate);
+    }
+
+    match detected.len() {
+        0 => Err(AppError::Config("unsupported_site".into())),
+        1 => Ok(detected.pop().expect("one detected backend")),
+        _ => Err(AppError::Config("protocol_conflict".into())),
     }
 }
 
@@ -177,6 +250,64 @@ fn probe_callback_url(candidate_id: &str, body: &str) -> url::Url {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn newapi_status_body() -> &'static str {
+        r#"{
+            "success": true,
+            "message": "",
+            "data": {
+                "version": "1.2.3",
+                "system_name": "New API",
+                "theme": "default",
+                "register_enabled": true,
+                "password_login_enabled": true
+            }
+        }"#
+    }
+
+    fn sub2api_body() -> &'static str {
+        r#"{
+            "code": 0,
+            "message": "success",
+            "data": {
+                "site_name": "Sub2API",
+                "version": "1.0.0",
+                "api_base_url": "",
+                "registration_enabled": true,
+                "promo_code_enabled": false,
+                "invitation_code_enabled": false
+            }
+        }"#
+    }
+
+    #[test]
+    fn backend_kind_serializes_to_stable_protocol_names() {
+        assert_eq!(
+            serde_json::to_string(&BackendKind::Sub2Api).unwrap(),
+            r#""sub2api""#
+        );
+        assert_eq!(
+            serde_json::to_string(&BackendKind::NewApi).unwrap(),
+            r#""newapi""#
+        );
+    }
+
+    #[test]
+    fn probe_candidates_include_sub2api_and_newapi_status() {
+        assert_eq!(
+            PROBE_CANDIDATES,
+            &[
+                ProbeCandidate {
+                    id: "sub2api",
+                    path: "/api/v1/settings/public",
+                },
+                ProbeCandidate {
+                    id: "newapi",
+                    path: "/api/status",
+                },
+            ]
+        );
+    }
 
     #[test]
     fn browser_probe_script_is_protocol_neutral_and_supports_multiple_candidates() {
@@ -215,7 +346,72 @@ mod tests {
 
     #[test]
     fn detector_registry_does_not_accept_new_api_as_sub2api() {
-        let body = r#"{"success":true,"data":{"version":"1","system_name":"new-api"}}"#;
-        assert!(detect_site("sub2api", body).is_none());
+        assert!(detect_site("sub2api", newapi_status_body()).is_none());
+    }
+
+    #[test]
+    fn detectors_accept_only_their_own_candidate() {
+        assert!(
+            detect_candidate("sub2api", sub2api_body())
+                .unwrap()
+                .backend_kind()
+                == BackendKind::Sub2Api
+        );
+        assert!(
+            detect_candidate("newapi", newapi_status_body())
+                .unwrap()
+                .backend_kind()
+                == BackendKind::NewApi
+        );
+        assert!(detect_candidate("newapi", sub2api_body()).is_none());
+        assert!(detect_candidate("sub2api", newapi_status_body()).is_none());
+    }
+
+    #[test]
+    fn convergence_requires_exactly_one_backend_and_deduplicates_same_backend_hits() {
+        let sub2api = ProbeResponse {
+            candidate_id: "sub2api".into(),
+            body: sub2api_body().into(),
+        };
+        let newapi = ProbeResponse {
+            candidate_id: "newapi".into(),
+            body: newapi_status_body().into(),
+        };
+
+        assert_eq!(
+            converge_probe_responses(&[]).unwrap_err().to_string(),
+            "配置错误: unsupported_site"
+        );
+        assert_eq!(
+            converge_probe_responses(std::slice::from_ref(&sub2api))
+                .unwrap()
+                .backend_kind(),
+            BackendKind::Sub2Api
+        );
+        assert_eq!(
+            converge_probe_responses(&[sub2api.clone(), sub2api.clone()])
+                .unwrap()
+                .backend_kind(),
+            BackendKind::Sub2Api
+        );
+        assert_eq!(
+            converge_probe_responses(&[sub2api, newapi])
+                .unwrap_err()
+                .to_string(),
+            "配置错误: protocol_conflict"
+        );
+    }
+
+    #[test]
+    fn convergence_can_consume_webview_raw_probe_responses() {
+        let response = parse_probe_navigation(&probe_callback_url("newapi", newapi_status_body()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            converge_probe_responses(&[response])
+                .unwrap()
+                .backend_kind(),
+            BackendKind::NewApi
+        );
     }
 }
