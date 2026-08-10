@@ -41,7 +41,7 @@ use crate::error::AppError;
 /// 远端配置的 URL。
 ///
 /// 2026-08-03 接上真实端点（Cloudflare Pages 项目 `loongport-config`，
-/// 源文件与签名脚本在档案仓 `remote-config/`）。
+/// 源文件与签名脚本在本仓库的 `remote-config/`）。
 ///
 /// ## ⚠️ 这个 URL 是不可逆的对外契约，别再改它
 ///
@@ -82,7 +82,7 @@ const UNCONFIGURED_MARKER: &str = ".invalid";
 /// 低阶点（如全零、单位元编码）下某些 (消息, 签名) 组合会**验过**
 /// （实测 `ring` 对 `(b"{ this is not json", [0u8; 64])` 返回 `Ok(())`）。
 /// 所以 [`verify_with`] 开头有一道**显式**的低阶点拦截，不靠曲线的性质兜。
-const PUBLIC_KEY_HEX: &str = "00acbf35a7eb2e0ad63e5b9d8cc070e6a3b693ecb7c11d01686c61b29f32451c";
+const PUBLIC_KEY_HEX: &str = "3e199ad0082b525fdf8edef5f7161270675e107fd81d31dbce1b71d83936a131";
 
 /// Ed25519 的**低阶点编码**（cofactor 8 那批 + y = ±1）。
 ///
@@ -861,7 +861,7 @@ mod tests {
     ///
     /// 常见触发原因：改了 `config.json` 忘跑 `sign.sh`、只发配置没发 `.sig`、
     /// 或换过密钥对但没同步这里的公钥。
-    /// （档案仓 `remote-config/verify.sh` 从 shell 侧验同一件事，两者互为备份。）
+    /// （本仓库 `remote-config/verify.sh` 从 shell 侧验同一件事，两者互为备份。）
     #[test]
     #[ignore = "需要外网；手动跑 --ignored"]
     fn live_remote_config_verifies_against_our_public_key() {
@@ -1197,7 +1197,7 @@ mod tests {
         // `r#".."#` 而不是 `br#".."#`：后者是 byte string，不能含非 ASCII，
         // 而站名本来就是中文 —— 这份 fixture 要长得像真实发布的那份。
         //
-        // ⚠️ **必须带上 `issued_at`** —— 线上那份有它（见档案仓
+        // ⚠️ **必须带上 `issued_at`** —— 线上那份有它（见本仓库
         // `remote-config/public/v1/config.json`），而它是本结构体的**未知字段**。
         // fixture 不带它的话，「未知字段该被忽略」这条性质就是零覆盖。
         let raw = r#"{

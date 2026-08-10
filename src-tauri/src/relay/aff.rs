@@ -55,6 +55,7 @@ const AFF_CODES: &[(&str, &str)] = &[
     ("api.aijws.com", "RJZUAA8XX6W7"),
     ("790053500.com", "FQSPPFUYXSSS"),
     ("wawapii.com", "4PAUD8SSZXG7"),
+    ("hapiopen.cc", "HTL7AFBJLKKU"),
     ("999555999.com", "XNTZVS78F7WY"),
     // ⚠️ bestapi.store 有意不在表里 —— 那是维护者自己的站，见模块文档。
 ];

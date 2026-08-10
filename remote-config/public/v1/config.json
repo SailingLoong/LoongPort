@@ -1,0 +1,27 @@
+{
+  "issued_at": "2026-08-10T03:00:00Z",
+  "sponsors": [
+    {
+      "site_origin": "https://wawapii.com",
+      "display_name": "WawAPI",
+      "tagline": "WawAPI AI API Gateway Platform"
+    },
+    {
+      "site_origin": "https://hapiopen.cc",
+      "display_name": "H API",
+      "tagline": "H API"
+    },
+    {
+      "site_origin": "https://www.999555999.com",
+      "display_name": "猫肥Neko API",
+      "tagline": "最懂您"
+    }
+  ],
+  "aff_codes": {
+    "api.aijws.com": "RJZUAA8XX6W7",
+    "790053500.com": "FQSPPFUYXSSS",
+    "wawapii.com": "4PAUD8SSZXG7",
+    "hapiopen.cc": "HTL7AFBJLKKU",
+    "999555999.com": "XNTZVS78F7WY"
+  }
+}
