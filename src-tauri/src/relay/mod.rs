@@ -57,6 +57,7 @@ pub mod api;
 pub mod cc_switch_import;
 pub mod chatgpt_app;
 pub mod creds;
+pub mod discovery;
 pub mod imagegen_mcp;
 pub mod login;
 pub mod managed;

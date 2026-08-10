@@ -99,7 +99,7 @@ pub struct PublicSettings {
     /// 站点展示名。V2 用它当中转站名字。
     #[serde(default)]
     pub site_name: String,
-    /// 服务端注入的版本号（非 DB 设置项），存在即说明是 sub2api。
+    /// 服务端注入的版本号；协议识别还需由严格 parser 校验整组指纹字段。
     #[serde(default)]
     pub version: String,
     /// 后台配置的 API 基址。**可能是空串**，不可盲信，见 [`normalize_api_base`]。
@@ -118,6 +118,45 @@ pub struct PublicSettings {
     ///   （它是个兄弟 slot）。所以那一页仍然走得通 —— 我们那条横幅也照样能显示。
     #[serde(default)]
     pub registration_enabled: bool,
+}
+
+/// sub2api 公共设置端点的严格 wire shape。
+///
+/// 协议识别不能只看 `version`：兼容站、验证页包装器乃至其它面板都可能带同名字段。
+/// 这里要求 sub2api 当前稳定公开的整组字段及类型同时匹配，再转换成上层真正消费的窄 DTO。
+#[derive(Debug, Deserialize)]
+struct Sub2ApiPublicSettingsWire {
+    site_name: String,
+    version: String,
+    api_base_url: String,
+    registration_enabled: bool,
+    promo_code_enabled: bool,
+    invitation_code_enabled: bool,
+}
+
+/// 严格解析 sub2api 的 `GET /api/v1/settings/public` 响应。
+///
+/// 原生 HTTP 探针与浏览器辅助探针必须共用这一处判据，避免两条路径对同一站点得出不同结论。
+pub fn parse_sub2api_public_settings(body: &str) -> Result<PublicSettings, AppError> {
+    let env: Envelope<Sub2ApiPublicSettingsWire> = serde_json::from_str(body)
+        .map_err(|e| AppError::Config(format!("响应不是 sub2api 公共设置格式: {e}")))?;
+    let wire = env.into_data("探测站点")?;
+
+    if wire.version.trim().is_empty() {
+        return Err(AppError::Config(
+            "响应不是 sub2api 公共设置格式: version 为空".into(),
+        ));
+    }
+
+    // 这两个布尔值目前不参与业务逻辑，但要求它们存在且类型正确是协议指纹的一部分。
+    let _ = (wire.promo_code_enabled, wire.invitation_code_enabled);
+
+    Ok(PublicSettings {
+        site_name: wire.site_name,
+        version: wire.version,
+        api_base_url: wire.api_base_url,
+        registration_enabled: wire.registration_enabled,
+    })
 }
 
 /// 分组（`GET /api/v1/groups/available`）的窄子集。
@@ -449,23 +488,16 @@ pub async fn probe_site(site_origin: &str) -> Result<PublicSettings, AppError> {
 
     if !resp.status().is_success() {
         return Err(AppError::Config(format!(
-            "{site_origin} 返回 HTTP {}，可能不是 sub2api 站点",
+            "{site_origin} 的公开探测端点返回 HTTP {}",
             resp.status().as_u16()
         )));
     }
-    let env: Envelope<PublicSettings> = resp
-        .json()
+    let body = resp
+        .text()
         .await
-        .map_err(|e| AppError::Config(format!("{site_origin} 的响应不是 sub2api 格式: {e}")))?;
-    let settings = env.into_data("探测站点")?;
-
-    // 指纹：version 由服务端注入，任何 sub2api 都有；site_name 可能被中转站留空，不作硬判据。
-    if settings.version.is_empty() {
-        return Err(AppError::Config(format!(
-            "{site_origin} 看起来不是 sub2api 站点（响应缺 version）"
-        )));
-    }
-    Ok(settings)
+        .map_err(|e| AppError::Config(format!("读取 {site_origin} 的公开探测响应失败: {e}")))?;
+    parse_sub2api_public_settings(&body)
+        .map_err(|e| AppError::Config(format!("{site_origin} 探测失败: {e}")))
 }
 
 /// 带 Bearer token 的 sub2api 客户端。
@@ -1011,7 +1043,7 @@ fn describe_send_error(e: &reqwest::Error) -> String {
     out
 }
 
-fn build_client() -> Result<reqwest::Client, AppError> {
+pub(crate) fn build_client() -> Result<reqwest::Client, AppError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(crate::relay::login::WEBVIEW_USER_AGENT)
@@ -1343,6 +1375,53 @@ mod tests {
     }
 
     #[test]
+    fn sub2api_public_settings_parser_accepts_a_strict_protocol_match() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "site_name":"贾维斯","version":"0.1.169","api_base_url":"",
+            "registration_enabled":true,"promo_code_enabled":true,
+            "invitation_code_enabled":true}}"#;
+
+        let settings = parse_sub2api_public_settings(body).expect("完整 sub2api 契约应通过");
+        assert_eq!(settings.site_name, "贾维斯");
+        assert_eq!(settings.version, "0.1.169");
+    }
+
+    #[test]
+    fn sub2api_public_settings_parser_rejects_browser_verification_html() {
+        let err = parse_sub2api_public_settings(
+            "<!doctype html><title>Just a moment...</title><p>Verify you are human</p>",
+        )
+        .expect_err("验证页不是 sub2api 协议响应");
+        assert!(err.to_string().contains("sub2api"));
+    }
+
+    #[test]
+    fn sub2api_public_settings_parser_rejects_new_api_status_shape() {
+        let body = r#"{"success":true,"message":"","data":{
+            "version":"0.9.0","system_name":"New API","register_enabled":true}}"#;
+        assert!(parse_sub2api_public_settings(body).is_err());
+    }
+
+    #[test]
+    fn sub2api_public_settings_parser_rejects_version_only_lookalike() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "site_name":"lookalike","version":"1.0.0","api_base_url":"",
+            "registration_enabled":true}}"#;
+        assert!(parse_sub2api_public_settings(body).is_err());
+    }
+
+    #[test]
+    fn sub2api_public_settings_parser_rejects_wrong_envelope_contract() {
+        for body in [
+            r#"{"code":1,"message":"no","data":{}}"#,
+            r#"{"code":"success","message":"","data":{}}"#,
+            r#"{"code":0,"message":"success","data":null}"#,
+        ] {
+            assert!(parse_sub2api_public_settings(body).is_err(), "body={body}");
+        }
+    }
+
+    #[test]
     fn envelope_parses_the_real_wire_format_byte_for_byte() {
         // 这条钉住一个**已经踩过**的坑：`code` 是整数、成功是 0，而 `message` 才是 "success"。
         // 之前把 code 声明成 String 判 == "success"，结果每一次调用都失败在反序列化上
@@ -1352,9 +1431,9 @@ mod tests {
         // 下面这段是 `curl https://bestapi.store/api/v1/settings/public` 的真实形状（截取字段）。
         let real = r#"{"code":0,"message":"success","data":{
             "site_name":"百适 BestApi","version":"0.1.169",
-            "api_base_url":"","registration_enabled":true}}"#;
-        let env: Envelope<PublicSettings> = serde_json::from_str(real).expect("必须能解真实响应");
-        let s = env.into_data("探测").expect("code=0 应判为成功");
+            "api_base_url":"","registration_enabled":true,
+            "promo_code_enabled":true,"invitation_code_enabled":true}}"#;
+        let s = parse_sub2api_public_settings(real).expect("必须能解真实响应");
         assert_eq!(s.version, "0.1.169");
         assert_eq!(s.api_base_url, "", "实测这个字段就是空串");
 

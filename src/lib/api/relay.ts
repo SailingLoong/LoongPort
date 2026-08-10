@@ -33,15 +33,16 @@ export interface SiteInfo {
 }
 
 export interface ProbeResult {
-  /**
-   * 探测成功后这个站在本地的行 id（已存在则是原来那行，后端会收口）。
-   *
-   * **必须拿它接着调 `login(relayId)`** —— 那条命令的参数是必填的，
-   * 没有「回落到当前站」这种东西（`is_current` 整个概念已删）。
-   */
+  /** 探测成功后这个站在本地的行 id（已存在则是原来那行，后端会收口）。 */
   relayId: number;
   siteOrigin: string;
   siteName: string;
+}
+
+/** 合并站点发现与同一浏览器会话登录的结果。 */
+export interface ImportResult extends ProbeResult {
+  /** true 表示已取得并保存凭据；false 表示用户在登录完成前关闭了窗口。 */
+  loggedIn: boolean;
 }
 
 /**
@@ -50,7 +51,7 @@ export interface ProbeResult {
  * 来自远端配置（Ed25519 验签过），不是编译期常量 —— 谈成新赞助商不用发版。
  */
 export interface Sponsor {
-  /** 站点 origin（如 `https://bestapi.store`）。直接喂给 `probeSite`。 */
+  /** 站点 origin（如 `https://bestapi.store`）。直接喂给 `importSite`。 */
   siteOrigin: string;
   /** 展示名。**服务端给什么就显示什么** —— 不翻译、不美化。 */
   displayName: string;
@@ -209,7 +210,14 @@ export const relayApi = {
    */
   listSponsors: (): Promise<Sponsor[]> => invoke("relay_list_sponsors"),
 
-  /** 探测域名并存为当前站点。空串走默认域名。 */
+  /**
+   * 导入第三方站点。原生发现失败时由后端打开可见网页，让用户自行完成验证，
+   * 并在同一个浏览器会话中识别协议、注册或登录。输入必须原样透传以保留邀请链接。
+   */
+  importSite: (site: string): Promise<ImportResult> =>
+    invoke("relay_import_site", { site }),
+
+  /** 仅探测域名并保存站点；保留给现有调用方。空串走默认域名。 */
   probeSite: (site: string): Promise<ProbeResult> =>
     invoke("relay_probe_site", { site }),
 
@@ -224,8 +232,8 @@ export const relayApi = {
   /**
    * 开登录窗。返回 true 表示拿到凭据，false 表示用户关窗或超时。
    *
-   * `relayId` 指定登录**哪一行**，**必填**。加站那条路用
-   * `probeSite` 返回的 `relayId`。
+   * `relayId` 指定重新登录**哪一行**，**必填**。新增站点走 `importSite`；
+   * 本命令保留给已有站点行的独立重登录。
    *
    * **每次都是全新登录态**（登录窗用 incognito，见后端注释）：同一个站可以
    * 挂多个账号，删掉再加也不会复用旧 token。

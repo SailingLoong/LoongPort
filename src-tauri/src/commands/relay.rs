@@ -1,11 +1,12 @@
 //! LoongPort 中转站的 Tauri 命令层。
 //!
-//! 五个命令，对应需求的五步：
+//! 中转站命令：
 //!
 //! | 命令 | 干什么 |
 //! |---|---|
 //! | [`relay_status`] | 首启该弹哪个弹窗、当前是什么状态 |
 //! | [`relay_probe_site`] | 域名弹窗点确定 → 探测这是不是 sub2api 站 |
+//! | [`relay_import_site`] | 发现协议；必要时让用户在可见 WebView 完成网页验证，并在同一会话登录 |
 //! | [`relay_login`] | 开登录 WebView，等凭据回来 |
 //! | [`relay_provision`] | 拉分组 → 每组备好 sk → 写成 codex provider |
 //! | [`relay_switch_tier`] | 选分组 → 退 ChatGPT → 切换 → 重开 |
@@ -30,7 +31,10 @@
 //! deep link 才碰得到，优先级低于上面几条）。
 
 use serde::Serialize;
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 use tauri::{Emitter, Manager, State};
 
 use crate::app_config::AppType;
@@ -38,7 +42,8 @@ use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
-    api, chatgpt_app, creds, imagegen_mcp, login, provider_fingerprint, provision, purchase,
+    api, chatgpt_app, creds, discovery, imagegen_mcp, login, provider_fingerprint, provision,
+    purchase,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -119,16 +124,55 @@ pub struct SiteInfo {
 }
 
 /// 探测结果。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeResult {
     /// 探测成功后这个站在本地的行 id（已存在则是原来那行，`save_site` 会收口）。
     ///
-    /// **前端必须拿它接着调 [`relay_login`]** —— 那条命令的 `relay_id` 是
-    /// 必填的，没有「回落到当前站」这种东西（那个概念已随 `is_current` 一起删）。
+    /// 旧的独立探测调用方若要继续登录，必须把它传给 [`relay_login`]；新增站点的
+    /// 主流程走 [`relay_import_site`]，在同一浏览器会话里完成发现与登录。
     pub relay_id: i64,
     pub site_origin: String,
     pub site_name: String,
+}
+
+/// 合并“发现站点 + 同一会话登录”的导入结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub relay_id: i64,
+    pub site_origin: String,
+    pub site_name: String,
+    pub logged_in: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LoginResult {
+    relay_id: i64,
+    logged_in: bool,
+}
+
+impl ImportResult {
+    fn from_login(probe: ProbeResult, login: LoginResult) -> Self {
+        Self {
+            relay_id: login.relay_id,
+            site_origin: probe.site_origin,
+            site_name: probe.site_name,
+            logged_in: login.logged_in,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrowserLoginContext {
+    probe: ProbeResult,
+    login_script: String,
+}
+
+enum BrowserImportOutcome {
+    Credentials(login::Credentials),
+    Error(String),
+    Closed,
 }
 
 /// 一个可选的档位。
@@ -413,6 +457,26 @@ async fn probe_and_save(
 ) -> Result<ProbeResult, AppError> {
     let site_origin = api::normalize_site_origin(input)?;
     let settings = api::probe_site(&site_origin).await?;
+    save_sub2api_site(app_handle, site_origin, settings)
+}
+
+fn save_detected_site(
+    app_handle: &tauri::AppHandle,
+    site_origin: String,
+    detected: discovery::DetectedSite,
+) -> Result<ProbeResult, AppError> {
+    match detected {
+        discovery::DetectedSite::Sub2Api(settings) => {
+            save_sub2api_site(app_handle, site_origin, settings)
+        }
+    }
+}
+
+fn save_sub2api_site(
+    app_handle: &tauri::AppHandle,
+    site_origin: String,
+    settings: api::PublicSettings,
+) -> Result<ProbeResult, AppError> {
     // 存**站点 API 根**（不带 `/v1`），不是某个 CLI 的成品端点：各 CLI 形状不同
     // （claude 要根、codex 要带 `/v1`），存成其中一种就必然被另一种误用 —— 那正是
     // 存量 claude 档位整片带上多余 `/v1` 的来源。派生一律走 `api::base_url_for`。
@@ -440,6 +504,375 @@ async fn probe_and_save(
     })
 }
 
+/// 发现并导入一个第三方中转站。
+///
+/// 先走原生 HTTP fast path；未识别时不猜失败原因，也不把它宣判成某种站点，
+/// 而是打开协议无关的可见 WebView。用户可自行完成任意网页验证；验证后的候选响应
+/// 回到 Rust 严格识别，随后在**同一个 WebView 会话**继续注册/登录。
+#[tauri::command]
+pub async fn relay_import_site(
+    app_handle: tauri::AppHandle,
+    site: String,
+) -> Result<ImportResult, String> {
+    import_site(&app_handle, &site)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn import_site(app_handle: &tauri::AppHandle, input: &str) -> Result<ImportResult, AppError> {
+    let input = if input.trim().is_empty() {
+        DEFAULT_SITE
+    } else {
+        input
+    };
+    let site_origin = api::normalize_site_origin(input)?;
+
+    let initial_detected = match discovery::probe_site(&site_origin).await {
+        Ok(detected) => Some(detected),
+        Err(error) => {
+            // 这里只记录 fast path 没识别出来；不根据 HTTP 状态、验证产品或响应正文
+            // 推断站点类型。可见 WebView 才是所有网页验证共用的下一步。
+            log::info!(
+                "原生站点发现未识别 {}，切换到浏览器辅助发现：{}",
+                site_origin,
+                error
+            );
+            None
+        }
+    };
+
+    browser_import(app_handle, input, site_origin, initial_detected).await
+}
+
+/// 生成浏览器首次打开的地址：站点 origin 与后端归一化规则一致，但保留用户给的
+/// path/query/fragment（例如邀请链接 `/register?aff=...`）。
+fn browser_entry_url(input: &str) -> Result<url::Url, AppError> {
+    let input = if input.trim().is_empty() {
+        DEFAULT_SITE
+    } else {
+        input.trim()
+    };
+    let site_origin = api::normalize_site_origin(input)?;
+    let with_scheme = if input.contains("://") {
+        input.to_string()
+    } else {
+        format!("https://{input}")
+    };
+    let supplied = url::Url::parse(&with_scheme)
+        .map_err(|e| AppError::InvalidInput(format!("域名格式不对: {e}")))?;
+    let mut entry = url::Url::parse(&site_origin)
+        .map_err(|e| AppError::InvalidInput(format!("域名格式不对: {e}")))?;
+    entry.set_path(supplied.path());
+    entry.set_query(supplied.query());
+    entry.set_fragment(supplied.fragment());
+    Ok(entry)
+}
+
+fn browser_entry_is_origin(url: &url::Url) -> bool {
+    url.path() == "/" && url.query().is_none() && url.fragment().is_none()
+}
+
+/// 选择共用导入 WebView 的首次地址。
+///
+/// 用户显式给出的 path/query/fragment 始终优先保留；只有输入是裸 origin 且原生 fast
+/// path 已经识别出协议时，才使用该协议的默认注册/登录入口。
+fn browser_start_url(
+    input: &str,
+    site_origin: &str,
+    detected: Option<&discovery::DetectedSite>,
+) -> Result<url::Url, AppError> {
+    let entry = browser_entry_url(input)?;
+    if !browser_entry_is_origin(&entry) {
+        return Ok(entry);
+    }
+
+    let Some(detected) = detected else {
+        return Ok(entry);
+    };
+
+    let url = match detected {
+        discovery::DetectedSite::Sub2Api(_) => login::login_url(site_origin, ""),
+    };
+    url::Url::parse(&url)
+        .map_err(|error| AppError::InvalidInput(format!("登录页地址不对: {error}")))
+}
+
+fn import_login_script(
+    detected: &discovery::DetectedSite,
+    site_origin: &str,
+    aff_code: Option<&str>,
+    promo_code: Option<&str>,
+) -> String {
+    match detected {
+        discovery::DetectedSite::Sub2Api(_) => {
+            login::login_script(site_origin, "", aff_code, promo_code)
+        }
+    }
+}
+
+fn resolve_login_codes(site_origin: &str) -> (Option<String>, Option<String>) {
+    let cached_config = crate::relay::remote_config::load_cached();
+    (
+        crate::relay::remote_config::resolve_aff_code(cached_config.as_ref(), site_origin),
+        crate::relay::remote_config::resolve_promo_code(cached_config.as_ref(), site_origin),
+    )
+}
+
+async fn browser_import(
+    app_handle: &tauri::AppHandle,
+    input: &str,
+    site_origin: String,
+    initial_detected: Option<discovery::DetectedSite>,
+) -> Result<ImportResult, AppError> {
+    if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
+        log::info!("发现残留的站点导入窗口，销毁后重开");
+        let _ = stale.destroy();
+    }
+
+    let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
+    let entry_url = browser_start_url(input, &site_origin, initial_detected.as_ref())?;
+    let navigate_after_detection =
+        initial_detected.is_none() && browser_entry_is_origin(&entry_url);
+
+    let initial_context = match initial_detected {
+        Some(detected) => {
+            let login_script = import_login_script(
+                &detected,
+                &site_origin,
+                login_aff_code.as_deref(),
+                login_promo_code.as_deref(),
+            );
+            let probe = save_detected_site(app_handle, site_origin.clone(), detected)?;
+            Some(BrowserLoginContext {
+                probe,
+                login_script,
+            })
+        }
+        None => None,
+    };
+
+    log::info!(
+        "打开浏览器辅助站点导入窗：{}（保留用户路径={}）",
+        crate::url_for_log(entry_url.as_str()),
+        !navigate_after_detection
+    );
+
+    let context = Arc::new(Mutex::new(initial_context));
+    let (creds_tx, mut creds_rx) = tokio::sync::mpsc::channel::<login::Credentials>(1);
+    let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<String>(1);
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    let context_for_load = Arc::clone(&context);
+    let app_for_nav = app_handle.clone();
+    let context_for_nav = Arc::clone(&context);
+    let site_origin_for_nav = site_origin.clone();
+    let aff_for_nav = login_aff_code.clone();
+    let promo_for_nav = login_promo_code.clone();
+    let probe_error_tx = error_tx.clone();
+    let credential_error_tx = error_tx.clone();
+
+    let window = tauri::WebviewWindowBuilder::new(
+        app_handle,
+        login::LOGIN_WINDOW_LABEL,
+        tauri::WebviewUrl::External(entry_url),
+    )
+    .title(format!("添加中转站 {site_origin}"))
+    .inner_size(480.0, 720.0)
+    .resizable(true)
+    // 一次导入只使用这一份纯内存会话：网页验证、协议探测、注册/登录都不换窗口，
+    // 同时也不复用上一次导入的站点 cookie 或 token。
+    .incognito(true)
+    .user_agent(login::WEBVIEW_USER_AGENT)
+    // 所有导入都统一注入协议无关的候选抓取器。脚本不认识 Cloudflare、HTTP 403
+    // 或任何其它验证产品；协议未知时，用户验证完成后它自然会在同源会话里读到候选响应。
+    // fast path 已识别时，Rust context 已有值，重复探测回传会被忽略。
+    .initialization_script(discovery::browser_probe_script(
+        &site_origin,
+        discovery::PROBE_CANDIDATES,
+    ))
+    .on_page_load(move |webview, payload| {
+        log::info!(
+            "站点导入窗页面加载 {:?}：{}",
+            payload.event(),
+            crate::url_for_log(payload.url().as_str())
+        );
+
+        let login_script = context_for_load
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|ctx| ctx.login_script.clone()));
+        if let Some(script) = login_script {
+            if let Err(error) = webview.eval(&script) {
+                log::warn!("站点登录脚本重注入失败: {error}");
+            }
+        }
+    })
+    .on_navigation(move |url| {
+        if let Some(result) = discovery::parse_probe_navigation(url) {
+            let response = match result {
+                Ok(response) => response,
+                Err(error) => {
+                    log::warn!("站点探测回传解析失败: {error}");
+                    let _ = probe_error_tx.try_send(error.to_string());
+                    return false;
+                }
+            };
+
+            // 同一候选正文可能在后续页面重复回传。识别成功一次后便以 Rust 侧状态为准，
+            // 不重复存站点、不重复导航。
+            if context_for_nav
+                .lock()
+                .map(|guard| guard.is_some())
+                .unwrap_or(false)
+            {
+                return false;
+            }
+
+            let Some(detected) = discovery::detect_site(&response.candidate_id, &response.body)
+            else {
+                return false;
+            };
+            let login_script = import_login_script(
+                &detected,
+                &site_origin_for_nav,
+                aff_for_nav.as_deref(),
+                promo_for_nav.as_deref(),
+            );
+            let probe =
+                match save_detected_site(&app_for_nav, site_origin_for_nav.clone(), detected) {
+                    Ok(probe) => probe,
+                    Err(error) => {
+                        log::warn!("保存已识别站点失败: {error}");
+                        let _ = probe_error_tx.try_send(error.to_string());
+                        return false;
+                    }
+                };
+
+            let browser_context = BrowserLoginContext {
+                probe,
+                login_script: login_script.clone(),
+            };
+            match context_for_nav.lock() {
+                Ok(mut guard) if guard.is_none() => *guard = Some(browser_context),
+                Ok(_) => return false,
+                Err(_) => {
+                    let _ = probe_error_tx.try_send("站点导入状态不可用".into());
+                    return false;
+                }
+            }
+
+            let Some(window) = app_for_nav.get_webview_window(login::LOGIN_WINDOW_LABEL) else {
+                let _ = probe_error_tx.try_send("站点导入窗口已关闭".into());
+                return false;
+            };
+
+            let next_step = if navigate_after_detection {
+                url::Url::parse(&login::login_url(&site_origin_for_nav, ""))
+                    .map_err(|error| format!("登录页地址不对: {error}"))
+                    .and_then(|url| window.navigate(url).map_err(|error| error.to_string()))
+            } else {
+                window
+                    .eval(&login_script)
+                    .map_err(|error| error.to_string())
+            };
+            if let Err(error) = next_step {
+                log::warn!("已识别站点，但无法在当前会话继续登录: {error}");
+                let _ = probe_error_tx.try_send(error);
+            }
+            return false;
+        }
+
+        match login::parse_creds_navigation(url) {
+            None => true,
+            Some(Ok(credentials)) => {
+                let _ = creds_tx.try_send(credentials);
+                false
+            }
+            Some(Err(error)) => {
+                log::warn!("凭据回传解析失败: {error}");
+                let _ = credential_error_tx.try_send(error.to_string());
+                let _ = app_for_nav.emit("relay-login-error", error.to_string());
+                false
+            }
+        }
+    })
+    .build()
+    .inspect_err(|error| log::error!("站点导入窗口创建失败: {error}"))
+    .map_err(|error| AppError::Config(format!("打开站点导入窗口失败: {error}")))?;
+
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = closed_tx.try_send(());
+        }
+    });
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
+        tokio::select! {
+            credentials = creds_rx.recv() => credentials
+                .map(BrowserImportOutcome::Credentials)
+                .unwrap_or(BrowserImportOutcome::Closed),
+            error = error_rx.recv() => error
+                .map(BrowserImportOutcome::Error)
+                .unwrap_or(BrowserImportOutcome::Closed),
+            _ = closed_rx.recv() => BrowserImportOutcome::Closed,
+        }
+    })
+    .await;
+
+    match outcome {
+        Ok(BrowserImportOutcome::Credentials(credentials)) => {
+            let browser_context = context
+                .lock()
+                .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
+                .clone()
+                .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
+            let (final_relay_id, account_id) = persist_login_credentials(
+                app_handle,
+                browser_context.probe.relay_id,
+                &site_origin,
+                credentials,
+            )
+            .await?;
+            let login = LoginResult {
+                relay_id: final_relay_id,
+                logged_in: true,
+            };
+
+            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
+            let _ = window.eval(login::CONNECTED_BANNER_JS);
+            log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
+            Ok(ImportResult::from_login(browser_context.probe, login))
+        }
+        Ok(BrowserImportOutcome::Error(error)) => {
+            let _ = window.destroy();
+            Err(AppError::Config(error))
+        }
+        Ok(BrowserImportOutcome::Closed) => import_result_after_incomplete_browser_flow(&context),
+        Err(_) => {
+            log::warn!(
+                "站点导入等待超时（{LOGIN_TIMEOUT_SECS} 秒内未完成识别与登录）：{site_origin}"
+            );
+            let _ = window.destroy();
+            import_result_after_incomplete_browser_flow(&context)
+        }
+    }
+}
+
+fn import_result_after_incomplete_browser_flow(
+    context: &Arc<Mutex<Option<BrowserLoginContext>>>,
+) -> Result<ImportResult, AppError> {
+    let browser_context = context
+        .lock()
+        .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
+        .clone()
+        .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
+    let login = LoginResult {
+        relay_id: browser_context.probe.relay_id,
+        logged_in: false,
+    };
+    Ok(ImportResult::from_login(browser_context.probe, login))
+}
+
 /// 开登录窗，等凭据回来。
 ///
 /// 凭据由注入脚本经一次被拦下的自定义 scheme 跳转送回（见 [`login`]）。本命令在收到凭据、
@@ -454,10 +887,11 @@ async fn probe_and_save(
 pub async fn relay_login(app_handle: tauri::AppHandle, relay_id: i64) -> Result<bool, String> {
     do_login(&app_handle, relay_id)
         .await
+        .map(|result| result.logged_in)
         .map_err(|e| e.to_string())
 }
 
-async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<bool, AppError> {
+async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<LoginResult, AppError> {
     // 记下行 id —— 凭据要写回这一行，而 `save_credentials` 可能因为发现重复账号
     // 而把它合并到别的行去。
     // 顺带取出登录标识：重登时预填进登录框，用户只需补密码与人机验证。
@@ -489,12 +923,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<bool,
     // 读缓存而不是现拉：拉取由启动时那个后台任务做（见 `lib.rs`），
     // 这里只同步读一份磁盘文件（含重新验签），不让用户等一次网络往返。
     // 缓存不存在 / 验签不过 ⇒ `load_cached` 返回 None ⇒ 自动落到内置那层。
-    let cached_config = crate::relay::remote_config::load_cached();
-    let login_aff_code =
-        crate::relay::remote_config::resolve_aff_code(cached_config.as_ref(), &site_origin);
-    // 注册优惠码（用户得赠额）走**同一套**三层回落，同一份缓存、同一次解析时机。
-    let login_promo_code =
-        crate::relay::remote_config::resolve_promo_code(cached_config.as_ref(), &site_origin);
+    let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
 
     // 落哪个页面由「这一行登录过没有」决定：新加的站落 `/register`，重登落 `/login`。
     let url = url::Url::parse(&login::login_url(&site_origin, &login_identifier))
@@ -624,36 +1053,8 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<bool,
 
     match outcome {
         Ok(Some(c)) => {
-            // 先拉一次 profile 拿账号身份 —— 去重键是「域名 + 账号」，而账号只有登录后才知道。
-            //
-            // 拉不到就不存：没有 account_id 的话去重判断无从做起，用户重新添加同一个站会
-            // 堆出重复行、进而给他的账号里堆重复 sk。让他重试一次比留下脏数据好。
-            // `account_id` 传 `None`：**这一次请求的目的就是去拿它**，此刻还不知道。
-            // 只读端点，不发写请求 ⇒ 用不上幂等键。
-            let account = api::Client::new(&site_origin, &c.auth_token, None)?
-                .account()
-                .await
-                .map_err(|e| {
-                    AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。"))
-                })?;
-
-            let state = app_handle.state::<AppState>();
-            with_conn(&state, |conn| {
-                creds::save_credentials(
-                    conn,
-                    relay_id,
-                    creds::AccountIdentity {
-                        id: account.id,
-                        label: &account.display_name(),
-                        // 登录标识单独存：display_name() 昵称优先，设了昵称的用户拿它
-                        // 预填登录框就填错了（sub2api 那个框要邮箱格式）。
-                        login_identifier: &account.email,
-                    },
-                    &c.auth_token,
-                    c.refresh_token.as_deref(),
-                    c.token_expires_at,
-                )
-            })?;
+            let (final_relay_id, account_id) =
+                persist_login_credentials(app_handle, relay_id, &site_origin, c).await?;
 
             // **不关窗**，把标题改成「已连接」并在页面上浮一条提示。
             //
@@ -668,8 +1069,11 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<bool,
             let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
             let _ = window.eval(login::CONNECTED_BANNER_JS);
 
-            log::info!("登录成功：{site_origin}（账号 id={}）", account.id);
-            Ok(true)
+            log::info!("登录成功：{site_origin}（账号 id={account_id}）");
+            Ok(LoginResult {
+                relay_id: final_relay_id,
+                logged_in: true,
+            })
         }
         // 用户关掉了窗口，或超时。都不是错误。
         //
@@ -688,7 +1092,10 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<bool,
         Ok(None) => {
             log::info!("用户关闭了登录窗口（未完成登录）：{site_origin}");
             let _ = window.destroy();
-            Ok(false)
+            Ok(LoginResult {
+                relay_id,
+                logged_in: false,
+            })
         }
         Err(_) => {
             log::warn!(
@@ -696,9 +1103,46 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<bool,
                  若用户当时看到的是白屏，对照上面 `登录窗页面加载` 那几行判断是哪一类"
             );
             let _ = window.destroy();
-            Ok(false)
+            Ok(LoginResult {
+                relay_id,
+                logged_in: false,
+            })
         }
     }
+}
+
+async fn persist_login_credentials(
+    app_handle: &tauri::AppHandle,
+    relay_id: i64,
+    site_origin: &str,
+    credentials: login::Credentials,
+) -> Result<(i64, i64), AppError> {
+    // 先拉一次 profile 拿账号身份 —— 去重键是「域名 + 账号」，而账号只有登录后才知道。
+    // `account_id` 传 `None`：这次只读请求的目的就是取得它，不需要幂等键。
+    let account = api::Client::new(site_origin, &credentials.auth_token, None)?
+        .account()
+        .await
+        .map_err(|e| AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。")))?;
+    let account_id = account.id;
+
+    let state = app_handle.state::<AppState>();
+    let final_relay_id = with_conn(&state, |conn| {
+        creds::save_credentials(
+            conn,
+            relay_id,
+            creds::AccountIdentity {
+                id: account.id,
+                label: &account.display_name(),
+                // 昵称与登录标识不是同一个事实；sub2api 登录框需要邮箱。
+                login_identifier: &account.email,
+            },
+            &credentials.auth_token,
+            credentials.refresh_token.as_deref(),
+            credentials.token_expires_at,
+        )
+    })?;
+
+    Ok((final_relay_id, account_id))
 }
 
 /// 取一份**能用**的凭据：token 快过期时先静默续期。
@@ -2728,6 +3172,78 @@ mod tests {
             EvidenceLevel, RunFailureKind, TargetKey, Verdict, VerificationReport, RULES_VERSION,
         },
     };
+
+    #[test]
+    fn browser_entry_url_preserves_user_path_and_query_but_forces_https() {
+        let url = browser_entry_url("http://api.example.com/register?aff=ABC123")
+            .expect("valid browser entry URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register?aff=ABC123");
+    }
+
+    #[test]
+    fn browser_entry_url_accepts_bare_hosts_with_paths() {
+        let url = browser_entry_url("api.example.com/login?next=%2Fdashboard")
+            .expect("valid browser entry URL");
+
+        assert_eq!(
+            url.as_str(),
+            "https://api.example.com/login?next=%2Fdashboard"
+        );
+    }
+
+    fn detected_sub2api() -> discovery::DetectedSite {
+        discovery::DetectedSite::Sub2Api(api::PublicSettings {
+            site_name: "Example".into(),
+            version: "1.0.0".into(),
+            api_base_url: String::new(),
+            registration_enabled: true,
+        })
+    }
+
+    #[test]
+    fn browser_start_url_preserves_invitation_link_after_native_detection() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "http://api.example.com/register?aff=ABC123",
+            "https://api.example.com",
+            Some(&detected),
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register?aff=ABC123");
+    }
+
+    #[test]
+    fn browser_start_url_uses_protocol_registration_page_for_known_bare_origin() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "api.example.com",
+            "https://api.example.com",
+            Some(&detected),
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register");
+    }
+
+    #[test]
+    fn import_result_uses_the_final_relay_id_after_account_merge() {
+        let result = ImportResult::from_login(
+            ProbeResult {
+                relay_id: 7,
+                site_origin: "https://api.example.com".into(),
+                site_name: "Example".into(),
+            },
+            LoginResult {
+                relay_id: 11,
+                logged_in: true,
+            },
+        );
+
+        assert_eq!(result.relay_id, 11);
+        assert!(result.logged_in);
+    }
 
     fn codex_settings(model: &str, models: &[&str]) -> serde_json::Value {
         serde_json::json!({

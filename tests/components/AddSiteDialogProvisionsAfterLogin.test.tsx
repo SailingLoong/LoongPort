@@ -9,8 +9,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * 用户在网页上登录完，界面却提示「该账号在此平台下没有可用分组」，非要再点一次
  * 「刷新」/「获取密钥」才补上。根因在这一条路少了一步：
  *
- * `probeSite` 只建**站点行**（`creds::save_site`），`relay_login` 只写**凭据** ——
- * 两条都不碰分组。而拉分组只有 `relay_provision` 这一条路（真打
+ * `importSite` 负责发现站点并在同一浏览器会话写入**凭据**，但它不碰分组。
+ * 拉分组只有 `relay_provision` 这一条路（真打
  * `/groups/available` 再逐组建 sk）。少了它，宿主随后那次 refresh 读的是本地 DB，
  * 里头一个档位都没有 ⇒ 那一行落到 `loggedIn && tiers.length === 0` 分支，
  * 显示的正是那句「没有可用分组」。
@@ -25,18 +25,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * 宿主早被通知去 reload 了），
  * 字符串照样匹配得上。
  */
-const { login, provision, probeSite, listSponsors, listSites } = vi.hoisted(
+const { importSite, login, provision, listSponsors, listSites } = vi.hoisted(
   () => ({
     login: vi.fn(),
     provision: vi.fn(),
-    probeSite: vi.fn(),
+    importSite: vi.fn(),
     listSponsors: vi.fn(),
     listSites: vi.fn(),
   }),
 );
 
 vi.mock("@/lib/api", () => ({
-  relayApi: { login, provision, probeSite, listSponsors, listSites },
+  relayApi: { importSite, login, provision, listSponsors, listSites },
 }));
 
 // 全局 setup 里的 i18n 资源是**空的** ⇒ `t()` 只回 key、把插值丢掉，
@@ -111,14 +111,14 @@ function clickConfirm() {
 describe("「添加中转站」登录后就地备好密钥", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    probeSite.mockResolvedValue({
+    importSite.mockResolvedValue({
       relayId: 7,
       siteOrigin: "https://790053500.com",
       siteName: "鑫旺",
+      loggedIn: true,
     });
     listSponsors.mockResolvedValue([]);
     listSites.mockResolvedValue([]);
-    login.mockResolvedValue(true);
     provision.mockResolvedValue(emptySummary);
   });
 
@@ -130,9 +130,10 @@ describe("「添加中转站」登录后就地备好密钥", () => {
     // 而那句话不属实（分组在中转站那边有，只是本地没去拉）。
     //
     // 断言**带上 id**：`provision` 的 relayId 是必填的（「当前站」那条回落已随
-    // `is_current` 一起删掉），而它必须是 `probeSite` 返回的那一行 ——
+    // `is_current` 一起删掉），而它必须是 `importSite` 返回的那一行 ——
     // 传错行就是给别的账号建 sk。
     await waitFor(() => expect(provision).toHaveBeenCalledWith(7));
+    expect(login).not.toHaveBeenCalled();
   });
 
   it("等分组拉完才通知宿主刷新（否则宿主读到的还是零档位）", async () => {
@@ -160,12 +161,18 @@ describe("「添加中转站」登录后就地备好密钥", () => {
   });
 
   it("用户自己关掉登录窗时不拉分组（没有凭据，后端在发请求前就报错）", async () => {
-    login.mockResolvedValue(false);
+    importSite.mockResolvedValue({
+      relayId: 7,
+      siteOrigin: "https://790053500.com",
+      siteName: "鑫旺",
+      loggedIn: false,
+    });
     renderDialog();
     clickConfirm();
 
-    // 等 handleProbe 整条链跑完再断言「没调」，否则这条测试对任何实现都绿。
-    await waitFor(() => expect(login).toHaveBeenCalled());
+    // 等导入命令返回再断言「没调」，否则这条测试对任何实现都绿。
+    await waitFor(() => expect(importSite).toHaveBeenCalled());
+    expect(login).not.toHaveBeenCalled();
     expect(provision).not.toHaveBeenCalled();
   });
 

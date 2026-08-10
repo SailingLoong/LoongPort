@@ -22,7 +22,7 @@ import type { SiteInfo, Sponsor } from "@/lib/api/relay";
 import { reportProvision } from "./reportProvision";
 
 /**
- * 「添加中转站」弹窗：输域名 → 探测 → 成功即存为当前站。
+ * 「添加中转站」弹窗：输入站点 → 必要时由用户完成网页验证 → 登录并保存。
  *
  * ## 为什么抽成自带状态的独立组件
  *
@@ -42,7 +42,7 @@ export interface AddSiteDialogProps {
   appId: AppId;
   /** 关闭请求。 */
   onClose: () => void;
-  /** 探测成功后调用，宿主据此 refresh。 */
+  /** 站点导入流程结束后调用，宿主据此 refresh。 */
   onAdded: () => void;
   /** 域名输入框的底纹词（来自 `relay_status.defaultSite`）。 */
   defaultSite: string;
@@ -123,85 +123,39 @@ export function AddSiteDialog({
     sites.filter((s) => s.siteOrigin === siteOrigin && s.accountLabel).length;
 
   /**
-   * 探测并存站。`site` 省略时用输入框的值（空串 = 走默认域名，后端的既有行为）。
+   * 导入站点。`site` 省略时使用输入框值；空串仍由后端回落到默认站点。
    *
-   * 点推荐按钮直接传它的 `siteOrigin` 而**不是先填进输入框再探测** ——
-   * 后者要多一次 state 往返，且用户会看到输入框内容突然被改写。
+   * 打开网页、等待用户验证的阶段完全不知道站点协议。后端只在同一个 WebView
+   * 会话中识别成功后才接入对应登录适配，前端不再拆成 probe + login 两条命令。
    */
-  const handleProbe = async (site?: string) => {
+  const handleImport = async (site?: string) => {
     const target = site ?? siteInput;
     setBusy(true);
     try {
-      const r = await relayApi.probeSite(target);
-      toast.success(t("loongport.addSite.connected", { name: r.siteName }));
+      const result = await relayApi.importSite(target);
+      toast.success(
+        t("loongport.addSite.connected", { name: result.siteName }),
+      );
       setSiteInput("");
 
-      // ⭐ **探测完接着开登录窗**，这一步不能省。
-      //
-      // `probeSite` 只建/更新那个**站点行**（`creds::save_site`），不碰账号。
-      // 少了下面这步，点一个已在列表里的站什么都不会发生 ——
-      // 用户看到的是「点了没反应，也加不出新账号」（维护者实测到的正是这个）。
-      //
-      // 加账号本来就只有登录这条路：`save_credentials` 按服务端 `account_id` 去重
-      // （`creds.rs` 那个 `UNIQUE(site_origin, account_id)` 索引），所以
-      // **换个账号登录就自然多一行，同一个账号重登就合并回原行**。
-      // 登录窗是 incognito ⇒ 每次都是全新登录态，同站挂多个号成立。
-      //
-      // ⚠️ **拿 `r.relayId` 显式传**：`login` 的参数是必填的。原来这里调无参版、
-      // 靠后端回落到「当前站」（`probeSite` 刚把它设成 current）—— 那条路随
-      // `is_current` 一起删了，因为它在多行并列的界面里会给错的账号登录。
-      const loggedIn = await relayApi.login(r.relayId);
-      if (loggedIn) {
+      if (result.loggedIn) {
         toast.success(t("loongport.session.connected"));
-        // ⭐ **登录完必须接着拉一次分组**（2026-08-04 用户实测报的 bug）。
-        //
-        // 三条命令各管一段，谁都不碰分组：`probeSite` 只建**站点行**
-        // （`creds::save_site`）、`relay_login` 只写**凭据**，而分组只有
-        // `relay_provision` 这一条路（真打 `/groups/available` 再逐组建 sk）。
-        //
-        // 少了这一步，宿主随后那次 reload 读的是本地 DB、里头一个档位都没有
-        // ⇒ 那一行落到 `loggedIn && tiers.length === 0` 分支，显示
-        // 「该账号在此平台下没有可用分组」—— 而那句话**不属实**：分组在中转站
-        // 那边有，只是本地还没去拉。用户得再点一次「获取密钥」才补上。
-        //
-        // 行内那两条路径（`RelaySection` 的 `handleLogin` / `handleProvision`）
-        // 本来就在登录成功后紧跟一次 provision，只有这条加站入口漏了 ——
-        // 补上它，三个入口行为一致。
-        //
-        // ⚠️ **必须 `await`，不能写成 `void provision().then(...)`**：`onAdded()`
-        // 是宿主 reload 的触发点，不等它就会抢在 `/groups/available` 与逐组建 sk
-        // 的网络往返之前读本地 DB ⇒ 那一行照样显示「没有可用分组」，且之后再没有
-        // 东西刷它 —— 一字不差地复现本次要修的 bug。由那条「等分组拉完才通知宿主」
-        // 的闸钉住（codex review 抓出：只断言「调过 provision」的闸区分不了这两种写法）。
-        //
-        // ⚠️ **失败不算加站失败**：站点行与登录态都已经落库了。把弹窗卡在这里
-        // 会让用户既看不到新加的那一行、也没法重试；放它过去，那一行会带着
-        // 「获取密钥」按钮出现，那就是重试入口。原因如实说出来 —— 用户能做的处置
-        // （检查网络 / 等中转站恢复）取决于原因是什么。
-        //
-        // 播报走**共用的** `reportProvision`（与 `RelaySection` 同一个函数）：
-        // 部分分组建密钥失败时要逐条点名，静默吞掉会让用户以为全部备好了。
+        // 登录成功后必须等分组和密钥落库再通知宿主刷新；否则新行会短暂显示
+        // “没有可用分组”。provision 失败不撤销已保存的站点和登录态，刷新后
+        // 用户仍可从新行上的“获取密钥”重试。
         try {
-          reportProvision(t, await relayApi.provision(r.relayId), appId);
+          reportProvision(t, await relayApi.provision(result.relayId), appId);
         } catch (e) {
           toast.error(String(e));
         }
       }
-      // `false` = 用户自己关了登录窗。**不出提示、也不算失败** ——
-      // 站点行已经建好了，他随时可以在那一行点登录。
-      //
-      // 也**不拉分组**：用户主动放弃了登录这一步，不该替他发请求。
-      //
-      // ⚠️ 判据有意是「他放弃了」而不是「那次请求反正会失败」—— 后者不是全称成立的：
-      // `save_site` 复用 `account_id IS NULL` 的行（`creds.rs` 那个查询），而那种行
-      // 可能**有 token 但 account_id 为空**（见上面 `accountCountFor` 那段说的真实行），
-      // 此时 `token_looks_valid` 为 true、provision 本来能成。所以理由落在用户意图上。
 
+      // loggedIn=false 表示用户在登录完成前主动关窗。若协议已经识别，站点行仍已
+      // 保存，因此照常刷新列表；没有凭据则不发 provision 请求。
       onAdded();
       onClose();
     } catch (e) {
-      // 探测/登录失败**不清输入框、不关弹窗** —— 用户可能只是打错一个字母，
-      // 让他改而不是重打。
+      // 发现、网页验证后的协议识别或登录失败时保留输入与弹窗，方便用户修正后重试。
       toast.error(String(e));
     } finally {
       setBusy(false);
@@ -261,7 +215,7 @@ export function AddSiteDialog({
                       <button
                         type="button"
                         disabled={busy}
-                        onClick={() => void handleProbe(s.siteOrigin)}
+                        onClick={() => void handleImport(s.siteOrigin)}
                         // 视觉抄上游的可选行样式（hover 变底色 + 圆角），
                         // 不新造一套 —— 判据是 CLAUDE.md §一「放一起看不出是两个人写的」。
                         className="flex flex-col items-start gap-0.5 rounded-md border border-border px-3 py-2 text-left transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
@@ -308,7 +262,7 @@ export function AddSiteDialog({
               value={siteInput}
               onChange={(e) => setSiteInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !busy) void handleProbe();
+                if (e.key === "Enter" && !busy) void handleImport();
               }}
               // 有推荐时不抢焦点 —— 那会让光标停在退路上而不是主路径上。
               autoFocus={sponsors.length === 0}
@@ -340,7 +294,7 @@ export function AddSiteDialog({
           >
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => void handleProbe()} disabled={busy}>
+          <Button onClick={() => void handleImport()} disabled={busy}>
             {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {t("common.confirm")}
           </Button>
