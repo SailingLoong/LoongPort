@@ -49,7 +49,13 @@ function tier(appId: TierInfo["appId"], n: number): TierInfo {
 }
 
 function summary(over: Partial<ProvisionSummary> = {}): ProvisionSummary {
-  return { tiers: [], failures: [], keysCreated: 0, mergedProviders: [], ...over };
+  return {
+    tiers: [],
+    failures: [],
+    keysCreated: 0,
+    mergedProviders: [],
+    ...over,
+  };
 }
 
 describe("provision 结果的播报", () => {
