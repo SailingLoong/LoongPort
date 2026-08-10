@@ -3225,8 +3225,10 @@
         "status": { "active": "已啟用", "waiting": "等待中", "error": "錯誤" }
       },
       "tierVerdict": {
+        "trusted": "模型已驗證",
         "suspicious": "模型存疑",
         "anomaly": "模型異常",
+        "trustedHint": "模型驗證通過，請點擊「模型驗證」查看詳情",
         "suspiciousHint": "模型驗證結果存疑，請點擊「模型驗證」查看詳情",
         "anomalyHint": "模型驗證發現異常，請點擊「模型驗證」查看詳情"
       },

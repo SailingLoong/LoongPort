@@ -3228,8 +3228,10 @@
         "status": { "active": "Active", "waiting": "Waiting", "error": "Error" }
       },
       "tierVerdict": {
+        "trusted": "Model verified",
         "suspicious": "Model suspicious",
         "anomaly": "Model anomaly",
+        "trustedHint": "Model verification passed. Select Verify model for details.",
         "suspiciousHint": "Verification found suspicious behavior. Select Verify model for details.",
         "anomalyHint": "Verification found an anomaly. Select Verify model for details."
       },

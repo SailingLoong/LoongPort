@@ -101,7 +101,11 @@ pub(crate) enum RunFailure {
     Authentication,
     RateLimited,
     InsufficientBalance,
-    Upstream,
+    /// An upstream 5xx response. The status is retained for diagnostics, but the response body
+    /// deliberately never crosses this protocol boundary.
+    Upstream {
+        status: u16,
+    },
     Network,
     Timeout,
     ModelUnavailable,
@@ -200,7 +204,9 @@ pub(crate) fn classify_http_failure(status: StatusCode, body: &[u8]) -> RunFailu
             RunFailure::InsufficientBalance
         }
         StatusCode::NOT_FOUND => RunFailure::ModelUnavailable,
-        status if status.is_server_error() => RunFailure::Upstream,
+        status if status.is_server_error() => RunFailure::Upstream {
+            status: status.as_u16(),
+        },
         _ => RunFailure::InvalidResponse,
     }
 }

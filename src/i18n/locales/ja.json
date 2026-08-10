@@ -3228,8 +3228,10 @@
         "status": { "active": "有効", "waiting": "待機中", "error": "エラー" }
       },
       "tierVerdict": {
+        "trusted": "モデル検証済み",
         "suspicious": "モデルに疑い",
         "anomaly": "モデル異常",
+        "trustedHint": "モデル検証に合格しました。モデルを検証で詳細を確認してください。",
         "suspiciousHint": "検証で疑わしい挙動が見つかりました。モデルを検証で詳細を確認してください。",
         "anomalyHint": "検証で異常が見つかりました。モデルを検証で詳細を確認してください。"
       },

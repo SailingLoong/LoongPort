@@ -237,6 +237,32 @@ describe("RelaySection model verification ownership", () => {
     await screen.findByRole("combobox");
   });
 
+  it("keeps a trusted tier visible until a more severe report supersedes it", async () => {
+    api.listResults.mockResolvedValueOnce([
+      report("provider-a", "trusted", "verified-model"),
+    ]);
+
+    render(<RelaySection appId="codex" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("verdict-provider-a")).toHaveTextContent(
+        "trusted",
+      ),
+    );
+
+    api.listResults.mockResolvedValueOnce([
+      report("provider-a", "trusted", "verified-model"),
+      report("provider-a", "suspicious", "suspicious-model"),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("verdict-provider-a")).toHaveTextContent(
+        "suspicious",
+      ),
+    );
+  });
+
   it("clears a reset badge only after the matching backend change event", async () => {
     render(<RelaySection appId="codex" />);
     await waitFor(() =>
