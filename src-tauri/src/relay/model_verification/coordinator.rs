@@ -667,6 +667,17 @@ impl ModelVerificationCoordinator {
             .map_err(|_| RunFailureKind::InvalidResponse)
     }
 
+    pub fn list_history(
+        &self,
+        scope: &TargetScope,
+    ) -> Result<
+        Vec<crate::relay::model_verification::types::VerificationHistoryEntry>,
+        RunFailureKind,
+    > {
+        crate::relay::model_verification::history::list(&self.db, scope)
+            .map_err(|_| RunFailureKind::InvalidResponse)
+    }
+
     pub fn cancel(&self, run_id: &str) -> Result<(), RunFailureKind> {
         let _mutation = self
             .mutation

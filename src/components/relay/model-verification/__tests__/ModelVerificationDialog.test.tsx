@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
   listModels: vi.fn(),
+  listHistory: vi.fn(),
   start: vi.fn(),
   cancel: vi.fn(),
   onProgress: vi.fn(),
@@ -37,6 +38,15 @@ vi.mock("react-i18next", () => ({
         "loongport.modelVerification.verdict.anomaly": "异常",
         "loongport.modelVerification.verdict.inconclusive": "结论不足",
         "loongport.modelVerification.failure.network": "网络连接失败",
+        "loongport.modelVerification.history.title": "最近 5 条验证记录",
+        "loongport.modelVerification.history.empty": "暂无验证记录",
+        "loongport.modelVerification.history.source.active": "主动检测",
+        "loongport.modelVerification.history.source.runtime": "使用时检测",
+        "loongport.modelVerification.evidence.fact.modelMatch": "模型身份",
+        "loongport.modelVerification.evidence.fact.streamLifecycle":
+          "流式响应生命周期",
+        "loongport.modelVerification.evidence.outcome.passed": "通过",
+        "loongport.modelVerification.evidence.outcome.failed": "未通过",
       };
       return (strings[key] ?? key).replace(/{{(\w+)}}/g, (_, name) =>
         String(options?.[name] ?? ""),
@@ -101,6 +111,7 @@ vi.mock("@/components/ui/select", async () => {
 
 import { ModelVerificationDialog } from "../ModelVerificationDialog";
 import type {
+  VerificationHistoryEntry,
   VerificationReport,
   VerificationVerdict,
 } from "@/lib/api/modelVerification";
@@ -159,6 +170,25 @@ const report = (verdict: VerificationVerdict): VerificationReport => ({
   checkedAt: 1,
 });
 
+const history: VerificationHistoryEntry[] = [
+  { source: "active", report: report("trusted") },
+  {
+    source: "runtime",
+    report: {
+      target: {
+        providerId: "provider-a",
+        appType: "codex",
+        model: "gpt-5.6-sol",
+      },
+      verdict: "anomaly",
+      evidenceLevel: "insufficient",
+      facts: [{ code: "streamLifecycle", outcome: "failed" }],
+      rulesVersion: 1,
+      checkedAt: 2,
+    },
+  },
+];
+
 async function openModelOptions() {
   await screen.findByRole("combobox");
   return screen.findByRole("option", { name: "gpt-5" });
@@ -169,6 +199,7 @@ describe("ModelVerificationDialog", () => {
     vi.clearAllMocks();
     progressListener = undefined;
     api.listModels.mockResolvedValue(["gpt-5"]);
+    api.listHistory.mockResolvedValue([]);
     api.start.mockResolvedValue({ runId: "run-1", state: "queued" });
     api.cancel.mockResolvedValue(undefined);
     api.onProgress.mockImplementation(
@@ -287,6 +318,20 @@ describe("ModelVerificationDialog", () => {
       rerender(<DialogHarness report={report(verdict)} />);
       await screen.findByText(label);
     }
+  });
+
+  it("shows the latest active and runtime verification records for this tier", async () => {
+    api.listHistory.mockResolvedValue(history);
+
+    render(<DialogHarness />);
+
+    expect(await screen.findByText("最近 5 条验证记录")).toBeInTheDocument();
+    expect(screen.getByText("主动检测")).toBeInTheDocument();
+    expect(screen.getByText("使用时检测")).toBeInTheDocument();
+    expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
+    expect(screen.getByText("流式响应生命周期")).toBeInTheDocument();
+    expect(screen.getByText("未通过")).toBeInTheDocument();
+    expect(api.listHistory).toHaveBeenCalledWith("provider-a", "codex");
   });
 
   it("requests a fresh model list every time the dialog reopens", async () => {

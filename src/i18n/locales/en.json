@@ -3227,6 +3227,13 @@
         "apps": { "codex": "Codex", "claude": "Claude" },
         "status": { "active": "Active", "waiting": "Waiting", "error": "Error" }
       },
+      "history": {
+        "title": "Latest 5 verification results",
+        "loading": "Loading verification results…",
+        "empty": "No verification results yet.",
+        "error": "Could not load verification results.",
+        "source": { "active": "Active check", "runtime": "Runtime check" }
+      },
       "tierVerdict": {
         "trusted": "Model verified",
         "suspicious": "Model suspicious",

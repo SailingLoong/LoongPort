@@ -3223,6 +3223,13 @@
         "apps": { "codex": "Codex", "claude": "Claude" },
         "status": { "active": "已启用", "waiting": "等待中", "error": "异常" }
       },
+      "history": {
+        "title": "最近 5 条验证记录",
+        "loading": "正在加载验证记录…",
+        "empty": "暂无验证记录",
+        "error": "验证记录加载失败",
+        "source": { "active": "主动检测", "runtime": "使用时检测" }
+      },
       "tierVerdict": {
         "trusted": "模型已验证",
         "suspicious": "模型存疑",

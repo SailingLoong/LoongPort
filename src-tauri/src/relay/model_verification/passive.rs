@@ -219,6 +219,10 @@ impl FiniteEvidenceFacts {
         self.0.is_empty()
     }
 
+    pub fn into_vec(self) -> Vec<EvidenceFact> {
+        self.0
+    }
+
     fn record(
         outcomes: &mut [Option<EvidenceOutcome>; EvidenceCode::CARDINALITY],
         fact: EvidenceFact,
@@ -377,6 +381,25 @@ impl PassiveAggregate {
 
     pub fn last_observed_at(&self) -> Option<i64> {
         self.last_observed_at
+    }
+
+    pub fn evidence_facts(&self) -> Vec<EvidenceFact> {
+        EvidenceCode::ALL
+            .into_iter()
+            .filter_map(|code| {
+                let outcome = if self
+                    .unresolved_fingerprints
+                    .contains(&AnomalyFingerprint::from_code(code))
+                {
+                    EvidenceOutcome::Failed
+                } else if self.pass_count(code) > 0 {
+                    EvidenceOutcome::Passed
+                } else {
+                    return None;
+                };
+                Some(EvidenceFact { code, outcome })
+            })
+            .collect()
     }
 
     #[cfg(test)]

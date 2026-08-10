@@ -1555,6 +1555,7 @@ pub fn run() {
             commands::start_model_verification,
             commands::cancel_model_verification,
             commands::get_model_verification_results,
+            commands::get_model_verification_history,
             // LoongPort 官网直连账号（vendor）
             commands::vendor_list_accounts,
             commands::vendor_open_login,

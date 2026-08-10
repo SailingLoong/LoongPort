@@ -3,7 +3,7 @@ use crate::{
         target,
         types::{
             RunFailureKind, RuntimeAppState, RuntimeVerificationSetting, StartRunResponse,
-            TargetKey, VerificationReport,
+            TargetKey, TargetScope, VerificationHistoryEntry, VerificationReport,
         },
     },
     AppState,
@@ -94,6 +94,17 @@ fn get_model_verification_results_impl(
     provider_ids: Vec<String>,
 ) -> Result<Vec<VerificationReport>, RunFailureKind> {
     state.model_verification.list_results(&provider_ids)
+}
+
+#[tauri::command]
+pub fn get_model_verification_history(
+    state: tauri::State<'_, AppState>,
+    provider_id: String,
+    app_type: String,
+) -> Result<Vec<VerificationHistoryEntry>, RunFailureKind> {
+    state
+        .model_verification
+        .list_history(&TargetScope::new(provider_id, app_type))
 }
 
 #[cfg(test)]
