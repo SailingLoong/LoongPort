@@ -75,6 +75,13 @@ export interface VerificationReport {
   checkedAt: number;
 }
 
+export type VerificationSource = "active" | "runtime";
+
+export interface VerificationHistoryEntry {
+  source: VerificationSource;
+  report: VerificationReport;
+}
+
 export interface StartRunResponse {
   runId: string;
   state: RunState;
@@ -126,6 +133,12 @@ export const modelVerificationApi = {
 
   listResults: (providerIds: string[]): Promise<VerificationReport[]> =>
     invoke("get_model_verification_results", { providerIds }),
+
+  listHistory: (
+    providerId: string,
+    appType: string,
+  ): Promise<VerificationHistoryEntry[]> =>
+    invoke("get_model_verification_history", { providerId, appType }),
 
   onProgress: (
     handler: (event: VerificationProgressEvent) => void,

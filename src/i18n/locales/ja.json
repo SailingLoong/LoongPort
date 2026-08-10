@@ -3227,6 +3227,13 @@
         "apps": { "codex": "Codex", "claude": "Claude" },
         "status": { "active": "有効", "waiting": "待機中", "error": "エラー" }
       },
+      "history": {
+        "title": "直近 5 件の検証結果",
+        "loading": "検証結果を読み込んでいます…",
+        "empty": "検証結果はまだありません。",
+        "error": "検証結果を読み込めませんでした。",
+        "source": { "active": "手動検証", "runtime": "使用時の検証" }
+      },
       "tierVerdict": {
         "trusted": "モデル検証済み",
         "suspicious": "モデルに疑い",

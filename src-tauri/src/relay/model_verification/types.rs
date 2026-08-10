@@ -49,12 +49,60 @@ pub enum Verdict {
     Inconclusive,
 }
 
+impl Verdict {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Suspicious => "suspicious",
+            Self::Anomaly => "anomaly",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
+impl TryFrom<&str> for Verdict {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "trusted" => Ok(Self::Trusted),
+            "suspicious" => Ok(Self::Suspicious),
+            "anomaly" => Ok(Self::Anomaly),
+            "inconclusive" => Ok(Self::Inconclusive),
+            _ => Err("unsupported verification verdict"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EvidenceLevel {
     Cryptographic,
     ProtocolBehavior,
     Insufficient,
+}
+
+impl EvidenceLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cryptographic => "cryptographic",
+            Self::ProtocolBehavior => "protocolBehavior",
+            Self::Insufficient => "insufficient",
+        }
+    }
+}
+
+impl TryFrom<&str> for EvidenceLevel {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "cryptographic" => Ok(Self::Cryptographic),
+            "protocolBehavior" => Ok(Self::ProtocolBehavior),
+            "insufficient" => Ok(Self::Insufficient),
+            _ => Err("unsupported verification evidence level"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -128,6 +176,41 @@ pub struct VerificationReport {
     pub facts: Vec<EvidenceFact>,
     pub rules_version: i32,
     pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VerificationSource {
+    Active,
+    Runtime,
+}
+
+impl VerificationSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+impl TryFrom<&str> for VerificationSource {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "active" => Ok(Self::Active),
+            "runtime" => Ok(Self::Runtime),
+            _ => Err("unsupported verification source"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationHistoryEntry {
+    pub source: VerificationSource,
+    pub report: VerificationReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

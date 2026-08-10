@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   status: vi.fn(),
   listSites: vi.fn(),
   listResults: vi.fn(),
+  listHistory: vi.fn(),
   listModels: vi.fn(),
   start: vi.fn(),
   cancel: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("@/lib/api/vendor", () => ({
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: {
     listResults: api.listResults,
+    listHistory: api.listHistory,
     listModels: api.listModels,
     start: api.start,
     cancel: api.cancel,
@@ -207,6 +209,7 @@ describe("RelaySection model verification ownership", () => {
       report("provider-a", "suspicious", "one"),
       report("provider-a", "anomaly", "two"),
     ]);
+    api.listHistory.mockResolvedValue([]);
     api.listModels.mockResolvedValue(["gpt-5"]);
     api.start.mockResolvedValue({ runId: "run-1", state: "running" });
     api.cancel.mockResolvedValue(undefined);

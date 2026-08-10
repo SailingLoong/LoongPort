@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 6;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 7;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -155,6 +155,13 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 log::info!("LoongPort 数据迁移 v5 → v6（运行时验证设置与代理租约）");
                 crate::relay::model_verification::store::create_runtime_tables(conn)?;
                 set_version(conn, 6)?;
+            }
+            // v6 → v7：每个分组最近五条脱敏模型验证结果。
+            // 旧表是当前状态快照，不是历史事件，不将它伪装成首条历史。
+            6 => {
+                log::info!("LoongPort 数据迁移 v6 → v7（模型验证历史）");
+                crate::relay::model_verification::history::create_table(conn)?;
+                set_version(conn, 7)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -524,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v6_creates_runtime_tables_without_touching_user_version() {
+    fn v4_to_latest_creates_model_verification_tables_without_touching_user_version() {
         let conn = mem();
         legacy_providers_table(&conn);
         conn.execute("PRAGMA user_version = 16", [])
@@ -564,6 +571,16 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("查询运行时验证租约表");
+        let history_table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'model_verification_history'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("查询模型验证历史表");
         let user_version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("读取上游版本");
@@ -571,12 +588,13 @@ mod tests {
         assert!(result_table_exists, "v4 → v5 必须创建模型验证结果表");
         assert!(settings_table_exists, "v5 → v6 必须创建运行时验证设置表");
         assert!(leases_table_exists, "v5 → v6 必须创建运行时验证租约表");
+        assert!(history_table_exists, "v6 → v7 必须创建模型验证历史表");
         assert_eq!(user_version, 16, "LoongPort 迁移不许修改上游版本号");
-        assert_eq!(current_version(&conn).unwrap(), 6);
+        assert_eq!(current_version(&conn).unwrap(), 7);
     }
 
     #[test]
-    fn v5_to_v6_is_idempotent_and_seeds_setting() {
+    fn v5_to_latest_is_idempotent_and_seeds_setting() {
         let conn = mem();
         ensure_version_table(&conn).expect("建版本表");
         set_version(&conn, 5).expect("设为 v5");
@@ -593,7 +611,52 @@ mod tests {
             )
             .expect("读取默认设置");
         assert_eq!(setting, (0, 1));
-        assert_eq!(current_version(&conn).unwrap(), 6);
+        assert_eq!(current_version(&conn).unwrap(), 7);
+    }
+
+    #[test]
+    fn v6_to_v7_keeps_current_results_but_starts_history_empty() {
+        let conn = mem();
+        legacy_providers_table(&conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type) VALUES ('provider-a', 'codex')",
+            [],
+        )
+        .expect("插入旧档位");
+        crate::relay::model_verification::store::create_results_table(&conn).expect("创建旧结果表");
+        conn.execute(
+            "INSERT INTO model_verification_results (
+                provider_id, app_type, model, verdict, evidence_level,
+                rules_version, updated_at
+             ) VALUES (
+                'provider-a', 'codex', 'gpt-test', 'inconclusive',
+                'insufficient', 1, 123
+             )",
+            [],
+        )
+        .expect("插入旧结果快照");
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, 6).expect("设为 v6");
+
+        apply(&conn).expect("迁移到 v7");
+
+        let current_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_verification_results",
+                [],
+                |row| row.get(0),
+            )
+            .expect("统计当前结果");
+        let history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_verification_history",
+                [],
+                |row| row.get(0),
+            )
+            .expect("统计验证历史");
+
+        assert_eq!(current_count, 1, "当前结果仍是运行状态，不应丢弃");
+        assert_eq!(history_count, 0, "旧快照不能伪造为历史事件");
     }
 
     fn insert_codex_tier(conn: &Connection, id: &str, name: &str, model: &str) {

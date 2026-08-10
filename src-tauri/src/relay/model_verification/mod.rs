@@ -1,6 +1,7 @@
 pub mod active;
 pub mod capability_profiles;
 pub mod coordinator;
+pub(crate) mod history;
 pub mod passive;
 pub(crate) mod protocols;
 pub mod store;

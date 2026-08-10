@@ -136,8 +136,12 @@ async fn active_protocols_keep_private_request_and_response_material_out_of_ever
         let returned = serde_json::to_string(&(start, &reports)).unwrap();
         assert_no_private_values("returned start/report", &returned, &request_private_strings);
 
-        let persisted = persisted_row(&db);
-        assert_no_private_values("SQLite result row", &persisted, &request_private_strings);
+        let persisted = persisted_rows(&db);
+        assert_no_private_values(
+            "SQLite result and history rows",
+            &persisted,
+            &request_private_strings,
+        );
 
         let emitted = serde_json::to_string(&(
             sink.progress.lock().unwrap().clone(),
@@ -531,21 +535,25 @@ async fn wait_for_change(sink: &RecordingSink) {
     .expect("active verification should finish");
 }
 
-fn persisted_row(db: &Database) -> String {
+fn persisted_rows(db: &Database) -> String {
     let conn = db.conn.lock().unwrap();
-    let mut statement = conn
-        .prepare("SELECT * FROM model_verification_results")
-        .unwrap();
-    let column_count = statement.column_count();
-    assert!(column_count > 0);
-    statement
-        .query_row([], |row| {
-            (0..column_count)
-                .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
-                .collect::<Result<Vec<_>, _>>()
-                .map(|values| values.join("|"))
+    ["model_verification_results", "model_verification_history"]
+        .into_iter()
+        .map(|table| {
+            let mut statement = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+            let column_count = statement.column_count();
+            assert!(column_count > 0);
+            statement
+                .query_row([], |row| {
+                    (0..column_count)
+                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|values| values.join("|"))
+                })
+                .unwrap()
         })
-        .unwrap()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn assert_no_private_values(

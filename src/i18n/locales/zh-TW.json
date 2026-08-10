@@ -3224,6 +3224,13 @@
         "apps": { "codex": "Codex", "claude": "Claude" },
         "status": { "active": "已啟用", "waiting": "等待中", "error": "錯誤" }
       },
+      "history": {
+        "title": "最近 5 筆驗證記錄",
+        "loading": "正在載入驗證記錄…",
+        "empty": "暫無驗證記錄",
+        "error": "驗證記錄載入失敗",
+        "source": { "active": "主動檢測", "runtime": "使用時檢測" }
+      },
       "tierVerdict": {
         "trusted": "模型已驗證",
         "suspicious": "模型存疑",

@@ -20,9 +20,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { modelVerificationApi } from "@/lib/api/modelVerification";
-import type { VerificationReport } from "@/lib/api/modelVerification";
+import type {
+  VerificationHistoryEntry,
+  VerificationReport,
+} from "@/lib/api/modelVerification";
 
 import { VerificationEvidenceList } from "./VerificationEvidenceList";
+import { VerificationHistoryList } from "./VerificationHistoryList";
 import { useModelVerificationRun } from "./useModelVerificationRun";
 
 export interface ModelVerificationDialogProps {
@@ -57,7 +61,12 @@ export function ModelVerificationDialog({
   const [runtimeState, setRuntimeState] = useState<
     "idle" | "loading" | "error"
   >("idle");
+  const [history, setHistory] = useState<VerificationHistoryEntry[]>([]);
+  const [historyState, setHistoryState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const requestRef = useRef(0);
+  const historyRequestRef = useRef(0);
   const run = useModelVerificationRun({ providerId, appType });
 
   useEffect(() => {
@@ -80,6 +89,22 @@ export function ModelVerificationDialog({
       .catch(() => {
         if (request !== requestRef.current) return;
         setModelsState("error");
+      });
+  }, [appType, providerId]);
+
+  const loadHistory = useCallback(() => {
+    const request = ++historyRequestRef.current;
+    setHistoryState("loading");
+    void modelVerificationApi
+      .listHistory(providerId, appType)
+      .then((entries) => {
+        if (request !== historyRequestRef.current) return;
+        setHistory(entries);
+        setHistoryState("ready");
+      })
+      .catch(() => {
+        if (request !== historyRequestRef.current) return;
+        setHistoryState("error");
       });
   }, [appType, providerId]);
 
@@ -107,6 +132,16 @@ export function ModelVerificationDialog({
       .catch(() => setRuntimeState("error"));
     // Reload from the live backend on every open; the model catalog is not cached UI state.
   }, [loadModels, open]);
+
+  useEffect(() => {
+    if (!open) {
+      historyRequestRef.current += 1;
+      setHistory([]);
+      setHistoryState("idle");
+      return;
+    }
+    loadHistory();
+  }, [loadHistory, open, report?.checkedAt]);
 
   const showStart = !run.isRunning;
   const canStart =
@@ -295,6 +330,31 @@ export function ModelVerificationDialog({
               <VerificationEvidenceList report={report} />
             </div>
           )}
+
+          <section className="space-y-3 border-t border-border-default pt-4">
+            <h3 className="text-sm font-medium">
+              {t("loongport.modelVerification.history.title")}
+            </h3>
+            {historyState === "loading" && (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" />
+                {t("loongport.modelVerification.history.loading")}
+              </p>
+            )}
+            {historyState === "error" && (
+              <p className="text-sm text-destructive" role="alert">
+                {t("loongport.modelVerification.history.error")}
+              </p>
+            )}
+            {historyState === "ready" && history.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                {t("loongport.modelVerification.history.empty")}
+              </p>
+            )}
+            {historyState === "ready" && history.length > 0 && (
+              <VerificationHistoryList entries={history} />
+            )}
+          </section>
         </div>
 
         <DialogFooter>

@@ -2,12 +2,14 @@ use crate::{
     database::{lock_conn, Database},
     error::AppError,
     relay::model_verification::{
+        history,
         passive::{
-            reduce_batch, resolve_with_active, AnomalyFingerprint, EvidenceBatch, PassiveAggregate,
+            reduce_batch, resolve_with_active, AnomalyFingerprint, EvidenceBatch,
+            FiniteEvidenceFacts, PassiveAggregate,
         },
         types::{
             EvidenceLevel, ProxyLease, RuntimeAppType, RuntimeVerificationSetting, TargetKey,
-            TargetScope, Verdict, VerificationReport, RULES_VERSION,
+            TargetScope, Verdict, VerificationReport, VerificationSource, RULES_VERSION,
         },
         verdict::{self, MergedReport},
     },
@@ -200,11 +202,36 @@ mod tests {
     use super::*;
     use crate::relay::model_verification::types::{
         EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, ProxyLease, RuntimeAppReason,
-        RuntimeAppState, RuntimeAppStatus, RuntimeAppType, TargetKey, Verdict, VerificationReport,
-        RULES_VERSION,
+        RuntimeAppState, RuntimeAppStatus, RuntimeAppType, TargetKey, TargetScope, Verdict,
+        VerificationReport, VerificationSource, RULES_VERSION,
     };
 
     use crate::relay::model_verification::passive::EvidenceBatch;
+
+    fn insert_provider(db: &Database, provider_id: &str, app_type: &str) -> Result<(), AppError> {
+        let conn = lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config)
+             VALUES (?1, ?2, ?1, '{}')",
+            params![provider_id, app_type],
+        )
+        .unwrap();
+        Ok(())
+    }
+
+    fn active_report(provider_id: &str, app_type: &str, checked_at: i64) -> VerificationReport {
+        VerificationReport {
+            target: TargetKey::new(provider_id, app_type, format!("model-{checked_at}")),
+            verdict: Verdict::Trusted,
+            evidence_level: EvidenceLevel::ProtocolBehavior,
+            facts: vec![EvidenceFact {
+                code: EvidenceCode::ModelMatch,
+                outcome: EvidenceOutcome::Passed,
+            }],
+            rules_version: RULES_VERSION,
+            checked_at,
+        }
+    }
 
     #[test]
     fn runtime_setting_defaults_off() {
@@ -362,9 +389,14 @@ mod tests {
             upsert_passive(&db, &batch).unwrap().verdict,
             Verdict::Anomaly
         );
+        let passive_report = &list_for_provider_ids(&db, &["provider-a".into()])?[0];
+        assert_eq!(passive_report.verdict, Verdict::Anomaly);
         assert_eq!(
-            list_for_provider_ids(&db, &["provider-a".into()])?[0].verdict,
-            Verdict::Anomaly
+            passive_report.facts,
+            vec![EvidenceFact {
+                code: EvidenceCode::ForeignProtocol,
+                outcome: EvidenceOutcome::Failed,
+            }]
         );
         let active = VerificationReport {
             target,
@@ -396,13 +428,97 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn history_is_newest_first_bounded_per_scope_and_cleared_with_results() -> Result<(), AppError>
+    {
+        let db = Database::memory().unwrap();
+        insert_provider(&db, "provider-a", "codex")?;
+        insert_provider(&db, "provider-b", "codex")?;
+        for checked_at in 1..=6 {
+            upsert_active(&db, &active_report("provider-a", "codex", checked_at))?;
+        }
+        upsert_active(&db, &active_report("provider-b", "codex", 99))?;
+
+        let scope = TargetScope::new("provider-a", "codex");
+        let history = history::list(&db, &scope)?;
+        assert_eq!(history.len(), 5);
+        assert_eq!(
+            history
+                .iter()
+                .map(|entry| entry.report.checked_at)
+                .collect::<Vec<_>>(),
+            vec![6, 5, 4, 3, 2]
+        );
+        assert!(history
+            .iter()
+            .all(|entry| entry.source == VerificationSource::Active));
+        assert_eq!(
+            history::list(&db, &TargetScope::new("provider-b", "codex"))?.len(),
+            1
+        );
+
+        clear_scope(&db, &scope)?;
+        assert!(history::list(&db, &scope)?.is_empty());
+        assert_eq!(
+            history::list(&db, &TargetScope::new("provider-b", "codex"))?.len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passive_history_retains_only_sanitized_merged_evidence() -> Result<(), AppError> {
+        let db = Database::memory().unwrap();
+        insert_provider(&db, "provider-a", "codex")?;
+        let target = TargetKey::new("provider-a", "codex", "gpt-5.6-sol");
+        upsert_passive(
+            &db,
+            &EvidenceBatch::new(
+                target.clone(),
+                0,
+                true,
+                [EvidenceFact {
+                    code: EvidenceCode::StreamLifecycle,
+                    outcome: EvidenceOutcome::Failed,
+                }],
+                100,
+            ),
+        )?;
+
+        let history = history::list(&db, &TargetScope::new("provider-a", "codex"))?;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].source, VerificationSource::Runtime);
+        assert_eq!(
+            history[0].report,
+            VerificationReport {
+                target,
+                verdict: Verdict::Anomaly,
+                evidence_level: EvidenceLevel::Insufficient,
+                facts: vec![EvidenceFact {
+                    code: EvidenceCode::StreamLifecycle,
+                    outcome: EvidenceOutcome::Failed,
+                }],
+                rules_version: RULES_VERSION,
+                checked_at: 100,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&history).unwrap()[0]["source"],
+            serde_json::json!("runtime")
+        );
+        Ok(())
+    }
 }
 
 pub fn upsert_active(db: &Database, report: &VerificationReport) -> Result<(), AppError> {
     let active_report_json = serde_json::to_string(report)
         .map_err(|error| AppError::Config(format!("序列化验证报告失败: {error}")))?;
-    let conn = lock_conn!(db.conn);
-    let (mut passive, notified) = load_passive_state(&conn, &report.target)?;
+    let mut conn = lock_conn!(db.conn);
+    let transaction = conn
+        .transaction()
+        .map_err(|error| AppError::Database(format!("开始保存模型验证结果失败: {error}")))?;
+    let (mut passive, notified) = load_passive_state(&transaction, &report.target)?;
     let cleared = passive
         .as_mut()
         .map(|aggregate| resolve_with_active(aggregate, report))
@@ -413,9 +529,18 @@ pub fn upsert_active(db: &Database, report: &VerificationReport) -> Result<(), A
         .collect();
     let merged = verdict::merge(Some(report), passive.as_ref());
     let passive_aggregate_json = serialize_optional(&passive)?;
+    let history_report = merged_report(
+        report.target.clone(),
+        Some(report),
+        passive.as_ref(),
+        merged,
+        report.rules_version,
+        report.checked_at,
+    );
 
-    conn.execute(
-        "INSERT INTO model_verification_results (
+    transaction
+        .execute(
+            "INSERT INTO model_verification_results (
             provider_id, app_type, model, active_report_json, passive_aggregate_json,
             verdict, evidence_level, rules_version, active_checked_at, updated_at,
             notified_fingerprints_json
@@ -429,21 +554,30 @@ pub fn upsert_active(db: &Database, report: &VerificationReport) -> Result<(), A
             active_checked_at = excluded.active_checked_at,
             updated_at = excluded.updated_at,
             notified_fingerprints_json = excluded.notified_fingerprints_json",
-        params![
-            &report.target.provider_id,
-            &report.target.app_type,
-            &report.target.model,
-            active_report_json,
-            passive_aggregate_json,
-            verdict_name(merged.verdict),
-            evidence_level_name(merged.evidence_level),
-            report.rules_version,
-            report.checked_at,
-            report.checked_at,
-            serialize_fingerprints(&notified)?,
-        ],
-    )
-    .map_err(|error| AppError::Database(format!("保存模型验证结果失败: {error}")))?;
+            params![
+                &report.target.provider_id,
+                &report.target.app_type,
+                &report.target.model,
+                active_report_json,
+                passive_aggregate_json,
+                verdict_name(merged.verdict),
+                evidence_level_name(merged.evidence_level),
+                report.rules_version,
+                report.checked_at,
+                report.checked_at,
+                serialize_fingerprints(&notified)?,
+            ],
+        )
+        .map_err(|error| AppError::Database(format!("保存模型验证结果失败: {error}")))?;
+    history::insert(&transaction, VerificationSource::Active, &history_report)?;
+    history::prune(
+        &transaction,
+        &report.target.provider_id,
+        &report.target.app_type,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| AppError::Database(format!("提交模型验证结果失败: {error}")))?;
     Ok(())
 }
 
@@ -456,11 +590,14 @@ pub fn upsert_passive_with_notifications(
     db: &Database,
     batch: &EvidenceBatch,
 ) -> Result<(MergedReport, Vec<AnomalyFingerprint>), AppError> {
-    let conn = lock_conn!(db.conn);
-    let (existing, notified) = load_passive_state(&conn, &batch.target)?;
+    let mut conn = lock_conn!(db.conn);
+    let transaction = conn
+        .transaction()
+        .map_err(|error| AppError::Database(format!("开始保存运行时模型验证结果失败: {error}")))?;
+    let (existing, notified) = load_passive_state(&transaction, &batch.target)?;
     let mut aggregate = existing.unwrap_or_default();
     reduce_batch(&mut aggregate, batch);
-    let active = load_active_report(&conn, &batch.target)?;
+    let active = load_active_report(&transaction, &batch.target)?;
     let merged = verdict::merge(active.as_ref(), Some(&aggregate));
     let newly_claimed = aggregate
         .unresolved_fingerprints()
@@ -473,9 +610,18 @@ pub fn upsert_passive_with_notifications(
     notified.extend(newly_claimed.iter().copied());
     let passive_aggregate_json = serde_json::to_string(&aggregate)
         .map_err(|error| AppError::Config(format!("序列化被动验证聚合失败: {error}")))?;
+    let history_report = merged_report(
+        batch.target.clone(),
+        active.as_ref(),
+        Some(&aggregate),
+        merged,
+        RULES_VERSION,
+        batch.observed_at,
+    );
 
-    conn.execute(
-        "INSERT INTO model_verification_results (
+    transaction
+        .execute(
+            "INSERT INTO model_verification_results (
             provider_id, app_type, model, passive_aggregate_json, verdict, evidence_level,
             rules_version, passive_observed_at, updated_at, notified_fingerprints_json
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -487,20 +633,29 @@ pub fn upsert_passive_with_notifications(
             passive_observed_at = excluded.passive_observed_at,
             updated_at = excluded.updated_at,
             notified_fingerprints_json = excluded.notified_fingerprints_json",
-        params![
-            &batch.target.provider_id,
-            &batch.target.app_type,
-            &batch.target.model,
-            passive_aggregate_json,
-            verdict_name(merged.verdict),
-            evidence_level_name(merged.evidence_level),
-            RULES_VERSION,
-            batch.observed_at,
-            batch.observed_at,
-            serialize_fingerprints(&notified)?,
-        ],
-    )
-    .map_err(|error| AppError::Database(format!("保存被动模型验证结果失败: {error}")))?;
+            params![
+                &batch.target.provider_id,
+                &batch.target.app_type,
+                &batch.target.model,
+                passive_aggregate_json,
+                verdict_name(merged.verdict),
+                evidence_level_name(merged.evidence_level),
+                RULES_VERSION,
+                batch.observed_at,
+                batch.observed_at,
+                serialize_fingerprints(&notified)?,
+            ],
+        )
+        .map_err(|error| AppError::Database(format!("保存被动模型验证结果失败: {error}")))?;
+    history::insert(&transaction, VerificationSource::Runtime, &history_report)?;
+    history::prune(
+        &transaction,
+        &batch.target.provider_id,
+        &batch.target.app_type,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| AppError::Database(format!("提交运行时模型验证结果失败: {error}")))?;
     Ok((merged, newly_claimed))
 }
 
@@ -570,20 +725,11 @@ fn serialize_fingerprints(fingerprints: &[AnomalyFingerprint]) -> Result<String,
 }
 
 fn verdict_name(verdict: Verdict) -> &'static str {
-    match verdict {
-        Verdict::Trusted => "trusted",
-        Verdict::Suspicious => "suspicious",
-        Verdict::Anomaly => "anomaly",
-        Verdict::Inconclusive => "inconclusive",
-    }
+    verdict.as_str()
 }
 
 fn evidence_level_name(evidence_level: EvidenceLevel) -> &'static str {
-    match evidence_level {
-        EvidenceLevel::Cryptographic => "cryptographic",
-        EvidenceLevel::ProtocolBehavior => "protocolBehavior",
-        EvidenceLevel::Insufficient => "insufficient",
-    }
+    evidence_level.as_str()
 }
 
 pub fn list_for_providers(
@@ -597,8 +743,9 @@ pub fn list_for_providers(
 
     let placeholders = vec!["?"; provider_ids.len()].join(", ");
     let sql = format!(
-        "SELECT provider_id, app_type, model, active_report_json, verdict, evidence_level,
-                rules_version, COALESCE(active_checked_at, passive_observed_at, updated_at)
+        "SELECT provider_id, app_type, model, active_report_json, passive_aggregate_json,
+                verdict, evidence_level, rules_version,
+                COALESCE(active_checked_at, passive_observed_at, updated_at)
          FROM model_verification_results
          WHERE app_type = ? AND provider_id IN ({placeholders})
          ORDER BY provider_id, model"
@@ -634,8 +781,9 @@ pub fn list_for_provider_ids(
 
     let placeholders = vec!["?"; provider_ids.len()].join(", ");
     let sql = format!(
-        "SELECT provider_id, app_type, model, active_report_json, verdict, evidence_level,
-                rules_version, COALESCE(active_checked_at, passive_observed_at, updated_at)
+        "SELECT provider_id, app_type, model, active_report_json, passive_aggregate_json,
+                verdict, evidence_level, rules_version,
+                COALESCE(active_checked_at, passive_observed_at, updated_at)
          FROM model_verification_results
          WHERE provider_id IN ({placeholders})
          ORDER BY provider_id, app_type, model"
@@ -653,7 +801,15 @@ pub fn list_for_provider_ids(
     rows.into_iter().map(result_row_into_report).collect()
 }
 
-type StoredResultRow = (TargetKey, Option<String>, String, String, i32, i64);
+type StoredResultRow = (
+    TargetKey,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    i32,
+    i64,
+);
 
 fn result_row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredResultRow> {
     Ok((
@@ -667,58 +823,96 @@ fn result_row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredResul
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 fn result_row_into_report(row: StoredResultRow) -> Result<VerificationReport, AppError> {
-    let (target, active_report_json, verdict, evidence_level, rules_version, checked_at) = row;
-    let mut report = active_report_json
+    let (
+        target,
+        active_report_json,
+        passive_aggregate_json,
+        verdict,
+        evidence_level,
+        rules_version,
+        checked_at,
+    ) = row;
+    let passive = passive_aggregate_json
+        .map(|value| {
+            serde_json::from_str::<PassiveAggregate>(&value)
+                .map_err(|error| AppError::Config(format!("解析被动验证聚合失败: {error}")))
+        })
+        .transpose()?;
+    let active = active_report_json
         .map(|value| {
             serde_json::from_str(&value)
                 .map_err(|error| AppError::Config(format!("解析主动验证报告失败: {error}")))
         })
-        .transpose()?
-        .unwrap_or(VerificationReport {
-            target: target.clone(),
-            verdict: Verdict::Inconclusive,
-            evidence_level: EvidenceLevel::Insufficient,
-            facts: Vec::new(),
-            rules_version,
-            checked_at,
-        });
-    report.target = target;
-    report.verdict = parse_verdict(&verdict)?;
-    report.evidence_level = parse_evidence_level(&evidence_level)?;
-    report.rules_version = rules_version;
-    report.checked_at = checked_at;
-    Ok(report)
+        .transpose()?;
+    Ok(merged_report(
+        target,
+        active.as_ref(),
+        passive.as_ref(),
+        MergedReport {
+            verdict: parse_verdict(&verdict)?,
+            evidence_level: parse_evidence_level(&evidence_level)?,
+        },
+        rules_version,
+        checked_at,
+    ))
+}
+
+fn merged_report(
+    target: TargetKey,
+    active: Option<&VerificationReport>,
+    passive: Option<&PassiveAggregate>,
+    merged: MergedReport,
+    rules_version: i32,
+    checked_at: i64,
+) -> VerificationReport {
+    let facts = FiniteEvidenceFacts::new(
+        active
+            .into_iter()
+            .flat_map(|report| report.facts.iter().cloned())
+            .chain(
+                passive
+                    .into_iter()
+                    .flat_map(PassiveAggregate::evidence_facts),
+            ),
+    )
+    .into_vec();
+    VerificationReport {
+        target,
+        verdict: merged.verdict,
+        evidence_level: merged.evidence_level,
+        facts,
+        rules_version,
+        checked_at,
+    }
 }
 
 fn parse_verdict(value: &str) -> Result<Verdict, AppError> {
-    match value {
-        "trusted" => Ok(Verdict::Trusted),
-        "suspicious" => Ok(Verdict::Suspicious),
-        "anomaly" => Ok(Verdict::Anomaly),
-        "inconclusive" => Ok(Verdict::Inconclusive),
-        _ => Err(AppError::Config("解析验证结论失败".into())),
-    }
+    Verdict::try_from(value).map_err(|_| AppError::Config("解析验证结论失败".into()))
 }
 
 fn parse_evidence_level(value: &str) -> Result<EvidenceLevel, AppError> {
-    match value {
-        "cryptographic" => Ok(EvidenceLevel::Cryptographic),
-        "protocolBehavior" => Ok(EvidenceLevel::ProtocolBehavior),
-        "insufficient" => Ok(EvidenceLevel::Insufficient),
-        _ => Err(AppError::Config("解析验证证据等级失败".into())),
-    }
+    EvidenceLevel::try_from(value).map_err(|_| AppError::Config("解析验证证据等级失败".into()))
 }
 
 pub fn clear_scope(db: &Database, scope: &TargetScope) -> Result<(), AppError> {
-    let conn = lock_conn!(db.conn);
-    conn.execute(
-        "DELETE FROM model_verification_results WHERE provider_id = ?1 AND app_type = ?2",
-        params![scope.provider_id, scope.app_type],
-    )
-    .map_err(|error| AppError::Database(format!("清除模型验证结果失败: {error}")))?;
+    let mut conn = lock_conn!(db.conn);
+    let transaction = conn
+        .transaction()
+        .map_err(|error| AppError::Database(format!("开始清除模型验证结果失败: {error}")))?;
+    transaction
+        .execute(
+            "DELETE FROM model_verification_results WHERE provider_id = ?1 AND app_type = ?2",
+            params![scope.provider_id, scope.app_type],
+        )
+        .map_err(|error| AppError::Database(format!("清除模型验证结果失败: {error}")))?;
+    history::clear(&transaction, scope)?;
+    transaction
+        .commit()
+        .map_err(|error| AppError::Database(format!("提交清除模型验证结果失败: {error}")))?;
     Ok(())
 }
