@@ -229,7 +229,10 @@ mod tests {
 
         server.abort();
         assert_eq!(failure, RunFailureKind::ModelUnavailable);
-        assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/responses"]);
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/v1/responses", "/v1/responses", "/v1/responses"]
+        );
         let serialized = serde_json::to_string(&failure).unwrap();
         for sentinel in ["URL", "KEY", "PROMPT", "OUTPUT", "SIGNATURE"] {
             assert!(!serialized.contains(sentinel));

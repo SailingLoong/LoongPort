@@ -9,6 +9,8 @@ pub(crate) mod openai_responses;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_RETRIES: usize = 2;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
 
 /// Finite, body-free reasons that an active protocol probe could not finish.
 ///
@@ -32,18 +34,31 @@ pub(crate) enum RunFailure {
 }
 
 pub(crate) async fn send_and_read(request: RequestBuilder) -> Result<Vec<u8>, RunFailure> {
-    tokio::time::timeout(PROBE_TIMEOUT, async {
-        let response = request.send().await.map_err(map_transport_failure)?;
-        let status = response.status();
-        let body = read_body(response).await?;
-        if status.is_success() {
-            Ok(body)
-        } else {
-            Err(classify_http_failure(status, &body))
+    for attempt in 0..=MAX_RETRIES {
+        let request = request.try_clone().ok_or(RunFailure::InvalidResponse)?;
+        let result = tokio::time::timeout(PROBE_TIMEOUT, async {
+            let response = request.send().await.map_err(map_transport_failure)?;
+            let status = response.status();
+            if status.is_server_error() {
+                return Err(classify_http_failure(status, &[]));
+            }
+            let body = read_body(response).await?;
+            if status.is_success() {
+                Ok(body)
+            } else {
+                Err(classify_http_failure(status, &body))
+            }
+        })
+        .await
+        .map_err(|_| RunFailure::Timeout)?;
+        match result {
+            Err(failure) if attempt < MAX_RETRIES && is_retryable_failure(failure) => {
+                tokio::time::sleep(RETRY_BASE_DELAY * (1 << attempt)).await;
+            }
+            result => return result,
         }
-    })
-    .await
-    .map_err(|_| RunFailure::Timeout)?
+    }
+    unreachable!("retry loop always returns")
 }
 
 pub(crate) async fn read_body(response: Response) -> Result<Vec<u8>, RunFailure> {
@@ -141,27 +156,238 @@ fn indicates_insufficient_balance(body: &[u8]) -> bool {
     .any(|needle| body.contains(needle))
 }
 
-pub(crate) async fn send_sse(
+pub(crate) async fn send_sse<State>(
     request: RequestBuilder,
-    on_event: impl FnMut(&str) -> Result<(), RunFailure>,
-) -> Result<(), RunFailure> {
-    tokio::time::timeout(PROBE_TIMEOUT, async {
-        let response = request.send().await.map_err(map_transport_failure)?;
-        if !response.status().is_success() {
+    mut new_state: impl FnMut() -> State,
+    mut on_event: impl FnMut(&mut State, &str) -> Result<(), RunFailure>,
+) -> Result<State, RunFailure> {
+    for attempt in 0..=MAX_RETRIES {
+        let request = request.try_clone().ok_or(RunFailure::InvalidResponse)?;
+        let mut state = new_state();
+        let result = tokio::time::timeout(PROBE_TIMEOUT, async {
+            let response = request.send().await.map_err(map_transport_failure)?;
             let status = response.status();
-            let body = read_body(response).await?;
-            return Err(classify_http_failure(status, &body));
+            if status.is_server_error() {
+                return Err(classify_http_failure(status, &[]));
+            }
+            if !status.is_success() {
+                let body = read_body(response).await?;
+                return Err(classify_http_failure(status, &body));
+            }
+            read_sse(response, |event| on_event(&mut state, event)).await?;
+            Ok(state)
+        })
+        .await
+        .map_err(|_| RunFailure::Timeout)?;
+        match result {
+            Err(failure) if attempt < MAX_RETRIES && is_retryable_failure(failure) => {
+                tokio::time::sleep(RETRY_BASE_DELAY * (1 << attempt)).await;
+            }
+            result => return result,
         }
-        read_sse(response, on_event).await
-    })
-    .await
-    .map_err(|_| RunFailure::Timeout)?
+    }
+    unreachable!("retry loop always returns")
 }
 
 fn map_transport_failure(error: reqwest::Error) -> RunFailure {
     if error.is_timeout() {
         RunFailure::Timeout
-    } else {
+    } else if error.is_connect() || error.is_request() || error.is_body() {
         RunFailure::Network
+    } else {
+        RunFailure::InvalidResponse
+    }
+}
+
+fn is_retryable_failure(failure: RunFailure) -> bool {
+    matches!(
+        failure,
+        RunFailure::Network
+            | RunFailure::Timeout
+            | RunFailure::Upstream {
+                status: 500 | 502 | 503 | 504
+            }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use axum::{
+        body::Body,
+        http::{HeaderValue, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Router,
+    };
+    use bytes::Bytes;
+
+    use super::{send_and_read, send_sse, RunFailure, MAX_RESPONSE_BYTES};
+
+    #[tokio::test]
+    async fn send_and_read_retries_transient_upstream_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/probe",
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt == 0 {
+                            (StatusCode::BAD_GATEWAY, "temporary")
+                        } else {
+                            (StatusCode::OK, "ready")
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let body = send_and_read(
+            reqwest::Client::new()
+                .post(format!("http://{address}/probe"))
+                .body("{}"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(body, b"ready");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn send_and_read_retries_retryable_status_before_reading_oversized_body() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/probe",
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt == 0 {
+                            (StatusCode::BAD_GATEWAY, vec![b'x'; MAX_RESPONSE_BYTES + 1])
+                        } else {
+                            (StatusCode::OK, b"ready".to_vec())
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let body = send_and_read(
+            reqwest::Client::new()
+                .post(format!("http://{address}/probe"))
+                .body("{}"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(body, b"ready");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn send_and_read_does_not_retry_redirect_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/probe",
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    async { (StatusCode::FOUND, [("location", "/probe")]) }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                attempt.error("redirect disabled")
+            }))
+            .build()
+            .unwrap();
+
+        let failure = send_and_read(client.post(format!("http://{address}/probe")).body("{}"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(failure, RunFailure::InvalidResponse);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn send_sse_retries_transient_upstream_failure_with_fresh_state() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/probe",
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt == 0 {
+                            let stream = async_stream::stream! {
+                                yield Ok::<_, std::io::Error>(Bytes::from_static(b"data: stale\n\n"));
+                                yield Err(std::io::Error::other("disconnected"));
+                            };
+                            let mut response = Body::from_stream(stream).into_response();
+                            response.headers_mut().insert(
+                                "content-type",
+                                HeaderValue::from_static("text/event-stream"),
+                            );
+                            response
+                        } else {
+                            (
+                                StatusCode::OK,
+                                [("content-type", "text/event-stream")],
+                                "data: ready\n\n",
+                            )
+                                .into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let events = send_sse(
+            reqwest::Client::new()
+                .post(format!("http://{address}/probe"))
+                .body("{}"),
+            Vec::new,
+            |events, event| {
+                events.push(event.to_string());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(events, ["data: ready\n"]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }
