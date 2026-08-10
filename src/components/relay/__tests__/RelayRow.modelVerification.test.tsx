@@ -8,8 +8,11 @@ vi.mock("react-i18next", () => ({
       (
         ({
           "loongport.modelVerification.title": "模型验证",
+          "loongport.modelVerification.tierVerdict.trusted": "模型已验证",
           "loongport.modelVerification.tierVerdict.suspicious": "模型存疑",
           "loongport.modelVerification.tierVerdict.anomaly": "模型异常",
+          "loongport.modelVerification.tierVerdict.trustedHint":
+            "模型验证通过，请点击「模型验证」查看详情",
           "loongport.modelVerification.tierVerdict.suspiciousHint":
             "模型验证结果存疑，请点击「模型验证」查看详情",
           "loongport.modelVerification.tierVerdict.anomalyHint":
@@ -150,15 +153,24 @@ describe("RelayRow model verification", () => {
     ).toBeInTheDocument();
   });
 
-  it.each(["trusted", "inconclusive"] as const)(
-    "does not render a problem label for %s",
-    (verificationVerdict) => {
-      renderRow({ verificationVerdictForTier: () => verificationVerdict });
+  it("shows a success-colored label for a verified model", () => {
+    renderRow({ verificationVerdictForTier: () => "trusted" });
 
-      expect(screen.queryByText("模型存疑")).not.toBeInTheDocument();
-      expect(screen.queryByText("模型异常")).not.toBeInTheDocument();
-    },
-  );
+    const label = screen.getByText("模型已验证").closest("span");
+    expect(label).toHaveClass("text-emerald-600");
+    expect(
+      screen.getByTitle("模型验证通过，请点击「模型验证」查看详情"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("模型存疑")).not.toBeInTheDocument();
+  });
+
+  it("does not render a tier label for an inconclusive result", () => {
+    renderRow({ verificationVerdictForTier: () => "inconclusive" });
+
+    expect(screen.queryByText("模型已验证")).not.toBeInTheDocument();
+    expect(screen.queryByText("模型存疑")).not.toBeInTheDocument();
+    expect(screen.queryByText("模型异常")).not.toBeInTheDocument();
+  });
 });
 
 function relayWithTier(tierOverrides: Partial<typeof tier>) {

@@ -3,6 +3,7 @@ import {
   Activity,
   AlertCircle,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Fingerprint,
@@ -662,6 +663,7 @@ function TierItem({
     verificationVerdict === "anomaly" || verificationVerdict === "suspicious"
       ? verificationVerdict
       : undefined;
+  const verificationPassed = verificationVerdict === "trusted";
 
   // ⚠️ **`=== true` 而不是 `??` 或直接判真值** —— `userEdited` 是三态：
   // `true`（改过）/ `false`（没改）/ `null`（**判不了**，读不出密钥或这个 CLI
@@ -728,6 +730,15 @@ function TierItem({
               {t(
                 `loongport.modelVerification.tierVerdict.${verificationProblem}`,
               )}
+            </span>
+          )}
+          {verificationPassed && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 ring-1 ring-inset ring-emerald-500/30 dark:text-emerald-400"
+              title={t("loongport.modelVerification.tierVerdict.trustedHint")}
+            >
+              <CheckCircle2 className="h-2.5 w-2.5" />
+              {t("loongport.modelVerification.tierVerdict.trusted")}
             </span>
           )}
         </div>

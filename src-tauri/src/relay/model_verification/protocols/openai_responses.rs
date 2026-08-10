@@ -1212,7 +1212,7 @@ mod openai_responses_tests {
             (
                 StatusCode::BAD_GATEWAY,
                 "SENTINEL_502",
-                RunFailure::Upstream,
+                RunFailure::Upstream { status: 502 },
             ),
         ] {
             let endpoint = spawn_server(

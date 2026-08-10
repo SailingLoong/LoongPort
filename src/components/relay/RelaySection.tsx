@@ -108,7 +108,7 @@ let autoPromptedThisProcess = false;
 
 type TierVerificationVerdict = Extract<
   VerificationVerdict,
-  "suspicious" | "anomaly"
+  "trusted" | "suspicious" | "anomaly"
 >;
 
 function verificationReportKey({
@@ -131,6 +131,11 @@ function reduceTierVerificationVerdicts(
       verdicts[report.target.providerId] !== "anomaly"
     ) {
       verdicts[report.target.providerId] = "suspicious";
+    } else if (
+      report.verdict === "trusted" &&
+      verdicts[report.target.providerId] === undefined
+    ) {
+      verdicts[report.target.providerId] = "trusted";
     }
   }
   return verdicts;

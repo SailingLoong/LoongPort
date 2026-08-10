@@ -70,7 +70,7 @@ impl ActiveVerifier for BalancedActiveVerifier {
                 }
                 _ => unreachable!("supported app type checked before preparing the run"),
             }
-            .map_err(map_protocol_failure)?;
+            .map_err(|failure| map_protocol_failure(&target, &app_type, failure))?;
             let (verdict, evidence_level) = verdict::evaluate(app_type, &profile, &facts);
             Ok(VerificationReport {
                 target,
@@ -88,12 +88,24 @@ impl ActiveVerifier for BalancedActiveVerifier {
     }
 }
 
-fn map_protocol_failure(failure: RunFailure) -> RunFailureKind {
+fn map_protocol_failure(
+    target: &TargetKey,
+    app_type: &AppType,
+    failure: RunFailure,
+) -> RunFailureKind {
     match failure {
         RunFailure::Authentication => RunFailureKind::Authentication,
         RunFailure::RateLimited => RunFailureKind::RateLimited,
         RunFailure::InsufficientBalance => RunFailureKind::InsufficientBalance,
-        RunFailure::Upstream => RunFailureKind::Upstream,
+        RunFailure::Upstream { status } => {
+            log::warn!(
+                "[model-verification] upstream failure: provider_id={:?} app_type={} model={:?} status={status}",
+                target.provider_id,
+                app_type.as_str(),
+                target.model,
+            );
+            RunFailureKind::Upstream
+        }
         RunFailure::Network => RunFailureKind::Network,
         RunFailure::Timeout => RunFailureKind::Timeout,
         RunFailure::ModelUnavailable => RunFailureKind::ModelUnavailable,
