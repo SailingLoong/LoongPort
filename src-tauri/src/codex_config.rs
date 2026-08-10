@@ -595,7 +595,7 @@ fn codex_catalog_model_entry(
     spec: &CodexCatalogModelSpec,
     priority: usize,
     profile: CodexCatalogToolProfile,
-    default_context_window: u64,
+    configured_context_window: Option<u64>,
 ) -> Value {
     let mut entry = template.clone();
     let Some(entry_obj) = entry.as_object_mut() else {
@@ -603,12 +603,18 @@ fn codex_catalog_model_entry(
     };
 
     let display_name = spec.display_name.as_deref().unwrap_or(&spec.model);
-    let context_window = spec.context_window.unwrap_or(default_context_window);
+    let context_window = spec
+        .context_window
+        .or(configured_context_window)
+        .or_else(|| parse_codex_positive_u64(template.get("context_window")))
+        .or_else(|| parse_codex_positive_u64(template.get("max_context_window")));
     entry_obj.insert("slug".to_string(), json!(spec.model));
     entry_obj.insert("display_name".to_string(), json!(display_name));
     entry_obj.insert("description".to_string(), json!(display_name));
-    entry_obj.insert("context_window".to_string(), json!(context_window));
-    entry_obj.insert("max_context_window".to_string(), json!(context_window));
+    if let Some(context_window) = context_window {
+        entry_obj.insert("context_window".to_string(), json!(context_window));
+        entry_obj.insert("max_context_window".to_string(), json!(context_window));
+    }
     entry_obj.insert("priority".to_string(), json!(1000 + priority));
     entry_obj.insert("additional_speed_tiers".to_string(), json!([]));
     entry_obj.insert("service_tiers".to_string(), json!([]));
@@ -671,8 +677,8 @@ struct CodexCatalogModelSpec {
     /// official vendor catalog entries, which keep the vendor's display name.
     display_name: Option<String>,
     /// Explicit user value only. Entries fall back to the config's
-    /// `model_context_window` (or 128k) — except official vendor catalog
-    /// entries, which keep the vendor's declared window.
+    /// `model_context_window`, then the selected Codex template's declared
+    /// window — except official vendor entries, which keep the vendor catalog.
     context_window: Option<u64>,
     /// Per-row override for the native template's `supports_parallel_tool_calls`
     /// (e.g. MiniMax=true, MiMo=false). Only consulted for `NativeResponses`.
@@ -1223,13 +1229,13 @@ fn codex_model_catalog_from_specs(
     specs: &[CodexCatalogModelSpec],
     template: &Value,
     profile: CodexCatalogToolProfile,
-    default_context_window: u64,
+    configured_context_window: Option<u64>,
 ) -> Value {
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            codex_catalog_model_entry(template, spec, index, profile, default_context_window)
+            codex_catalog_model_entry(template, spec, index, profile, configured_context_window)
         })
         .collect();
 
@@ -1260,8 +1266,8 @@ fn codex_model_catalog_from_settings(
         return Ok(Some(json!({ "models": entries })));
     }
 
-    let default_context_window =
-        extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
+    let configured_context_window =
+        extract_codex_top_level_u64(config_text, "model_context_window");
 
     // Native providers use the bundled clean template (no freeform apply_patch,
     // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
@@ -1276,7 +1282,7 @@ fn codex_model_catalog_from_settings(
         &specs,
         &template,
         profile,
-        default_context_window,
+        configured_context_window,
     )))
 }
 
@@ -1393,14 +1399,11 @@ pub fn prepare_codex_config_text_with_model_catalog(
 /// left alone — surfacing its richer structure as the simplified table would
 /// be a downgrade we can't safely round-trip.
 ///
-/// `displayName`, `contextWindow`, and `inputModalities` are omitted from the
-/// returned entry when the on-disk value matches the fallback that
-/// `codex_model_catalog_from_settings` injects for unset inputs (slug for
-/// display_name, `model_context_window` or 128_000 for context_window, and the
-/// shared confirmed-text-only inference for input modalities). This preserves
-/// the "user left it blank" intent across round-trip; an unavoidable edge case
-/// is that a user-typed value that happens to equal the fallback also collapses
-/// to blank, but the next save writes the same fallback so behavior is stable.
+/// `displayName` and `inputModalities` are omitted when they match generated
+/// values. `contextWindow` is omitted only when it matches an explicit top-level
+/// `model_context_window`; otherwise the on-disk value is preserved. The model
+/// template is intentionally not guessed during recovery, so a missing DB row
+/// cannot silently shrink a generated catalog back to a stale hard-coded limit.
 ///
 /// All failure modes (missing file, parse error, no `model_catalog_json`,
 /// entries without `slug`) collapse to `Ok(None)` so callers can treat this
@@ -1465,8 +1468,8 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
     let catalog: Value = serde_json::from_str(catalog_text).ok()?;
     let models = catalog.get("models").and_then(|m| m.as_array())?;
 
-    let default_context_window =
-        extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
+    let configured_context_window =
+        extract_codex_top_level_u64(config_text, "model_context_window");
 
     let mut entries = Vec::with_capacity(models.len());
     for entry in models {
@@ -1494,7 +1497,7 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
         if let Some(context_window) = entry
             .get("context_window")
             .and_then(|v| v.as_u64())
-            .filter(|v| *v > 0 && *v != default_context_window)
+            .filter(|v| *v > 0 && Some(*v) != configured_context_window)
         {
             obj.insert("contextWindow".to_string(), json!(context_window));
         }
@@ -3193,7 +3196,7 @@ base_url = "https://production.api/v1"
             &specs,
             &template,
             CodexCatalogToolProfile::ProxyChat,
-            128_000,
+            None,
         );
         assert_eq!(
             catalog["models"][0]
@@ -3204,7 +3207,7 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
-    fn codex_model_catalog_uses_provider_models_and_context() {
+    fn codex_model_catalog_uses_explicit_context_and_inherits_template_default() {
         let template = json!({
             "slug": "gpt-5.5",
             "display_name": "GPT-5.5",
@@ -3241,7 +3244,7 @@ base_url = "https://production.api/v1"
                     {
                         "model": "deepseek-v4-flash",
                         "displayName": "DeepSeek V4 Flash",
-                        "contextWindow": "64000"
+                        "contextWindow": "1050000"
                     },
                     {
                         "model": "kimi-k2",
@@ -3255,7 +3258,7 @@ base_url = "https://production.api/v1"
             &specs,
             &template,
             CodexCatalogToolProfile::ProxyChat,
-            128_000,
+            None,
         );
         let models = catalog
             .get("models")
@@ -3271,13 +3274,35 @@ base_url = "https://production.api/v1"
             models[0]
                 .get("context_window")
                 .and_then(|value| value.as_u64()),
-            Some(64_000)
+            Some(1_050_000)
         );
         assert_eq!(
             models[1]
                 .get("context_window")
                 .and_then(|value| value.as_u64()),
-            Some(128_000)
+            Some(272_000),
+            "unset model context must inherit the Codex template instead of shrinking to 128K"
+        );
+
+        let configured_catalog = codex_model_catalog_from_specs(
+            &specs,
+            &template,
+            CodexCatalogToolProfile::ProxyChat,
+            Some(500_000),
+        );
+        assert_eq!(
+            configured_catalog["models"][0]
+                .get("context_window")
+                .and_then(Value::as_u64),
+            Some(1_050_000),
+            "per-model context must override the top-level configured context"
+        );
+        assert_eq!(
+            configured_catalog["models"][1]
+                .get("context_window")
+                .and_then(Value::as_u64),
+            Some(500_000),
+            "top-level configured context must override the Codex template"
         );
         assert!(
             models[0].get("model_messages").is_some(),
@@ -3434,7 +3459,7 @@ base_url = "https://production.api/v1"
             CodexCatalogToolProfile::NativeResponses,
             CodexCatalogToolProfile::Anthropic,
         ] {
-            let catalog = codex_model_catalog_from_specs(&specs, &template, profile, 128_000);
+            let catalog = codex_model_catalog_from_specs(&specs, &template, profile, None);
             let models = catalog["models"].as_array().expect("models array");
             let modalities = |slug: &str| {
                 models
@@ -3706,7 +3731,7 @@ wire_api = "responses"
             &specs,
             &proxy_template,
             CodexCatalogToolProfile::ProxyChat,
-            128_000,
+            None,
         );
         assert_eq!(
             catalog["models"][0]
@@ -3952,7 +3977,7 @@ web_search = "disabled"
         assert_eq!(models.len(), 2);
 
         // First entry: display_name == slug → displayName squashed; explicit
-        // context_window != default 128_000 → preserved.
+        // With no configured default, the on-disk context window is preserved.
         assert_eq!(
             models[0].get("model").and_then(|v| v.as_str()),
             Some("deepseek-v4-pro")
@@ -3971,16 +3996,18 @@ web_search = "disabled"
     }
 
     #[test]
-    fn build_simplified_catalog_squashes_default_context_window() {
-        // Default fallback is 128_000 when config.toml has no model_context_window.
+    fn build_simplified_catalog_preserves_context_without_configured_default() {
+        // Without an explicit model_context_window, recovery must retain the
+        // generated catalog's actual value instead of guessing a magic default.
         let catalog = r#"{
             "models": [{ "slug": "kimi", "display_name": "kimi", "context_window": 128000 }]
         }"#;
         let result = build_simplified_catalog_from_texts("", catalog).expect("entry");
         let entry = &result.get("models").unwrap().as_array().unwrap()[0];
-        assert!(
-            entry.get("contextWindow").is_none(),
-            "default 128_000 should be squashed so the form shows blank, matching the user's blank input"
+        assert_eq!(
+            entry.get("contextWindow").and_then(Value::as_u64),
+            Some(128_000),
+            "recovery must preserve the catalog value when no configured default exists"
         );
     }
 
