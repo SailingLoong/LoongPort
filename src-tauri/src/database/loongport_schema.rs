@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 7;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 8;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -153,7 +153,7 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
             // v5 → v6：运行时自动验证全局设置与代理接管租约。
             5 => {
                 log::info!("LoongPort 数据迁移 v5 → v6（运行时验证设置与代理租约）");
-                crate::relay::model_verification::store::create_runtime_tables(conn)?;
+                crate::relay::model_verification::store::create_legacy_runtime_tables(conn)?;
                 set_version(conn, 6)?;
             }
             // v6 → v7：每个分组最近五条脱敏模型验证结果。
@@ -163,6 +163,13 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 crate::relay::model_verification::history::create_table(conn)?;
                 set_version(conn, 7)?;
             }
+            // v7 → v8：移除被动运行时验证数据，但保留尚未恢复的代理租约。
+            // 租约只能在启动时成功恢复对应 app 的 live config 后删除。
+            7 => {
+                log::info!("LoongPort 数据迁移 v7 → v8（移除被动运行时验证数据）");
+                remove_legacy_runtime_verification_state(conn)?;
+                set_version(conn, 8)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -170,6 +177,28 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
             }
         }
         version = current_version(conn)?;
+    }
+
+    Ok(())
+}
+
+fn remove_legacy_runtime_verification_state(conn: &Connection) -> Result<(), AppError> {
+    if crate::Database::table_exists(conn, "model_verification_history")?
+        && crate::Database::table_exists(conn, "providers")?
+    {
+        conn.execute(
+            "DELETE FROM model_verification_history WHERE source = 'runtime'",
+            [],
+        )
+        .map_err(|error| AppError::Database(format!("删除旧运行时验证历史失败: {error}")))?;
+    }
+
+    if crate::Database::table_exists(conn, "model_verification_settings")? {
+        conn.execute(
+            "UPDATE model_verification_settings SET runtime_auto_enabled = 0",
+            [],
+        )
+        .map_err(|error| AppError::Database(format!("关闭旧自动验证设置失败: {error}")))?;
     }
 
     Ok(())
@@ -590,7 +619,7 @@ mod tests {
         assert!(leases_table_exists, "v5 → v6 必须创建运行时验证租约表");
         assert!(history_table_exists, "v6 → v7 必须创建模型验证历史表");
         assert_eq!(user_version, 16, "LoongPort 迁移不许修改上游版本号");
-        assert_eq!(current_version(&conn).unwrap(), 7);
+        assert_eq!(current_version(&conn).unwrap(), 8);
     }
 
     #[test]
@@ -611,7 +640,94 @@ mod tests {
             )
             .expect("读取默认设置");
         assert_eq!(setting, (0, 1));
-        assert_eq!(current_version(&conn).unwrap(), 7);
+        assert_eq!(current_version(&conn).unwrap(), 8);
+    }
+
+    #[test]
+    fn v7_to_v8_removes_runtime_state_but_preserves_unresolved_proxy_leases() {
+        let conn = mem();
+        legacy_providers_table(&conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type) VALUES ('provider-a', 'codex')",
+            [],
+        )
+        .expect("插入旧档位");
+        conn.execute_batch(
+            "CREATE TABLE model_verification_history (
+                id INTEGER PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                model TEXT NOT NULL,
+                source TEXT NOT NULL CHECK (source IN ('active', 'runtime')),
+                verdict TEXT NOT NULL,
+                evidence_level TEXT NOT NULL,
+                facts_json TEXT NOT NULL,
+                rules_version INTEGER NOT NULL,
+                checked_at INTEGER NOT NULL,
+                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+            );
+            CREATE INDEX idx_model_verification_history_scope_order
+            ON model_verification_history (provider_id, app_type, checked_at DESC, id DESC);
+            INSERT INTO model_verification_history (
+                provider_id, app_type, model, source, verdict, evidence_level,
+                facts_json, rules_version, checked_at
+            ) VALUES
+                ('provider-a', 'codex', 'gpt-test', 'active', 'match', 'strong', '[]', 1, 100),
+                ('provider-a', 'codex', 'gpt-test', 'runtime', 'mismatch', 'strong', '[]', 1, 200);",
+        )
+        .expect("创建并填充 v7 验证历史");
+        crate::relay::model_verification::store::create_legacy_runtime_tables(&conn)
+            .expect("创建旧运行时表");
+        conn.execute(
+            "UPDATE model_verification_settings SET runtime_auto_enabled = 1 WHERE singleton = 1",
+            [],
+        )
+        .expect("开启旧自动验证设置");
+        conn.execute(
+            "INSERT INTO model_verification_proxy_leases (app_type, acquired_at)
+             VALUES ('codex', 123)",
+            [],
+        )
+        .expect("插入未恢复的旧代理租约");
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, 7).expect("设为 v7");
+
+        apply(&conn).expect("迁移到 v8");
+
+        let active_history: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_verification_history WHERE source = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("统计主动验证历史");
+        let runtime_history: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_verification_history WHERE source = 'runtime'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("统计运行时验证历史");
+        let runtime_auto_enabled: i64 = conn
+            .query_row(
+                "SELECT runtime_auto_enabled FROM model_verification_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("读取旧自动验证设置");
+        let unresolved_lease: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_verification_proxy_leases WHERE app_type = 'codex'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("统计未恢复的代理租约");
+
+        assert_eq!(current_version(&conn).unwrap(), 8);
+        assert_eq!(active_history, 1, "主动验证历史必须保留");
+        assert_eq!(runtime_history, 0, "被动运行时验证历史必须删除");
+        assert_eq!(runtime_auto_enabled, 0, "旧自动验证设置必须关闭");
+        assert_eq!(unresolved_lease, 1, "未恢复的代理租约必须留给启动清理");
     }
 
     #[test]

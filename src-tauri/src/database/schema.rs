@@ -47,7 +47,6 @@ impl Database {
 
         crate::relay::model_verification::store::create_results_table(conn)?;
         crate::relay::model_verification::history::create_table(conn)?;
-        crate::relay::model_verification::store::create_runtime_tables(conn)?;
 
         // 2. Provider Endpoints 表
         conn.execute(

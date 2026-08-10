@@ -3206,7 +3206,6 @@
       "title": "モデル検証",
       "titleWithTier": "モデル検証 · {{tierName}}",
       "description": "この接続プロファイルで選択されているモデルの応答特性を検証します。",
-      "globalScopeNote": "自動検証は設定済みのすべてのモデルに適用されます。",
       "model": {
         "label": "モデルを選択",
         "placeholder": "モデルを選択してください",
@@ -3222,29 +3221,13 @@
       "status": {
         "running": "{{completed}} / {{total}} を検証中"
       },
-      "runtime": {
-        "autoLabel": "自動検証",
-        "autoHelp": "Codex と Claude の実際の応答に基づき、すべての中継サービスのグループとモデルを自動検証します。追加の検証リクエストは送信せず、会話内容は保存しません。",
-        "loadError": "自動検証の状態を読み込めませんでした。もう一度お試しください。",
-        "anomalyToast": "{{app}} のモデル {{model}} で異常を検出しました。モデル検証を開いて詳細を確認してください。",
-        "apps": {
-          "codex": "Codex",
-          "claude": "Claude"
-        },
-        "status": {
-          "active": "有効",
-          "waiting": "利用可能な応答を待機中",
-          "error": "正常に動作していません"
-        }
-      },
       "history": {
         "title": "直近 5 件の検証結果",
         "loading": "検証結果を読み込み中…",
         "empty": "検証結果はまだありません",
         "error": "検証結果を読み込めませんでした。もう一度お試しください。",
         "source": {
-          "active": "現在の検証",
-          "runtime": "自動検証"
+          "active": "現在の検証"
         }
       },
       "tierVerdict": {

@@ -44,5 +44,3 @@ export const VENDOR_LOGIN_ERROR = "vendor-login-error";
 export const MODEL_VERIFICATION_PROGRESS = "model-verification-progress";
 /** 模型验证持久化结果变化（档位行与模型验证弹窗监听）。 */
 export const MODEL_VERIFICATION_CHANGED = "model-verification-changed";
-/** Passive runtime model verification anomaly notification. */
-export const MODEL_VERIFICATION_ANOMALY = "model-verification-anomaly";

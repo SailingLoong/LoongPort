@@ -3207,7 +3207,6 @@
       "title": "模型驗證",
       "titleWithTier": "模型驗證 · {{tierName}}",
       "description": "驗證目前連線設定檔所選模型的回應特徵。",
-      "globalScopeNote": "自動驗證適用於所有已設定的模型。",
       "model": {
         "label": "選擇模型",
         "placeholder": "請選擇模型",
@@ -3223,29 +3222,13 @@
       "status": {
         "running": "正在驗證 {{completed}} / {{total}}"
       },
-      "runtime": {
-        "autoLabel": "自動驗證",
-        "autoHelp": "根據 Codex 與 Claude 的實際回應，自動驗證所有中轉站群組與模型；不會另外傳送驗證請求，也不會儲存對話內容。",
-        "loadError": "無法載入自動驗證狀態。請再試一次。",
-        "anomalyToast": "{{app}} 的模型 {{model}} 偵測到異常。請開啟模型驗證查看詳細資料。",
-        "apps": {
-          "codex": "Codex",
-          "claude": "Claude"
-        },
-        "status": {
-          "active": "已啟用",
-          "waiting": "等待可用回應",
-          "error": "執行異常"
-        }
-      },
       "history": {
         "title": "最近 5 筆驗證記錄",
         "loading": "正在載入驗證記錄…",
         "empty": "尚無驗證記錄",
         "error": "無法載入驗證記錄。請再試一次。",
         "source": {
-          "active": "目前驗證",
-          "runtime": "自動驗證"
+          "active": "目前驗證"
         }
       },
       "tierVerdict": {

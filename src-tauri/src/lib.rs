@@ -1192,15 +1192,6 @@ pub fn run() {
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
 
-            // 启动一次有界被动验证 worker，并恢复持久化的运行时意图。失败只影响
-            // 被动验证，不阻塞应用启动。
-            let model_verification = app.state::<AppState>().model_verification.clone();
-            model_verification.start_passive_worker();
-            let proxy_service = app.state::<AppState>().proxy_service.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = model_verification.reconcile_all(&proxy_service).await;
-            });
-
             // 初始化 SkillService
             let skill_service = SkillService::new();
             app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));
@@ -1391,6 +1382,19 @@ pub fn run() {
                     }
                 }
 
+                // 旧版被动模型验证可能留下自己的 Codex / Claude 接管租约。只恢复有租约
+                // 的应用，成功后再删租约；失败保留，供下次启动重试。必须先于普通代理
+                // 状态恢复，避免把旧版自动接管误当成用户主动开启的代理。
+                if let Err(error) =
+                    crate::relay::model_verification::legacy_cleanup::cleanup_legacy_runtime(
+                        &state.db,
+                        &state.proxy_service,
+                    )
+                    .await
+                {
+                    log::warn!("清理旧版被动模型验证代理接管失败（下次启动会重试）: {error}");
+                }
+
                 // 必须排在 auto-extract 之前：先把历史泄漏进 Gemini 共享片段的凭据
                 // 清干净，否则紧接着的提取会基于被污染的 live 再写一遍。
                 if let Err(e) =
@@ -1550,8 +1554,6 @@ pub fn run() {
             commands::relay_purchase,
             commands::relay_restore_official_login,
             commands::list_verification_models,
-            commands::get_runtime_verification_setting,
-            commands::set_runtime_verification_enabled,
             commands::start_model_verification,
             commands::cancel_model_verification,
             commands::get_model_verification_results,

@@ -177,7 +177,6 @@ const requiredKeys = [
   "modelVerification.title",
   "modelVerification.titleWithTier",
   "modelVerification.description",
-  "modelVerification.globalScopeNote",
   "modelVerification.model.label",
   "modelVerification.model.placeholder",
   "modelVerification.model.loading",
@@ -376,8 +375,6 @@ describe("LoongPort tier page locale coverage", () => {
         neverLabel: "不会收集",
         accept: "允许分享",
         decline: "不分享",
-        noExtraRequest: "不额外发送验证请求",
-        noConversationStorage: "不保存对话内容",
       },
     ],
     [
@@ -388,8 +385,6 @@ describe("LoongPort tier page locale coverage", () => {
         neverLabel: "不會收集",
         accept: "允許分享",
         decline: "不分享",
-        noExtraRequest: "不會另外傳送驗證請求",
-        noConversationStorage: "不會儲存對話內容",
       },
     ],
     [
@@ -400,8 +395,6 @@ describe("LoongPort tier page locale coverage", () => {
         neverLabel: "Will not collect",
         accept: "Allow sharing",
         decline: "Don't share",
-        noExtraRequest: "does not send additional verification requests",
-        noConversationStorage: "does not save conversation content",
       },
     ],
     [
@@ -412,12 +405,10 @@ describe("LoongPort tier page locale coverage", () => {
         neverLabel: "収集しない情報",
         accept: "共有を許可",
         decline: "共有しない",
-        noExtraRequest: "追加の検証リクエストは送信せず",
-        noConversationStorage: "会話内容は保存しません",
       },
     ],
   ] as const)(
-    "%s states the approved privacy facts and consent actions",
+    "%s states the approved sharing facts and consent actions",
     (_locale, ns, expected) => {
       expect(ns.stats).toMatchObject({
         sendsLabel: expected.sendsLabel,
@@ -425,12 +416,6 @@ describe("LoongPort tier page locale coverage", () => {
         accept: expected.accept,
         decline: expected.decline,
       });
-      expect(ns.modelVerification.runtime.autoHelp).toContain(
-        expected.noExtraRequest,
-      );
-      expect(ns.modelVerification.runtime.autoHelp).toContain(
-        expected.noConversationStorage,
-      );
     },
   );
 });

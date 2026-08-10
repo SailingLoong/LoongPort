@@ -2,8 +2,8 @@ use crate::{
     relay::model_verification::{
         target,
         types::{
-            RunFailureKind, RuntimeAppState, RuntimeVerificationSetting, StartRunResponse,
-            TargetKey, TargetScope, VerificationHistoryEntry, VerificationReport,
+            RunFailureKind, StartRunResponse, TargetKey, TargetScope, VerificationHistoryEntry,
+            VerificationReport,
         },
     },
     AppState,
@@ -18,33 +18,6 @@ pub async fn list_verification_models(
     target::list_models(&state.db, &provider_id, &app_type)
         .await
         .map_err(|error| error.to_string())
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeVerificationSnapshot {
-    pub setting: RuntimeVerificationSetting,
-    pub apps: Vec<RuntimeAppState>,
-}
-
-#[tauri::command]
-pub async fn get_runtime_verification_setting(
-    state: tauri::State<'_, AppState>,
-) -> Result<RuntimeVerificationSnapshot, String> {
-    let (setting, apps) = state.model_verification.runtime_status().await?;
-    Ok(RuntimeVerificationSnapshot { setting, apps })
-}
-
-#[tauri::command]
-pub async fn set_runtime_verification_enabled(
-    state: tauri::State<'_, AppState>,
-    enabled: bool,
-) -> Result<RuntimeVerificationSnapshot, String> {
-    let (setting, apps) = state
-        .model_verification
-        .set_runtime_enabled(&state.proxy_service, enabled)
-        .await?;
-    Ok(RuntimeVerificationSnapshot { setting, apps })
 }
 
 #[tauri::command]
