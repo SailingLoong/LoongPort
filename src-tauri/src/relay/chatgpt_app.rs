@@ -421,6 +421,16 @@ pub fn is_running() -> Result<bool, AppError> {
     Ok(out.trim() == "true")
 }
 
+#[cfg(target_os = "macos")]
+fn quit_script() -> String {
+    format!(
+        "with timeout of {APPLESCRIPT_TIMEOUT_SECS} seconds\n\
+         activate application id \"{CHATGPT_BUNDLE_ID}\"\n\
+         quit application id \"{CHATGPT_BUNDLE_ID}\"\n\
+         end timeout"
+    )
+}
+
 /// 优雅退出并等它真的退出。
 ///
 /// ## 判据是轮询结果，不是 quit 的返回码
@@ -460,11 +470,7 @@ pub fn quit_and_wait() -> QuitOutcome {
         // Apple event，但前者在 app 已退出的竞态下不会把它重新唤起。
         //
         // `with timeout` 是硬要求，见 APPLESCRIPT_TIMEOUT_SECS 的说明（默认 120 秒）。
-        if let Err(e) = run_osascript(&format!(
-            "with timeout of {APPLESCRIPT_TIMEOUT_SECS} seconds\n\
-             quit application id \"{CHATGPT_BUNDLE_ID}\"\n\
-             end timeout"
-        )) {
+        if let Err(e) = run_osascript(&quit_script()) {
             // 权限被拒之类的硬失败：切换照常，让用户自己关。
             //
             // **超时（-1712）不算这一类** —— 那通常是确认框挡住了，还要靠下面的轮询区分
@@ -1580,13 +1586,16 @@ mod tests {
         //
         // 断言脚本文本而不是断言常量的大小（那是编译期常量、恒真）：这里要防的是
         // 有人重构时把 `with timeout` 那层拆掉。
-        let script = format!(
-            "with timeout of {APPLESCRIPT_TIMEOUT_SECS} seconds\n\
-             quit application id \"{CHATGPT_BUNDLE_ID}\"\n\
-             end timeout"
-        );
+        let script = quit_script();
         assert!(script.contains("with timeout of"), "{script}");
         assert!(script.contains("end timeout"), "{script}");
+        let activate = script
+            .find("activate application id")
+            .expect("退出前应把 ChatGPT 切到前台");
+        let quit = script
+            .find("quit application id")
+            .expect("退出脚本应发送 quit");
+        assert!(activate < quit, "应先聚焦 ChatGPT 再请求退出：{script}");
         // 顺带验证它真的是一段合法的 AppleScript（语法错在运行期才暴露的话，
         // 只有真机走到退出那一步才会发现）。
         let compiled = std::process::Command::new("osacompile")
