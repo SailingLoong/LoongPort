@@ -3206,7 +3206,6 @@
       "title": "Model verification",
       "titleWithTier": "Model verification · {{tierName}}",
       "description": "Verify the response characteristics of the model selected for this connection profile.",
-      "globalScopeNote": "Automatic verification applies to all configured models.",
       "model": {
         "label": "Select model",
         "placeholder": "Select a model",
@@ -3222,29 +3221,13 @@
       "status": {
         "running": "Verifying {{completed}} of {{total}}"
       },
-      "runtime": {
-        "autoLabel": "Automatic verification",
-        "autoHelp": "Automatically verifies all relay groups and models from actual Codex and Claude responses. It does not send additional verification requests and does not save conversation content.",
-        "loadError": "Could not load the automatic verification status. Try again.",
-        "anomalyToast": "An anomaly was detected for {{model}} in {{app}}. Open Model verification for details.",
-        "apps": {
-          "codex": "Codex",
-          "claude": "Claude"
-        },
-        "status": {
-          "active": "Enabled",
-          "waiting": "Waiting for an available response",
-          "error": "Not running correctly"
-        }
-      },
       "history": {
         "title": "5 most recent verification results",
         "loading": "Loading verification results…",
         "empty": "No verification results yet",
         "error": "Could not load verification results. Try again.",
         "source": {
-          "active": "Current verification",
-          "runtime": "Automatic verification"
+          "active": "Current verification"
         }
       },
       "tierVerdict": {

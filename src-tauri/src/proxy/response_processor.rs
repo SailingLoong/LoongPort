@@ -14,9 +14,6 @@ use super::{
     ProxyError,
 };
 use crate::database::PRICING_SOURCE_REQUEST;
-use crate::relay::model_verification::{
-    passive::VerificationIngress, protocols::VerificationTap, types::TargetKey,
-};
 use axum::http::{header::HeaderMap, HeaderName};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -189,14 +186,12 @@ pub async fn handle_streaming(
     let timeout_config = ctx.streaming_timeout_config();
 
     // 创建带日志和超时的透传流
-    let logged_stream = create_logged_passthrough_stream_with_verification(
+    let logged_stream = create_logged_passthrough_stream(
         stream,
         ctx.tag,
         usage_collector,
         timeout_config,
         connection_guard,
-        state.verification_ingress.clone(),
-        create_verification_tap(ctx, state),
     );
 
     let body = axum::body::Body::from_stream(logged_stream);
@@ -227,20 +222,6 @@ pub async fn handle_non_streaming(
         };
     let (mut response_headers, status, body_bytes) =
         read_decoded_body(response, ctx.tag, body_timeout).await?;
-    if let Some(tap) = create_verification_tap(ctx, state) {
-        let batch = VerificationTap::reduce_non_streaming(
-            TargetKey::new(
-                ctx.provider.id.clone(),
-                ctx.app_type_str,
-                ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model),
-            ),
-            state.verification_ingress.generation(),
-            &body_bytes,
-            chrono::Utc::now().timestamp(),
-        )
-        .unwrap_or_else(|| tap.finish(false, chrono::Utc::now().timestamp()));
-        let _ = state.verification_ingress.try_submit(batch);
-    }
     strip_hop_by_hop_response_headers(&mut response_headers);
 
     log::debug!(
@@ -701,26 +682,6 @@ pub fn create_logged_passthrough_stream(
     timeout_config: StreamingTimeoutConfig,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    create_logged_passthrough_stream_with_verification(
-        stream,
-        tag,
-        usage_collector,
-        timeout_config,
-        connection_guard,
-        VerificationIngress::disabled(),
-        None,
-    )
-}
-
-pub fn create_logged_passthrough_stream_with_verification(
-    stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
-    tag: &'static str,
-    usage_collector: Option<SseUsageCollector>,
-    timeout_config: StreamingTimeoutConfig,
-    connection_guard: Option<ActiveConnectionGuard>,
-    verification_ingress: VerificationIngress,
-    mut verification_tap: Option<VerificationTap>,
-) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let _conn_guard = connection_guard;
         let mut buffer = String::new();
@@ -772,9 +733,6 @@ pub fn create_logged_passthrough_stream_with_verification(
 
             match chunk_result {
                 Some(Ok(bytes)) => {
-                    if let Some(tap) = verification_tap.as_mut() {
-                        tap.observe_chunk(&bytes);
-                    }
                     if is_first_chunk {
                         log::debug!(
                             "[{tag}] 已接收上游流式首包: bytes={}",
@@ -837,25 +795,7 @@ pub fn create_logged_passthrough_stream_with_verification(
         if let Some(guard) = &mut finish_guard {
             guard.disarm();
         }
-        if let Some(tap) = verification_tap.take() {
-            let batch = tap.finish(true, chrono::Utc::now().timestamp());
-            let _ = verification_ingress.try_submit(batch);
-        }
     }
-}
-
-fn create_verification_tap(ctx: &RequestContext, state: &ProxyState) -> Option<VerificationTap> {
-    if !state.verification_ingress.is_enabled() {
-        return None;
-    }
-    VerificationTap::new(
-        TargetKey::new(
-            ctx.provider.id.clone(),
-            ctx.app_type_str,
-            ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model),
-        ),
-        state.verification_ingress.generation(),
-    )
 }
 
 fn is_safe_diagnostic_header(name: &str) -> bool {
@@ -1061,8 +1001,6 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
-            verification_ingress:
-                crate::relay::model_verification::passive::VerificationIngress::disabled(),
         }
     }
 

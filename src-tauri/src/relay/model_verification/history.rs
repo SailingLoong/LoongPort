@@ -18,7 +18,7 @@ pub(crate) fn create_table(conn: &Connection) -> Result<(), AppError> {
             provider_id TEXT NOT NULL,
             app_type TEXT NOT NULL,
             model TEXT NOT NULL,
-            source TEXT NOT NULL CHECK (source IN ('active', 'runtime')),
+            source TEXT NOT NULL CHECK (source = 'active'),
             verdict TEXT NOT NULL,
             evidence_level TEXT NOT NULL,
             facts_json TEXT NOT NULL,
@@ -40,7 +40,7 @@ pub fn list(db: &Database, scope: &TargetScope) -> Result<Vec<VerificationHistor
             "SELECT provider_id, app_type, model, source, verdict, evidence_level,
                     facts_json, rules_version, checked_at
              FROM model_verification_history
-             WHERE provider_id = ?1 AND app_type = ?2
+             WHERE provider_id = ?1 AND app_type = ?2 AND source = 'active'
              ORDER BY checked_at DESC, id DESC
              LIMIT ?3",
         )
@@ -129,7 +129,7 @@ pub(super) fn prune(conn: &Connection, provider_id: &str, app_type: &str) -> Res
          WHERE provider_id = ?1 AND app_type = ?2
            AND id NOT IN (
              SELECT id FROM model_verification_history
-             WHERE provider_id = ?1 AND app_type = ?2
+             WHERE provider_id = ?1 AND app_type = ?2 AND source = 'active'
              ORDER BY checked_at DESC, id DESC
              LIMIT ?3
            )",

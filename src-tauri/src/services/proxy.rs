@@ -9,7 +9,6 @@ use crate::provider::Provider;
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
-use crate::relay::model_verification::passive::VerificationIngress;
 use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
@@ -58,7 +57,6 @@ enum ClaudeTakeoverAuthPolicy {
 #[derive(Clone)]
 pub struct ProxyService {
     db: Arc<Database>,
-    verification_ingress: VerificationIngress,
     server: Arc<RwLock<Option<ProxyServer>>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
@@ -72,16 +70,8 @@ pub struct HotSwitchOutcome {
 
 impl ProxyService {
     pub fn new(db: Arc<Database>) -> Self {
-        Self::new_with_verification(db, VerificationIngress::disabled())
-    }
-
-    pub fn new_with_verification(
-        db: Arc<Database>,
-        verification_ingress: VerificationIngress,
-    ) -> Self {
         Self {
             db,
-            verification_ingress,
             server: Arc::new(RwLock::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
@@ -571,12 +561,7 @@ impl ProxyService {
 
         // 4. 创建并启动服务器
         let app_handle = self.app_handle.read().await.clone();
-        let server = ProxyServer::new_with_verification(
-            config.clone(),
-            self.db.clone(),
-            app_handle,
-            self.verification_ingress.clone(),
-        );
+        let server = ProxyServer::new(config.clone(), self.db.clone(), app_handle);
         let info = server
             .start()
             .await
@@ -3125,12 +3110,7 @@ impl ProxyService {
             }
 
             let app_handle = self.app_handle.read().await.clone();
-            let new_server = ProxyServer::new_with_verification(
-                new_config.clone(),
-                self.db.clone(),
-                app_handle,
-                self.verification_ingress.clone(),
-            );
+            let new_server = ProxyServer::new(new_config.clone(), self.db.clone(), app_handle);
             let info = new_server
                 .start()
                 .await

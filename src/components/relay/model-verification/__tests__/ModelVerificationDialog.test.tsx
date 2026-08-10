@@ -41,7 +41,6 @@ vi.mock("react-i18next", () => ({
         "loongport.modelVerification.history.title": "最近 5 条验证记录",
         "loongport.modelVerification.history.empty": "暂无验证记录",
         "loongport.modelVerification.history.source.active": "当前验证",
-        "loongport.modelVerification.history.source.runtime": "自动验证",
         "loongport.modelVerification.evidence.fact.modelMatch": "模型身份",
         "loongport.modelVerification.evidence.fact.streamLifecycle":
           "流式响应生命周期",
@@ -173,7 +172,7 @@ const report = (verdict: VerificationVerdict): VerificationReport => ({
 const history: VerificationHistoryEntry[] = [
   { source: "active", report: report("trusted") },
   {
-    source: "runtime",
+    source: "active",
     report: {
       target: {
         providerId: "provider-a",
@@ -320,14 +319,23 @@ describe("ModelVerificationDialog", () => {
     }
   });
 
-  it("shows the latest active and runtime verification records for this tier", async () => {
+  it("exposes only the user-triggered verification controls", async () => {
+    render(<DialogHarness />);
+
+    await screen.findByRole("combobox");
+    expect(
+      screen.getByRole("button", { name: "开始验证" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("shows the latest active verification records for this tier", async () => {
     api.listHistory.mockResolvedValue(history);
 
     render(<DialogHarness />);
 
     expect(await screen.findByText("最近 5 条验证记录")).toBeInTheDocument();
-    expect(screen.getByText("当前验证")).toBeInTheDocument();
-    expect(screen.getByText("自动验证")).toBeInTheDocument();
+    expect(screen.getAllByText("当前验证")).toHaveLength(2);
     expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
     expect(screen.getByText("流式响应生命周期")).toBeInTheDocument();
     expect(screen.getByText("未通过")).toBeInTheDocument();

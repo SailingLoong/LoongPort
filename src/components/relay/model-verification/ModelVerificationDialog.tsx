@@ -3,7 +3,6 @@ import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -54,13 +53,6 @@ export function ModelVerificationDialog({
   const [models, setModels] = useState<string[]>([]);
   const [modelsState, setModelsState] = useState<ModelsState>("idle");
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
-  const [runtimeAutoEnabled, setRuntimeAutoEnabled] = useState(false);
-  const [runtimeApps, setRuntimeApps] = useState<
-    Awaited<ReturnType<typeof modelVerificationApi.getRuntimeSetting>>["apps"]
-  >([]);
-  const [runtimeState, setRuntimeState] = useState<
-    "idle" | "loading" | "error"
-  >("idle");
   const [history, setHistory] = useState<VerificationHistoryEntry[]>([]);
   const [historyState, setHistoryState] = useState<
     "idle" | "loading" | "ready" | "error"
@@ -117,19 +109,6 @@ export function ModelVerificationDialog({
       return;
     }
     loadModels();
-    if (typeof modelVerificationApi.getRuntimeSetting !== "function") {
-      setRuntimeState("idle");
-      return;
-    }
-    setRuntimeState("loading");
-    void modelVerificationApi
-      .getRuntimeSetting()
-      .then((snapshot) => {
-        setRuntimeAutoEnabled(snapshot.setting.runtimeAutoEnabled);
-        setRuntimeApps(snapshot.apps);
-        setRuntimeState("idle");
-      })
-      .catch(() => setRuntimeState("error"));
     // Reload from the live backend on every open; the model catalog is not cached UI state.
   }, [loadModels, open]);
 
@@ -147,18 +126,9 @@ export function ModelVerificationDialog({
   const canStart =
     modelsState === "ready" && selectedModel !== undefined && !run.stopping;
 
-  const startVerification = async () => {
+  const startVerification = () => {
     if (!selectedModel) return;
-    try {
-      if (typeof modelVerificationApi.setRuntimeEnabled === "function") {
-        const snapshot =
-          await modelVerificationApi.setRuntimeEnabled(runtimeAutoEnabled);
-        setRuntimeApps(snapshot.apps);
-      }
-      await run.start(selectedModel);
-    } catch {
-      // The run hook owns run failures; setting persistence failure prevents starting.
-    }
+    void run.start(selectedModel);
   };
 
   return (
@@ -174,58 +144,6 @@ export function ModelVerificationDialog({
             {t("loongport.modelVerification.description")}
           </DialogDescription>
         </DialogHeader>
-
-        <div className="border-b border-border-default px-6 py-4">
-          <div className="flex items-start gap-3">
-            <Checkbox
-              id="model-verification-runtime-auto"
-              checked={runtimeAutoEnabled}
-              onCheckedChange={(checked) =>
-                setRuntimeAutoEnabled(checked === true)
-              }
-              disabled={runtimeState === "loading" || run.isRunning}
-            />
-            <div className="space-y-1">
-              <label
-                htmlFor="model-verification-runtime-auto"
-                className="text-sm font-medium"
-              >
-                {t("loongport.modelVerification.runtime.autoLabel")}
-              </label>
-              <p className="text-xs text-muted-foreground">
-                {t("loongport.modelVerification.runtime.autoHelp")}
-              </p>
-            </div>
-          </div>
-          {runtimeState === "error" && (
-            <p className="mt-2 text-xs text-destructive" role="alert">
-              {t("loongport.modelVerification.runtime.loadError")}
-            </p>
-          )}
-          <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-            {runtimeApps.map((app) => (
-              <div
-                key={app.appType}
-                className="flex items-center justify-between rounded border border-border-default px-2 py-1.5"
-              >
-                <span>
-                  {t(`loongport.modelVerification.runtime.apps.${app.appType}`)}
-                </span>
-                <span
-                  className={
-                    app.status === "error"
-                      ? "text-destructive"
-                      : "text-muted-foreground"
-                  }
-                >
-                  {t(
-                    `loongport.modelVerification.runtime.status.${app.status}`,
-                  )}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
 
         <div className="min-h-40 space-y-4 overflow-y-auto px-6 py-5">
           {modelsState === "loading" && (
@@ -362,7 +280,7 @@ export function ModelVerificationDialog({
             <Button
               type="button"
               disabled={!canStart}
-              onClick={() => void startVerification()}
+              onClick={startVerification}
             >
               {t(
                 run.failure

@@ -3206,7 +3206,6 @@
       "title": "模型验证",
       "titleWithTier": "模型验证 · {{tierName}}",
       "description": "验证当前接入配置所选模型的响应特征。",
-      "globalScopeNote": "自动验证适用于所有已配置的模型。",
       "model": {
         "label": "选择模型",
         "placeholder": "请选择模型",
@@ -3222,29 +3221,13 @@
       "status": {
         "running": "正在验证 {{completed}} / {{total}}"
       },
-      "runtime": {
-        "autoLabel": "自动验证",
-        "autoHelp": "根据 Codex 和 Claude 的实际响应自动验证所有中转站分组和模型；不额外发送验证请求，也不保存对话内容。",
-        "loadError": "无法加载自动验证状态。请重试。",
-        "anomalyToast": "{{app}} 的模型 {{model}} 检测到异常。请打开模型验证查看详情。",
-        "apps": {
-          "codex": "Codex",
-          "claude": "Claude"
-        },
-        "status": {
-          "active": "已启用",
-          "waiting": "等待可用响应",
-          "error": "运行异常"
-        }
-      },
       "history": {
         "title": "最近 5 条验证记录",
         "loading": "正在加载验证记录…",
         "empty": "暂无验证记录",
         "error": "无法加载验证记录。请重试。",
         "source": {
-          "active": "当前验证",
-          "runtime": "自动验证"
+          "active": "当前验证"
         }
       },
       "tierVerdict": {
