@@ -189,27 +189,11 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
 }
 
 fn add_relay_backend_kind_column(conn: &Connection) -> Result<(), AppError> {
-    let has_relay: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'loongport_relay'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if has_relay == 0 {
+    if !crate::Database::table_exists(conn, "loongport_relay")? {
         return Ok(());
     }
 
-    let has_column: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('loongport_relay')
-             WHERE name = 'backend_kind'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if has_column > 0 {
+    if crate::Database::has_column(conn, "loongport_relay", "backend_kind")? {
         return Ok(());
     }
 
@@ -577,6 +561,7 @@ fn inherit_the_old_current_image_tier(conn: &Connection) -> Result<(), AppError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
     fn mem() -> Connection {
         Connection::open_in_memory().expect("内存库")
@@ -674,6 +659,28 @@ mod tests {
             "迁移必须保留旧行，并把历史 relay 明确归为 sub2api"
         );
         assert_eq!(current_version(&conn).unwrap(), 9);
+    }
+
+    #[test]
+    fn v9_migration_does_not_treat_schema_inspection_failure_as_missing_table() {
+        let conn = mem();
+        v8_relay_table(&conn);
+        conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read {
+                table_name: "sqlite_master",
+                ..
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }));
+
+        let error = add_relay_backend_kind_column(&conn)
+            .expect_err("schema inspection failure must abort the migration")
+            .to_string();
+
+        assert!(
+            error.contains("读取表名失败") || error.contains("查询表名失败"),
+            "unexpected migration error: {error}"
+        );
     }
 
     #[test]

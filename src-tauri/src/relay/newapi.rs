@@ -9,6 +9,24 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
+
+pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
+    candidate: ProbeCandidate {
+        id: "newapi",
+        path: "/api/status",
+    },
+    detect: detect_site,
+};
+
+fn detect_site(body: &str) -> Option<DetectedSite> {
+    let status = parse_status(body).ok()?;
+    Some(DetectedSite {
+        backend_kind: BackendKind::NewApi,
+        site_name: status.system_name,
+        api_base_url: String::new(),
+    })
+}
 
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {

@@ -4,64 +4,22 @@
 //! **不在浏览器层猜站点类型**。原始响应回到 Rust 后，才由各协议 detector 严格判定。
 //! 将来接 new-api 时，只需增加候选与 detector，不改“打开网页 → 用户验证”的共用流程。
 
-use base64::Engine;
-use serde::{Deserialize, Serialize};
-
 use crate::error::AppError;
 use crate::relay::api;
+use crate::relay::backend::ProbeAdapter;
+pub use crate::relay::backend::{BackendKind, DetectedSite, ProbeCandidate};
 use crate::relay::newapi;
+use base64::Engine;
 
 pub const PROBE_SCHEME: &str = "loongport-probe";
-const SUB2API_CANDIDATE_ID: &str = "sub2api";
-const NEWAPI_CANDIDATE_ID: &str = "newapi";
 const MAX_PROBE_BODY_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BackendKind {
-    Sub2Api,
-    NewApi,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct ProbeCandidate {
-    pub id: &'static str,
-    pub path: &'static str,
-}
-
 pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
-    ProbeCandidate {
-        id: SUB2API_CANDIDATE_ID,
-        path: "/api/v1/settings/public",
-    },
-    ProbeCandidate {
-        id: NEWAPI_CANDIDATE_ID,
-        path: "/api/status",
-    },
+    api::PROBE_ADAPTER.candidate,
+    newapi::PROBE_ADAPTER.candidate,
 ];
 
-/// 严格 detector 已确认的协议及其协议专属公开信息。
-///
-/// 通用发现层不假设不同协议共享 DTO；将来加入 new-api 时新增 enum variant 即可。
-#[derive(Debug, Clone)]
-pub enum DetectedSite {
-    Sub2Api(api::PublicSettings),
-}
-
-#[derive(Debug, Clone)]
-pub enum DetectedBackend {
-    Sub2Api(api::PublicSettings),
-    NewApi(newapi::Status),
-}
-
-impl DetectedBackend {
-    pub fn backend_kind(&self) -> BackendKind {
-        match self {
-            Self::Sub2Api(_) => BackendKind::Sub2Api,
-            Self::NewApi(_) => BackendKind::NewApi,
-        }
-    }
-}
+const PROBE_ADAPTERS: &[ProbeAdapter] = &[api::PROBE_ADAPTER, newapi::PROBE_ADAPTER];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeResponse {
@@ -160,16 +118,17 @@ pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeResponse, Ap
 /// 任何传输失败、非成功状态或 detector 不匹配都只意味着“这个候选没有识别出来”；
 /// 不在这里把某次失败宣判成站点类型。全部候选都不匹配时，调用方可切到可见 WebView。
 pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, AppError> {
-    match discover_site(site_origin).await? {
-        DetectedBackend::Sub2Api(settings) => Ok(DetectedSite::Sub2Api(settings)),
-        DetectedBackend::NewApi(_) => Err(AppError::Config(format!(
+    let detected = discover_site(site_origin).await?;
+    match detected.backend_kind {
+        BackendKind::Sub2Api => Ok(detected),
+        BackendKind::NewApi => Err(AppError::Config(format!(
             "{site_origin} 是 newapi 站点，当前命令入口尚未接入该协议"
         ))),
     }
 }
 
 /// 原生 HTTP 探测所有候选，再复用 WebView 原始回传使用的同一收敛规则。
-pub async fn discover_site(site_origin: &str) -> Result<DetectedBackend, AppError> {
+pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, AppError> {
     let client = api::build_client()?;
     let mut responses = Vec::new();
 
@@ -197,26 +156,21 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedBackend, AppErro
 ///
 /// 未知候选或形状不匹配都返回 `None`。浏览器层永远不根据端点存在、HTTP 状态或通用字段
 /// 直接认定协议，因此 new-api 的响应不会被 sub2api detector 误收。
-pub fn detect_candidate(candidate_id: &str, body: &str) -> Option<DetectedBackend> {
-    match candidate_id {
-        SUB2API_CANDIDATE_ID => api::parse_sub2api_public_settings(body)
-            .ok()
-            .map(DetectedBackend::Sub2Api),
-        NEWAPI_CANDIDATE_ID => newapi::parse_status(body).ok().map(DetectedBackend::NewApi),
-        _ => None,
-    }
+pub fn detect_candidate(candidate_id: &str, body: &str) -> Option<DetectedSite> {
+    let adapter = PROBE_ADAPTERS
+        .iter()
+        .find(|adapter| adapter.candidate.id == candidate_id)?;
+    (adapter.detect)(body)
 }
 
 /// 旧命令层的兼容入口：只暴露现有 sub2api 结果，不把 newapi 伪装成 sub2api。
 pub fn detect_site(candidate_id: &str, body: &str) -> Option<DetectedSite> {
-    match detect_candidate(candidate_id, body)? {
-        DetectedBackend::Sub2Api(settings) => Some(DetectedSite::Sub2Api(settings)),
-        DetectedBackend::NewApi(_) => None,
-    }
+    let detected = detect_candidate(candidate_id, body)?;
+    (detected.backend_kind == BackendKind::Sub2Api).then_some(detected)
 }
 
 /// 汇总所有原始候选响应，去重后严格收敛为一个协议结果。
-pub fn converge_probe_responses(responses: &[ProbeResponse]) -> Result<DetectedBackend, AppError> {
+pub fn converge_probe_responses(responses: &[ProbeResponse]) -> Result<DetectedSite, AppError> {
     let mut detected = Vec::new();
     for response in responses {
         let Some(candidate) = detect_candidate(&response.candidate_id, &response.body) else {
@@ -224,7 +178,7 @@ pub fn converge_probe_responses(responses: &[ProbeResponse]) -> Result<DetectedB
         };
         if detected
             .iter()
-            .any(|item: &DetectedBackend| item.backend_kind() == candidate.backend_kind())
+            .any(|item: &DetectedSite| item.backend_kind == candidate.backend_kind)
         {
             continue;
         }
@@ -354,13 +308,13 @@ mod tests {
         assert!(
             detect_candidate("sub2api", sub2api_body())
                 .unwrap()
-                .backend_kind()
+                .backend_kind
                 == BackendKind::Sub2Api
         );
         assert!(
             detect_candidate("newapi", newapi_status_body())
                 .unwrap()
-                .backend_kind()
+                .backend_kind
                 == BackendKind::NewApi
         );
         assert!(detect_candidate("newapi", sub2api_body()).is_none());
@@ -385,13 +339,13 @@ mod tests {
         assert_eq!(
             converge_probe_responses(std::slice::from_ref(&sub2api))
                 .unwrap()
-                .backend_kind(),
+                .backend_kind,
             BackendKind::Sub2Api
         );
         assert_eq!(
             converge_probe_responses(&[sub2api.clone(), sub2api.clone()])
                 .unwrap()
-                .backend_kind(),
+                .backend_kind,
             BackendKind::Sub2Api
         );
         assert_eq!(
@@ -408,9 +362,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            converge_probe_responses(&[response])
-                .unwrap()
-                .backend_kind(),
+            converge_probe_responses(&[response]).unwrap().backend_kind,
             BackendKind::NewApi
         );
     }

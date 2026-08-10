@@ -54,6 +54,7 @@
 
 pub mod aff;
 pub mod api;
+pub mod backend;
 pub mod cc_switch_import;
 pub mod chatgpt_app;
 pub mod creds;

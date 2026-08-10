@@ -40,7 +40,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
 use crate::relay::platform_map::{parse_platform, Platform};
+
+pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
+    candidate: ProbeCandidate {
+        id: "sub2api",
+        path: "/api/v1/settings/public",
+    },
+    detect: detect_site,
+};
+
+fn detect_site(body: &str) -> Option<DetectedSite> {
+    let settings = parse_sub2api_public_settings(body).ok()?;
+    Some(DetectedSite {
+        backend_kind: BackendKind::Sub2Api,
+        site_name: settings.site_name,
+        api_base_url: settings.api_base_url,
+    })
+}
 
 /// sub2api 业务响应信封。
 ///

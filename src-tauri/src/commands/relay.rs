@@ -465,11 +465,31 @@ fn save_detected_site(
     site_origin: String,
     detected: discovery::DetectedSite,
 ) -> Result<ProbeResult, AppError> {
-    match detected {
-        discovery::DetectedSite::Sub2Api(settings) => {
-            save_sub2api_site(app_handle, site_origin, settings)
-        }
-    }
+    let api_base_url = api::site_api_root(&site_origin, &detected.api_base_url);
+    let site_name = if detected.site_name.trim().is_empty() {
+        site_origin
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_string()
+    } else {
+        detected.site_name
+    };
+    let state = app_handle.state::<AppState>();
+    let relay_id = with_conn(&state, |conn| {
+        creds::save_site_with_backend(
+            conn,
+            &site_origin,
+            &site_name,
+            &api_base_url,
+            detected.backend_kind,
+        )
+    })?;
+
+    Ok(ProbeResult {
+        relay_id,
+        site_origin,
+        site_name,
+    })
 }
 
 fn save_sub2api_site(
@@ -591,7 +611,14 @@ fn browser_start_url(
     };
 
     let url = match detected {
-        discovery::DetectedSite::Sub2Api(_) => login::login_url(site_origin, ""),
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::Sub2Api,
+            ..
+        } => login::login_url(site_origin, ""),
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::NewApi,
+            ..
+        } => site_origin.to_string(),
     };
     url::Url::parse(&url)
         .map_err(|error| AppError::InvalidInput(format!("登录页地址不对: {error}")))
@@ -604,9 +631,14 @@ fn import_login_script(
     promo_code: Option<&str>,
 ) -> String {
     match detected {
-        discovery::DetectedSite::Sub2Api(_) => {
-            login::login_script(site_origin, "", aff_code, promo_code)
-        }
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::Sub2Api,
+            ..
+        } => login::login_script(site_origin, "", aff_code, promo_code),
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::NewApi,
+            ..
+        } => String::new(),
     }
 }
 
@@ -3193,12 +3225,11 @@ mod tests {
     }
 
     fn detected_sub2api() -> discovery::DetectedSite {
-        discovery::DetectedSite::Sub2Api(api::PublicSettings {
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::Sub2Api,
             site_name: "Example".into(),
-            version: "1.0.0".into(),
             api_base_url: String::new(),
-            registration_enabled: true,
-        })
+        }
     }
 
     #[test]

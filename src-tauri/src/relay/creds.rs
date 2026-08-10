@@ -69,7 +69,7 @@ use rusqlite::{
 use crate::error::AppError;
 
 /// LoongPort 支持的 relay 协议；由 discovery 定义，持久层直接复用同一个类型。
-pub use super::discovery::BackendKind;
+pub use super::backend::BackendKind;
 
 impl BackendKind {
     pub const fn as_str(self) -> &'static str {
