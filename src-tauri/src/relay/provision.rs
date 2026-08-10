@@ -108,6 +108,10 @@ pub struct Tier {
     /// **不是常量** —— 纯生图分组要写它自己的 `gpt-image-*`，写 [`DEFAULT_MODEL`]
     /// 会让它选中即 404。
     pub model: String,
+    /// The model identifiers returned by this tier's `/v1/models` endpoint.
+    /// `None` means the endpoint was unavailable, so the UI must not claim a
+    /// complete supported-model list.
+    pub models: Option<Vec<String>>,
     /// claude 平台各角色模型（由 [`pick_tier_models`] 按该分组模型列表挑出）。
     ///
     /// 其余平台 `None`（它们的配置没有 haiku/sonnet/opus 这套角色别名）。
@@ -335,7 +339,7 @@ async fn ensure_key_for(
     // 为一个「模型名可能不理想」中断整个分组的 provision 是把小问题放大成大问题
     // （用户会看到「获取密钥失败」而不是「某个档位模型名不对」）。
     let models = match super::api::list_models(client.site_origin(), &api_key).await {
-        Ok(v) => v,
+        Ok(v) => v.map(normalize_model_names),
         Err(e) => {
             log::debug!(
                 "分组 {}（{}）的模型列表拉不到，模型名回落默认值（不影响使用）: {e}",
@@ -365,9 +369,24 @@ async fn ensure_key_for(
         api_key,
         key_was_created: created,
         model: picked.main,
+        models,
         roles: picked.claude_roles,
         allow_image_generation: group.allow_image_generation,
     })
+}
+
+/// Normalize a provider model list before it becomes persisted configuration.
+/// API responses are not guaranteed to be ordered and may contain duplicate or
+/// blank ids; keeping one stable, trimmed copy prevents noisy catalog changes.
+pub fn normalize_model_names(models: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<String> = models
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 /// 档位排序：倍率从低到高（便宜的在前），同倍率按分组 id 稳定排序。
@@ -573,6 +592,47 @@ pub fn settings_config_with_roles(
     model: &str,
     roles: Option<ClaudeRoleModels>,
 ) -> Option<serde_json::Value> {
+    settings_config_with_roles_and_models(
+        app_type,
+        api_key,
+        display_name,
+        base_url,
+        model,
+        roles,
+        None,
+    )
+}
+
+/// Build a provider configuration and, for Codex, persist the fetched model
+/// catalog that powers both the Codex picker and LoongPort's model chips.
+pub fn settings_config_with_models(
+    app_type: &AppType,
+    api_key: &str,
+    display_name: &str,
+    base_url: &str,
+    model: &str,
+    models: Option<&[String]>,
+) -> Option<serde_json::Value> {
+    settings_config_with_roles_and_models(
+        app_type,
+        api_key,
+        display_name,
+        base_url,
+        model,
+        None,
+        models,
+    )
+}
+
+fn settings_config_with_roles_and_models(
+    app_type: &AppType,
+    api_key: &str,
+    display_name: &str,
+    base_url: &str,
+    model: &str,
+    roles: Option<ClaudeRoleModels>,
+    models: Option<&[String]>,
+) -> Option<serde_json::Value> {
     // codex 例外：上游那份多一行 requires_openai_auth，见上面那段。
     //
     // ⚠️ **生图栏必须与 codex 走同一条**（测试 `the_image_column_shares_the_codex_config_shape`
@@ -580,10 +640,32 @@ pub fn settings_config_with_roles(
     // 得到一份 claude/gemini 形状的配置 ⇒ 生图在运行时读不出密钥，而那是只有真机
     // 才发现得了的失败。
     if matches!(app_type, AppType::Codex | AppType::CodexImage) {
-        return Some(serde_json::json!({
+        let mut settings = serde_json::json!({
             "auth": { "OPENAI_API_KEY": api_key },
             "config": codex_config_toml(display_name, base_url, model),
-        }));
+        });
+        if matches!(app_type, AppType::Codex) {
+            if let Some(models) = models.filter(|models| !models.is_empty()) {
+                // Mixed groups can advertise `gpt-image-*` alongside chat
+                // models. Those belong to the image-generation path and are
+                // not valid Codex conversation models, so do not turn them
+                // into clickable main-model choices.
+                let models = models
+                    .iter()
+                    .filter(|model| !is_image_model(model))
+                    .collect::<Vec<_>>();
+                if models.is_empty() {
+                    return Some(settings);
+                }
+                settings["modelCatalog"] = serde_json::json!({
+                    "models": models
+                        .iter()
+                        .map(|model| serde_json::json!({ "model": model }))
+                        .collect::<Vec<_>>(),
+                });
+            }
+        }
+        return Some(settings);
     }
 
     // 其余交给上游 —— 构造一个等价于「导入到 cc-switch」那个 deeplink 的请求。
@@ -1551,6 +1633,7 @@ mod tests {
             key_was_created: false,
             // 排序只看倍率与 group_id，模型名 / 角色模型 / 生图开关都不参与。
             model: DEFAULT_MODEL.into(),
+            models: None,
             roles: None,
             allow_image_generation: false,
         };
@@ -1876,6 +1959,59 @@ mod tests {
         assert!(toml.contains("disable_response_storage = true"));
         // sub2api 的 openai 网关原生走 responses，chat 是错的。
         assert!(toml.contains(r#"wire_api = "responses""#));
+    }
+
+    #[test]
+    fn codex_settings_persist_the_fetched_model_catalog() {
+        let models = vec![
+            "gpt-a".to_string(),
+            "gpt-b".to_string(),
+            "gpt-image-2".to_string(),
+        ];
+        let settings = settings_config_with_models(
+            &AppType::Codex,
+            "sk-test",
+            "Test",
+            "https://api.example.com/v1",
+            "gpt-a",
+            Some(&models),
+        )
+        .expect("Codex config");
+
+        assert_eq!(
+            settings["modelCatalog"]["models"],
+            serde_json::json!([
+                { "model": "gpt-a" },
+                { "model": "gpt-b" }
+            ])
+        );
+
+        let image_settings = settings_config_with_models(
+            &AppType::CodexImage,
+            "sk-test",
+            "Image",
+            "https://api.example.com/v1",
+            "gpt-image-2",
+            Some(&models),
+        )
+        .expect("Codex image config");
+        assert!(
+            image_settings.get("modelCatalog").is_none(),
+            "生图栏不消费 Codex 主模型目录"
+        );
+    }
+
+    #[test]
+    fn fetched_model_names_are_stable_and_unique() {
+        assert_eq!(
+            normalize_model_names(vec![
+                " gpt-b ".into(),
+                "".into(),
+                "gpt-a".into(),
+                "gpt-b".into(),
+            ]),
+            vec!["gpt-a".to_string(), "gpt-b".to_string()]
+        );
     }
 
     #[test]

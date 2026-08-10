@@ -95,6 +95,7 @@ export interface RelayRowProps {
   onLogin: () => void;
   onProvision: () => void;
   onSwitchTier: (tier: TierInfo) => void;
+  onSelectTierModel: (tier: TierInfo, model: string) => void;
   /**
    * 这一行的余额。`null` = 还没拉到 / 拉失败（中转站可能关了用户面板）。
    *
@@ -156,6 +157,7 @@ export function RelayRow({
   onLogin,
   onProvision,
   onSwitchTier,
+  onSelectTierModel,
   balance,
   onPurchase,
   onCheckTier,
@@ -306,6 +308,7 @@ export function RelayRow({
               tier={tier}
               busy={busy}
               onSwitch={() => onSwitchTier(tier)}
+              onSelectModel={(model) => onSelectTierModel(tier, model)}
               onCheck={() => onCheckTier(tier)}
               checking={isCheckingTier(tier.providerId)}
               verificationVerdict={verificationVerdictForTier?.(tier)}
@@ -628,6 +631,7 @@ function TierItem({
   tier,
   busy,
   onSwitch,
+  onSelectModel,
   onCheck,
   checking,
   verificationVerdict,
@@ -639,6 +643,7 @@ function TierItem({
   tier: TierInfo;
   busy: ReadonlySet<string>;
   onSwitch: () => void;
+  onSelectModel: (model: string) => void;
   onCheck: () => void;
   checking: boolean;
   verificationVerdict?: VerificationVerdict;
@@ -651,6 +656,7 @@ function TierItem({
   // 只禁**这一个档位**正在切换的那个按钮。原来是 `disabled={anyBusy}`，
   // 于是别的中转站在获取密钥时，这里所有「使用」按钮都灰掉了。
   const switching = busy.has(`switch:${tier.providerId}`);
+  const modelSwitching = busy.has(`model:${tier.providerId}`);
   const resetting = busy.has(`reset:${tier.providerId}`);
   const verificationProblem =
     verificationVerdict === "anomaly" || verificationVerdict === "suspicious"
@@ -668,7 +674,7 @@ function TierItem({
       className={cn(
         // `group/tier` 而不是裸 `group` —— 见 `TIER_HOVER_ACTIONS` 的说明：
         // 这一行嵌在中转站行里面，裸的会被外层 hover 一起点亮。
-        "group/tier flex items-center gap-2 rounded-lg border border-border px-3 py-2 transition-all",
+        "group/tier flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2 transition-all",
         // 三种态的优先级：**当前在用 > 已手动维护 > 普通**。
         //
         // 当前在用压过手动维护，是因为「现在生效的是哪一档」比「这一档谁维护」
@@ -758,7 +764,7 @@ function TierItem({
         className={cn(
           "flex flex-shrink-0 items-center gap-0.5",
           HOVER_ACTIONS_BASE,
-          checking || resetting || switching
+          checking || resetting || switching || modelSwitching
             ? HOVER_ACTIONS_PINNED
             : verifying
               ? HOVER_ACTIONS_PINNED
@@ -788,7 +794,7 @@ function TierItem({
             type="button"
             size="sm"
             className="h-7 shrink-0"
-            disabled={switching}
+            disabled={switching || modelSwitching}
             onClick={onSwitch}
           >
             {switching ? (
@@ -909,6 +915,43 @@ function TierItem({
             <Undo2 className="h-3.5 w-3.5" />
           )}
         </Button>
+      )}
+
+      {tier.models.length > 0 && (
+        <div className="basis-full border-t border-border/60 pt-2">
+          <div className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {t("loongport.tier.models")}
+            {modelSwitching && <Loader2 className="h-3 w-3 animate-spin" />}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {tier.models.map((model) => {
+              const selected = tier.model === model;
+              return (
+                <button
+                  key={model}
+                  type="button"
+                  className={cn(
+                    "max-w-full truncate rounded-md border px-2 py-1 text-xs transition-colors",
+                    selected
+                      ? "border-blue-500/60 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+                      : "border-border text-muted-foreground hover:border-primary/60 hover:text-foreground",
+                    (modelSwitching || switching) && "cursor-wait opacity-60",
+                  )}
+                  aria-pressed={selected}
+                  disabled={selected || modelSwitching || switching}
+                  onClick={() => onSelectModel(model)}
+                  title={
+                    selected
+                      ? t("loongport.tier.modelSelected")
+                      : t("loongport.tier.selectModel", { model })
+                  }
+                >
+                  {model}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       )}
     </div>
   );

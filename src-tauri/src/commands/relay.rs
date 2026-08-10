@@ -154,6 +154,11 @@ pub struct TierInfo {
     pub app_id: String,
     pub group_name: String,
     pub display_name: String,
+    /// The model currently written into this provider's Codex config.
+    pub model: String,
+    /// Model ids discovered from this tier's `/v1/models` endpoint.
+    /// An empty list means no complete remote catalog is available.
+    pub models: Vec<String>,
     pub rate_multiplier: Option<f64>,
     pub is_current: bool,
     /// 用户在 cc-switch 编辑页改过这个档位的配置吗。
@@ -951,6 +956,15 @@ async fn do_provision(
                 &tier.model,
                 tier.roles.clone(),
             )
+        } else if matches!(app_type, AppType::Codex) {
+            provision::settings_config_with_models(
+                app_type,
+                &tier.api_key,
+                &display_name,
+                &base_url,
+                &tier.model,
+                tier.models.as_deref(),
+            )
         } else {
             provision::settings_config_for(
                 app_type,
@@ -979,13 +993,14 @@ async fn do_provision(
             .get_provider_by_id(&provider_id, app_type.as_str())
             .ok()
             .flatten();
+        let user_edited = state.db.get_user_edited(app_type.as_str(), &provider_id)?;
 
         let settings_config = match existing {
             Some(old) => {
                 // 已手工维护（`user_edited` 标记）⇒ 只换 sk、保留用户的配置。
                 // 未标记（LoongPort 托管的）⇒ 整份重写为当前默认配置 —— 拿最新模型 /
                 // 端点；`repair_stale_model` 被这次全量重写吸收（删掉了，见 git log）。
-                if state.db.get_user_edited(app_type.as_str(), &provider_id)? {
+                if user_edited {
                     let mut kept = old.settings_config;
                     // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落到默认配置。
                     // 否则用户会留着一把旧 sk 却以为刷新成功了。
@@ -995,6 +1010,8 @@ async fn do_provision(
                         log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
                         defaults
                     }
+                } else if matches!(app_type, AppType::Codex) {
+                    preserve_supported_codex_model(defaults, &old.settings_config)
                 } else {
                     defaults
                 }
@@ -1068,9 +1085,6 @@ async fn do_provision(
         // 那正是用户实测「点刷新 claude 页下仍挂着 codex 的分组」的真根因。
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
-        // 读存库标记 ——「已手工维护」的唯一来源（编辑页置位、恢复默认复位）。
-        let user_edited = state.db.get_user_edited(app_type.as_str(), &provider_id)?;
-
         let is_current = current == provider_id;
         if is_current {
             refresh_live.push(app_type.clone());
@@ -1084,6 +1098,12 @@ async fn do_provision(
             app_id: app_type.as_str().to_string(),
             group_name: tier.group_name.clone(),
             display_name,
+            model: provision::extract_model(&provider.settings_config).unwrap_or_default(),
+            models: if matches!(app_type, AppType::Codex) {
+                codex_models_from_settings(&provider.settings_config)
+            } else {
+                Vec::new()
+            },
             rate_multiplier: Some(tier.rate_multiplier),
             user_edited: Some(user_edited),
             // 这条路上两个字段都有真值：模型名刚由 `pick_model` 算出来，
@@ -1567,6 +1587,15 @@ fn reset_tier_config_in_state(
             AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
         })?;
 
+    // Codex 的远端模型目录已经存进 `modelCatalog`：恢复默认时按同一份目录重新挑
+    // 默认模型，并保留目录本身。否则这个动作会把刚外露的模型列表清空，还可能把
+    // 不支持 `DEFAULT_MODEL` 的分组重置成一条选中即 404 的配置。
+    let codex_models = if matches!(app_type, AppType::Codex) {
+        codex_models_from_settings(&existing.settings_config)
+    } else {
+        Vec::new()
+    };
+
     // ⚠️ **生图档位要保住它自己的模型名**（review 抓出）。
     //
     // 这条路拿不到分组数据（手上只有本地 `settings_config`），所以原来无条件写
@@ -1578,17 +1607,27 @@ fn reset_tier_config_in_state(
     //
     // 这**不是**「保留用户改的模型名」—— 用户把模型改成任何文本模型时仍然会被重置成
     // 默认值，那正是这个按钮该做的事。
-    let model = provision::extract_model(&existing.settings_config)
-        .filter(|m| provision::is_image_model(m))
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = if codex_models.is_empty() {
+        provision::extract_model(&existing.settings_config)
+            .filter(|m| provision::is_image_model(m))
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+    } else {
+        provision::pick_tier_models(&app_type, Some(&codex_models)).main
+    };
+    let base_url = api::base_url_for(&app_type, &op.site_origin, &op.api_base_url);
 
-    let settings_config = provision::settings_config_for(
-        &app_type,
-        &api_key,
-        &existing.name,
-        &api::base_url_for(&app_type, &op.site_origin, &op.api_base_url),
-        &model,
-    )
+    let settings_config = if matches!(app_type, AppType::Codex) {
+        provision::settings_config_with_models(
+            &app_type,
+            &api_key,
+            &existing.name,
+            &base_url,
+            &model,
+            Some(&codex_models),
+        )
+    } else {
+        provision::settings_config_for(&app_type, &api_key, &existing.name, &base_url, &model)
+    }
     .ok_or_else(|| {
         AppError::Config(format!(
             "还不能为 {} 生成默认配置（`settings_config_for` 里没有它的形状）。",
@@ -1842,12 +1881,66 @@ fn tiers_of_site(
 
 /// 内部版本额外带出每条档位的 `website_url`（= 所属站点的 origin），供
 /// [`list_relays_impl`] 按站分组。命令层把它丢掉 —— 那是实现细节，不进对外契约。
+fn codex_models_from_settings(settings: &serde_json::Value) -> Vec<String> {
+    settings
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("model").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A LoongPort model-chip click is a managed preference, so refreshing the
+/// tier should keep it while the newly fetched catalog still advertises it.
+/// Once the upstream removes the model, the freshly computed default wins.
+fn preserve_supported_codex_model(
+    defaults: serde_json::Value,
+    previous: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(model) = provision::extract_model(previous) else {
+        return defaults;
+    };
+    select_codex_model(&defaults, &model).unwrap_or(defaults)
+}
+
+fn select_codex_model(
+    settings: &serde_json::Value,
+    model: &str,
+) -> Result<serde_json::Value, AppError> {
+    let model = model.trim();
+    if model.is_empty()
+        || !codex_models_from_settings(settings)
+            .iter()
+            .any(|candidate| candidate == model)
+    {
+        return Err(AppError::Config(format!(
+            "模型 {model:?} 不在这个档位支持的模型列表中"
+        )));
+    }
+
+    let config = settings
+        .get("config")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AppError::Config("这个 Codex 档位缺少 config.toml".to_string()))?;
+    let updated_config = crate::codex_config::update_codex_toml_field(config, "model", model)
+        .map_err(AppError::Config)?;
+    let mut updated = settings.clone();
+    updated["config"] = serde_json::Value::String(updated_config);
+    Ok(updated)
+}
+
 fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>, AppError> {
     // AppType 没派生 Copy（上游结构，别为此改它），所以 clone 一份给第二个调用点。
     let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
     // 这条路按 app 查，所以结果天然同质 —— 每条档位的 `app_id` 就是被查的那个。
     // 先取出来：`app_type` 下一行就被 move 进 `list` 了。
     let app_id = app_type.as_str().to_string();
+    let exposes_codex_models = matches!(app_type, AppType::Codex);
     let providers = ProviderService::list(state, app_type)?;
 
     let mut tiers: Vec<OwnedTier> = providers
@@ -1863,6 +1956,12 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                 rate_multiplier: None,
                 group_name: p.name.clone(),
                 display_name: p.name.clone(),
+                model: provision::extract_model(&p.settings_config).unwrap_or_default(),
+                models: if exposes_codex_models {
+                    codex_models_from_settings(&p.settings_config)
+                } else {
+                    Vec::new()
+                },
                 is_current: current == p.id,
                 // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
                 // 由 `tiers_of_site` 在按站分组时填。见该字段的文档。
@@ -1915,6 +2014,77 @@ pub async fn relay_switch_tier(
     switch_tier_impl(&app_handle, &provider_id, app_type, quit_chatgpt)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Select a supported model from a managed Codex tier and activate that tier.
+///
+/// The model catalog stored with the provider is the authority for validation;
+/// this keeps a stale frontend from writing an arbitrary model into
+/// `config.toml`. Updating the provider before the normal switch flow also
+/// means ChatGPT is restarted with the selected model already in place.
+#[tauri::command]
+pub async fn relay_switch_tier_model(
+    app_handle: tauri::AppHandle,
+    provider_id: String,
+    app: String,
+    model: String,
+    quit_chatgpt: bool,
+) -> Result<SwitchTierResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    select_tier_model_impl(&app_handle, &provider_id, app_type, &model, quit_chatgpt)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn select_tier_model_impl(
+    app_handle: &tauri::AppHandle,
+    provider_id: &str,
+    app_type: AppType,
+    model: &str,
+    quit_chatgpt: bool,
+) -> Result<SwitchTierResult, AppError> {
+    if !matches!(app_type, AppType::Codex) {
+        return Err(AppError::Config(
+            "模型选择目前只支持 Codex 档位".to_string(),
+        ));
+    }
+    if !crate::relay::is_managed(provider_id) {
+        return Err(AppError::Config(
+            "只有 LoongPort 托管的 Codex 档位才能从模型列表切换".to_string(),
+        ));
+    }
+
+    let state = app_handle.state::<AppState>();
+    let original_settings = state
+        .db
+        .get_provider_by_id(provider_id, app_type.as_str())?
+        .ok_or_else(|| AppError::Config("这个 Codex 档位不存在".to_string()))?
+        .settings_config;
+    let settings = select_codex_model(&original_settings, model)?;
+
+    state
+        .db
+        .update_provider_settings_config(app_type.as_str(), provider_id, &settings)?;
+
+    match switch_tier_impl(app_handle, provider_id, app_type.clone(), quit_chatgpt).await {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            // Model selection is a managed preference, not a manual provider
+            // edit. If the guarded switch fails, restore the DB value so a
+            // later refresh cannot silently apply a model the user never
+            // successfully switched to.
+            if let Err(rollback_error) = state.db.update_provider_settings_config(
+                app_type.as_str(),
+                provider_id,
+                &original_settings,
+            ) {
+                return Err(AppError::Config(format!(
+                    "{error}；模型配置回滚失败：{rollback_error}"
+                )));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// 这次切换要不要退 ChatGPT。
@@ -2559,6 +2729,18 @@ mod tests {
         },
     };
 
+    fn codex_settings(model: &str, models: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "sk-test" },
+            "config": format!(
+                "model_provider = \"custom\"\nmodel = {model:?}\n\n[model_providers.custom]\nname = \"Test\"\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            ),
+            "modelCatalog": {
+                "models": models.iter().map(|model| serde_json::json!({ "model": model })).collect::<Vec<_>>()
+            }
+        })
+    }
+
     fn provider_with_id(id: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -2574,6 +2756,45 @@ mod tests {
             icon_color: None,
             in_failover_queue: false,
         }
+    }
+
+    #[test]
+    fn codex_model_list_requires_a_real_catalog() {
+        let settings = serde_json::json!({
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-current\"\n"
+        });
+
+        assert!(
+            codex_models_from_settings(&settings).is_empty(),
+            "旧 provider 只有当前模型时，不能把它冒充成完整支持列表"
+        );
+    }
+
+    #[test]
+    fn selecting_a_codex_model_validates_and_only_updates_the_model_field() {
+        let settings = codex_settings("gpt-a", &["gpt-a", "gpt-b"]);
+
+        let selected = select_codex_model(&settings, " gpt-b ").expect("supported model");
+        assert_eq!(
+            provision::extract_model(&selected).as_deref(),
+            Some("gpt-b")
+        );
+        assert_eq!(selected["modelCatalog"], settings["modelCatalog"]);
+        assert_eq!(selected["auth"], settings["auth"]);
+
+        assert!(select_codex_model(&settings, "gpt-unknown").is_err());
+    }
+
+    #[test]
+    fn refreshing_a_managed_codex_tier_keeps_only_a_still_supported_selection() {
+        let defaults = codex_settings("gpt-a", &["gpt-a", "gpt-b"]);
+        let previous = codex_settings("gpt-b", &["gpt-a", "gpt-b"]);
+        let kept = preserve_supported_codex_model(defaults.clone(), &previous);
+        assert_eq!(provision::extract_model(&kept).as_deref(), Some("gpt-b"));
+
+        let removed = codex_settings("gpt-removed", &["gpt-removed"]);
+        let reset = preserve_supported_codex_model(defaults, &removed);
+        assert_eq!(provision::extract_model(&reset).as_deref(), Some("gpt-a"));
     }
 
     /// ⭐ `relay_list_sponsors` 发给前端的**键名**必须是 camelCase。
@@ -2634,6 +2855,8 @@ mod tests {
             app_id: AppType::Claude.as_str().to_string(),
             group_name: "pro池".into(),
             display_name: "站 · pro池".into(),
+            model: "claude-sonnet-5".into(),
+            models: vec!["claude-sonnet-5".into()],
             rate_multiplier: Some(1.0),
             is_current: false,
             user_edited: None,
@@ -2863,6 +3086,8 @@ mod tests {
             app_id: AppType::Codex.as_str().to_string(),
             group_name: id.into(),
             display_name: id.into(),
+            model: "gpt-5.6-sol".into(),
+            models: vec!["gpt-5.6-sol".into()],
             rate_multiplier: None,
             is_current: false,
             // 归属测试不关心它 —— `tiers_of_site` 会自己算出来覆盖掉这个值。

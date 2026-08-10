@@ -3091,6 +3091,9 @@
     "tier": {
       "rateUnknown": "Rate unknown",
       "rate": "{{value}}x",
+      "models": "Supported models",
+      "selectModel": "Switch to model {{model}}",
+      "modelSelected": "Current model",
       "switching": "Switching…",
       "checkConnectivity": "Check connectivity",
       "resetConfig": "Restore default config",
@@ -3139,7 +3142,10 @@
     "switch": {
       "done": "Switched to {{name}}",
       "doneRelaunched": "Switched to {{name}}, ChatGPT reopened",
-      "doneNeedsRestart": "Switched to {{name}} — please restart ChatGPT manually"
+      "doneNeedsRestart": "Switched to {{name}} — please restart ChatGPT manually",
+      "modelDone": "Switched {{name}} to model {{model}}",
+      "modelDoneRelaunched": "Switched {{name}} to model {{model}}, ChatGPT reopened",
+      "modelDoneNeedsRestart": "Switched {{name}} to model {{model}} — please restart ChatGPT manually"
     },
     "official": {
       "button": "Switch back to official login",
