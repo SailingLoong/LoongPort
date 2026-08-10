@@ -1610,14 +1610,14 @@ model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 disable_response_storage = true
 personality = "pragmatic"
+model_context_window = 1050000
+model_auto_compact_token_limit = 900000
 
 [model_providers.custom]
 name = "E-FlowCode"
 base_url = "https://e-flowcode.cc/v1"
 wire_api = "responses"
-requires_openai_auth = true
-model_context_window = 1000000
-model_auto_compact_token_limit = 9000000`,
+requires_openai_auth = true`,
     category: "third_party",
     endpointCandidates: ["https://e-flowcode.cc/v1"],
     icon: "eflowcode",
