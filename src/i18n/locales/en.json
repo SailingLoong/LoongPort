@@ -3131,6 +3131,7 @@
       "readyWithKeys": "{{count}} tier(s) ready, {{keys}} key(s) created",
       "landedOnOtherPlatforms": "This account has {{count}} group(s), but none of them are for the current CLI. Switch to the matching tab above to see them.",
       "groupFailed": "{{group}}: {{reason}}",
+      "mergedProviders": "Adopted {{count}} duplicate provider(s) from cc-switch",
       "refreshed": "Refreshed {{relays}} relay(s), {{tiers}} tier(s) total",
       "refreshFailedWithReason": "Failed to refresh {{name}}: {{reason}}",
       "refreshedWithKeys": "Refreshed {{relays}} relay(s), {{tiers}} tier(s) total, {{keys}} new key(s)"

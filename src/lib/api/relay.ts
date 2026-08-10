@@ -138,6 +138,8 @@ export interface ProvisionSummary {
   failures: Array<{ groupName: string; reason: string }>;
   /** 这次新建了几把密钥（其余是复用已有的）。 */
   keysCreated: number;
+  /** Imported non-managed providers removed because LoongPort now owns the same credential. */
+  mergedProviders: Array<{ name: string; appId: AppId }>;
 }
 
 export interface SwitchTierResult {

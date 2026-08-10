@@ -74,4 +74,11 @@ export function reportProvision(
       }),
     );
   }
+  if (r.mergedProviders.length > 0) {
+    toast.info(
+      t("loongport.provision.mergedProviders", {
+        count: r.mergedProviders.length,
+      }),
+    );
+  }
 }

@@ -65,6 +65,7 @@ pub mod managed;
 pub mod model_verification;
 pub mod platform_map;
 pub mod promo;
+pub(crate) mod provider_fingerprint;
 pub mod provision;
 pub mod purchase;
 pub mod remote_config;

@@ -32,6 +32,7 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::VENDOR_LOGIN_ERROR;
 use crate::provider::Provider;
+use crate::relay::provider_fingerprint;
 use crate::services::ProviderService;
 use crate::store::AppState;
 use crate::vendor::{creds, deepseek, provision, Vendor, VendorError};
@@ -155,6 +156,8 @@ pub struct VendorProvisionSummary {
     /// `false` = 本地已有明文，零请求就完事（**正常路径**）。前端据此决定要不要
     /// 提示「已在官网新建密钥」—— 每次刷新都提示会让用户以为在重复建 key。
     pub key_created: bool,
+    /// Imported non-managed providers removed because this account now owns the same credential.
+    pub merged_providers: Vec<String>,
 }
 
 /// 列出已添加的官网账号。
@@ -482,6 +485,7 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
     let provider_id = provision::provider_id_for(vendor.vendor_id(), &account_id);
 
     let mut platforms = Vec::new();
+    let mut merged_providers = Vec::new();
     for (idx, (app_type, defaults)) in provision::provider_rows_for(vendor, &api_key)
         .into_iter()
         .enumerate()
@@ -536,6 +540,30 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
             .save_provider(app_type.as_str(), &provider)
             .map_err(|e| AppError::Database(format!("保存 {} 配置失败: {e}", app_type.as_str())))?;
 
+        let merged = provider_fingerprint::remove_unmanaged_duplicates(
+            state.db.as_ref(),
+            &app_type,
+            &provider,
+        )?;
+        if !merged.is_empty() {
+            log::info!(
+                "收编 {} 个重复的 {} provider：{}",
+                merged.len(),
+                app_type.as_str(),
+                merged
+                    .iter()
+                    .map(|item| item.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+            if merged.iter().any(|item| item.was_current) {
+                state
+                    .db
+                    .set_current_provider(app_type.as_str(), &provider_id)?;
+            }
+            merged_providers.extend(merged.into_iter().map(|item| item.name));
+        }
+
         platforms.push(app_type.as_str().to_string());
     }
 
@@ -568,6 +596,7 @@ async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvision
         provider_id,
         platforms,
         key_created,
+        merged_providers,
     })
 }
 
@@ -894,6 +923,22 @@ mod tests {
         r.vendor_id = "kimi".into();
         let dto = VendorAccountRow::from(r);
         assert_eq!(dto.vendor_name, "kimi", "认不出也要有个名字显示，不能空着");
+    }
+
+    #[test]
+    fn provision_summary_reports_adopted_providers_to_the_frontend() {
+        let summary = VendorProvisionSummary {
+            provider_id: "loongport-0123456789abcdef".into(),
+            platforms: vec![AppType::Codex.as_str().into()],
+            key_created: false,
+            merged_providers: vec!["Imported DeepSeek".into()],
+        };
+
+        let json = serde_json::to_value(summary).expect("应能序列化");
+        assert_eq!(
+            json["mergedProviders"],
+            serde_json::json!(["Imported DeepSeek"])
+        );
     }
 
     // ─────────────── 当前在用：与中转站档位同源互斥 ───────────────

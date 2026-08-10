@@ -730,6 +730,13 @@ export function RelaySection({ appId }: RelaySectionProps) {
             ? t("loongport.vendor.keyCreated", { count: r.platforms.length })
             : t("loongport.vendor.keyReady", { count: r.platforms.length }),
         );
+        if (r.mergedProviders.length > 0) {
+          toast.info(
+            t("loongport.provision.mergedProviders", {
+              count: r.mergedProviders.length,
+            }),
+          );
+        }
         return r.providerId;
       } catch (e) {
         const msg = String(e);

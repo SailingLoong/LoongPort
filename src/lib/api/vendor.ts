@@ -85,6 +85,8 @@ export interface VendorProvisionSummary {
    * ⚠️ 只在 `true` 时提示「已在官网新建密钥」—— 每次刷新都提示会让用户以为在重复建 key。
    */
   keyCreated: boolean;
+  /** Imported non-managed providers removed because this account now owns the same credential. */
+  mergedProviders: string[];
 }
 
 /**

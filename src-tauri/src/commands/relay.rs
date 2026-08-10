@@ -37,7 +37,9 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
-use crate::relay::{api, chatgpt_app, creds, imagegen_mcp, login, provision, purchase};
+use crate::relay::{
+    api, chatgpt_app, creds, imagegen_mcp, login, provider_fingerprint, provision, purchase,
+};
 use crate::services::ProviderService;
 use crate::store::AppState;
 
@@ -219,6 +221,15 @@ pub struct ProvisionSummary {
     /// 给用户看的：第二次进来应该是 0（全部认领到），若每次都在新建，说明认领逻辑有问题
     /// 正在给他账号里堆垃圾 Key。
     pub keys_created: usize,
+    /// Imported non-managed providers removed because LoongPort now owns the same credential.
+    pub merged_providers: Vec<MergedProviderInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergedProviderInfo {
+    pub name: String,
+    pub app_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -903,6 +914,7 @@ async fn do_provision(
     let state = app_handle.state::<AppState>();
 
     let mut tiers = Vec::new();
+    let mut merged_providers = Vec::new();
     // 这次 provision 认可的「(app_type, provider_id)」组合。见下方 insert 处的说明。
     let mut keep: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     // 这次改写到的档位里，哪些**正是所属 app 的当前项**。见循环后那段刷 live 的说明。
@@ -1014,6 +1026,39 @@ async fn do_provision(
             .save_provider(app_type.as_str(), &provider)
             .map_err(|e| AppError::Database(format!("保存档位 {display_name} 失败: {e}")))?;
 
+        // 导入后的 cc-switch provider 可能仍指向同一站点、同一把 key。LoongPort
+        // 托管档位是该事实的 owner：收编同 app 下的非托管副本，避免用户看到两个
+        // 实际指向同一上游的档位。指纹只用于这次协调，不改变托管档位的稳定 id。
+        let merged_current = provider_fingerprint::remove_unmanaged_duplicates(
+            state.db.as_ref(),
+            app_type,
+            &provider,
+        )?;
+        if !merged_current.is_empty() {
+            log::info!(
+                "收编 {} 个重复的 {} provider：{}",
+                merged_current.len(),
+                app_type.as_str(),
+                merged_current
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+            merged_providers.extend(merged_current.iter().map(|merged| MergedProviderInfo {
+                name: merged.name.clone(),
+                app_id: app_type.as_str().to_string(),
+            }));
+            if merged_current.iter().any(|m| m.was_current) {
+                state
+                    .db
+                    .set_current_provider(app_type.as_str(), &provider_id)?;
+                if !refresh_live.contains(app_type) {
+                    refresh_live.push(app_type.clone());
+                }
+            }
+        }
+
         // ⚠️ **`keep` 必须带 app_type**，不能只放 provider_id。
         //
         // `provider_id` 是 `sha256(site_origin + group_id)` —— **不含 app_type**，
@@ -1095,6 +1140,7 @@ async fn do_provision(
             .into_iter()
             .map(|(group_name, reason)| FailureInfo { group_name, reason })
             .collect(),
+        merged_providers,
     })
 }
 
@@ -2619,6 +2665,195 @@ mod tests {
         for id in ["custom-1", "codex-official", "", "LoongPort-1"] {
             assert!(!is_managed(&provider_with_id(id)), "id: {id}");
         }
+    }
+
+    #[test]
+    fn provision_merge_removes_only_same_app_unmanaged_duplicate() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let site = "https://relay.example";
+        let key = "sk-same";
+        let settings = provision::settings_config_for(
+            &app_type,
+            key,
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+
+        let duplicate = Provider {
+            id: "cc-switch-duplicate".into(),
+            name: "Imported duplicate".into(),
+            settings_config: settings.clone(),
+            website_url: Some(site.into()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        let different_key = Provider {
+            id: "cc-switch-different-key".into(),
+            name: "Keep different key".into(),
+            settings_config: provision::settings_config_for(
+                &app_type,
+                "sk-other",
+                "Other",
+                "https://relay.example/v1",
+                "model-a",
+            )
+            .expect("codex 配置"),
+            ..duplicate.clone()
+        };
+        let managed_duplicate = Provider {
+            id: provision::provider_id_for(site, Some(1), 42),
+            name: "Managed duplicate".into(),
+            meta: Some(managed_meta(&app_type, Some(1))),
+            ..duplicate.clone()
+        };
+        db.save_provider(app_type.as_str(), &duplicate)
+            .expect("写入重复项");
+        db.save_provider(app_type.as_str(), &different_key)
+            .expect("写入不同 key");
+        db.save_provider(app_type.as_str(), &managed_duplicate)
+            .expect("写入托管项");
+
+        let merged =
+            provider_fingerprint::remove_unmanaged_duplicates(&db, &app_type, &managed_duplicate)
+                .expect("收编不该失败");
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "Imported duplicate");
+        assert!(db
+            .get_provider_by_id("cc-switch-duplicate", app_type.as_str())
+            .expect("查询")
+            .is_none());
+        assert!(db
+            .get_provider_by_id("cc-switch-different-key", app_type.as_str())
+            .expect("查询")
+            .is_some());
+        assert!(db
+            .get_provider_by_id(&managed_duplicate.id, app_type.as_str())
+            .expect("查询")
+            .is_some());
+    }
+
+    #[test]
+    fn provision_merge_reports_when_duplicate_was_current() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let settings = provision::settings_config_for(
+            &app_type,
+            "sk-current",
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+        let duplicate = Provider {
+            id: "cc-switch-current".into(),
+            name: "Current imported duplicate".into(),
+            settings_config: settings,
+            website_url: Some("https://relay.example".into()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        db.save_provider(app_type.as_str(), &duplicate)
+            .expect("写入当前项");
+        db.set_current_provider(app_type.as_str(), &duplicate.id)
+            .expect("设为当前");
+
+        let managed = Provider {
+            id: provision::provider_id_for("https://relay.example", Some(1), 99),
+            name: "Managed replacement".into(),
+            meta: Some(managed_meta(&app_type, Some(1))),
+            ..duplicate.clone()
+        };
+        db.save_provider(app_type.as_str(), &managed)
+            .expect("写入托管替代项");
+
+        let merged = provider_fingerprint::remove_unmanaged_duplicates(&db, &app_type, &managed)
+            .expect("收编不该失败");
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].was_current);
+    }
+
+    #[test]
+    fn provision_merge_never_uses_an_unmanaged_provider_as_the_owner() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let settings = provision::settings_config_for(
+            &app_type,
+            "sk-shared",
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+        let imported = Provider {
+            id: "cc-switch-imported".into(),
+            name: "Imported".into(),
+            settings_config: settings.clone(),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        let non_managed_candidate = Provider {
+            id: "manual-provider".into(),
+            name: "Manual".into(),
+            settings_config: settings,
+            ..imported.clone()
+        };
+        db.save_provider(app_type.as_str(), &imported)
+            .expect("写入导入项");
+        db.save_provider(app_type.as_str(), &non_managed_candidate)
+            .expect("写入手工项");
+
+        assert!(provider_fingerprint::remove_unmanaged_duplicates(
+            &db,
+            &app_type,
+            &non_managed_candidate,
+        )
+        .expect("不该失败")
+        .is_empty());
+        assert!(db
+            .get_provider_by_id(&imported.id, app_type.as_str())
+            .expect("查询")
+            .is_some());
+    }
+
+    #[test]
+    fn provision_summary_reports_adopted_providers_to_the_frontend() {
+        let summary = ProvisionSummary {
+            tiers: Vec::new(),
+            failures: Vec::new(),
+            keys_created: 0,
+            merged_providers: vec![MergedProviderInfo {
+                name: "Imported duplicate".into(),
+                app_id: AppType::Codex.as_str().to_string(),
+            }],
+        };
+
+        let json = serde_json::to_value(summary).expect("应能序列化");
+        assert_eq!(json["mergedProviders"][0]["name"], "Imported duplicate");
+        assert_eq!(json["mergedProviders"][0]["appId"], "codex");
     }
 
     fn tier(id: &str) -> TierInfo {
