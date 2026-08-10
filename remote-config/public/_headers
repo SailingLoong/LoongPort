@@ -1,0 +1,20 @@
+# 配置与签名：短缓存。
+#
+# ⚠️ 这个值直接决定「撤掉一个邀请码后多久生效」——`resolve_aff_code` 里把空串
+# 当作「维护者明确撤销」，但那要客户端先拿到新配置才算数。长缓存会让撤销失效很久。
+#
+# 300 秒是权衡：够短（撤销 5 分钟内传播），又不至于让每次启动都真回源
+# （客户端 8 秒超时 + 三层回落，回源慢一点也不影响用户）。
+/v1/config.json
+  Cache-Control: public, max-age=300
+  Content-Type: application/json; charset=utf-8
+
+# ⚠️ 签名与配置**必须同一个 max-age** —— 不然会出现「新配置 + 旧签名」的组合，
+# 客户端验签不过就整份丢弃（那是正确行为，但表现成「改了配置没生效」，很难查）。
+/v1/config.json.sig
+  Cache-Control: public, max-age=300
+  Content-Type: application/octet-stream
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer

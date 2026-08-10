@@ -1,0 +1,221 @@
+# 远端配置：赞助中转站 + 邀请码
+
+客户端启动后拉这份配置，覆盖编译期内置的邀请码表、并提供首启屏的赞助商列表。
+消费它的代码是 `LoongPort/src-tauri/src/relay/remote_config.rs`（那份的模块文档
+讲清了为什么要验签、三层回落怎么运作）。
+
+首次上线 2026-08-03。
+
+## 日常：加一家赞助商 / 改一个邀请码
+
+```bash
+cd ~/code/LoongPort-workspace/LoongPort/remote-config
+$EDITOR public/v1/config.json     # 1. 改内容
+./sign.sh                         # 2. 重新签名（**忘了这步 = 客户端全部拒绝**）
+./deploy.sh                       # 3. 部署
+./verify.sh                       # 4. 验线上（等 ~30 秒再跑，CDN 有 300 秒缓存）
+```
+
+四步都要跑。`sign.sh` 与 `verify.sh` 各自会自验并在出错时明确报出来。
+
+**不需要发版** —— 这套机制存在的全部意义就是改配置不用发新版本客户端。
+
+## 配置源位置
+
+配置源文件就在本仓库，用户可以直接审阅明文内容；客户端运行时从 Cloudflare Pages
+拉取同一份已签名配置。推荐站点与邀请码的变更必须修改明文后重新签名、部署。
+
+`aff_codes` 与 `sponsors` 独立维护：前者负责登录时自动带上注册邀请码，后者负责
+添加中转站弹窗的推荐列表。两者都保留客户端编译期回退，确保首次离线启动仍可使用邀请码。
+
+## ⚠️ 收录一家之前先测它探不探得通
+
+客户端靠 `GET /api/v1/settings/public` 里的 `version` 字段认「这是不是 sub2api 站」
+（`relay/api.rs::probe_site`）。**有些站被 Cloudflare 的机器人防护挡在门外**，
+那时客户端拿到一个 HTML 挑战页、报「看起来不是 sub2api 站点」——
+放进推荐列表就是给用户一个点了必然失败的按钮。
+
+```bash
+curl -sS -m 12 -o /dev/null -w "%{http_code}\n" https://<域名>/api/v1/settings/public
+```
+
+**200 才收录**。403 说明被防护拦了 —— 那不是「不是 sub2api」，也不是我们能绕的：
+客户端已经带了浏览器 UA（`api.rs` 里的 `WEBVIEW_USER_AGENT`），实测再加
+`Accept` / `Accept-Language` / `Referer` / `Origin` 仍是 403 ⇒ 拦在 **TLS 指纹层**
+（JA3），改 HTTP 头解决不了。
+
+2026-08-10 实测：`wawapii.com` / `hapiopen.cc` / `999555999.com` 都 200，
+**`api.aijws.com`（贾维斯）403** ⇒ 已从 `sponsors` 移除。
+但它的 **aff 码留在 `aff_codes` 里** —— 用户自己手动加那个站时返利仍该算我们的。
+
+## 事实表
+
+| 项 | 值 |
+|---|---|
+| 端点 | `https://config.loongport.dev/v1/config.json`（签名同名加 `.sig`） |
+| 托管 | Cloudflare Pages 项目 `loongport-config`（与官网 `loongport-website` **分开**） |
+| DNS | `config` CNAME → `loongport-config.pages.dev`，proxied |
+| 公钥 | `3e199ad0082b525fdf8edef5f7161270675e107fd81d31dbce1b71d83936a131` |
+| 私钥 | `~/Documents/loongport-keys/remote-config-ed25519.pem`（600，**仓外，绝不入库**）。备份见下节 |
+| 缓存 | `max-age=300`（见 `public/_headers`） |
+
+Cloudflare 凭据在本机 Keychain，`~/.zshrc` 里读它 —— 脚本直接用环境变量，无需额外配置。
+
+## 私钥备份：Keychain + 纸质（2026-08-04 落地）
+
+日常签名**照旧直接用那个 `.pem`**（`sign.sh` 自己会读它）。这一节讲的是
+**那个文件没了怎么恢复** —— 备份不参与日常流程，别在脚本里改成从 Keychain 取。
+
+三份，互不依赖：
+
+| 位置 | 存的形态 | 性质 |
+|---|---|---|
+| `~/Documents/loongport-keys/remote-config-ed25519.pem` | 完整 PEM，600 | 工作副本，`sign.sh` 用的就是它 |
+| 本机 login Keychain | PEM **正文那 64 字符**（无首尾两行） | 同一块磁盘，**不是异地冗余** |
+| 纸质抄写 | 同上 64 字符 | 唯一的离线 / 异地冗余 |
+
+⚠️ **Keychain 那份不算"第二份"**：它在 `~/Library/Keychains/login.keychain-db`，
+与工作副本同盘，且 `security` CLI 加的条目**不同步 iCloud**。它的价值是把明文
+从 `~/Documents` 挪进加密存储，抗的是"误删/误读文件"，抗不了磁盘损坏。
+真正的冗余是纸质那份。
+
+### 从 Keychain 取出并恢复成 `.pem`
+
+```bash
+security find-generic-password -a loongport -s loongport-remote-config-signing-key -w
+```
+
+`-a loongport` / `-s loongport-remote-config-signing-key` 是查它的**唯一坐标**
+（`-s` 刻意不带空格与括号，好让脚本引用时不必操心引号转义）。
+每次读会弹一次授权框（存的时候给了 `-T ""`，不预授权任何程序）。
+
+一步还原成可用的 `.pem`：
+
+```bash
+printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' \
+  "$(security find-generic-password -a loongport -s loongport-remote-config-signing-key -w)" \
+  > ~/Documents/loongport-keys/remote-config-ed25519.pem
+chmod 600 ~/Documents/loongport-keys/remote-config-ed25519.pem
+```
+
+**验证恢复对了**（须用 Homebrew OpenSSL，理由见本文末尾那条 LibreSSL 警告）：
+
+```bash
+"$(brew --prefix openssl@3)/bin/openssl" pkey \
+  -in ~/Documents/loongport-keys/remote-config-ed25519.pem \
+  -pubout -outform DER | tail -c 32 | xxd -p -c 32
+```
+
+输出**必须**等于事实表里那把公钥 `3e199ad0…a131`。不等就是恢复错了 ——
+⚠️ 别跳过这一步：用错的私钥签出来的配置**签名格式完全合法**，
+只是客户端全部拒绝，症状与"服务器挂了"一模一样。
+
+### 存的时候为什么是 64 字符而不是完整 PEM
+
+`security add-generic-password` 的交互式 `-w` 不接受多行输入。而首尾那两行
+`-----BEGIN/END PRIVATE KEY-----` 是固定文本、不含信息，恢复时补上即可。
+
+⚠️ **一个踩过的坑：值必须进密码字段，不能进 `-j`（注释）**。
+`-j 'MC4C...'` 命令会成功、`find-generic-password` 也看得见那串（在 `icmt` 属性里），
+但 **`-w` 取出来是空串且 exit=0** —— 所有脚本会静默拿到空值。
+且注释字段不受访问控制保护（任何进程直接读，不弹授权框）。
+写的时候用 `-w` 不带值走交互式输入（顺带避免私钥进 shell history 与 `ps`）。
+
+## ⚠️ 两件不可逆的事
+
+**端点 URL** 与**那把公钥**都烧在已发布的客户端二进制里。改任何一个，老版本客户端
+就永久收不到更新（静默回落到内置表，**不报任何错**）。
+
+⇒ **私钥丢了或泄露是真麻烦，不是「重新生成一把就行」** —— 换公钥要发新版，
+而没升级的用户永远停在内置那份。备份见上节。
+
+（`v1` 那段路径是给将来 schema 破坏性变更留的：那时新客户端打 `/v2/`，
+`/v1/` 要一直留着喂旧客户端。）
+
+## 格式
+
+```json
+{
+  "issued_at": "2026-08-03T00:00:00Z",
+  "sponsors": [
+    { "site_origin": "https://example.com", "display_name": "示例", "tagline": "一句话介绍" }
+  ],
+  "aff_codes": { "example.com": "CODE12345678" }
+}
+```
+
+字段名是**签名覆盖的契约**（`RemoteConfig` / `Sponsor` 的 serde 默认 snake_case）——
+改名意味着旧客户端解不出新配置。四条写错了不报错、只静默失效的规则：
+
+- **`aff_codes` 的 key 必须是归一后的 host**：小写、**去 `www.`**、**不带端口**、不带 scheme。
+  写 `https://www.example.com` 永远命中不到（归一逻辑见 `aff.rs::lookup_host`）。
+- **码按最终大写形态写**。服务端会 `ToUpper`，客户端只 trim 不校验格式。
+- **空字符串 = 明确撤销这个站的码**，不回落到内置表。这是撤码的唯一手段。
+- **`sponsors` 的顺序就是 UI 展示顺序**，客户端不排序；`display_name` 直接显示，不翻译。
+
+`issued_at` 客户端目前**忽略**（未知字段跳过）。它是为将来防回滚攻击攒的历史 ——
+CDN 或攻击者可以重放一份**旧的、签名仍然有效**的配置，把已撤销的码复活。
+从第一份就带上，将来加校验时不需要过渡期。
+
+## 脚本
+
+| 脚本 | 干什么 | 什么时候跑 |
+|---|---|---|
+| `sign.sh` | 签名，然后**用代码里那把公钥**验一遍 | 每次改完 `config.json` |
+| `deploy.sh` | 先本地验签，通过才部署到 Pages | 签完 |
+| `verify.sh` | 拉**线上**那两个文件验签，并比对与本地是否一致 | 部署后 |
+| `lib.sh` | 三者共用的函数（从 `.rs` 取常量、hex→DER、验签），**不单独执行** | — |
+
+那三个可执行脚本都用**从 `remote_config.rs` grep 出来的**公钥，不手抄 ——
+手抄多一个能写错的地方，而写错的症状是「验签永远失败」，与「服务器挂了」一模一样。
+
+⚠️ **必须用 Homebrew 的 OpenSSL，macOS 自带的 LibreSSL 做不了 Ed25519**
+（实测 LibreSSL 3.3.6 连私钥都载不进来，且 `pkeyutl` 没有 `-rawin`）。
+三个脚本开头都有一道预检会明确报出来 —— 没有它的话，LibreSSL 下的失败会被
+`verify.sh` 报成「改完 JSON 忘了重签？」，**把一份正确的配置误诊成签名出错**。
+这台机器能跑只因为 Homebrew 的 OpenSSL 在 PATH 里靠前；另外两台机器上要先：
+
+```bash
+brew install openssl@3
+export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+```
+
+各自守的是不同的东西，别省任何一步：
+
+- **`sign.sh` 的自验**用代码里那把公钥（而不是从私钥现导出的那把）。后者是套套逻辑、
+  永远成立；前者才抓得出「私钥换了/指错了，而代码里的公钥没同步」。
+- **`deploy.sh` 的前置验签**挡的是「陈旧或不相干的 `.sig`」。曾经这里只判「签名 64 字节」
+  和「签名比配置新」，两条都是**代理指标** —— 一个 touch 过的旧签名全能骗过去，
+  然后部署上线被客户端整份丢弃，而线上看起来一切正常。
+- **`verify.sh`** 覆盖的是单测覆盖不到的那件事：**线上那份与客户端烧着的公钥是否配套**。
+  单测用现场生成的密钥对验「机制」对不对，验不了「这次发布对不对」。
+  它还比对线上与本地是否一致 —— 只验签通过不够，线上可能是**上一次**发布的
+  （旧但签名有效）。
+
+代码侧另有一条等价的闸：`cargo test --lib live_remote_config -- --ignored`
+走客户端生产路径打线上端点，两者互为备份。
+
+## 常见故障
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| `verify.sh` 报验签失败 | 改了 JSON 忘跑 `sign.sh`，或只发了一个文件 | 重跑 `sign.sh` + `deploy.sh` |
+| `verify.sh` 报「与本地不一致」 | 还没部署，或 CDN 缓存未过期 | 等 5 分钟再试 |
+| 客户端拉不到但线上验签通过 | 正常 —— 拉不到不是错误，它会用缓存/内置 | 看客户端日志 `远端配置` |
+
+⚠️ **只发 `config.json` 不发 `.sig` = 客户端全部拒绝。那是正确行为，不是 bug**
+（否则攻击者删掉 `.sig` 即可绕过验签）。`deploy.sh` 传整个 `public/`，不会漏。
+
+## 为什么要签名（不是过度设计）
+
+绝大多数远端配置不签名，直接 HTTPS 拉 JSON 就够了。这份不同的地方在于**被篡改的后果**：
+
+- 改 `aff_codes` → 返利收益转给攻击者
+- 改 `sponsors` 的 `site_origin` → **用户被引到钓鱼站，并在那里输入真实账号密码**
+
+HTTPS 只保证"传输中没被改"，不保证"服务器上那份就是我们写的"。绕过 TLS 有三条现成的路：
+Cloudflare 账号/Token 泄露、域名过期被抢注、CDN 投毒。签名把信任从"服务器和账号"
+移到"一把只在本机的私钥"—— 攻击者拿到 Cloudflare 完全控制权也只能让客户端**拉不到**，
+不能让它拉到**假的**。
+
+同类做法：apt / Homebrew / Sparkle / Tauri 自己的 updater 都签。
