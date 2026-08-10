@@ -45,6 +45,7 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
+use crate::relay::provider_fingerprint;
 
 /// 导入时保留的本地表：LoongPort 的两张明文凭据表 + settings。
 ///
@@ -134,15 +135,7 @@ struct SourceProvider {
 /// 返回 `None` = 取不到（base_url / sk 提取失败，或这个 CLI 还没接线）—— 那条原样导入、
 /// 不参与冲突检测。
 fn fingerprint_of(provider: &Provider, app_type: &AppType) -> Option<(String, String)> {
-    let base_url = crate::proxy::providers::get_adapter(app_type)
-        .extract_base_url(provider)
-        .ok()?;
-    let origin = crate::relay::api::normalize_site_origin(&base_url).ok()?;
-    let sk = crate::relay::provision::extract_api_key(&provider.settings_config, app_type)?;
-    if origin.is_empty() || sk.is_empty() {
-        return None;
-    }
-    Some((origin, sk))
+    provider_fingerprint::for_provider(provider, app_type)
 }
 
 /// 一条 cc-switch provider 的分类结果。四类互斥。
