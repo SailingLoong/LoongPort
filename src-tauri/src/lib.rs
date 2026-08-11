@@ -11,6 +11,7 @@ mod commands;
 mod config;
 mod database;
 mod deeplink;
+mod diagnostics;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
@@ -355,7 +356,7 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 /// 一个转发函数只暴露真正要暴露的东西，`main.rs` 那侧读起来也更清楚
 /// ——「这个二进制有两种启动方式」正好对应这里的两个 `pub fn`。
 pub fn run_imagegen_mcp() -> Result<(), String> {
-    relay::imagegen_mcp::serve()
+    relay::imagegen_mcp::serve().map_err(|error| diagnostics::redact_log_text(&error))
 }
 
 /// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
@@ -367,7 +368,7 @@ pub use relay::imagegen_mcp::IMAGEGEN_MCP_FLAG;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
+    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.loongport/crash.log）
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
@@ -524,7 +525,7 @@ pub fn run() {
             app_store::refresh_app_config_dir_override(app.handle());
             panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
 
-            // 初始化日志（输出到 <app_config_dir>/logs/cc-switch.log）
+            // 初始化日志（输出到 <app_config_dir>/logs/loongport.log）
             {
                 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
@@ -557,6 +558,21 @@ pub fn run() {
                         .rotation_strategy(RotationStrategy::KeepSome(4))
                         .max_file_size(20 * 1024 * 1024)
                         .timezone_strategy(TimezoneStrategy::UseLocal)
+                        // 所有 Rust 与 WebView 日志共享同一最终安全出口：即使某个调用点
+                        // 忘了主动脱敏，写入 stdout/文件前仍会统一清理凭据、URL query、
+                        // 请求/响应正文并限制长度。
+                        .format(|out, message, record| {
+                            let timestamp = chrono::Local::now()
+                                .format("%Y-%m-%d][%H:%M:%S")
+                                .to_string();
+                            let line = diagnostics::format_log_line(
+                                &timestamp,
+                                record.level(),
+                                record.target(),
+                                &message.to_string(),
+                            );
+                            out.finish(format_args!("{line}"));
+                        })
                         .build(),
                 )?;
 
@@ -744,9 +760,20 @@ pub fn run() {
                         log::info!(
                             "Detected skills_ssot_migration_pending but skills table not empty; skipping auto import."
                         );
-                        let _ = app_state
+                        if let Err(error) = app_state
                             .db
-                            .set_setting("skills_ssot_migration_pending", "false");
+                            .set_setting("skills_ssot_migration_pending", "false")
+                        {
+                            log::warn!(
+                                "{}",
+                                crate::diagnostics::DiagnosticEvent::new(
+                                    "startup.skills_migration",
+                                    "clear_pending_failed",
+                                )
+                                .field("phase", "skip_existing")
+                                .field_display("error", error)
+                            );
+                        }
                     } else {
                         match crate::services::skill::migrate_skills_to_ssot(&app_state.db) {
                             Ok(count) => {
@@ -754,9 +781,20 @@ pub fn run() {
                                 if count > 0 {
                                     crate::init_status::set_skills_migration_result(count);
                                 }
-                                let _ = app_state
+                                if let Err(error) = app_state
                                     .db
-                                    .set_setting("skills_ssot_migration_pending", "false");
+                                    .set_setting("skills_ssot_migration_pending", "false")
+                                {
+                                    log::warn!(
+                                        "{}",
+                                        crate::diagnostics::DiagnosticEvent::new(
+                                            "startup.skills_migration",
+                                            "clear_pending_failed",
+                                        )
+                                        .field("phase", "after_import")
+                                        .field_display("error", error)
+                                    );
+                                }
                             }
                             Err(e) => {
                                 log::warn!("✗ Failed to auto import legacy skills to SSOT: {e}");
@@ -2183,19 +2221,42 @@ fn initialize_common_config_snippets(state: &store::AppState) {
     // This must run before proxy takeover is restored on startup, otherwise we'd read
     // proxy-placeholder configs instead of the user's actual live settings.
     for app_type in crate::app_config::AppType::all() {
-        if !state
-            .db
-            .should_auto_extract_config_snippet(app_type.as_str())
-            .unwrap_or(false)
-        {
+        let app = app_type.as_str();
+        let should_extract = match state.db.should_auto_extract_config_snippet(app) {
+            Ok(value) => value,
+            Err(error) => {
+                log::warn!(
+                    "{}",
+                    crate::diagnostics::DiagnosticEvent::new(
+                        "startup.config_snippet",
+                        "eligibility_check_failed",
+                    )
+                    .field("app", app)
+                    .field_display("error", error)
+                );
+                continue;
+            }
+        };
+        if !should_extract {
             continue;
         }
 
         let settings = match crate::services::provider::ProviderService::read_live_settings(
             app_type.clone(),
         ) {
-            Ok(s) => s,
-            Err(_) => continue,
+            Ok(settings) => settings,
+            Err(error) => {
+                log::debug!(
+                    "{}",
+                    crate::diagnostics::DiagnosticEvent::new(
+                        "startup.config_snippet",
+                        "live_read_skipped",
+                    )
+                    .field("app", app)
+                    .field_display("error", error)
+                );
+                continue;
+            }
         };
 
         match crate::services::provider::ProviderService::extract_common_config_snippet_from_settings(
@@ -2205,7 +2266,17 @@ fn initialize_common_config_snippets(state: &store::AppState) {
             Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
                 match state.db.set_config_snippet(app_type.as_str(), Some(snippet)) {
                     Ok(()) => {
-                        let _ = state.db.set_config_snippet_cleared(app_type.as_str(), false);
+                        if let Err(error) = state.db.set_config_snippet_cleared(app, false) {
+                            log::warn!(
+                                "{}",
+                                crate::diagnostics::DiagnosticEvent::new(
+                                    "startup.config_snippet",
+                                    "persist_cleared_state_failed",
+                                )
+                                .field("app", app)
+                                .field_display("error", error)
+                            );
+                        }
                         log::info!(
                             "✓ Auto-extracted common config snippet for {}",
                             app_type.as_str()

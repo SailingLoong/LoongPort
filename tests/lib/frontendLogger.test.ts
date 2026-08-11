@@ -1,22 +1,34 @@
-const writeErrorLog = vi.hoisted(() =>
-  vi.fn<(message: string, options: { file: string }) => Promise<void>>(() =>
-    Promise.resolve(),
+const logWriters = vi.hoisted(() => ({
+  error: vi.fn<(message: string, options: { file: string }) => Promise<void>>(
+    () => Promise.resolve(),
   ),
-);
-
-vi.mock("@tauri-apps/plugin-log", () => ({
-  error: writeErrorLog,
+  warn: vi.fn<(message: string, options: { file: string }) => Promise<void>>(
+    () => Promise.resolve(),
+  ),
+  info: vi.fn<(message: string, options: { file: string }) => Promise<void>>(
+    () => Promise.resolve(),
+  ),
+  debug: vi.fn<(message: string, options: { file: string }) => Promise<void>>(
+    () => Promise.resolve(),
+  ),
 }));
+const writeErrorLog = logWriters.error;
+
+vi.mock("@tauri-apps/plugin-log", () => logWriters);
 
 import {
+  installConsoleLogBridge,
   installGlobalErrorHandlers,
   redactFrontendLogText,
   reportFrontendError,
+  reportFrontendLog,
 } from "@/lib/frontendLogger";
 
 describe("frontendLogger", () => {
   beforeEach(() => {
-    writeErrorLog.mockClear();
+    for (const writer of Object.values(logWriters)) {
+      writer.mockClear();
+    }
   });
 
   it("redacts URL parameters and named credentials", () => {
@@ -49,6 +61,18 @@ describe("frontendLogger", () => {
       '{"detail":"line1\\nsk-ant-api03-escaped-secret"}',
     );
     expect(escapedMultiline).not.toContain("sk-ant-api03-escaped-secret");
+  });
+
+  it("redacts the complete credential key vocabulary in ordinary console text", () => {
+    const redacted = redactFrontendLogText(
+      'client_secret="private-client" session_id=private-session private_key=private-key credential=private-credential',
+    );
+
+    expect(redacted).not.toContain("private-client");
+    expect(redacted).not.toContain("private-session");
+    expect(redacted).not.toContain("private-key");
+    expect(redacted).not.toContain("private-credential");
+    expect(redacted.match(/\[REDACTED\]/g)).toHaveLength(4);
   });
 
   it("writes bounded, redacted errors through the Tauri log plugin", () => {
@@ -295,6 +319,117 @@ describe("frontendLogger", () => {
       reportFrontendError("unhandledrejection", reason),
     ).not.toThrow();
     expect(writeErrorLog.mock.calls[0][0]).toContain("[Circular]");
+  });
+
+  it("redacts raw private keys and opaque console credentials", () => {
+    reportFrontendError(
+      "key import failed",
+      "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
+    );
+    reportFrontendError(
+      "opaque credential failed",
+      "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+    );
+
+    expect(writeErrorLog).toHaveBeenCalledTimes(2);
+    for (const [message] of writeErrorLog.mock.calls) {
+      expect(message).not.toContain("private-material");
+      expect(message).not.toContain("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+      expect(message).toContain("[REDACTED");
+    }
+  });
+
+  it("redacts private keys even when processing truncates before the end marker", () => {
+    reportFrontendError(
+      "key import failed",
+      new Error(
+        `-----BEGIN PRIVATE KEY-----\nprivate-material\n${"A".repeat(20_000)}`,
+      ),
+    );
+
+    expect(writeErrorLog).toHaveBeenCalledOnce();
+    const [message] = writeErrorLog.mock.calls[0];
+    expect(message).not.toContain("private-material");
+    expect(message).not.toContain("BEGIN PRIVATE KEY");
+    expect(message).toContain("[REDACTED PRIVATE KEY]");
+  });
+
+  it("redacts named request and response bodies", () => {
+    const redacted = redactFrontendLogText(
+      'response_body={"private":"html"}\npayload=<html>verification secret</html>',
+    );
+
+    expect(redacted).not.toContain("verification secret");
+    expect(redacted).not.toContain('"private":"html"');
+    expect(redacted).toContain("[REDACTED BODY]");
+  });
+
+  it("writes structured non-error diagnostics at the requested level", () => {
+    reportFrontendLog("warn", "settings.save", "failed", {
+      section: "proxy",
+      responseBody: "private server response",
+    });
+
+    expect(logWriters.warn).toHaveBeenCalledOnce();
+    const [message, options] = logWriters.warn.mock.calls[0];
+    expect(message).toContain('"event":"settings.save"');
+    expect(message).toContain('"outcome":"failed"');
+    expect(message).toContain('"section":"proxy"');
+    expect(message).not.toContain("private server response");
+    const event = JSON.parse(message.replace(/^\[frontend\] /, ""));
+    expect(event).toMatchObject({
+      event: "settings.save",
+      outcome: "failed",
+      section: "proxy",
+      responseBody: "[REDACTED BODY]",
+    });
+    expect(options).toEqual({ file: "frontend" });
+  });
+
+  it("bridges console levels into persisted logs without retaining raw secrets", () => {
+    const originalError = vi.fn();
+    const originalWarn = vi.fn();
+    const originalInfo = vi.fn();
+    const originalLog = vi.fn();
+    const originalDebug = vi.fn();
+    const target = {
+      error: originalError,
+      warn: originalWarn,
+      info: originalInfo,
+      log: originalLog,
+      debug: originalDebug,
+    } as unknown as Console;
+    const uninstall = installConsoleLogBridge(target);
+
+    target.error("request failed", {
+      authorization: "Bearer private-token",
+      responseBody: "<html>private verification page</html>",
+    });
+    target.warn("retrying", { token: "private-token" });
+    target.info("loaded", { count: 2 });
+    target.log("legacy info");
+    target.debug("details", { cookie: "private-cookie" });
+
+    expect(logWriters.error).toHaveBeenCalledOnce();
+    expect(logWriters.warn).toHaveBeenCalledOnce();
+    expect(logWriters.info).toHaveBeenCalledTimes(2);
+    expect(logWriters.debug).toHaveBeenCalledOnce();
+    for (const writer of Object.values(logWriters)) {
+      for (const [message] of writer.mock.calls) {
+        expect(message).not.toContain("private-token");
+        expect(message).not.toContain("private-cookie");
+        expect(message).not.toContain("private verification page");
+      }
+    }
+    expect(originalError.mock.calls[0][0]).not.toContain("private-token");
+    expect(originalError.mock.calls[0][0]).not.toContain(
+      "private verification page",
+    );
+
+    uninstall();
+    target.error("after uninstall");
+    expect(logWriters.error).toHaveBeenCalledOnce();
+    expect(originalError).toHaveBeenCalledTimes(2);
   });
 
   it("captures global errors and unhandled rejections and can uninstall", () => {

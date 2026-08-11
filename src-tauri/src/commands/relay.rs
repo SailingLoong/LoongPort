@@ -767,8 +767,16 @@ async fn browser_import(
                 Ok(batch) => batch,
                 Err(error) => {
                     log::warn!(
-                        "站点探测回传解析失败：site={} error={error}",
-                        crate::url_for_log(&site_origin_for_nav)
+                        "{}",
+                        crate::diagnostics::DiagnosticEvent::new(
+                            "relay.browser_probe.callback",
+                            "parse_failed",
+                        )
+                        .field_display("site", crate::url_for_log(&site_origin_for_nav))
+                        .field(
+                            "error_chain",
+                            crate::diagnostics::format_error_chain(&error),
+                        )
                     );
                     let _ = probe_error_tx.try_send(error.into());
                     return false;
@@ -800,8 +808,13 @@ async fn browser_import(
                 Err(error) if error.kind == discovery::DiscoveryErrorKind::UnsupportedSite => {
                     if probe_summary_changed {
                         log::info!(
-                            "站点协议探针本批次未匹配：site={} {probe_summary}",
-                            crate::url_for_log(&site_origin_for_nav)
+                            "{}",
+                            crate::diagnostics::DiagnosticEvent::new(
+                                "relay.browser_probe",
+                                "unmatched",
+                            )
+                            .field_display("site", crate::url_for_log(&site_origin_for_nav))
+                            .field("probe", probe_summary.clone())
                         );
                     }
                     // 页面可能仍在验证或跳转，继续在同一 WebView 会话中轮询。
@@ -809,8 +822,14 @@ async fn browser_import(
                 }
                 Err(error) => {
                     log::warn!(
-                        "站点探测批次无法收敛：site={} {probe_summary} error={error}",
-                        crate::url_for_log(&site_origin_for_nav)
+                        "{}",
+                        crate::diagnostics::DiagnosticEvent::new(
+                            "relay.browser_probe",
+                            "conflict",
+                        )
+                        .field_display("site", crate::url_for_log(&site_origin_for_nav))
+                        .field("probe", probe_summary.clone())
+                        .field("error_chain", crate::diagnostics::format_error_chain(&error))
                     );
                     let _ = probe_error_tx.try_send(error.into());
                     return false;
@@ -842,8 +861,11 @@ async fn browser_import(
                 }
             }
             log::info!(
-                "站点协议探针识别成功：site={} backend={backend_kind:?} {probe_summary}",
-                crate::url_for_log(&site_origin_for_nav)
+                "{}",
+                crate::diagnostics::DiagnosticEvent::new("relay.browser_probe", "matched")
+                    .field_display("site", crate::url_for_log(&site_origin_for_nav))
+                    .field_display("backend", format_args!("{backend_kind:?}"))
+                    .field("probe", probe_summary)
             );
 
             let Some(window) = app_for_nav.get_webview_window(login::LOGIN_WINDOW_LABEL) else {
@@ -1012,8 +1034,11 @@ async fn browser_import(
                 .and_then(|guard| guard.clone())
                 .unwrap_or_else(|| "未收到协议探针回传".into());
             log::info!(
-                "站点导入窗口已关闭：site={} backend={backend_kind:?} probe={probe_detail}",
-                crate::url_for_log(&site_origin)
+                "{}",
+                crate::diagnostics::DiagnosticEvent::new("relay.browser_import", "closed")
+                    .field_display("site", crate::url_for_log(&site_origin))
+                    .field_display("backend", format_args!("{backend_kind:?}"))
+                    .field("probe", probe_detail)
             );
             import_result_after_incomplete_browser_flow(&context)
         }
@@ -1028,8 +1053,12 @@ async fn browser_import(
                 .and_then(|guard| guard.clone())
                 .unwrap_or_else(|| "未收到协议探针回传".into());
             log::warn!(
-                "站点导入等待超时（{LOGIN_TIMEOUT_SECS} 秒内未完成识别与登录）：site={} backend={backend_kind:?} probe={probe_detail}",
-                crate::url_for_log(&site_origin)
+                "{}",
+                crate::diagnostics::DiagnosticEvent::new("relay.browser_import", "timeout")
+                    .field_display("site", crate::url_for_log(&site_origin))
+                    .field_display("backend", format_args!("{backend_kind:?}"))
+                    .field("probe", probe_detail)
+                    .field("timeout_seconds", LOGIN_TIMEOUT_SECS)
             );
             let _ = window.destroy();
             import_result_after_incomplete_browser_flow(&context)

@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
+use crate::diagnostics::{format_error_chain, DiagnosticEvent, ResultLogExt};
 use crate::error::AppError;
 use crate::services::webdav_sync as webdav_sync_service;
 use crate::settings::{self, WebDavSyncSettings};
@@ -58,7 +59,16 @@ pub fn should_trigger_for_table(table: &str) -> bool {
 pub(crate) fn enqueue_change_signal(tx: &Sender<String>, table: &str) -> bool {
     match tx.try_send(table.to_string()) {
         Ok(()) => true,
-        Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => false,
+        Err(TrySendError::Full(_)) => false,
+        Err(TrySendError::Closed(_)) => {
+            log::warn!(
+                "{}",
+                DiagnosticEvent::new("sync.auto.enqueue", "worker_unavailable")
+                    .field("backend", "webdav")
+                    .field("table", table)
+            );
+            false
+        }
     }
 }
 
@@ -82,7 +92,11 @@ fn should_run_auto_sync(settings: Option<&WebDavSyncSettings>) -> bool {
 fn persist_auto_sync_error(settings: &mut WebDavSyncSettings, error: &AppError) {
     settings.status.last_error = Some(error.to_string());
     settings.status.last_error_source = Some("auto".to_string());
-    let _ = settings::update_webdav_sync_status(settings.status.clone());
+    settings::update_webdav_sync_status(settings.status.clone()).error_on_err(
+        DiagnosticEvent::new("sync.status", "persist_failed")
+            .field("backend", "webdav")
+            .field("source", "auto"),
+    );
 }
 
 fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&str>) {
@@ -98,9 +112,13 @@ fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&s
         }),
     };
 
-    if let Err(err) = app.emit(crate::events::WEBDAV_SYNC_STATUS_UPDATED, payload) {
-        log::debug!("[WebDAV] failed to emit sync status update event: {err}");
-    }
+    app.emit(crate::events::WEBDAV_SYNC_STATUS_UPDATED, payload)
+        .warn_on_err(
+            DiagnosticEvent::new("sync.status", "emit_failed")
+                .field("backend", "webdav")
+                .field("source", "auto")
+                .field("status", status),
+        );
 }
 
 async fn run_auto_sync_upload(
@@ -184,11 +202,27 @@ async fn run_worker_loop(
         }
 
         log::debug!(
-            "[WebDAV][AutoSync] Triggered by table={first_table}, merged_changes={merged_count}"
+            "{}",
+            DiagnosticEvent::new("sync.auto.upload", "started")
+                .field("backend", "webdav")
+                .field("first_table", first_table)
+                .field("merged_changes", merged_count as u64)
         );
 
-        if let Err(err) = run_auto_sync_upload(&db, &app).await {
-            log::warn!("[WebDAV][AutoSync] Upload failed: {err}");
+        match run_auto_sync_upload(&db, &app).await {
+            Ok(()) => log::debug!(
+                "{}",
+                DiagnosticEvent::new("sync.auto.upload", "completed")
+                    .field("backend", "webdav")
+                    .field("merged_changes", merged_count as u64)
+            ),
+            Err(err) => log::warn!(
+                "{}",
+                DiagnosticEvent::new("sync.auto.upload", "failed")
+                    .field("backend", "webdav")
+                    .field("merged_changes", merged_count as u64)
+                    .field("error_chain", format_error_chain(&err))
+            ),
         }
     }
 }

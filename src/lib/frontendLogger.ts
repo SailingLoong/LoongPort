@@ -1,4 +1,9 @@
-import { error as writeErrorLog } from "@tauri-apps/plugin-log";
+import {
+  debug as writeDebugLog,
+  error as writeErrorLog,
+  info as writeInfoLog,
+  warn as writeWarnLog,
+} from "@tauri-apps/plugin-log";
 
 const MAX_LOG_MESSAGE_LENGTH = 12_000;
 const MAX_RAW_LOG_INPUT_LENGTH = 16_000;
@@ -9,9 +14,9 @@ const MAX_SERIALIZATION_DEPTH = 4;
 const QUERY_VALUE_PATTERN = /([?&][A-Za-z0-9_.~-]+)=([^&#\s"'<>]*)/g;
 const URL_CREDENTIAL_PATTERN = /(https?:\/\/)[^/@\s]+@/gi;
 const QUOTED_NAMED_SECRET_PATTERN =
-  /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|authorization|auth|password|passwd|pwd|secret|cookie)\s*["']?\s*[:=]\s*)(["'])(.*?)\2/gi;
+  /(\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|session[_-]?id|authorization|credential|password|passwd|bearer|cookie|secret|token|auth|pwd|key)s?\s*["']?\s*[:=]\s*)(["'])(.*?)\2/gi;
 const NAMED_SECRET_PATTERN =
-  /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|authorization|auth|password|passwd|pwd|secret|cookie)\s*["']?\s*[:=]\s*["']?)([^\s"',}]+)/gi;
+  /(\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|session[_-]?id|authorization|credential|password|passwd|bearer|cookie|secret|token|auth|pwd|key)s?\s*["']?\s*[:=]\s*["']?)([^\s"',}]+)/gi;
 // 敏感键的值是数组/对象(`"tokens":[...]`、`"auth":{...}`)时，标量正则够不着里面的元素。
 // 文本层是所有入口(Error/string/对象/嵌套/前缀+JSON)最终汇聚的唯一出口，故在这里
 // 兜底：命中敏感键名后把紧跟的 `[..]`/`{..}` 整体替换。`\b` 防止匹配到 monkey 之类的后缀，
@@ -20,12 +25,19 @@ const NAMED_SECRET_CONTAINER_PATTERN =
   /((?:\\?["'])?\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|session[_-]?id|authorization|credential|password|passwd|bearer|cookie|secret|token|auth|pwd|key)s?(?:\\?["'])?\s*[:=]\s*)(\[[^\]]*\]|\{[^{}]*\})/gi;
 const SENSITIVE_HEADER_LINE_PATTERN =
   /(^|[\r\n])([ \t]*(?:(?:proxy-)?authorization|cookie|set-cookie|x-api-key|api-key)\s*[:=]\s*)[^\r\n]+/gim;
+const JSON_BODY_FIELD_PATTERN =
+  /(["'](?:request[_-]?body|response[_-]?body|body|payload)["']\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]]*\]|\{[^{}]*\}|[^,}\r\n]+)/gi;
+const BODY_FIELD_LINE_PATTERN =
+  /(^|[\r\n \t])((?:request[_-]?body|response[_-]?body|body|payload)\b\s*[:=]\s*).*$/gim;
+const HTTP_STATUS_BODY_PATTERN = /(HTTP\s+\d{3}\s*:\s*)[^\r\n]*/gim;
 const AUTH_SCHEME_PATTERN =
   /\b(Bearer|Basic|Token|ApiKey|Digest|Negotiate|AWS4-HMAC-SHA256)\s+[^\s"',}\]]+/gi;
 const SECRET_VALUE_IN_TEXT_PATTERN =
   /(^|[^A-Za-z0-9]|\\[nrt])(?:sk-[A-Za-z0-9._~+\/-]{6,}|AIza[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{6,}|gh[pousr]_[A-Za-z0-9_]{6,}|xox[baprs]-[A-Za-z0-9-]{6,}|ya29\.[A-Za-z0-9._-]{6,}|(?:AKIA|ASIA)[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/gim;
 const SECRET_VALUE_WITHIN_STRING_PATTERN =
   /(?:sk-[A-Za-z0-9._~+\/-]{6,}|AIza[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{6,}|gh[pousr]_[A-Za-z0-9_]{6,}|xox[baprs]-[A-Za-z0-9-]{6,}|ya29\.[A-Za-z0-9._-]{6,}|(?:AKIA|ASIA)[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/i;
+const PRIVATE_KEY_PATTERN =
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|$)/gi;
 function truncateForProcessing(input: string, limit: number): string {
   if (input.length <= limit) {
     return input;
@@ -35,12 +47,16 @@ function truncateForProcessing(input: string, limit: number): string {
 
 export function redactFrontendLogText(input: string): string {
   return input
+    .replace(NAMED_SECRET_CONTAINER_PATTERN, '$1"[REDACTED]"')
     .replace(QUERY_VALUE_PATTERN, "$1=[REDACTED]")
     .replace(URL_CREDENTIAL_PATTERN, "$1[REDACTED]@")
     .replace(SENSITIVE_HEADER_LINE_PATTERN, "$1$2[REDACTED]")
     .replace(AUTH_SCHEME_PATTERN, "$1 [REDACTED]")
+    .replace(JSON_BODY_FIELD_PATTERN, '$1"[REDACTED BODY]"')
+    .replace(BODY_FIELD_LINE_PATTERN, "$1$2[REDACTED BODY]")
+    .replace(HTTP_STATUS_BODY_PATTERN, "$1[REDACTED RESPONSE BODY]")
+    .replace(PRIVATE_KEY_PATTERN, "[REDACTED PRIVATE KEY]")
     .replace(SECRET_VALUE_IN_TEXT_PATTERN, "$1[REDACTED]")
-    .replace(NAMED_SECRET_CONTAINER_PATTERN, "$1[REDACTED]")
     .replace(QUOTED_NAMED_SECRET_PATTERN, "$1$2[REDACTED]$2")
     .replace(NAMED_SECRET_PATTERN, "$1[REDACTED]");
 }
@@ -90,6 +106,10 @@ const SENSITIVE_KEY_NAMES = new Set([
   "secret",
   "credential",
   "cookie",
+  "body",
+  "requestbody",
+  "responsebody",
+  "payload",
 ]);
 
 function isSensitiveKey(key: string): boolean {
@@ -277,6 +297,9 @@ function describeError(error: unknown): string {
     );
   }
   if (typeof error === "string") {
+    if (looksLikeSecretValue(error)) {
+      return "[REDACTED]";
+    }
     const structured = redactStructuredString(error);
     if (structured !== null) {
       return structured;
@@ -291,6 +314,46 @@ function describeError(error: unknown): string {
     return "[Unserializable thrown value]";
   }
   return truncateForProcessing(structured, MAX_RAW_LOG_INPUT_LENGTH);
+}
+
+export type FrontendLogLevel = "debug" | "info" | "warn" | "error";
+
+const FRONTEND_LOG_WRITERS = {
+  debug: writeDebugLog,
+  info: writeInfoLog,
+  warn: writeWarnLog,
+  error: writeErrorLog,
+} as const;
+
+function finalizeFrontendLogMessage(raw: string): string {
+  const bounded = truncateForProcessing(raw, MAX_RAW_LOG_INPUT_LENGTH);
+  const redacted = redactFrontendLogText(bounded);
+  return redacted.length > MAX_LOG_MESSAGE_LENGTH
+    ? `${redacted.slice(0, MAX_LOG_MESSAGE_LENGTH)}\n[truncated]`
+    : redacted;
+}
+
+function persistFrontendLog(level: FrontendLogLevel, raw: string): string {
+  const message = finalizeFrontendLogMessage(raw);
+  // Web 开发/测试环境没有 Tauri invoke；落盘失败不能再写 console，否则 console bridge
+  // 会形成递归错误循环。
+  void FRONTEND_LOG_WRITERS[level](message, { file: "frontend" }).catch(
+    () => undefined,
+  );
+  return message;
+}
+
+export function reportFrontendLog(
+  level: FrontendLogLevel,
+  event: string,
+  outcome: string,
+  fields: Record<string, unknown> = {},
+): void {
+  const serialized = serializeStructured({ event, outcome, ...fields });
+  persistFrontendLog(
+    level,
+    `[frontend] ${serialized ?? "[Unserializable diagnostic event]"}`,
+  );
 }
 
 export function reportFrontendError(
@@ -311,15 +374,51 @@ export function reportFrontendError(
       .join("\n"),
     MAX_RAW_LOG_INPUT_LENGTH,
   );
-  const redacted = redactFrontendLogText(raw);
-  const message =
-    redacted.length > MAX_LOG_MESSAGE_LENGTH
-      ? `${redacted.slice(0, MAX_LOG_MESSAGE_LENGTH)}\n[truncated]`
-      : redacted;
+  persistFrontendLog("error", raw);
+}
 
-  // Web 开发/测试环境没有 Tauri invoke，日志上报失败不应再触发
-  // console.error 或未处理 Promise，否则会形成错误循环。
-  void writeErrorLog(message, { file: "frontend" }).catch(() => undefined);
+const CONSOLE_LEVELS = ["error", "warn", "info", "log", "debug"] as const;
+type BridgedConsoleLevel = (typeof CONSOLE_LEVELS)[number];
+
+function consoleLogLevel(level: BridgedConsoleLevel): FrontendLogLevel {
+  if (level === "log") return "info";
+  return level;
+}
+
+function formatConsoleArguments(args: unknown[]): string {
+  return args.map((argument) => describeError(argument)).join(" ");
+}
+
+/**
+ * 将遗留和第三方 console 调用统一送入持久化日志，并把 DevTools 输出也替换为脱敏文本。
+ * 返回卸载函数，便于测试、HMR 和未来嵌入式入口安全恢复原 console。
+ */
+export function installConsoleLogBridge(target: Console = console): () => void {
+  const originals = new Map<
+    BridgedConsoleLevel,
+    (...args: unknown[]) => void
+  >();
+
+  for (const level of CONSOLE_LEVELS) {
+    const original = target[level].bind(target) as (...args: unknown[]) => void;
+    originals.set(level, original);
+    target[level] = ((...args: unknown[]) => {
+      const message = persistFrontendLog(
+        consoleLogLevel(level),
+        `[frontend] console.${level}\n${formatConsoleArguments(args)}`,
+      );
+      original(message);
+    }) as Console[typeof level];
+  }
+
+  return () => {
+    for (const level of CONSOLE_LEVELS) {
+      const original = originals.get(level);
+      if (original) {
+        target[level] = original as Console[typeof level];
+      }
+    }
+  };
 }
 
 export function installGlobalErrorHandlers(

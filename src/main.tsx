@@ -16,6 +16,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
 import { FrontendErrorBoundary } from "./components/FrontendErrorBoundary";
 import {
+  installConsoleLogBridge,
   installGlobalErrorHandlers,
   reportFrontendError,
 } from "./lib/frontendLogger";
@@ -24,6 +25,7 @@ import {
   syncModelsDevPricingOnStartup,
 } from "./lib/modelsDevAutoSync";
 
+installConsoleLogBridge();
 installGlobalErrorHandlers();
 
 // 根据平台添加 body class，便于平台特定样式

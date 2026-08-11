@@ -5,6 +5,7 @@
 use crate::app_config::AppType;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
+use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::provider::Provider;
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
@@ -570,7 +571,10 @@ impl ProxyService {
             .persist_ephemeral_listen_port_if_needed(&config, info.port)
             .await
         {
-            let _ = server.stop().await;
+            server.stop().await.warn_on_err(
+                DiagnosticEvent::new("proxy.start.rollback", "stop_failed")
+                    .field("phase", "persist_ephemeral_port"),
+            );
             return Err(e);
         }
 
@@ -645,7 +649,10 @@ impl ProxyService {
                 log::warn!("清理 Live 备份失败: {clean_err}");
             }
             if started_proxy_before_takeover {
-                let _ = self.stop().await;
+                self.stop().await.warn_on_err(
+                    DiagnosticEvent::new("proxy.takeover.rollback", "stop_failed")
+                        .field("phase", "activate_flag"),
+                );
             }
             return Err(format!("设置接管状态失败: {e}"));
         }
@@ -656,15 +663,24 @@ impl ProxyService {
             log::error!("接管 Live 配置失败，尝试恢复原始配置: {e}");
             match self.restore_live_configs().await {
                 Ok(()) => {
-                    let _ = self.db.set_live_takeover_active(false).await;
-                    let _ = self.db.delete_all_live_backups().await;
+                    self.db.set_live_takeover_active(false).await.error_on_err(
+                        DiagnosticEvent::new("proxy.takeover.rollback", "clear_active_failed")
+                            .field("phase", "takeover_live_config"),
+                    );
+                    self.db.delete_all_live_backups().await.error_on_err(
+                        DiagnosticEvent::new("proxy.takeover.rollback", "delete_backup_failed")
+                            .field("phase", "takeover_live_config"),
+                    );
                 }
                 Err(restore_err) => {
                     log::error!("恢复原始配置失败，将保留备份以便下次启动恢复: {restore_err}");
                 }
             }
             if started_proxy_before_takeover {
-                let _ = self.stop().await;
+                self.stop().await.warn_on_err(
+                    DiagnosticEvent::new("proxy.takeover.rollback", "stop_failed")
+                        .field("phase", "takeover_live_config"),
+                );
             }
             return Err(e);
         }
@@ -677,15 +693,24 @@ impl ProxyService {
                 log::error!("代理启动失败，尝试恢复原始配置: {e}");
                 match self.restore_live_configs().await {
                     Ok(()) => {
-                        let _ = self.db.set_live_takeover_active(false).await;
-                        let _ = self.db.delete_all_live_backups().await;
+                        self.db.set_live_takeover_active(false).await.error_on_err(
+                            DiagnosticEvent::new("proxy.takeover.rollback", "clear_active_failed")
+                                .field("phase", "proxy_start"),
+                        );
+                        self.db.delete_all_live_backups().await.error_on_err(
+                            DiagnosticEvent::new("proxy.takeover.rollback", "delete_backup_failed")
+                                .field("phase", "proxy_start"),
+                        );
                     }
                     Err(restore_err) => {
                         log::error!("恢复原始配置失败，将保留备份以便下次启动恢复: {restore_err}");
                     }
                 }
                 if started_proxy_before_takeover {
-                    let _ = self.stop().await;
+                    self.stop().await.warn_on_err(
+                        DiagnosticEvent::new("proxy.takeover.rollback", "stop_failed")
+                            .field("phase", "proxy_start"),
+                    );
                 }
                 Err(e)
             }
@@ -795,7 +820,11 @@ impl ProxyService {
 
                 // 4) 同步 Live Token 到数据库（仅当前 app）
                 if let Err(e) = self.sync_live_to_provider(&app).await {
-                    let _ = self.db.delete_live_backup(app_type_str).await;
+                    self.db.delete_live_backup(app_type_str).await.error_on_err(
+                        DiagnosticEvent::new("proxy.takeover.rollback", "delete_backup_failed")
+                            .field("phase", "sync_live_to_provider")
+                            .field("app", app_type_str),
+                    );
                     return Err(e);
                 }
             }
@@ -806,7 +835,11 @@ impl ProxyService {
                 match self.restore_live_config_for_app_inner(&app).await {
                     Ok(()) => {
                         // 恢复成功才清理备份，避免失败场景下丢失唯一可回滚来源
-                        let _ = self.db.delete_live_backup(app_type_str).await;
+                        self.db.delete_live_backup(app_type_str).await.error_on_err(
+                            DiagnosticEvent::new("proxy.takeover.rollback", "delete_backup_failed")
+                                .field("phase", "takeover_app")
+                                .field("app", app_type_str),
+                        );
                     }
                     Err(restore_err) => {
                         log::error!(
@@ -829,8 +862,12 @@ impl ProxyService {
                 .await
                 .map_err(|e| format!("设置 {app_type_str} enabled 状态失败: {e}"))?;
 
-            // 7) 兼容旧逻辑：写入 any-of 标志（失败不影响功能）
-            let _ = self.db.set_live_takeover_active(true).await;
+            // 7) 兼容旧逻辑：写入 any-of 标志（失败不影响功能，但必须可诊断）
+            self.db.set_live_takeover_active(true).await.warn_on_err(
+                DiagnosticEvent::new("proxy.takeover", "persist_legacy_flag_failed")
+                    .field("phase", "enable_app")
+                    .field("app", app_type_str),
+            );
 
             self.refresh_active_target_from_current_provider(&app).await;
 
@@ -845,13 +882,18 @@ impl ProxyService {
                         )
                     {
                         if let Some(handle) = self.app_handle.read().await.as_ref() {
-                            let _ = handle.emit(
-                                "proxy-official-warning",
-                                serde_json::json!({
-                                    "appType": app_type_str,
-                                    "providerName": provider.name,
-                                }),
-                            );
+                            handle
+                                .emit(
+                                    "proxy-official-warning",
+                                    serde_json::json!({
+                                        "appType": app_type_str,
+                                        "providerName": provider.name,
+                                    }),
+                                )
+                                .warn_on_err(
+                                    DiagnosticEvent::new("proxy.takeover.warning", "emit_failed")
+                                        .field("app", app_type_str),
+                                );
                         }
                     }
                 }
@@ -912,11 +954,20 @@ impl ProxyService {
             .map_err(|e| format!("检查接管状态失败: {e}"))?;
 
         if !any_enabled {
-            let _ = self.db.set_live_takeover_active(false).await;
+            self.db.set_live_takeover_active(false).await.warn_on_err(
+                DiagnosticEvent::new("proxy.takeover", "persist_legacy_flag_failed")
+                    .field("phase", "disable_last_app")
+                    .field("app", app_type_str),
+            );
 
             if self.is_running().await {
-                // 此时没有任何 app 处于接管状态，停止服务即可
-                let _ = self.stop().await;
+                // 此时没有任何 app 处于接管状态，停止服务即可。停止失败不回滚
+                // 已完成的 Live 恢复，但必须写日志，否则 UI 看到关闭后仍可能有监听端口。
+                self.stop().await.warn_on_err(
+                    DiagnosticEvent::new("proxy.takeover", "stop_failed")
+                        .field("phase", "disable_last_app")
+                        .field("app", app_type_str),
+                );
             }
         }
 
@@ -957,8 +1008,12 @@ impl ProxyService {
         futures::executor::block_on(self.db.clear_provider_health_for_app(app_type_str))
             .map_err(|e| format!("清除 {app_type_str} 健康状态失败: {e}"))?;
 
-        // 5) 清旧标志
-        let _ = futures::executor::block_on(self.db.set_live_takeover_active(false));
+        // 5) 清旧标志。同步调用方仍以 Live 恢复为主流程，兼容标志失败只记日志。
+        futures::executor::block_on(self.db.set_live_takeover_active(false)).warn_on_err(
+            DiagnosticEvent::new("proxy.takeover", "persist_legacy_flag_failed")
+                .field("phase", "disable_app_sync")
+                .field("app", app_type_str),
+        );
 
         Ok(())
     }
@@ -1359,7 +1414,10 @@ impl ProxyService {
         //    注意：保留 proxy_config.enabled 状态，下次启动时自动恢复
         if let Ok(mut config) = self.db.get_proxy_config().await {
             config.live_takeover_active = false;
-            let _ = self.db.update_proxy_config(config).await;
+            self.db.update_proxy_config(config).await.warn_on_err(
+                DiagnosticEvent::new("proxy.shutdown", "persist_state_failed")
+                    .field("phase", "restore_keep_state"),
+            );
         }
 
         // 4. 删除备份（Live 配置已恢复，备份不再需要）
@@ -1678,18 +1736,31 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 接管指定应用的 Live 配置（尽力而为：配置不存在/读取失败则跳过）
+    /// 接管指定应用的 Live 配置（尽力而为：配置不存在/读取失败则跳过并记录原因）
     async fn takeover_live_config_best_effort(&self, app_type: &AppType) -> Result<(), String> {
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
+        let app = app_type.as_str();
 
         match app_type {
-            AppType::Claude => {
-                if let Ok(mut live_config) = self.read_claude_live() {
-                    let claude_provider = self
-                        .get_current_provider_for_app(&AppType::Claude)
-                        .ok()
-                        .flatten();
+            AppType::Claude => match self.read_claude_live() {
+                Ok(mut live_config) => {
+                    let claude_provider = match self.get_current_provider_for_app(&AppType::Claude)
+                    {
+                        Ok(provider) => provider,
+                        Err(error) => {
+                            log::warn!(
+                                "{}",
+                                DiagnosticEvent::new(
+                                    "proxy.takeover.best_effort",
+                                    "current_provider_read_failed",
+                                )
+                                .field("app", app)
+                                .field("error", error)
+                            );
+                            None
+                        }
+                    };
                     if let Some(provider) = claude_provider.as_ref() {
                         let provider = self.claude_provider_with_effective_settings(provider)?;
                         Self::apply_claude_takeover_fields_for_provider(
@@ -1704,11 +1775,20 @@ impl ProxyService {
                             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
                         );
                     }
-                    let _ = self.write_claude_live(&live_config);
+                    self.write_claude_live(&live_config).warn_on_err(
+                        DiagnosticEvent::new("proxy.takeover.best_effort", "write_failed")
+                            .field("app", app),
+                    );
                 }
-            }
-            AppType::Codex => {
-                if let Ok(mut live_config) = self.read_codex_live() {
+                Err(error) => log::warn!(
+                    "{}",
+                    DiagnosticEvent::new("proxy.takeover.best_effort", "read_skipped")
+                        .field("app", app)
+                        .field("error", error)
+                ),
+            },
+            AppType::Codex => match self.read_codex_live() {
+                Ok(mut live_config) => {
                     let codex_provider = self.require_current_provider_for_app(&AppType::Codex)?;
                     Self::apply_codex_takeover_fields_for_provider(
                         &mut live_config,
@@ -1721,9 +1801,15 @@ impl ProxyService {
                         Some(&codex_provider),
                     )?;
                 }
-            }
-            AppType::Gemini => {
-                if let Ok(mut live_config) = self.read_gemini_live() {
+                Err(error) => log::warn!(
+                    "{}",
+                    DiagnosticEvent::new("proxy.takeover.best_effort", "read_skipped")
+                        .field("app", app)
+                        .field("error", error)
+                ),
+            },
+            AppType::Gemini => match self.read_gemini_live() {
+                Ok(mut live_config) => {
                     if let Some(env) = live_config.get_mut("env").and_then(|v| v.as_object_mut()) {
                         env.insert("GOOGLE_GEMINI_BASE_URL".to_string(), json!(&proxy_url));
                         env.insert("GEMINI_API_KEY".to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
@@ -1734,21 +1820,44 @@ impl ProxyService {
                         });
                     }
 
-                    let _ = self.write_gemini_live(&live_config);
+                    self.write_gemini_live(&live_config).warn_on_err(
+                        DiagnosticEvent::new("proxy.takeover.best_effort", "write_failed")
+                            .field("app", app),
+                    );
                 }
-            }
-            AppType::GrokBuild => {
-                if let Ok(mut live_config) = self.read_grok_live() {
+                Err(error) => log::warn!(
+                    "{}",
+                    DiagnosticEvent::new("proxy.takeover.best_effort", "read_skipped")
+                        .field("app", app)
+                        .field("error", error)
+                ),
+            },
+            AppType::GrokBuild => match self.read_grok_live() {
+                Ok(mut live_config) => {
                     if Self::grok_live_config_supports_takeover(&live_config) {
                         Self::apply_grok_takeover_fields(&mut live_config, &proxy_grok_base_url)?;
-                        let _ = self.write_grok_live(&live_config);
+                        self.write_grok_live(&live_config).warn_on_err(
+                            DiagnosticEvent::new("proxy.takeover.best_effort", "write_failed")
+                                .field("app", app),
+                        );
                     } else {
                         log::info!(
-                            "Grok Build Live 处于官方登录态（无自定义模型表），跳过代理接管"
+                            "{}",
+                            DiagnosticEvent::new(
+                                "proxy.takeover.best_effort",
+                                "unsupported_live_config",
+                            )
+                            .field("app", app)
                         );
                     }
                 }
-            }
+                Err(error) => log::warn!(
+                    "{}",
+                    DiagnosticEvent::new("proxy.takeover.best_effort", "read_skipped")
+                        .field("app", app)
+                        .field("error", error)
+                ),
+            },
             _ => {}
         }
 
@@ -3119,7 +3228,10 @@ impl ProxyService {
                 .persist_ephemeral_listen_port_if_needed(&new_config, info.port)
                 .await
             {
-                let _ = new_server.stop().await;
+                new_server.stop().await.warn_on_err(
+                    DiagnosticEvent::new("proxy.restart.rollback", "stop_failed")
+                        .field("phase", "persist_ephemeral_port"),
+                );
                 return Err(e);
             }
 
