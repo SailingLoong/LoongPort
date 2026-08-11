@@ -710,6 +710,7 @@ async fn browser_import(
     );
 
     let context = Arc::new(Mutex::new(initial_context));
+    let last_probe_summary = Arc::new(Mutex::new(None::<String>));
     let (creds_tx, mut creds_rx) = tokio::sync::mpsc::channel::<login::Credentials>(1);
     let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<RelayImportError>(1);
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -717,6 +718,7 @@ async fn browser_import(
     let context_for_load = Arc::clone(&context);
     let app_for_nav = app_handle.clone();
     let context_for_nav = Arc::clone(&context);
+    let last_probe_summary_for_nav = Arc::clone(&last_probe_summary);
     let site_origin_for_nav = site_origin.clone();
     let aff_for_nav = login_aff_code.clone();
     let promo_for_nav = login_promo_code.clone();
@@ -764,7 +766,10 @@ async fn browser_import(
             let batch = match result {
                 Ok(batch) => batch,
                 Err(error) => {
-                    log::warn!("站点探测回传解析失败: {error}");
+                    log::warn!(
+                        "站点探测回传解析失败：site={} error={error}",
+                        crate::url_for_log(&site_origin_for_nav)
+                    );
                     let _ = probe_error_tx.try_send(error.into());
                     return false;
                 }
@@ -780,14 +785,33 @@ async fn browser_import(
                 return false;
             }
 
+            let probe_summary = discovery::probe_batch_summary(&batch.responses);
+            let probe_summary_changed = match last_probe_summary_for_nav.lock() {
+                Ok(mut guard) => {
+                    let changed = guard.as_deref() != Some(probe_summary.as_str());
+                    *guard = Some(probe_summary.clone());
+                    changed
+                }
+                Err(_) => true,
+            };
+
             let detected = match discovery::converge_probe_responses(&batch.responses) {
                 Ok(detected) => detected,
                 Err(error) if error.kind == discovery::DiscoveryErrorKind::UnsupportedSite => {
-                    // 本轮只有未知或不匹配的 JSON 响应。页面可能还在验证或跳转，继续轮询。
+                    if probe_summary_changed {
+                        log::info!(
+                            "站点协议探针本批次未匹配：site={} {probe_summary}",
+                            crate::url_for_log(&site_origin_for_nav)
+                        );
+                    }
+                    // 页面可能仍在验证或跳转，继续在同一 WebView 会话中轮询。
                     return false;
                 }
                 Err(error) => {
-                    log::warn!("站点探测批次无法收敛: {error}");
+                    log::warn!(
+                        "站点探测批次无法收敛：site={} {probe_summary} error={error}",
+                        crate::url_for_log(&site_origin_for_nav)
+                    );
                     let _ = probe_error_tx.try_send(error.into());
                     return false;
                 }
@@ -817,6 +841,10 @@ async fn browser_import(
                     return false;
                 }
             }
+            log::info!(
+                "站点协议探针识别成功：site={} backend={backend_kind:?} {probe_summary}",
+                crate::url_for_log(&site_origin_for_nav)
+            );
 
             let Some(window) = app_for_nav.get_webview_window(login::LOGIN_WINDOW_LABEL) else {
                 let _ = probe_error_tx.try_send(RelayImportError::message("站点导入窗口已关闭"));
@@ -973,10 +1001,35 @@ async fn browser_import(
             let _ = window.destroy();
             Err(error)
         }
-        Ok(BrowserLoginOutcome::Closed) => import_result_after_incomplete_browser_flow(&context),
+        Ok(BrowserLoginOutcome::Closed) => {
+            let backend_kind = context
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|context| context.backend_kind));
+            let probe_detail = last_probe_summary
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .unwrap_or_else(|| "未收到协议探针回传".into());
+            log::info!(
+                "站点导入窗口已关闭：site={} backend={backend_kind:?} probe={probe_detail}",
+                crate::url_for_log(&site_origin)
+            );
+            import_result_after_incomplete_browser_flow(&context)
+        }
         Err(_) => {
+            let backend_kind = context
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|context| context.backend_kind));
+            let probe_detail = last_probe_summary
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .unwrap_or_else(|| "未收到协议探针回传".into());
             log::warn!(
-                "站点导入等待超时（{LOGIN_TIMEOUT_SECS} 秒内未完成识别与登录）：{site_origin}"
+                "站点导入等待超时（{LOGIN_TIMEOUT_SECS} 秒内未完成识别与登录）：site={} backend={backend_kind:?} probe={probe_detail}",
+                crate::url_for_log(&site_origin)
             );
             let _ = window.destroy();
             import_result_after_incomplete_browser_flow(&context)

@@ -15,7 +15,7 @@ use std::fmt;
 
 pub const PROBE_SCHEME: &str = "loongport-probe";
 const MAX_PROBE_BODY_BYTES: usize = 64 * 1024;
-const MAX_PROBE_RESPONSE_OVERHEAD_BYTES: usize = 256;
+const MAX_PROBE_RESPONSE_OVERHEAD_BYTES: usize = 512;
 
 pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
     api::PROBE_ADAPTER.candidate,
@@ -61,10 +61,20 @@ const MAX_PROBE_BATCH_BYTES: usize =
 
 const PROBE_ADAPTERS: &[ProbeAdapter] = &[api::PROBE_ADAPTER, newapi::PROBE_ADAPTER];
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ProbeResponse {
     pub candidate_id: String,
     pub body: String,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub body_bytes: usize,
+    #[serde(default)]
+    pub json_like: bool,
+    #[serde(default)]
+    pub error_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -75,7 +85,8 @@ pub struct ProbeBatch {
 /// 生成注入所有页面的协议无关探测脚本。
 ///
 /// 脚本只在目标 origin 上工作；验证页、注册页、登录页都走同一份代码。它不认识任何
-/// 验证产品或 HTTP 状态，只轮询候选端点并把 JSON-like 响应交给 Rust detector。
+/// 验证产品，也不在浏览器层判断协议。每轮回传安全的响应元数据；只有 JSON-like 且大小
+/// 合规的正文才交给 Rust detector，验证页正文、令牌、Cookie 和请求头都不会离开 WebView。
 pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) -> String {
     let expected_origin = serde_json::to_string(site_origin).expect("origin can be JSON encoded");
     let candidates =
@@ -110,6 +121,24 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
     return headers;
   }}
 
+  function responseContentType(response) {{
+    try {{
+      const value = response.headers && response.headers.get
+        ? response.headers.get('content-type')
+        : null;
+      if (typeof value !== 'string' || !value) return null;
+      return value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 128);
+    }} catch (_) {{
+      return null;
+    }}
+  }}
+
+  function safeErrorKind(error) {{
+    const name = error && typeof error.name === 'string' ? error.name : '';
+    const safeName = name.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 64);
+    return safeName || 'Error';
+  }}
+
   async function probe() {{
     if (window.location.origin !== expectedOrigin) return;
     if (probeInFlight) return;
@@ -128,27 +157,45 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
               headers: headersFor(candidate),
               signal: controller.signal,
             }});
-            return response.text();
+            const body = await response.text();
+            return {{ response, body }};
           }})();
           const timeout = new Promise((_, reject) => {{
             timeoutId = setTimeout(() => {{
               controller.abort();
-              reject(new Error('probe request timed out'));
+              const error = new Error('probe request timed out');
+              error.name = 'ProbeTimeout';
+              reject(error);
             }}, requestTimeoutMs);
           }});
-          const body = await Promise.race([request, timeout]);
+          const {{ response, body }} = await Promise.race([request, timeout]);
+          const bodyBytes = new TextEncoder().encode(body).length;
           const trimmed = body.trim();
-          if (!trimmed || (trimmed[0] !== '{{' && trimmed[0] !== '[')) continue;
-          if (new TextEncoder().encode(body).length > {MAX_PROBE_BODY_BYTES}) continue;
-          responses.push({{ candidate_id: candidate.id, body }});
-        }} catch (_) {{
-          // 页面仍可能处于验证或跳转阶段；下一轮继续，不在浏览器层解释失败原因。
+          const jsonLike = Boolean(trimmed) && (trimmed[0] === '{{' || trimmed[0] === '[');
+          responses.push({{
+            candidate_id: candidate.id,
+            body: jsonLike && bodyBytes <= {MAX_PROBE_BODY_BYTES} ? body : '',
+            status: Number.isInteger(response.status) ? response.status : null,
+            content_type: responseContentType(response),
+            body_bytes: bodyBytes,
+            json_like: jsonLike,
+            error_kind: null,
+          }});
+        }} catch (error) {{
+          responses.push({{
+            candidate_id: candidate.id,
+            body: '',
+            status: null,
+            content_type: null,
+            body_bytes: 0,
+            json_like: false,
+            error_kind: safeErrorKind(error),
+          }});
         }} finally {{
           if (timeoutId !== undefined) clearTimeout(timeoutId);
         }}
       }}
 
-      if (!responses.length) return;
       const batch = JSON.stringify(responses);
       if (batch === previousBatch) return;
       previousBatch = batch;
@@ -189,11 +236,20 @@ pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeBatch, AppEr
         let responses = serde_json::from_slice::<Vec<ProbeResponse>>(&bytes)
             .map_err(|e| AppError::Config(format!("站点探测回传不是候选响应批次: {e}")))?;
         if responses.len() > PROBE_CANDIDATES.len()
-            || responses
-                .iter()
-                .any(|response| response.body.len() > MAX_PROBE_BODY_BYTES)
+            || responses.iter().any(|response| {
+                response.candidate_id.len() > 64
+                    || response.body.len() > MAX_PROBE_BODY_BYTES
+                    || response
+                        .content_type
+                        .as_deref()
+                        .is_some_and(|value| value.len() > 128)
+                    || response
+                        .error_kind
+                        .as_deref()
+                        .is_some_and(|value| value.len() > 64)
+            })
         {
-            return Err(AppError::Config("站点探测回传正文过大".into()));
+            return Err(AppError::Config("站点探测回传正文或元数据过大".into()));
         }
         Ok(ProbeBatch { responses })
     })())
@@ -201,6 +257,59 @@ pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeBatch, AppEr
 
 const fn base64url_encoded_len(decoded_len: usize) -> usize {
     (decoded_len * 4).div_ceil(3)
+}
+
+/// 生成可安全落盘的探针批次摘要，不包含响应正文、令牌、Cookie 或请求头。
+pub fn probe_batch_summary(responses: &[ProbeResponse]) -> String {
+    if responses.is_empty() {
+        return "no_responses".into();
+    }
+
+    responses
+        .iter()
+        .map(|response| {
+            let candidate_id = sanitize_probe_log_value(&response.candidate_id, 64);
+            if let Some(error_kind) = response.error_kind.as_deref() {
+                return format!(
+                    "{candidate_id}(error={})",
+                    sanitize_probe_log_value(error_kind, 64)
+                );
+            }
+
+            let status = response
+                .status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "unknown".into());
+            let content_type = response
+                .content_type
+                .as_deref()
+                .map(|value| sanitize_probe_log_value(value, 128))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "unknown".into());
+            format!(
+                "{candidate_id}(status={status},type={content_type},bytes={},json={})",
+                response.body_bytes, response.json_like
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitize_probe_log_value(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(max_chars)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 用原生 HTTP 跑候选注册表的 fast path。
@@ -271,7 +380,14 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
         completed_candidate = true;
         responses.push(ProbeResponse {
             candidate_id: candidate.id.to_string(),
+            body_bytes: body.len(),
+            json_like: body
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|byte| byte == b'{' || byte == b'['),
             body: String::from_utf8_lossy(&body).into_owned(),
+            ..ProbeResponse::default()
         });
     }
 
@@ -338,14 +454,7 @@ pub fn converge_probe_responses(
 
 #[cfg(test)]
 fn probe_batch_callback_url(responses: &[ProbeResponse]) -> url::Url {
-    let body = serde_json::json!(responses
-        .iter()
-        .map(|response| serde_json::json!({
-            "candidate_id": response.candidate_id,
-            "body": response.body,
-        }))
-        .collect::<Vec<_>>())
-    .to_string();
+    let body = serde_json::to_string(responses).expect("serialize test probe responses");
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body);
     url::Url::parse(&format!("{PROBE_SCHEME}://response?d={encoded}"))
         .expect("test batch callback URL")
@@ -438,7 +547,8 @@ mod tests {
         assert!(script.contains(PROBE_SCHEME));
         assert!(script.contains("window.location.origin"));
         assert!(script.contains("const responses = []"));
-        assert!(script.contains("responses.push({ candidate_id: candidate.id, body })"));
+        assert!(script.contains("body: jsonLike && bodyBytes <= 65536 ? body : ''"));
+        assert!(script.contains("error_kind: safeErrorKind(error)"));
         assert!(script.contains("const batch = JSON.stringify(responses)"));
         assert!(script.contains("b64url(batch)"));
         assert_eq!(
@@ -457,6 +567,7 @@ mod tests {
         let url = probe_batch_callback_url(&[ProbeResponse {
             candidate_id: "sub2api".into(),
             body: body.into(),
+            ..ProbeResponse::default()
         }]);
         let parsed = parse_probe_navigation(&url)
             .expect("probe scheme")
@@ -472,10 +583,12 @@ mod tests {
             ProbeResponse {
                 candidate_id: "sub2api".into(),
                 body: sub2api_body().into(),
+                ..ProbeResponse::default()
             },
             ProbeResponse {
                 candidate_id: "newapi".into(),
                 body: newapi_status_body().into(),
+                ..ProbeResponse::default()
             },
         ];
         let parsed = parse_probe_navigation(&probe_batch_callback_url(&expected))
@@ -492,10 +605,12 @@ mod tests {
             ProbeResponse {
                 candidate_id: "sub2api".into(),
                 body: body.clone(),
+                ..ProbeResponse::default()
             },
             ProbeResponse {
                 candidate_id: "newapi".into(),
                 body,
+                ..ProbeResponse::default()
             },
         ];
 
@@ -504,6 +619,35 @@ mod tests {
             .expect("aggregate batch remains valid");
 
         assert_eq!(parsed.responses, expected);
+    }
+
+    #[test]
+    fn probe_batch_summary_reports_safe_metadata_without_response_body() {
+        let responses = [
+            ProbeResponse {
+                candidate_id: "sub2api".into(),
+                body: "<html>secret verification page</html>".into(),
+                status: Some(403),
+                content_type: Some("text/html; charset=UTF-8\nforged".into()),
+                body_bytes: 38,
+                json_like: false,
+                error_kind: None,
+            },
+            ProbeResponse {
+                candidate_id: "newapi".into(),
+                error_kind: Some("ProbeTimeout\nforged".into()),
+                ..ProbeResponse::default()
+            },
+        ];
+
+        let summary = probe_batch_summary(&responses);
+
+        assert_eq!(
+            summary,
+            "sub2api(status=403,type=text/html; charset=UTF-8 forged,bytes=38,json=false) newapi(error=ProbeTimeout forged)"
+        );
+        assert!(!summary.contains("secret verification page"));
+        assert!(!summary.contains('\n'));
     }
 
     #[test]
@@ -534,10 +678,12 @@ mod tests {
         let sub2api = ProbeResponse {
             candidate_id: "sub2api".into(),
             body: sub2api_body().into(),
+            ..ProbeResponse::default()
         };
         let newapi = ProbeResponse {
             candidate_id: "newapi".into(),
             body: newapi_status_body().into(),
+            ..ProbeResponse::default()
         };
 
         assert_eq!(
@@ -569,6 +715,7 @@ mod tests {
         let batch = parse_probe_navigation(&probe_batch_callback_url(&[ProbeResponse {
             candidate_id: "newapi".into(),
             body: newapi_status_body().into(),
+            ..ProbeResponse::default()
         }]))
         .unwrap()
         .unwrap();
