@@ -42,8 +42,8 @@ use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
-    api, chatgpt_app, creds, discovery, imagegen_mcp, login, provider_fingerprint, provision,
-    purchase,
+    api, backend, chatgpt_app, creds, discovery, imagegen_mcp, login, provider_fingerprint,
+    provision, purchase,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -353,25 +353,24 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
         // 拿 /user/profile 当探活请求（最便宜的鉴权端点）。
         let probe = async {
             let op = usable_relay(app_handle, id).await?;
-            api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?
-                .balance()
-                .await
+            backend::RuntimeBackend::for_relay(&op).balance().await
         }
         .await;
 
         if let Err(e) = probe {
-            let msg = e.to_string();
             // 「登录态已失效」是 api 层对不可恢复的那一类 401 的措辞（账号被禁 /
             // 会话被撤销 / 用户不存在）。这类清掉本地凭据、让用户重新登录。
             //
             // 其它失败（网络不通、中转站关了用户面板返 403）**不清凭据** ——
             // 那不是凭据的问题，清掉只会逼用户在网络恢复后白重登一次。
-            if msg.contains("登录态已失效") || msg.contains("请重新登录") {
+            if should_clear_credentials_after_probe_error(&e) {
                 let state = app_handle.state::<AppState>();
                 with_conn(&state, |conn| creds::clear_credentials(conn, id))?;
+                let msg = e.to_string();
                 log::info!("中转站 {id} 凭据已失效，已清除本地凭据：{msg}");
                 expired.push(id);
             } else {
+                let msg = e.to_string();
                 log::warn!("中转站 {id} 探活失败但保留凭据（可能只是网络问题）：{msg}");
             }
         }
@@ -1218,36 +1217,19 @@ async fn usable_relay(
         return Ok(op);
     }
 
-    // 过期了。有 refresh token 就试着续，没有就只能重登。
-    let Some(refresh) = op.refresh_token.clone() else {
-        return Err(AppError::Config("登录已过期，请重新登录".into()));
-    };
-
-    let fresh = api::refresh_token(&op.site_origin, &refresh).await?;
     let state = app_handle.state::<AppState>();
-    // 走 update_tokens 而不是 save_credentials：续期是「同一个账号换一把新 token」，
-    // 账号没变 ⇒ 没有重复可言，不该走那条会查重并可能合并行的路径。
-    with_conn(&state, |conn| {
-        creds::update_tokens(
-            conn,
-            op.id,
-            &fresh.auth_token,
-            // 服务端没轮换 refresh 时沿用旧的 —— 覆写成 None 会让下次过期时无法续期。
-            fresh.refresh_token.as_deref().or(Some(refresh.as_str())),
-            fresh.token_expires_at,
-        )
-    })?;
-
-    let renewed = creds::Relay {
-        auth_token: fresh.auth_token,
-        refresh_token: fresh.refresh_token.or(Some(refresh)),
-        token_expires_at: fresh.token_expires_at,
-        ..op
-    };
+    let refreshed = backend::RuntimeBackend::for_relay(&op)
+        .refresh_session(op.refresh_token.as_deref())
+        .await?;
+    let renewed = persist_refreshed_session(&state, &op, &refreshed)?;
 
     // 顺手刷一次账号身份：用户可能在中转站那边改了昵称或邮箱，而续期响应里没有账号信息
     // （`/auth/refresh` 只回 token），所以只有在这里额外打一次 profile 才发现得了。
     // 不刷的话站点选择器上会一直挂着旧标签 —— 而他改邮箱的动机往往就是「换个能认的」。
+    if refreshed.account.is_some() {
+        return Ok(renewed);
+    }
+
     Ok(backfill_account_identity(app_handle, renewed).await)
 }
 
@@ -1268,16 +1250,7 @@ async fn backfill_account_identity(
     app_handle: &tauri::AppHandle,
     mut op: creds::Relay,
 ) -> creds::Relay {
-    // `account_id` 传 `op.account_id`（此刻通常正是 `None` —— 本函数存在的理由就是它缺了）。
-    // 只打只读的 profile 端点，用不上幂等键。
-    let client = match api::Client::new(&op.site_origin, &op.auth_token, op.account_id) {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("刷新账号信息时构造客户端失败（不影响使用）: {e}");
-            return op;
-        }
-    };
-    let account = match client.account().await {
+    let account = match backend::RuntimeBackend::for_relay(&op).account().await {
         Ok(a) => a,
         Err(e) => {
             log::warn!("读取账号信息失败（不影响使用）: {e}");
@@ -1285,18 +1258,9 @@ async fn backfill_account_identity(
         }
     };
 
-    let label = account.display_name();
     let state = app_handle.state::<AppState>();
     if let Err(e) = with_conn(&state, |conn| {
-        creds::refresh_account_identity(
-            conn,
-            op.id,
-            creds::AccountIdentity {
-                id: account.id,
-                label: &label,
-                login_identifier: &account.email,
-            },
-        )
+        creds::refresh_account_identity(conn, op.id, runtime_account_identity(&account))
     }) {
         log::warn!("刷新账号信息失败（不影响使用）: {e}");
         return op;
@@ -1304,12 +1268,90 @@ async fn backfill_account_identity(
 
     // 写库成功才更新手上这份 —— 否则返回的结构与库里不一致，
     // 调用方据此判断 `account_id` 已补上，而下次读库又是空的。
-    if op.account_id.is_none() {
-        op.account_id = Some(account.id);
-    }
-    op.account_label = label;
-    op.login_identifier = account.email;
+    apply_runtime_account_identity(&mut op, account);
     op
+}
+
+fn runtime_account_identity(account: &backend::RuntimeAccount) -> creds::AccountIdentity<'_> {
+    creds::AccountIdentity {
+        id: account.id,
+        label: &account.label,
+        login_identifier: &account.login_identifier,
+    }
+}
+
+fn apply_runtime_account_identity(op: &mut creds::Relay, account: backend::RuntimeAccount) {
+    op.account_id = Some(account.id);
+    op.account_label = account.label;
+    op.login_identifier = account.login_identifier;
+}
+
+fn should_clear_credentials_after_probe_error(error: &AppError) -> bool {
+    backend::is_confirmed_auth_failure_message(&error.to_string())
+}
+
+fn persist_refreshed_session(
+    state: &AppState,
+    current: &creds::Relay,
+    refreshed: &backend::RefreshedSession,
+) -> Result<creds::Relay, AppError> {
+    persist_refreshed_session_with_identity_writer(
+        state,
+        current,
+        refreshed,
+        |state, relay_id, account| {
+            with_conn(state, |conn| {
+                creds::refresh_account_identity(conn, relay_id, runtime_account_identity(account))
+            })
+        },
+    )
+}
+
+fn persist_refreshed_session_with_identity_writer(
+    state: &AppState,
+    current: &creds::Relay,
+    refreshed: &backend::RefreshedSession,
+    write_identity: impl FnOnce(&AppState, i64, &backend::RuntimeAccount) -> Result<(), AppError>,
+) -> Result<creds::Relay, AppError> {
+    let refresh_token = refreshed
+        .refresh_credential
+        .clone()
+        .or_else(|| current.refresh_token.clone());
+    // 走 update_tokens 而不是 save_credentials：续期是「同一个账号换一把新 token」，
+    // 账号没变 ⇒ 没有重复可言，不该走那条会查重并可能合并行的路径。
+    with_conn(state, |conn| {
+        creds::update_tokens(
+            conn,
+            current.id,
+            &refreshed.auth_token,
+            refresh_token.as_deref(),
+            refreshed.token_expires_at,
+        )
+    })?;
+
+    let mut renewed = creds::Relay {
+        auth_token: refreshed.auth_token.clone(),
+        refresh_token,
+        token_expires_at: refreshed.token_expires_at,
+        ..current.clone()
+    };
+
+    if let Some(account) = refreshed.account.as_ref() {
+        if let Err(e) = write_identity(state, current.id, account) {
+            log::warn!("刷新账号信息失败（不影响使用）: {e}");
+        } else {
+            apply_runtime_account_identity(
+                &mut renewed,
+                backend::RuntimeAccount {
+                    id: account.id,
+                    label: account.label.clone(),
+                    login_identifier: account.login_identifier.clone(),
+                },
+            );
+        }
+    }
+
+    Ok(renewed)
 }
 
 /// 拉分组、为每组备好 sk、写成 provider 记录。
@@ -2790,9 +2832,14 @@ pub async fn relay_balance(
     let op = usable_relay(&app_handle, relay_id)
         .await
         .map_err(|e| e.to_string())?;
-    let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)
-        .map_err(|e| e.to_string())?;
-    client.balance().await.map_err(|e| e.to_string())
+    backend::RuntimeBackend::for_relay(&op)
+        .balance()
+        .await
+        .map(|balance| api::Balance {
+            balance: balance.balance,
+            frozen_balance: balance.frozen_balance,
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// 带登录态打开某个中转站的充值页。
@@ -4663,5 +4710,152 @@ mod tests {
             belongs_to_account(&legacy_provider, site, None),
             "删除方向对 `None` 仍是「算是我的」—— 那是旧数据能被清掉的前提"
         );
+    }
+
+    #[test]
+    fn session_probe_clears_only_confirmed_auth_failures() {
+        assert!(should_clear_credentials_after_probe_error(
+            &AppError::Config(
+                "newapi self 失败: 登录态已失效（HTTP 401），请重新登录中转站账号".into()
+            )
+        ));
+        assert!(should_clear_credentials_after_probe_error(
+            &AppError::Config("登录已过期，请重新登录".into())
+        ));
+        assert!(!should_clear_credentials_after_probe_error(
+            &AppError::Config("newapi self 请求失败: HTTP 500".into())
+        ));
+        assert!(!should_clear_credentials_after_probe_error(
+            &AppError::Config("newapi self 请求失败: 连不上服务器（boom）".into())
+        ));
+    }
+
+    #[test]
+    fn persisting_a_newapi_refresh_updates_rotated_cookie_and_account_identity() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Old Label",
+                    login_identifier: "old-login",
+                },
+                "stale-access",
+                Some("old-refresh"),
+                Some(1),
+            )
+        })
+        .expect("save credentials");
+
+        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load relay")
+            .expect("relay exists");
+        let renewed = persist_refreshed_session(
+            &state,
+            &current,
+            &backend::RefreshedSession {
+                auth_token: "new-access".into(),
+                refresh_credential: Some("rotated-refresh".into()),
+                token_expires_at: Some(1_900_000_000),
+                account: Some(backend::RuntimeAccount {
+                    id: 7,
+                    label: "NewAPI Display".into(),
+                    login_identifier: "newapi-login".into(),
+                }),
+            },
+        )
+        .expect("persist refresh");
+
+        assert_eq!(renewed.auth_token, "new-access");
+        assert_eq!(renewed.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(renewed.account_label, "NewAPI Display");
+        assert_eq!(renewed.login_identifier, "newapi-login");
+
+        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("reload relay")
+            .expect("relay exists");
+        assert_eq!(persisted.auth_token, "new-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_label, "NewAPI Display");
+        assert_eq!(persisted.login_identifier, "newapi-login");
+    }
+
+    #[test]
+    fn identity_refresh_failure_keeps_a_refreshed_session_usable() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Old Label",
+                    login_identifier: "old-login",
+                },
+                "stale-access",
+                Some("old-refresh"),
+                Some(1),
+            )
+        })
+        .expect("save credentials");
+
+        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load relay")
+            .expect("relay exists");
+        let renewed = persist_refreshed_session_with_identity_writer(
+            &state,
+            &current,
+            &backend::RefreshedSession {
+                auth_token: "new-access".into(),
+                refresh_credential: Some("rotated-refresh".into()),
+                token_expires_at: Some(1_900_000_000),
+                account: Some(backend::RuntimeAccount {
+                    id: 7,
+                    label: "NewAPI Display".into(),
+                    login_identifier: "newapi-login".into(),
+                }),
+            },
+            |_state, _relay_id, _account| Err(AppError::Database("identity write failed".into())),
+        )
+        .expect("token refresh should stay usable");
+
+        assert_eq!(renewed.auth_token, "new-access");
+        assert_eq!(renewed.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(renewed.account_label, "Old Label");
+        assert_eq!(renewed.login_identifier, "old-login");
+
+        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("reload relay")
+            .expect("relay exists");
+        assert_eq!(persisted.auth_token, "new-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_label, "Old Label");
+        assert_eq!(persisted.login_identifier, "old-login");
     }
 }

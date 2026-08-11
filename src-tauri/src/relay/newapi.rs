@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! NewAPI 的窄 DTO 与严格响应 parser。
 //!
 //! 这里只承载协议形状，不负责 HTTP 请求、登录态或业务编排。所有 parser 都先验证
@@ -31,11 +29,6 @@ fn detect_site(body: &str) -> Option<DetectedSite> {
     })
 }
 
-#[allow(dead_code)]
-fn relay_uses_newapi_backend(relay: &crate::relay::creds::Relay) -> bool {
-    relay.backend_kind == BackendKind::NewApi
-}
-
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
     success: bool,
@@ -62,13 +55,15 @@ fn parse_envelope<T: DeserializeOwned>(
     Ok(envelope.data)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub version: String,
     pub system_name: String,
     pub theme: String,
     pub register_enabled: bool,
     pub password_login_enabled: bool,
+    #[serde(default)]
+    pub quota_per_unit: Option<f64>,
 }
 
 pub fn parse_status(body: &str) -> Result<Status, AppError> {
@@ -114,8 +109,6 @@ fn validate_self_account(account: &SelfAccount, operation: &str) -> Result<(), A
     }
     for (field, value) in [
         ("username", account.username.trim()),
-        ("display_name", account.display_name.trim()),
-        ("email", account.email.trim()),
         ("group", account.group.trim()),
     ] {
         if value.is_empty() {
@@ -127,10 +120,12 @@ fn validate_self_account(account: &SelfAccount, operation: &str) -> Result<(), A
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GroupIdentity(pub String);
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub identity: GroupIdentity,
@@ -139,12 +134,14 @@ pub struct Group {
     pub description: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Deserialize)]
 struct GroupWire {
     ratio: RatioWire,
     desc: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RatioWire {
@@ -152,6 +149,7 @@ enum RatioWire {
     Text(String),
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl RatioWire {
     fn into_rate_multiplier(self) -> Result<Option<f64>, AppError> {
         match self {
@@ -165,6 +163,7 @@ impl RatioWire {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_groups(body: &str) -> Result<Vec<Group>, AppError> {
     let groups = parse_envelope::<BTreeMap<String, GroupWire>>(body, "groups", true)?
         .expect("requires_data guarantees groups data");
@@ -181,6 +180,7 @@ pub fn parse_groups(body: &str) -> Result<Vec<Group>, AppError> {
         .collect()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Token {
     pub id: i64,
@@ -213,6 +213,7 @@ pub struct Token {
     pub allow_ips: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenPage {
     pub page: i64,
@@ -221,24 +222,29 @@ pub struct TokenPage {
     pub items: Vec<Token>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_list(body: &str) -> Result<TokenPage, AppError> {
     Ok(parse_envelope::<TokenPage>(body, "token list", true)?
         .expect("requires_data guarantees token list data"))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenCreate;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_create(body: &str) -> Result<TokenCreate, AppError> {
     parse_envelope::<serde_json::Value>(body, "token create", false)?;
     Ok(TokenCreate)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenReveal {
     pub key: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_reveal(body: &str) -> Result<TokenReveal, AppError> {
     let reveal = parse_envelope::<TokenReveal>(body, "token reveal", true)?
         .expect("requires_data guarantees token reveal data");
@@ -248,9 +254,11 @@ pub fn parse_token_reveal(body: &str) -> Result<TokenReveal, AppError> {
     Ok(reveal)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenDelete;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_delete(body: &str) -> Result<TokenDelete, AppError> {
     parse_envelope::<serde_json::Value>(body, "token delete", false)?;
     Ok(TokenDelete)
@@ -259,6 +267,7 @@ pub fn parse_token_delete(body: &str) -> Result<TokenDelete, AppError> {
 pub struct RefreshedSession {
     pub access_token: String,
     pub access_expires_at: i64,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub session_id: String,
     pub account: SelfAccount,
     pub refresh_cookie: String,
@@ -315,10 +324,7 @@ pub async fn refresh_session(
         .await
         .map_err(|error| AppError::Config(format!("newapi refresh 读响应出错: {error}")))?;
     if !status.is_success() {
-        return Err(AppError::Config(format!(
-            "newapi refresh 请求失败: HTTP {}",
-            status.as_u16()
-        )));
+        return Err(classify_http_status("refresh", status));
     }
 
     let refreshed = parse_envelope::<RefreshEnvelope>(&body, "refresh", true)?
@@ -393,7 +399,52 @@ fn describe_send_error(error: &reqwest::Error) -> String {
     output
 }
 
+fn classify_http_status(operation: &str, status: reqwest::StatusCode) -> AppError {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return AppError::Config(format!(
+            "newapi {operation} 失败: 登录态已失效（HTTP {}），请重新登录中转站账号",
+            status.as_u16()
+        ));
+    }
+
+    AppError::Config(format!(
+        "newapi {operation} 请求失败: HTTP {}",
+        status.as_u16()
+    ))
+}
+
+pub async fn fetch_status(site_origin: &str) -> Result<Status, AppError> {
+    let site_origin = site_origin.trim().trim_end_matches('/');
+    if site_origin.is_empty() {
+        return Err(AppError::InvalidInput("newapi site_origin 不能为空".into()));
+    }
+
+    let response = crate::relay::api::build_client()?
+        .get(format!("{site_origin}/api/status"))
+        .header("Origin", site_origin)
+        .send()
+        .await
+        .map_err(|error| {
+            AppError::Config(format!(
+                "newapi status 请求失败: {}",
+                describe_send_error(&error)
+            ))
+        })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| AppError::Config(format!("newapi status 读响应出错: {error}")))?;
+    if !status.is_success() {
+        return Err(classify_http_status("status", status));
+    }
+
+    parse_status(&body)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 const TOKEN_PAGE_SIZE: i64 = 100;
+#[cfg_attr(not(test), allow(dead_code))]
 const TOKEN_PAGE_LIMIT: i64 = 100;
 
 pub struct NewApiClient {
@@ -402,6 +453,7 @@ pub struct NewApiClient {
     http: reqwest::Client,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Serialize)]
 struct CreateTokenPayload<'a> {
     name: &'a str,
@@ -416,6 +468,7 @@ struct CreateTokenPayload<'a> {
     cross_group_retry: bool,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl NewApiClient {
     pub fn new(site_origin: &str, access_token: &str) -> Result<Self, AppError> {
         let site_origin = site_origin.trim().trim_end_matches('/').to_string();
@@ -543,10 +596,7 @@ impl NewApiClient {
             .await
             .map_err(|error| AppError::Config(format!("newapi {operation} 读响应出错: {error}")))?;
         if !status.is_success() {
-            return Err(AppError::Config(format!(
-                "newapi {operation} 请求失败: HTTP {}",
-                status.as_u16()
-            )));
+            return Err(classify_http_status(operation, status));
         }
         Ok(body)
     }
@@ -805,7 +855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_refresh_reports_http_status_before_cookie_rotation_requirement() {
+    async fn failed_refresh_reports_confirmed_auth_failure_before_cookie_rotation_requirement() {
         let request_secret = "sid-401.previous-secret";
         let response_secret = "sid-401.response-secret";
         let server = TestServer::spawn(vec![TestResponse {
@@ -820,6 +870,7 @@ mod tests {
             Err(error) => error.to_string(),
         };
 
+        assert!(error.contains("登录态已失效"), "{error}");
         assert!(error.contains("HTTP 401"), "{error}");
         assert!(!error.contains("rotated new_api_refresh cookie"), "{error}");
         assert!(!error.contains("previous-secret"), "{error}");
@@ -1221,5 +1272,50 @@ mod tests {
         assert!(parse_token_list(r#"{"success":false,"message":"nope"}"#).is_err());
         assert!(parse_token_create(r#"{"success":false,"message":"nope"}"#).is_err());
         assert!(parse_token_delete(r#"{"success":false,"message":"nope"}"#).is_err());
+    }
+
+    #[test]
+    fn parse_self_allows_blank_display_name_and_email_for_newapi_accounts() {
+        let account = parse_self(
+            r#"{
+                "success": true,
+                "message": "",
+                "data": {
+                    "id": 7,
+                    "username": "newapi-login",
+                    "display_name": "",
+                    "email": "",
+                    "group": "default",
+                    "quota": 1,
+                    "used_quota": 0
+                }
+            }"#,
+        )
+        .expect("blank display_name/email should still be valid");
+
+        assert_eq!(account.username, "newapi-login");
+        assert_eq!(account.display_name, "");
+        assert_eq!(account.email, "");
+    }
+
+    #[test]
+    fn parse_status_preserves_site_owned_quota_per_unit() {
+        let status = parse_status(
+            r#"{
+                "success": true,
+                "message": "",
+                "data": {
+                    "version": "1.0.0",
+                    "system_name": "Relay",
+                    "theme": "default",
+                    "register_enabled": true,
+                    "password_login_enabled": true,
+                    "quota_per_unit": 250000.0
+                }
+            }"#,
+        )
+        .expect("status should parse");
+
+        assert_eq!(status.quota_per_unit, Some(250000.0));
     }
 }
