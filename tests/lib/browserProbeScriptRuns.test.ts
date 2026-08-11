@@ -1,46 +1,10 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 
 const REPO = resolve(__dirname, "../..");
-const SCRIPT = resolve(REPO, "src-tauri/target/browser-probe-script.js");
-
-function ensureScript(): void {
-  if (existsSync(SCRIPT)) return;
-  execFileSync(
-    "cargo",
-    [
-      "test",
-      "--manifest-path",
-      resolve(REPO, "src-tauri/Cargo.toml"),
-      "--lib",
-      "--",
-      "--ignored",
-      "export_browser_probe_script",
-    ],
-    {
-      stdio: "pipe",
-      env: {
-        ...process.env,
-        PATH: `${process.env.HOME}/.cargo/bin:${process.env.PATH}`,
-      },
-    },
-  );
-}
-
-function scriptAvailable(): boolean {
-  try {
-    ensureScript();
-    return true;
-  } catch (error) {
-    const reason =
-      error instanceof Error ? error.message.split("\n")[0] : String(error);
-    console.warn(`Skipping browser probe execution test: ${reason}`);
-    return false;
-  }
-}
+const SCRIPT = resolve(REPO, "tests/fixtures/browser-probe-script.txt");
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -59,7 +23,7 @@ async function flushPromises(): Promise<void> {
   await new Promise<void>((resolveNow) => setImmediate(resolveNow));
 }
 
-describe.runIf(scriptAvailable())("browser probe generated script", () => {
+describe("browser probe generated script", () => {
   it("serializes delayed rounds and emits one complete callback", async () => {
     const intervalCallbacks: Array<() => void> = [];
     const responseBodies: Array<Deferred<string>> = [];

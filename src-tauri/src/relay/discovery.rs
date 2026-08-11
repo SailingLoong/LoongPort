@@ -480,14 +480,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "exports the generated script for browserProbeScriptRuns.test.ts"]
-    fn export_browser_probe_script() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
-        std::fs::create_dir_all(&dir).expect("create target directory");
-        std::fs::write(
-            dir.join("browser-probe-script.js"),
+    fn tracked_browser_probe_script_matches_the_current_generator() {
+        assert_eq!(
+            include_str!("../../../tests/fixtures/browser-probe-script.txt"),
             browser_probe_script("https://relay.example", PROBE_CANDIDATES),
-        )
-        .expect("write browser probe script");
+            "the mandatory Vitest fixture must stay byte-for-byte current",
+        );
     }
 }

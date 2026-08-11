@@ -1,0 +1,52 @@
+
+(() => {
+  const expectedOrigin = "https://relay.example";
+  const candidates = [{"id":"sub2api","path":"/api/v1/settings/public"},{"id":"newapi","path":"/api/status"}];
+  const callbackScheme = 'loongport-probe';
+  let previousBatch = '';
+  let probeInFlight = false;
+
+  function b64url(value) {
+    const bytes = new TextEncoder().encode(value);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  async function probe() {
+    if (window.location.origin !== expectedOrigin) return;
+    if (probeInFlight) return;
+    probeInFlight = true;
+
+    try {
+      const responses = [];
+      for (const candidate of candidates) {
+        try {
+          const response = await fetch(candidate.path, {
+            credentials: 'include',
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+          });
+          const body = await response.text();
+          const trimmed = body.trim();
+          if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) continue;
+          if (new TextEncoder().encode(body).length > 65536) continue;
+          responses.push({ candidate_id: candidate.id, body });
+        } catch (_) {
+          // 页面仍可能处于验证或跳转阶段；下一轮继续，不在浏览器层解释失败原因。
+        }
+      }
+
+      if (!responses.length) return;
+      const batch = JSON.stringify(responses);
+      if (batch === previousBatch) return;
+      previousBatch = batch;
+      window.location.href = callbackScheme + '://response?d=' + b64url(batch);
+    } finally {
+      probeInFlight = false;
+    }
+  }
+
+  void probe();
+  setInterval(() => void probe(), 1500);
+})();
