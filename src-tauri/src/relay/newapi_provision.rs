@@ -3,10 +3,6 @@
 //! This module owns only the backend-specific remote lifecycle. Local provider
 //! persistence deliberately remains with the command layer.
 
-// Task 5a lands the independently tested reconcile boundary before Task 5b wires it into the
-// command lifecycle. Remove this transitional allowance as soon as that caller is added.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -257,11 +253,6 @@ pub async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppErro
     }
     delete_stale_tokens(client, &mut result, revealed_duplicate_tokens).await;
 
-    if !result.observed_groups.is_empty() && result.groups.is_empty() {
-        return Err(AppError::Config(
-            "所有 NewAPI 分组都没能取得可用 token".into(),
-        ));
-    }
     Ok(result)
 }
 
@@ -725,15 +716,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_returns_overall_error_when_every_observed_group_create_fails() {
+    async fn reconcile_returns_observed_inventory_when_every_group_create_fails() {
         let mut state = TestState::new(7, &["alpha"], Vec::new());
         state.create_failures.insert("alpha".into());
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let error = reconcile(&client).await.unwrap_err().to_string();
+        let result = reconcile(&client).await.unwrap();
 
-        assert!(error.contains("所有 NewAPI 分组"));
+        assert_eq!(result.observed_groups, vec![GroupIdentity("alpha".into())]);
+        assert!(result.groups.is_empty());
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures[0].stage, ReconcileStage::Create);
     }
 
     #[tokio::test]

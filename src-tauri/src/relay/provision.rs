@@ -446,6 +446,27 @@ pub fn provider_id_for(site_origin: &str, account_id: Option<i64>, group_id: i64
     )
 }
 
+/// A stable NewAPI provider id scoped by backend, site, account, and exact raw group identity.
+pub fn newapi_provider_id_for(
+    site_origin: &str,
+    account_id: i64,
+    raw_group_identity: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"newapi/");
+    h.update(site_origin.as_bytes());
+    h.update(b"/");
+    h.update(account_id.to_string().as_bytes());
+    h.update(b"/");
+    h.update(raw_group_identity.as_bytes());
+    format!(
+        "{}{:.16x}",
+        crate::relay::managed::MANAGED_ID_PREFIX,
+        h.finalize()
+    )
+}
+
 /// provider 的展示名。
 pub fn provider_display_name(site_name: &str, group_name: &str) -> String {
     if site_name.is_empty() {
@@ -919,6 +940,7 @@ const CODEX_MAIN_CANDIDATES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.
 ///   命中的；取不到顺延低档。列表是 gpt 家族时按「opus↔sol、sonnet↔terra、haiku↔luna」对齐。
 ///   挑出的模型名对支持 1M 的新一代模型附 `[1M]` 后缀声明（见 [`maybe_one_m`]）。
 /// - **codex**：主模型候选顺延（首位 `DEFAULT_MODEL` 命中即保持现状）。
+/// - **gemini**：优先取第一个 `gemini-*` 模型；没有时回落列表首项。
 /// - **其它平台**：模型列表第一个文本模型。
 /// - **纯生图分组**（只有 `gpt-image-*`）：仍写最新的生图模型（复用作 `pick_model`）。
 /// - **列表拉不到**：回落 `DEFAULT_MODEL`（旧行为，最坏退化）。
@@ -940,6 +962,14 @@ pub fn pick_tier_models(app_type: &AppType, models: Option<&[String]>) -> TierMo
         AppType::Claude => pick_claude_tier_models(models),
         AppType::Codex | AppType::CodexImage => TierModels {
             main: first_hit(CODEX_MAIN_CANDIDATES, models).unwrap_or_else(|| models[0].clone()),
+            claude_roles: None,
+        },
+        AppType::Gemini => TierModels {
+            main: models
+                .iter()
+                .find(|model| model.to_ascii_lowercase().starts_with("gemini-"))
+                .cloned()
+                .unwrap_or_else(|| models[0].clone()),
             claude_roles: None,
         },
         _ => TierModels {
@@ -1845,6 +1875,33 @@ mod tests {
         // hex」，只验前缀的断言比它弱，改坏格式时不会红（形状那条由
         // `generated_ids_always_have_exactly_sixteen_lowercase_hex_chars` 专门钉）。
         assert!(crate::relay::is_managed(&a), "id: {a}");
+    }
+
+    #[test]
+    fn newapi_provider_id_preserves_raw_group_identity_and_backend_scope() {
+        let site = "https://newapi.example";
+        let raw_group = " vip/中文 🚀 ";
+        let id = newapi_provider_id_for(site, 7, raw_group);
+
+        assert_eq!(id, newapi_provider_id_for(site, 7, raw_group));
+        assert_ne!(id, newapi_provider_id_for(site, 7, raw_group.trim()));
+        assert_ne!(id, newapi_provider_id_for(site, 8, raw_group));
+        assert_ne!(
+            id,
+            newapi_provider_id_for("https://other.example", 7, raw_group)
+        );
+        assert!(crate::relay::is_managed(&id), "id: {id}");
+
+        // The backend tag must keep a numeric NewAPI identity distinct from the
+        // existing sub2api namespace without changing sub2api's persisted id.
+        assert_ne!(
+            newapi_provider_id_for("https://bestapi.store", 1, "42"),
+            provider_id_for("https://bestapi.store", Some(1), 42)
+        );
+        assert_eq!(
+            provider_id_for("https://bestapi.store", Some(1), 42),
+            "loongport-6f2036536f2d81d5"
+        );
     }
 
     /// ⭐ **同一个站上两个账号的同号分组必须是不同的 provider。**

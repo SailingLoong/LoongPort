@@ -43,8 +43,8 @@ use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
-    api, backend, chatgpt_app, creds, discovery, imagegen_mcp, login, newapi, provider_fingerprint,
-    provision, purchase,
+    api, backend, chatgpt_app, creds, discovery, imagegen_mcp, login, newapi, newapi_provision,
+    provider_fingerprint, provision, purchase,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -1655,116 +1655,283 @@ pub async fn relay_provision(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Clone)]
+struct ManagedProvisionCandidate {
+    provider_id: String,
+    app_type: AppType,
+    group_name: String,
+    rate_multiplier: Option<f64>,
+    api_key: String,
+    model: String,
+    models: Option<Vec<String>>,
+    roles: Option<provision::ClaudeRoleModels>,
+    allow_image_generation: Option<bool>,
+    api_base_url: String,
+}
+
+#[derive(Default)]
+struct ManagedProvisionBatch {
+    account_id: Option<i64>,
+    candidates: Vec<ManagedProvisionCandidate>,
+    /// Upstream-observed `(app_type, provider_id)` pairs that stale pruning must retain.
+    observed_keep: std::collections::HashSet<(String, String)>,
+    failures: Vec<FailureInfo>,
+    keys_created: usize,
+}
+
+fn newapi_app_types() -> [AppType; 3] {
+    [AppType::Claude, AppType::Codex, AppType::Gemini]
+}
+
+fn newapi_observed_keep(
+    site_origin: &str,
+    account_id: i64,
+    observed_groups: &[newapi::GroupIdentity],
+) -> std::collections::HashSet<(String, String)> {
+    observed_groups
+        .iter()
+        .flat_map(|group| {
+            let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.0);
+            newapi_app_types()
+                .into_iter()
+                .map(move |app_type| (app_type.as_str().to_string(), provider_id.clone()))
+        })
+        .collect()
+}
+
+fn newapi_candidates_for_group(
+    site_origin: &str,
+    account_id: i64,
+    group: &newapi_provision::ReconciledGroup,
+    models: &[String],
+) -> Vec<ManagedProvisionCandidate> {
+    let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.identity.0);
+    newapi_app_types()
+        .into_iter()
+        .map(|app_type| {
+            let picked = provision::pick_tier_models(&app_type, Some(models));
+            ManagedProvisionCandidate {
+                provider_id: provider_id.clone(),
+                app_type,
+                group_name: group.name.clone(),
+                rate_multiplier: group.rate_multiplier,
+                api_key: group.api_key.clone(),
+                model: picked.main,
+                models: Some(models.to_vec()),
+                roles: picked.claude_roles,
+                allow_image_generation: None,
+                // NewAPI exposes one OpenAI-compatible root. Per-app suffixes are projected by
+                // `api::base_url_for`, so no persisted sub2api base belongs here.
+                api_base_url: String::new(),
+            }
+        })
+        .collect()
+}
+
+fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static str {
+    match stage {
+        newapi_provision::ReconcileStage::Create => "token_create",
+        newapi_provision::ReconcileStage::Relist => "token_relist",
+        newapi_provision::ReconcileStage::Reveal => "token_reveal",
+        newapi_provision::ReconcileStage::DeleteStale => "token_delete_stale",
+    }
+}
+
+async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, AppError> {
+    match op.backend_kind {
+        discovery::BackendKind::Sub2Api => {
+            let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?;
+            let mut result = provision::provision(&client).await?;
+            provision::sort_tiers(&mut result.tiers);
+            let keys_created = result
+                .tiers
+                .iter()
+                .filter(|targeted| targeted.tier.key_was_created)
+                .count();
+            let candidates = result
+                .tiers
+                .into_iter()
+                .map(|targeted| {
+                    let tier = targeted.tier;
+                    ManagedProvisionCandidate {
+                        provider_id: provision::provider_id_for(
+                            &op.site_origin,
+                            op.account_id,
+                            tier.group_id,
+                        ),
+                        app_type: targeted.app_type,
+                        group_name: tier.group_name,
+                        rate_multiplier: Some(tier.rate_multiplier),
+                        api_key: tier.api_key,
+                        model: tier.model,
+                        models: tier.models,
+                        roles: tier.roles,
+                        allow_image_generation: Some(tier.allow_image_generation),
+                        api_base_url: op.api_base_url.clone(),
+                    }
+                })
+                .collect();
+            Ok(ManagedProvisionBatch {
+                account_id: op.account_id,
+                candidates,
+                observed_keep: std::collections::HashSet::new(),
+                failures: result
+                    .failures
+                    .into_iter()
+                    .map(|(group_name, reason)| FailureInfo { group_name, reason })
+                    .collect(),
+                keys_created,
+            })
+        }
+        discovery::BackendKind::NewApi => {
+            let client = newapi::NewApiClient::new(&op.site_origin, &op.auth_token)?;
+            let result = newapi_provision::reconcile(&client).await?;
+            if op.account_id.is_some() && op.account_id != Some(result.account_id) {
+                return Err(AppError::Config(
+                    "NewAPI 登录态所属账号与本地中转站账号不一致，请重新登录".into(),
+                ));
+            }
+
+            let mut batch = ManagedProvisionBatch {
+                account_id: Some(result.account_id),
+                candidates: Vec::new(),
+                observed_keep: newapi_observed_keep(
+                    &op.site_origin,
+                    result.account_id,
+                    &result.observed_groups,
+                ),
+                failures: result
+                    .failures
+                    .into_iter()
+                    .map(|failure| FailureInfo {
+                        group_name: failure
+                            .group_identity
+                            .map(|identity| identity.0)
+                            .unwrap_or_else(|| "NewAPI token cleanup".into()),
+                        reason: format!(
+                            "{}: {}",
+                            newapi_reconcile_stage(failure.stage),
+                            failure.reason
+                        ),
+                    })
+                    .collect(),
+                keys_created: result.tokens_created,
+            };
+
+            for group in result.groups {
+                let models = match api::list_models(&op.site_origin, &group.api_key).await {
+                    Ok(Some(models)) => provision::normalize_model_names(models),
+                    Ok(None) => {
+                        batch.failures.push(FailureInfo {
+                            group_name: group.name,
+                            reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        batch.failures.push(FailureInfo {
+                            group_name: group.name,
+                            reason: format!("model_catalog: {error}"),
+                        });
+                        continue;
+                    }
+                };
+                batch.candidates.extend(newapi_candidates_for_group(
+                    &op.site_origin,
+                    result.account_id,
+                    &group,
+                    &models,
+                ));
+            }
+            Ok(batch)
+        }
+    }
+}
+
 async fn do_provision(
     app_handle: &tauri::AppHandle,
     relay_id: i64,
 ) -> Result<ProvisionSummary, AppError> {
-    // 判据是「`settings_config_for` 认不认这个 CLI」，**不是硬编码 codex** ——
-    // 那个函数加一个分支，这里就自动放开，不必两处同步改。
     let op = usable_relay(app_handle, relay_id).await?;
-    // ⭐ **`account_id` 必须带上**：这是唯一会发写请求（建 Key）的路径，而幂等键
-    // 不带账号时同站多账号必撞 409（见 `api::idempotency_key_for`）。
-    //
-    // `usable_relay` 会**尽力**补齐它，但补不上也照样返回（`backfill_account_identity`
-    // 拉 profile 失败只 warn）⇒ 这里仍可能是 `None`，那时建 Key 落在 `"anon"`
-    // 命名空间。不为此把 provision 判失败：拉 profile 瞬时失败换来「拿不到密钥」
-    // 是拿可用性换一个更窄的正确性，不值得。
-    let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?;
-    // **不传 app_type** —— 每个分组落到哪个 CLI 由它自己的 platform 决定
-    // （见 `provision::provision` 的文档）。一次登录探全部平台。
-    let mut result = provision::provision(&client).await?;
-    provision::sort_tiers(&mut result.tiers);
-
-    // 写 provider 记录。这一段是同步的（碰 DB），所以拿完网络数据再做。
+    let batch = provision_backend(&op).await?;
     let state = app_handle.state::<AppState>();
+    persist_provision_batch(state.inner(), &op, batch)
+}
 
+fn persist_provision_batch(
+    state: &AppState,
+    op: &creds::Relay,
+    mut batch: ManagedProvisionBatch,
+) -> Result<ProvisionSummary, AppError> {
     let mut tiers = Vec::new();
     let mut merged_providers = Vec::new();
-    // 这次 provision 认可的「(app_type, provider_id)」组合。见下方 insert 处的说明。
-    let mut keep: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    // 这次改写到的档位里，哪些**正是所属 app 的当前项**。见循环后那段刷 live 的说明。
+    // NewAPI fills this from the complete upstream inventory before reveal/model/write.
+    // sub2api candidates are inserted before their local write for the same retention property.
+    let mut keep = std::mem::take(&mut batch.observed_keep);
     let mut refresh_live: Vec<AppType> = Vec::new();
-    for (idx, targeted) in result.tiers.iter().enumerate() {
-        let tier = &targeted.tier;
-        // ⚠️ **用这条分组自己的 app_type**，不是调用方给的 —— 那正是
-        // 「claude 页出现 chatgpt 分组」那个 bug 的根因。
-        let app_type = &targeted.app_type;
+    for (idx, candidate) in batch.candidates.into_iter().enumerate() {
+        let app_type = &candidate.app_type;
+        let provider_id = candidate.provider_id.clone();
+        let display_name = provision::provider_display_name(&op.site_name, &candidate.group_name);
+        keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
-        let provider_id = provision::provider_id_for(&op.site_origin, op.account_id, tier.group_id);
-        let display_name = provision::provider_display_name(&op.site_name, &tier.group_name);
-
-        // 认不出配置形状的 CLI 直接跳过并如实报出来 —— 不能写一条形状不对的记录
-        // （那是「看着像成功、调用必失败」）。
-        //
-        // ⚠️ **模型名用 `tier.model` 而不是 `DEFAULT_MODEL`**：纯生图分组
-        // （`/v1/models` 里只有 `gpt-image-*`）写文本模型名就是必定 404。
-        // 那个值由 `provision::pick_tier_models` 按该分组的真实模型列表 + 平台定，见它的文档。
-        //
-        // ⚠️ **claude 档位带角色模型**（`tier.roles`）：provision 按该分组模型列表挑出的
-        // opus/sonnet/haiku/fable/subagent 各写各的，而不是全指向同一个主模型 ——
-        // 否则 Anthropic 分组明明返回 claude 模型，档位却全写 gpt-5.6-sol。
-        //
-        // ⚠️ **端点走 `api::base_url_for` 而不是直接用 `op.api_base_url`**：claude / gemini
-        // 自己拼版本段，要不带 `/v1` 的站点根；codex 系要带。后果见 [`api::base_url_for`]。
-        let base_url = api::base_url_for(app_type, &op.site_origin, &op.api_base_url);
+        let base_url = api::base_url_for(app_type, &op.site_origin, &candidate.api_base_url);
         let defaults = if matches!(app_type, AppType::Claude) {
             provision::settings_config_with_roles(
                 app_type,
-                &tier.api_key,
+                &candidate.api_key,
                 &display_name,
                 &base_url,
-                &tier.model,
-                tier.roles.clone(),
+                &candidate.model,
+                candidate.roles.clone(),
             )
         } else if matches!(app_type, AppType::Codex) {
             provision::settings_config_with_models(
                 app_type,
-                &tier.api_key,
+                &candidate.api_key,
                 &display_name,
                 &base_url,
-                &tier.model,
-                tier.models.as_deref(),
+                &candidate.model,
+                candidate.models.as_deref(),
             )
         } else {
             provision::settings_config_for(
                 app_type,
-                &tier.api_key,
+                &candidate.api_key,
                 &display_name,
                 &base_url,
-                &tier.model,
+                &candidate.model,
             )
         };
         let Some(defaults) = defaults else {
-            result.failures.push((
-                tier.group_name.clone(),
-                format!("还不能为 {} 生成配置", app_type.as_str()),
-            ));
+            batch.failures.push(FailureInfo {
+                group_name: candidate.group_name,
+                reason: format!("{}: 还不能生成配置", app_type.as_str()),
+            });
             continue;
         };
 
-        // ⚠️ **已手工维护的档位只换 sk、保留配置；其余整份重写为当前默认**。
-        //
-        // `save_provider` 是全量覆盖 `settings_config` 的。区分靠 `user_edited` 标记：
-        // 已标记（用户在编辑页维护过）⇒ 只换 sk，别把用户改的模型名 / reasoning effort /
-        // 自定义端点冲掉；未标记（LoongPort 托管的）⇒ 重写成默认，顺便吸收模型改名等
-        // 默认值变更（`repair_stale_model` 被这次全量重写吸收，已删）。
         let existing = state
             .db
             .get_provider_by_id(&provider_id, app_type.as_str())
             .ok()
             .flatten();
-        let user_edited = state.db.get_user_edited(app_type.as_str(), &provider_id)?;
+        let user_edited = match state.db.get_user_edited(app_type.as_str(), &provider_id) {
+            Ok(user_edited) => user_edited,
+            Err(error) => {
+                batch.failures.push(FailureInfo {
+                    group_name: candidate.group_name,
+                    reason: format!("{}: 读取用户编辑标记失败: {error}", app_type.as_str()),
+                });
+                continue;
+            }
+        };
 
         let settings_config = match existing {
             Some(old) => {
-                // 已手工维护（`user_edited` 标记）⇒ 只换 sk、保留用户的配置。
-                // 未标记（LoongPort 托管的）⇒ 整份重写为当前默认配置 —— 拿最新模型 /
-                // 端点；`repair_stale_model` 被这次全量重写吸收（删掉了，见 git log）。
                 if user_edited {
                     let mut kept = old.settings_config;
-                    // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落到默认配置。
-                    // 否则用户会留着一把旧 sk 却以为刷新成功了。
-                    if provision::patch_api_key(&mut kept, app_type, &tier.api_key) {
+                    if provision::patch_api_key(&mut kept, app_type, &candidate.api_key) {
                         kept
                     } else {
                         log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
@@ -1779,7 +1946,7 @@ async fn do_provision(
             None => defaults,
         };
 
-        let current = ProviderService::current(&state, app_type.clone()).unwrap_or_default();
+        let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
 
         let provider = Provider {
             id: provider_id.clone(),
@@ -1792,25 +1959,38 @@ async fn do_provision(
             created_at: Some(chrono::Utc::now().timestamp_millis()),
             sort_index: Some(idx),
             notes: None,
-            meta: Some(managed_meta(app_type, op.account_id)),
+            meta: Some(managed_meta(app_type, batch.account_id)),
             icon: None,
             icon_color: None,
             in_failover_queue: false,
         };
 
-        state
-            .db
-            .save_provider(app_type.as_str(), &provider)
-            .map_err(|e| AppError::Database(format!("保存档位 {display_name} 失败: {e}")))?;
+        if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+            batch.failures.push(FailureInfo {
+                group_name: candidate.group_name,
+                reason: format!(
+                    "{}: 保存档位 {display_name} 失败: {error}",
+                    app_type.as_str()
+                ),
+            });
+            continue;
+        }
 
-        // 导入后的 cc-switch provider 可能仍指向同一站点、同一把 key。LoongPort
-        // 托管档位是该事实的 owner：收编同 app 下的非托管副本，避免用户看到两个
-        // 实际指向同一上游的档位。指纹只用于这次协调，不改变托管档位的稳定 id。
-        let merged_current = provider_fingerprint::remove_unmanaged_duplicates(
+        let merged_current = match provider_fingerprint::remove_unmanaged_duplicates(
             state.db.as_ref(),
             app_type,
             &provider,
-        )?;
+        ) {
+            Ok(merged) => merged,
+            Err(error) => {
+                batch.failures.push(FailureInfo {
+                    group_name: candidate.group_name.clone(),
+                    reason: format!("{}: 收编重复 provider 失败: {error}", app_type.as_str()),
+                });
+                Vec::new()
+            }
+        };
+        let mut is_current = current == provider_id;
         if !merged_current.is_empty() {
             log::info!(
                 "收编 {} 个重复的 {} provider：{}",
@@ -1827,26 +2007,25 @@ async fn do_provision(
                 app_id: app_type.as_str().to_string(),
             }));
             if merged_current.iter().any(|m| m.was_current) {
-                state
+                match state
                     .db
-                    .set_current_provider(app_type.as_str(), &provider_id)?;
-                if !refresh_live.contains(app_type) {
-                    refresh_live.push(app_type.clone());
+                    .set_current_provider(app_type.as_str(), &provider_id)
+                {
+                    Ok(()) => {
+                        is_current = true;
+                        if !refresh_live.contains(app_type) {
+                            refresh_live.push(app_type.clone());
+                        }
+                    }
+                    Err(error) => batch.failures.push(FailureInfo {
+                        group_name: candidate.group_name.clone(),
+                        reason: format!("{}: 转移当前 provider 失败: {error}", app_type.as_str()),
+                    }),
                 }
             }
         }
 
-        // ⚠️ **`keep` 必须带 app_type**，不能只放 provider_id。
-        //
-        // `provider_id` 是 `sha256(site_origin + group_id)` —— **不含 app_type**，
-        // 所以同一个分组在 claude 与 codex 下是**同一个 id**。
-        // 只按 id 判的话：`pro池` 在 claude 下是脏记录、在 codex 下是合法记录，
-        // 那个 id 落进 keep ⇒ claude 下那条被当成「该保留」⇒ **永远删不掉**。
-        // 那正是用户实测「点刷新 claude 页下仍挂着 codex 的分组」的真根因。
-        keep.insert((app_type.as_str().to_string(), provider_id.clone()));
-
-        let is_current = current == provider_id;
-        if is_current {
+        if is_current && !refresh_live.contains(app_type) {
             refresh_live.push(app_type.clone());
         }
 
@@ -1856,7 +2035,7 @@ async fn do_provision(
             // **这条分组自己的 app_type**，不是调用方给的 —— 这一整段循环的前提就是
             // 「一次 provision 探全部平台」，写错会让前端把别的平台的档位算成自己的。
             app_id: app_type.as_str().to_string(),
-            group_name: tier.group_name.clone(),
+            group_name: candidate.group_name,
             display_name,
             model: provision::extract_model(&provider.settings_config).unwrap_or_default(),
             models: if matches!(app_type, AppType::Codex) {
@@ -1864,34 +2043,15 @@ async fn do_provision(
             } else {
                 Vec::new()
             },
-            rate_multiplier: Some(tier.rate_multiplier),
+            rate_multiplier: candidate.rate_multiplier,
             user_edited: Some(user_edited),
-            // 这条路上两个字段都有真值：模型名刚由 `pick_model` 算出来，
-            // 生图开关刚从 `/groups/available` 拉到。
-            allow_image_generation: Some(tier.allow_image_generation),
+            allow_image_generation: candidate.allow_image_generation,
         });
     }
 
-    // 被改写的档位里若有**当前项**，必须把新配置落到 live 文件上。
-    //
-    // ## 为什么不能只 `save_provider`（用户实测的症状）
-    //
-    // CLI 读的是落地文件（`~/.codex/config.toml` 等），不是我们的 DB。服务端那把 sk
-    // 被撤销后 `ensure_key_for` 会重建一把（`key_was_created = true`），DB 里换了新的，
-    // 而 live 里还是旧的 ⇒ **界面提示刷新成功、库里也确实是新密钥，Codex / Claude 却
-    // 仍拿旧密钥去请求**。更糟的是用户没有自救手段：UI 认为这个档位已经是当前项
-    // （`isCurrent` 为 true ⇒ 前端 `if (tier.isCurrent) return;` 直接跳过），
-    // 再点它一次也不会触发切换。
-    //
-    // 走 `sync_current_provider_for_app` 而不是 `switch`：我们不是在**切换**当前项
-    // （它本来就是当前项），只是让它的落地配置追上 DB。那个 API 内部已处理代理接管
-    // （接管时写备份而不是覆盖 live 文件），自己比 id + 调 `switch` 会绕过那层判断。
-    //
-    // 失败只 warn：记录已经存对了，用户手工切一次就能生效 —— 不该因为落地文件写不下去
-    // 就把整次「获取密钥」报成失败（那会让他以为连密钥都没拿到）。
-    refresh_live_for_current_tiers(&state, &refresh_live);
+    refresh_live_for_current_tiers(state, &refresh_live);
 
-    let removed = prune_stale_tiers(&state, &op.site_origin, op.account_id, &keep)?;
+    let removed = prune_stale_tiers(state, &op.site_origin, batch.account_id, &keep)?;
     if removed > 0 {
         log::info!("清理了 {removed} 个不再存在的档位（{}）", op.site_origin);
     }
@@ -1904,22 +2064,36 @@ async fn do_provision(
     //
     // 失败只 warn：档位已经存对了，不该因为一个 MCP 记录写不下去就把「获取密钥」
     // 整个报成失败（用户会以为连密钥都没拿到）。
-    if let Err(e) = imagegen_mcp::sync_registration(&state) {
+    if let Err(e) = imagegen_mcp::sync_registration(state) {
         log::warn!("同步生图工具记录失败（生图可能暂时用不了）: {e}");
     }
 
-    Ok(ProvisionSummary {
-        keys_created: result
-            .tiers
-            .iter()
-            .filter(|t| t.tier.key_was_created)
-            .count(),
-        tiers,
-        failures: result
+    let retained_observed = keep.iter().any(|(app_type, provider_id)| {
+        state
+            .db
+            .get_provider_by_id(provider_id, app_type)
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if tiers.is_empty() && !retained_observed {
+        let detail = batch
             .failures
-            .into_iter()
-            .map(|(group_name, reason)| FailureInfo { group_name, reason })
-            .collect(),
+            .iter()
+            .map(|failure| format!("{}: {}", failure.group_name, failure.reason))
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(AppError::Config(if detail.is_empty() {
+            "没有可写入或可保留的托管档位".into()
+        } else {
+            format!("所有分组都没能备好托管档位（{detail}）")
+        }));
+    }
+
+    Ok(ProvisionSummary {
+        keys_created: batch.keys_created,
+        tiers,
+        failures: batch.failures,
         merged_providers,
     })
 }
@@ -4115,6 +4289,311 @@ mod tests {
 
     fn test_app() -> AppType {
         AppType::Codex
+    }
+
+    fn test_newapi_relay(account_id: i64) -> creds::Relay {
+        creds::Relay {
+            id: account_id,
+            site_origin: "https://newapi.example".into(),
+            site_name: "NewAPI".into(),
+            backend_kind: discovery::BackendKind::NewApi,
+            api_base_url: String::new(),
+            account_id: Some(account_id),
+            account_label: format!("account-{account_id}"),
+            login_identifier: format!("account-{account_id}"),
+            auth_token: "access-token".into(),
+            refresh_token: None,
+            token_expires_at: None,
+            sort_index: 0,
+        }
+    }
+
+    fn test_newapi_group(
+        identity: &str,
+        api_key: &str,
+    ) -> crate::relay::newapi_provision::ReconciledGroup {
+        crate::relay::newapi_provision::ReconciledGroup {
+            identity: crate::relay::newapi::GroupIdentity(identity.into()),
+            name: identity.into(),
+            rate_multiplier: Some(1.25),
+            description: format!("{identity} description"),
+            api_key: api_key.into(),
+            token_was_created: false,
+        }
+    }
+
+    fn newapi_models() -> Vec<String> {
+        provision::normalize_model_names(vec![
+            "gemini-2.5-pro".into(),
+            "claude-haiku-4-5".into(),
+            "gpt-5.4".into(),
+            "claude-sonnet-4-5".into(),
+            "gpt-5.4".into(),
+        ])
+    }
+
+    fn newapi_batch(
+        op: &creds::Relay,
+        groups: &[crate::relay::newapi_provision::ReconciledGroup],
+    ) -> ManagedProvisionBatch {
+        let account_id = op.account_id.expect("test relay has account id");
+        let observed_groups = groups
+            .iter()
+            .map(|group| group.identity.clone())
+            .collect::<Vec<_>>();
+        ManagedProvisionBatch {
+            account_id: Some(account_id),
+            candidates: groups
+                .iter()
+                .flat_map(|group| {
+                    newapi_candidates_for_group(
+                        &op.site_origin,
+                        account_id,
+                        group,
+                        &newapi_models(),
+                    )
+                })
+                .collect(),
+            observed_keep: newapi_observed_keep(&op.site_origin, account_id, &observed_groups),
+            failures: Vec::new(),
+            keys_created: 0,
+        }
+    }
+
+    #[test]
+    fn newapi_group_expands_to_three_app_configs_with_one_provider_id() {
+        let op = test_newapi_relay(7);
+        let group = test_newapi_group(" vip/\u{4e2d}\u{6587} \u{1f680} ", "sk-shared");
+        let batch = newapi_batch(&op, std::slice::from_ref(&group));
+
+        assert_eq!(batch.candidates.len(), 3);
+        assert_eq!(batch.observed_keep.len(), 3);
+        let provider_ids = batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.provider_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(provider_ids.len(), 1);
+        assert_eq!(
+            batch
+                .candidates
+                .iter()
+                .map(|candidate| candidate.app_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "codex", "gemini"]
+        );
+
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let summary = persist_provision_batch(&state, &op, batch).expect("persist projections");
+
+        assert_eq!(summary.tiers.len(), 3);
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            let provider = db
+                .get_provider_by_id(summary.tiers[0].provider_id.as_str(), app_type.as_str())
+                .expect("read provider")
+                .expect("projection exists");
+            assert_eq!(
+                provision::extract_api_key(&provider.settings_config, &app_type).as_deref(),
+                Some("sk-shared")
+            );
+            assert_eq!(
+                provider.website_url.as_deref(),
+                Some(op.site_origin.as_str())
+            );
+            assert_eq!(
+                provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.loongport_account_id),
+                Some(7)
+            );
+        }
+    }
+
+    #[test]
+    fn newapi_refresh_preserves_edited_config_but_recomputes_unedited_defaults() {
+        let op = test_newapi_relay(7);
+        let first_group = test_newapi_group("vip", "sk-first");
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let first = persist_provision_batch(&state, &op, newapi_batch(&op, &[first_group]))
+            .expect("initial provision");
+        let provider_id = first.tiers[0].provider_id.clone();
+
+        let mut edited = db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+            .expect("read edited provider")
+            .expect("edited provider exists");
+        edited.settings_config = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-first",
+            "Custom Name",
+            "https://custom.example/v1",
+            "gpt-custom",
+        )
+        .expect("custom codex config");
+        let mut expected_edited = edited.settings_config.clone();
+        assert!(provision::patch_api_key(
+            &mut expected_edited,
+            &AppType::Codex,
+            "sk-second"
+        ));
+        db.save_provider(AppType::Codex.as_str(), &edited)
+            .expect("save edited provider");
+        db.set_user_edited(AppType::Codex.as_str(), &provider_id, true)
+            .expect("mark edited");
+
+        let mut unedited = db
+            .get_provider_by_id(&provider_id, AppType::Gemini.as_str())
+            .expect("read unedited provider")
+            .expect("unedited provider exists");
+        unedited.settings_config["env"]["GEMINI_MODEL"] =
+            serde_json::Value::String("gemini-stale".into());
+        db.save_provider(AppType::Gemini.as_str(), &unedited)
+            .expect("save stale unedited provider");
+
+        let second_group = test_newapi_group("vip", "sk-second");
+        let second_batch = newapi_batch(&op, &[second_group]);
+        persist_provision_batch(&state, &op, second_batch).expect("refresh provision");
+
+        let edited_after = db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+            .expect("read refreshed edited provider")
+            .expect("refreshed edited provider exists");
+        assert_eq!(edited_after.settings_config, expected_edited);
+        let unedited_after = db
+            .get_provider_by_id(&provider_id, AppType::Gemini.as_str())
+            .expect("read refreshed default provider")
+            .expect("refreshed default provider exists");
+        assert_eq!(
+            provision::extract_api_key(&unedited_after.settings_config, &AppType::Gemini)
+                .as_deref(),
+            Some("sk-second")
+        );
+        assert_eq!(
+            unedited_after
+                .settings_config
+                .pointer("/env/GEMINI_MODEL")
+                .and_then(serde_json::Value::as_str),
+            Some("gemini-2.5-pro")
+        );
+    }
+
+    #[test]
+    fn newapi_observed_keep_retains_failed_group_and_prunes_only_the_current_account() {
+        let account_seven = test_newapi_relay(7);
+        let account_eight = test_newapi_relay(8);
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+
+        persist_provision_batch(
+            &state,
+            &account_seven,
+            newapi_batch(
+                &account_seven,
+                &[
+                    test_newapi_group("observed", "sk-seven-observed"),
+                    test_newapi_group("removed", "sk-seven-removed"),
+                ],
+            ),
+        )
+        .expect("seed account seven");
+        persist_provision_batch(
+            &state,
+            &account_eight,
+            newapi_batch(
+                &account_eight,
+                &[
+                    test_newapi_group("observed", "sk-eight-observed"),
+                    test_newapi_group("removed", "sk-eight-removed"),
+                ],
+            ),
+        )
+        .expect("seed account eight");
+
+        let observed = crate::relay::newapi::GroupIdentity("observed".into());
+        let retained_id =
+            provision::newapi_provider_id_for(&account_seven.site_origin, 7, &observed.0);
+        let removed_id =
+            provision::newapi_provider_id_for(&account_seven.site_origin, 7, "removed");
+        let failure_batch = ManagedProvisionBatch {
+            account_id: Some(7),
+            candidates: Vec::new(),
+            observed_keep: newapi_observed_keep(
+                &account_seven.site_origin,
+                7,
+                std::slice::from_ref(&observed),
+            ),
+            failures: vec![FailureInfo {
+                group_name: "observed".into(),
+                reason: "reveal: temporary failure".into(),
+            }],
+            keys_created: 0,
+        };
+        let summary = persist_provision_batch(&state, &account_seven, failure_batch)
+            .expect("retained existing providers keep the refresh partial-successful");
+
+        assert!(summary.tiers.is_empty());
+        assert_eq!(summary.failures.len(), 1);
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            assert!(db
+                .get_provider_by_id(&retained_id, app_type.as_str())
+                .expect("read retained provider")
+                .is_some());
+            assert!(db
+                .get_provider_by_id(&removed_id, app_type.as_str())
+                .expect("read removed provider")
+                .is_none());
+
+            let other_account_id =
+                provision::newapi_provider_id_for(&account_eight.site_origin, 8, "removed");
+            assert!(db
+                .get_provider_by_id(&other_account_id, app_type.as_str())
+                .expect("read other account provider")
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn newapi_provider_write_failure_keeps_successful_apps_and_reports_the_failure() {
+        let op = test_newapi_relay(7);
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        {
+            let conn = db.conn.lock().expect("lock memory db");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_newapi_claude_write
+                 BEFORE INSERT ON providers
+                 WHEN NEW.app_type = 'claude'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected claude write failure');
+                 END;",
+            )
+            .expect("install selective write failure");
+        }
+        let state = AppState::new(db.clone());
+
+        let summary = persist_provision_batch(
+            &state,
+            &op,
+            newapi_batch(&op, &[test_newapi_group("partial", "sk-partial")]),
+        )
+        .expect("two successful app projections keep the batch successful");
+
+        assert_eq!(
+            summary
+                .tiers
+                .iter()
+                .map(|tier| tier.app_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex", "gemini"]
+        );
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].group_name, "partial");
+        assert!(summary.failures[0].reason.contains("claude"));
+        assert!(summary.failures[0]
+            .reason
+            .contains("injected claude write failure"));
     }
 
     /// 构造一条带归属的档位。`account` 为 `None` 表示升级前生成的旧档位。
