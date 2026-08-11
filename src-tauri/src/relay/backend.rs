@@ -97,15 +97,7 @@ impl<'a> RuntimeBackend<'a> {
                 let account = newapi::NewApiClient::new(&relay.site_origin, &relay.auth_token)?
                     .account()
                     .await?;
-                Ok(RuntimeAccount {
-                    id: account.id,
-                    label: first_nonblank(&[
-                        &account.display_name,
-                        &account.username,
-                        &account.email,
-                    ]),
-                    login_identifier: account.username,
-                })
+                Ok(newapi_runtime_account(&account))
             }
         }
     }
@@ -168,18 +160,18 @@ impl<'a> RuntimeBackend<'a> {
                     auth_token: refreshed.access_token,
                     refresh_credential: Some(refreshed.refresh_cookie),
                     token_expires_at: Some(refreshed.access_expires_at),
-                    account: Some(RuntimeAccount {
-                        id: refreshed.account.id,
-                        label: first_nonblank(&[
-                            &refreshed.account.display_name,
-                            &refreshed.account.username,
-                            &refreshed.account.email,
-                        ]),
-                        login_identifier: refreshed.account.username,
-                    }),
+                    account: Some(newapi_runtime_account(&refreshed.account)),
                 })
             }
         }
+    }
+}
+
+pub fn newapi_runtime_account(account: &newapi::SelfAccount) -> RuntimeAccount {
+    RuntimeAccount {
+        id: account.id,
+        label: first_nonblank(&[&account.display_name, &account.username, &account.email]),
+        login_identifier: account.username.clone(),
     }
 }
 

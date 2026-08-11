@@ -42,7 +42,7 @@ use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
-    api, backend, chatgpt_app, creds, discovery, imagegen_mcp, login, provider_fingerprint,
+    api, backend, chatgpt_app, creds, discovery, imagegen_mcp, login, newapi, provider_fingerprint,
     provision, purchase,
 };
 use crate::services::ProviderService;
@@ -166,11 +166,13 @@ impl ImportResult {
 #[derive(Debug, Clone)]
 struct BrowserLoginContext {
     probe: ProbeResult,
+    backend_kind: discovery::BackendKind,
     login_script: String,
 }
 
-enum BrowserImportOutcome {
-    Credentials(login::Credentials),
+enum BrowserLoginOutcome {
+    Sub2ApiCredentials(login::Credentials),
+    NewApiSession(newapi::RefreshedSession),
     Error(String),
     Closed,
 }
@@ -609,18 +611,29 @@ fn browser_start_url(
         return Ok(entry);
     };
 
-    let url = match detected {
-        discovery::DetectedSite {
-            backend_kind: discovery::BackendKind::Sub2Api,
-            ..
-        } => login::login_url(site_origin, ""),
-        discovery::DetectedSite {
-            backend_kind: discovery::BackendKind::NewApi,
-            ..
-        } => site_origin.to_string(),
-    };
+    let url = backend_login_url(site_origin, detected.backend_kind, "");
     url::Url::parse(&url)
         .map_err(|error| AppError::InvalidInput(format!("登录页地址不对: {error}")))
+}
+
+fn backend_login_url(
+    site_origin: &str,
+    backend_kind: discovery::BackendKind,
+    login_identifier: &str,
+) -> String {
+    match backend_kind {
+        discovery::BackendKind::Sub2Api => login::login_url(site_origin, login_identifier),
+        // NewAPI keeps `/register` and `/login` as legacy-compatible entry points. Current
+        // servers redirect them to `/sign-up` and `/sign-in`, while older deployments accept
+        // the legacy paths directly.
+        discovery::BackendKind::NewApi => {
+            if login_identifier.is_empty() {
+                format!("{site_origin}/register")
+            } else {
+                format!("{site_origin}/login")
+            }
+        }
+    }
 }
 
 fn import_login_script(
@@ -639,6 +652,58 @@ fn import_login_script(
             ..
         } => String::new(),
     }
+}
+
+fn browser_login_context(
+    app_handle: &tauri::AppHandle,
+    site_origin: &str,
+    detected: discovery::DetectedSite,
+    aff_code: Option<&str>,
+    promo_code: Option<&str>,
+) -> Result<BrowserLoginContext, AppError> {
+    let backend_kind = detected.backend_kind;
+    let login_script = import_login_script(&detected, site_origin, aff_code, promo_code);
+    let probe = save_detected_site(app_handle, site_origin.to_string(), detected)?;
+    Ok(BrowserLoginContext {
+        probe,
+        backend_kind,
+        login_script,
+    })
+}
+
+fn newapi_refresh_url(site_origin: &str) -> Result<url::Url, AppError> {
+    url::Url::parse(&format!("{site_origin}/api/user/auth/refresh"))
+        .map_err(|error| AppError::InvalidInput(format!("NewAPI refresh 地址不对: {error}")))
+}
+
+fn extract_newapi_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
+    cookies
+        .iter()
+        .find(|cookie| {
+            cookie.name() == "new_api_refresh"
+                && cookie.http_only() == Some(true)
+                && !cookie.value().trim().is_empty()
+        })
+        .map(|cookie| cookie.value().to_string())
+}
+
+async fn refresh_newapi_browser_session(
+    window: &tauri::WebviewWindow,
+    site_origin: &str,
+    refresh_url: &url::Url,
+) -> Result<Option<newapi::RefreshedSession>, AppError> {
+    // Tauri documents a Windows deadlock if cookies_for_url runs in a synchronous navigation
+    // or window callback. This function is called only by the outer async select loops below.
+    let cookies = window
+        .cookies_for_url(refresh_url.clone())
+        .map_err(|error| AppError::Config(format!("读取 NewAPI 登录会话失败: {error}")))?;
+    let Some(refresh_cookie) = extract_newapi_refresh_cookie(&cookies) else {
+        return Ok(None);
+    };
+
+    newapi::refresh_session(site_origin, &refresh_cookie, None)
+        .await
+        .map(Some)
 }
 
 fn resolve_login_codes(site_origin: &str) -> (Option<String>, Option<String>) {
@@ -666,19 +731,13 @@ async fn browser_import(
         initial_detected.is_none() && browser_entry_is_origin(&entry_url);
 
     let initial_context = match initial_detected {
-        Some(detected) => {
-            let login_script = import_login_script(
-                &detected,
-                &site_origin,
-                login_aff_code.as_deref(),
-                login_promo_code.as_deref(),
-            );
-            let probe = save_detected_site(app_handle, site_origin.clone(), detected)?;
-            Some(BrowserLoginContext {
-                probe,
-                login_script,
-            })
-        }
+        Some(detected) => Some(browser_login_context(
+            app_handle,
+            &site_origin,
+            detected,
+            login_aff_code.as_deref(),
+            login_promo_code.as_deref(),
+        )?),
         None => None,
     };
 
@@ -732,7 +791,7 @@ async fn browser_import(
             .lock()
             .ok()
             .and_then(|guard| guard.as_ref().map(|ctx| ctx.login_script.clone()));
-        if let Some(script) = login_script {
+        if let Some(script) = login_script.filter(|script| !script.is_empty()) {
             if let Err(error) = webview.eval(&script) {
                 log::warn!("站点登录脚本重注入失败: {error}");
             }
@@ -740,8 +799,8 @@ async fn browser_import(
     })
     .on_navigation(move |url| {
         if let Some(result) = discovery::parse_probe_navigation(url) {
-            let response = match result {
-                Ok(response) => response,
+            let batch = match result {
+                Ok(batch) => batch,
                 Err(error) => {
                     log::warn!("站点探测回传解析失败: {error}");
                     let _ = probe_error_tx.try_send(error.to_string());
@@ -759,30 +818,34 @@ async fn browser_import(
                 return false;
             }
 
-            let Some(detected) = discovery::detect_site(&response.candidate_id, &response.body)
-            else {
-                return false;
+            let detected = match discovery::converge_probe_responses(&batch.responses) {
+                Ok(detected) => detected,
+                Err(AppError::Config(message)) if message == "unsupported_site" => {
+                    // 本轮只有未知或不匹配的 JSON 响应。页面可能还在验证或跳转，继续轮询。
+                    return false;
+                }
+                Err(error) => {
+                    log::warn!("站点探测批次无法收敛: {error}");
+                    let _ = probe_error_tx.try_send(error.to_string());
+                    return false;
+                }
             };
-            let login_script = import_login_script(
-                &detected,
+            let browser_context = match browser_login_context(
+                &app_for_nav,
                 &site_origin_for_nav,
+                detected,
                 aff_for_nav.as_deref(),
                 promo_for_nav.as_deref(),
-            );
-            let probe =
-                match save_detected_site(&app_for_nav, site_origin_for_nav.clone(), detected) {
-                    Ok(probe) => probe,
-                    Err(error) => {
-                        log::warn!("保存已识别站点失败: {error}");
-                        let _ = probe_error_tx.try_send(error.to_string());
-                        return false;
-                    }
-                };
-
-            let browser_context = BrowserLoginContext {
-                probe,
-                login_script: login_script.clone(),
+            ) {
+                Ok(context) => context,
+                Err(error) => {
+                    log::warn!("保存已识别站点失败: {error}");
+                    let _ = probe_error_tx.try_send(error.to_string());
+                    return false;
+                }
             };
+            let backend_kind = browser_context.backend_kind;
+            let login_script = browser_context.login_script.clone();
             match context_for_nav.lock() {
                 Ok(mut guard) if guard.is_none() => *guard = Some(browser_context),
                 Ok(_) => return false,
@@ -798,13 +861,15 @@ async fn browser_import(
             };
 
             let next_step = if navigate_after_detection {
-                url::Url::parse(&login::login_url(&site_origin_for_nav, ""))
+                url::Url::parse(&backend_login_url(&site_origin_for_nav, backend_kind, ""))
                     .map_err(|error| format!("登录页地址不对: {error}"))
                     .and_then(|url| window.navigate(url).map_err(|error| error.to_string()))
-            } else {
+            } else if !login_script.is_empty() {
                 window
                     .eval(&login_script)
                     .map_err(|error| error.to_string())
+            } else {
+                Ok(())
             };
             if let Err(error) = next_step {
                 log::warn!("已识别站点，但无法在当前会话继续登录: {error}");
@@ -837,21 +902,40 @@ async fn browser_import(
         }
     });
 
+    let refresh_url = newapi_refresh_url(&site_origin)?;
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
-        tokio::select! {
-            credentials = creds_rx.recv() => credentials
-                .map(BrowserImportOutcome::Credentials)
-                .unwrap_or(BrowserImportOutcome::Closed),
-            error = error_rx.recv() => error
-                .map(BrowserImportOutcome::Error)
-                .unwrap_or(BrowserImportOutcome::Closed),
-            _ = closed_rx.recv() => BrowserImportOutcome::Closed,
+        let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                credentials = creds_rx.recv() => break credentials
+                    .map(BrowserLoginOutcome::Sub2ApiCredentials)
+                    .unwrap_or(BrowserLoginOutcome::Closed),
+                error = error_rx.recv() => break error
+                    .map(BrowserLoginOutcome::Error)
+                    .unwrap_or(BrowserLoginOutcome::Closed),
+                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
+                _ = cookie_poll.tick() => {
+                    let is_newapi = context
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.as_ref().map(|context| context.backend_kind))
+                        == Some(discovery::BackendKind::NewApi);
+                    if !is_newapi {
+                        continue;
+                    }
+                    match refresh_newapi_browser_session(&window, &site_origin, &refresh_url).await {
+                        Ok(Some(session)) => break BrowserLoginOutcome::NewApiSession(session),
+                        Ok(None) => {}
+                        Err(error) => break BrowserLoginOutcome::Error(error.to_string()),
+                    }
+                }
+            }
         }
     })
     .await;
 
     match outcome {
-        Ok(BrowserImportOutcome::Credentials(credentials)) => {
+        Ok(BrowserLoginOutcome::Sub2ApiCredentials(credentials)) => {
             let browser_context = context
                 .lock()
                 .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
@@ -874,11 +958,30 @@ async fn browser_import(
             log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
             Ok(ImportResult::from_login(browser_context.probe, login))
         }
-        Ok(BrowserImportOutcome::Error(error)) => {
+        Ok(BrowserLoginOutcome::NewApiSession(session)) => {
+            let browser_context = context
+                .lock()
+                .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
+                .clone()
+                .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
+            let state = app_handle.state::<AppState>();
+            let (final_relay_id, account_id) =
+                persist_newapi_login_session(&state, browser_context.probe.relay_id, &session)?;
+            let login = LoginResult {
+                relay_id: final_relay_id,
+                logged_in: true,
+            };
+
+            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
+            let _ = window.eval(login::CONNECTED_BANNER_JS);
+            log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
+            Ok(ImportResult::from_login(browser_context.probe, login))
+        }
+        Ok(BrowserLoginOutcome::Error(error)) => {
             let _ = window.destroy();
             Err(AppError::Config(error))
         }
-        Ok(BrowserImportOutcome::Closed) => import_result_after_incomplete_browser_flow(&context),
+        Ok(BrowserLoginOutcome::Closed) => import_result_after_incomplete_browser_flow(&context),
         Err(_) => {
             log::warn!(
                 "站点导入等待超时（{LOGIN_TIMEOUT_SECS} 秒内未完成识别与登录）：{site_origin}"
@@ -926,11 +1029,11 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 记下行 id —— 凭据要写回这一行，而 `save_credentials` 可能因为发现重复账号
     // 而把它合并到别的行去。
     // 顺带取出登录标识：重登时预填进登录框，用户只需补密码与人机验证。
-    let (relay_id, site_origin, login_identifier) = {
+    let (relay_id, site_origin, login_identifier, backend_kind) = {
         let state = app_handle.state::<AppState>();
         let op = with_conn(&state, |conn| creds::get(conn, target_id))?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {target_id} 的中转站")))?;
-        (op.id, op.site_origin, op.login_identifier)
+        (op.id, op.site_origin, op.login_identifier, op.backend_kind)
     };
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
@@ -957,8 +1060,12 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
 
     // 落哪个页面由「这一行登录过没有」决定：新加的站落 `/register`，重登落 `/login`。
-    let url = url::Url::parse(&login::login_url(&site_origin, &login_identifier))
-        .map_err(|e| AppError::Config(format!("登录页地址不对: {e}")))?;
+    let url = url::Url::parse(&backend_login_url(
+        &site_origin,
+        backend_kind,
+        &login_identifier,
+    ))
+    .map_err(|e| AppError::Config(format!("登录页地址不对: {e}")))?;
 
     // ⚠️ **这条链路的日志是刻意加密的**（2026-08-04，用户实测白屏后加）。
     //
@@ -980,6 +1087,16 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let handle_for_nav = app_handle.clone();
+    let initialization_script = match backend_kind {
+        discovery::BackendKind::Sub2Api => login::login_script(
+            &site_origin,
+            &login_identifier,
+            login_aff_code.as_deref(),
+            login_promo_code.as_deref(),
+        ),
+        discovery::BackendKind::NewApi => String::new(),
+    };
+    let backend_kind_for_nav = backend_kind;
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
         login::LOGIN_WINDOW_LABEL,
@@ -1017,14 +1134,9 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 没有完成回调可等 ⇒ 存在「还没清完页面就加载了」的竞态。
     .incognito(true)
     .user_agent(login::WEBVIEW_USER_AGENT)
-    // 邀请码走三层回落（远端 > 本地缓存 > 编译期内置）。**在这里解析而不是在
-    // `login_script` 里查表** —— 那样远端那层永远进不来。
-    .initialization_script(login::login_script(
-        &site_origin,
-        &login_identifier,
-        login_aff_code.as_deref(),
-        login_promo_code.as_deref(),
-    ))
+    // sub2api 的 localStorage 回传脚本只注入到 sub2api 窗口。NewAPI 的 HttpOnly
+    // refresh cookie 由外层 async 循环原生读取，绝不交给 JavaScript。
+    .initialization_script(initialization_script)
     // ⭐ **白屏的关键判据就在这两个事件上**：
     //
     // - 两条都没有 ⇒ WebView 压根没开始加载（创建失败 / URL 不可达 / 被拦）
@@ -1042,6 +1154,9 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         let _ = webview;
     })
     .on_navigation(move |url| {
+        if backend_kind_for_nav != discovery::BackendKind::Sub2Api {
+            return true;
+        }
         match login::parse_creds_navigation(url) {
             // 普通导航，放行。
             None => true,
@@ -1073,17 +1188,31 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         }
     });
 
-    // 等凭据或用户关窗。5 分钟够走完注册 + 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
+    let refresh_url = newapi_refresh_url(&site_origin)?;
+    // 等 sub2api 凭据、NewAPI HttpOnly refresh cookie 或用户关窗。5 分钟够走完注册 +
+    // 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
-        tokio::select! {
-            creds = rx.recv() => creds,
-            _ = closed_rx.recv() => None,
+        let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                creds = rx.recv() => break creds
+                    .map(BrowserLoginOutcome::Sub2ApiCredentials)
+                    .unwrap_or(BrowserLoginOutcome::Closed),
+                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
+                _ = cookie_poll.tick(), if backend_kind == discovery::BackendKind::NewApi => {
+                    match refresh_newapi_browser_session(&window, &site_origin, &refresh_url).await {
+                        Ok(Some(session)) => break BrowserLoginOutcome::NewApiSession(session),
+                        Ok(None) => {}
+                        Err(error) => break BrowserLoginOutcome::Error(error.to_string()),
+                    }
+                }
+            }
         }
     })
     .await;
 
     match outcome {
-        Ok(Some(c)) => {
+        Ok(BrowserLoginOutcome::Sub2ApiCredentials(c)) => {
             let (final_relay_id, account_id) =
                 persist_login_credentials(app_handle, relay_id, &site_origin, c).await?;
 
@@ -1106,6 +1235,24 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                 logged_in: true,
             })
         }
+        Ok(BrowserLoginOutcome::NewApiSession(session)) => {
+            let state = app_handle.state::<AppState>();
+            let (final_relay_id, account_id) =
+                persist_newapi_login_session(&state, relay_id, &session)?;
+
+            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
+            let _ = window.eval(login::CONNECTED_BANNER_JS);
+
+            log::info!("登录成功：{site_origin}（账号 id={account_id}）");
+            Ok(LoginResult {
+                relay_id: final_relay_id,
+                logged_in: true,
+            })
+        }
+        Ok(BrowserLoginOutcome::Error(error)) => {
+            let _ = window.destroy();
+            Err(AppError::Config(error))
+        }
         // 用户关掉了窗口，或超时。都不是错误。
         //
         // 用 `destroy()` 而不是 `close()`：后者派的是可被拦截的关闭**请求**，会经过
@@ -1120,7 +1267,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         // 在界面上都表现为「窗口没了、什么也没发生」，但对我们是两件完全不同的事 ——
         // 前者是正常收场，后者说明**凭据回传这条链路断了**（页面没渲染 / 脚本没注入 /
         // 用户卡在人机验证）。合成一条日志就等于放弃了区分它们的唯一手段。
-        Ok(None) => {
+        Ok(BrowserLoginOutcome::Closed) => {
             log::info!("用户关闭了登录窗口（未完成登录）：{site_origin}");
             let _ = window.destroy();
             Ok(LoginResult {
@@ -1174,6 +1321,26 @@ async fn persist_login_credentials(
     })?;
 
     Ok((final_relay_id, account_id))
+}
+
+fn persist_newapi_login_session(
+    state: &AppState,
+    relay_id: i64,
+    refreshed: &newapi::RefreshedSession,
+) -> Result<(i64, i64), AppError> {
+    let account = backend::newapi_runtime_account(&refreshed.account);
+    let final_relay_id = with_conn(state, |conn| {
+        creds::save_credentials(
+            conn,
+            relay_id,
+            runtime_account_identity(&account),
+            &refreshed.access_token,
+            Some(&refreshed.refresh_cookie),
+            Some(refreshed.access_expires_at),
+        )
+    })?;
+
+    Ok((final_relay_id, account.id))
 }
 
 /// 取一份**能用**的凭据：token 快过期时先静默续期。
@@ -3279,6 +3446,14 @@ mod tests {
         }
     }
 
+    fn detected_newapi() -> discovery::DetectedSite {
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::NewApi,
+            site_name: "NewAPI".into(),
+            api_base_url: String::new(),
+        }
+    }
+
     #[test]
     fn browser_start_url_preserves_invitation_link_after_native_detection() {
         let detected = detected_sub2api();
@@ -3303,6 +3478,125 @@ mod tests {
         .expect("valid browser start URL");
 
         assert_eq!(url.as_str(), "https://api.example.com/register");
+    }
+
+    #[test]
+    fn browser_start_url_uses_newapi_legacy_registration_page_for_known_bare_origin() {
+        let detected = detected_newapi();
+        let url = browser_start_url(
+            "api.example.com",
+            "https://api.example.com",
+            Some(&detected),
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register");
+    }
+
+    #[test]
+    fn backend_login_url_keeps_sub2api_and_selects_newapi_new_or_relogin_pages() {
+        assert_eq!(
+            backend_login_url(
+                "https://api.example.com",
+                discovery::BackendKind::Sub2Api,
+                ""
+            ),
+            "https://api.example.com/register"
+        );
+        assert_eq!(
+            backend_login_url(
+                "https://api.example.com",
+                discovery::BackendKind::Sub2Api,
+                "me@example.com"
+            ),
+            "https://api.example.com/login"
+        );
+        assert_eq!(
+            backend_login_url(
+                "https://api.example.com",
+                discovery::BackendKind::NewApi,
+                ""
+            ),
+            "https://api.example.com/register"
+        );
+        assert_eq!(
+            backend_login_url(
+                "https://api.example.com",
+                discovery::BackendKind::NewApi,
+                "newapi-login"
+            ),
+            "https://api.example.com/login"
+        );
+    }
+
+    #[test]
+    fn newapi_cookie_extraction_accepts_only_nonblank_refresh_values() {
+        let mut http_only_cookie = tauri::webview::Cookie::new("new_api_refresh", "refresh-cookie");
+        http_only_cookie.set_http_only(true);
+        let cookies = vec![
+            tauri::webview::Cookie::new("unrelated", "value"),
+            tauri::webview::Cookie::new("new_api_refresh", "   "),
+            tauri::webview::Cookie::new("new_api_refresh", "not-http-only"),
+            http_only_cookie,
+        ];
+
+        assert_eq!(
+            extract_newapi_refresh_cookie(&cookies).as_deref(),
+            Some("refresh-cookie")
+        );
+        assert!(extract_newapi_refresh_cookie(&[tauri::webview::Cookie::new(
+            "new_api_refresh",
+            "\t"
+        )])
+        .is_none());
+    }
+
+    #[test]
+    fn persisting_newapi_login_session_stores_tokens_and_native_account_identity() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        let refreshed = crate::relay::newapi::RefreshedSession {
+            access_token: "new-access-token".into(),
+            access_expires_at: 1_900_000_000,
+            session_id: "session-id".into(),
+            account: crate::relay::newapi::SelfAccount {
+                id: 84,
+                username: "newapi-login".into(),
+                display_name: "NewAPI Display".into(),
+                email: "newapi@example.com".into(),
+                group: "default".into(),
+                quota: 0,
+                used_quota: 0,
+            },
+            refresh_cookie: "rotated-refresh-cookie".into(),
+        };
+
+        let (final_relay_id, account_id) =
+            persist_newapi_login_session(&state, relay_id, &refreshed).expect("persist login");
+        let persisted = with_conn(&state, |conn| creds::get(conn, final_relay_id))
+            .expect("load relay")
+            .expect("relay exists");
+
+        assert_eq!(account_id, 84);
+        assert_eq!(persisted.auth_token, "new-access-token");
+        assert_eq!(
+            persisted.refresh_token.as_deref(),
+            Some("rotated-refresh-cookie")
+        );
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_id, Some(84));
+        assert_eq!(persisted.account_label, "NewAPI Display");
+        assert_eq!(persisted.login_identifier, "newapi-login");
     }
 
     #[test]

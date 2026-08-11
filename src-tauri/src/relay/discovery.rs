@@ -21,10 +21,15 @@ pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
 
 const PROBE_ADAPTERS: &[ProbeAdapter] = &[api::PROBE_ADAPTER, newapi::PROBE_ADAPTER];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct ProbeResponse {
     pub candidate_id: String,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ProbeBatch {
+    pub responses: Vec<ProbeResponse>,
 }
 
 /// 生成注入所有页面的协议无关探测脚本。
@@ -42,7 +47,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
   const expectedOrigin = {expected_origin};
   const candidates = {candidates};
   const callbackScheme = '{PROBE_SCHEME}';
-  const sentBodies = new Map();
+  let previousBatch = '';
 
   function b64url(value) {{
     const bytes = new TextEncoder().encode(value);
@@ -54,6 +59,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
   async function probe() {{
     if (window.location.origin !== expectedOrigin) return;
 
+    const responses = [];
     for (const candidate of candidates) {{
       try {{
         const response = await fetch(candidate.path, {{
@@ -65,14 +71,17 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
         const trimmed = body.trim();
         if (!trimmed || (trimmed[0] !== '{{' && trimmed[0] !== '[')) continue;
         if (new TextEncoder().encode(body).length > {MAX_PROBE_BODY_BYTES}) continue;
-        if (sentBodies.get(candidate.id) === body) continue;
-        sentBodies.set(candidate.id, body);
-        window.location.href = callbackScheme + '://response?id=' +
-          encodeURIComponent(candidate.id) + '&d=' + b64url(body);
+        responses.push({{ candidate_id: candidate.id, body }});
       }} catch (_) {{
         // 页面仍可能处于验证或跳转阶段；下一轮继续，不在浏览器层解释失败原因。
       }}
     }}
+
+    if (!responses.length) return;
+    const batch = JSON.stringify(responses);
+    if (batch === previousBatch) return;
+    previousBatch = batch;
+    window.location.href = callbackScheme + '://response?d=' + b64url(batch);
   }}
 
   void probe();
@@ -83,18 +92,12 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
 }
 
 /// 解析 WebView 的探测回传导航。`None` 表示普通网页导航，应继续放行。
-pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeResponse, AppError>> {
+pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeBatch, AppError>> {
     if url.scheme() != PROBE_SCHEME {
         return None;
     }
 
     Some((|| {
-        let candidate_id = url
-            .query_pairs()
-            .find(|(key, _)| key == "id")
-            .map(|(_, value)| value.into_owned())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| AppError::Config("站点探测回传缺少 candidate id".into()))?;
         let encoded = url
             .query_pairs()
             .find(|(key, _)| key == "d")
@@ -106,10 +109,9 @@ pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeResponse, Ap
         if bytes.len() > MAX_PROBE_BODY_BYTES {
             return Err(AppError::Config("站点探测回传正文过大".into()));
         }
-        let body = String::from_utf8(bytes)
-            .map_err(|e| AppError::Config(format!("站点探测回传不是 UTF-8: {e}")))?;
-
-        Ok(ProbeResponse { candidate_id, body })
+        serde_json::from_slice::<Vec<ProbeResponse>>(&bytes)
+            .map(|responses| ProbeBatch { responses })
+            .map_err(|e| AppError::Config(format!("站点探测回传不是候选响应批次: {e}")))
     })())
 }
 
@@ -118,13 +120,7 @@ pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeResponse, Ap
 /// 任何传输失败、非成功状态或 detector 不匹配都只意味着“这个候选没有识别出来”；
 /// 不在这里把某次失败宣判成站点类型。全部候选都不匹配时，调用方可切到可见 WebView。
 pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, AppError> {
-    let detected = discover_site(site_origin).await?;
-    match detected.backend_kind {
-        BackendKind::Sub2Api => Ok(detected),
-        BackendKind::NewApi => Err(AppError::Config(format!(
-            "{site_origin} 是 newapi 站点，当前命令入口尚未接入该协议"
-        ))),
-    }
+    discover_site(site_origin).await
 }
 
 /// 原生 HTTP 探测所有候选，再复用 WebView 原始回传使用的同一收敛规则。
@@ -164,6 +160,7 @@ pub fn detect_candidate(candidate_id: &str, body: &str) -> Option<DetectedSite> 
 }
 
 /// 旧命令层的兼容入口：只暴露现有 sub2api 结果，不把 newapi 伪装成 sub2api。
+#[allow(dead_code)]
 pub fn detect_site(candidate_id: &str, body: &str) -> Option<DetectedSite> {
     let detected = detect_candidate(candidate_id, body)?;
     (detected.backend_kind == BackendKind::Sub2Api).then_some(detected)
@@ -193,17 +190,24 @@ pub fn converge_probe_responses(responses: &[ProbeResponse]) -> Result<DetectedS
 }
 
 #[cfg(test)]
-fn probe_callback_url(candidate_id: &str, body: &str) -> url::Url {
+fn probe_batch_callback_url(responses: &[ProbeResponse]) -> url::Url {
+    let body = serde_json::json!(responses
+        .iter()
+        .map(|response| serde_json::json!({
+            "candidate_id": response.candidate_id,
+            "body": response.body,
+        }))
+        .collect::<Vec<_>>())
+    .to_string();
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body);
-    url::Url::parse(&format!(
-        "{PROBE_SCHEME}://response?id={candidate_id}&d={encoded}"
-    ))
-    .expect("test callback URL")
+    url::Url::parse(&format!("{PROBE_SCHEME}://response?d={encoded}"))
+        .expect("test batch callback URL")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::get, Json, Router};
 
     fn newapi_status_body() -> &'static str {
         r#"{
@@ -282,6 +286,15 @@ mod tests {
         assert!(script.contains("credentials: 'include'"));
         assert!(script.contains(PROBE_SCHEME));
         assert!(script.contains("window.location.origin"));
+        assert!(script.contains("const responses = []"));
+        assert!(script.contains("responses.push({ candidate_id: candidate.id, body })"));
+        assert!(script.contains("const batch = JSON.stringify(responses)"));
+        assert!(script.contains("b64url(batch)"));
+        assert_eq!(
+            script.matches("window.location.href =").count(),
+            1,
+            "each probe round must navigate once with the complete candidate batch"
+        );
         assert!(!script.contains("Cloudflare"));
         assert!(!script.contains("cf_clearance"));
         assert!(!script.contains("403"));
@@ -290,12 +303,35 @@ mod tests {
     #[test]
     fn probe_navigation_round_trips_candidate_and_raw_json() {
         let body = r#"{"code":0,"data":{"version":"1"}}"#;
-        let url = probe_callback_url("sub2api", body);
+        let url = probe_batch_callback_url(&[ProbeResponse {
+            candidate_id: "sub2api".into(),
+            body: body.into(),
+        }]);
         let parsed = parse_probe_navigation(&url)
             .expect("probe scheme")
             .expect("valid callback");
-        assert_eq!(parsed.candidate_id, "sub2api");
-        assert_eq!(parsed.body, body);
+        assert_eq!(parsed.responses.len(), 1);
+        assert_eq!(parsed.responses[0].candidate_id, "sub2api");
+        assert_eq!(parsed.responses[0].body, body);
+    }
+
+    #[test]
+    fn batch_probe_navigation_round_trips_multiple_candidate_bodies() {
+        let expected = vec![
+            ProbeResponse {
+                candidate_id: "sub2api".into(),
+                body: sub2api_body().into(),
+            },
+            ProbeResponse {
+                candidate_id: "newapi".into(),
+                body: newapi_status_body().into(),
+            },
+        ];
+        let parsed = parse_probe_navigation(&probe_batch_callback_url(&expected))
+            .expect("probe scheme")
+            .expect("valid batch callback");
+
+        assert_eq!(parsed.responses, expected);
     }
 
     #[test]
@@ -358,12 +394,39 @@ mod tests {
 
     #[test]
     fn convergence_can_consume_webview_raw_probe_responses() {
-        let response = parse_probe_navigation(&probe_callback_url("newapi", newapi_status_body()))
-            .unwrap()
-            .unwrap();
+        let batch = parse_probe_navigation(&probe_batch_callback_url(&[ProbeResponse {
+            candidate_id: "newapi".into(),
+            body: newapi_status_body().into(),
+        }]))
+        .unwrap()
+        .unwrap();
         assert_eq!(
-            converge_probe_responses(&[response]).unwrap().backend_kind,
+            converge_probe_responses(&batch.responses)
+                .unwrap()
+                .backend_kind,
             BackendKind::NewApi
         );
+    }
+
+    #[tokio::test]
+    async fn native_probe_site_accepts_detected_newapi() {
+        let app = Router::new().route(
+            "/api/status",
+            get(|| async {
+                Json(serde_json::from_str::<serde_json::Value>(newapi_status_body()).unwrap())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let origin = format!("http://{}", listener.local_addr().expect("local address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let detected = probe_site(&origin).await.expect("accept newapi probe");
+
+        assert_eq!(detected.backend_kind, BackendKind::NewApi);
+        server.abort();
     }
 }
