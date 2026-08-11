@@ -251,6 +251,19 @@ mod tests {
             None
         )
         .is_empty());
+
+        let command_source = include_str!("../commands/relay.rs");
+        for protocol_detail in [
+            "new_api_refresh",
+            "/api/user/auth/refresh",
+            "fn backend_login_url(",
+            "fn import_login_script(",
+        ] {
+            assert!(
+                !command_source.contains(protocol_detail),
+                "commands::relay must not own protocol detail {protocol_detail:?}"
+            );
+        }
     }
 
     use super::*;

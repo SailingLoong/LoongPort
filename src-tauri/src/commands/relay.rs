@@ -4494,13 +4494,19 @@ mod tests {
 
     #[tokio::test]
     async fn newapi_account_mismatch_stops_before_group_or_token_inventory() {
-        use axum::{routing::get, Json, Router};
+        use axum::{
+            routing::{delete, get, post},
+            Json, Router,
+        };
         use serde_json::json;
 
         let requests = Arc::new(Mutex::new(Vec::<String>::new()));
         let account_requests = Arc::clone(&requests);
         let group_requests = Arc::clone(&requests);
         let token_requests = Arc::clone(&requests);
+        let create_requests = Arc::clone(&requests);
+        let reveal_requests = Arc::clone(&requests);
+        let delete_requests = Arc::clone(&requests);
         let app = Router::new()
             .route(
                 "/api/user/self",
@@ -4548,6 +4554,33 @@ mod tests {
                                 "items": []
                             }
                         }))
+                    }
+                })
+                .post(move || {
+                    let requests = Arc::clone(&create_requests);
+                    async move {
+                        requests.lock().unwrap().push("create".into());
+                        Json(json!({ "success": true }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/{id}/key",
+                post(move || {
+                    let requests = Arc::clone(&reveal_requests);
+                    async move {
+                        requests.lock().unwrap().push("reveal".into());
+                        Json(json!({ "success": true, "data": { "key": "unexpected" } }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/{id}",
+                delete(move || {
+                    let requests = Arc::clone(&delete_requests);
+                    async move {
+                        requests.lock().unwrap().push("delete".into());
+                        Json(json!({ "success": true }))
                     }
                 }),
             );

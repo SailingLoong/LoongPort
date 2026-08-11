@@ -236,4 +236,14 @@ describe("「添加中转站」登录后就地备好密钥", () => {
       expect(toastError).toHaveBeenCalledWith("gateway unavailable"),
     );
   });
+
+  it("未知对象错误回落到本地化通用提示", async () => {
+    importSite.mockRejectedValue({ code: "unexpected" });
+    renderDialog();
+    clickConfirm();
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("loongport.addSite.importFailed"),
+    );
+  });
 });

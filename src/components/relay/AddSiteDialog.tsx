@@ -139,7 +139,13 @@ export function AddSiteDialog({
     }
 
     const raw =
-      typeof typed?.message === "string" ? typed.message : String(error);
+      typeof typed?.message === "string"
+        ? typed.message
+        : error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "";
     const clean = raw.replace(/^(?:配置错误:\s*)+/, "").trim();
     return clean || t("loongport.addSite.importFailed");
   };
