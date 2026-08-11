@@ -18,6 +18,7 @@ use tokio::time::timeout;
 use crate::app_config::{AppType, InstalledSkill, SkillApps, UnmanagedSkill};
 use crate::config::get_app_config_dir;
 use crate::database::Database;
+use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::error::format_skill_error;
 
 // ========== 数据结构 ==========
@@ -834,7 +835,11 @@ impl SkillService {
 
                 // 从所有应用目录删除
                 for app in AppType::all() {
-                    let _ = Self::remove_from_app(&directory, &app);
+                    Self::remove_from_app(&directory, &app).warn_on_err(
+                        DiagnosticEvent::new("skill.uninstall", "app_cleanup_failed")
+                            .field("app", app.as_str())
+                            .field("skill_id", id),
+                    );
                 }
 
                 // 从 SSOT 删除
@@ -974,7 +979,12 @@ impl SkillService {
 
             // 扫描仓库中的所有 Skill 目录
             let mut remote_skills: Vec<DiscoverableSkill> = Vec::new();
-            let _ = self.scan_dir_recursive(temp_dir, temp_dir, &repo, &mut remote_skills);
+            self.scan_dir_recursive(temp_dir, temp_dir, &repo, &mut remote_skills)
+                .warn_on_err(
+                    DiagnosticEvent::new("skill.update_check", "repository_scan_failed")
+                        .field("repo_owner", owner.clone())
+                        .field("repo_name", name.clone()),
+                );
 
             for skill in group_skills {
                 // 在远程仓库中找到匹配的 Skill 目录
@@ -1016,10 +1026,27 @@ impl SkillService {
                             if local_dir.exists() {
                                 match Self::compute_dir_hash(&local_dir) {
                                     Ok(h) => {
-                                        let _ = db.update_skill_hash(&skill.id, &h, 0);
+                                        db.update_skill_hash(&skill.id, &h, 0).warn_on_err(
+                                            DiagnosticEvent::new(
+                                                "skill.update_check",
+                                                "hash_persist_failed",
+                                            )
+                                            .field("skill_id", skill.id.clone()),
+                                        );
                                         Some(h)
                                     }
-                                    Err(_) => None,
+                                    Err(error) => {
+                                        log::warn!(
+                                            "{}",
+                                            DiagnosticEvent::new(
+                                                "skill.update_check",
+                                                "hash_compute_failed",
+                                            )
+                                            .field("skill_id", skill.id.clone())
+                                            .field_display("error", error)
+                                        );
+                                        None
+                                    }
                                 }
                             } else {
                                 None
@@ -1091,7 +1118,7 @@ impl SkillService {
 
         // 在解压的仓库中查找 Skill 源目录
         let mut remote_skills: Vec<DiscoverableSkill> = Vec::new();
-        let _ = self.scan_dir_recursive(temp_dir, temp_dir, &repo, &mut remote_skills);
+        self.scan_dir_recursive(temp_dir, temp_dir, &repo, &mut remote_skills)?;
 
         let remote_match = remote_skills
             .iter()
@@ -1117,8 +1144,8 @@ impl SkillService {
                 ))
             })?;
 
-        // 备份旧文件
-        let _ = Self::create_uninstall_backup(&skill);
+        // 备份旧文件。真实备份失败时停止更新，避免先删旧版本后才发现无法回滚。
+        Self::create_uninstall_backup(&skill)?;
 
         // 删除旧 SSOT 目录并复制新文件
         let dest = ssot_dir.join(&skill.directory);
@@ -1187,10 +1214,15 @@ impl SkillService {
                 continue;
             }
             match Self::compute_dir_hash(&skill_dir) {
-                Ok(hash) => {
-                    let _ = db.update_skill_hash(&skill.id, &hash, 0);
-                    count += 1;
-                }
+                Ok(hash) => match db.update_skill_hash(&skill.id, &hash, 0) {
+                    Ok(_) => count += 1,
+                    Err(error) => log::warn!(
+                        "{}",
+                        DiagnosticEvent::new("skill.hash_backfill", "persist_failed")
+                            .field("skill_id", skill.id.clone())
+                            .field_display("error", error)
+                    ),
+                },
                 Err(e) => {
                     log::warn!("补算哈希失败 {}: {e}", skill.id);
                 }
@@ -1267,7 +1299,13 @@ impl SkillService {
                 Ok(()) => result.migrated_count += 1,
                 Err(_) => match Self::copy_dir_recursive(&src, &dst) {
                     Ok(()) => {
-                        let _ = fs::remove_dir_all(&src);
+                        fs::remove_dir_all(&src).warn_on_err(
+                            DiagnosticEvent::new(
+                                "skill.storage_migration",
+                                "source_cleanup_failed",
+                            )
+                            .field_display("path", src.display()),
+                        );
                         result.migrated_count += 1;
                     }
                     Err(e) => {
@@ -1282,7 +1320,10 @@ impl SkillService {
 
         // 4. 刷新所有应用目录的 symlink（指向新 SSOT）
         for app in AppType::all() {
-            let _ = Self::sync_to_app(db, &app);
+            Self::sync_to_app(db, &app).warn_on_err(
+                DiagnosticEvent::new("skill.storage_migration", "app_sync_failed")
+                    .field("app", app.as_str()),
+            );
         }
 
         log::info!(
@@ -1402,14 +1443,23 @@ impl SkillService {
         restored_skill.content_hash = Self::compute_dir_hash(&restore_path).ok();
 
         if let Err(err) = db.save_skill(&restored_skill) {
-            let _ = fs::remove_dir_all(&restore_path);
+            fs::remove_dir_all(&restore_path).warn_on_err(
+                DiagnosticEvent::new("skill.restore.rollback", "directory_cleanup_failed")
+                    .field_display("path", restore_path.display()),
+            );
             return Err(err.into());
         }
 
         if !restored_skill.apps.is_empty() {
             if let Err(err) = Self::sync_to_app_dir(&restored_skill.directory, current_app) {
-                let _ = db.delete_skill(&restored_skill.id);
-                let _ = fs::remove_dir_all(&restore_path);
+                db.delete_skill(&restored_skill.id).error_on_err(
+                    DiagnosticEvent::new("skill.restore.rollback", "database_cleanup_failed")
+                        .field("skill_id", restored_skill.id.clone()),
+                );
+                fs::remove_dir_all(&restore_path).warn_on_err(
+                    DiagnosticEvent::new("skill.restore.rollback", "directory_cleanup_failed")
+                        .field_display("path", restore_path.display()),
+                );
                 return Err(err);
             }
         }
@@ -1792,7 +1842,11 @@ impl SkillService {
 
         let copy_result = Self::copy_dir_recursive(source, &tmp);
         if let Err(err) = copy_result {
-            let _ = Self::remove_path(&tmp);
+            Self::remove_path(&tmp).warn_on_err(
+                DiagnosticEvent::new("skill.atomic_replace", "temp_cleanup_failed")
+                    .field_display("path", tmp.display())
+                    .field("phase", "copy_failed"),
+            );
             return Err(err);
         }
 
@@ -1801,7 +1855,11 @@ impl SkillService {
         }
 
         fs::rename(&tmp, dest).with_context(|| {
-            let _ = Self::remove_path(&tmp);
+            Self::remove_path(&tmp).warn_on_err(
+                DiagnosticEvent::new("skill.atomic_replace", "temp_cleanup_failed")
+                    .field_display("path", tmp.display())
+                    .field("phase", "rename_failed"),
+            );
             format!(
                 "替换 Skill 目录失败: {} -> {}",
                 tmp.display(),
@@ -2464,8 +2522,14 @@ impl SkillService {
                 Err(e) => {
                     // 每个分支各自重算预算，所以失败后必须把上一轮的残留清掉——
                     // 否则 N 个候选分支等于 N 倍的落盘量堆在同一个目录里。
-                    let _ = fs::remove_dir_all(&temp_path);
-                    let _ = fs::create_dir_all(&temp_path);
+                    if temp_path.exists() {
+                        fs::remove_dir_all(&temp_path).with_context(|| {
+                            format!("清理失败分支下载目录失败: {}", temp_path.display())
+                        })?;
+                    }
+                    fs::create_dir_all(&temp_path).with_context(|| {
+                        format!("重建分支下载目录失败: {}", temp_path.display())
+                    })?;
                     last_error = Some(e);
                     continue;
                 }
@@ -2862,7 +2926,10 @@ impl SkillService {
         };
 
         if let Err(err) = write_backup() {
-            let _ = fs::remove_dir_all(&backup_path);
+            fs::remove_dir_all(&backup_path).warn_on_err(
+                DiagnosticEvent::new("skill.backup", "partial_cleanup_failed")
+                    .field_display("path", backup_path.display()),
+            );
             return Err(err);
         }
 
@@ -3078,7 +3145,7 @@ impl SkillService {
             // 复制到 SSOT
             let dest = ssot_dir.join(&install_name);
             if dest.exists() {
-                let _ = fs::remove_dir_all(&dest);
+                fs::remove_dir_all(&dest)?;
             }
             Self::copy_dir_recursive(&skill_dir, &dest)?;
 
@@ -3555,7 +3622,11 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
         count += 1;
     }
 
-    let _ = db.set_setting("skills_ssot_migration_snapshot", "");
+    db.set_setting("skills_ssot_migration_snapshot", "")
+        .warn_on_err(DiagnosticEvent::new(
+            "skill.ssot_migration",
+            "snapshot_clear_failed",
+        ));
 
     log::info!("Skills 迁移完成，共 {count} 个");
 

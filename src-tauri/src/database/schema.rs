@@ -3,6 +3,7 @@
 //! 负责数据库表结构的创建和版本迁移。
 
 use super::{lock_conn, Database, SCHEMA_VERSION};
+use crate::diagnostics::DiagnosticEvent;
 use crate::error::AppError;
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -337,46 +338,35 @@ impl Database {
             )
             .is_ok()
         {
-            let _ = conn.execute("DELETE FROM settings WHERE key = 'current_profile_id'", []);
+            if let Err(error) =
+                conn.execute("DELETE FROM settings WHERE key = 'current_profile_id'", [])
+            {
+                log::warn!(
+                    "{}",
+                    DiagnosticEvent::new("database.schema_cleanup", "legacy_key_delete_failed")
+                        .field("key", "current_profile_id")
+                        .field_display("error", error)
+                );
+            }
         }
 
-        // 尝试添加 live_takeover_active 列到 proxy_config 表
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-
-        // 尝试添加基础配置列到 proxy_config 表（兼容 v3.9.0-2 升级）
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN listen_address TEXT NOT NULL DEFAULT '127.0.0.1'",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN listen_port INTEGER NOT NULL DEFAULT 15721",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN enable_logging INTEGER NOT NULL DEFAULT 1",
-            [],
-        );
-
-        // 尝试添加超时配置列到 proxy_config 表
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN streaming_idle_timeout INTEGER NOT NULL DEFAULT 120",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN non_streaming_timeout INTEGER NOT NULL DEFAULT 600",
-            [],
-        );
+        // 兼容早期数据库：统一走“先查列、再 ALTER”的幂等 helper。旧代码直接吞掉
+        // 所有 ALTER 错误，会把磁盘损坏/权限问题伪装成“列已存在”。
+        for (column, definition) in [
+            ("live_takeover_active", "INTEGER NOT NULL DEFAULT 0"),
+            ("proxy_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("listen_address", "TEXT NOT NULL DEFAULT '127.0.0.1'"),
+            ("listen_port", "INTEGER NOT NULL DEFAULT 15721"),
+            ("enable_logging", "INTEGER NOT NULL DEFAULT 1"),
+            (
+                "streaming_first_byte_timeout",
+                "INTEGER NOT NULL DEFAULT 60",
+            ),
+            ("streaming_idle_timeout", "INTEGER NOT NULL DEFAULT 120"),
+            ("non_streaming_timeout", "INTEGER NOT NULL DEFAULT 600"),
+        ] {
+            Self::add_column_if_missing(conn, "proxy_config", column, definition)?;
+        }
 
         // 兼容：若旧版 proxy_config 仍为单例结构（无 app_type），则在启动时直接转换为三行结构
         // 说明：user_version=2 时不会再触发 v1->v2 迁移，但新代码查询依赖 app_type 列。
@@ -395,15 +385,18 @@ impl Database {
         )?;
 
         // 删除旧的 failover_queue 表（如果存在）
-        let _ = conn.execute("DROP INDEX IF EXISTS idx_failover_queue_order", []);
-        let _ = conn.execute("DROP TABLE IF EXISTS failover_queue", []);
+        conn.execute("DROP INDEX IF EXISTS idx_failover_queue_order", [])
+            .map_err(|error| AppError::Database(format!("删除旧故障转移索引失败: {error}")))?;
+        conn.execute("DROP TABLE IF EXISTS failover_queue", [])
+            .map_err(|error| AppError::Database(format!("删除旧故障转移表失败: {error}")))?;
 
         // 为故障转移队列创建索引（基于 providers 表）
-        let _ = conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_providers_failover
              ON providers(app_type, in_failover_queue, sort_index)",
             [],
-        );
+        )
+        .map_err(|error| AppError::Database(format!("创建故障转移索引失败: {error}")))?;
 
         // LoongPort：中转站与凭据（单行表）
         crate::relay::creds::create_table(conn)?;
@@ -1023,14 +1016,18 @@ impl Database {
         // 标记：需要在启动后从文件系统扫描并重建 Skills 数据
         // 说明：v3 结构将 Skills 的 SSOT 迁移到 ~/.cc-switch/skills/，
         // 旧表只存“安装记录”，无法直接无损迁移到新结构，因此改为启动后扫描 app 目录导入。
-        let _ = conn.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('skills_ssot_migration_pending', 'true')",
             [],
-        );
-        let _ = conn.execute(
+        )
+        .map_err(|error| {
+            AppError::Database(format!("写入 Skills 迁移待处理标志失败: {error}"))
+        })?;
+        conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('skills_ssot_migration_snapshot', ?1)",
             [snapshot_json],
-        );
+        )
+        .map_err(|error| AppError::Database(format!("写入 Skills 迁移快照失败: {error}")))?;
 
         // 2. 删除旧表
         conn.execute("DROP TABLE IF EXISTS skills", [])

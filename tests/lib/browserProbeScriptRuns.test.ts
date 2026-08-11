@@ -97,8 +97,24 @@ describe("browser probe generated script", () => {
       Buffer.from(encoded!, "base64url").toString("utf8"),
     );
     expect(batch).toEqual([
-      { candidate_id: "sub2api", body: '{"code":0}' },
-      { candidate_id: "newapi", body: '{"success":true}' },
+      {
+        candidate_id: "sub2api",
+        body: '{"code":0}',
+        status: null,
+        content_type: null,
+        body_bytes: Buffer.byteLength('{"code":0}'),
+        json_like: true,
+        error_kind: null,
+      },
+      {
+        candidate_id: "newapi",
+        body: '{"success":true}',
+        status: null,
+        content_type: null,
+        body_bytes: Buffer.byteLength('{"success":true}'),
+        json_like: true,
+        error_kind: null,
+      },
     ]);
 
     intervalCallbacks[0]();
@@ -106,6 +122,135 @@ describe("browser probe generated script", () => {
       fetchedPaths,
       "a finished round releases the next interval",
     ).toHaveLength(3);
+  });
+
+  it("uses the page's candidate-specific bearer session for authenticated browser probes", async () => {
+    const requests: Array<{
+      path: string;
+      authorization: string | undefined;
+    }> = [];
+    const navigations: string[] = [];
+    const location = {
+      origin: "https://relay.example",
+      get href() {
+        return navigations.at(-1) ?? "https://relay.example/dashboard";
+      },
+      set href(value: string) {
+        navigations.push(value);
+      },
+    };
+
+    const sandbox = {
+      window: { location },
+      localStorage: {
+        getItem: (key: string) =>
+          key === "auth_token" ? "browser-session-token" : null,
+      },
+      fetch: (
+        path: string,
+        init: { headers?: Record<string, string> } = {},
+      ) => {
+        const authorization = init.headers?.Authorization;
+        requests.push({ path, authorization });
+        const body =
+          path === "/api/v1/settings/public" &&
+          authorization === "Bearer browser-session-token"
+            ? '{"code":0}'
+            : "<html>verification required</html>";
+        return Promise.resolve({ text: () => Promise.resolve(body) });
+      },
+      setInterval: () => 1,
+      setTimeout,
+      clearTimeout,
+      AbortController,
+      TextEncoder,
+      btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
+      JSON,
+    };
+
+    vm.runInNewContext(readFileSync(SCRIPT, "utf8"), sandbox, {
+      timeout: 5000,
+    });
+    await flushPromises();
+
+    expect(requests[0]).toEqual({
+      path: "/api/v1/settings/public",
+      authorization: "Bearer browser-session-token",
+    });
+    expect(requests[1]).toEqual({
+      path: "/api/status",
+      authorization: undefined,
+    });
+    expect(navigations).toHaveLength(1);
+  });
+
+  it("reports safe response metadata when a verification page is not JSON", async () => {
+    const navigations: string[] = [];
+    const verificationBody = "<html><body>verification required</body></html>";
+    const location = {
+      origin: "https://relay.example",
+      get href() {
+        return navigations.at(-1) ?? "https://relay.example/dashboard";
+      },
+      set href(value: string) {
+        navigations.push(value);
+      },
+    };
+
+    const sandbox = {
+      window: { location },
+      fetch: () =>
+        Promise.resolve({
+          status: 403,
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === "content-type"
+                ? "text/html; charset=UTF-8"
+                : null,
+          },
+          text: () => Promise.resolve(verificationBody),
+        }),
+      setInterval: () => 1,
+      setTimeout,
+      clearTimeout,
+      AbortController,
+      TextEncoder,
+      btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
+      JSON,
+    };
+
+    vm.runInNewContext(readFileSync(SCRIPT, "utf8"), sandbox, {
+      timeout: 5000,
+    });
+    await flushPromises();
+
+    expect(navigations).toHaveLength(1);
+    const encoded = new URL(navigations[0]).searchParams.get("d");
+    expect(encoded).not.toBeNull();
+    const batch = JSON.parse(
+      Buffer.from(encoded!, "base64url").toString("utf8"),
+    );
+    expect(batch).toEqual([
+      {
+        candidate_id: "sub2api",
+        body: "",
+        status: 403,
+        content_type: "text/html; charset=UTF-8",
+        body_bytes: Buffer.byteLength(verificationBody),
+        json_like: false,
+        error_kind: null,
+      },
+      {
+        candidate_id: "newapi",
+        body: "",
+        status: 403,
+        content_type: "text/html; charset=UTF-8",
+        body_bytes: Buffer.byteLength(verificationBody),
+        json_like: false,
+        error_kind: null,
+      },
+    ]);
+    expect(JSON.stringify(batch)).not.toContain(verificationBody);
   });
 
   it("times out one candidate, continues the batch, and emits only after settlement", async () => {
@@ -159,5 +304,26 @@ describe("browser probe generated script", () => {
     secondBody.resolve('{"success":true}');
     await flushPromises();
     expect(navigations).toHaveLength(1);
+
+    const encoded = new URL(navigations[0]).searchParams.get("d");
+    expect(encoded).not.toBeNull();
+    const batch = JSON.parse(
+      Buffer.from(encoded!, "base64url").toString("utf8"),
+    );
+    expect(batch[0]).toEqual({
+      candidate_id: "sub2api",
+      body: "",
+      status: null,
+      content_type: null,
+      body_bytes: 0,
+      json_like: false,
+      error_kind: "ProbeTimeout",
+    });
+    expect(batch[1]).toMatchObject({
+      candidate_id: "newapi",
+      body: '{"success":true}',
+      json_like: true,
+      error_kind: null,
+    });
   });
 });

@@ -26,6 +26,10 @@ pub struct DetectedSite {
 pub struct ProbeCandidate {
     pub id: &'static str,
     pub path: &'static str,
+    /// 可选的页面登录令牌键。仅在目标 origin 内给该候选请求补 Bearer 头；
+    /// 令牌不回传 Rust、不写日志，也不与其它协议候选共享。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bearer_token_storage_key: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]

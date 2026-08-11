@@ -132,10 +132,18 @@ fn registration_server(exe: &str) -> McpServer {
 /// 2. **它不在协议通道上**，没有污染 stdout 的风险（那是本模块最怕的事）。
 /// 3. 自己装 logger 要么引新依赖，要么把 `tauri_plugin_log` 的初始化挪到 `run()` 之外
 ///    —— 后者恰好会把它那个 stdout target 带进 MCP 进程，即**制造**我们要防的故障。
+fn format_stderr_diagnostic(message: &str) -> String {
+    format!(
+        "[loongport-imagegen] {}",
+        crate::diagnostics::redact_log_text(message)
+    )
+}
+
 macro_rules! diag {
-    ($($arg:tt)*) => {
-        eprintln!("[loongport-imagegen] {}", format!($($arg)*))
-    };
+    ($($arg:tt)*) => {{
+        let message = format!($($arg)*);
+        eprintln!("{}", format_stderr_diagnostic(&message));
+    }};
 }
 
 /// 走哪个模型生图。
@@ -813,6 +821,17 @@ pub fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_diagnostics_redact_credentials_and_response_bodies() {
+        let message = format_stderr_diagnostic(
+            "Authorization: Bearer sk-private-token\nresponse_body=<html>secret</html>",
+        );
+
+        assert!(!message.contains("sk-private-token"));
+        assert!(!message.contains("<html>secret</html>"));
+        assert!(message.contains("[REDACTED]"));
+    }
 
     #[test]
     fn registration_targets_supported_hosts_without_binding_a_tier() {

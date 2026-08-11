@@ -1,6 +1,6 @@
 //! Panic Hook 模块
 //!
-//! 在应用崩溃时捕获 panic 信息并记录到 `<app_config_dir>/crash.log` 文件中（默认 `~/.cc-switch/crash.log`）。
+//! 在应用崩溃时捕获 panic 信息并记录到 `<app_config_dir>/crash.log` 文件中（默认 `~/.loongport/crash.log`）。
 //! 便于用户和开发者诊断闪退问题。
 
 use std::fs::{self, OpenOptions};
@@ -115,6 +115,51 @@ fn get_system_info() -> String {
     )
 }
 
+fn format_crash_entry(
+    timestamp: &str,
+    system_info: &str,
+    message: &str,
+    location: &str,
+    backtrace: &str,
+) -> String {
+    let message = crate::diagnostics::redact_log_text(message);
+    let separator = "=".repeat(80);
+    let sub_separator = "-".repeat(40);
+    format!(
+        r#"
+{separator}
+[CRASH REPORT] {timestamp}
+{separator}
+
+{sub_separator}
+System Information
+{sub_separator}
+{system_info}
+
+{sub_separator}
+Error Details
+{sub_separator}
+Message: {message}
+
+Location: {location}
+
+{sub_separator}
+Stack Trace (Backtrace)
+{sub_separator}
+{backtrace}
+
+{separator}
+"#
+    )
+}
+
+fn append_crash_entry(path: &Path, entry: &str) -> std::io::Result<()> {
+    rotate_crash_log_if_needed(path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(entry.as_bytes())?;
+    file.flush()
+}
+
 /// 设置 panic hook，捕获崩溃信息并写入日志文件
 ///
 /// 在应用启动时调用此函数，确保任何 panic 都会被记录。
@@ -130,14 +175,14 @@ pub fn setup_panic_hook() {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
 
-    let default_hook = panic::take_hook();
-
     panic::set_hook(Box::new(move |panic_info| {
         let log_path = get_crash_log_path();
 
         // 确保目录存在
         if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("[LoongPort] failed to create crash log directory: {error}");
+            }
         }
 
         // 构建崩溃信息（使用 catch_unwind 保护时间格式化，避免嵌套 panic）
@@ -184,34 +229,14 @@ pub fn setup_panic_hook() {
         let backtrace = std::backtrace::Backtrace::force_capture();
         let backtrace_str = format!("{backtrace}");
 
-        // 格式化日志条目
-        let separator = "=".repeat(80);
-        let sub_separator = "-".repeat(40);
-        let crash_entry = format!(
-            r#"
-{separator}
-[CRASH REPORT] {timestamp}
-{separator}
-
-{sub_separator}
-System Information
-{sub_separator}
-{system_info}
-
-{sub_separator}
-Error Details
-{sub_separator}
-Message: {message}
-
-Location: {location}
-
-{sub_separator}
-Stack Trace (Backtrace)
-{sub_separator}
-{backtrace_str}
-
-{separator}
-"#
+        // 格式化日志条目。panic payload 可能携带请求失败正文或凭据，
+        // crash.log 不经过 tauri-plugin-log formatter，因此必须显式复用同一脱敏策略。
+        let crash_entry = format_crash_entry(
+            &timestamp,
+            &system_info,
+            &message,
+            &location,
+            &backtrace_str,
         );
 
         // 将 size check、轮转和追加合成同一个临界区，避免多线程同时 panic
@@ -219,26 +244,22 @@ Stack Trace (Backtrace)
         let crash_log_guard = CRASH_LOG_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = rotate_crash_log_if_needed(&log_path);
-        let saved =
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-                let _ = file.write_all(crash_entry.as_bytes());
-                let _ = file.flush();
-                true
-            } else {
-                false
-            };
+        let save_result = append_crash_entry(&log_path, &crash_entry);
         drop(crash_log_guard);
 
-        if saved {
-            eprintln!("\n[CC-Switch] Crash log saved to: {}", log_path.display());
+        match save_result {
+            Ok(()) => eprintln!("\n[LoongPort] Crash log saved to: {}", log_path.display()),
+            Err(error) => eprintln!(
+                "\n[LoongPort] Failed to save crash log at {}: {error}",
+                log_path.display()
+            ),
         }
 
         // 同时输出到 stderr（便于开发调试）
         eprintln!("{crash_entry}");
 
-        // 调用默认 hook
-        default_hook(panic_info);
+        // 不再调用默认 hook：它会把未经脱敏的 panic payload 再次写到 stderr。
+        // 上面的 crash_entry 已包含同等的消息、位置和完整 backtrace。
     }));
 }
 
@@ -259,6 +280,22 @@ mod tests {
         assert!(info.contains("OS:"));
         assert!(info.contains("Arch:"));
         assert!(info.contains("App Version:"));
+    }
+
+    #[test]
+    fn crash_entries_redact_sensitive_panic_messages() {
+        let entry = format_crash_entry(
+            "2026-08-11 12:00:00",
+            "OS: test",
+            "Authorization: Bearer sk-private-token\nresponse_body=<html>secret</html>",
+            "src/example.rs:1",
+            "stack",
+        );
+
+        assert!(!entry.contains("sk-private-token"));
+        assert!(!entry.contains("<html>secret</html>"));
+        assert!(entry.contains("[REDACTED]"));
+        assert!(entry.contains("[REDACTED BODY]"));
     }
 
     #[test]

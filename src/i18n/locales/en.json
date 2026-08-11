@@ -399,7 +399,7 @@
         "title": "Application Diagnostic Logs",
         "description": "Control the output level for application diagnostic logs",
         "enabled": "Enable Diagnostic Logs",
-        "enabledDescription": "Controls cc-switch.log; request usage records and crash.log are unaffected",
+        "enabledDescription": "Controls loongport.log; request usage records and crash.log are unaffected",
         "level": "Log Level",
         "levelDescription": "Set the minimum log level to output",
         "levels": {

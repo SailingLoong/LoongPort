@@ -6,6 +6,7 @@ use tauri::State;
 use crate::commands::sync_support::{
     attach_warning, post_sync_warning_from_result, run_post_import_sync,
 };
+use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::error::AppError;
 use crate::services::s3_sync as s3_sync_service;
 use crate::settings::{self, S3SyncSettings};
@@ -14,7 +15,11 @@ use crate::store::AppState;
 fn persist_sync_error(settings: &mut S3SyncSettings, error: &AppError, source: &str) {
     settings.status.last_error = Some(error.to_string());
     settings.status.last_error_source = Some(source.to_string());
-    let _ = settings::update_s3_sync_status(settings.status.clone());
+    settings::update_s3_sync_status(settings.status.clone()).error_on_err(
+        DiagnosticEvent::new("sync.status", "persist_failed")
+            .field("backend", "s3")
+            .field("source", source),
+    );
 }
 
 fn s3_not_configured_error() -> String {

@@ -23,6 +23,7 @@ use super::{
     ProxyError,
 };
 use crate::commands::{CodexOAuthState, CopilotAuthState, XaiOAuthState};
+use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
@@ -273,6 +274,25 @@ impl RequestForwarder {
         });
     }
 
+    fn spawn_failover_switch(&self, app_type: &str, provider: &Provider) {
+        let manager = self.failover_manager.clone();
+        let app_handle = self.app_handle.clone();
+        let app_type = app_type.to_string();
+        let provider_id = provider.id.clone();
+        let provider_name = provider.name.clone();
+
+        tokio::spawn(async move {
+            manager
+                .try_switch(app_handle.as_ref(), &app_type, &provider_id, &provider_name)
+                .await
+                .warn_on_err(
+                    DiagnosticEvent::new("proxy.failover.switch", "failed")
+                        .field("app", app_type)
+                        .field("provider_id", provider_id),
+                );
+        });
+    }
+
     /// 整流（thinking signature 或 budget）重试失败后的统一收尾。
     ///
     /// `None` 表示已记录熔断器、累积 `last_error`/`last_provider`，
@@ -299,8 +319,7 @@ impl RequestForwarder {
         };
 
         if is_provider_error {
-            let _ = self
-                .router
+            self.router
                 .record_result(
                     &provider.id,
                     app_type_str,
@@ -308,7 +327,13 @@ impl RequestForwarder {
                     false,
                     Some(retry_err.to_string()),
                 )
-                .await;
+                .await
+                .warn_on_err(
+                    DiagnosticEvent::new("proxy.health.record", "failed")
+                        .field("phase", "rectifier_retry_failure")
+                        .field("app", app_type_str)
+                        .field("provider_id", provider.id.clone()),
+                );
             {
                 let mut status = self.status.write().await;
                 status.last_error = Some(format!(
@@ -516,15 +541,7 @@ impl RequestForwarder {
                             status.failover_count += 1;
 
                             // 异步触发供应商切换，更新 UI/托盘，并把“当前供应商”同步为实际使用的 provider
-                            let fm = self.failover_manager.clone();
-                            let ah = self.app_handle.clone();
-                            let pid = provider.id.clone();
-                            let pname = provider.name.clone();
-                            let at = app_type_str.to_string();
-
-                            tokio::spawn(async move {
-                                let _ = fm.try_switch(ah.as_ref(), &at, &pid, &pname).await;
-                            });
+                            self.spawn_failover_switch(app_type_str, provider);
                         }
                         // 重新计算成功率
                         if status.total_requests > 0 {
@@ -618,17 +635,7 @@ impl RequestForwarder {
                                                 != provider.id.as_str();
                                         if should_switch {
                                             status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
+                                            self.spawn_failover_switch(app_type_str, provider);
                                         }
                                         if status.total_requests > 0 {
                                             status.success_rate = (status.success_requests as f32
@@ -766,17 +773,7 @@ impl RequestForwarder {
                                                 status.failover_count += 1;
 
                                                 // 异步触发供应商切换，更新 UI/托盘
-                                                let fm = self.failover_manager.clone();
-                                                let ah = self.app_handle.clone();
-                                                let pid = provider.id.clone();
-                                                let pname = provider.name.clone();
-                                                let at = app_type_str.to_string();
-
-                                                tokio::spawn(async move {
-                                                    let _ = fm
-                                                        .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                        .await;
-                                                });
+                                                self.spawn_failover_switch(app_type_str, provider);
                                             }
                                             if status.total_requests > 0 {
                                                 status.success_rate = (status.success_requests
@@ -928,16 +925,7 @@ impl RequestForwarder {
                                                 != provider.id.as_str();
                                         if should_switch {
                                             status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
+                                            self.spawn_failover_switch(app_type_str, provider);
                                         }
                                         if status.total_requests > 0 {
                                             status.success_rate = (status.success_requests as f32
@@ -1008,8 +996,7 @@ impl RequestForwarder {
                     match category {
                         ErrorCategory::Retryable => {
                             // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
-                            let _ = self
-                                .router
+                            self.router
                                 .record_result(
                                     &provider.id,
                                     app_type_str,
@@ -1017,7 +1004,13 @@ impl RequestForwarder {
                                     false,
                                     Some(e.to_string()),
                                 )
-                                .await;
+                                .await
+                                .warn_on_err(
+                                    DiagnosticEvent::new("proxy.health.record", "failed")
+                                        .field("phase", "retryable_failure")
+                                        .field("app", app_type_str)
+                                        .field("provider_id", provider.id.clone()),
+                                );
 
                             {
                                 let mut status = self.status.write().await;
