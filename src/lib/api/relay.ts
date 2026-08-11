@@ -32,11 +32,24 @@ export interface SiteInfo {
   accountLabel: string;
 }
 
+export type BackendKind = "sub2api" | "newapi";
+
+export type DiscoveryErrorKind =
+  | "unsupported_site"
+  | "protocol_conflict"
+  | "transport";
+
+export interface RelayImportError {
+  kind?: DiscoveryErrorKind;
+  message: string;
+}
+
 export interface ProbeResult {
   /** 探测成功后这个站在本地的行 id（已存在则是原来那行，后端会收口）。 */
   relayId: number;
   siteOrigin: string;
   siteName: string;
+  readonly backendKind: BackendKind;
 }
 
 /** 合并站点发现与同一浏览器会话登录的结果。 */
@@ -216,10 +229,6 @@ export const relayApi = {
    */
   importSite: (site: string): Promise<ImportResult> =>
     invoke("relay_import_site", { site }),
-
-  /** 仅探测域名并保存站点；保留给现有调用方。空串走默认域名。 */
-  probeSite: (site: string): Promise<ProbeResult> =>
-    invoke("relay_probe_site", { site }),
 
   /**
    * 探一遍每一行凭据是不是真的还活着，返回**这次被清掉凭据的行 id**（空 = 全都好）。

@@ -54,6 +54,7 @@
 
 pub mod aff;
 pub mod api;
+pub mod backend;
 pub mod cc_switch_import;
 pub mod chatgpt_app;
 pub mod creds;
@@ -61,6 +62,8 @@ pub mod discovery;
 pub mod imagegen_mcp;
 pub mod login;
 pub mod managed;
+pub mod newapi;
+pub mod newapi_provision;
 // Phase 1 defines this crate-internal contract before Phase 2 consumes it.
 #[allow(dead_code)]
 pub mod model_verification;

@@ -115,6 +115,7 @@ describe("「添加中转站」登录后就地备好密钥", () => {
       relayId: 7,
       siteOrigin: "https://790053500.com",
       siteName: "鑫旺",
+      backendKind: "newapi",
       loggedIn: true,
     });
     listSponsors.mockResolvedValue([]);
@@ -165,6 +166,7 @@ describe("「添加中转站」登录后就地备好密钥", () => {
       relayId: 7,
       siteOrigin: "https://790053500.com",
       siteName: "鑫旺",
+      backendKind: "newapi",
       loggedIn: false,
     });
     renderDialog();
@@ -210,6 +212,38 @@ describe("「添加中转站」登录后就地备好密钥", () => {
     await waitFor(() => expect(onAdded).toHaveBeenCalled());
     expect(toastError).toHaveBeenCalledWith(
       expect.stringContaining("网络不通"),
+    );
+  });
+
+  it.each([
+    ["unsupported_site", "loongport.addSite.unsupportedSite"],
+    ["protocol_conflict", "loongport.addSite.protocolConflict"],
+  ])("发现错误 %s 映射成可操作的本地化提示", async (kind, key) => {
+    importSite.mockRejectedValue({ kind, message: kind });
+    renderDialog();
+    clickConfirm();
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(key));
+    expect(toastError).not.toHaveBeenCalledWith(kind);
+  });
+
+  it("未知错误只保留一层配置错误前缀", async () => {
+    importSite.mockRejectedValue("配置错误: 配置错误: gateway unavailable");
+    renderDialog();
+    clickConfirm();
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("gateway unavailable"),
+    );
+  });
+
+  it("未知对象错误回落到本地化通用提示", async () => {
+    importSite.mockRejectedValue({ code: "unexpected" });
+    renderDialog();
+    clickConfirm();
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("loongport.addSite.importFailed"),
     );
   });
 });

@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { relayApi } from "@/lib/api";
 import type { AppId } from "@/lib/api";
+import type { RelayImportError } from "@/lib/api/relay";
 // 类型从具体模块拿 —— `@/lib/api` 那个 barrel 只导出 `relayApi`
 // （与 `RelayRow` / `RelayTierList` 同一写法）。
 import type { SiteInfo, Sponsor } from "@/lib/api/relay";
@@ -122,6 +123,33 @@ export function AddSiteDialog({
   const accountCountFor = (siteOrigin: string) =>
     sites.filter((s) => s.siteOrigin === siteOrigin && s.accountLabel).length;
 
+  const importErrorMessage = (error: unknown) => {
+    const typed =
+      typeof error === "object" && error !== null
+        ? (error as Partial<RelayImportError>)
+        : undefined;
+    if (typed?.kind === "unsupported_site") {
+      return t("loongport.addSite.unsupportedSite");
+    }
+    if (typed?.kind === "protocol_conflict") {
+      return t("loongport.addSite.protocolConflict");
+    }
+    if (typed?.kind === "transport") {
+      return t("loongport.addSite.transportError");
+    }
+
+    const raw =
+      typeof typed?.message === "string"
+        ? typed.message
+        : error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "";
+    const clean = raw.replace(/^(?:配置错误:\s*)+/, "").trim();
+    return clean || t("loongport.addSite.importFailed");
+  };
+
   /**
    * 导入站点。`site` 省略时使用输入框值；空串仍由后端回落到默认站点。
    *
@@ -156,7 +184,7 @@ export function AddSiteDialog({
       onClose();
     } catch (e) {
       // 发现、网页验证后的协议识别或登录失败时保留输入与弹窗，方便用户修正后重试。
-      toast.error(String(e));
+      toast.error(importErrorMessage(e));
     } finally {
       setBusy(false);
     }

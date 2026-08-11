@@ -7,6 +7,7 @@
 //! | `id` | 自增主键 |
 //! | `site_origin` | 面板 origin，如 `https://bestapi.store` |
 //! | `site_name` | 展示名，来自探测结果 |
+//! | `backend_kind` | 已识别的中转站协议，如 `sub2api` 或 `newapi` |
 //! | `api_base_url` | 站点 **API 根**（不带 `/v1`）。各 CLI 的成品 `base_url` 由它派生，见 [`crate::relay::api::base_url_for`] |
 //! | `account_id` | 服务端的用户 id。**登录后才知道**，未登录时为 `NULL` |
 //! | `account_label` | 给人看的账号名（昵称优先，回落邮箱） |
@@ -59,9 +60,37 @@
 //!
 //! 同样是测试阶段直接删列、不加迁移步骤（与 `device_id` 同一处境、同一做法）。
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{
+    params,
+    types::{FromSql, FromSqlError, FromSqlResult, ValueRef},
+    Connection, OptionalExtension,
+};
 
 use crate::error::AppError;
+
+/// LoongPort 支持的 relay 协议；由 discovery 定义，持久层直接复用同一个类型。
+pub use super::backend::BackendKind;
+
+impl BackendKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sub2Api => "sub2api",
+            Self::NewApi => "newapi",
+        }
+    }
+}
+
+impl FromSql for BackendKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "sub2api" => Ok(Self::Sub2Api),
+            "newapi" => Ok(Self::NewApi),
+            value => Err(FromSqlError::Other(
+                format!("未知的 relay backend_kind: {value}").into(),
+            )),
+        }
+    }
+}
 
 /// 一个站点 × 账号（含凭据）。
 #[derive(Debug, Clone)]
@@ -69,6 +98,7 @@ pub struct Relay {
     pub id: i64,
     pub site_origin: String,
     pub site_name: String,
+    pub backend_kind: BackendKind,
     /// codex 用的 API 基址，已归一到带 `/v1`。
     ///
     /// ⚠️ **这是「codex 的 base」，不是「这个站的 base」** —— Anthropic / Gemini 在同一个站上
@@ -160,7 +190,7 @@ impl Relay {
     }
 }
 
-/// 建表 + 索引。**全新库与 v16→v17 迁移都走它，两条路建出的形态完全一样。**
+/// 建表 + 索引。**全新库与 v8→v9 迁移都走它，两条路建出的形态完全一样。**
 ///
 /// 索引不再需要「先判表形态」那道守卫：从前 `create_tables_on_conn` 跑在迁移之前，
 /// 升级的库上 `CREATE TABLE IF NOT EXISTS` 会跳过，那时表还是 v17 的旧形态、
@@ -183,7 +213,8 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
             refresh_token TEXT,
             token_expires_at INTEGER,
             sort_index INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            backend_kind TEXT NOT NULL DEFAULT 'sub2api'
         )",
         [],
     )
@@ -209,7 +240,7 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
 /// 由 [`select_cols_match_the_row_reader`] 钉住两者的列数一致。
 const SELECT_COLS: &str =
     "id, site_origin, site_name, api_base_url, account_id, account_label, login_identifier, \
-     auth_token, refresh_token, token_expires_at, sort_index";
+     auth_token, refresh_token, token_expires_at, sort_index, backend_kind";
 
 fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
     Ok(Relay {
@@ -224,6 +255,7 @@ fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
         refresh_token: row.get(8)?,
         token_expires_at: row.get(9)?,
         sort_index: row.get(10)?,
+        backend_kind: row.get(11)?,
     })
 }
 
@@ -285,11 +317,32 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Relay>, AppError> {
 ///
 /// 同一个站点若已有**未登录**的行（`account_id IS NULL`），复用它而不是再插一条 ——
 /// 用户连点两次「添加」不该得到两行。已登录的行不动（那是别的账号，或同一账号的既有配置）。
+#[cfg(test)]
 pub fn save_site(
     conn: &Connection,
     site_origin: &str,
     site_name: &str,
     api_base_url: &str,
+) -> Result<i64, AppError> {
+    save_site_with_backend(
+        conn,
+        site_origin,
+        site_name,
+        api_base_url,
+        BackendKind::Sub2Api,
+    )
+}
+
+/// 添加或更新一个站点，并保存本次探测得到的 relay 协议。
+///
+/// `save_site` 保留为 sub2api 默认入口，兼容已有调用方；新导入流程应使用本函数，把
+/// 探测结果作为显式事实写入数据库。
+pub fn save_site_with_backend(
+    conn: &Connection,
+    site_origin: &str,
+    site_name: &str,
+    api_base_url: &str,
+    backend_kind: BackendKind,
 ) -> Result<i64, AppError> {
     let now = now_unix();
 
@@ -307,9 +360,9 @@ pub fn save_site(
         Some(id) => {
             conn.execute(
                 "UPDATE loongport_relay
-                 SET site_name = ?1, api_base_url = ?2, updated_at = ?3
-                 WHERE id = ?4",
-                params![site_name, api_base_url, now, id],
+                 SET site_name = ?1, api_base_url = ?2, backend_kind = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![site_name, api_base_url, backend_kind.as_str(), now, id],
             )
             .map_err(|e| AppError::Database(format!("更新站点失败: {e}")))?;
             id
@@ -317,9 +370,15 @@ pub fn save_site(
         None => {
             conn.execute(
                 "INSERT INTO loongport_relay
-                    (site_origin, site_name, api_base_url, updated_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![site_origin, site_name, api_base_url, now],
+                    (site_origin, site_name, api_base_url, backend_kind, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    site_origin,
+                    site_name,
+                    api_base_url,
+                    backend_kind.as_str(),
+                    now
+                ],
             )
             .map_err(|e| AppError::Database(format!("保存站点失败: {e}")))?;
             conn.last_insert_rowid()
@@ -361,18 +420,27 @@ pub fn save_credentials(
         label: account_label,
         login_identifier,
     } = account;
-    let site_origin: String = conn
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::Database(format!("开始凭据合并事务失败: {e}")))?;
+    let (site_origin, site_name, api_base_url, backend_kind): (
+        String,
+        String,
+        String,
+        BackendKind,
+    ) = transaction
         .query_row(
-            "SELECT site_origin FROM loongport_relay WHERE id = ?1",
+            "SELECT site_origin, site_name, api_base_url, backend_kind
+             FROM loongport_relay WHERE id = ?1",
             params![id],
-            |r| r.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(|e| AppError::Database(format!("读取站点失败: {e}")))?
         .ok_or_else(|| AppError::Config("保存凭据失败: 站点记录不存在".into()))?;
 
     // 这个站上是否已有同一个账号的行（排除自己）。
-    let duplicate: Option<i64> = conn
+    let duplicate: Option<i64> = transaction
         .query_row(
             "SELECT id FROM loongport_relay
              WHERE site_origin = ?1 AND account_id = ?2 AND id != ?3 LIMIT 1",
@@ -382,34 +450,43 @@ pub fn save_credentials(
         .optional()
         .map_err(|e| AppError::Database(format!("查询重复账号失败: {e}")))?;
 
-    let target = match duplicate {
-        // 已经配过这个「站 × 账号」：凭据写回那一行，删掉这次新建的。
-        Some(existing) => {
-            conn.execute("DELETE FROM loongport_relay WHERE id = ?1", params![id])
-                .map_err(|e| AppError::Database(format!("清理重复站点失败: {e}")))?;
-            log::info!("站点 {site_origin} 的账号 {account_id} 已存在，合并到已有记录");
-            existing
-        }
-        None => id,
-    };
+    let target = duplicate.unwrap_or(id);
 
-    conn.execute(
-        "UPDATE loongport_relay
-         SET account_id = ?1, account_label = ?2, login_identifier = ?3, auth_token = ?4,
-             refresh_token = ?5, token_expires_at = ?6, updated_at = ?7
-         WHERE id = ?8",
-        params![
-            account_id,
-            account_label,
-            login_identifier,
-            auth_token,
-            refresh_token,
-            token_expires_at,
-            now_unix(),
-            target
-        ],
-    )
-    .map_err(|e| AppError::Database(format!("保存凭据失败: {e}")))?;
+    transaction
+        .execute(
+            "UPDATE loongport_relay
+         SET site_name = ?1, api_base_url = ?2, backend_kind = ?3,
+             account_id = ?4, account_label = ?5, login_identifier = ?6, auth_token = ?7,
+             refresh_token = ?8, token_expires_at = ?9, updated_at = ?10
+         WHERE id = ?11",
+            params![
+                site_name,
+                api_base_url,
+                backend_kind.as_str(),
+                account_id,
+                account_label,
+                login_identifier,
+                auth_token,
+                refresh_token,
+                token_expires_at,
+                now_unix(),
+                target
+            ],
+        )
+        .map_err(|e| AppError::Database(format!("保存凭据失败: {e}")))?;
+
+    if duplicate.is_some() {
+        transaction
+            .execute("DELETE FROM loongport_relay WHERE id = ?1", params![id])
+            .map_err(|e| AppError::Database(format!("清理重复站点失败: {e}")))?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|e| AppError::Database(format!("提交凭据合并事务失败: {e}")))?;
+    if duplicate.is_some() {
+        log::info!("站点 {site_origin} 的账号 {account_id} 已存在，合并到已有记录");
+    }
 
     Ok(target)
 }
@@ -583,6 +660,7 @@ mod tests {
         assert_eq!(op.auth_token, "tok");
         assert_eq!(op.refresh_token.as_deref(), Some("ref"));
         assert_eq!(op.token_expires_at, Some(123));
+        assert_eq!(op.backend_kind, BackendKind::Sub2Api);
 
         // 列数也直接对一遍：`SELECT *` 的实际列数必须与 `SELECT_COLS` 一致，
         // 否则说明表里有列没被读（那是「加了列忘了读」的另一半）。
@@ -597,6 +675,75 @@ mod tests {
             "SELECT_COLS 有 {n_selected} 列、表里有 {n_in_table} 列 —— \
              差值应恰好是 1（`updated_at` 不进结构体）。不等说明加/删列时漏了一处。"
         );
+    }
+
+    #[test]
+    fn backend_kind_has_stable_wire_values_and_is_persisted() {
+        assert_eq!(
+            serde_json::to_string(&BackendKind::Sub2Api).unwrap(),
+            "\"sub2api\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BackendKind::NewApi).unwrap(),
+            "\"newapi\""
+        );
+        assert_eq!(
+            serde_json::from_str::<BackendKind>("\"newapi\"").unwrap(),
+            BackendKind::NewApi
+        );
+
+        let conn = mem();
+        let newapi_id = save_site_with_backend(
+            &conn,
+            "https://newapi.example",
+            "NewAPI",
+            "https://newapi.example",
+            BackendKind::NewApi,
+        )
+        .unwrap();
+        let legacy_id = save_site(
+            &conn,
+            "https://legacy.example",
+            "Legacy",
+            "https://legacy.example",
+        )
+        .unwrap();
+
+        assert_eq!(
+            get(&conn, newapi_id).unwrap().unwrap().backend_kind,
+            BackendKind::NewApi
+        );
+        assert_eq!(
+            get(&conn, legacy_id).unwrap().unwrap().backend_kind,
+            BackendKind::Sub2Api,
+            "旧 save_site 调用必须继续默认使用 sub2api"
+        );
+    }
+
+    #[test]
+    fn saving_a_detected_backend_updates_an_existing_unlogged_site() {
+        let conn = mem();
+        let id = save_site(
+            &conn,
+            "https://site.example",
+            "旧名称",
+            "https://site.example",
+        )
+        .unwrap();
+
+        let same_id = save_site_with_backend(
+            &conn,
+            "https://site.example",
+            "新名称",
+            "https://site.example",
+            BackendKind::NewApi,
+        )
+        .unwrap();
+
+        assert_eq!(same_id, id);
+        let relay = get(&conn, id).unwrap().unwrap();
+        assert_eq!(relay.site_name, "新名称");
+        assert_eq!(relay.backend_kind, BackendKind::NewApi);
     }
 
     #[test]
@@ -680,6 +827,117 @@ mod tests {
         // 凭据用的是新的那份。
         let op = get(&conn, first).unwrap().unwrap();
         assert_eq!(op.auth_token, "new-token");
+    }
+
+    #[test]
+    fn duplicate_account_merge_keeps_existing_identity_and_copies_fresh_site_metadata() {
+        let conn = mem();
+        let existing = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Old name",
+            "https://a.dev/old-api",
+            BackendKind::Sub2Api,
+        )
+        .unwrap();
+        save_credentials(
+            &conn,
+            existing,
+            ident(100, "Old account", "old-login"),
+            "old-token",
+            Some("old-refresh"),
+            Some(100),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE loongport_relay SET sort_index = 9 WHERE id = ?1",
+            params![existing],
+        )
+        .unwrap();
+
+        let source = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Fresh NewAPI name",
+            "https://a.dev/new-api",
+            BackendKind::NewApi,
+        )
+        .unwrap();
+        let final_id = save_credentials(
+            &conn,
+            source,
+            ident(100, "Fresh account", "fresh-login"),
+            "fresh-token",
+            Some("fresh-refresh"),
+            Some(200),
+        )
+        .unwrap();
+
+        assert_eq!(final_id, existing);
+        let merged = get(&conn, existing).unwrap().unwrap();
+        assert_eq!(merged.sort_index, 9);
+        assert_eq!(merged.site_name, "Fresh NewAPI name");
+        assert_eq!(merged.api_base_url, "https://a.dev/new-api");
+        assert_eq!(merged.backend_kind, BackendKind::NewApi);
+        assert_eq!(merged.account_label, "Fresh account");
+        assert_eq!(merged.login_identifier, "fresh-login");
+        assert_eq!(merged.auth_token, "fresh-token");
+        assert_eq!(merged.refresh_token.as_deref(), Some("fresh-refresh"));
+        assert!(get(&conn, source).unwrap().is_none());
+    }
+
+    #[test]
+    fn duplicate_account_merge_rolls_back_when_source_delete_fails() {
+        let conn = mem();
+        let existing = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Old name",
+            "https://a.dev/old-api",
+            BackendKind::Sub2Api,
+        )
+        .unwrap();
+        save_credentials(
+            &conn,
+            existing,
+            ident(100, "Old account", "old-login"),
+            "old-token",
+            Some("old-refresh"),
+            Some(100),
+        )
+        .unwrap();
+        let source = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Fresh NewAPI name",
+            "https://a.dev/new-api",
+            BackendKind::NewApi,
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER fail_source_delete BEFORE DELETE ON loongport_relay
+             WHEN OLD.id = {source}
+             BEGIN SELECT RAISE(FAIL, 'injected delete failure'); END;"
+        ))
+        .unwrap();
+
+        save_credentials(
+            &conn,
+            source,
+            ident(100, "Fresh account", "fresh-login"),
+            "fresh-token",
+            Some("fresh-refresh"),
+            Some(200),
+        )
+        .expect_err("delete failure must roll the merge back");
+
+        let unchanged = get(&conn, existing).unwrap().unwrap();
+        assert_eq!(unchanged.site_name, "Old name");
+        assert_eq!(unchanged.api_base_url, "https://a.dev/old-api");
+        assert_eq!(unchanged.backend_kind, BackendKind::Sub2Api);
+        assert_eq!(unchanged.auth_token, "old-token");
+        assert_eq!(unchanged.refresh_token.as_deref(), Some("old-refresh"));
+        assert!(get(&conn, source).unwrap().is_some());
     }
 
     #[test]

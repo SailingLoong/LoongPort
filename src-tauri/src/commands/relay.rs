@@ -5,7 +5,6 @@
 //! | 命令 | 干什么 |
 //! |---|---|
 //! | [`relay_status`] | 首启该弹哪个弹窗、当前是什么状态 |
-//! | [`relay_probe_site`] | 域名弹窗点确定 → 探测这是不是 sub2api 站 |
 //! | [`relay_import_site`] | 发现协议；必要时让用户在可见 WebView 完成网页验证，并在同一会话登录 |
 //! | [`relay_login`] | 开登录 WebView，等凭据回来 |
 //! | [`relay_provision`] | 拉分组 → 每组备好 sk → 写成 codex provider |
@@ -32,6 +31,7 @@
 
 use serde::Serialize;
 use std::{
+    future::Future,
     str::FromStr,
     sync::{Arc, Mutex},
 };
@@ -42,8 +42,8 @@ use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
-    api, chatgpt_app, creds, discovery, imagegen_mcp, login, provider_fingerprint, provision,
-    purchase,
+    api, backend, chatgpt_app, creds, discovery, imagegen_mcp, login, newapi, newapi_provision,
+    provider_fingerprint, provision, purchase,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -134,6 +134,7 @@ pub struct ProbeResult {
     pub relay_id: i64,
     pub site_origin: String,
     pub site_name: String,
+    pub backend_kind: discovery::BackendKind,
 }
 
 /// 合并“发现站点 + 同一会话登录”的导入结果。
@@ -143,7 +144,43 @@ pub struct ImportResult {
     pub relay_id: i64,
     pub site_origin: String,
     pub site_name: String,
+    pub backend_kind: discovery::BackendKind,
     pub logged_in: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayImportError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<discovery::DiscoveryErrorKind>,
+    pub message: String,
+}
+
+impl RelayImportError {
+    fn message(message: impl Into<String>) -> Self {
+        Self {
+            kind: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<AppError> for RelayImportError {
+    fn from(error: AppError) -> Self {
+        Self {
+            kind: None,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<discovery::DiscoveryError> for RelayImportError {
+    fn from(error: discovery::DiscoveryError) -> Self {
+        Self {
+            kind: Some(error.kind),
+            message: error.message,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +195,7 @@ impl ImportResult {
             relay_id: login.relay_id,
             site_origin: probe.site_origin,
             site_name: probe.site_name,
+            backend_kind: probe.backend_kind,
             logged_in: login.logged_in,
         }
     }
@@ -166,13 +204,38 @@ impl ImportResult {
 #[derive(Debug, Clone)]
 struct BrowserLoginContext {
     probe: ProbeResult,
+    backend_kind: discovery::BackendKind,
     login_script: String,
 }
 
-enum BrowserImportOutcome {
-    Credentials(login::Credentials),
-    Error(String),
+enum BrowserLoginOutcome {
+    Sub2ApiCredentials(login::Credentials),
+    NewApiSession(newapi::RefreshedSession),
+    Error(RelayImportError),
     Closed,
+}
+
+enum RefreshWait<T, I> {
+    Interrupted(I),
+    Refreshed(Result<T, AppError>),
+}
+
+/// Refresh-token rotation is a non-cancellable write once the HTTP request starts: the server
+/// may invalidate the old cookie before the client observes the rotated one. An interrupt stops
+/// future polling, but this helper drains the bounded refresh request and preserves any success.
+async fn await_refresh_preserving_rotation<T, I>(
+    refresh: impl Future<Output = Result<T, AppError>>,
+    interrupt: impl Future<Output = I>,
+) -> RefreshWait<T, I> {
+    tokio::pin!(refresh);
+    tokio::select! {
+        biased;
+        refreshed = &mut refresh => RefreshWait::Refreshed(refreshed),
+        interrupted = interrupt => match refresh.await {
+            Ok(value) => RefreshWait::Refreshed(Ok(value)),
+            Err(_) => RefreshWait::Interrupted(interrupted),
+        },
+    }
 }
 
 /// 一个可选的档位。
@@ -353,25 +416,24 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
         // 拿 /user/profile 当探活请求（最便宜的鉴权端点）。
         let probe = async {
             let op = usable_relay(app_handle, id).await?;
-            api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?
-                .balance()
-                .await
+            backend::RuntimeBackend::for_relay(&op).balance().await
         }
         .await;
 
         if let Err(e) = probe {
-            let msg = e.to_string();
             // 「登录态已失效」是 api 层对不可恢复的那一类 401 的措辞（账号被禁 /
             // 会话被撤销 / 用户不存在）。这类清掉本地凭据、让用户重新登录。
             //
             // 其它失败（网络不通、中转站关了用户面板返 403）**不清凭据** ——
             // 那不是凭据的问题，清掉只会逼用户在网络恢复后白重登一次。
-            if msg.contains("登录态已失效") || msg.contains("请重新登录") {
+            if should_clear_credentials_after_probe_error(&e) {
                 let state = app_handle.state::<AppState>();
                 with_conn(&state, |conn| creds::clear_credentials(conn, id))?;
+                let msg = e.to_string();
                 log::info!("中转站 {id} 凭据已失效，已清除本地凭据：{msg}");
                 expired.push(id);
             } else {
+                let msg = e.to_string();
                 log::warn!("中转站 {id} 探活失败但保留凭据（可能只是网络问题）：{msg}");
             }
         }
@@ -433,74 +495,36 @@ pub fn relay_list_sponsors() -> Vec<crate::relay::remote_config::Sponsor> {
         .unwrap_or_default()
 }
 
-/// 探测一个域名，成功即存为当前站点。
-///
-/// 空输入用默认域名 —— 需求要的就是「不输入直接点确定也能走」。
-#[tauri::command]
-pub async fn relay_probe_site(
-    app_handle: tauri::AppHandle,
-    site: String,
-) -> Result<ProbeResult, String> {
-    let input = if site.trim().is_empty() {
-        DEFAULT_SITE.to_string()
-    } else {
-        site
-    };
-    probe_and_save(&app_handle, &input)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-async fn probe_and_save(
-    app_handle: &tauri::AppHandle,
-    input: &str,
-) -> Result<ProbeResult, AppError> {
-    let site_origin = api::normalize_site_origin(input)?;
-    let settings = api::probe_site(&site_origin).await?;
-    save_sub2api_site(app_handle, site_origin, settings)
-}
-
 fn save_detected_site(
     app_handle: &tauri::AppHandle,
     site_origin: String,
     detected: discovery::DetectedSite,
 ) -> Result<ProbeResult, AppError> {
-    match detected {
-        discovery::DetectedSite::Sub2Api(settings) => {
-            save_sub2api_site(app_handle, site_origin, settings)
-        }
-    }
-}
-
-fn save_sub2api_site(
-    app_handle: &tauri::AppHandle,
-    site_origin: String,
-    settings: api::PublicSettings,
-) -> Result<ProbeResult, AppError> {
-    // 存**站点 API 根**（不带 `/v1`），不是某个 CLI 的成品端点：各 CLI 形状不同
-    // （claude 要根、codex 要带 `/v1`），存成其中一种就必然被另一种误用 —— 那正是
-    // 存量 claude 档位整片带上多余 `/v1` 的来源。派生一律走 `api::base_url_for`。
-    let api_base_url = api::site_api_root(&site_origin, &settings.api_base_url);
-
-    let site_name = if settings.site_name.trim().is_empty() {
-        // 中转站可能没配站名。回落到主机名而不是留空 —— 空名字会让 UI 里那家没有标识。
+    let api_base_url = api::site_api_root(&site_origin, &detected.api_base_url);
+    let site_name = if detected.site_name.trim().is_empty() {
         site_origin
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .to_string()
     } else {
-        settings.site_name.clone()
+        detected.site_name
     };
-
     let state = app_handle.state::<AppState>();
     let relay_id = with_conn(&state, |conn| {
-        creds::save_site(conn, &site_origin, &site_name, &api_base_url)
+        creds::save_site_with_backend(
+            conn,
+            &site_origin,
+            &site_name,
+            &api_base_url,
+            detected.backend_kind,
+        )
     })?;
 
     Ok(ProbeResult {
         relay_id,
         site_origin,
         site_name,
+        backend_kind: detected.backend_kind,
     })
 }
 
@@ -513,23 +537,25 @@ fn save_sub2api_site(
 pub async fn relay_import_site(
     app_handle: tauri::AppHandle,
     site: String,
-) -> Result<ImportResult, String> {
-    import_site(&app_handle, &site)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<ImportResult, RelayImportError> {
+    import_site(&app_handle, &site).await
 }
 
-async fn import_site(app_handle: &tauri::AppHandle, input: &str) -> Result<ImportResult, AppError> {
+async fn import_site(
+    app_handle: &tauri::AppHandle,
+    input: &str,
+) -> Result<ImportResult, RelayImportError> {
     let input = if input.trim().is_empty() {
         DEFAULT_SITE
     } else {
         input
     };
-    let site_origin = api::normalize_site_origin(input)?;
+    let site_origin = api::normalize_site_origin(input).map_err(RelayImportError::from)?;
 
     let initial_detected = match discovery::probe_site(&site_origin).await {
         Ok(detected) => Some(detected),
         Err(error) => {
+            let error = recoverable_native_discovery_error(error)?;
             // 这里只记录 fast path 没识别出来；不根据 HTTP 状态、验证产品或响应正文
             // 推断站点类型。可见 WebView 才是所有网页验证共用的下一步。
             log::info!(
@@ -542,6 +568,16 @@ async fn import_site(app_handle: &tauri::AppHandle, input: &str) -> Result<Impor
     };
 
     browser_import(app_handle, input, site_origin, initial_detected).await
+}
+
+fn recoverable_native_discovery_error(
+    error: discovery::DiscoveryError,
+) -> Result<discovery::DiscoveryError, RelayImportError> {
+    if error.kind == discovery::DiscoveryErrorKind::ProtocolConflict {
+        Err(error.into())
+    } else {
+        Ok(error)
+    }
 }
 
 /// 生成浏览器首次打开的地址：站点 origin 与后端归一化规则一致，但保留用户给的
@@ -590,24 +626,46 @@ fn browser_start_url(
         return Ok(entry);
     };
 
-    let url = match detected {
-        discovery::DetectedSite::Sub2Api(_) => login::login_url(site_origin, ""),
-    };
+    let url = backend::browser_login_url(site_origin, detected.backend_kind, "");
     url::Url::parse(&url)
         .map_err(|error| AppError::InvalidInput(format!("登录页地址不对: {error}")))
 }
 
-fn import_login_script(
-    detected: &discovery::DetectedSite,
+fn browser_login_context(
+    app_handle: &tauri::AppHandle,
     site_origin: &str,
+    detected: discovery::DetectedSite,
     aff_code: Option<&str>,
     promo_code: Option<&str>,
-) -> String {
-    match detected {
-        discovery::DetectedSite::Sub2Api(_) => {
-            login::login_script(site_origin, "", aff_code, promo_code)
-        }
-    }
+) -> Result<BrowserLoginContext, AppError> {
+    let backend_kind = detected.backend_kind;
+    let login_script =
+        backend::browser_login_script(site_origin, backend_kind, "", aff_code, promo_code);
+    let probe = save_detected_site(app_handle, site_origin.to_string(), detected)?;
+    Ok(BrowserLoginContext {
+        probe,
+        backend_kind,
+        login_script,
+    })
+}
+
+fn newapi_refresh_cookie_from_window(
+    window: &tauri::WebviewWindow,
+    refresh_url: &url::Url,
+) -> Result<Option<String>, AppError> {
+    // Tauri documents a Windows deadlock if cookies_for_url runs in a synchronous navigation
+    // or window callback. This function is called only by the outer async select loops below.
+    let cookies = window
+        .cookies_for_url(refresh_url.clone())
+        .map_err(|error| AppError::Config(format!("读取 NewAPI 登录会话失败: {error}")))?;
+    Ok(newapi::extract_refresh_cookie(&cookies))
+}
+
+async fn refresh_newapi_browser_session(
+    site_origin: &str,
+    refresh_cookie: &str,
+) -> Result<newapi::RefreshedSession, AppError> {
+    newapi::refresh_session(site_origin, refresh_cookie, None).await
 }
 
 fn resolve_login_codes(site_origin: &str) -> (Option<String>, Option<String>) {
@@ -623,7 +681,7 @@ async fn browser_import(
     input: &str,
     site_origin: String,
     initial_detected: Option<discovery::DetectedSite>,
-) -> Result<ImportResult, AppError> {
+) -> Result<ImportResult, RelayImportError> {
     if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
         log::info!("发现残留的站点导入窗口，销毁后重开");
         let _ = stale.destroy();
@@ -635,19 +693,13 @@ async fn browser_import(
         initial_detected.is_none() && browser_entry_is_origin(&entry_url);
 
     let initial_context = match initial_detected {
-        Some(detected) => {
-            let login_script = import_login_script(
-                &detected,
-                &site_origin,
-                login_aff_code.as_deref(),
-                login_promo_code.as_deref(),
-            );
-            let probe = save_detected_site(app_handle, site_origin.clone(), detected)?;
-            Some(BrowserLoginContext {
-                probe,
-                login_script,
-            })
-        }
+        Some(detected) => Some(browser_login_context(
+            app_handle,
+            &site_origin,
+            detected,
+            login_aff_code.as_deref(),
+            login_promo_code.as_deref(),
+        )?),
         None => None,
     };
 
@@ -659,7 +711,7 @@ async fn browser_import(
 
     let context = Arc::new(Mutex::new(initial_context));
     let (creds_tx, mut creds_rx) = tokio::sync::mpsc::channel::<login::Credentials>(1);
-    let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<String>(1);
+    let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<RelayImportError>(1);
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let context_for_load = Arc::clone(&context);
@@ -701,7 +753,7 @@ async fn browser_import(
             .lock()
             .ok()
             .and_then(|guard| guard.as_ref().map(|ctx| ctx.login_script.clone()));
-        if let Some(script) = login_script {
+        if let Some(script) = login_script.filter(|script| !script.is_empty()) {
             if let Err(error) = webview.eval(&script) {
                 log::warn!("站点登录脚本重注入失败: {error}");
             }
@@ -709,11 +761,11 @@ async fn browser_import(
     })
     .on_navigation(move |url| {
         if let Some(result) = discovery::parse_probe_navigation(url) {
-            let response = match result {
-                Ok(response) => response,
+            let batch = match result {
+                Ok(batch) => batch,
                 Err(error) => {
                     log::warn!("站点探测回传解析失败: {error}");
-                    let _ = probe_error_tx.try_send(error.to_string());
+                    let _ = probe_error_tx.try_send(error.into());
                     return false;
                 }
             };
@@ -728,56 +780,67 @@ async fn browser_import(
                 return false;
             }
 
-            let Some(detected) = discovery::detect_site(&response.candidate_id, &response.body)
-            else {
-                return false;
+            let detected = match discovery::converge_probe_responses(&batch.responses) {
+                Ok(detected) => detected,
+                Err(error) if error.kind == discovery::DiscoveryErrorKind::UnsupportedSite => {
+                    // 本轮只有未知或不匹配的 JSON 响应。页面可能还在验证或跳转，继续轮询。
+                    return false;
+                }
+                Err(error) => {
+                    log::warn!("站点探测批次无法收敛: {error}");
+                    let _ = probe_error_tx.try_send(error.into());
+                    return false;
+                }
             };
-            let login_script = import_login_script(
-                &detected,
+            let browser_context = match browser_login_context(
+                &app_for_nav,
                 &site_origin_for_nav,
+                detected,
                 aff_for_nav.as_deref(),
                 promo_for_nav.as_deref(),
-            );
-            let probe =
-                match save_detected_site(&app_for_nav, site_origin_for_nav.clone(), detected) {
-                    Ok(probe) => probe,
-                    Err(error) => {
-                        log::warn!("保存已识别站点失败: {error}");
-                        let _ = probe_error_tx.try_send(error.to_string());
-                        return false;
-                    }
-                };
-
-            let browser_context = BrowserLoginContext {
-                probe,
-                login_script: login_script.clone(),
+            ) {
+                Ok(context) => context,
+                Err(error) => {
+                    log::warn!("保存已识别站点失败: {error}");
+                    let _ = probe_error_tx.try_send(error.into());
+                    return false;
+                }
             };
+            let backend_kind = browser_context.backend_kind;
+            let login_script = browser_context.login_script.clone();
             match context_for_nav.lock() {
                 Ok(mut guard) if guard.is_none() => *guard = Some(browser_context),
                 Ok(_) => return false,
                 Err(_) => {
-                    let _ = probe_error_tx.try_send("站点导入状态不可用".into());
+                    let _ =
+                        probe_error_tx.try_send(RelayImportError::message("站点导入状态不可用"));
                     return false;
                 }
             }
 
             let Some(window) = app_for_nav.get_webview_window(login::LOGIN_WINDOW_LABEL) else {
-                let _ = probe_error_tx.try_send("站点导入窗口已关闭".into());
+                let _ = probe_error_tx.try_send(RelayImportError::message("站点导入窗口已关闭"));
                 return false;
             };
 
             let next_step = if navigate_after_detection {
-                url::Url::parse(&login::login_url(&site_origin_for_nav, ""))
-                    .map_err(|error| format!("登录页地址不对: {error}"))
-                    .and_then(|url| window.navigate(url).map_err(|error| error.to_string()))
-            } else {
+                url::Url::parse(&backend::browser_login_url(
+                    &site_origin_for_nav,
+                    backend_kind,
+                    "",
+                ))
+                .map_err(|error| format!("登录页地址不对: {error}"))
+                .and_then(|url| window.navigate(url).map_err(|error| error.to_string()))
+            } else if !login_script.is_empty() {
                 window
                     .eval(&login_script)
                     .map_err(|error| error.to_string())
+            } else {
+                Ok(())
             };
             if let Err(error) = next_step {
                 log::warn!("已识别站点，但无法在当前会话继续登录: {error}");
-                let _ = probe_error_tx.try_send(error);
+                let _ = probe_error_tx.try_send(RelayImportError::message(error));
             }
             return false;
         }
@@ -790,8 +853,9 @@ async fn browser_import(
             }
             Some(Err(error)) => {
                 log::warn!("凭据回传解析失败: {error}");
-                let _ = credential_error_tx.try_send(error.to_string());
-                let _ = app_for_nav.emit("relay-login-error", error.to_string());
+                let message = error.to_string();
+                let _ = credential_error_tx.try_send(error.into());
+                let _ = app_for_nav.emit("relay-login-error", message);
                 false
             }
         }
@@ -806,21 +870,64 @@ async fn browser_import(
         }
     });
 
+    let refresh_url = newapi::refresh_url(&site_origin)?;
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
-        tokio::select! {
-            credentials = creds_rx.recv() => credentials
-                .map(BrowserImportOutcome::Credentials)
-                .unwrap_or(BrowserImportOutcome::Closed),
-            error = error_rx.recv() => error
-                .map(BrowserImportOutcome::Error)
-                .unwrap_or(BrowserImportOutcome::Closed),
-            _ = closed_rx.recv() => BrowserImportOutcome::Closed,
+        let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                biased;
+                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
+                credentials = creds_rx.recv() => break credentials
+                    .map(BrowserLoginOutcome::Sub2ApiCredentials)
+                    .unwrap_or(BrowserLoginOutcome::Closed),
+                error = error_rx.recv() => break error
+                    .map(BrowserLoginOutcome::Error)
+                    .unwrap_or(BrowserLoginOutcome::Closed),
+                _ = cookie_poll.tick() => {
+                    let is_newapi = context
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.as_ref().map(|context| context.backend_kind))
+                        == Some(discovery::BackendKind::NewApi);
+                    if !is_newapi {
+                        continue;
+                    }
+                    let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
+                        Ok(Some(refresh_cookie)) => refresh_cookie,
+                        Ok(None) => continue,
+                        Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                    };
+                    let interrupt = async {
+                        tokio::select! {
+                            biased;
+                            _ = closed_rx.recv() => BrowserLoginOutcome::Closed,
+                            error = error_rx.recv() => error
+                                .map(BrowserLoginOutcome::Error)
+                                .unwrap_or(BrowserLoginOutcome::Closed),
+                        }
+                    };
+                    match await_refresh_preserving_rotation(
+                        refresh_newapi_browser_session(&site_origin, &refresh_cookie),
+                        interrupt,
+                    )
+                    .await
+                    {
+                        RefreshWait::Interrupted(outcome) => break outcome,
+                        RefreshWait::Refreshed(Ok(session)) => {
+                            break BrowserLoginOutcome::NewApiSession(session)
+                        }
+                        RefreshWait::Refreshed(Err(error)) => {
+                            break BrowserLoginOutcome::Error(error.into())
+                        }
+                    }
+                }
+            }
         }
     })
     .await;
 
     match outcome {
-        Ok(BrowserImportOutcome::Credentials(credentials)) => {
+        Ok(BrowserLoginOutcome::Sub2ApiCredentials(credentials)) => {
             let browser_context = context
                 .lock()
                 .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
@@ -843,11 +950,30 @@ async fn browser_import(
             log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
             Ok(ImportResult::from_login(browser_context.probe, login))
         }
-        Ok(BrowserImportOutcome::Error(error)) => {
-            let _ = window.destroy();
-            Err(AppError::Config(error))
+        Ok(BrowserLoginOutcome::NewApiSession(session)) => {
+            let browser_context = context
+                .lock()
+                .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
+                .clone()
+                .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
+            let state = app_handle.state::<AppState>();
+            let (final_relay_id, account_id) =
+                persist_newapi_login_session(&state, browser_context.probe.relay_id, &session)?;
+            let login = LoginResult {
+                relay_id: final_relay_id,
+                logged_in: true,
+            };
+
+            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
+            let _ = window.eval(login::CONNECTED_BANNER_JS);
+            log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
+            Ok(ImportResult::from_login(browser_context.probe, login))
         }
-        Ok(BrowserImportOutcome::Closed) => import_result_after_incomplete_browser_flow(&context),
+        Ok(BrowserLoginOutcome::Error(error)) => {
+            let _ = window.destroy();
+            Err(error)
+        }
+        Ok(BrowserLoginOutcome::Closed) => import_result_after_incomplete_browser_flow(&context),
         Err(_) => {
             log::warn!(
                 "站点导入等待超时（{LOGIN_TIMEOUT_SECS} 秒内未完成识别与登录）：{site_origin}"
@@ -860,7 +986,7 @@ async fn browser_import(
 
 fn import_result_after_incomplete_browser_flow(
     context: &Arc<Mutex<Option<BrowserLoginContext>>>,
-) -> Result<ImportResult, AppError> {
+) -> Result<ImportResult, RelayImportError> {
     let browser_context = context
         .lock()
         .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
@@ -895,12 +1021,9 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 记下行 id —— 凭据要写回这一行，而 `save_credentials` 可能因为发现重复账号
     // 而把它合并到别的行去。
     // 顺带取出登录标识：重登时预填进登录框，用户只需补密码与人机验证。
-    let (relay_id, site_origin, login_identifier) = {
-        let state = app_handle.state::<AppState>();
-        let op = with_conn(&state, |conn| creds::get(conn, target_id))?
-            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {target_id} 的中转站")))?;
-        (op.id, op.site_origin, op.login_identifier)
-    };
+    let op = load_validated_relay(app_handle, target_id).await?;
+    let (relay_id, site_origin, login_identifier, backend_kind) =
+        (op.id, op.site_origin, op.login_identifier, op.backend_kind);
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
     //
@@ -926,8 +1049,12 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
 
     // 落哪个页面由「这一行登录过没有」决定：新加的站落 `/register`，重登落 `/login`。
-    let url = url::Url::parse(&login::login_url(&site_origin, &login_identifier))
-        .map_err(|e| AppError::Config(format!("登录页地址不对: {e}")))?;
+    let url = url::Url::parse(&backend::browser_login_url(
+        &site_origin,
+        backend_kind,
+        &login_identifier,
+    ))
+    .map_err(|e| AppError::Config(format!("登录页地址不对: {e}")))?;
 
     // ⚠️ **这条链路的日志是刻意加密的**（2026-08-04，用户实测白屏后加）。
     //
@@ -949,6 +1076,14 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let handle_for_nav = app_handle.clone();
+    let initialization_script = backend::browser_login_script(
+        &site_origin,
+        backend_kind,
+        &login_identifier,
+        login_aff_code.as_deref(),
+        login_promo_code.as_deref(),
+    );
+    let backend_kind_for_nav = backend_kind;
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
         login::LOGIN_WINDOW_LABEL,
@@ -986,14 +1121,9 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 没有完成回调可等 ⇒ 存在「还没清完页面就加载了」的竞态。
     .incognito(true)
     .user_agent(login::WEBVIEW_USER_AGENT)
-    // 邀请码走三层回落（远端 > 本地缓存 > 编译期内置）。**在这里解析而不是在
-    // `login_script` 里查表** —— 那样远端那层永远进不来。
-    .initialization_script(login::login_script(
-        &site_origin,
-        &login_identifier,
-        login_aff_code.as_deref(),
-        login_promo_code.as_deref(),
-    ))
+    // sub2api 的 localStorage 回传脚本只注入到 sub2api 窗口。NewAPI 的 HttpOnly
+    // refresh cookie 由外层 async 循环原生读取，绝不交给 JavaScript。
+    .initialization_script(initialization_script)
     // ⭐ **白屏的关键判据就在这两个事件上**：
     //
     // - 两条都没有 ⇒ WebView 压根没开始加载（创建失败 / URL 不可达 / 被拦）
@@ -1011,6 +1141,9 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         let _ = webview;
     })
     .on_navigation(move |url| {
+        if backend_kind_for_nav != discovery::BackendKind::Sub2Api {
+            return true;
+        }
         match login::parse_creds_navigation(url) {
             // 普通导航，放行。
             None => true,
@@ -1042,17 +1175,49 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         }
     });
 
-    // 等凭据或用户关窗。5 分钟够走完注册 + 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
+    let refresh_url = newapi::refresh_url(&site_origin)?;
+    // 等 sub2api 凭据、NewAPI HttpOnly refresh cookie 或用户关窗。5 分钟够走完注册 +
+    // 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
-        tokio::select! {
-            creds = rx.recv() => creds,
-            _ = closed_rx.recv() => None,
+        let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                biased;
+                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
+                creds = rx.recv() => break creds
+                    .map(BrowserLoginOutcome::Sub2ApiCredentials)
+                    .unwrap_or(BrowserLoginOutcome::Closed),
+                _ = cookie_poll.tick(), if backend_kind == discovery::BackendKind::NewApi => {
+                    let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
+                        Ok(Some(refresh_cookie)) => refresh_cookie,
+                        Ok(None) => continue,
+                        Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                    };
+                    match await_refresh_preserving_rotation(
+                        refresh_newapi_browser_session(&site_origin, &refresh_cookie),
+                        async {
+                            let _ = closed_rx.recv().await;
+                            BrowserLoginOutcome::Closed
+                        },
+                    )
+                    .await
+                    {
+                        RefreshWait::Interrupted(outcome) => break outcome,
+                        RefreshWait::Refreshed(Ok(session)) => {
+                            break BrowserLoginOutcome::NewApiSession(session)
+                        }
+                        RefreshWait::Refreshed(Err(error)) => {
+                            break BrowserLoginOutcome::Error(error.into())
+                        }
+                    }
+                }
+            }
         }
     })
     .await;
 
     match outcome {
-        Ok(Some(c)) => {
+        Ok(BrowserLoginOutcome::Sub2ApiCredentials(c)) => {
             let (final_relay_id, account_id) =
                 persist_login_credentials(app_handle, relay_id, &site_origin, c).await?;
 
@@ -1075,6 +1240,24 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                 logged_in: true,
             })
         }
+        Ok(BrowserLoginOutcome::NewApiSession(session)) => {
+            let state = app_handle.state::<AppState>();
+            let (final_relay_id, account_id) =
+                persist_newapi_login_session(&state, relay_id, &session)?;
+
+            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
+            let _ = window.eval(login::CONNECTED_BANNER_JS);
+
+            log::info!("登录成功：{site_origin}（账号 id={account_id}）");
+            Ok(LoginResult {
+                relay_id: final_relay_id,
+                logged_in: true,
+            })
+        }
+        Ok(BrowserLoginOutcome::Error(error)) => {
+            let _ = window.destroy();
+            Err(AppError::Config(error.message))
+        }
         // 用户关掉了窗口，或超时。都不是错误。
         //
         // 用 `destroy()` 而不是 `close()`：后者派的是可被拦截的关闭**请求**，会经过
@@ -1089,7 +1272,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         // 在界面上都表现为「窗口没了、什么也没发生」，但对我们是两件完全不同的事 ——
         // 前者是正常收场，后者说明**凭据回传这条链路断了**（页面没渲染 / 脚本没注入 /
         // 用户卡在人机验证）。合成一条日志就等于放弃了区分它们的唯一手段。
-        Ok(None) => {
+        Ok(BrowserLoginOutcome::Closed) => {
             log::info!("用户关闭了登录窗口（未完成登录）：{site_origin}");
             let _ = window.destroy();
             Ok(LoginResult {
@@ -1145,6 +1328,26 @@ async fn persist_login_credentials(
     Ok((final_relay_id, account_id))
 }
 
+fn persist_newapi_login_session(
+    state: &AppState,
+    relay_id: i64,
+    refreshed: &newapi::RefreshedSession,
+) -> Result<(i64, i64), AppError> {
+    let account = backend::newapi_runtime_account(&refreshed.account);
+    let final_relay_id = with_conn(state, |conn| {
+        creds::save_credentials(
+            conn,
+            relay_id,
+            runtime_account_identity(&account),
+            &refreshed.access_token,
+            Some(&refreshed.refresh_cookie),
+            Some(refreshed.access_expires_at),
+        )
+    })?;
+
+    Ok((final_relay_id, account.id))
+}
+
 /// 取一份**能用**的凭据：token 快过期时先静默续期。
 ///
 /// 没有这一步的话，token 一过期用户就得重新走一遍 WebView 登录 —— 而 sub2api 的
@@ -1156,15 +1359,11 @@ async fn persist_login_credentials(
 /// 「给 A 获取密钥」静默作用到 B 上（那是 review 抓出过的真实并发正确性问题，
 /// 见 [`relay_provision`] 的文档）。2026-08-04 连带 `is_current` 一起删掉了
 /// 那条 `Option` 分支。
-async fn usable_relay(
-    app_handle: &tauri::AppHandle,
+async fn usable_relay<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
 ) -> Result<creds::Relay, AppError> {
-    let op = {
-        let state = app_handle.state::<AppState>();
-        with_conn(&state, |conn| creds::get(conn, relay_id))?
-            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
-    };
+    let op = load_validated_relay(app_handle, relay_id).await?;
 
     if op.token_looks_valid(chrono::Utc::now().timestamp()) {
         // ⭐ **token 够用，但账号身份可能缺** —— 补一次再返回。
@@ -1186,37 +1385,53 @@ async fn usable_relay(
         return Ok(op);
     }
 
-    // 过期了。有 refresh token 就试着续，没有就只能重登。
-    let Some(refresh) = op.refresh_token.clone() else {
-        return Err(AppError::Config("登录已过期，请重新登录".into()));
-    };
-
-    let fresh = api::refresh_token(&op.site_origin, &refresh).await?;
     let state = app_handle.state::<AppState>();
-    // 走 update_tokens 而不是 save_credentials：续期是「同一个账号换一把新 token」，
-    // 账号没变 ⇒ 没有重复可言，不该走那条会查重并可能合并行的路径。
-    with_conn(&state, |conn| {
-        creds::update_tokens(
-            conn,
-            op.id,
-            &fresh.auth_token,
-            // 服务端没轮换 refresh 时沿用旧的 —— 覆写成 None 会让下次过期时无法续期。
-            fresh.refresh_token.as_deref().or(Some(refresh.as_str())),
-            fresh.token_expires_at,
-        )
-    })?;
-
-    let renewed = creds::Relay {
-        auth_token: fresh.auth_token,
-        refresh_token: fresh.refresh_token.or(Some(refresh)),
-        token_expires_at: fresh.token_expires_at,
-        ..op
-    };
+    let refreshed = backend::RuntimeBackend::for_relay(&op)
+        .refresh_session(op.refresh_token.as_deref())
+        .await?;
+    let renewed = persist_refreshed_session(&state, &op, &refreshed)?;
 
     // 顺手刷一次账号身份：用户可能在中转站那边改了昵称或邮箱，而续期响应里没有账号信息
     // （`/auth/refresh` 只回 token），所以只有在这里额外打一次 profile 才发现得了。
     // 不刷的话站点选择器上会一直挂着旧标签 —— 而他改邮箱的动机往往就是「换个能认的」。
+    if refreshed.account.is_some() {
+        return Ok(renewed);
+    }
+
     Ok(backfill_account_identity(app_handle, renewed).await)
+}
+
+async fn load_validated_relay<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    relay_id: i64,
+) -> Result<creds::Relay, AppError> {
+    let op = {
+        let state = app_handle.state::<AppState>();
+        with_conn(&state, |conn| creds::get(conn, relay_id))?
+            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
+    };
+
+    match discovery::probe_site(&op.site_origin).await {
+        Ok(detected) if detected.backend_kind == op.backend_kind => Ok(op),
+        Ok(_) => {
+            let state = app_handle.state::<AppState>();
+            with_conn(&state, |conn| creds::clear_credentials(conn, relay_id))?;
+            Err(AppError::Config(
+                "站点协议已变化，已清除旧凭据，请重新添加或登录".into(),
+            ))
+        }
+        Err(error) if error.kind == discovery::DiscoveryErrorKind::Transport => Err(
+            AppError::Config(format!("连接站点失败，未改动已有凭据：{}", error.message)),
+        ),
+        Err(error) => {
+            let state = app_handle.state::<AppState>();
+            with_conn(&state, |conn| creds::clear_credentials(conn, relay_id))?;
+            Err(AppError::Config(format!(
+                "站点协议无法安全识别，已清除旧凭据：{}",
+                error.message
+            )))
+        }
+    }
 }
 
 /// 打一次 profile，把账号身份写回库并更新手上这份 `op`。
@@ -1232,20 +1447,11 @@ async fn usable_relay(
 /// 调用方此刻的凭据**已经可用**（要么本来有效、要么刚续期成功）。账号标签陈旧或
 /// `account_id` 还是空，都只影响显示与去重，不影响这一次请求 —— 为它把整个操作
 /// 判失败会让用户在「明明能用」的时候被挡住。
-async fn backfill_account_identity(
-    app_handle: &tauri::AppHandle,
+async fn backfill_account_identity<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     mut op: creds::Relay,
 ) -> creds::Relay {
-    // `account_id` 传 `op.account_id`（此刻通常正是 `None` —— 本函数存在的理由就是它缺了）。
-    // 只打只读的 profile 端点，用不上幂等键。
-    let client = match api::Client::new(&op.site_origin, &op.auth_token, op.account_id) {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("刷新账号信息时构造客户端失败（不影响使用）: {e}");
-            return op;
-        }
-    };
-    let account = match client.account().await {
+    let account = match backend::RuntimeBackend::for_relay(&op).account().await {
         Ok(a) => a,
         Err(e) => {
             log::warn!("读取账号信息失败（不影响使用）: {e}");
@@ -1253,18 +1459,9 @@ async fn backfill_account_identity(
         }
     };
 
-    let label = account.display_name();
     let state = app_handle.state::<AppState>();
     if let Err(e) = with_conn(&state, |conn| {
-        creds::refresh_account_identity(
-            conn,
-            op.id,
-            creds::AccountIdentity {
-                id: account.id,
-                label: &label,
-                login_identifier: &account.email,
-            },
-        )
+        creds::refresh_account_identity(conn, op.id, runtime_account_identity(&account))
     }) {
         log::warn!("刷新账号信息失败（不影响使用）: {e}");
         return op;
@@ -1272,12 +1469,90 @@ async fn backfill_account_identity(
 
     // 写库成功才更新手上这份 —— 否则返回的结构与库里不一致，
     // 调用方据此判断 `account_id` 已补上，而下次读库又是空的。
-    if op.account_id.is_none() {
-        op.account_id = Some(account.id);
-    }
-    op.account_label = label;
-    op.login_identifier = account.email;
+    apply_runtime_account_identity(&mut op, account);
     op
+}
+
+fn runtime_account_identity(account: &backend::RuntimeAccount) -> creds::AccountIdentity<'_> {
+    creds::AccountIdentity {
+        id: account.id,
+        label: &account.label,
+        login_identifier: &account.login_identifier,
+    }
+}
+
+fn apply_runtime_account_identity(op: &mut creds::Relay, account: backend::RuntimeAccount) {
+    op.account_id = Some(account.id);
+    op.account_label = account.label;
+    op.login_identifier = account.login_identifier;
+}
+
+fn should_clear_credentials_after_probe_error(error: &AppError) -> bool {
+    backend::is_confirmed_auth_failure(error)
+}
+
+fn persist_refreshed_session(
+    state: &AppState,
+    current: &creds::Relay,
+    refreshed: &backend::RefreshedSession,
+) -> Result<creds::Relay, AppError> {
+    persist_refreshed_session_with_identity_writer(
+        state,
+        current,
+        refreshed,
+        |state, relay_id, account| {
+            with_conn(state, |conn| {
+                creds::refresh_account_identity(conn, relay_id, runtime_account_identity(account))
+            })
+        },
+    )
+}
+
+fn persist_refreshed_session_with_identity_writer(
+    state: &AppState,
+    current: &creds::Relay,
+    refreshed: &backend::RefreshedSession,
+    write_identity: impl FnOnce(&AppState, i64, &backend::RuntimeAccount) -> Result<(), AppError>,
+) -> Result<creds::Relay, AppError> {
+    let refresh_token = refreshed
+        .refresh_credential
+        .clone()
+        .or_else(|| current.refresh_token.clone());
+    // 走 update_tokens 而不是 save_credentials：续期是「同一个账号换一把新 token」，
+    // 账号没变 ⇒ 没有重复可言，不该走那条会查重并可能合并行的路径。
+    with_conn(state, |conn| {
+        creds::update_tokens(
+            conn,
+            current.id,
+            &refreshed.auth_token,
+            refresh_token.as_deref(),
+            refreshed.token_expires_at,
+        )
+    })?;
+
+    let mut renewed = creds::Relay {
+        auth_token: refreshed.auth_token.clone(),
+        refresh_token,
+        token_expires_at: refreshed.token_expires_at,
+        ..current.clone()
+    };
+
+    if let Some(account) = refreshed.account.as_ref() {
+        if let Err(e) = write_identity(state, current.id, account) {
+            log::warn!("刷新账号信息失败（不影响使用）: {e}");
+        } else {
+            apply_runtime_account_identity(
+                &mut renewed,
+                backend::RuntimeAccount {
+                    id: account.id,
+                    label: account.label.clone(),
+                    login_identifier: account.login_identifier.clone(),
+                },
+            );
+        }
+    }
+
+    Ok(renewed)
 }
 
 /// 拉分组、为每组备好 sk、写成 provider 记录。
@@ -1339,116 +1614,292 @@ pub async fn relay_provision(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Clone)]
+struct ManagedProvisionCandidate {
+    provider_id: String,
+    app_type: AppType,
+    group_name: String,
+    rate_multiplier: Option<f64>,
+    api_key: String,
+    model: String,
+    models: Option<Vec<String>>,
+    roles: Option<provision::ClaudeRoleModels>,
+    allow_image_generation: Option<bool>,
+    api_base_url: String,
+}
+
+#[derive(Default)]
+struct ManagedProvisionBatch {
+    account_id: Option<i64>,
+    candidates: Vec<ManagedProvisionCandidate>,
+    /// Upstream-observed `(app_type, provider_id)` pairs that stale pruning must retain.
+    observed_keep: std::collections::HashSet<(String, String)>,
+    failures: Vec<FailureInfo>,
+    keys_created: usize,
+}
+
+fn newapi_app_types() -> [AppType; 3] {
+    [AppType::Claude, AppType::Codex, AppType::Gemini]
+}
+
+fn newapi_observed_keep(
+    site_origin: &str,
+    account_id: i64,
+    observed_groups: &[newapi::GroupIdentity],
+) -> std::collections::HashSet<(String, String)> {
+    observed_groups
+        .iter()
+        .flat_map(|group| {
+            let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.0);
+            newapi_app_types()
+                .into_iter()
+                .map(move |app_type| (app_type.as_str().to_string(), provider_id.clone()))
+        })
+        .collect()
+}
+
+fn newapi_candidates_for_group(
+    site_origin: &str,
+    account_id: i64,
+    group: &newapi_provision::ReconciledGroup,
+    models: &[String],
+) -> Vec<ManagedProvisionCandidate> {
+    let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.identity.0);
+    newapi_app_types()
+        .into_iter()
+        .map(|app_type| {
+            let picked = provision::pick_tier_models(&app_type, Some(models));
+            ManagedProvisionCandidate {
+                provider_id: provider_id.clone(),
+                app_type,
+                group_name: group.name.clone(),
+                rate_multiplier: group.rate_multiplier,
+                api_key: group.api_key.clone(),
+                model: picked.main,
+                models: Some(models.to_vec()),
+                roles: picked.claude_roles,
+                allow_image_generation: None,
+                // NewAPI exposes one OpenAI-compatible root. Per-app suffixes are projected by
+                // `api::base_url_for`, so no persisted sub2api base belongs here.
+                api_base_url: String::new(),
+            }
+        })
+        .collect()
+}
+
+fn normalize_newapi_model_catalog(models: Option<Vec<String>>) -> Option<Vec<String>> {
+    models
+        .map(provision::normalize_model_names)
+        .filter(|models| !models.is_empty())
+}
+
+fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static str {
+    match stage {
+        newapi_provision::ReconcileStage::Create => "token_create",
+        newapi_provision::ReconcileStage::Relist => "token_relist",
+        newapi_provision::ReconcileStage::Reveal => "token_reveal",
+        newapi_provision::ReconcileStage::DeleteStale => "token_delete_stale",
+    }
+}
+
+async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, AppError> {
+    match op.backend_kind {
+        discovery::BackendKind::Sub2Api => {
+            let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?;
+            let mut result = provision::provision(&client).await?;
+            provision::sort_tiers(&mut result.tiers);
+            let keys_created = result
+                .tiers
+                .iter()
+                .filter(|targeted| targeted.tier.key_was_created)
+                .count();
+            let candidates = result
+                .tiers
+                .into_iter()
+                .map(|targeted| {
+                    let tier = targeted.tier;
+                    ManagedProvisionCandidate {
+                        provider_id: provision::provider_id_for(
+                            &op.site_origin,
+                            op.account_id,
+                            tier.group_id,
+                        ),
+                        app_type: targeted.app_type,
+                        group_name: tier.group_name,
+                        rate_multiplier: Some(tier.rate_multiplier),
+                        api_key: tier.api_key,
+                        model: tier.model,
+                        models: tier.models,
+                        roles: tier.roles,
+                        allow_image_generation: Some(tier.allow_image_generation),
+                        api_base_url: op.api_base_url.clone(),
+                    }
+                })
+                .collect();
+            Ok(ManagedProvisionBatch {
+                account_id: op.account_id,
+                candidates,
+                observed_keep: std::collections::HashSet::new(),
+                failures: result
+                    .failures
+                    .into_iter()
+                    .map(|(group_name, reason)| FailureInfo { group_name, reason })
+                    .collect(),
+                keys_created,
+            })
+        }
+        discovery::BackendKind::NewApi => {
+            let client = newapi::NewApiClient::new(&op.site_origin, &op.auth_token)?;
+            let account = client.account().await?;
+            if op.account_id.is_some() && op.account_id != Some(account.id) {
+                return Err(AppError::Config(
+                    "NewAPI 登录态所属账号与本地中转站账号不一致，请重新登录".into(),
+                ));
+            }
+            let result = newapi_provision::reconcile_for_account(&client, account.id).await?;
+
+            let mut batch = ManagedProvisionBatch {
+                account_id: Some(result.account_id),
+                candidates: Vec::new(),
+                observed_keep: newapi_observed_keep(
+                    &op.site_origin,
+                    result.account_id,
+                    &result.observed_groups,
+                ),
+                failures: result
+                    .failures
+                    .into_iter()
+                    .map(|failure| FailureInfo {
+                        group_name: failure
+                            .group_identity
+                            .map(|identity| identity.0)
+                            .unwrap_or_else(|| "NewAPI token cleanup".into()),
+                        reason: format!(
+                            "{}: {}",
+                            newapi_reconcile_stage(failure.stage),
+                            failure.reason
+                        ),
+                    })
+                    .collect(),
+                keys_created: result.tokens_created,
+            };
+
+            for group in result.groups {
+                let models = match api::list_models(&op.site_origin, &group.api_key).await {
+                    Ok(models) => match normalize_newapi_model_catalog(models) {
+                        Some(models) => models,
+                        None => {
+                            batch.failures.push(FailureInfo {
+                                group_name: group.name,
+                                reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
+                            });
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        batch.failures.push(FailureInfo {
+                            group_name: group.name,
+                            reason: format!("model_catalog: {error}"),
+                        });
+                        continue;
+                    }
+                };
+                batch.candidates.extend(newapi_candidates_for_group(
+                    &op.site_origin,
+                    result.account_id,
+                    &group,
+                    &models,
+                ));
+            }
+            Ok(batch)
+        }
+    }
+}
+
 async fn do_provision(
     app_handle: &tauri::AppHandle,
     relay_id: i64,
 ) -> Result<ProvisionSummary, AppError> {
-    // 判据是「`settings_config_for` 认不认这个 CLI」，**不是硬编码 codex** ——
-    // 那个函数加一个分支，这里就自动放开，不必两处同步改。
     let op = usable_relay(app_handle, relay_id).await?;
-    // ⭐ **`account_id` 必须带上**：这是唯一会发写请求（建 Key）的路径，而幂等键
-    // 不带账号时同站多账号必撞 409（见 `api::idempotency_key_for`）。
-    //
-    // `usable_relay` 会**尽力**补齐它，但补不上也照样返回（`backfill_account_identity`
-    // 拉 profile 失败只 warn）⇒ 这里仍可能是 `None`，那时建 Key 落在 `"anon"`
-    // 命名空间。不为此把 provision 判失败：拉 profile 瞬时失败换来「拿不到密钥」
-    // 是拿可用性换一个更窄的正确性，不值得。
-    let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?;
-    // **不传 app_type** —— 每个分组落到哪个 CLI 由它自己的 platform 决定
-    // （见 `provision::provision` 的文档）。一次登录探全部平台。
-    let mut result = provision::provision(&client).await?;
-    provision::sort_tiers(&mut result.tiers);
-
-    // 写 provider 记录。这一段是同步的（碰 DB），所以拿完网络数据再做。
+    let batch = provision_backend(&op).await?;
     let state = app_handle.state::<AppState>();
+    persist_provision_batch(state.inner(), &op, batch)
+}
 
+fn persist_provision_batch(
+    state: &AppState,
+    op: &creds::Relay,
+    mut batch: ManagedProvisionBatch,
+) -> Result<ProvisionSummary, AppError> {
     let mut tiers = Vec::new();
     let mut merged_providers = Vec::new();
-    // 这次 provision 认可的「(app_type, provider_id)」组合。见下方 insert 处的说明。
-    let mut keep: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    // 这次改写到的档位里，哪些**正是所属 app 的当前项**。见循环后那段刷 live 的说明。
+    // NewAPI fills this from the complete upstream inventory before reveal/model/write.
+    // sub2api candidates are inserted before their local write for the same retention property.
+    let mut keep = std::mem::take(&mut batch.observed_keep);
     let mut refresh_live: Vec<AppType> = Vec::new();
-    for (idx, targeted) in result.tiers.iter().enumerate() {
-        let tier = &targeted.tier;
-        // ⚠️ **用这条分组自己的 app_type**，不是调用方给的 —— 那正是
-        // 「claude 页出现 chatgpt 分组」那个 bug 的根因。
-        let app_type = &targeted.app_type;
+    for (idx, candidate) in batch.candidates.into_iter().enumerate() {
+        let app_type = &candidate.app_type;
+        let provider_id = candidate.provider_id.clone();
+        let display_name = provision::provider_display_name(&op.site_name, &candidate.group_name);
+        keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
-        let provider_id = provision::provider_id_for(&op.site_origin, op.account_id, tier.group_id);
-        let display_name = provision::provider_display_name(&op.site_name, &tier.group_name);
-
-        // 认不出配置形状的 CLI 直接跳过并如实报出来 —— 不能写一条形状不对的记录
-        // （那是「看着像成功、调用必失败」）。
-        //
-        // ⚠️ **模型名用 `tier.model` 而不是 `DEFAULT_MODEL`**：纯生图分组
-        // （`/v1/models` 里只有 `gpt-image-*`）写文本模型名就是必定 404。
-        // 那个值由 `provision::pick_tier_models` 按该分组的真实模型列表 + 平台定，见它的文档。
-        //
-        // ⚠️ **claude 档位带角色模型**（`tier.roles`）：provision 按该分组模型列表挑出的
-        // opus/sonnet/haiku/fable/subagent 各写各的，而不是全指向同一个主模型 ——
-        // 否则 Anthropic 分组明明返回 claude 模型，档位却全写 gpt-5.6-sol。
-        //
-        // ⚠️ **端点走 `api::base_url_for` 而不是直接用 `op.api_base_url`**：claude / gemini
-        // 自己拼版本段，要不带 `/v1` 的站点根；codex 系要带。后果见 [`api::base_url_for`]。
-        let base_url = api::base_url_for(app_type, &op.site_origin, &op.api_base_url);
+        let base_url = api::base_url_for(app_type, &op.site_origin, &candidate.api_base_url);
         let defaults = if matches!(app_type, AppType::Claude) {
             provision::settings_config_with_roles(
                 app_type,
-                &tier.api_key,
+                &candidate.api_key,
                 &display_name,
                 &base_url,
-                &tier.model,
-                tier.roles.clone(),
+                &candidate.model,
+                candidate.roles.clone(),
             )
         } else if matches!(app_type, AppType::Codex) {
             provision::settings_config_with_models(
                 app_type,
-                &tier.api_key,
+                &candidate.api_key,
                 &display_name,
                 &base_url,
-                &tier.model,
-                tier.models.as_deref(),
+                &candidate.model,
+                candidate.models.as_deref(),
             )
         } else {
             provision::settings_config_for(
                 app_type,
-                &tier.api_key,
+                &candidate.api_key,
                 &display_name,
                 &base_url,
-                &tier.model,
+                &candidate.model,
             )
         };
         let Some(defaults) = defaults else {
-            result.failures.push((
-                tier.group_name.clone(),
-                format!("还不能为 {} 生成配置", app_type.as_str()),
-            ));
+            batch.failures.push(FailureInfo {
+                group_name: candidate.group_name,
+                reason: format!("{}: 还不能生成配置", app_type.as_str()),
+            });
             continue;
         };
 
-        // ⚠️ **已手工维护的档位只换 sk、保留配置；其余整份重写为当前默认**。
-        //
-        // `save_provider` 是全量覆盖 `settings_config` 的。区分靠 `user_edited` 标记：
-        // 已标记（用户在编辑页维护过）⇒ 只换 sk，别把用户改的模型名 / reasoning effort /
-        // 自定义端点冲掉；未标记（LoongPort 托管的）⇒ 重写成默认，顺便吸收模型改名等
-        // 默认值变更（`repair_stale_model` 被这次全量重写吸收，已删）。
         let existing = state
             .db
             .get_provider_by_id(&provider_id, app_type.as_str())
             .ok()
             .flatten();
-        let user_edited = state.db.get_user_edited(app_type.as_str(), &provider_id)?;
+        let user_edited = match state.db.get_user_edited(app_type.as_str(), &provider_id) {
+            Ok(user_edited) => user_edited,
+            Err(error) => {
+                batch.failures.push(FailureInfo {
+                    group_name: candidate.group_name,
+                    reason: format!("{}: 读取用户编辑标记失败: {error}", app_type.as_str()),
+                });
+                continue;
+            }
+        };
 
         let settings_config = match existing {
             Some(old) => {
-                // 已手工维护（`user_edited` 标记）⇒ 只换 sk、保留用户的配置。
-                // 未标记（LoongPort 托管的）⇒ 整份重写为当前默认配置 —— 拿最新模型 /
-                // 端点；`repair_stale_model` 被这次全量重写吸收（删掉了，见 git log）。
                 if user_edited {
                     let mut kept = old.settings_config;
-                    // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落到默认配置。
-                    // 否则用户会留着一把旧 sk 却以为刷新成功了。
-                    if provision::patch_api_key(&mut kept, app_type, &tier.api_key) {
+                    if provision::patch_api_key(&mut kept, app_type, &candidate.api_key) {
                         kept
                     } else {
                         log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
@@ -1463,7 +1914,7 @@ async fn do_provision(
             None => defaults,
         };
 
-        let current = ProviderService::current(&state, app_type.clone()).unwrap_or_default();
+        let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
 
         let provider = Provider {
             id: provider_id.clone(),
@@ -1476,25 +1927,38 @@ async fn do_provision(
             created_at: Some(chrono::Utc::now().timestamp_millis()),
             sort_index: Some(idx),
             notes: None,
-            meta: Some(managed_meta(app_type, op.account_id)),
+            meta: Some(managed_meta(app_type, batch.account_id)),
             icon: None,
             icon_color: None,
             in_failover_queue: false,
         };
 
-        state
-            .db
-            .save_provider(app_type.as_str(), &provider)
-            .map_err(|e| AppError::Database(format!("保存档位 {display_name} 失败: {e}")))?;
+        if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+            batch.failures.push(FailureInfo {
+                group_name: candidate.group_name,
+                reason: format!(
+                    "{}: 保存档位 {display_name} 失败: {error}",
+                    app_type.as_str()
+                ),
+            });
+            continue;
+        }
 
-        // 导入后的 cc-switch provider 可能仍指向同一站点、同一把 key。LoongPort
-        // 托管档位是该事实的 owner：收编同 app 下的非托管副本，避免用户看到两个
-        // 实际指向同一上游的档位。指纹只用于这次协调，不改变托管档位的稳定 id。
-        let merged_current = provider_fingerprint::remove_unmanaged_duplicates(
+        let merged_current = match provider_fingerprint::remove_unmanaged_duplicates(
             state.db.as_ref(),
             app_type,
             &provider,
-        )?;
+        ) {
+            Ok(merged) => merged,
+            Err(error) => {
+                batch.failures.push(FailureInfo {
+                    group_name: candidate.group_name.clone(),
+                    reason: format!("{}: 收编重复 provider 失败: {error}", app_type.as_str()),
+                });
+                Vec::new()
+            }
+        };
+        let mut is_current = current == provider_id;
         if !merged_current.is_empty() {
             log::info!(
                 "收编 {} 个重复的 {} provider：{}",
@@ -1511,26 +1975,14 @@ async fn do_provision(
                 app_id: app_type.as_str().to_string(),
             }));
             if merged_current.iter().any(|m| m.was_current) {
-                state
-                    .db
-                    .set_current_provider(app_type.as_str(), &provider_id)?;
+                is_current = true;
                 if !refresh_live.contains(app_type) {
                     refresh_live.push(app_type.clone());
                 }
             }
         }
 
-        // ⚠️ **`keep` 必须带 app_type**，不能只放 provider_id。
-        //
-        // `provider_id` 是 `sha256(site_origin + group_id)` —— **不含 app_type**，
-        // 所以同一个分组在 claude 与 codex 下是**同一个 id**。
-        // 只按 id 判的话：`pro池` 在 claude 下是脏记录、在 codex 下是合法记录，
-        // 那个 id 落进 keep ⇒ claude 下那条被当成「该保留」⇒ **永远删不掉**。
-        // 那正是用户实测「点刷新 claude 页下仍挂着 codex 的分组」的真根因。
-        keep.insert((app_type.as_str().to_string(), provider_id.clone()));
-
-        let is_current = current == provider_id;
-        if is_current {
+        if is_current && !refresh_live.contains(app_type) {
             refresh_live.push(app_type.clone());
         }
 
@@ -1540,7 +1992,7 @@ async fn do_provision(
             // **这条分组自己的 app_type**，不是调用方给的 —— 这一整段循环的前提就是
             // 「一次 provision 探全部平台」，写错会让前端把别的平台的档位算成自己的。
             app_id: app_type.as_str().to_string(),
-            group_name: tier.group_name.clone(),
+            group_name: candidate.group_name,
             display_name,
             model: provision::extract_model(&provider.settings_config).unwrap_or_default(),
             models: if matches!(app_type, AppType::Codex) {
@@ -1548,34 +2000,15 @@ async fn do_provision(
             } else {
                 Vec::new()
             },
-            rate_multiplier: Some(tier.rate_multiplier),
+            rate_multiplier: candidate.rate_multiplier,
             user_edited: Some(user_edited),
-            // 这条路上两个字段都有真值：模型名刚由 `pick_model` 算出来，
-            // 生图开关刚从 `/groups/available` 拉到。
-            allow_image_generation: Some(tier.allow_image_generation),
+            allow_image_generation: candidate.allow_image_generation,
         });
     }
 
-    // 被改写的档位里若有**当前项**，必须把新配置落到 live 文件上。
-    //
-    // ## 为什么不能只 `save_provider`（用户实测的症状）
-    //
-    // CLI 读的是落地文件（`~/.codex/config.toml` 等），不是我们的 DB。服务端那把 sk
-    // 被撤销后 `ensure_key_for` 会重建一把（`key_was_created = true`），DB 里换了新的，
-    // 而 live 里还是旧的 ⇒ **界面提示刷新成功、库里也确实是新密钥，Codex / Claude 却
-    // 仍拿旧密钥去请求**。更糟的是用户没有自救手段：UI 认为这个档位已经是当前项
-    // （`isCurrent` 为 true ⇒ 前端 `if (tier.isCurrent) return;` 直接跳过），
-    // 再点它一次也不会触发切换。
-    //
-    // 走 `sync_current_provider_for_app` 而不是 `switch`：我们不是在**切换**当前项
-    // （它本来就是当前项），只是让它的落地配置追上 DB。那个 API 内部已处理代理接管
-    // （接管时写备份而不是覆盖 live 文件），自己比 id + 调 `switch` 会绕过那层判断。
-    //
-    // 失败只 warn：记录已经存对了，用户手工切一次就能生效 —— 不该因为落地文件写不下去
-    // 就把整次「获取密钥」报成失败（那会让他以为连密钥都没拿到）。
-    refresh_live_for_current_tiers(&state, &refresh_live);
+    refresh_live_for_current_tiers(state, &refresh_live);
 
-    let removed = prune_stale_tiers(&state, &op.site_origin, op.account_id, &keep)?;
+    let removed = prune_stale_tiers(state, &op.site_origin, batch.account_id, &keep)?;
     if removed > 0 {
         log::info!("清理了 {removed} 个不再存在的档位（{}）", op.site_origin);
     }
@@ -1588,22 +2021,36 @@ async fn do_provision(
     //
     // 失败只 warn：档位已经存对了，不该因为一个 MCP 记录写不下去就把「获取密钥」
     // 整个报成失败（用户会以为连密钥都没拿到）。
-    if let Err(e) = imagegen_mcp::sync_registration(&state) {
+    if let Err(e) = imagegen_mcp::sync_registration(state) {
         log::warn!("同步生图工具记录失败（生图可能暂时用不了）: {e}");
     }
 
-    Ok(ProvisionSummary {
-        keys_created: result
-            .tiers
-            .iter()
-            .filter(|t| t.tier.key_was_created)
-            .count(),
-        tiers,
-        failures: result
+    let retained_observed = keep.iter().any(|(app_type, provider_id)| {
+        state
+            .db
+            .get_provider_by_id(provider_id, app_type)
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if tiers.is_empty() && !retained_observed {
+        let detail = batch
             .failures
-            .into_iter()
-            .map(|(group_name, reason)| FailureInfo { group_name, reason })
-            .collect(),
+            .iter()
+            .map(|failure| format!("{}: {}", failure.group_name, failure.reason))
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(AppError::Config(if detail.is_empty() {
+            "没有可写入或可保留的托管档位".into()
+        } else {
+            format!("所有分组都没能备好托管档位（{detail}）")
+        }));
+    }
+
+    Ok(ProvisionSummary {
+        keys_created: batch.keys_created,
+        tiers,
+        failures: batch.failures,
         merged_providers,
     })
 }
@@ -2758,9 +3205,14 @@ pub async fn relay_balance(
     let op = usable_relay(&app_handle, relay_id)
         .await
         .map_err(|e| e.to_string())?;
-    let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)
-        .map_err(|e| e.to_string())?;
-    client.balance().await.map_err(|e| e.to_string())
+    backend::RuntimeBackend::for_relay(&op)
+        .balance()
+        .await
+        .map(|balance| api::Balance {
+            balance: balance.balance,
+            frozen_balance: balance.frozen_balance,
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// 带登录态打开某个中转站的充值页。
@@ -3193,12 +3645,19 @@ mod tests {
     }
 
     fn detected_sub2api() -> discovery::DetectedSite {
-        discovery::DetectedSite::Sub2Api(api::PublicSettings {
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::Sub2Api,
             site_name: "Example".into(),
-            version: "1.0.0".into(),
             api_base_url: String::new(),
-            registration_enabled: true,
-        })
+        }
+    }
+
+    fn detected_newapi() -> discovery::DetectedSite {
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::NewApi,
+            site_name: "NewAPI".into(),
+            api_base_url: String::new(),
+        }
     }
 
     #[test]
@@ -3228,12 +3687,138 @@ mod tests {
     }
 
     #[test]
+    fn browser_start_url_uses_newapi_legacy_registration_page_for_known_bare_origin() {
+        let detected = detected_newapi();
+        let url = browser_start_url(
+            "api.example.com",
+            "https://api.example.com",
+            Some(&detected),
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(
+            url.as_str(),
+            backend::browser_login_url(
+                "https://api.example.com",
+                discovery::BackendKind::NewApi,
+                ""
+            )
+        );
+    }
+
+    #[test]
+    fn native_protocol_conflict_is_terminal_while_unsupported_site_can_fall_back() {
+        let conflict = recoverable_native_discovery_error(discovery::DiscoveryError {
+            kind: discovery::DiscoveryErrorKind::ProtocolConflict,
+            message: "conflict".into(),
+        });
+        assert_eq!(
+            conflict
+                .expect_err("conflict must not open browser fallback")
+                .message,
+            "conflict"
+        );
+
+        let unsupported = recoverable_native_discovery_error(discovery::DiscoveryError {
+            kind: discovery::DiscoveryErrorKind::UnsupportedSite,
+            message: "unsupported".into(),
+        })
+        .expect("unsupported site can use browser fallback");
+        assert_eq!(unsupported.to_string(), "unsupported");
+    }
+
+    #[tokio::test]
+    async fn completed_refresh_wins_when_close_and_refresh_are_ready_together() {
+        let outcome =
+            await_refresh_preserving_rotation(async { Ok::<_, AppError>("refreshed") }, async {
+                "closed"
+            })
+            .await;
+
+        assert!(matches!(outcome, RefreshWait::Refreshed(Ok("refreshed"))));
+    }
+
+    #[tokio::test]
+    async fn refresh_started_before_close_is_drained_to_preserve_rotation() {
+        let (release_refresh, wait_for_release) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(await_refresh_preserving_rotation(
+            async {
+                wait_for_release
+                    .await
+                    .expect("test releases the refresh response");
+                Ok::<_, AppError>("rotated")
+            },
+            async { "closed" },
+        ));
+
+        tokio::task::yield_now().await;
+        release_refresh
+            .send(())
+            .expect("refresh waiter remains alive after close");
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), task)
+            .await
+            .expect("bounded refresh completes")
+            .expect("refresh task does not panic");
+
+        assert!(matches!(outcome, RefreshWait::Refreshed(Ok("rotated"))));
+    }
+
+    #[test]
+    fn persisting_newapi_login_session_stores_tokens_and_native_account_identity() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        let refreshed = crate::relay::newapi::RefreshedSession {
+            access_token: "new-access-token".into(),
+            access_expires_at: 1_900_000_000,
+            session_id: "session-id".into(),
+            account: crate::relay::newapi::SelfAccount {
+                id: 84,
+                username: "newapi-login".into(),
+                display_name: "NewAPI Display".into(),
+                email: "newapi@example.com".into(),
+                group: "default".into(),
+                quota: 0,
+                used_quota: 0,
+            },
+            refresh_cookie: "rotated-refresh-cookie".into(),
+        };
+
+        let (final_relay_id, account_id) =
+            persist_newapi_login_session(&state, relay_id, &refreshed).expect("persist login");
+        let persisted = with_conn(&state, |conn| creds::get(conn, final_relay_id))
+            .expect("load relay")
+            .expect("relay exists");
+
+        assert_eq!(account_id, 84);
+        assert_eq!(persisted.auth_token, "new-access-token");
+        assert_eq!(
+            persisted.refresh_token.as_deref(),
+            Some("rotated-refresh-cookie")
+        );
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_id, Some(84));
+        assert_eq!(persisted.account_label, "NewAPI Display");
+        assert_eq!(persisted.login_identifier, "newapi-login");
+    }
+
+    #[test]
     fn import_result_uses_the_final_relay_id_after_account_merge() {
         let result = ImportResult::from_login(
             ProbeResult {
                 relay_id: 7,
                 site_origin: "https://api.example.com".into(),
                 site_name: "Example".into(),
+                backend_kind: discovery::BackendKind::NewApi,
             },
             LoginResult {
                 relay_id: 11,
@@ -3526,6 +4111,82 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert!(merged[0].was_current);
+        assert_eq!(
+            db.get_current_provider(app_type.as_str())
+                .expect("读取收编后的当前项")
+                .as_deref(),
+            Some(managed.id.as_str())
+        );
+    }
+
+    #[test]
+    fn provision_merge_rolls_back_duplicate_deletion_when_current_transfer_fails() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let settings = provision::settings_config_for(
+            &app_type,
+            "sk-current",
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+        let duplicate = Provider {
+            id: "cc-switch-current".into(),
+            name: "Current imported duplicate".into(),
+            settings_config: settings,
+            website_url: Some("https://relay.example".into()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        db.save_provider(app_type.as_str(), &duplicate)
+            .expect("写入当前项");
+        db.set_current_provider(app_type.as_str(), &duplicate.id)
+            .expect("设为当前");
+
+        let managed = Provider {
+            id: provision::provider_id_for("https://relay.example", Some(1), 99),
+            name: "Managed replacement".into(),
+            meta: Some(managed_meta(&app_type, Some(1))),
+            ..duplicate.clone()
+        };
+        db.save_provider(app_type.as_str(), &managed)
+            .expect("写入托管替代项");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER fail_managed_current
+                 BEFORE UPDATE OF is_current ON providers
+                 WHEN NEW.id = '{}' AND NEW.is_current = 1
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected current transfer failure');
+                 END;",
+                managed.id
+            ))
+            .expect("install current-transfer failure");
+        }
+
+        let error = provider_fingerprint::remove_unmanaged_duplicates(&db, &app_type, &managed)
+            .expect_err("current transfer failure must roll back adoption")
+            .to_string();
+
+        assert!(error.contains("injected current transfer failure"));
+        assert!(db
+            .get_provider_by_id(&duplicate.id, app_type.as_str())
+            .expect("read duplicate")
+            .is_some());
+        assert_eq!(
+            db.get_current_provider(app_type.as_str())
+                .expect("read current after rollback")
+                .as_deref(),
+            Some(duplicate.id.as_str())
+        );
     }
 
     #[test]
@@ -3615,6 +4276,640 @@ mod tests {
 
     fn test_app() -> AppType {
         AppType::Codex
+    }
+
+    fn test_newapi_relay(account_id: i64) -> creds::Relay {
+        creds::Relay {
+            id: account_id,
+            site_origin: "https://newapi.example".into(),
+            site_name: "NewAPI".into(),
+            backend_kind: discovery::BackendKind::NewApi,
+            api_base_url: String::new(),
+            account_id: Some(account_id),
+            account_label: format!("account-{account_id}"),
+            login_identifier: format!("account-{account_id}"),
+            auth_token: "access-token".into(),
+            refresh_token: None,
+            token_expires_at: None,
+            sort_index: 0,
+        }
+    }
+
+    async fn spawn_discovery_server(
+        sub2api_body: Option<serde_json::Value>,
+        newapi_body: Option<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{routing::get, Json, Router};
+
+        let mut app = Router::new();
+        if let Some(body) = sub2api_body {
+            app = app.route(
+                "/api/v1/settings/public",
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+        }
+        if let Some(body) = newapi_body {
+            app = app.route(
+                "/api/status",
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind discovery test server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve discovery app");
+        });
+        (origin, server)
+    }
+
+    fn newapi_discovery_body() -> serde_json::Value {
+        serde_json::json!({
+            "success": true,
+            "data": {
+                "version": "1.0.0",
+                "system_name": "NewAPI",
+                "theme": "default",
+                "register_enabled": true,
+                "password_login_enabled": true
+            }
+        })
+    }
+
+    fn sub2api_discovery_body() -> serde_json::Value {
+        serde_json::json!({
+            "code": 0,
+            "message": "success",
+            "data": {
+                "site_name": "Sub2API",
+                "version": "1.0.0",
+                "api_base_url": "",
+                "registration_enabled": true,
+                "promo_code_enabled": false,
+                "invitation_code_enabled": false
+            }
+        })
+    }
+
+    fn saved_relay_app(
+        site_origin: &str,
+        backend_kind: discovery::BackendKind,
+    ) -> (tauri::App<tauri::test::MockRuntime>, i64) {
+        let db = Arc::new(crate::database::Database::memory().expect("memory database"));
+        let relay_id = {
+            let conn = db.conn.lock().expect("lock memory database");
+            let relay_id = creds::save_site_with_backend(
+                &conn,
+                site_origin,
+                "Saved relay",
+                site_origin,
+                backend_kind,
+            )
+            .expect("save relay");
+            creds::save_credentials(
+                &conn,
+                relay_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Saved Account",
+                    login_identifier: "saved-account",
+                },
+                "saved-access-token",
+                Some("saved-refresh-token"),
+                None,
+            )
+            .expect("save relay credentials");
+            relay_id
+        };
+        let app = tauri::test::mock_builder()
+            .manage(AppState::new(db))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app");
+        (app, relay_id)
+    }
+
+    fn relay_credentials(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        relay_id: i64,
+    ) -> creds::Relay {
+        let state = app.state::<AppState>();
+        with_conn(&state, |conn| creds::get(conn, relay_id))
+            .expect("read saved relay")
+            .expect("saved relay exists")
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_accepts_the_same_detected_backend() {
+        let (origin, server) = spawn_discovery_server(None, Some(newapi_discovery_body())).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let relay = usable_relay(app.handle(), relay_id)
+            .await
+            .expect("same backend remains usable");
+
+        assert_eq!(relay.backend_kind, discovery::BackendKind::NewApi);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_clears_credentials_on_detected_backend_mismatch() {
+        let (origin, server) = spawn_discovery_server(Some(sub2api_discovery_body()), None).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("backend mismatch must stop runtime dispatch");
+
+        assert!(error.to_string().contains("协议"), "{error}");
+        let relay = relay_credentials(&app, relay_id);
+        assert!(relay.auth_token.is_empty());
+        assert!(relay.refresh_token.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_clears_credentials_on_unsupported_or_conflicting_protocol() {
+        let cases = [
+            (
+                Some(serde_json::json!({ "unknown": "sub" })),
+                Some(serde_json::json!({ "unknown": "new" })),
+                "unsupported",
+            ),
+            (
+                Some(sub2api_discovery_body()),
+                Some(newapi_discovery_body()),
+                "conflict",
+            ),
+        ];
+
+        for (sub2api_body, newapi_body, case_name) in cases {
+            let (origin, server) = spawn_discovery_server(sub2api_body, newapi_body).await;
+            let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+            usable_relay(app.handle(), relay_id)
+                .await
+                .expect_err(case_name);
+
+            let relay = relay_credentials(&app, relay_id);
+            assert!(relay.auth_token.is_empty(), "{case_name}");
+            assert!(relay.refresh_token.is_none(), "{case_name}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_preserves_credentials_on_transport_only_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind connection-drop server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            for _ in 0..discovery::PROBE_CANDIDATES.len() {
+                let (stream, _) = listener.accept().await.expect("accept probe request");
+                drop(stream);
+            }
+        });
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("transport failure must stop dispatch");
+
+        assert!(error.to_string().contains("连接"), "{error}");
+        let relay = relay_credentials(&app, relay_id);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
+        server.await.expect("connection-drop server completes");
+    }
+
+    #[tokio::test]
+    async fn newapi_account_mismatch_stops_before_group_or_token_inventory() {
+        use axum::{
+            routing::{delete, get, post},
+            Json, Router,
+        };
+        use serde_json::json;
+
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let account_requests = Arc::clone(&requests);
+        let group_requests = Arc::clone(&requests);
+        let token_requests = Arc::clone(&requests);
+        let create_requests = Arc::clone(&requests);
+        let reveal_requests = Arc::clone(&requests);
+        let delete_requests = Arc::clone(&requests);
+        let app = Router::new()
+            .route(
+                "/api/user/self",
+                get(move || {
+                    let requests = Arc::clone(&account_requests);
+                    async move {
+                        requests.lock().unwrap().push("account".into());
+                        Json(json!({
+                            "success": true,
+                            "data": {
+                                "id": 99,
+                                "username": "other-account",
+                                "display_name": "Other Account",
+                                "email": "other@example.test",
+                                "group": "default",
+                                "quota": 0,
+                                "used_quota": 0
+                            }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/user/self/groups",
+                get(move || {
+                    let requests = Arc::clone(&group_requests);
+                    async move {
+                        requests.lock().unwrap().push("groups".into());
+                        Json(json!({ "success": true, "data": {} }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/",
+                get(move || {
+                    let requests = Arc::clone(&token_requests);
+                    async move {
+                        requests.lock().unwrap().push("tokens".into());
+                        Json(json!({
+                            "success": true,
+                            "data": {
+                                "page": 1,
+                                "page_size": 100,
+                                "total": 0,
+                                "items": []
+                            }
+                        }))
+                    }
+                })
+                .post(move || {
+                    let requests = Arc::clone(&create_requests);
+                    async move {
+                        requests.lock().unwrap().push("create".into());
+                        Json(json!({ "success": true }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/{id}/key",
+                post(move || {
+                    let requests = Arc::clone(&reveal_requests);
+                    async move {
+                        requests.lock().unwrap().push("reveal".into());
+                        Json(json!({ "success": true, "data": { "key": "unexpected" } }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/{id}",
+                delete(move || {
+                    let requests = Arc::clone(&delete_requests);
+                    async move {
+                        requests.lock().unwrap().push("delete".into());
+                        Json(json!({ "success": true }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind account-mismatch server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        let op = creds::Relay {
+            site_origin: origin,
+            ..test_newapi_relay(7)
+        };
+
+        let error = match provision_backend(&op).await {
+            Ok(_) => panic!("persisted account mismatch must stop provisioning"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("账号不一致"), "{error}");
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["account"],
+            "account preflight must be the only remote request; no group/token inventory or mutation may run"
+        );
+        server.abort();
+    }
+
+    fn test_newapi_group(
+        identity: &str,
+        api_key: &str,
+    ) -> crate::relay::newapi_provision::ReconciledGroup {
+        crate::relay::newapi_provision::ReconciledGroup {
+            identity: crate::relay::newapi::GroupIdentity(identity.into()),
+            name: identity.into(),
+            rate_multiplier: Some(1.25),
+            description: format!("{identity} description"),
+            api_key: api_key.into(),
+            token_was_created: false,
+        }
+    }
+
+    fn newapi_models() -> Vec<String> {
+        provision::normalize_model_names(vec![
+            "gemini-2.5-pro".into(),
+            "claude-haiku-4-5".into(),
+            "gpt-5.4".into(),
+            "claude-sonnet-4-5".into(),
+            "gpt-5.4".into(),
+        ])
+    }
+
+    #[test]
+    fn newapi_model_catalog_requires_at_least_one_normalized_model() {
+        assert!(normalize_newapi_model_catalog(None).is_none());
+        assert!(normalize_newapi_model_catalog(Some(vec!["  ".into(), "\n".into()])).is_none());
+        assert_eq!(
+            normalize_newapi_model_catalog(Some(vec![
+                " gpt-5.4 ".into(),
+                "gemini-2.5-pro".into(),
+                "gpt-5.4".into(),
+            ])),
+            Some(vec!["gemini-2.5-pro".into(), "gpt-5.4".into()])
+        );
+    }
+
+    fn newapi_batch(
+        op: &creds::Relay,
+        groups: &[crate::relay::newapi_provision::ReconciledGroup],
+    ) -> ManagedProvisionBatch {
+        let account_id = op.account_id.expect("test relay has account id");
+        let observed_groups = groups
+            .iter()
+            .map(|group| group.identity.clone())
+            .collect::<Vec<_>>();
+        ManagedProvisionBatch {
+            account_id: Some(account_id),
+            candidates: groups
+                .iter()
+                .flat_map(|group| {
+                    newapi_candidates_for_group(
+                        &op.site_origin,
+                        account_id,
+                        group,
+                        &newapi_models(),
+                    )
+                })
+                .collect(),
+            observed_keep: newapi_observed_keep(&op.site_origin, account_id, &observed_groups),
+            failures: Vec::new(),
+            keys_created: 0,
+        }
+    }
+
+    #[test]
+    fn newapi_group_expands_to_three_app_configs_with_one_provider_id() {
+        let op = test_newapi_relay(7);
+        let group = test_newapi_group(" vip/\u{4e2d}\u{6587} \u{1f680} ", "sk-shared");
+        let batch = newapi_batch(&op, std::slice::from_ref(&group));
+
+        assert_eq!(batch.candidates.len(), 3);
+        assert_eq!(batch.observed_keep.len(), 3);
+        let provider_ids = batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.provider_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(provider_ids.len(), 1);
+        assert_eq!(
+            batch
+                .candidates
+                .iter()
+                .map(|candidate| candidate.app_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "codex", "gemini"]
+        );
+
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let summary = persist_provision_batch(&state, &op, batch).expect("persist projections");
+
+        assert_eq!(summary.tiers.len(), 3);
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            let provider = db
+                .get_provider_by_id(summary.tiers[0].provider_id.as_str(), app_type.as_str())
+                .expect("read provider")
+                .expect("projection exists");
+            assert_eq!(
+                provision::extract_api_key(&provider.settings_config, &app_type).as_deref(),
+                Some("sk-shared")
+            );
+            assert_eq!(
+                provider.website_url.as_deref(),
+                Some(op.site_origin.as_str())
+            );
+            assert_eq!(
+                provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.loongport_account_id),
+                Some(7)
+            );
+        }
+    }
+
+    #[test]
+    fn newapi_refresh_preserves_edited_config_but_recomputes_unedited_defaults() {
+        let op = test_newapi_relay(7);
+        let first_group = test_newapi_group("vip", "sk-first");
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let first = persist_provision_batch(&state, &op, newapi_batch(&op, &[first_group]))
+            .expect("initial provision");
+        let provider_id = first.tiers[0].provider_id.clone();
+
+        let mut edited = db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+            .expect("read edited provider")
+            .expect("edited provider exists");
+        edited.settings_config = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-first",
+            "Custom Name",
+            "https://custom.example/v1",
+            "gpt-custom",
+        )
+        .expect("custom codex config");
+        let mut expected_edited = edited.settings_config.clone();
+        assert!(provision::patch_api_key(
+            &mut expected_edited,
+            &AppType::Codex,
+            "sk-second"
+        ));
+        db.save_provider(AppType::Codex.as_str(), &edited)
+            .expect("save edited provider");
+        db.set_user_edited(AppType::Codex.as_str(), &provider_id, true)
+            .expect("mark edited");
+
+        let mut unedited = db
+            .get_provider_by_id(&provider_id, AppType::Gemini.as_str())
+            .expect("read unedited provider")
+            .expect("unedited provider exists");
+        unedited.settings_config["env"]["GEMINI_MODEL"] =
+            serde_json::Value::String("gemini-stale".into());
+        db.save_provider(AppType::Gemini.as_str(), &unedited)
+            .expect("save stale unedited provider");
+
+        let second_group = test_newapi_group("vip", "sk-second");
+        let second_batch = newapi_batch(&op, &[second_group]);
+        persist_provision_batch(&state, &op, second_batch).expect("refresh provision");
+
+        let edited_after = db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+            .expect("read refreshed edited provider")
+            .expect("refreshed edited provider exists");
+        assert_eq!(edited_after.settings_config, expected_edited);
+        let unedited_after = db
+            .get_provider_by_id(&provider_id, AppType::Gemini.as_str())
+            .expect("read refreshed default provider")
+            .expect("refreshed default provider exists");
+        assert_eq!(
+            provision::extract_api_key(&unedited_after.settings_config, &AppType::Gemini)
+                .as_deref(),
+            Some("sk-second")
+        );
+        assert_eq!(
+            unedited_after
+                .settings_config
+                .pointer("/env/GEMINI_MODEL")
+                .and_then(serde_json::Value::as_str),
+            Some("gemini-2.5-pro")
+        );
+    }
+
+    #[test]
+    fn newapi_observed_keep_retains_failed_group_and_prunes_only_the_current_account() {
+        let account_seven = test_newapi_relay(7);
+        let account_eight = test_newapi_relay(8);
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+
+        persist_provision_batch(
+            &state,
+            &account_seven,
+            newapi_batch(
+                &account_seven,
+                &[
+                    test_newapi_group("observed", "sk-seven-observed"),
+                    test_newapi_group("removed", "sk-seven-removed"),
+                ],
+            ),
+        )
+        .expect("seed account seven");
+        persist_provision_batch(
+            &state,
+            &account_eight,
+            newapi_batch(
+                &account_eight,
+                &[
+                    test_newapi_group("observed", "sk-eight-observed"),
+                    test_newapi_group("removed", "sk-eight-removed"),
+                ],
+            ),
+        )
+        .expect("seed account eight");
+
+        let observed = crate::relay::newapi::GroupIdentity("observed".into());
+        let retained_id =
+            provision::newapi_provider_id_for(&account_seven.site_origin, 7, &observed.0);
+        let removed_id =
+            provision::newapi_provider_id_for(&account_seven.site_origin, 7, "removed");
+        let failure_batch = ManagedProvisionBatch {
+            account_id: Some(7),
+            candidates: Vec::new(),
+            observed_keep: newapi_observed_keep(
+                &account_seven.site_origin,
+                7,
+                std::slice::from_ref(&observed),
+            ),
+            failures: vec![FailureInfo {
+                group_name: "observed".into(),
+                reason: "reveal: temporary failure".into(),
+            }],
+            keys_created: 0,
+        };
+        let summary = persist_provision_batch(&state, &account_seven, failure_batch)
+            .expect("retained existing providers keep the refresh partial-successful");
+
+        assert!(summary.tiers.is_empty());
+        assert_eq!(summary.failures.len(), 1);
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            assert!(db
+                .get_provider_by_id(&retained_id, app_type.as_str())
+                .expect("read retained provider")
+                .is_some());
+            assert!(db
+                .get_provider_by_id(&removed_id, app_type.as_str())
+                .expect("read removed provider")
+                .is_none());
+
+            let other_account_id =
+                provision::newapi_provider_id_for(&account_eight.site_origin, 8, "removed");
+            assert!(db
+                .get_provider_by_id(&other_account_id, app_type.as_str())
+                .expect("read other account provider")
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn newapi_provider_write_failure_keeps_successful_apps_and_reports_the_failure() {
+        let op = test_newapi_relay(7);
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        {
+            let conn = db.conn.lock().expect("lock memory db");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_newapi_claude_write
+                 BEFORE INSERT ON providers
+                 WHEN NEW.app_type = 'claude'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected claude write failure');
+                 END;",
+            )
+            .expect("install selective write failure");
+        }
+        let state = AppState::new(db.clone());
+
+        let summary = persist_provision_batch(
+            &state,
+            &op,
+            newapi_batch(&op, &[test_newapi_group("partial", "sk-partial")]),
+        )
+        .expect("two successful app projections keep the batch successful");
+
+        assert_eq!(
+            summary
+                .tiers
+                .iter()
+                .map(|tier| tier.app_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex", "gemini"]
+        );
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].group_name, "partial");
+        assert!(summary.failures[0].reason.contains("claude"));
+        assert!(summary.failures[0]
+            .reason
+            .contains("injected claude write failure"));
     }
 
     /// 构造一条带归属的档位。`account` 为 `None` 表示升级前生成的旧档位。
@@ -4421,7 +5716,7 @@ mod tests {
             &src[start..start + end]
         };
         assert!(
-            provision.contains("refresh_live_for_current_tiers(&state, &refresh_live)"),
+            provision.contains("refresh_live_for_current_tiers(state, &refresh_live)"),
             "⭐ `do_provision` 不再刷新当前档位的 live config —— \
              sk 被撤销重建后，CLI 会一直用旧密钥，而用户点不动那个档位（UI 认为它已是当前项）"
         );
@@ -4632,5 +5927,152 @@ mod tests {
             belongs_to_account(&legacy_provider, site, None),
             "删除方向对 `None` 仍是「算是我的」—— 那是旧数据能被清掉的前提"
         );
+    }
+
+    #[test]
+    fn session_probe_clears_only_confirmed_auth_failures() {
+        assert!(should_clear_credentials_after_probe_error(
+            &AppError::Config(
+                "newapi self 失败: 登录态已失效（HTTP 401），请重新登录中转站账号".into()
+            )
+        ));
+        assert!(should_clear_credentials_after_probe_error(
+            &AppError::Config("登录已过期，请重新登录".into())
+        ));
+        assert!(!should_clear_credentials_after_probe_error(
+            &AppError::Config("newapi self 请求失败: HTTP 500".into())
+        ));
+        assert!(!should_clear_credentials_after_probe_error(
+            &AppError::Config("newapi self 请求失败: 连不上服务器（boom）".into())
+        ));
+    }
+
+    #[test]
+    fn persisting_a_newapi_refresh_updates_rotated_cookie_and_account_identity() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Old Label",
+                    login_identifier: "old-login",
+                },
+                "stale-access",
+                Some("old-refresh"),
+                Some(1),
+            )
+        })
+        .expect("save credentials");
+
+        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load relay")
+            .expect("relay exists");
+        let renewed = persist_refreshed_session(
+            &state,
+            &current,
+            &backend::RefreshedSession {
+                auth_token: "new-access".into(),
+                refresh_credential: Some("rotated-refresh".into()),
+                token_expires_at: Some(1_900_000_000),
+                account: Some(backend::RuntimeAccount {
+                    id: 7,
+                    label: "NewAPI Display".into(),
+                    login_identifier: "newapi-login".into(),
+                }),
+            },
+        )
+        .expect("persist refresh");
+
+        assert_eq!(renewed.auth_token, "new-access");
+        assert_eq!(renewed.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(renewed.account_label, "NewAPI Display");
+        assert_eq!(renewed.login_identifier, "newapi-login");
+
+        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("reload relay")
+            .expect("relay exists");
+        assert_eq!(persisted.auth_token, "new-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_label, "NewAPI Display");
+        assert_eq!(persisted.login_identifier, "newapi-login");
+    }
+
+    #[test]
+    fn identity_refresh_failure_keeps_a_refreshed_session_usable() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Old Label",
+                    login_identifier: "old-login",
+                },
+                "stale-access",
+                Some("old-refresh"),
+                Some(1),
+            )
+        })
+        .expect("save credentials");
+
+        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load relay")
+            .expect("relay exists");
+        let renewed = persist_refreshed_session_with_identity_writer(
+            &state,
+            &current,
+            &backend::RefreshedSession {
+                auth_token: "new-access".into(),
+                refresh_credential: Some("rotated-refresh".into()),
+                token_expires_at: Some(1_900_000_000),
+                account: Some(backend::RuntimeAccount {
+                    id: 7,
+                    label: "NewAPI Display".into(),
+                    login_identifier: "newapi-login".into(),
+                }),
+            },
+            |_state, _relay_id, _account| Err(AppError::Database("identity write failed".into())),
+        )
+        .expect("token refresh should stay usable");
+
+        assert_eq!(renewed.auth_token, "new-access");
+        assert_eq!(renewed.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(renewed.account_label, "Old Label");
+        assert_eq!(renewed.login_identifier, "old-login");
+
+        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("reload relay")
+            .expect("relay exists");
+        assert_eq!(persisted.auth_token, "new-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_label, "Old Label");
+        assert_eq!(persisted.login_identifier, "old-login");
     }
 }

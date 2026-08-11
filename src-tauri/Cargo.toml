@@ -43,6 +43,7 @@ dirs = "5.0"
 toml = "0.8"
 toml_edit = "0.22"
 reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
+cookie = "0.18.1"
 arboard = "3.6"
 flate2 = "1"
 brotli = "7"
@@ -126,3 +127,4 @@ strip = "symbols"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+tauri = { version = "2.8.2", features = ["test"] }

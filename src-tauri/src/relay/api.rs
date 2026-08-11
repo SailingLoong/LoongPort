@@ -21,8 +21,7 @@
 //! 已经为此让过路的两处（别推翻）：
 //! - `creds` 的登录标识叫 `login_identifier` 而非 `account_email` ——
 //!   new-api 用 username 登录，sub2api 用 email，中立命名两边都装得下
-//! - [`probe_site`] 是「这是不是一个 sub2api 站」的**指纹**，不是通用探测 ——
-//!   接 new-api 要加它自己的指纹，然后按结果分派
+//! - [`PROBE_ADAPTER`] 拥有 sub2api 指纹；通用候选遍历与收敛在 `relay::discovery`
 //!
 //! ## 四条会静默出错的约定
 //!
@@ -40,7 +39,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
 use crate::relay::platform_map::{parse_platform, Platform};
+
+pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
+    candidate: ProbeCandidate {
+        id: "sub2api",
+        path: "/api/v1/settings/public",
+    },
+    detect: detect_site,
+};
+
+fn detect_site(body: &str) -> Option<DetectedSite> {
+    let settings = parse_sub2api_public_settings(body).ok()?;
+    Some(DetectedSite {
+        backend_kind: BackendKind::Sub2Api,
+        site_name: settings.site_name,
+        api_base_url: settings.api_base_url,
+    })
+}
 
 /// sub2api 业务响应信封。
 ///
@@ -475,31 +492,6 @@ pub fn base_url_for(app_type: &AppType, site_origin: &str, api_base_url: &str) -
     }
 }
 
-/// 未鉴权探测：这个域名是不是一个 sub2api 站。
-///
-/// `GET /api/v1/settings/public` 只挂公开 IP 限流，无 JWT、无 backend-mode 守卫，所以
-/// 探测不需要任何凭据。
-pub async fn probe_site(site_origin: &str) -> Result<PublicSettings, AppError> {
-    let url = format!("{site_origin}/api/v1/settings/public");
-    let client = build_client()?;
-    let resp = client.get(&url).send().await.map_err(|e| {
-        AppError::Config(format!("连不上 {site_origin}: {}", describe_send_error(&e)))
-    })?;
-
-    if !resp.status().is_success() {
-        return Err(AppError::Config(format!(
-            "{site_origin} 的公开探测端点返回 HTTP {}",
-            resp.status().as_u16()
-        )));
-    }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| AppError::Config(format!("读取 {site_origin} 的公开探测响应失败: {e}")))?;
-    parse_sub2api_public_settings(&body)
-        .map_err(|e| AppError::Config(format!("{site_origin} 探测失败: {e}")))
-}
-
 /// 带 Bearer token 的 sub2api 客户端。
 ///
 /// **User-Agent 必须与登录 WebView 一致**：sub2api 有可选的会话绑定
@@ -816,11 +808,9 @@ pub async fn list_models(
         return Ok(None);
     }
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
         return Err(AppError::Config(format!(
-            "获取模型列表失败: HTTP {} {}",
-            status.as_u16(),
-            first_line(&body)
+            "获取模型列表失败: HTTP {}",
+            status.as_u16()
         )));
     }
 
@@ -1160,7 +1150,18 @@ mod tests {
         let origin = normalize_site_origin("bestapi.store").expect("归一化域名");
         assert_eq!(origin, "https://bestapi.store");
 
-        let settings = rt.block_on(probe_site(&origin)).expect("探测应成功");
+        let body = rt.block_on(async {
+            build_client()
+                .expect("建 client")
+                .get(format!("{origin}/api/v1/settings/public"))
+                .send()
+                .await
+                .expect("请求公开设置")
+                .text()
+                .await
+                .expect("读取公开设置")
+        });
+        let settings = parse_sub2api_public_settings(&body).expect("探测应成功");
 
         // version 是我们的站点指纹判据 —— 它没了，探测就认不出 sub2api。
         assert!(!settings.version.is_empty(), "指纹字段 version 必须有值");
@@ -1619,6 +1620,53 @@ mod tests {
         };
         assert!(mk("active").is_usable());
         assert!(!mk("disabled").is_usable());
+    }
+
+    #[tokio::test]
+    async fn list_models_does_not_expose_authenticated_response_bodies() {
+        const API_KEY: &str = "sk-model-list-secret";
+        const RESPONSE_MARKER: &str = "upstream-echoed-private-payload";
+
+        async fn leaking_error(
+            headers: axum::http::HeaderMap,
+        ) -> (axum::http::StatusCode, &'static str) {
+            assert_eq!(
+                headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer sk-model-list-secret")
+            );
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "upstream-echoed-private-payload sk-model-list-secret",
+            )
+        }
+
+        let app = axum::Router::new().route("/v1/models", axum::routing::get(leaking_error));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind model-list server");
+        let origin = format!("http://{}", listener.local_addr().expect("server addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve model-list response");
+        });
+
+        let error = list_models(&origin, API_KEY)
+            .await
+            .expect_err("502 model list must fail")
+            .to_string();
+
+        assert!(
+            error.contains("HTTP 502"),
+            "status remains diagnostic: {error}"
+        );
+        assert!(!error.contains(API_KEY), "error leaked API key: {error}");
+        assert!(
+            !error.contains(RESPONSE_MARKER),
+            "error leaked authenticated response body: {error}"
+        );
     }
 
     /// **传输错误必须带上 `source()` 链**。
