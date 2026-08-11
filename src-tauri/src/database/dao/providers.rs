@@ -2,7 +2,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::{HashMap, HashSet};
 
 type OmoProviderRow = (
@@ -22,6 +22,27 @@ impl Database {
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
         let conn = lock_conn!(self.conn);
+        Self::get_all_providers_on_connection(&conn, app_type)
+    }
+
+    /// Read current-provider state and provider rows through an active transaction.
+    ///
+    /// Callers that use the result to decide writes must begin the transaction before
+    /// calling this helper so the decision is based on one database snapshot.
+    pub(crate) fn get_provider_snapshot_in_transaction(
+        transaction: &Transaction<'_>,
+        app_type: &str,
+    ) -> Result<(Option<String>, IndexMap<String, Provider>), AppError> {
+        Ok((
+            Self::get_current_provider_on_connection(transaction, app_type)?,
+            Self::get_all_providers_on_connection(transaction, app_type)?,
+        ))
+    }
+
+    fn get_all_providers_on_connection(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+    ) -> Result<IndexMap<String, Provider>, AppError> {
         let mut stmt = conn.prepare(
             "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
              FROM providers WHERE app_type = ?1
@@ -110,6 +131,13 @@ impl Database {
 
     pub fn get_current_provider(&self, app_type: &str) -> Result<Option<String>, AppError> {
         let conn = lock_conn!(self.conn);
+        Self::get_current_provider_on_connection(&conn, app_type)
+    }
+
+    fn get_current_provider_on_connection(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+    ) -> Result<Option<String>, AppError> {
         let mut stmt = conn
             .prepare("SELECT id FROM providers WHERE app_type = ?1 AND is_current = 1 LIMIT 1")
             .map_err(|e| AppError::Database(e.to_string()))?;
