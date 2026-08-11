@@ -13,11 +13,18 @@ use base64::Engine;
 
 pub const PROBE_SCHEME: &str = "loongport-probe";
 const MAX_PROBE_BODY_BYTES: usize = 64 * 1024;
+const MAX_PROBE_RESPONSE_OVERHEAD_BYTES: usize = 256;
 
 pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
     api::PROBE_ADAPTER.candidate,
     newapi::PROBE_ADAPTER.candidate,
 ];
+
+// JSON can escape a body byte as a six-byte `\\u00XX` sequence. This bound permits every
+// registered candidate's maximum body plus its object metadata, while keeping callback input
+// bounded before base64 decoding.
+const MAX_PROBE_BATCH_BYTES: usize =
+    2 + PROBE_CANDIDATES.len() * (MAX_PROBE_BODY_BYTES * 6 + MAX_PROBE_RESPONSE_OVERHEAD_BYTES);
 
 const PROBE_ADAPTERS: &[ProbeAdapter] = &[api::PROBE_ADAPTER, newapi::PROBE_ADAPTER];
 
@@ -48,6 +55,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
   const candidates = {candidates};
   const callbackScheme = '{PROBE_SCHEME}';
   let previousBatch = '';
+  let probeInFlight = false;
 
   function b64url(value) {{
     const bytes = new TextEncoder().encode(value);
@@ -58,30 +66,36 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
 
   async function probe() {{
     if (window.location.origin !== expectedOrigin) return;
+    if (probeInFlight) return;
+    probeInFlight = true;
 
-    const responses = [];
-    for (const candidate of candidates) {{
-      try {{
-        const response = await fetch(candidate.path, {{
-          credentials: 'include',
-          cache: 'no-store',
-          headers: {{ Accept: 'application/json' }},
-        }});
-        const body = await response.text();
-        const trimmed = body.trim();
-        if (!trimmed || (trimmed[0] !== '{{' && trimmed[0] !== '[')) continue;
-        if (new TextEncoder().encode(body).length > {MAX_PROBE_BODY_BYTES}) continue;
-        responses.push({{ candidate_id: candidate.id, body }});
-      }} catch (_) {{
-        // 页面仍可能处于验证或跳转阶段；下一轮继续，不在浏览器层解释失败原因。
+    try {{
+      const responses = [];
+      for (const candidate of candidates) {{
+        try {{
+          const response = await fetch(candidate.path, {{
+            credentials: 'include',
+            cache: 'no-store',
+            headers: {{ Accept: 'application/json' }},
+          }});
+          const body = await response.text();
+          const trimmed = body.trim();
+          if (!trimmed || (trimmed[0] !== '{{' && trimmed[0] !== '[')) continue;
+          if (new TextEncoder().encode(body).length > {MAX_PROBE_BODY_BYTES}) continue;
+          responses.push({{ candidate_id: candidate.id, body }});
+        }} catch (_) {{
+          // 页面仍可能处于验证或跳转阶段；下一轮继续，不在浏览器层解释失败原因。
+        }}
       }}
-    }}
 
-    if (!responses.length) return;
-    const batch = JSON.stringify(responses);
-    if (batch === previousBatch) return;
-    previousBatch = batch;
-    window.location.href = callbackScheme + '://response?d=' + b64url(batch);
+      if (!responses.length) return;
+      const batch = JSON.stringify(responses);
+      if (batch === previousBatch) return;
+      previousBatch = batch;
+      window.location.href = callbackScheme + '://response?d=' + b64url(batch);
+    }} finally {{
+      probeInFlight = false;
+    }}
   }}
 
   void probe();
@@ -103,16 +117,30 @@ pub fn parse_probe_navigation(url: &url::Url) -> Option<Result<ProbeBatch, AppEr
             .find(|(key, _)| key == "d")
             .map(|(_, value)| value.into_owned())
             .ok_or_else(|| AppError::Config("站点探测回传缺少响应正文".into()))?;
+        if encoded.len() > base64url_encoded_len(MAX_PROBE_BATCH_BYTES) {
+            return Err(AppError::Config("站点探测回传正文过大".into()));
+        }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
             .map_err(|e| AppError::Config(format!("站点探测回传无法解码: {e}")))?;
-        if bytes.len() > MAX_PROBE_BODY_BYTES {
+        if bytes.len() > MAX_PROBE_BATCH_BYTES {
             return Err(AppError::Config("站点探测回传正文过大".into()));
         }
-        serde_json::from_slice::<Vec<ProbeResponse>>(&bytes)
-            .map(|responses| ProbeBatch { responses })
-            .map_err(|e| AppError::Config(format!("站点探测回传不是候选响应批次: {e}")))
+        let responses = serde_json::from_slice::<Vec<ProbeResponse>>(&bytes)
+            .map_err(|e| AppError::Config(format!("站点探测回传不是候选响应批次: {e}")))?;
+        if responses.len() > PROBE_CANDIDATES.len()
+            || responses
+                .iter()
+                .any(|response| response.body.len() > MAX_PROBE_BODY_BYTES)
+        {
+            return Err(AppError::Config("站点探测回传正文过大".into()));
+        }
+        Ok(ProbeBatch { responses })
     })())
+}
+
+const fn base64url_encoded_len(decoded_len: usize) -> usize {
+    (decoded_len * 4).div_ceil(3)
 }
 
 /// 用原生 HTTP 跑候选注册表的 fast path。
@@ -332,6 +360,37 @@ mod tests {
             .expect("valid batch callback");
 
         assert_eq!(parsed.responses, expected);
+    }
+
+    #[test]
+    fn batch_probe_navigation_accepts_two_valid_medium_sized_bodies() {
+        let body = format!(r#"{{"payload":"{}"}}"#, "x".repeat(40 * 1024));
+        let expected = vec![
+            ProbeResponse {
+                candidate_id: "sub2api".into(),
+                body: body.clone(),
+            },
+            ProbeResponse {
+                candidate_id: "newapi".into(),
+                body,
+            },
+        ];
+
+        let parsed = parse_probe_navigation(&probe_batch_callback_url(&expected))
+            .expect("probe scheme")
+            .expect("aggregate batch remains valid");
+
+        assert_eq!(parsed.responses, expected);
+    }
+
+    #[test]
+    fn browser_probe_script_serializes_slow_probe_rounds() {
+        let script = browser_probe_script("https://relay.example", PROBE_CANDIDATES);
+
+        assert!(script.contains("let probeInFlight = false"));
+        assert!(script.contains("if (probeInFlight) return"));
+        assert!(script.contains("probeInFlight = true"));
+        assert!(script.contains("finally {\n      probeInFlight = false"));
     }
 
     #[test]

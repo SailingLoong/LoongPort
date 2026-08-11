@@ -32,6 +32,7 @@
 
 use serde::Serialize;
 use std::{
+    future::Future,
     str::FromStr,
     sync::{Arc, Mutex},
 };
@@ -175,6 +176,22 @@ enum BrowserLoginOutcome {
     NewApiSession(newapi::RefreshedSession),
     Error(String),
     Closed,
+}
+
+enum RefreshWait<T, I> {
+    Interrupted(I),
+    Refreshed(Result<T, AppError>),
+}
+
+async fn await_refresh_or_interrupt<T, I>(
+    refresh: impl Future<Output = Result<T, AppError>>,
+    interrupt: impl Future<Output = I>,
+) -> RefreshWait<T, I> {
+    tokio::select! {
+        biased;
+        interrupted = interrupt => RefreshWait::Interrupted(interrupted),
+        refreshed = refresh => RefreshWait::Refreshed(refreshed),
+    }
 }
 
 /// 一个可选的档位。
@@ -551,6 +568,7 @@ async fn import_site(app_handle: &tauri::AppHandle, input: &str) -> Result<Impor
     let initial_detected = match discovery::probe_site(&site_origin).await {
         Ok(detected) => Some(detected),
         Err(error) => {
+            let error = recoverable_native_discovery_error(error)?;
             // 这里只记录 fast path 没识别出来；不根据 HTTP 状态、验证产品或响应正文
             // 推断站点类型。可见 WebView 才是所有网页验证共用的下一步。
             log::info!(
@@ -563,6 +581,14 @@ async fn import_site(app_handle: &tauri::AppHandle, input: &str) -> Result<Impor
     };
 
     browser_import(app_handle, input, site_origin, initial_detected).await
+}
+
+fn recoverable_native_discovery_error(error: AppError) -> Result<AppError, AppError> {
+    if matches!(&error, AppError::Config(message) if message == "protocol_conflict") {
+        Err(error)
+    } else {
+        Ok(error)
+    }
 }
 
 /// 生成浏览器首次打开的地址：站点 origin 与后端归一化规则一致，但保留用户给的
@@ -687,23 +713,23 @@ fn extract_newapi_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Opti
         .map(|cookie| cookie.value().to_string())
 }
 
-async fn refresh_newapi_browser_session(
+fn newapi_refresh_cookie_from_window(
     window: &tauri::WebviewWindow,
-    site_origin: &str,
     refresh_url: &url::Url,
-) -> Result<Option<newapi::RefreshedSession>, AppError> {
+) -> Result<Option<String>, AppError> {
     // Tauri documents a Windows deadlock if cookies_for_url runs in a synchronous navigation
     // or window callback. This function is called only by the outer async select loops below.
     let cookies = window
         .cookies_for_url(refresh_url.clone())
         .map_err(|error| AppError::Config(format!("读取 NewAPI 登录会话失败: {error}")))?;
-    let Some(refresh_cookie) = extract_newapi_refresh_cookie(&cookies) else {
-        return Ok(None);
-    };
+    Ok(extract_newapi_refresh_cookie(&cookies))
+}
 
-    newapi::refresh_session(site_origin, &refresh_cookie, None)
-        .await
-        .map(Some)
+async fn refresh_newapi_browser_session(
+    site_origin: &str,
+    refresh_cookie: &str,
+) -> Result<newapi::RefreshedSession, AppError> {
+    newapi::refresh_session(site_origin, refresh_cookie, None).await
 }
 
 fn resolve_login_codes(site_origin: &str) -> (Option<String>, Option<String>) {
@@ -907,13 +933,14 @@ async fn browser_import(
         let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
+                biased;
+                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 credentials = creds_rx.recv() => break credentials
                     .map(BrowserLoginOutcome::Sub2ApiCredentials)
                     .unwrap_or(BrowserLoginOutcome::Closed),
                 error = error_rx.recv() => break error
                     .map(BrowserLoginOutcome::Error)
                     .unwrap_or(BrowserLoginOutcome::Closed),
-                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 _ = cookie_poll.tick() => {
                     let is_newapi = context
                         .lock()
@@ -923,10 +950,33 @@ async fn browser_import(
                     if !is_newapi {
                         continue;
                     }
-                    match refresh_newapi_browser_session(&window, &site_origin, &refresh_url).await {
-                        Ok(Some(session)) => break BrowserLoginOutcome::NewApiSession(session),
-                        Ok(None) => {}
+                    let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
+                        Ok(Some(refresh_cookie)) => refresh_cookie,
+                        Ok(None) => continue,
                         Err(error) => break BrowserLoginOutcome::Error(error.to_string()),
+                    };
+                    let interrupt = async {
+                        tokio::select! {
+                            biased;
+                            _ = closed_rx.recv() => BrowserLoginOutcome::Closed,
+                            error = error_rx.recv() => error
+                                .map(BrowserLoginOutcome::Error)
+                                .unwrap_or(BrowserLoginOutcome::Closed),
+                        }
+                    };
+                    match await_refresh_or_interrupt(
+                        refresh_newapi_browser_session(&site_origin, &refresh_cookie),
+                        interrupt,
+                    )
+                    .await
+                    {
+                        RefreshWait::Interrupted(outcome) => break outcome,
+                        RefreshWait::Refreshed(Ok(session)) => {
+                            break BrowserLoginOutcome::NewApiSession(session)
+                        }
+                        RefreshWait::Refreshed(Err(error)) => {
+                            break BrowserLoginOutcome::Error(error.to_string())
+                        }
                     }
                 }
             }
@@ -1195,15 +1245,33 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
+                biased;
+                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 creds = rx.recv() => break creds
                     .map(BrowserLoginOutcome::Sub2ApiCredentials)
                     .unwrap_or(BrowserLoginOutcome::Closed),
-                _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 _ = cookie_poll.tick(), if backend_kind == discovery::BackendKind::NewApi => {
-                    match refresh_newapi_browser_session(&window, &site_origin, &refresh_url).await {
-                        Ok(Some(session)) => break BrowserLoginOutcome::NewApiSession(session),
-                        Ok(None) => {}
+                    let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
+                        Ok(Some(refresh_cookie)) => refresh_cookie,
+                        Ok(None) => continue,
                         Err(error) => break BrowserLoginOutcome::Error(error.to_string()),
+                    };
+                    match await_refresh_or_interrupt(
+                        refresh_newapi_browser_session(&site_origin, &refresh_cookie),
+                        async {
+                            let _ = closed_rx.recv().await;
+                            BrowserLoginOutcome::Closed
+                        },
+                    )
+                    .await
+                    {
+                        RefreshWait::Interrupted(outcome) => break outcome,
+                        RefreshWait::Refreshed(Ok(session)) => {
+                            break BrowserLoginOutcome::NewApiSession(session)
+                        }
+                        RefreshWait::Refreshed(Err(error)) => {
+                            break BrowserLoginOutcome::Error(error.to_string())
+                        }
                     }
                 }
             }
@@ -3527,6 +3595,47 @@ mod tests {
             ),
             "https://api.example.com/login"
         );
+    }
+
+    #[test]
+    fn native_protocol_conflict_is_terminal_while_unsupported_site_can_fall_back() {
+        let conflict =
+            recoverable_native_discovery_error(AppError::Config("protocol_conflict".into()));
+        assert_eq!(
+            conflict
+                .expect_err("conflict must not open browser fallback")
+                .to_string(),
+            "配置错误: protocol_conflict"
+        );
+
+        let unsupported =
+            recoverable_native_discovery_error(AppError::Config("unsupported_site".into()))
+                .expect("unsupported site can use browser fallback");
+        assert_eq!(unsupported.to_string(), "配置错误: unsupported_site");
+    }
+
+    #[tokio::test]
+    async fn refresh_interrupt_wins_when_close_and_refresh_are_ready_together() {
+        let outcome = await_refresh_or_interrupt(async { Ok::<_, AppError>("refreshed") }, async {
+            "closed"
+        })
+        .await;
+
+        assert!(matches!(outcome, RefreshWait::Interrupted("closed")));
+    }
+
+    #[tokio::test]
+    async fn refresh_interrupt_remains_selectable_while_refresh_is_pending() {
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            await_refresh_or_interrupt(futures::future::pending::<Result<(), AppError>>(), async {
+                "closed"
+            }),
+        )
+        .await
+        .expect("close must not wait for native refresh");
+
+        assert!(matches!(outcome, RefreshWait::Interrupted("closed")));
     }
 
     #[test]
