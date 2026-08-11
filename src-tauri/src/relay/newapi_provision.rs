@@ -104,10 +104,14 @@ fn canonical_token(
     let name = managed_token_name(account_id, &group.identity);
     let mut matches = tokens
         .iter()
-        .filter(|token| token.name == name && token.group == group.identity.0 && is_enabled(token))
+        .filter(|token| token.name == name && token.group == group.identity.0)
         .cloned()
         .collect::<Vec<_>>();
-    let canonical = matches.iter().max_by_key(|token| token.id).cloned()?;
+    let canonical = matches
+        .iter()
+        .filter(|token| is_enabled(token))
+        .max_by_key(|token| token.id)
+        .cloned()?;
     matches.retain(|token| token.id != canonical.id);
     Some((canonical, matches))
 }
@@ -130,9 +134,19 @@ fn failure(
 
 /// Reconciles remote NewAPI tokens with the authenticated account's current
 /// raw group inventory. It never writes local cc-switch providers.
-pub async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppError> {
+#[cfg(test)]
+async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppError> {
     let account = client.account().await?;
-    let account_id = account.id;
+    reconcile_for_account(client, account.id).await
+}
+
+/// Reconcile after the caller has verified which persisted relay account owns
+/// this authenticated NewAPI session. No group or token request is made before
+/// that account preflight succeeds.
+pub async fn reconcile_for_account(
+    client: &NewApiClient,
+    account_id: i64,
+) -> Result<ReconcileResult, AppError> {
     let groups = client.groups().await?;
     let observed_groups = groups
         .iter()
@@ -595,6 +609,46 @@ mod tests {
         assert_eq!(result.groups.len(), 1);
         assert!(result.groups[0].token_was_created);
         assert_eq!(server.state.lock().await.created.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_deletes_disabled_matching_token_after_replacement_reveal() {
+        let group = GroupIdentity("alpha".into());
+        let name = managed_token_name(7, &group);
+        let server = TestServer::spawn(TestState::new(
+            7,
+            &["alpha"],
+            vec![token(11, name, "alpha", 0)],
+        ))
+        .await;
+        let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
+
+        let result = reconcile(&client).await.unwrap();
+        let state = server.state.lock().await;
+
+        assert_eq!(result.groups.len(), 1);
+        assert!(result.groups[0].token_was_created);
+        assert_eq!(state.deleted, vec![11]);
+        assert!(!state.tokens.iter().any(|token| token.id == 11));
+    }
+
+    #[tokio::test]
+    async fn reconcile_retains_disabled_matching_token_when_replacement_reveal_fails() {
+        let group = GroupIdentity("alpha".into());
+        let name = managed_token_name(7, &group);
+        let mut state = TestState::new(7, &["alpha"], vec![token(11, name, "alpha", 0)]);
+        state.reveal_failures.insert(12);
+        let server = TestServer::spawn(state).await;
+        let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
+
+        let result = reconcile(&client).await.unwrap();
+        let state = server.state.lock().await;
+
+        assert!(result.groups.is_empty());
+        assert_eq!(result.failures[0].stage, ReconcileStage::Reveal);
+        assert!(state.deleted.is_empty());
+        assert!(state.tokens.iter().any(|token| token.id == 11));
+        assert!(state.tokens.iter().any(|token| token.id == 12));
     }
 
     #[tokio::test]

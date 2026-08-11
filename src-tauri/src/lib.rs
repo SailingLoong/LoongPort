@@ -1538,7 +1538,6 @@ pub fn run() {
             commands::relay_check_session,
             commands::relay_stats_endpoint_configured,
             commands::relay_list_sponsors,
-            commands::relay_probe_site,
             commands::relay_import_site,
             commands::relay_login,
             commands::relay_provision,

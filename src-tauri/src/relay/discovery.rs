@@ -10,6 +10,8 @@ use crate::relay::backend::ProbeAdapter;
 pub use crate::relay::backend::{BackendKind, DetectedSite, ProbeCandidate};
 use crate::relay::newapi;
 use base64::Engine;
+use futures::StreamExt;
+use std::fmt;
 
 pub const PROBE_SCHEME: &str = "loongport-probe";
 const MAX_PROBE_BODY_BYTES: usize = 64 * 1024;
@@ -19,6 +21,37 @@ pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
     api::PROBE_ADAPTER.candidate,
     newapi::PROBE_ADAPTER.candidate,
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryErrorKind {
+    UnsupportedSite,
+    ProtocolConflict,
+    Transport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryError {
+    pub kind: DiscoveryErrorKind,
+    pub message: String,
+}
+
+impl DiscoveryError {
+    fn new(kind: DiscoveryErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for DiscoveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DiscoveryError {}
 
 // JSON can escape a body byte as a six-byte `\\u00XX` sequence. This bound permits every
 // registered candidate's maximum body plus its object metadata, while keeping callback input
@@ -54,6 +87,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
   const expectedOrigin = {expected_origin};
   const candidates = {candidates};
   const callbackScheme = '{PROBE_SCHEME}';
+  const requestTimeoutMs = 5000;
   let previousBatch = '';
   let probeInFlight = false;
 
@@ -72,19 +106,33 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
     try {{
       const responses = [];
       for (const candidate of candidates) {{
+        const controller = new AbortController();
+        let timeoutId;
         try {{
-          const response = await fetch(candidate.path, {{
-            credentials: 'include',
-            cache: 'no-store',
-            headers: {{ Accept: 'application/json' }},
+          const request = (async () => {{
+            const response = await fetch(candidate.path, {{
+              credentials: 'include',
+              cache: 'no-store',
+              headers: {{ Accept: 'application/json' }},
+              signal: controller.signal,
+            }});
+            return response.text();
+          }})();
+          const timeout = new Promise((_, reject) => {{
+            timeoutId = setTimeout(() => {{
+              controller.abort();
+              reject(new Error('probe request timed out'));
+            }}, requestTimeoutMs);
           }});
-          const body = await response.text();
+          const body = await Promise.race([request, timeout]);
           const trimmed = body.trim();
           if (!trimmed || (trimmed[0] !== '{{' && trimmed[0] !== '[')) continue;
           if (new TextEncoder().encode(body).length > {MAX_PROBE_BODY_BYTES}) continue;
           responses.push({{ candidate_id: candidate.id, body }});
         }} catch (_) {{
           // 页面仍可能处于验证或跳转阶段；下一轮继续，不在浏览器层解释失败原因。
+        }} finally {{
+          if (timeoutId !== undefined) clearTimeout(timeoutId);
         }}
       }}
 
@@ -147,30 +195,81 @@ const fn base64url_encoded_len(decoded_len: usize) -> usize {
 ///
 /// 任何传输失败、非成功状态或 detector 不匹配都只意味着“这个候选没有识别出来”；
 /// 不在这里把某次失败宣判成站点类型。全部候选都不匹配时，调用方可切到可见 WebView。
-pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, AppError> {
+pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, DiscoveryError> {
     discover_site(site_origin).await
 }
 
 /// 原生 HTTP 探测所有候选，再复用 WebView 原始回传使用的同一收敛规则。
-pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, AppError> {
-    let client = api::build_client()?;
+pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryError> {
+    let client = api::build_client().map_err(|error| {
+        DiscoveryError::new(
+            DiscoveryErrorKind::Transport,
+            format!("无法建立站点连接: {error}"),
+        )
+    })?;
     let mut responses = Vec::new();
+    let mut completed_candidate = false;
+    let mut last_transport_error = None;
 
     for candidate in PROBE_CANDIDATES {
         let url = format!("{site_origin}{}", candidate.path);
-        let Ok(response) = client.get(&url).send().await else {
-            continue;
+        let response = match client.get(&url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_transport_error = Some(error.to_string());
+                continue;
+            }
         };
         if !response.status().is_success() {
+            completed_candidate = true;
             continue;
         }
-        let Ok(body) = response.text().await else {
+
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PROBE_BODY_BYTES as u64)
+        {
+            completed_candidate = true;
             continue;
-        };
+        }
+
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        let mut body_failed = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) if body.len() + chunk.len() <= MAX_PROBE_BODY_BYTES => {
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(_) => {
+                    completed_candidate = true;
+                    body_failed = true;
+                    break;
+                }
+                Err(error) => {
+                    last_transport_error = Some(error.to_string());
+                    body_failed = true;
+                    break;
+                }
+            }
+        }
+        if body_failed {
+            continue;
+        }
+        completed_candidate = true;
         responses.push(ProbeResponse {
             candidate_id: candidate.id.to_string(),
-            body,
+            body: String::from_utf8_lossy(&body).into_owned(),
         });
+    }
+
+    if responses.is_empty() && !completed_candidate {
+        return Err(DiscoveryError::new(
+            DiscoveryErrorKind::Transport,
+            last_transport_error
+                .map(|error| format!("连接站点失败: {error}"))
+                .unwrap_or_else(|| "连接站点失败".into()),
+        ));
     }
 
     converge_probe_responses(&responses)
@@ -195,7 +294,9 @@ pub fn detect_site(candidate_id: &str, body: &str) -> Option<DetectedSite> {
 }
 
 /// 汇总所有原始候选响应，去重后严格收敛为一个协议结果。
-pub fn converge_probe_responses(responses: &[ProbeResponse]) -> Result<DetectedSite, AppError> {
+pub fn converge_probe_responses(
+    responses: &[ProbeResponse],
+) -> Result<DetectedSite, DiscoveryError> {
     let mut detected = Vec::new();
     for response in responses {
         let Some(candidate) = detect_candidate(&response.candidate_id, &response.body) else {
@@ -211,9 +312,15 @@ pub fn converge_probe_responses(responses: &[ProbeResponse]) -> Result<DetectedS
     }
 
     match detected.len() {
-        0 => Err(AppError::Config("unsupported_site".into())),
+        0 => Err(DiscoveryError::new(
+            DiscoveryErrorKind::UnsupportedSite,
+            "无法识别该站点支持的中转协议",
+        )),
         1 => Ok(detected.pop().expect("one detected backend")),
-        _ => Err(AppError::Config("protocol_conflict".into())),
+        _ => Err(DiscoveryError::new(
+            DiscoveryErrorKind::ProtocolConflict,
+            "站点同时返回多种中转协议，无法安全选择",
+        )),
     }
 }
 
@@ -418,8 +525,8 @@ mod tests {
         };
 
         assert_eq!(
-            converge_probe_responses(&[]).unwrap_err().to_string(),
-            "配置错误: unsupported_site"
+            converge_probe_responses(&[]).unwrap_err().kind,
+            DiscoveryErrorKind::UnsupportedSite
         );
         assert_eq!(
             converge_probe_responses(std::slice::from_ref(&sub2api))
@@ -436,8 +543,8 @@ mod tests {
         assert_eq!(
             converge_probe_responses(&[sub2api, newapi])
                 .unwrap_err()
-                .to_string(),
-            "配置错误: protocol_conflict"
+                .kind,
+            DiscoveryErrorKind::ProtocolConflict
         );
     }
 
@@ -476,6 +583,39 @@ mod tests {
         let detected = probe_site(&origin).await.expect("accept newapi probe");
 
         assert_eq!(detected.backend_kind, BackendKind::NewApi);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn native_discovery_rejects_oversized_stream_without_waiting_for_eof() {
+        use axum::body::Body;
+        use axum::response::Response;
+        use bytes::Bytes;
+        use std::convert::Infallible;
+
+        let app = Router::new().route(
+            "/api/v1/settings/public",
+            get(|| async {
+                let stream = async_stream::stream! {
+                    yield Ok::<_, Infallible>(Bytes::from(vec![b'x'; MAX_PROBE_BODY_BYTES + 1]));
+                    std::future::pending::<()>().await;
+                };
+                Response::new(Body::from_stream(stream))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind oversized discovery server");
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let error =
+            tokio::time::timeout(std::time::Duration::from_millis(250), probe_site(&origin))
+                .await
+                .expect("oversized body is rejected before the stream ends")
+                .expect_err("oversized body cannot identify a backend");
+
+        assert_eq!(error.kind, DiscoveryErrorKind::UnsupportedSite);
         server.abort();
     }
 

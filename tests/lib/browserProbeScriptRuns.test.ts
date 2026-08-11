@@ -51,6 +51,9 @@ describe("browser probe generated script", () => {
         intervalCallbacks.push(callback);
         return 1;
       },
+      setTimeout,
+      clearTimeout,
+      AbortController,
       TextEncoder,
       btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
       JSON,
@@ -103,5 +106,58 @@ describe("browser probe generated script", () => {
       fetchedPaths,
       "a finished round releases the next interval",
     ).toHaveLength(3);
+  });
+
+  it("times out one candidate, continues the batch, and emits only after settlement", async () => {
+    const fetchedPaths: string[] = [];
+    const navigations: string[] = [];
+    const timeoutCallbacks: Array<() => void> = [];
+    const secondBody = deferred<string>();
+    const location = {
+      origin: "https://relay.example",
+      get href() {
+        return navigations.at(-1) ?? "https://relay.example/login";
+      },
+      set href(value: string) {
+        navigations.push(value);
+      },
+    };
+
+    const sandbox = {
+      window: { location },
+      fetch: (path: string) => {
+        fetchedPaths.push(path);
+        if (path === "/api/v1/settings/public") {
+          return new Promise(() => {});
+        }
+        return Promise.resolve({ text: () => secondBody.promise });
+      },
+      setInterval: () => 1,
+      setTimeout: (callback: () => void) => {
+        timeoutCallbacks.push(callback);
+        return timeoutCallbacks.length;
+      },
+      clearTimeout: () => {},
+      AbortController,
+      TextEncoder,
+      btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
+      JSON,
+      Error,
+    };
+
+    vm.runInNewContext(readFileSync(SCRIPT, "utf8"), sandbox, {
+      timeout: 5000,
+    });
+    expect(fetchedPaths).toEqual(["/api/v1/settings/public"]);
+    expect(navigations).toHaveLength(0);
+
+    timeoutCallbacks[0]();
+    await flushPromises();
+    expect(fetchedPaths).toEqual(["/api/v1/settings/public", "/api/status"]);
+    expect(navigations).toHaveLength(0);
+
+    secondBody.resolve('{"success":true}');
+    await flushPromises();
+    expect(navigations).toHaveLength(1);
   });
 });

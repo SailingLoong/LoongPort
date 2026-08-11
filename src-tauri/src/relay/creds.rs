@@ -317,6 +317,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Relay>, AppError> {
 ///
 /// 同一个站点若已有**未登录**的行（`account_id IS NULL`），复用它而不是再插一条 ——
 /// 用户连点两次「添加」不该得到两行。已登录的行不动（那是别的账号，或同一账号的既有配置）。
+#[cfg(test)]
 pub fn save_site(
     conn: &Connection,
     site_origin: &str,
@@ -419,18 +420,27 @@ pub fn save_credentials(
         label: account_label,
         login_identifier,
     } = account;
-    let site_origin: String = conn
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::Database(format!("开始凭据合并事务失败: {e}")))?;
+    let (site_origin, site_name, api_base_url, backend_kind): (
+        String,
+        String,
+        String,
+        BackendKind,
+    ) = transaction
         .query_row(
-            "SELECT site_origin FROM loongport_relay WHERE id = ?1",
+            "SELECT site_origin, site_name, api_base_url, backend_kind
+             FROM loongport_relay WHERE id = ?1",
             params![id],
-            |r| r.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(|e| AppError::Database(format!("读取站点失败: {e}")))?
         .ok_or_else(|| AppError::Config("保存凭据失败: 站点记录不存在".into()))?;
 
     // 这个站上是否已有同一个账号的行（排除自己）。
-    let duplicate: Option<i64> = conn
+    let duplicate: Option<i64> = transaction
         .query_row(
             "SELECT id FROM loongport_relay
              WHERE site_origin = ?1 AND account_id = ?2 AND id != ?3 LIMIT 1",
@@ -440,34 +450,43 @@ pub fn save_credentials(
         .optional()
         .map_err(|e| AppError::Database(format!("查询重复账号失败: {e}")))?;
 
-    let target = match duplicate {
-        // 已经配过这个「站 × 账号」：凭据写回那一行，删掉这次新建的。
-        Some(existing) => {
-            conn.execute("DELETE FROM loongport_relay WHERE id = ?1", params![id])
-                .map_err(|e| AppError::Database(format!("清理重复站点失败: {e}")))?;
-            log::info!("站点 {site_origin} 的账号 {account_id} 已存在，合并到已有记录");
-            existing
-        }
-        None => id,
-    };
+    let target = duplicate.unwrap_or(id);
 
-    conn.execute(
-        "UPDATE loongport_relay
-         SET account_id = ?1, account_label = ?2, login_identifier = ?3, auth_token = ?4,
-             refresh_token = ?5, token_expires_at = ?6, updated_at = ?7
-         WHERE id = ?8",
-        params![
-            account_id,
-            account_label,
-            login_identifier,
-            auth_token,
-            refresh_token,
-            token_expires_at,
-            now_unix(),
-            target
-        ],
-    )
-    .map_err(|e| AppError::Database(format!("保存凭据失败: {e}")))?;
+    transaction
+        .execute(
+            "UPDATE loongport_relay
+         SET site_name = ?1, api_base_url = ?2, backend_kind = ?3,
+             account_id = ?4, account_label = ?5, login_identifier = ?6, auth_token = ?7,
+             refresh_token = ?8, token_expires_at = ?9, updated_at = ?10
+         WHERE id = ?11",
+            params![
+                site_name,
+                api_base_url,
+                backend_kind.as_str(),
+                account_id,
+                account_label,
+                login_identifier,
+                auth_token,
+                refresh_token,
+                token_expires_at,
+                now_unix(),
+                target
+            ],
+        )
+        .map_err(|e| AppError::Database(format!("保存凭据失败: {e}")))?;
+
+    if duplicate.is_some() {
+        transaction
+            .execute("DELETE FROM loongport_relay WHERE id = ?1", params![id])
+            .map_err(|e| AppError::Database(format!("清理重复站点失败: {e}")))?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|e| AppError::Database(format!("提交凭据合并事务失败: {e}")))?;
+    if duplicate.is_some() {
+        log::info!("站点 {site_origin} 的账号 {account_id} 已存在，合并到已有记录");
+    }
 
     Ok(target)
 }
@@ -808,6 +827,117 @@ mod tests {
         // 凭据用的是新的那份。
         let op = get(&conn, first).unwrap().unwrap();
         assert_eq!(op.auth_token, "new-token");
+    }
+
+    #[test]
+    fn duplicate_account_merge_keeps_existing_identity_and_copies_fresh_site_metadata() {
+        let conn = mem();
+        let existing = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Old name",
+            "https://a.dev/old-api",
+            BackendKind::Sub2Api,
+        )
+        .unwrap();
+        save_credentials(
+            &conn,
+            existing,
+            ident(100, "Old account", "old-login"),
+            "old-token",
+            Some("old-refresh"),
+            Some(100),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE loongport_relay SET sort_index = 9 WHERE id = ?1",
+            params![existing],
+        )
+        .unwrap();
+
+        let source = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Fresh NewAPI name",
+            "https://a.dev/new-api",
+            BackendKind::NewApi,
+        )
+        .unwrap();
+        let final_id = save_credentials(
+            &conn,
+            source,
+            ident(100, "Fresh account", "fresh-login"),
+            "fresh-token",
+            Some("fresh-refresh"),
+            Some(200),
+        )
+        .unwrap();
+
+        assert_eq!(final_id, existing);
+        let merged = get(&conn, existing).unwrap().unwrap();
+        assert_eq!(merged.sort_index, 9);
+        assert_eq!(merged.site_name, "Fresh NewAPI name");
+        assert_eq!(merged.api_base_url, "https://a.dev/new-api");
+        assert_eq!(merged.backend_kind, BackendKind::NewApi);
+        assert_eq!(merged.account_label, "Fresh account");
+        assert_eq!(merged.login_identifier, "fresh-login");
+        assert_eq!(merged.auth_token, "fresh-token");
+        assert_eq!(merged.refresh_token.as_deref(), Some("fresh-refresh"));
+        assert!(get(&conn, source).unwrap().is_none());
+    }
+
+    #[test]
+    fn duplicate_account_merge_rolls_back_when_source_delete_fails() {
+        let conn = mem();
+        let existing = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Old name",
+            "https://a.dev/old-api",
+            BackendKind::Sub2Api,
+        )
+        .unwrap();
+        save_credentials(
+            &conn,
+            existing,
+            ident(100, "Old account", "old-login"),
+            "old-token",
+            Some("old-refresh"),
+            Some(100),
+        )
+        .unwrap();
+        let source = save_site_with_backend(
+            &conn,
+            "https://a.dev",
+            "Fresh NewAPI name",
+            "https://a.dev/new-api",
+            BackendKind::NewApi,
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER fail_source_delete BEFORE DELETE ON loongport_relay
+             WHEN OLD.id = {source}
+             BEGIN SELECT RAISE(FAIL, 'injected delete failure'); END;"
+        ))
+        .unwrap();
+
+        save_credentials(
+            &conn,
+            source,
+            ident(100, "Fresh account", "fresh-login"),
+            "fresh-token",
+            Some("fresh-refresh"),
+            Some(200),
+        )
+        .expect_err("delete failure must roll the merge back");
+
+        let unchanged = get(&conn, existing).unwrap().unwrap();
+        assert_eq!(unchanged.site_name, "Old name");
+        assert_eq!(unchanged.api_base_url, "https://a.dev/old-api");
+        assert_eq!(unchanged.backend_kind, BackendKind::Sub2Api);
+        assert_eq!(unchanged.auth_token, "old-token");
+        assert_eq!(unchanged.refresh_token.as_deref(), Some("old-refresh"));
+        assert!(get(&conn, source).unwrap().is_some());
     }
 
     #[test]

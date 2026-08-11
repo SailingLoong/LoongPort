@@ -21,8 +21,7 @@
 //! 已经为此让过路的两处（别推翻）：
 //! - `creds` 的登录标识叫 `login_identifier` 而非 `account_email` ——
 //!   new-api 用 username 登录，sub2api 用 email，中立命名两边都装得下
-//! - [`probe_site`] 是「这是不是一个 sub2api 站」的**指纹**，不是通用探测 ——
-//!   接 new-api 要加它自己的指纹，然后按结果分派
+//! - [`PROBE_ADAPTER`] 拥有 sub2api 指纹；通用候选遍历与收敛在 `relay::discovery`
 //!
 //! ## 四条会静默出错的约定
 //!
@@ -491,31 +490,6 @@ pub fn base_url_for(app_type: &AppType, site_origin: &str, api_base_url: &str) -
         AppType::Claude | AppType::Gemini => site_api_root(site_origin, api_base_url),
         _ => codex_base_url(site_origin, api_base_url),
     }
-}
-
-/// 未鉴权探测：这个域名是不是一个 sub2api 站。
-///
-/// `GET /api/v1/settings/public` 只挂公开 IP 限流，无 JWT、无 backend-mode 守卫，所以
-/// 探测不需要任何凭据。
-pub async fn probe_site(site_origin: &str) -> Result<PublicSettings, AppError> {
-    let url = format!("{site_origin}/api/v1/settings/public");
-    let client = build_client()?;
-    let resp = client.get(&url).send().await.map_err(|e| {
-        AppError::Config(format!("连不上 {site_origin}: {}", describe_send_error(&e)))
-    })?;
-
-    if !resp.status().is_success() {
-        return Err(AppError::Config(format!(
-            "{site_origin} 的公开探测端点返回 HTTP {}",
-            resp.status().as_u16()
-        )));
-    }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| AppError::Config(format!("读取 {site_origin} 的公开探测响应失败: {e}")))?;
-    parse_sub2api_public_settings(&body)
-        .map_err(|e| AppError::Config(format!("{site_origin} 探测失败: {e}")))
 }
 
 /// 带 Bearer token 的 sub2api 客户端。
@@ -1176,7 +1150,18 @@ mod tests {
         let origin = normalize_site_origin("bestapi.store").expect("归一化域名");
         assert_eq!(origin, "https://bestapi.store");
 
-        let settings = rt.block_on(probe_site(&origin)).expect("探测应成功");
+        let body = rt.block_on(async {
+            build_client()
+                .expect("建 client")
+                .get(format!("{origin}/api/v1/settings/public"))
+                .send()
+                .await
+                .expect("请求公开设置")
+                .text()
+                .await
+                .expect("读取公开设置")
+        });
+        let settings = parse_sub2api_public_settings(&body).expect("探测应成功");
 
         // version 是我们的站点指纹判据 —— 它没了，探测就认不出 sub2api。
         assert!(!settings.version.is_empty(), "指纹字段 version 必须有值");

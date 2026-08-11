@@ -5,7 +5,6 @@
 //! | 命令 | 干什么 |
 //! |---|---|
 //! | [`relay_status`] | 首启该弹哪个弹窗、当前是什么状态 |
-//! | [`relay_probe_site`] | 域名弹窗点确定 → 探测这是不是 sub2api 站 |
 //! | [`relay_import_site`] | 发现协议；必要时让用户在可见 WebView 完成网页验证，并在同一会话登录 |
 //! | [`relay_login`] | 开登录 WebView，等凭据回来 |
 //! | [`relay_provision`] | 拉分组 → 每组备好 sk → 写成 codex provider |
@@ -135,6 +134,7 @@ pub struct ProbeResult {
     pub relay_id: i64,
     pub site_origin: String,
     pub site_name: String,
+    pub backend_kind: discovery::BackendKind,
 }
 
 /// 合并“发现站点 + 同一会话登录”的导入结果。
@@ -144,7 +144,43 @@ pub struct ImportResult {
     pub relay_id: i64,
     pub site_origin: String,
     pub site_name: String,
+    pub backend_kind: discovery::BackendKind,
     pub logged_in: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayImportError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<discovery::DiscoveryErrorKind>,
+    pub message: String,
+}
+
+impl RelayImportError {
+    fn message(message: impl Into<String>) -> Self {
+        Self {
+            kind: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<AppError> for RelayImportError {
+    fn from(error: AppError) -> Self {
+        Self {
+            kind: None,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<discovery::DiscoveryError> for RelayImportError {
+    fn from(error: discovery::DiscoveryError) -> Self {
+        Self {
+            kind: Some(error.kind),
+            message: error.message,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,6 +195,7 @@ impl ImportResult {
             relay_id: login.relay_id,
             site_origin: probe.site_origin,
             site_name: probe.site_name,
+            backend_kind: probe.backend_kind,
             logged_in: login.logged_in,
         }
     }
@@ -174,7 +211,7 @@ struct BrowserLoginContext {
 enum BrowserLoginOutcome {
     Sub2ApiCredentials(login::Credentials),
     NewApiSession(newapi::RefreshedSession),
-    Error(String),
+    Error(RelayImportError),
     Closed,
 }
 
@@ -458,33 +495,6 @@ pub fn relay_list_sponsors() -> Vec<crate::relay::remote_config::Sponsor> {
         .unwrap_or_default()
 }
 
-/// 探测一个域名，成功即存为当前站点。
-///
-/// 空输入用默认域名 —— 需求要的就是「不输入直接点确定也能走」。
-#[tauri::command]
-pub async fn relay_probe_site(
-    app_handle: tauri::AppHandle,
-    site: String,
-) -> Result<ProbeResult, String> {
-    let input = if site.trim().is_empty() {
-        DEFAULT_SITE.to_string()
-    } else {
-        site
-    };
-    probe_and_save(&app_handle, &input)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-async fn probe_and_save(
-    app_handle: &tauri::AppHandle,
-    input: &str,
-) -> Result<ProbeResult, AppError> {
-    let site_origin = api::normalize_site_origin(input)?;
-    let settings = api::probe_site(&site_origin).await?;
-    save_sub2api_site(app_handle, site_origin, settings)
-}
-
 fn save_detected_site(
     app_handle: &tauri::AppHandle,
     site_origin: String,
@@ -514,38 +524,7 @@ fn save_detected_site(
         relay_id,
         site_origin,
         site_name,
-    })
-}
-
-fn save_sub2api_site(
-    app_handle: &tauri::AppHandle,
-    site_origin: String,
-    settings: api::PublicSettings,
-) -> Result<ProbeResult, AppError> {
-    // 存**站点 API 根**（不带 `/v1`），不是某个 CLI 的成品端点：各 CLI 形状不同
-    // （claude 要根、codex 要带 `/v1`），存成其中一种就必然被另一种误用 —— 那正是
-    // 存量 claude 档位整片带上多余 `/v1` 的来源。派生一律走 `api::base_url_for`。
-    let api_base_url = api::site_api_root(&site_origin, &settings.api_base_url);
-
-    let site_name = if settings.site_name.trim().is_empty() {
-        // 中转站可能没配站名。回落到主机名而不是留空 —— 空名字会让 UI 里那家没有标识。
-        site_origin
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .to_string()
-    } else {
-        settings.site_name.clone()
-    };
-
-    let state = app_handle.state::<AppState>();
-    let relay_id = with_conn(&state, |conn| {
-        creds::save_site(conn, &site_origin, &site_name, &api_base_url)
-    })?;
-
-    Ok(ProbeResult {
-        relay_id,
-        site_origin,
-        site_name,
+        backend_kind: detected.backend_kind,
     })
 }
 
@@ -558,19 +537,20 @@ fn save_sub2api_site(
 pub async fn relay_import_site(
     app_handle: tauri::AppHandle,
     site: String,
-) -> Result<ImportResult, String> {
-    import_site(&app_handle, &site)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<ImportResult, RelayImportError> {
+    import_site(&app_handle, &site).await
 }
 
-async fn import_site(app_handle: &tauri::AppHandle, input: &str) -> Result<ImportResult, AppError> {
+async fn import_site(
+    app_handle: &tauri::AppHandle,
+    input: &str,
+) -> Result<ImportResult, RelayImportError> {
     let input = if input.trim().is_empty() {
         DEFAULT_SITE
     } else {
         input
     };
-    let site_origin = api::normalize_site_origin(input)?;
+    let site_origin = api::normalize_site_origin(input).map_err(RelayImportError::from)?;
 
     let initial_detected = match discovery::probe_site(&site_origin).await {
         Ok(detected) => Some(detected),
@@ -590,9 +570,11 @@ async fn import_site(app_handle: &tauri::AppHandle, input: &str) -> Result<Impor
     browser_import(app_handle, input, site_origin, initial_detected).await
 }
 
-fn recoverable_native_discovery_error(error: AppError) -> Result<AppError, AppError> {
-    if matches!(&error, AppError::Config(message) if message == "protocol_conflict") {
-        Err(error)
+fn recoverable_native_discovery_error(
+    error: discovery::DiscoveryError,
+) -> Result<discovery::DiscoveryError, RelayImportError> {
+    if error.kind == discovery::DiscoveryErrorKind::ProtocolConflict {
+        Err(error.into())
     } else {
         Ok(error)
     }
@@ -644,47 +626,9 @@ fn browser_start_url(
         return Ok(entry);
     };
 
-    let url = backend_login_url(site_origin, detected.backend_kind, "");
+    let url = backend::browser_login_url(site_origin, detected.backend_kind, "");
     url::Url::parse(&url)
         .map_err(|error| AppError::InvalidInput(format!("登录页地址不对: {error}")))
-}
-
-fn backend_login_url(
-    site_origin: &str,
-    backend_kind: discovery::BackendKind,
-    login_identifier: &str,
-) -> String {
-    match backend_kind {
-        discovery::BackendKind::Sub2Api => login::login_url(site_origin, login_identifier),
-        // NewAPI keeps `/register` and `/login` as legacy-compatible entry points. Current
-        // servers redirect them to `/sign-up` and `/sign-in`, while older deployments accept
-        // the legacy paths directly.
-        discovery::BackendKind::NewApi => {
-            if login_identifier.is_empty() {
-                format!("{site_origin}/register")
-            } else {
-                format!("{site_origin}/login")
-            }
-        }
-    }
-}
-
-fn import_login_script(
-    detected: &discovery::DetectedSite,
-    site_origin: &str,
-    aff_code: Option<&str>,
-    promo_code: Option<&str>,
-) -> String {
-    match detected {
-        discovery::DetectedSite {
-            backend_kind: discovery::BackendKind::Sub2Api,
-            ..
-        } => login::login_script(site_origin, "", aff_code, promo_code),
-        discovery::DetectedSite {
-            backend_kind: discovery::BackendKind::NewApi,
-            ..
-        } => String::new(),
-    }
 }
 
 fn browser_login_context(
@@ -695,29 +639,14 @@ fn browser_login_context(
     promo_code: Option<&str>,
 ) -> Result<BrowserLoginContext, AppError> {
     let backend_kind = detected.backend_kind;
-    let login_script = import_login_script(&detected, site_origin, aff_code, promo_code);
+    let login_script =
+        backend::browser_login_script(site_origin, backend_kind, "", aff_code, promo_code);
     let probe = save_detected_site(app_handle, site_origin.to_string(), detected)?;
     Ok(BrowserLoginContext {
         probe,
         backend_kind,
         login_script,
     })
-}
-
-fn newapi_refresh_url(site_origin: &str) -> Result<url::Url, AppError> {
-    url::Url::parse(&format!("{site_origin}/api/user/auth/refresh"))
-        .map_err(|error| AppError::InvalidInput(format!("NewAPI refresh 地址不对: {error}")))
-}
-
-fn extract_newapi_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
-    cookies
-        .iter()
-        .find(|cookie| {
-            cookie.name() == "new_api_refresh"
-                && cookie.http_only() == Some(true)
-                && !cookie.value().trim().is_empty()
-        })
-        .map(|cookie| cookie.value().to_string())
 }
 
 fn newapi_refresh_cookie_from_window(
@@ -729,7 +658,7 @@ fn newapi_refresh_cookie_from_window(
     let cookies = window
         .cookies_for_url(refresh_url.clone())
         .map_err(|error| AppError::Config(format!("读取 NewAPI 登录会话失败: {error}")))?;
-    Ok(extract_newapi_refresh_cookie(&cookies))
+    Ok(newapi::extract_refresh_cookie(&cookies))
 }
 
 async fn refresh_newapi_browser_session(
@@ -752,7 +681,7 @@ async fn browser_import(
     input: &str,
     site_origin: String,
     initial_detected: Option<discovery::DetectedSite>,
-) -> Result<ImportResult, AppError> {
+) -> Result<ImportResult, RelayImportError> {
     if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
         log::info!("发现残留的站点导入窗口，销毁后重开");
         let _ = stale.destroy();
@@ -782,7 +711,7 @@ async fn browser_import(
 
     let context = Arc::new(Mutex::new(initial_context));
     let (creds_tx, mut creds_rx) = tokio::sync::mpsc::channel::<login::Credentials>(1);
-    let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<String>(1);
+    let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<RelayImportError>(1);
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let context_for_load = Arc::clone(&context);
@@ -836,7 +765,7 @@ async fn browser_import(
                 Ok(batch) => batch,
                 Err(error) => {
                     log::warn!("站点探测回传解析失败: {error}");
-                    let _ = probe_error_tx.try_send(error.to_string());
+                    let _ = probe_error_tx.try_send(error.into());
                     return false;
                 }
             };
@@ -853,13 +782,13 @@ async fn browser_import(
 
             let detected = match discovery::converge_probe_responses(&batch.responses) {
                 Ok(detected) => detected,
-                Err(AppError::Config(message)) if message == "unsupported_site" => {
+                Err(error) if error.kind == discovery::DiscoveryErrorKind::UnsupportedSite => {
                     // 本轮只有未知或不匹配的 JSON 响应。页面可能还在验证或跳转，继续轮询。
                     return false;
                 }
                 Err(error) => {
                     log::warn!("站点探测批次无法收敛: {error}");
-                    let _ = probe_error_tx.try_send(error.to_string());
+                    let _ = probe_error_tx.try_send(error.into());
                     return false;
                 }
             };
@@ -873,7 +802,7 @@ async fn browser_import(
                 Ok(context) => context,
                 Err(error) => {
                     log::warn!("保存已识别站点失败: {error}");
-                    let _ = probe_error_tx.try_send(error.to_string());
+                    let _ = probe_error_tx.try_send(error.into());
                     return false;
                 }
             };
@@ -883,20 +812,25 @@ async fn browser_import(
                 Ok(mut guard) if guard.is_none() => *guard = Some(browser_context),
                 Ok(_) => return false,
                 Err(_) => {
-                    let _ = probe_error_tx.try_send("站点导入状态不可用".into());
+                    let _ =
+                        probe_error_tx.try_send(RelayImportError::message("站点导入状态不可用"));
                     return false;
                 }
             }
 
             let Some(window) = app_for_nav.get_webview_window(login::LOGIN_WINDOW_LABEL) else {
-                let _ = probe_error_tx.try_send("站点导入窗口已关闭".into());
+                let _ = probe_error_tx.try_send(RelayImportError::message("站点导入窗口已关闭"));
                 return false;
             };
 
             let next_step = if navigate_after_detection {
-                url::Url::parse(&backend_login_url(&site_origin_for_nav, backend_kind, ""))
-                    .map_err(|error| format!("登录页地址不对: {error}"))
-                    .and_then(|url| window.navigate(url).map_err(|error| error.to_string()))
+                url::Url::parse(&backend::browser_login_url(
+                    &site_origin_for_nav,
+                    backend_kind,
+                    "",
+                ))
+                .map_err(|error| format!("登录页地址不对: {error}"))
+                .and_then(|url| window.navigate(url).map_err(|error| error.to_string()))
             } else if !login_script.is_empty() {
                 window
                     .eval(&login_script)
@@ -906,7 +840,7 @@ async fn browser_import(
             };
             if let Err(error) = next_step {
                 log::warn!("已识别站点，但无法在当前会话继续登录: {error}");
-                let _ = probe_error_tx.try_send(error);
+                let _ = probe_error_tx.try_send(RelayImportError::message(error));
             }
             return false;
         }
@@ -919,8 +853,9 @@ async fn browser_import(
             }
             Some(Err(error)) => {
                 log::warn!("凭据回传解析失败: {error}");
-                let _ = credential_error_tx.try_send(error.to_string());
-                let _ = app_for_nav.emit("relay-login-error", error.to_string());
+                let message = error.to_string();
+                let _ = credential_error_tx.try_send(error.into());
+                let _ = app_for_nav.emit("relay-login-error", message);
                 false
             }
         }
@@ -935,7 +870,7 @@ async fn browser_import(
         }
     });
 
-    let refresh_url = newapi_refresh_url(&site_origin)?;
+    let refresh_url = newapi::refresh_url(&site_origin)?;
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
         let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
@@ -960,7 +895,7 @@ async fn browser_import(
                     let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
                         Ok(Some(refresh_cookie)) => refresh_cookie,
                         Ok(None) => continue,
-                        Err(error) => break BrowserLoginOutcome::Error(error.to_string()),
+                        Err(error) => break BrowserLoginOutcome::Error(error.into()),
                     };
                     let interrupt = async {
                         tokio::select! {
@@ -982,7 +917,7 @@ async fn browser_import(
                             break BrowserLoginOutcome::NewApiSession(session)
                         }
                         RefreshWait::Refreshed(Err(error)) => {
-                            break BrowserLoginOutcome::Error(error.to_string())
+                            break BrowserLoginOutcome::Error(error.into())
                         }
                     }
                 }
@@ -1036,7 +971,7 @@ async fn browser_import(
         }
         Ok(BrowserLoginOutcome::Error(error)) => {
             let _ = window.destroy();
-            Err(AppError::Config(error))
+            Err(error)
         }
         Ok(BrowserLoginOutcome::Closed) => import_result_after_incomplete_browser_flow(&context),
         Err(_) => {
@@ -1051,7 +986,7 @@ async fn browser_import(
 
 fn import_result_after_incomplete_browser_flow(
     context: &Arc<Mutex<Option<BrowserLoginContext>>>,
-) -> Result<ImportResult, AppError> {
+) -> Result<ImportResult, RelayImportError> {
     let browser_context = context
         .lock()
         .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
@@ -1086,12 +1021,9 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 记下行 id —— 凭据要写回这一行，而 `save_credentials` 可能因为发现重复账号
     // 而把它合并到别的行去。
     // 顺带取出登录标识：重登时预填进登录框，用户只需补密码与人机验证。
-    let (relay_id, site_origin, login_identifier, backend_kind) = {
-        let state = app_handle.state::<AppState>();
-        let op = with_conn(&state, |conn| creds::get(conn, target_id))?
-            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {target_id} 的中转站")))?;
-        (op.id, op.site_origin, op.login_identifier, op.backend_kind)
-    };
+    let op = load_validated_relay(app_handle, target_id).await?;
+    let (relay_id, site_origin, login_identifier, backend_kind) =
+        (op.id, op.site_origin, op.login_identifier, op.backend_kind);
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
     //
@@ -1117,7 +1049,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
 
     // 落哪个页面由「这一行登录过没有」决定：新加的站落 `/register`，重登落 `/login`。
-    let url = url::Url::parse(&backend_login_url(
+    let url = url::Url::parse(&backend::browser_login_url(
         &site_origin,
         backend_kind,
         &login_identifier,
@@ -1144,15 +1076,13 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let handle_for_nav = app_handle.clone();
-    let initialization_script = match backend_kind {
-        discovery::BackendKind::Sub2Api => login::login_script(
-            &site_origin,
-            &login_identifier,
-            login_aff_code.as_deref(),
-            login_promo_code.as_deref(),
-        ),
-        discovery::BackendKind::NewApi => String::new(),
-    };
+    let initialization_script = backend::browser_login_script(
+        &site_origin,
+        backend_kind,
+        &login_identifier,
+        login_aff_code.as_deref(),
+        login_promo_code.as_deref(),
+    );
     let backend_kind_for_nav = backend_kind;
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
@@ -1245,7 +1175,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         }
     });
 
-    let refresh_url = newapi_refresh_url(&site_origin)?;
+    let refresh_url = newapi::refresh_url(&site_origin)?;
     // 等 sub2api 凭据、NewAPI HttpOnly refresh cookie 或用户关窗。5 分钟够走完注册 +
     // 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
@@ -1261,7 +1191,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                     let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
                         Ok(Some(refresh_cookie)) => refresh_cookie,
                         Ok(None) => continue,
-                        Err(error) => break BrowserLoginOutcome::Error(error.to_string()),
+                        Err(error) => break BrowserLoginOutcome::Error(error.into()),
                     };
                     match await_refresh_preserving_rotation(
                         refresh_newapi_browser_session(&site_origin, &refresh_cookie),
@@ -1277,7 +1207,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                             break BrowserLoginOutcome::NewApiSession(session)
                         }
                         RefreshWait::Refreshed(Err(error)) => {
-                            break BrowserLoginOutcome::Error(error.to_string())
+                            break BrowserLoginOutcome::Error(error.into())
                         }
                     }
                 }
@@ -1326,7 +1256,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         }
         Ok(BrowserLoginOutcome::Error(error)) => {
             let _ = window.destroy();
-            Err(AppError::Config(error))
+            Err(AppError::Config(error.message))
         }
         // 用户关掉了窗口，或超时。都不是错误。
         //
@@ -1429,15 +1359,11 @@ fn persist_newapi_login_session(
 /// 「给 A 获取密钥」静默作用到 B 上（那是 review 抓出过的真实并发正确性问题，
 /// 见 [`relay_provision`] 的文档）。2026-08-04 连带 `is_current` 一起删掉了
 /// 那条 `Option` 分支。
-async fn usable_relay(
-    app_handle: &tauri::AppHandle,
+async fn usable_relay<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
 ) -> Result<creds::Relay, AppError> {
-    let op = {
-        let state = app_handle.state::<AppState>();
-        with_conn(&state, |conn| creds::get(conn, relay_id))?
-            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
-    };
+    let op = load_validated_relay(app_handle, relay_id).await?;
 
     if op.token_looks_valid(chrono::Utc::now().timestamp()) {
         // ⭐ **token 够用，但账号身份可能缺** —— 补一次再返回。
@@ -1475,6 +1401,39 @@ async fn usable_relay(
     Ok(backfill_account_identity(app_handle, renewed).await)
 }
 
+async fn load_validated_relay<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    relay_id: i64,
+) -> Result<creds::Relay, AppError> {
+    let op = {
+        let state = app_handle.state::<AppState>();
+        with_conn(&state, |conn| creds::get(conn, relay_id))?
+            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
+    };
+
+    match discovery::probe_site(&op.site_origin).await {
+        Ok(detected) if detected.backend_kind == op.backend_kind => Ok(op),
+        Ok(_) => {
+            let state = app_handle.state::<AppState>();
+            with_conn(&state, |conn| creds::clear_credentials(conn, relay_id))?;
+            Err(AppError::Config(
+                "站点协议已变化，已清除旧凭据，请重新添加或登录".into(),
+            ))
+        }
+        Err(error) if error.kind == discovery::DiscoveryErrorKind::Transport => Err(
+            AppError::Config(format!("连接站点失败，未改动已有凭据：{}", error.message)),
+        ),
+        Err(error) => {
+            let state = app_handle.state::<AppState>();
+            with_conn(&state, |conn| creds::clear_credentials(conn, relay_id))?;
+            Err(AppError::Config(format!(
+                "站点协议无法安全识别，已清除旧凭据：{}",
+                error.message
+            )))
+        }
+    }
+}
+
 /// 打一次 profile，把账号身份写回库并更新手上这份 `op`。
 ///
 /// 两个调用点、两种动机，但做的事完全一样，所以共用一个函数（各写一遍迟早分叉）：
@@ -1488,8 +1447,8 @@ async fn usable_relay(
 /// 调用方此刻的凭据**已经可用**（要么本来有效、要么刚续期成功）。账号标签陈旧或
 /// `account_id` 还是空，都只影响显示与去重，不影响这一次请求 —— 为它把整个操作
 /// 判失败会让用户在「明明能用」的时候被挡住。
-async fn backfill_account_identity(
-    app_handle: &tauri::AppHandle,
+async fn backfill_account_identity<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     mut op: creds::Relay,
 ) -> creds::Relay {
     let account = match backend::RuntimeBackend::for_relay(&op).account().await {
@@ -1791,12 +1750,13 @@ async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, A
         }
         discovery::BackendKind::NewApi => {
             let client = newapi::NewApiClient::new(&op.site_origin, &op.auth_token)?;
-            let result = newapi_provision::reconcile(&client).await?;
-            if op.account_id.is_some() && op.account_id != Some(result.account_id) {
+            let account = client.account().await?;
+            if op.account_id.is_some() && op.account_id != Some(account.id) {
                 return Err(AppError::Config(
                     "NewAPI 登录态所属账号与本地中转站账号不一致，请重新登录".into(),
                 ));
             }
+            let result = newapi_provision::reconcile_for_account(&client, account.id).await?;
 
             let mut batch = ManagedProvisionBatch {
                 account_id: Some(result.account_id),
@@ -3736,60 +3696,35 @@ mod tests {
         )
         .expect("valid browser start URL");
 
-        assert_eq!(url.as_str(), "https://api.example.com/register");
-    }
-
-    #[test]
-    fn backend_login_url_keeps_sub2api_and_selects_newapi_new_or_relogin_pages() {
         assert_eq!(
-            backend_login_url(
-                "https://api.example.com",
-                discovery::BackendKind::Sub2Api,
-                ""
-            ),
-            "https://api.example.com/register"
-        );
-        assert_eq!(
-            backend_login_url(
-                "https://api.example.com",
-                discovery::BackendKind::Sub2Api,
-                "me@example.com"
-            ),
-            "https://api.example.com/login"
-        );
-        assert_eq!(
-            backend_login_url(
+            url.as_str(),
+            backend::browser_login_url(
                 "https://api.example.com",
                 discovery::BackendKind::NewApi,
                 ""
-            ),
-            "https://api.example.com/register"
-        );
-        assert_eq!(
-            backend_login_url(
-                "https://api.example.com",
-                discovery::BackendKind::NewApi,
-                "newapi-login"
-            ),
-            "https://api.example.com/login"
+            )
         );
     }
 
     #[test]
     fn native_protocol_conflict_is_terminal_while_unsupported_site_can_fall_back() {
-        let conflict =
-            recoverable_native_discovery_error(AppError::Config("protocol_conflict".into()));
+        let conflict = recoverable_native_discovery_error(discovery::DiscoveryError {
+            kind: discovery::DiscoveryErrorKind::ProtocolConflict,
+            message: "conflict".into(),
+        });
         assert_eq!(
             conflict
                 .expect_err("conflict must not open browser fallback")
-                .to_string(),
-            "配置错误: protocol_conflict"
+                .message,
+            "conflict"
         );
 
-        let unsupported =
-            recoverable_native_discovery_error(AppError::Config("unsupported_site".into()))
-                .expect("unsupported site can use browser fallback");
-        assert_eq!(unsupported.to_string(), "配置错误: unsupported_site");
+        let unsupported = recoverable_native_discovery_error(discovery::DiscoveryError {
+            kind: discovery::DiscoveryErrorKind::UnsupportedSite,
+            message: "unsupported".into(),
+        })
+        .expect("unsupported site can use browser fallback");
+        assert_eq!(unsupported.to_string(), "unsupported");
     }
 
     #[tokio::test]
@@ -3826,28 +3761,6 @@ mod tests {
             .expect("refresh task does not panic");
 
         assert!(matches!(outcome, RefreshWait::Refreshed(Ok("rotated"))));
-    }
-
-    #[test]
-    fn newapi_cookie_extraction_accepts_only_nonblank_refresh_values() {
-        let mut http_only_cookie = tauri::webview::Cookie::new("new_api_refresh", "refresh-cookie");
-        http_only_cookie.set_http_only(true);
-        let cookies = vec![
-            tauri::webview::Cookie::new("unrelated", "value"),
-            tauri::webview::Cookie::new("new_api_refresh", "   "),
-            tauri::webview::Cookie::new("new_api_refresh", "not-http-only"),
-            http_only_cookie,
-        ];
-
-        assert_eq!(
-            extract_newapi_refresh_cookie(&cookies).as_deref(),
-            Some("refresh-cookie")
-        );
-        assert!(extract_newapi_refresh_cookie(&[tauri::webview::Cookie::new(
-            "new_api_refresh",
-            "\t"
-        )])
-        .is_none());
     }
 
     #[test]
@@ -3905,6 +3818,7 @@ mod tests {
                 relay_id: 7,
                 site_origin: "https://api.example.com".into(),
                 site_name: "Example".into(),
+                backend_kind: discovery::BackendKind::NewApi,
             },
             LoginResult {
                 relay_id: 11,
@@ -4379,6 +4293,288 @@ mod tests {
             token_expires_at: None,
             sort_index: 0,
         }
+    }
+
+    async fn spawn_discovery_server(
+        sub2api_body: Option<serde_json::Value>,
+        newapi_body: Option<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{routing::get, Json, Router};
+
+        let mut app = Router::new();
+        if let Some(body) = sub2api_body {
+            app = app.route(
+                "/api/v1/settings/public",
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+        }
+        if let Some(body) = newapi_body {
+            app = app.route(
+                "/api/status",
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind discovery test server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve discovery app");
+        });
+        (origin, server)
+    }
+
+    fn newapi_discovery_body() -> serde_json::Value {
+        serde_json::json!({
+            "success": true,
+            "data": {
+                "version": "1.0.0",
+                "system_name": "NewAPI",
+                "theme": "default",
+                "register_enabled": true,
+                "password_login_enabled": true
+            }
+        })
+    }
+
+    fn sub2api_discovery_body() -> serde_json::Value {
+        serde_json::json!({
+            "code": 0,
+            "message": "success",
+            "data": {
+                "site_name": "Sub2API",
+                "version": "1.0.0",
+                "api_base_url": "",
+                "registration_enabled": true,
+                "promo_code_enabled": false,
+                "invitation_code_enabled": false
+            }
+        })
+    }
+
+    fn saved_relay_app(
+        site_origin: &str,
+        backend_kind: discovery::BackendKind,
+    ) -> (tauri::App<tauri::test::MockRuntime>, i64) {
+        let db = Arc::new(crate::database::Database::memory().expect("memory database"));
+        let relay_id = {
+            let conn = db.conn.lock().expect("lock memory database");
+            let relay_id = creds::save_site_with_backend(
+                &conn,
+                site_origin,
+                "Saved relay",
+                site_origin,
+                backend_kind,
+            )
+            .expect("save relay");
+            creds::save_credentials(
+                &conn,
+                relay_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Saved Account",
+                    login_identifier: "saved-account",
+                },
+                "saved-access-token",
+                Some("saved-refresh-token"),
+                None,
+            )
+            .expect("save relay credentials");
+            relay_id
+        };
+        let app = tauri::test::mock_builder()
+            .manage(AppState::new(db))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app");
+        (app, relay_id)
+    }
+
+    fn relay_credentials(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        relay_id: i64,
+    ) -> creds::Relay {
+        let state = app.state::<AppState>();
+        with_conn(&state, |conn| creds::get(conn, relay_id))
+            .expect("read saved relay")
+            .expect("saved relay exists")
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_accepts_the_same_detected_backend() {
+        let (origin, server) = spawn_discovery_server(None, Some(newapi_discovery_body())).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let relay = usable_relay(app.handle(), relay_id)
+            .await
+            .expect("same backend remains usable");
+
+        assert_eq!(relay.backend_kind, discovery::BackendKind::NewApi);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_clears_credentials_on_detected_backend_mismatch() {
+        let (origin, server) = spawn_discovery_server(Some(sub2api_discovery_body()), None).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("backend mismatch must stop runtime dispatch");
+
+        assert!(error.to_string().contains("协议"), "{error}");
+        let relay = relay_credentials(&app, relay_id);
+        assert!(relay.auth_token.is_empty());
+        assert!(relay.refresh_token.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_clears_credentials_on_unsupported_or_conflicting_protocol() {
+        let cases = [
+            (
+                Some(serde_json::json!({ "unknown": "sub" })),
+                Some(serde_json::json!({ "unknown": "new" })),
+                "unsupported",
+            ),
+            (
+                Some(sub2api_discovery_body()),
+                Some(newapi_discovery_body()),
+                "conflict",
+            ),
+        ];
+
+        for (sub2api_body, newapi_body, case_name) in cases {
+            let (origin, server) = spawn_discovery_server(sub2api_body, newapi_body).await;
+            let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+            usable_relay(app.handle(), relay_id)
+                .await
+                .expect_err(case_name);
+
+            let relay = relay_credentials(&app, relay_id);
+            assert!(relay.auth_token.is_empty(), "{case_name}");
+            assert!(relay.refresh_token.is_none(), "{case_name}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_preserves_credentials_on_transport_only_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind connection-drop server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            for _ in 0..discovery::PROBE_CANDIDATES.len() {
+                let (stream, _) = listener.accept().await.expect("accept probe request");
+                drop(stream);
+            }
+        });
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("transport failure must stop dispatch");
+
+        assert!(error.to_string().contains("连接"), "{error}");
+        let relay = relay_credentials(&app, relay_id);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
+        server.await.expect("connection-drop server completes");
+    }
+
+    #[tokio::test]
+    async fn newapi_account_mismatch_stops_before_group_or_token_inventory() {
+        use axum::{routing::get, Json, Router};
+        use serde_json::json;
+
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let account_requests = Arc::clone(&requests);
+        let group_requests = Arc::clone(&requests);
+        let token_requests = Arc::clone(&requests);
+        let app = Router::new()
+            .route(
+                "/api/user/self",
+                get(move || {
+                    let requests = Arc::clone(&account_requests);
+                    async move {
+                        requests.lock().unwrap().push("account".into());
+                        Json(json!({
+                            "success": true,
+                            "data": {
+                                "id": 99,
+                                "username": "other-account",
+                                "display_name": "Other Account",
+                                "email": "other@example.test",
+                                "group": "default",
+                                "quota": 0,
+                                "used_quota": 0
+                            }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/user/self/groups",
+                get(move || {
+                    let requests = Arc::clone(&group_requests);
+                    async move {
+                        requests.lock().unwrap().push("groups".into());
+                        Json(json!({ "success": true, "data": {} }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/",
+                get(move || {
+                    let requests = Arc::clone(&token_requests);
+                    async move {
+                        requests.lock().unwrap().push("tokens".into());
+                        Json(json!({
+                            "success": true,
+                            "data": {
+                                "page": 1,
+                                "page_size": 100,
+                                "total": 0,
+                                "items": []
+                            }
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind account-mismatch server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        let op = creds::Relay {
+            site_origin: origin,
+            ..test_newapi_relay(7)
+        };
+
+        let error = match provision_backend(&op).await {
+            Ok(_) => panic!("persisted account mismatch must stop provisioning"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("账号不一致"), "{error}");
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["account"],
+            "account preflight must be the only remote request; no group/token inventory or mutation may run"
+        );
+        server.abort();
     }
 
     fn test_newapi_group(

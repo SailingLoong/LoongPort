@@ -41,6 +41,10 @@ describe("relayApi 的中转站定位参数", () => {
     });
   });
 
+  it("不再暴露旧的 sub2api-only probeSite 入口", () => {
+    expect("probeSite" in relayApi).toBe(false);
+  });
+
   it("login 把 relayId 透传给后端", async () => {
     await relayApi.login(7);
     expect(invokeMock).toHaveBeenCalledWith("relay_login", {

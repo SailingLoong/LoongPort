@@ -12,6 +12,37 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
 
+const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
+const REFRESH_PATH: &str = "/api/user/auth/refresh";
+
+pub fn login_url(site_origin: &str, login_identifier: &str) -> String {
+    if login_identifier.is_empty() {
+        format!("{site_origin}/register")
+    } else {
+        format!("{site_origin}/login")
+    }
+}
+
+pub fn login_script() -> String {
+    String::new()
+}
+
+pub fn refresh_url(site_origin: &str) -> Result<url::Url, AppError> {
+    url::Url::parse(&format!("{site_origin}{REFRESH_PATH}"))
+        .map_err(|error| AppError::InvalidInput(format!("NewAPI refresh 地址不对: {error}")))
+}
+
+pub fn extract_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
+    cookies
+        .iter()
+        .find(|cookie| {
+            cookie.name() == REFRESH_COOKIE_NAME
+                && cookie.http_only() == Some(true)
+                && !cookie.value().trim().is_empty()
+        })
+        .map(|cookie| cookie.value().to_string())
+}
+
 pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
     candidate: ProbeCandidate {
         id: "newapi",
@@ -623,6 +654,34 @@ mod tests {
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn browser_session_details_are_owned_by_newapi() {
+        assert_eq!(
+            login_url("https://api.example.com", ""),
+            "https://api.example.com/register"
+        );
+        assert_eq!(
+            login_url("https://api.example.com", "user"),
+            "https://api.example.com/login"
+        );
+        assert_eq!(
+            refresh_url("https://api.example.com").unwrap().as_str(),
+            "https://api.example.com/api/user/auth/refresh"
+        );
+
+        let mut valid = tauri::webview::Cookie::new("new_api_refresh", "refresh-cookie");
+        valid.set_http_only(true);
+        let cookies = vec![
+            tauri::webview::Cookie::new("new_api_refresh", "   "),
+            tauri::webview::Cookie::new("new_api_refresh", "not-http-only"),
+            valid,
+        ];
+        assert_eq!(
+            extract_refresh_cookie(&cookies).as_deref(),
+            Some("refresh-cookie")
+        );
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct RecordedRequest {

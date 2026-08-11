@@ -3,6 +3,7 @@
   const expectedOrigin = "https://relay.example";
   const candidates = [{"id":"sub2api","path":"/api/v1/settings/public"},{"id":"newapi","path":"/api/status"}];
   const callbackScheme = 'loongport-probe';
+  const requestTimeoutMs = 5000;
   let previousBatch = '';
   let probeInFlight = false;
 
@@ -21,19 +22,33 @@
     try {
       const responses = [];
       for (const candidate of candidates) {
+        const controller = new AbortController();
+        let timeoutId;
         try {
-          const response = await fetch(candidate.path, {
-            credentials: 'include',
-            cache: 'no-store',
-            headers: { Accept: 'application/json' },
+          const request = (async () => {
+            const response = await fetch(candidate.path, {
+              credentials: 'include',
+              cache: 'no-store',
+              headers: { Accept: 'application/json' },
+              signal: controller.signal,
+            });
+            return response.text();
+          })();
+          const timeout = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              controller.abort();
+              reject(new Error('probe request timed out'));
+            }, requestTimeoutMs);
           });
-          const body = await response.text();
+          const body = await Promise.race([request, timeout]);
           const trimmed = body.trim();
           if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) continue;
           if (new TextEncoder().encode(body).length > 65536) continue;
           responses.push({ candidate_id: candidate.id, body });
         } catch (_) {
           // 页面仍可能处于验证或跳转阶段；下一轮继续，不在浏览器层解释失败原因。
+        } finally {
+          if (timeoutId !== undefined) clearTimeout(timeoutId);
         }
       }
 

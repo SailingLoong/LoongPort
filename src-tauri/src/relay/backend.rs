@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::relay::{api, creds, newapi};
+use crate::relay::{api, creds, login, newapi};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,6 +32,32 @@ pub struct ProbeCandidate {
 pub struct ProbeAdapter {
     pub candidate: ProbeCandidate,
     pub detect: fn(&str) -> Option<DetectedSite>,
+}
+
+pub fn browser_login_url(
+    site_origin: &str,
+    backend_kind: BackendKind,
+    login_identifier: &str,
+) -> String {
+    match backend_kind {
+        BackendKind::Sub2Api => login::login_url(site_origin, login_identifier),
+        BackendKind::NewApi => newapi::login_url(site_origin, login_identifier),
+    }
+}
+
+pub fn browser_login_script(
+    site_origin: &str,
+    backend_kind: BackendKind,
+    login_identifier: &str,
+    aff_code: Option<&str>,
+    promo_code: Option<&str>,
+) -> String {
+    match backend_kind {
+        BackendKind::Sub2Api => {
+            login::login_script(site_origin, login_identifier, aff_code, promo_code)
+        }
+        BackendKind::NewApi => newapi::login_script(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +220,38 @@ mod tests {
         Json, Router,
     };
     use serde_json::json;
+
+    #[test]
+    fn browser_login_dispatch_keeps_protocol_details_out_of_commands() {
+        assert_eq!(
+            browser_login_url("https://api.example.com", BackendKind::Sub2Api, ""),
+            "https://api.example.com/register"
+        );
+        assert_eq!(
+            browser_login_url(
+                "https://api.example.com",
+                BackendKind::NewApi,
+                "newapi-login"
+            ),
+            "https://api.example.com/login"
+        );
+        assert!(!browser_login_script(
+            "https://api.example.com",
+            BackendKind::Sub2Api,
+            "",
+            None,
+            None
+        )
+        .is_empty());
+        assert!(browser_login_script(
+            "https://api.example.com",
+            BackendKind::NewApi,
+            "",
+            None,
+            None
+        )
+        .is_empty());
+    }
 
     use super::*;
     use crate::relay::creds::Relay;

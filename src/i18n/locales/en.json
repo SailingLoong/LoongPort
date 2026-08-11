@@ -3176,7 +3176,11 @@
       "inputLabelWithSponsors": "Or enter a relay service domain",
       "inputHint": "For example, bestapi.store or https://bestapi.store/usage",
       "sponsorsLabel": "Recommended relay services",
-      "sponsorAddAnother": "{{count}} accounts added · Add another"
+      "sponsorAddAnother": "{{count}} accounts added · Add another",
+      "unsupportedSite": "LoongPort could not identify a supported relay protocol. Check the address, complete any browser verification, and try again.",
+      "protocolConflict": "This site returned multiple relay protocols, so LoongPort cannot connect safely. Ask the site administrator to check its configuration.",
+      "transportError": "LoongPort could not reach this site. Check your network and the address, then try again.",
+      "importFailed": "Could not add the relay service. Try again later."
     },
     "vendor": {
       "add": "Add provider account",
