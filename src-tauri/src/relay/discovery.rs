@@ -384,16 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn browser_probe_script_serializes_slow_probe_rounds() {
-        let script = browser_probe_script("https://relay.example", PROBE_CANDIDATES);
-
-        assert!(script.contains("let probeInFlight = false"));
-        assert!(script.contains("if (probeInFlight) return"));
-        assert!(script.contains("probeInFlight = true"));
-        assert!(script.contains("finally {\n      probeInFlight = false"));
-    }
-
-    #[test]
     fn detector_registry_does_not_accept_new_api_as_sub2api() {
         assert!(detect_site("sub2api", newapi_status_body()).is_none());
     }
@@ -487,5 +477,17 @@ mod tests {
 
         assert_eq!(detected.backend_kind, BackendKind::NewApi);
         server.abort();
+    }
+
+    #[test]
+    #[ignore = "exports the generated script for browserProbeScriptRuns.test.ts"]
+    fn export_browser_probe_script() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&dir).expect("create target directory");
+        std::fs::write(
+            dir.join("browser-probe-script.js"),
+            browser_probe_script("https://relay.example", PROBE_CANDIDATES),
+        )
+        .expect("write browser probe script");
     }
 }

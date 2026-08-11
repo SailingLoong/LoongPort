@@ -183,14 +183,21 @@ enum RefreshWait<T, I> {
     Refreshed(Result<T, AppError>),
 }
 
-async fn await_refresh_or_interrupt<T, I>(
+/// Refresh-token rotation is a non-cancellable write once the HTTP request starts: the server
+/// may invalidate the old cookie before the client observes the rotated one. An interrupt stops
+/// future polling, but this helper drains the bounded refresh request and preserves any success.
+async fn await_refresh_preserving_rotation<T, I>(
     refresh: impl Future<Output = Result<T, AppError>>,
     interrupt: impl Future<Output = I>,
 ) -> RefreshWait<T, I> {
+    tokio::pin!(refresh);
     tokio::select! {
         biased;
-        interrupted = interrupt => RefreshWait::Interrupted(interrupted),
-        refreshed = refresh => RefreshWait::Refreshed(refreshed),
+        refreshed = &mut refresh => RefreshWait::Refreshed(refreshed),
+        interrupted = interrupt => match refresh.await {
+            Ok(value) => RefreshWait::Refreshed(Ok(value)),
+            Err(_) => RefreshWait::Interrupted(interrupted),
+        },
     }
 }
 
@@ -964,7 +971,7 @@ async fn browser_import(
                                 .unwrap_or(BrowserLoginOutcome::Closed),
                         }
                     };
-                    match await_refresh_or_interrupt(
+                    match await_refresh_preserving_rotation(
                         refresh_newapi_browser_session(&site_origin, &refresh_cookie),
                         interrupt,
                     )
@@ -1256,7 +1263,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                         Ok(None) => continue,
                         Err(error) => break BrowserLoginOutcome::Error(error.to_string()),
                     };
-                    match await_refresh_or_interrupt(
+                    match await_refresh_preserving_rotation(
                         refresh_newapi_browser_session(&site_origin, &refresh_cookie),
                         async {
                             let _ = closed_rx.recv().await;
@@ -3615,27 +3622,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_interrupt_wins_when_close_and_refresh_are_ready_together() {
-        let outcome = await_refresh_or_interrupt(async { Ok::<_, AppError>("refreshed") }, async {
-            "closed"
-        })
-        .await;
+    async fn completed_refresh_wins_when_close_and_refresh_are_ready_together() {
+        let outcome =
+            await_refresh_preserving_rotation(async { Ok::<_, AppError>("refreshed") }, async {
+                "closed"
+            })
+            .await;
 
-        assert!(matches!(outcome, RefreshWait::Interrupted("closed")));
+        assert!(matches!(outcome, RefreshWait::Refreshed(Ok("refreshed"))));
     }
 
     #[tokio::test]
-    async fn refresh_interrupt_remains_selectable_while_refresh_is_pending() {
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            await_refresh_or_interrupt(futures::future::pending::<Result<(), AppError>>(), async {
-                "closed"
-            }),
-        )
-        .await
-        .expect("close must not wait for native refresh");
+    async fn refresh_started_before_close_is_drained_to_preserve_rotation() {
+        let (release_refresh, wait_for_release) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(await_refresh_preserving_rotation(
+            async {
+                wait_for_release
+                    .await
+                    .expect("test releases the refresh response");
+                Ok::<_, AppError>("rotated")
+            },
+            async { "closed" },
+        ));
 
-        assert!(matches!(outcome, RefreshWait::Interrupted("closed")));
+        tokio::task::yield_now().await;
+        release_refresh
+            .send(())
+            .expect("refresh waiter remains alive after close");
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), task)
+            .await
+            .expect("bounded refresh completes")
+            .expect("refresh task does not panic");
+
+        assert!(matches!(outcome, RefreshWait::Refreshed(Ok("rotated"))));
     }
 
     #[test]
