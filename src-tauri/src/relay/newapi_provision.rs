@@ -80,6 +80,7 @@ pub struct ReconcileResult {
 struct CanonicalToken {
     group: Group,
     token: Token,
+    duplicate_tokens: Vec<Token>,
     token_was_created: bool,
 }
 
@@ -99,7 +100,11 @@ fn is_enabled(token: &Token) -> bool {
     token.status == 1
 }
 
-fn canonical_token(tokens: &[Token], account_id: i64, group: &Group) -> Option<(Token, Vec<i64>)> {
+fn canonical_token(
+    tokens: &[Token],
+    account_id: i64,
+    group: &Group,
+) -> Option<(Token, Vec<Token>)> {
     let name = managed_token_name(account_id, &group.identity);
     let mut matches = tokens
         .iter()
@@ -108,10 +113,7 @@ fn canonical_token(tokens: &[Token], account_id: i64, group: &Group) -> Option<(
         .collect::<Vec<_>>();
     let canonical = matches.iter().max_by_key(|token| token.id).cloned()?;
     matches.retain(|token| token.id != canonical.id);
-    Some((
-        canonical,
-        matches.into_iter().map(|token| token.id).collect(),
-    ))
+    Some((canonical, matches))
 }
 
 fn belongs_to_current_account(token: &Token, account_id: i64) -> bool {
@@ -152,15 +154,14 @@ pub async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppErro
         stale_tokens_deleted: 0,
     };
     let mut canonical = Vec::new();
-    let mut stale_token_ids = HashSet::new();
     let mut missing_groups = Vec::new();
 
     for group in &groups {
         if let Some((token, duplicates)) = canonical_token(&initial_tokens, account_id, group) {
-            stale_token_ids.extend(duplicates);
             canonical.push(CanonicalToken {
                 group: group.clone(),
                 token,
+                duplicate_tokens: duplicates,
                 token_was_created: false,
             });
         } else {
@@ -197,10 +198,10 @@ pub async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppErro
                 for group in created_groups {
                     if let Some((token, duplicates)) = canonical_token(&tokens, account_id, &group)
                     {
-                        stale_token_ids.extend(duplicates);
                         canonical.push(CanonicalToken {
                             group,
                             token,
+                            duplicate_tokens: duplicates,
                             token_was_created: true,
                         });
                     } else {
@@ -224,42 +225,29 @@ pub async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppErro
         }
     }
 
-    for token in &cleanup_tokens {
-        if belongs_to_current_account(token, account_id)
-            && !observed_set.contains(&GroupIdentity(token.group.clone()))
-        {
-            stale_token_ids.insert(token.id);
-        }
-    }
+    let removed_group_tokens = cleanup_tokens
+        .into_iter()
+        .filter(|token| {
+            belongs_to_current_account(token, account_id)
+                && !observed_set.contains(&GroupIdentity(token.group.clone()))
+        })
+        .collect::<Vec<_>>();
+    delete_stale_tokens(client, &mut result, removed_group_tokens).await;
 
-    let cleanup_groups = cleanup_tokens
-        .iter()
-        .filter(|token| stale_token_ids.contains(&token.id))
-        .map(|token| (token.id, GroupIdentity(token.group.clone())))
-        .collect::<HashMap<_, _>>();
-    let mut stale_token_ids = stale_token_ids.into_iter().collect::<Vec<_>>();
-    stale_token_ids.sort_unstable();
-    for token_id in stale_token_ids {
-        match client.delete_token(token_id).await {
-            Ok(()) => result.stale_tokens_deleted += 1,
-            Err(error) => result.failures.push(failure(
-                cleanup_groups.get(&token_id).cloned(),
-                ReconcileStage::DeleteStale,
-                error,
-            )),
-        }
-    }
-
+    let mut revealed_duplicate_tokens = Vec::new();
     for item in canonical {
         match client.reveal_token(item.token.id).await {
-            Ok(api_key) => result.groups.push(ReconciledGroup {
-                identity: item.group.identity,
-                name: item.group.name,
-                rate_multiplier: item.group.rate_multiplier,
-                description: item.group.description,
-                api_key,
-                token_was_created: item.token_was_created,
-            }),
+            Ok(api_key) => {
+                revealed_duplicate_tokens.extend(item.duplicate_tokens);
+                result.groups.push(ReconciledGroup {
+                    identity: item.group.identity,
+                    name: item.group.name,
+                    rate_multiplier: item.group.rate_multiplier,
+                    description: item.group.description,
+                    api_key,
+                    token_was_created: item.token_was_created,
+                });
+            }
             Err(error) => result.failures.push(failure(
                 Some(item.group.identity),
                 ReconcileStage::Reveal,
@@ -267,6 +255,7 @@ pub async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppErro
             )),
         }
     }
+    delete_stale_tokens(client, &mut result, revealed_duplicate_tokens).await;
 
     if !result.observed_groups.is_empty() && result.groups.is_empty() {
         return Err(AppError::Config(
@@ -274,6 +263,31 @@ pub async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppErro
         ));
     }
     Ok(result)
+}
+
+async fn delete_stale_tokens(
+    client: &NewApiClient,
+    result: &mut ReconcileResult,
+    tokens: Vec<Token>,
+) {
+    let tokens = tokens
+        .into_iter()
+        .map(|token| (token.id, token))
+        .collect::<HashMap<_, _>>();
+    let mut token_ids = tokens.keys().copied().collect::<Vec<_>>();
+    token_ids.sort_unstable();
+    for token_id in token_ids {
+        match client.delete_token(token_id).await {
+            Ok(()) => result.stale_tokens_deleted += 1,
+            Err(error) => result.failures.push(failure(
+                tokens
+                    .get(&token_id)
+                    .map(|token| GroupIdentity(token.group.clone())),
+                ReconcileStage::DeleteStale,
+                error,
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -309,8 +323,10 @@ mod tests {
         next_token_id: i64,
         created: Vec<(String, String)>,
         deleted: Vec<i64>,
+        create_failures: HashSet<String>,
         reveal_failures: HashSet<i64>,
         delete_failures: HashSet<i64>,
+        relist_failure: bool,
         token_list_requests: usize,
     }
 
@@ -327,8 +343,10 @@ mod tests {
                 next_token_id,
                 created: Vec::new(),
                 deleted: Vec::new(),
+                create_failures: HashSet::new(),
                 reveal_failures: HashSet::new(),
                 delete_failures: HashSet::new(),
+                relist_failure: false,
                 token_list_requests: 0,
             }
         }
@@ -409,44 +427,52 @@ mod tests {
             }
             ("GET", "/api/token/") => {
                 state.token_list_requests += 1;
-                let items = state
-                    .tokens
-                    .iter()
-                    .map(|token| {
-                        json!({
-                            "id": token.id,
-                            "name": token.name,
-                            "key": "sk-masked",
-                            "status": token.status,
-                            "group": token.group
+                if state.relist_failure && state.token_list_requests == 2 {
+                    json!({ "success": false, "message": "relist failed" })
+                } else {
+                    let items = state
+                        .tokens
+                        .iter()
+                        .map(|token| {
+                            json!({
+                                "id": token.id,
+                                "name": token.name,
+                                "key": "sk-masked",
+                                "status": token.status,
+                                "group": token.group
+                            })
                         })
+                        .collect::<Vec<_>>();
+                    json!({
+                        "success": true,
+                        "data": {
+                            "page": 1,
+                            "page_size": 100,
+                            "total": items.len(),
+                            "items": items
+                        }
                     })
-                    .collect::<Vec<_>>();
-                json!({
-                    "success": true,
-                    "data": {
-                        "page": 1,
-                        "page_size": 100,
-                        "total": items.len(),
-                        "items": items
-                    }
-                })
+                }
             }
             ("POST", "/api/token/") => {
                 let payload: serde_json::Value =
                     serde_json::from_slice(&body).expect("valid create payload");
                 let name = payload["name"].as_str().expect("create name").to_string();
                 let group = payload["group"].as_str().expect("create group").to_string();
-                let id = state.next_token_id;
-                state.next_token_id += 1;
-                state.created.push((name.clone(), group.clone()));
-                state.tokens.push(TestToken {
-                    id,
-                    name,
-                    group,
-                    status: 1,
-                });
-                json!({ "success": true })
+                if state.create_failures.contains(&group) {
+                    json!({ "success": false, "message": "create failed" })
+                } else {
+                    let id = state.next_token_id;
+                    state.next_token_id += 1;
+                    state.created.push((name.clone(), group.clone()));
+                    state.tokens.push(TestToken {
+                        id,
+                        name,
+                        group,
+                        status: 1,
+                    });
+                    json!({ "success": true })
+                }
             }
             ("POST", path) if path.starts_with("/api/token/") && path.ends_with("/key") => {
                 let id = path
@@ -474,6 +500,7 @@ mod tests {
                 if state.delete_failures.contains(&id) {
                     json!({ "success": false, "message": "delete failed" })
                 } else {
+                    state.tokens.retain(|token| token.id != id);
                     json!({ "success": true })
                 }
             }
@@ -507,7 +534,7 @@ mod tests {
             "tier with spaces",
             "tier/slash",
             "中文分组",
-            "emoji-rocket",
+            "emoji-🚀",
             "very-long-group-name-very-long-group-name-very-long-group-name",
             " vip ",
             "vip",
@@ -594,10 +621,21 @@ mod tests {
         .await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let first = reconcile(&client).await.unwrap();
+        let second = reconcile(&client).await.unwrap();
+        let state = server.state.lock().await;
 
-        assert!(result.groups[0].api_key.ends_with("12"));
-        assert_eq!(server.state.lock().await.deleted, vec![10]);
+        assert!(first.groups[0].api_key.ends_with("12"));
+        assert_eq!(state.deleted, vec![10]);
+        assert_eq!(
+            state
+                .tokens
+                .iter()
+                .map(|token| token.id)
+                .collect::<Vec<_>>(),
+            vec![12]
+        );
+        assert_eq!(second.stale_tokens_deleted, 0);
     }
 
     #[tokio::test]
@@ -638,6 +676,90 @@ mod tests {
         assert_eq!(result.failures.len(), 1);
         assert_eq!(result.failures[0].stage, ReconcileStage::Reveal);
         assert!(server.state.lock().await.deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_retains_enabled_duplicate_when_higher_canonical_reveal_fails() {
+        let alpha = GroupIdentity("alpha".into());
+        let beta = GroupIdentity("beta".into());
+        let alpha_name = managed_token_name(7, &alpha);
+        let mut state = TestState::new(
+            7,
+            &["alpha", "beta"],
+            vec![
+                token(10, alpha_name.clone(), "alpha", 1),
+                token(12, alpha_name, "alpha", 1),
+                token(13, managed_token_name(7, &beta), "beta", 1),
+            ],
+        );
+        state.reveal_failures.insert(12);
+        let server = TestServer::spawn(state).await;
+        let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
+
+        let result = reconcile(&client).await.unwrap();
+        let state = server.state.lock().await;
+
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.failures[0].stage, ReconcileStage::Reveal);
+        assert!(state.deleted.is_empty());
+        assert!(state.tokens.iter().any(|token| token.id == 10));
+    }
+
+    #[tokio::test]
+    async fn reconcile_reports_one_group_create_failure_while_reconciling_another_group() {
+        let mut state = TestState::new(7, &["alpha", "beta"], Vec::new());
+        state.create_failures.insert("alpha".into());
+        let server = TestServer::spawn(state).await;
+        let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
+
+        let result = reconcile(&client).await.unwrap();
+
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].identity, GroupIdentity("beta".into()));
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures[0].group_identity,
+            Some(GroupIdentity("alpha".into()))
+        );
+        assert_eq!(result.failures[0].stage, ReconcileStage::Create);
+    }
+
+    #[tokio::test]
+    async fn reconcile_returns_overall_error_when_every_observed_group_create_fails() {
+        let mut state = TestState::new(7, &["alpha"], Vec::new());
+        state.create_failures.insert("alpha".into());
+        let server = TestServer::spawn(state).await;
+        let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
+
+        let error = reconcile(&client).await.unwrap_err().to_string();
+
+        assert!(error.contains("所有 NewAPI 分组"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_existing_success_when_post_create_relist_fails() {
+        let alpha = GroupIdentity("alpha".into());
+        let mut state = TestState::new(
+            7,
+            &["alpha", "beta"],
+            vec![token(10, managed_token_name(7, &alpha), "alpha", 1)],
+        );
+        state.relist_failure = true;
+        let server = TestServer::spawn(state).await;
+        let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
+
+        let result = reconcile(&client).await.unwrap();
+        let state = server.state.lock().await;
+
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].identity, alpha);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures[0].group_identity,
+            Some(GroupIdentity("beta".into()))
+        );
+        assert_eq!(result.failures[0].stage, ReconcileStage::Relist);
+        assert_eq!(state.token_list_requests, 2);
     }
 
     #[tokio::test]
