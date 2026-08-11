@@ -324,7 +324,7 @@ pub async fn refresh_session(
         .await
         .map_err(|error| AppError::Config(format!("newapi refresh 读响应出错: {error}")))?;
     if !status.is_success() {
-        return Err(classify_http_status("refresh", status));
+        return Err(classify_authenticated_http_status("refresh", status));
     }
 
     let refreshed = parse_envelope::<RefreshEnvelope>(&body, "refresh", true)?
@@ -399,7 +399,7 @@ fn describe_send_error(error: &reqwest::Error) -> String {
     output
 }
 
-fn classify_http_status(operation: &str, status: reqwest::StatusCode) -> AppError {
+fn classify_authenticated_http_status(operation: &str, status: reqwest::StatusCode) -> AppError {
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return AppError::Config(format!(
             "newapi {operation} 失败: 登录态已失效（HTTP {}），请重新登录中转站账号",
@@ -407,6 +407,13 @@ fn classify_http_status(operation: &str, status: reqwest::StatusCode) -> AppErro
         ));
     }
 
+    AppError::Config(format!(
+        "newapi {operation} 请求失败: HTTP {}",
+        status.as_u16()
+    ))
+}
+
+fn classify_public_http_status(operation: &str, status: reqwest::StatusCode) -> AppError {
     AppError::Config(format!(
         "newapi {operation} 请求失败: HTTP {}",
         status.as_u16()
@@ -436,7 +443,7 @@ pub async fn fetch_status(site_origin: &str) -> Result<Status, AppError> {
         .await
         .map_err(|error| AppError::Config(format!("newapi status 读响应出错: {error}")))?;
     if !status.is_success() {
-        return Err(classify_http_status("status", status));
+        return Err(classify_public_http_status("status", status));
     }
 
     parse_status(&body)
@@ -596,7 +603,7 @@ impl NewApiClient {
             .await
             .map_err(|error| AppError::Config(format!("newapi {operation} 读响应出错: {error}")))?;
         if !status.is_success() {
-            return Err(classify_http_status(operation, status));
+            return Err(classify_authenticated_http_status(operation, status));
         }
         Ok(body)
     }

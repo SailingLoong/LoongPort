@@ -1287,7 +1287,7 @@ fn apply_runtime_account_identity(op: &mut creds::Relay, account: backend::Runti
 }
 
 fn should_clear_credentials_after_probe_error(error: &AppError) -> bool {
-    backend::is_confirmed_auth_failure_message(&error.to_string())
+    backend::is_confirmed_auth_failure(error)
 }
 
 fn persist_refreshed_session(

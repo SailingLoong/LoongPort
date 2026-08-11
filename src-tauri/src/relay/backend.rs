@@ -56,8 +56,15 @@ pub struct RefreshedSession {
     pub account: Option<RuntimeAccount>,
 }
 
-pub fn is_confirmed_auth_failure_message(message: &str) -> bool {
-    message.contains("登录态已失效") || message.contains("请重新登录")
+pub fn is_confirmed_auth_failure(error: &AppError) -> bool {
+    match error {
+        AppError::Config(message)
+        | AppError::InvalidInput(message)
+        | AppError::Message(message) => {
+            message.contains("登录态已失效") || message.contains("请重新登录")
+        }
+        _ => false,
+    }
 }
 
 pub enum RuntimeBackend<'a> {
@@ -364,6 +371,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn newapi_public_status_401_is_not_a_confirmed_auth_failure() {
+        let app = Router::new()
+            .route(
+                "/api/user/self",
+                get(|| async {
+                    Json(json!({
+                        "success": true,
+                        "data": {
+                            "id": 84,
+                            "username": "quota-user",
+                            "display_name": "Quota User",
+                            "email": "quota@example.com",
+                            "group": "default",
+                            "quota": 1500000,
+                            "used_quota": 9000000
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/api/status",
+                get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "") }),
+            );
+        let (origin, server) = spawn(app).await;
+        let relay = relay(&origin, BackendKind::NewApi);
+
+        let error = RuntimeBackend::for_relay(&relay)
+            .balance()
+            .await
+            .unwrap_err();
+
+        assert!(!is_confirmed_auth_failure(&error), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn newapi_authenticated_self_401_is_a_confirmed_auth_failure() {
+        let app = Router::new().route(
+            "/api/user/self",
+            get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "") }),
+        );
+        let (origin, server) = spawn(app).await;
+        let relay = relay(&origin, BackendKind::NewApi);
+
+        let error = RuntimeBackend::for_relay(&relay)
+            .account()
+            .await
+            .unwrap_err();
+
+        assert!(is_confirmed_auth_failure(&error), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn newapi_refresh_uses_stored_cookie_and_returns_rotated_cookie() {
         let seen_cookie = Arc::new(Mutex::new(None::<String>));
         let seen_cookie_for_route = seen_cookie.clone();
@@ -468,12 +529,14 @@ mod tests {
 
     #[test]
     fn confirmed_auth_failure_messages_cover_newapi_and_expired_session_prompts() {
-        assert!(is_confirmed_auth_failure_message(
-            "newapi self 失败: 登录态已失效（HTTP 401），请重新登录中转站账号"
-        ));
-        assert!(is_confirmed_auth_failure_message("登录已过期，请重新登录"));
-        assert!(!is_confirmed_auth_failure_message(
-            "newapi self 请求失败: HTTP 500"
-        ));
+        assert!(is_confirmed_auth_failure(&AppError::Config(
+            "newapi self 失败: 登录态已失效（HTTP 401），请重新登录中转站账号".into()
+        )));
+        assert!(is_confirmed_auth_failure(&AppError::Config(
+            "登录已过期，请重新登录".into()
+        )));
+        assert!(!is_confirmed_auth_failure(&AppError::Config(
+            "newapi self 请求失败: HTTP 500".into()
+        )));
     }
 }
