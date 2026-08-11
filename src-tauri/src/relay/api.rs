@@ -834,11 +834,9 @@ pub async fn list_models(
         return Ok(None);
     }
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
         return Err(AppError::Config(format!(
-            "获取模型列表失败: HTTP {} {}",
-            status.as_u16(),
-            first_line(&body)
+            "获取模型列表失败: HTTP {}",
+            status.as_u16()
         )));
     }
 
@@ -1637,6 +1635,53 @@ mod tests {
         };
         assert!(mk("active").is_usable());
         assert!(!mk("disabled").is_usable());
+    }
+
+    #[tokio::test]
+    async fn list_models_does_not_expose_authenticated_response_bodies() {
+        const API_KEY: &str = "sk-model-list-secret";
+        const RESPONSE_MARKER: &str = "upstream-echoed-private-payload";
+
+        async fn leaking_error(
+            headers: axum::http::HeaderMap,
+        ) -> (axum::http::StatusCode, &'static str) {
+            assert_eq!(
+                headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer sk-model-list-secret")
+            );
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "upstream-echoed-private-payload sk-model-list-secret",
+            )
+        }
+
+        let app = axum::Router::new().route("/v1/models", axum::routing::get(leaking_error));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind model-list server");
+        let origin = format!("http://{}", listener.local_addr().expect("server addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve model-list response");
+        });
+
+        let error = list_models(&origin, API_KEY)
+            .await
+            .expect_err("502 model list must fail")
+            .to_string();
+
+        assert!(
+            error.contains("HTTP 502"),
+            "status remains diagnostic: {error}"
+        );
+        assert!(!error.contains(API_KEY), "error leaked API key: {error}");
+        assert!(
+            !error.contains(RESPONSE_MARKER),
+            "error leaked authenticated response body: {error}"
+        );
     }
 
     /// **传输错误必须带上 `source()` 链**。

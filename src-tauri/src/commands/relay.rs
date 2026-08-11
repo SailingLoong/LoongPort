@@ -1728,6 +1728,12 @@ fn newapi_candidates_for_group(
         .collect()
 }
 
+fn normalize_newapi_model_catalog(models: Option<Vec<String>>) -> Option<Vec<String>> {
+    models
+        .map(provision::normalize_model_names)
+        .filter(|models| !models.is_empty())
+}
+
 fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static str {
     match stage {
         newapi_provision::ReconcileStage::Create => "token_create",
@@ -1820,14 +1826,16 @@ async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, A
 
             for group in result.groups {
                 let models = match api::list_models(&op.site_origin, &group.api_key).await {
-                    Ok(Some(models)) => provision::normalize_model_names(models),
-                    Ok(None) => {
-                        batch.failures.push(FailureInfo {
-                            group_name: group.name,
-                            reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
-                        });
-                        continue;
-                    }
+                    Ok(models) => match normalize_newapi_model_catalog(models) {
+                        Some(models) => models,
+                        None => {
+                            batch.failures.push(FailureInfo {
+                                group_name: group.name,
+                                reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
+                            });
+                            continue;
+                        }
+                    },
                     Err(error) => {
                         batch.failures.push(FailureInfo {
                             group_name: group.name,
@@ -2007,20 +2015,9 @@ fn persist_provision_batch(
                 app_id: app_type.as_str().to_string(),
             }));
             if merged_current.iter().any(|m| m.was_current) {
-                match state
-                    .db
-                    .set_current_provider(app_type.as_str(), &provider_id)
-                {
-                    Ok(()) => {
-                        is_current = true;
-                        if !refresh_live.contains(app_type) {
-                            refresh_live.push(app_type.clone());
-                        }
-                    }
-                    Err(error) => batch.failures.push(FailureInfo {
-                        group_name: candidate.group_name.clone(),
-                        reason: format!("{}: 转移当前 provider 失败: {error}", app_type.as_str()),
-                    }),
+                is_current = true;
+                if !refresh_live.contains(app_type) {
+                    refresh_live.push(app_type.clone());
                 }
             }
         }
@@ -4200,6 +4197,82 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert!(merged[0].was_current);
+        assert_eq!(
+            db.get_current_provider(app_type.as_str())
+                .expect("读取收编后的当前项")
+                .as_deref(),
+            Some(managed.id.as_str())
+        );
+    }
+
+    #[test]
+    fn provision_merge_rolls_back_duplicate_deletion_when_current_transfer_fails() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let settings = provision::settings_config_for(
+            &app_type,
+            "sk-current",
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+        let duplicate = Provider {
+            id: "cc-switch-current".into(),
+            name: "Current imported duplicate".into(),
+            settings_config: settings,
+            website_url: Some("https://relay.example".into()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        db.save_provider(app_type.as_str(), &duplicate)
+            .expect("写入当前项");
+        db.set_current_provider(app_type.as_str(), &duplicate.id)
+            .expect("设为当前");
+
+        let managed = Provider {
+            id: provision::provider_id_for("https://relay.example", Some(1), 99),
+            name: "Managed replacement".into(),
+            meta: Some(managed_meta(&app_type, Some(1))),
+            ..duplicate.clone()
+        };
+        db.save_provider(app_type.as_str(), &managed)
+            .expect("写入托管替代项");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER fail_managed_current
+                 BEFORE UPDATE OF is_current ON providers
+                 WHEN NEW.id = '{}' AND NEW.is_current = 1
+                 BEGIN
+                   SELECT RAISE(FAIL, 'injected current transfer failure');
+                 END;",
+                managed.id
+            ))
+            .expect("install current-transfer failure");
+        }
+
+        let error = provider_fingerprint::remove_unmanaged_duplicates(&db, &app_type, &managed)
+            .expect_err("current transfer failure must roll back adoption")
+            .to_string();
+
+        assert!(error.contains("injected current transfer failure"));
+        assert!(db
+            .get_provider_by_id(&duplicate.id, app_type.as_str())
+            .expect("read duplicate")
+            .is_some());
+        assert_eq!(
+            db.get_current_provider(app_type.as_str())
+                .expect("read current after rollback")
+                .as_deref(),
+            Some(duplicate.id.as_str())
+        );
     }
 
     #[test]
@@ -4330,6 +4403,20 @@ mod tests {
             "claude-sonnet-4-5".into(),
             "gpt-5.4".into(),
         ])
+    }
+
+    #[test]
+    fn newapi_model_catalog_requires_at_least_one_normalized_model() {
+        assert!(normalize_newapi_model_catalog(None).is_none());
+        assert!(normalize_newapi_model_catalog(Some(vec!["  ".into(), "\n".into()])).is_none());
+        assert_eq!(
+            normalize_newapi_model_catalog(Some(vec![
+                " gpt-5.4 ".into(),
+                "gemini-2.5-pro".into(),
+                "gpt-5.4".into(),
+            ])),
+            Some(vec!["gemini-2.5-pro".into(), "gpt-5.4".into()])
+        );
     }
 
     fn newapi_batch(
@@ -5400,7 +5487,7 @@ mod tests {
             &src[start..start + end]
         };
         assert!(
-            provision.contains("refresh_live_for_current_tiers(&state, &refresh_live)"),
+            provision.contains("refresh_live_for_current_tiers(state, &refresh_live)"),
             "⭐ `do_provision` 不再刷新当前档位的 live config —— \
              sk 被撤销重建后，CLI 会一直用旧密钥，而用户点不动那个档位（UI 认为它已是当前项）"
         );
