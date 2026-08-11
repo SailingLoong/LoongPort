@@ -98,6 +98,18 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
     return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
   }}
 
+  function headersFor(candidate) {{
+    const headers = {{ Accept: 'application/json' }};
+    if (!candidate.bearer_token_storage_key) return headers;
+    try {{
+      const token = localStorage.getItem(candidate.bearer_token_storage_key);
+      if (token) headers.Authorization = 'Bearer ' + token;
+    }} catch (_) {{
+      // Some verification pages disable storage. Cookie-only probing still remains available.
+    }}
+    return headers;
+  }}
+
   async function probe() {{
     if (window.location.origin !== expectedOrigin) return;
     if (probeInFlight) return;
@@ -113,7 +125,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
             const response = await fetch(candidate.path, {{
               credentials: 'include',
               cache: 'no-store',
-              headers: {{ Accept: 'application/json' }},
+              headers: headersFor(candidate),
               signal: controller.signal,
             }});
             return response.text();
@@ -393,10 +405,12 @@ mod tests {
                 ProbeCandidate {
                     id: "sub2api",
                     path: "/api/v1/settings/public",
+                    bearer_token_storage_key: Some("auth_token"),
                 },
                 ProbeCandidate {
                     id: "newapi",
                     path: "/api/status",
+                    bearer_token_storage_key: None,
                 },
             ]
         );
@@ -408,10 +422,12 @@ mod tests {
             ProbeCandidate {
                 id: "sub2api",
                 path: "/api/v1/settings/public",
+                bearer_token_storage_key: Some("auth_token"),
             },
             ProbeCandidate {
                 id: "future",
                 path: "/api/status",
+                bearer_token_storage_key: None,
             },
         ];
         let script = browser_probe_script("https://relay.example", &candidates);

@@ -108,6 +108,66 @@ describe("browser probe generated script", () => {
     ).toHaveLength(3);
   });
 
+  it("uses the page's candidate-specific bearer session for authenticated browser probes", async () => {
+    const requests: Array<{
+      path: string;
+      authorization: string | undefined;
+    }> = [];
+    const navigations: string[] = [];
+    const location = {
+      origin: "https://relay.example",
+      get href() {
+        return navigations.at(-1) ?? "https://relay.example/dashboard";
+      },
+      set href(value: string) {
+        navigations.push(value);
+      },
+    };
+
+    const sandbox = {
+      window: { location },
+      localStorage: {
+        getItem: (key: string) =>
+          key === "auth_token" ? "browser-session-token" : null,
+      },
+      fetch: (
+        path: string,
+        init: { headers?: Record<string, string> } = {},
+      ) => {
+        const authorization = init.headers?.Authorization;
+        requests.push({ path, authorization });
+        const body =
+          path === "/api/v1/settings/public" &&
+          authorization === "Bearer browser-session-token"
+            ? '{"code":0}'
+            : "<html>verification required</html>";
+        return Promise.resolve({ text: () => Promise.resolve(body) });
+      },
+      setInterval: () => 1,
+      setTimeout,
+      clearTimeout,
+      AbortController,
+      TextEncoder,
+      btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
+      JSON,
+    };
+
+    vm.runInNewContext(readFileSync(SCRIPT, "utf8"), sandbox, {
+      timeout: 5000,
+    });
+    await flushPromises();
+
+    expect(requests[0]).toEqual({
+      path: "/api/v1/settings/public",
+      authorization: "Bearer browser-session-token",
+    });
+    expect(requests[1]).toEqual({
+      path: "/api/status",
+      authorization: undefined,
+    });
+    expect(navigations).toHaveLength(1);
+  });
+
   it("times out one candidate, continues the batch, and emits only after settlement", async () => {
     const fetchedPaths: string[] = [];
     const navigations: string[] = [];

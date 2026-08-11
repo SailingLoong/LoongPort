@@ -47,6 +47,7 @@ pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
     candidate: ProbeCandidate {
         id: "newapi",
         path: "/api/status",
+        bearer_token_storage_key: None,
     },
     detect: detect_site,
 };

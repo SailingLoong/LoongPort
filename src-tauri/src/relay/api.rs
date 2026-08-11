@@ -46,6 +46,7 @@ pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
     candidate: ProbeCandidate {
         id: "sub2api",
         path: "/api/v1/settings/public",
+        bearer_token_storage_key: Some("auth_token"),
     },
     detect: detect_site,
 };
