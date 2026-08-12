@@ -127,9 +127,13 @@ impl<'a> RuntimeBackend<'a> {
                 })
             }
             Self::NewApi { relay } => {
-                let account = newapi::NewApiClient::new(&relay.site_origin, &relay.auth_token)?
-                    .account()
-                    .await?;
+                let account = newapi::NewApiClient::with_optional_account_id(
+                    &relay.site_origin,
+                    &relay.auth_token,
+                    relay.account_id,
+                )?
+                .account()
+                .await?;
                 Ok(newapi_runtime_account(&account))
             }
         }
@@ -148,9 +152,13 @@ impl<'a> RuntimeBackend<'a> {
                 })
             }
             Self::NewApi { relay } => {
-                let account = newapi::NewApiClient::new(&relay.site_origin, &relay.auth_token)?
-                    .account()
-                    .await?;
+                let account = newapi::NewApiClient::with_optional_account_id(
+                    &relay.site_origin,
+                    &relay.auth_token,
+                    relay.account_id,
+                )?
+                .account()
+                .await?;
                 let status = newapi::fetch_status(&relay.site_origin).await?;
                 let quota_per_unit = status.quota_per_unit.ok_or_else(|| {
                     AppError::Config("newapi status 缺少 quota_per_unit，无法换算余额".into())
@@ -192,7 +200,7 @@ impl<'a> RuntimeBackend<'a> {
                 Ok(RefreshedSession {
                     auth_token: refreshed.access_token,
                     refresh_credential: Some(refreshed.refresh_cookie),
-                    token_expires_at: Some(refreshed.access_expires_at),
+                    token_expires_at: refreshed.access_expires_at,
                     account: Some(newapi_runtime_account(&refreshed.account)),
                 })
             }
@@ -250,7 +258,7 @@ mod tests {
             None
         )
         .is_empty());
-        assert!(browser_login_script(
+        assert!(!browser_login_script(
             "https://api.example.com",
             BackendKind::NewApi,
             "",
@@ -262,7 +270,10 @@ mod tests {
         let command_source = include_str!("../commands/relay.rs");
         for protocol_detail in [
             "new_api_refresh",
+            "loongport-newapi-session",
+            "New-Api-User",
             "/api/user/auth/refresh",
+            "/api/user/token",
             "fn backend_login_url(",
             "fn import_login_script(",
         ] {

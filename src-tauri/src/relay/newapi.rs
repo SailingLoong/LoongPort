@@ -14,6 +14,10 @@ use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandid
 
 const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
 const REFRESH_PATH: &str = "/api/user/auth/refresh";
+const SESSION_COOKIE_NAME: &str = "session";
+const SESSION_TOKEN_PATH: &str = "/api/user/token";
+const NEWAPI_USER_HEADER: &str = "New-Api-User";
+const SESSION_SCHEME: &str = "loongport-newapi-session";
 
 pub fn login_url(site_origin: &str, login_identifier: &str) -> String {
     if login_identifier.is_empty() {
@@ -24,12 +28,41 @@ pub fn login_url(site_origin: &str, login_identifier: &str) -> String {
 }
 
 pub fn login_script() -> String {
-    String::new()
+    format!(
+        r#"(function () {{
+  var scheme = '{SESSION_SCHEME}';
+  var sent = false;
+  function reportUser() {{
+    if (sent) return;
+    try {{
+      var raw = localStorage.getItem('user');
+      if (!raw) return;
+      var user = JSON.parse(raw);
+      var id = Number(user && user.id);
+      if (!Number.isSafeInteger(id) || id <= 0) return;
+      sent = true;
+      window.location.href = scheme + '://ok?user_id=' + encodeURIComponent(String(id));
+    }} catch (_) {{
+      // The page may briefly contain an incomplete localStorage value during login.
+    }}
+  }}
+  reportUser();
+  window.setInterval(reportUser, 500);
+}})();"#
+    )
 }
 
 pub fn refresh_url(site_origin: &str) -> Result<url::Url, AppError> {
     url::Url::parse(&format!("{site_origin}{REFRESH_PATH}"))
         .map_err(|error| AppError::InvalidInput(format!("NewAPI refresh 地址不对: {error}")))
+}
+
+pub fn session_token_url(site_origin: &str) -> Result<url::Url, AppError> {
+    url::Url::parse(&format!(
+        "{}{SESSION_TOKEN_PATH}",
+        site_origin.trim_end_matches('/')
+    ))
+    .map_err(|error| AppError::InvalidInput(format!("NewAPI session 地址不对: {error}")))
 }
 
 pub fn extract_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
@@ -41,6 +74,33 @@ pub fn extract_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<
                 && !cookie.value().trim().is_empty()
         })
         .map(|cookie| cookie.value().to_string())
+}
+
+pub fn extract_session_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
+    cookies
+        .iter()
+        .find(|cookie| cookie.name() == SESSION_COOKIE_NAME && !cookie.value().trim().is_empty())
+        .map(|cookie| cookie.value().to_string())
+}
+
+pub fn parse_session_navigation(url: &url::Url) -> Option<Result<i64, AppError>> {
+    if url.scheme() != SESSION_SCHEME {
+        return None;
+    }
+    Some(
+        url.query_pairs()
+            .find(|(key, _)| key == "user_id")
+            .ok_or_else(|| AppError::Config("NewAPI 登录回传缺少 user_id".into()))
+            .and_then(|(_, value)| {
+                let user_id = value
+                    .parse::<i64>()
+                    .map_err(|_| AppError::Config("NewAPI 登录回传的 user_id 格式不对".into()))?;
+                if user_id <= 0 {
+                    return Err(AppError::Config("NewAPI 登录回传的 user_id 无效".into()));
+                }
+                Ok(user_id)
+            }),
+    )
 }
 
 pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
@@ -100,9 +160,14 @@ fn parse_envelope<T: DeserializeOwned>(
 pub struct Status {
     pub version: String,
     pub system_name: String,
-    pub theme: String,
-    pub register_enabled: bool,
-    pub password_login_enabled: bool,
+    #[serde(default, rename = "_qn")]
+    pub implementation: Option<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub register_enabled: Option<bool>,
+    #[serde(default)]
+    pub password_login_enabled: Option<bool>,
     #[serde(default)]
     pub quota_per_unit: Option<f64>,
 }
@@ -118,8 +183,15 @@ pub fn parse_status(body: &str) -> Result<Status, AppError> {
             "newapi status 缺少非空 system_name".into(),
         ));
     }
-    if status.theme != "default" {
-        return Err(AppError::Config("newapi status theme 不是 default".into()));
+    let explicitly_identified = status
+        .implementation
+        .as_deref()
+        .is_some_and(|implementation| implementation.eq_ignore_ascii_case("new-api"));
+    let official_dashboard_shape = status.theme.as_deref() == Some("default")
+        && status.register_enabled.is_some()
+        && status.password_login_enabled.is_some();
+    if !explicitly_identified && !official_dashboard_shape {
+        return Err(AppError::Config("newapi status 缺少协议身份字段".into()));
     }
     Ok(status)
 }
@@ -307,11 +379,79 @@ pub fn parse_token_delete(body: &str) -> Result<TokenDelete, AppError> {
 
 pub struct RefreshedSession {
     pub access_token: String,
-    pub access_expires_at: i64,
+    pub access_expires_at: Option<i64>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub session_id: String,
     pub account: SelfAccount,
     pub refresh_cookie: String,
+}
+
+pub async fn exchange_session(
+    site_origin: &str,
+    session_cookie: &str,
+    user_id: i64,
+) -> Result<RefreshedSession, AppError> {
+    let site_origin = site_origin.trim().trim_end_matches('/');
+    if site_origin.is_empty() {
+        return Err(AppError::InvalidInput("newapi site_origin 不能为空".into()));
+    }
+    if session_cookie.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "newapi session cookie 不能为空".into(),
+        ));
+    }
+    if user_id <= 0 {
+        return Err(AppError::InvalidInput("newapi user id 无效".into()));
+    }
+
+    let client = crate::relay::api::build_client()?;
+    let response = client
+        .get(format!("{site_origin}{SESSION_TOKEN_PATH}"))
+        .header("Origin", site_origin)
+        .header("Cookie", format!("{SESSION_COOKIE_NAME}={session_cookie}"))
+        .header(NEWAPI_USER_HEADER, user_id.to_string())
+        .send()
+        .await
+        .map_err(|error| {
+            AppError::Config(format!(
+                "newapi session 换 token 请求失败: {}",
+                describe_send_error(&error)
+            ))
+        })?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| {
+        AppError::Config(format!("newapi session 换 token 读响应出错: {error}"))
+    })?;
+    if !status.is_success() {
+        return Err(classify_authenticated_http_status(
+            "session 换 token",
+            status,
+        ));
+    }
+
+    let access_token = parse_envelope::<String>(&body, "session 换 token", true)?
+        .expect("requires_data guarantees access token");
+    if access_token.trim().is_empty() {
+        return Err(AppError::Config(
+            "newapi session 换 token 响应缺少非空 access token".into(),
+        ));
+    }
+    let account = NewApiClient::with_account_id(site_origin, &access_token, user_id)?
+        .account()
+        .await?;
+    if account.id != user_id {
+        return Err(AppError::Config(
+            "newapi 登录回传的账号与服务端账号不一致".into(),
+        ));
+    }
+
+    Ok(RefreshedSession {
+        access_token,
+        access_expires_at: None,
+        session_id: String::new(),
+        account,
+        refresh_cookie: String::new(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,7 +530,7 @@ pub async fn refresh_session(
 
     Ok(RefreshedSession {
         access_token: refreshed.access_token,
-        access_expires_at: refreshed.access_expires_at,
+        access_expires_at: Some(refreshed.access_expires_at),
         session_id: refreshed.session.sid,
         account: refreshed.user,
         refresh_cookie: rotated_cookie,
@@ -498,6 +638,7 @@ const TOKEN_PAGE_LIMIT: i64 = 100;
 pub struct NewApiClient {
     site_origin: String,
     access_token: String,
+    account_id: Option<i64>,
     http: reqwest::Client,
 }
 
@@ -531,8 +672,33 @@ impl NewApiClient {
         Ok(Self {
             site_origin,
             access_token: access_token.to_string(),
+            account_id: None,
             http: crate::relay::api::build_client()?,
         })
+    }
+
+    pub fn with_account_id(
+        site_origin: &str,
+        access_token: &str,
+        account_id: i64,
+    ) -> Result<Self, AppError> {
+        if account_id <= 0 {
+            return Err(AppError::InvalidInput("newapi account id 无效".into()));
+        }
+        let mut client = Self::new(site_origin, access_token)?;
+        client.account_id = Some(account_id);
+        Ok(client)
+    }
+
+    pub fn with_optional_account_id(
+        site_origin: &str,
+        access_token: &str,
+        account_id: Option<i64>,
+    ) -> Result<Self, AppError> {
+        match account_id {
+            Some(account_id) => Self::with_account_id(site_origin, access_token, account_id),
+            None => Self::new(site_origin, access_token),
+        }
     }
 
     pub async fn account(&self) -> Result<SelfAccount, AppError> {
@@ -603,7 +769,7 @@ impl NewApiClient {
     pub async fn reveal_token(&self, token_id: i64) -> Result<String, AppError> {
         let body = self
             .send(
-                self.request(reqwest::Method::POST, &format!("/api/token/{token_id}/key")),
+                self.request(reqwest::Method::GET, &format!("/api/token/{token_id}/key")),
                 "token reveal",
             )
             .await?;
@@ -622,9 +788,14 @@ impl NewApiClient {
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
+        let request = self
+            .http
             .request(method, format!("{}{}", self.site_origin, path))
-            .bearer_auth(&self.access_token)
+            .bearer_auth(&self.access_token);
+        match self.account_id {
+            Some(account_id) => request.header(NEWAPI_USER_HEADER, account_id.to_string()),
+            None => request,
+        }
     }
 
     async fn send(
@@ -690,6 +861,30 @@ mod tests {
         assert_eq!(
             extract_refresh_cookie(&cookies).as_deref(),
             Some("refresh-cookie")
+        );
+
+        let session_cookies = vec![
+            tauri::webview::Cookie::new("session", "   "),
+            tauri::webview::Cookie::new("other", "ignored"),
+            tauri::webview::Cookie::new("session", "session-cookie"),
+        ];
+        assert_eq!(
+            extract_session_cookie(&session_cookies).as_deref(),
+            Some("session-cookie")
+        );
+
+        let script = login_script();
+        assert!(script.contains("localStorage.getItem('user')"));
+        assert!(script.contains("Number.isSafeInteger(id)"));
+        assert!(!script.contains("document.cookie"));
+        assert!(!script.contains("access_token"));
+
+        let callback = url::Url::parse("loongport-newapi-session://ok?user_id=42").unwrap();
+        assert_eq!(parse_session_navigation(&callback).unwrap().unwrap(), 42);
+        let malformed = url::Url::parse("loongport-newapi-session://ok?user_id=nope").unwrap();
+        assert!(parse_session_navigation(&malformed).unwrap().is_err());
+        assert!(
+            parse_session_navigation(&url::Url::parse("https://example.com").unwrap()).is_none()
         );
     }
 
@@ -860,7 +1055,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(refreshed.access_token, "access-123");
-        assert_eq!(refreshed.access_expires_at, 1_700_000_001);
+        assert_eq!(refreshed.access_expires_at, Some(1_700_000_001));
         assert_eq!(refreshed.session_id, "sid-123");
         assert_eq!(refreshed.refresh_cookie, "sid-123.rotated-secret");
         assert_eq!(refreshed.account.username, "alice");
@@ -1113,6 +1308,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_exchange_uses_browser_cookie_and_newapi_user_header() {
+        let server = TestServer::spawn(vec![
+            TestResponse::json(r#"{"success":true,"message":"","data":"access-secret"}"#),
+            TestResponse::json(
+                r#"{"success":true,"message":"","data":{
+                    "id":42,"username":"erin","display_name":"Erin","email":"e@example.com",
+                    "group":"vip","quota":12,"used_quota":3
+                }}"#,
+            ),
+        ])
+        .await;
+
+        let session = exchange_session(&server.origin, "session-secret", 42)
+            .await
+            .unwrap();
+
+        assert_eq!(session.access_token, "access-secret");
+        assert_eq!(session.access_expires_at, None);
+        assert_eq!(session.refresh_cookie, "");
+        assert_eq!(session.account.id, 42);
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path_and_query, "/api/user/token");
+        assert_eq!(requests[0].header("cookie"), Some("session=session-secret"));
+        assert_eq!(requests[0].header("new-api-user"), Some("42"));
+        assert_eq!(requests[0].header("authorization"), None);
+        assert_eq!(requests[1].path_and_query, "/api/user/self");
+        assert_eq!(
+            requests[1].header("authorization"),
+            Some("Bearer access-secret")
+        );
+        assert_eq!(requests[1].header("new-api-user"), Some("42"));
+    }
+
+    #[tokio::test]
+    async fn account_scoped_client_adds_newapi_user_to_all_protected_requests() {
+        let server = TestServer::spawn(vec![
+            TestResponse::json(
+                r#"{"success":true,"message":"","data":{
+                    "id":42,"username":"erin","display_name":"Erin","email":"e@example.com",
+                    "group":"vip","quota":12,"used_quota":3
+                }}"#,
+            ),
+            TestResponse::json(
+                r#"{"success":true,"message":"","data":{"vip":{"ratio":1.5,"desc":"paid"}}}"#,
+            ),
+            TestResponse::json(
+                r#"{"success":true,"message":"","data":{"page":1,"page_size":100,"total":0,"items":[]}}"#,
+            ),
+        ])
+        .await;
+        let client = NewApiClient::with_account_id(&server.origin, "access-secret", 42).unwrap();
+
+        client.account().await.unwrap();
+        client.groups().await.unwrap();
+        client.list_tokens().await.unwrap();
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert_eq!(request.header("new-api-user"), Some("42"));
+            assert_eq!(
+                request.header("authorization"),
+                Some("Bearer access-secret")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn token_listing_starts_at_page_one_and_stops_on_empty_page() {
         let server = TestServer::spawn(vec![
             TestResponse::json(
@@ -1200,7 +1465,7 @@ mod tests {
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].method, "GET");
         assert_eq!(requests[0].path_and_query, "/api/token/42/key");
         assert_eq!(requests[1].method, "DELETE");
         assert_eq!(requests[1].path_and_query, "/api/token/42");
@@ -1260,12 +1525,13 @@ mod tests {
         .unwrap();
         assert_eq!(status.version, "1.2.3");
         assert_eq!(status.system_name, "New API");
-        assert!(!status.password_login_enabled);
+        assert_eq!(status.password_login_enabled, Some(false));
 
         for body in [
             r#"{"success":false,"message":"nope","data":{}}"#,
             r#"{"success":true,"data":{"version":"1","system_name":"New API","theme":"default","register_enabled":true}}"#,
             r#"{"success":true,"data":{"version":"1","system_name":"New API","theme":"classic","register_enabled":true,"password_login_enabled":true}}"#,
+            r#"{"success":true,"data":{"version":"1","system_name":"New API"}}"#,
             r#"{"success":true,"data":{"version":"","system_name":"New API","theme":"default","register_enabled":true,"password_login_enabled":true}}"#,
             r#"{"success":true,"data":{"version":"1","system_name":" ","theme":"default","register_enabled":true,"password_login_enabled":true}}"#,
             r#"{"success":true,"data":{"version":1,"system_name":"New API","theme":"default","register_enabled":true,"password_login_enabled":true}}"#,
@@ -1275,6 +1541,30 @@ mod tests {
                 "accepted invalid status: {body}"
             );
         }
+    }
+
+    #[test]
+    fn status_parser_accepts_identified_newapi_forks_without_frontend_flags() {
+        let status = parse_status(
+            r#"{
+                "success": true,
+                "message": "",
+                "data": {
+                    "_qn": "new-api",
+                    "version": "main-93a2b15",
+                    "system_name": "元衡 API",
+                    "build_branch": "main",
+                    "build_commit": "93a2b15e123ee2848bd9f1f13aef6776f566650a",
+                    "build_repository": "nanashiwang/new-api",
+                    "quota_per_unit": 500000
+                }
+            }"#,
+        )
+        .expect("an explicitly identified NewAPI fork should be detected");
+
+        assert_eq!(status.version, "main-93a2b15");
+        assert_eq!(status.system_name, "元衡 API");
+        assert_eq!(status.quota_per_unit, Some(500000.0));
     }
 
     #[test]

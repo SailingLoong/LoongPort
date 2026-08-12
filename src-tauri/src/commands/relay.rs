@@ -215,6 +215,11 @@ enum BrowserLoginOutcome {
     Closed,
 }
 
+enum BrowserLoginCredential {
+    Sub2Api(login::Credentials),
+    NewApiUserId(i64),
+}
+
 enum RefreshWait<T, I> {
     Interrupted(I),
     Refreshed(Result<T, AppError>),
@@ -673,6 +678,16 @@ fn newapi_refresh_cookie_from_window(
     Ok(newapi::extract_refresh_cookie(&cookies))
 }
 
+fn newapi_session_cookie_from_window(
+    window: &tauri::WebviewWindow,
+    session_url: &url::Url,
+) -> Result<Option<String>, AppError> {
+    let cookies = window
+        .cookies_for_url(session_url.clone())
+        .map_err(|error| AppError::Config(format!("读取 NewAPI 登录会话失败: {error}")))?;
+    Ok(newapi::extract_session_cookie(&cookies))
+}
+
 async fn refresh_newapi_browser_session(
     site_origin: &str,
     refresh_cookie: &str,
@@ -736,7 +751,7 @@ async fn browser_import(
 
     let context = Arc::new(Mutex::new(initial_context));
     let last_probe_summary = Arc::new(Mutex::new(None::<String>));
-    let (creds_tx, mut creds_rx) = tokio::sync::mpsc::channel::<login::Credentials>(1);
+    let (creds_tx, mut creds_rx) = tokio::sync::mpsc::channel::<BrowserLoginCredential>(1);
     let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<RelayImportError>(1);
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -943,10 +958,23 @@ async fn browser_import(
             return false;
         }
 
+        if let Some(result) = newapi::parse_session_navigation(url) {
+            match result {
+                Ok(user_id) => {
+                    let _ = creds_tx.try_send(BrowserLoginCredential::NewApiUserId(user_id));
+                }
+                Err(error) => {
+                    log::warn!("NewAPI 登录回传解析失败: {error}");
+                    let _ = credential_error_tx.try_send(error.into());
+                }
+            }
+            return false;
+        }
+
         match login::parse_creds_navigation(url) {
             None => true,
             Some(Ok(credentials)) => {
-                let _ = creds_tx.try_send(credentials);
+                let _ = creds_tx.try_send(BrowserLoginCredential::Sub2Api(credentials));
                 false
             }
             Some(Err(error)) => {
@@ -971,13 +999,20 @@ async fn browser_import(
     let refresh_url = newapi::refresh_url(&site_origin)?;
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
         let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        let mut newapi_user_id = None;
         loop {
             tokio::select! {
                 biased;
                 _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
-                credentials = creds_rx.recv() => break credentials
-                    .map(BrowserLoginOutcome::Sub2ApiCredentials)
-                    .unwrap_or(BrowserLoginOutcome::Closed),
+                credentials = creds_rx.recv() => match credentials {
+                    Some(BrowserLoginCredential::Sub2Api(credentials)) => {
+                        break BrowserLoginOutcome::Sub2ApiCredentials(credentials)
+                    }
+                    Some(BrowserLoginCredential::NewApiUserId(user_id)) => {
+                        newapi_user_id = Some(user_id);
+                    }
+                    None => break BrowserLoginOutcome::Closed,
+                },
                 error = error_rx.recv() => break error
                     .map(BrowserLoginOutcome::Error)
                     .unwrap_or(BrowserLoginOutcome::Closed),
@@ -992,7 +1027,22 @@ async fn browser_import(
                     }
                     let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
                         Ok(Some(refresh_cookie)) => refresh_cookie,
-                        Ok(None) => continue,
+                        Ok(None) => {
+                            let Some(user_id) = newapi_user_id else { continue };
+                            let session_url = match newapi::session_token_url(&site_origin) {
+                                Ok(url) => url,
+                                Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                            };
+                            let session_cookie = match newapi_session_cookie_from_window(&window, &session_url) {
+                                Ok(Some(cookie)) => cookie,
+                                Ok(None) => continue,
+                                Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                            };
+                            match newapi::exchange_session(&site_origin, &session_cookie, user_id).await {
+                                Ok(session) => break BrowserLoginOutcome::NewApiSession(session),
+                                Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                            }
+                        }
                         Err(error) => break BrowserLoginOutcome::Error(error.into()),
                     };
                     let interrupt = async {
@@ -1201,7 +1251,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     );
 
     // 凭据经这个 channel 从导航回调回到本函数。容量 1：只需要第一份。
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<login::Credentials>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserLoginCredential>(1);
     // 用户自己关掉窗口的信号。没有它就只能干等 5 分钟超时。
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -1271,7 +1321,17 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         let _ = webview;
     })
     .on_navigation(move |url| {
-        if backend_kind_for_nav != discovery::BackendKind::Sub2Api {
+        if backend_kind_for_nav == discovery::BackendKind::NewApi {
+            if let Some(result) = newapi::parse_session_navigation(url) {
+                match result {
+                    Ok(user_id) => {
+                        let _ = tx.try_send(BrowserLoginCredential::NewApiUserId(user_id));
+                    }
+                    Err(error) => log::warn!("NewAPI 登录回传解析失败: {error}"),
+                }
+                return false;
+            }
+        } else if backend_kind_for_nav != discovery::BackendKind::Sub2Api {
             return true;
         }
         match login::parse_creds_navigation(url) {
@@ -1280,7 +1340,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
             Some(Ok(creds)) => {
                 // 用 try_send：这个回调不能 await，而我们只要第一份凭据，
                 // 满了就说明已经收到过了。
-                let _ = tx.try_send(creds);
+                let _ = tx.try_send(BrowserLoginCredential::Sub2Api(creds));
                 false
             }
             Some(Err(e)) => {
@@ -1310,17 +1370,39 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 邮箱验证 + 2FA；超时不是错误，用户可能就是走开了。
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
         let mut cookie_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        let mut newapi_user_id = None;
         loop {
             tokio::select! {
                 biased;
                 _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
-                creds = rx.recv() => break creds
-                    .map(BrowserLoginOutcome::Sub2ApiCredentials)
-                    .unwrap_or(BrowserLoginOutcome::Closed),
+                creds = rx.recv() => match creds {
+                    Some(BrowserLoginCredential::Sub2Api(credentials)) => {
+                        break BrowserLoginOutcome::Sub2ApiCredentials(credentials)
+                    }
+                    Some(BrowserLoginCredential::NewApiUserId(user_id)) => {
+                        newapi_user_id = Some(user_id);
+                    }
+                    None => break BrowserLoginOutcome::Closed,
+                },
                 _ = cookie_poll.tick(), if backend_kind == discovery::BackendKind::NewApi => {
                     let refresh_cookie = match newapi_refresh_cookie_from_window(&window, &refresh_url) {
                         Ok(Some(refresh_cookie)) => refresh_cookie,
-                        Ok(None) => continue,
+                        Ok(None) => {
+                            let Some(user_id) = newapi_user_id else { continue };
+                            let session_url = match newapi::session_token_url(&site_origin) {
+                                Ok(url) => url,
+                                Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                            };
+                            let session_cookie = match newapi_session_cookie_from_window(&window, &session_url) {
+                                Ok(Some(cookie)) => cookie,
+                                Ok(None) => continue,
+                                Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                            };
+                            match newapi::exchange_session(&site_origin, &session_cookie, user_id).await {
+                                Ok(session) => break BrowserLoginOutcome::NewApiSession(session),
+                                Err(error) => break BrowserLoginOutcome::Error(error.into()),
+                            }
+                        }
                         Err(error) => break BrowserLoginOutcome::Error(error.into()),
                     };
                     match await_refresh_preserving_rotation(
@@ -1470,8 +1552,9 @@ fn persist_newapi_login_session(
             relay_id,
             runtime_account_identity(&account),
             &refreshed.access_token,
-            Some(&refreshed.refresh_cookie),
-            Some(refreshed.access_expires_at),
+            (!refreshed.refresh_cookie.trim().is_empty())
+                .then_some(refreshed.refresh_cookie.as_str()),
+            refreshed.access_expires_at,
         )
     })?;
 
@@ -1879,7 +1962,11 @@ async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, A
             })
         }
         discovery::BackendKind::NewApi => {
-            let client = newapi::NewApiClient::new(&op.site_origin, &op.auth_token)?;
+            let client = newapi::NewApiClient::with_optional_account_id(
+                &op.site_origin,
+                &op.auth_token,
+                op.account_id,
+            )?;
             let account = client.account().await?;
             if op.account_id.is_some() && op.account_id != Some(account.id) {
                 return Err(AppError::Config(
@@ -3950,7 +4037,7 @@ mod tests {
         .expect("save site");
         let refreshed = crate::relay::newapi::RefreshedSession {
             access_token: "new-access-token".into(),
-            access_expires_at: 1_900_000_000,
+            access_expires_at: Some(1_900_000_000),
             session_id: "session-id".into(),
             account: crate::relay::newapi::SelfAccount {
                 id: 84,
@@ -3980,6 +4067,49 @@ mod tests {
         assert_eq!(persisted.account_id, Some(84));
         assert_eq!(persisted.account_label, "NewAPI Display");
         assert_eq!(persisted.login_identifier, "newapi-login");
+    }
+
+    #[test]
+    fn persisting_legacy_newapi_session_keeps_refresh_fields_absent() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://legacy-newapi.example",
+                "Legacy NewAPI",
+                "https://legacy-newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        let session = crate::relay::newapi::RefreshedSession {
+            access_token: "long-lived-access-token".into(),
+            access_expires_at: None,
+            session_id: String::new(),
+            account: crate::relay::newapi::SelfAccount {
+                id: 42,
+                username: "legacy-login".into(),
+                display_name: "Legacy User".into(),
+                email: String::new(),
+                group: "default".into(),
+                quota: 0,
+                used_quota: 0,
+            },
+            refresh_cookie: String::new(),
+        };
+
+        let (final_relay_id, account_id) =
+            persist_newapi_login_session(&state, relay_id, &session).expect("persist login");
+        let persisted = with_conn(&state, |conn| creds::get(conn, final_relay_id))
+            .expect("load relay")
+            .expect("relay exists");
+
+        assert_eq!(account_id, 42);
+        assert_eq!(persisted.auth_token, "long-lived-access-token");
+        assert_eq!(persisted.refresh_token, None);
+        assert_eq!(persisted.token_expires_at, None);
+        assert_eq!(persisted.account_id, Some(42));
     }
 
     #[test]

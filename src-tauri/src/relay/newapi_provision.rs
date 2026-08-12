@@ -479,7 +479,7 @@ mod tests {
                     json!({ "success": true })
                 }
             }
-            ("POST", path) if path.starts_with("/api/token/") && path.ends_with("/key") => {
+            ("GET", path) if path.starts_with("/api/token/") && path.ends_with("/key") => {
                 let id = path
                     .trim_start_matches("/api/token/")
                     .trim_end_matches("/key")
