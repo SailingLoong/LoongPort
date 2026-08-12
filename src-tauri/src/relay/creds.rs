@@ -136,6 +136,18 @@ pub struct Relay {
     /// Unix 秒。`None` 表示服务端没给（降级态：可用但不可续期）。
     pub token_expires_at: Option<i64>,
     pub user_agent: Option<String>,
+    /// Cloudflare 托管挑战通过后种下的放行 cookie。
+    ///
+    /// 本 app 有两套 HTTP 栈：登录走 WebView（能执行 JS ⇒ 过得了挑战），之后所有 API
+    /// 调用走 reqwest（**永远过不了**，它不是浏览器）。开了挑战的站上实测表现是
+    /// 「登录成功，紧接着读账号信息 403 + `Just a moment...`」—— 卡在登录完成的下一步。
+    /// 把 WebView 已经拿到的这个 cookie 交给 reqwest 就能放行。
+    ///
+    /// ⚠️ 它**绑定 IP + User-Agent** ⇒ 依赖 [`Relay::user_agent`] 如实记录真实 UA。
+    ///
+    /// `None` = 这个站没开挑战（绝大多数站如此），不是错误态。
+    /// 过期后请求会再次 403，走重新登录即可覆盖。
+    pub cf_clearance: Option<String>,
     /// 用户手工拖动决定的行序，越小越靠前。
     ///
     /// ## 为什么需要一列专门存序
@@ -216,7 +228,8 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
             sort_index INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0,
             backend_kind TEXT NOT NULL DEFAULT 'sub2api',
-            user_agent TEXT
+            user_agent TEXT,
+            cf_clearance TEXT
         )",
         [],
     )
@@ -242,7 +255,8 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
 /// 由 [`select_cols_match_the_row_reader`] 钉住两者的列数一致。
 const SELECT_COLS: &str =
     "id, site_origin, site_name, api_base_url, account_id, account_label, login_identifier, \
-     auth_token, refresh_token, token_expires_at, sort_index, backend_kind, user_agent";
+     auth_token, refresh_token, token_expires_at, sort_index, backend_kind, user_agent, \
+     cf_clearance";
 
 fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
     Ok(Relay {
@@ -259,6 +273,7 @@ fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
         sort_index: row.get(10)?,
         backend_kind: row.get(11)?,
         user_agent: row.get(12)?,
+        cf_clearance: row.get(13)?,
     })
 }
 
@@ -406,6 +421,22 @@ pub struct AccountIdentity<'a> {
     pub login_identifier: &'a str,
 }
 
+/// 这次登录所处的**客户端环境**。
+///
+/// 两个字段必须成对：Cloudflare 的放行 cookie 绑定 IP + User-Agent，UA 对不上它就失效。
+/// 把它们收成一个概念而不是并列的散参数 —— 既表达了这层耦合，也避免了
+/// `save_credentials` 的参数列表继续变长（clippy 的 too_many_arguments 已经在提醒了）。
+///
+/// 两个字段都可能是 `None`：NewAPI 那条登录路径不经过 sub2api 的 WebView 回传，
+/// 而绝大多数站没开 Cloudflare 托管挑战。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionEnvironment<'a> {
+    /// 登录时 WebView 的真实 User-Agent。见 [`Relay::user_agent`]。
+    pub user_agent: Option<&'a str>,
+    /// Cloudflare 放行 cookie。见 [`Relay::cf_clearance`]。
+    pub cf_clearance: Option<&'a str>,
+}
+
 /// 写入登录凭据与账号身份，并在发现重复时合并。
 ///
 /// 返回**最终生效的那一行的 id** —— 可能不是传进来的 `id`：如果这个站上已经有同一个账号的
@@ -417,8 +448,12 @@ pub fn save_credentials(
     auth_token: &str,
     refresh_token: Option<&str>,
     token_expires_at: Option<i64>,
-    user_agent: Option<&str>,
+    session: SessionEnvironment<'_>,
 ) -> Result<i64, AppError> {
+    let SessionEnvironment {
+        user_agent,
+        cf_clearance,
+    } = session;
     let AccountIdentity {
         id: account_id,
         label: account_label,
@@ -461,8 +496,9 @@ pub fn save_credentials(
             "UPDATE loongport_relay
          SET site_name = ?1, api_base_url = ?2, backend_kind = ?3,
              account_id = ?4, account_label = ?5, login_identifier = ?6, auth_token = ?7,
-             refresh_token = ?8, token_expires_at = ?9, user_agent = ?10, updated_at = ?11
-         WHERE id = ?12",
+             refresh_token = ?8, token_expires_at = ?9, user_agent = ?10, cf_clearance = ?11,
+             updated_at = ?12
+         WHERE id = ?13",
             params![
                 site_name,
                 api_base_url,
@@ -474,6 +510,7 @@ pub fn save_credentials(
                 refresh_token,
                 token_expires_at,
                 user_agent,
+                cf_clearance,
                 now_unix(),
                 target
             ],
@@ -650,7 +687,7 @@ mod tests {
             "tok",
             Some("ref"),
             Some(123),
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 
@@ -780,7 +817,7 @@ mod tests {
             "tok1",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 
@@ -794,7 +831,7 @@ mod tests {
             "tok2",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         assert_eq!(final_id, second);
@@ -814,7 +851,7 @@ mod tests {
             "old-token",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 
@@ -827,7 +864,7 @@ mod tests {
             "new-token",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 
@@ -857,7 +894,7 @@ mod tests {
             "old-token",
             Some("old-refresh"),
             Some(100),
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         conn.execute(
@@ -881,7 +918,7 @@ mod tests {
             "fresh-token",
             Some("fresh-refresh"),
             Some(200),
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 
@@ -916,7 +953,7 @@ mod tests {
             "old-token",
             Some("old-refresh"),
             Some(100),
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         let source = save_site_with_backend(
@@ -941,7 +978,7 @@ mod tests {
             "fresh-token",
             Some("fresh-refresh"),
             Some(200),
-            None,
+            SessionEnvironment::default(),
         )
         .expect_err("delete failure must roll the merge back");
 
@@ -966,7 +1003,7 @@ mod tests {
             "tok",
             Some("ref"),
             Some(123),
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         clear_credentials(&conn, a).unwrap();
@@ -1013,7 +1050,7 @@ mod tests {
             "tok",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("站点记录不存在"));
@@ -1030,7 +1067,7 @@ mod tests {
             "tok",
             None,
             Some(1000),
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         let base = get(&conn, a).unwrap().unwrap();
@@ -1076,7 +1113,7 @@ mod tests {
             "tok",
             None,
             Some(1000),
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         let stale = get(&conn, a).unwrap().unwrap();
@@ -1124,7 +1161,7 @@ mod tests {
             "tok",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
@@ -1138,7 +1175,7 @@ mod tests {
             "tok",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
@@ -1165,7 +1202,7 @@ mod tests {
             "tok",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
         let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
@@ -1185,7 +1222,7 @@ mod tests {
             "tok",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 
@@ -1206,7 +1243,7 @@ mod tests {
             "tok",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 
@@ -1234,7 +1271,7 @@ mod tests {
             "tok",
             None,
             None,
-            None,
+            SessionEnvironment::default(),
         )
         .unwrap();
 

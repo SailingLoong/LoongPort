@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 10;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 11;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -182,6 +182,12 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 add_relay_user_agent_column(conn)?;
                 set_version(conn, 10)?;
             }
+            // v10 → v11：存下 Cloudflare 放行 cookie，让 reqwest 也能过托管挑战。
+            10 => {
+                log::info!("LoongPort 数据迁移 v10 → v11（loongport_relay 加 cf_clearance 列）");
+                add_relay_cf_clearance_column(conn)?;
+                set_version(conn, 11)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -223,6 +229,23 @@ fn add_relay_user_agent_column(conn: &Connection) -> Result<(), AppError> {
 
     conn.execute("ALTER TABLE loongport_relay ADD COLUMN user_agent TEXT", [])
         .map_err(|e| AppError::Database(format!("给 loongport_relay 加 user_agent 列失败: {e}")))?;
+    Ok(())
+}
+
+fn add_relay_cf_clearance_column(conn: &Connection) -> Result<(), AppError> {
+    if !crate::Database::table_exists(conn, "loongport_relay")? {
+        return Ok(());
+    }
+
+    if crate::Database::has_column(conn, "loongport_relay", "cf_clearance")? {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE loongport_relay ADD COLUMN cf_clearance TEXT",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("给 loongport_relay 加 cf_clearance 列失败: {e}")))?;
     Ok(())
 }
 
@@ -678,7 +701,21 @@ mod tests {
             ),
             "迁移必须保留旧行，并把历史 relay 明确归为 sub2api"
         );
-        assert_eq!(current_version(&conn).unwrap(), 10);
+        // 断言的是「迁到最新版」而不是某个具体数字：写死版本号会让每加一次迁移
+        // 都得回来改这行（而它想钉的事实从来没变过）。
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+    }
+
+    /// v10 → v11 加上 cf_clearance 列，且重复跑不炸（幂等）。
+    #[test]
+    fn v10_to_v11_adds_cf_clearance_column_idempotently() {
+        let conn = mem();
+        apply(&conn).expect("initial migrate");
+        assert!(crate::Database::has_column(&conn, "loongport_relay", "cf_clearance").unwrap());
+
+        // 迁移必须可重入：启动时会无条件跑一遍。
+        apply(&conn).expect("second migrate must be a no-op");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 
     #[test]

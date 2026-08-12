@@ -84,6 +84,11 @@ pub struct Credentials {
     pub refresh_token: Option<String>,
     pub token_expires_at: Option<i64>,
     pub user_agent: Option<String>,
+    /// Cloudflare 放行 cookie（`cf_clearance`），没开挑战的站是 `None`。
+    ///
+    /// 由原生 API 从 WebView 读出 —— 它是 HttpOnly，注入脚本读不到，
+    /// 所以不走 `trySend()` 那条 JSON 回传，见 `commands::relay` 的取用点。
+    pub cf_clearance: Option<String>,
 }
 
 /// 凭据到手后浮在登录页顶部的提示条。
@@ -697,6 +702,24 @@ pub fn login_url(site_origin: &str, login_identifier: &str) -> String {
     }
 }
 
+/// Cloudflare 托管挑战通过后种下的放行 cookie 名。
+const CF_CLEARANCE_COOKIE_NAME: &str = "cf_clearance";
+
+/// 从 WebView 的 cookie 列表里挑出 `cf_clearance`。
+///
+/// 它是 **HttpOnly**，注入脚本读不到 ⇒ 必须走原生 `cookies_for_url`，
+/// 不能像 access token 那样从 localStorage 回传。
+///
+/// 没有该 cookie 是**正常情况**（绝大多数站没开托管挑战），返回 `None`。
+pub fn extract_cf_clearance(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
+    cookies
+        .iter()
+        .find(|cookie| {
+            cookie.name() == CF_CLEARANCE_COOKIE_NAME && !cookie.value().trim().is_empty()
+        })
+        .map(|cookie| cookie.value().to_string())
+}
+
 /// 判断一次导航是不是凭据回传，是则解出凭据。
 ///
 /// 返回 `None` 表示这是普通导航（放行）；返回 `Some` 表示这是回传（调用方应拦下）。
@@ -734,6 +757,8 @@ fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
 
     Ok(Credentials {
         auth_token,
+        // 由原生 cookie 读取补上（HttpOnly，脚本回传里没有它）。
+        cf_clearance: None,
         refresh_token: raw.refresh_token.filter(|t| !t.is_empty()),
         // sub2api 存的是毫秒时间戳字符串。解不出来不算错 —— 那就是「可用但不知何时过期」，
         // 与「没登录」是两件事，不该因此把整份凭据扔掉。
@@ -776,6 +801,26 @@ fn decode_b64url(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cf_clearance_is_extracted_only_when_present_and_non_empty() {
+        let mut valid = tauri::webview::Cookie::new("cf_clearance", "pass-token");
+        assert_eq!(
+            extract_cf_clearance(std::slice::from_ref(&valid)),
+            Some("pass-token".to_string())
+        );
+
+        // 空值等于没有：CF 没种下有效 cookie 时不该发一个空的出去。
+        valid.set_value("   ");
+        assert_eq!(extract_cf_clearance(std::slice::from_ref(&valid)), None);
+
+        // 没开挑战的站压根没有这个 cookie —— 正常情况，不是错误。
+        let others = [
+            tauri::webview::Cookie::new("session", "s"),
+            tauri::webview::Cookie::new("other", "o"),
+        ];
+        assert_eq!(extract_cf_clearance(&others), None);
+    }
+
     use super::*;
 
     /// 不关心优惠码那一维的用例走这个（等价于「这个站没有优惠码」）。

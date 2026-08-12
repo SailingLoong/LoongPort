@@ -121,6 +121,7 @@ impl<'a> RuntimeBackend<'a> {
                     &relay.auth_token,
                     relay.account_id,
                     relay.user_agent.as_deref(),
+                    relay.cf_clearance.as_deref(),
                 )?
                 .account()
                 .await?;
@@ -151,6 +152,7 @@ impl<'a> RuntimeBackend<'a> {
                     &relay.auth_token,
                     relay.account_id,
                     relay.user_agent.as_deref(),
+                    relay.cf_clearance.as_deref(),
                 )?
                 .balance()
                 .await?;
@@ -309,6 +311,7 @@ mod tests {
             refresh_token: Some("stored-refresh".into()),
             token_expires_at: Some(1),
             user_agent: None,
+            cf_clearance: None,
             sort_index: 0,
         }
     }

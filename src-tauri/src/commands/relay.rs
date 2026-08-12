@@ -678,6 +678,25 @@ fn newapi_refresh_cookie_from_window(
     Ok(newapi::extract_refresh_cookie(&cookies))
 }
 
+/// 从登录窗读 Cloudflare 放行 cookie。
+///
+/// 与相邻两个 NewAPI cookie 读取函数受同一条约束：`cookies_for_url` 只能在外层 async
+/// 循环里调，不能在同步的导航/窗口回调里调（Tauri 记录了 Windows 上的死锁）。
+///
+/// **读不到不算错**：绝大多数站没开托管挑战，`None` 是正常结果，
+/// 绝不能因此把一次成功的登录判失败。读 cookie 本身出错也只降级成 `None` ——
+/// 凭据已经到手了，为一个可选的加速项让整次登录失败不划算。
+fn cf_clearance_from_window(window: &tauri::WebviewWindow, site_origin: &str) -> Option<String> {
+    let url = url::Url::parse(site_origin).ok()?;
+    match window.cookies_for_url(url) {
+        Ok(cookies) => login::extract_cf_clearance(&cookies),
+        Err(error) => {
+            log::warn!("读取 Cloudflare 放行 cookie 失败（不影响登录）: {error}");
+            None
+        }
+    }
+}
+
 fn newapi_session_cookie_from_window(
     window: &tauri::WebviewWindow,
     session_url: &url::Url,
@@ -1004,7 +1023,10 @@ async fn browser_import(
                 biased;
                 _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 credentials = creds_rx.recv() => match credentials {
-                    Some(BrowserLoginCredential::Sub2Api(credentials)) => {
+                    Some(BrowserLoginCredential::Sub2Api(mut credentials)) => {
+                        // 趁窗口还在，把 CF 放行 cookie 一并收走：登录之后所有 API 都走
+                        // reqwest，而它过不了托管挑战，只能靠这个 cookie 放行。
+                        credentials.cf_clearance = cf_clearance_from_window(&window, &site_origin);
                         break BrowserLoginOutcome::Sub2ApiCredentials(credentials)
                     }
                     Some(BrowserLoginCredential::NewApiUserId(user_id)) => {
@@ -1374,7 +1396,10 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                 biased;
                 _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 creds = rx.recv() => match creds {
-                    Some(BrowserLoginCredential::Sub2Api(credentials)) => {
+                    Some(BrowserLoginCredential::Sub2Api(mut credentials)) => {
+                        // 趁窗口还在，把 CF 放行 cookie 一并收走：登录之后所有 API 都走
+                        // reqwest，而它过不了托管挑战，只能靠这个 cookie 放行。
+                        credentials.cf_clearance = cf_clearance_from_window(&window, &site_origin);
                         break BrowserLoginOutcome::Sub2ApiCredentials(credentials)
                     }
                     Some(BrowserLoginCredential::NewApiUserId(user_id)) => {
@@ -1517,6 +1542,7 @@ async fn persist_login_credentials(
         &credentials.auth_token,
         None,
         credentials.user_agent.as_deref(),
+        credentials.cf_clearance.as_deref(),
     )?
     .account()
     .await
@@ -1537,7 +1563,10 @@ async fn persist_login_credentials(
             &credentials.auth_token,
             credentials.refresh_token.as_deref(),
             credentials.token_expires_at,
-            credentials.user_agent.as_deref(),
+            creds::SessionEnvironment {
+                user_agent: credentials.user_agent.as_deref(),
+                cf_clearance: credentials.cf_clearance.as_deref(),
+            },
         )
     })?;
 
@@ -1559,7 +1588,8 @@ fn persist_newapi_login_session(
             (!refreshed.refresh_cookie.trim().is_empty())
                 .then_some(refreshed.refresh_cookie.as_str()),
             refreshed.access_expires_at,
-            None,
+            // NewAPI 登录不走 sub2api 那条 WebView 回传，两个字段都没有可写的值。
+            creds::SessionEnvironment::default(),
         )
     })?;
 
@@ -1936,6 +1966,7 @@ async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, A
                 &op.auth_token,
                 op.account_id,
                 op.user_agent.as_deref(),
+                op.cf_clearance.as_deref(),
             )?;
             let mut result = provision::provision(&client).await?;
             provision::sort_tiers(&mut result.tiers);
@@ -3493,6 +3524,7 @@ async fn open_purchase_window(
         &op.auth_token,
         op.account_id,
         op.user_agent.as_deref(),
+        op.cf_clearance.as_deref(),
     )?;
     let public_settings = client.public_settings().await?;
     let auth_user = purchase::auth_user_from_profile(client.profile_raw().await?)?;
@@ -4612,6 +4644,7 @@ mod tests {
             refresh_token: None,
             token_expires_at: None,
             user_agent: None,
+            cf_clearance: None,
             sort_index: 0,
         }
     }
@@ -4707,7 +4740,7 @@ mod tests {
                 "saved-access-token",
                 Some("saved-refresh-token"),
                 None,
-                None,
+                creds::SessionEnvironment::default(),
             )
             .expect("save relay credentials");
             relay_id
@@ -5757,7 +5790,7 @@ mod tests {
                 "token",
                 None,
                 None,
-                None,
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
@@ -6106,7 +6139,7 @@ mod tests {
                 "tok",
                 None,
                 None,
-                None,
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
@@ -6305,7 +6338,7 @@ mod tests {
                 "stale-access",
                 Some("old-refresh"),
                 Some(1),
-                None,
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
@@ -6370,7 +6403,7 @@ mod tests {
                 "stale-access",
                 Some("old-refresh"),
                 Some(1),
-                None,
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
