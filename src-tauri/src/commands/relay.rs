@@ -1633,17 +1633,25 @@ async fn load_validated_relay<R: tauri::Runtime>(
                 "站点协议已变化，已清除旧凭据，请重新添加或登录".into(),
             ))
         }
-        Err(error) if error.kind == discovery::DiscoveryErrorKind::Transport => Err(
-            AppError::Config(format!("连接站点失败，未改动已有凭据：{}", error.message)),
-        ),
-        Err(error) => {
-            let state = app_handle.state::<AppState>();
-            with_conn(&state, |conn| creds::clear_credentials(conn, relay_id))?;
-            Err(AppError::Config(format!(
-                "站点协议无法安全识别，已清除旧凭据：{}",
+        Err(error) => match error.kind {
+            discovery::DiscoveryErrorKind::Transport => Err(AppError::Config(format!(
+                "连接站点失败，未改动已有凭据：{}",
                 error.message
-            )))
-        }
+            ))),
+            discovery::DiscoveryErrorKind::UnsupportedSite => {
+                log::warn!(
+                    "站点探针暂时无法识别 {}，沿用已保存的 {} 协议和凭据：{}",
+                    op.site_origin,
+                    op.backend_kind.as_str(),
+                    error.message
+                );
+                Ok(op)
+            }
+            discovery::DiscoveryErrorKind::ProtocolConflict => Err(AppError::Config(format!(
+                "站点协议识别结果冲突，未改动已有凭据：{}",
+                error.message
+            ))),
+        },
     }
 }
 
@@ -4739,33 +4747,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saved_relay_validation_clears_credentials_on_unsupported_or_conflicting_protocol() {
-        let cases = [
-            (
-                Some(serde_json::json!({ "unknown": "sub" })),
-                Some(serde_json::json!({ "unknown": "new" })),
-                "unsupported",
-            ),
-            (
-                Some(sub2api_discovery_body()),
-                Some(newapi_discovery_body()),
-                "conflict",
-            ),
-        ];
+    async fn saved_relay_validation_uses_saved_backend_when_probe_is_unsupported() {
+        let (origin, server) = spawn_discovery_server(
+            Some(serde_json::json!({ "unknown": "sub" })),
+            Some(serde_json::json!({ "unknown": "new" })),
+        )
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
 
-        for (sub2api_body, newapi_body, case_name) in cases {
-            let (origin, server) = spawn_discovery_server(sub2api_body, newapi_body).await;
-            let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+        let relay = usable_relay(app.handle(), relay_id)
+            .await
+            .expect("unsupported probe should fall back to the saved backend");
 
-            usable_relay(app.handle(), relay_id)
-                .await
-                .expect_err(case_name);
+        assert_eq!(relay.backend_kind, discovery::BackendKind::NewApi);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
+        server.abort();
+    }
 
-            let relay = relay_credentials(&app, relay_id);
-            assert!(relay.auth_token.is_empty(), "{case_name}");
-            assert!(relay.refresh_token.is_none(), "{case_name}");
-            server.abort();
-        }
+    #[tokio::test]
+    async fn saved_relay_validation_preserves_credentials_on_conflicting_protocol() {
+        let (origin, server) = spawn_discovery_server(
+            Some(sub2api_discovery_body()),
+            Some(newapi_discovery_body()),
+        )
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("conflicting probe must stop runtime dispatch");
+
+        let relay = relay_credentials(&app, relay_id);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
+        server.abort();
     }
 
     #[tokio::test]
