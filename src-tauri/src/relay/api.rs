@@ -136,6 +136,12 @@ pub struct PublicSettings {
     ///   （它是个兄弟 slot）。所以那一页仍然走得通 —— 我们那条横幅也照样能显示。
     #[serde(default)]
     pub registration_enabled: bool,
+    /// 是否开放在线支付。关闭时 `/purchase` 会被站点路由守卫重定向到 dashboard，
+    /// 充值入口应改走兑换码页 `/redeem`。
+    ///
+    /// `None` = 老版本 sub2api 没有这个公开字段；为兼容旧站，调用方继续按开启处理。
+    #[serde(default)]
+    pub payment_enabled: Option<bool>,
 }
 
 /// sub2api 公共设置端点的严格 wire shape。
@@ -148,6 +154,8 @@ struct Sub2ApiPublicSettingsWire {
     version: String,
     api_base_url: String,
     registration_enabled: bool,
+    #[serde(default)]
+    payment_enabled: Option<bool>,
     promo_code_enabled: bool,
     invitation_code_enabled: bool,
 }
@@ -174,6 +182,7 @@ pub fn parse_sub2api_public_settings(body: &str) -> Result<PublicSettings, AppEr
         version: wire.version,
         api_base_url: wire.api_base_url,
         registration_enabled: wire.registration_enabled,
+        payment_enabled: wire.payment_enabled,
     })
 }
 
@@ -588,6 +597,34 @@ impl Client {
         let env: Envelope<T> = serde_json::from_str(&body)
             .map_err(|e| AppError::Config(format!("{what}失败: 响应解析出错 {e}")))?;
         env.into_data(what)
+    }
+
+    /// 拉站点公开设置。
+    ///
+    /// 这是站点能力的权威来源；充值页选择读取 `payment_enabled`，不按域名猜。
+    /// 端点公开可读，故有意不附带账号 token。
+    pub async fn public_settings(&self) -> Result<PublicSettings, AppError> {
+        let resp = self
+            .http
+            .get(self.url("/settings/public"))
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::Config(format!("获取站点公开设置失败: {}", describe_send_error(&e)))
+            })?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Config(format!("获取站点公开设置失败: 读响应出错 {e}")))?;
+        if !status.is_success() {
+            return Err(AppError::Config(format!(
+                "获取站点公开设置失败: HTTP {} {}",
+                status.as_u16(),
+                first_line(&body)
+            )));
+        }
+        parse_sub2api_public_settings(&body)
     }
 
     /// 拉可用分组。**返回平数组，不是分页信封。**
@@ -1376,16 +1413,61 @@ mod tests {
         assert!(env.into_data("测试").is_err());
     }
 
+    #[tokio::test]
+    async fn public_settings_reads_payment_capability_without_sending_credentials() {
+        async fn settings(headers: axum::http::HeaderMap) -> axum::Json<serde_json::Value> {
+            assert!(
+                headers.get(axum::http::header::AUTHORIZATION).is_none(),
+                "公开设置端点不需要账号 token"
+            );
+            axum::Json(serde_json::json!({
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "site_name": "WawAPI",
+                    "version": "1.0.0",
+                    "api_base_url": "",
+                    "registration_enabled": true,
+                    "payment_enabled": false,
+                    "promo_code_enabled": false,
+                    "invitation_code_enabled": true
+                }
+            }))
+        }
+
+        let app =
+            axum::Router::new().route("/api/v1/settings/public", axum::routing::get(settings));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind settings server");
+        let origin = format!("http://{}", listener.local_addr().expect("server addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve settings response");
+        });
+
+        let client = Client::new(origin, "account-secret", Some(7)).expect("build client");
+        let settings = client
+            .public_settings()
+            .await
+            .expect("read public settings");
+
+        assert_eq!(settings.site_name, "WawAPI");
+        assert_eq!(settings.payment_enabled, Some(false));
+    }
+
     #[test]
     fn sub2api_public_settings_parser_accepts_a_strict_protocol_match() {
         let body = r#"{"code":0,"message":"success","data":{
             "site_name":"贾维斯","version":"0.1.169","api_base_url":"",
-            "registration_enabled":true,"promo_code_enabled":true,
-            "invitation_code_enabled":true}}"#;
+            "registration_enabled":true,"payment_enabled":false,
+            "promo_code_enabled":true,"invitation_code_enabled":true}}"#;
 
         let settings = parse_sub2api_public_settings(body).expect("完整 sub2api 契约应通过");
         assert_eq!(settings.site_name, "贾维斯");
         assert_eq!(settings.version, "0.1.169");
+        assert_eq!(settings.payment_enabled, Some(false));
     }
 
     #[test]
@@ -1438,6 +1520,10 @@ mod tests {
         let s = parse_sub2api_public_settings(real).expect("必须能解真实响应");
         assert_eq!(s.version, "0.1.169");
         assert_eq!(s.api_base_url, "", "实测这个字段就是空串");
+        assert_eq!(
+            s.payment_enabled, None,
+            "老版本响应缺字段时必须保持未知，而不是误判为关闭支付"
+        );
 
         // 反面：把 message 的 "success" 误当 code 会解不出来 —— 这正是原来的写法。
         assert!(

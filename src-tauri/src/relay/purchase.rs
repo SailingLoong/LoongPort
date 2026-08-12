@@ -129,10 +129,16 @@ const INJECTED_MARKER_KEY: &str = "loongport_purchase_injected";
 
 /// 充值页 URL。
 ///
-/// **就是站点的 `/purchase`，里面是充值还是订阅由用户自己选**（维护者裁决）——
-/// 我们不判 tab、不探渠道、不认订单状态。
-pub fn purchase_url(site_origin: &str) -> String {
-    format!("{site_origin}/purchase")
+/// sub2api 在公开设置里声明 `payment_enabled`。在线支付关闭时，站点的路由守卫会
+/// 把 `/purchase` 重定向到 dashboard；此时唯一可用的充值入口是兑换码页 `/redeem`。
+/// 开启时仍走 `/purchase`，里面是充值还是订阅由用户自己选。
+pub fn purchase_url(site_origin: &str, payment_enabled: Option<bool>) -> String {
+    let path = if payment_enabled == Some(false) {
+        "redeem"
+    } else {
+        "purchase"
+    };
+    format!("{site_origin}/{path}")
 }
 
 /// 生成注入脚本：把登录态写进 localStorage，让站点的 router 守卫认出「已登录」。
@@ -293,11 +299,26 @@ mod tests {
     }
 
     #[test]
-    fn purchase_url_points_at_the_purchase_page() {
-        // 维护者裁决：就是 `/purchase`，充值还是订阅由用户在页面上自己选。
+    fn purchase_url_uses_purchase_when_online_payment_is_enabled() {
         assert_eq!(
-            purchase_url("https://bestapi.store"),
+            purchase_url("https://bestapi.store", Some(true)),
             "https://bestapi.store/purchase"
+        );
+    }
+
+    #[test]
+    fn purchase_url_uses_redeem_when_online_payment_is_disabled() {
+        assert_eq!(
+            purchase_url("https://wawapii.com", Some(false)),
+            "https://wawapii.com/redeem"
+        );
+    }
+
+    #[test]
+    fn purchase_url_keeps_legacy_sites_on_purchase_when_the_flag_is_absent() {
+        assert_eq!(
+            purchase_url("https://legacy.example", None),
+            "https://legacy.example/purchase"
         );
     }
 

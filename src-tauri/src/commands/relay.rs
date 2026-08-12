@@ -3336,6 +3336,7 @@ async fn open_purchase_window(
     // localStorage，注入脚本必须在那之前就带着完整的值。拿不到就别开窗：
     // 开一个注定落到登录页的窗口，用户只会以为「点了充值却要我重新登录」。
     let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?;
+    let public_settings = client.public_settings().await?;
     let auth_user = purchase::auth_user_from_profile(client.profile_raw().await?)?;
 
     // 这一行已经有充值窗时**聚焦它，不销毁重开** —— 与 `do_login` 的处置**有意相反**。
@@ -3360,8 +3361,11 @@ async fn open_purchase_window(
         return Ok(());
     }
 
-    let url = url::Url::parse(&purchase::purchase_url(&op.site_origin))
-        .map_err(|e| AppError::Config(format!("充值页地址不对: {e}")))?;
+    let url = url::Url::parse(&purchase::purchase_url(
+        &op.site_origin,
+        public_settings.payment_enabled,
+    ))
+    .map_err(|e| AppError::Config(format!("充值页地址不对: {e}")))?;
 
     // 关窗事件要带上是哪一行 —— 前端据此只刷那一行的余额。
     let handle_for_close = app_handle.clone();
