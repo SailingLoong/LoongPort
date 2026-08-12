@@ -30,6 +30,9 @@ pub struct ProbeCandidate {
     /// 令牌不回传 Rust、不写日志，也不与其它协议候选共享。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bearer_token_storage_key: Option<&'static str>,
+    /// JSON paths required by this adapter's strict detector when a public response is too large
+    /// to return verbatim through the bounded WebView callback.
+    pub detector_json_paths: &'static [&'static str],
 }
 
 #[derive(Clone, Copy)]

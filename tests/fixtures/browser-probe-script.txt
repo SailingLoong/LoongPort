@@ -1,9 +1,10 @@
 
 (() => {
   const expectedOrigin = "https://relay.example";
-  const candidates = [{"id":"sub2api","path":"/api/v1/settings/public","bearer_token_storage_key":"auth_token"},{"id":"newapi","path":"/api/status"}];
+  const candidates = [{"id":"sub2api","path":"/api/v1/settings/public","bearer_token_storage_key":"auth_token","detector_json_paths":["code","data.site_name","data.version","data.api_base_url","data.registration_enabled","data.promo_code_enabled","data.invitation_code_enabled"]},{"id":"newapi","path":"/api/status","detector_json_paths":["success","data.version","data.system_name","data.theme","data.register_enabled","data.password_login_enabled","data.quota_per_unit"]}];
   const callbackScheme = 'loongport-probe';
   const requestTimeoutMs = 5000;
+  const maxCompactSourceBytes = 2097152;
   let previousBatch = '';
   let probeInFlight = false;
 
@@ -44,6 +45,52 @@
     return safeName || 'Error';
   }
 
+  function byteLength(value) {
+    return new TextEncoder().encode(value).length;
+  }
+
+  function setProjectedPath(target, path, value) {
+    const segments = path.split('.').filter(Boolean);
+    if (segments.length === 0) return;
+    let cursor = target;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index];
+      if (!cursor[segment] || typeof cursor[segment] !== 'object') cursor[segment] = {};
+      cursor = cursor[segment];
+    }
+    cursor[segments[segments.length - 1]] = value;
+  }
+
+  function readJsonPath(source, path) {
+    const segments = path.split('.').filter(Boolean);
+    let cursor = source;
+    for (const segment of segments) {
+      if (!cursor || typeof cursor !== 'object'
+          || !Object.prototype.hasOwnProperty.call(cursor, segment)) {
+        return { found: false, value: null };
+      }
+      cursor = cursor[segment];
+    }
+    return { found: true, value: cursor };
+  }
+
+  function detectorBody(candidate, body, bodyBytes) {
+    if (bodyBytes > maxCompactSourceBytes) return '';
+    if (bodyBytes <= 65536) return body;
+    try {
+      const parsed = JSON.parse(body);
+      const projected = {};
+      for (const path of candidate.detector_json_paths || []) {
+        const selected = readJsonPath(parsed, path);
+        if (selected.found) setProjectedPath(projected, path, selected.value);
+      }
+      const compact = JSON.stringify(projected);
+      return byteLength(compact) <= 65536 ? compact : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   async function probe() {
     if (window.location.origin !== expectedOrigin) return;
     if (probeInFlight) return;
@@ -63,7 +110,8 @@
               signal: controller.signal,
             });
             const body = await response.text();
-            return { response, body };
+            const bodyBytes = byteLength(body);
+            return { response, body, bodyBytes };
           })();
           const timeout = new Promise((_, reject) => {
             timeoutId = setTimeout(() => {
@@ -73,16 +121,17 @@
               reject(error);
             }, requestTimeoutMs);
           });
-          const { response, body } = await Promise.race([request, timeout]);
-          const bodyBytes = new TextEncoder().encode(body).length;
+          const { response, body, bodyBytes } = await Promise.race([request, timeout]);
           const trimmed = body.trim();
           const jsonLike = Boolean(trimmed) && (trimmed[0] === '{' || trimmed[0] === '[');
+          const bodyForDetector = jsonLike ? detectorBody(candidate, body, bodyBytes) : '';
           responses.push({
             candidate_id: candidate.id,
-            body: jsonLike && bodyBytes <= 65536 ? body : '',
+            body: bodyForDetector,
             status: Number.isInteger(response.status) ? response.status : null,
             content_type: responseContentType(response),
             body_bytes: bodyBytes,
+            detector_body_bytes: byteLength(bodyForDetector),
             json_like: jsonLike,
             error_kind: null,
           });
@@ -93,6 +142,7 @@
             status: null,
             content_type: null,
             body_bytes: 0,
+            detector_body_bytes: 0,
             json_like: false,
             error_kind: safeErrorKind(error),
           });

@@ -103,6 +103,7 @@ describe("browser probe generated script", () => {
         status: null,
         content_type: null,
         body_bytes: Buffer.byteLength('{"code":0}'),
+        detector_body_bytes: Buffer.byteLength('{"code":0}'),
         json_like: true,
         error_kind: null,
       },
@@ -112,6 +113,7 @@ describe("browser probe generated script", () => {
         status: null,
         content_type: null,
         body_bytes: Buffer.byteLength('{"success":true}'),
+        detector_body_bytes: Buffer.byteLength('{"success":true}'),
         json_like: true,
         error_kind: null,
       },
@@ -122,6 +124,88 @@ describe("browser probe generated script", () => {
       fetchedPaths,
       "a finished round releases the next interval",
     ).toHaveLength(3);
+  });
+
+  it("keeps a valid oversized JSON detector response within the callback limit", async () => {
+    const navigations: string[] = [];
+    const location = {
+      origin: "https://relay.example",
+      get href() {
+        return navigations.at(-1) ?? "https://relay.example/";
+      },
+      set href(value: string) {
+        navigations.push(value);
+      },
+    };
+    const oversizedBody = JSON.stringify({
+      code: 0,
+      data: {
+        site_name: "Large Sub2API",
+        version: "1.2.3",
+        api_base_url: "",
+        registration_enabled: true,
+        promo_code_enabled: true,
+        invitation_code_enabled: true,
+        announcements: Array.from({ length: 5000 }, (_, index) => ({
+          id: index,
+          content: "x".repeat(80),
+        })),
+      },
+    });
+    expect(Buffer.byteLength(oversizedBody)).toBeGreaterThan(300_000);
+
+    const sandbox = {
+      window: { location },
+      fetch: (path: string) => {
+        const body =
+          path === "/api/v1/settings/public"
+            ? oversizedBody
+            : '{"success":false}';
+        return Promise.resolve({
+          status: 200,
+          headers: { get: () => "application/json" },
+          text: () => Promise.resolve(body),
+        });
+      },
+      setInterval: () => 1,
+      setTimeout,
+      clearTimeout,
+      AbortController,
+      TextEncoder,
+      btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
+      JSON,
+    };
+
+    vm.runInNewContext(readFileSync(SCRIPT, "utf8"), sandbox, {
+      timeout: 5000,
+    });
+    await flushPromises();
+
+    expect(navigations).toHaveLength(1);
+    const encoded = new URL(navigations[0]).searchParams.get("d");
+    expect(encoded).not.toBeNull();
+    const batch = JSON.parse(
+      Buffer.from(encoded!, "base64url").toString("utf8"),
+    );
+    expect(Buffer.byteLength(batch[0].body)).toBeLessThanOrEqual(64 * 1024);
+    expect(JSON.parse(batch[0].body)).toEqual({
+      code: 0,
+      data: {
+        site_name: "Large Sub2API",
+        version: "1.2.3",
+        api_base_url: "",
+        registration_enabled: true,
+        promo_code_enabled: true,
+        invitation_code_enabled: true,
+      },
+    });
+    expect(batch[0]).toMatchObject({
+      candidate_id: "sub2api",
+      body_bytes: Buffer.byteLength(oversizedBody),
+      detector_body_bytes: Buffer.byteLength(batch[0].body),
+      json_like: true,
+      error_kind: null,
+    });
   });
 
   it("uses the page's candidate-specific bearer session for authenticated browser probes", async () => {
@@ -237,6 +321,7 @@ describe("browser probe generated script", () => {
         status: 403,
         content_type: "text/html; charset=UTF-8",
         body_bytes: Buffer.byteLength(verificationBody),
+        detector_body_bytes: 0,
         json_like: false,
         error_kind: null,
       },
@@ -246,6 +331,7 @@ describe("browser probe generated script", () => {
         status: 403,
         content_type: "text/html; charset=UTF-8",
         body_bytes: Buffer.byteLength(verificationBody),
+        detector_body_bytes: 0,
         json_like: false,
         error_kind: null,
       },
@@ -316,6 +402,7 @@ describe("browser probe generated script", () => {
       status: null,
       content_type: null,
       body_bytes: 0,
+      detector_body_bytes: 0,
       json_like: false,
       error_kind: "ProbeTimeout",
     });

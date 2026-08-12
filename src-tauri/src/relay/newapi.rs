@@ -48,6 +48,15 @@ pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
         id: "newapi",
         path: "/api/status",
         bearer_token_storage_key: None,
+        detector_json_paths: &[
+            "success",
+            "data.version",
+            "data.system_name",
+            "data.theme",
+            "data.register_enabled",
+            "data.password_login_enabled",
+            "data.quota_per_unit",
+        ],
     },
     detect: detect_site,
 };

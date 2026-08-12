@@ -608,22 +608,34 @@ fn browser_entry_is_origin(url: &url::Url) -> bool {
     url.path() == "/" && url.query().is_none() && url.fragment().is_none()
 }
 
+fn browser_entry_is_auth_page(url: &url::Url) -> bool {
+    let path = url.path().trim_end_matches('/');
+    if matches!(path, "/login" | "/register") {
+        return true;
+    }
+    url.fragment()
+        .map(|fragment| fragment.trim_end_matches('/'))
+        .is_some_and(|fragment| matches!(fragment, "/login" | "/register"))
+}
+
 /// 选择共用导入 WebView 的首次地址。
 ///
-/// 用户显式给出的 path/query/fragment 始终优先保留；只有输入是裸 origin 且原生 fast
-/// path 已经识别出协议时，才使用该协议的默认注册/登录入口。
+/// 登录/注册链接属于明确的可交互页面，保留其 path/query/fragment；其它业务/API 路径
+/// 不能假定能在 WebView 中展示。协议未知时先打开 origin 让用户完成任意网页验证，识别后
+/// 再由协议适配层导航到登录/注册页；协议已知时直接使用该协议入口。
 fn browser_start_url(
     input: &str,
     site_origin: &str,
     detected: Option<&discovery::DetectedSite>,
 ) -> Result<url::Url, AppError> {
     let entry = browser_entry_url(input)?;
-    if !browser_entry_is_origin(&entry) {
+    if browser_entry_is_auth_page(&entry) {
         return Ok(entry);
     }
 
     let Some(detected) = detected else {
-        return Ok(entry);
+        return url::Url::parse(site_origin)
+            .map_err(|error| AppError::InvalidInput(format!("站点 origin 地址不对: {error}")));
     };
 
     let url = backend::browser_login_url(site_origin, detected.backend_kind, "");
@@ -692,6 +704,9 @@ async fn browser_import(
     let navigate_after_detection =
         initial_detected.is_none() && browser_entry_is_origin(&entry_url);
 
+    let initial_backend = initial_detected
+        .as_ref()
+        .map(|detected| format!("{:?}", detected.backend_kind));
     let initial_context = match initial_detected {
         Some(detected) => Some(browser_login_context(
             app_handle,
@@ -703,10 +718,20 @@ async fn browser_import(
         None => None,
     };
 
+    let entry_source = if browser_entry_is_auth_page(&entry_url) {
+        "supplied_auth_page"
+    } else if initial_backend.is_some() {
+        "protocol_login_page"
+    } else {
+        "site_origin"
+    };
     log::info!(
-        "打开浏览器辅助站点导入窗：{}（保留用户路径={}）",
-        crate::url_for_log(entry_url.as_str()),
-        !navigate_after_detection
+        "{}",
+        crate::diagnostics::DiagnosticEvent::new("relay.browser_import", "window_opening")
+            .field_display("site", crate::url_for_log(&site_origin))
+            .field_display("entry", crate::url_for_log(entry_url.as_str()))
+            .field_display("initial_backend", format_args!("{initial_backend:?}"))
+            .field("entry_source", entry_source)
     );
 
     let context = Arc::new(Mutex::new(initial_context));
@@ -873,24 +898,47 @@ async fn browser_import(
                 return false;
             };
 
-            let next_step = if navigate_after_detection {
-                url::Url::parse(&backend::browser_login_url(
-                    &site_origin_for_nav,
-                    backend_kind,
-                    "",
-                ))
-                .map_err(|error| format!("登录页地址不对: {error}"))
-                .and_then(|url| window.navigate(url).map_err(|error| error.to_string()))
+            let (next_action, next_step) = if navigate_after_detection {
+                let login_url = backend::browser_login_url(&site_origin_for_nav, backend_kind, "");
+                let result = url::Url::parse(&login_url)
+                    .map_err(|error| format!("登录页地址不对: {error}"))
+                    .and_then(|url| window.navigate(url).map_err(|error| error.to_string()));
+                ("navigate_login_page", result)
             } else if !login_script.is_empty() {
-                window
-                    .eval(&login_script)
-                    .map_err(|error| error.to_string())
+                (
+                    "inject_login_script",
+                    window
+                        .eval(&login_script)
+                        .map_err(|error| error.to_string()),
+                )
             } else {
-                Ok(())
+                ("await_page_login", Ok(()))
             };
-            if let Err(error) = next_step {
-                log::warn!("已识别站点，但无法在当前会话继续登录: {error}");
-                let _ = probe_error_tx.try_send(RelayImportError::message(error));
+            match next_step {
+                Ok(()) => log::info!(
+                    "{}",
+                    crate::diagnostics::DiagnosticEvent::new(
+                        "relay.browser_import.continue",
+                        "completed",
+                    )
+                    .field_display("site", crate::url_for_log(&site_origin_for_nav))
+                    .field_display("backend", format_args!("{backend_kind:?}"))
+                    .field("action", next_action)
+                ),
+                Err(error) => {
+                    log::warn!(
+                        "{}",
+                        crate::diagnostics::DiagnosticEvent::new(
+                            "relay.browser_import.continue",
+                            "failed",
+                        )
+                        .field_display("site", crate::url_for_log(&site_origin_for_nav))
+                        .field_display("backend", format_args!("{backend_kind:?}"))
+                        .field("action", next_action)
+                        .field("error", error.clone())
+                    );
+                    let _ = probe_error_tx.try_send(RelayImportError::message(error));
+                }
             }
             return false;
         }
@@ -3744,6 +3792,43 @@ mod tests {
             site_name: "NewAPI".into(),
             api_base_url: String::new(),
         }
+    }
+
+    #[test]
+    fn browser_start_url_uses_origin_when_protocol_is_unknown_even_for_non_page_path() {
+        let url = browser_start_url(
+            "https://api.example.com/custom/subscription-token",
+            "https://api.example.com",
+            None,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/");
+    }
+
+    #[test]
+    fn browser_start_url_preserves_auth_link_while_protocol_is_unknown() {
+        let url = browser_start_url(
+            "https://api.example.com/register?aff=ABC123",
+            "https://api.example.com",
+            None,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register?aff=ABC123");
+    }
+
+    #[test]
+    fn browser_start_url_replaces_non_page_path_after_native_detection() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "https://api.example.com/custom/subscription-token",
+            "https://api.example.com",
+            Some(&detected),
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register");
     }
 
     #[test]

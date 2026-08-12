@@ -14,7 +14,13 @@ use futures::StreamExt;
 use std::fmt;
 
 pub const PROBE_SCHEME: &str = "loongport-probe";
+// Some protocol registries include large, user-visible configuration arrays in their public
+// settings response. Keep the callback bounded, but do not discard a valid detector payload
+// merely because unrelated settings make the response larger than the old 64 KiB limit.
 const MAX_PROBE_BODY_BYTES: usize = 64 * 1024;
+// Only compact source responses up to this size. The browser fetch API materializes text before
+// this check, while the cross-process callback remains capped by MAX_PROBE_BODY_BYTES.
+const MAX_PROBE_COMPACT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROBE_RESPONSE_OVERHEAD_BYTES: usize = 512;
 
 pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
@@ -72,6 +78,8 @@ pub struct ProbeResponse {
     #[serde(default)]
     pub body_bytes: usize,
     #[serde(default)]
+    pub detector_body_bytes: usize,
+    #[serde(default)]
     pub json_like: bool,
     #[serde(default)]
     pub error_kind: Option<String>,
@@ -87,6 +95,7 @@ pub struct ProbeBatch {
 /// 脚本只在目标 origin 上工作；验证页、注册页、登录页都走同一份代码。它不认识任何
 /// 验证产品，也不在浏览器层判断协议。每轮回传安全的响应元数据；只有 JSON-like 且大小
 /// 合规的正文才交给 Rust detector，验证页正文、令牌、Cookie 和请求头都不会离开 WebView。
+/// 对不超过 2 MiB 的大 JSON 响应先做协议无关投影，再把最多 64 KiB 的正文交给 Rust detector。
 pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) -> String {
     let expected_origin = serde_json::to_string(site_origin).expect("origin can be JSON encoded");
     let candidates =
@@ -99,6 +108,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
   const candidates = {candidates};
   const callbackScheme = '{PROBE_SCHEME}';
   const requestTimeoutMs = 5000;
+  const maxCompactSourceBytes = {MAX_PROBE_COMPACT_SOURCE_BYTES};
   let previousBatch = '';
   let probeInFlight = false;
 
@@ -139,6 +149,52 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
     return safeName || 'Error';
   }}
 
+  function byteLength(value) {{
+    return new TextEncoder().encode(value).length;
+  }}
+
+  function setProjectedPath(target, path, value) {{
+    const segments = path.split('.').filter(Boolean);
+    if (segments.length === 0) return;
+    let cursor = target;
+    for (let index = 0; index < segments.length - 1; index += 1) {{
+      const segment = segments[index];
+      if (!cursor[segment] || typeof cursor[segment] !== 'object') cursor[segment] = {{}};
+      cursor = cursor[segment];
+    }}
+    cursor[segments[segments.length - 1]] = value;
+  }}
+
+  function readJsonPath(source, path) {{
+    const segments = path.split('.').filter(Boolean);
+    let cursor = source;
+    for (const segment of segments) {{
+      if (!cursor || typeof cursor !== 'object'
+          || !Object.prototype.hasOwnProperty.call(cursor, segment)) {{
+        return {{ found: false, value: null }};
+      }}
+      cursor = cursor[segment];
+    }}
+    return {{ found: true, value: cursor }};
+  }}
+
+  function detectorBody(candidate, body, bodyBytes) {{
+    if (bodyBytes > maxCompactSourceBytes) return '';
+    if (bodyBytes <= {MAX_PROBE_BODY_BYTES}) return body;
+    try {{
+      const parsed = JSON.parse(body);
+      const projected = {{}};
+      for (const path of candidate.detector_json_paths || []) {{
+        const selected = readJsonPath(parsed, path);
+        if (selected.found) setProjectedPath(projected, path, selected.value);
+      }}
+      const compact = JSON.stringify(projected);
+      return byteLength(compact) <= {MAX_PROBE_BODY_BYTES} ? compact : '';
+    }} catch (_) {{
+      return '';
+    }}
+  }}
+
   async function probe() {{
     if (window.location.origin !== expectedOrigin) return;
     if (probeInFlight) return;
@@ -158,7 +214,8 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
               signal: controller.signal,
             }});
             const body = await response.text();
-            return {{ response, body }};
+            const bodyBytes = byteLength(body);
+            return {{ response, body, bodyBytes }};
           }})();
           const timeout = new Promise((_, reject) => {{
             timeoutId = setTimeout(() => {{
@@ -168,16 +225,17 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
               reject(error);
             }}, requestTimeoutMs);
           }});
-          const {{ response, body }} = await Promise.race([request, timeout]);
-          const bodyBytes = new TextEncoder().encode(body).length;
+          const {{ response, body, bodyBytes }} = await Promise.race([request, timeout]);
           const trimmed = body.trim();
           const jsonLike = Boolean(trimmed) && (trimmed[0] === '{{' || trimmed[0] === '[');
+          const bodyForDetector = jsonLike ? detectorBody(candidate, body, bodyBytes) : '';
           responses.push({{
             candidate_id: candidate.id,
-            body: jsonLike && bodyBytes <= {MAX_PROBE_BODY_BYTES} ? body : '',
+            body: bodyForDetector,
             status: Number.isInteger(response.status) ? response.status : null,
             content_type: responseContentType(response),
             body_bytes: bodyBytes,
+            detector_body_bytes: byteLength(bodyForDetector),
             json_like: jsonLike,
             error_kind: null,
           }});
@@ -188,6 +246,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
             status: null,
             content_type: null,
             body_bytes: 0,
+            detector_body_bytes: 0,
             json_like: false,
             error_kind: safeErrorKind(error),
           }});
@@ -287,8 +346,8 @@ pub fn probe_batch_summary(responses: &[ProbeResponse]) -> String {
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "unknown".into());
             format!(
-                "{candidate_id}(status={status},type={content_type},bytes={},json={})",
-                response.body_bytes, response.json_like
+                "{candidate_id}(status={status},type={content_type},bytes={},detector_bytes={},json={})",
+                response.body_bytes, response.detector_body_bytes, response.json_like
             )
         })
         .collect::<Vec<_>>()
@@ -381,6 +440,7 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
         responses.push(ProbeResponse {
             candidate_id: candidate.id.to_string(),
             body_bytes: body.len(),
+            detector_body_bytes: body.len(),
             json_like: body
                 .iter()
                 .copied()
@@ -515,11 +575,13 @@ mod tests {
                     id: "sub2api",
                     path: "/api/v1/settings/public",
                     bearer_token_storage_key: Some("auth_token"),
+                    detector_json_paths: api::PROBE_ADAPTER.candidate.detector_json_paths,
                 },
                 ProbeCandidate {
                     id: "newapi",
                     path: "/api/status",
                     bearer_token_storage_key: None,
+                    detector_json_paths: newapi::PROBE_ADAPTER.candidate.detector_json_paths,
                 },
             ]
         );
@@ -532,11 +594,13 @@ mod tests {
                 id: "sub2api",
                 path: "/api/v1/settings/public",
                 bearer_token_storage_key: Some("auth_token"),
+                detector_json_paths: &["code", "data.version"],
             },
             ProbeCandidate {
                 id: "future",
                 path: "/api/status",
                 bearer_token_storage_key: None,
+                detector_json_paths: &["success", "data.system_name"],
             },
         ];
         let script = browser_probe_script("https://relay.example", &candidates);
@@ -547,7 +611,9 @@ mod tests {
         assert!(script.contains(PROBE_SCHEME));
         assert!(script.contains("window.location.origin"));
         assert!(script.contains("const responses = []"));
-        assert!(script.contains("body: jsonLike && bodyBytes <= 65536 ? body : ''"));
+        assert!(script.contains("function detectorBody(candidate, body, bodyBytes)"));
+        assert!(script.contains("candidate.detector_json_paths"));
+        assert!(script.contains("const maxCompactSourceBytes = 2097152;"));
         assert!(script.contains("error_kind: safeErrorKind(error)"));
         assert!(script.contains("const batch = JSON.stringify(responses)"));
         assert!(script.contains("b64url(batch)"));
@@ -630,6 +696,7 @@ mod tests {
                 status: Some(403),
                 content_type: Some("text/html; charset=UTF-8\nforged".into()),
                 body_bytes: 38,
+                detector_body_bytes: 0,
                 json_like: false,
                 error_kind: None,
             },
@@ -644,7 +711,7 @@ mod tests {
 
         assert_eq!(
             summary,
-            "sub2api(status=403,type=text/html; charset=UTF-8 forged,bytes=38,json=false) newapi(error=ProbeTimeout forged)"
+            "sub2api(status=403,type=text/html; charset=UTF-8 forged,bytes=38,detector_bytes=0,json=false) newapi(error=ProbeTimeout forged)"
         );
         assert!(!summary.contains("secret verification page"));
         assert!(!summary.contains('\n'));
