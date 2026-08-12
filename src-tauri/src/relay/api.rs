@@ -513,11 +513,9 @@ pub fn base_url_for(app_type: &AppType, site_origin: &str, api_base_url: &str) -
 
 /// 带 Bearer token 的 sub2api 客户端。
 ///
-/// **User-Agent 必须与登录 WebView 一致**：sub2api 有可选的会话绑定
-/// （`session_binding_enabled`，默认关），开启后 access token 里带
-/// `SHA256(clientIP + "\n" + UA)[:16]`，每个请求重算比对，不符即**撤销整个会话家族**
-/// 并返 401 `SESSION_BINDING_MISMATCH`。UA 不一致的后果不是单次失败，是连网页登录态
-/// 一起被踢掉。
+/// 会话绑定开启时，UA 必须与登录 WebView 一致。当前设计以引擎真实 UA 为唯一
+/// 数据源：登录时从 `navigator.userAgent` 回传并持久化，HTTP 客户端跟随它。
+/// 值为空时不设（不再伪造默认值）。
 pub struct Client {
     http: reqwest::Client,
     site_origin: String,
@@ -544,9 +542,10 @@ impl Client {
         site_origin: impl Into<String>,
         token: impl Into<String>,
         account_id: Option<i64>,
+        user_agent: Option<&str>,
     ) -> Result<Self, AppError> {
         Ok(Self {
-            http: build_client()?,
+            http: build_client_with_user_agent(user_agent)?,
             site_origin: site_origin.into(),
             token: token.into(),
             account_id,
@@ -1080,12 +1079,20 @@ fn describe_send_error(e: &reqwest::Error) -> String {
     out
 }
 
-pub(crate) fn build_client() -> Result<reqwest::Client, AppError> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(crate::relay::login::WEBVIEW_USER_AGENT)
+pub(crate) fn build_client_with_user_agent(
+    user_agent: Option<&str>,
+) -> Result<reqwest::Client, AppError> {
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    if let Some(ua) = user_agent {
+        builder = builder.user_agent(ua);
+    }
+    builder
         .build()
         .map_err(|e| AppError::Config(format!("创建 HTTP 客户端失败: {e}")))
+}
+
+pub(crate) fn build_client() -> Result<reqwest::Client, AppError> {
+    build_client_with_user_agent(None)
 }
 
 #[cfg(test)]
@@ -1456,7 +1463,7 @@ mod tests {
                 .expect("serve settings response");
         });
 
-        let client = Client::new(origin, "account-secret", Some(7)).expect("build client");
+        let client = Client::new(origin, "account-secret", Some(7), None).expect("build client");
         let settings = client
             .public_settings()
             .await
@@ -1659,7 +1666,7 @@ mod tests {
     /// **调用点** —— 把请求组装处的 `self.account_id` 换成 `None`（等于修法作废、
     /// 409 复发），它们一条都不会红。所以这条必须走 [`Client`]。
     fn idempotency_header_on_request(account_id: Option<i64>, name: &str) -> String {
-        let req = Client::new("https://example.com", "token", account_id)
+        let req = Client::new("https://example.com", "token", account_id, None)
             .expect("构造 client 不该失败")
             .create_key_request(name, 8)
             .build()

@@ -44,45 +44,6 @@ pub const LOGIN_WINDOW_LABEL: &str = "loongport-login";
 /// 我们认得的 scheme，就会被误当成凭据回传。
 const CREDS_SCHEME: &str = "loongport-creds";
 
-/// 登录 WebView 的 User-Agent。**按平台取值，必须与本机真实的 WebView 引擎一致。**
-///
-/// **Rust 侧的 HTTP 客户端必须用同一个值**（见 [`crate::relay::api::Client`]）：sub2api
-/// 有可选的会话绑定（默认关），开启后 access token 里带 `SHA256(clientIP + "\n" + UA)[:16]`，
-/// UA 不一致会 401 且**撤销整个会话家族**（连网页登录态一起踢）。
-///
-/// 显式写死而不是让两边各用默认值：WebView 与 reqwest 的默认 UA 天差地别，靠默认值必然
-/// 不一致。写死之后两边引用同一个常量，改一处两边都跟。
-///
-/// ## ⚠️ 为什么必须**按平台**分，不能一个值走天下（2026-08-03 实测）
-///
-/// 原来全平台共用一个 macOS Safari 的 UA。**Windows 上登录页的 Cloudflare 验证
-/// 永远过不去**（一直「验证失败」，不是超时也不是网络问题）—— 因为 Turnstile
-/// 会拿 UA 声明的浏览器与**真实的 JS 引擎指纹**对照：
-///
-/// | | UA 声称 | 实际引擎 |
-/// |---|---|---|
-/// | macOS | Safari 17.4 / AppleWebKit 605 | WKWebView（就是 Safari 内核）✅ |
-/// | Windows | Safari 17.4 / AppleWebKit 605 | **WebView2 = Chromium 150** ❌ |
-///
-/// Windows 上那是个自相矛盾的组合（Chromium 引擎冒充 Mac 上的 Safari），
-/// 属于典型的机器人特征 ⇒ Cloudflare 直接判失败，而且**重试多少次都一样**。
-///
-/// 所以取值规则是：**跟着本平台 WebView 的真实引擎写**，别追求跨平台统一。
-/// 会话绑定要的是「同一台机器上 WebView 与 HTTP 客户端一致」，
-/// 从来不要求「不同机器之间一致」—— 按 `cfg` 分不破坏它。
-///
-/// 末尾保留 `LoongPort` 标记：便于中转站在日志里认出本客户端，且不影响引擎指纹比对。
-#[cfg(target_os = "windows")]
-pub const WEBVIEW_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
-     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 \
-     Edg/150.0.0.0 LoongPort";
-
-/// 见 Windows 那份的说明 —— macOS 上 WebView 就是 WKWebView（Safari 内核），
-/// 所以这里声明 Safari 才是与引擎一致的那个。
-#[cfg(not(target_os = "windows"))]
-pub const WEBVIEW_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-     AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 LoongPort";
-
 /// sub2api 存 access token 的 localStorage 键名。
 ///
 /// ## 为什么提成常量（登录窗只读、充值窗要写）
@@ -122,6 +83,7 @@ pub struct Credentials {
     pub auth_token: String,
     pub refresh_token: Option<String>,
     pub token_expires_at: Option<i64>,
+    pub user_agent: Option<String>,
 }
 
 /// 凭据到手后浮在登录页顶部的提示条。
@@ -315,7 +277,8 @@ pub fn login_script(
     var payload = JSON.stringify({{
       auth_token: token,
       refresh_token: window.localStorage.getItem(K_REFRESH),
-      token_expires_at: window.localStorage.getItem(K_EXPIRES)
+      token_expires_at: window.localStorage.getItem(K_EXPIRES),
+      user_agent: navigator.userAgent,
     }});
 
     // 改 window.location 发这次跳转。
@@ -759,6 +722,7 @@ fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
         auth_token: Option<String>,
         refresh_token: Option<String>,
         token_expires_at: Option<String>,
+        user_agent: Option<String>,
     }
     let raw: Raw = serde_json::from_str(&json)
         .map_err(|e| AppError::Config(format!("凭据回传的格式不对: {e}")))?;
@@ -777,6 +741,7 @@ fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
             .token_expires_at
             .and_then(|s| s.trim().parse::<i64>().ok())
             .map(|ms| if ms > 100_000_000_000 { ms / 1000 } else { ms }),
+        user_agent: raw.user_agent.filter(|s| !s.is_empty()),
     })
 }
 
@@ -1478,57 +1443,6 @@ mod tests {
             login_url("https://x.com", "me@x.com"),
             "标识的有无必须真的改变落点"
         );
-    }
-
-    #[test]
-    fn user_agent_is_shared_with_the_http_client() {
-        // 会话绑定开启时 UA 不一致会 401 并撤销整个会话家族。这条钉住「两边用同一个常量」。
-        assert!(!WEBVIEW_USER_AGENT.is_empty());
-        assert!(WEBVIEW_USER_AGENT.contains("LoongPort"));
-    }
-
-    /// **UA 声称的浏览器必须与本平台 WebView 的真实引擎一致。**
-    ///
-    /// 守的是 2026-08-03 实测到的那个故障：Windows 上原来发的是 macOS Safari 的 UA，
-    /// 而引擎是 WebView2（Chromium）⇒ Cloudflare Turnstile 拿 UA 与 JS 引擎指纹
-    /// 对照发现自相矛盾 ⇒ 登录页**永远**「验证失败」，重试无效。
-    ///
-    /// 断言按平台分开写而不是只判「非空」：那个 bug 的形态恰恰是「值有、但不对」。
-    #[test]
-    fn the_user_agent_matches_this_platforms_real_webview_engine() {
-        if cfg!(target_os = "windows") {
-            // WebView2 是 Chromium 内核，必须声明 Chrome/Edge，且不能自称 Mac。
-            assert!(
-                WEBVIEW_USER_AGENT.contains("Windows NT"),
-                "Windows 上必须声明 Windows 平台：{WEBVIEW_USER_AGENT}"
-            );
-            assert!(
-                WEBVIEW_USER_AGENT.contains("Chrome/"),
-                "WebView2 是 Chromium，UA 必须声明 Chrome：{WEBVIEW_USER_AGENT}"
-            );
-            assert!(
-                !WEBVIEW_USER_AGENT.contains("Macintosh"),
-                "Windows 上自称 Macintosh 会被 Cloudflare 判成机器人：{WEBVIEW_USER_AGENT}"
-            );
-            assert!(
-                !WEBVIEW_USER_AGENT.contains("Version/"),
-                "`Version/x` 是 Safari 专有标记，Chromium 的 UA 里不该有：{WEBVIEW_USER_AGENT}"
-            );
-        } else {
-            // macOS 的 WKWebView 就是 Safari 内核，声明 Safari 才与引擎一致。
-            assert!(
-                WEBVIEW_USER_AGENT.contains("Macintosh"),
-                "macOS 上必须声明 Mac 平台：{WEBVIEW_USER_AGENT}"
-            );
-            assert!(
-                WEBVIEW_USER_AGENT.contains("Safari/"),
-                "WKWebView 是 Safari 内核：{WEBVIEW_USER_AGENT}"
-            );
-            assert!(
-                !WEBVIEW_USER_AGENT.contains("Windows NT"),
-                "macOS 上不该自称 Windows：{WEBVIEW_USER_AGENT}"
-            );
-        }
     }
 
     #[test]

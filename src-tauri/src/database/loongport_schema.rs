@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 9;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 10;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -176,6 +176,12 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 add_relay_backend_kind_column(conn)?;
                 set_version(conn, 9)?;
             }
+            // v9 → v10：记录登录时的真实 User-Agent（不再伪造）。
+            9 => {
+                log::info!("LoongPort 数据迁移 v9 → v10（loongport_relay 加 user_agent 列）");
+                add_relay_user_agent_column(conn)?;
+                set_version(conn, 10)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -203,6 +209,20 @@ fn add_relay_backend_kind_column(conn: &Connection) -> Result<(), AppError> {
         [],
     )
     .map_err(|e| AppError::Database(format!("给 loongport_relay 加 backend_kind 列失败: {e}")))?;
+    Ok(())
+}
+
+fn add_relay_user_agent_column(conn: &Connection) -> Result<(), AppError> {
+    if !crate::Database::table_exists(conn, "loongport_relay")? {
+        return Ok(());
+    }
+
+    if crate::Database::has_column(conn, "loongport_relay", "user_agent")? {
+        return Ok(());
+    }
+
+    conn.execute("ALTER TABLE loongport_relay ADD COLUMN user_agent TEXT", [])
+        .map_err(|e| AppError::Database(format!("给 loongport_relay 加 user_agent 列失败: {e}")))?;
     Ok(())
 }
 
@@ -658,7 +678,7 @@ mod tests {
             ),
             "迁移必须保留旧行，并把历史 relay 明确归为 sub2api"
         );
-        assert_eq!(current_version(&conn).unwrap(), 9);
+        assert_eq!(current_version(&conn).unwrap(), 10);
     }
 
     #[test]

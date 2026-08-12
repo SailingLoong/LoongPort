@@ -135,6 +135,7 @@ pub struct Relay {
     pub refresh_token: Option<String>,
     /// Unix 秒。`None` 表示服务端没给（降级态：可用但不可续期）。
     pub token_expires_at: Option<i64>,
+    pub user_agent: Option<String>,
     /// 用户手工拖动决定的行序，越小越靠前。
     ///
     /// ## 为什么需要一列专门存序
@@ -214,7 +215,8 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
             token_expires_at INTEGER,
             sort_index INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0,
-            backend_kind TEXT NOT NULL DEFAULT 'sub2api'
+            backend_kind TEXT NOT NULL DEFAULT 'sub2api',
+            user_agent TEXT
         )",
         [],
     )
@@ -240,7 +242,7 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
 /// 由 [`select_cols_match_the_row_reader`] 钉住两者的列数一致。
 const SELECT_COLS: &str =
     "id, site_origin, site_name, api_base_url, account_id, account_label, login_identifier, \
-     auth_token, refresh_token, token_expires_at, sort_index, backend_kind";
+     auth_token, refresh_token, token_expires_at, sort_index, backend_kind, user_agent";
 
 fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
     Ok(Relay {
@@ -256,6 +258,7 @@ fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
         token_expires_at: row.get(9)?,
         sort_index: row.get(10)?,
         backend_kind: row.get(11)?,
+        user_agent: row.get(12)?,
     })
 }
 
@@ -414,6 +417,7 @@ pub fn save_credentials(
     auth_token: &str,
     refresh_token: Option<&str>,
     token_expires_at: Option<i64>,
+    user_agent: Option<&str>,
 ) -> Result<i64, AppError> {
     let AccountIdentity {
         id: account_id,
@@ -457,8 +461,8 @@ pub fn save_credentials(
             "UPDATE loongport_relay
          SET site_name = ?1, api_base_url = ?2, backend_kind = ?3,
              account_id = ?4, account_label = ?5, login_identifier = ?6, auth_token = ?7,
-             refresh_token = ?8, token_expires_at = ?9, updated_at = ?10
-         WHERE id = ?11",
+             refresh_token = ?8, token_expires_at = ?9, user_agent = ?10, updated_at = ?11
+         WHERE id = ?12",
             params![
                 site_name,
                 api_base_url,
@@ -469,6 +473,7 @@ pub fn save_credentials(
                 auth_token,
                 refresh_token,
                 token_expires_at,
+                user_agent,
                 now_unix(),
                 target
             ],
@@ -645,6 +650,7 @@ mod tests {
             "tok",
             Some("ref"),
             Some(123),
+            None,
         )
         .unwrap();
 
@@ -774,6 +780,7 @@ mod tests {
             "tok1",
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -785,6 +792,7 @@ mod tests {
             second,
             ident(200, "alt@x.com", "alt@x.com"),
             "tok2",
+            None,
             None,
             None,
         )
@@ -806,6 +814,7 @@ mod tests {
             "old-token",
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -816,6 +825,7 @@ mod tests {
             second,
             ident(100, "me@x.com", "me@x.com"),
             "new-token",
+            None,
             None,
             None,
         )
@@ -847,6 +857,7 @@ mod tests {
             "old-token",
             Some("old-refresh"),
             Some(100),
+            None,
         )
         .unwrap();
         conn.execute(
@@ -870,6 +881,7 @@ mod tests {
             "fresh-token",
             Some("fresh-refresh"),
             Some(200),
+            None,
         )
         .unwrap();
 
@@ -904,6 +916,7 @@ mod tests {
             "old-token",
             Some("old-refresh"),
             Some(100),
+            None,
         )
         .unwrap();
         let source = save_site_with_backend(
@@ -928,6 +941,7 @@ mod tests {
             "fresh-token",
             Some("fresh-refresh"),
             Some(200),
+            None,
         )
         .expect_err("delete failure must roll the merge back");
 
@@ -952,6 +966,7 @@ mod tests {
             "tok",
             Some("ref"),
             Some(123),
+            None,
         )
         .unwrap();
         clear_credentials(&conn, a).unwrap();
@@ -998,6 +1013,7 @@ mod tests {
             "tok",
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("站点记录不存在"));
@@ -1014,6 +1030,7 @@ mod tests {
             "tok",
             None,
             Some(1000),
+            None,
         )
         .unwrap();
         let base = get(&conn, a).unwrap().unwrap();
@@ -1059,6 +1076,7 @@ mod tests {
             "tok",
             None,
             Some(1000),
+            None,
         )
         .unwrap();
         let stale = get(&conn, a).unwrap().unwrap();
@@ -1099,12 +1117,30 @@ mod tests {
         );
 
         // 给最后那行登录 —— 行序仍然不能变（这正是用户报的那个 bug 的形态）。
-        save_credentials(&conn, c, ident(1, "c@x.com", "c@x.com"), "tok", None, None).unwrap();
+        save_credentials(
+            &conn,
+            c,
+            ident(1, "c@x.com", "c@x.com"),
+            "tok",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
         assert_eq!(order, vec![a, b, c], "登录某一行不该让它跳到最前");
 
         // 给第一行登录也一样。
-        save_credentials(&conn, a, ident(2, "a@x.com", "a@x.com"), "tok", None, None).unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(2, "a@x.com", "a@x.com"),
+            "tok",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
         assert_eq!(order, vec![a, b, c], "任何登录都不该改变行序");
     }
@@ -1122,7 +1158,16 @@ mod tests {
         assert_eq!(order, vec![c, a, b]);
 
         // 拖完之后登录其中一行，顺序仍不变 —— 两件事互不干扰。
-        save_credentials(&conn, b, ident(1, "b@x.com", "b@x.com"), "tok", None, None).unwrap();
+        save_credentials(
+            &conn,
+            b,
+            ident(1, "b@x.com", "b@x.com"),
+            "tok",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
         assert_eq!(order, vec![c, a, b], "登录不该动用户拖出来的顺序");
     }
@@ -1133,7 +1178,16 @@ mod tests {
         // —— 拿它去预填登录框就填错了（sub2api 那个框要邮箱格式）。
         let conn = mem();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, a, ident(7, "张三", "me@x.com"), "tok", None, None).unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(7, "张三", "me@x.com"),
+            "tok",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let op = get(&conn, a).unwrap().unwrap();
         assert_eq!(op.account_label, "张三", "给人看的是昵称");
@@ -1145,7 +1199,16 @@ mod tests {
         // clear_credentials 正是「重登前的那一步」，把预填值一起清掉等于让用户重新输邮箱。
         let conn = mem();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, a, ident(7, "张三", "me@x.com"), "tok", None, None).unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(7, "张三", "me@x.com"),
+            "tok",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         clear_credentials(&conn, a).unwrap();
 
@@ -1164,7 +1227,16 @@ mod tests {
         // 只有展示与预填要跟上。续期路径靠这个函数刷，否则站点选择器一直挂旧标签。
         let conn = mem();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
-        save_credentials(&conn, a, ident(7, "老名字", "old@x.com"), "tok", None, None).unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(7, "老名字", "old@x.com"),
+            "tok",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         // 传一个**不同的** account_id（99）：已有值非空 ⇒ 必须不被覆盖。
         refresh_account_identity(&conn, a, ident(99, "新名字", "new@x.com")).unwrap();

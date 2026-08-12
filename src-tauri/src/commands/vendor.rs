@@ -308,7 +308,6 @@ async fn do_login(
     // **同一个厂商永远只能挂第一个登录过的账号**，而多账号正是本表唯一索引
     // `(vendor_id, account_id)` 特意支持的能力。
     .incognito(true)
-    .user_agent(crate::relay::login::WEBVIEW_USER_AGENT)
     .initialization_script(deepseek::login_script(login_hint))
     .on_navigation(move |url| {
         match deepseek::parse_creds_navigation(url) {

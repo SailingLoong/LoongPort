@@ -116,10 +116,14 @@ impl<'a> RuntimeBackend<'a> {
     pub async fn account(&self) -> Result<RuntimeAccount, AppError> {
         match self {
             Self::Sub2Api { relay } => {
-                let account =
-                    api::Client::new(&relay.site_origin, &relay.auth_token, relay.account_id)?
-                        .account()
-                        .await?;
+                let account = api::Client::new(
+                    &relay.site_origin,
+                    &relay.auth_token,
+                    relay.account_id,
+                    relay.user_agent.as_deref(),
+                )?
+                .account()
+                .await?;
                 Ok(RuntimeAccount {
                     id: account.id,
                     label: account.display_name(),
@@ -142,10 +146,14 @@ impl<'a> RuntimeBackend<'a> {
     pub async fn balance(&self) -> Result<RuntimeBalance, AppError> {
         match self {
             Self::Sub2Api { relay } => {
-                let balance =
-                    api::Client::new(&relay.site_origin, &relay.auth_token, relay.account_id)?
-                        .balance()
-                        .await?;
+                let balance = api::Client::new(
+                    &relay.site_origin,
+                    &relay.auth_token,
+                    relay.account_id,
+                    relay.user_agent.as_deref(),
+                )?
+                .balance()
+                .await?;
                 Ok(RuntimeBalance {
                     balance: balance.balance,
                     frozen_balance: balance.frozen_balance,
@@ -300,6 +308,7 @@ mod tests {
             auth_token: "access-token".into(),
             refresh_token: Some("stored-refresh".into()),
             token_expires_at: Some(1),
+            user_agent: None,
             sort_index: 0,
         }
     }
