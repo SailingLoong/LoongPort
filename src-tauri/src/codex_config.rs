@@ -279,7 +279,7 @@ pub fn write_codex_live_atomic(
     } else {
         None
     };
-    let _old_config = if config_path.exists() {
+    let old_config = if config_path.exists() {
         Some(fs::read(&config_path).map_err(|e| AppError::io(&config_path, e))?)
     } else {
         None
@@ -298,7 +298,17 @@ pub fn write_codex_live_atomic(
     write_json_file(&auth_path, auth)?;
 
     // 第二步：写 config.toml（失败则回滚 auth.json）
-    if let Err(e) = write_text_file(&config_path, &cfg_text) {
+    //
+    // 与切换供应商同样只覆盖自己 own 的键：这条路径同样是「投影」，
+    // 不该把用户手写的 approval_policy / plugins 等一起冲掉。
+    let merged = merge_codex_owned_keys(
+        &old_config
+            .as_deref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default(),
+        &cfg_text,
+    );
+    if let Err(e) = write_text_file(&config_path, &merged) {
         // 回滚 auth.json
         if let Some(bytes) = old_auth {
             let _ = atomic_write(&auth_path, &bytes);
@@ -309,6 +319,80 @@ pub fn write_codex_live_atomic(
     }
 
     Ok(())
+}
+
+/// LoongPort 在 `~/.codex/config.toml` 里**唯一拥有**的顶层键。
+///
+/// ## 为什么要有这份名单
+///
+/// 这个文件是「投影产物」：DB 是 **provider 路由**这件事的唯一数据源。但 DB **不是整个
+/// 文件**的 owner —— 用户手写的 `approval_policy`、`sandbox_mode`、`[plugins]`、
+/// `[features]` 等属于另一个 owner，投影不该越界删它们。
+///
+/// 从前写 live 走的是全文覆盖，于是用户手写的配置**每切一次供应商就被静默抹掉一次**
+/// （2026-08-12 实测：维护者为让 codex 免审批而手写的三个键就是这么消失的）。
+///
+/// ## 为什么是白名单而不是黑名单
+///
+/// 黑名单要跟着上游 codex 版本持续维护：它明天新增一个配置项、不在名单里就照样被抹。
+/// 白名单对未知键**天然免疫** —— 边界由「我们 own 什么」定义，那是我们自己说了算的事实。
+const CODEX_OWNED_TOP_LEVEL_KEYS: &[&str] = &[
+    "model_provider",
+    "model",
+    "model_providers",
+    "experimental_bearer_token",
+    "model_catalog_json",
+    "profiles",
+    "mcp_servers",
+    // 旧形态 `[mcp.servers]`：与 `mcp_servers` 同源，`strip_codex_mcp_servers_from_settings`
+    // 一直是两种一起处理的。漏掉它会让上一个供应商的 legacy 段被当成用户数据留下来，
+    // 传播进下一个供应商的 live（`provider_service.rs` 有测试专门钉这条）。
+    "mcp",
+    // `wire_api` / `base_url` 在没有 `model_provider` 时会**回落写顶层**
+    // （见 `update_codex_toml_field` 的 `"base_url" | "wire_api"` 分支）。
+    // 它们描述的是「这个供应商用什么协议、打哪个地址」⇒ 必须跟着供应商走：
+    // 留下上一个供应商的值会改写下一个的协议（`provider_service.rs` 钉了这条）。
+    "wire_api",
+    "base_url",
+    "web_search",
+];
+
+/// 把 `incoming`（投影产物）合进 `existing`（磁盘现状），**只动本模块 own 的键**。
+///
+/// 语义：
+/// - 白名单内的键：`incoming` 有则覆盖，`incoming` 没有则从结果中**删除**
+///   （切到不带该键的供应商时旧值必须清掉，否则残留串台）。
+/// - 白名单外的键：原样保留，连注释和键顺序一起（`toml_edit` 的本职能力）。
+///
+/// ## 解析不了就整体覆盖
+///
+/// `existing` 为空或语法坏掉时直接返回 `incoming`：用户把 TOML 写坏了不该**卡死切换**，
+/// 那会让人连「切回一个能用的供应商」都做不到。
+///
+/// ⚠️ **备份恢复不能走这里** —— 恢复要的是精确还原，若也做合并，接管时写进去的键
+/// 就永远删不掉，会残留一条指向本地代理的死配置。恢复路径保持全文覆盖。
+fn merge_codex_owned_keys(existing: &str, incoming: &str) -> String {
+    if existing.trim().is_empty() {
+        return incoming.to_string();
+    }
+    let Ok(mut doc) = existing.parse::<DocumentMut>() else {
+        return incoming.to_string();
+    };
+    let incoming_doc = match incoming.parse::<DocumentMut>() {
+        Ok(parsed) => parsed,
+        // incoming 来自 DB 且调用方已做语法校验，走到这里只可能是空串。
+        Err(_) => return incoming.to_string(),
+    };
+
+    for key in CODEX_OWNED_TOP_LEVEL_KEYS {
+        match incoming_doc.get(key) {
+            Some(item) => doc[*key] = item.clone(),
+            None => {
+                doc.as_table_mut().remove(key);
+            }
+        }
+    }
+    doc.to_string()
 }
 
 /// 读取 `~/.codex/config.toml`，若不存在返回空字符串
@@ -370,7 +454,8 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
-    write_text_file(&config_path, &cfg_text)
+    let merged = merge_codex_owned_keys(&read_codex_config_text().unwrap_or_default(), &cfg_text);
+    write_text_file(&config_path, &merged)
 }
 
 pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
@@ -2535,6 +2620,76 @@ requires_openai_auth = true
             Some("")
         );
         assert!(settings.pointer("/auth/tokens/access_token").is_some());
+    }
+
+    /// 用户手写的键必须活过供应商切换。
+    ///
+    /// 这条钉的是本次修复的核心：DB 是 provider 路由的 owner，不是整个文件的 owner。
+    #[test]
+    fn merge_keeps_user_authored_keys_outside_the_whitelist() {
+        let existing = concat!(
+            "# 用户自己加的\n",
+            "approval_policy = \"never\"\n",
+            "sandbox_mode = \"workspace-write\"\n",
+            "model = \"old-model\"\n",
+            "\n[sandbox_workspace_write]\nnetwork_access = true\n",
+            "\n[plugins.\"browser@openai-bundled\"]\nenabled = true\n",
+        );
+        let incoming = "model_provider = \"custom\"\nmodel = \"new-model\"\n";
+
+        let merged = merge_codex_owned_keys(existing, incoming);
+
+        assert!(
+            merged.contains("approval_policy = \"never\""),
+            "got: {merged}"
+        );
+        assert!(merged.contains("sandbox_mode = \"workspace-write\""));
+        assert!(merged.contains("[sandbox_workspace_write]"));
+        assert!(merged.contains("network_access = true"));
+        assert!(merged.contains("[plugins.\"browser@openai-bundled\"]"));
+        assert!(merged.contains("# 用户自己加的"), "注释也该留着");
+        // own 的键按 incoming 覆盖
+        assert!(merged.contains("model = \"new-model\""));
+        assert!(!merged.contains("old-model"));
+        assert!(merged.contains("model_provider = \"custom\""));
+    }
+
+    /// incoming 没有的 own 键必须删掉 —— 否则切到不带该键的供应商会残留串台。
+    #[test]
+    fn merge_removes_owned_keys_absent_from_incoming() {
+        let existing = concat!(
+            "model_provider = \"custom\"\n",
+            "model_catalog_json = \"loongport-model-catalog.json\"\n",
+            "approval_policy = \"never\"\n",
+            "\n[model_providers.custom]\nbase_url = \"https://old.example.com\"\n",
+        );
+        let incoming = "model = \"gpt-5.5\"\n";
+
+        let merged = merge_codex_owned_keys(existing, incoming);
+
+        assert!(
+            !merged.contains("model_provider"),
+            "旧路由必须清掉: {merged}"
+        );
+        assert!(!merged.contains("model_catalog_json"));
+        assert!(!merged.contains("model_providers"));
+        assert!(!merged.contains("old.example.com"));
+        // 用户的键不受影响
+        assert!(merged.contains("approval_policy = \"never\""));
+        assert!(merged.contains("model = \"gpt-5.5\""));
+    }
+
+    /// 用户把 TOML 写坏时不能卡死切换，否则他连切回一个能用的供应商都做不到。
+    #[test]
+    fn merge_falls_back_to_incoming_when_existing_is_unparsable() {
+        let incoming = "model = \"gpt-5.5\"\n";
+
+        for broken in ["这不是 TOML [[[", "model = \"unterminated\n"] {
+            assert_eq!(merge_codex_owned_keys(broken, incoming), incoming);
+        }
+        // 空盘同理
+        assert_eq!(merge_codex_owned_keys("", incoming), incoming);
+        assert_eq!(merge_codex_owned_keys("   \n", incoming), incoming);
     }
 
     #[test]

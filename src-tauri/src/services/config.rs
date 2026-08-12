@@ -213,6 +213,63 @@ impl ConfigService {
         Ok(())
     }
 
+    /// 把 provider 的投影 `incoming` 合进磁盘现状 `existing`，只动 LoongPort own 的键。
+    ///
+    /// ## 为什么 Claude 这条要单独写一份（而不是照抄 Codex 的白名单）
+    ///
+    /// Codex 的 live 是 TOML、own 的是一组**顶层键**；Claude 的 live 是 JSON，
+    /// own 的东西分两层：
+    ///
+    /// - **顶层**：provider 的 `settings_config` 里有什么就 own 什么（实测是
+    ///   `env` / `model` / `skipDangerousModePermissionPrompt`，测试里还有 `permissions`）。
+    ///   这份名单**跟着 provider 走**而不是写死 —— 用户新建的 provider 带什么字段，
+    ///   那些字段就归它管，写死的名单会漏。
+    /// - **`env` 内部**：`ANTHROPIC_*` 与 `CLAUDE_CODE_*` 是我们写的，其余是用户自己加的。
+    ///   所以 `env` 必须**键级合并**，不能整个替换 —— 后者会抹掉用户的自定义变量。
+    ///
+    /// 我们写的那些 env 前缀里，`incoming` 没有的要**删掉**：否则切到不带
+    /// `ANTHROPIC_DEFAULT_OPUS_MODEL` 的供应商时，上一个的值会留下来串台。
+    fn merge_claude_owned_keys(existing: &Value, incoming: &Value) -> Value {
+        let (Some(existing_map), Some(incoming_map)) = (existing.as_object(), incoming.as_object())
+        else {
+            // 磁盘上没有可用的 JSON 对象（首次写入 / 用户写坏了）：整体以投影为准。
+            return incoming.clone();
+        };
+
+        let mut merged = existing_map.clone();
+        for (key, value) in incoming_map {
+            if key == "env" {
+                continue;
+            }
+            merged.insert(key.clone(), value.clone());
+        }
+
+        let incoming_env = incoming_map.get("env").and_then(Value::as_object);
+        let existing_env = existing_map.get("env").and_then(Value::as_object);
+        if incoming_env.is_some() || existing_env.is_some() {
+            let mut env = existing_env.cloned().unwrap_or_default();
+            // 先清掉我们拥有的前缀，再按 incoming 重新写入 —— 这样「上一个供应商有、
+            // 这一个没有」的变量不会残留，而用户自己加的变量原样留着。
+            env.retain(|key, _| !Self::is_claude_owned_env_key(key));
+            if let Some(incoming_env) = incoming_env {
+                for (key, value) in incoming_env {
+                    env.insert(key.clone(), value.clone());
+                }
+            }
+            merged.insert("env".to_string(), Value::Object(env));
+        }
+
+        Value::Object(merged)
+    }
+
+    /// 这个 env 变量是 LoongPort 写的吗。
+    ///
+    /// 判前缀而不是列举全名：模型档位那组（`ANTHROPIC_DEFAULT_*_MODEL`）会随上游
+    /// 新增档位而变长，列全名必然漏。
+    fn is_claude_owned_env_key(key: &str) -> bool {
+        key.starts_with("ANTHROPIC_") || key.starts_with("CLAUDE_CODE_")
+    }
+
     fn sync_claude_live(
         config: &mut MultiAppConfig,
         provider_id: &str,
@@ -225,8 +282,19 @@ impl ConfigService {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
+        // 切换供应商是「投影」：只覆盖 provider 拥有的键，用户手写的其余内容原样保留。
+        //
+        // 此前这里全量覆盖 settings.json，于是用户自己加的顶层键（实测本机有 `language`）
+        // 以及 `env` 里非 `ANTHROPIC_*` 的自定义变量，每切一次供应商就被静默抹掉。
+        //
+        // ⚠️ 合并只加在这条切换路径上。代理接管与备份恢复走 `ProxyService::write_claude_live`，
+        // 那条必须保持全量覆盖 —— 恢复要精确还原，做合并会让接管写进去的键永远删不掉。
         let settings = sanitize_claude_settings_for_live(&provider.settings_config);
-        write_json_file(&settings_path, &settings)?;
+        let existing = read_json_file::<serde_json::Value>(&settings_path).unwrap_or(Value::Null);
+        write_json_file(
+            &settings_path,
+            &Self::merge_claude_owned_keys(&existing, &settings),
+        )?;
 
         let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
@@ -267,5 +335,93 @@ impl ConfigService {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 用户手写的顶层键与自定义 env 变量必须活过供应商切换（本次修复的核心）。
+    #[test]
+    fn merge_keeps_user_authored_keys_and_custom_env() {
+        let existing = json!({
+            "language": "zh-CN",
+            "hooks": { "Stop": "notify" },
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://old.example",
+                "MY_OWN_VAR": "keep-me"
+            }
+        });
+        let incoming = json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://new.example" }
+        });
+
+        let merged = ConfigService::merge_claude_owned_keys(&existing, &incoming);
+
+        assert_eq!(
+            merged.get("language").and_then(|v| v.as_str()),
+            Some("zh-CN")
+        );
+        assert!(
+            merged.get("hooks").is_some(),
+            "用户的 hooks 必须留着: {merged}"
+        );
+        assert_eq!(
+            merged.pointer("/env/MY_OWN_VAR").and_then(|v| v.as_str()),
+            Some("keep-me"),
+            "用户自定义 env 变量必须留着: {merged}"
+        );
+        assert_eq!(
+            merged
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://new.example"),
+            "我们拥有的 env 要按投影覆盖"
+        );
+    }
+
+    /// 上一个供应商有、这一个没有的 ANTHROPIC_* 必须清掉，否则模型名串台。
+    #[test]
+    fn merge_drops_owned_env_keys_absent_from_incoming() {
+        let existing = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://old.example",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "stale-subagent",
+                "MY_OWN_VAR": "keep-me"
+            }
+        });
+        let incoming = json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://new.example" }
+        });
+
+        let merged = ConfigService::merge_claude_owned_keys(&existing, &incoming);
+
+        assert!(
+            merged
+                .pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .is_none(),
+            "got: {merged}"
+        );
+        assert!(merged.pointer("/env/CLAUDE_CODE_SUBAGENT_MODEL").is_none());
+        assert_eq!(
+            merged.pointer("/env/MY_OWN_VAR").and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
+    }
+
+    /// 磁盘上没有可用 JSON 对象时整体以投影为准，不能卡死切换。
+    #[test]
+    fn merge_falls_back_to_incoming_without_usable_existing() {
+        let incoming = json!({ "env": { "ANTHROPIC_BASE_URL": "https://new.example" } });
+
+        for existing in [Value::Null, json!("not an object"), json!([1, 2])] {
+            assert_eq!(
+                ConfigService::merge_claude_owned_keys(&existing, &incoming),
+                incoming
+            );
+        }
     }
 }

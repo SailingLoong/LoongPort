@@ -513,11 +513,9 @@ pub fn base_url_for(app_type: &AppType, site_origin: &str, api_base_url: &str) -
 
 /// 带 Bearer token 的 sub2api 客户端。
 ///
-/// **User-Agent 必须与登录 WebView 一致**：sub2api 有可选的会话绑定
-/// （`session_binding_enabled`，默认关），开启后 access token 里带
-/// `SHA256(clientIP + "\n" + UA)[:16]`，每个请求重算比对，不符即**撤销整个会话家族**
-/// 并返 401 `SESSION_BINDING_MISMATCH`。UA 不一致的后果不是单次失败，是连网页登录态
-/// 一起被踢掉。
+/// 会话绑定开启时，UA 必须与登录 WebView 一致。当前设计以引擎真实 UA 为唯一
+/// 数据源：登录时从 `navigator.userAgent` 回传并持久化，HTTP 客户端跟随它。
+/// 值为空时不设（不再伪造默认值）。
 pub struct Client {
     http: reqwest::Client,
     site_origin: String,
@@ -544,9 +542,11 @@ impl Client {
         site_origin: impl Into<String>,
         token: impl Into<String>,
         account_id: Option<i64>,
+        user_agent: Option<&str>,
+        cf_clearance: Option<&str>,
     ) -> Result<Self, AppError> {
         Ok(Self {
-            http: build_client()?,
+            http: build_client_with_session(user_agent, cf_clearance)?,
             site_origin: site_origin.into(),
             token: token.into(),
             account_id,
@@ -1080,17 +1080,63 @@ fn describe_send_error(e: &reqwest::Error) -> String {
     out
 }
 
-pub(crate) fn build_client() -> Result<reqwest::Client, AppError> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(crate::relay::login::WEBVIEW_USER_AGENT)
+pub(crate) fn build_client_with_user_agent(
+    user_agent: Option<&str>,
+) -> Result<reqwest::Client, AppError> {
+    build_client_with_session(user_agent, None)
+}
+
+/// 建一个带登录会话特征的客户端。
+///
+/// `cf_clearance` 是 Cloudflare 托管挑战的放行 cookie：本 app 登录走 WebView（能执行 JS
+/// ⇒ 过得了挑战），之后 API 全走 reqwest（**永远过不了**）。把 WebView 拿到的那个 cookie
+/// 带上，reqwest 才不会在开了挑战的站上撞 403 `Just a moment...`。
+///
+/// ⚠️ 该 cookie 绑定 IP + UA ⇒ 必须与 `user_agent` 成对使用，两者都取自同一次登录。
+/// 任一为空就不设对应的头，绝不伪造。
+pub(crate) fn build_client_with_session(
+    user_agent: Option<&str>,
+    cf_clearance: Option<&str>,
+) -> Result<reqwest::Client, AppError> {
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    if let Some(ua) = user_agent {
+        builder = builder.user_agent(ua);
+    }
+    if let Some(clearance) = cf_clearance.map(str::trim).filter(|v| !v.is_empty()) {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let cookie = format!("cf_clearance={clearance}");
+        // 值来自服务端下发的 cookie，理论上都是合法 header 值；解析不了就不设它 ——
+        // 那只是回到「没有放行 cookie」的状态，不该让整个客户端建不起来。
+        match reqwest::header::HeaderValue::from_str(&cookie) {
+            Ok(value) => {
+                headers.insert(reqwest::header::COOKIE, value);
+                builder = builder.default_headers(headers);
+            }
+            Err(error) => log::warn!("Cloudflare 放行 cookie 不是合法的 header 值: {error}"),
+        }
+    }
+    builder
         .build()
         .map_err(|e| AppError::Config(format!("创建 HTTP 客户端失败: {e}")))
+}
+
+pub(crate) fn build_client() -> Result<reqwest::Client, AppError> {
+    build_client_with_user_agent(None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 有无放行 cookie 都要能建出客户端；无值时**不发空 Cookie 头**。
+    #[test]
+    fn client_builds_with_and_without_cf_clearance() {
+        assert!(build_client_with_session(Some("UA/1.0"), Some("tok")).is_ok());
+        assert!(build_client_with_session(Some("UA/1.0"), None).is_ok());
+        assert!(build_client_with_session(None, None).is_ok());
+        // 空白值等同于没有：不该拼出 `cf_clearance=` 这种空头。
+        assert!(build_client_with_session(None, Some("   ")).is_ok());
+    }
 
     #[test]
     fn normalize_site_origin_accepts_bare_host_and_strips_path() {
@@ -1456,7 +1502,8 @@ mod tests {
                 .expect("serve settings response");
         });
 
-        let client = Client::new(origin, "account-secret", Some(7)).expect("build client");
+        let client =
+            Client::new(origin, "account-secret", Some(7), None, None).expect("build client");
         let settings = client
             .public_settings()
             .await
@@ -1659,7 +1706,7 @@ mod tests {
     /// **调用点** —— 把请求组装处的 `self.account_id` 换成 `None`（等于修法作废、
     /// 409 复发），它们一条都不会红。所以这条必须走 [`Client`]。
     fn idempotency_header_on_request(account_id: Option<i64>, name: &str) -> String {
-        let req = Client::new("https://example.com", "token", account_id)
+        let req = Client::new("https://example.com", "token", account_id, None, None)
             .expect("构造 client 不该失败")
             .create_key_request(name, 8)
             .build()

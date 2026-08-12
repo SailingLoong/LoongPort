@@ -19,10 +19,6 @@
 //! 实测裸 curl UA、无 cookie、不带那五个 `x-client-*` 头照样 200 ⇒ 用普通
 //! HTTP 客户端直连即可，WebView 只用于登录那一步。
 //!
-//! ⚠️ **不要照抄 `relay::login::WEBVIEW_USER_AGENT` 的「必须写死」那条理由** ——
-//! 那是因为 **sub2api 有会话绑定**（token 里带 `SHA256(clientIP + UA)`，可选特性、
-//! 默认关）。DeepSeek 没有这个约束。
-
 use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::app_config::AppType;
@@ -458,13 +454,9 @@ fn round_decimal_string(raw: &str) -> Option<String> {
 
 /// 鉴权只要 Bearer（见模块文档），所以是个普通 HTTP 客户端。
 ///
-/// UA 复用 `relay::login::WEBVIEW_USER_AGENT`（现在是按平台的 `cfg` 常量）。
-/// ⚠️ **别照抄 sub2api 那条「必须与 WebView 一字不差否则撤销整个会话家族」的理由** ——
-/// 那是它的会话绑定特性，DeepSeek 没有。这里复用只是为了不再多一份 UA 字面量。
 fn build_client() -> Result<reqwest::Client, AppError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent(crate::relay::login::WEBVIEW_USER_AGENT)
         .build()
         .map_err(|e| AppError::Config(format!("创建 HTTP 客户端失败: {e}")))
 }

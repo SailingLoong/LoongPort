@@ -389,7 +389,51 @@ pub fn write_grok_provider_live(provider: &Provider) -> Result<(), AppError> {
         validate_config_toml(config)?;
     }
 
-    write_grok_live_settings(&json!({ "config": config }))
+    // 切换供应商是「投影」：只覆盖自己 own 的键，用户手写的其余内容原样保留。
+    // 不复用 `write_grok_live_settings` —— 那条是备份恢复用的，必须保持精确还原。
+    validate_config_toml_syntax(config)?;
+    let path = get_grok_config_path();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    write_text_file(&path, &merge_grok_owned_keys(&existing, config))
+}
+
+/// LoongPort 在 `~/.grok/config.toml` 里**唯一拥有**的顶层键。
+///
+/// 理由与 Codex 那份（`codex_config::CODEX_OWNED_TOP_LEVEL_KEYS`）逐字相同：
+/// DB 是 **provider 路由**的 owner，不是整个文件的 owner，投影不该越界删用户手写的键。
+/// 同样用白名单而非黑名单 —— 黑名单要跟着上游 Grok CLI 版本跑，新增配置项照样会被抹。
+///
+/// 核对依据：`extract_model_config` / `validate_config_toml` 只读 `models.default` 与
+/// `model.<profile>`；MCP 投影写顶层 `mcp_servers`，`strip_grok_mcp_servers_from_settings`
+/// 同时处理旧形态 `mcp.servers`。`api_key` / `base_url` 是**嵌套**在 `model.<profile>`
+/// 表里的字段，随 `model` 整体覆盖，不必单列。
+const GROK_OWNED_TOP_LEVEL_KEYS: &[&str] = &["models", "model", "mcp_servers", "mcp"];
+
+/// 把 `incoming`（投影产物）合进 `existing`（磁盘现状），只动本模块 own 的键。
+///
+/// 语义与 `codex_config::merge_codex_owned_keys` 一致：白名单内按 `incoming` 覆盖或删除，
+/// 白名单外原样保留；`existing` 空或语法坏掉时整体回落成 `incoming`（不能因为用户把
+/// TOML 写坏就卡死切换，那会让人连切回一个能用的供应商都做不到）。
+fn merge_grok_owned_keys(existing: &str, incoming: &str) -> String {
+    if existing.trim().is_empty() {
+        return incoming.to_string();
+    }
+    let Ok(mut document) = existing.parse::<toml_edit::DocumentMut>() else {
+        return incoming.to_string();
+    };
+    let Ok(incoming_document) = incoming.parse::<toml_edit::DocumentMut>() else {
+        return incoming.to_string();
+    };
+
+    for key in GROK_OWNED_TOP_LEVEL_KEYS {
+        match incoming_document.get(key) {
+            Some(item) => document[*key] = item.clone(),
+            None => {
+                document.as_table_mut().remove(key);
+            }
+        }
+    }
+    document.to_string()
 }
 
 /// Raw live-file writer, mirroring `read_grok_live_settings` (syntax-only).
@@ -586,6 +630,56 @@ context_window = 500000
         match original_unset {
             Some(value) => std::env::set_var("GROK_TEST_DEFINITELY_UNSET_VAR", value),
             None => std::env::remove_var("GROK_TEST_DEFINITELY_UNSET_VAR"),
+        }
+    }
+
+    /// 用户手写的键必须活过供应商切换（本次修复的核心）。
+    #[test]
+    fn merge_keeps_user_authored_keys_outside_the_whitelist() {
+        let existing = concat!(
+            "# 用户自己加的\n",
+            "telemetry = false\n",
+            "\n[models]\ndefault = \"old\"\n",
+            "\n[ui]\ntheme = \"dark\"\n",
+        );
+        let incoming = "[models]\ndefault = \"new\"\n";
+
+        let merged = merge_grok_owned_keys(existing, incoming);
+
+        assert!(merged.contains("telemetry = false"), "got: {merged}");
+        assert!(merged.contains("[ui]"));
+        assert!(merged.contains("theme = \"dark\""));
+        assert!(merged.contains("# 用户自己加的"), "注释也该留着");
+        assert!(merged.contains("default = \"new\""));
+        assert!(!merged.contains("\"old\""));
+    }
+
+    /// incoming 没有的 own 键必须删掉，否则旧投影会串到下一个供应商。
+    #[test]
+    fn merge_removes_owned_keys_absent_from_incoming() {
+        let existing = concat!(
+            "telemetry = false\n",
+            "\n[mcp_servers.echo]\ncommand = \"echo\"\n",
+            "\n[models]\ndefault = \"old\"\n",
+        );
+        let incoming = "[models]\ndefault = \"new\"\n";
+
+        let merged = merge_grok_owned_keys(existing, incoming);
+
+        assert!(
+            !merged.contains("mcp_servers"),
+            "旧 MCP 投影必须清掉: {merged}"
+        );
+        assert!(!merged.contains("echo"));
+        assert!(merged.contains("telemetry = false"), "用户键不受影响");
+    }
+
+    /// 用户把 TOML 写坏时不能卡死切换。
+    #[test]
+    fn merge_falls_back_to_incoming_when_existing_is_unparsable() {
+        let incoming = "[models]\ndefault = \"new\"\n";
+        for broken in ["这不是 TOML [[[", "", "   \n"] {
+            assert_eq!(merge_grok_owned_keys(broken, incoming), incoming);
         }
     }
 

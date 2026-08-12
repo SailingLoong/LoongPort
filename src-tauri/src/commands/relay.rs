@@ -678,6 +678,25 @@ fn newapi_refresh_cookie_from_window(
     Ok(newapi::extract_refresh_cookie(&cookies))
 }
 
+/// 从登录窗读 Cloudflare 放行 cookie。
+///
+/// 与相邻两个 NewAPI cookie 读取函数受同一条约束：`cookies_for_url` 只能在外层 async
+/// 循环里调，不能在同步的导航/窗口回调里调（Tauri 记录了 Windows 上的死锁）。
+///
+/// **读不到不算错**：绝大多数站没开托管挑战，`None` 是正常结果，
+/// 绝不能因此把一次成功的登录判失败。读 cookie 本身出错也只降级成 `None` ——
+/// 凭据已经到手了，为一个可选的加速项让整次登录失败不划算。
+fn cf_clearance_from_window(window: &tauri::WebviewWindow, site_origin: &str) -> Option<String> {
+    let url = url::Url::parse(site_origin).ok()?;
+    match window.cookies_for_url(url) {
+        Ok(cookies) => login::extract_cf_clearance(&cookies),
+        Err(error) => {
+            log::warn!("读取 Cloudflare 放行 cookie 失败（不影响登录）: {error}");
+            None
+        }
+    }
+}
+
 fn newapi_session_cookie_from_window(
     window: &tauri::WebviewWindow,
     session_url: &url::Url,
@@ -776,7 +795,6 @@ async fn browser_import(
     // 一次导入只使用这一份纯内存会话：网页验证、协议探测、注册/登录都不换窗口，
     // 同时也不复用上一次导入的站点 cookie 或 token。
     .incognito(true)
-    .user_agent(login::WEBVIEW_USER_AGENT)
     // 所有导入都统一注入协议无关的候选抓取器。脚本不认识 Cloudflare、HTTP 403
     // 或任何其它验证产品；协议未知时，用户验证完成后它自然会在同源会话里读到候选响应。
     // fast path 已识别时，Rust context 已有值，重复探测回传会被忽略。
@@ -1005,7 +1023,10 @@ async fn browser_import(
                 biased;
                 _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 credentials = creds_rx.recv() => match credentials {
-                    Some(BrowserLoginCredential::Sub2Api(credentials)) => {
+                    Some(BrowserLoginCredential::Sub2Api(mut credentials)) => {
+                        // 趁窗口还在，把 CF 放行 cookie 一并收走：登录之后所有 API 都走
+                        // reqwest，而它过不了托管挑战，只能靠这个 cookie 放行。
+                        credentials.cf_clearance = cf_clearance_from_window(&window, &site_origin);
                         break BrowserLoginOutcome::Sub2ApiCredentials(credentials)
                     }
                     Some(BrowserLoginCredential::NewApiUserId(user_id)) => {
@@ -1300,7 +1321,6 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 中转站、以及 app 内其它 WebView 的登录态一起冲掉；而且它是异步的，
     // 没有完成回调可等 ⇒ 存在「还没清完页面就加载了」的竞态。
     .incognito(true)
-    .user_agent(login::WEBVIEW_USER_AGENT)
     // sub2api 的 localStorage 回传脚本只注入到 sub2api 窗口。NewAPI 的 HttpOnly
     // refresh cookie 由外层 async 循环原生读取，绝不交给 JavaScript。
     .initialization_script(initialization_script)
@@ -1376,7 +1396,10 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                 biased;
                 _ = closed_rx.recv() => break BrowserLoginOutcome::Closed,
                 creds = rx.recv() => match creds {
-                    Some(BrowserLoginCredential::Sub2Api(credentials)) => {
+                    Some(BrowserLoginCredential::Sub2Api(mut credentials)) => {
+                        // 趁窗口还在，把 CF 放行 cookie 一并收走：登录之后所有 API 都走
+                        // reqwest，而它过不了托管挑战，只能靠这个 cookie 放行。
+                        credentials.cf_clearance = cf_clearance_from_window(&window, &site_origin);
                         break BrowserLoginOutcome::Sub2ApiCredentials(credentials)
                     }
                     Some(BrowserLoginCredential::NewApiUserId(user_id)) => {
@@ -1514,10 +1537,16 @@ async fn persist_login_credentials(
 ) -> Result<(i64, i64), AppError> {
     // 先拉一次 profile 拿账号身份 —— 去重键是「域名 + 账号」，而账号只有登录后才知道。
     // `account_id` 传 `None`：这次只读请求的目的就是取得它，不需要幂等键。
-    let account = api::Client::new(site_origin, &credentials.auth_token, None)?
-        .account()
-        .await
-        .map_err(|e| AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。")))?;
+    let account = api::Client::new(
+        site_origin,
+        &credentials.auth_token,
+        None,
+        credentials.user_agent.as_deref(),
+        credentials.cf_clearance.as_deref(),
+    )?
+    .account()
+    .await
+    .map_err(|e| AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。")))?;
     let account_id = account.id;
 
     let state = app_handle.state::<AppState>();
@@ -1534,6 +1563,10 @@ async fn persist_login_credentials(
             &credentials.auth_token,
             credentials.refresh_token.as_deref(),
             credentials.token_expires_at,
+            creds::SessionEnvironment {
+                user_agent: credentials.user_agent.as_deref(),
+                cf_clearance: credentials.cf_clearance.as_deref(),
+            },
         )
     })?;
 
@@ -1555,6 +1588,8 @@ fn persist_newapi_login_session(
             (!refreshed.refresh_cookie.trim().is_empty())
                 .then_some(refreshed.refresh_cookie.as_str()),
             refreshed.access_expires_at,
+            // NewAPI 登录不走 sub2api 那条 WebView 回传，两个字段都没有可写的值。
+            creds::SessionEnvironment::default(),
         )
     })?;
 
@@ -1926,7 +1961,13 @@ fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static s
 async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, AppError> {
     match op.backend_kind {
         discovery::BackendKind::Sub2Api => {
-            let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?;
+            let client = api::Client::new(
+                &op.site_origin,
+                &op.auth_token,
+                op.account_id,
+                op.user_agent.as_deref(),
+                op.cf_clearance.as_deref(),
+            )?;
             let mut result = provision::provision(&client).await?;
             provision::sort_tiers(&mut result.tiers);
             let keys_created = result
@@ -3478,7 +3519,13 @@ async fn open_purchase_window(
     // 先取账号档案。**必须在开窗之前** —— 站点的 router 守卫在页面启动那一刻就读
     // localStorage，注入脚本必须在那之前就带着完整的值。拿不到就别开窗：
     // 开一个注定落到登录页的窗口，用户只会以为「点了充值却要我重新登录」。
-    let client = api::Client::new(&op.site_origin, &op.auth_token, op.account_id)?;
+    let client = api::Client::new(
+        &op.site_origin,
+        &op.auth_token,
+        op.account_id,
+        op.user_agent.as_deref(),
+        op.cf_clearance.as_deref(),
+    )?;
     let public_settings = client.public_settings().await?;
     let auth_user = purchase::auth_user_from_profile(client.profile_raw().await?)?;
 
@@ -3535,10 +3582,6 @@ async fn open_purchase_window(
             // 它**不影响**注入：`initialization_script` 是 WKUserScript(AtDocumentStart)、
             // 与页面同一个 JS 世界，而 incognito 只决定这份 localStorage 落不落盘。
             .incognito(true)
-            // 与 HTTP 客户端共用同一个 UA：sub2api 的会话绑定（可选，默认关）会把
-            // `SHA256(clientIP + "\n" + UA)[:16]` 编进 token，UA 不一致会 401 并
-            // **撤销整个会话家族**（连网页登录态一起踢）。
-            .user_agent(login::WEBVIEW_USER_AGENT)
             .initialization_script(purchase::inject_script(
                 &op.site_origin,
                 &op.auth_token,
@@ -4600,6 +4643,8 @@ mod tests {
             auth_token: "access-token".into(),
             refresh_token: None,
             token_expires_at: None,
+            user_agent: None,
+            cf_clearance: None,
             sort_index: 0,
         }
     }
@@ -4695,6 +4740,7 @@ mod tests {
                 "saved-access-token",
                 Some("saved-refresh-token"),
                 None,
+                creds::SessionEnvironment::default(),
             )
             .expect("save relay credentials");
             relay_id
@@ -5744,6 +5790,7 @@ mod tests {
                 "token",
                 None,
                 None,
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
@@ -6092,6 +6139,7 @@ mod tests {
                 "tok",
                 None,
                 None,
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
@@ -6290,6 +6338,7 @@ mod tests {
                 "stale-access",
                 Some("old-refresh"),
                 Some(1),
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
@@ -6354,6 +6403,7 @@ mod tests {
                 "stale-access",
                 Some("old-refresh"),
                 Some(1),
+                creds::SessionEnvironment::default(),
             )
         })
         .expect("save credentials");
