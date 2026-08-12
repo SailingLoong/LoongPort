@@ -405,9 +405,13 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
             continue;
         }
 
+        // 上限按**压缩前的源大小**算，与浏览器那条路径一致（见 `detectorBody`）：
+        // 站点把大段用户可见配置塞进公共设置里是常事（实测 bestapi.store 已 143 KiB），
+        // 在 64 KiB 就丢弃会把一个完全正常的 sub2api 站误判成「协议无法识别」。
+        // 真正的指纹只有几个字段，读完再投影即可。
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_PROBE_BODY_BYTES as u64)
+            .is_some_and(|length| length > MAX_PROBE_COMPACT_SOURCE_BYTES as u64)
         {
             completed_candidate = true;
             continue;
@@ -418,7 +422,7 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
         let mut body_failed = false;
         while let Some(chunk) = stream.next().await {
             match chunk {
-                Ok(chunk) if body.len() + chunk.len() <= MAX_PROBE_BODY_BYTES => {
+                Ok(chunk) if body.len() + chunk.len() <= MAX_PROBE_COMPACT_SOURCE_BYTES => {
                     body.extend_from_slice(&chunk);
                 }
                 Ok(_) => {
@@ -816,6 +820,46 @@ mod tests {
         server.abort();
     }
 
+    /// 公共设置里塞了大段无关配置的站，原生探针也必须认得出来。
+    ///
+    /// 回归 bestapi.store：它的 `/api/v1/settings/public` 实测 143 KiB（用户可见的
+    /// 配置数组），旧上限 64 KiB 会在读之前就丢弃这个候选 ⇒ 明明是正常 sub2api 站，
+    /// 却报「无法识别该站点支持的中转协议」。浏览器那条路径一直能识别（它压缩后再判），
+    /// 两条路径对同一站点得出不同结论本身就是 bug。
+    #[tokio::test]
+    async fn native_discovery_accepts_sites_with_large_public_settings() {
+        let mut body: serde_json::Value = serde_json::from_str(sub2api_body()).expect("parse");
+        // 撑到远超旧的 64 KiB 上限，但仍在源大小上限之内。
+        let filler: Vec<String> = (0..4000).map(|i| format!("filler-value-{i:06}")).collect();
+        body["data"]["unrelated_large_setting"] = serde_json::json!(filler);
+        assert!(
+            serde_json::to_string(&body).expect("serialize").len() > MAX_PROBE_BODY_BYTES,
+            "样本必须真的超过旧上限，否则这条测试什么都没钉住"
+        );
+
+        let app = Router::new().route(
+            "/api/v1/settings/public",
+            get(move || {
+                let body = body.clone();
+                async move { Json(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let origin = format!("http://{}", listener.local_addr().expect("local address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let detected = probe_site(&origin)
+            .await
+            .expect("large settings must still detect");
+
+        assert_eq!(detected.backend_kind, BackendKind::Sub2Api);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn native_discovery_rejects_oversized_stream_without_waiting_for_eof() {
         use axum::body::Body;
@@ -827,7 +871,11 @@ mod tests {
             "/api/v1/settings/public",
             get(|| async {
                 let stream = async_stream::stream! {
-                    yield Ok::<_, Infallible>(Bytes::from(vec![b'x'; MAX_PROBE_BODY_BYTES + 1]));
+                    // 超的是**源大小**上限 —— 这条测试钉的是「超限当场中断，不挂着等 EOF」，
+                    // 阈值本身换成哪个常量不影响它要守的不变量。
+                    yield Ok::<_, Infallible>(Bytes::from(
+                        vec![b'x'; MAX_PROBE_COMPACT_SOURCE_BYTES + 1],
+                    ));
                     std::future::pending::<()>().await;
                 };
                 Response::new(Body::from_stream(stream))
