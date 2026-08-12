@@ -1265,6 +1265,11 @@ export const providerPresets: ProviderPreset[] = [
         // base_url 由代理后端强制重写为 chatgpt.com/backend-api/codex
         // 用户无需配置
         ANTHROPIC_BASE_URL: "https://chatgpt.com/backend-api/codex",
+        // Quality-first on purpose: sol is the top tier (Opus-class), luna sits
+        // around Sonnet for much less. We still route the Sonnet tier to sol —
+        // GPT pricing is low enough that the quality is worth it — and reserve
+        // luna for the low-frequency Haiku tier. Not an oversight; don't
+        // "fix" Sonnet down to luna without revisiting that tradeoff.
         ANTHROPIC_MODEL: "gpt-5.6-sol",
         ANTHROPIC_DEFAULT_HAIKU_MODEL: "gpt-5.6-luna",
         ANTHROPIC_DEFAULT_SONNET_MODEL: "gpt-5.6-sol",
