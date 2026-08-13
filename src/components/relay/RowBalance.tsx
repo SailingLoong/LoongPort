@@ -136,7 +136,7 @@ export function RowBalance({
             "flex shrink-0 items-center rounded-md p-1 transition-colors",
             // 低余额：琥珀色常驻（不是 hover 才出）—— 它是个提醒，藏起来就没用了。
             // 用琥珀而不是红：钱不够是「该处理一下」，不是「出错了」。
-            // 这两个色阶抄的是仓里已有的警示用法（`AddSiteDialog` 的提示条同一组）。
+            // 这两个色阶沿用仓里已有的琥珀色警示 token。
             low
               ? "text-amber-600 hover:bg-amber-50 dark:text-amber-500 dark:hover:bg-amber-950/40"
               : "text-muted-foreground hover:bg-muted/60 hover:text-blue-500 dark:hover:text-blue-400",

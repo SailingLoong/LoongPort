@@ -135,9 +135,6 @@ vi.mock("@/components/relay/RelayTierList", () => ({
     </div>
   ),
 }));
-vi.mock("@/components/relay/AddSiteDialog", () => ({
-  AddSiteDialog: () => null,
-}));
 vi.mock("@/components/relay/ImageTabNotice", () => ({
   ImageTabNotice: () => null,
 }));
@@ -163,7 +160,7 @@ function renderSection(appId: "codex" | "claude" | "codex-image" | "gemini") {
   const queryClient = createTestQueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
-      <RelaySection appId={appId} />
+      <RelaySection appId={appId} onOpenDirectory={vi.fn()} />
     </QueryClientProvider>,
   );
 }
@@ -509,7 +506,7 @@ describe("RelaySection model verification ownership", () => {
     const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     render(
       <QueryClientProvider client={queryClient}>
-        <RelaySection appId="codex" />
+        <RelaySection appId="codex" onOpenDirectory={vi.fn()} />
       </QueryClientProvider>,
     );
 

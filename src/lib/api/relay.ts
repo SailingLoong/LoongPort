@@ -25,12 +25,12 @@ export interface RelayStatus {
 /**
  * 一个已添加的站点。
  *
- * 两个消费者：加站弹窗（判「点这个推荐站会不会撞已有账号」）与「一个站都没有吗」
- * 那个自动引导判据（只数条数）。**含未登录的占位行** —— 加了站还没登录也算配过。
+ * 当前消费者是「一个站都没有吗」的自动引导判据（只数条数）。新增站点只有在
+ * 注册或登录成功后才会写入；启动建表路径也会清理旧版遗留的未认证占位行。
  */
 export interface SiteInfo {
   siteOrigin: string;
-  /** 登录后的账号名（昵称优先，回落邮箱），未登录为空串。 */
+  /** 登录后的账号名（昵称优先，回落邮箱）。 */
   accountLabel: string;
 }
 
@@ -70,6 +70,39 @@ export interface Sponsor {
   displayName: string;
   /** 一句话介绍，可能是空串。 */
   tagline: string;
+}
+
+export type LeaderboardKind = "overall" | "claude" | "openai" | "gemini";
+
+export interface ProtocolScore {
+  protocol: string;
+  score: number;
+  samples: number;
+  verdict: string | null;
+  reportUrl: string | null;
+}
+
+export interface RelayDirectoryItem {
+  siteHost: string;
+  veridropHost: string;
+  displayName: string;
+  rank: number;
+  score: number;
+  samples: number;
+  latestDate: string;
+  detailUrl: string;
+  protocolScores: ProtocolScore[];
+  claudeSignatureRate: number | null;
+  scenarios: string[];
+  issues: string[];
+  entryUrl: string;
+}
+
+export interface RelayLeaderboard {
+  kind: LeaderboardKind;
+  items: RelayDirectoryItem[];
+  syncedAt: number;
+  fromCache: boolean;
 }
 
 export interface TierInfo {
@@ -218,6 +251,10 @@ export const relayApi = {
    * 读的是本地缓存（后端不发网络请求），所以调它不会让界面等。
    */
   listSponsors: (): Promise<Sponsor[]> => invoke("relay_list_sponsors"),
+
+  /** 每次打开或切换榜单都实时拉取；后端仅在实时失败时返回上次成功缓存。 */
+  listDirectory: (kind: LeaderboardKind): Promise<RelayLeaderboard> =>
+    invoke("relay_list_directory", { kind }),
 
   /**
    * 导入第三方站点。原生发现失败时由后端打开可见网页，让用户自行完成验证，

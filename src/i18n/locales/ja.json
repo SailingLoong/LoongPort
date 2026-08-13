@@ -3064,6 +3064,44 @@
       "official": "公式 API",
       "other": "その他"
     },
+    "directory": {
+      "title": "中継サイト一覧",
+      "description": "VeriDrop の公開検証結果からサイトを選びます。登録またはログインに成功した場合のみ LoongPort に追加されます。",
+      "tabs": {
+        "overall": "総合",
+        "claude": "Claude",
+        "openai": "OpenAI",
+        "gemini": "Gemini"
+      },
+      "source": {
+        "live": "VeriDrop ライブデータ · {{time}}",
+        "cached": "VeriDrop キャッシュデータ · {{time}}"
+      },
+      "searchPlaceholder": "サイト、プロトコル、用途を検索",
+      "loading": "VeriDrop ランキングを読み込んでいます…",
+      "errorTitle": "中継サイト一覧を読み込めません",
+      "errorBody": "ライブデータと前回成功時のキャッシュのどちらも利用できません。",
+      "empty": "現在の条件に一致するサイトはありません",
+      "scoreLabel": "VeriDrop",
+      "signatureHint": "Claude 思考署名の検証成功率",
+      "compatibilityNote": "一部の非互換サイトは表示されません",
+      "customSitePlaceholder": "見つからない場合は別の中継サイト URL を入力",
+      "provisionFailed": "アカウントは追加されましたが、接続設定の作成に失敗しました：{{reason}}。中継サイト一覧から再試行できます。",
+      "meta": { "samples": "{{count}} 回の検証", "latest": "最終 {{date}}" },
+      "actions": {
+        "authenticate": "登録またはログイン",
+        "autoAddHint": "完了後に自動追加",
+        "history": "全履歴",
+        "refresh": "ライブランキングを更新",
+        "retry": "再試行",
+        "useOtherSite": "別のサイトを使用"
+      },
+      "pagination": {
+        "range": "{{from}}–{{to}} / {{total}}",
+        "previous": "前のページ",
+        "next": "次のページ"
+      }
+    },
     "tierList": {
       "empty": "中継サービスはまだ追加されていません",
       "addSite": "中継サービスを追加",
