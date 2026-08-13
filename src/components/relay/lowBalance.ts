@@ -26,10 +26,14 @@
  * sub2api 的 `balance` 就是美元计价（后台文案写的是「每付 1 CNY 得到多少 USD 余额」），
  * 所以这个阈值不需要汇率换算、也不需要币种判断。
  *
- * ⚠️ 官网直连（vendor）行**不适用**这个阈值：那边的余额是后端已经格式化好的
- * **字符串**（如 `¥547.08`，人民币），拿它跟一个美元数字比是错的。
- * 类型上就分开了（`string | null` vs `number | null`），所以不会误用 ——
- * 见 `VendorRow` 那段注释。
+ * ⚠️ 官网直连（vendor）行**不适用**这个阈值。2026-08-04 维护者明确要求：
+ * 「只对中转站生效，对 deepseek 之类的不生效」。
+ *
+ * 2026-08-13 两类行的余额契约统一成上游 `UsageResult`（不再是 `number` vs
+ * 已格式化字符串），**类型上的隔离没有了，但那条要求仍然成立** —— DeepSeek 的钱包
+ * 是 CNY，拿它跟一个美元阈值比仍然是错的。所以判据改由 `RowBalance` 显式守：
+ * 它只在**有充值入口**（`onPurchase`，relay 才传）时才算 `low`。
+ * 见 `lowBalanceScopeContract.test.ts`。
  */
 export const LOW_BALANCE_THRESHOLD_USD = 5;
 

@@ -3,7 +3,7 @@ import { RefreshCw, AlertCircle, Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { type AppId } from "@/lib/api";
 import { useUsageQuery } from "@/lib/query/queries";
-import { UsageData, Provider } from "@/types";
+import { UsageData, UsageResult, Provider } from "@/types";
 import { TierBadge } from "@/components/SubscriptionQuotaFooter";
 import type { QuotaTier } from "@/types/subscription";
 
@@ -41,6 +41,149 @@ function toQuotaTier(data: UsageData): QuotaTier {
     resetsAt: extra || null,
   };
 }
+
+/** [`InlineUsage`] 的入参。刻意**不含**「怎么拿到这些值」—— 那是调用方的事。 */
+export interface InlineUsageProps {
+  /** 用量结果。`undefined` = 还没有任何可显示的值（首查失败且无缓存）。 */
+  usage?: UsageResult;
+  /** 正在查（刷新按钮转圈 + 禁用）。 */
+  loading: boolean;
+  /** 上次**成功**查询的时间戳，`null` = 从未。 */
+  lastQueriedAt: number | null;
+  onRefresh: () => void;
+}
+
+/**
+ * provider 卡片右侧那条内联用量条：上次查询时间 + 手动刷新按钮 / 已用·剩余·单位。
+ *
+ * ## 为什么抽出来 export
+ *
+ * LoongPort 的「中转站 × 分组」页与「官网 API」块要显示同一样东西（维护者的要求是
+ * 「复用 provider 页的样子」）。抽成子组件而不是在那边照抄一份 JSX —— 照抄的那份
+ * 会在上游改这里时静默分叉。仓内已有同形先例：`SubscriptionQuotaFooter` export 了
+ * `TierBadge` 给本文件用。
+ *
+ * ## 失败态也在这里，不在调用方
+ *
+ * 「查失败」必须仍然渲染出**带刷新按钮的一行**，否则整块消失、用户无从重查
+ * （见下方 `usageEnabled` 那处注释里的同一条推理）。把它留在组件内，调用方就没有
+ * 「忘了处理失败态」这个选项。
+ */
+export const InlineUsage: React.FC<InlineUsageProps> = ({
+  usage,
+  loading,
+  lastQueriedAt,
+  onRefresh,
+}) => {
+  const { t } = useTranslation();
+
+  // 相对时间要自己走动，否则「1 分钟前」会一直停在那儿直到别的 state 变化。
+  const [now, setNow] = React.useState(Date.now());
+  React.useEffect(() => {
+    if (!lastQueriedAt) return;
+    const interval = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(interval);
+  }, [lastQueriedAt]);
+
+  const refresh = (e: React.MouseEvent) => {
+    // 行本身可点（切档位 / 展开），刷新不该顺带触发它。
+    e.stopPropagation();
+    onRefresh();
+  };
+
+  const refreshButton = (
+    <button
+      onClick={refresh}
+      disabled={loading}
+      className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-50 flex-shrink-0 text-muted-foreground"
+      title={t("usage.refreshUsage")}
+    >
+      <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
+    </button>
+  );
+
+  const firstUsage = usage?.data?.[0];
+  if (!usage || !usage.success || !firstUsage) {
+    return (
+      <div className="inline-flex items-center gap-2 text-xs rounded-lg border border-border-default bg-card px-3 py-2 shadow-sm">
+        <div
+          className="flex items-center gap-1.5 text-red-500 dark:text-red-400"
+          title={usage?.error || undefined}
+        >
+          <AlertCircle size={12} />
+          <span>{t("usage.queryFailed")}</span>
+        </div>
+        {refreshButton}
+      </div>
+    );
+  }
+
+  const isExpired = firstUsage.isValid === false;
+
+  return (
+    <div className="flex flex-col items-end gap-1 text-xs whitespace-nowrap flex-shrink-0">
+      {/* 第一行：更新时间和刷新按钮 */}
+      <div className="flex items-center gap-2 justify-end">
+        <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
+          <Clock size={10} />
+          {lastQueriedAt
+            ? formatRelativeTime(lastQueriedAt, now, t)
+            : t("usage.never", { defaultValue: "从未更新" })}
+        </span>
+        {refreshButton}
+      </div>
+
+      {/* 第二行：用量和剩余 */}
+      <div className="flex items-center gap-2">
+        {firstUsage.used !== undefined && (
+          <div className="flex items-center gap-0.5">
+            <span className="text-gray-500 dark:text-gray-400">
+              {t("usage.used")}
+            </span>
+            <span className="tabular-nums text-gray-600 dark:text-gray-400 font-medium">
+              {firstUsage.used.toFixed(2)}
+            </span>
+          </div>
+        )}
+
+        {firstUsage.remaining !== undefined && (
+          <div className="flex items-center gap-0.5">
+            <span className="text-gray-500 dark:text-gray-400">
+              {t("usage.remaining")}
+            </span>
+            <span
+              className={`font-semibold tabular-nums ${
+                isExpired
+                  ? "text-red-500 dark:text-red-400"
+                  : firstUsage.remaining <
+                      (firstUsage.total || firstUsage.remaining) * 0.1
+                    ? "text-orange-500 dark:text-orange-400"
+                    : "text-green-600 dark:text-green-400"
+              }`}
+            >
+              {firstUsage.remaining.toFixed(2)}
+            </span>
+          </div>
+        )}
+
+        {firstUsage.unit && (
+          <span className="text-gray-500 dark:text-gray-400">
+            {firstUsage.unit}
+          </span>
+        )}
+
+        {firstUsage.extra && (
+          <span
+            className="text-gray-500 dark:text-gray-400 truncate max-w-[150px]"
+            title={firstUsage.extra}
+          >
+            {firstUsage.extra}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
 
 const UsageFooter: React.FC<UsageFooterProps> = ({
   provider,
@@ -96,20 +239,12 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
   if (!usage || !usage.success) {
     if (inline) {
       return (
-        <div className="inline-flex items-center gap-2 text-xs rounded-lg border border-border-default bg-card px-3 py-2 shadow-sm">
-          <div className="flex items-center gap-1.5 text-red-500 dark:text-red-400">
-            <AlertCircle size={12} />
-            <span>{t("usage.queryFailed")}</span>
-          </div>
-          <button
-            onClick={() => refetch()}
-            disabled={loading}
-            className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-50 flex-shrink-0"
-            title={t("usage.refreshUsage")}
-          >
-            <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-          </button>
-        </div>
+        <InlineUsage
+          usage={usage}
+          loading={loading}
+          lastQueriedAt={lastQueriedAt}
+          onRefresh={refetch}
+        />
       );
     }
 
@@ -187,90 +322,15 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
     );
   }
 
-  // ── 通用用量：内联模式（原有逻辑） ──
+  // ── 通用用量：内联模式 ──
   if (inline) {
-    const firstUsage = usageDataList[0];
-    const isExpired = firstUsage.isValid === false;
-
     return (
-      <div className="flex flex-col items-end gap-1 text-xs whitespace-nowrap flex-shrink-0">
-        {/* 第一行：更新时间和刷新按钮 */}
-        <div className="flex items-center gap-2 justify-end">
-          {/* 上次查询时间 */}
-          <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
-            <Clock size={10} />
-            {lastQueriedAt
-              ? formatRelativeTime(lastQueriedAt, now, t)
-              : t("usage.never", { defaultValue: "从未更新" })}
-          </span>
-
-          {/* 刷新按钮 */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              refetch();
-            }}
-            disabled={loading}
-            className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-50 flex-shrink-0 text-muted-foreground"
-            title={t("usage.refreshUsage")}
-          >
-            <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
-          </button>
-        </div>
-
-        {/* 第二行：用量和剩余 */}
-        <div className="flex items-center gap-2">
-          {/* 已用 */}
-          {firstUsage.used !== undefined && (
-            <div className="flex items-center gap-0.5">
-              <span className="text-gray-500 dark:text-gray-400">
-                {t("usage.used")}
-              </span>
-              <span className="tabular-nums text-gray-600 dark:text-gray-400 font-medium">
-                {firstUsage.used.toFixed(2)}
-              </span>
-            </div>
-          )}
-
-          {/* 剩余 */}
-          {firstUsage.remaining !== undefined && (
-            <div className="flex items-center gap-0.5">
-              <span className="text-gray-500 dark:text-gray-400">
-                {t("usage.remaining")}
-              </span>
-              <span
-                className={`font-semibold tabular-nums ${
-                  isExpired
-                    ? "text-red-500 dark:text-red-400"
-                    : firstUsage.remaining <
-                        (firstUsage.total || firstUsage.remaining) * 0.1
-                      ? "text-orange-500 dark:text-orange-400"
-                      : "text-green-600 dark:text-green-400"
-                }`}
-              >
-                {firstUsage.remaining.toFixed(2)}
-              </span>
-            </div>
-          )}
-
-          {/* 单位 */}
-          {firstUsage.unit && (
-            <span className="text-gray-500 dark:text-gray-400">
-              {firstUsage.unit}
-            </span>
-          )}
-
-          {/* 扩展字段 extra */}
-          {firstUsage.extra && (
-            <span
-              className="text-gray-500 dark:text-gray-400 truncate max-w-[150px]"
-              title={firstUsage.extra}
-            >
-              {firstUsage.extra}
-            </span>
-          )}
-        </div>
-      </div>
+      <InlineUsage
+        usage={usage}
+        loading={loading}
+        lastQueriedAt={lastQueriedAt}
+        onRefresh={refetch}
+      />
     );
   }
 

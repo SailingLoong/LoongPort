@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { ComponentProps } from "react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import type { ComponentProps, ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("react-i18next", () => ({
@@ -36,7 +37,25 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
+import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
+
 import { RelayRow } from "../RelayRow";
+
+// 行内的 `RowBalance` 用 react-query 拉余额 ⇒ 得有 provider。余额不是这些闸关心
+// 的东西，让 `invoke` reject 即可（行会渲染失败态的用量条，不影响其它断言）。
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async () => {
+    throw new Error("balance not stubbed in this test");
+  }),
+}));
+
+function renderWithQuery(ui: ReactElement) {
+  return render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      {ui}
+    </QueryClientProvider>,
+  );
+}
 
 const tier = {
   providerId: "provider-a",
@@ -70,7 +89,6 @@ function renderRow(overrides: Partial<ComponentProps<typeof RelayRow>> = {}) {
     onProvision: vi.fn(),
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
-    balance: null,
     onPurchase: vi.fn(),
     onCheckTier: vi.fn(),
     isCheckingTier: () => false,
@@ -82,7 +100,7 @@ function renderRow(overrides: Partial<ComponentProps<typeof RelayRow>> = {}) {
     isVerifyingTier: () => false,
     ...overrides,
   };
-  return { onVerifyTier, ...render(<RelayRow {...props} />) };
+  return { onVerifyTier, ...renderWithQuery(<RelayRow {...props} />) };
 }
 
 describe("RelayRow model verification", () => {
@@ -132,13 +150,15 @@ describe("RelayRow model verification", () => {
     ).toBeInTheDocument();
 
     rerender(
-      <RelayRow
-        {...rowProps({
-          onVerifyTier,
-          isVerifyingTier: () => true,
-          verificationVerdictForTier: () => "anomaly",
-        })}
-      />,
+      <QueryClientProvider client={createTestQueryClient()}>
+        <RelayRow
+          {...rowProps({
+            onVerifyTier,
+            isVerifyingTier: () => true,
+            verificationVerdictForTier: () => "anomaly",
+          })}
+        />
+      </QueryClientProvider>,
     );
     const verify = screen.getByTitle("模型验证");
     expect(verify).toBeEnabled();
@@ -197,7 +217,6 @@ function rowProps(
     onProvision: vi.fn(),
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
-    balance: null,
     onPurchase: vi.fn(),
     onCheckTier: vi.fn(),
     isCheckingTier: () => false,

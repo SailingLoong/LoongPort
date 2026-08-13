@@ -3075,7 +3075,7 @@
       "login": "登录",
       "sessionExpired": "登录已过期",
       "reLogin": "重新登录",
-      "sessionExpiredUsable": "登录已过期，但 API 密钥仍可使用；余额暂时无法查询。点击重新登录。",
+      "sessionExpiredUsable": "登录已过期，但 API 密钥仍可使用（余额也照常显示）。点击重新登录。",
       "noTiers": "此账号在当前平台没有可用分组",
       "getKeys": "创建接入配置",
       "tierCount": "{{count}} 个接入配置",

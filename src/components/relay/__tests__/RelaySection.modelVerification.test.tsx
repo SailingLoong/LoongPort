@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -150,7 +151,22 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
+import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
+
 import { RelaySection } from "../RelaySection";
+
+/**
+ * 各行的余额走 react-query（`useRowBalanceQuery`）⇒ 这一层要有 provider。
+ * 余额不是这些闸关心的东西 —— `relayApi.balance` 没被 mock，那个 query 会 reject，
+ * 行上渲染一个失败态的用量条，不影响任何模型验证的断言。
+ */
+function renderSection(appId: "codex" | "claude" | "codex-image" | "gemini") {
+  return render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      <RelaySection appId={appId} />
+    </QueryClientProvider>,
+  );
+}
 
 const tier = (
   providerId: string,
@@ -222,7 +238,7 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("reduces reports from the initial and refreshed relay fetch, with one dialog owner", async () => {
-    render(<RelaySection appId="codex" />);
+    renderSection("codex");
     await waitFor(() =>
       expect(api.listResults).toHaveBeenCalledWith(["provider-a"]),
     );
@@ -245,7 +261,7 @@ describe("RelaySection model verification ownership", () => {
       report("provider-a", "trusted", "verified-model"),
     ]);
 
-    render(<RelaySection appId="codex" />);
+    renderSection("codex");
 
     await waitFor(() =>
       expect(screen.getByTestId("verdict-provider-a")).toHaveTextContent(
@@ -267,7 +283,7 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("clears a reset badge only after the matching backend change event", async () => {
-    render(<RelaySection appId="codex" />);
+    renderSection("codex");
     await waitFor(() =>
       expect(screen.getByTestId("verdict-provider-a")).toHaveTextContent(
         "anomaly",
@@ -286,7 +302,7 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("keeps one real run owner through close, terminal completion, and reopen", async () => {
-    render(<RelaySection appId="codex" />);
+    renderSection("codex");
     await waitFor(() =>
       screen.getByRole("button", { name: "verify provider-a" }),
     );
@@ -342,7 +358,7 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("keeps the prior persisted report visible when a rerun fails", async () => {
-    render(<RelaySection appId="codex" />);
+    renderSection("codex");
     await waitFor(() =>
       screen.getByRole("button", { name: "verify provider-a" }),
     );
@@ -385,7 +401,7 @@ describe("RelaySection model verification ownership", () => {
     ]);
     api.listModels.mockResolvedValue(["model-a"]);
 
-    render(<RelaySection appId="codex" />);
+    renderSection("codex");
     await waitFor(() =>
       screen.getByRole("button", { name: "verify provider-a" }),
     );
@@ -449,7 +465,7 @@ describe("RelaySection model verification ownership", () => {
     api.listRelays.mockResolvedValue([
       { ...relay, tiers: [tier("provider-a", appId)] },
     ]);
-    render(<RelaySection appId={appId} />);
+    renderSection(appId);
     await waitFor(() => screen.getByTestId("verdict-provider-a"));
     if (eligible) {
       expect(

@@ -1,7 +1,18 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { RelayRow } from "@/components/relay/RelayRow";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
+
+import { createTestQueryClient } from "../utils/testQueryClient";
+
+// 行内的 `RowBalance` 用 react-query 拉余额 ⇒ 得有 provider。余额不是这些闸关心
+// 的东西，让 `invoke` reject 即可（行会渲染失败态的用量条，不影响其它断言）。
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async () => {
+    throw new Error("balance not stubbed in this test");
+  }),
+}));
 
 function tier(models: string[]): TierInfo {
   return {
@@ -32,23 +43,24 @@ function relay(models: string[]): RelayRowData {
 
 function renderRow(models: string[], onSelectTierModel = vi.fn()) {
   render(
-    <RelayRow
-      relay={relay(models)}
-      open
-      onOpenChange={vi.fn()}
-      busy={new Set()}
-      onLogin={vi.fn()}
-      onProvision={vi.fn()}
-      onSwitchTier={vi.fn()}
-      onSelectTierModel={onSelectTierModel}
-      balance={null}
-      onPurchase={vi.fn()}
-      onCheckTier={vi.fn()}
-      isCheckingTier={() => false}
-      onResetTier={vi.fn()}
-      onEditTier={vi.fn()}
-      onDelete={vi.fn()}
-    />,
+    <QueryClientProvider client={createTestQueryClient()}>
+      <RelayRow
+        relay={relay(models)}
+        open
+        onOpenChange={vi.fn()}
+        busy={new Set()}
+        onLogin={vi.fn()}
+        onProvision={vi.fn()}
+        onSwitchTier={vi.fn()}
+        onSelectTierModel={onSelectTierModel}
+        onPurchase={vi.fn()}
+        onCheckTier={vi.fn()}
+        isCheckingTier={() => false}
+        onResetTier={vi.fn()}
+        onEditTier={vi.fn()}
+        onDelete={vi.fn()}
+      />
+    </QueryClientProvider>,
   );
   return onSelectTierModel;
 }

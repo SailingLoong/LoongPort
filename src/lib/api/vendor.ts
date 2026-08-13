@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { UsageResult } from "@/types";
+
 import type { AppId } from "./types";
 
 /**
@@ -175,16 +177,19 @@ export const vendorApi = {
     invoke("vendor_provision", { rowId }),
 
   /**
-   * 查一行的余额。
+   * 查一行的余额。**与 `relayApi.balance` 同一契约**（上游那个 `UsageResult`）。
    *
-   * 返回的是**已格式化的字符串**（`"¥547.08"`，币种符号在里面）——
-   * ⚠️ 前端**不做任何数值转换或格式化**，直接渲染。`null` = 拿不到
-   * （没有钱包 / 金额解不动），**不是 0**。
+   * 曾经这条回后端拼好的字符串 `"¥547.08"`、中转站那条回 `{balance, frozenBalance}`
+   * 数字 —— 同一个事实两套形状，前端因此长出两份 state、两个 effect、两处渲染。
+   * 统一之后两类行共用一个 hook（`useRowBalanceQuery`）与一个呈现件（`InlineUsage`）。
+   * 币种现在在 `unit` 字段里，由呈现件显示。
    *
-   * 失败要 catch 掉并把那一行留空，不要弹 toast —— 余额是附加信息
-   * （与 relay 侧同一条纪律）。
+   * 失败**不 reject**：查不到时回 `success:false`，用量条渲染失败态并留住刷新按钮。
+   *
+   * ⚠️ **登录态过期也查得到**：后端优先用 sk 查（`services::balance` 认得
+   * `api.deepseek.com`），网页登录态只是兜底。别在调用方按 `sessionExpired` 关掉它。
    */
-  balance: (rowId: number): Promise<string | null> =>
+  balance: (rowId: number): Promise<UsageResult> =>
     invoke("vendor_balance", { rowId }),
 
   /** 删一行，连带清掉它名下六个平台的 provider 记录。 */
