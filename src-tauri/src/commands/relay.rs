@@ -566,12 +566,32 @@ pub async fn relay_import_site(
     app_handle: tauri::AppHandle,
     site: String,
 ) -> Result<ImportResult, RelayImportError> {
-    import_site(&app_handle, &site).await
+    import_site(&app_handle, &site, BrowserEntrySource::Manual).await
+}
+
+/// 从已验签的中转站目录导入。
+///
+/// 与手工输入分开成一个命令：目录策略可以声明 `/keys` 这类站点专属入口，
+/// 但调用方不能靠传一个布尔值把任意业务路径升级成受信入口。这里重新读取并验证
+/// 当前签名配置：完全匹配其中 HTTPS `entry_url` 的地址会保留 path/query/fragment；
+/// 普通榜单站点仍按手工输入的安全规则打开 origin 或协议登录页。
+#[tauri::command]
+pub async fn relay_import_directory_site(
+    app_handle: tauri::AppHandle,
+    site: String,
+) -> Result<ImportResult, RelayImportError> {
+    let source = if is_signed_directory_entry(&site) {
+        BrowserEntrySource::SignedDirectory
+    } else {
+        BrowserEntrySource::Manual
+    };
+    import_site(&app_handle, &site, source).await
 }
 
 async fn import_site(
     app_handle: &tauri::AppHandle,
     input: &str,
+    entry_source: BrowserEntrySource,
 ) -> Result<ImportResult, RelayImportError> {
     let input = if input.trim().is_empty() {
         DEFAULT_SITE
@@ -595,7 +615,34 @@ async fn import_site(
         }
     };
 
-    browser_import(app_handle, input, site_origin, initial_detected).await
+    browser_import(
+        app_handle,
+        input,
+        site_origin,
+        initial_detected,
+        entry_source,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserEntrySource {
+    Manual,
+    SignedDirectory,
+}
+
+fn is_signed_directory_entry(input: &str) -> bool {
+    let Ok(candidate) = browser_entry_url(input) else {
+        return false;
+    };
+    crate::relay::remote_config::load_cached().is_some_and(|config| {
+        config.relay_directory.sites.values().any(|site| {
+            site.entry_url
+                .as_deref()
+                .and_then(|entry| browser_entry_url(entry).ok())
+                .is_some_and(|entry| entry == candidate)
+        })
+    })
 }
 
 fn recoverable_native_discovery_error(
@@ -655,9 +702,10 @@ fn browser_start_url(
     input: &str,
     site_origin: &str,
     detected: Option<&discovery::DetectedSite>,
+    entry_source: BrowserEntrySource,
 ) -> Result<url::Url, AppError> {
     let entry = browser_entry_url(input)?;
-    if browser_entry_is_auth_page(&entry) {
+    if entry_source == BrowserEntrySource::SignedDirectory || browser_entry_is_auth_page(&entry) {
         return Ok(entry);
     }
 
@@ -761,6 +809,7 @@ async fn browser_import(
     input: &str,
     site_origin: String,
     initial_detected: Option<discovery::DetectedSite>,
+    entry_source: BrowserEntrySource,
 ) -> Result<ImportResult, RelayImportError> {
     if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
         log::info!("发现残留的站点导入窗口，销毁后重开");
@@ -768,7 +817,8 @@ async fn browser_import(
     }
 
     let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
-    let entry_url = browser_start_url(input, &site_origin, initial_detected.as_ref())?;
+    let entry_url =
+        browser_start_url(input, &site_origin, initial_detected.as_ref(), entry_source)?;
     let navigate_after_detection =
         initial_detected.is_none() && browser_entry_is_origin(&entry_url);
 
@@ -4125,6 +4175,7 @@ mod tests {
             "https://api.example.com/custom/subscription-token",
             "https://api.example.com",
             None,
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4137,6 +4188,7 @@ mod tests {
             "https://api.example.com/register?aff=ABC123",
             "https://api.example.com",
             None,
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4150,10 +4202,25 @@ mod tests {
             "https://api.example.com/custom/subscription-token",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
         assert_eq!(url.as_str(), "https://api.example.com/register");
+    }
+
+    #[test]
+    fn browser_start_url_preserves_a_signed_directory_entry_path() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "https://790053500.com/keys",
+            "https://790053500.com",
+            Some(&detected),
+            BrowserEntrySource::SignedDirectory,
+        )
+        .expect("valid signed directory entry URL");
+
+        assert_eq!(url.as_str(), "https://790053500.com/keys");
     }
 
     #[test]
@@ -4163,6 +4230,7 @@ mod tests {
             "http://api.example.com/register?aff=ABC123",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4176,6 +4244,7 @@ mod tests {
             "api.example.com",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4189,6 +4258,7 @@ mod tests {
             "api.example.com",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 

@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -17,6 +18,7 @@ import type {
 const {
   listDirectory,
   importSite,
+  importDirectorySite,
   provision,
   openInBrowser,
   toastError,
@@ -25,6 +27,7 @@ const {
 } = vi.hoisted(() => ({
   listDirectory: vi.fn(),
   importSite: vi.fn(),
+  importDirectorySite: vi.fn(),
   provision: vi.fn(),
   openInBrowser: vi.fn(),
   toastError: vi.fn(),
@@ -33,7 +36,7 @@ const {
 }));
 
 vi.mock("@/lib/api", () => ({
-  relayApi: { listDirectory, importSite, provision },
+  relayApi: { listDirectory, importSite, importDirectorySite, provision },
 }));
 
 vi.mock("../../openInBrowser", () => ({ openInBrowser }));
@@ -117,6 +120,12 @@ describe("RelayDirectoryPage", () => {
       Promise.resolve(leaderboard(kind)),
     );
     importSite.mockResolvedValue({
+      relayId: 7,
+      siteOrigin: "https://bestapi.store",
+      siteName: "BestAPI",
+      backendKind: "sub2api",
+    });
+    importDirectorySite.mockResolvedValue({
       relayId: 7,
       siteOrigin: "https://bestapi.store",
       siteName: "BestAPI",
@@ -206,6 +215,22 @@ describe("RelayDirectoryPage", () => {
     );
   });
 
+  it("labels a managed detail-page completion without inventing a rank", async () => {
+    listDirectory.mockResolvedValue(
+      leaderboard("gemini", {
+        items: [{ ...item(1), rank: null }],
+      }),
+    );
+
+    render(<RelayDirectoryPage sourceAppId="gemini" onBack={() => {}} />);
+
+    const row = (await screen.findByText("BestAPI")).closest("article");
+    expect(
+      within(row!).getByText("loongport.directory.meta.supplementalRank"),
+    ).toBeInTheDocument();
+    expect(row).not.toHaveTextContent("#0");
+  });
+
   it("searches and paginates twelve rows per page", async () => {
     render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
     await screen.findByText("BestAPI");
@@ -261,7 +286,7 @@ describe("RelayDirectoryPage", () => {
     );
 
     await waitFor(() =>
-      expect(importSite).toHaveBeenCalledWith("https://bestapi.store"),
+      expect(importDirectorySite).toHaveBeenCalledWith("https://bestapi.store"),
     );
     expect(provision).toHaveBeenCalledWith(7);
     await waitFor(() => expect(onAuthenticated).toHaveBeenCalled());
@@ -269,7 +294,7 @@ describe("RelayDirectoryPage", () => {
   });
 
   it("stays open when registration or login is cancelled", async () => {
-    importSite.mockRejectedValue({
+    importDirectorySite.mockRejectedValue({
       kind: "cancelled",
       message: "注册或登录尚未完成",
     });
@@ -282,7 +307,7 @@ describe("RelayDirectoryPage", () => {
       within(row!).getByText("loongport.directory.actions.authenticate"),
     );
 
-    await waitFor(() => expect(importSite).toHaveBeenCalled());
+    await waitFor(() => expect(importDirectorySite).toHaveBeenCalled());
     expect(provision).not.toHaveBeenCalled();
     expect(onBack).not.toHaveBeenCalled();
     expect(toastSuccess).not.toHaveBeenCalled();
@@ -318,7 +343,7 @@ describe("RelayDirectoryPage", () => {
     ["unsupported_site", "loongport.addSite.unsupportedSite"],
     ["protocol_conflict", "loongport.addSite.protocolConflict"],
   ])("maps %s to an actionable message", async (kind, key) => {
-    importSite.mockRejectedValue({ kind, message: kind });
+    importDirectorySite.mockRejectedValue({ kind, message: kind });
     render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
     await screen.findByText("BestAPI");
 
@@ -331,7 +356,7 @@ describe("RelayDirectoryPage", () => {
   });
 
   it("uses the localized fallback for an unknown object error", async () => {
-    importSite.mockRejectedValue({ code: "unexpected" });
+    importDirectorySite.mockRejectedValue({ code: "unexpected" });
     render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
     await screen.findByText("BestAPI");
 
@@ -361,5 +386,59 @@ describe("RelayDirectoryPage", () => {
       expect(importSite).toHaveBeenCalledWith("https://790053500.com/keys"),
     );
     expect(provision).toHaveBeenCalledWith(7);
+  });
+
+  it("allows only one authentication operation at a time", async () => {
+    let finishImport!: (value: {
+      relayId: number;
+      siteOrigin: string;
+      siteName: string;
+      backendKind: string;
+    }) => void;
+    importDirectorySite.mockReturnValue(
+      new Promise((resolve) => {
+        finishImport = resolve;
+      }),
+    );
+
+    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    await screen.findByText("BestAPI");
+
+    const customInput = screen.getByPlaceholderText(
+      "loongport.directory.customSitePlaceholder",
+    );
+    fireEvent.change(customInput, {
+      target: { value: "https://790053500.com/keys" },
+    });
+
+    const firstRow = screen.getByText("BestAPI").closest("article");
+    const secondRow = screen.getByText("站点 2").closest("article");
+    fireEvent.click(
+      within(firstRow!).getByText("loongport.directory.actions.authenticate"),
+    );
+    fireEvent.click(
+      within(secondRow!).getByText("loongport.directory.actions.authenticate"),
+    );
+    fireEvent.keyDown(customInput, { key: "Enter" });
+
+    expect(importDirectorySite).toHaveBeenCalledTimes(1);
+    expect(importSite).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        within(secondRow!).getByRole("button", {
+          name: "loongport.directory.actions.authenticate",
+        }),
+      ).toBeDisabled(),
+    );
+    expect(customInput).toBeDisabled();
+
+    await act(async () => {
+      finishImport({
+        relayId: 7,
+        siteOrigin: "https://bestapi.store",
+        siteName: "BestAPI",
+        backendKind: "sub2api",
+      });
+    });
   });
 });

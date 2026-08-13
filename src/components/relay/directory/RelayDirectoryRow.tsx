@@ -11,6 +11,7 @@ import { openInBrowser } from "../openInBrowser";
 interface RelayDirectoryRowProps {
   item: RelayDirectoryItem;
   busy: boolean;
+  disabled: boolean;
   onAuthenticate: (item: RelayDirectoryItem) => void;
 }
 
@@ -23,6 +24,7 @@ function scoreTone(score: number): string {
 export function RelayDirectoryRow({
   item,
   busy,
+  disabled,
   onAuthenticate,
 }: RelayDirectoryRowProps) {
   const { t } = useTranslation();
@@ -30,7 +32,11 @@ export function RelayDirectoryRow({
   return (
     <article className="grid grid-cols-[44px_minmax(0,1fr)_86px_148px] items-center gap-3 border-b border-border-default px-4 py-3 last:border-b-0 hover:bg-muted/30">
       <div className="text-center text-xs tabular-nums text-muted-foreground">
-        <div className="font-medium text-foreground">#{item.rank}</div>
+        <div className="font-medium text-foreground">
+          {item.rank === null
+            ? t("loongport.directory.meta.supplementalRank")
+            : `#${item.rank}`}
+        </div>
       </div>
 
       <div className="min-w-0">
@@ -124,7 +130,11 @@ export function RelayDirectoryRow({
       </div>
 
       <div className="flex flex-col items-stretch gap-1">
-        <Button size="sm" disabled={busy} onClick={() => onAuthenticate(item)}>
+        <Button
+          size="sm"
+          disabled={disabled}
+          onClick={() => onAuthenticate(item)}
+        >
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           {t("loongport.directory.actions.authenticate")}
         </Button>

@@ -3087,7 +3087,11 @@
       "compatibilityNote": "Some incompatible sites are not shown",
       "customSitePlaceholder": "Can't find it? Enter another relay URL",
       "provisionFailed": "The account was added, but connection setup failed: {{reason}}. Retry from the relay list.",
-      "meta": { "samples": "{{count}} tests", "latest": "Latest {{date}}" },
+      "meta": {
+        "samples": "{{count}} tests",
+        "latest": "Latest {{date}}",
+        "supplementalRank": "Added"
+      },
       "actions": {
         "authenticate": "Register or sign in",
         "autoAddHint": "Added automatically when complete",

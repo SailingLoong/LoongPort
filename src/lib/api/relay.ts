@@ -86,7 +86,7 @@ export interface RelayDirectoryItem {
   siteHost: string;
   veridropHost: string;
   displayName: string;
-  rank: number;
+  rank: number | null;
   score: number;
   samples: number;
   latestDate: string;
@@ -265,6 +265,10 @@ export const relayApi = {
    */
   importSite: (site: string): Promise<ImportResult> =>
     invoke("relay_import_site", { site }),
+
+  /** 导入已验签目录声明的入口；后端会再次核对当前签名配置。 */
+  importDirectorySite: (site: string): Promise<ImportResult> =>
+    invoke("relay_import_directory_site", { site }),
 
   /**
    * 探一遍每一行凭据是不是真的还活着，返回**这次被清掉凭据的行 id**（空 = 全都好）。

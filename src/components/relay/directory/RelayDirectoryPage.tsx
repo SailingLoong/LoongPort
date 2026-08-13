@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -63,6 +63,7 @@ export function RelayDirectoryPage({
   const [authenticatingHost, setAuthenticatingHost] = useState<string | null>(
     null,
   );
+  const authenticationInProgress = useRef(false);
   const [customSite, setCustomSite] = useState("");
 
   useEffect(() => {
@@ -120,10 +121,18 @@ export function RelayDirectoryPage({
     return message || t("loongport.addSite.importFailed");
   };
 
-  const authenticate = async (entryUrl: string, host: string) => {
+  const authenticate = async (
+    entryUrl: string,
+    host: string,
+    source: "directory" | "manual",
+  ) => {
+    if (authenticationInProgress.current) return;
+    authenticationInProgress.current = true;
     setAuthenticatingHost(host);
     try {
-      const result = await relayApi.importSite(entryUrl);
+      const result = await (source === "directory"
+        ? relayApi.importDirectorySite(entryUrl)
+        : relayApi.importSite(entryUrl));
       toast.success(
         t("loongport.addSite.connected", { name: result.siteName }),
       );
@@ -146,6 +155,7 @@ export function RelayDirectoryPage({
       const message = importErrorMessage(reason);
       if (message) toast.error(message);
     } finally {
+      authenticationInProgress.current = false;
       setAuthenticatingHost(null);
     }
   };
@@ -270,8 +280,13 @@ export function RelayDirectoryPage({
                 key={`${item.siteHost}:${item.veridropHost}`}
                 item={item}
                 busy={authenticatingHost === item.siteHost}
+                disabled={authenticatingHost !== null}
                 onAuthenticate={(selected) =>
-                  void authenticate(selected.entryUrl, selected.siteHost)
+                  void authenticate(
+                    selected.entryUrl,
+                    selected.siteHost,
+                    "directory",
+                  )
                 }
               />
             ))}
@@ -317,18 +332,25 @@ export function RelayDirectoryPage({
       <div className="flex items-center gap-2 border-t border-border-default pt-3">
         <Input
           value={customSite}
+          disabled={authenticatingHost !== null}
           onChange={(event) => setCustomSite(event.target.value)}
           placeholder={t("loongport.directory.customSitePlaceholder")}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && customSite.trim()) {
-              void authenticate(customSite, customSite.trim());
+            if (
+              event.key === "Enter" &&
+              customSite.trim() &&
+              !authenticationInProgress.current
+            ) {
+              void authenticate(customSite, customSite.trim(), "manual");
             }
           }}
         />
         <Button
           variant="outline"
           disabled={!customSite.trim() || authenticatingHost !== null}
-          onClick={() => void authenticate(customSite, customSite.trim())}
+          onClick={() =>
+            void authenticate(customSite, customSite.trim(), "manual")
+          }
         >
           {t("loongport.directory.actions.useOtherSite")}
         </Button>

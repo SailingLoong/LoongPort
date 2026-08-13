@@ -3087,7 +3087,11 @@
       "compatibilityNote": "部分不兼容站点不会展示",
       "customSitePlaceholder": "没有找到？输入其他中转站网址",
       "provisionFailed": "账号已添加，但创建接入配置失败：{{reason}}。可返回中转站列表重试。",
-      "meta": { "samples": "{{count}} 次检测", "latest": "最近 {{date}}" },
+      "meta": {
+        "samples": "{{count}} 次检测",
+        "latest": "最近 {{date}}",
+        "supplementalRank": "补充"
+      },
       "actions": {
         "authenticate": "注册或登录",
         "autoAddHint": "完成后自动添加",
