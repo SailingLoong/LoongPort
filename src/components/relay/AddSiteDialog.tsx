@@ -137,6 +137,9 @@ export function AddSiteDialog({
     if (typed?.kind === "transport") {
       return t("loongport.addSite.transportError");
     }
+    if (typed?.kind === "cancelled") {
+      return null;
+    }
 
     const raw =
       typeof typed?.message === "string"
@@ -166,25 +169,21 @@ export function AddSiteDialog({
       );
       setSiteInput("");
 
-      if (result.loggedIn) {
-        toast.success(t("loongport.session.connected"));
-        // 登录成功后必须等分组和密钥落库再通知宿主刷新；否则新行会短暂显示
-        // “没有可用分组”。provision 失败不撤销已保存的站点和登录态，刷新后
-        // 用户仍可从新行上的“获取密钥”重试。
-        try {
-          reportProvision(t, await relayApi.provision(result.relayId), appId);
-        } catch (e) {
-          toast.error(String(e));
-        }
+      toast.success(t("loongport.session.connected"));
+      // 导入命令只在注册/登录成功并完成落库后返回。随后必须等分组和密钥落库再
+      // 通知宿主刷新；provision 失败不撤销已保存的账号，用户仍可从新行重试。
+      try {
+        reportProvision(t, await relayApi.provision(result.relayId), appId);
+      } catch (e) {
+        toast.error(String(e));
       }
 
-      // loggedIn=false 表示用户在登录完成前主动关窗。若协议已经识别，站点行仍已
-      // 保存，因此照常刷新列表；没有凭据则不发 provision 请求。
       onAdded();
       onClose();
     } catch (e) {
       // 发现、网页验证后的协议识别或登录失败时保留输入与弹窗，方便用户修正后重试。
-      toast.error(importErrorMessage(e));
+      const message = importErrorMessage(e);
+      if (message) toast.error(message);
     } finally {
       setBusy(false);
     }

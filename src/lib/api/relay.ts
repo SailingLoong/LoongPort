@@ -39,7 +39,8 @@ export type BackendKind = "sub2api" | "newapi";
 export type DiscoveryErrorKind =
   | "unsupported_site"
   | "protocol_conflict"
-  | "transport";
+  | "transport"
+  | "cancelled";
 
 export interface RelayImportError {
   kind?: DiscoveryErrorKind;
@@ -54,11 +55,8 @@ export interface ProbeResult {
   readonly backendKind: BackendKind;
 }
 
-/** 合并站点发现与同一浏览器会话登录的结果。 */
-export interface ImportResult extends ProbeResult {
-  /** true 表示已取得并保存凭据；false 表示用户在登录完成前关闭了窗口。 */
-  loggedIn: boolean;
-}
+/** 站点发现与同一浏览器会话认证均成功后的结果。 */
+export type ImportResult = ProbeResult;
 
 /**
  * 一个推荐中转站（首启屏那几个按钮）。

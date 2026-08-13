@@ -53,11 +53,10 @@ vi.mock("react-i18next", () => ({
 
 const toastError = vi.fn();
 const toastWarning = vi.fn();
+const toastSuccess = vi.fn();
 vi.mock("sonner", () => ({
   toast: {
-    // `success` 不留 spy：这些测试断言的是「分组拉了没有 / 失败说了没有」，
-    // 成功提示的措辞归 i18n 的闸管（`tests/config/loongportLocales.test.ts`）。
-    success: vi.fn(),
+    success: (...args: unknown[]) => toastSuccess(...args),
     error: (...args: unknown[]) => toastError(...args),
     warning: (...args: unknown[]) => toastWarning(...args),
   },
@@ -91,11 +90,13 @@ const { AddSiteDialog } = await import("@/components/relay/AddSiteDialog");
 /** 一份空的 provision 结果 —— 这些测试关心的是「有没有调它」，不是它返回什么。 */
 const emptySummary = { tiers: [], keysCreated: 0, failures: [] };
 
-function renderDialog(overrides: { onAdded?: () => void } = {}) {
+function renderDialog(
+  overrides: { onAdded?: () => void; onClose?: () => void } = {},
+) {
   return render(
     <AddSiteDialog
       open
-      onClose={() => {}}
+      onClose={overrides.onClose ?? (() => {})}
       onAdded={overrides.onAdded ?? (() => {})}
       defaultSite="790053500.com"
       appId="codex"
@@ -116,7 +117,6 @@ describe("「添加中转站」登录后就地备好密钥", () => {
       siteOrigin: "https://790053500.com",
       siteName: "鑫旺",
       backendKind: "newapi",
-      loggedIn: true,
     });
     listSponsors.mockResolvedValue([]);
     listSites.mockResolvedValue([]);
@@ -161,21 +161,23 @@ describe("「添加中转站」登录后就地备好密钥", () => {
     await waitFor(() => expect(onAdded).toHaveBeenCalled());
   });
 
-  it("用户自己关掉登录窗时不拉分组（没有凭据，后端在发请求前就报错）", async () => {
-    importSite.mockResolvedValue({
-      relayId: 7,
-      siteOrigin: "https://790053500.com",
-      siteName: "鑫旺",
-      backendKind: "newapi",
-      loggedIn: false,
+  it("用户未完成注册或登录时不添加、不关闭，也不显示连接成功", async () => {
+    importSite.mockRejectedValue({
+      kind: "cancelled",
+      message: "注册或登录尚未完成",
     });
-    renderDialog();
+    const onAdded = vi.fn();
+    const onClose = vi.fn();
+    renderDialog({ onAdded, onClose });
     clickConfirm();
 
-    // 等导入命令返回再断言「没调」，否则这条测试对任何实现都绿。
     await waitFor(() => expect(importSite).toHaveBeenCalled());
     expect(login).not.toHaveBeenCalled();
     expect(provision).not.toHaveBeenCalled();
+    expect(onAdded).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
   });
 
   it("部分分组建密钥失败时点名说出来（行内那两条路径就是这么做的）", async () => {
