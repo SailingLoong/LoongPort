@@ -41,10 +41,11 @@ const SCRIPT_DIR = resolve(REPO, "src-tauri/target");
  * 副本，那正是这条测试要避免的东西。
  */
 function ensureScripts(): void {
-  const both = ["with-promo", "no-promo"].map((n) =>
-    resolve(SCRIPT_DIR, `login-script-${n}.js`),
-  );
-  if (both.every(existsSync)) return;
+  const needed = [
+    ...["with-promo", "no-promo"].map((n) => `login-script-${n}.js`),
+    "account-fetch-script.js",
+  ].map((n) => resolve(SCRIPT_DIR, n));
+  if (needed.every(existsSync)) return;
   execFileSync(
     "cargo",
     [
@@ -332,5 +333,194 @@ describe.runIf(scriptsAvailable())("登录注入脚本能真的执行", () => {
     const parsed = JSON.parse(raw);
     expect(parsed.code).toBe("AFF12345678");
     expect(parsed.expiresAt).toBeGreaterThan(Date.now());
+  });
+});
+
+/**
+ * 「登录窗在页面上下文里代拉账号档案」的脚本**真的跑一遍**（不是字符串断言）。
+ *
+ * 与上面登录脚本同一条理由：`account_fetch_script` 也是 Rust 生成的另一门语言代码，
+ * 字符串断言验不了「跑得起来、重试逻辑真的会回传」。这条专门守那段最险的分支：
+ * **403 HTML 只重试、API 自己的错误不重试** —— 写错一次的表现就是「登录流程多等
+ * 3 秒然后报超时」，纯看字符串看不出来。
+ *
+ * 定时器用「可手动推进的假时钟」而不是真睡：重试间隔 1s、兜底 5s，真跑会拖慢测试，
+ * 而且**真 setTimeout 会让 5s 兜底和 1s 重试并发抢跑**（假时钟下谁先谁后由测试说了算，
+ * 不会出现 flaky）。
+ */
+describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", () => {
+  const read = () =>
+    readFileSync(resolve(SCRIPT_DIR, "account-fetch-script.js"), "utf8");
+
+  /** 解出回传导航 URL 里的 {status, body} 载荷（与 Rust 侧 decode 同构）。 */
+  function decodePayload(url: string): { status: number; body: string } {
+    const b64 = url
+      .slice(url.indexOf("?d=") + 3)
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+    return JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+  }
+
+  /**
+   * 极小的 stub 环境：fetch 可编程（按调用顺序出响应）、定时器进队列可手动推进。
+   *
+   * `origin` 与导出脚本里的 `ALLOWED_ORIGIN`（`https://bestapi.store`）一致，
+   * 否则 origin 守卫会让脚本直接早退、什么也验不到。
+   */
+  function runAccountScript(
+    responses: Array<
+      { status: number; ct: string; body: string } | { never: true }
+    >,
+  ) {
+    const navigations: string[] = [];
+    let fetchCalls = 0;
+    let now = 0;
+    const timers: Array<{ at: number; fire: () => void }> = [];
+
+    const sandbox = {
+      window: {} as Record<string, unknown>,
+      TextEncoder,
+      btoa: (s: string) => Buffer.from(s, "binary").toString("base64"),
+      setTimeout: (fn: () => void, ms: number) => {
+        timers.push({ at: now + ms, fire: fn });
+        return timers.length;
+      },
+      fetch: () => {
+        const spec = responses[Math.min(fetchCalls, responses.length - 1)];
+        fetchCalls++;
+        if ("never" in spec) return new Promise(() => {});
+        return Promise.resolve({
+          status: spec.status,
+          headers: { get: () => spec.ct },
+          text: () => Promise.resolve(spec.body),
+        });
+      },
+      console,
+    };
+    sandbox.window.top = sandbox.window;
+    sandbox.window.self = sandbox.window;
+    sandbox.window.location = {
+      origin: "https://bestapi.store",
+      get href() {
+        return "https://bestapi.store/login";
+      },
+      set href(v: string) {
+        navigations.push(v);
+      },
+    };
+
+    vm.runInNewContext(read(), sandbox, { timeout: 5000 });
+
+    return {
+      navigations,
+      // **getter 而不是值快照**：`{ fetchCalls }` 字面量会在创建时把当时的数值拷贝进去，
+      // 之后闭包里再 ++ 也读不到（这次实测踩过：重试明明跑了 3 次，harness 一直显示 1）。
+      get fetchCalls() {
+        return fetchCalls;
+      },
+      /** 把假时钟往前拨，触发到期的定时器（按到期顺序）。 */
+      advance(ms: number) {
+        now += ms;
+        const due = timers
+          .filter((t) => t.at <= now)
+          .sort((a, b) => a.at - b.at);
+        timers.splice(0, timers.length, ...timers.filter((t) => t.at > now));
+        for (const t of due) t.fire();
+      },
+    };
+  }
+
+  /** 让 promise 链跑完（fetch → text() → then），再做断言。 */
+  const flush = () => new Promise<void>((r) => setImmediate(r));
+
+  it("200 一次回传，不重试", async () => {
+    const h = runAccountScript([
+      {
+        status: 200,
+        ct: "application/json",
+        body: '{"code":0,"message":"success","data":{"id":7,"email":"a@b.c","username":"nicky"}}',
+      },
+    ]);
+    await flush();
+    expect(h.fetchCalls, "200 不该重试").toBe(1);
+    expect(h.navigations).toHaveLength(1);
+    const payload = decodePayload(h.navigations[0]);
+    expect(payload.status).toBe(200);
+    const account = JSON.parse(payload.body);
+    expect(account.data.id).toBe(7);
+  });
+
+  it("403 HTML 重试到成功（最多 3 次），不被 5s 兜底抢跑", async () => {
+    const h = runAccountScript([
+      {
+        status: 403,
+        ct: "text/html; charset=utf-8",
+        body: "<html>challenge</html>",
+      },
+      {
+        status: 403,
+        ct: "text/html; charset=utf-8",
+        body: "<html>challenge</html>",
+      },
+      {
+        status: 200,
+        ct: "application/json",
+        body: '{"code":0,"message":"success","data":{"id":9}}',
+      },
+    ]);
+    // 第一次 403：不能当场回传，要等重试。
+    await flush();
+    expect(h.navigations).toHaveLength(0);
+    // 第二次 403（t=1000）：还是不回传。
+    h.advance(1000);
+    await flush();
+    expect(h.navigations).toHaveLength(0);
+    // 第三次 200（t=2000）：回传成功，且 fetch 正好 3 次。
+    h.advance(1000);
+    await flush();
+    expect(h.fetchCalls, "403 该重试到 3 次").toBe(3);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(200);
+    // 5s 兜底还躺着没触发 —— 重试成功时它不该再发第二条。
+    h.advance(3000);
+    await flush();
+    expect(h.navigations, "兜底不该覆盖已经成功的回传").toHaveLength(1);
+  });
+
+  it("403 连着重 3 次仍失败：把最后一次 403 原样回传", async () => {
+    const h = runAccountScript([
+      { status: 403, ct: "text/html", body: "<html>1</html>" },
+      { status: 403, ct: "text/html", body: "<html>2</html>" },
+      { status: 403, ct: "text/html", body: "<html>3</html>" },
+    ]);
+    // 先让第一次 fetch 的 promise 链跑完（重试定时器是它排的，不等就拨时钟会扑空）。
+    await flush();
+    h.advance(1000);
+    await flush();
+    h.advance(1000);
+    await flush();
+    expect(h.fetchCalls, "最多 3 次").toBe(3);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(403);
+  });
+
+  it("401（API 自己的错误）不重试，原样回传", async () => {
+    const h = runAccountScript([
+      { status: 401, ct: "application/json", body: '{"code":401}' },
+    ]);
+    await flush();
+    expect(h.fetchCalls, "401 不该重试").toBe(1);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(401);
+  });
+
+  it("页面 fetch 挂起：5 秒兜底回传超时（-3）", async () => {
+    const h = runAccountScript([{ never: true }]);
+    await flush();
+    expect(h.navigations).toHaveLength(0);
+    h.advance(5000);
+    await flush();
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(-3);
   });
 });

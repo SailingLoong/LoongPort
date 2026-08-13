@@ -209,6 +209,17 @@ pub fn parse_sub2api_public_settings(body: &str) -> Result<PublicSettings, AppEr
     })
 }
 
+/// 从 `GET /api/v1/user/profile` 的响应正文解出账号身份。
+///
+/// 浏览器辅助回传（`login::parse_account_navigation` 解析自定义 scheme 导航后拿到
+/// 的原始正文）与 reqwest 客户端（[`Client::account`]）必须共用这一处信封判据，
+/// 避免两条路径对同一份档案得出不同结论。与 [`parse_sub2api_public_settings`] 同理。
+pub fn parse_account_profile(body: &str) -> Result<Account, AppError> {
+    let env: Envelope<Account> = serde_json::from_str(body)
+        .map_err(|e| AppError::Config(format!("获取账号信息失败: 响应解析出错 {e}")))?;
+    env.into_data("获取账号信息")
+}
+
 /// 分组（`GET /api/v1/groups/available`）的窄子集。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Group {
@@ -1592,6 +1603,35 @@ mod tests {
 
         assert_eq!(settings.site_name, "WawAPI");
         assert_eq!(settings.payment_enabled, Some(false));
+    }
+
+    #[test]
+    fn account_profile_parser_accepts_a_profile_envelope() {
+        let body = r#"{"code":0,"message":"success","data":{"id":7,"email":"a@b.c","username":"nicky"}}"#;
+        let account = parse_account_profile(body).expect("完整档案要能解出");
+        assert_eq!(account.id, 7);
+        assert_eq!(account.email, "a@b.c");
+        assert_eq!(account.username, "nicky");
+
+        // username / email 缺失是服务端已知降级态（`#[serde(default)]`），不该解失败。
+        let bare = parse_account_profile(r#"{"code":0,"message":"success","data":{"id":9}}"#)
+            .expect("只有 id 也要能解出");
+        assert_eq!(bare.id, 9);
+        assert!(bare.email.is_empty());
+    }
+
+    #[test]
+    fn account_profile_parser_rejects_browser_block_html() {
+        let err = parse_account_profile("<html><title>Just a moment...</title></html>")
+            .expect_err("Cloudflare 拦页不是档案响应");
+        assert!(err.to_string().contains("获取账号信息失败"), "{err}");
+    }
+
+    #[test]
+    fn account_profile_parser_rejects_business_error_envelope() {
+        let err = parse_account_profile(r#"{"code":1,"message":"no","data":null}"#)
+            .expect_err("业务失败不该产出账号");
+        assert!(err.to_string().contains("获取账号信息失败"), "{err}");
     }
 
     #[test]

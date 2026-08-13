@@ -78,6 +78,13 @@ use provision::DEFAULT_MODEL;
 /// 两处各写一个字面量迟早对不上（`vendor.rs` 的 `LOGIN_TIMEOUT` 同一形状）。
 const LOGIN_TIMEOUT_SECS: u64 = 300;
 
+/// 浏览器辅助拉账号档案时，等页面 fetch + 自定义 scheme 回传的最长秒数。
+///
+/// 只在 reqwest 被指纹级防护拦下（403 HTML）时才会走到这条路径；正常站点
+/// reqwest 一次往返就拿到账号，不会等这个超时。5 秒给真实浏览器留够往返，
+/// 又不会让登录流程在窗口已关（回传永远不来）时卡成 5 分钟超时。
+const BROWSER_ACCOUNT_TIMEOUT_SECS: u64 = 5;
+
 /// 「加站弹窗要什么」+「切档位前要不要提醒处理 ChatGPT」。
 ///
 /// ## 为什么只剩两个字段（2026-08-04 收缩）
@@ -781,6 +788,8 @@ async fn browser_import(
     let (creds_tx, mut creds_rx) = tokio::sync::mpsc::channel::<BrowserLoginCredential>(1);
     let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<RelayImportError>(1);
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
+    // 浏览器辅助拉账号档案的回传通道（reqwest 被指纹级防护拦下时才走）。
+    let (account_tx, mut account_rx) = tokio::sync::mpsc::channel::<Result<api::Account, AppError>>(1);
 
     let context_for_load = Arc::clone(&context);
     let app_for_nav = app_handle.clone();
@@ -791,6 +800,7 @@ async fn browser_import(
     let promo_for_nav = login_promo_code.clone();
     let probe_error_tx = error_tx.clone();
     let credential_error_tx = error_tx.clone();
+    let account_tx_for_nav = account_tx.clone();
 
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
@@ -997,6 +1007,20 @@ async fn browser_import(
             return false;
         }
 
+        // 浏览器辅助拉账号档案的回传（reqwest 被指纹级防护拦下时由本窗口代拉）。
+        if let Some(result) = login::parse_account_navigation(url) {
+            match result {
+                Ok(account) => {
+                    let _ = account_tx_for_nav.try_send(Ok(account));
+                }
+                Err(error) => {
+                    log::warn!("账号档案回传解析失败: {error}");
+                    let _ = account_tx_for_nav.try_send(Err(error));
+                }
+            }
+            return false;
+        }
+
         match login::parse_creds_navigation(url) {
             None => true,
             Some(Ok(credentials)) => {
@@ -1110,11 +1134,19 @@ async fn browser_import(
                 .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
                 .clone()
                 .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
+            let account = resolve_login_account_identity(
+                &window,
+                &site_origin,
+                &credentials,
+                &mut account_rx,
+            )
+            .await
+            .map_err(|e| AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。")))?;
             let (final_relay_id, account_id) = persist_login_credentials(
                 app_handle,
                 browser_context.probe.relay_id,
-                &site_origin,
                 credentials,
+                account,
             )
             .await?;
             let login = LoginResult {
@@ -1281,6 +1313,8 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
 
     // 凭据经这个 channel 从导航回调回到本函数。容量 1：只需要第一份。
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BrowserLoginCredential>(1);
+    // 浏览器辅助拉账号档案的回传通道（reqwest 被指纹级防护拦下时才走）。
+    let (account_tx, mut account_rx) = tokio::sync::mpsc::channel::<Result<api::Account, AppError>>(1);
     // 用户自己关掉窗口的信号。没有它就只能干等 5 分钟超时。
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -1293,6 +1327,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         login_promo_code.as_deref(),
     );
     let backend_kind_for_nav = backend_kind;
+    let account_tx_for_nav = account_tx.clone();
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
         login::LOGIN_WINDOW_LABEL,
@@ -1361,6 +1396,19 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
             }
         } else if backend_kind_for_nav != discovery::BackendKind::Sub2Api {
             return true;
+        }
+        // 浏览器辅助拉账号档案的回传（reqwest 被指纹级防护拦下时由本窗口代拉）。
+        if let Some(result) = login::parse_account_navigation(url) {
+            match result {
+                Ok(account) => {
+                    let _ = account_tx_for_nav.try_send(Ok(account));
+                }
+                Err(error) => {
+                    log::warn!("账号档案回传解析失败: {error}");
+                    let _ = account_tx_for_nav.try_send(Err(error));
+                }
+            }
+            return false;
         }
         match login::parse_creds_navigation(url) {
             // 普通导航，放行。
@@ -1461,8 +1509,11 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
 
     match outcome {
         Ok(BrowserLoginOutcome::Sub2ApiCredentials(c)) => {
+            let account = resolve_login_account_identity(&window, &site_origin, &c, &mut account_rx)
+                .await
+                .map_err(|e| AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。")))?;
             let (final_relay_id, account_id) =
-                persist_login_credentials(app_handle, relay_id, &site_origin, c).await?;
+                persist_login_credentials(app_handle, relay_id, c, account).await?;
 
             // **不关窗**，把标题改成「已连接」并在页面上浮一条提示。
             //
@@ -1537,24 +1588,107 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     }
 }
 
-async fn persist_login_credentials(
-    app_handle: &tauri::AppHandle,
-    relay_id: i64,
+/// 登录成功后取账号身份（去重键 + 展示名 + 登录标识的来源）。
+///
+/// 先走 reqwest fast path —— 绝大多数站这么拿就好。当站点启用了 Cloudflare 这类
+/// **指纹级**防护（reqwest 这种非浏览器 HTTP 栈必撞 403 HTML，README 里 `api.aijws.com`
+/// 就是实例），改由仍开着的登录窗在**页面上下文**里同源拉一次档案回传：登录窗本身就是
+/// 真实浏览器，是唯一能过这种防护的通道。判据是「HTTP 403 + 正文不是 JSON」——
+/// sub2api 的 API 出错（403 权限类）回的是 JSON 信封，正文非 JSON 说明根本不是 API 在说话。
+async fn resolve_login_account_identity(
+    window: &tauri::WebviewWindow,
     site_origin: &str,
-    credentials: login::Credentials,
-) -> Result<(i64, i64), AppError> {
-    // 先拉一次 profile 拿账号身份 —— 去重键是「域名 + 账号」，而账号只有登录后才知道。
-    // `account_id` 传 `None`：这次只读请求的目的就是取得它，不需要幂等键。
-    let account = api::Client::new(
+    credentials: &login::Credentials,
+    account_rx: &mut tokio::sync::mpsc::Receiver<Result<api::Account, AppError>>,
+) -> Result<api::Account, AppError> {
+    let via_reqwest = match api::Client::new(
         site_origin,
         &credentials.auth_token,
         None,
         credentials.user_agent.as_deref(),
         credentials.cf_clearance.as_deref(),
-    )?
-    .account()
+    ) {
+        Ok(client) => client.account().await,
+        Err(error) => Err(error),
+    };
+
+    match via_reqwest {
+        Ok(account) => Ok(account),
+        Err(error) if is_bot_blocked_error(&error) => {
+            log::info!(
+                "{}",
+                crate::diagnostics::DiagnosticEvent::new("relay.account_fetch", "browser_fallback")
+                    .field_display("site", crate::url_for_log(site_origin))
+                    .field("reason", error.to_string())
+            );
+            browser_fetch_account(window, site_origin, &credentials.auth_token, account_rx).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 让登录窗在页面上下文里同源拉账号档案，把 `{status, body}` 经
+/// `loongport-creds://account` 导航回传（见 [`login::account_fetch_script`]）。
+async fn browser_fetch_account(
+    window: &tauri::WebviewWindow,
+    site_origin: &str,
+    auth_token: &str,
+    account_rx: &mut tokio::sync::mpsc::Receiver<Result<api::Account, AppError>>,
+) -> Result<api::Account, AppError> {
+    let script = login::account_fetch_script(site_origin, auth_token);
+    window
+        .eval(&script)
+        .map_err(|e| AppError::Config(format!("浏览器辅助读取账号信息失败（登录窗口不可用）: {e}")))?;
+
+    // 给页面上的 fetch + 回传留出时间。窗口可能在凭据到手后被用户关掉，那时
+    // 回传永远不来 —— 靠超时收场而不是干等，把「关窗」与「回传真的到了」分开。
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(BROWSER_ACCOUNT_TIMEOUT_SECS),
+        account_rx.recv(),
+    )
     .await
-    .map_err(|e| AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。")))?;
+    {
+        Ok(Some(Ok(account))) => Ok(account),
+        Ok(Some(Err(error))) => Err(error),
+        Ok(None) => Err(AppError::Config(
+            "浏览器辅助读取账号信息失败：登录窗口已关闭".into(),
+        )),
+        Err(_) => Err(AppError::Config(
+            "浏览器辅助读取账号信息失败：等待回传超时".into(),
+        )),
+    }
+}
+
+/// 判断一次失败是不是「站点把非浏览器 HTTP 栈拦在门外」。
+///
+/// 判据：HTTP 403 + 响应正文不是 JSON。sub2api 的业务/鉴权失败回的是 JSON 信封
+/// （`{code, message}`，403 权限类也一样），正文是 HTML（`Just a moment...` /
+/// `Attention Required!`）说明响应根本不是 API 发的，而是防护层拦的 ——
+/// 加头、加 cookie、换 HTTP 版本都过不了，只能走浏览器。
+///
+/// ⚠️ 依赖 [`api::Client::send`] 的报错措辞（`...失败: HTTP <status> <正文首行>`）；
+/// 改动那条措辞必须同步改这里，由下方测试钉住。
+fn is_bot_blocked_error(error: &AppError) -> bool {
+    let AppError::Config(message) = error else {
+        return false;
+    };
+    let Some((_, rest)) = message.split_once("HTTP ") else {
+        return false;
+    };
+    let Some((status, body)) = rest.split_once(' ') else {
+        return false;
+    };
+    status == "403" && !body.trim_start().starts_with('{') && !body.trim_start().starts_with('[')
+}
+
+async fn persist_login_credentials(
+    app_handle: &tauri::AppHandle,
+    relay_id: i64,
+    credentials: login::Credentials,
+    account: api::Account,
+) -> Result<(i64, i64), AppError> {
+    // 账号身份由调用方先取好（`resolve_login_account_identity`）：去重键是
+    // 「域名 + 账号」，而账号只有登录后才知道；取不到账号 = 登录不能算成功。
     let account_id = account.id;
 
     let state = app_handle.state::<AppState>();
@@ -3903,6 +4037,30 @@ mod tests {
             EvidenceLevel, RunFailureKind, TargetKey, Verdict, VerificationReport, RULES_VERSION,
         },
     };
+
+    #[test]
+    fn bot_block_detector_recognizes_cloudflare_html_403() {
+        // 真实现场（api.aijws.com）：Cloudflare 拦非浏览器 HTTP 栈成 403 HTML。
+        assert!(is_bot_blocked_error(&AppError::Config(
+            "获取账号信息失败: HTTP 403 <!DOCTYPE html><html>Just a moment...</html>".into()
+        )));
+
+        // 正文是 JSON 信封 = API 在说话（业务 / 权限 403），不是防护层拦的。
+        assert!(!is_bot_blocked_error(&AppError::Config(
+            r#"获取账号信息失败: HTTP 403 {"code":"FORBIDDEN","message":"no"}"#.into()
+        )));
+
+        // 其它状态码（401 未授权、429 限流）不算防护拦截。
+        assert!(!is_bot_blocked_error(&AppError::Config(
+            r#"获取账号信息失败: HTTP 401 {"code":"UNAUTHORIZED","message":"no"}"#.into()
+        )));
+        assert!(!is_bot_blocked_error(&AppError::Config(
+            "获取账号信息失败: HTTP 429 rate limited".into()
+        )));
+
+        // 非 Config 变体（网络错误等）不算 —— 那些不是防护层在说话。
+        assert!(!is_bot_blocked_error(&AppError::Message("boom".into())));
+    }
 
     #[test]
     fn browser_entry_url_preserves_user_path_and_query_but_forces_https() {
