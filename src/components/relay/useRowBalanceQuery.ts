@@ -97,8 +97,8 @@ export function useRowBalanceQuery(
         : undefined),
     loading: query.isFetching,
     lastQueriedAt,
-    refetch: () => {
-      void query.refetch();
+    refetch: async () => {
+      await query.refetch();
     },
   };
 }

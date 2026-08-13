@@ -8,8 +8,9 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string) =>
       ({
-        "loongport.row.refetchGroups": "更新可用分组",
-        "loongport.vendor.refreshKey": "重新应用密钥配置",
+        "loongport.row.refreshAll":
+          "更新账号信息、额度、可用分组、倍率和接入配置",
+        "loongport.vendor.refreshAll": "更新账号信息、额度、密钥配置和当前状态",
         "loongport.modelVerification.title": "模型验证",
         "loongport.modelVerification.tierVerdict.trusted": "验证通过",
         "loongport.modelVerification.tierVerdict.suspicious": "需要复核",
@@ -55,13 +56,30 @@ import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
 import { RelayRow } from "../RelayRow";
 import { VendorRow } from "../VendorRow";
 
-// 两类行现在各自用 `useRowBalanceQuery` 拉余额（react-query）⇒ 得有 provider。
-// 余额本身不是这道闸关心的东西，`invoke` 让它 reject 即可：行会渲染失败态的
-// 用量条，刷新按钮照在。
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async () => {
-    throw new Error("balance not stubbed in this test");
-  }),
+// 这组测试只守两类行把统一刷新回调接到用量区，不重复验证余额查询本身。
+// `RowBalance.test.tsx` 已覆盖真实查询、布局和刷新顺序；这里隔离掉异步查询，
+// 避免行组件测试被 React Query 的加载态绑住。
+vi.mock("../RowBalance", () => ({
+  RowBalance: ({
+    onRefresh,
+    refreshBusy,
+    refreshLabel,
+  }: {
+    onRefresh?: () => void | Promise<void>;
+    refreshBusy?: boolean;
+    refreshLabel?: string;
+  }) =>
+    onRefresh ? (
+      <button
+        type="button"
+        aria-label={refreshLabel}
+        title={refreshLabel}
+        disabled={refreshBusy}
+        onClick={onRefresh}
+      >
+        refresh
+      </button>
+    ) : null,
 }));
 
 function renderWithQuery(ui: ReactElement) {
@@ -149,37 +167,47 @@ function renderVendorRow(onProvision = vi.fn()) {
   return { onProvision, ...renderWithQuery(<VendorRow {...props} />) };
 }
 
-/**
- * 两类行的刷新动作**都是一眼可见的带文字按钮**，不再藏在 `...` 菜单里。
- *
- * 「带文字」是这道闸真正守的东西：两个动作都不是「刷新一下当前显示」——
- * 中转站那个会去远端重新发现分组，官网那个会把本地 sk 重写进六个平台的配置。
- * 换成裸刷新图标的话，用户无从知道点下去会发生什么（那正是它们当初被收进
- * 菜单的理由；现在改成外置 + 文字，两个诉求同时满足）。
- */
+/** 两类行都只保留用量区里的图标入口，并通过 tooltip 说明完整刷新范围。 */
 describe("行上的刷新动作", () => {
-  it("中转站行把「更新可用分组」直接摆出来", async () => {
+  it("中转站行只保留用量区的统一刷新入口", async () => {
     const user = userEvent.setup();
     const { onProvision } = renderRelayRow();
 
-    const refetch = screen.getByRole("button", { name: "更新可用分组" });
+    const refetch = screen.getByRole("button", {
+      name: "更新账号信息、额度、可用分组、倍率和接入配置",
+    });
     expect(refetch).toBeInTheDocument();
+    expect(screen.queryByText("更新可用分组")).not.toBeInTheDocument();
 
     await user.click(refetch);
     expect(onProvision).toHaveBeenCalledTimes(1);
   });
 
-  it("官网行把「重新应用密钥配置」直接摆出来", async () => {
+  it("官网行只保留用量区的统一刷新入口", async () => {
     const user = userEvent.setup();
     const { onProvision } = renderVendorRow();
 
     const reprovision = screen.getByRole("button", {
-      name: "重新应用密钥配置",
+      name: "更新账号信息、额度、密钥配置和当前状态",
     });
     expect(reprovision).toBeInTheDocument();
+    expect(screen.queryByText("重新应用密钥配置")).not.toBeInTheDocument();
 
     await user.click(reprovision);
     expect(onProvision).toHaveBeenCalledTimes(1);
+  });
+
+  it("当前档位所在的中转站复用浅蓝当前态外框", () => {
+    renderRelayRow(vi.fn(), {
+      tiers: [{ ...tier, isCurrent: true }],
+    });
+
+    const row = screen.getByText("Relay").closest(".rounded-xl");
+    expect(row).toHaveClass(
+      "border-blue-500/60",
+      "shadow-sm",
+      "shadow-blue-500/10",
+    );
   });
 
   /**
@@ -195,12 +223,12 @@ describe("行上的刷新动作", () => {
   it("登录过期但仍有档位时，显示档位数与重新登录，而不是「没有可用分组」", () => {
     renderRelayRow(vi.fn(), { loggedIn: false, sessionExpired: true });
 
-    // 这个文件的 `t` mock 不做插值，所以档位数那句拿到的是原样模板 ——
-    // 断言它出现即可证明走的是「有档位」那一支。
-    expect(screen.getByText("{{count}} 个接入配置")).toBeInTheDocument();
+    expect(screen.getByTitle("{{count}} 个接入配置")).toHaveTextContent("1");
     expect(screen.queryByText("没有可用分组")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "更新可用分组" }),
+      screen.queryByRole("button", {
+        name: "更新账号信息、额度、可用分组、倍率和接入配置",
+      }),
     ).not.toBeInTheDocument();
 
     const reLogin = screen.getByRole("button", { name: "重新登录" });

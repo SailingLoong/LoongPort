@@ -3059,6 +3059,7 @@
     "refresh": "重新整理"
   },
   "loongport": {
+    "refreshAll": "更新全部中轉站與官方 API 的帳號資訊、額度、群組倍率和連線設定檔",
     "sections": {
       "relay": "中轉站",
       "official": "官方 API",
@@ -3080,6 +3081,7 @@
       "noTiers": "此帳號在目前平台沒有可用群組",
       "getKeys": "建立連線設定檔",
       "tierCount": "{{count}} 個連線設定檔",
+      "refreshAll": "更新帳號資訊、額度、可用群組、倍率和連線設定檔",
       "dragHandle": "拖曳排序",
       "refetchGroups": "更新可用群組",
       "purchaseHint": "開啟中轉站儲值頁面",
@@ -3184,6 +3186,7 @@
       "importFailed": "新增中轉站失敗，請稍後重試。"
     },
     "vendor": {
+      "refreshAll": "更新帳號資訊、額度、金鑰設定和目前狀態",
       "add": "新增服務商帳號",
       "empty": "尚未新增服務商帳號",
       "remove": "刪除服務商帳號與連線設定檔",

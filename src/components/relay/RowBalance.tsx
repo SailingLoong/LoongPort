@@ -26,6 +26,12 @@ interface RowBalanceProps {
   onPurchase?: () => void;
   /** 充值窗正在开（那一下按钮转圈）。传了 `onPurchase` 才有意义。 */
   purchaseBusy?: boolean;
+  /** 行级远端同步。传入时与额度重查合并为同一个刷新入口。 */
+  onRefresh?: () => void | Promise<void>;
+  /** 行级统一刷新入口的完整语义。 */
+  refreshLabel?: string;
+  /** 行级远端同步正在执行。 */
+  refreshBusy?: boolean;
 }
 
 /**
@@ -60,6 +66,9 @@ export function RowBalance({
   enabled,
   onPurchase,
   purchaseBusy = false,
+  onRefresh,
+  refreshLabel,
+  refreshBusy = false,
 }: RowBalanceProps) {
   const { t } = useTranslation();
   const { usage, loading, lastQueriedAt, refetch } = useRowBalanceQuery(
@@ -83,14 +92,25 @@ export function RowBalance({
   //    （「不知道」不是「没钱」，见 `lowBalance.ts`）。
   const remaining = usage?.success ? usage.data?.[0]?.remaining : undefined;
   const low = onPurchase ? isLowBalance(remaining ?? null) : false;
+  const handleRefresh = async () => {
+    try {
+      await onRefresh?.();
+    } finally {
+      await refetch();
+    }
+  };
 
   return (
     <div className="flex shrink-0 items-center gap-1">
       <InlineUsage
         usage={usage}
-        loading={loading}
+        loading={loading || refreshBusy}
         lastQueriedAt={lastQueriedAt}
-        onRefresh={refetch}
+        onRefresh={handleRefresh}
+        refreshLabel={refreshLabel}
+        singleLine
+        // 预留「已用」展示位：LoongPort 当前没有权威数据源，后端具备能力后再打开。
+        showUsed={false}
       />
 
       {onPurchase && (

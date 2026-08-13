@@ -6,7 +6,6 @@ import {
   Pencil,
   PencilLine,
   Play,
-  RefreshCw,
   Trash2,
   Undo2,
 } from "lucide-react";
@@ -56,7 +55,7 @@ export interface VendorRowProps {
   isCurrent: boolean;
   onLogin: () => void;
   /** 备好密钥（也是「刷新」的实现 —— 本地已有明文时零请求）。 */
-  onProvision: () => void;
+  onProvision: () => void | Promise<void>;
   /** 切到这个账号的配置。 */
   onUse: () => void;
   onDelete: () => void;
@@ -197,6 +196,11 @@ export function VendorRow({
           rowKind="vendor"
           rowId={account.id}
           enabled={account.loggedIn || account.sessionExpired}
+          onRefresh={account.keyReady ? onProvision : undefined}
+          refreshBusy={busy.has(vendorBusyKey("provision", account.id))}
+          refreshLabel={
+            account.keyReady ? t("loongport.vendor.refreshAll") : undefined
+          }
         />
 
         {/* 状态动作（含「使用 / 在用」主按钮）。**放在动作组最前**，对齐
@@ -327,9 +331,8 @@ export function VendorRow({
  * `keyReady && sessionExpired` 的行**照样能用** —— 反过来判会把一个完全可用的
  * 账号显示成「请重新登录」，而用户重登一次什么也没变（sk 本来就没失效）。
  *
- * 那种行唯一真实的损失是**拉不到余额**（余额要网页登录态）。所以「重新登录」
- * 入口不消失、只降级成 hover 才出的小按钮，title 说清是为了什么 ——
- * 让想看余额的人有路可走，而不催所有人。
+ * 登录态过期后余额仍优先用 sk 查询；「重新登录」入口保留为 hover 次要动作，
+ * 供需要更新网页登录信息的用户使用，但不把一个仍可用的账号渲染成故障态。
  */
 function VendorStatus({
   account,
@@ -343,7 +346,7 @@ function VendorStatus({
   busy: ReadonlySet<string>;
   isCurrent: boolean;
   onLogin: () => void;
-  onProvision: () => void;
+  onProvision: () => void | Promise<void>;
   onUse: () => void;
 }) {
   const { t } = useTranslation();
@@ -417,25 +420,6 @@ function VendorStatus({
             </Button>
           )}
         </div>
-
-        {/* 「重新备一次密钥」只是把本地已有的 sk 重新写入六个平台配置，
-            不会去官网换新 key。所以按钮**必须带文字** —— 一个裸刷新图标会让用户
-            误以为它会去官网换一把新的。形状与中转站行那个「更新可用分组」一致。 */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1"
-          disabled={provisioning}
-          onClick={onProvision}
-        >
-          {provisioning ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="h-3.5 w-3.5" />
-          )}
-          {t("loongport.vendor.refreshKey")}
-        </Button>
       </div>
     );
   }

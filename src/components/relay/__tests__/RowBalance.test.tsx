@@ -48,7 +48,7 @@ function renderWithQuery(ui: ReactElement) {
 
 const wallet = (remaining: number): UsageResult => ({
   success: true,
-  data: [{ planName: "钱包余额", remaining, unit: "USD" }],
+  data: [{ planName: "钱包余额", remaining, used: 12.3, unit: "USD" }],
 });
 
 beforeEach(() => {
@@ -137,6 +137,22 @@ describe("RowBalance", () => {
     );
 
     expect(await screen.findByTitle("余额不足，去充值")).toBeInTheDocument();
+  });
+
+  it("LoongPort 用量区单行展示剩余额度、更新时间与刷新，不显示已用", async () => {
+    api.relayBalance.mockResolvedValue(wallet(87.7));
+
+    renderWithQuery(
+      <RowBalance rowKind="relay" rowId={1} enabled onRefresh={vi.fn()} />,
+    );
+
+    await screen.findByText("87.70");
+    expect(screen.getByText("剩余：")).toBeInTheDocument();
+    expect(screen.queryByText("已使用：")).not.toBeInTheDocument();
+    expect(screen.getByText("87.70").closest(".flex-row")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "刷新用量" }),
+    ).toBeInTheDocument();
   });
 
   it("从没登录过的行不查也不渲染", async () => {

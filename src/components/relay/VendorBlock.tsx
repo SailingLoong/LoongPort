@@ -59,7 +59,7 @@ export interface VendorListSlice {
   /** 登录 / 重新登录某个官网账号。 */
   onLogin: (rowId: number) => void;
   /** 备好某个官网账号的密钥（也是「刷新密钥」的实现）。 */
-  onProvision: (rowId: number) => void;
+  onProvision: (rowId: number) => void | Promise<void>;
   /** 切到某个官网账号的配置。 */
   onUse: (rowId: number) => void;
   onRemove: (rowId: number) => void;
