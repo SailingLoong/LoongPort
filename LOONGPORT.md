@@ -131,19 +131,22 @@ hdiutil create -volname LoongPort -srcfolder "$STAGE" -ov -format UDZO \
 rm -rf "$(dirname "$STAGE")"
 ```
 
-### 产物归档：mac 落 `~/下载`、windows 落 `D:\`，两边同一个约定
+### 产物归档：mac 落 `~/Downloads`、windows 落 `D:\`，两边同一个约定
 
 产物别留在 `src-tauri/target/release/bundle/`（构建中间目录，下次 build 会清掉），
 打完了**复制到固定位置**再试用 / 分发 —— 归档位置就是「装到哪、从哪试」：
 
 | 平台 | 归档目录 | 产物 |
 |---|---|---|
-| macOS | `~/下载` | `LoongPort.app`（整个 .app 目录） |
+| macOS | `~/Downloads` | `LoongPort.app`（整个 .app 目录） |
 | Windows | `D:\`（D 盘根） | `LoongPort_<ver>_x64-setup.exe` / Portable `.zip` |
 
+macOS 的 shell 路径必须使用真实目录名 `~/Downloads`。Finder 可能把它本地化显示成
+“下载”，但 `~/下载` 是另一个路径，不能拿显示名写命令。
+
 ```bash
-# mac：把 .app 复制到 ~/下载
-cp -R src-tauri/target/release/bundle/macos/LoongPort.app ~/下载/
+# mac：把 .app 复制到 ~/Downloads
+cp -R src-tauri/target/release/bundle/macos/LoongPort.app ~/Downloads/
 
 # windows（在 Windows 机器 / CI 上）：复制到 D 盘根
 # copy /Y src-tauri\target\release\bundle\nsis\LoongPort_*.exe D:\

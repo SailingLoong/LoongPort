@@ -269,8 +269,8 @@ dependabot 的，别照搬。PR 模板在 `.github/pull_request_template.md`。
 
 ### 打包与产物归档：唯一源在 LOONGPORT.md，这里只指路
 
-打包命令、DMG 坑、产物路径、归档约定（mac 落 `~/下载`、windows 落 `D:\`）
-**全部收在 [LOONGPORT.md](LOONGPORT.md) 的打包章节**，这里是**唯一一份**，
+打包命令、DMG 坑、产物路径、归档约定**全部收在
+[LOONGPORT.md](LOONGPORT.md) 的打包章节**，那里是**唯一一份**，
 别在 CLAUDE.md 里复制第二遍（见全局准则 §1.4）。要打包时去读那份。
 
 唯一属于 CLAUDE.md（维护视角）的是上面那条警告：**`cargo test` / `clippy` 全绿
