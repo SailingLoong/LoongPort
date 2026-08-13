@@ -54,8 +54,6 @@ export interface VendorListSlice {
    * 官网直连账号行。**只含官网行** —— 本区块不掺中转站行（拆块前是混列的）。
    */
   accounts: VendorAccountRow[];
-  /** 某个官网账号的配置是不是当前 tab 正在用的那个。 */
-  isCurrent: (rowId: number) => boolean;
   /** 登录 / 重新登录某个官网账号。 */
   onLogin: (rowId: number) => void;
   /** 备好某个官网账号的密钥（也是「刷新密钥」的实现）。 */
@@ -170,7 +168,6 @@ export function VendorBlock({ vendor, busy, onAddVendor }: VendorBlockProps) {
                   key={rowKey("vendor", v.id)}
                   account={v}
                   busy={busy}
-                  isCurrent={vendor.isCurrent(v.id)}
                   onLogin={() => vendor.onLogin(v.id)}
                   onProvision={() => vendor.onProvision(v.id)}
                   onUse={() => vendor.onUse(v.id)}

@@ -77,7 +77,7 @@ export function RowBalance({
     { enabled },
   );
 
-  // 从没登录过的行：既没 sk 也没登录态，摆一个永远失败的用量条只是噪音。
+  // 后端没有确认可查询凭据的行，不渲染一个必然失败的用量条。
   if (!enabled) return null;
 
   // 低余额判据两道门：

@@ -12,8 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * `importSite` 负责发现站点并在同一浏览器会话写入**凭据**，但它不碰分组。
  * 拉分组只有 `relay_provision` 这一条路（真打
  * `/groups/available` 再逐组建 sk）。少了它，宿主随后那次 refresh 读的是本地 DB，
- * 里头一个档位都没有 ⇒ 那一行落到 `loggedIn && tiers.length === 0` 分支，
- * 显示的正是那句「没有可用分组」。
+ * 里头一个档位都没有 ⇒ 后端会把这一行标为「没有可用分组」，显示的正是那句文案。
  *
  * 而那句话此刻是**不属实的**：账号在中转站那边有分组，只是本地还没去拉。
  *

@@ -35,8 +35,11 @@ function relay(models: string[]): RelayRowData {
     siteOrigin: "https://api.example.com",
     siteName: "Example",
     accountLabel: "user@example.com",
-    loggedIn: true,
-    sessionExpired: false,
+    status: "ready",
+    isCurrent: true,
+    canQueryBalance: true,
+    canRefresh: true,
+    canDelete: false,
     tiers: [tier(models)],
   };
 }

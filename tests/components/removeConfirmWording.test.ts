@@ -12,27 +12,26 @@ import { removeConfirmMessageKey } from "@/components/relay/removeConfirmWording
  * 于是用户删一个只探测过、从没登录的占位行时，被告知要删掉一个不存在的登录态、
  * 以及一笔他从没充过的余额。三句话里有两句不属实。
  *
- * ## 为什么判据是「登录过」而不是 `loggedIn`
+ * ## 为什么由后端状态决定
  *
- * `loggedIn`（`token_looks_valid`）只说「此刻凭据还能用」。凭据过期的行
- * `loggedIn === false` 而 `sessionExpired === true` —— 那一行**库里真有 token 与
- * account_id**，删它确实会删掉登录态。只判 `loggedIn` 会把它误归到「没登录」那句，
- * 于是反向说错一次。
+ * `loggedIn` 只说「此刻凭据还能用」，不是「这行是否曾经登录过」。凭据过期的行
+ * 仍可能有 token 与 account_id，删它确实会删掉登录态。这个事实由后端转换成
+ * `status`，前端只选择对应文案，避免各处重复组合布尔值。
  *
- * 两个字段的语义见 `creds.rs` 的 `token_looks_valid` / `session_expired`：
- * 后者的定义本身就含 `account_id.is_some()`，即「登录过」。
+ * 具体语义见后端 DTO 的 `RelayRowStatus`；`sessionExpired` 只是兼容已有展示字段，
+ * 不是删除文案的判据。
  */
 describe("删除确认框的文案分支", () => {
   it("从没登录过的行：不提登录态，也不提余额", () => {
-    expect(
-      removeConfirmMessageKey({ loggedIn: false, sessionExpired: false }),
-    ).toBe("loongport.row.removeConfirmMessageNeverLoggedIn");
+    expect(removeConfirmMessageKey({ status: "notLoggedIn" })).toBe(
+      "loongport.row.removeConfirmMessageNeverLoggedIn",
+    );
   });
 
   it("登录着的行：说清会删掉登录态", () => {
-    expect(
-      removeConfirmMessageKey({ loggedIn: true, sessionExpired: false }),
-    ).toBe("loongport.row.removeConfirmMessage");
+    expect(removeConfirmMessageKey({ status: "ready" })).toBe(
+      "loongport.row.removeConfirmMessage",
+    );
   });
 
   /**
@@ -40,8 +39,8 @@ describe("删除确认框的文案分支", () => {
    * 删它真的会删掉登录态。判据退化成 `!loggedIn` 时这条会红。
    */
   it("登录过但凭据已过期：仍然会删掉登录态，走同一句", () => {
-    expect(
-      removeConfirmMessageKey({ loggedIn: false, sessionExpired: true }),
-    ).toBe("loongport.row.removeConfirmMessage");
+    expect(removeConfirmMessageKey({ status: "sessionExpired" })).toBe(
+      "loongport.row.removeConfirmMessage",
+    );
   });
 });

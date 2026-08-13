@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   cancel: vi.fn(),
   onProgress: vi.fn(),
   list: vi.fn(),
+  openLogin: vi.fn(),
   vendorProvision: vi.fn(),
 }));
 const vendorSupport = vi.hoisted(() => ({ enabled: false }));
@@ -42,7 +43,12 @@ vi.mock("@/lib/api", () => ({
   PROVIDER_SWITCHED: "provider-switched",
 }));
 vi.mock("@/lib/api/vendor", () => ({
-  vendorApi: { list: api.list, provision: api.vendorProvision },
+  DEEPSEEK_VENDOR_ID: "deepseek",
+  vendorApi: {
+    list: api.list,
+    openLogin: api.openLogin,
+    provision: api.vendorProvision,
+  },
   vendorSupportsApp: () => vendorSupport.enabled,
 }));
 vi.mock("@/lib/api/modelVerification", () => ({
@@ -141,7 +147,13 @@ vi.mock("@/components/relay/AddSiteDialog", () => ({
 vi.mock("@/components/relay/ImageTabNotice", () => ({
   ImageTabNotice: () => null,
 }));
-vi.mock("@/components/relay/VendorBlock", () => ({ VendorBlock: () => null }));
+vi.mock("@/components/relay/VendorBlock", () => ({
+  VendorBlock: ({ onAddVendor }: any) => (
+    <button type="button" onClick={onAddVendor}>
+      add official account
+    </button>
+  ),
+}));
 vi.mock("@/components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
 vi.mock("../SwitchTierConfirmDialog", () => ({
   SwitchTierConfirmDialog: () => null,
@@ -186,8 +198,11 @@ const relay = {
   siteOrigin: "https://relay.example",
   siteName: "Relay",
   accountLabel: "account",
-  loggedIn: true,
-  sessionExpired: false,
+  status: "ready" as const,
+  isCurrent: false,
+  canQueryBalance: true,
+  canRefresh: true,
+  canDelete: true,
   tiers: [tier("provider-a")],
 };
 const report = (providerId: string, verdict: string, model = "gpt-5") => ({
@@ -222,6 +237,7 @@ describe("RelaySection model verification ownership", () => {
     });
     api.listSites.mockResolvedValue([{}]);
     api.list.mockResolvedValue([]);
+    api.openLogin.mockResolvedValue(9);
     api.vendorProvision.mockResolvedValue({
       providerId: "vendor-provider",
       keyCreated: false,
@@ -497,9 +513,10 @@ describe("RelaySection model verification ownership", () => {
         vendorId: "deepseek",
         vendorName: "DeepSeek",
         accountLabel: "account",
-        loggedIn: true,
-        sessionExpired: false,
-        keyReady: true,
+        status: "ready",
+        canQueryBalance: true,
+        canRefresh: true,
+        canEditConfig: true,
         providerId: "vendor-provider",
         isCurrent: false,
         userEdited: false,
@@ -524,5 +541,17 @@ describe("RelaySection model verification ownership", () => {
       queryKey: ["rowBalance"],
     });
     expect(screen.queryByText("loongport.refreshAll")).not.toBeInTheDocument();
+  });
+
+  it("provisions the exact account row returned by the login command", async () => {
+    vendorSupport.enabled = true;
+    api.openLogin.mockResolvedValue(42);
+    renderSection("codex");
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "add official account" }),
+    );
+
+    await waitFor(() => expect(api.vendorProvision).toHaveBeenCalledWith(42));
   });
 });
