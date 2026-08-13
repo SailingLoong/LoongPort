@@ -13,7 +13,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 「这一版干了啥」的**唯一源是 annotated tag 的 message 正文**（见仓 CLAUDE.md §五）。
+  # 这个 job 既是闸也是取值：读一次，下面 publish-release 直接用它的 output ——
+  # 不让「闸校验的」和「页面显示的」变成两份，那种分叉不报错、只会悄悄不一致
+  # （同 CLAUDE.md 三点六）。
+  #
+  # 放在 release **之前**是有意的：忘了写说明时几秒钟就红，而不是编完 40 分钟的包
+  # 才在最后一步发现（macOS 那格还是 10× 计费）。
+  tag-notes:
+    name: Read tag notes
+    runs-on: ubuntu-22.04
+    outputs:
+      notes: ${{ steps.read.outputs.notes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # 要读的是 annotated tag 对象本身，浅 clone 未必带得到它的 message。
+          # 本仓 .git 才 82M，全量 fetch 多几秒换一个确定的结果。
+          fetch-depth: 0
+
+      - name: Read tag annotation
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          # `%(contents:subject)` 是首行标题，`%(contents:body)` 是空行之后的正文。
+          # **只判正文**：历史上的 tag message 全是「LoongPort v3.23.2」这种一行标题，
+          # 那等于什么也没说，必须拦住 —— 否则 Release 页又退回「每版长得一模一样」。
+          # 轻量 tag（非 annotated）没有 message，contents 为空，同样落在这条判据里。
+          NOTES="$(git tag -l --format='%(contents:body)' "$TAG")"
+          if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
+            echo "❌ tag $TAG 只有标题、没有变更说明 —— 发版中止（还没开始编包）。" >&2
+            echo "   Release 页的「本次更新」就是取这段正文，缺了发出去等于没说明。" >&2
+            echo "" >&2
+            echo "   修复（删旧 tag 重打）：" >&2
+            echo "     git tag -d $TAG && git push origin :refs/tags/$TAG" >&2
+            echo "     git tag -a $TAG -F notes.md   # 首行标题，空一行，再写条目" >&2
+            echo "     git push origin $TAG" >&2
+            exit 1
+          fi
+          # 多行值走 heredoc 语法写进 GITHUB_OUTPUT。分隔符取一个正文里不可能出现的串。
+          {
+            echo "notes<<LOONGPORT_TAG_NOTES_EOF"
+            printf '%s\n' "$NOTES"
+            echo "LOONGPORT_TAG_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "✅ 读到本版变更说明："
+          printf '%s\n' "$NOTES"
+
   release:
+    needs: tag-notes
     runs-on: ${{ matrix.os }}
     environment: release
     strategy:
@@ -29,7 +80,7 @@ jobs:
           #   - os: ubuntu-22.04-arm
           #     arch: arm64
           #
-          # 不能「留着让它失败」—— publish-release 是 `needs: release` 且没有
+          # 不能「留着让它失败」—— publish-release 的 needs 里有 `release` 且没有
           # `if: always()`，任一 matrix 分支失败就会把它 skip 掉 ⇒ 连已经编好的
           # Windows / macOS 包也发不出去（fail-fast: false 只保证其它分支跑完，
           # 不改变汇总那步的 skip 行为）。
@@ -738,7 +789,9 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-22.04
-    needs: release
+    # 直接 needs `tag-notes` 是为了拿它的 output —— job output 只能从**直接** needs 取，
+    # 隔着 `release` 传不过来。
+    needs: [release, tag-notes]
     permissions:
       contents: write
     steps:
@@ -765,6 +818,11 @@ jobs:
           # GitHub 不把预发布算作 Latest ⇒ `releases/latest` 拿不到它，而 README 的
           # 下载指引正是让人去 Releases 页拿最新版。
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # GitHub 按两个 tag 之间的 PR 自动生成 "What's Changed" + Full Changelog 链接，
+          # 追加在下面 body 之后（`body` 是 pre-pend，不是覆盖）。本仓 main 只接受 PR
+          # 进入（见 CLAUDE.md §四），所以那份自动列表天然完整 —— 人写的 tag 说明负责
+          # 「这版为什么值得升」，自动列表负责「具体合了哪些 PR」，各管一段，不重复维护。
+          generate_release_notes: true
           # ⚠️ 下面的「下载」清单必须与 matrix 实际跑的平台一致 —— 列出不存在的文件名
           # 等于让用户照着下载然后 404。Linux 两条现在是注释状态，所以这里也没有 Linux；
           # 放回 matrix 时把那句「Linux 包暂未提供」换成 AppImage / .deb / .rpm 三件套说明。
@@ -779,6 +837,10 @@ jobs:
             🌐 **唯一官方网站 / Only Official Website**: [loongport.dev](https://loongport.dev)
 
             把一个中转站账号变成 codex 可用的多档位供应商
+
+            ### 本次更新
+
+            ${{ needs.tag-notes.outputs.notes }}
 
             ### 下载
 
