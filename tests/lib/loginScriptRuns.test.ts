@@ -41,10 +41,18 @@ const SCRIPT_DIR = resolve(REPO, "src-tauri/target");
  * 副本，那正是这条测试要避免的东西。
  */
 function ensureScripts(): void {
-  const both = ["with-promo", "no-promo"].map((n) =>
-    resolve(SCRIPT_DIR, `login-script-${n}.js`),
-  );
-  if (both.every(existsSync)) return;
+  const needed = [
+    ...["with-promo", "no-promo"].map((n) => `login-script-${n}.js`),
+    "api-fetch-script.js",
+    "api-fetch-script-post.js",
+  ].map((n) => resolve(SCRIPT_DIR, n));
+  if (needed.every(existsSync)) return;
+  // ⛔ **CI 上素材不在就直接放弃，不去试着编** —— 见 [`scriptsAvailable`] 那段
+  // 「49 秒」。这里必须在 `existsSync` 之后判：装了 Rust 的 CI（将来若有）
+  // 只要素材已经备好，照样能跑这条测试。
+  if (process.env.CI) {
+    throw new Error("CI 上不现编 Rust 素材（见 scriptsAvailable 的说明）");
+  }
   execFileSync(
     "cargo",
     [
@@ -75,13 +83,39 @@ function ensureScripts(): void {
  * （那些只装在 `Backend Checks` 里）⇒ 前端那个 job 里必然编不过。
  *
  * 2026-08-04 实测到的正是这个：`The system library glib-2.0 required by crate
- * glib-sys was not found` ⇒ 这条测试的 10 个用例在 CI 全红，而**本机一直是绿的**
- * —— 因为本机 `src-tauri/target/` 里躺着之前生成的素材，每次都走上面那个 `return`
+ * glib-sys was not found` ⇒ 这条测试的用例在 CI 全红，而**本机一直是绿的**
+ * —— 因为本机 `src-tauri/target/` 里躺着之前生成的素材，每次都走那个 `return`
  * 短路、从不真的调 cargo。典型的「本机有状态、CI 干净」。
  *
  * ⇒ 备不出素材时**显式 skip 并把原因打出来**，不静默也不误报成失败。
- * 真正跑它的是 CI 里 `Backend Checks` 那个 job（有 Rust 环境，见 ci.yml），
- * 以及维护者本机的六道闸。
+ *
+ * ## ⚠️ 2026-08-13：CI 上**连试都不试**，因为那一试会拖垮同批别的测试
+ *
+ * 原来的实现是「先试着编，编不过再 skip」。而那一试在 Frontend Checks 里
+ * **实测烧了 49 秒**（cargo 把依赖树编到撞上 glib 才失败），`execFileSync` 又是
+ * **同步**的 —— 整整 49 秒 CPU 被吃满，而 vitest 的其它 worker 正在并行跑。
+ *
+ * 后果是同批里最慢的两条集成用例（本机 0.5s / 1.2s）在 CI 上双双撞穿
+ * 5000ms 默认超时，且**一超时就连累后面**：组件没卸载，下一个用例的
+ * `getByText` 会撞到两个同名元素。实测时间线（PR #98 那次）：
+ *
+ * ```text
+ * 11:38:42  vitest 启动
+ * 11:39:13  SessionManagerPage 超时      ← 都落在 cargo 那 49 秒里
+ * 11:39:30  App integration 超时
+ * 11:39:31  cargo 失败，本文件 skip
+ * ```
+ *
+ * 而这 49 秒**换不来任何覆盖**：`ci.yml` 里只有 `Frontend Checks` 跑
+ * `pnpm test:unit`（第 64 行），`Backend Checks` 只跑 `cargo test`（第 124 行）
+ * **不跑 vitest** —— 所以这条测试在 CI 上本来就哪儿都没跑过。
+ * （本文件原先写着「真正跑它的是 Backend Checks」，那句话不属实，一并改掉。）
+ *
+ * ⇒ CI 上素材不在就直接 skip。**真正跑它的是维护者本机的六道闸**，
+ * 那里 `src-tauri/target/` 有素材、或者 cargo 本来就编得动。
+ *
+ * ⚠️ 判据用 `CI` 而不是「是不是 ubuntu」：将来给前端那个 job 装上 GTK 全套时，
+ * 素材只要备好了（`existsSync` 那道短路在前）这条测试照样会跑。
  */
 function scriptsAvailable(): boolean {
   try {
@@ -90,8 +124,8 @@ function scriptsAvailable(): boolean {
   } catch (e) {
     const why = e instanceof Error ? e.message.split("\n")[0] : String(e);
     console.warn(
-      `⚠️ 跳过「登录注入脚本能真的执行」——素材备不出来（需要能编 Rust）：${why}\n` +
-        `   这条测试由 CI 的 Backend Checks 与本机六道闸负责，见本文件顶部说明。`,
+      `⚠️ 跳过「登录注入脚本能真的执行」——素材不在（${why}）\n` +
+        `   这条测试由维护者本机的六道闸负责，见本文件 scriptsAvailable 的说明。`,
     );
     return false;
   }
@@ -332,5 +366,239 @@ describe.runIf(scriptsAvailable())("登录注入脚本能真的执行", () => {
     const parsed = JSON.parse(raw);
     expect(parsed.code).toBe("AFF12345678");
     expect(parsed.expiresAt).toBeGreaterThan(Date.now());
+  });
+});
+
+/**
+ * 「登录窗在页面上下文里代拉 API 请求」的脚本**真的跑一遍**（不是字符串断言）。
+ *
+ * 与上面登录脚本同一条理由：`api_fetch_script` 也是 Rust 生成的另一门语言代码，
+ * 字符串断言验不了「跑得起来、重试逻辑真的会回传」。这条专门守那段最险的分支：
+ * **403 HTML 只重试、API 自己的错误不重试** —— 写错一次的表现就是「请求多等
+ * 3 秒然后报超时」，纯看字符串看不出来。
+ *
+ * 定时器用「可手动推进的假时钟」而不是真睡：重试间隔 1s、兜底 5s，真跑会拖慢测试，
+ * 而且**真 setTimeout 会让 5s 兜底和 1s 重试并发抢跑**（假时钟下谁先谁后由测试说了算，
+ * 不会出现 flaky）。
+ */
+describe.runIf(scriptsAvailable())("浏览器代拉脚本能真的执行", () => {
+  const read = (name: string) =>
+    readFileSync(resolve(SCRIPT_DIR, name), "utf8");
+  const readGet = () => read("api-fetch-script.js");
+  const readPost = () => read("api-fetch-script-post.js");
+
+  /** 解出回传导航 URL 里的 {status, body, ct} 载荷（与 Rust 侧 decode 同构）。 */
+  function decodePayload(url: string): {
+    status: number;
+    body: string;
+    ct: string;
+  } {
+    const b64 = url
+      .slice(url.indexOf("?d=") + 3)
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+    return JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+  }
+
+  /**
+   * 极小的 stub 环境：fetch 可编程（按调用顺序出响应）、定时器进队列可手动推进。
+   *
+   * `origin` 与导出脚本里的 `ALLOWED_ORIGIN`（`https://bestapi.store`）一致，
+   * 否则 origin 守卫会让脚本直接早退、什么也验不到。
+   */
+  function runScript(
+    source: string,
+    responses: Array<
+      { status: number; ct: string; body: string } | { never: true }
+    >,
+  ) {
+    const navigations: string[] = [];
+    const fetchCalls: Array<{ url: string; method: string; body?: unknown }> =
+      [];
+    let now = 0;
+    const timers: Array<{ at: number; fire: () => void }> = [];
+
+    const sandbox = {
+      window: {} as Record<string, unknown>,
+      TextEncoder,
+      btoa: (s: string) => Buffer.from(s, "binary").toString("base64"),
+      setTimeout: (fn: () => void, ms: number) => {
+        timers.push({ at: now + ms, fire: fn });
+        return timers.length;
+      },
+      fetch: (url: string, init?: { method?: string; body?: string }) => {
+        const spec =
+          responses[Math.min(fetchCalls.length, responses.length - 1)];
+        fetchCalls.push({
+          url,
+          method: init?.method ?? "GET",
+          body: init?.body,
+        });
+        if ("never" in spec) return new Promise(() => {});
+        return Promise.resolve({
+          status: spec.status,
+          headers: { get: () => spec.ct },
+          text: () => Promise.resolve(spec.body),
+        });
+      },
+      console,
+    };
+    sandbox.window.top = sandbox.window;
+    sandbox.window.self = sandbox.window;
+    sandbox.window.location = {
+      origin: "https://bestapi.store",
+      get href() {
+        return "https://bestapi.store/login";
+      },
+      set href(v: string) {
+        navigations.push(v);
+      },
+    };
+
+    vm.runInNewContext(source, sandbox, { timeout: 5000 });
+
+    return {
+      navigations,
+      // **getter 而不是值快照**：`{ fetchCalls }` 字面量会在创建时把当时的数值拷贝进去，
+      // 之后闭包里再 ++ 也读不到（这次实测踩过：重试明明跑了 3 次，harness 一直显示 1）。
+      get fetchCount() {
+        return fetchCalls.length;
+      },
+      get fetchMethods() {
+        return fetchCalls.map((c) => c.method);
+      },
+      /** 代拉打的是哪个 URL —— 脚本里那个字面量必须是**完整 URL（含 query）**，
+          相对路径会在页面已跳转到别的路由时打错端点。 */
+      get fetchUrls() {
+        return fetchCalls.map((c) => c.url);
+      },
+      get fetchBodies() {
+        return fetchCalls.map((c) => c.body);
+      },
+      /** 把假时钟往前拨，触发到期的定时器（按到期顺序）。 */
+      advance(ms: number) {
+        now += ms;
+        const due = timers
+          .filter((t) => t.at <= now)
+          .sort((a, b) => a.at - b.at);
+        timers.splice(0, timers.length, ...timers.filter((t) => t.at > now));
+        for (const t of due) t.fire();
+      },
+    };
+  }
+
+  /** 让 promise 链跑完（fetch → text() → then），再做断言。 */
+  const flush = () => new Promise<void>((r) => setImmediate(r));
+
+  it("GET 200 一次回传，不重试", async () => {
+    const h = runScript(readGet(), [
+      {
+        status: 200,
+        ct: "application/json",
+        body: '{"code":0,"message":"success","data":{"id":7,"email":"a@b.c","username":"nicky"}}',
+      },
+    ]);
+    await flush();
+    expect(h.fetchCount, "200 不该重试").toBe(1);
+    expect(h.navigations).toHaveLength(1);
+    const payload = decodePayload(h.navigations[0]);
+    expect(payload.status).toBe(200);
+    const account = JSON.parse(payload.body);
+    expect(account.data.id).toBe(7);
+  });
+
+  it("403 HTML 重试到成功（最多 3 次），不被 5s 兜底抢跑", async () => {
+    const h = runScript(readGet(), [
+      {
+        status: 403,
+        ct: "text/html; charset=utf-8",
+        body: "<html>challenge</html>",
+      },
+      {
+        status: 403,
+        ct: "text/html; charset=utf-8",
+        body: "<html>challenge</html>",
+      },
+      {
+        status: 200,
+        ct: "application/json",
+        body: '{"code":0,"message":"success","data":{"id":9}}',
+      },
+    ]);
+    // 第一次 403：不能当场回传，要等重试。
+    await flush();
+    expect(h.navigations).toHaveLength(0);
+    // 第二次 403（t=1000）：还是不回传。
+    h.advance(1000);
+    await flush();
+    expect(h.navigations).toHaveLength(0);
+    // 第三次 200（t=2000）：回传成功，且 fetch 正好 3 次。
+    h.advance(1000);
+    await flush();
+    expect(h.fetchCount, "403 该重试到 3 次").toBe(3);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(200);
+    // 5s 兜底还躺着没触发 —— 重试成功时它不该再发第二条。
+    h.advance(3000);
+    await flush();
+    expect(h.navigations, "兜底不该覆盖已经成功的回传").toHaveLength(1);
+  });
+
+  it("403 连着重 3 次仍失败：把最后一次 403 原样回传", async () => {
+    const h = runScript(readGet(), [
+      { status: 403, ct: "text/html", body: "<html>1</html>" },
+      { status: 403, ct: "text/html", body: "<html>2</html>" },
+      { status: 403, ct: "text/html", body: "<html>3</html>" },
+    ]);
+    // 先让第一次 fetch 的 promise 链跑完（重试定时器是它排的，不等就拨时钟会扑空）。
+    await flush();
+    h.advance(1000);
+    await flush();
+    h.advance(1000);
+    await flush();
+    expect(h.fetchCount, "最多 3 次").toBe(3);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(403);
+  });
+
+  it("401（API 自己的错误）不重试，原样回传", async () => {
+    const h = runScript(readGet(), [
+      { status: 401, ct: "application/json", body: '{"code":401}' },
+    ]);
+    await flush();
+    expect(h.fetchCount, "401 不该重试").toBe(1);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(401);
+  });
+
+  it("页面 fetch 挂起：5 秒兜底回传超时（-3）", async () => {
+    const h = runScript(readGet(), [{ never: true }]);
+    await flush();
+    expect(h.navigations).toHaveLength(0);
+    h.advance(5000);
+    await flush();
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(-3);
+  });
+
+  it("POST 带 body 与幂等头，重试也保持同一份请求", async () => {
+    const h = runScript(readPost(), [
+      { status: 403, ct: "text/html", body: "<html>challenge</html>" },
+      {
+        status: 200,
+        ct: "application/json",
+        body: '{"code":0,"data":{"id":1}}',
+      },
+    ]);
+    await flush();
+    h.advance(1000);
+    await flush();
+    expect(h.fetchCount).toBe(2);
+    expect(h.fetchMethods).toEqual(["POST", "POST"]);
+    // 每次重试都带着同一份 body（建 Key 的 JSON + 幂等键都原样重放）。
+    expect(h.fetchBodies[0]).toContain("provision:test");
+    expect(h.fetchBodies[1]).toBe(h.fetchBodies[0]);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(200);
   });
 });

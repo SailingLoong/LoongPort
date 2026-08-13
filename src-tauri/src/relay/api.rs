@@ -39,6 +39,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::app_config::AppType;
 use crate::error::AppError;
@@ -518,7 +519,30 @@ pub struct Client {
     /// [`super::provision`] 里传：它是「这个连接的身份」，与 `token` 同级，
     /// 让每个构造点都必须表态是谁 —— 而 `provision` 不必多一个它不关心的参数。
     account_id: Option<i64>,
+
+    /// 站点对非浏览器 HTTP 栈上了 TLS 指纹级防护时的浏览器代拉钩子。
+    ///
+    /// `None` = 这个 client 没有浏览器可借（默认）。命令层在「登录窗可能还开着」
+    /// 的流程（登录、登录后自动备 key）里用 [`Self::with_browser_fallback`] 注入。
+    /// 钩子自己负责「窗口在不在」：窗口已关时返回可读错误，直连的 403 原样上抛。
+    browser_fallback: Option<BrowserApiFallback>,
 }
+
+/// 浏览器代拉钩子：收到**被直连拦下的那份请求**（method + URL + 头 + body 原样），
+/// 在登录窗页面上下文里重放并回传原始响应。
+///
+/// 由命令层实现（`commands/relay.rs`）：从仍开着的登录窗取窗口、注入
+/// [`crate::relay::browser_bridge::api_fetch_script`]、等回传。`Client` 只负责在
+/// 撞上防护层时把原请求递进去 —— 代拉必须与直连同一份请求，不重拼。
+pub type BrowserApiFallback = Arc<
+    dyn Fn(
+            reqwest::Request,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<crate::relay::browser_bridge::BridgeResponse, AppError>,
+        > + Send
+        + Sync,
+>;
 
 impl Client {
     /// 建一个**知道自己是谁**的客户端。
@@ -538,7 +562,17 @@ impl Client {
             site_origin: site_origin.into(),
             token: token.into(),
             account_id,
+            browser_fallback: None,
         })
+    }
+
+    /// 注入浏览器代拉钩子（见 [`BrowserApiFallback`]）。
+    ///
+    /// 命名用 `with_` 而不是改 [`Self::new`] 签名：绝大多数调用点没有浏览器
+    /// 可借（充值、模型验证等），不该为少数几个流程把新参数塞进每个构造点。
+    pub fn with_browser_fallback(mut self, fallback: BrowserApiFallback) -> Self {
+        self.browser_fallback = Some(fallback);
+        self
     }
 
     /// 这个客户端以谁的身份在说话。
@@ -588,33 +622,86 @@ impl Client {
     ///
     /// 拆出来是因为「`data` 为空算不算错」是**端点的语义**，而 HTTP 那一段
     /// （401 归类、非 2xx 的措辞）对所有端点都一样 —— 两份各写一遍迟早分叉。
+    ///
+    /// ## 浏览器代拉回退也在这一层
+    ///
+    /// 直连（reqwest）被防护层拦下（403 + 正文非 JSON）且装了钩子时，把**同一份请求**
+    /// 递给钩子、由登录窗在页面上下文重放（见 [`crate::relay::browser_bridge`]）。
+    ///
+    /// **放在共享的这一半而不是 [`Self::send`] 里**：`send_optional` 那些端点同样会被
+    /// 防护层拦，回退挂在其中一条上就等于另一条永远过不去 —— 这正是上一版的病
+    /// （回退只挂在「取账号」一个调用点上，于是登录成功后备 key 照样全挂）。
+    ///
+    /// 直连与代拉的响应走**同一套** [`Self::finish_response`]：401 分类、信封解析
+    /// 都只有一份，不会两路分叉。
     async fn send_envelope<T: for<'de> Deserialize<'de>>(
         &self,
         req: reqwest::RequestBuilder,
         what: &str,
     ) -> Result<Envelope<T>, AppError> {
-        let resp =
-            req.bearer_auth(&self.token).send().await.map_err(|e| {
-                AppError::Config(format!("{what}失败: {}", describe_send_error(&e)))
-            })?;
+        let req = req.bearer_auth(&self.token);
+        // 撞防护层后要把「同一份请求」搬到浏览器代拉 —— 先留一份底。reqwest 对可重用
+        // body（本模块的 JSON bytes）支持 try_clone；clone 不出来（流式 body，本模块
+        // 不会出现）时只是失去代拉机会，直连结果不受影响。
+        let probe = req.try_clone().and_then(|builder| builder.build().ok());
 
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Config(format!("{what}失败: {}", describe_send_error(&e))))?;
         let status = resp.status();
         let body = resp
             .text()
             .await
             .map_err(|e| AppError::Config(format!("{what}失败: 读响应出错 {e}")))?;
 
+        if !status.is_success() && is_bot_blocked(status, &body) {
+            if let (Some(fallback), Some(request)) = (&self.browser_fallback, probe) {
+                log::info!(
+                    "{}",
+                    crate::diagnostics::DiagnosticEvent::new("relay.browser_fetch", "fallback")
+                        .field_display("site", crate::url_for_log(&self.site_origin))
+                        .field("method", request.method().as_str())
+                        .field("path", request.url().path())
+                );
+                return match fallback(request).await {
+                    Ok(bridge) => {
+                        if bridge.status < 0 {
+                            // 页面内 fetch 的传输层错误（-1 网络 / -2 脚本 / -3 超时 /
+                            // -4 origin 离开）。body 里是脚本塞的可读原因，不拼成假状态码。
+                            return Err(AppError::Config(format!(
+                                "{what}失败: 浏览器代拉失败: {}",
+                                first_line(&bridge.body)
+                            )));
+                        }
+                        let status = reqwest::StatusCode::from_u16(bridge.status as u16)
+                            .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+                        Self::finish_response::<T>(status, &bridge.body, what)
+                    }
+                    Err(fallback_error) => Err(fallback_error),
+                };
+            }
+        }
+        Self::finish_response::<T>(status, &body, what)
+    }
+
+    /// 把一次响应的状态 + 正文解成信封（直连与浏览器代拉共用）。
+    fn finish_response<T: for<'de> Deserialize<'de>>(
+        status: reqwest::StatusCode,
+        body: &str,
+        what: &str,
+    ) -> Result<Envelope<T>, AppError> {
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(classify_401(&body, what));
+            return Err(classify_401(body, what));
         }
         if !status.is_success() {
             return Err(AppError::Config(format!(
                 "{what}失败: HTTP {} {}",
                 status.as_u16(),
-                first_line(&body)
+                first_line(body)
             )));
         }
-        serde_json::from_str(&body)
+        serde_json::from_str(body)
             .map_err(|e| AppError::Config(format!("{what}失败: 响应解析出错 {e}")))
     }
 
@@ -1070,6 +1157,18 @@ fn first_line(body: &str) -> String {
         .collect()
 }
 
+/// 判断一次失败是不是「站点把非浏览器 HTTP 栈拦在门外」。
+///
+/// 判据：HTTP 403 + 响应正文不是 JSON。sub2api 的业务/鉴权失败回的是 JSON 信封
+/// （`{code, message}`，403 权限类也一样），正文是 HTML（`Just a moment...` /
+/// `Attention Required!`）说明响应根本不是 API 发的，而是防护层拦的 ——
+/// 加头、加 cookie、换 HTTP 版本都过不了，只能走浏览器代拉。
+fn is_bot_blocked(status: reqwest::StatusCode, body: &str) -> bool {
+    status.as_u16() == 403
+        && !body.trim_start().starts_with('{')
+        && !body.trim_start().starts_with('[')
+}
+
 /// `Idempotency-Key` 的取值：`account_id + name` 的 SHA-256 十六进制。
 ///
 /// 服务端要求 ≤128 字节且全 ASCII，64 个 hex 字符正好在范围内。
@@ -1208,6 +1307,7 @@ pub(crate) fn build_client() -> Result<reqwest::Client, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     /// 有无放行 cookie 都要能建出客户端；无值时**不发空 Cookie 头**。
     #[test]
@@ -1594,6 +1694,54 @@ mod tests {
         assert_eq!(settings.payment_enabled, Some(false));
     }
 
+    /// 与 [`Client::send`] 走**同一条**路（解信封 + 取 `data`），只是不发网络。
+    ///
+    /// 测试直接调 `finish_response` 只验到一半 —— 它现在回的是 `Envelope<T>`，
+    /// 「`code != 0` 该报错」那半在 `into_data` 里。两步都走才等价于生产路径。
+    fn parse_like_send<T: for<'de> Deserialize<'de>>(
+        body: &str,
+        what: &str,
+    ) -> Result<T, AppError> {
+        Client::finish_response::<T>(reqwest::StatusCode::OK, body, what)?.into_data(what)
+    }
+
+    #[test]
+    fn account_profile_envelope_parses_through_finish_response() {
+        let body =
+            r#"{"code":0,"message":"success","data":{"id":7,"email":"a@b.c","username":"nicky"}}"#;
+        let account: Account = parse_like_send(body, "获取账号信息").expect("完整档案要能解出");
+        assert_eq!(account.id, 7);
+        assert_eq!(account.email, "a@b.c");
+        assert_eq!(account.username, "nicky");
+
+        // username / email 缺失是服务端已知降级态（`#[serde(default)]`），不该解失败。
+        let bare: Account = parse_like_send(
+            r#"{"code":0,"message":"success","data":{"id":9}}"#,
+            "获取账号信息",
+        )
+        .expect("只有 id 也要能解出");
+        assert_eq!(bare.id, 9);
+        assert!(bare.email.is_empty());
+    }
+
+    #[test]
+    fn account_profile_rejects_browser_block_html() {
+        let err: Result<Account, AppError> = parse_like_send(
+            "<html><title>Just a moment...</title></html>",
+            "获取账号信息",
+        );
+        let err = err.expect_err("Cloudflare 拦页不是档案响应");
+        assert!(err.to_string().contains("获取账号信息失败"), "{err}");
+    }
+
+    #[test]
+    fn account_profile_rejects_business_error_envelope() {
+        let err: Result<Account, AppError> =
+            parse_like_send(r#"{"code":1,"message":"no","data":null}"#, "获取账号信息");
+        let err = err.expect_err("业务失败不该产出账号");
+        assert!(err.to_string().contains("获取账号信息失败"), "{err}");
+    }
+
     #[test]
     fn sub2api_public_settings_parser_accepts_a_strict_protocol_match() {
         let body = r#"{"code":0,"message":"success","data":{
@@ -1762,6 +1910,152 @@ mod tests {
         let expired = classify_401(r#"{"code":"TOKEN_EXPIRED"}"#, "测试").to_string();
         assert!(expired.contains("已过期"), "{expired}");
         assert!(!expired.contains("已失效"), "{expired}");
+    }
+
+    #[test]
+    fn bot_block_detector_recognizes_cloudflare_html_403() {
+        // 真实现场（api.aijws.com）：Cloudflare 拦非浏览器 HTTP 栈成 403 HTML。
+        assert!(is_bot_blocked(
+            reqwest::StatusCode::FORBIDDEN,
+            "<!DOCTYPE html><html>Just a moment...</html>"
+        ));
+
+        // 正文是 JSON 信封 = API 在说话（业务 / 权限 403），不是防护层拦的。
+        assert!(!is_bot_blocked(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"code":"FORBIDDEN","message":"no"}"#
+        ));
+
+        // 其它状态码（401 未授权、429 限流）不算防护拦截。
+        assert!(!is_bot_blocked(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "<html>challenge</html>"
+        ));
+        assert!(!is_bot_blocked(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "rate limited"
+        ));
+    }
+
+    /// 起一台**只会拦人**的站：任何请求都回 403 + HTML（Cloudflare 那副样子）。
+    async fn spawn_bot_blocking_site() -> String {
+        let app = axum::Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::FORBIDDEN,
+                [(axum::http::header::CONTENT_TYPE, "text/html")],
+                "<!DOCTYPE html><html>Just a moment...</html>",
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blocking server");
+        let origin = format!("http://{}", listener.local_addr().expect("server addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve 403");
+        });
+        origin
+    }
+
+    /// 造一个「浏览器代拉」钩子：记下收到的请求，回一份指定响应。
+    fn recording_fallback(
+        response: crate::relay::browser_bridge::BridgeResponse,
+    ) -> (BrowserApiFallback, Arc<Mutex<Vec<reqwest::Request>>>) {
+        let seen: Arc<Mutex<Vec<reqwest::Request>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let fallback: BrowserApiFallback = Arc::new(move |request: reqwest::Request| {
+            sink.lock().expect("记录锁").push(
+                request
+                    .try_clone()
+                    .expect("测试里的请求都是可克隆 body（JSON / 无 body）"),
+            );
+            let response = response.clone();
+            Box::pin(async move { Ok(response) })
+        });
+        (fallback, seen)
+    }
+
+    fn bridge_response(status: i64, body: &str) -> crate::relay::browser_bridge::BridgeResponse {
+        crate::relay::browser_bridge::BridgeResponse {
+            status,
+            content_type: "application/json".to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    /// ⭐⭐ **这条钉的是「桥真的接上了」这件事本身。**
+    ///
+    /// [`is_bot_blocked`]、`browser_bridge` 的往返、脚本生成三者各有自己的闸，但那三个
+    /// 全绿也不能说明 [`Client::send`] **会去调**钩子 —— 那句 `if !status.is_success()
+    /// && is_bot_blocked(..)` 一旦被改错（比如挪到 `is_success()` 分支里、或钩子没被
+    /// 注入），症状是「防护站又回到 403 报错」，而所有既有测试照样绿。
+    ///
+    /// 顺带钉住两件同样静默的事：
+    /// - 递给钩子的是**同一份请求**（含 `Authorization`）——代拉必须与直连同源同头，
+    ///   否则站点会把它当匿名请求
+    /// - 代拉回来的正文走**同一套** [`Client::finish_response`]（信封解析）
+    #[tokio::test]
+    async fn blocked_request_is_replayed_through_the_browser_and_parsed_once() {
+        let origin = spawn_bot_blocking_site().await;
+        let (fallback, seen) = recording_fallback(bridge_response(
+            200,
+            r#"{"code":0,"message":"success","data":{"id":42,"username":"Bridged","email":"a@b.c"}}"#,
+        ));
+
+        let account = Client::new(&origin, "tok-secret", None, None, None)
+            .expect("build client")
+            .with_browser_fallback(fallback)
+            .account()
+            .await
+            .expect("代拉回来的档案要能解出");
+
+        assert_eq!(account.id, 42);
+        assert_eq!(account.username, "Bridged");
+
+        let seen = seen.lock().expect("记录锁");
+        assert_eq!(seen.len(), 1, "被拦下的请求要且只要代拉一次");
+        assert_eq!(
+            seen[0].headers().get(reqwest::header::AUTHORIZATION),
+            Some(&reqwest::header::HeaderValue::from_static(
+                "Bearer tok-secret"
+            )),
+            "代拉的必须是同一份请求（带 Authorization），不是重拼的裸请求"
+        );
+        assert!(seen[0].url().path().ends_with("/user/profile"));
+    }
+
+    /// 没装钩子的 client（充值、模型验证等绝大多数调用点）行为不变：403 原样上抛。
+    #[tokio::test]
+    async fn blocked_request_without_a_browser_still_fails_directly() {
+        let origin = spawn_bot_blocking_site().await;
+        let error = Client::new(&origin, "tok", None, None, None)
+            .expect("build client")
+            .account()
+            .await
+            .expect_err("没有浏览器可借时该失败");
+        assert!(error.to_string().contains("403"), "{error}");
+    }
+
+    /// 页面内 fetch 的传输层错误用**负数**状态回传（-1 网络 / -2 脚本 / -3 超时 /
+    /// -4 origin 离开）。它们不能被 `as u16` 拼成一个假状态码（-1 会变成 65535，
+    /// 再被 `from_u16` 拒掉后回落成 500 —— 用户看到「服务器错误」而真相是「窗口关了」）。
+    #[tokio::test]
+    async fn negative_bridge_status_surfaces_the_reason_not_a_fake_http_code() {
+        let origin = spawn_bot_blocking_site().await;
+        let (fallback, _seen) = recording_fallback(bridge_response(-3, "浏览器代拉请求超时"));
+
+        let error = Client::new(&origin, "tok", None, None, None)
+            .expect("build client")
+            .with_browser_fallback(fallback)
+            .account()
+            .await
+            .expect_err("传输层失败要报错");
+
+        let message = error.to_string();
+        assert!(message.contains("浏览器代拉请求超时"), "{message}");
+        assert!(
+            !message.contains("500") && !message.contains("65535"),
+            "不能把负数状态拼成假 HTTP 码: {message}"
+        );
     }
 
     #[test]

@@ -39,14 +39,24 @@ $EDITOR public/v1/config.json     # 1. 改内容
 curl -sS -m 12 -o /dev/null -w "%{http_code}\n" https://<域名>/api/v1/settings/public
 ```
 
-**200 才收录**。403 说明被防护拦了 —— 那不是「不是 sub2api」，也不是我们能绕的：
-客户端已经带了浏览器 UA（`api.rs` 里的 `WEBVIEW_USER_AGENT`），实测再加
-`Accept` / `Accept-Language` / `Referer` / `Origin` 仍是 403 ⇒ 拦在 **TLS 指纹层**
-（JA3），改 HTTP 头解决不了。
+**200 才收录**（推荐列表的判据不变）。403 说明被防护拦了 —— 那不是「不是 sub2api」，
+也**不是加头加 cookie 能绕的**：客户端已经带了浏览器 UA（`api.rs` 里的
+`WEBVIEW_USER_AGENT`），实测再加 `Accept` / `Accept-Language` / `Referer` / `Origin`
+仍是 403 ⇒ 拦在 **TLS 指纹层**（JA3），非浏览器 HTTP 栈（curl / reqwest）一律被拦。
 
 2026-08-10 实测：`wawapii.com` / `hapiopen.cc` / `999555999.com` 都 200，
 **`api.aijws.com`（贾维斯）403** ⇒ 已从 `sponsors` 移除。
 但它的 **aff 码留在 `aff_codes` 里** —— 用户自己手动加那个站时返利仍该算我们的。
+
+⚠️ **403 不拦用户手动加站**：这类站的登录在真实浏览器（登录窗）里完成，天然过防护。
+2026-08-13 起，reqwest 被 403 拦下的请求会走「登录窗在页面上下文代拉」的浏览器桥
+（`relay/browser_bridge.rs` + `Client::send` 的 fallback）：登录、登录后自动备 key
+（分组 / 密钥 / 建 key）都在登录窗还开着时借同一扇窗重放请求，
+`api.aijws.com` 这类站可以正常登录、显示账号名、自动备好密钥。
+
+**仍受限**：登录窗已关后的 reqwest 操作（如重启 app 后各行的**余额展示**）——
+窗口不在就没有浏览器可借，会回到原来的 403 报错（余额失败是静默的，不打断主流程）。
+用户重新登录后，该行的备 key 与后续操作又能走通。
 
 ## 事实表
 

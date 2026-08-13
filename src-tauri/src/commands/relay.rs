@@ -42,8 +42,8 @@ use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::{Provider, UsageResult};
 use crate::relay::{
-    api, backend, balance, chatgpt_app, creds, discovery, imagegen_mcp, login, newapi,
-    newapi_provision, provider_fingerprint, provision, purchase,
+    api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
+    newapi, newapi_provision, provider_fingerprint, provision, purchase,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -997,6 +997,15 @@ async fn browser_import(
             return false;
         }
 
+        // 浏览器代拉 API 请求的回传（`loongport-creds://api-<id>`）。
+        if app_for_nav
+            .state::<AppState>()
+            .browser_bridge
+            .handle_navigation(url)
+        {
+            return false;
+        }
+
         match login::parse_creds_navigation(url) {
             None => true,
             Some(Ok(credentials)) => {
@@ -1110,11 +1119,16 @@ async fn browser_import(
                 .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
                 .clone()
                 .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
+            let account = resolve_login_account_identity(app_handle, &site_origin, &credentials)
+                .await
+                .map_err(|e| {
+                    AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。"))
+                })?;
             let (final_relay_id, account_id) = persist_login_credentials(
                 app_handle,
                 browser_context.probe.relay_id,
-                &site_origin,
                 credentials,
+                account,
             )
             .await?;
             let login = LoginResult {
@@ -1362,6 +1376,14 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         } else if backend_kind_for_nav != discovery::BackendKind::Sub2Api {
             return true;
         }
+        // 浏览器代拉 API 请求的回传（`loongport-creds://api-<id>`）。
+        if handle_for_nav
+            .state::<AppState>()
+            .browser_bridge
+            .handle_navigation(url)
+        {
+            return false;
+        }
         match login::parse_creds_navigation(url) {
             // 普通导航，放行。
             None => true,
@@ -1461,8 +1483,13 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
 
     match outcome {
         Ok(BrowserLoginOutcome::Sub2ApiCredentials(c)) => {
+            let account = resolve_login_account_identity(app_handle, &site_origin, &c)
+                .await
+                .map_err(|e| {
+                    AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。"))
+                })?;
             let (final_relay_id, account_id) =
-                persist_login_credentials(app_handle, relay_id, &site_origin, c).await?;
+                persist_login_credentials(app_handle, relay_id, c, account).await?;
 
             // **不关窗**，把标题改成「已连接」并在页面上浮一条提示。
             //
@@ -1537,24 +1564,88 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     }
 }
 
-async fn persist_login_credentials(
+/// 登录成功后取账号身份（去重键 + 展示名 + 登录标识的来源）。
+///
+/// 先走 reqwest fast path —— 绝大多数站这么拿就好。当站点启用了 Cloudflare 这类
+/// **指纹级**防护（reqwest 这种非浏览器 HTTP 栈必撞 403 HTML，README 里 `api.aijws.com`
+/// 就是实例），[`api::Client::send`] 内部会走浏览器代拉钩子：由仍开着的登录窗在
+/// **页面上下文**里同源重放同一份请求。登录窗本身就是真实浏览器，是唯一能过这种
+/// 防护的通道。判据是「HTTP 403 + 正文不是 JSON」—— sub2api 的 API 出错
+/// （403 权限类）回的是 JSON 信封，正文非 JSON 说明根本不是 API 在说话。
+async fn resolve_login_account_identity(
     app_handle: &tauri::AppHandle,
-    relay_id: i64,
     site_origin: &str,
-    credentials: login::Credentials,
-) -> Result<(i64, i64), AppError> {
-    // 先拉一次 profile 拿账号身份 —— 去重键是「域名 + 账号」，而账号只有登录后才知道。
-    // `account_id` 传 `None`：这次只读请求的目的就是取得它，不需要幂等键。
-    let account = api::Client::new(
+    credentials: &login::Credentials,
+) -> Result<api::Account, AppError> {
+    api::Client::new(
         site_origin,
         &credentials.auth_token,
         None,
         credentials.user_agent.as_deref(),
         credentials.cf_clearance.as_deref(),
     )?
+    .with_browser_fallback(browser_api_fallback(app_handle))
     .account()
     .await
-    .map_err(|e| AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。")))?;
+}
+
+/// 构造浏览器代拉钩子：被防护层拦下的请求由登录窗在页面上下文里原样重放。
+///
+/// [`api::Client::send`] 撞上「403 + 正文非 JSON」时调用（见那边的说明），把**同一份
+/// 请求**递进来。这里取当前登录窗（`loongport-login`，登录成功后**故意不关**）、把请求
+/// 注入页面 fetch，经 `loongport-creds://api-<id>` 回传（[`browser_bridge`] 按 id 认领）。
+/// 窗口不在（用户已关）时返回可读错误 —— 这类站只能靠真实浏览器过防护。
+fn browser_api_fallback(app_handle: &tauri::AppHandle) -> api::BrowserApiFallback {
+    let handle = app_handle.clone();
+    Arc::new(move |request: reqwest::Request| {
+        let handle = handle.clone();
+        Box::pin(async move {
+            let bridge = handle.state::<AppState>().browser_bridge.clone();
+            let Some(window) = handle.get_webview_window(login::LOGIN_WINDOW_LABEL) else {
+                return Err(AppError::Config(
+                    "站点开启了浏览器指纹级防护，直连请求被拦，且登录窗口已关闭——请重新登录后重试"
+                        .into(),
+                ));
+            };
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let req_id = bridge.register(tx);
+            let script = browser_bridge::api_fetch_script(&request, &req_id);
+            if let Err(error) = window.eval(&script) {
+                bridge.forget(&req_id);
+                return Err(AppError::Config(format!(
+                    "浏览器代拉脚本注入失败（登录窗口不可用）: {error}"
+                )));
+            }
+
+            // 给页面上的 fetch + 回传留出时间。窗口可能在凭据到手后被用户关掉，那时
+            // 回传永远不来 —— 靠超时收场而不是干等，把「关窗」与「回传真的到了」分开。
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(browser_bridge::FETCH_TIMEOUT_SECS),
+                rx,
+            )
+            .await
+            {
+                Ok(Ok(Ok(response))) => Ok(response),
+                Ok(Ok(Err(message))) => Err(AppError::Config(format!("浏览器代拉失败: {message}"))),
+                Ok(Err(_)) => Err(AppError::Config("浏览器代拉回传通道已关闭".into())),
+                Err(_) => Err(AppError::Config(format!(
+                    "浏览器代拉等待回传超时（{} 秒）",
+                    browser_bridge::FETCH_TIMEOUT_SECS
+                ))),
+            }
+        })
+    })
+}
+
+async fn persist_login_credentials(
+    app_handle: &tauri::AppHandle,
+    relay_id: i64,
+    credentials: login::Credentials,
+    account: api::Account,
+) -> Result<(i64, i64), AppError> {
+    // 账号身份由调用方先取好（`resolve_login_account_identity`）：去重键是
+    // 「域名 + 账号」，而账号只有登录后才知道；取不到账号 = 登录不能算成功。
     let account_id = account.id;
 
     let state = app_handle.state::<AppState>();
@@ -1966,16 +2057,24 @@ fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static s
     }
 }
 
-async fn provision_backend(op: &creds::Relay) -> Result<ManagedProvisionBatch, AppError> {
+async fn provision_backend(
+    op: &creds::Relay,
+    browser_fallback: Option<api::BrowserApiFallback>,
+) -> Result<ManagedProvisionBatch, AppError> {
     match op.backend_kind {
         discovery::BackendKind::Sub2Api => {
-            let client = api::Client::new(
+            let mut client = api::Client::new(
                 &op.site_origin,
                 &op.auth_token,
                 op.account_id,
                 op.user_agent.as_deref(),
                 op.cf_clearance.as_deref(),
             )?;
+            // 登录后自动备 key 时登录窗还开着：站点被指纹级防护拦下（403 HTML）时，
+            // 由登录窗代拉（见 `browser_api_fallback`）。测试等无 UI 上下文传 `None`。
+            if let Some(fallback) = browser_fallback {
+                client = client.with_browser_fallback(fallback);
+            }
             let mut result = provision::provision(&client).await?;
             provision::sort_tiers(&mut result.tiers);
             let keys_created = result
@@ -2095,7 +2194,7 @@ async fn do_provision(
     relay_id: i64,
 ) -> Result<ProvisionSummary, AppError> {
     let op = usable_relay(app_handle, relay_id).await?;
-    let batch = provision_backend(&op).await?;
+    let batch = provision_backend(&op, Some(browser_api_fallback(app_handle))).await?;
     let state = app_handle.state::<AppState>();
     persist_provision_batch(state.inner(), &op, batch)
 }
@@ -4966,7 +5065,7 @@ mod tests {
             ..test_newapi_relay(7)
         };
 
-        let error = match provision_backend(&op).await {
+        let error = match provision_backend(&op, None).await {
             Ok(_) => panic!("persisted account mismatch must stop provisioning"),
             Err(error) => error,
         };

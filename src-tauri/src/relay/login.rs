@@ -42,7 +42,10 @@ pub const LOGIN_WINDOW_LABEL: &str = "loongport-login";
 ///
 /// 选一个绝不会被真实网站用到的值：注入脚本只在中转站 origin 下跑，但万一页面自己跳到某个
 /// 我们认得的 scheme，就会被误当成凭据回传。
-const CREDS_SCHEME: &str = "loongport-creds";
+pub(crate) const CREDS_SCHEME: &str = "loongport-creds";
+
+/// 凭据回传的 host 标记（与浏览器代拉共用 `loongport-creds` scheme，用 host 区分）。
+pub(crate) const CREDS_CALLBACK_HOST: &str = "ok";
 
 /// sub2api 存 access token 的 localStorage 键名。
 ///
@@ -295,7 +298,7 @@ pub fn login_script(
     //
     // 顶层导航则不受这条 CSP 管（它没有 `navigate-to` 指令），而且 `on_navigation` 返回
     // false 会**拦下**这次导航 —— 页面不会真的走掉，用户看到的内容原样留着。
-    window.location.href = '{CREDS_SCHEME}://ok?d=' + b64url(payload);
+    window.location.href = '{CREDS_SCHEME}://{CREDS_CALLBACK_HOST}?d=' + b64url(payload);
   }}
 
   // 劫持 setItem：登录成功的那一刻四个键会陆续写进来。
@@ -724,7 +727,7 @@ pub fn extract_cf_clearance(cookies: &[tauri::webview::Cookie<'_>]) -> Option<St
 ///
 /// 返回 `None` 表示这是普通导航（放行）；返回 `Some` 表示这是回传（调用方应拦下）。
 pub fn parse_creds_navigation(url: &url::Url) -> Option<Result<Credentials, AppError>> {
-    if url.scheme() != CREDS_SCHEME {
+    if url.scheme() != CREDS_SCHEME || url.host_str() != Some(CREDS_CALLBACK_HOST) {
         return None;
     }
     Some(decode_creds(url))
@@ -770,7 +773,7 @@ fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
     })
 }
 
-fn decode_b64url(s: &str) -> Option<String> {
+pub(crate) fn decode_b64url(s: &str) -> Option<String> {
     // 手写而不引 base64 crate：只用在这一处，且输入是我们自己的脚本产生的。
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut lookup = [255u8; 256];
@@ -830,7 +833,7 @@ mod tests {
         login_script(site_origin, login_identifier, aff_code, None)
     }
 
-    fn creds_url(payload: &str) -> url::Url {
+    fn callback_url(host: &str, payload: &str) -> url::Url {
         let mut bin = String::new();
         // 复用生产解码器的逆运算，避免测试自带一份可能与生产不一致的编码实现。
         const TABLE: &[u8; 64] =
@@ -849,7 +852,11 @@ mod tests {
                 bin.push(TABLE[i as usize] as char);
             }
         }
-        url::Url::parse(&format!("{CREDS_SCHEME}://ok?d={bin}")).unwrap()
+        url::Url::parse(&format!("{CREDS_SCHEME}://{host}?d={bin}")).unwrap()
+    }
+
+    fn creds_url(payload: &str) -> url::Url {
+        callback_url(CREDS_CALLBACK_HOST, payload)
     }
 
     #[test]
@@ -1534,4 +1541,23 @@ fn export_login_scripts() {
         );
         std::fs::write(dir.join(format!("login-script-{name}.js")), s).expect("写脚本");
     }
+    // 浏览器代拉 API 请求的脚本同样要执行验证（`loginScriptRuns.test.ts`）。
+    let request = reqwest::Client::new()
+        .get("https://bestapi.store/api/v1/user/profile?x=1")
+        .bearer_auth("tok-secret")
+        .build()
+        .expect("构建请求");
+    let api = crate::relay::browser_bridge::api_fetch_script(&request, "api-0");
+    std::fs::write(dir.join("api-fetch-script.js"), api).expect("写脚本");
+
+    // POST 分支（带 body + 幂等头）同样要执行验证 —— 那行 `init.body = ...` 是
+    // 按请求条件生成的字面量，GET 脚本里不存在，不另导出就永远验不到。
+    let create = reqwest::Client::new()
+        .post("https://bestapi.store/api/v1/keys")
+        .json(&serde_json::json!({ "name": "provision:test", "group_id": 3 }))
+        .header("Idempotency-Key", "idem-1")
+        .build()
+        .expect("构建请求");
+    let api_post = crate::relay::browser_bridge::api_fetch_script(&create, "api-1");
+    std::fs::write(dir.join("api-fetch-script-post.js"), api_post).expect("写脚本");
 }
