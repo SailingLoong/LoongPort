@@ -1,10 +1,15 @@
-import { Suspense, type ComponentType } from "react";
+import { Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
+// 在收集阶段完成模块加载：若把 import 留在用例体内，超时后它仍可能续跑并越过 cleanup 再挂载 App。
+import App from "@/App";
 import { providersApi } from "@/lib/api/providers";
-import { LAST_APP_STORAGE_KEY } from "@/config/constants";
+import {
+  LAST_APP_STORAGE_KEY,
+  LAST_VIEW_STORAGE_KEY,
+} from "@/config/constants";
 import {
   resetProviderState,
   setCurrentProviderId,
@@ -151,12 +156,12 @@ vi.mock("@/components/mcp/McpPanel", () => ({
     ),
 }));
 
-const renderApp = (AppComponent: ComponentType) => {
+const renderApp = () => {
   const client = new QueryClient();
   return render(
     <QueryClientProvider client={client}>
       <Suspense fallback={<div data-testid="loading">loading</div>}>
-        <AppComponent />
+        <App />
       </Suspense>
     </QueryClientProvider>,
   );
@@ -171,9 +176,24 @@ describe("App integration with MSW", () => {
     // （`loongport`）。把「上次看的是 provider 列表」写进 localStorage —— 这既让这些用例
     // 拿到它们要测的那一屏，也顺带覆盖了「记住上次视图」这个行为本身。
     //
-    // key 必须与 App.tsx 的 VIEW_STORAGE_KEY 一致（那边加了 loongport- 前缀防止读到上游遗留值）。
-    localStorage.setItem("loongport-last-view", "providers");
+    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+  });
+
+  it.fails(
+    "cleans the rendered App when the test times out",
+    async () => {
+      renderApp();
+      // 这条必须真实撞穿自己的 10ms 超时，下一条才是在验证超时后的隔离性。
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    },
+    10,
+  );
+
+  it("mounts exactly one App after the timeout cleanup", () => {
+    renderApp();
+
+    expect(screen.getAllByText("switch-codex-image")).toHaveLength(1);
   });
 
   it("restores the image page and reconciles its MCP registration on startup", async () => {
@@ -186,8 +206,7 @@ describe("App integration with MSW", () => {
     );
     localStorage.setItem(LAST_APP_STORAGE_KEY, "codex-image");
 
-    const { default: App } = await import("@/App");
-    renderApp(App);
+    renderApp();
 
     await waitFor(() => {
       expect(screen.getByTestId("app-switcher")).toHaveTextContent(
@@ -206,16 +225,14 @@ describe("App integration with MSW", () => {
       }),
     );
 
-    const { default: App } = await import("@/App");
-    renderApp(App);
+    renderApp();
     fireEvent.click(await screen.findByText("switch-codex-image"));
 
     await waitFor(() => expect(syncCalls).toBe(1));
   });
 
   it("covers basic provider flows via real hooks", async () => {
-    const { default: App } = await import("@/App");
-    renderApp(App);
+    renderApp();
 
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -271,8 +288,7 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("shows toast when auto sync fails in background", async () => {
-    const { default: App } = await import("@/App");
-    renderApp(App);
+    renderApp();
 
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -331,8 +347,7 @@ describe("App integration with MSW", () => {
     setCurrentProviderId("openclaw", "deepseek");
     setLiveProviderIds("openclaw", ["deepseek-copy"]);
 
-    const { default: App } = await import("@/App");
-    renderApp(App);
+    renderApp();
 
     fireEvent.click(screen.getByText("switch-openclaw"));
 
@@ -377,8 +392,7 @@ describe("App integration with MSW", () => {
       .spyOn(providersApi, "getOpenClawLiveProviderIds")
       .mockRejectedValueOnce(new Error("broken config"));
 
-    const { default: App } = await import("@/App");
-    renderApp(App);
+    renderApp();
 
     fireEvent.click(screen.getByText("switch-openclaw"));
 
