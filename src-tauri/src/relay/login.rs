@@ -42,17 +42,10 @@ pub const LOGIN_WINDOW_LABEL: &str = "loongport-login";
 ///
 /// 选一个绝不会被真实网站用到的值：注入脚本只在中转站 origin 下跑，但万一页面自己跳到某个
 /// 我们认得的 scheme，就会被误当成凭据回传。
-const CREDS_SCHEME: &str = "loongport-creds";
+pub(crate) const CREDS_SCHEME: &str = "loongport-creds";
 
-/// 凭据回传的 host 标记（与账号档案共用 `loongport-creds` scheme，用 host 区分）。
-const CREDS_CALLBACK_HOST: &str = "ok";
-
-/// 账号档案回传的 host 标记（与凭据共用 `loongport-creds` scheme，用 host 区分）。
-///
-/// 登录成功后账号身份优先走 reqwest；站点开了 Cloudflare 这类**指纹级**防护时 reqwest
-/// 必撞 403 HTML，改由登录窗在页面上下文里拉档案，经 `loongport-creds://account` 回传。
-/// 与 `ok` 分开的原因：两个回传的载荷形状不同，合用一个 host 会让解析器按错形状解。
-const ACCOUNT_CALLBACK_HOST: &str = "account";
+/// 凭据回传的 host 标记（与浏览器代拉共用 `loongport-creds` scheme，用 host 区分）。
+pub(crate) const CREDS_CALLBACK_HOST: &str = "ok";
 
 /// sub2api 存 access token 的 localStorage 键名。
 ///
@@ -339,105 +332,6 @@ pub fn login_script(
   trySend();
   tryPrefill();
   tryPrefillPromo();
-}})();
-"#
-    )
-}
-
-/// 生成「让登录窗在页面上下文里同源拉账号档案并回传」的注入脚本。
-///
-/// 什么时候用：登录成功后 reqwest 拉 `/api/v1/user/profile` 撞上 Cloudflare 等
-/// **指纹级**防护（403 HTML —— 加头、加 cookie、换 HTTP 版本都过不了，README 里
-/// 那台 `api.aijws.com` 就是实例）时，登录窗是唯一能过防护的通道：它本身就是真实浏览器。
-/// 脚本在当前页面上下文里 fetch 同一份档案，把 `{status, body}` 经
-/// `loongport-creds://account` 导航回传 —— 与凭据回传同一条传输通道，只是 host 不同
-/// （见 [`ACCOUNT_CALLBACK_HOST`]）。
-///
-/// 为什么把原始正文送回来而不是在页面里窄化成 `{id,email,username}`：信封判据
-/// （`code == 0` 才算成功）与 `Account` 的形状都归 Rust 侧（[`super::api`]）管，
-/// 在这里复刻一份就是第二份事实源。档案正文通常只有 1–2KB，远低于 macOS WKWebView
-/// 自定义 scheme 的 URL 上限，整段送回由 [`super::api::parse_account_profile`] 解。
-///
-/// ## 为什么 403 HTML 要重试（2026-08-13 实测加）
-///
-/// 这类防护对真实浏览器也是**按会话概率性放行**：同一台 Chrome 里，同一窗口先后两次
-/// fetch 同一个端点，可能一次 200 一次 403（`api.aijws.com` 实测）。登录窗此刻是
-/// **已经登录成功**的信任会话（SPA 自己刚拉过 profile 渲染 dashboard），大多一次就过，
-/// 但偶发 403 会让用户白重登一次 —— 所以只对「403 + HTML」重试，最多 3 次、间隔 1 秒，
-/// 与 [`super::discovery`] 浏览器探针「轮询直到成功」是同一个思路。真正的 API 错误
-/// （401 / 200 + 业务 code）不重试，原样回传。
-pub fn account_fetch_script(site_origin: &str, auth_token: &str) -> String {
-    let origin_literal = serde_json::to_string(site_origin).expect("origin 可 JSON 编码");
-    let token_literal = serde_json::to_string(auth_token).expect("token 可 JSON 编码");
-    format!(
-        r#"(function () {{
-  'use strict';
-
-  // 只在顶层 frame 跑（与 `login_script` 同一条规则）：同源 iframe 会让脚本多执行一份。
-  if (window.top !== window.self) return;
-
-  var ALLOWED_ORIGIN = {origin_literal};
-  // 页面可能已被 SPA 带到别的 origin（前置 SSO / 自定义域跳主域），相对 fetch 会打错站。
-  // 与 `login_script` 那条 early-return 同理：宁可明确失败回传，也不静默拉错站。
-  if (window.location.origin !== ALLOWED_ORIGIN) {{
-    send(-4, '页面 origin 已离开站点');
-    return;
-  }}
-
-  var sent = false;
-
-  function send(status, body) {{
-    if (sent) return;
-    sent = true;
-    var payload = JSON.stringify({{ status: status, body: String(body || '') }});
-    // 顶层导航（`login_script` 里论证过不能改用 iframe：CSP 会拦）——
-    // Rust 侧 `on_navigation` 收到后拦下，页面内容原样留着。
-    window.location.href = '{CREDS_SCHEME}://{ACCOUNT_CALLBACK_HOST}?d=' + b64url(payload);
-  }}
-
-  function b64url(s) {{
-    var bytes = new TextEncoder().encode(s);
-    var bin = '';
-    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  }}
-
-  var attempts = 0;
-  var MAX_ATTEMPTS = 3;
-  var RETRY_DELAY_MS = 1000;
-
-  function attempt() {{
-    attempts++;
-    fetch('/api/v1/user/profile', {{
-      headers: {{ 'Authorization': 'Bearer ' + {token_literal} }},
-      credentials: 'include'
-    }})
-      .then(function (r) {{
-        return r.text().then(function (t) {{
-          return {{ status: r.status, ct: r.headers.get('content-type') || '', body: t }};
-        }});
-      }})
-      .then(function (res) {{
-        // 防护层偶发拦截的形态：403 + HTML。只对这种情况重试；
-        // API 自己的错误（401 / 200 + 业务 code）原样回传。
-        var blocked = res.status === 403 && res.ct.indexOf('html') !== -1;
-        if (blocked && attempts < MAX_ATTEMPTS) {{
-          setTimeout(attempt, RETRY_DELAY_MS);
-        }} else {{
-          send(res.status, res.body);
-        }}
-      }})
-      .catch(function (e) {{ send(-1, e && e.message ? e.message : String(e)); }});
-  }}
-
-  try {{
-    attempt();
-  }} catch (e) {{
-    send(-2, e && e.message ? e.message : String(e));
-  }}
-
-  // 页面里 fetch 卡住时不能让登录流程干等 —— 5 秒兜底后回传超时。
-  setTimeout(function () {{ send(-3, '浏览器辅助读取账号信息超时'); }}, 5000);
 }})();
 "#
     )
@@ -839,54 +733,6 @@ pub fn parse_creds_navigation(url: &url::Url) -> Option<Result<Credentials, AppE
     Some(decode_creds(url))
 }
 
-/// 判断一次导航是不是账号档案回传（`loongport-creds://account`），是则解出账号身份。
-///
-/// 与 [`parse_creds_navigation`] 共用同一条自定义 scheme，用 host 区分：`ok` 是凭据，
-/// `account` 是浏览器辅助拉的账号档案。返回 `None` 表示普通导航（放行）。
-pub fn parse_account_navigation(url: &url::Url) -> Option<Result<super::api::Account, AppError>> {
-    if url.scheme() != CREDS_SCHEME || url.host_str() != Some(ACCOUNT_CALLBACK_HOST) {
-        return None;
-    }
-    Some(decode_account(url))
-}
-
-fn decode_account(url: &url::Url) -> Result<super::api::Account, AppError> {
-    let encoded = url
-        .query_pairs()
-        .find(|(k, _)| k == "d")
-        .map(|(_, v)| v.into_owned())
-        .ok_or_else(|| AppError::Config("账号档案回传缺少数据".into()))?;
-
-    let json = decode_b64url(&encoded)
-        .ok_or_else(|| AppError::Config("账号档案回传的数据解不开".into()))?;
-
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        #[serde(default)]
-        status: i64,
-        #[serde(default)]
-        body: String,
-    }
-    let raw: Raw = serde_json::from_str(&json)
-        .map_err(|e| AppError::Config(format!("账号档案回传的格式不对: {e}")))?;
-
-    if raw.status != 200 {
-        let detail = raw.body.lines().next().unwrap_or("").trim();
-        let status = if raw.status < 0 {
-            // 页面内 fetch 的传输层错误：-1 网络错 / -2 脚本错 / -3 超时 / -4 origin 离开。
-            // body 里是脚本塞的可读原因，不拼成 "HTTP -1" 这种假状态码。
-            detail.to_string()
-        } else {
-            format!("HTTP {} {}", raw.status, detail)
-        };
-        return Err(AppError::Config(format!(
-            "浏览器辅助读取账号信息失败: {status}"
-        )));
-    }
-
-    super::api::parse_account_profile(&raw.body)
-}
-
 fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
     let encoded = url
         .query_pairs()
@@ -927,7 +773,7 @@ fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
     })
 }
 
-fn decode_b64url(s: &str) -> Option<String> {
+pub(crate) fn decode_b64url(s: &str) -> Option<String> {
     // 手写而不引 base64 crate：只用在这一处，且输入是我们自己的脚本产生的。
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut lookup = [255u8; 256];
@@ -1013,10 +859,6 @@ mod tests {
         callback_url(CREDS_CALLBACK_HOST, payload)
     }
 
-    fn account_url(payload: &str) -> url::Url {
-        callback_url(ACCOUNT_CALLBACK_HOST, payload)
-    }
-
     #[test]
     fn ordinary_navigation_is_not_treated_as_creds() {
         for u in [
@@ -1088,82 +930,6 @@ mod tests {
 
         let bad_b64 = url::Url::parse(&format!("{CREDS_SCHEME}://ok?d=!!!not-base64!!!")).unwrap();
         assert!(parse_creds_navigation(&bad_b64).unwrap().is_err());
-    }
-
-    #[test]
-    fn account_callback_roundtrips_a_profile_body() {
-        // 浏览器辅助回传的载荷：{status, body}，body 是 profile 原始正文。
-        let body = r#"{"code":0,"message":"success","data":{"id":7,"email":"a@b.c","username":"nicky"}}"#;
-        let payload = format!(r#"{{"status":200,"body":{}}}"#, serde_json::to_string(body).unwrap());
-        let account = parse_account_navigation(&account_url(&payload))
-            .expect("account host 的回传要认")
-            .expect("合法档案要解出");
-        assert_eq!(account.id, 7);
-        assert_eq!(account.email, "a@b.c");
-        assert_eq!(account.username, "nicky");
-    }
-
-    #[test]
-    fn account_callback_does_not_share_creds_host() {
-        // `ok` 是凭据、`account` 是账号档案 —— 同一 scheme 两个 host，互不串线。
-        let body = r#"{"code":0,"message":"success","data":{"id":7}}"#;
-        let payload = format!(r#"{{"status":200,"body":{}}}"#, serde_json::to_string(body).unwrap());
-        // 凭据 host 上的 account 载荷：不该被当成账号回传（返回 None = 放行）。
-        assert!(parse_account_navigation(&creds_url(&payload)).is_none());
-        // 反向也一样：账号 host 上的凭据载荷不该被当成凭据。
-        assert!(parse_creds_navigation(&account_url(r#"{"auth_token":"t"}"#)).is_none());
-    }
-
-    #[test]
-    fn account_callback_reports_http_and_transport_failures() {
-        // API 层 403（正文 JSON）不该由浏览器辅助背锅，但要原样报 HTTP 状态。
-        let http_payload = format!(
-            r#"{{"status":403,"body":{}}}"#,
-            serde_json::to_string(r#"{"code":"FORBIDDEN","message":"no"}"#).unwrap()
-        );
-        let err = parse_account_navigation(&account_url(&http_payload))
-            .unwrap()
-            .unwrap_err();
-        assert!(err.to_string().contains("HTTP 403"), "{err}");
-
-        // 页面内 fetch 的传输层错误（status < 0）不该拼成假的 "HTTP -1"。
-        let transport_payload = r#"{"status":-1,"body":"fetch failed"}"#;
-        let err = parse_account_navigation(&account_url(transport_payload))
-            .unwrap()
-            .unwrap_err();
-        assert!(err.to_string().contains("fetch failed"), "{err}");
-        assert!(!err.to_string().contains("HTTP -1"), "传输层错误不该拼 HTTP 状态码: {err}");
-    }
-
-    #[test]
-    fn malformed_account_callbacks_are_errors_not_panics() {
-        let no_query =
-            url::Url::parse(&format!("{CREDS_SCHEME}://{ACCOUNT_CALLBACK_HOST}")).unwrap();
-        assert!(parse_account_navigation(&no_query).unwrap().is_err());
-
-        let bad_b64 = url::Url::parse(&format!(
-            "{CREDS_SCHEME}://{ACCOUNT_CALLBACK_HOST}?d=!!!not-base64!!!"
-        ))
-        .unwrap();
-        assert!(parse_account_navigation(&bad_b64).unwrap().is_err());
-
-        // status 类型不对（字符串）应报格式错，而不是 panic。
-        let wrong_shape = account_url(r#"{"status":"x"}"#);
-        assert!(parse_account_navigation(&wrong_shape).unwrap().is_err());
-    }
-
-    #[test]
-    fn account_fetch_script_is_self_contained_and_origin_guarded() {
-        let script = account_fetch_script("https://relay.example", "tok-secret");
-        assert!(script.contains("https://relay.example"), "origin 字面量要在");
-        assert!(script.contains("tok-secret"), "token 要嵌入脚本");
-        assert!(script.contains("/api/v1/user/profile"), "要打 profile 端点");
-        assert!(script.contains(CREDS_SCHEME), "回传要走凭据同一条 scheme");
-        assert!(script.contains(ACCOUNT_CALLBACK_HOST), "回传要用 account host");
-        assert!(
-            script.contains("window.location.origin !== ALLOWED_ORIGIN"),
-            "origin 守卫要在"
-        );
     }
 
     #[test]
@@ -1775,7 +1541,23 @@ fn export_login_scripts() {
         );
         std::fs::write(dir.join(format!("login-script-{name}.js")), s).expect("写脚本");
     }
-    // 浏览器辅助拉账号档案的脚本同样要执行验证（`loginScriptRuns.test.ts`）。
-    let account = account_fetch_script("https://bestapi.store", "tok-secret");
-    std::fs::write(dir.join("account-fetch-script.js"), account).expect("写脚本");
+    // 浏览器代拉 API 请求的脚本同样要执行验证（`loginScriptRuns.test.ts`）。
+    let request = reqwest::Client::new()
+        .get("https://bestapi.store/api/v1/user/profile?x=1")
+        .bearer_auth("tok-secret")
+        .build()
+        .expect("构建请求");
+    let api = crate::relay::browser_bridge::api_fetch_script(&request, "api-0");
+    std::fs::write(dir.join("api-fetch-script.js"), api).expect("写脚本");
+
+    // POST 分支（带 body + 幂等头）同样要执行验证 —— 那行 `init.body = ...` 是
+    // 按请求条件生成的字面量，GET 脚本里不存在，不另导出就永远验不到。
+    let create = reqwest::Client::new()
+        .post("https://bestapi.store/api/v1/keys")
+        .json(&serde_json::json!({ "name": "provision:test", "group_id": 3 }))
+        .header("Idempotency-Key", "idem-1")
+        .build()
+        .expect("构建请求");
+    let api_post = crate::relay::browser_bridge::api_fetch_script(&create, "api-1");
+    std::fs::write(dir.join("api-fetch-script-post.js"), api_post).expect("写脚本");
 }

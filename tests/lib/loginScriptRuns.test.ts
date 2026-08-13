@@ -43,7 +43,8 @@ const SCRIPT_DIR = resolve(REPO, "src-tauri/target");
 function ensureScripts(): void {
   const needed = [
     ...["with-promo", "no-promo"].map((n) => `login-script-${n}.js`),
-    "account-fetch-script.js",
+    "api-fetch-script.js",
+    "api-fetch-script-post.js",
   ].map((n) => resolve(SCRIPT_DIR, n));
   if (needed.every(existsSync)) return;
   execFileSync(
@@ -337,23 +338,29 @@ describe.runIf(scriptsAvailable())("登录注入脚本能真的执行", () => {
 });
 
 /**
- * 「登录窗在页面上下文里代拉账号档案」的脚本**真的跑一遍**（不是字符串断言）。
+ * 「登录窗在页面上下文里代拉 API 请求」的脚本**真的跑一遍**（不是字符串断言）。
  *
- * 与上面登录脚本同一条理由：`account_fetch_script` 也是 Rust 生成的另一门语言代码，
+ * 与上面登录脚本同一条理由：`api_fetch_script` 也是 Rust 生成的另一门语言代码，
  * 字符串断言验不了「跑得起来、重试逻辑真的会回传」。这条专门守那段最险的分支：
- * **403 HTML 只重试、API 自己的错误不重试** —— 写错一次的表现就是「登录流程多等
+ * **403 HTML 只重试、API 自己的错误不重试** —— 写错一次的表现就是「请求多等
  * 3 秒然后报超时」，纯看字符串看不出来。
  *
  * 定时器用「可手动推进的假时钟」而不是真睡：重试间隔 1s、兜底 5s，真跑会拖慢测试，
  * 而且**真 setTimeout 会让 5s 兜底和 1s 重试并发抢跑**（假时钟下谁先谁后由测试说了算，
  * 不会出现 flaky）。
  */
-describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", () => {
-  const read = () =>
-    readFileSync(resolve(SCRIPT_DIR, "account-fetch-script.js"), "utf8");
+describe.runIf(scriptsAvailable())("浏览器代拉脚本能真的执行", () => {
+  const read = (name: string) =>
+    readFileSync(resolve(SCRIPT_DIR, name), "utf8");
+  const readGet = () => read("api-fetch-script.js");
+  const readPost = () => read("api-fetch-script-post.js");
 
-  /** 解出回传导航 URL 里的 {status, body} 载荷（与 Rust 侧 decode 同构）。 */
-  function decodePayload(url: string): { status: number; body: string } {
+  /** 解出回传导航 URL 里的 {status, body, ct} 载荷（与 Rust 侧 decode 同构）。 */
+  function decodePayload(url: string): {
+    status: number;
+    body: string;
+    ct: string;
+  } {
     const b64 = url
       .slice(url.indexOf("?d=") + 3)
       .replace(/-/g, "+")
@@ -367,13 +374,15 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
    * `origin` 与导出脚本里的 `ALLOWED_ORIGIN`（`https://bestapi.store`）一致，
    * 否则 origin 守卫会让脚本直接早退、什么也验不到。
    */
-  function runAccountScript(
+  function runScript(
+    source: string,
     responses: Array<
       { status: number; ct: string; body: string } | { never: true }
     >,
   ) {
     const navigations: string[] = [];
-    let fetchCalls = 0;
+    const fetchCalls: Array<{ url: string; method: string; body?: unknown }> =
+      [];
     let now = 0;
     const timers: Array<{ at: number; fire: () => void }> = [];
 
@@ -385,9 +394,14 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
         timers.push({ at: now + ms, fire: fn });
         return timers.length;
       },
-      fetch: () => {
-        const spec = responses[Math.min(fetchCalls, responses.length - 1)];
-        fetchCalls++;
+      fetch: (url: string, init?: { method?: string; body?: string }) => {
+        const spec =
+          responses[Math.min(fetchCalls.length, responses.length - 1)];
+        fetchCalls.push({
+          url,
+          method: init?.method ?? "GET",
+          body: init?.body,
+        });
         if ("never" in spec) return new Promise(() => {});
         return Promise.resolve({
           status: spec.status,
@@ -409,14 +423,25 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
       },
     };
 
-    vm.runInNewContext(read(), sandbox, { timeout: 5000 });
+    vm.runInNewContext(source, sandbox, { timeout: 5000 });
 
     return {
       navigations,
       // **getter 而不是值快照**：`{ fetchCalls }` 字面量会在创建时把当时的数值拷贝进去，
       // 之后闭包里再 ++ 也读不到（这次实测踩过：重试明明跑了 3 次，harness 一直显示 1）。
-      get fetchCalls() {
-        return fetchCalls;
+      get fetchCount() {
+        return fetchCalls.length;
+      },
+      get fetchMethods() {
+        return fetchCalls.map((c) => c.method);
+      },
+      /** 代拉打的是哪个 URL —— 脚本里那个字面量必须是**完整 URL（含 query）**，
+          相对路径会在页面已跳转到别的路由时打错端点。 */
+      get fetchUrls() {
+        return fetchCalls.map((c) => c.url);
+      },
+      get fetchBodies() {
+        return fetchCalls.map((c) => c.body);
       },
       /** 把假时钟往前拨，触发到期的定时器（按到期顺序）。 */
       advance(ms: number) {
@@ -433,8 +458,8 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
   /** 让 promise 链跑完（fetch → text() → then），再做断言。 */
   const flush = () => new Promise<void>((r) => setImmediate(r));
 
-  it("200 一次回传，不重试", async () => {
-    const h = runAccountScript([
+  it("GET 200 一次回传，不重试", async () => {
+    const h = runScript(readGet(), [
       {
         status: 200,
         ct: "application/json",
@@ -442,7 +467,7 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
       },
     ]);
     await flush();
-    expect(h.fetchCalls, "200 不该重试").toBe(1);
+    expect(h.fetchCount, "200 不该重试").toBe(1);
     expect(h.navigations).toHaveLength(1);
     const payload = decodePayload(h.navigations[0]);
     expect(payload.status).toBe(200);
@@ -451,7 +476,7 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
   });
 
   it("403 HTML 重试到成功（最多 3 次），不被 5s 兜底抢跑", async () => {
-    const h = runAccountScript([
+    const h = runScript(readGet(), [
       {
         status: 403,
         ct: "text/html; charset=utf-8",
@@ -478,7 +503,7 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
     // 第三次 200（t=2000）：回传成功，且 fetch 正好 3 次。
     h.advance(1000);
     await flush();
-    expect(h.fetchCalls, "403 该重试到 3 次").toBe(3);
+    expect(h.fetchCount, "403 该重试到 3 次").toBe(3);
     expect(h.navigations).toHaveLength(1);
     expect(decodePayload(h.navigations[0]).status).toBe(200);
     // 5s 兜底还躺着没触发 —— 重试成功时它不该再发第二条。
@@ -488,7 +513,7 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
   });
 
   it("403 连着重 3 次仍失败：把最后一次 403 原样回传", async () => {
-    const h = runAccountScript([
+    const h = runScript(readGet(), [
       { status: 403, ct: "text/html", body: "<html>1</html>" },
       { status: 403, ct: "text/html", body: "<html>2</html>" },
       { status: 403, ct: "text/html", body: "<html>3</html>" },
@@ -499,28 +524,49 @@ describe.runIf(scriptsAvailable())("账号档案代拉脚本能真的执行", ()
     await flush();
     h.advance(1000);
     await flush();
-    expect(h.fetchCalls, "最多 3 次").toBe(3);
+    expect(h.fetchCount, "最多 3 次").toBe(3);
     expect(h.navigations).toHaveLength(1);
     expect(decodePayload(h.navigations[0]).status).toBe(403);
   });
 
   it("401（API 自己的错误）不重试，原样回传", async () => {
-    const h = runAccountScript([
+    const h = runScript(readGet(), [
       { status: 401, ct: "application/json", body: '{"code":401}' },
     ]);
     await flush();
-    expect(h.fetchCalls, "401 不该重试").toBe(1);
+    expect(h.fetchCount, "401 不该重试").toBe(1);
     expect(h.navigations).toHaveLength(1);
     expect(decodePayload(h.navigations[0]).status).toBe(401);
   });
 
   it("页面 fetch 挂起：5 秒兜底回传超时（-3）", async () => {
-    const h = runAccountScript([{ never: true }]);
+    const h = runScript(readGet(), [{ never: true }]);
     await flush();
     expect(h.navigations).toHaveLength(0);
     h.advance(5000);
     await flush();
     expect(h.navigations).toHaveLength(1);
     expect(decodePayload(h.navigations[0]).status).toBe(-3);
+  });
+
+  it("POST 带 body 与幂等头，重试也保持同一份请求", async () => {
+    const h = runScript(readPost(), [
+      { status: 403, ct: "text/html", body: "<html>challenge</html>" },
+      {
+        status: 200,
+        ct: "application/json",
+        body: '{"code":0,"data":{"id":1}}',
+      },
+    ]);
+    await flush();
+    h.advance(1000);
+    await flush();
+    expect(h.fetchCount).toBe(2);
+    expect(h.fetchMethods).toEqual(["POST", "POST"]);
+    // 每次重试都带着同一份 body（建 Key 的 JSON + 幂等键都原样重放）。
+    expect(h.fetchBodies[0]).toContain("provision:test");
+    expect(h.fetchBodies[1]).toBe(h.fetchBodies[0]);
+    expect(h.navigations).toHaveLength(1);
+    expect(decodePayload(h.navigations[0]).status).toBe(200);
   });
 });
