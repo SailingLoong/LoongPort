@@ -24,6 +24,66 @@ async function flushPromises(): Promise<void> {
 }
 
 describe("browser probe generated script", () => {
+  it("waits for the initial document to finish loading before probing", async () => {
+    const documentListeners = new Map<string, () => void>();
+    const intervalCallbacks: Array<() => void> = [];
+    const fetchedPaths: string[] = [];
+    const navigations: string[] = [];
+    const location = {
+      origin: "https://relay.example",
+      get href() {
+        return navigations.at(-1) ?? "https://relay.example/";
+      },
+      set href(value: string) {
+        navigations.push(value);
+      },
+    };
+
+    const sandbox = {
+      window: { location },
+      document: {
+        readyState: "loading",
+        addEventListener: (event: string, listener: () => void) => {
+          documentListeners.set(event, listener);
+        },
+      },
+      fetch: (path: string) => {
+        fetchedPaths.push(path);
+        return Promise.resolve({
+          text: () => Promise.resolve('{"success":true}'),
+        });
+      },
+      setInterval: (callback: () => void) => {
+        intervalCallbacks.push(callback);
+        return 1;
+      },
+      setTimeout,
+      clearTimeout,
+      AbortController,
+      TextEncoder,
+      btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
+      JSON,
+    };
+
+    vm.runInNewContext(readFileSync(SCRIPT, "utf8"), sandbox, {
+      timeout: 5000,
+    });
+    await flushPromises();
+
+    expect(fetchedPaths).toHaveLength(0);
+    expect(navigations).toHaveLength(0);
+    expect(intervalCallbacks).toHaveLength(0);
+
+    const onDocumentReady = documentListeners.get("DOMContentLoaded");
+    expect(onDocumentReady).toBeDefined();
+    onDocumentReady!();
+    await flushPromises();
+
+    expect(fetchedPaths).toEqual(["/api/v1/settings/public", "/api/status"]);
+    expect(navigations).toHaveLength(1);
+    expect(intervalCallbacks).toHaveLength(1);
+  });
+
   it("serializes delayed rounds and emits one complete callback", async () => {
     const intervalCallbacks: Array<() => void> = [];
     const responseBodies: Array<Deferred<string>> = [];
@@ -41,6 +101,7 @@ describe("browser probe generated script", () => {
 
     const sandbox = {
       window: { location },
+      document: { readyState: "complete" },
       fetch: (path: string) => {
         fetchedPaths.push(path);
         const body = deferred<string>();
@@ -156,6 +217,7 @@ describe("browser probe generated script", () => {
 
     const sandbox = {
       window: { location },
+      document: { readyState: "complete" },
       fetch: (path: string) => {
         const body =
           path === "/api/v1/settings/public"
@@ -226,6 +288,7 @@ describe("browser probe generated script", () => {
 
     const sandbox = {
       window: { location },
+      document: { readyState: "complete" },
       localStorage: {
         getItem: (key: string) =>
           key === "auth_token" ? "browser-session-token" : null,
@@ -283,6 +346,7 @@ describe("browser probe generated script", () => {
 
     const sandbox = {
       window: { location },
+      document: { readyState: "complete" },
       fetch: () =>
         Promise.resolve({
           status: 403,
@@ -356,6 +420,7 @@ describe("browser probe generated script", () => {
 
     const sandbox = {
       window: { location },
+      document: { readyState: "complete" },
       fetch: (path: string) => {
         fetchedPaths.push(path);
         if (path === "/api/v1/settings/public") {
