@@ -7,7 +7,6 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string) =>
       ({
-        "loongport.row.more": "更多",
         "loongport.row.refetchGroups": "更新可用分组",
         "loongport.vendor.refreshKey": "重新应用密钥配置",
         "loongport.modelVerification.title": "模型验证",
@@ -42,7 +41,7 @@ vi.mock("react-i18next", () => ({
         "loongport.row.noTiers": "没有可用分组",
         "loongport.row.getKeys": "创建接入配置",
         "loongport.row.tierCount": "{{count}} 个接入配置",
-        "loongport.vendor.sessionExpiredUsable":
+        "loongport.row.sessionExpiredUsable":
           "登录已过期，但 API 密钥仍可使用；余额暂时无法查询。点击重新登录。",
         "loongport.vendor.noKey": "尚未配置 API 密钥",
         "loongport.vendor.keyReady": "已创建接入配置",
@@ -66,7 +65,11 @@ const tier = {
   allowImageGeneration: false,
 };
 
-function renderRelayRow(onProvision = vi.fn()) {
+function renderRelayRow(
+  onProvision = vi.fn(),
+  relayOverrides: Partial<ComponentProps<typeof RelayRow>["relay"]> = {},
+) {
+  const onLogin = vi.fn();
   const props: ComponentProps<typeof RelayRow> = {
     relay: {
       id: 1,
@@ -76,11 +79,12 @@ function renderRelayRow(onProvision = vi.fn()) {
       loggedIn: true,
       sessionExpired: false,
       tiers: [tier],
+      ...relayOverrides,
     },
     open: true,
     onOpenChange: vi.fn(),
     busy: new Set(),
-    onLogin: vi.fn(),
+    onLogin,
     onProvision,
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
@@ -96,7 +100,7 @@ function renderRelayRow(onProvision = vi.fn()) {
     isVerifyingTier: () => false,
   };
 
-  return { onProvision, ...render(<RelayRow {...props} />) };
+  return { onProvision, onLogin, ...render(<RelayRow {...props} />) };
 }
 
 function renderVendorRow(onProvision = vi.fn()) {
@@ -127,38 +131,64 @@ function renderVendorRow(onProvision = vi.fn()) {
   return { onProvision, ...render(<VendorRow {...props} />) };
 }
 
-describe("refresh actions", () => {
-  it("puts relay group refetch behind a clearly labeled more menu", async () => {
+/**
+ * 两类行的刷新动作**都是一眼可见的带文字按钮**，不再藏在 `...` 菜单里。
+ *
+ * 「带文字」是这道闸真正守的东西：两个动作都不是「刷新一下当前显示」——
+ * 中转站那个会去远端重新发现分组，官网那个会把本地 sk 重写进六个平台的配置。
+ * 换成裸刷新图标的话，用户无从知道点下去会发生什么（那正是它们当初被收进
+ * 菜单的理由；现在改成外置 + 文字，两个诉求同时满足）。
+ */
+describe("行上的刷新动作", () => {
+  it("中转站行把「更新可用分组」直接摆出来", async () => {
     const user = userEvent.setup();
     const { onProvision } = renderRelayRow();
 
-    expect(screen.getByRole("button", { name: "更多" })).toBeInTheDocument();
-    expect(screen.queryByTitle("更新可用分组")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "更多" }));
-    const refetch = screen.getByRole("menuitem", {
-      name: "更新可用分组",
-    });
+    const refetch = screen.getByRole("button", { name: "更新可用分组" });
     expect(refetch).toBeInTheDocument();
 
     await user.click(refetch);
     expect(onProvision).toHaveBeenCalledTimes(1);
   });
 
-  it("puts vendor key reprovision behind the same more menu", async () => {
+  it("官网行把「重新应用密钥配置」直接摆出来", async () => {
     const user = userEvent.setup();
     const { onProvision } = renderVendorRow();
 
-    expect(screen.getByRole("button", { name: "更多" })).toBeInTheDocument();
-    expect(screen.queryByTitle("重新应用密钥配置")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "更多" }));
-    const reprovision = screen.getByRole("menuitem", {
+    const reprovision = screen.getByRole("button", {
       name: "重新应用密钥配置",
     });
     expect(reprovision).toBeInTheDocument();
 
     await user.click(reprovision);
     expect(onProvision).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * ⭐ 登录态过期**不等于**分组和密钥失效。
+   *
+   * 后端探到会话失效时只清会话（`creds::clear_session`），账号身份、分组与 sk
+   * 全都留着 ⇒ 这一行照样能切档位。所以这种行不该退化成「登录已过期」那个空壳，
+   * 而要照常显示档位数 + 一条重新登录的路。
+   *
+   * 「不摆更新可用分组」同样要钉住：重拉分组必须有登录态，摆一个点下去必然报错的
+   * 按钮不如不摆。
+   */
+  it("登录过期但仍有档位时，显示档位数与重新登录，而不是「没有可用分组」", () => {
+    renderRelayRow(vi.fn(), { loggedIn: false, sessionExpired: true });
+
+    // 这个文件的 `t` mock 不做插值，所以档位数那句拿到的是原样模板 ——
+    // 断言它出现即可证明走的是「有档位」那一支。
+    expect(screen.getByText("{{count}} 个接入配置")).toBeInTheDocument();
+    expect(screen.queryByText("没有可用分组")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "更新可用分组" }),
+    ).not.toBeInTheDocument();
+
+    const reLogin = screen.getByRole("button", { name: "重新登录" });
+    expect(reLogin).toHaveAttribute(
+      "title",
+      "登录已过期，但 API 密钥仍可使用；余额暂时无法查询。点击重新登录。",
+    );
   });
 });

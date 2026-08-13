@@ -611,11 +611,56 @@ pub fn refresh_account_identity(
     Ok(())
 }
 
-/// 清掉某一行的凭据但保留站点（登出 / 凭据失效后重登用）。
+/// 清掉某一行的**会话**，保留账号身份。
 ///
-/// **`account_id` 也清掉**：下次登录可能换成别的账号，留着旧的会让去重判断把新账号误认成它。
-/// **`login_identifier` 也必须留着** —— 它存在的全部理由就是「重登时预填」，
-/// 而这个函数正是重登前的那一步；清掉它等于让用户重新输一遍邮箱。
+/// ## 为什么必须与 [`clear_credentials`] 分开（2026-08-13 修）
+///
+/// 「网页登录态失效」与「这一行的密钥没了」是两件事，而以前只有一个函数把它们一起做了：
+/// [`check_session`] 探到 401 就调 [`clear_credentials`]，那个函数会把 `account_id`
+/// 置 `NULL`。后果是三连，而且**没有一处会报错**：
+///
+/// 1. [`Relay::session_expired`] 的判据要求 `account_id.is_some()` ⇒ 变成 `false`
+///    ⇒ 界面显示「还没登录 / 登录」，而不是「登录已过期 / 重新登录」；
+/// 2. `commands::relay` 里按账号归属过滤档位的那一步，对「行没有 account_id、
+///    档位有」这种组合判为**不属于它** ⇒ **这一行名下的档位整片从界面消失**，
+///    退化成「没有可用分组 + 获取密钥」；
+/// 3. `account_label` 被清空 ⇒ 昵称没了，同一个站挂多个账号时分不出这是哪一行。
+///
+/// 而 sk 一把都没失效 —— 它们写在各自的 provider 配置里，这张表根本不碰。
+/// 用户看到的「密钥没了」纯粹是显示后果，但他会照着这个假象去重建一遍。
+///
+/// 所以会话失效走这条：只清会话，账号身份留着。用户点一次「重新登录」就复原，
+/// 期间档位照常可用（唯一真实的损失是余额拉不到，那要网页登录态）。
+///
+/// `cf_clearance` 跟着会话一起清：它绑 IP + User-Agent，本来就是这次会话的产物，
+/// 留着只会让下一次请求拿一个必然失效的 cookie 去撞 Cloudflare。
+/// `user_agent` **不清** —— 它记的是本机 WebView 的真实 UA，与会话无关。
+///
+/// ## 换账号登录不会被这份残留身份坑到
+///
+/// [`save_credentials`] 查重复时带 `id != ?3`（排除自己），并直接把本行的
+/// `account_id` 覆写成新登录的那个 ⇒ 留着旧 id 既不会撞唯一索引，也不会把新账号
+/// 误认成旧的。由 `relogin_on_an_expired_row_can_switch_to_a_different_account` 钉着。
+pub fn clear_session(conn: &Connection, id: i64) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE loongport_relay
+         SET auth_token = '', refresh_token = NULL, token_expires_at = NULL,
+             cf_clearance = NULL, updated_at = ?1
+         WHERE id = ?2",
+        params![now_unix(), id],
+    )
+    .map_err(|e| AppError::Database(format!("清除登录态失败: {e}")))?;
+    Ok(())
+}
+
+/// 清掉某一行的凭据**连同账号身份**，只保留站点。
+///
+/// ⚠️ **这不是「登录态失效」该走的路** —— 那条走 [`clear_session`]，见它的文档里
+/// 那三连后果。本函数留给「这一行的身份本身已经不作数」的情形：站点换了后端协议
+/// （`load_validated_relay` 那条路），旧后端给的 `account_id` 在新后端毫无意义。
+///
+/// **`login_identifier` 仍然留着** —— 它存在的全部理由就是「重登时预填」，
+/// 清掉它等于让用户重新输一遍邮箱。
 pub fn clear_credentials(conn: &Connection, id: i64) -> Result<(), AppError> {
     conn.execute(
         "UPDATE loongport_relay
@@ -993,7 +1038,9 @@ mod tests {
 
     #[test]
     fn clear_credentials_drops_account_identity_too() {
-        // account_id 不清的话，下次换账号登录会被去重逻辑误认成同一个账号。
+        // 这条守的是**协议变更**那条路（`load_validated_relay`）：旧后端给的
+        // account_id 在新后端毫无意义，必须一起清。
+        // ⚠️ 「登录态失效」走的**不是**这个函数，走 `clear_session`（见下一条）。
         let conn = mem();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
@@ -1013,6 +1060,116 @@ mod tests {
         assert_eq!(op.account_label, "");
         // 站点必须活着 —— 登出只清凭据，不是删站点。
         assert_eq!(op.site_origin, "https://a.dev");
+    }
+
+    /// ⭐ **会话失效只清会话** —— 账号身份留着，否则档位会整片从界面消失。
+    ///
+    /// 见 [`clear_session`] 文档里那三连后果：身份没了 ⇒ `session_expired()` 变 false、
+    /// 档位按账号归属被判成「不是这一行的」、昵称清空。而 sk 一把都没失效。
+    #[test]
+    fn clear_session_keeps_the_account_identity() {
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(100, "我的号", "me@x.com"),
+            "tok",
+            Some("ref"),
+            Some(123),
+            SessionEnvironment {
+                user_agent: Some("UA/1"),
+                cf_clearance: Some("cf"),
+            },
+        )
+        .unwrap();
+
+        clear_session(&conn, a).unwrap();
+
+        let op = get(&conn, a).unwrap().unwrap();
+        assert_eq!(op.auth_token, "", "会话必须清掉");
+        assert!(op.refresh_token.is_none());
+        assert!(op.token_expires_at.is_none());
+        assert!(
+            op.cf_clearance.is_none(),
+            "cf_clearance 绑本次会话的 IP+UA，留着只会拿一个必然失效的 cookie 去撞挑战"
+        );
+        assert_eq!(op.account_id, Some(100), "账号身份必须留着");
+        assert_eq!(op.account_label, "我的号", "昵称必须留着");
+        assert_eq!(
+            op.login_identifier, "me@x.com",
+            "重登要靠它预填，清掉等于让用户重输一遍邮箱"
+        );
+        assert_eq!(
+            op.user_agent.as_deref(),
+            Some("UA/1"),
+            "UA 记的是本机 WebView，与会话无关"
+        );
+    }
+
+    /// 清完会话的那一行必须报「登录已过期」，而不是「从没登录过」——
+    /// 两者对用户是两种处境（后者要输账号+密码，前者只需补密码与人机验证）。
+    #[test]
+    fn clear_session_makes_the_row_report_session_expired() {
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(100, "me@x.com", "me@x.com"),
+            "tok",
+            Some("ref"),
+            Some(123),
+            SessionEnvironment::default(),
+        )
+        .unwrap();
+
+        clear_session(&conn, a).unwrap();
+
+        let op = get(&conn, a).unwrap().unwrap();
+        assert!(!op.token_looks_valid(0));
+        assert!(
+            op.session_expired(0),
+            "有 account_id + 无 token + 无 refresh_token ⇒ 必须判为过期"
+        );
+    }
+
+    /// 会话清掉后**在同一行换一个账号登录**不会撞唯一索引、也不会被误判成同一个账号。
+    ///
+    /// 这条钉的是「保留 account_id 安全吗」——`save_credentials` 查重复时排除自己
+    /// （`id != ?3`），并直接把本行的 account_id 覆写成新登录的那个。
+    #[test]
+    fn relogin_on_an_expired_row_can_switch_to_a_different_account() {
+        let conn = mem();
+        let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(
+            &conn,
+            a,
+            ident(100, "old@x.com", "old@x.com"),
+            "tok",
+            Some("ref"),
+            Some(123),
+            SessionEnvironment::default(),
+        )
+        .unwrap();
+        clear_session(&conn, a).unwrap();
+
+        let target = save_credentials(
+            &conn,
+            a,
+            ident(200, "new@x.com", "new@x.com"),
+            "tok2",
+            Some("ref2"),
+            Some(456),
+            SessionEnvironment::default(),
+        )
+        .unwrap();
+
+        assert_eq!(target, a, "没有别的行持有 200，就该写回本行");
+        let op = get(&conn, a).unwrap().unwrap();
+        assert_eq!(op.account_id, Some(200));
+        assert_eq!(op.account_label, "new@x.com");
+        assert_eq!(list(&conn).unwrap().len(), 1, "不该多出一行");
     }
 
     #[test]

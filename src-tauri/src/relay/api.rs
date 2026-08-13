@@ -6,11 +6,11 @@
 //! | 端点 | 用途 | 鉴权 |
 //! |---|---|---|
 //! | `GET /api/v1/settings/public` | 域名探测（是不是 sub2api 站） | 无 |
-//! | `GET /api/v1/groups/available` | 拉可用分组 | Bearer(JWT) |
+//! | `GET /api/v1/groups/available` | 拉可用分组（含分组默认倍率） | Bearer(JWT) |
+//! | `GET /api/v1/groups/rates` | 当前用户的分组专属倍率 | Bearer(JWT) |
 //! | `GET /api/v1/keys` | 认领已有 sk（明文返回） | Bearer(JWT) |
 //! | `POST /api/v1/keys` | 建新 sk | Bearer(JWT) |
 //! | `GET /api/v1/user/profile` | 余额 + 账号身份 | Bearer(JWT) |
-//! | `GET /v1/sub2api/billing` | 一把 sk 的最终倍率 | **Bearer(sk)** |
 //!
 //! ## 接第二家中转站（如 new-api）时改这里
 //!
@@ -34,6 +34,8 @@
 //! 4. **`base_url` 按 CLI 分形状**：sub2api 后台的 `api_base_url` 可能是空串
 //!    （bestapi.store 实测），且 codex 要 `/v1` 结尾而 Claude Code 要不带 `/v1` 的站点根
 //!    （它自己拼 `/v1/messages`）。一律走 [`base_url_for`]，别直接用 `api_base_url`。
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +95,17 @@ struct Envelope<T> {
 impl<T> Envelope<T> {
     /// 取出 `data`，`code != 0` 或 `data` 缺失时报可见错误。
     fn into_data(self, what: &str) -> Result<T, AppError> {
+        self.into_optional_data(what)?
+            .ok_or_else(|| AppError::Config(format!("{what}失败: 响应缺少 data")))
+    }
+
+    /// 同上，但**空 `data` 是合法的成功回复**（返回 `None`），只有 `code != 0` 才算错。
+    ///
+    /// 给那些「没有内容也算成功」的端点用 —— 目前是 `/groups/rates`：
+    /// 用户没有任何分组专属倍率时，sub2api 把 repo 的 nil map 原样交给
+    /// `response.Success`，线上真实响应就是 `{"code":0,...,"data":null}`。
+    /// 走 [`Self::into_data`] 会把这件完全正常的事报成「响应缺少 data」。
+    fn into_optional_data(self, what: &str) -> Result<Option<T>, AppError> {
         if self.code != 0 {
             let mut msg = if self.message.is_empty() {
                 format!("code {}", self.code)
@@ -104,8 +117,7 @@ impl<T> Envelope<T> {
             }
             return Err(AppError::Config(format!("{what}失败: {msg}")));
         }
-        self.data
-            .ok_or_else(|| AppError::Config(format!("{what}失败: 响应缺少 data")))
+        Ok(self.data)
     }
 }
 
@@ -332,32 +344,6 @@ pub struct Balance {
     pub frozen_balance: f64,
 }
 
-/// 一把 sk 的计费倍率（`GET /v1/sub2api/billing`）的窄子集。
-///
-/// ## 为什么用这条而不是 `list_groups()` 拿倍率
-///
-/// **它是 sk 鉴权，不需要登录态**（源码 `routes/gateway.go:162-163`：注册在
-/// `apiKeyAuth` 之后）。我们每个档位都握着明文 sk，所以哪怕账号登录已过期，
-/// 倍率照样查得到。
-///
-/// 而且它给的是**服务端算好的最终值**：`effective_rate_multiplier` 已经把
-/// 「分组倍率 × 用户专属倍率 × 当前时刻高峰因子」乘完了
-/// （`handler/gateway_key_billing.go` 的 `resolveKeyBillingRate` + `PeakMultiplierAt`）。
-/// 走 `list_groups()` 只能拿到分组的基础倍率，用户专属倍率还得另查 `/groups/rates` ——
-/// 那条端点有个坑（无专属倍率时返回 `null` 而非空 map，V1 为它专门写过兜底）。
-///
-/// **服务端就是扣钱那方，它给的数就是账单** —— 客户端别自己乘。
-///
-/// ⚠️ **两处与本模块其它 DTO 不同**（照抄会踩）：
-/// 1. 路径是 `/v1/sub2api/billing`，**不在 `/api/v1` 下** —— 不能用 [`Client::url`]。
-/// 2. 响应是**裸 JSON，不套 [`Envelope`]**（handler 直接 `c.JSON(200, ...)`）。
-#[derive(Debug, Clone, Deserialize)]
-pub struct KeyBilling {
-    /// 最终生效倍率：分组 × 用户专属 × 当前时刻高峰，服务端算好的。
-    #[serde(default)]
-    pub effective_rate_multiplier: f64,
-}
-
 /// 账号身份（同一个 `GET /api/v1/user/profile` 响应的另一半）。
 ///
 /// ## 内部认 `id`，外面显示昵称
@@ -565,8 +551,8 @@ impl Client {
 
     /// 这个 client 连的站点（形如 `https://example.com`，无路径）。
     ///
-    /// 给需要打 `/v1` 下端点的调用方用（[`list_models`] / [`key_billing`]）——
-    /// 那些不走 [`Self::url`]（它拼的是 `/api/v1`）。**从 client 取而不是让调用方另传**：
+    /// 给需要打 `/v1` 下端点的调用方用（[`list_models`]）—— 那些不走 [`Self::url`]
+    /// （它拼的是 `/api/v1`）。**从 client 取而不是让调用方另传**：
     /// 「用哪个站建 Key」与「用哪个站查模型」必须是同一个答案，两处各传一遍就可能不一致。
     pub fn site_origin(&self) -> &str {
         &self.site_origin
@@ -576,12 +562,35 @@ impl Client {
         format!("{}/api/v1{}", self.site_origin, path)
     }
 
-    /// 发一个带鉴权的请求并解信封。
+    /// 发一个带鉴权的请求并解信封，**`data` 缺失算错误**（绝大多数端点都该如此）。
     async fn send<T: for<'de> Deserialize<'de>>(
         &self,
         req: reqwest::RequestBuilder,
         what: &str,
     ) -> Result<T, AppError> {
+        self.send_envelope(req, what).await?.into_data(what)
+    }
+
+    /// 同上，但**空 `data` 算正常成功**（返回 `None`）。见 [`Envelope::into_optional_data`]。
+    async fn send_optional<T: for<'de> Deserialize<'de>>(
+        &self,
+        req: reqwest::RequestBuilder,
+        what: &str,
+    ) -> Result<Option<T>, AppError> {
+        self.send_envelope(req, what)
+            .await?
+            .into_optional_data(what)
+    }
+
+    /// 上面两条共用的那一半：发请求、分类 HTTP 错误、解出信封。
+    ///
+    /// 拆出来是因为「`data` 为空算不算错」是**端点的语义**，而 HTTP 那一段
+    /// （401 归类、非 2xx 的措辞）对所有端点都一样 —— 两份各写一遍迟早分叉。
+    async fn send_envelope<T: for<'de> Deserialize<'de>>(
+        &self,
+        req: reqwest::RequestBuilder,
+        what: &str,
+    ) -> Result<Envelope<T>, AppError> {
         let resp =
             req.bearer_auth(&self.token).send().await.map_err(|e| {
                 AppError::Config(format!("{what}失败: {}", describe_send_error(&e)))
@@ -603,9 +612,8 @@ impl Client {
                 first_line(&body)
             )));
         }
-        let env: Envelope<T> = serde_json::from_str(&body)
-            .map_err(|e| AppError::Config(format!("{what}失败: 响应解析出错 {e}")))?;
-        env.into_data(what)
+        serde_json::from_str(&body)
+            .map_err(|e| AppError::Config(format!("{what}失败: 响应解析出错 {e}")))
     }
 
     /// 拉站点公开设置。
@@ -640,6 +648,31 @@ impl Client {
     pub async fn list_groups(&self) -> Result<Vec<Group>, AppError> {
         self.send(self.http.get(self.url("/groups/available")), "获取分组列表")
             .await
+    }
+
+    /// 拉当前用户的**分组专属倍率**（`GET /api/v1/groups/rates`），键是分组 id。
+    ///
+    /// ## 它是「分组基础倍率」之外的另一半
+    ///
+    /// `/groups/available` 给的是分组的**默认**倍率，中转站可以给某个用户单独设一个
+    /// 更低的（`user_group_rates` 表）。sub2api 自己的前端就是把这两条 join 起来显示的
+    /// （`frontend/src/views/user/KeysView.vue` 拉 `getAvailable()` + `getUserGroupRates()`，
+    /// 交给 `GroupBadge` 渲染）。我们照它做，所以一次 provision 只多一个请求。
+    ///
+    /// ⚠️ **走 [`Self::send_optional`] 而不是 [`Self::send`]**：用户没有任何专属倍率时
+    /// 服务端返回 `data: null`（`GetUserGroupRates` 直接把 repo 的 nil map 交给
+    /// `response.Success`），而 `send` 那条会把这件完全正常的事报成「响应缺少 data」。
+    ///
+    /// 键在 JSON 里是字符串（Go 的 `map[int64]float64` 就这么序列化），
+    /// serde 会把它解回 `i64`。
+    ///
+    /// **调用方应当把任何失败当成空 map**（回落到分组基础倍率）—— 专属倍率是附加信息，
+    /// 为它让整次 provision 失败是错的。
+    pub async fn user_group_rates(&self) -> Result<HashMap<i64, f64>, AppError> {
+        Ok(self
+            .send_optional(self.http.get(self.url("/groups/rates")), "获取分组专属倍率")
+            .await?
+            .unwrap_or_default())
     }
 
     /// 拉当前用户的全部 API Key（分页迭代到取完）。
@@ -747,61 +780,6 @@ impl Client {
     }
 }
 
-/// 查一把 sk 的计费倍率。
-///
-/// **自由函数而不是 [`Client`] 的方法**，与 [`refresh_token`] 同理：`Client` 持有的是账号
-/// JWT，而这个端点认的是 **sk**（`apiKeyAuth` 中间件）。两种凭据不该混进一个结构体。
-///
-/// 这也是它的好处：**不依赖登录态**。账号 token 过期了、甚至清空了，只要 sk 还在，
-/// 倍率照样查得到。
-///
-/// ## 三种「不是错误」的失败，全部返回 `Ok(None)`
-///
-/// | 状态 | 含义（源码 `handler/gateway_key_billing.go`） |
-/// |---|---|
-/// | 404 | 站点跑在 `RunModeSimple`，**不提供计费信息** |
-/// | 403 | 这把 sk 没绑分组 |
-/// | 401 | sk 已失效（被吊销 / 分组被删） |
-///
-/// 这三种都是「这个档位现在拿不到倍率」，UI 显示「倍率未知」即可 ——
-/// **不能当成错误弹 toast**：倍率是附加信息，为它打断用户的主流程是错的。
-/// 真正的错误（网络不通、响应解析失败）才返回 `Err`，由调用方决定要不要提示。
-pub async fn key_billing(site_origin: &str, api_key: &str) -> Result<Option<KeyBilling>, AppError> {
-    // ⚠️ 不走 `Client::url()` —— 那个拼的是 `/api/v1{path}`，而这个端点在 `/v1` 下。
-    let url = format!("{site_origin}/v1/sub2api/billing");
-    let resp = build_client()?
-        .get(&url)
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .map_err(|e| AppError::Config(format!("查询倍率失败: {}", describe_send_error(&e))))?;
-
-    let status = resp.status();
-    if status == reqwest::StatusCode::NOT_FOUND
-        || status == reqwest::StatusCode::FORBIDDEN
-        || status == reqwest::StatusCode::UNAUTHORIZED
-    {
-        return Ok(None);
-    }
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Config(format!(
-            "查询倍率失败: HTTP {} {}",
-            status.as_u16(),
-            first_line(&body)
-        )));
-    }
-
-    // 裸 JSON，**不套 Envelope** —— handler 是 `c.JSON(200, response)`。
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| AppError::Config(format!("查询倍率失败: 读响应出错 {e}")))?;
-    serde_json::from_str::<KeyBilling>(&body)
-        .map(Some)
-        .map_err(|e| AppError::Config(format!("查询倍率失败: 响应解析出错 {e}")))
-}
-
 /// 用某把 sk 拉「这个分组能调哪些模型」（`GET /v1/models`）。
 ///
 /// ## 为什么需要它：决定该给这条档位写什么模型名
@@ -816,10 +794,10 @@ pub async fn key_billing(site_origin: &str, api_key: &str) -> Result<Option<KeyB
 /// 归一化成带 `image_generation` tool 的形状再转发
 /// （sub2api `service/openai_codex_transform.go` 的 `normalizeOpenAIResponsesImageOnlyModel`）。
 ///
-/// ## 与 [`key_billing`] 同一条路
+/// ## 它是唯一一条「用 sk 打 `/v1` 下端点」的路
 ///
-/// 都是「用 sk 打 `/v1` 下的端点」：**不走 [`Client::url`]**（那个拼 `/api/v1`），
-/// 401/403/404 返回 `Ok(None)` 而不是错误。
+/// **不走 [`Client::url`]**（那个拼 `/api/v1`），且 401/403/404 返回 `Ok(None)`
+/// 而不是错误 —— 查不到模型清单只该回落到默认模型，不该中断 provision。
 ///
 /// 返回 `None` = 查不到（没这个端点 / 权限不够 / 解析不了）。调用方据此**回落到
 /// `DEFAULT_MODEL`** —— 那正是本函数出现之前的行为，所以查不到不会让任何事变糟。
@@ -1588,6 +1566,58 @@ mod tests {
             )
             .is_err(),
             "code 是整数，字符串形态不该被接受（否则等于容忍那个旧 bug）"
+        );
+    }
+
+    /// 复刻 [`Client::user_group_rates`] 的**解析那一半**（HTTP 那半不进单测）：
+    /// `send_optional` 解出信封 → `into_optional_data` → 空 data 取默认值。
+    fn user_group_rates_from(body: &str) -> Result<HashMap<i64, f64>, AppError> {
+        let env: Envelope<HashMap<i64, f64>> = serde_json::from_str(body)
+            .map_err(|e| AppError::Config(format!("获取分组专属倍率失败: 响应解析出错 {e}")))?;
+        Ok(env
+            .into_optional_data("获取分组专属倍率")?
+            .unwrap_or_default())
+    }
+
+    /// ⭐ **`data: null` 是「这个用户没有专属倍率」，不是错误。**
+    ///
+    /// sub2api 的 `GetUserGroupRates` 把 repo 返回的 nil map 直接交给 `response.Success`，
+    /// 于是线上真实响应就是 `{"code":0,"message":"success","data":null}`。
+    /// 走通用的 `Client::send` 会撞 `Envelope::into_data` 那句「响应缺少 data」⇒
+    /// 每一个没有专属折扣的用户（绝大多数）都会在 provision 里收到一条假错误。
+    ///
+    /// 会红的改法：把 `user_group_rates` 换回 `Client::send`（那条要求 data 非空）。
+    #[test]
+    fn user_group_rates_treats_a_null_payload_as_no_custom_rates() {
+        let empty = user_group_rates_from(r#"{"code":0,"message":"success","data":null}"#)
+            .expect("null 是正常回复，不该报错");
+        assert!(empty.is_empty());
+
+        // 字段整个缺失也一样（老版本服务端可能不带 data）。
+        let missing = user_group_rates_from(r#"{"code":0,"message":"success"}"#)
+            .expect("缺 data 同样不该报错");
+        assert!(missing.is_empty());
+    }
+
+    /// 键在 JSON 里是字符串（Go 的 `map[int64]float64` 就这么序列化），必须解回 `i64` ——
+    /// 解成字符串键的话与 `Group::id` 对不上，join 恒为空、专属倍率永远不生效（且不报错）。
+    #[test]
+    fn user_group_rates_parses_string_keys_back_into_group_ids() {
+        let rates =
+            user_group_rates_from(r#"{"code":0,"message":"success","data":{"3":0.12,"17":1.5}}"#)
+                .expect("正常 map 必须能解");
+        assert_eq!(rates.get(&3).copied(), Some(0.12));
+        assert_eq!(rates.get(&17).copied(), Some(1.5));
+        assert_eq!(rates.len(), 2);
+    }
+
+    /// 业务错误（`code != 0`）仍然是错误 —— 别把它一起吞成空 map，
+    /// 那会让「登录态坏了」表现成「你没有专属倍率」。
+    #[test]
+    fn user_group_rates_still_surfaces_a_business_error() {
+        assert!(
+            user_group_rates_from(r#"{"code":40001,"message":"unauthorized","data":null}"#)
+                .is_err()
         );
     }
 

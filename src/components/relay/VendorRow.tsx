@@ -6,6 +6,7 @@ import {
   Pencil,
   PencilLine,
   Play,
+  RefreshCw,
   Trash2,
   Undo2,
   Wallet,
@@ -18,7 +19,6 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { VendorAccountRow } from "@/lib/api/vendor";
 
-import { RefreshActionMenu } from "./RefreshActionMenu";
 import { rowKey } from "./rowKey";
 
 /**
@@ -413,7 +413,7 @@ function VendorStatus({
               className="h-7 gap-1 px-2 text-muted-foreground"
               disabled={loggingIn}
               onClick={onLogin}
-              title={t("loongport.vendor.sessionExpiredUsable")}
+              title={t("loongport.row.sessionExpiredUsable")}
             >
               {loggingIn ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -425,13 +425,23 @@ function VendorStatus({
         </div>
 
         {/* 「重新备一次密钥」只是把本地已有的 sk 重新写入六个平台配置，
-            不会去官网换新 key。收进明确命名的菜单，避免一个裸刷新图标让用户
-            误以为它会更新密钥本身。 */}
-        <RefreshActionMenu
-          actionLabel={t("loongport.vendor.refreshKey")}
-          loading={provisioning}
-          onAction={onProvision}
-        />
+            不会去官网换新 key。所以按钮**必须带文字** —— 一个裸刷新图标会让用户
+            误以为它会去官网换一把新的。形状与中转站行那个「更新可用分组」一致。 */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1"
+          disabled={provisioning}
+          onClick={onProvision}
+        >
+          {provisioning ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" />
+          )}
+          {t("loongport.vendor.refreshKey")}
+        </Button>
       </div>
     );
   }

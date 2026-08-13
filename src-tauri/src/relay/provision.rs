@@ -252,6 +252,31 @@ pub async fn provision(client: &Client) -> Result<ProvisionResult, AppError> {
         }
     }
 
+    // 把「用户专属倍率」并进来 —— sub2api 把倍率拆成两半，这是第二半。
+    //
+    // `/groups/available` 给的是**分组默认**倍率，中转站可以给某个用户单独设更低的
+    // （`user_group_rates` 表），那份要另查 `/groups/rates`。sub2api 自己的前端就是把
+    // 这两条 join 起来显示的（`KeysView.vue` 拉 `getAvailable()` + `getUserGroupRates()`
+    // 交给 `GroupBadge`），我们照它做。
+    //
+    // ⚠️ **失败当作「没有专属倍率」**，不是错误：拿不到它只是显示的数字回落成分组默认值，
+    // 而为它中断整次 provision 会让用户连密钥都拿不到。
+    //
+    // ⚠️ **有意在这里覆盖，而不是在 `ensure_key_for` 里** —— `Group::is_usable_for`
+    // 那道探针池过滤（惩罚性倍率）必须继续用**分组默认倍率**判：它判的是「这个分组
+    // 是不是不给人用的」，与某个用户拿到什么折扣无关。
+    let user_rates = client.user_group_rates().await.unwrap_or_else(|e| {
+        log::debug!("查询用户专属倍率失败（回落到分组默认倍率）: {e}");
+        Default::default()
+    });
+    if !user_rates.is_empty() {
+        for targeted in &mut result.tiers {
+            if let Some(rate) = user_rates.get(&targeted.tier.group_id) {
+                targeted.tier.rate_multiplier = *rate;
+            }
+        }
+    }
+
     // 分组被删除 ⇒ 它的 sk 在服务端成了孤儿，顺手删掉（**含服务端那把**）。
     //
     // 已有分组的 key 只是认领、绝不重建/轮换（见 `ensure_key_for`）；这里只处理
