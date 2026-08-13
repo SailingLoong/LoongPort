@@ -401,7 +401,7 @@ fn normalized_policy(policy: &RelayDirectoryPolicy) -> RelayDirectoryPolicy {
 
 fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
     let policy = normalized_policy(&config.relay_directory);
-    let blocked: BTreeSet<_> = policy.blocked_hosts.iter().cloned().collect();
+    let mut blocked: BTreeSet<_> = policy.blocked_hosts.iter().cloned().collect();
     let mut aliases = BTreeMap::new();
     for (loongport_host, site) in &policy.sites {
         let veridrop_host = site
@@ -411,7 +411,11 @@ fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
             .filter(|host| !host.is_empty())
             .unwrap_or_else(|| loongport_host.clone());
         aliases.insert(loongport_host.clone(), veridrop_host.clone());
-        aliases.insert(veridrop_host.clone(), veridrop_host);
+        aliases.insert(veridrop_host.clone(), veridrop_host.clone());
+        if blocked.contains(loongport_host) || blocked.contains(&veridrop_host) {
+            blocked.insert(loongport_host.clone());
+            blocked.insert(veridrop_host);
+        }
     }
 
     let mut candidates = BTreeSet::new();
@@ -887,6 +891,55 @@ mod tests {
                 .map(|item| item.veridrop_host.as_str())
                 .collect::<Vec<_>>(),
             vec!["slow.example", "fast.example"]
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_site_identity_does_not_fetch_its_veridrop_alias() {
+        let app = Router::new()
+            .route(
+                "/leaderboard/gemini",
+                get(|| async { Html(include_str!("fixtures/veridrop-gemini.html")) }),
+            )
+            .route(
+                "/leaderboard/api.790053500.com",
+                get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local VeriDrop fixture server");
+        let address = listener.local_addr().expect("fixture server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve VeriDrop fixtures");
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("fixture client");
+        let mut config = config_with_directory();
+        config
+            .aff_codes
+            .insert("790053500.com".into(), "invite".into());
+        config.relay_directory.blocked_hosts = vec!["790053500.com".into()];
+
+        let items = fetch_live_source_with(
+            &client,
+            &format!("http://{address}"),
+            LeaderboardKind::Gemini,
+            &managed_veridrop_hosts(&config),
+        )
+        .await
+        .expect("blocked alias must not make the leaderboard fail");
+        server.abort();
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.veridrop_host.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gemini.example"]
         );
     }
 
