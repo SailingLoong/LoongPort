@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("react-i18next", () => ({
@@ -42,15 +43,34 @@ vi.mock("react-i18next", () => ({
         "loongport.row.getKeys": "创建接入配置",
         "loongport.row.tierCount": "{{count}} 个接入配置",
         "loongport.row.sessionExpiredUsable":
-          "登录已过期，但 API 密钥仍可使用；余额暂时无法查询。点击重新登录。",
+          "登录已过期，但 API 密钥仍可使用（余额也照常显示）。点击重新登录。",
         "loongport.vendor.noKey": "尚未配置 API 密钥",
         "loongport.vendor.keyReady": "已创建接入配置",
       })[key] ?? key,
   }),
 }));
 
+import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
+
 import { RelayRow } from "../RelayRow";
 import { VendorRow } from "../VendorRow";
+
+// 两类行现在各自用 `useRowBalanceQuery` 拉余额（react-query）⇒ 得有 provider。
+// 余额本身不是这道闸关心的东西，`invoke` 让它 reject 即可：行会渲染失败态的
+// 用量条，刷新按钮照在。
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async () => {
+    throw new Error("balance not stubbed in this test");
+  }),
+}));
+
+function renderWithQuery(ui: ReactElement) {
+  return render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      {ui}
+    </QueryClientProvider>,
+  );
+}
 
 const tier = {
   providerId: "provider-a",
@@ -88,7 +108,6 @@ function renderRelayRow(
     onProvision,
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
-    balance: null,
     onPurchase: vi.fn(),
     onCheckTier: vi.fn(),
     isCheckingTier: () => false,
@@ -100,7 +119,7 @@ function renderRelayRow(
     isVerifyingTier: () => false,
   };
 
-  return { onProvision, onLogin, ...render(<RelayRow {...props} />) };
+  return { onProvision, onLogin, ...renderWithQuery(<RelayRow {...props} />) };
 }
 
 function renderVendorRow(onProvision = vi.fn()) {
@@ -118,7 +137,6 @@ function renderVendorRow(onProvision = vi.fn()) {
       userEdited: false,
     },
     busy: new Set(),
-    balance: null,
     isCurrent: false,
     onLogin: vi.fn(),
     onProvision,
@@ -128,7 +146,7 @@ function renderVendorRow(onProvision = vi.fn()) {
     onReset: vi.fn(),
   };
 
-  return { onProvision, ...render(<VendorRow {...props} />) };
+  return { onProvision, ...renderWithQuery(<VendorRow {...props} />) };
 }
 
 /**
@@ -188,7 +206,7 @@ describe("行上的刷新动作", () => {
     const reLogin = screen.getByRole("button", { name: "重新登录" });
     expect(reLogin).toHaveAttribute(
       "title",
-      "登录已过期，但 API 密钥仍可使用；余额暂时无法查询。点击重新登录。",
+      "登录已过期，但 API 密钥仍可使用（余额也照常显示）。点击重新登录。",
     );
   });
 });

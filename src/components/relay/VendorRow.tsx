@@ -9,7 +9,6 @@ import {
   RefreshCw,
   Trash2,
   Undo2,
-  Wallet,
 } from "lucide-react";
 
 import type { DraggableAttributes } from "@dnd-kit/core";
@@ -19,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { VendorAccountRow } from "@/lib/api/vendor";
 
+import { RowBalance } from "./RowBalance";
 import { rowKey } from "./rowKey";
 
 /**
@@ -32,15 +32,15 @@ import { rowKey } from "./rowKey";
  * 1. **不可展开** —— 一个官网账号就一个 endpoint，没有档位层可展开
  *    （所以没有 `Collapsible`、没有箭头、也不需要 `open` / `onOpenChange`）
  * 2. **无档位列表** —— 同上
- * 3. **余额直接渲染字符串** —— 后端给的已经是 `"¥547.08"`（币种符号在里面），
- *    前端**不做任何数值转换或格式化**。relay 那边是 `number` + `toFixed(2)`，
- *    两条契约有意不同（见 `vendorApi.balance`）
+ * 3. **没有充值按钮** —— relay 那边余额旁边有一个（`relay_purchase`），vendor 侧
+ *    **没有对应命令**（官网充值要走厂商自己的收银台，我们没做也不该做）。所以这里
+ *    的 `RowBalance` 不传 `onPurchase`，只剩用量条。
  *
- * ## 官网行的余额不可点
+ * ## 余额与中转站行**共用**同一个组件（2026-08-13 收敛）
  *
- * relay 那边余额是个按钮（点开充值页），因为它有 `relay_purchase` 命令。
- * vendor 侧**没有对应命令**（官网充值要走厂商自己的收银台，我们没做也不该做），
- * 所以这里余额就是一段文字 —— 做成看起来能点的样子是骗人。
+ * 曾经这里是「直接渲染后端拼好的字符串 `"¥547.08"`」，relay 那边是 `number` +
+ * `toFixed(2)` —— 同一个事实两套契约。后端统一成 `UsageResult` 之后两边都走
+ * `RowBalance`（即 provider 页那条用量条：上次查询时间 + 手动刷新按钮）。
  */
 export interface VendorRowProps {
   account: VendorAccountRow;
@@ -52,11 +52,6 @@ export interface VendorRowProps {
    * 与官网行 3 的按钮一起转圈。同一个坑、同一个解法（判别式 key）。
    */
   busy: ReadonlySet<string>;
-  /**
-   * 这一行的余额，**已格式化**（`"¥547.08"`）。`null` = 还没拉到 / 拉失败
-   * （登录态过期时必然拉不到）—— 那时整块不渲染，不摆「--」占位符。
-   */
-  balance: string | null;
   /** 这一行的配置是不是当前 tab 正在用的那个。 */
   isCurrent: boolean;
   onLogin: () => void;
@@ -101,7 +96,6 @@ export function vendorBusyKey(action: string, id: number): string {
 export function VendorRow({
   account,
   busy,
-  balance,
   isCurrent,
   onLogin,
   onProvision,
@@ -195,15 +189,15 @@ export function VendorRow({
           )}
         </div>
 
-        {/* 余额。**直接渲染后端给的字符串**，不 `toFixed`、不拼币种符号 ——
-            那些都在 Rust 侧做完了（见 `vendorApi.balance`）。
-            `null` 时整块不渲染（与 relay 侧同一条判据）。 */}
-        {balance !== null && (
-          <span className="flex shrink-0 items-center gap-1 px-1.5 py-1 text-xs text-muted-foreground">
-            <Wallet className="h-3.5 w-3.5" />
-            {balance}
-          </span>
-        )}
+        {/* 余额（provider 页那条用量条，与中转站行同一个组件）。
+            ⚠️ **判据是「登录过」而不是「登录态还有效」**：sk 是独立凭据，
+            登录态过期时后端照样查得到（第 1 步就命中 `api.deepseek.com`）。
+            官网行没有充值命令 ⇒ 不传 `onPurchase`。 */}
+        <RowBalance
+          rowKind="vendor"
+          rowId={account.id}
+          enabled={account.loggedIn || account.sessionExpired}
+        />
 
         {/* 状态动作（含「使用 / 在用」主按钮）。**放在动作组最前**，对齐
             cc-switch 的「主按钮在左、图标组在右」（`ProviderActions` 内部次序）。 */}

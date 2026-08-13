@@ -24,6 +24,7 @@
 //! 模块划分：
 //!
 //! - [`api`]：中转站的窄 DTO + HTTP 客户端（探测 / 分组 / Key / 余额 / 倍率）。**当前是 sub2api 形状**
+//! - [`balance`]：一行余额的有序回落链（cc-switch → sub2api sk → JWT），两类行共用
 //! - [`creds`]：凭据的内存结构与持久化（`loongport_credential` 表）
 //! - [`aff`]：站点 host → 我们的注册邀请码（编译期常量表）
 //! - [`login`]：登录 WebView（加载中转站真实登录页，从 localStorage 取凭据回传）
@@ -55,6 +56,7 @@
 pub mod aff;
 pub mod api;
 pub mod backend;
+pub mod balance;
 pub mod cc_switch_import;
 pub mod chatgpt_app;
 pub mod creds;

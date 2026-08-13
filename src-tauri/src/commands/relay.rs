@@ -40,10 +40,10 @@ use tauri::{Emitter, Manager, State};
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
-use crate::provider::Provider;
+use crate::provider::{Provider, UsageResult};
 use crate::relay::{
-    api, backend, chatgpt_app, creds, discovery, imagegen_mcp, login, newapi, newapi_provision,
-    provider_fingerprint, provision, purchase,
+    api, backend, balance, chatgpt_app, creds, discovery, imagegen_mcp, login, newapi,
+    newapi_provision, provider_fingerprint, provision, purchase,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -3382,37 +3382,110 @@ fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
     with_conn(state, |conn| creds::remove(conn, id))
 }
 
+/// 一行名下**全部托管档位**里的 base_url 与 sk。
+///
+/// 归属判据与 [`tiers_of_site`] 一致（站点 + 账号），但**跨全部 app 扫** ——
+/// 同一行的档位可能只挂在某一个 CLI 下（用户只给 codex 生成过 sk），
+/// 按单个 app 查会在别的 app 上空手而归，让余额白白落到下一条路。
+///
+/// 顺序不稳定不要紧：调用方（[`crate::relay::balance::resolve`]）是并发试完取第一个
+/// 拿到结果的，同一行的每把 sk 问出的钱包余额是同一个账户的同一个数。
+fn relay_balance_inputs(state: &AppState, relay: &creds::Relay) -> (String, Vec<String>) {
+    let mut base_url = None;
+    let mut keys: Vec<String> = Vec::new();
+    for app_type in AppType::all() {
+        let Ok(providers) = ProviderService::list(state, app_type.clone()) else {
+            continue;
+        };
+        for provider in providers.values() {
+            if !is_managed(provider) {
+                continue;
+            }
+            if provider.website_url.as_deref() != Some(relay.site_origin.as_str()) {
+                continue;
+            }
+            // 与 `tiers_of_site` 同一张真值表：档位没记账号（旧数据）只按站点归。
+            let owner = provider.meta.as_ref().and_then(|m| m.loongport_account_id);
+            let belongs = match (relay.account_id, owner) {
+                (Some(want), Some(owner)) => want == owner,
+                (_, None) => true,
+                (None, Some(_)) => false,
+            };
+            if !belongs {
+                continue;
+            }
+            if let Some(sk) = provision::extract_api_key(&provider.settings_config, &app_type) {
+                if base_url.is_none() {
+                    base_url = crate::proxy::providers::get_adapter(&app_type)
+                        .extract_base_url(provider)
+                        .ok();
+                }
+                if !sk.trim().is_empty() && !keys.contains(&sk) {
+                    keys.push(sk);
+                }
+            }
+        }
+    }
+    (base_url.unwrap_or_default(), keys)
+}
+
 /// 余额。`relay_id` 指定查**哪一行**的。
 ///
-/// `None` 回落到「当前站」。**前端已没有该省略它的调用方**（中转站区的每一行都显式传），
-/// 与 [`relay_login`] / [`relay_provision`] 同一套形状、同一条纪律：
-/// **显式指定时查不到就报错，绝不回落到当前站**（那会把 B 的余额显示在 A 那一行上，
-/// 用户会照着错的数字决定要不要充值 —— 比报错糟得多）。
-///
-/// 这个参数原本有意不加，理由是「中转站行上并不显示余额」。现在每一行都显示自己的余额，
-/// 消费者有了，所以按当初写下的预案补上：`usable_relay` 早就支持 `Option<i64>`。
+/// 与 [`relay_login`] / [`relay_provision`] 同一套纪律：显式指定查不到就报错，绝不
+/// 回落到其它站点 —— 那会把 B 的余额显示在 A 那一行上，比报错更糟。
 ///
 /// ## 一行一次请求是安全的
 ///
 /// `/user/profile` **没挂 `Heavy()`**，只吃 `panelRateLimiter.Global()`
 /// （sub2api 默认 `UserRPM = 240/分钟`，按 user_id 计数）—— 而且不同中转站行往往是
 /// **不同用户**，各记各的额度。N 行各打一次远远碰不到限流。
+///
+/// ## 为什么返回 [`UsageResult`] 而不是 `api::Balance`
+///
+/// 这是本轮最主要的收敛（全局准则 §1.4）。原来中转站行回 `{balance, frozenBalance}`
+/// 数字、官网行回**后端已格式化好的字符串** `"¥547.08"` —— 同一个事实两套契约，
+/// 于是前端也就有两份余额 state、两个 effect、两处渲染。改成两类行都回上游那个
+/// [`UsageResult`] 之后，前端只剩一个 hook 一个组件，还顺带白拿了 provider 页
+/// 那套用量条（上次查询时间 + 手动刷新按钮）。
+///
+/// ## **不走 [`usable_relay`]，因此登录态过期也能查**
+///
+/// 这是本轮的目的本身。`usable_relay` 会校验登录态、过期就报错 —— 而 sk 是独立凭据，
+/// 登录态过期时它照样能调用。所以这里只读那一行的记录（[`creds::get`]），把
+/// 「有没有可用登录态」交给 [`crate::relay::balance::resolve`] 的第 3 步自己判：
+/// 前两步不需要登录态，第 3 步需要，语义落在那一步里而不是拦在门口。
+///
+/// **不返回 `Err`**（除了「这一行不存在」）：三条路都失败时回 `success:false`，
+/// 前端才有失败态可渲染、有刷新按钮可点。见 [`crate::relay::balance`] 模块文档。
 #[tauri::command]
 pub async fn relay_balance(
     app_handle: tauri::AppHandle,
     relay_id: i64,
-) -> Result<api::Balance, String> {
-    let op = usable_relay(&app_handle, relay_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    backend::RuntimeBackend::for_relay(&op)
-        .balance()
-        .await
-        .map(|balance| api::Balance {
-            balance: balance.balance,
-            frozen_balance: balance.frozen_balance,
-        })
-        .map_err(|e| e.to_string())
+) -> Result<UsageResult, String> {
+    let (relay, base_url, api_keys) = {
+        let state = app_handle.state::<AppState>();
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("找不到 id 为 {relay_id} 的中转站"))?;
+        let (base_url, api_keys) = relay_balance_inputs(&state, &relay);
+        (relay, base_url, api_keys)
+    };
+
+    Ok(balance::resolve(
+        balance::BalanceQuery {
+            site_origin: &relay.site_origin,
+            base_url: &base_url,
+            api_keys: &api_keys,
+        },
+        // 登录态还在才给第 3 步（JWT 路）。空 token 就别让它白打一个必定 401 的请求。
+        if relay.auth_token.trim().is_empty() {
+            balance::SessionFallback::None
+        } else {
+            balance::SessionFallback::Relay(&relay)
+        },
+    )
+    .await
+    .usage)
 }
 
 /// 带登录态打开某个中转站的充值页。

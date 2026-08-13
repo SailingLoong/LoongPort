@@ -46,5 +46,4 @@ export type {
   TierInfo,
   ProvisionSummary,
   SwitchTierResult,
-  RelayBalance,
 } from "./relay";

@@ -1,7 +1,6 @@
 import { useTranslation } from "react-i18next";
 import {
   Activity,
-  AlertCircle,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -15,7 +14,6 @@ import {
   RefreshCw,
   Trash2,
   Undo2,
-  Wallet,
 } from "lucide-react";
 
 import type { DraggableAttributes } from "@dnd-kit/core";
@@ -30,7 +28,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
 import type { VerificationVerdict } from "@/lib/api/modelVerification";
-import { isLowBalance, LOW_BALANCE_THRESHOLD_USD } from "./lowBalance";
+import { RowBalance } from "./RowBalance";
 
 /**
  * 一行中转站 + 可折叠的档位列表。
@@ -97,14 +95,7 @@ export interface RelayRowProps {
   onProvision: () => void;
   onSwitchTier: (tier: TierInfo) => void;
   onSelectTierModel: (tier: TierInfo, model: string) => void;
-  /**
-   * 这一行的余额。`null` = 还没拉到 / 拉失败（中转站可能关了用户面板）。
-   *
-   * **拉失败不是异常状况**，所以是 `null` 而不是抛错：余额是附加信息，
-   * 为它打断用户的主流程是错的。UI 在 `null` 时什么都不显示。
-   */
-  balance: number | null;
-  /** 点余额 → 带登录态开这一行的充值页。 */
+  /** 带登录态开这一行的充值页（钱包按钮，低余额时换琥珀叹号）。 */
   onPurchase: () => void;
   /**
    * 检测某个档位的连通性。**复用上游的 `useStreamCheck`** —— 托管档位就是
@@ -159,7 +150,6 @@ export function RelayRow({
   onProvision,
   onSwitchTier,
   onSelectTierModel,
-  balance,
   onPurchase,
   onCheckTier,
   isCheckingTier,
@@ -259,16 +249,17 @@ export function RelayRow({
           </CollapsibleTrigger>
 
           {/* 余额 + 充值入口。放在状态按钮**左边**：它是这一行的属性（多少钱），
-              而右边那组是动作（登录 / 获取密钥）—— 混在一起会让用户以为余额也是个按钮组的一部分。
-              未登录的行没有余额可言，`balance` 恒为 null，这里自然什么都不渲染。 */}
+              而右边那组是动作（登录 / 获取密钥）—— 混在一起会让用户以为余额也是个按钮组的一部分。 */}
           <RowBalance
-            balance={balance}
-            // ⚠️ **必须带 loggedIn 守卫**（review 抓出）：`balances` 是按 id 累积的 map，
-            // 它不会因为某一行登出就自动清掉那一项。只判 `balance !== null` 的话，
-            // 用户登出后那一行仍显示**登出前的旧金额**和一个可点的充值按钮 ——
-            // 点下去才报「请先登录」。余额是账号态的一部分，没登录就不该有余额。
-            loggedIn={relay.loggedIn}
-            busy={busy.has(`purchase:${relay.id}`)}
+            rowKind="relay"
+            rowId={relay.id}
+            // ⚠️ **判据是「登录过」而不是「登录态还有效」**（2026-08-13 改）：
+            // sk 是独立凭据，登录态过期时后端照样查得到余额（`relay::balance` 的前
+            // 两步不需要登录态）。用 `loggedIn` 当开关会在前端把后端刚修好的能力
+            // 又堵死一次 —— 那正是这一轮要修的病。
+            // 从没登录过的行确实无从查起（既没 sk 也没登录态），那时才关掉。
+            enabled={relay.loggedIn || relay.sessionExpired}
+            purchaseBusy={busy.has(`purchase:${relay.id}`)}
             onPurchase={onPurchase}
           />
 
@@ -381,101 +372,6 @@ function RowDelete({
         <Trash2 className="h-3.5 w-3.5" />
       )}
     </Button>
-  );
-}
-
-/**
- * 这一行的余额，点一下带登录态开充值页。余额偏低时变成一个警示。
- *
- * ## 为什么是 button 而不是「一段文字 + 旁边一个按钮」
- *
- * 维护者要的是「鼠标放上面指示可以点击」—— 那就是说这段数字**本身**是控件。
- * 抄仓里已有的同形范例：`ProviderCard` 的 URL 那一处也是「看起来像文字、
- * 实际是 button，hover 出下划线 + 变蓝」（`ProviderCard.tsx` 的 `isClickableUrl`）。
- * 判据仍是「和旧页面放一起看不出是两个人写的」。
- *
- * `balance === null` 时**整块不渲染**：可能是还没拉到、也可能是中转站关了用户面板。
- * 摆一个「--」或「加载中」只会让用户盯着一个永远不变的占位符 —— 那比没有更糟。
- *
- * ## ⚠️ 低余额提醒为什么**不新增一个叹号按钮**（2026-08-04）
- *
- * 需求原文是「在账户余额旁边弄个小叹号，点击跳转对应账号的充值页面」。
- * 而这段余额**本来就是**「点一下跳充值页」的按钮 ⇒ 再加一个按钮的话，
- * 两个紧邻的控件点下去做同一件事，还得各自处理冒泡、busy、disabled。
- *
- * 所以做法是**把这一个控件切到警示态**：钱包图标换成叹号、颜色转琥珀、
- * title 换成催充值的那句。用户看到的仍是「余额旁边有个叹号」，
- * 点它跳充值页 —— 需求原文的行为一字不差，但少一个控件。
- *
- * 这也顺带避免了一个真实的坑：两个相邻按钮里只有一个 `stopPropagation`
- * 的话，点错那个会顺带折叠整行。
- */
-function RowBalance({
-  balance,
-  loggedIn,
-  busy,
-  onPurchase,
-}: {
-  balance: number | null;
-  loggedIn: boolean;
-  busy: boolean;
-  onPurchase: () => void;
-}) {
-  const { t } = useTranslation();
-
-  // 两个条件都要：没登录不该有余额（`balances` 是累积的 map，登出不会自动清掉那一项，
-  // 只判 balance 会让登出后的行继续显示旧金额）；`null` 是还没拉到或拉失败。
-  if (!loggedIn || balance === null) return null;
-
-  // 判据提在 `lowBalance.ts` 里 —— 它有两个消费者（图标与配色），
-  // 且是这个面板的领域规则，不该与「怎么画」缠在一起。
-  const low = isLowBalance(balance);
-
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        // 这个按钮在折叠触发区**外面**，但它与整行的点击区相邻 ——
-        // 不阻止冒泡的话点余额会顺带折叠这一行。
-        e.stopPropagation();
-        onPurchase();
-      }}
-      disabled={busy}
-      // title 挂在按钮自身：它 disabled 的时间极短（就是开窗那一下），
-      // 不像上游那几个常驻 disabled 的按钮需要 wrapper 承接 hover。
-      title={
-        low
-          ? t("loongport.row.lowBalanceHint", {
-              threshold: LOW_BALANCE_THRESHOLD_USD,
-            })
-          : t("loongport.row.purchaseHint")
-      }
-      className={cn(
-        "flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs transition-colors",
-        // 低余额：琥珀色常驻（不是 hover 才出）—— 它是个提醒，藏起来就没用了。
-        // 用琥珀而不是红：钱不够是「该处理一下」，不是「出错了」。
-        // 这两个色阶抄的是仓里已有的警示用法（`AddSiteDialog` 的提示条同一组）。
-        low
-          ? "text-amber-600 hover:bg-amber-50 hover:underline dark:text-amber-500 dark:hover:bg-amber-950/40"
-          : "text-muted-foreground hover:bg-muted/60 hover:text-blue-500 hover:underline dark:hover:text-blue-400",
-        busy && "cursor-not-allowed opacity-60 hover:no-underline",
-      )}
-    >
-      {busy ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : low ? (
-        // 叹号替掉钱包 —— 需求要的那个「小叹号」就是它。
-        <AlertCircle className="h-3.5 w-3.5" />
-      ) : (
-        <Wallet className="h-3.5 w-3.5" />
-      )}
-      {/* `$` + 两位小数，与顶部那处显示**一致**（同一个数字在两处必须同一个样子）。
-          初稿这里有意省掉 `$`，理由写的是「没拿到站点用什么货币的字段」——
-          **那个理由是错的**：sub2api 的 `balance` 就是美元计价（后台文案写的是
-          「每付 1 CNY 得到多少 USD 余额」，支付货币默认 CNY 再按汇率换成 USD 余额），
-          且 `/settings/public` 里压根没有货币字段可查 ⇒ 写死 `$` 才是对的。 */}
-      ${balance.toFixed(2)}
-    </button>
   );
 }
 

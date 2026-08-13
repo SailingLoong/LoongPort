@@ -7,69 +7,77 @@ import { resolve } from "node:path";
  *
  * ## 为什么这是个正确性问题，不是产品偏好
  *
- * 两侧余额的**类型和币种都不同**：
- *
- * | | 类型 | 值的样子 | 币种 |
- * |---|---|---|---|
- * | relay | `number \| null` | `547.08` | **美元**（sub2api 的 balance 就是 USD 计价） |
- * | vendor | `string \| null` | `"¥547.08"` | **人民币**（DeepSeek 官网） |
- *
- * 拿人民币余额跟一个 5 **美元**的阈值比是错的（差着汇率）。而且 vendor 那侧是
- * 后端已格式化好的字符串，前端要比较就得反解析它 —— 那会把「格式化在 Rust 侧做完」
- * 这条设计打破。
+ * 阈值是 **5 美元**（sub2api 的钱包就是 USD 计价），而官网行是 DeepSeek 的
+ * **人民币**钱包（`unit: "CNY"`）。拿人民币余额跟一个美元阈值比是错的（差着汇率）。
  *
  * ⚠️ 2026-08-04 维护者明确要求：「只对中转站生效，对 deepseek 之类的不生效」。
  *
+ * ## ⚠️ 2026-08-13 之后这条闸更重要了，不是更没用了
+ *
+ * 那一轮把两类行的余额契约统一成了上游的 `UsageResult`（原来是 relay 的 `number`
+ * vs vendor 的已格式化字符串），两类行也从此共用同一个 `RowBalance` 组件。
+ * **类型上那道天然隔离没有了** —— 现在只剩组件里一句显式判据顶着：`low` 只在
+ * 有充值入口（`onPurchase`，只有中转站行传）时才算。
+ *
+ * 所以这道闸从「守两个类型不许合并」改成「守那句判据不许被简化掉」。
+ *
  * ## 为什么读源码断言，而不是渲染组件
  *
- * 要测的是「`VendorRow` 压根没引入这个判据」这件**结构性事实**。
- * 渲染测试只能验「某个具体余额值不出叹号」—— 那种断言在有人给 vendor
- * 加上判据、只是阈值凑巧没命中时照样通过。同型于
- * `vendorSwitchGuardContract.test.ts`（仓库已有这个惯例）。
+ * 要测的是「vendor 那条路压根到不了这个判据」这件**结构性事实**。渲染测试只能验
+ * 「某个具体余额值不出叹号」—— 那种断言在有人把判据放开、只是阈值凑巧没命中时
+ * 照样通过。同型于 `vendorSwitchGuardContract.test.ts`（仓库已有这个惯例）。
  */
 describe("低余额提醒的作用域", () => {
   const read = (rel: string) =>
     readFileSync(resolve(__dirname, "../../src", rel), "utf8");
 
-  it("VendorRow 不引入低余额判据 —— 那边余额是人民币字符串，比不了美元阈值", () => {
+  it("VendorRow 不引入低余额判据，也不传充值入口 —— 那边是人民币钱包", () => {
     const vendorRow = read("components/relay/VendorRow.tsx");
     expect(vendorRow).not.toContain("isLowBalance");
     expect(vendorRow).not.toContain("LOW_BALANCE_THRESHOLD");
     expect(vendorRow).not.toContain("lowBalanceHint");
+    // 官网没有充值命令（收银台在厂商那边），所以不传 —— 这同时也是
+    // 「不算低余额」的判据本身，见 `RowBalance`。
+    // 只禁**作为 prop 传值**（`onPurchase={...}` / `onPurchase:`）；
+    // 文档里提到这个名字是正常的，那正是在解释为什么不传。
+    expect(vendorRow).not.toMatch(/onPurchase\s*[={]/);
   });
 
-  it("RelayRow 引入了它 —— 提醒要真的出现在中转站行上", () => {
+  /**
+   * ⭐ **`low` 必须以「有没有充值入口」为前置条件。**
+   *
+   * 这条守的是把它简化成 `isLowBalance(remaining ?? null)` 那种改法 —— 那样一改，
+   * 官网行的人民币余额就会拿去跟 5 美元比，低于 ¥5 之外的区间全部误判，
+   * 而且不会有任何报错。
+   */
+  it("低余额判据以「有充值入口」为前置条件（那就是「这是中转站行」）", () => {
+    const rowBalance = read("components/relay/RowBalance.tsx");
+    expect(rowBalance).toContain(
+      "const low = onPurchase ? isLowBalance(remaining ?? null) : false;",
+    );
+  });
+
+  it("中转站行真的用上了它 —— 提醒要出现在中转站行上", () => {
     const relayRow = read("components/relay/RelayRow.tsx");
-    expect(relayRow).toContain("isLowBalance");
-    expect(relayRow).toContain("lowBalanceHint");
+    const rowBalance = read("components/relay/RowBalance.tsx");
+    // 中转站行传了充值入口 ⇒ 判据对它成立。
+    expect(relayRow).toContain("onPurchase={onPurchase}");
+    expect(rowBalance).toContain("isLowBalance");
+    expect(rowBalance).toContain("lowBalanceHint");
   });
 
   /**
    * ⭐ **余额为 0 时必须仍然渲染** —— 那正是最该提醒的一刻。
    *
-   * 这条守的是 `{balance && ...}` / `if (!balance) return null` 那种写法：
-   * `0` 是 falsy ⇒ 余额刚好花完时整块消失，用户看到的是「没有余额这一项」
-   * 而不是「余额 $0.00 + 叹号」。判据必须是显式的 `=== null`（`null` 才是「不知道」）。
+   * 这条守的是 `{remaining && ...}` 那种写法：`0` 是 falsy ⇒ 余额刚好花完时
+   * 整块消失，用户看到的是「没有余额这一项」而不是「余额 0.00 + 叹号」。
    *
-   * 2026-08-04：中转站余额原本有两处显示（这里 + 已删的 LoongPort 独立页顶部），
-   * 那道「两处判据必须一致」的断言随那个页面一起去掉了。现在只有这一处。
+   * 现在这件事由呈现件 `InlineUsage` 保证：它判的是 `!== undefined`
+   * （`undefined` 才是「没有这个字段」）。
    */
   it("余额为 0 时不被 falsy 判据吞掉", () => {
-    const relayRow = read("components/relay/RelayRow.tsx");
-    expect(relayRow).toContain("balance === null) return null");
-    expect(relayRow).not.toContain("{balance && (");
-  });
-
-  /**
-   * ⭐ **vendor 的余额必须仍是字符串类型** —— 这条守的是「别为了复用提醒
-   * 而把 vendor 余额改成数字」那种改法。
-   *
-   * 那样改会连带打破两件事：后端那套纯字符串的两位小数进位（`1.005` 要显示
-   * 成 `¥1.01`，走 `f64` 会变 `1.00`），以及「币种符号已经在字符串里」
-   * 这个有意的设计（见 Rust 侧 `VendorBalance` 的文档：只有一个字段）。
-   */
-  it("vendor 的余额契约仍是「已格式化的字符串」", () => {
-    const vendorRow = read("components/relay/VendorRow.tsx");
-    expect(vendorRow).toContain("balance: string | null");
+    const usageFooter = read("components/UsageFooter.tsx");
+    expect(usageFooter).toContain("firstUsage.remaining !== undefined");
+    expect(usageFooter).not.toContain("{firstUsage.remaining && (");
   });
 });

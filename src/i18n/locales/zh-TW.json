@@ -3076,7 +3076,7 @@
       "login": "登入",
       "sessionExpired": "登入已過期",
       "reLogin": "重新登入",
-      "sessionExpiredUsable": "登入已過期，但 API 金鑰仍可使用；暫時無法查詢餘額。點一下重新登入。",
+      "sessionExpiredUsable": "登入已過期，但 API 金鑰仍可使用（餘額也照常顯示）。點一下重新登入。",
       "noTiers": "此帳號在目前平台沒有可用群組",
       "getKeys": "建立連線設定檔",
       "tierCount": "{{count}} 個連線設定檔",

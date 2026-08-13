@@ -23,7 +23,8 @@ use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
-use crate::vendor::{VendorAccount, VendorBalance, VendorError, VendorKey};
+use crate::provider::{UsageData, UsageResult};
+use crate::vendor::{VendorAccount, VendorError, VendorKey};
 
 /// 凭据回传用的自定义 scheme。
 ///
@@ -38,6 +39,9 @@ pub const LOGIN_WINDOW_LABEL: &str = "loongport-vendor-login";
 
 /// 站点 origin。**编译期常量，不是用户输入**（官网不需要探测）。
 pub const SITE_ORIGIN: &str = "https://platform.deepseek.com";
+
+/// 开放平台 API 根。余额查询按这个主机名识别 DeepSeek。
+pub const API_ORIGIN: &str = "https://api.deepseek.com";
 
 /// 登录页。
 pub const LOGIN_URL: &str = "https://platform.deepseek.com/sign_in";
@@ -161,9 +165,9 @@ pub fn config_for(app: &AppType) -> Option<(String, String)> {
 
 fn builtin_config_for(app: &AppType) -> Option<(&'static str, &'static str)> {
     Some(match app {
-        AppType::Codex => ("https://api.deepseek.com", FLASH),
+        AppType::Codex => (API_ORIGIN, FLASH),
         AppType::Claude | AppType::ClaudeDesktop => ("https://api.deepseek.com/anthropic", PRO),
-        AppType::Hermes => ("https://api.deepseek.com", PRO),
+        AppType::Hermes => (API_ORIGIN, PRO),
         AppType::OpenClaw | AppType::OpenCode => ("https://api.deepseek.com/v1", PRO),
         // 生图栏不适用：DeepSeek 没有 gpt-image-* 模型，展开一条进去只会得到一个必然 404 的档位。
         AppType::Gemini | AppType::GrokBuild | AppType::CodexImage => return None,
@@ -335,29 +339,52 @@ pub struct RawCost {
     pub currency: String,
 }
 
-/// 把余额格式化成给人看的字符串。
+/// 把余额包成上游那个 [`UsageResult`]。
 ///
-/// 规则（spec §2.8 定死，别自己发明）：
-/// - 保留 **2 位小数**，四舍五入；
-/// - `CNY → ¥`、`USD → $`，其它币种用 `<code> ` 前缀；
+/// 选钱包的规则（spec §2.8 定死，别自己发明）：
 /// - **选与 `total_costs` 同币种的那个钱包**，没有则取第一个 ——
 ///   ⚠️ **不要写死 `[0]`**，海外账号 CNY/USD 并存（bundle 里有两套告警开关）；
 /// - `bonus_wallets`（赠送）**不显示**，与 sub2api 那边 `frozen_balance` 不显示同口径。
-pub fn format_balance(data: &UserSummaryData) -> Option<VendorBalance> {
+///
+/// ## 出口为什么从 `"¥547.08"` 换成了 `UsageResult`
+///
+/// 原来这条路回**后端拼好的成品字符串**（币种符号在里面），而中转站那条回
+/// `{balance, frozenBalance}` 数字 —— 同一个事实两套契约，前端因此长出两份余额 state、
+/// 两个 effect、两处渲染。两类行统一到上游这个结构后前端只剩一个 hook（全局准则 §1.4）。
+/// 币种现在走 `unit` 字段交给前端呈现，那本来就是 provider 页用量条的形状。
+///
+/// ## ⚠️ 必须先经 [`round_decimal_string`] 再转 `f64`，不许直接 `parse::<f64>()`
+///
+/// 服务端给的是 18 位小数的字符串（实测 `"547.0842385200000000"`），而 `remaining` 是
+/// `f64`（上游契约，改不动）。直接 parse 会在**进位边界静默偏一分钱**：`"1.005"` 落到
+/// f64 是 `1.00499999…`，前端 `toFixed(2)` 显示 `1.00`，而正确答案是 `1.01`
+/// （完整对照表在 [`round_decimal_string`] 的文档里）。
+///
+/// 先舍入成 `"1.01"` 再 parse，f64 承载的就是**已经定好的两位小数**，残余误差在 1e-16
+/// 量级、显示层看不见。`wallet_usage_rounds_without_f64_on_the_real_path` 那条闸盯着
+/// 这件事：把这两步的顺序换过来必红。
+pub fn wallet_usage(data: &UserSummaryData) -> Option<UsageResult> {
     let preferred = data.total_costs.first().map(|c| c.currency.as_str());
     let wallet = preferred
         .and_then(|cur| data.normal_wallets.iter().find(|w| w.currency == cur))
         .or_else(|| data.normal_wallets.first())?;
+    // 解不动 = 不是合法的十进制数字串 ⇒ 当没拿到余额，不编造一个 0。
+    let remaining = round_decimal_string(&wallet.balance)?.parse::<f64>().ok()?;
 
-    let symbol = match wallet.currency.as_str() {
-        "CNY" => "¥".to_string(),
-        "USD" => "$".to_string(),
-        other => format!("{other} "),
-    };
-    Some(VendorBalance(format!(
-        "{symbol}{}",
-        round_decimal_string(&wallet.balance)?
-    )))
+    Some(UsageResult {
+        success: true,
+        data: Some(vec![UsageData {
+            plan_name: Some("钱包余额".to_string()),
+            remaining: Some(remaining),
+            unit: Some(wallet.currency.clone()),
+            extra: None,
+            is_valid: None,
+            invalid_message: None,
+            total: None,
+            used: None,
+        }]),
+        error: None,
+    })
 }
 
 /// 十进制字符串保留两位小数（四舍五入），**全程不经 `f64`**。
@@ -548,10 +575,13 @@ pub async fn delete_key(token: &str, key: &VendorKey) -> Result<(), VendorError>
 }
 
 /// 查余额。`None` = 拿不到（没有钱包 / 金额解不动）—— **不是显示 0**。
-pub async fn balance(token: &str) -> Result<Option<VendorBalance>, VendorError> {
+///
+/// 出口是上游那个 [`UsageResult`]，供 [`crate::relay::balance::resolve`] 的第 3 步用：
+/// 两类行（中转站 / 官网）的余额统一到一个契约后，兜底这一步也得回同一个形状。
+pub async fn balance(token: &str) -> Result<Option<UsageResult>, VendorError> {
     let body = get_text(token, "/api/v0/users/get_user_summary", "查询余额").await?;
     let data: UserSummaryData = parse_envelope(&body, "查询余额")?;
-    Ok(format_balance(&data))
+    Ok(wallet_usage(&data))
 }
 
 // ─────────────────────── 登录窗（注入脚本 + 凭据回传）───────────────────────
@@ -993,7 +1023,20 @@ mod tests {
             data.normal_wallets[0].currency, "USD",
             "fixture 顺序是判别力"
         );
-        assert_eq!(format_balance(&data).expect("有余额").0, "¥547.08");
+        let usage = first_usage(&data);
+        assert_eq!(usage.remaining, Some(547.08));
+        assert_eq!(usage.unit.as_deref(), Some("CNY"));
+    }
+
+    /// 取 `wallet_usage` 那唯一一条 [`UsageData`]。三条余额闸共用。
+    fn first_usage(data: &UserSummaryData) -> UsageData {
+        wallet_usage(data)
+            .expect("有余额")
+            .data
+            .expect("有 data")
+            .into_iter()
+            .next()
+            .expect("恰好一条")
     }
 
     // ─────────────────── 注入脚本 ───────────────────
@@ -1226,17 +1269,20 @@ mod tests {
         assert_eq!(round_decimal_string(""), None);
     }
 
-    /// ⚠️ **这条走的是 `format_balance` 完整路径**（不是内部的
-    /// `round_decimal_string`）—— 只测内部函数的话，把调用点换回
-    /// `parse::<f64>()` 那条老路它照样绿（实测过，闸没有判别力）。
+    /// ⚠️ **这条走的是 `wallet_usage` 完整路径**（不是内部的 `round_decimal_string`）——
+    /// 只测内部函数的话，把调用点换成 `wallet.balance.parse::<f64>()` 那条捷径它照样绿
+    /// （实测过，闸没有判别力）。
+    ///
+    /// 出口从字符串换成 `f64` 之后这条**更要留着**：`remaining` 是 `f64`，正是最容易
+    /// 让人图省事直接 parse 那串 18 位小数的地方。
     #[test]
-    fn format_balance_rounds_without_f64_on_the_real_path() {
-        // `1.005` 经 f64 是 1.00，正确是 1.01 —— 这一分钱就是判别力。
+    fn wallet_usage_rounds_without_f64_on_the_real_path() {
+        // 这四个数经 f64 会各偏一分钱（`1.005` 落到 `1.00499999…`）—— 就是判别力。
         for (raw, want) in [
-            ("1.005", "¥1.01"),
-            ("2.675", "¥2.68"),
-            ("0.015", "¥0.02"),
-            ("9.999", "¥10.00"),
+            ("1.005", 1.01),
+            ("2.675", 2.68),
+            ("0.015", 0.02),
+            ("9.999", 10.00),
         ] {
             let body = format!(
                 r#"{{"code":0,"msg":"","data":{{"biz_code":0,"biz_msg":"","biz_data":{{
@@ -1244,10 +1290,12 @@ mod tests {
                    "total_costs":[{{"currency":"CNY","amount":"0"}}]}}}}}}"#
             );
             let data: UserSummaryData = parse_envelope(&body, "余额").expect("解析");
-            assert_eq!(
-                format_balance(&data).expect("有余额").0,
-                want,
-                "{raw} 应当格式化成 {want}（经 f64 会偏一分钱）"
+            let got = first_usage(&data).remaining.expect("有余额");
+            // 比到 1e-9：舍入已经在字符串阶段完成，这里只防「先 parse 再舍入」那条错路
+            // （它给出的是 1.00 而不是 1.01，差 0.01，远大于这个阈值）。
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{raw} 应当舍入成 {want}，实得 {got}（先 parse 成 f64 会偏一分钱）"
             );
         }
     }
@@ -1258,7 +1306,7 @@ mod tests {
             "normal_wallets":[],"total_costs":[]}}}"#;
         let data: UserSummaryData = parse_envelope(body, "余额").expect("解析");
         assert!(
-            format_balance(&data).is_none(),
+            wallet_usage(&data).is_none(),
             "拿不到余额时不显示，不是显示 0"
         );
     }

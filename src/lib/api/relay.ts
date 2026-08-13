@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { UsageResult } from "@/types";
+
 import type { AppId } from "./types";
 
 /**
@@ -195,11 +197,6 @@ export interface RestoreOfficialLoginResult {
   warnings: string[];
 }
 
-export interface RelayBalance {
-  balance: number;
-  frozenBalance: number;
-}
-
 export const relayApi = {
   status: (): Promise<RelayStatus> => invoke("relay_status"),
 
@@ -341,10 +338,21 @@ export const relayApi = {
    * （曾经可省略、回落到「当前站」，那会让每一行都显示同一个数字而且是别人的；
    * `is_current` 整个概念已删，见后端 `creds` 模块文档。）
    *
-   * 失败**不是异常状况**：中转站可能关了用户面板、这一行可能没登录或已过期。
-   * 调用方该 catch 掉并把那一行留空，不要弹 toast —— 余额是附加信息。
+   * ## 返回上游那个 [`UsageResult`]，与官网行的 `vendorApi.balance` **同一契约**
+   *
+   * 曾经这条回 `{balance, frozenBalance}` 数字、官网那条回后端拼好的字符串
+   * `"¥547.08"` —— 同一个事实两套形状，前端因此长出两份 state、两个 effect、
+   * 两处渲染。统一之后两类行共用一个 hook（`useRowBalanceQuery`）与一个呈现件
+   * （`InlineUsage`，即 provider 页那条用量条）。
+   *
+   * 失败**不 reject**：后端三条路都查不到时回 `success:false`（见
+   * `src-tauri/src/relay/balance.rs` 模块文档）。那样用量条才能渲染失败态并留住
+   * 刷新按钮 —— reject 会让整块余额区消失，用户无从重查。
+   *
+   * ⚠️ **登录态过期也查得到**：后端前两步走 sk，不需要网页登录态。别在调用方
+   * 按 `sessionExpired` 把这条路关掉。
    */
-  balance: (relayId: number): Promise<RelayBalance> =>
+  balance: (relayId: number): Promise<UsageResult> =>
     invoke("relay_balance", { relayId }),
 
   /**

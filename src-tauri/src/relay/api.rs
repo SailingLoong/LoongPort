@@ -11,6 +11,7 @@
 //! | `GET /api/v1/keys` | 认领已有 sk（明文返回） | Bearer(JWT) |
 //! | `POST /api/v1/keys` | 建新 sk | Bearer(JWT) |
 //! | `GET /api/v1/user/profile` | 余额 + 账号身份 | Bearer(JWT) |
+//! | `GET /v1/usage` | 钱包余额（**sk 鉴权**，登录态过期也能查） | Bearer(sk) |
 //!
 //! ## 接第二家中转站（如 new-api）时改这里
 //!
@@ -41,6 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::provider::{UsageData, UsageResult};
 use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
 use crate::relay::platform_map::{parse_platform, Platform};
 
@@ -859,6 +861,107 @@ pub async fn list_models(
         return Ok(None);
     }
     Ok(Some(ids))
+}
+
+/// 用某把 sk 查**钱包余额**（`GET /v1/usage`）。
+///
+/// ## 为什么需要它：余额不该跟着网页登录态一起消失
+///
+/// 原来余额只有一条路 —— JWT 打 `/api/v1/user/profile`。那条路的前提是「网页登录态
+/// 还活着」，而 sk 是独立凭据：登录态过期时 sk 照样能调用，用户却看不到余额，
+/// 连充值入口都跟着不见了（充值按钮只在有余额时才渲染）。
+///
+/// ## ⚠️ 两条容易写错的契约
+///
+/// 1. **响应不是业务信封** —— 它是**裸的顶层 JSON 对象**（`/v1` 下的网关端点不套
+///    `{code, message, data}`）。拿 [`Envelope`] 去解会一路失败在反序列化上。
+/// 2. **只认 `balance` 字段**。sub2api 的 `/v1/usage` 对钱包型分组回
+///    `{"planName":"钱包余额","remaining":<余额>,"unit":"USD","balance":<余额>}`，
+///    但对**订阅型分组**回的是那个分组自己的日/周/月额度（有 `remaining`、
+///    **没有 `balance`**）。把 `remaining` 当钱包余额读，会在订阅型分组上把
+///    「这个分组今天还剩多少额度」显示成「账户里还有多少钱」—— 数字看着像真的，
+///    含义完全不同。所以判据是 `balance` 在不在，不是 `remaining` 在不在。
+///
+/// 返回 `success:false` = 这把 sk 问不出钱包余额（没这个端点 / 权限不够 / 是订阅型分组）。
+/// 调用方据此**试下一把 sk 或下一条路**，与 [`list_models`] 同样的「查不到不算错」纪律。
+pub async fn usage_with_api_key(site_origin: &str, api_key: &str) -> Result<UsageResult, AppError> {
+    let url = format!("{site_origin}/v1/usage");
+    let resp = build_client()?
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|e| AppError::Config(format!("查询余额失败: {}", describe_send_error(&e))))?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::UNAUTHORIZED
+    {
+        return Ok(usage_not_found(format!(
+            "这把 API key 无法查询钱包余额（HTTP {}）",
+            status.as_u16()
+        )));
+    }
+    if !status.is_success() {
+        return Err(AppError::Config(format!(
+            "查询余额失败: HTTP {}",
+            status.as_u16()
+        )));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| AppError::Config(format!("查询余额失败: 读响应出错 {e}")))?;
+    parse_usage_with_api_key_response(&body)
+}
+
+/// 从 `/v1/usage` 的裸响应里取钱包余额。**只认 `balance`**，见 [`usage_with_api_key`] 第 2 条。
+///
+/// 拆成独立函数是为了能不起 HTTP server 就把「订阅型分组不该被当成钱包」这条立成闸。
+pub(crate) fn parse_usage_with_api_key_response(body: &str) -> Result<UsageResult, AppError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct UsageResponse {
+        #[serde(default)]
+        plan_name: Option<String>,
+        #[serde(default)]
+        unit: Option<String>,
+        #[serde(default)]
+        balance: Option<f64>,
+    }
+
+    let response: UsageResponse = serde_json::from_str(body)
+        .map_err(|e| AppError::Config(format!("查询余额失败: 响应解析出错 {e}")))?;
+    let Some(balance) = response.balance else {
+        return Ok(usage_not_found(
+            "这把 API key 所属分组不是钱包型，响应里没有 balance".to_string(),
+        ));
+    };
+
+    Ok(UsageResult {
+        success: true,
+        data: Some(vec![UsageData {
+            plan_name: response.plan_name,
+            extra: None,
+            is_valid: None,
+            invalid_message: None,
+            total: None,
+            used: None,
+            remaining: Some(balance),
+            unit: response.unit,
+        }]),
+        error: None,
+    })
+}
+
+fn usage_not_found(error: String) -> UsageResult {
+    UsageResult {
+        success: false,
+        data: None,
+        error: Some(error),
+    }
 }
 
 /// 用 refresh token 换一对新的 token。

@@ -31,7 +31,7 @@ use tauri::{Emitter, Manager, State};
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::VENDOR_LOGIN_ERROR;
-use crate::provider::Provider;
+use crate::provider::{Provider, UsageResult};
 use crate::relay::provider_fingerprint;
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -705,30 +705,68 @@ fn vendor_reset_tier_config_impl(
     Ok(())
 }
 
-/// 查一行的余额。`None` = 拿不到（没有钱包 / 金额解不动）—— **不是显示 0**。
+/// 查一行的余额。走 [`crate::relay::balance::resolve`] 那条与中转站行**共用**的回落链。
 ///
-/// 返回**已格式化的字符串**（`"¥547.08"`）：币种符号已经在里面，前端不做币种分派、
-/// 也不做算术（见 [`crate::vendor::VendorBalance`] 那条「只有一个字段」）。
+/// ## 为什么返回 [`UsageResult`]（原来是格式化好的 `"¥547.08"` 字符串）
+///
+/// 原来这条路回字符串、中转站那条回 `{balance, frozenBalance}` 数字 —— 同一个事实
+/// 两套契约，前端因此长出两份 state、两个 effect、两处渲染。两边统一到上游那个
+/// [`UsageResult`] 之后前端只剩一个 hook（全局准则 §1.4），还白拿了 provider 页
+/// 那套用量条（上次查询时间 + 手动刷新按钮）。
+///
+/// 币种符号原来由后端拼进字符串。现在交给 `unit` 字段 + 前端呈现件 —— 那本来就是
+/// 上游 `UsageResult` 的形状，provider 页一直这么显示。
+///
+/// ## 官网行在**第 1 步**就命中
+///
+/// `api.deepseek.com` 是 cc-switch [`crate::services::balance::get_balance`] 认识的主机名，
+/// 所以有可用 sk 时这条路根本走不到 sub2api 那步（那个端点在官网上也不存在）。
+///
+/// 第 3 步走的是**官网自己的**网页余额接口（[`deepseek::balance`]），不是 relay 那条
+/// JWT 路 —— 见 [`crate::relay::balance::SessionFallback`]。它是 sk 还没生成时的兜底：
+/// 刚登录、还没点过「获取密钥」的行只有这一条路。
+///
+/// **登录态过期不再是硬错误**：这是本轮的目的 —— sk 是独立凭据，`api_key` 还在就该
+/// 查得到余额。所以不再一进门就 `AuthExpired`，把「有没有登录态」交给第 3 步自己判。
 #[tauri::command]
 pub async fn vendor_balance(
     state: State<'_, AppState>,
     row_id: i64,
-) -> Result<Option<String>, String> {
+) -> Result<UsageResult, String> {
     let row = with_conn(state.inner(), |conn| creds::get(conn, row_id))
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("找不到 id 为 {row_id} 的官网账号"))?;
 
-    if row.auth_token.is_empty() {
-        return Err(AppError::from(VendorError::AuthExpired).to_string());
+    let api_keys: Vec<String> = if row.api_key.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![row.api_key.clone()]
+    };
+
+    let resolved = crate::relay::balance::resolve(
+        crate::relay::balance::BalanceQuery {
+            site_origin: deepseek::SITE_ORIGIN,
+            base_url: deepseek::API_ORIGIN,
+            api_keys: &api_keys,
+        },
+        if row.auth_token.trim().is_empty() {
+            crate::relay::balance::SessionFallback::None
+        } else {
+            crate::relay::balance::SessionFallback::Vendor {
+                auth_token: &row.auth_token,
+            }
+        },
+    )
+    .await;
+
+    // 登录态确实失效了就清 token（前端据此显示「重新登录」）。**但仍返回余额结果** ——
+    // 会话失效不连累 sk，见本文件模块文档那条 `40002` 语义。判据是结构化的
+    // `VendorError`（顺着 `Resolved` 带出来的），不是字符串匹配。
+    if let Some(e) = &resolved.vendor_error {
+        on_vendor_error(state.inner(), row_id, e);
     }
 
-    match deepseek::balance(&row.auth_token).await {
-        Ok(b) => Ok(b.map(|v| v.0)),
-        Err(e) => {
-            on_vendor_error(state.inner(), row_id, &e);
-            Err(AppError::from(e).to_string())
-        }
-    }
+    Ok(resolved.usage)
 }
 
 /// 删一行，连带清掉它名下六个平台的 provider 记录。

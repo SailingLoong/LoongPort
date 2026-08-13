@@ -69,13 +69,6 @@ pub struct VendorAccount {
     pub login_identifier: String,
 }
 
-/// 已格式化的余额，如 `"¥547.08"`。
-///
-/// **只有一个字段**：币种符号已经在字符串里，再单独给一个 `currency`
-/// 就是没有消费者的字段（前端不做币种分派、也不做算术）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VendorBalance(pub String);
-
 /// 结构化错误。命令层与 UI 按它分派，**不许靠字符串匹配**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VendorError {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -38,12 +39,11 @@ import { ModelVerificationDialog } from "./model-verification/ModelVerificationD
 import { openInBrowser } from "./openInBrowser";
 import { ImageTabNotice } from "./ImageTabNotice";
 import { RelayTierList } from "./RelayTierList";
-import { balanceRowsKey, parseBalanceRowsKey } from "./balanceRowsKey";
 import { sumTiersForApp } from "./provisionScope";
 import { removeConfirmMessageKey } from "./removeConfirmWording";
 import { reportProvision } from "./reportProvision";
-import { type RowKey, rowKey } from "./rowKey";
 import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
+import { rowBalanceKeys } from "./useRowBalanceQuery";
 import { useRowBusy } from "./useRowBusy";
 import { useTierEditGuard } from "./useTierEditGuard";
 import { VendorBlock } from "./VendorBlock";
@@ -233,15 +233,14 @@ export function RelaySection({ appId }: RelaySectionProps) {
   const [addingSite, setAddingSite] = useState(false);
   // 域名输入框的底纹词，来自 relay_status。
   const [defaultSite, setDefaultSite] = useState("");
-  // 各行的余额。**与倍率同一个模式**：不进 listRelays（那条命令只读本地、
-  // 首屏不卡网络），渲染完再异步逐行补。
+  // 余额**不在这里** —— 它由每一行自己的 `useRowBalanceQuery`（react-query）拉，
+  // 见 `RowBalance`。曾经这里有两份 `Record<RowKey, …>` state 加两个 effect，
+  // 而那个形状有个死路：effect 的依赖键是 `id:accountLabel`，某一行拉失败过一次、
+  // 键不变 ⇒ 它永远不会再跑 ⇒ 那一行整个会话都没有余额；而充值按钮只在有余额时
+  // 渲染 ⇒ 用户连重试的入口都看不到。换成 react-query 后「重查」就是行上那个
+  // 刷新按钮。
   //
-  // 键是**判别式 RowKey**（`"relay:3"`）而不是裸 number：这个 map 与官网行的
-  // 那个共处一个列表，而两张表的自增 id 必然重叠 —— 用 number 会让 DeepSeek 的
-  // 余额显示到同 id 的中转站行上，且没有任何报错。
-  const [balances, setBalances] = useState<Record<RowKey, number | null>>({});
-  // `loadBalance` 要在**请求返回时**读到最新的 relays（判账号还是不是同一个），
-  // 而它是 useCallback([]) —— 闭包里的 relays 会是旧值。用 ref 取当前值。
+  // 这里保留 `relaysRef`：它还有别的消费者（下面几处要在异步返回时读最新的行）。
   const relaysRef = useRef<RelayRowData[]>([]);
   relaysRef.current = relays;
 
@@ -250,11 +249,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
   // **与 relay 平级并列的一份状态**，不合进上面那些：两边的命令、DTO 与余额
   // 类型全不同（余额那边是后端格式化好的字符串），合起来只会让每处多一个分支。
   const [vendors, setVendors] = useState<VendorAccountRow[]>([]);
-  // 官网行的余额。**值是 string**（`"¥547.08"`，后端已格式化）—— 与上面那条
-  // `number` 契约有意分开：改 relay 那条要动 sub2api 那半边，属范围蔓延。
-  const [vendorBalances, setVendorBalances] = useState<
-    Record<RowKey, string | null>
-  >({});
   // 每个官网账号行对应的 provider id。**六个平台共用一个**，由 `vendor_provision`
   // 返回 —— 前端算不出（它是 `sha256(vendor_id + "/" + account_id)`，而行 DTO 里
   // 没有 account_id）。所以「切换」这条路必须先 provision 拿 id 再切。
@@ -274,6 +268,8 @@ export function RelaySection({ appId }: RelaySectionProps) {
   const reloadSeqRef = useRef(0);
   const verificationRequestRef = useRef(0);
   const { t } = useTranslation();
+  // 余额由各行自己的 query 持有；这里只在「充值窗关了」「刷新」时让它们失效。
+  const queryClient = useQueryClient();
   const { busy, run } = useRowBusy();
   // 待确认「恢复默认配置」的目标。
   //
@@ -416,7 +412,8 @@ export function RelaySection({ appId }: RelaySectionProps) {
    * 一并返回 ⇒ 刷新倍率 = 重新拉分组（顶部「刷新」/ 行上「更新可用分组」/ 登录成功），
    * 正好是用户主动表达「把这页弄成最新」的那几下。
    *
-   * 真正需要实时的是**余额**，那条路独立（`loadBalance`，见下）。
+   * 真正需要实时的是**余额**，那条路独立：它由每一行自己的 `useRowBalanceQuery`
+   * 拉（react-query），不经过这个函数。
    *
    * ⚠️ **顺带刷新官网账号列表**（见函数体末尾）：两类行的「当前在用」现在都由后端
    * 现算（`tier.isCurrent` 与 vendor 的 `isCurrent` 同源），一次动作后必须把两类行
@@ -454,56 +451,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
   const { requestEdit, editDialogs } = useTierEditGuard(appId, reload);
 
   /**
-   * 拉某一行的余额。**逐行拉，而且只拉已登录的行。**
-   *
-   * 为什么不在 `reload` 里对所有行无条件拉：每行一次 HTTP，而 `reload` 在每次登录 /
-   * 获取密钥 / 切档位后都会跑 —— 那会把「刷新一次 = N 个请求」放大到每个动作上。
-   * 已登录才拉：没登录的行必然拿不到（`usable_relay` 会 Err），白打一次还报错。
-   *
-   * 失败静默存 `null`：中转站可能关了用户面板、这一行可能刚过期。
-   * **余额是附加信息，为它弹 toast 会打断主流程**（与倍率同一条纪律）。
-   *
-   * ## `accountLabel` 快照防的是一个真实竞态（review 抓出）
-   *
-   * 同一个 id 可以先后属于两个账号：用户在这一行登出 A、再登录 B，行 id 不变。
-   * 若 A 那次慢请求在 B 登录之后才返回，就会把 **A 的余额显示在 B 的行上**。
-   * 所以落状态前比一次账号标签，变了就丢弃这次结果。
-   */
-  const loadBalance = useCallback(
-    async (relayId: number, accountAtRequest: string) => {
-      // ⚠️ **这处 `find` 保持 number 不动**：`relayId` 只在 relay 这一类里
-      // 流转（调用方传的就是 `op.id`），不参与跨类索引。改成 RowKey 只是扩大
-      // 改动面。真正需要判别式键的是下面 `setBalances` 的那个 Record。
-      const stillSameAccount = () =>
-        relaysRef.current.find((op) => op.id === relayId)?.accountLabel ===
-        accountAtRequest;
-      const key = rowKey("relay", relayId);
-      try {
-        const b = await relayApi.balance(relayId);
-        if (!stillSameAccount()) return;
-        setBalances((prev) => ({ ...prev, [key]: b.balance }));
-      } catch {
-        if (!stillSameAccount()) return;
-        setBalances((prev) => ({ ...prev, [key]: null }));
-      }
-    },
-    [],
-  );
-
-  // 行列表变了就补齐余额。依赖是**已登录行的摘要字符串**而不是 `relays` ——
-  // 后者每次 reload 都是新对象引用，会让这个 effect 每次都跑、把 N 个请求重发一遍。
-  // 编解码收在 `balanceRowsKey`（那里写了为什么不能用逗号拼接：昵称含逗号会造出一个
-  // id 为 NaN 的伪造条目，症状是那一行永远没有余额、于是也没有充值入口）。
-  const loggedInRowsKey = balanceRowsKey(
-    relays.filter((op) => op.loggedIn).map((op) => [op.id, op.accountLabel]),
-  );
-  useEffect(() => {
-    for (const [id, accountLabel] of parseBalanceRowsKey(loggedInRowsKey)) {
-      void loadBalance(id, accountLabel);
-    }
-  }, [loggedInRowsKey, loadBalance]);
-
-  /**
    * 充值窗关掉了 → 刷那一行的余额（充完钱余额该涨）。
    *
    * **有意不做支付成功感知**（维护者裁决）：不认订单状态、不轮询、不判 tab。
@@ -513,9 +460,12 @@ export function RelaySection({ appId }: RelaySectionProps) {
    */
   useTauriEvent<number | null>(PURCHASE_CLOSED, (relayId) => {
     if (typeof relayId !== "number") return;
-    const row = relaysRef.current.find((op) => op.id === relayId);
-    // 行已经不在了（用户删掉了它）就别拉 —— 那次请求必然报错，且没有地方显示结果。
-    if (row) void loadBalance(relayId, row.accountLabel);
+    // 让那一行的余额 query 失效，react-query 自己去重拉。
+    // ⚠️ 行已经不在了（用户删掉了它）也无所谓 —— 没有组件订阅那个 key，
+    // invalidate 是个空操作，不像原来那样会白打一次必定报错的请求。
+    void queryClient.invalidateQueries({
+      queryKey: rowBalanceKeys.row("relay", relayId),
+    });
   });
 
   /**
@@ -646,42 +596,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
       cancelled = true;
     };
   }, []);
-
-  /**
-   * 拉一行官网账号的余额。
-   *
-   * 与 relay 那条同形（逐行拉、失败静默存 null、落状态前比一次账号标签防串行），
-   * 差别只有两处：值是**已格式化的字符串**（前端不碰）、判据是 `loggedIn`
-   * 而不是 `keyReady` —— 余额要网页登录态，sk 有效但登录过期的行拉不到。
-   */
-  const loadVendorBalance = useCallback(
-    async (rowId: number, accountAtRequest: string) => {
-      const stillSameAccount = () =>
-        vendorsRef.current.find((v) => v.id === rowId)?.accountLabel ===
-        accountAtRequest;
-      const key = rowKey("vendor", rowId);
-      try {
-        const b = await vendorApi.balance(rowId);
-        if (!stillSameAccount()) return;
-        setVendorBalances((prev) => ({ ...prev, [key]: b }));
-      } catch {
-        if (!stillSameAccount()) return;
-        setVendorBalances((prev) => ({ ...prev, [key]: null }));
-      }
-    },
-    [],
-  );
-
-  // 与 relay 侧那个 effect 同形，编解码共用 `balanceRowsKey`（同一份往返逻辑，
-  // 别在这里另写一遍 —— 两份里有一份没跟上正是那个逗号 bug 的形状）。
-  const loggedInVendorsKey = balanceRowsKey(
-    vendors.filter((v) => v.loggedIn).map((v) => [v.id, v.accountLabel]),
-  );
-  useEffect(() => {
-    for (const [id, accountLabel] of parseBalanceRowsKey(loggedInVendorsKey)) {
-      void loadVendorBalance(id, accountLabel);
-    }
-  }, [loggedInVendorsKey, loadVendorBalance]);
 
   /**
    * 登录窗的凭据回传解析失败了。
@@ -1078,15 +992,11 @@ export function RelaySection({ appId }: RelaySectionProps) {
       // 这一步只是把它们读出来。
       await reload();
 
-      // ⚠️ **余额也要重拉**（review 抓出的死路）。
+      // 余额也重拉一遍 —— 「刷新」就是用户表达「把这页弄成最新」的动作。
       //
-      // 余额只由那个 `loggedInRowsKey` effect 触发，而它的依赖是 `id:accountLabel` ——
-      // 一旦某行的余额请求失败过（网络抖动），那个键不变 ⇒ **effect 永远不会再跑**，
-      // 那一行整个会话都没有余额；而充值按钮只在有余额时才存在 ⇒ 用户连入口都看不到，
-      // 点「刷新」也没用。这里补上正是因为「刷新」就是用户表达「把这页弄成最新」的动作。
-      for (const op of targets) {
-        void loadBalance(op.id, op.accountLabel);
-      }
+      // 一次性让**全部行**的余额 query 失效（而不是逐个 targets 点名）：这里的
+      // `targets` 只是本次 provision 涉及的中转站，而官网行的余额同样该跟着刷新。
+      void queryClient.invalidateQueries({ queryKey: rowBalanceKeys.all });
     });
 
   /**
@@ -1291,7 +1201,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
         onSelectTierModel={(tier, model) =>
           void handleSelectTierModel(tier, model)
         }
-        balances={balances}
         onPurchase={(relayId) => void handlePurchase(relayId)}
         // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
         // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
@@ -1339,7 +1248,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
         <VendorBlock
           vendor={{
             accounts: vendors,
-            balances: vendorBalances,
             isCurrent: isVendorCurrent,
             onLogin: (rowId) => {
               const row = vendors.find((v) => v.id === rowId);

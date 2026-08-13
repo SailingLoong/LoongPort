@@ -39,7 +39,7 @@ import { parseRowKey, type RowKey, rowKey } from "./rowKey";
  *
  * ## dnd id 仍是判别式 `RowKey`
  *
- * 块内虽然只有一类行了，但 `openState` / `balances` 的键、dnd 的 `items` 与
+ * 块内虽然只有一类行了，但 `openState` 的键、dnd 的 `items` 与
  * `useSortable` 的 id 一路用的都是 `rowKey("relay", id)` —— 保持同形，
  * 别退回裸 number（`parseRowKey` 也因此还用得上）。
  *
@@ -77,18 +77,13 @@ export interface RelayTierListProps {
   /** 拖动结束后的新顺序（完整 id 序列，下标即 sort_index）。 */
   onReorder: (relayIds: number[]) => void;
   /**
-   * 各行的余额，**按 `RowKey` 索引**（`"relay:3"`）。缺键 / `null` = 还没拉到
-   * 或拉失败，那一行不显示余额。
+   * 带登录态开某一行的充值页。
    *
-   * **是 map 而不是塞进 `RelayRow`**：`listRelays` 的契约是「只读本地不发网络」，
-   * 而余额必须发请求 —— 混进去会破坏那条契约（首屏就得等网络）。
-   * 与倍率同一个模式：先渲染，再异步填。
-   *
-   * ⚠️ **官网行的余额不在这里** —— 官网行已拆去 `VendorBlock`，那边是后端格式化好的
-   * `string`（`"¥547.08"`），与这条 `number` 契约不同（那边前端不做任何格式化）。
+   * ⚠️ **余额本身不再从这里穿下去**：它由每一行自己的 `useRowBalanceQuery` 拉
+   * （见 `RowBalance`）。曾经这里有个 `balances: Record<RowKey, number|null>`，
+   * 由 `RelaySection` 的一个 effect 填 —— 那条路失败一次就再也不重试，见
+   * `RowBalance` 的文档。
    */
-  balances: Readonly<Record<RowKey, number | null>>;
-  /** 点某一行的余额 → 带登录态开那一行的充值页。 */
   onPurchase: (relayId: number) => void;
   /** 检测某个档位的连通性。 */
   onCheckTier: (tier: TierInfo) => void;
@@ -177,7 +172,6 @@ export function RelayTierList({
   onSwitchTier,
   onSelectTierModel,
   onReorder,
-  balances,
   onPurchase,
   onCheckTier,
   isCheckingTier,
@@ -309,7 +303,7 @@ export function RelayTierList({
           onDragEnd={handleDragEnd}
         >
           {/* dnd 的 id 仍是判别式 `RowKey` 字符串（`"relay:3"`）——
-              与 `openState` / `balances` 的键同形，别退回裸 number。 */}
+              与 `openState` 的键同形，别退回裸 number。 */}
           <SortableContext
             items={relays.map((op) => rowKey("relay", op.id))}
             strategy={verticalListSortingStrategy}
@@ -326,9 +320,6 @@ export function RelayTierList({
                   onProvision={() => onProvision(op.id)}
                   onSwitchTier={(tier) => onSwitchTier(op.id, tier)}
                   onSelectTierModel={onSelectTierModel}
-                  // `?? null` 而不是 `?? undefined`：缺键与「拉失败」在 UI 上是
-                  // 同一件事（都不显示余额），统一成 null 让行组件只判一种。
-                  balance={balances[rowKey("relay", op.id)] ?? null}
                   onPurchase={() => onPurchase(op.id)}
                   onCheckTier={onCheckTier}
                   isCheckingTier={isCheckingTier}

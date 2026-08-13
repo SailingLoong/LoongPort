@@ -3075,7 +3075,7 @@
       "login": "Sign in",
       "sessionExpired": "Sign-in session expired",
       "reLogin": "Sign in again",
-      "sessionExpiredUsable": "The sign-in session has expired, but the API key still works. Balance information is temporarily unavailable. Select to sign in again.",
+      "sessionExpiredUsable": "The sign-in session has expired, but the API key still works, and the balance is still shown. Select to sign in again.",
       "noTiers": "This account has no groups available for the current platform",
       "getKeys": "Create connection profiles",
       "tierCount": "{{count}} connection profiles",

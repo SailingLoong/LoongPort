@@ -22,7 +22,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { Button } from "@/components/ui/button";
 import type { VendorAccountRow } from "@/lib/api/vendor";
 
-import { parseRowKey, type RowKey, rowKey } from "./rowKey";
+import { parseRowKey, rowKey } from "./rowKey";
 import { VendorRow } from "./VendorRow";
 
 /**
@@ -45,7 +45,7 @@ import { VendorRow } from "./VendorRow";
  *
  * 排序、余额、busy 全部沿用 `RelayTierList` 的既有模式：
  * - dnd id 仍是判别式 `RowKey`（`"vendor:3"`），虽然这里只有一个类型，但
- *   `openState` / `balances` 的键与中转站那块的 `RowKey` 同一套，别退回裸 number。
+ *   `openState` 的键与中转站那块的 `RowKey` 同一套，别退回裸 number。
  * - 余额是**已格式化的字符串**（`"¥547.08"`，后端给的），与 relay 那条
  *   `number` 契约有意不同（改那边要动 sub2api）。
  */
@@ -54,11 +54,6 @@ export interface VendorListSlice {
    * 官网直连账号行。**只含官网行** —— 本区块不掺中转站行（拆块前是混列的）。
    */
   accounts: VendorAccountRow[];
-  /**
-   * 官网行的余额，按 `RowKey` 索引。**值是后端格式化好的字符串**（`"¥547.08"`）——
-   * 与 relay 那条 `number` 契约有意分开（改后者要动 sub2api 那半边）。
-   */
-  balances: Readonly<Record<RowKey, string | null>>;
   /** 某个官网账号的配置是不是当前 tab 正在用的那个。 */
   isCurrent: (rowId: number) => boolean;
   /** 登录 / 重新登录某个官网账号。 */
@@ -175,7 +170,6 @@ export function VendorBlock({ vendor, busy, onAddVendor }: VendorBlockProps) {
                   key={rowKey("vendor", v.id)}
                   account={v}
                   busy={busy}
-                  balance={vendor.balances[rowKey("vendor", v.id)] ?? null}
                   isCurrent={vendor.isCurrent(v.id)}
                   onLogin={() => vendor.onLogin(v.id)}
                   onProvision={() => vendor.onProvision(v.id)}
