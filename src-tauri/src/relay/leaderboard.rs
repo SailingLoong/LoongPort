@@ -10,6 +10,7 @@ const VERIDROP_ORIGIN: &str = "https://veridrop.org";
 const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 const FETCH_TIMEOUT_SECS: u64 = 12;
 const MANAGED_DETAIL_CONCURRENCY: usize = 4;
+const CACHE_SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +77,7 @@ pub struct RelayLeaderboard {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedLeaderboard {
+    schema_version: u8,
     kind: LeaderboardKind,
     items: Vec<ParsedLeaderboardItem>,
     synced_at: i64,
@@ -399,24 +401,37 @@ fn normalized_policy(policy: &RelayDirectoryPolicy) -> RelayDirectoryPolicy {
 
 fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
     let policy = normalized_policy(&config.relay_directory);
-    let mut hosts = BTreeSet::new();
-    for sponsor in &config.sponsors {
-        hosts.insert(crate::relay::aff::lookup_host(&sponsor.site_origin));
+    let blocked: BTreeSet<_> = policy.blocked_hosts.iter().cloned().collect();
+    let mut aliases = BTreeMap::new();
+    for (loongport_host, site) in &policy.sites {
+        let veridrop_host = site
+            .veridrop_host
+            .as_deref()
+            .map(crate::relay::aff::lookup_host)
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| loongport_host.clone());
+        aliases.insert(loongport_host.clone(), veridrop_host.clone());
+        aliases.insert(veridrop_host.clone(), veridrop_host);
     }
-    hosts.extend(
+
+    let mut candidates = BTreeSet::new();
+    for sponsor in &config.sponsors {
+        candidates.insert(crate::relay::aff::lookup_host(&sponsor.site_origin));
+    }
+    candidates.extend(
         config
             .aff_codes
             .keys()
             .map(|host| crate::relay::aff::lookup_host(host)),
     );
-    hosts.extend(
+    candidates.extend(
         config
             .promo_codes
             .keys()
             .map(|host| crate::relay::aff::lookup_host(host)),
     );
     for (loongport_host, site) in &policy.sites {
-        hosts.insert(
+        candidates.insert(
             site.veridrop_host
                 .as_deref()
                 .map(crate::relay::aff::lookup_host)
@@ -424,7 +439,14 @@ fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
                 .unwrap_or_else(|| loongport_host.clone()),
         );
     }
-    hosts.into_iter().filter(|host| !host.is_empty()).collect()
+    candidates
+        .into_iter()
+        .filter(|host| !host.is_empty() && !blocked.contains(host))
+        .map(|host| aliases.get(&host).cloned().unwrap_or(host))
+        .filter(|host| !blocked.contains(host))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub fn apply_policy(
@@ -502,7 +524,7 @@ fn read_cache(kind: LeaderboardKind) -> Option<CachedLeaderboard> {
         return None;
     }
     let cached: CachedLeaderboard = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    if cached.kind != kind {
+    if cached.schema_version != CACHE_SCHEMA_VERSION || cached.kind != kind {
         return None;
     }
     Some(cached)
@@ -610,7 +632,7 @@ async fn fetch_live_source_with(
         };
         parse_detail_page(kind, &host, &html)
     }))
-    .buffer_unordered(MANAGED_DETAIL_CONCURRENCY);
+    .buffered(MANAGED_DETAIL_CONCURRENCY);
     while let Some(detail) = details.next().await {
         if let Some(item) = detail? {
             items.push(item);
@@ -647,6 +669,7 @@ pub async fn list(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
                 return Err(AppError::Config("VeriDrop 榜单没有可展示站点".into()));
             }
             write_cache(&CachedLeaderboard {
+                schema_version: CACHE_SCHEMA_VERSION,
                 kind,
                 items: parsed,
                 synced_at,
@@ -815,6 +838,58 @@ mod tests {
         assert_eq!(managed.issues, vec!["token_usage"]);
     }
 
+    #[tokio::test]
+    async fn managed_details_keep_the_configured_order_when_responses_finish_out_of_order() {
+        let app = Router::new()
+            .route(
+                "/leaderboard/gemini",
+                get(|| async { Html(include_str!("fixtures/veridrop-gemini.html")) }),
+            )
+            .route(
+                "/leaderboard/slow.example",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Html(include_str!("fixtures/veridrop-detail-wawapii.html"))
+                }),
+            )
+            .route(
+                "/leaderboard/fast.example",
+                get(|| async { Html(include_str!("fixtures/veridrop-detail-wawapii.html")) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local VeriDrop fixture server");
+        let address = listener.local_addr().expect("fixture server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve VeriDrop fixtures");
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("fixture client");
+
+        let items = fetch_live_source_with(
+            &client,
+            &format!("http://{address}"),
+            LeaderboardKind::Gemini,
+            &["slow.example".into(), "fast.example".into()],
+        )
+        .await
+        .expect("fetch ordered managed details");
+        server.abort();
+
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.rank.is_none())
+                .map(|item| item.veridrop_host.as_str())
+                .collect::<Vec<_>>(),
+            vec!["slow.example", "fast.example"]
+        );
+    }
+
     #[test]
     fn detail_samples_do_not_include_digits_from_the_host_name() {
         let html = include_str!("fixtures/veridrop-detail-wawapii.html")
@@ -937,6 +1012,16 @@ mod tests {
     }
 
     #[test]
+    fn managed_hosts_use_the_policy_owned_veridrop_identity_once() {
+        let mut config = config_with_directory();
+        config
+            .aff_codes
+            .insert("790053500.com".into(), "invite".into());
+
+        assert_eq!(managed_veridrop_hosts(&config), vec!["api.790053500.com"]);
+    }
+
+    #[test]
     fn live_failure_uses_the_last_successful_cache_and_marks_it() {
         let cached = RelayLeaderboard {
             kind: LeaderboardKind::Claude,
@@ -954,6 +1039,7 @@ mod tests {
     #[test]
     fn cached_items_are_filtered_by_the_current_signed_policy() {
         let cached = CachedLeaderboard {
+            schema_version: CACHE_SCHEMA_VERSION,
             kind: LeaderboardKind::Claude,
             items: vec![ParsedLeaderboardItem {
                 veridrop_host: "blocked.example".into(),
@@ -991,6 +1077,7 @@ mod tests {
         };
         let cached: CachedLeaderboard = serde_json::from_slice(
             &serde_json::to_vec(&CachedLeaderboard {
+                schema_version: CACHE_SCHEMA_VERSION,
                 kind: LeaderboardKind::Claude,
                 items: vec![source],
                 synced_at: 1,
@@ -1003,6 +1090,32 @@ mod tests {
 
         assert_eq!(restored.items.len(), 1);
         assert_eq!(restored.items[0].site_host, "blocked.example");
+    }
+
+    #[test]
+    fn legacy_policy_filtered_cache_is_not_accepted_as_source_facts() {
+        let legacy = serde_json::json!({
+            "kind": "claude",
+            "items": [{
+                "siteHost": "bestapi.store",
+                "veridropHost": "bestapi.store",
+                "displayName": "BestAPI",
+                "rank": 1,
+                "score": 99,
+                "samples": 20,
+                "latestDate": "2026-08-12",
+                "detailUrl": "https://veridrop.org/leaderboard/bestapi.store",
+                "protocolScores": [],
+                "claudeSignatureRate": null,
+                "scenarios": [],
+                "issues": [],
+                "entryUrl": "https://bestapi.store"
+            }],
+            "syncedAt": 1,
+            "fromCache": true
+        });
+
+        assert!(serde_json::from_value::<CachedLeaderboard>(legacy).is_err());
     }
 
     #[tokio::test]
