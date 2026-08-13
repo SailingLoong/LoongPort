@@ -275,3 +275,62 @@ dependabot 的，别照搬。PR 模板在 `.github/pull_request_template.md`。
 
 唯一属于 CLAUDE.md（维护视角）的是上面那条警告：**`cargo test` / `clippy` 全绿
 不代表能打包** —— Tauri 的 npm↔crate 版本校验只在打包时触发。
+
+## 五、打 tag 发版：必须写清这一版干了啥
+
+**每个 `v*` tag 都要说明这一版做了什么，唯一源是 annotated tag message 的正文**
+（首行标题之外的部分）。Release 页的「本次更新」直接取它，`release.yml` 的
+`tag-notes` job 负责读取与校验。
+
+**为什么要有这条**：`publish-release` 的 `body` 原先是整段写死的模板，只有版本号会变 ⇒
+[Releases 页](https://github.com/SailingLoong/LoongPort/releases)每一版长得一模一样，
+用户无从判断该不该升级。而 tag message 里其实早就写了内容（`v3.23.2` 那条写得很完整），
+只是没人读它 —— 这不是「缺少内容」，是**内容和展示之间断了一截**，已修根。
+
+### 怎么写
+
+```bash
+cat > /tmp/notes.md <<'EOF'
+LoongPort v3.24.0
+
+修好 Cloudflare 托管站点的登录，并让 live 配置不再抹掉用户手写内容。
+
+#### 新增
+- ...
+
+#### 修复
+- ...
+EOF
+
+git tag -a v3.24.0 --cleanup=whitespace -F /tmp/notes.md
+git push origin v3.24.0
+```
+
+三条硬约束（都实测过）：
+
+1. **`--cleanup=whitespace` 不能省** —— git 默认的 `strip` 模式把**以 `#` 开头的行当注释
+   删掉**，`### 新增` 这种 Markdown 标题会**静默消失**（`- 条目` 还在，标题没了）。
+   实测：默认模式下 `### 新增` / `### 修复` 两行全被吞，正文只剩两条裸列表项。
+2. **小标题从 `####` 起** —— Release body 自己那层用的是 `###`（「本次更新」「下载」），
+   正文里再用 `###` 会和它平级，层级读起来是乱的。
+3. **首行是标题、空一行、再写正文** —— 校验只看正文（`%(contents:body)`）。
+   历史上那些只有一行 `LoongPort v3.23.0` 的 tag 正文为空，会被直接拦下。
+
+### 写什么、不写什么
+
+- **写**「这版为什么值得升」：修了什么用户能感知的问题、新增什么能力，用人话，
+  面向下载的人而不是面向维护者。
+- **不写** PR 编号清单和 commit 流水 —— GitHub 会按两个 tag 之间的 PR 自动生成
+  「What's Changed」追加在后面（`generate_release_notes: true`，本仓 main 只接受 PR
+  进入，所以那份列表天然完整）。**人写的和自动生成的各管一段，别手抄一遍。**
+
+### 忘了写会怎样
+
+`tag-notes` job 在**编包之前**跑，几秒内就红，不会浪费 40 分钟构建（macOS 那格还是
+10× 计费）。它红了整条发布通道就停，补救是删 tag 重打：
+
+```bash
+git tag -d v3.24.0 && git push origin :refs/tags/v3.24.0
+git tag -a v3.24.0 --cleanup=whitespace -F /tmp/notes.md
+git push origin v3.24.0
+```
