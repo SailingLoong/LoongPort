@@ -264,8 +264,18 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
     }}
   }}
 
-  void probe();
-  setInterval(() => void probe(), 1500);
+  function startProbing() {{
+    void probe();
+    setInterval(() => void probe(), 1500);
+  }}
+
+  // A custom-scheme callback before the first remote document commits can leave WebKit on its
+  // blank initial document even when Rust rejects that navigation. Start only after DOM readiness.
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', startProbing, {{ once: true }});
+  }} else {{
+    startProbing();
+  }}
 }})();
 "#
     )
