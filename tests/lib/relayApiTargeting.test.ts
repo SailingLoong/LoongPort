@@ -113,26 +113,4 @@ describe("relayApi 的中转站定位参数", () => {
     await relayApi.checkSession();
     expect(invokeMock).toHaveBeenCalledWith("relay_check_session");
   });
-
-  /**
-   * `listTierRates` 的 `siteOrigin` 同理 —— 它决定「只查这个站的倍率」。
-   *
-   * 漏传的后果不是错账号而是**浪费请求**：每个档位一次 HTTP，用户给账号 A
-   * 获取密钥时会把 B / C 的倍率也全重查一遍（他明确指出过这个现象）。
-   */
-  it("listTierRates 把 siteOrigin 透传，不传时发 null", async () => {
-    invokeMock.mockResolvedValue([]);
-    await relayApi.listTierRates("codex", "https://bestapi.store");
-    expect(invokeMock).toHaveBeenCalledWith("relay_list_tier_rates", {
-      app: "codex",
-      siteOrigin: "https://bestapi.store",
-    });
-
-    invokeMock.mockClear();
-    await relayApi.listTierRates("codex");
-    expect(invokeMock).toHaveBeenCalledWith("relay_list_tier_rates", {
-      app: "codex",
-      siteOrigin: null,
-    });
-  });
 });

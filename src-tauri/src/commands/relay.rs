@@ -382,7 +382,7 @@ pub fn relay_status(state: State<'_, AppState>) -> Result<RelayStatus, String> {
     relay_status_impl(state.inner()).map_err(|e| e.to_string())
 }
 
-/// 探一遍**每一行**已登录的凭据是不是真的还能用，并清掉确认失效的那些。
+/// 探一遍**每一行**已登录的凭据是不是真的还能用，并清掉确认失效的那些**会话**。
 ///
 /// 为什么需要这个：行 DTO 的 `logged_in` 只看本地记的过期时间。而凭据可能在网页端被
 /// 撤销、账号被禁用、会话被踢掉 —— 那些情况下本地看起来一切正常，用户点任何操作才会
@@ -394,7 +394,10 @@ pub fn relay_status(state: State<'_, AppState>) -> Result<RelayStatus, String> {
 /// 那个形状只对「同时只有一个站」的旧界面成立 —— 中转站区是**多行并列**的，
 /// 探一行的活等于让另外 N-1 行继续显示错的状态，而用户看不出区别。
 ///
-/// 现在返回**这次被清掉凭据的行 id**（空 = 全都还好）。前端据此提示并刷新。
+/// 现在返回**这次被清掉会话的行 id**（空 = 全都还好）。前端据此提示并刷新。
+///
+/// ⚠️ **清的是会话，不是这一行的全部凭据**：分组与 sk 不受影响，用户点一次
+/// 「重新登录」就复原（见 `creds::clear_session`）。
 ///
 /// 未登录的行直接跳过：`usable_relay` 对它们必然 Err，白打一次请求还得过滤噪音。
 #[tauri::command]
@@ -427,15 +430,20 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
 
         if let Err(e) = probe {
             // 「登录态已失效」是 api 层对不可恢复的那一类 401 的措辞（账号被禁 /
-            // 会话被撤销 / 用户不存在）。这类清掉本地凭据、让用户重新登录。
+            // 会话被撤销 / 用户不存在）。这类清掉本地**会话**、让用户重新登录。
             //
-            // 其它失败（网络不通、中转站关了用户面板返 403）**不清凭据** ——
+            // ⚠️ **只清会话，不清账号身份**（`clear_session` 而不是 `clear_credentials`）——
+            // 分组与 sk 写在各自的 provider 配置里，压根没失效；把 `account_id` 一起
+            // 抹掉会让档位按归属过滤时被判成「不是这一行的」⇒ 整片从界面消失，
+            // 用户以为密钥没了。完整的三连后果见 `creds::clear_session` 的文档。
+            //
+            // 其它失败（网络不通、中转站关了用户面板返 403）**连会话都不清** ——
             // 那不是凭据的问题，清掉只会逼用户在网络恢复后白重登一次。
             if should_clear_credentials_after_probe_error(&e) {
                 let state = app_handle.state::<AppState>();
-                with_conn(&state, |conn| creds::clear_credentials(conn, id))?;
+                with_conn(&state, |conn| creds::clear_session(conn, id))?;
                 let msg = e.to_string();
-                log::info!("中转站 {id} 凭据已失效，已清除本地凭据：{msg}");
+                log::info!("中转站 {id} 登录态已失效，已清除会话（分组与密钥保留）：{msg}");
                 expired.push(id);
             } else {
                 let msg = e.to_string();
@@ -2106,6 +2114,9 @@ fn persist_provision_batch(
     for (idx, candidate) in batch.candidates.into_iter().enumerate() {
         let app_type = &candidate.app_type;
         let provider_id = candidate.provider_id.clone();
+        // 先取出来：`candidate.group_name` 下面会被 move 进 failures，
+        // 而倍率在那之后还要用。
+        let rate_multiplier = candidate.rate_multiplier;
         let display_name = provision::provider_display_name(&op.site_name, &candidate.group_name);
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
@@ -2210,6 +2221,22 @@ fn persist_provision_batch(
             continue;
         }
 
+        // 倍率落库。**这是它唯一的写入点** —— 「刷新倍率」= 重新 provision，
+        // 界面上就是「顶部刷新 / 更新可用分组 / 登录成功」那几下。
+        //
+        // 曾经它一个字都不存（`list_tiers_impl` 恒返回 `None`），靠一条独立命令在
+        // 每次 reload 后**每个档位打一次 HTTP** 去补 —— 而 reload 挂在每个动作后面，
+        // 于是切一次档位就把全部档位的倍率重查一遍。倍率是服务端定价，不是实时量。
+        //
+        // 写失败只 warn：档位已经存对了，不该因为一个显示值让「获取密钥」整个报失败。
+        if let Err(error) =
+            state
+                .db
+                .set_tier_rate_multiplier(app_type.as_str(), &provider_id, rate_multiplier)
+        {
+            log::warn!("记录档位 {provider_id} 的倍率失败（只影响显示）: {error}");
+        }
+
         let merged_current = match provider_fingerprint::remove_unmanaged_duplicates(
             state.db.as_ref(),
             app_type,
@@ -2266,7 +2293,7 @@ fn persist_provision_batch(
             } else {
                 Vec::new()
             },
-            rate_multiplier: candidate.rate_multiplier,
+            rate_multiplier,
             user_edited: Some(user_edited),
             allow_image_generation: candidate.allow_image_generation,
         });
@@ -2415,10 +2442,13 @@ fn belongs_to_account(provider: &Provider, site_origin: &str, account_id: Option
 /// 方向**反过来就错了 —— 它会把「同站另一个账号正在用的档位」算成「你名下的」。
 ///
 /// 那种行真实可达，不是理论情况：`clear_credentials` 会把 `account_id` 置 `NULL`
-/// （`check_session` 发现登录态被撤销时就走这条），而唯一索引把 `NULL` 视为互不相等
-/// ⇒ 它与那个已登录的行并存。此时用户删这个空行会看到
+/// （站点换了后端协议时走这条，见 [`load_validated_relay`]），而唯一索引把 `NULL`
+/// 视为互不相等 ⇒ 它与那个已登录的行并存。此时用户删这个空行会看到
 /// 「这个账号名下还有档位正在使用中：B 的档位（codex）」—— 点名一个**它并不拥有**的档位，
 /// 而这一行压根没有任何档位。他唯一的出路是去 codex 把 B 切走，才能删掉一个空行。
+///
+/// （**登录态失效不再走那条路**：那边现在用 `creds::clear_session`，账号身份留着 ——
+/// 见它的文档。所以 `None` 的来源只剩「从没登录过」与「协议变更」两种。）
 ///
 /// 所以这里额外要求 `account_id.is_some()`：**认不出归属就不拦**。漏拦的代价是什么？
 /// 没有 —— 没有 `account_id` 的行派生不出 provider id（`provider_id_for` 要它），
@@ -2856,103 +2886,6 @@ pub fn relay_reorder(state: State<'_, AppState>, relay_ids: Vec<i64>) -> Result<
     with_conn(state.inner(), |conn| creds::reorder(conn, &relay_ids)).map_err(|e| e.to_string())
 }
 
-/// 一个档位的倍率查询结果。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TierRate {
-    pub provider_id: String,
-    /// `None` = 查不到（站点不提供计费信息 / sk 没绑分组 / sk 已失效）。
-    /// **不是错误** —— UI 继续显示「倍率未知」即可。
-    pub rate_multiplier: Option<f64>,
-}
-
-/// 查一个 app 下所有托管档位的当前倍率。**首屏渲染后由前端异步调用**，不阻塞首屏。
-///
-/// ## 为什么用 sk 而不是登录态
-///
-/// 每个档位的 sk 就在它自己的 `settings_config.auth.OPENAI_API_KEY` 里（provision 时写的），
-/// 而 `/v1/sub2api/billing` 是 sk 鉴权 —— 所以**账号登录过期了也能查到倍率**。
-/// 走 `list_groups()` 就必须有有效登录态，而且拿到的还只是分组基础倍率
-/// （不含用户专属倍率与高峰因子），见 [`api::key_billing`] 的文档。
-///
-/// ## 为什么单独一个命令而不是塞进 `relay_list_relays`
-///
-/// 那个命令的契约是「只读本地、不发网络」（与 `relay_status` 一致，首屏不能卡在网络上）。
-/// 倍率必须发网络才拿得到 ⇒ 拆成第二个命令，前端首屏渲染完再调它填空。
-///
-/// 并发发请求（每个档位一个）而不是串行：档位通常 1-5 个，串行会把等待时间叠起来。
-#[tauri::command]
-pub async fn relay_list_tier_rates(
-    app_handle: tauri::AppHandle,
-    app: String,
-    site_origin: Option<String>,
-) -> Result<Vec<TierRate>, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    list_tier_rates_impl(&app_handle, app_type, site_origin.as_deref())
-        .await
-        .map_err(|e| e.to_string())
-}
-
-async fn list_tier_rates_impl(
-    app_handle: &tauri::AppHandle,
-    app_type: AppType,
-    // `Some(origin)` = 只查这一个中转站的档位。
-    //
-    // ⚠️ **这个过滤是必要的，不是优化**：每个档位一次 HTTP 请求，而用户给账号 A
-    // 获取密钥时不该把账号 B / C 的倍率也全重查一遍（用户明确指出过这件事）。
-    // 档位多、中转站多时那是几十次无谓请求，还可能撞中转站的限流。
-    only_site: Option<&str>,
-) -> Result<Vec<TierRate>, AppError> {
-    // 先在同步块里把 (provider_id, site_origin, sk) 抠出来 —— AppState 的锁不能跨 await。
-    let targets: Vec<(String, String, String)> = {
-        let state = app_handle.state::<AppState>();
-        ProviderService::list(&state, app_type.clone())?
-            .values()
-            .filter(|p| is_managed(p))
-            .filter_map(|p| {
-                let origin = p.website_url.clone()?;
-                // 指定了中转站就只查它那些。
-                if only_site.is_some_and(|want| want != origin) {
-                    return None;
-                }
-                // ⚠️ **必须走 `extract_api_key` 而不是硬编码 `auth.OPENAI_API_KEY`** ——
-                // 那是 codex 的位置，claude 在 `env.ANTHROPIC_AUTH_TOKEN`、
-                // gemini 在 `env.GEMINI_API_KEY`。硬编码会让那两个平台永远查不到倍率
-                // （而且是静默的：filter_map 直接跳过，用户只看到「倍率未知」）。
-                //
-                // 取不到就跳过这条（历史数据或形状被用户改过），不报错 ——
-                // 倍率是附加信息，为它中断整个查询是错的。
-                let sk = provision::extract_api_key(&p.settings_config, &app_type)?;
-                Some((p.id.clone(), origin, sk))
-            })
-            .collect()
-    };
-
-    let futures = targets
-        .into_iter()
-        .map(|(provider_id, origin, sk)| async move {
-            // 单个档位查失败不影响其它档位 —— 部分有值优于全部未知。
-            let rate = match api::key_billing(&origin, &sk).await {
-                Ok(Some(b)) => Some(b.effective_rate_multiplier),
-                Ok(None) => None,
-                Err(e) => {
-                    log::debug!("查询 {provider_id} 的倍率失败（不影响使用）: {e}");
-                    None
-                }
-            };
-            TierRate {
-                provider_id,
-                rate_multiplier: rate,
-            }
-        });
-
-    // 并发发请求（每个档位一个），**有意不设上限**：档位数 = 用户在该中转站的分组数，
-    // 实测 1-5 个，而 sub2api 面板限流是 240 次/分钟 —— 差两个量级。
-    // 为假设的「几十个分组」加 `buffer_unordered` 是过度设计（尺子2）。
-    // 真撞限流时的表现也是良性的：那几个档位显示「倍率未知」，不影响切换。
-    Ok(futures::future::join_all(futures).await)
-}
-
 /// 一条档位 + 它的归属信息。
 ///
 /// **打成结构体而不是 `(TierInfo, Option<String>, Option<i64>)`** —— 两个 `Option`
@@ -3013,18 +2946,11 @@ fn tiers_of_site(
                 // 变错（前端据它筛「属于当前那一屏的档位」），而没有测试会红。
                 //
                 // 「已手工维护」读存库标记（编辑页置位、恢复默认复位）。
-                user_edited: {
-                    let v = state
+                user_edited: Some(
+                    state
                         .db
-                        .get_user_edited(app_type.as_str(), &owned.tier.provider_id)?;
-                    eprintln!(
-                        "DEBUG-inside {} {} -> {:?}",
-                        owned.tier.provider_id,
-                        app_type.as_str(),
-                        v
-                    );
-                    Some(v)
-                },
+                        .get_user_edited(app_type.as_str(), &owned.tier.provider_id)?,
+                ),
                 ..owned.tier.clone()
             })
         })
@@ -3107,10 +3033,18 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
             tier: TierInfo {
                 provider_id: p.id.clone(),
                 app_id: app_id.clone(),
-                // 倍率不在本地存 —— 它是服务端的定价，可能已经变了。要看倍率就重新
-                // provision，那时会从服务端拿到当前值。这里返回 None 让 UI 知道
-                // "不知道"，而不是编一个 0。
-                rate_multiplier: None,
+                // 倍率读**上次 provision 写下的那个值**（`providers.tier_rate_multiplier`）。
+                //
+                // 它是服务端定价，不是实时量 —— 所以「刷新倍率」就等于「重新拉分组」，
+                // 界面上是顶部刷新 / 更新可用分组 / 登录成功那几下。这条命令仍然
+                // **只读本地不发网络**，首屏契约不变，但首屏现在就有倍率可显示了。
+                //
+                // 读不出来（旧库、行刚被别处删掉）⇒ `None`，UI 显示「倍率未知」。
+                // **绝不能退化成 0** —— 那会让用户以为这是最便宜的一档。
+                rate_multiplier: state
+                    .db
+                    .get_tier_rate_multiplier(&app_id, &p.id)
+                    .unwrap_or(None),
                 group_name: p.name.clone(),
                 display_name: p.name.clone(),
                 model: provision::extract_model(&p.settings_config).unwrap_or_default(),
@@ -6253,8 +6187,8 @@ mod tests {
     /// 那对**删除**方向是对的（同站没记归属的旧档位该跟着清），但守卫方向反过来就成了
     /// 「把别人正在用的档位算成你的」。
     ///
-    /// 这种行真实可达：`clear_credentials` 会把 `account_id` 置 `NULL`（`check_session`
-    /// 发现登录态被撤销时走这条），而唯一索引把 `NULL` 视为互不相等 ⇒ 它与已登录的行并存。
+    /// 这种行真实可达：`clear_credentials` 会把 `account_id` 置 `NULL`（站点换了后端
+    /// 协议时走这条），而唯一索引把 `NULL` 视为互不相等 ⇒ 它与已登录的行并存。
     /// 症状是用户删一个**空行**时被告知「你名下还有档位正在使用中：B 的档位（codex）」，
     /// 而唯一出路是去 codex 把 B 切走。
     ///
@@ -6291,6 +6225,142 @@ mod tests {
         assert!(
             belongs_to_account(&legacy_provider, site, None),
             "删除方向对 `None` 仍是「算是我的」—— 那是旧数据能被清掉的前提"
+        );
+    }
+
+    /// ⭐ **登录态失效之后，那一行仍然带着它的档位、昵称和「已过期」这个状态。**
+    ///
+    /// 修之前 `check_session` 走的是 `clear_credentials`，它把 `account_id` 一起抹掉，
+    /// 于是三件事同时静默出错（都不报任何错）：
+    ///
+    /// 1. `tiers_of_site` 对「行没有 account_id、档位有」判为不属于它
+    ///    ⇒ **返回空 tiers**，界面退化成「没有可用分组 + 获取密钥」；
+    /// 2. `session_expired()` 要求 `account_id.is_some()` ⇒ 变成 `false`
+    ///    ⇒ 界面说「还没登录」，而用户明明登录过；
+    /// 3. `account_label` 被清空 ⇒ 昵称没了。
+    ///
+    /// 而 sk 一把都没失效。用户看到的是「密钥没了」，然后去重建一遍。
+    ///
+    /// 会红的改法：把 `check_session` 里的 `clear_session` 换回 `clear_credentials`。
+    #[test]
+    fn an_expired_session_keeps_its_tiers_label_and_expired_flag() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "BestAPI", "https://bestapi.store")
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "tok",
+                None,
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        let tier_id = provision::provider_id_for(site, Some(7), 1);
+        db.save_provider("codex", &seeded_owned(&tier_id, "Pro池", Some(site), 7))
+            .expect("seed tier");
+
+        with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
+
+        let rows = list_relays_impl(&state, AppType::Codex).expect("list relays");
+        let row = rows.iter().find(|r| r.id == row_id).expect("行还在");
+
+        assert!(!row.logged_in);
+        assert!(
+            row.session_expired,
+            "登录过 + 没 token + 没 refresh ⇒ 必须报「登录已过期」，而不是「还没登录」"
+        );
+        assert_eq!(row.account_label, "我的号", "昵称不该跟着会话一起没");
+        assert_eq!(
+            row.tiers.len(),
+            1,
+            "⭐ 分组与 sk 与网页登录态无关，不该从界面消失"
+        );
+        assert_eq!(row.tiers[0].provider_id, tier_id);
+    }
+
+    /// ⭐ **倍率必须活过 provision → 库 → `listRelays` 这一整条**。
+    ///
+    /// 它是这次改动的核心：倍率从「每次渲染现拉」改成「provision 写一次、之后只读本地」。
+    /// 链路上任何一环断掉，症状都是**界面永远显示「倍率未知」**，而没有报错 ——
+    /// 只有这条端到端的断言守得住。
+    ///
+    /// 会红的改法：`persist_provision_batch` 里不写 `set_tier_rate_multiplier`，
+    /// 或 `list_tiers_impl` 把 `rate_multiplier` 改回写死 `None`。
+    #[test]
+    fn a_provisioned_rate_survives_into_list_relays() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "tok",
+                None,
+                Some(i64::MAX),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+        let op = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load")
+            .expect("exists");
+
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let batch = ManagedProvisionBatch {
+            account_id: Some(7),
+            candidates: vec![ManagedProvisionCandidate {
+                provider_id: provider_id.clone(),
+                app_type: AppType::Codex,
+                group_name: "Pro池".into(),
+                rate_multiplier: Some(0.15),
+                api_key: "sk-test".into(),
+                model: "gpt-5.6-sol".into(),
+                models: None,
+                roles: None,
+                allow_image_generation: Some(false),
+                api_base_url: site.into(),
+            }],
+            observed_keep: Default::default(),
+            failures: Vec::new(),
+            keys_created: 0,
+        };
+        persist_provision_batch(&state, &op, batch).expect("persist");
+
+        let rows = list_relays_impl(&state, AppType::Codex).expect("list relays");
+        let tier = rows
+            .iter()
+            .find(|r| r.id == row_id)
+            .expect("行在")
+            .tiers
+            .first()
+            .expect("档位在");
+        assert_eq!(
+            tier.rate_multiplier,
+            Some(0.15),
+            "⭐ 倍率必须从本地库读回来 —— 它不再靠任何网络请求补齐"
         );
     }
 

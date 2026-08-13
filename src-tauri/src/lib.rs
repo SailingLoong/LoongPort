@@ -1580,7 +1580,6 @@ pub fn run() {
             commands::relay_login,
             commands::relay_provision,
             commands::relay_list_relays,
-            commands::relay_list_tier_rates,
             commands::relay_reorder,
             commands::relay_reset_tier_config,
             commands::relay_sync_imagegen_mcp,

@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 11;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 12;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -187,6 +187,19 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 log::info!("LoongPort 数据迁移 v10 → v11（loongport_relay 加 cf_clearance 列）");
                 add_relay_cf_clearance_column(conn)?;
                 set_version(conn, 11)?;
+            }
+            // v11 → v12：providers 加 `tier_rate_multiplier` 列 —— 档位倍率落库。
+            //
+            // 倍率原来根本不存，每次渲染都靠 `relay_list_tier_rates` 现拉（每个档位
+            // 一次 HTTP），而那条命令在每次动作后的 reload 里都会跑。现在 provision
+            // 时算好写下来，只有用户主动刷新才更新。与 `user_edited` 同一条路子：
+            // LoongPort 自己的列，**不要**加进上游 `schema.rs` 的 providers CREATE。
+            11 => {
+                log::info!(
+                    "LoongPort 数据迁移 v11 → v12（档位倍率落库为 providers.tier_rate_multiplier）"
+                );
+                add_tier_rate_multiplier_column(conn)?;
+                set_version(conn, 12)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -447,6 +460,57 @@ fn add_user_edited_column(conn: &Connection) -> Result<(), AppError> {
         [],
     )
     .map_err(|e| AppError::Database(format!("给 providers 加 user_edited 列失败: {e}")))?;
+    Ok(())
+}
+
+/// 给 providers 表加 `tier_rate_multiplier` 列（档位倍率的存库值，`NULL` = 未知）。
+///
+/// ## 为什么倍率要落库
+///
+/// 它原来根本不存：`list_tiers_impl` 恒返回 `None`，界面靠一条单独的命令
+/// （每个档位一次 HTTP）异步补，而那条命令挂在每次动作后的 reload 上 ⇒
+/// 切一次档位就把所有档位的倍率重查一遍。倍率是服务端定价，不是实时量。
+///
+/// 现在 provision 时就算好写下来（那一步本来就在拉分组），只有用户主动刷新才更新。
+///
+/// ## 为什么不叫 `rate_multiplier`
+///
+/// 上游 `ProviderMeta` 已有一个语义完全不同的 `costMultiplier`（用户自设的成本倍率，
+/// 用来算账单展示）。同名两个概念迟早被读错，而这是个静默错误。
+///
+/// ⚠️ 与 [`add_user_edited_column`] 同一条纪律：**列不放进上游
+/// `create_tables_on_conn` 的 providers CREATE**，全新库靠迁移链补上。
+fn add_tier_rate_multiplier_column(conn: &Connection) -> Result<(), AppError> {
+    // 缺表不报错，理由同 `add_user_edited_column`。
+    let has_providers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='providers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_providers == 0 {
+        return Ok(());
+    }
+
+    let has_column: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name='tier_rate_multiplier'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_column > 0 {
+        return Ok(());
+    }
+
+    // 可空且无默认值：`NULL` 就是「还没查过」。给 0 当默认会让 UI 把它当成
+    // 「免费档」显示出来 —— 那比「倍率未知」严重得多。
+    conn.execute(
+        "ALTER TABLE providers ADD COLUMN tier_rate_multiplier REAL",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("给 providers 加 tier_rate_multiplier 列失败: {e}")))?;
     Ok(())
 }
 
@@ -1327,6 +1391,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has, 1, "迁移后 providers 必须有 user_edited 列");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+    }
+
+    /// ⭐ v11→v12 给 providers 加 `tier_rate_multiplier` 列（档位倍率落库）。
+    ///
+    /// 与上面那条同形。前提同样钉住：上游建表**不带**这列。
+    ///
+    /// 列必须**可空**：`NULL` 表示「还没查过倍率」。给它一个 `NOT NULL DEFAULT 0`
+    /// 会让所有历史档位一夜之间显示成「0 倍」——用户会当成最便宜的一档去用。
+    #[test]
+    fn v11_to_v12_adds_tier_rate_multiplier_column_to_providers() {
+        let conn = mem();
+        crate::Database::create_tables_on_conn(&conn).unwrap();
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('providers') \
+                 WHERE name='tier_rate_multiplier'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has, 0,
+            "前提：create_tables 不该带 tier_rate_multiplier —— 那是 LoongPort 迁移的活"
+        );
+
+        // 模拟一个停在 v11 的老库。
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 11).unwrap();
+
+        apply(&conn).unwrap();
+
+        let notnull: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('providers') \
+                 WHERE name='tier_rate_multiplier' AND \"notnull\" = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            notnull, 1,
+            "迁移后 providers 必须有一个**可空**的 tier_rate_multiplier 列"
+        );
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 

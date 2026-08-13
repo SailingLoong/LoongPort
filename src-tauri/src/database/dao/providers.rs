@@ -363,6 +363,44 @@ impl Database {
         Ok(())
     }
 
+    /// 读档位的存库倍率。`None` = 还没查过 / 行不存在，**不是 0** ——
+    /// UI 拿到 `None` 显示「倍率未知」，显示成 0 会让用户以为这是最便宜的一档。
+    ///
+    /// 值由 provision 写入（那一步本来就在拉分组），所以「刷新倍率」= 重拉分组。
+    pub fn get_tier_rate_multiplier(
+        &self,
+        app_type: &str,
+        id: &str,
+    ) -> Result<Option<f64>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let rate: Option<Option<f64>> = conn
+            .query_row(
+                "SELECT tier_rate_multiplier FROM providers WHERE id = ?1 AND app_type = ?2",
+                params![id, app_type],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(rate.flatten())
+    }
+
+    /// 写档位的存库倍率。`None` 表示这次也没查到 —— 照样写下去，
+    /// 让「查不到」这件事覆盖掉一个可能已经过时的旧值。
+    pub fn set_tier_rate_multiplier(
+        &self,
+        app_type: &str,
+        id: &str,
+        value: Option<f64>,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE providers SET tier_rate_multiplier = ?1 WHERE id = ?2 AND app_type = ?3",
+            params![value, id, app_type],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn update_provider_settings_config(
         &self,
         app_type: &str,

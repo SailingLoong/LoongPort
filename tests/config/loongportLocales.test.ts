@@ -31,6 +31,10 @@ const requiredKeys = [
   "row.login",
   "row.sessionExpired",
   "row.reLogin",
+  // 「登录过期但密钥还能用」这个反直觉状态**唯一的解释**（两类行共用一句）。
+  // 后端把「会话」与「密钥」有意分开（`creds::clear_session` 只清会话），
+  // 缺它用户会以为分组和密钥一起没了，转而去做一堆不必要的重建。
+  "row.sessionExpiredUsable",
   "row.noTiers",
   "row.getKeys",
   "row.tierCount",
@@ -145,16 +149,17 @@ const requiredKeys = [
   "switch.done",
   "switch.doneRelaunched",
   "switch.doneNeedsRestart",
-  // 官网直连账号（vendor）行。**十二条都要有** —— 这一整行的文案全在这个命名空间里，
+  // 官网直连账号（vendor）行。**十一条都要有** —— 这一整行的文案全在这个命名空间里，
   // 缺一条那一行就显示 key 名。
   //
-  // 尤其这三条：
+  // 尤其这两条：
   // - `removeConfirmMessage` —— 破坏性操作的知情前提（会删掉什么、官网那把 key
   //   不受影响），退化成 key 名等于让人盲点一个删除
-  // - `sessionExpiredUsable` —— 「登录过期但密钥还能用」这个反直觉状态**唯一的解释**
-  //   （后端有意把 keyReady 与 loggedIn 分开，缺它用户会以为界面坏了）
   // - `openKeyPage` —— 超上限时那个「去官网删」的入口（spec §4.3 要求指路而不是
   //   只说不允许），它是个 toast action 的 label，退化成 key 名按钮就没法读
+  //
+  // ⚠️ 「登录过期但密钥还能用」那句已提升为 `row.sessionExpiredUsable`（见上）——
+  // 两类行现在是同一个反直觉状态、同一句解释，不该各留一份。
   "vendor.add",
   // 官方 API 块的空态占位。
   "vendor.empty",
@@ -166,7 +171,6 @@ const requiredKeys = [
   "vendor.keyReady",
   "vendor.keyCreated",
   "vendor.refreshKey",
-  "vendor.sessionExpiredUsable",
   "vendor.loginFailed",
   "vendor.openKeyPage",
   // 官网行专用的两条编辑文案。**不能复用 `tier.*` 那两条** —— 它们写死了

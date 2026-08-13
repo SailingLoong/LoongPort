@@ -12,6 +12,7 @@ import {
   Pencil,
   PencilLine,
   Play,
+  RefreshCw,
   Trash2,
   Undo2,
   Wallet,
@@ -30,7 +31,6 @@ import { cn } from "@/lib/utils";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
 import type { VerificationVerdict } from "@/lib/api/modelVerification";
 import { isLowBalance, LOW_BALANCE_THRESHOLD_USD } from "./lowBalance";
-import { RefreshActionMenu } from "./RefreshActionMenu";
 
 /**
  * 一行中转站 + 可折叠的档位列表。
@@ -480,12 +480,13 @@ function RowBalance({
 }
 
 /**
- * 行右侧的状态与动作。**三种状态必须分清**（spec §四，初版把它们混了）：
+ * 行右侧的状态与动作。**四种状态必须分清**（spec §四，初版把它们混了）：
  *
  * | 条件 | 显示 | 为什么不能混 |
  * |---|---|---|
  * | `!loggedIn && !sessionExpired` | 「还没登录」+ 登录 | 从没登录过，零分组是必然的；说「没有可用分组」是误导 |
- * | `sessionExpired` | 「登录已过期」+ 重新登录 | 预填已就绪，用户只需补密码 + 人机验证 |
+ * | `sessionExpired && 有档位` | 档位数 + 重新登录（title 说明密钥仍可用） | 见下 |
+ * | `sessionExpired && 无档位` | 「登录已过期」+ 重新登录 | 预填已就绪，用户只需补密码 + 人机验证 |
  * | `loggedIn && tiers 为空` | 「没有可用分组」+ 获取密钥 | 真登录了但这个平台没东西 |
  * | `loggedIn && 有档位` | 档位数 + **重新拉分组** | 见下 |
  *
@@ -493,6 +494,20 @@ function RowBalance({
  * 反了就永远走不到过期分支，用户会被当成从没登录过。
  *
  * 都**不做整页拦截**：其它中转站还能用。
+ *
+ * ## ⚠️ 登录态过期**不等于**密钥失效（2026-08-13 修）
+ *
+ * 每个档位的 sk 写在它自己的 provider 配置里，与网页登录态是两份独立的凭据。
+ * 后端探到会话失效时只清会话（`creds::clear_session`），账号身份、分组与密钥
+ * 全都留着 ⇒ 这一行**照样能切档位、照样能调用**，唯一真实的损失是拉不到余额
+ * （那要网页登录态）。
+ *
+ * 所以有档位时不摆「登录已过期」那个空壳状态 —— 那会让用户以为分组和密钥一起没了，
+ * 从而去做一堆不必要的重建动作。照常显示档位数，只在旁边留一条重新登录的路。
+ * 官方 API 块那边（`VendorStatus`）早就是这个形态，这里跟上它。
+ *
+ * 那一支**有意不摆「更新可用分组」**：重拉分组必须有登录态，摆一个点下去必然报错的
+ * 按钮不如不摆。
  *
  * ## 最后一档为什么要给按钮（2026-08-03 加，用户实测发现）
  *
@@ -518,6 +533,31 @@ function RowStatus({
   const provisioning = busy.has(`provision:${relay.id}`);
 
   if (relay.sessionExpired) {
+    // 有档位 ⇒ 密钥仍可用，见本函数上方那段说明：不摆空壳状态，只留一条重登的路。
+    if (relay.tiers.length > 0) {
+      return (
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="text-xs text-muted-foreground">
+            {t("loongport.row.tierCount", { count: relay.tiers.length })}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 px-2 text-muted-foreground"
+            disabled={loggingIn}
+            onClick={onLogin}
+            title={t("loongport.row.sessionExpiredUsable")}
+          >
+            {loggingIn ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              t("loongport.row.reLogin")
+            )}
+          </Button>
+        </div>
+      );
+    }
     return (
       <StatusAction
         hint={t("loongport.row.sessionExpired")}
@@ -558,13 +598,25 @@ function RowStatus({
       <span className="text-xs text-muted-foreground">
         {t("loongport.row.tierCount", { count: relay.tiers.length })}
       </span>
-      {/* 重拉分组不是普通的「刷新当前显示」，而是一次远端重新发现。
-          收进有明确文案的菜单，避免与顶部的全局刷新混淆。 */}
-      <RefreshActionMenu
-        actionLabel={t("loongport.row.refetchGroups")}
-        loading={provisioning}
-        onAction={onProvision}
-      />
+      {/* 重拉分组不是普通的「刷新当前显示」，而是一次远端重新发现 ——
+          所以按钮**必须带文字**：裸的刷新图标会被当成「刷新一下这页」。
+          形状逐字抄区块头那个「刷新」（`RelayTierList` 的同一组 class），
+          两处刷新看起来就是同一套东西。 */}
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-7 gap-1"
+        disabled={provisioning}
+        onClick={onProvision}
+      >
+        {provisioning ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="h-3.5 w-3.5" />
+        )}
+        {t("loongport.row.refetchGroups")}
+      </Button>
     </div>
   );
 }

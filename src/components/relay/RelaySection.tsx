@@ -71,7 +71,7 @@ import { vendorBusyKey } from "./VendorRow";
  *
  * ## 中转站之间没有依赖（2026-08-03 修）
  *
- * 三个行内命令（login / provision / listTierRates）**全部显式带 relayId**，
+ * 两个行内命令（login / provision）**全部显式带 relayId**，
  * 不再靠改全局「当前站」来定位。所以：
  *
  * - 禁用只作用于自己那一行（`useRowBusy`），别的行照常可点
@@ -404,67 +404,46 @@ export function RelaySection({ appId }: RelaySectionProps) {
   }, [appId]);
 
   /**
-   * 读本地档位列表 + 异步补倍率。**不发 provision**（不重拉分组）。
+   * 读本地档位列表。**不发 provision**（不重拉分组），也**不发任何网络请求**。
    *
-   * `onlySite` 限定只查哪个站的倍率 —— 每个档位一次 HTTP，用户给账号 A 获取
-   * 密钥时不该把 B / C 的也全重查一遍。
+   * ## 为什么这里一个请求都不该有（2026-08-13 改）
+   *
+   * 这个函数挂在**每一个动作**后面（登录 / 获取密钥 / 切档位 / 保存编辑 / 托盘切
+   * provider）。它原来还会异步调 `listTierRates` 去补倍率，而那条命令**每个档位一次
+   * HTTP** ⇒ 用户切一次档位就把所有档位的倍率重查一遍。
+   *
+   * 倍率是服务端定价，不是实时量。现在它在 provision 时就算好落库、由 `listRelays`
+   * 一并返回 ⇒ 刷新倍率 = 重新拉分组（顶部「刷新」/ 行上「更新可用分组」/ 登录成功），
+   * 正好是用户主动表达「把这页弄成最新」的那几下。
+   *
+   * 真正需要实时的是**余额**，那条路独立（`loadBalance`，见下）。
    *
    * ⚠️ **顺带刷新官网账号列表**（见函数体末尾）：两类行的「当前在用」现在都由后端
    * 现算（`tier.isCurrent` 与 vendor 的 `isCurrent` 同源），一次动作后必须把两类行
    * 一起刷齐，否则切档位后 DeepSeek 行会停在旧高亮上（2026-08-07 修的互斥 bug）。
    */
-  const reload = useCallback(
-    async (onlySite?: string) => {
-      // ⚠️ **请求序号：只让最后一次 reload 的结果落地。**
-      //
-      // 这一区在每个动作后都 reload，而它们会重叠 —— 典型的一串是
-      // 「保存编辑 → reload B」撞上更早开始的「获取密钥 → reload A」。
-      // 没有守卫的话 A 后返回就用**旧行**覆盖 B 的新行 ⇒ 用户刚保存的编辑在界面上
-      // 「没生效」（`userEdited` 标记闪一下又消失），而库里其实是对的。（review 抓出）
-      const seq = ++reloadSeqRef.current;
-      const isStale = () => seq !== reloadSeqRef.current;
+  const reload = useCallback(async () => {
+    // ⚠️ **请求序号：只让最后一次 reload 的结果落地。**
+    //
+    // 这一区在每个动作后都 reload，而它们会重叠 —— 典型的一串是
+    // 「保存编辑 → reload B」撞上更早开始的「获取密钥 → reload A」。
+    // 没有守卫的话 A 后返回就用**旧行**覆盖 B 的新行 ⇒ 用户刚保存的编辑在界面上
+    // 「没生效」（`userEdited` 标记闪一下又消失），而库里其实是对的。（review 抓出）
+    const seq = ++reloadSeqRef.current;
+    const isStale = () => seq !== reloadSeqRef.current;
 
-      try {
-        const rows = await relayApi.listRelays(appId);
-        if (isStale()) return;
-        setRelays(rows);
-        void loadVerificationReports(rows);
-
-        // 倍率单独异步补：listRelays 只读本地（首屏不卡网络），倍率必须发请求。
-        // **有意不 await** —— 先渲染出来，倍率随后把「倍率未知」换成数字。
-        // 失败不提示：倍率是附加信息，为它弹 toast 会打断主流程。
-        if (rows.some((op) => op.tiers.length > 0)) {
-          relayApi
-            .listTierRates(appId, onlySite)
-            .then((rates) => {
-              // 倍率回来时可能已经有新一轮 reload 换掉了行 —— 那时这些倍率
-              // 属于旧的一批档位，往新行上贴是错的。
-              if (isStale()) return;
-              const byId = new Map(rates.map((r) => [r.providerId, r]));
-              setRelays((prev) =>
-                prev.map((op) => ({
-                  ...op,
-                  tiers: op.tiers.map((tier) => {
-                    const hit = byId.get(tier.providerId);
-                    // 查不到的保持 null（继续显示「倍率未知」），别覆盖成 0。
-                    return hit
-                      ? { ...tier, rateMultiplier: hit.rateMultiplier }
-                      : tier;
-                  }),
-                })),
-              );
-            })
-            .catch(() => {});
-        }
-      } catch (e) {
-        toast.error(String(e));
-      }
-      // ⚠️ **官网行必须跟档位一起刷**（见上方 doc）：两类行的「当前在用」同源，
-      // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
-      void reloadVendors();
-    },
-    [appId, loadVerificationReports, reloadVendors],
-  );
+    try {
+      const rows = await relayApi.listRelays(appId);
+      if (isStale()) return;
+      setRelays(rows);
+      void loadVerificationReports(rows);
+    } catch (e) {
+      toast.error(String(e));
+    }
+    // ⚠️ **官网行必须跟档位一起刷**（见上方 doc）：两类行的「当前在用」同源，
+    // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
+    void reloadVendors();
+  }, [appId, loadVerificationReports, reloadVendors]);
 
   useEffect(() => {
     void reload();
@@ -976,7 +955,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
           reportProvision(t, await relayApi.provision(relayId), appId);
         }
         // ok === false 是用户自己关了窗口，不出提示（他知道自己干了什么）。
-        await reload(relays.find((op) => op.id === relayId)?.siteOrigin);
+        await reload();
       } catch (e) {
         toast.error(String(e));
       }
@@ -987,8 +966,8 @@ export function RelaySection({ appId }: RelaySectionProps) {
     run(`provision:${relayId}`, async () => {
       try {
         reportProvision(t, await relayApi.provision(relayId), appId);
-        // 只刷这一个中转站的倍率 —— 别的账号没变，重查它们纯属浪费请求。
-        await reload(relays.find((op) => op.id === relayId)?.siteOrigin);
+        // 纯本地重读 —— 倍率已经由上面那次 provision 写进库里了。
+        await reload();
       } catch (e) {
         toast.error(String(e));
       }
@@ -999,7 +978,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
    *
    * ## 为什么它必须真的重拉（用户实测发现）
    *
-   * 原来这个按钮只跑 `listRelays`（读本地 DB）+ `listTierRates`（只查倍率），
+   * 原来这个按钮只跑 `listRelays`（读本地 DB）+ 一次只查倍率的网络调用，
    * **没有任何一条路会重新拉 `/groups/available`** ⇒ 中转站在网页端新增了一个
    * 分组，点「刷新」永远看不到；而「获取密钥」按钮只在 `tiers.length === 0`
    * 时才显示，已有档位的行压根没有重拉入口。一个叫「刷新」的按钮刷不出新数据，
@@ -1095,7 +1074,8 @@ export function RelaySection({ appId }: RelaySectionProps) {
         );
       }
 
-      // 全量重载（含倍率）—— 这是显式的全局刷新，用户愿意等。
+      // 全量重载 —— 上面那批 provision 已经把新的分组与倍率写进库里了，
+      // 这一步只是把它们读出来。
       await reload();
 
       // ⚠️ **余额也要重拉**（review 抓出的死路）。

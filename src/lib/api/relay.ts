@@ -91,7 +91,16 @@ export interface TierInfo {
    * Empty for other apps or when no complete remote catalog was fetched.
    */
   models: string[];
-  /** 计费倍率，越小越便宜。null = 未知，不要当 0 显示。 */
+  /**
+   * 计费倍率（分组默认 × 用户专属），越小越便宜。`null` = 未知，**不要当 0 显示**。
+   *
+   * 值在 provision 时算好落库，`listRelays` 直接读本地 —— 所以**首屏就有**，
+   * 而刷新它就等于重新拉分组（顶部「刷新」/ 行上「更新可用分组」/ 登录成功）。
+   * 中间任何一次 reload 都不会为它发网络请求：倍率是服务端定价，不是实时量。
+   *
+   * ⚠️ **不含高峰时段因子** —— 与 sub2api 自己面板的口径一致（它把高峰窗口
+   * 单独标出来，不乘进这个数字）。
+   */
   rateMultiplier: number | null;
   isCurrent: boolean;
   /**
@@ -126,9 +135,8 @@ export interface TierInfo {
 /**
  * 「中转站 × 分组」页的一行中转站，连带它在当前 app 下的档位。
  *
- * 数据来自 `relay_list_relays`，**只读本地不发网络** —— 所以每个 tier 的
- * `rateMultiplier` 恒为 null，要等用户主动刷新（provision）才有值。
- * 这是有意的：首屏不该卡在网络上。
+ * 数据来自 `relay_list_relays`，**只读本地不发网络** —— 倍率也在本地
+ * （provision 时写下的值），所以首屏一次渲染就是完整的。
  */
 export interface RelayRow {
   id: number;
@@ -144,13 +152,6 @@ export interface RelayRow {
    */
   sessionExpired: boolean;
   tiers: TierInfo[];
-}
-
-/** 一个档位的倍率查询结果（`listTierRates` 返回）。 */
-export interface TierRate {
-  providerId: string;
-  /** null = 查不到（站点不提供计费信息 / sk 已失效）。**不是错误**，显示「倍率未知」。 */
-  rateMultiplier: number | null;
 }
 
 export interface ProvisionSummary {
@@ -271,23 +272,12 @@ export const relayApi = {
    *
    * `app` 传当前 tab 的 app_type（如 `"codex"`）。
    *
-   * **只读本地、不发网络**（首屏不卡在网络上），所以每个 tier 的 `rateMultiplier`
-   * 恒为 null。倍率用下面的 `listTierRates` 在首屏渲染后异步补。
+   * **只读本地、不发网络**（首屏不卡在网络上）。倍率也在返回值里 —— 它由
+   * provision 落库，所以这条命令**不需要**任何后续的异步补齐；
+   * 曾经那条「每个档位一次 HTTP」的 `listTierRates` 已经删掉。
    */
   listRelays: (app: string): Promise<RelayRow[]> =>
     invoke("relay_list_relays", { app }),
-
-  /**
-   * 查各档位的当前倍率。**首屏渲染完再调**（它发网络请求）。
-   *
-   * 用每个档位自己的 sk 查 `/v1/sub2api/billing` —— 所以**账号登录过期了也能查到**，
-   * 且拿到的是服务端算好的最终倍率（含用户专属倍率与当前时刻高峰因子）。
-   *
-   * `rateMultiplier` 为 null 表示这个档位查不到（站点不提供计费信息 / sk 已失效），
-   * **不是错误**，UI 继续显示「倍率未知」即可。
-   */
-  listTierRates: (app: string, siteOrigin?: string): Promise<TierRate[]> =>
-    invoke("relay_list_tier_rates", { app, siteOrigin: siteOrigin ?? null }),
 
   /**
    * 保存中转站行的手工顺序。`relayIds` 是拖动后的完整顺序，下标即 sort_index。
