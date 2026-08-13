@@ -23,5 +23,20 @@
     "wawapii.com": "4PAUD8SSZXG7",
     "hapiopen.cc": "HTL7AFBJLKKU",
     "999555999.com": "XNTZVS78F7WY"
+  },
+  "relay_directory": {
+    "blocked_hosts": [],
+    "sites": {
+      "bestapi.store": {
+        "veridrop_host": "bestapi.store",
+        "entry_url": "https://bestapi.store",
+        "display_name": "BestAPI"
+      },
+      "790053500.com": {
+        "veridrop_host": "api.790053500.com",
+        "entry_url": "https://790053500.com/keys",
+        "display_name": "鑫旺"
+      }
+    }
   }
 }

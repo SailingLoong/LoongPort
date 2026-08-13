@@ -532,6 +532,15 @@ pub fn relay_list_sponsors() -> Vec<crate::relay::remote_config::Sponsor> {
         .unwrap_or_default()
 }
 
+#[tauri::command]
+pub async fn relay_list_directory(
+    kind: crate::relay::leaderboard::LeaderboardKind,
+) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
+    crate::relay::leaderboard::list(kind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// 发现并导入一个第三方中转站。
 ///
 /// 先走原生 HTTP fast path；未识别时不猜失败原因，也不把它宣判成某种站点，
@@ -751,15 +760,14 @@ async fn browser_import(
     let initial_backend = initial_detected
         .as_ref()
         .map(|detected| format!("{:?}", detected.backend_kind));
-    let initial_context = match initial_detected {
-        Some(detected) => Some(browser_login_context(
+    let initial_context = initial_detected.map(|detected| {
+        browser_login_context(
             &site_origin,
             detected,
             login_aff_code.as_deref(),
             login_promo_code.as_deref(),
-        )),
-        None => None,
-    };
+        )
+    });
 
     let entry_source = if browser_entry_is_auth_page(&entry_url) {
         "supplied_auth_page"
