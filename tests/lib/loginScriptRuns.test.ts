@@ -47,6 +47,12 @@ function ensureScripts(): void {
     "api-fetch-script-post.js",
   ].map((n) => resolve(SCRIPT_DIR, n));
   if (needed.every(existsSync)) return;
+  // ⛔ **CI 上素材不在就直接放弃，不去试着编** —— 见 [`scriptsAvailable`] 那段
+  // 「49 秒」。这里必须在 `existsSync` 之后判：装了 Rust 的 CI（将来若有）
+  // 只要素材已经备好，照样能跑这条测试。
+  if (process.env.CI) {
+    throw new Error("CI 上不现编 Rust 素材（见 scriptsAvailable 的说明）");
+  }
   execFileSync(
     "cargo",
     [
@@ -77,13 +83,39 @@ function ensureScripts(): void {
  * （那些只装在 `Backend Checks` 里）⇒ 前端那个 job 里必然编不过。
  *
  * 2026-08-04 实测到的正是这个：`The system library glib-2.0 required by crate
- * glib-sys was not found` ⇒ 这条测试的 10 个用例在 CI 全红，而**本机一直是绿的**
- * —— 因为本机 `src-tauri/target/` 里躺着之前生成的素材，每次都走上面那个 `return`
+ * glib-sys was not found` ⇒ 这条测试的用例在 CI 全红，而**本机一直是绿的**
+ * —— 因为本机 `src-tauri/target/` 里躺着之前生成的素材，每次都走那个 `return`
  * 短路、从不真的调 cargo。典型的「本机有状态、CI 干净」。
  *
  * ⇒ 备不出素材时**显式 skip 并把原因打出来**，不静默也不误报成失败。
- * 真正跑它的是 CI 里 `Backend Checks` 那个 job（有 Rust 环境，见 ci.yml），
- * 以及维护者本机的六道闸。
+ *
+ * ## ⚠️ 2026-08-13：CI 上**连试都不试**，因为那一试会拖垮同批别的测试
+ *
+ * 原来的实现是「先试着编，编不过再 skip」。而那一试在 Frontend Checks 里
+ * **实测烧了 49 秒**（cargo 把依赖树编到撞上 glib 才失败），`execFileSync` 又是
+ * **同步**的 —— 整整 49 秒 CPU 被吃满，而 vitest 的其它 worker 正在并行跑。
+ *
+ * 后果是同批里最慢的两条集成用例（本机 0.5s / 1.2s）在 CI 上双双撞穿
+ * 5000ms 默认超时，且**一超时就连累后面**：组件没卸载，下一个用例的
+ * `getByText` 会撞到两个同名元素。实测时间线（PR #98 那次）：
+ *
+ * ```text
+ * 11:38:42  vitest 启动
+ * 11:39:13  SessionManagerPage 超时      ← 都落在 cargo 那 49 秒里
+ * 11:39:30  App integration 超时
+ * 11:39:31  cargo 失败，本文件 skip
+ * ```
+ *
+ * 而这 49 秒**换不来任何覆盖**：`ci.yml` 里只有 `Frontend Checks` 跑
+ * `pnpm test:unit`（第 64 行），`Backend Checks` 只跑 `cargo test`（第 124 行）
+ * **不跑 vitest** —— 所以这条测试在 CI 上本来就哪儿都没跑过。
+ * （本文件原先写着「真正跑它的是 Backend Checks」，那句话不属实，一并改掉。）
+ *
+ * ⇒ CI 上素材不在就直接 skip。**真正跑它的是维护者本机的六道闸**，
+ * 那里 `src-tauri/target/` 有素材、或者 cargo 本来就编得动。
+ *
+ * ⚠️ 判据用 `CI` 而不是「是不是 ubuntu」：将来给前端那个 job 装上 GTK 全套时，
+ * 素材只要备好了（`existsSync` 那道短路在前）这条测试照样会跑。
  */
 function scriptsAvailable(): boolean {
   try {
@@ -92,8 +124,8 @@ function scriptsAvailable(): boolean {
   } catch (e) {
     const why = e instanceof Error ? e.message.split("\n")[0] : String(e);
     console.warn(
-      `⚠️ 跳过「登录注入脚本能真的执行」——素材备不出来（需要能编 Rust）：${why}\n` +
-        `   这条测试由 CI 的 Backend Checks 与本机六道闸负责，见本文件顶部说明。`,
+      `⚠️ 跳过「登录注入脚本能真的执行」——素材不在（${why}）\n` +
+        `   这条测试由维护者本机的六道闸负责，见本文件 scriptsAvailable 的说明。`,
     );
     return false;
   }
