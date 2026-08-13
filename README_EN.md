@@ -14,6 +14,10 @@
 
 ### 🌐 Official website: **[loongport.dev](https://loongport.dev)**
 
+### 💬 QQ group: **773696474**
+
+<img src="assets/qq-group.jpeg" alt="QR code for the LoongPort QQ group" width="240">
+
 [中文](README.md) | English
 
 </div>
