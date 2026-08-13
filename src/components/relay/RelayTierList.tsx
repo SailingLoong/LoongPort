@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Plus, RefreshCw } from "lucide-react";
+import { Plus } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -34,8 +34,8 @@ import { parseRowKey, type RowKey, rowKey } from "./rowKey";
  *
  * ## 区块头
  *
- * 标题左侧一个 `+` 图标按钮（tooltip 是「添加中转站」），右侧是「刷新档位与密钥」
- * —— 刷新只属于中转站块（它要对每个已登录中转站重拉分组）。
+ * 标题左侧一个 `+` 图标按钮（tooltip 是「添加中转站」）。全量刷新属于
+ * `RelaySection` 页面级动作，因为它同时同步中转站与官方 API，不放在任一区块里。
  *
  * ## dnd id 仍是判别式 `RowKey`
  *
@@ -67,11 +67,9 @@ export interface RelayTierListProps {
    */
   busy: ReadonlySet<string>;
   onAddSite: () => void;
-  /** 顶部「刷新」：对所有已登录中转站重新拉分组（不只是刷倍率）。 */
-  onRefresh: () => void;
   /** 行内动作，**都显式带 relayId**（后端命令直接吃它，不再靠全局「当前站」）。 */
   onLogin: (relayId: number) => void;
-  onProvision: (relayId: number) => void;
+  onProvision: (relayId: number) => void | Promise<void>;
   onSwitchTier: (relayId: number, tier: TierInfo) => void;
   onSelectTierModel: (tier: TierInfo, model: string) => void;
   /** 拖动结束后的新顺序（完整 id 序列，下标即 sort_index）。 */
@@ -166,7 +164,6 @@ export function RelayTierList({
   relays,
   busy,
   onAddSite,
-  onRefresh,
   onLogin,
   onProvision,
   onSwitchTier,
@@ -183,8 +180,6 @@ export function RelayTierList({
   onRemoveRelay,
 }: RelayTierListProps) {
   const { t } = useTranslation();
-  const refreshing = busy.has("refresh:all");
-
   // 与 `useDragSort`（ProviderList 用的那个）同样的 sensor 配置 —— 视觉与手感一致。
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -254,41 +249,19 @@ export function RelayTierList({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <h2 className="text-sm font-medium">
-            {t("loongport.sections.relay")}
-          </h2>
-          {/* 「添加中转站」入口。与「官方 API」块同构：+ 图标跟在标题后面。 */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            onClick={onAddSite}
-            title={t("loongport.tierList.addSite")}
-            aria-label={t("loongport.tierList.addSite")}
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-        {/* 全局刷新会对每个已登录中转站各发一轮请求，所以它自己进行中时要禁用
-            （防连点）；但**别的行的操作不该禁它**，也不该被它禁 ——
-            中转站之间无依赖。 */}
+      <div className="flex items-center gap-1.5">
+        <h2 className="text-sm font-medium">{t("loongport.sections.relay")}</h2>
+        {/* 「添加中转站」入口。与「官方 API」块同构：+ 图标跟在标题后面。 */}
         <Button
           type="button"
           variant="ghost"
-          size="sm"
-          className="h-7 gap-1"
-          disabled={refreshing}
-          onClick={onRefresh}
+          size="icon"
+          className="h-6 w-6"
+          onClick={onAddSite}
+          title={t("loongport.tierList.addSite")}
+          aria-label={t("loongport.tierList.addSite")}
         >
-          {refreshing ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="h-3.5 w-3.5" />
-          )}
-          {t("loongport.tierList.refresh")}
+          <Plus className="h-3.5 w-3.5" />
         </Button>
       </div>
 

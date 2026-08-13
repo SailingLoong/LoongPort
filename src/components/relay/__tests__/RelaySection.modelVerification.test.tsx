@@ -22,7 +22,9 @@ const api = vi.hoisted(() => ({
   cancel: vi.fn(),
   onProgress: vi.fn(),
   list: vi.fn(),
+  vendorProvision: vi.fn(),
 }));
+const vendorSupport = vi.hoisted(() => ({ enabled: false }));
 const dialogState = vi.hoisted(() => ({
   onOpenChange: (_open: boolean) => {},
 }));
@@ -40,8 +42,8 @@ vi.mock("@/lib/api", () => ({
   PROVIDER_SWITCHED: "provider-switched",
 }));
 vi.mock("@/lib/api/vendor", () => ({
-  vendorApi: { list: api.list },
-  vendorSupportsApp: () => false,
+  vendorApi: { list: api.list, provision: api.vendorProvision },
+  vendorSupportsApp: () => vendorSupport.enabled,
 }));
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: {
@@ -127,9 +129,6 @@ vi.mock("@/components/relay/RelayTierList", () => ({
                   : `verify ${tier.providerId}`}
               </button>
             )}
-            <button type="button" onClick={props.onRefresh}>
-              refresh
-            </button>
           </div>
         )),
       )}
@@ -161,8 +160,9 @@ import { RelaySection } from "../RelaySection";
  * 行上渲染一个失败态的用量条，不影响任何模型验证的断言。
  */
 function renderSection(appId: "codex" | "claude" | "codex-image" | "gemini") {
+  const queryClient = createTestQueryClient();
   return render(
-    <QueryClientProvider client={createTestQueryClient()}>
+    <QueryClientProvider client={queryClient}>
       <RelaySection appId={appId} />
     </QueryClientProvider>,
   );
@@ -204,6 +204,7 @@ let progressListener: ((event: any) => void) | undefined;
 describe("RelaySection model verification ownership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vendorSupport.enabled = false;
     eventHandlers.clear();
     progressListener = undefined;
     api.listRelays.mockResolvedValue([relay]);
@@ -221,6 +222,12 @@ describe("RelaySection model verification ownership", () => {
     });
     api.listSites.mockResolvedValue([{}]);
     api.list.mockResolvedValue([]);
+    api.vendorProvision.mockResolvedValue({
+      providerId: "vendor-provider",
+      keyCreated: false,
+      platforms: ["codex"],
+      mergedProviders: [],
+    });
     api.listResults.mockResolvedValue([
       report("provider-a", "suspicious", "one"),
       report("provider-a", "anomaly", "two"),
@@ -247,7 +254,9 @@ describe("RelaySection model verification ownership", () => {
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "loongport.refreshAll" }),
+    );
     await waitFor(() => expect(api.listRelays).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(api.listResults).toHaveBeenCalledTimes(2));
 
@@ -273,7 +282,9 @@ describe("RelaySection model verification ownership", () => {
       report("provider-a", "trusted", "verified-model"),
       report("provider-a", "suspicious", "suspicious-model"),
     ]);
-    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "loongport.refreshAll" }),
+    );
 
     await waitFor(() =>
       expect(screen.getByTestId("verdict-provider-a")).toHaveTextContent(
@@ -476,5 +487,42 @@ describe("RelaySection model verification ownership", () => {
         screen.queryByRole("button", { name: "verify provider-a" }),
       ).not.toBeInTheDocument();
     }
+  });
+
+  it("refreshes relays and official APIs from one page-level icon", async () => {
+    vendorSupport.enabled = true;
+    api.list.mockResolvedValue([
+      {
+        id: 9,
+        vendorId: "deepseek",
+        vendorName: "DeepSeek",
+        accountLabel: "account",
+        loggedIn: true,
+        sessionExpired: false,
+        keyReady: true,
+        providerId: "vendor-provider",
+        isCurrent: false,
+        userEdited: false,
+      },
+    ]);
+    const queryClient = createTestQueryClient();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RelaySection appId="codex" />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(api.list).toHaveBeenCalled());
+    fireEvent.click(
+      screen.getByRole("button", { name: "loongport.refreshAll" }),
+    );
+
+    await waitFor(() => expect(api.provision).toHaveBeenCalledWith(1));
+    expect(api.vendorProvision).toHaveBeenCalledWith(9);
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["rowBalance"],
+    });
+    expect(screen.queryByText("loongport.refreshAll")).not.toBeInTheDocument();
   });
 });

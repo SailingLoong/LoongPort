@@ -50,7 +50,13 @@ export interface InlineUsageProps {
   loading: boolean;
   /** 上次**成功**查询的时间戳，`null` = 从未。 */
   lastQueriedAt: number | null;
-  onRefresh: () => void;
+  onRefresh: () => unknown | Promise<unknown>;
+  /** 刷新按钮的完整语义。省略时沿用 provider 页的「刷新用量」。 */
+  refreshLabel?: string;
+  /** 把更新时间、刷新与用量压在同一行。LoongPort 行使用，provider 页保持原布局。 */
+  singleLine?: boolean;
+  /** 是否显示服务端返回的已用值。 */
+  showUsed?: boolean;
 }
 
 /**
@@ -74,6 +80,9 @@ export const InlineUsage: React.FC<InlineUsageProps> = ({
   loading,
   lastQueriedAt,
   onRefresh,
+  refreshLabel,
+  singleLine = false,
+  showUsed = true,
 }) => {
   const { t } = useTranslation();
 
@@ -96,7 +105,8 @@ export const InlineUsage: React.FC<InlineUsageProps> = ({
       onClick={refresh}
       disabled={loading}
       className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-50 flex-shrink-0 text-muted-foreground"
-      title={t("usage.refreshUsage")}
+      title={refreshLabel ?? t("usage.refreshUsage")}
+      aria-label={refreshLabel ?? t("usage.refreshUsage")}
     >
       <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
     </button>
@@ -120,67 +130,85 @@ export const InlineUsage: React.FC<InlineUsageProps> = ({
 
   const isExpired = firstUsage.isValid === false;
 
+  const usageValues = (
+    <>
+      {showUsed && firstUsage.used !== undefined && (
+        <div className="flex items-center gap-0.5">
+          <span className="text-gray-500 dark:text-gray-400">
+            {t("usage.used")}
+          </span>
+          <span className="tabular-nums text-gray-600 dark:text-gray-400 font-medium">
+            {firstUsage.used.toFixed(2)}
+          </span>
+        </div>
+      )}
+
+      {firstUsage.remaining !== undefined && (
+        <div className="flex items-center gap-0.5">
+          <span className="text-gray-500 dark:text-gray-400">
+            {t("usage.remaining")}
+          </span>
+          <span
+            className={`font-semibold tabular-nums ${
+              isExpired
+                ? "text-red-500 dark:text-red-400"
+                : firstUsage.remaining <
+                    (firstUsage.total || firstUsage.remaining) * 0.1
+                  ? "text-orange-500 dark:text-orange-400"
+                  : "text-green-600 dark:text-green-400"
+            }`}
+          >
+            {firstUsage.remaining.toFixed(2)}
+          </span>
+        </div>
+      )}
+
+      {firstUsage.unit && (
+        <span className="text-gray-500 dark:text-gray-400">
+          {firstUsage.unit}
+        </span>
+      )}
+
+      {firstUsage.extra && (
+        <span
+          className="text-gray-500 dark:text-gray-400 truncate max-w-[150px]"
+          title={firstUsage.extra}
+        >
+          {firstUsage.extra}
+        </span>
+      )}
+    </>
+  );
+
+  const queriedAt = (
+    <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
+      <Clock size={10} />
+      {lastQueriedAt
+        ? formatRelativeTime(lastQueriedAt, now, t)
+        : t("usage.never", { defaultValue: "从未更新" })}
+    </span>
+  );
+
+  if (singleLine) {
+    return (
+      <div className="flex flex-row items-center gap-2 text-xs whitespace-nowrap flex-shrink-0">
+        {usageValues}
+        {queriedAt}
+        {refreshButton}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col items-end gap-1 text-xs whitespace-nowrap flex-shrink-0">
       {/* 第一行：更新时间和刷新按钮 */}
       <div className="flex items-center gap-2 justify-end">
-        <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
-          <Clock size={10} />
-          {lastQueriedAt
-            ? formatRelativeTime(lastQueriedAt, now, t)
-            : t("usage.never", { defaultValue: "从未更新" })}
-        </span>
+        {queriedAt}
         {refreshButton}
       </div>
 
       {/* 第二行：用量和剩余 */}
-      <div className="flex items-center gap-2">
-        {firstUsage.used !== undefined && (
-          <div className="flex items-center gap-0.5">
-            <span className="text-gray-500 dark:text-gray-400">
-              {t("usage.used")}
-            </span>
-            <span className="tabular-nums text-gray-600 dark:text-gray-400 font-medium">
-              {firstUsage.used.toFixed(2)}
-            </span>
-          </div>
-        )}
-
-        {firstUsage.remaining !== undefined && (
-          <div className="flex items-center gap-0.5">
-            <span className="text-gray-500 dark:text-gray-400">
-              {t("usage.remaining")}
-            </span>
-            <span
-              className={`font-semibold tabular-nums ${
-                isExpired
-                  ? "text-red-500 dark:text-red-400"
-                  : firstUsage.remaining <
-                      (firstUsage.total || firstUsage.remaining) * 0.1
-                    ? "text-orange-500 dark:text-orange-400"
-                    : "text-green-600 dark:text-green-400"
-              }`}
-            >
-              {firstUsage.remaining.toFixed(2)}
-            </span>
-          </div>
-        )}
-
-        {firstUsage.unit && (
-          <span className="text-gray-500 dark:text-gray-400">
-            {firstUsage.unit}
-          </span>
-        )}
-
-        {firstUsage.extra && (
-          <span
-            className="text-gray-500 dark:text-gray-400 truncate max-w-[150px]"
-            title={firstUsage.extra}
-          >
-            {firstUsage.extra}
-          </span>
-        )}
-      </div>
+      <div className="flex items-center gap-2">{usageValues}</div>
     </div>
   );
 };

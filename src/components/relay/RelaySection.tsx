@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
+import { Layers3, Loader2, RefreshCw } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Button } from "@/components/ui/button";
 import {
   relayApi,
   PURCHASE_CLOSED,
@@ -409,7 +411,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
    * HTTP** ⇒ 用户切一次档位就把所有档位的倍率重查一遍。
    *
    * 倍率是服务端定价，不是实时量。现在它在 provision 时就算好落库、由 `listRelays`
-   * 一并返回 ⇒ 刷新倍率 = 重新拉分组（顶部「刷新」/ 行上「更新可用分组」/ 登录成功），
+   * 一并返回 ⇒ 刷新倍率 = 重新拉分组（页面级刷新 / 行级统一刷新 / 登录成功），
    * 正好是用户主动表达「把这页弄成最新」的那几下。
    *
    * 真正需要实时的是**余额**，那条路独立：它由每一行自己的 `useRowBalanceQuery`
@@ -888,7 +890,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
     });
 
   /**
-   * 顶部「刷新」：**对所有已登录的中转站重新拉分组**。
+   * 页面级刷新：同步全部已登录中转站与当前平台支持的官方 API 账号。
    *
    * ## 为什么它必须真的重拉（用户实测发现）
    *
@@ -902,21 +904,21 @@ export function RelaySection({ appId }: RelaySectionProps) {
    * 站的等待时间叠加。用 allSettled 而不是 all —— 一个站失败（网络/登录过期）
    * 不该让别的站的结果一起丢掉。
    *
-   * 未登录的行跳过：它必然没有分组，白打一次请求还会报错。
+   * 中转站未登录的行跳过：它必然没有分组，白打一次请求还会报错。官方 API
+   * 行则全部同步；每行由后端决定是复用现有密钥还是补齐配置。
    */
   const handleRefreshAll = () =>
     run("refresh:all", async () => {
-      const targets = relays.filter((op) => op.loggedIn);
-      if (targets.length === 0) {
-        // 一个都没登录时退化成纯本地重载 —— 至少把别的 tab 里 provision 出来的
-        // 档位显示出来（那种情况本地 DB 确实有新数据）。
-        await reload();
-        return;
-      }
-
-      const results = await Promise.allSettled(
-        targets.map((op) => relayApi.provision(op.id)),
-      );
+      const relayTargets = relays.filter((op) => op.loggedIn);
+      const vendorTargets = vendorSupportsApp(appId)
+        ? vendors.filter((account) => account.loggedIn || account.keyReady)
+        : [];
+      const [relayResults, vendorResults] = await Promise.all([
+        Promise.allSettled(relayTargets.map((op) => relayApi.provision(op.id))),
+        Promise.allSettled(
+          vendorTargets.map((account) => vendorApi.provision(account.id)),
+        ),
+      ]);
 
       let keysCreated = 0;
       // ⚠️ **成功数必须自己数，不能用 `targets.length`**（review 抓出）。
@@ -932,7 +934,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
       // 成功项单独收一份 —— 档位数的累加交给 `sumTiersForApp`（见它的文档：
       // 内联 `+=` 那种写法没有任何闸钉得住，实测改错了 678 条测试全绿）。
       const ok: ProvisionSummary[] = [];
-      results.forEach((r, i) => {
+      relayResults.forEach((r, i) => {
         if (r.status === "fulfilled") {
           succeeded += 1;
           ok.push(r.value);
@@ -947,11 +949,37 @@ export function RelaySection({ appId }: RelaySectionProps) {
           }
         } else {
           failed.push({
-            name: targets[i].siteName || targets[i].siteOrigin,
+            name: relayTargets[i].siteName || relayTargets[i].siteOrigin,
             reason: String(r.reason),
           });
         }
       });
+
+      const refreshedVendorProviderIds: Record<number, string> = {};
+      vendorResults.forEach((result, index) => {
+        const account = vendorTargets[index];
+        if (result.status === "fulfilled") {
+          refreshedVendorProviderIds[account.id] = result.value.providerId;
+          if (result.value.mergedProviders.length > 0) {
+            toast.info(
+              t("loongport.provision.mergedProviders", {
+                count: result.value.mergedProviders.length,
+              }),
+            );
+          }
+        } else {
+          failed.push({
+            name: account.accountLabel || account.vendorName,
+            reason: String(result.reason),
+          });
+        }
+      });
+      if (Object.keys(refreshedVendorProviderIds).length > 0) {
+        setVendorProviderIds((previous) => ({
+          ...previous,
+          ...refreshedVendorProviderIds,
+        }));
+      }
 
       // ⚠️ **只数当前平台的** —— `tiers` 是全平台的（provision 一次探全部平台）。
       // 累总数会说出「共 9 个档位」而用户眼前那一屏只有 3 个，且那句是绿色的
@@ -996,7 +1024,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
       //
       // 一次性让**全部行**的余额 query 失效（而不是逐个 targets 点名）：这里的
       // `targets` 只是本次 provision 涉及的中转站，而官网行的余额同样该跟着刷新。
-      void queryClient.invalidateQueries({ queryKey: rowBalanceKeys.all });
+      await queryClient.invalidateQueries({ queryKey: rowBalanceKeys.all });
     });
 
   /**
@@ -1189,13 +1217,33 @@ export function RelaySection({ appId }: RelaySectionProps) {
       {/* 生图页顶部的说明。**只在这一页出现** —— 见 `ImageTabNotice` 的文档：
           它是唯一一个不能独立使用的标签，那件事必须写出来。 */}
       {isImageTab && <ImageTabNotice empty={false} />}
+      <div className="mb-3 flex justify-end">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="relative h-7 w-7"
+          disabled={busy.has("refresh:all")}
+          onClick={() => void handleRefreshAll()}
+          title={t("loongport.refreshAll")}
+          aria-label={t("loongport.refreshAll")}
+        >
+          {busy.has("refresh:all") ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <>
+              <RefreshCw className="h-4 w-4" />
+              <Layers3 className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-sm bg-background" />
+            </>
+          )}
+        </Button>
+      </div>
       <RelayTierList
         relays={relays}
         busy={busy}
         onAddSite={() => setAddingSite(true)}
-        onRefresh={() => void handleRefreshAll()}
         onLogin={(relayId) => void handleLogin(relayId)}
-        onProvision={(relayId) => void handleProvision(relayId)}
+        onProvision={handleProvision}
         onReorder={(ids) => void handleReorder(ids)}
         onSwitchTier={(relayId, tier) => void handleSwitchTier(relayId, tier)}
         onSelectTierModel={(tier, model) =>
@@ -1253,7 +1301,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
               const row = vendors.find((v) => v.id === rowId);
               if (row) void handleVendorLogin(row.vendorId, rowId);
             },
-            onProvision: (rowId) => void handleVendorProvision(rowId),
+            onProvision: handleVendorProvision,
             onUse: (rowId) => void handleVendorUse(rowId),
             onRemove: (rowId) => {
               const row = vendors.find((v) => v.id === rowId);

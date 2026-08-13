@@ -7,11 +7,11 @@ import {
   ChevronRight,
   Fingerprint,
   GripVertical,
+  Layers3,
   Loader2,
   Pencil,
   PencilLine,
   Play,
-  RefreshCw,
   Trash2,
   Undo2,
 } from "lucide-react";
@@ -92,7 +92,7 @@ export interface RelayRowProps {
    */
   busy: ReadonlySet<string>;
   onLogin: () => void;
-  onProvision: () => void;
+  onProvision: () => void | Promise<void>;
   onSwitchTier: (tier: TierInfo) => void;
   onSelectTierModel: (tier: TierInfo, model: string) => void;
   /** 带登录态开这一行的充值页（钱包按钮，低余额时换琥珀叹号）。 */
@@ -187,7 +187,9 @@ export function RelayRow({
           "group/row rounded-xl border border-border bg-card p-4 text-card-foreground transition-all duration-300",
           dragHandleProps?.isDragging
             ? "cursor-grabbing border-primary shadow-lg"
-            : "hover:border-border-active",
+            : hasCurrentTier
+              ? "border-blue-500/60 shadow-sm shadow-blue-500/10 hover:border-blue-500"
+              : "hover:border-border-active",
         )}
       >
         <div className="flex items-center gap-2">
@@ -261,6 +263,11 @@ export function RelayRow({
             enabled={relay.loggedIn || relay.sessionExpired}
             purchaseBusy={busy.has(`purchase:${relay.id}`)}
             onPurchase={onPurchase}
+            onRefresh={relay.loggedIn ? onProvision : undefined}
+            refreshBusy={busy.has(`provision:${relay.id}`)}
+            refreshLabel={
+              relay.loggedIn ? t("loongport.row.refreshAll") : undefined
+            }
           />
 
           {/* 删除这一行（这个「站点 × 账号」）。
@@ -395,8 +402,7 @@ function RowDelete({
  *
  * 每个档位的 sk 写在它自己的 provider 配置里，与网页登录态是两份独立的凭据。
  * 后端探到会话失效时只清会话（`creds::clear_session`），账号身份、分组与密钥
- * 全都留着 ⇒ 这一行**照样能切档位、照样能调用**，唯一真实的损失是拉不到余额
- * （那要网页登录态）。
+ * 全都留着 ⇒ 这一行**照样能切档位、照样能调用**，余额也会优先用独立的 sk 查询。
  *
  * 所以有档位时不摆「登录已过期」那个空壳状态 —— 那会让用户以为分组和密钥一起没了，
  * 从而去做一堆不必要的重建动作。照常显示档位数，只在旁边留一条重新登录的路。
@@ -409,7 +415,7 @@ function RowDelete({
  *
  * 原来「获取密钥」只在 `tiers.length === 0` 时出现 ⇒ **已经有档位的行没有任何
  * 重拉入口**。中转站在网页端新增一个分组后，用户在这一页无论点什么都看不到它
- * （顶部「刷新」当时也只读本地 + 查倍率）。
+ * （旧的区块刷新当时也只读本地 + 查倍率）。
  *
  * 禁用只看**自己这一个 key**，不看别人 —— 中转站之间无依赖。
  */
@@ -422,7 +428,7 @@ function RowStatus({
   relay: RelayRowData;
   busy: ReadonlySet<string>;
   onLogin: () => void;
-  onProvision: () => void;
+  onProvision: () => void | Promise<void>;
 }) {
   const { t } = useTranslation();
   const loggingIn = busy.has(`login:${relay.id}`);
@@ -433,8 +439,12 @@ function RowStatus({
     if (relay.tiers.length > 0) {
       return (
         <div className="flex shrink-0 items-center gap-2">
-          <span className="text-xs text-muted-foreground">
-            {t("loongport.row.tierCount", { count: relay.tiers.length })}
+          <span
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+            title={t("loongport.row.tierCount", { count: relay.tiers.length })}
+          >
+            <Layers3 className="h-3.5 w-3.5" />
+            <span className="tabular-nums">{relay.tiers.length}</span>
           </span>
           <Button
             type="button"
@@ -491,28 +501,13 @@ function RowStatus({
 
   return (
     <div className="flex shrink-0 items-center gap-2">
-      <span className="text-xs text-muted-foreground">
-        {t("loongport.row.tierCount", { count: relay.tiers.length })}
-      </span>
-      {/* 重拉分组不是普通的「刷新当前显示」，而是一次远端重新发现 ——
-          所以按钮**必须带文字**：裸的刷新图标会被当成「刷新一下这页」。
-          形状逐字抄区块头那个「刷新」（`RelayTierList` 的同一组 class），
-          两处刷新看起来就是同一套东西。 */}
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="h-7 gap-1"
-        disabled={provisioning}
-        onClick={onProvision}
+      <span
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+        title={t("loongport.row.tierCount", { count: relay.tiers.length })}
       >
-        {provisioning ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <RefreshCw className="h-3.5 w-3.5" />
-        )}
-        {t("loongport.row.refetchGroups")}
-      </Button>
+        <Layers3 className="h-3.5 w-3.5" />
+        <span className="tabular-nums">{relay.tiers.length}</span>
+      </span>
     </div>
   );
 }

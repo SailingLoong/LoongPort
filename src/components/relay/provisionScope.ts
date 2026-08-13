@@ -64,7 +64,7 @@ export function countTiersForApp(r: ProvisionSummary, appId: AppId): number {
 }
 
 /**
- * 跨多个中转站累加「落在当前平台的档位数」——顶部「刷新」那条批量路径用。
+ * 跨多个中转站累加「落在当前平台的档位数」——页面级批量刷新路径使用。
  *
  * ⚠️ **同样别累 `r.tiers.length`**：三个中转站各有 codex/claude/gemini 分组时，
  * 用户在 codex 屏会被告知「共 9 个档位」而他眼前只有 3 个。数字对不上时他分不清

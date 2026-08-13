@@ -3058,6 +3058,7 @@
     "refresh": "刷新"
   },
   "loongport": {
+    "refreshAll": "更新全部中转站与官方 API 的账号信息、额度、分组倍率和接入配置",
     "sections": {
       "relay": "中转站",
       "official": "官方 API",
@@ -3079,6 +3080,7 @@
       "noTiers": "此账号在当前平台没有可用分组",
       "getKeys": "创建接入配置",
       "tierCount": "{{count}} 个接入配置",
+      "refreshAll": "更新账号信息、额度、可用分组、倍率和接入配置",
       "dragHandle": "拖动排序",
       "refetchGroups": "更新可用分组",
       "purchaseHint": "打开中转站充值页面",
@@ -3183,6 +3185,7 @@
       "importFailed": "添加中转站失败，请稍后重试。"
     },
     "vendor": {
+      "refreshAll": "更新账号信息、额度、密钥配置和当前状态",
       "add": "添加服务商账号",
       "empty": "尚未添加服务商账号",
       "remove": "删除服务商账号及接入配置",
