@@ -39,7 +39,7 @@ use crate::vendor::{creds, deepseek, provision, Vendor, VendorError};
 
 /// 等用户走完登录流程的上限。5 分钟够走完注册 + 短信验证码 + 微信扫码。
 ///
-/// 超时**不是错误**：用户可能就是走开了，返回 `false` 让前端安静收场。
+/// 超时**不是错误**：用户可能就是走开了，返回 `None` 让前端安静收场。
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// 一个已添加的官网账号（给前端列表用）。
@@ -56,28 +56,14 @@ pub struct VendorAccountRow {
     pub vendor_name: String,
     /// 给人看的账号名（手机号，空则回落 account_id）。
     pub account_label: String,
-    /// 已有可用登录态。
-    pub logged_in: bool,
-    /// **登录过、但登录态已经不能用了** —— 前端据此提示「登录已过期，请重新登录」，
-    /// 而不是像从没登录过一样只摆一个「登录」按钮。
-    ///
-    /// 与 `!logged_in` 不同：那个把「从没登录」与「过期」混成一件事，而对用户是两种
-    /// 处境。判据是「有 `account_id`（登录过）但 token 空了」。
-    pub session_expired: bool,
-    /// **本地已经有这个账号的 sk 明文**。
-    ///
-    /// ⚠️ 判据就是 `api_key` 非空，**不代表六个平台的 provider 记录都写成功了**。
-    /// 别把它读成「配置已就绪」：`provision_impl` 第 5 步先落 sk、第 6 步才展开六条，
-    /// 中途某条 `save_provider` 失败会让这一行处于「有 sk、记录不全」的状态。
-    ///
-    /// 那种情况**不虚报**：第 6 步失败会让整条命令返回 `Err`，用户看到的是错误 toast，
-    /// 而这一行确实已经有 sk 了 —— 补救手段正是行内那个「刷新」（重新展开一次，
-    /// 已有的记录只换 sk、缺的补上）。所以这里如实反映「sk 有没有」就够了，
-    /// 不必为它去读六次 DB（这条命令的契约是只读本地、不发网络、首屏别卡）。
-    ///
-    /// ⚠️ 与 `logged_in` **独立**：登录态过期时这里仍可以是 `true`，那种情况下
-    /// 用户的 CLI 照样能用（sk 没失效），不该催他去重新登录。
-    pub key_ready: bool,
+    /// 后端计算出的行状态，前端只负责展示对应状态。
+    pub status: VendorAccountStatus,
+    /// 这一行是否具备余额查询所需的凭据。
+    pub can_query_balance: bool,
+    /// 这一行是否可以重新获取最新账号信息、额度与接入配置。
+    pub can_refresh: bool,
+    /// 当前 tab 下是否已有可编辑的接入配置。
+    pub can_edit_config: bool,
     /// 这一行名下那六条 provider 记录的 id（六个平台**共用一个**）。
     ///
     /// ## 为什么必须由后端给
@@ -115,6 +101,16 @@ pub struct VendorAccountRow {
     pub user_edited: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VendorAccountStatus {
+    NotLoggedIn,
+    SessionExpired,
+    SessionExpiredUsable,
+    Ready,
+    NoKey,
+}
+
 impl From<creds::VendorRow> for VendorAccountRow {
     fn from(row: creds::VendorRow) -> Self {
         let vendor_name = Vendor::from_id(&row.vendor_id)
@@ -126,10 +122,27 @@ impl From<creds::VendorRow> for VendorAccountRow {
             .as_deref()
             .map(|acct| crate::vendor::provision::provider_id_for(&row.vendor_id, acct))
             .unwrap_or_default();
+        let logged_in = !row.auth_token.is_empty();
+        let session_expired = row.account_id.is_some() && row.auth_token.is_empty();
+        let key_ready = !row.api_key.is_empty();
+        let status = if session_expired {
+            if key_ready {
+                VendorAccountStatus::SessionExpiredUsable
+            } else {
+                VendorAccountStatus::SessionExpired
+            }
+        } else if !logged_in {
+            VendorAccountStatus::NotLoggedIn
+        } else if key_ready {
+            VendorAccountStatus::Ready
+        } else {
+            VendorAccountStatus::NoKey
+        };
         VendorAccountRow {
-            logged_in: !row.auth_token.is_empty(),
-            session_expired: row.account_id.is_some() && row.auth_token.is_empty(),
-            key_ready: !row.api_key.is_empty(),
+            status,
+            can_query_balance: logged_in || key_ready,
+            can_refresh: !provider_id.is_empty() && (logged_in || key_ready),
+            can_edit_config: key_ready && !provider_id.is_empty(),
             account_label: row.account_label,
             provider_id,
             vendor_id: row.vendor_id,
@@ -240,7 +253,7 @@ fn is_current_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType) 
 
 /// 开登录窗，等凭据回来，存成一行账号。
 ///
-/// 返回 `true` = 拿到凭据并已入库；`false` = 用户关窗或超时（**都不是错误**）。
+/// 返回保存后的行 id；`None` = 用户关窗或超时（**都不是错误**）。
 ///
 /// ## 为什么不像 relay 那样先建行再登录
 ///
@@ -252,7 +265,7 @@ pub async fn vendor_open_login(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     vendor_id: String,
-) -> Result<bool, String> {
+) -> Result<Option<i64>, String> {
     let vendor = Vendor::from_id(&vendor_id).ok_or_else(|| format!("不认识的厂商：{vendor_id}"))?;
     // 预填值：这个厂商下**最近一次**登录过的那个标识。
     //
@@ -276,7 +289,7 @@ async fn do_login(
     app_handle: &tauri::AppHandle,
     vendor: Vendor,
     login_hint: &str,
-) -> Result<bool, AppError> {
+) -> Result<Option<i64>, AppError> {
     let url = url::Url::parse(deepseek::LOGIN_URL)
         .map_err(|e| AppError::Config(format!("登录页地址不对: {e}")))?;
 
@@ -346,7 +359,7 @@ async fn do_login(
 
     let Ok(Some(creds)) = outcome else {
         // 用户关掉了窗口，或超时。都不是错误。
-        return Ok(false);
+        return Ok(None);
     };
 
     // `account_id` 已经由 `parse_creds_navigation` 保证非空 —— 「账号身份拿不到就不存
@@ -355,7 +368,7 @@ async fn do_login(
     let account = crate::vendor::VendorAccount::from(creds);
 
     let state = app_handle.state::<AppState>();
-    with_conn(&state, |conn| {
+    let row_id = with_conn(&state, |conn| {
         creds::save_account(conn, vendor, &token, &account)
     })?;
 
@@ -365,7 +378,7 @@ async fn do_login(
     let _ = window.set_title(&format!("已连接 {} — 可关闭此窗口", vendor.display_name()));
     let _ = window.eval(crate::relay::login::CONNECTED_BANNER_JS);
 
-    Ok(true)
+    Ok(Some(row_id))
 }
 
 /// 备好这个账号的密钥，并展开成六个平台的 provider 记录。
@@ -909,14 +922,15 @@ mod tests {
         }
     }
 
-    // ─────────────── DTO：三个状态位互相独立 ───────────────
+    // ─────────────── DTO：后端状态与资格契约 ───────────────
 
     #[test]
     fn a_logged_in_row_is_not_reported_as_expired() {
         let dto = VendorAccountRow::from(row("tok", "", Some("uuid-a")));
-        assert!(dto.logged_in);
-        assert!(!dto.session_expired);
-        assert!(!dto.key_ready);
+        assert!(matches!(dto.status, VendorAccountStatus::NoKey));
+        assert!(dto.can_refresh);
+        assert!(dto.can_query_balance, "有效登录态是余额查询的兜底凭据");
+        assert!(!dto.can_edit_config);
         assert_eq!(dto.vendor_name, "DeepSeek");
     }
 
@@ -924,25 +938,38 @@ mod tests {
     #[test]
     fn expiry_requires_having_logged_in_before() {
         let expired = VendorAccountRow::from(row("", "", Some("uuid-a")));
-        assert!(!expired.logged_in);
-        assert!(expired.session_expired, "有 account_id + 空 token = 过期");
+        assert!(matches!(
+            expired.status,
+            VendorAccountStatus::SessionExpired
+        ));
 
         let never = VendorAccountRow::from(row("", "", None));
         assert!(
-            !never.session_expired,
+            matches!(never.status, VendorAccountStatus::NotLoggedIn),
             "从没登录过不是「过期」—— 前端那两种处境要给不同的按钮"
         );
+    }
+
+    #[test]
+    fn an_unlogged_row_without_a_key_cannot_query_balance() {
+        let dto = VendorAccountRow::from(row("", "", None));
+        assert!(matches!(dto.status, VendorAccountStatus::NotLoggedIn));
+        assert!(!dto.can_query_balance);
+        assert!(!dto.can_refresh);
+        assert!(!dto.can_edit_config);
     }
 
     /// 登录态过期时 sk 仍然好用 —— 这两个状态位必须独立，否则会催用户去做多余的事。
     #[test]
     fn a_usable_key_survives_an_expired_session() {
         let dto = VendorAccountRow::from(row("", "sk-plaintext", Some("uuid-a")));
-        assert!(dto.session_expired);
-        assert!(
-            dto.key_ready,
-            "sk 是独立凭据，网页登录态过期不影响它 —— UI 不该显示成「没配好」"
-        );
+        assert!(matches!(
+            dto.status,
+            VendorAccountStatus::SessionExpiredUsable
+        ));
+        assert!(dto.can_query_balance);
+        assert!(dto.can_refresh);
+        assert!(dto.can_edit_config);
     }
 
     /// 凭据不出 Rust 侧：DTO 序列化后不能带上 token 或明文 sk。

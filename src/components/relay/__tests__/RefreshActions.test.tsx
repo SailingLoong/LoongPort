@@ -61,18 +61,20 @@ import { VendorRow } from "../VendorRow";
 // 避免行组件测试被 React Query 的加载态绑住。
 vi.mock("../RowBalance", () => ({
   RowBalance: ({
+    enabled,
     onRefresh,
     refreshBusy,
     refreshLabel,
   }: {
+    enabled: boolean;
     onRefresh?: () => void | Promise<void>;
     refreshBusy?: boolean;
     refreshLabel?: string;
   }) =>
-    onRefresh ? (
+    enabled ? (
       <button
         type="button"
-        aria-label={refreshLabel}
+        aria-label={refreshLabel ?? "refresh"}
         title={refreshLabel}
         disabled={refreshBusy}
         onClick={onRefresh}
@@ -114,8 +116,11 @@ function renderRelayRow(
       siteOrigin: "https://relay.example",
       siteName: "Relay",
       accountLabel: "account",
-      loggedIn: true,
-      sessionExpired: false,
+      status: "ready",
+      isCurrent: false,
+      canQueryBalance: true,
+      canRefresh: true,
+      canDelete: true,
       tiers: [tier],
       ...relayOverrides,
     },
@@ -147,15 +152,15 @@ function renderVendorRow(onProvision = vi.fn()) {
       vendorId: "deepseek",
       vendorName: "DeepSeek",
       accountLabel: "account",
-      loggedIn: true,
-      sessionExpired: false,
-      keyReady: true,
+      status: "ready",
+      canQueryBalance: true,
+      canRefresh: true,
+      canEditConfig: true,
       providerId: "provider-a",
       isCurrent: false,
       userEdited: false,
     },
     busy: new Set(),
-    isCurrent: false,
     onLogin: vi.fn(),
     onProvision,
     onUse: vi.fn(),
@@ -199,6 +204,7 @@ describe("行上的刷新动作", () => {
 
   it("当前档位所在的中转站复用浅蓝当前态外框", () => {
     renderRelayRow(vi.fn(), {
+      isCurrent: true,
       tiers: [{ ...tier, isCurrent: true }],
     });
 
@@ -221,7 +227,11 @@ describe("行上的刷新动作", () => {
    * 按钮不如不摆。
    */
   it("登录过期但仍有档位时，显示档位数与重新登录，而不是「没有可用分组」", () => {
-    renderRelayRow(vi.fn(), { loggedIn: false, sessionExpired: true });
+    renderRelayRow(vi.fn(), {
+      status: "sessionExpiredUsable",
+      canQueryBalance: true,
+      canRefresh: false,
+    });
 
     expect(screen.getByTitle("{{count}} 个接入配置")).toHaveTextContent("1");
     expect(screen.queryByText("没有可用分组")).not.toBeInTheDocument();
@@ -236,5 +246,17 @@ describe("行上的刷新动作", () => {
       "title",
       "登录已过期，但 API 密钥仍可使用（余额也照常显示）。点击重新登录。",
     );
+  });
+
+  it("未登录但后端确认有 SK 时，仍展示余额刷新入口", () => {
+    const { onProvision } = renderRelayRow(vi.fn(), {
+      status: "notLoggedIn",
+      canQueryBalance: true,
+      canRefresh: false,
+    });
+
+    expect(screen.getByRole("button", { name: "refresh" })).toBeInTheDocument();
+    expect(screen.getByText("未登录")).toBeInTheDocument();
+    expect(onProvision).not.toHaveBeenCalled();
   });
 });

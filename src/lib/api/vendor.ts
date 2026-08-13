@@ -21,25 +21,15 @@ export interface VendorAccountRow {
   vendorName: string;
   /** 给人看的账号名（手机号，空则回落 account_id）。 */
   accountLabel: string;
-  /** 有可用登录态。 */
-  loggedIn: boolean;
-  /**
-   * **登录过、但登录态已经不能用了** —— 据此提示「登录已过期，请重新登录」，
-   * 而不是像从没登录过一样只摆一个「登录」按钮（那是两种处境）。
-   */
-  sessionExpired: boolean;
-  /**
-   * **本地已有这个账号的 sk**。
-   *
-   * ⚠️ 判据是「sk 非空」，**不是「六个平台的 provider 记录都就绪」** ——
-   * 别用它断言配置完整（后端字段文档写了完整理由）。展开六条记录时中途失败会让
-   * `provision` 整条返回错误，而这一行确实已经有 sk 了；补救手段是行内那个「刷新」。
-   *
-   * ⚠️ **与 `loggedIn` 独立**：登录态过期时它仍可以是 `true`，那种情况下用户的
-   * CLI **照样能用**（sk 是厂商侧的独立凭据，网页登录态过期不影响它）——
-   * 所以那种行不该被催去重新登录。
-   */
-  keyReady: boolean;
+  status:
+    | "notLoggedIn"
+    | "sessionExpired"
+    | "sessionExpiredUsable"
+    | "ready"
+    | "noKey";
+  canQueryBalance: boolean;
+  canRefresh: boolean;
+  canEditConfig: boolean;
   /**
    * 这一行名下那六条 provider 记录的 id（六个平台共用一个）。
    *
@@ -159,12 +149,11 @@ export const vendorApi = {
   /**
    * 开登录窗，等凭据回来，存成一行账号。
    *
-   * 返回 `true` = 拿到凭据并已入库；`false` = 用户关窗或超时（**都不是错误**，
-   * 别为它弹 toast —— 用户知道自己关了窗）。
+   * 返回保存后的行 id；`null` = 用户关窗或超时（**都不是错误**，别为它弹 toast）。
    *
    * 预填值由后端取「这个厂商下最近登录过的那个标识」，前端不必传。
    */
-  openLogin: (vendorId: string): Promise<boolean> =>
+  openLogin: (vendorId: string): Promise<number | null> =>
     invoke("vendor_open_login", { vendorId }),
 
   /**

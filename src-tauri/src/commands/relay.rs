@@ -341,12 +341,28 @@ pub struct RelayRow {
     /// 登录后的账号名（昵称优先，回落邮箱），未登录为空串。
     /// 同一个站可以挂多个账号，所以「登录了」不够 —— 得说清是**哪个**账号。
     pub account_label: String,
-    pub logged_in: bool,
-    /// 登录过但凭据已不可用（≠ `!logged_in`，那会把「从没登录」与「登录过期」混为一谈）。
-    /// 语义与 [`RelayStatus::session_expired`] 完全一致，判据也复用同一个函数。
-    pub session_expired: bool,
+    /// 后端根据当前行的所有托管档位计算出的展示状态。
+    pub status: RelayRowStatus,
+    /// 当前 app 下是否有档位正在使用。
+    pub is_current: bool,
+    /// 这一行是否具备余额查询所需的凭据（有效登录态或至少一把托管 SK）。
+    pub can_query_balance: bool,
+    /// 这一行是否可以重新拉取最新账号信息、额度、可用分组与倍率。
+    pub can_refresh: bool,
+    /// 这一行是否可以安全删除。真正的跨 app 删除闸仍在后端命令内。
+    pub can_delete: bool,
     /// 这个中转站在**当前 app_id** 下已备好的档位。
     pub tiers: Vec<TierInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelayRowStatus {
+    NotLoggedIn,
+    SessionExpired,
+    SessionExpiredUsable,
+    NoTiers,
+    Ready,
 }
 
 /// 备好密钥的结果。
@@ -2767,6 +2783,24 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
         .into_iter()
         .map(|op| -> Result<RelayRow, AppError> {
             let mine = tiers_of_site(state, &tiers, &op.site_origin, op.account_id, &app_type)?;
+            let logged_in = op.token_looks_valid(now);
+            let session_expired = op.session_expired(now);
+            let has_balance_key = !relay_balance_inputs(state, &op).1.is_empty();
+            let status = if session_expired {
+                if mine.is_empty() {
+                    RelayRowStatus::SessionExpired
+                } else {
+                    RelayRowStatus::SessionExpiredUsable
+                }
+            } else if !logged_in {
+                RelayRowStatus::NotLoggedIn
+            } else if mine.is_empty() {
+                RelayRowStatus::NoTiers
+            } else {
+                RelayRowStatus::Ready
+            };
+            let can_delete =
+                apps_using_this_accounts_tiers(state, &op.site_origin, op.account_id).is_empty();
             Ok(RelayRow {
                 id: op.id,
                 site_origin: op.site_origin.clone(),
@@ -2777,8 +2811,11 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
                 } else {
                     String::new()
                 },
-                logged_in: op.token_looks_valid(now),
-                session_expired: op.session_expired(now),
+                status,
+                is_current: mine.iter().any(|tier| tier.is_current),
+                can_query_balance: logged_in || has_balance_key,
+                can_refresh: op.can_refresh(now),
+                can_delete,
                 tiers: mine,
             })
         })
@@ -6284,8 +6321,7 @@ mod tests {
     /// 这是 review 抓出的缺陷现场，复现路径：
     ///
     /// 1. `list_relays_impl` 吃 `app_type` ⇒ `RelayRow.tiers` 只含**当前 tab** 的档位；
-    /// 2. 于是前端 `hasCurrentTier`（`RelayRow.tsx`）在 claude tab 上看这一行时是
-    ///    `false` ⇒ 删除按钮可点；
+    /// 2. 如果删除资格只按当前 tab 的档位判断，claude tab 可能看不到 codex 的当前项；
     /// 3. 而这个账号在 **codex** 下的档位正是 codex 的当前项 ⇒ 删下去把它清了，
     ///    `~/.codex/config.toml` 却还指着它。
     ///
@@ -6486,7 +6522,7 @@ mod tests {
     ///
     /// 会红的改法：把 `check_session` 里的 `clear_session` 换回 `clear_credentials`。
     #[test]
-    fn an_expired_session_keeps_its_tiers_label_and_expired_flag() {
+    fn an_expired_session_keeps_its_tiers_label_and_usable_status() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
         let state = AppState::new(db.clone());
@@ -6521,9 +6557,8 @@ mod tests {
         let rows = list_relays_impl(&state, AppType::Codex).expect("list relays");
         let row = rows.iter().find(|r| r.id == row_id).expect("行还在");
 
-        assert!(!row.logged_in);
         assert!(
-            row.session_expired,
+            matches!(row.status, RelayRowStatus::SessionExpiredUsable),
             "登录过 + 没 token + 没 refresh ⇒ 必须报「登录已过期」，而不是「还没登录」"
         );
         assert_eq!(row.account_label, "我的号", "昵称不该跟着会话一起没");
@@ -6533,6 +6568,51 @@ mod tests {
             "⭐ 分组与 sk 与网页登录态无关，不该从界面消失"
         );
         assert_eq!(row.tiers[0].provider_id, tier_id);
+    }
+
+    #[test]
+    fn a_relay_with_a_managed_key_can_query_balance_without_a_session() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        let provider_id = provision::provider_id_for(site, None, 1);
+        let settings = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-test",
+            "Pro池",
+            "https://bestapi.store/v1",
+            "gpt-5.6-sol",
+        )
+        .expect("settings");
+        db.save_provider(
+            "codex",
+            &Provider {
+                id: provider_id,
+                name: "Pro池".into(),
+                settings_config: settings,
+                website_url: Some(site.into()),
+                category: Some("aggregator".into()),
+                created_at: Some(1),
+                sort_index: Some(0),
+                notes: None,
+                meta: None,
+                icon: None,
+                icon_color: None,
+                in_failover_queue: false,
+            },
+        )
+        .expect("provider");
+
+        let row = list_relays_impl(&state, AppType::Codex)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == row_id)
+            .expect("row");
+        assert!(matches!(row.status, RelayRowStatus::NotLoggedIn));
+        assert!(row.can_query_balance);
+        assert!(!row.can_refresh);
     }
 
     /// ⭐ **倍率必须活过 provision → 库 → `listRelays` 这一整条**。

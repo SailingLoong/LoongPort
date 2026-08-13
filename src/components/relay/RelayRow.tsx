@@ -162,22 +162,6 @@ export function RelayRow({
   dragHandleProps,
 }: RelayRowProps) {
   const { t } = useTranslation();
-  // 名下有档位正在使用 ⇒ 这一行不许删。
-  //
-  // 判据延伸自上游 `ProviderActions.tsx:224` 的 `canDelete = ... && !isCurrent`
-  // ——「正在用的不许删」。区别是那边一行就是一个 provider，而这里一行有多个档位，
-  // 所以判的是「**任一**档位在用」。
-  //
-  // ⚠️ **这只是提示，不是闸** —— `relay.tiers` 只含**当前 tab 那个 app** 的档位
-  // （`relay_list_relays` 吃 `app` 参数），所以这个判据看不见「这个账号在别的
-  // 平台是当前项」。真正的闸在后端 `remove_site_impl`（它扫全部 app，撞上就报错并
-  // 点名哪个平台、哪个档位）。
-  //
-  // 两处都留是有意的，不是冗余：按钮先变灰是**即时反馈**（同 tab 内用户不必点下去
-  // 才知道），而跨 tab 那一类只能由后端拦 —— 前端要判它得为此新增一条「查全部 app
-  // 的当前项」的 IPC，而后端的错误文案已经把用户该做的处置说清了。
-  const hasCurrentTier = relay.tiers.some((tier) => tier.isCurrent);
-
   return (
     <Collapsible open={open} onOpenChange={onOpenChange}>
       <div
@@ -187,7 +171,7 @@ export function RelayRow({
           "group/row rounded-xl border border-border bg-card p-4 text-card-foreground transition-all duration-300",
           dragHandleProps?.isDragging
             ? "cursor-grabbing border-primary shadow-lg"
-            : hasCurrentTier
+            : relay.isCurrent
               ? "border-blue-500/60 shadow-sm shadow-blue-500/10 hover:border-blue-500"
               : "hover:border-border-active",
         )}
@@ -255,18 +239,14 @@ export function RelayRow({
           <RowBalance
             rowKind="relay"
             rowId={relay.id}
-            // ⚠️ **判据是「登录过」而不是「登录态还有效」**（2026-08-13 改）：
-            // sk 是独立凭据，登录态过期时后端照样查得到余额（`relay::balance` 的前
-            // 两步不需要登录态）。用 `loggedIn` 当开关会在前端把后端刚修好的能力
-            // 又堵死一次 —— 那正是这一轮要修的病。
-            // 从没登录过的行确实无从查起（既没 sk 也没登录态），那时才关掉。
-            enabled={relay.loggedIn || relay.sessionExpired}
+            // 余额查询资格由后端按有效登录态与托管 SK 计算；前端只负责传给查询钩子。
+            enabled={relay.canQueryBalance}
             purchaseBusy={busy.has(`purchase:${relay.id}`)}
             onPurchase={onPurchase}
-            onRefresh={relay.loggedIn ? onProvision : undefined}
+            onRefresh={relay.canRefresh ? onProvision : undefined}
             refreshBusy={busy.has(`provision:${relay.id}`)}
             refreshLabel={
-              relay.loggedIn ? t("loongport.row.refreshAll") : undefined
+              relay.canRefresh ? t("loongport.row.refreshAll") : undefined
             }
           />
 
@@ -286,7 +266,7 @@ export function RelayRow({
             )}
           >
             <RowDelete
-              canDelete={!hasCurrentTier}
+              canDelete={relay.canDelete}
               busy={busy.has(`removeRelay:${relay.id}`)}
               onDelete={onDelete}
             />
@@ -383,18 +363,15 @@ function RowDelete({
 }
 
 /**
- * 行右侧的状态与动作。**四种状态必须分清**（spec §四，初版把它们混了）：
+ * 行右侧的状态与动作。状态由后端 DTO 计算，前端只按状态展示对应动作：
  *
- * | 条件 | 显示 | 为什么不能混 |
+ * | 后端 `status` | 显示 | 为什么不能混 |
  * |---|---|---|
- * | `!loggedIn && !sessionExpired` | 「还没登录」+ 登录 | 从没登录过，零分组是必然的；说「没有可用分组」是误导 |
- * | `sessionExpired && 有档位` | 档位数 + 重新登录（title 说明密钥仍可用） | 见下 |
- * | `sessionExpired && 无档位` | 「登录已过期」+ 重新登录 | 预填已就绪，用户只需补密码 + 人机验证 |
- * | `loggedIn && tiers 为空` | 「没有可用分组」+ 获取密钥 | 真登录了但这个平台没东西 |
- * | `loggedIn && 有档位` | 档位数 + **重新拉分组** | 见下 |
- *
- * 判定顺序是**先 `sessionExpired` 后 `!loggedIn`** —— 过期时 `loggedIn` 也是 false，
- * 反了就永远走不到过期分支，用户会被当成从没登录过。
+ * | `notLoggedIn` | 「还没登录」+ 登录 | 从没登录过，零分组是必然的；说「没有可用分组」是误导 |
+ * | `sessionExpiredUsable` | 档位数 + 重新登录（title 说明密钥仍可用） | 登录态失效不等于托管 SK 失效 |
+ * | `sessionExpired` | 「登录已过期」+ 重新登录 | 预填已就绪，用户只需补密码 + 人机验证 |
+ * | `noTiers` | 「没有可用分组」+ 获取密钥 | 真登录了但这个平台没东西 |
+ * | `ready` | 档位数 + **重新拉分组** | 后端确认登录态与档位均可用 |
  *
  * 都**不做整页拦截**：其它中转站还能用。
  *
@@ -408,12 +385,12 @@ function RowDelete({
  * 从而去做一堆不必要的重建动作。照常显示档位数，只在旁边留一条重新登录的路。
  * 官方 API 块那边（`VendorStatus`）早就是这个形态，这里跟上它。
  *
- * 那一支**有意不摆「更新可用分组」**：重拉分组必须有登录态，摆一个点下去必然报错的
- * 按钮不如不摆。
+ * 那一支**有意不摆「更新可用分组」**：后端没有确认可刷新的凭据，摆一个点下去必然
+ * 报错的按钮不如不摆。
  *
  * ## 最后一档为什么要给按钮（2026-08-03 加，用户实测发现）
  *
- * 原来「获取密钥」只在 `tiers.length === 0` 时出现 ⇒ **已经有档位的行没有任何
+ * 原来「获取密钥」只在后端判定没有档位时出现 ⇒ **已经有档位的行没有任何
  * 重拉入口**。中转站在网页端新增一个分组后，用户在这一页无论点什么都看不到它
  * （旧的区块刷新当时也只读本地 + 查倍率）。
  *
@@ -434,36 +411,36 @@ function RowStatus({
   const loggingIn = busy.has(`login:${relay.id}`);
   const provisioning = busy.has(`provision:${relay.id}`);
 
-  if (relay.sessionExpired) {
-    // 有档位 ⇒ 密钥仍可用，见本函数上方那段说明：不摆空壳状态，只留一条重登的路。
-    if (relay.tiers.length > 0) {
-      return (
-        <div className="flex shrink-0 items-center gap-2">
-          <span
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-            title={t("loongport.row.tierCount", { count: relay.tiers.length })}
-          >
-            <Layers3 className="h-3.5 w-3.5" />
-            <span className="tabular-nums">{relay.tiers.length}</span>
-          </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1 px-2 text-muted-foreground"
-            disabled={loggingIn}
-            onClick={onLogin}
-            title={t("loongport.row.sessionExpiredUsable")}
-          >
-            {loggingIn ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              t("loongport.row.reLogin")
-            )}
-          </Button>
-        </div>
-      );
-    }
+  if (relay.status === "sessionExpiredUsable") {
+    return (
+      <div className="flex shrink-0 items-center gap-2">
+        <span
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+          title={t("loongport.row.tierCount", { count: relay.tiers.length })}
+        >
+          <Layers3 className="h-3.5 w-3.5" />
+          <span className="tabular-nums">{relay.tiers.length}</span>
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 px-2 text-muted-foreground"
+          disabled={loggingIn}
+          onClick={onLogin}
+          title={t("loongport.row.sessionExpiredUsable")}
+        >
+          {loggingIn ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            t("loongport.row.reLogin")
+          )}
+        </Button>
+      </div>
+    );
+  }
+
+  if (relay.status === "sessionExpired") {
     return (
       <StatusAction
         hint={t("loongport.row.sessionExpired")}
@@ -475,7 +452,7 @@ function RowStatus({
     );
   }
 
-  if (!relay.loggedIn) {
+  if (relay.status === "notLoggedIn") {
     return (
       <StatusAction
         hint={t("loongport.row.notLoggedIn")}
@@ -487,7 +464,7 @@ function RowStatus({
     );
   }
 
-  if (relay.tiers.length === 0) {
+  if (relay.status === "noTiers") {
     return (
       <StatusAction
         hint={t("loongport.row.noTiers")}
