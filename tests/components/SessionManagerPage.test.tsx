@@ -16,6 +16,7 @@ import { setSessionFixtures } from "../msw/state";
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
+const LIST_VIEW_MODE_STORAGE_KEY = "cc-switch.sessionManager.listViewMode";
 const GROUP_EXPANSION_STORAGE_KEY =
   "cc-switch.sessionManager.groupExpansionState";
 
@@ -154,7 +155,7 @@ describe("SessionManagerPage", () => {
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     Element.prototype.scrollIntoView = vi.fn();
-    window.localStorage.removeItem("cc-switch.sessionManager.listViewMode");
+    window.localStorage.removeItem(LIST_VIEW_MODE_STORAGE_KEY);
     window.localStorage.removeItem(GROUP_EXPANSION_STORAGE_KEY);
 
     const sessions: SessionMeta[] = [
@@ -637,6 +638,8 @@ describe("SessionManagerPage", () => {
   });
 
   it("batch deletes only sessions selected from a grouped directory", async () => {
+    // 视图切换由上面的分组用例覆盖；这里直接进入目标状态，避免重复支付 Radix Select 交互成本。
+    window.localStorage.setItem(LIST_VIEW_MODE_STORAGE_KEY, "grouped");
     renderPage();
 
     await waitFor(() =>
@@ -645,7 +648,7 @@ describe("SessionManagerPage", () => {
       ).toBeInTheDocument(),
     );
 
-    await enterGroupedBatchMode();
+    fireEvent.click(screen.getByRole("button", { name: /批量管理/i }));
     expandDirectoryGroup("codex", "codex");
     fireEvent.click(
       screen.getByRole("checkbox", {
