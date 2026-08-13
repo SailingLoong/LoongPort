@@ -41,6 +41,13 @@ describe("relayApi 的中转站定位参数", () => {
     });
   });
 
+  it("importDirectorySite 走后端重新核验签名目录的专用命令", async () => {
+    await relayApi.importDirectorySite("https://790053500.com/keys");
+    expect(invokeMock).toHaveBeenCalledWith("relay_import_directory_site", {
+      site: "https://790053500.com/keys",
+    });
+  });
+
   it("不再暴露旧的 sub2api-only probeSite 入口", () => {
     expect("probeSite" in relayApi).toBe(false);
   });

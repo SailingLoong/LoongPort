@@ -11,7 +11,7 @@ import { countTiersForApp, tiersLandedElsewhere } from "./provisionScope";
  * ## 为什么提成独立模块（2026-08-04）
  *
  * 它有**两个跨文件消费者**：`RelaySection`（行内登录 / 获取密钥两条路）与
- * `AddSiteDialog`（推荐站 / 手动加站那条路）。放同目录的局部模块而不是内联复制 ——
+ * `RelayDirectoryPage`（推荐站 / 手动站点那条路）。放同目录的局部模块而不是内联复制 ——
  * 尺子3 说的是「共享代码先放局部 helper，跨文件复用到 3+ 才提 package 级」，
  * 同目录模块正是那个局部落点，`lowBalance.ts` 是同形先例（2 个消费者、同目录、纯逻辑）。
  *

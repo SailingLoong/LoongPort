@@ -107,34 +107,19 @@ pub struct RelayStatus {
 
 /// 一个已添加的站点。
 ///
-/// 两个消费者：加站弹窗（判「点这个推荐站会不会撞上已有账号」，读
-/// `site_origin` + `account_label`）与「一个站都没有吗」那个自动引导判据（只数条数）。
+/// 当前消费者是「一个站都没有吗」的自动引导判据（只数条数）。新增站点只有在
+/// 注册或登录成功后才会写入；启动建表路径也会清理旧版遗留的未认证占位行。
 ///
 /// 2026-08-04 一并收缩：原来还有 `id` / `site_name` / `label` / `logged_in` /
 /// `is_current` 五个字段，服务的是已删独立页顶部那个**站点切换器**（要显示名、
 /// 要标出当前选中的是哪个、要能按 id 切换）。那个控件删了之后没有消费者。
 ///
-/// ⚠️ **含未登录的占位行** —— 「加了站但还没登录」也算配过站，不该再弹引导。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SiteInfo {
     pub site_origin: String,
-    /// 登录后的账号名（昵称优先，回落邮箱），未登录为空串。同一个站挂多个账号时靠它分辨。
+    /// 登录后的账号名（昵称优先，回落邮箱）。同一个站挂多个账号时靠它分辨。
     pub account_label: String,
-}
-
-/// 探测结果。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeResult {
-    /// 探测成功后这个站在本地的行 id（已存在则是原来那行，`save_site` 会收口）。
-    ///
-    /// 旧的独立探测调用方若要继续登录，必须把它传给 [`relay_login`]；新增站点的
-    /// 主流程走 [`relay_import_site`]，在同一浏览器会话里完成发现与登录。
-    pub relay_id: i64,
-    pub site_origin: String,
-    pub site_name: String,
-    pub backend_kind: discovery::BackendKind,
 }
 
 /// 合并“发现站点 + 同一会话登录”的导入结果。
@@ -145,14 +130,22 @@ pub struct ImportResult {
     pub site_origin: String,
     pub site_name: String,
     pub backend_kind: discovery::BackendKind,
-    pub logged_in: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayImportErrorKind {
+    UnsupportedSite,
+    ProtocolConflict,
+    Transport,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayImportError {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<discovery::DiscoveryErrorKind>,
+    pub kind: Option<RelayImportErrorKind>,
     pub message: String,
 }
 
@@ -177,7 +170,15 @@ impl From<AppError> for RelayImportError {
 impl From<discovery::DiscoveryError> for RelayImportError {
     fn from(error: discovery::DiscoveryError) -> Self {
         Self {
-            kind: Some(error.kind),
+            kind: Some(match error.kind {
+                discovery::DiscoveryErrorKind::UnsupportedSite => {
+                    RelayImportErrorKind::UnsupportedSite
+                }
+                discovery::DiscoveryErrorKind::ProtocolConflict => {
+                    RelayImportErrorKind::ProtocolConflict
+                }
+                discovery::DiscoveryErrorKind::Transport => RelayImportErrorKind::Transport,
+            }),
             message: error.message,
         }
     }
@@ -185,27 +186,49 @@ impl From<discovery::DiscoveryError> for RelayImportError {
 
 #[derive(Debug, Clone, Copy)]
 struct LoginResult {
-    relay_id: i64,
     logged_in: bool,
 }
 
 impl ImportResult {
-    fn from_login(probe: ProbeResult, login: LoginResult) -> Self {
+    fn authenticated(site: DiscoveredRelaySite, relay_id: i64) -> Self {
         Self {
-            relay_id: login.relay_id,
-            site_origin: probe.site_origin,
-            site_name: probe.site_name,
-            backend_kind: probe.backend_kind,
-            logged_in: login.logged_in,
+            relay_id,
+            site_origin: site.site_origin,
+            site_name: site.site_name,
+            backend_kind: site.backend_kind,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct BrowserLoginContext {
-    probe: ProbeResult,
+struct DiscoveredRelaySite {
+    site_origin: String,
+    site_name: String,
+    api_base_url: String,
     backend_kind: discovery::BackendKind,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserLoginContext {
+    site: DiscoveredRelaySite,
     login_script: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IncompleteImportReason {
+    Closed,
+    TimedOut,
+}
+
+fn incomplete_new_site_import_error(reason: IncompleteImportReason) -> RelayImportError {
+    let message = match reason {
+        IncompleteImportReason::Closed => "注册或登录尚未完成",
+        IncompleteImportReason::TimedOut => "注册或登录等待超时，请重试",
+    };
+    RelayImportError {
+        kind: Some(RelayImportErrorKind::Cancelled),
+        message: message.into(),
+    }
 }
 
 enum BrowserLoginOutcome {
@@ -524,37 +547,13 @@ pub fn relay_list_sponsors() -> Vec<crate::relay::remote_config::Sponsor> {
         .unwrap_or_default()
 }
 
-fn save_detected_site(
-    app_handle: &tauri::AppHandle,
-    site_origin: String,
-    detected: discovery::DetectedSite,
-) -> Result<ProbeResult, AppError> {
-    let api_base_url = api::site_api_root(&site_origin, &detected.api_base_url);
-    let site_name = if detected.site_name.trim().is_empty() {
-        site_origin
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .to_string()
-    } else {
-        detected.site_name
-    };
-    let state = app_handle.state::<AppState>();
-    let relay_id = with_conn(&state, |conn| {
-        creds::save_site_with_backend(
-            conn,
-            &site_origin,
-            &site_name,
-            &api_base_url,
-            detected.backend_kind,
-        )
-    })?;
-
-    Ok(ProbeResult {
-        relay_id,
-        site_origin,
-        site_name,
-        backend_kind: detected.backend_kind,
-    })
+#[tauri::command]
+pub async fn relay_list_directory(
+    kind: crate::relay::leaderboard::LeaderboardKind,
+) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
+    crate::relay::leaderboard::list(kind)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// 发现并导入一个第三方中转站。
@@ -567,12 +566,32 @@ pub async fn relay_import_site(
     app_handle: tauri::AppHandle,
     site: String,
 ) -> Result<ImportResult, RelayImportError> {
-    import_site(&app_handle, &site).await
+    import_site(&app_handle, &site, BrowserEntrySource::Manual).await
+}
+
+/// 从已验签的中转站目录导入。
+///
+/// 与手工输入分开成一个命令：目录策略可以声明 `/keys` 这类站点专属入口，
+/// 但调用方不能靠传一个布尔值把任意业务路径升级成受信入口。这里重新读取并验证
+/// 当前签名配置：完全匹配其中 HTTPS `entry_url` 的地址会保留 path/query/fragment；
+/// 普通榜单站点仍按手工输入的安全规则打开 origin 或协议登录页。
+#[tauri::command]
+pub async fn relay_import_directory_site(
+    app_handle: tauri::AppHandle,
+    site: String,
+) -> Result<ImportResult, RelayImportError> {
+    let source = if is_signed_directory_entry(&site) {
+        BrowserEntrySource::SignedDirectory
+    } else {
+        BrowserEntrySource::Manual
+    };
+    import_site(&app_handle, &site, source).await
 }
 
 async fn import_site(
     app_handle: &tauri::AppHandle,
     input: &str,
+    entry_source: BrowserEntrySource,
 ) -> Result<ImportResult, RelayImportError> {
     let input = if input.trim().is_empty() {
         DEFAULT_SITE
@@ -596,7 +615,34 @@ async fn import_site(
         }
     };
 
-    browser_import(app_handle, input, site_origin, initial_detected).await
+    browser_import(
+        app_handle,
+        input,
+        site_origin,
+        initial_detected,
+        entry_source,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserEntrySource {
+    Manual,
+    SignedDirectory,
+}
+
+fn is_signed_directory_entry(input: &str) -> bool {
+    let Ok(candidate) = browser_entry_url(input) else {
+        return false;
+    };
+    crate::relay::remote_config::load_cached().is_some_and(|config| {
+        config.relay_directory.sites.values().any(|site| {
+            site.entry_url
+                .as_deref()
+                .and_then(|entry| browser_entry_url(entry).ok())
+                .is_some_and(|entry| entry == candidate)
+        })
+    })
 }
 
 fn recoverable_native_discovery_error(
@@ -656,9 +702,10 @@ fn browser_start_url(
     input: &str,
     site_origin: &str,
     detected: Option<&discovery::DetectedSite>,
+    entry_source: BrowserEntrySource,
 ) -> Result<url::Url, AppError> {
     let entry = browser_entry_url(input)?;
-    if browser_entry_is_auth_page(&entry) {
+    if entry_source == BrowserEntrySource::SignedDirectory || browser_entry_is_auth_page(&entry) {
         return Ok(entry);
     }
 
@@ -673,21 +720,32 @@ fn browser_start_url(
 }
 
 fn browser_login_context(
-    app_handle: &tauri::AppHandle,
     site_origin: &str,
     detected: discovery::DetectedSite,
     aff_code: Option<&str>,
     promo_code: Option<&str>,
-) -> Result<BrowserLoginContext, AppError> {
+) -> BrowserLoginContext {
     let backend_kind = detected.backend_kind;
     let login_script =
         backend::browser_login_script(site_origin, backend_kind, "", aff_code, promo_code);
-    let probe = save_detected_site(app_handle, site_origin.to_string(), detected)?;
-    Ok(BrowserLoginContext {
-        probe,
-        backend_kind,
+    let api_base_url = api::site_api_root(site_origin, &detected.api_base_url);
+    let site_name = if detected.site_name.trim().is_empty() {
+        site_origin
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_string()
+    } else {
+        detected.site_name
+    };
+    BrowserLoginContext {
+        site: DiscoveredRelaySite {
+            site_origin: site_origin.to_string(),
+            site_name,
+            api_base_url,
+            backend_kind,
+        },
         login_script,
-    })
+    }
 }
 
 fn newapi_refresh_cookie_from_window(
@@ -751,6 +809,7 @@ async fn browser_import(
     input: &str,
     site_origin: String,
     initial_detected: Option<discovery::DetectedSite>,
+    entry_source: BrowserEntrySource,
 ) -> Result<ImportResult, RelayImportError> {
     if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
         log::info!("发现残留的站点导入窗口，销毁后重开");
@@ -758,23 +817,22 @@ async fn browser_import(
     }
 
     let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
-    let entry_url = browser_start_url(input, &site_origin, initial_detected.as_ref())?;
+    let entry_url =
+        browser_start_url(input, &site_origin, initial_detected.as_ref(), entry_source)?;
     let navigate_after_detection =
         initial_detected.is_none() && browser_entry_is_origin(&entry_url);
 
     let initial_backend = initial_detected
         .as_ref()
         .map(|detected| format!("{:?}", detected.backend_kind));
-    let initial_context = match initial_detected {
-        Some(detected) => Some(browser_login_context(
-            app_handle,
+    let initial_context = initial_detected.map(|detected| {
+        browser_login_context(
             &site_origin,
             detected,
             login_aff_code.as_deref(),
             login_promo_code.as_deref(),
-        )?),
-        None => None,
-    };
+        )
+    });
 
     let entry_source = if browser_entry_is_auth_page(&entry_url) {
         "supplied_auth_page"
@@ -917,21 +975,13 @@ async fn browser_import(
                     return false;
                 }
             };
-            let browser_context = match browser_login_context(
-                &app_for_nav,
+            let browser_context = browser_login_context(
                 &site_origin_for_nav,
                 detected,
                 aff_for_nav.as_deref(),
                 promo_for_nav.as_deref(),
-            ) {
-                Ok(context) => context,
-                Err(error) => {
-                    log::warn!("保存已识别站点失败: {error}");
-                    let _ = probe_error_tx.try_send(error.into());
-                    return false;
-                }
-            };
-            let backend_kind = browser_context.backend_kind;
+            );
+            let backend_kind = browser_context.site.backend_kind;
             let login_script = browser_context.login_script.clone();
             match context_for_nav.lock() {
                 Ok(mut guard) if guard.is_none() => *guard = Some(browser_context),
@@ -1074,7 +1124,9 @@ async fn browser_import(
                     let is_newapi = context
                         .lock()
                         .ok()
-                        .and_then(|guard| guard.as_ref().map(|context| context.backend_kind))
+                        .and_then(|guard| {
+                            guard.as_ref().map(|context| context.site.backend_kind)
+                        })
                         == Some(discovery::BackendKind::NewApi);
                     if !is_newapi {
                         continue;
@@ -1140,22 +1192,21 @@ async fn browser_import(
                 .map_err(|e| {
                     AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。"))
                 })?;
-            let (final_relay_id, account_id) = persist_login_credentials(
+            let (final_relay_id, account_id) = persist_new_relay_login_credentials(
                 app_handle,
-                browser_context.probe.relay_id,
+                &browser_context.site,
                 credentials,
                 account,
             )
             .await?;
-            let login = LoginResult {
-                relay_id: final_relay_id,
-                logged_in: true,
-            };
 
             let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
             let _ = window.eval(login::CONNECTED_BANNER_JS);
             log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
-            Ok(ImportResult::from_login(browser_context.probe, login))
+            Ok(ImportResult::authenticated(
+                browser_context.site,
+                final_relay_id,
+            ))
         }
         Ok(BrowserLoginOutcome::NewApiSession(session)) => {
             let browser_context = context
@@ -1165,16 +1216,15 @@ async fn browser_import(
                 .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
             let state = app_handle.state::<AppState>();
             let (final_relay_id, account_id) =
-                persist_newapi_login_session(&state, browser_context.probe.relay_id, &session)?;
-            let login = LoginResult {
-                relay_id: final_relay_id,
-                logged_in: true,
-            };
+                persist_new_relay_newapi_session(&state, &browser_context.site, &session)?;
 
             let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
             let _ = window.eval(login::CONNECTED_BANNER_JS);
             log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
-            Ok(ImportResult::from_login(browser_context.probe, login))
+            Ok(ImportResult::authenticated(
+                browser_context.site,
+                final_relay_id,
+            ))
         }
         Ok(BrowserLoginOutcome::Error(error)) => {
             let _ = window.destroy();
@@ -1184,7 +1234,7 @@ async fn browser_import(
             let backend_kind = context
                 .lock()
                 .ok()
-                .and_then(|guard| guard.as_ref().map(|context| context.backend_kind));
+                .and_then(|guard| guard.as_ref().map(|context| context.site.backend_kind));
             let probe_detail = last_probe_summary
                 .lock()
                 .ok()
@@ -1197,13 +1247,15 @@ async fn browser_import(
                     .field_display("backend", format_args!("{backend_kind:?}"))
                     .field("probe", probe_detail)
             );
-            import_result_after_incomplete_browser_flow(&context)
+            Err(incomplete_new_site_import_error(
+                IncompleteImportReason::Closed,
+            ))
         }
         Err(_) => {
             let backend_kind = context
                 .lock()
                 .ok()
-                .and_then(|guard| guard.as_ref().map(|context| context.backend_kind));
+                .and_then(|guard| guard.as_ref().map(|context| context.site.backend_kind));
             let probe_detail = last_probe_summary
                 .lock()
                 .ok()
@@ -1218,24 +1270,11 @@ async fn browser_import(
                     .field("timeout_seconds", LOGIN_TIMEOUT_SECS)
             );
             let _ = window.destroy();
-            import_result_after_incomplete_browser_flow(&context)
+            Err(incomplete_new_site_import_error(
+                IncompleteImportReason::TimedOut,
+            ))
         }
     }
-}
-
-fn import_result_after_incomplete_browser_flow(
-    context: &Arc<Mutex<Option<BrowserLoginContext>>>,
-) -> Result<ImportResult, RelayImportError> {
-    let browser_context = context
-        .lock()
-        .map_err(|_| AppError::Config("站点导入状态不可用".into()))?
-        .clone()
-        .ok_or_else(|| AppError::Config("尚未识别出受支持的站点协议".into()))?;
-    let login = LoginResult {
-        relay_id: browser_context.probe.relay_id,
-        logged_in: false,
-    };
-    Ok(ImportResult::from_login(browser_context.probe, login))
 }
 
 /// 开登录窗，等凭据回来。
@@ -1246,8 +1285,8 @@ fn import_result_after_incomplete_browser_flow(
 /// `relay_id` 指定登录**哪一行**，**必填**。
 ///
 /// 没有「回落到当前站」这条路：那要靠全局 `is_current` 定位，而界面是多行并列的
-/// ⇒ 用户点第 3 行的「重新登录」可能给第 1 行登了录。加站那条路拿
-/// [`ProbeResult::relay_id`] 接着调（`save_site` 已经把 id 给出来了）。
+/// ⇒ 用户点第 3 行的「重新登录」可能给第 1 行登了录。新增站点则走
+/// [`relay_import_site`]，只在注册或登录成功后创建完整账号行。
 #[tauri::command]
 pub async fn relay_login(app_handle: tauri::AppHandle, relay_id: i64) -> Result<bool, String> {
     do_login(&app_handle, relay_id)
@@ -1504,7 +1543,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                 .map_err(|e| {
                     AppError::Config(format!("登录成功但读取账号信息失败：{e}。请重试登录。"))
                 })?;
-            let (final_relay_id, account_id) =
+            let (_final_relay_id, account_id) =
                 persist_login_credentials(app_handle, relay_id, c, account).await?;
 
             // **不关窗**，把标题改成「已连接」并在页面上浮一条提示。
@@ -1521,24 +1560,18 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
             let _ = window.eval(login::CONNECTED_BANNER_JS);
 
             log::info!("登录成功：{site_origin}（账号 id={account_id}）");
-            Ok(LoginResult {
-                relay_id: final_relay_id,
-                logged_in: true,
-            })
+            Ok(LoginResult { logged_in: true })
         }
         Ok(BrowserLoginOutcome::NewApiSession(session)) => {
             let state = app_handle.state::<AppState>();
-            let (final_relay_id, account_id) =
+            let (_final_relay_id, account_id) =
                 persist_newapi_login_session(&state, relay_id, &session)?;
 
             let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
             let _ = window.eval(login::CONNECTED_BANNER_JS);
 
             log::info!("登录成功：{site_origin}（账号 id={account_id}）");
-            Ok(LoginResult {
-                relay_id: final_relay_id,
-                logged_in: true,
-            })
+            Ok(LoginResult { logged_in: true })
         }
         Ok(BrowserLoginOutcome::Error(error)) => {
             let _ = window.destroy();
@@ -1561,10 +1594,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
         Ok(BrowserLoginOutcome::Closed) => {
             log::info!("用户关闭了登录窗口（未完成登录）：{site_origin}");
             let _ = window.destroy();
-            Ok(LoginResult {
-                relay_id,
-                logged_in: false,
-            })
+            Ok(LoginResult { logged_in: false })
         }
         Err(_) => {
             log::warn!(
@@ -1572,10 +1602,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
                  若用户当时看到的是白屏，对照上面 `登录窗页面加载` 那几行判断是哪一类"
             );
             let _ = window.destroy();
-            Ok(LoginResult {
-                relay_id,
-                logged_in: false,
-            })
+            Ok(LoginResult { logged_in: false })
         }
     }
 }
@@ -1688,6 +1715,44 @@ async fn persist_login_credentials(
     Ok((final_relay_id, account_id))
 }
 
+async fn persist_new_relay_login_credentials(
+    app_handle: &tauri::AppHandle,
+    site: &DiscoveredRelaySite,
+    credentials: login::Credentials,
+    account: api::Account,
+) -> Result<(i64, i64), AppError> {
+    let account_id = account.id;
+    let state = app_handle.state::<AppState>();
+    let account_label = account.display_name();
+    let final_relay_id = with_conn(&state, |conn| {
+        creds::save_authenticated_relay(
+            conn,
+            creds::AuthenticatedRelay {
+                site: creds::RelaySite {
+                    site_origin: &site.site_origin,
+                    site_name: &site.site_name,
+                    api_base_url: &site.api_base_url,
+                    backend_kind: site.backend_kind,
+                },
+                account: creds::AccountIdentity {
+                    id: account.id,
+                    label: &account_label,
+                    login_identifier: &account.email,
+                },
+                auth_token: &credentials.auth_token,
+                refresh_token: credentials.refresh_token.as_deref(),
+                token_expires_at: credentials.token_expires_at,
+                session: creds::SessionEnvironment {
+                    user_agent: credentials.user_agent.as_deref(),
+                    cf_clearance: credentials.cf_clearance.as_deref(),
+                },
+            },
+        )
+    })?;
+
+    Ok((final_relay_id, account_id))
+}
+
 fn persist_newapi_login_session(
     state: &AppState,
     relay_id: i64,
@@ -1705,6 +1770,35 @@ fn persist_newapi_login_session(
             refreshed.access_expires_at,
             // NewAPI 登录不走 sub2api 那条 WebView 回传，两个字段都没有可写的值。
             creds::SessionEnvironment::default(),
+        )
+    })?;
+
+    Ok((final_relay_id, account.id))
+}
+
+fn persist_new_relay_newapi_session(
+    state: &AppState,
+    site: &DiscoveredRelaySite,
+    refreshed: &newapi::RefreshedSession,
+) -> Result<(i64, i64), AppError> {
+    let account = backend::newapi_runtime_account(&refreshed.account);
+    let final_relay_id = with_conn(state, |conn| {
+        creds::save_authenticated_relay(
+            conn,
+            creds::AuthenticatedRelay {
+                site: creds::RelaySite {
+                    site_origin: &site.site_origin,
+                    site_name: &site.site_name,
+                    api_base_url: &site.api_base_url,
+                    backend_kind: site.backend_kind,
+                },
+                account: runtime_account_identity(&account),
+                auth_token: &refreshed.access_token,
+                refresh_token: (!refreshed.refresh_cookie.trim().is_empty())
+                    .then_some(refreshed.refresh_cookie.as_str()),
+                token_expires_at: refreshed.access_expires_at,
+                session: creds::SessionEnvironment::default(),
+            },
         )
     })?;
 
@@ -4081,6 +4175,7 @@ mod tests {
             "https://api.example.com/custom/subscription-token",
             "https://api.example.com",
             None,
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4093,6 +4188,7 @@ mod tests {
             "https://api.example.com/register?aff=ABC123",
             "https://api.example.com",
             None,
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4106,10 +4202,25 @@ mod tests {
             "https://api.example.com/custom/subscription-token",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
         assert_eq!(url.as_str(), "https://api.example.com/register");
+    }
+
+    #[test]
+    fn browser_start_url_preserves_a_signed_directory_entry_path() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "https://790053500.com/keys",
+            "https://790053500.com",
+            Some(&detected),
+            BrowserEntrySource::SignedDirectory,
+        )
+        .expect("valid signed directory entry URL");
+
+        assert_eq!(url.as_str(), "https://790053500.com/keys");
     }
 
     #[test]
@@ -4119,6 +4230,7 @@ mod tests {
             "http://api.example.com/register?aff=ABC123",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4132,6 +4244,7 @@ mod tests {
             "api.example.com",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4145,6 +4258,7 @@ mod tests {
             "api.example.com",
             "https://api.example.com",
             Some(&detected),
+            BrowserEntrySource::Manual,
         )
         .expect("valid browser start URL");
 
@@ -4177,6 +4291,37 @@ mod tests {
         })
         .expect("unsupported site can use browser fallback");
         assert_eq!(unsupported.to_string(), "unsupported");
+    }
+
+    #[test]
+    fn new_site_import_close_is_a_typed_cancellation() {
+        let error = incomplete_new_site_import_error(IncompleteImportReason::Closed);
+
+        assert_eq!(error.kind, Some(RelayImportErrorKind::Cancelled));
+        assert_eq!(error.message, "注册或登录尚未完成");
+    }
+
+    #[test]
+    fn new_site_import_timeout_is_a_typed_cancellation() {
+        let error = incomplete_new_site_import_error(IncompleteImportReason::TimedOut);
+
+        assert_eq!(error.kind, Some(RelayImportErrorKind::Cancelled));
+        assert_eq!(error.message, "注册或登录等待超时，请重试");
+    }
+
+    #[test]
+    fn new_site_import_discovery_stays_in_memory_until_authentication() {
+        let context = browser_login_context(
+            "https://api.example.com",
+            detected_sub2api(),
+            Some("invite"),
+            None,
+        );
+
+        assert_eq!(context.site.site_origin, "https://api.example.com");
+        assert_eq!(context.site.site_name, "Example");
+        assert_eq!(context.site.api_base_url, "https://api.example.com");
+        assert_eq!(context.site.backend_kind, discovery::BackendKind::Sub2Api);
     }
 
     #[tokio::test]
@@ -4308,21 +4453,17 @@ mod tests {
 
     #[test]
     fn import_result_uses_the_final_relay_id_after_account_merge() {
-        let result = ImportResult::from_login(
-            ProbeResult {
-                relay_id: 7,
+        let result = ImportResult::authenticated(
+            DiscoveredRelaySite {
                 site_origin: "https://api.example.com".into(),
                 site_name: "Example".into(),
+                api_base_url: "https://api.example.com".into(),
                 backend_kind: discovery::BackendKind::NewApi,
             },
-            LoginResult {
-                relay_id: 11,
-                logged_in: true,
-            },
+            11,
         );
 
         assert_eq!(result.relay_id, 11);
-        assert!(result.logged_in);
     }
 
     fn codex_settings(model: &str, models: &[&str]) -> serde_json::Value {

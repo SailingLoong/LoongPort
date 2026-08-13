@@ -36,7 +36,6 @@ import {
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
-import { AddSiteDialog } from "./AddSiteDialog";
 import { ModelVerificationDialog } from "./model-verification/ModelVerificationDialog";
 import { openInBrowser } from "./openInBrowser";
 import { ImageTabNotice } from "./ImageTabNotice";
@@ -63,9 +62,9 @@ import { vendorBusyKey } from "./VendorRow";
  *
  * ## 它是中转站链路唯一的宿主（2026-08-04）
  *
- * 原来还有个 LoongPort 独立页（`OperatorPanel`）并存，它管首启引导、站点切换器、
- * 登出；本组件只管「选档位用起来」。那个页面已删 —— 加站 / 登录 / 获取密钥 /
- * 切档位现在全在这一区，用户不必为任何一步跳页。
+ * 原来还有个 LoongPort 独立管理页（`OperatorPanel`）并存，它管站点切换器、登出等
+ * 第二套状态。那个页面已删；现在只有“中转站广场”承担发现和首次认证，认证后的
+ * 登录、获取密钥与切档位仍由本组件统一持有，不再有平行的账号管理实现。
  *
  * 删它的理由：站点切换器与「登出」都是那个页面自造的概念（凭据按
  * `site_origin × account_id` 去重，换账号直接登录就是新增一行，不需要先登出），
@@ -90,6 +89,8 @@ export interface RelaySectionProps {
    * 且把「这是个受限取值域」这个事实写进类型里。
    */
   appId: AppId;
+  /** 打开独立中转站广场；首启入口固定落综合榜，普通添加按当前 app 选榜。 */
+  onOpenDirectory: (entry: "add" | "firstRun") => void;
 }
 
 /**
@@ -162,7 +163,7 @@ function highestSeverityReportForTier(
   );
 }
 
-export function RelaySection({ appId }: RelaySectionProps) {
+export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
    *
@@ -232,9 +233,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
     run: (quitChatgpt: boolean) => void;
   } | null>(null);
   const [chatgptNeedsAttention, setChatgptNeedsAttention] = useState(false);
-  const [addingSite, setAddingSite] = useState(false);
-  // 域名输入框的底纹词，来自 relay_status。
-  const [defaultSite, setDefaultSite] = useState("");
   // 余额**不在这里** —— 它由每一行自己的 `useRowBalanceQuery`（react-query）拉，
   // 见 `RowBalance`。曾经这里有两份 `Record<RowKey, …>` state 加两个 effect，
   // 而那个形状有个死路：effect 的依赖键是 `id:accountLabel`，某一行拉失败过一次、
@@ -513,7 +511,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
       .status()
       .then((s) => {
         setChatgptNeedsAttention(s.chatgptNeedsAttention);
-        setDefaultSite(s.defaultSite);
       })
       .catch(() => {});
   }, []);
@@ -564,8 +561,8 @@ export function RelaySection({ appId }: RelaySectionProps) {
    * tab 不该出现）。拿它们当判据的话，用户在 gemini tab 下会被弹一次引导 ——
    * 而他明明已经配好了 DeepSeek。
    *
-   * 所以判据走两条**不吃 app 参数**的命令：`relay_list_sites`（含未登录的占位行 ——
-   * 「加了站但还没登录」也算配过，不该再弹引导）与 `vendor_list_accounts`。
+   * 所以判据走两条**不吃 app 参数**的命令：`relay_list_sites`（只返回完成认证的
+   * 中转站账号）与 `vendor_list_accounts`。取消或失败的注册/登录不会阻止首启引导。
    *
    * ## 失败时不弹
    *
@@ -588,7 +585,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
           // 先置标志再开弹窗：用户关掉之后这个 effect 可能因为重挂再跑一次，
           // 标志已经是 true 就不会再弹。
           autoPromptedThisProcess = true;
-          setAddingSite(true);
+          onOpenDirectory("firstRun");
         }
       } catch {
         // 见上：读不出来时什么都不做。
@@ -597,7 +594,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [appId, onOpenDirectory]);
 
   /**
    * 登录窗的凭据回传解析失败了。
@@ -1197,7 +1194,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
       <RelayTierList
         relays={relays}
         busy={busy}
-        onAddSite={() => setAddingSite(true)}
+        onAddSite={() => onOpenDirectory("add")}
         onLogin={(relayId) => void handleLogin(relayId)}
         onProvision={handleProvision}
         onReorder={(ids) => void handleReorder(ids)}
@@ -1338,18 +1335,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
         confirmText={t("loongport.tier.resetConfirmButton")}
         onConfirm={() => confirmReset && void handleResetTier(confirmReset)}
         onCancel={() => setConfirmReset(null)}
-      />
-
-      {/* `isFirstRun`：一个站都没有时（两个区块都空）弹窗出引导文案
-          （「选择服务站点」而不是「添加另一个中转站」）。**它只换文案，仍然可关闭**
-          —— 见 `AddSiteDialogProps.isFirstRun` 的文档。 */}
-      <AddSiteDialog
-        open={addingSite}
-        onClose={() => setAddingSite(false)}
-        onAdded={() => void reload()}
-        defaultSite={defaultSite}
-        appId={appId}
-        isFirstRun={bothEmpty}
       />
 
       {/* 「编辑配置」的警告 + cc-switch 编辑页（见 useTierEditGuard）。 */}

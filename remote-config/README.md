@@ -28,6 +28,10 @@ $EDITOR public/v1/config.json     # 1. 改内容
 `aff_codes` 与 `sponsors` 独立维护：前者负责登录时自动带上注册邀请码，后者负责
 添加中转站弹窗的推荐列表。两者都保留客户端编译期回退，确保首次离线启动仍可使用邀请码。
 
+`relay_directory` 只维护广场的兼容策略：`blocked_hosts`、LoongPort host 到 VeriDrop host
+的别名、注册/登录入口和展示名。排名、评分、样本与日期不写进 Git，始终以 VeriDrop
+公开榜单为唯一来源。修改后同样必须重新签名。
+
 ## ⚠️ 收录一家之前先测它探不探得通
 
 客户端靠 `GET /api/v1/settings/public` 里的 `version` 字段认「这是不是 sub2api 站」

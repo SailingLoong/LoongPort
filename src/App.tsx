@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -89,6 +89,8 @@ import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { RelaySection } from "@/components/relay/RelaySection";
+import { RelayDirectoryPage } from "@/components/relay/directory/RelayDirectoryPage";
+import type { LeaderboardKind } from "@/lib/api/relay";
 import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
@@ -121,7 +123,8 @@ type View =
   | "openclawEnv"
   | "openclawTools"
   | "openclawAgents"
-  | "hermesMemory";
+  | "hermesMemory"
+  | "relayDirectory";
 
 interface SyncStatusUpdatedPayload {
   source?: string;
@@ -177,6 +180,8 @@ function App() {
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
+  const [directoryInitialKind, setDirectoryInitialKind] =
+    useState<LeaderboardKind>();
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
@@ -184,7 +189,10 @@ function App() {
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem(LAST_VIEW_STORAGE_KEY, currentView);
+    // 广场是从供应商页临时进入的子流程，不应成为下次启动的落点。
+    if (currentView !== "relayDirectory") {
+      localStorage.setItem(LAST_VIEW_STORAGE_KEY, currentView);
+    }
   }, [currentView]);
 
   const { data: settingsData } = useSettingsQuery();
@@ -891,9 +899,22 @@ function App() {
     setCurrentView("skillsDiscovery");
   };
 
+  const handleOpenRelayDirectory = useCallback((entry: "add" | "firstRun") => {
+    setDirectoryInitialKind(entry === "firstRun" ? "overall" : undefined);
+    setCurrentView("relayDirectory");
+  }, []);
+
   const renderContent = () => {
     const content = (() => {
       switch (currentView) {
+        case "relayDirectory":
+          return (
+            <RelayDirectoryPage
+              sourceAppId={activeApp}
+              initialKind={directoryInitialKind}
+              onBack={() => setCurrentView("providers")}
+            />
+          );
         case "settings":
           return (
             <SettingsPage
@@ -985,7 +1006,10 @@ function App() {
                         不把 relay 的逻辑摊进这个上游文件。
                         它内部已按「中转站 / 官方 API」两大块渲染（各自带区块头与
                         区块内的添加入口），空时也各自显示区块内的占位。 */}
-                    <RelaySection appId={activeApp} />
+                    <RelaySection
+                      appId={activeApp}
+                      onOpenDirectory={handleOpenRelayDirectory}
+                    />
 
                     {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口仍是顶栏 +。
                         生图页（codex-image）保持改动前的形态，不套三大块布局。 */}
@@ -1070,7 +1094,11 @@ function App() {
   return (
     <div
       className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pb-4"
-      style={{ overflowX: "hidden", paddingTop: contentTopOffset }}
+      style={{
+        overflowX: "hidden",
+        paddingTop:
+          currentView === "relayDirectory" ? dragBarHeight : contentTopOffset,
+      }}
     >
       {(dragBarHeight > 0 || useAppWindowControls) && (
         <div
@@ -1148,6 +1176,7 @@ function App() {
       )}
 
       <header
+        hidden={currentView === "relayDirectory"}
         className="fixed z-50 w-full transition-all duration-300 bg-background/80 backdrop-blur-md"
         {...DRAG_REGION_ATTR}
         style={

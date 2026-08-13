@@ -63,6 +63,7 @@ pub mod chatgpt_app;
 pub mod creds;
 pub mod discovery;
 pub mod imagegen_mcp;
+pub mod leaderboard;
 pub mod login;
 pub mod managed;
 pub mod newapi;

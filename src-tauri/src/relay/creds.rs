@@ -54,7 +54,7 @@
 //!
 //! 所以这次是**把概念连根拔掉**，不是清死代码：`load()` / `set_current()` 一并删，
 //! 四条命令（login / provision / balance / purchase）的 `relay_id` 从 `Option<i64>`
-//! 收成必填，加站那条路改为拿 `ProbeResult::relay_id` 显式往下传，
+//! 收成必填；新增站点则在认证成功后直接创建完整账号行，
 //! `check_session` 从「探当前站」改成**逐行探活**。`remove()` 里那段
 //! 「删了当前站要提另一条」的跨行不变量维护也随之消失。
 //!
@@ -240,7 +240,11 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
     )
     .map_err(|e| AppError::Database(format!("创建 loongport_relay 表失败: {e}")))?;
 
-    // 去重键。SQLite 把 NULL 视为互不相等 ⇒ 多条未登录行不受约束，由 save_site 收口。
+    // 旧版会在认证前写入 `account_id IS NULL` 的占位行。新流程不再需要它们：应用启动
+    // 时幂等清掉，避免升级后仍把一次已取消的注册/登录展示成中转站账号。
+    conn.execute("DELETE FROM loongport_relay WHERE account_id IS NULL", [])
+        .map_err(|e| AppError::Database(format!("清理未完成认证的中转站失败: {e}")))?;
+
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_loongport_relay_site_account
          ON loongport_relay(site_origin, account_id)",
@@ -360,6 +364,7 @@ pub fn save_site(
 ///
 /// `save_site` 保留为 sub2api 默认入口，兼容已有调用方；新导入流程应使用本函数，把
 /// 探测结果作为显式事实写入数据库。
+#[cfg(test)]
 pub fn save_site_with_backend(
     conn: &Connection,
     site_origin: &str,
@@ -440,6 +445,121 @@ pub struct SessionEnvironment<'a> {
     pub user_agent: Option<&'a str>,
     /// Cloudflare 放行 cookie。见 [`Relay::cf_clearance`]。
     pub cf_clearance: Option<&'a str>,
+}
+
+/// A discovered relay site that has not been persisted yet.
+///
+/// New-site imports keep this value in memory until authentication succeeds. This prevents a
+/// closed or failed login window from leaving an `account_id IS NULL` placeholder in the relay
+/// list.
+#[derive(Debug, Clone, Copy)]
+pub struct RelaySite<'a> {
+    pub site_origin: &'a str,
+    pub site_name: &'a str,
+    pub api_base_url: &'a str,
+    pub backend_kind: BackendKind,
+}
+
+/// The complete information required to create or refresh a relay account in one transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthenticatedRelay<'a> {
+    pub site: RelaySite<'a>,
+    pub account: AccountIdentity<'a>,
+    pub auth_token: &'a str,
+    pub refresh_token: Option<&'a str>,
+    pub token_expires_at: Option<i64>,
+    pub session: SessionEnvironment<'a>,
+}
+
+/// Insert or refresh a fully authenticated relay account atomically.
+///
+/// Unlike [`save_site_with_backend`] followed by [`save_credentials`], this function never
+/// creates a staging row. The database changes only after site discovery, browser authentication,
+/// and account identification have all completed successfully.
+pub fn save_authenticated_relay(
+    conn: &Connection,
+    relay: AuthenticatedRelay<'_>,
+) -> Result<i64, AppError> {
+    let AuthenticatedRelay {
+        site,
+        account,
+        auth_token,
+        refresh_token,
+        token_expires_at,
+        session,
+    } = relay;
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::Database(format!("开始认证中转站事务失败: {e}")))?;
+    let existing: Option<i64> = transaction
+        .query_row(
+            "SELECT id FROM loongport_relay
+             WHERE site_origin = ?1 AND account_id = ?2 LIMIT 1",
+            params![site.site_origin, account.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("查询已有中转站账号失败: {e}")))?;
+    let now = now_unix();
+
+    let id = if let Some(id) = existing {
+        transaction
+            .execute(
+                "UPDATE loongport_relay
+                 SET site_name = ?1, api_base_url = ?2, backend_kind = ?3,
+                     account_label = ?4, login_identifier = ?5, auth_token = ?6,
+                     refresh_token = ?7, token_expires_at = ?8, user_agent = ?9,
+                     cf_clearance = ?10, updated_at = ?11
+                 WHERE id = ?12",
+                params![
+                    site.site_name,
+                    site.api_base_url,
+                    site.backend_kind.as_str(),
+                    account.label,
+                    account.login_identifier,
+                    auth_token,
+                    refresh_token,
+                    token_expires_at,
+                    session.user_agent,
+                    session.cf_clearance,
+                    now,
+                    id,
+                ],
+            )
+            .map_err(|e| AppError::Database(format!("更新中转站账号失败: {e}")))?;
+        id
+    } else {
+        transaction
+            .execute(
+                "INSERT INTO loongport_relay
+                    (site_origin, site_name, api_base_url, backend_kind,
+                     account_id, account_label, login_identifier, auth_token,
+                     refresh_token, token_expires_at, user_agent, cf_clearance, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    site.site_origin,
+                    site.site_name,
+                    site.api_base_url,
+                    site.backend_kind.as_str(),
+                    account.id,
+                    account.label,
+                    account.login_identifier,
+                    auth_token,
+                    refresh_token,
+                    token_expires_at,
+                    session.user_agent,
+                    session.cf_clearance,
+                    now,
+                ],
+            )
+            .map_err(|e| AppError::Database(format!("保存认证中转站失败: {e}")))?;
+        transaction.last_insert_rowid()
+    };
+
+    transaction
+        .commit()
+        .map_err(|e| AppError::Database(format!("提交认证中转站事务失败: {e}")))?;
+    Ok(id)
 }
 
 /// 写入登录凭据与账号身份，并在发现重复时合并。
@@ -714,6 +834,67 @@ mod tests {
         }
     }
 
+    fn authenticated<'a>(
+        site_origin: &'a str,
+        account_id: i64,
+        auth_token: &'a str,
+    ) -> AuthenticatedRelay<'a> {
+        AuthenticatedRelay {
+            site: RelaySite {
+                site_origin,
+                site_name: "测试站",
+                api_base_url: site_origin,
+                backend_kind: BackendKind::Sub2Api,
+            },
+            account: ident(account_id, "测试账号", "me@example.com"),
+            auth_token,
+            refresh_token: Some("refresh-token"),
+            token_expires_at: Some(123),
+            session: SessionEnvironment::default(),
+        }
+    }
+
+    #[test]
+    fn save_authenticated_relay_inserts_only_a_complete_logged_in_row() {
+        let conn = mem();
+
+        let id = save_authenticated_relay(
+            &conn,
+            authenticated("https://relay.example", 7, "access-token"),
+        )
+        .unwrap();
+
+        let rows = list(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.id, id);
+        assert_eq!(row.account_id, Some(7));
+        assert_eq!(row.auth_token, "access-token");
+        assert!(rows.iter().all(|row| row.account_id.is_some()));
+    }
+
+    #[test]
+    fn save_authenticated_relay_updates_the_existing_account_without_staging_a_row() {
+        let conn = mem();
+        let first = save_authenticated_relay(
+            &conn,
+            authenticated("https://relay.example", 7, "old-token"),
+        )
+        .unwrap();
+
+        let second = save_authenticated_relay(
+            &conn,
+            authenticated("https://relay.example", 7, "new-token"),
+        )
+        .unwrap();
+
+        assert_eq!(second, first);
+        let rows = list(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].auth_token, "new-token");
+        assert!(rows.iter().all(|row| row.account_id.is_some()));
+    }
+
     /// **`SELECT_COLS` 的列数必须等于 `row_to_relay` 读的个数。**
     ///
     /// 那两处是一份契约，而**编译器管不到**：`row.get(n)` 的 `n` 是运行期索引，
@@ -842,6 +1023,22 @@ mod tests {
     #[test]
     fn list_is_empty_before_any_site_saved() {
         assert!(list(&mem()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_table_removes_legacy_unauthenticated_placeholders() {
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO loongport_relay
+                (site_origin, site_name, api_base_url, account_id, auth_token)
+             VALUES ('https://stale.example', 'Stale', 'https://stale.example', NULL, '')",
+            [],
+        )
+        .unwrap();
+
+        create_table(&conn).unwrap();
+
+        assert!(list(&conn).unwrap().is_empty());
     }
 
     #[test]

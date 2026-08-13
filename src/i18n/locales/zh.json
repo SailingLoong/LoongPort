@@ -3064,6 +3064,48 @@
       "official": "官方 API",
       "other": "其他"
     },
+    "directory": {
+      "title": "中转站广场",
+      "description": "基于 VeriDrop 公开检测结果选择站点，完成注册或登录后自动添加到 LoongPort。",
+      "tabs": {
+        "overall": "综合",
+        "claude": "Claude",
+        "openai": "OpenAI",
+        "gemini": "Gemini"
+      },
+      "source": {
+        "live": "VeriDrop 实时数据 · {{time}}",
+        "cached": "VeriDrop 缓存数据 · {{time}}"
+      },
+      "searchPlaceholder": "搜索站点、协议或适用场景",
+      "loading": "正在读取 VeriDrop 榜单…",
+      "errorTitle": "无法读取中转站榜单",
+      "errorBody": "实时数据和上次成功缓存均不可用。",
+      "empty": "没有符合当前筛选条件的站点",
+      "scoreLabel": "VeriDrop",
+      "signatureHint": "Claude 思维签名验证通过率",
+      "compatibilityNote": "部分不兼容站点不会展示",
+      "customSitePlaceholder": "没有找到？输入其他中转站网址",
+      "provisionFailed": "账号已添加，但创建接入配置失败：{{reason}}。可返回中转站列表重试。",
+      "meta": {
+        "samples": "{{count}} 次检测",
+        "latest": "最近 {{date}}",
+        "supplementalRank": "补充"
+      },
+      "actions": {
+        "authenticate": "注册或登录",
+        "autoAddHint": "完成后自动添加",
+        "history": "完整历史",
+        "refresh": "刷新实时榜单",
+        "retry": "重试",
+        "useOtherSite": "使用其他站点"
+      },
+      "pagination": {
+        "range": "{{from}}–{{to}} / {{total}}",
+        "previous": "上一页",
+        "next": "下一页"
+      }
+    },
     "tierList": {
       "empty": "尚未添加中转站",
       "addSite": "添加中转站",

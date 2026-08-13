@@ -25,12 +25,12 @@ export interface RelayStatus {
 /**
  * 一个已添加的站点。
  *
- * 两个消费者：加站弹窗（判「点这个推荐站会不会撞已有账号」）与「一个站都没有吗」
- * 那个自动引导判据（只数条数）。**含未登录的占位行** —— 加了站还没登录也算配过。
+ * 当前消费者是「一个站都没有吗」的自动引导判据（只数条数）。新增站点只有在
+ * 注册或登录成功后才会写入；启动建表路径也会清理旧版遗留的未认证占位行。
  */
 export interface SiteInfo {
   siteOrigin: string;
-  /** 登录后的账号名（昵称优先，回落邮箱），未登录为空串。 */
+  /** 登录后的账号名（昵称优先，回落邮箱）。 */
   accountLabel: string;
 }
 
@@ -39,7 +39,8 @@ export type BackendKind = "sub2api" | "newapi";
 export type DiscoveryErrorKind =
   | "unsupported_site"
   | "protocol_conflict"
-  | "transport";
+  | "transport"
+  | "cancelled";
 
 export interface RelayImportError {
   kind?: DiscoveryErrorKind;
@@ -54,11 +55,8 @@ export interface ProbeResult {
   readonly backendKind: BackendKind;
 }
 
-/** 合并站点发现与同一浏览器会话登录的结果。 */
-export interface ImportResult extends ProbeResult {
-  /** true 表示已取得并保存凭据；false 表示用户在登录完成前关闭了窗口。 */
-  loggedIn: boolean;
-}
+/** 站点发现与同一浏览器会话认证均成功后的结果。 */
+export type ImportResult = ProbeResult;
 
 /**
  * 一个推荐中转站（首启屏那几个按钮）。
@@ -72,6 +70,39 @@ export interface Sponsor {
   displayName: string;
   /** 一句话介绍，可能是空串。 */
   tagline: string;
+}
+
+export type LeaderboardKind = "overall" | "claude" | "openai" | "gemini";
+
+export interface ProtocolScore {
+  protocol: string;
+  score: number;
+  samples: number;
+  verdict: string | null;
+  reportUrl: string | null;
+}
+
+export interface RelayDirectoryItem {
+  siteHost: string;
+  veridropHost: string;
+  displayName: string;
+  rank: number | null;
+  score: number;
+  samples: number;
+  latestDate: string;
+  detailUrl: string;
+  protocolScores: ProtocolScore[];
+  claudeSignatureRate: number | null;
+  scenarios: string[];
+  issues: string[];
+  entryUrl: string;
+}
+
+export interface RelayLeaderboard {
+  kind: LeaderboardKind;
+  items: RelayDirectoryItem[];
+  syncedAt: number;
+  fromCache: boolean;
 }
 
 export interface TierInfo {
@@ -224,12 +255,20 @@ export const relayApi = {
    */
   listSponsors: (): Promise<Sponsor[]> => invoke("relay_list_sponsors"),
 
+  /** 每次打开或切换榜单都实时拉取；后端仅在实时失败时返回上次成功缓存。 */
+  listDirectory: (kind: LeaderboardKind): Promise<RelayLeaderboard> =>
+    invoke("relay_list_directory", { kind }),
+
   /**
    * 导入第三方站点。原生发现失败时由后端打开可见网页，让用户自行完成验证，
    * 并在同一个浏览器会话中识别协议、注册或登录。输入必须原样透传以保留邀请链接。
    */
   importSite: (site: string): Promise<ImportResult> =>
     invoke("relay_import_site", { site }),
+
+  /** 导入已验签目录声明的入口；后端会再次核对当前签名配置。 */
+  importDirectorySite: (site: string): Promise<ImportResult> =>
+    invoke("relay_import_directory_site", { site }),
 
   /**
    * 探一遍每一行凭据是不是真的还活着，返回**这次被清掉凭据的行 id**（空 = 全都好）。

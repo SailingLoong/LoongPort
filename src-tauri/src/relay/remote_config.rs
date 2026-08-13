@@ -191,6 +191,24 @@ pub struct RemoteClaudeRoleModels {
     pub subagent: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct RelayDirectorySite {
+    #[serde(default)]
+    pub veridrop_host: Option<String>,
+    #[serde(default)]
+    pub entry_url: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct RelayDirectoryPolicy {
+    #[serde(default)]
+    pub blocked_hosts: Vec<String>,
+    #[serde(default)]
+    pub sites: std::collections::BTreeMap<String, RelayDirectorySite>,
+}
+
 /// 远端配置的全文。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct RemoteConfig {
@@ -230,6 +248,9 @@ pub struct RemoteConfig {
     /// 由调用方忽略，远端配置只覆盖它明确提供且通过基本校验的值。
     #[serde(default)]
     pub tier_configs: std::collections::BTreeMap<String, RemoteTierConfig>,
+    /// 中转站广场兼容策略。评分与排名不在这里，始终由 VeriDrop 提供。
+    #[serde(default)]
+    pub relay_directory: RelayDirectoryPolicy,
 }
 
 /// 端点与公钥都配好了没。任一没配就整条链路 no-op（走缓存/内置）。
@@ -761,6 +782,7 @@ mod tests {
             aff_codes,
             promo_codes: std::collections::BTreeMap::new(),
             tier_configs: std::collections::BTreeMap::new(),
+            relay_directory: RelayDirectoryPolicy::default(),
         }
     }
 
@@ -773,6 +795,7 @@ mod tests {
             aff_codes: std::collections::BTreeMap::new(),
             promo_codes,
             tier_configs: std::collections::BTreeMap::new(),
+            relay_directory: RelayDirectoryPolicy::default(),
         }
     }
 

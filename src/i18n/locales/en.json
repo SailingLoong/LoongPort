@@ -3064,6 +3064,48 @@
       "official": "Official API",
       "other": "Other"
     },
+    "directory": {
+      "title": "Relay directory",
+      "description": "Choose a site using VeriDrop's public test results. It is added to LoongPort only after registration or sign-in succeeds.",
+      "tabs": {
+        "overall": "Overall",
+        "claude": "Claude",
+        "openai": "OpenAI",
+        "gemini": "Gemini"
+      },
+      "source": {
+        "live": "Live VeriDrop data · {{time}}",
+        "cached": "Cached VeriDrop data · {{time}}"
+      },
+      "searchPlaceholder": "Search sites, protocols, or use cases",
+      "loading": "Loading the VeriDrop leaderboard…",
+      "errorTitle": "Could not load the relay directory",
+      "errorBody": "Neither live data nor the last successful cache is available.",
+      "empty": "No sites match the current filters",
+      "scoreLabel": "VeriDrop",
+      "signatureHint": "Claude thinking-signature verification rate",
+      "compatibilityNote": "Some incompatible sites are not shown",
+      "customSitePlaceholder": "Can't find it? Enter another relay URL",
+      "provisionFailed": "The account was added, but connection setup failed: {{reason}}. Retry from the relay list.",
+      "meta": {
+        "samples": "{{count}} tests",
+        "latest": "Latest {{date}}",
+        "supplementalRank": "Added"
+      },
+      "actions": {
+        "authenticate": "Register or sign in",
+        "autoAddHint": "Added automatically when complete",
+        "history": "Full history",
+        "refresh": "Refresh live leaderboard",
+        "retry": "Retry",
+        "useOtherSite": "Use another site"
+      },
+      "pagination": {
+        "range": "{{from}}–{{to}} / {{total}}",
+        "previous": "Previous page",
+        "next": "Next page"
+      }
+    },
     "tierList": {
       "empty": "No relay services added",
       "addSite": "Add relay service",

@@ -3065,6 +3065,48 @@
       "official": "官方 API",
       "other": "其他"
     },
+    "directory": {
+      "title": "中轉站廣場",
+      "description": "根據 VeriDrop 公開檢測結果選擇站點，完成註冊或登入後自動加入 LoongPort。",
+      "tabs": {
+        "overall": "綜合",
+        "claude": "Claude",
+        "openai": "OpenAI",
+        "gemini": "Gemini"
+      },
+      "source": {
+        "live": "VeriDrop 即時資料 · {{time}}",
+        "cached": "VeriDrop 快取資料 · {{time}}"
+      },
+      "searchPlaceholder": "搜尋站點、協定或適用情境",
+      "loading": "正在讀取 VeriDrop 排行榜…",
+      "errorTitle": "無法讀取中轉站排行榜",
+      "errorBody": "即時資料與上次成功快取皆無法使用。",
+      "empty": "沒有符合目前篩選條件的站點",
+      "scoreLabel": "VeriDrop",
+      "signatureHint": "Claude 思維簽名驗證通過率",
+      "compatibilityNote": "部分不相容站點不會顯示",
+      "customSitePlaceholder": "沒有找到？輸入其他中轉站網址",
+      "provisionFailed": "帳號已加入，但建立連線設定失敗：{{reason}}。可返回中轉站列表重試。",
+      "meta": {
+        "samples": "{{count}} 次檢測",
+        "latest": "最近 {{date}}",
+        "supplementalRank": "補充"
+      },
+      "actions": {
+        "authenticate": "註冊或登入",
+        "autoAddHint": "完成後自動加入",
+        "history": "完整記錄",
+        "refresh": "重新整理即時排行榜",
+        "retry": "重試",
+        "useOtherSite": "使用其他站點"
+      },
+      "pagination": {
+        "range": "{{from}}–{{to}} / {{total}}",
+        "previous": "上一頁",
+        "next": "下一頁"
+      }
+    },
     "tierList": {
       "empty": "尚未新增中轉站",
       "addSite": "新增中轉站",
