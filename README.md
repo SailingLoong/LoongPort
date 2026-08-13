@@ -14,6 +14,10 @@
 
 ### 🌐 官方网站：**[loongport.dev](https://loongport.dev)**
 
+### 💬 QQ 群：**773696474**
+
+<img src="assets/qq-group.jpeg" alt="LoongPort QQ 群二维码" width="240">
+
 中文 | [English](README_EN.md)
 
 </div>
