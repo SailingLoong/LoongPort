@@ -263,7 +263,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
   >({});
   const [confirmRemoveVendor, setConfirmRemoveVendor] =
     useState<VendorAccountRow | null>(null);
-  // 与 `relaysRef` 同理：`loadVendorBalance` 请求返回时要判这一行还是不是同一个账号。
+  // 异步编辑、恢复默认与切换动作返回时，需要按 id 读取最新的行数据。
   const vendorsRef = useRef<VendorAccountRow[]>([]);
   vendorsRef.current = vendors;
   // reload 的请求序号 —— 只让最后一次的结果落地，见 `reload` 里的说明。
@@ -521,7 +521,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
   /**
    * 启动时探一次凭据是不是真的还活着。
    *
-   * `status.loggedIn` 只看本地记的**过期时间**。凭据在网页端被撤销、账号被禁用、
+   * 首屏行状态只看本地凭据。凭据在网页端被撤销、账号被禁用、
    * 会话被踢掉时它仍是 true ⇒ 用户看到界面一切正常，点任何操作才报错。
    * 这一次探活把那种状态提前暴露出来（后端探到失效会清掉本地凭据）。
    *
@@ -677,39 +677,13 @@ export function RelaySection({ appId }: RelaySectionProps) {
     run(
       rowId === null ? "vendorLogin:new" : vendorBusyKey("login", rowId),
       async () => {
-        // 新增那条路：**登录前先记下已有的行 id**，登录后靠差集认出新建的那行。
-        //
-        // ⚠️ 不能靠「列表里最后一个该 vendorId 的行」—— `creds::list` 按
-        // `sort_index, id` 排序，用户拖动过之后新行不一定在末尾 ⇒ 会给**别的账号**
-        // 备密钥（那个账号的 sk 被换成新建的，而新登录的账号什么也没拿到）。
-        //
-        // 差集在「新增」这条路上是准的：唯一索引是 `(vendor_id, account_id)`，
-        // 所以要么多出一行（新账号），要么行数不变（登录的是已存在的账号 ——
-        // 那种情况下差集为空，落到下面的 `existing` 分支按 account_label 找回来）。
-        const idsBefore = new Set(vendorsRef.current.map((v) => v.id));
         try {
-          const ok = await vendorApi.openLogin(vendorId);
-          // false = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
-          if (!ok) return;
+          const savedRowId = await vendorApi.openLogin(vendorId);
+          // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
+          if (savedRowId === null) return;
           toast.success(t("loongport.session.connected"));
-          // 先刷列表再 provision：登录成功后行才存在（新增那条路），而
-          // provision 要拿行 id。
-          const rows = await vendorApi.list(appId);
-          setVendors(rows);
-
-          const target =
-            rowId !== null
-              ? // 重登：就是原来那一行（后端按 `(vendor_id, account_id)` 合并回它）。
-                rows.find((v) => v.id === rowId)
-              : // 新增：差集里那一行。用户点「添加账号」但登的是已存在的账号时
-                // 差集为空 —— 那种情况下 `openLogin` 已经把 token 更新到那一行了，
-                // 靠 vendorId + 有登录态定位（同厂商多账号时可能有多行满足，
-                // 但它们的 sk 各自独立、provision 是幂等的，挑错也不会串账号）。
-                (rows.find((v) => !idsBefore.has(v.id)) ??
-                rows.find((v) => v.vendorId === vendorId && v.loggedIn));
-          if (!target) return;
-          // 直接把密钥备好 —— 不该再让用户点一次。
-          await doVendorProvision(target.id);
+          // 保存账号的后端直接返回权威行 id；前端不再根据列表差集或登录态猜账号。
+          await doVendorProvision(savedRowId);
           await reloadVendors();
         } catch (e) {
           toast.error(String(e));
@@ -841,24 +815,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
     }
   };
 
-  /**
-   * 这一行的配置是不是当前 tab 正在用的那个。
-   *
-   * ⚠️ **直接读后端算好的 `isCurrent`** —— `vendorApi.list(appId)` 返回的 DTO 里，
-   * 后端已按 `providers.is_current` 现算（与中转站档位的 `tier.isCurrent` 同源）。
-   * 前端**不再自维护 / 不自比较** current 值 —— 曾经历过「前端自己算 current」导致
-   * 切档位后 DeepSeek 行高亮停在上一个值、与档位同时显示「在用」的 bug（2026-08-07）。
-   *
-   * 空 id / 未登录的行后端给 `false` —— 那种行本来也不该高亮。
-   */
-  const isVendorCurrent = useCallback(
-    (rowId: number) => {
-      const row = vendors.find((v) => v.id === rowId);
-      return row?.isCurrent ?? false;
-    },
-    [vendors],
-  );
-
   const handleLogin = (relayId: number) =>
     run(`login:${relayId}`, async () => {
       try {
@@ -909,9 +865,9 @@ export function RelaySection({ appId }: RelaySectionProps) {
    */
   const handleRefreshAll = () =>
     run("refresh:all", async () => {
-      const relayTargets = relays.filter((op) => op.loggedIn);
+      const relayTargets = relays.filter((op) => op.canRefresh);
       const vendorTargets = vendorSupportsApp(appId)
-        ? vendors.filter((account) => account.loggedIn || account.keyReady)
+        ? vendors.filter((account) => account.canRefresh)
         : [];
       const [relayResults, vendorResults] = await Promise.all([
         Promise.allSettled(relayTargets.map((op) => relayApi.provision(op.id))),
@@ -1296,7 +1252,6 @@ export function RelaySection({ appId }: RelaySectionProps) {
         <VendorBlock
           vendor={{
             accounts: vendors,
-            isCurrent: isVendorCurrent,
             onLogin: (rowId) => {
               const row = vendors.find((v) => v.id === rowId);
               if (row) void handleVendorLogin(row.vendorId, rowId);
@@ -1315,7 +1270,7 @@ export function RelaySection({ appId }: RelaySectionProps) {
                 kind: "vendor",
                 providerId: account.providerId,
                 displayName: account.accountLabel || account.vendorName,
-                isCurrent: isVendorCurrent(account.id),
+                isCurrent: account.isCurrent,
               }),
             onReset: (account) =>
               setConfirmReset({
@@ -1351,13 +1306,11 @@ export function RelaySection({ appId }: RelaySectionProps) {
       <ConfirmDialog
         isOpen={confirmRemove !== null}
         title={t("loongport.row.removeConfirmTitle")}
-        // 文案按「这一行登录过没有」分两句 —— 判据见 `removeConfirmWording.ts`
-        // （从没登录的行既没有登录态也没有余额，无条件那句话会说错两处）。
+        // 文案按后端返回的行状态分两句 —— 前端只负责选择展示文案。
         // `confirmRemove` 为 null 时弹窗不显示，此处的兜底值不会被看到。
         message={t(
           removeConfirmMessageKey({
-            loggedIn: confirmRemove?.loggedIn ?? false,
-            sessionExpired: confirmRemove?.sessionExpired ?? false,
+            status: confirmRemove?.status ?? "notLoggedIn",
           }),
           {
             label:

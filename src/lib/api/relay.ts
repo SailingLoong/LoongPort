@@ -146,13 +146,16 @@ export interface RelayRow {
   siteName: string;
   /** 登录后的账号名，未登录为空串。同一个站挂多个账号时靠它分辨。 */
   accountLabel: string;
-  loggedIn: boolean;
-  /**
-   * 登录过但凭据已不可用。**与 `!loggedIn` 不同** —— 那会把「从没登录」与
-   * 「登录过期」混为一谈，而对用户是两种处境（前者要输账号+密码，后者只需
-   * 确认密码与人机验证）。
-   */
-  sessionExpired: boolean;
+  status:
+    | "notLoggedIn"
+    | "sessionExpired"
+    | "sessionExpiredUsable"
+    | "noTiers"
+    | "ready";
+  isCurrent: boolean;
+  canQueryBalance: boolean;
+  canRefresh: boolean;
+  canDelete: boolean;
   tiers: TierInfo[];
 }
 

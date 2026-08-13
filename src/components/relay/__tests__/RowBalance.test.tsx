@@ -64,14 +64,13 @@ describe("RowBalance", () => {
    * （`src-tauri/src/relay/balance.rs`）。改造前这里判的是 `loggedIn` ——
    * 过期的行连查都不查，用户看到的是「密钥还能用，但余额和充值入口都不见了」。
    *
-   * **会红的改法**：把 `enabled` 的判据从「登录过」改回「登录态还有效」
-   * （即 `RelayRow` 传 `relay.loggedIn`）。
+   * **会红的改法**：让调用方重新按登录态推导 `enabled`，而不是消费后端给出的
+   * `canQueryBalance`。
    */
   it("登录态过期的行照样查余额并显示出来", async () => {
     api.relayBalance.mockResolvedValue(wallet(42.5));
 
-    // `enabled` 由调用方按「登录过」算：过期的行是 `loggedIn:false` +
-    // `sessionExpired:true` ⇒ 仍然为 true。
+    // `enabled` 由后端 DTO 的 `canQueryBalance` 提供；登录态与 SK 的判定不在组件内。
     renderWithQuery(
       <RowBalance
         rowKind="relay"

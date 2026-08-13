@@ -201,6 +201,11 @@ impl Relay {
             && self.account_id.is_some()
             && self.refresh_token.is_none()
     }
+
+    /// 是否具备后端自动续期并执行全量刷新的凭据。
+    pub fn can_refresh(&self, now_unix: i64) -> bool {
+        self.token_looks_valid(now_unix) || self.refresh_token.is_some()
+    }
 }
 
 /// 建表 + 索引。**全新库与 v8→v9 迁移都走它，两条路建出的形态完全一样。**
@@ -1287,6 +1292,29 @@ mod tests {
             !renewable.session_expired(2000),
             "refresh_token 还在就该静默续期，不该催用户重登"
         );
+    }
+
+    #[test]
+    fn refresh_token_keeps_a_row_refreshable_until_reauthentication_is_required() {
+        let conn = mem();
+        let id = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
+        save_credentials(
+            &conn,
+            id,
+            ident(1, "x@x.com", "x@x.com"),
+            "tok",
+            Some("refresh"),
+            Some(1),
+            SessionEnvironment::default(),
+        )
+        .unwrap();
+        let mut renewable = get(&conn, id).unwrap().unwrap();
+        renewable.auth_token.clear();
+        assert!(renewable.can_refresh(0));
+
+        let mut unconfigured = renewable;
+        unconfigured.refresh_token = None;
+        assert!(!unconfigured.can_refresh(0));
     }
 
     #[test]

@@ -155,7 +155,7 @@ function initialOpenState(relays: RelayRowData[]): Record<RowKey, boolean> {
       state[key] = !stored;
       continue;
     }
-    state[key] = op.tiers.some((tier) => tier.isCurrent);
+    state[key] = op.isCurrent;
   }
   return state;
 }

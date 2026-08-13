@@ -78,8 +78,11 @@ function renderRow(overrides: Partial<ComponentProps<typeof RelayRow>> = {}) {
       siteOrigin: "https://relay.example",
       siteName: "Relay",
       accountLabel: "account",
-      loggedIn: true,
-      sessionExpired: false,
+      status: "ready",
+      isCurrent: false,
+      canQueryBalance: true,
+      canRefresh: true,
+      canDelete: true,
       tiers: [tier],
     },
     open: true,
@@ -127,8 +130,11 @@ describe("RelayRow model verification", () => {
         siteOrigin: "https://relay.example",
         siteName: "Relay",
         accountLabel: "account",
-        loggedIn: true,
-        sessionExpired: false,
+        status: "ready",
+        isCurrent: false,
+        canQueryBalance: true,
+        canRefresh: true,
+        canDelete: true,
         tiers: [{ ...tier, appId: "gemini" }],
       },
     });
@@ -193,14 +199,19 @@ describe("RelayRow model verification", () => {
   });
 });
 
-function relayWithTier(tierOverrides: Partial<typeof tier>) {
+function relayWithTier(
+  tierOverrides: Partial<typeof tier>,
+): ComponentProps<typeof RelayRow>["relay"] {
   return {
     id: 1,
     siteOrigin: "https://relay.example",
     siteName: "Relay",
     accountLabel: "account",
-    loggedIn: true,
-    sessionExpired: false,
+    status: "ready",
+    isCurrent: false,
+    canQueryBalance: true,
+    canRefresh: true,
+    canDelete: true,
     tiers: [{ ...tier, ...tierOverrides }],
   };
 }

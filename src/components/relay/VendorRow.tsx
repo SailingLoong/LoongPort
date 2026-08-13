@@ -51,8 +51,6 @@ export interface VendorRowProps {
    * 与官网行 3 的按钮一起转圈。同一个坑、同一个解法（判别式 key）。
    */
   busy: ReadonlySet<string>;
-  /** 这一行的配置是不是当前 tab 正在用的那个。 */
-  isCurrent: boolean;
   onLogin: () => void;
   /** 备好密钥（也是「刷新」的实现 —— 本地已有明文时零请求）。 */
   onProvision: () => void | Promise<void>;
@@ -95,7 +93,6 @@ export function vendorBusyKey(action: string, id: number): string {
 export function VendorRow({
   account,
   busy,
-  isCurrent,
   onLogin,
   onProvision,
   onUse,
@@ -115,9 +112,8 @@ export function VendorRow({
   const userEdited = account.userEdited === true;
 
   // 编辑与恢复都要读那条 provider 记录 —— 还没 provision 过就没有它。
-  // 那种行显示的是「获取密钥」引导态（下面 `keyReady` 那几个分支），
-  // 摆一个点了必然报错的编辑按钮是骗人。
-  const canEditConfig = account.keyReady && account.providerId !== "";
+  // 后端通过 `canEditConfig` 把这个资格传下来，前端不再根据凭据或 provider id 推导。
+  const canEditConfig = account.canEditConfig;
 
   return (
     <div
@@ -127,7 +123,7 @@ export function VendorRow({
         "group/row rounded-xl border bg-card p-4 text-card-foreground transition-all duration-300",
         dragHandleProps?.isDragging
           ? "cursor-grabbing border-primary shadow-lg"
-          : isCurrent
+          : account.isCurrent
             ? // 当前在用的行用蓝框，与 `TierItem` 的当前态同一个 token
               // （`ProviderCard.tsx:306`）—— 用户扫一眼列表首先要找到在用的那个。
               "border-blue-500/60 shadow-sm shadow-blue-500/10"
@@ -195,11 +191,11 @@ export function VendorRow({
         <RowBalance
           rowKind="vendor"
           rowId={account.id}
-          enabled={account.loggedIn || account.sessionExpired}
-          onRefresh={account.keyReady ? onProvision : undefined}
+          enabled={account.canQueryBalance}
+          onRefresh={account.canRefresh ? onProvision : undefined}
           refreshBusy={busy.has(vendorBusyKey("provision", account.id))}
           refreshLabel={
-            account.keyReady ? t("loongport.vendor.refreshAll") : undefined
+            account.canRefresh ? t("loongport.vendor.refreshAll") : undefined
           }
         />
 
@@ -208,7 +204,7 @@ export function VendorRow({
         <VendorStatus
           account={account}
           busy={busy}
-          isCurrent={isCurrent}
+          isCurrent={account.isCurrent}
           onLogin={onLogin}
           onProvision={onProvision}
           onUse={onUse}
@@ -314,24 +310,17 @@ export function VendorRow({
 }
 
 /**
- * 行右侧的状态与动作。**四种状态，判定顺序不能变**（后端有意把三个布尔分开，
- * 合并任意两个都会给用户错的处境）：
+ * 行右侧的状态与动作。状态由后端 DTO 计算，前端只按状态展示对应动作：
  *
- * | 条件 | 显示 | 为什么这个顺序 |
+ * | 后端 `status` | 显示 | 为什么不能混 |
  * |---|---|---|
- * | `keyReady` | 使用 / 在用 + 更多 | ⚠️ **优先于 `sessionExpired`** —— 见下 |
+ * | `ready` | 使用 / 在用 + 更多 | 后端确认凭据和配置可用 |
+ * | `sessionExpiredUsable` | 使用 / 在用 + 更多 | 登录态过期，但后端确认 SK 仍可用 |
  * | `sessionExpired` | 「登录已过期」+ 重新登录 | 预填已就绪，用户只需补验证 |
- * | `!loggedIn` | 「还没登录」+ 登录 | 从没登录过 |
- * | `loggedIn` | 「获取密钥」 | 登录了但还没备好 sk |
+ * | `notLoggedIn` | 「还没登录」+ 登录 | 从没登录过 |
+ * | `noKey` | 「获取密钥」 | 登录了但还没备好 SK |
  *
- * ## ⚠️ `keyReady` 必须排在 `sessionExpired` 前面
- *
- * 这两个布尔**独立**：sk 是厂商侧的独立凭据，网页登录态过期**不影响它**
- * （`creds::clear_token` 特意不清 `api_key`，那边有测试钉着）。所以
- * `keyReady && sessionExpired` 的行**照样能用** —— 反过来判会把一个完全可用的
- * 账号显示成「请重新登录」，而用户重登一次什么也没变（sk 本来就没失效）。
- *
- * 登录态过期后余额仍优先用 sk 查询；「重新登录」入口保留为 hover 次要动作，
+ * 登录态过期后余额仍优先用 SK 查询；「重新登录」入口保留为 hover 次要动作，
  * 供需要更新网页登录信息的用户使用，但不把一个仍可用的账号渲染成故障态。
  */
 function VendorStatus({
@@ -354,7 +343,7 @@ function VendorStatus({
   const provisioning = busy.has(vendorBusyKey("provision", account.id));
   const switching = busy.has(vendorBusyKey("switch", account.id));
 
-  if (account.keyReady) {
+  if (account.status === "ready" || account.status === "sessionExpiredUsable") {
     return (
       <div className="flex shrink-0 items-center gap-2">
         {/* 主按钮（「使用 / 在用」）+ 次要动作，**整组 hover 才出** —— 与
@@ -402,7 +391,7 @@ function VendorStatus({
 
           {/* 登录态过期但 sk 还在用的行：给一条重登的路，但**不催**。
               唯一的实际损失是余额拉不到，title 就说这件事。 */}
-          {account.sessionExpired && (
+          {account.status === "sessionExpiredUsable" && (
             <Button
               type="button"
               variant="ghost"
@@ -424,9 +413,7 @@ function VendorStatus({
     );
   }
 
-  // 判定顺序：**先 `sessionExpired` 后 `!loggedIn`** —— 过期时 `loggedIn` 也是
-  // false，反了就永远走不到过期分支，用户会被当成从没登录过（与 `RowStatus` 同）。
-  if (account.sessionExpired) {
+  if (account.status === "sessionExpired") {
     return (
       <StatusAction
         hint={t("loongport.row.sessionExpired")}
@@ -437,7 +424,7 @@ function VendorStatus({
     );
   }
 
-  if (!account.loggedIn) {
+  if (account.status === "notLoggedIn") {
     return (
       <StatusAction
         hint={t("loongport.row.notLoggedIn")}
