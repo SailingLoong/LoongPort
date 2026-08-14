@@ -1,0 +1,69 @@
+{
+  "openai": {
+    "id": "openai",
+    "name": "OpenAI",
+    "models": {
+      "gpt-5": {
+        "id": "gpt-5",
+        "name": "GPT-5",
+        "release_date": "2025-08-01",
+        "cost": { "input": 1.25, "output": 10, "cache_read": 0.125, "cache_write": 1.5 },
+        "modalities": { "input": ["text", "image"], "output": ["text"] }
+      },
+      "text-embedding-3-large": {
+        "name": "Text Embedding 3 Large",
+        "release_date": "2024-01-25",
+        "cost": { "input": 0.13, "output": 0 }
+      },
+      "gpt-image-1": {
+        "name": "GPT Image 1",
+        "release_date": "2025-04-23",
+        "cost": { "input": 5, "output": 40 },
+        "modalities": { "output": ["image"] }
+      }
+    }
+  },
+  "anthropic": {
+    "id": "anthropic",
+    "name": "Anthropic",
+    "models": {
+      "claude-sonnet-4-5[1m]": {
+        "name": "Claude Sonnet 4.5 1M",
+        "release_date": "2025-09-29",
+        "cost": { "input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75 }
+      },
+      "claude-legacy": {
+        "name": "Claude Legacy",
+        "release_date": "2024-01-01",
+        "status": "deprecated",
+        "cost": { "input": 8, "output": 24 }
+      }
+    }
+  },
+  "relay": {
+    "name": "Relay",
+    "models": {
+      "vendor/GPT-5": {
+        "name": "GPT-5 Relay",
+        "release_date": "2025-07-01",
+        "cost": { "input": 9, "output": 18 }
+      },
+      "custom-model": {
+        "name": "Custom Model",
+        "release_date": "2025-06-01",
+        "cost": { "input": 0.5, "output": 1 }
+      },
+      "speech-model": {
+        "name": "Speech Model",
+        "release_date": "2025-05-01",
+        "cost": { "input": 1, "output": 2 },
+        "modalities": { "output": ["text", "audio"] }
+      },
+      "invalid-price-model": {
+        "name": "Invalid Price Model",
+        "release_date": "2025-04-01",
+        "cost": { "input": 1e400, "output": -2, "cache_read": "not-a-price", "cache_write": 1000000000000 }
+      }
+    }
+  }
+}
