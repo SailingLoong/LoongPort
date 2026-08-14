@@ -12,7 +12,7 @@ use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
@@ -29,6 +29,12 @@ const NON_TEXT_MODEL_MARKERS: &[&str] = &[
     "tts",
     "video",
 ];
+
+static MODELS_DEV_SYNC_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn sync_lock() -> &'static tokio::sync::Mutex<()> {
+    MODELS_DEV_SYNC_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -386,6 +392,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Vec<ModelsDevEntry>, AppError>>,
 {
+    let _sync_guard = sync_lock().lock().await;
     let attempt: Result<ModelsDevSyncResult, AppError> = async {
         let initial = get_models_dev_sync_state(&db)?.config;
         let now = Utc::now().timestamp_millis();
@@ -435,7 +442,9 @@ pub async fn sync_pricing(db: Arc<Database>, force: bool) -> Result<ModelsDevSyn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::model_pricing::save_models_dev_sync_config;
+    use crate::services::model_pricing::{
+        save_models_dev_sync_preferences, ModelsDevSyncPreferences,
+    };
     use serial_test::serial;
     use std::ffi::OsString;
 
@@ -480,6 +489,29 @@ mod tests {
             excluded_common_model_keys: Vec::new(),
             last_sync_at,
             last_sync_error: None,
+        }
+    }
+
+    fn save_sync_config(
+        db: &Database,
+        auto_sync_enabled: bool,
+        selected_model_keys: Vec<&str>,
+        last_sync_at: Option<i64>,
+    ) {
+        let config = sync_config(auto_sync_enabled, selected_model_keys, last_sync_at);
+        save_models_dev_sync_preferences(
+            db,
+            ModelsDevSyncPreferences {
+                auto_sync_enabled: config.auto_sync_enabled,
+                include_common_models: config.include_common_models,
+                selected_model_keys: config.selected_model_keys,
+                excluded_common_model_keys: config.excluded_common_model_keys,
+            },
+        )
+        .expect("save sync preferences");
+        if let Some(last_sync_at) = last_sync_at {
+            record_models_dev_sync_result(db, Some(last_sync_at), None)
+                .expect("record previous sync success");
         }
     }
 
@@ -671,8 +703,7 @@ mod tests {
     async fn automatic_sync_skips_when_disabled() {
         let _home = TestHome::new();
         let db = Arc::new(Database::memory().expect("memory database"));
-        save_models_dev_sync_config(&db, sync_config(false, vec!["relay/custom-model"], None))
-            .expect("save disabled config");
+        save_sync_config(&db, false, vec!["relay/custom-model"], None);
 
         let result = sync_pricing_with_fetch(db, false, || async {
             panic!("disabled automatic sync must not fetch")
@@ -693,11 +724,7 @@ mod tests {
         let _home = TestHome::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let recent = chrono::Utc::now().timestamp_millis();
-        save_models_dev_sync_config(
-            &db,
-            sync_config(true, vec!["relay/custom-model"], Some(recent)),
-        )
-        .expect("save recent config");
+        save_sync_config(&db, true, vec!["relay/custom-model"], Some(recent));
 
         let result = sync_pricing_with_fetch(db, false, || async {
             panic!("recent automatic sync must not fetch")
@@ -714,8 +741,7 @@ mod tests {
     async fn forced_sync_runs_when_automatic_sync_is_disabled() {
         let _home = TestHome::new();
         let db = Arc::new(Database::memory().expect("memory database"));
-        save_models_dev_sync_config(&db, sync_config(false, vec!["relay/custom-model"], None))
-            .expect("save disabled config");
+        save_sync_config(&db, false, vec!["relay/custom-model"], None);
 
         let result =
             sync_pricing_with_fetch(Arc::clone(&db), true, || async { Ok(fixture_entries()) })
@@ -745,16 +771,11 @@ mod tests {
     async fn automatic_sync_aborts_when_user_disables_during_download() {
         let _home = TestHome::new();
         let db = Arc::new(Database::memory().expect("memory database"));
-        save_models_dev_sync_config(&db, sync_config(true, vec!["relay/custom-model"], None))
-            .expect("save enabled config");
+        save_sync_config(&db, true, vec!["relay/custom-model"], None);
         let db_during_fetch = Arc::clone(&db);
 
         let result = sync_pricing_with_fetch(Arc::clone(&db), false, move || async move {
-            save_models_dev_sync_config(
-                &db_during_fetch,
-                sync_config(false, vec!["relay/custom-model"], None),
-            )
-            .expect("disable during download");
+            save_sync_config(&db_during_fetch, false, vec!["relay/custom-model"], None);
             Ok(fixture_entries())
         })
         .await
@@ -779,16 +800,11 @@ mod tests {
     async fn sync_uses_selection_reloaded_after_download() {
         let _home = TestHome::new();
         let db = Arc::new(Database::memory().expect("memory database"));
-        save_models_dev_sync_config(&db, sync_config(true, vec!["relay/custom-model"], None))
-            .expect("save initial selection");
+        save_sync_config(&db, true, vec!["relay/custom-model"], None);
         let db_during_fetch = Arc::clone(&db);
 
         let result = sync_pricing_with_fetch(Arc::clone(&db), false, move || async move {
-            save_models_dev_sync_config(
-                &db_during_fetch,
-                sync_config(true, vec!["openai/gpt-5"], None),
-            )
-            .expect("change selection during download");
+            save_sync_config(&db_during_fetch, true, vec!["openai/gpt-5"], None);
             Ok(fixture_entries())
         })
         .await
@@ -820,11 +836,12 @@ mod tests {
         let _home = TestHome::new();
         let db = Arc::new(Database::memory().expect("memory database"));
         let previous_success = 1_700_000_000_000;
-        save_models_dev_sync_config(
+        save_sync_config(
             &db,
-            sync_config(true, vec!["relay/custom-model"], Some(previous_success)),
-        )
-        .expect("save previous success");
+            true,
+            vec!["relay/custom-model"],
+            Some(previous_success),
+        );
 
         let error = sync_pricing_with_fetch(Arc::clone(&db), false, || async {
             Err(AppError::Message("catalog offline".to_string()))
@@ -839,5 +856,58 @@ mod tests {
             state.config.last_sync_error.as_deref(),
             Some("catalog offline")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn concurrent_automatic_syncs_share_one_serialized_transaction() {
+        let _home = TestHome::new();
+        let db = Arc::new(Database::memory().expect("memory database"));
+        save_sync_config(&db, true, vec!["relay/custom-model"], None);
+
+        let (first_entered_tx, first_entered_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+        let first_db = Arc::clone(&db);
+        let first = tokio::spawn(async move {
+            sync_pricing_with_fetch(first_db, false, move || async move {
+                first_entered_tx.send(()).expect("signal first fetch");
+                release_first_rx.await.expect("release first fetch");
+                Ok(fixture_entries())
+            })
+            .await
+        });
+        first_entered_rx.await.expect("first fetch entered");
+
+        let (second_entered_tx, mut second_entered_rx) = tokio::sync::oneshot::channel();
+        let second_db = Arc::clone(&db);
+        let second = tokio::spawn(async move {
+            sync_pricing_with_fetch(second_db, false, move || async move {
+                let _ = second_entered_tx.send(());
+                Ok(fixture_entries())
+            })
+            .await
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second_entered_rx)
+                .await
+                .is_err(),
+            "the second fetch must wait for the first transaction"
+        );
+
+        release_first_tx.send(()).expect("finish first fetch");
+        let first_result = first.await.expect("join first sync").expect("first sync");
+        let second_result = second
+            .await
+            .expect("join second sync")
+            .expect("second sync");
+
+        assert!(!first_result.skipped);
+        assert!(second_result.skipped);
+        assert_eq!(second_result.synced_at, first_result.synced_at);
+
+        let state = get_models_dev_sync_state(&db).expect("read final sync state");
+        assert_eq!(state.config.last_sync_at, first_result.synced_at);
+        assert_eq!(state.config.last_sync_error, None);
     }
 }

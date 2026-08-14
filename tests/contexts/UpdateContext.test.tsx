@@ -29,6 +29,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { UpdateProvider, useUpdate } from "@/contexts/UpdateContext";
+import type { UpdateInfo } from "@/lib/updater";
 
 function UpdateState({
   onCheckUpdate,
@@ -68,8 +69,22 @@ const available = {
   info: {
     currentVersion: "3.24.0",
     availableVersion: "3.25.0",
+    notes: null,
+    pubDate: null,
   },
 };
+
+it("models absent updater metadata as IPC null values", () => {
+  const info: UpdateInfo = {
+    currentVersion: "3.24.0",
+    availableVersion: "3.25.0",
+    notes: null,
+    pubDate: null,
+  };
+
+  expect(info.notes).toBeNull();
+  expect(info.pubDate).toBeNull();
+});
 
 describe("UpdateProvider", () => {
   beforeEach(() => {

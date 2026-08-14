@@ -55,6 +55,15 @@ pub struct ModelsDevSyncConfig {
     pub last_sync_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelsDevSyncPreferences {
+    pub auto_sync_enabled: bool,
+    pub include_common_models: bool,
+    pub selected_model_keys: Vec<String>,
+    pub excluded_common_model_keys: Vec<String>,
+}
+
 impl Default for ModelsDevSyncConfig {
     fn default() -> Self {
         Self {
@@ -178,6 +187,15 @@ fn normalize_sync_config(mut config: ModelsDevSyncConfig) -> ModelsDevSyncConfig
         }
     });
     config
+}
+
+fn normalize_sync_preferences(
+    mut preferences: ModelsDevSyncPreferences,
+) -> ModelsDevSyncPreferences {
+    preferences.selected_model_keys = normalize_key_list(preferences.selected_model_keys);
+    preferences.excluded_common_model_keys =
+        normalize_key_list(preferences.excluded_common_model_keys);
+    preferences
 }
 
 fn normalize_file(mut file: ModelPricingFile) -> Result<ModelPricingFile, AppError> {
@@ -326,21 +344,25 @@ pub fn get_models_dev_sync_state(db: &Database) -> Result<ModelsDevSyncState, Ap
     })
 }
 
-pub fn save_models_dev_sync_config(
+pub fn save_models_dev_sync_preferences(
     db: &Database,
-    config: ModelsDevSyncConfig,
+    preferences: ModelsDevSyncPreferences,
 ) -> Result<(), AppError> {
     sync_local_model_pricing(db)?;
     let _file_guard = file_lock()
         .lock()
         .map_err(|error| AppError::Config(format!("模型定价文件锁失败: {error}")))?;
     let mut file = load_or_create_file_unlocked()?;
-    file.models_dev_sync = normalize_sync_config(config);
+    let preferences = normalize_sync_preferences(preferences);
+    file.models_dev_sync.auto_sync_enabled = preferences.auto_sync_enabled;
+    file.models_dev_sync.include_common_models = preferences.include_common_models;
+    file.models_dev_sync.selected_model_keys = preferences.selected_model_keys;
+    file.models_dev_sync.excluded_common_model_keys = preferences.excluded_common_model_keys;
     write_file_unlocked(&file)
 }
 
 /// Persist only the outcome of a models.dev sync. Keeping this separate from
-/// `save_models_dev_sync_config` prevents a slow startup fetch from restoring
+/// `save_models_dev_sync_preferences` prevents a slow startup fetch from restoring
 /// stale switches or model selections that the user changed in the meantime.
 pub fn record_models_dev_sync_result(
     db: &Database,
@@ -734,7 +756,18 @@ mod tests {
                 last_sync_at: Some(123),
                 last_sync_error: Some("old error".to_string()),
             };
-            save_models_dev_sync_config(db, config.clone()).expect("save sync config");
+            save_models_dev_sync_preferences(
+                db,
+                ModelsDevSyncPreferences {
+                    auto_sync_enabled: config.auto_sync_enabled,
+                    include_common_models: config.include_common_models,
+                    selected_model_keys: config.selected_model_keys.clone(),
+                    excluded_common_model_keys: config.excluded_common_model_keys.clone(),
+                },
+            )
+            .expect("save sync config");
+            record_models_dev_sync_result(db, config.last_sync_at, config.last_sync_error.clone())
+                .expect("record initial sync outcome");
 
             record_models_dev_sync_result(db, Some(456), None).expect("record success");
             let state = get_models_dev_sync_state(db).expect("read sync state");
@@ -754,6 +787,37 @@ mod tests {
             record_models_dev_sync_result(db, None, Some("offline".to_string()))
                 .expect("record failure");
             let state = get_models_dev_sync_state(db).expect("read failure state");
+            assert_eq!(state.config.last_sync_at, Some(456));
+            assert_eq!(state.config.last_sync_error.as_deref(), Some("offline"));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn saving_sync_preferences_preserves_the_latest_sync_outcome() {
+        with_test_home(|db, _path| {
+            record_models_dev_sync_result(db, Some(456), Some("offline".to_string()))
+                .expect("record latest sync outcome");
+
+            save_models_dev_sync_preferences(
+                db,
+                ModelsDevSyncPreferences {
+                    auto_sync_enabled: true,
+                    include_common_models: false,
+                    selected_model_keys: vec!["relay/custom-model".to_string()],
+                    excluded_common_model_keys: vec!["openai/gpt-5".to_string()],
+                },
+            )
+            .expect("save user preferences");
+
+            let state = get_models_dev_sync_state(db).expect("read merged sync state");
+            assert!(state.config.auto_sync_enabled);
+            assert!(!state.config.include_common_models);
+            assert_eq!(state.config.selected_model_keys, vec!["relay/custom-model"]);
+            assert_eq!(
+                state.config.excluded_common_model_keys,
+                vec!["openai/gpt-5"]
+            );
             assert_eq!(state.config.last_sync_at, Some(456));
             assert_eq!(state.config.last_sync_error.as_deref(), Some("offline"));
         });

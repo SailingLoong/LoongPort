@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface UpdateInfo {
   currentVersion: string;
   availableVersion: string;
-  notes?: string;
-  pubDate?: string;
+  notes: string | null;
+  pubDate: string | null;
 }
 
 export type AppUpdateCheckResult =

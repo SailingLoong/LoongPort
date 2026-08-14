@@ -4,14 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   getModelsDevSyncConfig,
-  saveModelsDevSyncConfig,
+  saveModelsDevSyncPreferences,
   getModelPricing,
   openAppConfigFolder,
   syncModelsDevPricing,
   listModelsDevEntries,
 } = vi.hoisted(() => ({
   getModelsDevSyncConfig: vi.fn(),
-  saveModelsDevSyncConfig: vi.fn(),
+  saveModelsDevSyncPreferences: vi.fn(),
   getModelPricing: vi.fn(),
   openAppConfigFolder: vi.fn(),
   syncModelsDevPricing: vi.fn(),
@@ -33,7 +33,7 @@ vi.mock("sonner", () => ({
 vi.mock("@/lib/api/usage", () => ({
   usageApi: {
     getModelsDevSyncConfig,
-    saveModelsDevSyncConfig,
+    saveModelsDevSyncPreferences,
     getModelPricing,
     syncModelsDevPricing,
     listModelsDevEntries,
@@ -73,7 +73,7 @@ describe("ModelsDevAutoSyncPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getModelsDevSyncConfig.mockResolvedValue(state);
-    saveModelsDevSyncConfig.mockResolvedValue(undefined);
+    saveModelsDevSyncPreferences.mockResolvedValue(undefined);
     getModelPricing.mockResolvedValue([]);
     openAppConfigFolder.mockResolvedValue(undefined);
     syncModelsDevPricing.mockResolvedValue({
@@ -151,7 +151,7 @@ describe("ModelsDevAutoSyncPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(state.configPath)).toBeInTheDocument();
     expect(screen.getByRole("switch")).not.toBeChecked();
-    expect(saveModelsDevSyncConfig).not.toHaveBeenCalled();
+    expect(saveModelsDevSyncPreferences).not.toHaveBeenCalled();
   });
 
   it("persists disabling without showing the overwrite warning", async () => {
@@ -164,8 +164,10 @@ describe("ModelsDevAutoSyncPanel", () => {
 
     fireEvent.click(await screen.findByRole("switch"));
     await waitFor(() =>
-      expect(saveModelsDevSyncConfig).toHaveBeenCalledWith({
-        ...enabledState.config,
+      expect(saveModelsDevSyncPreferences).toHaveBeenCalledWith({
+        includeCommonModels: enabledState.config.includeCommonModels,
+        selectedModelKeys: enabledState.config.selectedModelKeys,
+        excludedCommonModelKeys: enabledState.config.excludedCommonModelKeys,
         autoSyncEnabled: false,
       }),
     );
@@ -179,7 +181,7 @@ describe("ModelsDevAutoSyncPanel", () => {
 
     fireEvent.click(await screen.findByRole("switch"));
 
-    expect(saveModelsDevSyncConfig).not.toHaveBeenCalled();
+    expect(saveModelsDevSyncPreferences).not.toHaveBeenCalled();
     expect(
       await screen.findByText("usage.modelsDevAutoSync.enableConfirmTitle"),
     ).toBeInTheDocument();
@@ -190,8 +192,10 @@ describe("ModelsDevAutoSyncPanel", () => {
     );
 
     await waitFor(() =>
-      expect(saveModelsDevSyncConfig).toHaveBeenCalledWith({
-        ...state.config,
+      expect(saveModelsDevSyncPreferences).toHaveBeenCalledWith({
+        includeCommonModels: state.config.includeCommonModels,
+        selectedModelKeys: state.config.selectedModelKeys,
+        excludedCommonModelKeys: state.config.excludedCommonModelKeys,
         autoSyncEnabled: true,
       }),
     );
@@ -205,7 +209,7 @@ describe("ModelsDevAutoSyncPanel", () => {
       await screen.findByRole("button", { name: "common.cancel" }),
     );
 
-    expect(saveModelsDevSyncConfig).not.toHaveBeenCalled();
+    expect(saveModelsDevSyncPreferences).not.toHaveBeenCalled();
     expect(screen.getByRole("switch")).not.toBeChecked();
   });
 

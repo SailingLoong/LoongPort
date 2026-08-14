@@ -76,6 +76,13 @@ export interface ModelsDevSyncConfig {
   lastSyncError: string | null;
 }
 
+export interface ModelsDevSyncPreferences {
+  autoSyncEnabled: boolean;
+  includeCommonModels: boolean;
+  selectedModelKeys: string[];
+  excludedCommonModelKeys: string[];
+}
+
 export interface ModelsDevSyncState {
   config: ModelsDevSyncConfig;
   configPath: string;

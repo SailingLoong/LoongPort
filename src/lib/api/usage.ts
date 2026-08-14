@@ -8,7 +8,7 @@ import type {
   RequestLog,
   LogFilters,
   ModelPricing,
-  ModelsDevSyncConfig,
+  ModelsDevSyncPreferences,
   ModelsDevSyncState,
   ModelsDevEntry,
   ModelsDevSyncResult,
@@ -176,10 +176,10 @@ export const usageApi = {
     return invoke("get_models_dev_sync_config");
   },
 
-  saveModelsDevSyncConfig: async (
-    config: ModelsDevSyncConfig,
+  saveModelsDevSyncPreferences: async (
+    preferences: ModelsDevSyncPreferences,
   ): Promise<void> => {
-    return invoke("save_models_dev_sync_config", { config });
+    return invoke("save_models_dev_sync_preferences", { preferences });
   },
 
   listModelsDevEntries: async (): Promise<ModelsDevEntry[]> => {

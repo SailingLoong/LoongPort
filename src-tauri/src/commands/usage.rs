@@ -1,7 +1,9 @@
 //! 使用统计相关命令
 
 use crate::error::AppError;
-use crate::services::model_pricing::{ModelPricingInfo, ModelsDevSyncConfig, ModelsDevSyncState};
+use crate::services::model_pricing::{
+    ModelPricingInfo, ModelsDevSyncPreferences, ModelsDevSyncState,
+};
 use crate::services::models_dev::{ModelsDevEntry, ModelsDevSyncResult};
 use crate::services::usage_stats::*;
 use crate::store::AppState;
@@ -213,11 +215,11 @@ pub fn get_models_dev_sync_config(
 }
 
 #[tauri::command]
-pub fn save_models_dev_sync_config(
+pub fn save_models_dev_sync_preferences(
     state: State<'_, AppState>,
-    config: ModelsDevSyncConfig,
+    preferences: ModelsDevSyncPreferences,
 ) -> Result<(), AppError> {
-    crate::services::model_pricing::save_models_dev_sync_config(&state.db, config)
+    crate::services::model_pricing::save_models_dev_sync_preferences(&state.db, preferences)
 }
 
 #[tauri::command]
