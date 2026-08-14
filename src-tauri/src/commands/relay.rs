@@ -2921,7 +2921,21 @@ async fn provision_relay(
 ) -> Result<ProvisionSummary, AppError> {
     let batch = provision_backend(op, Some(browser_api_fallback(app_handle))).await?;
     let state = app_handle.state::<AppState>();
-    persist_provision_batch(state.inner(), op, batch)
+    let result = persist_provision_batch(state.inner(), op, batch);
+    mark_pricing_after_success(state.inner(), op.id, chrono::Utc::now().timestamp(), result)
+}
+
+fn mark_pricing_after_success<T>(
+    state: &AppState,
+    relay_id: i64,
+    synced_at: i64,
+    result: Result<T, AppError>,
+) -> Result<T, AppError> {
+    let value = result?;
+    with_conn(state, |conn| {
+        creds::mark_pricing_synced(conn, relay_id, synced_at)
+    })?;
+    Ok(value)
 }
 
 fn persist_provision_batch(
@@ -7889,5 +7903,57 @@ mod tests {
         let mut attempted_ids = attempts.lock().unwrap().clone();
         attempted_ids.sort_unstable();
         assert_eq!(attempted_ids, vec![2, 3]);
+    }
+
+    fn pricing_timestamp_state(initial: Option<i64>) -> (AppState, i64) {
+        let db = Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://pricing.example",
+                "Pricing",
+                "https://pricing.example/v1",
+                discovery::BackendKind::Sub2Api,
+            )
+        })
+        .unwrap();
+        if let Some(initial) = initial {
+            with_conn(&state, |conn| {
+                creds::mark_pricing_synced(conn, relay_id, initial)
+            })
+            .unwrap();
+        }
+        (state, relay_id)
+    }
+
+    #[test]
+    fn successful_full_refresh_marks_pricing_fresh() {
+        let (state, relay_id) = pricing_timestamp_state(None);
+
+        mark_pricing_after_success(&state, relay_id, 456, Ok(())).unwrap();
+
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(relay.pricing_synced_at, Some(456));
+    }
+
+    #[test]
+    fn failed_full_refresh_keeps_the_previous_pricing_time() {
+        let (state, relay_id) = pricing_timestamp_state(Some(123));
+
+        let result: Result<(), AppError> = mark_pricing_after_success(
+            &state,
+            relay_id,
+            456,
+            Err(AppError::Message("expected failure".into())),
+        );
+
+        assert!(result.is_err());
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(relay.pricing_synced_at, Some(123));
     }
 }
