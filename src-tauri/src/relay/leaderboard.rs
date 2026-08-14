@@ -65,6 +65,7 @@ pub struct RelayDirectoryItem {
     pub scenarios: Vec<String>,
     pub issues: Vec<String>,
     pub entry_url: String,
+    pub auto_add: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -606,6 +607,7 @@ pub fn apply_policy(
             if !seen_sites.insert(site_host.clone()) {
                 return None;
             }
+            let auto_add = override_site.is_some();
             let entry_url = override_site
                 .as_ref()
                 .and_then(|site| site.entry_url.clone())
@@ -629,6 +631,7 @@ pub fn apply_policy(
                 scenarios: item.scenarios,
                 issues: item.issues,
                 entry_url,
+                auto_add,
             })
         })
         .collect()
@@ -1190,6 +1193,28 @@ mod tests {
         assert_eq!(items[0].veridrop_host, "api.790053500.com");
         assert_eq!(items[0].display_name, "鑫旺");
         assert_eq!(items[0].entry_url, "https://790053500.com/keys");
+        assert!(items[0].auto_add);
+    }
+
+    #[test]
+    fn ordinary_leaderboard_sites_are_manual_only() {
+        let parsed = vec![ParsedLeaderboardItem {
+            veridrop_host: "ordinary.example".into(),
+            rank: Some(1),
+            score: 98,
+            samples: 12,
+            latest_date: "2026-08-14".into(),
+            detail_url: "https://veridrop.org/leaderboard/ordinary.example".into(),
+            protocol_scores: vec![],
+            claude_signature_rate: None,
+            scenarios: vec![],
+            issues: vec![],
+        }];
+
+        let items = apply_policy(parsed, &RemoteConfig::default());
+
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].auto_add);
     }
 
     #[test]
@@ -1560,6 +1585,34 @@ mod tests {
         let filtered = apply_policy_to_cached(cached, &config_with_directory());
 
         assert!(filtered.items.is_empty());
+    }
+
+    #[test]
+    fn cached_items_use_the_current_auto_add_policy() {
+        let cached = CachedLeaderboard {
+            schema_version: CACHE_SCHEMA_VERSION,
+            kind: LeaderboardKind::Claude,
+            items: vec![ParsedLeaderboardItem {
+                veridrop_host: "api.790053500.com".into(),
+                rank: Some(72),
+                score: 96,
+                samples: 9,
+                latest_date: "2026-08-11".into(),
+                detail_url: "https://veridrop.org/leaderboard/api.790053500.com".into(),
+                protocol_scores: vec![],
+                claude_signature_rate: None,
+                scenarios: vec![],
+                issues: vec![],
+            }],
+            managed_hosts: vec![],
+            synced_at: 1,
+        };
+
+        let managed = apply_policy_to_cached(cached.clone(), &config_with_directory());
+        let unmanaged = apply_policy_to_cached(cached, &RemoteConfig::default());
+
+        assert!(managed.items[0].auto_add);
+        assert!(!unmanaged.items[0].auto_add);
     }
 
     #[test]

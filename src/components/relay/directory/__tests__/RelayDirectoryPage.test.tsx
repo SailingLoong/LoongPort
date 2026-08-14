@@ -129,6 +129,7 @@ function item(index: number): RelayDirectoryItem {
     issues: index === 1 ? ["token_usage"] : [],
     entryUrl:
       index === 1 ? "https://bestapi.store" : `https://site-${index}.example`,
+    autoAdd: index === 1,
   };
 }
 
