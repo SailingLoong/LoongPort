@@ -100,6 +100,118 @@ if errors:
 PY
 }
 
+# 校验 v2 多站点 provider policy 的发布契约。
+#
+# 这份文件由策略消费者解释，观察数据不参与这里的裁决；脚本先拒绝结构错的
+# policy，再签名，避免发布「验签通过却无法消费」的配置。
+validate_directory_v2_json() {
+  local directory="$1"
+  python3 - "$directory" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding='utf-8') as f:
+        directory = json.load(f)
+except (OSError, json.JSONDecodeError) as e:
+    sys.exit(f"✘ v2 directory.json 不是合法 JSON：{e}")
+
+errors = []
+
+def non_empty_string(value, field):
+    if not isinstance(value, str) or not value:
+        errors.append(f"{field} 必须是非空字符串")
+
+def https_url(value, field):
+    non_empty_string(value, field)
+    if isinstance(value, str) and not value.startswith("https://"):
+        errors.append(f"{field} 必须以 https:// 开头：{value}")
+
+if directory.get("schemaVersion") != 2:
+    errors.append("schemaVersion 必须是 2")
+non_empty_string(directory.get("issuedAt"), "issuedAt")
+
+sites = directory.get("sites")
+if not isinstance(sites, list):
+    errors.append("sites 必须是数组")
+    sites = []
+
+seen_ids = set()
+for index, site in enumerate(sites):
+    prefix = f"sites[{index}]"
+    if not isinstance(site, dict):
+        errors.append(f"{prefix} 必须是对象")
+        continue
+
+    site_id = site.get("id")
+    non_empty_string(site_id, f"{prefix}.id")
+    if isinstance(site_id, str) and site_id:
+        if site_id in seen_ids:
+            errors.append(f"{prefix}.id 不能重复：{site_id}")
+        seen_ids.add(site_id)
+
+    non_empty_string(site.get("displayName"), f"{prefix}.displayName")
+    https_url(site.get("origin"), f"{prefix}.origin")
+    https_url(site.get("entryUrl"), f"{prefix}.entryUrl")
+
+    if "apiBaseUrl" in site:
+        https_url(site.get("apiBaseUrl"), f"{prefix}.apiBaseUrl")
+    if "inviteCode" in site:
+        non_empty_string(site.get("inviteCode"), f"{prefix}.inviteCode")
+
+    models = site.get("models")
+    if not isinstance(models, list) or not models:
+        errors.append(f"{prefix}.models 必须是非空数组")
+    else:
+        defaults = 0
+        model_ids = set()
+        for model_index, model in enumerate(models):
+            model_prefix = f"{prefix}.models[{model_index}]"
+            if not isinstance(model, dict):
+                errors.append(f"{model_prefix} 必须是对象")
+                continue
+            model_id = model.get("id")
+            non_empty_string(model_id, f"{model_prefix}.id")
+            if isinstance(model_id, str) and model_id:
+                if model_id in model_ids:
+                    errors.append(f"{model_prefix}.id 不能重复：{model_id}")
+                model_ids.add(model_id)
+            if "default" in model:
+                if model.get("default") is not True:
+                    errors.append(f"{model_prefix}.default 只能为 true")
+                else:
+                    defaults += 1
+        if defaults > 1:
+            errors.append(f"{prefix}.models 最多只能有一个 default: true")
+
+    hosts = site.get("veridropHosts")
+    if not isinstance(hosts, list) or not hosts:
+        errors.append(f"{prefix}.veridropHosts 必须是非空数组")
+    else:
+        for host_index, host in enumerate(hosts):
+            non_empty_string(host, f"{prefix}.veridropHosts[{host_index}]")
+
+    sponsorship = site.get("sponsorship")
+    if sponsorship is not None:
+        if not isinstance(sponsorship, dict):
+            errors.append(f"{prefix}.sponsorship 必须是对象")
+        else:
+            non_empty_string(sponsorship.get("label"), f"{prefix}.sponsorship.label")
+            https_url(sponsorship.get("url"), f"{prefix}.sponsorship.url")
+
+    authorization = site.get("authorization")
+    if authorization is not None:
+        if authorization != {"kind": "manual-api-key"}:
+            errors.append(f"{prefix}.authorization 只能是 {{'kind': 'manual-api-key'}}")
+
+    if "disabled" in site and not isinstance(site["disabled"], bool):
+        errors.append(f"{prefix}.disabled 必须是布尔值")
+
+if errors:
+    sys.exit("✘ v2 directory.json 不符合 provider policy 契约：\n" + "\n".join(f"  - {error}" for error in errors))
+PY
+}
+
 # hex 公钥 → DER SubjectPublicKeyInfo 文件（openssl 只吃 DER/PEM，不吃裸 hex）。
 #
 # Ed25519 的 SPKI 前缀是固定的 12 字节，后面直接跟 32 字节裸公钥。

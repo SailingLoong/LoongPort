@@ -1,0 +1,8 @@
+{
+  "name": "@loongport/remote-config",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "linkedom": "^0.18.13"
+  }
+}
