@@ -61,8 +61,8 @@ use std::sync::Mutex;
 /// 撞上之后是静默缺表而不是报错。我们那套走
 /// [`loongport_schema`](self::loongport_schema)，各记各的版本。
 ///
-/// 合并上游时这个值跟着上游走（它现在停在 16）。
-pub(crate) const SCHEMA_VERSION: i32 = 16;
+/// 合并上游时这个值跟着上游走（v17 = 上游的 Pi 会话用量统计迁移）。
+pub(crate) const SCHEMA_VERSION: i32 = 17;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
