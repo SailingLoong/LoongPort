@@ -2,6 +2,7 @@
 
 use crate::error::AppError;
 use crate::services::model_pricing::{ModelPricingInfo, ModelsDevSyncConfig, ModelsDevSyncState};
+use crate::services::models_dev::{ModelsDevEntry, ModelsDevSyncResult};
 use crate::services::usage_stats::*;
 use crate::store::AppState;
 use tauri::State;
@@ -226,6 +227,27 @@ pub fn record_models_dev_sync_result(
     error: Option<String>,
 ) -> Result<(), AppError> {
     crate::services::model_pricing::record_models_dev_sync_result(&state.db, synced_at, error)
+}
+
+#[tauri::command]
+pub async fn list_models_dev_entries() -> Result<Vec<ModelsDevEntry>, AppError> {
+    crate::services::models_dev::fetch_entries().await
+}
+
+#[tauri::command]
+pub fn import_models_dev_pricing(
+    state: State<'_, AppState>,
+    entries: Vec<ModelsDevEntry>,
+) -> Result<usize, AppError> {
+    crate::services::models_dev::import_pricing(&state.db, entries)
+}
+
+#[tauri::command]
+pub async fn sync_models_dev_pricing(
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<ModelsDevSyncResult, AppError> {
+    crate::services::models_dev::sync_pricing(state.db.clone(), force).await
 }
 
 /// 检查 Provider 使用限额

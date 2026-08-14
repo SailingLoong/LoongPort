@@ -81,6 +81,29 @@ export interface ModelsDevSyncState {
   configPath: string;
 }
 
+export interface ModelsDevEntry {
+  key: string;
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  normalizedId: string;
+  modelName: string;
+  releaseDate: string;
+  input: string;
+  output: string;
+  cacheRead: string;
+  cacheWrite: string;
+  isCommon: boolean;
+}
+
+export interface ModelsDevSyncResult {
+  skipped: boolean;
+  selected: number;
+  imported: number;
+  changed: number;
+  syncedAt: number | null;
+}
+
 export interface UsageSummary {
   totalRequests: number;
   totalCost: string;

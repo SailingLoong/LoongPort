@@ -7,10 +7,6 @@ pub mod env_manager;
 pub mod mcp;
 pub mod model_fetch;
 pub mod model_pricing;
-#[expect(
-    dead_code,
-    reason = "consumed by the maintenance commands and scheduler added in follow-up tasks"
-)]
 pub mod models_dev;
 pub mod omo;
 pub mod profile;

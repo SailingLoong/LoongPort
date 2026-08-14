@@ -10,6 +10,8 @@ import type {
   ModelPricing,
   ModelsDevSyncConfig,
   ModelsDevSyncState,
+  ModelsDevEntry,
+  ModelsDevSyncResult,
   ProviderLimitStatus,
   PaginatedLogs,
   SessionSyncResult,
@@ -185,6 +187,22 @@ export const usageApi = {
     error: string | null,
   ): Promise<void> => {
     return invoke("record_models_dev_sync_result", { syncedAt, error });
+  },
+
+  listModelsDevEntries: async (): Promise<ModelsDevEntry[]> => {
+    return invoke("list_models_dev_entries");
+  },
+
+  importModelsDevPricing: async (
+    entries: ModelsDevEntry[],
+  ): Promise<number> => {
+    return invoke("import_models_dev_pricing", { entries });
+  },
+
+  syncModelsDevPricing: async (
+    force: boolean,
+  ): Promise<ModelsDevSyncResult> => {
+    return invoke("sync_models_dev_pricing", { force });
   },
 
   deleteModelPricing: async (modelId: string): Promise<void> => {

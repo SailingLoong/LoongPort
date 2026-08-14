@@ -32,22 +32,13 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { settingsApi } from "@/lib/api/settings";
 import { usageApi } from "@/lib/api/usage";
-import {
-  MODELS_DEV_SYNC_CONFIG_QUERY_KEY,
-  syncModelsDevPricing,
-} from "@/lib/modelsDevAutoSync";
-import {
-  fetchModelsDevPricing,
-  flattenModels,
-  formatPrice,
-  getCommonModelKeys,
-  type ModelsDevEntry,
-} from "@/lib/modelsDevPricing";
+import { formatPrice, type ModelsDevEntry } from "@/lib/modelsDevPricing";
 import { usageKeys } from "@/lib/query/usage";
 import type { ModelsDevSyncConfig, ModelsDevSyncState } from "@/types/usage";
 import { isTextEditableTarget } from "@/utils/domUtils";
 
 const MODELS_DEV_QUERY_KEY = ["models-dev-pricing"] as const;
+const MODELS_DEV_SYNC_CONFIG_QUERY_KEY = ["models-dev-sync-config"] as const;
 const DEFAULT_VISIBLE_ROWS = 80;
 const MAX_VISIBLE_ROWS = 300;
 
@@ -74,12 +65,16 @@ function AutoSyncDialog({ state, onClose, onSaved }: AutoSyncDialogProps) {
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: MODELS_DEV_QUERY_KEY,
-    queryFn: fetchModelsDevPricing,
+    queryFn: usageApi.listModelsDevEntries,
     staleTime: 60 * 60 * 1000,
     retry: 1,
   });
-  const entries = useMemo(() => (data ? flattenModels(data) : []), [data]);
-  const commonModelKeys = useMemo(() => getCommonModelKeys(entries), [entries]);
+  const entries = data ?? [];
+  const commonModelKeys = useMemo(
+    () =>
+      new Set(entries.filter((entry) => entry.isCommon).map(({ key }) => key)),
+    [entries],
+  );
 
   const effectiveSelectedKeys = useMemo(() => {
     const selected = new Set(selectedModelKeys);
@@ -455,7 +450,7 @@ export function ModelsDevAutoSyncPanel() {
     if (!data) return;
     setIsSyncing(true);
     try {
-      const result = await syncModelsDevPricing(data, true);
+      const result = await usageApi.syncModelsDevPricing(true);
       await Promise.all([
         refetch(),
         queryClient.invalidateQueries({ queryKey: usageKeys.all }),

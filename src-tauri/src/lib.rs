@@ -1812,6 +1812,9 @@ pub fn run() {
             commands::get_models_dev_sync_config,
             commands::save_models_dev_sync_config,
             commands::record_models_dev_sync_result,
+            commands::list_models_dev_entries,
+            commands::import_models_dev_pricing,
+            commands::sync_models_dev_pricing,
             commands::check_provider_limits,
             // Session usage sync
             commands::sync_session_usage,

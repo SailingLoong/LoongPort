@@ -8,12 +8,14 @@ const {
   getModelPricing,
   openAppConfigFolder,
   syncModelsDevPricing,
+  listModelsDevEntries,
 } = vi.hoisted(() => ({
   getModelsDevSyncConfig: vi.fn(),
   saveModelsDevSyncConfig: vi.fn(),
   getModelPricing: vi.fn(),
   openAppConfigFolder: vi.fn(),
   syncModelsDevPricing: vi.fn(),
+  listModelsDevEntries: vi.fn(),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -33,16 +35,13 @@ vi.mock("@/lib/api/usage", () => ({
     getModelsDevSyncConfig,
     saveModelsDevSyncConfig,
     getModelPricing,
+    syncModelsDevPricing,
+    listModelsDevEntries,
   },
 }));
 
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openAppConfigFolder },
-}));
-
-vi.mock("@/lib/modelsDevAutoSync", () => ({
-  MODELS_DEV_SYNC_CONFIG_QUERY_KEY: ["models-dev-sync-config"],
-  syncModelsDevPricing,
 }));
 
 import { ModelsDevAutoSyncPanel } from "@/components/usage/ModelsDevAutoSyncPanel";
@@ -84,6 +83,36 @@ describe("ModelsDevAutoSyncPanel", () => {
       changed: 1,
       syncedAt: Date.now(),
     });
+    listModelsDevEntries.mockResolvedValue([
+      {
+        key: "openai/gpt-5",
+        providerId: "openai",
+        providerName: "OpenAI",
+        modelId: "gpt-5",
+        normalizedId: "gpt-5",
+        modelName: "GPT-5",
+        releaseDate: "2025-08-01",
+        input: "1",
+        output: "2",
+        cacheRead: "0",
+        cacheWrite: "0",
+        isCommon: true,
+      },
+      {
+        key: "deepseek/deepseek-chat",
+        providerId: "deepseek",
+        providerName: "DeepSeek",
+        modelId: "deepseek-chat",
+        normalizedId: "deepseek-chat",
+        modelName: "DeepSeek Chat",
+        releaseDate: "2025-12-01",
+        input: "0.3",
+        output: "1.2",
+        cacheRead: "0",
+        cacheWrite: "0",
+        isCommon: true,
+      },
+    ]);
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -201,6 +230,21 @@ describe("ModelsDevAutoSyncPanel", () => {
     );
     expect(getModelPricing).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.getByRole("switch")).not.toBeChecked());
+  });
+
+  it("runs a forced backend sync from the button", async () => {
+    renderPanel();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "usage.modelsDevAutoSync.syncNow",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(syncModelsDevPricing).toHaveBeenCalledWith(true),
+    );
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("opens the searchable multi-select dialog with common models selected", async () => {

@@ -30,7 +30,7 @@ const NON_TEXT_MODEL_MARKERS: &[&str] = &[
     "video",
 ];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsDevEntry {
     pub key: String,
@@ -286,20 +286,49 @@ fn resolve_selection<'a>(
         .collect()
 }
 
-fn to_model_pricing(entries: &[ModelsDevEntry]) -> Vec<ModelPricingInfo> {
+fn to_model_pricing(entries: &[ModelsDevEntry]) -> Result<Vec<ModelPricingInfo>, AppError> {
     let mut normalized_ids = BTreeSet::new();
-    entries
-        .iter()
-        .filter(|entry| normalized_ids.insert(entry.normalized_id.clone()))
-        .map(|entry| ModelPricingInfo {
-            model_id: entry.normalized_id.clone(),
-            display_name: entry.model_name.clone(),
-            input_cost_per_million: entry.input.clone(),
-            output_cost_per_million: entry.output.clone(),
-            cache_read_cost_per_million: entry.cache_read.clone(),
-            cache_creation_cost_per_million: entry.cache_write.clone(),
-        })
-        .collect()
+    let mut pricing = Vec::new();
+    for entry in entries {
+        let model_id = normalize_model_id(&entry.model_id);
+        if model_id.is_empty() {
+            return Err(AppError::InvalidInput(
+                "models.dev entry model ID is required".to_string(),
+            ));
+        }
+        for (label, value) in [
+            ("input", &entry.input),
+            ("output", &entry.output),
+            ("cache_read", &entry.cache_read),
+            ("cache_write", &entry.cache_write),
+        ] {
+            let price = Decimal::from_str(value).map_err(|error| {
+                AppError::InvalidInput(format!(
+                    "models.dev {label} price is invalid: {value} - {error}"
+                ))
+            })?;
+            if price < Decimal::ZERO {
+                return Err(AppError::InvalidInput(format!(
+                    "models.dev {label} price must be non-negative: {value}"
+                )));
+            }
+        }
+        if normalized_ids.insert(model_id.clone()) {
+            pricing.push(ModelPricingInfo {
+                model_id,
+                display_name: entry.model_name.clone(),
+                input_cost_per_million: entry.input.clone(),
+                output_cost_per_million: entry.output.clone(),
+                cache_read_cost_per_million: entry.cache_read.clone(),
+                cache_creation_cost_per_million: entry.cache_write.clone(),
+            });
+        }
+    }
+    Ok(pricing)
+}
+
+pub fn import_pricing(db: &Database, entries: Vec<ModelsDevEntry>) -> Result<usize, AppError> {
+    update_model_pricing_batch(db, to_model_pricing(&entries)?)
 }
 
 pub async fn fetch_entries() -> Result<Vec<ModelsDevEntry>, AppError> {
@@ -374,7 +403,7 @@ where
         let selected = resolve_selection(&entries, &latest);
         let selected_count = selected.len();
         let selected = selected.into_iter().cloned().collect::<Vec<_>>();
-        let pricing = to_model_pricing(&selected);
+        let pricing = to_model_pricing(&selected)?;
         let imported = pricing.len();
         let changed = update_model_pricing_batch(&db, pricing)?;
         let synced_at = Utc::now().timestamp_millis();
@@ -544,7 +573,7 @@ mod tests {
     #[test]
     fn pricing_deduplicates_normalized_ids_in_catalog_order() {
         let entries = fixture_entries();
-        let pricing = to_model_pricing(&entries);
+        let pricing = to_model_pricing(&entries).expect("convert pricing");
         let gpt = pricing
             .iter()
             .filter(|entry| entry.model_id == "gpt-5")
