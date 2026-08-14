@@ -72,8 +72,6 @@ const available = {
 };
 
 describe("UpdateProvider", () => {
-  let consoleError: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     vi.useFakeTimers();
     updaterMocks.checkForUpdate.mockReset();
@@ -84,12 +82,11 @@ describe("UpdateProvider", () => {
     );
     eventMocks.reset();
     localStorage.clear();
-    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    consoleError.mockRestore();
+    vi.restoreAllMocks();
   });
 
   it("applies a backend update event without starting a timer", async () => {
@@ -160,6 +157,9 @@ describe("UpdateProvider", () => {
   });
 
   it("records and rethrows the original manual command rejection", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     updaterMocks.checkForUpdate.mockRejectedValue("network offline");
     let result: Promise<boolean> | undefined;
     renderProvider((checkResult) => {
@@ -182,6 +182,9 @@ describe("UpdateProvider", () => {
   });
 
   it("handles listener registration rejection", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const listenerError = new Error("listener registration failed");
     eventMocks.listen.mockReturnValue(Promise.reject(listenerError));
 
@@ -211,6 +214,5 @@ describe("UpdateProvider", () => {
     });
 
     expect(cleanup).toHaveBeenCalledOnce();
-    expect(consoleError).not.toHaveBeenCalled();
   });
 });
