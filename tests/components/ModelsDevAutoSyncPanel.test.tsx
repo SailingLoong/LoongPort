@@ -4,16 +4,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   getModelsDevSyncConfig,
-  saveModelsDevSyncConfig,
+  saveModelsDevSyncPreferences,
   getModelPricing,
   openAppConfigFolder,
   syncModelsDevPricing,
+  listModelsDevEntries,
 } = vi.hoisted(() => ({
   getModelsDevSyncConfig: vi.fn(),
-  saveModelsDevSyncConfig: vi.fn(),
+  saveModelsDevSyncPreferences: vi.fn(),
   getModelPricing: vi.fn(),
   openAppConfigFolder: vi.fn(),
   syncModelsDevPricing: vi.fn(),
+  listModelsDevEntries: vi.fn(),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -31,18 +33,15 @@ vi.mock("sonner", () => ({
 vi.mock("@/lib/api/usage", () => ({
   usageApi: {
     getModelsDevSyncConfig,
-    saveModelsDevSyncConfig,
+    saveModelsDevSyncPreferences,
     getModelPricing,
+    syncModelsDevPricing,
+    listModelsDevEntries,
   },
 }));
 
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openAppConfigFolder },
-}));
-
-vi.mock("@/lib/modelsDevAutoSync", () => ({
-  MODELS_DEV_SYNC_CONFIG_QUERY_KEY: ["models-dev-sync-config"],
-  syncModelsDevPricing,
 }));
 
 import { ModelsDevAutoSyncPanel } from "@/components/usage/ModelsDevAutoSyncPanel";
@@ -74,7 +73,7 @@ describe("ModelsDevAutoSyncPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getModelsDevSyncConfig.mockResolvedValue(state);
-    saveModelsDevSyncConfig.mockResolvedValue(undefined);
+    saveModelsDevSyncPreferences.mockResolvedValue(undefined);
     getModelPricing.mockResolvedValue([]);
     openAppConfigFolder.mockResolvedValue(undefined);
     syncModelsDevPricing.mockResolvedValue({
@@ -84,6 +83,36 @@ describe("ModelsDevAutoSyncPanel", () => {
       changed: 1,
       syncedAt: Date.now(),
     });
+    listModelsDevEntries.mockResolvedValue([
+      {
+        key: "openai/gpt-5",
+        providerId: "openai",
+        providerName: "OpenAI",
+        modelId: "gpt-5",
+        normalizedId: "gpt-5",
+        modelName: "GPT-5",
+        releaseDate: "2025-08-01",
+        input: "1",
+        output: "2",
+        cacheRead: "0",
+        cacheWrite: "0",
+        isCommon: true,
+      },
+      {
+        key: "deepseek/deepseek-chat",
+        providerId: "deepseek",
+        providerName: "DeepSeek",
+        modelId: "deepseek-chat",
+        normalizedId: "deepseek-chat",
+        modelName: "DeepSeek Chat",
+        releaseDate: "2025-12-01",
+        input: "0.3",
+        output: "1.2",
+        cacheRead: "0",
+        cacheWrite: "0",
+        isCommon: true,
+      },
+    ]);
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -122,7 +151,7 @@ describe("ModelsDevAutoSyncPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(state.configPath)).toBeInTheDocument();
     expect(screen.getByRole("switch")).not.toBeChecked();
-    expect(saveModelsDevSyncConfig).not.toHaveBeenCalled();
+    expect(saveModelsDevSyncPreferences).not.toHaveBeenCalled();
   });
 
   it("persists disabling without showing the overwrite warning", async () => {
@@ -135,8 +164,10 @@ describe("ModelsDevAutoSyncPanel", () => {
 
     fireEvent.click(await screen.findByRole("switch"));
     await waitFor(() =>
-      expect(saveModelsDevSyncConfig).toHaveBeenCalledWith({
-        ...enabledState.config,
+      expect(saveModelsDevSyncPreferences).toHaveBeenCalledWith({
+        includeCommonModels: enabledState.config.includeCommonModels,
+        selectedModelKeys: enabledState.config.selectedModelKeys,
+        excludedCommonModelKeys: enabledState.config.excludedCommonModelKeys,
         autoSyncEnabled: false,
       }),
     );
@@ -150,7 +181,7 @@ describe("ModelsDevAutoSyncPanel", () => {
 
     fireEvent.click(await screen.findByRole("switch"));
 
-    expect(saveModelsDevSyncConfig).not.toHaveBeenCalled();
+    expect(saveModelsDevSyncPreferences).not.toHaveBeenCalled();
     expect(
       await screen.findByText("usage.modelsDevAutoSync.enableConfirmTitle"),
     ).toBeInTheDocument();
@@ -161,8 +192,10 @@ describe("ModelsDevAutoSyncPanel", () => {
     );
 
     await waitFor(() =>
-      expect(saveModelsDevSyncConfig).toHaveBeenCalledWith({
-        ...state.config,
+      expect(saveModelsDevSyncPreferences).toHaveBeenCalledWith({
+        includeCommonModels: state.config.includeCommonModels,
+        selectedModelKeys: state.config.selectedModelKeys,
+        excludedCommonModelKeys: state.config.excludedCommonModelKeys,
         autoSyncEnabled: true,
       }),
     );
@@ -176,7 +209,7 @@ describe("ModelsDevAutoSyncPanel", () => {
       await screen.findByRole("button", { name: "common.cancel" }),
     );
 
-    expect(saveModelsDevSyncConfig).not.toHaveBeenCalled();
+    expect(saveModelsDevSyncPreferences).not.toHaveBeenCalled();
     expect(screen.getByRole("switch")).not.toBeChecked();
   });
 
@@ -201,6 +234,21 @@ describe("ModelsDevAutoSyncPanel", () => {
     );
     expect(getModelPricing).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.getByRole("switch")).not.toBeChecked());
+  });
+
+  it("runs a forced backend sync from the button", async () => {
+    renderPanel();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "usage.modelsDevAutoSync.syncNow",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(syncModelsDevPricing).toHaveBeenCalledWith(true),
+    );
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("opens the searchable multi-select dialog with common models selected", async () => {

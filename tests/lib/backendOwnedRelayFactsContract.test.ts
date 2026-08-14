@@ -6,6 +6,24 @@ const read = (path: string) =>
   readFileSync(resolve(process.cwd(), path), "utf8");
 
 describe("中转站业务事实由后端定义", () => {
+  it("models.dev 自动刷新由后端调度，渲染端仅失效相关查询", () => {
+    const constants = read("src/config/constants.ts");
+    const main = read("src/main.tsx");
+    const usageQueries = read("src/lib/query/usage.ts");
+
+    expect(constants).toContain(
+      'MODELS_DEV_PRICING_UPDATED_EVENT = "models-dev-pricing-updated"',
+    );
+    expect(main).toContain("listen(MODELS_DEV_PRICING_UPDATED_EVENT");
+    expect(main).toContain(
+      "queryClient.invalidateQueries({ queryKey: usageKeys.all })",
+    );
+    expect(main).toContain("queryKey: usageKeys.modelsDevSyncConfig()");
+    expect(usageQueries).toContain('"models-dev-sync-config"');
+    expect(main).not.toContain("syncModelsDevPricing");
+    expect(main).not.toContain("setInterval");
+  });
+
   it("VeriDrop 后台更新事件和手动刷新命令有唯一契约", () => {
     const constants = read("src/config/constants.ts");
     const relayApi = read("src/lib/api/relay.ts");

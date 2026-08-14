@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Check, Loader2, Search } from "lucide-react";
 import {
@@ -21,20 +21,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useUpdateModelPricing } from "@/lib/query/usage";
-import {
-  fetchModelsDevPricing,
-  flattenModels,
-  formatPrice,
-  type ModelsDevEntry,
-} from "@/lib/modelsDevPricing";
+import { usageApi } from "@/lib/api/usage";
+import { formatPrice, type ModelsDevEntry } from "@/lib/modelsDevPricing";
+import { usageKeys } from "@/lib/query/usage";
 import { isTextEditableTarget } from "@/utils/domUtils";
-
-export {
-  flattenModels,
-  formatPrice,
-  normalizeModelIdForPricing,
-} from "@/lib/modelsDevPricing";
 
 // 全量约 5000 条：默认只展示最新发布的一批，搜索时才做全量匹配
 const DEFAULT_VISIBLE_ROWS = 50;
@@ -53,11 +43,12 @@ export function ModelsDevPickerDialog({
   onImported,
 }: ModelsDevPickerDialogProps) {
   const { t } = useTranslation();
-  const updatePricing = useUpdateModelPricing();
+  const queryClient = useQueryClient();
 
   const [search, setSearch] = useState("");
   const [providerFilter, setProviderFilter] = useState("all");
   const [selected, setSelected] = useState<ModelsDevEntry | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   // 每次打开时重置选择与过滤条件
   useEffect(() => {
@@ -70,13 +61,13 @@ export function ModelsDevPickerDialog({
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["models-dev-pricing"],
-    queryFn: fetchModelsDevPricing,
+    queryFn: usageApi.listModelsDevEntries,
     enabled: open,
     staleTime: 60 * 60 * 1000,
     retry: 1,
   });
 
-  const entries = useMemo(() => (data ? flattenModels(data) : []), [data]);
+  const entries = data ?? [];
 
   const providers = useMemo(() => {
     const map = new Map<string, string>();
@@ -121,15 +112,10 @@ export function ModelsDevPickerDialog({
   const handleImport = async () => {
     if (!selected) return;
 
+    setIsImporting(true);
     try {
-      await updatePricing.mutateAsync({
-        modelId: selected.normalizedId,
-        displayName: selected.modelName,
-        inputCost: formatPrice(selected.input),
-        outputCost: formatPrice(selected.output),
-        cacheReadCost: formatPrice(selected.cacheRead),
-        cacheCreationCost: formatPrice(selected.cacheWrite),
-      });
+      await usageApi.importModelsDevPricing([selected]);
+      await queryClient.invalidateQueries({ queryKey: usageKeys.all });
 
       toast.success(
         t("usage.modelsDevImported", {
@@ -141,6 +127,8 @@ export function ModelsDevPickerDialog({
       onImported();
     } catch (error) {
       toast.error(String(error));
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -159,7 +147,7 @@ export function ModelsDevPickerDialog({
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen && !updatePricing.isPending) {
+        if (!nextOpen && !isImporting) {
           onClose();
         }
       }}
@@ -329,18 +317,11 @@ export function ModelsDevPickerDialog({
         </div>
 
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={onClose}
-            disabled={updatePricing.isPending}
-          >
+          <Button variant="outline" onClick={onClose} disabled={isImporting}>
             {t("common.cancel", "取消")}
           </Button>
-          <Button
-            onClick={handleImport}
-            disabled={!selected || updatePricing.isPending}
-          >
-            {updatePricing.isPending ? (
+          <Button onClick={handleImport} disabled={!selected || isImporting}>
+            {isImporting ? (
               <>
                 <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                 {t("usage.modelsDevImporting", "导入中...")}

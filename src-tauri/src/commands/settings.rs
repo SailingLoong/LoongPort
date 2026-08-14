@@ -279,15 +279,29 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> 
 /// 升级无法解决，而不是让其反复尝试。
 #[tauri::command]
 pub async fn check_app_update_available(app: AppHandle) -> Result<Option<String>, String> {
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
-    let update = updater
-        .check()
+    crate::services::app_update::check(&app)
         .await
-        .map_err(|e| format!("检查更新失败: {e}"))?;
-    Ok(update.map(|u| u.version))
+        .map(available_version)
+        .map_err(Into::into)
+}
+
+fn available_version(result: crate::services::app_update::AppUpdateCheckResult) -> Option<String> {
+    match result {
+        crate::services::app_update::AppUpdateCheckResult::UpToDate => None,
+        crate::services::app_update::AppUpdateCheckResult::Available { info } => {
+            Some(info.available_version)
+        }
+    }
+}
+
+/// Check for an application update and return the backend-owned update facts.
+#[tauri::command]
+pub async fn check_app_update(
+    app: AppHandle,
+) -> Result<crate::services::app_update::AppUpdateCheckResult, String> {
+    crate::services::app_update::check(&app)
+        .await
+        .map_err(Into::into)
 }
 
 /// 获取 app_config_dir 覆盖配置 (从 Store)
@@ -320,12 +334,25 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_settings_for_save;
+    use super::{available_version, merge_settings_for_save};
+    use crate::services::app_update::AppUpdateCheckResult;
     use crate::settings::{
         AppSettings, CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
         CodexThirdPartyHistoryProviderBucketMigration, LocalMigrations, S3SyncSettings,
         WebDavSyncSettings,
     };
+
+    #[test]
+    fn database_upgrade_receives_the_available_version() {
+        let result = AppUpdateCheckResult::available("3.24.0".into(), "3.25.0".into(), None, None);
+
+        assert_eq!(available_version(result), Some("3.25.0".to_string()));
+    }
+
+    #[test]
+    fn database_upgrade_receives_none_when_up_to_date() {
+        assert_eq!(available_version(AppUpdateCheckResult::UpToDate), None);
+    }
 
     #[test]
     fn save_settings_should_preserve_existing_webdav_when_payload_omits_it() {

@@ -8,8 +8,10 @@ import type {
   RequestLog,
   LogFilters,
   ModelPricing,
-  ModelsDevSyncConfig,
+  ModelsDevSyncPreferences,
   ModelsDevSyncState,
+  ModelsDevEntry,
+  ModelsDevSyncResult,
   ProviderLimitStatus,
   PaginatedLogs,
   SessionSyncResult,
@@ -174,17 +176,26 @@ export const usageApi = {
     return invoke("get_models_dev_sync_config");
   },
 
-  saveModelsDevSyncConfig: async (
-    config: ModelsDevSyncConfig,
+  saveModelsDevSyncPreferences: async (
+    preferences: ModelsDevSyncPreferences,
   ): Promise<void> => {
-    return invoke("save_models_dev_sync_config", { config });
+    return invoke("save_models_dev_sync_preferences", { preferences });
   },
 
-  recordModelsDevSyncResult: async (
-    syncedAt: number | null,
-    error: string | null,
-  ): Promise<void> => {
-    return invoke("record_models_dev_sync_result", { syncedAt, error });
+  listModelsDevEntries: async (): Promise<ModelsDevEntry[]> => {
+    return invoke("list_models_dev_entries");
+  },
+
+  importModelsDevPricing: async (
+    entries: ModelsDevEntry[],
+  ): Promise<number> => {
+    return invoke("import_models_dev_pricing", { entries });
+  },
+
+  syncModelsDevPricing: async (
+    force: boolean,
+  ): Promise<ModelsDevSyncResult> => {
+    return invoke("sync_models_dev_pricing", { force });
   },
 
   deleteModelPricing: async (modelId: string): Promise<void> => {

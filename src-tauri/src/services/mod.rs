@@ -1,3 +1,4 @@
+pub mod app_update;
 pub mod balance;
 pub mod codex_oauth_models;
 pub mod coding_plan;
@@ -7,6 +8,7 @@ pub mod env_manager;
 pub mod mcp;
 pub mod model_fetch;
 pub mod model_pricing;
+pub mod models_dev;
 pub mod omo;
 pub mod profile;
 pub mod prompt;
