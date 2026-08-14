@@ -216,12 +216,12 @@ CDN 或攻击者可以重放一份**旧的、签名仍然有效**的配置，把
 | `verify-v2.sh` | 验 v2 policy；`--local-only` 不访问网络 | 签名后、部署后 |
 | `lib.sh` | 三者共用的函数（从 `.rs` 取常量、hex→DER、验签），**不单独执行** | — |
 
-那三个可执行脚本都用**从 `remote_config.rs` grep 出来的**公钥，不手抄 ——
+所有需要签名或验签的可执行脚本都用**从 `remote_config.rs` grep 出来的**公钥，不手抄 ——
 手抄多一个能写错的地方，而写错的症状是「验签永远失败」，与「服务器挂了」一模一样。
 
 ⚠️ **必须用 Homebrew 的 OpenSSL，macOS 自带的 LibreSSL 做不了 Ed25519**
 （实测 LibreSSL 3.3.6 连私钥都载不进来，且 `pkeyutl` 没有 `-rawin`）。
-三个脚本开头都有一道预检会明确报出来 —— 没有它的话，LibreSSL 下的失败会被
+这些可执行脚本开头都有一道预检会明确报出来 —— 没有它的话，LibreSSL 下的失败会被
 `verify.sh` 报成「改完 JSON 忘了重签？」，**把一份正确的配置误诊成签名出错**。
 这台机器能跑只因为 Homebrew 的 OpenSSL 在 PATH 里靠前；另外两台机器上要先：
 

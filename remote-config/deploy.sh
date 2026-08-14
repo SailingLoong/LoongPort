@@ -66,4 +66,4 @@ npx wrangler pages deploy "$HERE/public" \
   --project-name="$PROJECT" --branch=main --commit-dirty=true
 
 echo
-echo "✔ 已部署。等 ~30 秒后跑 ./verify.sh 验线上（CDN max-age=300）"
+echo "✔ 已部署。等 ~30 秒后依次跑 ./verify.sh 和 ./verify-v2.sh 验线上（CDN max-age=300）"
