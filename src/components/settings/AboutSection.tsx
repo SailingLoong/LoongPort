@@ -239,8 +239,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   );
   const [showInstallCommands, setShowInstallCommands] = useState(false);
 
-  const { hasUpdate, updateInfo, resetDismiss, isChecking, checkUpdate } =
-    useUpdate();
+  const {
+    hasUpdate,
+    updateInfo,
+    resetDismiss,
+    isChecking,
+    checkUpdate,
+    error,
+  } = useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -959,6 +965,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               </p>
             )}
           </motion.div>
+        )}
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
         )}
       </motion.div>
 
