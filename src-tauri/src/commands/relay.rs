@@ -2739,9 +2739,9 @@ async fn provision_relay(
     app_handle: &tauri::AppHandle,
     op: &creds::Relay,
 ) -> Result<ProvisionSummary, AppError> {
-    let batch = provision_backend(&op, Some(browser_api_fallback(app_handle))).await?;
+    let batch = provision_backend(op, Some(browser_api_fallback(app_handle))).await?;
     let state = app_handle.state::<AppState>();
-    persist_provision_batch(state.inner(), &op, batch)
+    persist_provision_batch(state.inner(), op, batch)
 }
 
 fn persist_provision_batch(

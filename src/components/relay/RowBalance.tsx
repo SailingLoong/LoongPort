@@ -77,9 +77,9 @@ export function RowBalance({
   if (!enabled) return null;
 
   const handleRefresh = async () => {
-    try {
-      await onRefresh?.();
-    } finally {
+    if (onRefresh) {
+      await onRefresh();
+    } else {
       await refetch();
     }
   };

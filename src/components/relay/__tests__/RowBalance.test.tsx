@@ -158,6 +158,21 @@ describe("RowBalance", () => {
     ).toBeInTheDocument();
   });
 
+  it("统一刷新消费后端原子余额，不会再发一条独立余额请求", async () => {
+    api.relayBalance.mockResolvedValue(balanceResult(87.7));
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+
+    renderWithQuery(
+      <RowBalance rowKind="relay" rowId={1} enabled onRefresh={onRefresh} />,
+    );
+
+    await screen.findByText("87.70");
+    await userEvent.click(screen.getByTitle("刷新用量"));
+
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+    expect(api.relayBalance).toHaveBeenCalledTimes(1);
+  });
+
   it("从没登录过的行不查也不渲染", async () => {
     renderWithQuery(
       <RowBalance

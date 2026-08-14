@@ -405,13 +405,47 @@ pub(crate) async fn refresh_vendor_account(
     Option<Result<VendorProvisionSummary, VendorActionError>>,
     Result<crate::relay::balance::RowBalanceResult, AppError>,
 ) {
+    let session_balance = refresh_vendor_session_balance(state, row_id).await;
     let provision = if refresh_config {
         Some(provision_impl(state, row_id).await)
     } else {
         None
     };
-    let balance = vendor_balance_impl(state, row_id).await;
+    let balance = match session_balance {
+        Ok(Some(balance)) => Ok(balance),
+        Ok(None) => vendor_balance_impl(state, row_id).await,
+        Err(error) => Err(error),
+    };
     (provision, balance)
+}
+
+/// 用户主动刷新官网账号时，始终核验可用网页登录态并取最新钱包额度。
+///
+/// DeepSeek 当前只在登录响应中返回账号标识与手机号，没有独立的昵称/profile 接口；
+/// 所以 `account_label` 的唯一权威来源仍是登录回传。这里刷新的是服务端可提供的
+/// 会话事实（有效性与额度），并在 `40002` 时及时落库为过期状态；随后保留 sk 作为
+/// 余额兜底，不能因网页登录态失效而废掉可用接入配置。
+async fn refresh_vendor_session_balance(
+    state: &AppState,
+    row_id: i64,
+) -> Result<Option<crate::relay::balance::RowBalanceResult>, AppError> {
+    let row = with_conn(state, |conn| creds::get(conn, row_id))?
+        .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))?;
+    if row.auth_token.trim().is_empty() {
+        return Ok(None);
+    }
+
+    match deepseek::balance(&row.auth_token).await {
+        Ok(Some(usage)) => Ok(Some(crate::relay::balance::row_balance_result(
+            usage, false,
+        ))),
+        Ok(None) => Ok(None),
+        Err(error) => {
+            on_vendor_error(state, row_id, &error);
+            log::warn!("刷新官网账号会话信息失败，回落到 sk 余额查询: {error:?}");
+            Ok(None)
+        }
+    }
 }
 
 /// 这一行在 `app_type` 这个平台上的配置**是不是被用户改过**。

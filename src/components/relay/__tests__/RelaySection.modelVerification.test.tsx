@@ -143,10 +143,15 @@ vi.mock("@/components/relay/ImageTabNotice", () => ({
   ImageTabNotice: () => null,
 }));
 vi.mock("@/components/relay/VendorBlock", () => ({
-  VendorBlock: ({ onAddVendor }: any) => (
-    <button type="button" onClick={onAddVendor}>
-      add official account
-    </button>
+  VendorBlock: ({ vendor, onAddVendor }: any) => (
+    <>
+      <output data-testid="vendor-labels">
+        {vendor.accounts.map((account: any) => account.accountLabel).join(",")}
+      </output>
+      <button type="button" onClick={onAddVendor}>
+        add official account
+      </button>
+    </>
   ),
 }));
 vi.mock("@/components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
@@ -546,6 +551,52 @@ describe("RelaySection model verification ownership", () => {
       queryKey: ["rowBalance"],
     });
     expect(screen.queryByText("loongport.refreshAll")).not.toBeInTheDocument();
+  });
+
+  it("keeps the newest backend vendor view when an older reload finishes late", async () => {
+    let resolveOlder!: (value: any) => void;
+    let resolveNewer!: (value: any) => void;
+    const older = new Promise((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise((resolve) => {
+      resolveNewer = resolve;
+    });
+    const account = (accountLabel: string) => ({
+      id: 9,
+      vendorId: "deepseek",
+      vendorName: "DeepSeek",
+      accountLabel,
+      status: "ready",
+      canQueryBalance: true,
+      canRefresh: true,
+      canEditConfig: true,
+      canSwitch: true,
+      canDelete: true,
+      providerId: "vendor-provider",
+      isCurrent: accountLabel === "new current",
+      userEdited: false,
+    });
+    api.list
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+
+    renderSection("codex");
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
+
+    eventHandlers.get("provider-switched")?.({ appType: "codex" });
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+
+    resolveNewer({ supported: true, accounts: [account("new current")] });
+    expect(await screen.findByTestId("vendor-labels")).toHaveTextContent(
+      "new current",
+    );
+
+    resolveOlder({ supported: true, accounts: [account("stale current")] });
+    await act(async () => {});
+    expect(screen.getByTestId("vendor-labels")).toHaveTextContent(
+      "new current",
+    );
   });
 
   it("uses the atomic refresh result returned by the login command", async () => {

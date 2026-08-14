@@ -154,6 +154,7 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
   vendorsRef.current = vendors;
   // reload 的请求序号 —— 只让最后一次的结果落地，见 `reload` 里的说明。
   const reloadSeqRef = useRef(0);
+  const vendorReloadSeqRef = useRef(0);
   const verificationRequestRef = useRef(0);
   const { t } = useTranslation();
   // 余额由各行自己的 query 持有；这里只在「充值窗关了」「刷新」时让它们失效。
@@ -255,11 +256,16 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
    * `supported/accounts`，不复制厂商支持列表。
    */
   const reloadVendors = useCallback(async () => {
+    const seq = ++vendorReloadSeqRef.current;
+    const isStale = () => seq !== vendorReloadSeqRef.current;
+
     try {
       const result = await vendorApi.list(appId);
+      if (isStale()) return;
       setVendorSupported(result.supported);
       setVendors(result.accounts);
     } catch (e) {
+      if (isStale()) return;
       toast.error(String(e));
     }
   }, [appId]);

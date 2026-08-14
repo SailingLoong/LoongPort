@@ -294,7 +294,7 @@ pub fn provider_presentation_with_context(
         .then_some(ProviderSwitchBlockReason::OfficialBlockedByProxy);
     let uses_official_subscription_usage =
         provider_uses_official_subscription_usage(app_type, provider);
-    let can_configure_usage = !(is_official && !uses_official_subscription_usage)
+    let can_configure_usage = (!is_official || uses_official_subscription_usage)
         && !provider.is_github_copilot()
         && !provider.is_codex_oauth()
         && !provider.is_xai_oauth();

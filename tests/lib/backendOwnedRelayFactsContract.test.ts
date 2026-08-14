@@ -59,6 +59,10 @@ describe("供应商业务事实由后端定义", () => {
     expect(queries).not.toContain("providersApi.getCurrent(appId)");
     expect(usageModal).not.toContain("isOfficialSubscriptionProvider");
     expect(card).not.toContain("supportsOfficialSubscription");
+    expect(card).not.toContain("TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION");
+    expect(card).toContain(
+      "provider.presentation?.usesOfficialSubscriptionUsage === true",
+    );
     expect(editDialog).not.toContain("providersApi.getCurrent(appId)");
     expect(editDialog).not.toContain("vscodeApi.getLiveProviderSettings");
     expect(editDialog).not.toContain("openclawApi.getLiveProvider");
@@ -75,5 +79,12 @@ describe("供应商业务事实由后端定义", () => {
     expect(read("src/App.tsx")).not.toContain("getOpenCodeLiveProviderIds");
     expect(read("src/App.tsx")).not.toContain("getOpenClawLiveProviderIds");
     expect(read("src/App.tsx")).not.toContain("getHermesLiveProviderIds");
+  });
+
+  it("官网账号刷新由后端主动核验登录态与最新额度", () => {
+    const vendorCommands = read("src-tauri/src/commands/vendor.rs");
+
+    expect(vendorCommands).toContain("refresh_vendor_session_balance");
+    expect(vendorCommands).toContain("deepseek::balance(&row.auth_token)");
   });
 });

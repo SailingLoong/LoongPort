@@ -15,7 +15,7 @@ import SubscriptionQuotaFooter from "@/components/SubscriptionQuotaFooter";
 import CopilotQuotaFooter from "@/components/CopilotQuotaFooter";
 import CodexOauthQuotaFooter from "@/components/CodexOauthQuotaFooter";
 import XaiOauthQuotaFooter from "@/components/XaiOauthQuotaFooter";
-import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
+import { PROVIDER_TYPES } from "@/config/constants";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
 import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
@@ -153,13 +153,10 @@ export function ProviderCard({
 
   const usageEnabled = provider.meta?.usage_script?.enabled ?? false;
   const isOfficial = provider.presentation?.isOfficial === true;
-  const isOfficialSubscriptionUsage =
-    provider.meta?.usage_script?.templateType ===
-    TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;
+  const usesOfficialSubscriptionUsage =
+    provider.presentation?.usesOfficialSubscriptionUsage === true;
   const officialSubscriptionEnabled =
-    provider.presentation?.usesOfficialSubscriptionUsage === true &&
-    usageEnabled &&
-    isOfficialSubscriptionUsage;
+    usesOfficialSubscriptionUsage && usageEnabled;
   const routingBadge = provider.presentation?.routingBadge ?? null;
   const isOfficialBlockedByProxy =
     provider.presentation?.switchBlockedReason === "officialBlockedByProxy";
@@ -182,7 +179,7 @@ export function ProviderCard({
     : 0;
 
   const { data: usage } = useUsageQuery(provider.id, appId, {
-    enabled: usageEnabled && !isOfficial && !isOfficialSubscriptionUsage,
+    enabled: usageEnabled && !isOfficial && !usesOfficialSubscriptionUsage,
     autoQueryInterval,
   });
 
