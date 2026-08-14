@@ -72,4 +72,18 @@ describe("parseVeriDropLeaderboard", () => {
       ).observations,
     ).toEqual([]);
   });
+
+  it("rejects report links with a noncanonical VeriDrop origin", () => {
+    const html = `
+      <article class="lb-row" data-impression-domain="example.test" data-impression-surface="leaderboard_top" data-impression-position="1">
+        <a class="lb-detail-link" href="https://user:opaque-capability@veridrop.org:444/report">Report</a>
+      </article>
+    `;
+
+    expect(
+      parseVeriDropLeaderboard(html, "2026-08-14T09:00:00.000Z"),
+    ).toMatchObject({
+      observations: [{ reportUrl: null }],
+    });
+  });
 });

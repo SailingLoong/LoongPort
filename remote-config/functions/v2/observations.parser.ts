@@ -19,6 +19,7 @@ export type ObservationFeedV1 = {
 
 export const VERIDROP_LEADERBOARD_URL = "https://veridrop.org/leaderboard/";
 
+const VERIDROP_ORIGIN = "https://veridrop.org";
 const datePattern = /\b(\d{4}-\d{2}-\d{2})\b/;
 
 export function parseVeriDropLeaderboard(
@@ -127,10 +128,14 @@ function parseSampleCount(meta: string | null): number | null {
 
 function parseObservedAt(meta: string | null): string | null {
   const value = meta?.match(datePattern)?.[1];
-  return value && isValidDate(value) ? value : null;
+  return value && isCanonicalObservedDate(value) ? value : null;
 }
 
-function isValidDate(value: string): boolean {
+export function isCanonicalObservedDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return (
     Number.isFinite(parsed.valueOf()) &&
@@ -145,7 +150,7 @@ function normalizeReportUrl(value: string | null | undefined): string | null {
 
   try {
     const url = new URL(value, VERIDROP_LEADERBOARD_URL);
-    if (url.protocol !== "https:" || url.hostname !== "veridrop.org") {
+    if (!hasCanonicalVeriDropOrigin(url)) {
       return null;
     }
 
@@ -155,6 +160,26 @@ function normalizeReportUrl(value: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+export function isCanonicalVeriDropReportUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      hasCanonicalVeriDropOrigin(url) && url.search === "" && url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasCanonicalVeriDropOrigin(url: URL): boolean {
+  return (
+    url.origin === VERIDROP_ORIGIN &&
+    url.username === "" &&
+    url.password === "" &&
+    url.port === ""
+  );
 }
 
 function parseIssues(

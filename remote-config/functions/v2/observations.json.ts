@@ -1,4 +1,6 @@
 import {
+  isCanonicalObservedDate,
+  isCanonicalVeriDropReportUrl,
   parseVeriDropLeaderboard,
   VERIDROP_LEADERBOARD_URL,
   type ObservationFeedV1,
@@ -148,8 +150,13 @@ function hasExactKeys(
 }
 
 function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const timestamp = new Date(value);
   return (
-    typeof value === "string" && Number.isFinite(new Date(value).valueOf())
+    Number.isFinite(timestamp.valueOf()) && timestamp.toISOString() === value
   );
 }
 
@@ -180,7 +187,7 @@ function isNonnegativeNumberOrNull(value: unknown): value is number | null {
 function isObservedDateOrNull(value: unknown): value is string | null {
   return (
     value === null ||
-    (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value))
+    (typeof value === "string" && isCanonicalObservedDate(value))
   );
 }
 
@@ -192,17 +199,7 @@ function isVeriDropReportUrlOrNull(value: unknown): value is string | null {
     return false;
   }
 
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === "https:" &&
-      url.hostname === "veridrop.org" &&
-      url.search === "" &&
-      url.hash === ""
-    );
-  } catch {
-    return false;
-  }
+  return isCanonicalVeriDropReportUrl(value);
 }
 
 function isIssueList(value: unknown): value is string[] {
@@ -210,7 +207,9 @@ function isIssueList(value: unknown): value is string[] {
     Array.isArray(value) &&
     value.every(
       (issue) =>
-        typeof issue === "string" && issue.trim() === issue && issue.length > 0,
+        typeof issue === "string" &&
+        issue.replace(/\s+/g, " ").trim() === issue &&
+        issue.length > 0,
     ) &&
     new Set(value).size === value.length
   );
