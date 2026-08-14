@@ -221,15 +221,6 @@ pub fn save_models_dev_sync_config(
 }
 
 #[tauri::command]
-pub fn record_models_dev_sync_result(
-    state: State<'_, AppState>,
-    synced_at: Option<i64>,
-    error: Option<String>,
-) -> Result<(), AppError> {
-    crate::services::model_pricing::record_models_dev_sync_result(&state.db, synced_at, error)
-}
-
-#[tauri::command]
 pub async fn list_models_dev_entries() -> Result<Vec<ModelsDevEntry>, AppError> {
     crate::services::models_dev::fetch_entries().await
 }

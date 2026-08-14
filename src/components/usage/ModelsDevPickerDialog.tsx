@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Check, Loader2, Search } from "lucide-react";
 import {
@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { usageApi } from "@/lib/api/usage";
 import { formatPrice, type ModelsDevEntry } from "@/lib/modelsDevPricing";
+import { usageKeys } from "@/lib/query/usage";
 import { isTextEditableTarget } from "@/utils/domUtils";
 
 // 全量约 5000 条：默认只展示最新发布的一批，搜索时才做全量匹配
@@ -42,6 +43,7 @@ export function ModelsDevPickerDialog({
   onImported,
 }: ModelsDevPickerDialogProps) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
 
   const [search, setSearch] = useState("");
   const [providerFilter, setProviderFilter] = useState("all");
@@ -113,6 +115,7 @@ export function ModelsDevPickerDialog({
     setIsImporting(true);
     try {
       await usageApi.importModelsDevPricing([selected]);
+      await queryClient.invalidateQueries({ queryKey: usageKeys.all });
 
       toast.success(
         t("usage.modelsDevImported", {

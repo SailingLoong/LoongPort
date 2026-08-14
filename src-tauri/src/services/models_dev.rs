@@ -585,6 +585,54 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn import_rejects_malformed_prices() {
+        let _home = TestHome::new();
+        let db = Database::memory().expect("memory database");
+        let mut entry = fixture_entries().remove(0);
+        entry.input = "not-a-decimal".to_string();
+
+        let result = import_pricing(&db, vec![entry]);
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn import_rejects_negative_prices() {
+        let _home = TestHome::new();
+        let db = Database::memory().expect("memory database");
+        let mut entry = fixture_entries().remove(0);
+        entry.cache_write = "-0.01".to_string();
+
+        let result = import_pricing(&db, vec![entry]);
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+    }
+
+    #[test]
+    #[serial]
+    fn import_recomputes_caller_supplied_normalized_id() {
+        let _home = TestHome::new();
+        let db = Database::memory().expect("memory database");
+        let mut entry = fixture_entries().remove(0);
+        entry.model_id = "Vendor/Caller-Model:free".to_string();
+        entry.normalized_id = "forged-id".to_string();
+
+        assert_eq!(import_pricing(&db, vec![entry]).expect("import pricing"), 1);
+
+        let conn = db.conn.lock().expect("lock test database");
+        let model_id: String = conn
+            .query_row(
+                "SELECT model_id FROM model_pricing WHERE model_id = ?1",
+                ["caller-model"],
+                |row| row.get(0),
+            )
+            .expect("query imported pricing");
+        assert_eq!(model_id, "caller-model");
+    }
+
+    #[test]
     fn common_selection_is_limited_to_six_recent_models_per_family() {
         let json = serde_json::json!({
             "openai": {

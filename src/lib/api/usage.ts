@@ -182,13 +182,6 @@ export const usageApi = {
     return invoke("save_models_dev_sync_config", { config });
   },
 
-  recordModelsDevSyncResult: async (
-    syncedAt: number | null,
-    error: string | null,
-  ): Promise<void> => {
-    return invoke("record_models_dev_sync_result", { syncedAt, error });
-  },
-
   listModelsDevEntries: async (): Promise<ModelsDevEntry[]> => {
     return invoke("list_models_dev_entries");
   },
