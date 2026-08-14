@@ -769,7 +769,7 @@ impl NewApiClient {
     pub async fn reveal_token(&self, token_id: i64) -> Result<String, AppError> {
         let body = self
             .send(
-                self.request(reqwest::Method::GET, &format!("/api/token/{token_id}/key")),
+                self.request(reqwest::Method::POST, &format!("/api/token/{token_id}/key")),
                 "token reveal",
             )
             .await?;
@@ -1465,7 +1465,7 @@ mod tests {
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].method, "POST");
         assert_eq!(requests[0].path_and_query, "/api/token/42/key");
         assert_eq!(requests[1].method, "DELETE");
         assert_eq!(requests[1].path_and_query, "/api/token/42");
