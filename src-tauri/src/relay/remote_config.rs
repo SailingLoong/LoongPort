@@ -1213,6 +1213,51 @@ mod tests {
         }
     }
 
+    /// ⭐ **仓内那份待发布配置必须过客户端自己的完整判据（验签 + 严格解析）。**
+    ///
+    /// `remote-config/public/v1/config.json` 与 `.sig` 是部署到线上、所有客户端
+    /// 启动时拉的那份。它与本 DTO 的一致性此前**没有任何闸**：改了 JSON 忘了重签、
+    /// 或写出客户端解不出的形状，都要等部署后从用户症状反推（README 里 sign.sh /
+    /// deploy.sh 各有一道，但 CI 层面是空的）。`include_str!` / `include_bytes!`
+    /// 是**编译期嵌入** ⇒ 这里比较的就是仓库里那两个文件的原始字节，签名覆盖的
+    /// 也是同一份字节。
+    #[test]
+    fn checked_in_config_passes_the_clients_own_gate() {
+        let body = include_str!("../../../remote-config/public/v1/config.json");
+        let sig = include_bytes!("../../../remote-config/public/v1/config.json.sig");
+        assert_eq!(sig.len(), 64, "Ed25519 签名必须是裸 64 字节");
+
+        // 与生产同一条路径：生产公钥 → 验签 → 验过才解析。
+        let cfg = parse_verified(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
+            .expect("仓内 config.json + .sig 必须过客户端同一套验签与解析");
+
+        assert!(!cfg.sponsors.is_empty(), "推荐列表不该是空的");
+        for sponsor in &cfg.sponsors {
+            assert!(
+                sponsor.site_origin.starts_with("https://"),
+                "sponsor origin 必须是 https：{}",
+                sponsor.site_origin
+            );
+            assert!(
+                !sponsor.display_name.trim().is_empty(),
+                "sponsor 展示名不能为空：{}",
+                sponsor.site_origin
+            );
+            // 每个赞助站都必须配邀请码 —— 这份文件存在的目的就是返利；
+            // 少一条 = 那个站的返利静默归零。哪天某站确实没有返利计划，
+            // 再有意识地放宽这条并说明原因。
+            let host = crate::relay::aff::lookup_host(&sponsor.site_origin);
+            assert!(
+                cfg.aff_codes.contains_key(&host),
+                "sponsor {} 没有配邀请码（归一后 host={host}）",
+                sponsor.site_origin
+            );
+        }
+        for (host, code) in &cfg.aff_codes {
+            assert!(!code.trim().is_empty(), "aff_codes 里 {host} 的码是空的");
+        }
+    }
+
     #[test]
     fn config_parses_the_shape_the_maintainer_will_actually_publish() {
         // 用一份**真实形状**的 JSON 当 fixture（而不是逐字段构造结构体）——

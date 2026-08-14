@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-08-10T03:00:00Z",
+  "issued_at": "2026-08-15T00:00:00Z",
   "sponsors": [
     {
       "site_origin": "https://wawapii.com",
@@ -15,14 +15,65 @@
       "site_origin": "https://www.999555999.com",
       "display_name": "猫肥Neko API",
       "tagline": "最懂您"
+    },
+    {
+      "site_origin": "https://wawazz.xyz",
+      "display_name": "WAWA ZZ API"
+    },
+    {
+      "site_origin": "https://anpin.ai",
+      "display_name": "AnPin AI"
+    },
+    {
+      "site_origin": "https://onepig123.com",
+      "display_name": "粉猪模型网关"
+    },
+    {
+      "site_origin": "https://linkai.shop",
+      "display_name": "LinkAI"
+    },
+    {
+      "site_origin": "https://passion8.cc",
+      "display_name": "Passion8 API"
+    },
+    {
+      "site_origin": "https://api-top.com",
+      "display_name": "Top-API"
+    },
+    {
+      "site_origin": "https://code28.ccwu.cc",
+      "display_name": "可乐AI"
+    },
+    {
+      "site_origin": "https://x-llm.net",
+      "display_name": "x-llm"
+    },
+    {
+      "site_origin": "https://ssnaiyun.com",
+      "display_name": "SSN AI"
+    },
+    {
+      "site_origin": "https://relaybases.com",
+      "display_name": "RelayBases"
     }
   ],
   "aff_codes": {
     "api.aijws.com": "RJZUAA8XX6W7",
     "790053500.com": "FQSPPFUYXSSS",
     "wawapii.com": "4PAUD8SSZXG7",
+    "wawapi.top": "4PAUD8SSZXG7",
     "hapiopen.cc": "HTL7AFBJLKKU",
-    "999555999.com": "XNTZVS78F7WY"
+    "999555999.com": "XNTZVS78F7WY",
+    "wawazz.xyz": "J5MJM2ZMVNTM",
+    "anpin.ai": "NNE5MWKYF6FC",
+    "onepig123.com": "DTRQKDRYVQF3",
+    "linkai.shop": "QXKFGUVMY6E7",
+    "passion8.cc": "fflr",
+    "api-top.com": "4Jxp",
+    "code28.ccwu.cc": "SSXa",
+    "x-llm.net": "jm9p",
+    "ssnaiyun.com": "ZBvxPUGY",
+    "relaybases.com": "C2a0"
   },
   "relay_directory": {
     "blocked_hosts": [],
