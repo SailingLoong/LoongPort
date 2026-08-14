@@ -8,7 +8,19 @@ pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 pub fn start(app: tauri::AppHandle) {
     start_veridrop_directory_refresh(app.clone());
     start_models_dev_pricing_refresh(app.clone());
+    start_relay_pricing_refresh(app.clone());
     start_app_update_check(app);
+}
+
+fn start_relay_pricing_refresh(app: tauri::AppHandle) {
+    let schedule = scheduler::TaskSchedule::new(
+        config::RELAY_PRICING_STARTUP_DELAY,
+        config::RELAY_PRICING_REFRESH_INTERVAL,
+        config::RELAY_PRICING_RETRY_DELAY,
+    );
+    scheduler::spawn_periodic("relay-pricing", schedule, move || {
+        crate::refresh_due_relay_pricing(app.clone())
+    });
 }
 
 fn start_app_update_check(app: tauri::AppHandle) {
@@ -76,7 +88,7 @@ fn start_models_dev_pricing_refresh(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
+    use super::{config, APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 
     #[test]
     fn app_update_event_matches_frontend_constant() {
@@ -90,5 +102,13 @@ mod tests {
         let frontend = include_str!("../../../src/config/constants.ts");
 
         assert!(frontend.contains(MODELS_DEV_PRICING_UPDATED_EVENT));
+    }
+
+    #[test]
+    fn relay_pricing_uses_its_own_six_hour_interval() {
+        assert_eq!(
+            config::RELAY_PRICING_REFRESH_INTERVAL,
+            std::time::Duration::from_secs(6 * 60 * 60)
+        );
     }
 }
