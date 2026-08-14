@@ -1580,6 +1580,7 @@ pub fn run() {
             commands::relay_stats_endpoint_configured,
             commands::relay_list_sponsors,
             commands::relay_list_directory,
+            commands::relay_refresh_directory,
             commands::relay_import_directory_site,
             commands::relay_import_site,
             commands::relay_login,

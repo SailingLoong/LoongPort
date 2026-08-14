@@ -66,6 +66,7 @@ use crate::store::AppState;
 // 写成反引号裸名字就没有任何东西能验它 —— 2026-08-04 同一次改名里连漏两处指针
 // （两路 review 各抓一次）。指「本模块 tests 里」而不指名字，改名就不会让它悬空。
 const DEFAULT_SITE: &str = "790053500.com";
+pub(crate) const RELAY_DIRECTORY_UPDATED_EVENT: &str = "relay-directory-updated";
 
 // `DEFAULT_MODEL` 住在 `provision` 里 —— `pick_model` 要在「问不出模型列表」时
 // 回落到它。这里只 `use`，避免在命令层另写一份。
@@ -958,11 +959,91 @@ pub fn relay_list_sponsors() -> Vec<crate::relay::remote_config::Sponsor> {
 
 #[tauri::command]
 pub async fn relay_list_directory(
+    app_handle: tauri::AppHandle,
     kind: crate::relay::leaderboard::LeaderboardKind,
 ) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
-    crate::relay::leaderboard::list(kind)
+    if let Some(cached) = crate::relay::leaderboard::read_cached(kind)
+        .map_err(|error| error.to_string())?
+    {
+        if !crate::relay::leaderboard::is_cache_fresh(kind, chrono::Utc::now().timestamp()) {
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = refresh_directory_and_emit(&app_handle, kind).await {
+                    log::warn!("background VeriDrop refresh for {kind:?} failed: {error}");
+                }
+            });
+        }
+        return Ok(cached);
+    }
+
+    refresh_directory_and_emit(&app_handle, kind)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn relay_refresh_directory(
+    app_handle: tauri::AppHandle,
+    kind: crate::relay::leaderboard::LeaderboardKind,
+) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
+    refresh_directory_and_emit(&app_handle, kind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayDirectoryUpdated {
+    kind: crate::relay::leaderboard::LeaderboardKind,
+}
+
+async fn refresh_directory_and_emit(
+    app_handle: &tauri::AppHandle,
+    kind: crate::relay::leaderboard::LeaderboardKind,
+) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
+    let leaderboard = crate::relay::leaderboard::refresh(kind).await?;
+    app_handle
+        .emit(RELAY_DIRECTORY_UPDATED_EVENT, RelayDirectoryUpdated { kind })
+        .map_err(|error| AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}")))?;
+    Ok(leaderboard)
+}
+
+pub(crate) async fn refresh_stale_directories(
+    app_handle: tauri::AppHandle,
+) -> Result<(), AppError> {
+    use futures::StreamExt;
+
+    let now = chrono::Utc::now().timestamp();
+    let stale = crate::relay::leaderboard::LeaderboardKind::ALL
+        .into_iter()
+        .filter(|kind| !crate::relay::leaderboard::is_cache_fresh(*kind, now));
+    let mut refreshes = futures::stream::iter(stale.map(|kind| {
+        let app_handle = app_handle.clone();
+        async move {
+            let leaderboard = crate::relay::leaderboard::refresh_if_stale(kind).await?;
+            app_handle
+                .emit(RELAY_DIRECTORY_UPDATED_EVENT, RelayDirectoryUpdated { kind })
+                .map_err(|error| {
+                    AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}"))
+                })?;
+            Ok::<_, AppError>(leaderboard)
+        }
+    }))
+    .buffer_unordered(2);
+
+    let mut failures = Vec::new();
+    while let Some(result) = refreshes.next().await {
+        if let Err(error) = result {
+            failures.push(error.to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "部分 VeriDrop 榜单刷新失败: {}",
+            failures.join("; ")
+        )))
+    }
 }
 
 /// 发现并导入一个第三方中转站。
@@ -4639,6 +4720,13 @@ pub fn relay_sync_imagegen_mcp(state: State<'_, AppState>) -> Result<(), AppErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_update_event_matches_the_frontend_constant() {
+        let frontend = include_str!("../../../src/config/constants.ts");
+
+        assert!(frontend.contains(RELAY_DIRECTORY_UPDATED_EVENT));
+    }
     use std::{
         collections::HashMap,
         future::Future,

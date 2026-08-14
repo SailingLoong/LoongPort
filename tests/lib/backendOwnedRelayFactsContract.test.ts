@@ -6,6 +6,16 @@ const read = (path: string) =>
   readFileSync(resolve(process.cwd(), path), "utf8");
 
 describe("中转站业务事实由后端定义", () => {
+  it("VeriDrop 后台更新事件和手动刷新命令有唯一契约", () => {
+    const constants = read("src/config/constants.ts");
+    const relayApi = read("src/lib/api/relay.ts");
+
+    expect(constants).toContain(
+      'RELAY_DIRECTORY_UPDATED_EVENT = "relay-directory-updated"',
+    );
+    expect(relayApi).toContain('invoke("relay_refresh_directory", { kind })');
+  });
+
   it("页面不编排全量刷新或汇总业务结果", () => {
     const section = read("src/components/relay/RelaySection.tsx");
 

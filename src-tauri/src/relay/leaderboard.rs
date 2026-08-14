@@ -84,6 +84,8 @@ struct CachedLeaderboard {
 }
 
 impl LeaderboardKind {
+    pub const ALL: [Self; 4] = [Self::Overall, Self::Claude, Self::OpenAi, Self::Gemini];
+
     fn path(self) -> &'static str {
         match self {
             Self::Overall => "/leaderboard",
@@ -634,6 +636,7 @@ async fn fetch_live_source_with(
     Ok(items)
 }
 
+#[cfg(test)]
 async fn fetch_live_source(
     kind: LeaderboardKind,
     managed_hosts: &[String],
@@ -713,13 +716,6 @@ pub async fn refresh_if_stale(kind: LeaderboardKind) -> Result<RelayLeaderboard,
         if let Some(cached) = read_cached(kind)? {
             return Ok(cached);
         }
-    }
-    refresh(kind).await
-}
-
-pub async fn list(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
-    if let Some(cached) = read_cached(kind)? {
-        return Ok(cached);
     }
     refresh(kind).await
 }

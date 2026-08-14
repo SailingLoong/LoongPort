@@ -283,9 +283,13 @@ export const relayApi = {
    */
   listSponsors: (): Promise<Sponsor[]> => invoke("relay_list_sponsors"),
 
-  /** 每次打开或切换榜单都实时拉取；后端仅在实时失败时返回上次成功缓存。 */
+  /** 读取本地 VeriDrop 快照；缺失时后端会等待首次拉取。 */
   listDirectory: (kind: LeaderboardKind): Promise<RelayLeaderboard> =>
     invoke("relay_list_directory", { kind }),
+
+  /** 强制刷新当前 VeriDrop 榜单，失败时保留原快照。 */
+  refreshDirectory: (kind: LeaderboardKind): Promise<RelayLeaderboard> =>
+    invoke("relay_refresh_directory", { kind }),
 
   /**
    * 导入第三方站点。原生发现失败时由后端打开可见网页，让用户自行完成验证，
