@@ -5659,6 +5659,7 @@ mod tests {
             token_expires_at: None,
             user_agent: None,
             cf_clearance: None,
+            pricing_synced_at: None,
             sort_index: 0,
         }
     }

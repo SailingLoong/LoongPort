@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 12;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 13;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -201,6 +201,11 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 add_tier_rate_multiplier_column(conn)?;
                 set_version(conn, 12)?;
             }
+            12 => {
+                log::info!("LoongPort 数据迁移 v12 → v13（中转站倍率刷新时间）");
+                add_relay_pricing_synced_at_column(conn)?;
+                set_version(conn, 13)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -259,6 +264,27 @@ fn add_relay_cf_clearance_column(conn: &Connection) -> Result<(), AppError> {
         [],
     )
     .map_err(|e| AppError::Database(format!("给 loongport_relay 加 cf_clearance 列失败: {e}")))?;
+    Ok(())
+}
+
+fn add_relay_pricing_synced_at_column(conn: &Connection) -> Result<(), AppError> {
+    if !crate::Database::table_exists(conn, "loongport_relay")? {
+        return Ok(());
+    }
+
+    if crate::Database::has_column(conn, "loongport_relay", "pricing_synced_at")? {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE loongport_relay ADD COLUMN pricing_synced_at INTEGER",
+        [],
+    )
+    .map_err(|e| {
+        AppError::Database(format!(
+            "给 loongport_relay 加 pricing_synced_at 列失败: {e}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -668,10 +694,39 @@ fn inherit_the_old_current_image_tier(conn: &Connection) -> Result<(), AppError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Database;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
     fn mem() -> Connection {
         Connection::open_in_memory().expect("内存库")
+    }
+
+    fn migrated_database_at_version(version: i32) -> Connection {
+        assert_eq!(version, 12, "这个夹具只描述 v12 的 relay 表形态");
+        let conn = mem();
+        conn.execute_batch(
+            "CREATE TABLE loongport_relay (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site_origin TEXT NOT NULL,
+                site_name TEXT NOT NULL DEFAULT '',
+                api_base_url TEXT NOT NULL DEFAULT '',
+                account_id INTEGER,
+                account_label TEXT NOT NULL DEFAULT '',
+                login_identifier TEXT NOT NULL DEFAULT '',
+                auth_token TEXT NOT NULL DEFAULT '',
+                refresh_token TEXT,
+                token_expires_at INTEGER,
+                sort_index INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                backend_kind TEXT NOT NULL DEFAULT 'sub2api',
+                user_agent TEXT,
+                cf_clearance TEXT
+            );",
+        )
+        .expect("造 v12 relay 表");
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, version).expect("设置版本");
+        conn
     }
 
     /// 造一张 providers 表 + 一条 codex 档位，用于迁移测试。
@@ -728,6 +783,22 @@ mod tests {
             .unwrap()
             .map(|row| row.unwrap())
             .collect()
+    }
+
+    #[test]
+    fn v12_to_v13_adds_nullable_pricing_synced_at() {
+        let conn = migrated_database_at_version(12);
+        apply(&conn).unwrap();
+        assert!(Database::has_column(&conn, "loongport_relay", "pricing_synced_at").unwrap());
+        let not_null: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('loongport_relay') \
+                 WHERE name='pricing_synced_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(not_null, 0);
     }
 
     #[test]

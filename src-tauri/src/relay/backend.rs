@@ -312,6 +312,7 @@ mod tests {
             token_expires_at: Some(1),
             user_agent: None,
             cf_clearance: None,
+            pricing_synced_at: None,
             sort_index: 0,
         }
     }
