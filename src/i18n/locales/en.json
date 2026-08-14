@@ -3095,6 +3095,7 @@
       "actions": {
         "authenticate": "Register or sign in",
         "autoAddHint": "Added automatically when complete",
+        "manualAddHint": "Add manually after signing in",
         "history": "Full history",
         "refresh": "Refresh live leaderboard",
         "retry": "Retry",

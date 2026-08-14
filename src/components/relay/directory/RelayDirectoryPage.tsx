@@ -25,6 +25,7 @@ import type {
 import { relayDirectoryKeys } from "@/lib/query/relayDirectory";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
+import { openInBrowser } from "../openInBrowser";
 import {
   DIRECTORY_PAGE_SIZE,
   defaultDirectoryKind,
@@ -280,13 +281,17 @@ export function RelayDirectoryPage({
                 item={item}
                 busy={authenticatingHost === item.siteHost}
                 disabled={authenticatingHost !== null}
-                onAuthenticate={(selected) =>
+                onAuthenticate={(selected) => {
+                  if (!selected.autoAdd) {
+                    openInBrowser(selected.entryUrl);
+                    return;
+                  }
                   void authenticate(
                     selected.entryUrl,
                     selected.siteHost,
                     "directory",
-                  )
-                }
+                  );
+                }}
               />
             ))}
           </div>

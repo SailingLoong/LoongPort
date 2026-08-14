@@ -25,6 +25,7 @@ function item(index: number, overrides: Partial<RelayDirectoryItem> = {}) {
     scenarios: [],
     issues: [],
     entryUrl: `https://site-${index}.example`,
+    autoAdd: false,
     ...overrides,
   } satisfies RelayDirectoryItem;
 }

@@ -139,7 +139,11 @@ export function RelayDirectoryRow({
           {t("loongport.directory.actions.authenticate")}
         </Button>
         <span className="text-center text-[10px] text-muted-foreground">
-          {t("loongport.directory.actions.autoAddHint")}
+          {t(
+            item.autoAdd
+              ? "loongport.directory.actions.autoAddHint"
+              : "loongport.directory.actions.manualAddHint",
+          )}
         </span>
       </div>
     </article>
