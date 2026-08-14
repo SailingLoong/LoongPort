@@ -62,26 +62,36 @@ import { VendorRow } from "../VendorRow";
 vi.mock("../RowBalance", () => ({
   RowBalance: ({
     enabled,
+    onPurchase,
     onRefresh,
     refreshBusy,
     refreshLabel,
   }: {
     enabled: boolean;
+    onPurchase?: () => void | Promise<void>;
     onRefresh?: () => void | Promise<void>;
     refreshBusy?: boolean;
     refreshLabel?: string;
-  }) =>
-    enabled ? (
-      <button
-        type="button"
-        aria-label={refreshLabel ?? "refresh"}
-        title={refreshLabel}
-        disabled={refreshBusy}
-        onClick={onRefresh}
-      >
-        refresh
-      </button>
-    ) : null,
+  }) => (
+    <>
+      {onPurchase ? (
+        <button type="button" aria-label="purchase" onClick={onPurchase}>
+          purchase
+        </button>
+      ) : null}
+      {enabled ? (
+        <button
+          type="button"
+          aria-label={refreshLabel ?? "refresh"}
+          title={refreshLabel}
+          disabled={refreshBusy}
+          onClick={onRefresh}
+        >
+          refresh
+        </button>
+      ) : null}
+    </>
+  ),
 }));
 
 function renderWithQuery(ui: ReactElement) {
@@ -120,6 +130,7 @@ function renderRelayRow(
       status: "ready",
       isCurrent: false,
       canQueryBalance: true,
+      canPurchase: true,
       canRefresh: true,
       canDelete: true,
       removeConfirmation: "configured",
@@ -182,6 +193,14 @@ function renderVendorRow(
 
 /** 两类行都只保留用量区里的图标入口，并通过 tooltip 说明完整刷新范围。 */
 describe("行上的刷新动作", () => {
+  it("后端不允许购买时不展示购买入口", () => {
+    renderRelayRow(vi.fn(), { canPurchase: false });
+
+    expect(
+      screen.queryByRole("button", { name: "purchase" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("中转站行只保留用量区的统一刷新入口", async () => {
     const user = userEvent.setup();
     const { onProvision } = renderRelayRow();

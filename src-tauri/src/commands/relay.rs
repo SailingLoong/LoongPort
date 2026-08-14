@@ -45,7 +45,7 @@ use crate::provider::Provider;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
     model_verification::target as verification_target, newapi, newapi_provision, pricing,
-    provider_fingerprint, provision, purchase,
+    provider_fingerprint, provision, purchase, remote_config,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -349,6 +349,8 @@ pub struct RelayRow {
     pub is_current: bool,
     /// 这一行是否具备余额查询所需的凭据（有效登录态或至少一把托管 SK）。
     pub can_query_balance: bool,
+    /// 后端是否确认这条账号行可以打开签名目录配置的购买入口。
+    pub can_purchase: bool,
     /// 这一行是否可以重新拉取最新账号信息、额度、可用分组与倍率。
     pub can_refresh: bool,
     /// 这一行是否可以安全删除。真正的跨 app 删除闸仍在后端命令内。
@@ -3463,6 +3465,18 @@ pub fn relay_list_relays(state: State<'_, AppState>, app: String) -> Result<Vec<
     list_relays_impl(state.inner(), app_type).map_err(|e| e.to_string())
 }
 
+fn can_purchase(relay: &creds::Relay, logged_in: bool, configured_url: bool) -> bool {
+    configured_url
+        && logged_in
+        && match relay.backend_kind {
+            creds::BackendKind::Sub2Api => true,
+            creds::BackendKind::NewApi => relay
+                .refresh_token
+                .as_deref()
+                .is_some_and(|refresh_cookie| !refresh_cookie.trim().is_empty()),
+        }
+}
+
 fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>, AppError> {
     let relays = with_conn(state, creds::list)?;
     // 一次读全量再在内存里按站分组，而不是对每个站各查一次 —— 站点通常 1-5 个，
@@ -3470,6 +3484,8 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
     // `app_type` 下面在闭环里要按站点各用一次（判「用户改过配置没有」），
     // 而它没派生 Copy（上游结构，别为此改它）⇒ 先 clone 一份给 `list_tiers_impl`。
     let tiers = list_tiers_impl(state, app_type.clone())?;
+    // 签名目录只读一次；逐行只做纯解析，避免重复验签与磁盘读取。
+    let signed_config = remote_config::load_cached().unwrap_or_default();
     let now = chrono::Utc::now().timestamp();
 
     relays
@@ -3492,6 +3508,19 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
             } else {
                 RelayRowStatus::Ready
             };
+            let configured_url =
+                match remote_config::configured_purchase_url(&signed_config, &op.site_origin) {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(_) => {
+                        let host = url::Url::parse(&op.site_origin)
+                            .ok()
+                            .and_then(|url| url.host_str().map(str::to_owned))
+                            .unwrap_or_else(|| "<unknown>".into());
+                        log::warn!("中转站 {host} 的购买入口配置无效，已禁用购买");
+                        false
+                    }
+                };
             let can_delete =
                 apps_using_this_accounts_tiers(state, &op.site_origin, op.account_id).is_empty();
             Ok(RelayRow {
@@ -3507,6 +3536,7 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
                 status,
                 is_current: mine.iter().any(|tier| tier.is_current),
                 can_query_balance: logged_in || has_balance_key,
+                can_purchase: can_purchase(&op, logged_in, configured_url),
                 can_refresh: op.can_refresh(now),
                 can_delete,
                 remove_confirmation: if op.account_id.is_some() {
@@ -4847,6 +4877,56 @@ pub fn relay_sync_imagegen_mcp(state: State<'_, AppState>) -> Result<(), AppErro
 mod tests {
     use super::*;
 
+    fn purchase_capability_relay(backend_kind: creds::BackendKind) -> creds::Relay {
+        creds::Relay {
+            id: 1,
+            site_origin: "https://relay.example".into(),
+            site_name: "Relay".into(),
+            backend_kind,
+            api_base_url: "https://relay.example/v1".into(),
+            account_id: Some(1),
+            account_label: "account".into(),
+            login_identifier: "account".into(),
+            auth_token: "session".into(),
+            refresh_token: None,
+            token_expires_at: None,
+            user_agent: None,
+            cf_clearance: None,
+            pricing_synced_at: None,
+            sort_index: 0,
+        }
+    }
+
+    fn sub2api_with_session() -> creds::Relay {
+        purchase_capability_relay(creds::BackendKind::Sub2Api)
+    }
+
+    fn newapi_with_refresh_cookie() -> creds::Relay {
+        creds::Relay {
+            refresh_token: Some("refresh-cookie".into()),
+            ..purchase_capability_relay(creds::BackendKind::NewApi)
+        }
+    }
+
+    fn newapi_without_refresh_cookie() -> creds::Relay {
+        purchase_capability_relay(creds::BackendKind::NewApi)
+    }
+
+    #[test]
+    fn purchase_capability_requires_login_config_and_backend_credentials() {
+        assert!(can_purchase(&sub2api_with_session(), true, true));
+        assert!(can_purchase(&newapi_with_refresh_cookie(), true, true));
+        assert!(!can_purchase(&newapi_without_refresh_cookie(), true, true));
+        assert!(!can_purchase(&sub2api_with_session(), false, true));
+        assert!(!can_purchase(&sub2api_with_session(), true, false));
+
+        let newapi_with_blank_refresh_cookie = creds::Relay {
+            refresh_token: Some("   ".into()),
+            ..newapi_with_refresh_cookie()
+        };
+        assert!(!can_purchase(&newapi_with_blank_refresh_cookie, true, true));
+    }
+
     #[test]
     fn directory_update_event_matches_the_frontend_constant() {
         let frontend = include_str!("../../../src/config/constants.ts");
@@ -5272,6 +5352,7 @@ mod tests {
             status: RelayRowStatus::NotLoggedIn,
             is_current: false,
             can_query_balance: false,
+            can_purchase: true,
             can_refresh: false,
             can_delete: true,
             remove_confirmation: RemoveConfirmation::NeverLoggedIn,
@@ -5279,6 +5360,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(row).expect("serialize relay row");
+        assert_eq!(json["canPurchase"], true);
         assert_eq!(json["removeConfirmation"], "neverLoggedIn");
     }
 

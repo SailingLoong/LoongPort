@@ -242,7 +242,7 @@ export function RelayRow({
             // 余额查询资格由后端按有效登录态与托管 SK 计算；前端只负责传给查询钩子。
             enabled={relay.canQueryBalance}
             purchaseBusy={busy.has(`purchase:${relay.id}`)}
-            onPurchase={onPurchase}
+            onPurchase={relay.canPurchase ? onPurchase : undefined}
             onRefresh={relay.canRefresh ? onProvision : undefined}
             refreshBusy={busy.has(`provision:${relay.id}`)}
             refreshLabel={

@@ -57,8 +57,10 @@ describe("低余额提醒的作用域", () => {
   it("中转站行真的用上了它 —— 提醒要出现在中转站行上", () => {
     const relayRow = read("components/relay/RelayRow.tsx");
     const rowBalance = read("components/relay/RowBalance.tsx");
-    // 中转站行传了充值入口 ⇒ 判据对它成立。
-    expect(relayRow).toContain("onPurchase={onPurchase}");
+    // 后端确认可购买的中转站行才传充值入口 ⇒ 判据只对这些行成立。
+    expect(relayRow).toContain(
+      "onPurchase={relay.canPurchase ? onPurchase : undefined}",
+    );
     expect(rowBalance).toContain("shouldPromptTopUp");
     expect(rowBalance).toContain("lowBalanceHint");
   });
