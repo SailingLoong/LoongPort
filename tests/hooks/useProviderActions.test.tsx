@@ -55,8 +55,6 @@ vi.mock("@/lib/query", () => ({
 
 const providersApiUpdateMock = vi.fn();
 const providersApiUpdateTrayMenuMock = vi.fn();
-const settingsApiGetMock = vi.fn();
-const settingsApiApplyMock = vi.fn();
 const openclawApiGetModelCatalogMock = vi.fn();
 const openclawApiGetDefaultModelMock = vi.fn();
 const openclawApiSetDefaultModelMock = vi.fn();
@@ -66,11 +64,6 @@ vi.mock("@/lib/api", () => ({
     update: (...args: unknown[]) => providersApiUpdateMock(...args),
     updateTrayMenu: (...args: unknown[]) =>
       providersApiUpdateTrayMenuMock(...args),
-  },
-  settingsApi: {
-    get: (...args: unknown[]) => settingsApiGetMock(...args),
-    applyClaudePluginConfig: (...args: unknown[]) =>
-      settingsApiApplyMock(...args),
   },
   openclawApi: {
     getModelCatalog: (...args: unknown[]) =>
@@ -111,10 +104,13 @@ beforeEach(() => {
   updateProviderMutateAsync.mockReset();
   deleteProviderMutateAsync.mockReset();
   switchProviderMutateAsync.mockReset();
+  switchProviderMutateAsync.mockResolvedValue({
+    status: "switched",
+    warnings: [],
+    routingNotice: null,
+  });
   providersApiUpdateMock.mockReset();
   providersApiUpdateTrayMenuMock.mockReset();
-  settingsApiGetMock.mockReset();
-  settingsApiApplyMock.mockReset();
   openclawApiGetModelCatalogMock.mockReset();
   openclawApiGetDefaultModelMock.mockReset();
   openclawApiSetDefaultModelMock.mockReset();
@@ -176,8 +172,12 @@ describe("useProviderActions", () => {
     expect(providersApiUpdateTrayMenuMock).toHaveBeenCalledTimes(1);
   });
 
-  it("should not request plugin sync when switching non-Claude provider", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+  it("submits only the requested provider switch", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce({
+      status: "switched",
+      warnings: [],
+      routingNotice: null,
+    });
     const { wrapper } = createWrapper();
     const provider = createProvider({ category: "custom" });
 
@@ -192,137 +192,58 @@ describe("useProviderActions", () => {
     expect(switchProviderMutateAsync).toHaveBeenCalledWith({
       providerId: provider.id,
     });
-    expect(settingsApiGetMock).not.toHaveBeenCalled();
-    expect(settingsApiApplyMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalledWith(
       "切换成功，请重启客户端以生效",
       { closeButton: true },
     );
   });
 
-  it("warns but still switches providers that require proxy when proxy is not running", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      category: "custom",
-      meta: {
-        apiFormat: "openai_chat",
-      },
+  it("presents each provider switch warning exactly as returned by the backend", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce({
+      status: "switched",
+      warnings: [
+        "Failed to quit ChatGPT before switching",
+        "Failed to backfill the previous provider config",
+      ],
+      routingNotice: null,
     });
+    const { wrapper } = createWrapper();
+    const provider = createProvider({ category: "custom" });
 
-    const { result } = renderHook(() => useProviderActions("claude", false), {
+    const { result } = renderHook(() => useProviderActions("codex"), {
       wrapper,
     });
 
     await act(async () => {
-      await result.current.switchProvider(provider);
+      await result.current.switchProvider(provider, true);
     });
 
-    expect(toastWarningMock).toHaveBeenCalledTimes(1);
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
-      providerId: provider.id,
-    });
+    expect(toastWarningMock.mock.calls).toEqual([
+      ["Failed to quit ChatGPT before switching"],
+      ["Failed to backfill the previous provider config"],
+    ]);
+    expect(toastSuccessMock).toHaveBeenCalledWith(
+      "切换成功，请重启客户端以生效",
+      { closeButton: true },
+    );
   });
 
-  it("warns but still switches Codex full URL providers when proxy is not running", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+  it("presents the backend routing notice without deriving provider capabilities", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce({
+      status: "switched",
+      warnings: [],
+      routingNotice: "managedOAuth",
+    });
     const { wrapper } = createWrapper();
     const provider = createProvider({
       category: "custom",
-      meta: {
-        isFullUrl: true,
-      },
+      meta: undefined,
+      settingsConfig: {},
     });
 
-    const { result } = renderHook(() => useProviderActions("codex", false), {
+    const { result } = renderHook(() => useProviderActions("codex"), {
       wrapper,
     });
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(toastWarningMock).toHaveBeenCalledTimes(1);
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
-      providerId: provider.id,
-    });
-  });
-
-  it("warns when switching a Codex Anthropic-format provider without proxy", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      category: "custom",
-      meta: { apiFormat: "anthropic" },
-    });
-
-    const { result } = renderHook(() => useProviderActions("codex", false), {
-      wrapper,
-    });
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(toastWarningMock).toHaveBeenCalledWith(
-      expect.stringContaining("Anthropic Messages"),
-    );
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
-      providerId: provider.id,
-    });
-  });
-
-  it("warns for Grok providers that require the Responses router", async () => {
-    switchProviderMutateAsync.mockResolvedValue(undefined);
-    const { wrapper } = createWrapper();
-    const providers = [
-      createProvider({
-        id: "grok-chat",
-        category: "custom",
-        meta: { apiFormat: "openai_chat" },
-      }),
-      createProvider({
-        id: "grok-anthropic",
-        category: "custom",
-        meta: { apiFormat: "anthropic" },
-      }),
-      createProvider({
-        id: "grok-full-url",
-        category: "custom",
-        meta: { isFullUrl: true },
-      }),
-    ];
-
-    const { result } = renderHook(
-      () => useProviderActions("grokbuild", false),
-      { wrapper },
-    );
-
-    for (const provider of providers) {
-      await act(async () => {
-        await result.current.switchProvider(provider);
-      });
-    }
-
-    expect(toastWarningMock).toHaveBeenCalledTimes(3);
-    expect(switchProviderMutateAsync).toHaveBeenCalledTimes(3);
-  });
-
-  it("warns for managed OAuth until the current Code app is taken over", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      category: "custom",
-      meta: {
-        providerType: "codex_oauth",
-        apiFormat: "openai_responses",
-      },
-    });
-
-    const { result } = renderHook(
-      () => useProviderActions("codex", true, false),
-      { wrapper },
-    );
 
     await act(async () => {
       await result.current.switchProvider(provider);
@@ -331,26 +252,53 @@ describe("useProviderActions", () => {
     expect(toastWarningMock).toHaveBeenCalledWith(
       expect.stringContaining("托管 OAuth"),
     );
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
-      providerId: provider.id,
-    });
+    expect(toastSuccessMock).not.toHaveBeenCalled();
   });
 
-  it("does not warn for managed OAuth after the current Code app is taken over", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      category: "custom",
-      meta: {
-        providerType: "codex_oauth",
-        apiFormat: "openai_responses",
-      },
-    });
+  it.each([
+    ["githubCopilot", "GitHub Copilot"],
+    ["managedOAuth", "托管 OAuth"],
+    ["openAiChat", "OpenAI Chat"],
+    ["openAiResponses", "OpenAI Responses"],
+    ["anthropicMessages", "Anthropic Messages"],
+    ["claudeDesktop", "Claude Desktop 本地路由模式"],
+    ["fullUrl", "完整 URL"],
+    ["routingRequired", "本地路由"],
+  ] as const)(
+    "maps backend routing notice %s to user-facing copy",
+    async (routingNotice, expectedText) => {
+      switchProviderMutateAsync.mockResolvedValueOnce({
+        status: "switched",
+        warnings: [],
+        routingNotice,
+      });
+      const { wrapper } = createWrapper();
+      const provider = createProvider({ category: "custom" });
 
-    const { result } = renderHook(
-      () => useProviderActions("codex", true, true),
-      { wrapper },
-    );
+      const { result } = renderHook(() => useProviderActions("claude"), {
+        wrapper,
+      });
+
+      await act(async () => {
+        await result.current.switchProvider(provider);
+      });
+
+      expect(toastWarningMock).toHaveBeenCalledWith(
+        expect.stringContaining(expectedText),
+      );
+      expect(switchProviderMutateAsync).toHaveBeenCalledWith({
+        providerId: provider.id,
+      });
+    },
+  );
+
+  it("does not present a routing warning when the backend returns none", async () => {
+    const { wrapper } = createWrapper();
+    const provider = createProvider({ category: "custom" });
+
+    const { result } = renderHook(() => useProviderActions("claude"), {
+      wrapper,
+    });
 
     await act(async () => {
       await result.current.switchProvider(provider);
@@ -360,163 +308,6 @@ describe("useProviderActions", () => {
     expect(switchProviderMutateAsync).toHaveBeenCalledWith({
       providerId: provider.id,
     });
-  });
-
-  it("uses proxy process readiness for Claude Desktop routing", async () => {
-    switchProviderMutateAsync.mockResolvedValue(undefined);
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      category: "custom",
-      meta: { claudeDesktopMode: "proxy" },
-    });
-
-    const { result, rerender } = renderHook(
-      ({ isProxyRunning }) =>
-        useProviderActions("claude-desktop", isProxyRunning, false),
-      { initialProps: { isProxyRunning: true }, wrapper },
-    );
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-    expect(toastWarningMock).not.toHaveBeenCalled();
-
-    rerender({ isProxyRunning: false });
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(toastWarningMock).toHaveBeenCalledTimes(1);
-    expect(toastWarningMock).toHaveBeenCalledWith(
-      expect.stringContaining("Claude Desktop 本地路由模式"),
-    );
-  });
-
-  it("allows the built-in Codex official provider during takeover", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      id: "codex-official",
-      category: "official",
-    });
-
-    const { result } = renderHook(
-      () => useProviderActions("codex", true, true),
-      { wrapper },
-    );
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
-      providerId: "codex-official",
-    });
-    expect(toastErrorMock).not.toHaveBeenCalled();
-  });
-
-  it("continues blocking other official providers during takeover", async () => {
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      id: "claude-official",
-      category: "official",
-    });
-
-    const { result } = renderHook(
-      () => useProviderActions("claude", true, true),
-      { wrapper },
-    );
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(switchProviderMutateAsync).not.toHaveBeenCalled();
-    expect(toastErrorMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not grant routing capability to a UUID Codex official copy", async () => {
-    const { wrapper } = createWrapper();
-    const provider = createProvider({
-      id: "generated-uuid",
-      category: "official",
-    });
-    const { result } = renderHook(
-      () => useProviderActions("codex", true, true),
-      { wrapper },
-    );
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(switchProviderMutateAsync).not.toHaveBeenCalled();
-    expect(toastErrorMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("should sync plugin config when switching Claude provider with integration enabled", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    settingsApiGetMock.mockResolvedValueOnce({
-      enableClaudePluginIntegration: true,
-    });
-    settingsApiApplyMock.mockResolvedValueOnce(true);
-    const { wrapper } = createWrapper();
-    const provider = createProvider({ category: "official" });
-
-    const { result } = renderHook(() => useProviderActions("claude"), {
-      wrapper,
-    });
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(switchProviderMutateAsync).toHaveBeenCalledWith({
-      providerId: provider.id,
-    });
-    expect(settingsApiGetMock).toHaveBeenCalledTimes(1);
-    expect(settingsApiApplyMock).toHaveBeenCalledWith({ official: true });
-  });
-
-  it("should not call applyClaudePluginConfig when integration is disabled", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    settingsApiGetMock.mockResolvedValueOnce({
-      enableClaudePluginIntegration: false,
-    });
-    const { wrapper } = createWrapper();
-    const provider = createProvider();
-
-    const { result } = renderHook(() => useProviderActions("claude"), {
-      wrapper,
-    });
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(settingsApiGetMock).toHaveBeenCalledTimes(1);
-    expect(settingsApiApplyMock).not.toHaveBeenCalled();
-  });
-
-  it("should show error toast when plugin sync fails with error message", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    settingsApiGetMock.mockResolvedValueOnce({
-      enableClaudePluginIntegration: true,
-    });
-    settingsApiApplyMock.mockRejectedValueOnce(new Error("Sync failed"));
-    const { wrapper } = createWrapper();
-    const provider = createProvider();
-
-    const { result } = renderHook(() => useProviderActions("claude"), {
-      wrapper,
-    });
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(toastErrorMock).toHaveBeenCalledTimes(1);
-    expect(toastErrorMock.mock.calls[0]?.[0]).toBe("Sync failed");
   });
 
   it("propagates updateProvider errors", async () => {
@@ -535,28 +326,7 @@ describe("useProviderActions", () => {
     ).rejects.toThrow("update failed");
   });
 
-  it("should use default error message when plugin sync fails without error message", async () => {
-    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
-    settingsApiGetMock.mockResolvedValueOnce({
-      enableClaudePluginIntegration: true,
-    });
-    settingsApiApplyMock.mockRejectedValueOnce(new Error(""));
-    const { wrapper } = createWrapper();
-    const provider = createProvider();
-
-    const { result } = renderHook(() => useProviderActions("claude"), {
-      wrapper,
-    });
-
-    await act(async () => {
-      await result.current.switchProvider(provider);
-    });
-
-    expect(toastErrorMock).toHaveBeenCalledTimes(1);
-    expect(toastErrorMock.mock.calls[0]?.[0]).toBe("同步 Claude 插件失败");
-  });
-
-  it("handles mutation errors when plugin sync is skipped", async () => {
+  it("handles switch mutation errors", async () => {
     switchProviderMutateAsync.mockRejectedValueOnce(new Error("switch failed"));
     const { wrapper } = createWrapper();
     const provider = createProvider();
@@ -568,8 +338,6 @@ describe("useProviderActions", () => {
     await expect(
       result.current.switchProvider(provider),
     ).resolves.toBeUndefined();
-    expect(settingsApiGetMock).not.toHaveBeenCalled();
-    expect(settingsApiApplyMock).not.toHaveBeenCalled();
   });
 
   it("should call delete mutation when calling deleteProvider", async () => {
@@ -720,9 +488,6 @@ describe("useProviderActions", () => {
     });
 
     await result.current.switchProvider(provider);
-
-    expect(settingsApiGetMock).not.toHaveBeenCalled();
-    expect(settingsApiApplyMock).not.toHaveBeenCalled();
   });
 
   it("should track pending state of all mutations in isLoading", () => {

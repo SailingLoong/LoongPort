@@ -27,7 +27,6 @@ import { SkillCard } from "./SkillCard";
 import { RepoManagerPanel } from "./RepoManagerPanel";
 import {
   useDiscoverableSkills,
-  useInstalledSkills,
   useInstallSkill,
   useSkillRepos,
   useAddSkillRepo,
@@ -119,7 +118,6 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       isFetching: fetchingDiscoverable,
       refetch: refetchDiscoverable,
     } = useDiscoverableSkills();
-    const { data: installedSkills } = useInstalledSkills();
     const { data: repos = [], refetch: refetchRepos } = useSkillRepos();
 
     // skills.sh 搜索
@@ -156,21 +154,6 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
     const addRepoMutation = useAddSkillRepo();
     const removeRepoMutation = useRemoveSkillRepo();
 
-    // 已安装的 skill key 集合（使用 directory + repoOwner + repoName 组合判断）
-    const installedKeys = useMemo(() => {
-      if (!installedSkills) return new Set<string>();
-      return new Set(
-        installedSkills.map((s) => {
-          // 构建唯一 key：directory + repoOwner + repoName
-          const owner = s.repoOwner?.toLowerCase() || "";
-          const name = s.repoName?.toLowerCase() || "";
-          return `${s.directory.toLowerCase()}:${owner}:${name}`;
-        }),
-      );
-    }, [installedSkills]);
-
-    type DiscoverableSkillItem = DiscoverableSkill & { installed: boolean };
-
     // 从可发现技能中提取所有仓库选项
     const repoOptions = useMemo(() => {
       if (!discoverableSkills) return [];
@@ -183,28 +166,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       return Array.from(repoSet).sort();
     }, [discoverableSkills]);
 
-    // 为发现列表补齐 installed 状态，供 SkillCard 使用
-    const skills: DiscoverableSkillItem[] = useMemo(() => {
-      if (!discoverableSkills) return [];
-      return discoverableSkills.map((d) => {
-        // 同时处理 / 和 \ 路径分隔符（兼容 Windows 和 Unix）
-        const installName =
-          d.directory.split(/[/\\]/).pop()?.toLowerCase() ||
-          d.directory.toLowerCase();
-        // 使用 directory + repoOwner + repoName 组合判断是否已安装
-        const key = `${installName}:${d.repoOwner.toLowerCase()}:${d.repoName.toLowerCase()}`;
-        return {
-          ...d,
-          installed: installedKeys.has(key),
-        };
-      });
-    }, [discoverableSkills, installedKeys]);
-
-    // 检查 skills.sh 结果的安装状态
-    const isSkillsShInstalled = (skill: SkillsShDiscoverableSkill): boolean => {
-      const key = `${skill.directory.toLowerCase()}:${skill.repoOwner.toLowerCase()}:${skill.repoName.toLowerCase()}`;
-      return installedKeys.has(key);
-    };
+    const skills = discoverableSkills ?? [];
 
     const loading =
       searchSource === "repos"
@@ -231,6 +193,9 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       repoName: s.repoName,
       repoBranch: s.repoBranch,
       readmeUrl: s.readmeUrl,
+      installed: s.installed,
+      canInstall: s.canInstall,
+      canUninstall: s.canUninstall,
     });
 
     const handleInstall = async (key: string) => {
@@ -599,14 +564,10 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                   <>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                       {accumulatedResults.map((skill) => {
-                        const installed = isSkillsShInstalled(skill);
                         return (
                           <SkillCard
                             key={skill.key}
-                            skill={{
-                              ...toDiscoverableSkill(skill),
-                              installed,
-                            }}
+                            skill={toDiscoverableSkill(skill)}
                             installs={skill.installs}
                             onInstall={handleInstall}
                             onUninstall={handleUninstall}

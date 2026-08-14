@@ -167,7 +167,7 @@
         "apiKeyPlaceholder": "Enter Gemini API Key"
       }
     },
-    "duplicateLiveIdsLoadFailed": "Failed to read provider identifiers from config, please fix the config and try again"
+    "duplicateFailed": "Failed to duplicate provider"
   },
   "claudeCode": {
     "needsRouting": "Needs Routing",
@@ -3126,7 +3126,7 @@
       "dragHandle": "Drag to reorder",
       "refetchGroups": "Update available groups",
       "purchaseHint": "Open the relay service's top-up page",
-      "lowBalanceHint": "Balance is below ${{threshold}}. Select to top up",
+      "lowBalanceHint": "Balance is low. Select to top up",
       "remove": "Delete account and connection profiles",
       "removeBlockedByCurrent": "A connection profile from this account is in use. Switch to another profile before deleting it",
       "removeConfirmTitle": "Delete this account?",
@@ -3134,7 +3134,6 @@
       "removeConfirmMessageNeverLoggedIn": "This deletes “{{label}}” and its {{count}} connection profiles. You can add the account again later."
     },
     "tier": {
-      "rateUnknown": "Rate unknown",
       "rate": "{{value}}×",
       "models": "Supported models",
       "selectModel": "Switch to {{model}}",

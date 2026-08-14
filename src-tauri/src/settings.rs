@@ -815,8 +815,10 @@ pub fn get_settings() -> AppSettings {
         .clone()
 }
 
-pub fn get_settings_for_frontend() -> AppSettings {
-    let mut settings = get_settings();
+fn prepare_settings_for_frontend(mut settings: AppSettings) -> AppSettings {
+    settings
+        .visible_apps
+        .get_or_insert_with(VisibleApps::default);
     if let Some(sync) = &mut settings.webdav_sync {
         sync.password.clear();
     }
@@ -825,6 +827,10 @@ pub fn get_settings_for_frontend() -> AppSettings {
     }
     settings.webdav_backup = None;
     settings
+}
+
+pub fn get_settings_for_frontend() -> AppSettings {
+    prepare_settings_for_frontend(get_settings())
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
@@ -1301,5 +1307,19 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn frontend_settings_materialize_backend_visible_app_defaults() {
+        let mut settings = AppSettings::default();
+        settings.visible_apps = None;
+
+        let frontend = prepare_settings_for_frontend(settings);
+        let visible = frontend
+            .visible_apps
+            .expect("frontend settings must include visible apps");
+
+        assert!(visible.claude);
+        assert!(!visible.hermes);
     }
 }

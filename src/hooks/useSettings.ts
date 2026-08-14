@@ -1,7 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { useQueryClient } from "@tanstack/react-query";
 import { providersApi, settingsApi } from "@/lib/api";
 import { syncCurrentProvidersLiveSafe } from "@/utils/postChangeSync";
 import { useSettingsQuery, useSaveSettingsMutation } from "@/lib/query";
@@ -63,7 +62,6 @@ export function useSettings(): UseSettingsResult {
   const { t } = useTranslation();
   const { data } = useSettingsQuery();
   const saveMutation = useSaveSettingsMutation();
-  const queryClient = useQueryClient();
 
   // 1️⃣ 表单状态管理
   const {
@@ -125,58 +123,6 @@ export function useSettings(): UseSettingsResult {
     setRequiresRestart,
   ]);
 
-  // 同步 Claude 插件集成配置到 ~/.claude/settings.json
-  // 返回 true 表示已执行过 syncCurrentProvidersLiveSafe，调用方可跳过重复同步
-  // prevEnabled 必须由调用方在 saveMutation 之前从实时缓存（queryClient.getQueryData）捕获，
-  // 避免 useCallback closure 中 data 因未 re-render 而滞后导致的快速连切 race。
-  const syncClaudePluginIfChanged = useCallback(
-    async (
-      enabled: boolean | undefined,
-      prevEnabled: boolean | undefined,
-    ): Promise<boolean> => {
-      if (enabled === undefined || enabled === prevEnabled) return false;
-      try {
-        if (enabled) {
-          const currentId = await providersApi.getCurrent("claude");
-          let isOfficial = false;
-          if (currentId) {
-            const allProviders = await providersApi.getAll("claude");
-            isOfficial = allProviders[currentId]?.category === "official";
-          }
-          await settingsApi.applyClaudePluginConfig({ official: isOfficial });
-        } else {
-          await settingsApi.applyClaudePluginConfig({ official: true });
-        }
-
-        const syncResult = await syncCurrentProvidersLiveSafe();
-        if (!syncResult.ok) {
-          console.warn(
-            "[useSettings] Failed to sync providers after toggling Claude plugin",
-            syncResult.error,
-          );
-          toast.error(
-            t("notifications.syncClaudePluginFailed", {
-              defaultValue: "同步 Claude 插件失败",
-            }),
-          );
-        }
-        return true;
-      } catch (error) {
-        console.warn(
-          "[useSettings] Failed to sync Claude plugin config",
-          error,
-        );
-        toast.error(
-          t("notifications.syncClaudePluginFailed", {
-            defaultValue: "同步 Claude 插件失败",
-          }),
-        );
-        return false;
-      }
-    },
-    [t],
-  );
-
   // 即时保存设置（用于 General 标签页的实时更新）
   // 保存基础配置 + 独立的系统 API 调用（开机自启）
   const autoSaveSettings = useCallback(
@@ -211,12 +157,6 @@ export function useSettings(): UseSettingsResult {
           openclawConfigDir: sanitizedOpenclawDir,
           language: mergedSettings.language,
         };
-
-        // 在 mutate 之前从实时缓存捕获上一次持久化的插件集成状态，
-        // 避免 closure 里的 data 因 React 尚未 re-render 而滞后
-        const prevPluginEnabled = queryClient.getQueryData<Settings>([
-          "settings",
-        ])?.enableClaudePluginIntegration;
 
         // 保存到配置文件
         await saveMutation.mutateAsync(payload);
@@ -268,11 +208,6 @@ export function useSettings(): UseSettingsResult {
           }
         }
 
-        await syncClaudePluginIfChanged(
-          payload.enableClaudePluginIntegration,
-          prevPluginEnabled,
-        );
-
         // 持久化语言偏好
         try {
           if (typeof window !== "undefined" && updates.language) {
@@ -304,7 +239,7 @@ export function useSettings(): UseSettingsResult {
         throw error;
       }
     },
-    [data, queryClient, saveMutation, settings, syncClaudePluginIfChanged, t],
+    [data, saveMutation, settings, t],
   );
 
   // 完整保存设置（用于 Advanced 标签页的手动保存）
@@ -351,12 +286,6 @@ export function useSettings(): UseSettingsResult {
           openclawConfigDir: sanitizedOpenclawDir,
           language: mergedSettings.language,
         };
-
-        // 在 mutate 之前从实时缓存捕获上一次持久化的插件集成状态，
-        // 避免 closure 里的 data 因 React 尚未 re-render 而滞后
-        const prevPluginEnabled = queryClient.getQueryData<Settings>([
-          "settings",
-        ])?.enableClaudePluginIntegration;
 
         await saveMutation.mutateAsync(payload);
 
@@ -406,11 +335,6 @@ export function useSettings(): UseSettingsResult {
           }
         }
 
-        const pluginSynced = await syncClaudePluginIfChanged(
-          payload.enableClaudePluginIntegration,
-          prevPluginEnabled,
-        );
-
         try {
           if (typeof window !== "undefined" && payload.language) {
             window.localStorage.setItem("language", payload.language);
@@ -428,8 +352,7 @@ export function useSettings(): UseSettingsResult {
           console.warn("[useSettings] Failed to refresh tray menu", error);
         }
 
-        // 如果 Claude/Codex/Gemini/OpenCode/OpenClaw 的目录覆盖发生变化，则立即将"当前使用的供应商"写回对应应用的 live 配置
-        // 如果插件同步已经执行过 syncCurrentProvidersLiveSafe，则跳过避免重复
+        // 如果 Claude/Codex/Gemini/OpenCode/OpenClaw 的目录覆盖发生变化，则立即将"当前使用的供应商"写回对应应用的 live 配置。
         const claudeDirChanged = sanitizedClaudeDir !== previousClaudeDir;
         const codexDirChanged = sanitizedCodexDir !== previousCodexDir;
         const geminiDirChanged = sanitizedGeminiDir !== previousGeminiDir;
@@ -437,13 +360,12 @@ export function useSettings(): UseSettingsResult {
         const opencodeDirChanged = sanitizedOpencodeDir !== previousOpencodeDir;
         const openclawDirChanged = sanitizedOpenclawDir !== previousOpenclawDir;
         if (
-          !pluginSynced &&
-          (claudeDirChanged ||
-            codexDirChanged ||
-            geminiDirChanged ||
-            grokDirChanged ||
-            opencodeDirChanged ||
-            openclawDirChanged)
+          claudeDirChanged ||
+          codexDirChanged ||
+          geminiDirChanged ||
+          grokDirChanged ||
+          opencodeDirChanged ||
+          openclawDirChanged
         ) {
           const syncResult = await syncCurrentProvidersLiveSafe();
           if (!syncResult.ok) {
@@ -482,11 +404,9 @@ export function useSettings(): UseSettingsResult {
       appConfigDir,
       data,
       initialAppConfigDir,
-      queryClient,
       saveMutation,
       settings,
       setRequiresRestart,
-      syncClaudePluginIfChanged,
       t,
     ],
   );

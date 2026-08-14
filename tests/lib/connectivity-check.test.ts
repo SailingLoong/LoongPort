@@ -1,32 +1,41 @@
-import { describe, expect, it } from "vitest";
-import { parseModelProbeVerdict } from "@/lib/api/connectivity-check";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { streamCheckProvider } from "@/lib/api/connectivity-check";
 
-describe("parseModelProbeVerdict", () => {
-  it("parses structured model lists", () => {
-    expect(
-      parseModelProbeVerdict(
-        '{"kind":"models","total":4,"head":["alpha","beta","…"]}',
-      ),
-    ).toEqual({
-      kind: "models",
-      total: 4,
-      head: ["alpha", "beta", "…"],
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
+
+describe("streamCheckProvider", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("returns the backend typed model probe verdict unchanged", async () => {
+    const backendResult = {
+      status: "operational",
+      overallStatus: "healthy",
+      success: true,
+      message: "Reachable",
+      responseTimeMs: 12,
+      httpStatus: 200,
+      modelProbe: {
+        kind: "models",
+        total: 4,
+        head: ["alpha", "beta", "…"],
+      },
+      testedAt: 1,
+      retryCount: 0,
+    };
+    invokeMock.mockResolvedValue(backendResult);
+
+    await expect(streamCheckProvider("codex", "provider-1")).resolves.toBe(
+      backendResult,
+    );
+    expect(invokeMock).toHaveBeenCalledWith("stream_check_provider", {
+      appType: "codex",
+      providerId: "provider-1",
     });
-  });
-
-  it("parses image-only and HTTP verdicts", () => {
-    expect(
-      parseModelProbeVerdict('{"kind":"imageOnly","models":["gpt-image-1"]}'),
-    ).toEqual({ kind: "imageOnly", models: ["gpt-image-1"] });
-    expect(
-      parseModelProbeVerdict('{"kind":"keyExpired","status":401}'),
-    ).toEqual({ kind: "keyExpired", status: 401 });
-  });
-
-  it("returns null for malformed or unknown payloads", () => {
-    expect(parseModelProbeVerdict("legacy Chinese summary")).toBeNull();
-    expect(parseModelProbeVerdict('{"kind":"futureVerdict"}')).toBeNull();
-    expect(parseModelProbeVerdict('{"kind":"models","total":"4"}')).toBeNull();
-    expect(parseModelProbeVerdict(undefined)).toBeNull();
   });
 });

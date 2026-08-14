@@ -24,6 +24,7 @@ function tier(models: string[]): TierInfo {
     models,
     rateMultiplier: 1,
     isCurrent: true,
+    canVerifyModels: true,
     userEdited: false,
     allowImageGeneration: false,
   };
@@ -40,6 +41,7 @@ function relay(models: string[]): RelayRowData {
     canQueryBalance: true,
     canRefresh: true,
     canDelete: false,
+    removeConfirmation: "configured",
     tiers: [tier(models)],
   };
 }

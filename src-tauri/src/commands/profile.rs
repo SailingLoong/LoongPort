@@ -3,6 +3,7 @@
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
+use crate::app_config::AppType;
 use crate::database::Profile;
 use crate::events::{PROFILE_APPLIED, PROVIDER_SWITCHED};
 use crate::services::profile::{ProfilePayload, ProfileScope, ProfileService};
@@ -14,6 +15,7 @@ pub struct ProfileDto {
     pub id: String,
     pub name: String,
     pub payload: ProfilePayload,
+    pub scope_snapshots: Vec<ProfileScopeSnapshotDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,6 +35,13 @@ impl From<Profile> for ProfileDto {
         Self {
             id: profile.id,
             name: profile.name,
+            scope_snapshots: ProfileScope::ALL
+                .into_iter()
+                .map(|scope| ProfileScopeSnapshotDto {
+                    scope,
+                    has_snapshot: payload.scope_captured(scope),
+                })
+                .collect(),
             payload,
             created_at: profile.created_at,
             updated_at: profile.updated_at,
@@ -40,20 +49,46 @@ impl From<Profile> for ProfileDto {
     }
 }
 
-/// 每个分组当前激活的项目 id（未使用项目时为 null）
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CurrentProfileIds {
-    pub claude: Option<String>,
-    pub claude_desktop: Option<String>,
-    pub codex: Option<String>,
+pub struct ProfileScopeSnapshotDto {
+    pub scope: ProfileScope,
+    pub has_snapshot: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileAppDto {
+    pub app: AppType,
+    pub supported: bool,
+    pub scope: Option<ProfileScope>,
+    pub current_profile_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfilesResponse {
     pub profiles: Vec<ProfileDto>,
-    pub current_ids: CurrentProfileIds,
+    pub apps: Vec<ProfileAppDto>,
+}
+
+fn build_profile_app_dtos<E>(
+    mut current_profile_id: impl FnMut(ProfileScope) -> Result<Option<String>, E>,
+) -> Result<Vec<ProfileAppDto>, E> {
+    AppType::all()
+        .map(|app| {
+            let scope = ProfileScope::for_app(&app);
+            Ok(ProfileAppDto {
+                app,
+                supported: scope.is_some(),
+                scope,
+                current_profile_id: match scope {
+                    Some(scope) => current_profile_id(scope)?,
+                    None => None,
+                },
+            })
+        })
+        .collect()
 }
 
 /// Profile 应用完成后的统一收尾：发事件 + 重建托盘菜单
@@ -96,23 +131,15 @@ pub fn emit_profile_apply_events(
 #[tauri::command]
 pub fn list_profiles(state: State<'_, AppState>) -> Result<ProfilesResponse, String> {
     let profiles = ProfileService::list(&state).map_err(|e| e.to_string())?;
-    let current_ids = CurrentProfileIds {
-        claude: state
+    let apps = build_profile_app_dtos(|scope| {
+        state
             .db
-            .get_current_profile_id(ProfileScope::Claude.as_str())
-            .map_err(|e| e.to_string())?,
-        claude_desktop: state
-            .db
-            .get_current_profile_id(ProfileScope::ClaudeDesktop.as_str())
-            .map_err(|e| e.to_string())?,
-        codex: state
-            .db
-            .get_current_profile_id(ProfileScope::Codex.as_str())
-            .map_err(|e| e.to_string())?,
-    };
+            .get_current_profile_id(scope.as_str())
+            .map_err(|e| e.to_string())
+    })?;
     Ok(ProfilesResponse {
         profiles: profiles.into_iter().map(ProfileDto::from).collect(),
-        current_ids,
+        apps,
     })
 }
 
@@ -193,4 +220,73 @@ pub fn apply_profile(
     }
 
     Ok(warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile_with_payload(payload: ProfilePayload) -> Profile {
+        Profile {
+            id: "profile-1".to_string(),
+            name: "Project One".to_string(),
+            payload: serde_json::to_string(&payload).unwrap(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(2),
+        }
+    }
+
+    #[test]
+    fn profile_dto_exposes_snapshot_presence_for_each_backend_scope() {
+        let mut payload = ProfilePayload::default();
+        payload.mcp.claude = Some(vec![]);
+        payload.providers.codex = Some("codex-provider".to_string());
+
+        let value = serde_json::to_value(ProfileDto::from(profile_with_payload(payload))).unwrap();
+
+        assert_eq!(
+            value["scopeSnapshots"],
+            serde_json::json!([
+                { "scope": "claude", "hasSnapshot": true },
+                { "scope": "claude-desktop", "hasSnapshot": false },
+                { "scope": "codex", "hasSnapshot": true }
+            ])
+        );
+    }
+
+    #[test]
+    fn profile_app_dtos_expose_backend_support_scope_and_current_profile() {
+        let apps = build_profile_app_dtos(|scope| {
+            Ok::<_, String>(match scope {
+                ProfileScope::Claude => Some("claude-current".to_string()),
+                ProfileScope::ClaudeDesktop => None,
+                ProfileScope::Codex => Some("codex-current".to_string()),
+            })
+        })
+        .unwrap();
+
+        assert!(apps.iter().any(|app| !app.supported && app.scope.is_none()));
+
+        let value = serde_json::to_value(apps).unwrap();
+        let apps = value.as_array().unwrap();
+        assert_eq!(
+            apps.iter().find(|app| app["app"] == "codex").unwrap(),
+            &serde_json::json!({
+                "app": "codex",
+                "supported": true,
+                "scope": "codex",
+                "currentProfileId": "codex-current"
+            })
+        );
+        assert_eq!(
+            apps.iter().find(|app| app["app"] == "codex-image").unwrap(),
+            &serde_json::json!({
+                "app": "codex-image",
+                "supported": false,
+                "scope": null,
+                "currentProfileId": null
+            })
+        );
+    }
 }

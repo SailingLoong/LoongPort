@@ -1,0 +1,79 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const read = (path: string) =>
+  readFileSync(resolve(process.cwd(), path), "utf8");
+
+describe("中转站业务事实由后端定义", () => {
+  it("页面不编排全量刷新或汇总业务结果", () => {
+    const section = read("src/components/relay/RelaySection.tsx");
+
+    expect(section).not.toContain("Promise.allSettled");
+    expect(section).not.toContain("sumTiersForApp");
+    expect(section).not.toContain("vendorProviderIds");
+    expect(section).not.toContain('msg.includes("100")');
+    expect(section).not.toContain("reportProvision");
+    expect(section).not.toContain("removeConfirmMessageKey");
+    expect(section).toContain("relayApi.refreshAll(appId)");
+  });
+
+  it("旧的前端业务规则 helper 已移除", () => {
+    for (const path of [
+      "src/components/relay/lowBalance.ts",
+      "src/components/relay/provisionScope.ts",
+      "src/components/relay/reportProvision.ts",
+      "src/components/relay/removeConfirmWording.ts",
+    ]) {
+      expect(() => read(path)).toThrow();
+    }
+  });
+});
+
+describe("供应商业务事实由后端定义", () => {
+  it("Provider 页面不再从原始配置或额外接口推导展示状态", () => {
+    const list = read("src/components/providers/ProviderList.tsx");
+    const card = read("src/components/providers/ProviderCard.tsx");
+    const usageModal = read("src/components/UsageScriptModal.tsx");
+    const editDialog = read("src/components/providers/EditProviderDialog.tsx");
+    const queries = read("src/lib/query/queries.ts");
+    const mutations = read("src/lib/query/mutations.ts");
+    const providerForm = read(
+      "src/components/providers/forms/ProviderForm.tsx",
+    );
+    const omoModelSource = read(
+      "src/components/providers/forms/hooks/useOmoModelSource.ts",
+    );
+    const providerApi = read("src/lib/api/providers.ts");
+
+    expect(list).not.toContain("isManagedProviderId");
+    expect(list).not.toContain("useOpenClawLiveProviderIds");
+    expect(list).not.toContain("useOpenClawDefaultModel");
+    expect(list).not.toContain("useHermesLiveProviderIds");
+    expect(list).not.toContain("useHermesModelConfig");
+    expect(list).not.toContain("useCurrentOmoProviderId");
+    expect(list).not.toContain("currentProviderId");
+    expect(list).not.toContain("isProviderInConfig");
+    expect(list).not.toContain("isProviderDefaultModel");
+    expect(card).not.toContain("isHermesReadOnlyProvider");
+    expect(queries).not.toContain("providersApi.getCurrent(appId)");
+    expect(usageModal).not.toContain("isOfficialSubscriptionProvider");
+    expect(card).not.toContain("supportsOfficialSubscription");
+    expect(editDialog).not.toContain("providersApi.getCurrent(appId)");
+    expect(editDialog).not.toContain("vscodeApi.getLiveProviderSettings");
+    expect(editDialog).not.toContain("openclawApi.getLiveProvider");
+    expect(editDialog).toContain("providersApi.getEditSettings(provider.id");
+    expect(mutations).not.toContain("generateUUID");
+    expect(providerForm).not.toContain("getOpenCodeLiveProviderIds");
+    expect(providerForm).not.toContain("useOpenClawLiveProviderIds");
+    expect(providerForm).not.toContain("useHermesLiveProviderIds");
+    expect(omoModelSource).not.toContain("getOpenCodeLiveProviderIds");
+    expect(omoModelSource).toContain("provider.presentation?.isInConfig");
+    expect(providerApi).not.toContain("getOpenCodeLiveProviderIds");
+    expect(providerApi).not.toContain("getOpenClawLiveProviderIds");
+    expect(providerApi).not.toContain("getHermesLiveProviderIds");
+    expect(read("src/App.tsx")).not.toContain("getOpenCodeLiveProviderIds");
+    expect(read("src/App.tsx")).not.toContain("getOpenClawLiveProviderIds");
+    expect(read("src/App.tsx")).not.toContain("getHermesLiveProviderIds");
+  });
+});

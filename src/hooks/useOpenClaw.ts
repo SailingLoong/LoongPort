@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openclawApi } from "@/lib/api/openclaw";
-import { providersApi } from "@/lib/api/providers";
 import type {
   OpenClawEnvConfig,
   OpenClawToolsConfig,
@@ -13,7 +12,6 @@ import type {
  */
 export const openclawKeys = {
   all: ["openclaw"] as const,
-  liveProviderIds: ["openclaw", "liveProviderIds"] as const,
   defaultModel: ["openclaw", "defaultModel"] as const,
   env: ["openclaw", "env"] as const,
   tools: ["openclaw", "tools"] as const,
@@ -24,18 +22,6 @@ export const openclawKeys = {
 // ============================================================
 // Query hooks
 // ============================================================
-
-/**
- * Query live provider IDs from openclaw.json config.
- * Used by ProviderList to show "In Config" badge.
- */
-export function useOpenClawLiveProviderIds(enabled: boolean) {
-  return useQuery({
-    queryKey: openclawKeys.liveProviderIds,
-    queryFn: () => providersApi.getOpenClawLiveProviderIds(),
-    enabled,
-  });
-}
 
 /**
  * Query the default model from agents.defaults.model.

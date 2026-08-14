@@ -4,34 +4,23 @@ import type { UsageResult } from "@/types";
 
 import type { AppId } from "./types";
 
-/**
- * 「加站弹窗要什么」+「切档位前要不要提醒处理 ChatGPT」。
- *
- * 2026-08-04 从 9 个字段收缩到 2 个 —— 那 7 个服务的是已删的 LoongPort 独立页
- * 那个「当前站」单站视图。中转站行现在每行各显示自己的状态、数据走 `listRelays`。
- * 后端 `RelayStatus` 的文档写了完整理由（含为什么不留着当预留）。
- */
 export interface RelayStatus {
   /** 域名输入框的底纹词。 */
   defaultSite: string;
-  /**
-   * 切换分组前要不要先提示用户处理 ChatGPT。
-   *
-   * 不是「装了没有」—— 非 macOS 平台查不到那个事实，那边恒为 true。
-   */
-  chatgptNeedsAttention: boolean;
+  /** 后端跨中转站与官网账号表计算的首次添加引导判据。 */
+  shouldPromptAddSite: boolean;
 }
 
 /**
- * 一个已添加的站点。
+ * 一个已添加站点的后端摘要。
  *
  * 当前消费者是「一个站都没有吗」的自动引导判据（只数条数）。新增站点只有在
  * 注册或登录成功后才会写入；启动建表路径也会清理旧版遗留的未认证占位行。
  */
 export interface SiteInfo {
   siteOrigin: string;
-  /** 登录后的账号名（昵称优先，回落邮箱）。 */
-  accountLabel: string;
+  /** 后端已识别身份的账号数；未登录占位行不计入。 */
+  accountCount: number;
 }
 
 export type BackendKind = "sub2api" | "newapi";
@@ -136,6 +125,8 @@ export interface TierInfo {
    */
   rateMultiplier: number | null;
   isCurrent: boolean;
+  /** 后端是否允许对这个档位执行模型验证。 */
+  canVerifyModels: boolean;
   /**
    * 用户在 cc-switch 编辑页改过这个档位的配置吗。
    *
@@ -187,17 +178,47 @@ export interface RelayRow {
   canQueryBalance: boolean;
   canRefresh: boolean;
   canDelete: boolean;
+  removeConfirmation: "neverLoggedIn" | "configured";
   tiers: TierInfo[];
 }
 
-export interface ProvisionSummary {
-  tiers: TierInfo[];
-  /** 失败的分组。**不为空也不代表整体失败** —— 成功的那些照样能用。 */
-  failures: Array<{ groupName: string; reason: string }>;
-  /** 这次新建了几把密钥（其余是复用已有的）。 */
+export interface RowBalanceResult {
+  usage: UsageResult;
+  shouldPromptTopUp: boolean;
+}
+
+export type RefreshNotice =
+  | "none"
+  | "updated"
+  | "updatedWithKeys"
+  | "otherPlatforms";
+
+export interface RefreshFailure {
+  name: string;
+  reason: string;
+  kind?: "key_limit";
+  helpUrl?: string;
+}
+
+export interface RefreshSummary {
+  notice: RefreshNotice;
+  refreshedAccounts: number;
+  tiers: number;
   keysCreated: number;
-  /** Imported non-managed providers removed because LoongPort now owns the same credential. */
-  mergedProviders: Array<{ name: string; appId: AppId }>;
+  otherPlatformTiers: number;
+  mergedProviders: number;
+  failures: RefreshFailure[];
+}
+
+export interface RefreshedBalance {
+  kind: "relay" | "vendor";
+  rowId: number;
+  result: RowBalanceResult;
+}
+
+export interface RefreshResult {
+  summary: RefreshSummary;
+  balances: RefreshedBalance[];
 }
 
 export interface SwitchTierResult {
@@ -212,6 +233,13 @@ export interface SwitchTierResult {
    */
   warnings: string[];
 }
+
+export type SwitchTierCommandResult =
+  | {
+      status: "confirmationRequired";
+      targetName: string;
+    }
+  | ({ status: "switched" } & SwitchTierResult);
 
 /** 「切回官方登录」的结果。字段名与 Rust 侧 `RestoreOfficialLoginResult` 一一对应。 */
 export interface RestoreOfficialLoginResult {
@@ -287,24 +315,8 @@ export const relayApi = {
    * **每次都是全新登录态**（登录窗用 incognito，见后端注释）：同一个站可以
    * 挂多个账号，删掉再加也不会复用旧 token。
    */
-  login: (relayId: number): Promise<boolean> =>
-    invoke("relay_login", { relayId }),
-
-  /**
-   * 拉分组并为每组备好密钥。**一次探全部平台，各归各的 tab。**
-   *
-   * 不吃 app 参数 —— 每个分组落到哪个 CLI 由它自己的 platform 决定
-   * （openai→codex、anthropic→claude、gemini→gemini、grok→grokbuild）。
-   * 用户在任何一个 tab 登录一次，全部平台的档位都备好了。
-   *
-   * `relayId` 指定作用于**哪一行**，**必填**。曾经可省略、回落到「当前站」
-   * 那个全局单例状态，于是两个中转站同时 provision 会互相串目标
-   * （原来靠「任一操作进行中就禁用所有行」兜住 —— 那是拿全局禁用换正确性）。
-   *
-   * 认不出配置形状的 CLI 会计入 `failures`，不让整批失败。
-   */
-  provision: (relayId: number): Promise<ProvisionSummary> =>
-    invoke("relay_provision", { relayId }),
+  login: (relayId: number, app: AppId): Promise<RefreshResult | null> =>
+    invoke("relay_login", { relayId, app }),
 
   /**
    * 「中转站 × 分组」页的数据源：一次拿到全部中转站 + 各自在该 app 下的档位。
@@ -340,9 +352,13 @@ export const relayApi = {
   switchTier: (
     providerId: string,
     app: string,
-    quitChatgpt: boolean,
-  ): Promise<SwitchTierResult> =>
-    invoke("relay_switch_tier", { providerId, app, quitChatgpt }),
+    quitChatgpt?: boolean,
+  ): Promise<SwitchTierCommandResult> =>
+    invoke("relay_switch_tier", {
+      providerId,
+      app,
+      quitChatgpt: quitChatgpt ?? null,
+    }),
 
   /**
    * Select one of the models advertised by a managed Codex tier. The backend
@@ -353,13 +369,13 @@ export const relayApi = {
     providerId: string,
     app: string,
     model: string,
-    quitChatgpt: boolean,
-  ): Promise<SwitchTierResult> =>
+    quitChatgpt?: boolean,
+  ): Promise<SwitchTierCommandResult> =>
     invoke("relay_switch_tier_model", {
       providerId,
       app,
       model,
-      quitChatgpt,
+      quitChatgpt: quitChatgpt ?? null,
     }),
 
   listSites: (): Promise<SiteInfo[]> => invoke("relay_list_sites"),
@@ -394,8 +410,14 @@ export const relayApi = {
    * ⚠️ **登录态过期也查得到**：后端前两步走 sk，不需要网页登录态。别在调用方
    * 按 `sessionExpired` 把这条路关掉。
    */
-  balance: (relayId: number): Promise<UsageResult> =>
+  balance: (relayId: number): Promise<RowBalanceResult> =>
     invoke("relay_balance", { relayId }),
+
+  refresh: (relayId: number, app: AppId): Promise<RefreshResult> =>
+    invoke("relay_refresh", { relayId, app }),
+
+  refreshAll: (app: AppId): Promise<RefreshResult> =>
+    invoke("relay_refresh_all", { app }),
 
   /**
    * 带登录态打开某个中转站的充值页。

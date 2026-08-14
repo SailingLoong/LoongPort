@@ -44,6 +44,5 @@ export type {
   SiteInfo,
   ProbeResult,
   TierInfo,
-  ProvisionSummary,
   SwitchTierResult,
 } from "./relay";

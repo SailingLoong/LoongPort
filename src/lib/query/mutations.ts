@@ -6,7 +6,6 @@ import type { DeleteSessionOptions } from "@/lib/api/sessions";
 import type { SwitchResult } from "@/lib/api/providers";
 import type { Provider, SessionMeta, Settings } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
-import { generateUUID } from "@/utils/uuid";
 import { openclawKeys } from "@/hooks/useOpenClaw";
 import { invalidateHermesProviderCaches } from "@/hooks/useHermes";
 import { proxyKeys } from "@/lib/query/proxy";
@@ -69,33 +68,17 @@ export const useAddProviderMutation = (appId: AppId) => {
         return officialProvider;
       }
 
-      let id: string;
-
-      if (appId === "opencode" || appId === "openclaw" || appId === "hermes") {
-        if (
-          providerInput.category === "omo" ||
-          providerInput.category === "omo-slim"
-        ) {
-          const prefix = providerInput.category === "omo" ? "omo" : "omo-slim";
-          id = `${prefix}-${generateUUID()}`;
-        } else {
-          if (!providerInput.providerKey) {
-            throw new Error(`Provider key is required for ${appId}`);
-          }
-          id = providerInput.providerKey;
-        }
-      } else {
-        id = generateUUID();
-      }
-
       const newProvider: Provider = {
         ...rest,
-        id,
-        createdAt: Date.now(),
+        id: "",
       };
-      delete (newProvider as any).providerKey;
 
-      await providersApi.add(newProvider, appId, addToLive);
+      await providersApi.add(
+        newProvider,
+        appId,
+        addToLive,
+        providerInput.providerKey,
+      );
       return newProvider;
     },
     onSuccess: async () => {
@@ -295,7 +278,8 @@ export const useSwitchProviderMutation = (appId: AppId) => {
         input.quitChatgpt,
       );
     },
-    onSuccess: async () => {
+    onSuccess: async (result) => {
+      if (result.status === "confirmationRequired") return;
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
       if (appId === "claude-desktop") {
         await queryClient.invalidateQueries({ queryKey: proxyKeys.status });
@@ -304,11 +288,7 @@ export const useSwitchProviderMutation = (appId: AppId) => {
         });
       }
 
-      // OpenCode/OpenClaw: also invalidate live provider IDs cache to update button state
       if (appId === "opencode") {
-        await queryClient.invalidateQueries({
-          queryKey: ["opencodeLiveProviderIds"],
-        });
         await queryClient.invalidateQueries({
           queryKey: ["omo", "current-provider-id"],
         });
@@ -317,9 +297,6 @@ export const useSwitchProviderMutation = (appId: AppId) => {
         });
       }
       if (appId === "openclaw") {
-        await queryClient.invalidateQueries({
-          queryKey: openclawKeys.liveProviderIds,
-        });
         await queryClient.invalidateQueries({
           queryKey: openclawKeys.defaultModel,
         });

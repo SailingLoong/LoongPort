@@ -40,14 +40,6 @@ import {
   useProfilesQuery,
 } from "@/lib/query/profiles";
 import { ProfileManageDialog } from "./ProfileManageDialog";
-import { APP_PROFILE_SCOPE, hasScopeSnapshot } from "./scope";
-import type { CurrentProfileIds, ProfileScope } from "@/lib/api/profiles";
-
-const CURRENT_ID_KEY: Record<ProfileScope, keyof CurrentProfileIds> = {
-  claude: "claude",
-  "claude-desktop": "claudeDesktop",
-  codex: "codex",
-};
 
 interface ProfileSwitcherProps {
   activeApp: AppId;
@@ -73,15 +65,13 @@ export function ProfileSwitcher({ activeApp }: ProfileSwitcherProps) {
   const clearMutation = useClearProfileMutation();
   const createMutation = useCreateProfileMutation();
 
-  // Profile 仅作用于受支持的应用——在其他应用的标签页展示会误导用户
-  // 以为当前应用也被切换了，因此只在有所属分组的应用页面渲染
-  const scope = APP_PROFILE_SCOPE[activeApp];
-  if (!scope) {
+  const appFacts = data?.apps?.find(({ app }) => app === activeApp);
+  if (!appFacts?.supported || !appFacts.scope) {
     return null;
   }
 
+  const { scope, currentProfileId: currentId } = appFacts;
   const profiles = data?.profiles ?? [];
-  const currentId = data?.currentIds?.[CURRENT_ID_KEY[scope]] ?? null;
   const currentProfile = profiles.find((p) => p.id === currentId);
 
   const handleApply = (id: string) => {
@@ -152,7 +142,9 @@ export function ProfileSwitcher({ activeApp }: ProfileSwitcherProps) {
                         )}
                       />
                       <span className="truncate">{profile.name}</span>
-                      {!hasScopeSnapshot(profile, scope) && (
+                      {!profile.scopeSnapshots.find(
+                        (snapshot) => snapshot.scope === scope,
+                      )?.hasSnapshot && (
                         <span className="ml-auto shrink-0 pl-2 text-xs text-muted-foreground">
                           {t("profiles.noSnapshotForScope")}
                         </span>

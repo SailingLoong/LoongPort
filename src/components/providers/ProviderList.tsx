@@ -22,15 +22,6 @@ import type { AppId } from "@/lib/api";
 import { providersApi } from "@/lib/api/providers";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { useDragSort } from "@/hooks/useDragSort";
-import { isManagedProviderId } from "@/config/managedProviderId";
-import {
-  useOpenClawLiveProviderIds,
-  useOpenClawDefaultModel,
-} from "@/hooks/useOpenClaw";
-import {
-  useHermesLiveProviderIds,
-  useHermesModelConfig,
-} from "@/hooks/useHermes";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { ProviderCard } from "@/components/providers/ProviderCard";
 import { ProviderEmptyState } from "@/components/providers/ProviderEmptyState";
@@ -40,10 +31,6 @@ import {
   useAddToFailoverQueue,
   useRemoveFromFailoverQueue,
 } from "@/lib/query/failover";
-import {
-  useCurrentOmoProviderId,
-  useCurrentOmoSlimProviderId,
-} from "@/lib/query/omo";
 import { useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -51,7 +38,6 @@ import { isTextEditableTarget } from "@/utils/domUtils";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
-  currentProviderId: string;
   appId: AppId;
   onSwitch: (provider: Provider) => void;
   onEdit: (provider: Provider) => void;
@@ -73,7 +59,6 @@ interface ProviderListProps {
 
 export function ProviderList({
   providers,
-  currentProviderId,
   appId,
   onSwitch,
   onEdit,
@@ -95,25 +80,12 @@ export function ProviderList({
   const { t } = useTranslation();
   const { checkProvider, isChecking } = useStreamCheck(appId);
 
-  // LoongPort 托管的档位不在这个列表里出现 —— 它们在本页**顶部**那一区
-  // （`RelaySection`）。⚠️ 别再写成「它们有自己的页面」：那个独立页
-  // 2026-08-04 已删，现在两者同在供应商页上，只是分上下两区。
-  //
-  // **为什么必须滤**：这里的每张卡都带编辑/删除/拖拽排序，而托管项那三样都不适用
-  // （配置由 provision 生成，改了下次刷新就被覆盖；顺序由倍率决定）。Rust 侧虽然已经
-  // 收了口（`reject_if_managed`，那些命令会报错），但把按钮摆在那儿本身就是陷阱 ——
-  // 用户点了才被拒，而错误文案指向另一个区。
-  //
-  // ⚠️ **判据走 `isManagedProviderId` 而不是裸前缀** —— 前缀会把用户手填的
-  // `loongport-mine` 也滤掉（opencode / openclaw / hermes 的 id 就是用户填的 key），
-  // 那条 provider 于是从界面上消失，而他没有任何办法把它找回来。
-  //
-  // 滤在 useDragSort **之前**：下游的排序、渲染、拖拽索引全都继承这个结果，
-  // 只需这一处。这也是「改上游文件时改动面越小越好」（CLAUDE.md §一）。
   const unmanagedProviders = useMemo(
     () =>
       Object.fromEntries(
-        Object.entries(providers).filter(([, p]) => !isManagedProviderId(p.id)),
+        Object.entries(providers).filter(
+          ([, provider]) => provider.presentation?.isManaged !== true,
+        ),
       ),
     [providers],
   );
@@ -121,54 +93,6 @@ export function ProviderList({
   const { sortedProviders, sensors, handleDragEnd } = useDragSort(
     unmanagedProviders,
     appId,
-  );
-
-  const { data: opencodeLiveIds } = useQuery({
-    queryKey: ["opencodeLiveProviderIds"],
-    queryFn: () => providersApi.getOpenCodeLiveProviderIds(),
-    enabled: appId === "opencode",
-  });
-
-  // OpenClaw: 查询 live 配置中的供应商 ID 列表，用于判断 isInConfig
-  const { data: openclawLiveIds } = useOpenClawLiveProviderIds(
-    appId === "openclaw",
-  );
-
-  // Hermes: 查询 live 配置中的供应商 ID 列表，用于判断 isInConfig
-  const { data: hermesLiveIds } = useHermesLiveProviderIds(appId === "hermes");
-
-  // Hermes: 读取当前 model.provider，用于判断哪个供应商是"当前激活"（高亮）
-  const { data: hermesModelConfig } = useHermesModelConfig(appId === "hermes");
-  const hermesCurrentProviderId = hermesModelConfig?.provider;
-
-  // 判断供应商是否已添加到配置（累加模式应用：OpenCode/OpenClaw/Hermes）
-  const isProviderInConfig = useCallback(
-    (providerId: string): boolean => {
-      if (appId === "opencode") {
-        return opencodeLiveIds?.includes(providerId) ?? false;
-      }
-      if (appId === "openclaw") {
-        return openclawLiveIds?.includes(providerId) ?? false;
-      }
-      if (appId === "hermes") {
-        return hermesLiveIds?.includes(providerId) ?? false;
-      }
-      return true; // 其他应用始终返回 true
-    },
-    [appId, opencodeLiveIds, openclawLiveIds, hermesLiveIds],
-  );
-
-  // OpenClaw: query default model to determine which provider is default
-  const { data: openclawDefaultModel } = useOpenClawDefaultModel(
-    appId === "openclaw",
-  );
-
-  const isProviderDefaultModel = useCallback(
-    (providerId: string): boolean => {
-      if (appId !== "openclaw" || !openclawDefaultModel?.primary) return false;
-      return openclawDefaultModel.primary.startsWith(providerId + "/");
-    },
-    [appId, openclawDefaultModel],
   );
 
   // 故障转移相关
@@ -179,10 +103,6 @@ export function ProviderList({
 
   const isFailoverModeActive =
     isProxyTakeover === true && isAutoFailoverEnabled === true;
-
-  const isOpenCode = appId === "opencode";
-  const { data: currentOmoId } = useCurrentOmoProviderId(isOpenCode);
-  const { data: currentOmoSlimId } = useCurrentOmoSlimProviderId(isOpenCode);
 
   const getFailoverPriority = useCallback(
     (providerId: string): number | undefined => {
@@ -413,26 +333,13 @@ export function ProviderList({
           {filteredProviders.map((provider) => {
             const isOmo = provider.category === "omo";
             const isOmoSlim = provider.category === "omo-slim";
-            const isOmoCurrent = isOmo && provider.id === (currentOmoId || "");
-            const isOmoSlimCurrent =
-              isOmoSlim && provider.id === (currentOmoSlimId || "");
-            const isHermesCurrent =
-              appId === "hermes" && hermesCurrentProviderId === provider.id;
             return (
               <SortableProviderCard
                 key={provider.id}
                 provider={provider}
-                isCurrent={
-                  isOmo
-                    ? isOmoCurrent
-                    : isOmoSlim
-                      ? isOmoSlimCurrent
-                      : appId === "hermes"
-                        ? isHermesCurrent
-                        : provider.id === currentProviderId
-                }
+                isCurrent={provider.presentation?.isCurrent === true}
                 appId={appId}
-                isInConfig={isProviderInConfig(provider.id)}
+                isInConfig={provider.presentation?.isInConfig === true}
                 isOmo={isOmo}
                 isOmoSlim={isOmoSlim}
                 onSwitch={onSwitch}
@@ -456,14 +363,11 @@ export function ProviderList({
                   handleToggleFailover(provider.id, enabled)
                 }
                 activeProviderId={activeProviderId}
-                // OpenClaw: default model / Hermes: model.provider === provider.id
-                isDefaultModel={
-                  appId === "hermes"
-                    ? isHermesCurrent
-                    : isProviderDefaultModel(provider.id)
-                }
+                isDefaultModel={provider.presentation?.isDefaultModel === true}
                 onSetAsDefault={
-                  onSetAsDefault ? () => onSetAsDefault(provider) : undefined
+                  onSetAsDefault && provider.presentation?.canSetAsDefault
+                    ? () => onSetAsDefault(provider)
+                    : undefined
                 }
               />
             );

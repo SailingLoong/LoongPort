@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
-import { relayApi } from "@/lib/api";
+import type { SwitchResult } from "@/lib/api/providers";
 import type { Provider } from "@/types";
 
 import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
@@ -32,55 +32,34 @@ import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
  * （非 macOS 查不到，那边恒为 true）。没装的 macOS 用户不会被打扰。
  */
 export function useCodexSwitchGuard(
-  appId: string,
-  switchProvider: (provider: Provider, quitChatgpt?: boolean) => void,
+  switchProvider: (
+    provider: Provider,
+    quitChatgpt?: boolean,
+  ) => Promise<SwitchResult | undefined>,
 ) {
-  const [pending, setPending] = useState<Provider | null>(null);
-  const [needsAttention, setNeedsAttention] = useState(false);
+  const [pending, setPending] = useState<{
+    provider: Provider;
+    targetName: string;
+  } | null>(null);
 
   // 只在 codex 页问一次后端。`switchProvider` 每次渲染都可能是新引用，
   // 所以用 ref 取当前值，避免把它写进依赖里让这个 effect 反复跑。
   const switchRef = useRef(switchProvider);
   switchRef.current = switchProvider;
 
-  useEffect(() => {
-    if (appId !== "codex") {
-      setNeedsAttention(false);
-      return;
+  const guardedSwitch = useCallback(async (provider: Provider) => {
+    const result = await switchRef.current(provider);
+    if (result?.status === "confirmationRequired") {
+      setPending({ provider, targetName: result.targetName });
     }
-    let cancelled = false;
-    relayApi
-      .status()
-      .then((s) => {
-        if (!cancelled) setNeedsAttention(s.chatgptNeedsAttention);
-      })
-      // 读不到就**不弹**：这是一个附加保护，为它拦住用户的切换是本末倒置。
-      // 那种情况下行为退化成改动前的样子（直接切 + 用户自己重启）。
-      .catch(() => {
-        if (!cancelled) setNeedsAttention(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [appId]);
-
-  const guardedSwitch = useCallback(
-    (provider: Provider) => {
-      if (appId === "codex" && needsAttention) {
-        setPending(provider);
-        return;
-      }
-      switchRef.current(provider);
-    },
-    [appId, needsAttention],
-  );
+  }, []);
 
   const switchDialog = (
     <SwitchTierConfirmDialog
-      targetName={pending?.name ?? null}
+      targetName={pending?.targetName ?? null}
       onCancel={() => setPending(null)}
       onSwitch={(quitChatgpt) => {
-        const target = pending;
+        const target = pending?.provider;
         setPending(null);
         if (target) switchRef.current(target, quitChatgpt);
       }}

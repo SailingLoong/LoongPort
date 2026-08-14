@@ -8,8 +8,8 @@ import {
   resolveDisplayUsage,
   type LastGoodUsage,
 } from "@/lib/query/queries";
-import type { UsageResult } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import type { RowBalanceResult } from "@/lib/api/relay";
 
 /**
  * 一行（中转站 / 官网）的余额查询。
@@ -58,7 +58,7 @@ export function useRowBalanceQuery(
 ) {
   const { enabled = true } = options;
 
-  const query = useQuery<UsageResult>({
+  const query = useQuery<RowBalanceResult>({
     queryKey: rowBalanceKeys.row(kind, rowId),
     queryFn: async () =>
       kind === "relay" ? relayApi.balance(rowId) : vendorApi.balance(rowId),
@@ -76,7 +76,7 @@ export function useRowBalanceQuery(
   // ref（按行维度），写入幂等。
   const lastGoodRef = useRef<LastGoodUsage | null>(null);
   const { data, lastQueriedAt, lastGood } = resolveDisplayUsage(
-    query.data,
+    query.data?.usage,
     query.dataUpdatedAt,
     lastGoodRef.current,
     Date.now(),
@@ -95,6 +95,7 @@ export function useRowBalanceQuery(
             error: extractErrorMessage(query.error) || undefined,
           }
         : undefined),
+    shouldPromptTopUp: query.data?.shouldPromptTopUp ?? false,
     loading: query.isFetching,
     lastQueriedAt,
     refetch: async () => {

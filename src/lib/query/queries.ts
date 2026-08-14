@@ -13,7 +13,6 @@ import {
 } from "@/lib/api";
 import type {
   Provider,
-  Settings,
   UsageResult,
   SessionMeta,
   SessionMessage,
@@ -46,7 +45,6 @@ const sortProviders = (
 
 export interface ProvidersQueryData {
   providers: Record<string, Provider>;
-  currentProviderId: string;
 }
 
 export interface UseProvidersQueryOptions {
@@ -66,30 +64,19 @@ export const useProvidersQuery = (
     // 这样可以自动反映后端熔断器自动禁用代理目标的变更
     refetchInterval: isProxyRunning ? 10000 : false,
     queryFn: async () => {
-      let providers: Record<string, Provider> = {};
-      let currentProviderId = "";
-
       try {
-        providers = await providersApi.getAll(appId);
+        return { providers: sortProviders(await providersApi.getAll(appId)) };
       } catch (error) {
         console.error("获取供应商列表失败:", error);
+        return { providers: {} };
       }
-
-      try {
-        currentProviderId = await providersApi.getCurrent(appId);
-      } catch (error) {
-        console.error("获取当前供应商失败:", error);
-      }
-
-      return {
-        providers: sortProviders(providers),
-        currentProviderId,
-      };
     },
   });
 };
 
-export const useSettingsQuery = (): UseQueryResult<Settings> => {
+export const useSettingsQuery = (): UseQueryResult<
+  Awaited<ReturnType<typeof settingsApi.get>>
+> => {
   return useQuery({
     queryKey: ["settings"],
     queryFn: async () => settingsApi.get(),

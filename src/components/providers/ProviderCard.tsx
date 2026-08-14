@@ -16,17 +16,9 @@ import CopilotQuotaFooter from "@/components/CopilotQuotaFooter";
 import CodexOauthQuotaFooter from "@/components/CodexOauthQuotaFooter";
 import XaiOauthQuotaFooter from "@/components/XaiOauthQuotaFooter";
 import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
-import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
 import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
-import {
-  extractCodexBaseUrl,
-  extractCodexExperimentalBearerToken,
-} from "@/utils/providerConfigUtils";
-import {
-  supportsOfficialProxyTakeover,
-  providerNeedsRouting,
-} from "@/utils/providerCapabilities";
+import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
 import { resolveProviderIcon } from "@/utils/providerIcon";
@@ -67,41 +59,6 @@ interface ProviderCardProps {
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
-}
-
-/** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
-function isOfficialProvider(provider: Provider, appId: AppId): boolean {
-  if (provider.category === "official") {
-    return true;
-  }
-
-  const config = provider.settingsConfig as Record<string, any>;
-  if (appId === "claude") {
-    const baseUrl = config?.env?.ANTHROPIC_BASE_URL;
-    return !baseUrl || (typeof baseUrl === "string" && baseUrl.trim() === "");
-  }
-  if (appId === "codex") {
-    // 无 OPENAI_API_KEY → 使用 Codex CLI 内置 OAuth（官方）
-    const apiKey = config?.auth?.OPENAI_API_KEY;
-    const bearerToken =
-      typeof config?.config === "string"
-        ? extractCodexExperimentalBearerToken(config.config)
-        : undefined;
-    return (
-      !bearerToken &&
-      (!apiKey || (typeof apiKey === "string" && apiKey.trim() === ""))
-    );
-  }
-  if (appId === "gemini") {
-    // 无 GEMINI_API_KEY 且无 GOOGLE_GEMINI_BASE_URL → Google OAuth 官方模式
-    const apiKey = config?.env?.GEMINI_API_KEY;
-    const baseUrl = config?.env?.GOOGLE_GEMINI_BASE_URL;
-    return (
-      (!apiKey || (typeof apiKey === "string" && apiKey.trim() === "")) &&
-      (!baseUrl || (typeof baseUrl === "string" && baseUrl.trim() === ""))
-    );
-  }
-  return false;
 }
 
 const extractApiUrl = (provider: Provider, fallbackText: string) => {
@@ -195,45 +152,25 @@ export function ProviderCard({
   }, [provider.notes, displayUrl, fallbackUrlText]);
 
   const usageEnabled = provider.meta?.usage_script?.enabled ?? false;
-  const isOfficial = isOfficialProvider(provider, appId);
-  const supportsOfficialSubscription =
-    isOfficial && ["claude", "codex", "gemini", "grokbuild"].includes(appId);
+  const isOfficial = provider.presentation?.isOfficial === true;
   const isOfficialSubscriptionUsage =
     provider.meta?.usage_script?.templateType ===
     TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;
   const officialSubscriptionEnabled =
-    supportsOfficialSubscription && usageEnabled && isOfficialSubscriptionUsage;
-  // 官方判定只认显式 category === "official"（SSOT），不回退 isOfficial 的空字段启发式。
-  // 理由（此判定曾在「纯 category ↔ category+isOfficial 回退」间反复，结论钉死于此）：
-  //  1) 封号保护是高代价决策，不该建立在「base_url/key 缺失」这种脆弱信号上——它无法区分
-  //     「想直连官方」与「自定义但还没填完」，两者都表现为字段为空，必然误伤后者。
-  //  2) 启发式在 UI 多拦的部分，执行层 useProviderActions.ts 也只认 category === "official"、
-  //     并不兑现（绕过 UI 即可切换）→ 属虚保护，却以误伤 category 缺失的自定义供应商为代价。
-  //  3) 预设导入的官方一定带 category="official"，category 缺失的「真官方」现实中≈不存在。
-  // 真官方就该有显式 category；手动新建官方应引导标注，而不是靠空字段猜。
-  const supportsOfficialRouting = supportsOfficialProxyTakeover(
-    appId,
-    provider,
-  );
+    provider.presentation?.usesOfficialSubscriptionUsage === true &&
+    usageEnabled &&
+    isOfficialSubscriptionUsage;
+  const routingBadge = provider.presentation?.routingBadge ?? null;
   const isOfficialBlockedByProxy =
-    isProxyTakeover &&
-    provider.category === "official" &&
-    !supportsOfficialRouting;
+    provider.presentation?.switchBlockedReason === "officialBlockedByProxy";
   const isCopilot =
     provider.meta?.providerType === PROVIDER_TYPES.GITHUB_COPILOT ||
     provider.meta?.usage_script?.templateType === "github_copilot";
-  // Hermes v12+ overlay entries live under the `providers:` dict and are
-  // read-only here — writes have to go through Hermes Web UI.
-  const isHermesReadOnly =
-    appId === "hermes" && isHermesReadOnlyProvider(provider.settingsConfig);
+  const isHermesReadOnly = provider.presentation?.isReadOnly === true;
   const isCodexOauth =
     provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH;
   // xAI OAuth (SuperGrok 反代)：额度经自管 OAuth token 自动显示，与 codex_oauth 同构
   const isXaiOauth = provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
-  // 统一权威谓词（详见 providerNeedsRouting）：以 providerType 为准，不受
-  // apiFormat 被改动/缺省影响。此 badge 仅在 Codex 视图渲染，故加 appId 守卫。
-  const codexNeedsRouting =
-    appId === "codex" && providerNeedsRouting(appId, provider);
   // 获取用量数据以判断是否有多套餐
   // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
   const shouldAutoQuery =
@@ -368,16 +305,15 @@ export function ProviderCard({
                 </span>
               )}
 
-              {appId === "claude-desktop" &&
-                providerNeedsRouting(appId, provider) && (
-                  <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                    {t("claudeDesktop.modeProxy", {
-                      defaultValue: "需要路由",
-                    })}
-                  </span>
-                )}
+              {appId === "claude-desktop" && routingBadge === "required" && (
+                <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                  {t("claudeDesktop.modeProxy", {
+                    defaultValue: "需要路由",
+                  })}
+                </span>
+              )}
 
-              {appId === "claude" && providerNeedsRouting(appId, provider) && (
+              {appId === "claude" && routingBadge === "required" && (
                 <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
                   {t("claudeCode.needsRouting", {
                     defaultValue: "需要路由",
@@ -385,7 +321,7 @@ export function ProviderCard({
                 </span>
               )}
 
-              {codexNeedsRouting && (
+              {appId === "codex" && routingBadge === "required" && (
                 <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
                   {t("codex.needsRouting", {
                     defaultValue: "需要路由",
@@ -393,7 +329,7 @@ export function ProviderCard({
                 </span>
               )}
 
-              {appId === "claude" && provider.category === "official" && (
+              {appId === "claude" && routingBadge === "unsupported" && (
                 <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
                   {t("claudeCode.noRoutingSupport", {
                     defaultValue: "不支持路由",
@@ -401,27 +337,27 @@ export function ProviderCard({
                 </span>
               )}
 
-              {appId === "codex" && supportsOfficialRouting && (
-                <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                  {isProxyTakeover
-                    ? t("codex.officialRouting", {
-                        defaultValue: "官方账号路由",
-                      })
-                    : t("codex.nativeLogin", {
-                        defaultValue: "Codex 登录",
-                      })}
-                </span>
-              )}
-
               {appId === "codex" &&
-                provider.category === "official" &&
-                !supportsOfficialRouting && (
-                  <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
-                    {t("codex.noRoutingSupport", {
-                      defaultValue: "不支持路由",
-                    })}
+                (routingBadge === "officialRouting" ||
+                  routingBadge === "nativeLogin") && (
+                  <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                    {routingBadge === "officialRouting"
+                      ? t("codex.officialRouting", {
+                          defaultValue: "官方账号路由",
+                        })
+                      : t("codex.nativeLogin", {
+                          defaultValue: "Codex 登录",
+                        })}
                   </span>
                 )}
+
+              {appId === "codex" && routingBadge === "unsupported" && (
+                <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
+                  {t("codex.noRoutingSupport", {
+                    defaultValue: "不支持路由",
+                  })}
+                </span>
+              )}
 
               {isProxyRunning && isInFailoverQueue && health && (
                 <ProviderHealthBadge
@@ -565,6 +501,8 @@ export function ProviderCard({
               isProxyTakeover={isProxyTakeover}
               isOfficialBlockedByProxy={isOfficialBlockedByProxy}
               isReadOnly={isHermesReadOnly}
+              canDelete={provider.presentation?.canDelete === true}
+              canEdit={provider.presentation?.canEdit === true}
               isOmo={isAnyOmo}
               onSwitch={() => onSwitch(provider)}
               onEdit={() => onEdit(provider)}
@@ -575,15 +513,12 @@ export function ProviderCard({
                 // (category === "official") 一律隐藏：它们 base_url 故意留空、走客户端
                 // 默认/OAuth 端点，cc-switch 没有可靠的探测目标（尤其 Claude Desktop
                 // 官方是原生 1P 模式，根本不在请求路径上）。
-                onTest && provider.category !== "official"
+                onTest && provider.presentation?.canTestConnectivity
                   ? () => onTest(provider)
                   : undefined
               }
               onConfigureUsage={
-                (isOfficial && !supportsOfficialSubscription) ||
-                isCopilot ||
-                isCodexOauth ||
-                isXaiOauth
+                !provider.presentation?.canConfigureUsage
                   ? undefined
                   : () => onConfigureUsage(provider)
               }

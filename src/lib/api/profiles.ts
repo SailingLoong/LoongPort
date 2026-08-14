@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AppId } from "./types";
 
 /**
  * Profile 操作的应用分组（与后端 services/profile.rs 的 ProfileScope 严格对应）
@@ -34,24 +35,26 @@ export interface Profile {
   id: string;
   name: string;
   payload: ProfilePayload;
+  scopeSnapshots: ProfileScopeSnapshot[];
   createdAt?: number;
   updatedAt?: number;
 }
 
-/** 每个分组当前激活的项目 id（未使用项目时为 null）
- *
- * 注意：JSON key 是 camelCase（claudeDesktop），与 ProfileScope 的 kebab-case
- * 字符串不同——后者用于命令参数，前者用于响应字段。
- */
-export interface CurrentProfileIds {
-  claude: string | null;
-  claudeDesktop: string | null;
-  codex: string | null;
+export interface ProfileScopeSnapshot {
+  scope: ProfileScope;
+  hasSnapshot: boolean;
+}
+
+export interface ProfileApp {
+  app: AppId;
+  supported: boolean;
+  scope: ProfileScope | null;
+  currentProfileId: string | null;
 }
 
 export interface ProfilesResponse {
   profiles: Profile[];
-  currentIds: CurrentProfileIds;
+  apps: ProfileApp[];
 }
 
 export const profilesApi = {

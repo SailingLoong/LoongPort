@@ -167,7 +167,7 @@
         "apiKeyPlaceholder": "請輸入 Gemini API Key"
       }
     },
-    "duplicateLiveIdsLoadFailed": "讀取設定中的供應商識別碼失敗，請先修復設定後再試"
+    "duplicateFailed": "複製供應商失敗"
   },
   "claudeCode": {
     "needsRouting": "需要路由",
@@ -3127,7 +3127,7 @@
       "dragHandle": "拖曳排序",
       "refetchGroups": "更新可用群組",
       "purchaseHint": "開啟中轉站儲值頁面",
-      "lowBalanceHint": "餘額低於 ${{threshold}}，點一下儲值",
+      "lowBalanceHint": "餘額較低，點一下儲值",
       "remove": "刪除帳號與連線設定檔",
       "removeBlockedByCurrent": "此帳號有連線設定檔正在使用，請先切換至其他連線設定檔",
       "removeConfirmTitle": "刪除此帳號？",
@@ -3135,7 +3135,6 @@
       "removeConfirmMessageNeverLoggedIn": "將刪除「{{label}}」及其 {{count}} 個連線設定檔。之後可重新新增此帳號。"
     },
     "tier": {
-      "rateUnknown": "倍率未知",
       "rate": "{{value}} 倍",
       "models": "支援的模型",
       "selectModel": "切換至 {{model}}",

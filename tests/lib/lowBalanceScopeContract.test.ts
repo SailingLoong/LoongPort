@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
- * 低余额提醒**只对中转站（relay）行生效，不对官网直连（vendor）行生效**。
+ * 低余额提醒由后端决定，前端只展示 `shouldPromptTopUp`。
  *
  * ## 为什么这是个正确性问题，不是产品偏好
  *
@@ -31,15 +31,11 @@ describe("低余额提醒的作用域", () => {
   const read = (rel: string) =>
     readFileSync(resolve(__dirname, "../../src", rel), "utf8");
 
-  it("VendorRow 不引入低余额判据，也不传充值入口 —— 那边是人民币钱包", () => {
+  it("VendorRow 不引入低余额判据", () => {
     const vendorRow = read("components/relay/VendorRow.tsx");
     expect(vendorRow).not.toContain("isLowBalance");
     expect(vendorRow).not.toContain("LOW_BALANCE_THRESHOLD");
     expect(vendorRow).not.toContain("lowBalanceHint");
-    // 官网没有充值命令（收银台在厂商那边），所以不传 —— 这同时也是
-    // 「不算低余额」的判据本身，见 `RowBalance`。
-    // 只禁**作为 prop 传值**（`onPurchase={...}` / `onPurchase:`）；
-    // 文档里提到这个名字是正常的，那正是在解释为什么不传。
     expect(vendorRow).not.toMatch(/onPurchase\s*[={]/);
   });
 
@@ -50,11 +46,12 @@ describe("低余额提醒的作用域", () => {
    * 官网行的人民币余额就会拿去跟 5 美元比，低于 ¥5 之外的区间全部误判，
    * 而且不会有任何报错。
    */
-  it("低余额判据以「有充值入口」为前置条件（那就是「这是中转站行」）", () => {
+  it("RowBalance 不读取余额数字或维护阈值", () => {
     const rowBalance = read("components/relay/RowBalance.tsx");
-    expect(rowBalance).toContain(
-      "const low = onPurchase ? isLowBalance(remaining ?? null) : false;",
-    );
+    expect(rowBalance).not.toContain("isLowBalance");
+    expect(rowBalance).not.toContain("LOW_BALANCE_THRESHOLD");
+    expect(rowBalance).not.toContain("usage.data?.[0]?.remaining");
+    expect(rowBalance).toContain("shouldPromptTopUp");
   });
 
   it("中转站行真的用上了它 —— 提醒要出现在中转站行上", () => {
@@ -62,7 +59,7 @@ describe("低余额提醒的作用域", () => {
     const rowBalance = read("components/relay/RowBalance.tsx");
     // 中转站行传了充值入口 ⇒ 判据对它成立。
     expect(relayRow).toContain("onPurchase={onPurchase}");
-    expect(rowBalance).toContain("isLowBalance");
+    expect(rowBalance).toContain("shouldPromptTopUp");
     expect(rowBalance).toContain("lowBalanceHint");
   });
 

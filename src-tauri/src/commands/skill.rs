@@ -125,7 +125,7 @@ pub async fn discover_available_skills(
     let repos = app_state.db.get_skill_repos().map_err(|e| e.to_string())?;
     service
         .0
-        .discover_available(repos)
+        .discover_available(repos, &app_state.db)
         .await
         .map_err(|e| e.to_string())
 }
@@ -172,8 +172,9 @@ pub async fn search_skills_sh(
     query: String,
     limit: usize,
     offset: usize,
+    app_state: State<'_, AppState>,
 ) -> Result<SkillsShSearchResult, String> {
-    SkillService::search_skills_sh(&query, limit, offset)
+    SkillService::search_skills_sh(&query, limit, offset, &app_state.db)
         .await
         .map_err(|e| e.to_string())
 }
@@ -230,7 +231,7 @@ pub async fn install_skill_for_app(
     let repos = app_state.db.get_skill_repos().map_err(|e| e.to_string())?;
     let skills = service
         .0
-        .discover_available(repos)
+        .discover_available(repos, &app_state.db)
         .await
         .map_err(|e| e.to_string())?;
 

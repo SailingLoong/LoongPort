@@ -31,7 +31,7 @@ use tauri::{Emitter, Manager, State};
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::VENDOR_LOGIN_ERROR;
-use crate::provider::{Provider, UsageResult};
+use crate::provider::Provider;
 use crate::relay::provider_fingerprint;
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -64,6 +64,10 @@ pub struct VendorAccountRow {
     pub can_refresh: bool,
     /// 当前 tab 下是否已有可编辑的接入配置。
     pub can_edit_config: bool,
+    /// 当前 tab 下是否已有可切换的接入配置。
+    pub can_switch: bool,
+    /// 这一行是否可以安全删除。真正删除时后端仍会重新检查。
+    pub can_delete: bool,
     /// 这一行名下那六条 provider 记录的 id（六个平台**共用一个**）。
     ///
     /// ## 为什么必须由后端给
@@ -99,6 +103,20 @@ pub struct VendorAccountRow {
     /// 判据见 [`user_edited_for`]，它不存标记、靠与默认配置整份比对
     /// （所以用户把配置改回默认，标记会自动消失）。
     pub user_edited: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VendorAccountList {
+    pub supported: bool,
+    pub accounts: Vec<VendorAccountRow>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VendorLoginResult {
+    pub row_id: i64,
+    pub refresh: super::relay::RefreshResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +161,8 @@ impl From<creds::VendorRow> for VendorAccountRow {
             can_query_balance: logged_in || key_ready,
             can_refresh: !provider_id.is_empty() && (logged_in || key_ready),
             can_edit_config: key_ready && !provider_id.is_empty(),
+            can_switch: false,
+            can_delete: false,
             account_label: row.account_label,
             provider_id,
             vendor_id: row.vendor_id,
@@ -173,6 +193,51 @@ pub struct VendorProvisionSummary {
     pub merged_providers: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorActionErrorKind {
+    KeyLimit,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VendorActionError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<VendorActionErrorKind>,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help_url: Option<String>,
+}
+
+impl std::fmt::Display for VendorActionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<AppError> for VendorActionError {
+    fn from(error: AppError) -> Self {
+        Self {
+            kind: None,
+            message: error.to_string(),
+            help_url: None,
+        }
+    }
+}
+
+impl From<VendorError> for VendorActionError {
+    fn from(error: VendorError) -> Self {
+        let kind = matches!(error, VendorError::KeyLimitReached)
+            .then_some(VendorActionErrorKind::KeyLimit);
+        let help_url = kind.is_some().then(|| deepseek::API_KEYS_URL.to_string());
+        Self {
+            kind,
+            message: AppError::from(error).to_string(),
+            help_url,
+        }
+    }
+}
+
 /// 列出已添加的官网账号。
 ///
 /// **契约：只读本地、不发网络**（与 `relay_list_relays` 一致）—— 首屏不能卡在
@@ -189,24 +254,164 @@ pub struct VendorProvisionSummary {
 pub async fn vendor_list_accounts(
     state: State<'_, AppState>,
     app_id: String,
-) -> Result<Vec<VendorAccountRow>, String> {
-    // 认不出的 app_id 不该让整条列表失败 —— 首屏契约是「只读本地、不卡」。
-    // 那种情况下 `user_edited` 全给 `None`、`is_current` 全给 `false`（判不了就别断言）。
-    let app_type: Option<AppType> = app_id.parse().ok();
+) -> Result<VendorAccountList, String> {
+    // 认不出或不支持的 app_id 不该让整条列表失败 —— 首屏契约是「只读本地、不卡」。
+    let Some(app_type) = app_id.parse::<AppType>().ok() else {
+        return Ok(VendorAccountList {
+            supported: false,
+            accounts: Vec::new(),
+        });
+    };
+    if !vendor_supports_app(&app_type) {
+        return Ok(VendorAccountList {
+            supported: false,
+            accounts: Vec::new(),
+        });
+    }
     with_conn(state.inner(), creds::list)
         .map(|rows| {
-            rows.into_iter()
-                .map(|row| {
-                    let mut out = VendorAccountRow::from(row);
-                    if let Some(app) = app_type.as_ref() {
-                        out.user_edited = user_edited_for(state.inner(), &out, app);
-                        out.is_current = is_current_for(state.inner(), &out, app);
-                    }
-                    out
-                })
-                .collect()
+            let accounts = rows
+                .into_iter()
+                .map(|row| vendor_account_for_app(state.inner(), row, &app_type))
+                .collect();
+            VendorAccountList {
+                supported: true,
+                accounts,
+            }
         })
         .map_err(|e| e.to_string())
+}
+
+fn vendor_supports_app(app_type: &AppType) -> bool {
+    provision::DEEPSEEK_APPS.contains(app_type)
+}
+
+fn vendor_account_for_app(
+    state: &AppState,
+    row: creds::VendorRow,
+    app_type: &AppType,
+) -> VendorAccountRow {
+    let logged_in = !row.auth_token.is_empty();
+    let session_expired = row.account_id.is_some() && !logged_in;
+    let key_ready = !row.api_key.is_empty();
+    let mut out = VendorAccountRow::from(row);
+    let provider_exists = !out.provider_id.is_empty()
+        && state
+            .db
+            .get_provider_by_id(&out.provider_id, app_type.as_str())
+            .ok()
+            .flatten()
+            .is_some();
+
+    out.status = if session_expired {
+        if key_ready && provider_exists {
+            VendorAccountStatus::SessionExpiredUsable
+        } else {
+            VendorAccountStatus::SessionExpired
+        }
+    } else if !logged_in {
+        VendorAccountStatus::NotLoggedIn
+    } else if key_ready && provider_exists {
+        VendorAccountStatus::Ready
+    } else {
+        VendorAccountStatus::NoKey
+    };
+    out.can_query_balance = logged_in || key_ready;
+    out.can_refresh = logged_in || (key_ready && provider_exists);
+    out.can_edit_config = key_ready && provider_exists;
+    out.can_switch = provider_exists;
+    out.user_edited = provider_exists
+        .then(|| user_edited_for(state, &out, app_type))
+        .flatten();
+    out.is_current = provider_exists && is_current_for(state, &out, app_type);
+    out.can_delete = vendor_can_delete(state, &out);
+    out
+}
+
+#[tauri::command]
+pub async fn vendor_switch(
+    app_handle: tauri::AppHandle,
+    row_id: i64,
+    app: String,
+    quit_chatgpt: Option<bool>,
+) -> Result<super::relay::SwitchTierCommandResult, String> {
+    let app_type = app.parse::<AppType>().map_err(|error| error.to_string())?;
+    let state = app_handle.state::<AppState>();
+    let row = with_conn(&state, |conn| {
+        creds::get(conn, row_id)?
+            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))
+    })
+    .map_err(|error| error.to_string())?;
+    let account_id = row
+        .account_id
+        .as_deref()
+        .ok_or_else(|| "这个官网账号还没有完成登录，无法切换".to_string())?;
+    let provider_id = provision::provider_id_for(&row.vendor_id, account_id);
+    if state
+        .db
+        .get_provider_by_id(&provider_id, app_type.as_str())
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("这个官网账号还没有当前平台的接入配置，请先刷新".to_string());
+    }
+    super::relay::switch_tier_command(&app_handle, &provider_id, app_type, quit_chatgpt)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn vendor_can_delete(state: &AppState, row: &VendorAccountRow) -> bool {
+    if row.provider_id.is_empty() {
+        return true;
+    }
+    provision::DEEPSEEK_APPS.iter().all(|app_type| {
+        ProviderService::current(state, app_type.clone())
+            .map(|current| current != row.provider_id)
+            .unwrap_or(false)
+    })
+}
+
+pub(crate) fn vendor_refresh_targets(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<Vec<(i64, String, bool)>, AppError> {
+    if !vendor_supports_app(app_type) {
+        return Ok(Vec::new());
+    }
+    with_conn(state, creds::list).map(|rows| {
+        rows.into_iter()
+            .filter_map(|row| {
+                let dto = vendor_account_for_app(state, row, app_type);
+                let name = if dto.account_label.is_empty() {
+                    dto.vendor_name
+                } else {
+                    dto.account_label
+                };
+                (dto.can_refresh || dto.can_query_balance).then_some((
+                    dto.id,
+                    name,
+                    dto.can_refresh,
+                ))
+            })
+            .collect()
+    })
+}
+
+pub(crate) async fn refresh_vendor_account(
+    state: &AppState,
+    row_id: i64,
+    refresh_config: bool,
+) -> (
+    Option<Result<VendorProvisionSummary, VendorActionError>>,
+    Result<crate::relay::balance::RowBalanceResult, AppError>,
+) {
+    let provision = if refresh_config {
+        Some(provision_impl(state, row_id).await)
+    } else {
+        None
+    };
+    let balance = vendor_balance_impl(state, row_id).await;
+    (provision, balance)
 }
 
 /// 这一行在 `app_type` 这个平台上的配置**是不是被用户改过**。
@@ -262,10 +467,12 @@ fn is_current_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType) 
 /// 由 `save_account` 建的（同 `(vendor_id, account_id)` 已存在则更新，天然幂等）。
 #[tauri::command]
 pub async fn vendor_open_login(
-    app: tauri::AppHandle,
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     vendor_id: String,
-) -> Result<Option<i64>, String> {
+    app: String,
+) -> Result<Option<VendorLoginResult>, String> {
+    let app_type: AppType = app.parse().map_err(|error: AppError| error.to_string())?;
     let vendor = Vendor::from_id(&vendor_id).ok_or_else(|| format!("不认识的厂商：{vendor_id}"))?;
     // 预填值：这个厂商下**最近一次**登录过的那个标识。
     //
@@ -280,9 +487,69 @@ pub async fn vendor_open_login(
         .map(|r| r.login_identifier)
         .unwrap_or_default();
 
-    do_login(&app, vendor, &login_hint)
+    let Some(row_id) = do_login(&app_handle, vendor, &login_hint)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let (provision, balance) = refresh_vendor_account(state.inner(), row_id, true).await;
+    let name = with_conn(state.inner(), |conn| creds::get(conn, row_id))
+        .ok()
+        .flatten()
+        .map(|row| {
+            if row.account_label.is_empty() {
+                vendor.display_name().to_string()
+            } else {
+                row.account_label
+            }
+        })
+        .unwrap_or_else(|| vendor.display_name().to_string());
+    Ok(Some(VendorLoginResult {
+        row_id,
+        refresh: super::relay::finish_refresh_result(
+            &app_type,
+            Vec::new(),
+            vec![super::relay::VendorRefreshOutcome {
+                name,
+                row_id,
+                provision,
+                balance,
+            }],
+        ),
+    }))
+}
+
+#[tauri::command]
+pub async fn vendor_refresh(
+    state: State<'_, AppState>,
+    row_id: i64,
+    app: String,
+) -> Result<super::relay::RefreshResult, String> {
+    let app_type: AppType = app.parse().map_err(|error: AppError| error.to_string())?;
+    let name = with_conn(state.inner(), |conn| creds::get(conn, row_id))
+        .map_err(|error| error.to_string())?
+        .map(|row| {
+            if row.account_label.is_empty() {
+                Vendor::from_id(&row.vendor_id)
+                    .map(|vendor| vendor.display_name().to_string())
+                    .unwrap_or(row.vendor_id)
+            } else {
+                row.account_label
+            }
+        })
+        .unwrap_or_else(|| format!("官方账号 #{row_id}"));
+    let (provision, balance) = refresh_vendor_account(state.inner(), row_id, true).await;
+    Ok(super::relay::finish_refresh_result(
+        &app_type,
+        Vec::new(),
+        vec![super::relay::VendorRefreshOutcome {
+            name,
+            row_id,
+            provision,
+            balance,
+        }],
+    ))
 }
 
 async fn do_login(
@@ -397,13 +664,14 @@ async fn do_login(
 pub async fn vendor_provision(
     state: State<'_, AppState>,
     row_id: i64,
-) -> Result<VendorProvisionSummary, String> {
-    provision_impl(state.inner(), row_id)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<VendorProvisionSummary, VendorActionError> {
+    provision_impl(state.inner(), row_id).await
 }
 
-async fn provision_impl(state: &AppState, row_id: i64) -> Result<VendorProvisionSummary, AppError> {
+async fn provision_impl(
+    state: &AppState,
+    row_id: i64,
+) -> Result<VendorProvisionSummary, VendorActionError> {
     // ── 1. 取行 + 账号 id ───────────────────────────────────────────
     let row = with_conn(state, |conn| {
         creds::get(conn, row_id)?
@@ -745,10 +1013,18 @@ fn vendor_reset_tier_config_impl(
 pub async fn vendor_balance(
     state: State<'_, AppState>,
     row_id: i64,
-) -> Result<UsageResult, String> {
-    let row = with_conn(state.inner(), |conn| creds::get(conn, row_id))
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("找不到 id 为 {row_id} 的官网账号"))?;
+) -> Result<crate::relay::balance::RowBalanceResult, String> {
+    vendor_balance_impl(state.inner(), row_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn vendor_balance_impl(
+    state: &AppState,
+    row_id: i64,
+) -> Result<crate::relay::balance::RowBalanceResult, AppError> {
+    let row = with_conn(state, |conn| creds::get(conn, row_id))?
+        .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))?;
 
     let api_keys: Vec<String> = if row.api_key.trim().is_empty() {
         Vec::new()
@@ -776,10 +1052,13 @@ pub async fn vendor_balance(
     // 会话失效不连累 sk，见本文件模块文档那条 `40002` 语义。判据是结构化的
     // `VendorError`（顺着 `Resolved` 带出来的），不是字符串匹配。
     if let Some(e) = &resolved.vendor_error {
-        on_vendor_error(state.inner(), row_id, e);
+        on_vendor_error(state, row_id, e);
     }
 
-    Ok(resolved.usage)
+    Ok(crate::relay::balance::row_balance_result(
+        resolved.usage,
+        false,
+    ))
 }
 
 /// 删一行，连带清掉它名下六个平台的 provider 记录。
@@ -970,6 +1249,118 @@ mod tests {
         assert!(dto.can_query_balance);
         assert!(dto.can_refresh);
         assert!(dto.can_edit_config);
+    }
+
+    #[test]
+    fn unsupported_apps_do_not_receive_vendor_rows() {
+        assert!(!vendor_supports_app(&AppType::Gemini));
+        assert!(!vendor_supports_app(&AppType::GrokBuild));
+        assert!(vendor_supports_app(&AppType::Codex));
+    }
+
+    #[test]
+    fn delete_capability_is_backend_owned() {
+        let dto = VendorAccountRow::from(row("tok", "sk-plaintext", Some("uuid-a")));
+        let json = serde_json::to_value(dto).expect("serialize");
+        assert!(
+            json.get("canDelete").is_some(),
+            "删除资格必须由后端 DTO 定义，前端不能总是展示为可用"
+        );
+    }
+
+    #[test]
+    fn current_app_capabilities_require_its_provider_record() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            let row_id = creds::save_account(
+                conn,
+                Vendor::DeepSeek,
+                "token",
+                &crate::vendor::VendorAccount {
+                    account_id: "uuid-a".into(),
+                    label: "13800000000".into(),
+                    login_identifier: "13800000000".into(),
+                },
+            )?;
+            creds::set_api_key(conn, row_id, "sk-plaintext")?;
+            creds::clear_token(conn, row_id)?;
+            Ok(row_id)
+        })
+        .expect("seed vendor row");
+        let base = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load vendor row")
+            .expect("vendor row exists");
+
+        let without_provider = vendor_account_for_app(&state, base, &AppType::Codex);
+        assert!(matches!(
+            without_provider.status,
+            VendorAccountStatus::SessionExpired
+        ));
+        assert!(!without_provider.can_refresh);
+        assert!(!without_provider.can_edit_config);
+        assert!(without_provider.can_query_balance);
+        assert!(
+            vendor_refresh_targets(&state, &AppType::Codex)
+                .expect("refresh targets")
+                .iter()
+                .any(|(id, _, can_refresh)| *id == without_provider.id && !can_refresh),
+            "顶部全量刷新也要包含只能用 SK 查余额的官网账号"
+        );
+
+        db.save_provider(
+            AppType::Codex.as_str(),
+            &Provider {
+                id: without_provider.provider_id.clone(),
+                name: "DeepSeek".into(),
+                settings_config: serde_json::json!({}),
+                website_url: Some(deepseek::SITE_ORIGIN.into()),
+                category: Some("cn_official".into()),
+                created_at: None,
+                sort_index: Some(0),
+                notes: None,
+                meta: None,
+                icon: Some("deepseek".into()),
+                icon_color: None,
+                in_failover_queue: false,
+            },
+        )
+        .expect("save provider");
+
+        let with_provider = vendor_account_for_app(
+            &state,
+            row("", "sk-plaintext", Some("uuid-a")),
+            &AppType::Codex,
+        );
+        assert!(matches!(
+            with_provider.status,
+            VendorAccountStatus::SessionExpiredUsable
+        ));
+        assert!(with_provider.can_refresh);
+        assert!(with_provider.can_edit_config);
+    }
+
+    #[test]
+    fn vendor_login_result_carries_the_atomic_refresh_result() {
+        let login = VendorLoginResult {
+            row_id: 9,
+            refresh: super::super::relay::RefreshResult {
+                summary: super::super::relay::RefreshSummary {
+                    notice: super::super::relay::RefreshNotice::None,
+                    refreshed_accounts: 0,
+                    tiers: 0,
+                    keys_created: 0,
+                    other_platform_tiers: 0,
+                    merged_providers: 0,
+                    failures: Vec::new(),
+                },
+                balances: Vec::new(),
+            },
+        };
+
+        let json = serde_json::to_value(login).expect("serialize vendor login result");
+        assert_eq!(json["rowId"], 9);
+        assert!(json.get("refresh").is_some());
     }
 
     /// 凭据不出 Rust 侧：DTO 序列化后不能带上 token 或明文 sk。

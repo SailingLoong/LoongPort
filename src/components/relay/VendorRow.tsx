@@ -262,25 +262,27 @@ export function VendorRow({
             </Button>
           )}
 
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className={cn(
-              "h-7 w-7 shrink-0 p-1 text-muted-foreground",
-              removing
-                ? "cursor-not-allowed opacity-40"
-                : "hover:text-red-500 dark:hover:text-red-400",
-            )}
-            onClick={removing ? undefined : onDelete}
-            title={t("loongport.vendor.remove")}
-          >
-            {removing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Trash2 className="h-3.5 w-3.5" />
-            )}
-          </Button>
+          {account.canDelete && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className={cn(
+                "h-7 w-7 shrink-0 p-1 text-muted-foreground",
+                removing
+                  ? "cursor-not-allowed opacity-40"
+                  : "hover:text-red-500 dark:hover:text-red-400",
+              )}
+              onClick={removing ? undefined : onDelete}
+              title={t("loongport.vendor.remove")}
+            >
+              {removing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
         </div>
 
         {/* 「恢复默认配置」的**常驻**版，只给已手动维护的那些。
@@ -372,7 +374,7 @@ function VendorStatus({
               <Check className="mr-1 h-3.5 w-3.5" />
               {t("provider.inUse")}
             </Button>
-          ) : (
+          ) : account.canSwitch ? (
             <Button
               type="button"
               size="sm"
@@ -387,7 +389,7 @@ function VendorStatus({
               )}
               {switching ? t("loongport.tier.switching") : t("provider.enable")}
             </Button>
-          )}
+          ) : null}
 
           {/* 登录态过期但 sk 还在用的行：给一条重登的路，但**不催**。
               唯一的实际损失是余额拉不到，title 就说这件事。 */}

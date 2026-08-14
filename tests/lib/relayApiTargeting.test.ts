@@ -53,16 +53,18 @@ describe("relayApi 的中转站定位参数", () => {
   });
 
   it("login 把 relayId 透传给后端", async () => {
-    await relayApi.login(7);
+    await relayApi.login(7, "claude");
     expect(invokeMock).toHaveBeenCalledWith("relay_login", {
       relayId: 7,
+      app: "claude",
     });
   });
 
-  it("provision 把 relayId 透传给后端", async () => {
-    await relayApi.provision(42);
-    expect(invokeMock).toHaveBeenCalledWith("relay_provision", {
+  it("refresh 把 relayId 与 app 透传给后端", async () => {
+    await relayApi.refresh(42, "codex");
+    expect(invokeMock).toHaveBeenCalledWith("relay_refresh", {
       relayId: 42,
+      app: "codex",
     });
   });
 
@@ -103,9 +105,10 @@ describe("relayApi 的中转站定位参数", () => {
    * 但那是**库的约定，不是这一层的约定**，这一层的职责是原样透传。
    */
   it("relayId = 0 也照原样传（别被 falsy 判据吞掉）", async () => {
-    await relayApi.provision(0);
-    expect(invokeMock).toHaveBeenCalledWith("relay_provision", {
+    await relayApi.refresh(0, "codex");
+    expect(invokeMock).toHaveBeenCalledWith("relay_refresh", {
       relayId: 0,
+      app: "codex",
     });
   });
 
@@ -119,5 +122,24 @@ describe("relayApi 的中转站定位参数", () => {
     invokeMock.mockResolvedValue([]);
     await relayApi.checkSession();
     expect(invokeMock).toHaveBeenCalledWith("relay_check_session");
+  });
+
+  it("switchTier 首次调用不替后端决定 ChatGPT 行为", async () => {
+    await relayApi.switchTier("provider-1", "codex");
+    expect(invokeMock).toHaveBeenCalledWith("relay_switch_tier", {
+      providerId: "provider-1",
+      app: "codex",
+      quitChatgpt: null,
+    });
+  });
+
+  it("switchTierModel 首次调用同样把确认裁决留给后端", async () => {
+    await relayApi.switchTierModel("provider-1", "codex", "gpt-5");
+    expect(invokeMock).toHaveBeenCalledWith("relay_switch_tier_model", {
+      providerId: "provider-1",
+      app: "codex",
+      model: "gpt-5",
+      quitChatgpt: null,
+    });
   });
 });

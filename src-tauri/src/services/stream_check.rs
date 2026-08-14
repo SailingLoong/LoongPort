@@ -35,10 +35,17 @@ pub enum HealthStatus {
     Failed,
 }
 
+/// Backend-owned overall outcome for user-facing presentation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum OverallStatus {
+    Healthy,
+    Degraded,
+    Unusable,
+    Unreachable,
+}
+
 /// `/models` 探测的结构化结论。
-///
-/// 该值会序列化进既有的 `stream_check_logs.model_used` TEXT 列；这样不需要迁移数据库，
-/// 前端仍能按当前语言渲染文案。旧日志里的纯文本值由前端作为 legacy 值回退显示。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ModelProbeVerdict {
@@ -47,12 +54,6 @@ pub enum ModelProbeVerdict {
     NoModels,
     ImageOnly { models: Vec<String> },
     Models { total: usize, head: Vec<String> },
-}
-
-impl ModelProbeVerdict {
-    fn encode(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
-    }
 }
 
 /// 连通性检查配置
@@ -84,18 +85,48 @@ impl Default for StreamCheckConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCheckResult {
+    /// Raw reachability and latency result.
     pub status: HealthStatus,
+    /// Final backend-derived business outcome for presentation.
+    pub overall_status: OverallStatus,
     pub success: bool,
     pub message: String,
     pub response_time_ms: Option<u64>,
     pub http_status: Option<u16>,
-    /// 兼容 `stream_check_logs` 表结构的探测结论 JSON；未探测到时为空串。
-    pub model_used: String,
+    /// 后端计算的模型探测结论；前端只负责映射成文案与视觉样式。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_probe: Option<ModelProbeVerdict>,
     pub tested_at: i64,
     pub retry_count: u32,
     /// 细粒度错误分类；连通性检查不再细分，恒为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_category: Option<String>,
+}
+
+impl StreamCheckResult {
+    fn with_model_probe(mut self, app_type: &AppType, model_probe: ModelProbeVerdict) -> Self {
+        self.overall_status = match &model_probe {
+            ModelProbeVerdict::KeyExpired { .. }
+            | ModelProbeVerdict::Forbidden { .. }
+            | ModelProbeVerdict::NoModels => OverallStatus::Unusable,
+            ModelProbeVerdict::ImageOnly { .. } if !matches!(app_type, AppType::CodexImage) => {
+                OverallStatus::Unusable
+            }
+            ModelProbeVerdict::ImageOnly { .. } | ModelProbeVerdict::Models { .. } => {
+                Self::overall_status_for_reachability(&self.status)
+            }
+        };
+        self.model_probe = Some(model_probe);
+        self
+    }
+
+    fn overall_status_for_reachability(status: &HealthStatus) -> OverallStatus {
+        match status {
+            HealthStatus::Operational => OverallStatus::Healthy,
+            HealthStatus::Degraded => OverallStatus::Degraded,
+            HealthStatus::Failed => OverallStatus::Unreachable,
+        }
+    }
 }
 
 /// 连通性检查服务
@@ -139,11 +170,12 @@ impl StreamCheckService {
 
         Ok(last_result.unwrap_or_else(|| StreamCheckResult {
             status: HealthStatus::Failed,
+            overall_status: OverallStatus::Unreachable,
             success: false,
             message: "Check failed".to_string(),
             response_time_ms: None,
             http_status: None,
-            model_used: String::new(),
+            model_probe: None,
             tested_at: chrono::Utc::now().timestamp(),
             retry_count: config.max_retries,
             error_category: None,
@@ -178,7 +210,7 @@ impl StreamCheckService {
             if let Some(verdict) =
                 Self::probe_models(&client, app_type, provider, &base_url, timeout, ua).await
             {
-                checked.model_used = verdict.encode();
+                checked = checked.with_model_probe(app_type, verdict);
             }
         }
         Ok(checked)
@@ -207,12 +239,6 @@ impl StreamCheckService {
     /// `/v1/models` 是**列表接口，不计费**（不产生 token、不触发调度）。所以它可以随手点、
     /// 可以对每个档位都点，与「真发一次推理去试」有本质区别 —— 后者要花钱，因而不可能
     /// 做成一个用户随时能按的按钮。
-    ///
-    /// # 返回值序列化后放进 `model_used`（一个原本恒空的字段）
-    ///
-    /// `StreamCheckResult::model_used` 是 `stream_check_logs` 表里的既有列，改成真实检查
-    /// 之后它一直是空串。填上结构化 JSON ⇒ 前端与历史日志**不用改结构**就能看到这条信息，
-    /// 而这正是那个字段当初的用意。旧行若仍是纯文本，由调用方按 legacy 值处理。
     ///
     /// 返回 `None` = 问不出来（站点没这个端点 / 网络抖动）。**那时不改判定** ——
     /// 探测不到不等于档位坏了，把「我不知道」报成「不可用」比不报更糟。
@@ -360,24 +386,30 @@ impl StreamCheckService {
     ) -> StreamCheckResult {
         let tested_at = chrono::Utc::now().timestamp();
         match result {
-            Ok(status) => StreamCheckResult {
-                status: Self::determine_status(response_time, degraded_threshold_ms),
-                success: true,
-                message: "Reachable".to_string(),
-                response_time_ms: Some(response_time),
-                http_status: Some(status),
-                model_used: String::new(),
-                tested_at,
-                retry_count: 0,
-                error_category: None,
-            },
+            Ok(http_status) => {
+                let status = Self::determine_status(response_time, degraded_threshold_ms);
+                let overall_status = StreamCheckResult::overall_status_for_reachability(&status);
+                StreamCheckResult {
+                    status,
+                    overall_status,
+                    success: true,
+                    message: "Reachable".to_string(),
+                    response_time_ms: Some(response_time),
+                    http_status: Some(http_status),
+                    model_probe: None,
+                    tested_at,
+                    retry_count: 0,
+                    error_category: None,
+                }
+            }
             Err(e) => StreamCheckResult {
                 status: HealthStatus::Failed,
+                overall_status: OverallStatus::Unreachable,
                 success: false,
                 message: e.to_string(),
                 response_time_ms: Some(response_time),
                 http_status: None,
-                model_used: String::new(),
+                model_probe: None,
                 tested_at,
                 retry_count: 0,
                 error_category: None,
@@ -524,20 +556,83 @@ mod tests {
     }
 
     #[test]
-    fn model_probe_verdict_serializes_for_existing_log_column() {
+    fn stream_check_result_serializes_model_probe_as_a_typed_dto_field() {
         let verdict = ModelProbeVerdict::Models {
             total: 4,
             head: vec!["alpha".to_string(), "beta".to_string(), "…".to_string()],
         };
+        let result = StreamCheckResult {
+            status: HealthStatus::Operational,
+            overall_status: OverallStatus::Healthy,
+            success: true,
+            message: "Reachable".to_string(),
+            response_time_ms: Some(12),
+            http_status: Some(200),
+            model_probe: Some(verdict),
+            tested_at: 1,
+            retry_count: 0,
+            error_category: None,
+        };
 
+        let serialized = serde_json::to_value(result).unwrap();
         assert_eq!(
-            verdict.encode(),
-            r#"{"kind":"models","total":4,"head":["alpha","beta","…"]}"#
+            serialized.get("modelProbe"),
+            Some(&serde_json::json!({
+                "kind": "models",
+                "total": 4,
+                "head": ["alpha", "beta", "…"]
+            }))
         );
-        assert_eq!(
-            serde_json::from_str::<ModelProbeVerdict>(&verdict.encode()).unwrap(),
-            verdict
+        assert!(serialized.get("modelUsed").is_none());
+    }
+
+    #[test]
+    fn definitive_model_probe_failure_makes_the_overall_status_unusable() {
+        let probes = [
+            ModelProbeVerdict::KeyExpired { status: 401 },
+            ModelProbeVerdict::Forbidden { status: 403 },
+            ModelProbeVerdict::NoModels,
+            ModelProbeVerdict::ImageOnly {
+                models: vec!["gpt-image-2".to_string()],
+            },
+        ];
+
+        for probe in probes {
+            let result = StreamCheckService::build_result(Ok(200), 12, 1500)
+                .with_model_probe(&AppType::Codex, probe);
+
+            assert_eq!(result.status, HealthStatus::Operational);
+            assert_eq!(result.overall_status, OverallStatus::Unusable);
+        }
+    }
+
+    #[test]
+    fn healthy_model_probe_preserves_degraded_reachability_as_the_overall_status() {
+        let result = StreamCheckService::build_result(Ok(200), 3000, 1500).with_model_probe(
+            &AppType::Codex,
+            ModelProbeVerdict::Models {
+                total: 1,
+                head: vec!["gpt-5".to_string()],
+            },
         );
+
+        assert_eq!(result.status, HealthStatus::Degraded);
+        assert_eq!(result.overall_status, OverallStatus::Degraded);
+    }
+
+    #[test]
+    fn image_only_is_unusable_for_text_checks_but_healthy_for_the_image_app() {
+        let models = || ModelProbeVerdict::ImageOnly {
+            models: vec!["gpt-image-2".to_string()],
+        };
+
+        let text = StreamCheckService::build_result(Ok(200), 12, 1500)
+            .with_model_probe(&AppType::Codex, models());
+        let image = StreamCheckService::build_result(Ok(200), 12, 1500)
+            .with_model_probe(&AppType::CodexImage, models());
+
+        assert_eq!(text.overall_status, OverallStatus::Unusable);
+        assert_eq!(image.overall_status, OverallStatus::Healthy);
     }
 
     #[test]
@@ -576,7 +671,7 @@ mod tests {
             assert!(r.success, "status {status} should be reachable");
             assert_eq!(r.status, HealthStatus::Operational);
             assert_eq!(r.http_status, Some(status));
-            assert!(r.model_used.is_empty());
+            assert!(r.model_probe.is_none());
             assert!(r.error_category.is_none());
         }
     }

@@ -292,8 +292,7 @@ export function RelayRow({
               checking={isCheckingTier(tier.providerId)}
               verificationVerdict={verificationVerdictForTier?.(tier)}
               onVerify={
-                onVerifyTier &&
-                (tier.appId === "codex" || tier.appId === "claude")
+                onVerifyTier && tier.canVerifyModels
                   ? () => onVerifyTier(tier)
                   : undefined
               }
@@ -523,7 +522,7 @@ function StatusAction({
 /**
  * 一个档位。
  *
- * ⚠️ **`rateMultiplier` 为 null 时显示「倍率未知」，绝不能显示成 0 或「免费」** ——
+ * ⚠️ **`rateMultiplier` 为 null 时不显示倍率，绝不能显示成 0 或「免费」** ——
  * 列表命令只读本地，倍率是服务端定价，要 provision 才有值
  * （`relay.rs` 的 `TierInfo` 注释钉过这条）。显示成 0 会让用户以为这是最便宜的一档。
  */
@@ -642,9 +641,8 @@ function TierItem({
           )}
         </div>
         <div className="text-xs text-muted-foreground">
-          {tier.rateMultiplier === null
-            ? t("loongport.tier.rateUnknown")
-            : t("loongport.tier.rate", { value: tier.rateMultiplier })}
+          {tier.rateMultiplier !== null &&
+            t("loongport.tier.rate", { value: tier.rateMultiplier })}
         </div>
       </div>
 

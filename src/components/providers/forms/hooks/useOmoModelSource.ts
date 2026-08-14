@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { providersApi } from "@/lib/api";
 import { useProvidersQuery } from "@/lib/query/queries";
 import type { OpenCodeProviderConfig } from "@/types";
 import { OPENCODE_PRESET_MODEL_VARIANTS } from "@/config/opencodeProviderPresets";
@@ -9,7 +8,6 @@ import { parseOpencodeConfigStrict } from "../helpers/opencodeFormUtils";
 
 interface UseOmoModelSourceParams {
   isOmoCategory: boolean;
-  providerId?: string;
 }
 
 interface OmoModelBuild {
@@ -23,7 +21,6 @@ interface OmoModelBuild {
     }
   >;
   parseFailedProviders: string[];
-  usedFallbackSource: boolean;
 }
 
 export interface OmoModelSourceResult {
@@ -36,64 +33,15 @@ export interface OmoModelSourceResult {
       limit?: { context?: number; output?: number };
     }
   >;
-  existingOpencodeKeys: string[];
 }
 
 export function useOmoModelSource({
   isOmoCategory,
-  providerId,
 }: UseOmoModelSourceParams): OmoModelSourceResult {
   const { t } = useTranslation();
 
   const { data: opencodeProvidersData } = useProvidersQuery("opencode");
-  const existingOpencodeKeys = useMemo(() => {
-    if (!opencodeProvidersData?.providers) return [];
-    return Object.keys(opencodeProvidersData.providers).filter(
-      (k) => k !== providerId,
-    );
-  }, [opencodeProvidersData?.providers, providerId]);
-
-  const [enabledOpencodeProviderIds, setEnabledOpencodeProviderIds] = useState<
-    string[] | null
-  >(null);
-  const [omoLiveIdsLoadFailed, setOmoLiveIdsLoadFailed] = useState(false);
   const lastOmoModelSourceWarningRef = useRef<string>("");
-
-  useEffect(() => {
-    let active = true;
-    if (!isOmoCategory) {
-      setEnabledOpencodeProviderIds(null);
-      setOmoLiveIdsLoadFailed(false);
-      return () => {
-        active = false;
-      };
-    }
-
-    setEnabledOpencodeProviderIds(null);
-    setOmoLiveIdsLoadFailed(false);
-
-    (async () => {
-      try {
-        const ids = await providersApi.getOpenCodeLiveProviderIds();
-        if (active) {
-          setEnabledOpencodeProviderIds(ids);
-        }
-      } catch (error) {
-        console.warn(
-          "[OMO_MODEL_SOURCE_LIVE_IDS_FAILED] failed to load live provider ids",
-          error,
-        );
-        if (active) {
-          setOmoLiveIdsLoadFailed(true);
-          setEnabledOpencodeProviderIds(null);
-        }
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [isOmoCategory]);
 
   const omoModelBuild = useMemo<OmoModelBuild>(() => {
     const empty: OmoModelBuild = {
@@ -101,7 +49,6 @@ export function useOmoModelSource({
       variantsMap: {},
       presetMetaMap: {},
       parseFailedProviders: [],
-      usedFallbackSource: false,
     };
     if (!isOmoCategory) {
       return empty;
@@ -111,15 +58,6 @@ export function useOmoModelSource({
     if (!allProviders) {
       return empty;
     }
-
-    const shouldFilterByLive = !omoLiveIdsLoadFailed;
-    if (shouldFilterByLive && enabledOpencodeProviderIds === null) {
-      return empty;
-    }
-    const liveSet =
-      shouldFilterByLive && enabledOpencodeProviderIds
-        ? new Set(enabledOpencodeProviderIds)
-        : null;
 
     const dedupedOptions = new Map<string, string>();
     const variantsMap: Record<string, string[]> = {};
@@ -136,7 +74,7 @@ export function useOmoModelSource({
       if (provider.category === "omo" || provider.category === "omo-slim") {
         continue;
       }
-      if (liveSet && !liveSet.has(providerKey)) {
+      if (provider.presentation?.isInConfig !== true) {
         continue;
       }
 
@@ -224,26 +162,16 @@ export function useOmoModelSource({
       variantsMap,
       presetMetaMap,
       parseFailedProviders,
-      usedFallbackSource: omoLiveIdsLoadFailed,
     };
-  }, [
-    isOmoCategory,
-    opencodeProvidersData?.providers,
-    enabledOpencodeProviderIds,
-    omoLiveIdsLoadFailed,
-  ]);
+  }, [isOmoCategory, opencodeProvidersData?.providers]);
 
   // Warning toast for parse failures / fallback
   useEffect(() => {
     if (!isOmoCategory) return;
     const failed = omoModelBuild.parseFailedProviders;
-    const fallback = omoModelBuild.usedFallbackSource;
-    if (failed.length === 0 && !fallback) return;
+    if (failed.length === 0) return;
 
-    const signature = `${fallback ? "fallback:" : ""}${failed
-      .slice()
-      .sort()
-      .join(",")}`;
+    const signature = failed.slice().sort().join(",");
     if (lastOmoModelSourceWarningRef.current === signature) return;
     lastOmoModelSourceWarningRef.current = signature;
 
@@ -256,25 +184,11 @@ export function useOmoModelSource({
         }),
       );
     }
-    if (fallback) {
-      toast.warning(
-        t("omo.modelSourceFallbackWarning", {
-          defaultValue:
-            "Failed to load live provider state. Falling back to configured providers.",
-        }),
-      );
-    }
-  }, [
-    isOmoCategory,
-    omoModelBuild.parseFailedProviders,
-    omoModelBuild.usedFallbackSource,
-    t,
-  ]);
+  }, [isOmoCategory, omoModelBuild.parseFailedProviders, t]);
 
   return {
     omoModelOptions: omoModelBuild.options,
     omoModelVariantsMap: omoModelBuild.variantsMap,
     omoPresetMetaMap: omoModelBuild.presetMetaMap,
-    existingOpencodeKeys,
   };
 }

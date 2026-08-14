@@ -8,7 +8,7 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
-import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
+import { providersApi, type AppId } from "@/lib/api";
 
 interface EditProviderDialogProps {
   open: boolean;
@@ -33,8 +33,7 @@ export function EditProviderDialog({
   const { t } = useTranslation();
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
 
-  // 默认使用传入的 provider.settingsConfig，若当前编辑对象是"当前生效供应商"，则尝试读取实时配置替换初始值
-  const [liveSettings, setLiveSettings] = useState<Record<
+  const [editSettings, setEditSettings] = useState<Record<
     string,
     unknown
   > | null>(null);
@@ -46,7 +45,7 @@ export function EditProviderDialog({
     let cancelled = false;
     const load = async () => {
       if (!open || !provider) {
-        setLiveSettings(null);
+        setEditSettings(null);
         setHasLoadedLive(false);
         return;
       }
@@ -56,107 +55,35 @@ export function EditProviderDialog({
         return;
       }
 
-      // 代理接管模式：Live 配置已被代理改写，读取 live 会导致编辑界面展示代理地址/占位符等内容
-      // 因此直接回退到 SSOT（数据库）配置，避免用户困惑与误保存
-      if (isProxyTakeover) {
-        if (!cancelled) {
-          setLiveSettings(null);
-          setHasLoadedLive(true);
-        }
-        return;
-      }
-
-      // OpenCode uses additive mode - each provider's config is stored independently in DB
-      // Reading live config would return the full opencode.json (with $schema, provider, mcp etc.)
-      // instead of just the provider fragment, causing incorrect nested structure on save
-      if (appId === "opencode") {
-        if (!cancelled) {
-          setLiveSettings(null);
-          setHasLoadedLive(true);
-        }
-        return;
-      }
-
-      if (appId === "openclaw") {
-        try {
-          const live = await openclawApi.getLiveProvider(provider.id);
-          if (!cancelled && live && typeof live === "object") {
-            setLiveSettings(live);
-          } else if (!cancelled) {
-            setLiveSettings(null);
-          }
-        } catch {
-          if (!cancelled) {
-            setLiveSettings(null);
-          }
-        } finally {
-          if (!cancelled) {
-            setHasLoadedLive(true);
-          }
-        }
-        return;
-      }
-
       try {
-        const currentId = await providersApi.getCurrent(appId);
-        if (currentId && provider.id === currentId) {
-          try {
-            const live = (await vscodeApi.getLiveProviderSettings(
-              appId,
-            )) as Record<string, unknown>;
-            if (!cancelled && live && typeof live === "object") {
-              setLiveSettings(live);
-              setHasLoadedLive(true);
-            }
-          } catch {
-            // 读取实时配置失败则回退到 SSOT（不打断编辑流程）
-            if (!cancelled) {
-              setLiveSettings(null);
-              setHasLoadedLive(true);
-            }
-          }
-        } else {
-          if (!cancelled) {
-            setLiveSettings(null);
-            setHasLoadedLive(true);
-          }
+        const settings = await providersApi.getEditSettings(provider.id, appId);
+        if (!cancelled) {
+          setEditSettings(settings);
+        }
+      } catch {
+        if (!cancelled) {
+          setEditSettings(null);
         }
       } finally {
-        // no-op
+        if (!cancelled) {
+          setHasLoadedLive(true);
+        }
       }
     };
     void load();
     return () => {
       cancelled = true;
     };
-  }, [open, provider?.id, appId, hasLoadedLive, isProxyTakeover]); // 只依赖 provider.id，不依赖整个 provider 对象
+  }, [open, provider?.id, appId, hasLoadedLive]); // 只依赖 provider.id，不依赖整个 provider 对象
 
-  const initialSettingsConfig = useMemo(() => {
-    const base = (liveSettings ?? provider?.settingsConfig ?? {}) as Record<
-      string,
-      unknown
-    >;
-
-    // Codex 的 modelCatalog 是 cc-switch 私有字段，SSOT 在数据库。Live 的 config.toml
-    // 仅在写入时投影出 model_catalog_json 指针；Codex.app 改写配置、代理接管/恢复周期、
-    // 来回切换供应商都可能让 Live 丢失该投影，从而 read_live_settings 反解为空。
-    // 若放任 Live 覆盖，编辑界面会显示空映射表，保存后连同数据库里的映射一起清空（数据丢失）。
-    // 因此始终以数据库 SSOT 的 modelCatalog 为准，仅在数据库确实没有时才回退到 Live 反解结果。
-    if (
-      appId === "codex" &&
-      liveSettings &&
-      provider?.settingsConfig &&
-      typeof provider.settingsConfig === "object"
-    ) {
-      const dbCatalog = (provider.settingsConfig as Record<string, unknown>)
-        .modelCatalog;
-      if (dbCatalog !== undefined) {
-        return { ...base, modelCatalog: dbCatalog };
-      }
-    }
-
-    return base;
-  }, [liveSettings, provider?.settingsConfig, appId]); // 只依赖 settingsConfig，不依赖整个 provider
+  const initialSettingsConfig = useMemo(
+    () =>
+      (editSettings ?? provider?.settingsConfig ?? {}) as Record<
+        string,
+        unknown
+      >,
+    [editSettings, provider?.settingsConfig],
+  );
 
   // 固定 initialData，防止 provider 对象更新时重置表单
   const initialData = useMemo(() => {

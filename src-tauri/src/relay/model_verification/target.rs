@@ -116,11 +116,16 @@ impl ResolvedScope {
     }
 }
 
+pub(crate) fn supports_app_type(app_type: &AppType) -> bool {
+    matches!(app_type, AppType::Codex | AppType::Claude)
+}
+
 fn supported_app_type(app_type: &str) -> Result<AppType, AppError> {
-    match AppType::from_str(app_type)? {
-        AppType::Codex => Ok(AppType::Codex),
-        AppType::Claude => Ok(AppType::Claude),
-        _ => Err(AppError::Config("模型验证仅支持 codex 和 claude。".into())),
+    let app_type = AppType::from_str(app_type)?;
+    if supports_app_type(&app_type) {
+        Ok(app_type)
+    } else {
+        Err(AppError::Config("模型验证仅支持 codex 和 claude。".into()))
     }
 }
 

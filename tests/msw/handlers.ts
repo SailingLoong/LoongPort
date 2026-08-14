@@ -39,6 +39,95 @@ const withJson = async <T>(request: Request): Promise<T> => {
 
 const success = <T>(payload: T) => HttpResponse.json(payload as any);
 
+function providerViews(app: AppId): Record<string, Provider> {
+  const currentProviderId = getCurrentProviderId(app);
+  const liveProviderIds = new Set(
+    app === "opencode" || app === "openclaw" || app === "hermes"
+      ? getLiveProviderIds(app)
+      : [],
+  );
+
+  return Object.fromEntries(
+    Object.entries(getProviders(app)).map(([id, provider]) => [
+      id,
+      {
+        ...provider,
+        presentation: provider.presentation ?? {
+          isOfficial: provider.category === "official",
+          isCurrent: id === currentProviderId,
+          isInConfig:
+            app === "opencode" || app === "openclaw" || app === "hermes"
+              ? liveProviderIds.has(id)
+              : true,
+          isDefaultModel: false,
+          isManaged: false,
+          isReadOnly: false,
+          canDelete: id !== currentProviderId,
+          canEdit: true,
+          canTestConnectivity: provider.category !== "official",
+          canConfigureUsage: provider.category !== "official",
+          usesOfficialSubscriptionUsage: provider.category === "official",
+          canSetAsDefault: false,
+          routingBadge: null,
+          routingReason: null,
+          switchBlockedReason: null,
+        },
+      },
+    ]),
+  );
+}
+
+function duplicateProvider(app: AppId, id: string): boolean {
+  const providers = listProviders(app);
+  const source = providers[id];
+  if (!source) return false;
+
+  const isAdditive =
+    app === "opencode" || app === "openclaw" || app === "hermes";
+  let duplicateId = `mock-duplicate-${Date.now()}`;
+  if (isAdditive) {
+    const occupiedIds = new Set([
+      ...Object.keys(providers),
+      ...getLiveProviderIds(app),
+    ]);
+    const baseId = `${source.id}-copy`;
+    duplicateId = baseId;
+    for (let suffix = 2; occupiedIds.has(duplicateId); suffix += 1) {
+      duplicateId = `${baseId}-${suffix}`;
+    }
+  }
+
+  const duplicateSortIndex =
+    source.sortIndex === undefined ? undefined : source.sortIndex + 1;
+  if (duplicateSortIndex !== undefined) {
+    updateSortOrder(
+      app,
+      Object.values(providers)
+        .filter(
+          (provider) =>
+            provider.id !== source.id &&
+            provider.sortIndex !== undefined &&
+            provider.sortIndex >= duplicateSortIndex,
+        )
+        .map((provider) => ({
+          id: provider.id,
+          sortIndex: provider.sortIndex! + 1,
+        })),
+    );
+  }
+
+  const { presentation: _presentation, notes: _notes, ...copied } = source;
+  addProvider(app, {
+    ...copied,
+    id: duplicateId,
+    name: `${source.name} copy`,
+    createdAt: Date.now(),
+    sortIndex: duplicateSortIndex,
+    inFailoverQueue: false,
+  });
+  return true;
+}
+
 export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_migration_result`, () => success(false)),
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
@@ -47,7 +136,7 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/list_profiles`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/get_providers`, async ({ request }) => {
     const { app } = await withJson<{ app: AppId }>(request);
-    return success(getProviders(app));
+    return success(providerViews(app));
   }),
 
   http.post(`${TAURI_ENDPOINT}/get_current_provider`, async ({ request }) => {
@@ -94,14 +183,22 @@ export const handlers = [
   }),
 
   http.post(`${TAURI_ENDPOINT}/add_provider`, async ({ request }) => {
-    const { provider, app } = await withJson<{
+    const { provider, app, providerKey } = await withJson<{
       provider: Provider & { id?: string };
       app: AppId;
+      providerKey?: string;
     }>(request);
 
-    const newId = provider.id ?? `mock-${Date.now()}`;
-    addProvider(app, { ...provider, id: newId });
+    const newId = provider.id || providerKey || `mock-${Date.now()}`;
+    addProvider(app, { ...provider, id: newId, createdAt: Date.now() });
     return success(true);
+  }),
+
+  http.post(`${TAURI_ENDPOINT}/duplicate_provider`, async ({ request }) => {
+    const { id, app } = await withJson<{ id: string; app: AppId }>(request);
+    return duplicateProvider(app, id)
+      ? success(true)
+      : HttpResponse.json(false, { status: 404 });
   }),
 
   http.post(`${TAURI_ENDPOINT}/update_provider`, async ({ request }) => {
@@ -396,7 +493,10 @@ export const handlers = [
   // 返回的形状照前端契约（`src/lib/api/relay.ts` / `vendor.ts`），空集合优先 ——
   // 这些 handler 只为「首屏能渲染完」，具体行为由各自的专项测试覆盖。
   http.post(`${TAURI_ENDPOINT}/relay_status`, () =>
-    success({ defaultSite: "example.com", chatgptNeedsAttention: false }),
+    success({
+      defaultSite: "example.com",
+      shouldPromptAddSite: false,
+    }),
   ),
   http.post(`${TAURI_ENDPOINT}/relay_list_relays`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/relay_list_sites`, () => success([])),
@@ -406,5 +506,7 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/relay_stats_endpoint_configured`, () =>
     success(false),
   ),
-  http.post(`${TAURI_ENDPOINT}/vendor_list_accounts`, () => success([])),
+  http.post(`${TAURI_ENDPOINT}/vendor_list_accounts`, () =>
+    success({ supported: false, accounts: [] }),
+  ),
 ];

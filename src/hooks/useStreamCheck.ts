@@ -2,8 +2,8 @@ import { useState, useCallback } from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import {
-  parseModelProbeVerdict,
   streamCheckProvider,
+  type ModelProbeVerdict,
   type StreamCheckResult,
 } from "@/lib/api/connectivity-check";
 import type { AppId } from "@/lib/api";
@@ -20,12 +20,8 @@ export function useStreamCheck(appId: AppId) {
   const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set());
 
   const formatModelProbe = useCallback(
-    (modelUsed: string | undefined) => {
-      if (!modelUsed) return undefined;
-
-      const verdict = parseModelProbeVerdict(modelUsed);
-      if (!verdict) return modelUsed;
-
+    (verdict: ModelProbeVerdict | undefined) => {
+      if (!verdict) return undefined;
       switch (verdict.kind) {
         case "keyExpired":
           return t("streamCheck.modelProbe.keyExpired", {
@@ -61,7 +57,7 @@ export function useStreamCheck(appId: AppId) {
       try {
         const result = await streamCheckProvider(appId, providerId);
 
-        if (result.status === "operational") {
+        if (result.overallStatus === "healthy") {
           toast.success(
             t("streamCheck.reachable", {
               providerName: providerName,
@@ -70,25 +66,34 @@ export function useStreamCheck(appId: AppId) {
             }),
             {
               closeButton: true,
-              // 「真正能调什么」—— 后端零成本探出来的（见 `modelUsed` 的文档）。
+              // 「真正能调什么」—— 后端零成本探出并给出最终结论。
               // **可达 ≠ 可用**：密钥失效、分组没挂模型、只挂生图模型这三种，
               // 可达性探测都报「正常」，而这一行会说清楚。
-              description: formatModelProbe(result.modelUsed),
+              description: formatModelProbe(result.modelProbe),
             },
           );
-        } else if (result.status === "degraded") {
+        } else if (result.overallStatus === "degraded") {
           toast.warning(
             t("streamCheck.reachableSlow", {
               providerName: providerName,
               responseTimeMs: result.responseTimeMs,
               defaultValue: `${providerName} 连通但较慢 (${result.responseTimeMs}ms)`,
             }),
-            // ⚠️ 这一支**同样要显示** `modelUsed`（review 抓出）——「慢」与「坏」是两件
+            // ⚠️ 这一支**同样要显示**模型探测结论——「慢」与「坏」是两件
             // 独立的事：一个响应慢的档位同样可能密钥已失效、或只挂了生图模型。
             // 漏在这里等于让这个功能在最需要它的那一类档位上静默失效
             // （结论算出来了、写进日志了，就是不给用户看）。
-            { description: formatModelProbe(result.modelUsed) },
+            { description: formatModelProbe(result.modelProbe) },
           );
+        } else if (result.overallStatus === "unusable") {
+          toast.error(formatModelProbe(result.modelProbe) ?? result.message, {
+            closeButton: true,
+            description: t("streamCheck.reachable", {
+              providerName: providerName,
+              responseTimeMs: result.responseTimeMs,
+              defaultValue: `${providerName} 连通正常 (${result.responseTimeMs}ms)`,
+            }),
+          });
         } else {
           // 仅当无法建立连接（DNS / 连接被拒 / TLS / 超时）才会到这里
           toast.error(

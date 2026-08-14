@@ -38,7 +38,7 @@ pub enum ProfileScope {
 }
 
 impl ProfileScope {
-    /// 全部分组（扩展新分组时同步扩展 apps/for_app 与前端 scope.ts 镜像）
+    /// 全部分组（扩展新分组时同步扩展 apps/for_app）
     pub const ALL: [ProfileScope; 3] = [
         ProfileScope::Claude,
         ProfileScope::ClaudeDesktop,

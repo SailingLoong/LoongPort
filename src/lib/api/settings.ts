@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Settings,
+  VisibleApps,
   WebDavSyncSettings,
   S3SyncSettings,
   RemoteSnapshotInfo,
@@ -30,8 +31,10 @@ export interface WebDavSyncResult {
   status: string;
 }
 
+export type FrontendSettings = Settings & { visibleApps: VisibleApps };
+
 export const settingsApi = {
-  async get(): Promise<Settings> {
+  async get(): Promise<FrontendSettings> {
     return await invoke("get_settings");
   },
 
@@ -99,13 +102,6 @@ export const settingsApi = {
 
   async setAppConfigDirOverride(path: string | null): Promise<boolean> {
     return await invoke("set_app_config_dir_override", { path });
-  },
-
-  async applyClaudePluginConfig(options: {
-    official: boolean;
-  }): Promise<boolean> {
-    const { official } = options;
-    return await invoke("apply_claude_plugin_config", { official });
   },
 
   async applyClaudeOnboardingSkip(): Promise<boolean> {
