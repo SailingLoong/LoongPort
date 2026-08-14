@@ -12,8 +12,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
 
-const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
-const REFRESH_PATH: &str = "/api/user/auth/refresh";
+/// refresh cookie 的名字。`pub(crate)`：commands 层的命令级测试要按它构造 fake
+/// 站点的 Set-Cookie / 路由 —— 协议细节的唯一 owner 在本模块，那边只**引用**不复制
+/// （`browser_login_dispatch_keeps_protocol_details_out_of_commands` 闸钉着这一点）。
+pub(crate) const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
+/// refresh 端点路径。owner 同上；`refresh_url` 是它对外的完整 URL 形态。
+pub(crate) const REFRESH_PATH: &str = "/api/user/auth/refresh";
 /// NewAPI 上游 refresh cookie 的 `Path` 属性：refresh 端点（[`REFRESH_PATH`]）就挂在
 /// 这棵子树下，作用域收窄到 auth 而不是全站 `/`。
 const REFRESH_COOKIE_PATH: &str = "/api/user/auth";

@@ -77,6 +77,7 @@ pub mod promo;
 pub(crate) mod provider_fingerprint;
 pub mod provision;
 pub mod purchase;
+pub mod purchase_session;
 pub mod remote_config;
 pub mod stats;
 

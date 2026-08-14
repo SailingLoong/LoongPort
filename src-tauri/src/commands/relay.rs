@@ -2457,6 +2457,15 @@ async fn usable_relay<R: tauri::Runtime>(
     }
 
     let state = app_handle.state::<AppState>();
+    // ⭐ 充值窗口持有这个 NewAPI 账号的 refresh 轮换独占权时，后台续期不得抢跑：
+    // NewAPI 的 refresh cookie 一次性轮换，这里并发续期会把充值窗口里那颗 cookie
+    // 立刻作废（用户充值到一半被踢回登录页）。闸放在 `token_looks_valid` 早退**之后**：
+    // token 仍然有效时根本不走续期，不受影响；sub2api 的续期也不受影响。
+    if op.backend_kind == creds::BackendKind::NewApi && state.purchase_sessions.is_active(op.id) {
+        return Err(AppError::Config(
+            "充值窗口正在使用这个账号的登录态，请关闭充值窗口后重试".into(),
+        ));
+    }
     let refreshed = backend::RuntimeBackend::for_relay(&op)
         .refresh_session(op.refresh_token.as_deref())
         .await?;
@@ -6059,6 +6068,21 @@ mod tests {
             .expect("saved relay exists")
     }
 
+    /// 把 `saved_relay_app` 存好的 relay 的 access token 显式置为已过期。
+    ///
+    /// 必须给一个**过去**的 `token_expires_at`：`saved_relay_app` 存的是 `None`，而
+    /// `token_looks_valid` 对 `None` 有意乐观降级（返回 true），`usable_relay` 会走
+    /// token 早退分支，永远到不了要测的续期路径。
+    fn expire_saved_relay_token(app: &tauri::App<tauri::test::MockRuntime>, relay_id: i64) {
+        let state = app.state::<AppState>();
+        let conn = state.db.conn.lock().expect("lock memory database");
+        conn.execute(
+            "UPDATE loongport_relay SET token_expires_at = ?1 WHERE id = ?2",
+            rusqlite::params![chrono::Utc::now().timestamp() - 3600, relay_id],
+        )
+        .expect("expire saved relay token");
+    }
+
     #[tokio::test]
     async fn saved_relay_validation_accepts_the_same_detected_backend() {
         let (origin, server) = spawn_discovery_server(None, Some(newapi_discovery_body())).await;
@@ -6150,6 +6174,146 @@ mod tests {
         assert_eq!(relay.auth_token, "saved-access-token");
         assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
         server.await.expect("connection-drop server completes");
+    }
+
+    /// ⭐ 回归闸：充值窗口持有 NewAPI 账号的 refresh 轮换独占权时，`usable_relay`
+    /// 的静默续期必须被拦下 —— NewAPI 的 refresh cookie 一次性轮换，后台并发续期会把
+    /// 充值窗口里种着的那颗 cookie 立刻作废（用户充值到一半被踢回登录页）。
+    ///
+    /// 两个断言互相补充：
+    /// 1. 持 lease 时：报「充值窗口」错误，且 fake 站点收到 **0** 个 refresh 请求
+    ///    （`newapi::refresh_url` 指向的端点）—— 闸必须挡在发请求之前，不是发完再补救。
+    /// 2. drop lease 后：同一 relay 的 `usable_relay` 正常走续期（端点收到请求、拿到
+    ///    新 token）—— 证明闸只认 lease，不是无条件挡路。
+    ///
+    /// 协议细节（refresh 端点路径、cookie 名）全部从 `newapi` owner 派生，本文件
+    /// 不写字面量 —— `browser_login_dispatch_keeps_protocol_details_out_of_commands`
+    /// 闸钉着 commands 层不得拥有这些细节。探测阶段会打 `/api/status`（还可能探别的
+    /// 候选端点吃 404），与断言无关 —— 请求日志里只数 refresh 端点的个数。
+    #[tokio::test]
+    async fn active_purchase_session_blocks_newapi_refresh() {
+        use axum::{
+            extract::Request,
+            http::{header, HeaderValue},
+            middleware,
+            middleware::Next,
+            response::IntoResponse,
+            routing::get,
+            routing::post,
+            Json, Router,
+        };
+
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let every_request = Arc::clone(&requests);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind refresh-block test server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        // refresh 端点路径从 owner 派生：fake 路由和下面的请求计数共用它，两边
+        // 永远指向同一个端点（写两份字面量迟早分叉，而且这份文件不许有字面量）。
+        let refresh_path = newapi::refresh_url(&origin)
+            .expect("newapi refresh url")
+            .path()
+            .to_string();
+
+        let site = Router::new()
+            .route(
+                "/api/status",
+                get(move || {
+                    let body = newapi_discovery_body();
+                    async move { Json(body) }
+                }),
+            )
+            // 不持 lease 的那次 `usable_relay` 要真的续期成功，回一个完整的 NewAPI
+            // refresh 信封（parser 要求带轮换后的 Set-Cookie，名字同样取自 owner）。
+            .route(
+                refresh_path.as_str(),
+                post(move || {
+                    async move {
+                        let set_cookie = format!(
+                            "{}=rotated-secret; Path=/; HttpOnly",
+                            newapi::REFRESH_COOKIE_NAME
+                        );
+                        (
+                            [(
+                                header::SET_COOKIE,
+                                // HeaderValue 拥有自己的字节：cookie 值是运行期拼出来的
+                                // （名字来自 owner 常量），借用拼不出 'static 响应。
+                                HeaderValue::from_str(&set_cookie).expect("合法 set-cookie"),
+                            )],
+                            Json(serde_json::json!({
+                                "success": true,
+                                "data": {
+                                    "access_token": "refreshed-access-token",
+                                    "access_expires_at": 4_102_444_800_i64,
+                                    "user": {
+                                        "id": 7,
+                                        "username": "saved-account",
+                                        "display_name": "Saved Account",
+                                        "email": "saved@example.test",
+                                        "group": "default",
+                                        "quota": 1,
+                                        "used_quota": 0
+                                    },
+                                    "session": { "sid": "sid-refreshed" }
+                                }
+                            })),
+                        )
+                            .into_response()
+                    }
+                }),
+            )
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
+                let requests = Arc::clone(&every_request);
+                async move {
+                    requests.lock().unwrap().push(req.uri().path().to_string());
+                    next.run(req).await
+                }
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, site)
+                .await
+                .expect("serve refresh-block app");
+        });
+
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+        expire_saved_relay_token(&app, relay_id);
+
+        let refresh_count = || {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == refresh_path)
+                .count()
+        };
+
+        let coordinator = Arc::clone(&app.state::<AppState>().purchase_sessions);
+        let lease = coordinator.try_acquire(relay_id).expect("acquire lease");
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("持 lease 时后台续期必须被拦下");
+        assert!(error.to_string().contains("充值窗口"), "{error}");
+        assert_eq!(
+            refresh_count(),
+            0,
+            "闸必须挡在发请求之前：fake 站点不该收到任何 refresh 请求"
+        );
+
+        drop(lease);
+        let relay = usable_relay(app.handle(), relay_id)
+            .await
+            .expect("lease 释放后同一 relay 必须恢复续期");
+        assert_eq!(relay.auth_token, "refreshed-access-token");
+        assert_eq!(
+            refresh_count(),
+            1,
+            "不持 lease 时同一 relay 的 usable_relay 会正常尝试续期 —— 闸不是无条件挡路"
+        );
+
+        server.abort();
     }
 
     /// ⭐ 回归闸：sub2api 充值页必须打开**签名配置的 URL**，不再读站点公开设置的
