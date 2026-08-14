@@ -3074,13 +3074,13 @@
         "gemini": "Gemini"
       },
       "source": {
-        "live": "VeriDrop 实时数据 · {{time}}",
-        "cached": "VeriDrop 缓存数据 · {{time}}"
+        "syncedAt": "VeriDrop 实时数据 · 更新于 {{time}}"
       },
       "searchPlaceholder": "搜索站点、协议或适用场景",
       "loading": "正在读取 VeriDrop 榜单…",
       "errorTitle": "无法读取中转站榜单",
       "errorBody": "实时数据和上次成功缓存均不可用。",
+      "refreshFailed": "刷新 VeriDrop 榜单失败：{{reason}}",
       "empty": "没有符合当前筛选条件的站点",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思维签名验证通过率",

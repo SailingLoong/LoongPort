@@ -3075,13 +3075,13 @@
         "gemini": "Gemini"
       },
       "source": {
-        "live": "VeriDrop 即時資料 · {{time}}",
-        "cached": "VeriDrop 快取資料 · {{time}}"
+        "syncedAt": "VeriDrop 即時資料 · 更新於 {{time}}"
       },
       "searchPlaceholder": "搜尋站點、協定或適用情境",
       "loading": "正在讀取 VeriDrop 排行榜…",
       "errorTitle": "無法讀取中轉站排行榜",
       "errorBody": "即時資料與上次成功快取皆無法使用。",
+      "refreshFailed": "重新整理 VeriDrop 排行榜失敗：{{reason}}",
       "empty": "沒有符合目前篩選條件的站點",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思維簽名驗證通過率",

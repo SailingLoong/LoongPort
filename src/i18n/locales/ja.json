@@ -3074,13 +3074,13 @@
         "gemini": "Gemini"
       },
       "source": {
-        "live": "VeriDrop ライブデータ · {{time}}",
-        "cached": "VeriDrop キャッシュデータ · {{time}}"
+        "syncedAt": "VeriDrop ライブデータ · {{time}} 更新"
       },
       "searchPlaceholder": "サイト、プロトコル、用途を検索",
       "loading": "VeriDrop ランキングを読み込んでいます…",
       "errorTitle": "中継サイト一覧を読み込めません",
       "errorBody": "ライブデータと前回成功時のキャッシュのどちらも利用できません。",
+      "refreshFailed": "VeriDrop ランキングを更新できませんでした：{{reason}}",
       "empty": "現在の条件に一致するサイトはありません",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思考署名の検証成功率",

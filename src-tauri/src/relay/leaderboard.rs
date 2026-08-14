@@ -1,16 +1,18 @@
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::error::AppError;
+use crate::maintenance::config::VERIDROP_CACHE_TTL;
 use crate::relay::remote_config::{RelayDirectoryPolicy, RemoteConfig};
 
 const VERIDROP_ORIGIN: &str = "https://veridrop.org";
 const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 const FETCH_TIMEOUT_SECS: u64 = 12;
 const MANAGED_DETAIL_CONCURRENCY: usize = 4;
-const CACHE_SCHEMA_VERSION: u8 = 1;
+const CACHE_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,7 +73,6 @@ pub struct RelayLeaderboard {
     pub kind: LeaderboardKind,
     pub items: Vec<RelayDirectoryItem>,
     pub synced_at: i64,
-    pub from_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -80,10 +81,128 @@ struct CachedLeaderboard {
     schema_version: u8,
     kind: LeaderboardKind,
     items: Vec<ParsedLeaderboardItem>,
+    managed_hosts: Vec<String>,
     synced_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RefreshOutcome {
+    pub leaderboard: RelayLeaderboard,
+    pub updated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshMode {
+    Force,
+    IfStale,
+}
+
+struct RefreshCoordinator {
+    generation: AtomicU64,
+    slot: tokio::sync::Mutex<RefreshSlot>,
+}
+
+struct RefreshSlot {
+    last_result: Option<Result<RelayLeaderboard, String>>,
+    last_failure_at: Option<Instant>,
+}
+
+impl RefreshCoordinator {
+    const fn new() -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            slot: tokio::sync::Mutex::const_new(RefreshSlot {
+                last_result: None,
+                last_failure_at: None,
+            }),
+        }
+    }
+
+    async fn run<Fresh, Task, Fut>(
+        &self,
+        mode: RefreshMode,
+        cache_available: bool,
+        fresh: Fresh,
+        task: Task,
+    ) -> Result<RefreshOutcome, AppError>
+    where
+        Fresh: Fn() -> Option<RelayLeaderboard>,
+        Task: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<RelayLeaderboard, AppError>>,
+    {
+        let observed_generation = self.generation.load(Ordering::Acquire);
+        let mut slot = self.slot.lock().await;
+        let generation_changed = self.generation.load(Ordering::Acquire) != observed_generation;
+        let fresh_leaderboard = (mode == RefreshMode::IfStale || generation_changed)
+            .then(fresh)
+            .flatten();
+
+        if mode == RefreshMode::IfStale {
+            if let Some(leaderboard) = fresh_leaderboard.clone() {
+                return Ok(RefreshOutcome {
+                    leaderboard,
+                    updated: false,
+                });
+            }
+        }
+
+        if generation_changed {
+            match slot.last_result.as_ref() {
+                Some(Err(_)) | None => return shared_refresh_result(&slot),
+                Some(Ok(_)) => {
+                    if let Some(leaderboard) = fresh_leaderboard {
+                        return Ok(RefreshOutcome {
+                            leaderboard,
+                            updated: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        if mode == RefreshMode::IfStale
+            && cache_available
+            && slot.last_failure_at.is_some_and(|failed_at| {
+                failed_at.elapsed() < crate::maintenance::config::VERIDROP_RETRY_DELAY
+            })
+        {
+            return shared_refresh_result(&slot);
+        }
+
+        let result = task().await.map_err(|error| error.to_string());
+        slot.last_failure_at = result.as_ref().err().map(|_| Instant::now());
+        slot.last_result = Some(result.clone());
+        self.generation.fetch_add(1, Ordering::Release);
+
+        result
+            .map(|leaderboard| RefreshOutcome {
+                leaderboard,
+                updated: true,
+            })
+            .map_err(AppError::Message)
+    }
+}
+
+impl Default for RefreshCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn shared_refresh_result(slot: &RefreshSlot) -> Result<RefreshOutcome, AppError> {
+    slot.last_result
+        .clone()
+        .ok_or_else(|| AppError::Message("VeriDrop 刷新状态缺少结果".into()))?
+        .map(|leaderboard| RefreshOutcome {
+            leaderboard,
+            updated: false,
+        })
+        .map_err(AppError::Message)
+}
+
 impl LeaderboardKind {
+    pub const ALL: [Self; 4] = [Self::Overall, Self::Claude, Self::OpenAi, Self::Gemini];
+
     fn path(self) -> &'static str {
         match self {
             Self::Overall => "/leaderboard",
@@ -539,38 +658,32 @@ fn apply_policy_to_cached(cached: CachedLeaderboard, config: &RemoteConfig) -> R
         kind: cached.kind,
         items: apply_policy(cached.items, config),
         synced_at: cached.synced_at,
-        from_cache: true,
     }
 }
 
-fn write_cache(leaderboard: &CachedLeaderboard) {
+fn write_cache(leaderboard: &CachedLeaderboard) -> Result<(), AppError> {
     let path = cache_path(leaderboard.kind);
-    let Some(parent) = path.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    if let Ok(bytes) = serde_json::to_vec(leaderboard) {
-        let _ = std::fs::write(path, bytes);
-    }
+    let bytes =
+        serde_json::to_vec(leaderboard).map_err(|source| AppError::JsonSerialize { source })?;
+    crate::config::atomic_write(&path, &bytes)
 }
 
-fn prefer_live(
-    live: Result<RelayLeaderboard, AppError>,
-    cached: Option<RelayLeaderboard>,
-) -> Result<RelayLeaderboard, AppError> {
-    match live {
-        Ok(leaderboard) => Ok(leaderboard),
-        Err(error) => cached
-            .map(|mut leaderboard| {
-                leaderboard.from_cache = true;
-                leaderboard
-            })
-            .ok_or(error),
-    }
+fn is_fresh_at(synced_at: i64, now: i64) -> bool {
+    now.saturating_sub(synced_at) < VERIDROP_CACHE_TTL.as_secs() as i64
 }
 
-fn prefer_live_config(live: Option<RemoteConfig>, cached: Option<RemoteConfig>) -> RemoteConfig {
-    live.or(cached).unwrap_or_default()
+fn is_fresh_for(cached: &CachedLeaderboard, now: i64, config: &RemoteConfig) -> bool {
+    is_fresh_at(cached.synced_at, now) && cached.managed_hosts == managed_veridrop_hosts(config)
+}
+
+pub fn read_cached(kind: LeaderboardKind) -> Result<Option<RelayLeaderboard>, AppError> {
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+    Ok(read_cache(kind).map(|cached| apply_policy_to_cached(cached, &config)))
+}
+
+pub fn is_cache_fresh(kind: LeaderboardKind, now: i64) -> bool {
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+    read_cache(kind).is_some_and(|cached| is_fresh_for(&cached, now, &config))
 }
 
 async fn fetch_html(client: &reqwest::Client, url: &str) -> Result<Option<String>, AppError> {
@@ -645,6 +758,7 @@ async fn fetch_live_source_with(
     Ok(items)
 }
 
+#[cfg(test)]
 async fn fetch_live_source(
     kind: LeaderboardKind,
     managed_hosts: &[String],
@@ -657,41 +771,111 @@ async fn fetch_live_source(
     fetch_live_source_with(&client, VERIDROP_ORIGIN, kind, managed_hosts).await
 }
 
-pub async fn list(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
-    let cached_config = crate::relay::remote_config::load_cached();
-    let config = prefer_live_config(
-        crate::relay::remote_config::refresh_and_cache().await,
-        cached_config,
-    );
-    let cached = read_cache(kind).map(|cached| apply_policy_to_cached(cached, &config));
-    let live = fetch_live_source(kind, &managed_veridrop_hosts(&config))
+static OVERALL_REFRESH: RefreshCoordinator = RefreshCoordinator::new();
+static CLAUDE_REFRESH: RefreshCoordinator = RefreshCoordinator::new();
+static OPENAI_REFRESH: RefreshCoordinator = RefreshCoordinator::new();
+static GEMINI_REFRESH: RefreshCoordinator = RefreshCoordinator::new();
+
+fn refresh_coordinator(kind: LeaderboardKind) -> &'static RefreshCoordinator {
+    match kind {
+        LeaderboardKind::Overall => &OVERALL_REFRESH,
+        LeaderboardKind::Claude => &CLAUDE_REFRESH,
+        LeaderboardKind::OpenAi => &OPENAI_REFRESH,
+        LeaderboardKind::Gemini => &GEMINI_REFRESH,
+    }
+}
+
+async fn refresh_with(
+    client: &reqwest::Client,
+    origin: &str,
+    kind: LeaderboardKind,
+    config: &RemoteConfig,
+) -> Result<RelayLeaderboard, AppError> {
+    let parsed =
+        fetch_live_source_with(client, origin, kind, &managed_veridrop_hosts(config)).await?;
+    let items = apply_policy(parsed.clone(), config);
+    if items.is_empty() {
+        return Err(AppError::Config("VeriDrop 榜单没有可展示站点".into()));
+    }
+    let synced_at = chrono::Utc::now().timestamp();
+    write_cache(&CachedLeaderboard {
+        schema_version: CACHE_SCHEMA_VERSION,
+        kind,
+        items: parsed,
+        managed_hosts: managed_veridrop_hosts(config),
+        synced_at,
+    })?;
+    Ok(RelayLeaderboard {
+        kind,
+        items,
+        synced_at,
+    })
+}
+
+async fn perform_refresh(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .user_agent("LoongPort/relay-directory")
+        .build()
+        .map_err(|error| AppError::Config(format!("创建 VeriDrop 请求失败: {error}")))?;
+    refresh_with(&client, VERIDROP_ORIGIN, kind, &config).await
+}
+
+fn read_fresh(kind: LeaderboardKind) -> Option<RelayLeaderboard> {
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+    let cached = read_cache(kind)?;
+    is_fresh_for(&cached, chrono::Utc::now().timestamp(), &config)
+        .then(|| apply_policy_to_cached(cached, &config))
+}
+
+pub async fn refresh(kind: LeaderboardKind) -> Result<RefreshOutcome, AppError> {
+    refresh_coordinator(kind)
+        .run(
+            RefreshMode::Force,
+            false,
+            || read_fresh(kind),
+            || perform_refresh(kind),
+        )
         .await
-        .and_then(|parsed| {
-            let synced_at = chrono::Utc::now().timestamp();
-            let items = apply_policy(parsed.clone(), &config);
-            if items.is_empty() {
-                return Err(AppError::Config("VeriDrop 榜单没有可展示站点".into()));
-            }
-            write_cache(&CachedLeaderboard {
-                schema_version: CACHE_SCHEMA_VERSION,
-                kind,
-                items: parsed,
-                synced_at,
-            });
-            Ok(RelayLeaderboard {
-                kind,
-                items,
-                synced_at,
-                from_cache: false,
-            })
-        });
-    prefer_live(live, cached)
+}
+
+pub async fn refresh_if_stale(kind: LeaderboardKind) -> Result<RefreshOutcome, AppError> {
+    let cache_available = read_cache(kind).is_some();
+    refresh_coordinator(kind)
+        .run(
+            RefreshMode::IfStale,
+            cache_available,
+            || read_fresh(kind),
+            || perform_refresh(kind),
+        )
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{response::Html, routing::get, Router};
+    use serial_test::serial;
+
+    struct TestHomeGuard(Option<std::ffi::OsString>);
+
+    impl TestHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
 
     fn config_with_directory() -> RemoteConfig {
         RemoteConfig {
@@ -1034,34 +1218,312 @@ mod tests {
     }
 
     #[test]
-    fn live_result_wins_and_replaces_the_previous_cache() {
-        let cached = RelayLeaderboard {
-            kind: LeaderboardKind::Claude,
-            items: vec![],
-            synced_at: 1,
-            from_cache: true,
-        };
-        let live = RelayLeaderboard {
-            kind: LeaderboardKind::Claude,
-            items: vec![],
-            synced_at: 2,
-            from_cache: false,
-        };
+    fn cache_is_fresh_until_exactly_six_hours() {
+        let synced_at = 1_786_680_000;
 
-        let selected = prefer_live(Ok(live.clone()), Some(cached)).unwrap();
-
-        assert_eq!(selected, live);
-        assert!(!selected.from_cache);
+        assert!(is_fresh_at(synced_at, synced_at + 6 * 60 * 60 - 1));
+        assert!(!is_fresh_at(synced_at, synced_at + 6 * 60 * 60));
     }
 
     #[test]
-    fn freshly_verified_directory_policy_wins_over_the_startup_cache() {
-        let cached = RemoteConfig::default();
-        let live = config_with_directory();
+    fn cache_freshness_includes_the_managed_host_set() {
+        let mut config = config_with_directory();
+        let cached = CachedLeaderboard {
+            schema_version: CACHE_SCHEMA_VERSION,
+            kind: LeaderboardKind::Claude,
+            items: vec![],
+            managed_hosts: managed_veridrop_hosts(&config),
+            synced_at: 1_786_680_000,
+        };
 
-        let selected = prefer_live_config(Some(live.clone()), Some(cached));
+        assert!(is_fresh_for(&cached, cached.synced_at + 60, &config));
 
-        assert_eq!(selected, live);
+        config.relay_directory.sites.insert(
+            "new.example".into(),
+            crate::relay::remote_config::RelayDirectorySite {
+                veridrop_host: Some("probe.new.example".into()),
+                entry_url: None,
+                display_name: None,
+            },
+        );
+
+        assert!(!is_fresh_for(&cached, cached.synced_at + 60, &config));
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_share_one_successful_attempt() {
+        use std::sync::{atomic::AtomicUsize, Arc};
+
+        let coordinator = RefreshCoordinator::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cached = Arc::new(std::sync::Mutex::new(None));
+        let run = || {
+            let calls = calls.clone();
+            let cached_for_read = cached.clone();
+            let cached_for_write = cached.clone();
+            coordinator.run(
+                RefreshMode::Force,
+                false,
+                move || cached_for_read.lock().expect("cached result").clone(),
+                move || async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let leaderboard = RelayLeaderboard {
+                        kind: LeaderboardKind::Claude,
+                        items: vec![],
+                        synced_at: 1,
+                    };
+                    *cached_for_write.lock().expect("cached result") = Some(leaderboard.clone());
+                    Ok(leaderboard)
+                },
+            )
+        };
+
+        let (first, second) = tokio::join!(run(), run());
+        let first = first.expect("first refresh result");
+        let second = second.expect("second refresh result");
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_ne!(first.updated, second.updated);
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_share_one_failed_attempt() {
+        use std::sync::{atomic::AtomicUsize, Arc};
+
+        let coordinator = RefreshCoordinator::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let run = || {
+            let calls = calls.clone();
+            coordinator.run(
+                RefreshMode::IfStale,
+                false,
+                || None,
+                move || async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err(AppError::Config("offline".into()))
+                },
+            )
+        };
+
+        let (first, second) = tokio::join!(run(), run());
+
+        assert!(first.is_err());
+        assert!(second.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn policy_change_during_refresh_starts_a_new_attempt() {
+        use std::sync::{atomic::AtomicUsize, Arc};
+
+        let coordinator = Arc::new(RefreshCoordinator::default());
+        let active_policy = Arc::new(AtomicUsize::new(1));
+        let cached_policy = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+
+        let first = {
+            let coordinator = coordinator.clone();
+            let active_policy = active_policy.clone();
+            let cached_policy = cached_policy.clone();
+            let calls = calls.clone();
+            let first_started = first_started.clone();
+            let release_first = release_first.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run(
+                        RefreshMode::IfStale,
+                        true,
+                        || None,
+                        move || async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            let policy = active_policy.load(Ordering::SeqCst);
+                            first_started.notify_one();
+                            release_first.notified().await;
+                            cached_policy.store(policy, Ordering::SeqCst);
+                            Ok(RelayLeaderboard {
+                                kind: LeaderboardKind::Claude,
+                                items: vec![],
+                                synced_at: policy as i64,
+                            })
+                        },
+                    )
+                    .await
+            })
+        };
+
+        first_started.notified().await;
+        active_policy.store(2, Ordering::SeqCst);
+
+        let second = {
+            let coordinator = coordinator.clone();
+            let active_policy = active_policy.clone();
+            let cached_policy = cached_policy.clone();
+            let active_policy_for_fresh = active_policy.clone();
+            let cached_policy_for_fresh = cached_policy.clone();
+            let calls = calls.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run(
+                        RefreshMode::IfStale,
+                        true,
+                        || {
+                            (cached_policy_for_fresh.load(Ordering::SeqCst)
+                                == active_policy_for_fresh.load(Ordering::SeqCst))
+                            .then(|| RelayLeaderboard {
+                                kind: LeaderboardKind::Claude,
+                                items: vec![],
+                                synced_at: cached_policy_for_fresh.load(Ordering::SeqCst) as i64,
+                            })
+                        },
+                        move || async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            let policy = active_policy.load(Ordering::SeqCst);
+                            cached_policy.store(policy, Ordering::SeqCst);
+                            Ok(RelayLeaderboard {
+                                kind: LeaderboardKind::Claude,
+                                items: vec![],
+                                synced_at: policy as i64,
+                            })
+                        },
+                    )
+                    .await
+            })
+        };
+
+        release_first.notify_one();
+        first.await.expect("first task").expect("first refresh");
+        second.await.expect("second task").expect("second refresh");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(cached_policy.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_cache_bypasses_recent_automatic_failure() {
+        use std::sync::{atomic::AtomicUsize, Arc};
+
+        let coordinator = RefreshCoordinator::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let first_calls = calls.clone();
+        let first = coordinator
+            .run(
+                RefreshMode::IfStale,
+                false,
+                || None,
+                move || async move {
+                    first_calls.fetch_add(1, Ordering::SeqCst);
+                    Err(AppError::Config("offline".into()))
+                },
+            )
+            .await;
+        assert!(first.is_err());
+
+        let second_calls = calls.clone();
+        let second = coordinator
+            .run(
+                RefreshMode::IfStale,
+                false,
+                || None,
+                move || async move {
+                    second_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(RelayLeaderboard {
+                        kind: LeaderboardKind::Claude,
+                        items: vec![],
+                        synced_at: 2,
+                    })
+                },
+            )
+            .await
+            .expect("foreground read retries without a cache");
+
+        assert!(second.updated);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn relay_leaderboard_serialization_has_no_from_cache_mirror() {
+        let leaderboard = RelayLeaderboard {
+            kind: LeaderboardKind::Claude,
+            items: vec![],
+            synced_at: 1_786_680_000,
+        };
+
+        let value = serde_json::to_value(leaderboard).expect("serialize leaderboard");
+
+        assert!(value.get("fromCache").is_none());
+        assert_eq!(value["syncedAt"], 1_786_680_000);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_refresh_preserves_previous_cache_bytes_and_timestamp() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _home = TestHomeGuard::set(temp.path());
+        let previous = CachedLeaderboard {
+            schema_version: CACHE_SCHEMA_VERSION,
+            kind: LeaderboardKind::Claude,
+            items: vec![ParsedLeaderboardItem {
+                veridrop_host: "bestapi.store".into(),
+                rank: Some(1),
+                score: 99,
+                samples: 20,
+                latest_date: "2026-08-12".into(),
+                detail_url: "https://veridrop.org/leaderboard/bestapi.store".into(),
+                protocol_scores: vec![],
+                claude_signature_rate: None,
+                scenarios: vec![],
+                issues: vec![],
+            }],
+            managed_hosts: vec![],
+            synced_at: 1_786_680_000,
+        };
+        write_cache(&previous).expect("write previous cache");
+        let path = cache_path(LeaderboardKind::Claude);
+        let previous_bytes = std::fs::read(&path).expect("read previous cache");
+
+        let app = Router::new().route(
+            "/leaderboard/claude",
+            get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local VeriDrop fixture server");
+        let address = listener.local_addr().expect("fixture server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve VeriDrop fixtures");
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("fixture client");
+
+        let result = refresh_with(
+            &client,
+            &format!("http://{address}"),
+            LeaderboardKind::Claude,
+            &RemoteConfig::default(),
+        )
+        .await;
+        server.abort();
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved cache"),
+            previous_bytes
+        );
+        assert_eq!(
+            read_cache(LeaderboardKind::Claude)
+                .expect("preserved cache")
+                .synced_at,
+            previous.synced_at
+        );
     }
 
     #[test]
@@ -1072,21 +1534,6 @@ mod tests {
             .insert("790053500.com".into(), "invite".into());
 
         assert_eq!(managed_veridrop_hosts(&config), vec!["api.790053500.com"]);
-    }
-
-    #[test]
-    fn live_failure_uses_the_last_successful_cache_and_marks_it() {
-        let cached = RelayLeaderboard {
-            kind: LeaderboardKind::Claude,
-            items: vec![],
-            synced_at: 1,
-            from_cache: false,
-        };
-
-        let selected = prefer_live(Err(AppError::Config("offline".into())), Some(cached)).unwrap();
-
-        assert!(selected.from_cache);
-        assert_eq!(selected.synced_at, 1);
     }
 
     #[test]
@@ -1106,6 +1553,7 @@ mod tests {
                 scenarios: vec![],
                 issues: vec![],
             }],
+            managed_hosts: vec![],
             synced_at: 1,
         };
 
@@ -1133,6 +1581,7 @@ mod tests {
                 schema_version: CACHE_SCHEMA_VERSION,
                 kind: LeaderboardKind::Claude,
                 items: vec![source],
+                managed_hosts: vec![],
                 synced_at: 1,
             })
             .expect("serialize current cache shape"),

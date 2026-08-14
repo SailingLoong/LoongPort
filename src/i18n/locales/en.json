@@ -3074,13 +3074,13 @@
         "gemini": "Gemini"
       },
       "source": {
-        "live": "Live VeriDrop data · {{time}}",
-        "cached": "Cached VeriDrop data · {{time}}"
+        "syncedAt": "Live VeriDrop data · Updated {{time}}"
       },
       "searchPlaceholder": "Search sites, protocols, or use cases",
       "loading": "Loading the VeriDrop leaderboard…",
       "errorTitle": "Could not load the relay directory",
       "errorBody": "Neither live data nor the last successful cache is available.",
+      "refreshFailed": "Could not refresh the VeriDrop leaderboard: {{reason}}",
       "empty": "No sites match the current filters",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude thinking-signature verification rate",
