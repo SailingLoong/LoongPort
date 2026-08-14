@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use crate::error::AppError;
+use crate::maintenance::config::VERIDROP_CACHE_TTL;
 use crate::relay::remote_config::{RelayDirectoryPolicy, RemoteConfig};
 
 const VERIDROP_ORIGIN: &str = "https://veridrop.org";
@@ -71,7 +72,6 @@ pub struct RelayLeaderboard {
     pub kind: LeaderboardKind,
     pub items: Vec<RelayDirectoryItem>,
     pub synced_at: i64,
-    pub from_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -539,38 +539,27 @@ fn apply_policy_to_cached(cached: CachedLeaderboard, config: &RemoteConfig) -> R
         kind: cached.kind,
         items: apply_policy(cached.items, config),
         synced_at: cached.synced_at,
-        from_cache: true,
     }
 }
 
-fn write_cache(leaderboard: &CachedLeaderboard) {
+fn write_cache(leaderboard: &CachedLeaderboard) -> Result<(), AppError> {
     let path = cache_path(leaderboard.kind);
-    let Some(parent) = path.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    if let Ok(bytes) = serde_json::to_vec(leaderboard) {
-        let _ = std::fs::write(path, bytes);
-    }
+    let bytes = serde_json::to_vec(leaderboard)
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    crate::config::atomic_write(&path, &bytes)
 }
 
-fn prefer_live(
-    live: Result<RelayLeaderboard, AppError>,
-    cached: Option<RelayLeaderboard>,
-) -> Result<RelayLeaderboard, AppError> {
-    match live {
-        Ok(leaderboard) => Ok(leaderboard),
-        Err(error) => cached
-            .map(|mut leaderboard| {
-                leaderboard.from_cache = true;
-                leaderboard
-            })
-            .ok_or(error),
-    }
+fn is_fresh_at(synced_at: i64, now: i64) -> bool {
+    now.saturating_sub(synced_at) < VERIDROP_CACHE_TTL.as_secs() as i64
 }
 
-fn prefer_live_config(live: Option<RemoteConfig>, cached: Option<RemoteConfig>) -> RemoteConfig {
-    live.or(cached).unwrap_or_default()
+pub fn read_cached(kind: LeaderboardKind) -> Result<Option<RelayLeaderboard>, AppError> {
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+    Ok(read_cache(kind).map(|cached| apply_policy_to_cached(cached, &config)))
+}
+
+pub fn is_cache_fresh(kind: LeaderboardKind, now: i64) -> bool {
+    read_cache(kind).is_some_and(|cached| is_fresh_at(cached.synced_at, now))
 }
 
 async fn fetch_html(client: &reqwest::Client, url: &str) -> Result<Option<String>, AppError> {
@@ -657,41 +646,108 @@ async fn fetch_live_source(
     fetch_live_source_with(&client, VERIDROP_ORIGIN, kind, managed_hosts).await
 }
 
+static OVERALL_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static CLAUDE_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static OPENAI_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static GEMINI_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn refresh_lock(kind: LeaderboardKind) -> &'static tokio::sync::Mutex<()> {
+    match kind {
+        LeaderboardKind::Overall => &OVERALL_REFRESH_LOCK,
+        LeaderboardKind::Claude => &CLAUDE_REFRESH_LOCK,
+        LeaderboardKind::OpenAi => &OPENAI_REFRESH_LOCK,
+        LeaderboardKind::Gemini => &GEMINI_REFRESH_LOCK,
+    }
+}
+
+async fn refresh_with(
+    client: &reqwest::Client,
+    origin: &str,
+    kind: LeaderboardKind,
+    config: &RemoteConfig,
+) -> Result<RelayLeaderboard, AppError> {
+    let parsed = fetch_live_source_with(client, origin, kind, &managed_veridrop_hosts(config)).await?;
+    let items = apply_policy(parsed.clone(), config);
+    if items.is_empty() {
+        return Err(AppError::Config("VeriDrop 榜单没有可展示站点".into()));
+    }
+    let synced_at = chrono::Utc::now().timestamp();
+    write_cache(&CachedLeaderboard {
+        schema_version: CACHE_SCHEMA_VERSION,
+        kind,
+        items: parsed,
+        synced_at,
+    })?;
+    Ok(RelayLeaderboard {
+        kind,
+        items,
+        synced_at,
+    })
+}
+
+pub async fn refresh(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
+    let previous_synced_at = read_cache(kind).map(|cached| cached.synced_at);
+    let _guard = refresh_lock(kind).lock().await;
+    if let Some(cached) = read_cache(kind) {
+        let refreshed_while_waiting = previous_synced_at
+            .map(|previous| cached.synced_at > previous)
+            .unwrap_or(true);
+        if refreshed_while_waiting {
+            let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+            return Ok(apply_policy_to_cached(cached, &config));
+        }
+    }
+
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .user_agent("LoongPort/relay-directory")
+        .build()
+        .map_err(|error| AppError::Config(format!("创建 VeriDrop 请求失败: {error}")))?;
+    refresh_with(&client, VERIDROP_ORIGIN, kind, &config).await
+}
+
+pub async fn refresh_if_stale(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
+    let now = chrono::Utc::now().timestamp();
+    if is_cache_fresh(kind, now) {
+        if let Some(cached) = read_cached(kind)? {
+            return Ok(cached);
+        }
+    }
+    refresh(kind).await
+}
+
 pub async fn list(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
-    let cached_config = crate::relay::remote_config::load_cached();
-    let config = prefer_live_config(
-        crate::relay::remote_config::refresh_and_cache().await,
-        cached_config,
-    );
-    let cached = read_cache(kind).map(|cached| apply_policy_to_cached(cached, &config));
-    let live = fetch_live_source(kind, &managed_veridrop_hosts(&config))
-        .await
-        .and_then(|parsed| {
-            let synced_at = chrono::Utc::now().timestamp();
-            let items = apply_policy(parsed.clone(), &config);
-            if items.is_empty() {
-                return Err(AppError::Config("VeriDrop 榜单没有可展示站点".into()));
-            }
-            write_cache(&CachedLeaderboard {
-                schema_version: CACHE_SCHEMA_VERSION,
-                kind,
-                items: parsed,
-                synced_at,
-            });
-            Ok(RelayLeaderboard {
-                kind,
-                items,
-                synced_at,
-                from_cache: false,
-            })
-        });
-    prefer_live(live, cached)
+    if let Some(cached) = read_cached(kind)? {
+        return Ok(cached);
+    }
+    refresh(kind).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{response::Html, routing::get, Router};
+    use serial_test::serial;
+
+    struct TestHomeGuard(Option<std::ffi::OsString>);
+
+    impl TestHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
 
     fn config_with_directory() -> RemoteConfig {
         RemoteConfig {
@@ -1034,34 +1090,91 @@ mod tests {
     }
 
     #[test]
-    fn live_result_wins_and_replaces_the_previous_cache() {
-        let cached = RelayLeaderboard {
-            kind: LeaderboardKind::Claude,
-            items: vec![],
-            synced_at: 1,
-            from_cache: true,
-        };
-        let live = RelayLeaderboard {
-            kind: LeaderboardKind::Claude,
-            items: vec![],
-            synced_at: 2,
-            from_cache: false,
-        };
+    fn cache_is_fresh_until_exactly_six_hours() {
+        let synced_at = 1_786_680_000;
 
-        let selected = prefer_live(Ok(live.clone()), Some(cached)).unwrap();
-
-        assert_eq!(selected, live);
-        assert!(!selected.from_cache);
+        assert!(is_fresh_at(synced_at, synced_at + 6 * 60 * 60 - 1));
+        assert!(!is_fresh_at(synced_at, synced_at + 6 * 60 * 60));
     }
 
     #[test]
-    fn freshly_verified_directory_policy_wins_over_the_startup_cache() {
-        let cached = RemoteConfig::default();
-        let live = config_with_directory();
+    fn relay_leaderboard_serialization_has_no_from_cache_mirror() {
+        let leaderboard = RelayLeaderboard {
+            kind: LeaderboardKind::Claude,
+            items: vec![],
+            synced_at: 1_786_680_000,
+        };
 
-        let selected = prefer_live_config(Some(live.clone()), Some(cached));
+        let value = serde_json::to_value(leaderboard).expect("serialize leaderboard");
 
-        assert_eq!(selected, live);
+        assert!(value.get("fromCache").is_none());
+        assert_eq!(value["syncedAt"], 1_786_680_000);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_refresh_preserves_previous_cache_bytes_and_timestamp() {
+        let temp = tempfile::tempdir().expect("create isolated home");
+        let _home = TestHomeGuard::set(temp.path());
+        let previous = CachedLeaderboard {
+            schema_version: CACHE_SCHEMA_VERSION,
+            kind: LeaderboardKind::Claude,
+            items: vec![ParsedLeaderboardItem {
+                veridrop_host: "bestapi.store".into(),
+                rank: Some(1),
+                score: 99,
+                samples: 20,
+                latest_date: "2026-08-12".into(),
+                detail_url: "https://veridrop.org/leaderboard/bestapi.store".into(),
+                protocol_scores: vec![],
+                claude_signature_rate: None,
+                scenarios: vec![],
+                issues: vec![],
+            }],
+            synced_at: 1_786_680_000,
+        };
+        write_cache(&previous).expect("write previous cache");
+        let path = cache_path(LeaderboardKind::Claude);
+        let previous_bytes = std::fs::read(&path).expect("read previous cache");
+
+        let app = Router::new().route(
+            "/leaderboard/claude",
+            get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local VeriDrop fixture server");
+        let address = listener.local_addr().expect("fixture server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve VeriDrop fixtures");
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("fixture client");
+
+        let result = refresh_with(
+            &client,
+            &format!("http://{address}"),
+            LeaderboardKind::Claude,
+            &RemoteConfig::default(),
+        )
+        .await;
+        server.abort();
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved cache"),
+            previous_bytes
+        );
+        assert_eq!(
+            read_cache(LeaderboardKind::Claude)
+                .expect("preserved cache")
+                .synced_at,
+            previous.synced_at
+        );
     }
 
     #[test]
@@ -1072,21 +1185,6 @@ mod tests {
             .insert("790053500.com".into(), "invite".into());
 
         assert_eq!(managed_veridrop_hosts(&config), vec!["api.790053500.com"]);
-    }
-
-    #[test]
-    fn live_failure_uses_the_last_successful_cache_and_marks_it() {
-        let cached = RelayLeaderboard {
-            kind: LeaderboardKind::Claude,
-            items: vec![],
-            synced_at: 1,
-            from_cache: false,
-        };
-
-        let selected = prefer_live(Err(AppError::Config("offline".into())), Some(cached)).unwrap();
-
-        assert!(selected.from_cache);
-        assert_eq!(selected.synced_at, 1);
     }
 
     #[test]
