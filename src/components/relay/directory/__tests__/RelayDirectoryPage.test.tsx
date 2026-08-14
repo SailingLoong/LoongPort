@@ -11,14 +11,13 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { RELAY_DIRECTORY_UPDATED_EVENT } from "@/config/constants";
 import type {
   LeaderboardKind,
   RelayDirectoryItem,
   RelayLeaderboard,
 } from "@/lib/api/relay";
+import { relayDirectoryKeys } from "@/lib/query/relayDirectory";
 import { createTestQueryClient } from "../../../../../tests/utils/testQueryClient";
-import { emitTauriEvent } from "../../../../../tests/msw/tauriMocks";
 
 const {
   listDirectory,
@@ -73,15 +72,14 @@ vi.mock("sonner", () => ({
 
 const { RelayDirectoryPage } = await import("../RelayDirectoryPage");
 
-function renderDirectory(
-  props: ComponentProps<typeof RelayDirectoryPage>,
-): ReturnType<typeof render> {
+function renderDirectory(props: ComponentProps<typeof RelayDirectoryPage>) {
   const client = createTestQueryClient();
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
       <RelayDirectoryPage {...props} />
     </QueryClientProvider>,
   );
+  return { ...view, client };
 }
 
 function deferred<T>() {
@@ -322,6 +320,24 @@ describe("RelayDirectoryPage", () => {
     ).toHaveLength(1);
   });
 
+  it("keeps inactive leaderboards for the whole app session", async () => {
+    const user = userEvent.setup();
+    const { client } = renderDirectory({
+      sourceAppId: "claude",
+      onBack: () => {},
+    });
+    await screen.findByText("BestAPI");
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.directory.tabs.gemini" }),
+    );
+    await waitFor(() => expect(listDirectory).toHaveBeenCalledWith("gemini"));
+
+    const claudeQuery = client.getQueryCache().find({
+      queryKey: relayDirectoryKeys.byKind("claude"),
+    });
+    expect(claudeQuery?.gcTime).toBe(Infinity);
+  });
+
   it("keeps the old list visible while a manual refresh is pending", async () => {
     const next = deferred<RelayLeaderboard>();
     refreshDirectory.mockReturnValue(next.promise);
@@ -365,33 +381,6 @@ describe("RelayDirectoryPage", () => {
       ),
     );
     expect(screen.getByText("BestAPI")).toBeInTheDocument();
-  });
-
-  it("invalidates only the leaderboard named by a background event", async () => {
-    const user = userEvent.setup();
-    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
-
-    await user.click(
-      screen.getByRole("tab", { name: "loongport.directory.tabs.gemini" }),
-    );
-    await waitFor(() => expect(listDirectory).toHaveBeenCalledWith("gemini"));
-
-    act(() => {
-      emitTauriEvent(RELAY_DIRECTORY_UPDATED_EVENT, { kind: "claude" });
-    });
-    await user.click(
-      screen.getByRole("tab", { name: "loongport.directory.tabs.claude" }),
-    );
-
-    await waitFor(() =>
-      expect(
-        listDirectory.mock.calls.filter(([kind]) => kind === "claude"),
-      ).toHaveLength(2),
-    );
-    expect(
-      listDirectory.mock.calls.filter(([kind]) => kind === "gemini"),
-    ).toHaveLength(1);
   });
 
   it("waits for authentication and backend refresh before returning", async () => {

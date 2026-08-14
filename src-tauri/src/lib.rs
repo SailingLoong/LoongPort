@@ -1303,24 +1303,6 @@ pub fn run() {
                 }
             }
 
-            // 远端配置：启动后拉一次（赞助商列表 + 邀请码），验签通过才落盘缓存。
-            //
-            // **失败完全无声**：拉不到 / 超时 / 验签不过都只是让本次启动继续用
-            // 「上次的缓存 or 编译期内置」那两层（见 `remote_config` 模块文档那张表）。
-            //
-            // 延迟 5 秒：比统计上报早（配置会影响用户看到什么），但仍让首屏先渲染完。
-            // 端点未配时它自己就 return，一个字节都不发。
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                if let Some(cfg) = crate::relay::remote_config::refresh_and_cache().await {
-                    log::info!(
-                        "远端配置已更新：{} 个赞助中转站、{} 条邀请码",
-                        cfg.sponsors.len(),
-                        cfg.aff_codes.len()
-                    );
-                }
-            });
-
             // 匿名使用统计：启动后延迟一次性上报（只报站点 host 与个数）。
             //
             // **一次性、不定时重复**：它答的是「用户在用哪几家中转站」，那不是

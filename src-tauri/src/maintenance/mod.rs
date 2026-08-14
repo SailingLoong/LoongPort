@@ -9,6 +9,9 @@ pub fn start(app: tauri::AppHandle) {
     );
     scheduler::spawn_periodic("veridrop-directory", schedule, move || {
         let app = app.clone();
-        async move { crate::refresh_stale_directories(app).await }
+        async move {
+            crate::relay::remote_config::refresh_and_cache().await;
+            crate::refresh_stale_directories(app).await
+        }
     });
 }

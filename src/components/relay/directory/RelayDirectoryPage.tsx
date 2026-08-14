@@ -15,8 +15,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { RELAY_DIRECTORY_UPDATED_EVENT } from "@/config/constants";
-import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { relayApi } from "@/lib/api";
 import type { AppId } from "@/lib/api";
 import type {
@@ -24,6 +22,7 @@ import type {
   RelayDirectoryItem,
   RelayImportError,
 } from "@/lib/api/relay";
+import { relayDirectoryKeys } from "@/lib/query/relayDirectory";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 import {
@@ -65,15 +64,16 @@ export function RelayDirectoryPage({
   const [customSite, setCustomSite] = useState("");
 
   const directoryQuery = useQuery({
-    queryKey: ["relay-directory", view.kind],
+    queryKey: relayDirectoryKeys.byKind(view.kind),
     queryFn: () => relayApi.listDirectory(view.kind),
     staleTime: Infinity,
+    gcTime: Infinity,
   });
 
   const refreshMutation = useMutation({
     mutationFn: () => relayApi.refreshDirectory(view.kind),
     onSuccess: (result) => {
-      queryClient.setQueryData(["relay-directory", result.kind], result);
+      queryClient.setQueryData(relayDirectoryKeys.byKind(result.kind), result);
     },
     onError: (reason) => {
       toast.error(
@@ -83,15 +83,6 @@ export function RelayDirectoryPage({
       );
     },
   });
-
-  useTauriEvent<{ kind: LeaderboardKind }>(
-    RELAY_DIRECTORY_UPDATED_EVENT,
-    ({ kind }) =>
-      queryClient.invalidateQueries({
-        queryKey: ["relay-directory", kind],
-        exact: true,
-      }),
-  );
 
   const visibleLeaderboard = directoryQuery.data ?? null;
   const filtered = useMemo(

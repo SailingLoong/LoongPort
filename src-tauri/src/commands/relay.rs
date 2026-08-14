@@ -967,7 +967,7 @@ pub async fn relay_list_directory(
     {
         if !crate::relay::leaderboard::is_cache_fresh(kind, chrono::Utc::now().timestamp()) {
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = refresh_directory_and_emit(&app_handle, kind).await {
+                if let Err(error) = refresh_stale_directory_and_emit(&app_handle, kind).await {
                     log::warn!("background VeriDrop refresh for {kind:?} failed: {error}");
                 }
             });
@@ -975,7 +975,7 @@ pub async fn relay_list_directory(
         return Ok(cached);
     }
 
-    refresh_directory_and_emit(&app_handle, kind)
+    refresh_stale_directory_and_emit(&app_handle, kind)
         .await
         .map_err(|error| error.to_string())
 }
@@ -985,7 +985,7 @@ pub async fn relay_refresh_directory(
     app_handle: tauri::AppHandle,
     kind: crate::relay::leaderboard::LeaderboardKind,
 ) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
-    refresh_directory_and_emit(&app_handle, kind)
+    force_refresh_directory_and_emit(&app_handle, kind)
         .await
         .map_err(|error| error.to_string())
 }
@@ -996,18 +996,36 @@ struct RelayDirectoryUpdated {
     kind: crate::relay::leaderboard::LeaderboardKind,
 }
 
-async fn refresh_directory_and_emit(
+async fn force_refresh_directory_and_emit(
     app_handle: &tauri::AppHandle,
     kind: crate::relay::leaderboard::LeaderboardKind,
 ) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
-    let leaderboard = crate::relay::leaderboard::refresh(kind).await?;
-    app_handle
-        .emit(
-            RELAY_DIRECTORY_UPDATED_EVENT,
-            RelayDirectoryUpdated { kind },
-        )
-        .map_err(|error| AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}")))?;
-    Ok(leaderboard)
+    let outcome = crate::relay::leaderboard::refresh(kind).await?;
+    emit_directory_update(app_handle, kind, outcome)
+}
+
+async fn refresh_stale_directory_and_emit(
+    app_handle: &tauri::AppHandle,
+    kind: crate::relay::leaderboard::LeaderboardKind,
+) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
+    let outcome = crate::relay::leaderboard::refresh_if_stale(kind).await?;
+    emit_directory_update(app_handle, kind, outcome)
+}
+
+fn emit_directory_update(
+    app_handle: &tauri::AppHandle,
+    kind: crate::relay::leaderboard::LeaderboardKind,
+    outcome: crate::relay::leaderboard::RefreshOutcome,
+) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
+    if outcome.updated {
+        app_handle
+            .emit(
+                RELAY_DIRECTORY_UPDATED_EVENT,
+                RelayDirectoryUpdated { kind },
+            )
+            .map_err(|error| AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}")))?;
+    }
+    Ok(outcome.leaderboard)
 }
 
 pub(crate) async fn refresh_stale_directories(
@@ -1021,18 +1039,7 @@ pub(crate) async fn refresh_stale_directories(
         .filter(|kind| !crate::relay::leaderboard::is_cache_fresh(*kind, now));
     let mut refreshes = futures::stream::iter(stale.map(|kind| {
         let app_handle = app_handle.clone();
-        async move {
-            let leaderboard = crate::relay::leaderboard::refresh_if_stale(kind).await?;
-            app_handle
-                .emit(
-                    RELAY_DIRECTORY_UPDATED_EVENT,
-                    RelayDirectoryUpdated { kind },
-                )
-                .map_err(|error| {
-                    AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}"))
-                })?;
-            Ok::<_, AppError>(leaderboard)
-        }
+        async move { refresh_stale_directory_and_emit(&app_handle, kind).await }
     }))
     .buffer_unordered(2);
 
