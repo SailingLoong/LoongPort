@@ -3096,6 +3096,7 @@
       "actions": {
         "authenticate": "註冊或登入",
         "autoAddHint": "完成後自動加入",
+        "manualAddHint": "需要手動加入",
         "history": "完整記錄",
         "refresh": "重新整理即時排行榜",
         "retry": "重試",

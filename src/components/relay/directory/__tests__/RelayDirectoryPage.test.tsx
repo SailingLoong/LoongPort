@@ -256,6 +256,30 @@ describe("RelayDirectoryPage", () => {
     );
   });
 
+  it("opens a manual-only row without importing it", async () => {
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
+
+    const row = (await screen.findByText("站点 2")).closest("article");
+    expect(row).not.toBeNull();
+    const manualSite = within(row!);
+    expect(
+      manualSite.getByText("loongport.directory.actions.authenticate"),
+    ).toBeInTheDocument();
+    expect(
+      manualSite.getByText("loongport.directory.actions.manualAddHint"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      manualSite.getByRole("button", {
+        name: "loongport.directory.actions.authenticate",
+      }),
+    );
+
+    expect(openInBrowser).toHaveBeenCalledWith("https://site-2.example");
+    expect(importDirectorySite).not.toHaveBeenCalled();
+    expect(importSite).not.toHaveBeenCalled();
+  });
+
   it("labels a managed detail-page completion without inventing a rank", async () => {
     listDirectory.mockResolvedValue(
       leaderboard("gemini", {

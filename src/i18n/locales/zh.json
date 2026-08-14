@@ -3095,6 +3095,7 @@
       "actions": {
         "authenticate": "注册或登录",
         "autoAddHint": "完成后自动添加",
+        "manualAddHint": "需要手动添加",
         "history": "完整历史",
         "refresh": "刷新实时榜单",
         "retry": "重试",
