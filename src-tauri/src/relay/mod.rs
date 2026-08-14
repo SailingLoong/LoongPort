@@ -72,6 +72,7 @@ pub mod newapi_provision;
 #[allow(dead_code)]
 pub mod model_verification;
 pub mod platform_map;
+pub mod pricing;
 pub mod promo;
 pub(crate) mod provider_fingerprint;
 pub mod provision;
