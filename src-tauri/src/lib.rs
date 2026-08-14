@@ -19,6 +19,7 @@ mod grok_config;
 pub mod hermes_config;
 mod init_status;
 mod lightweight;
+mod maintenance;
 #[cfg(target_os = "linux")]
 mod linux_fix;
 mod mcp;
@@ -1229,6 +1230,7 @@ pub fn run() {
             );
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
+            maintenance::start(app.handle().clone());
 
             // 初始化 SkillService
             let skill_service = SkillService::new();
