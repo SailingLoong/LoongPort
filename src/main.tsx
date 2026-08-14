@@ -84,16 +84,14 @@ try {
   reportFrontendError("config_load_error_listener", e);
 }
 
-try {
-  void listen(MODELS_DEV_PRICING_UPDATED_EVENT, () => {
-    queryClient.invalidateQueries({ queryKey: usageKeys.all });
-    queryClient.invalidateQueries({
-      queryKey: usageKeys.modelsDevSyncConfig(),
-    });
+void listen(MODELS_DEV_PRICING_UPDATED_EVENT, () => {
+  queryClient.invalidateQueries({ queryKey: usageKeys.all });
+  queryClient.invalidateQueries({
+    queryKey: usageKeys.modelsDevSyncConfig(),
   });
-} catch (e) {
+}).catch((e) => {
   reportFrontendError("models_dev_pricing_updated_listener", e);
-}
+});
 
 async function bootstrap() {
   // 启动早期主动查询后端初始化错误，避免事件竞态
