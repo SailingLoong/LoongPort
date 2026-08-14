@@ -30,7 +30,8 @@ v2，保证 JSON 和 detached signature 始终一起发布。
 
 ```bash
 $EDITOR public/v2/directory.json
-LOONGPORT_CONFIG_KEY=/path/to/signing-key ./sign-v2.sh
+# 授权维护者先在仓库外提供 LOONGPORT_CONFIG_KEY。
+./sign-v2.sh
 ./verify-v2.sh --local-only
 ./deploy.sh
 ./verify-v2.sh
@@ -38,12 +39,13 @@ LOONGPORT_CONFIG_KEY=/path/to/signing-key ./sign-v2.sh
 
 `verify-v2.sh --local-only` 验证本地待发布 JSON 的原始字节签名和 schema；不带参数时，
 它还会下载线上 JSON 与 detached signature，验签并要求线上 JSON 与本地逐字节一致。
-签名密钥只在运行 `sign-v2.sh` 时经环境变量提供，绝不写入仓库或文档。
+授权维护者在仓库外通过运行时环境变量 `LOONGPORT_CONFIG_KEY` 提供 Ed25519 私钥。
+私钥绝不提交、复制到文档或写入日志；密钥配置与恢复请查本机 `--help` 或组织私有 runbook。
 
 ## 日常：加一家赞助商 / 改一个邀请码
 
 ```bash
-cd ~/code/LoongPort-workspace/LoongPort/remote-config
+cd remote-config
 $EDITOR public/v1/config.json     # 1. 改内容
 ./sign.sh                         # 2. 重新签名（**忘了这步 = 客户端全部拒绝**）
 ./deploy.sh                       # 3. 部署
@@ -51,6 +53,11 @@ $EDITOR public/v1/config.json     # 1. 改内容
 ```
 
 四步都要跑。`sign.sh` 与 `verify.sh` 各自会自验并在出错时明确报出来。
+
+`sign.sh` 和 `sign-v2.sh` 都要求授权维护者先在仓库外提供运行时环境变量
+`LOONGPORT_CONFIG_KEY`。私钥绝不提交或记录到日志；供应和恢复流程请查本机 `--help`
+或组织私有 runbook。部署同样要求运行时 `CLOUDFLARE_API_TOKEN`；部署凭据必须留在
+仓库外，并按组织私有 runbook 提供。
 
 **不需要发版** —— 这套机制存在的全部意义就是改配置不用发新版本客户端。
 
@@ -104,70 +111,7 @@ curl -sS -m 12 -o /dev/null -w "%{http_code}\n" https://<域名>/api/v1/settings
 | 托管 | Cloudflare Pages 项目 `loongport-config`（与官网 `loongport-website` **分开**） |
 | DNS | `config` CNAME → `loongport-config.pages.dev`，proxied |
 | 公钥 | `3e199ad0082b525fdf8edef5f7161270675e107fd81d31dbce1b71d83936a131` |
-| 私钥 | `~/Documents/loongport-keys/remote-config-ed25519.pem`（600，**仓外，绝不入库**）。备份见下节 |
 | 缓存 | `max-age=300`（见 `public/_headers`） |
-
-Cloudflare 凭据在本机 Keychain，`~/.zshrc` 里读它 —— 脚本直接用环境变量，无需额外配置。
-
-## 私钥备份：Keychain + 纸质（2026-08-04 落地）
-
-日常签名**照旧直接用那个 `.pem`**（`sign.sh` 自己会读它）。这一节讲的是
-**那个文件没了怎么恢复** —— 备份不参与日常流程，别在脚本里改成从 Keychain 取。
-
-三份，互不依赖：
-
-| 位置 | 存的形态 | 性质 |
-|---|---|---|
-| `~/Documents/loongport-keys/remote-config-ed25519.pem` | 完整 PEM，600 | 工作副本，`sign.sh` 用的就是它 |
-| 本机 login Keychain | PEM **正文那 64 字符**（无首尾两行） | 同一块磁盘，**不是异地冗余** |
-| 纸质抄写 | 同上 64 字符 | 唯一的离线 / 异地冗余 |
-
-⚠️ **Keychain 那份不算"第二份"**：它在 `~/Library/Keychains/login.keychain-db`，
-与工作副本同盘，且 `security` CLI 加的条目**不同步 iCloud**。它的价值是把明文
-从 `~/Documents` 挪进加密存储，抗的是"误删/误读文件"，抗不了磁盘损坏。
-真正的冗余是纸质那份。
-
-### 从 Keychain 取出并恢复成 `.pem`
-
-```bash
-security find-generic-password -a loongport -s loongport-remote-config-signing-key -w
-```
-
-`-a loongport` / `-s loongport-remote-config-signing-key` 是查它的**唯一坐标**
-（`-s` 刻意不带空格与括号，好让脚本引用时不必操心引号转义）。
-每次读会弹一次授权框（存的时候给了 `-T ""`，不预授权任何程序）。
-
-一步还原成可用的 `.pem`：
-
-```bash
-printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' \
-  "$(security find-generic-password -a loongport -s loongport-remote-config-signing-key -w)" \
-  > ~/Documents/loongport-keys/remote-config-ed25519.pem
-chmod 600 ~/Documents/loongport-keys/remote-config-ed25519.pem
-```
-
-**验证恢复对了**（须用 Homebrew OpenSSL，理由见本文末尾那条 LibreSSL 警告）：
-
-```bash
-"$(brew --prefix openssl@3)/bin/openssl" pkey \
-  -in ~/Documents/loongport-keys/remote-config-ed25519.pem \
-  -pubout -outform DER | tail -c 32 | xxd -p -c 32
-```
-
-输出**必须**等于事实表里那把公钥 `3e199ad0…a131`。不等就是恢复错了 ——
-⚠️ 别跳过这一步：用错的私钥签出来的配置**签名格式完全合法**，
-只是客户端全部拒绝，症状与"服务器挂了"一模一样。
-
-### 存的时候为什么是 64 字符而不是完整 PEM
-
-`security add-generic-password` 的交互式 `-w` 不接受多行输入。而首尾那两行
-`-----BEGIN/END PRIVATE KEY-----` 是固定文本、不含信息，恢复时补上即可。
-
-⚠️ **一个踩过的坑：值必须进密码字段，不能进 `-j`（注释）**。
-`-j 'MC4C...'` 命令会成功、`find-generic-password` 也看得见那串（在 `icmt` 属性里），
-但 **`-w` 取出来是空串且 exit=0** —— 所有脚本会静默拿到空值。
-且注释字段不受访问控制保护（任何进程直接读，不弹授权框）。
-写的时候用 `-w` 不带值走交互式输入（顺带避免私钥进 shell history 与 `ps`）。
 
 ## ⚠️ 两件不可逆的事
 
@@ -175,7 +119,7 @@ chmod 600 ~/Documents/loongport-keys/remote-config-ed25519.pem
 就永久收不到更新（静默回落到内置表，**不报任何错**）。
 
 ⇒ **私钥丢了或泄露是真麻烦，不是「重新生成一把就行」** —— 换公钥要发新版，
-而没升级的用户永远停在内置那份。备份见上节。
+而没升级的用户永远停在内置那份。密钥处置必须遵循组织私有 runbook。
 
 （`v1` 那段路径是给将来 schema 破坏性变更留的：那时新客户端打 `/v2/`，
 `/v1/` 要一直留着喂旧客户端。）

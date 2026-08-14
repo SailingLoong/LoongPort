@@ -19,12 +19,7 @@ require_openssl_with_ed25519
 
 export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-a2bffcffbb0d8145f4ba0a471b1afaec}"
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-  CLOUDFLARE_API_TOKEN="$(security find-generic-password -a "$USER" \
-    -s loongport-cloudflare-token -w 2>/dev/null || true)"
-  export CLOUDFLARE_API_TOKEN
-fi
-if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-  echo "✘ 拿不到 CLOUDFLARE_API_TOKEN（Keychain 里没有 loongport-cloudflare-token）" >&2
+  echo "✘ CLOUDFLARE_API_TOKEN 必须由授权维护者通过运行时环境提供" >&2
   exit 1
 fi
 
