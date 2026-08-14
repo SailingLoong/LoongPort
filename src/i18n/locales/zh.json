@@ -167,7 +167,7 @@
         "apiKeyPlaceholder": "请输入 Gemini API Key"
       }
     },
-    "duplicateLiveIdsLoadFailed": "读取配置中的供应商标识失败，请先修复配置后再试"
+    "duplicateFailed": "复制供应商失败"
   },
   "claudeCode": {
     "needsRouting": "需要路由",
@@ -3126,7 +3126,7 @@
       "dragHandle": "拖动排序",
       "refetchGroups": "更新可用分组",
       "purchaseHint": "打开中转站充值页面",
-      "lowBalanceHint": "余额低于 ${{threshold}}，点击充值",
+      "lowBalanceHint": "余额较低，点击充值",
       "remove": "删除账号及接入配置",
       "removeBlockedByCurrent": "此账号有接入配置正在使用，请先切换到其他接入配置",
       "removeConfirmTitle": "删除此账号？",
@@ -3134,7 +3134,6 @@
       "removeConfirmMessageNeverLoggedIn": "将删除「{{label}}」及其 {{count}} 个接入配置。之后可重新添加此账号。"
     },
     "tier": {
-      "rateUnknown": "倍率未知",
       "rate": "{{value}} 倍",
       "models": "支持的模型",
       "selectModel": "切换到 {{model}}",

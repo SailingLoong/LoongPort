@@ -27,8 +27,8 @@ import {
   LayoutDashboard,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { Provider, VisibleApps } from "@/types";
-import { ALL_APPS_VISIBLE, APP_IDS } from "@/config/appConfig";
+import type { Provider } from "@/types";
+import { APP_IDS } from "@/config/appConfig";
 import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
@@ -48,7 +48,7 @@ import {
 } from "@/config/constants";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
-import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
+import { useOpenHermesWebUI } from "@/hooks/useHermes";
 import { hermesApi } from "@/lib/api/hermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
@@ -57,7 +57,6 @@ import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
-import { deepClone } from "@/utils/deepClone";
 import { cn } from "@/lib/utils";
 import {
   isWindows,
@@ -200,13 +199,13 @@ function App() {
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
   const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
-  const visibleApps: VisibleApps =
-    settingsData?.visibleApps ?? ALL_APPS_VISIBLE;
-
-  const firstVisibleApp = APP_IDS.find((app) => visibleApps[app]) ?? "claude";
+  const visibleApps = settingsData?.visibleApps;
+  const firstVisibleApp = visibleApps
+    ? APP_IDS.find((app) => visibleApps[app])
+    : undefined;
 
   useEffect(() => {
-    if (!visibleApps[activeApp]) {
+    if (visibleApps && firstVisibleApp && !visibleApps[activeApp]) {
       setActiveApp(firstVisibleApp);
     }
   }, [visibleApps, activeApp, firstVisibleApp]);
@@ -277,7 +276,6 @@ function App() {
     isProxyRunning,
   });
   const providers = useMemo(() => data?.providers ?? {}, [data]);
-  const currentProviderId = data?.currentProviderId ?? "";
   const isOpenClawView =
     activeApp === "openclaw" &&
     (currentView === "providers" ||
@@ -305,20 +303,13 @@ function App() {
     deleteProvider,
     saveUsageScript,
     setAsDefaultModel,
-  } = useProviderActions(
-    activeApp,
-    isProxyRunning,
-    isProxyRunning && isCurrentAppTakeoverActive,
-  );
+  } = useProviderActions(activeApp);
 
   // 切 codex 的供应商时也走「退 ChatGPT → 切 → 重开」——**包括 cc-switch 自带的那些**。
   // ChatGPT 桌面版与命令行 codex 共用同一个 `~/.codex`，它在跑的时候切任何 codex 供应商
   // 都会撞上「它启动时读的旧配置还在生效，而且它退出时会回写 config.toml」。
   // 判据与 LoongPort 档位切换完全一致（同一个页面两种行为不该不一样）。
-  const { guardedSwitch, switchDialog } = useCodexSwitchGuard(
-    activeApp,
-    switchProvider,
-  );
+  const { guardedSwitch, switchDialog } = useCodexSwitchGuard(switchProvider);
 
   const disableOmoMutation = useDisableCurrentOmo();
   const handleDisableOmo = () => {
@@ -669,21 +660,9 @@ function App() {
       // Remove from live config only (for additive mode apps like OpenCode/OpenClaw)
       // Does NOT delete from database - provider remains in the list
       await providersApi.removeFromLiveConfig(provider.id, activeApp);
-      // Invalidate queries to refresh the isInConfig state
-      if (activeApp === "opencode") {
-        await queryClient.invalidateQueries({
-          queryKey: ["opencodeLiveProviderIds"],
-        });
-      } else if (activeApp === "openclaw") {
-        await queryClient.invalidateQueries({
-          queryKey: openclawKeys.liveProviderIds,
-        });
+      if (activeApp === "openclaw") {
         await queryClient.invalidateQueries({
           queryKey: openclawKeys.health,
-        });
-      } else if (activeApp === "hermes") {
-        await queryClient.invalidateQueries({
-          queryKey: hermesKeys.liveProviderIds,
         });
       }
       toast.success(
@@ -698,115 +677,22 @@ function App() {
     setConfirmAction(null);
   };
 
-  const generateUniqueProviderCopyKey = (
-    originalKey: string,
-    existingKeys: string[],
-  ): string => {
-    const baseKey = `${originalKey}-copy`;
-
-    if (!existingKeys.includes(baseKey)) {
-      return baseKey;
-    }
-
-    let counter = 2;
-    while (existingKeys.includes(`${baseKey}-${counter}`)) {
-      counter++;
-    }
-    return `${baseKey}-${counter}`;
-  };
-
   const handleDuplicateProvider = async (provider: Provider) => {
-    const newSortIndex =
-      provider.sortIndex !== undefined ? provider.sortIndex + 1 : undefined;
-
-    const duplicatedProvider: Omit<Provider, "id" | "createdAt"> & {
-      providerKey?: string;
-      addToLive?: boolean;
-    } = {
-      name: `${provider.name} copy`,
-      settingsConfig: deepClone(provider.settingsConfig),
-      websiteUrl: provider.websiteUrl,
-      category: provider.category,
-      sortIndex: newSortIndex, // 复制原 sortIndex + 1
-      meta: provider.meta ? deepClone(provider.meta) : undefined,
-      icon: provider.icon,
-      iconColor: provider.iconColor,
-    };
-
-    if (
-      activeApp === "opencode" ||
-      activeApp === "openclaw" ||
-      activeApp === "hermes"
-    ) {
-      let liveProviderIds: string[] = [];
-      try {
-        liveProviderIds =
-          activeApp === "opencode"
-            ? await queryClient.ensureQueryData({
-                queryKey: ["opencodeLiveProviderIds"],
-                queryFn: () => providersApi.getOpenCodeLiveProviderIds(),
-              })
-            : activeApp === "openclaw"
-              ? await queryClient.ensureQueryData({
-                  queryKey: openclawKeys.liveProviderIds,
-                  queryFn: () => providersApi.getOpenClawLiveProviderIds(),
-                })
-              : await queryClient.ensureQueryData({
-                  queryKey: hermesKeys.liveProviderIds,
-                  queryFn: () => providersApi.getHermesLiveProviderIds(),
-                });
-      } catch (error) {
-        console.error(
-          "[App] Failed to load live provider IDs for duplication",
-          error,
-        );
-        const errorMessage = extractErrorMessage(error);
-        toast.error(
-          t("provider.duplicateLiveIdsLoadFailed", {
-            defaultValue: "读取配置中的供应商标识失败，请先修复配置后再试",
-          }) + (errorMessage ? `: ${errorMessage}` : ""),
-        );
-        return;
-      }
-      const existingKeys = Array.from(
-        new Set([...Object.keys(providers), ...liveProviderIds]),
+    try {
+      await providersApi.duplicate(provider.id, activeApp);
+      await queryClient.invalidateQueries({
+        queryKey: ["providers", activeApp],
+      });
+      await providersApi.updateTrayMenu();
+    } catch (error) {
+      console.error("[App] Failed to duplicate provider", error);
+      const detail = extractErrorMessage(error);
+      toast.error(
+        t("provider.duplicateFailed", {
+          defaultValue: "复制供应商失败",
+        }) + (detail ? `: ${detail}` : ""),
       );
-      duplicatedProvider.providerKey = generateUniqueProviderCopyKey(
-        provider.id,
-        existingKeys,
-      );
-      duplicatedProvider.addToLive = false;
     }
-
-    if (provider.sortIndex !== undefined) {
-      const updates = Object.values(providers)
-        .filter(
-          (p) =>
-            p.sortIndex !== undefined &&
-            p.sortIndex >= newSortIndex! &&
-            p.id !== provider.id,
-        )
-        .map((p) => ({
-          id: p.id,
-          sortIndex: p.sortIndex! + 1,
-        }));
-
-      if (updates.length > 0) {
-        try {
-          await providersApi.updateSortOrder(updates, activeApp);
-        } catch (error) {
-          console.error("[App] Failed to update sort order", error);
-          toast.error(
-            t("provider.sortUpdateFailed", {
-              defaultValue: "排序更新失败",
-            }),
-          );
-          return; // 如果排序更新失败，不继续添加
-        }
-      }
-    }
-
-    await addProvider(duplicatedProvider);
   };
 
   const handleOpenTerminal = async (provider: Provider) => {
@@ -1021,7 +907,6 @@ function App() {
 
                     <ProviderList
                       providers={providers}
-                      currentProviderId={currentProviderId}
                       appId={activeApp}
                       isLoading={isLoading}
                       isProxyRunning={isProxyRunning}
@@ -1445,11 +1330,13 @@ function App() {
                 )}
                 {currentView === "providers" && (
                   <>
-                    <AppSwitcher
-                      activeApp={activeApp}
-                      onSwitch={setActiveApp}
-                      visibleApps={visibleApps}
-                    />
+                    {visibleApps && (
+                      <AppSwitcher
+                        activeApp={activeApp}
+                        onSwitch={setActiveApp}
+                        visibleApps={visibleApps}
+                      />
+                    )}
 
                     <div className="flex items-center gap-1 p-1 bg-muted rounded-xl">
                       <AnimatePresence mode="wait">

@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import { providersApi, settingsApi, openclawApi, type AppId } from "@/lib/api";
+import { providersApi, openclawApi, type AppId } from "@/lib/api";
 import type {
   Provider,
   UsageScript,
@@ -20,26 +20,13 @@ import {
 import { usageKeys } from "@/lib/query/usage";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { openclawKeys } from "@/hooks/useOpenClaw";
-import {
-  extractCodexWireApi,
-  isCodexAnthropicWireApi,
-  isCodexChatWireApi,
-} from "@/utils/providerConfigUtils";
-import {
-  providerNeedsRouting,
-  supportsOfficialProxyTakeover,
-} from "@/utils/providerCapabilities";
-import { isOAuthProviderType } from "@/config/constants";
+import type { ProviderRoutingReason } from "@/types";
 
 /**
  * Hook for managing provider actions (add, update, delete, switch)
  * Extracts business logic from App.tsx
  */
-export function useProviderActions(
-  activeApp: AppId,
-  isProxyRunning?: boolean,
-  isProxyTakeover?: boolean,
-) {
+export function useProviderActions(activeApp: AppId) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -47,33 +34,6 @@ export function useProviderActions(
   const updateProviderMutation = useUpdateProviderMutation(activeApp);
   const deleteProviderMutation = useDeleteProviderMutation(activeApp);
   const switchProviderMutation = useSwitchProviderMutation(activeApp);
-
-  // Claude 插件同步逻辑
-  const syncClaudePlugin = useCallback(
-    async (provider: Provider) => {
-      if (activeApp !== "claude") return;
-
-      try {
-        const settings = await settingsApi.get();
-        if (!settings?.enableClaudePluginIntegration) {
-          return;
-        }
-
-        const isOfficial = provider.category === "official";
-        await settingsApi.applyClaudePluginConfig({ official: isOfficial });
-
-        // 静默执行，不显示成功通知
-      } catch (error) {
-        const detail =
-          extractErrorMessage(error) ||
-          t("notifications.syncClaudePluginFailed", {
-            defaultValue: "同步 Claude 插件失败",
-          });
-        toast.error(detail, { duration: 4200 });
-      }
-    },
-    [activeApp, t],
-  );
 
   // 添加供应商
   const addProvider = useCallback(
@@ -174,152 +134,35 @@ export function useProviderActions(
    */
   const switchProvider = useCallback(
     async (provider: Provider, quitChatgpt?: boolean) => {
-      const isCopilotProvider =
-        activeApp === "claude" &&
-        provider.meta?.providerType === "github_copilot";
-      const isCodexChatFormat =
-        (activeApp === "codex" || activeApp === "grokbuild") &&
-        (provider.meta?.apiFormat === "openai_chat" ||
-          (typeof (provider.settingsConfig as Record<string, any>)?.config ===
-            "string" &&
-            isCodexChatWireApi(
-              extractCodexWireApi(
-                (provider.settingsConfig as Record<string, any>).config,
-              ),
-            )));
-      const isCodexAnthropicFormat =
-        (activeApp === "codex" || activeApp === "grokbuild") &&
-        (provider.meta?.apiFormat === "anthropic" ||
-          (typeof (provider.settingsConfig as Record<string, any>)?.config ===
-            "string" &&
-            isCodexAnthropicWireApi(
-              extractCodexWireApi(
-                (provider.settingsConfig as Record<string, any>).config,
-              ),
-            )));
-
-      // Claude Desktop 的路由开关就是代理进程本身；其余应用还必须开启当前
-      // 应用的 takeover。不能只看全局进程，否则其它应用已接管时会漏判；也
-      // 不能只看 takeover，否则 Desktop 在路由已运行时会持续误报。
-      const routingReady =
-        activeApp === "claude-desktop"
-          ? isProxyRunning === true
-          : isProxyTakeover === true;
-
-      // Determine why this provider requires the proxy.
-      let proxyRequiredReason: string | null = null;
-      if (!routingReady && providerNeedsRouting(activeApp, provider)) {
-        if (isCopilotProvider) {
-          proxyRequiredReason = t("notifications.proxyReasonCopilot", {
-            defaultValue: "使用 GitHub Copilot 作为 Claude 供应商",
-          });
-        } else if (isOAuthProviderType(provider.meta?.providerType)) {
-          // 托管 OAuth（codex_oauth / xai_oauth 等）：凭据由本地代理注入，
-          // 是否需路由由 providerType 权威决定，不看 apiFormat（后端亦无视，
-          // 见 forwarder.rs）——避免 codex_oauth 被改成 anthropic / 旧数据缺省
-          // apiFormat 时漏判。Claude 下的 Copilot 保留上面的专属文案。
-          proxyRequiredReason = t("notifications.proxyReasonManagedOAuth", {
-            defaultValue: "使用托管 OAuth 登录（令牌由本地路由注入）",
-          });
-        } else if (
-          provider.meta?.apiFormat === "openai_chat" &&
-          activeApp === "claude"
-        ) {
-          proxyRequiredReason = t("notifications.proxyReasonOpenAIChat", {
-            defaultValue: "使用 OpenAI Chat 接口格式",
-          });
-        } else if (
-          provider.meta?.apiFormat === "openai_responses" &&
-          activeApp === "claude"
-        ) {
-          proxyRequiredReason = t("notifications.proxyReasonOpenAIResponses", {
-            defaultValue: "使用 OpenAI Responses 接口格式",
-          });
-        } else if (isCodexChatFormat) {
-          proxyRequiredReason = t("notifications.proxyReasonOpenAIChat", {
-            defaultValue: "使用 OpenAI Chat 接口格式",
-          });
-        } else if (isCodexAnthropicFormat) {
-          proxyRequiredReason = t(
-            "notifications.proxyReasonAnthropicMessages",
-            {
-              defaultValue: "使用 Anthropic Messages 接口格式",
-            },
-          );
-        } else if (
-          activeApp === "claude-desktop" &&
-          provider.meta?.claudeDesktopMode === "proxy"
-        ) {
-          proxyRequiredReason = t("notifications.proxyReasonClaudeDesktop", {
-            defaultValue: "使用 Claude Desktop 本地路由模式",
-          });
-        } else if (
-          provider.meta?.isFullUrl &&
-          (activeApp === "claude" ||
-            activeApp === "codex" ||
-            activeApp === "grokbuild")
-        ) {
-          proxyRequiredReason = t("notifications.proxyReasonFullUrl", {
-            defaultValue: "开启了完整 URL 连接模式",
-          });
-        } else {
-          proxyRequiredReason = t("notifications.proxyReasonRoutingRequired", {
-            defaultValue: "需要本地路由处理请求",
-          });
-        }
-      }
-
-      if (proxyRequiredReason) {
-        toast.warning(
-          t("notifications.proxyRequiredForSwitch", {
-            reason: proxyRequiredReason,
-            defaultValue:
-              "此供应商{{reason}}，需要代理服务才能正常使用，请先启动代理",
-          }),
-        );
-      }
-
-      // The built-in Codex official provider can reuse Codex's native ChatGPT
-      // login through local routing. Other official providers remain blocked.
-      const officialSupportsTakeover = supportsOfficialProxyTakeover(
-        activeApp,
-        provider,
-      );
-      if (
-        isProxyTakeover &&
-        provider.category === "official" &&
-        !officialSupportsTakeover
-      ) {
-        toast.error(
-          t("notifications.officialBlockedByProxy", {
-            defaultValue:
-              "代理接管模式下不能切换到官方供应商，使用代理访问官方 API 可能导致账号被封禁",
-          }),
-          { duration: 6000 },
-        );
-        return;
-      }
-
       try {
         const result = await switchProviderMutation.mutateAsync({
           providerId: provider.id,
           quitChatgpt,
         });
-        await syncClaudePlugin(provider);
-
-        // Show backfill warning if present
-        if (result?.warnings?.length) {
+        if (result.status === "confirmationRequired") {
+          return result;
+        }
+        const routingReason = result.routingNotice
+          ? routingReasonText(result.routingNotice, t)
+          : null;
+        if (routingReason) {
           toast.warning(
-            t("notifications.backfillWarning", {
+            t("notifications.proxyRequiredForSwitch", {
+              reason: routingReason,
               defaultValue:
-                "切换成功，但旧供应商配置回填失败，您手动修改的配置可能未保存",
+                "此供应商{{reason}}，需要代理服务才能正常使用，请先启动代理",
             }),
-            { duration: 5000 },
           );
         }
 
+        if (result?.warnings) {
+          for (const warning of result.warnings) {
+            toast.warning(warning);
+          }
+        }
+
         // 若已弹过 proxyRequired 警告则不再弹 success
-        if (!proxyRequiredReason) {
+        if (!routingReason) {
           let messageKey = "notifications.switchSuccess";
           let defaultMessage = "切换成功！";
           if (activeApp === "codex") {
@@ -345,18 +188,13 @@ export function useProviderActions(
             closeButton: true,
           });
         }
+        return result;
       } catch {
         // 错误提示由 mutation 处理
+        return undefined;
       }
     },
-    [
-      switchProviderMutation,
-      syncClaudePlugin,
-      activeApp,
-      isProxyRunning,
-      isProxyTakeover,
-      t,
-    ],
+    [switchProviderMutation, activeApp, t],
   );
 
   // 删除供应商
@@ -466,4 +304,43 @@ export function useProviderActions(
       deleteProviderMutation.isPending ||
       switchProviderMutation.isPending,
   };
+}
+
+function routingReasonText(
+  reason: ProviderRoutingReason,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
+  const keys: Record<ProviderRoutingReason, [string, string]> = {
+    githubCopilot: [
+      "notifications.proxyReasonCopilot",
+      "使用 GitHub Copilot 作为 Claude 供应商",
+    ],
+    managedOAuth: [
+      "notifications.proxyReasonManagedOAuth",
+      "使用托管 OAuth 登录（令牌由本地路由注入）",
+    ],
+    openAiChat: [
+      "notifications.proxyReasonOpenAIChat",
+      "使用 OpenAI Chat 接口格式",
+    ],
+    openAiResponses: [
+      "notifications.proxyReasonOpenAIResponses",
+      "使用 OpenAI Responses 接口格式",
+    ],
+    anthropicMessages: [
+      "notifications.proxyReasonAnthropicMessages",
+      "使用 Anthropic Messages 接口格式",
+    ],
+    claudeDesktop: [
+      "notifications.proxyReasonClaudeDesktop",
+      "使用 Claude Desktop 本地路由模式",
+    ],
+    fullUrl: ["notifications.proxyReasonFullUrl", "开启了完整 URL 连接模式"],
+    routingRequired: [
+      "notifications.proxyReasonRoutingRequired",
+      "需要本地路由处理请求",
+    ],
+  };
+  const [key, defaultValue] = keys[reason];
+  return t(key, { defaultValue });
 }

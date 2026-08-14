@@ -9,8 +9,9 @@ mod usage;
 
 use indexmap::IndexMap;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 use crate::app_config::AppType;
 use crate::database::{validate_cost_multiplier, validate_pricing_source};
@@ -50,6 +51,310 @@ use usage::validate_usage_script;
 pub fn official_provider_supports_proxy_takeover(app_type: &AppType, provider: &Provider) -> bool {
     matches!(app_type, AppType::Codex)
         && crate::proxy::providers::is_codex_official_provider(provider)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderRoutingReason {
+    GithubCopilot,
+    ManagedOAuth,
+    OpenAiChat,
+    OpenAiResponses,
+    AnthropicMessages,
+    ClaudeDesktop,
+    FullUrl,
+    RoutingRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderRoutingBadge {
+    Required,
+    OfficialRouting,
+    NativeLogin,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderSwitchBlockReason {
+    OfficialBlockedByProxy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderPresentation {
+    pub is_official: bool,
+    pub is_current: bool,
+    pub is_in_config: bool,
+    pub is_default_model: bool,
+    pub is_managed: bool,
+    pub is_read_only: bool,
+    pub can_delete: bool,
+    pub can_edit: bool,
+    pub can_test_connectivity: bool,
+    pub can_configure_usage: bool,
+    pub uses_official_subscription_usage: bool,
+    pub can_set_as_default: bool,
+    pub routing_badge: Option<ProviderRoutingBadge>,
+    pub routing_reason: Option<ProviderRoutingReason>,
+    pub switch_blocked_reason: Option<ProviderSwitchBlockReason>,
+}
+
+pub struct ProviderPresentationContext {
+    app_taken_over: bool,
+    current_provider_id: Option<String>,
+    current_omo_provider_id: Option<String>,
+    current_omo_slim_provider_id: Option<String>,
+    configured_provider_ids: Option<HashSet<String>>,
+    default_model_provider_id: Option<String>,
+}
+
+pub fn provider_routing_requirement(
+    app_type: &AppType,
+    provider: &Provider,
+) -> Option<ProviderRoutingReason> {
+    if provider.category.as_deref() == Some("official") {
+        return None;
+    }
+
+    if provider.is_github_copilot() {
+        return Some(ProviderRoutingReason::GithubCopilot);
+    }
+    if provider.is_codex_oauth() || provider.is_xai_oauth() {
+        return Some(ProviderRoutingReason::ManagedOAuth);
+    }
+
+    let is_full_url = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.is_full_url)
+        .unwrap_or(false);
+
+    match app_type {
+        AppType::ClaudeDesktop => {
+            if provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.claude_desktop_mode.as_ref())
+                == Some(&crate::provider::ClaudeDesktopMode::Proxy)
+            {
+                Some(ProviderRoutingReason::ClaudeDesktop)
+            } else {
+                None
+            }
+        }
+        AppType::Claude => match crate::proxy::providers::get_claude_api_format(provider) {
+            "openai_chat" => Some(ProviderRoutingReason::OpenAiChat),
+            "openai_responses" => Some(ProviderRoutingReason::OpenAiResponses),
+            "gemini_native" => Some(ProviderRoutingReason::RoutingRequired),
+            _ if is_full_url => Some(ProviderRoutingReason::FullUrl),
+            _ => None,
+        },
+        AppType::Codex | AppType::GrokBuild => {
+            if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+                Some(ProviderRoutingReason::OpenAiChat)
+            } else if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
+                Some(ProviderRoutingReason::AnthropicMessages)
+            } else if is_full_url {
+                Some(ProviderRoutingReason::FullUrl)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn is_app_taken_over(state: &AppState, app_type: &AppType) -> bool {
+    let has_live_backup = futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+        .ok()
+        .flatten()
+        .is_some();
+    has_live_backup
+        || state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(app_type)
+}
+
+pub fn provider_presentation_context(
+    state: &AppState,
+    app_type: &AppType,
+) -> ProviderPresentationContext {
+    let configured_provider_ids = match app_type {
+        AppType::OpenCode => crate::opencode_config::get_providers()
+            .ok()
+            .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
+        AppType::OpenClaw => crate::openclaw_config::get_providers()
+            .ok()
+            .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
+        AppType::Hermes => crate::hermes_config::get_providers()
+            .ok()
+            .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
+        _ => None,
+    };
+    let current_provider_id = if app_type.is_additive_mode() {
+        None
+    } else {
+        crate::settings::get_effective_current_provider(&state.db, app_type)
+            .ok()
+            .flatten()
+    };
+    let current_omo_provider_id = if matches!(app_type, AppType::OpenCode) {
+        state
+            .db
+            .get_current_omo_provider(app_type.as_str(), "omo")
+            .ok()
+            .flatten()
+            .map(|provider| provider.id)
+    } else {
+        None
+    };
+    let current_omo_slim_provider_id = if matches!(app_type, AppType::OpenCode) {
+        state
+            .db
+            .get_current_omo_provider(app_type.as_str(), "omo-slim")
+            .ok()
+            .flatten()
+            .map(|provider| provider.id)
+    } else {
+        None
+    };
+    let default_model_provider_id = match app_type {
+        AppType::OpenClaw => crate::openclaw_config::get_default_model()
+            .ok()
+            .flatten()
+            .and_then(|model| {
+                model
+                    .primary
+                    .split_once('/')
+                    .map(|(provider_id, _)| provider_id.to_string())
+            }),
+        AppType::Hermes => crate::hermes_config::get_model_config()
+            .ok()
+            .flatten()
+            .and_then(|model| model.provider),
+        _ => None,
+    };
+
+    ProviderPresentationContext {
+        app_taken_over: is_app_taken_over(state, app_type),
+        current_provider_id,
+        current_omo_provider_id,
+        current_omo_slim_provider_id,
+        configured_provider_ids,
+        default_model_provider_id,
+    }
+}
+
+pub fn provider_presentation_with_context(
+    context: &ProviderPresentationContext,
+    app_type: &AppType,
+    provider: &Provider,
+) -> ProviderPresentation {
+    let routing_reason = provider_routing_requirement(app_type, provider);
+    let supports_official = official_provider_supports_proxy_takeover(app_type, provider);
+    let is_official = provider.category.as_deref() == Some("official");
+    let is_omo = matches!(provider.category.as_deref(), Some("omo") | Some("omo-slim"));
+    let is_current = context.current_provider_id.as_deref() == Some(provider.id.as_str())
+        || (provider.category.as_deref() == Some("omo")
+            && context.current_omo_provider_id.as_deref() == Some(provider.id.as_str()))
+        || (provider.category.as_deref() == Some("omo-slim")
+            && context.current_omo_slim_provider_id.as_deref() == Some(provider.id.as_str()))
+        || (matches!(app_type, AppType::Hermes)
+            && context.default_model_provider_id.as_deref() == Some(provider.id.as_str()));
+    let is_in_config = context
+        .configured_provider_ids
+        .as_ref()
+        .map(|provider_ids| provider_ids.contains(&provider.id))
+        .unwrap_or(true);
+    let is_default_model = matches!(app_type, AppType::OpenClaw | AppType::Hermes)
+        && context.default_model_provider_id.as_deref() == Some(provider.id.as_str());
+    let is_managed = crate::relay::is_managed(&provider.id);
+    let is_read_only = matches!(app_type, AppType::Hermes)
+        && provider
+            .settings_config
+            .get(crate::hermes_config::PROVIDER_SOURCE_FIELD)
+            .and_then(Value::as_str)
+            == Some(crate::hermes_config::PROVIDER_SOURCE_DICT);
+    let routing_badge = if routing_reason.is_some() {
+        Some(ProviderRoutingBadge::Required)
+    } else if supports_official {
+        Some(if context.app_taken_over {
+            ProviderRoutingBadge::OfficialRouting
+        } else {
+            ProviderRoutingBadge::NativeLogin
+        })
+    } else if is_official && matches!(app_type, AppType::Claude) {
+        Some(ProviderRoutingBadge::Unsupported)
+    } else {
+        None
+    };
+    let switch_blocked_reason = (context.app_taken_over && is_official && !supports_official)
+        .then_some(ProviderSwitchBlockReason::OfficialBlockedByProxy);
+    let uses_official_subscription_usage =
+        provider_uses_official_subscription_usage(app_type, provider);
+    let can_configure_usage = (!is_official || uses_official_subscription_usage)
+        && !provider.is_github_copilot()
+        && !provider.is_codex_oauth()
+        && !provider.is_xai_oauth();
+
+    ProviderPresentation {
+        is_official,
+        is_current,
+        is_in_config,
+        is_default_model,
+        is_managed,
+        is_read_only,
+        can_delete: !is_read_only && (is_omo || app_type.is_additive_mode() || !is_current),
+        can_edit: !is_read_only,
+        can_test_connectivity: !is_official,
+        can_configure_usage,
+        uses_official_subscription_usage,
+        can_set_as_default: matches!(app_type, AppType::OpenClaw | AppType::Hermes) && is_in_config,
+        routing_badge,
+        routing_reason,
+        switch_blocked_reason,
+    }
+}
+
+fn provider_uses_official_subscription_usage(app_type: &AppType, provider: &Provider) -> bool {
+    if provider.category.as_deref() == Some("official") {
+        return matches!(
+            app_type,
+            AppType::Claude | AppType::Codex | AppType::Gemini | AppType::GrokBuild
+        );
+    }
+
+    let is_blank = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+    };
+
+    match app_type {
+        AppType::Claude => is_blank(provider.settings_config.pointer("/env/ANTHROPIC_BASE_URL")),
+        AppType::Codex => {
+            let api_key = provider.settings_config.pointer("/auth/OPENAI_API_KEY");
+            let bearer_token = provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .and_then(crate::codex_config::extract_codex_experimental_bearer_token);
+            bearer_token.is_none() && is_blank(api_key)
+        }
+        AppType::Gemini => {
+            let env = provider.settings_config.get("env");
+            is_blank(env.and_then(|env| env.get("GEMINI_API_KEY")))
+                && is_blank(env.and_then(|env| env.get("GOOGLE_GEMINI_BASE_URL")))
+        }
+        AppType::GrokBuild
+        | AppType::ClaudeDesktop
+        | AppType::CodexImage
+        | AppType::OpenCode
+        | AppType::OpenClaw
+        | AppType::Hermes => false,
+    }
 }
 
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
@@ -244,6 +549,7 @@ mod tests {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+        crate::settings::reload_settings().expect("restore settings after test");
 
         result
     }
@@ -436,6 +742,55 @@ mod tests {
             "omo-slim" => crate::services::omo::SLIM.preferred_filename,
             other => panic!("unexpected OMO category in test: {other}"),
         })
+    }
+
+    #[test]
+    #[serial]
+    fn claude_plugin_integration_follows_backend_settings_and_current_provider() {
+        with_test_home(|state, _| {
+            crate::settings::reload_settings().expect("load isolated settings");
+            let mut settings = crate::settings::get_settings();
+            settings.enable_claude_plugin_integration = true;
+            crate::settings::update_settings(settings).expect("enable integration");
+
+            let mut provider = Provider::with_id(
+                "relay".to_string(),
+                "Relay".to_string(),
+                json!({ "env": { "ANTHROPIC_BASE_URL": "https://relay.example" } }),
+                None,
+            );
+            provider.category = Some("custom".to_string());
+            state
+                .db
+                .save_provider(AppType::Claude.as_str(), &provider)
+                .expect("save third-party provider");
+            crate::settings::set_current_provider(&AppType::Claude, Some(&provider.id))
+                .expect("set current provider");
+
+            assert!(ProviderService::sync_claude_plugin_integration(state)
+                .expect("sync plugin for third-party provider"));
+            let config_path =
+                crate::claude_plugin::claude_config_path().expect("plugin config path");
+            let config: Value = serde_json::from_str(
+                &fs::read_to_string(&config_path).expect("read plugin config"),
+            )
+            .expect("parse plugin config");
+            assert_eq!(config["primaryApiKey"], json!("any"));
+
+            provider.category = Some("official".to_string());
+            state
+                .db
+                .save_provider(AppType::Claude.as_str(), &provider)
+                .expect("save official provider");
+
+            assert!(ProviderService::sync_claude_plugin_integration(state)
+                .expect("clear plugin for official provider"));
+            let config: Value = serde_json::from_str(
+                &fs::read_to_string(&config_path).expect("read cleared plugin config"),
+            )
+            .expect("parse cleared plugin config");
+            assert!(config.get("primaryApiKey").is_none());
+        });
     }
 
     #[test]
@@ -1853,6 +2208,59 @@ requires_openai_auth = true
 
     #[test]
     #[serial]
+    fn duplicate_additive_provider_avoids_live_only_ids_and_inserts_after_source() {
+        with_test_home(|state, _| {
+            let source = openclaw_provider("deepseek");
+            ProviderService::add(state, AppType::OpenClaw, source, false)
+                .expect("seed db-only provider");
+            let mut following = openclaw_provider("following");
+            following.sort_index = Some(1);
+            ProviderService::add(state, AppType::OpenClaw, following, false)
+                .expect("seed following provider");
+            crate::openclaw_config::set_provider(
+                "deepseek-copy",
+                json!({
+                    "baseUrl": "https://live.example.com",
+                    "apiKey": "live-key",
+                    "api": "openai-completions",
+                    "models": []
+                }),
+            )
+            .expect("seed live-only provider id");
+
+            ProviderService::duplicate(state, AppType::OpenClaw, "deepseek")
+                .expect("duplicate provider");
+
+            let providers = state
+                .db
+                .get_all_providers(AppType::OpenClaw.as_str())
+                .expect("list providers");
+            let duplicate = providers
+                .get("deepseek-copy-2")
+                .expect("duplicate should avoid live-only id");
+            assert_eq!(duplicate.name, "Provider deepseek copy");
+            assert_eq!(duplicate.sort_index, Some(1));
+            assert_eq!(
+                providers
+                    .get("following")
+                    .expect("following provider should remain")
+                    .sort_index,
+                Some(2),
+                "providers after the source should shift down"
+            );
+            assert_eq!(
+                duplicate
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.live_config_managed),
+                Some(false),
+                "duplicate should remain DB-only until the user explicitly adds it"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
     fn db_only_additive_update_survives_live_config_parse_errors() {
         with_test_home(|state, home| {
             let provider = openclaw_provider("deepseek");
@@ -2421,6 +2829,26 @@ requires_openai_auth = true
 }
 
 impl ProviderService {
+    /// Synchronize Claude plugin integration from the backend-owned settings and
+    /// active Claude provider. UI callers must never infer this from raw config.
+    pub fn sync_claude_plugin_integration(state: &AppState) -> Result<bool, AppError> {
+        let settings = crate::settings::get_settings();
+        let current = crate::settings::get_effective_current_provider(&state.db, &AppType::Claude)?;
+        let uses_third_party_provider = match current.as_deref() {
+            Some(id) => state
+                .db
+                .get_provider_by_id(id, AppType::Claude.as_str())?
+                .is_some_and(|provider| provider.category.as_deref() != Some("official")),
+            None => false,
+        };
+
+        if settings.enable_claude_plugin_integration && uses_third_party_provider {
+            crate::claude_plugin::write_claude_config()
+        } else {
+            crate::claude_plugin::clear_claude_config()
+        }
+    }
+
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
         if matches!(app_type, AppType::Claude) {
             let mut v = provider.settings_config.clone();
@@ -2596,6 +3024,82 @@ impl ProviderService {
         }
 
         Ok(true)
+    }
+
+    /// Duplicate a provider using backend-owned identifiers, live-config checks,
+    /// and sort ordering. Additive-mode copies remain database-only until the
+    /// user explicitly adds them to the live config.
+    pub fn duplicate(
+        state: &AppState,
+        app_type: AppType,
+        source_id: &str,
+    ) -> Result<Provider, AppError> {
+        let mut providers = state.db.get_all_providers(app_type.as_str())?;
+        let source = providers.get(source_id).cloned().ok_or_else(|| {
+            AppError::Message(format!(
+                "Provider '{}' does not exist in app '{}'",
+                source_id,
+                app_type.as_str()
+            ))
+        })?;
+
+        let mut duplicate = Provider::with_id(
+            Self::duplicate_id(&app_type, &source, &providers)?,
+            format!("{} copy", source.name),
+            source.settings_config,
+            source.website_url,
+        );
+        duplicate.category = source.category;
+        duplicate.created_at = Some(chrono::Utc::now().timestamp_millis());
+        duplicate.notes = None;
+        duplicate.meta = source.meta;
+        duplicate.icon = source.icon;
+        duplicate.icon_color = source.icon_color;
+        duplicate.in_failover_queue = false;
+
+        if let Some(source_sort_index) = source.sort_index {
+            let duplicate_sort_index = source_sort_index + 1;
+            duplicate.sort_index = Some(duplicate_sort_index);
+            for provider in providers.values_mut().filter(|provider| {
+                provider.id != source_id
+                    && provider
+                        .sort_index
+                        .is_some_and(|index| index >= duplicate_sort_index)
+            }) {
+                provider.sort_index = provider.sort_index.map(|index| index + 1);
+                state.db.save_provider(app_type.as_str(), provider)?;
+            }
+        }
+
+        let add_to_live = !app_type.is_additive_mode();
+        Self::add(state, app_type, duplicate.clone(), add_to_live)?;
+        Ok(duplicate)
+    }
+
+    fn duplicate_id(
+        app_type: &AppType,
+        source: &Provider,
+        providers: &IndexMap<String, Provider>,
+    ) -> Result<String, AppError> {
+        if !app_type.is_additive_mode()
+            || (matches!(app_type, AppType::OpenCode)
+                && matches!(source.category.as_deref(), Some("omo") | Some("omo-slim")))
+        {
+            return Ok(uuid::Uuid::new_v4().to_string());
+        }
+
+        let base_id = format!("{}-copy", source.id);
+        for suffix in std::iter::once(None).chain((2..).map(Some)) {
+            let candidate =
+                suffix.map_or_else(|| base_id.clone(), |suffix| format!("{base_id}-{suffix}"));
+            if !providers.contains_key(&candidate)
+                && !provider_exists_in_live_config(app_type, &candidate)?
+            {
+                return Ok(candidate);
+            }
+        }
+
+        unreachable!("unbounded provider-copy suffix search must find an available id")
     }
 
     /// Update a provider
@@ -3005,16 +3509,7 @@ impl ProviderService {
         // Backup or live placeholders mean the live file is owned by proxy
         // takeover, even if the proxy server is temporarily stopped or is in the
         // activation window before enabled=true is committed.
-        let is_app_taken_over =
-            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                .ok()
-                .flatten()
-                .is_some();
-        let live_taken_over = state
-            .proxy_service
-            .detect_takeover_in_live_config_for_app(&app_type);
-
-        let should_hot_switch = is_app_taken_over || live_taken_over;
+        let should_hot_switch = is_app_taken_over(state, &app_type);
 
         // Block switching to official providers when proxy takeover is active.
         // Using a proxy with official APIs (Anthropic/OpenAI/Google) may cause account bans.
@@ -3048,11 +3543,30 @@ impl ProviderService {
 
             // The proxy server will route requests to the new provider via is_current.
             // MCP sync is intentionally skipped while Live config is owned by takeover.
-            return Ok(SwitchResult::default());
+            let mut result = SwitchResult::default();
+            Self::append_claude_plugin_sync_warning(state, &app_type, &mut result);
+            return Ok(result);
         }
 
         // Normal mode: full switch with Live config write
-        Self::switch_normal(state, app_type, id, &providers)
+        let mut result = Self::switch_normal(state, app_type.clone(), id, &providers)?;
+        Self::append_claude_plugin_sync_warning(state, &app_type, &mut result);
+        Ok(result)
+    }
+
+    fn append_claude_plugin_sync_warning(
+        state: &AppState,
+        app_type: &AppType,
+        result: &mut SwitchResult,
+    ) {
+        if matches!(app_type, AppType::Claude) {
+            if let Err(error) = Self::sync_claude_plugin_integration(state) {
+                log::warn!("切换 Claude 供应商后同步插件集成失败: {error}");
+                result
+                    .warnings
+                    .push(format!("claude_plugin_sync_failed:{error}"));
+            }
+        }
     }
 
     /// Normal switch flow (non-proxy mode)
@@ -4067,6 +4581,60 @@ impl ProviderService {
     /// Read current live settings (re-export)
     pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
         read_live_settings(app_type)
+    }
+
+    /// Return the settings snapshot that should seed provider editing. The
+    /// backend owns the live-vs-database decision and preserves DB-only Codex
+    /// metadata that a live config cannot represent.
+    pub fn edit_settings(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+    ) -> Result<Value, AppError> {
+        let provider = state
+            .db
+            .get_provider_by_id(provider_id, app_type.as_str())?
+            .ok_or_else(|| {
+                AppError::Message(format!(
+                    "Provider '{}' does not exist in app '{}'",
+                    provider_id,
+                    app_type.as_str()
+                ))
+            })?;
+        let database_settings = provider.settings_config;
+
+        if is_app_taken_over(state, &app_type) || matches!(app_type, AppType::OpenCode) {
+            return Ok(database_settings);
+        }
+
+        let live_settings = match app_type {
+            AppType::OpenClaw => crate::openclaw_config::get_provider(provider_id)?,
+            _ => {
+                let current =
+                    crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+                if current.as_deref() == Some(provider_id) {
+                    Some(read_live_settings(app_type.clone())?)
+                } else {
+                    None
+                }
+            }
+        };
+
+        let Some(mut settings) = live_settings else {
+            return Ok(database_settings);
+        };
+        if matches!(app_type, AppType::Codex) {
+            if let Some(model_catalog) = database_settings
+                .as_object()
+                .and_then(|settings| settings.get("modelCatalog"))
+                .cloned()
+            {
+                if let Some(settings) = settings.as_object_mut() {
+                    settings.insert("modelCatalog".to_string(), model_catalog);
+                }
+            }
+        }
+        Ok(settings)
     }
 
     /// Get custom endpoints list (re-export)

@@ -24,7 +24,6 @@ import type {
 } from "@/lib/api/relay";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
-import { reportProvision } from "../reportProvision";
 import {
   DIRECTORY_PAGE_SIZE,
   defaultDirectoryKind,
@@ -137,11 +136,7 @@ export function RelayDirectoryPage({
         t("loongport.addSite.connected", { name: result.siteName }),
       );
       try {
-        reportProvision(
-          t,
-          await relayApi.provision(result.relayId),
-          sourceAppId,
-        );
+        await relayApi.refresh(result.relayId, sourceAppId);
       } catch (reason) {
         toast.error(
           t("loongport.directory.provisionFailed", {

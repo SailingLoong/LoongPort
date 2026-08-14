@@ -4,7 +4,6 @@ import { AlertCircle, Loader2, Wallet } from "lucide-react";
 import { InlineUsage } from "@/components/UsageFooter";
 import { cn } from "@/lib/utils";
 
-import { isLowBalance, LOW_BALANCE_THRESHOLD_USD } from "./lowBalance";
 import { useRowBalanceQuery, type BalanceRowKind } from "./useRowBalanceQuery";
 
 interface RowBalanceProps {
@@ -71,31 +70,16 @@ export function RowBalance({
   refreshBusy = false,
 }: RowBalanceProps) {
   const { t } = useTranslation();
-  const { usage, loading, lastQueriedAt, refetch } = useRowBalanceQuery(
-    rowKind,
-    rowId,
-    { enabled },
-  );
+  const { usage, shouldPromptTopUp, loading, lastQueriedAt, refetch } =
+    useRowBalanceQuery(rowKind, rowId, { enabled });
 
   // 后端没有确认可查询凭据的行，不渲染一个必然失败的用量条。
   if (!enabled) return null;
 
-  // 低余额判据两道门：
-  //
-  // 1. **只在有充值入口时才算** —— 阈值是**美元**（sub2api 的钱包是 USD 计价），
-  //    而官网行是 DeepSeek 的人民币钱包，拿它跟 5 比差着汇率。2026-08-04 维护者
-  //    明确要求「只对中转站生效，对 deepseek 之类的不生效」；余额契约统一之后
-  //    类型上不再隔离，所以这条要求改由这里显式守（`lowBalanceScopeContract`
-  //    那道闸盯着它）。`onPurchase` 恰好就是「这是中转站行」的判据，也是 `low`
-  //    的唯一消费者 —— 没有充值按钮时算出来也无处可用。
-  // 2. **只在拿到了数字时才算** —— 查失败时 `remaining` 为空 ⇒ 不算低
-  //    （「不知道」不是「没钱」，见 `lowBalance.ts`）。
-  const remaining = usage?.success ? usage.data?.[0]?.remaining : undefined;
-  const low = onPurchase ? isLowBalance(remaining ?? null) : false;
   const handleRefresh = async () => {
-    try {
-      await onRefresh?.();
-    } finally {
+    if (onRefresh) {
+      await onRefresh();
+    } else {
       await refetch();
     }
   };
@@ -126,18 +110,15 @@ export function RowBalance({
           // title 挂在按钮自身：它 disabled 的时间极短（就是开窗那一下），
           // 不像上游那几个常驻 disabled 的按钮需要 wrapper 承接 hover。
           title={
-            low
-              ? t("loongport.row.lowBalanceHint", {
-                  threshold: LOW_BALANCE_THRESHOLD_USD,
-                })
+            shouldPromptTopUp
+              ? t("loongport.row.lowBalanceHint")
               : t("loongport.row.purchaseHint")
           }
           className={cn(
             "flex shrink-0 items-center rounded-md p-1 transition-colors",
             // 低余额：琥珀色常驻（不是 hover 才出）—— 它是个提醒，藏起来就没用了。
             // 用琥珀而不是红：钱不够是「该处理一下」，不是「出错了」。
-            // 这两个色阶沿用仓里已有的琥珀色警示 token。
-            low
+            shouldPromptTopUp
               ? "text-amber-600 hover:bg-amber-50 dark:text-amber-500 dark:hover:bg-amber-950/40"
               : "text-muted-foreground hover:bg-muted/60 hover:text-blue-500 dark:hover:text-blue-400",
             purchaseBusy && "cursor-not-allowed opacity-60",
@@ -145,7 +126,7 @@ export function RowBalance({
         >
           {purchaseBusy ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : low ? (
+          ) : shouldPromptTopUp ? (
             // 叹号替掉钱包 —— 需求要的那个「小叹号」就是它。
             <AlertCircle className="h-3.5 w-3.5" />
           ) : (

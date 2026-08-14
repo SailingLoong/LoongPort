@@ -44,6 +44,31 @@ use futures::future::join_all;
 use crate::provider::{UsageData, UsageResult};
 use crate::relay::{api, backend, creds};
 
+const LOW_BALANCE_THRESHOLD_USD: f64 = 5.0;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowBalanceResult {
+    pub usage: UsageResult,
+    pub should_prompt_top_up: bool,
+}
+
+pub fn row_balance_result(usage: UsageResult, top_up_prompt_applicable: bool) -> RowBalanceResult {
+    let should_prompt_top_up = top_up_prompt_applicable
+        && usage.success
+        && usage
+            .data
+            .as_ref()
+            .and_then(|items| items.first())
+            .and_then(|item| item.remaining)
+            .is_some_and(|remaining| remaining < LOW_BALANCE_THRESHOLD_USD);
+
+    RowBalanceResult {
+        usage,
+        should_prompt_top_up,
+    }
+}
+
 /// 一行的查询材料。
 ///
 /// **打成结构体而不是三个平铺参数**：`site_origin` 与 `base_url` 都是 URL 形状的
@@ -255,6 +280,17 @@ fn wallet_usage(balance: f64) -> UsageResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_wallet_balance_owns_the_top_up_prompt_fact() {
+        let low = row_balance_result(wallet_usage(4.99), true);
+        let threshold = row_balance_result(wallet_usage(5.0), true);
+        let vendor = row_balance_result(wallet_usage(1.0), false);
+
+        assert!(low.should_prompt_top_up);
+        assert!(!threshold.should_prompt_top_up);
+        assert!(!vendor.should_prompt_top_up);
+    }
 
     /// 走到 `success_at` 那一步为止，链上依次经过了哪些步。
     fn steps_until_success(success_at: BalanceStep) -> Vec<BalanceStep> {

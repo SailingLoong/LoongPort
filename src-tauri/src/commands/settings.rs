@@ -70,6 +70,12 @@ pub async fn save_settings(
     let unify_codex_enabled = merged.unify_codex_session_history;
     crate::settings::update_settings(merged).map_err(|e| e.to_string())?;
 
+    if let Err(error) =
+        crate::services::ProviderService::sync_claude_plugin_integration(state.inner())
+    {
+        log::warn!("保存设置后同步 Claude 插件集成失败: {error}");
+    }
+
     // 统一会话开关变更时立即重写当前官方 Codex 供应商的 live 配置，
     // 不必等下一次切换才生效。
     if unify_codex_changed {

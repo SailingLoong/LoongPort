@@ -7,6 +7,10 @@ use crate::commands::xai_oauth::XaiOAuthState;
 use crate::error::AppError;
 use crate::events::{emit_provider_switched, UNIVERSAL_PROVIDER_SYNCED, USAGE_CACHE_UPDATED};
 use crate::provider::{ClaudeDesktopMode, Provider};
+use crate::services::provider::{
+    provider_presentation_context, provider_presentation_with_context,
+    provider_routing_requirement, ProviderPresentation, ProviderRoutingReason,
+};
 use crate::services::{
     EndpointLatency, ProviderService, ProviderSortUpdate, SpeedtestService, SwitchResult,
 };
@@ -20,14 +24,43 @@ const TEMPLATE_TYPE_BALANCE: &str = "balance";
 const TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION: &str = "official_subscription";
 const COPILOT_UNIT_PREMIUM: &str = "requests";
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderView {
+    #[serde(flatten)]
+    pub provider: Provider,
+    pub presentation: ProviderPresentation,
+}
+
 /// 获取所有供应商
 #[tauri::command]
 pub fn get_providers(
     state: State<'_, AppState>,
     app: String,
-) -> Result<IndexMap<String, Provider>, String> {
+) -> Result<IndexMap<String, ProviderView>, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::list(state.inner(), app_type).map_err(|e| e.to_string())
+    ProviderService::list(state.inner(), app_type.clone())
+        .map(|providers| {
+            let presentation_context = provider_presentation_context(state.inner(), &app_type);
+            providers
+                .into_iter()
+                .map(|(id, provider)| {
+                    let presentation = provider_presentation_with_context(
+                        &presentation_context,
+                        &app_type,
+                        &provider,
+                    );
+                    (
+                        id,
+                        ProviderView {
+                            provider,
+                            presentation,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -42,10 +75,127 @@ pub fn add_provider(
     app: String,
     provider: Provider,
     #[allow(non_snake_case)] addToLive: Option<bool>,
+    #[allow(non_snake_case)] providerKey: Option<String>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let provider = prepare_provider_for_add(state.inner(), app_type.clone(), provider, providerKey)
+        .map_err(|e| e.to_string())?;
     add_provider_internal(state.inner(), app_type, provider, addToLive.unwrap_or(true))
         .map_err(|e| e.to_string())
+}
+
+fn prepare_provider_for_add(
+    state: &AppState,
+    app_type: AppType,
+    mut provider: Provider,
+    provider_key: Option<String>,
+) -> Result<Provider, AppError> {
+    if provider.id.trim().is_empty() {
+        provider.id =
+            new_provider_id(state, &app_type, provider.category.as_deref(), provider_key)?;
+    }
+    if provider.created_at.is_none() {
+        provider.created_at = Some(chrono::Utc::now().timestamp_millis());
+    }
+
+    if state
+        .db
+        .get_provider_by_id(&provider.id, app_type.as_str())?
+        .is_some()
+    {
+        return Err(AppError::Message(format!(
+            "Provider '{}' already exists in app '{}'",
+            provider.id,
+            app_type.as_str()
+        )));
+    }
+    if app_type.is_additive_mode()
+        && crate::services::provider::provider_exists_in_live_config(&app_type, &provider.id)?
+    {
+        return Err(AppError::Message(format!(
+            "Provider '{}' already exists in the app configuration",
+            provider.id
+        )));
+    }
+
+    Ok(provider)
+}
+
+fn new_provider_id(
+    state: &AppState,
+    app_type: &AppType,
+    category: Option<&str>,
+    provider_key: Option<String>,
+) -> Result<String, AppError> {
+    if app_type.is_additive_mode()
+        && !(matches!(app_type, AppType::OpenCode)
+            && matches!(category, Some("omo") | Some("omo-slim")))
+    {
+        let provider_key = provider_key
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| {
+                AppError::Message("Provider key is required for this app".to_string())
+            })?;
+        if !is_valid_provider_key(&provider_key) {
+            return Err(AppError::Message(
+                "Provider key must contain lowercase letters, digits, and single hyphens"
+                    .to_string(),
+            ));
+        }
+        return Ok(provider_key);
+    }
+
+    loop {
+        let id = if matches!(app_type, AppType::OpenCode)
+            && matches!(category, Some("omo") | Some("omo-slim"))
+        {
+            format!("{}-{}", category.unwrap_or_default(), uuid::Uuid::new_v4())
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        if state
+            .db
+            .get_provider_by_id(&id, app_type.as_str())?
+            .is_none()
+        {
+            return Ok(id);
+        }
+    }
+}
+
+fn is_valid_provider_key(value: &str) -> bool {
+    !value.starts_with('-')
+        && !value.ends_with('-')
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+#[tauri::command]
+pub fn duplicate_provider(
+    state: State<'_, AppState>,
+    app: String,
+    id: String,
+) -> Result<bool, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    duplicate_provider_internal(state.inner(), app_type, &id).map_err(|e| e.to_string())
+}
+
+fn duplicate_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    source_id: &str,
+) -> Result<bool, AppError> {
+    crate::relay::reject_if_managed(source_id)?;
+    let duplicate = ProviderService::duplicate(state, app_type.clone(), source_id)?;
+    state
+        .db
+        .set_user_edited(app_type.as_str(), &duplicate.id, true)?;
+    Ok(true)
 }
 
 fn add_provider_internal(
@@ -267,17 +417,60 @@ pub fn switch_provider_test_hook(
 /// **`None` = 不碰 ChatGPT**，这是给托盘快切 / deeplink 导入 / 项目快照那些既有调用点留的
 /// 默认行为（它们没有弹确认框的机会，而未经用户同意就关掉他正开着的 app 是不能接受的）。
 /// 只有前端在弹过确认框、用户同意之后才传 `Some(true)`。
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ProviderSwitchCommandResult {
+    ConfirmationRequired {
+        target_name: String,
+    },
+    Switched {
+        warnings: Vec<String>,
+        routing_notice: Option<ProviderRoutingReason>,
+    },
+}
+
+fn should_request_chatgpt_confirmation(
+    app_type: &AppType,
+    user_choice: Option<bool>,
+    needs_attention: bool,
+) -> bool {
+    matches!(app_type, AppType::Codex) && user_choice.is_none() && needs_attention
+}
+
 #[tauri::command]
 pub async fn switch_provider(
     app_handle: tauri::AppHandle,
     app: String,
     id: String,
     quit_chatgpt: Option<bool>,
-) -> Result<SwitchResult, String> {
+) -> Result<ProviderSwitchCommandResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    // 与 `relay_switch_tier` 同一条判据：**只有 codex 才需要管 ChatGPT**
-    // （那个 app 只读 `~/.codex`，切 claude / gemini 时去退它是扰民 ——
-    // 关掉用户正开着的、与本次切换毫无关系的对话）。
+    let state = app_handle
+        .try_state::<AppState>()
+        .ok_or_else(|| "应用状态不可用".to_string())?;
+    let provider = state
+        .db
+        .get_provider_by_id(&id, app_type.as_str())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("供应商 {id} 不存在"))?;
+
+    if should_request_chatgpt_confirmation(
+        &app_type,
+        quit_chatgpt,
+        crate::relay::chatgpt_app::needs_user_attention(),
+    ) {
+        return Ok(ProviderSwitchCommandResult::ConfirmationRequired {
+            target_name: provider.name,
+        });
+    }
+
+    let routing_requirement = provider_routing_requirement(&app_type, &provider);
+    let routing_ready = if matches!(app_type, AppType::ClaudeDesktop) {
+        state.proxy_service.is_running().await
+    } else {
+        crate::services::provider::is_app_taken_over(state.inner(), &app_type)
+    };
+    let routing_notice = routing_requirement.filter(|_| !routing_ready);
     let quit_chatgpt = quit_chatgpt.unwrap_or(false) && matches!(app_type, AppType::Codex);
 
     let emit_handle = app_handle.clone();
@@ -309,7 +502,10 @@ pub async fn switch_provider(
     if result.is_ok() {
         emit_provider_switched(&emit_handle, &emit_app_type, &emit_id);
     }
-    result
+    result.map(|switched| ProviderSwitchCommandResult::Switched {
+        warnings: switched.warnings,
+        routing_notice,
+    })
 }
 
 /// 三条通用 provider 命令撞到 LoongPort 托管档位时必须报错，而不是照做。
@@ -351,6 +547,28 @@ mod managed_guard_tests {
     /// 这样前缀真变了的那天，测试跟着生成器走、守卫失配才会被别的断言抓到。
     fn managed_id() -> String {
         crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 42)
+    }
+
+    #[test]
+    fn provider_presentation_marks_current_managed_tier() {
+        let id = managed_id();
+        let state = state_with_managed_tier(&id);
+        state
+            .db
+            .set_current_provider(AppType::Codex.as_str(), &id)
+            .expect("设为当前档位");
+        let provider = state
+            .db
+            .get_provider_by_id(&id, AppType::Codex.as_str())
+            .expect("读取档位")
+            .expect("档位存在");
+
+        let context = provider_presentation_context(&state, &AppType::Codex);
+        let presentation = provider_presentation_with_context(&context, &AppType::Codex, &provider);
+
+        assert!(presentation.is_current);
+        assert!(presentation.is_managed);
+        assert!(presentation.is_in_config);
     }
 
     fn assert_managed_guard_error(err: &AppError) {
@@ -582,6 +800,54 @@ mod managed_guard_tests {
         assert_managed_guard_error(&err);
     }
 
+    #[test]
+    fn frontend_add_without_id_uses_a_backend_generated_id() {
+        let provider = Provider::with_id(
+            String::new(),
+            "new provider".to_string(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "sk-1"}}),
+            None,
+        );
+
+        let prepared = prepare_provider_for_add(&empty_state(), AppType::Codex, provider, None)
+            .expect("backend should assign a provider id");
+
+        assert!(!prepared.id.is_empty());
+        assert!(uuid::Uuid::parse_str(&prepared.id).is_ok());
+        assert!(prepared.created_at.is_some());
+    }
+
+    #[test]
+    fn frontend_add_rejects_an_existing_additive_provider_key() {
+        let state = empty_state();
+        let existing = Provider::with_id(
+            "already-used".to_string(),
+            "existing provider".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        state
+            .db
+            .save_provider(AppType::OpenClaw.as_str(), &existing)
+            .expect("seed existing provider");
+        let provider = Provider::with_id(
+            String::new(),
+            "new provider".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+
+        let err = prepare_provider_for_add(
+            &state,
+            AppType::OpenClaw,
+            provider,
+            Some("already-used".to_string()),
+        )
+        .expect_err("backend must reject a duplicate additive provider key");
+
+        assert!(err.to_string().contains("already exists"));
+    }
+
     /// 反向那个口子：把**普通** provider 改成托管 id ⇒ 伪装成托管项。
     ///
     /// 后果不是显示错乱那么轻：它会出现在中转站区里，而那一区的
@@ -689,6 +955,82 @@ mod managed_guard_tests {
                 .unwrap(),
             "复位后必须读到 false"
         );
+    }
+}
+
+#[cfg(test)]
+mod switch_presentation_tests {
+    use super::*;
+    use crate::provider::{ClaudeDesktopMode, ProviderMeta};
+    use crate::services::provider::{provider_routing_requirement, ProviderRoutingReason};
+    use serde_json::json;
+
+    fn provider(settings_config: serde_json::Value, meta: Option<ProviderMeta>) -> Provider {
+        let mut provider = Provider::with_id(
+            "test".to_string(),
+            "Test".to_string(),
+            settings_config,
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        provider.meta = meta;
+        provider
+    }
+
+    #[test]
+    fn confirmation_is_an_action_scoped_backend_decision() {
+        assert!(should_request_chatgpt_confirmation(
+            &AppType::Codex,
+            None,
+            true
+        ));
+        assert!(!should_request_chatgpt_confirmation(
+            &AppType::Claude,
+            None,
+            true
+        ));
+        assert!(!should_request_chatgpt_confirmation(
+            &AppType::Codex,
+            Some(false),
+            true
+        ));
+        assert!(!should_request_chatgpt_confirmation(
+            &AppType::Codex,
+            None,
+            false
+        ));
+    }
+
+    #[test]
+    fn routing_requirement_reuses_backend_provider_semantics() {
+        let managed = ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            provider_routing_requirement(&AppType::Codex, &provider(json!({}), Some(managed))),
+            Some(ProviderRoutingReason::ManagedOAuth)
+        );
+
+        let desktop = ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            ..Default::default()
+        };
+        assert_eq!(
+            provider_routing_requirement(
+                &AppType::ClaudeDesktop,
+                &provider(json!({}), Some(desktop))
+            ),
+            Some(ProviderRoutingReason::ClaudeDesktop)
+        );
+
+        let native = provider(
+            json!({
+                "config": "model_provider = \"custom\"\n[model_providers.custom]\nwire_api = \"responses\"\n"
+            }),
+            None,
+        );
+        assert_eq!(provider_routing_requirement(&AppType::Codex, &native), None);
     }
 }
 
@@ -1359,6 +1701,16 @@ pub async fn testUsageScript(
 pub fn read_live_provider_settings(app: String) -> Result<serde_json::Value, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     ProviderService::read_live_settings(app_type).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_provider_edit_settings(
+    state: State<'_, AppState>,
+    app: String,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ProviderService::edit_settings(state.inner(), app_type, &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

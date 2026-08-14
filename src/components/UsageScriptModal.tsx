@@ -159,44 +159,6 @@ function detectBalanceProvider(baseUrl: string | undefined): boolean {
   return BALANCE_PROVIDERS.some((bp) => bp.pattern.test(baseUrl));
 }
 
-function isOfficialSubscriptionProvider(provider: Provider, appId: AppId) {
-  if (!["claude", "codex", "gemini", "grokbuild"].includes(appId)) return false;
-  if (provider.category === "official") return true;
-
-  const config = provider.settingsConfig as Record<string, any>;
-  if (appId === "claude") {
-    const baseUrl = config?.env?.ANTHROPIC_BASE_URL;
-    return !baseUrl || (typeof baseUrl === "string" && baseUrl.trim() === "");
-  }
-  if (appId === "codex") {
-    const apiKey = config?.auth?.OPENAI_API_KEY;
-    const bearerToken =
-      typeof config?.config === "string"
-        ? extractCodexExperimentalBearerToken(config.config)
-        : undefined;
-    return (
-      !bearerToken &&
-      (!apiKey || (typeof apiKey === "string" && apiKey.trim() === ""))
-    );
-  }
-  if (appId === "gemini") {
-    const env = config?.env || {};
-    const apiKey = env.GEMINI_API_KEY;
-    const baseUrl = env.GOOGLE_GEMINI_BASE_URL;
-    return (
-      (!apiKey || (typeof apiKey === "string" && apiKey.trim() === "")) &&
-      (!baseUrl || (typeof baseUrl === "string" && baseUrl.trim() === ""))
-    );
-  }
-  // grokbuild 不做配置启发式，只认上方的 category === "official"：官方态判定
-  // 在后端是 TOML 解析（grok_config::is_official_live_config），正则无法忠实
-  // 镜像（引号键/inline table/非法 TOML 均会误判为官方），误判会让本组件的
-  // state 初始化丢弃已保存的非官方脚本。claude/codex/gemini 的启发式建立在
-  // 已解析的 JSON 字段上是精确的，不受此限。官方判定以 category 为 SSOT 的
-  // 理由见 ProviderCard 中的注释。
-  return false;
-}
-
 const NATIVE_USAGE_TEMPLATES = new Set<string>([
   TEMPLATE_TYPES.GITHUB_COPILOT,
   TEMPLATE_TYPES.TOKEN_PLAN,
@@ -311,10 +273,8 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   };
 
   const providerCredentials = getProviderCredentials();
-  const isOfficialSubscription = isOfficialSubscriptionProvider(
-    provider,
-    appId,
-  );
+  const isOfficialSubscription =
+    provider.presentation?.usesOfficialSubscriptionUsage === true;
 
   const [script, setScript] = useState<UsageScript>(() => {
     const savedScript = provider.meta?.usage_script;

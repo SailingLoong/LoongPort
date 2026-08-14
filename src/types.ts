@@ -28,6 +28,42 @@ export interface Provider {
   iconColor?: string; // 图标颜色（Hex 格式，如 "#00A67E"）
   // 是否加入故障转移队列
   inFailoverQueue?: boolean;
+  /** 后端计算的展示与操作事实；普通表单草稿可以没有。 */
+  presentation?: ProviderPresentation;
+}
+
+export type ProviderRoutingReason =
+  | "githubCopilot"
+  | "managedOAuth"
+  | "openAiChat"
+  | "openAiResponses"
+  | "anthropicMessages"
+  | "claudeDesktop"
+  | "fullUrl"
+  | "routingRequired";
+
+export type ProviderRoutingBadge =
+  | "required"
+  | "officialRouting"
+  | "nativeLogin"
+  | "unsupported";
+
+export interface ProviderPresentation {
+  isOfficial: boolean;
+  isCurrent: boolean;
+  isInConfig: boolean;
+  isDefaultModel: boolean;
+  isManaged: boolean;
+  isReadOnly: boolean;
+  canDelete: boolean;
+  canEdit: boolean;
+  canTestConnectivity: boolean;
+  canConfigureUsage: boolean;
+  usesOfficialSubscriptionUsage: boolean;
+  canSetAsDefault: boolean;
+  routingBadge: ProviderRoutingBadge | null;
+  routingReason: ProviderRoutingReason | null;
+  switchBlockedReason: "officialBlockedByProxy" | null;
 }
 
 export interface AppConfig {

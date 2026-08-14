@@ -96,14 +96,26 @@ let liveProviderIds: LiveProviderIdsByApp = {
   openclaw: [],
   hermes: [],
 };
-let settingsState: Settings = {
+const createDefaultSettings = (): Settings => ({
   showInTray: true,
   minimizeToTrayOnClose: true,
   enableClaudePluginIntegration: false,
   claudeConfigDir: "/default/claude",
   codexConfigDir: "/default/codex",
   language: "zh",
-};
+  visibleApps: {
+    claude: true,
+    "claude-desktop": true,
+    codex: true,
+    "codex-image": true,
+    gemini: true,
+    grokbuild: true,
+    opencode: true,
+    openclaw: true,
+    hermes: true,
+  },
+});
+let settingsState = createDefaultSettings();
 let appConfigDirOverride: string | null = null;
 const sessionMessageKey = (providerId: string, sourcePath: string) =>
   `${providerId}:${sourcePath}`;
@@ -217,14 +229,7 @@ export const resetProviderState = () => {
   };
   sessionsState = createDefaultSessions();
   sessionMessagesState = createDefaultSessionMessages();
-  settingsState = {
-    showInTray: true,
-    minimizeToTrayOnClose: true,
-    enableClaudePluginIntegration: false,
-    claudeConfigDir: "/default/claude",
-    codexConfigDir: "/default/codex",
-    language: "zh",
-  };
+  settingsState = createDefaultSettings();
   appConfigDirOverride = null;
   mcpConfigs = {
     claude: {

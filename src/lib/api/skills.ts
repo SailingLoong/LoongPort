@@ -66,6 +66,9 @@ export interface DiscoverableSkill {
   repoOwner: string;
   repoName: string;
   repoBranch: string;
+  installed: boolean;
+  canInstall: boolean;
+  canUninstall: boolean;
 }
 
 /** 未管理的 Skill（用于导入） */
@@ -121,6 +124,9 @@ export interface SkillsShDiscoverableSkill {
   repoBranch: string;
   installs: number;
   readmeUrl?: string;
+  installed: boolean;
+  canInstall: boolean;
+  canUninstall: boolean;
 }
 
 /** skills.sh 搜索结果 */

@@ -97,6 +97,29 @@ vi.mock("@/lib/query/failover", () => ({
   useReorderFailoverQueue: () => ({ mutate: vi.fn() }),
 }));
 
+function createPresentation(
+  overrides: Partial<NonNullable<Provider["presentation"]>> = {},
+) {
+  return {
+    isOfficial: false,
+    isCurrent: false,
+    isInConfig: true,
+    isDefaultModel: false,
+    isManaged: false,
+    isReadOnly: false,
+    canDelete: true,
+    canEdit: true,
+    canTestConnectivity: true,
+    canConfigureUsage: true,
+    usesOfficialSubscriptionUsage: false,
+    canSetAsDefault: false,
+    routingBadge: null,
+    routingReason: null,
+    switchBlockedReason: null,
+    ...overrides,
+  };
+}
+
 function createProvider(overrides: Partial<Provider> = {}): Provider {
   return {
     id: overrides.id ?? "provider-1",
@@ -107,6 +130,7 @@ function createProvider(overrides: Partial<Provider> = {}): Provider {
     sortIndex: overrides.sortIndex,
     meta: overrides.meta,
     websiteUrl: overrides.websiteUrl,
+    presentation: createPresentation(overrides.presentation),
   };
 }
 
@@ -146,7 +170,6 @@ describe("ProviderList Component", () => {
     const { container } = renderWithQueryClient(
       <ProviderList
         providers={{}}
-        currentProviderId=""
         appId="claude"
         onSwitch={vi.fn()}
         onEdit={vi.fn()}
@@ -174,7 +197,6 @@ describe("ProviderList Component", () => {
     renderWithQueryClient(
       <ProviderList
         providers={{}}
-        currentProviderId=""
         appId="claude"
         onSwitch={vi.fn()}
         onEdit={vi.fn()}
@@ -195,7 +217,11 @@ describe("ProviderList Component", () => {
 
   it("should render in order returned by useDragSort and pass through action callbacks", () => {
     const providerA = createProvider({ id: "a", name: "A" });
-    const providerB = createProvider({ id: "b", name: "B" });
+    const providerB = createProvider({
+      id: "b",
+      name: "B",
+      presentation: createPresentation({ isCurrent: true }),
+    });
 
     const handleSwitch = vi.fn();
     const handleEdit = vi.fn();
@@ -213,7 +239,6 @@ describe("ProviderList Component", () => {
     renderWithQueryClient(
       <ProviderList
         providers={{ a: providerA, b: providerB }}
-        currentProviderId="b"
         appId="claude"
         onSwitch={handleSwitch}
         onEdit={handleEdit}
@@ -277,7 +302,6 @@ describe("ProviderList Component", () => {
     renderWithQueryClient(
       <ProviderList
         providers={{ alpha: providerAlpha, beta: providerBeta }}
-        currentProviderId=""
         appId="claude"
         onSwitch={vi.fn()}
         onEdit={vi.fn()}
@@ -323,9 +347,9 @@ describe("ProviderList Component", () => {
           "loongport-abc123def4567890": createProvider({
             id: "loongport-abc123def4567890",
             name: "BestApi · Pro",
+            presentation: createPresentation({ isManaged: true }),
           }),
         }}
-        currentProviderId=""
         appId="codex"
         onSwitch={vi.fn()}
         onEdit={vi.fn()}
@@ -362,7 +386,6 @@ describe("ProviderList Component", () => {
             name: "My own gateway",
           }),
         }}
-        currentProviderId=""
         appId="codex"
         onSwitch={vi.fn()}
         onEdit={vi.fn()}

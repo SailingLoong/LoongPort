@@ -12,10 +12,10 @@ const api = vi.hoisted(() => ({
   listRelays: vi.fn(),
   listTierRates: vi.fn(),
   checkSession: vi.fn(),
-  provision: vi.fn(),
+  refreshAll: vi.fn(),
   status: vi.fn(),
   listSites: vi.fn(),
-  listResults: vi.fn(),
+  listSummaries: vi.fn(),
   listHistory: vi.fn(),
   listModels: vi.fn(),
   start: vi.fn(),
@@ -23,9 +23,8 @@ const api = vi.hoisted(() => ({
   onProgress: vi.fn(),
   list: vi.fn(),
   openLogin: vi.fn(),
-  vendorProvision: vi.fn(),
+  vendorRefresh: vi.fn(),
 }));
-const vendorSupport = vi.hoisted(() => ({ enabled: false }));
 const dialogState = vi.hoisted(() => ({
   onOpenChange: (_open: boolean) => {},
 }));
@@ -47,13 +46,12 @@ vi.mock("@/lib/api/vendor", () => ({
   vendorApi: {
     list: api.list,
     openLogin: api.openLogin,
-    provision: api.vendorProvision,
+    refresh: api.vendorRefresh,
   },
-  vendorSupportsApp: () => vendorSupport.enabled,
 }));
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: {
-    listResults: api.listResults,
+    listSummaries: api.listSummaries,
     listHistory: api.listHistory,
     listModels: api.listModels,
     start: api.start,
@@ -128,7 +126,7 @@ vi.mock("@/components/relay/RelayTierList", () => ({
             <span data-testid={`verdict-${tier.providerId}`}>
               {props.verificationVerdictForTier(tier) ?? "none"}
             </span>
-            {props.onVerifyTier && (
+            {props.onVerifyTier && tier.canVerifyModels && (
               <button type="button" onClick={() => props.onVerifyTier(tier)}>
                 {props.isVerifyingTier(tier.providerId)
                   ? `reopen ${tier.providerId}`
@@ -145,10 +143,15 @@ vi.mock("@/components/relay/ImageTabNotice", () => ({
   ImageTabNotice: () => null,
 }));
 vi.mock("@/components/relay/VendorBlock", () => ({
-  VendorBlock: ({ onAddVendor }: any) => (
-    <button type="button" onClick={onAddVendor}>
-      add official account
-    </button>
+  VendorBlock: ({ vendor, onAddVendor }: any) => (
+    <>
+      <output data-testid="vendor-labels">
+        {vendor.accounts.map((account: any) => account.accountLabel).join(",")}
+      </output>
+      <button type="button" onClick={onAddVendor}>
+        add official account
+      </button>
+    </>
   ),
 }));
 vi.mock("@/components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
@@ -187,6 +190,7 @@ const tier = (
   displayName: providerId,
   rateMultiplier: null,
   isCurrent: false,
+  canVerifyModels: appId === "codex" || appId === "claude",
   userEdited: false,
   allowImageGeneration: false,
 });
@@ -200,7 +204,20 @@ const relay = {
   canQueryBalance: true,
   canRefresh: true,
   canDelete: true,
+  removeConfirmation: "configured" as const,
   tiers: [tier("provider-a")],
+};
+const emptyRefreshResult = {
+  summary: {
+    notice: "none" as const,
+    refreshedAccounts: 0,
+    tiers: 0,
+    keysCreated: 0,
+    otherPlatformTiers: 0,
+    mergedProviders: 0,
+    failures: [],
+  },
+  balances: [],
 };
 const report = (providerId: string, verdict: string, model = "gpt-5") => ({
   target: { providerId, appType: "codex", model },
@@ -211,39 +228,34 @@ const report = (providerId: string, verdict: string, model = "gpt-5") => ({
   checkedAt: 1,
 });
 
+const summary = (providerId: string, verdict: string, model = "gpt-5") => ({
+  providerId,
+  appType: "codex",
+  badgeVerdict: verdict === "inconclusive" ? null : verdict,
+  representativeReport: report(providerId, verdict, model),
+});
+
 let progressListener: ((event: any) => void) | undefined;
 
 describe("RelaySection model verification ownership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vendorSupport.enabled = false;
     eventHandlers.clear();
     progressListener = undefined;
     api.listRelays.mockResolvedValue([relay]);
     api.listTierRates.mockResolvedValue([]);
     api.checkSession.mockResolvedValue([]);
-    api.provision.mockResolvedValue({
-      tiers: [],
-      failures: [],
-      keysCreated: 0,
-      mergedProviders: [],
-    });
+    api.refreshAll.mockResolvedValue(emptyRefreshResult);
     api.status.mockResolvedValue({
       defaultSite: "",
-      chatgptNeedsAttention: false,
+      shouldPromptAddSite: false,
     });
     api.listSites.mockResolvedValue([{}]);
-    api.list.mockResolvedValue([]);
-    api.openLogin.mockResolvedValue(9);
-    api.vendorProvision.mockResolvedValue({
-      providerId: "vendor-provider",
-      keyCreated: false,
-      platforms: ["codex"],
-      mergedProviders: [],
-    });
-    api.listResults.mockResolvedValue([
-      report("provider-a", "suspicious", "one"),
-      report("provider-a", "anomaly", "two"),
+    api.list.mockResolvedValue({ supported: false, accounts: [] });
+    api.openLogin.mockResolvedValue({ rowId: 9, refresh: emptyRefreshResult });
+    api.vendorRefresh.mockResolvedValue(emptyRefreshResult);
+    api.listSummaries.mockResolvedValue([
+      summary("provider-a", "anomaly", "two"),
     ]);
     api.listHistory.mockResolvedValue([]);
     api.listModels.mockResolvedValue(["gpt-5"]);
@@ -257,10 +269,10 @@ describe("RelaySection model verification ownership", () => {
     );
   });
 
-  it("reduces reports from the initial and refreshed relay fetch, with one dialog owner", async () => {
+  it("renders backend summaries from initial and refreshed relay fetches", async () => {
     renderSection("codex");
     await waitFor(() =>
-      expect(api.listResults).toHaveBeenCalledWith(["provider-a"]),
+      expect(api.listSummaries).toHaveBeenCalledWith(["provider-a"], "codex"),
     );
     expect(screen.getByTestId("verdict-provider-a")).toHaveTextContent(
       "anomaly",
@@ -271,7 +283,7 @@ describe("RelaySection model verification ownership", () => {
       screen.getByRole("button", { name: "loongport.refreshAll" }),
     );
     await waitFor(() => expect(api.listRelays).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(api.listResults).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.listSummaries).toHaveBeenCalledTimes(2));
 
     fireEvent.click(screen.getByRole("button", { name: "verify provider-a" }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -279,8 +291,8 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("keeps a trusted tier visible until a more severe report supersedes it", async () => {
-    api.listResults.mockResolvedValueOnce([
-      report("provider-a", "trusted", "verified-model"),
+    api.listSummaries.mockResolvedValueOnce([
+      summary("provider-a", "trusted", "verified-model"),
     ]);
 
     renderSection("codex");
@@ -291,9 +303,8 @@ describe("RelaySection model verification ownership", () => {
       ),
     );
 
-    api.listResults.mockResolvedValueOnce([
-      report("provider-a", "trusted", "verified-model"),
-      report("provider-a", "suspicious", "suspicious-model"),
+    api.listSummaries.mockResolvedValueOnce([
+      summary("provider-a", "suspicious", "suspicious-model"),
     ]);
     fireEvent.click(
       screen.getByRole("button", { name: "loongport.refreshAll" }),
@@ -313,7 +324,7 @@ describe("RelaySection model verification ownership", () => {
         "anomaly",
       ),
     );
-    api.listResults.mockResolvedValueOnce([]);
+    api.listSummaries.mockResolvedValueOnce([]);
     eventHandlers.get("model-verification-changed")?.({
       providerId: "provider-a",
       appType: "codex",
@@ -354,7 +365,7 @@ describe("RelaySection model verification ownership", () => {
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    api.listResults.mockResolvedValueOnce([report("provider-a", "trusted")]);
+    api.listSummaries.mockResolvedValueOnce([summary("provider-a", "trusted")]);
     await act(async () => {
       progressListener?.({
         runId: "run-1",
@@ -419,9 +430,8 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("reopens with the persisted highest-severity model after another model completes", async () => {
-    api.listResults.mockResolvedValue([
-      report("provider-a", "suspicious", "model-a"),
-      report("provider-a", "anomaly", "model-b"),
+    api.listSummaries.mockResolvedValue([
+      summary("provider-a", "anomaly", "model-b"),
     ]);
     api.listModels.mockResolvedValue(["model-a"]);
 
@@ -446,9 +456,8 @@ describe("RelaySection model verification ownership", () => {
       screen.getByRole("button", { name: "close verification dialog" }),
     );
 
-    api.listResults.mockResolvedValue([
-      report("provider-a", "trusted", "model-a"),
-      report("provider-a", "anomaly", "model-b"),
+    api.listSummaries.mockResolvedValue([
+      summary("provider-a", "anomaly", "model-b"),
     ]);
     await act(async () => {
       progressListener?.({
@@ -467,7 +476,7 @@ describe("RelaySection model verification ownership", () => {
       });
     });
     await waitFor(() =>
-      expect(api.listResults.mock.calls.length).toBeGreaterThan(1),
+      expect(api.listSummaries.mock.calls.length).toBeGreaterThan(1),
     );
 
     fireEvent.click(
@@ -503,22 +512,26 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("refreshes relays and official APIs from one page-level icon", async () => {
-    vendorSupport.enabled = true;
-    api.list.mockResolvedValue([
-      {
-        id: 9,
-        vendorId: "deepseek",
-        vendorName: "DeepSeek",
-        accountLabel: "account",
-        status: "ready",
-        canQueryBalance: true,
-        canRefresh: true,
-        canEditConfig: true,
-        providerId: "vendor-provider",
-        isCurrent: false,
-        userEdited: false,
-      },
-    ]);
+    api.list.mockResolvedValue({
+      supported: true,
+      accounts: [
+        {
+          id: 9,
+          vendorId: "deepseek",
+          vendorName: "DeepSeek",
+          accountLabel: "account",
+          status: "ready",
+          canQueryBalance: true,
+          canRefresh: true,
+          canEditConfig: true,
+          canSwitch: true,
+          canDelete: true,
+          providerId: "vendor-provider",
+          isCurrent: false,
+          userEdited: false,
+        },
+      ],
+    });
     const queryClient = createTestQueryClient();
     const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     render(
@@ -532,23 +545,75 @@ describe("RelaySection model verification ownership", () => {
       screen.getByRole("button", { name: "loongport.refreshAll" }),
     );
 
-    await waitFor(() => expect(api.provision).toHaveBeenCalledWith(1));
-    expect(api.vendorProvision).toHaveBeenCalledWith(9);
-    expect(invalidateQueries).toHaveBeenCalledWith({
+    await waitFor(() => expect(api.refreshAll).toHaveBeenCalledWith("codex"));
+    expect(api.vendorRefresh).not.toHaveBeenCalled();
+    expect(invalidateQueries).not.toHaveBeenCalledWith({
       queryKey: ["rowBalance"],
     });
     expect(screen.queryByText("loongport.refreshAll")).not.toBeInTheDocument();
   });
 
-  it("provisions the exact account row returned by the login command", async () => {
-    vendorSupport.enabled = true;
-    api.openLogin.mockResolvedValue(42);
+  it("keeps the newest backend vendor view when an older reload finishes late", async () => {
+    let resolveOlder!: (value: any) => void;
+    let resolveNewer!: (value: any) => void;
+    const older = new Promise((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise((resolve) => {
+      resolveNewer = resolve;
+    });
+    const account = (accountLabel: string) => ({
+      id: 9,
+      vendorId: "deepseek",
+      vendorName: "DeepSeek",
+      accountLabel,
+      status: "ready",
+      canQueryBalance: true,
+      canRefresh: true,
+      canEditConfig: true,
+      canSwitch: true,
+      canDelete: true,
+      providerId: "vendor-provider",
+      isCurrent: accountLabel === "new current",
+      userEdited: false,
+    });
+    api.list
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+
+    renderSection("codex");
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
+
+    eventHandlers.get("provider-switched")?.({ appType: "codex" });
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+
+    resolveNewer({ supported: true, accounts: [account("new current")] });
+    expect(await screen.findByTestId("vendor-labels")).toHaveTextContent(
+      "new current",
+    );
+
+    resolveOlder({ supported: true, accounts: [account("stale current")] });
+    await act(async () => {});
+    expect(screen.getByTestId("vendor-labels")).toHaveTextContent(
+      "new current",
+    );
+  });
+
+  it("uses the atomic refresh result returned by the login command", async () => {
+    api.list.mockResolvedValue({ supported: true, accounts: [] });
+    api.openLogin.mockResolvedValue({
+      rowId: 42,
+      refresh: emptyRefreshResult,
+    });
     renderSection("codex");
 
     fireEvent.click(
       await screen.findByRole("button", { name: "add official account" }),
     );
 
-    await waitFor(() => expect(api.vendorProvision).toHaveBeenCalledWith(42));
+    await waitFor(() =>
+      expect(api.openLogin).toHaveBeenCalledWith("deepseek", "codex"),
+    );
+    expect(api.vendorRefresh).not.toHaveBeenCalled();
   });
 });

@@ -5,9 +5,7 @@ import { ToggleRow } from "@/components/ui/toggle-row";
 import { cn } from "@/lib/utils";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import type { SettingsFormState } from "@/hooks/useSettings";
-import type { VisibleApps } from "@/types";
 import type { AppId } from "@/lib/api";
-import { ALL_APPS_VISIBLE } from "@/config/appConfig";
 
 interface AppVisibilitySettingsProps {
   settings: SettingsFormState;
@@ -39,7 +37,8 @@ export function AppVisibilitySettings({
 }: AppVisibilitySettingsProps) {
   const { t } = useTranslation();
 
-  const visibleApps: VisibleApps = settings.visibleApps ?? ALL_APPS_VISIBLE;
+  const visibleApps = settings.visibleApps;
+  if (!visibleApps) return null;
 
   // Count how many apps are currently visible
   const visibleCount = Object.values(visibleApps).filter(Boolean).length;

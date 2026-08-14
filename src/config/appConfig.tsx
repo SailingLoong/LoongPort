@@ -1,6 +1,5 @@
 import React from "react";
 import type { AppId } from "@/lib/api/types";
-import type { VisibleApps } from "@/types";
 import {
   ClaudeIcon,
   CodexIcon,
@@ -40,30 +39,6 @@ export const SKILLS_APP_IDS: AppId[] = [
 
 /** App IDs shown in MCP panels (excludes OpenClaw) */
 export const MCP_APP_IDS: AppId[] = [...SKILLS_APP_IDS];
-
-/**
- * 全部标签默认可见时的 `VisibleApps`。
- *
- * ⚠️ **唯一定义** —— 原来 `App.tsx` 与 `AppVisibilitySettings.tsx` 各写一份字面量，
- * 加一个 app 时改一处漏一处（这次是编译器抓到的，但只因为 `VisibleApps` 的新字段
- * 是必填；若新字段可选，分叉就会静默 —— 一处认为默认显示、另一处认为默认隐藏）。
- * CLAUDE.md §三点六。
- *
- * 注意 `hermes: true`：这里是**前端读不到设置时的兜底**，与后端
- * `VisibleApps::default()`（那边 hermes 是 false）有意不同 —— 那边管「新装机的初始值」，
- * 这里管「设置还没加载完的那一帧」，让标签先都显示比闪一下少一个更平稳。
- */
-export const ALL_APPS_VISIBLE: VisibleApps = {
-  claude: true,
-  "claude-desktop": true,
-  codex: true,
-  "codex-image": true,
-  gemini: true,
-  grokbuild: true,
-  opencode: true,
-  openclaw: true,
-  hermes: true,
-};
 
 export const APP_ICON_MAP: Record<AppId, AppConfig> = {
   claude: {

@@ -14,10 +14,8 @@ import { ExternalLink, Download, Trash2, Loader2 } from "lucide-react";
 import { settingsApi } from "@/lib/api";
 import type { DiscoverableSkill } from "@/lib/api/skills";
 
-type SkillCardSkill = DiscoverableSkill & { installed: boolean };
-
 interface SkillCardProps {
-  skill: SkillCardSkill;
+  skill: DiscoverableSkill;
   onInstall: (key: string) => Promise<void>;
   onUninstall: (key: string) => Promise<void>;
   installs?: number;
@@ -130,7 +128,7 @@ export function SkillCard({
             {t("skills.view")}
           </Button>
         )}
-        {skill.installed ? (
+        {skill.canUninstall && (
           <Button
             variant="outline"
             size="sm"
@@ -145,12 +143,13 @@ export function SkillCard({
             )}
             {loading ? t("skills.uninstalling") : t("skills.uninstall")}
           </Button>
-        ) : (
+        )}
+        {skill.canInstall && (
           <Button
             variant="mcp"
             size="sm"
             onClick={handleInstall}
-            disabled={loading || !skill.repoOwner}
+            disabled={loading}
             className="flex-1"
           >
             {loading ? (

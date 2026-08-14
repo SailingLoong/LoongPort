@@ -101,6 +101,7 @@ const tier = {
   models: [],
   rateMultiplier: 1,
   isCurrent: false,
+  canVerifyModels: true,
   userEdited: false,
   allowImageGeneration: false,
 };
@@ -121,6 +122,7 @@ function renderRelayRow(
       canQueryBalance: true,
       canRefresh: true,
       canDelete: true,
+      removeConfirmation: "configured",
       tiers: [tier],
       ...relayOverrides,
     },
@@ -145,7 +147,10 @@ function renderRelayRow(
   return { onProvision, onLogin, ...renderWithQuery(<RelayRow {...props} />) };
 }
 
-function renderVendorRow(onProvision = vi.fn()) {
+function renderVendorRow(
+  onProvision = vi.fn(),
+  accountOverrides: Partial<ComponentProps<typeof VendorRow>["account"]> = {},
+) {
   const props: ComponentProps<typeof VendorRow> = {
     account: {
       id: 1,
@@ -156,9 +161,12 @@ function renderVendorRow(onProvision = vi.fn()) {
       canQueryBalance: true,
       canRefresh: true,
       canEditConfig: true,
+      canSwitch: true,
+      canDelete: true,
       providerId: "provider-a",
       isCurrent: false,
       userEdited: false,
+      ...accountOverrides,
     },
     busy: new Set(),
     onLogin: vi.fn(),
@@ -200,6 +208,14 @@ describe("行上的刷新动作", () => {
 
     await user.click(reprovision);
     expect(onProvision).toHaveBeenCalledTimes(1);
+  });
+
+  it("后端不允许删除时不展示官网账号删除入口", () => {
+    renderVendorRow(vi.fn(), { canDelete: false });
+
+    expect(
+      screen.queryByRole("button", { name: "loongport.vendor.remove" }),
+    ).not.toBeInTheDocument();
   });
 
   it("当前档位所在的中转站复用浅蓝当前态外框", () => {

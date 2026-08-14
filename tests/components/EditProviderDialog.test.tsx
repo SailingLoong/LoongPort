@@ -3,20 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
 
 const apiMocks = vi.hoisted(() => ({
-  getCurrent: vi.fn(),
-  getLiveProviderSettings: vi.fn(),
-  getOpenClawLiveProvider: vi.fn(),
+  getEditSettings: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => ({
   providersApi: {
-    getCurrent: apiMocks.getCurrent,
-  },
-  vscodeApi: {
-    getLiveProviderSettings: apiMocks.getLiveProviderSettings,
-  },
-  openclawApi: {
-    getLiveProvider: apiMocks.getOpenClawLiveProvider,
+    getEditSettings: apiMocks.getEditSettings,
   },
 }));
 
@@ -93,9 +85,7 @@ import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 
 describe("EditProviderDialog", () => {
   beforeEach(() => {
-    apiMocks.getCurrent.mockReset();
-    apiMocks.getLiveProviderSettings.mockReset();
-    apiMocks.getOpenClawLiveProvider.mockReset();
+    apiMocks.getEditSettings.mockReset();
   });
 
   it("保留 Codex 数据库中的 modelCatalog，避免 live 配置缺字段时清空模型映射", async () => {
@@ -119,6 +109,9 @@ describe("EditProviderDialog", () => {
         config: 'model_provider = "custom"\nmodel = "deepseek-v4-flash"\n',
         modelCatalog: dbModelCatalog,
       },
+      presentation: {
+        isCurrent: true,
+      } as Provider["presentation"],
     };
     const liveSettings = {
       auth: {
@@ -128,8 +121,10 @@ describe("EditProviderDialog", () => {
     };
     const handleSubmit = vi.fn().mockResolvedValue(undefined);
 
-    apiMocks.getCurrent.mockResolvedValue(provider.id);
-    apiMocks.getLiveProviderSettings.mockResolvedValue(liveSettings);
+    apiMocks.getEditSettings.mockResolvedValue({
+      ...liveSettings,
+      modelCatalog: dbModelCatalog,
+    });
 
     render(
       <EditProviderDialog
@@ -173,14 +168,7 @@ describe("EditProviderDialog", () => {
       },
     };
 
-    apiMocks.getCurrent.mockResolvedValue(provider.id);
-    apiMocks.getLiveProviderSettings.mockResolvedValue({
-      auth: {
-        OPENAI_API_KEY: "PROXY_MANAGED",
-      },
-      config:
-        'model_provider = "custom"\n[model_providers.custom]\nbase_url = "http://127.0.0.1:15721/v1"\nexperimental_bearer_token = "PROXY_MANAGED"\n',
-    });
+    apiMocks.getEditSettings.mockResolvedValue(provider.settingsConfig);
 
     render(
       <EditProviderDialog
@@ -197,7 +185,7 @@ describe("EditProviderDialog", () => {
       expect(screen.getByTestId("is-proxy-takeover").textContent).toBe("true");
     });
 
-    expect(apiMocks.getLiveProviderSettings).not.toHaveBeenCalled();
+    expect(apiMocks.getEditSettings).toHaveBeenCalledWith("deepseek", "codex");
     expect(
       JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
     ).toEqual(provider.settingsConfig);

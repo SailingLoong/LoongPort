@@ -29,6 +29,7 @@
 //! **deeplink 导入仍直接调 `ProviderService::switch`**（要构造一条带 `enabled=true` 的
 //! deep link 才碰得到，优先级低于上面几条）。
 
+use futures::future::join_all;
 use serde::Serialize;
 use std::{
     future::Future,
@@ -40,10 +41,11 @@ use tauri::{Emitter, Manager, State};
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
-use crate::provider::{Provider, UsageResult};
+use crate::provider::Provider;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
-    newapi, newapi_provision, provider_fingerprint, provision, purchase,
+    model_verification::target as verification_target, newapi, newapi_provision,
+    provider_fingerprint, provision, purchase,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -78,7 +80,7 @@ use provision::DEFAULT_MODEL;
 /// 两处各写一个字面量迟早对不上（`vendor.rs` 的 `LOGIN_TIMEOUT` 同一形状）。
 const LOGIN_TIMEOUT_SECS: u64 = 300;
 
-/// 「加站弹窗要什么」+「切档位前要不要提醒处理 ChatGPT」。
+/// 加站弹窗需要的后端状态。
 ///
 /// ## 为什么只剩两个字段（2026-08-04 收缩）
 ///
@@ -98,14 +100,11 @@ const LOGIN_TIMEOUT_SECS: u64 = 300;
 pub struct RelayStatus {
     /// 域名输入框的底纹词。
     pub default_site: String,
-    /// 切换分组前要不要先提示用户处理 ChatGPT。
-    ///
-    /// 不是「装了没有」—— 非 macOS 平台查不到那个事实，那边恒为 true（宁可多问一句，
-    /// 也不能让装了 ChatGPT 的用户静默用错分组）。见 `chatgpt_app::needs_user_attention`。
-    pub chatgpt_needs_attention: bool,
+    /// 当前是否没有任何中转站或官网账号配置，前端据此决定是否显示首次引导。
+    pub should_prompt_add_site: bool,
 }
 
-/// 一个已添加的站点。
+/// 一个已添加站点的后端摘要。
 ///
 /// 当前消费者是「一个站都没有吗」的自动引导判据（只数条数）。新增站点只有在
 /// 注册或登录成功后才会写入；启动建表路径也会清理旧版遗留的未认证占位行。
@@ -118,8 +117,8 @@ pub struct RelayStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SiteInfo {
     pub site_origin: String,
-    /// 登录后的账号名（昵称优先，回落邮箱）。同一个站挂多个账号时靠它分辨。
-    pub account_label: String,
+    /// 该站已有几个后端已识别身份的账号。未登录占位行不计入。
+    pub account_count: usize,
 }
 
 /// 合并“发现站点 + 同一会话登录”的导入结果。
@@ -296,6 +295,8 @@ pub struct TierInfo {
     pub models: Vec<String>,
     pub rate_multiplier: Option<f64>,
     pub is_current: bool,
+    /// 后端是否支持对这个档位执行模型验证。
+    pub can_verify_models: bool,
     /// 用户在 cc-switch 编辑页改过这个档位的配置吗。
     ///
     /// 判据是**存库标记** `providers.user_edited`（编辑页置位、恢复默认复位），
@@ -351,8 +352,17 @@ pub struct RelayRow {
     pub can_refresh: bool,
     /// 这一行是否可以安全删除。真正的跨 app 删除闸仍在后端命令内。
     pub can_delete: bool,
+    /// 删除确认框使用哪一种后端定义的业务语义。
+    pub remove_confirmation: RemoveConfirmation,
     /// 这个中转站在**当前 app_id** 下已备好的档位。
     pub tiers: Vec<TierInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoveConfirmation {
+    NeverLoggedIn,
+    Configured,
 }
 
 #[derive(Debug, Serialize)]
@@ -388,6 +398,393 @@ pub struct MergedProviderInfo {
     pub app_id: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RefreshNotice {
+    None,
+    Updated,
+    UpdatedWithKeys,
+    OtherPlatforms,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefreshFailureKind {
+    KeyLimit,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshFailure {
+    pub name: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<RefreshFailureKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshSummary {
+    pub notice: RefreshNotice,
+    pub refreshed_accounts: usize,
+    pub tiers: usize,
+    pub keys_created: usize,
+    pub other_platform_tiers: usize,
+    pub merged_providers: usize,
+    pub failures: Vec<RefreshFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefreshedBalanceKind {
+    Relay,
+    Vendor,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshedBalance {
+    pub kind: RefreshedBalanceKind,
+    pub row_id: i64,
+    pub result: balance::RowBalanceResult,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshResult {
+    pub summary: RefreshSummary,
+    pub balances: Vec<RefreshedBalance>,
+}
+
+fn refresh_summary(
+    app_type: &AppType,
+    relay_results: Vec<(String, Result<ProvisionSummary, AppError>)>,
+    vendor_results: Vec<(
+        String,
+        Result<super::vendor::VendorProvisionSummary, super::vendor::VendorActionError>,
+    )>,
+) -> RefreshSummary {
+    let mut refreshed_accounts = 0;
+    let mut tiers = 0;
+    let mut keys_created = 0;
+    let mut other_platform_tiers = 0;
+    let mut merged_providers = 0;
+    let mut failures = Vec::new();
+
+    for (name, result) in relay_results {
+        match result {
+            Ok(summary) => {
+                refreshed_accounts += 1;
+                let current = summary
+                    .tiers
+                    .iter()
+                    .filter(|tier| tier.app_id == app_type.as_str())
+                    .count();
+                tiers += current;
+                if current == 0 && summary.failures.is_empty() {
+                    other_platform_tiers += summary.tiers.len();
+                }
+                keys_created += summary.keys_created;
+                merged_providers += summary.merged_providers.len();
+                failures.extend(summary.failures.into_iter().map(|failure| RefreshFailure {
+                    name: failure.group_name,
+                    reason: failure.reason,
+                    kind: None,
+                    help_url: None,
+                }));
+            }
+            Err(error) => failures.push(RefreshFailure {
+                name,
+                reason: error.to_string(),
+                kind: None,
+                help_url: None,
+            }),
+        }
+    }
+    for (name, result) in vendor_results {
+        match result {
+            Ok(summary) => {
+                refreshed_accounts += 1;
+                let current = usize::from(
+                    summary
+                        .platforms
+                        .iter()
+                        .any(|platform| platform == app_type.as_str()),
+                );
+                tiers += current;
+                if current == 0 {
+                    other_platform_tiers += summary.platforms.len();
+                }
+                merged_providers += summary.merged_providers.len();
+                keys_created += usize::from(summary.key_created);
+            }
+            Err(error) => failures.push(RefreshFailure {
+                name,
+                reason: error.message,
+                kind: error.kind.map(|kind| match kind {
+                    super::vendor::VendorActionErrorKind::KeyLimit => RefreshFailureKind::KeyLimit,
+                }),
+                help_url: error.help_url,
+            }),
+        }
+    }
+
+    let notice = if refreshed_accounts == 0 {
+        RefreshNotice::None
+    } else if tiers == 0 && other_platform_tiers > 0 && failures.is_empty() {
+        RefreshNotice::OtherPlatforms
+    } else if keys_created > 0 {
+        RefreshNotice::UpdatedWithKeys
+    } else {
+        RefreshNotice::Updated
+    };
+    RefreshSummary {
+        notice,
+        refreshed_accounts,
+        tiers,
+        keys_created,
+        other_platform_tiers,
+        merged_providers,
+        failures,
+    }
+}
+
+pub(crate) struct RelayRefreshOutcome {
+    name: String,
+    row_id: i64,
+    provision: Option<Result<ProvisionSummary, AppError>>,
+    balance: Result<balance::RowBalanceResult, AppError>,
+    failures: Vec<RefreshFailure>,
+}
+
+pub(crate) struct VendorRefreshOutcome {
+    pub name: String,
+    pub row_id: i64,
+    pub provision:
+        Option<Result<super::vendor::VendorProvisionSummary, super::vendor::VendorActionError>>,
+    pub balance: Result<balance::RowBalanceResult, AppError>,
+}
+
+pub(crate) fn finish_refresh_result(
+    app_type: &AppType,
+    relay_outcomes: Vec<RelayRefreshOutcome>,
+    vendor_outcomes: Vec<VendorRefreshOutcome>,
+) -> RefreshResult {
+    let mut relay_results = Vec::with_capacity(relay_outcomes.len());
+    let mut vendor_results = Vec::with_capacity(vendor_outcomes.len());
+    let mut balances = Vec::new();
+    let mut balance_failures = Vec::new();
+
+    for outcome in relay_outcomes {
+        let name = outcome.name;
+        if let Some(provision) = outcome.provision {
+            relay_results.push((name.clone(), provision));
+        }
+        balance_failures.extend(outcome.failures);
+        collect_refreshed_balance(
+            &mut balances,
+            &mut balance_failures,
+            name,
+            RefreshedBalanceKind::Relay,
+            outcome.row_id,
+            outcome.balance,
+        );
+    }
+    for outcome in vendor_outcomes {
+        let name = outcome.name;
+        if let Some(provision) = outcome.provision {
+            vendor_results.push((name.clone(), provision));
+        }
+        collect_refreshed_balance(
+            &mut balances,
+            &mut balance_failures,
+            name,
+            RefreshedBalanceKind::Vendor,
+            outcome.row_id,
+            outcome.balance,
+        );
+    }
+
+    let successful_balances = balances
+        .iter()
+        .filter(|balance| balance.result.usage.success)
+        .count();
+    let mut summary = refresh_summary(app_type, relay_results, vendor_results);
+    summary.refreshed_accounts = summary.refreshed_accounts.max(successful_balances);
+    summary.failures.extend(balance_failures);
+    if matches!(summary.notice, RefreshNotice::None) && summary.refreshed_accounts > 0 {
+        summary.notice = RefreshNotice::Updated;
+    }
+
+    RefreshResult { summary, balances }
+}
+
+fn relay_refresh_targets(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<Vec<(i64, String, bool)>, AppError> {
+    list_relays_impl(state, app_type.clone()).map(|rows| {
+        rows.into_iter()
+            .filter_map(|row| {
+                let name = if row.account_label.is_empty() {
+                    row.site_name
+                } else {
+                    row.account_label
+                };
+                (row.can_refresh || row.can_query_balance).then_some((
+                    row.id,
+                    name,
+                    row.can_refresh,
+                ))
+            })
+            .collect()
+    })
+}
+
+async fn refresh_relay_outcome(
+    app_handle: &tauri::AppHandle,
+    relay_id: i64,
+    name: String,
+    refresh_config: bool,
+) -> RelayRefreshOutcome {
+    let provision = if refresh_config {
+        Some(refresh_relay_provision(app_handle, relay_id).await)
+    } else {
+        None
+    };
+    let balance = relay_balance_impl(app_handle, relay_id).await;
+    RelayRefreshOutcome {
+        name,
+        row_id: relay_id,
+        provision,
+        balance,
+        failures: Vec::new(),
+    }
+}
+
+async fn refresh_relay_result(
+    app_handle: &tauri::AppHandle,
+    relay_id: i64,
+    app_type: &AppType,
+) -> RefreshResult {
+    let name = {
+        let state = app_handle.state::<AppState>();
+        with_conn(&state, |conn| creds::get(conn, relay_id))
+            .ok()
+            .flatten()
+            .map(|relay| {
+                if relay.account_label.is_empty() {
+                    relay.site_name
+                } else {
+                    relay.account_label
+                }
+            })
+            .unwrap_or_else(|| format!("中转站 #{relay_id}"))
+    };
+    finish_refresh_result(
+        app_type,
+        vec![refresh_relay_outcome(app_handle, relay_id, name, true).await],
+        Vec::new(),
+    )
+}
+
+#[tauri::command]
+pub async fn relay_refresh(
+    app_handle: tauri::AppHandle,
+    relay_id: i64,
+    app: String,
+) -> Result<RefreshResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|error| error.to_string())?;
+    Ok(refresh_relay_result(&app_handle, relay_id, &app_type).await)
+}
+
+#[tauri::command]
+pub async fn relay_refresh_all(
+    app_handle: tauri::AppHandle,
+    app: String,
+) -> Result<RefreshResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|error| error.to_string())?;
+    let (relay_targets, vendor_targets) = {
+        let state = app_handle.state::<AppState>();
+        (
+            relay_refresh_targets(state.inner(), &app_type).map_err(|error| error.to_string())?,
+            super::vendor::vendor_refresh_targets(state.inner(), &app_type)
+                .map_err(|error| error.to_string())?,
+        )
+    };
+
+    let relay_futures = relay_targets
+        .into_iter()
+        .map(|(row_id, name, refresh_config)| {
+            let app_handle = app_handle.clone();
+            async move { refresh_relay_outcome(&app_handle, row_id, name, refresh_config).await }
+        });
+    let vendor_futures = vendor_targets
+        .into_iter()
+        .map(|(row_id, name, refresh_config)| {
+            let app_handle = app_handle.clone();
+            async move {
+                let state = app_handle.state::<AppState>();
+                let (provision, balance) =
+                    super::vendor::refresh_vendor_account(state.inner(), row_id, refresh_config)
+                        .await;
+                VendorRefreshOutcome {
+                    name,
+                    row_id,
+                    provision,
+                    balance,
+                }
+            }
+        });
+    let (relay_outcomes, vendor_outcomes) =
+        tokio::join!(join_all(relay_futures), join_all(vendor_futures));
+
+    Ok(finish_refresh_result(
+        &app_type,
+        relay_outcomes,
+        vendor_outcomes,
+    ))
+}
+
+fn collect_refreshed_balance(
+    balances: &mut Vec<RefreshedBalance>,
+    failures: &mut Vec<RefreshFailure>,
+    name: String,
+    kind: RefreshedBalanceKind,
+    row_id: i64,
+    result: Result<balance::RowBalanceResult, AppError>,
+) {
+    match result {
+        Ok(result) => {
+            if !result.usage.success {
+                failures.push(RefreshFailure {
+                    name,
+                    reason: result
+                        .usage
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "余额刷新失败".to_string()),
+                    kind: None,
+                    help_url: None,
+                });
+            }
+            balances.push(RefreshedBalance {
+                kind,
+                row_id,
+                result,
+            });
+        }
+        Err(error) => failures.push(RefreshFailure {
+            name,
+            reason: error.to_string(),
+            kind: None,
+            help_url: None,
+        }),
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureInfo {
@@ -409,6 +806,18 @@ pub struct SwitchTierResult {
     /// 「退不掉 ChatGPT」**不在这里** —— 那种情况整个命令返回 Err、配置不动，见
     /// [`switch_tier_impl`]。
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum SwitchTierCommandResult {
+    ConfirmationRequired {
+        target_name: String,
+    },
+    Switched {
+        #[serde(flatten)]
+        result: SwitchTierResult,
+    },
 }
 
 /// 读当前状态。
@@ -493,13 +902,13 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
     Ok(expired)
 }
 
-fn relay_status_impl(_state: &AppState) -> Result<RelayStatus, AppError> {
-    // 两个字段都不看库：底纹词是常量，ChatGPT 那个探的是本机装了什么。
-    // 收缩之前这里还 `creds::load` + 遍历整个 provider 表数托管档位，那两笔
-    // 开销随对应字段一起去掉了（见 `RelayStatus` 的文档）。
+fn relay_status_impl(state: &AppState) -> Result<RelayStatus, AppError> {
+    let should_prompt_add_site = with_conn(state, |conn| {
+        Ok(creds::list(conn)?.is_empty() && crate::vendor::creds::list(conn)?.is_empty())
+    })?;
     Ok(RelayStatus {
         default_site: DEFAULT_SITE.to_string(),
-        chatgpt_needs_attention: chatgpt_app::needs_user_attention(),
+        should_prompt_add_site,
     })
 }
 
@@ -1288,11 +1697,21 @@ async fn browser_import(
 /// ⇒ 用户点第 3 行的「重新登录」可能给第 1 行登了录。新增站点则走
 /// [`relay_import_site`]，只在注册或登录成功后创建完整账号行。
 #[tauri::command]
-pub async fn relay_login(app_handle: tauri::AppHandle, relay_id: i64) -> Result<bool, String> {
-    do_login(&app_handle, relay_id)
+pub async fn relay_login(
+    app_handle: tauri::AppHandle,
+    relay_id: i64,
+    app: String,
+) -> Result<Option<RefreshResult>, String> {
+    let app_type = AppType::from_str(&app).map_err(|error| error.to_string())?;
+    let login = do_login(&app_handle, relay_id)
         .await
-        .map(|result| result.logged_in)
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())?;
+    if !login.logged_in {
+        return Ok(None);
+    }
+    Ok(Some(
+        refresh_relay_result(&app_handle, relay_id, &app_type).await,
+    ))
 }
 
 async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<LoginResult, AppError> {
@@ -2304,9 +2723,25 @@ async fn do_provision(
     relay_id: i64,
 ) -> Result<ProvisionSummary, AppError> {
     let op = usable_relay(app_handle, relay_id).await?;
-    let batch = provision_backend(&op, Some(browser_api_fallback(app_handle))).await?;
+    provision_relay(app_handle, &op).await
+}
+
+async fn refresh_relay_provision(
+    app_handle: &tauri::AppHandle,
+    relay_id: i64,
+) -> Result<ProvisionSummary, AppError> {
+    let op = usable_relay(app_handle, relay_id).await?;
+    let op = backfill_account_identity(app_handle, op).await;
+    provision_relay(app_handle, &op).await
+}
+
+async fn provision_relay(
+    app_handle: &tauri::AppHandle,
+    op: &creds::Relay,
+) -> Result<ProvisionSummary, AppError> {
+    let batch = provision_backend(op, Some(browser_api_fallback(app_handle))).await?;
     let state = app_handle.state::<AppState>();
-    persist_provision_batch(state.inner(), &op, batch)
+    persist_provision_batch(state.inner(), op, batch)
 }
 
 fn persist_provision_batch(
@@ -2503,6 +2938,7 @@ fn persist_provision_batch(
                 Vec::new()
             },
             rate_multiplier,
+            can_verify_models: verification_target::supports_app_type(app_type),
             user_edited: Some(user_edited),
             allow_image_generation: candidate.allow_image_generation,
         });
@@ -2837,12 +3273,12 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
             let session_expired = op.session_expired(now);
             let has_balance_key = !relay_balance_inputs(state, &op).1.is_empty();
             let status = if session_expired {
-                if mine.is_empty() {
-                    RelayRowStatus::SessionExpired
-                } else {
+                if has_balance_key {
                     RelayRowStatus::SessionExpiredUsable
+                } else {
+                    RelayRowStatus::SessionExpired
                 }
-            } else if !logged_in {
+            } else if !logged_in && !op.can_refresh(now) {
                 RelayRowStatus::NotLoggedIn
             } else if mine.is_empty() {
                 RelayRowStatus::NoTiers
@@ -2866,6 +3302,11 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
                 can_query_balance: logged_in || has_balance_key,
                 can_refresh: op.can_refresh(now),
                 can_delete,
+                remove_confirmation: if op.account_id.is_some() {
+                    RemoveConfirmation::Configured
+                } else {
+                    RemoveConfirmation::NeverLoggedIn
+                },
                 tiers: mine,
             })
         })
@@ -3254,6 +3695,7 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
     // 先取出来：`app_type` 下一行就被 move 进 `list` 了。
     let app_id = app_type.as_str().to_string();
     let exposes_codex_models = matches!(app_type, AppType::Codex);
+    let can_verify_models = verification_target::supports_app_type(&app_type);
     let providers = ProviderService::list(state, app_type)?;
 
     let mut tiers: Vec<OwnedTier> = providers
@@ -3284,6 +3726,7 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                     Vec::new()
                 },
                 is_current: current == p.id,
+                can_verify_models,
                 // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
                 // 由 `tiers_of_site` 在按站分组时填。见该字段的文档。
                 user_edited: None,
@@ -3329,10 +3772,10 @@ pub async fn relay_switch_tier(
     app_handle: tauri::AppHandle,
     provider_id: String,
     app: String,
-    quit_chatgpt: bool,
-) -> Result<SwitchTierResult, String> {
+    quit_chatgpt: Option<bool>,
+) -> Result<SwitchTierCommandResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    switch_tier_impl(&app_handle, &provider_id, app_type, quit_chatgpt)
+    switch_tier_command(&app_handle, &provider_id, app_type, quit_chatgpt)
         .await
         .map_err(|e| e.to_string())
 }
@@ -3349,12 +3792,71 @@ pub async fn relay_switch_tier_model(
     provider_id: String,
     app: String,
     model: String,
-    quit_chatgpt: bool,
-) -> Result<SwitchTierResult, String> {
+    quit_chatgpt: Option<bool>,
+) -> Result<SwitchTierCommandResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    select_tier_model_impl(&app_handle, &provider_id, app_type, &model, quit_chatgpt)
-        .await
-        .map_err(|e| e.to_string())
+    if should_request_switch_confirmation(
+        &app_type,
+        quit_chatgpt,
+        chatgpt_app::needs_user_attention(),
+    ) {
+        let state = app_handle.state::<AppState>();
+        let target_name = state
+            .db
+            .get_provider_by_id(&provider_id, app_type.as_str())
+            .map_err(|error| error.to_string())?
+            .map(|provider| format!("{} · {model}", provider.name))
+            .unwrap_or(model.clone());
+        return Ok(SwitchTierCommandResult::ConfirmationRequired { target_name });
+    }
+    select_tier_model_impl(
+        &app_handle,
+        &provider_id,
+        app_type,
+        &model,
+        quit_chatgpt.unwrap_or(false),
+    )
+    .await
+    .map(|result| SwitchTierCommandResult::Switched { result })
+    .map_err(|e| e.to_string())
+}
+
+fn should_request_switch_confirmation(
+    app_type: &AppType,
+    user_choice: Option<bool>,
+    needs_attention: bool,
+) -> bool {
+    matches!(app_type, AppType::Codex) && user_choice.is_none() && needs_attention
+}
+
+pub(crate) async fn switch_tier_command(
+    app_handle: &tauri::AppHandle,
+    provider_id: &str,
+    app_type: AppType,
+    user_choice: Option<bool>,
+) -> Result<SwitchTierCommandResult, AppError> {
+    let state = app_handle.state::<AppState>();
+    let provider = state
+        .db
+        .get_provider_by_id(provider_id, app_type.as_str())?
+        .ok_or_else(|| AppError::Config("这个接入配置不存在".to_string()))?;
+    if should_request_switch_confirmation(
+        &app_type,
+        user_choice,
+        chatgpt_app::needs_user_attention(),
+    ) {
+        return Ok(SwitchTierCommandResult::ConfirmationRequired {
+            target_name: provider.name,
+        });
+    }
+    switch_tier_impl(
+        app_handle,
+        provider_id,
+        app_type,
+        user_choice.unwrap_or(false),
+    )
+    .await
+    .map(|result| SwitchTierCommandResult::Switched { result })
 }
 
 async fn select_tier_model_impl(
@@ -3488,16 +3990,27 @@ async fn switch_tier_impl(
 /// 列出全部已添加的站点。
 #[tauri::command]
 pub fn relay_list_sites(state: State<'_, AppState>) -> Result<Vec<SiteInfo>, String> {
-    with_conn(state.inner(), |conn| {
-        Ok(creds::list(conn)?
-            .into_iter()
-            .map(|op| SiteInfo {
-                site_origin: op.site_origin,
-                account_label: op.account_label,
-            })
-            .collect())
+    list_sites_impl(state.inner()).map_err(|e| e.to_string())
+}
+
+fn list_sites_impl(state: &AppState) -> Result<Vec<SiteInfo>, AppError> {
+    with_conn(state, |conn| {
+        let mut summaries = Vec::<SiteInfo>::new();
+        for relay in creds::list(conn)? {
+            if let Some(summary) = summaries
+                .iter_mut()
+                .find(|summary| summary.site_origin == relay.site_origin)
+            {
+                summary.account_count += usize::from(relay.account_id.is_some());
+            } else {
+                summaries.push(SiteInfo {
+                    site_origin: relay.site_origin,
+                    account_count: usize::from(relay.account_id.is_some()),
+                });
+            }
+        }
+        Ok(summaries)
     })
-    .map_err(|e| e.to_string())
 }
 
 /// 删掉一个站点，**连带它已生成的托管档位**。
@@ -3691,17 +4204,25 @@ fn relay_balance_inputs(state: &AppState, relay: &creds::Relay) -> (String, Vec<
 pub async fn relay_balance(
     app_handle: tauri::AppHandle,
     relay_id: i64,
-) -> Result<UsageResult, String> {
+) -> Result<balance::RowBalanceResult, String> {
+    relay_balance_impl(&app_handle, relay_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn relay_balance_impl(
+    app_handle: &tauri::AppHandle,
+    relay_id: i64,
+) -> Result<balance::RowBalanceResult, AppError> {
     let (relay, base_url, api_keys) = {
         let state = app_handle.state::<AppState>();
-        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("找不到 id 为 {relay_id} 的中转站"))?;
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))?
+            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?;
         let (base_url, api_keys) = relay_balance_inputs(&state, &relay);
         (relay, base_url, api_keys)
     };
 
-    Ok(balance::resolve(
+    let usage = balance::resolve(
         balance::BalanceQuery {
             site_origin: &relay.site_origin,
             base_url: &base_url,
@@ -3715,7 +4236,9 @@ pub async fn relay_balance(
         },
     )
     .await
-    .usage)
+    .usage;
+
+    Ok(balance::row_balance_result(usage, true))
 }
 
 /// 带登录态打开某个中转站的充值页。
@@ -4466,6 +4989,105 @@ mod tests {
         assert_eq!(result.relay_id, 11);
     }
 
+    #[test]
+    fn relay_row_serializes_backend_owned_remove_confirmation() {
+        let row = RelayRow {
+            id: 7,
+            site_origin: "https://api.example.com".into(),
+            site_name: "Example".into(),
+            account_label: String::new(),
+            status: RelayRowStatus::NotLoggedIn,
+            is_current: false,
+            can_query_balance: false,
+            can_refresh: false,
+            can_delete: true,
+            remove_confirmation: RemoveConfirmation::NeverLoggedIn,
+            tiers: Vec::new(),
+        };
+
+        let json = serde_json::to_value(row).expect("serialize relay row");
+        assert_eq!(json["removeConfirmation"], "neverLoggedIn");
+    }
+
+    #[test]
+    fn relay_status_owns_the_global_add_site_prompt_decision() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+
+        assert!(
+            relay_status_impl(&state)
+                .expect("empty status")
+                .should_prompt_add_site
+        );
+
+        with_conn(&state, |conn| {
+            crate::vendor::creds::save_account(
+                conn,
+                crate::vendor::Vendor::DeepSeek,
+                "token",
+                &crate::vendor::VendorAccount {
+                    account_id: "account-7".into(),
+                    label: "DeepSeek user".into(),
+                    login_identifier: "13800000000".into(),
+                },
+            )?;
+            Ok(())
+        })
+        .expect("save vendor account");
+
+        assert!(
+            !relay_status_impl(&state)
+                .expect("configured status")
+                .should_prompt_add_site
+        );
+    }
+
+    #[test]
+    fn refresh_summary_counts_vendor_config_for_the_current_app() {
+        let summary = refresh_summary(
+            &AppType::Codex,
+            Vec::new(),
+            vec![(
+                "DeepSeek".into(),
+                Ok(super::super::vendor::VendorProvisionSummary {
+                    provider_id: "managed-deepseek".into(),
+                    platforms: vec![
+                        AppType::Codex.as_str().into(),
+                        AppType::Claude.as_str().into(),
+                    ],
+                    key_created: true,
+                    merged_providers: vec!["Imported DeepSeek".into()],
+                }),
+            )],
+        );
+
+        assert_eq!(summary.refreshed_accounts, 1);
+        assert_eq!(summary.tiers, 1);
+        assert_eq!(summary.other_platform_tiers, 0);
+        assert_eq!(summary.keys_created, 1);
+        assert_eq!(summary.merged_providers, 1);
+        assert!(matches!(summary.notice, RefreshNotice::UpdatedWithKeys));
+    }
+
+    #[test]
+    fn refresh_result_is_cloneable() {
+        let result = RefreshResult {
+            summary: RefreshSummary {
+                notice: RefreshNotice::None,
+                refreshed_accounts: 0,
+                tiers: 0,
+                keys_created: 0,
+                other_platform_tiers: 0,
+                merged_providers: 0,
+                failures: Vec::new(),
+            },
+            balances: Vec::new(),
+        };
+
+        let cloned = result.clone();
+        assert!(matches!(cloned.summary.notice, RefreshNotice::None));
+    }
+
     fn codex_settings(model: &str, models: &[&str]) -> serde_json::Value {
         serde_json::json!({
             "auth": { "OPENAI_API_KEY": "sk-test" },
@@ -4596,6 +5218,7 @@ mod tests {
             models: vec!["claude-sonnet-5".into()],
             rate_multiplier: Some(1.0),
             is_current: false,
+            can_verify_models: true,
             user_edited: None,
             allow_image_generation: None,
         };
@@ -4608,6 +5231,11 @@ mod tests {
             Some("claude"),
             "前端要靠 appId 判断这条档位是不是属于它当前那一屏，实际：{:?}",
             obj.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            obj.get("canVerifyModels").and_then(|value| value.as_bool()),
+            Some(true),
+            "模型验证支持资格必须由后端随档位返回"
         );
         assert!(
             !obj.contains_key("app_id"),
@@ -4903,6 +5531,7 @@ mod tests {
             models: vec!["gpt-5.6-sol".into()],
             rate_multiplier: None,
             is_current: false,
+            can_verify_models: true,
             // 归属测试不关心它 —— `tiers_of_site` 会自己算出来覆盖掉这个值。
             user_edited: None,
             // 同上：归属判定与生图无关。
@@ -5705,6 +6334,25 @@ mod tests {
         assert!(!should_quit_chatgpt(true, &AppType::Gemini));
         // 用户没同意 ⇒ 一律不退，哪怕是 codex。
         assert!(!should_quit_chatgpt(false, &AppType::Codex));
+    }
+
+    #[test]
+    fn switch_confirmation_is_decided_before_mutating_the_target() {
+        assert!(should_request_switch_confirmation(
+            &AppType::Codex,
+            None,
+            true
+        ));
+        assert!(!should_request_switch_confirmation(
+            &AppType::Claude,
+            None,
+            true
+        ));
+        assert!(!should_request_switch_confirmation(
+            &AppType::Codex,
+            Some(false),
+            true
+        ));
     }
 
     #[test]
@@ -6619,8 +7267,22 @@ mod tests {
         .expect("save credentials");
 
         let tier_id = provision::provider_id_for(site, Some(7), 1);
-        db.save_provider("codex", &seeded_owned(&tier_id, "Pro池", Some(site), 7))
-            .expect("seed tier");
+        let settings_config = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-valid",
+            "Pro池",
+            "https://bestapi.store/v1",
+            "gpt-5.6-sol",
+        )
+        .expect("settings");
+        db.save_provider(
+            "codex",
+            &Provider {
+                settings_config,
+                ..seeded_owned(&tier_id, "Pro池", Some(site), 7)
+            },
+        )
+        .expect("seed tier");
 
         with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
 
@@ -6683,6 +7345,105 @@ mod tests {
         assert!(matches!(row.status, RelayRowStatus::NotLoggedIn));
         assert!(row.can_query_balance);
         assert!(!row.can_refresh);
+        assert!(
+            relay_refresh_targets(&state, &AppType::Codex)
+                .expect("refresh targets")
+                .iter()
+                .any(|(id, _, can_refresh)| *id == row_id && !can_refresh),
+            "顶部全量刷新也要包含只能用 SK 查余额的账号"
+        );
+    }
+
+    #[test]
+    fn a_refreshable_session_is_not_reported_as_not_logged_in() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "expired-token",
+                Some("refresh-token"),
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+
+        let row = list_relays_impl(&state, AppType::Codex)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == row_id)
+            .expect("row");
+
+        assert!(
+            !matches!(row.status, RelayRowStatus::NotLoggedIn),
+            "refresh token 可自动续期时，后端不能要求用户重新登录"
+        );
+        assert!(row.can_refresh);
+    }
+
+    #[test]
+    fn session_expired_usable_requires_an_extractable_managed_key() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "token",
+                None,
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+
+        let tier_id = provision::provider_id_for(site, Some(7), 1);
+        db.save_provider(
+            "codex",
+            &Provider {
+                id: tier_id,
+                name: "坏配置".into(),
+                settings_config: serde_json::json!({}),
+                website_url: Some(site.into()),
+                category: Some("aggregator".into()),
+                created_at: Some(1),
+                sort_index: Some(0),
+                notes: None,
+                meta: Some(managed_meta(&AppType::Codex, Some(7))),
+                icon: None,
+                icon_color: None,
+                in_failover_queue: false,
+            },
+        )
+        .expect("provider");
+        with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
+
+        let row = list_relays_impl(&state, AppType::Codex)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == row_id)
+            .expect("row");
+
+        assert!(matches!(row.status, RelayRowStatus::SessionExpired));
+        assert!(!row.can_query_balance);
     }
 
     /// ⭐ **倍率必须活过 provision → 库 → `listRelays` 这一整条**。

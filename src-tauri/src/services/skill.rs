@@ -70,6 +70,12 @@ pub struct DiscoverableSkill {
     /// 分支名称
     #[serde(rename = "repoBranch")]
     pub repo_branch: String,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(rename = "canInstall", default)]
+    pub can_install: bool,
+    #[serde(rename = "canUninstall", default)]
+    pub can_uninstall: bool,
 }
 
 /// 技能对象（兼容旧 API，内部使用 DiscoverableSkill）
@@ -246,6 +252,12 @@ pub struct SkillsShDiscoverableSkill {
     pub repo_branch: String,
     pub installs: u64,
     pub readme_url: Option<String>,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub can_install: bool,
+    #[serde(default)]
+    pub can_uninstall: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -636,8 +648,8 @@ impl SkillService {
         for existing in existing_skills.values() {
             if existing.directory.eq_ignore_ascii_case(&install_name) {
                 // 检查是否来自同一仓库
-                let same_repo = existing.repo_owner.as_deref() == Some(&skill.repo_owner)
-                    && existing.repo_name.as_deref() == Some(&skill.repo_name);
+                let same_repo =
+                    Self::repositories_match(existing, &skill.repo_owner, &skill.repo_name);
                 if same_repo {
                     // 同一仓库的同名 skill，返回现有记录（可能需要更新启用状态）
                     let mut updated = existing.clone();
@@ -1979,6 +1991,7 @@ impl SkillService {
     pub async fn discover_available(
         &self,
         repos: Vec<SkillRepo>,
+        db: &Arc<Database>,
     ) -> Result<Vec<DiscoverableSkill>> {
         let mut skills = Vec::new();
 
@@ -2002,8 +2015,77 @@ impl SkillService {
         // 去重并排序
         Self::deduplicate_discoverable_skills(&mut skills);
         skills.sort_by_key(|skill| skill.name.to_lowercase());
+        let installed = db.get_all_installed_skills()?;
+        let installed: Vec<InstalledSkill> = installed.into_values().collect();
+        Self::apply_repository_installation_facts(&mut skills, &installed);
 
         Ok(skills)
+    }
+
+    fn installation_facts(
+        directory: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        installed: &[InstalledSkill],
+    ) -> (bool, bool) {
+        let install_name = Path::new(directory)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| directory.to_string());
+        let has_installed_directory = installed
+            .iter()
+            .any(|skill| skill.directory.eq_ignore_ascii_case(&install_name));
+        let is_installed = installed.iter().any(|skill| {
+            skill.directory.eq_ignore_ascii_case(&install_name)
+                && Self::repositories_match(skill, repo_owner, repo_name)
+        });
+
+        (is_installed, !has_installed_directory)
+    }
+
+    fn repositories_match(skill: &InstalledSkill, repo_owner: &str, repo_name: &str) -> bool {
+        skill
+            .repo_owner
+            .as_deref()
+            .is_some_and(|owner| owner.eq_ignore_ascii_case(repo_owner))
+            && skill
+                .repo_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(repo_name))
+    }
+
+    fn apply_repository_installation_facts(
+        skills: &mut [DiscoverableSkill],
+        installed: &[InstalledSkill],
+    ) {
+        for skill in skills {
+            let (is_installed, can_install) = Self::installation_facts(
+                &skill.directory,
+                &skill.repo_owner,
+                &skill.repo_name,
+                installed,
+            );
+            skill.installed = is_installed;
+            skill.can_install = can_install;
+            skill.can_uninstall = false;
+        }
+    }
+
+    fn apply_skills_sh_installation_facts(
+        skills: &mut [SkillsShDiscoverableSkill],
+        installed: &[InstalledSkill],
+    ) {
+        for skill in skills {
+            let (is_installed, can_install) = Self::installation_facts(
+                &skill.directory,
+                &skill.repo_owner,
+                &skill.repo_name,
+                installed,
+            );
+            skill.installed = is_installed;
+            skill.can_install = can_install;
+            skill.can_uninstall = false;
+        }
     }
 
     /// 列出所有技能（兼容旧 API）
@@ -2013,33 +2095,23 @@ impl SkillService {
         db: &Arc<Database>,
     ) -> Result<Vec<Skill>> {
         // 获取可发现的技能
-        let discoverable = self.discover_available(repos).await?;
+        let discoverable = self.discover_available(repos, db).await?;
 
         // 获取已安装的技能
         let installed = db.get_all_installed_skills()?;
-        let installed_dirs: HashSet<String> =
-            installed.values().map(|s| s.directory.clone()).collect();
-
         // 转换为 Skill 格式
         let mut skills: Vec<Skill> = discoverable
             .into_iter()
-            .map(|d| {
-                let install_name = Path::new(&d.directory)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| d.directory.clone());
-
-                Skill {
-                    key: d.key,
-                    name: d.name,
-                    description: d.description,
-                    directory: d.directory,
-                    readme_url: d.readme_url,
-                    installed: installed_dirs.contains(&install_name),
-                    repo_owner: Some(d.repo_owner),
-                    repo_name: Some(d.repo_name),
-                    repo_branch: Some(d.repo_branch),
-                }
+            .map(|d| Skill {
+                key: d.key,
+                name: d.name,
+                description: d.description,
+                directory: d.directory,
+                readme_url: d.readme_url,
+                installed: d.installed,
+                repo_owner: Some(d.repo_owner),
+                repo_name: Some(d.repo_name),
+                repo_branch: Some(d.repo_branch),
             })
             .collect();
 
@@ -2166,6 +2238,9 @@ impl SkillService {
             repo_owner: repo.owner.clone(),
             repo_name: repo.name.clone(),
             repo_branch: repo.branch.clone(),
+            installed: false,
+            can_install: false,
+            can_uninstall: false,
         })
     }
 
@@ -3351,6 +3426,7 @@ impl SkillService {
         query: &str,
         limit: usize,
         offset: usize,
+        db: &Arc<Database>,
     ) -> Result<SkillsShSearchResult> {
         let client = crate::proxy::http_client::get();
 
@@ -3372,7 +3448,7 @@ impl SkillService {
             .json::<SkillsShApiResponse>()
             .await?;
 
-        let skills = resp
+        let mut skills: Vec<SkillsShDiscoverableSkill> = resp
             .skills
             .into_iter()
             .filter_map(|s| {
@@ -3399,9 +3475,15 @@ impl SkillService {
                     repo_branch: "main".to_string(),
                     installs: s.installs,
                     readme_url: Some(format!("https://github.com/{}/{}", owner, repo)),
+                    installed: false,
+                    can_install: false,
+                    can_uninstall: false,
                 })
             })
             .collect();
+        let installed = db.get_all_installed_skills()?;
+        let installed: Vec<InstalledSkill> = installed.into_values().collect();
+        Self::apply_skills_sh_installation_facts(&mut skills, &installed);
 
         Ok(SkillsShSearchResult {
             skills,
@@ -3637,6 +3719,121 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn installed_skill(directory: &str, owner: Option<&str>, repo: Option<&str>) -> InstalledSkill {
+        InstalledSkill {
+            id: format!("installed:{directory}"),
+            name: directory.to_string(),
+            description: None,
+            directory: directory.to_string(),
+            repo_owner: owner.map(str::to_string),
+            repo_name: repo.map(str::to_string),
+            repo_branch: Some("main".to_string()),
+            readme_url: None,
+            apps: SkillApps::default(),
+            installed_at: 1,
+            content_hash: None,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn repository_discovery_facts_distinguish_installed_skills_from_directory_conflicts() {
+        let installed = vec![installed_skill(
+            "shared-skill",
+            Some("owner-a"),
+            Some("repo-a"),
+        )];
+        let mut skills: Vec<DiscoverableSkill> = serde_json::from_value(serde_json::json!([
+            {
+                "key": "owner-a/repo-a:shared-skill",
+                "name": "Installed",
+                "description": "",
+                "directory": "skills/shared-skill",
+                "readmeUrl": null,
+                "repoOwner": "OWNER-A",
+                "repoName": "REPO-A",
+                "repoBranch": "main"
+            },
+            {
+                "key": "owner-b/repo-b:shared-skill",
+                "name": "Conflict",
+                "description": "",
+                "directory": "shared-skill",
+                "readmeUrl": null,
+                "repoOwner": "owner-b",
+                "repoName": "repo-b",
+                "repoBranch": "main"
+            },
+            {
+                "key": "owner-c/repo-c:new-skill",
+                "name": "Available",
+                "description": "",
+                "directory": "new-skill",
+                "readmeUrl": null,
+                "repoOwner": "owner-c",
+                "repoName": "repo-c",
+                "repoBranch": "main"
+            }
+        ]))
+        .expect("deserialize repository skills");
+
+        SkillService::apply_repository_installation_facts(&mut skills, &installed);
+
+        let value = serde_json::to_value(skills).expect("serialize repository skills");
+        assert_eq!(value[0]["installed"], true);
+        assert_eq!(value[0]["canInstall"], false);
+        assert_eq!(value[0]["canUninstall"], false);
+        assert_eq!(value[1]["installed"], false);
+        assert_eq!(value[1]["canInstall"], false);
+        assert_eq!(value[1]["canUninstall"], false);
+        assert_eq!(value[2]["installed"], false);
+        assert_eq!(value[2]["canInstall"], true);
+        assert_eq!(value[2]["canUninstall"], false);
+    }
+
+    #[test]
+    fn skills_sh_discovery_facts_use_the_same_backend_installation_policy() {
+        let installed = vec![installed_skill(
+            "shared-skill",
+            Some("owner-a"),
+            Some("repo-a"),
+        )];
+        let mut skills: Vec<SkillsShDiscoverableSkill> =
+            serde_json::from_value(serde_json::json!([
+                {
+                    "key": "shared",
+                    "name": "Shared",
+                    "directory": "shared-skill",
+                    "repoOwner": "owner-b",
+                    "repoName": "repo-b",
+                    "repoBranch": "main",
+                    "installs": 10,
+                    "readmeUrl": null
+                },
+                {
+                    "key": "new",
+                    "name": "New",
+                    "directory": "new-skill",
+                    "repoOwner": "owner-c",
+                    "repoName": "repo-c",
+                    "repoBranch": "main",
+                    "installs": 5,
+                    "readmeUrl": null
+                }
+            ]))
+            .expect("deserialize skills.sh skills");
+
+        SkillService::apply_skills_sh_installation_facts(&mut skills, &installed);
+
+        let value = serde_json::to_value(skills).expect("serialize skills.sh skills");
+        assert_eq!(value[0]["installed"], false);
+        assert_eq!(value[0]["canInstall"], false);
+        assert_eq!(value[0]["canUninstall"], false);
+        assert_eq!(value[1]["installed"], false);
+        assert_eq!(value[1]["canInstall"], true);
+        assert_eq!(value[1]["canUninstall"], false);
+    }
 
     /// 构造一个模拟 GitHub 归档的 ZIP：带一层 `repo-main/` 根目录，
     /// 其中掺入用 `../` 逃逸的恶意条目。

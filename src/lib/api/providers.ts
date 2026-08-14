@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Provider,
+  ProviderRoutingReason,
   UniversalProvider,
   UniversalProvidersMap,
 } from "@/types";
@@ -18,9 +19,16 @@ export interface ProviderSwitchEvent {
   providerId: string;
 }
 
-export interface SwitchResult {
-  warnings: string[];
-}
+export type SwitchResult =
+  | {
+      status: "confirmationRequired";
+      targetName: string;
+    }
+  | {
+      status: "switched";
+      warnings: string[];
+      routingNotice: ProviderRoutingReason | null;
+    };
 
 export interface OpenTerminalOptions {
   cwd?: string;
@@ -56,12 +64,29 @@ export const providersApi = {
     return await invoke("get_current_provider", { app: appId });
   },
 
+  async getEditSettings(
+    id: string,
+    appId: AppId,
+  ): Promise<Record<string, unknown>> {
+    return await invoke("get_provider_edit_settings", { id, app: appId });
+  },
+
   async add(
     provider: Provider,
     appId: AppId,
     addToLive?: boolean,
+    providerKey?: string,
   ): Promise<boolean> {
-    return await invoke("add_provider", { provider, app: appId, addToLive });
+    return await invoke("add_provider", {
+      provider,
+      app: appId,
+      addToLive,
+      providerKey,
+    });
+  },
+
+  async duplicate(id: string, appId: AppId): Promise<boolean> {
+    return await invoke("duplicate_provider", { id, app: appId });
   },
 
   async update(
@@ -179,30 +204,6 @@ export const providersApi = {
    */
   async importOpenCodeFromLive(): Promise<number> {
     return await invoke("import_opencode_providers_from_live");
-  },
-
-  /**
-   * 获取 OpenCode live 配置中的供应商 ID 列表
-   * 用于前端判断供应商是否已添加到 opencode.json
-   */
-  async getOpenCodeLiveProviderIds(): Promise<string[]> {
-    return await invoke("get_opencode_live_provider_ids");
-  },
-
-  /**
-   * 获取 OpenClaw live 配置中的供应商 ID 列表
-   * 用于前端判断供应商是否已添加到 openclaw.json
-   */
-  async getOpenClawLiveProviderIds(): Promise<string[]> {
-    return await invoke("get_openclaw_live_provider_ids");
-  },
-
-  /**
-   * 获取 Hermes live 配置中的供应商 ID 列表
-   * 用于前端判断供应商是否已添加到 Hermes 配置
-   */
-  async getHermesLiveProviderIds(): Promise<string[]> {
-    return await invoke("get_hermes_live_provider_ids");
   },
 
   /**

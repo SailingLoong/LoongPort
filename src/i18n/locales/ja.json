@@ -167,7 +167,7 @@
         "apiKeyPlaceholder": "Gemini API Key を入力"
       }
     },
-    "duplicateLiveIdsLoadFailed": "設定内のプロバイダー識別子を読み込めませんでした。設定を修正してから再度お試しください"
+    "duplicateFailed": "プロバイダーの複製に失敗しました"
   },
   "claudeCode": {
     "needsRouting": "ルーティングが必要",
@@ -3126,7 +3126,7 @@
       "dragHandle": "ドラッグして並べ替え",
       "refetchGroups": "利用可能なグループを更新",
       "purchaseHint": "中継サービスのチャージページを開く",
-      "lowBalanceHint": "残高が ${{threshold}} 未満です。クリックしてチャージ",
+      "lowBalanceHint": "残高が少なくなっています。クリックしてチャージ",
       "remove": "アカウントと接続プロファイルを削除",
       "removeBlockedByCurrent": "このアカウントの接続プロファイルが使用中です。別のプロファイルに切り替えてから削除してください",
       "removeConfirmTitle": "このアカウントを削除しますか？",
@@ -3134,7 +3134,6 @@
       "removeConfirmMessageNeverLoggedIn": "「{{label}}」と {{count}} 件の接続プロファイルを削除します。後からこのアカウントを再度追加できます。"
     },
     "tier": {
-      "rateUnknown": "倍率不明",
       "rate": "{{value}} 倍",
       "models": "対応モデル",
       "selectModel": "{{model}} に切り替え",

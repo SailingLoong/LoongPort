@@ -8,6 +8,16 @@ use crate::{
     },
     AppState,
 };
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationScopeSummary {
+    pub provider_id: String,
+    pub app_type: String,
+    pub badge_verdict: Option<crate::relay::model_verification::types::Verdict>,
+    pub representative_report: VerificationReport,
+}
 
 #[tauri::command]
 pub async fn list_verification_models(
@@ -55,18 +65,67 @@ fn cancel_model_verification_impl(state: &AppState, run_id: String) -> Result<()
 }
 
 #[tauri::command]
-pub fn get_model_verification_results(
+pub fn get_model_verification_summaries(
     state: tauri::State<'_, AppState>,
     provider_ids: Vec<String>,
-) -> Result<Vec<VerificationReport>, RunFailureKind> {
-    get_model_verification_results_impl(&state, provider_ids)
+    app_type: String,
+) -> Result<Vec<VerificationScopeSummary>, RunFailureKind> {
+    get_model_verification_summaries_impl(&state, provider_ids, app_type)
 }
 
-fn get_model_verification_results_impl(
+fn get_model_verification_summaries_impl(
     state: &AppState,
     provider_ids: Vec<String>,
-) -> Result<Vec<VerificationReport>, RunFailureKind> {
-    state.model_verification.list_results(&provider_ids)
+    app_type: String,
+) -> Result<Vec<VerificationScopeSummary>, RunFailureKind> {
+    let reports = state
+        .model_verification
+        .list_results_for_app(&app_type, &provider_ids)?;
+    let mut summaries = Vec::<VerificationScopeSummary>::new();
+    for report in reports {
+        if let Some(summary) = summaries
+            .iter_mut()
+            .find(|summary| summary.provider_id == report.target.provider_id)
+        {
+            if report_precedes(&report, &summary.representative_report) {
+                summary.badge_verdict = badge_verdict(report.verdict);
+                summary.representative_report = report;
+            }
+        } else {
+            summaries.push(VerificationScopeSummary {
+                provider_id: report.target.provider_id.clone(),
+                app_type: report.target.app_type.clone(),
+                badge_verdict: badge_verdict(report.verdict),
+                representative_report: report,
+            });
+        }
+    }
+    Ok(summaries)
+}
+
+const fn badge_verdict(
+    verdict: crate::relay::model_verification::types::Verdict,
+) -> Option<crate::relay::model_verification::types::Verdict> {
+    use crate::relay::model_verification::types::Verdict;
+    match verdict {
+        Verdict::Trusted | Verdict::Suspicious | Verdict::Anomaly => Some(verdict),
+        Verdict::Inconclusive => None,
+    }
+}
+
+fn report_precedes(candidate: &VerificationReport, current: &VerificationReport) -> bool {
+    verdict_severity(candidate.verdict) > verdict_severity(current.verdict)
+        || (candidate.verdict == current.verdict && candidate.checked_at > current.checked_at)
+}
+
+const fn verdict_severity(verdict: crate::relay::model_verification::types::Verdict) -> u8 {
+    use crate::relay::model_verification::types::Verdict;
+    match verdict {
+        Verdict::Trusted => 0,
+        Verdict::Inconclusive => 1,
+        Verdict::Suspicious => 2,
+        Verdict::Anomaly => 3,
+    }
 }
 
 #[tauri::command]
@@ -100,8 +159,8 @@ mod tests {
     };
 
     use super::{
-        cancel_model_verification_impl, get_model_verification_results_impl,
-        start_model_verification_impl,
+        cancel_model_verification_impl, get_model_verification_summaries_impl,
+        start_model_verification_impl, VerificationScopeSummary,
     };
 
     struct RejectingVerifier {
@@ -162,9 +221,11 @@ mod tests {
         let state = state_with_verifier(verifier);
 
         cancel_model_verification_impl(&state, "unknown-run".into()).unwrap();
-        assert!(get_model_verification_results_impl(&state, Vec::new())
-            .unwrap()
-            .is_empty());
+        assert!(
+            get_model_verification_summaries_impl(&state, Vec::new(), "codex".into())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -200,19 +261,78 @@ mod tests {
         )
         .unwrap();
 
-        let results =
-            get_model_verification_results_impl(&state, vec!["provider-a".into()]).unwrap();
+        let results = get_model_verification_summaries_impl(
+            &state,
+            vec!["provider-a".into()],
+            "codex".into(),
+        )
+        .unwrap();
 
         assert_eq!(
             results,
-            vec![VerificationReport {
-                target: TargetKey::new("provider-a", "codex", "gpt-a"),
-                verdict: Verdict::Trusted,
-                evidence_level: EvidenceLevel::ProtocolBehavior,
-                facts: vec![fact],
-                rules_version: RULES_VERSION,
-                checked_at: 1_700_000_000,
+            vec![VerificationScopeSummary {
+                provider_id: "provider-a".into(),
+                app_type: "codex".into(),
+                badge_verdict: Some(Verdict::Trusted),
+                representative_report: VerificationReport {
+                    target: TargetKey::new("provider-a", "codex", "gpt-a"),
+                    verdict: Verdict::Trusted,
+                    evidence_level: EvidenceLevel::ProtocolBehavior,
+                    facts: vec![fact],
+                    rules_version: RULES_VERSION,
+                    checked_at: 1_700_000_000,
+                },
             }]
+        );
+    }
+
+    #[test]
+    fn result_boundary_aggregates_scope_severity_and_uses_the_newest_tie() {
+        let verifier = Arc::new(RejectingVerifier {
+            target: Mutex::new(None),
+        });
+        let state = state_with_verifier(verifier);
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, app_type, name, settings_config) VALUES (?1, ?2, ?3, '{}')",
+                rusqlite::params!["provider-a", "codex", "provider-a"],
+            )
+            .unwrap();
+        for (model, verdict, checked_at) in [
+            ("trusted", Verdict::Trusted, 30),
+            ("old-anomaly", Verdict::Anomaly, 10),
+            ("new-anomaly", Verdict::Anomaly, 20),
+        ] {
+            upsert_active(
+                &state.db,
+                &VerificationReport {
+                    target: TargetKey::new("provider-a", "codex", model),
+                    verdict,
+                    evidence_level: EvidenceLevel::ProtocolBehavior,
+                    facts: Vec::new(),
+                    rules_version: RULES_VERSION,
+                    checked_at,
+                },
+            )
+            .unwrap();
+        }
+
+        let summaries = get_model_verification_summaries_impl(
+            &state,
+            vec!["provider-a".into()],
+            "codex".into(),
+        )
+        .unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].badge_verdict, Some(Verdict::Anomaly));
+        assert_eq!(
+            summaries[0].representative_report.target.model,
+            "new-anomaly"
         );
     }
 }

@@ -101,6 +101,9 @@ const makeSkillsShSkill = (
   repoBranch: "main",
   installs: 100,
   readmeUrl: "https://example.com/a",
+  installed: false,
+  canInstall: true,
+  canUninstall: false,
   ...overrides,
 });
 
@@ -115,6 +118,9 @@ const makeDiscoverableSkill = (
   repoOwner: "owner-a",
   repoName: "repo-a",
   repoBranch: "main",
+  installed: false,
+  canInstall: true,
+  canUninstall: false,
   ...overrides,
 });
 
@@ -196,6 +202,61 @@ describe("SkillsPage - skills.sh install (regression)", () => {
     expect(callArgs.skill.repoOwner).toBe("owner-b");
     expect(callArgs.skill.repoName).toBe("repo-b");
     expect(callArgs.skill.name).toBe("Agent Browser B");
+  });
+
+  it("renders repository installation status and actions from backend facts", () => {
+    discoverableSkillsMock = [
+      makeDiscoverableSkill({
+        installed: true,
+        canInstall: false,
+        canUninstall: false,
+      }),
+    ];
+    skillReposMock = [makeSkillRepo()];
+
+    render(<SkillsPage initialApp="claude" />);
+
+    expect(screen.getByText("skills.installed")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "skills.install" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "skills.uninstall" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not invent an install action for a blocked skills.sh result", async () => {
+    setSearchResult("agent", 0, {
+      skills: [
+        makeSkillsShSkill({
+          installed: false,
+          canInstall: false,
+          canUninstall: false,
+        }),
+      ],
+      totalCount: 1,
+      query: "agent",
+    });
+
+    render(<SkillsPage initialApp="claude" />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: /skills\.sh/i }));
+    const input = screen.getByPlaceholderText(
+      "skills.skillssh.searchPlaceholder",
+    );
+    await user.type(input, "agent");
+    await user.click(screen.getByRole("button", { name: "skills.search" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Agent Browser")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "skills.install" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "skills.uninstall" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps skills.sh results when submitting the same query again", async () => {

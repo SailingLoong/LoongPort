@@ -231,6 +231,19 @@ impl ModelVerificationCoordinator {
             .map_err(|_| RunFailureKind::InvalidResponse)
     }
 
+    pub fn list_results_for_app(
+        &self,
+        app_type: &str,
+        provider_ids: &[String],
+    ) -> Result<Vec<VerificationReport>, RunFailureKind> {
+        crate::relay::model_verification::store::list_for_providers(
+            &self.db,
+            app_type,
+            provider_ids,
+        )
+        .map_err(|_| RunFailureKind::InvalidResponse)
+    }
+
     pub fn list_history(
         &self,
         scope: &TargetScope,

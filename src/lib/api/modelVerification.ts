@@ -74,6 +74,15 @@ export interface VerificationReport {
   checkedAt: number;
 }
 
+export interface VerificationScopeSummary {
+  providerId: string;
+  appType: string;
+  /** 后端决定是否在档位行展示；不确定结论为 null。 */
+  badgeVerdict: VerificationVerdict | null;
+  /** 后端按严重度、同级最新时间选出的弹窗默认报告。 */
+  representativeReport: VerificationReport;
+}
+
 export type VerificationSource = "active";
 
 export interface VerificationHistoryEntry {
@@ -108,8 +117,11 @@ export const modelVerificationApi = {
   cancel: (runId: string): Promise<void> =>
     invoke("cancel_model_verification", { runId }),
 
-  listResults: (providerIds: string[]): Promise<VerificationReport[]> =>
-    invoke("get_model_verification_results", { providerIds }),
+  listSummaries: (
+    providerIds: string[],
+    appType: string,
+  ): Promise<VerificationScopeSummary[]> =>
+    invoke("get_model_verification_summaries", { providerIds, appType }),
 
   listHistory: (
     providerId: string,

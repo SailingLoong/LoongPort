@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { UsageResult } from "@/types";
-
 import type { AppId } from "./types";
+import type {
+  RefreshResult,
+  RowBalanceResult,
+  SwitchTierCommandResult,
+} from "./relay";
 
 /**
  * 一个已添加的官网直连账号（`loongport_vendor` 的一行）。
@@ -30,6 +33,8 @@ export interface VendorAccountRow {
   canQueryBalance: boolean;
   canRefresh: boolean;
   canEditConfig: boolean;
+  canSwitch: boolean;
+  canDelete: boolean;
   /**
    * 这一行名下那六条 provider 记录的 id（六个平台共用一个）。
    *
@@ -64,43 +69,20 @@ export interface VendorAccountRow {
   userEdited: boolean | null;
 }
 
-/** `vendorApi.provision` 的结果。 */
-export interface VendorProvisionSummary {
-  /** 这个账号的 provider id。**六个平台共用一个**（不含 app_type）。 */
-  providerId: string;
-  /** 实际写成功的平台（kebab-case 的 app_type）。 */
-  platforms: string[];
-  /**
-   * 这一轮有没有真的去官网建了一把新 key。
-   *
-   * `false` = 本地已有明文，零请求就完事（**这是正常路径**）。
-   * ⚠️ 只在 `true` 时提示「已在官网新建密钥」—— 每次刷新都提示会让用户以为在重复建 key。
-   */
-  keyCreated: boolean;
-  /** Imported non-managed providers removed because this account now owns the same credential. */
-  mergedProviders: string[];
+export interface VendorAccountList {
+  supported: boolean;
+  accounts: VendorAccountRow[];
 }
 
-/**
- * 官网行会出现在哪些 tab。
- *
- * ⚠️ **`gemini` 与 `grokbuild` 不在里面** —— 上游没有 DeepSeek preset，协议不兼容
- * （Rust 侧 `vendor::provision::DEEPSEEK_APPS` 就是这六个，多写一个这边也生不出记录）。
- *
- * 过滤放在前端是因为 `vendor_list_accounts` **有意不吃 app 参数**：一个官网账号一把 sk
- * 展开到全部平台，「这一行在哪些 tab 出现」是纯展示判断，不该让后端为它多一条查询。
- */
-export const VENDOR_APPS: readonly AppId[] = [
-  "codex",
-  "claude",
-  "claude-desktop",
-  "hermes",
-  "openclaw",
-  "opencode",
-];
+export interface VendorActionError {
+  kind?: "key_limit";
+  message: string;
+  helpUrl?: string;
+}
 
-export function vendorSupportsApp(appId: AppId): boolean {
-  return VENDOR_APPS.includes(appId);
+export interface VendorLoginResult {
+  rowId: number;
+  refresh: RefreshResult;
 }
 
 /**
@@ -114,26 +96,13 @@ export function vendorSupportsApp(appId: AppId): boolean {
  */
 export const DEEPSEEK_VENDOR_ID = "deepseek";
 
-/**
- * DeepSeek 的 key 管理页。**超上限（官网 100 把）时引导用户去这里删**——
- * 指路而不是只说不允许。
- *
- * Rust 侧有一份等价常量（`vendor/deepseek.rs` 的 `API_KEYS_URL`，注释里就写着
- * 消费者是这个 UI）。跨语言没法共享常量 —— 但**这一处不加一致性闸**：
- * 它只是个「点开去看看」的引导链接，两边分叉的后果是用户跳到一个稍旧的页面，
- * 不是静默失效（与 deeplink scheme / 事件名那类不同，那些对不上功能会悄悄消失）。
- */
-export const DEEPSEEK_API_KEYS_URL = "https://platform.deepseek.com/api_keys";
-
 export const vendorApi = {
   /**
    * 列出已添加的官网账号。
    *
-   * `appId` **只用来算 `userEdited`**（一行背后六条 provider 记录，「改过没有」
-   * 必须按平台问）。**不是用它过滤行** —— 官网账号在 `VENDOR_APPS` 那六个 tab
-   * 都出现，那个判断仍由前端 `vendorSupportsApp` 做。
+   * 后端同时返回当前平台是否支持官网账号，以及可直接展示的账号行。
    */
-  list: (appId: AppId): Promise<VendorAccountRow[]> =>
+  list: (appId: AppId): Promise<VendorAccountList> =>
     invoke("vendor_list_accounts", { appId }),
 
   /**
@@ -153,17 +122,11 @@ export const vendorApi = {
    *
    * 预填值由后端取「这个厂商下最近登录过的那个标识」，前端不必传。
    */
-  openLogin: (vendorId: string): Promise<number | null> =>
-    invoke("vendor_open_login", { vendorId }),
-
-  /**
-   * 备好这个账号的密钥并展开成六个平台的 provider 记录。
-   *
-   * **本地已有明文时零请求**（`keyCreated: false`，这是正常路径）；没有才去官网
-   * 「删旧建新」。所以它同时是「获取密钥」与「刷新」两个入口的实现。
-   */
-  provision: (rowId: number): Promise<VendorProvisionSummary> =>
-    invoke("vendor_provision", { rowId }),
+  openLogin: (
+    vendorId: string,
+    app: AppId,
+  ): Promise<VendorLoginResult | null> =>
+    invoke("vendor_open_login", { vendorId, app }),
 
   /**
    * 查一行的余额。**与 `relayApi.balance` 同一契约**（上游那个 `UsageResult`）。
@@ -178,8 +141,22 @@ export const vendorApi = {
    * ⚠️ **登录态过期也查得到**：后端优先用 sk 查（`services::balance` 认得
    * `api.deepseek.com`），网页登录态只是兜底。别在调用方按 `sessionExpired` 关掉它。
    */
-  balance: (rowId: number): Promise<UsageResult> =>
+  balance: (rowId: number): Promise<RowBalanceResult> =>
     invoke("vendor_balance", { rowId }),
+
+  refresh: (rowId: number, app: AppId): Promise<RefreshResult> =>
+    invoke("vendor_refresh", { rowId, app }),
+
+  switch: (
+    rowId: number,
+    app: AppId,
+    quitChatgpt?: boolean,
+  ): Promise<SwitchTierCommandResult> =>
+    invoke("vendor_switch", {
+      rowId,
+      app,
+      quitChatgpt: quitChatgpt ?? null,
+    }),
 
   /** 删一行，连带清掉它名下六个平台的 provider 记录。 */
   remove: (rowId: number): Promise<void> => invoke("vendor_remove", { rowId }),

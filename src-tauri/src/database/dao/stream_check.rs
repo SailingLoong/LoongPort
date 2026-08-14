@@ -14,6 +14,13 @@ impl Database {
         result: &StreamCheckResult,
     ) -> Result<i64, AppError> {
         let conn = lock_conn!(self.conn);
+        let model_used = result
+            .model_probe
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| AppError::Message(format!("序列化模型探测结论失败: {e}")))?
+            .unwrap_or_default();
 
         conn.execute(
             "INSERT INTO stream_check_logs 
@@ -29,7 +36,7 @@ impl Database {
                 result.message,
                 result.response_time_ms.map(|t| t as i64),
                 result.http_status.map(|s| s as i64),
-                result.model_used,
+                model_used,
                 result.retry_count as i64,
                 result.tested_at,
             ],

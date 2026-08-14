@@ -25,7 +25,7 @@ const APP_BADGE_ICON: Partial<
 interface AppSwitcherProps {
   activeApp: AppId;
   onSwitch: (app: AppId) => void;
-  visibleApps?: VisibleApps;
+  visibleApps: VisibleApps;
 }
 
 const ALL_APPS: AppId[] = [
@@ -86,11 +86,7 @@ export function AppSwitcher({
     hermes: "Hermes",
   };
 
-  // Filter apps based on visibility settings (default all visible)
-  const appsToShow = ALL_APPS.filter((app) => {
-    if (!visibleApps) return true;
-    return visibleApps[app];
-  });
+  const appsToShow = ALL_APPS.filter((app) => visibleApps[app]);
 
   // 前 4 个固定显示，其余折叠进「更多」。
   const pinnedApps = appsToShow.slice(0, COLLAPSED_START_INDEX);

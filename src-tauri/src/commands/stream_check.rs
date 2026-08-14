@@ -7,7 +7,7 @@ use crate::app_config::AppType;
 use crate::commands::copilot::CopilotAuthState;
 use crate::error::AppError;
 use crate::services::stream_check::{
-    HealthStatus, StreamCheckConfig, StreamCheckResult, StreamCheckService,
+    HealthStatus, OverallStatus, StreamCheckConfig, StreamCheckResult, StreamCheckService,
 };
 use crate::store::AppState;
 use std::collections::HashSet;
@@ -91,11 +91,12 @@ pub async fn stream_check_all_providers(
                 .await
                 .unwrap_or_else(|e| StreamCheckResult {
                     status: HealthStatus::Failed,
+                    overall_status: OverallStatus::Unreachable,
                     success: false,
                     message: e.to_string(),
                     response_time_ms: None,
                     http_status: None,
-                    model_used: String::new(),
+                    model_probe: None,
                     tested_at: chrono::Utc::now().timestamp(),
                     retry_count: 0,
                     error_category: None,

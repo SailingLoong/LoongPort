@@ -13,10 +13,6 @@ const apiMocks = vi.hoisted(() => ({
   updateTrayMenu: vi.fn(),
 }));
 
-const uuidMocks = vi.hoisted(() => ({
-  generateUUID: vi.fn(),
-}));
-
 vi.mock("@/lib/api", () => ({
   providersApi: {
     add: (...args: unknown[]) => apiMocks.add(...args),
@@ -29,10 +25,6 @@ vi.mock("@/lib/api", () => ({
   },
   sessionsApi: {},
   settingsApi: {},
-}));
-
-vi.mock("@/utils/uuid", () => ({
-  generateUUID: () => uuidMocks.generateUUID(),
 }));
 
 vi.mock("sonner", () => ({
@@ -65,11 +57,10 @@ beforeEach(() => {
   apiMocks.ensureCodexOfficialProvider.mockReset().mockResolvedValue(true);
   apiMocks.getAll.mockReset().mockResolvedValue({});
   apiMocks.updateTrayMenu.mockReset().mockResolvedValue(true);
-  uuidMocks.generateUUID.mockReset().mockReturnValue("generated-uuid");
 });
 
 describe("useAddProviderMutation", () => {
-  it("duplicates Claude Desktop official providers with a fresh id", async () => {
+  it("asks the backend to generate the duplicated Claude Desktop provider id", async () => {
     const { wrapper } = createWrapper();
     const { result } = renderHook(
       () => useAddProviderMutation("claude-desktop"),
@@ -88,14 +79,15 @@ describe("useAddProviderMutation", () => {
     expect(apiMocks.add).toHaveBeenCalledTimes(1);
     expect(apiMocks.add).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "generated-uuid",
+        id: "",
         name: "Claude Desktop Official copy",
         category: "official",
       }),
       "claude-desktop",
       undefined,
+      undefined,
     );
-    expect(duplicatedProvider.id).toBe("generated-uuid");
+    expect(duplicatedProvider.id).toBe("");
     expect(duplicatedProvider.id).not.toBe("claude-desktop-official");
   });
 

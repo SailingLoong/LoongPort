@@ -66,6 +66,7 @@ const tier = {
   models: [],
   rateMultiplier: 1,
   isCurrent: false,
+  canVerifyModels: true,
   userEdited: false,
   allowImageGeneration: false,
 };
@@ -83,6 +84,7 @@ function renderRow(overrides: Partial<ComponentProps<typeof RelayRow>> = {}) {
       canQueryBalance: true,
       canRefresh: true,
       canDelete: true,
+      removeConfirmation: "configured",
       tiers: [tier],
     },
     open: true,
@@ -135,7 +137,8 @@ describe("RelayRow model verification", () => {
         canQueryBalance: true,
         canRefresh: true,
         canDelete: true,
-        tiers: [{ ...tier, appId: "gemini" }],
+        removeConfirmation: "configured",
+        tiers: [{ ...tier, appId: "gemini", canVerifyModels: false }],
       },
     });
 
@@ -212,6 +215,7 @@ function relayWithTier(
     canQueryBalance: true,
     canRefresh: true,
     canDelete: true,
+    removeConfirmation: "configured",
     tiers: [{ ...tier, ...tierOverrides }],
   };
 }

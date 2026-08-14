@@ -51,6 +51,11 @@ const wallet = (remaining: number): UsageResult => ({
   data: [{ planName: "钱包余额", remaining, used: 12.3, unit: "USD" }],
 });
 
+const balanceResult = (remaining: number, shouldPromptTopUp = false) => ({
+  usage: wallet(remaining),
+  shouldPromptTopUp,
+});
+
 beforeEach(() => {
   api.relayBalance.mockReset();
   api.vendorBalance.mockReset();
@@ -68,7 +73,7 @@ describe("RowBalance", () => {
    * `canQueryBalance`。
    */
   it("登录态过期的行照样查余额并显示出来", async () => {
-    api.relayBalance.mockResolvedValue(wallet(42.5));
+    api.relayBalance.mockResolvedValue(balanceResult(42.5));
 
     // `enabled` 由后端 DTO 的 `canQueryBalance` 提供；登录态与 SK 的判定不在组件内。
     renderWithQuery(
@@ -94,9 +99,9 @@ describe("RowBalance", () => {
    */
   it("查失败时渲染失败态 + 刷新按钮，点它会重查", async () => {
     api.relayBalance.mockResolvedValue({
-      success: false,
-      error: "三条路都查不到",
-    } satisfies UsageResult);
+      usage: { success: false, error: "三条路都查不到" },
+      shouldPromptTopUp: false,
+    });
 
     renderWithQuery(
       <RowBalance rowKind="relay" rowId={7} enabled onPurchase={vi.fn()} />,
@@ -105,7 +110,7 @@ describe("RowBalance", () => {
     expect(await screen.findByText("查询失败")).toBeInTheDocument();
     const refresh = screen.getByTitle("刷新用量");
 
-    api.relayBalance.mockResolvedValue(wallet(3));
+    api.relayBalance.mockResolvedValue(balanceResult(3, true));
     await userEvent.click(refresh);
 
     expect(await screen.findByText("3.00")).toBeInTheDocument();
@@ -114,12 +119,11 @@ describe("RowBalance", () => {
   /**
    * ⭐ **低余额提醒不作用于官网行** —— 阈值是美元，DeepSeek 的钱包是人民币。
    *
-   * 判据是「有没有充值入口」（只有中转站行传 `onPurchase`），
-   * 见 `lowBalanceScopeContract.test.ts` 与 `lowBalance.ts` 的文档。
+   * 判据由后端 `shouldPromptTopUp` 给出；官网行返回 false。
    */
   it("官网行没有充值按钮，低余额也不出琥珀叹号", async () => {
     // 1.5 在美元口径下是低余额；官网行不该因此变态。
-    api.vendorBalance.mockResolvedValue(wallet(1.5));
+    api.vendorBalance.mockResolvedValue(balanceResult(1.5));
 
     renderWithQuery(<RowBalance rowKind="vendor" rowId={1} enabled />);
 
@@ -129,7 +133,7 @@ describe("RowBalance", () => {
   });
 
   it("中转站行余额偏低时，充值按钮切到催充值的提示", async () => {
-    api.relayBalance.mockResolvedValue(wallet(1.5));
+    api.relayBalance.mockResolvedValue(balanceResult(1.5, true));
 
     renderWithQuery(
       <RowBalance rowKind="relay" rowId={1} enabled onPurchase={vi.fn()} />,
@@ -139,7 +143,7 @@ describe("RowBalance", () => {
   });
 
   it("LoongPort 用量区单行展示剩余额度、更新时间与刷新，不显示已用", async () => {
-    api.relayBalance.mockResolvedValue(wallet(87.7));
+    api.relayBalance.mockResolvedValue(balanceResult(87.7));
 
     renderWithQuery(
       <RowBalance rowKind="relay" rowId={1} enabled onRefresh={vi.fn()} />,
@@ -152,6 +156,21 @@ describe("RowBalance", () => {
     expect(
       screen.getByRole("button", { name: "刷新用量" }),
     ).toBeInTheDocument();
+  });
+
+  it("统一刷新消费后端原子余额，不会再发一条独立余额请求", async () => {
+    api.relayBalance.mockResolvedValue(balanceResult(87.7));
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+
+    renderWithQuery(
+      <RowBalance rowKind="relay" rowId={1} enabled onRefresh={onRefresh} />,
+    );
+
+    await screen.findByText("87.70");
+    await userEvent.click(screen.getByTitle("刷新用量"));
+
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+    expect(api.relayBalance).toHaveBeenCalledTimes(1);
   });
 
   it("从没登录过的行不查也不渲染", async () => {
