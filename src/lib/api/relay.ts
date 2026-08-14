@@ -91,7 +91,6 @@ export interface RelayLeaderboard {
   kind: LeaderboardKind;
   items: RelayDirectoryItem[];
   syncedAt: number;
-  fromCache: boolean;
 }
 
 export interface TierInfo {

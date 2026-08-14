@@ -19,9 +19,9 @@ mod grok_config;
 pub mod hermes_config;
 mod init_status;
 mod lightweight;
-mod maintenance;
 #[cfg(target_os = "linux")]
 mod linux_fix;
+mod maintenance;
 mod mcp;
 mod model_capabilities;
 mod openclaw_config;

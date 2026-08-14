@@ -546,8 +546,8 @@ fn apply_policy_to_cached(cached: CachedLeaderboard, config: &RemoteConfig) -> R
 
 fn write_cache(leaderboard: &CachedLeaderboard) -> Result<(), AppError> {
     let path = cache_path(leaderboard.kind);
-    let bytes = serde_json::to_vec(leaderboard)
-        .map_err(|source| AppError::JsonSerialize { source })?;
+    let bytes =
+        serde_json::to_vec(leaderboard).map_err(|source| AppError::JsonSerialize { source })?;
     crate::config::atomic_write(&path, &bytes)
 }
 
@@ -669,7 +669,8 @@ async fn refresh_with(
     kind: LeaderboardKind,
     config: &RemoteConfig,
 ) -> Result<RelayLeaderboard, AppError> {
-    let parsed = fetch_live_source_with(client, origin, kind, &managed_veridrop_hosts(config)).await?;
+    let parsed =
+        fetch_live_source_with(client, origin, kind, &managed_veridrop_hosts(config)).await?;
     let items = apply_policy(parsed.clone(), config);
     if items.is_empty() {
         return Err(AppError::Config("VeriDrop 榜单没有可展示站点".into()));

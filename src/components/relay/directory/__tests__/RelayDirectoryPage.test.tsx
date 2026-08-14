@@ -6,17 +6,23 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { RELAY_DIRECTORY_UPDATED_EVENT } from "@/config/constants";
 import type {
   LeaderboardKind,
   RelayDirectoryItem,
   RelayLeaderboard,
 } from "@/lib/api/relay";
+import { createTestQueryClient } from "../../../../../tests/utils/testQueryClient";
+import { emitTauriEvent } from "../../../../../tests/msw/tauriMocks";
 
 const {
   listDirectory,
+  refreshDirectory,
   importSite,
   importDirectorySite,
   refresh,
@@ -26,6 +32,7 @@ const {
   toastWarning,
 } = vi.hoisted(() => ({
   listDirectory: vi.fn(),
+  refreshDirectory: vi.fn(),
   importSite: vi.fn(),
   importDirectorySite: vi.fn(),
   refresh: vi.fn(),
@@ -36,7 +43,13 @@ const {
 }));
 
 vi.mock("@/lib/api", () => ({
-  relayApi: { listDirectory, importSite, importDirectorySite, refresh },
+  relayApi: {
+    listDirectory,
+    refreshDirectory,
+    importSite,
+    importDirectorySite,
+    refresh,
+  },
 }));
 
 vi.mock("../../openInBrowser", () => ({ openInBrowser }));
@@ -59,6 +72,27 @@ vi.mock("sonner", () => ({
 }));
 
 const { RelayDirectoryPage } = await import("../RelayDirectoryPage");
+
+function renderDirectory(
+  props: ComponentProps<typeof RelayDirectoryPage>,
+): ReturnType<typeof render> {
+  const client = createTestQueryClient();
+  return render(
+    <QueryClientProvider client={client}>
+      <RelayDirectoryPage {...props} />
+    </QueryClientProvider>,
+  );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
 
 function item(index: number): RelayDirectoryItem {
   return {
@@ -108,7 +142,6 @@ function leaderboard(
     kind,
     items: Array.from({ length: 13 }, (_, index) => item(index + 1)),
     syncedAt: 1786633200,
-    fromCache: false,
     ...overrides,
   };
 }
@@ -117,6 +150,9 @@ describe("RelayDirectoryPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     listDirectory.mockImplementation((kind: LeaderboardKind) =>
+      Promise.resolve(leaderboard(kind)),
+    );
+    refreshDirectory.mockImplementation((kind: LeaderboardKind) =>
       Promise.resolve(leaderboard(kind)),
     );
     importSite.mockResolvedValue({
@@ -146,7 +182,7 @@ describe("RelayDirectoryPage", () => {
   });
 
   it("defaults Codex to OpenAI and exposes all four leaderboard tabs", async () => {
-    render(<RelayDirectoryPage sourceAppId="codex" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
 
     await waitFor(() => expect(listDirectory).toHaveBeenCalledWith("openai"));
     for (const tab of ["overall", "claude", "openai", "gemini"]) {
@@ -168,7 +204,7 @@ describe("RelayDirectoryPage", () => {
       });
     });
 
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
     expect(await screen.findByText("BestAPI")).toBeInTheDocument();
 
     await user.click(
@@ -190,7 +226,7 @@ describe("RelayDirectoryPage", () => {
   });
 
   it("shows the useful VeriDrop evidence and opens full history", async () => {
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
 
     expect(await screen.findByText("BestAPI")).toBeInTheDocument();
     const row = screen.getByText("BestAPI").closest("article");
@@ -228,7 +264,7 @@ describe("RelayDirectoryPage", () => {
       }),
     );
 
-    render(<RelayDirectoryPage sourceAppId="gemini" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "gemini", onBack: () => {} });
 
     const row = (await screen.findByText("BestAPI")).closest("article");
     expect(
@@ -238,7 +274,7 @@ describe("RelayDirectoryPage", () => {
   });
 
   it("searches and paginates twelve rows per page", async () => {
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
     await screen.findByText("BestAPI");
 
     expect(screen.queryByText("站点 13")).not.toBeInTheDocument();
@@ -257,33 +293,115 @@ describe("RelayDirectoryPage", () => {
     expect(screen.queryByText("站点 13")).not.toBeInTheDocument();
   });
 
-  it("marks cached data with its timestamp and lets the user retry live", async () => {
+  it("shows the last successful VeriDrop sync time", async () => {
     listDirectory.mockResolvedValue(
-      leaderboard("claude", { fromCache: true, items: [item(1)] }),
+      leaderboard("claude", { items: [item(1)] }),
     );
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
 
     expect(
-      await screen.findByText(/loongport\.directory\.source\.cached/),
+      await screen.findByText(/loongport\.directory\.source\.syncedAt/),
     ).toBeInTheDocument();
+  });
+
+  it("keeps each leaderboard cached when switching tabs", async () => {
+    const user = userEvent.setup();
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
+
+    await screen.findByText("BestAPI");
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.directory.tabs.gemini" }),
+    );
+    await waitFor(() => expect(listDirectory).toHaveBeenCalledWith("gemini"));
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.directory.tabs.claude" }),
+    );
+
+    expect(
+      listDirectory.mock.calls.filter(([kind]) => kind === "claude"),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the old list visible while a manual refresh is pending", async () => {
+    const next = deferred<RelayLeaderboard>();
+    refreshDirectory.mockReturnValue(next.promise);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
+    await screen.findByText("BestAPI");
+
     fireEvent.click(
       screen.getByRole("button", {
         name: "loongport.directory.actions.refresh",
       }),
     );
-    await waitFor(() => expect(listDirectory).toHaveBeenCalledTimes(2));
+
+    await waitFor(() =>
+      expect(refreshDirectory).toHaveBeenCalledWith("claude"),
+    );
+    expect(screen.getByText("BestAPI")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "loongport.directory.actions.refresh",
+      }),
+    ).toBeDisabled();
+
+    next.resolve(leaderboard("claude", { items: [item(2)] }));
+    expect(await screen.findByText("站点 2")).toBeInTheDocument();
+  });
+
+  it("keeps the old list and reports a manual refresh failure", async () => {
+    refreshDirectory.mockRejectedValue(new Error("刷新失败"));
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
+    await screen.findByText("BestAPI");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "loongport.directory.actions.refresh",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        expect.stringContaining("刷新失败"),
+      ),
+    );
+    expect(screen.getByText("BestAPI")).toBeInTheDocument();
+  });
+
+  it("invalidates only the leaderboard named by a background event", async () => {
+    const user = userEvent.setup();
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
+    await screen.findByText("BestAPI");
+
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.directory.tabs.gemini" }),
+    );
+    await waitFor(() => expect(listDirectory).toHaveBeenCalledWith("gemini"));
+
+    act(() => {
+      emitTauriEvent(RELAY_DIRECTORY_UPDATED_EVENT, { kind: "claude" });
+    });
+    await user.click(
+      screen.getByRole("tab", { name: "loongport.directory.tabs.claude" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        listDirectory.mock.calls.filter(([kind]) => kind === "claude"),
+      ).toHaveLength(2),
+    );
+    expect(
+      listDirectory.mock.calls.filter(([kind]) => kind === "gemini"),
+    ).toHaveLength(1);
   });
 
   it("waits for authentication and backend refresh before returning", async () => {
     const onBack = vi.fn();
     const onAuthenticated = vi.fn();
-    render(
-      <RelayDirectoryPage
-        sourceAppId="claude"
-        onBack={onBack}
-        onAuthenticated={onAuthenticated}
-      />,
-    );
+    renderDirectory({
+      sourceAppId: "claude",
+      onBack,
+      onAuthenticated,
+    });
     await screen.findByText("BestAPI");
 
     const row = screen.getByText("BestAPI").closest("article");
@@ -305,7 +423,7 @@ describe("RelayDirectoryPage", () => {
       message: "注册或登录尚未完成",
     });
     const onBack = vi.fn();
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={onBack} />);
+    renderDirectory({ sourceAppId: "claude", onBack });
     await screen.findByText("BestAPI");
 
     const row = screen.getByText("BestAPI").closest("article");
@@ -324,13 +442,11 @@ describe("RelayDirectoryPage", () => {
     refresh.mockRejectedValue(new Error("网络不通"));
     const onBack = vi.fn();
     const onAuthenticated = vi.fn();
-    render(
-      <RelayDirectoryPage
-        sourceAppId="claude"
-        onBack={onBack}
-        onAuthenticated={onAuthenticated}
-      />,
-    );
+    renderDirectory({
+      sourceAppId: "claude",
+      onBack,
+      onAuthenticated,
+    });
     await screen.findByText("BestAPI");
 
     const row = screen.getByText("BestAPI").closest("article");
@@ -350,7 +466,7 @@ describe("RelayDirectoryPage", () => {
     ["protocol_conflict", "loongport.addSite.protocolConflict"],
   ])("maps %s to an actionable message", async (kind, key) => {
     importDirectorySite.mockRejectedValue({ kind, message: kind });
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
     await screen.findByText("BestAPI");
 
     const row = screen.getByText("BestAPI").closest("article");
@@ -363,7 +479,7 @@ describe("RelayDirectoryPage", () => {
 
   it("uses the localized fallback for an unknown object error", async () => {
     importDirectorySite.mockRejectedValue({ code: "unexpected" });
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
     await screen.findByText("BestAPI");
 
     const row = screen.getByText("BestAPI").closest("article");
@@ -377,7 +493,7 @@ describe("RelayDirectoryPage", () => {
   });
 
   it("runs a custom site through the same authentication flow", async () => {
-    render(<RelayDirectoryPage sourceAppId="codex" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
     await screen.findByText("BestAPI");
 
     fireEvent.change(
@@ -407,7 +523,7 @@ describe("RelayDirectoryPage", () => {
       }),
     );
 
-    render(<RelayDirectoryPage sourceAppId="claude" onBack={() => {}} />);
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
     await screen.findByText("BestAPI");
 
     const customInput = screen.getByPlaceholderText(

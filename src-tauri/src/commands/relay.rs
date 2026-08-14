@@ -962,8 +962,8 @@ pub async fn relay_list_directory(
     app_handle: tauri::AppHandle,
     kind: crate::relay::leaderboard::LeaderboardKind,
 ) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
-    if let Some(cached) = crate::relay::leaderboard::read_cached(kind)
-        .map_err(|error| error.to_string())?
+    if let Some(cached) =
+        crate::relay::leaderboard::read_cached(kind).map_err(|error| error.to_string())?
     {
         if !crate::relay::leaderboard::is_cache_fresh(kind, chrono::Utc::now().timestamp()) {
             tauri::async_runtime::spawn(async move {
@@ -1002,7 +1002,10 @@ async fn refresh_directory_and_emit(
 ) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
     let leaderboard = crate::relay::leaderboard::refresh(kind).await?;
     app_handle
-        .emit(RELAY_DIRECTORY_UPDATED_EVENT, RelayDirectoryUpdated { kind })
+        .emit(
+            RELAY_DIRECTORY_UPDATED_EVENT,
+            RelayDirectoryUpdated { kind },
+        )
         .map_err(|error| AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}")))?;
     Ok(leaderboard)
 }
@@ -1021,7 +1024,10 @@ pub(crate) async fn refresh_stale_directories(
         async move {
             let leaderboard = crate::relay::leaderboard::refresh_if_stale(kind).await?;
             app_handle
-                .emit(RELAY_DIRECTORY_UPDATED_EVENT, RelayDirectoryUpdated { kind })
+                .emit(
+                    RELAY_DIRECTORY_UPDATED_EVENT,
+                    RelayDirectoryUpdated { kind },
+                )
                 .map_err(|error| {
                     AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}"))
                 })?;

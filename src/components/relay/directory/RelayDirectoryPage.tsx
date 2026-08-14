@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useMemo, useReducer, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -14,13 +15,14 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { RELAY_DIRECTORY_UPDATED_EVENT } from "@/config/constants";
+import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { relayApi } from "@/lib/api";
 import type { AppId } from "@/lib/api";
 import type {
   LeaderboardKind,
   RelayDirectoryItem,
   RelayImportError,
-  RelayLeaderboard,
 } from "@/lib/api/relay";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
@@ -50,43 +52,48 @@ export function RelayDirectoryPage({
   onAuthenticated,
 }: RelayDirectoryPageProps) {
   const { t, i18n } = useTranslation();
+  const queryClient = useQueryClient();
   const [view, dispatch] = useReducer(reduceDirectoryView, {
     kind: initialKind ?? defaultDirectoryKind(sourceAppId),
     search: "",
     page: 1,
   });
-  const [leaderboard, setLeaderboard] = useState<RelayLeaderboard | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [refreshNonce, setRefreshNonce] = useState(0);
   const [authenticatingHost, setAuthenticatingHost] = useState<string | null>(
     null,
   );
   const authenticationInProgress = useRef(false);
   const [customSite, setCustomSite] = useState("");
 
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError("");
-    void relayApi
-      .listDirectory(view.kind)
-      .then((result) => {
-        if (active) setLeaderboard(result);
-      })
-      .catch((reason) => {
-        if (active) setError(extractErrorMessage(reason));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [view.kind, refreshNonce]);
+  const directoryQuery = useQuery({
+    queryKey: ["relay-directory", view.kind],
+    queryFn: () => relayApi.listDirectory(view.kind),
+    staleTime: Infinity,
+  });
 
-  const visibleLeaderboard =
-    leaderboard?.kind === view.kind ? leaderboard : null;
+  const refreshMutation = useMutation({
+    mutationFn: () => relayApi.refreshDirectory(view.kind),
+    onSuccess: (result) => {
+      queryClient.setQueryData(["relay-directory", result.kind], result);
+    },
+    onError: (reason) => {
+      toast.error(
+        t("loongport.directory.refreshFailed", {
+          reason: extractErrorMessage(reason),
+        }),
+      );
+    },
+  });
+
+  useTauriEvent<{ kind: LeaderboardKind }>(
+    RELAY_DIRECTORY_UPDATED_EVENT,
+    ({ kind }) =>
+      queryClient.invalidateQueries({
+        queryKey: ["relay-directory", kind],
+        exact: true,
+      }),
+  );
+
+  const visibleLeaderboard = directoryQuery.data ?? null;
   const filtered = useMemo(
     () => filterDirectoryItems(visibleLeaderboard?.items ?? [], view.search),
     [visibleLeaderboard?.items, view.search],
@@ -188,9 +195,7 @@ export function RelayDirectoryPage({
         <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
           {visibleLeaderboard && (
             <span>
-              {visibleLeaderboard.fromCache
-                ? t("loongport.directory.source.cached", { time: syncedAt })
-                : t("loongport.directory.source.live", { time: syncedAt })}
+              {t("loongport.directory.source.syncedAt", { time: syncedAt })}
             </span>
           )}
           <Button
@@ -198,12 +203,16 @@ export function RelayDirectoryPage({
             variant="ghost"
             size="icon"
             className="h-8 w-8"
-            disabled={loading}
-            onClick={() => setRefreshNonce((value) => value + 1)}
+            disabled={directoryQuery.isPending || refreshMutation.isPending}
+            onClick={() => refreshMutation.mutate()}
             aria-label={t("loongport.directory.actions.refresh")}
           >
             <RefreshCw
-              className={loading ? "h-4 w-4 animate-spin" : "h-4 w-4"}
+              className={
+                directoryQuery.isFetching || refreshMutation.isPending
+                  ? "h-4 w-4 animate-spin"
+                  : "h-4 w-4"
+              }
             />
           </Button>
         </div>
@@ -243,21 +252,25 @@ export function RelayDirectoryPage({
       </div>
 
       <section className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border-default bg-background shadow-sm">
-        {loading && !visibleLeaderboard ? (
+        {directoryQuery.isPending && !visibleLeaderboard ? (
           <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             {t("loongport.directory.loading")}
           </div>
-        ) : error && !visibleLeaderboard ? (
+        ) : directoryQuery.isError && !visibleLeaderboard ? (
           <div className="p-4">
             <Alert variant="destructive">
               <AlertTitle>{t("loongport.directory.errorTitle")}</AlertTitle>
               <AlertDescription className="mt-2 flex items-center justify-between gap-4">
-                <span>{error || t("loongport.directory.errorBody")}</span>
+                <span>
+                  {extractErrorMessage(directoryQuery.error) ||
+                    t("loongport.directory.errorBody")}
+                </span>
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => setRefreshNonce((value) => value + 1)}
+                  disabled={directoryQuery.isFetching}
+                  onClick={() => void directoryQuery.refetch()}
                 >
                   {t("loongport.directory.actions.retry")}
                 </Button>
