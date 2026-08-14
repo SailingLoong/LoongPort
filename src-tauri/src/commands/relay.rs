@@ -44,7 +44,7 @@ use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
-    model_verification::target as verification_target, newapi, newapi_provision,
+    model_verification::target as verification_target, newapi, newapi_provision, pricing,
     provider_fingerprint, provision, purchase,
 };
 use crate::services::ProviderService;
@@ -644,6 +644,92 @@ fn relay_refresh_targets(
     })
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RelayPricingRefreshSummary {
+    attempted: usize,
+    succeeded: usize,
+    failed: Vec<(i64, String)>,
+}
+
+async fn refresh_due_relay_pricing_rows<F, Fut>(
+    relays: Vec<creds::Relay>,
+    now: i64,
+    interval: std::time::Duration,
+    refresh: F,
+) -> RelayPricingRefreshSummary
+where
+    F: Fn(creds::Relay) -> Fut + Sync,
+    Fut: Future<Output = Result<(), AppError>> + Send,
+{
+    use futures::StreamExt;
+
+    let due: Vec<_> = relays
+        .into_iter()
+        .filter(|relay| relay.account_id.is_some() && !relay.pricing_is_fresh(now, interval))
+        .collect();
+    let attempted = due.len();
+    let mut results = futures::stream::iter(due.into_iter().map(|relay| {
+        let refresh = &refresh;
+        async move {
+            let relay_id = relay.id;
+            (relay_id, refresh(relay).await)
+        }
+    }))
+    .buffer_unordered(2);
+    let mut summary = RelayPricingRefreshSummary {
+        attempted,
+        ..Default::default()
+    };
+    while let Some((relay_id, result)) = results.next().await {
+        match result {
+            Ok(()) => summary.succeeded += 1,
+            Err(error) => summary.failed.push((relay_id, error.to_string())),
+        }
+    }
+    summary
+}
+
+pub(crate) async fn refresh_due_relay_pricing(
+    app_handle: tauri::AppHandle,
+) -> Result<(), AppError> {
+    let (relays, db) = {
+        let state = app_handle.state::<AppState>();
+        (with_conn(&state, creds::list)?, Arc::clone(&state.db))
+    };
+    let now = chrono::Utc::now().timestamp();
+    let summary = refresh_due_relay_pricing_rows(
+        relays,
+        now,
+        crate::maintenance::config::RELAY_PRICING_REFRESH_INTERVAL,
+        move |relay| {
+            let app_handle = app_handle.clone();
+            let db = Arc::clone(&db);
+            async move {
+                let relay = usable_relay(&app_handle, relay.id).await?;
+                let updates = pricing::fetch_rate_updates(&relay).await?;
+                pricing::apply_rate_updates(&db, &updates)?;
+                let conn = db
+                    .conn
+                    .lock()
+                    .map_err(|error| AppError::Database(format!("获取数据库连接失败: {error}")))?;
+                creds::mark_pricing_synced(&conn, relay.id, chrono::Utc::now().timestamp())
+            }
+        },
+    )
+    .await;
+
+    for (relay_id, error) in &summary.failed {
+        log::warn!("中转站 #{relay_id} 后台倍率刷新失败: {error}");
+    }
+    log::info!(
+        "中转站后台倍率刷新完成: attempted={}, succeeded={}, failed={}",
+        summary.attempted,
+        summary.succeeded,
+        summary.failed.len()
+    );
+    Ok(())
+}
+
 async fn refresh_relay_outcome(
     app_handle: &tauri::AppHandle,
     relay_id: i64,
@@ -1083,11 +1169,14 @@ pub async fn relay_import_directory_site(
     app_handle: tauri::AppHandle,
     site: String,
 ) -> Result<ImportResult, RelayImportError> {
-    let source = if is_signed_directory_entry(&site) {
-        BrowserEntrySource::SignedDirectory
-    } else {
-        BrowserEntrySource::Manual
-    };
+    let config = crate::relay::remote_config::load_cached().ok_or_else(|| RelayImportError {
+        kind: Some(RelayImportErrorKind::UnsupportedSite),
+        message: "该站点需要手动添加".into(),
+    })?;
+    let source = directory_entry_source(&config, &site).ok_or_else(|| RelayImportError {
+        kind: Some(RelayImportErrorKind::UnsupportedSite),
+        message: "该站点需要手动添加".into(),
+    })?;
     import_site(&app_handle, &site, source).await
 }
 
@@ -1134,18 +1223,28 @@ enum BrowserEntrySource {
     SignedDirectory,
 }
 
-fn is_signed_directory_entry(input: &str) -> bool {
+fn directory_entry_source(
+    config: &crate::relay::remote_config::RemoteConfig,
+    input: &str,
+) -> Option<BrowserEntrySource> {
     let Ok(candidate) = browser_entry_url(input) else {
-        return false;
+        return None;
     };
-    crate::relay::remote_config::load_cached().is_some_and(|config| {
-        config.relay_directory.sites.values().any(|site| {
-            site.entry_url
-                .as_deref()
-                .and_then(|entry| browser_entry_url(entry).ok())
-                .is_some_and(|entry| entry == candidate)
+    config
+        .relay_directory
+        .sites
+        .iter()
+        .find_map(|(host, site)| {
+            if let Some(entry) = site.entry_url.as_deref() {
+                if url::Url::parse(entry).is_ok_and(|declared| declared.scheme() == "https") {
+                    return (browser_entry_url(entry).ok()? == candidate)
+                        .then_some(BrowserEntrySource::SignedDirectory);
+                }
+            }
+
+            (!host.is_empty() && browser_entry_url(host).ok()? == candidate)
+                .then_some(BrowserEntrySource::Manual)
         })
-    })
 }
 
 fn recoverable_native_discovery_error(
@@ -2835,7 +2934,21 @@ async fn provision_relay(
 ) -> Result<ProvisionSummary, AppError> {
     let batch = provision_backend(op, Some(browser_api_fallback(app_handle))).await?;
     let state = app_handle.state::<AppState>();
-    persist_provision_batch(state.inner(), op, batch)
+    let result = persist_provision_batch(state.inner(), op, batch);
+    mark_pricing_after_success(state.inner(), op.id, chrono::Utc::now().timestamp(), result)
+}
+
+fn mark_pricing_after_success<T>(
+    state: &AppState,
+    relay_id: i64,
+    synced_at: i64,
+    result: Result<T, AppError>,
+) -> Result<T, AppError> {
+    let value = result?;
+    with_conn(state, |conn| {
+        creds::mark_pricing_synced(conn, relay_id, synced_at)
+    })?;
+    Ok(value)
 }
 
 fn persist_provision_batch(
@@ -4777,6 +4890,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn directory_entry_source_accepts_only_policy_owned_entries() {
+        let config = crate::relay::remote_config::RemoteConfig {
+            relay_directory: crate::relay::remote_config::RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([
+                    (
+                        "790053500.com".into(),
+                        crate::relay::remote_config::RelayDirectorySite {
+                            veridrop_host: Some("api.790053500.com".into()),
+                            entry_url: Some("https://790053500.com/keys".into()),
+                            display_name: Some("鑫旺".into()),
+                        },
+                    ),
+                    (
+                        "plain.example".into(),
+                        crate::relay::remote_config::RelayDirectorySite::default(),
+                    ),
+                    (
+                        "broken.example".into(),
+                        crate::relay::remote_config::RelayDirectorySite {
+                            veridrop_host: None,
+                            entry_url: Some("http://broken.example/keys".into()),
+                            display_name: None,
+                        },
+                    ),
+                ]),
+            },
+            ..crate::relay::remote_config::RemoteConfig::default()
+        };
+
+        assert_eq!(
+            directory_entry_source(&config, "https://790053500.com/keys"),
+            Some(BrowserEntrySource::SignedDirectory)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://plain.example"),
+            Some(BrowserEntrySource::Manual)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://unknown.example"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://790053500.com/other"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://broken.example"),
+            Some(BrowserEntrySource::Manual)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://broken.example/keys"),
+            None
+        );
+    }
+
     fn detected_sub2api() -> discovery::DetectedSite {
         discovery::DetectedSite {
             backend_kind: discovery::BackendKind::Sub2Api,
@@ -5659,6 +5829,7 @@ mod tests {
             token_expires_at: None,
             user_agent: None,
             cf_clearance: None,
+            pricing_synced_at: None,
             sort_index: 0,
         }
     }
@@ -7766,5 +7937,93 @@ mod tests {
         assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
         assert_eq!(persisted.account_label, "Old Label");
         assert_eq!(persisted.login_identifier, "old-login");
+    }
+
+    #[tokio::test]
+    async fn pricing_refresh_skips_fresh_rows_and_continues_after_one_failure() {
+        let mut fresh = test_newapi_relay(1);
+        fresh.pricing_synced_at = Some(100);
+        let failed = test_newapi_relay(2);
+        let succeeded = test_newapi_relay(3);
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let attempts_for_refresh = Arc::clone(&attempts);
+
+        let summary = refresh_due_relay_pricing_rows(
+            vec![fresh, failed, succeeded],
+            159,
+            std::time::Duration::from_secs(60),
+            move |relay| {
+                let attempts = Arc::clone(&attempts_for_refresh);
+                async move {
+                    attempts.lock().unwrap().push(relay.id);
+                    if relay.id == 2 {
+                        Err(AppError::Message("expected failure".into()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(summary.attempted, 2);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].0, 2);
+        let mut attempted_ids = attempts.lock().unwrap().clone();
+        attempted_ids.sort_unstable();
+        assert_eq!(attempted_ids, vec![2, 3]);
+    }
+
+    fn pricing_timestamp_state(initial: Option<i64>) -> (AppState, i64) {
+        let db = Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://pricing.example",
+                "Pricing",
+                "https://pricing.example/v1",
+                discovery::BackendKind::Sub2Api,
+            )
+        })
+        .unwrap();
+        if let Some(initial) = initial {
+            with_conn(&state, |conn| {
+                creds::mark_pricing_synced(conn, relay_id, initial)
+            })
+            .unwrap();
+        }
+        (state, relay_id)
+    }
+
+    #[test]
+    fn successful_full_refresh_marks_pricing_fresh() {
+        let (state, relay_id) = pricing_timestamp_state(None);
+
+        mark_pricing_after_success(&state, relay_id, 456, Ok(())).unwrap();
+
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(relay.pricing_synced_at, Some(456));
+    }
+
+    #[test]
+    fn failed_full_refresh_keeps_the_previous_pricing_time() {
+        let (state, relay_id) = pricing_timestamp_state(Some(123));
+
+        let result: Result<(), AppError> = mark_pricing_after_success(
+            &state,
+            relay_id,
+            456,
+            Err(AppError::Message("expected failure".into())),
+        );
+
+        assert!(result.is_err());
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(relay.pricing_synced_at, Some(123));
     }
 }

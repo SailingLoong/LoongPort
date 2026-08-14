@@ -85,6 +85,7 @@ export interface RelayDirectoryItem {
   scenarios: string[];
   issues: string[];
   entryUrl: string;
+  autoAdd: boolean;
 }
 
 export interface RelayLeaderboard {

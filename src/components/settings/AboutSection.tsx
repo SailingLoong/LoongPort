@@ -239,8 +239,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   );
   const [showInstallCommands, setShowInstallCommands] = useState(false);
 
-  const { hasUpdate, updateInfo, resetDismiss, isChecking, checkUpdate } =
-    useUpdate();
+  const {
+    hasUpdate,
+    updateInfo,
+    resetDismiss,
+    isChecking,
+    checkUpdate,
+    error,
+  } = useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -488,9 +494,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       return;
     }
 
-    // 真的去问一次（`checkUpdate()` → updater 插件 → 本仓 Releases 的 latest.json）。
+    // 真的去问一次（`checkUpdate()` → 前端命令 → 后端 updater service）。
     // 2026-08-04 之前这里走的是 `settingsApi.checkUpdates()`（只是开 Releases 页）——
-    // 那时 updater 插件有意不注册，`check()` 必抛。现在插件与端点都配好了，
+    // 那时后端更新服务有意未启用，命令必抛。现在后端服务与 updater 通道都已配好，
     // 该问就问；**问不到才回落到开页面**，让用户至少有路可走（离线、GitHub 不可达、
     // 或免安装版被放在只读位置都会走到这里）。
     try {
@@ -959,6 +965,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               </p>
             )}
           </motion.div>
+        )}
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
         )}
       </motion.div>
 

@@ -76,9 +76,39 @@ export interface ModelsDevSyncConfig {
   lastSyncError: string | null;
 }
 
+export interface ModelsDevSyncPreferences {
+  autoSyncEnabled: boolean;
+  includeCommonModels: boolean;
+  selectedModelKeys: string[];
+  excludedCommonModelKeys: string[];
+}
+
 export interface ModelsDevSyncState {
   config: ModelsDevSyncConfig;
   configPath: string;
+}
+
+export interface ModelsDevEntry {
+  key: string;
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  normalizedId: string;
+  modelName: string;
+  releaseDate: string;
+  input: string;
+  output: string;
+  cacheRead: string;
+  cacheWrite: string;
+  isCommon: boolean;
+}
+
+export interface ModelsDevSyncResult {
+  skipped: boolean;
+  selected: number;
+  imported: number;
+  changed: number;
+  syncedAt: number | null;
 }
 
 export interface UsageSummary {

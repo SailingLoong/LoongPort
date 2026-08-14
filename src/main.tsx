@@ -8,7 +8,9 @@ import "./index.css";
 import i18n from "./i18n";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme-provider";
+import { MODELS_DEV_PRICING_UPDATED_EVENT } from "@/config/constants";
 import { queryClient } from "@/lib/query";
+import { usageKeys } from "@/lib/query/usage";
 import { Toaster } from "@/components/ui/sonner";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -20,10 +22,6 @@ import {
   installGlobalErrorHandlers,
   reportFrontendError,
 } from "./lib/frontendLogger";
-import {
-  MODELS_DEV_SYNC_CONFIG_QUERY_KEY,
-  syncModelsDevPricingOnStartup,
-} from "./lib/modelsDevAutoSync";
 
 installConsoleLogBridge();
 installGlobalErrorHandlers();
@@ -86,6 +84,15 @@ try {
   reportFrontendError("config_load_error_listener", e);
 }
 
+void listen(MODELS_DEV_PRICING_UPDATED_EVENT, () => {
+  queryClient.invalidateQueries({ queryKey: usageKeys.all });
+  queryClient.invalidateQueries({
+    queryKey: usageKeys.modelsDevSyncConfig(),
+  });
+}).catch((e) => {
+  reportFrontendError("models_dev_pricing_updated_listener", e);
+});
+
 async function bootstrap() {
   // 启动早期主动查询后端初始化错误，避免事件竞态
   try {
@@ -130,25 +137,6 @@ async function bootstrap() {
       </FrontendErrorBoundary>
     </React.StrictMode>,
   );
-
-  void syncModelsDevPricingOnStartup()
-    .then((result) => {
-      if (!result.skipped) {
-        return Promise.all([
-          queryClient.invalidateQueries({ queryKey: ["usage"] }),
-          queryClient.invalidateQueries({
-            queryKey: MODELS_DEV_SYNC_CONFIG_QUERY_KEY,
-          }),
-        ]);
-      }
-    })
-    .catch((error) => {
-      // 离线或 models.dev 暂时不可用不应阻塞应用启动。
-      reportFrontendError("models_dev_startup_sync", error);
-      void queryClient.invalidateQueries({
-        queryKey: MODELS_DEV_SYNC_CONFIG_QUERY_KEY,
-      });
-    });
 }
 
 void bootstrap();

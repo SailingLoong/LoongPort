@@ -13,6 +13,7 @@
 //! | `account_label` | 给人看的账号名（昵称优先，回落邮箱） |
 //! | `login_identifier` | 重登时预填进登录框的值。**给机器填表单用**，见字段注释 |
 //! | `auth_token` / `refresh_token` / `token_expires_at` | 登录凭据 |
+//! | `pricing_synced_at` | 最近一次成功刷新倍率的 Unix 秒；`NULL` 表示从未成功刷新 |
 //!
 //! ## 去重是「域名 + 账号」，不是只看域名
 //!
@@ -65,6 +66,7 @@ use rusqlite::{
     types::{FromSql, FromSqlError, FromSqlResult, ValueRef},
     Connection, OptionalExtension,
 };
+use std::time::Duration;
 
 use crate::error::AppError;
 
@@ -148,6 +150,8 @@ pub struct Relay {
     /// `None` = 这个站没开挑战（绝大多数站如此），不是错误态。
     /// 过期后请求会再次 403，走重新登录即可覆盖。
     pub cf_clearance: Option<String>,
+    /// 最近一次成功刷新倍率的 Unix 秒。`None` 表示从未成功刷新。
+    pub pricing_synced_at: Option<i64>,
     /// 用户手工拖动决定的行序，越小越靠前。
     ///
     /// ## 为什么需要一列专门存序
@@ -206,6 +210,11 @@ impl Relay {
     pub fn can_refresh(&self, now_unix: i64) -> bool {
         self.token_looks_valid(now_unix) || self.refresh_token.is_some()
     }
+
+    pub fn pricing_is_fresh(&self, now: i64, interval: Duration) -> bool {
+        self.pricing_synced_at
+            .is_some_and(|synced| now.saturating_sub(synced) < interval.as_secs() as i64)
+    }
 }
 
 /// 建表 + 索引。**全新库与 v8→v9 迁移都走它，两条路建出的形态完全一样。**
@@ -234,7 +243,8 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
             updated_at INTEGER NOT NULL DEFAULT 0,
             backend_kind TEXT NOT NULL DEFAULT 'sub2api',
             user_agent TEXT,
-            cf_clearance TEXT
+            cf_clearance TEXT,
+            pricing_synced_at INTEGER
         )",
         [],
     )
@@ -265,7 +275,7 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
 const SELECT_COLS: &str =
     "id, site_origin, site_name, api_base_url, account_id, account_label, login_identifier, \
      auth_token, refresh_token, token_expires_at, sort_index, backend_kind, user_agent, \
-     cf_clearance";
+     cf_clearance, pricing_synced_at";
 
 fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
     Ok(Relay {
@@ -283,6 +293,7 @@ fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
         backend_kind: row.get(11)?,
         user_agent: row.get(12)?,
         cf_clearance: row.get(13)?,
+        pricing_synced_at: row.get(14)?,
     })
 }
 
@@ -338,6 +349,18 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Relay>, AppError> {
     )
     .optional()
     .map_err(|e| AppError::Database(format!("读取中转站失败: {e}")))
+}
+
+pub fn mark_pricing_synced(
+    conn: &Connection,
+    relay_id: i64,
+    synced_at: i64,
+) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE loongport_relay SET pricing_synced_at = ?1 WHERE id = ?2",
+        params![synced_at, relay_id],
+    )?;
+    Ok(())
 }
 
 /// 添加或更新一个站点，并把它设为当前选中。返回那一行的 id。
@@ -852,6 +875,48 @@ mod tests {
             token_expires_at: Some(123),
             session: SessionEnvironment::default(),
         }
+    }
+
+    fn seed_authenticated_relay(conn: &Connection, site_origin: &str, account_id: i64) -> i64 {
+        save_authenticated_relay(conn, authenticated(site_origin, account_id, "access-token"))
+            .unwrap()
+    }
+
+    #[test]
+    fn marking_one_relay_pricing_fresh_does_not_touch_another() {
+        let conn = mem();
+        let first = seed_authenticated_relay(&conn, "https://a.example", 1);
+        let second = seed_authenticated_relay(&conn, "https://b.example", 2);
+        mark_pricing_synced(&conn, first, 123).unwrap();
+        assert_eq!(
+            get(&conn, first).unwrap().unwrap().pricing_synced_at,
+            Some(123)
+        );
+        assert_eq!(get(&conn, second).unwrap().unwrap().pricing_synced_at, None);
+    }
+
+    #[test]
+    fn pricing_is_fresh_only_within_the_interval() {
+        let conn = mem();
+        let relay_id = seed_authenticated_relay(&conn, "https://relay.example", 1);
+        let unsynced = get(&conn, relay_id).unwrap().unwrap();
+        let interval = std::time::Duration::from_secs(60);
+        assert!(!unsynced.pricing_is_fresh(159, interval));
+
+        mark_pricing_synced(&conn, relay_id, 100).unwrap();
+        let synced = get(&conn, relay_id).unwrap().unwrap();
+        assert!(synced.pricing_is_fresh(159, interval));
+        assert!(!synced.pricing_is_fresh(160, interval));
+    }
+
+    #[test]
+    fn pricing_is_fresh_tolerates_the_clock_moving_backwards() {
+        let conn = mem();
+        let relay_id = seed_authenticated_relay(&conn, "https://relay.example", 1);
+        mark_pricing_synced(&conn, relay_id, 100).unwrap();
+        let relay = get(&conn, relay_id).unwrap().unwrap();
+
+        assert!(relay.pricing_is_fresh(99, std::time::Duration::from_secs(60)));
     }
 
     #[test]

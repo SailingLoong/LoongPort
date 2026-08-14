@@ -3095,6 +3095,7 @@
       "actions": {
         "authenticate": "登録またはログイン",
         "autoAddHint": "完了後に自動追加",
+        "manualAddHint": "ログイン後に手動で追加",
         "history": "全履歴",
         "refresh": "ライブランキングを更新",
         "retry": "再試行",

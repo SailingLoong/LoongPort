@@ -176,6 +176,34 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个。
 > 但要你回 [Releases](../../releases) 下载新的压缩包。这是选免安装版的代价，
 > 换来的是没有安装步骤、不会被安全软件拦。
 
+## DeepSeek Harness（dsh）
+
+LoongPort 还提供独立的 [`loongport` npm 集成](https://www.npmjs.com/package/loongport)，
+用于给 [DeepSeek Harness（dsh）](https://github.com/deepseek-ai/deepseek-harness)
+写入一个 OpenAI 兼容路由。它不属于下面的桌面端支持矩阵：传输、流式输出、工具调用与重试
+仍由 dsh 内置的 `llm-pi-ai` 负责。
+
+先预览计划，不改文件：
+
+```bash
+LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
+  --base-url https://relay.example.com/v1 \
+  --model model-id
+```
+
+确认后显式加 `--write`：
+
+```bash
+LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
+  --base-url https://relay.example.com/v1 \
+  --model model-id \
+  --write
+```
+
+API key 只从环境变量读取。命令只更新选定的 provider 路由与凭据名，保留其他 dsh 配置；
+完整的安装要求、安全边界和选项见 **[loongport.dev/zh/dsh](https://loongport.dev/zh/dsh)**，
+源码在 **[SailingLoong/loongport-dsh](https://github.com/SailingLoong/loongport-dsh)**。
+
 ## 支持范围
 
 | | 已支持 | 在做 |
