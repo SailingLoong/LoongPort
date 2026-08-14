@@ -81,10 +81,10 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
 /// cc-switch–owned `model_catalog_json`, using the same path ownership rules as
 /// Codex live-setting import.
 pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
-    let generated_path = crate::codex_config::get_codex_model_catalog_path();
+    let config_dir = crate::codex_config::get_codex_config_dir();
     let active_catalog_path = match crate::codex_config::read_codex_config_text() {
         Ok(config_text) => {
-            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &generated_path)
+            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &config_dir)
         }
         Err(_) => None,
     };
@@ -92,8 +92,13 @@ pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
     let catalog = if let Some(catalog_path) =
         active_catalog_path.as_ref().filter(|path| path.exists())
     {
-        let text = std::fs::read_to_string(catalog_path).unwrap_or_default();
-        serde_json::from_str(&text).unwrap_or(json!({"models": []}))
+        match crate::codex_config::read_codex_model_catalog_text(catalog_path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or(json!({"models": []})),
+            Err(error) => {
+                log::warn!("[models] 拒绝读取越界或过大的目录文件: {error}");
+                json!({"models": []})
+            }
+        }
     } else {
         if active_catalog_path.is_none() {
             log::debug!(
@@ -225,7 +230,12 @@ async fn handle_messages_for_app(
     let response = result.response;
 
     // 检查是否需要格式转换（OpenRouter 等中转服务）
-    let adapter = get_adapter(&app_type);
+    let adapter = get_adapter(&app_type).ok_or_else(|| {
+        ProxyError::ConfigError(format!(
+            "{} does not support proxy routing",
+            app_type.as_str()
+        ))
+    })?;
     let needs_transform = adapter.needs_transform(&ctx.provider);
 
     // Claude 特有：格式转换处理
@@ -1896,7 +1906,8 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         | ProxyError::NotRunning
         | ProxyError::BindFailed(_)
         | ProxyError::StopTimeout
-        | ProxyError::StopFailed(_) => "cc_switch_proxy_error",
+        | ProxyError::StopFailed(_)
+        | ProxyError::ResponseBodyTooLarge(_) => "cc_switch_proxy_error",
     }
 }
 

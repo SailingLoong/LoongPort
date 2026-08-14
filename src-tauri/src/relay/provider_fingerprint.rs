@@ -12,7 +12,7 @@ use rusqlite::{params, TransactionBehavior};
 
 /// Return the normalized `(site origin, api key)` fingerprint for a provider.
 pub(crate) fn for_provider(provider: &Provider, app_type: &AppType) -> Option<(String, String)> {
-    let base_url = crate::proxy::providers::get_adapter(app_type)
+    let base_url = crate::proxy::providers::get_adapter(app_type)?
         .extract_base_url(provider)
         .ok()?;
     let origin = crate::relay::api::normalize_site_origin(&base_url).ok()?;

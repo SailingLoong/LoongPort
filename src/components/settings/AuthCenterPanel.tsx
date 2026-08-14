@@ -70,7 +70,7 @@ export function AuthCenterPanel() {
           </div>
         </div>
 
-        <CodexOAuthSection />
+        <CodexOAuthSection showAccountQuota />
 
         {/* 「切回 ChatGPT 官方登录」——**LoongPort 自己的东西**，收在
             `components/relay/` 下（这里只挂一行，见 CLAUDE.md §一）。

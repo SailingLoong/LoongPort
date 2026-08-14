@@ -2,10 +2,21 @@
 //!
 //! 提供前端调用的 API 接口
 
+use std::str::FromStr;
+
 use crate::error::AppError;
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
+
+fn require_proxy_app(app_type: &str) -> Result<crate::app_config::AppType, String> {
+    let app = crate::app_config::AppType::from_str(app_type)
+        .map_err(|error| format!("无效的应用类型: {error}"))?;
+    if !app.supports_local_proxy() {
+        return Err(format!("{} 不支持本地路由", app.as_str()));
+    }
+    Ok(app)
+}
 
 /// 启动代理服务器（仅启动服务，不接管 Live 配置）
 #[tauri::command]
@@ -119,6 +130,7 @@ pub async fn get_proxy_config_for_app(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<AppProxyConfig, String> {
+    require_proxy_app(&app_type)?;
     let db = &state.db;
     db.get_proxy_config_for_app(&app_type)
         .await
@@ -135,6 +147,7 @@ pub async fn update_proxy_config_for_app(
 ) -> Result<(), String> {
     let db = &state.db;
     let app_type = config.app_type.clone();
+    require_proxy_app(&app_type)?;
     let circuit_config = CircuitBreakerConfig::from(&config);
 
     db.update_proxy_config_for_app(config)
@@ -282,6 +295,7 @@ pub async fn get_provider_health(
     provider_id: String,
     app_type: String,
 ) -> Result<ProviderHealth, String> {
+    require_proxy_app(&app_type)?;
     let db = &state.db;
     db.get_provider_health(&provider_id, &app_type)
         .await
@@ -300,6 +314,7 @@ pub async fn reset_circuit_breaker(
     provider_id: String,
     app_type: String,
 ) -> Result<(), String> {
+    require_proxy_app(&app_type)?;
     // 1. 重置数据库健康状态
     let db = &state.db;
     db.update_provider_health(&provider_id, &app_type, true, None)
@@ -416,6 +431,7 @@ pub async fn get_circuit_breaker_stats(
     provider_id: String,
     app_type: String,
 ) -> Result<Option<CircuitBreakerStats>, String> {
+    require_proxy_app(&app_type)?;
     // 这个功能需要访问运行中的代理服务器的内存状态
     // 目前先返回 None，后续可以通过 ProxyService 暴露接口来实现
     let _ = (state, provider_id, app_type);

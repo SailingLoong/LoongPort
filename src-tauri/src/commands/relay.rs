@@ -4367,8 +4367,7 @@ fn relay_balance_inputs(state: &AppState, relay: &creds::Relay) -> (String, Vec<
             if let Some(sk) = provision::extract_api_key(&provider.settings_config, &app_type) {
                 if base_url.is_none() {
                     base_url = crate::proxy::providers::get_adapter(&app_type)
-                        .extract_base_url(provider)
-                        .ok();
+                        .and_then(|adapter| adapter.extract_base_url(provider).ok());
                 }
                 if !sk.trim().is_empty() && !keys.contains(&sk) {
                     keys.push(sk);

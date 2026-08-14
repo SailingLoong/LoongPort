@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import { providersApi, openclawApi, type AppId } from "@/lib/api";
+import { piApi, providersApi, openclawApi, type AppId } from "@/lib/api";
 import type {
   Provider,
   UsageScript,
@@ -102,7 +102,10 @@ export function useProviderActions(activeApp: AppId) {
   // 更新供应商
   const updateProvider = useCallback(
     async (provider: Provider, originalId?: string) => {
-      await updateProviderMutation.mutateAsync({ provider, originalId });
+      await updateProviderMutation.mutateAsync({
+        provider,
+        originalId,
+      });
 
       // 更新托盘菜单（失败不影响主操作）
       try {
@@ -217,7 +220,11 @@ export function useProviderActions(activeApp: AppId) {
           },
         };
 
-        await providersApi.update(updatedProvider, activeApp);
+        if (activeApp === "pi") {
+          await piApi.updateProviderUsageScript(provider.id, script);
+        } else {
+          await providersApi.update(updatedProvider, activeApp);
+        }
         await queryClient.invalidateQueries({
           queryKey: ["providers", activeApp],
         });
@@ -249,7 +256,7 @@ export function useProviderActions(activeApp: AppId) {
 
   // Set provider as default model (OpenClaw only)
   const setAsDefaultModel = useCallback(
-    async (provider: Provider) => {
+    async (provider: Provider, modelId?: string) => {
       const config = provider.settingsConfig as OpenClawProviderConfig;
       if (!config.models || config.models.length === 0) {
         toast.error(
@@ -260,12 +267,31 @@ export function useProviderActions(activeApp: AppId) {
         return;
       }
 
-      const model: OpenClawDefaultModel = {
-        primary: `${provider.id}/${config.models[0].id}`,
-        fallbacks: config.models.slice(1).map((m) => `${provider.id}/${m.id}`),
-      };
+      const selectedModel = modelId
+        ? config.models.find((model) => model.id === modelId)
+        : config.models[0];
+      if (!selectedModel) {
+        toast.error(
+          t("notifications.openclawModelNotFound", {
+            defaultValue: "所选模型已不存在，请刷新后重试",
+          }),
+        );
+        return;
+      }
 
       try {
+        const primary = `${provider.id}/${selectedModel.id}`;
+        const existingDefault = await openclawApi.getDefaultModel();
+        const model: OpenClawDefaultModel = {
+          ...(existingDefault ?? {}),
+          primary,
+        };
+        if (existingDefault?.fallbacks) {
+          model.fallbacks = existingDefault.fallbacks.filter(
+            (fallback) => fallback !== primary,
+          );
+        }
+
         await openclawApi.setDefaultModel(model);
         await queryClient.invalidateQueries({
           queryKey: openclawKeys.defaultModel,

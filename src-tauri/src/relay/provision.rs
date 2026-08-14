@@ -1177,6 +1177,8 @@ fn api_key_locations(app_type: &AppType) -> Option<&'static [&'static [&'static 
         AppType::OpenClaw => Some(&[OPENCLAW]),
         AppType::OpenCode => Some(&[OPENCODE]),
         AppType::GrokBuild => None,
+        // Pi 的 provider 形态与中转站链路无关：归 None，不参与 sk 提取/判等。
+        AppType::Pi => None,
     }
 }
 
@@ -2460,6 +2462,16 @@ mod tests {
         // 留着 Option 与那道闸**不是多余**：它让「上游哪天新增一个 app_type
         // 而我们还没验证过它」这件事有地方表达，而不是静默生成一份没验证过的配置。
         for app_type in AppType::all() {
+            // Pi（上游 3.19.x 新增）还没接入中转站链路：在验证过它的配置形状前，
+            // settings_config_for 对它返回 None —— do_provision 的闸会明确拦截，
+            // 而不是静默生成一份没验证过的配置。这正是上面注释说的那个表达位。
+            if matches!(app_type, AppType::Pi) {
+                assert!(
+                    settings_config_for(&app_type, "k", "n", "https://x.dev", "m").is_none(),
+                    "Pi 还没验证过中转站配置形状，应该显式返回 None"
+                );
+                continue;
+            }
             assert!(
                 settings_config_for(&app_type, "k", "n", "https://x.dev", "m").is_some(),
                 "{app_type:?} 没有配置形状 —— 上游 build_provider_from_request 该覆盖它"

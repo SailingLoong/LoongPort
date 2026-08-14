@@ -39,6 +39,8 @@ vi.mock("@/lib/query/usage", () => ({
   },
 }));
 vi.mock("@tauri-apps/api/core", () => ({
+  // main.tsx（上游 initializeWindowActivity）会探测宿主环境
+  isTauri: () => false,
   invoke: (...args: unknown[]) => mocks.invoke(...args),
 }));
 vi.mock("@tauri-apps/api/event", () => ({

@@ -20,6 +20,10 @@ import { server } from "../msw/server";
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
+const skillsPanelMocks = vi.hoisted(() => ({
+  checkUpdates: vi.fn(),
+  openDiscovery: vi.fn(),
+}));
 
 vi.mock("sonner", () => ({
   toast: {
@@ -37,6 +41,8 @@ vi.mock("@/components/providers/ProviderList", () => ({
     onConfigureUsage,
     onOpenWebsite,
     onCreate,
+    onDelete,
+    onRemoveFromConfig,
   }: any) =>
     (() => {
       const currentProvider = Object.values(providers).find(
@@ -58,6 +64,14 @@ vi.mock("@/components/providers/ProviderList", () => ({
           </button>
           <button onClick={() => onOpenWebsite("https://example.com")}>
             open-website
+          </button>
+          <button onClick={() => onDelete(Object.values(providers)[0])}>
+            delete
+          </button>
+          <button
+            onClick={() => onRemoveFromConfig?.(Object.values(providers)[0])}
+          >
+            remove
           </button>
           <button onClick={() => onCreate?.()}>create</button>
         </div>
@@ -120,9 +134,10 @@ vi.mock("@/components/UsageScriptModal", () => ({
 }));
 
 vi.mock("@/components/ConfirmDialog", () => ({
-  ConfirmDialog: ({ isOpen, onConfirm, onCancel }: any) =>
+  ConfirmDialog: ({ isOpen, message, onConfirm, onCancel }: any) =>
     isOpen ? (
       <div data-testid="confirm-dialog">
+        <div data-testid="confirm-message">{message}</div>
         <button onClick={() => onConfirm()}>confirm-delete</button>
         <button onClick={() => onCancel()}>cancel-delete</button>
       </div>
@@ -142,6 +157,32 @@ vi.mock("@/components/AppSwitcher", () => ({
     </div>
   ),
 }));
+
+vi.mock("@/components/skills/UnifiedSkillsPanel", async () => {
+  const React = await import("react");
+  const MockUnifiedSkillsPanel = React.forwardRef(
+    ({ onCheckUpdatesStateChange }: any, ref) => {
+      React.useEffect(() => {
+        onCheckUpdatesStateChange?.({ isChecking: false, hasSkills: true });
+        return () =>
+          onCheckUpdatesStateChange?.({
+            isChecking: false,
+            hasSkills: false,
+          });
+      }, [onCheckUpdatesStateChange]);
+      React.useImperativeHandle(ref, () => ({
+        openDiscovery: skillsPanelMocks.openDiscovery,
+        openImport: vi.fn(),
+        openInstallFromZip: vi.fn(),
+        openRestoreFromBackup: vi.fn(),
+        checkUpdates: skillsPanelMocks.checkUpdates,
+      }));
+      return <div data-testid="unified-skills-panel" />;
+    },
+  );
+  MockUnifiedSkillsPanel.displayName = "MockUnifiedSkillsPanel";
+  return { default: MockUnifiedSkillsPanel };
+});
 
 vi.mock("@/components/UpdateBadge", () => ({
   UpdateBadge: ({ onClick }: any) => (
@@ -233,6 +274,10 @@ describe("App integration with MSW", () => {
     fireEvent.click(await screen.findByText("switch-codex-image"));
 
     await waitFor(() => expect(syncCalls).toBe(1));
+    skillsPanelMocks.checkUpdates.mockReset();
+    skillsPanelMocks.openDiscovery.mockReset();
+    localStorage.removeItem(LAST_VIEW_STORAGE_KEY);
+    localStorage.removeItem(LAST_APP_STORAGE_KEY);
   });
 
   it("covers basic provider flows via real hooks", async () => {
@@ -372,5 +417,82 @@ describe("App integration with MSW", () => {
     expect(toastErrorMock).not.toHaveBeenCalledWith(
       expect.stringContaining("Provider key is required for openclaw"),
     );
+  });
+
+  it("warns without blocking when removing Pi's global default provider", async () => {
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "pi");
+    setProviders("pi", {
+      custom: {
+        id: "custom",
+        name: "Custom Pi",
+        settingsConfig: {
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "test-key",
+          api: "openai-completions",
+          models: [{ id: "model-a" }],
+        },
+        category: "custom",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+    });
+    server.use(
+      http.post("http://tauri.local/get_pi_current_state", () =>
+        HttpResponse.json({
+          enabledProviderIds: ["custom"],
+          defaultProviderId: "custom",
+        }),
+      ),
+    );
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "Custom Pi",
+      ),
+    );
+    fireEvent.click(screen.getByText("remove"));
+
+    expect(screen.getByTestId("confirm-message")).toHaveTextContent(
+      "confirm.piDefaultProviderWarning",
+    );
+    fireEvent.click(screen.getByText("confirm-delete"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("hosts the Skills check-update action in the App toolbar", async () => {
+    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "skills");
+    renderApp();
+
+    expect(
+      await screen.findByTestId("unified-skills-panel"),
+    ).toBeInTheDocument();
+    const checkUpdatesButton = await screen.findByRole("button", {
+      name: "skills.checkUpdates",
+    });
+    await waitFor(() => expect(checkUpdatesButton).toBeEnabled());
+
+    fireEvent.click(checkUpdatesButton);
+    expect(skillsPanelMocks.checkUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes the Skills discover toolbar action through the panel guard", async () => {
+    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "skills");
+    renderApp();
+
+    expect(
+      await screen.findByTestId("unified-skills-panel"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "skills.discover",
+      }),
+    );
+
+    expect(skillsPanelMocks.openDiscovery).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("unified-skills-panel")).toBeInTheDocument();
   });
 });

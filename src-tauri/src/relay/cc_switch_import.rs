@@ -9,7 +9,7 @@
 //! ## 覆盖式：复用上游导入路径
 //!
 //! providers / MCP / prompts / skills 以 cc-switch 为准整体替换，走
-//! [`Database::import_sql_string_preserving`]（备份 + 原子替换 + 迁移 + authorizer +
+//! [`Database::import_sql_string_from_cc_switch`]（备份 + 原子替换 + 迁移 + authorizer +
 //! 版本校验全在里头）；`loongport_relay` / `loongport_vendor` / `settings` 通过
 //! preserve 保住；本地**托管档位**的 provider 记录（`loongport-*`）在导入后回填。
 //!
@@ -39,7 +39,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::app_config::AppType;
 use crate::database::Database;
@@ -198,7 +197,7 @@ fn classify_source(
 
 /// source provider 的 base_url 归一化 origin（站点归并判据用）。
 fn source_origin(s: &SourceProvider) -> Option<String> {
-    let base_url = crate::proxy::providers::get_adapter(&s.app_type)
+    let base_url = crate::proxy::providers::get_adapter(&s.app_type)?
         .extract_base_url(&s.provider)
         .ok()?;
     crate::relay::api::normalize_site_origin(&base_url).ok()
@@ -402,8 +401,12 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
 }
 
 /// 执行导入。返回报告；失败时（含源库不可读 / 版本不兼容）返回 Err，用户可凭
-/// `restore_db_backup` 恢复 —— 导入前的备份由 `import_sql_string_preserving` 自动建。
-pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportReport, AppError> {
+/// `restore_db_backup` 恢复 —— 导入前的备份由 `import_sql_string_from_cc_switch` 自动建。
+pub fn execute_import(
+    app_state: crate::store::AppState,
+    source_path: &Path,
+) -> Result<ImportReport, AppError> {
+    let db = app_state.db.clone();
     if !source_path.exists() {
         return Err(AppError::Config(
             "未检测到 cc-switch 数据（~/.cc-switch/cc-switch.db）。".to_string(),
@@ -437,9 +440,9 @@ pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportRep
     }
 
     // 覆盖式导入：dump 源库（只读）→ 走同一条导入路径。备份 + 原子替换 + 迁移 +
-    // authorizer + 版本校验全在 `import_sql_string_preserving` 里。
+    // authorizer + 版本校验全在 `import_sql_string_from_cc_switch` 里。
     let sql = Database::dump_sql(&conn, &[])?;
-    let backup_id = db.import_sql_string_preserving(&sql, PRESERVE_TABLES)?;
+    let backup_id = db.import_sql_string_from_cc_switch(&sql, PRESERVE_TABLES)?;
 
     // 回填托管档位 + 删掉与托管档位同指纹的 cc-switch 重复行。
     //
@@ -468,7 +471,7 @@ pub fn execute_import(db: Arc<Database>, source_path: &Path) -> Result<ImportRep
         }
     }
 
-    if let Err(e) = crate::commands::sync_support::run_post_import_sync(db) {
+    if let Err(e) = crate::commands::sync_support::run_post_import_sync(&app_state) {
         warnings.push(format!("导入后同步失败: {e}"));
         log::warn!("[cc-switch-import] post-import sync: {e}");
     }
@@ -511,6 +514,7 @@ mod tests {
     use rusqlite::Connection;
     use serde_json::json;
     use serial_test::serial;
+    use std::sync::Arc;
 
     /// 造一份「codex 形状」的 settings_config（auth.OPENAI_API_KEY + config TOML）。
     fn codex_settings(base_url: &str, sk: &str) -> Value {
@@ -908,7 +912,8 @@ mod tests {
 
         let report = {
             let _guard = TestHomeGuard::set(tempfile::tempdir().unwrap().path());
-            execute_import(db.clone(), src.path()).expect("导入不该失败")
+            execute_import(crate::store::AppState::new(db.clone()), src.path())
+                .expect("导入不该失败")
         };
 
         // 1. 源库只读 —— 导入不是迁移。

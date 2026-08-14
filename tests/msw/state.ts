@@ -75,6 +75,7 @@ const createDefaultProviders = (): ProvidersByApp => ({
   hermes: {},
   // 生图栏：msw 的默认夹具里不放档位（那一栏只由 provision 填）。
   "codex-image": {},
+  pi: {},
 });
 
 const createDefaultCurrent = (): CurrentProviderState => ({
@@ -87,6 +88,7 @@ const createDefaultCurrent = (): CurrentProviderState => ({
   opencode: "",
   openclaw: "",
   hermes: "",
+  pi: "",
 });
 
 let providers = createDefaultProviders();
@@ -108,6 +110,7 @@ const createDefaultSettings = (): Settings => ({
     "claude-desktop": true,
     codex: true,
     "codex-image": true,
+    pi: true,
     gemini: true,
     grokbuild: true,
     opencode: true,
@@ -214,6 +217,7 @@ let mcpConfigs: McpConfigState = {
   hermes: {},
   // 生图栏不装 MCP（它不是一个 CLI）—— 夹具里恒为空。
   "codex-image": {},
+  pi: {},
 };
 
 const cloneProviders = (value: ProvidersByApp) =>
@@ -277,6 +281,7 @@ export const resetProviderState = () => {
     openclaw: {},
     hermes: {},
     "codex-image": {},
+    pi: {},
   };
 };
 
