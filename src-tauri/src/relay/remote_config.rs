@@ -59,6 +59,15 @@ const CONFIG_URL: &str = "https://config.loongport.dev/v1/config.json";
 /// 签名文件的 URL（与配置同目录、同名加 `.sig`）。
 const SIGNATURE_URL: &str = "https://config.loongport.dev/v1/config.json.sig";
 
+/// Provider directory v2 的发布端点。
+///
+/// v2 是给多站点策略消费者使用的独立契约；现有桌面端仍只消费 v1，
+/// 所以这两个常量只作为签名与发布脚本的唯一 URL 来源，不能改动 v1 的读取路径。
+const DIRECTORY_V2_URL: &str = "https://config.loongport.dev/v2/directory.json";
+
+/// Provider directory v2 的 detached Ed25519 签名端点。
+const DIRECTORY_V2_SIGNATURE_URL: &str = "https://config.loongport.dev/v2/directory.json.sig";
+
 /// 占位标记。端点含它就说明还没配真实域名。
 ///
 /// `.invalid` 是 RFC 2606 保留 TLD —— 占位期间万一判断失灵真发了请求，
@@ -626,7 +635,50 @@ fn resolve_code(
 mod tests {
     use super::*;
 
+    use serde::Deserialize;
     use std::sync::Mutex;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DirectoryV2Contract {
+        schema_version: u8,
+        issued_at: String,
+        sites: Vec<DirectorySiteV2Contract>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DirectorySiteV2Contract {
+        id: String,
+        display_name: String,
+        origin: String,
+        entry_url: String,
+        api_base_url: Option<String>,
+        invite_code: Option<String>,
+        models: Vec<DirectoryModelV2Contract>,
+        sponsorship: Option<DirectorySponsorshipV2Contract>,
+        veridrop_hosts: Vec<String>,
+        authorization: Option<DirectoryAuthorizationV2Contract>,
+        disabled: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DirectoryModelV2Contract {
+        id: String,
+        #[serde(rename = "default")]
+        is_default: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DirectorySponsorshipV2Contract {
+        label: String,
+        url: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DirectoryAuthorizationV2Contract {
+        kind: String,
+    }
 
     /// 测试用的缓存目录覆盖。见 [`super::cache_dir`] 的文档。
     ///
@@ -836,6 +888,61 @@ mod tests {
     }
 
     #[test]
+    fn v2_directory_contract_publishes_the_bestapi_policy() {
+        let raw = include_bytes!("../../../remote-config/public/v2/directory.json");
+        let directory: DirectoryV2Contract =
+            serde_json::from_slice(raw).expect("v2 directory must parse as its published schema");
+
+        assert_eq!(directory.schema_version, 2);
+        assert!(!directory.issued_at.is_empty(), "v2 directory needs an issuedAt timestamp");
+
+        let bestapi = directory
+            .sites
+            .iter()
+            .find(|site| site.id == "bestapi")
+            .expect("v2 directory must publish bestapi");
+
+        assert_eq!(bestapi.display_name, "BestAPI");
+        assert_eq!(bestapi.origin, "https://api.bestapi.store");
+        assert_eq!(bestapi.entry_url, "https://api.bestapi.store/");
+        assert_eq!(
+            bestapi.api_base_url.as_deref(),
+            Some("https://api.bestapi.store/v1")
+        );
+        assert!(
+            bestapi.invite_code.is_none(),
+            "the policy must not invent an invite code"
+        );
+        assert_eq!(
+            bestapi.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["deepseek-v4-flash", "deepseek-v4-pro"]
+        );
+        assert_eq!(
+            bestapi
+                .models
+                .iter()
+                .filter(|model| model.is_default == Some(true))
+                .map(|model| (model.id.as_str(), model.is_default))
+                .collect::<Vec<_>>(),
+            [("deepseek-v4-flash", Some(true))]
+        );
+        assert_eq!(
+            bestapi.authorization.as_ref().map(|authorization| authorization.kind.as_str()),
+            Some("manual-api-key")
+        );
+        assert!(
+            !bestapi.veridrop_hosts.is_empty(),
+            "each directory site must declare its Veridrop hosts"
+        );
+
+        if let Some(sponsorship) = &bestapi.sponsorship {
+            assert!(!sponsorship.label.is_empty());
+            assert!(sponsorship.url.starts_with("https://"));
+        }
+        assert!(bestapi.disabled != Some(true), "BestAPI must start enabled");
+    }
+
+    #[test]
     fn endpoints_and_key_are_configured_for_production() {
         // 2026-08-03 端点与公钥都配成真的了（这条以前断言的是反面，是那时留的闸）。
         // 现在它守的是**别退回占位**，以及下面那三条「填错了会静默失效」的性质。
@@ -859,6 +966,19 @@ mod tests {
             SIGNATURE_URL,
             format!("{CONFIG_URL}.sig"),
             "签名 URL 必须是配置 URL 加 .sig"
+        );
+
+        for url in [DIRECTORY_V2_URL, DIRECTORY_V2_SIGNATURE_URL] {
+            assert!(
+                !url.contains(UNCONFIGURED_MARKER),
+                "v2 端点不该含占位标记: {url}"
+            );
+            assert!(url.starts_with("https://"), "v2 端点必须是 HTTPS: {url}");
+        }
+        assert_eq!(
+            DIRECTORY_V2_SIGNATURE_URL,
+            format!("{DIRECTORY_V2_URL}.sig"),
+            "v2 签名 URL 必须是目录 URL 加 .sig"
         );
 
         // ⭐ 公钥填错（截断 / 多粘一个字符 / 误填低阶点）同样表现成「验签永远失败」。

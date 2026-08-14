@@ -28,30 +28,39 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
   exit 1
 fi
 
-CONFIG="$HERE/public/v1/config.json"
-SIG="$HERE/public/v1/config.json.sig"
-
-if [ ! -f "$SIG" ]; then
-  echo "✘ 缺 config.json.sig —— 先跑 ./sign.sh" >&2
-  exit 1
-fi
-
-# ⭐ **发之前真验一次签**，用**客户端那把公钥**。
-#
-# review 抓出：原来这里只判「签名 64 字节」+「签名比配置新」，那两条都是
-# **代理指标**。一个陈旧或不相干的 64 字节 .sig 被拷进来（或 touch 过）
-# 两条都过得了，然后部署上去被客户端整份丢弃 —— 而线上看起来「一切正常」，
-# 只有事后跑 verify.sh 才发现，那时生产已经坏了。
-#
-# 判「签名验得过这份 JSON 吗」才是真判据，且它天然覆盖了那两条代理指标。
 PUBKEY_HEX=$(rc_const PUBLIC_KEY_HEX "$RS")
-if ! verify_signature "$CONFIG" "$SIG" "$PUBKEY_HEX"; then
-  echo "✘ 本地签名验不过这份 config.json —— 客户端会整份丢弃它。" >&2
-  echo "  改完 JSON 忘了重签？跑 ./sign.sh" >&2
-  echo "  （用的公钥来自 ${RS}）" >&2
-  exit 1
-fi
-echo "✔ 本地验签通过（公钥取自 remote_config.rs）"
+
+# ⭐ 发之前按原始字节验每一个已发布的配置对。长度或修改时间只是代理指标；
+# 只有签名实际覆盖当前 JSON 才能保证消费者会接受它。
+verify_signed_pair() {
+  local label="$1" config="$2" sig="$3" sign_command="$4"
+
+  if [ ! -f "$config" ]; then
+    echo "✘ 缺 ${label} 配置文件：${config}" >&2
+    return 1
+  fi
+  if [ ! -f "$sig" ]; then
+    echo "✘ 缺 ${label} 签名文件：${sig} —— 先跑 ${sign_command}" >&2
+    return 1
+  fi
+  if ! verify_signature "$config" "$sig" "$PUBKEY_HEX"; then
+    echo "✘ ${label} 本地签名验不过当前 JSON；部署已停止。" >&2
+    echo "  改完 JSON 后先跑 ${sign_command}（公钥取自 remote_config.rs）。" >&2
+    return 1
+  fi
+  echo "✔ ${label} 本地验签通过（公钥取自 remote_config.rs）"
+}
+
+verify_signed_pair \
+  "v1 config.json" \
+  "$HERE/public/v1/config.json" \
+  "$HERE/public/v1/config.json.sig" \
+  "./sign.sh"
+verify_signed_pair \
+  "v2 directory.json" \
+  "$HERE/public/v2/directory.json" \
+  "$HERE/public/v2/directory.json.sig" \
+  "./sign-v2.sh"
 
 npx wrangler pages deploy "$HERE/public" \
   --project-name="$PROJECT" --branch=main --commit-dirty=true

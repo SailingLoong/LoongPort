@@ -6,6 +6,40 @@
 
 首次上线 2026-08-03。
 
+## v2 provider policy（多站点目录）
+
+v2 provider policy 是独立于 v1 的已签名目录契约，发布端点为：
+
+- `https://config.loongport.dev/v2/directory.json`
+- `https://config.loongport.dev/v2/directory.json.sig`
+
+它的明文源是 `public/v2/directory.json`。这份 policy 是「哪些站点、入口、API
+基址、模型和授权方式可以被消费」的**唯一权威来源**；签名覆盖 JSON 的原始字节，
+因此改动一个空白字符也必须重新签名。当前 v2 policy 的 BestAPI 条目只声明手工 API
+key 授权和可用模型，不包含邀请码。
+
+v1 保持原样：已有桌面客户端继续只读取 `v1/config.json` 与其签名，不能因为发布 v2
+而删除、改名或迁移 v1 文件。`deploy.sh` 会在部署整个 `public/` 目录前分别验签 v1 与
+v2，保证 JSON 和 detached signature 始终一起发布。
+
+可用性探测、延迟、成功率或其他**观测数据**必须单独保存和呈现：它们不是 policy，
+也没有修改 policy 或覆盖 policy 决策的权威。变更可消费的站点策略时，只能修改并重新
+签名 v2 directory。
+
+更新 v2 policy 的操作顺序：
+
+```bash
+$EDITOR public/v2/directory.json
+LOONGPORT_CONFIG_KEY=/path/to/signing-key ./sign-v2.sh
+./verify-v2.sh --local-only
+./deploy.sh
+./verify-v2.sh
+```
+
+`verify-v2.sh --local-only` 验证本地待发布 JSON 的原始字节签名和 schema；不带参数时，
+它还会下载线上 JSON 与 detached signature，验签并要求线上 JSON 与本地逐字节一致。
+签名密钥只在运行 `sign-v2.sh` 时经环境变量提供，绝不写入仓库或文档。
+
 ## 日常：加一家赞助商 / 改一个邀请码
 
 ```bash
@@ -176,8 +210,10 @@ CDN 或攻击者可以重放一份**旧的、签名仍然有效**的配置，把
 | 脚本 | 干什么 | 什么时候跑 |
 |---|---|---|
 | `sign.sh` | 签名，然后**用代码里那把公钥**验一遍 | 每次改完 `config.json` |
+| `sign-v2.sh` | 签名 v2 directory，再用 production public key 自验 | 每次改完 `directory.json` |
 | `deploy.sh` | 先本地验签，通过才部署到 Pages | 签完 |
 | `verify.sh` | 拉**线上**那两个文件验签，并比对与本地是否一致 | 部署后 |
+| `verify-v2.sh` | 验 v2 policy；`--local-only` 不访问网络 | 签名后、部署后 |
 | `lib.sh` | 三者共用的函数（从 `.rs` 取常量、hex→DER、验签），**不单独执行** | — |
 
 那三个可执行脚本都用**从 `remote_config.rs` grep 出来的**公钥，不手抄 ——
