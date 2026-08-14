@@ -30,12 +30,20 @@
       "bestapi.store": {
         "veridrop_host": "bestapi.store",
         "entry_url": "https://bestapi.store",
+        "purchase_url": "https://bestapi.store/purchase",
         "display_name": "BestAPI"
       },
       "790053500.com": {
         "veridrop_host": "api.790053500.com",
         "entry_url": "https://790053500.com/keys",
+        "purchase_url": "https://790053500.com/purchase",
         "display_name": "鑫旺"
+      },
+      "api-top.com": {
+        "veridrop_host": "api-top.com",
+        "entry_url": "https://api-top.com/register",
+        "purchase_url": "https://api-top.com/wallet",
+        "display_name": "Top-API"
       }
     }
   }

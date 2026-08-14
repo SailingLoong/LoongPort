@@ -198,6 +198,8 @@ pub struct RelayDirectorySite {
     #[serde(default)]
     pub entry_url: Option<String>,
     #[serde(default)]
+    pub purchase_url: Option<String>,
+    #[serde(default)]
     pub display_name: Option<String>,
 }
 
@@ -562,6 +564,53 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, App
     Ok(buf)
 }
 
+/// 读取签名目录为站点配置的购买入口。
+///
+/// 购买地址会直接承载用户的付款动作，因此只接受 HTTPS 且与站点 origin 完全同源的
+/// 已签名值。目录没有该站或该字段为空时返回 `Ok(None)`；配置值不安全时返回错误，
+/// 不猜测 `/purchase`、`/wallet` 或其它路径。
+pub fn configured_purchase_url(
+    config: &RemoteConfig,
+    site_origin: &str,
+) -> Result<Option<url::Url>, AppError> {
+    let normalized_origin = super::api::normalize_site_origin(site_origin)?;
+    let host = super::aff::lookup_host(&normalized_origin);
+    let Some(configured) = config
+        .relay_directory
+        .sites
+        .get(&host)
+        .and_then(|site| site.purchase_url.as_deref())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let purchase_url = url::Url::parse(configured)
+        .map_err(|e| AppError::Config(format!("购买入口地址不合法: {e}")))?;
+    if purchase_url.scheme() != "https" {
+        return Err(AppError::Config("购买入口必须使用 HTTPS".into()));
+    }
+
+    let relay_origin = url::Url::parse(&normalized_origin)
+        .map_err(|e| AppError::Config(format!("归一化后的站点地址不合法: {e}")))?;
+    let purchase_origin = (
+        purchase_url.scheme(),
+        purchase_url.host_str(),
+        purchase_url.port_or_known_default(),
+    );
+    let expected_origin = (
+        relay_origin.scheme(),
+        relay_origin.host_str(),
+        relay_origin.port_or_known_default(),
+    );
+    if purchase_origin != expected_origin {
+        return Err(AppError::Config("购买入口必须与中转站同源".into()));
+    }
+
+    Ok(Some(purchase_url))
+}
+
 /// 按三层回落查一个站的邀请码：远端（已缓存的） > 编译期内置。
 ///
 /// `cached` 传上一次成功拉取并缓存下来的配置（`None` = 没有缓存）。
@@ -772,6 +821,63 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         (hex, pair)
+    }
+
+    fn config_with_site(
+        host: &str,
+        entry_url: Option<&str>,
+        purchase_url: Option<&str>,
+    ) -> RemoteConfig {
+        RemoteConfig {
+            relay_directory: RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([(
+                    host.to_string(),
+                    RelayDirectorySite {
+                        veridrop_host: None,
+                        entry_url: entry_url.map(str::to_string),
+                        purchase_url: purchase_url.map(str::to_string),
+                        display_name: None,
+                    },
+                )]),
+            },
+            ..RemoteConfig::default()
+        }
+    }
+
+    #[test]
+    fn purchase_url_requires_signed_https_same_origin() {
+        let config = config_with_site(
+            "api-top.com",
+            Some("https://api-top.com/register"),
+            Some("https://api-top.com/wallet"),
+        );
+
+        assert_eq!(
+            configured_purchase_url(&config, "https://api-top.com")
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "https://api-top.com/wallet"
+        );
+        assert!(configured_purchase_url(&config, "https://unknown.example")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn purchase_url_rejects_http_and_cross_origin_entries() {
+        for purchase_url in [
+            "http://api-top.com/wallet",
+            "https://payments.example/wallet",
+        ] {
+            let config = config_with_site(
+                "api-top.com",
+                Some("https://api-top.com/register"),
+                Some(purchase_url),
+            );
+            assert!(configured_purchase_url(&config, "https://api-top.com").is_err());
+        }
     }
 
     fn cfg_with(host: &str, code: &str) -> RemoteConfig {

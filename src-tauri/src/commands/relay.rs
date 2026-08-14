@@ -4901,6 +4901,7 @@ mod tests {
                         crate::relay::remote_config::RelayDirectorySite {
                             veridrop_host: Some("api.790053500.com".into()),
                             entry_url: Some("https://790053500.com/keys".into()),
+                            purchase_url: None,
                             display_name: Some("鑫旺".into()),
                         },
                     ),
@@ -4913,6 +4914,7 @@ mod tests {
                         crate::relay::remote_config::RelayDirectorySite {
                             veridrop_host: None,
                             entry_url: Some("http://broken.example/keys".into()),
+                            purchase_url: None,
                             display_name: None,
                         },
                     ),
