@@ -1311,8 +1311,10 @@ mod tests {
 
     #[test]
     fn frontend_settings_materialize_backend_visible_app_defaults() {
-        let mut settings = AppSettings::default();
-        settings.visible_apps = None;
+        let settings = AppSettings {
+            visible_apps: None,
+            ..Default::default()
+        };
 
         let frontend = prepare_settings_for_frontend(settings);
         let visible = frontend

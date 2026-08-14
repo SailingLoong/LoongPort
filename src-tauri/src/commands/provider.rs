@@ -1003,15 +1003,19 @@ mod switch_presentation_tests {
 
     #[test]
     fn routing_requirement_reuses_backend_provider_semantics() {
-        let mut managed = ProviderMeta::default();
-        managed.provider_type = Some("codex_oauth".to_string());
+        let managed = ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             provider_routing_requirement(&AppType::Codex, &provider(json!({}), Some(managed))),
             Some(ProviderRoutingReason::ManagedOAuth)
         );
 
-        let mut desktop = ProviderMeta::default();
-        desktop.claude_desktop_mode = Some(ClaudeDesktopMode::Proxy);
+        let desktop = ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            ..Default::default()
+        };
         assert_eq!(
             provider_routing_requirement(
                 &AppType::ClaudeDesktop,
