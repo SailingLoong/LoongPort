@@ -160,6 +160,21 @@ CDN 或攻击者可以重放一份**旧的、签名仍然有效**的配置，把
 | `verify-v2.sh` | 验 v2 policy；`--local-only` 不访问网络 | 签名后、部署后 |
 | `lib.sh` | 三者共用的函数（从 `.rs` 取常量、hex→DER、验签），**不单独执行** | — |
 
+## 公开观测数据
+
+`/v2/observations.json` 是一个非权威的公开观测源：Function 仅抓取 VeriDrop 的公开总榜
+`https://veridrop.org/leaderboard/`，并返回经过归一化的站点主机名、排名、分数、样本数、观测日期、
+VeriDrop 报告链接和问题文本。它的响应缓存策略为
+`public, max-age=300, stale-while-revalidate=900`。
+
+部署脚本通过 `--cwd remote-config` 运行 `wrangler pages deploy public`，让 Pages 从同一项目根目录
+发现 `functions/`。可用下面的命令本地验证路由：
+
+```bash
+npx wrangler pages dev public --cwd remote-config --port 8788
+curl -fsS http://127.0.0.1:8788/v2/observations.json | jq .
+```
+
 所有需要签名或验签的可执行脚本都用**从 `remote_config.rs` grep 出来的**公钥，不手抄 ——
 手抄多一个能写错的地方，而写错的症状是「验签永远失败」，与「服务器挂了」一模一样。
 

@@ -57,7 +57,10 @@ verify_signed_pair \
   "$HERE/public/v2/directory.json.sig" \
   "./sign-v2.sh"
 
-npx wrangler pages deploy "$HERE/public" \
+# `pages deploy` discovers Functions from its project working directory. The current
+# Wrangler CLI deliberately has no separate Functions-directory option, so retain
+# remote-config as `--cwd` while deploying its public/ assets.
+npx wrangler pages deploy public --cwd "$HERE" \
   --project-name="$PROJECT" --branch=main --commit-dirty=true
 
 echo
