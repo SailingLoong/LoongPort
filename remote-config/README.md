@@ -18,6 +18,11 @@ $EDITOR public/v1/config.json     # 1. 改内容
 
 四步都要跑。`sign.sh` 与 `verify.sh` 各自会自验并在出错时明确报出来。
 
+CI 层还有一道一致性闸：`cargo test` 里的
+`checked_in_config_passes_the_clients_own_gate`（`remote_config.rs`）用客户端
+生产公钥验仓内 `.sig`、并用客户端 DTO 严格解析仓内 `config.json` —— 忘了重签、
+或写出客户端解不出的形状，测试直接红。
+
 **不需要发版** —— 这套机制存在的全部意义就是改配置不用发新版本客户端。
 
 ## 配置源位置
