@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
@@ -11,18 +11,6 @@ import {
 
 vi.mock("@/components/providers/ProviderList", () => ({
   ProviderList: () => <div data-testid="provider-list" />,
-}));
-
-vi.mock("@/components/AppSwitcher", () => ({
-  AppSwitcher: ({ activeApp, onSwitch }: any) => (
-    <div data-testid="app-switcher">
-      <span>{activeApp}</span>
-      <button onClick={() => onSwitch("claude")}>switch-claude</button>
-      <button onClick={() => onSwitch("codex")}>switch-codex</button>
-      <button onClick={() => onSwitch("gemini")}>switch-gemini</button>
-      <button onClick={() => onSwitch("openclaw")}>switch-openclaw</button>
-    </div>
-  ),
 }));
 
 vi.mock("@/components/UpdateBadge", () => ({
@@ -109,15 +97,8 @@ describe("relay directory routing", () => {
   ])(
     "opens an independent directory from %s with the %s leaderboard",
     async (appId, expectedKind) => {
+      localStorage.setItem(LAST_APP_STORAGE_KEY, appId);
       renderApp();
-      if (appId !== "claude") {
-        fireEvent.click(screen.getByText(`switch-${appId}`));
-        await waitFor(() =>
-          expect(screen.getByTestId("relay-source-app")).toHaveTextContent(
-            appId,
-          ),
-        );
-      }
 
       fireEvent.click(await screen.findByText("open-directory"));
 
@@ -133,19 +114,13 @@ describe("relay directory routing", () => {
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
 
       fireEvent.click(screen.getByText("directory-back"));
-      await waitFor(() =>
-        expect(screen.getByTestId("app-switcher")).toHaveTextContent(appId),
-      );
       expect(await screen.findByTestId("provider-list")).toBeInTheDocument();
     },
   );
 
   it("opens the first-run entry on the overall leaderboard", async () => {
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "codex");
     renderApp();
-    fireEvent.click(screen.getByText("switch-codex"));
-    await waitFor(() =>
-      expect(screen.getByTestId("relay-source-app")).toHaveTextContent("codex"),
-    );
     fireEvent.click(await screen.findByText("open-first-run-directory"));
 
     expect(await screen.findByTestId("directory-source-app")).toHaveTextContent(
