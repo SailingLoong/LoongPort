@@ -3,11 +3,34 @@ pub mod scheduler;
 
 use tauri::{Emitter, Manager};
 
-pub use config::MODELS_DEV_PRICING_UPDATED_EVENT;
+pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 
 pub fn start(app: tauri::AppHandle) {
     start_veridrop_directory_refresh(app.clone());
-    start_models_dev_pricing_refresh(app);
+    start_models_dev_pricing_refresh(app.clone());
+    start_app_update_check(app);
+}
+
+fn start_app_update_check(app: tauri::AppHandle) {
+    let schedule = scheduler::TaskSchedule::new(
+        config::UPDATE_CHECK_STARTUP_DELAY,
+        config::UPDATE_CHECK_INTERVAL,
+        config::UPDATE_CHECK_INTERVAL,
+    );
+
+    scheduler::spawn_periodic("app-update", schedule, move || {
+        let app = app.clone();
+        async move {
+            let result = crate::services::app_update::check(&app).await?;
+            app.emit(APP_UPDATE_CHECKED_EVENT, &result)
+                .map_err(|error| {
+                    crate::AppError::Message(format!(
+                        "failed to emit {APP_UPDATE_CHECKED_EVENT}: {error}"
+                    ))
+                })?;
+            Ok(())
+        }
+    });
 }
 
 fn start_veridrop_directory_refresh(app: tauri::AppHandle) {
@@ -53,7 +76,14 @@ fn start_models_dev_pricing_refresh(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::MODELS_DEV_PRICING_UPDATED_EVENT;
+    use super::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
+
+    #[test]
+    fn app_update_event_matches_frontend_constant() {
+        let frontend = include_str!("../../../src/config/constants.ts");
+
+        assert!(frontend.contains(APP_UPDATE_CHECKED_EVENT));
+    }
 
     #[test]
     fn models_dev_event_matches_frontend_constant() {

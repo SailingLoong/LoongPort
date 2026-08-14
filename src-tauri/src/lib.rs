@@ -1636,6 +1636,7 @@ pub fn run() {
             commands::set_log_config,
             commands::restart_app,
             commands::install_update_and_restart,
+            commands::check_app_update,
             commands::check_app_update_available,
             commands::check_for_updates,
             commands::is_portable_mode,
