@@ -1169,11 +1169,14 @@ pub async fn relay_import_directory_site(
     app_handle: tauri::AppHandle,
     site: String,
 ) -> Result<ImportResult, RelayImportError> {
-    let source = if is_signed_directory_entry(&site) {
-        BrowserEntrySource::SignedDirectory
-    } else {
-        BrowserEntrySource::Manual
-    };
+    let config = crate::relay::remote_config::load_cached().ok_or_else(|| RelayImportError {
+        kind: Some(RelayImportErrorKind::UnsupportedSite),
+        message: "该站点需要手动添加".into(),
+    })?;
+    let source = directory_entry_source(&config, &site).ok_or_else(|| RelayImportError {
+        kind: Some(RelayImportErrorKind::UnsupportedSite),
+        message: "该站点需要手动添加".into(),
+    })?;
     import_site(&app_handle, &site, source).await
 }
 
@@ -1220,18 +1223,28 @@ enum BrowserEntrySource {
     SignedDirectory,
 }
 
-fn is_signed_directory_entry(input: &str) -> bool {
+fn directory_entry_source(
+    config: &crate::relay::remote_config::RemoteConfig,
+    input: &str,
+) -> Option<BrowserEntrySource> {
     let Ok(candidate) = browser_entry_url(input) else {
-        return false;
+        return None;
     };
-    crate::relay::remote_config::load_cached().is_some_and(|config| {
-        config.relay_directory.sites.values().any(|site| {
-            site.entry_url
-                .as_deref()
-                .and_then(|entry| browser_entry_url(entry).ok())
-                .is_some_and(|entry| entry == candidate)
+    config
+        .relay_directory
+        .sites
+        .iter()
+        .find_map(|(host, site)| {
+            if let Some(entry) = site.entry_url.as_deref() {
+                if url::Url::parse(entry).is_ok_and(|declared| declared.scheme() == "https") {
+                    return (browser_entry_url(entry).ok()? == candidate)
+                        .then_some(BrowserEntrySource::SignedDirectory);
+                }
+            }
+
+            (!host.is_empty() && browser_entry_url(host).ok()? == candidate)
+                .then_some(BrowserEntrySource::Manual)
         })
-    })
 }
 
 fn recoverable_native_discovery_error(
@@ -4874,6 +4887,63 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://api.example.com/login?next=%2Fdashboard"
+        );
+    }
+
+    #[test]
+    fn directory_entry_source_accepts_only_policy_owned_entries() {
+        let config = crate::relay::remote_config::RemoteConfig {
+            relay_directory: crate::relay::remote_config::RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([
+                    (
+                        "790053500.com".into(),
+                        crate::relay::remote_config::RelayDirectorySite {
+                            veridrop_host: Some("api.790053500.com".into()),
+                            entry_url: Some("https://790053500.com/keys".into()),
+                            display_name: Some("鑫旺".into()),
+                        },
+                    ),
+                    (
+                        "plain.example".into(),
+                        crate::relay::remote_config::RelayDirectorySite::default(),
+                    ),
+                    (
+                        "broken.example".into(),
+                        crate::relay::remote_config::RelayDirectorySite {
+                            veridrop_host: None,
+                            entry_url: Some("http://broken.example/keys".into()),
+                            display_name: None,
+                        },
+                    ),
+                ]),
+            },
+            ..crate::relay::remote_config::RemoteConfig::default()
+        };
+
+        assert_eq!(
+            directory_entry_source(&config, "https://790053500.com/keys"),
+            Some(BrowserEntrySource::SignedDirectory)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://plain.example"),
+            Some(BrowserEntrySource::Manual)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://unknown.example"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://790053500.com/other"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://broken.example"),
+            Some(BrowserEntrySource::Manual)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://broken.example/keys"),
+            None
         );
     }
 
