@@ -894,6 +894,15 @@ mod tests {
     #[test]
     fn v2_directory_contract_publishes_the_bestapi_policy() {
         let raw = include_bytes!("../../../remote-config/public/v2/directory.json");
+        // 与 v1 那道闸（`checked_in_config_passes_the_clients_own_gate`）同构：
+        // 仓内 `.sig` 必须能用生产公钥验过仓内 JSON 的原始字节。少了这条，
+        // 「改了 directory.json 忘了重跑 sign-v2.sh」在 cargo test 层零覆盖 ——
+        // 部署后消费者整份拒绝，症状与「服务器挂了」一样难查。
+        let sig = include_bytes!("../../../remote-config/public/v2/directory.json.sig");
+        assert_eq!(sig.len(), 64, "Ed25519 签名必须是裸 64 字节");
+        verify_with(PUBLIC_KEY_HEX, raw, sig)
+            .expect("仓内 v2 directory.json.sig 必须用客户端公钥验过当前 JSON");
+
         let directory: DirectoryV2Contract =
             serde_json::from_slice(raw).expect("v2 directory must parse as its published schema");
 
