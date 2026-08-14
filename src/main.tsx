@@ -8,7 +8,9 @@ import "./index.css";
 import i18n from "./i18n";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme-provider";
+import { MODELS_DEV_PRICING_UPDATED_EVENT } from "@/config/constants";
 import { queryClient } from "@/lib/query";
+import { usageKeys } from "@/lib/query/usage";
 import { Toaster } from "@/components/ui/sonner";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -80,6 +82,17 @@ try {
 } catch (e) {
   // 忽略事件订阅异常（例如在非 Tauri 环境下）
   reportFrontendError("config_load_error_listener", e);
+}
+
+try {
+  void listen(MODELS_DEV_PRICING_UPDATED_EVENT, () => {
+    queryClient.invalidateQueries({ queryKey: usageKeys.all });
+    queryClient.invalidateQueries({
+      queryKey: usageKeys.modelsDevSyncConfig(),
+    });
+  });
+} catch (e) {
+  reportFrontendError("models_dev_pricing_updated_listener", e);
 }
 
 async function bootstrap() {

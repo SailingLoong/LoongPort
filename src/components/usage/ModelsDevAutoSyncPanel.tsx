@@ -38,7 +38,7 @@ import type { ModelsDevSyncConfig, ModelsDevSyncState } from "@/types/usage";
 import { isTextEditableTarget } from "@/utils/domUtils";
 
 const MODELS_DEV_QUERY_KEY = ["models-dev-pricing"] as const;
-const MODELS_DEV_SYNC_CONFIG_QUERY_KEY = ["models-dev-sync-config"] as const;
+const MODELS_DEV_SYNC_CONFIG_QUERY_KEY = usageKeys.modelsDevSyncConfig();
 const DEFAULT_VISIBLE_ROWS = 80;
 const MAX_VISIBLE_ROWS = 300;
 

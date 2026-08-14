@@ -25,6 +25,9 @@ export const GITHUB_REPO = "https://github.com/SailingLoong/LoongPort";
 /** Rust 后台成功写入某个 VeriDrop 榜单缓存后的刷新通知。 */
 export const RELAY_DIRECTORY_UPDATED_EVENT = "relay-directory-updated";
 
+/** Rust 后台完成 models.dev 定价自动刷新后的通知。 */
+export const MODELS_DEV_PRICING_UPDATED_EVENT = "models-dev-pricing-updated";
+
 /**
  * LoongPort 托管 provider 的 id 前缀 —— 「这条 provider 是托管档位」的判据。
  *

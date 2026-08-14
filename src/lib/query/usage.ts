@@ -36,6 +36,7 @@ type RequestLogsKey = {
 // Query keys
 export const usageKeys = {
   all: ["usage"] as const,
+  modelsDevSyncConfig: () => ["models-dev-sync-config"] as const,
   summary: (
     preset: UsageRangeSelection["preset"],
     customStartDate: number | undefined,
