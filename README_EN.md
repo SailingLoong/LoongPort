@@ -210,6 +210,37 @@ can press "check for updates" yourself at any time.
 > from [Releases](../../releases). That is the trade-off for the portable build: no
 > install step, so nothing for security software to block.
 
+## DeepSeek Harness (dsh)
+
+LoongPort also ships an independent [`loongport` npm integration](https://www.npmjs.com/package/loongport)
+for adding one OpenAI-compatible route to
+[DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness). It is separate
+from the desktop support matrix below: dsh's built-in `llm-pi-ai` still owns transport,
+streaming, tool calls and retries.
+
+Preview the redacted plan without changing files:
+
+```bash
+LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
+  --base-url https://relay.example.com/v1 \
+  --model model-id
+```
+
+Then apply it explicitly with `--write`:
+
+```bash
+LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
+  --base-url https://relay.example.com/v1 \
+  --model model-id \
+  --write
+```
+
+The API key is read only from the environment. The command updates only the selected
+provider route and credential name while preserving other dsh configuration. See
+**[loongport.dev/en/dsh](https://loongport.dev/en/dsh)** for prerequisites, security
+boundaries and every option; source lives at
+**[SailingLoong/loongport-dsh](https://github.com/SailingLoong/loongport-dsh)**.
+
 ## What it supports
 
 | | Shipped | In progress |
