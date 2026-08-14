@@ -706,6 +706,37 @@ pub fn update_tokens(
     Ok(())
 }
 
+/// 只轮换 refresh credential（NewAPI 的 refresh cookie 值），别的列一概不碰。
+///
+/// ## 为什么不能复用 [`update_tokens`]
+///
+/// 那条路的语义是「续期拿到了**整套**新凭据」—— `auth_token` / `token_expires_at` /
+/// `refresh_token` 三列一起覆写。而充值窗口的 cookie 轮换手上**只有**一颗新 refresh
+/// cookie：窗口期间 access token 仍有效、且正被并发使用（余额 / 档位 / 下单都靠它）。
+/// 复用那条要么逼调用方把旧值原样传一遍（多一次读、多一个传错的机会），要么把正被
+/// 使用的 access token 盖成空。所以这里窄化成单列 UPDATE —— 这是**安全要求**：
+/// 轮换 refresh cookie 绝不允许顺带作废一个还活着的 access token。
+///
+/// credential 值不进日志、不进错误文案。
+pub fn update_refresh_credential(
+    conn: &Connection,
+    relay_id: i64,
+    refresh_credential: &str,
+) -> Result<(), AppError> {
+    let changed = conn
+        .execute(
+            "UPDATE loongport_relay SET refresh_token = ?1, updated_at = ?2 WHERE id = ?3",
+            params![refresh_credential, now_unix(), relay_id],
+        )
+        .map_err(|e| AppError::Database(format!("更新 refresh credential 失败: {e}")))?;
+    if changed == 0 {
+        return Err(AppError::Config(
+            "更新 refresh credential 失败: 站点记录不存在".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// 刷新账号的展示名与登录标识（用户在中转站那边改了昵称 / 邮箱之后）。
 ///
 /// ## 为什么单独一个函数，而不是让 `update_tokens` 一起刷
@@ -1775,5 +1806,87 @@ mod tests {
     fn refreshing_identity_on_a_missing_row_is_an_error() {
         let err = refresh_account_identity(&mem(), 999, ident(1, "n", "e@x.com")).unwrap_err();
         assert!(err.to_string().contains("站点记录不存在"), "{err}");
+    }
+
+    /// ⭐ **轮换 refresh credential 只许动 `refresh_token` 与 `updated_at` 两处。**
+    ///
+    /// 充值窗口的轮换手上只有一颗新 refresh cookie；窗口期间 access token 仍有效、
+    /// 且正被并发使用（余额 / 档位 / 下单都靠它）。走 [`update_tokens`] 会把
+    /// `auth_token` / `token_expires_at` 一起覆写 —— 那会把一个活着的会话打崩。
+    ///
+    /// 整行快照逐字段比对，而不是只盯凭据三列：将来加列、或这个 UPDATE 被顺手
+    /// 「补全」，任何越界的列写在这里当场红。种子行故意带上非默认值
+    /// （UA / cf_clearance / pricing_synced_at / sort_index）——「没变」才是真的没变。
+    #[test]
+    fn update_refresh_credential_rotates_only_the_refresh_column() {
+        let conn = mem();
+        let mut relay = authenticated("https://newapi.example", 7, "access-token");
+        relay.site.backend_kind = BackendKind::NewApi;
+        relay.session = SessionEnvironment {
+            user_agent: Some("UA/1"),
+            cf_clearance: Some("cf-clearance"),
+        };
+        let id = save_authenticated_relay(&conn, relay).unwrap();
+        mark_pricing_synced(&conn, id, 555).unwrap();
+        conn.execute(
+            "UPDATE loongport_relay SET sort_index = 9 WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        // updated_at 的语义是「最后更新秒」：同秒内新旧相等会让断言 flake，
+        // 先把旧行压到一个确定比现在旧的值。
+        let stale_updated_at = now_unix() - 10;
+        conn.execute(
+            "UPDATE loongport_relay SET updated_at = ?1 WHERE id = ?2",
+            params![stale_updated_at, id],
+        )
+        .unwrap();
+
+        let before = get(&conn, id).unwrap().unwrap();
+        update_refresh_credential(&conn, id, "rotated-refresh").unwrap();
+        let after = get(&conn, id).unwrap().unwrap();
+
+        assert_eq!(after.refresh_token.as_deref(), Some("rotated-refresh"));
+        // 除 refresh_token 外整行必须原样（updated_at 不进结构体，钉在最后）。
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.site_origin, before.site_origin);
+        assert_eq!(after.site_name, before.site_name);
+        assert_eq!(after.api_base_url, before.api_base_url);
+        assert_eq!(after.account_id, before.account_id);
+        assert_eq!(after.account_label, before.account_label);
+        assert_eq!(after.login_identifier, before.login_identifier);
+        assert_eq!(
+            after.auth_token, before.auth_token,
+            "access token 仍在被并发使用，轮换 refresh cookie 不许把它盖掉"
+        );
+        assert_eq!(
+            after.token_expires_at, before.token_expires_at,
+            "过期时间跟着 access token 走，同样不许动"
+        );
+        assert_eq!(after.backend_kind, before.backend_kind);
+        assert_eq!(after.user_agent, before.user_agent);
+        assert_eq!(after.cf_clearance, before.cf_clearance);
+        assert_eq!(after.pricing_synced_at, before.pricing_synced_at);
+        assert_eq!(after.sort_index, before.sort_index);
+
+        let updated_at: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM loongport_relay WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            updated_at > stale_updated_at,
+            "轮换必须推进 updated_at（旧值 {stale_updated_at}，新值 {updated_at}）"
+        );
+    }
+
+    #[test]
+    fn update_refresh_credential_on_a_missing_row_is_a_visible_error() {
+        let err = update_refresh_credential(&mem(), 999, "rotated-refresh").unwrap_err();
+        assert!(err.to_string().contains("站点记录不存在"), "{err}");
+        assert!(!err.to_string().contains("rotated-refresh"), "{err}");
     }
 }
