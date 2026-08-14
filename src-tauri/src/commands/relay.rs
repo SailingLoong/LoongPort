@@ -44,8 +44,8 @@ use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
-    model_verification::target as verification_target, newapi, newapi_provision, pricing,
-    provider_fingerprint, provision, purchase, remote_config,
+    model_verification::target as verification_target, newapi, newapi_provision, newapi_purchase,
+    pricing, provider_fingerprint, provision, purchase, remote_config,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -1393,6 +1393,18 @@ fn newapi_session_cookie_from_window(
     Ok(newapi::extract_session_cookie(&cookies))
 }
 
+/// 登录 / 导入流程里的 NewAPI 会话刷新（reqwest 直连，不经 WebView）。
+///
+/// ## 有意豁免充值窗口的 lease 闸（B 检查点①裁决）
+///
+/// [`usable_relay`] 的续期路径对持 lease 的 NewAPI relay 报「充值窗口正在使用」，
+/// 防止后台续期把充值窗口里种着的 refresh cookie 轮换作废。本函数**不走**那条闸：
+/// 它服务的是登录 / 导入流程 —— 用户主动重建会话的时刻，此时旧的充值窗口即使
+/// 还开着也已被用户视作废弃，让登录拿到最新会话优先级更高。
+///
+/// 残余风险边界：重登后，旧充值窗口的 monitor 只持久化**它自己 cookie store 里**
+/// 观察到的轮换；那个 incognito store 与新登录写入的库凭据从此各自演化，旧窗口的
+/// 会话先失效属预期 —— 用户已经用「重新登录」表达了从头再来。
 async fn refresh_newapi_browser_session(
     site_origin: &str,
     refresh_cookie: &str,
@@ -4517,16 +4529,54 @@ async fn open_purchase_window<R: tauri::Runtime>(
     let purchase_url = remote_config::configured_purchase_url(&config, &op.site_origin)?
         .ok_or_else(|| AppError::Config("该中转站尚未配置充值入口".into()))?;
 
+    dispatch_purchase(app_handle, op, purchase_url).await
+}
+
+/// 按协议分派充值开窗；`purchase_url` 必须由调用方从签名配置解析后传入。
+///
+/// 拆出这个接缝与 `open_sub2api_purchase_window` 的「参数化只为可测」同一惯例：
+/// 生产 `load_cached()` 用生产公钥验签，测试无法（也不该）伪造一份能过验签的缓存，
+/// 所以协议分派的回归测试直接驱动本函数、自己构造内存里的 `RemoteConfig`。
+async fn dispatch_purchase<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    op: creds::Relay,
+    purchase_url: url::Url,
+) -> Result<(), AppError> {
+    // ⭐ 同一行第二击：聚焦现有窗口，不做任何协议相关工作 —— 不发 HTTP、不取 lease。
+    //
+    // 这段检查原先在 `open_sub2api_purchase_window` 内部（协议分派之后才跑），上移到
+    // 分派层有两个理由：
+    // 1. NewAPI 与 sub2api 共用同一个 label 空间（`purchase::window_label`），聚焦
+    //    检查对两种协议同样必要，放两处迟早分叉；
+    // 2. 原顺序下第二击会先打「续期 + 档案」两个 sub2api 请求才聚焦 —— 白白发 HTTP，
+    //    NewAPI 那边更糟：续期会轮换 refresh cookie，正是 lease 闸要防的那类冲突。
+    //
+    // 为什么聚焦而不是销毁重开：充值窗背后是**已经发生的钱**（见
+    // `open_sub2api_purchase_window` 里那条注释）。
+    let label = purchase::window_label(op.id);
+    if let Some(existing) = app_handle.get_webview_window(&label) {
+        log::info!("这一行的充值窗已经开着，聚焦它而不是重开");
+        // 可能被用户最小化或藏到别的 Space 了，先 show 再 focus ——
+        // `set_focus` 对不可见窗口是 no-op。
+        let _ = existing.show();
+        let _ = existing.unminimize();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
     match op.backend_kind {
         creds::BackendKind::Sub2Api => {
             open_sub2api_purchase_window(app_handle, op, purchase_url).await
         }
-        // NewAPI 的充值窗要带它自己的钱包会话（cookie 形态登录态 + `/api/user/self`
-        // 档案），由后续提交接入。这里必须明确报错，而不是让 NewAPI 行撞进 sub2api 的
-        // `/api/v1/user/profile` —— 那等于把 NewAPI 伪装成 sub2api。
-        creds::BackendKind::NewApi => Err(AppError::Config(
-            "该协议的充值窗口尚未支持，请稍后再试".into(),
-        )),
+        // NewAPI 的充值窗是「cookie 形态登录态 + 轮换跟踪」的另一套实现
+        // （`relay::newapi_purchase`，接线顺序的理由见它的模块文档）。
+        // 空白 refresh credential 在建窗前由 `newapi_purchase::open` 拒绝
+        // （含「重新登录」文案）—— lease 在那之后才被消费。
+        creds::BackendKind::NewApi => {
+            let state = app_handle.state::<AppState>();
+            let lease = state.purchase_sessions.try_acquire(op.id)?;
+            newapi_purchase::open(app_handle, op, purchase_url, lease).await
+        }
     }
 }
 
@@ -4566,27 +4616,8 @@ async fn open_sub2api_purchase_window<R: tauri::Runtime>(
     )?;
     let auth_user = purchase::auth_user_from_profile(client.profile_raw().await?)?;
 
-    // 这一行已经有充值窗时**聚焦它，不销毁重开** —— 与 `do_login` 的处置**有意相反**。
-    //
-    // 登录窗那边销毁重开是对的：能走到那儿说明上一轮 `do_login` 已经返回，
-    // 那个窗口已经没人在等它的凭据了，留着反而是陷阱。
-    //
-    // 充值窗背后是**已经发生的钱**：用户可能正盯着一个二维码、或已经跳到了支付网关。
-    // 销毁它不会取消服务端的订单或网关扣款，只会让用户失去轮询与确认页面，
-    // 进而很可能重新下一单 ⇒ 两笔待支付、甚至重复付款。
-    //
-    // 窗口是**按 relay_id 分的**，所以「点另一行的充值」压根不会碰到这一个
-    // （那是另一个 label）。这里处理的只是「同一行连点两次」。
-    let label = purchase::window_label(op.id);
-    if let Some(existing) = app_handle.get_webview_window(&label) {
-        log::info!("这一行的充值窗已经开着，聚焦它而不是重开");
-        // 可能被用户最小化或藏到别的 Space 了，先 show 再 focus ——
-        // `set_focus` 对不可见窗口是 no-op。
-        let _ = existing.show();
-        let _ = existing.unminimize();
-        let _ = existing.set_focus();
-        return Ok(());
-    }
+    // 「同一行第二击聚焦现有窗口」的检查在 `dispatch_purchase`（分派层）—— 两种协议
+    // 共用同一 label 空间，检查只有一份。本函数假定调用时没有同 label 窗口存在。
 
     // 关窗事件要带上是哪一行 —— 前端据此只刷那一行的余额。
     let handle_for_close = app_handle.clone();
@@ -4594,7 +4625,7 @@ async fn open_sub2api_purchase_window<R: tauri::Runtime>(
 
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
-        &label,
+        purchase::window_label(op.id),
         tauri::WebviewUrl::External(purchase_url),
     )
     .title(format!("充值 {}", op.site_origin))
@@ -6442,6 +6473,330 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    // ======================================================================
+    // NewAPI 充值分派（Task 7）。全部直接驱动 `dispatch_purchase` —— 生产
+    // `load_cached()` 用生产公钥验签，测试无法（也不该）伪造缓存，这个接缝与
+    // `open_sub2api_purchase_window` 的「参数化只为可测」是同一惯例。
+    // 协议字面量一律从 `newapi` owner 派生（backend.rs 的架构闸钉着）。
+    // ======================================================================
+
+    /// 起一个「记录全部请求 path」的哨兵站点：只应答 NewAPI 探测端点的形状
+    /// （`/api/status`），其余 404 —— 任何路径都会进日志（middleware 不挑路由）。
+    async fn recording_newapi_sentinel(
+    ) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+        use axum::{extract::Request, middleware, middleware::Next, routing::get, Json, Router};
+
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let every_request = Arc::clone(&requests);
+        let app = Router::new()
+            .route(
+                "/api/status",
+                get(|| async move { Json(newapi_discovery_body()) }),
+            )
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
+                let requests = Arc::clone(&every_request);
+                async move {
+                    requests.lock().unwrap().push(req.uri().path().to_string());
+                    next.run(req).await
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind newapi purchase sentinel");
+        let addr = listener.local_addr().expect("sentinel address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve newapi purchase sentinel");
+        });
+        (format!("http://{addr}"), requests, server)
+    }
+
+    /// 等 monitor 任务收场把 lease 还回去（`open` 返回与后台任务 drop lease 之间
+    /// 有毫秒级竞态，轮询等待而不是睡固定时长）。
+    async fn until_purchase_lease_released(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        relay_id: i64,
+    ) {
+        let coordinator = Arc::clone(&app.state::<AppState>().purchase_sessions);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while coordinator.is_active(relay_id) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "命令返回后 lease 必须随即释放"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// 把 `saved_relay_app` 存好的 refresh credential 覆写成空白（模拟凭据缺失的行）。
+    fn blank_saved_refresh_credential(app: &tauri::App<tauri::test::MockRuntime>, relay_id: i64) {
+        let state = app.state::<AppState>();
+        let conn = state.db.conn.lock().expect("lock memory database");
+        conn.execute(
+            "UPDATE loongport_relay SET refresh_token = ?1 WHERE id = ?2",
+            rusqlite::params!["   ", relay_id],
+        )
+        .expect("blank refresh credential");
+    }
+
+    #[tokio::test]
+    async fn newapi_purchase_dispatch_times_out_without_touching_sub2api_endpoints() {
+        let (origin, requests, server) = recording_newapi_sentinel().await;
+        // relay 行存 https 形态的哨兵 origin（生产行的 origin 在导入时就归一成 https），
+        // purchase_url 用同 host:port 的 https 形态 —— `configured_purchase_url` 才解析得出。
+        let (app, relay_id) = saved_relay_app(
+            &origin.replacen("http://", "https://", 1),
+            discovery::BackendKind::NewApi,
+        );
+        let op = relay_credentials(&app, relay_id);
+        assert_eq!(
+            op.refresh_token.as_deref(),
+            Some("saved-refresh-token"),
+            "前提：这行有非空 refresh credential"
+        );
+
+        let configured = format!(
+            "{}{}",
+            origin.replacen("http://", "https://", 1),
+            "/console/topup"
+        );
+        let config = remote_config::RemoteConfig {
+            relay_directory: remote_config::RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([(
+                    "127.0.0.1".to_string(),
+                    remote_config::RelayDirectorySite {
+                        veridrop_host: None,
+                        entry_url: None,
+                        purchase_url: Some(configured.clone()),
+                        display_name: None,
+                    },
+                )]),
+            },
+            ..remote_config::RemoteConfig::default()
+        };
+        let purchase_url = remote_config::configured_purchase_url(&config, &op.site_origin)
+            .expect("签名目录解析不该报错")
+            .expect("这个站在目录里配了购买入口");
+
+        // MockRuntime 的 cookies_for_url 恒返回空 ⇒ 走 300ms 启动超时路径（生产 20s）。
+        let error = dispatch_purchase(app.handle(), op, purchase_url)
+            .await
+            .expect_err("mock 下观察不到轮换，必须按超时收场");
+
+        assert!(
+            error.to_string().contains("重新登录"),
+            "超时错误要有「重新登录」语义：{error}"
+        );
+
+        // 协议隔离：NewAPI 的充值分派不得打任何 sub2api 端点（协议字面量属于
+        // api.rs / 既有测试形状，这里只对照黑名单）。
+        let paths = requests.lock().unwrap().clone();
+        for forbidden in [
+            "/api/v1/settings/public",
+            "/api/v1/user/profile",
+            "/api/v1/auth/refresh",
+        ] {
+            assert!(
+                !paths.iter().any(|path| path == forbidden),
+                "NewAPI 充值分派不该打 sub2api 端点 {forbidden}：{paths:?}"
+            );
+        }
+
+        until_purchase_lease_released(&app, relay_id).await;
+        // 「窗口已销毁」在 MockRuntime 上不可观察：destroy 只清运行时自己的窗口表，
+        // manager 那份（get_webview_window 读的）要等事件循环处理 Destroyed 才清，
+        // 而 mock 的 run_iteration 是 no-op、测试也不驱动 run。销毁动作本身钉在
+        // `newapi_purchase::open` 的 ready-Err 路径（返回前 destroy）与 monitor 兜底；
+        // 这里能观察到的等价不变量是「lease 已还」—— 没有挂着 lease 却无人管理的窗口。
+        assert!(
+            !app.state::<AppState>()
+                .purchase_sessions
+                .is_active(relay_id),
+            "超时收场后 lease 必须已释放"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn newapi_purchase_blank_refresh_credential_is_rejected_before_a_window() {
+        let (app, relay_id) =
+            saved_relay_app("https://newapi.example", discovery::BackendKind::NewApi);
+        blank_saved_refresh_credential(&app, relay_id);
+        let op = relay_credentials(&app, relay_id);
+
+        let error = dispatch_purchase(
+            app.handle(),
+            op,
+            url::Url::parse("https://newapi.example/console/topup").unwrap(),
+        )
+        .await
+        .expect_err("空白 refresh credential 必须在建窗前被拒绝");
+
+        assert!(
+            error.to_string().contains("重新登录"),
+            "错误要指明出路：{error}"
+        );
+        assert!(
+            app.get_webview_window(&purchase::window_label(relay_id))
+                .is_none(),
+            "被拒绝的调用不得留下窗口"
+        );
+        assert!(
+            !app.state::<AppState>()
+                .purchase_sessions
+                .is_active(relay_id),
+            "失败路径的 lease 必须已释放"
+        );
+    }
+
+    #[tokio::test]
+    async fn newapi_purchase_focuses_an_existing_window_without_http_or_lease() {
+        // relay 行故意存 http origin：任何回归（比如有人把续期挪到聚焦检查之前）都会
+        // 真的打上这个哨兵，日志就不再是空的。
+        let (origin, requests, server) = recording_newapi_sentinel().await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        // 预建同 label 窗口，模拟「这一行的充值窗已经开着」。
+        let label = purchase::window_label(relay_id);
+        tauri::WebviewWindowBuilder::new(
+            app.handle(),
+            &label,
+            tauri::WebviewUrl::External(url::Url::parse("about:blank").unwrap()),
+        )
+        .build()
+        .expect("预建同 label 窗口");
+
+        let op = relay_credentials(&app, relay_id);
+        dispatch_purchase(
+            app.handle(),
+            op,
+            url::Url::parse(&format!("{origin}/console/topup")).unwrap(),
+        )
+        .await
+        .expect("聚焦现有窗口是 Ok");
+
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "同一行第二击不得发任何 HTTP：{:?}",
+            requests.lock().unwrap()
+        );
+        assert!(
+            !app.state::<AppState>()
+                .purchase_sessions
+                .is_active(relay_id),
+            "聚焦路径不得取 lease"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn newapi_purchase_ignores_another_relays_lease() {
+        // relay1（NewAPI）的 lease 被占着，relay2（也是 NewAPI）的充值分派照样能拿到
+        // **自己的** lease —— lease 按 relay 键控，一行占用不该拦住另一行。
+        //
+        // 第二腿特意用 NewApi 而不是 sub2api（review F3）：sub2api 分派根本不碰
+        // lease 协调器（跨行隔离对它是平凡成立，走通开窗本身已由 Task 4 的测试覆盖）；
+        // NewApi 腿会真的执行 `try_acquire(relay2)`，被 relay1 的 lease 挡住与否在这里
+        // 才是可观察的。判据：错误是 mock 下的启动超时（「重新登录」）而不是 lease
+        // 占用文案（「正在使用或正在关闭」）—— 后者出现说明 try_acquire 被**别人**
+        // 的 lease 挡了（两条文案都含「充值窗口」，判别要认后者的专属措辞）。
+        let (app, relay1) =
+            saved_relay_app("https://newapi.example", discovery::BackendKind::NewApi);
+        let coordinator = Arc::clone(&app.state::<AppState>().purchase_sessions);
+        let held = coordinator
+            .try_acquire(relay1)
+            .expect("占用 relay1 的 lease");
+
+        // 第二行：另一个 NewAPI 站点账号，自己的 id 与有效 refresh credential。
+        let relay2 = {
+            let state = app.state::<AppState>();
+            let conn = state.db.conn.lock().expect("lock memory database");
+            let id = creds::save_site_with_backend(
+                &conn,
+                "https://newapi2.example",
+                "Second relay",
+                "https://newapi2.example",
+                discovery::BackendKind::NewApi,
+            )
+            .expect("save second relay");
+            creds::save_credentials(
+                &conn,
+                id,
+                creds::AccountIdentity {
+                    id: 8,
+                    label: "Second Account",
+                    login_identifier: "second-account",
+                },
+                "second-access-token",
+                Some("second-refresh-cookie"),
+                None,
+                creds::SessionEnvironment::default(),
+            )
+            .expect("save second credentials");
+            id
+        };
+
+        let op = relay_credentials(&app, relay2);
+        let error = dispatch_purchase(
+            app.handle(),
+            op,
+            url::Url::parse("https://newapi2.example/console/topup").unwrap(),
+        )
+        .await
+        .expect_err("mock 下观察不到轮换，relay2 走自己的超时收场");
+
+        let error = error.to_string();
+        assert!(
+            error.contains("重新登录"),
+            "relay2 拿到了自己的 lease、走进了自己的开窗流程（mock 超时收场）：{error}"
+        );
+        assert!(
+            !error.contains("正在使用或正在关闭"),
+            "出现 lease 占用类错误说明 try_acquire 被别人（relay1）的 lease 挡了：{error}"
+        );
+
+        assert!(
+            coordinator.is_active(relay1),
+            "relay1 的 lease 不受 relay2 的分派影响"
+        );
+        until_purchase_lease_released(&app, relay2).await;
+
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn newapi_purchase_reports_when_its_own_lease_is_already_held() {
+        let (app, relay_id) =
+            saved_relay_app("https://newapi.example", discovery::BackendKind::NewApi);
+        let op = relay_credentials(&app, relay_id);
+
+        let coordinator = Arc::clone(&app.state::<AppState>().purchase_sessions);
+        let held = coordinator.try_acquire(relay_id).expect("预占自己的 lease");
+
+        let error = dispatch_purchase(
+            app.handle(),
+            op,
+            url::Url::parse("https://newapi.example/console/topup").unwrap(),
+        )
+        .await
+        .expect_err("自己的 lease 被占时必须明确报错");
+
+        assert!(
+            error.to_string().contains("充值窗口"),
+            "错误要说清是充值窗口占用：{error}"
+        );
+        assert!(
+            app.get_webview_window(&purchase::window_label(relay_id))
+                .is_none(),
+            "不得开第二个窗口"
+        );
+        drop(held);
     }
 
     #[tokio::test]

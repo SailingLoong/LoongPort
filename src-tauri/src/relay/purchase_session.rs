@@ -44,11 +44,17 @@ impl PurchaseSessionCoordinator {
     ///
     /// 排队（await 直到别人释放）看似更友好，但排队意味着「开第二个充值窗口」静默
     /// 变成「等第一个关掉再开」—— 用户看不出任何提示，只觉得窗口开不出来。
-    /// 立刻报错让上层把「窗口已打开」说清楚。
+    /// 立刻报错让上层把占用说清楚。
+    ///
+    /// 文案说「正在使用**或正在关闭**」而不是「已经打开」：这个错误的唯一可达场景是
+    /// 关窗 teardown 的竞态（真实窗口已销毁、lease 还差几毫秒才 drop）—— 说「已经
+    /// 打开」会让用户去找一个此刻已经不存在的窗口（review F2）。
     pub fn try_acquire(self: &Arc<Self>, relay_id: i64) -> Result<PurchaseSessionLease, AppError> {
         let mut active = self.lock_active();
         if active.contains(&relay_id) {
-            return Err(AppError::Config("这个账号的充值窗口已经打开".into()));
+            return Err(AppError::Config(
+                "该中转站的充值窗口正在使用或正在关闭，请稍后重试".into(),
+            ));
         }
         active.insert(relay_id);
         Ok(PurchaseSessionLease {

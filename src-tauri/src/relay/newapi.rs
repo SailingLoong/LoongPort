@@ -20,6 +20,11 @@ pub(crate) const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
 pub(crate) const REFRESH_PATH: &str = "/api/user/auth/refresh";
 /// NewAPI 上游 refresh cookie 的 `Path` 属性：refresh 端点（[`REFRESH_PATH`]）就挂在
 /// 这棵子树下，作用域收窄到 auth 而不是全站 `/`。
+///
+/// 顺带记录同一颗 cookie 的 `Secure` 属性裁决：上游 NewAPI 的 Secure 是**环境可配置**
+/// 的，我们无条件钉死 `true` —— 本仓对中转站的契约本来就是 https-only（导入时强制
+/// 归一），钉死不仅自洽，还比「跟随站点配置」更严（一个配错的站点不会让我们把
+/// refresh cookie 明文发出去）。
 const REFRESH_COOKIE_PATH: &str = "/api/user/auth";
 const SESSION_COOKIE_NAME: &str = "session";
 const SESSION_TOKEN_PATH: &str = "/api/user/token";
@@ -535,7 +540,11 @@ pub async fn refresh_session(
     let mut request = client
         .post(format!("{site_origin}/api/user/auth/refresh"))
         .header("Origin", site_origin)
-        .header("Cookie", format!("new_api_refresh={refresh_cookie}"));
+        // cookie 名取自 owner 常量，不再有第三份字面量（review F1；端点路径不在本次裁决内）。
+        .header(
+            "Cookie",
+            format!("{}={refresh_cookie}", REFRESH_COOKIE_NAME),
+        );
     let expected_sid = expected_sid.unwrap_or("").trim();
     if !expected_sid.is_empty() {
         request = request.header("X-Auth-Session", expected_sid);
@@ -595,7 +604,7 @@ fn extract_rotated_refresh_cookie(
             .map_err(|_| AppError::Config("newapi refresh Set-Cookie 不是合法 ASCII".into()))?;
         let cookie = Cookie::parse(raw.to_owned())
             .map_err(|_| AppError::Config("newapi refresh Set-Cookie 格式无效".into()))?;
-        if cookie.name() == "new_api_refresh" {
+        if cookie.name() == REFRESH_COOKIE_NAME {
             if cookie.value().trim().is_empty() {
                 return Err(AppError::Config(
                     "newapi refresh Set-Cookie 缺少非空 new_api_refresh".into(),
