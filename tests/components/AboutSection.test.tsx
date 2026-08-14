@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
 afterEach(() => {
   mocks.value.checkUpdate.mockReset();
   mocks.checkUpdates.mockReset();
+  vi.restoreAllMocks();
 });
 
 vi.mock("@/contexts/UpdateContext", () => ({
@@ -54,7 +55,11 @@ describe("AboutSection", () => {
   });
 
   it("keeps the Releases fallback when a manual check rejects", async () => {
-    mocks.value.checkUpdate.mockRejectedValue(new Error("network offline"));
+    const checkError = new Error("network offline");
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    mocks.value.checkUpdate.mockRejectedValue(checkError);
     render(<AboutSection isPortable={false} />);
 
     fireEvent.click(
@@ -64,5 +69,9 @@ describe("AboutSection", () => {
     );
 
     await waitFor(() => expect(mocks.checkUpdates).toHaveBeenCalledOnce());
+    expect(consoleError).toHaveBeenCalledWith(
+      "[AboutSection] Update check failed",
+      checkError,
+    );
   });
 });

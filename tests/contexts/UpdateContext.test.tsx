@@ -1,18 +1,40 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { emitTauriEvent } from "../msw/tauriMocks";
 
 const updaterMocks = vi.hoisted(() => ({
   checkForUpdate: vi.fn(),
 }));
 
+const eventMocks = vi.hoisted(() => {
+  const listeners = new Set<(event: { payload: unknown }) => void>();
+  return {
+    emit: (payload: unknown) => {
+      listeners.forEach((listener) => listener({ payload }));
+    },
+    listen: vi.fn(),
+    reset: () => listeners.clear(),
+    register: (handler: (event: { payload: unknown }) => void) => {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    },
+  };
+});
+
 vi.mock("@/lib/updater", () => ({
   checkForUpdate: () => updaterMocks.checkForUpdate(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (...args: unknown[]) => eventMocks.listen(...args),
+}));
+
 import { UpdateProvider, useUpdate } from "@/contexts/UpdateContext";
 
-function UpdateState() {
+function UpdateState({
+  onCheckUpdate,
+}: {
+  onCheckUpdate?: (result: Promise<boolean>) => void;
+}) {
   const update = useUpdate();
 
   return (
@@ -23,7 +45,8 @@ function UpdateState() {
       <button
         type="button"
         onClick={() => {
-          void update.checkUpdate().catch(() => undefined);
+          const result = update.checkUpdate();
+          onCheckUpdate?.(result);
         }}
       >
         Check for updates
@@ -32,10 +55,10 @@ function UpdateState() {
   );
 }
 
-function renderProvider() {
+function renderProvider(onCheckUpdate?: (result: Promise<boolean>) => void) {
   return render(
     <UpdateProvider>
-      <UpdateState />
+      <UpdateState onCheckUpdate={onCheckUpdate} />
     </UpdateProvider>,
   );
 }
@@ -49,14 +72,24 @@ const available = {
 };
 
 describe("UpdateProvider", () => {
+  let consoleError: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     vi.useFakeTimers();
     updaterMocks.checkForUpdate.mockReset();
+    eventMocks.listen.mockReset();
+    eventMocks.listen.mockImplementation(
+      (_eventName: string, handler: (event: { payload: unknown }) => void) =>
+        Promise.resolve(eventMocks.register(handler)),
+    );
+    eventMocks.reset();
     localStorage.clear();
+    consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    consoleError.mockRestore();
   });
 
   it("applies a backend update event without starting a timer", async () => {
@@ -64,7 +97,7 @@ describe("UpdateProvider", () => {
     await act(async () => {});
 
     await act(async () => {
-      emitTauriEvent("app-update-checked", available);
+      eventMocks.emit(available);
     });
 
     expect(screen.getByText("3.25.0")).toBeInTheDocument();
@@ -78,8 +111,8 @@ describe("UpdateProvider", () => {
     await act(async () => {});
 
     await act(async () => {
-      emitTauriEvent("app-update-checked", available);
-      emitTauriEvent("app-update-checked", available);
+      eventMocks.emit(available);
+      eventMocks.emit(available);
     });
 
     expect(screen.getByText("dismissed")).toBeInTheDocument();
@@ -91,7 +124,7 @@ describe("UpdateProvider", () => {
     await act(async () => {});
 
     await act(async () => {
-      emitTauriEvent("app-update-checked", available);
+      eventMocks.emit(available);
     });
 
     expect(screen.getByText("dismissed")).toBeInTheDocument();
@@ -107,8 +140,8 @@ describe("UpdateProvider", () => {
     await act(async () => {});
 
     await act(async () => {
-      emitTauriEvent("app-update-checked", available);
-      emitTauriEvent("app-update-checked", { status: "upToDate" });
+      eventMocks.emit(available);
+      eventMocks.emit({ status: "upToDate" });
     });
 
     expect(screen.getByText("no update")).toBeInTheDocument();
@@ -126,14 +159,58 @@ describe("UpdateProvider", () => {
     expect(screen.getByText("3.25.0")).toBeInTheDocument();
   });
 
-  it("records a manual check error for the presentation layer", async () => {
-    updaterMocks.checkForUpdate.mockRejectedValue(new Error("network offline"));
+  it("records and rethrows the original manual command rejection", async () => {
+    updaterMocks.checkForUpdate.mockRejectedValue("network offline");
+    let result: Promise<boolean> | undefined;
+    renderProvider((checkResult) => {
+      result = checkResult;
+    });
+    await act(async () => {});
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Check for updates" }),
+      );
+      await expect(result).rejects.toBe("network offline");
+    });
+
+    expect(screen.getByText("network offline")).toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalledWith(
+      "检查更新失败:",
+      "network offline",
+    );
+  });
+
+  it("handles listener registration rejection", async () => {
+    const listenerError = new Error("listener registration failed");
+    eventMocks.listen.mockReturnValue(Promise.reject(listenerError));
+
     renderProvider();
     await act(async () => {});
 
-    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
-    await act(async () => {});
+    expect(consoleError).toHaveBeenCalledWith(
+      "Failed to listen for app update checks",
+      listenerError,
+    );
+  });
 
-    expect(screen.getByText("network offline")).toBeInTheDocument();
+  it("cleans up a listener that registers after unmount", async () => {
+    let resolveRegistration: ((cleanup: () => void) => void) | undefined;
+    const cleanup = vi.fn();
+    eventMocks.listen.mockReturnValue(
+      new Promise<(cleanup: () => void) => void>((resolve) => {
+        resolveRegistration = resolve;
+      }),
+    );
+
+    const { unmount } = renderProvider();
+    unmount();
+
+    await act(async () => {
+      resolveRegistration?.(cleanup);
+    });
+
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });

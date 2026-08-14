@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { APP_UPDATE_CHECKED_EVENT } from "@/config/constants";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import {
   checkForUpdate,
   type AppUpdateCheckResult,
@@ -76,7 +77,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
       return applyCheckResult(await checkForUpdate());
     } catch (err) {
       console.error("检查更新失败:", err);
-      setError(err instanceof Error ? err.message : "检查更新失败");
+      setError(extractErrorMessage(err) || "检查更新失败");
       setHasUpdate(false);
       throw err;
     } finally {
