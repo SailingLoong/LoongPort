@@ -15,6 +15,17 @@
   Cache-Control: public, max-age=300
   Content-Type: application/octet-stream
 
+# v2 策略目录与它的签名：与 v1 同一条「短缓存 + 同 max-age」不变式。
+# 少了显式规则时会落到 Pages 的默认缓存行为，签名与配置可能在不同层
+# 被缓存成不同版本 —— 那正是上面那条警告描述的失败模式。
+/v2/directory.json
+  Cache-Control: public, max-age=300
+  Content-Type: application/json; charset=utf-8
+
+/v2/directory.json.sig
+  Cache-Control: public, max-age=300
+  Content-Type: application/octet-stream
+
 /*
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
