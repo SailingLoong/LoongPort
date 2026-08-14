@@ -19,7 +19,7 @@ const {
   listDirectory,
   importSite,
   importDirectorySite,
-  provision,
+  refresh,
   openInBrowser,
   toastError,
   toastSuccess,
@@ -28,7 +28,7 @@ const {
   listDirectory: vi.fn(),
   importSite: vi.fn(),
   importDirectorySite: vi.fn(),
-  provision: vi.fn(),
+  refresh: vi.fn(),
   openInBrowser: vi.fn(),
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
@@ -36,7 +36,7 @@ const {
 }));
 
 vi.mock("@/lib/api", () => ({
-  relayApi: { listDirectory, importSite, importDirectorySite, provision },
+  relayApi: { listDirectory, importSite, importDirectorySite, refresh },
 }));
 
 vi.mock("../../openInBrowser", () => ({ openInBrowser }));
@@ -131,11 +131,17 @@ describe("RelayDirectoryPage", () => {
       siteName: "BestAPI",
       backendKind: "sub2api",
     });
-    provision.mockResolvedValue({
-      tiers: [],
-      failures: [],
-      keysCreated: 0,
-      mergedProviders: [],
+    refresh.mockResolvedValue({
+      summary: {
+        notice: "updated",
+        refreshedAccounts: 1,
+        tiers: 0,
+        keysCreated: 0,
+        otherPlatformTiers: 0,
+        mergedProviders: 0,
+        failures: [],
+      },
+      balances: [],
     });
   });
 
@@ -268,7 +274,7 @@ describe("RelayDirectoryPage", () => {
     await waitFor(() => expect(listDirectory).toHaveBeenCalledTimes(2));
   });
 
-  it("waits for authentication and provisioning before returning", async () => {
+  it("waits for authentication and backend refresh before returning", async () => {
     const onBack = vi.fn();
     const onAuthenticated = vi.fn();
     render(
@@ -288,7 +294,7 @@ describe("RelayDirectoryPage", () => {
     await waitFor(() =>
       expect(importDirectorySite).toHaveBeenCalledWith("https://bestapi.store"),
     );
-    expect(provision).toHaveBeenCalledWith(7);
+    expect(refresh).toHaveBeenCalledWith(7, "claude");
     await waitFor(() => expect(onAuthenticated).toHaveBeenCalled());
     expect(onBack).toHaveBeenCalled();
   });
@@ -308,14 +314,14 @@ describe("RelayDirectoryPage", () => {
     );
 
     await waitFor(() => expect(importDirectorySite).toHaveBeenCalled());
-    expect(provision).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
     expect(onBack).not.toHaveBeenCalled();
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(toastError).not.toHaveBeenCalled();
   });
 
-  it("returns to the relay list when provisioning fails after authentication", async () => {
-    provision.mockRejectedValue(new Error("网络不通"));
+  it("returns to the relay list when refresh fails after authentication", async () => {
+    refresh.mockRejectedValue(new Error("网络不通"));
     const onBack = vi.fn();
     const onAuthenticated = vi.fn();
     render(
@@ -385,7 +391,7 @@ describe("RelayDirectoryPage", () => {
     await waitFor(() =>
       expect(importSite).toHaveBeenCalledWith("https://790053500.com/keys"),
     );
-    expect(provision).toHaveBeenCalledWith(7);
+    expect(refresh).toHaveBeenCalledWith(7, "codex");
   });
 
   it("allows only one authentication operation at a time", async () => {

@@ -7282,7 +7282,7 @@ mod tests {
                 ..seeded_owned(&tier_id, "Pro池", Some(site), 7)
             },
         )
-            .expect("seed tier");
+        .expect("seed tier");
 
         with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
 
