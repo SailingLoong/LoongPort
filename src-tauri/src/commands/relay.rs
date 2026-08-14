@@ -4494,12 +4494,44 @@ pub async fn relay_purchase(app_handle: tauri::AppHandle, relay_id: i64) -> Resu
         .map_err(|e| e.to_string())
 }
 
-async fn open_purchase_window(
-    app_handle: &tauri::AppHandle,
+async fn open_purchase_window<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
 ) -> Result<(), AppError> {
     let op = usable_relay(app_handle, relay_id).await?;
 
+    // 充值页直接承载付款动作，它指向哪由**签名配置**说了算 —— 客户端不再读站点
+    // 公开设置的支付开关去推测 `/purchase` 还是 `/redeem`（那是在替站长决定入口）。
+    // 配置没加载 / 这个站没配入口都明确报错，绝不回落到猜测的路由。
+    let config = remote_config::load_cached()
+        .ok_or_else(|| AppError::Config("中转站配置尚未加载，暂时无法打开充值入口".into()))?;
+    let purchase_url = remote_config::configured_purchase_url(&config, &op.site_origin)?
+        .ok_or_else(|| AppError::Config("该中转站尚未配置充值入口".into()))?;
+
+    match op.backend_kind {
+        creds::BackendKind::Sub2Api => {
+            open_sub2api_purchase_window(app_handle, op, purchase_url).await
+        }
+        // NewAPI 的充值窗要带它自己的钱包会话（cookie 形态登录态 + `/api/user/self`
+        // 档案），由后续提交接入。这里必须明确报错，而不是让 NewAPI 行撞进 sub2api 的
+        // `/api/v1/user/profile` —— 那等于把 NewAPI 伪装成 sub2api。
+        creds::BackendKind::NewApi => Err(AppError::Config(
+            "该协议的充值窗口尚未支持，请稍后再试".into(),
+        )),
+    }
+}
+
+/// 打开某个 sub2api 中转站的充值窗（登录态注入版）。
+///
+/// `purchase_url` 必须由调用方从签名配置解析后传入 —— 本函数**不做路由选择**。
+/// 拆出这个接缝与 `remote_config::load_cached_with` 的「参数化只为可测」同构：
+/// 生产 `load_cached()` 用生产公钥验签，测试无法（也不该）伪造一份能过验签的缓存，
+/// 所以回归测试直接驱动本函数、自己构造内存里的 `RemoteConfig`。
+async fn open_sub2api_purchase_window<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    op: creds::Relay,
+    purchase_url: url::Url,
+) -> Result<(), AppError> {
     // ⚠️ **充值是长会话，`usable_relay` 的余量对它不够**（review 抓出）。
     //
     // 那个函数的判据是「还剩 > 60 秒」—— 对「发一次请求」够用，但充值页会挂着几分钟
@@ -4523,7 +4555,6 @@ async fn open_purchase_window(
         op.user_agent.as_deref(),
         op.cf_clearance.as_deref(),
     )?;
-    let public_settings = client.public_settings().await?;
     let auth_user = purchase::auth_user_from_profile(client.profile_raw().await?)?;
 
     // 这一行已经有充值窗时**聚焦它，不销毁重开** —— 与 `do_login` 的处置**有意相反**。
@@ -4548,44 +4579,41 @@ async fn open_purchase_window(
         return Ok(());
     }
 
-    let url = url::Url::parse(&purchase::purchase_url(
-        &op.site_origin,
-        public_settings.payment_enabled,
-    ))
-    .map_err(|e| AppError::Config(format!("充值页地址不对: {e}")))?;
-
     // 关窗事件要带上是哪一行 —— 前端据此只刷那一行的余额。
     let handle_for_close = app_handle.clone();
     let closed_relay_id = op.id;
 
-    let window =
-        tauri::WebviewWindowBuilder::new(app_handle, &label, tauri::WebviewUrl::External(url))
-            .title(format!("充值 {}", op.site_origin))
-            // 尺寸比登录窗宽得多，而且**这是安全要求不是体验偏好**：USDT 充值页有一段
-            // 「转错网络资产不可找回」的警告，窗口太窄会把它挤到要滚动才看得见的地方。
-            // 可缩放 + 足够高，让那段话一屏内可读。
-            .inner_size(1000.0, 800.0)
-            .resizable(true)
-            // 防止在小屏上超出可用区域（框架原生实现就是 `work_area - margin` 再 clamp，
-            // 比自己查 monitor 再算术安全 —— 后者容易把 PhysicalSize 当逻辑像素用，
-            // 那正是 Retina 上「窗口大一倍」的成因）。
-            .prevent_overflow_with_margin(tauri::LogicalSize::new(40.0, 40.0))
-            .center()
-            // ⚠️ **必须 incognito**，理由见 `purchase.rs` 模块文档第 1 条。
-            // 一句话：持久 profile 是全 app 共享的，不隔离的话这个窗口会读到**别的账号**
-            // 残留的 refresh_token，站点的 401 拦截器拿它续期后覆盖 auth_token
-            // ⇒ 用户在 B 行点充值、钱充进 A 账号（已实测复现）。
-            //
-            // 它**不影响**注入：`initialization_script` 是 WKUserScript(AtDocumentStart)、
-            // 与页面同一个 JS 世界，而 incognito 只决定这份 localStorage 落不落盘。
-            .incognito(true)
-            .initialization_script(purchase::inject_script(
-                &op.site_origin,
-                &op.auth_token,
-                &auth_user,
-            ))
-            .build()
-            .map_err(|e| AppError::Config(format!("打开充值窗口失败: {e}")))?;
+    let window = tauri::WebviewWindowBuilder::new(
+        app_handle,
+        &label,
+        tauri::WebviewUrl::External(purchase_url),
+    )
+    .title(format!("充值 {}", op.site_origin))
+    // 尺寸比登录窗宽得多，而且**这是安全要求不是体验偏好**：USDT 充值页有一段
+    // 「转错网络资产不可找回」的警告，窗口太窄会把它挤到要滚动才看得见的地方。
+    // 可缩放 + 足够高，让那段话一屏内可读。
+    .inner_size(1000.0, 800.0)
+    .resizable(true)
+    // 防止在小屏上超出可用区域（框架原生实现就是 `work_area - margin` 再 clamp，
+    // 比自己查 monitor 再算术安全 —— 后者容易把 PhysicalSize 当逻辑像素用，
+    // 那正是 Retina 上「窗口大一倍」的成因）。
+    .prevent_overflow_with_margin(tauri::LogicalSize::new(40.0, 40.0))
+    .center()
+    // ⚠️ **必须 incognito**，理由见 `purchase.rs` 模块文档第 1 条。
+    // 一句话：持久 profile 是全 app 共享的，不隔离的话这个窗口会读到**别的账号**
+    // 残留的 refresh_token，站点的 401 拦截器拿它续期后覆盖 auth_token
+    // ⇒ 用户在 B 行点充值、钱充进 A 账号（已实测复现）。
+    //
+    // 它**不影响**注入：`initialization_script` 是 WKUserScript(AtDocumentStart)、
+    // 与页面同一个 JS 世界，而 incognito 只决定这份 localStorage 落不落盘。
+    .incognito(true)
+    .initialization_script(purchase::inject_script(
+        &op.site_origin,
+        &op.auth_token,
+        &auth_user,
+    ))
+    .build()
+    .map_err(|e| AppError::Config(format!("打开充值窗口失败: {e}")))?;
 
     // 关窗刷余额。认 `Destroyed`（窗口真的没了）而不是 `CloseRequested`
     // （可被拦下的关闭请求，某些平台上会先于实际销毁触发、甚至可能被取消）。
@@ -4616,8 +4644,8 @@ async fn open_purchase_window(
 ///
 /// **失败不算错误** —— 原样返回传进来的凭据（`usable_relay` 已经保证它现在可用），
 /// 让用户至少能完成一笔快的；把「可能不够」当成「一定不行」去拦住他更糟。
-async fn ensure_token_outlasts_a_payment(
-    app_handle: &tauri::AppHandle,
+async fn ensure_token_outlasts_a_payment<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     op: creds::Relay,
 ) -> creds::Relay {
     let Some(refresh) = op.refresh_token.clone() else {
@@ -6122,6 +6150,134 @@ mod tests {
         assert_eq!(relay.auth_token, "saved-access-token");
         assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
         server.await.expect("connection-drop server completes");
+    }
+
+    /// ⭐ 回归闸：sub2api 充值页必须打开**签名配置的 URL**，不再读站点公开设置的
+    /// 支付开关去猜 `/purchase` 还是 `/redeem`。
+    ///
+    /// 三个断言互相补充：
+    /// 1. 请求日志**不含** `/api/v1/settings/public` —— 路由事实已归签名目录，
+    ///    生产充值路径不该再读站点公开设置。
+    /// 2. 请求日志恰好是「开窗前续期 + 取账号档案」两个请求 —— 证明 token 寿命续期
+    ///    与登录态注入这些既有行为没有被这次改动顺带丢掉。
+    /// 3. 窗口打开的 URL **逐字符等于**配置值 —— 配置里故意用了不可推导的路径
+    ///    （`/topup-center?flow=card`），推导逻辑造不出它。
+    ///
+    /// 用 middleware 记录**所有**请求的 path（含未注册路由的 404）：逐 handler 记录会漏掉
+    /// 「代码打了但我们没 serve 的路径」，那种漏记正好把要抓的回归放跑。
+    #[tokio::test]
+    async fn sub2api_purchase_uses_signed_url() {
+        use axum::{
+            extract::Request, middleware, middleware::Next, routing::get, routing::post, Json,
+            Router,
+        };
+
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let every_request = Arc::clone(&requests);
+
+        let app = Router::new()
+            // `ensure_token_outlasts_a_payment` 开窗前无条件续期要打的端点。
+            .route(
+                "/api/v1/auth/refresh",
+                post(|| async move {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": {
+                            "access_token": "fresh-access-token",
+                            "refresh_token": "fresh-refresh-token",
+                            "expires_at": 4_102_444_800_000_i64
+                        }
+                    }))
+                }),
+            )
+            // `auth_user_from_profile` 要的账号档案（信封 `data` 里必须有 `id`）。
+            .route(
+                "/api/v1/user/profile",
+                get(|| async move {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": { "id": 7, "email": "saved-account", "username": "Saved Account" }
+                    }))
+                }),
+            )
+            // ⚠️ 陷阱端点：旧实现靠它读站点公开设置的支付开关猜路由。这里故意把它
+            // 配成一个能正常解析的 sub2api 响应 —— 只要充值流程还来问它，下面的
+            // 断言当场红。
+            .route(
+                "/api/v1/settings/public",
+                get(|| async move { Json(sub2api_discovery_body()) }),
+            )
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
+                let requests = Arc::clone(&every_request);
+                async move {
+                    requests.lock().unwrap().push(req.uri().path().to_string());
+                    next.run(req).await
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind purchase test server");
+        let addr = listener.local_addr().expect("server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve purchase app");
+        });
+
+        // relay 行存 http origin（测试站是本机 http 服务）；签名目录的 `purchase_url`
+        // 用同 host:port 的 https 形态 —— `normalize_site_origin` 强制 https 且保留端口，
+        // 所以两者恰好同源、`configured_purchase_url` 解析成功。
+        let (app, relay_id) =
+            saved_relay_app(&format!("http://{addr}"), discovery::BackendKind::Sub2Api);
+        let op = relay_credentials(&app, relay_id);
+
+        let configured = format!("https://{addr}/topup-center?flow=card");
+        let config = remote_config::RemoteConfig {
+            relay_directory: remote_config::RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([(
+                    "127.0.0.1".to_string(),
+                    remote_config::RelayDirectorySite {
+                        veridrop_host: None,
+                        entry_url: None,
+                        purchase_url: Some(configured.clone()),
+                        display_name: None,
+                    },
+                )]),
+            },
+            ..remote_config::RemoteConfig::default()
+        };
+        let purchase_url = remote_config::configured_purchase_url(&config, &op.site_origin)
+            .expect("签名目录解析不该报错")
+            .expect("这个站在目录里配了购买入口");
+
+        open_sub2api_purchase_window(app.handle(), op, purchase_url)
+            .await
+            .expect("开充值窗");
+
+        let paths = requests.lock().unwrap().clone();
+        assert_eq!(
+            paths,
+            vec!["/api/v1/auth/refresh", "/api/v1/user/profile"],
+            "充值流程只该打「开窗前续期 + 取账号档案」两个请求；\
+             出现 /api/v1/settings/public 说明又回去按公开设置猜路由了"
+        );
+
+        let window = app
+            .get_webview_window(&purchase::window_label(relay_id))
+            .expect("充值窗应该开出来了");
+        let opened = window
+            .url()
+            .expect("mock 窗口能读回创建时的 URL")
+            .to_string();
+        assert_eq!(
+            opened, configured,
+            "打开的外部 URL 必须恰好是签名配置值，不是推导出的 /purchase 或 /redeem"
+        );
+
+        server.abort();
     }
 
     #[tokio::test]
