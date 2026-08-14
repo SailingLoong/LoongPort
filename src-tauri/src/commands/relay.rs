@@ -44,7 +44,7 @@ use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
-    model_verification::target as verification_target, newapi, newapi_provision,
+    model_verification::target as verification_target, newapi, newapi_provision, pricing,
     provider_fingerprint, provision, purchase,
 };
 use crate::services::ProviderService;
@@ -642,6 +642,92 @@ fn relay_refresh_targets(
             })
             .collect()
     })
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RelayPricingRefreshSummary {
+    attempted: usize,
+    succeeded: usize,
+    failed: Vec<(i64, String)>,
+}
+
+async fn refresh_due_relay_pricing_rows<F, Fut>(
+    relays: Vec<creds::Relay>,
+    now: i64,
+    interval: std::time::Duration,
+    refresh: F,
+) -> RelayPricingRefreshSummary
+where
+    F: Fn(creds::Relay) -> Fut + Sync,
+    Fut: Future<Output = Result<(), AppError>> + Send,
+{
+    use futures::StreamExt;
+
+    let due: Vec<_> = relays
+        .into_iter()
+        .filter(|relay| relay.account_id.is_some() && !relay.pricing_is_fresh(now, interval))
+        .collect();
+    let attempted = due.len();
+    let mut results = futures::stream::iter(due.into_iter().map(|relay| {
+        let refresh = &refresh;
+        async move {
+            let relay_id = relay.id;
+            (relay_id, refresh(relay).await)
+        }
+    }))
+    .buffer_unordered(2);
+    let mut summary = RelayPricingRefreshSummary {
+        attempted,
+        ..Default::default()
+    };
+    while let Some((relay_id, result)) = results.next().await {
+        match result {
+            Ok(()) => summary.succeeded += 1,
+            Err(error) => summary.failed.push((relay_id, error.to_string())),
+        }
+    }
+    summary
+}
+
+pub(crate) async fn refresh_due_relay_pricing(
+    app_handle: tauri::AppHandle,
+) -> Result<(), AppError> {
+    let (relays, db) = {
+        let state = app_handle.state::<AppState>();
+        (with_conn(&state, creds::list)?, Arc::clone(&state.db))
+    };
+    let now = chrono::Utc::now().timestamp();
+    let summary = refresh_due_relay_pricing_rows(
+        relays,
+        now,
+        crate::maintenance::config::RELAY_PRICING_REFRESH_INTERVAL,
+        move |relay| {
+            let app_handle = app_handle.clone();
+            let db = Arc::clone(&db);
+            async move {
+                let relay = usable_relay(&app_handle, relay.id).await?;
+                let updates = pricing::fetch_rate_updates(&relay).await?;
+                pricing::apply_rate_updates(&db, &updates)?;
+                let conn = db
+                    .conn
+                    .lock()
+                    .map_err(|error| AppError::Database(format!("获取数据库连接失败: {error}")))?;
+                creds::mark_pricing_synced(&conn, relay.id, chrono::Utc::now().timestamp())
+            }
+        },
+    )
+    .await;
+
+    for (relay_id, error) in &summary.failed {
+        log::warn!("中转站 #{relay_id} 后台倍率刷新失败: {error}");
+    }
+    log::info!(
+        "中转站后台倍率刷新完成: attempted={}, succeeded={}, failed={}",
+        summary.attempted,
+        summary.succeeded,
+        summary.failed.len()
+    );
+    Ok(())
 }
 
 async fn refresh_relay_outcome(
@@ -7767,5 +7853,41 @@ mod tests {
         assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
         assert_eq!(persisted.account_label, "Old Label");
         assert_eq!(persisted.login_identifier, "old-login");
+    }
+
+    #[tokio::test]
+    async fn pricing_refresh_skips_fresh_rows_and_continues_after_one_failure() {
+        let mut fresh = test_newapi_relay(1);
+        fresh.pricing_synced_at = Some(100);
+        let failed = test_newapi_relay(2);
+        let succeeded = test_newapi_relay(3);
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let attempts_for_refresh = Arc::clone(&attempts);
+
+        let summary = refresh_due_relay_pricing_rows(
+            vec![fresh, failed, succeeded],
+            159,
+            std::time::Duration::from_secs(60),
+            move |relay| {
+                let attempts = Arc::clone(&attempts_for_refresh);
+                async move {
+                    attempts.lock().unwrap().push(relay.id);
+                    if relay.id == 2 {
+                        Err(AppError::Message("expected failure".into()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(summary.attempted, 2);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].0, 2);
+        let mut attempted_ids = attempts.lock().unwrap().clone();
+        attempted_ids.sort_unstable();
+        assert_eq!(attempted_ids, vec![2, 3]);
     }
 }
