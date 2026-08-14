@@ -63,9 +63,13 @@ const SIGNATURE_URL: &str = "https://config.loongport.dev/v1/config.json.sig";
 ///
 /// v2 是给多站点策略消费者使用的独立契约；现有桌面端仍只消费 v1，
 /// 所以这两个常量只作为签名与发布脚本的唯一 URL 来源，不能改动 v1 的读取路径。
+// `remote-config/lib.sh::rc_const` 在仓库外部读取它；Rust 无法看到这条跨语言引用。
+#[allow(dead_code)]
 const DIRECTORY_V2_URL: &str = "https://config.loongport.dev/v2/directory.json";
 
 /// Provider directory v2 的 detached Ed25519 签名端点。
+// 与 `DIRECTORY_V2_URL` 一样，由签名和部署脚本读取，而不是桌面运行时读取。
+#[allow(dead_code)]
 const DIRECTORY_V2_SIGNATURE_URL: &str = "https://config.loongport.dev/v2/directory.json.sig";
 
 /// 占位标记。端点含它就说明还没配真实域名。
@@ -894,7 +898,10 @@ mod tests {
             serde_json::from_slice(raw).expect("v2 directory must parse as its published schema");
 
         assert_eq!(directory.schema_version, 2);
-        assert!(!directory.issued_at.is_empty(), "v2 directory needs an issuedAt timestamp");
+        assert!(
+            !directory.issued_at.is_empty(),
+            "v2 directory needs an issuedAt timestamp"
+        );
 
         let bestapi = directory
             .sites
@@ -914,7 +921,11 @@ mod tests {
             "the policy must not invent an invite code"
         );
         assert_eq!(
-            bestapi.models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            bestapi
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
             ["deepseek-v4-flash", "deepseek-v4-pro"]
         );
         assert_eq!(
@@ -927,7 +938,10 @@ mod tests {
             [("deepseek-v4-flash", Some(true))]
         );
         assert_eq!(
-            bestapi.authorization.as_ref().map(|authorization| authorization.kind.as_str()),
+            bestapi
+                .authorization
+                .as_ref()
+                .map(|authorization| authorization.kind.as_str()),
             Some("manual-api-key")
         );
         assert!(
