@@ -2616,6 +2616,7 @@
   },
   "autoMode": {
     "title": "自動模式",
+    "tooltip": "自動模式生效中\\n系統按策略自動挑選託管檔位；同一會話保持目前檔位不切換\\n關閉後回到手動選擇，可隨時在設定中重新開啟",
     "description": "系統從託管檔位裡自動挑最合適的，目前檔位會話中保持不變",
     "strategyLabel": "挑選策略（全域）",
     "strategy": {
@@ -2631,7 +2632,7 @@
       "confirm": "開啟"
     },
     "enabledToast": "{{app}} 自動模式已開啟",
-    "disabledToast": "{{app}} 自動模式已關閉",
+    "disabledToast": "{{app}} 自動模式已關閉，可在設定中重新開啟",
     "strategySaved": "策略已更新",
     "toggleFailed": "操作失敗"
   },

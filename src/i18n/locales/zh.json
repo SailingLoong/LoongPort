@@ -2615,6 +2615,7 @@
   },
   "autoMode": {
     "title": "自动模式",
+    "tooltip": "自动模式生效中\\n系统按策略自动挑选托管档位；同一会话保持当前档位不切换\\n关闭后回到手动选择，可随时在设置中重新开启",
     "description": "系统从托管档位里自动挑最合适的，当前档位会话中保持不变",
     "strategyLabel": "挑选策略（全局）",
     "strategy": {
@@ -2630,7 +2631,7 @@
       "confirm": "开启"
     },
     "enabledToast": "{{app}} 自动模式已开启",
-    "disabledToast": "{{app}} 自动模式已关闭",
+    "disabledToast": "{{app}} 自动模式已关闭，可在设置中重新开启",
     "strategySaved": "策略已更新",
     "toggleFailed": "操作失败"
   },

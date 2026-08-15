@@ -2615,6 +2615,7 @@
   },
   "autoMode": {
     "title": "Auto Mode",
+    "tooltip": "Auto mode is active\\nThe system picks managed tiers automatically per strategy; the current tier stays within a session\\nTurning it off returns to manual selection; re-enable anytime in Settings",
     "description": "The system picks the best managed tier automatically; the current tier stays put during a session",
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
@@ -2630,7 +2631,7 @@
       "confirm": "Enable"
     },
     "enabledToast": "Auto mode enabled for {{app}}",
-    "disabledToast": "Auto mode disabled for {{app}}",
+    "disabledToast": "Auto mode disabled for {{app}}; re-enable it in Settings",
     "strategySaved": "Strategy updated",
     "toggleFailed": "Operation failed"
   },
