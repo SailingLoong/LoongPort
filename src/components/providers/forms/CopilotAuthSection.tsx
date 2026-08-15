@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/select";
 import {
   Loader2,
-  Github,
   LogOut,
   Copy,
   Check,
@@ -22,6 +21,7 @@ import {
   X,
   User,
 } from "lucide-react";
+import { GithubIcon } from "@/components/icons/GithubIcon";
 import { useCopilotAuth } from "./hooks/useCopilotAuth";
 import { copyText } from "@/lib/clipboard";
 import type { GitHubAccount } from "@/lib/api";
@@ -280,7 +280,7 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
           variant="outline"
           disabled={deploymentType === "enterprise" && !enterpriseDomain.trim()}
         >
-          <Github className="mr-2 h-4 w-4" />
+          <GithubIcon className="mr-2 h-4 w-4" />
           {t("copilot.loginWithGitHub", "使用 GitHub 登录")}
         </Button>
       )}
