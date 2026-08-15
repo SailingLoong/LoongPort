@@ -494,24 +494,25 @@ fn tray_menu_providers(
     sort_providers(providers)
 }
 
-/// 「模型」子菜单的数据来源：当前档位是**托管 Codex 项**且落库模型目录非空时，
+/// 「模型」子菜单的数据来源：当前档位是**托管项**且落库模型目录非空时，
 /// 返回 `(当前模型, 目录)`；其余情况 `None`（不挂子菜单）。
 ///
-/// 与主界面 `TierInfo.models` 同一份 `modelCatalog`（`codex_models_from_settings`），
-/// 非托管 provider / 非 Codex app 没有「选模型」这个概念，不预埋。
+/// 与主界面 `TierInfo.models` 同一份 `modelCatalog`（`models_from_settings`）。
+/// 目录按平台落库（codex / claude / gemini），没有目录的 app 自然不挂；
+/// 非托管 provider 没有「选模型」这个概念，不预埋。
 fn tier_model_choices(
     provider: &crate::provider::Provider,
     app_type: &AppType,
 ) -> Option<(Option<String>, Vec<String>)> {
-    if !matches!(app_type, AppType::Codex) || !crate::relay::is_managed(&provider.id) {
+    if !crate::relay::is_managed(&provider.id) {
         return None;
     }
-    let models = crate::commands::codex_models_from_settings(&provider.settings_config);
+    let models = crate::commands::models_from_settings(&provider.settings_config);
     if models.is_empty() {
         return None;
     }
     Some((
-        crate::relay::provision::extract_model(&provider.settings_config),
+        crate::relay::provision::selected_model(app_type, &provider.settings_config),
         models,
     ))
 }
@@ -907,9 +908,6 @@ fn handle_tier_model_click(
     app_type: &AppType,
     model: &str,
 ) -> Result<(), AppError> {
-    if !matches!(app_type, AppType::Codex) {
-        return Ok(());
-    }
     let Some(app_state) = app.try_state::<AppState>() else {
         return Ok(());
     };
@@ -1745,8 +1743,13 @@ mod tests {
             vec!["gpt-5.6-sol".to_string(), "gpt-5.6-nano".to_string()]
         );
 
-        // 非 Codex app（同一个 provider 行挂在 Claude 下）→ 不挂
-        assert!(tier_model_choices(&provider, &AppType::Claude).is_none());
+        // 目录按平台落库后 Claude 也挂子菜单 —— 选中模型按 env 形状读
+        // （这个 codex 形状的 provider 在 Claude 下读不到 env，当前模型为 None，
+        // 但目录照样暴露）
+        let (current, models) = tier_model_choices(&provider, &AppType::Claude)
+            .expect("claude tier with catalog should expose models too");
+        assert_eq!(current, None);
+        assert_eq!(models.len(), 2);
 
         // 自建 provider → 不挂
         let custom = codex_tier_provider("custom-1", "gpt-5.6-sol", &["gpt-5.6-sol"]);

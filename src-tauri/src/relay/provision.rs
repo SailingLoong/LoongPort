@@ -670,7 +670,7 @@ pub fn settings_config_with_models(
     )
 }
 
-fn settings_config_with_roles_and_models(
+pub fn settings_config_with_roles_and_models(
     app_type: &AppType,
     api_key: &str,
     display_name: &str,
@@ -771,6 +771,32 @@ fn settings_config_with_roles_and_models(
             if matches!(app_type, AppType::Claude) {
                 config["language"] = serde_json::json!("chinese");
             }
+            // Claude / Gemini：把分组模型目录落进配置（主界面模型芯片与自动模式
+            // app→模型 映射的数据源，形状与 codex 的 modelCatalog 相同）。
+            // 与 codex 的 `is_image_model` 过滤同理按家族收口：
+            // - claude 分组可能混 gpt-* / deepseek-*（瓜子跨家族对齐，角色挑选本来就
+            //   跨家族），目录收全部**文本**模型；
+            // - gemini 走原生 URL 路由（`/v1beta/models/{model}:generateContent`），
+            //   只认 gemini-* 家族，目录只收 gemini-*。
+            if matches!(app_type, AppType::Claude | AppType::Gemini) {
+                if let Some(models) = models.filter(|models| !models.is_empty()) {
+                    let family: Vec<&String> = match app_type {
+                        AppType::Gemini => models
+                            .iter()
+                            .filter(|m| m.to_ascii_lowercase().starts_with("gemini-"))
+                            .collect(),
+                        _ => models.iter().filter(|m| !is_image_model(m)).collect(),
+                    };
+                    if !family.is_empty() {
+                        config["modelCatalog"] = serde_json::json!({
+                            "models": family
+                                .iter()
+                                .map(|model| serde_json::json!({ "model": model }))
+                                .collect::<Vec<_>>(),
+                        });
+                    }
+                }
+            }
             config
         })
 }
@@ -808,6 +834,82 @@ pub fn extract_model(settings_config: &serde_json::Value) -> Option<String> {
         return Some(unquoted.to_string());
     }
     None
+}
+
+/// 从 settings_config 读档位**选中的模型**（跨平台）。
+///
+/// codex 系读 config TOML 的 `model` 行（[`extract_model`]）；claude 读
+/// `env.ANTHROPIC_MODEL`；gemini 读 `env.GEMINI_MODEL`。其余平台（没有
+/// 「档位选模型」概念）返回 `None`。目录本身统一走 `modelCatalog`
+/// （`commands::models_from_settings`，与 codex 同一份形状）。
+pub fn selected_model(app_type: &AppType, settings: &serde_json::Value) -> Option<String> {
+    let env_key = match app_type {
+        AppType::Codex | AppType::CodexImage => return extract_model(settings),
+        AppType::Claude => "ANTHROPIC_MODEL",
+        AppType::Gemini => "GEMINI_MODEL",
+        _ => return None,
+    };
+    settings
+        .pointer(&format!("/env/{env_key}"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+/// 把 claude / gemini 档位的选中模型（env 键）改成 `model`，返回改写后的配置。
+///
+/// claude 侧按 [`maybe_one_m`] 补 `[1M]` 能力声明 —— 与 provision 写入的形态
+/// 一致，否则用户一切模型就丢掉 1M 声明。成员资格校验由命令层对着目录做，
+/// 这里只负责写。找不到 `env` 对象 = 配置形状异常，报错而不是静默新建
+/// （静默新建会造出一份没有其它键的残缺 env）。
+pub fn select_env_model(
+    app_type: &AppType,
+    settings: &serde_json::Value,
+    model: &str,
+) -> Result<serde_json::Value, crate::error::AppError> {
+    let env_key = match app_type {
+        AppType::Claude => "ANTHROPIC_MODEL",
+        AppType::Gemini => "GEMINI_MODEL",
+        other => {
+            return Err(crate::error::AppError::Config(format!(
+                "{} 档位不支持选模型",
+                other.as_str()
+            )))
+        }
+    };
+    let mut config = settings.clone();
+    let Some(env) = config.get_mut("env").and_then(|env| env.as_object_mut()) else {
+        return Err(crate::error::AppError::Config(format!(
+            "配置里缺少 env 对象，无法写入 {env_key}"
+        )));
+    };
+    let value = if matches!(app_type, AppType::Claude) {
+        maybe_one_m(model)
+    } else {
+        model.to_string()
+    };
+    env.insert(env_key.to_string(), serde_json::json!(value));
+    Ok(config)
+}
+
+/// 重新 provision 时保留用户选过的模型（目录里还有它才保留，上游下架则新默认接管）。
+///
+/// codex 系委托 [`preserve_supported_codex_model`] 的等价逻辑在命令层
+/// （`preserve_supported_model`），这里只管 env 形状：读旧选中值、剥掉
+/// `[1M]` 声明后对新目录查成员资格，命中就把新默认的选中键改回旧值。
+pub fn preserve_supported_env_model(
+    app_type: &AppType,
+    defaults: serde_json::Value,
+    previous: &serde_json::Value,
+    catalog: &[String],
+) -> serde_json::Value {
+    let Some(old) = selected_model(app_type, previous) else {
+        return defaults;
+    };
+    let bare = old.trim_end_matches(crate::claude_desktop_config::ONE_M_CONTEXT_MARKER);
+    if !catalog.iter().any(|m| m == bare) {
+        return defaults;
+    }
+    select_env_model(app_type, &defaults, bare).unwrap_or(defaults)
 }
 
 /// codex 的默认模型（**文本对话**用）。
@@ -2116,6 +2218,131 @@ mod tests {
         assert!(
             image_settings.get("modelCatalog").is_none(),
             "生图栏不消费 Codex 主模型目录"
+        );
+    }
+
+    /// claude 档位落模型目录：收全部**文本**模型（跨家族是合法形态 —— 瓜子对齐），
+    /// 生图模型剔除；与 codex 目录同一份 JSON 形状。
+    #[test]
+    fn claude_settings_persist_the_text_model_catalog() {
+        let models = vec![
+            "claude-opus-5".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "gpt-image-2".to_string(),
+        ];
+        let settings = settings_config_with_roles_and_models(
+            &AppType::Claude,
+            "sk-test",
+            "Test",
+            "https://api.example.com/v1",
+            "claude-opus-5",
+            None,
+            Some(&models),
+        )
+        .expect("Claude config");
+
+        assert_eq!(
+            settings["modelCatalog"]["models"],
+            serde_json::json!([
+                { "model": "claude-opus-5" },
+                { "model": "gpt-5.6-sol" }
+            ])
+        );
+        // 选中模型在 env 里可读（`[1m]` 后缀是 pick_tier_models 挑选时加的，
+        // 这里传什么写什么 —— 裸 id 进、裸 id 出）
+        assert_eq!(
+            selected_model(&AppType::Claude, &settings).as_deref(),
+            Some("claude-opus-5")
+        );
+    }
+
+    /// gemini 档位落模型目录：只收 gemini-*（原生 URL 路由不认其它家族），
+    /// 家族全空时不写目录（托盘回「自动」占位）。
+    #[test]
+    fn gemini_settings_persist_the_gemini_family_catalog_only() {
+        let mixed = vec![
+            "gemini-3-pro".to_string(),
+            "claude-opus-5".to_string(),
+            "gpt-5.6-sol".to_string(),
+        ];
+        let settings = settings_config_with_roles_and_models(
+            &AppType::Gemini,
+            "sk-test",
+            "Test",
+            "https://api.example.com/v1",
+            "gemini-3-pro",
+            None,
+            Some(&mixed),
+        )
+        .expect("Gemini config");
+        assert_eq!(
+            settings["modelCatalog"]["models"],
+            serde_json::json!([{ "model": "gemini-3-pro" }])
+        );
+        assert_eq!(
+            selected_model(&AppType::Gemini, &settings).as_deref(),
+            Some("gemini-3-pro")
+        );
+
+        let no_family = vec!["claude-opus-5".to_string(), "gpt-5.6-sol".to_string()];
+        let settings = settings_config_with_roles_and_models(
+            &AppType::Gemini,
+            "sk-test",
+            "Test",
+            "https://api.example.com/v1",
+            "claude-opus-5",
+            None,
+            Some(&no_family),
+        )
+        .expect("Gemini config");
+        assert!(
+            settings.get("modelCatalog").is_none(),
+            "没有 gemini-* 时不能写一个空目录"
+        );
+    }
+
+    /// env 形状的选模型：写 env 键（claude 补 [1M]）；保留偏好对「目录里还有」
+    /// 的旧选中值生效，上游下架则新默认接管。
+    #[test]
+    fn env_model_selection_and_preserve() {
+        let models = vec![
+            "claude-sonnet-5".to_string(),
+            "claude-haiku-4-5".to_string(),
+        ];
+        let settings = settings_config_with_roles_and_models(
+            &AppType::Claude,
+            "sk-test",
+            "Test",
+            "https://api.example.com/v1",
+            "claude-sonnet-5",
+            None,
+            Some(&models),
+        )
+        .expect("Claude config");
+
+        let switched = select_env_model(&AppType::Claude, &settings, "claude-haiku-4-5")
+            .expect("select env model");
+        assert_eq!(
+            selected_model(&AppType::Claude, &switched).as_deref(),
+            Some("claude-haiku-4-5[1m]")
+        );
+
+        // 保留偏好：旧选中值（带 [1M] 声明）在新目录里 → 新默认的选中键改回旧值
+        let defaults = settings.clone();
+        let preserved =
+            preserve_supported_env_model(&AppType::Claude, defaults.clone(), &switched, &models);
+        assert_eq!(
+            selected_model(&AppType::Claude, &preserved).as_deref(),
+            Some("claude-haiku-4-5[1m]")
+        );
+
+        // 上游下架：目录里没有旧值 → 新默认接管
+        let shrunk = vec!["claude-sonnet-5".to_string()];
+        let reset = preserve_supported_env_model(&AppType::Claude, defaults, &switched, &shrunk);
+        // 新默认接管：生成侧写入的是裸 id（[1m] 只在 pick/选模型时补）
+        assert_eq!(
+            selected_model(&AppType::Claude, &reset).as_deref(),
+            Some("claude-sonnet-5")
         );
     }
 
