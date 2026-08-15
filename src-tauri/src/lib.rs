@@ -1861,6 +1861,7 @@ pub fn run() {
             commands::get_auto_mode_status,
             commands::set_auto_mode_enabled,
             commands::set_auto_mode_strategy,
+            commands::set_auto_mode_model,
             // Usage statistics
             commands::get_usage_summary,
             commands::get_usage_summary_by_app,

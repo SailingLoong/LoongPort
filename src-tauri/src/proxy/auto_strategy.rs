@@ -25,6 +25,9 @@ use std::str::FromStr;
 pub const SETTING_ENABLED_PREFIX: &str = "auto_mode_enabled_";
 /// settings 表里全局策略的 key（`cheapest` / `fastest`）。
 pub const SETTING_STRATEGY: &str = "auto_mode_strategy";
+/// settings 表里「某应用模型偏好」的 key 前缀（`auto_mode_model_<app>`）。
+/// `None` = 不限模型（全部托管档位都进候选）。
+pub const SETTING_MODEL_PREFIX: &str = "auto_mode_model_";
 
 /// 会话亲和窗口：当前档位最近一次请求距今小于该值即视为「会话进行中」。
 /// 30 分钟 ≈ 一次长编码会话的自然间隔，期间不因策略重排切走。
@@ -95,6 +98,58 @@ pub fn set_strategy(db: &Database, strategy: AutoStrategy) -> Result<(), crate::
     db.set_setting(SETTING_STRATEGY, strategy.as_str())
 }
 
+/// 读某应用的模型偏好（`None` = 不限模型）。
+pub fn get_model_pref(db: &Database, app_type: &str) -> Option<String> {
+    db.get_setting(&format!("{SETTING_MODEL_PREFIX}{app_type}"))
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
+}
+
+/// 写某应用的模型偏好（`None` 清除，回到不限）。
+pub fn set_model_pref(
+    db: &Database,
+    app_type: &str,
+    model: Option<&str>,
+) -> Result<(), crate::error::AppError> {
+    db.set_setting(
+        &format!("{SETTING_MODEL_PREFIX}{app_type}"),
+        model.unwrap_or(""),
+    )
+}
+
+/// 档位的模型目录（settings_config.modelCatalog）。目前只有 Codex 系托管档位
+/// 在 provision 时写目录；返回空 = 该档位没有目录（不参与模型过滤）。
+pub fn tier_models(tier: &Provider) -> Vec<String> {
+    crate::commands::codex_models_from_settings(&tier.settings_config)
+}
+
+/// 按模型偏好过滤候选：只保留目录里含偏好模型的档位。
+///
+/// 两类回退都不拦人：偏好的模型已从所有目录下架（过滤后为空）→ 回退全量，
+/// 选路不能因为一个过期偏好就没档位可用；该应用根本没有目录（非 Codex 系）
+/// → 过滤无意义，直接全量。无目录档位在有偏好时**不**保留 —— 目录都没有，
+/// 无法证明它能服务这个模型。
+fn filter_by_model_pref(tiers: Vec<Provider>, model_pref: Option<&str>) -> Vec<Provider> {
+    let Some(model) = model_pref else {
+        return tiers;
+    };
+    let has_catalogs = tiers.iter().any(|t| !tier_models(t).is_empty());
+    if !has_catalogs {
+        return tiers;
+    }
+    let filtered: Vec<Provider> = tiers
+        .iter()
+        .filter(|t| tier_models(t).iter().any(|m| m == model))
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        log::warn!("[AutoMode] 模型偏好 {model} 不在任何档位目录中，回退全量候选");
+        return tiers;
+    }
+    filtered
+}
+
 /// 当前供应商 id：本地 settings 优先（校验存在性），fallback 到数据库 is_current。
 /// `provider_router` 的常规选路与自动模式候选共用这一份解析。
 pub fn effective_current_provider_id(db: &Database, app_type: &str) -> Option<String> {
@@ -108,16 +163,20 @@ pub fn effective_current_provider_id(db: &Database, app_type: &str) -> Option<St
         .or_else(|| db.get_current_provider(app_type).ok().flatten())
 }
 
-/// 自动模式候选（选路与「开启即切最优」命令共用，唯源）：
-/// 该应用全部托管档位，按策略排序；当前在用档位（含非托管）会话活跃时置顶。
-/// 没有任何托管档位时返回 `None`（调用方回退常规选路 / 拒绝开启）。
+/// 自动模式候选（选路与「开启即切最优/选模型」命令共用，唯源）：
+/// 该应用全部托管档位，按模型偏好过滤后按策略排序；当前在用档位（含非托管）
+/// 会话活跃时置顶。没有任何托管档位时返回 `None`（调用方回退常规选路 / 拒绝开启）。
 ///
 /// 当前在用的是**非托管**供应商（用户自选的官网直连等）且会话活跃时，同样置顶 ——
 /// 亲和规则的判据是「切换丢缓存」，与在用的是不是托管档位无关；用户的手动选择
 /// 在他闲置或该供应商熔断之前不被系统挤走。
+///
+/// `honor_affinity`：托盘点选模型是**显式**选择，绕过亲和立即切到目标 ——
+/// 亲和保护的是「系统重排别打断会话」，不是替用户拒绝他刚点的选择。
 pub fn rank_managed_tier_candidates(
     db: &Database,
     app_type: &str,
+    honor_affinity: bool,
 ) -> Result<Option<Vec<Provider>>, crate::error::AppError> {
     let tiers: Vec<Provider> = db
         .get_all_providers(app_type)?
@@ -130,7 +189,13 @@ pub fn rank_managed_tier_candidates(
         return Ok(None);
     }
 
-    let current_id = effective_current_provider_id(db, app_type);
+    let tiers = filter_by_model_pref(tiers, get_model_pref(db, app_type).as_deref());
+
+    let current_id = if honor_affinity {
+        effective_current_provider_id(db, app_type)
+    } else {
+        None
+    };
     let now = chrono::Utc::now().timestamp();
     let mut ranked = rank_tiers(
         db,
@@ -365,5 +430,58 @@ mod tests {
 
         set_enabled(&db, "claude", false).unwrap();
         assert!(!is_auto_mode_enabled(&db, "claude"));
+    }
+
+    /// 模型偏好过滤：有偏好时只留「目录含该模型」的档位（无目录档位不保留 ——
+    /// 无法证明它能服务这个模型）；偏好过期（不在任何目录）回退全量；
+    /// 无偏好全量。经 rank_managed_tier_candidates（honor_affinity=false）走真实路径。
+    #[test]
+    fn model_pref_filters_candidates_with_stale_fallback() {
+        let db = Database::memory().unwrap();
+        let has_sol = managed_id("https://a.example", 1, 1);
+        let has_nano = managed_id("https://b.example", 1, 2);
+        let no_catalog = managed_id("https://c.example", 1, 3);
+
+        let with_catalog =
+            |model: &str| serde_json::json!({ "modelCatalog": { "models": [{ "model": model }] } });
+        for (id, settings) in [
+            (&has_sol, with_catalog("gpt-5.6-sol")),
+            (&has_nano, with_catalog("gpt-5.6-nano")),
+            (&no_catalog, serde_json::json!({})),
+        ] {
+            let mut p = tier(id, id);
+            p.settings_config = settings;
+            db.save_provider("codex", &p).unwrap();
+        }
+
+        // 偏好 sol → 只剩目录含 sol 的档位（无目录档位被排除）
+        set_model_pref(&db, "codex", Some("gpt-5.6-sol")).unwrap();
+        let ranked = rank_managed_tier_candidates(&db, "codex", false)
+            .unwrap()
+            .expect("候选不应为空");
+        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec![has_sol.as_str()]);
+
+        // 过期偏好（不在任何目录）→ 回退全量，选路不能没档位可用
+        set_model_pref(&db, "codex", Some("gone-model")).unwrap();
+        let ranked = rank_managed_tier_candidates(&db, "codex", false)
+            .unwrap()
+            .expect("过期偏好必须回退全量");
+        assert_eq!(ranked.len(), 3);
+
+        // 无偏好 → 全量
+        set_model_pref(&db, "codex", None).unwrap();
+        let ranked = rank_managed_tier_candidates(&db, "codex", false)
+            .unwrap()
+            .expect("无偏好全量");
+        assert_eq!(ranked.len(), 3);
+
+        // 读写往返
+        assert_eq!(get_model_pref(&db, "codex"), None);
+        set_model_pref(&db, "codex", Some("gpt-5.6-nano")).unwrap();
+        assert_eq!(
+            get_model_pref(&db, "codex").as_deref(),
+            Some("gpt-5.6-nano")
+        );
     }
 }
