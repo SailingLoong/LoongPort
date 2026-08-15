@@ -2,13 +2,11 @@
 //!
 //! 负责选择和管理代理目标供应商，实现智能故障转移
 
-use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -31,66 +29,84 @@ impl ProviderRouter {
 
     /// 选择可用的供应商（支持故障转移）
     ///
-    /// 返回按优先级排序的可用供应商列表：
-    /// - 故障转移关闭时：仅返回当前供应商
+    /// 返回按优先级排序的可用供应商列表，优先级从高到低：
+    /// - 自动模式开启时：托管档位按策略排序（Cheapest/Fastest，会话亲和置顶当前档位）
     /// - 故障转移开启时：仅使用故障转移队列，按队列顺序依次尝试（P1 → P2 → ...）
+    /// - 两者都关闭时：仅返回当前供应商
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
         let mut result = Vec::new();
         let mut total_providers = 0usize;
         let mut circuit_open_count = 0usize;
 
-        // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
-        let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
-            Ok(config) => config.auto_failover_enabled,
-            Err(e) => {
-                log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
-                false
-            }
-        };
-
-        if auto_failover_enabled {
-            // 故障转移开启：仅按队列顺序依次尝试（P1 → P2 → ...）
-            let all_providers = self.db.get_all_providers(app_type)?;
-
-            // 使用 DAO 返回的排序结果，确保和前端展示一致
-            let ordered_ids: Vec<String> = self
-                .db
-                .get_failover_queue(app_type)?
-                .into_iter()
-                .map(|item| item.provider_id)
-                .collect();
-
-            total_providers = ordered_ids.len();
-
-            for provider_id in ordered_ids {
-                let Some(provider) = all_providers.get(&provider_id).cloned() else {
-                    continue;
-                };
-
-                let circuit_key = format!("{app_type}:{}", provider.id);
-                let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
-
-                if breaker.is_available().await {
-                    result.push(provider);
-                } else {
-                    circuit_open_count += 1;
+        // 自动模式（LoongPort）：托管档位按策略排序，优先于故障转移队列 ——
+        // 同时开着两个时以自动模式为准（用户把选择权交给了系统，队列不再有意义）。
+        // 没有托管档位时回落到下面的常规选路，别让请求直接失败。
+        let auto_mode_candidates =
+            if crate::proxy::auto_strategy::is_auto_mode_enabled(&self.db, app_type) {
+                match self.collect_auto_mode_candidates(app_type).await? {
+                    Some(candidates) => {
+                        total_providers = candidates.len();
+                        Some(candidates)
+                    }
+                    None => {
+                        log::warn!("[{app_type}] 自动模式开启但没有托管档位，回退到常规选路");
+                        None
+                    }
                 }
-            }
-        } else {
-            // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
-            let current_id = AppType::from_str(app_type)
-                .ok()
-                .and_then(|app_enum| {
-                    crate::settings::get_effective_current_provider(&self.db, &app_enum)
-                        .ok()
-                        .flatten()
-                })
-                .or_else(|| self.db.get_current_provider(app_type).ok().flatten());
+            } else {
+                None
+            };
 
-            if let Some(current_id) = current_id {
-                if let Some(current) = self.db.get_provider_by_id(&current_id, app_type)? {
-                    total_providers = 1;
-                    result.push(current);
+        if let Some(candidates) = auto_mode_candidates {
+            self.filter_by_circuit_breaker(
+                app_type,
+                candidates,
+                &mut result,
+                &mut circuit_open_count,
+            )
+            .await;
+        } else {
+            // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
+            let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
+                Ok(config) => config.auto_failover_enabled,
+                Err(e) => {
+                    log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
+                    false
+                }
+            };
+
+            if auto_failover_enabled {
+                // 故障转移开启：仅按队列顺序依次尝试（P1 → P2 → ...）
+                let all_providers = self.db.get_all_providers(app_type)?;
+
+                // 使用 DAO 返回的排序结果，确保和前端展示一致
+                let ordered_ids: Vec<String> = self
+                    .db
+                    .get_failover_queue(app_type)?
+                    .into_iter()
+                    .map(|item| item.provider_id)
+                    .collect();
+
+                let ordered = ordered_ids
+                    .into_iter()
+                    .filter_map(|id| all_providers.get(&id).cloned())
+                    .collect::<Vec<_>>();
+                total_providers = ordered.len();
+
+                self.filter_by_circuit_breaker(
+                    app_type,
+                    ordered,
+                    &mut result,
+                    &mut circuit_open_count,
+                )
+                .await;
+            } else {
+                // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
+                if let Some(current_id) = self.resolve_current_provider_id(app_type) {
+                    if let Some(current) = self.db.get_provider_by_id(&current_id, app_type)? {
+                        total_providers = 1;
+                        result.push(current);
+                    }
                 }
             }
         }
@@ -106,6 +122,40 @@ impl ProviderRouter {
         }
 
         Ok(result)
+    }
+
+    /// 自动模式候选：委托给 `auto_strategy::rank_managed_tier_candidates`
+    /// （选路与「开启即切最优」命令共用同一份实现，唯源）。
+    async fn collect_auto_mode_candidates(
+        &self,
+        app_type: &str,
+    ) -> Result<Option<Vec<Provider>>, AppError> {
+        crate::proxy::auto_strategy::rank_managed_tier_candidates(&self.db, app_type)
+    }
+
+    /// 当前供应商 id：本地 settings 优先（校验存在性），fallback 到数据库 is_current。
+    fn resolve_current_provider_id(&self, app_type: &str) -> Option<String> {
+        crate::proxy::auto_strategy::effective_current_provider_id(&self.db, app_type)
+    }
+
+    /// 按熔断器可用性过滤候选，累计放行结果与熔断计数。
+    async fn filter_by_circuit_breaker(
+        &self,
+        app_type: &str,
+        candidates: Vec<Provider>,
+        result: &mut Vec<Provider>,
+        circuit_open_count: &mut usize,
+    ) {
+        for provider in candidates {
+            let circuit_key = format!("{app_type}:{}", provider.id);
+            let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+
+            if breaker.is_available().await {
+                result.push(provider);
+            } else {
+                *circuit_open_count += 1;
+            }
+        }
     }
 
     /// 请求执行前获取熔断器“放行许可”
@@ -500,6 +550,87 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, managed_id);
+    }
+
+    /// 自动模式开启时：候选 = 该应用全部托管档位，按策略排序（默认 cheapest），
+    /// 与故障转移队列无关（队列里有别的 provider 也不掺进来）。
+    #[tokio::test]
+    #[serial]
+    async fn select_providers_auto_mode_ranks_managed_tiers_by_strategy() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let cheap = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let expensive = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        db.save_provider(
+            "claude",
+            &Provider::with_id(expensive.clone(), "Expensive".to_string(), json!({}), None),
+        )
+        .unwrap();
+        db.save_provider(
+            "claude",
+            &Provider::with_id(cheap.clone(), "Cheap".to_string(), json!({}), None),
+        )
+        .unwrap();
+        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &expensive, Some(2.0))
+            .unwrap();
+
+        // 队列里塞一个非托管 provider —— 自动模式下必须被无视
+        db.save_provider(
+            "claude",
+            &Provider::with_id(
+                "vendor-1".to_string(),
+                "Vendor".to_string(),
+                json!({}),
+                None,
+            ),
+        )
+        .unwrap();
+        db.add_to_failover_queue("claude", "vendor-1").unwrap();
+
+        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+
+        assert_eq!(providers.len(), 2, "只有托管档位进候选");
+        assert_eq!(providers[0].id, cheap, "cheapest 策略下倍率低者第一");
+        assert_eq!(providers[1].id, expensive);
+    }
+
+    /// 自动模式开启但没有托管档位：回退常规选路（故障转移队列），
+    /// 不能因为开了自动模式就让请求无供应商可用。
+    #[tokio::test]
+    #[serial]
+    async fn select_providers_auto_mode_without_tiers_falls_back_to_failover() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        db.save_provider(
+            "claude",
+            &Provider::with_id(
+                "vendor-1".to_string(),
+                "Vendor".to_string(),
+                json!({}),
+                None,
+            ),
+        )
+        .unwrap();
+        db.add_to_failover_queue("claude", "vendor-1").unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "vendor-1");
     }
 
     #[tokio::test]
