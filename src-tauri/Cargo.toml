@@ -115,7 +115,11 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
-rquickjs = { version = "0.8", features = ["bindgen"] }
+# 必须与主依赖同版本：两段同时命中这个 target 时，版本分叉会让依赖图里
+# 同时出现 rquickjs 0.12/0.8 两个单元，rustc 对 `use rquickjs` 产生
+# E0464（v3.27.0 发版实测）。同版本时 features 在两段间自动合并
+# （array-buffer + classes + bindgen）。
+rquickjs = { version = "0.12", features = ["bindgen"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
