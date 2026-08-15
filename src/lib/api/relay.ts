@@ -255,6 +255,43 @@ export interface RestoreOfficialLoginResult {
   warnings: string[];
 }
 
+/**
+ * 窗口标记。判据是业务事实，由后端定（`WindowFlag`），前端只展示：
+ *
+ * - `skippedTopUp`：扣减 <= 0（充值/返利/赠送），不进比值、不进基线。
+ * - `insufficientData`：没有可算的比值（扣减太小或窗口内无估算数据）。
+ * - `suspicious`：实际扣减持续达到预期的 2 倍以上（`ratio <= baseline × 0.5`）。
+ * - `normal`：其余有比值的窗口。
+ */
+export type ReconciliationFlag =
+  "normal" | "skippedTopUp" | "insufficientData" | "suspicious";
+
+/** 相邻两枚余额快照构成的窗口 `[startSecs, endSecs)`。 */
+export interface ReconciliationWindow {
+  startSecs: number;
+  endSecs: number;
+  startBalanceUsd: number;
+  endBalanceUsd: number;
+  /** `end - start`：负数 = 扣减，正数 = 充值/返利。 */
+  balanceDeltaUsd: number;
+  /** 窗口内该站名下 provider 的估算成本之和（美元）。 */
+  estimatedCostUsd: number;
+  /** 估算 ÷ 扣减；扣减太小或窗口内无估算数据时为 `null`，**不要当 0 处理**。 */
+  ratio: number | null;
+  flag: ReconciliationFlag;
+}
+
+/** 一份扣费对账报告（`relay_reconciliation` 的返回值）。 */
+export interface ReconciliationReport {
+  relayId: number;
+  /** 回看期（30 天）内的快照总数 —— 是窗口的原料数，不是窗口数。 */
+  snapshotCount: number;
+  /** 有效窗口 ratio 的中位数；不足 3 个有效窗口为 `null`，此时不判 `suspicious`。 */
+  baselineRatio: number | null;
+  /** 窗口按**新 → 旧**排，最多 50 个。 */
+  windows: ReconciliationWindow[];
+}
+
 export const relayApi = {
   status: (): Promise<RelayStatus> => invoke("relay_status"),
 
@@ -453,4 +490,13 @@ export const relayApi = {
    */
   restoreOfficialLogin: (): Promise<RestoreOfficialLoginResult> =>
     invoke("relay_restore_official_login"),
+
+  /**
+   * 某一行中转站的扣费对账报告（30 天回看）。
+   *
+   * 纯读本地库（快照 + 代理日志），不发网络。快照不足两枚时 `windows` 为空 ——
+   * 那是「快照不足」的合法状态，UI 展示即可，不是错误。
+   */
+  reconciliation: (relayId: number): Promise<ReconciliationReport> =>
+    invoke("relay_reconciliation", { relayId }),
 };
