@@ -3925,7 +3925,9 @@ fn tiers_of_site(
 
 /// 内部版本额外带出每条档位的 `website_url`（= 所属站点的 origin），供
 /// [`list_relays_impl`] 按站分组。命令层把它丢掉 —— 那是实现细节，不进对外契约。
-fn codex_models_from_settings(settings: &serde_json::Value) -> Vec<String> {
+///
+/// `pub(crate)`：托盘的「模型」子菜单也从这里取目录（同一份 `modelCatalog` 两个消费者）。
+pub(crate) fn codex_models_from_settings(settings: &serde_json::Value) -> Vec<String> {
     settings
         .get("modelCatalog")
         .and_then(|catalog| catalog.get("models"))
@@ -4085,30 +4087,42 @@ pub async fn relay_switch_tier_model(
     quit_chatgpt: Option<bool>,
 ) -> Result<SwitchTierCommandResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    switch_tier_model_command(&app_handle, &provider_id, app_type, &model, quit_chatgpt)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// [`relay_switch_tier_model`] 的命令层实现，托盘的模型子菜单也走这里 ——
+/// 与 [`switch_tier_command`] 同样的「一个编排、多个入口」约定（见它的文档）。
+pub(crate) async fn switch_tier_model_command(
+    app_handle: &tauri::AppHandle,
+    provider_id: &str,
+    app_type: AppType,
+    model: &str,
+    user_choice: Option<bool>,
+) -> Result<SwitchTierCommandResult, AppError> {
     if should_request_switch_confirmation(
         &app_type,
-        quit_chatgpt,
+        user_choice,
         chatgpt_app::needs_user_attention(),
     ) {
         let state = app_handle.state::<AppState>();
         let target_name = state
             .db
-            .get_provider_by_id(&provider_id, app_type.as_str())
-            .map_err(|error| error.to_string())?
+            .get_provider_by_id(provider_id, app_type.as_str())?
             .map(|provider| format!("{} · {model}", provider.name))
-            .unwrap_or(model.clone());
+            .unwrap_or_else(|| model.to_string());
         return Ok(SwitchTierCommandResult::ConfirmationRequired { target_name });
     }
     select_tier_model_impl(
-        &app_handle,
-        &provider_id,
+        app_handle,
+        provider_id,
         app_type,
-        &model,
-        quit_chatgpt.unwrap_or(false),
+        model,
+        user_choice.unwrap_or(false),
     )
     .await
     .map(|result| SwitchTierCommandResult::Switched { result })
-    .map_err(|e| e.to_string())
 }
 
 fn should_request_switch_confirmation(
@@ -4268,6 +4282,11 @@ async fn switch_tier_impl(
     // 两条切换路径都发，共用 `commands::provider::emit_provider_switched` 那一份实现 ——
     // payload 形状复制第二遍的必然结局是两份分叉（那边的文档写了完整理由）。
     emit_provider_switched(app_handle, &app_type_for_event, provider_id);
+
+    // 托盘也要跟上：这里不刷，用户从主界面切完档位、再看托盘标题还是旧的
+    // （前端 relay 那条路不会替我们调 `update_tray_menu`）。放在 `switch_tier_impl`
+    // 而不是各命令壳里 —— relay / vendor / 托盘三个入口一次全修，后来者免接。
+    crate::tray::refresh_tray_menu(app_handle);
 
     Ok(SwitchTierResult {
         provider_name,
