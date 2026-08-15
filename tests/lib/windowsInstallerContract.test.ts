@@ -13,9 +13,15 @@ const read = (path: string) =>
  * 进入 Config.Msi rollback 路径，恢复 Error 1926。
  */
 describe("Windows NSIS 安装与自动更新契约", () => {
-  it("Tauri 默认 bundle 是 NSIS，并挂载旧 MSI 迁移 hook", () => {
+  it("Tauri 默认 bundle 含 NSIS（唯一 Windows 格式），并挂载旧 MSI 迁移 hook", () => {
     const config = JSON.parse(read("src-tauri/tauri.conf.json"));
-    expect(config.bundle.targets).toEqual(["nsis"]);
+    // 默认 targets 列全平台格式，让任何系统上裸 `pnpm tauri build` 都能出对应包；
+    // 本测试守的 Windows 不变量是「nsis 在列、且是唯一 Windows 安装格式」——
+    // msi/wix 一旦出现，安装器与 latest.json 的 NSIS 契约就分叉了（见文件头注释）。
+    // 各平台发布格式由 release.yml 显式 --bundles 指定（见下一条测试），不在此钉。
+    expect(config.bundle.targets).toContain("nsis");
+    expect(config.bundle.targets).not.toContain("msi");
+    expect(config.bundle.targets).not.toContain("wix");
     // Tauri 模板会先用 ProductName + Publisher 模糊命中 WiX，然后执行
     // 不带静默参数的 UninstallString。与历史 MSI 的 loongport 区分开，
     // 才会让下面按 UpgradeCode 精确识别的 hook 接管迁移。
