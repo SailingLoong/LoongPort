@@ -1637,6 +1637,7 @@
     "tokens": "Tokens",
     "avgCost": "Average Cost",
     "avgLatency": "Average Latency",
+    "avgFirstToken": "Avg First Token",
     "successRate": "Success Rate",
     "requestId": "Request ID",
     "never": "Never",

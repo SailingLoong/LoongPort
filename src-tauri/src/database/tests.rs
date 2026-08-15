@@ -424,6 +424,15 @@ fn migration_v10_to_v11_rebuilds_rollups_with_request_model_dimension() {
     assert_eq!(rollup_pricing_model.r#type, "TEXT");
     assert_eq!(rollup_pricing_model.notnull, 1);
 
+    // 迁移重建的表形状必须与 create_tables_on_conn 的新建表一致：TTFT 和/计数列
+    // 也要在（否则同步暂存库跑迁移后，restore_tables 的 INSERT 会因缺列失败）。
+    let ttft_sum = get_column_info(&conn, "usage_daily_rollups", "first_token_ms_sum");
+    assert_eq!(ttft_sum.r#type, "INTEGER");
+    assert_eq!(ttft_sum.notnull, 1);
+    let ttft_count = get_column_info(&conn, "usage_daily_rollups", "first_token_count");
+    assert_eq!(ttft_count.r#type, "INTEGER");
+    assert_eq!(ttft_count.notnull, 1);
+
     // 明细表补上 pricing_model 列（可空，历史行 NULL）
     let pricing_model = get_column_info(&conn, "proxy_request_logs", "pricing_model");
     assert_eq!(pricing_model.r#type, "TEXT");

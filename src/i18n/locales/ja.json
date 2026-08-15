@@ -1637,6 +1637,7 @@
     "tokens": "トークン",
     "avgCost": "平均コスト",
     "avgLatency": "平均レイテンシ",
+    "avgFirstToken": "平均初トークン時間",
     "successRate": "成功率",
     "requestId": "リクエスト ID",
     "never": "なし",

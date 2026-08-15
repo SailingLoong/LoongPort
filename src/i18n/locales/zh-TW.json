@@ -1638,6 +1638,7 @@
     "tokens": "Tokens",
     "avgCost": "平均成本",
     "avgLatency": "平均延遲",
+    "avgFirstToken": "平均首字耗時",
     "successRate": "成功率",
     "requestId": "請求 ID",
     "never": "從不",

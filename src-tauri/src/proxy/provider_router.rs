@@ -161,6 +161,44 @@ impl ProviderRouter {
         Ok(())
     }
 
+    /// 记录供应商请求结果（致命失败变体）
+    ///
+    /// 与 [`record_result`](Self::record_result) 的失败分支同步更新 DB 健康度，
+    /// 区别只在熔断器：致命失败一次即 Open 且用长冷却
+    /// （[`CircuitBreaker::record_fatal_failure`](crate::proxy::circuit_breaker::CircuitBreaker::record_fatal_failure)）。
+    /// 什么时候算「致命」由调用方分类（forwarder 按上游状态码 401/402/403）。
+    pub async fn record_fatal_result(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+        used_half_open_permit: bool,
+        error_msg: Option<String>,
+    ) -> Result<(), AppError> {
+        // 1. 按应用独立获取熔断器配置
+        let failure_threshold = match self.db.get_proxy_config_for_app(app_type).await {
+            Ok(app_config) => app_config.circuit_failure_threshold,
+            Err(_) => 5, // 默认值
+        };
+
+        // 2. 更新熔断器状态（致命失败）
+        let circuit_key = format!("{app_type}:{provider_id}");
+        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+        breaker.record_fatal_failure(used_half_open_permit).await;
+
+        // 3. 更新数据库健康状态（与普通失败同一张表）
+        self.db
+            .update_provider_health_with_threshold(
+                provider_id,
+                app_type,
+                false,
+                error_msg.clone(),
+                failure_threshold,
+            )
+            .await?;
+
+        Ok(())
+    }
+
     /// 重置熔断器（手动恢复）
     pub async fn reset_circuit_breaker(&self, circuit_key: &str) {
         let breakers = self.circuit_breakers.read().await;
@@ -423,6 +461,45 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "b");
+    }
+
+    /// 队列里的托管档位必须能被选路（自动模式选路的地基）。
+    ///
+    /// 历史上托管档位被挡在队列外（见 `relay/managed.rs` 的说明：守卫防的是
+    /// 非接管态下跳过 ChatGPT 编排，而这条链的切换点都先验证接管态，场景不可达，
+    /// 2026-08-15 修根移除）。这条测试钉住移除后的契约：托管 id 进队列后，
+    /// `select_providers` 照常返回它，后续熔断/热切换链路对它一视同仁。
+    #[tokio::test]
+    #[serial]
+    async fn select_providers_serves_managed_tiers_in_failover_queue() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let managed_id =
+            crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 42);
+        assert!(
+            crate::relay::is_managed(&managed_id),
+            "fixture 必须是托管形状的 id"
+        );
+
+        let provider = Provider::with_id(
+            managed_id.clone(),
+            "Managed Tier".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("claude", &provider).unwrap();
+        db.add_to_failover_queue("claude", &managed_id).unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, managed_id);
     }
 
     #[tokio::test]

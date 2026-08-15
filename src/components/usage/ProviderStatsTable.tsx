@@ -60,13 +60,16 @@ export function ProviderStatsTable({
             <TableHead className="text-right">
               {t("usage.avgLatency", "平均延迟")}
             </TableHead>
+            <TableHead className="text-right">
+              {t("usage.avgFirstToken", "平均首字耗时")}
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {stats?.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={6}
+                colSpan={7}
                 className="text-center text-muted-foreground"
               >
                 {t("usage.noData", "暂无数据")}
@@ -92,6 +95,10 @@ export function ProviderStatsTable({
                 </TableCell>
                 <TableCell className="text-right">
                   {stat.avgLatencyMs}ms
+                </TableCell>
+                <TableCell className="text-right">
+                  {/* 无 TTFT 样本（0）时显示占位：0ms 是「没有数据」不是「真的 0ms」 */}
+                  {stat.avgFirstTokenMs > 0 ? `${stat.avgFirstTokenMs}ms` : "—"}
                 </TableCell>
               </TableRow>
             ))
