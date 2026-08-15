@@ -184,9 +184,11 @@ for index, site in enumerate(sites):
         if defaults > 1:
             errors.append(f"{prefix}.models 最多只能有一个 default: true")
 
+    # veridropHosts 对中转站应为非空（它要能对上 VeriDrop 榜）；官方直连站
+    # 不在 VeriDrop 榜上，允许空数组——与 dsh 插件已发布的 policy 校验一致。
     hosts = site.get("veridropHosts")
-    if not isinstance(hosts, list) or not hosts:
-        errors.append(f"{prefix}.veridropHosts 必须是非空数组")
+    if not isinstance(hosts, list):
+        errors.append(f"{prefix}.veridropHosts 必须是数组")
     else:
         for host_index, host in enumerate(hosts):
             non_empty_string(host, f"{prefix}.veridropHosts[{host_index}]")
