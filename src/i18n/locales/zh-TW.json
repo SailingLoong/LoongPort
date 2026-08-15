@@ -3168,7 +3168,8 @@
       "description": "選擇廠商，登入後自動完成金鑰取得與各平台設定",
       "connect": "連線並取得金鑰",
       "deepseekDesc": "DeepSeek 開放平台：登入後自動建立/認領 API Key，接入各程式代理",
-      "bigmodelDesc": "智譜 BigModel 開放平台：GLM 系列模型，登入後自動建立/認領 API Key"
+      "bigmodelDesc": "智譜 BigModel 開放平台：GLM 系列模型，登入後自動建立/認領 API Key",
+      "opencodeDesc": "opencode Zen：Claude / GPT / Gemini 等模型的統一閘道，登入後自動建立/認領 API Key"
     },
     "tierList": {
       "empty": "尚未新增中轉站",

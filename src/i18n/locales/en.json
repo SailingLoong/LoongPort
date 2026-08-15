@@ -3167,7 +3167,8 @@
       "description": "Pick a vendor; after sign-in the key is provisioned and each app is configured automatically",
       "connect": "Connect & fetch key",
       "deepseekDesc": "DeepSeek platform: sign in to create/claim an API key for your coding agents",
-      "bigmodelDesc": "Zhipu BigModel platform: GLM model family; sign in to create/claim an API key"
+      "bigmodelDesc": "Zhipu BigModel platform: GLM model family; sign in to create/claim an API key",
+      "opencodeDesc": "opencode Zen: unified gateway for Claude / GPT / Gemini models; sign in to create/claim an API key"
     },
     "tierList": {
       "empty": "No relay services added",

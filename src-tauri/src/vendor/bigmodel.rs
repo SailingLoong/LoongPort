@@ -577,13 +577,12 @@ mod tests {
 
     #[test]
     fn envelope_maps_error_code_and_missing_data() {
-        assert_eq!(
+        assert!(
             parse_envelope::<serde_json::Value>(
                 &serde_json::json!({"code": 200, "data": {}}).to_string(),
                 "测试"
             )
-            .is_ok(),
-            true
+            .is_ok()
         );
         assert!(matches!(
             parse_envelope::<serde_json::Value>(
