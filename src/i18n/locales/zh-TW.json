@@ -2603,6 +2603,7 @@
     "enabled": "{{app}} 故障轉移已啟用",
     "disabled": "{{app}} 故障轉移已關閉",
     "toggleFailed": "操作失敗：{{detail}}",
+    "cacheCostWarning": "同一工作階段內切換供應商會丟失提示詞快取：未命中快取的請求按全價計費，長會話代價明顯",
     "inQueue": "已加入",
     "addQueue": "加入",
     "priority": {

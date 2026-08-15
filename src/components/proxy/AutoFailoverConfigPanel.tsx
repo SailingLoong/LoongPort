@@ -229,6 +229,13 @@ export function AutoFailoverConfigPanel({
               "proxy.autoFailover.info",
               "当故障转移队列中配置了多个供应商时，系统会在请求失败时按优先级顺序依次尝试。当某个供应商连续失败达到阈值时，熔断器会打开并在一段时间内跳过该供应商。",
             )}
+            <br />
+            {/* 与主界面故障转移开关的 hover 提示共用同一个 key（唯源）：
+                切换丢缓存这件事只在一处维护文案。 */}
+            {t(
+              "failover.cacheCostWarning",
+              "同一会话内切换供应商会丢失提示词缓存：未命中缓存的请求按全价计费，长会话代价明显",
+            )}
           </AlertDescription>
         </Alert>
 

@@ -35,20 +35,27 @@ export function FailoverToggle({ className, activeApp }: FailoverToggleProps) {
 
   const appLabel = getAppLabel(activeApp);
 
+  // 缓存代价提醒：同一事实只存一个 key（failover.cacheCostWarning），
+  // 这里与故障转移配置面板的说明 Alert 共用，别在两处各写一遍。
+  const cacheCostWarning = t(
+    "failover.cacheCostWarning",
+    "同一会话内切换供应商会丢失提示词缓存：未命中缓存的请求按全价计费，长会话代价明显",
+  );
+
   const tooltipText = !takeoverEnabled
     ? t("failover.tooltip.takeoverRequired", {
         app: appLabel,
         defaultValue: `请先接管 ${appLabel}，再启用故障转移`,
       })
     : isEnabled
-      ? t("failover.tooltip.enabled", {
+      ? `${t("failover.tooltip.enabled", {
           app: appLabel,
           defaultValue: `${appLabel} 故障转移已启用\n按队列优先级（P1→P2→...）选择供应商`,
-        })
-      : t("failover.tooltip.disabled", {
+        })}\n⚠️ ${cacheCostWarning}`
+      : `${t("failover.tooltip.disabled", {
           app: appLabel,
           defaultValue: `启用 ${appLabel} 故障转移\n将立即切换到队列 P1，并在失败时自动切换到下一个`,
-        });
+        })}\n⚠️ ${cacheCostWarning}`;
 
   return (
     <div

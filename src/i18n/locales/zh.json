@@ -2602,6 +2602,7 @@
     "enabled": "{{app}} 故障转移已启用",
     "disabled": "{{app}} 故障转移已关闭",
     "toggleFailed": "操作失败: {{detail}}",
+    "cacheCostWarning": "同一会话内切换供应商会丢失提示词缓存：未命中缓存的请求按全价计费，长会话代价明显",
     "inQueue": "已加入",
     "addQueue": "加入",
     "priority": {

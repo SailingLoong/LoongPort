@@ -2602,6 +2602,7 @@
     "enabled": "{{app}} failover enabled",
     "disabled": "{{app}} failover disabled",
     "toggleFailed": "Operation failed: {{detail}}",
+    "cacheCostWarning": "Switching providers mid-session drops the prompt cache: cache-miss requests are billed at full price — costly for long sessions",
     "inQueue": "In queue",
     "addQueue": "Add",
     "priority": {
