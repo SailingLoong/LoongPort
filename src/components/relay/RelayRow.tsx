@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Activity,
@@ -12,6 +13,7 @@ import {
   Pencil,
   PencilLine,
   Play,
+  Scale,
   Trash2,
   Undo2,
 } from "lucide-react";
@@ -28,6 +30,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
 import type { VerificationVerdict } from "@/lib/api/modelVerification";
+import { ReconcileDialog } from "./ReconcileDialog";
 import { RowBalance } from "./RowBalance";
 
 /**
@@ -162,6 +165,9 @@ export function RelayRow({
   dragHandleProps,
 }: RelayRowProps) {
   const { t } = useTranslation();
+  // 「对账」弹窗的开合由这一行自己持有 —— 它只读这一个 relay 的事实，
+  // 没有跨行状态要父组件管（与 `ModelVerificationDialog` 那种全局验证任务不同）。
+  const [reconcileOpen, setReconcileOpen] = useState(false);
   return (
     <Collapsible open={open} onOpenChange={onOpenChange}>
       <div
@@ -255,7 +261,9 @@ export function RelayRow({
               它是这一行的破坏性操作，不该跟「登录 / 获取密钥」抢位置。
 
               **hover 才出**（与档位行同一条规矩）。删除是破坏性动作，常驻一个红色垃圾桶
-              在每一行上，比档位行那些次要按钮更值得藏 —— 上游对删除正是这么处理的。 */}
+              在每一行上，比档位行那些次要按钮更值得藏 —— 上游对删除正是这么处理的。
+              「对账」也是 hover 组的一员：它是查看型入口，与删除同为这一行的
+              行级动作，常驻会把每一行都撑出一排图标。 */}
           <div
             className={cn(
               "flex shrink-0 items-center",
@@ -265,6 +273,22 @@ export function RelayRow({
                 : ROW_HOVER_ACTIONS,
             )}
           >
+            {/* 「对账」入口。**只给能查余额的行** —— 对账的原料是余额快照，
+                而快照来自余额查询；`canQueryBalance` 是后端给的同一份资格判断
+                （`RowBalance` 用的也是它），没资格的行开了弹窗也只有永远空的数据。 */}
+            {relay.canQueryBalance && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+                onClick={() => setReconcileOpen(true)}
+                title={t("loongport.reconcile.entry")}
+                aria-label={t("loongport.reconcile.entry")}
+              >
+                <Scale className="h-3.5 w-3.5" />
+              </Button>
+            )}
             <RowDelete
               canDelete={relay.canDelete}
               busy={busy.has(`removeRelay:${relay.id}`)}
@@ -302,6 +326,21 @@ export function RelayRow({
             />
           ))}
         </CollapsibleContent>
+
+        {/* 对账弹窗走 portal 渲染，放行内只是挂个宿主位置。
+            查询只在弹窗打开时发（`enabled: open`），关着的行不会多一个请求。 */}
+        {relay.canQueryBalance && (
+          <ReconcileDialog
+            relayId={relay.id}
+            relayLabel={
+              relay.accountLabel
+                ? `${relay.siteName || relay.siteOrigin} · ${relay.accountLabel}`
+                : relay.siteName || relay.siteOrigin
+            }
+            open={reconcileOpen}
+            onOpenChange={setReconcileOpen}
+          />
+        )}
       </div>
     </Collapsible>
   );

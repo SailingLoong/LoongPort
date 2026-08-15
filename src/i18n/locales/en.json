@@ -3288,6 +3288,26 @@
       "emptyTitle": "No image-generation connection profiles",
       "emptyBody": "When you create connection profiles, LoongPort identifies groups that support only gpt-image models. If your relay service does not offer such a group, this page remains empty."
     },
+    "reconcile": {
+      "entry": "View billing reconciliation",
+      "title": "Billing reconciliation",
+      "snapshotCount": "{{count}} balance snapshots",
+      "baselineRatioLabel": "Baseline ratio",
+      "sampleNow": "Sample now",
+      "colWindow": "Window",
+      "colEstimatedCost": "Estimated cost",
+      "colBalanceChange": "Balance change",
+      "colRatio": "Ratio",
+      "colStatus": "Status",
+      "flagSuspicious": "Low ratio",
+      "flagSuspiciousHint": "Actual deductions have kept running at more than twice the local estimate. May be worth a closer look.",
+      "flagSkippedTopUp": "Top-up",
+      "flagSkippedTopUpHint": "Balance increased (top-up, rebate, or bonus); excluded from the ratio",
+      "note": "Ratio = locally estimated cost ÷ what the site actually deducted; estimates already include group rate multipliers. One low window does not mean billing is wrong — only a persistently low ratio (the site charging noticeably more) is worth attention.",
+      "empty": "No reconciliation data yet",
+      "loadFailed": "Failed to load reconciliation data",
+      "retry": "Retry"
+    },
     "modelVerification": {
       "title": "Model verification",
       "titleWithTier": "Model verification · {{tierName}}",

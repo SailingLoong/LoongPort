@@ -3289,6 +3289,26 @@
       "emptyTitle": "尚無圖像生成連線設定檔",
       "emptyBody": "建立連線設定檔時，LoongPort 會識別只支援 gpt-image 模型的群組。若中轉站未提供這類群組，此頁面將保持空白。"
     },
+    "reconcile": {
+      "entry": "查看扣費對帳",
+      "title": "扣費對帳",
+      "snapshotCount": "{{count}} 個餘額快照",
+      "baselineRatioLabel": "基準比值",
+      "sampleNow": "立即取樣",
+      "colWindow": "時間區間",
+      "colEstimatedCost": "估計成本",
+      "colBalanceChange": "餘額變化",
+      "colRatio": "比值",
+      "colStatus": "狀態",
+      "flagSuspicious": "偏低",
+      "flagSuspiciousHint": "實際扣減持續達到本地估計的 2 倍以上，建議關注",
+      "flagSkippedTopUp": "儲值",
+      "flagSkippedTopUpHint": "餘額增加（儲值、回饋或贈送），不計入比值",
+      "note": "比值 = 本地估計成本 ÷ 站點實際扣減，估計已包含站點分組倍率。單一區間偏低不代表計費有誤，持續明顯偏低（實際扣得多）時才值得關注。",
+      "empty": "尚無對帳資料",
+      "loadFailed": "對帳資料載入失敗",
+      "retry": "重試"
+    },
     "modelVerification": {
       "title": "模型驗證",
       "titleWithTier": "模型驗證 · {{tierName}}",
