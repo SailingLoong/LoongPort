@@ -1589,9 +1589,9 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_mode_models, format_script_summary, format_subscription_summary,
-        tier_model_choices, tray_menu_providers, AUTO_MODEL_PREFIX, AUTO_PREF_NONE,
-        AUTO_SUFFIX, TIER_MODEL_EVENT_PREFIX, TRAY_ID, TRAY_SECTIONS,
+        auto_mode_models, format_script_summary, format_subscription_summary, tier_model_choices,
+        tray_menu_providers, AUTO_MODEL_PREFIX, AUTO_PREF_NONE, AUTO_SUFFIX,
+        TIER_MODEL_EVENT_PREFIX, TRAY_ID, TRAY_SECTIONS,
     };
     use crate::app_config::AppType;
     use crate::provider::{Provider, UsageData, UsageResult};
