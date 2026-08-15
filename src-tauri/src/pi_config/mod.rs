@@ -424,7 +424,7 @@ fn ensure_models_revision(path: &Path, expected_revision: &str) -> Result<(), Ap
 }
 
 fn revision(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn ensure_private_models_parent(path: &Path) -> Result<(), AppError> {

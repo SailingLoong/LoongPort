@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { ComponentProps } from "react";
 import { ProviderActions } from "@/components/providers/ProviderActions";
 
 function renderPiActions({
@@ -20,22 +21,7 @@ function renderPiActions({
   onDelete = vi.fn(),
   onSetAsDefault = vi.fn(),
   onToggleFailover,
-}: {
-  isCurrent?: boolean;
-  isInConfig?: boolean;
-  isRemovalProtected?: boolean;
-  isStateChangeProtected?: boolean;
-  isAutoFailoverEnabled?: boolean;
-  isInFailoverQueue?: boolean;
-  canEdit?: boolean;
-  canDelete?: boolean;
-  onSwitch?: ReturnType<typeof vi.fn>;
-  onEdit?: ReturnType<typeof vi.fn>;
-  onRemoveFromConfig?: ReturnType<typeof vi.fn>;
-  onDelete?: ReturnType<typeof vi.fn>;
-  onSetAsDefault?: ReturnType<typeof vi.fn>;
-  onToggleFailover?: ReturnType<typeof vi.fn>;
-}) {
+}: Partial<ComponentProps<typeof ProviderActions>>) {
   render(
     <ProviderActions
       appId="pi"

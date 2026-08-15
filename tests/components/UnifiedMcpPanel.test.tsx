@@ -9,12 +9,10 @@ const mocks = vi.hoisted(() => ({
   isLoading: false,
   togglePending: false,
   toggleVariables: undefined as
-    | { serverId: string; app: string; enabled: boolean }
-    | undefined,
+    { serverId: string; app: string; enabled: boolean } | undefined,
   bulkPending: false,
   bulkVariables: undefined as
-    | { serverIds: string[]; app: string; enabled: boolean }
-    | undefined,
+    { serverIds: string[]; app: string; enabled: boolean } | undefined,
   toggle: vi.fn(),
   bulkToggle: vi.fn(),
   deleteServer: vi.fn(),

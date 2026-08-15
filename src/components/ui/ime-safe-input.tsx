@@ -1,8 +1,10 @@
 import * as React from "react";
 import { Input, type InputProps } from "@/components/ui/input";
 
-export interface ImeSafeInputProps
-  extends Omit<InputProps, "defaultValue" | "onChange" | "value"> {
+export interface ImeSafeInputProps extends Omit<
+  InputProps,
+  "defaultValue" | "onChange" | "value"
+> {
   value: string;
   onValueChange: (value: string) => void;
   normalize?: (value: string) => string;

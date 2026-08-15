@@ -752,6 +752,7 @@ dependencies = [
  "indexmap 2.14.0",
  "json-five",
  "json5",
+ "libc",
  "log",
  "objc2",
  "objc2-app-kit",

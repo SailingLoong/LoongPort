@@ -337,7 +337,7 @@ fn validate_content_size(content: &str, label: &str) -> Result<(), AppError> {
 }
 
 fn revision(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn template_path(dir: &Path, slug: &str) -> PathBuf {

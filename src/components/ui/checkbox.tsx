@@ -4,11 +4,10 @@ import { cn } from "@/lib/utils";
 
 type CheckedState = boolean | "indeterminate";
 
-interface CheckboxProps
-  extends Omit<
-    React.InputHTMLAttributes<HTMLInputElement>,
-    "checked" | "type"
-  > {
+interface CheckboxProps extends Omit<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  "checked" | "type"
+> {
   checked?: CheckedState;
   onCheckedChange?: (checked: boolean) => void;
 }
