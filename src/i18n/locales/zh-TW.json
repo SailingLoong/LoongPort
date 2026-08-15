@@ -3086,7 +3086,6 @@
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思維簽名驗證通過率",
       "compatibilityNote": "部分不相容站點不會顯示",
-      "customSitePlaceholder": "沒有找到？輸入其他中轉站網址",
       "provisionFailed": "帳號已加入，但建立連線設定失敗：{{reason}}。可返回中轉站列表重試。",
       "meta": {
         "samples": "{{count}} 次檢測",
@@ -3096,11 +3095,9 @@
       "actions": {
         "authenticate": "註冊或登入",
         "autoAddHint": "完成後自動加入",
-        "manualAddHint": "需要手動加入",
         "history": "完整記錄",
         "refresh": "重新整理即時排行榜",
-        "retry": "重試",
-        "useOtherSite": "使用其他站點"
+        "retry": "重試"
       },
       "pagination": {
         "range": "{{from}}–{{to}} / {{total}}",

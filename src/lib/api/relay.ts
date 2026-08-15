@@ -53,7 +53,7 @@ export type ImportResult = ProbeResult;
  * 来自远端配置（Ed25519 验签过），不是编译期常量 —— 谈成新赞助商不用发版。
  */
 export interface Sponsor {
-  /** 站点 origin（如 `https://bestapi.store`）。直接喂给 `importSite`。 */
+  /** 站点 origin（如 `https://bestapi.store`）。直接喂给 `importDirectorySite`。 */
   siteOrigin: string;
   /** 展示名。**服务端给什么就显示什么** —— 不翻译、不美化。 */
   displayName: string;
@@ -294,13 +294,9 @@ export const relayApi = {
     invoke("relay_refresh_directory", { kind }),
 
   /**
-   * 导入第三方站点。原生发现失败时由后端打开可见网页，让用户自行完成验证，
-   * 并在同一个浏览器会话中识别协议、注册或登录。输入必须原样透传以保留邀请链接。
+   * 导入第三方站点（广场白名单行）。原生发现失败时由后端打开可见网页，让用户
+   * 自行完成验证，并在同一个浏览器会话中识别协议、注册或登录。
    */
-  importSite: (site: string): Promise<ImportResult> =>
-    invoke("relay_import_site", { site }),
-
-  /** 导入已验签目录声明的入口；后端会再次核对当前签名配置。 */
   importDirectorySite: (site: string): Promise<ImportResult> =>
     invoke("relay_import_directory_site", { site }),
 
@@ -315,7 +311,7 @@ export const relayApi = {
   /**
    * 开登录窗。返回 true 表示拿到凭据，false 表示用户关窗或超时。
    *
-   * `relayId` 指定重新登录**哪一行**，**必填**。新增站点走 `importSite`；
+   * `relayId` 指定重新登录**哪一行**，**必填**。新增站点走 `importDirectorySite`；
    * 本命令保留给已有站点行的独立重登录。
    *
    * **每次都是全新登录态**（登录窗用 incognito，见后端注释）：同一个站可以

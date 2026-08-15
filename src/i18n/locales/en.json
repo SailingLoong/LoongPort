@@ -3085,7 +3085,6 @@
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude thinking-signature verification rate",
       "compatibilityNote": "Some incompatible sites are not shown",
-      "customSitePlaceholder": "Can't find it? Enter another relay URL",
       "provisionFailed": "The account was added, but connection setup failed: {{reason}}. Retry from the relay list.",
       "meta": {
         "samples": "{{count}} tests",
@@ -3095,11 +3094,9 @@
       "actions": {
         "authenticate": "Register or sign in",
         "autoAddHint": "Added automatically when complete",
-        "manualAddHint": "Add manually after signing in",
         "history": "Full history",
         "refresh": "Refresh live leaderboard",
-        "retry": "Retry",
-        "useOtherSite": "Use another site"
+        "retry": "Retry"
       },
       "pagination": {
         "range": "{{from}}–{{to}} / {{total}}",
