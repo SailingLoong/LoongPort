@@ -130,7 +130,7 @@ impl ProviderRouter {
         &self,
         app_type: &str,
     ) -> Result<Option<Vec<Provider>>, AppError> {
-        crate::proxy::auto_strategy::rank_managed_tier_candidates(&self.db, app_type)
+        crate::proxy::auto_strategy::rank_managed_tier_candidates(&self.db, app_type, true)
     }
 
     /// 当前供应商 id：本地 settings 优先（校验存在性），fallback 到数据库 is_current。

@@ -71,7 +71,7 @@ pub async fn set_auto_mode_enabled(
         // 用户以为开了自动模式实际没生效。
         // 排序与选路共用同一份实现（auto_strategy::rank_managed_tier_candidates，
         // 含会话亲和置顶）：活跃会话里第一名就是当前档位，切换为 no-op，不丢缓存。
-        let Some(ranked) = auto_strategy::rank_managed_tier_candidates(&state.db, &app_type)
+        let Some(ranked) = auto_strategy::rank_managed_tier_candidates(&state.db, &app_type, true)
             .map_err(|e| e.to_string())?
         else {
             return Err(
@@ -128,6 +128,128 @@ pub async fn set_auto_mode_strategy(
         other => return Err(format!("未知的自动模式策略: {other}")),
     };
     auto_strategy::set_strategy(&state.db, parsed).map_err(|e| e.to_string())
+}
+
+/// 设置某应用的自动模式模型偏好（M3 托盘 app→模型 映射的落点）。
+///
+/// `model = None` 表示「不限模型」。点选模型是**显式**选择：绕过会话亲和立即
+/// 切到「目录含该模型、策略最优」的档位（亲和保护的是系统重排别打断会话，
+/// 不替用户拒绝他刚点的选择），并把该档位的选中模型对齐到偏好。
+#[tauri::command]
+pub async fn set_auto_mode_model(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    model: Option<String>,
+) -> Result<(), String> {
+    set_auto_mode_model_impl(app, &state, &app_type, model.as_deref()).await
+}
+
+/// `set_auto_mode_model` 的可从托盘调用的核心（托盘事件处理拿不到
+/// `tauri::State`，但有 `AppHandle`）。
+pub(crate) async fn set_auto_mode_model_impl(
+    app: tauri::AppHandle,
+    state: &AppState,
+    app_type: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    require_auto_mode_app(app_type)?;
+    if !auto_strategy::is_auto_mode_enabled(&state.db, app_type) {
+        return Err("自动模式未开启，请先在设置中开启再选择模型".to_string());
+    }
+    let config = state
+        .db
+        .get_proxy_config_for_app(app_type)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !config.enabled {
+        return Err("自动模式需要代理接管态，请先恢复接管".to_string());
+    }
+
+    auto_strategy::set_model_pref(&state.db, app_type, model).map_err(|e| e.to_string())?;
+
+    // 显式选择：绕过亲和（honor_affinity=false），立即切到过滤+排序后的第一名
+    let ranked = auto_strategy::rank_managed_tier_candidates(&state.db, app_type, false)
+        .map_err(|e| e.to_string())?;
+    let Some(best) = ranked.and_then(|mut r| {
+        if r.is_empty() {
+            None
+        } else {
+            Some(r.remove(0))
+        }
+    }) else {
+        return Ok(()); // 偏好已落库；没有可切档位时下一次选路自然生效
+    };
+
+    let current_id = auto_strategy::effective_current_provider_id(&state.db, app_type);
+    if current_id.as_deref() != Some(best.id.as_str()) {
+        state
+            .proxy_service
+            .switch_proxy_target(app_type, &best.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit(
+            PROVIDER_SWITCHED,
+            serde_json::json!({
+                "appType": app_type,
+                "providerId": best.id,
+                "source": "autoModeModel"
+            }),
+        );
+    }
+
+    // 对齐档位的选中模型（接管态下走热路径，无 ChatGPT 退重开编排）
+    if let Some(model) = model {
+        let wants_model = auto_strategy::tier_models(&best).iter().any(|m| m == model);
+        let current_model = crate::relay::provision::extract_model(&best.settings_config);
+        if wants_model && current_model.as_deref() != Some(model) {
+            let mut user_choice = None;
+            loop {
+                let outcome = crate::commands::switch_tier_model_command(
+                    &app,
+                    &best.id,
+                    crate::app_config::AppType::from_str(app_type).map_err(|e| e.to_string())?,
+                    model,
+                    user_choice,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                match outcome {
+                    crate::commands::SwitchTierCommandResult::ConfirmationRequired {
+                        target_name,
+                    } => {
+                        // 原生确认对话框是阻塞调用，丢到 blocking 线程池别卡 async worker
+                        // （接管态下通常不会走到这里，见 needs_user_attention）
+                        let app_for_dialog = app.clone();
+                        let confirmed = tauri::async_runtime::spawn_blocking(move || {
+                            crate::tray::confirm_quit_chatgpt(&app_for_dialog, &target_name)
+                        })
+                        .await
+                        .unwrap_or(false);
+                        if !confirmed {
+                            return Ok(());
+                        }
+                        user_choice = Some(true);
+                    }
+                    crate::commands::SwitchTierCommandResult::Switched { result } => {
+                        for warning in &result.warnings {
+                            log::warn!("[AutoMode] 切换档位模型后警告: {warning}");
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    // 刷新托盘菜单，确保勾选状态同步
+    if let Ok(new_menu) = crate::tray::create_tray_menu(&app, state) {
+        if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
+            let _ = tray.set_menu(Some(new_menu));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
