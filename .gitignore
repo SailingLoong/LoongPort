@@ -30,3 +30,6 @@ mainWindow.js
 
 # Mimosa 扫描器本地状态（hook 每次调用都会重写）
 .mimosa/
+
+# SDD plan 工作区（superpowers subagent-driven-development 的台账/brief/review 包）
+.superpowers/
