@@ -15,6 +15,7 @@ use rusqlite::{params, Connection};
 
 use crate::database::lock_conn;
 use crate::error::AppError;
+use crate::provider::UsageResult;
 use crate::Database;
 
 /// 一行余额快照。
@@ -128,6 +129,39 @@ impl Database {
         }
         Ok(out)
     }
+}
+
+/// `relay_balance_impl` 成功解析余额之后的旁路采样：满足写入条件就落一条快照。
+///
+/// 写入条件（plan §三.2）：`usage.success` 且**第一条**数据有 `remaining`、`unit` 是
+/// `"USD"`（与 `row_balance_result` 取同一条 —— 那边判低余额告警也是取第一条）。
+/// 失败路径不写：`success:false` 是常态（如 sub2api 订阅型分组 sk 路查不到余额），
+/// 天然无快照，对账页显示「快照不足」即可。
+///
+/// **写快照失败不影响余额显示**：对账是旁路能力，这里只记日志，绝不向上抛。
+pub fn capture_balance_snapshot(db: &Database, relay_id: i64, usage: &UsageResult) {
+    let Some(balance_usd) = resolved_usd_balance(usage) else {
+        return;
+    };
+    if let Err(error) = db.insert_balance_snapshot(relay_id, balance_usd, "balance_query") {
+        log::warn!("写入余额快照失败（不影响余额显示，对账页会显示快照不足）: {error}");
+    }
+}
+
+/// 从一次解析结果里取出可入账的 USD 余额；条件不满足就回 `None`。
+///
+/// 取**第一条**：与 `balance::row_balance_result` 判低余额告警取同一条，
+/// 两边口径必须一致，否则会出现「告警说 4.9、快照记的是另一条的 30」。
+fn resolved_usd_balance(usage: &UsageResult) -> Option<f64> {
+    if !usage.success {
+        return None;
+    }
+    usage
+        .data
+        .as_ref()
+        .and_then(|items| items.first())
+        .filter(|item| item.unit.as_deref() == Some("USD"))
+        .and_then(|item| item.remaining)
 }
 
 #[cfg(test)]
@@ -249,6 +283,94 @@ mod tests {
         let db = db();
         let conn = db.conn.lock().expect("拿连接");
         create_table(&conn).expect("再建一次不该报错");
+    }
+
+    // ------------------------------------------------------------------
+    // capture_balance_snapshot：写入条件（plan §三.2）
+    // ------------------------------------------------------------------
+
+    fn usage(success: bool, remaining: Option<f64>, unit: Option<&str>) -> UsageResult {
+        UsageResult {
+            success,
+            data: Some(vec![crate::provider::UsageData {
+                plan_name: None,
+                extra: None,
+                is_valid: None,
+                invalid_message: None,
+                total: None,
+                used: None,
+                remaining,
+                unit: unit.map(str::to_string),
+            }]),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn capture_writes_one_snapshot_on_success_with_usd_remaining() {
+        let db = db();
+        capture_balance_snapshot(&db, 7, &usage(true, Some(12.5), Some("USD")));
+
+        let rows = db.list_balance_snapshots(7, None).expect("读取");
+        assert_eq!(rows.len(), 1, "成功 + USD 余额必须落一条快照");
+        assert_eq!(rows[0].balance_usd, 12.5);
+        assert_eq!(rows[0].source, "balance_query");
+    }
+
+    #[test]
+    fn capture_skips_unsuccessful_resolve() {
+        let db = db();
+        // 失败路拿到什么 data 都不算数。
+        capture_balance_snapshot(&db, 7, &usage(false, Some(12.5), Some("USD")));
+
+        assert_eq!(
+            db.list_balance_snapshots(7, None).expect("读取").len(),
+            0,
+            "success:false 是常态（订阅型分组查不到钱包余额），不能落快照"
+        );
+    }
+
+    #[test]
+    fn capture_skips_when_data_or_remaining_is_missing() {
+        let db = db();
+        let no_data = UsageResult {
+            success: true,
+            data: None,
+            error: None,
+        };
+        capture_balance_snapshot(&db, 7, &no_data);
+        capture_balance_snapshot(&db, 7, &usage(true, None, Some("USD")));
+
+        assert_eq!(
+            db.list_balance_snapshots(7, None).expect("读取").len(),
+            0,
+            "没有 remaining 就没有可入账的数字"
+        );
+    }
+
+    #[test]
+    fn capture_skips_non_usd_unit() {
+        let db = db();
+        capture_balance_snapshot(&db, 7, &usage(true, Some(12.5), Some("CNY")));
+        capture_balance_snapshot(&db, 7, &usage(true, Some(12.5), None));
+
+        assert_eq!(
+            db.list_balance_snapshots(7, None).expect("读取").len(),
+            0,
+            "快照列名就是 balance_usd，非 USD 的数字进来是错的单位口径"
+        );
+    }
+
+    #[test]
+    fn capture_swallows_insert_failure() {
+        let db = db();
+        {
+            let conn = db.conn.lock().expect("拿连接");
+            conn.execute("DROP TABLE relay_balance_snapshots", [])
+                .expect("删表制造写入失败");
+        }
+        // 不该 panic、不该把错误抛出去 —— 对账是旁路能力。
+        capture_balance_snapshot(&db, 7, &usage(true, Some(12.5), Some("USD")));
     }
 
     /// 老库（v13，没有本表）升级后必须有这张表且可用。
