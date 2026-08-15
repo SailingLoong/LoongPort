@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { ProxyPanel } from "@/components/proxy";
 import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
+import { AutoModePanel } from "@/components/proxy/AutoModePanel";
 import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
@@ -194,6 +195,10 @@ export function ProxyTabContent({
                       value={appType}
                       className="mt-4 space-y-6"
                     >
+                      <AutoModePanel
+                        appType={appType}
+                        disabled={failoverDisabled}
+                      />
                       <div className="space-y-4">
                         <div>
                           <h4 className="text-sm font-semibold">

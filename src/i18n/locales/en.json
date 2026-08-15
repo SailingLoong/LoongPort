@@ -2613,6 +2613,27 @@
       "takeoverRequired": "Take over {{app}} first, then enable failover"
     }
   },
+  "autoMode": {
+    "title": "Auto Mode",
+    "description": "The system picks the best managed tier automatically; the current tier stays put during a session",
+    "strategyLabel": "Selection strategy (global)",
+    "strategy": {
+      "cheapest": "Cheapest",
+      "cheapestHint": "Ordered by tier rate multiplier",
+      "fastest": "Fastest",
+      "fastestHint": "Ordered by 7-day avg first-token time"
+    },
+    "activeHint": "Auto mode is active and takes precedence over the failover queue. The current tier is kept within a session; it only switches by strategy order after repeated failures or when idle (switching drops the prompt cache).",
+    "confirm": {
+      "title": "Enable Auto Mode",
+      "message": "The system will pick and switch managed tiers automatically per the strategy: the current tier stays within a session (to keep the prompt cache); it only moves to a better tier after failures or when idle. Enable?",
+      "confirm": "Enable"
+    },
+    "enabledToast": "Auto mode enabled for {{app}}",
+    "disabledToast": "Auto mode disabled for {{app}}",
+    "strategySaved": "Strategy updated",
+    "toggleFailed": "Operation failed"
+  },
   "proxy": {
     "panel": {
       "serviceAddress": "Service Address",

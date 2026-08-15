@@ -2614,6 +2614,27 @@
       "takeoverRequired": "請先接管 {{app}}，再啟用故障轉移"
     }
   },
+  "autoMode": {
+    "title": "自動模式",
+    "description": "系統從託管檔位裡自動挑最合適的，目前檔位會話中保持不變",
+    "strategyLabel": "挑選策略（全域）",
+    "strategy": {
+      "cheapest": "價格最低",
+      "cheapestHint": "按檔位倍率升序",
+      "fastest": "回應最快",
+      "fastestHint": "按近 7 天首字耗時升序"
+    },
+    "activeHint": "自動模式生效中，優先於故障轉移佇列。同一會話內保持目前檔位不切換；目前檔位持續失敗時按策略順序切換（切換會丟失提示詞快取）。",
+    "confirm": {
+      "title": "開啟自動模式",
+      "message": "系統將按所選策略自動挑選並切換託管檔位：同一會話內保持目前檔位不變（避免丟失提示詞快取），目前檔位故障或閒置後才切換到更合適的一檔。確定開啟？",
+      "confirm": "開啟"
+    },
+    "enabledToast": "{{app}} 自動模式已開啟",
+    "disabledToast": "{{app}} 自動模式已關閉",
+    "strategySaved": "策略已更新",
+    "toggleFailed": "操作失敗"
+  },
   "proxy": {
     "panel": {
       "serviceAddress": "服務位址",
