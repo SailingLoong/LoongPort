@@ -1148,7 +1148,7 @@ pub fn is_image_model(model: &str) -> bool {
 /// 一个 CLI 可能有多个兼容字段（例如 Claude 的 token / api key）；它们都存在时会
 /// 一起更新，避免运行时和倍率查询读到不同的凭据。
 ///
-/// 返回 `None` = 这个 CLI 还没接。
+/// 返回 `None` = 走不了路径机制（sk 不在 JSON 字段里，或这个 CLI 还没接）。
 fn api_key_locations(app_type: &AppType) -> Option<&'static [&'static [&'static str]]> {
     const CODEX: &[&str] = &["auth", "OPENAI_API_KEY"];
     const CLAUDE_AUTH_TOKEN: &[&str] = &["env", "ANTHROPIC_AUTH_TOKEN"];
@@ -1176,6 +1176,9 @@ fn api_key_locations(app_type: &AppType) -> Option<&'static [&'static [&'static 
         AppType::Hermes => Some(&[HERMES]),
         AppType::OpenClaw => Some(&[OPENCLAW]),
         AppType::OpenCode => Some(&[OPENCODE]),
+        // Grok Build 的 sk 在 `config` 字段的 TOML 文本内部（`[model."<default>"]` 表的
+        // `api_key`），JSON 路径表达不了 ⇒ 走 [`extract_api_key`] / [`patch_api_key`]
+        // 开头的 TOML 专用分支，这里归 None。
         AppType::GrokBuild => None,
         // Pi 的 provider 形态与中转站链路无关：归 None，不参与 sk 提取/判等。
         AppType::Pi => None,
@@ -1212,12 +1215,26 @@ fn ensure_object_at_parent_path<'a>(
     Some(current)
 }
 
+/// Grok Build 的 sk 不在 JSON 字段里，而在 `config` 字段那段 TOML 文本内部
+/// （`[model."<models.default>"]` 表的 `api_key`），[`api_key_locations`] 的 JSON
+/// 路径机制表达不了 —— 单独接线，委托 `grok_config` 现成的解析/改写助手。
+///
+/// 读写都只认 **inline `api_key`**：`env_key`（从进程环境变量取凭据）不参与 ——
+/// 与路径机制「只读配置里写着的字段」的语义对齐，指纹也不随运行环境漂。
+fn grok_config_text(settings_config: &serde_json::Value) -> Option<&str> {
+    settings_config.get("config")?.as_str()
+}
+
 /// 从一份 `settings_config` 里读出 sk。
 ///
 /// 供「恢复默认配置」用：那个操作要保留 sk 不变，所以得先把它取出来。
 /// 返回 `None` 表示配置形状里找不到 sk（被改坏了 / 这个 CLI 还没接）——
 /// 调用方应当报错而不是继续，生成一份没有 sk 的配置是条必定 401 的记录。
 pub fn extract_api_key(settings_config: &serde_json::Value, app_type: &AppType) -> Option<String> {
+    if matches!(app_type, AppType::GrokBuild) {
+        return grok_config_text(settings_config)
+            .and_then(crate::grok_config::extract_inline_api_key);
+    }
     api_key_locations(app_type)?.iter().find_map(|path| {
         value_at_path(settings_config, path)?
             .as_str()
@@ -1250,6 +1267,7 @@ pub fn extract_api_key(settings_config: &serde_json::Value, app_type: &AppType) 
 /// - codex：`auth.OPENAI_API_KEY`
 /// - claude：`env.ANTHROPIC_AUTH_TOKEN`
 /// - gemini：`env.GEMINI_API_KEY`
+/// - grokbuild：`config` 字段 TOML 文本里选中模型表的 `api_key`（见 [`grok_config_text`]）
 ///
 /// 返回 `false` 表示**没找到该放 sk 的位置**（形状被用户改坏了，或这个 CLI 还没接）——
 /// 调用方据此回落到「全量重写」，否则用户会拿着一把旧 sk 却以为刷新成功了。
@@ -1258,6 +1276,22 @@ pub fn patch_api_key(
     app_type: &AppType,
     api_key: &str,
 ) -> bool {
+    // Grok Build：改写 TOML 文本后写回 `config` 字段（toml_edit 保格式保注释，
+    // 用户的手工编辑不丢）。形状坏到改不动时返回 false，走调用方的「全量重写」回落。
+    // 字段被删掉时 `update_api_key` 会补回 —— ensure 语义（编辑器丢认证字段后
+    // 把托管凭据补回去）与 patch 语义在这里天然合并，无需两套。
+    if matches!(app_type, AppType::GrokBuild) {
+        let Some(text) = grok_config_text(settings_config) else {
+            return false;
+        };
+        let Ok(updated) = crate::grok_config::update_api_key(text, api_key) else {
+            return false;
+        };
+        // `grok_config_text` 拿到了 `config` 字符串 ⇒ 根必是对象，这里直接写回。
+        settings_config["config"] = serde_json::Value::String(updated);
+        return true;
+    }
+
     let Some(locations) = api_key_locations(app_type) else {
         return false;
     };
@@ -2271,6 +2305,95 @@ mod tests {
         assert!(ensure_api_key(&mut sc, &AppType::Codex, "sk-managed"));
         assert_eq!(sc["auth"]["OPENAI_API_KEY"], "sk-managed");
         assert_eq!(sc["config"], "model = \"用户改过的模型\"");
+    }
+
+    /// Grok Build 的 sk 在 `config` 字段的 TOML 文本里（不在 JSON 字段上），
+    /// 三个 sk 函数走 TOML 专用分支 —— 这组测试钉住那条接线。
+    #[test]
+    fn grokbuild_api_key_round_trips_through_the_toml_branch() {
+        let sc = settings_config_for(
+            &AppType::GrokBuild,
+            "sk-old",
+            "n",
+            "https://g.dev/v1",
+            "grok-4.5",
+        )
+        .expect("grokbuild 必须有形状");
+        assert_eq!(
+            extract_api_key(&sc, &AppType::GrokBuild).as_deref(),
+            Some("sk-old")
+        );
+
+        // env_key 形状不认：凭据在进程环境变量里，读了指纹就会随运行环境漂，
+        // 也和 JSON 路径机制「只读配置里写着的字段」的语义不对齐。
+        let env_only = serde_json::json!({
+            "config": "[models]\ndefault = \"p\"\n\n[model.p]\nmodel = \"m\"\nbase_url = \"https://g.dev/v1\"\nname = \"n\"\nenv_key = \"GROK_SK\"\napi_backend = \"openai-compliant\"\ncontext_window = 1000000\n"
+        });
+        assert_eq!(extract_api_key(&env_only, &AppType::GrokBuild), None);
+    }
+
+    #[test]
+    fn patch_api_key_updates_grokbuild_toml_and_keeps_user_edits() {
+        let mut sc = settings_config_for(
+            &AppType::GrokBuild,
+            "sk-old",
+            "n",
+            "https://g.dev/v1",
+            "grok-4.5",
+        )
+        .expect("grokbuild 必须有形状");
+        // 用户编辑过的配置：加了注释与自定义字段（中文键必须带引号 —— TOML 裸键
+        // 只允许 ASCII）。config 文本以选中模型表结尾，追加的行落进同一张表；
+        // toml_edit 保格式改写，patch 后这些必须还在。
+        let with_edits = format!(
+            "{}# 用户注释\n\"自定义\" = 1\n",
+            sc["config"].as_str().unwrap()
+        );
+        sc["config"] = serde_json::json!(with_edits);
+
+        assert!(patch_api_key(&mut sc, &AppType::GrokBuild, "sk-new"));
+        let toml_text = sc["config"].as_str().unwrap();
+        assert!(toml_text.contains("api_key = \"sk-new\""));
+        assert!(!toml_text.contains("sk-old"));
+        assert!(toml_text.contains("# 用户注释"));
+        assert!(toml_text.contains("\"自定义\" = 1"));
+    }
+
+    #[test]
+    fn ensure_api_key_recreates_a_deleted_grokbuild_key() {
+        let mut sc = settings_config_for(
+            &AppType::GrokBuild,
+            "sk-managed",
+            "n",
+            "https://g.dev/v1",
+            "grok-4.5",
+        )
+        .expect("grokbuild 必须有形状");
+        // 编辑器把 api_key 字段删了：选中模型表还在，ensure 应把托管凭据补回。
+        let toml_text = sc["config"]
+            .as_str()
+            .unwrap()
+            .replace("api_key = \"sk-managed\"\n", "");
+        assert!(!toml_text.contains("sk-managed"));
+        sc["config"] = serde_json::json!(toml_text);
+
+        assert!(ensure_api_key(&mut sc, &AppType::GrokBuild, "sk-managed"));
+        assert!(sc["config"]
+            .as_str()
+            .unwrap()
+            .contains("api_key = \"sk-managed\""));
+    }
+
+    #[test]
+    fn patch_api_key_refuses_broken_grokbuild_shapes_instead_of_inventing_one() {
+        let mut broken = serde_json::json!({"config": "not toml {"});
+        assert!(!patch_api_key(&mut broken, &AppType::GrokBuild, "sk"));
+
+        // 没有 models.default ⇒ 找不到选中模型表，改不动就是改不动，
+        // 原文必须原样保留，交给调用方走「全量重写」回落。
+        let mut no_default = serde_json::json!({"config": "[model.x]\napi_key = \"k\"\n"});
+        assert!(!patch_api_key(&mut no_default, &AppType::GrokBuild, "sk"));
+        assert_eq!(no_default["config"], "[model.x]\napi_key = \"k\"\n");
     }
 
     /// Claude Code 的默认配置带 `language: chinese`（维护者要求所有 LoongPort 生成的
