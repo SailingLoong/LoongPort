@@ -17,6 +17,7 @@
 pub mod bigmodel;
 pub mod creds;
 pub mod deepseek;
+pub mod opencode;
 pub mod provision;
 
 use crate::error::AppError;
@@ -26,6 +27,7 @@ use crate::error::AppError;
 pub enum Vendor {
     DeepSeek,
     BigModel,
+    OpenCode,
 }
 
 impl Vendor {
@@ -34,6 +36,7 @@ impl Vendor {
         match self {
             Vendor::DeepSeek => "deepseek",
             Vendor::BigModel => "bigmodel",
+            Vendor::OpenCode => "opencode",
         }
     }
 
@@ -41,6 +44,7 @@ impl Vendor {
         match self {
             Vendor::DeepSeek => "DeepSeek",
             Vendor::BigModel => "智谱 BigModel",
+            Vendor::OpenCode => "opencode Zen",
         }
     }
 
@@ -48,6 +52,7 @@ impl Vendor {
         match id {
             "deepseek" => Some(Vendor::DeepSeek),
             "bigmodel" => Some(Vendor::BigModel),
+            "opencode" => Some(Vendor::OpenCode),
             _ => None,
         }
     }
@@ -71,6 +76,7 @@ pub fn login_url(vendor: Vendor) -> String {
     let builtin = match vendor {
         Vendor::DeepSeek => deepseek::LOGIN_URL,
         Vendor::BigModel => bigmodel::LOGIN_URL,
+        Vendor::OpenCode => opencode::LOGIN_URL,
     };
     let invite = crate::relay::remote_config::load_cached()
         .and_then(|config| config.vendor_invite_urls.get(vendor.vendor_id()).cloned())
@@ -86,6 +92,7 @@ fn invite_host(vendor: Vendor) -> &'static str {
     match vendor {
         Vendor::DeepSeek => "platform.deepseek.com",
         Vendor::BigModel => "www.bigmodel.cn",
+        Vendor::OpenCode => "opencode.ai",
     }
 }
 
@@ -93,6 +100,7 @@ pub fn login_window_label(vendor: Vendor) -> &'static str {
     match vendor {
         Vendor::DeepSeek => deepseek::LOGIN_WINDOW_LABEL,
         Vendor::BigModel => bigmodel::LOGIN_WINDOW_LABEL,
+        Vendor::OpenCode => opencode::LOGIN_WINDOW_LABEL,
     }
 }
 
@@ -100,6 +108,7 @@ pub fn login_script(vendor: Vendor, login_hint: &str) -> String {
     match vendor {
         Vendor::DeepSeek => deepseek::login_script(login_hint),
         Vendor::BigModel => bigmodel::login_script(login_hint),
+        Vendor::OpenCode => opencode::login_script(login_hint),
     }
 }
 
@@ -120,6 +129,9 @@ pub fn parse_creds_navigation(
                 account,
             })
         }),
+        // auth_token 暂存登录信号 JSON（页面读不到 HttpOnly cookie），
+        // `commands::vendor::do_login` 采完 cookie 后经 `compose_session` 定稿。
+        Vendor::OpenCode => opencode::parse_creds_navigation(url),
     }
 }
 
@@ -133,6 +145,7 @@ pub async fn list_keys(vendor: Vendor, auth_token: &str) -> Result<Vec<VendorKey
             )
             .await
         }
+        Vendor::OpenCode => opencode::list_keys(auth_token).await,
     }
 }
 
@@ -151,6 +164,7 @@ pub async fn create_key(
             )
             .await
         }
+        Vendor::OpenCode => opencode::create_key(auth_token, name).await,
     }
 }
 
@@ -169,6 +183,7 @@ pub async fn delete_key(
             )
             .await
         }
+        Vendor::OpenCode => opencode::delete_key(auth_token, key).await,
     }
 }
 
@@ -185,6 +200,7 @@ pub async fn balance(
             )
             .await
         }
+        Vendor::OpenCode => opencode::balance().await,
     }
 }
 
@@ -192,6 +208,7 @@ pub fn config_for(vendor: Vendor, app: &crate::app_config::AppType) -> Option<(S
     match vendor {
         Vendor::DeepSeek => deepseek::config_for(app),
         Vendor::BigModel => bigmodel::config_for(app),
+        Vendor::OpenCode => opencode::config_for(app),
     }
 }
 
@@ -199,6 +216,7 @@ pub fn claude_role_models(vendor: Vendor) -> crate::relay::provision::ClaudeRole
     match vendor {
         Vendor::DeepSeek => deepseek::claude_role_models(),
         Vendor::BigModel => bigmodel::claude_role_models(),
+        Vendor::OpenCode => opencode::claude_role_models(),
     }
 }
 
@@ -207,6 +225,9 @@ pub fn api_keys_help_url(vendor: Vendor) -> Option<&'static str> {
     match vendor {
         Vendor::DeepSeek => Some(deepseek::API_KEYS_URL),
         Vendor::BigModel => Some(bigmodel::API_KEYS_URL),
+        // keys 页在 workspace 内（`/workspace/{id}/keys`），没有静态直达 URL；
+        // 落到站点首页，用户从自己的 workspace 一步可达。
+        Vendor::OpenCode => Some(opencode::SITE_ORIGIN),
     }
 }
 
@@ -215,6 +236,7 @@ pub fn site_origin(vendor: Vendor) -> &'static str {
     match vendor {
         Vendor::DeepSeek => deepseek::SITE_ORIGIN,
         Vendor::BigModel => bigmodel::SITE_ORIGIN,
+        Vendor::OpenCode => opencode::SITE_ORIGIN,
     }
 }
 
@@ -223,6 +245,7 @@ pub fn api_origin(vendor: Vendor) -> &'static str {
     match vendor {
         Vendor::DeepSeek => deepseek::API_ORIGIN,
         Vendor::BigModel => bigmodel::API_ORIGIN,
+        Vendor::OpenCode => opencode::API_ORIGIN,
     }
 }
 

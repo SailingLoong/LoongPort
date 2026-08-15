@@ -46,6 +46,10 @@ const requiredKeys = [
   "officialApi.title",
   "officialApi.description",
   "officialApi.connect",
+  // 厂商卡片的说明文案 —— 每接一家都要有，漏一个 locale 那张卡就显示 key 名。
+  "officialApi.deepseekDesc",
+  "officialApi.bigmodelDesc",
+  "officialApi.opencodeDesc",
   "directory.provisionFailed",
   "directory.meta.samples",
   "directory.meta.latest",

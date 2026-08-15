@@ -93,6 +93,7 @@ export interface VendorLoginResult {
  */
 export const DEEPSEEK_VENDOR_ID = "deepseek";
 export const BIGMODEL_VENDOR_ID = "bigmodel";
+export const OPENCODE_VENDOR_ID = "opencode";
 
 /** 「官方 API」页的厂商目录（展示名/说明与 Rust 侧 `display_name` 对应）。 */
 export const VENDOR_CATALOG: ReadonlyArray<{
@@ -109,6 +110,11 @@ export const VENDOR_CATALOG: ReadonlyArray<{
     id: BIGMODEL_VENDOR_ID,
     displayName: "智谱 BigModel",
     descriptionKey: "loongport.officialApi.bigmodelDesc",
+  },
+  {
+    id: OPENCODE_VENDOR_ID,
+    displayName: "opencode Zen",
+    descriptionKey: "loongport.officialApi.opencodeDesc",
   },
 ];
 

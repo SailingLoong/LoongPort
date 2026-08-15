@@ -684,13 +684,36 @@ async fn do_login(
 
     // `account_id` 已经由 `parse_creds_navigation` 保证非空 —— 「账号身份拿不到就不存
     // token」那条语义在解析那一步就落实了，走到这里的凭据一定是完整的。
-    let token = creds.auth_token;
+    //
+    // opencode 例外一条：它的会话是 HttpOnly cookie，页面脚本读不到 ⇒ 回传的
+    // auth_token 只是「登录信号」（workspace + 采集到的明文 key），cookie 在这里
+    // 原生补采后经 `compose_session` 定稿，顺手认领那把 key（登录时一次完成，
+    // Rust 侧没有它的 key 管理 API —— 见 `vendor::opencode` 模块文档）。
+    let (token, harvested_key) = match vendor {
+        Vendor::OpenCode => {
+            let cookies = window
+                .cookies_for_url(
+                    url::Url::parse(crate::vendor::opencode::SITE_ORIGIN)
+                        .expect("opencode 站点 origin 是合法 URL"),
+                )
+                .map_err(|e| AppError::Config(format!("读取 opencode 登录会话失败: {e}")))?;
+            crate::vendor::opencode::compose_session(
+                crate::vendor::opencode::extract_session_cookie(&cookies),
+                &creds.auth_token,
+            )?
+        }
+        _ => (creds.auth_token, None),
+    };
     let account = creds.account;
 
     let state = app_handle.state::<AppState>();
     let row_id = with_conn(&state, |conn| {
         creds::save_account(conn, vendor, &token, &account)
     })?;
+
+    if let Some(plaintext) = harvested_key {
+        with_conn(&state, |conn| creds::set_api_key(conn, row_id, &plaintext))?;
+    }
 
     // 广播账号行集合变化：登录入口是 App 级的 OfficialApiPage，够不到
     // RelaySection 的本地状态 —— 与 relay 侧靠 provider-switched 刷新同一机制。
@@ -1212,6 +1235,7 @@ fn vendor_icon(vendor: Vendor) -> &'static str {
     match vendor {
         Vendor::DeepSeek => "deepseek",
         Vendor::BigModel => "zhipu",
+        Vendor::OpenCode => "opencode",
     }
 }
 
@@ -1220,6 +1244,8 @@ fn vendor_icon_color(vendor: Vendor) -> &'static str {
     match vendor {
         Vendor::DeepSeek => "#1E88E5",
         Vendor::BigModel => "#3B5BDB",
+        // opencode 品牌黑（logo 的实色，浅色底下可见、深色底下也不刺眼）。
+        Vendor::OpenCode => "#211E1E",
     }
 }
 
