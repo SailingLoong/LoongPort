@@ -45,7 +45,7 @@ use crate::provider::Provider;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
     model_verification::target as verification_target, newapi, newapi_provision, newapi_purchase,
-    pricing, provider_fingerprint, provision, purchase, remote_config,
+    pricing, provider_fingerprint, provision, purchase, reconcile, remote_config,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -3332,6 +3332,9 @@ fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
 /// 答案。散成两份的后果是守卫与删除各认一套：守卫说「这条不是你的、不拦」，删除说
 /// 「这条是你的、删了」⇒ 恰好绕过守卫删掉正在用的配置，而那正是守卫要防的事。
 ///
+/// [`belongs_to_relay`]（严格版）才是余额 / 对账这些**归属**路径用的判据 ——
+/// 两者 `(account_id, 档位标记)` 的 `(None, Some)` 那一格语义相反，见它那边的说明。
+///
 /// 三道判据缺一不可：
 ///
 /// - `is_managed` —— 我们生成的（前缀 + 恰好 16 位小写 hex，即校验哈希形状）。用户手工加的 provider
@@ -3345,7 +3348,11 @@ fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
 ///     代价是可能误伤同站另一账号的旧档位，但那些会在下次 provision 时重新生成并带上标记。
 ///   - **调用方不知道账号（`account_id` 为 `None`）** ⇒ 未登录的行（provision 不出档位）
 ///     或删站兜底路径，此时不按账号过滤。
-fn belongs_to_account(provider: &Provider, site_origin: &str, account_id: Option<i64>) -> bool {
+pub(crate) fn belongs_to_account(
+    provider: &Provider,
+    site_origin: &str,
+    account_id: Option<i64>,
+) -> bool {
     if !is_managed(provider) {
         return false;
     }
@@ -3358,6 +3365,41 @@ fn belongs_to_account(provider: &Provider, site_origin: &str, account_id: Option
     ) {
         (Some(want), Some(owner)) => want == owner,
         _ => true,
+    }
+}
+
+/// 这条 provider 是不是「这个 relay 行」名下的托管档位 —— **严格归属版**。
+///
+/// 与 [`belongs_to_account`] 只差一格：relay 行没登录（`account_id == None`）而档位
+/// 记了**别人的**账号时，这里**不认**。两个方向语义相反，不能合并：
+///
+/// - [`belongs_to_account`] 服务清理 / 守卫 —— 宁可多认不误删（同站没记归属的旧档位
+///   要能跟着清掉，`None` 一律「算是」）。
+/// - 这里服务**把事实记到某一行头上**的路径（余额 sk 收集、扣费对账的成本归属）——
+///   把别的账号的 sk / 成本算进未登录行，等于把 B 的消费记到 A 头上，比漏算更糟。
+///   这也是 `apps_using_this_accounts_tiers` 当年要额外加 `account_id.is_some()` 的
+///   同一类教训（见它那边的 ⚠️ 段）。
+///
+/// 判据即 `relay_balance_inputs` 原内联那份（`(None, Some(_)) => false`），收成函数
+/// 供余额与 `relay_reconciliation`（`commands/reconcile.rs`）共用 —— 归属口径只有一份。
+pub(crate) fn belongs_to_relay(
+    provider: &Provider,
+    site_origin: &str,
+    account_id: Option<i64>,
+) -> bool {
+    if !is_managed(provider) {
+        return false;
+    }
+    if provider.website_url.as_deref() != Some(site_origin) {
+        return false;
+    }
+    match (
+        account_id,
+        provider.meta.as_ref().and_then(|m| m.loongport_account_id),
+    ) {
+        (Some(want), Some(owner)) => want == owner,
+        (_, None) => true,
+        (None, Some(_)) => false,
     }
 }
 
@@ -4466,8 +4508,8 @@ fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
 
 /// 一行名下**全部托管档位**里的 base_url 与 sk。
 ///
-/// 归属判据与 [`tiers_of_site`] 一致（站点 + 账号），但**跨全部 app 扫** ——
-/// 同一行的档位可能只挂在某一个 CLI 下（用户只给 codex 生成过 sk），
+/// 归属判据走 [`belongs_to_relay`]（严格版：未登录的行不认别人账号的档位），但
+/// **跨全部 app 扫** —— 同一行的档位可能只挂在某一个 CLI 下（用户只给 codex 生成过 sk），
 /// 按单个 app 查会在别的 app 上空手而归，让余额白白落到下一条路。
 ///
 /// 顺序不稳定不要紧：调用方（[`crate::relay::balance::resolve`]）是并发试完取第一个
@@ -4480,20 +4522,7 @@ fn relay_balance_inputs(state: &AppState, relay: &creds::Relay) -> (String, Vec<
             continue;
         };
         for provider in providers.values() {
-            if !is_managed(provider) {
-                continue;
-            }
-            if provider.website_url.as_deref() != Some(relay.site_origin.as_str()) {
-                continue;
-            }
-            // 与 `tiers_of_site` 同一张真值表：档位没记账号（旧数据）只按站点归。
-            let owner = provider.meta.as_ref().and_then(|m| m.loongport_account_id);
-            let belongs = match (relay.account_id, owner) {
-                (Some(want), Some(owner)) => want == owner,
-                (_, None) => true,
-                (None, Some(_)) => false,
-            };
-            if !belongs {
+            if !belongs_to_relay(provider, &relay.site_origin, relay.account_id) {
                 continue;
             }
             if let Some(sk) = provision::extract_api_key(&provider.settings_config, &app_type) {
@@ -4548,8 +4577,8 @@ pub async fn relay_balance(
         .map_err(|error| error.to_string())
 }
 
-async fn relay_balance_impl(
-    app_handle: &tauri::AppHandle,
+async fn relay_balance_impl<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
 ) -> Result<balance::RowBalanceResult, AppError> {
     let (relay, base_url, api_keys) = {
@@ -4575,6 +4604,10 @@ async fn relay_balance_impl(
     )
     .await
     .usage;
+
+    // 余额快照是扣费对账的旁路采样，挂在成功解析之后：写入条件与失败兜底都在
+    // `reconcile::capture_balance_snapshot` 里，这里只出一条调用，不拖垮余额显示。
+    reconcile::capture_balance_snapshot(&app_handle.state::<AppState>().db, relay_id, &usage);
 
     Ok(balance::row_balance_result(usage, true))
 }
@@ -6192,6 +6225,124 @@ mod tests {
             rusqlite::params![chrono::Utc::now().timestamp() - 3600, relay_id],
         )
         .expect("expire saved relay token");
+    }
+
+    /// 起一个只回余额相关端点的本地 server（手法照 `relay/backend.rs` 的先例）。
+    async fn spawn_balance_server(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (origin, task)
+    }
+
+    fn profile_router(balance: serde_json::Value) -> axum::Router {
+        use axum::{routing::get, Json, Router};
+        Router::new().route(
+            "/api/v1/user/profile",
+            get(move || async move { Json(balance) }),
+        )
+    }
+
+    #[tokio::test]
+    async fn relay_balance_writes_one_snapshot_on_successful_resolve() {
+        let (origin, server) = spawn_balance_server(profile_router(serde_json::json!({
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": 7,
+                "username": "Sub User",
+                "email": "sub@example.com",
+                "balance": 12.5,
+                "frozen_balance": 0.0
+            }
+        })))
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let result = relay_balance_impl(app.handle(), relay_id)
+            .await
+            .expect("成功解析必须 Ok");
+
+        assert!(result.usage.success, "{:?}", result.usage.error);
+        let state = app.state::<AppState>();
+        let rows = state
+            .db
+            .list_balance_snapshots(relay_id, None)
+            .expect("读快照");
+        assert_eq!(rows.len(), 1, "成功路径恰好落一条快照");
+        assert_eq!(rows[0].balance_usd, 12.5);
+        assert_eq!(rows[0].source, "balance_query");
+        assert_eq!(rows[0].relay_id, relay_id);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_balance_writes_no_snapshot_when_resolve_fails() {
+        use axum::{http::StatusCode, routing::get, Router};
+        let router = Router::new().route(
+            "/api/v1/user/profile",
+            get(|| async { StatusCode::UNAUTHORIZED }),
+        );
+        let (origin, server) = spawn_balance_server(router).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let result = relay_balance_impl(app.handle(), relay_id)
+            .await
+            .expect("失败路回 success:false，仍是 Ok");
+
+        assert!(!result.usage.success);
+        let state = app.state::<AppState>();
+        assert_eq!(
+            state
+                .db
+                .list_balance_snapshots(relay_id, None)
+                .expect("读快照")
+                .len(),
+            0,
+            "三路全败不能落快照"
+        );
+        server.abort();
+    }
+
+    /// ⭐ 快照写入失败绝不能拖垮余额显示（对账是旁路能力，plan §三.2）。
+    #[tokio::test]
+    async fn relay_balance_returns_balance_even_when_snapshot_insert_fails() {
+        let (origin, server) = spawn_balance_server(profile_router(serde_json::json!({
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": 7,
+                "username": "Sub User",
+                "email": "sub@example.com",
+                "balance": 9.9,
+                "frozen_balance": 0.0
+            }
+        })))
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+        {
+            let state = app.state::<AppState>();
+            let conn = state.db.conn.lock().expect("lock memory database");
+            conn.execute("DROP TABLE relay_balance_snapshots", [])
+                .expect("删表制造写入失败");
+        }
+
+        let result = relay_balance_impl(app.handle(), relay_id)
+            .await
+            .expect("快照写入失败时余额命令仍必须 Ok");
+        assert!(result.usage.success);
+        assert_eq!(
+            result
+                .usage
+                .data
+                .as_ref()
+                .and_then(|items| items.first())
+                .and_then(|item| item.remaining),
+            Some(9.9)
+        );
+        server.abort();
     }
 
     #[tokio::test]
@@ -8333,6 +8484,78 @@ mod tests {
         assert!(
             belongs_to_account(&legacy_provider, site, None),
             "删除方向对 `None` 仍是「算是我的」—— 那是旧数据能被清掉的前提"
+        );
+    }
+
+    /// ⭐ **还没登录的 relay 行，不能把同站别人账号的档位记到自己头上。**
+    ///
+    /// Task 3 review 抓出的：把 `relay_balance_inputs` 的内联判据收敛到
+    /// `belongs_to_account` 时，`(relay.account_id, 档位账号)` 的 `(None, Some)` 那格
+    /// 从「不认」翻成了「认」—— 未登录行会收走别人档位的 sk、对账会把别人的成本
+    /// 算进这一行。现在余额 / 对账走严格版 [`belongs_to_relay`]（还原原内联语义
+    /// `(None, Some(_)) => false`），清理 / 守卫路径仍走宽松版 [`belongs_to_account`]。
+    ///
+    /// 会红的改法：`relay_balance_inputs` 改回 `belongs_to_account`。
+    #[test]
+    fn an_unlogged_relay_row_is_not_attributed_another_accounts_tier() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 账号 9 的档位，带真实 sk（否则「没收走」的断言没有判别力）。
+        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        let mut b_provider = seeded_owned(&b_tier, "B 的档位", Some(site), 9);
+        b_provider.settings_config = serde_json::json!({ "auth": { "OPENAI_API_KEY": "sk-b" } });
+        db.save_provider("codex", &b_provider).expect("seed B");
+
+        // 同站一条没记账号的旧档位（升级前生成），也没有 sk —— 只用于钉住
+        // `(None, None) => true` 这格没被顺手改掉。
+        let legacy = provision::provider_id_for(site, None, 5);
+        db.save_provider("codex", &seeded(&legacy, "旧数据", Some(site)))
+            .expect("seed legacy");
+
+        let state = AppState::new(db.clone());
+        let mut unlogged = purchase_capability_relay(creds::BackendKind::Sub2Api);
+        unlogged.site_origin = site.to_string();
+        unlogged.account_id = None;
+
+        let (_, keys) = relay_balance_inputs(&state, &unlogged);
+        assert!(
+            keys.is_empty(),
+            "⭐ 未登录的行认不出归属 ⇒ 同站别人账号的档位（哪怕有 sk）不该被收走：{keys:?}"
+        );
+
+        // 对照组：账号 9 自己的行必须能拿到那把 sk —— 证明上面不是「本来就收不到」。
+        let mut owner_row = unlogged.clone();
+        owner_row.account_id = Some(9);
+        let (_, keys) = relay_balance_inputs(&state, &owner_row);
+        assert_eq!(
+            keys,
+            vec!["sk-b".to_string()],
+            "档位自己的账号必须收得到 sk"
+        );
+
+        // 两个判据函数在关键那格的分歧是**有意的**，钉住防止将来被「顺手统一」：
+        // 删除方向（belongs_to_account）对 None 宽松（旧数据要能清），
+        // 归属方向（belongs_to_relay）对 None 严格（别人的不能认领）。
+        let b_in_db = db
+            .get_provider_by_id(&b_tier, "codex")
+            .expect("query")
+            .expect("在");
+        assert!(
+            belongs_to_account(&b_in_db, site, None),
+            "删除方向对 `None` 仍宽松 —— 别改"
+        );
+        assert!(
+            !belongs_to_relay(&b_in_db, site, None),
+            "归属方向对 `(None, Some)` 必须严格 —— 别人的档位不能记到未登录行头上"
+        );
+        let legacy_in_db = db
+            .get_provider_by_id(&legacy, "codex")
+            .expect("query")
+            .expect("在");
+        assert!(
+            belongs_to_relay(&legacy_in_db, site, None),
+            "同站没记归属的旧档位仍是「可能是我的」（(None, None) => true）"
         );
     }
 

@@ -31,6 +31,7 @@
 //! - [`purchase`]：充值 WebView（**与 `login` 方向相反** —— 把已有登录态注入进充值页）
 //! - [`platform_map`]：sub2api 的 `platform` ↔ cc-switch 的 `AppType` 映射表（唯一一处映射数据）
 //! - [`provision`]：分组 → sk → codex provider 的展开
+//! - [`reconcile`]：扣费对账的余额快照表（`relay_balance_snapshots`，唯一采样点）
 //! - [`remote_config`]：远端配置（赞助商 + 邀请码，Ed25519 验签、三层回落）
 //! - [`stats`]：匿名使用统计（只报站点 host 与个数，默认开、可关）
 //! - [`managed`]：「这条 provider 是不是托管的」的唯一判据 + 各入口的守卫
@@ -80,6 +81,7 @@ pub(crate) mod provider_fingerprint;
 pub mod provision;
 pub mod purchase;
 pub mod purchase_session;
+pub mod reconcile;
 pub mod remote_config;
 pub mod stats;
 

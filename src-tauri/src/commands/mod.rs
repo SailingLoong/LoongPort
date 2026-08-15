@@ -25,6 +25,8 @@ mod profile;
 mod prompt;
 mod provider;
 mod proxy;
+// 中转站扣费对账：`commands/relay.rs` 已经 8819+ 行，对账命令单独放，不再往里堆。
+mod reconcile;
 mod relay;
 mod session_manager;
 mod settings;
@@ -73,6 +75,7 @@ pub use profile::*;
 pub use prompt::*;
 pub use provider::*;
 pub use proxy::*;
+pub use reconcile::*;
 pub use relay::*;
 pub use session_manager::*;
 pub use settings::*;

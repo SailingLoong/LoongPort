@@ -1625,6 +1625,7 @@ pub fn run() {
             commands::relay_list_sites,
             commands::relay_remove_site,
             commands::relay_balance,
+            commands::relay_reconciliation,
             commands::relay_purchase,
             commands::relay_restore_official_login,
             commands::list_verification_models,

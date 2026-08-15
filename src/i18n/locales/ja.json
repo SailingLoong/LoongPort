@@ -3288,6 +3288,26 @@
       "emptyTitle": "画像生成用の接続プロファイルがありません",
       "emptyBody": "接続プロファイルの作成時に、LoongPort は gpt-image モデルのみに対応するグループを識別します。中継サービスに該当するグループがない場合、このページは空のままです。"
     },
+    "reconcile": {
+      "entry": "課金照合を表示",
+      "title": "課金照合",
+      "snapshotCount": "残高スナップショット {{count}} 件",
+      "baselineRatioLabel": "基準比率",
+      "sampleNow": "今すぐ取得",
+      "colWindow": "期間",
+      "colEstimatedCost": "推定コスト",
+      "colBalanceChange": "残高変化",
+      "colRatio": "比率",
+      "colStatus": "状態",
+      "flagSuspicious": "比率が低い",
+      "flagSuspiciousHint": "実際の引き去りが推定の 2 倍以上で続いています。確認をおすすめします",
+      "flagSkippedTopUp": "チャージ",
+      "flagSkippedTopUpHint": "残高の増加（チャージ・還元・ボーナス）は比率の計算対象外です",
+      "note": "比率はローカルの推定コストをサイトの実際の引き去りで割ったもので、推定にはグループ倍率が含まれます。一つの期間で低くても課金ミスとは限らず、継続して明らかに低い場合（実際の引き去りが多い）にのみ注意が必要です。",
+      "empty": "照合データはまだありません",
+      "loadFailed": "照合データの読み込みに失敗しました",
+      "retry": "再試行"
+    },
     "modelVerification": {
       "title": "モデル検証",
       "titleWithTier": "モデル検証 · {{tierName}}",

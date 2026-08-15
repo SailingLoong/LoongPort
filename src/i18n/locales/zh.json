@@ -3288,6 +3288,26 @@
       "emptyTitle": "尚无图像生成接入配置",
       "emptyBody": "创建接入配置时，LoongPort 会识别仅支持 gpt-image 模型的分组。若中转站未提供这类分组，本页将保持为空。"
     },
+    "reconcile": {
+      "entry": "查看扣费对账",
+      "title": "扣费对账",
+      "snapshotCount": "{{count}} 个余额快照",
+      "baselineRatioLabel": "基线比值",
+      "sampleNow": "立即采样",
+      "colWindow": "时间段",
+      "colEstimatedCost": "估算成本",
+      "colBalanceChange": "余额变化",
+      "colRatio": "比值",
+      "colStatus": "状态",
+      "flagSuspicious": "偏低",
+      "flagSuspiciousHint": "实际扣减持续达到本地估算的 2 倍以上，建议关注",
+      "flagSkippedTopUp": "充值",
+      "flagSkippedTopUpHint": "余额增加（充值、返利或赠送），不计入比值",
+      "note": "比值 = 本地估算成本 ÷ 站点实际扣减，估算已包含站点分组倍率。个别窗口偏低不代表计费有误，持续显著偏低（实际扣得多）时才值得关注。",
+      "empty": "暂无对账数据",
+      "loadFailed": "对账数据加载失败",
+      "retry": "重试"
+    },
     "modelVerification": {
       "title": "模型验证",
       "titleWithTier": "模型验证 · {{tierName}}",
