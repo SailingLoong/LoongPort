@@ -1,10 +1,15 @@
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { getOpenCodeModels } from "@/lib/api/model-fetch";
 import { useProvidersQuery } from "@/lib/query/queries";
 import type { OpenCodeProviderConfig } from "@/types";
 import { OPENCODE_PRESET_MODEL_VARIANTS } from "@/config/opencodeProviderPresets";
 import { parseOpencodeConfigStrict } from "../helpers/opencodeFormUtils";
+
+const EMPTY_DISCOVERED_MODELS: Awaited<ReturnType<typeof getOpenCodeModels>> =
+  [];
 
 interface UseOmoModelSourceParams {
   isOmoCategory: boolean;
@@ -40,8 +45,22 @@ export function useOmoModelSource({
 }: UseOmoModelSourceParams): OmoModelSourceResult {
   const { t } = useTranslation();
 
+  const {
+    data: discoveredModels = EMPTY_DISCOVERED_MODELS,
+    isError: runtimeModelsFailed,
+    error: runtimeModelsError,
+  } = useQuery({
+    queryKey: ["opencode", "runtime-models"],
+    queryFn: getOpenCodeModels,
+    enabled: isOmoCategory,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
+
   const { data: opencodeProvidersData } = useProvidersQuery("opencode");
   const lastOmoModelSourceWarningRef = useRef<string>("");
+  const lastRuntimeModelsWarningRef = useRef<string>("");
 
   const omoModelBuild = useMemo<OmoModelBuild>(() => {
     const empty: OmoModelBuild = {
@@ -55,9 +74,6 @@ export function useOmoModelSource({
     }
 
     const allProviders = opencodeProvidersData?.providers;
-    if (!allProviders) {
-      return empty;
-    }
 
     const dedupedOptions = new Map<string, string>();
     const variantsMap: Record<string, string[]> = {};
@@ -70,7 +86,10 @@ export function useOmoModelSource({
     > = {};
     const parseFailedProviders: string[] = [];
 
-    for (const [providerKey, provider] of Object.entries(allProviders)) {
+    // Configured providers carry the backend-computed presentation.isInConfig fact.
+    // Runtime models are merged regardless, so OAuth/Zen entries still show
+    // while the provider query is in flight.
+    for (const [providerKey, provider] of Object.entries(allProviders ?? {})) {
       if (provider.category === "omo" || provider.category === "omo-slim") {
         continue;
       }
@@ -155,6 +174,13 @@ export function useOmoModelSource({
       }
     }
 
+    for (const model of discoveredModels) {
+      const value = `${model.providerId}/${model.modelId}`;
+      if (!dedupedOptions.has(value)) {
+        dedupedOptions.set(value, `${model.providerId} / ${model.modelId}`);
+      }
+    }
+
     return {
       options: Array.from(dedupedOptions.entries())
         .map(([value, label]) => ({ value, label }))
@@ -163,7 +189,7 @@ export function useOmoModelSource({
       presetMetaMap,
       parseFailedProviders,
     };
-  }, [isOmoCategory, opencodeProvidersData?.providers]);
+  }, [isOmoCategory, opencodeProvidersData?.providers, discoveredModels]);
 
   // Warning toast for parse failures / fallback
   useEffect(() => {
@@ -185,6 +211,32 @@ export function useOmoModelSource({
       );
     }
   }, [isOmoCategory, omoModelBuild.parseFailedProviders, t]);
+
+  // Warning toast when OpenCode runtime model discovery fails
+  useEffect(() => {
+    if (!isOmoCategory || !runtimeModelsFailed) {
+      if (!isOmoCategory) {
+        lastRuntimeModelsWarningRef.current = "";
+      }
+      return;
+    }
+
+    const detail = String(
+      (runtimeModelsError as { message?: string } | null)?.message ||
+        runtimeModelsError ||
+        "",
+    );
+    const signature = detail || "runtime-models-failed";
+    if (lastRuntimeModelsWarningRef.current === signature) return;
+    lastRuntimeModelsWarningRef.current = signature;
+
+    toast.warning(
+      t("omo.runtimeModelsFailedWarning", {
+        defaultValue:
+          "Failed to load OpenCode runtime models. Showing configured providers only.",
+      }),
+    );
+  }, [isOmoCategory, runtimeModelsFailed, runtimeModelsError, t]);
 
   return {
     omoModelOptions: omoModelBuild.options,

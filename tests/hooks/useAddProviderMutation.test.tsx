@@ -13,6 +13,16 @@ const apiMocks = vi.hoisted(() => ({
   updateTrayMenu: vi.fn(),
 }));
 
+const uuidMocks = vi.hoisted(() => ({
+  generateUUID: vi.fn(),
+}));
+
+const toastMocks = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+  warning: vi.fn(),
+}));
+
 vi.mock("@/lib/api", () => ({
   providersApi: {
     add: (...args: unknown[]) => apiMocks.add(...args),
@@ -28,10 +38,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: {
-    success: vi.fn(),
-    error: vi.fn(),
-  },
+  toast: toastMocks,
 }));
 
 function createWrapper() {
@@ -57,6 +64,10 @@ beforeEach(() => {
   apiMocks.ensureCodexOfficialProvider.mockReset().mockResolvedValue(true);
   apiMocks.getAll.mockReset().mockResolvedValue({});
   apiMocks.updateTrayMenu.mockReset().mockResolvedValue(true);
+  uuidMocks.generateUUID.mockReset().mockReturnValue("generated-uuid");
+  toastMocks.success.mockReset();
+  toastMocks.error.mockReset();
+  toastMocks.warning.mockReset();
 });
 
 describe("useAddProviderMutation", () => {
@@ -158,5 +169,62 @@ describe("useAddProviderMutation", () => {
     expect(apiMocks.getAll).toHaveBeenCalledWith("codex");
     expect(apiMocks.add).not.toHaveBeenCalled();
     expect(persistedProvider).toEqual(seedProvider);
+  });
+
+  it("adds a Pi provider without a separate default-model command", async () => {
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useAddProviderMutation("pi"), {
+      wrapper,
+    });
+
+    const provider = await act(async () =>
+      result.current.mutateAsync({
+        name: "Pi Provider",
+        providerKey: "pi-provider",
+        settingsConfig: {
+          api: "openai-responses",
+          baseUrl: "https://example.com/v1",
+          apiKey: "secret",
+          models: [{ id: "model-a" }],
+        },
+      }),
+    );
+
+    // 本仓契约：ID 由后端生成 —— 前端传空 id，providerKey 作为第 4 参随行。
+    expect(apiMocks.add).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "" }),
+      "pi",
+      undefined,
+      "pi-provider",
+    );
+    expect(provider.id).toBe("");
+  });
+
+  it("reports a Pi provider add failure", async () => {
+    apiMocks.add.mockRejectedValueOnce(new Error("provider add failed"));
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useAddProviderMutation("pi"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync({
+          name: "Pi Provider",
+          providerKey: "pi-provider",
+          settingsConfig: { models: [{ id: "model-a" }] },
+        }),
+      ).rejects.toThrow("provider add failed");
+    });
+
+    // 本仓契约：ID 由后端生成 —— 前端传空 id，providerKey 作为第 4 参随行。
+    expect(apiMocks.add).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "" }),
+      "pi",
+      undefined,
+      "pi-provider",
+    );
+    expect(toastMocks.error).toHaveBeenCalled();
+    expect(toastMocks.warning).not.toHaveBeenCalled();
   });
 });

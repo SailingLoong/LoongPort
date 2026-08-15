@@ -34,6 +34,9 @@
     "import": "インポート",
     "all": "すべて",
     "search": "検索",
+    "enableAllForApp": "{{app}} ですべて有効化",
+    "disableAllForApp": "{{app}} ですべて無効化",
+    "bulkToggleFailed": "{{count}} 件の更新に失敗しました",
     "reset": "リセット",
     "actions": "操作",
     "deleting": "削除中...",
@@ -167,7 +170,10 @@
         "apiKeyPlaceholder": "Gemini API Key を入力"
       }
     },
-    "duplicateFailed": "プロバイダーの複製に失敗しました"
+    "duplicateFailed": "プロバイダーの複製に失敗しました",
+    "needsRouting": "ルーティングが必要",
+    "noRoutingSupport": "ルーティング非対応",
+    "duplicateLiveIdsLoadFailed": "設定内のプロバイダー識別子を読み込めませんでした。設定を修正してから再度お試しください"
   },
   "claudeCode": {
     "needsRouting": "ルーティングが必要",
@@ -185,8 +191,8 @@
     "modeDirect": "直結",
     "modeProxy": "ルーティング必要",
     "modelMappingToggle": "モデルマッピングが必要",
-    "modelMappingOffHint": "プロバイダーが Claude Desktop の三つの役割 ID（claude-sonnet-* / claude-opus-* / claude-haiku-*）を受け付ける場合のみ直結できます。それ以外のモデル名（claude-3-5-sonnet-… などの旧式 ID を含む）はこのスイッチを有効にしてマッピングを使ってください。",
-    "modelMappingOnHint": "Claude Desktop は claude-sonnet-* / claude-opus-* / claude-haiku-* の三つの役割 ID のみ受け付けます。有効にすると LoongPort がこの三役割をプロバイダーの実モデルにマッピングし、使用中はローカルルーティングを起動したままにします。",
+    "modelMappingOffHint": "プロバイダーが Claude Desktop の三つの役割 ID（claude-sonnet-* / claude-opus-* / claude-haiku-*）を受け付ける場合のみ直結できます。それ以外のモデル名（claude-3-5-sonnet-… などの旧式 ID を含む）は「モデルマッピング」を選択してください。",
+    "modelMappingOnHint": "Claude Desktop は claude-sonnet-* / claude-opus-* / claude-haiku-* の三つの役割 ID のみ受け付けます。「モデルマッピング」を選択すると、LoongPort がこの三役割をプロバイダーの実モデルにマッピングし、使用中はローカルルーティングを起動したままにします。",
     "routeMapTitle": "モデルマッピング",
     "routeMapHint": "Sonnet・Opus・Haiku の各区分に実際のリクエストモデルを入力してください。DeepSeek や Kimi などのブランド名はメニュー表示名に入れられます。空欄の区分は Sonnet（または最初に入力した区分）のモデルを引き継ぐため、サブ agent が呼び出す Haiku が常に利用可能になります。",
     "routeModelLabel": "モデル役割",
@@ -198,9 +204,9 @@
     "upstreamModelLabel": "リクエストモデル",
     "supports1mLabel": "1M 対応を宣言",
     "supports1mShort": "1M",
-    "directModelListTitle": "Claude Desktop モデルを手動指定（高度・任意）",
+    "directModelListTitle": "モデル一覧",
     "directModelListCollapsedHint": "ネイティブ Claude モデルのプロバイダーでは通常不要です。Claude Desktop が /v1/models を自動取得します。",
-    "directModelListHint": "プロバイダーの /v1/models が使えない、または Claude Desktop が認識できる Sonnet / Opus / Haiku モデル ID を返さない場合だけ入力してください。1M をオンにすると Claude Desktop に 1M コンテキスト対応を宣言します。",
+    "directModelListHint": "Claude Desktop で使用できる Sonnet、Opus、Haiku モデルを設定します。空欄の場合、Claude Desktop が /v1/models を自動取得します。1M をオンにすると 1M コンテキスト対応を宣言します。",
     "directModelInvalid": "直結モデルは Claude Desktop が認識できる Sonnet / Opus / Haiku モデル ID を使う必要があります",
     "addModel": "モデルを追加",
     "addRoute": "モデルを追加",
@@ -218,7 +224,11 @@
         "inactive": "モデルマッピングや形式変換が必要なプロバイダー向けに Claude Desktop ローカルルーティングを起動します。設定アドレス: {{address}}:{{port}}"
       },
       "stopBlockedByTakeover": "別のアプリがプロキシテイクオーバーを使用しています。設定で該当アプリのテイクオーバーを無効にしてから、ローカルルーティングを停止してください。"
-    }
+    },
+    "modelConfigTitle": "モデル設定",
+    "modelModeLabel": "接続方式",
+    "modelModeDirect": "直接接続",
+    "modelModeProxy": "モデルマッピング"
   },
   "notifications": {
     "providerAdded": "プロバイダーを追加しました",
@@ -267,7 +277,9 @@
     "windowControlFailed": "ウィンドウ操作に失敗しました: {{error}}",
     "officialBlockedByProxy": "ローカルルーティングモード中は公式プロバイダーに切り替えできません。ルーティング経由で公式 API にアクセスするとアカウントが停止される可能性があります。",
     "proxyOfficialWarning": "現在のプロバイダー {{name}} は公式です。ローカルルーティングを使用する前にサードパーティプロバイダーに切り替えてください。",
-    "proxyReasonClaudeDesktop": "Claude Desktop ローカルルーティングモードを使用中"
+    "proxyReasonClaudeDesktop": "Claude Desktop ローカルルーティングモードを使用中",
+    "removeFromConfigFailed": "プロバイダーを削除できません",
+    "openclawModelNotFound": "選択したモデルは存在しません。更新してからもう一度お試しください。"
   },
   "confirm": {
     "deleteProvider": "プロバイダーを削除",
@@ -310,7 +322,8 @@
       "title": "共通設定について",
       "message": "「共通設定スニペット」を使うと、プラグインや環境変数などの設定を異なるプロバイダー間で共有でき、切り替え時に失われることがありません。\n\n使い方：\n① プロバイダーを編集 →「共通設定を編集」→「編集内容から抽出」\n② 新規プロバイダー作成時に「共通設定を適用」をチェック（デフォルトでオン）\n\n新しいプラグインや Hook をインストールした場合は、共通設定を再抽出してください。",
       "confirm": "わかりました"
-    }
+    },
+    "piDefaultProviderWarning": "Pi のグローバルデフォルトは現在このプロバイダーを参照しています。続行すると、Pi は別の利用可能なモデルを試します。/model で再選択するか、/login で別のプロバイダーにログインできます。"
   },
   "settings": {
     "title": "設定",
@@ -814,7 +827,7 @@
     "officialWebsite": "公式サイト",
     "github": "GitHub",
     "manualInstallCommands": "手動インストールコマンド",
-    "oneClickInstallHint": "Claude Code / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes をインストールまたは更新",
+    "oneClickInstallHint": "Claude Code / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes / Pi をインストールまたは更新",
     "localEnvCheck": "ローカル環境チェック",
     "updateAllTools": "すべて更新（{{count}}）",
     "currentVersion": "現在のバージョン",
@@ -894,7 +907,10 @@
     },
     "saveFailedGeneric": "保存に失敗しました。もう一度お試しください",
     "anonymousStats": "利用統計",
-    "anonymousStatsDescription": "追加した中継サイトのドメインとアカウント数を送信し、対応の優先順位付けに役立てます。重複集計用のランダムな識別子を含みます。アカウント・残高・キーは含みません。"
+    "anonymousStatsDescription": "追加した中継サイトのドメインとアカウント数を送信し、対応の優先順位付けに役立てます。重複集計用のランダムな識別子を含みます。アカウント・残高・キーは含みません。",
+    "piConfigDir": "Pi 設定ディレクトリ",
+    "piConfigDirDescription": "Pi の設定ディレクトリ（models.json、指示ファイル、プロンプト、Skills、セッション）を上書きします。",
+    "browsePlaceholderPi": "例: /home/<your-username>/.pi/agent"
   },
   "apps": {
     "claude": "Claude",
@@ -908,7 +924,8 @@
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "more": "その他"
+    "more": "その他",
+    "pi": "Pi"
   },
   "grokBuild": {
     "apiBackend": "API Backend",
@@ -920,7 +937,7 @@
   },
   "sessionManager": {
     "title": "セッション管理",
-    "subtitle": "Claude Code / Codex / Gemini CLI / Grok Build / OpenCode / OpenClaw / Hermes のセッションを管理",
+    "subtitle": "Claude Code / Codex / Gemini CLI / Grok Build / OpenCode / OpenClaw / Hermes / Pi のセッションを管理",
     "searchPlaceholder": "内容・ディレクトリ・ID で検索",
     "searchSessions": "セッションを検索",
     "providerFilterAll": "すべて",
@@ -947,6 +964,8 @@
     "batchDeleting": "削除中...",
     "loadingSessions": "セッションを読み込み中...",
     "noSessions": "セッションが見つかりません",
+    "piRelativeSessionDir": "Pi の sessionDir は Pi を起動したディレクトリからの相対パスであるため、グローバルブラウザーから安全に列挙できません。すべての Pi セッションをここで表示するには、sessionDir に絶対パスを設定してください:",
+    "piDiscoveryUnavailable": "Pi セッションを検査できませんでした: {{error}}",
     "selectSession": "セッションを選択してください",
     "noSummary": "概要なし",
     "lastActive": "最終アクティブ",
@@ -1054,7 +1073,7 @@
       "patewayai": "PatewayAI は CC Switch ユーザーに特別な特典を提供しています。このリンクから登録すると $3 のクレジットがもらえます。",
       "claudeapi": "ClaudeAPI は CC Switch ユーザーに特別な特典を提供しています。このリンクから登録するとテストクレジットを受け取ることができます。",
       "claudecn": "ClaudeCN は登録企業が運営するエンタープライズグレードの AI ゲートウェイプラットフォームで、企業調達プロセスをサポートし、法人支払い、契約、コンプライアンス保証を提供します。",
-      "runapi": "RunAPI は CC Switch ユーザーに特別な特典を提供しています。このリンクから登録しカスタマーサポートにご連絡いただくと、¥14 の無料クレジットを受け取ることができます。",
+      "runapi": "RunAPI は CC Switch ユーザーに特別な特典を提供しています。このリンクから登録すると、初回チャージが 10% オフになります。",
       "minimax_cn": "MiniMax Coding Plan 特別価格、Starter ¥9.9 から",
       "minimax_en": "MiniMax Coding Plan Black Friday、Starter が月額 $2（80% OFF）",
       "opencode_go": "このリンクから OpenCode Go を購読すると、初月はわずか $5、さらに $5 分のクレジットがもらえます！",
@@ -1072,14 +1091,17 @@
       "etok": "公式サイトで ETok コミュニティに参加し、プランを購読してください。",
       "shengsuanyun": "胜算云はCC Switchユーザーに特別特典を提供しています。このリンクから登録すると、10元分の無料クレジットと初回チャージ10%ボーナスがもらえます！",
       "doubaoseed": "豆包大モデルは CC Switch ユーザーに専属特典を提供しています：このリンクから登録すると、豆包全テキストモデル50万トークンの推論クレジットおよびSeedance2.0の500万トークン無料クレジットがもらえます。",
-      "volcengine_agentplan": "火山方舟 Coding Plan は CC Switch ユーザーに専属特典を提供しています：このリンクから方舟 Coding Plan を購読すると、新規のお客様は最初の 2 か月が 75% オフ、さらに専用招待コード 6J6FV5N2 で 5% オフが加算され、月額 9.4 元から！",
+      "volcengine_agentplan": "火山方舟 Agent Plan は CC Switch ユーザーに専属特典を提供しています：このリンクから方舟 Agent Plan を購読すると、新規のお客様は最初の 2 か月が 75% オフ、さらに専用招待コード 6J6FV5N2 で 5% オフが加算され、月額 9.4 元から！",
       "byteplus": "このリンクから登録すると、各モデルごとに50万トークンの無料推論クォータがもらえます。",
       "ccsub": "CCSub は安定・低価格の AI API リレーサービスです。Claude Code の公式サブスクリプションの代替として、1つのキーで全モデルを公式比約1/3のコストで利用できます。",
       "subrouter": "SubRouter は、1つのキーで複数のモデルとプロバイダーにアクセスできる AI 中継アグリゲーターです。",
       "qiniu": "Qiniu Cloud（七牛云）はマルチプロトコル対応の AI 中継プラットフォームです。1つのキーでネイティブの Claude・GPT・Gemini モデルを利用でき、Anthropic／OpenAI／Gemini の各 API に対応します。",
-      "fenno": "Fenno.ai は安定・高効率な API 中継サービスで、幅広い主要モデルを利用できます。CC Switch 利用者限定特典：このリンクから 9.9 元（150 ドル相当）の Coding Plan を購入できます！",
+      "fenno": "Fenno.ai は安定・高効率な API 中継サービスで、幅広い主要モデルを利用できます。CC Switch 利用者限定特典：このリンクから 1.99 ドルで 50 ドル相当の Trial プランを購入できます（有効期間 7 日間）！",
       "zetaapi": "ZetaAPI はモデルを水増し・劣化させず、公式価格の 35% から利用できます。CC Switch 利用者限定特典：このリンクから登録し、初回チャージ時にプロモコード CC-SWITCH を使うと初回チャージ 10% オフ！",
-      "teamorouter": "TeamoRouter はエンタープライズグレードの Agentic LLM ゲートウェイで、料金は最大 90% オフ。CC Switch ユーザーに特別特典を提供しています：このリンクから新規登録すると初回チャージが 10% オフ！"
+      "teamorouter": "TeamoRouter はエンタープライズグレードの Agentic LLM ゲートウェイで、料金は最大 90% オフ。CC Switch ユーザーに特別特典を提供しています：このリンクから新規登録すると初回チャージが 10% オフ！",
+      "kimi": "Kimi の新規ユーザーは、初回チャージに成功するとチャージ金額の 10%（最大 CNY ¥1,000）が API クレジットとして進呈されます。",
+      "volcengine_codingplan": "火山方舟 Coding Plan は CC Switch ユーザーに専属特典を提供しています：このリンクから方舟 Coding Plan を購読すると、新規のお客様は最初の 2 か月が 75% オフ、さらに専用招待コード 6J6FV5N2 で 5% オフが加算され、月額 9.4 元から！",
+      "xycai": "XycAi はエンタープライズグレードのトークンファクトリー：200+ のグローバルモデルにワンクリック接続、SLA 自動補償、異常キャッシュは 100% 返金！"
     },
     "presets": {
       "ucloud": "Compshare",
@@ -1119,8 +1141,8 @@
     "visitWebsite": "{{url}} を開く",
     "anthropicModel": "メインモデル",
     "anthropicSmallFastModel": "高速モデル",
-    "apiFormat": "API フォーマット",
-    "apiFormatHint": "プロバイダー API の入力フォーマットを選択",
+    "apiFormat": "上流フォーマット",
+    "apiFormatHint": "プロバイダーがネイティブ Anthropic Messages API なら Anthropic Messages を選択（直結、フォーマット変換なし）。Chat Completions プロトコルなら Chat、Responses API なら Responses、Gemini generateContent プロトコルなら Gemini Native を選択。Chat、Responses、Gemini Native は Anthropic Messages への変換にルーティング引き継ぎの有効化が必要です。",
     "customUserAgent": "カスタム User-Agent",
     "customUserAgentHint": "ローカルルーティング/プロキシ引き継ぎが有効な場合にのみ適用され、プロバイダー API へ転送するリクエストの User-Agent を置き換えます。",
     "customUserAgentInvalid": "User-Agent に制御文字（改行など）を含めることはできません。含まれている場合は無視されます。",
@@ -1192,7 +1214,10 @@
     "fetchModelsNotSupported": "このプロバイダーはモデル一覧の取得に対応していません",
     "fetchModelsEndpointNotFound": "利用可能なモデル一覧エンドポイントが見つかりません。Base URL を確認するか、プロバイダーが該当 API を公開しているかご確認ください",
     "fetchModelsTimeout": "リクエストがタイムアウトしました。ネットワーク接続を確認してください",
-    "requiredFields": "プロバイダー名、API エンドポイント、API Key、モデルを入力してください"
+    "requiredFields": "プロバイダー名、API エンドポイント、API Key、モデルを入力してください",
+    "searchModelPlaceholder": "モデルを検索...",
+    "searchModelEmpty": "一致するモデルがありません",
+    "searchModelAriaLabel": "モデルを選択"
   },
   "copilot": {
     "authSection": "GitHub Copilot 認証",
@@ -1824,7 +1849,10 @@
         "opencode": "OpenCode",
         "openclaw": "OpenClaw",
         "hermes": "Hermes"
-      }
+      },
+      "searchPlaceholder": "MCP の名前、説明、タグ、コマンドを検索...",
+      "searchAriaLabel": "管理中の MCP サーバーを検索",
+      "noSearchResults": "検索に一致する MCP サーバーがありません"
     },
     "userLevelPath": "ユーザーレベルの MCP パス",
     "serverList": "サーバー一覧",
@@ -1974,6 +2002,9 @@
     "empty": "まだプロンプトがありません",
     "emptyDescription": "上のボタンからプロンプトを追加またはインポートしてください",
     "loading": "読み込み中...",
+    "searchPlaceholder": "プロンプトの名前、説明、内容を検索...",
+    "searchAriaLabel": "管理中のプロンプトを検索",
+    "noSearchResults": "検索に一致するプロンプトがありません",
     "name": "名前",
     "namePlaceholder": "例: デフォルトプロジェクトプロンプト",
     "description": "説明",
@@ -2086,26 +2117,25 @@
     "apiProtocolHint": "プロバイダーの API と互換性のあるプロトコルタイプを選択してください。ほとんどのプロバイダーは OpenAI Completions 形式を使用します。",
     "baseUrl": "API エンドポイント",
     "baseUrlHint": "プロバイダーの API エンドポイントアドレス。",
-    "models": "モデル一覧",
+    "models": "モデル設定",
     "addModel": "モデルを追加",
-    "noModels": "モデルが設定されていません。「モデルを追加」をクリックして利用可能なモデルを設定してください。",
+    "selectDefaultModel": "デフォルトモデルを選択",
+    "noModels": "モデルが設定されていません",
     "modelId": "モデル ID",
     "modelIdPlaceholder": "claude-3-sonnet",
     "modelName": "表示名",
     "modelNamePlaceholder": "Claude 3 Sonnet",
-    "contextWindow": "コンテキストウィンドウ",
+    "toggleModelDetails": "モデル詳細を展開または折りたたむ",
+    "removeModel": "モデルを削除",
+    "contextWindow": "コンテキスト長",
     "maxTokens": "最大出力トークン数",
-    "reasoning": "推論モード",
-    "reasoningOn": "有効",
-    "reasoningOff": "無効",
+    "reasoning": "拡張思考に対応",
     "inputTypes": "入力タイプ",
-    "inputCost": "入力コスト ($/M トークン)",
-    "outputCost": "出力コスト ($/M トークン)",
-    "advancedOptions": "詳細オプション",
-    "cacheReadCost": "キャッシュ読取コスト ($/M トークン)",
-    "cacheWriteCost": "キャッシュ書込コスト ($/M トークン)",
-    "cacheCostHint": "キャッシュコストは Prompt Caching のコスト計算に使用されます。キャッシュを使用しない場合は空欄のままにしてください。",
-    "modelsHint": "このプロバイダーがサポートするモデルを設定します。モデル ID は API 呼び出しに、表示名はインターフェースに使用されます。",
+    "modelCost": "コスト（$/100万トークン）",
+    "inputCost": "入力",
+    "outputCost": "出力",
+    "cacheReadCost": "キャッシュ読み取り",
+    "cacheWriteCost": "キャッシュ書き込み",
     "userAgent": "User-Agent を送信",
     "userAgentHint": "一部のプロバイダーはブラウザの User-Agent ヘッダーが必要です。",
     "env": {
@@ -2174,9 +2204,7 @@
       "stringifiedEnvVars": "env.vars はオブジェクトである必要がありますが、現在の値は文字列化または破損しているようです。",
       "stringifiedShellEnv": "env.shellEnv はオブジェクトである必要がありますが、現在の値は文字列化または破損しているようです。",
       "parseFailed": "openclaw.json を有効な JSON5 として解析できませんでした。ここで編集する前にファイルを修正してください。"
-    },
-    "primaryModel": "プライマリモデル",
-    "fallbackModel": "フォールバックモデル"
+    }
   },
   "hermes": {
     "form": {
@@ -2206,11 +2234,9 @@
       "modelName": "表示名",
       "modelNamePlaceholder": "Claude Opus 5",
       "contextLength": "コンテキスト長",
-      "advancedOptions": "詳細オプション",
-      "modelsHint": "切り替え時、最初のモデルが model.default に書き込まれます。",
-      "primaryModel": "デフォルト",
-      "fallbackModel": "予備",
-      "providerAdvanced": "プロバイダー詳細オプション",
+      "toggleModelDetails": "モデル詳細を展開または折りたたむ",
+      "removeModel": "モデルを削除",
+      "modelsHint": "現在のプロバイダーとして有効にすると、最初のモデルが Hermes のデフォルトモデルになります。",
       "rateLimitDelay": "リクエスト間隔（秒）",
       "rateLimitDelayHint": "連続したリクエスト間の最小待機秒数（任意）。空欄の場合は制限なし。"
     },
@@ -2442,7 +2468,12 @@
       "successSingle": "スキル {{name}} をインストールしました",
       "successMultiple": "{{count}} 件のスキルをインストールしました",
       "noSkillsFound": "ZIP ファイルにスキルが見つかりません（SKILL.md が必要です）"
-    }
+    },
+    "uninstallPiPreserved": "Pi のコピーが CC Switch 管理下であることを確認できなかったため、そのまま残しました: {{path}}",
+    "uninstallPiCleanupIncomplete": "Pi のクリーンアップを完了できませんでした。Pi Skills ディレクトリにコピーが残っていないか手動で確認してください。",
+    "installedSearchPlaceholder": "インストール済みスキルの名前、説明、リポジトリを検索...",
+    "installedSearchAriaLabel": "インストール済みスキルを検索",
+    "noInstalledSearchResults": "検索に一致するインストール済みスキルがありません"
   },
   "deeplink": {
     "confirmImport": "プロバイダーのインポートを確認",
@@ -2527,7 +2558,9 @@
       "envHijack": "この設定には、プロセスの読み込み動作を変える環境変数（ライブラリの注入、CA 証明書の差し替えなど）が含まれています。信頼できる提供元か確認してください。",
       "privateEndpoint": "このアドレスはローカルホストまたは内部ネットワークを指しています。自分で立てたローカルサービス以外はインポートしないでください。",
       "shellCommand": "この設定はシェル経由でコマンド全体を実行します。実際に動作する内容は引数にあります。1 行ずつ確認してください。"
-    }
+    },
+    "usageAccessToken": "使用量アクセストークン",
+    "usageUserId": "使用量ユーザー ID"
   },
   "iconPicker": {
     "search": "アイコンを検索",
@@ -2898,6 +2931,7 @@
     "noEnabledModelsWarning": "利用可能な設定済みモデルがありません。先に OpenCode モデルを設定してください。",
     "modelSourcePartialWarning": "一部プロバイダーのモデル設定が不正なため、候補から除外しました。",
     "modelSourceFallbackWarning": "live プロバイダー状態の取得に失敗したため、設定済みプロバイダーへフォールバックしました。",
+    "runtimeModelsFailedWarning": "OpenCode ランタイムモデルの取得に失敗しました。設定済みプロバイダーのモデルのみ表示します。",
     "importLocalReplaceSuccess": "ローカルファイルから読み込み、Agents/Categories/Other Fields を置き換えました",
     "importLocalFailed": "ローカルファイルの読み込みに失敗しました: {{error}}",
     "agentKeyPlaceholder": "agent キー",
@@ -3326,5 +3360,154 @@
         "invalidResponse": "プロバイダーの応答を検証できませんでした。しばらくしてから再試行するか、手動で確認してください。"
       }
     }
+  },
+  "firstRunNotice": {
+    "title": "CC Switch へようこそ",
+    "bodyDefault": "CC Switch は Claude Code / Codex / Gemini CLI の複数プロバイダーをワンクリックで切り替えられるツールです。すでにこれらのツールを設定済みの場合、CC Switch は現在の設定を「default」という名前のプロバイダーとして自動的に保存するので、既存の設定が失われることはありません。",
+    "bodyOfficial": "リストには「Official（公式）」プリセットも用意されており、公式バージョンに戻したくなったらクリックするだけで切り替えられます。切り替える前に現在の設定は自動で default にバックアップされるので、自由に行き来できます。これが CC Switch の仕組みです 😊",
+    "confirm": "了解しました"
+  },
+  "pi": {
+    "empty": {
+      "title": "API キープロバイダーはまだありません",
+      "description": "右上の + から、プリセットまたはカスタムプロバイダーを追加できます。"
+    },
+    "provider": {
+      "enabled": "Pi で有効にしました",
+      "enableFailed": "Pi でこのプロバイダーを有効にできませんでした",
+      "removed": "Pi から削除しました",
+      "writeConflict": "別のプロセスが Pi の設定を更新しています。しばらくしてから再試行してください。"
+    },
+    "form": {
+      "providerKey": "プロバイダーキー",
+      "providerKeyRequired": "プロバイダーキーを入力してください",
+      "selectPresetRequired": "先にプリセットまたはカスタム設定を選択してください",
+      "fixJsonFirst": "下の設定 JSON を修正してから、構造化フィールドを編集してください。",
+      "nameRequired": "表示名を入力してください",
+      "credential": "API キー",
+      "credentialRequired": "このプリセットの API キーを入力してください",
+      "absoluteHttpUrlRequired": "{{label}} は絶対 HTTP または HTTPS URL で指定してください",
+      "positiveNumberRequired": "{{label}} は 0 より大きい数値で指定してください",
+      "models": "モデル設定",
+      "noModels": "モデルはまだ設定されていません",
+      "addModel": "モデルを追加",
+      "removeModel": "モデルを削除",
+      "modelId": "モデル ID",
+      "modelIdRequired": "モデル {{index}} に ID が必要です",
+      "modelName": "表示名",
+      "modelNameRequired": "モデル {{index}} に表示名が必要です",
+      "modelNamePlaceholder": "表示名",
+      "toggleModelDetails": "モデル詳細を開閉",
+      "reasoning": "拡張思考に対応",
+      "imageInput": "画像入力に対応",
+      "thinkingLevelsLabel": "思考レベル",
+      "customizeThinkingLevels": "カスタマイズ",
+      "thinkingLevelDefault": "Pi デフォルト",
+      "thinkingLevelUnsupported": "利用不可",
+      "thinkingLevelValue": "{{level}} の上流値",
+      "editThinkingLevel": "{{level}}レベルを編集",
+      "thinkingLevelFollowDefault": "Pi のデフォルトに従う",
+      "thinkingLevelMapTo": "マッピング先",
+      "thinkingLevelMarkUnavailable": "このレベルは利用不可",
+      "thinkingLevelMapInvalid": "思考レベルは Pi のネイティブキーのみ使用でき、値は文字列または null である必要があります。",
+      "thinkingLevels": {
+        "off": "オフ",
+        "minimal": "最小",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "xhigh": "超高",
+        "max": "最大"
+      },
+      "contextWindow": "コンテキストウィンドウ",
+      "maxTokens": "最大出力トークン数",
+      "compatibility": "互換性",
+      "compatibilityHint": "互換エンドポイントやローカル環境向けにリクエスト動作を調整します。",
+      "addCompatibilityOption": "追加",
+      "noCompatibilityOptions": "互換性オプションはありません",
+      "optionKey": "オプション",
+      "optionValue": "値",
+      "removeCompatibilityOption": "互換性オプションを削除",
+      "effectiveApiRequired": "モデル {{id}} には、直接またはプロバイダーから継承した API が必要です",
+      "effectiveBaseUrlRequired": "モデル {{id}} には、直接またはプロバイダーから継承したベース URL が必要です",
+      "duplicateModel": "モデル ID {{id}} が重複しています",
+      "modelRequired": "モデルを 1 つ以上追加してください"
+    },
+    "current": {
+      "readFailed": "Pi のプロバイダー設定を読み込めません",
+      "stateUnavailableHint": "CC Switch が Pi のプロバイダー設定を読み込むまで、プロバイダーの変更は無効です。"
+    },
+    "prompts": {
+      "globalTab": "グローバルプロンプト",
+      "systemTab": "グローバルシステムプロンプト",
+      "templatesTab": "プロンプトテンプレート",
+      "agentsLibrary": "AGENTS.md ライブラリ",
+      "agentsLibraryDescription": "1 つのプロンプトを選び、Pi のグローバル AGENTS.md に書き込みます。",
+      "writtenToAgents": "AGENTS.md に書き込み済み",
+      "externalAgents": "外部 AGENTS.md",
+      "noGlobalPrompt": "グローバル AGENTS.md は未設定",
+      "noGlobalPrompts": "グローバルプロンプトがありません",
+      "noGlobalPromptsDescription": "右上からプロンプトを追加し、必要なものをグローバル AGENTS.md に書き込めます。",
+      "noPromptDescription": "説明なし",
+      "usePrompt": "使用",
+      "stopUsing": "停止",
+      "usePromptSuccess": "グローバル AGENTS.md を更新しました",
+      "stopUsingSuccess": "グローバル AGENTS.md を削除しました",
+      "stopBeforeDelete": "先に使用を停止してください",
+      "systemFilesDescription": "通常は追記を使用し、基本指示を完全に制御する場合のみ置換を使用してください。",
+      "systemAppend": "システムプロンプトの追記",
+      "systemAppendDescription": "Pi の組み込み基本プロンプトの後に指示を追加します。",
+      "systemOverride": "システムプロンプトの置換",
+      "systemOverrideDescription": "Pi の組み込み基本プロンプトを置換します。コンテキストや AGENTS.md などは Pi が引き続き追加します。",
+      "systemOverrideWarning": "SYSTEM.md は Pi の組み込み基本プロンプトを置換します。基本指示を完全に制御する必要がない限り、APPEND_SYSTEM.md を使用してください。",
+      "recommended": "推奨",
+      "configured": "設定済み",
+      "configuredEmpty": "設定済み（空）",
+      "notConfigured": "未設定",
+      "unavailable": "読み込み失敗",
+      "markdownContent": "Markdown 内容",
+      "instructionPlaceholder": "Pi が使用する Markdown 内容",
+      "blankInstruction": "空白以外の内容を入力するか、グローバルファイルを削除してください。",
+      "saveAndConfigure": "保存して設定",
+      "removeGlobalFile": "グローバルファイルを削除",
+      "activateOverrideTitle": "{{filename}} を設定しますか？",
+      "activateOverrideMessage": "{{filename}} を作成すると Pi の組み込み基本プロンプトが置換されます。コンテキスト、AGENTS.md、Skills などは Pi の規則に従って引き続き追加されます。",
+      "removeFileTitle": "{{filename}} を削除しますか？",
+      "removeFileMessage": "Pi のグローバル設定ディレクトリから {{filename}} を削除します。",
+      "fileSaved": "{{filename}} を保存しました",
+      "fileRemoved": "{{filename}} を削除しました",
+      "saveFailed": "Pi 指示ファイルを保存できませんでした",
+      "deleteFailed": "Pi 指示ファイルを削除できませんでした",
+      "reloadNotice": "開いている Pi セッションには自動反映されません。変更後、Pi がアイドル状態のときに /reload を実行してください。新しいセッションは自動的に読み込みます。",
+      "templatesDescription": "保存したテンプレートは Pi で /コマンド名 として呼び出せます。有効化は不要です。",
+      "newTemplate": "新しいプロンプトテンプレート",
+      "editTemplate": "/{{slug}} を編集",
+      "templateCommand": "スラッシュコマンド",
+      "templateSlug": "例: review",
+      "templateSlugInvalid": "空白やファイル名の予約文字を含まない、1 つのコマンド名を入力してください。",
+      "templateSlugExists": "そのスラッシュコマンドは既に存在します。",
+      "templateDescription": "メモ",
+      "templateDescriptionPlaceholder": "任意の説明",
+      "templateContent": "テンプレート Markdown",
+      "templateContentPlaceholder": "Pi が展開する Markdown を入力します。YAML frontmatter は保持されます。",
+      "templateSyntax": "Pi テンプレート構文",
+      "templateSyntaxDescription": "任意の frontmatter では description と argument-hint を使用できます。本文では $1、$2、$@ または $ARGUMENTS、${@:N}、${@:N:L} の引数置換を使用できます。",
+      "createTemplate": "テンプレートを作成",
+      "templateCreated": "Pi プロンプトテンプレートを作成しました",
+      "templateSaved": "/{{slug}} を保存しました",
+      "templateDeleted": "/{{slug}} を削除しました",
+      "templateLoadFailed": "Pi プロンプトテンプレートを読み込めませんでした",
+      "templateSaveFailed": "Pi プロンプトテンプレートを保存できませんでした",
+      "templateDeleteFailed": "Pi プロンプトテンプレートを削除できませんでした",
+      "searchTemplates": "プロンプトテンプレートの名前、説明、内容を検索…",
+      "noTemplates": "プロンプトテンプレートがありません",
+      "noTemplatesDescription": "右上からテンプレートを作成すると、Pi でスラッシュコマンドとして呼び出せます。",
+      "noTemplateResults": "一致するテンプレートがありません",
+      "deleteTemplateTitle": "/{{slug}} を削除しますか？",
+      "deleteTemplateMessage": "prompts/{{slug}}.md を完全に削除します。"
+    }
+  },
+  "appSwitcher": {
+    "more": "その他のアプリ"
   }
 }

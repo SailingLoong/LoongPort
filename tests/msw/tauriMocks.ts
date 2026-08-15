@@ -1,10 +1,21 @@
-import "cross-fetch/polyfill";
+import crossFetch, {
+  Headers as CrossFetchHeaders,
+  Request as CrossFetchRequest,
+  Response as CrossFetchResponse,
+} from "cross-fetch";
 import { vi } from "vitest";
 import { server } from "./server";
 
 const TAURI_ENDPOINT = "http://tauri.local";
 
+globalThis.fetch = crossFetch as typeof fetch;
+globalThis.Headers = CrossFetchHeaders as typeof Headers;
+globalThis.Request = CrossFetchRequest as typeof Request;
+globalThis.Response = CrossFetchResponse as typeof Response;
+
 vi.mock("@tauri-apps/api/core", () => ({
+  // main.tsx 的 initializeWindowActivity（上游）会探测宿主环境；测试里恒为非 Tauri。
+  isTauri: () => false,
   invoke: async (command: string, payload: Record<string, unknown> = {}) => {
     const response = await fetch(`${TAURI_ENDPOINT}/${command}`, {
       method: "POST",
