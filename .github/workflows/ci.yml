@@ -249,7 +249,44 @@ jobs:
           if ($testList -notcontains $expected) {
             throw "Expected ignored test was not discovered: $testName"
           }
-          cargo test --lib --manifest-path src-tauri/Cargo.toml $testName -- --ignored --exact --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+          # 已知偶发（PR #130 前后两次踩实）：link.exe/mt.exe 在 \\wsl.localhost UNC
+          # 临时路径上随机失败（LNK1327 / c1010070），重试换一个 lnk{GUID}.tmp 即绿。
+          # 不重试的后果是 automerge 永远等不到绿，纯搁置人。
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            if ($attempt -gt 1) {
+              Write-Host "::warning::UNC contract attempt $attempt/$maxAttempts (retrying after known mt.exe flake)"
+              Start-Sleep -Seconds 10
+            }
+            cargo test --lib --manifest-path src-tauri/Cargo.toml $testName -- --ignored --exact --nocapture
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq $maxAttempts) { exit $LASTEXITCODE }
           }
+
+  # ⚠️ **分支保护的必需检查只认这一个 job**（名字见 name:），别再改成四个矩阵名。
+  #
+  # 为什么必须有个门卫 job：`changes` 过滤会让无关 job 走 skipped，而 skipped 的
+  # 矩阵 job 上报的名字与运行时不同（`Backend Checks` vs `Backend Checks (ubuntu-22.04)`）
+  # ⇒ 必需检查永远等不齐 ⇒ automerge 死锁（PR #130 踩过，只能 --admin 解锁）。
+  # GitHub 官方建议也是「必需检查不要被跳过」—— 门卫 always 跑、把 skipped 当作
+  # 「过滤说不相关」放行，failure/cancelled 仍然拦下。
+  required-checks:
+    name: Required Checks
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [frontend, backend, backend-windows-wsl2]
+    steps:
+      - name: Gate on upstream results
+        shell: bash
+        run: |
+          failed=0
+          for result in $(printf '%s\n' ${{ join(needs.*.result, ' ') }}); do
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "::error::upstream job ended as '$result' (failure/cancelled are hard failures; skipped means the path filter deemed it irrelevant)"
+                failed=1
+                ;;
+            esac
+          done
+          exit $failed
