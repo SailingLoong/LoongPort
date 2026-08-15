@@ -55,6 +55,38 @@
     {
       "site_origin": "https://relaybases.com",
       "display_name": "RelayBases"
+    },
+    {
+      "site_origin": "https://api.ooapi.cc",
+      "display_name": "玩转AI"
+    },
+    {
+      "site_origin": "https://cc-vibe.com",
+      "display_name": "CCVibe"
+    },
+    {
+      "site_origin": "https://codex666ai.com",
+      "display_name": "codex666ai"
+    },
+    {
+      "site_origin": "https://fluxlane.cn",
+      "display_name": "智流（FluxLane）"
+    },
+    {
+      "site_origin": "https://jizhiapi.site",
+      "display_name": "极智API"
+    },
+    {
+      "site_origin": "https://sub.kedaya.xyz",
+      "display_name": "Kedaya 中转站"
+    },
+    {
+      "site_origin": "https://api.codepup.cn",
+      "display_name": "代码狗"
+    },
+    {
+      "site_origin": "https://nexaxis.ai",
+      "display_name": "NEXAXIS"
     }
   ],
   "aff_codes": {
@@ -73,7 +105,16 @@
     "code28.ccwu.cc": "SSXa",
     "x-llm.net": "jm9p",
     "ssnaiyun.com": "ZBvxPUGY",
-    "relaybases.com": "C2a0"
+    "relaybases.com": "C2a0",
+    "api.ooapi.cc": "RQGYTDTQ7S9E",
+    "cc-vibe.com": "EW7UMATLD67S",
+    "codex666ai.com": "GCB7PPCGWHFG",
+    "fluxlane.cn": "QADYWCTSJ3GS",
+    "jizhiapi.site": "6ABFYJGCNLHR",
+    "sub.kedaya.xyz": "GCQD22VH47VN",
+    "api.codepup.cn": "6sbG",
+    "nexaxis.ai": "N7oc",
+    "ai.codepup.cn": "6sbG"
   },
   "relay_directory": {
     "blocked_hosts": [],
@@ -106,11 +147,6 @@
         "entry_url": "https://cc-vibe.com",
         "display_name": "CCVibe"
       },
-      "codereel.pro": {
-        "veridrop_host": "codereel.pro",
-        "entry_url": "https://codereel.pro",
-        "display_name": "CodeReel"
-      },
       "codex666ai.com": {
         "veridrop_host": "codex666ai.com",
         "entry_url": "https://codex666ai.com",
@@ -126,20 +162,10 @@
         "entry_url": "https://jizhiapi.site",
         "display_name": "极智API"
       },
-      "sub2.congmingai.com": {
-        "veridrop_host": "sub2.congmingai.com",
-        "entry_url": "https://sub2.congmingai.com",
-        "display_name": "聪明AI"
-      },
       "sub.kedaya.xyz": {
         "veridrop_host": "sub.kedaya.xyz",
         "entry_url": "https://sub.kedaya.xyz",
         "display_name": "Kedaya 中转站"
-      },
-      "uuapi.net": {
-        "veridrop_host": "uuapi.net",
-        "entry_url": "https://uuapi.net",
-        "display_name": "UU API"
       },
       "api.codepup.cn": {
         "veridrop_host": "api.codepup.cn",
