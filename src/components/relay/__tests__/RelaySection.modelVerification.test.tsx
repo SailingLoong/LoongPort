@@ -174,7 +174,7 @@ import { RelaySection } from "../RelaySection";
  */
 function renderSection(
   appId: "codex" | "claude" | "codex-image" | "gemini",
-  callbacks: { onOpenOfficialApi?: ReturnType<typeof vi.fn> } = {},
+  callbacks: { onOpenOfficialApi?: () => void } = {},
 ) {
   const queryClient = createTestQueryClient();
   return render(
@@ -182,7 +182,7 @@ function renderSection(
       <RelaySection
         appId={appId}
         onOpenDirectory={vi.fn()}
-        onOpenOfficialApi={callbacks.onOpenOfficialApi ?? vi.fn()}
+        onOpenOfficialApi={callbacks.onOpenOfficialApi ?? (() => undefined)}
       />
     </QueryClientProvider>,
   );
