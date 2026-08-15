@@ -237,7 +237,7 @@ impl Database {
     /// 算某个中转站的扣费对账报告。
     ///
     /// `provider_keys` 是该站名下全部托管档位的 `(provider_id, app_type)` ——
-    /// 归属判据在命令层（`commands::relay::belongs_to_account`，与 `relay_balance_inputs`
+    /// 归属判据在命令层（`commands::relay::belongs_to_relay`，与 `relay_balance_inputs`
     /// 同一来源），本方法只管按这些 key 聚合 `proxy_request_logs` 的成本。
     pub fn reconciliation_report(
         &self,

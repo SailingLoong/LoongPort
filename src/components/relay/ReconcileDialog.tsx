@@ -151,9 +151,11 @@ export function ReconcileDialog({
               填 0 或 "--" 都是在替后端猜事实。 */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm">
             <span className="text-muted-foreground">
-              {t("loongport.reconcile.snapshotCount", {
-                count: report?.snapshotCount ?? 0,
-              })}
+              {report
+                ? t("loongport.reconcile.snapshotCount", {
+                    count: report.snapshotCount,
+                  })
+                : ""}
             </span>
             <span className="flex items-center gap-1.5 text-muted-foreground">
               {t("loongport.reconcile.baselineRatioLabel")}
@@ -189,8 +191,7 @@ export function ReconcileDialog({
           ) : error ? (
             <div className="flex flex-col items-center gap-2 py-6 text-sm text-red-500">
               <span>
-                {t("loongport.reconcile.loadFailed")}
-                {error ? `：${error}` : ""}
+                {t("loongport.reconcile.loadFailed")}：{error}
               </span>
               <Button
                 type="button"
