@@ -3058,13 +3058,14 @@ fn persist_provision_batch(
 
         let base_url = api::base_url_for(app_type, &op.site_origin, &candidate.api_base_url);
         let defaults = if matches!(app_type, AppType::Claude) {
-            provision::settings_config_with_roles(
+            provision::settings_config_with_roles_and_models(
                 app_type,
                 &candidate.api_key,
                 &display_name,
                 &base_url,
                 &candidate.model,
                 candidate.roles.clone(),
+                candidate.models.as_deref(),
             )
         } else if matches!(app_type, AppType::Codex) {
             provision::settings_config_with_models(
@@ -3073,6 +3074,17 @@ fn persist_provision_batch(
                 &display_name,
                 &base_url,
                 &candidate.model,
+                candidate.models.as_deref(),
+            )
+        } else if matches!(app_type, AppType::Gemini) {
+            // gemini 同样落模型目录（只收 gemini-* 家族，见生成侧注释）
+            provision::settings_config_with_roles_and_models(
+                app_type,
+                &candidate.api_key,
+                &display_name,
+                &base_url,
+                &candidate.model,
+                None,
                 candidate.models.as_deref(),
             )
         } else {
@@ -3118,10 +3130,8 @@ fn persist_provision_batch(
                         log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
                         defaults
                     }
-                } else if matches!(app_type, AppType::Codex) {
-                    preserve_supported_codex_model(defaults, &old.settings_config)
                 } else {
-                    defaults
+                    preserve_supported_model(app_type, defaults, &old.settings_config)
                 }
             }
             None => defaults,
@@ -3223,12 +3233,9 @@ fn persist_provision_batch(
             app_id: app_type.as_str().to_string(),
             group_name: candidate.group_name,
             display_name,
-            model: provision::extract_model(&provider.settings_config).unwrap_or_default(),
-            models: if matches!(app_type, AppType::Codex) {
-                codex_models_from_settings(&provider.settings_config)
-            } else {
-                Vec::new()
-            },
+            model: provision::selected_model(app_type, &provider.settings_config)
+                .unwrap_or_default(),
+            models: models_from_settings(&provider.settings_config),
             rate_multiplier,
             can_verify_models: verification_target::supports_app_type(app_type),
             user_edited: Some(user_edited),
@@ -3811,7 +3818,7 @@ fn reset_tier_config_in_state(
     // 默认模型，并保留目录本身。否则这个动作会把刚外露的模型列表清空，还可能把
     // 不支持 `DEFAULT_MODEL` 的分组重置成一条选中即 404 的配置。
     let codex_models = if matches!(app_type, AppType::Codex) {
-        codex_models_from_settings(&existing.settings_config)
+        models_from_settings(&existing.settings_config)
     } else {
         Vec::new()
     };
@@ -3999,7 +4006,7 @@ fn tiers_of_site(
 /// [`list_relays_impl`] 按站分组。命令层把它丢掉 —— 那是实现细节，不进对外契约。
 ///
 /// `pub(crate)`：托盘的「模型」子菜单也从这里取目录（同一份 `modelCatalog` 两个消费者）。
-pub(crate) fn codex_models_from_settings(settings: &serde_json::Value) -> Vec<String> {
+pub(crate) fn models_from_settings(settings: &serde_json::Value) -> Vec<String> {
     settings
         .get("modelCatalog")
         .and_then(|catalog| catalog.get("models"))
@@ -4026,13 +4033,31 @@ fn preserve_supported_codex_model(
     select_codex_model(&defaults, &model).unwrap_or(defaults)
 }
 
+/// [`preserve_supported_codex_model`] 的跨平台版：claude / gemini 走 env 形状
+/// （剥掉 `[1M]` 声明后对新目录查成员资格），其余平台没有「选模型」概念，
+/// 新默认直接接管。
+fn preserve_supported_model(
+    app_type: &AppType,
+    defaults: serde_json::Value,
+    previous: &serde_json::Value,
+) -> serde_json::Value {
+    match app_type {
+        AppType::Codex => preserve_supported_codex_model(defaults, previous),
+        AppType::Claude | AppType::Gemini => {
+            let catalog = models_from_settings(&defaults);
+            provision::preserve_supported_env_model(app_type, defaults, previous, &catalog)
+        }
+        _ => defaults,
+    }
+}
+
 fn select_codex_model(
     settings: &serde_json::Value,
     model: &str,
 ) -> Result<serde_json::Value, AppError> {
     let model = model.trim();
     if model.is_empty()
-        || !codex_models_from_settings(settings)
+        || !models_from_settings(settings)
             .iter()
             .any(|candidate| candidate == model)
     {
@@ -4058,9 +4083,8 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
     // 这条路按 app 查，所以结果天然同质 —— 每条档位的 `app_id` 就是被查的那个。
     // 先取出来：`app_type` 下一行就被 move 进 `list` 了。
     let app_id = app_type.as_str().to_string();
-    let exposes_codex_models = matches!(app_type, AppType::Codex);
     let can_verify_models = verification_target::supports_app_type(&app_type);
-    let providers = ProviderService::list(state, app_type)?;
+    let providers = ProviderService::list(state, app_type.clone())?;
 
     let mut tiers: Vec<OwnedTier> = providers
         .values()
@@ -4083,12 +4107,9 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                     .unwrap_or(None),
                 group_name: p.name.clone(),
                 display_name: p.name.clone(),
-                model: provision::extract_model(&p.settings_config).unwrap_or_default(),
-                models: if exposes_codex_models {
-                    codex_models_from_settings(&p.settings_config)
-                } else {
-                    Vec::new()
-                },
+                model: provision::selected_model(&app_type, &p.settings_config).unwrap_or_default(),
+                // 目录没有就返回空 —— UI/托盘按「无目录」处理，不用按 app 分支
+                models: models_from_settings(&p.settings_config),
                 is_current: current == p.id,
                 can_verify_models,
                 // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
@@ -4242,14 +4263,16 @@ async fn select_tier_model_impl(
     model: &str,
     quit_chatgpt: bool,
 ) -> Result<SwitchTierResult, AppError> {
-    if !matches!(app_type, AppType::Codex) {
+    // 支持选模型的平台：codex（config TOML）/ claude（env.ANTHROPIC_MODEL）/
+    // gemini（env.GEMINI_MODEL）。目录（modelCatalog）三个平台同一份形状。
+    if !matches!(app_type, AppType::Codex | AppType::Claude | AppType::Gemini) {
         return Err(AppError::Config(
-            "模型选择目前只支持 Codex 档位".to_string(),
+            "模型选择目前只支持 Codex / Claude / Gemini 档位".to_string(),
         ));
     }
     if !crate::relay::is_managed(provider_id) {
         return Err(AppError::Config(
-            "只有 LoongPort 托管的 Codex 档位才能从模型列表切换".to_string(),
+            "只有 LoongPort 托管的档位才能从模型列表切换".to_string(),
         ));
     }
 
@@ -4257,9 +4280,25 @@ async fn select_tier_model_impl(
     let original_settings = state
         .db
         .get_provider_by_id(provider_id, app_type.as_str())?
-        .ok_or_else(|| AppError::Config("这个 Codex 档位不存在".to_string()))?
+        .ok_or_else(|| AppError::Config("这个档位不存在".to_string()))?
         .settings_config;
-    let settings = select_codex_model(&original_settings, model)?;
+    let settings = match &app_type {
+        AppType::Codex => select_codex_model(&original_settings, model)?,
+        // env 形状：成员资格对着目录校验（select_codex_model 内置，这里对齐）
+        _ => {
+            let bare = model.trim();
+            if bare.is_empty()
+                || !models_from_settings(&original_settings)
+                    .iter()
+                    .any(|candidate| candidate == bare)
+            {
+                return Err(AppError::Config(format!(
+                    "模型 {bare:?} 不在这个档位支持的模型列表中"
+                )));
+            }
+            provision::select_env_model(&app_type, &original_settings, bare)?
+        }
+    };
 
     state
         .db
@@ -5660,7 +5699,7 @@ mod tests {
         });
 
         assert!(
-            codex_models_from_settings(&settings).is_empty(),
+            models_from_settings(&settings).is_empty(),
             "旧 provider 只有当前模型时，不能把它冒充成完整支持列表"
         );
     }
