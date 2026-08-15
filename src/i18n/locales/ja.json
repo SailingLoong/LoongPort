@@ -3409,6 +3409,12 @@
         "cancelled": "検証を停止しました。",
         "invalidResponse": "プロバイダーの応答を検証できませんでした。しばらくしてから再試行するか、手動で確認してください。"
       }
+    },
+    "star": {
+      "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）",
+      "toastTitle": "LoongPort はいかがですか？",
+      "toastBody": "LoongPort は無料のオープンソースです。GitHub で ⭐ を付けて応援してください。",
+      "toastAction": "スターを付ける"
     }
   },
   "firstRunNotice": {

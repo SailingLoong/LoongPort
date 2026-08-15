@@ -3409,6 +3409,12 @@
         "cancelled": "验证已停止。",
         "invalidResponse": "服务商返回的响应无法验证。请稍后重试或人工复核。"
       }
+    },
+    "star": {
+      "buttonTitle": "GitHub 仓库（点个 ⭐ 支持一下）",
+      "toastTitle": "用得还顺手吗？",
+      "toastBody": "LoongPort 免费开源，去 GitHub 点个 ⭐ 支持一下吧。",
+      "toastAction": "去点星"
     }
   },
   "firstRunNotice": {

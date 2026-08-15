@@ -403,6 +403,10 @@ export interface Settings {
   statsNoticeConfirmed?: boolean;
   /** 首启「是否一键导入 cc-switch」问过没。`undefined` = 还没问过 ⇒ 第一次打开时弹一次。 */
   ccSwitchImportPrompted?: boolean;
+  /** 顶栏 GitHub 入口的小红点点过没。`undefined` = 还没点过 ⇒ 显示红点。 */
+  githubStarBadgeClicked?: boolean;
+  /** 「点个星支持」toast 出过没。`undefined` = 还没出过 ⇒ 首次注册成功后出一次。 */
+  githubStarToastShown?: boolean;
   /**
    * 统计**专属**的随机安装 id。
    *

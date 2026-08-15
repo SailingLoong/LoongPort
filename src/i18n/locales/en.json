@@ -3409,6 +3409,12 @@
         "cancelled": "Verification stopped.",
         "invalidResponse": "The provider's response could not be verified. Try again later or review it manually."
       }
+    },
+    "star": {
+      "buttonTitle": "GitHub repository (star it if you like it)",
+      "toastTitle": "Enjoying LoongPort?",
+      "toastBody": "LoongPort is free and open source. A ⭐ on GitHub helps a lot.",
+      "toastAction": "Star on GitHub"
     }
   },
   "firstRunNotice": {

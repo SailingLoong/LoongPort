@@ -428,6 +428,17 @@ pub struct AppSettings {
     /// 与 `stats_notice_confirmed` / `proxy_confirmed` / `usage_confirmed` 同一个惯例。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc_switch_import_prompted: Option<bool>,
+    /// 顶栏 GitHub 入口上的小红点被点过没有。
+    ///
+    /// `None` = 还没点过 ⇒ 前端显示红点。纯 UI 提示的一次性标志，
+    /// 与 `cc_switch_import_prompted` 同一个惯例。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_star_badge_clicked: Option<bool>,
+    /// 「去 GitHub 点个星」的 toast 出过没有。
+    ///
+    /// `None` = 还没出过 ⇒ 前端在首次注册成功后出一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_star_toast_shown: Option<bool>,
     /// Whether to show the failover toggle independently on the main page
     #[serde(default)]
     pub enable_failover_toggle: bool,
@@ -609,6 +620,8 @@ impl Default for AppSettings {
             stats_notice_confirmed: None,
             stats_install_id: None,
             cc_switch_import_prompted: None,
+            github_star_badge_clicked: None,
+            github_star_toast_shown: None,
             enable_failover_toggle: false,
             show_profile_switcher: true,
             // 见字段上的说明：这条保的是 ChatGPT 桌面版的登录凭据，LoongPort 必须默认开。
