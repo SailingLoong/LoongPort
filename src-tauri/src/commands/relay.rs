@@ -1816,6 +1816,11 @@ async fn browser_import(
             )
             .await?;
 
+            // 先卸掉窗口的续期能力再贴提示条：从这一刻起 refresh lineage 的唯一
+            // 持有者是本仓 DB（为什么必须卸见 `login::strip_refresh_keys_js`）。
+            if let Err(e) = window.eval(login::strip_refresh_keys_js()) {
+                log::warn!("卸掉登录窗续期能力失败（窗口可能已关）：{e}");
+            }
             let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
             let _ = window.eval(login::CONNECTED_BANNER_JS);
             log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
@@ -1834,9 +1839,24 @@ async fn browser_import(
             let (final_relay_id, account_id) =
                 persist_new_relay_newapi_session(&state, &browser_context.site, &session)?;
 
-            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
-            let _ = window.eval(login::CONNECTED_BANNER_JS);
-            log::info!("浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}）");
+            // ⚠️ **NewAPI 登录窗必须当场关掉**，与 sub2api「留着但卸掉续期能力」不同。
+            //
+            // NewAPI 的登录态是 HttpOnly refresh cookie（名字见 `relay::newapi`），JS 删不掉 ⇒
+            // 没法像 sub2api 那样卸掉窗口的续期能力。而它的一次性轮换比 sub2api
+            // 激进得多：access token 只有 15 分钟（new-api `auth_token.go` 的
+            // `AccessTokenTTL`），页面每 15 分钟就会拿 cookie 续期一次；更糟的是
+            // **登录流程本身已经用原生侧轮换过一轮**（`refresh_newapi_browser_session`
+            // → 轮换后的新 cookie 落进 DB）⇒ 窗口 cookie store 里那颗此刻就是废票，
+            // 页面下一次续期拿废票去换 ⇒ 服务端判 reuse ⇒ **整个会话族被撤销**，
+            // DB 里那份也跟着死。窗口多活 15 分钟就是一颗定时炸弹。
+            //
+            // 代价（明说）：用户少了一个「在登录窗里逛面板」的入口 —— 但面板余额
+            // 主界面就有、充值有专门的充值窗（`newapi_purchase` 会种 cookie），
+            // 登录窗的浏览价值撑不过它会造成的破坏。
+            let _ = window.destroy();
+            log::info!(
+                "浏览器辅助导入登录成功：{site_origin}（账号 id={account_id}，登录窗已随凭据交接关闭）"
+            );
             Ok(ImportResult::authenticated(
                 browser_context.site,
                 final_relay_id,
@@ -2172,7 +2192,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
             let (_final_relay_id, account_id) =
                 persist_login_credentials(app_handle, relay_id, c, account).await?;
 
-            // **不关窗**，把标题改成「已连接」并在页面上浮一条提示。
+            // **不关窗**，但先把窗口的续期能力卸掉，再把标题改成「已连接」并贴提示条。
             //
             // 为什么不关：用户拿到凭据的那一刻，页面往往刚跳到 dashboard（sub2api 登录成功后
             // `router.push(redirectTo)`，注册成功后 `push('/dashboard')`）—— 那上面有余额、
@@ -2181,7 +2201,14 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
             // 更糟的一种：用户之前登录过，`/login` 的路由守卫会把他直接重定向到 dashboard，
             // 而注入脚本的轮询会在几百毫秒内拿到已有 token —— 窗口开了就关，用户一眼都没看到。
             //
-            // 所以改成：凭据已到手、命令正常返回（前端接着去备密钥），窗口留给用户自己关。
+            // 为什么又必须先卸续期能力：留着窗 + 留着 `refresh_token`，站点页面到点的
+            // 自动续期会把一次性 refresh token 轮换进**这个 incognito 窗口的内存里**
+            // （关窗即失），本仓 DB 里那把当场作废 ⇒ 用户被迫重登。删除两个续期键后
+            // 窗口只剩只读登录态（判据与源码依据见 `login::strip_refresh_keys_js`），
+            // 浏览器代拉不受影响（它重放的是我们自己的请求头）。
+            if let Err(e) = window.eval(login::strip_refresh_keys_js()) {
+                log::warn!("卸掉登录窗续期能力失败（窗口可能已关）：{e}");
+            }
             let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
             let _ = window.eval(login::CONNECTED_BANNER_JS);
 
@@ -2193,10 +2220,13 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
             let (_final_relay_id, account_id) =
                 persist_newapi_login_session(&state, relay_id, &session)?;
 
-            let _ = window.set_title(&format!("已连接 {site_origin} — 可关闭此窗口"));
-            let _ = window.eval(login::CONNECTED_BANNER_JS);
+            // ⚠️ **NewAPI 登录窗必须当场关掉**（理由全文见 `browser_import` 里同型分支）：
+            // HttpOnly cookie 卸不掉续期能力、access token 只有 15 分钟、登录流程
+            // 本身已轮换过一轮 ⇒ 窗口里那颗 cookie 已是废票，页面下一次续期
+            // 会被服务端判 reuse、撤销整个会话族。
+            let _ = window.destroy();
 
-            log::info!("登录成功：{site_origin}（账号 id={account_id}）");
+            log::info!("登录成功：{site_origin}（账号 id={account_id}，登录窗已随凭据交接关闭）");
             Ok(LoginResult { logged_in: true })
         }
         Ok(BrowserLoginOutcome::Error(error)) => {
@@ -2261,9 +2291,11 @@ async fn resolve_login_account_identity(
 /// 构造浏览器代拉钩子：被防护层拦下的请求由登录窗在页面上下文里原样重放。
 ///
 /// [`api::Client::send`] 撞上「403 + 正文非 JSON」时调用（见那边的说明），把**同一份
-/// 请求**递进来。这里取当前登录窗（`loongport-login`，登录成功后**故意不关**）、把请求
-/// 注入页面 fetch，经 `loongport-creds://api-<id>` 回传（[`browser_bridge`] 按 id 认领）。
-/// 窗口不在（用户已关）时返回可读错误 —— 这类站只能靠真实浏览器过防护。
+/// 请求**递进来。这里取当前登录窗（`loongport-login`；sub2api 登录成功后**留着**、
+/// 但已卸掉续期能力）、把请求注入页面 fetch，经 `loongport-creds://api-<id>` 回传
+/// （[`browser_bridge`] 按 id 认领）。窗口不在（用户关了，或 NewAPI 登录窗在凭据
+/// 交接时已自动关闭——它的 HttpOnly cookie 卸不掉续期能力，留着必炸 lineage）时
+/// 返回可读错误 —— 这类站只能靠真实浏览器过防护。
 fn browser_api_fallback(app_handle: &tauri::AppHandle) -> api::BrowserApiFallback {
     let handle = app_handle.clone();
     Arc::new(move |request: reqwest::Request| {

@@ -3,7 +3,9 @@
 //! 站点启用 Cloudflare 这类**指纹级**防护（非浏览器 HTTP 栈一律 403 HTML；加头、
 //! 加 cookie、换 HTTP 版本都过不了，`remote-config/README.md` 里那台 `api.aijws.com`
 //! 就是实例）时，唯一能过防护的通道是真实浏览器 —— 而登录窗本身就是真实浏览器，
-//! 且登录成功后**故意不关**（页面刚跳到 dashboard，用户还要看余额、充值）。
+//! 且 sub2api 登录成功后**故意不关**（页面刚跳到 dashboard，用户还要看余额、充值；
+//! 续期能力已卸掉，见 [`super::login::strip_refresh_keys_js`]）。
+//! NewAPI 登录窗在凭据交接时即关闭，对它的代拉走不通、返回可读错误。
 //!
 //! 本模块就是那条通道：[`super::api::Client`] 撞上防护层时，把**同一份请求**（method +
 //! URL + 头 + body）原样搬进登录窗页面上下文里 fetch，响应经自定义 scheme

@@ -18,6 +18,17 @@
 //! 不同，URL 长度上限也另有其数。若拦不住或装不下，回退方案就是 V1 那套分片协议
 //! （`LoongPort/src-tauri/src/relay/{title_channel.rs,login_script.js}`）。
 //!
+//! ## 凭据到手之后：窗口不得再持有续期能力
+//!
+//! 中转站的登录凭据是**一次性轮换**的 refresh lineage，只能有一个持有者 —— 本仓 DB。
+//! 登录窗在回传凭据的那一刻起就必须把续期能力交出去，否则窗口里站点的自动续期
+//! 会把 DB 里那把作废（详见 [`strip_refresh_keys_js`]）：
+//!
+//! - **sub2api**：eval [`strip_refresh_keys_js`] 删掉两个续期键。窗口继续活着
+//!   （用户看面板、浏览器代拉走它的页面上下文），但只剩「只读」的登录态。
+//! - **NewAPI**：登录 cookie 是 HttpOnly，JS 删不掉 ⇒ 没有卸能力的手段，只能
+//!   凭据到手即 `destroy()`（见 `commands::relay` 两条登录路径的说明）。
+//!
 //! ## 落哪个页面：新站 `/register`，重登 `/login`
 //!
 //! 判据是这一行有没有 `login_identifier`（成功登录过才有）。见 [`login_url`]。
@@ -68,16 +79,20 @@ pub const AUTH_USER_KEY: &str = "auth_user";
 
 /// refresh token 的键名。
 ///
-/// ⚠️ **只有登录窗读它，充值窗有意不写** —— sub2api 的 refresh token 是**一次性轮换**的：
-/// 站点用掉之后本仓 DB 里那份立刻失效，下次本仓自己续期会被判成疑似重放
-/// （`REFRESH_TOKEN_REUSED`）⇒ 用户被迫重新登录。见 [`crate::relay::purchase`]
-/// 的模块文档。
+/// ⚠️ **登录窗读完要删、充值窗有意不写** —— 两边是同一条不变式的两个方向：
+/// refresh lineage 的唯一持有者是本仓 DB，任何窗口都不该持有能触发轮换的副本。
+///
+/// - sub2api 的 refresh token 是**一次性轮换**的：站点用掉之后本仓 DB 里那份
+///   立刻失效，下次本仓自己续期时服务端认不出它、返回
+///   `REFRESH_TOKEN_INVALID` ⇒ **用户被迫重新登录整个中转站**。见
+///   [`strip_refresh_keys_js`] 与 [`crate::relay::purchase`] 的模块文档。
+/// - 充值窗不写它的理由同上（写进去站点一定用掉）。
 pub const REFRESH_TOKEN_KEY: &str = "refresh_token";
 
 /// 过期时间的键名。**站点存的是毫秒时间戳字符串**（见 [`decode_creds`] 归一成秒）。
 ///
-/// ⚠️ 与 [`REFRESH_TOKEN_KEY`] 同理，充值窗有意不写它 —— 写了会让站点起一个续期
-/// 定时器，那正是上面那条要避开的东西。
+/// ⚠️ 与 [`REFRESH_TOKEN_KEY`] 同理：充值窗有意不写、登录窗读完即删（它是站点
+/// 起续期定时器的依据，删掉等于连定时器都不再排）。见 [`strip_refresh_keys_js`]。
 pub const TOKEN_EXPIRES_AT_KEY: &str = "token_expires_at";
 
 /// 从登录页取回的凭据。
@@ -137,6 +152,47 @@ pub const CONNECTED_BANNER_JS: &str = r#"(function () {
   (document.body || document.documentElement).appendChild(bar);
 })();
 "#;
+
+/// 生成「卸掉登录窗续期能力」的脚本：删掉 localStorage 里的 `refresh_token` 与
+/// `token_expires_at` 两个键。
+///
+/// ## 为什么必须删（登录窗是 refresh lineage 的第二个持有者）
+///
+/// 登录成功那一刻，同一把 sub2api refresh token 同时存在于两处：本仓 DB（原生侧
+/// `usable_relay` 靠它续期）和这个窗口的 localStorage。它是**一次性轮换**的 ——
+/// 站点前端到点（access token 过期前 2 分钟）会起定时器用它换新对，而换出的新
+/// refresh token 只写进窗口的 localStorage，关窗即失 ⇒ DB 里那把当场作废 ⇒
+/// 用户被迫重登整个中转站。窗口开得越久（或站点把 access TTL 配得越短），死得越快。
+///
+/// 删掉这两个键后，窗口**没有任何路径能再触发轮换**（有上游源码依据，两条路都读
+/// localStorage，不是内存缓存）：
+///
+/// - 主动定时器：`performTokenRefresh` → `refreshAuthTokens` → `readAuthSnapshot`
+///   （`tokenRefresh.ts:52`）`getItem('refresh_token')` 为 null 直接 throw，被
+///   `performTokenRefresh` 的 catch 吞掉、明确不清登录态；
+/// - 401 拦截器：`client.ts:166` 同样 `getItem`，拿不到就不续期。
+///
+/// 这是充值窗「只注入两个键」决定的镜像（那边是不写、这边是删掉）—— 两边共同的
+/// 不变式：**窗口永远不持有续期能力，refresh lineage 的唯一持有者是本仓 DB**。
+///
+/// 浏览器代拉不受影响：代拉 fetch 重放的是我们自己的头（Bearer 来自 DB），不经过
+/// 站点自己的 axios 拦截器。代价与充值窗同款：窗口里的页面在 access token 过期后
+/// 会被 401 拦截器清掉登录态、硬跳 `/login` —— 对一个登录窗来说页面寿命到那时
+/// 早已用完，可接受。
+///
+/// 用 `format!` 而不是整段字面量：键名必须复用 [`REFRESH_TOKEN_KEY`] /
+/// [`TOKEN_EXPIRES_AT_KEY`] 常量 —— 站点改键名时这里跟着走，不会出现
+/// 「充值窗改了、登录窗没改」的静默分叉。
+pub fn strip_refresh_keys_js() -> String {
+    format!(
+        r#"(function () {{
+  try {{
+    localStorage.removeItem({REFRESH_TOKEN_KEY:?});
+    localStorage.removeItem({TOKEN_EXPIRES_AT_KEY:?});
+  }} catch (e) {{ /* 私有模式等极端情况下的 localStorage 异常不值得惊动任何人 */ }}
+}})();"#
+    )
+}
 
 /// 生成注入脚本。
 ///
@@ -822,6 +878,24 @@ mod tests {
             tauri::webview::Cookie::new("other", "o"),
         ];
         assert_eq!(extract_cf_clearance(&others), None);
+    }
+
+    /// 卸续期能力的脚本必须真的引用那两个键常量 —— 它靠 `format!` 接线，
+    /// 哪天有人把插值改回字面量或删掉一个键，这个闸会让它当场红。
+    #[test]
+    fn strip_refresh_keys_js_targets_both_rotation_keys() {
+        let script = strip_refresh_keys_js();
+        assert!(
+            script.contains(&format!("removeItem(\"{REFRESH_TOKEN_KEY}\")")),
+            "缺少对 {REFRESH_TOKEN_KEY} 的删除：{script}"
+        );
+        assert!(
+            script.contains(&format!("removeItem(\"{TOKEN_EXPIRES_AT_KEY}\")")),
+            "缺少对 {TOKEN_EXPIRES_AT_KEY} 的删除：{script}"
+        );
+        // 不能误删登录态本体：页面在 access token 有效期内还得是已登录视图。
+        assert!(!script.contains(AUTH_TOKEN_KEY));
+        assert!(!script.contains(AUTH_USER_KEY));
     }
 
     use super::*;
