@@ -11,6 +11,9 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // CI 2 核机器上交互重的 jsdom 用例（userEvent 连续操作）比本地慢 3-5 倍，
+    // 默认 5s 会成片超时（PiProviderForm 等），放宽到 15s。
+    testTimeout: 15_000,
     setupFiles: ["./tests/setupGlobals.ts", "./tests/setupTests.ts"],
     globals: true,
     // ⚠️ **必须限定到这两处，不能用默认的全仓扫**。
