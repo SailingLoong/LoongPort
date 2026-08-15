@@ -3390,9 +3390,24 @@
     },
     "star": {
       "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）",
-      "toastTitle": "LoongPort はいかがですか？",
-      "toastBody": "LoongPort は無料のオープンソースです。GitHub で ⭐ を付けて応援してください。",
-      "toastAction": "スターを付ける"
+      "dotTitle": "新規特典が未受け取り —— GitHub でスターを付けると受け取れます",
+      "dialogTitle": "スターを付けて ${{amount}} の登録ボーナスをもらう",
+      "dialogBody": "GitHub で LoongPort にスターを付けると、BestAPI の登録ボーナス（登録時に ${{amount}} 分のクレジット）がもらえます。まずローカルの GitHub CLI（gh）で代わりにスターを試みます。未インストールや未ログインの場合はリポジトリページを開きます。",
+      "confirm": "スターを付けて受け取る",
+      "cancel": "キャンセル",
+      "waitTitle": "スターをお待ちしています ⭐",
+      "waitBody": "リポジトリページがブラウザで開きました。スターを付けたら戻ってきて、下のボタンを押してください。",
+      "waitAction": "スターを付けました",
+      "reopenRepo": "リポジトリページをもう一度開く",
+      "checking": "確認中…",
+      "grantedTitle": "ボーナス獲得 🎉",
+      "grantedViaGh": "GitHub CLI でスターを付けました。ボーナスはまもなく届きます。",
+      "grantedDetected": "スターを確認できました。ボーナスはまもなく届きます。",
+      "grantedUnverified": "スターを確認できませんでした（ネットワークの揺れの可能性があります）が、ボーナスはそのまま進呈します。",
+      "codeLabel": "プロモコード",
+      "copy": "コピー",
+      "copied": "コピーしました",
+      "registerNote": "BestAPI の登録ウィンドウが開き、プロモコードは自動入力されます。"
     }
   },
   "firstRunNotice": {

@@ -31,7 +31,7 @@ import {
   ONBOARDING_REGISTER_COMPLETED,
 } from "@/lib/api/events";
 import {
-  promptOnboardingRegister,
+  promptOnboardingStarReward,
   type OnboardingRegisterCompleted,
 } from "@/lib/onboarding";
 import { vendorApi, type VendorAccountRow } from "@/lib/api/vendor";
@@ -291,13 +291,12 @@ export function RelaySection({
         return;
       }
       autoPromptedThisProcess = true;
-      // 首启先走新人引导（官方站注册窗，策略见 src/lib/onboarding.ts 与后端
-      // relay::onboarding）：引导触发了就不再叠「添加站点」目录提示 —— 一次只劝
-      // 一遍。没触发（已弹过 / 不是新用户 / 后端暂时不可用）才回落到既有提示。
-      const onboardingLaunched = await promptOnboardingRegister();
-      if (!onboardingLaunched) {
-        onOpenDirectory("firstRun");
-      }
+      // 首启先问后端要不要给这个新用户弹「点 Star 领注册礼」（三道闸在后端：
+      // 资格 + 远端配置 + 基线星数，弹不弹那边说了算，事件直达 App 的弹窗）。
+      // 无论弹不弹，新人都落到中转站广场 —— 注册窗不再自动弹，它是 star
+      // 走通之后的终点，不是起点。
+      void promptOnboardingStarReward();
+      onOpenDirectory("firstRun");
     } catch {
       // 状态读不到时不猜业务事实；保留最后一次完整后端视图。
     }

@@ -3391,9 +3391,24 @@
     },
     "star": {
       "buttonTitle": "GitHub 儲存庫（點個 ⭐ 支持一下）",
-      "toastTitle": "用得還順手嗎？",
-      "toastBody": "LoongPort 免費開源，去 GitHub 點個 ⭐ 支持一下吧。",
-      "toastAction": "去點星"
+      "dotTitle": "新人禮還沒領 —— 點 GitHub Star 領註冊禮",
+      "dialogTitle": "點個 Star，領 ${{amount}} 註冊禮",
+      "dialogBody": "去 GitHub 給 LoongPort 點亮 Star，就送 BestAPI 註冊禮：註冊即享 ${{amount}} 額度。會先嘗試用本機 GitHub CLI（gh）代你點星；未安裝或未登入時自動開啟倉庫頁面。",
+      "confirm": "點 Star 領禮",
+      "cancel": "取消",
+      "waitTitle": "等你的 Star ⭐",
+      "waitBody": "倉庫頁面已在瀏覽器開啟。點亮 Star 後回到這裡點下方按鈕，註冊禮馬上到手。",
+      "waitAction": "我已點星",
+      "reopenRepo": "再開啟一次倉庫頁",
+      "checking": "正在確認…",
+      "grantedTitle": "註冊禮到手 🎉",
+      "grantedViaGh": "已透過 GitHub CLI 為你點亮 Star，註冊禮馬上送到。",
+      "grantedDetected": "已偵測到你的 Star，註冊禮馬上送到。",
+      "grantedUnverified": "沒能確認 Star（可能是網路波動），註冊禮照樣發放。",
+      "codeLabel": "優惠碼",
+      "copy": "複製",
+      "copied": "已複製",
+      "registerNote": "BestAPI 註冊視窗已開啟，優惠碼會自動填好。"
     }
   },
   "firstRunNotice": {

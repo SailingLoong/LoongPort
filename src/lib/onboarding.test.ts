@@ -6,29 +6,27 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
-describe("promptOnboardingRegister", () => {
+describe("promptOnboardingStarReward", () => {
   beforeEach(() => {
     // 单例是模块级状态：每个用例重置模块注册表，拿一份干净实例。
     vi.resetModules();
     invokeMock.mockReset();
   });
 
-  it("一次进程内多次调用收敛成一次 invoke（App 挂载与首启判定都会碰它）", async () => {
-    invokeMock.mockResolvedValue(true);
-    const { promptOnboardingRegister } = await import("./onboarding");
-    const [a, b] = await Promise.all([
-      promptOnboardingRegister(),
-      promptOnboardingRegister(),
+  it("一次进程内多次调用收敛成一次 invoke（多处首启判定都会碰它）", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const { promptOnboardingStarReward } = await import("./onboarding");
+    await Promise.all([
+      promptOnboardingStarReward(),
+      promptOnboardingStarReward(),
     ]);
-    expect(a).toBe(true);
-    expect(b).toBe(true);
     expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(invokeMock).toHaveBeenCalledWith("onboarding_prompt_register");
+    expect(invokeMock).toHaveBeenCalledWith("onboarding_prompt_star_reward");
   });
 
-  it("invoke 失败时静默降级为 false（回落到既有的首启目录提示）", async () => {
+  it("invoke 失败时静默降级（不抛错 —— 引导是加分项，别打扰新用户）", async () => {
     invokeMock.mockRejectedValue(new Error("backend unavailable"));
-    const { promptOnboardingRegister } = await import("./onboarding");
-    await expect(promptOnboardingRegister()).resolves.toBe(false);
+    const { promptOnboardingStarReward } = await import("./onboarding");
+    await expect(promptOnboardingStarReward()).resolves.toBeUndefined();
   });
 });

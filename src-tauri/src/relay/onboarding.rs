@@ -1,5 +1,5 @@
-//! 新人引导（onboarding）：新用户首次打开 LoongPort 时，自动打开官方站
-//! （BestAPI）的注册页，让「注册即用」这条路径一步到位。
+//! 新人引导（onboarding）：新用户首次打开 LoongPort 时，唯一的主动触点是
+//! 「点 Star 领注册礼」弹窗；官方站（BestAPI）的注册窗是 star 走通之后的终点。
 //!
 //! ## 这个模块的边界（为什么单独收拢）
 //!
@@ -11,15 +11,17 @@
 //! 具体分工：
 //! - 本模块：官方站 origin、注册窗完成事件名、新人礼包横幅脚本；
 //! - [`crate::commands::onboarding`]：判据（一次性标志 + 还没有任何账号）、
-//!   打开窗口的调度；
+//!   star 邀请事件的发射与注册窗的调度；
+//! - [`crate::commands::star_reward`]：星数取数、gh 代点、邀请 payload；
 //! - [`crate::commands::relay`]：`BrowserEntrySource::Onboarding` 入口把本模块的
 //!   横幅脚本接进既有的 `browser_import` 窗口。
 //!
 //! ## 优惠码不在这里
 //!
-//! 注册页的优惠码预填（`LOONGPORT`）由既有的 `promo` 链路负责：
-//! `browser_import` 对任何站点都会解析优惠码并注入
-//! [`login`] 的预填脚本，本模块不复制那份码表。
+//! 注册窗的优惠码预填由既有的 `promo` 链路负责：`browser_import` 对任何站点
+//! 都会解析优惠码并注入 [`login`] 的预填脚本，本模块不复制那份码表。star
+//! 领礼的奖励码是另一份数据（远端配置 `star_reward`，显式传参进导入链），
+//! 也不经过这里。
 
 /// 新人引导自动打开的官方站。BestAPI 是维护者自己的站，是「注册即用 +
 /// 新人大礼包」承诺的承载方；与优惠码表（`promo::PROMO_CODES`）里键的

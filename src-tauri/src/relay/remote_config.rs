@@ -224,6 +224,26 @@ pub struct RelayDirectoryPolicy {
     pub sites: std::collections::BTreeMap<String, RelayDirectorySite>,
 }
 
+/// 「点 Star 领注册礼」的奖励配置（码 + 展示额度）。
+///
+/// ## 整块缺席 = 活动下线
+///
+/// 码表 [`RemoteConfig::promo_codes`] 是给**所有**导入无条件预填的，而这个码要
+/// gate 在「点了 Star」后面 —— 所以它单独一块，不进那张表。下线手段就是把整块
+/// 从线上配置里删掉（或把 `promo_code` 置空，客户端按同一语义处理）：弹窗不再
+/// 出现，红点熄灭，一切回到「直接开仓库」的现状。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct StarRewardConfig {
+    /// 注册窗预填的优惠码（BestAPI 服务端负责解释它值多少额度）。
+    /// 空串与整块缺席同义 —— 与 [`resolve_code`] 的「空值 = 撤销」语义一致。
+    pub promo_code: String,
+    /// 弹窗文案里展示的额度（美元）。
+    ///
+    /// **唯一数据源**：界面上每一个「$N」都从这份配置来，前端不另存数值 ——
+    /// 配置改了文案跟着改，不会出现页面还挂着旧额度的欺骗感。
+    pub amount_usd: u64,
+}
+
 /// 远端配置的全文。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct RemoteConfig {
@@ -270,6 +290,11 @@ pub struct RemoteConfig {
     /// 中转站广场兼容策略。评分与排名不在这里，始终由 VeriDrop 提供。
     #[serde(default)]
     pub relay_directory: RelayDirectoryPolicy,
+    /// 「点 Star 领注册礼」的奖励配置。`None`（旧线上配置）= 活动不存在，
+    /// 见 [`StarRewardConfig`] 的文档。`#[serde(default)]` 的双向兼容理由同
+    /// [`RemoteConfig::promo_codes`] 上的注释。
+    #[serde(default)]
+    pub star_reward: Option<StarRewardConfig>,
 }
 
 /// 端点与公钥都配好了没。任一没配就整条链路 no-op（走缓存/内置）。
@@ -950,6 +975,7 @@ mod tests {
             promo_codes: std::collections::BTreeMap::new(),
             tier_configs: std::collections::BTreeMap::new(),
             relay_directory: RelayDirectoryPolicy::default(),
+            star_reward: None,
         }
     }
 
@@ -964,6 +990,7 @@ mod tests {
             promo_codes,
             tier_configs: std::collections::BTreeMap::new(),
             relay_directory: RelayDirectoryPolicy::default(),
+            star_reward: None,
         }
     }
 
@@ -1565,6 +1592,21 @@ mod tests {
             "X1234567890A",
             "其余字段照常"
         );
+    }
+
+    /// star_reward：有块就解出，缺块是 `None`（活动下线），空码由调用方按
+    /// 同一语义过滤（见 `commands::star_reward::effective_star_reward`）。
+    #[test]
+    fn star_reward_block_parses_and_absence_is_none() {
+        let with = br#"{"star_reward": {"promo_code": "LOONGPORT5", "amount_usd": 5}}"#;
+        let cfg: RemoteConfig = serde_json::from_slice(with).expect("有块要能解");
+        let reward = cfg.star_reward.expect("块在就是 Some");
+        assert_eq!(reward.promo_code, "LOONGPORT5");
+        assert_eq!(reward.amount_usd, 5);
+
+        let without: RemoteConfig =
+            serde_json::from_slice(br#"{"sponsors": []}"#).expect("缺块要能解");
+        assert!(without.star_reward.is_none(), "缺块 ⇒ None ⇒ 活动下线");
     }
 
     /// ⭐ **两个方向的命名有意不同，别「统一」它们** —— 统一哪边都会坏。

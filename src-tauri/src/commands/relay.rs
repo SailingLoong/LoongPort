@@ -1165,7 +1165,7 @@ pub async fn relay_import_site(
     app_handle: tauri::AppHandle,
     site: String,
 ) -> Result<ImportResult, RelayImportError> {
-    import_site(&app_handle, &site, BrowserEntrySource::Manual).await
+    import_site(&app_handle, &site, BrowserEntrySource::Manual, None).await
 }
 
 /// 从已验签的中转站目录导入。
@@ -1187,15 +1187,19 @@ pub async fn relay_import_directory_site(
         kind: Some(RelayImportErrorKind::UnsupportedSite),
         message: "该站点需要手动添加".into(),
     })?;
-    import_site(&app_handle, &site, source).await
+    import_site(&app_handle, &site, source, None).await
 }
 
 // `pub(crate)`：新人引导（`commands::onboarding`）走同一条导入链路，只是入口
 // 标记不同（见 `BrowserEntrySource::Onboarding`）。
+//
+// `promo_override`：这一窗**必给**的优惠码（star 领礼的奖励码，绕过码表 ——
+// 码表是所有导入无条件预填的，奖励码要 gate 在 star 后面）。常规导入传 `None`。
 pub(crate) async fn import_site(
     app_handle: &tauri::AppHandle,
     input: &str,
     entry_source: BrowserEntrySource,
+    promo_override: Option<&str>,
 ) -> Result<ImportResult, RelayImportError> {
     let input = if input.trim().is_empty() {
         DEFAULT_SITE
@@ -1225,6 +1229,7 @@ pub(crate) async fn import_site(
         site_origin,
         initial_detected,
         entry_source,
+        promo_override,
     )
     .await
 }
@@ -1425,11 +1430,21 @@ async fn refresh_newapi_browser_session(
     newapi::refresh_session(site_origin, refresh_cookie, None).await
 }
 
-fn resolve_login_codes(site_origin: &str) -> (Option<String>, Option<String>) {
+/// 解析这一窗登录脚本要预填的 (aff, promo) 码。
+///
+/// `promo_override` 是**这一窗专属**的奖励码（star 领礼），优先于码表 ——
+/// 码表对所有导入无条件生效，而奖励码必须 gate 在 star 后面，两者是
+/// 不同的 owner，谁也不吞谁。
+fn resolve_login_codes(
+    site_origin: &str,
+    promo_override: Option<&str>,
+) -> (Option<String>, Option<String>) {
     let cached_config = crate::relay::remote_config::load_cached();
     (
         crate::relay::remote_config::resolve_aff_code(cached_config.as_ref(), site_origin),
-        crate::relay::remote_config::resolve_promo_code(cached_config.as_ref(), site_origin),
+        promo_override.map(str::to_string).or_else(|| {
+            crate::relay::remote_config::resolve_promo_code(cached_config.as_ref(), site_origin)
+        }),
     )
 }
 
@@ -1439,13 +1454,14 @@ async fn browser_import(
     site_origin: String,
     initial_detected: Option<discovery::DetectedSite>,
     entry_source: BrowserEntrySource,
+    promo_override: Option<&str>,
 ) -> Result<ImportResult, RelayImportError> {
     if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
         log::info!("发现残留的站点导入窗口，销毁后重开");
         let _ = stale.destroy();
     }
 
-    let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
+    let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin, promo_override);
     let entry_url =
         browser_start_url(input, &site_origin, initial_detected.as_ref(), entry_source)?;
     let navigate_after_detection =
@@ -2000,7 +2016,8 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 读缓存而不是现拉：拉取由启动时那个后台任务做（见 `lib.rs`），
     // 这里只同步读一份磁盘文件（含重新验签），不让用户等一次网络往返。
     // 缓存不存在 / 验签不过 ⇒ `load_cached` 返回 None ⇒ 自动落到内置那层。
-    let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin);
+    // 重登没有奖励码 override —— 那是 star 领礼注册窗专属的入参。
+    let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin, None);
 
     // 落哪个页面由「这一行登录过没有」决定：新加的站落 `/register`，重登落 `/login`。
     let url = url::Url::parse(&backend::browser_login_url(
