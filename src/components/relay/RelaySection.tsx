@@ -26,7 +26,14 @@ import {
   type VerificationScopeSummary,
   type VerificationVerdict,
 } from "@/lib/api/modelVerification";
-import { MODEL_VERIFICATION_CHANGED } from "@/lib/api/events";
+import {
+  MODEL_VERIFICATION_CHANGED,
+  ONBOARDING_REGISTER_COMPLETED,
+} from "@/lib/api/events";
+import {
+  promptOnboardingRegister,
+  type OnboardingRegisterCompleted,
+} from "@/lib/onboarding";
 import { vendorApi, type VendorAccountRow } from "@/lib/api/vendor";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
@@ -277,11 +284,18 @@ export function RelaySection({
     try {
       const status = await relayApi.status();
       if (
-        !isImageTab &&
-        status.shouldPromptAddSite &&
-        !autoPromptedThisProcess
+        isImageTab ||
+        !status.shouldPromptAddSite ||
+        autoPromptedThisProcess
       ) {
-        autoPromptedThisProcess = true;
+        return;
+      }
+      autoPromptedThisProcess = true;
+      // 首启先走新人引导（官方站注册窗，策略见 src/lib/onboarding.ts 与后端
+      // relay::onboarding）：引导触发了就不再叠「添加站点」目录提示 —— 一次只劝
+      // 一遍。没触发（已弹过 / 不是新用户 / 后端暂时不可用）才回落到既有提示。
+      const onboardingLaunched = await promptOnboardingRegister();
+      if (!onboardingLaunched) {
         onOpenDirectory("firstRun");
       }
     } catch {
@@ -506,6 +520,28 @@ export function RelaySection({
   useTauriEvent<null>(VENDOR_ACCOUNTS_CHANGED, () => {
     void reloadVendors();
   });
+
+  /**
+   * 新人引导注册窗里注册成功（凭据已由后端入库）。收尾对齐目录页手动导入成功的
+   * 那一串（`RelayDirectoryPage.authenticate`）：toast + 给当前 app 预配档位 +
+   * 整区刷新 —— 用户关掉注册窗回到主界面时，「注册即用」已经成立。
+   */
+  useTauriEvent<OnboardingRegisterCompleted>(
+    ONBOARDING_REGISTER_COMPLETED,
+    async (payload) => {
+      toast.success(
+        t("loongport.addSite.connected", { name: payload.siteName }),
+      );
+      try {
+        presentRefreshResult(await relayApi.refresh(payload.relayId, appId));
+      } catch (reason) {
+        toast.error(
+          t("loongport.directory.provisionFailed", { reason: String(reason) }),
+        );
+      }
+      void reload();
+    },
+  );
 
   /**
    * 登录（或重新登录）一个官网账号。

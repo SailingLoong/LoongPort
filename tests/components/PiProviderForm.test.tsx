@@ -8,6 +8,11 @@ import {
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// 本文件是全仓最慢的交互重组件测试（46 例单跑 ~45s，userEvent 连续操作多）；
+// 全局 testTimeout 15s（vitest.config.ts，已为 CI 2 核放宽过一次）在全量并发
+// 负载下仍会偶发超时红 CI。按文件再放宽，不动全局。
+vi.setConfig({ testTimeout: 30_000 });
+
 import { PiProviderForm } from "@/components/providers/forms/PiProviderForm";
 import { http, HttpResponse } from "msw";
 import { server } from "../msw/server";

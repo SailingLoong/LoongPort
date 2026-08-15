@@ -46,3 +46,5 @@ export const VENDOR_ACCOUNTS_CHANGED = "vendor-accounts-changed";
 export const MODEL_VERIFICATION_PROGRESS = "model-verification-progress";
 /** 模型验证持久化结果变化（档位行与模型验证弹窗监听）。 */
 export const MODEL_VERIFICATION_CHANGED = "model-verification-changed";
+/** 新人引导注册窗完成（`RelaySection` 监听）：凭据已入库，前端做 toast + 档位预配 + 列表刷新。 */
+export const ONBOARDING_REGISTER_COMPLETED = "onboarding-register-completed";

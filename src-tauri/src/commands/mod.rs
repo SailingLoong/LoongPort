@@ -17,6 +17,7 @@ mod misc;
 mod model_fetch;
 mod model_verification;
 mod omo;
+mod onboarding;
 mod openclaw;
 mod pi;
 mod plugin;
@@ -63,6 +64,8 @@ pub use misc::*;
 pub use model_fetch::*;
 pub use model_verification::*;
 pub use omo::*;
+// 新人引导：与 relay 主流程解耦的引导调度（判据 + 一次性标志 + 官方站注册窗）。
+pub use onboarding::*;
 pub use openclaw::*;
 pub(crate) use pi::*;
 pub use plugin::*;
