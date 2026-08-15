@@ -657,29 +657,50 @@ pub fn run() {
             //
             // 预检：数据库版本过新时，必须先于任何 schema 写操作（create_tables 内含
             // DROP/ALTER 等 DDL）进入恢复界面，避免旧应用对读不懂的更新版 DB 落写。
+            //
+            // 两个版本计数器各查各的：上游的 `user_version` 和 LoongPort 自己的
+            // `loongport_schema_version` 表（为什么有两套见 loongport_schema 模块文档）。
+            // 后者的检查原本只在 `Database::init` 内部才有，那里已错过预检窗口。
             match crate::database::Database::stored_user_version_exceeds_supported(&db_path) {
                 Ok(Some(version)) => {
                     log::warn!("数据库版本过新（v{version}），引导用户在应用内升级应用");
-                    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
-                        path: db_path.display().to_string(),
-                        error: format!(
+                    enter_db_version_too_new_recovery(
+                        app.handle(),
+                        &db_path,
+                        format!(
                             "数据库版本过新（{version}），当前应用仅支持 {}，请升级应用后再尝试。",
                             crate::database::SCHEMA_VERSION
                         ),
-                        kind: Some("db_version_too_new".to_string()),
-                        db_version: Some(version),
-                        supported_version: Some(crate::database::SCHEMA_VERSION),
-                    });
-                    // 主窗口默认 visible:false，恢复界面必须强制显示
-                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                        version,
+                        crate::database::SCHEMA_VERSION,
+                    );
                     return Ok(());
                 }
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("预检数据库版本失败，继续正常初始化流程: {e}");
+                }
+            }
+            match crate::database::loongport_schema::stored_version_exceeds_supported(&db_path) {
+                Ok(Some(version)) => {
+                    log::warn!(
+                        "LoongPort 数据版本过新（v{version}），引导用户在应用内升级应用"
+                    );
+                    enter_db_version_too_new_recovery(
+                        app.handle(),
+                        &db_path,
+                        format!(
+                            "LoongPort 数据版本过新（{version}），当前应用仅支持 {}，请升级应用后再尝试。",
+                            crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
+                        ),
+                        version,
+                        crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION,
+                    );
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("预检 LoongPort 数据版本失败，继续正常初始化流程: {e}");
                 }
             }
 
@@ -2419,6 +2440,31 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
             exit_text.to_string(),
         ))
         .blocking_show()
+}
+
+/// 进入「数据库版本过新（应用过旧）」恢复模式。
+///
+/// 记下 init error（前端 `main.tsx` 据 `kind = "db_version_too_new"` 渲染应用内
+/// 升级恢复界面而非正常 App），并强制显示主窗口（它默认 `visible: false`）。
+/// 上游 `user_version` 与 LoongPort 自己的版本表两个计数器共用这一个入口。
+fn enter_db_version_too_new_recovery(
+    app: &tauri::AppHandle,
+    db_path: &std::path::Path,
+    error: String,
+    db_version: i32,
+    supported_version: i32,
+) {
+    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+        path: db_path.display().to_string(),
+        error,
+        kind: Some("db_version_too_new".to_string()),
+        db_version: Some(db_version),
+        supported_version: Some(supported_version),
+    });
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 /// 显示数据库初始化/Schema 迁移失败对话框

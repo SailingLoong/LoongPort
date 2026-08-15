@@ -75,6 +75,14 @@ fn ensure_version_table(conn: &Connection) -> Result<(), AppError> {
 /// 读当前版本。表不存在或没有行都返回 0（= 还没跑过任何 LoongPort 迁移）。
 pub(crate) fn current_version(conn: &Connection) -> Result<i32, AppError> {
     ensure_version_table(conn)?;
+    read_stored_version(conn)
+}
+
+/// 只读地读版本号：表不存在或没有行都算 0，**绝不建表**。
+///
+/// 与 [`current_version`] 的差别就是少那一步 `ensure_version_table` ——
+/// 预检（[`stored_version_exceeds_supported`]）靠它守住「先于任何写入」。
+fn read_stored_version(conn: &Connection) -> Result<i32, AppError> {
     let version: Option<i32> = conn
         .query_row(
             &format!("SELECT version FROM {VERSION_TABLE} WHERE id = 1"),
@@ -83,6 +91,25 @@ pub(crate) fn current_version(conn: &Connection) -> Result<i32, AppError> {
         )
         .ok();
     Ok(version.unwrap_or(0))
+}
+
+/// 启动预检：磁盘上的库是否带着比当前代码支持的更新的 LoongPort 版本。
+///
+/// [`apply`] 里也有同一道检查，但它跑在 `Database::init` 内部 —— 那时上游
+/// `create_tables` 的 DDL 已经落盘，错过了「先于任何 schema 写入」的预检窗口；
+/// 撞上时用户看到的是原生 Retry/Exit 对话框，而不是应用内升级恢复界面。
+///
+/// **只读不写**：以只读模式打开库文件，版本表不存在就当版本 0。
+pub(crate) fn stored_version_exceeds_supported(
+    db_path: &std::path::Path,
+) -> Result<Option<i32>, AppError> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| AppError::Database(format!("只读打开数据库失败: {e}")))?;
+    let version = read_stored_version(&conn)?;
+    Ok((version > LOONGPORT_SCHEMA_VERSION).then_some(version))
 }
 
 fn set_version(conn: &Connection, version: i32) -> Result<(), AppError> {
@@ -1746,5 +1773,114 @@ mod tests {
             err.to_string().contains("过新"),
             "错误里要说清是「版本过新」，实际：{err}"
         );
+    }
+
+    // ============================================================
+    // 启动预检（stored_version_exceeds_supported）
+    // ============================================================
+
+    fn temp_db_file() -> tempfile::NamedTempFile {
+        tempfile::NamedTempFile::new().expect("临时库文件")
+    }
+
+    /// ⭐ 预检必须抓到「磁盘上的版本比代码新」—— 这是它存在的全部理由。
+    ///
+    /// 场景就是它修的缺口：用户跑过新版（stamp 到更高版本）又打开旧版，
+    /// 检查原本只在 `Database::init` 内部才有，用户看到的是原生 Retry/Exit
+    /// 对话框而不是应用内升级恢复界面。
+    #[test]
+    fn the_precheck_flags_a_database_from_a_newer_build() {
+        let file = temp_db_file();
+        {
+            let conn = Connection::open(file.path()).expect("打开临时库");
+            ensure_version_table(&conn).expect("建版本表");
+            set_version(&conn, LOONGPORT_SCHEMA_VERSION + 1).expect("写入未来版本");
+        }
+
+        assert_eq!(
+            stored_version_exceeds_supported(file.path()).unwrap(),
+            Some(LOONGPORT_SCHEMA_VERSION + 1)
+        );
+    }
+
+    #[test]
+    fn the_precheck_leaves_current_databases_alone() {
+        let file = temp_db_file();
+        {
+            let conn = Connection::open(file.path()).expect("打开临时库");
+            apply(&conn).expect("迁移到最新");
+        }
+
+        assert_eq!(stored_version_exceeds_supported(file.path()).unwrap(), None);
+    }
+
+    /// ⭐ 预检**只读不写**：没有版本表的库不会被它顺手建出一张来。
+    ///
+    /// 预检的约束是「先于任何 schema 写入」—— 建表本身也是写入。
+    #[test]
+    fn the_precheck_never_creates_the_version_table() {
+        let file = temp_db_file();
+        {
+            let conn = Connection::open(file.path()).expect("打开临时库");
+            conn.execute("CREATE TABLE unrelated (id INTEGER)", [])
+                .expect("造一张无关表");
+        }
+
+        assert_eq!(stored_version_exceeds_supported(file.path()).unwrap(), None);
+
+        let conn = Connection::open(file.path()).expect("重开临时库");
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [VERSION_TABLE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "预检不许建版本表 —— 那是写入");
+    }
+
+    #[test]
+    fn the_precheck_ignores_a_missing_file() {
+        assert_eq!(
+            stored_version_exceeds_supported(std::path::Path::new(
+                "/nonexistent/loongport-precheck.db"
+            ))
+            .unwrap(),
+            None
+        );
+    }
+
+    /// ⭐ **预检闸**：lib.rs 里查上游计数器的预检旁边，必须也查 LoongPort 自己的。
+    ///
+    /// 会红的改法：上游合并把 lib.rs 的预检区域改形、或有人删掉 LoongPort 这条
+    /// 预检 —— 两者都会让用户重新看到原生对话框而非升级恢复界面。
+    #[test]
+    fn the_startup_precheck_covers_the_loongport_counter_too() {
+        let src = include_str!("../lib.rs");
+
+        let mut checked = 0;
+        for (lineno, line) in src.lines().enumerate() {
+            let is_precheck = line.contains("stored_user_version_exceeds_supported(")
+                && !line.contains("loongport_schema::")
+                && !line.contains("fn ")
+                && !line.trim_start().starts_with("//");
+            if !is_precheck {
+                continue;
+            }
+            checked += 1;
+            let window: String = src
+                .lines()
+                .skip(lineno)
+                .take(40)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                window.contains("loongport_schema::stored_version_exceeds_supported("),
+                "lib.rs:{} 的上游版本预检附近没有跟着查 LoongPort 自己的版本表。原文：{}",
+                lineno + 1,
+                line.trim()
+            );
+        }
+        assert!(checked >= 1, "一个上游预检调用点都没找到 —— 匹配规则失效了");
     }
 }
