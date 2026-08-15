@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 2,
+  "issuedAt": "2026-08-14T00:00:00Z",
+  "sites": [
+    {
+      "id": "bestapi",
+      "displayName": "BestAPI",
+      "origin": "https://api.bestapi.store",
+      "entryUrl": "https://api.bestapi.store/",
+      "apiBaseUrl": "https://api.bestapi.store/v1",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "default": true
+        },
+        {
+          "id": "deepseek-v4-pro"
+        }
+      ],
+      "veridropHosts": [
+        "api.bestapi.store"
+      ],
+      "authorization": {
+        "kind": "manual-api-key"
+      }
+    }
+  ]
+}
