@@ -3117,6 +3117,9 @@
   },
   "loongport": {
     "refreshAll": "Update account details, balances, group rates, and connection profiles for all relay services and official APIs",
+    "addEntry": {
+      "title": "Add"
+    },
     "sections": {
       "relay": "Relay services",
       "official": "Official API",
@@ -3290,7 +3293,6 @@
     },
     "vendor": {
       "refreshAll": "Update account details, balance, API key configuration, and current status",
-      "add": "Add provider account",
       "empty": "No provider accounts added",
       "remove": "Delete provider account and connection profiles",
       "removeConfirmTitle": "Delete this provider account?",

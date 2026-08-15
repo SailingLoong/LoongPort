@@ -82,6 +82,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
+import { AddEntryMenu } from "@/components/AddEntryMenu";
 import { StarRewardDialog } from "@/components/StarRewardDialog";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
@@ -307,8 +308,6 @@ function App() {
   // 这里 enabled 默认 false，仅用于「导入」按钮的绿点提示，不主动发起扫描。
   const { data: unmanagedSkills } = useScanUnmanagedSkills();
   const hasUnmanagedSkills = (unmanagedSkills?.length ?? 0) > 0;
-  const addActionButtonClass =
-    "bg-orange-500 hover:bg-orange-600 dark:bg-orange-500 dark:hover:bg-orange-600 text-white shadow-lg shadow-orange-500/30 dark:shadow-orange-500/40 rounded-full w-8 h-8";
 
   const {
     isRunning: isProxyRunning,
@@ -1120,15 +1119,14 @@ function App() {
                     {/* LoongPort 的「中转站 × 分组」区，装在手工 provider 列表**上方**。
                         它自带全部状态（见 RelaySection 的文档）—— 这里只挂一行，
                         不把 relay 的逻辑摊进这个上游文件。
-                        它内部已按「中转站 / 官方 API」两大块渲染（各自带区块头与
-                        区块内的添加入口），空时也各自显示区块内的占位。 */}
+                        它内部已按「中转站 / 官方 API」两大块渲染；两块与下面
+                        「其他」的添加入口统一收在顶栏大「+」（AddEntryMenu）。 */}
                     <RelaySection
                       appId={activeApp}
                       onOpenDirectory={handleOpenRelayDirectory}
-                      onOpenOfficialApi={handleOpenOfficialApi}
                     />
 
-                    {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口仍是顶栏 +。
+                    {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口在顶栏 +。
                         生图页（codex-image）保持改动前的形态，不套三大块布局。 */}
                     {activeApp !== "codex-image" && (
                       <h2 className="text-sm font-medium">
@@ -1786,15 +1784,14 @@ function App() {
                       </AnimatePresence>
                     </div>
 
-                    <Button
-                      onClick={() => setIsAddOpen(true)}
-                      size="icon"
-                      className={`ml-2 ${addActionButtonClass}`}
-                      aria-label={t("provider.addNewProvider")}
-                      title={t("provider.addNewProvider")}
-                    >
-                      <Plus className="w-5 h-5" />
-                    </Button>
+                    <AddEntryMenu
+                      appId={activeApp}
+                      onOpenRelayDirectory={() =>
+                        handleOpenRelayDirectory("add")
+                      }
+                      onOpenOfficialApi={handleOpenOfficialApi}
+                      onOpenManual={() => setIsAddOpen(true)}
+                    />
                   </>
                 )}
               </div>

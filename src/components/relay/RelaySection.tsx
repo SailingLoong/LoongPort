@@ -88,10 +88,9 @@ export interface RelaySectionProps {
    * 且把「这是个受限取值域」这个事实写进类型里。
    */
   appId: AppId;
-  /** 打开独立中转站广场；首启入口固定落综合榜，普通添加按当前 app 选榜。 */
-  onOpenDirectory: (entry: "add" | "firstRun") => void;
-  /** 打开独立「官方 API」页（厂商选择 → 登录 → 备钥）。与广场同构的子流程。 */
-  onOpenOfficialApi: () => void;
+  /** 打开独立中转站广场；首启入口固定落综合榜，普通添加按当前 app 选榜。
+   * 普通添加入口（`"add"`）已上收到顶栏大「+」，这里只剩首启引导在用。 */
+  onOpenDirectory: (entry: "firstRun") => void;
 }
 
 /**
@@ -110,11 +109,7 @@ export interface RelaySectionProps {
  */
 let autoPromptedThisProcess = false;
 
-export function RelaySection({
-  appId,
-  onOpenDirectory,
-  onOpenOfficialApi,
-}: RelaySectionProps) {
+export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
    *
@@ -543,28 +538,23 @@ export function RelaySection({
   );
 
   /**
-   * 登录（或重新登录）一个官网账号。
-   *
-   * ⚠️ **入口是「添加官网账号」按钮时没有行**（行是登录成功后由后端建的），所以
-   * `rowId` 为 null 表示新增。`vendor_open_login` 吃的是 `vendorId` 而不是行 id，
-   * 天然支持这两种情形 —— 同账号重登会合并回同一行（唯一索引 `(vendor_id, account_id)`）。
+   * 重新登录一个已有的官网账号（新增账号的登录在 `OfficialApiPage` 里，
+   * 那边直接调 `vendor_open_login` —— 同账号重登会靠唯一索引
+   * `(vendor_id, account_id)` 合并回同一行）。
    */
-  const handleVendorLogin = (vendorId: string, rowId: number | null) =>
-    run(
-      rowId === null ? "vendorLogin:new" : vendorBusyKey("login", rowId),
-      async () => {
-        try {
-          const result = await vendorApi.openLogin(vendorId, appId);
-          // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
-          if (result === null) return;
-          toast.success(t("loongport.session.connected"));
-          presentRefreshResult(result.refresh);
-          await reloadVendors();
-        } catch (e) {
-          toast.error(String(e));
-        }
-      },
-    );
+  const handleVendorLogin = (vendorId: string, rowId: number) =>
+    run(vendorBusyKey("login", rowId), async () => {
+      try {
+        const result = await vendorApi.openLogin(vendorId, appId);
+        // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
+        if (result === null) return;
+        toast.success(t("loongport.session.connected"));
+        presentRefreshResult(result.refresh);
+        await reloadVendors();
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
 
   const handleVendorProvision = (rowId: number) =>
     run(vendorBusyKey("provision", rowId), async () => {
@@ -847,8 +837,8 @@ export function RelaySection({
     void doSelectTierModel(tier, model);
   };
 
-  // 两个区块的添加入口都在各自区块头（`RelayTierList` 的 + / `VendorBlock` 的 +），
-  // 所以不再有「两类都空时单摆按钮」的空态分支 —— 空态由各区块内部的占位承接。
+  // 添加入口已全部上收到顶栏大「+」（`AddEntryMenu`），区块内不再有按钮，
+  // 空态由各区块内部的占位承接。
   const bothEmpty = relays.length === 0 && vendors.length === 0;
 
   // 生图页的空态**不引导「添加站点」** —— 生图档位不是单独添加的，它由现有站点里
@@ -889,7 +879,6 @@ export function RelaySection({
       <RelayTierList
         relays={relays}
         busy={busy}
-        onAddSite={() => onOpenDirectory("add")}
         onLogin={(relayId) => void handleLogin(relayId)}
         onProvision={handleProvision}
         onReorder={(ids) => void handleReorder(ids)}
@@ -939,7 +928,7 @@ export function RelaySection({
       )}
 
       {/* 官网直连账号块 —— 只在支持厂商的 tab 出现（gemini / grokbuild 无 preset，
-          摆了也是骗人）。「添加官网账号」入口在它自己的区块头。 */}
+          摆了也是骗人）。添加入口在顶栏大「+」。 */}
       {vendorSupported && (
         <VendorBlock
           vendor={{
@@ -974,7 +963,6 @@ export function RelaySection({
             onReorder: (ids) => void handleVendorReorder(ids),
           }}
           busy={busy}
-          onAddVendor={onOpenOfficialApi}
         />
       )}
 

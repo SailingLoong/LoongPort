@@ -144,15 +144,10 @@ vi.mock("@/components/relay/ImageTabNotice", () => ({
   ImageTabNotice: () => null,
 }));
 vi.mock("@/components/relay/VendorBlock", () => ({
-  VendorBlock: ({ vendor, onAddVendor }: any) => (
-    <>
-      <output data-testid="vendor-labels">
-        {vendor.accounts.map((account: any) => account.accountLabel).join(",")}
-      </output>
-      <button type="button" onClick={onAddVendor}>
-        add official account
-      </button>
-    </>
+  VendorBlock: ({ vendor }: any) => (
+    <output data-testid="vendor-labels">
+      {vendor.accounts.map((account: any) => account.accountLabel).join(",")}
+    </output>
   ),
 }));
 vi.mock("@/components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
@@ -172,18 +167,11 @@ import { RelaySection } from "../RelaySection";
  * 余额不是这些闸关心的东西 —— `relayApi.balance` 没被 mock，那个 query 会 reject，
  * 行上渲染一个失败态的用量条，不影响任何模型验证的断言。
  */
-function renderSection(
-  appId: "codex" | "claude" | "codex-image" | "gemini",
-  callbacks: { onOpenOfficialApi?: () => void } = {},
-) {
+function renderSection(appId: "codex" | "claude" | "codex-image" | "gemini") {
   const queryClient = createTestQueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
-      <RelaySection
-        appId={appId}
-        onOpenDirectory={vi.fn()}
-        onOpenOfficialApi={callbacks.onOpenOfficialApi ?? (() => undefined)}
-      />
+      <RelaySection appId={appId} onOpenDirectory={vi.fn()} />
     </QueryClientProvider>,
   );
 }
@@ -544,11 +532,7 @@ describe("RelaySection model verification ownership", () => {
     const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     render(
       <QueryClientProvider client={queryClient}>
-        <RelaySection
-          appId="codex"
-          onOpenDirectory={vi.fn()}
-          onOpenOfficialApi={vi.fn()}
-        />
+        <RelaySection appId="codex" onOpenDirectory={vi.fn()} />
       </QueryClientProvider>,
     );
 
@@ -609,20 +593,5 @@ describe("RelaySection model verification ownership", () => {
     expect(screen.getByTestId("vendor-labels")).toHaveTextContent(
       "new current",
     );
-  });
-
-  it("routes the add-official-account button to the OfficialApiPage", async () => {
-    // 「+」不再直接登录某个固定厂商，而是打开厂商选择页（与中转站广场同构）。
-    // 登录动作本身由 OfficialApiPage.test.tsx 覆盖。
-    api.list.mockResolvedValue({ supported: true, accounts: [] });
-    const onOpenOfficialApi = vi.fn();
-    renderSection("codex", { onOpenOfficialApi });
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "add official account" }),
-    );
-
-    expect(onOpenOfficialApi).toHaveBeenCalledTimes(1);
-    expect(api.openLogin).not.toHaveBeenCalled();
   });
 });

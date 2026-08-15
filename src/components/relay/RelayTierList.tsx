@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Plus } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -19,7 +18,6 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import { Button } from "@/components/ui/button";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
 import type { VerificationVerdict } from "@/lib/api/modelVerification";
 
@@ -66,7 +64,6 @@ export interface RelayTierListProps {
    * 不该跟着灰掉。见 `useRowBusy` 的文档。
    */
   busy: ReadonlySet<string>;
-  onAddSite: () => void;
   /** 行内动作，**都显式带 relayId**（后端命令直接吃它，不再靠全局「当前站」）。 */
   onLogin: (relayId: number) => void;
   onProvision: (relayId: number) => void | Promise<void>;
@@ -163,7 +160,6 @@ function initialOpenState(relays: RelayRowData[]): Record<RowKey, boolean> {
 export function RelayTierList({
   relays,
   busy,
-  onAddSite,
   onLogin,
   onProvision,
   onSwitchTier,
@@ -249,21 +245,7 @@ export function RelayTierList({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-1.5">
-        <h2 className="text-sm font-medium">{t("loongport.sections.relay")}</h2>
-        {/* 「添加中转站」入口。与「官方 API」块同构：+ 图标跟在标题后面。 */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6"
-          onClick={onAddSite}
-          title={t("loongport.tierList.addSite")}
-          aria-label={t("loongport.tierList.addSite")}
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
-      </div>
+      <h2 className="text-sm font-medium">{t("loongport.sections.relay")}</h2>
 
       {relays.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">

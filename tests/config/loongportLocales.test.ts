@@ -22,6 +22,8 @@ const requiredKeys = [
   "sections.relay",
   "sections.official",
   "sections.other",
+  // 顶栏大「+」统一添加入口的触发提示。
+  "addEntry.title",
   // 独立中转站广场。四个榜单、数据来源、评分证据、认证动作、缓存状态和分页
   // 都是用户直接看到的主流程文案；漏一个 locale 会直接显示 key 名。
   "directory.title",
@@ -192,7 +194,6 @@ const requiredKeys = [
   //
   // ⚠️ 「登录过期但密钥还能用」那句已提升为 `row.sessionExpiredUsable`（见上）——
   // 两类行现在是同一个反直觉状态、同一句解释，不该各留一份。
-  "vendor.add",
   // 官方 API 块的空态占位。
   "vendor.empty",
   "vendor.remove",
