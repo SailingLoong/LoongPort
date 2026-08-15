@@ -3332,8 +3332,8 @@ fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
 /// 答案。散成两份的后果是守卫与删除各认一套：守卫说「这条不是你的、不拦」，删除说
 /// 「这条是你的、删了」⇒ 恰好绕过守卫删掉正在用的配置，而那正是守卫要防的事。
 ///
-/// [`relay_balance_inputs`] 与对账命令 `relay_reconciliation`（`commands/reconcile.rs`）
-/// 也走这一个判据 —— 归属口径全仓只有这一份（plan §二：唯一数据源）。
+/// [`belongs_to_relay`]（严格版）才是余额 / 对账这些**归属**路径用的判据 ——
+/// 两者 `(account_id, 档位标记)` 的 `(None, Some)` 那一格语义相反，见它那边的说明。
 ///
 /// 三道判据缺一不可：
 ///
@@ -3365,6 +3365,41 @@ pub(crate) fn belongs_to_account(
     ) {
         (Some(want), Some(owner)) => want == owner,
         _ => true,
+    }
+}
+
+/// 这条 provider 是不是「这个 relay 行」名下的托管档位 —— **严格归属版**。
+///
+/// 与 [`belongs_to_account`] 只差一格：relay 行没登录（`account_id == None`）而档位
+/// 记了**别人的**账号时，这里**不认**。两个方向语义相反，不能合并：
+///
+/// - [`belongs_to_account`] 服务清理 / 守卫 —— 宁可多认不误删（同站没记归属的旧档位
+///   要能跟着清掉，`None` 一律「算是」）。
+/// - 这里服务**把事实记到某一行头上**的路径（余额 sk 收集、扣费对账的成本归属）——
+///   把别的账号的 sk / 成本算进未登录行，等于把 B 的消费记到 A 头上，比漏算更糟。
+///   这也是 `apps_using_this_accounts_tiers` 当年要额外加 `account_id.is_some()` 的
+///   同一类教训（见它那边的 ⚠️ 段）。
+///
+/// 判据即 `relay_balance_inputs` 原内联那份（`(None, Some(_)) => false`），收成函数
+/// 供余额与 `relay_reconciliation`（`commands/reconcile.rs`）共用 —— 归属口径只有一份。
+pub(crate) fn belongs_to_relay(
+    provider: &Provider,
+    site_origin: &str,
+    account_id: Option<i64>,
+) -> bool {
+    if !is_managed(provider) {
+        return false;
+    }
+    if provider.website_url.as_deref() != Some(site_origin) {
+        return false;
+    }
+    match (
+        account_id,
+        provider.meta.as_ref().and_then(|m| m.loongport_account_id),
+    ) {
+        (Some(want), Some(owner)) => want == owner,
+        (_, None) => true,
+        (None, Some(_)) => false,
     }
 }
 
@@ -4473,8 +4508,8 @@ fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
 
 /// 一行名下**全部托管档位**里的 base_url 与 sk。
 ///
-/// 归属判据走 [`belongs_to_account`]（与 [`tiers_of_site`] / `prune_stale_tiers` 同一来源），
-/// 但**跨全部 app 扫** —— 同一行的档位可能只挂在某一个 CLI 下（用户只给 codex 生成过 sk），
+/// 归属判据走 [`belongs_to_relay`]（严格版：未登录的行不认别人账号的档位），但
+/// **跨全部 app 扫** —— 同一行的档位可能只挂在某一个 CLI 下（用户只给 codex 生成过 sk），
 /// 按单个 app 查会在别的 app 上空手而归，让余额白白落到下一条路。
 ///
 /// 顺序不稳定不要紧：调用方（[`crate::relay::balance::resolve`]）是并发试完取第一个
@@ -4487,7 +4522,7 @@ fn relay_balance_inputs(state: &AppState, relay: &creds::Relay) -> (String, Vec<
             continue;
         };
         for provider in providers.values() {
-            if !belongs_to_account(provider, &relay.site_origin, relay.account_id) {
+            if !belongs_to_relay(provider, &relay.site_origin, relay.account_id) {
                 continue;
             }
             if let Some(sk) = provision::extract_api_key(&provider.settings_config, &app_type) {
@@ -8449,6 +8484,78 @@ mod tests {
         assert!(
             belongs_to_account(&legacy_provider, site, None),
             "删除方向对 `None` 仍是「算是我的」—— 那是旧数据能被清掉的前提"
+        );
+    }
+
+    /// ⭐ **还没登录的 relay 行，不能把同站别人账号的档位记到自己头上。**
+    ///
+    /// Task 3 review 抓出的：把 `relay_balance_inputs` 的内联判据收敛到
+    /// `belongs_to_account` 时，`(relay.account_id, 档位账号)` 的 `(None, Some)` 那格
+    /// 从「不认」翻成了「认」—— 未登录行会收走别人档位的 sk、对账会把别人的成本
+    /// 算进这一行。现在余额 / 对账走严格版 [`belongs_to_relay`]（还原原内联语义
+    /// `(None, Some(_)) => false`），清理 / 守卫路径仍走宽松版 [`belongs_to_account`]。
+    ///
+    /// 会红的改法：`relay_balance_inputs` 改回 `belongs_to_account`。
+    #[test]
+    fn an_unlogged_relay_row_is_not_attributed_another_accounts_tier() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 账号 9 的档位，带真实 sk（否则「没收走」的断言没有判别力）。
+        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        let mut b_provider = seeded_owned(&b_tier, "B 的档位", Some(site), 9);
+        b_provider.settings_config = serde_json::json!({ "auth": { "OPENAI_API_KEY": "sk-b" } });
+        db.save_provider("codex", &b_provider).expect("seed B");
+
+        // 同站一条没记账号的旧档位（升级前生成），也没有 sk —— 只用于钉住
+        // `(None, None) => true` 这格没被顺手改掉。
+        let legacy = provision::provider_id_for(site, None, 5);
+        db.save_provider("codex", &seeded(&legacy, "旧数据", Some(site)))
+            .expect("seed legacy");
+
+        let state = AppState::new(db.clone());
+        let mut unlogged = purchase_capability_relay(creds::BackendKind::Sub2Api);
+        unlogged.site_origin = site.to_string();
+        unlogged.account_id = None;
+
+        let (_, keys) = relay_balance_inputs(&state, &unlogged);
+        assert!(
+            keys.is_empty(),
+            "⭐ 未登录的行认不出归属 ⇒ 同站别人账号的档位（哪怕有 sk）不该被收走：{keys:?}"
+        );
+
+        // 对照组：账号 9 自己的行必须能拿到那把 sk —— 证明上面不是「本来就收不到」。
+        let mut owner_row = unlogged.clone();
+        owner_row.account_id = Some(9);
+        let (_, keys) = relay_balance_inputs(&state, &owner_row);
+        assert_eq!(
+            keys,
+            vec!["sk-b".to_string()],
+            "档位自己的账号必须收得到 sk"
+        );
+
+        // 两个判据函数在关键那格的分歧是**有意的**，钉住防止将来被「顺手统一」：
+        // 删除方向（belongs_to_account）对 None 宽松（旧数据要能清），
+        // 归属方向（belongs_to_relay）对 None 严格（别人的不能认领）。
+        let b_in_db = db
+            .get_provider_by_id(&b_tier, "codex")
+            .expect("query")
+            .expect("在");
+        assert!(
+            belongs_to_account(&b_in_db, site, None),
+            "删除方向对 `None` 仍宽松 —— 别改"
+        );
+        assert!(
+            !belongs_to_relay(&b_in_db, site, None),
+            "归属方向对 `(None, Some)` 必须严格 —— 别人的档位不能记到未登录行头上"
+        );
+        let legacy_in_db = db
+            .get_provider_by_id(&legacy, "codex")
+            .expect("query")
+            .expect("在");
+        assert!(
+            belongs_to_relay(&legacy_in_db, site, None),
+            "同站没记归属的旧档位仍是「可能是我的」（(None, None) => true）"
         );
     }
 
