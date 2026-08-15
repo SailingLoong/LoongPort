@@ -13,6 +13,7 @@
     "format": "prettier --write \"{src,tests}/**/*.{js,jsx,ts,tsx,css,json,html}\"",
     "format:check": "prettier --check \"{src,tests}/**/*.{js,jsx,ts,tsx,css,json,html}\"",
     "test:unit": "vitest run",
+    "ci:rust": "bash scripts/ci-checks.sh",
     "test:unit:watch": "vitest watch"
   },
   "keywords": [],
