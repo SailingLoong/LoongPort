@@ -638,7 +638,7 @@ fn short_hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("{:x}", h.finalize())[..12].to_string()
+    hex::encode(h.finalize())[..12].to_string()
 }
 
 fn first_line(s: &str) -> String {

@@ -178,31 +178,19 @@ ARM64 的 Windows 机器（如骁龙笔记本）用带 `-arm64` 的那两个。
 
 ## DeepSeek Harness（dsh）
 
-LoongPort 还提供独立的 [`loongport` npm 集成](https://www.npmjs.com/package/loongport)，
-用于给 [DeepSeek Harness（dsh）](https://github.com/deepseek-ai/deepseek-harness)
-写入一个 OpenAI 兼容路由。它不属于下面的桌面端支持矩阵：传输、流式输出、工具调用与重试
-仍由 dsh 内置的 `llm-pi-ai` 负责。
-
-先预览计划，不改文件：
+LoongPort 提供 [`loongport` npm Cordis bundle](https://www.npmjs.com/package/loongport)，可在
+[DeepSeek Harness（dsh）](https://github.com/deepseek-ai/deepseek-harness) 中使用已验证服务商。
 
 ```bash
-LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
-  --base-url https://relay.example.com/v1 \
-  --model model-id
+dsh plugin --profile <profile> add loongport
 ```
 
-确认后显式加 `--write`：
+安装后，在 **Settings → LoongPort** 选择服务商；需要账号时打开它自己的注册或登录页面，
+手动生成并粘贴 API Key，再选择 `deepseek-v4-flash` 或 `deepseek-v4-pro` 保存。BestAPI 是默认
+服务商。完整安全边界、签名目录与 VeriDrop 的职责说明见
+**[loongport.dev/zh/dsh](https://loongport.dev/zh/dsh)**。
 
-```bash
-LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
-  --base-url https://relay.example.com/v1 \
-  --model model-id \
-  --write
-```
-
-API key 只从环境变量读取。命令只更新选定的 provider 路由与凭据名，保留其他 dsh 配置；
-完整的安装要求、安全边界和选项见 **[loongport.dev/zh/dsh](https://loongport.dev/zh/dsh)**，
-源码在 **[SailingLoong/loongport-dsh](https://github.com/SailingLoong/loongport-dsh)**。
+浏览器授权不会自动化；高级自定义 endpoint 的 CLI 用法见官网。
 
 ## 支持范围
 

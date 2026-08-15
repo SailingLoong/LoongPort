@@ -65,6 +65,9 @@ pub struct RelayDirectoryItem {
     pub scenarios: Vec<String>,
     pub issues: Vec<String>,
     pub entry_url: String,
+    /// 一键登录可用。广场只展示受管站点（见 [`apply_policy`] 的白名单过滤），
+    /// 而受管 = 探针验证过 sub2api / newapi 协议 ⇒ 每一行都该走应用内登录，
+    /// 不再区分「在浏览器打开让用户自己注册」的旧路径。
     pub auto_add: bool,
 }
 
@@ -592,6 +595,12 @@ pub fn apply_policy(
         aliases.insert(veridrop_host, value);
     }
     let mut seen_sites = BTreeSet::new();
+    // 展示白名单：只有受管站点（sponsors / aff / promo / relay_directory 声明，
+    // 且未被 block）可以进广场。VeriDrop 榜单只作为这些站点的**观测数据来源**
+    // （排名 / 评分 / 样本），不是展示集合的所有者 —— 未受管的站点（包括 Top 60）
+    // 没经过「探针可通 + 一键登录可用」的收录验证，展示出来就是给用户一个
+    // 点了大概率失败的按钮。
+    let managed: BTreeSet<_> = managed_veridrop_hosts(config).into_iter().collect();
 
     parsed
         .into_iter()
@@ -604,10 +613,13 @@ pub fn apply_policy(
             if blocked.contains(&site_host) || blocked.contains(&item.veridrop_host) {
                 return None;
             }
+            if !managed.contains(&item.veridrop_host) {
+                return None;
+            }
             if !seen_sites.insert(site_host.clone()) {
                 return None;
             }
-            let auto_add = override_site.is_some();
+            let auto_add = true;
             let entry_url = override_site
                 .as_ref()
                 .and_then(|site| site.entry_url.clone())
@@ -890,6 +902,7 @@ mod tests {
                         crate::relay::remote_config::RelayDirectorySite {
                             veridrop_host: Some("api.790053500.com".into()),
                             entry_url: Some("https://790053500.com/keys".into()),
+                            purchase_url: None,
                             display_name: Some("鑫旺".into()),
                         },
                     ),
@@ -898,6 +911,7 @@ mod tests {
                         crate::relay::remote_config::RelayDirectorySite {
                             veridrop_host: None,
                             entry_url: None,
+                            purchase_url: None,
                             display_name: None,
                         },
                     ),
@@ -1197,7 +1211,10 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_leaderboard_sites_are_manual_only() {
+    fn ordinary_leaderboard_sites_are_not_displayed() {
+        // 白名单语义（2026-08-15）：未受管的普通榜单站点没有过收录验证
+        // （探针可通 + 一键登录可用），**不进广场** —— 旧的「展示但 auto_add=false、
+        // 让用户去浏览器手动注册」路径已删。
         let parsed = vec![ParsedLeaderboardItem {
             veridrop_host: "ordinary.example".into(),
             rank: Some(1),
@@ -1213,8 +1230,40 @@ mod tests {
 
         let items = apply_policy(parsed, &RemoteConfig::default());
 
-        assert_eq!(items.len(), 1);
-        assert!(!items[0].auto_add);
+        assert!(items.is_empty(), "未受管站点不该出现在广场");
+    }
+
+    #[test]
+    fn sponsor_sites_are_displayed_with_one_click_login() {
+        // sponsors 声明的站点即使没有 relay_directory 条目，也要进广场且可一键登录：
+        // entry_url 回落到 sponsor 的 site origin。
+        let config = RemoteConfig {
+            sponsors: vec![crate::relay::remote_config::Sponsor {
+                site_origin: "https://wawazz.xyz".into(),
+                display_name: "WAWA ZZ API".into(),
+                tagline: String::new(),
+            }],
+            ..RemoteConfig::default()
+        };
+        let row = |veridrop_host: &str| ParsedLeaderboardItem {
+            veridrop_host: veridrop_host.into(),
+            rank: Some(1),
+            score: 96,
+            samples: 9,
+            latest_date: "2026-08-14".into(),
+            detail_url: format!("https://veridrop.org/leaderboard/{veridrop_host}"),
+            protocol_scores: vec![],
+            claude_signature_rate: None,
+            scenarios: vec![],
+            issues: vec![],
+        };
+
+        let items = apply_policy(vec![row("wawazz.xyz"), row("top.example")], &config);
+
+        assert_eq!(items.len(), 1, "只有受管站点保留");
+        assert_eq!(items[0].site_host, "wawazz.xyz");
+        assert_eq!(items[0].entry_url, "https://wawazz.xyz");
+        assert!(items[0].auto_add, "受管站点一律可一键登录");
     }
 
     #[test]
@@ -1268,6 +1317,7 @@ mod tests {
             crate::relay::remote_config::RelayDirectorySite {
                 veridrop_host: Some("probe.new.example".into()),
                 entry_url: None,
+                purchase_url: None,
                 display_name: None,
             },
         );
@@ -1611,8 +1661,12 @@ mod tests {
         let managed = apply_policy_to_cached(cached.clone(), &config_with_directory());
         let unmanaged = apply_policy_to_cached(cached, &RemoteConfig::default());
 
+        assert_eq!(managed.items.len(), 1);
         assert!(managed.items[0].auto_add);
-        assert!(!unmanaged.items[0].auto_add);
+        assert!(
+            unmanaged.items.is_empty(),
+            "配置撤掉受管身份后，缓存里的旧站点也不该再展示"
+        );
     }
 
     #[test]
@@ -1641,7 +1695,19 @@ mod tests {
         )
         .expect("read current cache shape");
 
-        let restored = apply_policy_to_cached(cached, &RemoteConfig::default());
+        let restored = apply_policy_to_cached(
+            cached,
+            &RemoteConfig {
+                // 解除 block 后该站要重新可见，前提是它仍在受管名单里
+                // （sponsors / aff / promo / relay_directory 任一来源）。
+                sponsors: vec![crate::relay::remote_config::Sponsor {
+                    site_origin: "https://blocked.example".into(),
+                    display_name: "Blocked".into(),
+                    tagline: String::new(),
+                }],
+                ..RemoteConfig::default()
+            },
+        );
 
         assert_eq!(restored.items.len(), 1);
         assert_eq!(restored.items[0].site_host, "blocked.example");

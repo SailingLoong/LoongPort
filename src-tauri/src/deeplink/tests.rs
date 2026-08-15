@@ -112,7 +112,7 @@ fn test_parse_grokbuild_provider() {
 
     let provider = build_provider_from_request(&AppType::GrokBuild, &request).unwrap();
     let config = provider.settings_config["config"].as_str().unwrap();
-    let document = config.parse::<toml::Value>().unwrap();
+    let document = config.parse::<toml::Table>().unwrap();
     let model = &document["model"]["grok-4.5"];
 
     assert_eq!(document["models"]["default"].as_str(), Some("grok-4.5"));

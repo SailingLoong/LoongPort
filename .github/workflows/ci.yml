@@ -109,6 +109,15 @@ jobs:
       - name: Unit tests
         run: pnpm test:unit
 
+      # remote-config 的 Pages Functions 有自己的 vitest 配置与 tsconfig（node 环境），
+      # 根配置只收 src/ 与 tests/ —— 不加这步，observations 解析（吃不可信的
+      # VeriDrop 排行榜 HTML）的测试与类型检查在 CI 都是零覆盖。
+      - name: Remote-config typecheck
+        run: pnpm --filter @loongport/remote-config exec tsc --noEmit
+
+      - name: Remote-config tests
+        run: pnpm --filter @loongport/remote-config exec vitest run
+
   backend:
     name: Backend Checks
     runs-on: ${{ matrix.os }}

@@ -44,9 +44,9 @@ pub fn provider_id_for(vendor_id: &str, account_id: &str) -> String {
     h.update(b"/");
     h.update(account_id.as_bytes());
     format!(
-        "{}vendor-{:.16x}",
+        "{}vendor-{}",
         crate::relay::managed::MANAGED_ID_PREFIX,
-        h.finalize()
+        &hex::encode(h.finalize())[..16]
     )
 }
 

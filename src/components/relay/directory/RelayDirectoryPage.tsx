@@ -25,7 +25,6 @@ import type {
 import { relayDirectoryKeys } from "@/lib/query/relayDirectory";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
-import { openInBrowser } from "../openInBrowser";
 import {
   DIRECTORY_PAGE_SIZE,
   defaultDirectoryKind,
@@ -62,7 +61,6 @@ export function RelayDirectoryPage({
     null,
   );
   const authenticationInProgress = useRef(false);
-  const [customSite, setCustomSite] = useState("");
 
   const directoryQuery = useQuery({
     queryKey: relayDirectoryKeys.byKind(view.kind),
@@ -119,18 +117,12 @@ export function RelayDirectoryPage({
     return message || t("loongport.addSite.importFailed");
   };
 
-  const authenticate = async (
-    entryUrl: string,
-    host: string,
-    source: "directory" | "manual",
-  ) => {
+  const authenticate = async (entryUrl: string, host: string) => {
     if (authenticationInProgress.current) return;
     authenticationInProgress.current = true;
     setAuthenticatingHost(host);
     try {
-      const result = await (source === "directory"
-        ? relayApi.importDirectorySite(entryUrl)
-        : relayApi.importSite(entryUrl));
+      const result = await relayApi.importDirectorySite(entryUrl);
       toast.success(
         t("loongport.addSite.connected", { name: result.siteName }),
       );
@@ -282,15 +274,7 @@ export function RelayDirectoryPage({
                 busy={authenticatingHost === item.siteHost}
                 disabled={authenticatingHost !== null}
                 onAuthenticate={(selected) => {
-                  if (!selected.autoAdd) {
-                    openInBrowser(selected.entryUrl);
-                    return;
-                  }
-                  void authenticate(
-                    selected.entryUrl,
-                    selected.siteHost,
-                    "directory",
-                  );
+                  void authenticate(selected.entryUrl, selected.siteHost);
                 }}
               />
             ))}
@@ -331,33 +315,6 @@ export function RelayDirectoryPage({
             <ChevronRight className="h-3.5 w-3.5" />
           </Button>
         </div>
-      </div>
-
-      <div className="flex items-center gap-2 border-t border-border-default pt-3">
-        <Input
-          value={customSite}
-          disabled={authenticatingHost !== null}
-          onChange={(event) => setCustomSite(event.target.value)}
-          placeholder={t("loongport.directory.customSitePlaceholder")}
-          onKeyDown={(event) => {
-            if (
-              event.key === "Enter" &&
-              customSite.trim() &&
-              !authenticationInProgress.current
-            ) {
-              void authenticate(customSite, customSite.trim(), "manual");
-            }
-          }}
-        />
-        <Button
-          variant="outline"
-          disabled={!customSite.trim() || authenticatingHost !== null}
-          onClick={() =>
-            void authenticate(customSite, customSite.trim(), "manual")
-          }
-        >
-          {t("loongport.directory.actions.useOtherSite")}
-        </Button>
       </div>
     </main>
   );

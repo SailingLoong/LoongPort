@@ -69,7 +69,7 @@ pub fn validate_config_toml_syntax(config_toml: &str) -> Result<(), AppError> {
         return Ok(());
     }
     config_toml
-        .parse::<toml::Value>()
+        .parse::<toml::Table>()
         .map(|_| ())
         .map_err(|error| {
             AppError::localized(
@@ -87,29 +87,19 @@ pub fn validate_config_toml_syntax(config_toml: &str) -> Result<(), AppError> {
 /// 让残缺的自定义配置继续走 `validate_config_toml` 报出真实错误，
 /// 而不是被误判成官方态静默吞掉。语法不合法同样返回 false。
 pub fn is_official_live_config(config_toml: &str) -> bool {
-    let Ok(document) = config_toml.parse::<toml::Value>() else {
+    let Ok(document) = config_toml.parse::<toml::Table>() else {
         return false;
     };
-    document
-        .as_table()
-        .is_some_and(|root| !root.contains_key("models") && !root.contains_key("model"))
+    !document.contains_key("models") && !document.contains_key("model")
 }
 
 /// Validate the provider-owned Grok Build TOML document.
 pub fn validate_config_toml(config_toml: &str) -> Result<(), AppError> {
-    let document = config_toml.parse::<toml::Value>().map_err(|error| {
+    let root = config_toml.parse::<toml::Table>().map_err(|error| {
         AppError::localized(
             "provider.grokbuild.config.invalid_toml",
             format!("Grok Build config.toml 格式错误: {error}"),
             format!("Invalid Grok Build config.toml: {error}"),
-        )
-    })?;
-
-    let root = document.as_table().ok_or_else(|| {
-        AppError::localized(
-            "provider.grokbuild.config.not_table",
-            "Grok Build 配置必须是 TOML 表结构",
-            "Grok Build configuration must be a TOML table",
         )
     })?;
     let models = root
@@ -174,8 +164,7 @@ pub fn validate_config_toml(config_toml: &str) -> Result<(), AppError> {
 }
 
 pub fn extract_model_config(config_toml: &str) -> Option<GrokModelConfig> {
-    let document = config_toml.parse::<toml::Value>().ok()?;
-    let root = document.as_table()?;
+    let root = config_toml.parse::<toml::Table>().ok()?;
     let default_model = root
         .get("models")?
         .as_table()?

@@ -3119,7 +3119,6 @@
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思维签名验证通过率",
       "compatibilityNote": "部分不兼容站点不会展示",
-      "customSitePlaceholder": "没有找到？输入其他中转站网址",
       "provisionFailed": "账号已添加，但创建接入配置失败：{{reason}}。可返回中转站列表重试。",
       "meta": {
         "samples": "{{count}} 次检测",
@@ -3129,11 +3128,9 @@
       "actions": {
         "authenticate": "注册或登录",
         "autoAddHint": "完成后自动添加",
-        "manualAddHint": "需要手动添加",
         "history": "完整历史",
         "refresh": "刷新实时榜单",
-        "retry": "重试",
-        "useOtherSite": "使用其他站点"
+        "retry": "重试"
       },
       "pagination": {
         "range": "{{from}}–{{to}} / {{total}}",

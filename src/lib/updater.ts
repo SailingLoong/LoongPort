@@ -8,8 +8,7 @@ export interface UpdateInfo {
 }
 
 export type AppUpdateCheckResult =
-  | { status: "upToDate" }
-  | { status: "available"; info: UpdateInfo };
+  { status: "upToDate" } | { status: "available"; info: UpdateInfo };
 
 export const checkForUpdate = (): Promise<AppUpdateCheckResult> =>
   invoke("check_app_update");

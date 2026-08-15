@@ -55,7 +55,7 @@ fn generated_config_is_a_shape_codex_accepts() {
     let config_text = settings["config"].as_str().expect("config 应是字符串");
 
     // 1) 必须是合法 TOML —— 语法错的话 codex 启动时才报，而那时用户只看到「用不了」。
-    let parsed: toml::Value = config_text.parse().expect("生成的 config.toml 必须可解析");
+    let parsed: toml::Table = config_text.parse().expect("生成的 config.toml 必须可解析");
 
     // 2) model_provider 必须是 custom：它是会话历史的桶标识，也是 bearer token 能落进
     //    provider 作用域的前提（`openai` 在 codex 的保留 id 里）。
@@ -140,7 +140,7 @@ fn writing_live_config_only_leaves_chatgpt_login_untouched() {
 
     // 而 sk 应该落在 config.toml 的 provider 作用域里。
     let written = std::fs::read_to_string(get_codex_config_path()).expect("读 config.toml");
-    let parsed: toml::Value = written.parse().expect("写出的 config.toml 必须可解析");
+    let parsed: toml::Table = written.parse().expect("写出的 config.toml 必须可解析");
     assert_eq!(
         parsed["model_providers"]["custom"]["experimental_bearer_token"].as_str(),
         Some("sk-loongport-test"),
@@ -197,7 +197,7 @@ fn provisioned_provider_switches_and_lands_correct_config() {
 
     // 落盘的 config.toml 必须是 codex 接受的形态。
     let written = std::fs::read_to_string(get_codex_config_path()).expect("读 config.toml");
-    let parsed: toml::Value = written.parse().expect("落盘的 config.toml 必须可解析");
+    let parsed: toml::Table = written.parse().expect("落盘的 config.toml 必须可解析");
 
     assert_eq!(
         parsed["model_provider"].as_str(),
@@ -297,7 +297,7 @@ fn refreshing_the_current_tiers_key_updates_the_live_config() {
         .expect("同步当前项的落地配置不该失败");
 
     let written = std::fs::read_to_string(get_codex_config_path()).expect("读 config.toml");
-    let parsed: toml::Value = written.parse().expect("落盘的 config.toml 必须可解析");
+    let parsed: toml::Table = written.parse().expect("落盘的 config.toml 必须可解析");
     assert_eq!(
         parsed["model_providers"]["custom"]["experimental_bearer_token"].as_str(),
         Some("sk-rebuilt"),

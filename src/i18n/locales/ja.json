@@ -3119,7 +3119,6 @@
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思考署名の検証成功率",
       "compatibilityNote": "一部の非互換サイトは表示されません",
-      "customSitePlaceholder": "見つからない場合は別の中継サイト URL を入力",
       "provisionFailed": "アカウントは追加されましたが、接続設定の作成に失敗しました：{{reason}}。中継サイト一覧から再試行できます。",
       "meta": {
         "samples": "{{count}} 回の検証",
@@ -3129,11 +3128,9 @@
       "actions": {
         "authenticate": "登録またはログイン",
         "autoAddHint": "完了後に自動追加",
-        "manualAddHint": "ログイン後に手動で追加",
         "history": "全履歴",
         "refresh": "ライブランキングを更新",
-        "retry": "再試行",
-        "useOtherSite": "別のサイトを使用"
+        "retry": "再試行"
       },
       "pagination": {
         "range": "{{from}}–{{to}} / {{total}}",

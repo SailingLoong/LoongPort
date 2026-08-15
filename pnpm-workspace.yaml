@@ -1,4 +1,9 @@
-packages: []
+# remote-config 是独立部署单元（Cloudflare Pages Functions），有运行时依赖
+# （linkedom），必须进 workspace —— 否则 `pnpm install` 不装它，本地测试与
+# wrangler 打包 Functions 时都解析不到（2026-08-15 review 抓出三方不一致：
+# package.json 与 pnpm-lock.yaml 都当它是 importer，唯独这里漏了）。
+packages:
+  - remote-config
 
 onlyBuiltDependencies:
   - '@tailwindcss/oxide'
@@ -6,6 +11,9 @@ onlyBuiltDependencies:
 
 ignoredBuiltDependencies:
   - msw
+  # code-inspector-plugin v2 的可选依赖（dev 期 click-to-editor 用），
+  # 原生构建脚本是它自己的事，与本仓无关。
+  - node-pty
 
 # pnpm 10 会在遇到未表态的构建脚本时中止 install（连带把 `pnpm run xxx` 全挡住，
 # 因为它们跑之前都会做一次 deps 检查）。这两条是显式表态：
@@ -14,3 +22,4 @@ ignoredBuiltDependencies:
 allowBuilds:
   esbuild: true
   msw: false
+  node-pty: set this to true or false

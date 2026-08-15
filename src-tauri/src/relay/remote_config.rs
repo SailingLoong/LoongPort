@@ -59,6 +59,19 @@ const CONFIG_URL: &str = "https://config.loongport.dev/v1/config.json";
 /// 签名文件的 URL（与配置同目录、同名加 `.sig`）。
 const SIGNATURE_URL: &str = "https://config.loongport.dev/v1/config.json.sig";
 
+/// Provider directory v2 的发布端点。
+///
+/// v2 是给多站点策略消费者使用的独立契约；现有桌面端仍只消费 v1，
+/// 所以这两个常量只作为签名与发布脚本的唯一 URL 来源，不能改动 v1 的读取路径。
+// `remote-config/lib.sh::rc_const` 在仓库外部读取它；Rust 无法看到这条跨语言引用。
+#[allow(dead_code)]
+const DIRECTORY_V2_URL: &str = "https://config.loongport.dev/v2/directory.json";
+
+/// Provider directory v2 的 detached Ed25519 签名端点。
+// 与 `DIRECTORY_V2_URL` 一样，由签名和部署脚本读取，而不是桌面运行时读取。
+#[allow(dead_code)]
+const DIRECTORY_V2_SIGNATURE_URL: &str = "https://config.loongport.dev/v2/directory.json.sig";
+
 /// 占位标记。端点含它就说明还没配真实域名。
 ///
 /// `.invalid` 是 RFC 2606 保留 TLD —— 占位期间万一判断失灵真发了请求，
@@ -197,6 +210,8 @@ pub struct RelayDirectorySite {
     pub veridrop_host: Option<String>,
     #[serde(default)]
     pub entry_url: Option<String>,
+    #[serde(default)]
+    pub purchase_url: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
 }
@@ -562,6 +577,53 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, App
     Ok(buf)
 }
 
+/// 读取签名目录为站点配置的购买入口。
+///
+/// 购买地址会直接承载用户的付款动作，因此只接受 HTTPS 且与站点 origin 完全同源的
+/// 已签名值。目录没有该站或该字段为空时返回 `Ok(None)`；配置值不安全时返回错误，
+/// 不猜测 `/purchase`、`/wallet` 或其它路径。
+pub fn configured_purchase_url(
+    config: &RemoteConfig,
+    site_origin: &str,
+) -> Result<Option<url::Url>, AppError> {
+    let normalized_origin = super::api::normalize_site_origin(site_origin)?;
+    let host = super::aff::lookup_host(&normalized_origin);
+    let Some(configured) = config
+        .relay_directory
+        .sites
+        .get(&host)
+        .and_then(|site| site.purchase_url.as_deref())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let purchase_url = url::Url::parse(configured)
+        .map_err(|e| AppError::Config(format!("购买入口地址不合法: {e}")))?;
+    if purchase_url.scheme() != "https" {
+        return Err(AppError::Config("购买入口必须使用 HTTPS".into()));
+    }
+
+    let relay_origin = url::Url::parse(&normalized_origin)
+        .map_err(|e| AppError::Config(format!("归一化后的站点地址不合法: {e}")))?;
+    let purchase_origin = (
+        purchase_url.scheme(),
+        purchase_url.host_str(),
+        purchase_url.port_or_known_default(),
+    );
+    let expected_origin = (
+        relay_origin.scheme(),
+        relay_origin.host_str(),
+        relay_origin.port_or_known_default(),
+    );
+    if purchase_origin != expected_origin {
+        return Err(AppError::Config("购买入口必须与中转站同源".into()));
+    }
+
+    Ok(Some(purchase_url))
+}
+
 /// 按三层回落查一个站的邀请码：远端（已缓存的） > 编译期内置。
 ///
 /// `cached` 传上一次成功拉取并缓存下来的配置（`None` = 没有缓存）。
@@ -626,7 +688,50 @@ fn resolve_code(
 mod tests {
     use super::*;
 
+    use serde::Deserialize;
     use std::sync::Mutex;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DirectoryV2Contract {
+        schema_version: u8,
+        issued_at: String,
+        sites: Vec<DirectorySiteV2Contract>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DirectorySiteV2Contract {
+        id: String,
+        display_name: String,
+        origin: String,
+        entry_url: String,
+        api_base_url: Option<String>,
+        invite_code: Option<String>,
+        models: Vec<DirectoryModelV2Contract>,
+        sponsorship: Option<DirectorySponsorshipV2Contract>,
+        veridrop_hosts: Vec<String>,
+        authorization: Option<DirectoryAuthorizationV2Contract>,
+        disabled: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DirectoryModelV2Contract {
+        id: String,
+        #[serde(rename = "default")]
+        is_default: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DirectorySponsorshipV2Contract {
+        label: String,
+        url: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DirectoryAuthorizationV2Contract {
+        kind: String,
+    }
 
     /// 测试用的缓存目录覆盖。见 [`super::cache_dir`] 的文档。
     ///
@@ -774,6 +879,63 @@ mod tests {
         (hex, pair)
     }
 
+    fn config_with_site(
+        host: &str,
+        entry_url: Option<&str>,
+        purchase_url: Option<&str>,
+    ) -> RemoteConfig {
+        RemoteConfig {
+            relay_directory: RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([(
+                    host.to_string(),
+                    RelayDirectorySite {
+                        veridrop_host: None,
+                        entry_url: entry_url.map(str::to_string),
+                        purchase_url: purchase_url.map(str::to_string),
+                        display_name: None,
+                    },
+                )]),
+            },
+            ..RemoteConfig::default()
+        }
+    }
+
+    #[test]
+    fn purchase_url_requires_signed_https_same_origin() {
+        let config = config_with_site(
+            "api-top.com",
+            Some("https://api-top.com/register"),
+            Some("https://api-top.com/wallet"),
+        );
+
+        assert_eq!(
+            configured_purchase_url(&config, "https://api-top.com")
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "https://api-top.com/wallet"
+        );
+        assert!(configured_purchase_url(&config, "https://unknown.example")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn purchase_url_rejects_http_and_cross_origin_entries() {
+        for purchase_url in [
+            "http://api-top.com/wallet",
+            "https://payments.example/wallet",
+        ] {
+            let config = config_with_site(
+                "api-top.com",
+                Some("https://api-top.com/register"),
+                Some(purchase_url),
+            );
+            assert!(configured_purchase_url(&config, "https://api-top.com").is_err());
+        }
+    }
+
     fn cfg_with(host: &str, code: &str) -> RemoteConfig {
         let mut aff_codes = std::collections::BTreeMap::new();
         aff_codes.insert(host.to_string(), code.to_string());
@@ -836,6 +998,80 @@ mod tests {
     }
 
     #[test]
+    fn v2_directory_contract_publishes_the_bestapi_policy() {
+        let raw = include_bytes!("../../../remote-config/public/v2/directory.json");
+        // 与 v1 那道闸（`checked_in_config_passes_the_clients_own_gate`）同构：
+        // 仓内 `.sig` 必须能用生产公钥验过仓内 JSON 的原始字节。少了这条，
+        // 「改了 directory.json 忘了重跑 sign-v2.sh」在 cargo test 层零覆盖 ——
+        // 部署后消费者整份拒绝，症状与「服务器挂了」一样难查。
+        let sig = include_bytes!("../../../remote-config/public/v2/directory.json.sig");
+        assert_eq!(sig.len(), 64, "Ed25519 签名必须是裸 64 字节");
+        verify_with(PUBLIC_KEY_HEX, raw, sig)
+            .expect("仓内 v2 directory.json.sig 必须用客户端公钥验过当前 JSON");
+
+        let directory: DirectoryV2Contract =
+            serde_json::from_slice(raw).expect("v2 directory must parse as its published schema");
+
+        assert_eq!(directory.schema_version, 2);
+        assert!(
+            !directory.issued_at.is_empty(),
+            "v2 directory needs an issuedAt timestamp"
+        );
+
+        let bestapi = directory
+            .sites
+            .iter()
+            .find(|site| site.id == "bestapi")
+            .expect("v2 directory must publish bestapi");
+
+        assert_eq!(bestapi.display_name, "BestAPI");
+        assert_eq!(bestapi.origin, "https://api.bestapi.store");
+        assert_eq!(bestapi.entry_url, "https://api.bestapi.store/");
+        assert_eq!(
+            bestapi.api_base_url.as_deref(),
+            Some("https://api.bestapi.store/v1")
+        );
+        assert!(
+            bestapi.invite_code.is_none(),
+            "the policy must not invent an invite code"
+        );
+        assert_eq!(
+            bestapi
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["deepseek-v4-flash", "deepseek-v4-pro"]
+        );
+        assert_eq!(
+            bestapi
+                .models
+                .iter()
+                .filter(|model| model.is_default == Some(true))
+                .map(|model| (model.id.as_str(), model.is_default))
+                .collect::<Vec<_>>(),
+            [("deepseek-v4-flash", Some(true))]
+        );
+        assert_eq!(
+            bestapi
+                .authorization
+                .as_ref()
+                .map(|authorization| authorization.kind.as_str()),
+            Some("manual-api-key")
+        );
+        assert!(
+            !bestapi.veridrop_hosts.is_empty(),
+            "each directory site must declare its Veridrop hosts"
+        );
+
+        if let Some(sponsorship) = &bestapi.sponsorship {
+            assert!(!sponsorship.label.is_empty());
+            assert!(sponsorship.url.starts_with("https://"));
+        }
+        assert!(bestapi.disabled != Some(true), "BestAPI must start enabled");
+    }
+
+    #[test]
     fn endpoints_and_key_are_configured_for_production() {
         // 2026-08-03 端点与公钥都配成真的了（这条以前断言的是反面，是那时留的闸）。
         // 现在它守的是**别退回占位**，以及下面那三条「填错了会静默失效」的性质。
@@ -859,6 +1095,19 @@ mod tests {
             SIGNATURE_URL,
             format!("{CONFIG_URL}.sig"),
             "签名 URL 必须是配置 URL 加 .sig"
+        );
+
+        for url in [DIRECTORY_V2_URL, DIRECTORY_V2_SIGNATURE_URL] {
+            assert!(
+                !url.contains(UNCONFIGURED_MARKER),
+                "v2 端点不该含占位标记: {url}"
+            );
+            assert!(url.starts_with("https://"), "v2 端点必须是 HTTPS: {url}");
+        }
+        assert_eq!(
+            DIRECTORY_V2_SIGNATURE_URL,
+            format!("{DIRECTORY_V2_URL}.sig"),
+            "v2 签名 URL 必须是目录 URL 加 .sig"
         );
 
         // ⭐ 公钥填错（截断 / 多粘一个字符 / 误填低阶点）同样表现成「验签永远失败」。
@@ -1210,6 +1459,51 @@ mod tests {
                 Some("NEWCODE12345"),
                 "{origin}"
             );
+        }
+    }
+
+    /// ⭐ **仓内那份待发布配置必须过客户端自己的完整判据（验签 + 严格解析）。**
+    ///
+    /// `remote-config/public/v1/config.json` 与 `.sig` 是部署到线上、所有客户端
+    /// 启动时拉的那份。它与本 DTO 的一致性此前**没有任何闸**：改了 JSON 忘了重签、
+    /// 或写出客户端解不出的形状，都要等部署后从用户症状反推（README 里 sign.sh /
+    /// deploy.sh 各有一道，但 CI 层面是空的）。`include_str!` / `include_bytes!`
+    /// 是**编译期嵌入** ⇒ 这里比较的就是仓库里那两个文件的原始字节，签名覆盖的
+    /// 也是同一份字节。
+    #[test]
+    fn checked_in_config_passes_the_clients_own_gate() {
+        let body = include_str!("../../../remote-config/public/v1/config.json");
+        let sig = include_bytes!("../../../remote-config/public/v1/config.json.sig");
+        assert_eq!(sig.len(), 64, "Ed25519 签名必须是裸 64 字节");
+
+        // 与生产同一条路径：生产公钥 → 验签 → 验过才解析。
+        let cfg = parse_verified(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
+            .expect("仓内 config.json + .sig 必须过客户端同一套验签与解析");
+
+        assert!(!cfg.sponsors.is_empty(), "推荐列表不该是空的");
+        for sponsor in &cfg.sponsors {
+            assert!(
+                sponsor.site_origin.starts_with("https://"),
+                "sponsor origin 必须是 https：{}",
+                sponsor.site_origin
+            );
+            assert!(
+                !sponsor.display_name.trim().is_empty(),
+                "sponsor 展示名不能为空：{}",
+                sponsor.site_origin
+            );
+            // 每个赞助站都必须配邀请码 —— 这份文件存在的目的就是返利；
+            // 少一条 = 那个站的返利静默归零。哪天某站确实没有返利计划，
+            // 再有意识地放宽这条并说明原因。
+            let host = crate::relay::aff::lookup_host(&sponsor.site_origin);
+            assert!(
+                cfg.aff_codes.contains_key(&host),
+                "sponsor {} 没有配邀请码（归一后 host={host}）",
+                sponsor.site_origin
+            );
+        }
+        for (host, code) in &cfg.aff_codes {
+            assert!(!code.trim().is_empty(), "aff_codes 里 {host} 的码是空的");
         }
     }
 

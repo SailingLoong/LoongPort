@@ -68,6 +68,7 @@ pub mod login;
 pub mod managed;
 pub mod newapi;
 pub mod newapi_provision;
+pub mod newapi_purchase;
 // Phase 1 defines this crate-internal contract before Phase 2 consumes it.
 #[allow(dead_code)]
 pub mod model_verification;
@@ -77,6 +78,7 @@ pub mod promo;
 pub(crate) mod provider_fingerprint;
 pub mod provision;
 pub mod purchase;
+pub mod purchase_session;
 pub mod remote_config;
 pub mod stats;
 

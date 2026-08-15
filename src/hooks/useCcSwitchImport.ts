@@ -8,11 +8,7 @@ import type {
 } from "@/lib/api/ccSwitchImport";
 
 export type CcSwitchImportStatus =
-  | "idle"
-  | "loading"
-  | "importing"
-  | "success"
-  | "error";
+  "idle" | "loading" | "importing" | "success" | "error";
 
 export interface UseCcSwitchImportResult {
   /** 最近一次拉到的预览（可能为 null = 还没拉 / 源库不存在）。 */

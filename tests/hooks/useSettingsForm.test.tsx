@@ -9,7 +9,15 @@ vi.mock("@/lib/query", () => ({
   useSettingsQuery: (...args: unknown[]) => useSettingsQueryMock(...args),
 }));
 
-let changeLanguageSpy: ReturnType<typeof vi.spyOn<any, any>>;
+// react-i18next v17 的 useTranslation 在 i18next 未走 initReactI18next 初始化时，
+// 每次渲染给的 i18n 实例身份不稳定，会让 useSettingsForm 里依赖 [i18n] 的
+// callback 每次 render 都换新 ⇒ 初始化 effect 反复重跑、覆盖 reset 结果。
+// mock 成同一个单例，语义与生产（i18next init 过）一致。
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ i18n }),
+}));
+
+let changeLanguageSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   useSettingsQueryMock.mockReset();

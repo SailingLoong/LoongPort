@@ -6,14 +6,14 @@
 # 所以这个文件被改一个字节（哪怕只是空白）签名就失效。
 # ⇒ **改完 config.json 必须重跑本脚本**，两个文件一起发布。
 #
-# 私钥在仓外（见 KEY_PATH），绝不进仓库。
+# 私钥由授权维护者在仓外通过 LOONGPORT_CONFIG_KEY 提供，绝不进仓库或日志。
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$HERE/public/v1/config.json"
 SIG="$HERE/public/v1/config.json.sig"
-KEY_PATH="${LOONGPORT_CONFIG_KEY:-$HOME/Documents/loongport-keys/remote-config-ed25519.pem}"
+KEY_PATH="${LOONGPORT_CONFIG_KEY:-}"
 RS="${LOONGPORT_REMOTE_CONFIG_RS:-$HERE/../src-tauri/src/relay/remote_config.rs}"
 
 # shellcheck source=lib.sh
@@ -21,9 +21,8 @@ RS="${LOONGPORT_REMOTE_CONFIG_RS:-$HERE/../src-tauri/src/relay/remote_config.rs}
 
 require_openssl_with_ed25519
 
-if [ ! -f "$KEY_PATH" ]; then
-  echo "✘ 找不到私钥：$KEY_PATH" >&2
-  echo "  （用 LOONGPORT_CONFIG_KEY 指定别的路径）" >&2
+if [ -z "$KEY_PATH" ] || [ ! -f "$KEY_PATH" ]; then
+  echo "✘ LOONGPORT_CONFIG_KEY 必须由授权维护者提供可读的 Ed25519 私钥文件" >&2
   exit 1
 fi
 
@@ -49,7 +48,7 @@ openssl pkeyutl -sign -inkey "$KEY_PATH" -rawin -in "$CONFIG" -out "$TMP_SIG"
 PUBKEY_HEX=$(rc_const PUBLIC_KEY_HEX "$RS")
 if ! verify_signature "$CONFIG" "$TMP_SIG" "$PUBKEY_HEX"; then
   echo "✘ 签出来的签名，用客户端那把公钥验不过 ——" >&2
-  echo "  说明 ${KEY_PATH} 与 remote_config.rs 里的 PUBLIC_KEY_HEX **不配对**。" >&2
+  echo "  说明提供的签名密钥与 remote_config.rs 里的 PUBLIC_KEY_HEX **不配对**。" >&2
   echo "  用错私钥了？还是换过密钥对但没同步代码里的公钥？" >&2
   echo "  （现有的 ${SIG} 未被改动）" >&2
   exit 1
