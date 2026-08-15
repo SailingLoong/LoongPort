@@ -473,6 +473,13 @@ pub struct AppSettings {
     /// User has confirmed the common config first-run notice
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub common_config_confirmed: Option<bool>,
+    /// 新人引导的官方站注册窗**已经弹过**（无论用户注册、关窗还是超时）。
+    ///
+    /// 一次性标志：新人引导模块（`relay::onboarding`）用它保证注册窗每个安装只自动弹
+    /// 一次 —— 没弹成（关窗 / 超时 / 没网）也不重试，后续启动回落到既有的
+    /// 「添加站点」首启提示（`RelayStatus.should_prompt_add_site` 那条链路）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_register_prompted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 
@@ -611,6 +618,7 @@ impl Default for AppSettings {
             failover_confirmed: None,
             first_run_notice_confirmed: None,
             common_config_confirmed: None,
+            onboarding_register_prompted: None,
             language: None,
             visible_apps: None,
             claude_config_dir: None,

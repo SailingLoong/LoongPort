@@ -1582,6 +1582,8 @@ pub fn run() {
             commands::switch_provider,
             // LoongPort 中转站
             commands::relay_status,
+            // 新人引导（官方站注册窗）
+            commands::onboarding_prompt_register,
             commands::relay_check_session,
             commands::relay_stats_endpoint_configured,
             commands::relay_list_sponsors,
