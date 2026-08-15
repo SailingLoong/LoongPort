@@ -1263,6 +1263,59 @@ impl Database {
         Ok(stats)
     }
 
+    /// 自动模式「响应最快」策略：各供应商在窗口内的平均首字耗时。
+    ///
+    /// 只统计有 first_token_ms 的行（流式成功请求）；窗口应 ≤ 明细保留天数，
+    /// 走 proxy_request_logs 即可（被 prune 掉的旧数据对「现在谁快」也没有代表性）。
+    /// key 不在返回值里 = 窗口内没有 TTFT 样本（排序时排最后，见 `proxy::auto_strategy`）。
+    pub fn get_provider_avg_first_token_ms(
+        &self,
+        app_type: &str,
+        since: i64,
+    ) -> Result<HashMap<String, u64>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn.prepare(
+            "SELECT provider_id,
+                    SUM(first_token_ms) / SUM(CASE WHEN first_token_ms IS NOT NULL THEN 1 ELSE 0 END)
+             FROM proxy_request_logs
+             WHERE app_type = ?1 AND created_at >= ?2 AND first_token_ms IS NOT NULL
+             GROUP BY provider_id",
+        )?;
+        let rows = stmt.query_map(params![app_type, since], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut result = HashMap::new();
+        for row in rows {
+            let (provider_id, avg) = row?;
+            result.insert(provider_id, avg.max(0) as u64);
+        }
+        Ok(result)
+    }
+
+    /// 自动模式会话亲和：各供应商在该应用下的最近一次请求时间（unix 秒）。
+    ///
+    /// 用于判断「当前在用档位是否还在会话中」—— 切换会丢提示词缓存，
+    /// 近期有流量的档位保持置顶，闲置后才允许策略重排接管。
+    pub fn get_provider_last_activity(
+        &self,
+        app_type: &str,
+    ) -> Result<HashMap<String, i64>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn.prepare(
+            "SELECT provider_id, MAX(created_at) FROM proxy_request_logs
+             WHERE app_type = ?1 GROUP BY provider_id",
+        )?;
+        let rows = stmt.query_map(params![app_type], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut result = HashMap::new();
+        for row in rows {
+            let (provider_id, last) = row?;
+            result.insert(provider_id, last);
+        }
+        Ok(result)
+    }
+
     /// 获取 Provider 统计
     pub fn get_provider_stats(
         &self,

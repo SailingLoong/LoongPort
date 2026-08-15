@@ -403,6 +403,34 @@ impl Database {
         Ok(())
     }
 
+    /// 批量读一个应用下全部档位的存库倍率（自动模式「价格最低」策略用）。
+    ///
+    /// 只返回有值的行：key 不在 map 里 = 倍率未知（排序时当最贵处理，
+    /// 见 `proxy::auto_strategy`），免得调用方到处拆 `Option`。
+    pub fn get_tier_rate_multipliers(
+        &self,
+        app_type: &str,
+    ) -> Result<HashMap<String, f64>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, tier_rate_multiplier FROM providers
+                 WHERE app_type = ?1 AND tier_rate_multiplier IS NOT NULL",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![app_type], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut result = HashMap::new();
+        for row in rows {
+            let (id, multiplier) = row.map_err(|e| AppError::Database(e.to_string()))?;
+            result.insert(id, multiplier);
+        }
+        Ok(result)
+    }
+
     pub fn update_provider_settings_config(
         &self,
         app_type: &str,

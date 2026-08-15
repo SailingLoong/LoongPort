@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 
 mod auth;
+// 自动模式（系统按策略挑托管档位）：选路在 proxy 层，这里是开关/策略命令层。
+mod auto_mode;
 mod balance;
 mod codex_oauth;
 mod coding_plan;
@@ -50,6 +52,7 @@ mod webdav_sync;
 mod workspace;
 
 pub use auth::*;
+pub use auto_mode::*;
 pub use balance::*;
 pub use codex_oauth::*;
 pub use coding_plan::*;

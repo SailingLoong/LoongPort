@@ -1857,6 +1857,10 @@ pub fn run() {
             commands::remove_from_failover_queue,
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
+            // Auto mode (LoongPort): 系统按策略自动挑托管档位
+            commands::get_auto_mode_status,
+            commands::set_auto_mode_enabled,
+            commands::set_auto_mode_strategy,
             // Usage statistics
             commands::get_usage_summary,
             commands::get_usage_summary_by_app,
