@@ -14,14 +14,18 @@
 //! enum 静态分派零新依赖、编译期穷尽，与 [`crate::relay::platform_map`] 的风格一致。
 //! 加第二家厂商 = 加一个变体 + 编译器把所有没覆盖的 match 点报出来。
 
+pub mod bigmodel;
 pub mod creds;
 pub mod deepseek;
 pub mod provision;
+
+use crate::error::AppError;
 
 /// 支持的官网厂商。加一家就加一个变体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vendor {
     DeepSeek,
+    BigModel,
 }
 
 impl Vendor {
@@ -29,20 +33,196 @@ impl Vendor {
     pub fn vendor_id(&self) -> &'static str {
         match self {
             Vendor::DeepSeek => "deepseek",
+            Vendor::BigModel => "bigmodel",
         }
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
             Vendor::DeepSeek => "DeepSeek",
+            Vendor::BigModel => "智谱 BigModel",
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
             "deepseek" => Some(Vendor::DeepSeek),
+            "bigmodel" => Some(Vendor::BigModel),
             _ => None,
         }
+    }
+}
+
+// ─────────────────────── 厂商分发（同 relay::backend 的形状） ───────────────────────
+
+/// 登录窗回传解析后的统一形态：凭据材料（进 `auth_token` 列）+ 账号身份。
+///
+/// deepseek 的 `auth_token` 是裸 JWT；bigmodel 是三件套的 JSON（[`bigmodel::Session`]）。
+/// 列语义都是「调用该厂商 API 所需的全部凭据」，各模块自己序列化。
+pub struct VendorSession {
+    pub auth_token: String,
+    pub account: VendorAccount,
+}
+
+/// 功能性登录页。远端配置的 `vendor_invite_urls`（维护者返利链接，
+/// 已过 HTTPS + 同源闸）存在且属于该厂商时，优先打开它 —— 归因在服务端完成，
+/// 对登录流程零侵入。
+pub fn login_url(vendor: Vendor) -> String {
+    let builtin = match vendor {
+        Vendor::DeepSeek => deepseek::LOGIN_URL,
+        Vendor::BigModel => bigmodel::LOGIN_URL,
+    };
+    let invite = crate::relay::remote_config::load_cached()
+        .and_then(|config| config.vendor_invite_urls.get(vendor.vendor_id()).cloned())
+        .filter(|url| {
+            url::Url::parse(url)
+                .is_ok_and(|u| u.scheme() == "https" && u.host_str() == Some(invite_host(vendor)))
+        });
+    invite.unwrap_or_else(|| builtin.to_string())
+}
+
+/// 邀请链接必须落在的 host（同源闸的判据）。
+fn invite_host(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::DeepSeek => "platform.deepseek.com",
+        Vendor::BigModel => "www.bigmodel.cn",
+    }
+}
+
+pub fn login_window_label(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::DeepSeek => deepseek::LOGIN_WINDOW_LABEL,
+        Vendor::BigModel => bigmodel::LOGIN_WINDOW_LABEL,
+    }
+}
+
+pub fn login_script(vendor: Vendor, login_hint: &str) -> String {
+    match vendor {
+        Vendor::DeepSeek => deepseek::login_script(login_hint),
+        Vendor::BigModel => bigmodel::login_script(login_hint),
+    }
+}
+
+pub fn parse_creds_navigation(
+    vendor: Vendor,
+    url: &url::Url,
+) -> Option<Result<VendorSession, AppError>> {
+    match vendor {
+        Vendor::DeepSeek => deepseek::parse_creds_navigation(url).map(|result| {
+            result.map(|creds| VendorSession {
+                auth_token: creds.auth_token.clone(),
+                account: VendorAccount::from(creds),
+            })
+        }),
+        Vendor::BigModel => bigmodel::parse_creds_navigation(url).map(|result| {
+            result.map(|(session, account)| VendorSession {
+                auth_token: serde_json::to_string(&session).unwrap_or_default(),
+                account,
+            })
+        }),
+    }
+}
+
+pub async fn list_keys(vendor: Vendor, auth_token: &str) -> Result<Vec<VendorKey>, VendorError> {
+    match vendor {
+        Vendor::DeepSeek => deepseek::list_keys(auth_token).await,
+        Vendor::BigModel => {
+            bigmodel::list_keys(
+                &bigmodel::parse_session(auth_token)
+                    .map_err(|e| VendorError::Transient(e.to_string()))?,
+            )
+            .await
+        }
+    }
+}
+
+pub async fn create_key(
+    vendor: Vendor,
+    auth_token: &str,
+    name: &str,
+) -> Result<String, VendorError> {
+    match vendor {
+        Vendor::DeepSeek => deepseek::create_key(auth_token, name).await,
+        Vendor::BigModel => {
+            bigmodel::create_key(
+                &bigmodel::parse_session(auth_token)
+                    .map_err(|e| VendorError::Transient(e.to_string()))?,
+                name,
+            )
+            .await
+        }
+    }
+}
+
+pub async fn delete_key(
+    vendor: Vendor,
+    auth_token: &str,
+    key: &VendorKey,
+) -> Result<(), VendorError> {
+    match vendor {
+        Vendor::DeepSeek => deepseek::delete_key(auth_token, key).await,
+        Vendor::BigModel => {
+            bigmodel::delete_key(
+                &bigmodel::parse_session(auth_token)
+                    .map_err(|e| VendorError::Transient(e.to_string()))?,
+                key,
+            )
+            .await
+        }
+    }
+}
+
+pub async fn balance(
+    vendor: Vendor,
+    auth_token: &str,
+) -> Result<Option<crate::provider::UsageResult>, VendorError> {
+    match vendor {
+        Vendor::DeepSeek => deepseek::balance(auth_token).await,
+        Vendor::BigModel => {
+            bigmodel::balance(
+                &bigmodel::parse_session(auth_token)
+                    .map_err(|e| VendorError::Transient(e.to_string()))?,
+            )
+            .await
+        }
+    }
+}
+
+pub fn config_for(vendor: Vendor, app: &crate::app_config::AppType) -> Option<(String, String)> {
+    match vendor {
+        Vendor::DeepSeek => deepseek::config_for(app),
+        Vendor::BigModel => bigmodel::config_for(app),
+    }
+}
+
+pub fn claude_role_models(vendor: Vendor) -> crate::relay::provision::ClaudeRoleModels {
+    match vendor {
+        Vendor::DeepSeek => deepseek::claude_role_models(),
+        Vendor::BigModel => bigmodel::claude_role_models(),
+    }
+}
+
+/// 「管理 API Key」网页（帮助跳转）。`None` = 该厂商没有公开的密钥管理页。
+pub fn api_keys_help_url(vendor: Vendor) -> Option<&'static str> {
+    match vendor {
+        Vendor::DeepSeek => Some(deepseek::API_KEYS_URL),
+        Vendor::BigModel => Some(bigmodel::API_KEYS_URL),
+    }
+}
+
+/// 官网站点 origin（provider 的 website_url 等展示用）。
+pub fn site_origin(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::DeepSeek => deepseek::SITE_ORIGIN,
+        Vendor::BigModel => bigmodel::SITE_ORIGIN,
+    }
+}
+
+/// 该厂商 API 调用的 base origin（余额兜底等）。
+pub fn api_origin(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::DeepSeek => deepseek::API_ORIGIN,
+        Vendor::BigModel => bigmodel::API_ORIGIN,
     }
 }
 

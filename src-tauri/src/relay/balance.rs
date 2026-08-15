@@ -92,8 +92,11 @@ pub struct BalanceQuery<'a> {
 pub enum SessionFallback<'a> {
     /// sub2api / NewAPI 中转站的 JWT 路。**NewAPI 站只有这一条**，不能删。
     Relay(&'a creds::Relay),
-    /// 官网（DeepSeek）的网页登录态路。
-    Vendor { auth_token: &'a str },
+    /// 官网厂商的网页登录态路。每家的会话接口不同（`vendor::balance` 分发）。
+    Vendor {
+        vendor: crate::vendor::Vendor,
+        auth_token: &'a str,
+    },
     /// 这一行没有可用登录态 ⇒ 跳过第 3 步，别去打一个必定 401 的请求。
     None,
 }
@@ -237,8 +240,8 @@ async fn session_balance(
                 }
             }
         }
-        SessionFallback::Vendor { auth_token } => {
-            match crate::vendor::deepseek::balance(auth_token).await {
+        SessionFallback::Vendor { vendor, auth_token } => {
+            match crate::vendor::balance(*vendor, auth_token).await {
                 Ok(Some(usage)) => Some(usage),
                 // 登录态活着但这个账号没有钱包 ⇒ 确实没有余额可显示，不当成错误，
                 // 也不编造一个 0（见 `deepseek::wallet_usage`）。

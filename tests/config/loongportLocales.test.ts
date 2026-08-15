@@ -40,6 +40,10 @@ const requiredKeys = [
   "directory.scoreLabel",
   "directory.signatureHint",
   "directory.compatibilityNote",
+  // 独立「官方 API」页（厂商选择 → 登录 → 备钥），与广场并列的子流程。
+  "officialApi.title",
+  "officialApi.description",
+  "officialApi.connect",
   "directory.provisionFailed",
   "directory.meta.samples",
   "directory.meta.latest",

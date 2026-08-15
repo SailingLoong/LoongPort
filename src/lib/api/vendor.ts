@@ -86,15 +86,23 @@ export interface VendorLoginResult {
 }
 
 /**
- * 目前唯一支持的厂商。
+ * 官网厂商的稳定标识。
  *
- * ⚠️ 与 Rust 侧 `Vendor::DeepSeek.vendor_id()` 必须一致 —— 它是**稳定标识**
+ * ⚠️ 与 Rust 侧 `Vendor::vendor_id()` 必须一致 —— 它是**稳定标识**
  * （进数据库、进 provider id 的哈希），后端认不出会直接报「不认识的厂商」。
- *
- * 摆成常量而不是把 `"deepseek"` 散在组件里：加第二家厂商时这里会变成一个选择器，
- * 而散落的字面量得逐个找出来。
  */
 export const DEEPSEEK_VENDOR_ID = "deepseek";
+export const BIGMODEL_VENDOR_ID = "bigmodel";
+
+/** 「官方 API」页的厂商目录（展示名/说明与 Rust 侧 `display_name` 对应）。 */
+export const VENDOR_CATALOG: ReadonlyArray<{
+  id: string;
+  displayName: string;
+  descriptionKey: string;
+}> = [
+  { id: DEEPSEEK_VENDOR_ID, displayName: "DeepSeek", descriptionKey: "loongport.officialApi.deepseekDesc" },
+  { id: BIGMODEL_VENDOR_ID, displayName: "智谱 BigModel", descriptionKey: "loongport.officialApi.bigmodelDesc" },
+];
 
 export const vendorApi = {
   /**

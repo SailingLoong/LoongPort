@@ -20,10 +20,11 @@
 use serde_json::Value;
 
 use crate::app_config::AppType;
-use crate::vendor::{deepseek, key_name_for, Vendor, VendorKey};
+use crate::vendor::{key_name_for, Vendor, VendorKey};
 
-/// 六个平台。`Gemini` / `GrokBuild` 不在其中（上游无 DeepSeek preset）。
-pub const DEEPSEEK_APPS: [AppType; 6] = [
+/// 官网厂商展开的全部平台。`Gemini` / `GrokBuild` 等不在其中
+/// （vendor 的 `config_for` 对不支持的平台返回 `None`，这里只是候选集）。
+pub const VENDOR_APPS: [AppType; 6] = [
     AppType::Codex,
     AppType::Claude,
     AppType::ClaudeDesktop,
@@ -77,18 +78,22 @@ pub fn keys_to_delete(all: &[VendorKey], account_id: &str) -> Vec<VendorKey> {
 ///
 /// 只有 Claude 系有那套角色别名（`ANTHROPIC_DEFAULT_*` / `CLAUDE_CODE_SUBAGENT_MODEL`），
 /// 其余平台返回 `None`。分档的取值与理由见
-/// [`deepseek::claude_role_models`]。
+/// [`crate::vendor::claude_role_models`]。
 ///
 /// ## ⚠️ 生成配置与 `is_user_edited` 的基准**必须都走这个函数**
 ///
 /// `is_user_edited` 靠「与重算的默认值整份比对」判断用户改没改过
 /// （`relay::provision::is_user_edited`）。两边算法只要有一处不一致，
-/// 结果就是**每个 DeepSeek 的 Claude 档位都显示「已手工维护」**，而用户一个字没改过。
+/// 结果就是**每个官网档位都显示「已手工维护」**，而用户一个字没改过。
 ///
 /// 所以这个判断收在一个 pub 函数里，两个调用方（`provider_rows_for` 与
 /// vendor 侧算 `user_edited` 那处）共用它，而不是各写一遍 `matches!(app, Claude | ..)`。
-pub fn claude_roles_for(app: &AppType) -> Option<crate::relay::provision::ClaudeRoleModels> {
-    matches!(app, AppType::Claude | AppType::ClaudeDesktop).then(deepseek::claude_role_models)
+pub fn claude_roles_for(
+    vendor: Vendor,
+    app: &AppType,
+) -> Option<crate::relay::provision::ClaudeRoleModels> {
+    matches!(app, AppType::Claude | AppType::ClaudeDesktop)
+        .then(|| crate::vendor::claude_role_models(vendor))
 }
 
 /// 一把 sk 展开成六条 `(app_type, settings_config)`。
@@ -98,17 +103,17 @@ pub fn claude_roles_for(app: &AppType) -> Option<crate::relay::provision::Claude
 /// （`deeplink/provider.rs:147`）⇒ 我们要的六个都在里面，不需要新写分派。
 pub fn provider_rows_for(vendor: Vendor, api_key: &str) -> Vec<(AppType, Value)> {
     let display = vendor.display_name();
-    DEEPSEEK_APPS
+    VENDOR_APPS
         .iter()
         .filter_map(|app| {
-            let (base_url, model) = deepseek::config_for(app)?;
+            let (base_url, model) = crate::vendor::config_for(vendor, app)?;
             let cfg = crate::relay::provision::settings_config_with_roles(
                 app,
                 api_key,
                 display,
                 &base_url,
                 &model,
-                claude_roles_for(app),
+                claude_roles_for(vendor, app),
             )?;
             Some((app.clone(), cfg))
         })
@@ -250,7 +255,7 @@ mod tests {
         for app in provision_apps() {
             let expected = matches!(app, AppType::Claude | AppType::ClaudeDesktop);
             assert_eq!(
-                claude_roles_for(app).is_some(),
+                claude_roles_for(Vendor::DeepSeek, app).is_some(),
                 expected,
                 "{} 的角色分档判定错了 —— ClaudeDesktop 与 Claude 同形，两个都要有",
                 app.as_str()
@@ -260,7 +265,7 @@ mod tests {
 
     /// 本轮 provision 覆盖的那几个平台（测试辅助）。
     fn provision_apps() -> impl Iterator<Item = &'static AppType> {
-        DEEPSEEK_APPS.iter()
+        VENDOR_APPS.iter()
     }
 
     #[test]
