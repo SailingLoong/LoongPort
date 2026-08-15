@@ -465,9 +465,9 @@ pub fn provider_id_for(site_origin: &str, account_id: Option<i64>, group_id: i64
     h.update(group_id.to_string().as_bytes());
     // 取前 16 个 hex 字符：够避免碰撞，又不至于让 id 长得没法读。
     format!(
-        "{}{:.16x}",
+        "{}{}",
         crate::relay::managed::MANAGED_ID_PREFIX,
-        h.finalize()
+        &hex::encode(h.finalize())[..16]
     )
 }
 
@@ -486,9 +486,9 @@ pub fn newapi_provider_id_for(
     h.update(b"/");
     h.update(raw_group_identity.as_bytes());
     format!(
-        "{}{:.16x}",
+        "{}{}",
         crate::relay::managed::MANAGED_ID_PREFIX,
-        h.finalize()
+        &hex::encode(h.finalize())[..16]
     )
 }
 
@@ -2200,7 +2200,7 @@ mod tests {
     fn config_toml_quotes_values_so_names_cannot_break_toml() {
         // 分组名来自服务端，含引号或反斜杠时不转义就会写出坏 TOML，切换时解析失败。
         let toml = codex_config_toml(r#"Pro "special" \ tier"#, "https://x.dev/v1", "m");
-        let parsed: toml::Value = toml.parse().expect("生成的 TOML 必须可解析");
+        let parsed: toml::Table = toml.parse().expect("生成的 TOML 必须可解析");
         assert_eq!(
             parsed["model_providers"]["custom"]["name"]
                 .as_str()

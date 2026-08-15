@@ -218,7 +218,7 @@ async fn spawn_mock(
     protocol: MockProtocol,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    let route = format!("/{URL_SENTINEL}/v1/*rest");
+    let route = format!("/{URL_SENTINEL}/v1/{{*rest}}");
     let app = Router::new()
         .route(&route, post(mock_handler))
         .with_state(MockState { protocol, requests });

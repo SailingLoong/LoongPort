@@ -231,7 +231,7 @@ fn provider_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Provider> {
     let website_url: Option<String> = row.get(4)?;
     let category: Option<String> = row.get(5)?;
     let created_at: Option<i64> = row.get(6)?;
-    let sort_index: Option<usize> = row.get(7)?;
+    let sort_index: Option<usize> = row.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as usize);
     let notes: Option<String> = row.get(8)?;
     let icon: Option<String> = row.get(9)?;
     let icon_color: Option<String> = row.get(10)?;
