@@ -11,6 +11,9 @@ onlyBuiltDependencies:
 
 ignoredBuiltDependencies:
   - msw
+  # code-inspector-plugin v2 的可选依赖（dev 期 click-to-editor 用），
+  # 原生构建脚本是它自己的事，与本仓无关。
+  - node-pty
 
 # pnpm 10 会在遇到未表态的构建脚本时中止 install（连带把 `pnpm run xxx` 全挡住，
 # 因为它们跑之前都会做一次 deps 检查）。这两条是显式表态：
@@ -19,3 +22,4 @@ ignoredBuiltDependencies:
 allowBuilds:
   esbuild: true
   msw: false
+  node-pty: set this to true or false

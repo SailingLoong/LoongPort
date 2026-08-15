@@ -43,10 +43,7 @@ export type ProviderRoutingReason =
   | "routingRequired";
 
 export type ProviderRoutingBadge =
-  | "required"
-  | "officialRouting"
-  | "nativeLogin"
-  | "unsupported";
+  "required" | "officialRouting" | "nativeLogin" | "unsupported";
 
 export interface ProviderPresentation {
   isOfficial: boolean;
@@ -162,10 +159,7 @@ export interface ClaudeDesktopModelRoute {
 }
 
 export type CodexChatThinkingParam =
-  | "none"
-  | "thinking"
-  | "enable_thinking"
-  | "reasoning_split";
+  "none" | "thinking" | "enable_thinking" | "reasoning_split";
 
 export type CodexChatEffortParam =
   | "none"
@@ -232,10 +226,7 @@ export interface ProviderMeta {
   // - "openai_responses": OpenAI Responses API 格式，需要格式转换
   // - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
   apiFormat?:
-    | "anthropic"
-    | "openai_chat"
-    | "openai_responses"
-    | "gemini_native";
+    "anthropic" | "openai_chat" | "openai_responses" | "gemini_native";
   // 通用认证绑定
   authBinding?: AuthBinding;
   // Claude 认证字段名
@@ -281,10 +272,7 @@ export type SkillStorageLocation = "cc_switch" | "unified";
 // - "openai_responses": OpenAI Responses API 格式，需要格式转换
 // - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
 export type ClaudeApiFormat =
-  | "anthropic"
-  | "openai_chat"
-  | "openai_responses"
-  | "gemini_native";
+  "anthropic" | "openai_chat" | "openai_responses" | "gemini_native";
 
 // Codex API 格式类型
 // - "openai_responses": OpenAI Responses API 格式，直接透传

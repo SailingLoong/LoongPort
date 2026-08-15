@@ -212,7 +212,9 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
   }, [localValue]);
 
   // Debounce timer for compact limit input
-  const compactTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const compactTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   const handleContextWindowToggle = useCallback(
     (checked: boolean) => {

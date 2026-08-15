@@ -26,10 +26,7 @@ export interface SiteInfo {
 export type BackendKind = "sub2api" | "newapi";
 
 export type DiscoveryErrorKind =
-  | "unsupported_site"
-  | "protocol_conflict"
-  | "transport"
-  | "cancelled";
+  "unsupported_site" | "protocol_conflict" | "transport" | "cancelled";
 
 export interface RelayImportError {
   kind?: DiscoveryErrorKind;
@@ -188,10 +185,7 @@ export interface RowBalanceResult {
 }
 
 export type RefreshNotice =
-  | "none"
-  | "updated"
-  | "updatedWithKeys"
-  | "otherPlatforms";
+  "none" | "updated" | "updatedWithKeys" | "otherPlatforms";
 
 export interface RefreshFailure {
   name: string;

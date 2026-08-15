@@ -7,15 +7,10 @@ import {
 } from "./events";
 
 export type VerificationVerdict =
-  | "trusted"
-  | "suspicious"
-  | "anomaly"
-  | "inconclusive";
+  "trusted" | "suspicious" | "anomaly" | "inconclusive";
 
 export type EvidenceLevel =
-  | "cryptographic"
-  | "protocolBehavior"
-  | "insufficient";
+  "cryptographic" | "protocolBehavior" | "insufficient";
 
 export type EvidenceCode =
   | "basicEnvelope"
@@ -43,11 +38,7 @@ export type RunFailureKind =
   | "invalidResponse";
 
 export type RunState =
-  | "queued"
-  | "running"
-  | "completed"
-  | "cancelled"
-  | "failed";
+  "queued" | "running" | "completed" | "cancelled" | "failed";
 
 export interface VerificationTarget {
   providerId: string;
