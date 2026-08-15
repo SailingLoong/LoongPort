@@ -10,6 +10,7 @@ import {
   relayApi,
   PURCHASE_CLOSED,
   VENDOR_LOGIN_ERROR,
+  VENDOR_ACCOUNTS_CHANGED,
   PROVIDER_SWITCHED,
 } from "@/lib/api";
 import type { AppId, ProviderSwitchEvent } from "@/lib/api";
@@ -28,7 +29,6 @@ import {
 import { MODEL_VERIFICATION_CHANGED } from "@/lib/api/events";
 import {
   vendorApi,
-  DEEPSEEK_VENDOR_ID,
   type VendorAccountRow,
 } from "@/lib/api/vendor";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
@@ -86,6 +86,8 @@ export interface RelaySectionProps {
   appId: AppId;
   /** 打开独立中转站广场；首启入口固定落综合榜，普通添加按当前 app 选榜。 */
   onOpenDirectory: (entry: "add" | "firstRun") => void;
+  /** 打开独立「官方 API」页（厂商选择 → 登录 → 备钥）。与广场同构的子流程。 */
+  onOpenOfficialApi: () => void;
 }
 
 /**
@@ -104,7 +106,11 @@ export interface RelaySectionProps {
  */
 let autoPromptedThisProcess = false;
 
-export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
+export function RelaySection({
+  appId,
+  onOpenDirectory,
+  onOpenOfficialApi,
+}: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
    *
@@ -494,6 +500,14 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
    */
   useTauriEvent<string>(VENDOR_LOGIN_ERROR, (message) => {
     toast.error(t("loongport.vendor.loginFailed", { reason: message }));
+  });
+
+  /**
+   * 官网账号行集合变化（App 级「官方 API」页里登录成功后由后端广播）。
+   * 这页够不到这里的本地状态，与 relay 侧靠 provider-switched 刷新同一机制。
+   */
+  useTauriEvent<null>(VENDOR_ACCOUNTS_CHANGED, () => {
+    void reloadVendors();
   });
 
   /**
@@ -928,7 +942,7 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
             onReorder: (ids) => void handleVendorReorder(ids),
           }}
           busy={busy}
-          onAddVendor={() => void handleVendorLogin(DEEPSEEK_VENDOR_ID, null)}
+          onAddVendor={onOpenOfficialApi}
         />
       )}
 

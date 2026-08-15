@@ -45,6 +45,10 @@ pub const PURCHASE_CLOSED: &str = "relay-purchase-closed";
 /// 官网直连登录窗凭据解析失败（`RelaySection` 监听）。原名
 /// `commands::vendor::LOGIN_ERROR_EVENT`。
 pub const VENDOR_LOGIN_ERROR: &str = "vendor-login-error";
+/// 官网账号行集合变化（新增/重登合并）。登录入口在 `OfficialApiPage`
+/// （App 级页面，够不到 `RelaySection` 的本地状态），靠这个事件让账号块刷新 ——
+/// 与 relay 侧靠 `provider-switched` 刷新是同一套机制。
+pub const VENDOR_ACCOUNTS_CHANGED: &str = "vendor-accounts-changed";
 /// 主动模型验证任务进度变化（模型验证弹窗监听）。
 pub const MODEL_VERIFICATION_PROGRESS: &str = "model-verification-progress";
 /// 模型验证持久化结果变化（档位行与模型验证弹窗监听）。

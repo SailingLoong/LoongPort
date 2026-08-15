@@ -40,6 +40,8 @@ export const S3_SYNC_STATUS_UPDATED = "s3-sync-status-updated";
 export const PURCHASE_CLOSED = "relay-purchase-closed";
 /** 官网直连登录窗凭据解析失败（`RelaySection` 监听）。原在 `@/lib/api/vendor`。 */
 export const VENDOR_LOGIN_ERROR = "vendor-login-error";
+/** 官网账号行集合变化（`RelaySection` 监听；登录入口是 App 级页面，够不到本地状态）。 */
+export const VENDOR_ACCOUNTS_CHANGED = "vendor-accounts-changed";
 /** 主动模型验证任务进度变化（模型验证弹窗监听）。 */
 export const MODEL_VERIFICATION_PROGRESS = "model-verification-progress";
 /** 模型验证持久化结果变化（档位行与模型验证弹窗监听）。 */

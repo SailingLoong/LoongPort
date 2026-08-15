@@ -113,6 +113,10 @@ describe("供应商业务事实由后端定义", () => {
     const vendorCommands = read("src-tauri/src/commands/vendor.rs");
 
     expect(vendorCommands).toContain("refresh_vendor_session_balance");
-    expect(vendorCommands).toContain("deepseek::balance(&row.auth_token)");
+    // 余额/密钥调用按厂商分发（`crate::vendor::balance(vendor, …)`），
+    // 命令层不再直连某一家厂商的模块。
+    expect(vendorCommands).toContain(
+      "crate::vendor::balance(vendor, &row.auth_token)",
+    );
   });
 });

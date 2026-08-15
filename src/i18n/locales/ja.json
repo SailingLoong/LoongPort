@@ -3138,6 +3138,13 @@
         "next": "次のページ"
       }
     },
+    "officialApi": {
+      "title": "公式 API",
+      "description": "ベンダーを選択すると、サインイン後にキー取得と各アプリの設定が自動で完了します",
+      "connect": "接続してキーを準備",
+      "deepseekDesc": "DeepSeek プラットフォーム：サインインで API キーを作成/引き継ぎ",
+      "bigmodelDesc": "智譜 BigModel プラットフォーム：GLM シリーズ。サインインで API キーを作成/引き継ぎ"
+    },
     "tierList": {
       "empty": "中継サービスはまだ追加されていません",
       "addSite": "中継サービスを追加",

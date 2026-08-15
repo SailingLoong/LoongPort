@@ -100,6 +100,7 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { RelaySection } from "@/components/relay/RelaySection";
 import { RelayDirectoryPage } from "@/components/relay/directory/RelayDirectoryPage";
+import { OfficialApiPage } from "@/components/relay/OfficialApiPage";
 import type { LeaderboardKind } from "@/lib/api/relay";
 import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
@@ -140,7 +141,8 @@ type View =
   | "openclawTools"
   | "openclawAgents"
   | "hermesMemory"
-  | "relayDirectory";
+  | "relayDirectory"
+  | "officialApi";
 
 interface SyncStatusUpdatedPayload {
   source?: string;
@@ -215,8 +217,8 @@ function App() {
     });
 
   useEffect(() => {
-    // 广场是从供应商页临时进入的子流程，不应成为下次启动的落点。
-    if (currentView !== "relayDirectory") {
+    // 广场/官方 API 页是从供应商页临时进入的子流程，不应成为下次启动的落点。
+    if (currentView !== "relayDirectory" && currentView !== "officialApi") {
       localStorage.setItem(LAST_VIEW_STORAGE_KEY, currentView);
     }
   }, [currentView]);
@@ -932,6 +934,10 @@ function App() {
     setCurrentView("relayDirectory");
   }, []);
 
+  const handleOpenOfficialApi = useCallback(() => {
+    setCurrentView("officialApi");
+  }, []);
+
   const renderContent = () => {
     const content = (() => {
       switch (currentView) {
@@ -940,6 +946,13 @@ function App() {
             <RelayDirectoryPage
               sourceAppId={activeApp}
               initialKind={directoryInitialKind}
+              onBack={() => setCurrentView("providers")}
+            />
+          );
+        case "officialApi":
+          return (
+            <OfficialApiPage
+              sourceAppId={activeApp}
               onBack={() => setCurrentView("providers")}
             />
           );
@@ -1044,6 +1057,7 @@ function App() {
                     <RelaySection
                       appId={activeApp}
                       onOpenDirectory={handleOpenRelayDirectory}
+                      onOpenOfficialApi={handleOpenOfficialApi}
                     />
 
                     {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口仍是顶栏 +。
@@ -1138,7 +1152,9 @@ function App() {
       style={{
         overflowX: "hidden",
         paddingTop:
-          currentView === "relayDirectory" ? dragBarHeight : contentTopOffset,
+          currentView === "relayDirectory" || currentView === "officialApi"
+            ? dragBarHeight
+            : contentTopOffset,
       }}
     >
       {(dragBarHeight > 0 || useAppWindowControls) && (
@@ -1217,7 +1233,7 @@ function App() {
       )}
 
       <header
-        hidden={currentView === "relayDirectory"}
+        hidden={currentView === "relayDirectory" || currentView === "officialApi"}
         className="fixed z-50 w-full transition-all duration-300 bg-background/80 backdrop-blur-md"
         {...DRAG_REGION_ATTR}
         style={

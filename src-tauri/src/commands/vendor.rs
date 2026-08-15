@@ -35,7 +35,12 @@ use crate::provider::Provider;
 use crate::relay::provider_fingerprint;
 use crate::services::ProviderService;
 use crate::store::AppState;
-use crate::vendor::{creds, deepseek, provision, Vendor, VendorError};
+use crate::vendor::{creds, provision, Vendor, VendorError, VendorSession};
+
+// 命令层已全部走 vendor 分发；deepseek 模块只剩测试在直接引用它的常量
+// （隔离守卫那几条）。
+#[cfg(test)]
+use crate::vendor::deepseek;
 
 /// 等用户走完登录流程的上限。5 分钟够走完注册 + 短信验证码 + 微信扫码。
 ///
@@ -229,13 +234,23 @@ impl From<VendorError> for VendorActionError {
     fn from(error: VendorError) -> Self {
         let kind = matches!(error, VendorError::KeyLimitReached)
             .then_some(VendorActionErrorKind::KeyLimit);
-        let help_url = kind.is_some().then(|| deepseek::API_KEYS_URL.to_string());
+        // help_url 按厂商不同，From 这儿拿不到 vendor —— 由 provision_impl
+        // （唯一知道 vendor 的漏斗）在错误出口补，见 `vendor_action_error`。
         Self {
             kind,
             message: AppError::from(error).to_string(),
-            help_url,
+            help_url: None,
         }
     }
+}
+
+/// 带 vendor 语义的错误出口：KeyLimit 的帮助链接指向**该厂商**的密钥管理页。
+fn vendor_action_error(error: VendorError, vendor: Vendor) -> VendorActionError {
+    let mut action: VendorActionError = error.into();
+    if matches!(action.kind, Some(VendorActionErrorKind::KeyLimit)) {
+        action.help_url = crate::vendor::api_keys_help_url(vendor).map(str::to_string);
+    }
+    action
 }
 
 /// 列出已添加的官网账号。
@@ -283,7 +298,7 @@ pub async fn vendor_list_accounts(
 }
 
 fn vendor_supports_app(app_type: &AppType) -> bool {
-    provision::DEEPSEEK_APPS.contains(app_type)
+    provision::VENDOR_APPS.contains(app_type)
 }
 
 fn vendor_account_for_app(
@@ -364,7 +379,7 @@ fn vendor_can_delete(state: &AppState, row: &VendorAccountRow) -> bool {
     if row.provider_id.is_empty() {
         return true;
     }
-    provision::DEEPSEEK_APPS.iter().all(|app_type| {
+    provision::VENDOR_APPS.iter().all(|app_type| {
         ProviderService::current(state, app_type.clone())
             .map(|current| current != row.provider_id)
             .unwrap_or(false)
@@ -434,8 +449,10 @@ async fn refresh_vendor_session_balance(
     if row.auth_token.trim().is_empty() {
         return Ok(None);
     }
+    let vendor = Vendor::from_id(&row.vendor_id)
+        .ok_or_else(|| AppError::Config(format!("不认识的厂商：{}", row.vendor_id)))?;
 
-    match deepseek::balance(&row.auth_token).await {
+    match crate::vendor::balance(vendor, &row.auth_token).await {
         Ok(Some(usage)) => Ok(Some(crate::relay::balance::row_balance_result(
             usage, false,
         ))),
@@ -591,26 +608,28 @@ async fn do_login(
     vendor: Vendor,
     login_hint: &str,
 ) -> Result<Option<i64>, AppError> {
-    let url = url::Url::parse(deepseek::LOGIN_URL)
+    let url = url::Url::parse(&crate::vendor::login_url(vendor))
         .map_err(|e| AppError::Config(format!("登录页地址不对: {e}")))?;
+
+    let window_label = crate::vendor::login_window_label(vendor);
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
     // 残留窗口可能是隐藏状态，而 `set_focus` 对不可见窗口是 no-op ⇒ 用户点了登录
     // 什么都没发生，且 label 被占，再点多少次都一样（照 `relay::do_login` 那段）。
-    if let Some(stale) = app_handle.get_webview_window(deepseek::LOGIN_WINDOW_LABEL) {
+    if let Some(stale) = app_handle.get_webview_window(window_label) {
         log::info!("发现残留的官网登录窗口，销毁后重开");
         let _ = stale.destroy();
     }
 
     // 凭据经这个 channel 从导航回调回到本函数。容量 1：只需要第一份。
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<deepseek::VendorCreds>(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<VendorSession>(1);
     // 用户自己关窗的信号。没有它就只能干等满超时。
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let handle_for_nav = app_handle.clone();
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
-        deepseek::LOGIN_WINDOW_LABEL,
+        window_label,
         tauri::WebviewUrl::External(url),
     )
     .title(format!("登录 {}", vendor.display_name()))
@@ -622,9 +641,9 @@ async fn do_login(
     // **同一个厂商永远只能挂第一个登录过的账号**，而多账号正是本表唯一索引
     // `(vendor_id, account_id)` 特意支持的能力。
     .incognito(true)
-    .initialization_script(deepseek::login_script(login_hint))
+    .initialization_script(crate::vendor::login_script(vendor, login_hint))
     .on_navigation(move |url| {
-        match deepseek::parse_creds_navigation(url) {
+        match crate::vendor::parse_creds_navigation(vendor, url) {
             // 普通导航，放行。
             None => true,
             Some(Ok(creds)) => {
@@ -665,13 +684,19 @@ async fn do_login(
 
     // `account_id` 已经由 `parse_creds_navigation` 保证非空 —— 「账号身份拿不到就不存
     // token」那条语义在解析那一步就落实了，走到这里的凭据一定是完整的。
-    let token = creds.auth_token.clone();
-    let account = crate::vendor::VendorAccount::from(creds);
+    let token = creds.auth_token;
+    let account = creds.account;
 
     let state = app_handle.state::<AppState>();
     let row_id = with_conn(&state, |conn| {
         creds::save_account(conn, vendor, &token, &account)
     })?;
+
+    // 广播账号行集合变化：登录入口是 App 级的 OfficialApiPage，够不到
+    // RelaySection 的本地状态 —— 与 relay 侧靠 provider-switched 刷新同一机制。
+    if let Err(e) = app_handle.emit(crate::events::VENDOR_ACCOUNTS_CHANGED, ()) {
+        log::warn!("广播官网账号变化失败: {e}");
+    }
 
     // **不关窗**：用户拿到凭据的那一刻页面往往刚跳到控制台 —— 上面有余额、充值入口，
     // 都是他接着要用的东西。把窗口关掉等于替他决定「你看完了」。
@@ -728,7 +753,7 @@ async fn provision_impl(
         row.api_key.clone()
     } else {
         if row.auth_token.is_empty() {
-            return Err(VendorError::AuthExpired.into());
+            return Err(vendor_action_error(VendorError::AuthExpired, vendor));
         }
 
         // ── 3. 删本机上次留下的（删了才建）──────────────────────────
@@ -736,10 +761,11 @@ async fn provision_impl(
         // ⚠️ 两处失败都只 warn 不 return：**删是清理、建是目的**。
         // 最坏情况是官网多一把废 key（下次 provision 的这一步正好删掉它），
         // 而阻断的话用户拿不到任何可用密钥。
-        match deepseek::list_keys(&row.auth_token).await {
+        match crate::vendor::list_keys(vendor, &row.auth_token).await {
             Ok(all) => {
                 for stale in provision::keys_to_delete(&all, &account_id) {
-                    if let Err(e) = deepseek::delete_key(&row.auth_token, &stale).await {
+                    if let Err(e) = crate::vendor::delete_key(vendor, &row.auth_token, &stale).await
+                    {
                         log::warn!("清理旧密钥 {} 失败（不阻断建新的）: {e:?}", stale.name);
                     }
                 }
@@ -747,24 +773,27 @@ async fn provision_impl(
             Err(e) => {
                 on_vendor_error(state, row_id, &e);
                 log::warn!("拉取密钥列表失败，跳过清理: {e:?}");
-                // 登录态失效就没必要继续了 —— 建 key 也会拿同一个 40002。
+                // 登录态失效就没必要继续了 —— 建 key 也会拿同一个过期错误。
                 if matches!(e, VendorError::AuthExpired) {
-                    return Err(e.into());
+                    return Err(vendor_action_error(e, vendor));
                 }
             }
         }
 
         // ── 4 + 5. 建新的 → 校验明文（在 `create_key` 里）→ 落库 ────
-        let plaintext =
-            match deepseek::create_key(&row.auth_token, &crate::vendor::key_name_for(&account_id))
-                .await
-            {
-                Ok(k) => k,
-                Err(e) => {
-                    on_vendor_error(state, row_id, &e);
-                    return Err(e.into());
-                }
-            };
+        let plaintext = match crate::vendor::create_key(
+            vendor,
+            &row.auth_token,
+            &crate::vendor::key_name_for(&account_id),
+        )
+        .await
+        {
+            Ok(k) => k,
+            Err(e) => {
+                on_vendor_error(state, row_id, &e);
+                return Err(vendor_action_error(e, vendor));
+            }
+        };
         key_created = true;
 
         with_conn(state, |conn| creds::set_api_key(conn, row_id, &plaintext)).map_err(|e| {
@@ -835,7 +864,7 @@ async fn provision_impl(
             id: provider_id.clone(),
             name: vendor.display_name().to_string(),
             settings_config,
-            website_url: Some(deepseek::SITE_ORIGIN.to_string()),
+            website_url: Some(crate::vendor::site_origin(vendor).to_string()),
             // ⚠️ `cn_official` —— **不是** `aggregator`（那是中转站的），
             // 更**绝不能**是 `official`：那条分类会触发一批只对官方订阅成立的逻辑
             // （stale auth 清理、统一会话桶注入）。
@@ -844,8 +873,8 @@ async fn provision_impl(
             sort_index: Some(idx),
             notes: None,
             meta: Some(vendor_meta(&app_type, Some(account_id.clone()))),
-            icon: Some("deepseek".to_string()),
-            icon_color: Some("#1E88E5".to_string()),
+            icon: Some(vendor_icon(vendor).to_string()),
+            icon_color: Some(vendor_icon_color(vendor).to_string()),
             in_failover_queue: false,
         };
 
@@ -890,7 +919,7 @@ async fn provision_impl(
     // （接管时更新备份而不是覆盖 live 文件），而 `switch` 会多跑一遍切换语义
     // （接管态下走 `hot_switch_provider_inner`）—— 那不是这里要的。
     // `commands::relay` 的两条同型路径也用它，三处一份写法。
-    for app_type in provision::DEEPSEEK_APPS {
+    for app_type in provision::VENDOR_APPS {
         let is_current = ProviderService::current(state, app_type.clone())
             .ok()
             .as_deref()
@@ -957,9 +986,12 @@ fn vendor_reset_tier_config_impl(
     }
 
     let app_type: AppType = app_id.parse()?;
-    let (base_url, model) = deepseek::config_for(&app_type).ok_or_else(|| {
+    // provider_id 是 vendor_id/account_id 的哈希（不可逆）⇒ 用 vendor 表重算反查。
+    let vendor = vendor_by_provider_id(state, provider_id)?;
+    let (base_url, model) = crate::vendor::config_for(vendor, &app_type).ok_or_else(|| {
         AppError::Config(format!(
-            "{app_id} 这个平台没有 DeepSeek 配置，恢复不了默认值"
+            "{app_id} 这个平台没有 {} 配置，恢复不了默认值",
+            vendor.display_name()
         ))
     })?;
 
@@ -984,7 +1016,7 @@ fn vendor_reset_tier_config_impl(
         &existing.name,
         &base_url,
         &model,
-        provision::claude_roles_for(&app_type),
+        provision::claude_roles_for(vendor, &app_type),
     )
     .ok_or_else(|| AppError::Config(format!("{app_id} 这个平台生成不出默认配置")))?;
 
@@ -1059,6 +1091,8 @@ pub(crate) async fn vendor_balance_impl(
 ) -> Result<crate::relay::balance::RowBalanceResult, AppError> {
     let row = with_conn(state, |conn| creds::get(conn, row_id))?
         .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))?;
+    let vendor = Vendor::from_id(&row.vendor_id)
+        .ok_or_else(|| AppError::Config(format!("不认识的厂商：{}", row.vendor_id)))?;
 
     let api_keys: Vec<String> = if row.api_key.trim().is_empty() {
         Vec::new()
@@ -1068,14 +1102,15 @@ pub(crate) async fn vendor_balance_impl(
 
     let resolved = crate::relay::balance::resolve(
         crate::relay::balance::BalanceQuery {
-            site_origin: deepseek::SITE_ORIGIN,
-            base_url: deepseek::API_ORIGIN,
+            site_origin: crate::vendor::site_origin(vendor),
+            base_url: crate::vendor::api_origin(vendor),
             api_keys: &api_keys,
         },
         if row.auth_token.trim().is_empty() {
             crate::relay::balance::SessionFallback::None
         } else {
             crate::relay::balance::SessionFallback::Vendor {
+                vendor,
                 auth_token: &row.auth_token,
             }
         },
@@ -1126,7 +1161,7 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
 
         // 闸：先扫一遍六个平台，撞上当前项就整条路中止（全有或全无 —— 半删会留下
         // 用户再也处置不了的孤儿记录，见 `relay::remove_site_impl` 那段）。
-        let in_use: Vec<&str> = provision::DEEPSEEK_APPS
+        let in_use: Vec<&str> = provision::VENDOR_APPS
             .iter()
             .filter(|app_type| {
                 ProviderService::current(state, (*app_type).clone())
@@ -1143,7 +1178,7 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
             )));
         }
 
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             // ⚠️ **必须带 app_type**：`provider_id` 不含它（六个平台共用一个 id），
             // 所以要逐个平台删。
             if let Err(e) = state.db.delete_provider(app_type.as_str(), &provider_id) {
@@ -1172,6 +1207,39 @@ pub async fn vendor_reorder(state: State<'_, AppState>, ids: Vec<i64>) -> Result
 /// `account_id` 是**归属依据**，不是装饰：一个厂商可以挂多个账号，而 `website_url`
 /// 是编译期常量（对所有 DeepSeek 账号都一样）⇒ 少了它，删账号 / 重建配置两处都会
 /// 误伤同厂商另一个账号的记录。
+/// 厂商在 provider 记录上的 icon 标识（前端按它挑内置图标）。
+fn vendor_icon(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::DeepSeek => "deepseek",
+        Vendor::BigModel => "zhipu",
+    }
+}
+
+/// 厂商主题色（与 icon 配套）。
+fn vendor_icon_color(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::DeepSeek => "#1E88E5",
+        Vendor::BigModel => "#3B5BDB",
+    }
+}
+
+/// provider_id 是 `hash(vendor_id/account_id)`（不可逆）⇒ 用 vendor 账号表
+/// 逐行重算来反查厂商。匹配不到说明这条托管记录不是 vendor 展开的，报错。
+fn vendor_by_provider_id(state: &AppState, provider_id: &str) -> Result<Vendor, AppError> {
+    let rows = with_conn(state, creds::list)?;
+    for row in rows {
+        if let Some(account_id) = &row.account_id {
+            if provision::provider_id_for(&row.vendor_id, account_id) == provider_id {
+                return Vendor::from_id(&row.vendor_id)
+                    .ok_or_else(|| AppError::Config(format!("不认识的厂商：{}", row.vendor_id)));
+            }
+        }
+    }
+    Err(AppError::Config(format!(
+        "这条托管档位不属于任何官网账号：{provider_id}"
+    )))
+}
+
 fn vendor_meta(app_type: &AppType, account_id: Option<String>) -> crate::provider::ProviderMeta {
     crate::provider::ProviderMeta {
         // `api_format` **只被 `codex_config.rs` 消费**（`CodexCatalogToolProfile::from_api_format`），
@@ -1720,7 +1788,7 @@ mod tests {
         let provider_id = provision::provider_id_for("deepseek", "uuid-a");
 
         // 六个平台各种一条（形状与 provision 落库的那条一致即可）。
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             let p = Provider {
                 id: provider_id.clone(),
                 name: "DeepSeek".into(),
@@ -1741,7 +1809,7 @@ mod tests {
                 .expect("种 provider");
         }
         // 前提断言：六条真的在（否则这条闸没有判别力）。
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             assert!(
                 state
                     .db
@@ -1755,7 +1823,7 @@ mod tests {
 
         remove_impl(&state, row_id).expect("删账号");
 
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             assert!(
                 state
                     .db
@@ -1791,7 +1859,7 @@ mod tests {
         );
         // 且**没有**建出任何 provider 记录。
         let anon_id = provision::provider_id_for("deepseek", "anon");
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             assert!(
                 state
                     .db
@@ -1818,7 +1886,7 @@ mod tests {
         let provider_id = provision::provider_id_for("deepseek", "uuid-a");
 
         // 六个平台各一条记录（`provision_impl` 就是这么写的），并把 codex 那个设成当前项。
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             let mut p = crate::provider::Provider::with_id(
                 provider_id.clone(),
                 "DeepSeek".to_string(),
@@ -1844,7 +1912,7 @@ mod tests {
         );
 
         // 全有或全无：六条记录一条都不能少，账号行也必须还在。
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             assert!(
                 state
                     .db
@@ -1872,7 +1940,7 @@ mod tests {
         let row_id = seed_vendor_row(&state, Some("uuid-a"));
         let provider_id = provision::provider_id_for("deepseek", "uuid-a");
 
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             let p = crate::provider::Provider::with_id(
                 provider_id.clone(),
                 "DeepSeek".to_string(),
@@ -1888,7 +1956,7 @@ mod tests {
 
         remove_impl(&state, row_id).expect("没人在用它时删除该成功");
 
-        for app_type in provision::DEEPSEEK_APPS {
+        for app_type in provision::VENDOR_APPS {
             assert!(
                 state
                     .db

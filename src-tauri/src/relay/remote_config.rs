@@ -227,6 +227,10 @@ pub struct RelayDirectoryPolicy {
 /// 远端配置的全文。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct RemoteConfig {
+    /// 官网厂商 → 维护者返利链接（登录窗默认打开它，归因在服务端完成）。
+    /// key 是 `Vendor::vendor_id()`；值过 HTTPS + 同源闸（`vendor::login_url`）。
+    #[serde(default)]
+    pub vendor_invite_urls: std::collections::BTreeMap<String, String>,
     /// 赞助中转站，按维护者给的顺序（**不排序** —— 顺序是他的编排意图）。
     #[serde(default)]
     pub sponsors: Vec<Sponsor>,
@@ -940,6 +944,7 @@ mod tests {
         let mut aff_codes = std::collections::BTreeMap::new();
         aff_codes.insert(host.to_string(), code.to_string());
         RemoteConfig {
+            vendor_invite_urls: std::collections::BTreeMap::new(),
             sponsors: vec![],
             aff_codes,
             promo_codes: std::collections::BTreeMap::new(),
@@ -953,6 +958,7 @@ mod tests {
         let mut promo_codes = std::collections::BTreeMap::new();
         promo_codes.insert(host.to_string(), code.to_string());
         RemoteConfig {
+            vendor_invite_urls: std::collections::BTreeMap::new(),
             sponsors: vec![],
             aff_codes: std::collections::BTreeMap::new(),
             promo_codes,

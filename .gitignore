@@ -27,3 +27,6 @@ copilot-api
 .history
 CODEBUDDY.md
 mainWindow.js
+
+# Mimosa 扫描器本地状态（hook 每次调用都会重写）
+.mimosa/

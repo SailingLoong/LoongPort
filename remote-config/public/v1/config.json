@@ -1,5 +1,8 @@
 {
   "issued_at": "2026-08-15T00:00:00Z",
+  "vendor_invite_urls": {
+    "bigmodel": "https://www.bigmodel.cn/login?icode=9g7xCHQO8WMdZ54ByDv%2FI%2BZLO2QH3C0EBTSr%2BArzMw4%3D&from=invite&redirect=%2F"
+  },
   "sponsors": [
     {
       "site_origin": "https://wawapii.com",

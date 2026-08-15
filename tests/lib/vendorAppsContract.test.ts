@@ -15,10 +15,10 @@ describe("官网账号支持平台的唯一数据源", () => {
     expect(section).not.toContain("vendorSupportsApp");
   });
 
-  it("后端按 DEEPSEEK_APPS 过滤当前平台", () => {
+  it("后端按 VENDOR_APPS 过滤当前平台", () => {
     const backend = read("src-tauri/src/commands/vendor.rs");
     expect(backend).toContain("vendor_supports_app");
-    expect(backend).toContain("provision::DEEPSEEK_APPS.contains(app_type)");
+    expect(backend).toContain("provision::VENDOR_APPS.contains(app_type)");
   });
 
   it("官网行切换资格由后端 DTO 给出", () => {
