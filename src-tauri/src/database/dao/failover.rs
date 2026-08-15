@@ -37,7 +37,7 @@ impl Database {
                 Ok(FailoverQueueItem {
                     provider_id: row.get(0)?,
                     provider_name: row.get(1)?,
-                    sort_index: row.get(2)?,
+                    sort_index: row.get::<_, Option<i64>>(2)?.map(|v| v.max(0) as usize),
                     provider_notes: row.get(3)?,
                 })
             })

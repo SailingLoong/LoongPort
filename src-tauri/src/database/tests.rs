@@ -586,7 +586,7 @@ fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
             Option::<String>::None,
             Option::<String>::None,
             Option::<i64>::None,
-            Option::<usize>::None,
+            Option::<i64>::None,
             Option::<String>::None,
             Option::<String>::None,
             Option::<String>::None,

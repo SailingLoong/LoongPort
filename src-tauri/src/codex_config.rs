@@ -119,7 +119,7 @@ const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] =
 
 /// Top-level `model` id from a Codex `config.toml`.
 fn codex_top_level_model(config_text: &str) -> Option<String> {
-    let doc = config_text.parse::<toml::Value>().ok()?;
+    let doc = config_text.parse::<toml::Table>().ok()?;
     doc.get("model")
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
@@ -479,7 +479,7 @@ pub fn extract_codex_api_key(auth: Option<&Value>, config_text: Option<&str>) ->
 /// (`getRecoverableBaseUrlAssignments`) excludes those too, and a leftover
 /// section unrelated to the active provider must not leak into `{{baseUrl}}`.
 pub fn extract_codex_base_url(config_text: &str) -> Option<String> {
-    let doc = config_text.parse::<toml::Value>().ok()?;
+    let doc = config_text.parse::<toml::Table>().ok()?;
 
     if let Some(active_provider) = doc.get("model_provider").and_then(|v| v.as_str()) {
         if let Some(base_url) = doc
@@ -657,7 +657,7 @@ fn parse_codex_positive_u64(value: Option<&Value>) -> Option<u64> {
 }
 
 fn extract_codex_top_level_u64(config_text: &str, field: &str) -> Option<u64> {
-    let doc = config_text.parse::<toml::Value>().ok()?;
+    let doc = config_text.parse::<toml::Table>().ok()?;
     doc.get(field)
         .and_then(|value| value.as_integer())
         .and_then(|value| u64::try_from(value).ok())

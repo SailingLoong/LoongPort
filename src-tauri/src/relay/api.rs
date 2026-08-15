@@ -1190,7 +1190,7 @@ fn idempotency_key_for(account_id: Option<i64>, name: &str) -> String {
     // 喂进哈希的字节流完全相同。
     h.update(b"/");
     h.update(name.as_bytes());
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// 把一个 `reqwest` 发送错误描述成**能定位问题**的一行。
