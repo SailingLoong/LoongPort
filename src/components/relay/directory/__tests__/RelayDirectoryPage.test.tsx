@@ -129,7 +129,8 @@ function item(index: number): RelayDirectoryItem {
     issues: index === 1 ? ["token_usage"] : [],
     entryUrl:
       index === 1 ? "https://bestapi.store" : `https://site-${index}.example`,
-    autoAdd: index === 1,
+    // 后端 apply_policy 白名单过滤后，广场里每一行都是受管站点、可一键登录。
+    autoAdd: true,
   };
 }
 
@@ -256,28 +257,31 @@ describe("RelayDirectoryPage", () => {
     );
   });
 
-  it("opens a manual-only row without importing it", async () => {
+  it("authenticates every displayed row with one click", async () => {
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
 
     const row = (await screen.findByText("站点 2")).closest("article");
     expect(row).not.toBeNull();
-    const manualSite = within(row!);
+    const managedSite = within(row!);
     expect(
-      manualSite.getByText("loongport.directory.actions.authenticate"),
+      managedSite.getByText("loongport.directory.actions.authenticate"),
     ).toBeInTheDocument();
     expect(
-      manualSite.getByText("loongport.directory.actions.manualAddHint"),
+      managedSite.getByText("loongport.directory.actions.autoAddHint"),
     ).toBeInTheDocument();
 
     fireEvent.click(
-      manualSite.getByRole("button", {
+      managedSite.getByRole("button", {
         name: "loongport.directory.actions.authenticate",
       }),
     );
 
-    expect(openInBrowser).toHaveBeenCalledWith("https://site-2.example");
-    expect(importDirectorySite).not.toHaveBeenCalled();
-    expect(importSite).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(importDirectorySite).toHaveBeenCalledWith(
+        "https://site-2.example",
+      ),
+    );
+    expect(openInBrowser).not.toHaveBeenCalledWith("https://site-2.example");
   });
 
   it("labels a managed detail-page completion without inventing a rank", async () => {
@@ -506,24 +510,6 @@ describe("RelayDirectoryPage", () => {
     );
   });
 
-  it("runs a custom site through the same authentication flow", async () => {
-    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
-    await screen.findByText("BestAPI");
-
-    fireEvent.change(
-      screen.getByPlaceholderText("loongport.directory.customSitePlaceholder"),
-      { target: { value: "https://790053500.com/keys" } },
-    );
-    fireEvent.click(
-      screen.getByText("loongport.directory.actions.useOtherSite"),
-    );
-
-    await waitFor(() =>
-      expect(importSite).toHaveBeenCalledWith("https://790053500.com/keys"),
-    );
-    expect(refresh).toHaveBeenCalledWith(7, "codex");
-  });
-
   it("allows only one authentication operation at a time", async () => {
     let finishImport!: (value: {
       relayId: number;
@@ -540,13 +526,6 @@ describe("RelayDirectoryPage", () => {
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
     await screen.findByText("BestAPI");
 
-    const customInput = screen.getByPlaceholderText(
-      "loongport.directory.customSitePlaceholder",
-    );
-    fireEvent.change(customInput, {
-      target: { value: "https://790053500.com/keys" },
-    });
-
     const firstRow = screen.getByText("BestAPI").closest("article");
     const secondRow = screen.getByText("站点 2").closest("article");
     fireEvent.click(
@@ -555,10 +534,8 @@ describe("RelayDirectoryPage", () => {
     fireEvent.click(
       within(secondRow!).getByText("loongport.directory.actions.authenticate"),
     );
-    fireEvent.keyDown(customInput, { key: "Enter" });
 
     expect(importDirectorySite).toHaveBeenCalledTimes(1);
-    expect(importSite).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(
         within(secondRow!).getByRole("button", {
@@ -566,7 +543,6 @@ describe("RelayDirectoryPage", () => {
         }),
       ).toBeDisabled(),
     );
-    expect(customInput).toBeDisabled();
 
     await act(async () => {
       finishImport({
@@ -576,5 +552,21 @@ describe("RelayDirectoryPage", () => {
         backendKind: "sub2api",
       });
     });
+  });
+
+  it("no longer offers a custom-site input", async () => {
+    // 白名单语义：广场只展示受管站点，手动输域名的入口已删。
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+    await screen.findByText("BestAPI");
+
+    expect(
+      screen.queryByPlaceholderText(
+        "loongport.directory.customSitePlaceholder",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("loongport.directory.actions.useOtherSite"),
+    ).not.toBeInTheDocument();
+    expect(importSite).not.toHaveBeenCalled();
   });
 });

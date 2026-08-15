@@ -139,11 +139,8 @@ export function RelayDirectoryRow({
           {t("loongport.directory.actions.authenticate")}
         </Button>
         <span className="text-center text-[10px] text-muted-foreground">
-          {t(
-            item.autoAdd
-              ? "loongport.directory.actions.autoAddHint"
-              : "loongport.directory.actions.manualAddHint",
-          )}
+          {/* 广场只展示受管站点（后端 apply_policy 的白名单过滤），一律一键登录。 */}
+          {t("loongport.directory.actions.autoAddHint")}
         </span>
       </div>
     </article>
