@@ -9,7 +9,12 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Monitor, MoreHorizontal, Terminal } from "lucide-react";
+import {
+  Image as ImageIcon,
+  Monitor,
+  MoreHorizontal,
+  Terminal,
+} from "lucide-react";
 import { APP_IDS } from "@/config/appConfig";
 import { LAST_APP_STORAGE_KEY } from "@/config/constants";
 
@@ -18,6 +23,10 @@ const APP_BADGE_ICON: Partial<
 > = {
   claude: { icon: Terminal },
   "claude-desktop": { icon: Monitor, offsetY: 0.5 },
+  // 与 claude-desktop 同一个手法：同品牌图标 + 一个角标说明「这是那个 CLI 的另一面」。
+  // 角标是图片而不是文字，因为它要在 20px 的图标上认得出来。
+  // （PR #116 上游合并时随上游版 AppSwitcher 丢过一次，别再丢。）
+  "codex-image": { icon: ImageIcon, offsetY: 0.5 },
 };
 
 interface AppSwitcherProps {

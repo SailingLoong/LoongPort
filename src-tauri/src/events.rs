@@ -53,6 +53,9 @@ pub const VENDOR_ACCOUNTS_CHANGED: &str = "vendor-accounts-changed";
 pub const MODEL_VERIFICATION_PROGRESS: &str = "model-verification-progress";
 /// 模型验证持久化结果变化（档位行与模型验证弹窗监听）。
 pub const MODEL_VERIFICATION_CHANGED: &str = "model-verification-changed";
+/// 新人引导注册窗完成（`RelaySection` 监听）：凭据已入库，前端做 toast +
+/// 档位预配 + 列表刷新。payload `{ relayId, siteName }`。
+pub const ONBOARDING_REGISTER_COMPLETED: &str = "onboarding-register-completed";
 
 /// 广播「当前供应商变了」。
 ///
@@ -143,6 +146,10 @@ mod consistency_tests {
             (
                 "MODEL_VERIFICATION_CHANGED",
                 super::MODEL_VERIFICATION_CHANGED,
+            ),
+            (
+                "ONBOARDING_REGISTER_COMPLETED",
+                super::ONBOARDING_REGISTER_COMPLETED,
             ),
         ];
 

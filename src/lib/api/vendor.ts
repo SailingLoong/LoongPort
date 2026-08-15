@@ -100,8 +100,16 @@ export const VENDOR_CATALOG: ReadonlyArray<{
   displayName: string;
   descriptionKey: string;
 }> = [
-  { id: DEEPSEEK_VENDOR_ID, displayName: "DeepSeek", descriptionKey: "loongport.officialApi.deepseekDesc" },
-  { id: BIGMODEL_VENDOR_ID, displayName: "智谱 BigModel", descriptionKey: "loongport.officialApi.bigmodelDesc" },
+  {
+    id: DEEPSEEK_VENDOR_ID,
+    displayName: "DeepSeek",
+    descriptionKey: "loongport.officialApi.deepseekDesc",
+  },
+  {
+    id: BIGMODEL_VENDOR_ID,
+    displayName: "智谱 BigModel",
+    descriptionKey: "loongport.officialApi.bigmodelDesc",
+  },
 ];
 
 export const vendorApi = {

@@ -21,12 +21,14 @@ export const APP_IDS: AppId[] = [
   "claude-desktop",
   "codex",
   "codex-image",
-  "gemini",
+  // Pi / Grok 排在生图后面：tab 栏宽度不够时按此顺序收进「更多」，
+  // 靠前才不会被折叠隐藏
+  "pi",
   "grokbuild",
+  "gemini",
   "opencode",
   "openclaw",
   "hermes",
-  "pi",
 ];
 
 export const DEFAULT_VISIBLE_APPS: VisibleApps = {

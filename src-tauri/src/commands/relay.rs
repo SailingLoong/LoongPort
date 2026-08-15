@@ -991,10 +991,18 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
     Ok(expired)
 }
 
-fn relay_status_impl(state: &AppState) -> Result<RelayStatus, AppError> {
-    let should_prompt_add_site = with_conn(state, |conn| {
+/// 本机还没有任何中转站 / 厂商账号 —— 即「新用户」这一事实的唯一判据。
+///
+/// `RelayStatus.should_prompt_add_site` 与新人引导（`commands::onboarding`）都读它：
+/// 同一个业务事实只算一次，两处不会因为各写一份判据而分叉。
+pub(crate) fn user_has_no_accounts(state: &AppState) -> Result<bool, AppError> {
+    with_conn(state, |conn| {
         Ok(creds::list(conn)?.is_empty() && crate::vendor::creds::list(conn)?.is_empty())
-    })?;
+    })
+}
+
+fn relay_status_impl(state: &AppState) -> Result<RelayStatus, AppError> {
+    let should_prompt_add_site = user_has_no_accounts(state)?;
     Ok(RelayStatus {
         default_site: DEFAULT_SITE.to_string(),
         should_prompt_add_site,
@@ -1182,7 +1190,9 @@ pub async fn relay_import_directory_site(
     import_site(&app_handle, &site, source).await
 }
 
-async fn import_site(
+// `pub(crate)`：新人引导（`commands::onboarding`）走同一条导入链路，只是入口
+// 标记不同（见 `BrowserEntrySource::Onboarding`）。
+pub(crate) async fn import_site(
     app_handle: &tauri::AppHandle,
     input: &str,
     entry_source: BrowserEntrySource,
@@ -1220,9 +1230,12 @@ async fn import_site(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserEntrySource {
+pub(crate) enum BrowserEntrySource {
     Manual,
     SignedDirectory,
+    /// 新人引导的官方站注册窗（见 [`crate::relay::onboarding`]）。落页与探测行为
+    /// 同 `Manual`；差别只有窗口标题和额外注入的新人礼包横幅。
+    Onboarding,
 }
 
 fn directory_entry_source(
@@ -1450,7 +1463,11 @@ async fn browser_import(
         )
     });
 
-    let entry_source = if browser_entry_is_auth_page(&entry_url) {
+    // 在下面把 entry_source 遮蔽成诊断字符串之前先记下入口类型。
+    let is_onboarding = entry_source == BrowserEntrySource::Onboarding;
+    let entry_source = if is_onboarding {
+        "onboarding"
+    } else if browser_entry_is_auth_page(&entry_url) {
         "supplied_auth_page"
     } else if initial_backend.is_some() {
         "protocol_login_page"
@@ -1482,12 +1499,28 @@ async fn browser_import(
     let probe_error_tx = error_tx.clone();
     let credential_error_tx = error_tx.clone();
 
+    // 新人引导的注册窗用自己的标题：新用户没有「添加中转站」这个上下文，
+    // 标题要说清这个窗口为什么自己弹出来（见 relay::onboarding 的文档）。
+    let window_title = if is_onboarding {
+        crate::relay::onboarding::register_window_title()
+    } else {
+        format!("添加中转站 {site_origin}")
+    };
+
+    // 协议探针脚本所有入口都注入；新人引导额外带上新人礼包横幅（只在 /register
+    // 显示，脚本自己管显隐 —— 见 relay::onboarding::register_gift_banner_js）。
+    let mut init_script =
+        discovery::browser_probe_script(&site_origin, discovery::PROBE_CANDIDATES);
+    if is_onboarding {
+        init_script.push_str(&crate::relay::onboarding::register_gift_banner_js());
+    }
+
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
         login::LOGIN_WINDOW_LABEL,
         tauri::WebviewUrl::External(entry_url),
     )
-    .title(format!("添加中转站 {site_origin}"))
+    .title(window_title)
     .inner_size(480.0, 720.0)
     .resizable(true)
     // 一次导入只使用这一份纯内存会话：网页验证、协议探测、注册/登录都不换窗口，
@@ -1496,10 +1529,7 @@ async fn browser_import(
     // 所有导入都统一注入协议无关的候选抓取器。脚本不认识 Cloudflare、HTTP 403
     // 或任何其它验证产品；协议未知时，用户验证完成后它自然会在同源会话里读到候选响应。
     // fast path 已识别时，Rust context 已有值，重复探测回传会被忽略。
-    .initialization_script(discovery::browser_probe_script(
-        &site_origin,
-        discovery::PROBE_CANDIDATES,
-    ))
+    .initialization_script(init_script)
     .on_page_load(move |webview, payload| {
         log::info!(
             "站点导入窗页面加载 {:?}：{}",
@@ -3925,7 +3955,9 @@ fn tiers_of_site(
 
 /// 内部版本额外带出每条档位的 `website_url`（= 所属站点的 origin），供
 /// [`list_relays_impl`] 按站分组。命令层把它丢掉 —— 那是实现细节，不进对外契约。
-fn codex_models_from_settings(settings: &serde_json::Value) -> Vec<String> {
+///
+/// `pub(crate)`：托盘的「模型」子菜单也从这里取目录（同一份 `modelCatalog` 两个消费者）。
+pub(crate) fn codex_models_from_settings(settings: &serde_json::Value) -> Vec<String> {
     settings
         .get("modelCatalog")
         .and_then(|catalog| catalog.get("models"))
@@ -4085,30 +4117,42 @@ pub async fn relay_switch_tier_model(
     quit_chatgpt: Option<bool>,
 ) -> Result<SwitchTierCommandResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    switch_tier_model_command(&app_handle, &provider_id, app_type, &model, quit_chatgpt)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// [`relay_switch_tier_model`] 的命令层实现，托盘的模型子菜单也走这里 ——
+/// 与 [`switch_tier_command`] 同样的「一个编排、多个入口」约定（见它的文档）。
+pub(crate) async fn switch_tier_model_command(
+    app_handle: &tauri::AppHandle,
+    provider_id: &str,
+    app_type: AppType,
+    model: &str,
+    user_choice: Option<bool>,
+) -> Result<SwitchTierCommandResult, AppError> {
     if should_request_switch_confirmation(
         &app_type,
-        quit_chatgpt,
+        user_choice,
         chatgpt_app::needs_user_attention(),
     ) {
         let state = app_handle.state::<AppState>();
         let target_name = state
             .db
-            .get_provider_by_id(&provider_id, app_type.as_str())
-            .map_err(|error| error.to_string())?
+            .get_provider_by_id(provider_id, app_type.as_str())?
             .map(|provider| format!("{} · {model}", provider.name))
-            .unwrap_or(model.clone());
+            .unwrap_or_else(|| model.to_string());
         return Ok(SwitchTierCommandResult::ConfirmationRequired { target_name });
     }
     select_tier_model_impl(
-        &app_handle,
-        &provider_id,
+        app_handle,
+        provider_id,
         app_type,
-        &model,
-        quit_chatgpt.unwrap_or(false),
+        model,
+        user_choice.unwrap_or(false),
     )
     .await
     .map(|result| SwitchTierCommandResult::Switched { result })
-    .map_err(|e| e.to_string())
 }
 
 fn should_request_switch_confirmation(
@@ -4268,6 +4312,11 @@ async fn switch_tier_impl(
     // 两条切换路径都发，共用 `commands::provider::emit_provider_switched` 那一份实现 ——
     // payload 形状复制第二遍的必然结局是两份分叉（那边的文档写了完整理由）。
     emit_provider_switched(app_handle, &app_type_for_event, provider_id);
+
+    // 托盘也要跟上：这里不刷，用户从主界面切完档位、再看托盘标题还是旧的
+    // （前端 relay 那条路不会替我们调 `update_tray_menu`）。放在 `switch_tier_impl`
+    // 而不是各命令壳里 —— relay / vendor / 托盘三个入口一次全修，后来者免接。
+    crate::tray::refresh_tray_menu(app_handle);
 
     Ok(SwitchTierResult {
         provider_name,

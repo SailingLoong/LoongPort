@@ -6,18 +6,17 @@
 //! 与 [`crate::vendor::provision::provider_id_for`] 两个生成端的输出形状），
 //! 用前缀而不是往 `ProviderMeta` 里加字段：那是上游的结构，加字段会扩大与上游 merge 的接触面。
 //!
-//! 代价是这个前缀字符串会被多处需要（生成、托盘过滤、命令层守卫），一旦散落成三个字面量，
+//! 代价是这个前缀字符串会被多处需要（生成、托盘路由、命令层守卫），一旦散落成三个字面量，
 //! 改前缀那天就会漏掉一处、于是某条绕过路径静默复活。所以常量与判据函数都收在这里，
 //! 别处只许调用。
 //!
 //! ## 为什么需要守卫（不只是前端过滤）
 //!
-//! 切换托管档位的正确入口只有 `relay_switch_tier` —— 它编排的是「退出 ChatGPT →
-//! 切换 → 重开」。任何绕过它直接切 provider 的路径，结果都是**界面显示切了、codex 还连着
-//! 旧分组**，而用户不会收到任何提示。前端那道过滤（`isManagedProviderId`）挡不住托盘菜单与命令层，
+//! 切换托管档位的正确入口是 `switch_tier_command` 那条编排（「退出 ChatGPT → 切换 →
+//! 重开」，命令层与托盘共用；`relay_switch_tier` 命令是它的一个壳）。任何绕过它直接切
+//! provider 的路径，结果都是**界面显示切了、codex 还连着旧分组**，而用户不会收到任何
+//! 提示。前端那道过滤（`isManagedProviderId`）挡不住托盘菜单与命令层，
 //! 所以守卫必须落在 Rust 侧。
-
-use crate::provider::Provider;
 
 /// 托管 provider 的 id 前缀。
 ///
@@ -91,27 +90,10 @@ pub fn reject_if_managed(provider_id: &str) -> Result<(), crate::error::AppError
     Ok(())
 }
 
-/// 从（已按调用方规则排好序的）provider 列表里剔除托管项，保留原有顺序。
-///
-/// 供「点一下就直接切」的入口用（当前是托盘菜单）：那些入口没有 `relay_switch_tier`
-/// 的编排，托管项出现在那里就是个陷阱。
-pub fn filter_unmanaged<'a>(
-    providers: Vec<(&'a String, &'a Provider)>,
-) -> Vec<(&'a String, &'a Provider)> {
-    providers
-        .into_iter()
-        .filter(|(_, provider)| !is_managed(&provider.id))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::relay::provision;
-
-    fn provider_with_id(id: &str) -> Provider {
-        Provider::with_id(id.to_string(), "t".to_string(), serde_json::json!({}), None)
-    }
 
     /// 前缀在**前后端各存一份**（Rust 这里 + `src/config/constants.ts` 的
     /// `MANAGED_PROVIDER_ID_PREFIX`），跨语言编译器管不到 —— 两处不一致的后果是
@@ -301,29 +283,5 @@ mod tests {
             assert!(reject_if_managed(id).is_ok(), "id: {id}");
             assert!(!is_managed(id), "id: {id}");
         }
-    }
-
-    #[test]
-    fn filter_unmanaged_drops_managed_and_keeps_order() {
-        let managed = provider_with_id(&provision::provider_id_for(
-            "https://bestapi.store",
-            Some(1),
-            1,
-        ));
-        let first = provider_with_id("custom-1");
-        let second = provider_with_id("custom-2");
-        let input = vec![
-            (&first.id, &first),
-            (&managed.id, &managed),
-            (&second.id, &second),
-        ];
-
-        let kept = filter_unmanaged(input);
-
-        assert_eq!(
-            kept.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
-            vec!["custom-1", "custom-2"],
-            "托管项必须消失，其余顺序不变"
-        );
     }
 }

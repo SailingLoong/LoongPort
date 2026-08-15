@@ -69,6 +69,7 @@ pub mod managed;
 pub mod newapi;
 pub mod newapi_provision;
 pub mod newapi_purchase;
+pub mod onboarding;
 // Phase 1 defines this crate-internal contract before Phase 2 consumes it.
 #[allow(dead_code)]
 pub mod model_verification;
@@ -82,4 +83,4 @@ pub mod purchase_session;
 pub mod remote_config;
 pub mod stats;
 
-pub use managed::{filter_unmanaged, is_managed, reject_if_managed};
+pub use managed::{is_managed, reject_if_managed};
