@@ -1,6 +1,5 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Plus } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -19,7 +18,6 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import { Button } from "@/components/ui/button";
 import type { VendorAccountRow } from "@/lib/api/vendor";
 
 import { parseRowKey, rowKey } from "./rowKey";
@@ -31,12 +29,9 @@ import { VendorRow } from "./VendorRow";
  * 2026-08-07 从 `RelayTierList` 拆出来：原来两类行（中转站 / 官网）混在同一个
  * dnd 列表里，现在各归各的区块 —— 中转站行归 `RelayTierList`，官网行走这里。
  *
- * ## 区块头
+ * 区块头只有标题；「添加官网账号」入口在顶栏大「+」（`AddEntryMenu`）。
  *
- * 标题左侧一个 `+` 图标按钮（tooltip 是「添加官网账号」），与中转站块同构。
- * 点它走 `vendor_open_login`（新增账号；同厂商重登会合并回同一行）。
- *
- * ## 为什么标题与按钮文案不带厂商名
+ * ## 为什么标题文案不带厂商名
  *
  * 将来官方账号不一定只有 DeepSeek —— 这一层是「官网账号」这一**类**的落位，
  * 不是某个厂商专属。文案 vendor 无关，接第二家时不用改 UI。
@@ -78,15 +73,13 @@ export interface VendorBlockProps {
   /** 官网直连行那半边。 */
   vendor: VendorListSlice;
   /**
-   * 正在进行的操作集合。`"vendorLogin:new"` 命中时 `+` 按钮禁用并转圈
-   * （登录窗正在打开，防连点）。
+   * 正在进行的操作集合。行内登录等动作的 busy 判定用
+   * （`"vendorLogin:<rowId>"` 等）。
    */
   busy: ReadonlySet<string>;
-  /** 「添加官网账号」入口：新增登录（`rowId` 为 null 的那条路）。 */
-  onAddVendor: () => void;
 }
 
-export function VendorBlock({ vendor, busy, onAddVendor }: VendorBlockProps) {
+export function VendorBlock({ vendor, busy }: VendorBlockProps) {
   const { t } = useTranslation();
   const accounts = vendor.accounts;
 
@@ -122,31 +115,9 @@ export function VendorBlock({ vendor, busy, onAddVendor }: VendorBlockProps) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <h2 className="text-sm font-medium">
-            {t("loongport.sections.official")}
-          </h2>
-          {/* 「添加官网账号」入口。文案 vendor 无关 —— 将来不只是 DeepSeek。
-              + 图标跟在标题后面，与「中转站」块同构。 */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            onClick={onAddVendor}
-            title={t("loongport.vendor.add")}
-            aria-label={t("loongport.vendor.add")}
-            disabled={busy.has("vendorLogin:new")}
-          >
-            {busy.has("vendorLogin:new") ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Plus className="h-3.5 w-3.5" />
-            )}
-          </Button>
-        </div>
-      </div>
+      <h2 className="text-sm font-medium">
+        {t("loongport.sections.official")}
+      </h2>
 
       {accounts.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">

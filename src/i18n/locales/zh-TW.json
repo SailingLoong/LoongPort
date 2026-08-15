@@ -3118,6 +3118,9 @@
   },
   "loongport": {
     "refreshAll": "更新全部中轉站與官方 API 的帳號資訊、額度、群組倍率和連線設定檔",
+    "addEntry": {
+      "title": "新增"
+    },
     "sections": {
       "relay": "中轉站",
       "official": "官方 API",
@@ -3291,7 +3294,6 @@
     },
     "vendor": {
       "refreshAll": "更新帳號資訊、額度、金鑰設定和目前狀態",
-      "add": "新增服務商帳號",
       "empty": "尚未新增服務商帳號",
       "remove": "刪除服務商帳號與連線設定檔",
       "removeConfirmTitle": "刪除此服務商帳號？",
