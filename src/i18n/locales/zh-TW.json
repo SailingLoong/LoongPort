@@ -3388,6 +3388,12 @@
         "cancelled": "驗證已停止。",
         "invalidResponse": "服務商傳回的回應無法驗證。請稍後再試或人工複核。"
       }
+    },
+    "star": {
+      "buttonTitle": "GitHub 儲存庫（點個 ⭐ 支持一下）",
+      "toastTitle": "用得還順手嗎？",
+      "toastBody": "LoongPort 免費開源，去 GitHub 點個 ⭐ 支持一下吧。",
+      "toastAction": "去點星"
     }
   },
   "firstRunNotice": {

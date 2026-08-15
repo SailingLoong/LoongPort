@@ -77,6 +77,8 @@ import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
+import { GitHubStarButton } from "@/components/GitHubStarButton";
+import { StarPromoToast } from "@/components/StarPromoToast";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
@@ -1330,6 +1332,8 @@ function App() {
                     setCurrentView("settings");
                   }}
                 />
+                {/* GitHub 入口 + 首次小红点：自带全部状态（含点掉红点的持久化）。 */}
+                <GitHubStarButton />
                 {isCurrentAppTakeoverActive && (
                   <Button
                     variant="ghost"
@@ -1810,6 +1814,10 @@ function App() {
           `statsNoticeConfirmed`，没表态就一个字节都不发）。
           它自带「读设置 → 判要不要弹」的全部状态，这里只挂一行。 */}
       <StatsNoticeDialog />
+
+      {/* 首次注册成功后的一次性「点个星」toast：自带全部状态（含出过就不再出的
+          持久化），这里只挂一行 —— 与上面那个同一个模式。 */}
+      <StarPromoToast />
 
       {/* 切 codex 供应商前的「要不要退 ChatGPT」确认框。它由 `useCodexSwitchGuard`
           持有全部状态（弹不弹、切哪个），这里只挂一行 —— 与上面那个同一个模式。 */}
