@@ -3332,6 +3332,9 @@ fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
 /// 答案。散成两份的后果是守卫与删除各认一套：守卫说「这条不是你的、不拦」，删除说
 /// 「这条是你的、删了」⇒ 恰好绕过守卫删掉正在用的配置，而那正是守卫要防的事。
 ///
+/// [`relay_balance_inputs`] 与对账命令 `relay_reconciliation`（`commands/reconcile.rs`）
+/// 也走这一个判据 —— 归属口径全仓只有这一份（plan §二：唯一数据源）。
+///
 /// 三道判据缺一不可：
 ///
 /// - `is_managed` —— 我们生成的（前缀 + 恰好 16 位小写 hex，即校验哈希形状）。用户手工加的 provider
@@ -3345,7 +3348,11 @@ fn refresh_live_for_current_tiers(state: &AppState, app_types: &[AppType]) {
 ///     代价是可能误伤同站另一账号的旧档位，但那些会在下次 provision 时重新生成并带上标记。
 ///   - **调用方不知道账号（`account_id` 为 `None`）** ⇒ 未登录的行（provision 不出档位）
 ///     或删站兜底路径，此时不按账号过滤。
-fn belongs_to_account(provider: &Provider, site_origin: &str, account_id: Option<i64>) -> bool {
+pub(crate) fn belongs_to_account(
+    provider: &Provider,
+    site_origin: &str,
+    account_id: Option<i64>,
+) -> bool {
     if !is_managed(provider) {
         return false;
     }
@@ -4466,8 +4473,8 @@ fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
 
 /// 一行名下**全部托管档位**里的 base_url 与 sk。
 ///
-/// 归属判据与 [`tiers_of_site`] 一致（站点 + 账号），但**跨全部 app 扫** ——
-/// 同一行的档位可能只挂在某一个 CLI 下（用户只给 codex 生成过 sk），
+/// 归属判据走 [`belongs_to_account`]（与 [`tiers_of_site`] / `prune_stale_tiers` 同一来源），
+/// 但**跨全部 app 扫** —— 同一行的档位可能只挂在某一个 CLI 下（用户只给 codex 生成过 sk），
 /// 按单个 app 查会在别的 app 上空手而归，让余额白白落到下一条路。
 ///
 /// 顺序不稳定不要紧：调用方（[`crate::relay::balance::resolve`]）是并发试完取第一个
@@ -4480,20 +4487,7 @@ fn relay_balance_inputs(state: &AppState, relay: &creds::Relay) -> (String, Vec<
             continue;
         };
         for provider in providers.values() {
-            if !is_managed(provider) {
-                continue;
-            }
-            if provider.website_url.as_deref() != Some(relay.site_origin.as_str()) {
-                continue;
-            }
-            // 与 `tiers_of_site` 同一张真值表：档位没记账号（旧数据）只按站点归。
-            let owner = provider.meta.as_ref().and_then(|m| m.loongport_account_id);
-            let belongs = match (relay.account_id, owner) {
-                (Some(want), Some(owner)) => want == owner,
-                (_, None) => true,
-                (None, Some(_)) => false,
-            };
-            if !belongs {
+            if !belongs_to_account(provider, &relay.site_origin, relay.account_id) {
                 continue;
             }
             if let Some(sk) = provision::extract_api_key(&provider.settings_config, &app_type) {

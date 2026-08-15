@@ -12,6 +12,7 @@
 //! 对账要把两种时间放在同一个窗口里比，单位必须一致。
 
 use rusqlite::{params, Connection};
+use serde::Serialize;
 
 use crate::database::lock_conn;
 use crate::error::AppError;
@@ -162,6 +163,202 @@ fn resolved_usd_balance(usage: &UsageResult) -> Option<f64> {
         .and_then(|items| items.first())
         .filter(|item| item.unit.as_deref() == Some("USD"))
         .and_then(|item| item.remaining)
+}
+
+// ============================================================================
+// 对账报告：窗口计算（plan §三.3 / §三.4）
+// ============================================================================
+
+/// 回看窗口长度：30 天。再早的快照不进报告 —— 中转站价格表会变，
+/// 太老的比值没有判别力，只会稀释基线。
+const LOOKBACK_SECS: i64 = 30 * 24 * 3600;
+
+/// 返回窗口数上限（新 → 旧）。正常频率（每次余额刷新一枚快照）远够不到，
+/// 这是防「高频刷新把 payload 撑爆」的安全阀。基线仍按回看期内全部有效窗口算。
+const MAX_WINDOWS: usize = 50;
+
+/// 扣减低于这个数（USD）的窗口不算有效消费 —— 精度噪音，不进比值也不进基线。
+const MIN_DEDUCTION_USD: f64 = 0.01;
+
+/// 基线（有效窗口 ratio 的中位数）需要的最少窗口数。不足就不判 `Suspicious`。
+const MIN_BASELINE_WINDOWS: usize = 3;
+
+/// `Suspicious` 阈值：`ratio <= baseline × 0.5`。刻意放宽到 2 倍 —— 吸收
+/// 「同账号在其他 key/工具上消费」「估算价格表偏差」这类已知噪音，宁可漏报不制造纠纷。
+const SUSPICIOUS_RATIO_FRACTION: f64 = 0.5;
+
+/// 一份对账报告（serde camelCase，给前端展示）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconciliationReport {
+    pub relay_id: i64,
+    /// 回看期内的快照总数（配成窗口的原料，不是窗口数）。
+    pub snapshot_count: usize,
+    /// 有效窗口 ratio 的中位数；不足 [`MIN_BASELINE_WINDOWS`] 个有效窗口为 `None`。
+    pub baseline_ratio: Option<f64>,
+    /// 窗口按新 → 旧排，最多 [`MAX_WINDOWS`] 个。
+    pub windows: Vec<ReconciliationWindow>,
+}
+
+/// 相邻两枚快照构成的窗口 `[start_secs, end_secs)`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconciliationWindow {
+    pub start_secs: i64,
+    pub end_secs: i64,
+    pub start_balance_usd: f64,
+    pub end_balance_usd: f64,
+    /// `end - start`：负数 = 扣减，正数 = 充值/返利。
+    pub balance_delta_usd: f64,
+    /// 窗口内该站名下 provider 的估算成本之和（`proxy_request_logs`，CAST 后的美元数）。
+    pub estimated_cost_usd: f64,
+    /// `估算 ÷ 扣减`，仅当扣减 > [`MIN_DEDUCTION_USD`] 且估算 > 0 时有值。
+    pub ratio: Option<f64>,
+    pub flag: WindowFlag,
+}
+
+/// 窗口标记。判据是业务事实，由后端定（前端只展示）：
+///
+/// - [`WindowFlag::SkippedTopUp`]：扣减 <= 0（充值/返利/赠送），不进比值、不进基线。
+/// - [`WindowFlag::InsufficientData`]：没有可算的比值（扣减太小或窗口内无估算数据）。
+/// - [`WindowFlag::Suspicious`]：`ratio <= baseline × 0.5` 且基线存在 ——
+///   实际扣减持续达到预期的 2 倍以上。
+/// - [`WindowFlag::Normal`]：其余有比值的窗口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowFlag {
+    Normal,
+    SkippedTopUp,
+    InsufficientData,
+    Suspicious,
+}
+
+impl Database {
+    /// 算某个中转站的扣费对账报告。
+    ///
+    /// `provider_keys` 是该站名下全部托管档位的 `(provider_id, app_type)` ——
+    /// 归属判据在命令层（`commands::relay::belongs_to_account`，与 `relay_balance_inputs`
+    /// 同一来源），本方法只管按这些 key 聚合 `proxy_request_logs` 的成本。
+    pub fn reconciliation_report(
+        &self,
+        relay_id: i64,
+        provider_keys: &[(String, String)],
+    ) -> Result<ReconciliationReport, AppError> {
+        let since = chrono::Utc::now().timestamp() - LOOKBACK_SECS;
+        let snapshots = self.list_balance_snapshots(relay_id, Some(since))?;
+        let snapshot_count = snapshots.len();
+
+        // 相邻两枚快照配成窗口（升序 ⇒ 窗口先按旧 → 新算，收尾再反转）。
+        let mut windows = Vec::with_capacity(snapshot_count.saturating_sub(1));
+        for pair in snapshots.windows(2) {
+            let (older, newer) = (&pair[0], &pair[1]);
+            let deduction = older.balance_usd - newer.balance_usd; // 正数 = 消费
+            let estimated =
+                self.estimated_cost_between(provider_keys, older.created_at, newer.created_at)?;
+            let ratio =
+                (deduction > MIN_DEDUCTION_USD && estimated > 0.0).then(|| estimated / deduction);
+            windows.push(ReconciliationWindow {
+                start_secs: older.created_at,
+                end_secs: newer.created_at,
+                start_balance_usd: older.balance_usd,
+                end_balance_usd: newer.balance_usd,
+                balance_delta_usd: newer.balance_usd - older.balance_usd,
+                estimated_cost_usd: estimated,
+                ratio,
+                flag: WindowFlag::Normal, // 占位；基线算出来后统一分类
+            });
+        }
+
+        let baseline_ratio = median_baseline(&windows);
+        for window in &mut windows {
+            window.flag = classify(window, baseline_ratio);
+        }
+        windows.reverse();
+        windows.truncate(MAX_WINDOWS);
+
+        Ok(ReconciliationReport {
+            relay_id,
+            snapshot_count,
+            baseline_ratio,
+            windows,
+        })
+    }
+
+    /// `[start_secs, end_secs)` 内、名下 provider 的估算成本之和（美元）。
+    ///
+    /// `total_cost_usd` 是 TEXT 美元字符串，必须 CAST（同
+    /// `services/usage_stats.rs` 的既有写法）。`(provider_id, app_type)` 成对匹配：
+    /// provider id 只在所属 app_type 那一栏下才是这条档位。
+    fn estimated_cost_between(
+        &self,
+        provider_keys: &[(String, String)],
+        start_secs: i64,
+        end_secs: i64,
+    ) -> Result<f64, AppError> {
+        if provider_keys.is_empty() {
+            return Ok(0.0);
+        }
+
+        let mut sql = String::from(
+            "SELECT COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0)
+             FROM proxy_request_logs
+             WHERE created_at >= ?1 AND created_at < ?2
+               AND (provider_id, app_type) IN (VALUES ",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(start_secs), Box::new(end_secs)];
+        for (i, (provider_id, app_type)) in provider_keys.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str("(?, ?)");
+            args.push(Box::new(provider_id.clone()));
+            args.push(Box::new(app_type.clone()));
+        }
+        // 关掉 `IN (VALUES` 那个开括号；每一行 `(?, ?)` 自带收尾。
+        sql.push(')');
+
+        let conn = lock_conn!(self.conn);
+        let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        conn.query_row(&sql, params.as_slice(), |row| row.get::<_, f64>(0))
+            .map_err(|e| AppError::Database(format!("聚合窗口估算成本失败: {e}")))
+    }
+}
+
+/// 有效窗口 ratio 的中位数；不足 [`MIN_BASELINE_WINDOWS`] 个有效窗口回 `None`。
+fn median_baseline(windows: &[ReconciliationWindow]) -> Option<f64> {
+    let mut ratios: Vec<f64> = windows.iter().filter_map(|w| w.ratio).collect();
+    if ratios.len() < MIN_BASELINE_WINDOWS {
+        return None;
+    }
+    ratios.sort_by(|a, b| a.total_cmp(b));
+    let mid = ratios.len() / 2;
+    Some(if ratios.len() % 2 == 1 {
+        ratios[mid]
+    } else {
+        (ratios[mid - 1] + ratios[mid]) / 2.0
+    })
+}
+
+/// 基线定完之后给窗口打标（[`WindowFlag`] 的判据见枚举文档）。
+fn classify(window: &ReconciliationWindow, baseline_ratio: Option<f64>) -> WindowFlag {
+    let deduction = window.start_balance_usd - window.end_balance_usd;
+    if deduction <= 0.0 {
+        WindowFlag::SkippedTopUp
+    } else if window.ratio.is_none() {
+        WindowFlag::InsufficientData
+    } else if let Some(baseline) = baseline_ratio {
+        let suspicious = window
+            .ratio
+            .is_some_and(|ratio| ratio <= baseline * SUSPICIOUS_RATIO_FRACTION);
+        if suspicious {
+            WindowFlag::Suspicious
+        } else {
+            WindowFlag::Normal
+        }
+    } else {
+        WindowFlag::Normal
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +568,243 @@ mod tests {
         }
         // 不该 panic、不该把错误抛出去 —— 对账是旁路能力。
         capture_balance_snapshot(&db, 7, &usage(true, Some(12.5), Some("USD")));
+    }
+
+    // ------------------------------------------------------------------
+    // reconciliation_report：窗口计算（plan §三.3 / §三.4）
+    // ------------------------------------------------------------------
+
+    /// 本站名下那个托管 provider 的 `(provider_id, app_type)`。
+    /// id 形状满足 [`crate::relay::managed::is_managed`]：前缀 + 恰好 16 位小写 hex。
+    const OWNED_PID: &str = "loongport-0123456789abcdef";
+
+    fn owned_keys() -> Vec<(String, String)> {
+        vec![(OWNED_PID.to_string(), "codex".to_string())]
+    }
+
+    /// 插一条快照并把 `created_at` 改成指定值（测试没法等真实时钟拉开差距）。
+    fn snapshot_at(db: &Database, relay_id: i64, balance_usd: f64, created_at: i64) {
+        let id = db
+            .insert_balance_snapshot(relay_id, balance_usd, "balance_query")
+            .expect("插快照");
+        set_created_at(db, id, created_at);
+    }
+
+    /// 插一条代理日志。`total_cost_usd` 故意走 TEXT —— 生产列存的是美元字符串，
+    /// 聚合必须 CAST 才算得出数。
+    fn insert_log(
+        db: &Database,
+        request_id: &str,
+        provider_id: &str,
+        app_type: &str,
+        created_at: i64,
+        total_cost_usd: &str,
+    ) {
+        let conn = db.conn.lock().expect("拿连接");
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, latency_ms, status_code,
+                total_cost_usd, created_at
+            ) VALUES (?1, ?2, ?3, 'test-model', 100, 200, ?4, ?5)",
+            params![
+                request_id,
+                provider_id,
+                app_type,
+                total_cost_usd,
+                created_at
+            ],
+        )
+        .expect("插日志");
+    }
+
+    /// 测试时间基点：几小时前的整点，往前取偏移 —— 30 天回看窗口内的确定性时间轴。
+    fn base_time() -> i64 {
+        chrono::Utc::now().timestamp() - 10_000
+    }
+
+    #[test]
+    fn normal_windows_compute_ratio_and_median_baseline() {
+        let db = db();
+        let base = base_time();
+        // 三个窗口，每个扣减 2.0、估算 1.0 ⇒ ratio 全是 0.5，中位数也是 0.5。
+        for (offset, balance) in [(100, 10.0), (200, 8.0), (300, 6.0), (400, 4.0)] {
+            snapshot_at(&db, 7, balance, base + offset);
+        }
+        // 两条 TEXT 美元字符串相加（0.60 + 0.40）验证 CAST；t=100 计入、t=400 不计入。
+        insert_log(&db, "r0", OWNED_PID, "codex", base + 100, "0.60");
+        insert_log(&db, "r1", OWNED_PID, "codex", base + 150, "0.40");
+        insert_log(&db, "r2", OWNED_PID, "codex", base + 250, "1.0");
+        insert_log(&db, "r3", OWNED_PID, "codex", base + 399, "1.0");
+        insert_log(&db, "r4", OWNED_PID, "codex", base + 400, "999"); // 恰好落在窗口右端点之外
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert_eq!(report.relay_id, 7);
+        assert_eq!(report.snapshot_count, 4);
+        assert_eq!(report.windows.len(), 3);
+        assert_eq!(report.baseline_ratio, Some(0.5));
+        // 新 → 旧
+        assert_eq!(report.windows[0].start_secs, base + 300);
+        assert_eq!(report.windows[2].start_secs, base + 100);
+        for w in &report.windows {
+            assert_eq!(w.estimated_cost_usd, 1.0, "估算成本 = {w:?}");
+            assert_eq!(w.ratio, Some(0.5));
+            assert_eq!(w.flag, WindowFlag::Normal);
+            assert_eq!(w.balance_delta_usd, -2.0, "余额变化是负数 = 扣减");
+        }
+    }
+
+    #[test]
+    fn topup_window_is_skipped_and_left_out_of_baseline() {
+        let db = db();
+        let base = base_time();
+        // 中间那个窗口余额上升（充值），其余正常消费。
+        for (offset, balance) in [(100, 10.0), (200, 8.0), (300, 12.0), (400, 10.0)] {
+            snapshot_at(&db, 7, balance, base + offset);
+        }
+        insert_log(&db, "r0", OWNED_PID, "codex", base + 150, "1.0");
+        insert_log(&db, "r1", OWNED_PID, "codex", base + 350, "1.0");
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        // 有效窗口只有 2 个，基线要 >= 3 个 ⇒ None（充值窗口不进基线）。
+        assert_eq!(report.baseline_ratio, None);
+        let topup = &report.windows[1]; // 新→旧排完，充值窗口排中间
+        assert_eq!((topup.start_secs, topup.end_secs), (base + 200, base + 300));
+        assert_eq!(topup.flag, WindowFlag::SkippedTopUp);
+        assert_eq!(topup.ratio, None);
+        assert_eq!(topup.balance_delta_usd, 4.0, "充值后余额上升为正");
+        for w in [&report.windows[0], &report.windows[2]] {
+            assert_eq!(w.flag, WindowFlag::Normal);
+            assert_eq!(w.ratio, Some(0.5));
+        }
+    }
+
+    #[test]
+    fn tiny_deduction_and_zero_usage_are_insufficient_data() {
+        let db = db();
+        let base = base_time();
+        // [100,200) 扣减 0.005（>0 但 <= 0.01）；[200,300) 无估算数据；[300,400) 正常。
+        for (offset, balance) in [(100, 10.0), (200, 9.995), (300, 9.0), (400, 7.0)] {
+            snapshot_at(&db, 7, balance, base + offset);
+        }
+        insert_log(&db, "r0", OWNED_PID, "codex", base + 350, "1.0");
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        // 只有 1 个有效窗口 ⇒ 基线 None。
+        assert_eq!(report.baseline_ratio, None);
+        let valid = &report.windows[0]; // [300,400)
+        assert_eq!(valid.ratio, Some(0.5));
+        assert_eq!(
+            valid.flag,
+            WindowFlag::Normal,
+            "没有基线时不判 Suspicious，但仍是有数据的窗口"
+        );
+        let no_usage = &report.windows[1]; // [200,300)
+        assert_eq!(no_usage.estimated_cost_usd, 0.0);
+        assert_eq!(no_usage.ratio, None);
+        assert_eq!(no_usage.flag, WindowFlag::InsufficientData);
+        let tiny = &report.windows[2]; // [100,200)
+        assert_eq!(tiny.ratio, None);
+        assert_eq!(tiny.flag, WindowFlag::InsufficientData);
+    }
+
+    #[test]
+    fn half_baseline_ratio_flags_suspicious() {
+        let db = db();
+        let base = base_time();
+        // 5 个窗口：ratio [1.0, 1.0, 1.0, 0.5, 0.3]，中位数 1.0。
+        // 0.5 恰好等于 baseline × 0.5 ⇒ 触发（判据是 <=），顺带钉住边界。
+        for (offset, balance) in [
+            (100, 10.0),
+            (200, 9.0),
+            (300, 8.0),
+            (400, 7.0),
+            (500, 6.5),
+            (600, 6.2),
+        ] {
+            snapshot_at(&db, 7, balance, base + offset);
+        }
+        insert_log(&db, "r0", OWNED_PID, "codex", base + 150, "1.0");
+        insert_log(&db, "r1", OWNED_PID, "codex", base + 250, "1.0");
+        insert_log(&db, "r2", OWNED_PID, "codex", base + 350, "1.0");
+        insert_log(&db, "r3", OWNED_PID, "codex", base + 450, "0.25"); // ratio 0.5
+        insert_log(&db, "r4", OWNED_PID, "codex", base + 550, "0.09"); // ratio 0.3
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert_eq!(report.baseline_ratio, Some(1.0));
+        // 新 → 旧：windows[0] = [500,600)（ratio 0.3），windows[1] = [400,500)（ratio 0.5）。
+        assert_eq!(report.windows[0].flag, WindowFlag::Suspicious);
+        assert_eq!(report.windows[1].flag, WindowFlag::Suspicious);
+        for w in &report.windows[2..] {
+            assert_eq!(w.flag, WindowFlag::Normal);
+        }
+    }
+
+    #[test]
+    fn other_providers_and_apps_do_not_leak_into_estimates() {
+        let db = db();
+        let base = base_time();
+        snapshot_at(&db, 7, 10.0, base + 100);
+        snapshot_at(&db, 7, 8.0, base + 200);
+        // 另一个中转站的托管 provider、同 id 挂在别的 app_type 下，都不许混进来。
+        insert_log(&db, "mine", OWNED_PID, "codex", base + 150, "0.50");
+        insert_log(
+            &db,
+            "foreign",
+            "loongport-fedcba9876543210",
+            "codex",
+            base + 150,
+            "999",
+        );
+        insert_log(&db, "wrong-app", OWNED_PID, "claude", base + 150, "888");
+        // 别的 relay 的快照也不该配进本站的窗口。
+        snapshot_at(&db, 8, 100.0, base + 150);
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert_eq!(report.windows.len(), 1, "别的 relay 的快照不该产生窗口");
+        let w = &report.windows[0];
+        assert_eq!(w.estimated_cost_usd, 0.50, "估算成本 = {w:?}");
+        assert_eq!(w.ratio, Some(0.25));
+    }
+
+    #[test]
+    fn snapshots_older_than_30_days_are_ignored() {
+        let db = db();
+        let now = chrono::Utc::now().timestamp();
+        snapshot_at(&db, 7, 100.0, now - 40 * 86_400);
+        snapshot_at(&db, 7, 90.0, now - 35 * 86_400);
+        snapshot_at(&db, 7, 10.0, now - 5 * 86_400);
+        snapshot_at(&db, 7, 8.0, now - 86_400);
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert_eq!(report.snapshot_count, 2, "30 天窗口外的快照不进报告");
+        assert_eq!(report.windows.len(), 1);
+        assert_eq!(report.windows[0].start_secs, now - 5 * 86_400);
+    }
+
+    #[test]
+    fn windows_are_capped_at_50_newest_first() {
+        let db = db();
+        let now = chrono::Utc::now().timestamp();
+        // 60 枚快照（每小时一枚）⇒ 59 个窗口，只回最近 50 个。
+        for i in 0..60 {
+            snapshot_at(&db, 7, 100.0 - i as f64, now - (60 - i) * 3600);
+        }
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert_eq!(report.snapshot_count, 60);
+        assert_eq!(report.windows.len(), 50);
+        assert_eq!(report.windows[0].end_secs, now - 3600, "最新的窗口排最前");
+    }
+
+    #[test]
+    fn report_without_enough_snapshots_is_empty() {
+        let db = db();
+        snapshot_at(&db, 7, 10.0, base_time());
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert_eq!(report.snapshot_count, 1);
+        assert!(report.windows.is_empty(), "快照不足两枚 ⇒ 没有窗口");
+        assert_eq!(report.baseline_ratio, None);
     }
 
     /// 老库（v13，没有本表）升级后必须有这张表且可用。
