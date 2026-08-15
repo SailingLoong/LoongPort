@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 13;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 14;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -232,6 +232,13 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 log::info!("LoongPort 数据迁移 v12 → v13（中转站倍率刷新时间）");
                 add_relay_pricing_synced_at_column(conn)?;
                 set_version(conn, 13)?;
+            }
+            // v13 → v14：中转站余额快照表（扣费对账的唯一采样点）。
+            // 全新库由 `create_tables_on_conn` 直接建成本形态，这一步服务已停在 v13 的库。
+            13 => {
+                log::info!("LoongPort 数据迁移 v13 → v14（中转站余额快照表）");
+                crate::relay::reconcile::create_table(conn)?;
+                set_version(conn, 14)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -828,6 +835,32 @@ mod tests {
         assert_eq!(not_null, 0);
     }
 
+    /// ⭐ v13→v14 建中转站余额快照表：停在 v13 的老库升级后必须有表且可写。
+    #[test]
+    fn v13_to_v14_creates_the_balance_snapshot_table() {
+        let conn = mem();
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, 13).expect("设为 v13");
+        assert!(
+            !Database::table_exists(&conn, "relay_balance_snapshots").expect("查表"),
+            "前提：升级前本表不存在"
+        );
+
+        apply(&conn).expect("迁移到 v14");
+
+        assert!(
+            Database::table_exists(&conn, "relay_balance_snapshots").expect("查表"),
+            "v13 → v14 必须建出余额快照表"
+        );
+        conn.execute(
+            "INSERT INTO relay_balance_snapshots (relay_id, balance_usd, source, created_at)
+             VALUES (1, 1.5, 'balance_query', 0)",
+            [],
+        )
+        .expect("迁移后必须可写");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+    }
+
     #[test]
     fn v8_to_v9_adds_backend_kind_and_defaults_existing_rows_to_sub2api() {
         let conn = mem();
@@ -884,7 +917,7 @@ mod tests {
     fn v9_migration_does_not_treat_schema_inspection_failure_as_missing_table() {
         let conn = mem();
         v8_relay_table(&conn);
-        conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        let _ = conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
             AuthAction::Read {
                 table_name: "sqlite_master",
                 ..

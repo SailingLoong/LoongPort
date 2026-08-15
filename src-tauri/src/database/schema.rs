@@ -404,6 +404,9 @@ impl Database {
         // LoongPort：官网直连账号（vendor 层）
         crate::vendor::creds::create_table(conn)?;
 
+        // LoongPort：中转站余额快照（扣费对账）
+        crate::relay::reconcile::create_table(conn)?;
+
         Ok(())
     }
 
