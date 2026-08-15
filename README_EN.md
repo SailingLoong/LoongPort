@@ -212,34 +212,20 @@ can press "check for updates" yourself at any time.
 
 ## DeepSeek Harness (dsh)
 
-LoongPort also ships an independent [`loongport` npm integration](https://www.npmjs.com/package/loongport)
-for adding one OpenAI-compatible route to
-[DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness). It is separate
-from the desktop support matrix below: dsh's built-in `llm-pi-ai` still owns transport,
-streaming, tool calls and retries.
-
-Preview the redacted plan without changing files:
+LoongPort provides the [`loongport` npm Cordis bundle](https://www.npmjs.com/package/loongport)
+for verified providers in [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness).
 
 ```bash
-LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
-  --base-url https://relay.example.com/v1 \
-  --model model-id
+dsh plugin --profile <profile> add loongport
 ```
 
-Then apply it explicitly with `--write`:
+After installation, open **Settings → LoongPort**, choose a provider, use its own
+registration or sign-in page when needed, manually generate and paste an API key, then save
+`deepseek-v4-flash` or `deepseek-v4-pro`. BestAPI is the default provider. See
+**[loongport.dev/en/dsh](https://loongport.dev/en/dsh)** for the safety boundary and the
+signed-directory and VeriDrop roles.
 
-```bash
-LOONGPORT_API_KEY='sk-…' npx loongport dsh setup \
-  --base-url https://relay.example.com/v1 \
-  --model model-id \
-  --write
-```
-
-The API key is read only from the environment. The command updates only the selected
-provider route and credential name while preserving other dsh configuration. See
-**[loongport.dev/en/dsh](https://loongport.dev/en/dsh)** for prerequisites, security
-boundaries and every option; source lives at
-**[SailingLoong/loongport-dsh](https://github.com/SailingLoong/loongport-dsh)**.
+Browser authorization is not automated; the website documents the advanced custom-endpoint CLI path.
 
 ## What it supports
 
