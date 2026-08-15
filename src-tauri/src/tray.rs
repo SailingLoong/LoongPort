@@ -202,7 +202,7 @@ impl TrayTexts {
 /// 托盘应用分区配置。
 ///
 /// 机器部分（事件 id 前缀、空提示 id）全部从 [`AppType::as_str`] 派生，
-/// 不写字面量 —— 10 个分区 × 3 份手写 id 迟早漂移，而漂移的表现是
+/// 不写字面量 —— 分区数 × 3 份手写 id 迟早漂移，而漂移的表现是
 /// 「菜单项点上去没反应」（事件 id 对不上），编译器和测试都抓不到。
 #[derive(Clone)]
 pub struct TrayAppSection {
@@ -227,16 +227,15 @@ impl TrayAppSection {
 pub const AUTO_SUFFIX: &str = "auto";
 pub const TRAY_ID: &str = "cc-switch";
 
-/// 托盘覆盖全部 provider 型 app（顺序对齐主界面 `appConfig`），实际显示哪些
-/// 由 `settings.visible_apps` 过滤 —— 主界面藏掉的 tab 托盘也不出现。
-pub const TRAY_SECTIONS: [TrayAppSection; 10] = [
+/// 托盘应用分区：**6 个** —— 中转站档位真正可用的 app（Claude / Codex /
+/// Codex 生图 / Gemini / Grok Build / Pi），顺序对齐主界面 `appConfig`。
+/// 其余 app（Claude Desktop / OpenCode / OpenClaw / Hermes）的档位与切换
+/// 留在主界面，托盘不铺满 —— 快速切换入口要的是精简，不是全覆盖。
+/// 实际显示仍由 `settings.visible_apps` 过滤，主界面藏掉的 tab 托盘不出现。
+pub const TRAY_SECTIONS: [TrayAppSection; 6] = [
     TrayAppSection {
         app_type: AppType::Claude,
         label: "Claude",
-    },
-    TrayAppSection {
-        app_type: AppType::ClaudeDesktop,
-        label: "Claude Desktop",
     },
     TrayAppSection {
         app_type: AppType::Codex,
@@ -253,18 +252,6 @@ pub const TRAY_SECTIONS: [TrayAppSection; 10] = [
     TrayAppSection {
         app_type: AppType::GrokBuild,
         label: "Grok Build",
-    },
-    TrayAppSection {
-        app_type: AppType::OpenCode,
-        label: "OpenCode",
-    },
-    TrayAppSection {
-        app_type: AppType::OpenClaw,
-        label: "OpenClaw",
-    },
-    TrayAppSection {
-        app_type: AppType::Hermes,
-        label: "Hermes",
     },
     TrayAppSection {
         app_type: AppType::Pi,
@@ -1659,10 +1646,10 @@ mod tests {
         }
     }
 
-    /// 托盘分区覆盖主界面全部 app（P2）：每个 AppType 都有对应分区，
-    /// 顺序与主界面 `appConfig` 一致，避免菜单顺序和 tab 顺序打架。
+    /// 托盘分区是固定的 6 个（中转站档位可用的 app），顺序与主界面 `appConfig`
+    /// 一致 —— 改这份集合时同步改这里的期望，顺序打架说明有人只动了一边。
     #[test]
-    fn tray_sections_cover_all_apps_in_main_ui_order() {
+    fn tray_sections_are_the_six_relay_apps_in_main_ui_order() {
         let section_apps: Vec<&str> = TRAY_SECTIONS
             .iter()
             .map(|section| section.app_type.as_str())
@@ -1671,14 +1658,10 @@ mod tests {
             section_apps,
             vec![
                 "claude",
-                "claude-desktop",
                 "codex",
                 "codex-image",
                 "gemini",
                 "grokbuild",
-                "opencode",
-                "openclaw",
-                "hermes",
                 "pi",
             ]
         );
