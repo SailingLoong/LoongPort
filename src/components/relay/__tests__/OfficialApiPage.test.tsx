@@ -11,8 +11,16 @@ vi.mock("@/lib/api/vendor", () => ({
   DEEPSEEK_VENDOR_ID: "deepseek",
   BIGMODEL_VENDOR_ID: "bigmodel",
   VENDOR_CATALOG: [
-    { id: "deepseek", displayName: "DeepSeek", descriptionKey: "loongport.officialApi.deepseekDesc" },
-    { id: "bigmodel", displayName: "智谱 BigModel", descriptionKey: "loongport.officialApi.bigmodelDesc" },
+    {
+      id: "deepseek",
+      displayName: "DeepSeek",
+      descriptionKey: "loongport.officialApi.deepseekDesc",
+    },
+    {
+      id: "bigmodel",
+      displayName: "智谱 BigModel",
+      descriptionKey: "loongport.officialApi.bigmodelDesc",
+    },
   ],
 }));
 
@@ -30,7 +38,10 @@ vi.mock("sonner", () => ({
 const { OfficialApiPage } = await import("../OfficialApiPage");
 
 function renderPage(app: AppId = "claude", onBack = vi.fn()) {
-  return { onBack, view: render(<OfficialApiPage sourceAppId={app} onBack={onBack} />) };
+  return {
+    onBack,
+    view: render(<OfficialApiPage sourceAppId={app} onBack={onBack} />),
+  };
 }
 
 describe("OfficialApiPage", () => {
@@ -43,9 +54,7 @@ describe("OfficialApiPage", () => {
 
     expect(screen.getByText("DeepSeek")).toBeInTheDocument();
     expect(screen.getByText("智谱 BigModel")).toBeInTheDocument();
-    expect(
-      screen.getAllByText("loongport.officialApi.connect").length,
-    ).toBe(2);
+    expect(screen.getAllByText("loongport.officialApi.connect").length).toBe(2);
   });
 
   it("picking a vendor opens login with that vendor id and the source app", async () => {

@@ -544,8 +544,11 @@ describe("RelaySection model verification ownership", () => {
     const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     render(
       <QueryClientProvider client={queryClient}>
-        <RelaySection appId="codex" onOpenDirectory={vi.fn()}
-        onOpenOfficialApi={vi.fn()} />
+        <RelaySection
+          appId="codex"
+          onOpenDirectory={vi.fn()}
+          onOpenOfficialApi={vi.fn()}
+        />
       </QueryClientProvider>,
     );
 

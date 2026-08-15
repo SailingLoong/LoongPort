@@ -75,7 +75,9 @@ export function OfficialApiPage({ sourceAppId, onBack }: OfficialApiPageProps) {
             onClick={() => void handlePick(vendor.id)}
             className="flex min-h-36 flex-col items-start gap-2 rounded-lg border border-border-default bg-background p-5 text-left shadow-sm transition-colors hover:border-blue-400/60 hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <span className="text-base font-semibold">{vendor.displayName}</span>
+            <span className="text-base font-semibold">
+              {vendor.displayName}
+            </span>
             <span className="text-xs leading-relaxed text-muted-foreground">
               {t(vendor.descriptionKey)}
             </span>

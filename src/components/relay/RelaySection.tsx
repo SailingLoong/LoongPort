@@ -27,10 +27,7 @@ import {
   type VerificationVerdict,
 } from "@/lib/api/modelVerification";
 import { MODEL_VERIFICATION_CHANGED } from "@/lib/api/events";
-import {
-  vendorApi,
-  type VendorAccountRow,
-} from "@/lib/api/vendor";
+import { vendorApi, type VendorAccountRow } from "@/lib/api/vendor";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
