@@ -95,6 +95,66 @@
         "entry_url": "https://api-top.com/register",
         "purchase_url": "https://api-top.com/wallet",
         "display_name": "Top-API"
+      },
+      "api.ooapi.cc": {
+        "veridrop_host": "api.ooapi.cc",
+        "entry_url": "https://api.ooapi.cc",
+        "display_name": "玩转AI"
+      },
+      "cc-vibe.com": {
+        "veridrop_host": "cc-vibe.com",
+        "entry_url": "https://cc-vibe.com",
+        "display_name": "CCVibe"
+      },
+      "codereel.pro": {
+        "veridrop_host": "codereel.pro",
+        "entry_url": "https://codereel.pro",
+        "display_name": "CodeReel"
+      },
+      "codex666ai.com": {
+        "veridrop_host": "codex666ai.com",
+        "entry_url": "https://codex666ai.com",
+        "display_name": "codex666ai"
+      },
+      "fluxlane.cn": {
+        "veridrop_host": "fluxlane.cn",
+        "entry_url": "https://fluxlane.cn",
+        "display_name": "智流（FluxLane）"
+      },
+      "jizhiapi.site": {
+        "veridrop_host": "jizhiapi.site",
+        "entry_url": "https://jizhiapi.site",
+        "display_name": "极智API"
+      },
+      "sub2.congmingai.com": {
+        "veridrop_host": "sub2.congmingai.com",
+        "entry_url": "https://sub2.congmingai.com",
+        "display_name": "聪明AI"
+      },
+      "sub.kedaya.xyz": {
+        "veridrop_host": "sub.kedaya.xyz",
+        "entry_url": "https://sub.kedaya.xyz",
+        "display_name": "Kedaya 中转站"
+      },
+      "uuapi.net": {
+        "veridrop_host": "uuapi.net",
+        "entry_url": "https://uuapi.net",
+        "display_name": "UU API"
+      },
+      "api.codepup.cn": {
+        "veridrop_host": "api.codepup.cn",
+        "entry_url": "https://api.codepup.cn",
+        "display_name": "代码狗"
+      },
+      "nexaxis.ai": {
+        "veridrop_host": "nexaxis.ai",
+        "entry_url": "https://nexaxis.ai",
+        "display_name": "NEXAXIS"
+      },
+      "yomiapi.com": {
+        "veridrop_host": "yomiapi.com",
+        "entry_url": "https://yomiapi.com",
+        "display_name": "Yomi API"
       }
     }
   }
