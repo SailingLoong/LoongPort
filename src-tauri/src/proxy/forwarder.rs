@@ -2743,7 +2743,7 @@ fn is_fatal_upstream_error(error: &ProxyError) -> bool {
     matches!(
         error,
         ProxyError::UpstreamError {
-            status: 401 | 402 | 403,
+            status: 401..=403,
             ..
         }
     )

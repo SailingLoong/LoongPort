@@ -50,10 +50,10 @@ pub async fn get_available_providers_for_failover(
 ) -> Result<Vec<Provider>, String> {
     require_failover_app(&app_type)?;
     // 托管档位（中转站档位）也可以进队列 —— 见 `add_to_failover_queue` 的说明。
-    Ok(state
+    state
         .db
         .get_available_providers_for_failover(&app_type)
-        .map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
 }
 
 /// 添加供应商到故障转移队列
