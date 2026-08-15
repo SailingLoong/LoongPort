@@ -72,6 +72,13 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
+/// 致命失败（凭证/余额级，如上游 401/402/403）打开熔断后的冷却时长。
+///
+/// 这类错误短期不会自愈 —— 凭证不会被刷新、余额不会自己回来 —— 按普通
+/// `timeout_seconds`（默认 60s）每分钟探测一次只是拿用户的请求反复撞墙。
+/// 不做成配置项：致命分级本身就是策略，暴露成旋钮只会让人把它拧回 60s。
+const FATAL_OPEN_COOLDOWN_SECONDS: u64 = 1800;
+
 /// 熔断器实例
 pub struct CircuitBreaker {
     /// 当前状态
@@ -86,6 +93,8 @@ pub struct CircuitBreaker {
     failed_requests: Arc<AtomicU32>,
     /// 上次打开时间
     last_opened_at: Arc<RwLock<Option<Instant>>>,
+    /// 本次 Open 是否由致命失败触发（决定恢复冷却用长冷却还是配置超时）
+    fatal_open: Arc<std::sync::atomic::AtomicBool>,
     /// 配置（支持热更新）
     config: Arc<RwLock<CircuitBreakerConfig>>,
     /// 半开状态已放行的请求数（用于限流）
@@ -112,6 +121,7 @@ impl CircuitBreaker {
             total_requests: Arc::new(AtomicU32::new(0)),
             failed_requests: Arc::new(AtomicU32::new(0)),
             last_opened_at: Arc::new(RwLock::new(None)),
+            fatal_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config: Arc::new(RwLock::new(config)),
             half_open_requests: Arc::new(AtomicU32::new(0)),
         }
@@ -120,6 +130,15 @@ impl CircuitBreaker {
     /// 更新熔断器配置（热更新，不重置状态）
     pub async fn update_config(&self, new_config: CircuitBreakerConfig) {
         *self.config.write().await = new_config;
+    }
+
+    /// 当前 Open 状态的恢复冷却（秒）：致命失败用长冷却，否则用配置超时
+    async fn open_cooldown_secs(&self, config: &CircuitBreakerConfig) -> u64 {
+        if self.fatal_open.load(Ordering::SeqCst) {
+            FATAL_OPEN_COOLDOWN_SECONDS
+        } else {
+            config.timeout_seconds
+        }
     }
 
     /// 判断当前 Provider 是否“可被纳入候选链路”
@@ -138,7 +157,7 @@ impl CircuitBreaker {
             CircuitState::Closed | CircuitState::HalfOpen => true,
             CircuitState::Open => {
                 if let Some(opened_at) = *self.last_opened_at.read().await {
-                    if opened_at.elapsed().as_secs() >= config.timeout_seconds {
+                    if opened_at.elapsed().as_secs() >= self.open_cooldown_secs(&config).await {
                         drop(config); // 释放读锁再转换状态
                         log::info!(
                             "[{}] 熔断器 Open → HalfOpen (超时恢复)",
@@ -166,7 +185,7 @@ impl CircuitBreaker {
                 let config = self.config.read().await;
                 // 检查是否应该尝试半开
                 if let Some(opened_at) = *self.last_opened_at.read().await {
-                    if opened_at.elapsed().as_secs() >= config.timeout_seconds {
+                    if opened_at.elapsed().as_secs() >= self.open_cooldown_secs(&config).await {
                         drop(config); // 释放读锁再转换状态
                         log::info!(
                             "[{}] 熔断器 Open → HalfOpen (超时恢复)",
@@ -252,7 +271,10 @@ impl CircuitBreaker {
                     log_cb::HALF_OPEN_PROBE_FAILED
                 );
                 drop(config);
-                self.transition_to_open().await;
+                // 沿用上一次打开时的致命标记：曾因欠费打开的档位探测再失败，
+                // 说明还是坏的，不该把冷却悄悄降回配置超时。
+                let fatal = self.fatal_open.load(Ordering::SeqCst);
+                self.transition_to_open(fatal).await;
             }
             CircuitState::Closed => {
                 // 检查连续失败次数
@@ -262,7 +284,8 @@ impl CircuitBreaker {
                         log_cb::TRIGGERED_FAILURES
                     );
                     drop(config); // 释放读锁再转换状态
-                    self.transition_to_open().await;
+                    let fatal = self.fatal_open.load(Ordering::SeqCst);
+                    self.transition_to_open(fatal).await;
                 } else {
                     // 检查错误率
                     let total = self.total_requests.load(Ordering::SeqCst);
@@ -278,13 +301,44 @@ impl CircuitBreaker {
                                 error_rate * 100.0
                             );
                             drop(config); // 释放读锁再转换状态
-                            self.transition_to_open().await;
+                            let fatal = self.fatal_open.load(Ordering::SeqCst);
+                            self.transition_to_open(fatal).await;
                         }
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    /// 记录致命失败（凭证/余额级错误，如上游 401/402/403）
+    ///
+    /// 与 [`record_failure`](Self::record_failure) 的区别只有两点：
+    /// - **一次即开**：不等连续失败阈值 —— 第 2、3 次请求结果已可预知，没必要再撞；
+    /// - **长冷却**：恢复探测间隔用 [`FATAL_OPEN_COOLDOWN_SECONDS`] 而不是配置的
+    ///   `timeout_seconds`。
+    ///
+    /// 致命分级只在成功（`transition_to_closed`）时清除：半开探测失败会沿用上一次
+    /// 打开时的致命冷却 —— 一个曾因欠费打开的档位，探测又失败，说明它还是坏的。
+    pub async fn record_fatal_failure(&self, used_half_open_permit: bool) {
+        let config = self.config.read().await;
+
+        if used_half_open_permit {
+            self.release_half_open_permit();
+        }
+
+        self.consecutive_failures.fetch_add(1, Ordering::SeqCst);
+        self.total_requests.fetch_add(1, Ordering::SeqCst);
+        self.failed_requests.fetch_add(1, Ordering::SeqCst);
+        self.consecutive_successes.store(0, Ordering::SeqCst);
+
+        let cooldown = config.timeout_seconds.max(FATAL_OPEN_COOLDOWN_SECONDS);
+        drop(config);
+        log::warn!(
+            "[{}] 熔断器致命失败（凭证/余额级）→ Open，冷却 {cooldown}s",
+            log_cb::TRIGGERED_FATAL
+        );
+        self.transition_to_open(true).await;
     }
 
     /// 获取当前状态
@@ -356,9 +410,13 @@ impl CircuitBreaker {
     }
 
     /// 转换到打开状态
-    async fn transition_to_open(&self) {
+    ///
+    /// `fatal` 决定恢复冷却：普通失败沿用配置超时，致命失败用长冷却。
+    /// 普通失败路径传「沿用当前标记」—— 半开探测失败不该把致命冷却悄悄降回 60s。
+    async fn transition_to_open(&self, fatal: bool) {
         *self.state.write().await = CircuitState::Open;
         *self.last_opened_at.write().await = Some(Instant::now());
+        self.fatal_open.store(fatal, Ordering::SeqCst);
         self.consecutive_failures.store(0, Ordering::SeqCst);
         self.consecutive_successes.store(0, Ordering::SeqCst);
     }
@@ -379,6 +437,7 @@ impl CircuitBreaker {
     /// 转换到关闭状态
     async fn transition_to_closed(&self) {
         *self.state.write().await = CircuitState::Closed;
+        self.fatal_open.store(false, Ordering::SeqCst);
         self.consecutive_failures.store(0, Ordering::SeqCst);
         self.consecutive_successes.store(0, Ordering::SeqCst);
         // 重置计数器
@@ -459,7 +518,7 @@ mod tests {
         let breaker = CircuitBreaker::new(config);
 
         // 进入 Open，然后由于 timeout_seconds=0，allow_request 会立即切换到 HalfOpen 并占用探测名额
-        breaker.transition_to_open().await;
+        breaker.transition_to_open(false).await;
         let first = breaker.allow_request().await;
         assert!(first.allowed);
         assert!(first.used_half_open_permit);
@@ -491,5 +550,56 @@ mod tests {
         breaker.reset().await;
         assert_eq!(breaker.get_state().await, CircuitState::Closed);
         assert!(breaker.allow_request().await.allowed);
+    }
+
+    /// 致命失败一次即 Open，且冷却用长冷却而不是配置超时。
+    #[tokio::test]
+    async fn fatal_failure_opens_immediately_with_long_cooldown() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 4,
+            timeout_seconds: 60,
+            ..Default::default()
+        };
+        let breaker = CircuitBreaker::new(config);
+
+        // 普通失败 4 次才开；致命失败 1 次就开
+        breaker.record_fatal_failure(false).await;
+        assert_eq!(breaker.get_state().await, CircuitState::Open);
+        assert!(!breaker.is_available().await);
+
+        {
+            let config = breaker.config.read().await;
+            assert_eq!(
+                breaker.open_cooldown_secs(&config).await,
+                FATAL_OPEN_COOLDOWN_SECONDS
+            );
+        }
+    }
+
+    /// 成功（Closed 恢复）清除致命标记；之后普通失败打开用配置超时。
+    #[tokio::test]
+    async fn success_clears_fatal_cooldown() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            success_threshold: 1,
+            timeout_seconds: 60,
+            ..Default::default()
+        };
+        let breaker = CircuitBreaker::new(config);
+
+        breaker.record_fatal_failure(false).await;
+        // 手动进入半开并让一次探测成功 → Closed
+        breaker.transition_to_half_open().await;
+        breaker.record_success(true).await;
+        assert_eq!(breaker.get_state().await, CircuitState::Closed);
+
+        // 再普通失败打开：冷却应回到配置超时（致命标记已被成功清除）
+        breaker.record_failure(false).await;
+        breaker.record_failure(false).await;
+        assert_eq!(breaker.get_state().await, CircuitState::Open);
+        {
+            let config = breaker.config.read().await;
+            assert_eq!(breaker.open_cooldown_secs(&config).await, 60);
+        }
     }
 }

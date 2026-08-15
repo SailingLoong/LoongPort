@@ -12,11 +12,14 @@
 //!
 //! ## 为什么需要守卫（不只是前端过滤）
 //!
-//! 切换托管档位的正确入口是 `switch_tier_command` 那条编排（「退出 ChatGPT → 切换 →
-//! 重开」，命令层与托盘共用；`relay_switch_tier` 命令是它的一个壳）。任何绕过它直接切
-//! provider 的路径，结果都是**界面显示切了、codex 还连着旧分组**，而用户不会收到任何
-//! 提示。前端那道过滤（`isManagedProviderId`）挡不住托盘菜单与命令层，
+//! 托管记录由 provision 自动生成与维护（登录 / 获取密钥 / 切档位都在供应商页顶部的
+//! 中转站区），把它们当普通供应商编辑、复制、删除会破坏那套生命周期 —— 所以命令层的
+//! 增改删入口都拦托管 id。前端那道过滤（`isManagedProviderId`）挡不住托盘菜单与命令层，
 //! 所以守卫必须落在 Rust 侧。
+//!
+//! 注意守卫**不管切换路径**：故障转移队列允许托管档位（链上每个切换点都先验证接管态，
+//! 接管态热切换无感，见 `commands/failover.rs`）；托盘点击托管项走 `switch_tier_command`
+//! 编排。别把「禁止 CRUD」误扩成「禁止一切」。
 
 /// 托管 provider 的 id 前缀。
 ///
@@ -255,33 +258,12 @@ mod tests {
         reject_if_managed("custom-1").expect("普通 id 不该被拦");
     }
 
-    /// 故障转移队列的准入：托管档位不得进队列。
-    ///
-    /// 这条守的是一条**自动发生**的路径：队列里有托管项时，熔断会让
-    /// `FailoverSwitchManager` 在用户没点任何按钮的情况下切到它，跳过
-    /// 「退出 ChatGPT → 切换 → 重开」的编排（托盘菜单过滤在这条路上完全无效，
-    /// 因为切换不是从菜单点出来的）。
-    ///
-    /// 队列有**两个准入口**，都必须拦（commands/failover.rs）：
-    /// `add_to_failover_queue` 命令（用户手动加），以及 `set_auto_failover_enabled`
-    /// 里「队列为空时自动把当前 provider 作为 P1 加入」那段 —— 后者直接调
-    /// `state.db`，绕过前者的守卫，所以是独立的一道。
-    #[test]
-    fn managed_tiers_are_rejected_from_failover_queue() {
-        let real = provision::provider_id_for("https://bestapi.store", Some(1), 3);
-
-        // 准入口 1：手动加入 —— 走 reject_if_managed。
-        assert!(
-            reject_if_managed(&real).is_err(),
-            "托管档位必须被挡在故障转移队列之外"
-        );
-        // 准入口 2：自动作为 P1 加入 —— 走 is_managed 判断后给专门的文案。
-        assert!(is_managed(&real));
-
-        // 普通 provider 不受影响：故障转移对它们是正常功能，别顺手拦死。
-        for id in ["custom-1", "codex-official"] {
-            assert!(reject_if_managed(id).is_ok(), "id: {id}");
-            assert!(!is_managed(id), "id: {id}");
-        }
-    }
+    // 故障转移队列**不设**托管守卫（2026-08-15 修根移除）。
+    //
+    // 历史上这里拦过托管档位，理由是「熔断自动切会跳过 ChatGPT 退出重开编排」——
+    // 但故障转移链的每个切换点（`set_auto_failover_enabled`、`FailoverSwitchManager`）
+    // 都先验证接管态，而接管态下热切换对托管档位无感，守卫防的场景在这条链上
+    // 不可达。留在仓里的契约由 `provider_router` 的
+    // `select_providers_serves_managed_tiers_in_failover_queue` 钉住：队列里的
+    // 托管档位必须能被选路（这是自动模式选路的地基）。
 }

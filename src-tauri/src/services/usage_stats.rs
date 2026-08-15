@@ -86,6 +86,9 @@ pub struct ProviderStats {
     pub total_cost: String,
     pub success_rate: f32,
     pub avg_latency_ms: u64,
+    /// 平均首字耗时（TTFT）。只统计有值的行（流式成功请求）；没有任何
+    /// TTFT 样本时为 0。自动模式「响应最快」策略的排序依据。
+    pub avg_first_token_ms: u64,
 }
 
 /// 模型统计
@@ -1340,7 +1343,10 @@ impl Database {
                 SUM(success_count) as success_count,
                 CASE WHEN SUM(request_count) > 0
                     THEN SUM(latency_sum) / SUM(request_count)
-                    ELSE 0 END as avg_latency
+                    ELSE 0 END as avg_latency,
+                CASE WHEN SUM(ttft_count) > 0
+                    THEN SUM(ttft_sum) / SUM(ttft_count)
+                    ELSE 0 END as avg_ttft
             FROM (
                 SELECT l.provider_id, l.app_type,
                     {detail_pname} as provider_name,
@@ -1348,7 +1354,9 @@ impl Database {
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
                     COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
-                    COALESCE(SUM(l.latency_ms), 0) as latency_sum
+                    COALESCE(SUM(l.latency_ms), 0) as latency_sum,
+                    COALESCE(SUM(l.first_token_ms), 0) as ttft_sum,
+                    COALESCE(SUM(CASE WHEN l.first_token_ms IS NOT NULL THEN 1 ELSE 0 END), 0) as ttft_count
                 FROM proxy_request_logs l
                 LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
                 {detail_where}
@@ -1360,7 +1368,9 @@ impl Database {
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0),
                     COALESCE(SUM(r.success_count), 0),
-                    COALESCE(SUM(r.avg_latency_ms * r.request_count), 0)
+                    COALESCE(SUM(r.avg_latency_ms * r.request_count), 0),
+                    COALESCE(SUM(r.first_token_ms_sum), 0),
+                    COALESCE(SUM(r.first_token_count), 0)
                 FROM usage_daily_rollups r
                 LEFT JOIN providers p2 ON r.provider_id = p2.id AND r.app_type = p2.app_type
                 {rollup_where}
@@ -1391,6 +1401,7 @@ impl Database {
                 total_cost: format!("{:.6}", row.get::<_, f64>(5)?),
                 success_rate,
                 avg_latency_ms: row.get::<_, f64>(7)? as u64,
+                avg_first_token_ms: row.get::<_, f64>(8)? as u64,
             })
         };
 
@@ -3842,6 +3853,48 @@ mod tests {
         assert_eq!(stats[0].provider_id, "p1");
         assert_eq!(stats[0].request_count, 1);
         assert_eq!(stats[0].total_tokens, 275);
+
+        Ok(())
+    }
+
+    /// TTFT 聚合：只统计有 first_token_ms 的行，且明细与归档行能正确合并。
+    /// 这是自动模式「响应最快」策略的排序数据源。
+    #[test]
+    fn test_get_provider_stats_aggregates_ttft_over_detail_and_rollups() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            // 明细：两行有 TTFT（100/300），一行 NULL
+            for (id, ttft) in [("d1", Some(100i64)), ("d2", Some(300)), ("d3", None)] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model,
+                        input_tokens, output_tokens, total_cost_usd,
+                        latency_ms, first_token_ms, status_code, created_at
+                    ) VALUES (?, 'p1', 'claude', 'claude-3', 100, 50, '0.01', 400, ?, 200, 2000)",
+                    params![id, ttft],
+                )?;
+            }
+            // 归档：sum=600, count=2（明细被 prune 后只剩这份）
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (
+                    date, app_type, provider_id, model, request_count,
+                    input_tokens, output_tokens, total_cost_usd, avg_latency_ms,
+                    first_token_ms_sum, first_token_count
+                ) VALUES ('2026-01-01', 'claude', 'p1', 'claude-3', 2,
+                          200, 100, '0.02', 400, 600, 2)",
+                [],
+            )?;
+        }
+
+        let stats = db.get_provider_stats(None, None, Some("claude"), None, None)?;
+        assert_eq!(stats.len(), 1);
+        // (100 + 300 + 600) / (2 + 2) = 250
+        assert_eq!(
+            stats[0].avg_first_token_ms, 250,
+            "TTFT 均值必须跨明细+归档按样本数加权，NULL 行不参与"
+        );
 
         Ok(())
     }

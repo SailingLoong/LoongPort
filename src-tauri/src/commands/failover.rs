@@ -49,17 +49,11 @@ pub async fn get_available_providers_for_failover(
     app_type: String,
 ) -> Result<Vec<Provider>, String> {
     require_failover_app(&app_type)?;
-    let available = state
+    // 托管档位（中转站档位）也可以进队列 —— 见 `add_to_failover_queue` 的说明。
+    state
         .db
         .get_available_providers_for_failover(&app_type)
-        .map_err(|e| e.to_string())?;
-
-    // 托管档位不该出现在选择器里 —— 见 `add_to_failover_queue` 的守卫说明。
-    // 这里滤掉是为了**不把拦得住的东西摆出来给人点**（点了会被守卫拒，但那是个坏体验）。
-    Ok(available
-        .into_iter()
-        .filter(|p| !crate::relay::is_managed(&p.id))
-        .collect())
+        .map_err(|e| e.to_string())
 }
 
 /// 添加供应商到故障转移队列
@@ -70,17 +64,15 @@ pub async fn add_to_failover_queue(
     provider_id: String,
 ) -> Result<(), String> {
     require_failover_app(&app_type)?;
-    // 托管档位不许进队列。**这是队列这条链的唯一准入口，所以守卫只需要加在这里** ——
-    // 下游三个消费点（开故障转移开关时切 P1、托盘 Auto、熔断自动切）切的都是队列里的
-    // provider_id，队列里没有托管项，那三条路就不可能指向托管项。
-    //
-    // 为什么必须拦：熔断自动切是**用户没点任何按钮**就发生的（FailoverSwitchManager
-    // 检测到上游报错后自己切），一旦切到托管档位，就跳过了「退出 ChatGPT → 切换 → 重开」
-    // 的编排 —— codex 的 live 配置被换成托管 sk 而 ChatGPT 还连着旧的，用户全程无感。
-    // （托盘菜单那条路现在点击托管项会走 `switch_tier_command` 编排，但这条队列路
-    // 完全不经过菜单，守卫只能加在这里。）
-    crate::relay::reject_if_managed(&provider_id).map_err(|e| e.to_string())?;
-
+    // 托管档位可以进队列。历史上这里拦过托管 id，理由是「熔断自动切会跳过
+    // 『退出 ChatGPT → 切换 → 重开』的编排」—— 但那条理由只成立于**非接管态**，
+    // 而这条链上的每个切换点都先验证了接管态：
+    // - `set_auto_failover_enabled` 开启故障转移前要求 `config.enabled`（接管）；
+    // - `FailoverSwitchManager::do_switch` 每次切换前重新读接管开关。
+    // 接管态下 CLI 流量走本地代理，`hot_switch_provider` 只换代理的服务目标、
+    // 不做退出重开编排 —— 切到托管档位对用户无感，没有「界面切了、codex 还连着旧的」
+    // 的问题。守卫防的场景在这条链上不可达，留着它只是挡住「把托管档位纳入
+    // 故障转移阶梯」这个真实需求（也是后续自动模式选路的地基）。
     state
         .db
         .add_to_failover_queue(&app_type, &provider_id)
@@ -161,20 +153,9 @@ pub async fn set_auto_failover_enabled(
                 return Err("故障转移队列为空，且未设置当前供应商，无法开启故障转移".to_string());
             };
 
-            // 这里是队列的**第二个准入口**，且它绕过了 `add_to_failover_queue` 命令
-            // （直接调 `state.db`），所以那道守卫在这里不生效，必须再拦一次。
-            //
-            // 真会走到：用户当前正用着某个托管档位、队列还空着，此时开故障转移开关 ⇒
-            // 「自动把当前 provider 作为 P1 加入」就把托管档位塞进了队列，
-            // 之后每次熔断都会自动切到它。
-            //
-            // 拦下而不是「跳过自动添加」：跳过的结果是队列仍为空、下面 `queue.first()`
-            // 拿不到 P1 而报一句语焉不详的「队列为空」，用户不知道为什么。
-            if crate::relay::is_managed(&current_id) {
-                return Err("当前用的是 LoongPort 托管的档位，它不能作为故障转移目标。\
-                            请先切到普通供应商，或手动往队列里加至少一个供应商，再开启故障转移。"
-                    .to_string());
-            }
+            // 托管档位作为 P1 也没问题：开启故障转移的前置条件就是接管态（上方
+            // `config.enabled` 检查），接管态下切到托管档位走热切换、无感。
+            // 见 `add_to_failover_queue` 的说明。
 
             state
                 .db

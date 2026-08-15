@@ -127,7 +127,8 @@ impl Database {
                  request_count, success_count,
                  input_tokens, output_tokens,
                  cache_read_tokens, cache_creation_tokens,
-                 input_token_semantics, total_cost_usd, avg_latency_ms)
+                 input_token_semantics, total_cost_usd, avg_latency_ms,
+                 first_token_ms_sum, first_token_count)
             SELECT
                 d, a, p, m, rm, pm,
                 COALESCE(old.request_count, 0) + new_req,
@@ -142,7 +143,9 @@ impl Database {
                     THEN (COALESCE(old.avg_latency_ms, 0) * COALESCE(old.request_count, 0)
                           + new_lat * new_req)
                          / (COALESCE(old.request_count, 0) + new_req)
-                    ELSE 0 END
+                    ELSE 0 END,
+                COALESCE(old.first_token_ms_sum, 0) + new_ttft_sum,
+                COALESCE(old.first_token_count, 0) + new_ttft_count
             FROM (
                 SELECT
                     date(l.created_at, 'unixepoch', 'localtime') as d,
@@ -156,7 +159,9 @@ impl Database {
                     COALESCE(SUM(l.cache_read_tokens), 0) as new_cr,
                     COALESCE(SUM(l.cache_creation_tokens), 0) as new_cc,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as new_cost,
-                    COALESCE(AVG(l.latency_ms), 0) as new_lat
+                    COALESCE(AVG(l.latency_ms), 0) as new_lat,
+                    COALESCE(SUM(l.first_token_ms), 0) as new_ttft_sum,
+                    SUM(CASE WHEN l.first_token_ms IS NOT NULL THEN 1 ELSE 0 END) as new_ttft_count
                 FROM proxy_request_logs l
                 WHERE l.created_at < ?1 AND {effective_filter}
                 GROUP BY d, a, p, m, rm, pm
@@ -513,6 +518,47 @@ mod tests {
             (total_cost - 5.0).abs() < 1e-6,
             "expected backfilled cost 5.0, got {total_cost}"
         );
+        Ok(())
+    }
+
+    /// TTFT（首字耗时）只在流式成功行上有值：明细被 prune 后必须能从归档行
+    /// 还原出「和 + 计数」，否则按供应商的首字耗时统计会随剪枝清零。
+    #[test]
+    fn test_rollup_preserves_ttft_sum_and_count() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let old_ts = chrono::Utc::now().timestamp() - 40 * 86400;
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            // 两行有 TTFT（100/200），一行 NULL（非流式），一行 NULL（错误行）
+            for (i, ttft) in [
+                ("ttft-a", Some(100i64)),
+                ("ttft-b", Some(200)),
+                ("ttft-c", None),
+                ("ttft-d", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model,
+                        input_tokens, output_tokens, total_cost_usd,
+                        latency_ms, first_token_ms, status_code, created_at
+                    ) VALUES (?1, 'p1', 'claude', 'claude-3', 100, 50, '0.01', 300, ?2, 200, ?3)",
+                    rusqlite::params![i, ttft, old_ts],
+                )?;
+            }
+        }
+
+        assert_eq!(db.rollup_and_prune(30)?, 4);
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (sum, count): (i64, i64) = conn.query_row(
+            "SELECT first_token_ms_sum, first_token_count FROM usage_daily_rollups
+             WHERE provider_id = 'p1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(sum, 300, "只累计非 NULL 的 TTFT");
+        assert_eq!(count, 2, "NULL 行不计入 TTFT 计数");
         Ok(())
     }
 

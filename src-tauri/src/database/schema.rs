@@ -277,6 +277,8 @@ impl Database {
         // request_model 保留路由接管的「客户端别名 → 真实模型」映射维度，
         // pricing_model 保留写入时的计价基准（request 计价模式下与 model 分叉），
         // 否则明细被 prune 后接管计费不可审计；历史行迁移时填 ''（未知）。
+        // first_token_ms_sum/count 存和与计数而不是均值：TTFT 只在流式成功行上有值
+        // （非流式/错误行为 NULL），存均值无法在明细+归档合并时正确加权。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
                 date TEXT NOT NULL,
@@ -294,11 +296,25 @@ impl Database {
                 input_token_semantics INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                first_token_ms_sum INTEGER NOT NULL DEFAULT 0,
+                first_token_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
             )",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::add_column_if_missing(
+            conn,
+            "usage_daily_rollups",
+            "first_token_ms_sum",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Self::add_column_if_missing(
+            conn,
+            "usage_daily_rollups",
+            "first_token_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         // 18. Session Log Sync 表 (会话日志同步状态)
         conn.execute(
@@ -1339,6 +1355,8 @@ impl Database {
                  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                  total_cost_usd TEXT NOT NULL DEFAULT '0',
                  avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                 first_token_ms_sum INTEGER NOT NULL DEFAULT 0,
+                 first_token_count INTEGER NOT NULL DEFAULT 0,
                  PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
              );
              INSERT INTO usage_daily_rollups

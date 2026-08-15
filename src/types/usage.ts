@@ -149,6 +149,8 @@ export interface ProviderStats {
   totalCost: string;
   successRate: number;
   avgLatencyMs: number;
+  /** 平均首字耗时；只统计流式成功请求，无样本时为 0 */
+  avgFirstTokenMs: number;
 }
 
 export interface ModelStats {

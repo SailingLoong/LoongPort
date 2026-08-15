@@ -1001,22 +1001,37 @@ impl RequestForwarder {
 
                     match category {
                         ErrorCategory::Retryable => {
-                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
-                            self.router
-                                .record_result(
-                                    &provider.id,
-                                    app_type_str,
-                                    used_half_open_permit,
-                                    false,
-                                    Some(e.to_string()),
-                                )
-                                .await
-                                .warn_on_err(
-                                    DiagnosticEvent::new("proxy.health.record", "failed")
-                                        .field("phase", "retryable_failure")
-                                        .field("app", app_type_str)
-                                        .field("provider_id", provider.id.clone()),
-                                );
+                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度。
+                            // 凭证/余额级错误（401/402/403）进一步分级为致命：换下一家
+                            // 照试，但这家熔断用长冷却 —— 短期内它不会自愈，按普通
+                            // 60s 冷却等于每分钟拿用户请求再撞一次。
+                            let fatal = is_fatal_upstream_error(&e);
+                            let record = if fatal {
+                                self.router
+                                    .record_fatal_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                        Some(e.to_string()),
+                                    )
+                                    .await
+                            } else {
+                                self.router
+                                    .record_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                        false,
+                                        Some(e.to_string()),
+                                    )
+                                    .await
+                            };
+                            record.warn_on_err(
+                                DiagnosticEvent::new("proxy.health.record", "failed")
+                                    .field("phase", "retryable_failure")
+                                    .field("app", app_type_str)
+                                    .field("provider_id", provider.id.clone()),
+                            );
 
                             {
                                 let mut status = self.status.write().await;
@@ -2716,6 +2731,22 @@ fn extract_error_message(error: &ProxyError) -> Option<String> {
         ProxyError::UpstreamError { body, .. } => body.clone(),
         _ => Some(error.to_string()),
     }
+}
+
+/// 凭证/计费级的上游错误：换供应商重试是对的，但这家供应商短期不会自愈
+/// （凭证不会被刷新、余额不会自己回来），熔断要用致命长冷却。
+///
+/// 只覆盖 401/402/403。429 里的「余额不足」变体需要解析响应体才能区分，
+/// 先按瞬态处理（欠费站点最终会以 402/403 显形）。只在 Retryable 分类内部
+/// 进一步分级 —— NonRetryable 的 4xx 根本不进健康度。
+fn is_fatal_upstream_error(error: &ProxyError) -> bool {
+    matches!(
+        error,
+        ProxyError::UpstreamError {
+            status: 401..=403,
+            ..
+        }
+    )
 }
 
 /// 检测 Provider 是否为 Bedrock（通过 CLAUDE_CODE_USE_BEDROCK 环境变量判断）
