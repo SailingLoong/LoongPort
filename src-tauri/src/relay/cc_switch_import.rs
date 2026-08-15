@@ -522,6 +522,12 @@ mod tests {
             .expect("codex 必须有形状")
     }
 
+    /// 造一份「grokbuild 形状」的 settings_config（sk 藏在 config 字段的 TOML 文本里）。
+    fn grok_settings(base_url: &str, sk: &str) -> Value {
+        provision::settings_config_for(&AppType::GrokBuild, sk, "GrokX", base_url, "grok-4.5")
+            .expect("grokbuild 必须有形状")
+    }
+
     fn provider(
         id: &str,
         name: &str,
@@ -629,9 +635,94 @@ mod tests {
 
     #[test]
     fn fingerprint_is_none_when_sk_is_missing() {
-        // grokbuild 还没接线（extract_api_key 返回 None）⇒ 取不到指纹。
-        let p = provider("a", "A", json!({"config": "[models]\n..."}), None);
-        assert_eq!(fingerprint_of(&p, &AppType::GrokBuild), None);
+        // grokbuild 的 sk 藏在 config 字段的 TOML 文本里：坏 TOML 解析不出，
+        // env_key 形状（凭据在进程环境变量里）则按定义不参与指纹。
+        let broken = provider("a", "A", json!({"config": "not toml {"}), None);
+        assert_eq!(fingerprint_of(&broken, &AppType::GrokBuild), None);
+
+        let env_key_only = provider(
+            "b",
+            "B",
+            json!({"config": "[models]\ndefault = \"p\"\n\n[model.p]\nmodel = \"m\"\nbase_url = \"https://g.dev/v1\"\nname = \"n\"\nenv_key = \"GROK_SK\"\napi_backend = \"openai-compliant\"\ncontext_window = 1000000\n"}),
+            None,
+        );
+        assert_eq!(fingerprint_of(&env_key_only, &AppType::GrokBuild), None);
+    }
+
+    /// grokbuild 接线后，指纹必须从 TOML 文本里提出 (origin, sk)：
+    /// 同站同 sk 归一成同一指纹、同站不同 sk 分开 —— 与 codex 同一套判据。
+    #[test]
+    fn fingerprint_works_for_grokbuild_toml_shape() {
+        let a = provider(
+            "a",
+            "A",
+            grok_settings("https://g.dev/v1", "sk-1"),
+            Some("https://g.dev"),
+        );
+        let b = provider(
+            "b",
+            "B",
+            grok_settings("https://g.dev", "sk-1"),
+            Some("https://g.dev"),
+        );
+        assert_eq!(
+            fingerprint_of(&a, &AppType::GrokBuild),
+            fingerprint_of(&b, &AppType::GrokBuild),
+            "同站同 sk、base_url 带不带 path 必须算同一个指纹"
+        );
+
+        let c = provider(
+            "c",
+            "C",
+            grok_settings("https://g.dev/v1", "sk-2"),
+            Some("https://g.dev"),
+        );
+        assert_ne!(
+            fingerprint_of(&a, &AppType::GrokBuild),
+            fingerprint_of(&c, &AppType::GrokBuild),
+            "同站不同 sk 必须算不同指纹"
+        );
+    }
+
+    /// 托管 grok 档位与 cc-switch 导入源同指纹 ⇒ 托管侧胜、跳过导入
+    /// （接线前 grokbuild 取不到指纹，这条判重对它不生效）。
+    #[test]
+    fn classify_dedups_grokbuild_by_fingerprint() {
+        let managed = [SourceProvider {
+            app_type: AppType::GrokBuild,
+            provider: provider(
+                "loongport-aaaaaaaaaaaaaaaa",
+                "托管档",
+                grok_settings("https://g.dev/v1", "sk-managed"),
+                Some("https://g.dev"),
+            ),
+        }];
+        let source = vec![
+            SourceProvider {
+                app_type: AppType::GrokBuild,
+                provider: provider(
+                    "grok-dup",
+                    "GrokDup",
+                    grok_settings("https://g.dev/v1", "sk-managed"),
+                    Some("https://g.dev"),
+                ),
+            },
+            SourceProvider {
+                app_type: AppType::GrokBuild,
+                provider: provider(
+                    "grok-own",
+                    "GrokOwn",
+                    grok_settings("https://g.dev/v1", "sk-other"),
+                    Some("https://g.dev"),
+                ),
+            },
+        ];
+
+        let out = classify_source(&source, &managed, &HashSet::new());
+        assert_eq!(out.will_import, vec![1], "不同 sk 的那条该导入");
+        assert_eq!(out.skipped, vec![0], "同指纹那条该跳过");
+        assert!(out.cannot_fingerprint.is_empty());
+        assert!(out.merged_to_relay.is_empty());
     }
 
     #[test]
