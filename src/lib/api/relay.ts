@@ -176,6 +176,8 @@ export interface RelayRow {
     | "ready";
   isCurrent: boolean;
   canQueryBalance: boolean;
+  /** 购买入口资格由后端完整判定；前端不得从站点或凭据重新推导。 */
+  canPurchase: boolean;
   canRefresh: boolean;
   canDelete: boolean;
   removeConfirmation: "neverLoggedIn" | "configured";

@@ -39,6 +39,7 @@ function relay(models: string[]): RelayRowData {
     status: "ready",
     isCurrent: true,
     canQueryBalance: true,
+    canPurchase: true,
     canRefresh: true,
     canDelete: false,
     removeConfirmation: "configured",

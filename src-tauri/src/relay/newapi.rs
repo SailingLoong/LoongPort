@@ -12,8 +12,20 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
 
-const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
-const REFRESH_PATH: &str = "/api/user/auth/refresh";
+/// refresh cookie 的名字。`pub(crate)`：commands 层的命令级测试要按它构造 fake
+/// 站点的 Set-Cookie / 路由 —— 协议细节的唯一 owner 在本模块，那边只**引用**不复制
+/// （`browser_login_dispatch_keeps_protocol_details_out_of_commands` 闸钉着这一点）。
+pub(crate) const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
+/// refresh 端点路径。owner 同上；`refresh_url` 是它对外的完整 URL 形态。
+pub(crate) const REFRESH_PATH: &str = "/api/user/auth/refresh";
+/// NewAPI 上游 refresh cookie 的 `Path` 属性：refresh 端点（[`REFRESH_PATH`]）就挂在
+/// 这棵子树下，作用域收窄到 auth 而不是全站 `/`。
+///
+/// 顺带记录同一颗 cookie 的 `Secure` 属性裁决：上游 NewAPI 的 Secure 是**环境可配置**
+/// 的，我们无条件钉死 `true` —— 本仓对中转站的契约本来就是 https-only（导入时强制
+/// 归一），钉死不仅自洽，还比「跟随站点配置」更严（一个配错的站点不会让我们把
+/// refresh cookie 明文发出去）。
+const REFRESH_COOKIE_PATH: &str = "/api/user/auth";
 const SESSION_COOKIE_NAME: &str = "session";
 const SESSION_TOKEN_PATH: &str = "/api/user/token";
 const NEWAPI_USER_HEADER: &str = "New-Api-User";
@@ -81,6 +93,48 @@ pub fn extract_session_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<
         .iter()
         .find(|cookie| cookie.name() == SESSION_COOKIE_NAME && !cookie.value().trim().is_empty())
         .map(|cookie| cookie.value().to_string())
+}
+
+/// 构造充值窗口要种的 refresh cookie（host-scoped、HttpOnly）。
+///
+/// reqwest 栈过不了 Cloudflare 挑战，进充值页前要把 WebView 登录拿到的 refresh
+/// cookie 种回窗口。属性对齐上游真实行为：`Path` 是 NewAPI 上游 refresh cookie 的
+/// 真实 path（[`REFRESH_COOKIE_PATH`]，refresh 端点挂在它下面）；`HttpOnly` 与
+/// [`extract_refresh_cookie`] 认 cookie 的判据同一条 —— 值不给 JS；`Secure` +
+/// `SameSite=Strict` 保证只在 HTTPS、不出站。domain 取 `site_origin` 的 host
+/// （尾斜杠容忍，非 HTTPS 与畸形 origin 拒绝）。cookie 值不进日志、不进错误文案。
+pub fn purchase_refresh_cookie(
+    site_origin: &str,
+    value: &str,
+) -> Result<tauri::webview::Cookie<'static>, AppError> {
+    let site_origin = site_origin.trim().trim_end_matches('/');
+    if site_origin.is_empty() {
+        return Err(AppError::InvalidInput("newapi site_origin 不能为空".into()));
+    }
+    if value.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "newapi refresh cookie 不能为空".into(),
+        ));
+    }
+    let origin = url::Url::parse(site_origin)
+        .map_err(|error| AppError::InvalidInput(format!("newapi site_origin 不合法: {error}")))?;
+    if origin.scheme() != "https" {
+        return Err(AppError::InvalidInput(
+            "newapi site_origin 必须使用 HTTPS".into(),
+        ));
+    }
+    let host = origin
+        .host_str()
+        .ok_or_else(|| AppError::InvalidInput("newapi site_origin 缺少主机名".into()))?
+        .to_string();
+
+    let mut cookie = Cookie::new(REFRESH_COOKIE_NAME, value.to_string());
+    cookie.set_domain(host);
+    cookie.set_path(REFRESH_COOKIE_PATH);
+    cookie.set_http_only(true);
+    cookie.set_secure(true);
+    cookie.set_same_site(cookie::SameSite::Strict);
+    Ok(cookie)
 }
 
 pub fn parse_session_navigation(url: &url::Url) -> Option<Result<i64, AppError>> {
@@ -486,7 +540,11 @@ pub async fn refresh_session(
     let mut request = client
         .post(format!("{site_origin}/api/user/auth/refresh"))
         .header("Origin", site_origin)
-        .header("Cookie", format!("new_api_refresh={refresh_cookie}"));
+        // cookie 名取自 owner 常量，不再有第三份字面量（review F1；端点路径不在本次裁决内）。
+        .header(
+            "Cookie",
+            format!("{}={refresh_cookie}", REFRESH_COOKIE_NAME),
+        );
     let expected_sid = expected_sid.unwrap_or("").trim();
     if !expected_sid.is_empty() {
         request = request.header("X-Auth-Session", expected_sid);
@@ -546,7 +604,7 @@ fn extract_rotated_refresh_cookie(
             .map_err(|_| AppError::Config("newapi refresh Set-Cookie 不是合法 ASCII".into()))?;
         let cookie = Cookie::parse(raw.to_owned())
             .map_err(|_| AppError::Config("newapi refresh Set-Cookie 格式无效".into()))?;
-        if cookie.name() == "new_api_refresh" {
+        if cookie.name() == REFRESH_COOKIE_NAME {
             if cookie.value().trim().is_empty() {
                 return Err(AppError::Config(
                     "newapi refresh Set-Cookie 缺少非空 new_api_refresh".into(),
@@ -769,7 +827,7 @@ impl NewApiClient {
     pub async fn reveal_token(&self, token_id: i64) -> Result<String, AppError> {
         let body = self
             .send(
-                self.request(reqwest::Method::GET, &format!("/api/token/{token_id}/key")),
+                self.request(reqwest::Method::POST, &format!("/api/token/{token_id}/key")),
                 "token reveal",
             )
             .await?;
@@ -886,6 +944,57 @@ mod tests {
         assert!(
             parse_session_navigation(&url::Url::parse("https://example.com").unwrap()).is_none()
         );
+    }
+
+    /// 充值窗口要种的 refresh cookie：与登录窗提取的同一颗（名字 / HttpOnly），
+    /// 且钉死在这个站的 auth 子树上 —— `Path` 是 NewAPI 上游 refresh cookie 的
+    /// 真实 path（refresh 端点 `/api/user/auth/refresh` 挂在它下面），
+    /// `Secure` + `SameSite=Strict` 保证值不出 HTTPS、不出站，HttpOnly 保证不进 JS。
+    #[test]
+    fn purchase_refresh_cookie_is_host_scoped_and_hidden_from_js() {
+        let cookie = purchase_refresh_cookie("https://api-top.com", "sid.secret").unwrap();
+        assert_eq!(cookie.name(), "new_api_refresh");
+        assert_eq!(cookie.value(), "sid.secret");
+        assert_eq!(cookie.path(), Some("/api/user/auth"));
+        assert_eq!(cookie.domain(), Some("api-top.com"));
+        assert!(cookie.http_only().unwrap_or(false));
+        assert!(cookie.secure().unwrap_or(false));
+        assert_eq!(cookie.same_site(), Some(cookie::SameSite::Strict));
+
+        // 配置里的 origin 常带尾斜杠，host 提取不能被它绊倒。
+        let trailing = purchase_refresh_cookie("https://api-top.com/", "sid.secret").unwrap();
+        assert_eq!(trailing.domain(), Some("api-top.com"));
+    }
+
+    /// 空白 credential、非 HTTPS 与畸形 origin 都是拒绝项，且错误文案不带 credential 值。
+    #[test]
+    fn purchase_refresh_cookie_rejects_blank_credentials_and_untrusted_origins() {
+        for credential in ["", "   "] {
+            let error = purchase_refresh_cookie("https://api-top.com", credential)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("不能为空"),
+                "credential: {credential:?}, error: {error}"
+            );
+        }
+
+        for site_origin in [
+            "http://api-top.com",
+            "api-top.com",
+            "not a url",
+            "",
+            "https://",
+        ] {
+            let error = purchase_refresh_cookie(site_origin, "sid.secret")
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("sid.secret"), "{error}");
+            assert!(
+                error.contains("newapi"),
+                "origin: {site_origin:?}, error: {error}"
+            );
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1465,7 +1574,7 @@ mod tests {
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].method, "POST");
         assert_eq!(requests[0].path_and_query, "/api/token/42/key");
         assert_eq!(requests[1].method, "DELETE");
         assert_eq!(requests[1].path_and_query, "/api/token/42");

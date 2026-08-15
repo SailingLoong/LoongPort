@@ -127,20 +127,6 @@ pub fn window_label(relay_id: i64) -> String {
 /// 带 `loongport_` 前缀避免与站点自己的键撞（站点用的是 `auth_expired` 这类裸名字）。
 const INJECTED_MARKER_KEY: &str = "loongport_purchase_injected";
 
-/// 充值页 URL。
-///
-/// sub2api 在公开设置里声明 `payment_enabled`。在线支付关闭时，站点的路由守卫会
-/// 把 `/purchase` 重定向到 dashboard；此时唯一可用的充值入口是兑换码页 `/redeem`。
-/// 开启时仍走 `/purchase`，里面是充值还是订阅由用户自己选。
-pub fn purchase_url(site_origin: &str, payment_enabled: Option<bool>) -> String {
-    let path = if payment_enabled == Some(false) {
-        "redeem"
-    } else {
-        "purchase"
-    };
-    format!("{site_origin}/{path}")
-}
-
 /// 生成注入脚本：把登录态写进 localStorage，让站点的 router 守卫认出「已登录」。
 ///
 /// `auth_user` 是 `/user/profile` 的 `data` 原样（见模块文档第 3 条）。
@@ -299,27 +285,22 @@ mod tests {
     }
 
     #[test]
-    fn purchase_url_uses_purchase_when_online_payment_is_enabled() {
-        assert_eq!(
-            purchase_url("https://bestapi.store", Some(true)),
-            "https://bestapi.store/purchase"
-        );
-    }
-
-    #[test]
-    fn purchase_url_uses_redeem_when_online_payment_is_disabled() {
-        assert_eq!(
-            purchase_url("https://wawapii.com", Some(false)),
-            "https://wawapii.com/redeem"
-        );
-    }
-
-    #[test]
-    fn purchase_url_keeps_legacy_sites_on_purchase_when_the_flag_is_absent() {
-        assert_eq!(
-            purchase_url("https://legacy.example", None),
-            "https://legacy.example/purchase"
-        );
+    fn purchase_routes_stay_in_the_signed_config_not_in_command_source() {
+        // ⭐ 源码闸：充值路由事实属于签名配置，不许回流到命令层。
+        //
+        // 按支付开关猜 `/purchase` 还是 `/redeem` 的 `purchase_url` 已删除 ——
+        // 「哪个站用哪个购买页」由维护者签名发布（`remote_config::configured_purchase_url`）。
+        // 这条闸钉住两件事：命令层不再读站点公开设置的支付开关，也不再调用本模块猜路由。
+        //
+        // 形状与 `backend.rs` 的 `browser_login_dispatch_keeps_protocol_details_out_of_commands`
+        // 相同：include_str! 比对**另一个文件**的源码 —— 放在被检的文件里会自匹配。
+        let command_source = include_str!("../commands/relay.rs");
+        for forbidden in ["payment_enabled", "purchase::purchase_url"] {
+            assert!(
+                !command_source.contains(forbidden),
+                "commands::relay 的充值路径不该再出现 {forbidden:?} —— 路由事实属于签名配置"
+            );
+        }
     }
 
     #[test]

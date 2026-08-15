@@ -1,6 +1,7 @@
 use crate::database::Database;
 use crate::relay::browser_bridge::BrowserBridge;
 use crate::relay::model_verification::coordinator::ModelVerificationCoordinator;
+use crate::relay::purchase_session::PurchaseSessionCoordinator;
 use crate::services::{ProxyService, UsageCache};
 use std::sync::Arc;
 
@@ -15,6 +16,12 @@ pub struct AppState {
     /// 挂 app 级而不是随登录流程走：provision 等流程在登录命令**返回之后**才跑，
     /// 那时登录流程的局部通道早已 drop，只有这里的注册表还活着。
     pub browser_bridge: Arc<BrowserBridge>,
+    /// 充值窗口对 NewAPI refresh credential 轮换的独占协调器。
+    ///
+    /// 挂 app 级：充值窗口与后台续期（`usable_relay`）是两条互不相识的调用链，
+    /// 「这个账号的 refresh 轮换权现在归谁」是后端会话协调的事实，不是 React 的
+    /// busy 状态 —— 前端刷新/重挂载会丢，而 lease 必须活到窗口真正销毁为止。
+    pub purchase_sessions: Arc<PurchaseSessionCoordinator>,
 }
 
 impl AppState {
@@ -29,6 +36,7 @@ impl AppState {
             usage_cache: Arc::new(UsageCache::new()),
             model_verification,
             browser_bridge: Arc::new(BrowserBridge::default()),
+            purchase_sessions: Arc::new(PurchaseSessionCoordinator::default()),
         }
     }
 }

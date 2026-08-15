@@ -160,10 +160,12 @@ pub struct PublicSettings {
     ///   （它是个兄弟 slot）。所以那一页仍然走得通 —— 我们那条横幅也照样能显示。
     #[serde(default)]
     pub registration_enabled: bool,
-    /// 是否开放在线支付。关闭时 `/purchase` 会被站点路由守卫重定向到 dashboard，
-    /// 充值入口应改走兑换码页 `/redeem`。
+    /// 是否开放在线支付。**当前没有生产消费方** —— 它曾决定充值入口开 `/purchase`
+    /// 还是 `/redeem`，那个路由决策已随购买页改走签名配置
+    /// （`remote_config::configured_purchase_url`）一起删除。留着是因为它就在
+    /// `/settings/public` 的响应里，删掉这个字段只是让我们看不见它。
     ///
-    /// `None` = 老版本 sub2api 没有这个公开字段；为兼容旧站，调用方继续按开启处理。
+    /// `None` = 老版本 sub2api 没有这个公开字段。
     #[serde(default)]
     pub payment_enabled: Option<bool>,
 }
@@ -703,34 +705,6 @@ impl Client {
         }
         serde_json::from_str(body)
             .map_err(|e| AppError::Config(format!("{what}失败: 响应解析出错 {e}")))
-    }
-
-    /// 拉站点公开设置。
-    ///
-    /// 这是站点能力的权威来源；充值页选择读取 `payment_enabled`，不按域名猜。
-    /// 端点公开可读，故有意不附带账号 token。
-    pub async fn public_settings(&self) -> Result<PublicSettings, AppError> {
-        let resp = self
-            .http
-            .get(self.url("/settings/public"))
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::Config(format!("获取站点公开设置失败: {}", describe_send_error(&e)))
-            })?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AppError::Config(format!("获取站点公开设置失败: 读响应出错 {e}")))?;
-        if !status.is_success() {
-            return Err(AppError::Config(format!(
-                "获取站点公开设置失败: HTTP {} {}",
-                status.as_u16(),
-                first_line(&body)
-            )));
-        }
-        parse_sub2api_public_settings(&body)
     }
 
     /// 拉可用分组。**返回平数组，不是分页信封。**
@@ -1647,51 +1621,6 @@ mod tests {
         let env: Envelope<Vec<Group>> =
             serde_json::from_str(r#"{"code":0,"message":"success","data":null}"#).unwrap();
         assert!(env.into_data("测试").is_err());
-    }
-
-    #[tokio::test]
-    async fn public_settings_reads_payment_capability_without_sending_credentials() {
-        async fn settings(headers: axum::http::HeaderMap) -> axum::Json<serde_json::Value> {
-            assert!(
-                headers.get(axum::http::header::AUTHORIZATION).is_none(),
-                "公开设置端点不需要账号 token"
-            );
-            axum::Json(serde_json::json!({
-                "code": 0,
-                "message": "success",
-                "data": {
-                    "site_name": "WawAPI",
-                    "version": "1.0.0",
-                    "api_base_url": "",
-                    "registration_enabled": true,
-                    "payment_enabled": false,
-                    "promo_code_enabled": false,
-                    "invitation_code_enabled": true
-                }
-            }))
-        }
-
-        let app =
-            axum::Router::new().route("/api/v1/settings/public", axum::routing::get(settings));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind settings server");
-        let origin = format!("http://{}", listener.local_addr().expect("server addr"));
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve settings response");
-        });
-
-        let client =
-            Client::new(origin, "account-secret", Some(7), None, None).expect("build client");
-        let settings = client
-            .public_settings()
-            .await
-            .expect("read public settings");
-
-        assert_eq!(settings.site_name, "WawAPI");
-        assert_eq!(settings.payment_enabled, Some(false));
     }
 
     /// 与 [`Client::send`] 走**同一条**路（解信封 + 取 `data`），只是不发网络。
