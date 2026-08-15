@@ -1,7 +1,27 @@
 {
   "schemaVersion": 2,
-  "issuedAt": "2026-08-14T00:00:00Z",
+  "issuedAt": "2026-08-15T00:00:00Z",
   "sites": [
+    {
+      "id": "deepseek-official",
+      "displayName": "DeepSeek",
+      "origin": "https://platform.deepseek.com",
+      "entryUrl": "https://platform.deepseek.com/",
+      "apiBaseUrl": "https://api.deepseek.com/v1",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "default": true
+        },
+        {
+          "id": "deepseek-v4-pro"
+        }
+      ],
+      "veridropHosts": [],
+      "authorization": {
+        "kind": "manual-api-key"
+      }
+    },
     {
       "id": "bestapi",
       "displayName": "BestAPI",
