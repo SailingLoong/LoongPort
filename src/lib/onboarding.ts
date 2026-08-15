@@ -16,12 +16,14 @@ let promptPromise: Promise<boolean> | null = null;
  *（本进程的首次且用户仍是新用户）；`false` = 已弹过 / 不是新用户 / 后端不可用。
  */
 export function promptOnboardingRegister(): Promise<boolean> {
-  promptPromise ??= invoke<boolean>("onboarding_prompt_register").catch((error) => {
-    // 引导是加分项：后端暂时不可用时静默降级（false = 走既有的首启目录提示），
-    // 不为它弹错误打扰新用户。
-    console.warn("[onboarding] 新人引导注册窗未能发起", error);
-    return false;
-  });
+  promptPromise ??= invoke<boolean>("onboarding_prompt_register").catch(
+    (error) => {
+      // 引导是加分项：后端暂时不可用时静默降级（false = 走既有的首启目录提示），
+      // 不为它弹错误打扰新用户。
+      console.warn("[onboarding] 新人引导注册窗未能发起", error);
+      return false;
+    },
+  );
   return promptPromise;
 }
 

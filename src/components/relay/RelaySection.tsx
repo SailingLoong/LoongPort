@@ -34,10 +34,7 @@ import {
   promptOnboardingRegister,
   type OnboardingRegisterCompleted,
 } from "@/lib/onboarding";
-import {
-  vendorApi,
-  type VendorAccountRow,
-} from "@/lib/api/vendor";
+import { vendorApi, type VendorAccountRow } from "@/lib/api/vendor";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
@@ -286,7 +283,11 @@ export function RelaySection({
   const reloadStatus = useCallback(async () => {
     try {
       const status = await relayApi.status();
-      if (isImageTab || !status.shouldPromptAddSite || autoPromptedThisProcess) {
+      if (
+        isImageTab ||
+        !status.shouldPromptAddSite ||
+        autoPromptedThisProcess
+      ) {
         return;
       }
       autoPromptedThisProcess = true;
@@ -528,7 +529,9 @@ export function RelaySection({
   useTauriEvent<OnboardingRegisterCompleted>(
     ONBOARDING_REGISTER_COMPLETED,
     async (payload) => {
-      toast.success(t("loongport.addSite.connected", { name: payload.siteName }));
+      toast.success(
+        t("loongport.addSite.connected", { name: payload.siteName }),
+      );
       try {
         presentRefreshResult(await relayApi.refresh(payload.relayId, appId));
       } catch (reason) {

@@ -77,8 +77,8 @@ pub async fn add_to_failover_queue(
     // 为什么必须拦：熔断自动切是**用户没点任何按钮**就发生的（FailoverSwitchManager
     // 检测到上游报错后自己切），一旦切到托管档位，就跳过了「退出 ChatGPT → 切换 → 重开」
     // 的编排 —— codex 的 live 配置被换成托管 sk 而 ChatGPT 还连着旧的，用户全程无感。
-    // 托盘菜单过滤（tray.rs 的 filter_unmanaged）在这条路上完全无效，因为切换不是从
-    // 菜单点出来的。
+    // （托盘菜单那条路现在点击托管项会走 `switch_tier_command` 编排，但这条队列路
+    // 完全不经过菜单，守卫只能加在这里。）
     crate::relay::reject_if_managed(&provider_id).map_err(|e| e.to_string())?;
 
     state

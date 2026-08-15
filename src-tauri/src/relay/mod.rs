@@ -83,4 +83,4 @@ pub mod purchase_session;
 pub mod remote_config;
 pub mod stats;
 
-pub use managed::{filter_unmanaged, is_managed, reject_if_managed};
+pub use managed::{is_managed, reject_if_managed};
