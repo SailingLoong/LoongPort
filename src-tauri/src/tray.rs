@@ -199,47 +199,76 @@ impl TrayTexts {
     }
 }
 
-/// 托盘应用分区配置
+/// 托盘应用分区配置。
+///
+/// 机器部分（事件 id 前缀、空提示 id）全部从 [`AppType::as_str`] 派生，
+/// 不写字面量 —— 10 个分区 × 3 份手写 id 迟早漂移，而漂移的表现是
+/// 「菜单项点上去没反应」（事件 id 对不上），编译器和测试都抓不到。
+#[derive(Clone)]
 pub struct TrayAppSection {
     pub app_type: AppType,
-    pub prefix: &'static str,
-    pub empty_id: &'static str,
-    pub header_label: &'static str,
-    pub log_name: &'static str,
+    /// 展示名（子菜单标题 + 日志用），与主界面 `appConfig` 的 label 一致。
+    pub label: &'static str,
+}
+
+impl TrayAppSection {
+    /// 该分区菜单项的事件 id 前缀：`<as_str>_`。
+    pub fn event_prefix(&self) -> String {
+        format!("{}_", self.app_type.as_str())
+    }
+
+    /// 「无供应商」占位项的事件 id：`<as_str>_empty`。
+    pub fn empty_id(&self) -> String {
+        format!("{}_empty", self.app_type.as_str())
+    }
 }
 
 /// Auto 菜单项后缀
 pub const AUTO_SUFFIX: &str = "auto";
 pub const TRAY_ID: &str = "cc-switch";
 
-pub const TRAY_SECTIONS: [TrayAppSection; 4] = [
+/// 托盘覆盖全部 provider 型 app（顺序对齐主界面 `appConfig`），实际显示哪些
+/// 由 `settings.visible_apps` 过滤 —— 主界面藏掉的 tab 托盘也不出现。
+pub const TRAY_SECTIONS: [TrayAppSection; 10] = [
     TrayAppSection {
         app_type: AppType::Claude,
-        prefix: "claude_",
-        empty_id: "claude_empty",
-        header_label: "Claude",
-        log_name: "Claude",
+        label: "Claude",
+    },
+    TrayAppSection {
+        app_type: AppType::ClaudeDesktop,
+        label: "Claude Desktop",
     },
     TrayAppSection {
         app_type: AppType::Codex,
-        prefix: "codex_",
-        empty_id: "codex_empty",
-        header_label: "Codex",
-        log_name: "Codex",
+        label: "Codex",
+    },
+    TrayAppSection {
+        app_type: AppType::CodexImage,
+        label: "Codex Images",
     },
     TrayAppSection {
         app_type: AppType::Gemini,
-        prefix: "gemini_",
-        empty_id: "gemini_empty",
-        header_label: "Gemini",
-        log_name: "Gemini",
+        label: "Gemini",
     },
     TrayAppSection {
         app_type: AppType::GrokBuild,
-        prefix: "grokbuild_",
-        empty_id: "grokbuild_empty",
-        header_label: "Grok Build",
-        log_name: "Grok Build",
+        label: "Grok Build",
+    },
+    TrayAppSection {
+        app_type: AppType::OpenCode,
+        label: "OpenCode",
+    },
+    TrayAppSection {
+        app_type: AppType::OpenClaw,
+        label: "OpenClaw",
+    },
+    TrayAppSection {
+        app_type: AppType::Hermes,
+        label: "Hermes",
+    },
+    TrayAppSection {
+        app_type: AppType::Pi,
+        label: "Pi",
     },
 ];
 
@@ -566,7 +595,7 @@ pub fn handle_profile_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool
     true
 }
 
-/// 托盘「模型」子菜单项的事件 id 后缀：`{section.prefix}model_{model}`。
+/// 托盘「模型」子菜单项的事件 id 后缀：`{section.event_prefix()}model_{model}`。
 /// 自建 provider 的 id 是 uuid / `<category>-<uuid>`（连字符分隔），不会以
 /// `model_` 开头，与供应商事件不冲突。
 const TIER_MODEL_EVENT_PREFIX: &str = "model_";
@@ -574,15 +603,15 @@ const TIER_MODEL_EVENT_PREFIX: &str = "model_";
 /// 处理供应商托盘事件
 pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool {
     for section in TRAY_SECTIONS.iter() {
-        if let Some(suffix) = event_id.strip_prefix(section.prefix) {
+        if let Some(suffix) = event_id.strip_prefix(&section.event_prefix()) {
             // 处理 Auto 点击
             if suffix == AUTO_SUFFIX {
-                log::info!("切换到{} Auto模式", section.log_name);
+                log::info!("切换到{} Auto模式", section.label);
                 let app_handle = app.clone();
                 let app_type = section.app_type.clone();
                 tauri::async_runtime::spawn_blocking(move || {
                     if let Err(e) = handle_auto_click(&app_handle, &app_type) {
-                        log::error!("切换{}Auto模式失败: {e}", section.log_name);
+                        log::error!("切换{}Auto模式失败: {e}", section.label);
                     }
                 });
                 return true;
@@ -590,13 +619,13 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
 
             // 处理「模型」子菜单点击（只挂在 Codex 当前托管档位下）
             if let Some(model) = suffix.strip_prefix(TIER_MODEL_EVENT_PREFIX) {
-                log::info!("切换{}档位模型: {model}", section.log_name);
+                log::info!("切换{}档位模型: {model}", section.label);
                 let app_handle = app.clone();
                 let app_type = section.app_type.clone();
                 let model = model.to_string();
                 tauri::async_runtime::spawn_blocking(move || {
                     if let Err(e) = handle_tier_model_click(&app_handle, &app_type, &model) {
-                        log::error!("切换{}档位模型失败: {e}", section.log_name);
+                        log::error!("切换{}档位模型失败: {e}", section.label);
                         show_tier_switch_error(&app_handle, &e);
                     }
                 });
@@ -604,13 +633,13 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
             }
 
             // 处理供应商点击
-            log::info!("切换到{}供应商: {suffix}", section.log_name);
+            log::info!("切换到{}供应商: {suffix}", section.label);
             let app_handle = app.clone();
             let provider_id = suffix.to_string();
             let app_type = section.app_type.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 if let Err(e) = handle_provider_click(&app_handle, &app_type, &provider_id) {
-                    log::error!("切换{}供应商失败: {e}", section.log_name);
+                    log::error!("切换{}供应商失败: {e}", section.label);
                     if crate::relay::is_managed(&provider_id) {
                         show_tier_switch_error(&app_handle, &e);
                     }
@@ -826,7 +855,9 @@ fn handle_tier_model_click(
 
     // 点的就是当前模型 → 无操作（与主界面 `handleSelectTierModel` 的守卫对齐，
     // 否则每次误点都会走一遍「退 ChatGPT」确认）。
-    let current = app_state.db.get_provider_by_id(&provider_id, app_type.as_str())?;
+    let current = app_state
+        .db
+        .get_provider_by_id(&provider_id, app_type.as_str())?;
     if let Some(provider) = current {
         if crate::relay::provision::extract_model(&provider.settings_config).as_deref()
             == Some(model)
@@ -935,11 +966,15 @@ pub fn create_tray_menu(
     // Pre-compute proxy running state (used to disable official providers in tray menu)
     let is_proxy_running = futures::executor::block_on(app_state.proxy_service.is_running());
 
-    // 每个应用类型折叠为子菜单，避免供应商过多时菜单过长
+    // 每个应用类型折叠为子菜单，避免供应商过多时菜单过长。
+    // 分区数已扩到 10 个 app，分隔符整组只放一个 —— 每分区一条的话菜单会被
+    // 分隔符撑到两倍长。
+    let mut any_section_added = false;
     for section in TRAY_SECTIONS.iter() {
         if !visible_apps.is_visible(&section.app_type) {
             continue;
         }
+        any_section_added = true;
 
         let app_type_str = section.app_type.as_str();
         let providers = app_state.db.get_all_providers(app_type_str)?;
@@ -952,11 +987,11 @@ pub fn create_tray_menu(
 
         if menu_providers.is_empty() {
             // 空供应商：显示禁用的菜单项（否则会挂出一个点开什么都没有的空子菜单）
-            let label = format!("{} {}", section.header_label, tray_texts.no_providers_label);
-            let empty_item = MenuItem::with_id(app, section.empty_id, &label, false, None::<&str>)
-                .map_err(|e| {
-                    AppError::Message(format!("创建{}空提示失败: {e}", section.log_name))
-                })?;
+            let label = format!("{} {}", section.label, tray_texts.no_providers_label);
+            let empty_item =
+                MenuItem::with_id(app, section.empty_id(), &label, false, None::<&str>).map_err(
+                    |e| AppError::Message(format!("创建{}空提示失败: {e}", section.label)),
+                )?;
             menu_builder = menu_builder.item(&empty_item);
         } else {
             let current_provider = providers.get(&current_id);
@@ -964,11 +999,12 @@ pub fn create_tray_menu(
                 Some(p) => {
                     let suffix = format_usage_suffix(app_state, &section.app_type, p, &current_id)
                         .unwrap_or_default();
-                    format!("{} · {}{}", section.header_label, p.name, suffix)
+                    format!("{} · {}{}", section.label, p.name, suffix)
                 }
-                None => section.header_label.to_string(),
+                None => section.label.to_string(),
             };
             let submenu_id = format!("submenu_{}", app_type_str);
+            let event_prefix = section.event_prefix();
 
             // Check if this app is under proxy takeover (for disabling official providers)
             let is_app_taken_over = is_proxy_running
@@ -997,15 +1033,13 @@ pub fn create_tray_menu(
                 };
                 let item = CheckMenuItem::with_id(
                     app,
-                    format!("{}{}", section.prefix, id),
+                    format!("{event_prefix}{id}"),
                     &label,
                     !is_official_blocked, // disabled when blocked
                     is_current,
                     None::<&str>,
                 )
-                .map_err(|e| {
-                    AppError::Message(format!("创建{}菜单项失败: {e}", section.log_name))
-                })?;
+                .map_err(|e| AppError::Message(format!("创建{}菜单项失败: {e}", section.label)))?;
                 submenu_builder = submenu_builder.item(&item);
             }
 
@@ -1023,30 +1057,32 @@ pub fn create_tray_menu(
                 for model in &models {
                     let item = CheckMenuItem::with_id(
                         app,
-                        format!("{}{}{}", section.prefix, TIER_MODEL_EVENT_PREFIX, model),
+                        format!("{event_prefix}{TIER_MODEL_EVENT_PREFIX}{model}"),
                         model,
                         true,
                         current_model.as_deref() == Some(model.as_str()),
                         None::<&str>,
                     )
                     .map_err(|e| {
-                        AppError::Message(format!("创建{}模型菜单项失败: {e}", section.log_name))
+                        AppError::Message(format!("创建{}模型菜单项失败: {e}", section.label))
                     })?;
                     models_builder = models_builder.item(&item);
                 }
                 let models_submenu = models_builder.build().map_err(|e| {
-                    AppError::Message(format!("构建{}模型子菜单失败: {e}", section.log_name))
+                    AppError::Message(format!("构建{}模型子菜单失败: {e}", section.label))
                 })?;
                 submenu_builder = submenu_builder.separator().item(&models_submenu);
             }
 
-            let submenu = submenu_builder.build().map_err(|e| {
-                AppError::Message(format!("构建{}子菜单失败: {e}", section.log_name))
-            })?;
+            let submenu = submenu_builder
+                .build()
+                .map_err(|e| AppError::Message(format!("构建{}子菜单失败: {e}", section.label)))?;
             section_handles.insert(section.app_type.clone(), submenu.clone());
             menu_builder = menu_builder.item(&submenu);
         }
+    }
 
+    if any_section_added {
         menu_builder = menu_builder.separator();
     }
 
@@ -1146,7 +1182,6 @@ pub fn create_tray_menu(
 
     menu_builder = menu_builder.item(&lightweight_item).separator();
 
-    // 退出菜单（分隔符已在上面的 section 循环中添加）
     let quit_item = MenuItem::with_id(app, "quit", tray_texts.quit, true, None::<&str>)
         .map_err(|e| AppError::Message(format!("创建退出菜单失败: {e}")))?;
 
@@ -1192,9 +1227,9 @@ fn update_tray_usage_labels(app: &tauri::AppHandle) {
         };
         let suffix = format_usage_suffix(&app_state, &section.app_type, provider, &current_id)
             .unwrap_or_default();
-        let new_label = format!("{} · {}{}", section.header_label, provider.name, suffix);
+        let new_label = format!("{} · {}{}", section.label, provider.name, suffix);
         if let Err(e) = submenu.set_text(&new_label) {
-            log::debug!("[Tray] 更新{}子菜单标题失败: {e}", section.log_name);
+            log::debug!("[Tray] 更新{}子菜单标题失败: {e}", section.label);
         }
     }
 }
@@ -1358,7 +1393,7 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
         }
 
         let app_type_str = section.app_type.as_str();
-        let log_name = section.log_name;
+        let log_name = section.label;
 
         // 解析 effective current provider；未设置 / 出错都静默跳过，
         // 与 create_tray_menu 的行为保持一致。
@@ -1485,7 +1520,11 @@ mod tests {
         assert!(tray_menu_providers(&empty).is_empty());
     }
 
-    fn codex_tier_provider(id: &str, config_toml_model: &str, catalog: &[&str]) -> crate::provider::Provider {
+    fn codex_tier_provider(
+        id: &str,
+        config_toml_model: &str,
+        catalog: &[&str],
+    ) -> crate::provider::Provider {
         let config = if config_toml_model.is_empty() {
             String::new()
         } else {
@@ -1512,11 +1551,15 @@ mod tests {
         let managed = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 1);
 
         // 托管 Codex 档位 + 有目录 → (当前模型, 目录)
-        let provider = codex_tier_provider(&managed, "gpt-5.6-sol", &["gpt-5.6-sol", "gpt-5.6-nano"]);
+        let provider =
+            codex_tier_provider(&managed, "gpt-5.6-sol", &["gpt-5.6-sol", "gpt-5.6-nano"]);
         let (current, models) = tier_model_choices(&provider, &AppType::Codex)
             .expect("managed codex tier with catalog should expose models");
         assert_eq!(current.as_deref(), Some("gpt-5.6-sol"));
-        assert_eq!(models, vec!["gpt-5.6-sol".to_string(), "gpt-5.6-nano".to_string()]);
+        assert_eq!(
+            models,
+            vec!["gpt-5.6-sol".to_string(), "gpt-5.6-nano".to_string()]
+        );
 
         // 非 Codex app（同一个 provider 行挂在 Claude 下）→ 不挂
         assert!(tier_model_choices(&provider, &AppType::Claude).is_none());
@@ -1590,9 +1633,55 @@ mod tests {
             .find(|section| section.app_type == AppType::GrokBuild)
             .expect("Grok Build tray section should exist");
 
-        assert_eq!(section.prefix, "grokbuild_");
-        assert_eq!(section.empty_id, "grokbuild_empty");
-        assert_eq!(section.header_label, "Grok Build");
+        assert_eq!(section.event_prefix(), "grokbuild_");
+        assert_eq!(section.empty_id(), "grokbuild_empty");
+        assert_eq!(section.label, "Grok Build");
+    }
+
+    /// 分区事件前缀之间**互不为前缀**：`handle_provider_tray_event` 按数组顺序
+    /// `strip_prefix` 分发，若 A 的前缀是 B 的前缀（如假想的 `codex_` 与
+    /// `codex_extra_`），B 分区的事件会先被 A 抢走 —— 表现是「点上去没反应」，
+    /// 编译器抓不到。扩 app 时这道闸必须跟着绿。
+    #[test]
+    fn tray_section_prefixes_do_not_shadow_each_other() {
+        for (i, earlier) in TRAY_SECTIONS.iter().enumerate() {
+            for (j, later) in TRAY_SECTIONS.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let earlier_prefix = earlier.event_prefix();
+                let later_prefix = later.event_prefix();
+                assert!(
+                    !later_prefix.starts_with(&earlier_prefix),
+                    "{later_prefix} 会被先出现的 {earlier_prefix} 抢走分发"
+                );
+            }
+        }
+    }
+
+    /// 托盘分区覆盖主界面全部 app（P2）：每个 AppType 都有对应分区，
+    /// 顺序与主界面 `appConfig` 一致，避免菜单顺序和 tab 顺序打架。
+    #[test]
+    fn tray_sections_cover_all_apps_in_main_ui_order() {
+        let section_apps: Vec<&str> = TRAY_SECTIONS
+            .iter()
+            .map(|section| section.app_type.as_str())
+            .collect();
+        assert_eq!(
+            section_apps,
+            vec![
+                "claude",
+                "claude-desktop",
+                "codex",
+                "codex-image",
+                "gemini",
+                "grokbuild",
+                "opencode",
+                "openclaw",
+                "hermes",
+                "pi",
+            ]
+        );
     }
 
     fn make_quota(tool: &str, success: bool, tiers: Vec<QuotaTier>) -> SubscriptionQuota {
