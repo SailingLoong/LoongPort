@@ -3,6 +3,7 @@ export * from "./events";
 export { piApi } from "./pi";
 export { providersApi, universalProvidersApi } from "./providers";
 export { settingsApi } from "./settings";
+export { starRewardApi, type StarRewardOffer } from "./starReward";
 export { backupsApi } from "./settings";
 export { mcpApi } from "./mcp";
 export { profilesApi } from "./profiles";

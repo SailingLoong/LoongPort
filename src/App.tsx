@@ -35,6 +35,9 @@ import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
   settingsApi,
+  starRewardApi,
+  type StarRewardOffer,
+  ONBOARDING_STAR_REWARD_OFFER,
   PROFILE_APPLIED,
   S3_SYNC_STATUS_UPDATED,
   UNIVERSAL_PROVIDER_SYNCED,
@@ -44,6 +47,7 @@ import {
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import {
+  GITHUB_REPO,
   LAST_APP_STORAGE_KEY,
   LAST_VIEW_STORAGE_KEY,
 } from "@/config/constants";
@@ -78,7 +82,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
-import { StarPromoToast } from "@/components/StarPromoToast";
+import { StarRewardDialog } from "@/components/StarRewardDialog";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
@@ -533,6 +537,67 @@ function App() {
       );
     },
   );
+
+  // ===== 「点 Star 领注册礼」：状态统一收在 App（红点 / 弹窗 / 事件三处共用）=====
+
+  const [starRewardOffer, setStarRewardOffer] =
+    useState<StarRewardOffer | null>(null);
+  // `null` = 还没读到（读失败也归这里：读不到就不亮红点，不在顶栏挂一颗
+  // 点不掉的假红点 —— 与本仓一次性标志的既有降级方向一致）。
+  const [starRewardActive, setStarRewardActive] = useState<boolean | null>(
+    null,
+  );
+  const [starRewardBusy, setStarRewardBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([settingsApi.get(), starRewardApi.configured()])
+      .then(([settings, configured]) => {
+        if (cancelled) return;
+        setStarRewardActive(configured && settings.starRewardClaimed !== true);
+      })
+      .catch(() => {
+        if (!cancelled) setStarRewardActive(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 新人引导的邀请事件（后端已过三道闸：资格 + 配置 + 基线）：拿到即弹。
+  // 已领取的极端情形（红点先领了、引导事件才到）直接忽略。
+  useTauriEvent<StarRewardOffer>(ONBOARDING_STAR_REWARD_OFFER, (payload) => {
+    if (starRewardActive === false) return;
+    setStarRewardOffer(payload);
+  });
+
+  /** 红点按钮点击：活动在且未领取 → 问后端要邀请（含基线）弹窗；否则现状开仓库。 */
+  const handleGitHubStarClick = useCallback(async () => {
+    if (starRewardActive !== true) {
+      await settingsApi.openExternal(GITHUB_REPO);
+      return;
+    }
+    setStarRewardBusy(true);
+    try {
+      // null = 活动刚下线 / 基线取不到 —— 按现状开仓库，不弹一个
+      // 兑现不了的 offer。
+      const offer = (await starRewardApi.offer()) ?? null;
+      if (offer) {
+        setStarRewardOffer(offer);
+      } else {
+        await settingsApi.openExternal(GITHUB_REPO);
+      }
+    } catch {
+      await settingsApi.openExternal(GITHUB_REPO).catch(() => {});
+    } finally {
+      setStarRewardBusy(false);
+    }
+  }, [starRewardActive]);
+
+  /** 弹窗发码时刻：熄红点（持久化由弹窗自己负责）。 */
+  const handleStarRewardClaimed = useCallback(() => {
+    setStarRewardActive(false);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1333,8 +1398,13 @@ function App() {
                     setCurrentView("settings");
                   }}
                 />
-                {/* GitHub 入口 + 首次小红点：自带全部状态（含点掉红点的持久化）。 */}
-                <GitHubStarButton />
+                {/* GitHub 入口：star 领礼活动在且未领取时带红点；点击行为
+                    （弹邀请窗 / 直接开仓库）由 App 统一决定。 */}
+                <GitHubStarButton
+                  showDot={starRewardActive === true}
+                  busy={starRewardBusy}
+                  onClick={() => void handleGitHubStarClick()}
+                />
                 {isCurrentAppTakeoverActive && (
                   <Button
                     variant="ghost"
@@ -1817,9 +1887,15 @@ function App() {
           它自带「读设置 → 判要不要弹」的全部状态，这里只挂一行。 */}
       <StatsNoticeDialog />
 
-      {/* 首次注册成功后的一次性「点个星」toast：自带全部状态（含出过就不再出的
-          持久化），这里只挂一行 —— 与上面那个同一个模式。 */}
-      <StarPromoToast />
+      {/* 「点 Star 领注册礼」弹窗：新人引导事件与红点点击共用，状态机在组件内；
+          这里只持开关（offer 在即弹）。 */}
+      {starRewardOffer && (
+        <StarRewardDialog
+          offer={starRewardOffer}
+          onClose={() => setStarRewardOffer(null)}
+          onClaimed={handleStarRewardClaimed}
+        />
+      )}
 
       {/* 切 codex 供应商前的「要不要退 ChatGPT」确认框。它由 `useCodexSwitchGuard`
           持有全部状态（弹不弹、切哪个），这里只挂一行 —— 与上面那个同一个模式。 */}

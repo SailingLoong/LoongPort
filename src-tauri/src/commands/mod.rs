@@ -32,7 +32,10 @@ mod reconcile;
 mod relay;
 mod session_manager;
 mod settings;
+// 「点 Star 领注册礼」的机制层：星数取数 / gh 代点 / 邀请 payload。
+// 策略在 onboarding（新人首启）与前端（红点入口），机制两端共用所以单独收拢。
 pub mod skill;
+mod star_reward;
 mod stream_check;
 mod subscription;
 // `pub(crate)`：`relay::cc_switch_import` 的导入流程在导入后要调
@@ -83,6 +86,7 @@ pub use relay::*;
 pub use session_manager::*;
 pub use settings::*;
 pub use skill::*;
+pub use star_reward::*;
 pub use stream_check::*;
 pub use subscription::*;
 pub use vendor::*;

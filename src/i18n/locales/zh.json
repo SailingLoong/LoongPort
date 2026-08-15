@@ -3413,9 +3413,24 @@
     },
     "star": {
       "buttonTitle": "GitHub 仓库（点个 ⭐ 支持一下）",
-      "toastTitle": "用得还顺手吗？",
-      "toastBody": "LoongPort 免费开源，去 GitHub 点个 ⭐ 支持一下吧。",
-      "toastAction": "去点星"
+      "dotTitle": "新人礼还没领 —— 点 GitHub Star 领注册礼",
+      "dialogTitle": "点个 Star，领 ${{amount}} 注册礼",
+      "dialogBody": "去 GitHub 给 LoongPort 点亮 Star，就送 BestAPI 注册礼：注册立享 ${{amount}} 额度。会先尝试用本机 GitHub CLI（gh）代你点星；没安装或未登录时自动打开仓库页面。",
+      "confirm": "点 Star 领礼",
+      "cancel": "取消",
+      "waitTitle": "等你的 Star ⭐",
+      "waitBody": "仓库页面已在浏览器打开。点亮 Star 后回到这里点下方按钮，注册礼马上到手。",
+      "waitAction": "我已点赞",
+      "reopenRepo": "再打开一次仓库页",
+      "checking": "正在确认…",
+      "grantedTitle": "注册礼到手 🎉",
+      "grantedViaGh": "已通过 GitHub CLI 为你点亮 Star，注册礼马上送到。",
+      "grantedDetected": "已检测到你的 Star，注册礼马上送到。",
+      "grantedUnverified": "没能确认 Star（可能是网络波动），注册礼照样发放。",
+      "codeLabel": "优惠码",
+      "copy": "复制",
+      "copied": "已复制",
+      "registerNote": "BestAPI 注册窗口已打开，优惠码会自动填好。"
     }
   },
   "firstRunNotice": {

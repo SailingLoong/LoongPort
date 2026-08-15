@@ -3413,9 +3413,24 @@
     },
     "star": {
       "buttonTitle": "GitHub repository (star it if you like it)",
-      "toastTitle": "Enjoying LoongPort?",
-      "toastBody": "LoongPort is free and open source. A ⭐ on GitHub helps a lot.",
-      "toastAction": "Star on GitHub"
+      "dotTitle": "Sign-up gift unclaimed — star on GitHub to claim it",
+      "dialogTitle": "Star us, get a ${{amount}} sign-up gift",
+      "dialogBody": "Star LoongPort on GitHub to receive a BestAPI sign-up gift: ${{amount}} of credit on registration. We'll first try to star it for you via the local GitHub CLI (gh); if it's not installed or not signed in, the repository page will open instead.",
+      "confirm": "Star & claim",
+      "cancel": "Cancel",
+      "waitTitle": "Waiting for your star ⭐",
+      "waitBody": "The repository page has opened in your browser. Star it, then come back and tap the button below — your gift is one click away.",
+      "waitAction": "I've starred",
+      "reopenRepo": "Open the repository page again",
+      "checking": "Checking…",
+      "grantedTitle": "Gift claimed 🎉",
+      "grantedViaGh": "Starred for you via GitHub CLI — your gift is on its way.",
+      "grantedDetected": "Your star was detected — your gift is on its way.",
+      "grantedUnverified": "Couldn't confirm the star (possibly a network hiccup), but the gift is yours all the same.",
+      "codeLabel": "Promo code",
+      "copy": "Copy",
+      "copied": "Copied",
+      "registerNote": "The BestAPI sign-up window is open with the promo code pre-filled."
     }
   },
   "firstRunNotice": {
