@@ -778,7 +778,7 @@ fn read_cache(kind: LeaderboardKind) -> Option<CachedLeaderboard> {
 fn apply_policy_to_cached(cached: CachedLeaderboard, config: &RemoteConfig) -> RelayLeaderboard {
     RelayLeaderboard {
         kind: cached.kind,
-        items: apply_probe_gate(apply_policy(cached.items, config)),
+        items: renumber_ranks_by_score(apply_probe_gate(apply_policy(cached.items, config))),
         synced_at: cached.synced_at,
     }
 }
@@ -799,6 +799,33 @@ fn filter_probe_gated(
         .into_iter()
         .filter(|item| store.should_expose(&item.site_host))
         .collect()
+}
+
+/// 广场最终呈现序：按 veridrop **评分倒排**并重排名次（1..N）。
+///
+/// 白名单与探针闸会摘掉中间名次的站（第 2 名直接跳第 7 名），veridrop 原始名次
+/// 对用户就是乱序。重排后 `rank` = **本广场内的位置**，评分 / 样本数仍是
+/// veridrop 原值 —— 用户看到的既是连续名次，也不丢失「凭什么排这」的依据。
+///
+/// 排序键：评分降序，同分时 veridrop 原名次小者在前（无原名次的站 —— 靠
+/// detail 页回填的那种 —— 排在同分有名次者之后），仍并列按 host 字典序钉死
+/// 顺序（快照测试友好，两次渲染不跳行）。
+fn renumber_ranks_by_score(mut items: Vec<RelayDirectoryItem>) -> Vec<RelayDirectoryItem> {
+    items.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| match (a.rank, b.rank) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a.site_host.cmp(&b.site_host))
+    });
+    for (index, item) in items.iter_mut().enumerate() {
+        item.rank = Some(index as u32 + 1);
+    }
+    items
 }
 
 fn write_cache(leaderboard: &CachedLeaderboard) -> Result<(), AppError> {
@@ -947,9 +974,9 @@ async fn refresh_with(
     })?;
     Ok(RelayLeaderboard {
         kind,
-        // 返回给 UI 的这份过探针闸；缓存里存的始终是未过滤的 parsed，
-        // 摘除闸解除后无需重新抓取即可恢复展示。
-        items: apply_probe_gate(items),
+        // 返回给 UI 的这份过探针闸并重排名次；缓存里存的始终是未过滤的 parsed，
+        // 摘除闸解除后无需重新抓取即可恢复展示（名次在读取时重算，天然跟上）。
+        items: renumber_ranks_by_score(apply_probe_gate(items)),
         synced_at,
     })
 }
@@ -1995,5 +2022,55 @@ mod tests {
             );
         }
         assert!(!hosts.contains(&"blocked.example".to_string()));
+    }
+
+    /// 漏斗摘掉中间名次的站后，veridrop 原始名次对用户是乱序（#2 直接跳 #7）。
+    /// 重排钉三件事：评分倒序、名次连续（1..N）、并列确定性
+    /// （同分先看 veridrop 原名次，无名次的回填站垫后，仍并列按 host 钉死）。
+    #[test]
+    fn renumber_ranks_by_score_closes_funnel_gaps() {
+        fn row(site_host: &str, score: u8, rank: Option<u32>) -> RelayDirectoryItem {
+            RelayDirectoryItem {
+                site_host: site_host.into(),
+                veridrop_host: site_host.into(),
+                display_name: site_host.into(),
+                rank,
+                score,
+                samples: 30,
+                latest_date: "2026-08-16".into(),
+                detail_url: format!("https://veridrop.org/site/{site_host}"),
+                protocol_scores: vec![],
+                claude_signature_rate: None,
+                scenarios: vec![],
+                issues: vec![],
+                entry_url: format!("https://{site_host}"),
+                auto_add: true,
+            }
+        }
+
+        // 名次带洞（2/7/None/1），评分乱序给出。
+        let items = vec![
+            row("gap.example", 88, Some(7)),
+            row("tie-a.example", 95, Some(2)),
+            row("backfilled.example", 92, None),
+            row("tie-b.example", 95, Some(1)),
+        ];
+
+        let renumbered = renumber_ranks_by_score(items);
+        let order = renumbered
+            .iter()
+            .map(|item| (item.site_host.as_str(), item.rank))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            order,
+            vec![
+                ("tie-b.example", Some(1)),      // 95 分、veridrop 原名次 1 → 并列在前
+                ("tie-a.example", Some(2)),      // 95 分、原名次 2
+                ("backfilled.example", Some(3)), // 92 分、无原名次也不丢位置
+                ("gap.example", Some(4)),        // 88 分
+            ],
+            "评分倒排 + 连续名次，洞被补上"
+        );
     }
 }
