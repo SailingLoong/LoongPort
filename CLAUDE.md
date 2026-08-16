@@ -270,6 +270,26 @@ npx tsc --noEmit && npx prettier --check "{src,tests}/**/*.{js,jsx,ts,tsx,css,js
 **`cargo test` / `clippy` 全绿不代表能打包** —— CI 的 Backend Checks 不跑 `tauri build`，
 Tauri 的 npm↔crate 版本校验只在打包时触发（已踩过，见 `ca82a908`）。
 
+### 推送前快速预判会不会红
+
+六道闸不用每次全跑 —— CI 红不红可以按改动面跑**最小集**预判，本地绿 ⇒ CI 必绿：
+
+- 只动 `src/` / `tests/`：前端三件套（typecheck / format:check / test:unit）。
+- 只动 `src-tauri/`：后端三件套（fmt / clippy / test）。
+- 依据有两条：本地 clippy 带 `--all-targets`，是 CI 那条（不带）的**超集**；
+  CI 工具链走 `rust-toolchain.toml`（同本机版本，2026-08-16 #150 起 —— 别在
+  workflow 里换回 `@stable`，那会覆盖钉版，重新制造「本地绿 CI 红」的漂移）。
+
+本地判不了的三块，按相关性扫一眼而不是跑更多命令：
+
+- `#[cfg(target_os = "windows")]` 分支 macOS 编译器看不见 —— 动了 Windows
+  特定代码才需要留意，那是 `windows-build.yml` 那条腿兜的。
+- WSL2 契约 job 只测 `config` 原子写一条 —— 动到它才相关。
+- `Cargo.lock` / 依赖升级可能改行为（dependabot 的红全在这类），闸照跑、
+  结论保守点。
+
+**别拿打包当预检**：上一段说过检查面不同，方向反了 —— 打包留给发版前那次。
+
 ### 合并到远程 main：走 PR，且要过线上 4 个必需检查
 
 改动要进 `main` 一律走 PR（`gh pr create`），不要直接 push 到 `main`。
