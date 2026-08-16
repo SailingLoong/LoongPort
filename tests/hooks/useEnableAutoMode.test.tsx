@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useEnableAutoMode } from "@/lib/query/autoMode";
+import { useDisableAutoMode, useEnableAutoMode } from "@/lib/query/autoMode";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 // 编排链路是 useProxyStatus → proxyApi/autoModeApi → invoke，在 invoke 层 mock
@@ -139,5 +139,65 @@ describe("useEnableAutoMode", () => {
     expect(sequence).not.toContain("set_proxy_takeover_for_app");
     expect(sequence).not.toContain("set_auto_mode_enabled");
     await waitFor(() => expect(result.current.isError).toBe(true));
+  });
+
+  it("关态编排：关省心模式后连该 app 的接管一并收回", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "get_proxy_status":
+          return { running: true };
+        case "get_proxy_takeover_status":
+          return {
+            claude: false,
+            codex: true, // codex 正被接管
+            gemini: false,
+            grokbuild: false,
+            opencode: false,
+            openclaw: false,
+          };
+        default:
+          return {};
+      }
+    });
+
+    const { result } = renderHook(() => useDisableAutoMode(), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ appType: "codex" });
+    });
+
+    const sequence = orchestration();
+    expect(sequence).toEqual([
+      "set_auto_mode_enabled",
+      "set_proxy_takeover_for_app",
+    ]);
+    expect(invoke).toHaveBeenCalledWith("set_auto_mode_enabled", {
+      appType: "codex",
+      enabled: false,
+    });
+    expect(invoke).toHaveBeenCalledWith("set_proxy_takeover_for_app", {
+      appType: "codex",
+      enabled: false,
+    });
+  });
+
+  it("关态编排：该 app 未被接管时不再多余调收回", async () => {
+    invoke.mockImplementation(async () => ({
+      claude: false,
+      codex: false,
+      gemini: false,
+      grokbuild: false,
+      opencode: false,
+      openclaw: false,
+    }));
+
+    const { result } = renderHook(() => useDisableAutoMode(), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ appType: "codex" });
+    });
+
+    const sequence = orchestration();
+    expect(sequence).toEqual(["set_auto_mode_enabled"]);
   });
 });

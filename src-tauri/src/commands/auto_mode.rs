@@ -22,6 +22,9 @@ pub struct AutoModeStatus {
     pub model: Option<String>,
     /// 可选模型清单（该应用全部托管档位模型目录的并集；空 = 没有目录）。
     pub available_models: Vec<String>,
+    /// 有没有可用的托管档位（与 [`set_auto_mode_enabled`] 的开启判据同源）。
+    /// 总开关据此只对有档位的 app 生效，前端也用它把无档位卡的开关灰掉。
+    pub has_candidates: bool,
 }
 
 fn require_auto_mode_app(app_type: &str) -> Result<(), String> {
@@ -31,6 +34,15 @@ fn require_auto_mode_app(app_type: &str) -> Result<(), String> {
         return Err(format!("{} 不支持自动模式", app.as_str()));
     }
     Ok(())
+}
+
+/// 有没有可用的托管档位。与 `set_auto_mode_enabled` 里的开启判据同一份实现
+/// （`rank_managed_tier_candidates`），别各写一个判据 —— 分叉的结局是
+/// 「状态说能开、开启却报错」。
+fn has_managed_candidates(db: &crate::store::AppState, app_type: &str) -> bool {
+    auto_strategy::rank_managed_tier_candidates(&db.db, app_type, true)
+        .map(|ranked| ranked.is_some_and(|candidates| !candidates.is_empty()))
+        .unwrap_or(false)
 }
 
 /// 读取某应用的自动模式状态
@@ -49,6 +61,7 @@ pub async fn get_auto_mode_status(
         strategy: auto_strategy::get_strategy(&state.db).as_str().to_string(),
         model: auto_strategy::get_model_pref(&state.db, &app_type),
         available_models: auto_strategy::auto_mode_models(&providers),
+        has_candidates: has_managed_candidates(&state, &app_type),
     })
 }
 

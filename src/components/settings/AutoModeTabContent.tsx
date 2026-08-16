@@ -1,30 +1,23 @@
 /**
- * 「自动模式」设置页：用户只管 app 和模型，系统按全局策略（价格最低/响应
+ * 「省心模式」设置页：用户只管 app 和模型，系统按全局策略（价格最低/响应
  * 最快）从托管档位里自动挑最合适的（Beta）。
  *
- * ## 为什么从路由 tab 迁出来
+ * ## 布局语义
  *
- * 原先它藏在 设置→路由→「自动故障转移」折叠项→app 子标签 三层之下，且开关
- * 被「路由运行 + 接管」前置禁用成灰态 —— 用户找不到（2026-08-16 实反馈）。
- * 自动模式是**产品**，路由/接管/熔断是它的**基础设施**，层级应该反过来：
- * 这里是主入口，底层设置收在「高级路由」tab（过渡形态，最终并入高级 tab）。
- *
- * ## 一键开启
- *
- * 开关不再因前置未满足而变灰：点击时若路由未运行/未接管，弹一次性授权后
- * 由 [`useEnableAutoMode`] 顺带开启（复用既有命令，后端零新增编排）。
- *
- * ## 组件去向说明
- *
- * 故障转移队列（FailoverQueueManager）与熔断/超时（AutoFailoverConfigPanel）
- * 从原路由 tab 随迁为每张卡片的「高级」折叠 —— 自动模式优先于队列，
- * 两者是同一 app 的两档自动化，放一起才说得清。
+ * - **总开关**在页头：一次开/关全部有托管档位的 app；逐 app 的卡片开关仍是
+ *   细粒度入口。主入口只在设置页 —— 顶栏开关默认不展示（生效时才出现，
+ *   只做随时关上）。
+ * - **关闭即收回路由**：关省心模式（无论总开关还是单卡）默认把该 app 的
+ *   路由接管一并关掉（`useDisableAutoMode`，与开启编排对称）。
+ * - **自动故障转移是统一入口**（本页底部一行，作用于全部 app）：原先每个
+ *   app 的队列里各一个开关，重复且易漏；队列管理本身仍按 app 收在各卡
+ *   「高级」折叠里。
  */
 
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
-import { Sparkles, Loader2, ShieldAlert } from "lucide-react";
+import { Sparkles, Loader2, ShieldAlert, Zap } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
@@ -53,11 +46,15 @@ import {
 } from "@/components/proxy/autoModeConfirm";
 import {
   useAutoModeStatus,
+  useDisableAutoMode,
   useEnableAutoMode,
   useSetAutoModeEnabled,
+  useSetAutoModeAll,
   useSetAutoModeModel,
   useSetAutoModeStrategy,
+  useSetFailoverAll,
 } from "@/lib/query/autoMode";
+import { useAutoFailoverEnabled } from "@/lib/query/failover";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import {
@@ -81,13 +78,48 @@ export function AutoModeTabContent({
 }: AutoModeTabContentProps) {
   const { t } = useTranslation();
   const setStrategy = useSetAutoModeStrategy();
+  const setAll = useSetAutoModeAll();
+  const setFailoverAll = useSetFailoverAll();
   const [showFailoverConfirm, setShowFailoverConfirm] = useState(false);
 
   // strategy 是全局的，任一 app 的状态里都带同一份 —— 借第一个 app 当读取锚点。
-  const { data: anchorStatus } = useAutoModeStatus(PROXY_APP_IDS[0]);
+  const anchorStatus = useAutoModeStatus(PROXY_APP_IDS[0]).data;
   const strategy = anchorStatus?.strategy ?? "cheapest";
 
-  const handleFailoverToggleChange = (checked: boolean) => {
+  // 总开关的状态语义：全部「有托管档位」的 app 都开着 = 开。各 app 状态由
+  // 卡片各自订阅（同 query key 共享缓存），这里拿全集算总开关的显示值。
+  const statuses = PROXY_APP_IDS.map((appType) => ({
+    appType,
+    status: useAutoModeStatus(appType).data,
+  }));
+  const eligible = statuses.filter(({ status }) => status?.hasCandidates);
+  const masterChecked =
+    eligible.length > 0 &&
+    eligible.every(({ status }) => status?.enabled ?? false);
+
+  // 统一故障转移开关的状态：全部 app 都开 = 开。
+  const failoverStates = PROXY_APP_IDS.map(
+    (appType) => useAutoFailoverEnabled(appType).data ?? false,
+  );
+  const failoverChecked = failoverStates.every(Boolean);
+
+  const handleMasterChange = (checked: boolean) => {
+    if (checked) {
+      setAll.mutate({
+        apps: eligible.map(({ appType }) => appType),
+        enable: true,
+      });
+    } else {
+      setAll.mutate({
+        apps: statuses
+          .filter(({ status }) => status?.enabled)
+          .map(({ appType }) => appType),
+        enable: false,
+      });
+    }
+  };
+
+  const handleDisplayToggleChange = (checked: boolean) => {
     if (checked && !settings?.failoverConfirmed) {
       setShowFailoverConfirm(true);
     } else {
@@ -107,26 +139,36 @@ export function AutoModeTabContent({
       transition={{ duration: 0.3 }}
       className="space-y-4"
     >
-      {/* 页头：定位说明 + Beta + 全局策略。策略全局一份，不按 app 重复。 */}
+      {/* 页头：定位说明 + Beta + 总开关 + 全局策略（策略全局一份，不按 app 重复）。 */}
       <div className="rounded-xl glass-card p-6 space-y-4">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background ring-1 ring-border">
             <Sparkles className="h-5 w-5 text-emerald-500" />
           </div>
-          <div className="space-y-1">
+          <div className="space-y-1 flex-1">
             <div className="flex items-center gap-2">
               <h3 className="text-base font-semibold">
-                {t("autoMode.title", "自动模式")}
+                {t("autoMode.title", "省心模式")}
               </h3>
               <Badge variant="secondary">{t("autoMode.beta", "Beta")}</Badge>
             </div>
             <p className="text-sm text-muted-foreground">
               {t(
                 "autoMode.tabDescription",
-                "你只管选 app 和模型，系统按策略从托管档位里自动挑最合适的：同一会话保持当前档位（保护提示词缓存），失败自动切换下一档。开启时会顺带启用本地路由并接管该 CLI 的配置。",
+                "你只管选 app 和模型，系统按策略从托管档位里自动挑最合适的：同一会话保持当前档位（保护提示词缓存），失败自动切换下一档。档位倍率与模型单价以站点实时数据验证，所选模型均经「模型验真」确认真实可用。开启时会顺带启用本地路由并接管该 CLI 的配置，关闭时一并恢复。",
               )}
             </p>
           </div>
+          {setAll.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : (
+            <Switch
+              checked={masterChecked}
+              onCheckedChange={handleMasterChange}
+              disabled={setAll.isPending || eligible.length === 0}
+              aria-label={t("autoMode.masterLabel", "省心模式总开关")}
+            />
+          )}
         </div>
 
         <div className="space-y-2">
@@ -179,7 +221,38 @@ export function AutoModeTabContent({
         <AutoModeAppCard key={appType} appType={appType} />
       ))}
 
-      {/* 主页面故障转移开关：随故障转移设置一起从原路由 tab 迁来。 */}
+      {/* 统一的自动故障转移开关：作用于全部 app（队列管理仍在各卡片「高级」里）。 */}
+      <div className="rounded-xl glass-card p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-orange-500" />
+              <span className="text-sm font-medium">
+                {t("proxy.failover.autoSwitch", "自动故障转移")}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "proxy.failover.autoSwitchDescription",
+                "开启后各应用立即切换到各自队列的 P1，请求失败时自动切换队列中的下一个供应商；对所有应用统一生效",
+              )}
+            </p>
+          </div>
+          <Switch
+            checked={failoverChecked}
+            onCheckedChange={(checked) =>
+              setFailoverAll.mutate({
+                apps: [...PROXY_APP_IDS],
+                enabled: checked,
+              })
+            }
+            disabled={setFailoverAll.isPending}
+            aria-label={t("proxy.failover.autoSwitch", "自动故障转移")}
+          />
+        </div>
+      </div>
+
+      {/* 主页面故障转移开关：控制顶栏 FailoverToggle 是否显示。 */}
       <div className="rounded-xl glass-card p-6">
         <ToggleRow
           icon={<ShieldAlert className="h-4 w-4 text-orange-500" />}
@@ -188,7 +261,7 @@ export function AutoModeTabContent({
             "settings.advanced.proxy.enableFailoverToggleDescription",
           )}
           checked={settings?.enableFailoverToggle ?? false}
-          onCheckedChange={handleFailoverToggleChange}
+          onCheckedChange={handleDisplayToggleChange}
         />
       </div>
 
@@ -211,15 +284,18 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
   const { isRunning, takeoverStatus } = useProxyStatus();
   const setEnabled = useSetAutoModeEnabled();
   const enableFlow = useEnableAutoMode();
+  const disableFlow = useDisableAutoMode();
   const setModel = useSetAutoModeModel();
   const [showConfirm, setShowConfirm] = useState(false);
 
   const isEnabled = status?.enabled ?? false;
+  const hasCandidates = status?.hasCandidates ?? false;
   const model = status?.model ?? null;
   const availableModels = status?.availableModels ?? [];
-  // 自动模式下队列/熔断只作兜底展示，仍要求接管态（与迁移前同判据）。
+  // 队列/熔断只作兜底展示，仍要求接管态（与迁移前同判据）。
   const advancedDisabled = !isRunning || !(takeoverStatus?.[appType] ?? false);
-  const isPending = setEnabled.isPending || enableFlow.isPending;
+  const isPending =
+    setEnabled.isPending || enableFlow.isPending || disableFlow.isPending;
 
   const prerequisitesMet = !advancedDisabled;
 
@@ -233,7 +309,8 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
 
   const handleToggle = (checked: boolean) => {
     if (!checked) {
-      setEnabled.mutate({ appType, enabled: false });
+      // 关闭默认连路由接管一起收回（开启编排的对称面）。
+      disableFlow.mutate({ appType });
       return;
     }
     if (hasConfirmedAutoMode()) {
@@ -278,10 +355,15 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              {t(
-                "autoMode.description",
-                "系统从托管档位里自动挑最合适的，当前档位会话中保持不变",
-              )}
+              {hasCandidates
+                ? t(
+                    "autoMode.description",
+                    "系统从托管档位里自动挑最合适的，当前档位会话中保持不变",
+                  )
+                : t(
+                    "autoMode.noCandidatesHint",
+                    "没有可用的托管档位 —— 先在中转站区登录并获取档位",
+                  )}
             </p>
           </div>
         </div>
@@ -291,8 +373,8 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
           <Switch
             checked={isEnabled}
             onCheckedChange={handleToggle}
-            disabled={isPending}
-            aria-label={t("autoMode.title", "自动模式")}
+            disabled={isPending || !hasCandidates}
+            aria-label={t("autoMode.title", "省心模式")}
           />
         )}
       </div>
@@ -341,7 +423,7 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
           <AlertDescription className="text-xs">
             {t(
               "autoMode.activeHint",
-              "自动模式生效中，优先于故障转移队列。同一会话内保持当前档位不切换；当前档位持续失败时按策略顺序切换（切换会丢失提示词缓存）。",
+              "省心模式生效中，优先于故障转移队列。同一会话内保持当前档位不切换；当前档位持续失败时按策略顺序切换（切换会丢失提示词缓存）。档位价格经站点倍率验证，模型经「模型验真」确认。",
             )}
           </AlertDescription>
         </Alert>
@@ -381,10 +463,10 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
       <ConfirmDialog
         isOpen={showConfirm}
         variant="info"
-        title={t("autoMode.confirm.title", "开启自动模式")}
+        title={t("autoMode.confirm.title", "开启省心模式")}
         message={t(
           "autoMode.confirm.message",
-          "系统将按所选策略自动挑选并切换托管档位：同一会话内保持当前档位不变（避免丢失提示词缓存），当前档位故障或闲置后才切换到更合适的一档。若本地路由未开启，将一并开启并接管该 CLI 的配置。确定开启？",
+          "系统将按所选策略自动挑选并切换托管档位：同一会话内保持当前档位不变（避免丢失提示词缓存），当前档位故障或闲置后才切换到更合适的一档。若本地路由未开启，将一并开启并接管该 CLI 的配置（关闭省心模式时会一并恢复）。确定开启？",
         )}
         confirmText={t("autoMode.confirm.confirm", "开启")}
         onConfirm={handleConfirm}
