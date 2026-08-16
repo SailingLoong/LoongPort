@@ -44,15 +44,16 @@ pub(crate) fn effective_star_reward() -> Option<crate::relay::remote_config::Sta
         .filter(|reward| !reward.promo_code.trim().is_empty())
 }
 
-/// 取当前 star 数。4s 超时、失败重试一次 —— 弹窗闸门与「我已点赞」校验共用：
-/// 两次机会足够区分「抖了一下」和「这个网络到不了 GitHub」，再多重试只是
-/// 让用户干等。
+/// 取当前 star 数。10s 超时、失败重试一次 —— 弹窗闸门与「我已点赞」校验共用。
+/// 10s 是被实测校准的：国内直连 api.github.com 常态就要 5s+（2026-08-16 本机
+/// 实测 5.2s，4s 超时把「慢但通」误判成「到不了」，新人引导弹窗整条被掐）。
+/// 真到不了的网络两次也在 20s 内收敛，闸门跑在后台，不拖任何人干等。
 async fn fetch_star_count() -> Result<u64, String> {
     let url = format!("https://api.github.com/repos/{}", repo_api_slug());
     let mut last_error = String::new();
     for _ in 0..2 {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(4))
+            .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|error| error.to_string())?;
         match client

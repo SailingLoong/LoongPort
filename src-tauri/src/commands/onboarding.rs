@@ -82,6 +82,7 @@ pub async fn onboarding_prompt_star_reward(
     let Some(offer) = star_reward::build_offer().await else {
         // 拉完仍没有 offer：这次压根没弹成，不置位（否则一次网络抖动就把
         // 引导永久吃掉），下次启动重试。
+        log::info!("新人引导邀请未发出（无 offer：没网 / 活动下线 / 基线取不到），下次启动重试");
         return Ok(());
     };
     mark_register_prompted();
