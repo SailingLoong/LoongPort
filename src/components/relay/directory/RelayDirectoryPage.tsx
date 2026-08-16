@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  Plus,
   RefreshCw,
   Search,
 } from "lucide-react";
@@ -66,7 +67,6 @@ export function RelayDirectoryPage({
   const [authenticatingHost, setAuthenticatingHost] = useState<string | null>(
     null,
   );
-  const [customSite, setCustomSite] = useState("");
   const authenticationInProgress = useRef(false);
 
   const directoryQuery = useQuery({
@@ -251,6 +251,18 @@ export function RelayDirectoryPage({
             onChange={(event) =>
               dispatch({ type: "search", search: event.target.value })
             }
+            onKeyDown={(event) => {
+              // 搜不到时回车 = 把搜索词作为站点直连导入（与虚框按钮同一动作）。
+              if (
+                event.key === "Enter" &&
+                paged.items.length === 0 &&
+                view.search.trim() &&
+                !authenticationInProgress.current
+              ) {
+                const site = view.search.trim();
+                void authenticate(site, site, "manual");
+              }
+            }}
             placeholder={t("loongport.directory.searchPlaceholder")}
             className="pl-9"
           />
@@ -283,6 +295,34 @@ export function RelayDirectoryPage({
               </AlertDescription>
             </Alert>
           </div>
+        ) : paged.items.length === 0 && view.search.trim() ? (
+          // 搜不到就地转添加：白名单没有的站，搜索词就是要连的地址 —— 整块
+          // 虚框是碰撞框（与区块空态同一个交互语言），回车同效。
+          <button
+            type="button"
+            disabled={authenticatingHost !== null}
+            onClick={() => {
+              const site = view.search.trim();
+              void authenticate(site, site, "manual");
+            }}
+            className="m-4 flex w-[calc(100%-2rem)] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground transition-colors hover:border-blue-400/60 hover:bg-muted/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <span>
+              {t("loongport.directory.noMatch", {
+                query: view.search.trim(),
+              })}
+            </span>
+            <span className="inline-flex items-center gap-1.5 font-medium text-blue-600 dark:text-blue-400">
+              {authenticatingHost === view.search.trim() ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Plus className="h-3.5 w-3.5" />
+              )}
+              {t("loongport.directory.addAsSite", {
+                query: view.search.trim(),
+              })}
+            </span>
+          </button>
         ) : paged.items.length === 0 ? (
           <div className="flex h-48 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
             <span>{t("loongport.directory.empty")}</span>
@@ -337,35 +377,6 @@ export function RelayDirectoryPage({
             <ChevronRight className="h-3.5 w-3.5" />
           </Button>
         </div>
-      </div>
-
-      {/* 白名单里没有的站，用户自己填域名直连（Manual 来源，保守打开规则；
-          探针不通 / 协议不识别以可读 toast 报错）。 */}
-      <div className="flex items-center gap-2 border-t border-border-default pt-3">
-        <Input
-          value={customSite}
-          disabled={authenticatingHost !== null}
-          onChange={(event) => setCustomSite(event.target.value)}
-          placeholder={t("loongport.directory.customSitePlaceholder")}
-          onKeyDown={(event) => {
-            if (
-              event.key === "Enter" &&
-              customSite.trim() &&
-              !authenticationInProgress.current
-            ) {
-              void authenticate(customSite, customSite.trim(), "manual");
-            }
-          }}
-        />
-        <Button
-          variant="outline"
-          disabled={!customSite.trim() || authenticatingHost !== null}
-          onClick={() =>
-            void authenticate(customSite, customSite.trim(), "manual")
-          }
-        >
-          {t("loongport.directory.actions.useOtherSite")}
-        </Button>
       </div>
     </div>
   );

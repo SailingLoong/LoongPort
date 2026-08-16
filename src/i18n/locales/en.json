@@ -3134,7 +3134,6 @@
       "other": "Other"
     },
     "directory": {
-      "customSitePlaceholder": "Can't find it? Enter another relay URL",
       "title": "Relay directory",
       "description": "Choose a site using VeriDrop's public test results. It is added to LoongPort only after registration or sign-in succeeds.",
       "tabs": {
@@ -3162,7 +3161,6 @@
         "supplementalRank": "Added"
       },
       "actions": {
-        "useOtherSite": "Use another site",
         "authenticate": "Register or sign in",
         "autoAddHint": "Added automatically when complete",
         "history": "Full history",
@@ -3173,7 +3171,9 @@
         "range": "{{from}}–{{to}} / {{total}}",
         "previous": "Previous page",
         "next": "Next page"
-      }
+      },
+      "noMatch": "No relay matches “{{query}}”",
+      "addAsSite": "Add {{query}} as a relay"
     },
     "officialApi": {
       "title": "Official APIs",
