@@ -3300,6 +3300,7 @@
       "sponsorsLabel": "推荐中转站",
       "sponsorAddAnother": "已有 {{count}} 个账号 · 再添加一个",
       "unsupportedSite": "无法识别该站点支持的中转协议，请确认地址正确并完成网页验证后重试。",
+      "notInDirectory": "该站点不在当前支持目录中，请用页面底部的「使用其他站点」输入框手动添加。",
       "protocolConflict": "该站点同时返回多种中转协议，无法安全连接。请联系站点管理员检查配置。",
       "transportError": "暂时无法连接该站点，请检查网络和地址后重试。",
       "importFailed": "添加中转站失败，请稍后重试。"

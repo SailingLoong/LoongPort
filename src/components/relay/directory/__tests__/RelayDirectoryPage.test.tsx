@@ -503,6 +503,7 @@ describe("RelayDirectoryPage", () => {
 
   it.each([
     ["unsupported_site", "loongport.addSite.unsupportedSite"],
+    ["not_in_directory", "loongport.addSite.notInDirectory"],
     ["protocol_conflict", "loongport.addSite.protocolConflict"],
   ])("maps %s to an actionable message", async (kind, key) => {
     importDirectorySite.mockRejectedValue({ kind, message: kind });
