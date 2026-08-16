@@ -125,6 +125,10 @@ rquickjs = { version = "0.12", features = ["bindgen"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSColor"] }
 
+# 依赖不生成调试信息（本 crate 仍保留），避免 target/debug 膨胀到几十 G
+[profile.dev.package."*"]
+debug = false
+
 # Optimize release binary size to help reduce AppImage footprint
 [profile.release]
 codegen-units = 1
