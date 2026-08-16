@@ -3,7 +3,14 @@
 //! ## 快照从哪来
 //!
 //! 写入挂在 `relay_balance_impl` 成功解析余额之后（前端行级刷新、充值关窗都会触发），
-//! 本模块只负责表 + DAO；对账窗口计算是后续任务的事。
+//! 本模块只负责表 + DAO；对账窗口计算见下方「对账报告」一节。
+//!
+//! ## 只记变化：余额没变的观测不落行
+//!
+//! 这张表的唯一消费者是对账窗口（相邻快照配对）。余额与该站最新一条相同时再落一条，
+//! 只会把窗口切碎成「估算 0 + 变动 0」的零信息行 —— 所以写入侧就去重（见
+//! [`Database::record_balance_snapshot`]），**相邻快照必然相异**是本表的结构不变量。
+//! v15 之前落下的重复行由 LoongPort 迁移 v14 → v15 清洗。
 //!
 //! ## `created_at` 的单位：Unix 秒
 //!
@@ -59,22 +66,31 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
 }
 
 impl Database {
-    /// 记一条余额快照，返回行 id。`created_at` 取当前 Unix 秒。
-    pub fn insert_balance_snapshot(
+    /// 记一条余额快照，返回行 id；**余额与该站最新一条相同则不落行**，返回 `None`。
+    ///
+    /// 「只在有变时落行」是这张表的结构不变量（见模块文档），比对 + 落行收在
+    /// 一条 `INSERT … SELECT … WHERE` 里原子完成。`created_at` 取当前 Unix 秒。
+    pub fn record_balance_snapshot(
         &self,
         relay_id: i64,
         balance_usd: f64,
         source: &str,
-    ) -> Result<i64, AppError> {
+    ) -> Result<Option<i64>, AppError> {
         let conn = lock_conn!(self.conn);
         let created_at = chrono::Utc::now().timestamp();
+        // 标量子查询取该站最新一条的余额（表空得 NULL）；`IS NOT` 是 NULL 安全的
+        // 不等比较 —— 表空时 `NULL IS NOT ?2` 为真，首条照落。
         conn.execute(
             "INSERT INTO relay_balance_snapshots (relay_id, balance_usd, source, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
+             SELECT ?1, ?2, ?3, ?4
+             WHERE (SELECT balance_usd FROM relay_balance_snapshots
+                    WHERE relay_id = ?1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1) IS NOT ?2",
             params![relay_id, balance_usd, source, created_at],
         )
         .map_err(|e| AppError::Database(format!("写入余额快照失败: {e}")))?;
-        Ok(conn.last_insert_rowid())
+        Ok((conn.changes() > 0).then(|| conn.last_insert_rowid()))
     }
 
     /// 列出某个中转站的快照，按时间升序（对账窗口要按先后配对）。
@@ -144,7 +160,7 @@ pub fn capture_balance_snapshot(db: &Database, relay_id: i64, usage: &UsageResul
     let Some(balance_usd) = resolved_usd_balance(usage) else {
         return;
     };
-    if let Err(error) = db.insert_balance_snapshot(relay_id, balance_usd, "balance_query") {
+    if let Err(error) = db.record_balance_snapshot(relay_id, balance_usd, "balance_query") {
         log::warn!("写入余额快照失败（不影响余额显示，对账页会显示快照不足）: {error}");
     }
 }
@@ -173,7 +189,7 @@ fn resolved_usd_balance(usage: &UsageResult) -> Option<f64> {
 /// 太老的比值没有判别力，只会稀释基线。
 const LOOKBACK_SECS: i64 = 30 * 24 * 3600;
 
-/// 返回窗口数上限（新 → 旧）。正常频率（每次余额刷新一枚快照）远够不到，
+/// 返回窗口数上限（新 → 旧）。正常频率（每次余额变化一枚快照）远够不到，
 /// 这是防「高频刷新把 payload 撑爆」的安全阀。基线仍按回看期内全部有效窗口算。
 const MAX_WINDOWS: usize = 50;
 
@@ -219,7 +235,7 @@ pub struct ReconciliationWindow {
 
 /// 窗口标记。判据是业务事实，由后端定（前端只展示）：
 ///
-/// - [`WindowFlag::SkippedTopUp`]：扣减 <= 0（充值/返利/赠送），不进比值、不进基线。
+/// - [`WindowFlag::SkippedTopUp`]：扣减 < 0，即余额增加（充值/返利/赠送），不进比值、不进基线。
 /// - [`WindowFlag::InsufficientData`]：没有可算的比值（扣减太小或窗口内无估算数据）。
 /// - [`WindowFlag::Suspicious`]：`ratio <= baseline × 0.5` 且基线存在 ——
 ///   实际扣减持续达到预期的 2 倍以上。
@@ -343,7 +359,9 @@ fn median_baseline(windows: &[ReconciliationWindow]) -> Option<f64> {
 /// 基线定完之后给窗口打标（[`WindowFlag`] 的判据见枚举文档）。
 fn classify(window: &ReconciliationWindow, baseline_ratio: Option<f64>) -> WindowFlag {
     let deduction = window.start_balance_usd - window.end_balance_usd;
-    if deduction <= 0.0 {
+    // 余额没变（deduction == 0）不算充值 —— 落到 InsufficientData：没有可算的比值。
+    // 快照写入侧去重后这种窗口不该出现，但判据本身要站得住。
+    if deduction < 0.0 {
         WindowFlag::SkippedTopUp
     } else if window.ratio.is_none() {
         WindowFlag::InsufficientData
@@ -380,11 +398,12 @@ mod tests {
     }
 
     #[test]
-    fn insert_then_read_roundtrips_every_field() {
+    fn record_then_read_roundtrips_every_field() {
         let db = db();
         let id = db
-            .insert_balance_snapshot(7, 12.5, "balance_query")
-            .expect("插入");
+            .record_balance_snapshot(7, 12.5, "balance_query")
+            .expect("记录")
+            .expect("表空，首条必须落行");
 
         let rows = db.list_balance_snapshots(7, None).expect("读取");
         assert_eq!(rows.len(), 1);
@@ -411,12 +430,15 @@ mod tests {
     #[test]
     fn snapshots_are_filtered_by_relay() {
         let db = db();
-        db.insert_balance_snapshot(1, 10.0, "balance_query")
-            .expect("插入");
-        db.insert_balance_snapshot(2, 20.0, "balance_query")
-            .expect("插入");
-        db.insert_balance_snapshot(1, 30.0, "balance_query")
-            .expect("插入");
+        db.record_balance_snapshot(1, 10.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
+        db.record_balance_snapshot(2, 20.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
+        db.record_balance_snapshot(1, 30.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
 
         let rows = db.list_balance_snapshots(1, None).expect("读取");
         assert_eq!(
@@ -430,14 +452,17 @@ mod tests {
     fn snapshots_are_ordered_by_created_at_ascending() {
         let db = db();
         let a = db
-            .insert_balance_snapshot(3, 1.0, "balance_query")
-            .expect("插入");
+            .record_balance_snapshot(3, 1.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
         let b = db
-            .insert_balance_snapshot(3, 2.0, "balance_query")
-            .expect("插入");
+            .record_balance_snapshot(3, 2.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
         let c = db
-            .insert_balance_snapshot(3, 4.0, "balance_query")
-            .expect("插入");
+            .record_balance_snapshot(3, 4.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
         // 故意让插入顺序与时间顺序相反。
         set_created_at(&db, a, 300);
         set_created_at(&db, b, 100);
@@ -455,14 +480,17 @@ mod tests {
     fn since_secs_keeps_snapshots_at_or_after_the_boundary() {
         let db = db();
         let a = db
-            .insert_balance_snapshot(4, 1.0, "balance_query")
-            .expect("插入");
+            .record_balance_snapshot(4, 1.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
         let b = db
-            .insert_balance_snapshot(4, 2.0, "balance_query")
-            .expect("插入");
+            .record_balance_snapshot(4, 2.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
         let c = db
-            .insert_balance_snapshot(4, 4.0, "balance_query")
-            .expect("插入");
+            .record_balance_snapshot(4, 4.0, "balance_query")
+            .expect("记录")
+            .expect("落行");
         set_created_at(&db, a, 100);
         set_created_at(&db, b, 200);
         set_created_at(&db, c, 300);
@@ -480,6 +508,50 @@ mod tests {
         let db = db();
         let conn = db.conn.lock().expect("拿连接");
         create_table(&conn).expect("再建一次不该报错");
+    }
+
+    #[test]
+    fn record_skips_unchanged_balance() {
+        let db = db();
+        assert!(
+            db.record_balance_snapshot(7, 12.5, "balance_query")
+                .expect("记录")
+                .is_some(),
+            "该站还没有快照，首条必须落"
+        );
+        assert!(
+            db.record_balance_snapshot(7, 12.5, "balance_query")
+                .expect("记录")
+                .is_none(),
+            "余额与最新一条相同 ⇒ 零信息观测，不落行"
+        );
+        assert!(
+            db.record_balance_snapshot(7, 12.0, "balance_query")
+                .expect("记录")
+                .is_some(),
+            "余额有变必须落行"
+        );
+        assert!(
+            db.record_balance_snapshot(7, 12.5, "balance_query")
+                .expect("记录")
+                .is_some(),
+            "回到见过的旧值也算有变 —— 只与最新一条比"
+        );
+        // 不同站各自独立：relay 8 的首条与 relay 7 的最新值无关。
+        assert!(db
+            .record_balance_snapshot(8, 12.5, "balance_query")
+            .expect("记录")
+            .is_some());
+
+        assert_eq!(
+            db.list_balance_snapshots(7, None)
+                .expect("读取")
+                .iter()
+                .map(|r| r.balance_usd)
+                .collect::<Vec<_>>(),
+            vec![12.5, 12.0, 12.5]
+        );
+        assert_eq!(db.list_balance_snapshots(8, None).expect("读取").len(), 1);
     }
 
     // ------------------------------------------------------------------
@@ -582,11 +654,13 @@ mod tests {
         vec![(OWNED_PID.to_string(), "codex".to_string())]
     }
 
-    /// 插一条快照并把 `created_at` 改成指定值（测试没法等真实时钟拉开差距）。
+    /// 记一条快照并把 `created_at` 改成指定值（测试没法等真实时钟拉开差距）。
+    /// 各测试里相邻余额都相异，去重不会拦。
     fn snapshot_at(db: &Database, relay_id: i64, balance_usd: f64, created_at: i64) {
         let id = db
-            .insert_balance_snapshot(relay_id, balance_usd, "balance_query")
-            .expect("插快照");
+            .record_balance_snapshot(relay_id, balance_usd, "balance_query")
+            .expect("记快照")
+            .expect("相邻余额相异，必须落行");
         set_created_at(db, id, created_at);
     }
 
@@ -705,6 +779,24 @@ mod tests {
         let tiny = &report.windows[2]; // [100,200)
         assert_eq!(tiny.ratio, None);
         assert_eq!(tiny.flag, WindowFlag::InsufficientData);
+    }
+
+    #[test]
+    fn zero_delta_window_is_not_a_topup() {
+        // 写入侧去重后 delta == 0 的窗口不该再出现；但 classify 自身的语义要钉住：
+        // 余额没变不是充值 —— 0 落进 InsufficientData（前端无徽标），而不是 SkippedTopUp。
+        let window = ReconciliationWindow {
+            start_secs: 100,
+            end_secs: 200,
+            start_balance_usd: 10.0,
+            end_balance_usd: 10.0,
+            balance_delta_usd: 0.0,
+            estimated_cost_usd: 0.0,
+            ratio: None,
+            flag: WindowFlag::Normal,
+        };
+        assert_eq!(classify(&window, None), WindowFlag::InsufficientData);
+        assert_eq!(classify(&window, Some(0.5)), WindowFlag::InsufficientData);
     }
 
     #[test]

@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 14;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 15;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -240,6 +240,14 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 crate::relay::reconcile::create_table(conn)?;
                 set_version(conn, 14)?;
             }
+            // v14 → v15：清洗余额快照的存量重复行。写入侧已改成「只在余额有变时
+            // 落行」（`record_balance_snapshot`），这一步把 v14 及之前攒下的
+            // 「与上一条余额相同」的行删掉 —— 它们只会把对账窗口切成零信息行。
+            14 => {
+                log::info!("LoongPort 数据迁移 v14 → v15（余额快照去重：删余额未变的相邻行）");
+                dedupe_balance_snapshots(conn)?;
+                set_version(conn, 15)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -249,6 +257,36 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    Ok(())
+}
+
+/// 删除 `relay_balance_snapshots` 里「与同站上一条余额相同」的行 —— 每个等值
+/// 连续段只留最早一条，删完后相邻行必然相异（与 [`crate::relay::reconcile`]
+/// 写入侧的去重口径一致）。
+///
+/// 一趟 `LAG` 就够：被删的行都等于其直接前驱，按序传递 ⇒ 段内全等，留下的
+/// 最早一条与下一段的值必不同。
+fn dedupe_balance_snapshots(conn: &Connection) -> Result<(), AppError> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM relay_balance_snapshots
+             WHERE id IN (
+                 SELECT id FROM (
+                     SELECT id,
+                            LAG(balance_usd) OVER (
+                                PARTITION BY relay_id
+                                ORDER BY created_at, id
+                            ) AS prev_balance
+                     FROM relay_balance_snapshots
+                 )
+                 WHERE prev_balance IS NOT NULL AND prev_balance = balance_usd
+             )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("清洗余额快照重复行失败: {e}")))?;
+    if deleted > 0 {
+        log::info!("余额快照去重：删除 {deleted} 行零信息快照");
+    }
     Ok(())
 }
 
@@ -858,6 +896,51 @@ mod tests {
             [],
         )
         .expect("迁移后必须可写");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+    }
+
+    /// ⭐ v14→v15 清洗余额快照重复行：与同站上一条余额相同的行删掉、每个等值段留最早
+    /// 一条；余额回到旧值的行（与最新一条不同）必须留下。
+    #[test]
+    fn v14_to_v15_deletes_consecutive_duplicate_balance_snapshots() {
+        let conn = mem();
+        crate::relay::reconcile::create_table(&conn).expect("建快照表");
+        // relay 7：10 → 10（删）→ 8 → 10；relay 8：5 → 5（删）。跨站互不影响。
+        for (relay_id, created_at, balance) in [
+            (7, 100, 10.0),
+            (7, 200, 10.0),
+            (7, 300, 8.0),
+            (7, 400, 10.0),
+            (8, 150, 5.0),
+            (8, 250, 5.0),
+        ] {
+            conn.execute(
+                "INSERT INTO relay_balance_snapshots (relay_id, balance_usd, source, created_at)
+                 VALUES (?1, ?2, 'balance_query', ?3)",
+                rusqlite::params![relay_id, balance, created_at],
+            )
+            .expect("造 v14 存量数据");
+        }
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, 14).expect("设为 v14");
+
+        apply(&conn).expect("迁移到 v15");
+
+        let rows: Vec<(i64, f64)> = conn
+            .prepare(
+                "SELECT relay_id, balance_usd FROM relay_balance_snapshots
+                      ORDER BY relay_id, created_at",
+            )
+            .expect("查表")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("读行")
+            .collect::<rusqlite::Result<_>>()
+            .expect("收集");
+        assert_eq!(
+            rows,
+            vec![(7, 10.0), (7, 8.0), (7, 10.0), (8, 5.0)],
+            "等值段留最早一条；回到旧值（≠最新一条）的行要留"
+        );
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 
