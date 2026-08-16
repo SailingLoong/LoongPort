@@ -34,9 +34,13 @@ fn register_prompt_eligible(state: &AppState) -> Result<bool, crate::error::AppE
         && user_has_no_accounts(state)?)
 }
 
-/// 标志只置位一次：置位后无论弹窗结局如何（领了 / 取消 / 压根没弹成），
-/// 后续启动都不再主动弹。这是有意的不重试 —— 引导过的用户回落到广场页 +
-/// 顶栏红点（未领取时红点常亮，那是他们的「稍后再说」入口）。
+/// 标志只置位一次，且**只在确认拿到 offer、正要发事件时置位**：置位后无论
+/// 弹出去之后的结局如何（领了 / 取消 / 事件发不出去），后续启动都不再主动弹。
+/// 这是有意的不重试 —— 引导过的用户回落到广场页 + 顶栏红点（未领取时红点
+/// 常亮，那是他们的「稍后再说」入口）。
+///
+/// 反面是「压根没拿到 offer」（没网 / 活动下线 / 基线取不到，见命令体）：
+/// 那不算「引导过」，不置位，下次启动还能再试。
 fn mark_register_prompted() {
     let mut settings = crate::settings::get_settings();
     if settings.onboarding_register_prompted.is_none() {
@@ -53,7 +57,8 @@ fn mark_register_prompted() {
 /// → 基线星数取得到（star 邀约的基本盘 —— 取不到连比对都做不了，别让用户
 /// 看到一个随时兑现不了的 offer）。全过才发 [`ONBOARDING_STAR_REWARD_OFFER`]
 /// （payload 含基线），前端拿到即弹；任何一道不过都静默返回，新人引导宁可
-/// 少弹一次。
+/// 少弹一次 —— 但「没弹成」不置位一次性标志，下次启动还能再试（见
+/// [`mark_register_prompted`]）。
 ///
 /// 返回 `()`：弹不弹的判定完全在 Rust，前端不需要返回值分支（广场页总是要
 /// 落的，见 `RelaySection.reloadStatus`）。
@@ -66,11 +71,20 @@ pub async fn onboarding_prompt_star_reward(
     if !eligible {
         return Ok(());
     }
-    mark_register_prompted();
+
+    // 新装机的远端配置缓存要启动 5 秒后才由后台目录任务落盘，而这条命令
+    // 恰恰在最开始的渲染路径上被调 —— 不补这一拉，全新安装的首次引导必然
+    // 赶在空缓存上判「无活动」。幂等：与后台任务写的是同一份缓存。
+    if star_reward::effective_star_reward().is_none() {
+        crate::relay::remote_config::refresh_and_cache().await;
+    }
 
     let Some(offer) = star_reward::build_offer().await else {
+        // 拉完仍没有 offer：这次压根没弹成，不置位（否则一次网络抖动就把
+        // 引导永久吃掉），下次启动重试。
         return Ok(());
     };
+    mark_register_prompted();
     if let Err(error) = app_handle.emit(ONBOARDING_STAR_REWARD_OFFER, offer) {
         // 发不出去只是这次不弹（标志已置位，下次启动不再问）—— 命令本身
         // 不该因此失败，那会让前端把一次正常的引导当成后端故障。

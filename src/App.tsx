@@ -577,12 +577,18 @@ function App() {
     null,
   );
   const [starRewardBusy, setStarRewardBusy] = useState(false);
+  // 已领取是 durable 事实（settings 持久化），事件守卫只认它 —— 不能认
+  // `starRewardActive`：后者在首启时由挂载检查按「当时缓存有没有活动」定值，
+  // 新装机缓存 5 秒后才落盘，挂载时几乎必然是 false，若拿它当守卫会把几秒
+  // 后到来的合法引导事件整个吞掉。
+  const starRewardClaimedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([settingsApi.get(), starRewardApi.configured()])
       .then(([settings, configured]) => {
         if (cancelled) return;
+        starRewardClaimedRef.current = settings.starRewardClaimed === true;
         setStarRewardActive(configured && settings.starRewardClaimed !== true);
       })
       .catch(() => {
@@ -594,9 +600,11 @@ function App() {
   }, []);
 
   // 新人引导的邀请事件（后端已过三道闸：资格 + 配置 + 基线）：拿到即弹。
-  // 已领取的极端情形（红点先领了、引导事件才到）直接忽略。
+  // 已领取的极端情形（红点先领了、引导事件才到）直接忽略。事件本身证明活动
+  // 在线，顺手点亮红点 —— 它到达时挂载检查可能刚在空缓存上判过 false。
   useTauriEvent<StarRewardOffer>(ONBOARDING_STAR_REWARD_OFFER, (payload) => {
-    if (starRewardActive === false) return;
+    if (starRewardClaimedRef.current) return;
+    setStarRewardActive(true);
     setStarRewardOffer(payload);
   });
 
@@ -625,6 +633,7 @@ function App() {
 
   /** 弹窗发码时刻：熄红点（持久化由弹窗自己负责）。 */
   const handleStarRewardClaimed = useCallback(() => {
+    starRewardClaimedRef.current = true;
     setStarRewardActive(false);
   }, []);
 
