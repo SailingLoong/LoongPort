@@ -171,7 +171,7 @@ function renderSection(appId: "codex" | "claude" | "codex-image" | "gemini") {
   const queryClient = createTestQueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
-      <RelaySection appId={appId} onOpenDirectory={vi.fn()} />
+      <RelaySection appId={appId} onOpenAddHub={vi.fn()} />
     </QueryClientProvider>,
   );
 }
@@ -532,7 +532,7 @@ describe("RelaySection model verification ownership", () => {
     const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     render(
       <QueryClientProvider client={queryClient}>
-        <RelaySection appId="codex" onOpenDirectory={vi.fn()} />
+        <RelaySection appId="codex" onOpenAddHub={vi.fn()} />
       </QueryClientProvider>,
     );
 

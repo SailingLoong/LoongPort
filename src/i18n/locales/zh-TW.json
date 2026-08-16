@@ -3135,6 +3135,7 @@
       "other": "其他"
     },
     "directory": {
+      "customSitePlaceholder": "沒有找到？輸入其他中轉站網址",
       "title": "中轉站廣場",
       "description": "根據 VeriDrop 公開檢測結果選擇站點，完成註冊或登入後自動加入 LoongPort。",
       "tabs": {
@@ -3162,6 +3163,7 @@
         "supplementalRank": "補充"
       },
       "actions": {
+        "useOtherSite": "使用其他站點",
         "authenticate": "註冊或登入",
         "autoAddHint": "完成後自動加入",
         "history": "完整記錄",

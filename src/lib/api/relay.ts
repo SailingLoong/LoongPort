@@ -344,6 +344,15 @@ export const relayApi = {
     invoke("relay_import_directory_site", { site }),
 
   /**
+   * 手动导入任意站点（用户自己填的域名，绕开广场白名单）。与目录导入分开：
+   * 后端走 `BrowserEntrySource::Manual` 的保守打开规则（origin 或协议登录页，
+   * 不认目录声明的专属入口）。未验证站点可能探针不通 / 协议不识别——
+   * 错误会以可读 toast 呈现，不静默。
+   */
+  importSite: (site: string): Promise<ImportResult> =>
+    invoke("relay_import_site", { site }),
+
+  /**
    * 探一遍每一行凭据是不是真的还活着，返回**这次被清掉凭据的行 id**（空 = 全都好）。
    *
    * 曾经它探「当前站」一行、返回 bool —— 那个形状只对单站界面成立。

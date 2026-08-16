@@ -33,11 +33,11 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 vi.mock("@/components/relay/RelaySection", () => ({
-  RelaySection: ({ appId, onOpenDirectory }: any) => (
+  RelaySection: ({ appId, onOpenAddHub }: any) => (
     <div data-testid="relay-section">
       <span data-testid="relay-source-app">{appId}</span>
-      {/* 普通添加入口已上收到顶栏大「+」（聚合页默认落当前 app 的榜）。 */}
-      <button onClick={() => onOpenDirectory("firstRun")}>
+      {/* 普通添加入口已上收到顶栏大「+」（聚合页默认落综合榜）。 */}
+      <button onClick={() => onOpenAddHub("directory")}>
         open-first-run-directory
       </button>
     </div>
@@ -89,14 +89,9 @@ describe("relay directory routing", () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
   });
 
-  it.each([
-    ["claude", "claude"],
-    ["codex", "openai"],
-    ["gemini", "gemini"],
-    ["openclaw", "overall"],
-  ])(
-    "opens an independent directory from %s with the %s leaderboard",
-    async (appId, expectedKind) => {
+  it.each([["claude"], ["codex"], ["gemini"], ["openclaw"]])(
+    "opens the add hub from %s with the overall leaderboard",
+    async (appId) => {
       localStorage.setItem(LAST_APP_STORAGE_KEY, appId);
       renderApp();
 
@@ -112,9 +107,7 @@ describe("relay directory routing", () => {
       expect(screen.getByTestId("directory-source-app")).toHaveTextContent(
         appId,
       );
-      expect(screen.getByTestId("directory-kind")).toHaveTextContent(
-        expectedKind,
-      );
+      expect(screen.getByTestId("directory-kind")).toHaveTextContent("overall");
       expect(screen.queryByTestId("app-switcher")).not.toBeInTheDocument();
       expect(document.querySelector("header")).toHaveAttribute("hidden");
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");

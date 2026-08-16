@@ -284,6 +284,28 @@ describe("RelayDirectoryPage", () => {
     expect(openInBrowser).not.toHaveBeenCalledWith("https://site-2.example");
   });
 
+  it("imports a manually entered site outside the whitelist", async () => {
+    const user = userEvent.setup();
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+    await waitFor(() => expect(listDirectory).toHaveBeenCalled());
+
+    await user.type(
+      screen.getByPlaceholderText("loongport.directory.customSitePlaceholder"),
+      "https://my-own-relay.example",
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "loongport.directory.actions.useOtherSite",
+      }),
+    );
+
+    // 手填域名走 Manual 导入（保守打开规则），不是白名单行的目录导入。
+    await waitFor(() =>
+      expect(importSite).toHaveBeenCalledWith("https://my-own-relay.example"),
+    );
+    expect(importDirectorySite).not.toHaveBeenCalled();
+  });
+
   it("labels a managed detail-page completion without inventing a rank", async () => {
     listDirectory.mockResolvedValue(
       leaderboard("gemini", {
@@ -554,19 +576,20 @@ describe("RelayDirectoryPage", () => {
     });
   });
 
-  it("no longer offers a custom-site input", async () => {
-    // 白名单语义：广场只展示受管站点，手动输域名的入口已删。
+  it("keeps the custom-site input alongside the whitelist rows", async () => {
+    // 白名单仍是展示集合的所有者；手填域名是绕开它的兜底直连（2026-08-16 应
+    // 用户要求恢复 —— 白名单外的站也该能连，错误以可读 toast 呈现）。
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
     await screen.findByText("BestAPI");
 
     expect(
-      screen.queryByPlaceholderText(
-        "loongport.directory.customSitePlaceholder",
-      ),
-    ).not.toBeInTheDocument();
+      screen.getByPlaceholderText("loongport.directory.customSitePlaceholder"),
+    ).toBeInTheDocument();
     expect(
-      screen.queryByText("loongport.directory.actions.useOtherSite"),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", {
+        name: "loongport.directory.actions.useOtherSite",
+      }),
+    ).toBeInTheDocument();
     expect(importSite).not.toHaveBeenCalled();
   });
 });
