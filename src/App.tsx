@@ -55,6 +55,7 @@ import {
   GITHUB_REPO,
   LAST_APP_STORAGE_KEY,
   LAST_VIEW_STORAGE_KEY,
+  OFFICIAL_WEBSITE,
 } from "@/config/constants";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
@@ -275,6 +276,18 @@ function App() {
       );
     },
     [saveSettingsMutation, settingsData, visibleApps, t],
+  );
+
+  // 末尾「+」的反向操作：把隐藏的应用加回来。效果（tab 出现）自解释，不弹 toast。
+  const showAppFromMainPage = useCallback(
+    (app: AppId) => {
+      if (!settingsData) return;
+      saveSettingsMutation.mutate({
+        ...settingsData,
+        visibleApps: { ...visibleApps, [app]: true },
+      });
+    },
+    [saveSettingsMutation, settingsData, visibleApps],
   );
 
   useEffect(() => {
@@ -1376,8 +1389,9 @@ function App() {
               </div>
             ) : (
               <div className="flex items-center gap-2">
-                {/* LoongPort seam：品牌点击回主面板（见 RoutingActivationBrand 的 props 注释）；
-                    上游的 cc-switch 导入入口保留。 */}
+                {/* LoongPort seam：品牌是外链入口，点击打开官网 loongport.dev
+                    （与上游的 ccswitch.io 外链同构；回主面板语义已废弃——
+                    品牌只在 providers 视图渲染，原本就是空操作）。 */}
                 <RoutingActivationBrand
                   active={isProxyRunning && isCurrentAppTakeoverActive}
                   contextKey={activeApp}
@@ -1385,7 +1399,17 @@ function App() {
                     proxyStatus !== undefined && takeoverStatus !== undefined
                   }
                   label="LoongPort"
-                  onClick={() => setCurrentView("providers")}
+                  title={OFFICIAL_WEBSITE}
+                  onClick={() => {
+                    void settingsApi
+                      .openExternal(OFFICIAL_WEBSITE)
+                      .catch((error) => {
+                        console.error(
+                          "[App] Failed to open official website",
+                          error,
+                        );
+                      });
+                  }}
                 />
                 <CcSwitchImportEntry />
                 <Button
@@ -1473,6 +1497,7 @@ function App() {
                   onSwitch={setActiveApp}
                   visibleApps={visibleApps}
                   onHideApp={hideAppFromMainPage}
+                  onShowApp={showAppFromMainPage}
                 />
               )}
             </div>

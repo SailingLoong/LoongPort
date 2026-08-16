@@ -3609,6 +3609,8 @@
     }
   },
   "appSwitcher": {
+    "add": "Add apps to homepage",
+    "allShown": "All apps are shown",
     "hide": "Hide from homepage",
     "hiddenToast": "Hidden \"{{name}}\". Restore it under Settings → Homepage Display."
   }

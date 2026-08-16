@@ -25,12 +25,13 @@ interface RoutingActivationBrandProps {
   ready: boolean;
   /**
    * LoongPort seam：上游渲染固定的 "CC Switch" 外链（ccswitch.io）。
-   * LoongPort 的品牌是产品标识，点击应回主面板而不是跳 cc-switch 官网
-   * （官网入口在「关于」页与托盘里已有）。传 `label`/`onClick` 即切换为本仓行为；
-   * 不传则与上游完全一致。
+   * LoongPort 的品牌同样是外链，只是指向自己的官网 loongport.dev。
+   * 传 `label`/`onClick`/`title` 即切换为本仓行为；不传则与上游完全一致。
    */
   label?: string;
   onClick?: () => void;
+  /** 悬停提示（本仓传官网地址，让外链可被发现） */
+  title?: string;
 }
 
 /**
@@ -44,6 +45,7 @@ export function RoutingActivationBrand({
   ready,
   label = "CC Switch",
   onClick,
+  title,
 }: RoutingActivationBrandProps) {
   const prefersReducedMotion = useReducedMotion();
   const previousState = useRef({ active, contextKey, ready });
@@ -128,6 +130,7 @@ export function RoutingActivationBrand({
         <motion.button
           type="button"
           onClick={onClick}
+          title={title}
           className={brandClassName}
           animate={brandAnimation}
           transition={brandTransition}
@@ -139,6 +142,7 @@ export function RoutingActivationBrand({
           href="https://ccswitch.io"
           target="_blank"
           rel="noreferrer"
+          title={title}
           className={brandClassName}
           animate={brandAnimation}
           transition={brandTransition}
