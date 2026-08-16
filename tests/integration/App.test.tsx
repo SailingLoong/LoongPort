@@ -79,25 +79,30 @@ vi.mock("@/components/providers/ProviderList", () => ({
     })(),
 }));
 
-vi.mock("@/components/providers/AddProviderDialog", () => ({
-  AddProviderDialog: ({ open, onOpenChange, onSubmit, appId }: any) =>
-    open ? (
-      <div data-testid="add-provider-dialog">
-        <button
-          onClick={() =>
-            onSubmit({
+vi.mock("@/components/relay/AddHubPage", () => ({
+  // 只验证「+ 聚合页 → 提交 → 回供应商列表」这条数据链；
+  // 标签结构与切换由 AddHubPage.test.tsx 自己测。
+  AddHubPage: ({ onBack, onAddProvider, sourceAppId: appId }: any) => (
+    <div data-testid="add-provider-dialog">
+      <button
+        onClick={() =>
+          void (async () => {
+            // 真实表单的时序：await 提交成功 → onDone → 聚合页返回。
+            await onAddProvider({
               name: `New ${appId} Provider`,
               settingsConfig: {},
               category: "custom",
               sortIndex: 99,
-            })
-          }
-        >
-          confirm-add
-        </button>
-        <button onClick={() => onOpenChange(false)}>close-add</button>
-      </div>
-    ) : null,
+            });
+            onBack();
+          })()
+        }
+      >
+        confirm-add
+      </button>
+      <button onClick={() => onBack()}>close-add</button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/providers/EditProviderDialog", () => ({
@@ -302,7 +307,9 @@ describe("App integration with MSW", () => {
     fireEvent.click(screen.getByText("close-usage"));
 
     fireEvent.click(screen.getByText("create"));
-    expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("add-provider-dialog"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByText("confirm-add"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toMatch(
