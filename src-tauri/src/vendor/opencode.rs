@@ -539,22 +539,6 @@ impl Plan {
             .find(|plan| plan.id_segment() == segment)
     }
 
-    /// Anthropic 兼容 base（SDK 自己补 `/v1/messages`）。
-    fn anthropic_origin(self) -> &'static str {
-        match self {
-            Plan::Zen => ANTHROPIC_ORIGIN,
-            Plan::Go => GO_ANTHROPIC_ORIGIN,
-        }
-    }
-
-    /// OpenAI 兼容 API 根（chat/completions 与 Responses 都挂在它下面）。
-    fn api_origin(self) -> &'static str {
-        match self {
-            Plan::Zen => API_ORIGIN,
-            Plan::Go => GO_API_ORIGIN,
-        }
-    }
-
     /// 生成配置时与默认风格的差异（[`crate::relay::provision::ProvisionStyle`]）。
     pub fn style(self) -> crate::relay::provision::ProvisionStyle {
         match self {

@@ -707,6 +707,9 @@ pub fn settings_config_with_models(
     )
 }
 
+// 参数收不拢：它就是这族包装函数（_for / _with_roles / _with_models）的**底**，
+// 每个参数各自有默认包装路径在用；收成 struct 得连改动全部 relay 调用点。
+#[allow(clippy::too_many_arguments)]
 pub fn settings_config_with_roles_and_models(
     app_type: &AppType,
     api_key: &str,
