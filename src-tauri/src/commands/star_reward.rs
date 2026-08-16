@@ -100,6 +100,18 @@ pub async fn star_reward_offer() -> Result<Option<StarRewardOffer>, String> {
     Ok(build_offer().await)
 }
 
+/// Star 领取落点（2026-08-16 起）：后端 RMW 写 `star_reward_claimed`，幂等。
+/// 不走前端全量 save —— 这条路在 `merge_settings_for_save` 对后端专有字段
+/// 无条件取现有值（旧快照回写曾把它抹掉，红点复活、码可重领），这个字段的
+/// 事实 owner 本来就在后端。
+#[tauri::command]
+pub fn star_reward_mark_claimed() -> Result<(), String> {
+    crate::settings::mutate_settings(|settings| {
+        settings.star_reward_claimed = Some(true);
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// star_reward 活动还在吗（只读缓存配置，不碰网络）。红点显隐用它 ——
 /// 每次启动都为了一颗红点去拉一次基线太浪费。
 #[tauri::command]

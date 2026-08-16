@@ -1608,6 +1608,7 @@ pub fn run() {
             commands::onboarding_open_register_window,
             commands::star_reward_offer,
             commands::star_reward_configured,
+            commands::star_reward_mark_claimed,
             commands::github_star_count,
             commands::github_star_via_gh,
             commands::relay_check_session,

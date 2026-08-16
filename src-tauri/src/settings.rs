@@ -883,7 +883,9 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     Ok(())
 }
 
-fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
+// pub(crate)：LoongPort 的窄命令（如 `star_reward_mark_claimed`）用它做后端
+// RMW 写专有字段，与上面的迁移标记写入者同一形状。
+pub(crate) fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut AppSettings),
 {

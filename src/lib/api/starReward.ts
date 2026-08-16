@@ -38,6 +38,11 @@ export const starRewardApi = {
     return await invoke("github_star_via_gh");
   },
 
+  /** 标记已领取（发码时刻调用）。后端专有事实走窄命令 RMW，不走全量 save。 */
+  async markClaimed(): Promise<void> {
+    await invoke("star_reward_mark_claimed");
+  },
+
   /** 打开官方站注册窗并预填奖励码（star 走通之后的终点）。 */
   async openRegisterWindow(promoCode: string): Promise<void> {
     await invoke("onboarding_open_register_window", { promoCode });
