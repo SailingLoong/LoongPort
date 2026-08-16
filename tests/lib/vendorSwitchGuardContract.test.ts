@@ -35,9 +35,13 @@ describe("vendor 切换入口", () => {
     return src.slice(start, end);
   })();
 
-  it("只把行 id 与用户选择交给 vendorApi.switch", () => {
-    expect(vendorUseBody).toContain("vendorApi.switch");
-    expect(vendorUseBody).not.toContain("providerId");
+  it("只把行 id、plan 与用户选择交给 vendorApi.switch", () => {
+    // 命令契约是 (rowId, planId, app, quitChatgpt) —— planId 是稳定段标识
+    // （`providerId` 只允许出现在 busy key 里，那是本地转圈判别，不是命令入参）。
+    // 正则容忍 prettier 折行。
+    expect(vendorUseBody).toMatch(
+      /vendorApi\.switch\(\s*rowId,\s*plan\.planId/,
+    );
     expect(vendorUseBody).not.toContain("relayApi.switchTier");
   });
 

@@ -531,7 +531,22 @@ pub fn provider_display_name(site_name: &str, group_name: &str) -> String {
 ///
 /// 4. **`base_url` 必须带 `/v1`**，见 [`crate::relay::api::codex_base_url`]。
 pub fn codex_config_toml(display_name: &str, base_url: &str, model: &str) -> String {
+    codex_config_toml_with_wire(display_name, base_url, model, "responses")
+}
+
+/// [`codex_config_toml`] 的 wire 选择版。`wire_api` 只认 `"responses"` / `"chat"`
+/// —— 由 [`ProvisionStyle::codex_wire_chat`] 决定，别处没有第三个值。
+pub fn codex_config_toml_with_wire(
+    display_name: &str,
+    base_url: &str,
+    model: &str,
+    wire_api: &str,
+) -> String {
     let q = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+    debug_assert!(
+        wire_api == "responses" || wire_api == "chat",
+        "wire_api 只认 responses / chat：{wire_api}"
+    );
     format!(
         r#"model_provider = "custom"
 model = {}
@@ -541,11 +556,31 @@ disable_response_storage = true
 [model_providers.custom]
 name = {}
 base_url = {}
-wire_api = "responses""#,
+wire_api = {}"#,
         q(model),
         q(display_name),
-        q(base_url)
+        q(base_url),
+        q(wire_api)
     )
+}
+
+/// 一条托管 provider 配置在「生成风格」上与默认的差异。
+///
+/// 中转站与单档官网厂商全部走 [`ProvisionStyle::default`]（零差异）；唯一的使用方是
+/// vendor 层的**多 plan 厂商**（opencode Go：网关只认 x-api-key、responses 目录只有
+/// 带 30 天监控保留的模型）。见 `vendor::opencode::Plan::style`。
+///
+/// ⚠️ **生成与 `is_user_edited` 的基准必须带同一份 style**（同
+/// [`ClaudeRoleModels`] 那条铁律）—— 基准少了这个维度，存量 Go 档位会集体误报
+/// 「已手工维护」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProvisionStyle {
+    /// Claude 系鉴权改写 `ANTHROPIC_API_KEY`（x-api-key），**且完全不写**
+    /// `ANTHROPIC_AUTH_TOKEN` —— 两个字段同写时 Claude Code 优先 Bearer，被网关
+    /// 静默忽略后就是一条必 401 的配置。
+    pub claude_auth_via_api_key: bool,
+    /// codex 的 `wire_api` 用 `"chat"` 而不是默认 `"responses"`。
+    pub codex_wire_chat: bool,
 }
 
 /// 一条托管 provider 的 `settings_config`，**复用上游 deeplink 那套按 CLI 分派的构造**。
@@ -646,6 +681,7 @@ pub fn settings_config_with_roles(
         model,
         roles,
         None,
+        ProvisionStyle::default(),
     )
 }
 
@@ -667,9 +703,13 @@ pub fn settings_config_with_models(
         model,
         None,
         models,
+        ProvisionStyle::default(),
     )
 }
 
+// 参数收不拢：它就是这族包装函数（_for / _with_roles / _with_models）的**底**，
+// 每个参数各自有默认包装路径在用；收成 struct 得连改动全部 relay 调用点。
+#[allow(clippy::too_many_arguments)]
 pub fn settings_config_with_roles_and_models(
     app_type: &AppType,
     api_key: &str,
@@ -678,6 +718,7 @@ pub fn settings_config_with_roles_and_models(
     model: &str,
     roles: Option<ClaudeRoleModels>,
     models: Option<&[String]>,
+    style: ProvisionStyle,
 ) -> Option<serde_json::Value> {
     // codex 例外：上游那份多一行 requires_openai_auth，见上面那段。
     //
@@ -686,9 +727,14 @@ pub fn settings_config_with_roles_and_models(
     // 得到一份 claude/gemini 形状的配置 ⇒ 生图在运行时读不出密钥，而那是只有真机
     // 才发现得了的失败。
     if matches!(app_type, AppType::Codex | AppType::CodexImage) {
+        let toml = if style.codex_wire_chat {
+            codex_config_toml_with_wire(display_name, base_url, model, "chat")
+        } else {
+            codex_config_toml(display_name, base_url, model)
+        };
         let mut settings = serde_json::json!({
             "auth": { "OPENAI_API_KEY": api_key },
-            "config": codex_config_toml(display_name, base_url, model),
+            "config": toml,
         });
         if matches!(app_type, AppType::Codex) {
             if let Some(models) = models.filter(|models| !models.is_empty()) {
@@ -754,6 +800,8 @@ pub fn settings_config_with_roles_and_models(
         // 集体误报「已手工维护」。
         fable_model: roles.as_ref().map(|r| r.fable.clone()),
         subagent_model: roles.as_ref().map(|r| r.subagent.clone()),
+        // Claude 系鉴权字段的选择（Go 网关只认 x-api-key）。None = 默认 Bearer。
+        claude_api_key_auth: style.claude_auth_via_api_key.then_some(true),
         homepage: None,
         ..Default::default()
     };
@@ -2238,6 +2286,7 @@ mod tests {
             "claude-opus-5",
             None,
             Some(&models),
+            ProvisionStyle::default(),
         )
         .expect("Claude config");
 
@@ -2273,6 +2322,7 @@ mod tests {
             "gemini-3-pro",
             None,
             Some(&mixed),
+            ProvisionStyle::default(),
         )
         .expect("Gemini config");
         assert_eq!(
@@ -2293,6 +2343,7 @@ mod tests {
             "claude-opus-5",
             None,
             Some(&no_family),
+            ProvisionStyle::default(),
         )
         .expect("Gemini config");
         assert!(
@@ -2317,6 +2368,7 @@ mod tests {
             "claude-sonnet-5",
             None,
             Some(&models),
+            ProvisionStyle::default(),
         )
         .expect("Claude config");
 

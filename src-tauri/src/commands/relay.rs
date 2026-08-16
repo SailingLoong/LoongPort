@@ -3180,6 +3180,7 @@ fn persist_provision_batch(
                 &candidate.model,
                 candidate.roles.clone(),
                 candidate.models.as_deref(),
+                provision::ProvisionStyle::default(),
             )
         } else if matches!(app_type, AppType::Codex) {
             provision::settings_config_with_models(
@@ -3200,6 +3201,7 @@ fn persist_provision_batch(
                 &candidate.model,
                 None,
                 candidate.models.as_deref(),
+                provision::ProvisionStyle::default(),
             )
         } else {
             provision::settings_config_for(

@@ -20,7 +20,7 @@ export interface VendorAccountRow {
   id: number;
   /** 稳定标识（`"deepseek"`）。传给 `openLogin`。 */
   vendorId: string;
-  /** 厂商展示名（`"DeepSeek"`）。**服务端给什么就显示什么**，不翻译。 */
+  /** 厂商家族展示名（`"DeepSeek"` / `"opencode"`）。**服务端给什么就显示什么**，不翻译。 */
   vendorName: string;
   /** 给人看的账号名（手机号，空则回落 account_id）。 */
   accountLabel: string;
@@ -32,41 +32,56 @@ export interface VendorAccountRow {
     | "noKey";
   canQueryBalance: boolean;
   canRefresh: boolean;
-  canEditConfig: boolean;
-  canSwitch: boolean;
   canDelete: boolean;
   /**
-   * 这一行名下那六条 provider 记录的 id（六个平台共用一个）。
+   * 这一行展开出的接入变体（plan）。单 plan 厂商恒一个元素（DeepSeek / BigModel），
+   * opencode 是 Zen + Go 两个 —— 同 app 下互斥可切，形状对齐 relay 的档位。
    *
-   * 由后端派生（`sha256(vendorId + "/" + accountId)`）——
+   * 按 plan 算的事实（providerId / isCurrent / userEdited / can*）全在这里；
+   * 行级只剩账号级事实（登录态 / key / 删除资格）。
+   */
+  plans: VendorPlanInfo[];
+}
+
+export interface VendorPlanInfo {
+  /** plan 稳定标识（= provider id 哈希里的段）。传给 `vendorApi.switch` 的 `plan`。 */
+  planId: string;
+  /** 展示名（`opencode Zen` / `opencode Go`）。服务端给定，不翻译。 */
+  planName: string;
+  /**
+   * 这个 plan 那六条 provider 记录的 id（六个平台共用一个）。
+   *
+   * 由后端派生（`sha256(planId + "/" + accountId)`）——
    * **前端算不出来**：DTO 有意不给 accountId，也没有 sha256。
    *
-   * ⚠️ **不再用它判「当前在用」** —— 那件事改由下面的 `isCurrent`（后端现算）
-   * 表达。它只在「编辑 / 恢复默认 / 切换」时用（这几条命令吃 providerId）。
+   * ⚠️ **不再用它判「当前在用」** —— 那件事改由 `isCurrent`（后端现算）表达。
+   * 它只在「编辑 / 恢复默认」时用（这两条命令吃 providerId）。
    *
    * 空串 = 还没登录过（没有 accountId 就派生不出 id）。
    */
   providerId: string;
   /**
-   * **当前 tab 那个 app** 下，这一行是不是正在用的那个。
+   * **当前 tab 那个 app** 下，这个 plan 是不是正在用的那个。
    *
    * 由后端按 `appId` 现算（判据与中转站档位的 `isCurrent` 同源 —— 都是
    * `providers` 表的 `is_current`）。**前端不自己维护、也不拿它跟别的值比较**。
-   * 所以 DeepSeek 官网组与中转站档位 / 手工 provider 共享同一份互斥：
+   * 所以官网档、中转站档位 / 手工 provider 共享同一份互斥：
    * 一个 app 下永远只有一个「在用」。
    */
   isCurrent: boolean;
   /**
-   * **当前 tab 那个平台**的配置是不是被用户改过（`vendorApi.list` 的 `appId`）。
+   * **当前 tab 那个平台**的这个 plan 配置是不是被用户改过。
    *
-   * ⚠️ **按平台算，不是整行一个值** —— 一行背后六条 provider 记录各自能被独立编辑。
+   * ⚠️ **按平台 × plan 算** —— 每个 plan 的六条 provider 记录各自能被独立编辑。
    *
    * `null` = 判不了（没 provision 过 / 这个平台不适用）。**`null` 时不显示标记** ——
    * 与 relay 的 `TierInfo.userEdited` 同一条原则：不知道就别断言。
-   *
-   * 后端不存这个标记，靠与默认配置整份比对现算 ⇒ 用户把配置改回默认，标记会自动消失。
    */
   userEdited: boolean | null;
+  /** 当前 tab 下这个 plan 是否已有可编辑的接入配置。 */
+  canEditConfig: boolean;
+  /** 当前 tab 下这个 plan 是否已有可切换的接入配置。 */
+  canSwitch: boolean;
 }
 
 export interface VendorAccountList {
@@ -95,7 +110,7 @@ export const DEEPSEEK_VENDOR_ID = "deepseek";
 export const BIGMODEL_VENDOR_ID = "bigmodel";
 export const OPENCODE_VENDOR_ID = "opencode";
 
-/** 「官方 API」页的厂商目录（展示名/说明与 Rust 侧 `display_name` 对应）。 */
+/** 「官方 API」页的厂商目录（展示名与 Rust 侧 `display_name` 对应）。 */
 export const VENDOR_CATALOG: ReadonlyArray<{
   id: string;
   displayName: string;
@@ -112,8 +127,9 @@ export const VENDOR_CATALOG: ReadonlyArray<{
     descriptionKey: "loongport.officialApi.bigmodelDesc",
   },
   {
+    // 厂商家族名；登录后账号行下按 plan 展开（Zen 按量 / Go 订阅）。
     id: OPENCODE_VENDOR_ID,
-    displayName: "opencode Zen",
+    displayName: "opencode",
     descriptionKey: "loongport.officialApi.opencodeDesc",
   },
 ];
@@ -171,11 +187,14 @@ export const vendorApi = {
 
   switch: (
     rowId: number,
+    /** 要切到的 plan（`plans[].planId`；单 plan 厂商也显式传）。 */
+    plan: string,
     app: AppId,
     quitChatgpt?: boolean,
   ): Promise<SwitchTierCommandResult> =>
     invoke("vendor_switch", {
       rowId,
+      plan,
       app,
       quitChatgpt: quitChatgpt ?? null,
     }),

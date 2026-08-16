@@ -125,6 +125,11 @@ fn parse_provider_deeplink(
     // 参数名跟随上游那三个的 camelCase 惯例。
     let fable_model = params.get("fableModel").cloned();
     let subagent_model = params.get("subagentModel").cloned();
+    // Claude 系鉴权走 x-api-key（opencode Go 这类网关），见
+    // `DeepLinkImportRequest::claude_api_key_auth`。
+    let claude_api_key_auth = params
+        .get("claudeApiKeyAuth")
+        .and_then(|v| v.parse::<bool>().ok());
     let icon = params
         .get("icon")
         .map(|v| v.trim().to_lowercase())
@@ -164,6 +169,7 @@ fn parse_provider_deeplink(
         opus_model,
         fable_model,
         subagent_model,
+        claude_api_key_auth,
         content: None,
         description: None,
         apps: None,
@@ -238,6 +244,7 @@ fn parse_prompt_deeplink(
         opus_model: None,
         fable_model: None,
         subagent_model: None,
+        claude_api_key_auth: None,
         apps: None,
         repo: None,
         directory: None,
@@ -313,6 +320,7 @@ fn parse_mcp_deeplink(
         opus_model: None,
         fable_model: None,
         subagent_model: None,
+        claude_api_key_auth: None,
         content: None,
         description: None,
         repo: None,
@@ -370,6 +378,7 @@ fn parse_skill_deeplink(
         opus_model: None,
         fable_model: None,
         subagent_model: None,
+        claude_api_key_auth: None,
         content: None,
         description: None,
         apps: None,

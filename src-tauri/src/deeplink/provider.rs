@@ -338,10 +338,22 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
 
     // Now overwrite / fill in the standard fields from URL params. URL params
     // are authoritative because they're what the deeplink builder put on the
-    // wire — for Claude these are: ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL,
+    // wire — for Claude these are: the auth field (AUTH_TOKEN by default, or
+    // API_KEY for x-api-key-only gateways like opencode Go), ANTHROPIC_BASE_URL,
     // ANTHROPIC_MODEL, and the haiku/sonnet/opus model aliases.
+    //
+    // ⚠️ 只写选中的那一个字段，不同写两个：Claude Code 优先 Bearer（AUTH_TOKEN），
+    // 只认 x-api-key 的网关会把它静默忽略 ⇒ 同写等于必 401。
+    let auth_field = if request.claude_api_key_auth.unwrap_or(false) {
+        // inline config 里可能自带另一个字段 —— 鉴权字段由请求参数独占，删掉它。
+        env.remove("ANTHROPIC_AUTH_TOKEN");
+        "ANTHROPIC_API_KEY"
+    } else {
+        env.remove("ANTHROPIC_API_KEY");
+        "ANTHROPIC_AUTH_TOKEN"
+    };
     env.insert(
-        "ANTHROPIC_AUTH_TOKEN".to_string(),
+        auth_field.to_string(),
         json!(request.api_key.clone().unwrap_or_default()),
     );
     env.insert(

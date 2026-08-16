@@ -57,7 +57,7 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 pub struct VendorAccountRow {
     pub id: i64,
     pub vendor_id: String,
-    /// 厂商展示名（`DeepSeek`）。认不出的 `vendor_id` 回落到它本身。
+    /// 厂商家族展示名（`DeepSeek` / `opencode`）。认不出的 `vendor_id` 回落到它本身。
     pub vendor_name: String,
     /// 给人看的账号名（手机号，空则回落 account_id）。
     pub account_label: String,
@@ -67,47 +67,56 @@ pub struct VendorAccountRow {
     pub can_query_balance: bool,
     /// 这一行是否可以重新获取最新账号信息、额度与接入配置。
     pub can_refresh: bool,
-    /// 当前 tab 下是否已有可编辑的接入配置。
-    pub can_edit_config: bool,
-    /// 当前 tab 下是否已有可切换的接入配置。
-    pub can_switch: bool,
     /// 这一行是否可以安全删除。真正删除时后端仍会重新检查。
     pub can_delete: bool,
-    /// 这一行名下那六条 provider 记录的 id（六个平台**共用一个**）。
+    /// 这一行展开出的接入变体（单 plan 厂商恒一个元素）。按 plan 算的事实全在这里
+    /// —— 行级只留账号级事实（登录态 / key / 删除资格）。
+    pub plans: Vec<VendorPlanRow>,
+}
+
+/// 一个接入变体（plan）在**当前 tab 那个 app** 下的事实。
+///
+/// 单 plan 厂商（DeepSeek / BigModel）恰好一个元素；多 plan 厂商（opencode）是
+/// Zen + Go 两个 —— 同 app 下互斥可切，判据与 relay 档位同源。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VendorPlanRow {
+    /// plan 稳定标识（= provider id 哈希里的段）。传给 `vendor_switch` 的 `plan`。
+    pub plan_id: String,
+    /// 展示名（`opencode Zen` / `opencode Go`）。
+    pub plan_name: String,
+    /// 这个 plan 那六条 provider 记录的 id（六个平台**共用一个**）。
     ///
     /// ## 为什么必须由后端给
     ///
-    /// 它是 `sha256(vendor_id + "/" + account_id)` 的前 16 位 hex
+    /// 它是 `sha256(id_segment + "/" + account_id)` 的前 16 位 hex
     /// （[`crate::vendor::provision::provider_id_for`]）——
     /// **前端算不出来**：没有 `account_id`（有意不给，那是厂商侧的内部 id），
     /// 也没有 sha256。
     ///
-    /// 缺了它的后果（Task 6 实现时撞到的）：官网行的**「当前在用」高亮判不了**
-    /// —— 前端只能靠「本次会话 provision 过」临时记住那个 id，app 一重启就没了。
-    ///
     /// 空串 = 还没登录过（没有 `account_id` 就派生不出 id）。
     pub provider_id: String,
-    /// **当前 tab 那个 app** 下，这一行是不是正在用的那个。
+    /// **当前 tab 那个 app** 下，这个 plan 是不是正在用的那个。
     ///
-    /// 判据是「`providers` 表里 `app_id` 那一栏的当前项 == 本行的 `provider_id`」——
-    /// 由后端在 `vendor_list_accounts` 里按 `app_id` 现算（同 `user_edited` 的时机），
+    /// 判据是「`providers` 表里 `app_id` 那一栏的当前项 == 本 plan 的
+    /// `provider_id`」—— 由后端在 `vendor_list_accounts` 里按 `app_id` 现算，
     /// **前端不自己维护**。与中转站档位的 `tier.is_current` 共用同一个事实源
     /// （上游 `ProviderService::current`），所以一个 app 下所有组天然互斥。
     ///
     /// `false` 也可能是还没登录（`provider_id` 为空）—— 未登录的行不可能在用。
     pub is_current: bool,
-    /// **当前 tab 那个平台**的配置是不是被用户改过。
+    /// **当前 tab 那个平台**的这个 plan 配置是不是被用户改过。
     ///
-    /// ⚠️ **按平台算，不是整行一个值** —— 一行背后六条 provider 记录各自能被独立
-    /// 编辑。这里给的是 `vendor_list_accounts` 收到的那个 `app_id` 对应的那一条。
+    /// ⚠️ **按平台 × plan 算** —— 每个 plan 的六条 provider 记录各自能被独立编辑。
     ///
-    /// `None` = 判不了（没 provision 过 / 这个平台不适用 / 判据本身判不了），
+    /// `None` = 判不了（没 provision 过 / 这个平台不适用），
     /// **UI 在 `None` 时不显示标记** —— 同 relay 的 `TierInfo.user_edited`：
     /// 不知道就别断言。
-    ///
-    /// 判据见 [`user_edited_for`]，它不存标记、靠与默认配置整份比对
-    /// （所以用户把配置改回默认，标记会自动消失）。
     pub user_edited: Option<bool>,
+    /// 当前 tab 下这个 plan 是否已有可编辑的接入配置。
+    pub can_edit_config: bool,
+    /// 当前 tab 下这个 plan 是否已有可切换的接入配置。
+    pub can_switch: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,12 +148,35 @@ impl From<creds::VendorRow> for VendorAccountRow {
         let vendor_name = Vendor::from_id(&row.vendor_id)
             .map(|v| v.display_name().to_string())
             .unwrap_or_else(|| row.vendor_id.clone());
-        // 未登录（无 account_id）时派生不出 id —— 给空串，前端据此不显示高亮。
-        let provider_id = row
-            .account_id
-            .as_deref()
-            .map(|acct| crate::vendor::provision::provider_id_for(&row.vendor_id, acct))
+        // plan 骨架：段与名字来自静态清单，provider id 按 account 派生（未登录则空）。
+        // is_current / user_edited / can_* 这类要读 DB 的事实留给
+        // `vendor_account_for_app` 填 —— 这个 `From` 是纯转换。
+        let vendor = Vendor::from_id(&row.vendor_id);
+        let plans: Vec<VendorPlanRow> = vendor
+            .map(|vendor| {
+                crate::vendor::plans(vendor)
+                    .iter()
+                    .map(|plan| VendorPlanRow {
+                        plan_id: plan.id_segment.to_string(),
+                        plan_name: plan.display_name.to_string(),
+                        provider_id: row
+                            .account_id
+                            .as_deref()
+                            .map(|acct| {
+                                crate::vendor::provision::provider_id_for(plan.id_segment, acct)
+                            })
+                            .unwrap_or_default(),
+                        is_current: false,
+                        user_edited: None,
+                        can_edit_config: false,
+                        can_switch: false,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
+        // 任何一个 plan 派生得出 id，就说明登录过（provision 资格判定用）。
+        let any_provider_id = plans.iter().any(|plan| !plan.provider_id.is_empty());
+
         let logged_in = !row.auth_token.is_empty();
         let session_expired = row.account_id.is_some() && row.auth_token.is_empty();
         let key_ready = !row.api_key.is_empty();
@@ -164,19 +196,13 @@ impl From<creds::VendorRow> for VendorAccountRow {
         VendorAccountRow {
             status,
             can_query_balance: logged_in || key_ready,
-            can_refresh: !provider_id.is_empty() && (logged_in || key_ready),
-            can_edit_config: key_ready && !provider_id.is_empty(),
-            can_switch: false,
+            can_refresh: any_provider_id && (logged_in || key_ready),
             can_delete: false,
             account_label: row.account_label,
-            provider_id,
             vendor_id: row.vendor_id,
             vendor_name,
             id: row.id,
-            // 这个 `From` 是纯转换、拿不到 DB。命令层用 `user_edited_for` / `is_current_for`
-            // 填它们（要读 provider 记录才算得出来）。
-            user_edited: None,
-            is_current: false,
+            plans,
         }
     }
 }
@@ -310,35 +336,42 @@ fn vendor_account_for_app(
     let session_expired = row.account_id.is_some() && !logged_in;
     let key_ready = !row.api_key.is_empty();
     let mut out = VendorAccountRow::from(row);
-    let provider_exists = !out.provider_id.is_empty()
-        && state
-            .db
-            .get_provider_by_id(&out.provider_id, app_type.as_str())
-            .ok()
-            .flatten()
-            .is_some();
+
+    // 逐 plan 填「当前 tab 那个 app」的事实。provision 是原子展开全部 plan 的，
+    // 但存在记录只按 plan 判 —— 行级 `provider_exists` 取「任一 plan 有记录」。
+    let mut any_provider_exists = false;
+    for plan in &mut out.plans {
+        let provider_exists = !plan.provider_id.is_empty()
+            && state
+                .db
+                .get_provider_by_id(&plan.provider_id, app_type.as_str())
+                .ok()
+                .flatten()
+                .is_some();
+        any_provider_exists |= provider_exists;
+        plan.can_edit_config = key_ready && provider_exists;
+        plan.can_switch = provider_exists;
+        plan.user_edited = provider_exists
+            .then(|| user_edited_for(state, plan, app_type))
+            .flatten();
+        plan.is_current = provider_exists && is_current_for(state, plan, app_type);
+    }
 
     out.status = if session_expired {
-        if key_ready && provider_exists {
+        if key_ready && any_provider_exists {
             VendorAccountStatus::SessionExpiredUsable
         } else {
             VendorAccountStatus::SessionExpired
         }
     } else if !logged_in {
         VendorAccountStatus::NotLoggedIn
-    } else if key_ready && provider_exists {
+    } else if key_ready && any_provider_exists {
         VendorAccountStatus::Ready
     } else {
         VendorAccountStatus::NoKey
     };
     out.can_query_balance = logged_in || key_ready;
-    out.can_refresh = logged_in || (key_ready && provider_exists);
-    out.can_edit_config = key_ready && provider_exists;
-    out.can_switch = provider_exists;
-    out.user_edited = provider_exists
-        .then(|| user_edited_for(state, &out, app_type))
-        .flatten();
-    out.is_current = provider_exists && is_current_for(state, &out, app_type);
+    out.can_refresh = logged_in || (key_ready && any_provider_exists);
     out.can_delete = vendor_can_delete(state, &out);
     out
 }
@@ -347,6 +380,9 @@ fn vendor_account_for_app(
 pub async fn vendor_switch(
     app_handle: tauri::AppHandle,
     row_id: i64,
+    // 要切到的 plan（`vendor_list_accounts` 里 `plans[].planId` 之一）。
+    // 单 plan 厂商也显式传（前端有那份清单，不搞「缺省 = 唯一一档」的隐式约定）。
+    plan: String,
     app: String,
     quit_chatgpt: Option<bool>,
 ) -> Result<super::relay::SwitchTierCommandResult, String> {
@@ -361,7 +397,11 @@ pub async fn vendor_switch(
         .account_id
         .as_deref()
         .ok_or_else(|| "这个官网账号还没有完成登录，无法切换".to_string())?;
-    let provider_id = provision::provider_id_for(&row.vendor_id, account_id);
+    let vendor = Vendor::from_id(&row.vendor_id)
+        .ok_or_else(|| format!("不认识的厂商：{}", row.vendor_id))?;
+    let plan = crate::vendor::plan_by_segment(vendor, &plan)
+        .ok_or_else(|| format!("不认识的接入变体：{plan}"))?;
+    let provider_id = provision::provider_id_for(plan.id_segment, account_id);
     if state
         .db
         .get_provider_by_id(&provider_id, app_type.as_str())
@@ -376,13 +416,17 @@ pub async fn vendor_switch(
 }
 
 fn vendor_can_delete(state: &AppState, row: &VendorAccountRow) -> bool {
-    if row.provider_id.is_empty() {
-        return true;
-    }
-    provision::VENDOR_APPS.iter().all(|app_type| {
-        ProviderService::current(state, app_type.clone())
-            .map(|current| current != row.provider_id)
-            .unwrap_or(false)
+    // 逐 plan 检查：一个账号展开出的**所有** provider id 都不在任何平台的
+    // 当前项上，删除才安全（删账号会清掉全部 plan 的记录）。
+    row.plans.iter().all(|plan| {
+        if plan.provider_id.is_empty() {
+            return true;
+        }
+        provision::VENDOR_APPS.iter().all(|app_type| {
+            ProviderService::current(state, app_type.clone())
+                .map(|current| current != plan.provider_id)
+                .unwrap_or(false)
+        })
     })
 }
 
@@ -465,45 +509,46 @@ async fn refresh_vendor_session_balance(
     }
 }
 
-/// 这一行在 `app_type` 这个平台上的配置**是不是被用户改过**。
+/// 这个 plan 在 `app_type` 这个平台上的配置**是不是被用户改过**。
 ///
 /// `None` = 判不了：还没 provision（没有 provider 记录）、这个平台不适用
-/// （`config_for` 返回 `None`，如 gemini），或 `is_user_edited` 自己判不了。
+/// （`config_for` 返回 `None`，如 gemini），或读不出标记。
 /// UI 在 `None` 时不显示标记 —— 与 relay 的 `TierInfo.user_edited` 同一条原则：
 /// **不知道就别断言**。
 ///
-/// ## ⚠️ `roles` 必须与生成配置时用的完全一致
+/// ## ⚠️ 生成基准必须与生成配置时同一份 plan
 ///
-/// 两边都取 [`crate::vendor::provision::claude_roles_for`]。不一致 ⇒ 基准里缺
-/// fable / subagent 两个键 ⇒ 整份比对失配 ⇒ **每个 Claude 档位都误报「已手工维护」**。
-/// 那个函数的文档写了完整理由。
-fn user_edited_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType) -> Option<bool> {
-    if row.provider_id.is_empty() {
+/// 两边都取 [`crate::vendor::provision::claude_roles_for`]（带同一个 plan 段）。
+/// 不一致 ⇒ 基准里缺 fable / subagent 两个键 ⇒ 整份比对失配 ⇒ **每个 Claude 档位
+/// 都误报「已手工维护」**。那个函数的文档写了完整理由。
+fn user_edited_for(state: &AppState, plan: &VendorPlanRow, app_type: &AppType) -> Option<bool> {
+    if plan.provider_id.is_empty() {
         return None; // 还没登录过，派生不出 provider id。
     }
     // 读存库标记 ——「已手工维护」的唯一来源（编辑页置位、恢复默认复位）。
     // 读失败返回 None（不知道就别断言，同原语义）。
     state
         .db
-        .get_user_edited(app_type.as_str(), &row.provider_id)
+        .get_user_edited(app_type.as_str(), &plan.provider_id)
         .ok()
 }
 
-/// 这一行在 `app_type` 这个平台下**是不是正在用的那个**。
+/// 这个 plan 在 `app_type` 这个平台下**是不是正在用的那个**。
 ///
 /// 判据与中转站档位的 `is_current` **同源**：`providers` 表里该 `app_type` 的当前项
-/// （上游 `ProviderService::current`）== 本行的 `provider_id`。所以「DeepSeek 官方组」
-/// 与「中转站档位 / 手工 provider」共享同一份互斥，一个 app 下永远只有一个在用。
+/// （上游 `ProviderService::current`）== 本 plan 的 `provider_id`。所以「DeepSeek
+/// 官方组」「opencode 的 Zen / Go 档」与「中转站档位 / 手工 provider」共享同一份
+/// 互斥，一个 app 下永远只有一个在用。
 ///
 /// ⚠️ **`provider_id` 为空时必须返回 `false`**：未登录的行派生不出 id（给空串），
 /// 而 `ProviderService::current` 在无当前项时也返回空串 —— 不守卫会让「从未登录」
 /// 的行被误判成当前项（空 == 空）。
-fn is_current_for(state: &AppState, row: &VendorAccountRow, app_type: &AppType) -> bool {
-    if row.provider_id.is_empty() {
+fn is_current_for(state: &AppState, plan: &VendorPlanRow, app_type: &AppType) -> bool {
+    if plan.provider_id.is_empty() {
         return false;
     }
     ProviderService::current(state, app_type.clone())
-        .map(|current| current == row.provider_id)
+        .map(|current| current == plan.provider_id)
         .unwrap_or(false)
 }
 
@@ -829,7 +874,7 @@ async fn provision_impl(
         plaintext
     };
 
-    // ── 6. 展开六个平台 ─────────────────────────────────────────────
+    // ── 6. 按全部 plan 展开平台记录 ─────────────────────────────────
     //
     // ⚠️ **`account_id` 为 `None` 时必须报错，不能回落**（final review I-4 抓出）。
     //
@@ -848,94 +893,106 @@ async fn provision_impl(
     // 否则造出死局」）：这里也报错。两处口径统一成「`None` ⇒ Err」之后，
     // 那个死局在结构上就不存在了。
     // （`account_id` 已在第 1 步取出并要求非空 —— Key 名字也按它算。）
-    let provider_id = provision::provider_id_for(vendor.vendor_id(), &account_id);
+    let bundles = provision::plan_rows_for(vendor, &account_id, &api_key);
 
     let mut platforms = Vec::new();
     let mut merged_providers = Vec::new();
-    for (idx, (app_type, defaults)) in provision::provider_rows_for(vendor, &api_key)
-        .into_iter()
-        .enumerate()
-    {
-        // ⚠️ **已存在的记录只换 sk，不覆盖用户的编辑**：`save_provider` 是全量覆盖
-        // `settings_config` 的，照写默认配置会把用户改过的模型名 / 自定义端点全冲掉 ——
-        // 而他点「获取密钥」通常只是想刷新一下（照 `relay::provision_impl` 那段）。
-        let existing = state
-            .db
-            .get_provider_by_id(&provider_id, app_type.as_str())
-            .ok()
-            .flatten();
+    // 「当前项在不在本轮写过的 id 里」要按 id 集合判（多 plan 有多个 id），
+    // 结尾统一刷 live config。
+    let mut written_provider_ids = Vec::new();
+    for (plan_idx, bundle) in bundles.iter().enumerate() {
+        let provider_id = bundle.provider_id.clone();
+        written_provider_ids.push(provider_id.clone());
+        for (row_idx, (app_type, defaults)) in bundle.rows.iter().enumerate() {
+            let sort_index = plan_idx * provision::VENDOR_APPS.len() + row_idx;
 
-        let settings_config = match existing {
-            Some(old) => {
-                let mut kept = old.settings_config;
-                // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落默认配置。
-                // 否则用户会留着一把旧 sk 却以为刷新成功了。
-                if crate::relay::provision::patch_api_key(&mut kept, &app_type, &api_key) {
-                    kept
-                } else {
-                    log::warn!(
-                        "{} 的官网配置里找不到放密钥的位置，已重置为默认配置",
-                        app_type.as_str()
-                    );
-                    defaults
+            // ⚠️ **已存在的记录只换 sk，不覆盖用户的编辑**：`save_provider` 是全量覆盖
+            // `settings_config` 的，照写默认配置会把用户改过的模型名 / 自定义端点全冲掉 ——
+            // 而他点「获取密钥」通常只是想刷新一下（照 `relay::provision_impl` 那段）。
+            let existing = state
+                .db
+                .get_provider_by_id(&provider_id, app_type.as_str())
+                .ok()
+                .flatten();
+
+            let settings_config = match existing {
+                Some(old) => {
+                    let mut kept = old.settings_config;
+                    // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落默认配置。
+                    // 否则用户会留着一把旧 sk 却以为刷新成功了。
+                    if crate::relay::provision::patch_api_key(&mut kept, app_type, &api_key) {
+                        kept
+                    } else {
+                        log::warn!(
+                            "{} 的官网配置里找不到放密钥的位置，已重置为默认配置",
+                            app_type.as_str()
+                        );
+                        defaults.clone()
+                    }
                 }
+                None => defaults.clone(),
+            };
+
+            let provider = Provider {
+                id: provider_id.clone(),
+                name: bundle.plan.display_name.to_string(),
+                settings_config,
+                website_url: Some(crate::vendor::site_origin(vendor).to_string()),
+                // ⚠️ `cn_official` —— **不是** `aggregator`（那是中转站的），
+                // 更**绝不能**是 `official`：那条分类会触发一批只对官方订阅成立的逻辑
+                // （stale auth 清理、统一会话桶注入）。
+                category: Some("cn_official".to_string()),
+                created_at: Some(chrono::Utc::now().timestamp_millis()),
+                sort_index: Some(sort_index),
+                notes: None,
+                meta: Some(vendor_meta(
+                    app_type,
+                    Some(account_id.clone()),
+                    crate::vendor::plan_style(vendor, bundle.plan.id_segment),
+                )),
+                icon: Some(vendor_icon(vendor).to_string()),
+                icon_color: Some(vendor_icon_color(vendor).to_string()),
+                in_failover_queue: false,
+            };
+
+            state
+                .db
+                .save_provider(app_type.as_str(), &provider)
+                .map_err(|e| {
+                    AppError::Database(format!("保存 {} 配置失败: {e}", app_type.as_str()))
+                })?;
+
+            let merged = provider_fingerprint::remove_unmanaged_duplicates(
+                state.db.as_ref(),
+                app_type,
+                &provider,
+            )?;
+            if !merged.is_empty() {
+                log::info!(
+                    "收编 {} 个重复的 {} provider：{}",
+                    merged.len(),
+                    app_type.as_str(),
+                    merged
+                        .iter()
+                        .map(|item| item.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                );
+                if merged.iter().any(|item| item.was_current) {
+                    state
+                        .db
+                        .set_current_provider(app_type.as_str(), &provider_id)?;
+                }
+                merged_providers.extend(merged.into_iter().map(|item| item.name));
             }
-            None => defaults,
-        };
 
-        let provider = Provider {
-            id: provider_id.clone(),
-            name: vendor.display_name().to_string(),
-            settings_config,
-            website_url: Some(crate::vendor::site_origin(vendor).to_string()),
-            // ⚠️ `cn_official` —— **不是** `aggregator`（那是中转站的），
-            // 更**绝不能**是 `official`：那条分类会触发一批只对官方订阅成立的逻辑
-            // （stale auth 清理、统一会话桶注入）。
-            category: Some("cn_official".to_string()),
-            created_at: Some(chrono::Utc::now().timestamp_millis()),
-            sort_index: Some(idx),
-            notes: None,
-            meta: Some(vendor_meta(&app_type, Some(account_id.clone()))),
-            icon: Some(vendor_icon(vendor).to_string()),
-            icon_color: Some(vendor_icon_color(vendor).to_string()),
-            in_failover_queue: false,
-        };
-
-        state
-            .db
-            .save_provider(app_type.as_str(), &provider)
-            .map_err(|e| AppError::Database(format!("保存 {} 配置失败: {e}", app_type.as_str())))?;
-
-        let merged = provider_fingerprint::remove_unmanaged_duplicates(
-            state.db.as_ref(),
-            &app_type,
-            &provider,
-        )?;
-        if !merged.is_empty() {
-            log::info!(
-                "收编 {} 个重复的 {} provider：{}",
-                merged.len(),
-                app_type.as_str(),
-                merged
-                    .iter()
-                    .map(|item| item.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("、")
-            );
-            if merged.iter().any(|item| item.was_current) {
-                state
-                    .db
-                    .set_current_provider(app_type.as_str(), &provider_id)?;
-            }
-            merged_providers.extend(merged.into_iter().map(|item| item.name));
+            platforms.push(app_type.as_str().to_string());
         }
-
-        platforms.push(app_type.as_str().to_string());
     }
 
-    // 写完六条之后刷一次 live config：不刷的话「当前就是这条 provider」的用户拿到的
-    // 仍是旧 sk（CLI 读的是落地文件，不是数据库）。失败只 warn —— 记录已经存对了，
-    // 用户手工切一次就能生效，不该因为快照写不下去而报「备密钥失败」。
+    // 写完全部 plan 的记录之后刷一次 live config：不刷的话「当前就是这条 provider」
+    // 的用户拿到的仍是旧 sk（CLI 读的是落地文件，不是数据库）。失败只 warn ——
+    // 记录已经存对了，用户手工切一次就能生效，不该因为快照写不下去而报「备密钥失败」。
     //
     // 走 `sync_current_provider_for_app` 而不是 `switch`：这条路不是**切换**当前项
     // （它本来就是当前项），只是让落地配置追上 DB。那个 API 内部已处理代理接管
@@ -945,8 +1002,8 @@ async fn provision_impl(
     for app_type in provision::VENDOR_APPS {
         let is_current = ProviderService::current(state, app_type.clone())
             .ok()
-            .as_deref()
-            == Some(provider_id.as_str());
+            .map(|current| written_provider_ids.contains(&current))
+            .unwrap_or(false);
         if !is_current {
             continue;
         }
@@ -959,7 +1016,9 @@ async fn provision_impl(
     }
 
     Ok(VendorProvisionSummary {
-        provider_id,
+        // 多 plan 后一个账号有多个 provider id；给「主」id（第一个 plan）保持旧契约，
+        // 前端只拿它做日志/展示，真正的行内档位 id 来自 `vendor_list_accounts`。
+        provider_id: written_provider_ids.first().cloned().unwrap_or_default(),
         platforms,
         key_created,
         merged_providers,
@@ -1009,14 +1068,15 @@ fn vendor_reset_tier_config_impl(
     }
 
     let app_type: AppType = app_id.parse()?;
-    // provider_id 是 vendor_id/account_id 的哈希（不可逆）⇒ 用 vendor 表重算反查。
-    let vendor = vendor_by_provider_id(state, provider_id)?;
-    let (base_url, model) = crate::vendor::config_for(vendor, &app_type).ok_or_else(|| {
-        AppError::Config(format!(
-            "{app_id} 这个平台没有 {} 配置，恢复不了默认值",
-            vendor.display_name()
-        ))
-    })?;
+    // provider_id 是段/account_id 的哈希（不可逆）⇒ 用 vendor 表逐 plan 重算反查。
+    let (vendor, plan) = vendor_plan_by_provider_id(state, provider_id)?;
+    let (base_url, model) = crate::vendor::config_for(vendor, plan.id_segment, &app_type)
+        .ok_or_else(|| {
+            AppError::Config(format!(
+                "{app_id} 这个平台没有 {} 配置，恢复不了默认值",
+                plan.display_name
+            ))
+        })?;
 
     let existing = state
         .db
@@ -1031,15 +1091,18 @@ fn vendor_reset_tier_config_impl(
             AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
         })?;
 
-    // ⚠️ **`roles` 必须与生成时一致**，否则「恢复默认」写出的配置与
-    // `user_edited` 的基准不同 ⇒ 恢复完立刻又显示「已手工维护」。
-    let defaults = crate::relay::provision::settings_config_with_roles(
+    // ⚠️ **`roles` 与生成风格必须与生成时同一份 plan**，否则「恢复默认」写出的
+    // 配置与 `user_edited` 的基准不同 ⇒ 恢复完立刻又显示「已手工维护」
+    // （Go 档的鉴权字段再走 Bearer 就是静默 401）。
+    let defaults = crate::relay::provision::settings_config_with_roles_and_models(
         &app_type,
         &api_key,
         &existing.name,
         &base_url,
         &model,
-        provision::claude_roles_for(vendor, &app_type),
+        provision::claude_roles_for(vendor, plan.id_segment, &app_type),
+        None,
+        crate::vendor::plan_style(vendor, plan.id_segment),
     )
     .ok_or_else(|| AppError::Config(format!("{app_id} 这个平台生成不出默认配置")))?;
 
@@ -1180,17 +1243,22 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
         .ok_or_else(|| AppError::Config("这个账号已经不存在了".into()))?;
 
     if let (Some(vendor), Some(account_id)) = (Vendor::from_id(&row.vendor_id), row.account_id) {
-        let provider_id = provision::provider_id_for(vendor.vendor_id(), &account_id);
+        // ⚠️ **逐 plan 清理**：一个账号展开出全部 plan 的 provider 记录（多 plan
+        // 厂商一个账号两个 id），删账号要清的是「全部」。
+        let provider_ids: Vec<String> = crate::vendor::plans(vendor)
+            .iter()
+            .map(|plan| provision::provider_id_for(plan.id_segment, &account_id))
+            .collect();
 
         // 闸：先扫一遍六个平台，撞上当前项就整条路中止（全有或全无 —— 半删会留下
         // 用户再也处置不了的孤儿记录，见 `relay::remove_site_impl` 那段）。
         let in_use: Vec<&str> = provision::VENDOR_APPS
             .iter()
             .filter(|app_type| {
-                ProviderService::current(state, (*app_type).clone())
-                    .ok()
-                    .as_deref()
-                    == Some(provider_id.as_str())
+                let current = ProviderService::current(state, (*app_type).clone()).ok();
+                provider_ids
+                    .iter()
+                    .any(|id| current.as_deref() == Some(id.as_str()))
             })
             .map(|app_type| app_type.as_str())
             .collect();
@@ -1201,14 +1269,16 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
             )));
         }
 
-        for app_type in provision::VENDOR_APPS {
-            // ⚠️ **必须带 app_type**：`provider_id` 不含它（六个平台共用一个 id），
-            // 所以要逐个平台删。
-            if let Err(e) = state.db.delete_provider(app_type.as_str(), &provider_id) {
-                log::warn!(
-                    "删除账号时清理 {} 的配置失败（账号仍会删掉）: {e}",
-                    app_type.as_str()
-                );
+        for provider_id in &provider_ids {
+            for app_type in provision::VENDOR_APPS {
+                // ⚠️ **必须带 app_type**：`provider_id` 不含它（六个平台共用一个 id），
+                // 所以要逐个平台删。
+                if let Err(e) = state.db.delete_provider(app_type.as_str(), provider_id) {
+                    log::warn!(
+                        "删除账号时清理 {} 的配置失败（账号仍会删掉）: {e}",
+                        app_type.as_str()
+                    );
+                }
             }
         }
     }
@@ -1249,15 +1319,23 @@ fn vendor_icon_color(vendor: Vendor) -> &'static str {
     }
 }
 
-/// provider_id 是 `hash(vendor_id/account_id)`（不可逆）⇒ 用 vendor 账号表
-/// 逐行重算来反查厂商。匹配不到说明这条托管记录不是 vendor 展开的，报错。
-fn vendor_by_provider_id(state: &AppState, provider_id: &str) -> Result<Vendor, AppError> {
+/// provider_id 是 `hash(plan段/account_id)`（不可逆）⇒ 用 vendor 账号表逐行
+/// **逐 plan** 重算来反查。匹配不到说明这条托管记录不是 vendor 展开的，报错。
+fn vendor_plan_by_provider_id(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<(Vendor, crate::vendor::PlanInfo), AppError> {
     let rows = with_conn(state, creds::list)?;
     for row in rows {
-        if let Some(account_id) = &row.account_id {
-            if provision::provider_id_for(&row.vendor_id, account_id) == provider_id {
-                return Vendor::from_id(&row.vendor_id)
-                    .ok_or_else(|| AppError::Config(format!("不认识的厂商：{}", row.vendor_id)));
+        let Some(vendor) = Vendor::from_id(&row.vendor_id) else {
+            continue;
+        };
+        let Some(account_id) = &row.account_id else {
+            continue;
+        };
+        for plan in crate::vendor::plans(vendor) {
+            if provision::provider_id_for(plan.id_segment, account_id) == provider_id {
+                return Ok((vendor, *plan));
             }
         }
     }
@@ -1266,12 +1344,24 @@ fn vendor_by_provider_id(state: &AppState, provider_id: &str) -> Result<Vendor, 
     )))
 }
 
-fn vendor_meta(app_type: &AppType, account_id: Option<String>) -> crate::provider::ProviderMeta {
+fn vendor_meta(
+    app_type: &AppType,
+    account_id: Option<String>,
+    style: crate::relay::provision::ProvisionStyle,
+) -> crate::provider::ProviderMeta {
     crate::provider::ProviderMeta {
         // `api_format` **只被 `codex_config.rs` 消费**（`CodexCatalogToolProfile::from_api_format`），
         // 对 claude / opencode 无意义 —— 给它们填值不会有人读，反而让人以为那里有语义。
+        // codex 的取值跟着 plan 的 wire 走（Go 是 chat，其余 responses）。
         api_format: match app_type {
-            AppType::Codex => Some("openai_responses".to_string()),
+            AppType::Codex => Some(
+                if style.codex_wire_chat {
+                    "openai_chat"
+                } else {
+                    "openai_responses"
+                }
+                .to_string(),
+            ),
             _ => None,
         },
         loongport_vendor_account: account_id,
@@ -1337,7 +1427,7 @@ mod tests {
         assert!(matches!(dto.status, VendorAccountStatus::NoKey));
         assert!(dto.can_refresh);
         assert!(dto.can_query_balance, "有效登录态是余额查询的兜底凭据");
-        assert!(!dto.can_edit_config);
+        assert!(!dto.plans[0].can_edit_config);
         assert_eq!(dto.vendor_name, "DeepSeek");
     }
 
@@ -1363,10 +1453,12 @@ mod tests {
         assert!(matches!(dto.status, VendorAccountStatus::NotLoggedIn));
         assert!(!dto.can_query_balance);
         assert!(!dto.can_refresh);
-        assert!(!dto.can_edit_config);
+        assert!(!dto.plans[0].can_edit_config);
     }
 
     /// 登录态过期时 sk 仍然好用 —— 这两个状态位必须独立，否则会催用户去做多余的事。
+    /// （`can_edit_config` 是按 plan × provider 记录算的，DB 侧的填充由
+    /// `current_app_capabilities_require_its_provider_record` 那条钉。）
     #[test]
     fn a_usable_key_survives_an_expired_session() {
         let dto = VendorAccountRow::from(row("", "sk-plaintext", Some("uuid-a")));
@@ -1376,7 +1468,6 @@ mod tests {
         ));
         assert!(dto.can_query_balance);
         assert!(dto.can_refresh);
-        assert!(dto.can_edit_config);
     }
 
     #[test]
@@ -1426,7 +1517,7 @@ mod tests {
             VendorAccountStatus::SessionExpired
         ));
         assert!(!without_provider.can_refresh);
-        assert!(!without_provider.can_edit_config);
+        assert!(!without_provider.plans[0].can_edit_config);
         assert!(without_provider.can_query_balance);
         assert!(
             vendor_refresh_targets(&state, &AppType::Codex)
@@ -1439,7 +1530,7 @@ mod tests {
         db.save_provider(
             AppType::Codex.as_str(),
             &Provider {
-                id: without_provider.provider_id.clone(),
+                id: without_provider.plans[0].provider_id.clone(),
                 name: "DeepSeek".into(),
                 settings_config: serde_json::json!({}),
                 website_url: Some(deepseek::SITE_ORIGIN.into()),
@@ -1465,7 +1556,7 @@ mod tests {
             VendorAccountStatus::SessionExpiredUsable
         ));
         assert!(with_provider.can_refresh);
-        assert!(with_provider.can_edit_config);
+        assert!(with_provider.plans[0].can_edit_config);
     }
 
     #[test]
@@ -1539,7 +1630,7 @@ mod tests {
         db.save_provider(
             "claude",
             &crate::provider::Provider {
-                id: in_use.provider_id.clone(),
+                id: in_use.plans[0].provider_id.clone(),
                 name: "DeepSeek".into(),
                 settings_config: serde_json::json!({}),
                 website_url: Some("https://platform.deepseek.com".into()),
@@ -1554,11 +1645,11 @@ mod tests {
             },
         )
         .expect("save provider");
-        db.set_current_provider("claude", &in_use.provider_id)
+        db.set_current_provider("claude", &in_use.plans[0].provider_id)
             .expect("set current");
 
-        assert!(is_current_for(&state, &in_use, &AppType::Claude));
-        assert!(!is_current_for(&state, &idle, &AppType::Claude));
+        assert!(is_current_for(&state, &in_use.plans[0], &AppType::Claude));
+        assert!(!is_current_for(&state, &idle.plans[0], &AppType::Claude));
     }
 
     /// 未登录的行（provider_id 为空）绝不能被判成当前项 ——
@@ -1568,29 +1659,42 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
         let state = AppState::new(db.clone());
         let never = VendorAccountRow::from(row("", "", None));
-        assert!(never.provider_id.is_empty());
-        assert!(!is_current_for(&state, &never, &AppType::Claude));
+        assert!(never.plans[0].provider_id.is_empty());
+        assert!(!is_current_for(&state, &never.plans[0], &AppType::Claude));
     }
 
     // ─────────────── meta ───────────────
 
     #[test]
     fn only_codex_gets_an_api_format() {
-        let codex = vendor_meta(&AppType::Codex, Some("uuid-a".into()));
+        let style = crate::relay::provision::ProvisionStyle::default();
+        let codex = vendor_meta(&AppType::Codex, Some("uuid-a".into()), style);
         assert_eq!(codex.api_format.as_deref(), Some("openai_responses"));
         for app in [AppType::Claude, AppType::OpenCode, AppType::Hermes] {
             assert!(
-                vendor_meta(&app, None).api_format.is_none(),
+                vendor_meta(&app, None, style).api_format.is_none(),
                 "{app:?} 不消费 api_format，填值只会让人以为那里有语义"
             );
         }
+    }
+
+    /// Go plan 的 codex 记录吃 chat 目录工具档（`openai_chat`），与 wire_api 一致。
+    #[test]
+    fn go_plan_codex_meta_uses_the_chat_api_format() {
+        let go = crate::vendor::plan_style(Vendor::OpenCode, "opencode-go");
+        let meta = vendor_meta(&AppType::Codex, Some("wrk_x".into()), go);
+        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
     }
 
     /// UUID 装不进 `loongport_account_id`（那是 `i64`）—— 这条钉住新字段的类型。
     #[test]
     fn the_vendor_account_field_holds_a_uuid() {
         let uuid = "11111111-2222-3333-4444-555555555555";
-        let meta = vendor_meta(&AppType::Claude, Some(uuid.to_string()));
+        let meta = vendor_meta(
+            &AppType::Claude,
+            Some(uuid.to_string()),
+            crate::relay::provision::ProvisionStyle::default(),
+        );
         assert_eq!(meta.loongport_vendor_account.as_deref(), Some(uuid));
         assert!(
             meta.loongport_account_id.is_none(),
@@ -1606,7 +1710,12 @@ mod tests {
 
     #[test]
     fn meta_omits_the_vendor_field_when_there_is_no_account() {
-        let json = serde_json::to_string(&vendor_meta(&AppType::Claude, None)).expect("序列化");
+        let json = serde_json::to_string(&vendor_meta(
+            &AppType::Claude,
+            None,
+            crate::relay::provision::ProvisionStyle::default(),
+        ))
+        .expect("序列化");
         assert!(
             !json.contains("loongportVendorAccount"),
             "None 时整个字段不该出现（skip_serializing_if）：{json}"
@@ -1713,12 +1822,12 @@ mod tests {
         };
         let dto = VendorAccountRow::from(row);
         assert_eq!(
-            dto.provider_id,
+            dto.plans[0].provider_id,
             crate::vendor::provision::provider_id_for("deepseek", "uuid-a"),
             "必须与 provision 算出的 id 一致 —— 不一致则前端比不出当前态"
         );
         assert!(
-            crate::relay::is_managed(&dto.provider_id),
+            crate::relay::is_managed(&dto.plans[0].provider_id),
             "顺带钉住它仍命中托管前缀"
         );
     }
@@ -1736,7 +1845,39 @@ mod tests {
             api_key: String::new(),
             sort_index: 0,
         };
-        assert_eq!(VendorAccountRow::from(row).provider_id, "");
+        assert_eq!(VendorAccountRow::from(row).plans[0].provider_id, "");
+    }
+
+    /// ⭐ **opencode 的 DTO 必须给出两个 plan，且 id 与 provision 派生的一致。**
+    ///
+    /// 前端渲染档位子行、switch 带 planId，全靠这份清单；id 对不上则「当前在用」
+    /// 高亮与切换命令各算各的。
+    #[test]
+    fn opencode_dto_lists_both_plans_with_derived_ids() {
+        let row = creds::VendorRow {
+            id: 1,
+            vendor_id: "opencode".to_string(),
+            account_id: Some("wrk_x".to_string()),
+            account_label: "dev@example.com".to_string(),
+            login_identifier: String::new(),
+            auth_token: "tok".to_string(),
+            api_key: "sk-x".to_string(),
+            sort_index: 0,
+        };
+        let dto = VendorAccountRow::from(row);
+        assert_eq!(dto.vendor_name, "opencode", "账号行头用厂商家族名");
+        assert_eq!(dto.plans.len(), 2, "Zen + Go");
+        assert_eq!(dto.plans[0].plan_name, "opencode Zen");
+        assert_eq!(dto.plans[1].plan_name, "opencode Go");
+        for plan in &dto.plans {
+            assert_eq!(
+                plan.provider_id,
+                crate::vendor::provision::provider_id_for(&plan.plan_id, "wrk_x"),
+                "{} 的 id 必须与 provision 派生一致",
+                plan.plan_name
+            );
+        }
+        assert_ne!(dto.plans[0].provider_id, dto.plans[1].provider_id);
     }
 
     #[test]
@@ -1998,6 +2139,104 @@ mod tests {
                 .expect("查行")
                 .is_none(),
             "账号行该被删掉"
+        );
+    }
+
+    // ─────────────── 多 plan（opencode）───────────────
+
+    fn seed_opencode_row(state: &AppState) -> i64 {
+        with_conn(state, |conn| {
+            creds::save_account(
+                conn,
+                Vendor::OpenCode,
+                "tok",
+                &crate::vendor::VendorAccount {
+                    account_id: "wrk_x".into(),
+                    label: "dev@example.com".into(),
+                    login_identifier: String::new(),
+                },
+            )
+        })
+        .expect("种 opencode 行")
+    }
+
+    fn opencode_provider_ids() -> Vec<String> {
+        crate::vendor::plans(Vendor::OpenCode)
+            .iter()
+            .map(|plan| provision::provider_id_for(plan.id_segment, "wrk_x"))
+            .collect()
+    }
+
+    fn seed_provider_everywhere(state: &AppState, provider_id: &str, name: &str) {
+        for app_type in provision::VENDOR_APPS {
+            let p = crate::provider::Provider::with_id(
+                provider_id.to_string(),
+                name.to_string(),
+                serde_json::json!({ "env": {} }),
+                None,
+            );
+            state
+                .db
+                .save_provider(app_type.as_str(), &p)
+                .expect("seed provider");
+        }
+    }
+
+    /// ⭐ **删一个 opencode 账号要清掉两个 plan（Zen + Go）的全部记录。**
+    /// 只清第一个 plan 会留下另一组托管孤儿（不可见、不可删）。
+    #[test]
+    fn deleting_an_opencode_account_removes_both_plans_records() {
+        let state = mem_state();
+        let row_id = seed_opencode_row(&state);
+        for (idx, id) in opencode_provider_ids().iter().enumerate() {
+            seed_provider_everywhere(
+                &state,
+                id,
+                if idx == 0 {
+                    "opencode Zen"
+                } else {
+                    "opencode Go"
+                },
+            );
+        }
+
+        remove_impl(&state, row_id).expect("删账号");
+
+        for (idx, id) in opencode_provider_ids().iter().enumerate() {
+            for app_type in provision::VENDOR_APPS {
+                assert!(
+                    state
+                        .db
+                        .get_provider_by_id(id, app_type.as_str())
+                        .expect("查")
+                        .is_none(),
+                    "第 {} 个 plan 的 {} 记录没被清掉 —— 会变成托管孤儿",
+                    idx,
+                    app_type.as_str()
+                );
+            }
+        }
+    }
+
+    /// ⭐ **任一 plan 在用都拦删除** —— Go 档在 codex 上被选中时删账号同样会毁掉
+    /// 那个平台的当前配置（删除清的是全部 plan）。
+    #[test]
+    fn removing_an_opencode_account_is_refused_while_the_go_plan_is_in_use() {
+        let state = mem_state();
+        let row_id = seed_opencode_row(&state);
+        let ids = opencode_provider_ids();
+        let go_id = ids.last().expect("Go 档 id").clone();
+        seed_provider_everywhere(&state, &ids[0], "opencode Zen");
+        seed_provider_everywhere(&state, &go_id, "opencode Go");
+        state
+            .db
+            .set_current_provider("codex", &go_id)
+            .expect("set current");
+
+        let err = remove_impl(&state, row_id).expect_err("Go 档在用时删除必须失败");
+        assert!(
+            err.to_string().contains("codex"),
+            "文案要点名平台，实际：{err}"
         );
     }
 }

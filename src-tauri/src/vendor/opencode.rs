@@ -39,6 +39,12 @@
 //! （2026-08-16）：Anthropic 兼容 `/zen/v1/messages`（SDK base 取 `/zen`）、
 //! OpenAI 兼容 `/zen/v1/chat/completions` 与 Responses `/zen/v1/responses`（base
 //! 取 `/zen/v1`）。
+//!
+//! ## 两个接入变体（[`Plan`]）
+//!
+//! opencode 的账号有两套接入端点共享同一把 key：Zen（按量计费全量目录）与
+//! Go（订阅制精选开源模型，`/zen/go` 下）。账号层（登录窗、cookie、key 认领）
+//! 两档完全同一套 —— 差异只在配置展开层，见 [`Plan`] 的文档。
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +53,10 @@ use crate::vendor::{key_name_for, VendorAccount, VendorError};
 
 /// 凭据回传用的自定义 scheme（与 deepseek / bigmodel 不同名，互不认领）。
 const CREDS_SCHEME: &str = "loongport-opencode-creds";
+
+/// 稳定标识（`Vendor::vendor_id` 与 [`Plan::Zen`] 段的唯一源）。
+/// ⚠️ 改它是迁移不是重构。
+pub const VENDOR_ID: &str = "opencode";
 
 /// 登录窗 label（各厂商的登录窗可以同时开）。
 pub const LOGIN_WINDOW_LABEL: &str = "loongport-opencode-login";
@@ -61,6 +71,13 @@ pub const API_ORIGIN: &str = "https://opencode.ai/zen/v1";
 
 /// Anthropic 兼容层（`/zen/v1/messages` ⇒ SDK base_url 取 `/zen`）。
 pub const ANTHROPIC_ORIGIN: &str = "https://opencode.ai/zen";
+
+/// Go 套餐的 OpenAI 兼容 API 根（[`Plan::Go`]）。
+pub const GO_API_ORIGIN: &str = "https://opencode.ai/zen/go/v1";
+
+/// Go 套餐的 Anthropic 兼容层（`/zen/go/v1/messages` ⇒ SDK base 取 `/zen/go`；
+/// 该网关只认 x-api-key，见 [`Plan::style`]）。
+pub const GO_ANTHROPIC_ORIGIN: &str = "https://opencode.ai/zen/go";
 
 /// 会话 cookie 名（console `useSession({ name: "auth" })`，HttpOnly）。
 const SESSION_COOKIE_NAME: &str = "auth";
@@ -437,86 +454,212 @@ pub fn login_script(_login_hint: &str) -> String {
 
 // ─────────────────────── 平台预设 ───────────────────────
 
-/// Claude 系默认主模型（coding 甜点档）。
+/// Zen：Claude 系默认主模型（coding 甜点档）。
 const FLAGSHIP: &str = "claude-sonnet-5";
-/// Claude 系便宜档。
+/// Zen：Claude 系便宜档。
 const HAIKU: &str = "claude-haiku-4-5";
-/// Codex 走 Responses 端点，用 codex 系模型。
+/// Zen：Codex 走 Responses 端点，用 codex 系模型。
 const CODEX_MODEL: &str = "gpt-5.3-codex";
-/// OpenAI 兼容（chat/completions）平台的主模型。
+/// Zen：OpenAI 兼容（chat/completions）平台的主模型。
 const CHAT_MODEL: &str = "deepseek-v4-pro";
 
-/// `AppType` → `(base_url, model)`。远端 `tier_configs`（键 `opencode/{app}`）可覆盖。
-pub fn config_for(app: &crate::app_config::AppType) -> Option<(String, String)> {
-    let builtin = builtin_config_for(app)?;
+/// Go：Claude 系主模型（Go 目录没有 claude，落 deepseek 双档）。
+const GO_CLAUDE_MAIN: &str = "deepseek-v4-pro";
+/// Go：Claude 系便宜档。
+const GO_CLAUDE_CHEAP: &str = "deepseek-v4-flash";
+/// Go：OpenAI 兼容平台的默认模型（上游 OpenCode Go preset 同款首发模型）。
+const GO_CHAT_MODEL: &str = "glm-5.2";
 
-    let key = format!("opencode/{}", app.as_str());
-    let remote = crate::relay::remote_config::load_cached()
-        .and_then(|config| config.tier_configs.get(&key).cloned())
-        .filter(|config| {
-            config.base_url.starts_with("https://") && !config.model.trim().is_empty()
-        });
-
-    Some(match remote {
-        Some(config) => (config.base_url.clone(), config.model.clone()),
-        None => (builtin.0.to_string(), builtin.1.to_string()),
-    })
+/// opencode 账号的**接入变体（plan）**：同一个 workspace、同一把 key、同一个控制台，
+/// 不同的端点与模型目录。
+///
+/// - [`Plan::Zen`]：按量计费全量目录（claude / gpt / gemini …）。
+/// - [`Plan::Go`]：Go 订阅的精选开源编码模型（glm / kimi / deepseek / qwen …），
+///   端点挂在 `/zen/go` 下，**要求该 workspace 有生效的 Go 订阅**（订阅态无公开
+///   API 可查，不探测 —— 没订阅的用户切过去 401，档位上的订阅链接自解释）。
+///
+/// ## 为什么是 plan 而不是新 [`crate::vendor::Vendor`] 变体
+///
+/// 两档在**账号层零差异**（登录窗、cookie、key 认领、余额语义全是同一套），
+/// 拆成两个 vendor 行会把同一个会话与同一把 key 存两份，且必然漂移
+/// （重登一行、删一行后另一行还是旧值）—— 唯一数据源（全局准则 §1.4）不允许。
+/// 差异全部在**配置展开层**，plan 就只住在这一层。
+///
+/// ## 判据（将来同类问题按这条切）
+///
+/// **同 console、同 key ⇒ 同一账号的 plan；不同 console、不同 key ⇒ 新 vendor 变体。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plan {
+    /// 按量计费（`/zen`、`/zen/v1`）。
+    Zen,
+    /// Go 订阅（`/zen/go`、`/zen/go/v1`），网关只认 x-api-key。
+    Go,
 }
 
-fn builtin_config_for(app: &crate::app_config::AppType) -> Option<(&'static str, &'static str)> {
-    Some(match app {
-        crate::app_config::AppType::Codex => (API_ORIGIN, CODEX_MODEL),
-        crate::app_config::AppType::Claude | crate::app_config::AppType::ClaudeDesktop => {
-            (ANTHROPIC_ORIGIN, FLAGSHIP)
+impl Plan {
+    /// 全部 plan，数组序即展示序（Zen 在前：不订阅也能用）。
+    pub const ALL: [Plan; 2] = [Plan::Zen, Plan::Go];
+
+    /// 喂给 [`crate::vendor::plans`] 的静态清单（两档的段与名字都从本枚举派生）。
+    pub const PLAN_INFOS: [crate::vendor::PlanInfo; 2] = [
+        crate::vendor::PlanInfo {
+            id_segment: Plan::Zen.id_segment(),
+            display_name: Plan::Zen.display_name(),
+        },
+        crate::vendor::PlanInfo {
+            id_segment: Plan::Go.id_segment(),
+            display_name: Plan::Go.display_name(),
+        },
+    ];
+
+    /// 进 provider id 哈希（[`crate::vendor::provision::provider_id_for`]）与远端
+    /// `tier_configs` 键的稳定段。
+    ///
+    /// ⚠️ **Zen 段必须等于 `VENDOR_ID`（`"opencode"`）** ——
+    /// 存量 Zen 档位的 provider id 由它派生，改一个字节那些记录就全部失联
+    /// （既切不走也删不掉）。有测试闸钉着这条。
+    pub const fn id_segment(self) -> &'static str {
+        match self {
+            Plan::Zen => VENDOR_ID,
+            Plan::Go => "opencode-go",
         }
-        crate::app_config::AppType::Hermes
-        | crate::app_config::AppType::OpenClaw
-        | crate::app_config::AppType::OpenCode => (API_ORIGIN, CHAT_MODEL),
-        crate::app_config::AppType::Gemini
-        | crate::app_config::AppType::GrokBuild
-        | crate::app_config::AppType::CodexImage
-        | crate::app_config::AppType::Pi => return None,
-    })
-}
+    }
 
-/// Claude 系四角色 → zen 的 Claude 模型。远端 `tier_configs` 键
-/// `opencode/claude` 的 `claude_roles` 可覆盖。
-pub fn claude_role_models() -> crate::relay::provision::ClaudeRoleModels {
-    let builtin = crate::relay::provision::ClaudeRoleModels {
-        opus: "claude-opus-5".to_string(),
-        fable: "claude-fable-5".to_string(),
-        sonnet: FLAGSHIP.to_string(),
-        haiku: HAIKU.to_string(),
-        subagent: HAIKU.to_string(),
-    };
-    let Some(remote) = crate::relay::remote_config::load_cached()
-        .and_then(|config| config.tier_configs.get("opencode/claude").cloned())
-        .and_then(|config| config.claude_roles)
-    else {
-        return builtin;
-    };
+    /// provider 记录与档位行的展示名（要自描述：provider 列表里没有行的上下文）。
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Plan::Zen => "opencode Zen",
+            Plan::Go => "opencode Go",
+        }
+    }
 
-    crate::relay::provision::ClaudeRoleModels {
-        opus: remote
-            .opus
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or(builtin.opus),
-        fable: remote
-            .fable
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or(builtin.fable),
-        sonnet: remote
-            .sonnet
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or(builtin.sonnet),
-        haiku: remote
-            .haiku
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or(builtin.haiku),
-        subagent: remote
-            .subagent
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or(builtin.subagent),
+    pub fn from_id_segment(segment: &str) -> Option<Self> {
+        Plan::ALL
+            .into_iter()
+            .find(|plan| plan.id_segment() == segment)
+    }
+
+    /// 生成配置时与默认风格的差异（[`crate::relay::provision::ProvisionStyle`]）。
+    pub fn style(self) -> crate::relay::provision::ProvisionStyle {
+        match self {
+            Plan::Zen => crate::relay::provision::ProvisionStyle::default(),
+            Plan::Go => crate::relay::provision::ProvisionStyle {
+                // Go 网关 /v1/messages 只认 x-api-key（Bearer 被静默忽略，仓内
+                // OpenCode Go preset 的注释实测钉过）。
+                claude_auth_via_api_key: true,
+                // Go 的 responses 目录只有 grok-4.5 / gpt-5.6-luna（带 30 天监控
+                // 保留），主力开源模型都在 chat 目录 —— 上游 Codex preset 同选
+                // chat + glm-5.2，照它的实测结论走。
+                codex_wire_chat: true,
+            },
+        }
+    }
+
+    /// `AppType` → `(base_url, model)`。远端 `tier_configs`（键
+    /// `{id_segment}/{app}`）可覆盖。
+    pub fn config_for(self, app: &crate::app_config::AppType) -> Option<(String, String)> {
+        let builtin = self.builtin_config_for(app)?;
+
+        let key = format!("{}/{}", self.id_segment(), app.as_str());
+        let remote = crate::relay::remote_config::load_cached()
+            .and_then(|config| config.tier_configs.get(&key).cloned())
+            .filter(|config| {
+                config.base_url.starts_with("https://") && !config.model.trim().is_empty()
+            });
+
+        Some(match remote {
+            Some(config) => (config.base_url.clone(), config.model.clone()),
+            None => (builtin.0.to_string(), builtin.1.to_string()),
+        })
+    }
+
+    fn builtin_config_for(
+        self,
+        app: &crate::app_config::AppType,
+    ) -> Option<(&'static str, &'static str)> {
+        match self {
+            Plan::Zen => Some(match app {
+                crate::app_config::AppType::Codex => (API_ORIGIN, CODEX_MODEL),
+                crate::app_config::AppType::Claude | crate::app_config::AppType::ClaudeDesktop => {
+                    (ANTHROPIC_ORIGIN, FLAGSHIP)
+                }
+                crate::app_config::AppType::Hermes
+                | crate::app_config::AppType::OpenClaw
+                | crate::app_config::AppType::OpenCode => (API_ORIGIN, CHAT_MODEL),
+                crate::app_config::AppType::Gemini
+                | crate::app_config::AppType::GrokBuild
+                | crate::app_config::AppType::CodexImage
+                | crate::app_config::AppType::Pi => return None,
+            }),
+            Plan::Go => Some(match app {
+                crate::app_config::AppType::Codex => (GO_API_ORIGIN, GO_CHAT_MODEL),
+                crate::app_config::AppType::Claude | crate::app_config::AppType::ClaudeDesktop => {
+                    (GO_ANTHROPIC_ORIGIN, GO_CLAUDE_MAIN)
+                }
+                crate::app_config::AppType::Hermes
+                | crate::app_config::AppType::OpenClaw
+                | crate::app_config::AppType::OpenCode => (GO_API_ORIGIN, GO_CHAT_MODEL),
+                crate::app_config::AppType::Gemini
+                | crate::app_config::AppType::GrokBuild
+                | crate::app_config::AppType::CodexImage
+                | crate::app_config::AppType::Pi => return None,
+            }),
+        }
+    }
+
+    /// Claude 系四角色 → 本档的角色模型（Zen 用 claude 系，Go 落开源双档）。
+    /// 远端 `tier_configs` 键 `{id_segment}/claude` 的 `claude_roles` 可覆盖。
+    pub fn claude_role_models(self) -> crate::relay::provision::ClaudeRoleModels {
+        let builtin = self.builtin_claude_roles();
+        let key = format!("{}/claude", self.id_segment());
+        let Some(remote) = crate::relay::remote_config::load_cached()
+            .and_then(|config| config.tier_configs.get(&key).cloned())
+            .and_then(|config| config.claude_roles)
+        else {
+            return builtin;
+        };
+
+        crate::relay::provision::ClaudeRoleModels {
+            opus: remote
+                .opus
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(builtin.opus),
+            fable: remote
+                .fable
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(builtin.fable),
+            sonnet: remote
+                .sonnet
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(builtin.sonnet),
+            haiku: remote
+                .haiku
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(builtin.haiku),
+            subagent: remote
+                .subagent
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(builtin.subagent),
+        }
+    }
+
+    fn builtin_claude_roles(self) -> crate::relay::provision::ClaudeRoleModels {
+        match self {
+            Plan::Zen => crate::relay::provision::ClaudeRoleModels {
+                opus: "claude-opus-5".to_string(),
+                fable: "claude-fable-5".to_string(),
+                sonnet: FLAGSHIP.to_string(),
+                haiku: HAIKU.to_string(),
+                subagent: HAIKU.to_string(),
+            },
+            Plan::Go => crate::relay::provision::ClaudeRoleModels {
+                opus: GO_CLAUDE_MAIN.to_string(),
+                fable: GO_CLAUDE_MAIN.to_string(),
+                sonnet: GO_CLAUDE_MAIN.to_string(),
+                haiku: GO_CLAUDE_CHEAP.to_string(),
+                subagent: GO_CLAUDE_CHEAP.to_string(),
+            },
+        }
     }
 }
 
@@ -662,14 +805,93 @@ mod tests {
     #[test]
     fn builtin_config_covers_six_platforms_with_expected_origins() {
         use crate::app_config::AppType;
-        let (codex_base, codex_model) = builtin_config_for(&AppType::Codex).unwrap();
+        let (codex_base, codex_model) = Plan::Zen.builtin_config_for(&AppType::Codex).unwrap();
         assert_eq!(codex_base, API_ORIGIN);
         assert_eq!(codex_model, CODEX_MODEL);
 
-        let (claude_base, _) = builtin_config_for(&AppType::Claude).unwrap();
+        let (claude_base, _) = Plan::Zen.builtin_config_for(&AppType::Claude).unwrap();
         assert_eq!(claude_base, ANTHROPIC_ORIGIN);
 
-        assert!(builtin_config_for(&AppType::Gemini).is_none());
-        assert!(builtin_config_for(&AppType::OpenCode).is_some());
+        assert!(Plan::Zen.builtin_config_for(&AppType::Gemini).is_none());
+        assert!(Plan::Zen.builtin_config_for(&AppType::OpenCode).is_some());
+    }
+
+    /// ⭐ **Zen 段必须等于 vendor_id** —— 存量 Zen 档位的 provider id 全部由它派生。
+    /// 这条一旦失守，老用户的 Zen 档位既切不走也删不掉（托管记录还拦手工删除）。
+    #[test]
+    fn zen_id_segment_is_pinned_to_the_vendor_id() {
+        assert_eq!(
+            Plan::Zen.id_segment(),
+            crate::vendor::Vendor::OpenCode.vendor_id(),
+            "改 Zen 段 = 迁移不是重构，先读 id_segment 的文档"
+        );
+        // 对应地：两档对同一账号必须派生出不同的 provider id（互斥可切的机制）。
+        let zen = crate::vendor::provision::provider_id_for(Plan::Zen.id_segment(), "wrk_x");
+        let go = crate::vendor::provision::provider_id_for(Plan::Go.id_segment(), "wrk_x");
+        assert_ne!(zen, go);
+    }
+
+    /// Go 的内置端点全部落在 `/zen/go` 下，且覆盖面与 Zen 相同（六个平台）。
+    #[test]
+    fn go_plan_points_every_supported_app_at_the_go_gateway() {
+        use crate::app_config::AppType;
+        for app in [
+            AppType::Codex,
+            AppType::Claude,
+            AppType::ClaudeDesktop,
+            AppType::Hermes,
+            AppType::OpenClaw,
+            AppType::OpenCode,
+        ] {
+            let (base, model) = Plan::Go
+                .builtin_config_for(&app)
+                .unwrap_or_else(|| panic!("{} 该有 Go 配置", app.as_str()));
+            assert!(
+                base.starts_with("https://opencode.ai/zen/go"),
+                "{} 的 Go 端点指错地方：{base}",
+                app.as_str()
+            );
+            assert!(!model.is_empty());
+        }
+        assert!(Plan::Go.builtin_config_for(&AppType::Gemini).is_none());
+    }
+
+    /// Go 的 Claude 角色档不能引用 Zen 目录里的 claude 模型（Go 网关没有它们，
+    /// 写进去就是切到 sonnet 才炸的静默坑）。
+    #[test]
+    fn go_claude_roles_stay_inside_the_go_catalog() {
+        let roles = Plan::Go.claude_role_models();
+        for model in [
+            &roles.opus,
+            &roles.fable,
+            &roles.sonnet,
+            &roles.haiku,
+            &roles.subagent,
+        ] {
+            assert!(!model.starts_with("claude-"), "Go 目录没有 {model}");
+        }
+    }
+
+    /// 生成风格：Zen 全默认；Go = Claude 系 x-api-key + codex chat wire。
+    /// 写错任何一项都是「真机切换后才 401」的静默坑（Bearer 被网关静默忽略）。
+    #[test]
+    fn plan_styles_match_the_gateway_requirements() {
+        assert_eq!(
+            Plan::Zen.style(),
+            crate::relay::provision::ProvisionStyle::default()
+        );
+        let go = Plan::Go.style();
+        assert!(go.claude_auth_via_api_key, "Go 只认 x-api-key");
+        assert!(go.codex_wire_chat, "Go 的主力模型在 chat 目录");
+    }
+
+    /// id 段的往返：`from_id_segment` 认得全部段、拒绝陌生段（反查路径靠它）。
+    #[test]
+    fn id_segments_round_trip() {
+        for plan in Plan::ALL {
+            assert_eq!(Plan::from_id_segment(plan.id_segment()), Some(plan));
+        }
+        assert_eq!(Plan::from_id_segment("opencode-zen"), None);
+        assert_eq!(Plan::from_id_segment("deepseek"), None);
     }
 }

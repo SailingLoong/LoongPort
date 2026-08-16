@@ -106,6 +106,14 @@ pub struct DeepLinkImportRequest {
     /// Claude Code 不认的名字。见 `fable_model` 那段说明。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    /// Claude 系鉴权走 `ANTHROPIC_API_KEY`（x-api-key）而不是默认的
+    /// `ANTHROPIC_AUTH_TOKEN`（Bearer），且**完全不写** AUTH_TOKEN ——
+    /// 两个字段同写时 Claude Code 优先 Bearer，被只认 x-api-key 的网关
+    /// 静默忽略后就是一条必 401 的配置（opencode Go 网关实测如此）。
+    ///
+    /// LoongPort 新增；生成侧的传入口是 `relay::provision::ProvisionStyle`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_api_key_auth: Option<bool>,
 
     // ============ Prompt-specific fields ============
     /// Base64 encoded Markdown content

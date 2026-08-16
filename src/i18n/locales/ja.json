@@ -3193,7 +3193,7 @@
       "connect": "接続してキーを準備",
       "deepseekDesc": "DeepSeek プラットフォーム：サインインで API キーを作成/引き継ぎ",
       "bigmodelDesc": "智譜 BigModel プラットフォーム：GLM シリーズ。サインインで API キーを作成/引き継ぎ",
-      "opencodeDesc": "opencode Zen：Claude / GPT / Gemini などを束ねるゲートウェイ。サインインで API キーを作成/引き継ぎ"
+      "opencodeDesc": "opencode アカウント：サインイン 1 回で API キーを自動設定。同じキーで 2 つの接続プロファイルが使えます —— Zen（従量課金・全モデルカタログ）と Go（サブスクリプション・精選オープンソースコーディングモデル）"
     },
     "tierList": {
       "empty": "中継サービスはまだ追加されていません",

@@ -25,7 +25,11 @@ describe("官网账号支持平台的唯一数据源", () => {
     const api = read("src/lib/api/vendor.ts");
     const row = read("src/components/relay/VendorRow.tsx");
 
+    // 资格是**按 plan** 给的（多 plan 厂商一行两档，各自判）；行组件只消费
+    // DTO 上的值，不自己推导。
     expect(api).toContain("canSwitch: boolean");
-    expect(row).toContain("account.canSwitch");
+    expect(api).toContain("plans: VendorPlanInfo[]");
+    // 行级主按钮在单 plan 分支读 `plan?.canSwitch`（可选链：多 plan 行传 null）。
+    expect(row).toContain("plan?.canSwitch");
   });
 });
