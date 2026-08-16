@@ -418,7 +418,14 @@ pub fn switch_provider_test_hook(
 /// 默认行为（它们没有弹确认框的机会，而未经用户同意就关掉他正开着的 app 是不能接受的）。
 /// 只有前端在弹过确认框、用户同意之后才传 `Some(true)`。
 #[derive(Debug, serde::Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// `rename_all` 只转变体名；变体字段要另加 `rename_all_fields`（serde 1.0.185+）。
+// 漏掉它时 `target_name`/`routing_notice` 蛇形下发、前端读 undefined ——
+// 闸在 switch_command_result_wire_tests。
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProviderSwitchCommandResult {
     ConfirmationRequired {
         target_name: String,
@@ -2175,5 +2182,41 @@ mod native_query_credentials_tests {
 
         assert_eq!(base_url, "https://provider.zenmux.example/v1");
         assert_eq!(api_key, "sk-provider");
+    }
+}
+
+#[cfg(test)]
+mod switch_command_result_wire_tests {
+    use super::*;
+
+    /// 契约闸：前端 `src/lib/api/providers.ts` 的 `SwitchResult` 手写断言这份形状。
+    /// enum 级 `rename_all` 不覆盖变体字段，这里钉住驼峰契约（与 relay 侧同款事故）。
+    #[test]
+    fn provider_switch_command_result_wire_contract_is_camel_case() {
+        let confirmation =
+            serde_json::to_value(ProviderSwitchCommandResult::ConfirmationRequired {
+                target_name: "供应商".into(),
+            })
+            .unwrap();
+        assert_eq!(confirmation["status"], "confirmationRequired");
+        assert!(
+            confirmation.get("targetName").is_some(),
+            "变体字段必须驼峰下发：{confirmation}"
+        );
+        assert!(
+            confirmation.get("target_name").is_none(),
+            "蛇形键意味着前端读到 undefined：{confirmation}"
+        );
+
+        let switched = serde_json::to_value(ProviderSwitchCommandResult::Switched {
+            warnings: vec![],
+            routing_notice: None,
+        })
+        .unwrap();
+        assert_eq!(switched["status"], "switched");
+        assert!(
+            switched.get("routingNotice").is_some(),
+            "变体字段必须驼峰下发：{switched}"
+        );
     }
 }
