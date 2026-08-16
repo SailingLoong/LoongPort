@@ -1,21 +1,14 @@
-import { useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { Image as ImageIcon, Monitor, Terminal, X } from "lucide-react";
 import {
-  Image as ImageIcon,
-  Monitor,
-  MoreHorizontal,
-  Terminal,
-} from "lucide-react";
-import { APP_IDS } from "@/config/appConfig";
+  APP_DISPLAY_NAME,
+  APP_IDS,
+  getAppDisplayName,
+} from "@/config/appConfig";
 import { LAST_APP_STORAGE_KEY } from "@/config/constants";
 
 const APP_BADGE_ICON: Partial<
@@ -33,6 +26,8 @@ interface AppSwitcherProps {
   activeApp: AppId;
   onSwitch: (app: AppId) => void;
   visibleApps?: VisibleApps;
+  /** tab 上的 ×：就地隐藏一个应用，与设置页「主页面显示」是同一开关 */
+  onHideApp?: (app: AppId) => void;
 }
 
 const APP_ICON_NAME: Record<AppId, string> = {
@@ -46,20 +41,6 @@ const APP_ICON_NAME: Record<AppId, string> = {
   openclaw: "openclaw",
   hermes: "hermes",
   pi: "pi",
-};
-
-const APP_DISPLAY_NAME: Record<AppId, string> = {
-  claude: "Claude Code",
-  "claude-desktop": "Claude Desktop",
-  codex: "Codex",
-  // 静态占位；用户可见文案走 component 内的 displayName()（i18n）。
-  "codex-image": "Codex Image",
-  gemini: "Gemini",
-  grokbuild: "Grok Build",
-  opencode: "OpenCode",
-  openclaw: "OpenClaw",
-  hermes: "Hermes",
-  pi: "Pi",
 };
 
 /** 应用图标 + 角标（Claude Code / Desktop 用角标区分终端与桌面） */
@@ -102,14 +83,9 @@ export function AppSwitcher({
   activeApp,
   onSwitch,
   visibleApps,
+  onHideApp,
 }: AppSwitcherProps) {
   const { t } = useTranslation();
-  const rootRef = useRef<HTMLDivElement>(null);
-  const [moreOpen, setMoreOpen] = useState(false);
-  // LoongPort seam：「生图」是功能描述，四语各有说法（apps.codex-image）；
-  // 其余都是产品名，直接用上游的静态表。
-  const displayName = (app: AppId): string =>
-    app === "codex-image" ? t("apps.codex-image") : APP_DISPLAY_NAME[app];
 
   const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
@@ -122,120 +98,58 @@ export function AppSwitcher({
     if (!visibleApps) return true;
     return visibleApps[app];
   });
-  const appCount = appsToShow.length;
-
-  const [visibleCount, setVisibleCount] = useState(appCount);
-
-  // 宽度必须取父弹性槽而非自身：自身宽度随可见数量变化，
-  // 用它做输入会形成收起→变窄→再收起的反馈循环
-  useLayoutEffect(() => {
-    const root = rootRef.current;
-    const slot = root?.parentElement;
-    if (!root || !slot) return;
-
-    const compute = () => {
-      const sample = root.querySelector("button");
-      if (!sample) return;
-      const itemWidth = sample.offsetWidth;
-      // jsdom 或未完成布局时 offsetWidth 为 0，保持全部可见
-      if (itemWidth <= 0) return;
-      const rootStyle = window.getComputedStyle(root);
-      const gap = parseFloat(rootStyle.columnGap) || 0;
-      const padding =
-        (parseFloat(rootStyle.paddingLeft) || 0) +
-        (parseFloat(rootStyle.paddingRight) || 0);
-      const available = slot.clientWidth;
-      const widthAll = padding + appCount * itemWidth + (appCount - 1) * gap;
-      if (widthAll <= available) {
-        setVisibleCount(appCount);
-        return;
-      }
-      // 「更多」按钮与应用按钮同宽（同 padding + 同尺寸图标）
-      const fit = Math.floor(
-        (available - padding - itemWidth) / (itemWidth + gap),
-      );
-      setVisibleCount(Math.max(1, Math.min(appCount - 1, fit)));
-    };
-
-    compute();
-    const observer = new ResizeObserver(compute);
-    observer.observe(slot);
-    return () => observer.disconnect();
-  }, [appCount]);
-
-  const visibleList = appsToShow.slice(0, Math.max(1, visibleCount));
-  // 激活应用被收进溢出区时，顶替最后一个可见位，保证始终可点亮
-  if (appsToShow.includes(activeApp) && !visibleList.includes(activeApp)) {
-    visibleList[visibleList.length - 1] = activeApp;
-  }
-  const overflowList = appsToShow.filter((app) => !visibleList.includes(app));
+  // 与设置页同一护栏：只剩一个可见应用时不可再隐藏，否则没有任何 tab 可点
+  const canHide = appsToShow.length > 1 && onHideApp !== undefined;
 
   return (
     <div
-      ref={rootRef}
       className="inline-flex bg-muted rounded-xl p-1 gap-1"
       style={{ WebkitAppRegion: "no-drag" } as any}
     >
-      {visibleList.map((app) => {
+      {appsToShow.map((app) => {
         const isActive = activeApp === app;
+        const name = getAppDisplayName(app, t);
         return (
-          <button
-            key={app}
-            type="button"
-            onClick={() => handleSwitch(app)}
-            title={displayName(app)}
-            aria-label={displayName(app)}
-            className={cn(
-              "group inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
-              isActive
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground hover:bg-background/50",
-            )}
-          >
-            <AppGlyph app={app} isActive={isActive} />
-          </button>
-        );
-      })}
-      {overflowList.length > 0 && (
-        <Popover open={moreOpen} onOpenChange={setMoreOpen}>
-          <PopoverTrigger asChild>
+          <div key={app} className="group relative">
             <button
               type="button"
-              title={t("appSwitcher.more")}
-              aria-label={t("appSwitcher.more")}
+              onClick={() => handleSwitch(app)}
+              title={name}
+              aria-label={name}
               className={cn(
-                "inline-flex items-center px-3 h-8 rounded-md transition-all duration-200",
-                moreOpen
+                "inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
+                isActive
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground hover:bg-background/50",
               )}
             >
-              <MoreHorizontal size={20} className="shrink-0" />
+              <AppGlyph app={app} isActive={isActive} />
             </button>
-          </PopoverTrigger>
-          <PopoverContent
-            side="bottom"
-            align="end"
-            sideOffset={6}
-            className="z-[100] w-56 p-1"
-          >
-            {overflowList.map((app) => (
+            {canHide && (
               <button
-                key={app}
                 type="button"
-                onClick={() => {
-                  setMoreOpen(false);
-                  handleSwitch(app);
+                title={t("appSwitcher.hide")}
+                aria-label={`${t("appSwitcher.hide")}: ${name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onHideApp?.(app);
                 }}
-                className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                className={cn(
+                  "absolute -top-1.5 -right-1 z-10 flex h-3.5 w-3.5 items-center justify-center",
+                  "rounded-full border border-border bg-background text-muted-foreground shadow-sm",
+                  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:text-foreground",
+                )}
               >
-                <AppGlyph app={app} isActive={false} />
-                <span className="truncate">{displayName(app)}</span>
+                <X
+                  aria-hidden="true"
+                  className="h-[9px] w-[9px]"
+                  strokeWidth={2.5}
+                />
               </button>
-            ))}
-          </PopoverContent>
-        </Popover>
-      )}
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

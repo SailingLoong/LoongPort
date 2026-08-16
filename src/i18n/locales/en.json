@@ -924,7 +924,6 @@
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "more": "More",
     "pi": "Pi"
   },
   "grokBuild": {
@@ -3597,6 +3596,7 @@
     }
   },
   "appSwitcher": {
-    "more": "More apps"
+    "hide": "Hide from homepage",
+    "hiddenToast": "Hidden \"{{name}}\". Restore it under Settings → Homepage Display."
   }
 }

@@ -31,7 +31,12 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
-import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
+import {
+  proxyKeys,
+  useProvidersQuery,
+  useSaveSettingsMutation,
+  useSettingsQuery,
+} from "@/lib/query";
 import {
   providersApi,
   settingsApi,
@@ -127,6 +132,7 @@ import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
 import {
   APP_IDS,
   DEFAULT_VISIBLE_APPS,
+  getAppDisplayName,
   isProxyAppId,
 } from "@/config/appConfig";
 
@@ -227,6 +233,7 @@ function App() {
   }, [currentView]);
 
   const { data: settingsData } = useSettingsQuery();
+  const saveSettingsMutation = useSaveSettingsMutation();
   const useAppWindowControls =
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
@@ -248,6 +255,27 @@ function App() {
       setActiveApp(getFirstVisibleApp());
     }
   }, [visibleApps, activeApp]);
+
+  // tab 上的 ×：与设置页「主页面显示」同一开关，就地隐藏一个应用。
+  // 发送与 DEFAULT_VISIBLE_APPS 合并后的完整对象（后端 visible_apps 是整体替换）；
+  // settings 还没加载时不动 —— 那次保存会把其余字段全部清成默认值。
+  const hideAppFromMainPage = useCallback(
+    (app: AppId) => {
+      if (!settingsData) return;
+      saveSettingsMutation.mutate(
+        { ...settingsData, visibleApps: { ...visibleApps, [app]: false } },
+        {
+          onSuccess: () =>
+            toast.info(
+              t("appSwitcher.hiddenToast", {
+                name: getAppDisplayName(app, t),
+              }),
+            ),
+        },
+      );
+    },
+    [saveSettingsMutation, settingsData, visibleApps, t],
+  );
 
   useEffect(() => {
     if (activeApp !== "codex-image") return;
@@ -1436,14 +1464,15 @@ function App() {
                   <ProfileSwitcher activeApp={activeApp} />
                 </div>
               )}
-            {/* 弹性中段：空间不足时由 AppSwitcher 自行收纳溢出应用；
-                justify-end + overflow-hidden 只裁剪 resize 瞬间的过渡帧 */}
+            {/* 弹性中段：tab 不做自动折叠，放不下时由 overflow-hidden 裁剪左侧；
+                可见集由用户显式控制（tab 上的 × 或设置页「主页面显示」） */}
             <div className="flex flex-1 min-w-0 items-center justify-end overflow-hidden py-4">
               {currentView === "providers" && (
                 <AppSwitcher
                   activeApp={activeApp}
                   onSwitch={setActiveApp}
                   visibleApps={visibleApps}
+                  onHideApp={hideAppFromMainPage}
                 />
               )}
             </div>
