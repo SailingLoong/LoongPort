@@ -34,10 +34,11 @@ const VENDOR_API = read("src", "lib", "api", "vendor.ts");
 
 describe("官网行的 userEdited 是三态", () => {
   it("判据必须是 `=== true`，不能是 `??` 或裸真值", () => {
-    expect(VENDOR_ROW).toContain("account.userEdited === true");
+    // **按 plan 判**（多 plan 行每档各自三态）；行级是纯归并（`some`）。
+    expect(VENDOR_ROW).toContain("plan.userEdited === true");
     // 这两种写法都会让 `null`（判不了）被当成一个确定的答案。
-    expect(VENDOR_ROW).not.toMatch(/account\.userEdited\s*\?\?/);
-    expect(VENDOR_ROW).not.toMatch(/!account\.userEdited/);
+    expect(VENDOR_ROW).not.toMatch(/plan\.userEdited\s*\?\?/);
+    expect(VENDOR_ROW).not.toMatch(/!plan\.userEdited/);
   });
 
   it("与 `RelayRow` 用同一个判据 —— 两类行的三态语义必须一致", () => {
@@ -46,9 +47,9 @@ describe("官网行的 userEdited 是三态", () => {
 });
 
 describe("编辑与恢复的入口条件", () => {
-  it("没 provision 过的行不给编辑入口（点了必然报错）", () => {
-    // 资格由后端计算，前端只消费 DTO，不再组合 `keyReady` 与 `providerId`。
-    expect(VENDOR_ROW).toContain("const canEditConfig = account.canEditConfig");
+  it("没 provision 过的档不给编辑入口（点了必然报错）", () => {
+    // 资格由后端**按 plan** 计算，前端只消费 DTO，不再组合 `keyReady` 与 id。
+    expect(VENDOR_ROW).toContain("plan.canEditConfig");
   });
 
   it("两个恢复按钮互斥：hover 版给没改过的，常驻版给改过的", () => {

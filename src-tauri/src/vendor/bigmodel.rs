@@ -30,6 +30,9 @@ use crate::vendor::{VendorAccount, VendorError, VendorKey};
 /// （`deepseek::parse_creds_navigation` 的文档警告过这个坑）。
 const CREDS_SCHEME: &str = "loongport-bigmodel-creds";
 
+/// 稳定标识（`Vendor::vendor_id` 与单 plan 段的唯一源）。⚠️ 改它是迁移不是重构。
+pub const VENDOR_ID: &str = "bigmodel";
+
 /// 登录窗 label。与 deepseek 分开：两个厂商的登录窗可以同时开。
 pub const LOGIN_WINDOW_LABEL: &str = "loongport-bigmodel-login";
 

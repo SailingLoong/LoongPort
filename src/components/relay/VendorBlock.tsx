@@ -18,7 +18,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import type { VendorAccountRow } from "@/lib/api/vendor";
+import type { VendorAccountRow, VendorPlanInfo } from "@/lib/api/vendor";
 
 import { parseRowKey, rowKey } from "./rowKey";
 import { VendorRow } from "./VendorRow";
@@ -53,18 +53,18 @@ export interface VendorListSlice {
   onLogin: (rowId: number) => void;
   /** 备好某个官网账号的密钥（也是「刷新密钥」的实现）。 */
   onProvision: (rowId: number) => void | Promise<void>;
-  /** 切到某个官网账号的配置。 */
-  onUse: (rowId: number) => void;
+  /** 切到某个官网账号**某个 plan**的配置（单 plan 厂商也传 `plans[0]`）。 */
+  onUse: (rowId: number, plan: VendorPlanInfo) => void;
   onRemove: (rowId: number) => void;
   /**
-   * 编辑某个官网账号在**当前 tab 那个平台**上的配置。
+   * 编辑某个 plan 在**当前 tab 那个平台**上的配置。
    *
-   * 传整行而不是 rowId：宿主要拿 `providerId` / `accountLabel` / `isCurrent`
-   * 去喂 `useTierEditGuard`（它吃 `EditableTier`），只给 id 还得再 find 回来。
+   * 传整行 + plan 而不是 rowId：宿主要拿 plan 的 `providerId` / `planName`
+   * / `isCurrent` 去喂 `useTierEditGuard`（它吃 `EditableTier`）。
    */
-  onEdit: (account: VendorAccountRow) => void;
-  /** 把某个官网账号在当前 tab 那个平台上的配置恢复成默认值。 */
-  onReset: (account: VendorAccountRow) => void;
+  onEdit: (account: VendorAccountRow, plan: VendorPlanInfo) => void;
+  /** 把某个 plan 在当前 tab 那个平台上的配置恢复成默认值。 */
+  onReset: (account: VendorAccountRow, plan: VendorPlanInfo) => void;
   /** 官网行的排序（**只含官网行的 id**，走另一条命令）。 */
   onReorder: (rowIds: number[]) => void;
 }
@@ -150,10 +150,10 @@ export function VendorBlock({ vendor, busy, onAddAccount }: VendorBlockProps) {
                   busy={busy}
                   onLogin={() => vendor.onLogin(v.id)}
                   onProvision={() => vendor.onProvision(v.id)}
-                  onUse={() => vendor.onUse(v.id)}
+                  onUse={(plan) => vendor.onUse(v.id, plan)}
                   onDelete={() => vendor.onRemove(v.id)}
-                  onEdit={() => vendor.onEdit(v)}
-                  onReset={() => vendor.onReset(v)}
+                  onEdit={(plan) => vendor.onEdit(v, plan)}
+                  onReset={(plan) => vendor.onReset(v, plan)}
                 />
               ))}
             </div>

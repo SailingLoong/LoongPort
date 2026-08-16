@@ -33,6 +33,9 @@ use crate::vendor::{VendorAccount, VendorError, VendorKey};
 /// （这边多 `account_id` / `login_identifier`），认错就是解析失败。
 const CREDS_SCHEME: &str = "loongport-vendor-creds";
 
+/// 稳定标识（`Vendor::vendor_id` 与单 plan 段的唯一源）。⚠️ 改它是迁移不是重构。
+pub const VENDOR_ID: &str = "deepseek";
+
 /// 登录窗的 label。⚠️ **不得与 relay 的 `loongport-login` 重名** ——
 /// label 是 Tauri 的窗口唯一键，撞名会让 `build()` 直接失败。
 pub const LOGIN_WINDOW_LABEL: &str = "loongport-vendor-login";

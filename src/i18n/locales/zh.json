@@ -3193,7 +3193,7 @@
       "connect": "连接并获取密钥",
       "deepseekDesc": "DeepSeek 开放平台：登录后自动创建/认领 API Key，接入各编程代理",
       "bigmodelDesc": "智谱 BigModel 开放平台：GLM 系列模型，登录后自动创建/认领 API Key",
-      "opencodeDesc": "opencode Zen：Claude / GPT / Gemini 等模型的统一网关，登录后自动创建/认领 API Key"
+      "opencodeDesc": "opencode 官网账号：登录一次自动接入 API Key，同一把密钥双档可用 —— Zen 按量计费全量模型目录，Go 订阅制精选开源编码模型"
     },
     "tierList": {
       "empty": "尚未添加中转站",

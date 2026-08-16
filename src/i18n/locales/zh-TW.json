@@ -3194,7 +3194,7 @@
       "connect": "連線並取得金鑰",
       "deepseekDesc": "DeepSeek 開放平台：登入後自動建立/認領 API Key，接入各程式代理",
       "bigmodelDesc": "智譜 BigModel 開放平台：GLM 系列模型，登入後自動建立/認領 API Key",
-      "opencodeDesc": "opencode Zen：Claude / GPT / Gemini 等模型的統一閘道，登入後自動建立/認領 API Key"
+      "opencodeDesc": "opencode 官網帳號：登入一次自動接入 API Key，同一把金鑰雙檔可用 —— Zen 按量計費全量模型目錄，Go 訂閱制精選開源編碼模型"
     },
     "tierList": {
       "empty": "尚未新增中轉站",

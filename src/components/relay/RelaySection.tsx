@@ -35,7 +35,11 @@ import {
   promptOnboardingStarReward,
   type OnboardingRegisterCompleted,
 } from "@/lib/onboarding";
-import { vendorApi, type VendorAccountRow } from "@/lib/api/vendor";
+import {
+  vendorApi,
+  type VendorAccountRow,
+  type VendorPlanInfo,
+} from "@/lib/api/vendor";
 import { getAppLabel } from "@/config/appConfig";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
@@ -49,7 +53,7 @@ import { openInBrowser } from "./openInBrowser";
 import { useRowBusy } from "./useRowBusy";
 import { useTierEditGuard } from "./useTierEditGuard";
 import { VendorBlock } from "./VendorBlock";
-import { vendorBusyKey } from "./VendorRow";
+import { vendorBusyKey, vendorPlanBusyKey } from "./VendorRow";
 
 /**
  * 「中转站 × 分组」区，**自带全部状态**，供 provider 页顶部直接挂载。
@@ -568,23 +572,31 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
       }
     });
 
-  const handleVendorUse = (rowId: number) => void doVendorSwitch(rowId);
+  const handleVendorUse = (rowId: number, plan: VendorPlanInfo) =>
+    void doVendorSwitch(rowId, plan);
 
-  const doVendorSwitch = (rowId: number, quitChatgpt?: boolean) => {
+  const doVendorSwitch = (
+    rowId: number,
+    plan: VendorPlanInfo,
+    quitChatgpt?: boolean,
+  ) => {
     setConfirmSwitch(null);
-    return run(vendorBusyKey("switch", rowId), async () => {
+    return run(vendorPlanBusyKey("switch", plan.providerId), async () => {
       try {
-        const result = await vendorApi.switch(rowId, appId, quitChatgpt);
+        const result = await vendorApi.switch(
+          rowId,
+          plan.planId,
+          appId,
+          quitChatgpt,
+        );
         if (result.status === "confirmationRequired") {
           setConfirmSwitch({
             name: result.targetName,
-            run: (choice) => void doVendorSwitch(rowId, choice),
+            run: (choice) => void doVendorSwitch(rowId, plan, choice),
           });
           return;
         }
-        const name =
-          vendorsRef.current.find((vendor) => vendor.id === rowId)
-            ?.vendorName ?? result.providerName;
+        const name = plan.planName;
         toast.success(
           result.chatgptRelaunched
             ? t("loongport.switch.doneRelaunched", { name })
@@ -962,27 +974,27 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
               if (row) void handleVendorLogin(row.vendorId, rowId);
             },
             onProvision: handleVendorProvision,
-            onUse: (rowId) => void handleVendorUse(rowId),
+            onUse: (rowId, plan) => handleVendorUse(rowId, plan),
             onRemove: (rowId) => {
               const row = vendors.find((v) => v.id === rowId);
               if (row) setConfirmRemoveVendor(row);
             },
             // 编辑走与档位**同一个** `useTierEditGuard`（同一道事前警告、同一个
-            // cc-switch 编辑页）。`accountLabel` 空时回落厂商名 —— 弹窗标题里
-            // 空字符串会读成「手动编辑「」的配置」。
-            onEdit: (account) =>
+            // cc-switch 编辑页）。按 plan 编辑 —— 一行（opencode）背后每 plan
+            // 各六条记录，各改各的。
+            onEdit: (_account, plan) =>
               requestEdit({
                 kind: "vendor",
-                providerId: account.providerId,
-                displayName: account.accountLabel || account.vendorName,
-                isCurrent: account.isCurrent,
+                providerId: plan.providerId,
+                displayName: plan.planName,
+                isCurrent: plan.isCurrent,
               }),
-            onReset: (account) =>
+            onReset: (_account, plan) =>
               setConfirmReset({
                 kind: "vendor",
-                providerId: account.providerId,
-                displayName: account.accountLabel || account.vendorName,
-                busyKey: vendorBusyKey("resetVendor", account.id),
+                providerId: plan.providerId,
+                displayName: plan.planName,
+                busyKey: vendorPlanBusyKey("resetVendor", plan.providerId),
               }),
             onReorder: (ids) => void handleVendorReorder(ids),
           }}

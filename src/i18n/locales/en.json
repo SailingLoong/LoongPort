@@ -3193,7 +3193,7 @@
       "connect": "Connect & fetch key",
       "deepseekDesc": "DeepSeek platform: sign in to create/claim an API key for your coding agents",
       "bigmodelDesc": "Zhipu BigModel platform: GLM model family; sign in to create/claim an API key",
-      "opencodeDesc": "opencode Zen: unified gateway for Claude / GPT / Gemini models; sign in to create/claim an API key"
+      "opencodeDesc": "opencode account: one sign-in wires up your API key for both plans — Zen (pay-as-you-go, full model catalog) and Go (subscription, curated open-source coding models)"
     },
     "tierList": {
       "empty": "No relay services added",

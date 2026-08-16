@@ -34,17 +34,19 @@ impl Vendor {
     /// 稳定标识，进数据库与 provider id 的哈希。⚠️ 改它是迁移不是重构。
     pub fn vendor_id(&self) -> &'static str {
         match self {
-            Vendor::DeepSeek => "deepseek",
-            Vendor::BigModel => "bigmodel",
-            Vendor::OpenCode => "opencode",
+            Vendor::DeepSeek => deepseek::VENDOR_ID,
+            Vendor::BigModel => bigmodel::VENDOR_ID,
+            Vendor::OpenCode => opencode::VENDOR_ID,
         }
     }
 
-    pub fn display_name(&self) -> &'static str {
+    pub const fn display_name(&self) -> &'static str {
         match self {
             Vendor::DeepSeek => "DeepSeek",
             Vendor::BigModel => "智谱 BigModel",
-            Vendor::OpenCode => "opencode Zen",
+            // 厂商家族名（账号行头、登录窗标题用）；具体档位名由
+            // [`plans`] 里那份 [`PlanInfo::display_name`] 给（"opencode Zen"/"opencode Go"）。
+            Vendor::OpenCode => "opencode",
         }
     }
 
@@ -56,6 +58,57 @@ impl Vendor {
             _ => None,
         }
     }
+}
+
+// ─────────────────────── 接入变体（plan） ───────────────────────
+
+/// 一个 vendor 账号在**配置展开层**的接入变体。
+///
+/// 单 plan 厂商（DeepSeek / BigModel）恰好一个，`id_segment` = `vendor_id`，行为与
+/// 「一个账号一个 endpoint」的旧世界完全一致；多 plan 厂商（opencode 的 Zen / Go）
+/// 同一个账号展开出多组 provider 记录，各自独立可切 —— 账号层（登录、key、余额）
+/// 两档共享同一份，不因 plan 而分叉。
+///
+/// plan 是**编译期静态清单**，不是用户数据：不进数据库、无迁移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanInfo {
+    /// 进 provider id 哈希（[`provision::provider_id_for`]）与远端 `tier_configs`
+    /// 键的稳定段。⚠️ 单 plan 厂商的段恒等于 `vendor_id` —— 存量 id 靠它不变。
+    pub id_segment: &'static str,
+    /// provider 记录与档位行的展示名。
+    pub display_name: &'static str,
+}
+
+/// 单 plan 厂商的档位清单：段 = `vendor_id`、名字 = 厂商名 —— 与「一个账号一个
+/// endpoint」的旧世界完全一致（provider id 派生结果一个字节都没变）。
+///
+/// `display_name` 在这里各写一份字面量（const 上下文调不了 `Vendor::display_name`），
+/// 一致性由测试 `single_plan_segments_mirror_the_vendor_identity` 钉住 —— 同
+/// `MANAGED_ID_PREFIX` 那道跨文件闸的模式。
+const DEEPSEEK_PLANS: &[PlanInfo] = &[PlanInfo {
+    id_segment: deepseek::VENDOR_ID,
+    display_name: "DeepSeek",
+}];
+const BIGMODEL_PLANS: &[PlanInfo] = &[PlanInfo {
+    id_segment: bigmodel::VENDOR_ID,
+    display_name: "智谱 BigModel",
+}];
+
+/// 这个厂商账号展开出的全部 plan。数组序即展示序。
+pub fn plans(vendor: Vendor) -> &'static [PlanInfo] {
+    match vendor {
+        Vendor::DeepSeek => DEEPSEEK_PLANS,
+        Vendor::BigModel => BIGMODEL_PLANS,
+        Vendor::OpenCode => &opencode::Plan::PLAN_INFOS,
+    }
+}
+/// 按 id 段反查 plan（`vendor_switch` 的入参校验、provider id 反查都走它）。
+/// `None` = 这个厂商没有这个段。
+pub fn plan_by_segment(vendor: Vendor, segment: &str) -> Option<PlanInfo> {
+    plans(vendor)
+        .iter()
+        .find(|plan| plan.id_segment == segment)
+        .copied()
 }
 
 // ─────────────────────── 厂商分发（同 relay::backend 的形状） ───────────────────────
@@ -204,19 +257,44 @@ pub async fn balance(
     }
 }
 
-pub fn config_for(vendor: Vendor, app: &crate::app_config::AppType) -> Option<(String, String)> {
+/// 该厂商**某个 plan**下 `AppType` → `(base_url, model)`。
+/// `id_segment` 必须来自 [`plans`] 的清单；不在清单里的段返回 `None`。
+pub fn config_for(
+    vendor: Vendor,
+    id_segment: &str,
+    app: &crate::app_config::AppType,
+) -> Option<(String, String)> {
     match vendor {
-        Vendor::DeepSeek => deepseek::config_for(app),
-        Vendor::BigModel => bigmodel::config_for(app),
-        Vendor::OpenCode => opencode::config_for(app),
+        Vendor::DeepSeek if id_segment == deepseek::VENDOR_ID => deepseek::config_for(app),
+        Vendor::BigModel if id_segment == bigmodel::VENDOR_ID => bigmodel::config_for(app),
+        Vendor::OpenCode => opencode::Plan::from_id_segment(id_segment)?.config_for(app),
+        _ => None,
     }
 }
 
-pub fn claude_role_models(vendor: Vendor) -> crate::relay::provision::ClaudeRoleModels {
+/// 该厂商**某个 plan**的 Claude 角色分档（生成与 `is_user_edited` 基准共用，见
+/// [`provision::claude_roles_for`] 的铁律）。
+pub fn claude_role_models(
+    vendor: Vendor,
+    id_segment: &str,
+) -> crate::relay::provision::ClaudeRoleModels {
     match vendor {
         Vendor::DeepSeek => deepseek::claude_role_models(),
         Vendor::BigModel => bigmodel::claude_role_models(),
-        Vendor::OpenCode => opencode::claude_role_models(),
+        // Zen 与 Go 的角色档不同（Go 目录没有 claude 系），必须按段分派。
+        Vendor::OpenCode => opencode::Plan::from_id_segment(id_segment)
+            .unwrap_or(opencode::Plan::Zen)
+            .claude_role_models(),
+    }
+}
+
+/// 该厂商**某个 plan**的生成风格（鉴权字段 / wire 协议）。
+pub fn plan_style(vendor: Vendor, id_segment: &str) -> crate::relay::provision::ProvisionStyle {
+    match vendor {
+        Vendor::DeepSeek | Vendor::BigModel => crate::relay::provision::ProvisionStyle::default(),
+        Vendor::OpenCode => opencode::Plan::from_id_segment(id_segment)
+            .unwrap_or(opencode::Plan::Zen)
+            .style(),
     }
 }
 
@@ -357,5 +435,35 @@ mod tests {
         assert_eq!(Vendor::from_id("deepseek"), Some(Vendor::DeepSeek));
         assert_eq!(Vendor::from_id("kimi"), None);
         assert_eq!(Vendor::DeepSeek.vendor_id(), "deepseek");
+    }
+
+    /// 单 plan 厂商的档位段与名字必须与 `Vendor` 的身份一致 —— 段错了存量
+    /// provider id 失联，名字错了账号行头与档位名分叉（两个来源各改各的）。
+    #[test]
+    fn single_plan_segments_mirror_the_vendor_identity() {
+        for vendor in [Vendor::DeepSeek, Vendor::BigModel] {
+            let plans = plans(vendor);
+            assert_eq!(plans.len(), 1, "{vendor:?} 是单 plan 厂商");
+            assert_eq!(
+                plans[0].id_segment,
+                vendor.vendor_id(),
+                "单 plan 段必须等于 vendor_id（存量 id 靠它不变）"
+            );
+            assert_eq!(
+                plans[0].display_name,
+                vendor.display_name(),
+                "单 plan 名字必须等于厂商名"
+            );
+        }
+        // 多 plan 厂商：Zen 段 = vendor_id（存量闸在 opencode 模块里），
+        // 清单里没有重复段。
+        let opencode_plans = plans(Vendor::OpenCode);
+        assert!(opencode_plans.len() > 1);
+        assert_eq!(opencode_plans[0].id_segment, Vendor::OpenCode.vendor_id());
+        for (i, a) in opencode_plans.iter().enumerate() {
+            for b in opencode_plans.iter().skip(i + 1) {
+                assert_ne!(a.id_segment, b.id_segment, "段不能重复");
+            }
+        }
     }
 }
