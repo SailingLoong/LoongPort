@@ -108,8 +108,14 @@ export function RelayDirectoryPage({
         ? (reason as Partial<RelayImportError>)
         : undefined;
     if (typed?.kind === "cancelled") return null;
+    // 两种 kind 的指引不能共用：unsupported_site 是「协议没识别出来，网页验证
+    // 可能有用」；not_in_directory 是「目录里没有这个站」，正确出路是本页底部
+    // 的手动输入框（Manual 来源不走签名目录校验）。
     if (typed?.kind === "unsupported_site") {
       return t("loongport.addSite.unsupportedSite");
+    }
+    if (typed?.kind === "not_in_directory") {
+      return t("loongport.addSite.notInDirectory");
     }
     if (typed?.kind === "protocol_conflict") {
       return t("loongport.addSite.protocolConflict");

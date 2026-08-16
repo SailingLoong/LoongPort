@@ -25,11 +25,22 @@ export interface SiteInfo {
 
 export type BackendKind = "sub2api" | "newapi";
 
-export type DiscoveryErrorKind =
-  "unsupported_site" | "protocol_conflict" | "transport" | "cancelled";
+/**
+ * 导入失败 kind 的线上取值（与后端 `RelayImportErrorKind` 的 serde snake_case 一致，
+ * 闸在 Rust 侧 `import_error_kinds_serialize_to_the_wire_names_the_frontend_matches`）。
+ *
+ * 不叫 DiscoveryErrorKind：`cancelled` 只存在于导入层（后端 discovery 枚举没有它），
+ * 名字跟着实际承载的契约走。
+ */
+export type ImportErrorKind =
+  | "unsupported_site"
+  | "not_in_directory"
+  | "protocol_conflict"
+  | "transport"
+  | "cancelled";
 
 export interface RelayImportError {
-  kind?: DiscoveryErrorKind;
+  kind?: ImportErrorKind;
   message: string;
 }
 

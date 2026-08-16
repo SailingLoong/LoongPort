@@ -163,6 +163,13 @@ const requiredKeys = [
   "addSite.body",
   "addSite.inputLabel",
   "addSite.connected",
+  // 导入失败 toast 按 kind 映射的文案：漏一个 locale 就直接显示 key 名，
+  // 而这些是用户唯一能看到的失败解释。
+  "addSite.unsupportedSite",
+  "addSite.notInDirectory",
+  "addSite.protocolConflict",
+  "addSite.transportError",
+  "addSite.importFailed",
   "site.removed",
   // 启动探活发现凭据在服务端已失效时那句。缺它用户会收到一个 key 名当提示，
   // 而这条 toast 是他知道「要重新登录」的唯一途径（界面其余部分看不出区别）。

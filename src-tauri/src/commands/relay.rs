@@ -132,10 +132,18 @@ pub struct ImportResult {
     pub backend_kind: discovery::BackendKind,
 }
 
+/// 导入失败的机器可读种类。
+///
+/// 前端按 kind 映射本地化文案（`RelayDirectoryPage` 的 `importErrorMessage`），
+/// 所以**一个 kind 只能承载一种用户行动指引**：`UnsupportedSite` 是「协议没识别出来，
+/// 完成网页验证可能有用」；「站点不在签名目录、请手动添加」是另一种指引，归
+/// [`RelayImportErrorKind::NotInDirectory`] —— 两者共用了同一个 kind 时，前端只能
+/// 对一半场景说对的话（曾实锤：不在目录的站被引导去「完成网页验证」，永远无效）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayImportErrorKind {
     UnsupportedSite,
+    NotInDirectory,
     ProtocolConflict,
     Transport,
     Cancelled,
@@ -1196,17 +1204,21 @@ pub async fn relay_import_site(
 /// 但调用方不能靠传一个布尔值把任意业务路径升级成受信入口。这里重新读取并验证
 /// 当前签名配置：完全匹配其中 HTTPS `entry_url` 的地址会保留 path/query/fragment；
 /// 普通榜单站点仍按手工输入的安全规则打开 origin 或协议登录页。
+///
+/// 两种拒绝（配置缓存缺失 / 站点不在目录）都报 `NotInDirectory` 而不是
+/// `UnsupportedSite`：前者的正确指引是「换手动输入框添加」，后者的指引是
+/// 「完成网页验证」——把不同指引压进同一个 kind，前端只能对一半场景说对话。
 #[tauri::command]
 pub async fn relay_import_directory_site(
     app_handle: tauri::AppHandle,
     site: String,
 ) -> Result<ImportResult, RelayImportError> {
     let config = crate::relay::remote_config::load_cached().ok_or_else(|| RelayImportError {
-        kind: Some(RelayImportErrorKind::UnsupportedSite),
+        kind: Some(RelayImportErrorKind::NotInDirectory),
         message: "该站点需要手动添加".into(),
     })?;
     let source = directory_entry_source(&config, &site).ok_or_else(|| RelayImportError {
-        kind: Some(RelayImportErrorKind::UnsupportedSite),
+        kind: Some(RelayImportErrorKind::NotInDirectory),
         message: "该站点需要手动添加".into(),
     })?;
     import_site(&app_handle, &site, source, None).await
@@ -5579,6 +5591,34 @@ mod tests {
 
         assert_eq!(error.kind, Some(RelayImportErrorKind::Cancelled));
         assert_eq!(error.message, "注册或登录等待超时，请重试");
+    }
+
+    /// ⭐ **kind 的线上格式必须与前端 union 逐字一致。**
+    ///
+    /// 前端 `src/lib/api/relay.ts` 的 `ImportErrorKind` 按这些字面量匹配（switch
+    /// 的是字符串，不是共享类型）。serde enum 的 rename 只在结构体字段上踩过 casing
+    /// 雷（PR #153 的 `target_name`），枚举变体同理 —— 这里把每个变体的线上值钉死。
+    #[test]
+    fn import_error_kinds_serialize_to_the_wire_names_the_frontend_matches() {
+        for (kind, wire) in [
+            (
+                RelayImportErrorKind::UnsupportedSite,
+                "\"unsupported_site\"",
+            ),
+            (RelayImportErrorKind::NotInDirectory, "\"not_in_directory\""),
+            (
+                RelayImportErrorKind::ProtocolConflict,
+                "\"protocol_conflict\"",
+            ),
+            (RelayImportErrorKind::Transport, "\"transport\""),
+            (RelayImportErrorKind::Cancelled, "\"cancelled\""),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&kind).expect("kind 可序列化"),
+                wire,
+                "{kind:?} 的线上名变了，前端 union 要跟着改"
+            );
+        }
     }
 
     #[test]

@@ -3301,6 +3301,7 @@
       "sponsorsLabel": "推薦中轉站",
       "sponsorAddAnother": "已有 {{count}} 個帳號 · 再新增一個",
       "unsupportedSite": "無法識別此站點支援的中轉協議，請確認網址正確並完成網頁驗證後重試。",
+      "notInDirectory": "此站點不在目前支援目錄中，請用頁面底部的「使用其他站點」輸入框手動新增。",
       "protocolConflict": "此站點同時回傳多種中轉協議，無法安全連線。請聯絡站點管理員檢查設定。",
       "transportError": "暫時無法連線至此站點，請檢查網路與網址後重試。",
       "importFailed": "新增中轉站失敗，請稍後重試。"
