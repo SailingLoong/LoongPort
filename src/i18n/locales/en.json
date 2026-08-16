@@ -3125,7 +3125,8 @@
   "loongport": {
     "refreshAll": "Update account details, balances, group rates, and connection profiles for all relay services and official APIs",
     "addEntry": {
-      "title": "Add"
+      "title": "Add",
+      "manual": "Manual"
     },
     "sections": {
       "relay": "Relay services",

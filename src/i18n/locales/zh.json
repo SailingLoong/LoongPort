@@ -3125,7 +3125,8 @@
   "loongport": {
     "refreshAll": "更新全部中转站与官方 API 的账号信息、额度、分组倍率和接入配置",
     "addEntry": {
-      "title": "添加"
+      "title": "添加",
+      "manual": "手动添加"
     },
     "sections": {
       "relay": "中转站",

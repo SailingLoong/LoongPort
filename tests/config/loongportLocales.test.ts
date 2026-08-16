@@ -24,6 +24,7 @@ const requiredKeys = [
   "sections.other",
   // 顶栏大「+」统一添加入口的触发提示。
   "addEntry.title",
+  "addEntry.manual",
   // 独立中转站广场。四个榜单、数据来源、评分证据、认证动作、缓存状态和分页
   // 都是用户直接看到的主流程文案；漏一个 locale 会直接显示 key 名。
   "directory.title",

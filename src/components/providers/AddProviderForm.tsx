@@ -4,7 +4,6 @@ import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import type { Provider, CustomEndpoint, UniversalProvider } from "@/types";
 import type { AppId } from "@/lib/api";
 import { universalProvidersApi } from "@/lib/api";
@@ -24,9 +23,15 @@ import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
 import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
 
-interface AddProviderDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+/**
+ * 手动添加供应商的表单体（无外壳）：App 专属/统一供应商两个 tab + 表单 + 动作条。
+ *
+ * 原来装在 `AddProviderDialog` 的全屏弹窗里、由顶栏大「+」直接打开；现在「+」
+ * 进的是统一添加聚合页（`AddHubPage`），本组件作为其中「手动添加」标签的内容
+ * 内嵌渲染 —— 弹窗外壳因此没有调用方了，表单逻辑整层搬过来，onDone 语义 =
+ * 「这一轮添加结束」（提交成功 / 用户取消），由宿主决定回哪去。
+ */
+export interface AddProviderFormProps {
   appId: AppId;
   onSubmit: (
     provider: Omit<Provider, "id"> & {
@@ -37,14 +42,15 @@ interface AddProviderDialogProps {
       ensureGrokBuildOfficialSeed?: boolean;
     },
   ) => Promise<void> | void;
+  /** 提交成功或用户取消 —— 宿主收尾（聚合页回供应商列表）。 */
+  onDone: () => void;
 }
 
-export function AddProviderDialog({
-  open,
-  onOpenChange,
+export function AddProviderForm({
   appId,
   onSubmit,
-}: AddProviderDialogProps) {
+  onDone,
+}: AddProviderFormProps) {
   const { t } = useTranslation();
   // OpenCode and OpenClaw don't support universal providers
   const showUniversalTab =
@@ -61,10 +67,8 @@ export function AddProviderDialog({
   const [selectedUniversalPreset, setSelectedUniversalPreset] =
     useState<UniversalProviderPreset | null>(null);
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
-  const formReadyToken = useMemo(
-    () => Symbol("provider-form-ready"),
-    [appId, open],
-  );
+  // 表单随聚合页标签的挂/卸载自然重置，没有弹窗 open 翻转那回事 —— token 只跟 appId。
+  const formReadyToken = useMemo(() => Symbol("provider-form-ready"), [appId]);
   const currentFormReadyToken = useRef(formReadyToken);
   currentFormReadyToken.current = formReadyToken;
   const [formReadyState, setFormReadyState] = useState({
@@ -90,7 +94,7 @@ export function AddProviderDialog({
         await universalProvidersApi.upsert(provider);
       } catch (error) {
         console.error(
-          "[AddProviderDialog] Failed to save universal provider",
+          "[AddProviderForm] Failed to save universal provider",
           error,
         );
         toast.error(
@@ -110,7 +114,7 @@ export function AddProviderDialog({
         );
       } catch (error) {
         console.error(
-          "[AddProviderDialog] Provider saved but sync failed",
+          "[AddProviderForm] Provider saved but sync failed",
           error,
         );
         toast.warning(
@@ -122,9 +126,9 @@ export function AddProviderDialog({
 
       setUniversalFormOpen(false);
       setSelectedUniversalPreset(null);
-      onOpenChange(false);
+      onDone();
     },
-    [t, onOpenChange],
+    [t, onDone],
   );
 
   const handleUniversalFormClose = useCallback(() => {
@@ -338,9 +342,9 @@ export function AddProviderDialog({
       }
 
       await onSubmit(providerData);
-      onOpenChange(false);
+      onDone();
     },
-    [appId, onSubmit, onOpenChange],
+    [appId, onSubmit, onDone],
   );
 
   const footer =
@@ -351,7 +355,7 @@ export function AddProviderDialog({
         </span>
         <Button
           variant="outline"
-          onClick={() => onOpenChange(false)}
+          onClick={() => onDone()}
           className="border-border/20 hover:bg-accent hover:text-accent-foreground"
         >
           {t("common.cancel")}
@@ -374,7 +378,7 @@ export function AddProviderDialog({
       <>
         <Button
           variant="outline"
-          onClick={() => onOpenChange(false)}
+          onClick={() => onDone()}
           className="border-border/20 hover:bg-accent hover:text-accent-foreground"
         >
           {t("common.cancel")}
@@ -390,55 +394,59 @@ export function AddProviderDialog({
     );
 
   return (
-    <FullScreenPanel
-      isOpen={open}
-      title={t("provider.addNewProvider")}
-      onClose={() => onOpenChange(false)}
-      footer={footer}
-      contentClassName={appId === "pi" ? "pt-3 pb-0" : "pt-3"}
-    >
-      {showUniversalTab ? (
-        <Tabs
-          value={activeTab}
-          onValueChange={(v) => setActiveTab(v as "app-specific" | "universal")}
-        >
-          <TabsList className="grid w-full grid-cols-2 mb-6">
-            <TabsTrigger value="app-specific">
-              {t(`apps.${appId}`)} {t("provider.tabProvider")}
-            </TabsTrigger>
-            <TabsTrigger value="universal">
-              {t("provider.tabUniversal")}
-            </TabsTrigger>
-          </TabsList>
+    <div className="flex h-full min-h-0 flex-col">
+      <div
+        className={`min-h-0 flex-1 space-y-6 overflow-y-auto ${appId === "pi" ? "pt-3 pb-0" : "pt-3 pb-6"}`}
+      >
+        {showUniversalTab ? (
+          <Tabs
+            value={activeTab}
+            onValueChange={(v) =>
+              setActiveTab(v as "app-specific" | "universal")
+            }
+          >
+            <TabsList className="grid w-full grid-cols-2 mb-6">
+              <TabsTrigger value="app-specific">
+                {t(`apps.${appId}`)} {t("provider.tabProvider")}
+              </TabsTrigger>
+              <TabsTrigger value="universal">
+                {t("provider.tabUniversal")}
+              </TabsTrigger>
+            </TabsList>
 
-          <TabsContent value="app-specific" className="mt-0">
-            <ProviderForm
-              appId={appId}
-              submitLabel={t("common.add")}
-              onSubmit={handleSubmit}
-              onCancel={() => onOpenChange(false)}
-              onSubmittingChange={setIsFormSubmitting}
-              onSubmitReadyChange={handleSubmitReadyChange}
-              showButtons={false}
-            />
-          </TabsContent>
+            <TabsContent value="app-specific" className="mt-0">
+              <ProviderForm
+                appId={appId}
+                submitLabel={t("common.add")}
+                onSubmit={handleSubmit}
+                onCancel={() => onDone()}
+                onSubmittingChange={setIsFormSubmitting}
+                onSubmitReadyChange={handleSubmitReadyChange}
+                showButtons={false}
+              />
+            </TabsContent>
 
-          <TabsContent value="universal" className="mt-0">
-            <UniversalProviderPanel />
-          </TabsContent>
-        </Tabs>
-      ) : (
-        // OpenCode/OpenClaw: directly show form without tabs
-        <ProviderForm
-          appId={appId}
-          submitLabel={t("common.add")}
-          onSubmit={handleSubmit}
-          onCancel={() => onOpenChange(false)}
-          onSubmittingChange={setIsFormSubmitting}
-          onSubmitReadyChange={handleSubmitReadyChange}
-          showButtons={false}
-        />
-      )}
+            <TabsContent value="universal" className="mt-0">
+              <UniversalProviderPanel />
+            </TabsContent>
+          </Tabs>
+        ) : (
+          // OpenCode/OpenClaw: directly show form without tabs
+          <ProviderForm
+            appId={appId}
+            submitLabel={t("common.add")}
+            onSubmit={handleSubmit}
+            onCancel={() => onDone()}
+            onSubmittingChange={setIsFormSubmitting}
+            onSubmitReadyChange={handleSubmitReadyChange}
+            showButtons={false}
+          />
+        )}
+      </div>
+
+      <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border-default py-4">
+        {footer}
+      </div>
 
       {showUniversalTab && (
         <UniversalProviderFormModal
@@ -448,6 +456,6 @@ export function AddProviderDialog({
           initialPreset={selectedUniversalPreset}
         />
       )}
-    </FullScreenPanel>
+    </div>
   );
 }
