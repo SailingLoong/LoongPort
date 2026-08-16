@@ -133,7 +133,6 @@ import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
 import {
   APP_IDS,
   DEFAULT_VISIBLE_APPS,
-  getAppDisplayName,
   isProxyAppId,
 } from "@/config/appConfig";
 
@@ -260,22 +259,17 @@ function App() {
   // tab 上的 ×：与设置页「主页面显示」同一开关，就地隐藏一个应用。
   // 发送与 DEFAULT_VISIBLE_APPS 合并后的完整对象（后端 visible_apps 是整体替换）；
   // settings 还没加载时不动 —— 那次保存会把其余字段全部清成默认值。
+  // 不弹 toast：tab 消失即反馈，恢复入口就在旁边的「+」，顶部横幅反而会挡住
+  // 连续隐藏的操作（实测反馈）。
   const hideAppFromMainPage = useCallback(
     (app: AppId) => {
       if (!settingsData) return;
-      saveSettingsMutation.mutate(
-        { ...settingsData, visibleApps: { ...visibleApps, [app]: false } },
-        {
-          onSuccess: () =>
-            toast.info(
-              t("appSwitcher.hiddenToast", {
-                name: getAppDisplayName(app, t),
-              }),
-            ),
-        },
-      );
+      saveSettingsMutation.mutate({
+        ...settingsData,
+        visibleApps: { ...visibleApps, [app]: false },
+      });
     },
-    [saveSettingsMutation, settingsData, visibleApps, t],
+    [saveSettingsMutation, settingsData, visibleApps],
   );
 
   // 末尾「+」的反向操作：把隐藏的应用加回来。效果（tab 出现）自解释，不弹 toast。
