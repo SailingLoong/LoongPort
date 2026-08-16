@@ -240,10 +240,13 @@ jobs:
         # 循环之外；#148 分支同 workflow 则完全没重编 —— 指纹抖动不可依赖）。
         shell: pwsh
         run: |
+          # 关掉颜色：TERM_COLOR=always 时 "Executable" 后面跟着 ANSI 色码，
+          # 且 Windows 输出是 src\lib.rs（反斜杠）——正则按无色输出写，分隔符两种都认。
+          $env:CARGO_TERM_COLOR = 'never'
           $output = cargo test --lib --manifest-path src-tauri/Cargo.toml --no-run 2>&1
           $output | Write-Host
-          # `--lib` 恰好产生一行 "Executable unittests src/lib.rs (…exe)"
-          $m = $output | Select-String -Pattern 'Executable unittests src/lib\.rs \((.+\.exe)\)' | Select-Object -First 1
+          # `--lib` 恰好产生一行 "… unittests src/lib.rs (…exe)"
+          $m = $output | Select-String -Pattern 'unittests src[/\\]lib\.rs \((.+\.exe)\)' | Select-Object -First 1
           if (-not $m) { throw "cargo 输出里没有 lib 测试二进制路径" }
           $rel = $m.Matches[0].Groups[1].Value
           $exe = if ([IO.Path]::IsPathRooted($rel)) { $rel } else { Join-Path $pwd.Path $rel }
