@@ -1,4 +1,5 @@
 import React from "react";
+import type { TFunction } from "i18next";
 import type { AppId } from "@/lib/api/types";
 import type { VisibleApps } from "@/types";
 import {
@@ -21,8 +22,6 @@ export const APP_IDS: AppId[] = [
   "claude-desktop",
   "codex",
   "codex-image",
-  // Pi / Grok 排在生图后面：tab 栏宽度不够时按此顺序收进「更多」，
-  // 靠前才不会被折叠隐藏
   "pi",
   "grokbuild",
   "gemini",
@@ -30,6 +29,26 @@ export const APP_IDS: AppId[] = [
   "openclaw",
   "hermes",
 ];
+
+/** tab 栏 / 提示语里展示的应用名（静态表，产品名不翻译）。 */
+export const APP_DISPLAY_NAME: Record<AppId, string> = {
+  claude: "Claude Code",
+  "claude-desktop": "Claude Desktop",
+  codex: "Codex",
+  "codex-image": "Codex Image",
+  gemini: "Gemini",
+  grokbuild: "Grok Build",
+  opencode: "OpenCode",
+  openclaw: "OpenClaw",
+  hermes: "Hermes",
+  pi: "Pi",
+};
+
+/** 应用展示名的唯一来源：「生图」是功能描述，四语各有说法（apps.codex-image）；
+ *  其余都是产品名，直接用静态表。 */
+export function getAppDisplayName(app: AppId, t: TFunction): string {
+  return app === "codex-image" ? t("apps.codex-image") : APP_DISPLAY_NAME[app];
+}
 
 export const DEFAULT_VISIBLE_APPS: VisibleApps = {
   claude: true,

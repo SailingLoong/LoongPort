@@ -925,7 +925,6 @@
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "more": "更多",
     "pi": "Pi"
   },
   "grokBuild": {
@@ -3598,6 +3597,7 @@
     }
   },
   "appSwitcher": {
-    "more": "更多應用程式"
+    "hide": "從主頁面隱藏",
+    "hiddenToast": "已隱藏「{{name}}」，可在 設定 → 主頁面顯示 中恢復"
   }
 }

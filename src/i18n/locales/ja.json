@@ -924,7 +924,6 @@
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "more": "その他",
     "pi": "Pi"
   },
   "grokBuild": {
@@ -3597,6 +3596,7 @@
     }
   },
   "appSwitcher": {
-    "more": "その他のアプリ"
+    "hide": "ホームページから隠す",
+    "hiddenToast": "「{{name}}」を非表示にしました。設定 → ホームページ表示 から戻せます。"
   }
 }
