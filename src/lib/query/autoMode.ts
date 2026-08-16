@@ -252,13 +252,15 @@ export function useDisableAutoMode() {
 }
 
 /**
- * 总开关：一次开/关多个 app 的省心模式（与单 app 同一份编排顺序，
- * 逐个执行、单个失败不影响其余 —— 剩下的下次再点即补齐）。
+ * 总开关：一次开/关多个 app 的省心模式。**逐 app 静默容错**：CLI 没装的 app
+ * （接管写配置时报「配置文件不存在」）直接跳过、不弹错 —— 总开关面向「能开的
+ * 都开」，单个 app 的问题留给用户显式单开时再报（单卡走带 toast 的编排）。
+ * 例外：路由服务本身起不来是真问题，浮出让它的 mutation toast 报。
  */
 export function useSetAutoModeAll() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
-  const { startProxyServer, setTakeoverForApp } = useProxyStatus();
+  const { startProxyServer } = useProxyStatus();
 
   return useMutation({
     mutationFn: async ({
@@ -268,21 +270,31 @@ export function useSetAutoModeAll() {
       apps: ProxyAppId[];
       enable: boolean;
     }) => {
+      if (enable) {
+        const status = await proxyApi.getProxyStatus();
+        if (!status.running) {
+          await startProxyServer();
+        }
+      }
+      const takeover = await proxyApi.getProxyTakeoverStatus();
       for (const appType of apps) {
         try {
           if (enable) {
-            await enableAutoModeApp(
-              startProxyServer,
-              setTakeoverForApp,
+            if (!(takeover?.[appType] ?? false)) {
+              // 静默路径（raw API，不走带 toast 的 mutation）：
+              // CLI 未装等 per-app 失败跳过即可。
+              await proxyApi.setProxyTakeoverForApp(appType, true);
+            }
+            await autoModeApi.setEnabled(appType, true);
+          } else {
+            await disableAutoModeApp(
+              (input) =>
+                proxyApi.setProxyTakeoverForApp(input.appType, input.enabled),
               appType,
             );
-          } else {
-            await disableAutoModeApp(setTakeoverForApp, appType);
           }
         } catch (error) {
-          // 单个 app 失败不停整批：各命令的 toast 已给出原因，
-          // 其余 app 继续处理，总开关状态按实际结果刷新。
-          console.error(`省心模式总开关处理 ${appType} 失败:`, error);
+          console.warn(`省心模式总开关跳过 ${appType}:`, error);
         }
       }
     },

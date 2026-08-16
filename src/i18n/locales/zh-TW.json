@@ -2628,7 +2628,7 @@
     "strategyLabel": "挑選策略（全域）",
     "strategy": {
       "cheapest": "價格最低",
-      "cheapestHint": "按檔位倍率升序",
+      "cheapestHint": "按 倍率×模型單價 升序（無價模型排後）",
       "fastest": "回應最快",
       "fastestHint": "按近 7 天首字耗時升序"
     },
@@ -2772,7 +2772,7 @@
     },
     "failoverQueue": {
       "title": "故障轉移佇列",
-      "description": "管理各應用程式的供應商故障轉移順序",
+      "description": "僅當省心模式關閉時生效：請求失敗按此順序切換（省心模式開啟時由策略自動排序，不經過佇列）。順序與首頁供應商列表一致，可增刪成員",
       "info": "啟用自動故障轉移後，將按佇列優先順序選擇供應商（P1 優先）。當請求失敗時，系統會按佇列順序依次嘗試下一個供應商。",
       "selectProvider": "選擇供應商新增至佇列",
       "noAvailableProviders": "沒有可新增的供應商",

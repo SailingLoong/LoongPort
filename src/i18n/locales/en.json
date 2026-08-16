@@ -2627,7 +2627,7 @@
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
       "cheapest": "Cheapest",
-      "cheapestHint": "Ordered by tier rate multiplier",
+      "cheapestHint": "By rate multiplier × model unit price (unpriced models last)",
       "fastest": "Fastest",
       "fastestHint": "Ordered by 7-day avg first-token time"
     },
@@ -2771,7 +2771,7 @@
     },
     "failoverQueue": {
       "title": "Failover Queue",
-      "description": "Manage failover order for each app's providers",
+      "description": "Only used when Easy Mode is off: requests switch through this order on failure (Easy Mode ranks tiers by strategy instead). Order follows the home provider list; members can be added or removed",
       "info": "When auto failover is enabled, requests follow the queue priority order (P1 first). On failures, the system will try the next provider in the queue.",
       "selectProvider": "Select a provider to add to queue",
       "noAvailableProviders": "No providers available to add",
