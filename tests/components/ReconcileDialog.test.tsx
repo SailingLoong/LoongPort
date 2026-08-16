@@ -61,9 +61,18 @@ const flagsReport: ReconciliationReport = {
   ],
 };
 
-function stubInvoke(report: ReconciliationReport) {
+function stubInvoke(report: ReconciliationReport, easyModeEnabled = true) {
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === "relay_reconciliation") return report;
+    // RelayRow 的对账资格要读省心模式状态（useEasyModeApps → 4 个 app）。
+    if (cmd === "get_auto_mode_status")
+      return {
+        enabled: easyModeEnabled,
+        strategy: "cheapest",
+        model: null,
+        availableModels: [],
+        hasCandidates: true,
+      };
     throw new Error(`command not stubbed in this test: ${cmd}`);
   });
 }
@@ -80,6 +89,37 @@ function renderDialog(report: ReconciliationReport) {
       />
     </QueryClientProvider>,
   );
+}
+
+/** 一行带 codex 托管档位、可查余额的中转站（对账入口的资格原料齐备）。 */
+function relayWithCodexTier(): RelayRowData {
+  const tier: TierInfo = {
+    providerId: "loongport-test",
+    appId: "codex",
+    groupName: "Pro",
+    displayName: "Example · Pro",
+    model: "gpt-a",
+    models: ["gpt-a"],
+    rateMultiplier: 1,
+    isCurrent: true,
+    canVerifyModels: true,
+    userEdited: false,
+    allowImageGeneration: false,
+  };
+  return {
+    id: 7,
+    siteOrigin: "https://api.example.com",
+    siteName: "Example",
+    accountLabel: "user@example.com",
+    status: "ready",
+    isCurrent: true,
+    canQueryBalance: true,
+    canPurchase: true,
+    canRefresh: true,
+    usageBlockers: [{ app: "codex", tierName: "Example · Pro" }],
+    removeConfirmation: "configured",
+    tiers: [tier],
+  };
 }
 
 describe("ReconcileDialog", () => {
@@ -201,33 +241,7 @@ describe("ReconcileDialog", () => {
 
   it("exposes the entry on RelayRow and opens the dialog from there", async () => {
     stubInvoke(flagsReport);
-    const tier: TierInfo = {
-      providerId: "loongport-test",
-      appId: "codex",
-      groupName: "Pro",
-      displayName: "Example · Pro",
-      model: "gpt-a",
-      models: ["gpt-a"],
-      rateMultiplier: 1,
-      isCurrent: true,
-      canVerifyModels: true,
-      userEdited: false,
-      allowImageGeneration: false,
-    };
-    const relay: RelayRowData = {
-      id: 7,
-      siteOrigin: "https://api.example.com",
-      siteName: "Example",
-      accountLabel: "user@example.com",
-      status: "ready",
-      isCurrent: true,
-      canQueryBalance: true,
-      canPurchase: true,
-      canRefresh: true,
-      usageBlockers: [{ app: "codex", tierName: "Example · Pro" }],
-      removeConfirmation: "configured",
-      tiers: [tier],
-    };
+    const relay = relayWithCodexTier();
     render(
       <QueryClientProvider client={createTestQueryClient()}>
         <RelayRow
@@ -249,10 +263,11 @@ describe("ReconcileDialog", () => {
       </QueryClientProvider>,
     );
 
-    // 入口在行上（hover 操作区），点开弹窗后能看到标题与报告内容。
-    fireEvent.click(
-      screen.getByRole("button", { name: "loongport.reconcile.entry" }),
-    );
+    // 入口在行上（hover 操作区）；省心模式状态异步回来后才具备资格，先等它。
+    const entry = await screen.findByRole("button", {
+      name: "loongport.reconcile.entry",
+    });
+    fireEvent.click(entry);
     await waitFor(() =>
       expect(screen.getByText("loongport.reconcile.title")).toBeTruthy(),
     );
@@ -260,6 +275,44 @@ describe("ReconcileDialog", () => {
       expect(
         screen.getByText("loongport.reconcile.flagSuspicious"),
       ).toBeTruthy(),
+    );
+  });
+
+  it("hides the entry on RelayRow when Easy Mode is off (no attributed traffic to reconcile)", async () => {
+    // 省心模式全关：估算没有原料（带档位归因的本地路由流量），入口不出现。
+    stubInvoke(flagsReport, false);
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <RelayRow
+          relay={relayWithCodexTier()}
+          open
+          onOpenChange={vi.fn()}
+          busy={new Set()}
+          onLogin={vi.fn()}
+          onProvision={vi.fn()}
+          onSwitchTier={vi.fn()}
+          onSelectTierModel={vi.fn()}
+          onPurchase={vi.fn()}
+          onCheckTier={vi.fn()}
+          isCheckingTier={() => false}
+          onResetTier={vi.fn()}
+          onEditTier={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+
+    // 省心模式状态先回来，入口资格才会判定；稳态后入口应当不存在。
+    await waitFor(() => {
+      const calls = invoke.mock.calls.filter(
+        ([cmd]) => cmd === "get_auto_mode_status",
+      );
+      expect(calls.length).toBeGreaterThanOrEqual(4);
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "loongport.reconcile.entry" }),
+      ).toBeNull(),
     );
   });
 });

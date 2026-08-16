@@ -30,6 +30,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
 import type { VerificationVerdict } from "@/lib/api/modelVerification";
+import { useEasyModeApps } from "@/lib/query/autoMode";
 import { ReconcileDialog } from "./ReconcileDialog";
 import { RowBalance } from "./RowBalance";
 
@@ -169,6 +170,14 @@ export function RelayRow({
   // 「对账」弹窗的开合由这一行自己持有 —— 它只读这一个 relay 的事实，
   // 没有跨行状态要父组件管（与 `ModelVerificationDialog` 那种全局验证任务不同）。
   const [reconcileOpen, setReconcileOpen] = useState(false);
+  // 对账的资格（2026-08-16 定稿）：除了能查余额，还要求该站**有档位的 app
+  // 至少一个开着省心模式** —— 估算的原料是带档位归因的本地路由流量
+  // （实际消耗的 token / 成本），没有省心模式就没有这些数据，弹窗只剩
+  // 余额变动一列，不如不开口。查询失败按「没开」保守处理。
+  const easyModeApps = useEasyModeApps();
+  const reconcileAvailable =
+    relay.canQueryBalance &&
+    relay.tiers.some((tier) => easyModeApps.has(tier.appId));
   return (
     <Collapsible open={open} onOpenChange={onOpenChange}>
       <div
@@ -274,10 +283,11 @@ export function RelayRow({
                 : ROW_HOVER_ACTIONS,
             )}
           >
-            {/* 「对账」入口。**只给能查余额的行** —— 对账的原料是余额快照，
-                而快照来自余额查询；`canQueryBalance` 是后端给的同一份资格判断
-                （`RowBalance` 用的也是它），没资格的行开了弹窗也只有永远空的数据。 */}
-            {relay.canQueryBalance && (
+            {/* 「对账」入口。资格 = 能查余额（快照原料）**且**该站有档位的 app
+                至少一个开着省心模式（估算原料：带档位归因的本地路由流量）。
+                两个条件都由后端/设置态给出，行里只消费；不满足时整个入口
+                不出现 —— 不是禁用置灰，这行上该功能就是不适用。 */}
+            {reconcileAvailable && (
               <Button
                 type="button"
                 variant="ghost"
@@ -330,7 +340,7 @@ export function RelayRow({
 
         {/* 对账弹窗走 portal 渲染，放行内只是挂个宿主位置。
             查询只在弹窗打开时发（`enabled: open`），关着的行不会多一个请求。 */}
-        {relay.canQueryBalance && (
+        {reconcileAvailable && (
           <ReconcileDialog
             relayId={relay.id}
             relayLabel={

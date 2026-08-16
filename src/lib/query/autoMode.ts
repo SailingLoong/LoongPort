@@ -20,6 +20,26 @@ export function useAutoModeStatus(appType: string, enabled = true) {
 }
 
 /**
+ * 当前开着省心模式的 app 集合（四个路由 app 的状态并集，同一批 query 缓存）。
+ *
+ * 消费方是「功能是否可用」的资格判断（如扣费对账：估算的原料是带档位归因的
+ * 本地路由流量，没有省心模式就没有数据）。查不到状态时按「没开」处理 ——
+ * 资格判断宁可保守。
+ */
+export function useEasyModeApps(): Set<string> {
+  const claude = useAutoModeStatus("claude").data;
+  const codex = useAutoModeStatus("codex").data;
+  const gemini = useAutoModeStatus("gemini").data;
+  const grokbuild = useAutoModeStatus("grokbuild").data;
+  const apps = new Set<string>();
+  if (claude?.enabled) apps.add("claude");
+  if (codex?.enabled) apps.add("codex");
+  if (gemini?.enabled) apps.add("gemini");
+  if (grokbuild?.enabled) apps.add("grokbuild");
+  return apps;
+}
+
+/**
  * 开/关某应用的省心模式。
  *
  * 开启可能立即热切换到策略第一名（后端编排），成功后要刷新供应商列表与
