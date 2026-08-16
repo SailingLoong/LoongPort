@@ -1470,6 +1470,58 @@ fn resolve_login_codes(
     )
 }
 
+/// 残留登录窗销毁后等 label 释放的上限。事件循环正常处理 `Destroyed` 只要几十毫秒；
+/// 这个上限只兜「事件循环长时间不转」的病态情形，到点就照常重开。
+const STALE_LOGIN_WINDOW_DESTROY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 销毁残留的登录窗，并**等 label 真正释放**后才返回。
+///
+/// ## 为什么必须等（2026-08-16 用户日志实锤）
+///
+/// `destroy()` 是异步生效的：它只清运行时自己的窗口表，manager 那份注册表
+/// （`get_webview_window` 与窗口重建共用）要等事件循环处理完 `Destroyed` 才清。
+/// 不等就重建，`WebviewWindowBuilder::build` 会撞
+/// `a webview with label 'loongport-login' already exists` —— 连续两次导入第二次
+/// 必现，导入直接失败。
+///
+/// 轮询 `get_webview_window` 直到 `None`：那份注册表正是 label 冲突的判据，
+/// 它清了，`build` 就一定能过。
+///
+/// 用 `destroy()` 而不是 `close()`：close 派发的是可被拦截的关闭**请求**
+/// （`CloseRequested`，主窗口的最小化到托盘就是靠它拦的），拦下后 label 继续被占；
+/// destroy 直接销毁、拦不住。
+async fn destroy_stale_login_window<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
+    destroy_stale_login_window_with_timeout(app_handle, STALE_LOGIN_WINDOW_DESTROY_TIMEOUT).await
+}
+
+/// 参数化超时只为可测：MockRuntime 不驱动事件循环，label 永不释放
+/// （见 newapi_purchase 超时用例里同款说明），生产超时下限走上面的常量。
+async fn destroy_stale_login_window_with_timeout<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    timeout: std::time::Duration,
+) {
+    let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) else {
+        return;
+    };
+    log::info!("发现残留的登录窗口，销毁后重开");
+    let _ = stale.destroy();
+
+    let deadline = std::time::Instant::now() + timeout;
+    while app_handle
+        .get_webview_window(login::LOGIN_WINDOW_LABEL)
+        .is_some()
+    {
+        if std::time::Instant::now() >= deadline {
+            log::warn!(
+                "残留登录窗口 {} 销毁未在 {timeout:?} 内生效，继续重开（label 仍被占用时建窗会失败）",
+                login::LOGIN_WINDOW_LABEL
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 async fn browser_import(
     app_handle: &tauri::AppHandle,
     input: &str,
@@ -1478,10 +1530,9 @@ async fn browser_import(
     entry_source: BrowserEntrySource,
     promo_override: Option<&str>,
 ) -> Result<ImportResult, RelayImportError> {
-    if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
-        log::info!("发现残留的站点导入窗口，销毁后重开");
-        let _ = stale.destroy();
-    }
+    // 上一次导入留下的窗口（NewAPI 凭据到手即关、sub2api 留窗都可能产生）：
+    // 每次导入必须是全新的 incognito 会话，所以销毁重开而不是复用导航。
+    destroy_stale_login_window(app_handle).await;
 
     let (login_aff_code, login_promo_code) = resolve_login_codes(&site_origin, promo_override);
     let entry_url =
@@ -2026,11 +2077,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 直接销毁重开则总能给用户一个可见的窗口。代价是「他正在填的表单没了」，但能走到这里
     // 说明上一轮的 `do_login` 已经返回（否则那边还持有窗口），也就是那个窗口已经没人在等它
     // 的凭据了 —— 留着它反而是个陷阱。
-    if let Some(stale) = app_handle.get_webview_window(login::LOGIN_WINDOW_LABEL) {
-        log::info!("发现残留的登录窗口，销毁后重开");
-        // destroy 而不是 close：close 是可被拦截的请求，见下方 destroy 那处的说明。
-        let _ = stale.destroy();
-    }
+    destroy_stale_login_window(app_handle).await;
 
     // 邀请码走三层回落：**远端（上次拉到并缓存的）> 编译期内置**。
     // 在这里解析而不是在 `login_script` 里查表 —— 那样远端那层永远进不来。
@@ -5571,6 +5618,54 @@ mod tests {
 
         assert_eq!(error.kind, Some(RelayImportErrorKind::Cancelled));
         assert_eq!(error.message, "注册或登录尚未完成");
+    }
+
+    fn bare_mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app")
+    }
+
+    #[tokio::test]
+    async fn stale_login_window_destroy_returns_without_waiting_when_none_exists() {
+        // 没有残留窗口是绝大多数路径（上一轮窗口早就关了）：helper 必须立即返回，
+        // 不进等待循环 —— 否则每次导入/重登都白等一个轮询周期。
+        let app = bare_mock_app();
+        let start = std::time::Instant::now();
+        destroy_stale_login_window_with_timeout(app.handle(), std::time::Duration::from_secs(2))
+            .await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "没有残留窗口时不该等待，实际等了 {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_login_window_destroy_is_bounded_when_the_label_never_frees() {
+        // MockRuntime 不驱动事件循环 ⇒ destroy 后 manager 注册表里的 label 永不释放
+        // （与 newapi_purchase 超时用例同款不可观测性）。能钉住的不变量是「有界返回」：
+        // 到点必须继续走，否则真实运行时里事件循环卡一下，导入就永久卡死在等待里。
+        let app = bare_mock_app();
+        tauri::WebviewWindowBuilder::new(
+            app.handle(),
+            login::LOGIN_WINDOW_LABEL,
+            tauri::WebviewUrl::External(url::Url::parse("about:blank").unwrap()),
+        )
+        .build()
+        .expect("预建残留登录窗");
+
+        let start = std::time::Instant::now();
+        destroy_stale_login_window_with_timeout(
+            app.handle(),
+            std::time::Duration::from_millis(150),
+        )
+        .await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "label 永不释放时也必须有界返回，实际等了 {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
