@@ -14,8 +14,6 @@
 
 ### 🌐 官方网站：**[loongport.dev](https://loongport.dev)**
 
-### 📖 图文教程：**[从下载到接上中转站，含从 cc-switch 迁移](https://github.com/SailingLoong/cc-switch-relay-tutorial)**
-
 ### 💬 QQ 群：**773696474**
 
 <img src="assets/qq-group.jpeg" alt="LoongPort QQ 群二维码" width="240">
