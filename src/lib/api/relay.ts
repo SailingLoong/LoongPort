@@ -309,6 +309,12 @@ export interface ReconciliationReport {
   relayId: number;
   /** 回看期（30 天）内的快照总数 —— 是窗口的原料数，不是窗口数。 */
   snapshotCount: number;
+  /**
+   * 回看期内名下档位有没有任何本地代理记录（不限窗口内）。
+   * `false` 时预估成本全 0 的含义是**没有原料**（档位直连、未开本地路由），
+   * 不是「消费为 0」—— 弹窗据此展示提示。
+   */
+  hasLocalTraffic: boolean;
   /** 有效窗口 ratio 的中位数；不足 3 个有效窗口为 `null`，此时不判 `suspicious`。 */
   baselineRatio: number | null;
   /** 窗口按**新 → 旧**排，最多 50 个。 */

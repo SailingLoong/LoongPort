@@ -182,6 +182,14 @@ export function ReconcileDialog({
             </Button>
           </div>
 
+          {/* 估算没有原料的提示：后端判定回看期内名下档位没有任何本地代理记录
+              （档位直连、未开路由），预估全 0 的含义是「没得算」而不是「免费」。 */}
+          {report && !report.hasLocalTraffic && (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {t("loongport.reconcile.noLocalTrafficHint")}
+            </p>
+          )}
+
           {/* 首次加载：居中转圈。后台刷新（loading 且已有 report）不打断表格 ——
               keep-last-good 语义，见 useReconciliationQuery 的文档。 */}
           {loading && !report ? (

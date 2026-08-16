@@ -26,6 +26,7 @@ function createWrapper() {
 const report: ReconciliationReport = {
   relayId: 7,
   snapshotCount: 4,
+  hasLocalTraffic: true,
   baselineRatio: 0.5,
   windows: [
     {

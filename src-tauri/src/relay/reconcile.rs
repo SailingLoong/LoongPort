@@ -183,6 +183,11 @@ fn resolved_usd_balance(usage: &UsageResult) -> Option<f64> {
 
 // ============================================================================
 // 对账报告：窗口计算（plan §三.3 / §三.4）
+//
+// ⚠️ 估算的数据源边界：预估成本只统计**经本地代理**的请求（`proxy_request_logs`
+// 里带档位归因的行）。托管档位默认直连中转站 —— 只有在代理面板为对应 CLI 开了
+// 路由（接管），流量才会留下记录；直连消费不进估算。`has_local_traffic` 把这个
+// 边界如实交给前端，别让「无估算」被误读成「免费」。
 // ============================================================================
 
 /// 回看窗口长度：30 天。再早的快照不进报告 —— 中转站价格表会变，
@@ -210,6 +215,13 @@ pub struct ReconciliationReport {
     pub relay_id: i64,
     /// 回看期内的快照总数（配成窗口的原料，不是窗口数）。
     pub snapshot_count: usize,
+    /// 回看期内名下档位有没有**任何**本地代理记录（不限窗口夹住的区间）。
+    ///
+    /// `false` 时「预估成本全 0」的含义是**没有原料** —— 托管档位默认直连中转站，
+    /// 只有在代理面板为对应 CLI 开了路由（接管），流量才会经本地代理留下带档位
+    /// 归因的记录；直连消费不进估算。前端据此展示提示，别让用户把「无估算」
+    /// 误读成「免费」。
+    pub has_local_traffic: bool,
     /// 有效窗口 ratio 的中位数；不足 [`MIN_BASELINE_WINDOWS`] 个有效窗口为 `None`。
     pub baseline_ratio: Option<f64>,
     /// 窗口按新 → 旧排，最多 [`MAX_WINDOWS`] 个。
@@ -263,6 +275,7 @@ impl Database {
         let since = chrono::Utc::now().timestamp() - LOOKBACK_SECS;
         let snapshots = self.list_balance_snapshots(relay_id, Some(since))?;
         let snapshot_count = snapshots.len();
+        let has_local_traffic = self.has_local_traffic(provider_keys, since)?;
 
         // 相邻两枚快照配成窗口（升序 ⇒ 窗口先按旧 → 新算，收尾再反转）。
         let mut windows = Vec::with_capacity(snapshot_count.saturating_sub(1));
@@ -295,6 +308,7 @@ impl Database {
         Ok(ReconciliationReport {
             relay_id,
             snapshot_count,
+            has_local_traffic,
             baseline_ratio,
             windows,
         })
@@ -319,26 +333,69 @@ impl Database {
             "SELECT COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0)
              FROM proxy_request_logs
              WHERE created_at >= ?1 AND created_at < ?2
-               AND (provider_id, app_type) IN (VALUES ",
+               AND ",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(start_secs), Box::new(end_secs)];
-        for (i, (provider_id, app_type)) in provider_keys.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            sql.push_str("(?, ?)");
-            args.push(Box::new(provider_id.clone()));
-            args.push(Box::new(app_type.clone()));
-        }
-        // 关掉 `IN (VALUES` 那个开括号；每一行 `(?, ?)` 自带收尾。
-        sql.push(')');
+        append_provider_keys_in_values(&mut sql, provider_keys, &mut args);
 
         let conn = lock_conn!(self.conn);
         let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
         conn.query_row(&sql, params.as_slice(), |row| row.get::<_, f64>(0))
             .map_err(|e| AppError::Database(format!("聚合窗口估算成本失败: {e}")))
     }
+
+    /// 回看期内名下档位有没有**任何**本地代理记录（不限窗口夹住的区间）。
+    ///
+    /// 与 [`Self::estimated_cost_between`] 同一套归属匹配，回答「估算有没有原料」。
+    /// 刻意看整个回看期而不是只看窗口内：采样滞后于消费是常态，最新一笔消费
+    /// 常落在最后一枚快照之后（还配不成窗口），那也要算「有本地流量」。
+    fn has_local_traffic(
+        &self,
+        provider_keys: &[(String, String)],
+        since_secs: i64,
+    ) -> Result<bool, AppError> {
+        if provider_keys.is_empty() {
+            return Ok(false);
+        }
+
+        let mut sql = String::from(
+            "SELECT EXISTS(SELECT 1 FROM proxy_request_logs
+             WHERE created_at >= ?1 AND ",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(since_secs)];
+        append_provider_keys_in_values(&mut sql, provider_keys, &mut args);
+        // 给 `EXISTS(` 收尾。
+        sql.push(')');
+
+        let conn = lock_conn!(self.conn);
+        let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        conn.query_row(&sql, params.as_slice(), |row| row.get::<_, i64>(0))
+            .map(|exists| exists == 1)
+            .map_err(|e| AppError::Database(format!("查询本地流量记录失败: {e}")))
+    }
+}
+
+/// 往 `sql` 追加 `(provider_id, app_type) IN (VALUES (?, ?), …)`，成对参数进 `args`。
+///
+/// 归属匹配是窗口聚合与原料探测共用的口径 —— provider id 只在所属 app_type 那一栏
+/// 下才是这条档位 —— 拼法只此一份，别在调用点各拼各的。
+fn append_provider_keys_in_values(
+    sql: &mut String,
+    provider_keys: &[(String, String)],
+    args: &mut Vec<Box<dyn rusqlite::ToSql>>,
+) {
+    sql.push_str("(provider_id, app_type) IN (VALUES ");
+    for (i, (provider_id, app_type)) in provider_keys.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str("(?, ?)");
+        args.push(Box::new(provider_id.clone()));
+        args.push(Box::new(app_type.clone()));
+    }
+    // 关掉 `IN (VALUES` 那个开括号；每一行 `(?, ?)` 自带收尾。
+    sql.push(')');
 }
 
 /// 有效窗口 ratio 的中位数；不足 [`MIN_BASELINE_WINDOWS`] 个有效窗口回 `None`。
@@ -716,6 +773,7 @@ mod tests {
         assert_eq!(report.snapshot_count, 4);
         assert_eq!(report.windows.len(), 3);
         assert_eq!(report.baseline_ratio, Some(0.5));
+        assert!(report.has_local_traffic, "有名下档位的本地记录");
         // 新 → 旧
         assert_eq!(report.windows[0].start_secs, base + 300);
         assert_eq!(report.windows[2].start_secs, base + 100);
@@ -897,6 +955,47 @@ mod tests {
         assert_eq!(report.snapshot_count, 1);
         assert!(report.windows.is_empty(), "快照不足两枚 ⇒ 没有窗口");
         assert_eq!(report.baseline_ratio, None);
+        assert!(!report.has_local_traffic, "没有任何本地记录");
+    }
+
+    #[test]
+    fn has_local_traffic_spans_lookback_beyond_windows() {
+        let db = db();
+        let base = base_time();
+        // 窗口只有 [base, base+100]，但本地记录发生在最新快照**之后** —— 采样滞后
+        // 于消费是常态，那笔记录配不成任何窗口，也要报告「有本地流量」。
+        snapshot_at(&db, 7, 10.0, base);
+        snapshot_at(&db, 7, 8.0, base + 100);
+        insert_log(&db, "late", OWNED_PID, "codex", base + 200, "0.5");
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert_eq!(report.windows.len(), 1);
+        assert_eq!(
+            report.windows[0].estimated_cost_usd, 0.0,
+            "记录在窗口外，窗口估算是 0"
+        );
+        assert!(report.has_local_traffic, "窗口外的记录也算「有原料」");
+    }
+
+    #[test]
+    fn foreign_provider_traffic_does_not_count_as_local_traffic() {
+        let db = db();
+        let base = base_time();
+        snapshot_at(&db, 7, 10.0, base);
+        snapshot_at(&db, 7, 8.0, base + 100);
+        // 别的站/别的 app 的记录不算本站的原料。
+        insert_log(
+            &db,
+            "foreign",
+            "loongport-fedcba9876543210",
+            "codex",
+            base + 50,
+            "9",
+        );
+        insert_log(&db, "wrong-app", OWNED_PID, "claude", base + 50, "9");
+
+        let report = db.reconciliation_report(7, &owned_keys()).expect("算报告");
+        assert!(!report.has_local_traffic, "归属匹配与窗口聚合同一套口径");
     }
 
     /// 老库（v13，没有本表）升级后必须有这张表且可用。
