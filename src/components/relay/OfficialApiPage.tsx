@@ -21,9 +21,15 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 export interface OfficialApiPageProps {
   sourceAppId: AppId;
   onBack: () => void;
+  /** 内嵌在统一添加聚合页（`AddHubPage`）里时不带返回箭头与页面级容器。 */
+  embedded?: boolean;
 }
 
-export function OfficialApiPage({ sourceAppId, onBack }: OfficialApiPageProps) {
+export function OfficialApiPage({
+  sourceAppId,
+  onBack,
+  embedded = false,
+}: OfficialApiPageProps) {
   const { t } = useTranslation();
   const [loginningVendor, setLoginningVendor] = useState<string | null>(null);
 
@@ -44,18 +50,26 @@ export function OfficialApiPage({ sourceAppId, onBack }: OfficialApiPageProps) {
   };
 
   return (
-    <main className="mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6">
+    <div
+      className={
+        embedded
+          ? "flex w-full flex-col"
+          : "mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6"
+      }
+    >
       <div className="flex items-start gap-3 border-b border-border-default py-4">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="mt-0.5 h-8 w-8 shrink-0"
-          onClick={onBack}
-          aria-label={t("common.back")}
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
+        {!embedded && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="mt-0.5 h-8 w-8 shrink-0"
+            onClick={onBack}
+            aria-label={t("common.back")}
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+        )}
         <div>
           <h1 className="text-lg font-semibold tracking-tight">
             {t("loongport.officialApi.title")}
@@ -90,6 +104,6 @@ export function OfficialApiPage({ sourceAppId, onBack }: OfficialApiPageProps) {
           </button>
         ))}
       </div>
-    </main>
+    </div>
   );
 }

@@ -36,7 +36,7 @@ vi.mock("@/components/relay/RelaySection", () => ({
   RelaySection: ({ appId, onOpenDirectory }: any) => (
     <div data-testid="relay-section">
       <span data-testid="relay-source-app">{appId}</span>
-      <button onClick={() => onOpenDirectory("add")}>open-directory</button>
+      {/* 普通添加入口已上收到顶栏大「+」（聚合页默认落当前 app 的榜）。 */}
       <button onClick={() => onOpenDirectory("firstRun")}>
         open-first-run-directory
       </button>
@@ -100,7 +100,13 @@ describe("relay directory routing", () => {
       localStorage.setItem(LAST_APP_STORAGE_KEY, appId);
       renderApp();
 
-      fireEvent.click(await screen.findByText("open-directory"));
+      // 顶栏大「+」进聚合页，默认落中转站标签、按当前 app 选榜
+      //（i18n 空资源下 aria-label 就是 key 本身）。
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "loongport.addEntry.title",
+        }),
+      );
 
       expect(await screen.findByTestId("relay-directory")).toBeInTheDocument();
       expect(screen.getByTestId("directory-source-app")).toHaveTextContent(

@@ -3125,7 +3125,8 @@
   "loongport": {
     "refreshAll": "すべての中継サービスと公式 API のアカウント情報、残高、グループ倍率、接続プロファイルを更新",
     "addEntry": {
-      "title": "追加"
+      "title": "追加",
+      "manual": "手動追加"
     },
     "sections": {
       "relay": "中継サービス",

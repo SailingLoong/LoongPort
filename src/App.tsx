@@ -76,13 +76,12 @@ import {
 import { AppSwitcher } from "@/components/AppSwitcher";
 import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
 import { ProviderList } from "@/components/providers/ProviderList";
-import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
-import { AddEntryMenu } from "@/components/AddEntryMenu";
+import { AddHubPage } from "@/components/relay/AddHubPage";
 import { StarRewardDialog } from "@/components/StarRewardDialog";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
@@ -107,8 +106,6 @@ import UnifiedSkillsPanel, {
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { RelaySection } from "@/components/relay/RelaySection";
-import { RelayDirectoryPage } from "@/components/relay/directory/RelayDirectoryPage";
-import { OfficialApiPage } from "@/components/relay/OfficialApiPage";
 import type { LeaderboardKind } from "@/lib/api/relay";
 import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
@@ -149,8 +146,7 @@ type View =
   | "openclawTools"
   | "openclawAgents"
   | "hermesMemory"
-  | "relayDirectory"
-  | "officialApi";
+  | "addHub";
 
 interface SyncStatusUpdatedPayload {
   source?: string;
@@ -211,7 +207,6 @@ function App() {
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
-  const [isAddOpen, setIsAddOpen] = useState(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [mcpManagementBusy, setMcpManagementBusy] = useState(false);
   const [skillsManagementBusy, setSkillsManagementBusy] = useState(false);
@@ -226,7 +221,7 @@ function App() {
 
   useEffect(() => {
     // 广场/官方 API 页是从供应商页临时进入的子流程，不应成为下次启动的落点。
-    if (currentView !== "relayDirectory" && currentView !== "officialApi") {
+    if (currentView !== "addHub") {
       localStorage.setItem(LAST_VIEW_STORAGE_KEY, currentView);
     }
   }, [currentView]);
@@ -996,31 +991,22 @@ function App() {
     setCurrentView("skillsDiscovery");
   };
 
-  const handleOpenRelayDirectory = useCallback((entry: "add" | "firstRun") => {
-    setDirectoryInitialKind(entry === "firstRun" ? "overall" : undefined);
-    setCurrentView("relayDirectory");
-  }, []);
-
-  const handleOpenOfficialApi = useCallback(() => {
-    setCurrentView("officialApi");
+  /** 普通添加（顶栏 + / ProviderList 空态）不带榜单偏好；首启引导落综合榜。 */
+  const handleOpenAddHub = useCallback((directoryKind?: "overall") => {
+    setDirectoryInitialKind(directoryKind);
+    setCurrentView("addHub");
   }, []);
 
   const renderContent = () => {
     const content = (() => {
       switch (currentView) {
-        case "relayDirectory":
+        case "addHub":
           return (
-            <RelayDirectoryPage
+            <AddHubPage
               sourceAppId={activeApp}
-              initialKind={directoryInitialKind}
+              initialDirectoryKind={directoryInitialKind}
               onBack={() => setCurrentView("providers")}
-            />
-          );
-        case "officialApi":
-          return (
-            <OfficialApiPage
-              sourceAppId={activeApp}
-              onBack={() => setCurrentView("providers")}
+              onAddProvider={addProvider}
             />
           );
         case "settings":
@@ -1120,10 +1106,11 @@ function App() {
                         它自带全部状态（见 RelaySection 的文档）—— 这里只挂一行，
                         不把 relay 的逻辑摊进这个上游文件。
                         它内部已按「中转站 / 官方 API」两大块渲染；两块与下面
-                        「其他」的添加入口统一收在顶栏大「+」（AddEntryMenu）。 */}
+                        「其他」的添加入口统一收在顶栏大「+」（点开是 AddHubPage
+                        聚合页，三标签就地切换）。 */}
                     <RelaySection
                       appId={activeApp}
-                      onOpenDirectory={handleOpenRelayDirectory}
+                      onOpenDirectory={() => handleOpenAddHub("overall")}
                     />
 
                     {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口在顶栏 +。
@@ -1177,7 +1164,7 @@ function App() {
                       onOpenTerminal={
                         activeApp === "claude" ? handleOpenTerminal : undefined
                       }
-                      onCreate={() => setIsAddOpen(true)}
+                      onCreate={() => handleOpenAddHub()}
                       onSetAsDefault={
                         activeApp === "openclaw"
                           ? setAsDefaultModel
@@ -1217,10 +1204,7 @@ function App() {
       className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pb-4"
       style={{
         overflowX: "hidden",
-        paddingTop:
-          currentView === "relayDirectory" || currentView === "officialApi"
-            ? dragBarHeight
-            : contentTopOffset,
+        paddingTop: currentView === "addHub" ? dragBarHeight : contentTopOffset,
       }}
     >
       {(dragBarHeight > 0 || useAppWindowControls) && (
@@ -1299,9 +1283,7 @@ function App() {
       )}
 
       <header
-        hidden={
-          currentView === "relayDirectory" || currentView === "officialApi"
-        }
+        hidden={currentView === "addHub"}
         className="fixed z-50 w-full transition-all duration-300 bg-background/80 backdrop-blur-md"
         {...DRAG_REGION_ATTR}
         style={
@@ -1784,14 +1766,15 @@ function App() {
                       </AnimatePresence>
                     </div>
 
-                    <AddEntryMenu
-                      appId={activeApp}
-                      onOpenRelayDirectory={() =>
-                        handleOpenRelayDirectory("add")
-                      }
-                      onOpenOfficialApi={handleOpenOfficialApi}
-                      onOpenManual={() => setIsAddOpen(true)}
-                    />
+                    <Button
+                      onClick={() => handleOpenAddHub()}
+                      size="icon"
+                      className="ml-2 bg-orange-500 hover:bg-orange-600 dark:bg-orange-500 dark:hover:bg-orange-600 text-white shadow-lg shadow-orange-500/30 dark:shadow-orange-500/40 rounded-full w-8 h-8"
+                      aria-label={t("loongport.addEntry.title")}
+                      title={t("loongport.addEntry.title")}
+                    >
+                      <Plus className="w-5 h-5" />
+                    </Button>
                   </>
                 )}
               </div>
@@ -1806,13 +1789,6 @@ function App() {
         )}
         {renderContent()}
       </main>
-
-      <AddProviderDialog
-        open={isAddOpen}
-        onOpenChange={setIsAddOpen}
-        appId={activeApp}
-        onSubmit={addProvider}
-      />
 
       <EditProviderDialog
         open={Boolean(editingProvider)}

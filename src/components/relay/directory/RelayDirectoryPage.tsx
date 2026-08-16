@@ -42,6 +42,11 @@ export interface RelayDirectoryPageProps {
   initialKind?: LeaderboardKind;
   onBack: () => void;
   onAuthenticated?: () => void;
+  /**
+   * 内嵌在统一添加聚合页（`AddHubPage`）里时不带自己的返回箭头与页面级容器 ——
+   * 外层是聚合页的标签布局，返回由聚合页统一负责。
+   */
+  embedded?: boolean;
 }
 
 export function RelayDirectoryPage({
@@ -49,6 +54,7 @@ export function RelayDirectoryPage({
   initialKind,
   onBack,
   onAuthenticated,
+  embedded = false,
 }: RelayDirectoryPageProps) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -154,19 +160,27 @@ export function RelayDirectoryPage({
     : "";
 
   return (
-    <main className="mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6">
+    <div
+      className={
+        embedded
+          ? "flex w-full flex-col"
+          : "mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6"
+      }
+    >
       <div className="flex items-start justify-between gap-4 border-b border-border-default py-4">
         <div className="flex min-w-0 items-start gap-3">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="mt-0.5 h-8 w-8 shrink-0"
-            onClick={onBack}
-            aria-label={t("common.back")}
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
+          {!embedded && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="mt-0.5 h-8 w-8 shrink-0"
+              onClick={onBack}
+              aria-label={t("common.back")}
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+          )}
           <div className="min-w-0">
             <h1 className="text-lg font-semibold tracking-tight">
               {t("loongport.directory.title")}
@@ -316,6 +330,6 @@ export function RelayDirectoryPage({
           </Button>
         </div>
       </div>
-    </main>
+    </div>
   );
 }

@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
+import { AddProviderForm } from "@/components/providers/AddProviderForm";
 import type { ProviderFormValues } from "@/components/providers/forms/ProviderForm";
 
 vi.mock("@/components/ui/dialog", () => ({
@@ -61,7 +61,7 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
   },
 }));
 
-describe("AddProviderDialog", () => {
+describe("AddProviderForm", () => {
   beforeEach(() => {
     mockFormReady = true;
     submitReadyCallbacks = [];
@@ -85,9 +85,8 @@ describe("AddProviderDialog", () => {
     const handleOpenChange = vi.fn();
 
     render(
-      <AddProviderDialog
-        open
-        onOpenChange={handleOpenChange}
+      <AddProviderForm
+        onDone={handleOpenChange}
         appId="claude"
         onSubmit={handleSubmit}
       />,
@@ -105,7 +104,7 @@ describe("AddProviderDialog", () => {
     expect(submitted.meta?.custom_endpoints).toEqual(
       mockFormValues.meta?.custom_endpoints,
     );
-    expect(handleOpenChange).toHaveBeenCalledWith(false);
+    expect(handleOpenChange).toHaveBeenCalledTimes(1);
   });
 
   it("在缺少自定义端点时回退到配置中的 baseUrl", async () => {
@@ -121,9 +120,8 @@ describe("AddProviderDialog", () => {
     };
 
     render(
-      <AddProviderDialog
-        open
-        onOpenChange={vi.fn()}
+      <AddProviderForm
+        onDone={vi.fn()}
         appId="claude"
         onSubmit={handleSubmit}
       />,
@@ -171,9 +169,8 @@ context_window = 500000
     };
 
     render(
-      <AddProviderDialog
-        open
-        onOpenChange={vi.fn()}
+      <AddProviderForm
+        onDone={vi.fn()}
         appId="grokbuild"
         onSubmit={handleSubmit}
       />,
@@ -214,12 +211,7 @@ context_window = 500000
     };
 
     render(
-      <AddProviderDialog
-        open
-        onOpenChange={vi.fn()}
-        appId="pi"
-        onSubmit={handleSubmit}
-      />,
+      <AddProviderForm onDone={vi.fn()} appId="pi" onSubmit={handleSubmit} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "common.add" }));
@@ -235,20 +227,19 @@ context_window = 500000
 
   it("重新打开 Pi 表单后忽略上一轮的就绪回调", async () => {
     const props = {
-      onOpenChange: vi.fn(),
+      onDone: vi.fn(),
       appId: "pi" as const,
       onSubmit: vi.fn(),
     };
-    const { rerender } = render(<AddProviderDialog open {...props} />);
+    const { rerender } = render(<AddProviderForm key="round-1" {...props} />);
 
     const addButton = await screen.findByRole("button", { name: "common.add" });
     await waitFor(() => expect(addButton).toBeEnabled());
     const staleCallback = submitReadyCallbacks.at(-1);
     expect(staleCallback).toBeDefined();
 
-    rerender(<AddProviderDialog open={false} {...props} />);
     mockFormReady = false;
-    rerender(<AddProviderDialog open {...props} />);
+    rerender(<AddProviderForm key="round-2" {...props} />);
     const reopenedButton = await screen.findByRole("button", {
       name: "common.add",
     });
