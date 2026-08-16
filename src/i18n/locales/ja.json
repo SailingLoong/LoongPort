@@ -3134,7 +3134,6 @@
       "other": "その他"
     },
     "directory": {
-      "customSitePlaceholder": "見つからない場合は別の中継サイト URL を入力",
       "title": "中継サイト一覧",
       "description": "VeriDrop の公開検証結果からサイトを選びます。登録またはログインに成功した場合のみ LoongPort に追加されます。",
       "tabs": {
@@ -3162,7 +3161,6 @@
         "supplementalRank": "補足"
       },
       "actions": {
-        "useOtherSite": "別のサイトを使用",
         "authenticate": "登録またはログイン",
         "autoAddHint": "完了後に自動追加",
         "history": "全履歴",
@@ -3173,7 +3171,9 @@
         "range": "{{from}}–{{to}} / {{total}}",
         "previous": "前のページ",
         "next": "次のページ"
-      }
+      },
+      "noMatch": "「{{query}}」に一致する中継サイトがありません",
+      "addAsSite": "{{query}} を中継サイトとして追加"
     },
     "officialApi": {
       "title": "公式 API",

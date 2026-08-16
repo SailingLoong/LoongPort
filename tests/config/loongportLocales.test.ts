@@ -28,7 +28,8 @@ const requiredKeys = [
   // 独立中转站广场。四个榜单、数据来源、评分证据、认证动作、缓存状态和分页
   // 都是用户直接看到的主流程文案；漏一个 locale 会直接显示 key 名。
   "directory.title",
-  "directory.customSitePlaceholder",
+  "directory.noMatch",
+  "directory.addAsSite",
   "directory.description",
   "directory.tabs.overall",
   "directory.tabs.claude",
@@ -56,7 +57,6 @@ const requiredKeys = [
   "directory.meta.samples",
   "directory.meta.latest",
   "directory.actions.authenticate",
-  "directory.actions.useOtherSite",
   "directory.actions.autoAddHint",
   "directory.actions.history",
   "directory.actions.refresh",

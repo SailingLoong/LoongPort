@@ -284,22 +284,22 @@ describe("RelayDirectoryPage", () => {
     expect(openInBrowser).not.toHaveBeenCalledWith("https://site-2.example");
   });
 
-  it("imports a manually entered site outside the whitelist", async () => {
+  it("adds the unmatched search text as a site via the manual import", async () => {
     const user = userEvent.setup();
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
     await waitFor(() => expect(listDirectory).toHaveBeenCalled());
 
     await user.type(
-      screen.getByPlaceholderText("loongport.directory.customSitePlaceholder"),
+      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
       "https://my-own-relay.example",
     );
     await user.click(
-      screen.getByRole("button", {
-        name: "loongport.directory.actions.useOtherSite",
+      await screen.findByRole("button", {
+        name: /loongport.directory.addAsSite/,
       }),
     );
 
-    // 手填域名走 Manual 导入（保守打开规则），不是白名单行的目录导入。
+    // 搜索词直连走 Manual 导入（保守打开规则），不是白名单行的目录导入。
     await waitFor(() =>
       expect(importSite).toHaveBeenCalledWith("https://my-own-relay.example"),
     );
@@ -576,18 +576,33 @@ describe("RelayDirectoryPage", () => {
     });
   });
 
-  it("keeps the custom-site input alongside the whitelist rows", async () => {
-    // 白名单仍是展示集合的所有者；手填域名是绕开它的兜底直连（2026-08-16 应
-    // 用户要求恢复 —— 白名单外的站也该能连，错误以可读 toast 呈现）。
+  it("offers the search text as a manual add only when nothing matches", async () => {
+    // 手填域名合并进搜索框：搜不到 → 列表区变成「把搜索词添加为中转站」的
+    // 整块虚框（白名单外的站也该能连，错误以可读 toast 呈现）；搜得到就不出现。
+    const user = userEvent.setup();
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
     await screen.findByText("BestAPI");
 
+    // 搜到白名单行：没有转添加的兜底。
+    await user.type(
+      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
+      "Best",
+    );
     expect(
-      screen.getByPlaceholderText("loongport.directory.customSitePlaceholder"),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /loongport.directory.addAsSite/ }),
+    ).not.toBeInTheDocument();
+
+    // 搜不到：兜底出现。
+    await user.clear(
+      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
+    );
+    await user.type(
+      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
+      "my-own-relay.example",
+    );
     expect(
-      screen.getByRole("button", {
-        name: "loongport.directory.actions.useOtherSite",
+      await screen.findByRole("button", {
+        name: /loongport.directory.addAsSite/,
       }),
     ).toBeInTheDocument();
     expect(importSite).not.toHaveBeenCalled();
