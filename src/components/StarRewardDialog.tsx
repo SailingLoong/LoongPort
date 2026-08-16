@@ -71,10 +71,9 @@ export function StarRewardDialog({
     setPhase({ kind: "granted", via });
     void (async () => {
       try {
-        const settings = await settingsApi.get();
-        // `webdavSync` 是只读的聚合字段，save 时要摘掉（与仓里其它调用点一致）。
-        const { webdavSync: _webdavSync, ...rest } = settings;
-        await settingsApi.save({ ...rest, starRewardClaimed: true });
+        // claimed 是后端专有事实：窄命令 RMW 落库。不走全量 save —— 那条路
+        // 对后端专有字段取现有值（2026-08-16 起，旧快照回写曾把它抹掉）。
+        await starRewardApi.markClaimed();
       } catch {
         // 持久化失败可接受：码已展示给用户，最坏下次启动红点再现（荣誉制）。
       }

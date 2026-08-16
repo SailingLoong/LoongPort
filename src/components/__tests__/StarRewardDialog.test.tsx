@@ -5,19 +5,18 @@ import { describe, expect, it, vi } from "vitest";
 import type { StarRewardOffer } from "@/lib/api";
 import { StarRewardDialog } from "@/components/StarRewardDialog";
 
-const { starViaGh, starCount, openRegisterWindow, openExternal, get, save } =
+const { starViaGh, starCount, openRegisterWindow, openExternal, markClaimed } =
   vi.hoisted(() => ({
     starViaGh: vi.fn(),
     starCount: vi.fn(),
     openRegisterWindow: vi.fn(),
     openExternal: vi.fn(),
-    get: vi.fn(),
-    save: vi.fn(),
+    markClaimed: vi.fn(),
   }));
 
 vi.mock("@/lib/api", () => ({
-  settingsApi: { get, save, openExternal },
-  starRewardApi: { starViaGh, starCount, openRegisterWindow },
+  settingsApi: { openExternal },
+  starRewardApi: { starViaGh, starCount, openRegisterWindow, markClaimed },
 }));
 vi.mock("@/lib/clipboard", () => ({
   copyText: vi.fn().mockResolvedValue(undefined),
@@ -42,8 +41,7 @@ function renderDialog(onClaimed = vi.fn(), onClose = vi.fn()) {
 describe("StarRewardDialog", () => {
   it("确认 → gh 直点成功 → 展示优惠码、落 claimed、开注册窗", async () => {
     starViaGh.mockResolvedValue(true);
-    get.mockResolvedValue({});
-    save.mockResolvedValue(undefined);
+    markClaimed.mockResolvedValue(undefined);
     openRegisterWindow.mockResolvedValue(undefined);
     const { onClaimed } = renderDialog();
 
@@ -54,9 +52,7 @@ describe("StarRewardDialog", () => {
     });
     expect(starCount).not.toHaveBeenCalled();
     expect(openExternal).not.toHaveBeenCalled();
-    expect(save).toHaveBeenCalledWith(
-      expect.objectContaining({ starRewardClaimed: true }),
-    );
+    expect(markClaimed).toHaveBeenCalled();
     expect(openRegisterWindow).toHaveBeenCalledWith("LOONGPORT5");
     await waitFor(() => expect(onClaimed).toHaveBeenCalled());
   });
@@ -65,8 +61,7 @@ describe("StarRewardDialog", () => {
     starViaGh.mockResolvedValue(false);
     openExternal.mockResolvedValue(undefined);
     starCount.mockResolvedValue(101); // 基线 100 → +1
-    get.mockResolvedValue({});
-    save.mockResolvedValue(undefined);
+    markClaimed.mockResolvedValue(undefined);
     openRegisterWindow.mockResolvedValue(undefined);
     renderDialog();
 
@@ -89,8 +84,7 @@ describe("StarRewardDialog", () => {
     starViaGh.mockResolvedValue(false);
     openExternal.mockResolvedValue(undefined);
     starCount.mockResolvedValue(100); // 与基线相同
-    get.mockResolvedValue({});
-    save.mockResolvedValue(undefined);
+    markClaimed.mockResolvedValue(undefined);
     openRegisterWindow.mockResolvedValue(undefined);
     renderDialog();
 
@@ -110,6 +104,6 @@ describe("StarRewardDialog", () => {
     expect(onClose).toHaveBeenCalled();
     expect(starViaGh).not.toHaveBeenCalled();
     expect(openRegisterWindow).not.toHaveBeenCalled();
-    expect(save).not.toHaveBeenCalled();
+    expect(markClaimed).not.toHaveBeenCalled();
   });
 });
