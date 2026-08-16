@@ -1,9 +1,15 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Image as ImageIcon, Monitor, Terminal, X } from "lucide-react";
+import { Image as ImageIcon, Monitor, Plus, Terminal, X } from "lucide-react";
 import {
   APP_DISPLAY_NAME,
   APP_IDS,
@@ -28,6 +34,8 @@ interface AppSwitcherProps {
   visibleApps?: VisibleApps;
   /** tab 上的 ×：就地隐藏一个应用，与设置页「主页面显示」是同一开关 */
   onHideApp?: (app: AppId) => void;
+  /** 末尾「+」：把隐藏的应用加回主页面 */
+  onShowApp?: (app: AppId) => void;
 }
 
 const APP_ICON_NAME: Record<AppId, string> = {
@@ -84,8 +92,10 @@ export function AppSwitcher({
   onSwitch,
   visibleApps,
   onHideApp,
+  onShowApp,
 }: AppSwitcherProps) {
   const { t } = useTranslation();
+  const [addOpen, setAddOpen] = useState(false);
 
   const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
@@ -98,6 +108,10 @@ export function AppSwitcher({
     if (!visibleApps) return true;
     return visibleApps[app];
   });
+  // 隐藏的应用（「+」的候选）；visibleApps 未加载时视为全部可见
+  const hiddenApps = visibleApps
+    ? APP_IDS.filter((app) => !visibleApps[app])
+    : [];
   // 与设置页同一护栏：只剩一个可见应用时不可再隐藏，否则没有任何 tab 可点
   const canHide = appsToShow.length > 1 && onHideApp !== undefined;
 
@@ -150,6 +164,49 @@ export function AppSwitcher({
           </div>
         );
       })}
+      {onShowApp && (
+        <Popover open={addOpen} onOpenChange={setAddOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              title={t("appSwitcher.add")}
+              aria-label={t("appSwitcher.add")}
+              className={cn(
+                "inline-flex items-center px-3 h-8 rounded-md transition-all duration-200",
+                addOpen
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background/50",
+              )}
+            >
+              <Plus size={20} className="shrink-0" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            side="bottom"
+            align="end"
+            sideOffset={6}
+            className="z-[100] w-56 p-1"
+          >
+            {hiddenApps.length === 0 ? (
+              <p className="px-2.5 py-2 text-sm text-muted-foreground">
+                {t("appSwitcher.allShown")}
+              </p>
+            ) : (
+              hiddenApps.map((app) => (
+                <button
+                  key={app}
+                  type="button"
+                  onClick={() => onShowApp(app)}
+                  className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <AppGlyph app={app} isActive={false} />
+                  <span className="truncate">{getAppDisplayName(app, t)}</span>
+                </button>
+              ))
+            )}
+          </PopoverContent>
+        </Popover>
+      )}
     </div>
   );
 }

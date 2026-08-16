@@ -83,4 +83,60 @@ describe("AppSwitcher", () => {
     );
     expect(container.querySelector(hideButtonSelector)).toBeNull();
   });
+
+  it("「+」常驻列表末尾；全部可见时点开是空态", () => {
+    render(
+      <AppSwitcher
+        activeApp="claude"
+        onSwitch={vi.fn()}
+        visibleApps={allVisible}
+        onShowApp={vi.fn()}
+      />,
+    );
+    const addButton = screen.getByTitle("appSwitcher.add");
+    expect(addButton).toBeInTheDocument();
+    fireEvent.click(addButton);
+    expect(screen.getByText("appSwitcher.allShown")).toBeInTheDocument();
+  });
+
+  it("「+」浮层列出隐藏应用，点击加回", () => {
+    const onShowApp = vi.fn();
+    const partlyHidden: VisibleApps = {
+      ...allVisible,
+      pi: false,
+      hermes: false,
+    };
+    render(
+      <AppSwitcher
+        activeApp="claude"
+        onSwitch={vi.fn()}
+        visibleApps={partlyHidden}
+        onShowApp={onShowApp}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Pi" }),
+      "隐藏的 Pi 不应出现在 tab 里",
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("appSwitcher.add"));
+    // 两个隐藏应用都列在浮层里。用正则匹配：ProviderIcon 给部分品牌图标带
+    // alt 文本，条目按钮的可访问名是「alt + span」拼接，不是裸应用名。
+    // （浮层常开可多选是 Radix Popover 的固有行为，不在 jsdom 里复测库本身）
+    expect(screen.getByRole("button", { name: /Pi/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Hermes/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Hermes/ }));
+    expect(onShowApp).toHaveBeenCalledTimes(1);
+    expect(onShowApp).toHaveBeenCalledWith("hermes");
+  });
+
+  it("未传 onShowApp 时不渲染「+」", () => {
+    render(
+      <AppSwitcher
+        activeApp="claude"
+        onSwitch={vi.fn()}
+        visibleApps={allVisible}
+      />,
+    );
+    expect(screen.queryByTitle("appSwitcher.add")).not.toBeInTheDocument();
+  });
 });
