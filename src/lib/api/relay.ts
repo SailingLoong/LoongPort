@@ -176,9 +176,21 @@ export interface RelayRow {
   /** 购买入口资格由后端完整判定；前端不得从站点或凭据重新推导。 */
   canPurchase: boolean;
   canRefresh: boolean;
-  canDelete: boolean;
+  /**
+   * 这一行名下正被某个 app 当作当前项的档位（后端跨全部 app 扫出的）。
+   * 空 = 可直接删；非空 = 删除弹窗换成「点名 app」的强删变体，确认后带 force 重删。
+   * 「能不能删」由 `usageBlockers.length === 0` 派生，后端不再单给一个 canDelete。
+   */
+  usageBlockers: RelayUsageBlocker[];
   removeConfirmation: "neverLoggedIn" | "configured";
   tiers: TierInfo[];
+}
+
+/** `RelayRow.usageBlockers` 的元素：哪个 app 正在把哪条档位当当前项。 */
+export interface RelayUsageBlocker {
+  /** `AppType` 字符串（与前端 `AppId` 同一套），显示名查 `getAppLabel`。 */
+  app: string;
+  tierName: string;
 }
 
 export interface RowBalanceResult {
@@ -418,9 +430,12 @@ export const relayApi = {
    *
    * 判据是 `website_url == site_origin` + 账号维度，用户自建的 provider 一律不碰
    * （后端 `relay_remove_site` 的文档写了完整理由）。
+   *
+   * `force` 只在 `row.usageBlockers` 非空、用户已在点名 app 的弹窗里确认后传 true；
+   * 后端默认仍会拦下在用档位（那道闸不信任任何前端按钮态）。
    */
-  removeSite: (id: number): Promise<void> =>
-    invoke("relay_remove_site", { id }),
+  removeSite: (id: number, force = false): Promise<void> =>
+    invoke("relay_remove_site", { id, force }),
 
   /**
    * 查某个中转站的余额。

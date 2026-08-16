@@ -41,7 +41,7 @@ function relay(models: string[]): RelayRowData {
     canQueryBalance: true,
     canPurchase: true,
     canRefresh: true,
-    canDelete: false,
+    usageBlockers: [{ app: "codex", tierName: "Example" }],
     removeConfirmation: "configured",
     tiers: [tier(models)],
   };

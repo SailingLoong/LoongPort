@@ -3202,7 +3202,9 @@
       "purchaseHint": "打开中转站充值页面",
       "lowBalanceHint": "余额较低，点击充值",
       "remove": "删除账号及接入配置",
-      "removeBlockedByCurrent": "此账号有接入配置正在使用，请先切换到其他接入配置",
+      "removeInUseHint": "有接入配置正在使用——仍可删除，需在弹窗中确认",
+      "removeConfirmUsageItem": "{{tier}}（{{app}}）",
+      "removeConfirmMessageInUse": "「{{label}}」的接入配置正在被使用：{{usages}}。删除后这些 app 将失去当前供应商（正在运行的 CLI 会继续沿用旧配置，重新选择后生效）。将删除该账号的登录信息及其 {{count}} 个接入配置；中转站中的余额不会受影响。",
       "removeConfirmTitle": "删除此账号？",
       "removeConfirmMessage": "将删除「{{label}}」的登录信息及其 {{count}} 个接入配置。中转站中的余额不会受影响；之后可重新登录恢复使用。",
       "removeConfirmMessageNeverLoggedIn": "将删除「{{label}}」及其 {{count}} 个接入配置。之后可重新添加此账号。"

@@ -353,12 +353,27 @@ pub struct RelayRow {
     pub can_purchase: bool,
     /// 这一行是否可以重新拉取最新账号信息、额度、可用分组与倍率。
     pub can_refresh: bool,
-    /// 这一行是否可以安全删除。真正的跨 app 删除闸仍在后端命令内。
-    pub can_delete: bool,
+    /// 这一行名下**正被某个 app 当作当前项**的档位。空 = 可直接删；
+    /// 非空 = 前端删除弹窗换成「点名 app」的强删变体，确认后带 `force` 重删。
+    ///
+    /// ⚠️ 这里与 [`relay_remove_site`] 的闸是**同一次扫描**（`apps_using_this_accounts_tiers`），
+    /// 不再另设一个 `can_delete: bool` —— 那会让「能不能删」与「谁在用」两个表述分叉
+    /// （尺子 1.4）：前者前端自己 `is_empty()` 派生即可。
+    pub usage_blockers: Vec<UsageBlocker>,
     /// 删除确认框使用哪一种后端定义的业务语义。
     pub remove_confirmation: RemoveConfirmation,
     /// 这个中转站在**当前 app_id** 下已备好的档位。
     pub tiers: Vec<TierInfo>,
+}
+
+/// `RelayRow::usage_blockers` 的元素：哪个 app 正在把哪条档位当当前项。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageBlocker {
+    /// `AppType::as_str()`，与前端 `AppId` 同一套字符串（前端拿它查显示名）。
+    pub app: String,
+    /// 正在被当作当前项的那条档位的名字。
+    pub tier_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3670,8 +3685,14 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
                         false
                     }
                 };
-            let can_delete =
-                apps_using_this_accounts_tiers(state, &op.site_origin, op.account_id).is_empty();
+            let usage_blockers =
+                apps_using_this_accounts_tiers(state, &op.site_origin, op.account_id)
+                    .into_iter()
+                    .map(|(app_type, tier_name)| UsageBlocker {
+                        app: app_type.as_str().to_string(),
+                        tier_name,
+                    })
+                    .collect::<Vec<_>>();
             Ok(RelayRow {
                 id: op.id,
                 site_origin: op.site_origin.clone(),
@@ -3687,7 +3708,7 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
                 can_query_balance: logged_in || has_balance_key,
                 can_purchase: can_purchase(&op, logged_in, configured_url),
                 can_refresh: op.can_refresh(now),
-                can_delete,
+                usage_blockers,
                 remove_confirmation: if op.account_id.is_some() {
                     RemoveConfirmation::Configured
                 } else {
@@ -4462,37 +4483,45 @@ fn list_sites_impl(state: &AppState) -> Result<Vec<SiteInfo>, AppError> {
 /// **只删这个站的托管档位**，判据是 `website_url == site_origin`（`prune_stale_tiers`
 /// 里写清了为什么 `provider_id` 反推不出归属）。用户自建的 provider 一律不碰。
 ///
-/// ## ⚠️ 「不许删掉任何平台正在用的档位」是**后端不变量**，不能靠前端按钮态
+/// ## ⚠️ 「在用的档位」有两条出路：默认拦下；`force` 才放行 —— 闸始终在后端
 ///
-/// 前端确实有一道（有档位在用的行，删除按钮渲染成不可点，见 `RowDelete`），但那道判据是
-/// `relay.tiers.some(t => t.isCurrent)` —— 而 `tiers` **只含当前 tab 那个 app 的档位**
-/// （`list_relays_impl` 吃 `app_type`）。于是：
+/// 前端的判据只看当前 tab（`RelayRow::usageBlockers` 虽是后端跨 app 算的，但按钮态
+/// 仍可能被绕过 / 旧版本前端没有它）。于是：
 ///
-/// 1. 用户在 **Claude** tab 上看某一行 —— 它在 claude 下没有当前项 ⇒ 按钮可点；
+/// 1. 用户在 **Claude** tab 上看某一行 —— 它在 claude 下没有当前项；
 /// 2. 而同一个账号在 **Codex** 下的档位正是 codex 的当前项；
 /// 3. 删下去 ⇒ codex 的当前 provider 记录没了，而 `~/.codex/config.toml` 还指着它。
 ///
-/// 「删 Claude 页的账号，把 Codex 正在用的配置删掉了」对用户是完全不可预期的。所以这里
-/// **必须自己查一遍全部 app**，撞上就报错让他先切走 —— 前端那道保留（它给的是即时反馈，
-/// 按钮先变灰比点下去弹错误好），但**它是提示，这里是闸**。
+/// 「删 Claude 页的账号，把 Codex 正在用的配置删掉了」对用户是不可预期的，所以这里
+/// **必须自己查一遍全部 app**。查到在用时的两条出路：
+///
+/// - **默认（`force == false`）**：报错拦下，文案点名平台与档位，让用户先去切走。
+/// - **`force == true`**：放行。它只该来自前端那道**点名了在用 app 的确认弹窗**
+///   （`RelayRow::usage_blockers` 与这道闸同一次扫描，弹窗文案由它驱动 —— 用户
+///   是看着「Codex 正在用 BestApi · Pro」这句话按的确认），即知情删除。
 ///
 /// ## 与 `prune_stale_tiers` 「当前项也删」的区别（两者都对，因为前提不同）
 ///
 /// `prune_stale_tiers` 在 provision 路径上会删当前项，理由是走到那一步说明**服务端已经
 /// 没有那个分组了** ⇒ 它的 sk 是死的，留着当当前项只会让 CLI 拿废密钥去 401（见它的文档）。
 ///
-/// 删账号这条路的前提相反：那些档位**还是好的**，用户只是想清掉这个账号。此时删掉当前项
-/// 是在毁一份能用的配置，与那条裁决不矛盾 —— 判据是「这条档位还活着吗」，不是「它是不是
-/// 当前项」。
+/// 删账号这条路的前提相反：那些档位**还是好的**。默认路径因此拦下（不忍心毁一份能用的
+/// 配置）；`force` 路径是用户在弹窗里**看着点名**做出的选择 —— 删掉一条还活着的当前项
+/// 正是他要的（「我不想再用这个站了」），与那条裁决不矛盾 —— 判据从「档位还活着吗」
+/// 变成「用户知道自己在删什么吗」。
 ///
 /// 顺序：**先删档位再删站点**。反过来的话，站点行没了而 `site_origin` 是档位归属的唯一
 /// 依据 —— 删站点之后就再也认不出哪些档位属于它，那些记录会永久留在 provider 列表里。
 #[tauri::command]
-pub fn relay_remove_site(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    remove_site_impl(state.inner(), id).map_err(|e| e.to_string())
+pub fn relay_remove_site(
+    state: State<'_, AppState>,
+    id: i64,
+    force: Option<bool>,
+) -> Result<(), String> {
+    remove_site_impl(state.inner(), id, force.unwrap_or(false)).map_err(|e| e.to_string())
 }
 
-fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
+fn remove_site_impl(state: &AppState, id: i64, force: bool) -> Result<(), AppError> {
     // 先取归属信息 —— 删掉那行之后就没法知道该清哪些档位了。
     //
     // ⚠️ **`account_id` 与 `site_origin` 一样必须取**：删的是**一个账号**（一行），
@@ -4503,16 +4532,23 @@ fn remove_site_impl(state: &AppState, id: i64) -> Result<(), AppError> {
     let site_origin = op.site_origin;
     let account_id = op.account_id;
 
-    // ⚠️ 闸：这个账号名下有档位正被某个 app 用着 ⇒ **一条都不删，直接报错**。
+    // ⚠️ 闸：这个账号名下有档位正被某个 app 用着 ⇒ 默认**一条都不删，直接报错**；
+    // `force == true` 才放行（只该来自点名了在用 app 的前端确认弹窗，见命令文档）。
     //
     // 全有或全无（在 `prune_stale_tiers` 之前拦，而不是让它逐条跳过正在用的那些）：
     // 半删的结果是「账号行没了，名下还剩一条孤儿档位」—— 而托管档位在 provider 列表里
     // 被前端过滤、被通用删除命令拒绝 ⇒ 那条记录用户再也处置不了。
     //
     // 文案点名**哪个平台、哪个档位**：只说「有档位在使用中」的话，用户得自己去六个 tab
-    // 里翻是哪一个。他要做的处置（去那个平台切走）完全取决于这个信息。
+    // 里翻是哪一个。他要做的处置（切走 / 或回弹窗里选强制删）完全取决于这个信息。
+    //
+    // force 路径对「被删掉的当前项」不做额外处置：`prune_stale_tiers` 的当前项旁路
+    // （直连 db 删）+ 悬空 current 指针自愈（`get_effective_current_provider`）与
+    // provision 清死档位是同一条路；受影响 app 的 live 配置继续沿用旧设置直到用户
+    // 重选 —— 有意**不**自动切到别的供应商：静默改掉 CLI 正在用的配置比留一份
+    // 还能跑的旧配置更不可预期。
     let in_use = apps_using_this_accounts_tiers(state, &site_origin, account_id);
-    if !in_use.is_empty() {
+    if !in_use.is_empty() && !force {
         let detail = in_use
             .iter()
             .map(|(app_type, name)| format!("{}（{}）", name, app_type.as_str()))
@@ -5591,7 +5627,7 @@ mod tests {
             can_query_balance: false,
             can_purchase: true,
             can_refresh: false,
-            can_delete: true,
+            usage_blockers: Vec::new(),
             remove_confirmation: RemoveConfirmation::NeverLoggedIn,
             tiers: Vec::new(),
         };
@@ -5599,6 +5635,7 @@ mod tests {
         let json = serde_json::to_value(row).expect("serialize relay row");
         assert_eq!(json["canPurchase"], true);
         assert_eq!(json["removeConfirmation"], "neverLoggedIn");
+        assert_eq!(json["usageBlockers"], serde_json::json!([]));
     }
 
     #[test]
@@ -8352,7 +8389,7 @@ mod tests {
         );
     }
 
-    /// ⭐ **删账号不许毁掉「别的平台」正在用的档位** —— 前端那道判据挡不住这一类。
+    /// ⭐ **默认路径下，删账号不许毁掉「别的平台」正在用的档位** —— 前端那道判据挡不住这一类。
     ///
     /// 这是 review 抓出的缺陷现场，复现路径：
     ///
@@ -8404,7 +8441,7 @@ mod tests {
             .expect("set codex current");
 
         // 用户此刻停在 claude tab 上（那边这一行没有当前项）—— 前端会放行，后端必须拦。
-        let err = remove_site_impl(&state, row_id)
+        let err = remove_site_impl(&state, row_id, false)
             .expect_err("⭐ 名下有档位是别的平台的当前项时，删除必须失败");
         let msg = err.to_string();
         assert!(
@@ -8449,13 +8486,74 @@ mod tests {
             .expect("seed");
         // **不设 current** —— 别的 provider 是当前项，或压根没有当前项。
 
-        remove_site_impl(&state, row_id).expect("没人在用它时删除该成功");
+        remove_site_impl(&state, row_id, false).expect("没人在用它时删除该成功");
 
         assert!(
             db.get_provider_by_id(&tier, "codex")
                 .expect("query")
                 .is_none(),
             "档位该被连带清掉"
+        );
+        assert!(
+            with_conn(&state, |conn| creds::get(conn, row_id))
+                .expect("query row")
+                .is_none(),
+            "账号行该被删掉"
+        );
+    }
+
+    /// 第三条出路：用户在前端弹窗里看着「Codex 正在用 xxx」按了确认（`force`）⇒
+    /// 连在用的档位一起删干净。
+    ///
+    /// 这条与第一条成对 —— 没有它的话，把闸写成「在用就无条件拒绝（连 force 也拦）」
+    /// 也能过前两条。钉住的语义：
+    ///
+    /// - force 放行后**全有或全无**：档位、账号行都得没了（不留孤儿记录）；
+    /// - 被删的是 codex 的**当前项** —— `prune_stale_tiers` 的当前项旁路在这条路上
+    ///   生效（这正是 force 依赖的机制，见 `remove_site_impl` 闸注释）。
+    #[test]
+    fn forced_removal_deletes_even_while_another_app_uses_its_tier() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "BestApi", "https://bestapi.store/v1")
+        })
+        .expect("save site");
+
+        let row_id = with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "me@example.com",
+                    login_identifier: "me@example.com",
+                },
+                "tok",
+                None,
+                None,
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        let codex_tier = provision::provider_id_for(site, Some(7), 1);
+        db.save_provider(
+            "codex",
+            &seeded_owned(&codex_tier, "BestApi · Pro", Some(site), 7),
+        )
+        .expect("seed codex tier");
+        db.set_current_provider("codex", &codex_tier)
+            .expect("set codex current");
+
+        remove_site_impl(&state, row_id, true).expect("force 是用户知情后的选择，该放行");
+
+        assert!(
+            db.get_provider_by_id(&codex_tier, "codex")
+                .expect("query")
+                .is_none(),
+            "force 该连当前项档位一起删掉"
         );
         assert!(
             with_conn(&state, |conn| creds::get(conn, row_id))

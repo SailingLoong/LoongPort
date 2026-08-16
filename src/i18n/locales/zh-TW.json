@@ -3203,7 +3203,9 @@
       "purchaseHint": "開啟中轉站儲值頁面",
       "lowBalanceHint": "餘額較低，點一下儲值",
       "remove": "刪除帳號與連線設定檔",
-      "removeBlockedByCurrent": "此帳號有連線設定檔正在使用，請先切換至其他連線設定檔",
+      "removeInUseHint": "有連線設定檔正在使用——仍可刪除，需在彈出視窗中確認",
+      "removeConfirmUsageItem": "{{tier}}（{{app}}）",
+      "removeConfirmMessageInUse": "「{{label}}」的連線設定檔正在被使用：{{usages}}。刪除後這些 app 將失去目前供應商（執行中的 CLI 會繼續沿用舊設定，重新選擇後生效）。將刪除該帳號的登入資訊及其 {{count}} 個連線設定檔；中轉站內的餘額不會受到影響。",
       "removeConfirmTitle": "刪除此帳號？",
       "removeConfirmMessage": "將刪除「{{label}}」的登入資訊及其 {{count}} 個連線設定檔。中轉站內的餘額不會受到影響；之後可重新登入繼續使用。",
       "removeConfirmMessageNeverLoggedIn": "將刪除「{{label}}」及其 {{count}} 個連線設定檔。之後可重新新增此帳號。"

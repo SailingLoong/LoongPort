@@ -83,12 +83,16 @@ const requiredKeys = [
   // 余额偏低时那个叹号的 title。**缺了最伤**：叹号本身不带文字，
   // title 退化成 key 名 ⇒ 用户看到一个说不清为什么的警示图标。
   "row.lowBalanceHint",
-  // 删这一行的入口 + 「有档位在用所以不能删」的解释。
-  // 后者缺了最伤：按钮变灰但没有 title ⇒ 用户完全不知道为什么点不动。
+  // 删这一行的入口 + 「有档位在用」的预告。后者是强删弹窗之外唯一的预告：
+  // 缺了它用户会在毫无预期的情况下点开一个「点名 app」的强删确认框。
+  // 强删弹窗那两条（清单项格式 + 主文案）是知情前提 —— 点名哪些 app 在用、
+  // 删了会失去什么，退化成 key 名等于让人盲点一个破坏性操作。
   "row.remove",
-  "row.removeBlockedByCurrent",
+  "row.removeInUseHint",
   "row.removeConfirmTitle",
   "row.removeConfirmMessage",
+  "row.removeConfirmUsageItem",
+  "row.removeConfirmMessageInUse",
   // 从没登录过的行走另一句 —— 无条件那句会说错两处（不存在的登录态、没充过的
   // 余额）。判据由后端 `removeConfirmation` 字段给出。
   "row.removeConfirmMessageNeverLoggedIn",
