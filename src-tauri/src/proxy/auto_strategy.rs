@@ -1,7 +1,10 @@
 //! 自动模式策略排序（LoongPort）。
 //!
 //! 产品语义：用户只选 app（和模型，M3），系统从可用托管档位里按策略挑最合适的：
-//! - **Cheapest（默认）**：按 `providers.tier_rate_multiplier` 升序；
+//! - **Cheapest（默认）**：按 `倍率 × 模型单价` 升序 —— 只比倍率会漏掉「低倍率
+//!   配贵模型」的档位。单价取有效模型（偏好优先，否则档位选中模型）每百万
+//!   token 输入+输出之和；查不到价的模型保守排在有价模型之后（组内按倍率比），
+//!   倍率来自站点实时数据、永远可信，单价表可能没收录新模型。
 //! - **Fastest**：按最近窗口的平均首字耗时（TTFT）升序。
 //!
 //! ## 会话亲和（硬需求）
@@ -263,25 +266,49 @@ pub fn rank_tiers(
         .unwrap_or_default();
     let last_activity = db.get_provider_last_activity(app_type).unwrap_or_default();
 
-    let cost_of =
-        |p: &Provider| -> f64 { multipliers.get(&p.id).copied().unwrap_or(f64::INFINITY) };
+    // 各档位有效模型的单价一次性查出（短锁，不跨排序持有；毒锁恢复继续）。
+    let model_pref = get_model_pref(db, app_type);
+    let mut unit_prices = std::collections::HashMap::new();
+    {
+        let conn = db
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for p in tiers {
+            let price = tier_unit_price(&conn, p, model_pref.as_deref());
+            unit_prices.insert(p.id.clone(), price);
+        }
+    }
+
+    // 价格最低的排序键：(单价未知, 倍率×单价)。第一维把「查不到价」的档位
+    // 保守排到有价之后 —— 宁可错过便宜也别把「不知道」当「最便宜」；
+    // 组内按倍率比（倍率来自站点实时数据，永远可信）。
+    let cost_of = |p: &Provider| -> (bool, f64) {
+        let multiplier = multipliers.get(&p.id).copied().unwrap_or(f64::INFINITY);
+        match unit_prices.get(&p.id).copied().flatten() {
+            Some(unit) => (false, multiplier * unit),
+            None => (true, multiplier),
+        }
+    };
+    let cmp_cost = |a: &Provider, b: &Provider| -> Ordering {
+        let (ka, va) = cost_of(a);
+        let (kb, vb) = cost_of(b);
+        ka.cmp(&kb)
+            .then_with(|| va.partial_cmp(&vb).unwrap_or(Ordering::Equal))
+    };
     let ttft_of = |p: &Provider| -> u64 { ttft.get(&p.id).copied().unwrap_or(u64::MAX) };
 
     let mut ranked = tiers.to_vec();
     ranked.sort_by(|a, b| {
         let primary = match strategy {
-            AutoStrategy::Cheapest => cost_of(a)
-                .partial_cmp(&cost_of(b))
-                .unwrap_or(Ordering::Equal),
+            AutoStrategy::Cheapest => cmp_cost(a, b),
             AutoStrategy::Fastest => ttft_of(a).cmp(&ttft_of(b)),
         };
         // 次级键互为 fallback： cheapest 时更快者先（同价选快的），
         // fastest 时更便宜者先（同速选便宜的），冷启动（无 TTFT 样本）也能有序。
         let secondary = match strategy {
             AutoStrategy::Cheapest => ttft_of(a).cmp(&ttft_of(b)),
-            AutoStrategy::Fastest => cost_of(a)
-                .partial_cmp(&cost_of(b))
-                .unwrap_or(Ordering::Equal),
+            AutoStrategy::Fastest => cmp_cost(a, b),
         };
         primary.then(secondary).then_with(|| a.id.cmp(&b.id))
     });
@@ -300,6 +327,26 @@ pub fn rank_tiers(
     }
 
     ranked
+}
+
+/// 档位「有效模型」的合并单价：每百万 token 输入+输出之和（美元）。
+///
+/// 有效模型 = 模型偏好（调用方已按偏好过滤，候选目录都含它），没有偏好时用
+/// 档位当前选中模型（`settings_config.config` 里的 `model`）。查不到价返回
+/// `None` —— 排序侧当「未知」保守处理，绝不猜 0。
+fn tier_unit_price(
+    conn: &rusqlite::Connection,
+    tier: &Provider,
+    model_pref: Option<&str>,
+) -> Option<f64> {
+    let model = model_pref
+        .map(str::to_string)
+        .or_else(|| crate::relay::provision::extract_model(&tier.settings_config))?;
+    let (input, output, _cache_read, _cache_creation) =
+        crate::services::usage_stats::find_model_pricing_row(conn, &model).ok()??;
+    let input: f64 = input.parse().ok()?;
+    let output: f64 = output.parse().ok()?;
+    Some(input + output)
 }
 
 #[cfg(test)]
@@ -382,6 +429,57 @@ mod tests {
         let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
         // 有样本的按耗时升序；无 TTFT 样本（cold）排最后 —— 冷启动不抢跑
         assert_eq!(ids, vec![fast.as_str(), slow.as_str(), cold.as_str()]);
+    }
+
+    #[test]
+    fn cheapest_multiplies_unit_price_and_sorts_unpriced_last() {
+        let db = Database::memory().unwrap();
+        // 价表：m-x 每百万 input 1 + output 1 = 单价 2；m-y 不收录（单价未知）。
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
+                 VALUES ('m-x', 'M X', '1', '1')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 有价档位比「倍率×单价」：1.0×2=2.0 vs 0.5×2=1.0（只比倍率会把
+        // 低倍率排第一，错）；无价档位（选中模型 m-y）倍率再低也保守排最后。
+        let low_mul = managed_id("https://a.example", 1, 1);
+        let high_mul = managed_id("https://b.example", 1, 2);
+        let unpriced = managed_id("https://c.example", 1, 3);
+        let with_model = |id: &str, name: &str, model: &str| {
+            Provider::with_id(
+                id.to_string(),
+                name.to_string(),
+                json!({ "config": format!("model = \"{model}\"\n") }),
+                None,
+            )
+        };
+        let tiers = vec![
+            with_model(&low_mul, "LowMul", "m-x"),
+            with_model(&high_mul, "HighMul", "m-x"),
+            with_model(&unpriced, "Unpriced", "m-y"),
+        ];
+        for p in &tiers {
+            db.save_provider("claude", p).unwrap();
+        }
+        db.set_tier_rate_multiplier("claude", &low_mul, Some(1.0))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &high_mul, Some(0.5))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &unpriced, Some(0.1))
+            .unwrap();
+
+        let ranked = rank_tiers(&db, "claude", &tiers, None, AutoStrategy::Cheapest, now());
+        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
+        // 0.5×2=1.0 < 1.0×2=2.0 <（无价）0.1
+        assert_eq!(
+            ids,
+            vec![high_mul.as_str(), low_mul.as_str(), unpriced.as_str()]
+        );
     }
 
     #[test]

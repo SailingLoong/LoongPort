@@ -2627,7 +2627,7 @@
     "strategyLabel": "挑选策略（全局）",
     "strategy": {
       "cheapest": "价格最低",
-      "cheapestHint": "按档位倍率升序",
+      "cheapestHint": "按 倍率×模型单价 升序（无价模型排后）",
       "fastest": "响应最快",
       "fastestHint": "按近 7 天首字耗时升序"
     },
@@ -2771,7 +2771,7 @@
     },
     "failoverQueue": {
       "title": "故障转移队列",
-      "description": "管理各应用的供应商故障转移顺序",
+      "description": "仅当省心模式关闭时生效：请求失败按此顺序切换（省心模式开启时由策略自动排序，不经过队列）。顺序与首页供应商列表一致，可增删成员",
       "info": "启用自动故障转移后，将按队列优先级选择供应商（P1 优先）。当请求失败时，系统会按队列顺序依次尝试下一个供应商。",
       "selectProvider": "选择供应商添加到队列",
       "noAvailableProviders": "没有可添加的供应商",

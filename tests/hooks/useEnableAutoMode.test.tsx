@@ -2,7 +2,11 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useDisableAutoMode, useEnableAutoMode } from "@/lib/query/autoMode";
+import {
+  useDisableAutoMode,
+  useEnableAutoMode,
+  useSetAutoModeAll,
+} from "@/lib/query/autoMode";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 // 编排链路是 useProxyStatus → proxyApi/autoModeApi → invoke，在 invoke 层 mock
@@ -199,5 +203,60 @@ describe("useEnableAutoMode", () => {
 
     const sequence = orchestration();
     expect(sequence).toEqual(["set_auto_mode_enabled"]);
+  });
+
+  it("总开关静默容错：CLI 未装的 app（接管报配置不存在）跳过，其余照开", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    invoke.mockImplementation(
+      async (cmd: string, args?: { appType?: string }) => {
+        switch (cmd) {
+          case "get_proxy_status":
+            return { running: true };
+          case "get_proxy_takeover_status":
+            return {
+              claude: false,
+              codex: false,
+              gemini: false,
+              grokbuild: false,
+              opencode: false,
+              openclaw: false,
+            };
+          case "set_proxy_takeover_for_app":
+            // gemini CLI 没装：接管报「配置文件不存在」。
+            if (args?.appType === "gemini") {
+              throw new Error("Gemini .env 文件不存在");
+            }
+            return {};
+          default:
+            return {};
+        }
+      },
+    );
+
+    const { result } = renderHook(() => useSetAutoModeAll(), { wrapper });
+
+    await act(async () => {
+      // 不 reject：gemini 的失败被逐 app 吞掉，claude/codex 照常开。
+      await result.current.mutateAsync({
+        apps: ["claude", "codex", "gemini"],
+        enable: true,
+      });
+    });
+
+    const enabledCalls = invoke.mock.calls.filter(
+      ([cmd]) => cmd === "set_auto_mode_enabled",
+    );
+    expect(enabledCalls).toHaveLength(2); // gemini 没走到 enable
+    expect(enabledCalls.map(([, args]) => args)).toEqual(
+      expect.arrayContaining([
+        { appType: "claude", enabled: true },
+        { appType: "codex", enabled: true },
+      ]),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("gemini"),
+      expect.anything(),
+    );
+    warnSpy.mockRestore();
   });
 });
