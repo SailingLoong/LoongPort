@@ -24,7 +24,7 @@
     "@tauri-apps/cli": "^2.11.4",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.3",
+    "@testing-library/user-event": "^14.6.4",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
@@ -36,7 +36,7 @@
     "msw": "^2.15.0",
     "postcss": "^8.5.26",
     "prettier": "^3.9.6",
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
     "vitest": "^4.1.10"
@@ -85,7 +85,7 @@
     "react-hook-form": "^7.85.0",
     "react-i18next": "^17.0.11",
     "recharts": "^3.10.1",
-    "smol-toml": "^1.7.2",
+    "smol-toml": "^1.8.0",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3"
