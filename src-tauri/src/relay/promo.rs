@@ -14,28 +14,23 @@
 //! `auth_service.go:259` 处理 promo）。所以这张表与 aff 那张表**各自独立**，
 //! 一个站可以只有其中一个、也可以两个都有。
 //!
-//! ## 为什么 `bestapi.store` 在本表里、却有意不在 aff 表里
+//! ## `bestapi.store` 为什么两张表都不在
 //!
-//! 那两张表的排除理由完全不同，别看到「同一个站」就以为矛盾：
+//! 两张表的排除理由不同，别看到「同一个站」就想「修正」其中一张：
 //!
 //! - **aff 表排除它**：服务端拒绝自己邀请自己（`affiliate_service.go:300`），
 //!   `inviterSummary.UserID == userID` ⇒ `ErrAffiliateCodeInvalid`。
-//! - **promo 表包含它**：优惠码不是邀请关系，是**站主给新用户的赠额活动** ——
-//!   站主给自己站的新用户发赠额天经地义，服务端**没有任何「邀请人 == 被邀请人」
-//!   那类身份比对**。`promo_service.go:91` 的 `ApplyPromoCode` 查两样：
-//!   码本身有效（status / 过期 / 用量上限，`promo_code.go:37` 的 `CanUse`），
-//!   以及**这个用户没用过这个码**（`promo_service.go:117`，
-//!   命中则 `ErrPromoCodeAlreadyUsed`）。两者都与「谁是站主」无关。
+//! - **promo 表曾包含它**（优惠码是站主给新用户的赠额活动，与服务端身份比对无关），
+//!   但那个码 `LOONGPORT` 已于 **2026-08-16 在服务端删除**：内置条目随之清空，
+//!   对已发出去的客户端同日由远端配置下发
+//!   `promo_codes: {"bestapi.store": ""}` 撤销（`resolve_code` 的
+//!   「远端空串 = 撤销、不回落内置」语义）。两层一起收口，注册页不再预填。
 //!
-//! ## 为什么只有这一个站（2026-08-04 维护者拍板）
-//!
-//! `LOONGPORT` 是维护者在**自己的站** `bestapi.store` 后台建的码。
-//! 别的站的优惠码得由那些站主自己建，我们无从知晓。
-//!
-//! ⚠️ **有意不做「所有站都试着填 LOONGPORT」** —— 别的站没建这个码，
+//! ⚠️ **有意不做「所有站都试着填优惠码」** —— 别的站没建码，
 //! 注册页的实时校验（`RegisterView.vue:599` 的 `validatePromoCodeDebounced`）
 //! 会给一个红框 + 「优惠码无效」⇒ 用户以为自己或我们出错了。
-//! 一个错误的红框比不填糟得多。
+//! 一个错误的红框比不填糟得多。将来要再上码：这里加条目，或直接走远端
+//! `promo_codes` 表（不用发版）。
 //!
 //! ## 码的格式：我们只搬运，不校验
 //!
@@ -47,8 +42,7 @@
 /// key 是**归一后的 host**（小写、去 `www.`、不带端口），与 [`super::aff::AFF_CODES`]
 /// 同一套归一规则 —— 两处共用 [`super::aff::lookup_host`]，不各写一份。
 const PROMO_CODES: &[(&str, &str)] = &[
-    // 维护者自己的站。⚠️ 与 aff 表**有意相反**（那张表排除它），理由见模块文档。
-    ("bestapi.store", "LOONGPORT"),
+    // 2026-08-16 起为空：唯一的码 LOONGPORT 已在服务端删除（见模块文档）。
 ];
 
 /// 查这个站有没有注册优惠码。
@@ -67,23 +61,25 @@ pub fn promo_code_for(site_origin: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    /// 2026-08-16 起：唯一的码已在服务端删除，内置表清空 —— 任何站都不预填。
     #[test]
-    fn finds_the_code_for_the_maintainers_own_site() {
-        assert_eq!(promo_code_for("https://bestapi.store"), Some("LOONGPORT"));
+    fn the_builtin_table_is_empty_since_the_code_was_deleted_serverside() {
+        assert_eq!(promo_code_for("https://bestapi.store"), None);
+        assert!(PROMO_CODES.is_empty(), "再加码请连着更新这条与模块文档");
     }
 
-    /// ⭐ **这条钉住「promo 表包含 bestapi.store 而 aff 表排除它」不是矛盾。**
+    /// ⭐ **这条钉住「两张表都不含 bestapi.store」各自的理由，防止有人反向「补齐」。**
     ///
-    /// 两张表的排除理由不同（见模块文档）。会有人看到这个「不一致」就来
-    /// 「修正」其中一张 —— 改哪张都是错的：给 aff 表补上它会让服务端日志多一条
-    /// `ErrAffiliateCodeInvalid`；从 promo 表删掉它会让用户白丢赠额。
+    /// 排除理由不同（见模块文档）：aff 是服务端拒绝自己邀请自己；
+    /// promo 是码已删除。给 aff 表补上它会让服务端日志多一条
+    /// `ErrAffiliateCodeInvalid`；给 promo 表补回旧码会让注册页弹「优惠码无效」。
     #[test]
-    fn the_two_tables_deliberately_disagree_about_the_maintainers_site() {
+    fn neither_table_carries_the_maintainers_site_anymore() {
         let origin = "https://bestapi.store";
         assert_eq!(
             promo_code_for(origin),
-            Some("LOONGPORT"),
-            "优惠码是站主给新用户的赠额，自己的站当然要给"
+            None,
+            "LOONGPORT 已在服务端删除（2026-08-16），填回去就是红框"
         );
         assert_eq!(
             super::super::aff::aff_code_for(origin),
@@ -109,13 +105,14 @@ mod tests {
     fn host_normalization_is_shared_with_the_aff_table() {
         // 复用 `aff::lookup_host` ⇒ 端口 / `www.` / 大小写的归一行为**必须一致**。
         // 各写一份迟早会漂成「aff 查到了 promo 没查到」的静默失效。
+        // 表清空后这条同时守「bestapi.store 的任何变体都不再把码带回来」。
         for origin in [
             "https://www.bestapi.store",
             "https://BestApi.store",
             "https://bestapi.store:443",
             "bestapi.store",
         ] {
-            assert_eq!(promo_code_for(origin), Some("LOONGPORT"), "{origin}");
+            assert_eq!(promo_code_for(origin), None, "{origin}");
         }
     }
 
