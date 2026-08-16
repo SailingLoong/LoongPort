@@ -910,7 +910,9 @@
     "anonymousStatsDescription": "Reports the relay site domains you added and how many accounts, to help prioritise support. Includes a random install ID for de-duplication; never accounts, balances, or keys.",
     "piConfigDir": "Pi Configuration Directory",
     "piConfigDirDescription": "Override the Pi configuration directory (models.json, instruction files, prompts, skills, and sessions).",
-    "browsePlaceholderPi": "e.g., /home/<your-username>/.pi/agent"
+    "browsePlaceholderPi": "e.g., /home/<your-username>/.pi/agent",
+    "tabAutoMode": "Auto Mode",
+    "tabAdvancedRouting": "Advanced Routing"
   },
   "apps": {
     "claude": "Claude",
@@ -2622,7 +2624,7 @@
   },
   "autoMode": {
     "title": "Auto Mode",
-    "tooltip": "Auto mode is active\\nThe system picks managed tiers automatically per strategy; the current tier stays within a session\\nTurning it off returns to manual selection; re-enable anytime in Settings",
+    "tooltip": "Auto Mode active (Beta)\nThe system picks managed tiers by strategy; the tier sticks within a session\nTurn off to go back to manual selection; re-enable anytime",
     "description": "The system picks the best managed tier automatically; the current tier stays put during a session",
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
@@ -2634,13 +2636,21 @@
     "activeHint": "Auto mode is active and takes precedence over the failover queue. The current tier is kept within a session; it only switches by strategy order after repeated failures or when idle (switching drops the prompt cache).",
     "confirm": {
       "title": "Enable Auto Mode",
-      "message": "The system will pick and switch managed tiers automatically per the strategy: the current tier stays within a session (to keep the prompt cache); it only moves to a better tier after failures or when idle. Enable?",
+      "message": "The system will pick and switch managed tiers by the selected strategy: the current tier sticks within a session (to keep the prompt cache) and only switches after failures or idling. If local routing is off, it will be turned on and take over that CLI's config as well. Enable now?",
       "confirm": "Enable"
     },
     "enabledToast": "Auto mode enabled for {{app}}",
     "disabledToast": "Auto mode disabled for {{app}}; re-enable it in Settings",
     "strategySaved": "Strategy updated",
-    "toggleFailed": "Operation failed"
+    "toggleFailed": "Operation failed",
+    "beta": "Beta",
+    "tabDescription": "You only pick the app and model; the system picks the best managed tier by strategy: the current tier sticks within a session (protecting the prompt cache) and failures switch to the next tier. Enabling also turns on local routing and takes over that CLI's config if needed.",
+    "modelLabel": "Model preference",
+    "modelAny": "Any model",
+    "modelHint": "With a model picked, only tiers whose catalog includes it are chosen; an explicit pick switches to the best tier immediately.",
+    "advancedSection": "Advanced (failover queue & circuit breaker)",
+    "statusActive": "Active",
+    "tooltipOff": "Auto Mode (Beta)\nThe system picks managed tiers by strategy and sticks within a session\nEnabling also turns on local routing if needed"
   },
   "proxy": {
     "panel": {

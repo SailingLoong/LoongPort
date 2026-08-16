@@ -619,26 +619,6 @@ const TIER_MODEL_EVENT_PREFIX: &str = "model_";
 const AUTO_MODEL_PREFIX: &str = "automodel_";
 const AUTO_PREF_NONE: &str = "autopref_none";
 
-/// 自动模式分区的模型清单：该应用全部托管档位模型目录的并集（去重）。
-/// 目录顺序沿用档位顺序 → 目录内顺序，跨档位重复只保留首次出现。
-/// 返回空 = 该应用没有模型目录（非 Codex 系），托盘放「自动」占位。
-fn auto_mode_models(
-    providers: &indexmap::IndexMap<String, crate::provider::Provider>,
-) -> Vec<String> {
-    let mut models: Vec<String> = Vec::new();
-    for provider in providers.values() {
-        if !crate::relay::is_managed(&provider.id) {
-            continue;
-        }
-        for model in crate::proxy::auto_strategy::tier_models(provider) {
-            if !models.contains(&model) {
-                models.push(model);
-            }
-        }
-    }
-    models
-}
-
 /// 处理供应商托盘事件
 pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool {
     for section in TRAY_SECTIONS.iter() {
@@ -1102,7 +1082,7 @@ pub fn create_tray_menu(
                         tray_texts.auto_strategy_fastest
                     }
                 };
-                let models = auto_mode_models(&providers);
+                let models = crate::proxy::auto_strategy::auto_mode_models(&providers);
                 let model_pref =
                     crate::proxy::auto_strategy::get_model_pref(&app_state.db, app_type_str);
 
@@ -1587,12 +1567,14 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_mode_models, format_script_summary, format_subscription_summary, tier_model_choices,
+        format_script_summary, format_subscription_summary, tier_model_choices,
         tray_menu_providers, AUTO_MODEL_PREFIX, AUTO_PREF_NONE, AUTO_SUFFIX,
         TIER_MODEL_EVENT_PREFIX, TRAY_ID, TRAY_SECTIONS,
     };
     use crate::app_config::AppType;
     use crate::provider::{Provider, UsageData, UsageResult};
+    // 模型并集已提为共享函数（设置页 get_auto_mode_status 与托盘同源）。
+    use crate::proxy::auto_strategy::auto_mode_models;
     use crate::services::subscription::{
         CredentialStatus, QuotaTier, SubscriptionQuota, TIER_FIVE_HOUR, TIER_GEMINI_FLASH,
         TIER_GEMINI_FLASH_LITE, TIER_GEMINI_PRO, TIER_MONTHLY, TIER_SEVEN_DAY, TIER_SEVEN_DAY_OPUS,

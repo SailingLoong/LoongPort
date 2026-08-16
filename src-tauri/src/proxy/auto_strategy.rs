@@ -124,6 +124,26 @@ pub fn tier_models(tier: &Provider) -> Vec<String> {
     crate::commands::models_from_settings(&tier.settings_config)
 }
 
+/// 自动模式的可选模型清单：该应用全部托管档位模型目录的**并集**（去重）。
+///
+/// 目录顺序沿用档位顺序 → 目录内顺序，跨档位重复只保留首次出现；返回空 =
+/// 该应用没有模型目录（非 Codex 系），UI 放「不限模型」占位。托盘菜单与
+/// 设置页共用这一份 —— 别在两边各拼一遍。
+pub fn auto_mode_models(providers: &indexmap::IndexMap<String, Provider>) -> Vec<String> {
+    let mut models: Vec<String> = Vec::new();
+    for provider in providers.values() {
+        if !crate::relay::is_managed(&provider.id) {
+            continue;
+        }
+        for model in tier_models(provider) {
+            if !models.contains(&model) {
+                models.push(model);
+            }
+        }
+    }
+    models
+}
+
 /// 按模型偏好过滤候选：只保留目录里含偏好模型的档位。
 ///
 /// 两类回退都不拦人：偏好的模型已从所有目录下架（过滤后为空）→ 回退全量，

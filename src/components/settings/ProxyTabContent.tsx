@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Server, Activity, Zap, Globe, ShieldAlert } from "lucide-react";
+import { Server, Activity, Zap, Globe } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
@@ -8,41 +8,35 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { ProxyPanel } from "@/components/proxy";
-import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
-import { AutoModePanel } from "@/components/proxy/AutoModePanel";
-import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { ToggleRow } from "@/components/ui/toggle-row";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import type { SettingsFormState } from "@/hooks/useSettings";
-import { getAppLabel, PROXY_APP_IDS } from "@/config/appConfig";
 
 interface ProxyTabContentProps {
   settings: SettingsFormState;
   onAutoSave: (updates: Partial<SettingsFormState>) => Promise<boolean | void>;
 }
 
-export const FAILOVER_APPS = PROXY_APP_IDS.map((id) => ({
-  id,
-  label: getAppLabel(id),
-}));
-
+/**
+ * 「高级路由」设置页（过渡形态）。
+ *
+ * 自动模式、故障转移队列与熔断/超时已迁往「自动模式」tab（主入口），
+ * 这里只剩路由基础设施：本地路由服务面板、整流器、全局出站代理。
+ * 下一步计划：这三块并入设置「高级」tab 后本 tab 移除。
+ */
 export function ProxyTabContent({
   settings,
   onAutoSave,
 }: ProxyTabContentProps) {
   const { t } = useTranslation();
   const [showProxyConfirm, setShowProxyConfirm] = useState(false);
-  const [showFailoverConfirm, setShowFailoverConfirm] = useState(false);
 
   const {
     isRunning,
-    takeoverStatus,
     startProxyServer,
     stopWithRestore,
     isPending: isProxyPending,
@@ -69,23 +63,6 @@ export function ProxyTabContent({
       await startProxyServer();
     } catch (error) {
       console.error("Proxy confirm failed:", error);
-    }
-  };
-
-  const handleFailoverToggleChange = (checked: boolean) => {
-    if (checked && !settings?.failoverConfirmed) {
-      setShowFailoverConfirm(true);
-    } else {
-      void onAutoSave({ enableFailoverToggle: checked });
-    }
-  };
-
-  const handleFailoverConfirm = async () => {
-    setShowFailoverConfirm(false);
-    try {
-      await onAutoSave({ failoverConfirmed: true, enableFailoverToggle: true });
-    } catch (error) {
-      console.error("Failover confirm failed:", error);
     }
   };
 
@@ -135,95 +112,6 @@ export function ProxyTabContent({
               onToggleProxy={handleToggleProxy}
               isProxyPending={isProxyPending}
             />
-          </AccordionContent>
-        </AccordionItem>
-
-        {/* Auto Failover */}
-        <AccordionItem
-          value="failover"
-          className="rounded-xl glass-card overflow-hidden"
-        >
-          <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-            <div className="flex items-center gap-3">
-              <Activity className="h-5 w-5 text-orange-500" />
-              <div className="text-left">
-                <h3 className="text-base font-semibold">
-                  {t("settings.advanced.failover.title")}
-                </h3>
-                <p className="text-sm text-muted-foreground font-normal">
-                  {t("settings.advanced.failover.description")}
-                </p>
-              </div>
-            </div>
-          </AccordionTrigger>
-          <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-            <div className="space-y-6">
-              <ToggleRow
-                icon={<ShieldAlert className="h-4 w-4 text-orange-500" />}
-                title={t("settings.advanced.proxy.enableFailoverToggle")}
-                description={t(
-                  "settings.advanced.proxy.enableFailoverToggleDescription",
-                )}
-                checked={settings?.enableFailoverToggle ?? false}
-                onCheckedChange={handleFailoverToggleChange}
-              />
-
-              {!isRunning && (
-                <div className="p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-                  <p className="text-sm text-yellow-600 dark:text-yellow-400">
-                    {t("proxy.failover.proxyRequired", {
-                      defaultValue: "需要先启动代理服务才能配置故障转移",
-                    })}
-                  </p>
-                </div>
-              )}
-
-              <Tabs defaultValue="claude" className="w-full">
-                <TabsList className="grid w-full grid-cols-4">
-                  {FAILOVER_APPS.map(({ id, label }) => (
-                    <TabsTrigger key={id} value={id}>
-                      {label}
-                    </TabsTrigger>
-                  ))}
-                </TabsList>
-                {FAILOVER_APPS.map(({ id: appType }) => {
-                  const failoverDisabled =
-                    !isRunning || !(takeoverStatus?.[appType] ?? false);
-                  return (
-                    <TabsContent
-                      key={appType}
-                      value={appType}
-                      className="mt-4 space-y-6"
-                    >
-                      <AutoModePanel
-                        appType={appType}
-                        disabled={failoverDisabled}
-                      />
-                      <div className="space-y-4">
-                        <div>
-                          <h4 className="text-sm font-semibold">
-                            {t("proxy.failoverQueue.title")}
-                          </h4>
-                          <p className="text-xs text-muted-foreground">
-                            {t("proxy.failoverQueue.description")}
-                          </p>
-                        </div>
-                        <FailoverQueueManager
-                          appType={appType}
-                          disabled={failoverDisabled}
-                        />
-                      </div>
-                      <div className="border-t border-border/50 pt-6">
-                        <AutoFailoverConfigPanel
-                          appType={appType}
-                          disabled={failoverDisabled}
-                        />
-                      </div>
-                    </TabsContent>
-                  );
-                })}
-              </Tabs>
-            </div>
           </AccordionContent>
         </AccordionItem>
 
@@ -282,16 +170,6 @@ export function ProxyTabContent({
         confirmText={t("confirm.proxy.confirm")}
         onConfirm={() => void handleProxyConfirm()}
         onCancel={() => setShowProxyConfirm(false)}
-      />
-
-      <ConfirmDialog
-        isOpen={showFailoverConfirm}
-        variant="info"
-        title={t("confirm.failover.title")}
-        message={t("confirm.failover.message")}
-        confirmText={t("confirm.failover.confirm")}
-        onConfirm={() => void handleFailoverConfirm()}
-        onCancel={() => setShowFailoverConfirm(false)}
       />
     </motion.div>
   );

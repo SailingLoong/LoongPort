@@ -7,8 +7,14 @@ import { invoke } from "@tauri-apps/api/core";
 export type AutoModeStrategy = "cheapest" | "fastest";
 
 export interface AutoModeStatus {
+  /** 按 app 的开关。 */
   enabled: boolean;
+  /** 全局策略（所有 app 共享一份）。 */
   strategy: AutoModeStrategy;
+  /** 模型偏好；`null` = 不限。 */
+  model: string | null;
+  /** 可选模型清单（该 app 全部托管档位模型目录的并集；空 = 没有目录）。 */
+  availableModels: string[];
 }
 
 export const autoModeApi = {
@@ -20,4 +26,8 @@ export const autoModeApi = {
 
   setStrategy: (strategy: AutoModeStrategy): Promise<void> =>
     invoke("set_auto_mode_strategy", { strategy }),
+
+  /** 设模型偏好（`null` = 不限）。后端会绕过会话亲和立即切到最优档位。 */
+  setModel: (appType: string, model: string | null): Promise<void> =>
+    invoke("set_auto_mode_model", { appType, model }),
 };

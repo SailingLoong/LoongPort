@@ -49,6 +49,8 @@ import { BackupListSection } from "@/components/settings/BackupListSection";
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { ProxyTabContent } from "@/components/settings/ProxyTabContent";
+import { AutoModeTabContent } from "@/components/settings/AutoModeTabContent";
+import { Badge } from "@/components/ui/badge";
 import { ConnectivityCheckConfigPanel } from "@/components/usage/ConnectivityCheckConfigPanel";
 import { UsageDashboard } from "@/components/usage/UsageDashboard";
 import { LogConfigPanel } from "@/components/settings/LogConfigPanel";
@@ -226,11 +228,21 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full grid-cols-6 mb-6 glass rounded-lg">
+          <TabsList className="grid w-full grid-cols-7 mb-6 glass rounded-lg">
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
             </TabsTrigger>
-            <TabsTrigger value="proxy">{t("settings.tabProxy")}</TabsTrigger>
+            <TabsTrigger value="proxy">
+              <span className="inline-flex items-center gap-1.5">
+                {t("settings.tabAutoMode", "自动模式")}
+                <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+                  {t("autoMode.beta", "Beta")}
+                </Badge>
+              </span>
+            </TabsTrigger>
+            <TabsTrigger value="advancedRouting">
+              {t("settings.tabAdvancedRouting", "高级路由")}
+            </TabsTrigger>
             <TabsTrigger value="auth">
               {t("settings.tabAuth", { defaultValue: "认证" })}
             </TabsTrigger>
@@ -295,6 +307,18 @@ export function SettingsPage({
               </TabsContent>
 
               <TabsContent value="proxy" className="space-y-6 mt-0 pb-4">
+                {settings ? (
+                  <AutoModeTabContent
+                    settings={settings}
+                    onAutoSave={handleAutoSave}
+                  />
+                ) : null}
+              </TabsContent>
+
+              <TabsContent
+                value="advancedRouting"
+                className="space-y-6 mt-0 pb-4"
+              >
                 {settings ? (
                   <ProxyTabContent
                     settings={settings}

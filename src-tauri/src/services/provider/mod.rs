@@ -2108,6 +2108,14 @@ requires_openai_auth = true
         db.save_live_backup("claude-desktop", "{}")
             .await
             .expect("seed live backup");
+        // 临时端口（仓内约定）：本机跑测试时用户的 LoongPort 可能正开着路由
+        // 占着默认端口（15721），写死会撞「Address already in use」。
+        db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("update proxy config");
         {
             let mut config = db
                 .get_proxy_config_for_app("claude-desktop")
@@ -2165,9 +2173,16 @@ requires_openai_auth = true
 
         let profile_path = claude_desktop_profile_path(home.dir.path());
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
+        // 监听端口是临时的（防与本机运行中的 LoongPort 撞 15721），网关地址按实际端口断言。
+        let running_port = state
+            .proxy_service
+            .get_status()
+            .await
+            .expect("get proxy status")
+            .port;
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!("http://127.0.0.1:{running_port}/claude-desktop")),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));

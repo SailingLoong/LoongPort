@@ -18,6 +18,10 @@ pub struct AutoModeStatus {
     pub enabled: bool,
     /// "cheapest" | "fastest"
     pub strategy: String,
+    /// 模型偏好（`None` = 不限）。
+    pub model: Option<String>,
+    /// 可选模型清单（该应用全部托管档位模型目录的并集；空 = 没有目录）。
+    pub available_models: Vec<String>,
 }
 
 fn require_auto_mode_app(app_type: &str) -> Result<(), String> {
@@ -36,9 +40,15 @@ pub async fn get_auto_mode_status(
     app_type: String,
 ) -> Result<AutoModeStatus, String> {
     require_auto_mode_app(&app_type)?;
+    let providers = state
+        .db
+        .get_all_providers(&app_type)
+        .map_err(|e| e.to_string())?;
     Ok(AutoModeStatus {
         enabled: auto_strategy::is_auto_mode_enabled(&state.db, &app_type),
         strategy: auto_strategy::get_strategy(&state.db).as_str().to_string(),
+        model: auto_strategy::get_model_pref(&state.db, &app_type),
+        available_models: auto_strategy::auto_mode_models(&providers),
     })
 }
 
