@@ -90,9 +90,9 @@ export interface RelaySectionProps {
    * 且把「这是个受限取值域」这个事实写进类型里。
    */
   appId: AppId;
-  /** 打开独立中转站广场；首启入口固定落综合榜，普通添加按当前 app 选榜。
-   * 普通添加入口（`"add"`）已上收到顶栏大「+」，这里只剩首启引导在用。 */
-  onOpenDirectory: (entry: "firstRun") => void;
+  /** 打开统一添加聚合页的指定标签。首启引导落「中转站」（综合榜）；
+   * 两个区块的空态占位也经它指名跳转（中转站→directory / 官方 API→official）。 */
+  onOpenAddHub: (tab: "directory" | "official") => void;
 }
 
 /**
@@ -111,7 +111,7 @@ export interface RelaySectionProps {
  */
 let autoPromptedThisProcess = false;
 
-export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
+export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
    *
@@ -293,11 +293,11 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
       // 无论弹不弹，新人都落到中转站广场 —— 注册窗不再自动弹，它是 star
       // 走通之后的终点，不是起点。
       void promptOnboardingStarReward();
-      onOpenDirectory("firstRun");
+      onOpenAddHub("directory");
     } catch {
       // 状态读不到时不猜业务事实；保留最后一次完整后端视图。
     }
-  }, [isImageTab, onOpenDirectory]);
+  }, [isImageTab, onOpenAddHub]);
 
   const presentRefreshResult = useCallback(
     (result: RefreshResult) => {
@@ -902,6 +902,7 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
       <RelayTierList
         relays={relays}
         busy={busy}
+        onAddSite={() => onOpenAddHub("directory")}
         onLogin={(relayId) => void handleLogin(relayId)}
         onProvision={handleProvision}
         onReorder={(ids) => void handleReorder(ids)}
@@ -986,6 +987,7 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
             onReorder: (ids) => void handleVendorReorder(ids),
           }}
           busy={busy}
+          onAddAccount={() => onOpenAddHub("official")}
         />
       )}
 

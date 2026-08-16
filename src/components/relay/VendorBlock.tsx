@@ -77,9 +77,11 @@ export interface VendorBlockProps {
    * （`"vendorLogin:<rowId>"` 等）。
    */
   busy: ReadonlySet<string>;
+  /** 空态占位（「尚未添加服务商账号」虚框）整块的点击动作：跳聚合页「官方 API」。 */
+  onAddAccount: () => void;
 }
 
-export function VendorBlock({ vendor, busy }: VendorBlockProps) {
+export function VendorBlock({ vendor, busy, onAddAccount }: VendorBlockProps) {
   const { t } = useTranslation();
   const accounts = vendor.accounts;
 
@@ -120,9 +122,16 @@ export function VendorBlock({ vendor, busy }: VendorBlockProps) {
       </h2>
 
       {accounts.length === 0 ? (
-        <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+        // 空态占位整块是碰撞框：点一下直达聚合页「官方 API」标签。
+        <button
+          type="button"
+          onClick={onAddAccount}
+          title={t("loongport.officialApi.title")}
+          aria-label={t("loongport.officialApi.title")}
+          className="w-full rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground transition-colors hover:border-blue-400/60 hover:bg-muted/40 hover:text-foreground"
+        >
           {t("loongport.vendor.empty")}
-        </p>
+        </button>
       ) : (
         <DndContext
           sensors={sensors}

@@ -64,6 +64,8 @@ export interface RelayTierListProps {
    * 不该跟着灰掉。见 `useRowBusy` 的文档。
    */
   busy: ReadonlySet<string>;
+  /** 空态占位（「尚未添加中转站」虚框）整块的点击动作：跳聚合页「中转站」。 */
+  onAddSite: () => void;
   /** 行内动作，**都显式带 relayId**（后端命令直接吃它，不再靠全局「当前站」）。 */
   onLogin: (relayId: number) => void;
   onProvision: (relayId: number) => void | Promise<void>;
@@ -160,6 +162,7 @@ function initialOpenState(relays: RelayRowData[]): Record<RowKey, boolean> {
 export function RelayTierList({
   relays,
   busy,
+  onAddSite,
   onLogin,
   onProvision,
   onSwitchTier,
@@ -248,9 +251,16 @@ export function RelayTierList({
       <h2 className="text-sm font-medium">{t("loongport.sections.relay")}</h2>
 
       {relays.length === 0 ? (
-        <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+        // 空态占位整块是碰撞框：点一下直达聚合页「中转站」标签。
+        <button
+          type="button"
+          onClick={onAddSite}
+          title={t("loongport.tierList.addSite")}
+          aria-label={t("loongport.tierList.addSite")}
+          className="w-full rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground transition-colors hover:border-blue-400/60 hover:bg-muted/40 hover:text-foreground"
+        >
           {t("loongport.tierList.empty")}
-        </p>
+        </button>
       ) : (
         <DndContext
           sensors={sensors}

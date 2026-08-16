@@ -81,7 +81,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
-import { AddHubPage } from "@/components/relay/AddHubPage";
+import { AddHubPage, type AddHubTab } from "@/components/relay/AddHubPage";
 import { StarRewardDialog } from "@/components/StarRewardDialog";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
@@ -106,7 +106,6 @@ import UnifiedSkillsPanel, {
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { RelaySection } from "@/components/relay/RelaySection";
-import type { LeaderboardKind } from "@/lib/api/relay";
 import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
@@ -202,8 +201,9 @@ function App() {
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
-  const [directoryInitialKind, setDirectoryInitialKind] =
-    useState<LeaderboardKind>();
+  // 聚合页进来落在哪个标签（顶栏 + / 空态占位 / 首启引导共用一个入口状态）。
+  const [addHubInitialTab, setAddHubInitialTab] =
+    useState<AddHubTab>("directory");
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
@@ -991,9 +991,9 @@ function App() {
     setCurrentView("skillsDiscovery");
   };
 
-  /** 普通添加（顶栏 + / ProviderList 空态）不带榜单偏好；首启引导落综合榜。 */
-  const handleOpenAddHub = useCallback((directoryKind?: "overall") => {
-    setDirectoryInitialKind(directoryKind);
+  /** 打开聚合页；`tab` 缺省落「中转站」（首启引导同）。 */
+  const handleOpenAddHub = useCallback((tab: AddHubTab = "directory") => {
+    setAddHubInitialTab(tab);
     setCurrentView("addHub");
   }, []);
 
@@ -1004,7 +1004,7 @@ function App() {
           return (
             <AddHubPage
               sourceAppId={activeApp}
-              initialDirectoryKind={directoryInitialKind}
+              initialTab={addHubInitialTab}
               onBack={() => setCurrentView("providers")}
               onAddProvider={addProvider}
             />
@@ -1110,7 +1110,7 @@ function App() {
                         聚合页，三标签就地切换）。 */}
                     <RelaySection
                       appId={activeApp}
-                      onOpenDirectory={() => handleOpenAddHub("overall")}
+                      onOpenAddHub={handleOpenAddHub}
                     />
 
                     {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口在顶栏 +。

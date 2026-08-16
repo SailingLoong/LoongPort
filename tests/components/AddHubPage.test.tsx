@@ -89,6 +89,23 @@ describe("AddHubPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("lands on the official tab when entered from the official empty state", async () => {
+    listVendorAccounts.mockResolvedValue({ supported: true, accounts: [] });
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <AddHubPage
+          sourceAppId="codex"
+          initialTab="official"
+          onBack={vi.fn()}
+          onAddProvider={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+
+    // 指名进来直落「官方 API」，不用再点一遍标签。
+    expect(await screen.findByTestId("official-content")).toBeInTheDocument();
+  });
+
   it("invokes onBack from the back button", async () => {
     const user = userEvent.setup();
     listVendorAccounts.mockResolvedValue({ supported: true, accounts: [] });

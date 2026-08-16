@@ -34,9 +34,13 @@ describe("relayApi 的中转站定位参数", () => {
     invokeMock.mockResolvedValue(undefined);
   });
 
-  it("不再暴露手动输入专用的 importSite 入口", () => {
-    // 广场白名单化后手动添加已删（2026-08-15），前端只剩目录导入一条路。
-    expect("importSite" in relayApi).toBe(false);
+  it("importSite 走 Manual 来源的保守导入命令（手填域名兜底直连）", async () => {
+    // 白名单是展示集合的所有者，但白名单外的站也要能连（2026-08-16 恢复）；
+    // 与目录导入分开成两条命令：Manual 不认目录声明的专属入口。
+    await relayApi.importSite("https://my-own-relay.example");
+    expect(invokeMock).toHaveBeenCalledWith("relay_import_site", {
+      site: "https://my-own-relay.example",
+    });
   });
 
   it("importDirectorySite 走后端重新核验签名目录的专用命令", async () => {

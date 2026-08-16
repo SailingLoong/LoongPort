@@ -66,6 +66,7 @@ export function RelayDirectoryPage({
   const [authenticatingHost, setAuthenticatingHost] = useState<string | null>(
     null,
   );
+  const [customSite, setCustomSite] = useState("");
   const authenticationInProgress = useRef(false);
 
   const directoryQuery = useQuery({
@@ -123,12 +124,19 @@ export function RelayDirectoryPage({
     return message || t("loongport.addSite.importFailed");
   };
 
-  const authenticate = async (entryUrl: string, host: string) => {
+  const authenticate = async (
+    entryUrl: string,
+    host: string,
+    source: "directory" | "manual" = "directory",
+  ) => {
     if (authenticationInProgress.current) return;
     authenticationInProgress.current = true;
     setAuthenticatingHost(host);
     try {
-      const result = await relayApi.importDirectorySite(entryUrl);
+      // manual = 用户手填域名（不在白名单里）：走保守的 Manual 打开规则。
+      const result = await (source === "directory"
+        ? relayApi.importDirectorySite(entryUrl)
+        : relayApi.importSite(entryUrl));
       toast.success(
         t("loongport.addSite.connected", { name: result.siteName }),
       );
@@ -329,6 +337,35 @@ export function RelayDirectoryPage({
             <ChevronRight className="h-3.5 w-3.5" />
           </Button>
         </div>
+      </div>
+
+      {/* 白名单里没有的站，用户自己填域名直连（Manual 来源，保守打开规则；
+          探针不通 / 协议不识别以可读 toast 报错）。 */}
+      <div className="flex items-center gap-2 border-t border-border-default pt-3">
+        <Input
+          value={customSite}
+          disabled={authenticatingHost !== null}
+          onChange={(event) => setCustomSite(event.target.value)}
+          placeholder={t("loongport.directory.customSitePlaceholder")}
+          onKeyDown={(event) => {
+            if (
+              event.key === "Enter" &&
+              customSite.trim() &&
+              !authenticationInProgress.current
+            ) {
+              void authenticate(customSite, customSite.trim(), "manual");
+            }
+          }}
+        />
+        <Button
+          variant="outline"
+          disabled={!customSite.trim() || authenticatingHost !== null}
+          onClick={() =>
+            void authenticate(customSite, customSite.trim(), "manual")
+          }
+        >
+          {t("loongport.directory.actions.useOtherSite")}
+        </Button>
       </div>
     </div>
   );
