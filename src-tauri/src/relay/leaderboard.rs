@@ -576,6 +576,91 @@ fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
         .collect()
 }
 
+/// 受管站点（去 blocked）的**本站 host** 清单 —— 这些是真实可导入的 origin，
+/// 探针名单用这份（`managed_veridrop_hosts` 是 veridrop 空间的别名，探它没意义）。
+pub(crate) fn managed_site_hosts(config: &RemoteConfig) -> Vec<String> {
+    let policy = normalized_policy(&config.relay_directory);
+    let blocked: BTreeSet<_> = policy.blocked_hosts.iter().cloned().collect();
+    policy
+        .sites
+        .into_keys()
+        .filter(|host| !host.is_empty() && !blocked.contains(host))
+        .collect()
+}
+
+/// 四个榜单缓存里出现过的 veridrop host 全集 —— 漏斗第 1/2 层的对照面。
+fn cached_veridrop_hosts() -> BTreeSet<String> {
+    LeaderboardKind::ALL
+        .into_iter()
+        .filter_map(read_cache)
+        .flat_map(|cached| cached.items)
+        .map(|item| item.veridrop_host)
+        .collect()
+}
+
+/// 目录漏斗的周期收尾：**三层过滤逐层留痕** + 受管站探针落盘。
+///
+/// 由 `maintenance` 的 veridrop-directory 定时任务在配置与榜单刷新之后调用，
+/// 每个周期（6 小时）输出三条 INFO：
+///
+/// 1. `whitelist_filter` —— 榜单在、白名单不在（未收录，不展示）；
+/// 2. `leaderboard_missing` —— 白名单在、榜单没有行（无排名数据但仍可展示）；
+/// 3. `probe`（逐站一条）—— 探针三分类 + 连续 miss 计数 + 是否仍曝光。
+///
+/// 下一轮排查「这个站为什么不在广场」时，逐层翻日志就能回答。
+pub(crate) async fn refresh_site_probes_for_directory() {
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+    let managed_hosts = managed_site_hosts(&config);
+    if managed_hosts.is_empty() {
+        log::info!(
+            "{}",
+            crate::diagnostics::DiagnosticEvent::new("relay.directory_funnel", "skipped")
+                .field("reason", "no_managed_sites")
+        );
+        return;
+    }
+
+    let managed_veridrop: BTreeSet<_> = managed_veridrop_hosts(&config).into_iter().collect();
+    let cached_hosts = cached_veridrop_hosts();
+    let not_managed: Vec<_> = cached_hosts
+        .difference(&managed_veridrop)
+        .cloned()
+        .collect();
+    let missing_from_board: Vec<_> = managed_veridrop
+        .difference(&cached_hosts)
+        .cloned()
+        .collect();
+    log::info!(
+        "{}",
+        crate::diagnostics::DiagnosticEvent::new("relay.directory_funnel", "whitelist_filter")
+            .field("dropped", not_managed.join(","))
+            .field("dropped_count", not_managed.len())
+    );
+    log::info!(
+        "{}",
+        crate::diagnostics::DiagnosticEvent::new("relay.directory_funnel", "leaderboard_missing")
+            .field("hosts", missing_from_board.join(","))
+            .field("count", missing_from_board.len())
+    );
+
+    let origins = managed_hosts
+        .iter()
+        .map(|host| format!("https://{host}"))
+        .collect::<Vec<_>>();
+    for record in crate::relay::site_probe::probe_and_record(&origins).await {
+        log::info!(
+            "{}",
+            crate::diagnostics::DiagnosticEvent::new("relay.directory_funnel", "probe")
+                .field("host", record.host)
+                .field("verdict", format!("{:?}", record.verdict))
+                .field("backend", format!("{:?}", record.backend))
+                .field("consecutive_panel_misses", record.consecutive_panel_misses)
+                .field("exposed", record.exposed)
+                .field("detail", record.detail)
+        );
+    }
+}
+
 pub fn apply_policy(
     parsed: Vec<ParsedLeaderboardItem>,
     config: &RemoteConfig,
@@ -671,9 +756,27 @@ fn read_cache(kind: LeaderboardKind) -> Option<CachedLeaderboard> {
 fn apply_policy_to_cached(cached: CachedLeaderboard, config: &RemoteConfig) -> RelayLeaderboard {
     RelayLeaderboard {
         kind: cached.kind,
-        items: apply_policy(cached.items, config),
+        items: apply_probe_gate(apply_policy(cached.items, config)),
         synced_at: cached.synced_at,
     }
+}
+
+/// 曝光闸：白名单（`apply_policy`）之后再过一遍**探针健康**——连续多轮「协议认不出」
+/// 的站从广场摘掉。见 [`crate::relay::site_probe`] 的三分类（网络失败不摘）。
+fn apply_probe_gate(items: Vec<RelayDirectoryItem>) -> Vec<RelayDirectoryItem> {
+    let store = crate::relay::site_probe::SiteProbeStore::load();
+    filter_probe_gated(items, &store)
+}
+
+/// `apply_probe_gate` 的纯函数核——测试直接喂 store，不碰磁盘。
+fn filter_probe_gated(
+    items: Vec<RelayDirectoryItem>,
+    store: &crate::relay::site_probe::SiteProbeStore,
+) -> Vec<RelayDirectoryItem> {
+    items
+        .into_iter()
+        .filter(|item| store.should_expose(&item.site_host))
+        .collect()
 }
 
 fn write_cache(leaderboard: &CachedLeaderboard) -> Result<(), AppError> {
@@ -822,7 +925,9 @@ async fn refresh_with(
     })?;
     Ok(RelayLeaderboard {
         kind,
-        items,
+        // 返回给 UI 的这份过探针闸；缓存里存的始终是未过滤的 parsed，
+        // 摘除闸解除后无需重新抓取即可恢复展示。
+        items: apply_probe_gate(items),
         synced_at,
     })
 }
@@ -1773,5 +1878,62 @@ mod tests {
             .protocol_scores
             .iter()
             .any(|protocol| protocol.protocol == "Gemini"));
+    }
+
+    /// 曝光闸：连续多轮「协议认不出」的站从广场摘掉；网络失败 / 没探过的站不摘。
+    /// 钉的是 `filter_probe_gated` 与 `SiteProbeStore::should_expose` 的合谋行为。
+    #[test]
+    fn probe_gate_hides_sites_with_consecutive_panel_misses() {
+        use crate::relay::site_probe::{
+            ProbeOutcome, ProbeVerdict, SiteProbeStore, HIDE_AFTER_CONSECUTIVE_PANEL_MISSES,
+        };
+
+        fn outcome(verdict: ProbeVerdict) -> ProbeOutcome {
+            ProbeOutcome {
+                verdict,
+                backend: None,
+                detail: "test".into(),
+                probed_at: 1,
+            }
+        }
+
+        let mut store = SiteProbeStore::default();
+        for _ in 0..HIDE_AFTER_CONSECUTIVE_PANEL_MISSES {
+            store.record("koozhan.example", &outcome(ProbeVerdict::UnrecognizedPanel));
+        }
+        store.record("cf-blocked.example", &outcome(ProbeVerdict::NetworkBlocked));
+
+        fn gated_item(site_host: &str) -> RelayDirectoryItem {
+            RelayDirectoryItem {
+                site_host: site_host.into(),
+                veridrop_host: site_host.into(),
+                display_name: site_host.into(),
+                rank: None,
+                score: 90,
+                samples: 30,
+                latest_date: "2026-08-16".into(),
+                detail_url: format!("https://veridrop.org/site/{site_host}"),
+                protocol_scores: vec![],
+                claude_signature_rate: None,
+                scenarios: vec![],
+                issues: vec![],
+                entry_url: format!("https://{site_host}"),
+                auto_add: true,
+            }
+        }
+
+        let items = vec![
+            gated_item("koozhan.example"),
+            gated_item("cf-blocked.example"),
+            gated_item("fresh.example"),
+        ];
+        let remaining = filter_probe_gated(items, &store)
+            .into_iter()
+            .map(|item| item.site_host)
+            .collect::<Vec<_>>();
+
+        assert!(!remaining.contains(&"koozhan.example".to_owned()));
+        assert!(remaining.contains(&"cf-blocked.example".to_owned()));
+        assert!(remaining.contains(&"fresh.example".to_owned()));
     }
 }
