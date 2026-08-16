@@ -331,7 +331,6 @@
     "tabGeneral": "General",
     "tabAuth": "Auth",
     "tabAdvanced": "Advanced",
-    "tabProxy": "Routing",
     "authCenter": {
       "title": "OAuth Authentication Center",
       "description": "Use your other subscriptions in Claude Code — please be mindful of compliance risks.",
@@ -911,8 +910,7 @@
     "piConfigDir": "Pi Configuration Directory",
     "piConfigDirDescription": "Override the Pi configuration directory (models.json, instruction files, prompts, skills, and sessions).",
     "browsePlaceholderPi": "e.g., /home/<your-username>/.pi/agent",
-    "tabAutoMode": "Auto Mode",
-    "tabAdvancedRouting": "Advanced Routing"
+    "tabAutoMode": "Auto Mode"
   },
   "apps": {
     "claude": "Claude",

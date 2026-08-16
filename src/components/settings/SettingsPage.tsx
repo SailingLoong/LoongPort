@@ -17,6 +17,8 @@ import {
   ScrollText,
   HardDriveDownload,
   FlaskConical,
+  Zap,
+  Globe,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -48,8 +50,10 @@ import { CcSwitchImportSection } from "@/components/settings/CcSwitchImportSecti
 import { BackupListSection } from "@/components/settings/BackupListSection";
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
-import { ProxyTabContent } from "@/components/settings/ProxyTabContent";
 import { AutoModeTabContent } from "@/components/settings/AutoModeTabContent";
+import { LocalRoutingServicePanel } from "@/components/settings/LocalRoutingServicePanel";
+import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
+import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { Badge } from "@/components/ui/badge";
 import { ConnectivityCheckConfigPanel } from "@/components/usage/ConnectivityCheckConfigPanel";
 import { UsageDashboard } from "@/components/usage/UsageDashboard";
@@ -228,7 +232,7 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full grid-cols-7 mb-6 glass rounded-lg">
+          <TabsList className="grid w-full grid-cols-6 mb-6 glass rounded-lg">
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
             </TabsTrigger>
@@ -239,9 +243,6 @@ export function SettingsPage({
                   {t("autoMode.beta", "Beta")}
                 </Badge>
               </span>
-            </TabsTrigger>
-            <TabsTrigger value="advancedRouting">
-              {t("settings.tabAdvancedRouting", "高级路由")}
             </TabsTrigger>
             <TabsTrigger value="auth">
               {t("settings.tabAuth", { defaultValue: "认证" })}
@@ -309,18 +310,6 @@ export function SettingsPage({
               <TabsContent value="proxy" className="space-y-6 mt-0 pb-4">
                 {settings ? (
                   <AutoModeTabContent
-                    settings={settings}
-                    onAutoSave={handleAutoSave}
-                  />
-                ) : null}
-              </TabsContent>
-
-              <TabsContent
-                value="advancedRouting"
-                className="space-y-6 mt-0 pb-4"
-              >
-                {settings ? (
-                  <ProxyTabContent
                     settings={settings}
                     onAutoSave={handleAutoSave}
                   />
@@ -552,6 +541,59 @@ export function SettingsPage({
                         </AccordionTrigger>
                         <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
                           <LogConfigPanel />
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      {/* 路由基础设施三项：自动模式主入口化后从原路由页迁入
+                          （#165 过渡 tab 的最终归宿），产品语义是底层配置。 */}
+                      {settings ? (
+                        <LocalRoutingServicePanel
+                          settings={settings}
+                          onAutoSave={handleAutoSave}
+                        />
+                      ) : null}
+
+                      <AccordionItem
+                        value="rectifier"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <Zap className="h-5 w-5 text-purple-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.rectifier.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.rectifier.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <RectifierConfigPanel />
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      <AccordionItem
+                        value="globalProxy"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <Globe className="h-5 w-5 text-cyan-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.globalProxy.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.globalProxy.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <GlobalProxySettings />
                         </AccordionContent>
                       </AccordionItem>
                     </Accordion>

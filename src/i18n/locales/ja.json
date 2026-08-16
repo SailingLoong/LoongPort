@@ -331,7 +331,6 @@
     "tabGeneral": "一般",
     "tabAuth": "認証",
     "tabAdvanced": "詳細",
-    "tabProxy": "ルーティング",
     "authCenter": {
       "title": "OAuth 認証センター",
       "description": "Claude Code で他のサブスクリプションをご利用いただけます。コンプライアンスリスクにご注意ください。",
@@ -911,8 +910,7 @@
     "piConfigDir": "Pi 設定ディレクトリ",
     "piConfigDirDescription": "Pi の設定ディレクトリ（models.json、指示ファイル、プロンプト、Skills、セッション）を上書きします。",
     "browsePlaceholderPi": "例: /home/<your-username>/.pi/agent",
-    "tabAutoMode": "自動モード",
-    "tabAdvancedRouting": "高度なルーティング"
+    "tabAutoMode": "自動モード"
   },
   "apps": {
     "claude": "Claude",

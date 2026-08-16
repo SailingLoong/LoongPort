@@ -331,7 +331,6 @@
     "tabGeneral": "通用",
     "tabAuth": "驗證",
     "tabAdvanced": "進階",
-    "tabProxy": "路由",
     "authCenter": {
       "title": "OAuth 驗證中心",
       "description": "在 Claude Code 中使用您的其他訂閱，請注意合規風險。",
@@ -912,8 +911,7 @@
     "piConfigDir": "Pi 設定目錄",
     "piConfigDirDescription": "覆寫 Pi 設定目錄（models.json、指示檔案、提示、Skills 與工作階段）。",
     "browsePlaceholderPi": "例如：/home/<您的帳號>/.pi/agent",
-    "tabAutoMode": "自動模式",
-    "tabAdvancedRouting": "進階路由"
+    "tabAutoMode": "自動模式"
   },
   "apps": {
     "claude": "Claude",
