@@ -3204,7 +3204,7 @@
       "remove": "アカウントと接続プロファイルを削除",
       "removeInUseHint": "使用中の接続プロファイルがあります。確認のうえ削除できます",
       "removeConfirmUsageItem": "{{tier}}（{{app}}）",
-      "removeConfirmMessageInUse": "「{{label}}」の接続プロファイルが使用中です：{{usages}}。削除するとこれらのアプリは現在使用中のプロバイダーを失います（実行中の CLI は再選択まで旧設定を使い続けます）。ログイン情報と {{count}} 件の接続プロファイルを削除します。中継サービスの残高は保持されます。",
+      "removeConfirmMessageInUse": "「{{label}}」の接続プロファイルが使用中です：{{usages}}。削除後、これらのアプリは公式ログインに切り替わります。独自のログインがないアプリは次回起動時にログイン案内が表示されます（実行中の CLI は再起動で反映されます）。ログイン情報と {{count}} 件の接続プロファイルを削除します。中継サービスの残高は保持されます。",
       "removeConfirmTitle": "このアカウントを削除しますか？",
       "removeConfirmMessage": "「{{label}}」のログイン情報と {{count}} 件の接続プロファイルを削除します。中継サービスの残高は保持され、後から再ログインできます。",
       "removeConfirmMessageNeverLoggedIn": "「{{label}}」と {{count}} 件の接続プロファイルを削除します。後からこのアカウントを再度追加できます。"

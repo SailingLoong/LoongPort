@@ -3204,7 +3204,7 @@
       "remove": "Delete account and connection profiles",
       "removeInUseHint": "Some connection profiles are in use — you can still delete, with confirmation",
       "removeConfirmUsageItem": "{{tier}} ({{app}})",
-      "removeConfirmMessageInUse": "Connection profiles of “{{label}}” are in use: {{usages}}. After deletion these apps lose their active provider (running CLIs keep the old config until you pick another). This deletes the sign-in session and its {{count}} connection profiles; your balance remains with the relay service.",
+      "removeConfirmMessageInUse": "Connection profiles of “{{label}}” are in use: {{usages}}. After deletion these apps switch back to their official sign-in; apps without their own sign-in will be guided to sign in again on next run (restart running CLIs to apply). This deletes the sign-in session and its {{count}} connection profiles; your balance remains with the relay service.",
       "removeConfirmTitle": "Delete this account?",
       "removeConfirmMessage": "This deletes the sign-in session for “{{label}}” and its {{count}} connection profiles. Your balance remains with the relay service, and you can sign in again later.",
       "removeConfirmMessageNeverLoggedIn": "This deletes “{{label}}” and its {{count}} connection profiles. You can add the account again later."
