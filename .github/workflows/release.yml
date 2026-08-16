@@ -98,7 +98,9 @@ jobs:
           node-version-file: .node-version
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        # 同 ci.yml：工具链跟 rust-toolchain.toml 走 —— 出包用的编译器必须和
+        # CI 验过闸的是同一个，否则又是一种「本地验证不了」的漂移。
+        run: rustup show
 
       - name: Add Windows ARM64 target
         if: runner.os == 'Windows' && matrix.arch == 'arm64'
