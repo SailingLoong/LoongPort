@@ -83,6 +83,7 @@ pub mod purchase;
 pub mod purchase_session;
 pub mod reconcile;
 pub mod remote_config;
+pub mod site_probe;
 pub mod stats;
 
 pub use managed::{is_managed, reject_if_managed};

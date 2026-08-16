@@ -55,7 +55,11 @@ fn start_veridrop_directory_refresh(app: tauri::AppHandle) {
         let app = app.clone();
         async move {
             crate::relay::remote_config::refresh_and_cache().await;
-            crate::refresh_stale_directories(app).await
+            crate::refresh_stale_directories(app).await?;
+            // 漏斗收尾（探针 + 三层日志）：best-effort，不把它记成任务失败 ——
+            // 探针的单站失败已经作为 NetworkBlocked 落进了结果里。
+            crate::relay::leaderboard::refresh_site_probes_for_directory().await;
+            Ok(())
         }
     });
 }

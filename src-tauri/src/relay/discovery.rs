@@ -391,6 +391,38 @@ pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, DiscoveryErro
 
 /// 原生 HTTP 探测所有候选，再复用 WebView 原始回传使用的同一收敛规则。
 pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryError> {
+    let responses = probe_candidates(site_origin).await?;
+    // 与旧内联实现同一条判据：**没有任何候选完成过一次 HTTP 往返**才算传输失败
+    // （连不上 / 中途断流）；只要有一个候选拿到过响应（哪怕 404 / 超大），
+    // 就按「站点答了话但认不出」走 UnsupportedSite。
+    let completed = responses
+        .iter()
+        .any(|response| response.status.is_some() && response.error_kind.is_none());
+    if !completed {
+        let detail = responses
+            .iter()
+            .find_map(|response| response.error_kind.clone())
+            .unwrap_or_default();
+        return Err(DiscoveryError::new(
+            DiscoveryErrorKind::Transport,
+            format!("连接站点失败: {detail}"),
+        ));
+    }
+
+    converge_probe_responses(&responses)
+}
+
+/// 原生探测一轮，返回**逐候选**的元数据（失败候选也记录 `status` / `error_kind`，
+/// `body` 为空）——`discover_site` 的收敛与 [`crate::relay::site_probe`] 的三分类
+/// 都吃这一份原始数据，谁也不用重打一遍网络请求。
+///
+/// 每个候选的落表口径：发送失败 `status=None + error_kind`；读到 HTTP 响应但
+/// 状态非 2xx `status=Some + 空 body`；2xx 且读完正文 `status + body`；正文超上限
+/// （与浏览器路径同一个源大小上限）按「答了话但指纹读不了」记 `status + 空 body`
+/// —— 与非 2xx 同形状，靠 status 区分，**不算 error**（站点活着，别当传输失败）。
+pub(crate) async fn probe_candidates(
+    site_origin: &str,
+) -> Result<Vec<ProbeResponse>, DiscoveryError> {
     let client = api::build_client().map_err(|error| {
         DiscoveryError::new(
             DiscoveryErrorKind::Transport,
@@ -398,20 +430,29 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
         )
     })?;
     let mut responses = Vec::new();
-    let mut completed_candidate = false;
-    let mut last_transport_error = None;
 
     for candidate in PROBE_CANDIDATES {
         let url = format!("{site_origin}{}", candidate.path);
-        let response = match client.get(&url).send().await {
-            Ok(response) => response,
+        let mut response = ProbeResponse {
+            candidate_id: candidate.id.to_string(),
+            ..ProbeResponse::default()
+        };
+        let sent = match client.get(&url).send().await {
+            Ok(sent) => sent,
             Err(error) => {
-                last_transport_error = Some(error.to_string());
+                response.error_kind = Some(sanitize_probe_log_value(&error.to_string(), 64));
+                responses.push(response);
                 continue;
             }
         };
-        if !response.status().is_success() {
-            completed_candidate = true;
+        response.status = Some(sent.status().as_u16());
+        response.content_type = sent
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        if !sent.status().is_success() {
+            responses.push(response);
             continue;
         }
 
@@ -419,62 +460,50 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
         // 站点把大段用户可见配置塞进公共设置里是常事（实测 bestapi.store 已 143 KiB），
         // 在 64 KiB 就丢弃会把一个完全正常的 sub2api 站误判成「协议无法识别」。
         // 真正的指纹只有几个字段，读完再投影即可。
-        if response
+        if sent
             .content_length()
             .is_some_and(|length| length > MAX_PROBE_COMPACT_SOURCE_BYTES as u64)
         {
-            completed_candidate = true;
+            responses.push(response);
             continue;
         }
 
         let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        let mut body_failed = false;
+        let mut oversized = false;
+        let mut stream = sent.bytes_stream();
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(chunk) if body.len() + chunk.len() <= MAX_PROBE_COMPACT_SOURCE_BYTES => {
                     body.extend_from_slice(&chunk);
                 }
                 Ok(_) => {
-                    completed_candidate = true;
-                    body_failed = true;
+                    oversized = true;
                     break;
                 }
                 Err(error) => {
-                    last_transport_error = Some(error.to_string());
-                    body_failed = true;
+                    response.error_kind = Some(sanitize_probe_log_value(&error.to_string(), 64));
                     break;
                 }
             }
         }
-        if body_failed {
+        if response.error_kind.is_some() || oversized {
+            // 读流中断（error）之外的两种「没读到指纹」都按答话处理：正文超上限
+            // 时丢弃半截正文 —— 存 2 MiB 解不开的 JSON 没有意义，status 已说明一切。
+            responses.push(response);
             continue;
         }
-        completed_candidate = true;
-        responses.push(ProbeResponse {
-            candidate_id: candidate.id.to_string(),
-            body_bytes: body.len(),
-            detector_body_bytes: body.len(),
-            json_like: body
-                .iter()
-                .copied()
-                .find(|byte| !byte.is_ascii_whitespace())
-                .is_some_and(|byte| byte == b'{' || byte == b'['),
-            body: String::from_utf8_lossy(&body).into_owned(),
-            ..ProbeResponse::default()
-        });
+        response.body_bytes = body.len();
+        response.detector_body_bytes = body.len();
+        response.json_like = body
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .is_some_and(|byte| byte == b'{' || byte == b'[');
+        response.body = String::from_utf8_lossy(&body).into_owned();
+        responses.push(response);
     }
 
-    if responses.is_empty() && !completed_candidate {
-        return Err(DiscoveryError::new(
-            DiscoveryErrorKind::Transport,
-            last_transport_error
-                .map(|error| format!("连接站点失败: {error}"))
-                .unwrap_or_else(|| "连接站点失败".into()),
-        ));
-    }
-
-    converge_probe_responses(&responses)
+    Ok(responses)
 }
 
 /// 在 Rust 侧按候选 id 分派严格 detector。
