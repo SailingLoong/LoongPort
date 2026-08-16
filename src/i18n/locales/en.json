@@ -910,7 +910,7 @@
     "piConfigDir": "Pi Configuration Directory",
     "piConfigDirDescription": "Override the Pi configuration directory (models.json, instruction files, prompts, skills, and sessions).",
     "browsePlaceholderPi": "e.g., /home/<your-username>/.pi/agent",
-    "tabAutoMode": "Auto Mode"
+    "tabAutoMode": "Easy Mode"
   },
   "apps": {
     "claude": "Claude",
@@ -2621,9 +2621,9 @@
     }
   },
   "autoMode": {
-    "title": "Auto Mode",
-    "tooltip": "Auto Mode active (Beta)\nThe system picks managed tiers by strategy; the tier sticks within a session\nTurn off to go back to manual selection; re-enable anytime",
-    "description": "The system picks the best managed tier automatically; the current tier stays put during a session",
+    "title": "Easy Mode",
+    "tooltip": "Easy Mode active (Beta)\nThe system picks managed tiers by strategy; the tier sticks within a session\nTurning it off also restores that CLI's local routing; re-enable in Settings",
+    "description": "The system picks the best managed tier automatically and sticks within a session",
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
       "cheapest": "Cheapest",
@@ -2631,24 +2631,27 @@
       "fastest": "Fastest",
       "fastestHint": "Ordered by 7-day avg first-token time"
     },
-    "activeHint": "Auto mode is active and takes precedence over the failover queue. The current tier is kept within a session; it only switches by strategy order after repeated failures or when idle (switching drops the prompt cache).",
+    "activeHint": "Easy Mode is active and takes precedence over the failover queue. The current tier sticks within a session; on persistent failures it switches by strategy order (switching loses the prompt cache). Tier prices are verified against live site rates, and models are confirmed genuine by model verification.",
     "confirm": {
-      "title": "Enable Auto Mode",
-      "message": "The system will pick and switch managed tiers by the selected strategy: the current tier sticks within a session (to keep the prompt cache) and only switches after failures or idling. If local routing is off, it will be turned on and take over that CLI's config as well. Enable now?",
+      "title": "Enable Easy Mode",
+      "message": "The system will pick and switch managed tiers by the selected strategy: the current tier sticks within a session (to keep the prompt cache) and only switches after failures or idling; tier prices are site-verified and models confirmed by model verification. If local routing is off, it will be turned on and take over that CLI's config (restored when Easy Mode is turned off). Enable now?",
       "confirm": "Enable"
     },
-    "enabledToast": "Auto mode enabled for {{app}}",
-    "disabledToast": "Auto mode disabled for {{app}}; re-enable it in Settings",
+    "enabledToast": "Easy Mode enabled for {{app}}",
+    "disabledToast": "Easy Mode disabled for {{app}}; local routing restored",
     "strategySaved": "Strategy updated",
     "toggleFailed": "Operation failed",
     "beta": "Beta",
-    "tabDescription": "You only pick the app and model; the system picks the best managed tier by strategy: the current tier sticks within a session (protecting the prompt cache) and failures switch to the next tier. Enabling also turns on local routing and takes over that CLI's config if needed.",
+    "tabDescription": "You only pick the app and model; the system picks the best managed tier by strategy: the current tier sticks within a session (protecting the prompt cache) and failures switch to the next tier. Tier rates and model prices are verified against live site data, and models are confirmed genuine by model verification. Enabling also turns on local routing and takes over that CLI's config; disabling restores it.",
     "modelLabel": "Model preference",
     "modelAny": "Any model",
     "modelHint": "With a model picked, only tiers whose catalog includes it are chosen; an explicit pick switches to the best tier immediately.",
     "advancedSection": "Advanced (failover queue & circuit breaker)",
     "statusActive": "Active",
-    "tooltipOff": "Auto Mode (Beta)\nThe system picks managed tiers by strategy and sticks within a session\nEnabling also turns on local routing if needed"
+    "masterLabel": "Easy Mode master switch",
+    "masterOnToast": "Easy Mode enabled (apps with managed tiers)",
+    "masterOffToast": "Easy Mode disabled everywhere; local routing restored",
+    "noCandidatesHint": "No managed tiers available — log in to a relay site and fetch tiers first"
   },
   "proxy": {
     "panel": {
@@ -2761,8 +2764,10 @@
     },
     "failover": {
       "proxyRequired": "Routing service must be started to configure failover",
-      "autoSwitch": "Auto Failover",
-      "autoSwitchDescription": "When enabled, switches to queue P1 immediately and automatically tries the next provider in the queue on failures"
+      "autoSwitch": "Auto failover",
+      "autoSwitchDescription": "Each app immediately switches to its queue's P1 when enabled, and to the next provider in the queue on request failure; applies to all apps at once",
+      "allOnToast": "Auto failover enabled for all apps",
+      "allOffToast": "Auto failover disabled for all apps"
     },
     "failoverQueue": {
       "title": "Failover Queue",

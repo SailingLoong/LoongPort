@@ -15,6 +15,8 @@ export interface AutoModeStatus {
   model: string | null;
   /** 可选模型清单（该 app 全部托管档位模型目录的并集；空 = 没有目录）。 */
   availableModels: string[];
+  /** 有没有可用的托管档位（与开启判据同源）；总开关只对 true 的 app 生效。 */
+  hasCandidates: boolean;
 }
 
 export const autoModeApi = {
