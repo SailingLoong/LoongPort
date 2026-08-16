@@ -232,16 +232,38 @@ jobs:
           "CC_SWITCH_WSL_TEST_TEMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Compile backend tests with native temp
-        # link.exe/mt.exe cannot create manifests when TEMP points at a WSL UNC path.
-        run: cargo test --lib --manifest-path src-tauri/Cargo.toml --no-run
+        # link.exe/mt.exe cannot create manifests when TEMP points at a WSL UNC path,
+        # 所以 cargo（构建）只允许出现在这一步。顺带解析出 lib 测试二进制的路径，
+        # 跑测步直接执行它 —— cargo 不再进入 WSL TEMP 环境，任何原因触发的重链
+        # 都碰不到 mt.exe（2026-08-16 main 实红：--no-run 刚编完，跑测步的
+        # --list 又无端重编一次，重链恰好踩中 UNC manifest 坑，且失败在重试
+        # 循环之外；#148 分支同 workflow 则完全没重编 —— 指纹抖动不可依赖）。
+        shell: pwsh
+        run: |
+          # 关掉颜色：TERM_COLOR=always 时 "Executable" 后面跟着 ANSI 色码，
+          # 且 Windows 输出是 src\lib.rs（反斜杠）——正则按无色输出写，分隔符两种都认。
+          $env:CARGO_TERM_COLOR = 'never'
+          $output = cargo test --lib --manifest-path src-tauri/Cargo.toml --no-run 2>&1
+          $output | Write-Host
+          # `--lib` 恰好产生一行 "… unittests src/lib.rs (…exe)"
+          $m = $output | Select-String -Pattern 'unittests src[/\\]lib\.rs \((.+\.exe)\)' | Select-Object -First 1
+          if (-not $m) { throw "cargo 输出里没有 lib 测试二进制路径" }
+          $rel = $m.Matches[0].Groups[1].Value
+          $exe = if ([IO.Path]::IsPathRooted($rel)) { $rel } else { Join-Path $pwd.Path $rel }
+          "CC_SWITCH_TEST_BIN=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run Windows-to-WSL2 filesystem contract
+        # 直接执行上一步编好的测试二进制：契约本身要求 TEMP/HOME 落在 WSL UNC
+        # 上（测试断言 temp_dir() 也在测试根下），而 cargo 在这种环境里一旦
+        # 重链就会踩 mt.exe 的 LNK1327。二进制不经 cargo 运行后，链接器彻底
+        # 不出现，原来的重试循环随之删除（它兜的就是这个链接坑）。
         shell: pwsh
         run: |
           $env:TEMP = $env:CC_SWITCH_WSL_TEST_TEMP
           $env:TMP = $env:CC_SWITCH_WSL_TEST_TEMP
+          $exe = $env:CC_SWITCH_TEST_BIN
           $testName = "config::tests::atomic_write_replaces_existing_wsl_unc_file"
-          $testList = cargo test --lib --manifest-path src-tauri/Cargo.toml -- --ignored --list
+          $testList = & $exe --ignored --list
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -249,19 +271,8 @@ jobs:
           if ($testList -notcontains $expected) {
             throw "Expected ignored test was not discovered: $testName"
           }
-          # 已知偶发（PR #130 前后两次踩实）：link.exe/mt.exe 在 \\wsl.localhost UNC
-          # 临时路径上随机失败（LNK1327 / c1010070），重试换一个 lnk{GUID}.tmp 即绿。
-          # 不重试的后果是 automerge 永远等不到绿，纯搁置人。
-          $maxAttempts = 3
-          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            if ($attempt -gt 1) {
-              Write-Host "::warning::UNC contract attempt $attempt/$maxAttempts (retrying after known mt.exe flake)"
-              Start-Sleep -Seconds 10
-            }
-            cargo test --lib --manifest-path src-tauri/Cargo.toml $testName -- --ignored --exact --nocapture
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -eq $maxAttempts) { exit $LASTEXITCODE }
-          }
+          & $exe --ignored --exact --nocapture $testName
+          exit $LASTEXITCODE
 
   # ⚠️ **分支保护的必需检查只认这一个 job**（名字见 name:），别再改成四个矩阵名。
   #
