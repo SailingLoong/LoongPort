@@ -1413,17 +1413,17 @@ mod tests {
             Some("SUMMER2026"),
             "远端存在的全部意义：它比内置新"
         );
-        // 没缓存 ⇒ 回落内置。
+        // 没缓存 ⇒ 回落内置（内置自 2026-08-16 起为空：码已在服务端删除）。
         assert_eq!(
             resolve_promo_code(None, "https://bestapi.store").as_deref(),
-            Some("LOONGPORT"),
-            "全新安装 + 首启没网仍要有赠额"
+            None,
+            "死码不能在内置里苟活：离线首启填了也是红框"
         );
-        // 远端拉到了但没提这个站 ⇒ 用内置。
+        // 远端拉到了但没提这个站 ⇒ 用内置（同为空）。
         let other = cfg_with_promo("someone-else.com", "THEIRS");
         assert_eq!(
             resolve_promo_code(Some(&other), "https://bestapi.store").as_deref(),
-            Some("LOONGPORT")
+            None
         );
         // 归一同样生效（远端那层与内置那层共用 `lookup_host`）。
         assert_eq!(
@@ -1469,11 +1469,11 @@ mod tests {
             "aff 该走自己那条链，不该被 promo 的 map 影响"
         );
 
-        // 反过来：只给 aff 的配置，promo 回落内置。
+        // 反过来：只给 aff 的配置，promo 回落内置（2026-08-16 起内置为空）。
         let aff_only = cfg_with("bestapi.store", "AFFX12345678");
         assert_eq!(
             resolve_promo_code(Some(&aff_only), "https://bestapi.store").as_deref(),
-            Some("LOONGPORT")
+            None
         );
     }
 
