@@ -1203,9 +1203,10 @@ pub async fn relay_import_site(
 /// 与手工输入分开成一个命令：目录策略可以声明 `/keys` 这类站点专属入口，
 /// 但调用方不能靠传一个布尔值把任意业务路径升级成受信入口。这里重新读取并验证
 /// 当前签名配置：完全匹配其中 HTTPS `entry_url` 的地址会保留 path/query/fragment；
-/// 普通榜单站点仍按手工输入的安全规则打开 origin 或协议登录页。
+/// 其余受管站点（sponsors / aff / promo —— **与广场曝光同一份名单**，见
+/// `leaderboard::managed_site_hosts`）按手工输入的安全规则打开 origin 或协议登录页。
 ///
-/// 两种拒绝（配置缓存缺失 / 站点不在目录）都报 `NotInDirectory` 而不是
+/// 两种拒绝（配置缓存缺失 / 站点不在受管名单）都报 `NotInDirectory` 而不是
 /// `UnsupportedSite`：前者的正确指引是「换手动输入框添加」，后者的指引是
 /// 「完成网页验证」——把不同指引压进同一个 kind，前端只能对一半场景说对话。
 #[tauri::command]
@@ -1284,7 +1285,9 @@ fn directory_entry_source(
     let Ok(candidate) = browser_entry_url(input) else {
         return None;
     };
-    config
+    // 第一段：签名目录条目享有专属入口（`/keys`、`/register` 这类受信 path），
+    // 完全匹配才给 `SignedDirectory`。
+    let signed = config
         .relay_directory
         .sites
         .iter()
@@ -1298,6 +1301,19 @@ fn directory_entry_source(
 
             (!host.is_empty() && browser_entry_url(host).ok()? == candidate)
                 .then_some(BrowserEntrySource::Manual)
+        });
+    if signed.is_some() {
+        return signed;
+    }
+
+    // 第二段：受管全集（sponsors / aff / promo 也算 —— **与广场曝光同一份名单**，
+    // 见 `leaderboard::managed_site_hosts` 的唯源注释）按 Manual 保守规则回落。
+    // 只认**裸 origin**：带 path 的输入不匹配，防止任意业务路径被当成受信入口。
+    // wawapi.top 实测踩出的洞就在这：aff 名单让它进了广场，第一段却拒了它的接入。
+    crate::relay::leaderboard::managed_site_hosts(config)
+        .iter()
+        .find_map(|host| {
+            (browser_entry_url(host).ok()? == candidate).then_some(BrowserEntrySource::Manual)
         })
 }
 
@@ -5480,6 +5496,52 @@ mod tests {
         );
         assert_eq!(
             directory_entry_source(&config, "https://broken.example/keys"),
+            None
+        );
+    }
+
+    /// wawapi.top 实测踩出的洞：aff / sponsor 名单里的站进了广场（曝光集合），
+    /// 导入闸却只认 relay_directory ⇒ 点「接入」被 NotInDirectory 拒。第二段回落
+    /// 补上：受管全集按 Manual 放行裸 origin；带 path / blocked / 名单外仍拒。
+    #[test]
+    fn directory_entry_source_falls_back_to_the_full_managed_set() {
+        let config = crate::relay::remote_config::RemoteConfig {
+            relay_directory: crate::relay::remote_config::RelayDirectoryPolicy {
+                blocked_hosts: vec!["blocked.example".into()],
+                sites: std::collections::BTreeMap::new(),
+            },
+            sponsors: vec![crate::relay::remote_config::Sponsor {
+                site_origin: "https://www.WawAPII.com".into(),
+                display_name: "WawAPI".into(),
+                tagline: String::new(),
+            }],
+            aff_codes: std::collections::BTreeMap::from([
+                ("wawapi.top".to_string(), "AFF".to_string()),
+                ("blocked.example".to_string(), "AFF".to_string()),
+            ]),
+            ..crate::relay::remote_config::RemoteConfig::default()
+        };
+
+        assert_eq!(
+            directory_entry_source(&config, "https://wawapi.top"),
+            Some(BrowserEntrySource::Manual)
+        );
+        // sponsor 的 www / 大小写变体归一后也要命中
+        assert_eq!(
+            directory_entry_source(&config, "https://wawapii.com"),
+            Some(BrowserEntrySource::Manual)
+        );
+        // Manual 回落只认裸 origin —— 带 path 的输入不给受信处理
+        assert_eq!(
+            directory_entry_source(&config, "https://wawapi.top/register"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://blocked.example"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://unknown.example"),
             None
         );
     }

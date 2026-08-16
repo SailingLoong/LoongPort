@@ -576,14 +576,36 @@ fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
         .collect()
 }
 
-/// 受管站点（去 blocked）的**本站 host** 清单 —— 这些是真实可导入的 origin，
-/// 探针名单用这份（`managed_veridrop_hosts` 是 veridrop 空间的别名，探它没意义）。
+/// 受管站点的**真实 origin** host 全集（sponsors ∪ aff_codes ∪ promo_codes ∪
+/// relay_directory，统一归一后去 blocked）。
+///
+/// ⭐ 三份清单的**唯一源**（wawapi.top 实测踩出的洞：aff 名单里的站进了广场，
+/// 导入闸却只认 relay_directory ⇒ 广场显示、点接入被拒）。广场曝光
+/// （`managed_veridrop_hosts` 是这份在 veridrop 空间的别名视图）、目录导入闸的
+/// 回落匹配（`commands::relay::directory_entry_source`）、探针名单
+/// （`refresh_site_probes_for_directory`）全部从这份派生 —— 任何一份单独收窄，
+/// 就会重现「广场显示但点不进 / 探针名单漏探」，三处必须同宽。
 pub(crate) fn managed_site_hosts(config: &RemoteConfig) -> Vec<String> {
     let policy = normalized_policy(&config.relay_directory);
     let blocked: BTreeSet<_> = policy.blocked_hosts.iter().cloned().collect();
-    policy
-        .sites
-        .into_keys()
+    let mut hosts: BTreeSet<String> = policy.sites.into_keys().collect();
+    for sponsor in &config.sponsors {
+        hosts.insert(crate::relay::aff::lookup_host(&sponsor.site_origin));
+    }
+    hosts.extend(
+        config
+            .aff_codes
+            .keys()
+            .map(|host| crate::relay::aff::lookup_host(host)),
+    );
+    hosts.extend(
+        config
+            .promo_codes
+            .keys()
+            .map(|host| crate::relay::aff::lookup_host(host)),
+    );
+    hosts
+        .into_iter()
         .filter(|host| !host.is_empty() && !blocked.contains(host))
         .collect()
 }
@@ -1935,5 +1957,43 @@ mod tests {
         assert!(!remaining.contains(&"koozhan.example".to_owned()));
         assert!(remaining.contains(&"cf-blocked.example".to_owned()));
         assert!(remaining.contains(&"fresh.example".to_owned()));
+    }
+
+    /// 三份清单的唯一源：sponsors / aff / promo / directory **全部**要进这份名单，
+    /// 统一归一（www、大小写）并去 blocked。**会红的改法**：把任何一类从并集里
+    /// 拿掉 —— 那正是 wawapi.top 式的洞（aff 名单进了广场，探针/导入闸却漏了它）。
+    #[test]
+    fn managed_site_hosts_spans_sponsors_aff_promo_and_directory() {
+        let config = RemoteConfig {
+            relay_directory: RelayDirectoryPolicy {
+                blocked_hosts: vec!["blocked.example".into()],
+                sites: BTreeMap::from([(
+                    "bestapi.store".into(),
+                    crate::relay::remote_config::RelayDirectorySite::default(),
+                )]),
+            },
+            sponsors: vec![crate::relay::remote_config::Sponsor {
+                site_origin: "https://www.WawAPII.com".into(),
+                display_name: "WawAPI".into(),
+                tagline: String::new(),
+            }],
+            aff_codes: BTreeMap::from([("wawapi.top".to_string(), "AFF".into())]),
+            promo_codes: BTreeMap::from([("promo.example".to_string(), "PROMO".into())]),
+            ..RemoteConfig::default()
+        };
+
+        let hosts = managed_site_hosts(&config);
+        for expected in [
+            "bestapi.store",
+            "wawapii.com",
+            "wawapi.top",
+            "promo.example",
+        ] {
+            assert!(
+                hosts.contains(&expected.to_string()),
+                "受管全集缺 {expected}：{hosts:?}"
+            );
+        }
+        assert!(!hosts.contains(&"blocked.example".to_string()));
     }
 }
