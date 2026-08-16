@@ -910,7 +910,9 @@
     "anonymousStatsDescription": "上报你添加的中转站域名与账号个数，帮助决定优先适配谁。含一个随机安装标识用于去重；不含账号、余额或密钥。",
     "piConfigDir": "Pi 配置目录",
     "piConfigDirDescription": "覆盖 Pi 配置目录（models.json、指令文件、提示词、Skills 与会话）。",
-    "browsePlaceholderPi": "例如：/home/<你的用户名>/.pi/agent"
+    "browsePlaceholderPi": "例如：/home/<你的用户名>/.pi/agent",
+    "tabAutoMode": "自动模式",
+    "tabAdvancedRouting": "高级路由"
   },
   "apps": {
     "claude": "Claude",
@@ -2623,7 +2625,7 @@
   },
   "autoMode": {
     "title": "自动模式",
-    "tooltip": "自动模式生效中\\n系统按策略自动挑选托管档位；同一会话保持当前档位不切换\\n关闭后回到手动选择，可随时在设置中重新开启",
+    "tooltip": "自动模式生效中（Beta）\n系统按策略自动挑选托管档位；同一会话保持当前档位不切换\n关闭后回到手动选择，可随时重新开启",
     "description": "系统从托管档位里自动挑最合适的，当前档位会话中保持不变",
     "strategyLabel": "挑选策略（全局）",
     "strategy": {
@@ -2635,13 +2637,21 @@
     "activeHint": "自动模式生效中，优先于故障转移队列。同一会话内保持当前档位不切换；当前档位持续失败时按策略顺序切换（切换会丢失提示词缓存）。",
     "confirm": {
       "title": "开启自动模式",
-      "message": "系统将按所选策略自动挑选并切换托管档位：同一会话内保持当前档位不变（避免丢失提示词缓存），当前档位故障或闲置后才切换到更合适的一档。确定开启？",
+      "message": "系统将按所选策略自动挑选并切换托管档位：同一会话内保持当前档位不变（避免丢失提示词缓存），当前档位故障或闲置后才切换到更合适的一档。若本地路由未开启，将一并开启并接管该 CLI 的配置。确定开启？",
       "confirm": "开启"
     },
     "enabledToast": "{{app}} 自动模式已开启",
     "disabledToast": "{{app}} 自动模式已关闭，可在设置中重新开启",
     "strategySaved": "策略已更新",
-    "toggleFailed": "操作失败"
+    "toggleFailed": "操作失败",
+    "beta": "Beta",
+    "tabDescription": "你只管选 app 和模型，系统按策略从托管档位里自动挑最合适的：同一会话保持当前档位（保护提示词缓存），失败自动切换下一档。开启时会顺带启用本地路由并接管该 CLI 的配置。",
+    "modelLabel": "模型偏好",
+    "modelAny": "不限模型",
+    "modelHint": "选了模型后只在目录含该模型的档位里挑；显式点选会立即切到最优档位",
+    "advancedSection": "高级（故障转移队列与熔断）",
+    "statusActive": "生效中",
+    "tooltipOff": "自动模式（Beta）\n系统按策略自动挑选托管档位，同一会话保持不变\n开启时若本地路由未启用会一并开启"
   },
   "proxy": {
     "panel": {

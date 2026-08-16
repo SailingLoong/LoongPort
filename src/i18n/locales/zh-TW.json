@@ -911,7 +911,9 @@
     "anonymousStatsDescription": "上報你新增的中轉站網域與帳號數量，協助決定優先適配對象。含一個隨機安裝識別碼用於去重；不含帳號、餘額或密鑰。",
     "piConfigDir": "Pi 設定目錄",
     "piConfigDirDescription": "覆寫 Pi 設定目錄（models.json、指示檔案、提示、Skills 與工作階段）。",
-    "browsePlaceholderPi": "例如：/home/<您的帳號>/.pi/agent"
+    "browsePlaceholderPi": "例如：/home/<您的帳號>/.pi/agent",
+    "tabAutoMode": "自動模式",
+    "tabAdvancedRouting": "進階路由"
   },
   "apps": {
     "claude": "Claude",
@@ -2624,7 +2626,7 @@
   },
   "autoMode": {
     "title": "自動模式",
-    "tooltip": "自動模式生效中\\n系統按策略自動挑選託管檔位；同一會話保持目前檔位不切換\\n關閉後回到手動選擇，可隨時在設定中重新開啟",
+    "tooltip": "自動模式生效中（Beta）\n系統按策略自動挑選託管檔位；同一會話保持當前檔位不切換\n關閉後回到手動選擇，可隨時重新開啟",
     "description": "系統從託管檔位裡自動挑最合適的，目前檔位會話中保持不變",
     "strategyLabel": "挑選策略（全域）",
     "strategy": {
@@ -2636,13 +2638,21 @@
     "activeHint": "自動模式生效中，優先於故障轉移佇列。同一會話內保持目前檔位不切換；目前檔位持續失敗時按策略順序切換（切換會丟失提示詞快取）。",
     "confirm": {
       "title": "開啟自動模式",
-      "message": "系統將按所選策略自動挑選並切換託管檔位：同一會話內保持目前檔位不變（避免丟失提示詞快取），目前檔位故障或閒置後才切換到更合適的一檔。確定開啟？",
+      "message": "系統將按所選策略自動挑選並切換託管檔位：同一會話內保持當前檔位不變（避免丟失提示詞快取），當前檔位故障或閒置後才切換到更合適的一檔。若本地路由未開啟，將一併開啟並接管該 CLI 的設定。確定開啟？",
       "confirm": "開啟"
     },
     "enabledToast": "{{app}} 自動模式已開啟",
     "disabledToast": "{{app}} 自動模式已關閉，可在設定中重新開啟",
     "strategySaved": "策略已更新",
-    "toggleFailed": "操作失敗"
+    "toggleFailed": "操作失敗",
+    "beta": "Beta",
+    "tabDescription": "你只管選 app 和模型，系統按策略從託管檔位裡自動挑最合適的：同一會話保持當前檔位（保護提示詞快取），失敗自動切換下一檔。開啟時會順帶啟用本地路由並接管該 CLI 的設定。",
+    "modelLabel": "模型偏好",
+    "modelAny": "不限模型",
+    "modelHint": "選了模型後只在目錄含該模型的檔位裡挑；顯式點選會立即切到最優檔位",
+    "advancedSection": "進階（故障轉移佇列與熔斷）",
+    "statusActive": "生效中",
+    "tooltipOff": "自動模式（Beta）\n系統按策略自動挑選託管檔位，同一會話保持不變\n開啟時若本地路由未啟用會一併開啟"
   },
   "proxy": {
     "panel": {
