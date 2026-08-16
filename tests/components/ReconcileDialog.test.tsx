@@ -40,6 +40,7 @@ function win(overrides: Partial<ReconciliationWindow>): ReconciliationWindow {
 const flagsReport: ReconciliationReport = {
   relayId: 7,
   snapshotCount: 9,
+  hasLocalTraffic: true,
   baselineRatio: 0.95,
   windows: [
     win({ flag: "suspicious", ratio: 0.4 }),
@@ -108,6 +109,7 @@ describe("ReconcileDialog", () => {
     renderDialog({
       relayId: 7,
       snapshotCount: 2,
+      hasLocalTraffic: true,
       baselineRatio: null,
       windows: [
         win({ flag: "insufficientData", ratio: null, estimatedCostUsd: 0 }),
@@ -123,12 +125,40 @@ describe("ReconcileDialog", () => {
     expect(cells[3].textContent).toBe("");
     // 留空只针对判不了的比值：成本照常显示（fmtUsd 4 位，与用量页同约定）。
     expect(cells[1].textContent).toBe("$0.0000");
+    // 有本地流量原料 ⇒ 不出「无本地路由」提示（这里估算 0 是窗口内没数据，
+    // 不是整段回看期没原料）。
+    expect(
+      screen.queryByText("loongport.reconcile.noLocalTrafficHint"),
+    ).toBeNull();
     // 基线比值（不足 3 个有效窗口）同样留空。值是标签所在容器里的子 span，
     // 不是兄弟节点（标签与值包在同一个外层 span 里）。
     const baselineValue = screen
       .getByText("loongport.reconcile.baselineRatioLabel")
       .querySelector(".tabular-nums");
     expect(baselineValue?.textContent).toBe("");
+  });
+
+  it("explains all-zero estimates when there is no locally routed traffic", async () => {
+    renderDialog({
+      relayId: 7,
+      snapshotCount: 3,
+      hasLocalTraffic: false,
+      baselineRatio: null,
+      windows: [
+        win({
+          flag: "insufficientData",
+          ratio: null,
+          estimatedCostUsd: 0,
+          balanceDeltaUsd: -0.05,
+        }),
+      ],
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("loongport.reconcile.noLocalTrafficHint"),
+      ).toBeTruthy(),
+    );
   });
 
   it("samples via the existing balance command, then refetches the report", async () => {
