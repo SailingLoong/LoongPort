@@ -90,6 +90,21 @@ pub(crate) fn is_official_seed_id(id: &str) -> bool {
     OFFICIAL_SEEDS.iter().any(|seed| seed.id == id)
 }
 
+/// 这个 app 有没有官方 seed provider；有则返回它的固定 id。
+///
+/// 官方 seed 的「空 env / 空 config」就是该 CLI 刚装好时的默认认证状态（各 seed
+/// 的注释原文），所以「切到官方」=「回默认认证」。强删中转站账号的收尾拿它把
+/// 受影响 app 安置回官方（`commands::relay::switch_affected_apps_to_official`）。
+///
+/// 返回 `None` 的 app（codex-image 生图，及 additive 类）没有这个回落 —— 调用方
+/// 维持悬空自愈。与 `is_official_seed_id` 同一份 `OFFICIAL_SEEDS`，别另列清单。
+pub(crate) fn official_seed_id(app_type: &AppType) -> Option<&'static str> {
+    OFFICIAL_SEEDS
+        .iter()
+        .find(|seed| seed.app_type == *app_type)
+        .map(|seed| seed.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +131,29 @@ mod tests {
         assert!(is_official_seed_id(GROKBUILD_OFFICIAL_PROVIDER_ID));
         // 空 config = 官方登录态：切换时不注入自定义模型表
         assert_eq!(seed.settings_config_json, r#"{"config":""}"#);
+    }
+
+    /// 强删收尾靠这份映射决定「哪个 app 能回落官方」。**会红的改法**：给新 app
+    /// 加官方 seed 却忘了这里（单源扫描，加 seed 即自动覆盖）；或有人把 codex-image
+    /// 的回落写成依赖它 —— 它没有 seed，这里必须是 `None`。
+    #[test]
+    fn official_seed_id_maps_text_apps_and_denies_codex_image() {
+        assert_eq!(official_seed_id(&AppType::Claude), Some("claude-official"));
+        assert_eq!(
+            official_seed_id(&AppType::ClaudeDesktop),
+            Some(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID)
+        );
+        assert_eq!(
+            official_seed_id(&AppType::Codex),
+            Some(CODEX_OFFICIAL_PROVIDER_ID)
+        );
+        assert_eq!(official_seed_id(&AppType::Gemini), Some("gemini-official"));
+        assert_eq!(
+            official_seed_id(&AppType::GrokBuild),
+            Some(GROKBUILD_OFFICIAL_PROVIDER_ID)
+        );
+        // 生图没有「官方登录」可回；additive 类 app 永远进不了在用名单（current 恒空）
+        assert_eq!(official_seed_id(&AppType::CodexImage), None);
+        assert_eq!(official_seed_id(&AppType::OpenCode), None);
     }
 }

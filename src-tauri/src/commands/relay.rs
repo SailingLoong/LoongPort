@@ -4510,18 +4510,28 @@ fn list_sites_impl(state: &AppState) -> Result<Vec<SiteInfo>, AppError> {
 /// 正是他要的（「我不想再用这个站了」），与那条裁决不矛盾 —— 判据从「档位还活着吗」
 /// 变成「用户知道自己在删什么吗」。
 ///
-/// 顺序：**先删档位再删站点**。反过来的话，站点行没了而 `site_origin` 是档位归属的唯一
-/// 依据 —— 删站点之后就再也认不出哪些档位属于它，那些记录会永久留在 provider 列表里。
+/// 顺序：**（force 时）先切官方 → 先删档位再删站点**。反过来的话，站点行没了而
+/// `site_origin` 是档位归属的唯一依据 —— 删站点之后就再也认不出哪些档位属于它，
+/// 那些记录会永久留在 provider 列表里。切官方放在删档位之前，则是让被安置的档位
+/// 先卸下「当前项」身份、删除全走常规路径（见 [`switch_affected_apps_to_official`]）。
 #[tauri::command]
 pub fn relay_remove_site(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: i64,
     force: Option<bool>,
 ) -> Result<(), String> {
-    remove_site_impl(state.inner(), id, force.unwrap_or(false)).map_err(|e| e.to_string())
+    remove_site_impl(state.inner(), id, force.unwrap_or(false), Some(&app))
+        .map_err(|e| e.to_string())
 }
 
-fn remove_site_impl(state: &AppState, id: i64, force: bool) -> Result<(), AppError> {
+fn remove_site_impl(
+    state: &AppState,
+    id: i64,
+    force: bool,
+    // `None` = 单测（没有 AppHandle）：切官方照常执行，只是不发事件、不刷托盘。
+    app: Option<&tauri::AppHandle>,
+) -> Result<(), AppError> {
     // 先取归属信息 —— 删掉那行之后就没法知道该清哪些档位了。
     //
     // ⚠️ **`account_id` 与 `site_origin` 一样必须取**：删的是**一个账号**（一行），
@@ -4542,11 +4552,6 @@ fn remove_site_impl(state: &AppState, id: i64, force: bool) -> Result<(), AppErr
     // 文案点名**哪个平台、哪个档位**：只说「有档位在使用中」的话，用户得自己去六个 tab
     // 里翻是哪一个。他要做的处置（切走 / 或回弹窗里选强制删）完全取决于这个信息。
     //
-    // force 路径对「被删掉的当前项」不做额外处置：`prune_stale_tiers` 的当前项旁路
-    // （直连 db 删）+ 悬空 current 指针自愈（`get_effective_current_provider`）与
-    // provision 清死档位是同一条路；受影响 app 的 live 配置继续沿用旧设置直到用户
-    // 重选 —— 有意**不**自动切到别的供应商：静默改掉 CLI 正在用的配置比留一份
-    // 还能跑的旧配置更不可预期。
     let in_use = apps_using_this_accounts_tiers(state, &site_origin, account_id);
     if !in_use.is_empty() && !force {
         let detail = in_use
@@ -4557,6 +4562,27 @@ fn remove_site_impl(state: &AppState, id: i64, force: bool) -> Result<(), AppErr
         return Err(AppError::Config(format!(
             "这个账号名下还有档位正在使用中：{detail}。请先在对应平台切换到别的供应商，再删除这个账号。"
         )));
+    }
+
+    // force 路径对「被删掉的当前项」的安置：**先切回官方 seed provider，再删档位**
+    // （[`switch_affected_apps_to_official`] 的文档写了完整理由 —— 删本地登录态不会
+    // 吊销服务端 sk，留旧配置等于 CLI 继续把请求打向一个用户明确要删掉的站）。
+    // 切过去之后档位不再是当前项，`prune_stale_tiers` 全走常规删除路径。
+    //
+    // 切不动的（codex-image 无官方 seed / seed 被删 / 代理接管禁止切官方）降级成
+    // 悬空自愈（`get_effective_current_provider`）—— 宁可降级也不让「删账号」失败。
+    if force && !in_use.is_empty() {
+        let switched = switch_affected_apps_to_official(state, &in_use);
+        if let Some(app) = app {
+            for (app_type, provider_id) in &switched {
+                // 背后切了 current 就必须广播（2026-08-04 的教训：不发事件的症状是
+                // provider 页 / 中转站页静默陈旧，用户以为删除功能坏了）。
+                emit_provider_switched(app, app_type, provider_id);
+            }
+            if !switched.is_empty() {
+                crate::tray::refresh_tray_menu(app);
+            }
+        }
     }
 
     // 空 `keep` = 这一行名下的托管档位全不保留。
@@ -4596,6 +4622,60 @@ fn remove_site_impl(state: &AppState, id: i64, force: bool) -> Result<(), AppErr
     }
 
     with_conn(state, |conn| creds::remove(conn, id))
+}
+
+/// force 删的收尾一步：把受影响的 app 切回各自的官方 seed provider。
+///
+/// ## 为什么是「切官方」而不是留着旧配置
+///
+/// 删登录态只是本地动作，**服务端的 sk 并没有被吊销** —— 留着 live 旧配置等于
+/// CLI 继续把请求（和扣费）打向一个用户刚刚明确删掉的站，那才是违背「我不想再
+/// 用这个站」的意图。官方 seed 的「空 env / 空 config」正是该 CLI 刚装好时的
+/// 默认认证状态（seed 注释原文）：纯中转站用户下次运行会被引导登录；本来就有
+/// 官方登录的直接用回它（那份登录与中转站无关，保留正是预期）。
+///
+/// ## 复用与边界
+///
+/// live 配置怎么清、current 怎么写、MCP 怎么同步全是 `ProviderService::switch`
+/// 现成的，这里只编排「谁该被切」。没有官方 seed 的 app（codex-image 生图）跳过；
+/// 切失败（seed 被用户删了 / 代理接管下 switch 主动拒绝切官方 —— 防封号）记日志
+/// 降级成悬空自愈，**不让删账号失败** —— 安置是收尾，不是闸。
+///
+/// 返回成功切到官方的 `(app_type, official_id)`，调用方拿它发 `PROVIDER_SWITCHED`
+/// 与刷托盘。
+fn switch_affected_apps_to_official(
+    state: &AppState,
+    affected: &[(AppType, String)],
+) -> Vec<(AppType, String)> {
+    let mut switched = Vec::new();
+    for (app_type, tier_name) in affected {
+        let Some(official_id) = crate::database::official_seed_id(app_type) else {
+            log::info!(
+                "{} 没有官方 seed 可回落（原在用档位「{tier_name}」随删除悬空自愈）",
+                app_type.as_str()
+            );
+            continue;
+        };
+        match ProviderService::switch(state, app_type.clone(), official_id) {
+            Ok(result) => {
+                for warning in &result.warnings {
+                    log::info!("强删后 {} 切回官方的提示：{warning}", app_type.as_str());
+                }
+                log::info!(
+                    "强删后把 {} 切回官方 provider（原在用档位：{tier_name}）",
+                    app_type.as_str()
+                );
+                switched.push((app_type.clone(), official_id.to_string()));
+            }
+            Err(e) => {
+                log::warn!(
+                    "强删后把 {} 切回官方失败（current 将悬空自愈，不影响删除）：{e}",
+                    app_type.as_str()
+                );
+            }
+        }
+    }
+    switched
 }
 
 /// 一行名下**全部托管档位**里的 base_url 与 sk。
@@ -8441,7 +8521,7 @@ mod tests {
             .expect("set codex current");
 
         // 用户此刻停在 claude tab 上（那边这一行没有当前项）—— 前端会放行，后端必须拦。
-        let err = remove_site_impl(&state, row_id, false)
+        let err = remove_site_impl(&state, row_id, false, None)
             .expect_err("⭐ 名下有档位是别的平台的当前项时，删除必须失败");
         let msg = err.to_string();
         assert!(
@@ -8486,7 +8566,7 @@ mod tests {
             .expect("seed");
         // **不设 current** —— 别的 provider 是当前项，或压根没有当前项。
 
-        remove_site_impl(&state, row_id, false).expect("没人在用它时删除该成功");
+        remove_site_impl(&state, row_id, false, None).expect("没人在用它时删除该成功");
 
         assert!(
             db.get_provider_by_id(&tier, "codex")
@@ -8509,8 +8589,12 @@ mod tests {
     /// 也能过前两条。钉住的语义：
     ///
     /// - force 放行后**全有或全无**：档位、账号行都得没了（不留孤儿记录）；
-    /// - 被删的是 codex 的**当前项** —— `prune_stale_tiers` 的当前项旁路在这条路上
-    ///   生效（这正是 force 依赖的机制，见 `remove_site_impl` 闸注释）。
+    /// - 被删的是 codex 的**当前项** —— 这条测试的内存库里**没有官方 seed**
+    ///   （`init_default_official_providers` 只在真应用启动时跑），切官方必然失败
+    ///   ⇒ 它同时钉住降级路径：**安置失败不阻断删除**，current 悬空自愈。
+    ///   （正向「切回官方」那条没法单测 —— `ProviderService::switch` 会写真实
+    ///   live 配置文件，codex/claude 没有测试沙箱；映射由
+    ///   `official_seed_id_maps_text_apps_and_denies_codex_image` 把守。）
     #[test]
     fn forced_removal_deletes_even_while_another_app_uses_its_tier() {
         let site = "https://bestapi.store";
@@ -8547,7 +8631,7 @@ mod tests {
         db.set_current_provider("codex", &codex_tier)
             .expect("set codex current");
 
-        remove_site_impl(&state, row_id, true).expect("force 是用户知情后的选择，该放行");
+        remove_site_impl(&state, row_id, true, None).expect("force 是用户知情后的选择，该放行");
 
         assert!(
             db.get_provider_by_id(&codex_tier, "codex")

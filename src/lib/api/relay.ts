@@ -432,7 +432,8 @@ export const relayApi = {
    * （后端 `relay_remove_site` 的文档写了完整理由）。
    *
    * `force` 只在 `row.usageBlockers` 非空、用户已在点名 app 的弹窗里确认后传 true；
-   * 后端默认仍会拦下在用档位（那道闸不信任任何前端按钮态）。
+   * 后端默认仍会拦下在用档位（那道闸不信任任何前端按钮态）。force 放行后后端会把
+   * 受影响 app 切回各自的官方 seed provider（切不动则悬空自愈，均不阻断删除）。
    */
   removeSite: (id: number, force = false): Promise<void> =>
     invoke("relay_remove_site", { id, force }),
