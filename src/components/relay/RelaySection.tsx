@@ -17,6 +17,7 @@ import type { AppId, ProviderSwitchEvent } from "@/lib/api";
 import type {
   RefreshResult,
   RelayRow as RelayRowData,
+  RelayUsageBlocker,
   TierInfo,
 } from "@/lib/api/relay";
 import {
@@ -35,6 +36,7 @@ import {
   type OnboardingRegisterCompleted,
 } from "@/lib/onboarding";
 import { vendorApi, type VendorAccountRow } from "@/lib/api/vendor";
+import { getAppLabel } from "@/config/appConfig";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
@@ -161,7 +163,7 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
   const reloadSeqRef = useRef(0);
   const vendorReloadSeqRef = useRef(0);
   const verificationRequestRef = useRef(0);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   // 余额由各行自己的 query 持有；这里只在「充值窗关了」「刷新」时让它们失效。
   const queryClient = useQueryClient();
   const { busy, run } = useRowBusy();
@@ -695,11 +697,32 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
     });
   };
 
-  /** 删掉一行中转站（连带档位）。有档位在用的行按钮不可点，走不到这里。 */
-  const doRemoveRelay = (row: RelayRowData) =>
+  /**
+   * 把「谁在用」拼成弹窗里那串清单：「BestApi · Pro（Codex）、xxx（Claude）」。
+   *
+   * 每项一条 i18n key（括号样式随 locale 走），连接符交给 `Intl.ListFormat`
+   * （zh 用「、」、en 用 ", "，各自正确）—— 不在组件里手写分隔符。
+   */
+  const formatUsageBlockers = (blockers: RelayUsageBlocker[]) =>
+    new Intl.ListFormat(i18n.resolvedLanguage ?? i18n.language).format(
+      blockers.map((b) =>
+        t("loongport.row.removeConfirmUsageItem", {
+          tier: b.tierName,
+          app: getAppLabel(b.app),
+        }),
+      ),
+    );
+
+  /**
+   * 删掉一行中转站（连带档位）。
+   *
+   * `force` 只来自「点名 app」的强删确认变体 —— 名下有档位在用的行现在也能删，
+   * 但必须经那道弹窗知情确认；后端默认路径仍会拦（闸在后端，见 `relay_remove_site`）。
+   */
+  const doRemoveRelay = (row: RelayRowData, force = false) =>
     run(`removeRelay:${row.id}`, async () => {
       try {
-        await relayApi.removeSite(row.id);
+        await relayApi.removeSite(row.id, force);
         toast.success(
           t("loongport.site.removed", {
             label: row.accountLabel || row.siteName || row.siteOrigin,
@@ -986,24 +1009,43 @@ export function RelaySection({ appId, onOpenDirectory }: RelaySectionProps) {
       <ConfirmDialog
         isOpen={confirmRemove !== null}
         title={t("loongport.row.removeConfirmTitle")}
-        // 文案按后端返回的行状态分两句 —— 前端只负责选择展示文案。
-        // `confirmRemove` 为 null 时弹窗不显示，此处的兜底值不会被看到。
-        message={t(
-          confirmRemove?.removeConfirmation === "configured"
-            ? "loongport.row.removeConfirmMessage"
-            : "loongport.row.removeConfirmMessageNeverLoggedIn",
-          {
-            label:
-              confirmRemove?.accountLabel ||
-              confirmRemove?.siteName ||
-              confirmRemove?.siteOrigin ||
-              "",
-            count: confirmRemove?.tiers.length ?? 0,
-          },
-        )}
+        // 文案三个变体，前端只按后端给的事实选：名下有档位在用（强删确认，
+        // 点名哪些 app）> 已登录 > 从未登录。`confirmRemove` 为 null 时弹窗
+        // 不显示，兜底值不会被看到。
+        message={
+          confirmRemove && confirmRemove.usageBlockers.length > 0
+            ? t("loongport.row.removeConfirmMessageInUse", {
+                label:
+                  confirmRemove.accountLabel ||
+                  confirmRemove.siteName ||
+                  confirmRemove.siteOrigin ||
+                  "",
+                count: confirmRemove.tiers.length,
+                usages: formatUsageBlockers(confirmRemove.usageBlockers),
+              })
+            : t(
+                confirmRemove?.removeConfirmation === "configured"
+                  ? "loongport.row.removeConfirmMessage"
+                  : "loongport.row.removeConfirmMessageNeverLoggedIn",
+                {
+                  label:
+                    confirmRemove?.accountLabel ||
+                    confirmRemove?.siteName ||
+                    confirmRemove?.siteOrigin ||
+                    "",
+                  count: confirmRemove?.tiers.length ?? 0,
+                },
+              )
+        }
         confirmText={t("common.delete")}
         onConfirm={() => {
-          if (confirmRemove) void doRemoveRelay(confirmRemove);
+          if (confirmRemove) {
+            // 有档位在用 ⇒ 走的是强删变体弹窗，确认即用户知情，带 force 删。
+            void doRemoveRelay(
+              confirmRemove,
+              confirmRemove.usageBlockers.length > 0,
+            );
+          }
           setConfirmRemove(null);
         }}
         onCancel={() => setConfirmRemove(null)}

@@ -199,7 +199,7 @@ const relay = {
   isCurrent: false,
   canQueryBalance: true,
   canRefresh: true,
-  canDelete: true,
+  usageBlockers: [],
   removeConfirmation: "configured" as const,
   tiers: [tier("provider-a")],
 };

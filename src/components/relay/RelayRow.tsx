@@ -133,7 +133,8 @@ export interface RelayRowProps {
   /**
    * 删掉这一行（这个「站点 × 账号」）连带它名下的托管档位。
    *
-   * **名下有档位正在使用时不会被调用** —— 那种情况按钮渲染成不可点（见 `RowDelete`）。
+   * 有档位在用时**也会被调用** —— 宿主会弹「点名 app」的强删确认变体
+   * （按 `usageBlockers` 分叉），确认后带 `force` 调后端。
    */
   onDelete: () => void;
   /** dnd-kit 的拖动手柄 props（由 `SortableRelayRow` 注入）。 */
@@ -290,7 +291,7 @@ export function RelayRow({
               </Button>
             )}
             <RowDelete
-              canDelete={relay.canDelete}
+              blocked={relay.usageBlockers.length > 0}
               busy={busy.has(`removeRelay:${relay.id}`)}
               onDelete={onDelete}
             />
@@ -349,25 +350,28 @@ export function RelayRow({
 /**
  * 删掉这一行（这个「站点 × 账号」）。
  *
- * ## 不可删时**仍然渲染**，只是点不动 —— 这是抄上游的取舍
+ * ## 有档位在用时**照样可点**（2026-08-16 改，原来是渲染成不可点）
  *
- * `ProviderActions.tsx:358-364` 就是这么做的：`canDelete` 为 false 时按钮照样在，
- * 只是 `opacity-40 cursor-not-allowed` 且不挂 `onClick`。
+ * 原来的形态是抄上游 `ProviderActions.tsx`：`canDelete` 为 false 时按钮灰掉点不动，
+ * 只靠 hover `title` 解释 —— 用户既看不见是**哪个 app** 在用，也没有任何出路，
+ * 只能自己去六个 tab 里翻（维护者实测就卡在这）。现在改成：
  *
- * 为什么不直接隐藏：用户得知道「这里有删除这个操作，只是现在不能用」。
- * 藏起来的话，正在用某个档位的用户会以为这一行根本删不了，转而去别处找入口。
- * `title` 说清原因（要先切走），他就知道下一步做什么。
+ * - 永远可点（`busy` 除外），点了由宿主弹确认框；
+ * - 宿主按 `usageBlockers` 分叉弹窗：非空时弹「点名 app + 强删确认」的变体
+ *   （见 `RelaySection` 里那个 `ConfirmDialog`），确认后带 `force` 调后端；
+ * - 后端那道跨 app 删除闸**不受影响**：默认路径照样拦，force 只认显式确认。
  *
  * ⚠️ **`disabled` 属性不能用**：`Button` 基类带 `disabled:pointer-events-none`，
- * 那会让 `title` 在 hover 时不显示 —— 而这里的 `title` 正是「为什么点不了」的唯一解释。
- * 所以走「不挂 onClick + 视觉变灰」，与上游同一个写法。
+ * 那会让 `title` 在 hover 时不显示 —— 而这个 `title` 是「有档位在用」的唯一预告。
+ * 所以 busy 时走「不挂 onClick + 视觉变灰」。
  */
 function RowDelete({
-  canDelete,
+  blocked,
   busy,
   onDelete,
 }: {
-  canDelete: boolean;
+  /** 名下有档位正被某个 app 用着 —— 换 tooltip，点击仍照常弹确认框。 */
+  blocked: boolean;
   busy: boolean;
   onDelete: () => void;
 }) {
@@ -380,15 +384,12 @@ function RowDelete({
       size="icon"
       className={cn(
         "h-7 w-7 shrink-0 p-1 text-muted-foreground",
-        canDelete && !busy
-          ? "hover:text-red-500 dark:hover:text-red-400"
-          : "cursor-not-allowed opacity-40",
+        !busy && "hover:text-red-500 dark:hover:text-red-400",
+        busy && "cursor-not-allowed opacity-40",
       )}
-      onClick={canDelete && !busy ? onDelete : undefined}
+      onClick={!busy ? onDelete : undefined}
       title={
-        canDelete
-          ? t("loongport.row.remove")
-          : t("loongport.row.removeBlockedByCurrent")
+        blocked ? t("loongport.row.removeInUseHint") : t("loongport.row.remove")
       }
     >
       {busy ? (

@@ -194,7 +194,7 @@ describe("ReconcileDialog", () => {
       canQueryBalance: true,
       canPurchase: true,
       canRefresh: true,
-      canDelete: false,
+      usageBlockers: [{ app: "codex", tierName: "Example · Pro" }],
       removeConfirmation: "configured",
       tiers: [tier],
     };
