@@ -913,7 +913,14 @@ pub struct SwitchTierResult {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// `rename_all` 只转变体名；变体字段要另加 `rename_all_fields`（serde 1.0.185+）。
+// 漏掉它时 `target_name` 蛇形下发、前端读 `targetName` 得 undefined，
+// 确认弹窗静默打不开 —— 闸在 tests::switch_tier_command_result_wire_contract。
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SwitchTierCommandResult {
     ConfirmationRequired {
         target_name: String,
@@ -5229,6 +5236,42 @@ pub fn relay_sync_imagegen_mcp(state: State<'_, AppState>) -> Result<(), AppErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 契约闸：前端 TS 类型手写断言了这份 wire 形状（`src/lib/api/relay.ts` 的
+    /// `SwitchTierCommandResult`），serde 的 enum 级 `rename_all` 只转变体名、
+    /// 不转变体字段 —— 没有这条闸的话 casing 分叉编译期完全静默
+    /// （2026-08-16 线上事故：`target_name` 蛇形下发，确认弹窗永不打开）。
+    #[test]
+    fn switch_tier_command_result_wire_contract_is_camel_case() {
+        let confirmation = serde_json::to_value(SwitchTierCommandResult::ConfirmationRequired {
+            target_name: "站点 · 分组".into(),
+        })
+        .unwrap();
+        assert_eq!(confirmation["status"], "confirmationRequired");
+        assert!(
+            confirmation.get("targetName").is_some(),
+            "变体字段必须驼峰下发：{confirmation}"
+        );
+        assert!(
+            confirmation.get("target_name").is_none(),
+            "蛇形键意味着前端读到 undefined：{confirmation}"
+        );
+
+        let switched = serde_json::to_value(SwitchTierCommandResult::Switched {
+            result: SwitchTierResult {
+                provider_name: "p".into(),
+                chatgpt_was_running: false,
+                chatgpt_relaunched: false,
+                warnings: vec![],
+            },
+        })
+        .unwrap();
+        assert_eq!(switched["status"], "switched");
+        assert!(
+            switched.get("providerName").is_some(),
+            "flatten 的结构体字段同样是驼峰契约：{switched}"
+        );
+    }
 
     fn purchase_capability_relay(backend_kind: creds::BackendKind) -> creds::Relay {
         creds::Relay {
