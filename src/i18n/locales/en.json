@@ -2622,7 +2622,7 @@
   },
   "autoMode": {
     "title": "Easy Mode",
-    "tooltip": "Easy Mode active (Beta)\nThe system picks managed tiers by strategy; the tier sticks within a session\nTurning it off also restores that CLI's local routing; re-enable in Settings",
+    "tooltip": "Easy Mode (Beta): when on, the system picks managed tiers by strategy and the tier sticks within a session; turning it off also restores that CLI's local routing",
     "description": "The system picks the best managed tier automatically and sticks within a session",
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
