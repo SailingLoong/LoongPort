@@ -3356,7 +3356,7 @@
       "flagSkippedTopUp": "Top-up",
       "flagSkippedTopUpHint": "Balance increased (top-up, rebate, or bonus); excluded from the ratio",
       "note": "Ratio = locally estimated cost ÷ what the site actually deducted; estimates already include group rate multipliers. One low window does not mean billing is wrong — only a persistently low ratio (the site charging noticeably more) is worth attention.",
-      "noLocalTrafficHint": "No locally routed traffic in the lookback period: estimated cost and ratio only cover traffic going through local routing (enable routing for the CLI in the proxy settings panel). Direct-to-relay usage is not estimated.",
+      "noLocalTrafficHint": "No locally routed traffic in the lookback period yet: estimated cost and ratio only count traffic and actual token usage under Easy Mode (local routing); data accumulates automatically once Easy Mode is on.",
       "empty": "No reconciliation data yet",
       "loadFailed": "Failed to load reconciliation data",
       "retry": "Retry"
