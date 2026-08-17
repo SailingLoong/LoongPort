@@ -58,15 +58,31 @@ function renderTab() {
 /** 四个 app 的省心模式状态。默认：claude/codex 有档位，codex/gemini 开着。 */
 function stubStatuses(overrides: Record<string, object> = {}) {
   const base = {
-    claude: { enabled: false, hasCandidates: true, availableModels: [] },
+    claude: {
+      enabled: false,
+      hasCandidates: true,
+      cliInstalled: true,
+      availableModels: [],
+    },
     codex: {
       enabled: true,
       hasCandidates: true,
+      cliInstalled: true,
       model: "gpt-5.6-sol",
       availableModels: ["gpt-5.6-sol", "gpt-5.6-nano"],
     },
-    gemini: { enabled: true, hasCandidates: false, availableModels: [] },
-    grokbuild: { enabled: false, hasCandidates: false, availableModels: [] },
+    gemini: {
+      enabled: true,
+      hasCandidates: false,
+      cliInstalled: true,
+      availableModels: [],
+    },
+    grokbuild: {
+      enabled: false,
+      hasCandidates: false,
+      cliInstalled: false,
+      availableModels: [],
+    },
   } as Record<string, object>;
   statusMock.mockImplementation((appType: string) => ({
     data: {
@@ -107,15 +123,37 @@ describe("AutoModeTabContent", () => {
     expect(screen.getAllByText("autoMode.noCandidatesHint")).toHaveLength(2);
   });
 
-  it("总开关：未全开时点开只对有档位的 app 批量开启", () => {
+  it("总开关：未全开时点开只对「有档位且 CLI 装过」的 app 批量开启", () => {
     renderTab();
 
     // claude（有档位但未开）存在 ⇒ 总开关未全开
     const switches = screen.getAllByRole("switch");
     fireEvent.click(switches[0]);
     expect(setAllMock).toHaveBeenCalledWith({
-      apps: ["claude", "codex"], // 只有有档位的 app
+      apps: ["claude", "codex"], // 只有有档位且 CLI 齐的 app
       enable: true,
+    });
+  });
+
+  it("总开关：CLI 未装的 app（即使有档位）不计入 —— 否则永远差一个，开关反复弹回", () => {
+    // gemini 有档位但 CLI 没装：不进 eligible，也不影响 masterChecked。
+    stubStatuses({
+      claude: { enabled: true },
+      gemini: { enabled: false, hasCandidates: true, cliInstalled: false },
+    });
+    renderTab();
+
+    // claude/codex 都开 ⇒ 总开关应为开（gemini 不拖后腿）。
+    const master = screen.getAllByRole("switch")[0];
+    expect(master.getAttribute("aria-checked")).toBe("true");
+    // 卡片上给出 CLI 缺失的针对性提示。
+    expect(screen.getByText("autoMode.cliMissingHint")).toBeTruthy();
+
+    // 点它走「关」路径：对已开的 app 批量关。
+    fireEvent.click(master);
+    expect(setAllMock).toHaveBeenCalledWith({
+      apps: ["claude", "codex"],
+      enable: false,
     });
   });
 

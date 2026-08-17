@@ -86,13 +86,17 @@ export function AutoModeTabContent({
   const anchorStatus = useAutoModeStatus(PROXY_APP_IDS[0]).data;
   const strategy = anchorStatus?.strategy ?? "cheapest";
 
-  // 总开关的状态语义：全部「有托管档位」的 app 都开着 = 开。各 app 状态由
-  // 卡片各自订阅（同 query key 共享缓存），这里拿全集算总开关的显示值。
+  // 总开关的状态语义：全部「真正能开」的 app（有托管档位 **且** CLI 装过）
+  // 都开着 = 开。只看档位会把 CLI 未装的 app 也算进来 —— 那个永远开不了，
+  // 总开关就永远「开了又弹回」（2026-08-17 实测症状）。各 app 状态由卡片
+  // 各自订阅（同 query key 共享缓存），这里拿全集算总开关的显示值。
   const statuses = PROXY_APP_IDS.map((appType) => ({
     appType,
     status: useAutoModeStatus(appType).data,
   }));
-  const eligible = statuses.filter(({ status }) => status?.hasCandidates);
+  const eligible = statuses.filter(
+    ({ status }) => status?.hasCandidates && (status?.cliInstalled ?? false),
+  );
   const masterChecked =
     eligible.length > 0 &&
     eligible.every(({ status }) => status?.enabled ?? false);
@@ -290,6 +294,7 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
 
   const isEnabled = status?.enabled ?? false;
   const hasCandidates = status?.hasCandidates ?? false;
+  const cliInstalled = status?.cliInstalled ?? false;
   const model = status?.model ?? null;
   const availableModels = status?.availableModels ?? [];
   // 队列/熔断只作兜底展示，仍要求接管态（与迁移前同判据）。
@@ -355,15 +360,20 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              {hasCandidates
+              {!hasCandidates
                 ? t(
-                    "autoMode.description",
-                    "系统从托管档位里自动挑最合适的，当前档位会话中保持不变",
-                  )
-                : t(
                     "autoMode.noCandidatesHint",
                     "没有可用的托管档位 —— 先在中转站区登录并获取档位",
-                  )}
+                  )
+                : !cliInstalled
+                  ? t(
+                      "autoMode.cliMissingHint",
+                      "未检测到该 CLI 的配置文件（未安装或未初始化），无法接管；安装并运行一次该 CLI 后再来开启",
+                    )
+                  : t(
+                      "autoMode.description",
+                      "系统从托管档位里自动挑最合适的，当前档位会话中保持不变",
+                    )}
             </p>
           </div>
         </div>
@@ -373,7 +383,7 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
           <Switch
             checked={isEnabled}
             onCheckedChange={handleToggle}
-            disabled={isPending || !hasCandidates}
+            disabled={isPending || !hasCandidates || !cliInstalled}
             aria-label={t("autoMode.title", "省心模式")}
           />
         )}

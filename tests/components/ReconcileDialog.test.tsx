@@ -72,6 +72,7 @@ function stubInvoke(report: ReconciliationReport, easyModeEnabled = true) {
         model: null,
         availableModels: [],
         hasCandidates: true,
+        cliInstalled: true,
       };
     throw new Error(`command not stubbed in this test: ${cmd}`);
   });

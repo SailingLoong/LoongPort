@@ -25,6 +25,10 @@ pub struct AutoModeStatus {
     /// 有没有可用的托管档位（与 [`set_auto_mode_enabled`] 的开启判据同源）。
     /// 总开关据此只对有档位的 app 生效，前端也用它把无档位卡的开关灰掉。
     pub has_candidates: bool,
+    /// 该 CLI 的配置文件是否已存在（= CLI 装过/初始化过）。接管要改写这些
+    /// 文件，不存在时开启必失败 —— 总开关只统计「档位 + CLI 都齐」的 app，
+    /// 否则永远差一个「开不了」的，开关反复弹回（2026-08-17 实测症状）。
+    pub cli_installed: bool,
 }
 
 fn require_auto_mode_app(app_type: &str) -> Result<(), String> {
@@ -45,6 +49,26 @@ fn has_managed_candidates(db: &crate::store::AppState, app_type: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// CLI 配置文件是否存在。与接管路径的报错判据（「Gemini .env 文件不存在」
+/// 「Grok Build 配置文件不存在」）同一批路径 —— 接管改写的就是这些文件。
+fn cli_config_present(app_type: &str) -> bool {
+    match crate::app_config::AppType::from_str(app_type) {
+        Ok(crate::app_config::AppType::Claude) => {
+            crate::config::get_claude_settings_path().exists()
+        }
+        Ok(crate::app_config::AppType::Codex) => {
+            crate::codex_config::get_codex_config_path().exists()
+        }
+        Ok(crate::app_config::AppType::Gemini) => {
+            crate::gemini_config::get_gemini_env_path().exists()
+        }
+        Ok(crate::app_config::AppType::GrokBuild) => {
+            crate::grok_config::get_grok_config_path().exists()
+        }
+        _ => false,
+    }
+}
+
 /// 读取某应用的自动模式状态
 #[tauri::command]
 pub async fn get_auto_mode_status(
@@ -62,6 +86,7 @@ pub async fn get_auto_mode_status(
         model: auto_strategy::get_model_pref(&state.db, &app_type),
         available_models: auto_strategy::auto_mode_models(&providers),
         has_candidates: has_managed_candidates(&state, &app_type),
+        cli_installed: cli_config_present(&app_type),
     })
 }
 

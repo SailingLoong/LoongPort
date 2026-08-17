@@ -2651,7 +2651,8 @@
     "masterLabel": "省心模式总开关",
     "masterOnToast": "省心模式已开启（有托管档位的应用）",
     "masterOffToast": "省心模式已全部关闭，路由接管已恢复",
-    "noCandidatesHint": "没有可用的托管档位 —— 先在中转站区登录并获取档位"
+    "noCandidatesHint": "没有可用的托管档位 —— 先在中转站区登录并获取档位",
+    "cliMissingHint": "未检测到该 CLI 的配置文件（未安装或未初始化），无法接管；安装并运行一次该 CLI 后再来开启"
   },
   "proxy": {
     "panel": {
