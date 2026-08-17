@@ -52,6 +52,7 @@ import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { AutoModeTabContent } from "@/components/settings/AutoModeTabContent";
 import { LocalRoutingServicePanel } from "@/components/settings/LocalRoutingServicePanel";
+import { FailoverAccordionItem } from "@/components/settings/FailoverControls";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { Badge } from "@/components/ui/badge";
@@ -64,6 +65,7 @@ import { useInstalledSkills } from "@/hooks/useSkills";
 import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
 import { useTranslation } from "react-i18next";
+import { cn } from "@/lib/utils";
 import type { SettingsFormState } from "@/hooks/useSettings";
 
 interface SettingsDialogProps {
@@ -119,12 +121,23 @@ export function SettingsPage({
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   const tabScrollContainerRef = useRef<HTMLDivElement>(null);
 
+  // 省心模式 Beta 开关（默认关）：关 = 发布形态，设置页不出现该 tab，
+  // 故障转移管理回退到「高级」tab（既有功能不能跟着消失）。
+  const easyModeBeta = settings?.easyModeBeta ?? false;
+
   useEffect(() => {
     if (open) {
       setActiveTab(defaultTab);
       resetStatus();
     }
   }, [open, resetStatus, defaultTab]);
+
+  // Beta 关着却停在省心 tab（例如开关刚被改回）：落回通用页，别留空白 tab。
+  useEffect(() => {
+    if (!easyModeBeta && activeTab === "proxy") {
+      setActiveTab("general");
+    }
+  }, [easyModeBeta, activeTab]);
 
   useEffect(() => {
     if (requiresRestart) {
@@ -232,18 +245,27 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full grid-cols-6 mb-6 glass rounded-lg">
+          {/* 省心模式 Beta：默认关（发布形态不暴露设置 tab，维护者在
+              settings.json 置 easyModeBeta 自测）；tab 数变化时列数跟着变。 */}
+          <TabsList
+            className={cn(
+              "grid w-full mb-6 glass rounded-lg",
+              easyModeBeta ? "grid-cols-6" : "grid-cols-5",
+            )}
+          >
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
             </TabsTrigger>
-            <TabsTrigger value="proxy">
-              <span className="inline-flex items-center gap-1.5">
-                {t("settings.tabAutoMode", "自动模式")}
-                <Badge variant="secondary" className="h-4 px-1 text-[10px]">
-                  {t("autoMode.beta", "Beta")}
-                </Badge>
-              </span>
-            </TabsTrigger>
+            {easyModeBeta && (
+              <TabsTrigger value="proxy">
+                <span className="inline-flex items-center gap-1.5">
+                  {t("settings.tabAutoMode", "省心模式")}
+                  <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+                    {t("autoMode.beta", "Beta")}
+                  </Badge>
+                </span>
+              </TabsTrigger>
+            )}
             <TabsTrigger value="auth">
               {t("settings.tabAuth", { defaultValue: "认证" })}
             </TabsTrigger>
@@ -307,14 +329,16 @@ export function SettingsPage({
                 ) : null}
               </TabsContent>
 
-              <TabsContent value="proxy" className="space-y-6 mt-0 pb-4">
-                {settings ? (
-                  <AutoModeTabContent
-                    settings={settings}
-                    onAutoSave={handleAutoSave}
-                  />
-                ) : null}
-              </TabsContent>
+              {easyModeBeta && (
+                <TabsContent value="proxy" className="space-y-6 mt-0 pb-4">
+                  {settings ? (
+                    <AutoModeTabContent
+                      settings={settings}
+                      onAutoSave={handleAutoSave}
+                    />
+                  ) : null}
+                </TabsContent>
+              )}
 
               <TabsContent value="auth" className="space-y-6 mt-0 pb-4">
                 <motion.div
@@ -548,6 +572,15 @@ export function SettingsPage({
                           （#165 过渡 tab 的最终归宿），产品语义是底层配置。 */}
                       {settings ? (
                         <LocalRoutingServicePanel
+                          settings={settings}
+                          onAutoSave={handleAutoSave}
+                        />
+                      ) : null}
+
+                      {/* 故障转移管理（发布形态的家）：省心模式 Beta 关着时
+                          它在这里；Beta 开着时收进省心模式页，两处不同现。 */}
+                      {!easyModeBeta && settings ? (
+                        <FailoverAccordionItem
                           settings={settings}
                           onAutoSave={handleAutoSave}
                         />

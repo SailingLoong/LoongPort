@@ -428,6 +428,9 @@ export interface Settings {
   // Run official Codex under the shared "custom" provider id so future
   // sessions share one resume-history bucket with third-party providers
   unifyCodexSessionHistory?: boolean;
+  // Easy Mode (省心模式) Beta flag: default off — the shipped build hides the
+  // settings tab; maintainers flip it in settings.json to self-test.
+  easyModeBeta?: boolean;
   // User opted in (enable dialog checkbox) to migrate existing official sessions
   unifyCodexMigrateExisting?: boolean;
   // User has confirmed the failover toggle first-run notice
