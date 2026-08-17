@@ -1492,7 +1492,10 @@ function App() {
                       {settingsData?.enableFailoverToggle && (
                         <FailoverToggle activeApp={proxyAppId} />
                       )}
-                      <AutoModeToggle activeApp={proxyAppId} />
+                      {/* 省心模式 Beta（默认关）：发布形态顶栏也不露出。 */}
+                      {settingsData?.easyModeBeta && (
+                        <AutoModeToggle activeApp={proxyAppId} />
+                      )}
                     </>
                   ) : null}
                 </div>
