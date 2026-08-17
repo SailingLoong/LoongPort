@@ -2739,14 +2739,24 @@ fn extract_error_message(error: &ProxyError) -> Option<String> {
 /// 只覆盖 401/402/403。429 里的「余额不足」变体需要解析响应体才能区分，
 /// 先按瞬态处理（欠费站点最终会以 402/403 显形）。只在 Retryable 分类内部
 /// 进一步分级 —— NonRetryable 的 4xx 根本不进健康度。
+///
+/// 403 例外：newapi 家族会把**站点侧**故障包成 403（2026-08-17 api-top.com
+/// 实测：「上游线路余额不足，暂时无法完成请求」）——这不是用户凭证问题，
+/// 按致命处理会白吃 30 分钟长冷却。body 命中站点侧标记时降级为普通失败。
 fn is_fatal_upstream_error(error: &ProxyError) -> bool {
-    matches!(
-        error,
+    /// 403 body 里的站点侧信号：出现即说明问题在上游线路/站点额度，
+    /// 与用户凭证无关。
+    const SITE_SIDE_403_MARKERS: &[&str] = &["余额不足", "上游"];
+
+    match error {
+        ProxyError::UpstreamError { status: 403, body } => !body
+            .as_deref()
+            .is_some_and(|b| SITE_SIDE_403_MARKERS.iter().any(|m| b.contains(m))),
         ProxyError::UpstreamError {
-            status: 401..=403,
-            ..
-        }
-    )
+            status: 401 | 402, ..
+        } => true,
+        _ => false,
+    }
 }
 
 /// 检测 Provider 是否为 Bedrock（通过 CLAUDE_CODE_USE_BEDROCK 环境变量判断）
@@ -3671,6 +3681,46 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    #[test]
+    fn fatal_classification_403_with_site_side_body_downgrades() {
+        // newapi 实测形状：站点侧上游线路余额不足被包成 403
+        let site_side = ProxyError::UpstreamError {
+            status: 403,
+            body: Some(
+                r#"{"error":{"type":"new_api_error","message":"上游线路余额不足，暂时无法完成请求，请稍后重试或切换分组。"}}"#.to_string(),
+            ),
+        };
+        assert!(!is_fatal_upstream_error(&site_side));
+    }
+
+    #[test]
+    fn fatal_classification_403_credential_and_401_402_stay_fatal() {
+        // 凭证级 403（无 body 或 body 无站点侧标记）维持致命
+        let plain = ProxyError::UpstreamError {
+            status: 403,
+            body: Some(r#"{"error":{"message":"invalid api key"}}"#.to_string()),
+        };
+        assert!(is_fatal_upstream_error(&plain));
+        let no_body = ProxyError::UpstreamError {
+            status: 403,
+            body: None,
+        };
+        assert!(is_fatal_upstream_error(&no_body));
+        for status in [401, 402] {
+            let e = ProxyError::UpstreamError {
+                status,
+                body: Some("余额不足".to_string()),
+            };
+            assert!(is_fatal_upstream_error(&e), "{status} 无条件致命");
+        }
+        // 非 401-403 的上游错误不属致命分级
+        let server_error = ProxyError::UpstreamError {
+            status: 502,
+            body: Some("Upstream access forbidden".to_string()),
+        };
+        assert!(!is_fatal_upstream_error(&server_error));
     }
 
     #[test]
