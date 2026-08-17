@@ -71,7 +71,7 @@ scraper = "0.27"
 rquickjs = { version = "0.12", features = ["array-buffer", "classes"] }
 thiserror = "2.0"
 anyhow = "1.0"
-zip = "8.6"
+zip = "4.6"
 serde_yaml = "0.9"
 tempfile = "3"
 url = "2.5"
