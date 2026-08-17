@@ -17,7 +17,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
-import { Sparkles, Loader2, ShieldAlert, Zap } from "lucide-react";
+import { Sparkles, Loader2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
@@ -37,13 +37,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { ToggleRow } from "@/components/ui/toggle-row";
 import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
 import {
   hasConfirmedAutoMode,
   markAutoModeConfirmed,
 } from "@/components/proxy/autoModeConfirm";
+import { FailoverControls } from "@/components/settings/FailoverControls";
 import {
   useAutoModeStatus,
   useDisableAutoMode,
@@ -52,9 +52,7 @@ import {
   useSetEasyModeMaster,
   useSetAutoModeModel,
   useSetAutoModeStrategy,
-  useSetFailoverAll,
 } from "@/lib/query/autoMode";
-import { useAutoFailoverEnabled } from "@/lib/query/failover";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import {
@@ -79,8 +77,6 @@ export function AutoModeTabContent({
   const { t } = useTranslation();
   const setStrategy = useSetAutoModeStrategy();
   const masterFlow = useSetEasyModeMaster();
-  const setFailoverAll = useSetFailoverAll();
-  const [showFailoverConfirm, setShowFailoverConfirm] = useState(false);
   const [showMasterConfirm, setShowMasterConfirm] = useState(false);
 
   // strategy 是全局的，任一 app 的状态里都带同一份 —— 借第一个 app 当读取锚点。
@@ -91,12 +87,6 @@ export function AutoModeTabContent({
   // 显示值就是路由服务的运行态；只有它开着，各 app 卡片才可配置（开=起路由，
   // 关=全部 app 关省心 + 恢复配置停服务，见 useSetEasyModeMaster）。
   const { isRunning } = useProxyStatus();
-
-  // 统一故障转移开关的状态：全部 app 都开 = 开。
-  const failoverStates = PROXY_APP_IDS.map(
-    (appType) => useAutoFailoverEnabled(appType).data ?? false,
-  );
-  const failoverChecked = failoverStates.every(Boolean);
 
   const handleMasterChange = (checked: boolean) => {
     if (!checked) {
@@ -115,19 +105,6 @@ export function AutoModeTabContent({
     markAutoModeConfirmed();
     setShowMasterConfirm(false);
     masterFlow.mutate({ enable: true });
-  };
-
-  const handleDisplayToggleChange = (checked: boolean) => {
-    if (checked && !settings?.failoverConfirmed) {
-      setShowFailoverConfirm(true);
-    } else {
-      void onAutoSave({ enableFailoverToggle: checked });
-    }
-  };
-
-  const handleFailoverConfirm = async () => {
-    setShowFailoverConfirm(false);
-    await onAutoSave({ failoverConfirmed: true, enableFailoverToggle: true });
   };
 
   return (
@@ -226,59 +203,9 @@ export function AutoModeTabContent({
         <AutoModeAppCard key={appType} appType={appType} />
       ))}
 
-      {/* 统一的自动故障转移开关：作用于全部 app（队列管理仍在各卡片「高级」里）。 */}
-      <div className="rounded-xl glass-card p-6">
-        <div className="flex items-center justify-between gap-4">
-          <div className="space-y-0.5">
-            <div className="flex items-center gap-2">
-              <Zap className="h-4 w-4 text-orange-500" />
-              <span className="text-sm font-medium">
-                {t("proxy.failover.autoSwitch", "自动故障转移")}
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {t(
-                "proxy.failover.autoSwitchDescription",
-                "开启后各应用立即切换到各自队列的 P1，请求失败时自动切换队列中的下一个供应商；对所有应用统一生效",
-              )}
-            </p>
-          </div>
-          <Switch
-            checked={failoverChecked}
-            onCheckedChange={(checked) =>
-              setFailoverAll.mutate({
-                apps: [...PROXY_APP_IDS],
-                enabled: checked,
-              })
-            }
-            disabled={setFailoverAll.isPending}
-            aria-label={t("proxy.failover.autoSwitch", "自动故障转移")}
-          />
-        </div>
-      </div>
-
-      {/* 主页面故障转移开关：控制顶栏 FailoverToggle 是否显示。 */}
-      <div className="rounded-xl glass-card p-6">
-        <ToggleRow
-          icon={<ShieldAlert className="h-4 w-4 text-orange-500" />}
-          title={t("settings.advanced.proxy.enableFailoverToggle")}
-          description={t(
-            "settings.advanced.proxy.enableFailoverToggleDescription",
-          )}
-          checked={settings?.enableFailoverToggle ?? false}
-          onCheckedChange={handleDisplayToggleChange}
-        />
-      </div>
-
-      <ConfirmDialog
-        isOpen={showFailoverConfirm}
-        variant="info"
-        title={t("confirm.failover.title")}
-        message={t("confirm.failover.message")}
-        confirmText={t("confirm.failover.confirm")}
-        onConfirm={() => void handleFailoverConfirm()}
-        onCancel={() => setShowFailoverConfirm(false)}
-      />
+      {/* 故障转移控制（统一开关 + 主页面显示开关）：与「高级」tab 的发布形态
+          共用一份组件，见 FailoverControls 的文档。 */}
+      <FailoverControls settings={settings} onAutoSave={onAutoSave} />
 
       <ConfirmDialog
         isOpen={showMasterConfirm}

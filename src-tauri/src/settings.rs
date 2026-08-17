@@ -467,6 +467,11 @@ pub struct AppSettings {
     /// 的场景，`Default` impl 负责新装机，两处必须保持一致。
     #[serde(default = "default_true")]
     pub unify_codex_session_history: bool,
+    /// 「省心模式」Beta 开关：**默认关 = 发布形态不暴露**（设置页不出 tab），
+    /// 维护者在 settings.json 手动置 true 用于自测；成熟后翻默认或删开关。
+    /// 注意默认值两处一致（serde default 与 `Default` impl），见上方说明。
+    #[serde(default)]
+    pub easy_mode_beta: bool,
     /// User opted in (via the enable dialog checkbox) to migrate existing
     /// official sessions ("openai" bucket) into the shared bucket. Persisted so
     /// a failed migration retries at startup; cleared when the toggle turns off.
@@ -628,6 +633,7 @@ impl Default for AppSettings {
             // 见字段上的说明：这条保的是 ChatGPT 桌面版的登录凭据，LoongPort 必须默认开。
             preserve_codex_official_auth_on_switch: true,
             unify_codex_session_history: true,
+            easy_mode_beta: false,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
             first_run_notice_confirmed: None,
