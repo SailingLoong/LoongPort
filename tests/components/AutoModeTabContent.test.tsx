@@ -11,7 +11,7 @@ import {
 // 编排的 invoke 顺序由 useEnableAutoMode 自己的测试钉住。
 const enableFlowMock = vi.hoisted(() => vi.fn());
 const disableFlowMock = vi.hoisted(() => vi.fn());
-const setAllMock = vi.hoisted(() => vi.fn());
+const masterFlowMock = vi.hoisted(() => vi.fn());
 const setFailoverAllMock = vi.hoisted(() => vi.fn());
 const setEnabledMock = vi.hoisted(() => vi.fn());
 const setStrategyMock = vi.hoisted(() => vi.fn());
@@ -23,7 +23,7 @@ vi.mock("@/lib/query/autoMode", () => ({
   useSetAutoModeEnabled: () => ({ mutate: setEnabledMock, isPending: false }),
   useEnableAutoMode: () => ({ mutate: enableFlowMock, isPending: false }),
   useDisableAutoMode: () => ({ mutate: disableFlowMock, isPending: false }),
-  useSetAutoModeAll: () => ({ mutate: setAllMock, isPending: false }),
+  useSetEasyModeMaster: () => ({ mutate: masterFlowMock, isPending: false }),
   useSetAutoModeStrategy: () => ({ mutate: setStrategyMock, isPending: false }),
   useSetAutoModeModel: () => ({ mutate: setModelMock, isPending: false }),
   useSetFailoverAll: () => ({ mutate: setFailoverAllMock, isPending: false }),
@@ -123,50 +123,60 @@ describe("AutoModeTabContent", () => {
     expect(screen.getAllByText("autoMode.noCandidatesHint")).toHaveLength(2);
   });
 
-  it("总开关：未全开时点开只对「有档位且 CLI 装过」的 app 批量开启", () => {
+  it("总开关 = 本地路由运行态：运行中显示为开，点关走 masterFlow(enable:false)", () => {
     renderTab();
 
-    // claude（有档位但未开）存在 ⇒ 总开关未全开
-    const switches = screen.getAllByRole("switch");
-    fireEvent.click(switches[0]);
-    expect(setAllMock).toHaveBeenCalledWith({
-      apps: ["claude", "codex"], // 只有有档位且 CLI 齐的 app
-      enable: true,
-    });
-  });
-
-  it("总开关：CLI 未装的 app（即使有档位）不计入 —— 否则永远差一个，开关反复弹回", () => {
-    // gemini 有档位但 CLI 没装：不进 eligible，也不影响 masterChecked。
-    stubStatuses({
-      claude: { enabled: true },
-      gemini: { enabled: false, hasCandidates: true, cliInstalled: false },
-    });
-    renderTab();
-
-    // claude/codex 都开 ⇒ 总开关应为开（gemini 不拖后腿）。
     const master = screen.getAllByRole("switch")[0];
     expect(master.getAttribute("aria-checked")).toBe("true");
-    // 卡片上给出 CLI 缺失的针对性提示。
-    expect(screen.getByText("autoMode.cliMissingHint")).toBeTruthy();
-
-    // 点它走「关」路径：对已开的 app 批量关。
     fireEvent.click(master);
-    expect(setAllMock).toHaveBeenCalledWith({
-      apps: ["claude", "codex"],
-      enable: false,
-    });
+    expect(masterFlowMock).toHaveBeenCalledWith({ enable: false });
   });
 
-  it("总开关全开时点关，对已开的 app 批量关闭", () => {
-    stubStatuses({ claude: { enabled: true } });
+  it("总开关：路由未开且未授权时先弹授权，确认后 masterFlow(enable:true)", () => {
+    useProxyStatusMock.mockReturnValue({
+      isRunning: false,
+      takeoverStatus: undefined,
+    });
+    renderTab();
+
+    const master = screen.getAllByRole("switch")[0];
+    expect(master.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(master);
+    expect(masterFlowMock).not.toHaveBeenCalled();
+    expect(screen.getByText("autoMode.confirm.title")).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "autoMode.confirm.confirm" }),
+    );
+    expect(masterFlowMock).toHaveBeenCalledWith({ enable: true });
+    expect(localStorage.getItem(AUTO_MODE_CONFIRMED_STORAGE_KEY)).toBe("true");
+  });
+
+  it("总开关：已授权（或路由已在跑）时点开直接 masterFlow(enable:true)", () => {
+    markAutoModeConfirmed();
+    useProxyStatusMock.mockReturnValue({
+      isRunning: false,
+      takeoverStatus: undefined,
+    });
+    renderTab();
+
+    fireEvent.click(screen.getAllByRole("switch")[0]);
+    expect(masterFlowMock).toHaveBeenCalledWith({ enable: true });
+    expect(screen.queryByText("autoMode.confirm.title")).toBeNull();
+  });
+
+  it("总开关关闭（路由未跑）时各 app 卡片开关全部禁用", () => {
+    useProxyStatusMock.mockReturnValue({
+      isRunning: false,
+      takeoverStatus: undefined,
+    });
     renderTab();
 
     const switches = screen.getAllByRole("switch");
-    fireEvent.click(switches[0]);
-    expect(setAllMock).toHaveBeenCalledWith({
-      apps: ["claude", "codex", "gemini"], // enabled 的都关
-      enable: false,
-    });
+    // 卡片开关（总开关之后的四个）：全部禁用 —— 大开关不开，细节不可配置。
+    for (const sw of switches.slice(1, 5)) {
+      expect(sw).toBeDisabled();
+    }
   });
 
   it("统一故障转移行：切换走 setFailoverAll（全部 app）", () => {
@@ -195,12 +205,17 @@ describe("AutoModeTabContent", () => {
     );
   });
 
-  it("卡片：前置未满足时开启走一键编排", () => {
+  it("卡片：路由在跑但该 app 未接管时，开启走一键编排", () => {
     markAutoModeConfirmed();
     // mock 要在渲染前生效（mockReturnValue 不会触发已渲染组件重算）
     useProxyStatusMock.mockReturnValue({
-      isRunning: false,
-      takeoverStatus: undefined,
+      isRunning: true,
+      takeoverStatus: {
+        claude: false,
+        codex: false,
+        gemini: false,
+        grokbuild: false,
+      },
     });
     renderTab();
 
@@ -208,6 +223,17 @@ describe("AutoModeTabContent", () => {
     fireEvent.click(switches[1]);
     expect(enableFlowMock).toHaveBeenCalledWith({ appType: "claude" });
     expect(setEnabledMock).not.toHaveBeenCalled();
+  });
+
+  it("卡片：有档位但 CLI 未装给出针对性提示并禁用", () => {
+    stubStatuses({
+      gemini: { enabled: false, hasCandidates: true, cliInstalled: false },
+    });
+    renderTab();
+
+    expect(screen.getByText("autoMode.cliMissingHint")).toBeTruthy();
+    // gemini 卡（第 4 个 switch：总开关、claude、codex、gemini）禁用
+    expect(screen.getAllByRole("switch")[3]).toBeDisabled();
   });
 
   it("卡片关闭走关态编排（连路由一起收回），不弹授权", () => {

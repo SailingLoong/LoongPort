@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useDisableAutoMode,
   useEnableAutoMode,
-  useSetAutoModeAll,
+  useSetEasyModeMaster,
 } from "@/lib/query/autoMode";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
@@ -205,58 +205,74 @@ describe("useEnableAutoMode", () => {
     expect(sequence).toEqual(["set_auto_mode_enabled"]);
   });
 
-  it("总开关静默容错：CLI 未装的 app（接管报配置不存在）跳过，其余照开", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("总开关开=起路由：服务未跑才 start，不动任何 app 的省心开关", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_proxy_status") return { running: false };
+      return {};
+    });
+
+    const { result } = renderHook(() => useSetEasyModeMaster(), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ enable: true });
+    });
+
+    const cmds = calls();
+    expect(cmds).toContain("get_proxy_status");
+    expect(cmds).toContain("start_proxy_server");
+    expect(cmds).not.toContain("set_auto_mode_enabled");
+    expect(cmds).not.toContain("set_proxy_takeover_for_app");
+  });
+
+  it("总开关开：服务已在跑则幂等跳过 start", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_proxy_status") return { running: true };
+      return {};
+    });
+
+    const { result } = renderHook(() => useSetEasyModeMaster(), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ enable: true });
+    });
+
+    expect(calls()).not.toContain("start_proxy_server");
+  });
+
+  it("总开关关=全部 app 关省心 + 恢复配置停服务", async () => {
     invoke.mockImplementation(
       async (cmd: string, args?: { appType?: string }) => {
         switch (cmd) {
           case "get_proxy_status":
             return { running: true };
-          case "get_proxy_takeover_status":
+          case "get_auto_mode_status":
+            // claude/codex 开着，其余没开。
             return {
-              claude: false,
-              codex: false,
-              gemini: false,
-              grokbuild: false,
-              opencode: false,
-              openclaw: false,
+              enabled: args?.appType === "claude" || args?.appType === "codex",
+              strategy: "cheapest",
+              model: null,
+              availableModels: [],
+              hasCandidates: true,
+              cliInstalled: true,
             };
-          case "set_proxy_takeover_for_app":
-            // gemini CLI 没装：接管报「配置文件不存在」。
-            if (args?.appType === "gemini") {
-              throw new Error("Gemini .env 文件不存在");
-            }
-            return {};
           default:
             return {};
         }
       },
     );
 
-    const { result } = renderHook(() => useSetAutoModeAll(), { wrapper });
+    const { result } = renderHook(() => useSetEasyModeMaster(), { wrapper });
 
     await act(async () => {
-      // 不 reject：gemini 的失败被逐 app 吞掉，claude/codex 照常开。
-      await result.current.mutateAsync({
-        apps: ["claude", "codex", "gemini"],
-        enable: true,
-      });
+      await result.current.mutateAsync({ enable: false });
     });
 
-    const enabledCalls = invoke.mock.calls.filter(
-      ([cmd]) => cmd === "set_auto_mode_enabled",
+    const disableCalls = invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "set_auto_mode_enabled" && args?.enabled === false,
     );
-    expect(enabledCalls).toHaveLength(2); // gemini 没走到 enable
-    expect(enabledCalls.map(([, args]) => args)).toEqual(
-      expect.arrayContaining([
-        { appType: "claude", enabled: true },
-        { appType: "codex", enabled: true },
-      ]),
-    );
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("gemini"),
-      expect.anything(),
-    );
-    warnSpy.mockRestore();
+    expect(disableCalls).toHaveLength(2); // 只关开着的 claude/codex
+    // 收尾：整体恢复 + 停服务（恢复全部接管配置）。
+    expect(calls()).toContain("stop_proxy_with_restore");
   });
 });

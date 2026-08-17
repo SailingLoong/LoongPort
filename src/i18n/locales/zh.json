@@ -2649,10 +2649,11 @@
     "advancedSection": "高级（故障转移队列与熔断）",
     "statusActive": "生效中",
     "masterLabel": "省心模式总开关",
-    "masterOnToast": "省心模式已开启（有托管档位的应用）",
-    "masterOffToast": "省心模式已全部关闭，路由接管已恢复",
+    "masterOnToast": "省心模式已开启（本地路由运行中），现在可以为各应用打开了",
+    "masterOffToast": "省心模式已关闭，路由已停并恢复全部配置",
     "noCandidatesHint": "没有可用的托管档位 —— 先在中转站区登录并获取档位",
-    "cliMissingHint": "未检测到该 CLI 的配置文件（未安装或未初始化），无法接管；安装并运行一次该 CLI 后再来开启"
+    "cliMissingHint": "未检测到该 CLI 的配置文件（未安装或未初始化），无法接管；安装并运行一次该 CLI 后再来开启",
+    "masterHint": "总开关就是本地路由：开启后才能为各应用打开省心模式；关闭时会关闭全部应用的省心模式、恢复配置并停止路由"
   },
   "proxy": {
     "panel": {

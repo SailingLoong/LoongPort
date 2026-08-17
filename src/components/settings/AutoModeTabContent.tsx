@@ -2,13 +2,13 @@
  * 「省心模式」设置页：用户只管 app 和模型，系统按全局策略（价格最低/响应
  * 最快）从托管档位里自动挑最合适的（Beta）。
  *
- * ## 布局语义
+ * ## 布局语义（2026-08-17 定稿）
  *
- * - **总开关**在页头：一次开/关全部有托管档位的 app；逐 app 的卡片开关仍是
- *   细粒度入口。主入口只在设置页 —— 顶栏开关默认不展示（生效时才出现，
- *   只做随时关上）。
- * - **关闭即收回路由**：关省心模式（无论总开关还是单卡）默认把该 app 的
- *   路由接管一并关掉（`useDisableAutoMode`，与开启编排对称）。
+ * - **总开关 = 省心模式本身 = 本地路由**（`useSetEasyModeMaster`）：开 = 起
+ *   路由服务；关 = 全部 app 关省心 + 恢复配置停服务。只有总开关开着，各
+ *   app 卡片的细节数据才可配置 —— 大开关管路由，小开关管各 app。
+ * - **单卡关闭**只收回该 app 的省心模式与接管（`useDisableAutoMode`），
+ *   不停路由（停不停由总开关说了算）。
  * - **自动故障转移是统一入口**（本页底部一行，作用于全部 app）：原先每个
  *   app 的队列里各一个开关，重复且易漏；队列管理本身仍按 app 收在各卡
  *   「高级」折叠里。
@@ -49,7 +49,7 @@ import {
   useDisableAutoMode,
   useEnableAutoMode,
   useSetAutoModeEnabled,
-  useSetAutoModeAll,
+  useSetEasyModeMaster,
   useSetAutoModeModel,
   useSetAutoModeStrategy,
   useSetFailoverAll,
@@ -78,28 +78,19 @@ export function AutoModeTabContent({
 }: AutoModeTabContentProps) {
   const { t } = useTranslation();
   const setStrategy = useSetAutoModeStrategy();
-  const setAll = useSetAutoModeAll();
+  const masterFlow = useSetEasyModeMaster();
   const setFailoverAll = useSetFailoverAll();
   const [showFailoverConfirm, setShowFailoverConfirm] = useState(false);
+  const [showMasterConfirm, setShowMasterConfirm] = useState(false);
 
   // strategy 是全局的，任一 app 的状态里都带同一份 —— 借第一个 app 当读取锚点。
   const anchorStatus = useAutoModeStatus(PROXY_APP_IDS[0]).data;
   const strategy = anchorStatus?.strategy ?? "cheapest";
 
-  // 总开关的状态语义：全部「真正能开」的 app（有托管档位 **且** CLI 装过）
-  // 都开着 = 开。只看档位会把 CLI 未装的 app 也算进来 —— 那个永远开不了，
-  // 总开关就永远「开了又弹回」（2026-08-17 实测症状）。各 app 状态由卡片
-  // 各自订阅（同 query key 共享缓存），这里拿全集算总开关的显示值。
-  const statuses = PROXY_APP_IDS.map((appType) => ({
-    appType,
-    status: useAutoModeStatus(appType).data,
-  }));
-  const eligible = statuses.filter(
-    ({ status }) => status?.hasCandidates && (status?.cliInstalled ?? false),
-  );
-  const masterChecked =
-    eligible.length > 0 &&
-    eligible.every(({ status }) => status?.enabled ?? false);
+  // 总开关语义（2026-08-17 定稿）= 「是否开启省心模式」=「是否开启本地路由」：
+  // 显示值就是路由服务的运行态；只有它开着，各 app 卡片才可配置（开=起路由，
+  // 关=全部 app 关省心 + 恢复配置停服务，见 useSetEasyModeMaster）。
+  const { isRunning } = useProxyStatus();
 
   // 统一故障转移开关的状态：全部 app 都开 = 开。
   const failoverStates = PROXY_APP_IDS.map(
@@ -108,19 +99,22 @@ export function AutoModeTabContent({
   const failoverChecked = failoverStates.every(Boolean);
 
   const handleMasterChange = (checked: boolean) => {
-    if (checked) {
-      setAll.mutate({
-        apps: eligible.map(({ appType }) => appType),
-        enable: true,
-      });
-    } else {
-      setAll.mutate({
-        apps: statuses
-          .filter(({ status }) => status?.enabled)
-          .map(({ appType }) => appType),
-        enable: false,
-      });
+    if (!checked) {
+      masterFlow.mutate({ enable: false });
+      return;
     }
+    // 首次开启走一次性授权；已授权或服务已在跑则直接开。
+    if (!isRunning && !hasConfirmedAutoMode()) {
+      setShowMasterConfirm(true);
+    } else {
+      masterFlow.mutate({ enable: true });
+    }
+  };
+
+  const handleMasterConfirm = () => {
+    markAutoModeConfirmed();
+    setShowMasterConfirm(false);
+    masterFlow.mutate({ enable: true });
   };
 
   const handleDisplayToggleChange = (checked: boolean) => {
@@ -163,17 +157,24 @@ export function AutoModeTabContent({
               )}
             </p>
           </div>
-          {setAll.isPending ? (
+          {masterFlow.isPending ? (
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           ) : (
             <Switch
-              checked={masterChecked}
+              checked={isRunning}
               onCheckedChange={handleMasterChange}
-              disabled={setAll.isPending || eligible.length === 0}
+              disabled={masterFlow.isPending}
               aria-label={t("autoMode.masterLabel", "省心模式总开关")}
             />
           )}
         </div>
+
+        <p className="text-xs text-muted-foreground">
+          {t(
+            "autoMode.masterHint",
+            "总开关就是本地路由：开启后才能为各应用打开省心模式；关闭时会关闭全部应用的省心模式、恢复配置并停止路由",
+          )}
+        </p>
 
         <div className="space-y-2">
           <Label className="text-xs text-muted-foreground">
@@ -277,6 +278,19 @@ export function AutoModeTabContent({
         confirmText={t("confirm.failover.confirm")}
         onConfirm={() => void handleFailoverConfirm()}
         onCancel={() => setShowFailoverConfirm(false)}
+      />
+
+      <ConfirmDialog
+        isOpen={showMasterConfirm}
+        variant="info"
+        title={t("autoMode.confirm.title", "开启省心模式")}
+        message={t(
+          "autoMode.confirm.message",
+          "系统将按所选策略自动挑选并切换托管档位：同一会话内保持当前档位不变（避免丢失提示词缓存），当前档位故障或闲置后才切换到更合适的一档。若本地路由未开启，将一并开启并接管该 CLI 的配置（关闭省心模式时会一并恢复）。确定开启？",
+        )}
+        confirmText={t("autoMode.confirm.confirm", "开启")}
+        onConfirm={handleMasterConfirm}
+        onCancel={() => setShowMasterConfirm(false)}
       />
     </motion.div>
   );
@@ -383,7 +397,9 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
           <Switch
             checked={isEnabled}
             onCheckedChange={handleToggle}
-            disabled={isPending || !hasCandidates || !cliInstalled}
+            disabled={
+              isPending || !isRunning || !hasCandidates || !cliInstalled
+            }
             aria-label={t("autoMode.title", "省心模式")}
           />
         )}
