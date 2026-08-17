@@ -10,8 +10,7 @@ use crate::opencode_config::get_opencode_dir;
 
 /// 返回指定应用所使用的提示词文件路径。
 pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
-    // 生图栏与 Claude Desktop 同类：它不是一个能读 AGENTS.md 的 CLI。
-    if matches!(app, AppType::ClaudeDesktop | AppType::CodexImage) {
+    if !app.supports_prompts() {
         return Err(AppError::localized(
             "app.prompts_unsupported",
             "当前应用暂不支持 Prompts",

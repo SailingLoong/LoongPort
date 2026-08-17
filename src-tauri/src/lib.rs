@@ -1124,16 +1124,8 @@ pub fn run() {
             if app_state.db.is_prompts_table_empty().unwrap_or(false) {
                 log::info!("Prompts table empty, importing from live configurations...");
 
-                for app in [
-                    crate::app_config::AppType::Claude,
-                    crate::app_config::AppType::Codex,
-                    crate::app_config::AppType::Gemini,
-                    crate::app_config::AppType::GrokBuild,
-                    crate::app_config::AppType::OpenCode,
-                    crate::app_config::AppType::OpenClaw,
-                    crate::app_config::AppType::Hermes,
-                    crate::app_config::AppType::Pi,
-                ] {
+                for app in crate::app_config::AppType::all().filter(|app| app.supports_prompts())
+                {
                     match crate::services::prompt::PromptService::import_from_file_on_first_launch(
                         &app_state,
                         app.clone(),

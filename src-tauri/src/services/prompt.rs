@@ -241,9 +241,13 @@ impl PromptService {
     /// This deliberately does not call `enable_prompt`: restore paths must not
     /// read stale live content and write it back into the freshly imported DB.
     pub fn sync_to_live(state: &AppState, app: AppType) -> Result<(), AppError> {
+        // 没有提示词文件的栏位（ClaudeDesktop / 生图栏）是「不适用」而不是失败。
+        if !app.supports_prompts() {
+            return Ok(());
+        }
         // Pi derives activation from its native AGENTS.md; its persisted prompt
         // rows are intentionally disabled and must not drive generic projection.
-        if matches!(app, AppType::ClaudeDesktop | AppType::Pi) {
+        if matches!(app, AppType::Pi) {
             return Ok(());
         }
 
@@ -259,9 +263,6 @@ impl PromptService {
     pub fn sync_all_to_live(state: &AppState) -> Result<(), AppError> {
         let mut failures = Vec::new();
         for app in AppType::all() {
-            if matches!(app, AppType::ClaudeDesktop) {
-                continue;
-            }
             if let Err(error) = Self::sync_to_live(state, app.clone()) {
                 log::warn!("同步 Prompt 到 {app:?} 失败: {error}");
                 failures.push(format!("{}: {error}", app.as_str()));
@@ -520,6 +521,23 @@ mod tests {
             std::fs::read_to_string(path).expect("read prompt"),
             "restored"
         );
+    }
+
+    /// ⭐ **导入 / 云同步恢复不该把生图栏报成 Prompt 同步失败。**
+    ///
+    /// `run_post_import_sync` 走 `sync_all_to_live` 扫全部 app；生图栏没有
+    /// 提示词文件，对它是「不适用」（Ok）而不是失败 —— 否则一键导入明明成功，
+    /// 却整体误报「导入后同步失败: … codex-image: 当前应用暂不支持 Prompts」。
+    #[test]
+    fn syncing_prompts_skips_apps_without_prompt_files() {
+        let state = crate::store::AppState::new(std::sync::Arc::new(
+            crate::database::Database::memory().expect("create in-memory database"),
+        ));
+
+        super::PromptService::sync_to_live(&state, crate::app_config::AppType::CodexImage)
+            .expect("生图栏没有提示词文件，该是 Ok 而不是失败");
+        super::PromptService::sync_to_live(&state, crate::app_config::AppType::ClaudeDesktop)
+            .expect("Claude Desktop 该被跳过");
     }
 
     #[test]
