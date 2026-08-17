@@ -2649,10 +2649,11 @@
     "advancedSection": "Advanced (failover queue & circuit breaker)",
     "statusActive": "Active",
     "masterLabel": "Easy Mode master switch",
-    "masterOnToast": "Easy Mode enabled (apps with managed tiers)",
-    "masterOffToast": "Easy Mode disabled everywhere; local routing restored",
+    "masterOnToast": "Easy Mode is on (local routing running) — you can now enable it per app",
+    "masterOffToast": "Easy Mode is off; routing stopped and all configs restored",
     "noCandidatesHint": "No managed tiers available — log in to a relay site and fetch tiers first",
-    "cliMissingHint": "This CLI's config file was not found (not installed or not initialized); takeover is impossible. Install and run the CLI once, then come back"
+    "cliMissingHint": "This CLI's config file was not found (not installed or not initialized); takeover is impossible. Install and run the CLI once, then come back",
+    "masterHint": "The master switch is local routing itself: only with it on can you enable Easy Mode per app; turning it off disables Easy Mode for every app, restores configs and stops routing"
   },
   "proxy": {
     "panel": {

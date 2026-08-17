@@ -5,7 +5,11 @@ import { failoverApi } from "@/lib/api/failover";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { extractErrorMessage } from "@/utils/errorUtils";
-import { getAppLabel, type ProxyAppId } from "@/config/appConfig";
+import {
+  getAppLabel,
+  PROXY_APP_IDS,
+  type ProxyAppId,
+} from "@/config/appConfig";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 
 /**
@@ -272,51 +276,42 @@ export function useDisableAutoMode() {
 }
 
 /**
- * 总开关：一次开/关多个 app 的省心模式。**逐 app 静默容错**：CLI 没装的 app
- * （接管写配置时报「配置文件不存在」）直接跳过、不弹错 —— 总开关面向「能开的
- * 都开」，单个 app 的问题留给用户显式单开时再报（单卡走带 toast 的编排）。
- * 例外：路由服务本身起不来是真问题，浮出让它的 mutation toast 报。
+ * 省心模式**总开关**（2026-08-17 定稿语义）：它就是「是否开启省心模式」，
+ * 也就是「是否开启本地路由」—— 只有大开关开着，各 app 卡片的细节数据才
+ * 可配置。
+ *
+ * - **开**：起路由服务（已在跑则幂等跳过）。不动任何 app —— 各 app 的
+ *   省心模式由卡片逐个开（开卡时自动接管）。
+ * - **关**：把所有开着省心模式的 app 关掉（raw API，静默容错），然后
+ *   `stopWithRestore` —— 恢复全部接管配置并停服务，路由彻底回到关闭态。
  */
-export function useSetAutoModeAll() {
+export function useSetEasyModeMaster() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
-  const { startProxyServer } = useProxyStatus();
+  const { startProxyServer, stopWithRestore } = useProxyStatus();
 
   return useMutation({
-    mutationFn: async ({
-      apps,
-      enable,
-    }: {
-      apps: ProxyAppId[];
-      enable: boolean;
-    }) => {
+    mutationFn: async ({ enable }: { enable: boolean }) => {
+      const status = await proxyApi.getProxyStatus();
       if (enable) {
-        const status = await proxyApi.getProxyStatus();
         if (!status.running) {
           await startProxyServer();
         }
+        return;
       }
-      const takeover = await proxyApi.getProxyTakeoverStatus();
-      for (const appType of apps) {
+      // 关：先落各 app 的省心模式开关（失败不拦停，路由该关还得关），
+      // 再整体恢复 + 停服务（stopWithRestore 会还原所有接管配置）。
+      for (const appType of PROXY_APP_IDS) {
         try {
-          if (enable) {
-            if (!(takeover?.[appType] ?? false)) {
-              // 静默路径（raw API，不走带 toast 的 mutation）：
-              // CLI 未装等 per-app 失败跳过即可。
-              await proxyApi.setProxyTakeoverForApp(appType, true);
-            }
-            await autoModeApi.setEnabled(appType, true);
-          } else {
-            await disableAutoModeApp(
-              (input) =>
-                proxyApi.setProxyTakeoverForApp(input.appType, input.enabled),
-              appType,
-            );
+          const appStatus = await autoModeApi.getStatus(appType);
+          if (appStatus.enabled) {
+            await autoModeApi.setEnabled(appType, false);
           }
         } catch (error) {
-          console.warn(`省心模式总开关跳过 ${appType}:`, error);
+          console.warn(`省心模式总开关关闭 ${appType} 失败（继续）:`, error);
         }
       }
+      await stopWithRestore();
     },
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ["autoModeStatus"] });
@@ -325,10 +320,11 @@ export function useSetAutoModeAll() {
       toast.success(
         variables.enable
           ? t("autoMode.masterOnToast", {
-              defaultValue: "省心模式已开启（有托管档位的应用）",
+              defaultValue:
+                "省心模式已开启（本地路由运行中），现在可以为各应用打开了",
             })
           : t("autoMode.masterOffToast", {
-              defaultValue: "省心模式已全部关闭，路由接管已恢复",
+              defaultValue: "省心模式已关闭，路由已停并恢复全部配置",
             }),
       );
     },

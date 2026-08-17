@@ -2650,10 +2650,11 @@
     "advancedSection": "進階（故障轉移佇列與熔斷）",
     "statusActive": "生效中",
     "masterLabel": "省心模式總開關",
-    "masterOnToast": "省心模式已開啟（有託管檔位的應用）",
-    "masterOffToast": "省心模式已全部關閉，路由接管已恢復",
+    "masterOnToast": "省心模式已開啟（本地路由運行中），現在可以為各應用開啟了",
+    "masterOffToast": "省心模式已關閉，路由已停並復原全部設定",
     "noCandidatesHint": "沒有可用的託管檔位 —— 先在中轉站區登入並取得檔位",
-    "cliMissingHint": "未偵測到該 CLI 的設定檔（未安裝或未初始化），無法接管；安裝並執行一次該 CLI 後再來開啟"
+    "cliMissingHint": "未偵測到該 CLI 的設定檔（未安裝或未初始化），無法接管；安裝並執行一次該 CLI 後再來開啟",
+    "masterHint": "總開關就是本地路由：開啟後才能為各應用開啟省心模式；關閉時會關閉全部應用的省心模式、復原設定並停止路由"
   },
   "proxy": {
     "panel": {
