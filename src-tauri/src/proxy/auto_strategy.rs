@@ -31,6 +31,79 @@ pub const SETTING_STRATEGY: &str = "auto_mode_strategy";
 /// settings 表里「某应用模型偏好」的 key 前缀（`auto_mode_model_<app>`）。
 /// `None` = 不限模型（全部托管档位都进候选）。
 pub const SETTING_MODEL_PREFIX: &str = "auto_mode_model_";
+/// settings 表里「某应用省心选路模式」的 key 前缀（`easy_mode_mode_<app>`，
+/// `auto` / `manual`）。
+pub const SETTING_MODE_PREFIX: &str = "easy_mode_mode_";
+/// settings 表里「某应用手动档位顺序」的 key 前缀（`easy_mode_manual_order_<app>`，
+/// JSON 数组，存 provider id）。清单外的档位（新档位/被删后残留的 id）由下面的
+/// 读取函数兜底：不认识的忽略、漏掉的按策略序追加 —— 手动序永远不能让档位丢失。
+pub const SETTING_MANUAL_ORDER_PREFIX: &str = "easy_mode_manual_order_";
+
+/// 省心模式的选路模式：自动按策略排序 / 用户手动定序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EasyModeMode {
+    /// 系统按策略（cheapest/fastest）排序，会话亲和照常。
+    Auto,
+    /// 用户拖拽定的顺序即优先级；亲和、熔断、故障转移照常（定序 ≠ 关保险）。
+    Manual,
+}
+
+impl EasyModeMode {
+    /// 从 settings 值解析；不认识的值落回默认（auto）。
+    pub fn from_setting_value(value: &str) -> Self {
+        match value {
+            "manual" => Self::Manual,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// 读某应用的选路模式（缺省 auto）。
+pub fn get_mode(db: &Database, app_type: &str) -> EasyModeMode {
+    db.get_setting(&format!("{SETTING_MODE_PREFIX}{app_type}"))
+        .ok()
+        .flatten()
+        .map(|value| EasyModeMode::from_setting_value(&value))
+        .unwrap_or(EasyModeMode::Auto)
+}
+
+/// 写某应用的选路模式。
+pub fn set_mode(
+    db: &Database,
+    app_type: &str,
+    mode: EasyModeMode,
+) -> Result<(), crate::error::AppError> {
+    db.set_setting(&format!("{SETTING_MODE_PREFIX}{app_type}"), mode.as_str())
+}
+
+/// 读某应用的手动档位顺序。脏数据 / 不存在 → 空清单（等同「全按策略追加」）。
+pub fn get_manual_order(db: &Database, app_type: &str) -> Vec<String> {
+    db.get_setting(&format!("{SETTING_MANUAL_ORDER_PREFIX}{app_type}"))
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default()
+}
+
+/// 写某应用的手动档位顺序（完整清单，前端拖拽落定后整份提交）。
+pub fn set_manual_order(
+    db: &Database,
+    app_type: &str,
+    ordered_ids: &[String],
+) -> Result<(), crate::error::AppError> {
+    db.set_setting(
+        &format!("{SETTING_MANUAL_ORDER_PREFIX}{app_type}"),
+        &serde_json::to_string(ordered_ids)
+            .map_err(|e| crate::error::AppError::Config(format!("序列化手动顺序失败: {e}")))?,
+    )
+}
 
 /// 会话亲和窗口：当前档位最近一次请求距今小于该值即视为「会话进行中」。
 /// 30 分钟 ≈ 一次长编码会话的自然间隔，期间不因策略重排切走。
@@ -220,14 +293,22 @@ pub fn rank_managed_tier_candidates(
         None
     };
     let now = chrono::Utc::now().timestamp();
-    let mut ranked = rank_tiers(
-        db,
-        app_type,
-        &tiers,
-        current_id.as_deref(),
-        get_strategy(db),
-        now,
-    );
+    // 手动模式：清单序优先（亲和交给下面的置顶块统一处理，rank_tiers 里不再预置顶，
+    // 否则策略预置顶会被清单重排冲掉）；自动模式：策略排序（含内部亲和置顶）。
+    let mut ranked = match get_mode(db, app_type) {
+        EasyModeMode::Auto => rank_tiers(
+            db,
+            app_type,
+            &tiers,
+            current_id.as_deref(),
+            get_strategy(db),
+            now,
+        ),
+        EasyModeMode::Manual => {
+            let by_strategy = rank_tiers(db, app_type, &tiers, None, get_strategy(db), now);
+            apply_manual_order(&get_manual_order(db, app_type), by_strategy)
+        }
+    };
 
     if let Some(current_id) = current_id.as_deref() {
         let already_first = ranked.first().is_some_and(|p| p.id == current_id);
@@ -327,6 +408,33 @@ pub fn rank_tiers(
     }
 
     ranked
+}
+
+/// 手动序套在策略序上：清单里的按清单序排前，漏掉的（清单写之后的**新档位**）
+/// 按策略序追加 —— 清单是用户的显式意志，但绝不能因为清单过期让新档位拿不到流量；
+/// 清单里已不存在的 id（档位被删）自然被忽略。
+fn apply_manual_order(order: &[String], mut by_strategy: Vec<Provider>) -> Vec<Provider> {
+    let mut ranked: Vec<Provider> = Vec::with_capacity(by_strategy.len());
+    for id in order {
+        if let Some(pos) = by_strategy.iter().position(|p| &p.id == id) {
+            ranked.push(by_strategy.remove(pos));
+        }
+    }
+    ranked.extend(by_strategy);
+    ranked
+}
+
+/// 看板命令展示用的单价入口：与排序同一份实现（唯源），别在看板侧再算一遍。
+pub(crate) fn effective_unit_price(
+    db: &Database,
+    tier: &Provider,
+    model_pref: Option<&str>,
+) -> Option<f64> {
+    let conn = db
+        .conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tier_unit_price(&conn, tier, model_pref)
 }
 
 /// 档位「有效模型」的合并单价：每百万 token 输入+输出之和（美元）。
@@ -521,6 +629,82 @@ mod tests {
             t + AFFINITY_WINDOW_SECS + 1,
         );
         assert_eq!(ranked_idle[0].id, cheap);
+    }
+
+    /// 手动模式：清单序优先，清单外的新档位按策略序追加（绝不能丢流量），
+    /// 清单里已删档位的 id 被忽略；亲和照常置顶活跃当前档位（定序 ≠ 关掉会话保护）。
+    #[test]
+    fn manual_mode_orders_by_user_list_with_strategy_fallback() {
+        let db = Database::memory().unwrap();
+        let expensive = managed_id("https://a.example", 1, 1);
+        let cheap = managed_id("https://b.example", 1, 2);
+        let fresh = managed_id("https://c.example", 1, 3);
+        let tiers = vec![tier(&expensive, "E"), tier(&cheap, "C"), tier(&fresh, "F")];
+        for p in &tiers {
+            db.save_provider("claude", p).unwrap();
+        }
+        db.set_tier_rate_multiplier("claude", &expensive, Some(2.0))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
+            .unwrap();
+        // fresh 不设倍率：策略序垫底，但不在清单里也必须被追加
+
+        // 自动模式基线：便宜在前
+        let ranked = rank_managed_tier_candidates(&db, "claude", false)
+            .unwrap()
+            .expect("候选非空");
+        assert_eq!(ranked[0].id, cheap);
+
+        // 手动序：贵档第一；清单里塞一个已删档位的 id（被忽略）
+        set_mode(&db, "claude", EasyModeMode::Manual).unwrap();
+        set_manual_order(
+            &db,
+            "claude",
+            &[
+                expensive.clone(),
+                "loongport-deadbeefdeadbeef".to_string(),
+                cheap.clone(),
+            ],
+        )
+        .unwrap();
+        let ranked = rank_managed_tier_candidates(&db, "claude", true)
+            .unwrap()
+            .expect("手动模式候选非空");
+        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![expensive.as_str(), cheap.as_str(), fresh.as_str()],
+            "手动序优先，漏档按策略序追加"
+        );
+
+        // 亲和：当前档位（fresh）活跃 → 手动序之上仍被置顶
+        seed_activity(&db, "claude", &fresh, now() - 60, 500);
+        db.set_current_provider("claude", &fresh).unwrap();
+        let ranked = rank_managed_tier_candidates(&db, "claude", true)
+            .unwrap()
+            .expect("候选非空");
+        assert_eq!(ranked[0].id, fresh, "活跃会话在手动模式下同样不被打断");
+    }
+
+    #[test]
+    fn mode_and_manual_order_setting_roundtrip() {
+        let db = Database::memory().unwrap();
+        assert_eq!(get_mode(&db, "claude"), EasyModeMode::Auto);
+
+        set_mode(&db, "claude", EasyModeMode::Manual).unwrap();
+        assert_eq!(get_mode(&db, "claude"), EasyModeMode::Manual);
+        assert_eq!(get_mode(&db, "codex"), EasyModeMode::Auto, "按 app 隔离");
+        // 脏数据落回默认，别炸选路
+        db.set_setting(&format!("{SETTING_MODE_PREFIX}claude"), "nonsense")
+            .unwrap();
+        assert_eq!(get_mode(&db, "claude"), EasyModeMode::Auto);
+
+        // 手动序：脏数据 → 空清单（等同全按策略追加）
+        db.set_setting(&format!("{SETTING_MANUAL_ORDER_PREFIX}claude"), "not-json")
+            .unwrap();
+        assert!(get_manual_order(&db, "claude").is_empty());
+        set_manual_order(&db, "claude", &["x".to_string(), "y".to_string()]).unwrap();
+        assert_eq!(get_manual_order(&db, "claude"), vec!["x", "y"]);
     }
 
     #[test]

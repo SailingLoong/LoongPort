@@ -1858,6 +1858,9 @@ pub fn run() {
             commands::set_auto_mode_enabled,
             commands::set_auto_mode_strategy,
             commands::set_auto_mode_model,
+            commands::easy_mode_tier_board,
+            commands::set_easy_mode_mode,
+            commands::set_easy_mode_manual_order,
             // Usage statistics
             commands::get_usage_summary,
             commands::get_usage_summary_by_app,
