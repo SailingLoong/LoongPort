@@ -2,12 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
 /**
@@ -54,12 +49,11 @@ export function FirstVisitDomainDialog({
       }}
     >
       <DialogContent className="max-w-[26rem] gap-0 p-6" zIndex="top">
+        {/* 正文有意为零：标题说做什么、暗纹说怎么填、按钮说去哪，三者闭环
+            就不需要再解释（维护者 2026-08-17 文案纪律）。 */}
         <DialogTitle className="text-base font-semibold">
           {t("loongport.firstSite.title")}
         </DialogTitle>
-        <DialogDescription className="mt-1.5 text-sm leading-relaxed">
-          {t("loongport.firstSite.body")}
-        </DialogDescription>
 
         <Input
           autoFocus

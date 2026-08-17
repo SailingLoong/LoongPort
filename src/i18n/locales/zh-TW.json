@@ -3443,7 +3443,6 @@
     },
     "firstSite": {
       "title": "添加你的第一個中轉站",
-      "body": "廣場推薦列表還在載入。先輸入站長給你的網域，直接進入該站的註冊 / 登入。",
       "placeholder": "bestapi.store",
       "confirm": "進入註冊 / 登入",
       "cancel": "先逛逛廣場"
