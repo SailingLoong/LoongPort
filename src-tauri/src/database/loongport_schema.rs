@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 15;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 16;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -247,6 +247,14 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 log::info!("LoongPort 数据迁移 v14 → v15（余额快照去重：删余额未变的相邻行）");
                 dedupe_balance_snapshots(conn)?;
                 set_version(conn, 15)?;
+            }
+            // v15 → v16：存量官网直连档位补倍率 1.0。provision 侧从本版起写入，
+            // 这一步服务已停在 v15 的库 —— 倍率 NULL 会被省心模式当「未知=最贵」
+            // 系统性垫底（官网直连按官方价目计费，倍率恒为 1）。纯 DML，不动表形状。
+            15 => {
+                log::info!("LoongPort 数据迁移 v15 → v16（官网直连档位倍率补 1.0）");
+                backfill_vendor_tier_multipliers(conn)?;
+                set_version(conn, 16)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -578,6 +586,39 @@ fn add_user_edited_column(conn: &Connection) -> Result<(), AppError> {
 ///
 /// ⚠️ 与 [`add_user_edited_column`] 同一条纪律：**列不放进上游
 /// `create_tables_on_conn` 的 providers CREATE**，全新库靠迁移链补上。
+/// v15 → v16 的存量回填：官网直连档位（`loongport-vendor-%`）倍率 NULL → 1.0。
+/// 缺表/缺列不报错，理由同 [`add_tier_rate_multiplier_column]`（老库可能还没有
+/// providers 表或还没有这一列 —— 没有行可补就是成功）。
+fn backfill_vendor_tier_multipliers(conn: &Connection) -> Result<(), AppError> {
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='providers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_table == 0 {
+        return Ok(());
+    }
+    let has_column: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name='tier_rate_multiplier'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_column == 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE providers SET tier_rate_multiplier = 1.0
+         WHERE tier_rate_multiplier IS NULL
+           AND id LIKE 'loongport-vendor-%'",
+        [],
+    )?;
+    Ok(())
+}
+
 fn add_tier_rate_multiplier_column(conn: &Connection) -> Result<(), AppError> {
     // 缺表不报错，理由同 `add_user_edited_column`。
     let has_providers: i64 = conn
@@ -1548,6 +1589,44 @@ mod tests {
     fn a_fresh_database_reports_version_zero() {
         let conn = mem();
         assert_eq!(current_version(&conn).unwrap(), 0);
+    }
+
+    /// v15 → v16：官网直连档位倍率 NULL → 1.0（官方价目即倍率 1）；
+    /// 中转站/导入档位不碰 —— 它们的倍率归站点数据，NULL 的语义是「未知」。
+    #[test]
+    fn migrates_vendor_tier_multiplier_to_one() {
+        let conn = mem();
+        providers_table(&conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config) VALUES
+             ('loongport-vendor-abc123def4567890', 'claude', 'DeepSeek', '{}'),
+             ('loongport-11112222333344445555', 'claude', 'Relay Tier', '{}')",
+            [],
+        )
+        .expect("造档位行");
+        ensure_version_table(&conn).expect("建版本表");
+        // 从 v11 起（倍率列由 v11→v12 加），让加列与回填都走真实迁移路径。
+        set_version(&conn, 11).expect("置 v11");
+
+        apply(&conn).expect("迁移到 v16");
+
+        let vendor: Option<f64> = conn
+            .query_row(
+                "SELECT tier_rate_multiplier FROM providers WHERE id LIKE 'loongport-vendor-%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("查 vendor 倍率");
+        assert_eq!(vendor, Some(1.0));
+        let relay: Option<f64> = conn
+            .query_row(
+                "SELECT tier_rate_multiplier FROM providers
+                 WHERE id NOT LIKE 'loongport-vendor-%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("查 relay 倍率");
+        assert_eq!(relay, None, "中转站档位倍率仍归站点数据管");
     }
 
     #[test]

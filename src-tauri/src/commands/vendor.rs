@@ -915,7 +915,7 @@ async fn provision_impl(
                 .ok()
                 .flatten();
 
-            let settings_config = match existing {
+            let mut settings_config = match existing {
                 Some(old) => {
                     let mut kept = old.settings_config;
                     // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落默认配置。
@@ -932,6 +932,13 @@ async fn provision_impl(
                 }
                 None => defaults.clone(),
             };
+            // 存量行补模型目录（只增不覆盖）：目录版本之前的行没有 modelCatalog，
+            // 而省心模式的偏好过滤会把无目录档位静默排除 —— 刷新密钥时顺手补齐。
+            if settings_config.get("modelCatalog").is_none() {
+                if let Some(catalog) = defaults.get("modelCatalog") {
+                    settings_config["modelCatalog"] = catalog.clone();
+                }
+            }
 
             let provider = Provider {
                 id: provider_id.clone(),
@@ -961,6 +968,11 @@ async fn provision_impl(
                 .map_err(|e| {
                     AppError::Database(format!("保存 {} 配置失败: {e}", app_type.as_str()))
                 })?;
+            // 官网直连按官方价目计费，倍率恒为 1（中转站才有站点折扣）。
+            // 不落倍率会被省心模式当「未知=最贵」垫底（2026-08-17 真实 smoke 实测）。
+            state
+                .db
+                .set_tier_rate_multiplier(app_type.as_str(), &provider_id, Some(1.0))?;
 
             let merged = provider_fingerprint::remove_unmanaged_duplicates(
                 state.db.as_ref(),

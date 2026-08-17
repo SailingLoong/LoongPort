@@ -298,6 +298,39 @@ pub fn plan_style(vendor: Vendor, id_segment: &str) -> crate::relay::provision::
     }
 }
 
+/// 该厂商**某个 plan**能服务的模型清单（去重），供 provision 写进 `modelCatalog`
+/// —— 省心模式的模型偏好过滤与托盘 app→模型映射都以目录为准，没有目录的档位
+/// 在用户设了偏好时会被静默排除（2026-08-17 真实 smoke 实测 DeepSeek 直连中招）。
+///
+/// 派生而不是另列常量：取各平台 `config_for` 的主模型 + Claude 角色分档的取值，
+/// 与生成配置同源 —— 两边各写一份清单迟早分叉。`[1M]` 是上下文长度变体后缀，
+/// 目录收基础名（角色 env 才带后缀）。
+pub fn catalog_models(vendor: Vendor, id_segment: &str) -> Vec<String> {
+    let mut models: Vec<String> = Vec::new();
+    let push = |models: &mut Vec<String>, model: &str| {
+        let base = model.trim_end_matches("[1M]");
+        if !base.is_empty() && !models.iter().any(|m| m == base) {
+            models.push(base.to_string());
+        }
+    };
+    for app in crate::vendor::provision::VENDOR_APPS {
+        if let Some((_, model)) = config_for(vendor, id_segment, &app) {
+            push(&mut models, &model);
+        }
+    }
+    let roles = claude_role_models(vendor, id_segment);
+    for model in [
+        &roles.opus,
+        &roles.fable,
+        &roles.sonnet,
+        &roles.haiku,
+        &roles.subagent,
+    ] {
+        push(&mut models, model);
+    }
+    models
+}
+
 /// 「管理 API Key」网页（帮助跳转）。`None` = 该厂商没有公开的密钥管理页。
 pub fn api_keys_help_url(vendor: Vendor) -> Option<&'static str> {
     match vendor {

@@ -130,27 +130,31 @@ pub struct PlanRows {
 pub fn plan_rows_for(vendor: Vendor, account_id: &str, api_key: &str) -> Vec<PlanRows> {
     crate::vendor::plans(vendor)
         .iter()
-        .map(|plan| PlanRows {
-            plan: *plan,
-            provider_id: provider_id_for(plan.id_segment, account_id),
-            rows: VENDOR_APPS
-                .iter()
-                .filter_map(|app| {
-                    let (base_url, model) =
-                        crate::vendor::config_for(vendor, plan.id_segment, app)?;
-                    let cfg = crate::relay::provision::settings_config_with_roles_and_models(
-                        app,
-                        api_key,
-                        plan.display_name,
-                        &base_url,
-                        &model,
-                        claude_roles_for(vendor, plan.id_segment, app),
-                        None,
-                        crate::vendor::plan_style(vendor, plan.id_segment),
-                    )?;
-                    Some((app.clone(), cfg))
-                })
-                .collect(),
+        .map(|plan| {
+            // 模型目录与配置同源派生：没有目录的档位会被省心模式的偏好过滤静默排除。
+            let catalog = crate::vendor::catalog_models(vendor, plan.id_segment);
+            PlanRows {
+                plan: *plan,
+                provider_id: provider_id_for(plan.id_segment, account_id),
+                rows: VENDOR_APPS
+                    .iter()
+                    .filter_map(|app| {
+                        let (base_url, model) =
+                            crate::vendor::config_for(vendor, plan.id_segment, app)?;
+                        let cfg = crate::relay::provision::settings_config_with_roles_and_models(
+                            app,
+                            api_key,
+                            plan.display_name,
+                            &base_url,
+                            &model,
+                            claude_roles_for(vendor, plan.id_segment, app),
+                            Some(catalog.as_slice()),
+                            crate::vendor::plan_style(vendor, plan.id_segment),
+                        )?;
+                        Some((app.clone(), cfg))
+                    })
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -190,6 +194,35 @@ mod tests {
             "opencode",
         ] {
             assert!(apps.contains(&expect.to_string()), "缺平台 {expect}");
+        }
+    }
+
+    /// ⭐ 每条行都带模型目录：无目录档位会被省心模式的模型偏好过滤**静默排除**
+    /// （2026-08-17 真实 smoke 实测 DeepSeek 直连中招）。目录与配置同源派生、收基础名。
+    #[test]
+    fn rows_carry_model_catalog_for_easy_mode() {
+        let rows = deepseek_rows("sk-x");
+        for (app, cfg) in &rows {
+            let models: Vec<&str> = cfg["modelCatalog"]["models"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} 行缺模型目录", app.as_str()))
+                .iter()
+                .filter_map(|m| m.get("model").and_then(|v| v.as_str()))
+                .collect();
+            assert!(
+                models.contains(&"deepseek-v4-pro"),
+                "{} 目录缺 pro：{models:?}",
+                app.as_str()
+            );
+            assert!(
+                models.contains(&"deepseek-v4-flash"),
+                "{} 目录缺 flash：{models:?}",
+                app.as_str()
+            );
+            assert!(
+                models.iter().all(|m| !m.ends_with("[1M]")),
+                "目录收基础名（[1M] 是角色 env 的变体后缀）：{models:?}"
+            );
         }
     }
 
