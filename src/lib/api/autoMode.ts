@@ -5,6 +5,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type AutoModeStrategy = "cheapest" | "fastest";
+/** 省心选路模式：自动按策略 / 用户手动定序。 */
+export type EasyModeMode = "auto" | "manual";
 
 export interface AutoModeStatus {
   /** 按 app 的开关。 */
@@ -21,6 +23,31 @@ export interface AutoModeStatus {
   cliInstalled: boolean;
 }
 
+/** 档位看板的一行：展示序即选路优先级序（后端唯源，前端只渲染）。 */
+export interface TierBoardTier {
+  providerId: string;
+  name: string;
+  position: number;
+  isCurrent: boolean;
+  /** `null` = 倍率未知。 */
+  rateMultiplier: number | null;
+  /** 每百万 token 输入+输出之和（美元）；`null` = 价格未知。 */
+  unitPricePerMillion: number | null;
+  effectiveModel: string | null;
+  avgFirstTokenMs: number | null;
+  /** 站点钱包余额（美元）；`null` = 该站不可查。 */
+  balanceUsd: number | null;
+}
+
+export interface TierBoard {
+  mode: EasyModeMode;
+  strategy: AutoModeStrategy;
+  model: string | null;
+  availableModels: string[];
+  currentProviderId: string | null;
+  tiers: TierBoardTier[];
+}
+
 export const autoModeApi = {
   getStatus: (appType: string): Promise<AutoModeStatus> =>
     invoke("get_auto_mode_status", { appType }),
@@ -34,4 +61,19 @@ export const autoModeApi = {
   /** 设模型偏好（`null` = 不限）。后端会绕过会话亲和立即切到最优档位。 */
   setModel: (appType: string, model: string | null): Promise<void> =>
     invoke("set_auto_mode_model", { appType, model }),
+
+  /** 档位看板（首页省心视图数据源，一次拉全展示事实）。 */
+  getTierBoard: (appType: string): Promise<TierBoard> =>
+    invoke("easy_mode_tier_board", { appType }),
+
+  /** 切选路模式；后端在首次切手动时快照当前序为初始清单。 */
+  setEasyModeMode: (appType: string, mode: EasyModeMode): Promise<void> =>
+    invoke("set_easy_mode_mode", { appType, mode }),
+
+  /** 写手动档位顺序（拖拽落定后整份提交）。 */
+  setEasyModeManualOrder: (
+    appType: string,
+    orderedIds: string[],
+  ): Promise<void> =>
+    invoke("set_easy_mode_manual_order", { appType, orderedIds }),
 };
