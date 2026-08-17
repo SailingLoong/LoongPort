@@ -124,6 +124,8 @@ import {
   useDisableCurrentOmoSlim,
 } from "@/lib/query/omo";
 import { invalidatePiProviderCaches, usePiCurrentState } from "@/lib/query/pi";
+import { useAutoModeStatus } from "@/lib/query/autoMode";
+import { EasyBoard } from "@/components/easymode/EasyBoard";
 import WorkspaceFilesPanel from "@/components/workspace/WorkspaceFilesPanel";
 import EnvPanel from "@/components/openclaw/EnvPanel";
 import ToolsPanel from "@/components/openclaw/ToolsPanel";
@@ -348,6 +350,18 @@ function App() {
     status: proxyStatus,
   } = useProxyStatus();
   const proxyAppId = isProxyAppId(activeApp) ? activeApp : null;
+  // 省心视图替换判据：Beta 开 + 该 app 省心模式开 + 路由在跑（三个都是展示
+  // 事实的组合，业务开关本身仍由设置页/顶栏管理）。
+  const { data: activeAutoModeStatus } = useAutoModeStatus(
+    proxyAppId ?? activeApp,
+    !!proxyAppId,
+  );
+  const showEasyBoard = Boolean(
+    settingsData?.easyModeBeta &&
+    proxyAppId &&
+    activeAutoModeStatus?.enabled &&
+    isProxyRunning,
+  );
   const currentAppUsesProxy =
     proxyAppId !== null || activeApp === "claude-desktop";
   const isCurrentAppTakeoverActive = proxyAppId
@@ -1161,79 +1175,94 @@ function App() {
                     transition={{ duration: 0.15 }}
                     className="space-y-4"
                   >
-                    {/* LoongPort 的「中转站 × 分组」区，装在手工 provider 列表**上方**。
+                    {/* LoongPort 省心视图：Beta 开 + 该 app 省心模式开 + 路由在跑时，
+                        整个 provider 页（中转站区 + 手工列表）替换为档位看板。 */}
+                    {showEasyBoard ? (
+                      <EasyBoard appId={activeApp} />
+                    ) : (
+                      <>
+                        {/* LoongPort 的「中转站 × 分组」区，装在手工 provider 列表**上方**。
                         它自带全部状态（见 RelaySection 的文档）—— 这里只挂一行，
                         不把 relay 的逻辑摊进这个上游文件。
                         它内部已按「中转站 / 官方 API」两大块渲染；两块与下面
                         「其他」的添加入口统一收在顶栏大「+」（点开是 AddHubPage
                         聚合页，三标签就地切换）。 */}
-                    <RelaySection
-                      appId={activeApp}
-                      onOpenAddHub={handleOpenAddHub}
-                    />
+                        <RelaySection
+                          appId={activeApp}
+                          onOpenAddHub={handleOpenAddHub}
+                        />
 
-                    {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口在顶栏 +。
+                        {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口在顶栏 +。
                         生图页（codex-image）保持改动前的形态，不套三大块布局。 */}
-                    {activeApp !== "codex-image" && (
-                      <h2 className="text-sm font-medium">
-                        {t("loongport.sections.other")}
-                      </h2>
-                    )}
+                        {activeApp !== "codex-image" && (
+                          <h2 className="text-sm font-medium">
+                            {t("loongport.sections.other")}
+                          </h2>
+                        )}
 
-                    <ProviderList
-                      providers={providers}
-                      appId={activeApp}
-                      isLoading={isLoading}
-                      isProxyRunning={currentAppUsesProxy && isProxyRunning}
-                      isProxyTakeover={
-                        isProxyRunning && isCurrentAppTakeoverActive
-                      }
-                      activeProviderId={activeProviderId}
-                      onSwitch={
-                        activeApp === "pi"
-                          ? handleEnablePiProvider
-                          : guardedSwitch
-                      }
-                      onEdit={(provider) => {
-                        setEditingProvider(provider);
-                      }}
-                      onDelete={(provider) =>
-                        setConfirmAction({ provider, action: "delete" })
-                      }
-                      onRemoveFromConfig={
-                        activeApp === "opencode" ||
-                        activeApp === "openclaw" ||
-                        activeApp === "hermes" ||
-                        activeApp === "pi"
-                          ? (provider) =>
-                              setConfirmAction({ provider, action: "remove" })
-                          : undefined
-                      }
-                      onDisableOmo={
-                        activeApp === "opencode" ? handleDisableOmo : undefined
-                      }
-                      onDisableOmoSlim={
-                        activeApp === "opencode"
-                          ? handleDisableOmoSlim
-                          : undefined
-                      }
-                      onDuplicate={handleDuplicateProvider}
-                      onConfigureUsage={setUsageProvider}
-                      onOpenWebsite={handleOpenWebsite}
-                      onOpenTerminal={
-                        activeApp === "claude" ? handleOpenTerminal : undefined
-                      }
-                      onCreate={() => handleOpenAddHub()}
-                      onSetAsDefault={
-                        activeApp === "openclaw"
-                          ? setAsDefaultModel
-                          : activeApp === "hermes"
-                            ? // switchProvider 的第二参是 quitChatgpt?: boolean，
-                              // 这里只需要 (provider) 形状，包一层避免与 modelId 签名冲突。
-                              (provider) => switchProvider(provider)
-                            : undefined
-                      }
-                    />
+                        <ProviderList
+                          providers={providers}
+                          appId={activeApp}
+                          isLoading={isLoading}
+                          isProxyRunning={currentAppUsesProxy && isProxyRunning}
+                          isProxyTakeover={
+                            isProxyRunning && isCurrentAppTakeoverActive
+                          }
+                          activeProviderId={activeProviderId}
+                          onSwitch={
+                            activeApp === "pi"
+                              ? handleEnablePiProvider
+                              : guardedSwitch
+                          }
+                          onEdit={(provider) => {
+                            setEditingProvider(provider);
+                          }}
+                          onDelete={(provider) =>
+                            setConfirmAction({ provider, action: "delete" })
+                          }
+                          onRemoveFromConfig={
+                            activeApp === "opencode" ||
+                            activeApp === "openclaw" ||
+                            activeApp === "hermes" ||
+                            activeApp === "pi"
+                              ? (provider) =>
+                                  setConfirmAction({
+                                    provider,
+                                    action: "remove",
+                                  })
+                              : undefined
+                          }
+                          onDisableOmo={
+                            activeApp === "opencode"
+                              ? handleDisableOmo
+                              : undefined
+                          }
+                          onDisableOmoSlim={
+                            activeApp === "opencode"
+                              ? handleDisableOmoSlim
+                              : undefined
+                          }
+                          onDuplicate={handleDuplicateProvider}
+                          onConfigureUsage={setUsageProvider}
+                          onOpenWebsite={handleOpenWebsite}
+                          onOpenTerminal={
+                            activeApp === "claude"
+                              ? handleOpenTerminal
+                              : undefined
+                          }
+                          onCreate={() => handleOpenAddHub()}
+                          onSetAsDefault={
+                            activeApp === "openclaw"
+                              ? setAsDefaultModel
+                              : activeApp === "hermes"
+                                ? // switchProvider 的第二参是 quitChatgpt?: boolean，
+                                  // 这里只需要 (provider) 形状，包一层避免与 modelId 签名冲突。
+                                  (provider) => switchProvider(provider)
+                                : undefined
+                          }
+                        />
+                      </>
+                    )}
                   </motion.div>
                 </AnimatePresence>
               </div>

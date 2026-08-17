@@ -1,5 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { autoModeApi, type AutoModeStrategy } from "@/lib/api/autoMode";
+import {
+  autoModeApi,
+  type AutoModeStrategy,
+  type EasyModeMode,
+} from "@/lib/api/autoMode";
 import { proxyApi } from "@/lib/api/proxy";
 import { failoverApi } from "@/lib/api/failover";
 import { toast } from "sonner";
@@ -102,6 +106,8 @@ export function useSetAutoModeStrategy() {
       autoModeApi.setStrategy(strategy),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["autoModeStatus"] });
+      // 看板的顺序/理由随策略变，全局策略 → 全部看板失效
+      queryClient.invalidateQueries({ queryKey: ["easyModeTierBoard"] });
       toast.success(
         t("autoMode.strategySaved", { defaultValue: "策略已更新" }),
       );
@@ -140,6 +146,10 @@ export function useSetAutoModeModel() {
         queryKey: ["providers", variables.appType],
       });
       queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      // 偏好决定有效模型/单价与候选过滤
+      queryClient.invalidateQueries({
+        queryKey: ["easyModeTierBoard", variables.appType],
+      });
     },
     onError: (error) => {
       toast.error(
@@ -366,6 +376,77 @@ export function useSetFailoverAll() {
               defaultValue: "自动故障转移已全部关闭",
             }),
       );
+    },
+    onError: (error) => {
+      toast.error(
+        t("autoMode.toggleFailed", { defaultValue: "操作失败" }) +
+          ": " +
+          extractErrorMessage(error),
+      );
+    },
+  });
+}
+
+/**
+ * 档位看板（首页省心视图数据源）：顺序/倍率/单价/耗时/命中/余额一次拉全。
+ * 余额链含站点查询，给个短 staleTime 避免频繁切 app 时反复打站点。
+ */
+export function useTierBoard(appType: string, enabled = true) {
+  return useQuery({
+    queryKey: ["easyModeTierBoard", appType],
+    queryFn: () => autoModeApi.getTierBoard(appType),
+    enabled: enabled && !!appType,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * 切选路模式（自动/手动）。后端首切手动会快照当前序为初始清单。
+ */
+export function useSetEasyModeMode() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: ({ appType, mode }: { appType: string; mode: EasyModeMode }) =>
+      autoModeApi.setEasyModeMode(appType, mode),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["easyModeTierBoard", variables.appType],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["autoModeStatus", variables.appType],
+      });
+    },
+    onError: (error) => {
+      toast.error(
+        t("autoMode.toggleFailed", { defaultValue: "操作失败" }) +
+          ": " +
+          extractErrorMessage(error),
+      );
+    },
+  });
+}
+
+/**
+ * 写手动档位顺序（拖拽落定后整份提交，后端按清单序选路）。
+ */
+export function useSetEasyModeManualOrder() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: ({
+      appType,
+      orderedIds,
+    }: {
+      appType: string;
+      orderedIds: string[];
+    }) => autoModeApi.setEasyModeManualOrder(appType, orderedIds),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["easyModeTierBoard", variables.appType],
+      });
     },
     onError: (error) => {
       toast.error(
