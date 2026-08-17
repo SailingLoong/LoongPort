@@ -819,30 +819,31 @@ pub fn settings_config_with_roles_and_models(
             if matches!(app_type, AppType::Claude) {
                 config["language"] = serde_json::json!("chinese");
             }
-            // Claude / Gemini：把分组模型目录落进配置（主界面模型芯片与自动模式
-            // app→模型 映射的数据源，形状与 codex 的 modelCatalog 相同）。
-            // 与 codex 的 `is_image_model` 过滤同理按家族收口：
-            // - claude 分组可能混 gpt-* / deepseek-*（瓜子跨家族对齐，角色挑选本来就
-            //   跨家族），目录收全部**文本**模型；
+            // 把分组模型目录落进配置（主界面模型芯片与自动模式 app→模型 映射的
+            // 数据源，形状与 codex 的 modelCatalog 相同）。**全部非 codex 平台**：
+            // 目录是档位级事实（「这把 key 能服务哪些模型」），省心模式的偏好过滤
+            // 对无目录档位是静默排除 —— 2026-08-17 真实 smoke 实测官网直连的
+            // hermes/openclaw/opencode 行中招。与 codex 的 `is_image_model` 过滤
+            // 同理按家族收口：
             // - gemini 走原生 URL 路由（`/v1beta/models/{model}:generateContent`），
-            //   只认 gemini-* 家族，目录只收 gemini-*。
-            if matches!(app_type, AppType::Claude | AppType::Gemini) {
-                if let Some(models) = models.filter(|models| !models.is_empty()) {
-                    let family: Vec<&String> = match app_type {
-                        AppType::Gemini => models
+            //   只认 gemini-* 家族，目录只收 gemini-*；
+            // - 其余平台目录收全部**文本**模型（claude 分组可能混 gpt-* / deepseek-*，
+            //   瓜子跨家族对齐，角色挑选本来就跨家族）。
+            if let Some(models) = models.filter(|models| !models.is_empty()) {
+                let family: Vec<&String> = match app_type {
+                    AppType::Gemini => models
+                        .iter()
+                        .filter(|m| m.to_ascii_lowercase().starts_with("gemini-"))
+                        .collect(),
+                    _ => models.iter().filter(|m| !is_image_model(m)).collect(),
+                };
+                if !family.is_empty() {
+                    config["modelCatalog"] = serde_json::json!({
+                        "models": family
                             .iter()
-                            .filter(|m| m.to_ascii_lowercase().starts_with("gemini-"))
-                            .collect(),
-                        _ => models.iter().filter(|m| !is_image_model(m)).collect(),
-                    };
-                    if !family.is_empty() {
-                        config["modelCatalog"] = serde_json::json!({
-                            "models": family
-                                .iter()
-                                .map(|model| serde_json::json!({ "model": model }))
-                                .collect::<Vec<_>>(),
-                        });
-                    }
+                            .map(|model| serde_json::json!({ "model": model }))
+                            .collect::<Vec<_>>(),
+                    });
                 }
             }
             config
