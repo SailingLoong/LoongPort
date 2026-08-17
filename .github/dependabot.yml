@@ -33,6 +33,13 @@ updates:
       cargo-deps:
         patterns:
           - "*"
+    ignore:
+      # zip 4→8 跨多个大版本，`..` 条目的处置语义变了（安全闸测试
+      # extract_local_zip_rejects_dot_dot_entries 拦下）。升 8 要单独评估
+      # 解压安全语义，不吃依赖组的顺带升级。
+      - dependency-name: "zip"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
