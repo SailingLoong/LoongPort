@@ -730,14 +730,21 @@ pub(crate) async fn refresh_due_relay_pricing(
             let app_handle = app_handle.clone();
             let db = Arc::clone(&db);
             async move {
-                let relay = usable_relay(&app_handle, relay.id).await?;
-                let updates = pricing::fetch_rate_updates(&relay).await?;
-                pricing::apply_rate_updates(&db, &updates)?;
-                let conn = db
-                    .conn
-                    .lock()
-                    .map_err(|error| AppError::Database(format!("获取数据库连接失败: {error}")))?;
-                creds::mark_pricing_synced(&conn, relay.id, chrono::Utc::now().timestamp())
+                // 倍率拉取是只读请求，走 401→续期→重试：`token_expires_at = NULL`
+                // 的行靠它从「永不续期、到点暴毙」的降级态自愈。
+                relay_read_with_refresh_retry(&app_handle, relay.id, |op| {
+                    // 闭包要能调两次（原请求 + 重试），future 各自持有克隆出来的 Arc。
+                    let db = Arc::clone(&db);
+                    async move {
+                        let updates = pricing::fetch_rate_updates(&op).await?;
+                        pricing::apply_rate_updates(&db, &updates)?;
+                        let conn = db.conn.lock().map_err(|error| {
+                            AppError::Database(format!("获取数据库连接失败: {error}"))
+                        })?;
+                        creds::mark_pricing_synced(&conn, op.id, chrono::Utc::now().timestamp())
+                    }
+                })
+                .await
             }
         },
     )
@@ -988,11 +995,12 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
     // 并发省下的几百毫秒换来的是撞限流的风险，不值得。
     for id in targets {
         // usable_relay 会在快过期时先续期、并顺手补齐缺失的账号身份（见它的文档）；
-        // 拿 /user/profile 当探活请求（最便宜的鉴权端点）。
-        let probe = async {
-            let op = usable_relay(app_handle, id).await?;
+        // 拿 /user/profile 当探活请求（最便宜的鉴权端点）。撞上「登录已过期」类 401
+        // 时先静默续期再重试一次 —— 那是 `token_expires_at = NULL` 的降级态行唯一
+        // 的自救机会（详见 relay_read_with_refresh_retry 的文档）。
+        let probe = relay_read_with_refresh_retry(app_handle, id, |op| async move {
             backend::RuntimeBackend::for_relay(&op).balance().await
-        }
+        })
         .await;
 
         if let Err(e) = probe {
@@ -2655,6 +2663,30 @@ async fn usable_relay<R: tauri::Runtime>(
         return Ok(op);
     }
 
+    let (renewed, refreshed) = refresh_relay_session(app_handle, &op).await?;
+
+    // 顺手刷一次账号身份：用户可能在中转站那边改了昵称或邮箱，而续期响应里没有账号信息
+    // （`/auth/refresh` 只回 token），所以只有在这里额外打一次 profile 才发现得了。
+    // 不刷的话站点选择器上会一直挂着旧标签 —— 而他改邮箱的动机往往就是「换个能认的」。
+    if refreshed.account.is_some() {
+        return Ok(renewed);
+    }
+
+    Ok(backfill_account_identity(app_handle, renewed).await)
+}
+
+/// 续期一次并落库（充值窗口独占闸 → `refresh_session` → 持久化）。
+///
+/// 从 [`usable_relay`] 的尾部提出来的公共路径：主动续期（token 已知过期）与
+/// [`relay_read_with_refresh_retry`] 的被动续期（撞上 401 才发现过期）走的是
+/// 同一段代码 —— 两处各写一遍，「充值窗口独占」那道闸迟早只挡住一边。
+///
+/// 返回 `(落库后的 Relay, 续期响应)`：调用方有的只要新凭据，有的还要看响应里
+/// 有没有账号信息（NewAPI 回、sub2api 不回）来决定要不要补打一次 profile。
+async fn refresh_relay_session<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    op: &creds::Relay,
+) -> Result<(creds::Relay, backend::RefreshedSession), AppError> {
     let state = app_handle.state::<AppState>();
     // ⭐ 充值窗口持有这个 NewAPI 账号的 refresh 轮换独占权时，后台续期不得抢跑：
     // NewAPI 的 refresh cookie 一次性轮换，这里并发续期会把充值窗口里那颗 cookie
@@ -2665,19 +2697,72 @@ async fn usable_relay<R: tauri::Runtime>(
             "充值窗口正在使用这个账号的登录态，请关闭充值窗口后重试".into(),
         ));
     }
-    let refreshed = backend::RuntimeBackend::for_relay(&op)
+    let refreshed = backend::RuntimeBackend::for_relay(op)
         .refresh_session(op.refresh_token.as_deref())
         .await?;
-    let renewed = persist_refreshed_session(&state, &op, &refreshed)?;
+    let renewed = persist_refreshed_session(&state, op, &refreshed)?;
+    Ok((renewed, refreshed))
+}
 
-    // 顺手刷一次账号身份：用户可能在中转站那边改了昵称或邮箱，而续期响应里没有账号信息
-    // （`/auth/refresh` 只回 token），所以只有在这里额外打一次 profile 才发现得了。
-    // 不刷的话站点选择器上会一直挂着旧标签 —— 而他改邮箱的动机往往就是「换个能认的」。
-    if refreshed.account.is_some() {
-        return Ok(renewed);
+/// 跑一次**只读**的站点请求；撞上「登录已过期」类 401 且手里还有 refresh token 时，
+/// 先静默续期一次、再用新凭据重跑原请求 —— 续期也救不回来才把**原错误**交出去。
+///
+/// ## 为什么必须有它（2026-08-17 bestapi.store 线上事故）
+///
+/// `token_expires_at = NULL` 的行（登录快照没带回过期时间的站点）走的是
+/// [`creds::Relay::token_looks_valid`] 的乐观降级：永远「看起来有效」，于是
+/// [`usable_relay`] 的主动续期**永不触发**。access token 在服务端到 24h 过期后，
+/// 启动探活撞上 401「登录已过期」直接清会话 —— refresh token 一次没用过就被连坐，
+/// 用户被迫重登，体感就是「登录态撑不过一两天」。
+///
+/// 撞上 401 先续期再重试，也是上游 sub2api 自己前端的 401 拦截器做法。续期响应
+/// 会带回 `expires_at`，落库之后这行就回到「过期时间已知」的健康轨道 —— 这条
+/// 路径是降级态的自愈入口，不只是补救。
+///
+/// ## 边界（都有意为之）
+///
+/// - **只包只读请求**（余额探活 / 倍率刷新）。写操作（provision 建密钥、充值）不
+///   整体重跑：第一次请求可能已部分生效，盲目重试会开出第二把密钥。
+/// - **原错误优先**：续期失败时把原请求的错误交出去，`check_session` 的清会话
+///   判读（`is_confirmed_auth_failure`）与从前完全一致 —— refresh token 真死了
+///   仍然清，不会把死 lineage 无限期留着。
+/// - **只重试一次**，不进循环：重试后仍 401 就交错误。
+/// - NewAPI 的 401 文案是「登录态已失效」一类，不匹配 [`backend::is_token_expiry_failure`]，
+///   天然不进这条路径 —— 它的 30 秒 reuse 判定下，拿可能已被消费的 cookie 盲目
+///   重试会吊销整个会话族。
+async fn relay_read_with_refresh_retry<R, F, Fut, T>(
+    app_handle: &tauri::AppHandle<R>,
+    relay_id: i64,
+    run: F,
+) -> Result<T, AppError>
+where
+    R: tauri::Runtime,
+    // Fn 而不是 FnOnce：原请求与续期后的重试各调一次。
+    F: Fn(creds::Relay) -> Fut,
+    Fut: std::future::Future<Output = Result<T, AppError>>,
+{
+    let op = usable_relay(app_handle, relay_id).await?;
+    match run(op.clone()).await {
+        Ok(value) => Ok(value),
+        Err(original) => {
+            let has_refresh_credential = op
+                .refresh_token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty());
+            if !has_refresh_credential || !backend::is_token_expiry_failure(&original) {
+                return Err(original);
+            }
+            match refresh_relay_session(app_handle, &op).await {
+                Ok((renewed, _)) => run(renewed).await,
+                Err(refresh_error) => {
+                    log::warn!(
+                        "中转站 {relay_id} 过期 401 后静默续期失败，按原错误处理：{refresh_error}"
+                    );
+                    Err(original)
+                }
+            }
+        }
     }
-
-    Ok(backfill_account_identity(app_handle, renewed).await)
 }
 
 async fn load_validated_relay<R: tauri::Runtime>(
@@ -6862,6 +6947,147 @@ mod tests {
         assert_eq!(relay.auth_token, "saved-access-token");
         assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
         server.await.expect("connection-drop server completes");
+    }
+
+    /// mock 站点轮换后回的假凭据：沿用 `saved_*` 前缀家族，仅供断言对得上号，
+    /// 不是任何真实站点的密钥。
+    const RENEWED_ACCESS: &str = "saved-access-token-renewed";
+    const RENEWED_ROTATION: &str = "saved-refresh-token-renewed";
+
+    /// ⭐ 回归闸（2026-08-17 bestapi.store 线上事故）：登录快照没带回过期时间
+    /// （`token_expires_at = NULL`）的行，`token_looks_valid` 永远乐观为真，
+    /// `usable_relay` 的主动续期永不触发；access token 在服务端到 24h 过期后，
+    /// 探活撞上 401「登录已过期」直接清会话 —— refresh token 一次没用过就被连坐。
+    /// 钉住：过期类 401 + 手里有 refresh token ⇒ 先静默续期一次、用新凭据重跑原请求。
+    #[tokio::test]
+    async fn relay_read_refreshes_once_and_retries_when_token_expires_server_side() {
+        use axum::{
+            http::{header, HeaderMap, StatusCode},
+            routing::{get, post},
+            Json, Router,
+        };
+        let router = Router::new()
+            .route(
+                "/api/v1/user/profile",
+                get(|headers: HeaderMap| async move {
+                    let stale = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.ends_with("saved-access-token"));
+                    if stale {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({
+                                "code": "TOKEN_EXPIRED",
+                                "message": "登录已过期，请重新登录"
+                            })),
+                        );
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "code": 0,
+                            "message": "success",
+                            "data": {
+                                "id": 7,
+                                "username": "Sub User",
+                                "email": "sub@example.com",
+                                "balance": 12.5,
+                                "frozen_balance": 0.0
+                            }
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/auth/refresh",
+                post(|Json(body): Json<serde_json::Value>| async move {
+                    assert_eq!(body["refresh_token"], "saved-refresh-token", "{body}");
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "code": 0,
+                            "message": "success",
+                            "data": {
+                                "access_token": RENEWED_ACCESS,
+                                "refresh_token": RENEWED_ROTATION,
+                                "expires_at": 4_102_444_800_000_i64
+                            }
+                        })),
+                    )
+                }),
+            );
+        let (origin, server) = spawn_balance_server(router).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let balance = relay_read_with_refresh_retry(app.handle(), relay_id, |op| async move {
+            backend::RuntimeBackend::for_relay(&op).balance().await
+        })
+        .await
+        .expect("服务端 401 过期必须被静默续期救回");
+
+        assert_eq!(balance.balance, 12.5);
+        let creds = relay_credentials(&app, relay_id);
+        assert_eq!(creds.auth_token, RENEWED_ACCESS);
+        assert_eq!(creds.refresh_token.as_deref(), Some(RENEWED_ROTATION));
+        assert!(
+            creds.token_expires_at.is_some(),
+            "续期响应带回的过期时间必须落库 —— 为 NULL 正是这起事故的起点"
+        );
+        server.abort();
+    }
+
+    /// 续期救不回来时（refresh token 也被服务端拒了），必须把**原错误**交回去：
+    /// `check_session` 靠错误分类决定清会话，换成续期那条报错会悄悄改变判读。
+    #[tokio::test]
+    async fn relay_read_returns_original_error_when_refresh_cannot_rescue() {
+        use axum::{
+            http::StatusCode,
+            routing::{get, post},
+            Json, Router,
+        };
+        let router = Router::new()
+            .route(
+                "/api/v1/user/profile",
+                get(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "code": "TOKEN_EXPIRED",
+                            "message": "登录已过期，请重新登录"
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/auth/refresh",
+                post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "code": "REFRESH_TOKEN_INVALID",
+                            "message": "refresh token 已失效"
+                        })),
+                    )
+                }),
+            );
+        let (origin, server) = spawn_balance_server(router).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let error = relay_read_with_refresh_retry(app.handle(), relay_id, |op| async move {
+            backend::RuntimeBackend::for_relay(&op).balance().await
+        })
+        .await
+        .expect_err("续期失败时原请求的错误必须往外抛");
+
+        assert!(error.to_string().contains("登录已过期"), "{error}");
+        assert!(!error.to_string().contains("续期失败"), "{error}");
+        let creds = relay_credentials(&app, relay_id);
+        assert_eq!(
+            creds.auth_token, "saved-access-token",
+            "续期失败不得改动库里的凭据"
+        );
+        server.abort();
     }
 
     /// ⭐ 回归闸：充值窗口持有 NewAPI 账号的 refresh 轮换独占权时，`usable_relay`

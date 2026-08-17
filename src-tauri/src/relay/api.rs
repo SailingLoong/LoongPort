@@ -44,7 +44,10 @@ use std::sync::Arc;
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::provider::{UsageData, UsageResult};
-use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
+use crate::relay::backend::{
+    BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate, AUTH_DEAD_MARKER, AUTH_EXPIRED_MARKER,
+    RELOGIN_MARKER,
+};
 use crate::relay::platform_map::{parse_platform, Platform};
 
 pub const PROBE_ADAPTER: ProbeAdapter = ProbeAdapter {
@@ -1115,10 +1118,12 @@ fn classify_401(body: &str, what: &str) -> AppError {
 
     if UNRECOVERABLE.contains(&code.as_str()) {
         AppError::Config(format!(
-            "{what}失败: 登录态已失效（{code}），请重新登录中转站账号"
+            "{what}失败: {AUTH_DEAD_MARKER}（{code}），{RELOGIN_MARKER}中转站账号"
         ))
     } else {
-        AppError::Config(format!("{what}失败: 登录已过期（{code}），请重新登录"))
+        AppError::Config(format!(
+            "{what}失败: {AUTH_EXPIRED_MARKER}（{code}），{RELOGIN_MARKER}"
+        ))
     }
 }
 

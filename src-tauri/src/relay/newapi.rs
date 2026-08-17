@@ -10,7 +10,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::relay::backend::{BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate};
+use crate::relay::backend::{
+    BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate, AUTH_DEAD_MARKER, RELOGIN_MARKER,
+};
 
 /// refresh cookie 的名字。`pub(crate)`：commands 层的命令级测试要按它构造 fake
 /// 站点的 Set-Cookie / 路由 —— 协议细节的唯一 owner 在本模块，那边只**引用**不复制
@@ -641,7 +643,7 @@ fn describe_send_error(error: &reqwest::Error) -> String {
 fn classify_authenticated_http_status(operation: &str, status: reqwest::StatusCode) -> AppError {
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return AppError::Config(format!(
-            "newapi {operation} 失败: 登录态已失效（HTTP {}），请重新登录中转站账号",
+            "newapi {operation} 失败: {AUTH_DEAD_MARKER}（HTTP {}），{RELOGIN_MARKER}中转站账号",
             status.as_u16()
         ));
     }

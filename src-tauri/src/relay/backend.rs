@@ -89,13 +89,38 @@ pub struct RefreshedSession {
     pub account: Option<RuntimeAccount>,
 }
 
+/// 401 文案的**措辞标记**：api / newapi 两条协议侧格式化错误时必须用这些常量拼，
+/// 这边的谓词按它们分拣。各写一遍字面量迟早分叉，分叉的后果见
+/// [`is_token_expiry_failure`] 的文档。
+pub const AUTH_DEAD_MARKER: &str = "登录态已失效";
+pub const AUTH_EXPIRED_MARKER: &str = "登录已过期";
+pub const RELOGIN_MARKER: &str = "请重新登录";
+
 pub fn is_confirmed_auth_failure(error: &AppError) -> bool {
     match error {
         AppError::Config(message)
         | AppError::InvalidInput(message)
         | AppError::Message(message) => {
-            message.contains("登录态已失效") || message.contains("请重新登录")
+            message.contains(AUTH_DEAD_MARKER) || message.contains(RELOGIN_MARKER)
         }
+        _ => false,
+    }
+}
+
+/// 「token 过期、但 refresh 可能救得回来」的那一类 401，与 [`is_confirmed_auth_failure`]
+/// 里「账号已死」那类（被禁用 / 会话被撤销 / 用户不存在）相对 —— 后者续期也无济于事。
+///
+/// 这是「过期了靠 401 发现」那半句承诺的兑现处：`token_expires_at = NULL` 的乐观降级行
+/// （登录快照没带回过期时间的站点）永远不会触发主动续期，唯一的自救机会就是撞上
+/// 过期 401 之后先续期一次再重试（见 `commands::relay::relay_read_with_refresh_retry`）。
+///
+/// NewAPI 的 401 文案落在「已失效」那类、**有意**不在此列：它的 refresh cookie 有
+/// 30 秒 reuse 判定，拿可能已被消费的 cookie 盲目重试会吊销整个会话族。
+pub fn is_token_expiry_failure(error: &AppError) -> bool {
+    match error {
+        AppError::Config(message)
+        | AppError::InvalidInput(message)
+        | AppError::Message(message) => message.contains(AUTH_EXPIRED_MARKER),
         _ => false,
     }
 }
@@ -632,5 +657,30 @@ mod tests {
         assert!(!is_confirmed_auth_failure(&AppError::Config(
             "newapi self 请求失败: HTTP 500".into()
         )));
+    }
+
+    #[test]
+    fn token_expiry_failure_is_disjoint_from_dead_account_wording() {
+        let expired = AppError::Config(format!(
+            "获取余额失败: {AUTH_EXPIRED_MARKER}（TOKEN_EXPIRED），{RELOGIN_MARKER}"
+        ));
+        let dead = AppError::Config(format!(
+            "获取余额失败: {AUTH_DEAD_MARKER}（USER_INACTIVE），{RELOGIN_MARKER}中转站账号"
+        ));
+
+        assert!(is_token_expiry_failure(&expired), "{expired}");
+        // 账号已死（被禁用 / 会话被撤销）那类 401 续期救不回来，不该触发续期重试。
+        assert!(!is_token_expiry_failure(&dead), "{dead}");
+        assert!(!is_token_expiry_failure(&AppError::Config(
+            "获取余额失败: HTTP 502 Bad Gateway".into()
+        )));
+        assert!(!is_token_expiry_failure(&AppError::Database(
+            "数据库被锁".into()
+        )));
+
+        // 措辞闸：两类标记互不为子串 —— 「登录已过期」一旦被写进「登录态已失效」
+        // 的文案，过期 401 会被误判成账号已死、永远不触发续期重试。
+        assert!(!AUTH_DEAD_MARKER.contains(AUTH_EXPIRED_MARKER));
+        assert!(!AUTH_EXPIRED_MARKER.contains(AUTH_DEAD_MARKER));
     }
 }
