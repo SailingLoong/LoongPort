@@ -640,7 +640,8 @@ function App() {
     }
   }, [starRewardActive]);
 
-  /** 弹窗发码时刻：熄红点（持久化由弹窗自己负责）。 */
+  /** 弹窗「领取」点击时刻：熄红点（领没领成功都熄；取消/叉不触发）。
+   * 持久化的熄灭靠发码时的 markClaimed，这里只是会话内立即生效。 */
   const handleStarRewardClaimed = useCallback(() => {
     starRewardClaimedRef.current = true;
     setStarRewardActive(false);

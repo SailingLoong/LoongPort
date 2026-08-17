@@ -98,12 +98,13 @@ describe("StarRewardDialog", () => {
     expect(screen.getByText("loongport.star.grantedUnverified")).toBeTruthy();
   });
 
-  it("取消 → 只关窗，不发码不开窗", () => {
-    const { onClose } = renderDialog();
+  it("取消 → 只关窗，不发码不开窗，红点保留（onClaimed 不触发）", () => {
+    const { onClose, onClaimed } = renderDialog();
     fireEvent.click(screen.getByText("loongport.star.cancel"));
     expect(onClose).toHaveBeenCalled();
     expect(starViaGh).not.toHaveBeenCalled();
     expect(openRegisterWindow).not.toHaveBeenCalled();
     expect(markClaimed).not.toHaveBeenCalled();
+    expect(onClaimed).not.toHaveBeenCalled();
   });
 });
