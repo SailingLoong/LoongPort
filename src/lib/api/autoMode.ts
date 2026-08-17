@@ -17,6 +17,8 @@ export interface AutoModeStatus {
   availableModels: string[];
   /** 有没有可用的托管档位（与开启判据同源）；总开关只对 true 的 app 生效。 */
   hasCandidates: boolean;
+  /** 该 CLI 的配置文件是否存在（= CLI 装过/初始化过）；接管必依赖它。 */
+  cliInstalled: boolean;
 }
 
 export const autoModeApi = {

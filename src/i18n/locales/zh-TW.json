@@ -2652,7 +2652,8 @@
     "masterLabel": "省心模式總開關",
     "masterOnToast": "省心模式已開啟（有託管檔位的應用）",
     "masterOffToast": "省心模式已全部關閉，路由接管已恢復",
-    "noCandidatesHint": "沒有可用的託管檔位 —— 先在中轉站區登入並取得檔位"
+    "noCandidatesHint": "沒有可用的託管檔位 —— 先在中轉站區登入並取得檔位",
+    "cliMissingHint": "未偵測到該 CLI 的設定檔（未安裝或未初始化），無法接管；安裝並執行一次該 CLI 後再來開啟"
   },
   "proxy": {
     "panel": {
