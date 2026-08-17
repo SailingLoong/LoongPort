@@ -344,6 +344,28 @@ async fn active_session_sticks_to_current_tier_over_cheaper_one() {
     fx.server.stop().await.expect("stop server");
 }
 
+/// 手动模式：用户清单序优先于策略序（便宜者让位）——首页看板拖拽落定的
+/// 语义在真实选路链上的落点。
+#[tokio::test]
+#[serial]
+async fn manual_order_overrides_strategy_in_routing() {
+    let fx = E2eFixture::new().await;
+    // 手动序：贵档第一（与 cheapest 策略序相反）
+    auto_strategy::set_mode(&fx.db, "claude", auto_strategy::EasyModeMode::Manual).unwrap();
+    auto_strategy::set_manual_order(
+        &fx.db,
+        "claude",
+        &[fx.expensive_id.clone(), fx.cheap_id.clone()],
+    )
+    .unwrap();
+
+    let marker = response_text(send_message(fx.port, "sess-e2e-manual-00001").await).await;
+    assert_eq!(marker, "served-by-expensive");
+    assert_eq!(fx.expensive.hits(), 1);
+    assert_eq!(fx.cheap.hits(), 0, "策略上更便宜的档位必须让位给手动序");
+    fx.server.stop().await.expect("stop server");
+}
+
 /// 在用档位（便宜）故障：请求内故障转移到下一家、客户端始终拿到 200；
 /// 恢复后回到在用档位。熔断 1 次失败即开 + 冷却 0 ⇒ 每条请求允许探测一次。
 #[tokio::test]

@@ -218,3 +218,137 @@ async fn real_upstream_roundtrip_through_local_proxy() {
     }
     server.stop().await.expect("stop server");
 }
+
+/// 看板实拍：真实库副本上的聚合事实（顺序/倍率/单价/耗时/余额）。
+/// 不发模型请求（余额是免费 GET），观察首页省心视图将看到什么。
+#[tokio::test]
+#[serial]
+#[ignore = "需要 LOONGPORT_SMOKE_DB；余额查询打真实站点（GET /v1/usage，免费）"]
+async fn real_tier_board_snapshot() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (_home, db) = smoke_db();
+    let state = crate::store::AppState::new(db);
+    let board = crate::tier_board_impl(&state, "claude")
+        .await
+        .expect("tier board");
+    println!(
+        "[smoke] mode={} strategy={} model={:?} current={:?}",
+        board.mode, board.strategy, board.model, board.current_provider_id
+    );
+    for tier in board.tiers.iter().take(8) {
+        println!(
+            "[smoke] #{} {} ×{:?} ${:?}/M ttft={:?}ms balance=${:?} current={}",
+            tier.position,
+            tier.name,
+            tier.rate_multiplier,
+            tier.unit_price_per_million,
+            tier.avg_first_token_ms,
+            tier.balance_usd,
+            tier.is_current
+        );
+    }
+    assert!(!board.tiers.is_empty(), "真实库里应有托管档位");
+}
+
+/// 手动序优先实拍：把看板第一名设为手动序第一，发一条真实请求，
+/// 断言它被**首先尝试**（落库出现该档的行——失败也会留痕，语义与站点健康无关）。
+#[tokio::test]
+#[serial]
+#[ignore = "需要 LOONGPORT_SMOKE_DB；发一条真实请求（小额花费）"]
+async fn real_manual_order_routes_to_user_first_pick() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (_home, db) = smoke_db();
+    let state = crate::store::AppState::new(db);
+
+    // 手动序 = [看板第 2 位, 看板第 1 位, 其余反转]：第 2 位提到第 1 之前，
+    // 与自动策略序不同（否则证明力为零）。断言探针选「必有 HTTP 交换」的档位
+    // ——网络层失败（连接拒绝/超时）不写 proxy_request_logs，只有 HTTP 交换
+    // （2xx/4xx/5xx）留痕；newapi/sub2api 站点总会回 HTTP。
+    let board = crate::tier_board_impl(&state, "claude")
+        .await
+        .expect("tier board");
+    assert!(board.tiers.len() >= 2, "至少两档才能构造证明性手动序");
+    let mut manual: Vec<String> = vec![
+        board.tiers[1].provider_id.clone(),
+        board.tiers[0].provider_id.clone(),
+    ];
+    let mut rest: Vec<String> = board
+        .tiers
+        .iter()
+        .skip(2)
+        .map(|t| t.provider_id.clone())
+        .collect();
+    rest.reverse();
+    manual.extend(rest);
+    let first = manual[0].clone();
+    let model = board.tiers[1]
+        .effective_model
+        .clone()
+        .expect("手动序第一档要有有效模型");
+    crate::proxy::auto_strategy::set_mode(
+        &state.db,
+        "claude",
+        crate::proxy::auto_strategy::EasyModeMode::Manual,
+    )
+    .unwrap();
+    crate::proxy::auto_strategy::set_manual_order(&state.db, "claude", &manual).unwrap();
+
+    let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
+    config.auto_failover_enabled = true;
+    config.max_retries = 0; // 只尝试手动序第一档：落库行是谁，选路序就是谁
+    state.db.update_proxy_config_for_app(config).await.unwrap();
+    crate::proxy::auto_strategy::set_enabled(&state.db, "claude", true).unwrap();
+
+    let server = ProxyServer::new(
+        ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        },
+        state.db.clone(),
+        None,
+    );
+    let info = server.start().await.expect("start proxy");
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{}/v1/messages", info.port))
+        .header("x-claude-code-session-id", "sess-real-manual-0001")
+        .json(&serde_json::json!({
+            "model": model, "max_tokens": 16, "stream": false,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .expect("拿到 HTTP 响应");
+    println!("[smoke] 手动序第一档 {} → {}", first, resp.status());
+
+    // 落库 = 每条客户端请求一行（最终尝试的档位）；max_retries=0 ⇒ 唯一一次
+    // 尝试就是手动序第一档 —— 行的 provider_id 直接证明选路吃了手动序
+    //（若选路仍按自动序，会先打看板第一名，落库的就是另一个 id）。
+    {
+        let conn = state.db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider_id, status_code FROM proxy_request_logs
+                 WHERE session_id LIKE 'sess-real-manual%'",
+            )
+            .expect("prepare");
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+        for (pid, code) in &rows {
+            println!("[smoke] 手动序请求落库 {pid} → {code}");
+        }
+        assert_eq!(rows.len(), 1, "max_retries=0 应恰有一行");
+        assert_eq!(
+            rows[0].0, first,
+            "唯一尝试的档位必须是手动序第一档（自动序会先打看板第一名）"
+        );
+    }
+    server.stop().await.expect("stop server");
+}
