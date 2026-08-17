@@ -47,7 +47,6 @@ const requiredKeys = [
   "directory.compatibilityNote",
   // 新人首启的「手填域名直达」弹窗（广场列表动态加载期间的捷径）。
   "firstSite.title",
-  "firstSite.body",
   "firstSite.placeholder",
   "firstSite.confirm",
   "firstSite.cancel",

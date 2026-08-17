@@ -3442,7 +3442,6 @@
     },
     "firstSite": {
       "title": "Add your first relay site",
-      "body": "The plaza list is still loading. Enter the domain your site owner gave you to jump straight into its sign-up / login.",
       "placeholder": "bestapi.store",
       "confirm": "Go to sign-up / login",
       "cancel": "Browse the plaza first"

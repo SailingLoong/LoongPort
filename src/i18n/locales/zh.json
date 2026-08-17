@@ -3442,7 +3442,6 @@
     },
     "firstSite": {
       "title": "添加你的第一个中转站",
-      "body": "广场推荐列表还在加载。先输入站长给你的域名，直接进入该站的注册 / 登录。",
       "placeholder": "bestapi.store",
       "confirm": "进入注册 / 登录",
       "cancel": "先逛逛广场"
