@@ -468,6 +468,15 @@ impl AppType {
         )
     }
 
+    /// 该 app 是否有可托管的提示词文件（CLAUDE.md / AGENTS.md / …）。
+    ///
+    /// ClaudeDesktop 与 CodexImage 不是能读提示词文件的 CLI —— 见
+    /// [`AppType::CodexImage`] 的说明。「支不支持 Prompts」以这里为唯一判据，
+    /// 别在调用方再手写排除名单。
+    pub fn supports_prompts(&self) -> bool {
+        !matches!(self, AppType::ClaudeDesktop | AppType::CodexImage)
+    }
+
     /// Return an iterator over all app types
     pub fn all() -> impl Iterator<Item = AppType> {
         [
@@ -1353,5 +1362,28 @@ mod app_type_all_tests {
     #[test]
     fn the_codex_image_const_matches_as_str() {
         assert_eq!(AppType::CODEX_IMAGE_STR, AppType::CodexImage.as_str());
+    }
+
+    /// 「支不支持 Prompts」的唯一判据是 [`AppType::supports_prompts`]。
+    ///
+    /// 名单漏更的后果不是编译红，而是**误报**：全量 Prompt 同步
+    /// （一键导入 / 云同步恢复后置）会把生图栏报成「导入后同步失败」，
+    /// 而导入本身明明成功了。加新 app 类型时这条闸会逼着把能力判定
+    /// 补进谓词，而不是指望散落各处的手写名单记得改。
+    #[test]
+    fn supports_prompts_flags_non_cli_slots() {
+        assert!(!AppType::ClaudeDesktop.supports_prompts());
+        assert!(!AppType::CodexImage.supports_prompts());
+        // 其余（含 Pi——`sync_to_live` 对它的跳过是投影语义不同，不是能力
+        // 缺失）都是能读 CLAUDE.md / AGENTS.md / SOUL.md 的 CLI。
+        for app in AppType::all() {
+            let is_non_cli = matches!(app, AppType::ClaudeDesktop | AppType::CodexImage);
+            assert_ne!(
+                app.supports_prompts(),
+                is_non_cli,
+                "{} 的 Prompts 能力判定与名单不一致",
+                app.as_str()
+            );
+        }
     }
 }
