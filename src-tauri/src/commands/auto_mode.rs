@@ -300,13 +300,305 @@ pub(crate) async fn set_auto_mode_model_impl(
     Ok(())
 }
 
+/// 设置某应用的省心选路模式（auto / manual）。
+///
+/// 首次切到 manual 且还没有手动清单时，把当前选路序快照成初始清单 ——
+/// 用户从现状开始拖，不给空白列表。
+#[tauri::command]
+pub async fn set_easy_mode_mode(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    mode: String,
+) -> Result<(), String> {
+    require_auto_mode_app(&app_type)?;
+    let parsed = auto_strategy::EasyModeMode::from_setting_value(&mode);
+    if parsed.as_str() != mode {
+        return Err(format!("未知的省心选路模式: {mode}"));
+    }
+    if parsed == auto_strategy::EasyModeMode::Manual
+        && auto_strategy::get_manual_order(&state.db, &app_type).is_empty()
+    {
+        let snapshot: Vec<String> =
+            auto_strategy::rank_managed_tier_candidates(&state.db, &app_type, false)
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| p.id)
+                .collect();
+        if !snapshot.is_empty() {
+            auto_strategy::set_manual_order(&state.db, &app_type, &snapshot)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    auto_strategy::set_mode(&state.db, &app_type, parsed).map_err(|e| e.to_string())
+}
+
+/// 写某应用的手动档位顺序（前端拖拽落定后整份提交）。
+#[tauri::command]
+pub async fn set_easy_mode_manual_order(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    ordered_ids: Vec<String>,
+) -> Result<(), String> {
+    require_auto_mode_app(&app_type)?;
+    auto_strategy::set_manual_order(&state.db, &app_type, &ordered_ids).map_err(|e| e.to_string())
+}
+
+/// 省心模式档位看板的一行（首页省心视图的展示事实，全部后端算好）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierBoardTier {
+    pub provider_id: String,
+    pub name: String,
+    /// 展示序即选路优先级序（含亲和置顶/手动序）。
+    pub position: usize,
+    pub is_current: bool,
+    pub rate_multiplier: Option<f64>,
+    /// 该档位有效模型的单价（每百万 token 输入+输出之和，美元）；
+    /// `None` = 价格未知 —— 排序保守垫底的同一个事实，前端原样展示「未知」。
+    pub unit_price_per_million: Option<f64>,
+    pub effective_model: Option<String>,
+    pub avg_first_token_ms: Option<u64>,
+    /// 站点钱包余额（美元）。sub2api 用档位 sk 直查 `GET /v1/usage`（同站各档
+    /// 共享一个账号钱包）；newapi 无此路 → `None`（前端显示 —，走登录态的余额链）。
+    pub balance_usd: Option<f64>,
+}
+
+/// 省心模式档位看板：首页省心视图一次拉全的聚合 DTO。
+///
+/// 业务事实（顺序/模式/策略/倍率/单价/耗时/命中/余额）的唯一源在后端，
+/// 前端只渲染 —— 别在前端用多个原始命令各拼一遍（分叉温床）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierBoard {
+    /// "auto" | "manual"
+    pub mode: String,
+    /// "cheapest" | "fastest"（全局一份）
+    pub strategy: String,
+    pub model: Option<String>,
+    pub available_models: Vec<String>,
+    pub current_provider_id: Option<String>,
+    pub tiers: Vec<TierBoardTier>,
+}
+
+/// 省心模式档位看板（首页省心视图数据源）。
+#[tauri::command]
+pub async fn easy_mode_tier_board(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+) -> Result<TierBoard, String> {
+    tier_board_impl(&state, &app_type).await
+}
+
+/// 看板核心（真实 smoke 直接调它，不走 tauri State）。
+pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<TierBoard, String> {
+    require_auto_mode_app(app_type)?;
+    let db = &state.db;
+    let providers = db.get_all_providers(app_type).map_err(|e| e.to_string())?;
+    let ranked = auto_strategy::rank_managed_tier_candidates(db, app_type, true)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let multipliers = db.get_tier_rate_multipliers(app_type).unwrap_or_default();
+    let ttft = db
+        .get_provider_avg_first_token_ms(app_type, chrono::Utc::now().timestamp() - 7 * 86400)
+        .unwrap_or_default();
+    let model_pref = auto_strategy::get_model_pref(db, app_type);
+    let current_id = auto_strategy::effective_current_provider_id(db, app_type);
+
+    let balances = fetch_site_balances(app_type, &ranked).await;
+
+    let tiers = ranked
+        .into_iter()
+        .enumerate()
+        .map(|(position, p)| TierBoardTier {
+            is_current: current_id.as_deref() == Some(p.id.as_str()),
+            effective_model: model_pref
+                .clone()
+                .or_else(|| crate::relay::provision::extract_model(&p.settings_config)),
+            unit_price_per_million: auto_strategy::effective_unit_price(
+                db,
+                &p,
+                model_pref.as_deref(),
+            ),
+            rate_multiplier: multipliers.get(&p.id).copied(),
+            avg_first_token_ms: ttft.get(&p.id).copied(),
+            balance_usd: balances.get(&p.id).copied(),
+            provider_id: p.id.clone(),
+            name: p.name.clone(),
+            position,
+        })
+        .collect();
+
+    Ok(TierBoard {
+        mode: auto_strategy::get_mode(db, app_type).as_str().to_string(),
+        strategy: auto_strategy::get_strategy(db).as_str().to_string(),
+        model: model_pref,
+        available_models: auto_strategy::auto_mode_models(&providers),
+        current_provider_id: current_id,
+        tiers,
+    })
+}
+
+/// sub2api 站点钱包余额：按「站点 origin」去重，每个 origin 用第一把 sk 查一次
+/// `GET /v1/usage`（登录态过期也能查），回填到该站的全部档位上。newapi 站
+/// 403/404 → 该站各档 `None`。只对 https 端点发起（http/本地/无 sk 自然跳过，
+/// 单元测试零网络）。
+async fn fetch_site_balances(
+    app_type: &str,
+    tiers: &[crate::provider::Provider],
+) -> std::collections::HashMap<String, f64> {
+    use crate::app_config::AppType;
+    let app = match AppType::from_str(app_type) {
+        Ok(app) => app,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let Some(adapter) = crate::proxy::providers::get_adapter(&app) else {
+        return std::collections::HashMap::new();
+    };
+
+    let mut tier_origin: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut origin_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for tier in tiers {
+        let (base, auth) = match (adapter.extract_base_url(tier), adapter.extract_auth(tier)) {
+            (Ok(base), Some(auth)) => (base, auth),
+            _ => continue,
+        };
+        let Some(origin) = origin_of(&base) else {
+            continue;
+        };
+        if !origin.starts_with("https://") {
+            continue;
+        }
+        tier_origin.insert(tier.id.clone(), origin.clone());
+        origin_key.entry(origin).or_insert(auth.api_key);
+    }
+
+    let mut balances = std::collections::HashMap::new();
+    let queries: Vec<_> = origin_key
+        .into_iter()
+        .map(|(origin, key)| async move {
+            let balance = crate::relay::api::usage_with_api_key(&origin, &key)
+                .await
+                .ok()
+                .and_then(|usage| {
+                    usage
+                        .data
+                        .and_then(|items| items.first().and_then(|item| item.remaining))
+                });
+            (origin, balance)
+        })
+        .collect();
+    for (origin, balance) in futures::future::join_all(queries).await {
+        if let Some(balance) = balance {
+            for (tier_id, tier_origin) in &tier_origin {
+                if tier_origin == &origin {
+                    balances.insert(tier_id.clone(), balance);
+                }
+            }
+        }
+    }
+    balances
+}
+
+/// 从 base_url 取 `scheme://authority`（`https://site/v1` → `https://site`）。
+fn origin_of(base_url: &str) -> Option<String> {
+    let (scheme, rest) = base_url.split_once("://")?;
+    let authority = rest.split('/').next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::require_auto_mode_app;
+    use super::{require_auto_mode_app, tier_board_impl};
+    use crate::store::AppState;
+    use crate::Database;
+    use serde_json::json;
+    use serial_test::serial;
+    use std::sync::Arc;
 
     #[test]
     fn auto_mode_rejects_apps_without_a_proxy_data_plane() {
         assert!(require_auto_mode_app("claude").is_ok());
         assert!(require_auto_mode_app("pi").is_err());
+    }
+
+    /// 看板聚合：顺序=选路序、倍率/单价/耗时/命中齐全；手动模式反映手动序。
+    /// 余额链对 http 端点零网络（真实站点路径由 ignored 的真实 smoke 覆盖）。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_aggregates_display_facts() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let expensive = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let cheap = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        // http 端点（fetch_site_balances 只对 https 发请求）
+        let tier = |id: &str, name: &str, config: serde_json::Value| {
+            crate::provider::Provider::with_id(id.to_string(), name.to_string(), config, None)
+        };
+        db.save_provider(
+            "claude",
+            &tier(&expensive, "贵档", json!({ "config": "model = \"m-x\"\n" })),
+        )
+        .unwrap();
+        db.save_provider(
+            "claude",
+            &tier(&cheap, "便宜档", json!({ "config": "model = \"m-x\"\n" })),
+        )
+        .unwrap();
+        db.set_tier_rate_multiplier("claude", &expensive, Some(2.0))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
+            .unwrap();
+        db.set_current_provider("claude", &expensive).unwrap();
+
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        assert_eq!(board.mode, "auto");
+        assert_eq!(board.strategy, "cheapest");
+        assert_eq!(board.tiers.len(), 2);
+        assert_eq!(board.tiers[0].provider_id, cheap, "自动模式便宜在前");
+        assert_eq!(board.tiers[0].rate_multiplier, Some(0.5));
+        assert_eq!(
+            board.tiers[0].unit_price_per_million, None,
+            "价表没收录 → 未知"
+        );
+        assert!(
+            board
+                .tiers
+                .iter()
+                .any(|t| t.is_current && t.provider_id == expensive),
+            "当前档位有命中标记"
+        );
+
+        // 手动模式：手动序反映到看板
+        crate::proxy::auto_strategy::set_mode(
+            &db,
+            "claude",
+            crate::proxy::auto_strategy::EasyModeMode::Manual,
+        )
+        .unwrap();
+        crate::proxy::auto_strategy::set_manual_order(
+            &db,
+            "claude",
+            &[expensive.clone(), cheap.clone()],
+        )
+        .unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        assert_eq!(board.mode, "manual");
+        assert_eq!(board.tiers[0].provider_id, expensive, "手动序优先");
+    }
+
+    fn test_home() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+        crate::settings::reload_settings().unwrap();
+        dir
     }
 }
