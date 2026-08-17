@@ -138,8 +138,8 @@ importers:
         specifier: ^3.10.1
         version: 3.10.1(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react-is@17.0.2)(react@19.2.8)(redux@5.0.1)
       smol-toml:
-        specifier: ^1.7.2
-        version: 1.7.2
+        specifier: ^1.8.0
+        version: 1.8.0
       sonner:
         specifier: ^2.0.8
         version: 2.0.8(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -160,8 +160,8 @@ importers:
         specifier: ^16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@testing-library/user-event':
-        specifier: ^14.6.3
-        version: 14.6.3(@testing-library/dom@10.4.1)
+        specifier: ^14.6.4
+        version: 14.6.4(@testing-library/dom@10.4.1)
       '@types/node':
         specifier: ^26.2.0
         version: 26.2.0
@@ -179,7 +179,7 @@ importers:
         version: 10.5.4(postcss@8.5.26)
       code-inspector-plugin:
         specifier: ^2.0.7
-        version: 2.0.7(supports-color@7.2.0)
+        version: 2.0.7
       cross-fetch:
         specifier: ^4.1.0
         version: 4.1.0
@@ -1288,42 +1288,36 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-arm64-musl@1.2.4':
     resolution: {integrity: sha512-Ql1Q0EQqVThvn9VAVlwNzsUvbSFtCMGjLpRRi4pk5i7NZZ4n5ISiLMjHYtus4VQ2PvkSw24zyaCVsiS+sXPj1w==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@rolldown/binding-linux-ppc64-gnu@1.2.4':
     resolution: {integrity: sha512-GjbjXD4XXfN19D0LZNbmiCBUoDiRACsYHr0yaIbbn8aFsXjHZifcYqu/W5Er5X2X990WjHXFrxarn5chzItorQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [ppc64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-s390x-gnu@1.2.4':
     resolution: {integrity: sha512-p5WR0NOwaRmJ/B1b6IjEFLLivwEsf3PrdBIhRbhTCQisbo2SvHHpG4ELB/+FgQNnB88LTOF86upmJmbvZdQ2lw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [s390x]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-x64-gnu@1.2.4':
     resolution: {integrity: sha512-4/GyVjmhR+Tc6HLJvwc1sOhPqAZtySiSMesOZyX6JQ5XBxoTDEMKQzvo07NIK6nTon/SivlZqvhzvuVBNQhObQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-x64-musl@1.2.4':
     resolution: {integrity: sha512-l9eeLsCNvPpmSXUej0etw/J1eqV0Jj1D5G/xG6YTijmE6dkv6E2QezgWbTfQk63v952DPqrjOCoiqxq7Bw0YUQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@rolldown/binding-openharmony-arm64@1.2.4':
     resolution: {integrity: sha512-e0F355MSTMm3+UOqtV3L24gFUp2N5m1f8L/7d56deik6va+AXdrt9F8LbzGpeWGWRbZEDq4m8NVnJDeBtf9DZg==}
@@ -1395,35 +1389,30 @@ packages:
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-arm64-musl@2.11.4':
     resolution: {integrity: sha512-v277UnT/fB64xAfSroL5N3Km3tLmvATWqJJw/wRI+g6o+HkeD0slyE7gOhNs1MbjE41R7bQOTxMVoL3aomUJmw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@tauri-apps/cli-linux-riscv64-gnu@2.11.4':
     resolution: {integrity: sha512-qqgNkQ2u1yZHxjhxsZaxUtRDW8dIqIYm33rx/mzwQv0SfY9x1B+iraj8vWeFiXjjSVVhEMepXSOts1TqPzvXNQ==}
     engines: {node: '>= 10'}
     cpu: [riscv64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-x64-gnu@2.11.4':
     resolution: {integrity: sha512-2VRNWl84FOH0m2giiDkO2h0QXlcMJeX+zJDpI5kDIQAx6s+geF3v48F4DXfJez4GS/FdoDGnPnw1C2iYGbQ7bQ==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-x64-musl@2.11.4':
     resolution: {integrity: sha512-o9GyhYor/nc7xarmwDE3ka2szuW3uuZzXjHWh64Q8YX5AtSgxdQkFWzrY4O8KiGtVNvFBI14H3Q49Qj5TOIP/A==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@tauri-apps/cli-win32-arm64-msvc@2.11.4':
     resolution: {integrity: sha512-ld5Ehb598m0VkYyylRPNeCFsBe/km0jxis6KgMpl3IGY6I/i1RwQXO05I1AsXUXO2WC6AvB/Lw4qTf/asiuEiQ==}
@@ -1486,8 +1475,8 @@ packages:
       '@types/react-dom':
         optional: true
 
-  '@testing-library/user-event@14.6.3':
-    resolution: {integrity: sha512-6dBq67jT8lE+JTE8Exm02Kt6ze43hz1jdiSpSJwtTZiT1xQQ6b7nZYTTQ9njdArdU8XklOwaDp/AbT/eYSKF4g==}
+  '@testing-library/user-event@14.6.4':
+    resolution: {integrity: sha512-QCGwP6QrjypBLwyj5cuyfVamkaIEy/XGY+1VDehbtbQqOggYmTFpFOdWR5mPz14vX8vXLMVjDHlRNBcClyO9ew==}
     engines: {node: '>=12', npm: '>=6'}
     peerDependencies:
       '@testing-library/dom': '>=7.21.4'
@@ -2260,28 +2249,24 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   lightningcss-linux-arm64-musl@1.33.0:
     resolution: {integrity: sha512-yiO5ROMuYQgXbC60yjZU5CYSFZGKXL0HFATXt9mHJn1+zW55oCtMI9NfcVhYLMFDL7gV7oBPon/EmMMGg2OvtQ==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   lightningcss-linux-x64-gnu@1.33.0:
     resolution: {integrity: sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   lightningcss-linux-x64-musl@1.33.0:
     resolution: {integrity: sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   lightningcss-win32-arm64-msvc@1.33.0:
     resolution: {integrity: sha512-1K+MPfLSFVpphzpdbfkhlWk6wBrTObBzS2T6db10PNOZgR9GoVsAWzwNyuhUYYbTp23j+4RrncfujZ4uAzXvwA==}
@@ -2668,8 +2653,8 @@ packages:
     resolution: {integrity: sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==}
     engines: {node: '>=14'}
 
-  smol-toml@1.7.2:
-    resolution: {integrity: sha512-pXFZ9B2WinEPzxWkMmlYE/oYx2BP+qLrE95wP8tCuK901uLSMGdCb6QSr82z+wnhXkG4+cO+OMLbZB2Cn+97zw==}
+  smol-toml@1.8.0:
+    resolution: {integrity: sha512-kCZr2V3ch9i00x8zXRhjUNVcjG9ijES5dDudkXvUVCT5QlJNQWElSJdZqyPemffHoLNUYwOcou0Fy+ojN0uHSQ==}
     engines: {node: '>= 18'}
 
   sonner@2.0.8:
@@ -3056,12 +3041,12 @@ snapshots:
     dependencies:
       css-tree: 3.2.1
 
-  '@code-inspector/core@2.0.7(supports-color@7.2.0)':
+  '@code-inspector/core@2.0.7':
     dependencies:
       '@vue/compiler-dom': 3.5.41
       chalk: 4.1.1
       launch-ide: 1.4.8
-      portfinder: 1.0.38(supports-color@7.2.0)
+      portfinder: 1.0.38
       ws: 8.21.3
     optionalDependencies:
       node-pty: 1.1.0
@@ -3070,9 +3055,9 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@code-inspector/esbuild@2.0.7(supports-color@7.2.0)':
+  '@code-inspector/esbuild@2.0.7':
     dependencies:
-      '@code-inspector/core': 2.0.7(supports-color@7.2.0)
+      '@code-inspector/core': 2.0.7
     transitivePeerDependencies:
       - '@anthropic-ai/claude-agent-sdk'
       - '@openai/codex-sdk'
@@ -3081,9 +3066,9 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@code-inspector/mako@2.0.7(supports-color@7.2.0)':
+  '@code-inspector/mako@2.0.7':
     dependencies:
-      '@code-inspector/core': 2.0.7(supports-color@7.2.0)
+      '@code-inspector/core': 2.0.7
     transitivePeerDependencies:
       - '@anthropic-ai/claude-agent-sdk'
       - '@openai/codex-sdk'
@@ -3092,10 +3077,10 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@code-inspector/turbopack@2.0.7(supports-color@7.2.0)':
+  '@code-inspector/turbopack@2.0.7':
     dependencies:
-      '@code-inspector/core': 2.0.7(supports-color@7.2.0)
-      '@code-inspector/webpack': 2.0.7(supports-color@7.2.0)
+      '@code-inspector/core': 2.0.7
+      '@code-inspector/webpack': 2.0.7
     transitivePeerDependencies:
       - '@anthropic-ai/claude-agent-sdk'
       - '@openai/codex-sdk'
@@ -3104,9 +3089,9 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@code-inspector/vite@2.0.7(supports-color@7.2.0)':
+  '@code-inspector/vite@2.0.7':
     dependencies:
-      '@code-inspector/core': 2.0.7(supports-color@7.2.0)
+      '@code-inspector/core': 2.0.7
       chalk: 4.1.1
     transitivePeerDependencies:
       - '@anthropic-ai/claude-agent-sdk'
@@ -3116,9 +3101,9 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@code-inspector/webpack@2.0.7(supports-color@7.2.0)':
+  '@code-inspector/webpack@2.0.7':
     dependencies:
-      '@code-inspector/core': 2.0.7(supports-color@7.2.0)
+      '@code-inspector/core': 2.0.7
     transitivePeerDependencies:
       - '@anthropic-ai/claude-agent-sdk'
       - '@openai/codex-sdk'
@@ -4178,7 +4163,7 @@ snapshots:
       '@types/react': 19.2.18
       '@types/react-dom': 19.2.4(@types/react@19.2.18)
 
-  '@testing-library/user-event@14.6.3(@testing-library/dom@10.4.1)':
+  '@testing-library/user-event@14.6.4(@testing-library/dom@10.4.1)':
     dependencies:
       '@testing-library/dom': 10.4.1
 
@@ -4470,14 +4455,14 @@ snapshots:
       - '@types/react'
       - '@types/react-dom'
 
-  code-inspector-plugin@2.0.7(supports-color@7.2.0):
+  code-inspector-plugin@2.0.7:
     dependencies:
-      '@code-inspector/core': 2.0.7(supports-color@7.2.0)
-      '@code-inspector/esbuild': 2.0.7(supports-color@7.2.0)
-      '@code-inspector/mako': 2.0.7(supports-color@7.2.0)
-      '@code-inspector/turbopack': 2.0.7(supports-color@7.2.0)
-      '@code-inspector/vite': 2.0.7(supports-color@7.2.0)
-      '@code-inspector/webpack': 2.0.7(supports-color@7.2.0)
+      '@code-inspector/core': 2.0.7
+      '@code-inspector/esbuild': 2.0.7
+      '@code-inspector/mako': 2.0.7
+      '@code-inspector/turbopack': 2.0.7
+      '@code-inspector/vite': 2.0.7
+      '@code-inspector/webpack': 2.0.7
       chalk: 4.1.1
     transitivePeerDependencies:
       - '@anthropic-ai/claude-agent-sdk'
@@ -4585,11 +4570,9 @@ snapshots:
     transitivePeerDependencies:
       - '@noble/hashes'
 
-  debug@4.4.3(supports-color@7.2.0):
+  debug@4.4.3:
     dependencies:
       ms: 2.1.3
-    optionalDependencies:
-      supports-color: 7.2.0
 
   decimal.js-light@2.5.1: {}
 
@@ -5037,10 +5020,10 @@ snapshots:
 
   pirates@4.0.7: {}
 
-  portfinder@1.0.38(supports-color@7.2.0):
+  portfinder@1.0.38:
     dependencies:
       async: 3.2.6
-      debug: 4.4.3(supports-color@7.2.0)
+      debug: 4.4.3
     transitivePeerDependencies:
       - supports-color
 
@@ -5245,7 +5228,7 @@ snapshots:
 
   signal-exit@4.1.0: {}
 
-  smol-toml@1.7.2: {}
+  smol-toml@1.8.0: {}
 
   sonner@2.0.8(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
     dependencies:

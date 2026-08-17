@@ -13,6 +13,12 @@ updates:
       frontend-deps:
         patterns:
           - "*"
+    ignore:
+      # v4 起 tailwind 不能再直接当 PostCSS 插件用（@tailwindcss/postcss 分家），
+      # 本仓钉 v3 —— 升 v4 是一次独立的迁移工程，不吃依赖组的顺带升级。
+      - dependency-name: "tailwindcss"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
