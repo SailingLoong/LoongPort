@@ -40,12 +40,15 @@ export function AddHubPage({
   initialTab = "directory",
   onBack,
   onAddProvider,
+  firstVisit = false,
 }: {
   sourceAppId: AppId;
   /** 进来落在哪个标签；顶栏大「+」与首启引导不传（落默认「中转站」）。 */
   initialTab?: AddHubTab;
   onBack: () => void;
   onAddProvider: AddProviderFormProps["onSubmit"];
+  /** 新人首启落广场：同时弹一次「手填域名直达」（见 `FirstVisitDomainDialog`）。 */
+  firstVisit?: boolean;
 }) {
   const { t } = useTranslation();
   const vendorSupported = useVendorSupportedQuery(sourceAppId);
@@ -90,6 +93,7 @@ export function AddHubPage({
           initialKind="overall"
           onBack={onBack}
           embedded
+          firstVisit={firstVisit}
         />
       </TabsContent>
 

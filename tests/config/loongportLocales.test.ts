@@ -45,6 +45,12 @@ const requiredKeys = [
   "directory.scoreLabel",
   "directory.signatureHint",
   "directory.compatibilityNote",
+  // 新人首启的「手填域名直达」弹窗（广场列表动态加载期间的捷径）。
+  "firstSite.title",
+  "firstSite.body",
+  "firstSite.placeholder",
+  "firstSite.confirm",
+  "firstSite.cancel",
   // 独立「官方 API」页（厂商选择 → 登录 → 备钥），与广场并列的子流程。
   "officialApi.title",
   "officialApi.description",

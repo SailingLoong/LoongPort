@@ -31,10 +31,7 @@ import {
   MODEL_VERIFICATION_CHANGED,
   ONBOARDING_REGISTER_COMPLETED,
 } from "@/lib/api/events";
-import {
-  promptOnboardingStarReward,
-  type OnboardingRegisterCompleted,
-} from "@/lib/onboarding";
+import { type OnboardingRegisterCompleted } from "@/lib/onboarding";
 import {
   vendorApi,
   type VendorAccountRow,
@@ -96,13 +93,16 @@ export interface RelaySectionProps {
   appId: AppId;
   /** 打开统一添加聚合页的指定标签。首启引导落「中转站」（综合榜）；
    * 两个区块的空态占位也经它指名跳转（中转站→directory / 官方 API→official）。 */
-  onOpenAddHub: (tab: "directory" | "official") => void;
+  onOpenAddHub: (
+    tab: "directory" | "official",
+    opts?: { firstVisit?: boolean },
+  ) => void;
 }
 
 /**
- * 「这个进程里已经自动弹过引导了」——**模块级变量，有意不是 state / ref**。
+ * 「这个进程里已经自动打开过广场了」——**模块级变量，有意不是 state / ref**。
  *
- * 需求是「以进程被打开为计算，进程不消亡就不重复弹」。而这个组件会**反复挂载卸载**：
+ * 需求是「以进程被打开为计算，进程不消亡就不重复跳」。而这个组件会**反复挂载卸载**：
  * `App.tsx` 只在 provider 视图下渲染它，用户切到设置页再切回来、或切换 app tab
  * （`appId` 变化本身不重挂，但视图切换会）都会走一次新的挂载。
  *
@@ -113,7 +113,7 @@ export interface RelaySectionProps {
  * ⚠️ 用 `localStorage` 是**错的**：那会跨进程持久化 ⇒ 用户第一次关掉引导之后，
  * 以后每次启动都不再提醒，即使他一个站都还没配。
  */
-let autoPromptedThisProcess = false;
+let autoOpenedHubThisProcess = false;
 
 export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
   /**
@@ -287,17 +287,16 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
       if (
         isImageTab ||
         !status.shouldPromptAddSite ||
-        autoPromptedThisProcess
+        autoOpenedHubThisProcess
       ) {
         return;
       }
-      autoPromptedThisProcess = true;
-      // 首启先问后端要不要给这个新用户弹「点 Star 领注册礼」（三道闸在后端：
-      // 资格 + 远端配置 + 基线星数，弹不弹那边说了算，事件直达 App 的弹窗）。
-      // 无论弹不弹，新人都落到中转站广场 —— 注册窗不再自动弹，它是 star
-      // 走通之后的终点，不是起点。
-      void promptOnboardingStarReward();
-      onOpenAddHub("directory");
+      autoOpenedHubThisProcess = true;
+      // 新人（还没有任何站点账号）落到中转站广场挑站点 —— 落点 + 一次
+      // 「手填域名直达」弹窗（广场列表动态加载，站长给的域名先走）。
+      // 「点 Star 领注册礼」推迟到首个站点接入成功之后由后端直接发事件
+      // （见 `commands::onboarding`），用户有使用感觉再邀请。
+      onOpenAddHub("directory", { firstVisit: true });
     } catch {
       // 状态读不到时不猜业务事实；保留最后一次完整后端视图。
     }

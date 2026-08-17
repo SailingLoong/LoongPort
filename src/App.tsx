@@ -210,6 +210,9 @@ function App() {
   // 聚合页进来落在哪个标签（顶栏 + / 空态占位 / 首启引导共用一个入口状态）。
   const [addHubInitialTab, setAddHubInitialTab] =
     useState<AddHubTab>("directory");
+  // 新人首启那次进广场带 firstVisit（弹「手填域名直达」）；普通「+」入口
+  // 不带。每进程至多一次，由 RelaySection 的 autoOpenedHubThisProcess 保证。
+  const [addHubFirstVisit, setAddHubFirstVisit] = useState(false);
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
@@ -585,13 +588,19 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([settingsApi.get(), starRewardApi.configured()])
-      .then(([settings, configured]) => {
+    settingsApi
+      .get()
+      .then((settings) => {
         if (cancelled) return;
         starRewardClaimedRef.current = settings.starRewardClaimed === true;
-        setStarRewardActive(configured && settings.starRewardClaimed !== true);
+        // 红点 =「礼还没领」，只认 durable 的 claimed —— 不再叠加
+        // configured（那是对「活动在不在」的瞬时缓存读：新装机缓存未落盘时
+        // 会把红点错误熄灭，而用户要求红点在领取前常亮）。活动真下线时点击
+        // 回落「直接开仓库」（offer 返回 null），见 handleGitHubStarClick。
+        setStarRewardActive(settings.starRewardClaimed !== true);
       })
       .catch(() => {
+        // 读不到设置就熄：不在顶栏挂一颗状态不明的红点（既有降级方向）。
         if (!cancelled) setStarRewardActive(false);
       });
     return () => {
@@ -1036,10 +1045,14 @@ function App() {
   };
 
   /** 打开聚合页；`tab` 缺省落「中转站」（首启引导同）。 */
-  const handleOpenAddHub = useCallback((tab: AddHubTab = "directory") => {
-    setAddHubInitialTab(tab);
-    setCurrentView("addHub");
-  }, []);
+  const handleOpenAddHub = useCallback(
+    (tab: AddHubTab = "directory", opts?: { firstVisit?: boolean }) => {
+      setAddHubInitialTab(tab);
+      setAddHubFirstVisit(opts?.firstVisit === true);
+      setCurrentView("addHub");
+    },
+    [],
+  );
 
   const renderContent = () => {
     const content = (() => {
@@ -1051,6 +1064,7 @@ function App() {
               initialTab={addHubInitialTab}
               onBack={() => setCurrentView("providers")}
               onAddProvider={addProvider}
+              firstVisit={addHubFirstVisit}
             />
           );
         case "settings":

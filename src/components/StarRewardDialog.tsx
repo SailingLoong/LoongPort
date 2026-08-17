@@ -63,7 +63,9 @@ export function StarRewardDialog({
     };
   }, []);
 
-  const amount = `$${offer.amountUsd}`;
+  // 只传数值：`$` 符号在各语言文案里（`${{amount}}`）——组件再拼一个 `$`
+  // 会和文案里的叠成 `$$5`。
+  const amount = String(offer.amountUsd);
 
   /** 发码：置 granted → 持久化 claimed → 通知 App → 开注册窗（码自动预填）。 */
   const grant = (via: GrantedVia) => {

@@ -1604,10 +1604,8 @@ pub fn run() {
             // LoongPort 中转站
             commands::relay_status,
             // 新人引导（点 Star 领注册礼 + 注册窗终点）与其机制层（星数 / gh 代点）
-            commands::onboarding_prompt_star_reward,
             commands::onboarding_open_register_window,
             commands::star_reward_offer,
-            commands::star_reward_configured,
             commands::star_reward_mark_claimed,
             commands::github_star_count,
             commands::github_star_via_gh,

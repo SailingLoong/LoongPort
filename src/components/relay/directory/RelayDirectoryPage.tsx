@@ -35,6 +35,7 @@ import {
   visibleDirectoryRange,
 } from "./directoryState";
 import { RelayDirectoryRow } from "./RelayDirectoryRow";
+import { FirstVisitDomainDialog } from "./FirstVisitDomainDialog";
 
 const KINDS: LeaderboardKind[] = ["overall", "claude", "openai", "gemini"];
 
@@ -48,6 +49,12 @@ export interface RelayDirectoryPageProps {
    * 外层是聚合页的标签布局，返回由聚合页统一负责。
    */
   embedded?: boolean;
+  /**
+   * 新人首启落广场（`RelaySection.reloadStatus` 的新人分支）：同时弹一次
+   * 「手填域名直达」弹窗（见 `FirstVisitDomainDialog`）。每进程最多一次，
+   * 由调用方保证（`autoOpenedHubThisProcess`）。
+   */
+  firstVisit?: boolean;
 }
 
 export function RelayDirectoryPage({
@@ -56,6 +63,7 @@ export function RelayDirectoryPage({
   onBack,
   onAuthenticated,
   embedded = false,
+  firstVisit = false,
 }: RelayDirectoryPageProps) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -68,6 +76,9 @@ export function RelayDirectoryPage({
     null,
   );
   const authenticationInProgress = useRef(false);
+  // 新人首启的域名直达弹窗：只跟首挂载那一次走（firstVisit 由调用方保证
+  // 每进程至多一次），用户关掉就纯逛广场。
+  const [firstVisitOpen, setFirstVisitOpen] = useState(firstVisit);
 
   const directoryQuery = useQuery({
     queryKey: relayDirectoryKeys.byKind(view.kind),
@@ -181,6 +192,15 @@ export function RelayDirectoryPage({
           : "mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6"
       }
     >
+      <FirstVisitDomainDialog
+        open={firstVisitOpen}
+        onDismiss={() => setFirstVisitOpen(false)}
+        onSubmit={(domain) => {
+          setFirstVisitOpen(false);
+          // 与广场搜索框手填完全同一条 manual 导入链（保守打开规则）。
+          void authenticate(domain, domain, "manual");
+        }}
+      />
       <div className="flex items-start justify-between gap-4 border-b border-border-default py-4">
         <div className="flex min-w-0 items-start gap-3">
           {!embedded && (

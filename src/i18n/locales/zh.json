@@ -3440,11 +3440,18 @@
         "invalidResponse": "服务商返回的响应无法验证。请稍后重试或人工复核。"
       }
     },
+    "firstSite": {
+      "title": "添加你的第一个中转站",
+      "body": "广场推荐列表还在加载。先输入站长给你的域名，直接进入该站的注册 / 登录。",
+      "placeholder": "bestapi.store",
+      "confirm": "进入注册 / 登录",
+      "cancel": "先逛逛广场"
+    },
     "star": {
       "buttonTitle": "GitHub 仓库（点个 ⭐ 支持一下）",
-      "dotTitle": "新人礼还没领 —— 点 GitHub Star 领注册礼",
+      "dotTitle": "GitHub 点赞领取 新人注册礼",
       "dialogTitle": "点个 Star，领 ${{amount}} 注册礼",
-      "dialogBody": "去 GitHub 给 LoongPort 点亮 Star，就送 BestAPI 注册礼：注册立享 ${{amount}} 额度。会先尝试用本机 GitHub CLI（gh）代你点星；没安装或未登录时自动打开仓库页面。",
+      "dialogBody": "去 GitHub 给 LoongPort 点亮 Star，就送 BestAPI 注册礼：注册立享 ${{amount}} 额度。",
       "confirm": "点 Star 领礼",
       "cancel": "取消",
       "waitTitle": "等你的 Star ⭐",

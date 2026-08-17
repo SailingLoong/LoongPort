@@ -51,11 +51,11 @@ fn merge_settings_for_save(
 
     // 后端专有字段（2026-08-16 收口，与 local_migrations 同一个丢失更新理由）：
     // 切换链路在后端写 current_provider_*（`settings::set_current_provider`），
-    // 新人引导写 `onboarding_register_prompted`，Star 领取走窄命令
-    // `star_reward_mark_claimed` 写 `star_reward_claimed`。前端全量保存的快照
-    // 取自某个过去时刻，透传它们 = 把并发写入整体抹掉（当晚实测 mark 与
-    // claimed 先后被旧快照抹除；"当前在用"指针被抹会让整片供应商失去选中态）。
-    incoming.onboarding_register_prompted = existing.onboarding_register_prompted;
+    // Star 邀约与领取由后端流程写 `star_reward_offered` / `star_reward_claimed`
+    // （前者在 `commands::onboarding`、后者走窄命令 `star_reward_mark_claimed`）。
+    // 前端全量保存的快照取自某个过去时刻，透传它们 = 把并发写入整体抹掉
+    // （当晚实测 claimed 被旧快照抹除；"当前在用"指针被抹会让整片供应商失去选中态）。
+    incoming.star_reward_offered = existing.star_reward_offered;
     incoming.star_reward_claimed = existing.star_reward_claimed;
     incoming.current_provider_claude = existing.current_provider_claude.clone();
     incoming.current_provider_claude_desktop = existing.current_provider_claude_desktop.clone();
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn save_settings_must_not_overwrite_backend_owned_fields() {
         let existing = AppSettings {
-            onboarding_register_prompted: Some(true),
+            star_reward_offered: Some(true),
             star_reward_claimed: Some(true),
             current_provider_codex: Some("provider-1".to_string()),
             current_provider_claude: Some("provider-2".to_string()),
@@ -572,7 +572,7 @@ mod tests {
 
         let merged = merge_settings_for_save(incoming, &existing);
 
-        assert_eq!(merged.onboarding_register_prompted, Some(true));
+        assert_eq!(merged.star_reward_offered, Some(true));
         assert_eq!(merged.star_reward_claimed, Some(true));
         assert_eq!(merged.current_provider_codex.as_deref(), Some("provider-1"));
         assert_eq!(

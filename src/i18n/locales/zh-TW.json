@@ -3441,11 +3441,18 @@
         "invalidResponse": "服務商傳回的回應無法驗證。請稍後再試或人工複核。"
       }
     },
+    "firstSite": {
+      "title": "添加你的第一個中轉站",
+      "body": "廣場推薦列表還在載入。先輸入站長給你的網域，直接進入該站的註冊 / 登入。",
+      "placeholder": "bestapi.store",
+      "confirm": "進入註冊 / 登入",
+      "cancel": "先逛逛廣場"
+    },
     "star": {
       "buttonTitle": "GitHub 儲存庫（點個 ⭐ 支持一下）",
-      "dotTitle": "新人禮還沒領 —— 點 GitHub Star 領註冊禮",
+      "dotTitle": "GitHub 點讚領取 新人註冊禮",
       "dialogTitle": "點個 Star，領 ${{amount}} 註冊禮",
-      "dialogBody": "去 GitHub 給 LoongPort 點亮 Star，就送 BestAPI 註冊禮：註冊即享 ${{amount}} 額度。會先嘗試用本機 GitHub CLI（gh）代你點星；未安裝或未登入時自動開啟倉庫頁面。",
+      "dialogBody": "去 GitHub 給 LoongPort 點亮 Star，就送 BestAPI 註冊禮：註冊即享 ${{amount}} 額度。",
       "confirm": "點 Star 領禮",
       "cancel": "取消",
       "waitTitle": "等你的 Star ⭐",

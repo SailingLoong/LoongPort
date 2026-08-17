@@ -2,19 +2,20 @@
 //!
 //! 见那个模块的文档 for 模块边界（策略收拢、机制复用、后续调整只动那边）。
 //!
-//! 引导形状（2026-08-15 起）：新人首启**不再自动弹官方站注册窗** —— 唯一的
-//! 主动触点是「点 Star 领注册礼」弹窗（本模块判资格后发
-//! [`ONBOARDING_STAR_REWARD_OFFER`]，前端 `StarRewardDialog` 弹），注册窗退化成
-//! star 走通之后的终点（[`onboarding_open_register_window`]）。
+//! 引导形状（2026-08-17 起）：新人首启只**落到中转站广场**（`RelaySection`
+//! 的 `shouldPromptAddSite` 跳转），不弹任何邀约 —— 「点 Star 领注册礼」
+//! 推迟到**首个站点注册/登录成功之后**（[`offer_star_reward_after_first_import`]，
+//! 挂在 `import_site` 成功路径上）：用户有了使用感觉再邀请，比首启硬弹
+//! 打扰小。注册窗（[`onboarding_open_register_window`]）仍是 star 走通
+//! 之后的终点。
 
 use serde::Serialize;
-use tauri::{Emitter, State};
+use tauri::Emitter;
 
 use crate::events::{ONBOARDING_REGISTER_COMPLETED, ONBOARDING_STAR_REWARD_OFFER};
 use crate::relay::onboarding;
-use crate::store::AppState;
 
-use super::relay::{import_site, user_has_no_accounts, BrowserEntrySource, ImportResult};
+use super::relay::{import_site, BrowserEntrySource, ImportResult};
 use super::star_reward;
 
 /// 新人引导注册窗完成事件的 payload（前端 `src/lib/onboarding.ts` 消费）。
@@ -25,73 +26,52 @@ struct RegisterCompletedPayload {
     site_name: String,
 }
 
-/// 弹不弹新人引导的判据。**纯判据，无副作用**：
-/// 还没有任何账号（新用户）&& 这个安装还没引导过（一次性标志未置位）。
-fn register_prompt_eligible(state: &AppState) -> Result<bool, crate::error::AppError> {
-    Ok(crate::settings::get_settings()
-        .onboarding_register_prompted
-        .is_none()
-        && user_has_no_accounts(state)?)
-}
-
-/// 标志只置位一次，且**只在确认拿到 offer、正要发事件时置位**：置位后无论
-/// 弹出去之后的结局如何（领了 / 取消 / 事件发不出去），后续启动都不再主动弹。
-/// 这是有意的不重试 —— 引导过的用户回落到广场页 + 顶栏红点（未领取时红点
-/// 常亮，那是他们的「稍后再说」入口）。
+/// 首个站点接入成功后的「点 Star 领注册礼」邀请（不暴露成命令：只有
+/// `import_site` 的成功路径这一个调用方）。
 ///
-/// 反面是「压根没拿到 offer」（没网 / 活动下线 / 基线取不到，见命令体）：
-/// 那不算「引导过」，不置位，下次启动还能再试。
-fn mark_register_prompted() {
-    let mut settings = crate::settings::get_settings();
-    if settings.onboarding_register_prompted.is_none() {
-        settings.onboarding_register_prompted = Some(true);
-        if let Err(error) = crate::settings::update_settings(settings) {
-            log::warn!("新人引导标志写入失败（不影响本次引导，但下次启动会再弹）: {error}");
-        }
-    }
-}
-
-/// 新用户首启的「点 Star 领注册礼」邀请。
+/// 判据：礼还没领（`star_reward_claimed` 为空）&& 这次安装还没主动弹过
+/// （`star_reward_offered` 为空）。注意**不看账号数** —— 调用时机本身就是
+/// 「刚接入第一个站点」，比旧版首启判据（无账号）语义更直白。
 ///
-/// 三道闸都在这里收口：资格（无账号 + 未引导过）→ 远端配置有 `star_reward`
-/// → 基线星数取得到（star 邀约的基本盘 —— 取不到连比对都做不了，别让用户
-/// 看到一个随时兑现不了的 offer）。全过才发 [`ONBOARDING_STAR_REWARD_OFFER`]
-/// （payload 含基线），前端拿到即弹；任何一道不过都静默返回，新人引导宁可
-/// 少弹一次 —— 但「没弹成」不置位一次性标志，下次启动还能再试（见
-/// [`mark_register_prompted`]）。
-///
-/// 返回 `()`：弹不弹的判定完全在 Rust，前端不需要返回值分支（广场页总是要
-/// 落的，见 `RelaySection.reloadStatus`）。
-#[tauri::command]
-pub async fn onboarding_prompt_star_reward(
-    app_handle: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let eligible = register_prompt_eligible(&state).map_err(|e| e.to_string())?;
-    if !eligible {
-        return Ok(());
+/// 其余两道闸（远端配置有 `star_reward` / 基线星数取得到）沿用
+/// [`star_reward::build_offer`]。任一不过都静默返回；「压根没拿到 offer」
+/// 不置位一次性标志（一次网络抖动不该把邀请永久吃掉），下次接入站点再试。
+pub(crate) async fn offer_star_reward_after_first_import(app_handle: &tauri::AppHandle) {
+    let settings = crate::settings::get_settings();
+    if settings.star_reward_claimed.is_some() || settings.star_reward_offered.is_some() {
+        return;
     }
 
-    // 新装机的远端配置缓存要启动 5 秒后才由后台目录任务落盘，而这条命令
-    // 恰恰在最开始的渲染路径上被调 —— 不补这一拉，全新安装的首次引导必然
-    // 赶在空缓存上判「无活动」。幂等：与后台任务写的是同一份缓存。
+    // 接入通常发生在启动数分钟后、后台目录任务早已把缓存落盘；补这一拉
+    // 只兜「启动 5 秒内就完成接入」的极端窗口。幂等：与后台任务写同一份缓存。
     if star_reward::effective_star_reward().is_none() {
         crate::relay::remote_config::refresh_and_cache().await;
     }
 
     let Some(offer) = star_reward::build_offer().await else {
-        // 拉完仍没有 offer：这次压根没弹成，不置位（否则一次网络抖动就把
-        // 引导永久吃掉），下次启动重试。
-        log::info!("新人引导邀请未发出（无 offer：没网 / 活动下线 / 基线取不到），下次启动重试");
-        return Ok(());
+        log::info!("Star 邀约未发出（无 offer：没网 / 活动下线 / 基线取不到），下次接入站点再试");
+        return;
     };
-    mark_register_prompted();
+    mark_star_reward_offered();
     if let Err(error) = app_handle.emit(ONBOARDING_STAR_REWARD_OFFER, offer) {
-        // 发不出去只是这次不弹（标志已置位，下次启动不再问）—— 命令本身
-        // 不该因此失败，那会让前端把一次正常的引导当成后端故障。
+        // 发不出去只是这次不弹（标志已置位，不再主动弹）—— 红点仍是
+        // 未领取用户的常驻「稍后再说」入口。
         log::warn!("发射 star 邀请事件失败: {error}");
     }
-    Ok(())
+}
+
+/// 标志只置位一次，且**只在确认拿到 offer、正要发事件时置位**：置位后无论
+/// 弹出去之后的结局如何（领了 / 取消 / 事件发不出去），都不再主动弹 ——
+/// 未领取的用户回落到顶栏红点（常亮，那是他们的「稍后再说」入口）。
+fn mark_star_reward_offered() {
+    crate::settings::mutate_settings(|settings| {
+        if settings.star_reward_offered.is_none() {
+            settings.star_reward_offered = Some(true);
+        }
+    })
+    .unwrap_or_else(|error| {
+        log::warn!("Star 邀约标志写入失败（不影响本次弹窗，但之后可能再弹一次）: {error}")
+    });
 }
 
 /// 打开官方站（BestAPI）注册窗 —— 只有「点 Star 领注册礼」走通之后才被调用，

@@ -3440,11 +3440,18 @@
         "invalidResponse": "The provider's response could not be verified. Try again later or review it manually."
       }
     },
+    "firstSite": {
+      "title": "Add your first relay site",
+      "body": "The plaza list is still loading. Enter the domain your site owner gave you to jump straight into its sign-up / login.",
+      "placeholder": "bestapi.store",
+      "confirm": "Go to sign-up / login",
+      "cancel": "Browse the plaza first"
+    },
     "star": {
       "buttonTitle": "GitHub repository (star it if you like it)",
-      "dotTitle": "Sign-up gift unclaimed — star on GitHub to claim it",
+      "dotTitle": "Star on GitHub to claim your sign-up gift",
       "dialogTitle": "Star us, get a ${{amount}} sign-up gift",
-      "dialogBody": "Star LoongPort on GitHub to receive a BestAPI sign-up gift: ${{amount}} of credit on registration. We'll first try to star it for you via the local GitHub CLI (gh); if it's not installed or not signed in, the repository page will open instead.",
+      "dialogBody": "Star LoongPort on GitHub to receive a BestAPI sign-up gift: ${{amount}} of credit on registration.",
       "confirm": "Star & claim",
       "cancel": "Cancel",
       "waitTitle": "Waiting for your star ⭐",
