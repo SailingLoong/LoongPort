@@ -19,6 +19,10 @@ import { Input } from "@/components/ui/input";
  * `authenticate(domain, …, "manual")`），直接进该站的注册 / 登录。列表照常
  * 在后台加载，关掉弹窗就回到广场逛。
  *
+ * **暗纹即默认值**：输入框的 placeholder（当前 `bestapi.store`）同时是留空
+ * 时的取值 —— 确认按钮常可点，不逼用户先敲字（维护者 2026-08-17 定）。
+ * 占位符与默认值同源（都读 `loongport.firstSite.placeholder`），改一处两处动。
+ *
  * 一次性（每进程一次）：由 `RelaySection.reloadStatus` 的新人分支在跳广场
  * 时带 `firstVisit` 进来；用户关闭后本进程不再主动弹 —— 广场列表此后就是
  * 常驻入口，不需要再问一遍。
@@ -31,12 +35,16 @@ export function FirstVisitDomainDialog({
   open: boolean;
   /** 关闭（取消 / esc / 点遮罩）：回广场逛列表，本进程不再主动弹。 */
   onDismiss: () => void;
-  /** 确认：参数是用户输入 trim 后的非空串；导入流程由调用方执行。 */
+  /** 确认：参数是用户输入 trim 后的值，留空时回退暗纹默认值（恒非空）。 */
   onSubmit: (domain: string) => void;
 }) {
   const { t } = useTranslation();
   const [domain, setDomain] = useState("");
-  const trimmed = domain.trim();
+  const placeholder = t("loongport.firstSite.placeholder");
+  // 留空 = 用暗纹里的默认站（官方站），与按钮常可点的行为配套。
+  const effective = domain.trim() || placeholder;
+
+  const submit = () => onSubmit(effective);
 
   return (
     <Dialog
@@ -45,27 +53,30 @@ export function FirstVisitDomainDialog({
         if (!next) onDismiss();
       }}
     >
-      <DialogContent className="max-w-md">
-        <DialogTitle>{t("loongport.firstSite.title")}</DialogTitle>
-        <DialogDescription>{t("loongport.firstSite.body")}</DialogDescription>
+      <DialogContent className="max-w-[26rem] gap-0 p-6" zIndex="top">
+        <DialogTitle className="text-base font-semibold">
+          {t("loongport.firstSite.title")}
+        </DialogTitle>
+        <DialogDescription className="mt-1.5 text-sm leading-relaxed">
+          {t("loongport.firstSite.body")}
+        </DialogDescription>
+
         <Input
           autoFocus
+          className="mt-4"
           value={domain}
           onChange={(event) => setDomain(event.target.value)}
-          placeholder={t("loongport.firstSite.placeholder")}
+          placeholder={placeholder}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && trimmed) onSubmit(trimmed);
+            if (event.key === "Enter") submit();
           }}
         />
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onDismiss}>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onDismiss}>
             {t("loongport.firstSite.cancel")}
           </Button>
-          <Button
-            disabled={!trimmed}
-            onClick={() => onSubmit(trimmed)}
-            data-testid="first-site-confirm"
-          >
+          <Button size="sm" data-testid="first-site-confirm" onClick={submit}>
             {t("loongport.firstSite.confirm")}
           </Button>
         </div>
