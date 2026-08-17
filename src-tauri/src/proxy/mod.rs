@@ -39,6 +39,9 @@ pub mod usage;
 #[cfg(test)]
 mod auto_mode_e2e_tests;
 
+#[cfg(test)]
+mod real_upstream_smoke_tests;
+
 // 公开导出给外部使用（commands, services等模块需要）
 #[allow(unused_imports)]
 pub use circuit_breaker::{
