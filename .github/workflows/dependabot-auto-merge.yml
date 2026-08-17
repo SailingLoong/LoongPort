@@ -32,7 +32,7 @@ jobs:
       # 不可信分支再执行其中的脚本是那类经典提权漏洞，这里从头就不需要代码。
       - name: Fetch metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
