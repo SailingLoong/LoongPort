@@ -3440,11 +3440,18 @@
         "invalidResponse": "プロバイダーの応答を検証できませんでした。しばらくしてから再試行するか、手動で確認してください。"
       }
     },
+    "firstSite": {
+      "title": "最初のリレーサイトを追加",
+      "body": "広場のおすすめリストはまだ読み込み中です。運営者からもらったドメインを入力して、そのサイトの登録 / ログインに直接進みましょう。",
+      "placeholder": "bestapi.store",
+      "confirm": "登録 / ログインへ進む",
+      "cancel": "まず広場を見る"
+    },
     "star": {
       "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）",
-      "dotTitle": "新規特典が未受け取り —— GitHub でスターを付けると受け取れます",
+      "dotTitle": "GitHub でスターを付けて登録ボーナスをもらう",
       "dialogTitle": "スターを付けて ${{amount}} の登録ボーナスをもらう",
-      "dialogBody": "GitHub で LoongPort にスターを付けると、BestAPI の登録ボーナス（登録時に ${{amount}} 分のクレジット）がもらえます。まずローカルの GitHub CLI（gh）で代わりにスターを試みます。未インストールや未ログインの場合はリポジトリページを開きます。",
+      "dialogBody": "GitHub で LoongPort にスターを付けると、BestAPI の登録ボーナス（登録時に ${{amount}} 分のクレジット）がもらえます。",
       "confirm": "スターを付けて受け取る",
       "cancel": "キャンセル",
       "waitTitle": "スターをお待ちしています ⭐",

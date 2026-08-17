@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
  * 「点 Star 领注册礼」（后端机制层在 `src-tauri/src/commands/star_reward.rs`）。
  *
  * 配置（码 + 额度）的唯一数据源是远端配置的 `star_reward` 块 —— 整块缺席
- * = 活动下线，`configured` 返回 false、`offer` 返回 null，一切回落现状行为。
+ * = 活动下线，`offer` 返回 null，一切回落现状行为。
  * 界面上每个「$N」都从 `offer.amountUsd` 来，前端不另存数值。
  */
 
@@ -18,11 +18,6 @@ export interface StarRewardOffer {
 }
 
 export const starRewardApi = {
-  /** star_reward 活动还在吗（只读缓存配置，不碰网络）。红点显隐用。 */
-  async configured(): Promise<boolean> {
-    return await invoke("star_reward_configured");
-  },
-
   /** 红点入口的邀请：null = 活动不在 / 基线取不到，回落「直接开仓库」。 */
   async offer(): Promise<StarRewardOffer | null> {
     return await invoke("star_reward_offer");

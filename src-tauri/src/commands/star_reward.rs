@@ -112,13 +112,6 @@ pub fn star_reward_mark_claimed() -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// star_reward 活动还在吗（只读缓存配置，不碰网络）。红点显隐用它 ——
-/// 每次启动都为了一颗红点去拉一次基线太浪费。
-#[tauri::command]
-pub fn star_reward_configured() -> Result<bool, String> {
-    Ok(effective_star_reward().is_some())
-}
-
 /// 当前 star 数（「我已点赞」后的第二次取数）。失败由前端按
 /// 「可能网络波动，照发」处理，不在这里重试更多次。
 #[tauri::command]

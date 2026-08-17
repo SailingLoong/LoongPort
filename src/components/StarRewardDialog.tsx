@@ -63,9 +63,11 @@ export function StarRewardDialog({
     };
   }, []);
 
-  const amount = `$${offer.amountUsd}`;
+  // 只传数值：`$` 符号在各语言文案里（`${{amount}}`）——组件再拼一个 `$`
+  // 会和文案里的叠成 `$$5`。
+  const amount = String(offer.amountUsd);
 
-  /** 发码：置 granted → 持久化 claimed → 通知 App → 开注册窗（码自动预填）。 */
+  /** 发码：置 granted → 持久化 claimed → 开注册窗（码自动预填）。 */
   const grant = (via: GrantedVia) => {
     if (!aliveRef.current) return;
     setPhase({ kind: "granted", via });
@@ -78,7 +80,6 @@ export function StarRewardDialog({
         // 持久化失败可接受：码已展示给用户，最坏下次启动红点再现（荣誉制）。
       }
       if (!aliveRef.current) return;
-      onClaimed();
       // 注册窗打开失败也不回滚：码可见可复制，用户可以自己去 bestapi 注册。
       starRewardApi.openRegisterWindow(offer.promoCode).catch((error) => {
         console.warn("[star-reward] 注册窗未能打开", error);
@@ -87,6 +88,12 @@ export function StarRewardDialog({
   };
 
   const handleConfirm = async () => {
+    // 红点在**点「领取」这一刻**熄灭（2026-08-17 维护者定）：之后领没领成
+    // 功都不再亮 —— 用户已应征，不再用红点追着提醒。取消 / 叉号不走这里，
+    // 红点保留为「稍后再说」入口。durable 的熄灭靠发码时的 markClaimed；
+    // 这里只是会话内立即熄灭（点完领取又中断的用户下次启动红点会回来，
+    // 因为码还没到手）。
+    onClaimed();
     setPhase({ kind: "starring" });
     // gh 通了就一步到位（PUT 幂等，早点过星的老用户也算成功）。
     try {

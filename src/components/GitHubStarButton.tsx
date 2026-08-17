@@ -6,17 +6,17 @@ import { GithubIcon } from "@/components/icons/GithubIcon";
 /**
  * 顶栏的 GitHub 入口：常驻按钮 + 活动期小红点。
  *
- * 状态全部由 `App` 持有（star-reward 的 claimed / configured 与弹窗都在那），
- * 本组件只呈现：`showDot` = 「点 Star 领注册礼」活动在且还没领过 —— 领过即熄，
- * 与「点没点过这个按钮」无关。点击行为也由 App 决定（活动在 ⇒ 问后端要邀请
- * payload 弹窗；不在 ⇒ 直接开仓库）。
+ * 状态全部由 `App` 持有（star-reward 的 claimed 与弹窗都在那），本组件只
+ * 呈现：`showDot` = 礼还没领（durable 的 claimed 判据，2026-08-17 起不再叠
+ * 加「活动在不在」的瞬时缓存读 —— 活动下线时点击回落直接开仓库）。领过即
+ * 熄，与「点没点过这个按钮」无关。
  */
 export function GitHubStarButton({
   showDot,
   busy,
   onClick,
 }: {
-  /** star 领礼活动在 && 未领取。 */
+  /** 礼还没领（claimed 判据；活动是否在线由点击时的 offer 兜底）。 */
   showDot: boolean;
   /** 正在向后端要邀请 payload（那次基线取数要过网络）。 */
   busy: boolean;

@@ -1258,7 +1258,7 @@ pub(crate) async fn import_site(
         }
     };
 
-    browser_import(
+    let result = browser_import(
         app_handle,
         input,
         site_origin,
@@ -1266,7 +1266,18 @@ pub(crate) async fn import_site(
         entry_source,
         promo_override,
     )
-    .await
+    .await;
+
+    // 首个站点接入成功 → 事后邀请「点 Star 领注册礼」（用户有了使用感觉再弹，
+    // 见 `commands::onboarding`）。三道闸与一次性标志都在那边；这里只发信号，
+    // 不挡导入返回 —— 邀约要拉网络，让用户先看到导入成功的界面。
+    if result.is_ok() {
+        let handle = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::commands::onboarding::offer_star_reward_after_first_import(&handle).await;
+        });
+    }
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
