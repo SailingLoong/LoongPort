@@ -31,11 +31,13 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 /// 可编程 mock 上游：默认 200，可翻成 500 模拟故障；记录命中数与鉴权头。
+/// `foreign` 开关让 mock 回 OpenAI 形状（模拟换芯转发，供被动监控 E2E）。
 #[derive(Clone)]
 struct MockUpstreamState {
     hits: Arc<AtomicUsize>,
     status: Arc<RwLock<u16>>,
     auth_header: Arc<RwLock<Option<String>>>,
+    foreign: Arc<RwLock<bool>>,
     marker: &'static str,
 }
 
@@ -50,6 +52,7 @@ impl MockUpstream {
             hits: Arc::new(AtomicUsize::new(0)),
             status: Arc::new(RwLock::new(200)),
             auth_header: Arc::new(RwLock::new(None)),
+            foreign: Arc::new(RwLock::new(false)),
             marker,
         };
         let app = axum::Router::new()
@@ -77,6 +80,10 @@ impl MockUpstream {
         *self.state.status.write().await = status;
     }
 
+    async fn set_foreign(&self, foreign: bool) {
+        *self.state.foreign.write().await = foreign;
+    }
+
     async fn auth_header(&self) -> Option<String> {
         self.state.auth_header.read().await.clone()
     }
@@ -94,6 +101,20 @@ async fn handle_mock(
         .map(str::to_string);
     let status = *state.status.read().await;
     if status == 200 {
+        if *state.foreign.read().await {
+            // OpenAI chat.completions 形状出现在 Claude 线路 = 异源指纹（换芯转发）
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "object": "chat.completion",
+                    "model": "gpt-5.6",
+                    "choices": [{
+                        "message": { "role": "assistant", "content": state.marker }
+                    }],
+                    "usage": {},
+                })),
+            );
+        }
         (
             StatusCode::OK,
             Json(json!({
@@ -172,6 +193,9 @@ struct E2eFixture {
     expensive: MockUpstream,
     cheap_id: String,
     expensive_id: String,
+    /// 真协调器（被动消费 worker 在跑）；持有它保活 worker 生命周期
+    #[allow(dead_code)]
+    verification: Arc<crate::relay::model_verification::coordinator::ModelVerificationCoordinator>,
 }
 
 impl E2eFixture {
@@ -227,6 +251,13 @@ impl E2eFixture {
 
         auto_strategy::set_enabled(&db, "claude", true).expect("enable auto mode");
 
+        // 真协调器：被动异常经消费 worker 落库（干净流量不落库，既有三条
+        // 测试的正常 Claude 形状不会产生任何报告）
+        let verification = Arc::new(
+            crate::relay::model_verification::coordinator::ModelVerificationCoordinator::new(
+                db.clone(),
+            ),
+        );
         let server = ProxyServer::new(
             ProxyConfig {
                 listen_port: 0,
@@ -234,7 +265,7 @@ impl E2eFixture {
             },
             db.clone(),
             None,
-            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            verification.passive_ingress(),
         );
         let info = server.start().await.expect("start proxy server");
 
@@ -247,6 +278,7 @@ impl E2eFixture {
             expensive,
             cheap_id,
             expensive_id,
+            verification,
         }
     }
 
@@ -392,5 +424,95 @@ async fn failing_tier_fails_over_and_returns_when_recovered() {
     assert_eq!(marker, "served-by-cheap");
     assert_eq!(fx.cheap.hits(), 3);
     assert_eq!(fx.expensive.hits(), 2, "恢复后不应继续占用备胎档位");
+    fx.server.stop().await.expect("stop server");
+}
+
+/// 4. 被动模型监控：换芯流量（Claude 线路回 OpenAI 形状）→ 异源指纹 Anomaly
+///    落库 + history(source=passive) + 档位看板点亮；干净档位零报告；
+///    转发本身不受观察影响（客户端仍拿到 200 与原样响应体）。
+#[tokio::test]
+#[serial]
+async fn passive_anomaly_lands_and_surfaces() {
+    let fx = E2eFixture::new().await;
+
+    // 便宜档（无亲和 → 省心选它）回 OpenAI 形状冒充 Claude
+    fx.cheap.set_foreign(true).await;
+    let resp = send_message(fx.port, "sess-e2e-passive-0001").await;
+    assert_eq!(resp.status(), 200, "观察不得影响转发");
+    let body: Value = resp.json().await.expect("parse impersonated body");
+    assert_eq!(body["object"], "chat.completion", "响应体原样到达客户端");
+
+    // 等被动消费 worker 落库（异步）
+    let reports = {
+        let mut reports = Vec::new();
+        for _ in 0..250 {
+            reports = crate::relay::model_verification::store::list_for_provider_ids(
+                &fx.db,
+                &[fx.cheap_id.clone()],
+            )
+            .unwrap();
+            if !reports.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        reports
+    };
+    assert_eq!(reports.len(), 1, "换芯档位必须落一份异常报告");
+    assert_eq!(
+        reports[0].verdict,
+        crate::relay::model_verification::types::Verdict::Anomaly
+    );
+    assert!(reports[0].facts.iter().any(|fact| {
+        fact.code == crate::relay::model_verification::types::EvidenceCode::ForeignProtocol
+            && fact.outcome == crate::relay::model_verification::types::EvidenceOutcome::Failed
+    }));
+    let serialized = serde_json::to_string(&reports[0]).unwrap();
+    assert!(!serialized.contains("gpt-5.6"), "证据不得携带响应内容");
+
+    // history 记 passive 来源
+    let history = crate::relay::model_verification::history::list(
+        &fx.db,
+        &crate::relay::model_verification::types::TargetScope::new(fx.cheap_id.clone(), "claude"),
+    )
+    .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].source,
+        crate::relay::model_verification::types::VerificationSource::Passive
+    );
+
+    // 档位看板点亮异常
+    let state = crate::store::AppState::new(fx.db.clone());
+    let board = crate::commands::auto_mode::tier_board_impl(&state, "claude")
+        .await
+        .unwrap();
+    let tier = board
+        .tiers
+        .iter()
+        .find(|t| t.provider_id == fx.cheap_id)
+        .expect("cheap tier on board");
+    assert_eq!(tier.verification_verdict.as_deref(), Some("anomaly"));
+
+    // 对照：干净档位（贵档未被打过流量）与正常形状流量都不产报告
+    assert!(
+        crate::relay::model_verification::store::list_for_provider_ids(
+            &fx.db,
+            &[fx.expensive_id.clone()],
+        )
+        .unwrap()
+        .is_empty()
+    );
+
+    fx.cheap.set_foreign(false).await;
+    let marker = response_text(send_message(fx.port, "sess-e2e-passive-0002").await).await;
+    assert_eq!(marker, "served-by-cheap");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let reports = crate::relay::model_verification::store::list_for_provider_ids(
+        &fx.db,
+        &[fx.cheap_id.clone()],
+    )
+    .unwrap();
+    assert_eq!(reports.len(), 1, "干净流量不落库，异常报告不被干净流量稀释");
     fx.server.stop().await.expect("stop server");
 }
