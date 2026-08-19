@@ -111,12 +111,9 @@ beforeEach(() => {
 });
 
 describe("AutoModeTabContent", () => {
-  it("页头带 Beta 徽标与总开关；卡片按档位情况区分可开性", () => {
+  it("页头带总开关；卡片按档位情况区分可开性", () => {
     renderTab();
 
-    expect(screen.getAllByText("autoMode.beta").length).toBeGreaterThanOrEqual(
-      1,
-    );
     // codex 与 gemini（历史遗留的开启态）都开着 → 两个「生效中」
     expect(screen.getAllByText("autoMode.statusActive")).toHaveLength(2);
     // gemini / grokbuild 没档位 → 两张卡提示不可开

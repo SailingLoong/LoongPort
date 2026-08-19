@@ -350,17 +350,14 @@ function App() {
     status: proxyStatus,
   } = useProxyStatus();
   const proxyAppId = isProxyAppId(activeApp) ? activeApp : null;
-  // 省心视图替换判据：Beta 开 + 该 app 省心模式开 + 路由在跑（三个都是展示
-  // 事实的组合，业务开关本身仍由设置页/顶栏管理）。
+  // 省心视图替换判据：该 app 省心模式开 + 路由在跑（两个都是展示事实的
+  // 组合，业务开关本身仍由设置页/顶栏管理）。
   const { data: activeAutoModeStatus } = useAutoModeStatus(
     proxyAppId ?? activeApp,
     !!proxyAppId,
   );
   const showEasyBoard = Boolean(
-    settingsData?.easyModeBeta &&
-    proxyAppId &&
-    activeAutoModeStatus?.enabled &&
-    isProxyRunning,
+    proxyAppId && activeAutoModeStatus?.enabled && isProxyRunning,
   );
   const currentAppUsesProxy =
     proxyAppId !== null || activeApp === "claude-desktop";
@@ -1521,10 +1518,7 @@ function App() {
                       {settingsData?.enableFailoverToggle && (
                         <FailoverToggle activeApp={proxyAppId} />
                       )}
-                      {/* 省心模式 Beta（默认关）：发布形态顶栏也不露出。 */}
-                      {settingsData?.easyModeBeta && (
-                        <AutoModeToggle activeApp={proxyAppId} />
-                      )}
+                      <AutoModeToggle activeApp={proxyAppId} />
                     </>
                   ) : null}
                 </div>

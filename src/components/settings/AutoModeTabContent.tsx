@@ -1,6 +1,6 @@
 /**
  * 「省心模式」设置页：用户只管 app 和模型，系统按全局策略（价格最低/响应
- * 最快）从托管档位里自动挑最合适的（Beta）。
+ * 最快）从托管档位里自动挑最合适的。
  *
  * ## 布局语义（2026-08-17 定稿）
  *
@@ -114,7 +114,7 @@ export function AutoModeTabContent({
       transition={{ duration: 0.3 }}
       className="space-y-4"
     >
-      {/* 页头：定位说明 + Beta + 总开关 + 全局策略（策略全局一份，不按 app 重复）。 */}
+      {/* 页头：定位说明 + 总开关 + 全局策略（策略全局一份，不按 app 重复）。 */}
       <div className="rounded-xl glass-card p-6 space-y-4">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background ring-1 ring-border">
@@ -125,7 +125,6 @@ export function AutoModeTabContent({
               <h3 className="text-base font-semibold">
                 {t("autoMode.title", "省心模式")}
               </h3>
-              <Badge variant="secondary">{t("autoMode.beta", "Beta")}</Badge>
             </div>
             <p className="text-sm text-muted-foreground">
               {t(
