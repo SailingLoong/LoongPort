@@ -8,6 +8,7 @@ import { usageApi, settingsApi, type AppId } from "@/lib/api";
 import { copilotGetUsage, copilotGetUsageForAccount } from "@/lib/api/copilot";
 import { useSettingsQuery } from "@/lib/query";
 import { resolveManagedAccountId } from "@/lib/authBinding";
+import { resolveCodexOfficialIdentity } from "@/utils/providerCapabilities";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import {
@@ -283,8 +284,13 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   };
 
   const providerCredentials = getProviderCredentials();
+  // isOfficialSubscription 读后端 DTO（presentation.usesOfficialSubscriptionUsage，
+  // 由 provider_uses_official_subscription_usage 计算）——业务事实后端唯源；
+  // isBoundCodexOfficial 是托管 OAuth 账号的身份判定，走前端 identity helper。
   const isOfficialSubscription =
     provider.presentation?.usesOfficialSubscriptionUsage === true;
+  const isBoundCodexOfficial =
+    resolveCodexOfficialIdentity(appId, provider) === "managed_account";
 
   const [script, setScript] = useState<UsageScript>(() => {
     const savedScript = provider.meta?.usage_script;
@@ -294,7 +300,9 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         isOfficialSubscription &&
         normalizedScript.templateType !== TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION
       ) {
-        return createUsageScript();
+        return createUsageScript({
+          enabled: isBoundCodexOfficial ? normalizedScript.enabled : false,
+        });
       }
       // 已有配置：如果是 coding_plan 但没有 codingPlanProvider，自动检测填充
       if (
@@ -320,7 +328,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
     }
 
     if (isOfficialSubscription) {
-      return createUsageScript();
+      return createUsageScript({ enabled: isBoundCodexOfficial });
     }
 
     return createUsageScript({
@@ -486,7 +494,15 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
       // 官方订阅额度模板使用 CLI/OAuth 凭据和官方 API
       if (selectedTemplate === TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION) {
         const { subscriptionApi } = await import("@/lib/api/subscription");
-        const quota = await subscriptionApi.getQuota(appId);
+        const accountId = isBoundCodexOfficial
+          ? (resolveManagedAccountId(
+              provider.meta,
+              PROVIDER_TYPES.CODEX_OAUTH,
+            ) ?? null)
+          : null;
+        const quota = isBoundCodexOfficial
+          ? await subscriptionApi.getCodexOauthQuota(accountId)
+          : await subscriptionApi.getQuota(appId);
         if (quota.success && quota.tiers.length > 0) {
           const summary = quota.tiers
             .map((tier) => `${tier.name}: ${Math.round(tier.utilization)}%`)
@@ -495,7 +511,12 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
             duration: 3000,
             closeButton: true,
           });
-          queryClient.setQueryData(["subscription", "quota", appId], quota);
+          queryClient.setQueryData(
+            isBoundCodexOfficial
+              ? ["codex_oauth", "quota", accountId ?? "default"]
+              : ["subscription", "quota", appId],
+            quota,
+          );
         } else {
           toast.error(
             `${t("usageScript.testFailed")}: ${quota.error || t("endpointTest.noResult")}`,

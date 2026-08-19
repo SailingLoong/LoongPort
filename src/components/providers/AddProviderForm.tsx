@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -11,6 +11,7 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
+import { AuthSettingsPanel } from "@/components/providers/AuthSettingsPanel";
 import { UniversalProviderFormModal } from "@/components/universal/UniversalProviderFormModal";
 import { UniversalProviderPanel } from "@/components/universal";
 import { providerPresets } from "@/config/claudeProviderPresets";
@@ -22,6 +23,7 @@ import { extractGrokBuildBaseUrl } from "@/utils/grokBuildConfig";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
 import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
+import type { ManagedAuthProvider } from "@/lib/api";
 
 /**
  * 手动添加供应商的表单体（无外壳）：App 专属/统一供应商两个 tab + 表单 + 动作条。
@@ -38,7 +40,6 @@ export interface AddProviderFormProps {
       providerKey?: string;
       suggestedDefaults?: OpenClawSuggestedDefaults;
       ensureClaudeDesktopOfficialSeed?: boolean;
-      ensureCodexOfficialSeed?: boolean;
       ensureGrokBuildOfficialSeed?: boolean;
     },
   ) => Promise<void> | void;
@@ -67,6 +68,13 @@ export function AddProviderForm({
   const [selectedUniversalPreset, setSelectedUniversalPreset] =
     useState<UniversalProviderPreset | null>(null);
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
+  // 托管 OAuth 账号的面板目标（上游 #3879 移植）：聚合页没有弹窗 open 翻转，
+  // 只在切换 app 标签时收起；页面卸载自然重置。
+  const [authSettingsTarget, setAuthSettingsTarget] =
+    useState<ManagedAuthProvider | null>(null);
+  useEffect(() => {
+    setAuthSettingsTarget(null);
+  }, [appId]);
   // 表单随聚合页标签的挂/卸载自然重置，没有弹窗 open 翻转那回事 —— token 只跟 appId。
   const formReadyToken = useMemo(() => Symbol("provider-form-ready"), [appId]);
   const currentFormReadyToken = useRef(formReadyToken);
@@ -148,7 +156,6 @@ export function AddProviderForm({
         providerKey?: string;
         suggestedDefaults?: OpenClawSuggestedDefaults;
         ensureClaudeDesktopOfficialSeed?: boolean;
-        ensureCodexOfficialSeed?: boolean;
         ensureGrokBuildOfficialSeed?: boolean;
       } = {
         name: values.name.trim(),
@@ -166,14 +173,6 @@ export function AddProviderForm({
         );
         const preset = claudeDesktopProviderPresets[presetIndex];
         providerData.ensureClaudeDesktopOfficialSeed =
-          values.presetCategory === "official" &&
-          preset?.category === "official";
-      }
-
-      if (appId === "codex" && values.presetId) {
-        const presetIndex = parseInt(values.presetId.replace("codex-", ""));
-        const preset = codexProviderPresets[presetIndex];
-        providerData.ensureCodexOfficialSeed =
           values.presetCategory === "official" &&
           preset?.category === "official";
       }
@@ -420,6 +419,7 @@ export function AddProviderForm({
                 submitLabel={t("common.add")}
                 onSubmit={handleSubmit}
                 onCancel={() => onDone()}
+                onManageAuthAccounts={setAuthSettingsTarget}
                 onSubmittingChange={setIsFormSubmitting}
                 onSubmitReadyChange={handleSubmitReadyChange}
                 showButtons={false}
@@ -437,6 +437,7 @@ export function AddProviderForm({
             submitLabel={t("common.add")}
             onSubmit={handleSubmit}
             onCancel={() => onDone()}
+            onManageAuthAccounts={setAuthSettingsTarget}
             onSubmittingChange={setIsFormSubmitting}
             onSubmitReadyChange={handleSubmitReadyChange}
             showButtons={false}
@@ -456,6 +457,11 @@ export function AddProviderForm({
           initialPreset={selectedUniversalPreset}
         />
       )}
+
+      <AuthSettingsPanel
+        target={authSettingsTarget}
+        onClose={() => setAuthSettingsTarget(null)}
+      />
     </div>
   );
 }
