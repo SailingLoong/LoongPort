@@ -26,6 +26,7 @@
 |---|---|---|---|---|---|---|
 | 2026-08-14 | #116 | 整并 upstream main | 67 | （未单列，主要在 Cargo.lock） | 有（依赖大版本栈） | merge-tree 干跑定冲突面；Cargo.lock `--theirs` + `cargo check` 收口；WSL2 job flake 重跑即绿 |
 | 2026-08-16 | #145 | 定点 cherry-pick | 2 | 2（database/mod.rs、schema.rs） | 1（sha2 `LowerHex`→`hex::encode`） | SCHEMA_VERSION 16→17 跟上游走，口径注释保留；首次建立本台账 |
+| 2026-08-19 | #200 | 定点 cherry-pick（预收冲突） | 1（3d126f45） | 1（UsageTrendChart.tsx，取上游版整体替换本地 3c43cfca） | 无 | 上游 #6337 与本地 #144 同根修复的会合：主动吸收上游版使文件回到与上游一致，下次整并该文件不再冲突；上游 PR #6488 已被取代关闭 |
 
 ## 关联
 
