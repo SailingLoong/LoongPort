@@ -139,6 +139,7 @@ async fn real_upstream_roundtrip_through_local_proxy() {
         },
         db.clone(),
         None,
+        crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
     );
     let info = server.start().await.expect("start proxy");
 
@@ -307,6 +308,7 @@ async fn real_manual_order_routes_to_user_first_pick() {
         },
         state.db.clone(),
         None,
+        crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
     );
     let info = server.start().await.expect("start proxy");
     let resp = reqwest::Client::builder()

@@ -28,8 +28,9 @@ pub struct AppState {
 impl AppState {
     /// 创建新的应用状态
     pub fn new(db: Arc<Database>) -> Self {
-        let proxy_service = ProxyService::new(db.clone());
         let model_verification = Arc::new(ModelVerificationCoordinator::new(db.clone()));
+        // 被动观察入口单向流入代理：proxy 只管顺路观察提交，不知道 coordinator 存在
+        let proxy_service = ProxyService::new(db.clone(), model_verification.passive_ingress());
 
         Self {
             db,

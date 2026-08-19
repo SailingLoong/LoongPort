@@ -234,6 +234,7 @@ impl E2eFixture {
             },
             db.clone(),
             None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
         );
         let info = server.start().await.expect("start proxy server");
 
