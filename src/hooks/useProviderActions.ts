@@ -43,7 +43,6 @@ export function useProviderActions(activeApp: AppId) {
         suggestedDefaults?: OpenClawSuggestedDefaults;
         addToLive?: boolean;
         ensureClaudeDesktopOfficialSeed?: boolean;
-        ensureCodexOfficialSeed?: boolean;
         ensureGrokBuildOfficialSeed?: boolean;
       },
     ) => {
