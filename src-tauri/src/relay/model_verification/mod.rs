@@ -19,7 +19,7 @@ mod tests {
         types::{
             EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind, RunState,
             StartRunResponse, TargetKey, TargetScope, Verdict, VerificationProgressEvent,
-            VerificationReport, RULES_VERSION,
+            VerificationReport, VerificationSource, RULES_VERSION,
         },
     };
     use crate::{
@@ -293,6 +293,27 @@ mod tests {
                 .verdict,
             Verdict::Trusted
         );
+        Ok(())
+    }
+
+    #[test]
+    fn passive_history_round_trips() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        let entry = report("provider-a", "codex", "gpt-a", Verdict::Anomaly);
+        {
+            let conn = db
+                .conn
+                .lock()
+                .map_err(|error| AppError::Database(error.to_string()))?;
+            super::history::insert(&conn, VerificationSource::Passive, &entry)?;
+        }
+
+        let entries = super::history::list(&db, &TargetScope::new("provider-a", "codex"))?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, VerificationSource::Passive);
+        assert_eq!(entries[0].report.verdict, Verdict::Anomaly);
         Ok(())
     }
 

@@ -182,12 +182,14 @@ pub struct VerificationReport {
 #[serde(rename_all = "camelCase")]
 pub enum VerificationSource {
     Active,
+    Passive,
 }
 
 impl VerificationSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
+            Self::Passive => "passive",
         }
     }
 }
@@ -198,6 +200,7 @@ impl TryFrom<&str> for VerificationSource {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "active" => Ok(Self::Active),
+            "passive" => Ok(Self::Passive),
             _ => Err("unsupported verification source"),
         }
     }
