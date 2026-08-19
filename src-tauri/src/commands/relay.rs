@@ -1266,6 +1266,16 @@ pub(crate) async fn import_site(
         }
     };
 
+    let requested_origin = site_origin.clone();
+    let site_origin = import_anchor_origin(site_origin, initial_detected.as_ref());
+    if site_origin != requested_origin {
+        log::info!(
+            "站点 {} 探针重定向到 {}，导入窗按最终 origin 锚定",
+            requested_origin,
+            site_origin
+        );
+    }
+
     let result = browser_import(
         app_handle,
         input,
@@ -1344,6 +1354,22 @@ fn recoverable_native_discovery_error(
     } else {
         Ok(error)
     }
+}
+
+/// 导入窗的锚定 origin：探针跟随重定向落在**别的 origin**（典型：裸域全路径 301
+/// 到 `www.`）时，以最终落地 origin 为准。
+///
+/// `browser_import` 里所有同源约束都锚在这一个值上 —— 登录/注册入口、注入脚本的
+/// origin 守卫、落库的 `site_origin`。用户输入的 origin 被站点 301 走时，页面实际
+/// 停在最终 origin 上，锚若留在请求 origin，守卫（见 `login::login_script` 与
+/// `discovery::browser_probe_script` 的 origin 早退）会静默吞掉全部回传：探针没有
+/// 结果、凭据永远不来、导入干等到超时。探针没跑成（回退浏览器辅助发现）或没有
+/// 重定向时，保持用户输入的 origin。
+fn import_anchor_origin(requested: String, detected: Option<&discovery::DetectedSite>) -> String {
+    detected
+        .and_then(|site| site.final_origin.clone())
+        .filter(|final_origin| *final_origin != requested)
+        .unwrap_or(requested)
 }
 
 /// 生成浏览器首次打开的地址：站点 origin 与后端归一化规则一致，但保留用户给的
@@ -5649,6 +5675,7 @@ mod tests {
             backend_kind: discovery::BackendKind::Sub2Api,
             site_name: "Example".into(),
             api_base_url: String::new(),
+            final_origin: None,
         }
     }
 
@@ -5657,7 +5684,38 @@ mod tests {
             backend_kind: discovery::BackendKind::NewApi,
             site_name: "NewAPI".into(),
             api_base_url: String::new(),
+            final_origin: None,
         }
+    }
+
+    #[test]
+    fn import_anchor_origin_prefers_the_probe_final_origin() {
+        let redirected = discovery::DetectedSite {
+            final_origin: Some("https://panel.example".into()),
+            ..detected_sub2api()
+        };
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), Some(&redirected)),
+            "https://panel.example"
+        );
+        // 浏览器路径的回传不带 final_origin（守卫保证同源），探针也没跑成时同理：
+        // 都保持用户输入的 origin。
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), Some(&detected_sub2api())),
+            "https://apex.example"
+        );
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), None),
+            "https://apex.example"
+        );
+        let same_origin = discovery::DetectedSite {
+            final_origin: Some("https://apex.example".into()),
+            ..detected_sub2api()
+        };
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), Some(&same_origin)),
+            "https://apex.example"
+        );
     }
 
     #[test]

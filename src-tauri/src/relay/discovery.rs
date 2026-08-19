@@ -83,6 +83,10 @@ pub struct ProbeResponse {
     pub json_like: bool,
     #[serde(default)]
     pub error_kind: Option<String>,
+    /// 原生请求跟随重定向后的最终落地 origin；浏览器回传不含该字段 —— 探针脚本
+    /// 受 origin 守卫约束，只在与锚点同源的页面上跑。
+    #[serde(default)]
+    pub final_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -446,6 +450,7 @@ pub(crate) async fn probe_candidates(
             }
         };
         response.status = Some(sent.status().as_u16());
+        response.final_origin = Some(sent.url().origin().ascii_serialization());
         response.content_type = sent
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -530,9 +535,10 @@ pub fn converge_probe_responses(
 ) -> Result<DetectedSite, DiscoveryError> {
     let mut detected = Vec::new();
     for response in responses {
-        let Some(candidate) = detect_candidate(&response.candidate_id, &response.body) else {
+        let Some(mut candidate) = detect_candidate(&response.candidate_id, &response.body) else {
             continue;
         };
+        candidate.final_origin = response.final_origin.clone();
         if detected
             .iter()
             .any(|item: &DetectedSite| item.backend_kind == candidate.backend_kind)
@@ -742,6 +748,7 @@ mod tests {
                 detector_body_bytes: 0,
                 json_like: false,
                 error_kind: None,
+                final_origin: None,
             },
             ProbeResponse {
                 candidate_id: "newapi".into(),
@@ -943,5 +950,76 @@ mod tests {
             browser_probe_script("https://relay.example", PROBE_CANDIDATES),
             "the mandatory Vitest fixture must stay byte-for-byte current",
         );
+    }
+
+    #[test]
+    fn convergence_propagates_final_origin_from_the_matching_candidate() {
+        let response = ProbeResponse {
+            candidate_id: "sub2api".into(),
+            body: sub2api_body().into(),
+            final_origin: Some("https://panel.example".into()),
+            ..ProbeResponse::default()
+        };
+
+        let detected = converge_probe_responses(std::slice::from_ref(&response))
+            .expect("valid sub2api body must converge");
+
+        assert_eq!(
+            detected.final_origin.as_deref(),
+            Some("https://panel.example")
+        );
+    }
+
+    /// 裸域全路径 301 到 `www.` 的站点：原生探针跟随重定向认出协议，且必须带回
+    /// **最终落地 origin** —— 导入窗靠它把入口、脚本守卫与落库行锚到页面真正
+    /// 停留的 origin，否则守卫锚在请求 origin 上、回传永远不来。
+    #[tokio::test]
+    async fn native_probe_follows_redirect_and_reports_final_origin() {
+        let panel = Router::new().route(
+            "/api/v1/settings/public",
+            get(|| async {
+                Json(serde_json::from_str::<serde_json::Value>(sub2api_body()).unwrap())
+            }),
+        );
+        let panel_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind panel server");
+        let panel_origin = format!(
+            "http://{}",
+            panel_listener.local_addr().expect("panel local address")
+        );
+        let panel_server = tokio::spawn(async move {
+            axum::serve(panel_listener, panel)
+                .await
+                .expect("serve panel");
+        });
+
+        let redirect_target = format!("{panel_origin}/api/v1/settings/public");
+        let apex = Router::new().route(
+            "/api/v1/settings/public",
+            get(move || async move { axum::response::Redirect::permanent(&redirect_target) }),
+        );
+        let apex_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind apex server");
+        let apex_origin = format!(
+            "http://{}",
+            apex_listener.local_addr().expect("apex local address")
+        );
+        let apex_server = tokio::spawn(async move {
+            axum::serve(apex_listener, apex).await.expect("serve apex");
+        });
+
+        let detected = probe_site(&apex_origin)
+            .await
+            .expect("redirected sub2api probe must converge");
+
+        assert_eq!(detected.backend_kind, BackendKind::Sub2Api);
+        assert_eq!(
+            detected.final_origin.as_deref(),
+            Some(panel_origin.as_str())
+        );
+        apex_server.abort();
+        panel_server.abort();
     }
 }

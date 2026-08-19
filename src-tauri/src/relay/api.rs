@@ -74,6 +74,7 @@ fn detect_site(body: &str) -> Option<DetectedSite> {
         backend_kind: BackendKind::Sub2Api,
         site_name: settings.site_name,
         api_base_url: settings.api_base_url,
+        final_origin: None,
     })
 }
 
