@@ -95,6 +95,7 @@ pub struct ModelVerificationCoordinator {
     db: Arc<Database>,
     verifier: Arc<dyn ActiveVerifier>,
     event_sink: Arc<dyn VerificationEventSink>,
+    passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
     mutation: Mutex<()>,
     state: Mutex<CoordinatorState>,
 }
@@ -130,13 +131,57 @@ impl ModelVerificationCoordinator {
         verifier: Arc<dyn ActiveVerifier>,
         event_sink: Arc<dyn VerificationEventSink>,
     ) -> Self {
+        let (passive_ingress, passive_receiver) =
+            crate::relay::model_verification::passive::PassiveIngress::channel(
+                crate::relay::model_verification::passive::PASSIVE_INGRESS_CAPACITY,
+            );
+        Self::spawn_passive_consumer(db.clone(), event_sink.clone(), passive_receiver);
         Self {
             db,
             verifier,
             event_sink,
+            passive_ingress,
             mutation: Mutex::new(()),
             state: Mutex::new(CoordinatorState::default()),
         }
+    }
+
+    /// 常驻被动消费循环：判定 → 异常才落库（含 history）→ 发结果变化事件。
+    /// 干净流量不产报告；写侧防降级跳过（Ok(false)）不写不发。单条失败只告警
+    /// 不退出——被动观察永远不能拖垮彼此，更不能阻塞转发路径（ingress 满即丢）。
+    fn spawn_passive_consumer(
+        db: Arc<Database>,
+        event_sink: Arc<dyn VerificationEventSink>,
+        mut receiver: tokio::sync::mpsc::Receiver<
+            crate::relay::model_verification::passive::EvidenceBatch,
+        >,
+    ) {
+        tauri::async_runtime::spawn(async move {
+            while let Some(batch) = receiver.recv().await {
+                let Some(report) =
+                    crate::relay::model_verification::passive::evaluate_passive(&batch)
+                else {
+                    continue;
+                };
+                match crate::relay::model_verification::store::upsert_passive(&db, &report) {
+                    Ok(true) => {
+                        let scope = TargetScope::new(
+                            batch.target.provider_id.clone(),
+                            batch.target.app_type.clone(),
+                        );
+                        if event_sink.emit_changed(&scope).is_err() {
+                            log::warn!("被动验证结果变化事件发送失败");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => log::warn!("被动验证结果落库失败: {error}"),
+                }
+            }
+        });
+    }
+
+    pub fn passive_ingress(&self) -> crate::relay::model_verification::passive::PassiveIngress {
+        self.passive_ingress.clone()
     }
 
     pub fn database(&self) -> Arc<Database> {
@@ -1330,5 +1375,79 @@ mod tests {
             rules_version: RULES_VERSION,
             checked_at: 1_700_000_000,
         }
+    }
+
+    fn anomaly_batch() -> crate::relay::model_verification::passive::EvidenceBatch {
+        use crate::relay::model_verification::{
+            passive::EvidenceBatch,
+            types::{EvidenceCode, EvidenceFact, EvidenceOutcome},
+        };
+        EvidenceBatch {
+            target: target(),
+            completed: true,
+            facts: vec![EvidenceFact {
+                code: EvidenceCode::ForeignProtocol,
+                outcome: EvidenceOutcome::Failed,
+            }],
+            observed_at: 1_700_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn passive_anomaly_batch_lands_in_results_and_history() {
+        let db = database_with_providers(&[("provider-a", "codex")]);
+        let coordinator = Arc::new(ModelVerificationCoordinator::with_verifier(
+            db,
+            Arc::new(BlockedVerifier::new()),
+        ));
+
+        assert!(coordinator.passive_ingress().try_submit(anomaly_batch()));
+
+        wait_until(|| {
+            coordinator
+                .list_results(&["provider-a".into()])
+                .is_ok_and(|rows| rows.len() == 1)
+        })
+        .await;
+        let rows = coordinator.list_results(&["provider-a".into()]).unwrap();
+        assert_eq!(rows[0].verdict, Verdict::Anomaly);
+
+        let history = coordinator
+            .list_history(&TargetScope::new("provider-a", "codex"))
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].source,
+            crate::relay::model_verification::types::VerificationSource::Passive
+        );
+        assert_eq!(history[0].report.verdict, Verdict::Anomaly);
+    }
+
+    #[tokio::test]
+    async fn passive_clean_batch_writes_nothing() {
+        let db = database_with_providers(&[("provider-a", "codex")]);
+        let coordinator = Arc::new(ModelVerificationCoordinator::with_verifier(
+            db,
+            Arc::new(BlockedVerifier::new()),
+        ));
+
+        let clean = crate::relay::model_verification::passive::EvidenceBatch {
+            facts: vec![crate::relay::model_verification::types::EvidenceFact {
+                code: crate::relay::model_verification::types::EvidenceCode::BasicEnvelope,
+                outcome: crate::relay::model_verification::types::EvidenceOutcome::Passed,
+            }],
+            ..anomaly_batch()
+        };
+        assert!(coordinator.passive_ingress().try_submit(clean));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(coordinator
+            .list_results(&["provider-a".into()])
+            .unwrap()
+            .is_empty());
+        assert!(coordinator
+            .list_history(&TargetScope::new("provider-a", "codex"))
+            .unwrap()
+            .is_empty());
     }
 }
