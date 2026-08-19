@@ -50,6 +50,7 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         effectiveModel: "claude-fable-5",
         avgFirstTokenMs: 420,
         balanceUsd: 10.347,
+        verificationVerdict: null,
       },
       {
         providerId: "tier-b",
@@ -61,6 +62,7 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         effectiveModel: null,
         avgFirstTokenMs: null,
         balanceUsd: null,
+        verificationVerdict: null,
       },
     ],
     ...overrides,
@@ -118,5 +120,24 @@ describe("EasyBoard", () => {
   it("空档位显示空态而不是崩", () => {
     setupBoard(boardFixture({ tiers: [] }));
     expect(screen.getByText("还没有可用档位")).toBeDefined();
+  });
+
+  it("验真异常档显示标记，干净档位零视觉噪音", () => {
+    const tiers = boardFixture().tiers.map((tier) => ({ ...tier }));
+    tiers[0] = { ...tiers[0], verificationVerdict: "anomaly" };
+    setupBoard(boardFixture({ tiers }));
+
+    expect(screen.getByTitle("检测到异常")).toBeDefined();
+    expect(screen.queryByTitle("需要复核")).toBeNull();
+    expect(screen.queryByTitle("验证通过")).toBeNull();
+  });
+
+  it("suspicious 档显示复核标记", () => {
+    const tiers = boardFixture().tiers.map((tier) => ({
+      ...tier,
+      verificationVerdict: "suspicious" as const,
+    }));
+    setupBoard(boardFixture({ tiers }));
+    expect(screen.getAllByTitle("需要复核")).toHaveLength(2);
   });
 });

@@ -142,6 +142,37 @@ function TierCard({
               {t("autoMode.board.current", { defaultValue: "当前" })}
             </Badge>
           ) : null}
+          {tier.verificationVerdict === "anomaly" ||
+          tier.verificationVerdict === "suspicious" ? (
+            <span
+              title={t(
+                `loongport.modelVerification.tierVerdict.${tier.verificationVerdict}`,
+                {
+                  defaultValue:
+                    tier.verificationVerdict === "anomaly"
+                      ? "检测到异常"
+                      : "需要复核",
+                },
+              )}
+              className={`h-2 w-2 shrink-0 rounded-full ${
+                tier.verificationVerdict === "anomaly"
+                  ? "bg-red-600"
+                  : "bg-amber-500"
+              }`}
+            >
+              <span className="sr-only">
+                {t(
+                  `loongport.modelVerification.tierVerdict.${tier.verificationVerdict}`,
+                  {
+                    defaultValue:
+                      tier.verificationVerdict === "anomaly"
+                        ? "检测到异常"
+                        : "需要复核",
+                  },
+                )}
+              </span>
+            </span>
+          ) : null}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span className="tabular-nums">

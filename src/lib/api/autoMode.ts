@@ -37,6 +37,8 @@ export interface TierBoardTier {
   avgFirstTokenMs: number | null;
   /** 站点钱包余额（美元）；`null` = 该站不可查。 */
   balanceUsd: number | null;
+  /** 模型验真合并判定，只上异常（`'anomaly' | 'suspicious'`）；`null` = 无异常（不背书）。 */
+  verificationVerdict: "anomaly" | "suspicious" | null;
 }
 
 export interface TierBoard {

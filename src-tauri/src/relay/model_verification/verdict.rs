@@ -29,6 +29,13 @@ pub fn merge_passive_over<'a>(
     }
 }
 
+/// 同一档位跨模型的报告优先级：更严重者赢，同级取更新。
+/// badge 聚合与档位看板共用——优先级规则只此一份。
+pub fn report_precedes(candidate: &VerificationReport, current: &VerificationReport) -> bool {
+    verdict_severity(candidate.verdict) > verdict_severity(current.verdict)
+        || (candidate.verdict == current.verdict && candidate.checked_at > current.checked_at)
+}
+
 /// Reduces finite verification evidence to its single user-facing verdict.
 ///
 /// Protocol probes emit facts only; their meaning and precedence live here so adding a probe
