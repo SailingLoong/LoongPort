@@ -3,6 +3,7 @@ pub mod capability_profiles;
 pub mod coordinator;
 pub(crate) mod history;
 pub(crate) mod legacy_cleanup;
+pub mod passive;
 pub(crate) mod protocols;
 pub mod store;
 pub(crate) mod target;
