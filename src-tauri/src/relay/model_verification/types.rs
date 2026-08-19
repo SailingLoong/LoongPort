@@ -194,6 +194,16 @@ impl VerificationSource {
     }
 }
 
+/// 判定严重度（数字越大越严重）。主动/被动两源合并与跨模型聚合共用这一把尺。
+pub(crate) const fn verdict_severity(verdict: Verdict) -> u8 {
+    match verdict {
+        Verdict::Trusted => 0,
+        Verdict::Inconclusive => 1,
+        Verdict::Suspicious => 2,
+        Verdict::Anomaly => 3,
+    }
+}
+
 impl TryFrom<&str> for VerificationSource {
     type Error = &'static str;
 

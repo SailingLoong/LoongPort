@@ -2,9 +2,32 @@ use crate::{
     app_config::AppType,
     relay::model_verification::{
         capability_profiles::CapabilityProfile,
-        types::{EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, Verdict},
+        types::{
+            verdict_severity, EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, Verdict,
+            VerificationReport,
+        },
     },
 };
+
+/// 主动/被动两源报告的读侧合并：严重者赢，同严重度被动赢
+/// （被动是最新一次观察；主动 Anomaly 仍高于被动 Suspicious）。
+/// 合并策略只住在这里——加证据源不能造出第二套优先级。
+pub fn merge_passive_over<'a>(
+    active: Option<&'a VerificationReport>,
+    passive: Option<&'a VerificationReport>,
+) -> Option<&'a VerificationReport> {
+    match (active, passive) {
+        (None, None) => None,
+        (Some(report), None) | (None, Some(report)) => Some(report),
+        (Some(active), Some(passive)) => {
+            if verdict_severity(passive.verdict) >= verdict_severity(active.verdict) {
+                Some(passive)
+            } else {
+                Some(active)
+            }
+        }
+    }
+}
 
 /// Reduces finite verification evidence to its single user-facing verdict.
 ///

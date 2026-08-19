@@ -16,7 +16,9 @@ mod privacy_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        store::{clear_scope, list_for_provider_ids, list_for_providers, upsert_active},
+        store::{
+            clear_scope, list_for_provider_ids, list_for_providers, upsert_active, upsert_passive,
+        },
         types::{
             EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind, RunState,
             StartRunResponse, TargetKey, TargetScope, Verdict, VerificationProgressEvent,
@@ -315,6 +317,88 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source, VerificationSource::Passive);
         assert_eq!(entries[0].report.verdict, Verdict::Anomaly);
+        Ok(())
+    }
+
+    #[test]
+    fn passive_anomaly_surfaces_through_list() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Trusted),
+        )?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        let reports = list_for_providers(&db, "codex", &["provider-a".into()])?;
+
+        assert_eq!(reports[0].verdict, Verdict::Anomaly);
+        Ok(())
+    }
+
+    #[test]
+    fn passive_write_never_downgrades_stored_anomaly() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        let downgraded = upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Suspicious),
+        )?;
+
+        assert!(!downgraded);
+        assert_eq!(
+            list_for_providers(&db, "codex", &["provider-a".into()])?[0].verdict,
+            Verdict::Anomaly
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_refresh_keeps_passive_anomaly() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Trusted),
+        )?;
+
+        assert_eq!(
+            list_for_providers(&db, "codex", &["provider-a".into()])?[0].verdict,
+            Verdict::Anomaly
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_anomaly_outranks_passive_suspicious() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Suspicious),
+        )?;
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        assert_eq!(
+            list_for_providers(&db, "codex", &["provider-a".into()])?[0].verdict,
+            Verdict::Anomaly
+        );
         Ok(())
     }
 
