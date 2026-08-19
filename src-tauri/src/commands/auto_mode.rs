@@ -362,6 +362,9 @@ pub struct TierBoardTier {
     /// 站点钱包余额（美元）。sub2api 用档位 sk 直查 `GET /v1/usage`（同站各档
     /// 共享一个账号钱包）；newapi 无此路 → `None`（前端显示 —，走登录态的余额链）。
     pub balance_usd: Option<f64>,
+    /// 模型验真合并判定（两源读侧合并、跨模型取最严重）。只上异常：
+    /// "anomaly" | "suspicious"；Trusted/无报告 = `None`（被动监控不背书）。
+    pub verification_verdict: Option<String>,
 }
 
 /// 省心模式档位看板：首页省心视图一次拉全的聚合 DTO。
@@ -407,6 +410,40 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
 
     let balances = fetch_site_balances(app_type, &ranked).await;
 
+    // 验真判定（两源读侧合并已在 store 层做完）：跨模型取最严重，只上异常
+    let provider_ids: Vec<String> = ranked.iter().map(|p| p.id.clone()).collect();
+    let mut verification: std::collections::HashMap<
+        String,
+        crate::relay::model_verification::types::VerificationReport,
+    > = std::collections::HashMap::new();
+    for report in crate::relay::model_verification::store::list_for_provider_ids(db, &provider_ids)
+        .unwrap_or_default()
+    {
+        match verification.get(&report.target.provider_id) {
+            Some(current) => {
+                if crate::relay::model_verification::verdict::report_precedes(&report, current) {
+                    verification.insert(report.target.provider_id.clone(), report);
+                }
+            }
+            None => {
+                verification.insert(report.target.provider_id.clone(), report);
+            }
+        }
+    }
+    let verification_verdict = |provider_id: &str| -> Option<String> {
+        verification
+            .get(provider_id)
+            .and_then(|report| match report.verdict {
+                crate::relay::model_verification::types::Verdict::Anomaly => {
+                    Some("anomaly".to_string())
+                }
+                crate::relay::model_verification::types::Verdict::Suspicious => {
+                    Some("suspicious".to_string())
+                }
+                _ => None,
+            })
+    };
+
     let tiers = ranked
         .into_iter()
         .enumerate()
@@ -423,6 +460,7 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
             rate_multiplier: multipliers.get(&p.id).copied(),
             avg_first_token_ms: ttft.get(&p.id).copied(),
             balance_usd: balances.get(&p.id).copied(),
+            verification_verdict: verification_verdict(&p.id),
             provider_id: p.id.clone(),
             name: p.name.clone(),
             position,
@@ -575,6 +613,41 @@ mod tests {
                 .any(|t| t.is_current && t.provider_id == expensive),
             "当前档位有命中标记"
         );
+
+        // 验真 verdict：被动异常上板、active Trusted 不上板（只报异常不背书）
+        use crate::relay::model_verification::{
+            store::{list_for_provider_ids, upsert_active, upsert_passive},
+            types::{TargetKey, Verdict, VerificationReport, RULES_VERSION},
+        };
+        let verification_report =
+            |provider_id: &str, model: &str, verdict: Verdict| VerificationReport {
+                target: TargetKey::new(provider_id, "claude", model),
+                verdict,
+                evidence_level:
+                    crate::relay::model_verification::types::EvidenceLevel::ProtocolBehavior,
+                facts: Vec::new(),
+                rules_version: RULES_VERSION,
+                checked_at: 1_700_000_000,
+            };
+        upsert_passive(&db, &verification_report(&cheap, "m-x", Verdict::Anomaly)).unwrap();
+        upsert_active(
+            &db,
+            &verification_report(&expensive, "m-x", Verdict::Trusted),
+        )
+        .unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
+        assert_eq!(
+            by_id(&cheap).verification_verdict.as_deref(),
+            Some("anomaly"),
+            "被动异常必须上板"
+        );
+        assert_eq!(
+            by_id(&expensive).verification_verdict,
+            None,
+            "active Trusted 不上板"
+        );
+        assert_eq!(list_for_provider_ids(&db, &[]).unwrap().len(), 0);
 
         // 手动模式：手动序反映到看板
         crate::proxy::auto_strategy::set_mode(

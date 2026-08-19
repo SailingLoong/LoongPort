@@ -3,6 +3,7 @@ pub mod capability_profiles;
 pub mod coordinator;
 pub(crate) mod history;
 pub(crate) mod legacy_cleanup;
+pub mod passive;
 pub(crate) mod protocols;
 pub mod store;
 pub(crate) mod target;
@@ -15,11 +16,13 @@ mod privacy_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        store::{clear_scope, list_for_provider_ids, list_for_providers, upsert_active},
+        store::{
+            clear_scope, list_for_provider_ids, list_for_providers, upsert_active, upsert_passive,
+        },
         types::{
             EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind, RunState,
             StartRunResponse, TargetKey, TargetScope, Verdict, VerificationProgressEvent,
-            VerificationReport, RULES_VERSION,
+            VerificationReport, VerificationSource, RULES_VERSION,
         },
     };
     use crate::{
@@ -292,6 +295,109 @@ mod tests {
                 .unwrap()
                 .verdict,
             Verdict::Trusted
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passive_history_round_trips() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        let entry = report("provider-a", "codex", "gpt-a", Verdict::Anomaly);
+        {
+            let conn = db
+                .conn
+                .lock()
+                .map_err(|error| AppError::Database(error.to_string()))?;
+            super::history::insert(&conn, VerificationSource::Passive, &entry)?;
+        }
+
+        let entries = super::history::list(&db, &TargetScope::new("provider-a", "codex"))?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, VerificationSource::Passive);
+        assert_eq!(entries[0].report.verdict, Verdict::Anomaly);
+        Ok(())
+    }
+
+    #[test]
+    fn passive_anomaly_surfaces_through_list() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Trusted),
+        )?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        let reports = list_for_providers(&db, "codex", &["provider-a".into()])?;
+
+        assert_eq!(reports[0].verdict, Verdict::Anomaly);
+        Ok(())
+    }
+
+    #[test]
+    fn passive_write_never_downgrades_stored_anomaly() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        let downgraded = upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Suspicious),
+        )?;
+
+        assert!(!downgraded);
+        assert_eq!(
+            list_for_providers(&db, "codex", &["provider-a".into()])?[0].verdict,
+            Verdict::Anomaly
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_refresh_keeps_passive_anomaly() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Trusted),
+        )?;
+
+        assert_eq!(
+            list_for_providers(&db, "codex", &["provider-a".into()])?[0].verdict,
+            Verdict::Anomaly
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_anomaly_outranks_passive_suspicious() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "provider-a", "codex")?;
+        upsert_passive(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Suspicious),
+        )?;
+        upsert_active(
+            &db,
+            &report("provider-a", "codex", "gpt-a", Verdict::Anomaly),
+        )?;
+
+        assert_eq!(
+            list_for_providers(&db, "codex", &["provider-a".into()])?[0].verdict,
+            Verdict::Anomaly
         );
         Ok(())
     }

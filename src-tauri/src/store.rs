@@ -34,9 +34,13 @@ impl AppState {
     pub fn new(db: Arc<Database>) -> Self {
         let codex_oauth_manager =
             Arc::new(CodexOAuthManager::new(crate::config::get_app_config_dir()));
-        let proxy_service =
-            ProxyService::new_with_codex_oauth_manager(db.clone(), codex_oauth_manager.clone());
         let model_verification = Arc::new(ModelVerificationCoordinator::new(db.clone()));
+        // 被动观察入口单向流入代理：proxy 只管顺路观察提交，不知道 coordinator 存在
+        let proxy_service = ProxyService::new_with_codex_oauth_manager(
+            db.clone(),
+            codex_oauth_manager.clone(),
+            model_verification.passive_ingress(),
+        );
 
         Self {
             db,

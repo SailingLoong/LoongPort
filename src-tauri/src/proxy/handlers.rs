@@ -35,8 +35,8 @@ use super::{
         transform_codex_responses_namespace, transform_gemini, transform_responses,
     },
     response_processor::{
-        create_logged_passthrough_stream, create_usage_collector, process_response,
-        read_decoded_body, strip_entity_headers_for_rebuilt_body,
+        create_logged_passthrough_stream, create_passive_tap, create_usage_collector,
+        process_response, read_decoded_body, strip_entity_headers_for_rebuilt_body,
         strip_hop_by_hop_response_headers, usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
@@ -520,6 +520,8 @@ async fn handle_claude_transform(
             usage_collector,
             timeout_config,
             connection_guard,
+            create_passive_tap(ctx),
+            state.passive_ingress.clone(),
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -1201,6 +1203,8 @@ async fn handle_codex_responses_namespace_restore(
             usage_collector,
             ctx.streaming_timeout_config(),
             connection_guard,
+            create_passive_tap(ctx),
+            state.passive_ingress.clone(),
         );
 
         let body = axum::body::Body::from_stream(logged_stream);
@@ -1394,6 +1398,8 @@ async fn handle_codex_chat_to_responses_transform(
             usage_collector,
             ctx.streaming_timeout_config(),
             connection_guard,
+            create_passive_tap(ctx),
+            state.passive_ingress.clone(),
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -1767,6 +1773,8 @@ fn build_codex_anthropic_sse_response(
         usage_collector,
         ctx.streaming_timeout_config(),
         connection_guard,
+        create_passive_tap(ctx),
+        state.passive_ingress.clone(),
     );
 
     let mut headers = axum::http::HeaderMap::new();

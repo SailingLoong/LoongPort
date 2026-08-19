@@ -5,6 +5,7 @@ use crate::{
             RunFailureKind, StartRunResponse, TargetKey, TargetScope, VerificationHistoryEntry,
             VerificationReport,
         },
+        verdict::report_precedes,
     },
     AppState,
 };
@@ -110,21 +111,6 @@ const fn badge_verdict(
     match verdict {
         Verdict::Trusted | Verdict::Suspicious | Verdict::Anomaly => Some(verdict),
         Verdict::Inconclusive => None,
-    }
-}
-
-fn report_precedes(candidate: &VerificationReport, current: &VerificationReport) -> bool {
-    verdict_severity(candidate.verdict) > verdict_severity(current.verdict)
-        || (candidate.verdict == current.verdict && candidate.checked_at > current.checked_at)
-}
-
-const fn verdict_severity(verdict: crate::relay::model_verification::types::Verdict) -> u8 {
-    use crate::relay::model_verification::types::Verdict;
-    match verdict {
-        Verdict::Trusted => 0,
-        Verdict::Inconclusive => 1,
-        Verdict::Suspicious => 2,
-        Verdict::Anomaly => 3,
     }
 }
 

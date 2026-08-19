@@ -48,6 +48,8 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    /// 被动模型监控入口：响应路径顺路观察托管档流量，满即丢不阻塞转发。
+    pub passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
 }
 
 /// 代理HTTP服务器
@@ -64,6 +66,7 @@ impl ProxyServer {
         config: ProxyConfig,
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
+        passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
     ) -> Self {
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
@@ -81,6 +84,7 @@ impl ProxyServer {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle,
             failover_manager,
+            passive_ingress,
         };
 
         Self {
@@ -508,6 +512,7 @@ mod tests {
             },
             db.clone(),
             None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
         );
         let proxy_info = proxy.start().await.expect("start test proxy");
         let client = reqwest::Client::new();

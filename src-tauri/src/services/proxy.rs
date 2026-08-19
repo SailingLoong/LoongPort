@@ -389,11 +389,13 @@ impl Drop for CodexAuthFileTransaction {
 #[derive(Clone)]
 pub struct ProxyService {
     db: Arc<Database>,
-    codex_oauth_manager: Arc<CodexOAuthManager>,
     server: Arc<RwLock<Option<ProxyServer>>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
+    /// 被动模型监控入口（从 ModelVerificationCoordinator 单向流入，随 server 组装传下去）
+    passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
+    codex_oauth_manager: Arc<CodexOAuthManager>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -402,19 +404,24 @@ pub struct HotSwitchOutcome {
 }
 
 impl ProxyService {
-    pub fn new(db: Arc<Database>) -> Self {
+    pub fn new(
+        db: Arc<Database>,
+        passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
+    ) -> Self {
         let codex_oauth_manager =
             Arc::new(CodexOAuthManager::new(crate::config::get_app_config_dir()));
 
-        Self::new_with_codex_oauth_manager(db, codex_oauth_manager)
+        Self::new_with_codex_oauth_manager(db, codex_oauth_manager, passive_ingress)
     }
 
     pub fn new_with_codex_oauth_manager(
         db: Arc<Database>,
         codex_oauth_manager: Arc<CodexOAuthManager>,
+        passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
     ) -> Self {
         Self {
             db,
+            passive_ingress,
             codex_oauth_manager,
             server: Arc::new(RwLock::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
@@ -966,7 +973,12 @@ impl ProxyService {
 
         // 4. 创建并启动服务器
         let app_handle = self.app_handle.read().await.clone();
-        let server = ProxyServer::new(config.clone(), self.db.clone(), app_handle);
+        let server = ProxyServer::new(
+            config.clone(),
+            self.db.clone(),
+            app_handle,
+            self.passive_ingress.clone(),
+        );
         let info = server
             .start()
             .await
@@ -4007,7 +4019,12 @@ impl ProxyService {
             }
 
             let app_handle = self.app_handle.read().await.clone();
-            let new_server = ProxyServer::new(new_config.clone(), self.db.clone(), app_handle);
+            let new_server = ProxyServer::new(
+                new_config.clone(),
+                self.db.clone(),
+                app_handle,
+                self.passive_ingress.clone(),
+            );
             let info = new_server
                 .start()
                 .await
@@ -4181,7 +4198,10 @@ mod tests {
     #[tokio::test]
     async fn unsupported_apps_are_rejected_before_proxy_side_effects() {
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         assert!(service.set_takeover_for_app("pi", true).await.is_err());
         assert!(!service.is_running().await);
@@ -4699,7 +4719,10 @@ mod tests {
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider = Provider::with_id(
             "p1".to_string(),
@@ -4911,7 +4934,10 @@ mod tests {
         .expect("enable Codex official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5001,7 +5027,10 @@ wire_api = "responses"
         .expect("enable Codex official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5087,7 +5116,10 @@ wire_api = "responses"
         .expect("enable Codex official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5169,7 +5201,10 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5281,7 +5316,10 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -5396,7 +5434,10 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -5547,7 +5588,10 @@ wire_api = "responses"
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -5634,7 +5678,10 @@ wire_api = "responses"
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         crate::codex_config::write_codex_live_atomic(
             &json!({ "OPENAI_API_KEY": "sk-real" }),
             Some("model = \"gpt-5.4\"\n"),
@@ -5670,7 +5717,10 @@ wire_api = "responses"
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let auth = json!({ "OPENAI_API_KEY": "sk-real" });
         crate::codex_config::write_codex_live_atomic(&auth, Some("model = \"gpt-5.4\"\n"))
             .expect("seed auth");
@@ -5694,7 +5744,10 @@ wire_api = "responses"
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let mut official = Provider::with_id(
             crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
             "OpenAI Official".to_string(),
@@ -5741,7 +5794,10 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5816,7 +5872,10 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -6144,7 +6203,10 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6290,7 +6352,10 @@ wire_api = "responses"
         .expect("disable Codex official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6366,7 +6431,10 @@ wire_api = "responses"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6431,7 +6499,10 @@ experimental_bearer_token = "PROXY_MANAGED"
         .expect("disable Codex official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6792,7 +6863,10 @@ model = "gpt-5.1-codex"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider = Provider::with_id(
             "p1".to_string(),
@@ -6848,7 +6922,10 @@ model = "gpt-5.1-codex"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider = Provider::with_id(
             "p1".to_string(),
@@ -6904,7 +6981,10 @@ model = "gpt-5.1-codex"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -6966,7 +7046,10 @@ model = "gpt-5.1-codex"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -7131,7 +7214,10 @@ model = "gpt-5.1-codex"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -7224,7 +7310,10 @@ model = "gpt-5.1-codex"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -7319,7 +7408,10 @@ model = "gpt-5.1-codex"
         )
         .expect("set common config snippet");
 
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let mut provider = Provider::with_id(
             "p1".to_string(),
@@ -7370,7 +7462,10 @@ model = "gpt-5.1-codex"
         )
         .expect("set common config snippet");
 
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let mut provider = Provider::with_id(
             "p1".to_string(),
@@ -7428,7 +7523,10 @@ base_url = "https://codex.example/v1"
         .expect("enable official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -7508,7 +7606,10 @@ base_url = "https://codex.example/v1"
         })
         .await
         .expect("set proxy port");
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -7592,7 +7693,10 @@ base_url = "https://codex.example/v1"
         })
         .await
         .expect("set proxy port");
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let native_auth = json!({
             "auth_mode": "chatgpt",
             "OPENAI_API_KEY": null,
@@ -7633,7 +7737,10 @@ base_url = "https://codex.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let mut provider = Provider::with_id(
             "managed-official".to_string(),
             "OpenAI Official".to_string(),
@@ -7844,7 +7951,10 @@ wire_api = "responses"
         .expect("enable official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let native_auth = json!({
             "auth_mode": "chatgpt",
             "OPENAI_API_KEY": null,
@@ -7902,7 +8012,10 @@ wire_api = "responses"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         db.save_live_backup(
             "codex",
@@ -7977,7 +8090,10 @@ base_url = "https://new.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -8148,7 +8264,10 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -8275,7 +8394,10 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         db.save_live_backup(
             "codex",
@@ -8729,7 +8851,10 @@ requires_openai_auth = true
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -8845,7 +8970,10 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         // Pre-takeover Live state: config.toml points at the cc-switch generated
         // catalog file, and that file exists on disk (takeover never touches it).
@@ -8909,7 +9037,10 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         // Catalog projection needs a model template; seed `models_cache.json`
         // with the template slug so we don't depend on the `codex` CLI.
@@ -8987,7 +9118,10 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         let codex_dir = crate::codex_config::get_codex_config_dir();
         std::fs::create_dir_all(&codex_dir).expect("create codex dir");
@@ -9044,7 +9178,10 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         // Seed DB with a current provider that has a real API key
         let provider = Provider::with_id(
@@ -9145,7 +9282,10 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         // Backup snapshot: third-party API-key shape (pre-login state)
         db.save_live_backup(
@@ -9224,7 +9364,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         db.save_live_backup(
             "codex",
@@ -9265,7 +9408,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let mut official = Provider::with_id(
             crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
             "OpenAI Official".to_string(),
@@ -9326,7 +9472,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         db.save_live_backup(
             "codex",
             &serde_json::to_string(&json!({
@@ -9361,7 +9510,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let auth_path = crate::codex_config::get_codex_auth_path();
         write_json_file(
             &auth_path,
@@ -9405,7 +9557,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let provider = Provider::with_id(
             "third-party".to_string(),
             "Third Party".to_string(),
@@ -9463,7 +9618,10 @@ base_url = "https://third.example/v1"
         .expect("simulate concurrent login");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let error = service
             .write_codex_live_verbatim_with_auth_guard(
                 &json!({
@@ -9579,7 +9737,10 @@ base_url = "https://third.example/v1"
         std::fs::create_dir(&config_path).expect("make config target unwritable as a file");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db);
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let error = service
             .write_codex_live_verbatim_with_auth_guard(
                 &json!({
@@ -9609,7 +9770,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         db.save_live_backup(
             "codex",
@@ -9667,7 +9831,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         db.save_live_backup(
             "codex",
@@ -9726,7 +9893,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         db.save_live_backup(
             "codex",
@@ -9774,7 +9944,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         db.save_live_backup(
             "codex",
@@ -9830,7 +10003,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         // Seed a GOOD backup (the "real" original Live)
         let good_backup = serde_json::to_string(&json!({
@@ -9883,7 +10059,10 @@ base_url = "https://third.example/v1"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
 
         // Seed good backups for all three apps
         let good_backup = serde_json::to_string(&json!({
@@ -9986,7 +10165,10 @@ experimental_bearer_token = "PROXY_MANAGED"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let provider_a = Provider::with_id(
             "grok-a".to_string(),
             "Grok A".to_string(),
@@ -10053,7 +10235,10 @@ experimental_bearer_token = "PROXY_MANAGED"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
         let provider_a = Provider::with_id(
             "grok-a".to_string(),
             "Grok A".to_string(),

@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 16;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 17;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -255,6 +255,13 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 log::info!("LoongPort 数据迁移 v15 → v16（官网直连档位倍率补 1.0）");
                 backfill_vendor_tier_multipliers(conn)?;
                 set_version(conn, 16)?;
+            }
+            // v16 → v17：模型验真历史支持 passive 来源（被动监控落异常历史）。
+            // 旧 CHECK 两种形态都插不进 passive，重建表放宽；行数据原样保留。
+            16 => {
+                log::info!("LoongPort 数据迁移 v16 → v17（验证历史 source 放宽 active+passive）");
+                crate::relay::model_verification::history::rebuild_for_passive_source(conn)?;
+                set_version(conn, 17)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -1256,6 +1263,82 @@ mod tests {
         assert_eq!(runtime_history, 0, "被动运行时验证历史必须删除");
         assert_eq!(runtime_auto_enabled, 0, "旧自动验证设置必须关闭");
         assert_eq!(unresolved_lease, 1, "未恢复的代理租约必须留给启动清理");
+    }
+
+    /// 造一张停在 v16 的 history 表。现存库有两种历史 CHECK 形态：
+    /// PR #83 后新建的 `= 'active'` 与被动时代建的 `IN ('active','runtime')`
+    /// （v8 已删 runtime 行但没重建表），v17 重建必须两种都兼容。
+    fn v16_history_table(conn: &Connection, check_clause: &str) {
+        conn.execute_batch(&format!(
+            "CREATE TABLE model_verification_history (
+                id INTEGER PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                model TEXT NOT NULL,
+                source TEXT NOT NULL {check_clause},
+                verdict TEXT NOT NULL,
+                evidence_level TEXT NOT NULL,
+                facts_json TEXT NOT NULL,
+                rules_version INTEGER NOT NULL,
+                checked_at INTEGER NOT NULL,
+                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+            );
+            CREATE INDEX idx_model_verification_history_scope_order
+            ON model_verification_history (provider_id, app_type, checked_at DESC, id DESC);
+            INSERT INTO model_verification_history (
+                provider_id, app_type, model, source, verdict, evidence_level,
+                facts_json, rules_version, checked_at
+            ) VALUES
+                ('provider-a', 'codex', 'gpt-test', 'active', 'anomaly',
+                 'protocolBehavior', '[]', 1, 100);"
+        ))
+        .expect("造 v16 验证历史表");
+    }
+
+    #[test]
+    fn v17_relaxes_history_source_check_for_both_legacy_shapes() {
+        let shapes = [
+            "CHECK (source = 'active')",
+            "CHECK (source IN ('active', 'runtime'))",
+        ];
+        for check_clause in shapes {
+            let conn = mem();
+            legacy_providers_table(&conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type) VALUES ('provider-a', 'codex')",
+                [],
+            )
+            .expect("插入旧档位");
+            v16_history_table(&conn, check_clause);
+            ensure_version_table(&conn).expect("建版本表");
+            set_version(&conn, 16).expect("设为 v16");
+
+            apply(&conn).expect("迁移到最新版本");
+
+            let active_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM model_verification_history WHERE source = 'active'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("统计 active 历史");
+            assert_eq!(active_rows, 1, "active 行必须保留（{check_clause} 形态）");
+            conn.execute(
+                "INSERT INTO model_verification_history (
+                    provider_id, app_type, model, source, verdict, evidence_level,
+                    facts_json, rules_version, checked_at
+                 ) VALUES
+                    ('provider-a', 'codex', 'gpt-test', 'passive', 'anomaly',
+                     'protocolBehavior', '[]', 1, 200)",
+                [],
+            )
+            .unwrap_or_else(|_| panic!("迁移后必须能插入 passive 行（{check_clause} 形态）"));
+            assert_eq!(
+                current_version(&conn).unwrap(),
+                LOONGPORT_SCHEMA_VERSION,
+                "版本必须到最新（{check_clause} 形态）"
+            );
+        }
     }
 
     #[test]

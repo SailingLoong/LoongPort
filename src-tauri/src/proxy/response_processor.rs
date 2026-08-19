@@ -14,6 +14,9 @@ use super::{
     ProxyError,
 };
 use crate::database::PRICING_SOURCE_REQUEST;
+use crate::relay::model_verification::{
+    passive::PassiveIngress, protocols::VerificationTap, types::TargetKey,
+};
 use axum::http::{header::HeaderMap, HeaderName};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -190,13 +193,15 @@ pub async fn handle_streaming(
     // 获取流式超时配置
     let timeout_config = ctx.streaming_timeout_config();
 
-    // 创建带日志和超时的透传流
+    // 创建带日志和超时的透传流；托管档顺路挂被动观察 tap（只读，不影响转发）
     let logged_stream = create_logged_passthrough_stream(
         stream,
         ctx.tag,
         usage_collector,
         timeout_config,
         connection_guard,
+        create_passive_tap(ctx),
+        state.passive_ingress.clone(),
     );
 
     let body = axum::body::Body::from_stream(logged_stream);
@@ -227,6 +232,16 @@ pub async fn handle_non_streaming(
         };
     let (mut response_headers, status, body_bytes) =
         read_decoded_body(response, ctx.tag, body_timeout).await?;
+    // 托管档的非流式响应顺路观察（解压后的明文形状；满即丢不阻塞）
+    if let Some(target) = create_passive_target(ctx) {
+        if let Some(batch) = VerificationTap::reduce_non_streaming(
+            target,
+            &body_bytes,
+            chrono::Utc::now().timestamp(),
+        ) {
+            let _ = state.passive_ingress.try_submit(batch);
+        }
+    }
     strip_hop_by_hop_response_headers(&mut response_headers);
 
     log::debug!(
@@ -679,6 +694,21 @@ async fn log_usage_internal(
     }
 }
 
+/// 被动观察的门控与目标定位：只观察托管档位（LoongPort 生成 id 的形状判据）。
+/// 非托管档（用户手填的 provider）没有站点关联语义，观察了也无从落库展示。
+fn passive_target(provider_id: &str, app_type_str: &str, model: &str) -> Option<TargetKey> {
+    crate::relay::is_managed(provider_id).then(|| TargetKey::new(provider_id, app_type_str, model))
+}
+
+pub(crate) fn create_passive_target(ctx: &RequestContext) -> Option<TargetKey> {
+    let model = ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model);
+    passive_target(&ctx.provider.id, ctx.app_type_str, model)
+}
+
+pub(crate) fn create_passive_tap(ctx: &RequestContext) -> Option<VerificationTap> {
+    VerificationTap::new(create_passive_target(ctx)?)
+}
+
 /// 创建带日志记录和超时控制的透传流
 pub fn create_logged_passthrough_stream(
     stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
@@ -686,6 +716,8 @@ pub fn create_logged_passthrough_stream(
     usage_collector: Option<SseUsageCollector>,
     timeout_config: StreamingTimeoutConfig,
     connection_guard: Option<ActiveConnectionGuard>,
+    mut verification_tap: Option<VerificationTap>,
+    passive_ingress: PassiveIngress,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let _conn_guard = connection_guard;
@@ -745,6 +777,9 @@ pub fn create_logged_passthrough_stream(
                         );
                     }
                     is_first_chunk = false;
+                    if let Some(tap) = verification_tap.as_mut() {
+                        tap.observe_chunk(&bytes);
+                    }
                     if inspect_sse_events {
                         crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
 
@@ -799,6 +834,12 @@ pub fn create_logged_passthrough_stream(
         }
         if let Some(guard) = &mut finish_guard {
             guard.disarm();
+        }
+        // 流结束（含异常中断）都要收尾观察：tap 内部按 terminal 状态判 StreamLifecycle，
+        // 异常中断的 batch 会被判定侧自然降级，不构成误报源。
+        if let Some(tap) = verification_tap.take() {
+            let batch = tap.finish(true, chrono::Utc::now().timestamp());
+            let _ = passive_ingress.try_submit(batch);
         }
     }
 }
@@ -869,6 +910,32 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn passive_target_gates_on_managed_providers() {
+        assert!(passive_target("loongport-0123456789abcdef", "codex", "gpt-5.6").is_some());
+        assert!(passive_target("manual-provider", "codex", "gpt-5.6").is_none());
+        assert!(passive_target("", "claude", "claude-sonnet-5").is_none());
+    }
+
+    #[test]
+    fn verification_tap_supports_codex_and_claude_only() {
+        use crate::relay::model_verification::protocols::VerificationTap;
+        use crate::relay::model_verification::types::TargetKey;
+
+        for app_type in ["codex", "claude"] {
+            assert!(
+                VerificationTap::new(TargetKey::new("loongport-0123456789abcdef", app_type, "m"))
+                    .is_some(),
+                "托管 {app_type} 档必须可观察"
+            );
+        }
+        assert!(
+            VerificationTap::new(TargetKey::new("loongport-0123456789abcdef", "gemini", "m"))
+                .is_none(),
+            "非验证范围的 app 不建 tap"
+        );
+    }
 
     #[test]
     fn format_headers_keeps_only_allowlisted_diagnostic_values() {
@@ -1030,6 +1097,8 @@ mod tests {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            passive_ingress: crate::relay::model_verification::passive::PassiveIngress::channel(1)
+                .0,
         }
     }
 

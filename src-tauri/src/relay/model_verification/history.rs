@@ -18,7 +18,7 @@ pub(crate) fn create_table(conn: &Connection) -> Result<(), AppError> {
             provider_id TEXT NOT NULL,
             app_type TEXT NOT NULL,
             model TEXT NOT NULL,
-            source TEXT NOT NULL CHECK (source = 'active'),
+            source TEXT NOT NULL CHECK (source IN ('active', 'passive')),
             verdict TEXT NOT NULL,
             evidence_level TEXT NOT NULL,
             facts_json TEXT NOT NULL,
@@ -33,6 +33,52 @@ pub(crate) fn create_table(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// v17 迁移：重建 history 表把 source CHECK 放宽到 `IN ('active','passive')`。
+///
+/// 现存库有两种旧形态（`= 'active'` 与被动时代的 `IN ('active','runtime')`，后者
+/// 的 runtime 行已在 v8 删净），两种都插不进 passive —— SQLite 改不了 CHECK，
+/// 只能重建。表不存在时（v6 以前的库会先由 v6→v7 建新形态）直接跳过。
+pub(crate) fn rebuild_for_passive_source(conn: &Connection) -> Result<(), AppError> {
+    // providers 缺失时跳过：history 的 FK 指向它，RENAME 需要能解析全部引用
+    // （与 v8 remove_legacy_runtime_verification_state 的守卫同一形状；真实库
+    // providers 恒在——上游建表先于本模块迁移跑）。
+    if !crate::Database::table_exists(conn, TABLE)?
+        || !crate::Database::table_exists(conn, "providers")?
+    {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_model_verification_history_scope_order;
+         ALTER TABLE model_verification_history RENAME TO model_verification_history_pre_v17;
+         CREATE TABLE model_verification_history (
+            id INTEGER PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL,
+            source TEXT NOT NULL CHECK (source IN ('active', 'passive')),
+            verdict TEXT NOT NULL,
+            evidence_level TEXT NOT NULL,
+            facts_json TEXT NOT NULL,
+            rules_version INTEGER NOT NULL,
+            checked_at INTEGER NOT NULL,
+            FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+         );
+         CREATE INDEX idx_model_verification_history_scope_order
+         ON model_verification_history (provider_id, app_type, checked_at DESC, id DESC);
+         INSERT INTO model_verification_history (
+            id, provider_id, app_type, model, source, verdict, evidence_level,
+            facts_json, rules_version, checked_at
+         ) SELECT id, provider_id, app_type, model, source, verdict, evidence_level,
+                  facts_json, rules_version, checked_at
+         FROM model_verification_history_pre_v17;
+         DROP TABLE model_verification_history_pre_v17;",
+    )
+    .map_err(|error| {
+        AppError::Database(format!("重建 {TABLE} 表（放宽 source CHECK）失败: {error}"))
+    })?;
+    Ok(())
+}
+
 pub fn list(db: &Database, scope: &TargetScope) -> Result<Vec<VerificationHistoryEntry>, AppError> {
     let conn = lock_conn!(db.conn);
     let mut statement = conn
@@ -40,7 +86,7 @@ pub fn list(db: &Database, scope: &TargetScope) -> Result<Vec<VerificationHistor
             "SELECT provider_id, app_type, model, source, verdict, evidence_level,
                     facts_json, rules_version, checked_at
              FROM model_verification_history
-             WHERE provider_id = ?1 AND app_type = ?2 AND source = 'active'
+             WHERE provider_id = ?1 AND app_type = ?2
              ORDER BY checked_at DESC, id DESC
              LIMIT ?3",
         )
@@ -129,7 +175,7 @@ pub(super) fn prune(conn: &Connection, provider_id: &str, app_type: &str) -> Res
          WHERE provider_id = ?1 AND app_type = ?2
            AND id NOT IN (
              SELECT id FROM model_verification_history
-             WHERE provider_id = ?1 AND app_type = ?2 AND source = 'active'
+             WHERE provider_id = ?1 AND app_type = ?2
              ORDER BY checked_at DESC, id DESC
              LIMIT ?3
            )",

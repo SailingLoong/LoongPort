@@ -1,10 +1,75 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use futures::StreamExt;
 use reqwest::{RequestBuilder, Response, StatusCode};
 
 pub(crate) mod anthropic;
+pub(crate) mod anthropic_passive;
 pub(crate) mod openai_responses;
+pub(crate) mod openai_responses_passive;
+
+use crate::{
+    app_config::AppType,
+    relay::model_verification::{passive::EvidenceBatch, types::TargetKey},
+};
+
+/// 协议无关的被动观察器：只持有有界解析状态与有限事实，供响应转发路径顺路观察。
+pub(crate) enum VerificationTap {
+    Anthropic(anthropic_passive::AnthropicPassiveTap),
+    OpenAiResponses(openai_responses_passive::OpenAiResponsesPassiveTap),
+}
+
+impl VerificationTap {
+    pub(crate) fn new(target: TargetKey) -> Option<Self> {
+        match AppType::from_str(target.app_type.as_str()).ok()? {
+            AppType::Claude => Some(Self::Anthropic(
+                anthropic_passive::AnthropicPassiveTap::new(target),
+            )),
+            AppType::Codex => Some(Self::OpenAiResponses(
+                openai_responses_passive::OpenAiResponsesPassiveTap::new(target),
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn observe_chunk(&mut self, chunk: &[u8]) {
+        match self {
+            Self::Anthropic(tap) => tap.observe_chunk(chunk),
+            Self::OpenAiResponses(tap) => tap.observe_chunk(chunk),
+        }
+    }
+
+    pub(crate) fn finish(self, completed: bool, observed_at: i64) -> EvidenceBatch {
+        match self {
+            Self::Anthropic(tap) => tap.finish(completed, observed_at),
+            Self::OpenAiResponses(tap) => tap.finish(completed, observed_at),
+        }
+    }
+
+    pub(crate) fn reduce_non_streaming(
+        target: TargetKey,
+        body: &[u8],
+        observed_at: i64,
+    ) -> Option<EvidenceBatch> {
+        match AppType::from_str(target.app_type.as_str()).ok()? {
+            AppType::Claude => Some(
+                anthropic_passive::AnthropicPassiveTap::reduce_non_streaming(
+                    target,
+                    body,
+                    observed_at,
+                ),
+            ),
+            AppType::Codex => Some(
+                openai_responses_passive::OpenAiResponsesPassiveTap::reduce_non_streaming(
+                    target,
+                    body,
+                    observed_at,
+                ),
+            ),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;

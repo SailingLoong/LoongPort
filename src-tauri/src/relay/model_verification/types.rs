@@ -182,13 +182,25 @@ pub struct VerificationReport {
 #[serde(rename_all = "camelCase")]
 pub enum VerificationSource {
     Active,
+    Passive,
 }
 
 impl VerificationSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
+            Self::Passive => "passive",
         }
+    }
+}
+
+/// 判定严重度（数字越大越严重）。主动/被动两源合并与跨模型聚合共用这一把尺。
+pub(crate) const fn verdict_severity(verdict: Verdict) -> u8 {
+    match verdict {
+        Verdict::Trusted => 0,
+        Verdict::Inconclusive => 1,
+        Verdict::Suspicious => 2,
+        Verdict::Anomaly => 3,
     }
 }
 
@@ -198,6 +210,7 @@ impl TryFrom<&str> for VerificationSource {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "active" => Ok(Self::Active),
+            "passive" => Ok(Self::Passive),
             _ => Err("unsupported verification source"),
         }
     }
