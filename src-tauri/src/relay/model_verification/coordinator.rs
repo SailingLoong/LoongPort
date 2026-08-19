@@ -135,7 +135,7 @@ impl ModelVerificationCoordinator {
             crate::relay::model_verification::passive::PassiveIngress::channel(
                 crate::relay::model_verification::passive::PASSIVE_INGRESS_CAPACITY,
             );
-        Self::spawn_passive_consumer(db.clone(), event_sink.clone(), passive_receiver);
+        Self::spawn_passive_consumer(&db, event_sink.clone(), passive_receiver);
         Self {
             db,
             verifier,
@@ -149,18 +149,27 @@ impl ModelVerificationCoordinator {
     /// 常驻被动消费循环：判定 → 异常才落库（含 history）→ 发结果变化事件。
     /// 干净流量不产报告；写侧防降级跳过（Ok(false)）不写不发。单条失败只告警
     /// 不退出——被动观察永远不能拖垮彼此，更不能阻塞转发路径（ingress 满即丢）。
+    ///
+    /// db 只以 Weak 持有：worker 是消费者不是 owner，强持有会把磁盘库句柄的
+    /// 释放吊在异步 task 的调度上（Windows 上集成测试清理 test home 时
+    /// os error 32 连环毒化）。owner（coordinator/AppState）drop 后到来的
+    /// batch 顺势丢弃。
     fn spawn_passive_consumer(
-        db: Arc<Database>,
+        db: &Arc<Database>,
         event_sink: Arc<dyn VerificationEventSink>,
         mut receiver: tokio::sync::mpsc::Receiver<
             crate::relay::model_verification::passive::EvidenceBatch,
         >,
     ) {
+        let db = Arc::downgrade(db);
         tauri::async_runtime::spawn(async move {
             while let Some(batch) = receiver.recv().await {
                 let Some(report) =
                     crate::relay::model_verification::passive::evaluate_passive(&batch)
                 else {
+                    continue;
+                };
+                let Some(db) = db.upgrade() else {
                     continue;
                 };
                 match crate::relay::model_verification::store::upsert_passive(&db, &report) {
@@ -1449,5 +1458,33 @@ mod tests {
             .list_history(&TargetScope::new("provider-a", "codex"))
             .unwrap()
             .is_empty());
+    }
+
+    /// 被动 worker 不得延长 Database 生命周期：它是消费者不是 owner。强持有会在
+    /// Windows 上钉死磁盘库文件句柄（集成测试清理 test home 时 os error 32 连环毒化）。
+    /// 断言在 drop coordinator 后立即计数、不等待异步调度：弱持有恒为 1；
+    /// 强持有则依赖 task 被调度退出，慢机上会红。
+    #[tokio::test]
+    async fn passive_worker_does_not_keep_database_alive() {
+        let db = database_with_providers(&[("provider-a", "codex")]);
+        let coordinator = Arc::new(ModelVerificationCoordinator::with_verifier(
+            db.clone(),
+            Arc::new(BlockedVerifier::new()),
+        ));
+        assert!(coordinator.passive_ingress().try_submit(anomaly_batch()));
+        wait_until(|| {
+            coordinator
+                .list_results(&["provider-a".into()])
+                .is_ok_and(|rows| rows.len() == 1)
+        })
+        .await;
+
+        drop(coordinator);
+
+        assert_eq!(
+            Arc::strong_count(&db),
+            1,
+            "只剩测试持有的 db：worker 必须 Weak 持有（channel 开着也不计数）"
+        );
     }
 }
