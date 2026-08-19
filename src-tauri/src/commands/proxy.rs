@@ -2,12 +2,11 @@
 //!
 //! 提供前端调用的 API 接口
 
-use std::str::FromStr;
-
 use crate::error::AppError;
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
+use std::str::FromStr;
 
 fn require_proxy_app(app_type: &str) -> Result<crate::app_config::AppType, String> {
     let app = crate::app_config::AppType::from_str(app_type)
@@ -284,6 +283,36 @@ pub async fn is_proxy_running(state: tauri::State<'_, AppState>) -> Result<bool,
 #[tauri::command]
 pub async fn is_live_takeover_active(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     state.proxy_service.is_takeover_active().await
+}
+
+/// 代理模式下切换供应商（热切换）
+#[tauri::command]
+pub async fn switch_proxy_provider(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    provider_id: String,
+) -> Result<(), String> {
+    let app = require_proxy_app(&app_type)?;
+    // Codex official account cards can use the client's native OpenAI login
+    // through takeover. Other apps' official providers remain blocked.
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, &app_type)
+        .map_err(|e| format!("读取供应商失败: {e}"))?
+        .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
+    if provider.category.as_deref() == Some("official")
+        && !crate::services::provider::official_provider_supports_proxy_takeover(&app, &provider)
+    {
+        return Err(
+            "代理接管模式下不能切换到官方供应商 (Cannot switch to official provider during proxy takeover)"
+                .to_string(),
+        );
+    }
+
+    state
+        .proxy_service
+        .switch_proxy_target(&app_type, &provider_id)
+        .await
 }
 
 // ==================== 故障转移相关命令 ====================

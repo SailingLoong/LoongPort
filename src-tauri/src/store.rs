@@ -1,4 +1,5 @@
 use crate::database::Database;
+use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::relay::browser_bridge::BrowserBridge;
 use crate::relay::model_verification::coordinator::ModelVerificationCoordinator;
 use crate::relay::purchase_session::PurchaseSessionCoordinator;
@@ -23,14 +24,23 @@ pub struct AppState {
     /// 「这个账号的 refresh 轮换权现在归谁」是后端会话协调的事实，不是 React 的
     /// busy 状态 —— 前端刷新/重挂载会丢，而 lease 必须活到窗口真正销毁为止。
     pub purchase_sessions: Arc<PurchaseSessionCoordinator>,
+    // 内部已使用细粒度锁（accounts/access_tokens/refresh_locks），所有方法均为
+    // `&self`，无需外层 RwLock；避免持有粗粒度锁跨网络刷新导致的连锁阻塞。
+    pub codex_oauth_manager: Arc<CodexOAuthManager>,
 }
 
 impl AppState {
     /// 创建新的应用状态
     pub fn new(db: Arc<Database>) -> Self {
+        let codex_oauth_manager =
+            Arc::new(CodexOAuthManager::new(crate::config::get_app_config_dir()));
         let model_verification = Arc::new(ModelVerificationCoordinator::new(db.clone()));
         // 被动观察入口单向流入代理：proxy 只管顺路观察提交，不知道 coordinator 存在
-        let proxy_service = ProxyService::new(db.clone(), model_verification.passive_ingress());
+        let proxy_service = ProxyService::new_with_codex_oauth_manager(
+            db.clone(),
+            codex_oauth_manager.clone(),
+            model_verification.passive_ingress(),
+        );
 
         Self {
             db,
@@ -39,6 +49,7 @@ impl AppState {
             model_verification,
             browser_bridge: Arc::new(BrowserBridge::default()),
             purchase_sessions: Arc::new(PurchaseSessionCoordinator::default()),
+            codex_oauth_manager,
         }
     }
 }

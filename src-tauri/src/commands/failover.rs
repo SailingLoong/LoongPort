@@ -36,10 +36,25 @@ pub async fn get_failover_queue(
     app_type: String,
 ) -> Result<Vec<FailoverQueueItem>, String> {
     require_failover_app(&app_type)?;
-    state
+    let queue = state
         .db
         .get_failover_queue(&app_type)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if app_type != "codex" {
+        return Ok(queue);
+    }
+    let providers = state
+        .db
+        .get_all_providers(&app_type)
+        .map_err(|e| e.to_string())?;
+    Ok(queue
+        .into_iter()
+        .filter(|item| {
+            providers.get(&item.provider_id).is_some_and(|provider| {
+                crate::proxy::provider_router::provider_supports_failover(&app_type, provider)
+            })
+        })
+        .collect())
 }
 
 /// 获取可添加到故障转移队列的供应商（不在队列中的）
@@ -50,10 +65,16 @@ pub async fn get_available_providers_for_failover(
 ) -> Result<Vec<Provider>, String> {
     require_failover_app(&app_type)?;
     // 托管档位（中转站档位）也可以进队列 —— 见 `add_to_failover_queue` 的说明。
-    state
+    let providers = state
         .db
         .get_available_providers_for_failover(&app_type)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(providers
+        .into_iter()
+        .filter(|provider| {
+            crate::proxy::provider_router::provider_supports_failover(&app_type, provider)
+        })
+        .collect())
 }
 
 /// 添加供应商到故障转移队列
@@ -137,10 +158,25 @@ pub async fn set_auto_failover_enabled(
     // 队列为空时把当前供应商自动加入作为 P1，避免用户陷入"必须先加队列才能开启"的死锁
     let mut auto_added_provider_id: Option<String> = None;
     let p1_provider_id = if enabled {
+        let all_providers = state
+            .db
+            .get_all_providers(&app_type)
+            .map_err(|e| e.to_string())?;
         let mut queue = state
             .db
             .get_failover_queue(&app_type)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|item| {
+                all_providers
+                    .get(&item.provider_id)
+                    .is_some_and(|provider| {
+                        crate::proxy::provider_router::provider_supports_failover(
+                            &app_type, provider,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
 
         if queue.is_empty() {
             let app_enum = crate::app_config::AppType::from_str(&app_type)
@@ -166,7 +202,18 @@ pub async fn set_auto_failover_enabled(
             queue = state
                 .db
                 .get_failover_queue(&app_type)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|item| {
+                    all_providers
+                        .get(&item.provider_id)
+                        .is_some_and(|provider| {
+                            crate::proxy::provider_router::provider_supports_failover(
+                                &app_type, provider,
+                            )
+                        })
+                })
+                .collect();
         }
 
         queue

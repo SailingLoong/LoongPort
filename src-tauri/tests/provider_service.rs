@@ -842,8 +842,8 @@ requires_openai_auth = true
                 None,
             ),
         );
-        let mut official_provider = Provider::with_id(
-            "official-provider".to_string(),
+        let official_provider = Provider::with_id(
+            "codex-official".to_string(),
             "OpenAI Official".to_string(),
             json!({
                 "auth": {},
@@ -851,15 +851,14 @@ requires_openai_auth = true
             }),
             None,
         );
-        official_provider.category = Some("official".to_string());
         manager
             .providers
-            .insert("official-provider".to_string(), official_provider);
+            .insert("codex-official".to_string(), official_provider);
     }
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
 
-    ProviderService::switch(&state, AppType::Codex, "official-provider")
+    ProviderService::switch(&state, AppType::Codex, "codex-official")
         .expect("switch to official provider should succeed without API key");
 
     let auth_value: serde_json::Value =
@@ -1070,8 +1069,8 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         let manager = initial_config
             .get_manager_mut(&AppType::Codex)
             .expect("codex manager");
-        let mut official = Provider::with_id(
-            "official-provider".to_string(),
+        let official = Provider::with_id(
+            "codex-official".to_string(),
             "Official".to_string(),
             json!({
                 "auth": {
@@ -1083,10 +1082,9 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
             }),
             None,
         );
-        official.category = Some("official".to_string());
         manager
             .providers
-            .insert("official-provider".to_string(), official);
+            .insert("codex-official".to_string(), official);
     }
     let servers = initial_config
         .mcp
@@ -1118,7 +1116,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
 
     let state = create_test_state_with_config(&initial_config).expect("create test state");
 
-    ProviderService::switch(&state, AppType::Codex, "official-provider")
+    ProviderService::switch(&state, AppType::Codex, "codex-official")
         .expect("switch to official provider");
     let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
         .expect("read config.toml after switch");
