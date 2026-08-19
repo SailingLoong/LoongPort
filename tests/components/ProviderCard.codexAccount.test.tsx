@@ -50,6 +50,26 @@ vi.mock("@/lib/query/queries", () => ({
   useUsageQuery: () => ({ data: undefined }),
 }));
 
+// LoongPort 契约：业务判据（能否配置用量等）由后端 presentation DTO 唯一裁决，
+// 测试 fixture 需要时用这份「托管官方卡」形状的默认值。
+const basePresentation = (): Provider["presentation"] => ({
+  isOfficial: true,
+  isCurrent: true,
+  isInConfig: true,
+  isDefaultModel: false,
+  isManaged: true,
+  isReadOnly: true,
+  canDelete: true,
+  canEdit: true,
+  canTestConnectivity: true,
+  canConfigureUsage: true,
+  usesOfficialSubscriptionUsage: true,
+  canSetAsDefault: false,
+  routingBadge: null,
+  routingReason: null,
+  switchBlockedReason: null,
+});
+
 const managedProvider = (
   name: string,
   accountId = "account-long",
@@ -129,7 +149,7 @@ describe("ProviderCard Codex Official account identity", () => {
     const provider = managedProvider("Work account");
     delete provider.meta!.providerType;
     // LoongPort 契约：「能否配置用量统计」由后端 presentation DTO 唯一裁决。
-    provider.presentation = { canConfigureUsage: true };
+    provider.presentation = basePresentation();
 
     renderCard(provider, { isCurrent: true, onConfigureUsage });
 
@@ -142,7 +162,7 @@ describe("ProviderCard Codex Official account identity", () => {
 
   it("honors a saved disabled state for managed OAuth quota", () => {
     const provider = managedProvider("Work account");
-    provider.presentation = { canConfigureUsage: true };
+    provider.presentation = basePresentation();
     provider.meta!.usage_script = {
       enabled: false,
       language: "javascript",
