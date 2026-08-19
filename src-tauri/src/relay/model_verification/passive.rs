@@ -5,6 +5,7 @@
 //! 证据降为一份报告——**只报异常不背书**：高置信异源指纹直接 Anomaly，
 //! 次要信号 Suspicious，干净流量不产报告，任何输入都不返回 Trusted。
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::relay::model_verification::types::{
@@ -12,9 +13,16 @@ use crate::relay::model_verification::types::{
 };
 
 pub const PASSIVE_INGRESS_CAPACITY: usize = 128;
+/// 单个在途 SSE 事件的最大观察字节数；超限即放弃对该请求的进一步观察（有界内存）。
+pub const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;
+/// 非流式响应的最大观察字节数；超限记 oversized 不再解析。
+pub const MAX_RESPONSE_INSPECTION_BYTES: usize = 2 * 1024 * 1024;
+/// 自报身份短语匹配保留的尾部窗口字节数。
+pub const SELF_ID_TAIL_BYTES: usize = 256;
 
 /// 一次请求的观察结果。facts 已消毒（只含 code+outcome），可安全落库。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EvidenceBatch {
     pub target: TargetKey,
     pub completed: bool,
