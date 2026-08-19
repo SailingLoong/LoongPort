@@ -183,6 +183,7 @@ fn detect_site(body: &str) -> Option<DetectedSite> {
         backend_kind: BackendKind::NewApi,
         site_name: status.system_name,
         api_base_url: String::new(),
+        final_origin: None,
     })
 }
 

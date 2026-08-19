@@ -20,6 +20,10 @@ pub struct DetectedSite {
     pub backend_kind: BackendKind,
     pub site_name: String,
     pub api_base_url: String,
+    /// 指纹实际被观察到的 origin。原生探针跟随重定向后可能落在与请求不同的
+    /// origin（典型：裸域 301 到 `www.`）；浏览器路径的回传总在锚点 origin 上，
+    /// 故为 `None`。导入窗据此把入口、脚本守卫与落库行锚到页面真正停留的 origin。
+    pub final_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

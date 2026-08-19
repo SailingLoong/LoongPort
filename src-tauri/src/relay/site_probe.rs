@@ -302,6 +302,7 @@ mod tests {
             detector_body_bytes: body.len(),
             json_like: trimmed.starts_with('{') || trimmed.starts_with('['),
             error_kind: None,
+            final_origin: None,
         }
     }
 
