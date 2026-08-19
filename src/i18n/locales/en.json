@@ -2622,7 +2622,7 @@
   },
   "autoMode": {
     "title": "Easy Mode",
-    "tooltip": "Easy Mode (Beta): when on, the system picks managed tiers by strategy and the tier sticks within a session; turning it off also restores that CLI's local routing",
+    "tooltip": "Easy Mode: when on, the system picks managed tiers by strategy and the tier sticks within a session; turning it off also restores that CLI's local routing",
     "description": "The system picks the best managed tier automatically and sticks within a session",
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
@@ -2641,7 +2641,6 @@
     "disabledToast": "Easy Mode disabled for {{app}}; local routing restored",
     "strategySaved": "Strategy updated",
     "toggleFailed": "Operation failed",
-    "beta": "Beta",
     "tabDescription": "You only pick the app and model; the system picks the best managed tier by strategy: the current tier sticks within a session (protecting the prompt cache) and failures switch to the next tier. Tier rates and model prices are verified against live site data, and models are confirmed genuine by model verification. Enabling also turns on local routing and takes over that CLI's config; disabling restores it.",
     "modelLabel": "Model preference",
     "modelAny": "Any model",

@@ -42,7 +42,7 @@ export function AutoModeToggle({ className, activeApp }: AutoModeToggleProps) {
 
   const tooltipText = t(
     "autoMode.tooltip",
-    "省心模式（Beta）：开启后系统按策略自动挑选托管档位，同一会话保持当前档位不切换；关闭时一并恢复该 CLI 的路由接管",
+    "省心模式：开启后系统按策略自动挑选托管档位，同一会话保持当前档位不切换；关闭时一并恢复该 CLI 的路由接管",
   );
 
   const handleToggle = (checked: boolean) => {
