@@ -731,7 +731,21 @@ mod tests {
             .unwrap();
 
         server.abort();
-        assert_eq!(models, vec!["a-model", "z-model"]);
+        // 模型列表照常排序去重；能力图查询打不到本地 http 端点（well-known 走
+        // https），全部落 Unknown——正是「无公开数据 ⇒ 无预筛」的契约。
+        assert_eq!(
+            models,
+            vec![
+                super::types::VerificationModelOption {
+                    name: "a-model".into(),
+                    fitness: super::types::ModelFitness::Unknown,
+                },
+                super::types::VerificationModelOption {
+                    name: "z-model".into(),
+                    fitness: super::types::ModelFitness::Unknown,
+                },
+            ]
+        );
         assert_eq!(
             observed_authorization.lock().unwrap().as_deref(),
             Some("Bearer sk-secret")

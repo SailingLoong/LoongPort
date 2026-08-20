@@ -583,6 +583,32 @@ pub struct ProviderMeta {
         skip_serializing_if = "Option::is_none"
     )]
     pub loongport_vendor_account: Option<String>,
+    /// 托管档位在中转站侧的**分组身份**（分组 id + 分组名）。provision 时持久化。
+    ///
+    /// 为什么必须显式记：分组名只烧在展示名字符串里（`provider_display_name`
+    /// 的 `{site} · {group}` 形状），反向解析展示串是把展示当数据源；而档位
+    /// 级能力判定（模型验证的协议预筛 join 站点 ai-transit 快照的分组）需要
+    /// 「这个档位是哪个分组」的**结构化**事实。
+    ///
+    /// join 键是**分组名**——ai-transit 快照的分组只有名字没有 id；id 仍然记下
+    /// （provision 本来就拿到了，零成本），快照将来暴露 id 时升级 join 不需要
+    /// 重刷全部存量档位。
+    ///
+    /// `None` = 旧数据（provision 早于本字段）或「恢复默认」重建路径拿不到分组
+    /// 数据时的空窗 ⇒ 能力判定按 Unknown 处理（不排除任何模型）。
+    #[serde(rename = "loongportGroup", skip_serializing_if = "Option::is_none")]
+    pub loongport_group: Option<LoongportGroupIdentity>,
+}
+
+/// 托管档位在中转站侧的分组身份（见 [`ProviderMeta::loongport_group`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LoongportGroupIdentity {
+    /// 分组 id 的字符串形态（sub2api 是数字 id、NewAPI 本来就是字符串 ——
+    /// 与 `loongport_vendor_account` 同一先例：异构 id 统一走字符串）。
+    /// 信息字段：ai-transit 快照的分组只有名字，join 键是 [`Self::name`]。
+    pub id: String,
+    pub name: String,
 }
 
 /// 解析 Provider 级自定义 User-Agent 字符串（单一真理来源）。

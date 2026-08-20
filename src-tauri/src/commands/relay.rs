@@ -3053,6 +3053,7 @@ pub async fn relay_provision(
 struct ManagedProvisionCandidate {
     provider_id: String,
     app_type: AppType,
+    group_id: String,
     group_name: String,
     rate_multiplier: Option<f64>,
     api_key: String,
@@ -3107,6 +3108,7 @@ fn newapi_candidates_for_group(
             ManagedProvisionCandidate {
                 provider_id: provider_id.clone(),
                 app_type,
+                group_id: group.identity.0.clone(),
                 group_name: group.name.clone(),
                 rate_multiplier: group.rate_multiplier,
                 api_key: group.api_key.clone(),
@@ -3174,6 +3176,7 @@ async fn provision_backend(
                             tier.group_id,
                         ),
                         app_type: targeted.app_type,
+                        group_id: tier.group_id.to_string(),
                         group_name: tier.group_name,
                         rate_multiplier: Some(tier.rate_multiplier),
                         api_key: tier.api_key,
@@ -3425,7 +3428,14 @@ fn persist_provision_batch(
             created_at: Some(chrono::Utc::now().timestamp_millis()),
             sort_index: Some(idx),
             notes: None,
-            meta: Some(managed_meta(app_type, batch.account_id)),
+            meta: Some(managed_meta(
+                app_type,
+                batch.account_id,
+                Some(crate::provider::LoongportGroupIdentity {
+                    id: candidate.group_id.clone(),
+                    name: candidate.group_name.clone(),
+                }),
+            )),
             icon: None,
             icon_color: None,
             in_failover_queue: false,
@@ -4164,9 +4174,17 @@ fn reset_tier_config_in_state(
     // `managed_meta` 传 `op.account_id` 而不是上面那个 `account_id` ——
     // 后者可能是 `None`（旧数据），而这次重建正好是**补上归属标记**的时机：
     // 我们刚刚确认了它属于 `op` 这一行。
+    //
+    // 分组身份同样趁重建补上——但这条路拿不到分组数据（手上只有本地
+    // `settings_config`），只能保留旧值；旧值也是 `None` 时维持 `None`
+    // （能力判定按 Unknown 处理，不排除任何模型）。
+    let preserved_group = existing
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.loongport_group.clone());
     let restored = Provider {
         settings_config,
-        meta: Some(managed_meta(&app_type, op.account_id)),
+        meta: Some(managed_meta(&app_type, op.account_id, preserved_group)),
         ..existing
     };
 
@@ -5486,7 +5504,11 @@ fn is_managed(p: &Provider) -> bool {
 /// `account_id` 是**归属依据**，不是可选的装饰：同一个站可以挂多个账号，而
 /// `website_url` 只记站点 ⇒ 少了它，清理 / 重建 / 删站三处都会误伤同站另一个账号的
 /// 档位（见 [`crate::provider::ProviderMeta::loongport_account_id`] 的文档）。
-fn managed_meta(app_type: &AppType, account_id: Option<i64>) -> crate::provider::ProviderMeta {
+fn managed_meta(
+    app_type: &AppType,
+    account_id: Option<i64>,
+    group: Option<crate::provider::LoongportGroupIdentity>,
+) -> crate::provider::ProviderMeta {
     crate::provider::ProviderMeta {
         // `api_format` **只被 `codex_config.rs` 消费**（`CodexCatalogToolProfile::from_api_format`），
         // 对 claude / gemini 无意义 —— 给它们填值不会有人读，反而让人以为那里有语义。
@@ -5495,6 +5517,7 @@ fn managed_meta(app_type: &AppType, account_id: Option<i64>) -> crate::provider:
             _ => None,
         },
         loongport_account_id: account_id,
+        loongport_group: group,
         ..Default::default()
     }
 }
@@ -6510,7 +6533,7 @@ mod tests {
         let managed_duplicate = Provider {
             id: provision::provider_id_for(site, Some(1), 42),
             name: "Managed duplicate".into(),
-            meta: Some(managed_meta(&app_type, Some(1))),
+            meta: Some(managed_meta(&app_type, Some(1), None)),
             ..duplicate.clone()
         };
         db.save_provider(app_type.as_str(), &duplicate)
@@ -6574,7 +6597,7 @@ mod tests {
         let managed = Provider {
             id: provision::provider_id_for("https://relay.example", Some(1), 99),
             name: "Managed replacement".into(),
-            meta: Some(managed_meta(&app_type, Some(1))),
+            meta: Some(managed_meta(&app_type, Some(1), None)),
             ..duplicate.clone()
         };
         db.save_provider(app_type.as_str(), &managed)
@@ -6627,7 +6650,7 @@ mod tests {
         let managed = Provider {
             id: provision::provider_id_for("https://relay.example", Some(1), 99),
             name: "Managed replacement".into(),
-            meta: Some(managed_meta(&app_type, Some(1))),
+            meta: Some(managed_meta(&app_type, Some(1), None)),
             ..duplicate.clone()
         };
         db.save_provider(app_type.as_str(), &managed)
@@ -8449,7 +8472,9 @@ mod tests {
         // codex：不写 apiFormat 会落到 ProxyChat profile —— 那是唯一会 spawn codex
         // 子进程的分支。
         assert_eq!(
-            managed_meta(&AppType::Codex, Some(1)).api_format.as_deref(),
+            managed_meta(&AppType::Codex, Some(1), None)
+                .api_format
+                .as_deref(),
             Some("openai_responses")
         );
 
@@ -8457,7 +8482,7 @@ mod tests {
         // 反而让人以为那里有语义。
         for app_type in [AppType::Claude, AppType::Gemini] {
             assert_eq!(
-                managed_meta(&app_type, Some(1)).api_format,
+                managed_meta(&app_type, Some(1), None).api_format,
                 None,
                 "{app_type:?} 不该有 api_format —— 只有 codex 会读它"
             );
@@ -8510,7 +8535,7 @@ mod tests {
     /// 带账号归属的那种（provision 从此都写它，见 `managed_meta`）。
     fn seeded_owned(id: &str, name: &str, site: Option<&str>, account_id: i64) -> Provider {
         Provider {
-            meta: Some(managed_meta(&AppType::Codex, Some(account_id))),
+            meta: Some(managed_meta(&AppType::Codex, Some(account_id), None)),
             ..seeded(id, name, site)
         }
     }
@@ -9653,7 +9678,7 @@ mod tests {
                 created_at: Some(1),
                 sort_index: Some(0),
                 notes: None,
-                meta: Some(managed_meta(&AppType::Codex, Some(7))),
+                meta: Some(managed_meta(&AppType::Codex, Some(7), None)),
                 icon: None,
                 icon_color: None,
                 in_failover_queue: false,
@@ -9714,6 +9739,7 @@ mod tests {
             candidates: vec![ManagedProvisionCandidate {
                 provider_id: provider_id.clone(),
                 app_type: AppType::Codex,
+                group_id: "1".into(),
                 group_name: "Pro池".into(),
                 rate_multiplier: Some(0.15),
                 api_key: "sk-test".into(),

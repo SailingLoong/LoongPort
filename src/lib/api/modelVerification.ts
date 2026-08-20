@@ -94,8 +94,20 @@ export interface VerificationProgressEvent extends VerificationTarget {
   failure: RunFailureKind | null;
 }
 
+/** 协议预筛结论（后端 `ModelFitness` 的镜像；判据唯一源是站点 ai-transit 快照）。 */
+export type ModelFitness = "supported" | "unsupported_protocol" | "unknown";
+
+/** 验证弹窗的一个模型选项。`unsupported` 项禁选并带原因标签。 */
+export interface VerificationModelOption {
+  name: string;
+  fitness: ModelFitness;
+}
+
 export const modelVerificationApi = {
-  listModels: (providerId: string, appType: string): Promise<string[]> =>
+  listModels: (
+    providerId: string,
+    appType: string,
+  ): Promise<VerificationModelOption[]> =>
     invoke("list_verification_models", { providerId, appType }),
 
   start: (target: VerificationTarget): Promise<StartRunResponse> =>

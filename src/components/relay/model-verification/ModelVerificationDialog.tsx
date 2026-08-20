@@ -21,6 +21,7 @@ import {
 import { modelVerificationApi } from "@/lib/api/modelVerification";
 import type {
   VerificationHistoryEntry,
+  VerificationModelOption,
   VerificationReport,
 } from "@/lib/api/modelVerification";
 
@@ -50,7 +51,7 @@ export function ModelVerificationDialog({
   report,
 }: ModelVerificationDialogProps) {
   const { t } = useTranslation();
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<VerificationModelOption[]>([]);
   const [modelsState, setModelsState] = useState<ModelsState>("idle");
   const [selectedModel, setSelectedModel] = useState<string | undefined>();
   const [history, setHistory] = useState<VerificationHistoryEntry[]>([]);
@@ -197,12 +198,31 @@ export function ModelVerificationDialog({
                 </SelectTrigger>
                 <SelectContent>
                   {models.map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
+                    <SelectItem
+                      key={model.name}
+                      value={model.name}
+                      disabled={model.fitness === "unsupported_protocol"}
+                    >
+                      {model.name}
+                      {model.fitness === "unsupported_protocol" && (
+                        <span
+                          className="ml-2 text-xs text-amber-600 dark:text-amber-400"
+                          title={t(
+                            "loongport.modelVerification.model.unsupportedHint",
+                          )}
+                        >
+                          {t(
+                            "loongport.modelVerification.model.unsupportedTag",
+                          )}
+                        </span>
+                      )}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">
+                {t("loongport.modelVerification.model.fitnessNote")}
+              </p>
             </div>
           )}
 
