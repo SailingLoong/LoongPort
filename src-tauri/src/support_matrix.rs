@@ -13,8 +13,9 @@
 //!
 //! 这正是 CLAUDE.md §三点六 说的那类：**编译器管不到 md 与另一个仓的 ts，
 //! 不一致时不崩不报，只是某处静默过期**。而这张表过期的后果不只是「文档旧了」——
-//! 它是对外承诺的一部分：new-api 那边如果看到我们没列他们，可能就自己另搞一套，
-//! 而我们其实早就把登录标识设计成中立的 `login_identifier` 正是为了接他们。
+//! 它是对外承诺的一部分：把某个目标从「在做」挪进「已支持」（或反过来）都是
+//! 对外声明的变更，不能只在代码里发生。new-api 从 planned 挪进 shipped
+//! （2026-08，登录/充值/档位全套落地）就是这类变更的第一次兑现。
 //!
 //! # 这道闸覆盖到哪，覆盖不到哪
 //!
@@ -39,14 +40,11 @@
 //! （反方向不做检查：文档里多写一个词不算错，那可能只是叙述。）
 
 /// 中转服务：已支持的。
-const RELAYS_SHIPPED: &[&str] = &["sub2api"];
-
-/// 中转服务：在做的。
 ///
-/// ⚠️ **`new-api` 在这里是一句对外承诺**，不是随手写的占位 —— 登录标识已按它设计成
-/// 中立的 `login_identifier`（而不是 sub2api 那侧的具体字段名）。删它之前先想清楚
-/// 那个设计还要不要。
-const RELAYS_PLANNED: &[&str] = &["new-api"];
+/// `new-api` 于 2026-08 转正（`BackendKind::NewApi` 登录/充值/档位全套在 main）。
+/// 目前没有在做其它中转后端 —— 出现新的再做时，把 RELAYS_PLANNED 连同两条
+/// 断言里的对应项一起加回来。
+const RELAYS_SHIPPED: &[&str] = &["sub2api", "new-api"];
 
 /// AI CLI：已支持的（**指对话档位**）。
 const CLIS_SHIPPED: &[&str] = &["codex", "claude"];
@@ -81,7 +79,6 @@ mod tests {
     fn assert_all_present(doc: &str, doc_name: &str) {
         for (label, items) in [
             ("已支持的中转服务", RELAYS_SHIPPED),
-            ("在做的中转服务", RELAYS_PLANNED),
             ("已支持的 CLI", CLIS_SHIPPED),
             ("在做的 CLI", CLIS_PLANNED),
             ("已支持的平台", PLATFORMS_SHIPPED),
@@ -124,7 +121,6 @@ mod tests {
     fn the_gate_itself_is_not_vacuous() {
         for (name, items) in [
             ("RELAYS_SHIPPED", RELAYS_SHIPPED),
-            ("RELAYS_PLANNED", RELAYS_PLANNED),
             ("CLIS_SHIPPED", CLIS_SHIPPED),
             ("CLIS_PLANNED", CLIS_PLANNED),
             ("PLATFORMS_SHIPPED", PLATFORMS_SHIPPED),

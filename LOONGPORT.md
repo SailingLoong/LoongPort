@@ -37,8 +37,8 @@
 - **「不用科学上网」** —— 会把产品定位成规避网络管制的工具。行业通用表述是
   「国内直连」/「无需额外网络配置」，传达同样的信息。
 
-最初在 [cc-switch](https://github.com/farion1231/cc-switch) v3.19.1 上 fork、之后合并
-上游至 v3.19.2 的客户端：
+最初在 [cc-switch](https://github.com/farion1231/cc-switch) v3.19.1 上 fork、已合并
+上游至 v3.20.0 的客户端：
 把一个**中转站账号**变成 CLI 可用的多档位供应商 —— 用户填域名、登录、拿到分组，
 不必自己建 key、抄 base_url、配 config。
 
@@ -47,7 +47,7 @@
 
 | 维度 | 已实现 | 在做 / 待做 |
 |---|---|---|
-| 中转站 | sub2api | new-api（登录标识已按它设计成中立的 `login_identifier`） |
+| 中转站 | sub2api · new-api（2026-08 登录/充值/档位全套落地，`BackendKind::NewApi`） | — |
 | CLI | codex · claude | gemini / grok（`platform_map` 映射表已建全，缺各自的配置写入形状） |
 | 平台 | macOS · Windows | Linux |
 
