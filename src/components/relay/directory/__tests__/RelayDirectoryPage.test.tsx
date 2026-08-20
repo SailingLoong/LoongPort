@@ -131,6 +131,12 @@ function item(index: number): RelayDirectoryItem {
       index === 1 ? "https://bestapi.store" : `https://site-${index}.example`,
     // 后端 apply_policy 白名单过滤后，广场里每一行都是受管站点、可一键登录。
     autoAdd: true,
+    // 站方一手 transit 摘要：只有部署了 ai-transit 公开协议的站才有
+    //（New API 站与未部署的站保持 undefined，徽章不渲染）。
+    transit:
+      index === 1
+        ? { minMultiplier: 0.06, minAvailability7d: 88.3, syncedAt: 1786633200 }
+        : undefined,
   };
 }
 
@@ -190,6 +196,36 @@ describe("RelayDirectoryPage", () => {
         screen.getByRole("tab", { name: `loongport.directory.tabs.${tab}` }),
       ).toBeInTheDocument();
     }
+  });
+
+  it("renders transit badges only for sites that publish them", async () => {
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+
+    // 有摘要的站：倍率与可用性两个徽章都渲染（title 即 tooltip 说明）。
+    const bestRow = (await screen.findByText("BestAPI")).closest("article")!;
+    expect(
+      within(bestRow as HTMLElement).getByTitle(
+        "loongport.directory.transit.multiplierHint",
+      ),
+    ).toHaveTextContent("0.06x");
+    expect(
+      within(bestRow as HTMLElement).getByTitle(
+        "loongport.directory.transit.availabilityHint",
+      ),
+    ).toHaveTextContent("88%");
+
+    // 没有摘要的站（未部署公开协议 / New API）：一行都不该有徽章。
+    const plainRow = (await screen.findByText("站点 2")).closest("article")!;
+    expect(
+      within(plainRow as HTMLElement).queryByTitle(
+        "loongport.directory.transit.multiplierHint",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(plainRow as HTMLElement).queryByTitle(
+        "loongport.directory.transit.availabilityHint",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("does not show the previous leaderboard while a new tab is loading", async () => {

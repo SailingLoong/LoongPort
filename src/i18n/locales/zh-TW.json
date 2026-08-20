@@ -3181,6 +3181,10 @@
       "empty": "沒有符合目前篩選條件的站點",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思維簽名驗證通過率",
+      "transit": {
+        "multiplierHint": "站方公開的最低分組綜合倍率（儲值係數 × 模型倍率），越低越便宜。資料來自站點 ai-transit 公開協定。",
+        "availabilityHint": "站方公開監測的最低分組近 7 日可用性，取最差分組。"
+      },
       "compatibilityNote": "部分不相容站點不會顯示",
       "provisionFailed": "帳號已加入，但建立連線設定失敗：{{reason}}。可返回中轉站列表重試。",
       "meta": {
