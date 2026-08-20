@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-08-21T00:00:00Z",
+  "issued_at": "2026-08-21T12:00:00Z",
   "star_reward": {
     "promo_code": "LOONGPORT5",
     "amount_usd": 5
@@ -130,12 +130,14 @@
         "veridrop_host": "bestapi.store",
         "entry_url": "https://bestapi.store",
         "purchase_url": "https://bestapi.store/purchase",
+        "usage_url": "https://bestapi.store/usage",
         "display_name": "BestAPI"
       },
       "790053500.com": {
         "veridrop_host": "api.790053500.com",
         "entry_url": "https://790053500.com/keys",
         "purchase_url": "https://790053500.com/purchase",
+        "usage_url": "https://790053500.com/usage",
         "display_name": "鑫旺"
       },
       "api-top.com": {
@@ -157,6 +159,7 @@
       "codex666ai.com": {
         "veridrop_host": "codex666ai.com",
         "entry_url": "https://codex666ai.com",
+        "usage_url": "https://codex666ai.com/usage",
         "display_name": "codex666ai"
       },
       "fluxlane.cn": {
@@ -193,41 +196,48 @@
         "veridrop_host": "1pkapi.com",
         "entry_url": "https://1pkapi.com/register",
         "purchase_url": "https://1pkapi.com/purchase",
+        "usage_url": "https://1pkapi.com/usage",
         "display_name": "皓悦API"
       },
       "sub.callai.one": {
         "veridrop_host": "sub.callai.one",
         "entry_url": "https://sub.callai.one/register",
         "purchase_url": "https://sub.callai.one/purchase",
+        "usage_url": "https://sub.callai.one/usage",
         "display_name": "CallAI中转"
       },
       "aliuapi.top": {
         "veridrop_host": "aliuapi.top",
         "entry_url": "https://aliuapi.top/register",
         "purchase_url": "https://aliuapi.top/purchase",
+        "usage_url": "https://aliuapi.top/usage",
         "display_name": "AL-API"
       },
       "mfttai.com": {
         "veridrop_host": "mfttai.com",
         "entry_url": "https://mfttai.com/register",
         "purchase_url": "https://mfttai.com/purchase",
+        "usage_url": "https://mfttai.com/usage",
         "display_name": "MFAPI"
       },
       "bb-api.com": {
         "veridrop_host": "www.bb-api.com",
         "entry_url": "https://www.bb-api.com/register",
+        "usage_url": "https://www.bb-api.com/usage",
         "display_name": "贝贝"
       },
       "cca.maya.today": {
         "veridrop_host": "cca.maya.today",
         "entry_url": "https://cca.maya.today/register",
         "purchase_url": "https://cca.maya.today/purchase",
+        "usage_url": "https://cca.maya.today/usage",
         "display_name": "BMCCA"
       },
       "apinode.ltd": {
         "veridrop_host": "apinode.ltd",
         "entry_url": "https://apinode.ltd/register",
         "purchase_url": "https://apinode.ltd/purchase",
+        "usage_url": "https://apinode.ltd/usage",
         "display_name": "APINode"
       },
       "hejuapi.com": {
@@ -244,6 +254,18 @@
         "veridrop_host": "www.umapis.com",
         "entry_url": "https://www.umapis.com/register",
         "display_name": "悠米AI中转"
+      },
+      "wawazz.xyz": {
+        "veridrop_host": "wawazz.xyz",
+        "entry_url": "https://wawazz.xyz/register",
+        "usage_url": "https://wawazz.xyz/usage",
+        "display_name": "WAWA ZZ API"
+      },
+      "onepig123.com": {
+        "veridrop_host": "onepig123.com",
+        "entry_url": "https://onepig123.com/register",
+        "usage_url": "https://onepig123.com/usage",
+        "display_name": "粉猪模型网关"
       }
     }
   }

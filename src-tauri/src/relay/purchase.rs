@@ -117,9 +117,48 @@ use super::login::{AUTH_TOKEN_KEY, AUTH_USER_KEY};
 /// （而不是销毁重开 —— 那同样会打断这一行自己的付款流程）。
 pub const PURCHASE_WINDOW_LABEL_PREFIX: &str = "loongport-purchase-";
 
+/// 「查看用量」窗的 label 前缀。与充值窗**分开**：付钱页不能被一次「看用量」
+/// 顶掉或反过来——两个页面各自的会话各自保留。
+pub const USAGE_WINDOW_LABEL_PREFIX: &str = "loongport-usage-";
+
 /// 某个中转站的充值窗 label。
 pub fn window_label(relay_id: i64) -> String {
     format!("{PURCHASE_WINDOW_LABEL_PREFIX}{relay_id}")
+}
+
+/// 带登录态注入的**站点页面窗**的身份：label + 窗口标题。
+///
+/// 充值与「查看用量」是这类窗的两个实例——会话注入、第二击聚焦已有窗口、
+/// incognito 隔离、window-state 不跟踪几何，纪律全部相同；不同的只有
+/// 「打开的是哪个页面」，由 label（窗口身份）与 title（人看的那行字）承载。
+/// 开窗机制只认这份身份，不知道也不需要知道页面内容是什么。
+pub struct SiteWindow {
+    pub label: String,
+    pub title: String,
+}
+
+/// 某个中转站的充值窗身份。
+pub fn purchase_window(relay_id: i64, site_origin: &str) -> SiteWindow {
+    SiteWindow {
+        label: window_label(relay_id),
+        title: format!("充值 {site_origin}"),
+    }
+}
+
+/// 某个中转站的用量页窗身份。
+pub fn usage_window(relay_id: i64, site_origin: &str) -> SiteWindow {
+    SiteWindow {
+        label: format!("{USAGE_WINDOW_LABEL_PREFIX}{relay_id}"),
+        title: format!("用量 {site_origin}"),
+    }
+}
+
+/// window-state 插件的过滤判据：凡是站点页面窗（充值 / 用量）的 label
+/// 都不跟踪几何。这类窗是「打开即用」的站点页面，尺寸按页面内容定，
+/// 「记住用户调过的大小」对它们没有价值（与登录窗同一条理由，
+/// 见 `lib.rs` 里 window-state 的 denylist 注释）。
+pub fn is_site_window_label(label: &str) -> bool {
+    label.starts_with(PURCHASE_WINDOW_LABEL_PREFIX) || label.starts_with(USAGE_WINDOW_LABEL_PREFIX)
 }
 
 /// 一次性注入 marker 的 `sessionStorage` 键名。
@@ -304,6 +343,31 @@ mod tests {
     }
 
     #[test]
+    /// 充值窗与用量窗必须是**两个窗口**：label 不同（互不聚焦、互不顶掉），
+    /// 标题带各自的页面语义；window-state 过滤要把两类都排除。
+    #[test]
+    fn purchase_and_usage_windows_are_distinct_identities() {
+        let purchase = purchase_window(7, "https://api.example.com");
+        let usage = usage_window(7, "https://api.example.com");
+
+        assert_eq!(purchase.label, format!("{PURCHASE_WINDOW_LABEL_PREFIX}7"));
+        assert_eq!(usage.label, format!("{USAGE_WINDOW_LABEL_PREFIX}7"));
+        assert_ne!(
+            purchase.label, usage.label,
+            "充值页不能被一次「看用量」顶掉"
+        );
+        assert!(purchase.title.contains("充值"));
+        assert!(usage.title.contains("用量"));
+        assert!(purchase.title.contains("api.example.com"));
+
+        assert!(is_site_window_label(&purchase.label));
+        assert!(is_site_window_label(&usage.label));
+        assert!(
+            !is_site_window_label("main"),
+            "主窗口不该被 window-state 过滤掉"
+        );
+    }
+
     fn window_labels_are_per_relay_and_collide_with_no_other_window() {
         // **按行分窗**是资损面的修法：全局单窗时「开新窗前销毁残留窗」会销毁一个
         // 可能正在付款的窗口（服务端订单不会因此取消，用户却失去确认页面）。

@@ -82,6 +82,8 @@ export interface RelayTierListProps {
    * `RowBalance` 的文档。
    */
   onPurchase: (relayId: number) => void;
+  /** 「查看用量」开窗；undefined = 该行没有入口资格（不渲染按钮）。 */
+  onOpenUsage: ((relayId: number) => void) | undefined;
   /** 检测某个档位的连通性。 */
   onCheckTier: (tier: TierInfo) => void;
   /** 某个档位是不是正在检测中。 */
@@ -169,6 +171,7 @@ export function RelayTierList({
   onSelectTierModel,
   onReorder,
   onPurchase,
+  onOpenUsage,
   onCheckTier,
   isCheckingTier,
   verificationVerdictForTier,
@@ -286,6 +289,9 @@ export function RelayTierList({
                   onSwitchTier={(tier) => onSwitchTier(op.id, tier)}
                   onSelectTierModel={onSelectTierModel}
                   onPurchase={() => onPurchase(op.id)}
+                  onOpenUsage={
+                    onOpenUsage ? () => onOpenUsage(op.id) : undefined
+                  }
                   onCheckTier={onCheckTier}
                   isCheckingTier={isCheckingTier}
                   verificationVerdictForTier={verificationVerdictForTier}

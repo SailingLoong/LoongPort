@@ -816,6 +816,19 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
       }
     });
 
+  /**
+   * 带登录态开这一行的用量页（「查看用量」）。与充值同一纪律：失败要说出来
+   * （常见原因是登录过期），busy 只盖「开窗」那一段。
+   */
+  const handleOpenUsage = (relayId: number) =>
+    run(`openUsage:${relayId}`, async () => {
+      try {
+        await relayApi.openUsage(relayId);
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+
   const handleSwitchTier = (_relayId: number, tier: TierInfo) => {
     if (tier.isCurrent) return;
     void doSwitch(tier);
@@ -922,6 +935,7 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
           void handleSelectTierModel(tier, model)
         }
         onPurchase={(relayId) => void handlePurchase(relayId)}
+        onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
         // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
         // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
         onCheckTier={(tier) =>

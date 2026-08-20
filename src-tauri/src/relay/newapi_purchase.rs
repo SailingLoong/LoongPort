@@ -46,7 +46,6 @@ use crate::error::AppError;
 use crate::events::PURCHASE_CLOSED;
 use crate::relay::creds;
 use crate::relay::newapi;
-use crate::relay::purchase;
 use crate::relay::purchase_session::PurchaseSessionLease;
 use crate::store::AppState;
 
@@ -228,48 +227,50 @@ fn required_refresh_credential(relay: &creds::Relay) -> Result<&str, AppError> {
 /// `about:blank` 窗口是为了让 cookie 有一个可种的 cookie store，也是为了让真实
 /// 充值 URL 永远不在无登录态的窗口里加载。
 ///
-/// 窗口 title / 尺寸 / incognito 与 sub2api 充值窗保持一致：两者共用同一个 label
-/// 前缀空间（[`purchase::window_label`]），同一行第二击的聚焦检查分不出协议，
-/// 同前缀的窗口也不该长得两样。**有意不调用 initialization_script**（模块文档）。
+/// 窗口 title / 尺寸 / incognito 与 sub2api 站点窗保持一致：两者由同一分派层
+/// （`commands::relay::dispatch_site_window`）开窗，同一行第二击的聚焦检查按
+/// label 分不出协议，同前缀空间的窗口也不该长得两样。
+/// **有意不调用 initialization_script**（模块文档）。
 ///
 /// `shutdown` 是窗口销毁的停机信号端，接进 `Destroyed` 事件后交给 monitor。
 pub(crate) fn build_window<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     relay: &creds::Relay,
-    purchase_url: &url::Url,
+    window: super::purchase::SiteWindow,
+    target_url: &url::Url,
     refresh_credential: &str,
     shutdown: watch::Sender<bool>,
 ) -> Result<tauri::WebviewWindow<R>, AppError> {
-    // 关窗事件要带上是哪一行 —— 前端据此只刷那一行的余额（与 sub2api 充值窗同一事件）。
+    // 关窗事件要带上是哪一行 —— 前端据此只刷那一行的余额（与 sub2api 站点窗同一事件）。
     let handle_for_close = app_handle.clone();
     let closed_relay_id = relay.id;
 
-    let window = tauri::WebviewWindowBuilder::new(
+    let built = tauri::WebviewWindowBuilder::new(
         app_handle,
-        // ⚠️ 复用 sub2api 充值窗的同一 label 空间：「同一行第二击聚焦现有窗口」的
-        // 检查在命令分派层做，两种协议必须落到同一个 label 上它才成立；
-        // window-state 的前缀过滤也依赖同一前缀。
-        purchase::window_label(relay.id),
+        // label 由调用方传入（充值 / 用量各自的 per-relay 窗）：「同一行第二击聚焦
+        // 现有窗口」的检查在命令分派层做，同一页面种类的两种协议必须落到同一个
+        // label 上它才成立；window-state 的过滤也依赖 `purchase::is_site_window_label`。
+        window.label,
         tauri::WebviewUrl::External(
             url::Url::parse("about:blank").expect("about:blank 必是合法 URL"),
         ),
     )
-    .title(format!("充值 {}", relay.site_origin))
-    // 尺寸与安全说明与 sub2api 充值窗一致（USDT 充值页的「转错网络资产不可找回」
+    .title(window.title)
+    // 尺寸与安全说明与 sub2api 站点窗一致（USDT 充值页的「转错网络资产不可找回」
     // 警告需要一屏内可读；防溢出用框架原生 clamp，避免 Retina 尺寸翻倍）。
     .inner_size(1000.0, 800.0)
     .resizable(true)
     .prevent_overflow_with_margin(tauri::LogicalSize::new(40.0, 40.0))
     .center()
-    // ⚠️ **必须 incognito**，理由同 sub2api 充值窗（purchase.rs 模块文档第 1 条）：
+    // ⚠️ **必须 incognito**，理由同 sub2api 站点窗（purchase.rs 模块文档第 1 条）：
     // 持久 profile 是全 app 共享的，不隔离会读到别的账号残留的登录态 —— 钱充错账号。
     .incognito(true)
     .build()
-    .map_err(|e| AppError::Config(format!("打开充值窗口失败: {e}")))?;
+    .map_err(|e| AppError::Config(format!("打开站点窗口失败: {e}")))?;
 
     // 认 `Destroyed`（窗口真的没了）而不是 `CloseRequested`（可被拦下、可能取消）：
     // 关窗即刷余额（emit）+ 停 monitor（shutdown）。
-    window.on_window_event(move |event| {
+    built.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             let _ = handle_for_close.emit(PURCHASE_CLOSED, closed_relay_id);
             let _ = shutdown.send(true);
@@ -277,15 +278,15 @@ pub(crate) fn build_window<R: tauri::Runtime>(
     });
 
     let cookie = newapi::purchase_refresh_cookie(&relay.site_origin, refresh_credential)?;
-    if let Err(error) = window.set_cookie(cookie) {
-        let _ = window.destroy();
+    if let Err(error) = built.set_cookie(cookie) {
+        let _ = built.destroy();
         return Err(AppError::Config(format!("种入充值登录态失败: {error}")));
     }
-    if let Err(error) = window.navigate(purchase_url.clone()) {
-        let _ = window.destroy();
-        return Err(AppError::Config(format!("充值窗口导航失败: {error}")));
+    if let Err(error) = built.navigate(target_url.clone()) {
+        let _ = built.destroy();
+        return Err(AppError::Config(format!("站点窗口导航失败: {error}")));
     }
-    Ok(window)
+    Ok(built)
 }
 
 /// 写库端的生产实现：只轮换 `relay_id` 的 refresh credential 那一列。
@@ -303,17 +304,20 @@ fn persist_refresh_credential<R: tauri::Runtime>(
     creds::update_refresh_credential(&conn, relay_id, value)
 }
 
-/// 打开 NewAPI 的充值窗：种 cookie → 导航 → 等首次轮换落库 → 交给后台 monitor。
+/// 打开 NewAPI 的站点页面窗（充值 / 查看用量）：种 cookie → 导航 → 等首次轮换落库
+/// → 交给后台 monitor。
 ///
 /// `open` 只在 WebView 完成**首次** cookie 轮换并持久化成功后才返回 `Ok`；
 /// 超时或首次持久化失败会销毁窗口并返回「重新登录」类错误。`lease` 移交给后台
 /// monitor 任务持有，直到窗口销毁或 monitor 致命错误（届时窗口一并销毁）。
 ///
-/// `purchase_url` 由调用方从签名配置解析后传入；本函数不持久化它、不回传给前端。
+/// 窗口身份（`window`：label + 标题）与目标 URL 都由调用方从签名配置解析后传入；
+/// 本函数不持久化它们、不回传给前端。
 pub async fn open<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     relay: creds::Relay,
-    purchase_url: url::Url,
+    window: super::purchase::SiteWindow,
+    target_url: url::Url,
     lease: PurchaseSessionLease,
 ) -> Result<(), AppError> {
     let refresh_credential = required_refresh_credential(&relay)?;
@@ -332,7 +336,8 @@ pub async fn open<R: tauri::Runtime>(
     let window = build_window(
         app_handle,
         &relay,
-        &purchase_url,
+        window,
+        &target_url,
         refresh_credential,
         shutdown_tx,
     )?;
@@ -762,6 +767,7 @@ mod tests {
         let window = build_window(
             app.handle(),
             &relay,
+            crate::relay::purchase::purchase_window(relay.id, &relay.site_origin),
             &purchase_url,
             "seed-refresh-cookie",
             shutdown_tx,
@@ -775,7 +781,7 @@ mod tests {
             "窗口最终地址必须恰好是签名配置的钱包 URL（about:blank 只是种 cookie 的脚手架）"
         );
         assert!(
-            app.get_webview_window(&purchase::window_label(3)).is_some(),
+            app.get_webview_window(&crate::relay::purchase::window_label(3)).is_some(),
             "窗口 label 必须复用 purchase 的同一前缀空间（window-state 过滤与「第二击聚焦」都靠它）"
         );
     }

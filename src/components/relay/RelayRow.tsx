@@ -101,6 +101,8 @@ export interface RelayRowProps {
   onSelectTierModel: (tier: TierInfo, model: string) => void;
   /** 带登录态开这一行的充值页（钱包按钮，低余额时换琥珀叹号）。 */
   onPurchase: () => void;
+  /** 带登录态开这一行的用量页（「查看用量」，入口资格由后端判定）。 */
+  onOpenUsage: (() => void) | undefined;
   /**
    * 检测某个档位的连通性。**复用上游的 `useStreamCheck`** —— 托管档位就是
    * 正常的 provider 记录（`category = "aggregator"`，在同一张表里），
@@ -156,6 +158,7 @@ export function RelayRow({
   onSwitchTier,
   onSelectTierModel,
   onPurchase,
+  onOpenUsage,
   onCheckTier,
   isCheckingTier,
   verificationVerdictForTier,
@@ -298,6 +301,23 @@ export function RelayRow({
                 aria-label={t("loongport.reconcile.entry")}
               >
                 <Scale className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {/* 「查看用量」入口。资格 = 后端判定的 `canViewUsage`（签名目录配了
+                usage_url 且登录态可开窗）——与 `canPurchase` 同一条纪律：行级
+                事实在行里应用（见上面 RowBalance 的 onPurchase），不是禁用置灰。
+                与「对账」同为查看型入口，进 hover 组。 */}
+            {relay.canViewUsage && onOpenUsage && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+                onClick={onOpenUsage}
+                title={t("loongport.row.openUsageHint")}
+                aria-label={t("loongport.row.openUsageHint")}
+              >
+                <Activity className="h-3.5 w-3.5" />
               </Button>
             )}
             <RowDelete

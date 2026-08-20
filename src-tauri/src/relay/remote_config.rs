@@ -212,6 +212,11 @@ pub struct RelayDirectorySite {
     pub entry_url: Option<String>,
     #[serde(default)]
     pub purchase_url: Option<String>,
+    /// 「查看用量」带登录态开窗的入口（与 `purchase_url` 同一套 HTTPS+同源校验，
+    /// 见 [`configured_usage_url`]）。路由由签名配置拥有：sub2api 是 `/usage`，
+    /// New API 面板是各自的 console 路由，客户端不猜。
+    #[serde(default)]
+    pub usage_url: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
 }
@@ -606,7 +611,7 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, App
     Ok(buf)
 }
 
-/// 读取签名目录为站点配置的购买入口。
+/// 读取签名目录为站点配置的**购买入口**。
 ///
 /// 购买地址会直接承载用户的付款动作，因此只接受 HTTPS 且与站点 origin 完全同源的
 /// 已签名值。目录没有该站或该字段为空时返回 `Ok(None)`；配置值不安全时返回错误，
@@ -615,42 +620,79 @@ pub fn configured_purchase_url(
     config: &RemoteConfig,
     site_origin: &str,
 ) -> Result<Option<url::Url>, AppError> {
+    configured_signed_site_url(
+        config,
+        site_origin,
+        |site| site.purchase_url.as_deref(),
+        "购买入口",
+    )
+}
+
+/// 读取签名目录为站点配置的**用量页入口**（「查看用量」带登录态开窗用）。
+///
+/// 与购买入口同一条校验（HTTPS + 同源 + 已签名）——理由相同但强度来源不同：
+/// 用量页不承载付款，可它是在**注入了登录态的窗口**里打开的，一个跨源的地址
+/// 等于把站内会话带去第三方页面。路由同样由签名配置拥有（sub2api 是 `/usage`，
+/// New API 面板是各自的 console 路由），客户端不猜。
+pub fn configured_usage_url(
+    config: &RemoteConfig,
+    site_origin: &str,
+) -> Result<Option<url::Url>, AppError> {
+    configured_signed_site_url(
+        config,
+        site_origin,
+        |site| site.usage_url.as_deref(),
+        "用量入口",
+    )
+}
+
+/// 「签名目录里的站点页面入口」的共用校验核（购买 / 用量两个入口同一套规则）。
+///
+/// `select` 取该站的对应字段；`label` 只进错误文案（哪一类入口没通过校验）。
+/// 规则：HTTPS、与站点 origin 完全同源；空值/缺站 = `Ok(None)`（没有配置的入口
+/// 就是没有，不是错误），不安全的值 = `Err`（宁可报错也不带登录态跳过去）。
+fn configured_signed_site_url(
+    config: &RemoteConfig,
+    site_origin: &str,
+    select: fn(&RelayDirectorySite) -> Option<&str>,
+    label: &str,
+) -> Result<Option<url::Url>, AppError> {
     let normalized_origin = super::api::normalize_site_origin(site_origin)?;
     let host = super::aff::lookup_host(&normalized_origin);
     let Some(configured) = config
         .relay_directory
         .sites
         .get(&host)
-        .and_then(|site| site.purchase_url.as_deref())
+        .and_then(select)
         .map(str::trim)
         .filter(|url| !url.is_empty())
     else {
         return Ok(None);
     };
 
-    let purchase_url = url::Url::parse(configured)
-        .map_err(|e| AppError::Config(format!("购买入口地址不合法: {e}")))?;
-    if purchase_url.scheme() != "https" {
-        return Err(AppError::Config("购买入口必须使用 HTTPS".into()));
+    let configured = url::Url::parse(configured)
+        .map_err(|e| AppError::Config(format!("{label}地址不合法: {e}")))?;
+    if configured.scheme() != "https" {
+        return Err(AppError::Config(format!("{label}必须使用 HTTPS")));
     }
 
     let relay_origin = url::Url::parse(&normalized_origin)
         .map_err(|e| AppError::Config(format!("归一化后的站点地址不合法: {e}")))?;
-    let purchase_origin = (
-        purchase_url.scheme(),
-        purchase_url.host_str(),
-        purchase_url.port_or_known_default(),
+    let configured_origin = (
+        configured.scheme(),
+        configured.host_str(),
+        configured.port_or_known_default(),
     );
     let expected_origin = (
         relay_origin.scheme(),
         relay_origin.host_str(),
         relay_origin.port_or_known_default(),
     );
-    if purchase_origin != expected_origin {
-        return Err(AppError::Config("购买入口必须与中转站同源".into()));
+    if configured_origin != expected_origin {
+        return Err(AppError::Config(format!("{label}必须与中转站同源")));
     }
 
-    Ok(Some(purchase_url))
+    Ok(Some(configured))
 }
 
 /// 按三层回落查一个站的邀请码：远端（已缓存的） > 编译期内置。
@@ -922,6 +964,7 @@ mod tests {
                         veridrop_host: None,
                         entry_url: entry_url.map(str::to_string),
                         purchase_url: purchase_url.map(str::to_string),
+                        usage_url: None,
                         display_name: None,
                     },
                 )]),
@@ -951,6 +994,35 @@ mod tests {
     }
 
     #[test]
+    /// usage_url 与 purchase_url 同一套校验（HTTPS + 同源 + 签名值），
+    /// 理由不是付款，而是它开在**注入登录态的窗口**里——跨源等于带走站内会话。
+    #[test]
+    fn usage_url_gets_the_same_https_and_same_origin_gate() {
+        let config = config_with_usage_site("api-top.com", "https://api-top.com/usage");
+
+        assert_eq!(
+            configured_usage_url(&config, "https://api-top.com")
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "https://api-top.com/usage"
+        );
+        assert!(configured_usage_url(&config, "https://unknown.example")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn usage_url_rejects_http_and_cross_origin_entries() {
+        for usage_url in ["http://api-top.com/usage", "https://console.example/usage"] {
+            let config = config_with_usage_site("api-top.com", usage_url);
+            assert!(
+                configured_usage_url(&config, "https://api-top.com").is_err(),
+                "{usage_url} 必须被拒"
+            );
+        }
+    }
+
     fn purchase_url_rejects_http_and_cross_origin_entries() {
         for purchase_url in [
             "http://api-top.com/wallet",
@@ -962,6 +1034,26 @@ mod tests {
                 Some(purchase_url),
             );
             assert!(configured_purchase_url(&config, "https://api-top.com").is_err());
+        }
+    }
+
+    /// 只带 usage_url 的站点配置（usage_url 校验测试的 fixture）。
+    fn config_with_usage_site(host: &str, usage_url: &str) -> RemoteConfig {
+        RemoteConfig {
+            relay_directory: RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([(
+                    host.to_string(),
+                    RelayDirectorySite {
+                        veridrop_host: None,
+                        entry_url: None,
+                        purchase_url: None,
+                        usage_url: Some(usage_url.to_string()),
+                        display_name: None,
+                    },
+                )]),
+            },
+            ..RemoteConfig::default()
         }
     }
 

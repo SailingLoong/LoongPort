@@ -40,6 +40,7 @@ function relay(models: string[]): RelayRowData {
     isCurrent: true,
     canQueryBalance: true,
     canPurchase: true,
+    canViewUsage: false,
     canRefresh: true,
     usageBlockers: [{ app: "codex", tierName: "Example" }],
     removeConfirmation: "configured",
@@ -60,6 +61,7 @@ function renderRow(models: string[], onSelectTierModel = vi.fn()) {
         onSwitchTier={vi.fn()}
         onSelectTierModel={onSelectTierModel}
         onPurchase={vi.fn()}
+        onOpenUsage={undefined}
         onCheckTier={vi.fn()}
         isCheckingTier={() => false}
         onResetTier={vi.fn()}
