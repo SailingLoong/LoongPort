@@ -49,7 +49,12 @@ pub struct ParsedLeaderboardItem {
     pub issues: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// 广场的一行。veridrop 观测数据 + 站方一手 transit 摘要（后者可缺——
+/// New API 站与未部署公开协议的站就是没有，徽章不渲染）。
+///
+/// `Eq` 主动放弃：transit 摘要带 f64，而本结构只参与 `assert_eq!`
+/// （`PartialEq`）——没有 HashMap/HashSet 语义需要 `Eq`。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayDirectoryItem {
     pub site_host: String,
@@ -69,9 +74,17 @@ pub struct RelayDirectoryItem {
     /// 而受管 = 探针验证过 sub2api / newapi 协议 ⇒ 每一行都该走应用内登录，
     /// 不再区分「在浏览器打开让用户自己注册」的旧路径。
     pub auto_add: bool,
+    /// 站方一手 transit 摘要（ai-transit.v1）。`None`/缺席 = 该站没有公开
+    /// 协议数据，前端不渲染徽章。由 [`decorate_transit`] 在**读取路径**合并，
+    /// 不进榜单缓存——两份数据各有各的刷新周期，缓存里存的是 veridrop
+    /// 观测的原始形状。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transit: Option<crate::relay::transit::TransitSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// 返回给 UI 的榜单。`Eq` 随 [`RelayDirectoryItem`] 一起放弃（f64 摘要），
+/// 只有 `assert_eq!` 消费它。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayLeaderboard {
     pub kind: LeaderboardKind,
@@ -751,6 +764,7 @@ pub fn apply_policy(
                 issues: item.issues,
                 entry_url,
                 auto_add,
+                transit: None,
             })
         })
         .collect()
@@ -778,9 +792,28 @@ fn read_cache(kind: LeaderboardKind) -> Option<CachedLeaderboard> {
 fn apply_policy_to_cached(cached: CachedLeaderboard, config: &RemoteConfig) -> RelayLeaderboard {
     RelayLeaderboard {
         kind: cached.kind,
-        items: renumber_ranks_by_score(apply_probe_gate(apply_policy(cached.items, config))),
+        items: decorate_transit(renumber_ranks_by_score(apply_probe_gate(apply_policy(
+            cached.items,
+            config,
+        )))),
         synced_at: cached.synced_at,
     }
+}
+
+/// 把站方一手 transit 摘要合并进广场行（join 键 = 归一后的 site host）。
+///
+/// 只在**读取路径**调用（缓存读与刷新返回两处），榜单缓存里不存它——
+/// transit 有自己的 6 小时刷新周期，写进榜单缓存会让两份数据的过期
+/// 语义咬在一起（榜单没刷新时 transit 也跟着冻结）。
+fn decorate_transit(mut items: Vec<RelayDirectoryItem>) -> Vec<RelayDirectoryItem> {
+    let summaries = crate::relay::transit::summaries();
+    if summaries.is_empty() {
+        return items;
+    }
+    for item in &mut items {
+        item.transit = summaries.get(&item.site_host).copied();
+    }
+    items
 }
 
 /// 曝光闸：白名单（`apply_policy`）之后再过一遍**探针健康**——连续多轮「协议认不出」
@@ -976,7 +1009,7 @@ async fn refresh_with(
         kind,
         // 返回给 UI 的这份过探针闸并重排名次；缓存里存的始终是未过滤的 parsed，
         // 摘除闸解除后无需重新抓取即可恢复展示（名次在读取时重算，天然跟上）。
-        items: renumber_ranks_by_score(apply_probe_gate(items)),
+        items: decorate_transit(renumber_ranks_by_score(apply_probe_gate(items))),
         synced_at,
     })
 }
@@ -1968,6 +2001,7 @@ mod tests {
                 issues: vec![],
                 entry_url: format!("https://{site_host}"),
                 auto_add: true,
+                transit: None,
             }
         }
 
@@ -2027,6 +2061,53 @@ mod tests {
     /// 漏斗摘掉中间名次的站后，veridrop 原始名次对用户是乱序（#2 直接跳 #7）。
     /// 重排钉三件事：评分倒序、名次连续（1..N）、并列确定性
     /// （同分先看 veridrop 原名次，无名次的回填站垫后，仍并列按 host 钉死）。
+    /// transit 摘要按归一 host 精确 join：有摘要的站带上、没有的保持
+    /// `None`（徽章不渲染），摘要缓存为空时整体短路（新装首启的常态）。
+    #[test]
+    #[serial]
+    fn decorate_transit_joins_by_host_and_short_circuits_when_empty() {
+        fn row(site_host: &str) -> RelayDirectoryItem {
+            RelayDirectoryItem {
+                site_host: site_host.into(),
+                veridrop_host: site_host.into(),
+                display_name: site_host.into(),
+                rank: None,
+                score: 90,
+                samples: 30,
+                latest_date: "2026-08-21".into(),
+                detail_url: format!("https://veridrop.org/site/{site_host}"),
+                protocol_scores: vec![],
+                claude_signature_rate: None,
+                scenarios: vec![],
+                issues: vec![],
+                entry_url: format!("https://{site_host}"),
+                auto_add: true,
+                transit: None,
+            }
+        }
+
+        // 空缓存短路：一条都不该被碰（短路分支连 entries 都不查）。
+        let untouched = decorate_transit(vec![row("a.example")]);
+        assert!(untouched[0].transit.is_none());
+
+        // 写一份只含 a.example 的摘要缓存，join 后只有它带徽章数据。
+        // guard 必须活到断言之后：提前 Drop 会还原 home、让 decorate 读到
+        // 真实用户目录里的缓存。
+        let _guard = crate::relay::transit::tests::transit_cache_guard("decorate");
+        crate::relay::transit::tests::write_transit_cache_entry(
+            "a.example",
+            crate::relay::transit::TransitSummary {
+                min_multiplier: Some(0.06),
+                min_availability_7d: Some(95.0),
+                synced_at: 2,
+            },
+        );
+        let decorated = decorate_transit(vec![row("a.example"), row("b.example")]);
+        let summary = decorated[0].transit.expect("a.example 应带上摘要");
+        assert_eq!(summary.min_multiplier, Some(0.06));
+        assert!(decorated[1].transit.is_none(), "没有摘要的站保持 None");
+    }
+
     #[test]
     fn renumber_ranks_by_score_closes_funnel_gaps() {
         fn row(site_host: &str, score: u8, rank: Option<u32>) -> RelayDirectoryItem {
@@ -2045,6 +2126,7 @@ mod tests {
                 issues: vec![],
                 entry_url: format!("https://{site_host}"),
                 auto_add: true,
+                transit: None,
             }
         }
 
