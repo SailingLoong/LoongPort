@@ -539,12 +539,11 @@ pub fn run() {
                 // 那是它为这件事提供的 happy path，手写过滤等于重造一遍它
                 // `on_window_ready` 里的同一个判断。
                 .with_denylist(&[relay::login::LOGIN_WINDOW_LABEL])
-                // 充值窗**每个中转站一个**（label 是 `loongport-purchase-<id>`），
-                // label 不是定值 ⇒ 只能按前缀判，用 `with_filter` 而不是 denylist。
+                // 站点页面窗（充值 / 查看用量）**每个中转站各一个**（label 是
+                // `loongport-purchase-<id>` / `loongport-usage-<id>`），label 不是定值
+                // ⇒ 只能按前缀判，用 `with_filter` 而不是 denylist。
                 // 返回 false = 不保存这个窗口的状态。
-                .with_filter(|label| {
-                    !label.starts_with(relay::purchase::PURCHASE_WINDOW_LABEL_PREFIX)
-                })
+                .with_filter(|label| !relay::purchase::is_site_window_label(label))
                 .build(),
         )
         // ⚠️ 这道清理**必须在 window-state 插件读文件之前**跑。插件在

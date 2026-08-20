@@ -199,6 +199,9 @@ export interface RelayRow {
   canQueryBalance: boolean;
   /** 购买入口资格由后端完整判定；前端不得从站点或凭据重新推导。 */
   canPurchase: boolean;
+  /** 「查看用量」入口资格（`usage_url` 已配置 + 登录态满足开窗条件），
+   * 同样由后端判定。 */
+  canViewUsage: boolean;
   canRefresh: boolean;
   /**
    * 这一行名下正被某个 app 当作当前项的档位（后端跨全部 app 扫出的）。
@@ -519,6 +522,14 @@ export const relayApi = {
    */
   purchase: (relayId: number): Promise<void> =>
     invoke("relay_purchase", { relayId }),
+
+  /**
+   * 带登录态开这一行的**用量页**（「查看用量」）。与充值窗同一套机制，
+   * 独立窗口（互不顶掉）；入口由签名配置的 `usage_url` 决定，未配置的站
+   * 后端不会给出 `canViewUsage` 资格，前端也不该渲染入口。
+   */
+  openUsage: (relayId: number): Promise<void> =>
+    invoke("relay_open_usage", { relayId }),
 
   /**
    * 把某个托管档位的配置恢复成默认值。

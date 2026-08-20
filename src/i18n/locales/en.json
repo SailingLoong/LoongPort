@@ -3234,6 +3234,7 @@
       "dragHandle": "Drag to reorder",
       "refetchGroups": "Update available groups",
       "purchaseHint": "Open the relay service's top-up page",
+      "openUsageHint": "Open the relay site's usage page (signed in)",
       "lowBalanceHint": "Balance is low. Select to top up",
       "remove": "Delete account and connection profiles",
       "removeInUseHint": "Some connection profiles are in use — you can still delete, with confirmation",

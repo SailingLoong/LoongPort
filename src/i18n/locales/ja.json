@@ -3234,6 +3234,7 @@
       "dragHandle": "ドラッグして並べ替え",
       "refetchGroups": "利用可能なグループを更新",
       "purchaseHint": "中継サービスのチャージページを開く",
+      "openUsageHint": "中継サイトの使用量ページを開く（ログイン済み）",
       "lowBalanceHint": "残高が少なくなっています。クリックしてチャージ",
       "remove": "アカウントと接続プロファイルを削除",
       "removeInUseHint": "使用中の接続プロファイルがあります。確認のうえ削除できます",

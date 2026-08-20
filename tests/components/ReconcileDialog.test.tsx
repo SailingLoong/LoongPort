@@ -116,6 +116,7 @@ function relayWithCodexTier(): RelayRowData {
     isCurrent: true,
     canQueryBalance: true,
     canPurchase: true,
+    canViewUsage: false,
     canRefresh: true,
     usageBlockers: [{ app: "codex", tierName: "Example · Pro" }],
     removeConfirmation: "configured",
@@ -255,6 +256,7 @@ describe("ReconcileDialog", () => {
           onSwitchTier={vi.fn()}
           onSelectTierModel={vi.fn()}
           onPurchase={vi.fn()}
+          onOpenUsage={undefined}
           onCheckTier={vi.fn()}
           isCheckingTier={() => false}
           onResetTier={vi.fn()}
@@ -294,6 +296,7 @@ describe("ReconcileDialog", () => {
           onSwitchTier={vi.fn()}
           onSelectTierModel={vi.fn()}
           onPurchase={vi.fn()}
+          onOpenUsage={undefined}
           onCheckTier={vi.fn()}
           isCheckingTier={() => false}
           onResetTier={vi.fn()}

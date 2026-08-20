@@ -90,6 +90,7 @@ const requiredKeys = [
   "row.dragHandle",
   "row.refetchGroups",
   "row.purchaseHint",
+  "row.openUsageHint",
   // 余额偏低时那个叹号的 title。**缺了最伤**：叹号本身不带文字，
   // title 退化成 key 名 ⇒ 用户看到一个说不清为什么的警示图标。
   "row.lowBalanceHint",

@@ -1090,6 +1090,7 @@ mod tests {
                             veridrop_host: Some("api.790053500.com".into()),
                             entry_url: Some("https://790053500.com/keys".into()),
                             purchase_url: None,
+                            usage_url: None,
                             display_name: Some("鑫旺".into()),
                         },
                     ),
@@ -1099,6 +1100,7 @@ mod tests {
                             veridrop_host: None,
                             entry_url: None,
                             purchase_url: None,
+                            usage_url: None,
                             display_name: None,
                         },
                     ),
@@ -1505,6 +1507,7 @@ mod tests {
                 veridrop_host: Some("probe.new.example".into()),
                 entry_url: None,
                 purchase_url: None,
+                usage_url: None,
                 display_name: None,
             },
         );
