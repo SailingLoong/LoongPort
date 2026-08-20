@@ -24,16 +24,19 @@
 
 ## What it does
 
-You want to run Codex CLI or Claude Code without paying official API rates. Normally
-that means: sign up with a relay provider, hunt for their console, create an API key by
+Running Codex CLI or Claude Code below official API rates normally means a tedious
+routine: sign up with a relay provider, hunt for their console, create an API key by
 hand, copy the `base_url` correctly, track down the config file, and get every field
-exactly right. Then do it all again for another CLI or tier.
+exactly right — then do it all again for another CLI or tier.
 
 LoongPort collapses that into two steps — **enter a domain, sign in once.** It
 provisions a key for every tier your account can reach, writes each CLI's config in
 its own shape, and switching tiers becomes a single click.
 
-If your site has an image tier, you can also
+Beyond relay tiers, LoongPort ships built-in
+[official-direct tiers](#official-direct-official-apis) (DeepSeek, BigModel, opencode);
+both kinds take part in [Easy Mode](#easy-mode-let-the-system-pick-the-tier)
+scheduling side by side. If your site has an image tier, you can also
 [**generate images right inside your CLI**](#generating-images-in-your-cli) — without
 giving up the tier you chat on.
 
@@ -70,7 +73,7 @@ No config files to edit, no API keys to create by hand, no `base_url` to remembe
 ## If you run a relay
 
 You can hand LoongPort to your users as **a client for your own site** — it is a generic
-sub2api client and is not tied to any particular relay:
+sub2api / new-api client and is not tied to any particular relay:
 
 - **It replaces your setup guide.** Users no longer follow a tutorial to create a key,
   copy a `base_url`, and hunt down a config file. The four steps above are the whole
@@ -82,7 +85,8 @@ sub2api client and is not tied to any particular relay:
   config that can carry a "recommended sites" list — it appears at the top of the
   "pick a service site" screen, one click to connect. Just [open an issue](../../issues).
 - **Affiliate and promo codes are supported too**: the same config can carry your
-  referral code and a registration promo code, applied automatically at sign-up.
+  referral code and a registration promo code, applied automatically at sign-up
+  (this mechanism currently targets sub2api sites).
 
 ## Why it costs so much less
 
@@ -146,9 +150,8 @@ On ARM64 Windows machines (Snapdragon laptops and the like), use the two files w
 > xattr -dr com.apple.quarantine /Applications/LoongPort.app
 > ```
 >
-> It opens normally after that, and you only do this once. What that command does and why it
-> is safe are
-> all covered at **[loongport.dev/en/download](https://loongport.dev/en/download)**.
+> It opens normally after that, and you only do this once. What that command does and why
+> it is safe are all covered at **[loongport.dev/en/download](https://loongport.dev/en/download)**.
 
 ## How it works
 
@@ -169,9 +172,75 @@ On ARM64 Windows machines (Snapdragon laptops and the like), use the two files w
 > the process is force-terminated**, with no dialog, so the app warns you before switching.
 > Claude tier switches do not involve it.
 
+The system tray switches tiers for each app without opening the main window, and adjusts
+Easy Mode strategy and model preferences directly.
+
 Credentials and site data live in a local SQLite database under `~/.loongport/` and are
 sent only to the relay site you chose, as the Bearer token on its API calls. LoongPort
 has no account system and no server of its own, so it never receives them.
+
+## Easy Mode: let the system pick the tier
+
+Once sites are connected, "which tier should I be on" remains a recurring decision:
+tiers differ in multiplier, unit price and live health. Easy Mode hands that decision to
+the system:
+
+- **Automatic tier selection** — managed tiers are chosen automatically by one of two
+  strategies, "lowest cost (multiplier × model unit price)" or "fastest response (recent
+  average time to first token)"; strategy and model preferences are configured per app.
+- **Session stickiness** — the current tier is kept for the duration of a session, so the
+  prompt cache is never thrown away.
+- **Failover** — when the current tier keeps failing, the next one in strategy order
+  takes over automatically, and traffic switches back once it recovers.
+- **Tier board** — with Easy Mode on, the home page becomes a tier board showing each
+  tier's multiplier, estimated unit price, balance, time to first token and current
+  hit, along with [model verification](#model-verification) anomaly flags.
+- **Manual ordering** — prefer to decide yourself? Switch to manual ordering and drag
+  tiers into your preferred priority; it takes effect on release. Session stickiness and
+  failover keep working.
+- **Always at hand** — a toggle in the top bar turns Easy Mode on or off per app at any
+  time. Turning it on also starts the local router and takes over that CLI's config;
+  turning it off restores the original config.
+
+Easy Mode lives under Settings → Easy Mode. With it off, everything works as before:
+manual switching and the failover queue remain available, and the underlying routing
+config sits in the Advanced settings page.
+
+## Official-direct (Official APIs)
+
+Besides relay tiers, LoongPort ships official-direct tiers for three vendors:
+**DeepSeek**, **Zhipu BigModel** (GLM models), and the **opencode account** (one login
+expands into two tiers: Zen pay-as-you-go and the Go subscription). Sign in once on the
+"Official APIs" page and LoongPort provisions the key and each platform's config
+automatically.
+
+Official-direct tiers have the same standing as relay tiers: both join Easy Mode's
+price comparison, ordering and failover at official list prices.
+
+## Model verification
+
+Whether a tier actually serves the model it advertises bears directly on billing and
+output quality. LoongPort verifies it on two levels:
+
+- **Active verification** — run "Model verification" on a tier to probe the selected
+  models one by one; results are kept on record for review.
+- **Passive observation** — while the local router is running, responses from managed
+  tiers are passively compared against the expected model fingerprint, with no extra
+  requests sent. A suspected model swap is flagged on the tier board. Passive
+  observation reports anomalies only — it never vouches for a normal tier, so healthy
+  tiers are never disturbed.
+
+## Usage statistics and billing reconciliation
+
+Traffic through the local router (Easy Mode included) is fully recorded, locally only:
+request count, success rate, cost, input/output and cache tokens, daily trends, and
+per-provider and per-model breakdowns.
+
+Each relay account row offers "billing reconciliation": estimated local cost is compared
+against the actual deductions in the site's balance snapshots per time window, with the
+ratio shown; windows where the actual deduction is markedly higher than the estimate are
+flagged. The feature becomes available once Easy Mode is on for a relevant app and
+reconciliation data exists.
 
 ## Generating images in your CLI
 
@@ -221,7 +290,8 @@ dsh plugin --profile <profile> add loongport
 
 After installation, open **Settings → LoongPort**, choose a provider, use its own
 registration or sign-in page when needed, manually generate and paste an API key, then save
-`deepseek-v4-flash` or `deepseek-v4-pro`. BestAPI is the default provider. See
+`deepseek-v4-flash` or `deepseek-v4-pro`. The default provider is DeepSeek's official API;
+BestAPI is the verified relay option. See
 **[loongport.dev/en/dsh](https://loongport.dev/en/dsh)** for the safety boundary and the
 signed-directory and VeriDrop roles.
 
@@ -231,24 +301,20 @@ Browser authorization is not automated; the website documents the advanced custo
 
 | | Shipped | In progress |
 |---|---|---|
-| **Relay services** | sub2api | new-api |
+| **Relay services** | sub2api · new-api | — |
 | **AI CLIs** | codex · claude | gemini · grok |
 | **Platforms** | macOS · Windows | Linux |
+
+You can point it at your own site domain; a working one is preset by default. macOS and
+Windows have the same feature set.
 
 > **The "AI CLIs" row is about chat tiers.** The image tool registers with codex,
 > claude **and gemini** — "gemini in progress" means it cannot yet be the target of a
 > chat tier (its config shape is not written yet), not that it is untouched.
 
-> **"In progress" is not a wishlist.** Take new-api: the login identifier is already
-> modelled as a neutral `login_identifier` (rather than hardcoding sub2api's field name),
-> and the `platform_map` table is complete — what is missing is the adapter for its own
-> API surface. **If you run a new-api site, or you are its developer,
-> [opening an issue](../../issues) would move this along considerably**: what we need is a
-> site to test against and confirmation of a few endpoint shapes. The same goes for any
-> other relay backend.
-
-You can point it at your own site domain; a working one is preset by default. macOS and
-Windows have the same feature set.
+> **"In progress" is not a wishlist.** The tier mapping for gemini and grok is already
+> in place; what is missing is each one's config-writing adapter. If you run another
+> kind of relay backend, [opening an issue](../../issues) is the way to get it assessed.
 
 ## If you run a relay service
 
@@ -271,7 +337,7 @@ The benefits, the concerns, the technical prerequisites and how to get on board 
 
 **[cc-switch](https://github.com/farion1231/cc-switch)** (by
 [@farion1231](https://github.com/farion1231), MIT) — the base this is built on, forked
-at v3.19.1 and merged upstream through v3.19.2. The icon is derived from theirs and
+at v3.19.1 and merged upstream through v3.20.0. The icon is derived from theirs and
 their copyright notice is kept in [LICENSE](LICENSE).
 
 cc-switch is a general multi-provider manager covering every CLI and every provider,
