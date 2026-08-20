@@ -79,6 +79,18 @@ export interface ProtocolScore {
   reportUrl: string | null;
 }
 
+/**
+ * 站方一手 transit 摘要（ai-transit.v1 公开协议）。取的是最保守值：
+ * 最低分组综合倍率、最低分组 7 日可用性。`null` 字段 = 站方快照里没有
+ * 该数据；整个对象缺席 = 该站没部署公开协议（New API 站），不渲染徽章。
+ */
+export interface TransitSummary {
+  minMultiplier: number | null;
+  minAvailability7d: number | null;
+  /** 站方快照的生成时间（Unix 秒）。 */
+  syncedAt: number;
+}
+
 export interface RelayDirectoryItem {
   siteHost: string;
   veridropHost: string;
@@ -94,6 +106,7 @@ export interface RelayDirectoryItem {
   issues: string[];
   entryUrl: string;
   autoAdd: boolean;
+  transit?: TransitSummary;
 }
 
 export interface RelayLeaderboard {

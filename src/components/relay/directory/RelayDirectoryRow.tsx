@@ -21,6 +21,20 @@ function scoreTone(score: number): string {
   return "text-amber-600 dark:text-amber-400";
 }
 
+/** 可用性徽章的着色，阈值与 scoreTone 同一档位语义（90/75 两档）。 */
+function availabilityTone(availability: number): string {
+  if (availability >= 95)
+    return "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300";
+  if (availability >= 85)
+    return "border-border-default bg-muted/40 text-foreground";
+  return "border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300";
+}
+
+/** 92.5 显示为 93%，95.0 也显示 95% —— 徽章位是整数，精度进 title 不值得。 */
+function formatAvailability(availability: number): string {
+  return `${Math.round(availability)}%`;
+}
+
 export function RelayDirectoryRow({
   item,
   busy,
@@ -75,6 +89,27 @@ export function RelayDirectoryRow({
             >
               <LockKeyhole className="h-3 w-3" />
               {item.claudeSignatureRate}%
+            </Badge>
+          )}
+          {item.transit?.minMultiplier != null && (
+            <Badge
+              variant="outline"
+              className="border-border-default bg-muted/40 px-2 py-0 text-[11px] font-medium tabular-nums text-foreground"
+              title={t("loongport.directory.transit.multiplierHint")}
+            >
+              {item.transit.minMultiplier}x
+            </Badge>
+          )}
+          {item.transit?.minAvailability7d != null && (
+            <Badge
+              variant="outline"
+              className={cn(
+                "px-2 py-0 text-[11px] font-medium tabular-nums",
+                availabilityTone(item.transit.minAvailability7d),
+              )}
+              title={t("loongport.directory.transit.availabilityHint")}
+            >
+              {formatAvailability(item.transit.minAvailability7d)}
             </Badge>
           )}
           {item.scenarios.map((scenario) => (

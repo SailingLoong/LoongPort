@@ -1134,8 +1134,42 @@ async fn force_refresh_directory_and_emit(
     app_handle: &tauri::AppHandle,
     kind: crate::relay::leaderboard::LeaderboardKind,
 ) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
+    // 手动刷新按钮：榜单同步刷（返回值立刻要给 UI），transit 摘要异步刷
+    // ——不能让几十个站的快照抓取把按钮卡住十几秒，刷完走事件广播。
+    spawn_transit_refresh_and_emit(app_handle.clone());
     let outcome = crate::relay::leaderboard::refresh(kind).await?;
     emit_directory_update(app_handle, kind, outcome)
+}
+
+/// 异步刷一轮 transit 摘要，完成后广播全部榜单的更新事件。
+///
+/// maintenance 周期任务与手动刷新共用这一条：榜单与 transit 是两份数据、
+/// 各刷各的；前端对 `relay-directory-updated` 的反应是重拉列表，届时
+/// 读取路径会把新摘要合并进去（见 `leaderboard::decorate_transit`）。
+pub(crate) fn spawn_transit_refresh_and_emit(app_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+        let hosts = crate::relay::leaderboard::managed_site_hosts(&config);
+        if hosts.is_empty() {
+            return;
+        }
+        crate::relay::transit::refresh_for_hosts(&hosts).await;
+        emit_all_directory_updates(&app_handle);
+    });
+}
+
+/// 广场数据在「命令层之外」被更新（transit 后台刷新）后的广播：
+/// 4 个榜单各发一次同名事件，前端作废重拉。与 [`emit_directory_update`]
+/// 共用事件契约，前端不区分来源。
+pub(crate) fn emit_all_directory_updates(app_handle: &tauri::AppHandle) {
+    for kind in crate::relay::leaderboard::LeaderboardKind::ALL {
+        if let Err(error) = app_handle.emit(
+            RELAY_DIRECTORY_UPDATED_EVENT,
+            RelayDirectoryUpdated { kind },
+        ) {
+            log::warn!("发送广场更新事件失败（{kind:?}）: {error}");
+        }
+    }
 }
 
 async fn refresh_stale_directory_and_emit(

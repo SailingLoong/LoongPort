@@ -3180,6 +3180,10 @@
       "empty": "No sites match the current filters",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude thinking-signature verification rate",
+      "transit": {
+        "multiplierHint": "Lowest group composite multiplier published by the site (recharge rate x model multiplier) via its ai-transit public protocol. Lower is cheaper.",
+        "availabilityHint": "Lowest group availability over the last 7 days from the site's public monitoring."
+      },
       "compatibilityNote": "Some incompatible sites are not shown",
       "provisionFailed": "The account was added, but connection setup failed: {{reason}}. Retry from the relay list.",
       "meta": {

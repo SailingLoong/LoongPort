@@ -3180,6 +3180,10 @@
       "empty": "現在の条件に一致するサイトはありません",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思考署名の検証成功率",
+      "transit": {
+        "multiplierHint": "サイトが ai-transit 公開プロトコルで公表している最小グループの総合倍率（チャージ倍率 × モデル倍率）。低いほど安い。",
+        "availabilityHint": "サイトの公開モニタリングによる、直近 7 日間の最低グループ可用性。"
+      },
       "compatibilityNote": "一部の非互換サイトは表示されません",
       "provisionFailed": "アカウントは追加されましたが、接続設定の作成に失敗しました：{{reason}}。中継サイト一覧から再試行できます。",
       "meta": {
