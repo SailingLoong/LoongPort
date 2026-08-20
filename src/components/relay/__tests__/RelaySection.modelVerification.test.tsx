@@ -254,7 +254,9 @@ describe("RelaySection model verification ownership", () => {
       summary("provider-a", "anomaly", "two"),
     ]);
     api.listHistory.mockResolvedValue([]);
-    api.listModels.mockResolvedValue(["gpt-5"]);
+    api.listModels.mockResolvedValue([
+      { name: "gpt-5", fitness: "unknown" as const },
+    ]);
     api.start.mockResolvedValue({ runId: "run-1", state: "running" });
     api.cancel.mockResolvedValue(undefined);
     api.onProgress.mockImplementation(
@@ -429,7 +431,9 @@ describe("RelaySection model verification ownership", () => {
     api.listSummaries.mockResolvedValue([
       summary("provider-a", "anomaly", "model-b"),
     ]);
-    api.listModels.mockResolvedValue(["model-a"]);
+    api.listModels.mockResolvedValue([
+      { name: "model-a", fitness: "unknown" as const },
+    ]);
 
     renderSection("codex");
     await waitFor(() =>

@@ -268,3 +268,29 @@ pub struct VerificationProgressEvent {
     pub total_checks: u8,
     pub failure: Option<RunFailureKind>,
 }
+
+/// 「这个模型能不能用当前验证协议验」的预筛结论。
+///
+/// 判据的唯一源是站点 ai-transit 公开快照里逐模型声明的 `supported_protocols`
+/// （设计档见 design TODO「模型验证·协议级筛选」）。**只有快照正向覆盖
+/// （分组与模型都能定位）才给 Supported/Unsupported**；站点没公开数据、分组
+/// 不在快照里（站点只发布部分分组是常态）、模型不在清单里 —— 一律 Unknown，
+/// 照常可选。宁可少排除，不误杀。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFitness {
+    /// 快照声明该分组下此模型支持当前验证协议。
+    Supported,
+    /// 快照**正向覆盖**该分组与模型，且协议清单不含当前验证协议。
+    UnsupportedProtocol,
+    /// 快照没有覆盖到（站点无公开数据 / 分组不在快照 / 模型不在清单）。
+    Unknown,
+}
+
+/// 验证弹窗的一个模型选项：模型名 + 预筛结论。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationModelOption {
+    pub name: String,
+    pub fitness: ModelFitness,
+}

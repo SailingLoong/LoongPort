@@ -245,6 +245,8 @@ const requiredKeys = [
   "modelVerification.model.loading",
   "modelVerification.model.empty",
   "modelVerification.model.error",
+  "modelVerification.model.unsupportedTag",
+  "modelVerification.model.fitnessNote",
   "modelVerification.actions.start",
   "modelVerification.actions.stop",
   "modelVerification.actions.retry",

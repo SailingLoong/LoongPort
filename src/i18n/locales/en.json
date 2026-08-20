@@ -3390,7 +3390,10 @@
         "placeholder": "Select a model",
         "loading": "Loading models…",
         "empty": "No models are available for verification",
-        "error": "Could not load the model list. Try again."
+        "error": "Could not load the model list. Try again.",
+        "unsupportedTag": "Not supported in this group",
+        "unsupportedHint": "The site's public protocol data declares this model does not support the current verification protocol in this group",
+        "fitnessNote": "\"Not supported\" comes from the site's public protocol data; untagged models have no public data or are supported."
       },
       "actions": {
         "start": "Start verification",

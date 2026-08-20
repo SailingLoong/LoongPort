@@ -106,9 +106,26 @@ struct TransitSnapshot {
 #[derive(Debug, Default, Deserialize)]
 struct TransitGroup {
     #[serde(default)]
+    name: String,
+    #[serde(default)]
     composite_multiplier: Option<f64>,
     #[serde(default)]
     rate_multiplier: Option<f64>,
+    /// 逐模型条目（能力查询消费；摘要不需要它，空数组照常出摘要）。
+    #[serde(default)]
+    models: Vec<TransitGroupModel>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TransitGroupModel {
+    /// 标准模型名（官方目录口径）。
+    #[serde(default)]
+    standard_model: Option<String>,
+    /// 站点自己的模型 id —— `/v1/models` 返回的就是它。
+    #[serde(default)]
+    raw_model: Option<String>,
+    #[serde(default)]
+    supported_protocols: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -264,6 +281,88 @@ pub fn summaries() -> BTreeMap<String, TransitSummary> {
     read_cache().entries
 }
 
+/// 站点的**模型协议能力图**：分组名 →（模型名 → 该站声明的支持协议集合）。
+///
+/// 消费方是模型验证的协议预筛（`model_verification::target`）：档位记着
+/// 分组名（`ProviderMeta::loongport_group`），用它在这里查「这个分组下的
+/// 这个模型支不支持当前验证协议」。**分组只有名字可 join**——ai-transit
+/// 快照的分组不带 id。
+#[derive(Debug, Default, Clone)]
+pub struct ModelProtocolCapabilities {
+    groups: BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<String>>>,
+}
+
+impl ModelProtocolCapabilities {
+    /// 「该分组 × 该模型」的协议清单。
+    ///
+    /// `None` = 快照**没有正向覆盖**（分组不在快照里，或模型不在该分组的
+    /// 清单里）——按 Unknown 处理、照常显示，绝不能当作「不支持」。
+    /// 站点快照的分组覆盖是部分的（实测有站只发布部分平台分组），把
+    /// 「没提到」读成「不支持」就是误杀。
+    pub fn protocols_for(
+        &self,
+        group: &str,
+        model: &str,
+    ) -> Option<&std::collections::BTreeSet<String>> {
+        self.groups.get(group)?.get(model)
+    }
+}
+
+/// 从快照建能力图。纯函数——分组下每个模型以 standard 与 raw 两个名字
+/// 入图（`/v1/models` 返回站点自己的 id，两种形态都可能是它）；同名条目
+/// 的协议取并集（任何一条清单声明支持即算支持，正向口径）。
+fn build_model_capabilities(snapshot: &TransitSnapshot) -> ModelProtocolCapabilities {
+    let mut groups: BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<String>>> =
+        BTreeMap::new();
+    for group in &snapshot.groups {
+        if group.name.is_empty() {
+            continue;
+        }
+        let entry = groups.entry(group.name.clone()).or_default();
+        for model in &group.models {
+            let protocols: std::collections::BTreeSet<String> = model
+                .supported_protocols
+                .iter()
+                .filter(|protocol| !protocol.is_empty())
+                .cloned()
+                .collect();
+            if protocols.is_empty() {
+                continue;
+            }
+            for name in [&model.raw_model, &model.standard_model]
+                .into_iter()
+                .flatten()
+            {
+                let target = entry.entry(name.clone()).or_default();
+                target.extend(protocols.iter().cloned());
+            }
+        }
+    }
+    ModelProtocolCapabilities { groups }
+}
+
+/// 按需取某个站点的模型协议能力图（well-known → snapshot → 建图）。
+///
+/// 与广场摘要的周期刷新**互不相干**：这里服务的是「验证弹窗打开那一刻」，
+/// 用户站可能不在受管名单里（自建站照样有公开协议），不值得为它进缓存——
+/// 弹窗开一次抓一次。任何一步失败返回 `None`（站点没有公开数据 ⇒ 预筛
+/// 全部按 Unknown，行为退回无预筛）。
+pub async fn model_protocol_capabilities(site_origin: &str) -> Option<ModelProtocolCapabilities> {
+    let host = crate::relay::aff::lookup_host(site_origin);
+    if host.is_empty() {
+        return None;
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .user_agent("LoongPort/relay-transit")
+        .build()
+        .ok()?;
+    let well_known: WellKnown = fetch_json(&client, &well_known_url(&host)).await.ok()?;
+    let snapshot_url = validate_well_known(&well_known).ok()?;
+    let snapshot: TransitSnapshot = fetch_json(&client, snapshot_url.as_str()).await.ok()?;
+    Some(build_model_capabilities(&snapshot))
+}
+
 /// 周期刷新：并发抓全部受管站的 transit 摘要并合并进缓存。
 ///
 /// 失败的站**保留旧值**（见模块文档的缓存语义），全程不向上抛错——
@@ -371,6 +470,15 @@ pub(crate) mod tests {
     /// 把 `get_home_dir` 隔离到临时目录（跨模块测试助手）。
     pub(crate) fn transit_cache_guard(tag: &str) -> TestHomeGuard {
         TestHomeGuard::set(tag)
+    }
+
+    /// 用真实投影解析一份快照 JSON 并建能力图（跨模块测试助手：
+    /// `model_verification::target` 的预筛测试借它守住字段名契约，
+    /// 不手搓 Map）。
+    pub(crate) fn capabilities_from_snapshot_json(raw: &str) -> ModelProtocolCapabilities {
+        let snapshot: TransitSnapshot =
+            serde_json::from_str(raw).expect("测试快照 JSON 要能过投影");
+        build_model_capabilities(&snapshot)
     }
 
     /// 往当前缓存合并一条摘要（跨模块测试助手）。

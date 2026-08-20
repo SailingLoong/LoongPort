@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -89,17 +90,23 @@ vi.mock("@/components/ui/select", async () => {
     SelectItem: ({
       children,
       value,
+      disabled: itemDisabled,
     }: {
       children: React.ReactNode;
       value: string;
+      disabled?: boolean;
     }) => {
       const context = React.useContext(SelectContext);
       return (
         <button
           type="button"
           role="option"
-          disabled={context?.disabled}
-          onClick={() => context?.onValueChange(value)}
+          // 与 radix 语义一致：单选项自身的 disabled 与整组 disabled 取或。
+          disabled={itemDisabled || context?.disabled}
+          onClick={() => {
+            if (itemDisabled) return;
+            context?.onValueChange(value);
+          }}
         >
           {children}
         </button>
@@ -197,7 +204,9 @@ describe("ModelVerificationDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     progressListener = undefined;
-    api.listModels.mockResolvedValue(["gpt-5"]);
+    api.listModels.mockResolvedValue([
+      { name: "gpt-5", fitness: "unknown" as const },
+    ]);
     api.listHistory.mockResolvedValue([]);
     api.start.mockResolvedValue({ runId: "run-1", state: "queued" });
     api.cancel.mockResolvedValue(undefined);
@@ -217,6 +226,36 @@ describe("ModelVerificationDialog", () => {
     ).toBeInTheDocument();
   });
 
+  it("marks positively-unsupported models with a reason and blocks selection", async () => {
+    // 快照正向覆盖且协议不符 ⇒ 禁选 + 原因标签；未覆盖（unknown）照常可选。
+    api.listModels.mockResolvedValue([
+      { name: "bad-model", fitness: "unsupported_protocol" as const },
+      { name: "gpt-5", fitness: "unknown" as const },
+    ]);
+    render(<DialogHarness />);
+
+    await screen.findByRole("combobox");
+    await userEvent.click(screen.getByRole("combobox"));
+
+    const unsupported = await screen.findByRole("option", {
+      name: /bad-model/,
+    });
+    // 原因标签随行渲染（title 即完整说明）。
+    expect(
+      screen.getByTitle("loongport.modelVerification.model.unsupportedHint"),
+    ).toHaveTextContent("loongport.modelVerification.model.unsupportedTag");
+
+    // 行为契约：点「不支持」的项不产生选择——开始按钮保持禁用；
+    // 点未覆盖（unknown）的项正常选中解禁。
+    const startButton = () => screen.getByRole("button", { name: "开始验证" });
+    await userEvent.click(unsupported);
+    expect(startButton()).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("combobox"));
+    await userEvent.click(await screen.findByRole("option", { name: "gpt-5" }));
+    expect(startButton()).toBeEnabled();
+  });
+
   it("requires an explicit model selection", async () => {
     render(<DialogHarness />);
 
@@ -226,7 +265,7 @@ describe("ModelVerificationDialog", () => {
   });
 
   it("shows loading, error, and empty model-list states", async () => {
-    let resolveModels!: (models: string[]) => void;
+    let resolveModels!: (models: unknown[]) => void;
     api.listModels.mockReturnValue(
       new Promise((resolve) => (resolveModels = resolve)),
     );
