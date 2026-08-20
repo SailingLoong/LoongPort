@@ -624,4 +624,48 @@ pub(crate) mod tests {
         );
         assert!(cache.entries.contains_key("new.example"));
     }
+
+    /// 打**线上真实站点**验生产链路（well-known_url 的 https 前缀 + reqwest
+    /// 重定向 + 真实快照体量）。**默认不跑**（CI 不依赖外网）。
+    ///
+    /// 站点清单从环境变量注入（`TRANSIT_LIVE_HOSTS=host1,host2`），测试代码
+    /// 里不写真实域名——与 `live_remote_config` 同一条纪律。
+    ///
+    /// 手动跑：`TRANSIT_LIVE_HOSTS=… cargo test --lib live_transit -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要外网；手动跑 --ignored（站点经 TRANSIT_LIVE_HOSTS 注入）"]
+    fn live_transit_refresh_fetches_real_summaries() {
+        let hosts: Vec<String> = std::env::var("TRANSIT_LIVE_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_string)
+            .collect();
+        assert!(!hosts.is_empty(), "没有可测站点：设 TRANSIT_LIVE_HOSTS");
+
+        let _guard = TestHomeGuard::set("live");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("建 runtime");
+        rt.block_on(refresh_for_hosts(&hosts));
+
+        let summaries = summaries();
+        for host in &hosts {
+            match summaries.get(host) {
+                Some(summary) => println!(
+                    "  {host}: 倍率 {:?} / 可用性 {:?}",
+                    summary.min_multiplier, summary.min_availability_7d
+                ),
+                None => println!("  {host}: 无摘要（该站可能未部署公开协议）"),
+            }
+        }
+        assert!(
+            summaries
+                .values()
+                .any(|summary| summary.min_multiplier.is_some()),
+            "一个倍率都没抓到——生产链路（https 前缀/重定向/解析）可能有回归"
+        );
+    }
 }
