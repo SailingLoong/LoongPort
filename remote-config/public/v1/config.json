@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-08-15T00:00:00Z",
+  "issued_at": "2026-08-21T00:00:00Z",
   "star_reward": {
     "promo_code": "LOONGPORT5",
     "amount_usd": 5
@@ -188,6 +188,62 @@
         "veridrop_host": "yomiapi.com",
         "entry_url": "https://yomiapi.com",
         "display_name": "Yomi API"
+      },
+      "1pkapi.com": {
+        "veridrop_host": "1pkapi.com",
+        "entry_url": "https://1pkapi.com/register",
+        "purchase_url": "https://1pkapi.com/purchase",
+        "display_name": "皓悦API"
+      },
+      "sub.callai.one": {
+        "veridrop_host": "sub.callai.one",
+        "entry_url": "https://sub.callai.one/register",
+        "purchase_url": "https://sub.callai.one/purchase",
+        "display_name": "CallAI中转"
+      },
+      "aliuapi.top": {
+        "veridrop_host": "aliuapi.top",
+        "entry_url": "https://aliuapi.top/register",
+        "purchase_url": "https://aliuapi.top/purchase",
+        "display_name": "AL-API"
+      },
+      "mfttai.com": {
+        "veridrop_host": "mfttai.com",
+        "entry_url": "https://mfttai.com/register",
+        "purchase_url": "https://mfttai.com/purchase",
+        "display_name": "MFAPI"
+      },
+      "bb-api.com": {
+        "veridrop_host": "www.bb-api.com",
+        "entry_url": "https://www.bb-api.com/register",
+        "display_name": "贝贝"
+      },
+      "cca.maya.today": {
+        "veridrop_host": "cca.maya.today",
+        "entry_url": "https://cca.maya.today/register",
+        "purchase_url": "https://cca.maya.today/purchase",
+        "display_name": "BMCCA"
+      },
+      "apinode.ltd": {
+        "veridrop_host": "apinode.ltd",
+        "entry_url": "https://apinode.ltd/register",
+        "purchase_url": "https://apinode.ltd/purchase",
+        "display_name": "APINode"
+      },
+      "hejuapi.com": {
+        "veridrop_host": "www.hejuapi.com",
+        "entry_url": "https://www.hejuapi.com/register",
+        "display_name": "合聚API"
+      },
+      "yujianwudi.top": {
+        "veridrop_host": "yujianwudi.top",
+        "entry_url": "https://yujianwudi.top/register",
+        "display_name": "天机阁"
+      },
+      "umapis.com": {
+        "veridrop_host": "www.umapis.com",
+        "entry_url": "https://www.umapis.com/register",
+        "display_name": "悠米AI中转"
       }
     }
   }
