@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-08-21T12:00:00Z",
+  "issued_at": "2026-08-21T16:00:00Z",
   "star_reward": {
     "promo_code": "LOONGPORT5",
     "amount_usd": 5
@@ -121,7 +121,18 @@
     "sub.kedaya.xyz": "GCQD22VH47VN",
     "api.codepup.cn": "6sbG",
     "nexaxis.ai": "N7oc",
-    "ai.codepup.cn": "6sbG"
+    "ai.codepup.cn": "6sbG",
+    "1pkapi.com": "DLVHVZK3MBXL",
+    "sub.callai.one": "ARHDEL2VWSGR",
+    "aliuapi.top": "YMAQW3BXEDNF",
+    "api.aliuapi.top": "YMAQW3BXEDNF",
+    "mfttai.com": "GV7SJHF7YWSD",
+    "cca.maya.today": "2853PR369KG9",
+    "apinode.ltd": "GKP9STGPF3F3",
+    "hejuapi.com": "iKOd",
+    "yujianwudi.top": "55Et",
+    "umapis.com": "GgIn",
+    "sub2.congmingai.com": "GKHHMLU3V8YL"
   },
   "relay_directory": {
     "blocked_hosts": [],
