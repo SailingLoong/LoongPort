@@ -14,6 +14,18 @@ RS="${LOONGPORT_REMOTE_CONFIG_RS:-$HERE/../src-tauri/src/relay/remote_config.rs}
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
 
+# ⭐ 部署面完整性闸（2026-08-21 事故的机制修根）：
+# `pages deploy` 会把 --cwd 里的 **functions/ 与整个 public/** 当作完整站点发布——
+# 从一个不完整副本（比如缺 functions/ 或 v2 的镜像目录）出发，等于把线上端点
+# **整份回退下线**，且不报任何错。所以先验本目录是不是完整部署面，宁可拒发。
+for required in functions public/v1 public/v2 public/_headers; do
+  if [ ! -e "$HERE/$required" ]; then
+    echo "✘ 缺 ${required} —— 本目录不是完整部署面（会把线上端点整份回退）。" >&2
+    echo "  编辑与部署只能从主仓的 remote-config/ 走；其他目录一律是只读镜像。" >&2
+    exit 1
+  fi
+done
+
 # 下面那道前置验签要用 Ed25519 —— macOS 自带的 LibreSSL 做不了，见 lib.sh。
 require_openssl_with_ed25519
 
@@ -64,4 +76,9 @@ npx wrangler pages deploy public --cwd "$HERE" \
   --project-name="$PROJECT" --branch=main --commit-dirty=true
 
 echo
-echo "✔ 已部署。等 ~30 秒后依次跑 ./verify.sh 和 ./verify-v2.sh 验线上（CDN max-age=300）"
+echo "✔ 已部署。等 ~30 秒（CDN max-age=300）后自动验线上……"
+sleep 30
+"$HERE/verify.sh"
+"$HERE/verify-v2.sh"
+echo
+echo "✔ 线上 v1 + v2 双验签通过。"
