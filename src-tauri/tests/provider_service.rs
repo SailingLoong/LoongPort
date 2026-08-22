@@ -479,13 +479,17 @@ requires_openai_auth = true
         Some("bridge-key"),
         "third-party key should be injected into the selected live provider table"
     );
-    assert_eq!(
+    // bearer 路必须不声明 requires_openai_auth：密钥走 experimental_bearer_token
+    // 时带上它，codex 会转进 ChatGPT 鉴权模式去打 chatgpt.com（codex doctor 三组
+    // 对照里唯一跑不通的组合）。存储配置带键（上游预设/sub2api 面板抄来的）
+    // 也会在落盘时被归一化掉——不变式见 codex_config::write_codex_live_for_provider。
+    assert!(
         parsed_live
             .get("model_providers")
             .and_then(|v| v.get("aihubmix"))
             .and_then(|v| v.get("requires_openai_auth"))
-            .and_then(|v| v.as_bool()),
-        Some(true)
+            .is_none(),
+        "live config must not declare requires_openai_auth on the bearer path: {live_config}"
     );
 
     ProviderService::switch(&state, AppType::Codex, "plain-provider")
