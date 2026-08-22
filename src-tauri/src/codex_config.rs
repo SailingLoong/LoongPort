@@ -2570,6 +2570,79 @@ fn remove_codex_experimental_bearer_token(config_text: &str) -> Result<String, A
     remove_codex_experimental_bearer_token_if(config_text, |_| true)
 }
 
+/// `requires_openai_auth` 与密钥落地位置是同一个不变式的两面（唯源文档在
+/// [`write_codex_live_for_provider`]）：sk 进 `auth.json` ⇒ 必须为 true；
+/// sk 进 `experimental_bearer_token` ⇒ 必须不写。
+///
+/// 给**当前激活**的 custom provider 表补 `requires_openai_auth = true`。
+/// codex ≥0.149（openai/codex#39214）不再让自定义 provider 隐式继承 auth.json
+/// 鉴权，sk 走 auth.json 落地的第三方档必须显式带上它；老版本 codex 对
+/// 「true + auth.json 有 key」同样放行（codex doctor 实测 API key auth 打
+/// provider 的 /v1，200），补键对两侧版本都是安全方向。
+///
+/// 保留 id（`openai` 等）与没有激活 custom 表的配置原样返回——那些鉴权语义
+/// 归 codex 所有，不由我们改写。
+fn set_codex_provider_requires_openai_auth(config_text: &str) -> Result<String, AppError> {
+    let Some(mut doc) = parse_codex_config_doc(config_text)? else {
+        return Ok(config_text.to_string());
+    };
+    let Some(provider_id) = active_custom_codex_provider_id(&doc) else {
+        return Ok(doc.to_string());
+    };
+
+    if let Some(provider_table) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+        .and_then(|table| table.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_mut())
+    {
+        provider_table["requires_openai_auth"] = toml_edit::value(true);
+    }
+    Ok(doc.to_string())
+}
+
+/// 从**当前激活**的 custom provider 表剥掉 `requires_openai_auth`（不变式见
+/// [`set_codex_provider_requires_openai_auth`]）。bearer 路带上它时 codex 会
+/// 转进 ChatGPT 鉴权模式去打 chatgpt.com 而不是拿 bearer 打 provider——那是
+/// codex doctor 三组对照里唯一跑不通的组合。
+fn remove_codex_provider_requires_openai_auth(config_text: &str) -> Result<String, AppError> {
+    if config_text.trim().is_empty() || !config_text.contains("requires_openai_auth") {
+        return Ok(config_text.to_string());
+    }
+    let Some(mut doc) = parse_codex_config_doc(config_text)? else {
+        return Ok(config_text.to_string());
+    };
+    let Some(provider_id) = active_custom_codex_provider_id(&doc) else {
+        return Ok(doc.to_string());
+    };
+
+    if let Some(provider_table) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+        .and_then(|table| table.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_mut())
+    {
+        provider_table.remove("requires_openai_auth");
+    }
+    Ok(doc.to_string())
+}
+
+/// 当前激活的 model_provider 是 custom id 时返回它，否则 `None`。
+fn active_custom_codex_provider_id(doc: &DocumentMut) -> Option<String> {
+    active_codex_model_provider_id(doc).filter(|id| is_custom_codex_model_provider_id(id))
+}
+
+/// 解析 config.toml；空文本返回 `None`（没有表可改，调用方按 no-op 处理）。
+fn parse_codex_config_doc(config_text: &str) -> Result<Option<DocumentMut>, AppError> {
+    if config_text.trim().is_empty() {
+        return Ok(None);
+    }
+    config_text
+        .parse::<DocumentMut>()
+        .map(Some)
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))
+}
+
 /// Read the current Codex live settings as a `{ auth, config }` object.
 ///
 /// Missing `auth.json` collapses to `{}` so a config-only third-party install
@@ -2940,6 +3013,18 @@ pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(),
 ///
 /// 统一会话开关开启时，官方配置在落盘前注入共享的 `custom` 路由
 /// （见 `inject_codex_unified_session_bucket`）。
+///
+/// ## `requires_openai_auth` 不变式：密钥落在哪，这个键跟到哪
+///
+/// codex 0.149 起（openai/codex#39214）自定义 provider 不再隐式继承 auth.json
+/// 鉴权，但显式 `experimental_bearer_token` 仍放行。于是这个键的正确取值完全
+/// 由切换时密钥的落地位置决定，两个分支各自归一化——存储模板里写没写都会被
+/// 纠正（上游预设与 sub2api 面板模板带的 `true` 在 bearer 路上就是事故源）：
+///
+/// | 密钥位置 | `requires_openai_auth` | 依据 |
+/// |---|---|---|
+/// | `auth.json`（auth+config 分支） | 补 `true` | codex 拿 auth.json 的 key 打 provider；≥0.149 没有它就是 unauthenticated → 401，≤0.148 实测同组合同样放行 |
+/// | `experimental_bearer_token`（config-only 分支） | 剥掉 | 带上它 codex 转进 ChatGPT 鉴权模式去打 chatgpt.com（codex doctor 实测唯一跑不通的组合） |
 pub fn write_codex_live_for_provider(
     category: Option<&str>,
     auth: &Value,
@@ -2964,7 +3049,16 @@ pub fn write_codex_live_for_provider(
                 || get_codex_managed_oauth_live_auth_marker_path().exists()));
 
     if should_write_auth {
-        write_codex_live_atomic(auth, config_text)
+        // 第三方档把 sk 写进 auth.json 时补 requires_openai_auth（不变式见本函数
+        // 文档）。auth 里没有 API key（登录态形状）时不动——flag 会把那种凭据
+        // 引到 ChatGPT 鉴权模式去打 provider 的 base_url。
+        let config_text = match (category != Some("official"), config_text) {
+            (true, Some(text)) if extract_codex_auth_api_key(auth).is_some() => {
+                Some(set_codex_provider_requires_openai_auth(text)?)
+            }
+            (_, text) => text.map(str::to_string),
+        };
+        write_codex_live_atomic(auth, config_text.as_deref())
     } else {
         let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
         write_codex_live_config_atomic(Some(&live_config))
@@ -2977,6 +3071,10 @@ pub fn write_codex_live_for_provider(
 /// requests can use a provider-scoped `experimental_bearer_token`, so switching
 /// providers only needs to update `config.toml`; `auth.json` stays as the user's
 /// long-lived ChatGPT login cache.
+///
+/// bearer 路必须不声明 `requires_openai_auth`（不变式见
+/// [`write_codex_live_for_provider`]）——存储模板带它（上游预设 / sub2api 面板
+/// 抄来的）也会在注入 token 时一并归一化掉。
 pub fn prepare_codex_provider_live_config(
     auth: &Value,
     config_text: &str,
@@ -2985,7 +3083,10 @@ pub fn prepare_codex_provider_live_config(
         .or_else(|| extract_codex_experimental_bearer_token(config_text));
 
     Ok(match token {
-        Some(token) => set_codex_experimental_bearer_token(config_text, &token)?,
+        Some(token) => {
+            let with_token = set_codex_experimental_bearer_token(config_text, &token)?;
+            remove_codex_provider_requires_openai_auth(&with_token)?
+        }
         None => config_text.to_string(),
     })
 }
@@ -3324,6 +3425,153 @@ mod tests {
         assert_eq!(
             CodexCatalogToolProfile::from_api_format(None),
             CodexCatalogToolProfile::ProxyChat
+        );
+    }
+
+    /// 上游预设与 sub2api 面板模板都带 `requires_openai_auth = true`；bearer 路
+    /// 带上它 codex 会转进 ChatGPT 鉴权模式去打 chatgpt.com（codex doctor 实测
+    /// 唯一跑不通的组合）。注入 token 时必须一并归一化掉，存量带键的存储配置
+    /// 才不会把这条事故形状写到 live。
+    #[test]
+    fn provider_live_config_strips_requires_openai_auth_when_key_rides_bearer() {
+        let config = r#"model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let live =
+            prepare_codex_provider_live_config(&json!({ "OPENAI_API_KEY": "sk-relay" }), config)
+                .expect("prepare live config");
+
+        let parsed: toml::Table = live.parse().expect("live config must parse");
+        assert_eq!(
+            parsed["model_providers"]["custom"]["experimental_bearer_token"].as_str(),
+            Some("sk-relay")
+        );
+        assert!(
+            parsed["model_providers"]["custom"]
+                .get("requires_openai_auth")
+                .is_none(),
+            "bearer 路不得声明 requires_openai_auth: {live}"
+        );
+    }
+
+    /// codex ≥0.149（openai/codex#39214）不再让自定义 provider 隐式继承 auth.json
+    /// 鉴权：sk 走 auth.json 落地（preserve 关闭）的第三方档若不补
+    /// `requires_openai_auth = true`，codex 会按 unauthenticated 打请求 → 401。
+    #[test]
+    #[serial]
+    fn auth_json_switch_flags_provider_for_codex_0149() {
+        let _home = CodexLiveTestHome::new();
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: false,
+            ..Default::default()
+        })
+        .expect("disable preserve for this test");
+
+        let config = r#"model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+wire_api = "responses"
+"#;
+        write_codex_live_for_provider(
+            Some("aggregator"),
+            &json!({ "OPENAI_API_KEY": "sk-relay" }),
+            Some(config),
+        )
+        .expect("write live for provider");
+
+        let written =
+            fs::read_to_string(get_codex_config_path()).expect("read written config.toml");
+        let parsed: toml::Table = written.parse().expect("written config must parse");
+        assert_eq!(
+            parsed["model_providers"]["custom"]["requires_openai_auth"].as_bool(),
+            Some(true),
+            "sk 走 auth.json 落地必须补 requires_openai_auth，否则 codex ≥0.149 报 401: {written}"
+        );
+        let live_auth: Value =
+            read_json_file(&get_codex_auth_path()).expect("read written auth.json");
+        assert_eq!(
+            live_auth["OPENAI_API_KEY"].as_str(),
+            Some("sk-relay"),
+            "前置条件：这个分支真的把 key 写进了 auth.json"
+        );
+    }
+
+    /// 登录态形状的 auth（ChatGPT tokens，没有 API key）走 auth+config 分支时
+    /// 不得补键——`requires_openai_auth` 会把那份凭据引到 ChatGPT 鉴权模式去打
+    /// provider 的 base_url。
+    #[test]
+    #[serial]
+    fn login_shaped_auth_switch_does_not_flag_provider() {
+        let _home = CodexLiveTestHome::new();
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: false,
+            ..Default::default()
+        })
+        .expect("disable preserve for this test");
+
+        let config = r#"model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+wire_api = "responses"
+"#;
+        let login_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "chatgpt-access",
+                "refresh_token": "chatgpt-refresh",
+            },
+        });
+        write_codex_live_for_provider(Some("aggregator"), &login_auth, Some(config))
+            .expect("write live for provider");
+
+        let written =
+            fs::read_to_string(get_codex_config_path()).expect("read written config.toml");
+        assert!(
+            !written.contains("requires_openai_auth"),
+            "登录态 auth 不该触发补键: {written}"
+        );
+    }
+
+    /// 官方档的 `requires_openai_auth` 由官方构造路径自己负责（unified/proxy 表
+    /// 内建带键），这里只验证：没有 model_providers 的官方配置不会被补键逻辑
+    /// 凭空注入表或键。关掉统一会话桶以排除官方路由注入的干扰。
+    #[test]
+    #[serial]
+    fn official_switch_does_not_inject_requires_openai_auth() {
+        let _home = CodexLiveTestHome::new();
+        crate::settings::update_settings(crate::settings::AppSettings {
+            unify_codex_session_history: false,
+            ..Default::default()
+        })
+        .expect("disable unified session bucket for this test");
+        let login_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "chatgpt-access",
+                "refresh_token": "chatgpt-refresh",
+            },
+        });
+        let config = "model = \"gpt-5.5\"\n";
+        write_codex_live_for_provider(Some("official"), &login_auth, Some(config))
+            .expect("write live for provider");
+
+        let written =
+            fs::read_to_string(get_codex_config_path()).expect("read written config.toml");
+        assert_eq!(
+            written, config,
+            "官方配置必须原样落盘，不得注入 requires_openai_auth: {written}"
         );
     }
 

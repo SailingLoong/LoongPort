@@ -525,6 +525,11 @@ pub fn provider_display_name(site_name: &str, group_name: &str) -> String {
 ///    留着它 + 不写 auth.json 是唯一跑不通的组合：codex 会判成 ChatGPT 登录模式，去打
 ///    `chatgpt.com/backend-api` 然后报 credentials incomplete。
 ///
+///    ⚠️ codex 0.149 起（openai/codex#39214）自定义 provider 不再隐式继承 auth.json
+///    鉴权，但显式 `experimental_bearer_token` 仍放行——所以这份模板**维持不写**不变。
+///    这个键的正确取值只由切换时密钥落在哪决定（sk 进 auth.json ⇒ 补 true，走 bearer
+///    ⇒ 剥掉），归一化收在 `codex_config::write_codex_live_for_provider`，唯源文档在那边。
+///
 /// 3. **`disable_response_storage = true`**：不写它 codex 会发 `previous_response_id` 续接，
 ///    而 sub2api 的 HTTP 路径对非空 `previous_response_id` **直接 400**（只有 WebSocket v2
 ///    支持），不是静默忽略。
