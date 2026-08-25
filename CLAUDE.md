@@ -280,7 +280,8 @@ Tauri 的 npm↔crate 版本校验只在打包时触发（已踩过，见 `ca82a
 
 - 只动 `src/` / `tests/`：前端三件套（typecheck / format:check / test:unit）。
 - 只动 `src-tauri/`：后端三件套（fmt / clippy / test）。
-- 依据有两条：本地 clippy 带 `--all-targets`，是 CI 那条（不带）的**超集**；
+- 依据有两条：CI 的 clippy 与本地同一条命令（都带 `--all-targets`，2026-08-25
+  起对齐——此前 CI 不带它，测试代码的 lint 线上隐形，攒过 9 处存量才补齐）；
   CI 工具链走 `rust-toolchain.toml`（同本机版本，2026-08-16 #150 起 —— 别在
   workflow 里换回 `@stable`，那会覆盖钉版，重新制造「本地绿 CI 红」的漂移）。
 
