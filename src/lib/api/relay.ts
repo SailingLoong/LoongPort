@@ -80,15 +80,47 @@ export interface ProtocolScore {
 }
 
 /**
- * 站方一手 transit 摘要（ai-transit.v1 公开协议）。取的是最保守值：
- * 最低分组综合倍率、最低分组 7 日可用性。`null` 字段 = 站方快照里没有
- * 该数据；整个对象缺席 = 该站没部署公开协议（New API 站），不渲染徽章。
+ * 站方一手 transit 分组摘要（ai-transit.v1 公开协议），详情弹窗的表格行。
+ * 可用性 / 延迟从站方监测条目按分组名 join；`null` = 站方快照里没有该数据。
+ */
+export interface TransitGroupSummary {
+  name: string;
+  /** 平台（anthropic / openai / grok…，站方原值；空串 = 快照没给）。 */
+  platform: string;
+  multiplier: number | null;
+  cacheHitRate7d: number | null;
+  availability: number | null;
+  /** 平均延迟毫秒（优先 7 日窗口，兜底 1 日）。 */
+  avgLatencyMs: number | null;
+  modelCount: number;
+}
+
+/**
+ * 站方一手 transit 摘要（ai-transit.v1 公开协议）。行徽章取最保守值：
+ * 最低分组综合倍率、最低分组可用性（窗口按站方口径偏好 7d → 15d → 30d
+ * → 1d）。其余字段给详情弹窗（充值口径、逐分组、来源披露）。`null` 字段
+ * = 站方快照里没有该数据；整个对象缺席 = 该站没部署公开协议（New API
+ * 站），不渲染徽章与详情入口。
  */
 export interface TransitSummary {
   minMultiplier: number | null;
-  minAvailability7d: number | null;
+  minAvailability: number | null;
   /** 站方快照的生成时间（Unix 秒）。 */
   syncedAt: number;
+  /** 充值系数：1 单位本币兑多少 USD 额度。 */
+  rechargeMultiplier: number | null;
+  /** 最低充值额（本币，币种见 `currency`）。 */
+  minimumTopUp: number | null;
+  currency: string | null;
+  /** 来源披露：上游类型（站方自报原值）。 */
+  upstreamType: string | null;
+  /** 来源披露：是否逆向账号池。 */
+  isReverse: boolean | null;
+  /** 站方公开价格页（快照原值）。 */
+  priceUrl: string | null;
+  /** 站方客服入口（快照原值，通常是 TG 群）。 */
+  supportUrl: string | null;
+  groups: TransitGroupSummary[];
 }
 
 export interface RelayDirectoryItem {

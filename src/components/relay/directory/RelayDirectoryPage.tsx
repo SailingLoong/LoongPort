@@ -36,6 +36,7 @@ import {
 } from "./directoryState";
 import { RelayDirectoryRow } from "./RelayDirectoryRow";
 import { FirstVisitDomainDialog } from "./FirstVisitDomainDialog";
+import { TransitDetailDialog } from "./TransitDetailDialog";
 
 const KINDS: LeaderboardKind[] = ["overall", "claude", "openai", "gemini"];
 
@@ -79,6 +80,10 @@ export function RelayDirectoryPage({
   // 新人首启的域名直达弹窗：只跟首挂载那一次走（firstVisit 由调用方保证
   // 每进程至多一次），用户关掉就纯逛广场。
   const [firstVisitOpen, setFirstVisitOpen] = useState(firstVisit);
+  // 站方公开数据详情：持有整个 item（弹窗要站名 + transit 投影），非空即开。
+  const [transitDetail, setTransitDetail] = useState<RelayDirectoryItem | null>(
+    null,
+  );
 
   const directoryQuery = useQuery({
     queryKey: relayDirectoryKeys.byKind(view.kind),
@@ -201,6 +206,13 @@ export function RelayDirectoryPage({
           void authenticate(domain, domain, "manual");
         }}
       />
+      {transitDetail && (
+        <TransitDetailDialog
+          item={transitDetail}
+          open
+          onDismiss={() => setTransitDetail(null)}
+        />
+      )}
       <div className="flex items-start justify-between gap-4 border-b border-border-default py-4">
         <div className="flex min-w-0 items-start gap-3">
           {!embedded && (
@@ -364,6 +376,7 @@ export function RelayDirectoryPage({
                 onAuthenticate={(selected) => {
                   void authenticate(selected.entryUrl, selected.siteHost);
                 }}
+                onOpenTransit={setTransitDetail}
               />
             ))}
           </div>

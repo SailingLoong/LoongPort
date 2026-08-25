@@ -7,12 +7,19 @@ import type { RelayDirectoryItem } from "@/lib/api/relay";
 import { cn } from "@/lib/utils";
 
 import { openInBrowser } from "../openInBrowser";
+import {
+  availabilityTone,
+  formatAvailability,
+  formatMultiplier,
+} from "./transitDisplay";
 
 interface RelayDirectoryRowProps {
   item: RelayDirectoryItem;
   busy: boolean;
   disabled: boolean;
   onAuthenticate: (item: RelayDirectoryItem) => void;
+  /** 点倍率徽章打开站方公开数据详情；不传（测试）时徽章退化为纯展示。 */
+  onOpenTransit?: (item: RelayDirectoryItem) => void;
 }
 
 function scoreTone(score: number): string {
@@ -21,25 +28,12 @@ function scoreTone(score: number): string {
   return "text-amber-600 dark:text-amber-400";
 }
 
-/** 可用性徽章的着色，阈值与 scoreTone 同一档位语义（90/75 两档）。 */
-function availabilityTone(availability: number): string {
-  if (availability >= 95)
-    return "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300";
-  if (availability >= 85)
-    return "border-border-default bg-muted/40 text-foreground";
-  return "border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300";
-}
-
-/** 92.5 显示为 93%，95.0 也显示 95% —— 徽章位是整数，精度进 title 不值得。 */
-function formatAvailability(availability: number): string {
-  return `${Math.round(availability)}%`;
-}
-
 export function RelayDirectoryRow({
   item,
   busy,
   disabled,
   onAuthenticate,
+  onOpenTransit,
 }: RelayDirectoryRowProps) {
   const { t } = useTranslation();
 
@@ -92,24 +86,33 @@ export function RelayDirectoryRow({
             </Badge>
           )}
           {item.transit?.minMultiplier != null && (
-            <Badge
-              variant="outline"
-              className="border-border-default bg-muted/40 px-2 py-0 text-[11px] font-medium tabular-nums text-foreground"
-              title={t("loongport.directory.transit.multiplierHint")}
+            <button
+              type="button"
+              className={cn(
+                "rounded-full border border-border-default bg-muted/40 px-2 py-0 text-[11px] font-medium tabular-nums text-foreground",
+                onOpenTransit && "hover:border-blue-400 hover:text-blue-600",
+              )}
+              disabled={!onOpenTransit}
+              title={
+                onOpenTransit
+                  ? t("loongport.directory.transit.openDetail")
+                  : t("loongport.directory.transit.multiplierHint")
+              }
+              onClick={() => onOpenTransit?.(item)}
             >
-              {item.transit.minMultiplier}x
-            </Badge>
+              {formatMultiplier(item.transit.minMultiplier)}
+            </button>
           )}
-          {item.transit?.minAvailability7d != null && (
+          {item.transit?.minAvailability != null && (
             <Badge
               variant="outline"
               className={cn(
                 "px-2 py-0 text-[11px] font-medium tabular-nums",
-                availabilityTone(item.transit.minAvailability7d),
+                availabilityTone(item.transit.minAvailability),
               )}
               title={t("loongport.directory.transit.availabilityHint")}
             >
-              {formatAvailability(item.transit.minAvailability7d)}
+              {formatAvailability(item.transit.minAvailability)}
             </Badge>
           )}
           {item.scenarios.map((scenario) => (
