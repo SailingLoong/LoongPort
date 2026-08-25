@@ -342,7 +342,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// 充值窗与用量窗必须是**两个窗口**：label 不同（互不聚焦、互不顶掉），
     /// 标题带各自的页面语义；window-state 过滤要把两类都排除。
     #[test]
@@ -368,6 +367,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn window_labels_are_per_relay_and_collide_with_no_other_window() {
         // **按行分窗**是资损面的修法：全局单窗时「开新窗前销毁残留窗」会销毁一个
         // 可能正在付款的窗口（服务端订单不会因此取消，用户却失去确认页面）。

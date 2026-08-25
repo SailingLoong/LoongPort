@@ -993,7 +993,6 @@ mod tests {
             .is_none());
     }
 
-    #[test]
     /// usage_url 与 purchase_url 同一套校验（HTTPS + 同源 + 签名值），
     /// 理由不是付款，而是它开在**注入登录态的窗口**里——跨源等于带走站内会话。
     #[test]
@@ -1023,6 +1022,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn purchase_url_rejects_http_and_cross_origin_entries() {
         for purchase_url in [
             "http://api-top.com/wallet",
