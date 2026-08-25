@@ -811,7 +811,7 @@ fn decorate_transit(mut items: Vec<RelayDirectoryItem>) -> Vec<RelayDirectoryIte
         return items;
     }
     for item in &mut items {
-        item.transit = summaries.get(&item.site_host).copied();
+        item.transit = summaries.get(&item.site_host).cloned();
     }
     items
 }
@@ -2099,14 +2099,10 @@ mod tests {
         let _guard = crate::relay::transit::tests::transit_cache_guard("decorate");
         crate::relay::transit::tests::write_transit_cache_entry(
             "a.example",
-            crate::relay::transit::TransitSummary {
-                min_multiplier: Some(0.06),
-                min_availability_7d: Some(95.0),
-                synced_at: 2,
-            },
+            crate::relay::transit::tests::badge_summary(Some(0.06), Some(95.0)),
         );
         let decorated = decorate_transit(vec![row("a.example"), row("b.example")]);
-        let summary = decorated[0].transit.expect("a.example 应带上摘要");
+        let summary = decorated[0].transit.clone().expect("a.example 应带上摘要");
         assert_eq!(summary.min_multiplier, Some(0.06));
         assert!(decorated[1].transit.is_none(), "没有摘要的站保持 None");
     }

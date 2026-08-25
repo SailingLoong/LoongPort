@@ -1,5 +1,13 @@
 //! sub2api 站点的 ai-transit.v1 一手数据：`/.well-known/ai-transit.json` 发现 +
-//! snapshot 快照解析，产出广场行要展示的**价格与可用性摘要**。
+//! snapshot 快照解析，产出广场行的价格/可用性徽章与站点详情弹窗要展示的
+//! 摘要（充值口径、逐分组倍率/缓存命中/可用性/延迟、来源披露）。
+//!
+//! ## 投影边界：缓存到分组粒度，不缓存逐模型价格表
+//!
+//! 快照的体积大头是逐模型 USD/token 四价表（一份几十 KB）。分组粒度已覆盖
+//! 「这家怎么充值、哪个分组便宜、稳不稳」的全部展示需求；跨站同模型比价
+//! 才需要逐模型数据，那是另一个产品形态，真做再单独设计。60 点监测时间线
+//! 只覆盖 5 小时、price_trend 实测与配置倍率相同，都不带价值，不缓存。
 //!
 //! ## 为什么接协议而不接聚合站（PriceAI / Oken）
 //!
@@ -43,25 +51,67 @@ const FETCH_TIMEOUT_SECS: u64 = 12;
 /// 后台任务不该为了快把用户的出口带宽打满。
 const REFRESH_CONCURRENCY: usize = 4;
 
-const CACHE_SCHEMA_VERSION: u8 = 1;
+/// v2：摘要从「两个数字」扩成含充值口径 / 逐分组摘要 / 来源披露的完整
+/// 投影（详情弹窗消费）。旧缓存整体作废，下一轮刷新重建。
+const CACHE_SCHEMA_VERSION: u8 = 2;
 
 /// 唯一认的协议版本。站点未来出 v2 时这里不会误读——版本不匹配按
 /// 「该站没有 transit 数据」处理，而不是拿错口径的数字展示给用户。
 const SCHEMA_VERSION: &str = "ai-transit.v1";
 
-/// 广场行展示用的摘要。两个数字都取**最保守值**（最低倍率 / 最低分组
-/// 可用性）：用户按徽章做的是「这家最便宜多少、最差稳到什么程度」的
-/// 预期，用均值会把最差分组藏起来。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// 广场行徽章 + 详情弹窗共用的站点摘要。行徽章取**最保守值**（最低倍率 /
+/// 最低分组可用性）：用户按徽章做的是「这家最便宜多少、最差稳到什么程度」
+/// 的预期，用均值会把最差分组藏起来；弹窗消费其余字段（充值口径、逐分组、
+/// 披露），全部来自同一份快照投影。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransitSummary {
     /// 各分组综合倍率的最小值（`composite_multiplier`，老版 sub2api 只有
     /// `rate_multiplier`，兜底取它）。`None` = 快照里没有可用的倍率字段。
     pub min_multiplier: Option<f64>,
-    /// 各分组近 7 日可用性的最小值（0-100）。
-    pub min_availability_7d: Option<f64>,
+    /// 各分组可用性的最小值（0-100）。窗口按站方发布口径依次偏好
+    /// 7d → 15d → 30d → 1d：新版 sub2api 只发布 1d/15d/30d，只认 7d 会让
+    /// 这些站的可用性徽章整个消失。
+    pub min_availability: Option<f64>,
     /// 快照的 `generated_at`（站方口径的数据时间，不是我们抓取的时间）。
     pub synced_at: i64,
+    /// 充值系数：1 单位本币兑多少 USD 额度（`billing.recharge_multiplier`）。
+    pub recharge_multiplier: Option<f64>,
+    /// 最低充值额（本币，币种见 `currency`）。
+    pub minimum_top_up: Option<f64>,
+    /// 本币币种（`billing.currency`，如 CNY）。
+    pub currency: Option<String>,
+    /// 来源披露：上游类型（站方自报原值，如 official / mixed / reverse）。
+    pub upstream_type: Option<String>,
+    /// 来源披露：是否逆向账号池。
+    pub is_reverse: Option<bool>,
+    /// 站方公开价格页（快照 `station.price_url` 原值，通常是 /public/transit）。
+    pub price_url: Option<String>,
+    /// 站方客服入口（`station.support_url` 原值，通常是 TG 群）。
+    pub support_url: Option<String>,
+    /// 逐分组摘要（详情弹窗的表格行）。无名分组是脏数据，跳过。
+    pub groups: Vec<TransitGroupSummary>,
+}
+
+/// 单个分组的展示摘要。倍率 / 缓存命中来自 `groups[]` 区块，可用性 / 延迟
+/// 从 `monitoring[]` 按分组名 join（新版快照监测条目带 `group_name`，老版
+/// 只有与分组同名的 `name`，两个键都认）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransitGroupSummary {
+    pub name: String,
+    /// 平台（anthropic / openai / grok…，站方原值；空 = 快照没给）。
+    pub platform: String,
+    /// 综合倍率（老版 sub2api 兜底 `rate_multiplier`）。
+    pub multiplier: Option<f64>,
+    /// 近 7 日缓存命中率（0-100，站方按真实流量统计）。
+    pub cache_hit_rate_7d: Option<f64>,
+    /// 可用性（0-100，窗口偏好链同 [`TransitSummary::min_availability`]）。
+    pub availability: Option<f64>,
+    /// 平均延迟毫秒（优先 7 日窗口，兜底 1 日）。
+    pub avg_latency_ms: Option<f64>,
+    /// 该分组发布的模型条目数。
+    pub model_count: usize,
 }
 
 /// 缓存文件结构。`Eq` 只是 BTreeMap 键序稳定的附带要求，摘要里的 f64
@@ -96,11 +146,43 @@ struct WellKnown {
 #[derive(Debug, Default, Deserialize)]
 struct TransitSnapshot {
     #[serde(default)]
+    station: TransitStation,
+    #[serde(default)]
+    billing: TransitBilling,
+    #[serde(default)]
     groups: Vec<TransitGroup>,
     #[serde(default)]
     monitoring: Vec<TransitMonitor>,
     #[serde(default)]
+    disclosure: TransitDisclosure,
+    #[serde(default)]
     generated_at: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TransitStation {
+    #[serde(default)]
+    price_url: Option<String>,
+    #[serde(default)]
+    support_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TransitBilling {
+    #[serde(default)]
+    recharge_multiplier: Option<f64>,
+    #[serde(default)]
+    minimum_top_up: Option<f64>,
+    #[serde(default)]
+    currency: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TransitDisclosure {
+    #[serde(default)]
+    upstream_type: Option<String>,
+    #[serde(default)]
+    is_reverse: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -108,12 +190,29 @@ struct TransitGroup {
     #[serde(default)]
     name: String,
     #[serde(default)]
+    platform: String,
+    #[serde(default)]
     composite_multiplier: Option<f64>,
     #[serde(default)]
     rate_multiplier: Option<f64>,
-    /// 逐模型条目（能力查询消费；摘要不需要它，空数组照常出摘要）。
+    #[serde(default)]
+    cache_usage: Option<TransitCacheUsage>,
+    /// 逐模型条目（能力查询消费；摘要只需要它的长度）。
     #[serde(default)]
     models: Vec<TransitGroupModel>,
+}
+
+/// 分组的缓存命中统计，只消费 7 日窗口（24h/total 展示价值重复）。
+#[derive(Debug, Default, Deserialize)]
+struct TransitCacheUsage {
+    #[serde(default)]
+    last_7d: Option<TransitCachePeriod>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TransitCachePeriod {
+    #[serde(default)]
+    cache_hit_rate: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -128,10 +227,27 @@ struct TransitGroupModel {
     supported_protocols: Vec<String>,
 }
 
+/// 监测条目（一个分组一条）。可用性窗口老版给 7d/15d/30d，新版
+/// （api_gateway 系统）只给 1d/15d/30d——字段全部可缺，取数走窗口偏好链。
 #[derive(Debug, Default, Deserialize)]
 struct TransitMonitor {
+    /// 老版快照里与分组同名的键；新版另带 `group_name`，join 时后者优先。
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    group_name: Option<String>,
     #[serde(default)]
     availability_7d: Option<f64>,
+    #[serde(default)]
+    availability_15d: Option<f64>,
+    #[serde(default)]
+    availability_30d: Option<f64>,
+    #[serde(default)]
+    availability_1d: Option<f64>,
+    #[serde(default)]
+    avg_latency_7d_ms: Option<f64>,
+    #[serde(default)]
+    avg_latency_1d_ms: Option<f64>,
 }
 
 /// 校验 well-known 发现文档，通过则返回可抓取的 snapshot URL。
@@ -154,36 +270,123 @@ fn validate_well_known(well_known: &WellKnown) -> Result<url::Url, AppError> {
     Ok(snapshot_url)
 }
 
+/// 可用性窗口偏好链：7d → 15d → 30d → 1d，脏值（越界 / 非有限）跳过。
+fn best_availability(monitor: &TransitMonitor) -> Option<f64> {
+    [
+        monitor.availability_7d,
+        monitor.availability_15d,
+        monitor.availability_30d,
+        monitor.availability_1d,
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| (0.0..=100.0).contains(value) && value.is_finite())
+}
+
+/// 平均延迟：优先 7 日窗口，兜底 1 日。
+fn best_avg_latency(monitor: &TransitMonitor) -> Option<f64> {
+    [monitor.avg_latency_7d_ms, monitor.avg_latency_1d_ms]
+        .into_iter()
+        .flatten()
+        .find(|value| *value >= 0.0 && value.is_finite())
+}
+
+/// 监测条目按分组名建索引（`group_name` 优先，老版用与分组同名的 `name`）。
+fn monitors_by_group(monitoring: &[TransitMonitor]) -> BTreeMap<&str, &TransitMonitor> {
+    monitoring
+        .iter()
+        .filter_map(|monitor| {
+            let key = monitor
+                .group_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .or_else(|| (!monitor.name.is_empty()).then_some(monitor.name.as_str()))?;
+            Some((key, monitor))
+        })
+        .collect()
+}
+
+/// 分组倍率：composite 优先，老版兜底 rate；0 与负数是脏数据，过滤。
+fn group_multiplier(group: &TransitGroup) -> Option<f64> {
+    group
+        .composite_multiplier
+        .or(group.rate_multiplier)
+        .filter(|multiplier| *multiplier > 0.0 && multiplier.is_finite())
+}
+
+fn fold_min(values: impl Iterator<Item = f64>) -> Option<f64> {
+    values.fold(None::<f64>, |acc, value| {
+        Some(match acc {
+            Some(current) => current.min(value),
+            None => value,
+        })
+    })
+}
+
 /// 从快照算摘要。纯函数，测试直接喂 [`TransitSnapshot`] 的 JSON。
 fn summarize(snapshot: &TransitSnapshot) -> TransitSummary {
-    // 倍率取 composite，老版 sub2api 没有 composite 就退 rate（两者实测
-    // 同时存在时值一致；0 与负数是脏数据，过滤掉）。
-    let min_multiplier = snapshot
+    let monitors = monitors_by_group(&snapshot.monitoring);
+    let groups: Vec<TransitGroupSummary> = snapshot
         .groups
         .iter()
-        .filter_map(|group| group.composite_multiplier.or(group.rate_multiplier))
-        .filter(|multiplier| *multiplier > 0.0 && multiplier.is_finite())
-        .fold(None::<f64>, |acc, value| {
-            Some(match acc {
-                Some(current) => current.min(value),
-                None => value,
-            })
-        });
-    let min_availability_7d = snapshot
-        .monitoring
-        .iter()
-        .filter_map(|monitor| monitor.availability_7d)
-        .filter(|availability| (0.0..=100.0).contains(availability))
-        .fold(None::<f64>, |acc, value| {
-            Some(match acc {
-                Some(current) => current.min(value),
-                None => value,
-            })
-        });
+        .filter(|group| !group.name.is_empty())
+        .map(|group| {
+            let monitor = monitors.get(group.name.as_str()).copied();
+            TransitGroupSummary {
+                name: group.name.clone(),
+                platform: group.platform.clone(),
+                multiplier: group_multiplier(group),
+                cache_hit_rate_7d: group
+                    .cache_usage
+                    .as_ref()
+                    .and_then(|usage| usage.last_7d.as_ref())
+                    .and_then(|period| period.cache_hit_rate)
+                    .filter(|rate| (0.0..=100.0).contains(rate) && rate.is_finite()),
+                availability: monitor.and_then(best_availability),
+                avg_latency_ms: monitor.and_then(best_avg_latency),
+                model_count: group.models.len(),
+            }
+        })
+        .collect();
+    // 行徽章对**全部**分组取最小（无名分组进不了表格，但它的低价也是真实
+    // 发布价格，藏起来会美化「最便宜多少」的承诺）；表格投影才过滤无名分组。
+    // 可用性同理：对全部监测条目取最小，不只看进了分组表的。
+    let min_multiplier = fold_min(snapshot.groups.iter().filter_map(group_multiplier));
+    let min_availability = fold_min(snapshot.monitoring.iter().filter_map(best_availability));
     TransitSummary {
         min_multiplier,
-        min_availability_7d,
+        min_availability,
         synced_at: parse_timestamp(&snapshot.generated_at),
+        recharge_multiplier: snapshot
+            .billing
+            .recharge_multiplier
+            .filter(|value| *value > 0.0 && value.is_finite()),
+        minimum_top_up: snapshot
+            .billing
+            .minimum_top_up
+            .filter(|value| *value >= 0.0 && value.is_finite()),
+        currency: snapshot
+            .billing
+            .currency
+            .clone()
+            .filter(|currency| !currency.is_empty()),
+        upstream_type: snapshot
+            .disclosure
+            .upstream_type
+            .clone()
+            .filter(|upstream| !upstream.is_empty()),
+        is_reverse: snapshot.disclosure.is_reverse,
+        price_url: snapshot
+            .station
+            .price_url
+            .clone()
+            .filter(|url| !url.is_empty()),
+        support_url: snapshot
+            .station
+            .support_url
+            .clone()
+            .filter(|url| !url.is_empty()),
+        groups,
     }
 }
 
@@ -488,6 +691,27 @@ pub(crate) mod tests {
         write_cache(&cache).expect("写测试缓存");
     }
 
+    /// 只关心两个徽章数字的测试用摘要（其余字段走空缺省）。
+    /// `pub(crate)`：`leaderboard::tests` 的 decorate 用例也用它写缓存条目。
+    pub(crate) fn badge_summary(
+        min_multiplier: Option<f64>,
+        min_availability: Option<f64>,
+    ) -> TransitSummary {
+        TransitSummary {
+            min_multiplier,
+            min_availability,
+            synced_at: 0,
+            recharge_multiplier: None,
+            minimum_top_up: None,
+            currency: None,
+            upstream_type: None,
+            is_reverse: None,
+            price_url: None,
+            support_url: None,
+            groups: Vec::new(),
+        }
+    }
+
     /// 真实快照的字段子集（中性域名），含新老两种 sub2api 倍率形态。
     fn snapshot_json(
         composite: Option<f64>,
@@ -527,7 +751,7 @@ pub(crate) mod tests {
         // 都没有 → None，而不是 0（0 会渲染成「免费」）。
         let bare: TransitSnapshot = serde_json::from_str(&snapshot_json(None, None, None)).unwrap();
         assert_eq!(summarize(&bare).min_multiplier, None);
-        assert_eq!(summarize(&bare).min_availability_7d, None);
+        assert_eq!(summarize(&bare).min_availability, None);
     }
 
     #[test]
@@ -549,13 +773,121 @@ pub(crate) mod tests {
         let snapshot: TransitSnapshot = serde_json::from_str(raw).unwrap();
         let summary = summarize(&snapshot);
         assert_eq!(summary.min_multiplier, Some(0.06));
-        assert_eq!(summary.min_availability_7d, Some(88.3));
+        assert_eq!(summary.min_availability, Some(88.3));
         assert_eq!(
             summary.synced_at,
             chrono::DateTime::parse_from_rfc3339("2026-08-21T00:00:00Z")
                 .unwrap()
                 .timestamp()
         );
+    }
+
+    /// 可用性窗口偏好链：7d 优先；只有 1d/15d/30d 的新版快照也必须出徽章
+    /// （修复前新版站只发 1d/15d/30d，可用性徽章整个消失）。
+    #[test]
+    fn availability_prefers_7d_and_falls_back_to_shorter_windows() {
+        let raw = r#"{
+            "monitoring": [
+                {"name": "g1", "availability_7d": 95.0, "availability_15d": 90.0},
+                {"name": "g2", "availability_15d": 88.0, "availability_30d": 80.0},
+                {"name": "g3", "availability_1d": 99.0}
+            ]
+        }"#;
+        let snapshot: TransitSnapshot = serde_json::from_str(raw).unwrap();
+        let summary = summarize(&snapshot);
+        // 三个条目各自取到 95 / 88 / 99，行徽章取最保守的 88。
+        assert_eq!(summary.min_availability, Some(88.0));
+        assert_eq!(summary.groups.len(), 0, "没有分组区块就没有表格行");
+
+        // 越界脏值不挡住后面窗口：7d 是 250（脏）→ 落到 15d。
+        let dirty = r#"{
+            "monitoring": [{"name": "g1", "availability_7d": 250.0, "availability_15d": 91.0}]
+        }"#;
+        let snapshot: TransitSnapshot = serde_json::from_str(dirty).unwrap();
+        assert_eq!(summarize(&snapshot).min_availability, Some(91.0));
+    }
+
+    /// 详情弹窗消费的完整投影：充值口径 / 逐分组摘要（监测按分组名 join，
+    /// group_name 与老版 name 两种键都认）/ 来源披露 / 站方链接。
+    #[test]
+    fn summarize_projects_groups_billing_and_disclosure() {
+        let raw = r#"{
+            "generated_at": "2026-08-25T00:00:00Z",
+            "station": {
+                "price_url": "https://panel.example/public/transit",
+                "support_url": "https://t.me/example-group"
+            },
+            "billing": {
+                "recharge_multiplier": 1.0,
+                "minimum_top_up": 50.0,
+                "currency": "CNY"
+            },
+            "disclosure": {"upstream_type": "mixed", "is_reverse": true},
+            "groups": [
+                {
+                    "name": "group-a",
+                    "platform": "openai",
+                    "composite_multiplier": 0.1,
+                    "cache_usage": {"last_7d": {"cache_hit_rate": 79.8}},
+                    "models": [{"standard_model": "m1"}, {"standard_model": "m2"}]
+                },
+                {
+                    "name": "group-b",
+                    "platform": "anthropic",
+                    "rate_multiplier": 0.3
+                }
+            ],
+            "monitoring": [
+                {
+                    "name": "legacy-name",
+                    "group_name": "group-a",
+                    "availability_7d": 96.5,
+                    "avg_latency_7d_ms": 4715
+                },
+                {
+                    "name": "group-b",
+                    "availability_1d": 100.0,
+                    "avg_latency_1d_ms": 800
+                }
+            ]
+        }"#;
+        let snapshot: TransitSnapshot = serde_json::from_str(raw).unwrap();
+        let summary = summarize(&snapshot);
+
+        assert_eq!(summary.recharge_multiplier, Some(1.0));
+        assert_eq!(summary.minimum_top_up, Some(50.0));
+        assert_eq!(summary.currency.as_deref(), Some("CNY"));
+        assert_eq!(summary.upstream_type.as_deref(), Some("mixed"));
+        assert_eq!(summary.is_reverse, Some(true));
+        assert_eq!(
+            summary.price_url.as_deref(),
+            Some("https://panel.example/public/transit")
+        );
+        assert_eq!(
+            summary.support_url.as_deref(),
+            Some("https://t.me/example-group")
+        );
+
+        assert_eq!(summary.groups.len(), 2);
+        let group_a = &summary.groups[0];
+        assert_eq!(group_a.name, "group-a");
+        assert_eq!(group_a.platform, "openai");
+        assert_eq!(group_a.multiplier, Some(0.1));
+        assert_eq!(group_a.cache_hit_rate_7d, Some(79.8));
+        // group_name 优先于 name（legacy-name 是老键，join 仍要命中 group-a）。
+        assert_eq!(group_a.availability, Some(96.5));
+        assert_eq!(group_a.avg_latency_ms, Some(4715.0));
+        assert_eq!(group_a.model_count, 2);
+
+        let group_b = &summary.groups[1];
+        // 老版兜底：rate_multiplier；监测条目只有 name 键也照常 join。
+        assert_eq!(group_b.multiplier, Some(0.3));
+        assert_eq!(group_b.cache_hit_rate_7d, None);
+        assert_eq!(group_b.availability, Some(100.0));
+        assert_eq!(group_b.avg_latency_ms, Some(800.0));
+
+        assert_eq!(summary.min_multiplier, Some(0.1));
+        assert_eq!(summary.min_availability, Some(96.5));
     }
 
     #[test]
@@ -586,7 +918,7 @@ pub(crate) mod tests {
             serde_json::from_str(r#"{"station":{"name":"Example"},"future_field":1}"#).unwrap();
         let summary = summarize(&snapshot);
         assert_eq!(summary.min_multiplier, None);
-        assert_eq!(summary.min_availability_7d, None);
+        assert_eq!(summary.min_availability, None);
         assert_eq!(
             summary.synced_at, 0,
             "没有 generated_at 就是 0，不是解析失败"
@@ -640,7 +972,7 @@ pub(crate) mod tests {
             .expect("快照要能抓回并解析");
         let summary = summarize(&snapshot);
         assert_eq!(summary.min_multiplier, Some(0.06));
-        assert_eq!(summary.min_availability_7d, Some(95.0));
+        assert_eq!(summary.min_availability, Some(95.0));
         assert!(summary.synced_at > 0);
 
         // well-known 404 的站必须整链失败（Err），而不是部分成功。
@@ -658,14 +990,9 @@ pub(crate) mod tests {
         let _guard = TestHomeGuard::set("stale");
 
         let mut cache = TransitCache::default();
-        cache.entries.insert(
-            "a.example".into(),
-            TransitSummary {
-                min_multiplier: Some(0.1),
-                min_availability_7d: Some(90.0),
-                synced_at: 100,
-            },
-        );
+        let mut seeded = badge_summary(Some(0.1), Some(90.0));
+        seeded.synced_at = 100;
+        cache.entries.insert("a.example".into(), seeded);
         write_cache(&cache).unwrap();
 
         let loaded = read_cache();
@@ -689,32 +1016,19 @@ pub(crate) mod tests {
     #[test]
     fn apply_results_overwrites_successes_and_keeps_failures_stale() {
         let mut cache = TransitCache::default();
-        cache.entries.insert(
-            "flaky.example".into(),
-            TransitSummary {
-                min_multiplier: Some(0.9),
-                min_availability_7d: Some(70.0),
-                synced_at: 1,
-            },
-        );
-        cache.entries.insert(
-            "stable.example".into(),
-            TransitSummary {
-                min_multiplier: Some(0.5),
-                min_availability_7d: Some(80.0),
-                synced_at: 1,
-            },
-        );
+        let mut flaky = badge_summary(Some(0.9), Some(70.0));
+        flaky.synced_at = 1;
+        let mut stable = badge_summary(Some(0.5), Some(80.0));
+        stable.synced_at = 1;
+        cache.entries.insert("flaky.example".into(), flaky);
+        cache.entries.insert("stable.example".into(), stable);
 
-        let fresh = TransitSummary {
-            min_multiplier: Some(0.06),
-            min_availability_7d: Some(95.0),
-            synced_at: 2,
-        };
+        let mut fresh = badge_summary(Some(0.06), Some(95.0));
+        fresh.synced_at = 2;
         let (updated, failed) = apply_results(
             &mut cache,
             vec![
-                ("stable.example".into(), Ok(fresh)),
+                ("stable.example".into(), Ok(fresh.clone())),
                 (
                     "flaky.example".into(),
                     Err(AppError::Config("本轮抓取失败".into())),
@@ -763,8 +1077,11 @@ pub(crate) mod tests {
         for host in &hosts {
             match summaries.get(host) {
                 Some(summary) => println!(
-                    "  {host}: 倍率 {:?} / 可用性 {:?}",
-                    summary.min_multiplier, summary.min_availability_7d
+                    "  {host}: 倍率 {:?} / 可用性 {:?} / 分组 {} / 充值系数 {:?}",
+                    summary.min_multiplier,
+                    summary.min_availability,
+                    summary.groups.len(),
+                    summary.recharge_multiplier
                 ),
                 None => println!("  {host}: 无摘要（该站可能未部署公开协议）"),
             }

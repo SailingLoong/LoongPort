@@ -135,7 +135,38 @@ function item(index: number): RelayDirectoryItem {
     //（New API 站与未部署的站保持 undefined，徽章不渲染）。
     transit:
       index === 1
-        ? { minMultiplier: 0.06, minAvailability7d: 88.3, syncedAt: 1786633200 }
+        ? {
+            minMultiplier: 0.06,
+            minAvailability: 88.3,
+            syncedAt: 1786633200,
+            rechargeMultiplier: 1,
+            minimumTopUp: 50,
+            currency: "CNY",
+            upstreamType: "mixed",
+            isReverse: true,
+            priceUrl: "https://bestapi.store/public/transit",
+            supportUrl: "https://t.me/bestapi-group",
+            groups: [
+              {
+                name: "group-a",
+                platform: "openai",
+                multiplier: 0.06,
+                cacheHitRate7d: 79.8,
+                availability: 88.3,
+                avgLatencyMs: 5391,
+                modelCount: 14,
+              },
+              {
+                name: "group-b",
+                platform: "anthropic",
+                multiplier: 0.3,
+                cacheHitRate7d: null,
+                availability: null,
+                avgLatencyMs: null,
+                modelCount: 0,
+              },
+            ],
+          }
         : undefined,
   };
 }
@@ -201,11 +232,11 @@ describe("RelayDirectoryPage", () => {
   it("renders transit badges only for sites that publish them", async () => {
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
 
-    // 有摘要的站：倍率与可用性两个徽章都渲染（title 即 tooltip 说明）。
+    // 有摘要的站：倍率（可点开详情，title 是动作提示）与可用性两个徽章都渲染。
     const bestRow = (await screen.findByText("BestAPI")).closest("article")!;
     expect(
       within(bestRow as HTMLElement).getByTitle(
-        "loongport.directory.transit.multiplierHint",
+        "loongport.directory.transit.openDetail",
       ),
     ).toHaveTextContent("0.06x");
     expect(
@@ -218,7 +249,7 @@ describe("RelayDirectoryPage", () => {
     const plainRow = (await screen.findByText("站点 2")).closest("article")!;
     expect(
       within(plainRow as HTMLElement).queryByTitle(
-        "loongport.directory.transit.multiplierHint",
+        "loongport.directory.transit.openDetail",
       ),
     ).not.toBeInTheDocument();
     expect(
@@ -226,6 +257,45 @@ describe("RelayDirectoryPage", () => {
         "loongport.directory.transit.availabilityHint",
       ),
     ).not.toBeInTheDocument();
+  });
+
+  it("opens the transit detail dialog from the multiplier badge", async () => {
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+
+    const bestRow = (await screen.findByText("BestAPI")).closest("article")!;
+    await userEvent.click(
+      within(bestRow as HTMLElement).getByTitle(
+        "loongport.directory.transit.openDetail",
+      ),
+    );
+
+    // 弹窗标题：站名 + 站方公开数据。
+    expect(
+      screen.getByText("BestAPI · loongport.directory.transit.detailTitle"),
+    ).toBeInTheDocument();
+    // 充值口径与披露 meta（i18n mock 直接渲染 key，值跟在标签后面）。
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "loongport.directory.transit.rechargeMultiplier",
+    );
+    expect(dialog).toHaveTextContent("¥50");
+    expect(dialog).toHaveTextContent("mixed");
+    // 分组表：两个分组、缺测值渲染为 —。
+    expect(screen.getByText("group-a")).toBeInTheDocument();
+    expect(screen.getByText("group-b")).toBeInTheDocument();
+    expect(screen.getByText("5.4s")).toBeInTheDocument();
+    expect(screen.getByText("80%")).toBeInTheDocument();
+    // 站方价格页链接走外链打开。
+    expect(
+      screen.getByText("loongport.directory.transit.viewPricePage"),
+    ).toBeInTheDocument();
+    expect(openInBrowser).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByText("loongport.directory.transit.viewPricePage"),
+    );
+    expect(openInBrowser).toHaveBeenCalledWith(
+      "https://bestapi.store/public/transit",
+    );
   });
 
   it("does not show the previous leaderboard while a new tab is loading", async () => {
