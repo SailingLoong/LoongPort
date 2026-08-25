@@ -117,101 +117,6 @@ fn fitness_for(
     }
 }
 
-#[cfg(test)]
-mod fitness_tests {
-    use super::*;
-    use crate::relay::transit::ModelProtocolCapabilities;
-    use std::collections::BTreeMap;
-
-    fn capabilities() -> ModelProtocolCapabilities {
-        // 两代协议值并存（实证快照的投影）：新版 openai_responses /
-        // anthropic_messages，旧版 responses。
-        crate::relay::transit::tests::capabilities_from_snapshot_json(
-            r#"{
-              "groups": [
-                {"name": "g-new", "models": [
-                  {"raw_model": "gpt-x", "standard_model": "gpt-x-std",
-                   "supported_protocols": ["openai_responses"]},
-                  {"raw_model": "claude-y", "standard_model": "claude-y-std",
-                   "supported_protocols": ["anthropic_messages"]}
-                ]},
-                {"name": "g-legacy", "models": [
-                  {"raw_model": "old-gpt", "supported_protocols": ["responses"]}
-                ]}
-              ]
-            }"#,
-        )
-    }
-
-    fn fitness(app: &str, group: Option<&str>, model: &str) -> ModelFitness {
-        let caps = capabilities();
-        fitness_for(&AppType::from_str(app).unwrap(), Some(&caps), group, model)
-    }
-
-    #[test]
-    fn supported_matches_both_protocol_generations() {
-        // 新版值。
-        assert_eq!(
-            fitness("codex", Some("g-new"), "gpt-x"),
-            ModelFitness::Supported
-        );
-        // 旧版值（老站只有 responses 键）。
-        assert_eq!(
-            fitness("codex", Some("g-legacy"), "old-gpt"),
-            ModelFitness::Supported
-        );
-        // claude 的 Messages。
-        assert_eq!(
-            fitness("claude", Some("g-new"), "claude-y"),
-            ModelFitness::Supported
-        );
-        // standard_model 名字也能命中（/v1/models 两种形态都可能是它）。
-        assert_eq!(
-            fitness("codex", Some("g-new"), "gpt-x-std"),
-            ModelFitness::Supported
-        );
-    }
-
-    #[test]
-    fn positive_coverage_excludes_cross_protocol_models() {
-        // 快照正向覆盖了（分组在、模型在），但声明的是另一族协议 —— 排除。
-        assert_eq!(
-            fitness("claude", Some("g-new"), "gpt-x"),
-            ModelFitness::UnsupportedProtocol
-        );
-        // claude 撞旧版 openai 分组：旧站没有 messages 形态的键，也不猜
-        // 没见过的值 —— 正向覆盖且不含 anthropic_messages ⇒ 排除。
-        assert_eq!(
-            fitness("claude", Some("g-legacy"), "old-gpt"),
-            ModelFitness::UnsupportedProtocol
-        );
-    }
-
-    #[test]
-    fn missing_coverage_is_unknown_never_excluded() {
-        // 分组不在快照（站点只发布部分分组是常态）。
-        assert_eq!(
-            fitness("codex", Some("g-unpublished"), "gpt-x"),
-            ModelFitness::Unknown
-        );
-        // 模型不在该分组清单。
-        assert_eq!(
-            fitness("codex", Some("g-new"), "unlisted-model"),
-            ModelFitness::Unknown
-        );
-        // 档位没记分组身份（旧数据）。
-        assert_eq!(fitness("codex", None, "gpt-x"), ModelFitness::Unknown);
-        // 站点没有公开数据。
-        let none = fitness_for(
-            &AppType::from_str("codex").unwrap(),
-            None,
-            Some("g-new"),
-            "gpt-x",
-        );
-        assert_eq!(none, ModelFitness::Unknown);
-    }
-}
-
 fn unavailable_models_error() -> AppError {
     AppError::Config(MODEL_LIST_UNAVAILABLE.into())
 }
@@ -314,5 +219,99 @@ fn resolve_relay(
         None => Err(AppError::Config(format!(
             "这个档位没有记录属于 {site_origin} 上的哪个账号，而那个站现在挂着多个账号。请用「获取密钥」重新生成它 —— 那会带上账号归属。"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod fitness_tests {
+    use super::*;
+    use crate::relay::transit::ModelProtocolCapabilities;
+
+    fn capabilities() -> ModelProtocolCapabilities {
+        // 两代协议值并存（实证快照的投影）：新版 openai_responses /
+        // anthropic_messages，旧版 responses。
+        crate::relay::transit::tests::capabilities_from_snapshot_json(
+            r#"{
+              "groups": [
+                {"name": "g-new", "models": [
+                  {"raw_model": "gpt-x", "standard_model": "gpt-x-std",
+                   "supported_protocols": ["openai_responses"]},
+                  {"raw_model": "claude-y", "standard_model": "claude-y-std",
+                   "supported_protocols": ["anthropic_messages"]}
+                ]},
+                {"name": "g-legacy", "models": [
+                  {"raw_model": "old-gpt", "supported_protocols": ["responses"]}
+                ]}
+              ]
+            }"#,
+        )
+    }
+
+    fn fitness(app: &str, group: Option<&str>, model: &str) -> ModelFitness {
+        let caps = capabilities();
+        fitness_for(&AppType::from_str(app).unwrap(), Some(&caps), group, model)
+    }
+
+    #[test]
+    fn supported_matches_both_protocol_generations() {
+        // 新版值。
+        assert_eq!(
+            fitness("codex", Some("g-new"), "gpt-x"),
+            ModelFitness::Supported
+        );
+        // 旧版值（老站只有 responses 键）。
+        assert_eq!(
+            fitness("codex", Some("g-legacy"), "old-gpt"),
+            ModelFitness::Supported
+        );
+        // claude 的 Messages。
+        assert_eq!(
+            fitness("claude", Some("g-new"), "claude-y"),
+            ModelFitness::Supported
+        );
+        // standard_model 名字也能命中（/v1/models 两种形态都可能是它）。
+        assert_eq!(
+            fitness("codex", Some("g-new"), "gpt-x-std"),
+            ModelFitness::Supported
+        );
+    }
+
+    #[test]
+    fn positive_coverage_excludes_cross_protocol_models() {
+        // 快照正向覆盖了（分组在、模型在），但声明的是另一族协议 —— 排除。
+        assert_eq!(
+            fitness("claude", Some("g-new"), "gpt-x"),
+            ModelFitness::UnsupportedProtocol
+        );
+        // claude 撞旧版 openai 分组：旧站没有 messages 形态的键，也不猜
+        // 没见过的值 —— 正向覆盖且不含 anthropic_messages ⇒ 排除。
+        assert_eq!(
+            fitness("claude", Some("g-legacy"), "old-gpt"),
+            ModelFitness::UnsupportedProtocol
+        );
+    }
+
+    #[test]
+    fn missing_coverage_is_unknown_never_excluded() {
+        // 分组不在快照（站点只发布部分分组是常态）。
+        assert_eq!(
+            fitness("codex", Some("g-unpublished"), "gpt-x"),
+            ModelFitness::Unknown
+        );
+        // 模型不在该分组清单。
+        assert_eq!(
+            fitness("codex", Some("g-new"), "unlisted-model"),
+            ModelFitness::Unknown
+        );
+        // 档位没记分组身份（旧数据）。
+        assert_eq!(fitness("codex", None, "gpt-x"), ModelFitness::Unknown);
+        // 站点没有公开数据。
+        let none = fitness_for(
+            &AppType::from_str("codex").unwrap(),
+            None,
+            Some("g-new"),
+            "gpt-x",
+        );
+        assert_eq!(none, ModelFitness::Unknown);
     }
 }

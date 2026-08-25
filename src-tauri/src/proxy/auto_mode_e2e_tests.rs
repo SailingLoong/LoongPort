@@ -448,7 +448,7 @@ async fn passive_anomaly_lands_and_surfaces() {
         for _ in 0..250 {
             reports = crate::relay::model_verification::store::list_for_provider_ids(
                 &fx.db,
-                &[fx.cheap_id.clone()],
+                std::slice::from_ref(&fx.cheap_id),
             )
             .unwrap();
             if !reports.is_empty() {
@@ -498,7 +498,7 @@ async fn passive_anomaly_lands_and_surfaces() {
     assert!(
         crate::relay::model_verification::store::list_for_provider_ids(
             &fx.db,
-            &[fx.expensive_id.clone()],
+            std::slice::from_ref(&fx.expensive_id),
         )
         .unwrap()
         .is_empty()
@@ -510,7 +510,7 @@ async fn passive_anomaly_lands_and_surfaces() {
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let reports = crate::relay::model_verification::store::list_for_provider_ids(
         &fx.db,
-        &[fx.cheap_id.clone()],
+        std::slice::from_ref(&fx.cheap_id),
     )
     .unwrap();
     assert_eq!(reports.len(), 1, "干净流量不落库，异常报告不被干净流量稀释");
