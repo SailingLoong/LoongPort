@@ -38,7 +38,7 @@ import {
   visibleDirectoryRange,
 } from "./directoryState";
 import { RelayDirectoryRow } from "./RelayDirectoryRow";
-import { CrowdNoticeDialog } from "../CrowdNoticeDialog";
+import { CROWD_NOTICE_OPEN_EVENT } from "../CrowdNoticeDialog";
 import { FirstVisitDomainDialog } from "./FirstVisitDomainDialog";
 import { TransitDetailDialog } from "./TransitDetailDialog";
 
@@ -88,9 +88,6 @@ export function RelayDirectoryPage({
   const [transitDetail, setTransitDetail] = useState<RelayDirectoryItem | null>(
     null,
   );
-  // 共建告知弹窗（从实测区的加入入口唤起）。
-  const [crowdNoticeOpen, setCrowdNoticeOpen] = useState(false);
-
   const { settings: appSettings } = useSettings();
   const crowdEnabled = appSettings?.crowdMetricsEnabled ?? false;
   const crowdSnapshotQuery = useQuery({
@@ -236,15 +233,12 @@ export function RelayDirectoryPage({
               : null
           }
           crowdEnabled={crowdEnabled}
-          onOpenCrowdNotice={() => setCrowdNoticeOpen(true)}
+          onOpenCrowdNotice={() =>
+            // 弹窗单实例挂在 App 层（主动告知 + 广场再入口共用），这里只广播。
+            window.dispatchEvent(new Event(CROWD_NOTICE_OPEN_EVENT))
+          }
         />
       )}
-      {/* 共建告知：从实测区的「加入共建」入口唤起，表态后设置与快照缓存
-          都会被弹窗自己失效 —— 这里只负责开关。 */}
-      <CrowdNoticeDialog
-        open={crowdNoticeOpen}
-        onDone={() => setCrowdNoticeOpen(false)}
-      />
       <div className="flex items-start justify-between gap-4 border-b border-border-default py-4">
         <div className="flex min-w-0 items-start gap-3">
           {!embedded && (
