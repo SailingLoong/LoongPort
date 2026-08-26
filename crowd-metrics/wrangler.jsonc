@@ -1,0 +1,29 @@
+{
+  // crowd-metrics：中转站实测数据的聚合 Worker。
+  //
+  // 端点：POST /v1/ingest（客户端上传小时聚合桶）、GET /v1/snapshot（公共快照，CORS *）。
+  // Cron 每 5 分钟从 D1 重算 k-匿名后的快照写入 KV；原始桶保留 30 天。
+  //
+  // ⚠️ 两个 REPLACE_WITH_* 占位在首次部署前必须替换成真实 id（见 README「资源创建」），
+  // deploy.sh 会拒绝带占位部署。
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "loongport-metrics",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "loongport-metrics",
+      "database_id": "REPLACE_WITH_D1_ID"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SNAPSHOT",
+      "id": "REPLACE_WITH_KV_ID"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}
