@@ -910,7 +910,9 @@
     "piConfigDir": "Pi 設定ディレクトリ",
     "piConfigDirDescription": "Pi の設定ディレクトリ（models.json、指示ファイル、プロンプト、Skills、セッション）を上書きします。",
     "browsePlaceholderPi": "例: /home/<your-username>/.pi/agent",
-    "tabAutoMode": "おまかせモード"
+    "tabAutoMode": "おまかせモード",
+    "crowdMetrics": "サイト実測データの共同利用",
+    "crowdMetricsDescription": "サイト単位の集計指標（初トークン時間・エラー率など、時間別）を共有し、広場のユーザー実測データを解放します。プロンプト・キー・アカウント情報は含みません。"
   },
   "apps": {
     "claude": "Claude",
@@ -3294,6 +3296,40 @@
       "accept": "共有を許可",
       "decline": "共有しない",
       "idNote": "データには重複集計を防ぐためのランダムなインストール ID が含まれます。中継サービスのアカウントとは関連付けられません。"
+    },
+    "crowd": {
+      "badgeLabel": "実測 {{value}}",
+      "badgeHint": "LoongPort ユーザーが実測した直近 24 時間の初トークン中央値。クリックで詳細",
+      "sectionTitle": "ユーザー実測",
+      "window24": "直近 24 時間",
+      "window7": "直近 7 日間",
+      "noteSources": "{{count}} ユーザー · {{samples}} サンプル",
+      "ttftP50": "初トークン p50",
+      "ttftP95": "初トークン p95",
+      "errRate": "エラー率",
+      "cacheHit": "キャッシュ命中",
+      "costRef": "費用参考",
+      "hoursTitle": "時間帯別の初トークン中央値（直近 7 日 · UTC）",
+      "hourTooltip": "UTC {{slot}}:00 · {{value}} · {{count}} サンプル",
+      "hourEmpty": "UTC {{slot}}:00 · データなし",
+      "noData": "実測データはまだありません（サンプルまたはソース不足）",
+      "lockedTitle": "共同データに参加すると閲覧できます",
+      "lockedBody": "使用中のサイトの集計指標（初トークン時間・エラー率など）を共有すると、全ユーザーの実測データを閲覧できます。",
+      "join": "参加する",
+      "footnote": "LoongPort ユーザーによる共同データ：時間単位の集計をプライバシーしきい値付きで公開。費用はモデル混合の参考値。",
+      "notice": {
+        "title": "サイト実測データの共同利用",
+        "intro": "利用中の中継サイトの実際のパフォーマンス（速度・安定性）を共有し、みんなの実測データを閲覧できます。",
+        "sendsLabel": "アップロード：",
+        "sendsBody": "サイト単位の時間別集計（リクエスト数、初トークン時間の分布、エラー率、トークンとキャッシュ数、費用）。",
+        "neverLabel": "アップロードしない：",
+        "neverBody": "プロンプト、キー、アカウント情報、個人を特定できるもの一切。",
+        "reciprocity": "対等条件：アップロードに参加しない場合、他のユーザーの実測データは閲覧できません。",
+        "idNote": "アップロードには統計の重複排除のためだけの毎日入れ替わるランダム ID が付き、アカウントとは紐づきません。",
+        "canChange": "設定でいつでもオン / オフできます。",
+        "accept": "参加して解放",
+        "decline": "今はしない"
+      }
     },
     "site": {
       "removed": "{{label}} を削除しました"

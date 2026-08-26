@@ -1,6 +1,13 @@
 import { useTranslation } from "react-i18next";
 import type { SettingsFormState } from "@/hooks/useSettings";
-import { AppWindow, BarChart3, MonitorUp, Power, EyeOff } from "lucide-react";
+import {
+  AppWindow,
+  BarChart3,
+  Gauge,
+  MonitorUp,
+  Power,
+  EyeOff,
+} from "lucide-react";
 import { ToggleRow } from "@/components/ui/toggle-row";
 import { AnimatePresence, motion } from "framer-motion";
 import { isLinux } from "@/lib/platform";
@@ -42,6 +49,26 @@ export function WindowSettings({ settings, onChange }: WindowSettingsProps) {
               value
                 ? { enableAnonymousStats: true }
                 : { enableAnonymousStats: false, statsInstallId: undefined },
+            )
+          }
+        />
+
+        {/* 站点实测共建（第二个隐私开关，紧挨着第一个）。与匿名统计的区别：
+            默认关 + 对等条款（参与才解锁广场实测数据）。在这里打开也算一次
+            明确表态 —— 直接置 confirmed，不再追着弹告知。 */}
+        <ToggleRow
+          icon={<Gauge className="h-4 w-4 text-teal-500" />}
+          title={t("settings.crowdMetrics")}
+          description={t("settings.crowdMetricsDescription")}
+          checked={!!settings.crowdMetricsEnabled}
+          onCheckedChange={(value) =>
+            onChange(
+              value
+                ? {
+                    crowdMetricsEnabled: true,
+                    crowdMetricsNoticeConfirmed: true,
+                  }
+                : { crowdMetricsEnabled: false },
             )
           }
         />
