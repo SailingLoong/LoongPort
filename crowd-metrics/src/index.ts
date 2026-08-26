@@ -8,6 +8,7 @@
 
 import { buildSnapshot, type RawRow } from "./aggregate";
 import { TTFT_BIN_EDGES_MS } from "./bins";
+import { cleanupDue, isFresh } from "./freshness";
 import { handleIngest, type Env } from "./ingest";
 import { hourFloorUtc } from "./validate";
 import type { Snapshot } from "./types";
@@ -41,17 +42,40 @@ async function queryRawRows(env: Env, nowSec: number): Promise<RawRow[]> {
   return results ?? [];
 }
 
+/** KV 里记上次清理时间的键（值 = epoch 秒）。 */
+const CLEANUP_LAST_RUN_KEY = "cleanup:last-run";
+
+/**
+ * 现算快照并写 KV。清理（保留期删除）折叠在这里、按小时时间闸节流 ——
+ * cron 从未触发过（见 freshness.ts 的背景说明），保留期不能指望它。
+ */
 async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
   const rows = await queryRawRows(env, nowSec);
   const snapshot = buildSnapshot(rows, nowSec);
   snapshot.ttftBinEdges = [...TTFT_BIN_EDGES_MS];
-  await env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
+
+  const rawCutoff = hourFloorUtc(nowSec - RAW_RETENTION_SECS);
+  const rlCutoff = hourFloorUtc(nowSec - RATE_LIMIT_RETENTION_SECS);
+  const cleanup = (async () => {
+    const lastRun = await env.SNAPSHOT.get(CLEANUP_LAST_RUN_KEY);
+    if (!cleanupDue(lastRun == null ? null : Number(lastRun), nowSec)) return;
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM bucket_raw WHERE hour < ?1").bind(rawCutoff),
+      env.DB.prepare("DELETE FROM upload_ip_hour WHERE hour < ?1").bind(rlCutoff),
+    ]);
+    await env.SNAPSHOT.put(CLEANUP_LAST_RUN_KEY, String(nowSec));
+  })();
+
+  await Promise.all([env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot)), cleanup]);
   return snapshot;
 }
 
 async function handleSnapshot(env: Env, allowCompute: boolean): Promise<Response> {
+  const nowSec = Math.floor(Date.now() / 1000);
   const cached = await env.SNAPSHOT.get(SNAPSHOT_KEY);
-  if (cached !== null) {
+  // 新鲜（≤10min）直接回缓存；陈旧/缺失且允许计算 → 请求路径里现算自愈。
+  // 并发重算由前面的 CDN 缓存（max-age=60）天然限流到约每分钟一次。
+  if (cached !== null && (isFresh(cached, nowSec) || !allowCompute)) {
     return new Response(cached, {
       status: 200,
       headers: {
@@ -64,8 +88,6 @@ async function handleSnapshot(env: Env, allowCompute: boolean): Promise<Response
   if (!allowCompute) {
     return jsonResponse({ error: "snapshot not ready" }, 503);
   }
-  // 冷启动兜底：部署后第一次 cron 之前也能出数。
-  const nowSec = Math.floor(Date.now() / 1000);
   const snapshot = await recomputeSnapshot(env, nowSec);
   return new Response(JSON.stringify(snapshot), {
     status: 200,
@@ -115,18 +137,10 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
+    // 冗余 belt：GET 自愈已覆盖新鲜度与清理（见 freshness.ts 背景说明），
+    // cron 即使永不触发，系统也自洽。真触发时就当多刷一次。
     const nowSec = Math.floor(Date.now() / 1000);
-
-    const recompute = recomputeSnapshot(env, nowSec);
-    const rawCutoff = hourFloorUtc(nowSec - RAW_RETENTION_SECS);
-    const rlCutoff = hourFloorUtc(nowSec - RATE_LIMIT_RETENTION_SECS);
-    const cleanup = env.DB.batch([
-      env.DB.prepare("DELETE FROM bucket_raw WHERE hour < ?1").bind(rawCutoff),
-      env.DB.prepare("DELETE FROM upload_ip_hour WHERE hour < ?1").bind(rlCutoff),
-    ]);
-
-    await Promise.all([recompute, cleanup]);
-    void ctx;
+    ctx.waitUntil(recomputeSnapshot(env, nowSec));
   },
 };
 
