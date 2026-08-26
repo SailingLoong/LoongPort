@@ -9,6 +9,7 @@ mod codex_history_migration;
 mod codex_state_db;
 mod commands;
 mod config;
+mod crowd;
 mod database;
 mod deeplink;
 mod diagnostics;
@@ -1621,6 +1622,7 @@ pub fn run() {
             commands::github_star_count,
             commands::github_star_via_gh,
             commands::relay_check_session,
+            commands::crowd_get_snapshot,
             commands::relay_stats_endpoint_configured,
             commands::relay_list_sponsors,
             commands::relay_list_directory,

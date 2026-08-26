@@ -74,7 +74,7 @@ const AFF_CODES: &[(&str, &str)] = &[
 ///
 /// ⚠️ **有意不做更聪明的匹配**：不做子域通配、不做模糊。那会把不相关的站匹进去，
 /// 后果是**给错的站带上我们的码** —— 比查不到糟得多。
-pub(super) fn lookup_host(site_origin: &str) -> String {
+pub(crate) fn lookup_host(site_origin: &str) -> String {
     let without_scheme = site_origin
         .split_once("://")
         .map(|(_, rest)| rest)

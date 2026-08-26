@@ -8,6 +8,8 @@ mod codex_oauth;
 mod coding_plan;
 mod config;
 mod copilot;
+// 站点实测共建：快照读取（对等门禁在这一层）。上传不走命令 —— maintenance 周期任务。
+mod crowd;
 mod deeplink;
 mod env;
 mod failover;
@@ -61,6 +63,7 @@ pub use codex_oauth::*;
 pub use coding_plan::*;
 pub use config::*;
 pub use copilot::*;
+pub use crowd::*;
 pub use deeplink::*;
 pub use env::*;
 pub use failover::*;
