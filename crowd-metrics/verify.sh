@@ -3,11 +3,11 @@
 # 线上验证：healthz、snapshot（含 CORS/缓存头）、OPTIONS 预检。
 #
 # 用法：./verify.sh [BASE_URL]
-# 不传 BASE 时用 workers.dev 默认域（account 子域 + worker 名）。
+# 不传 BASE 时用正式自定义域（workers.dev 在国内网络不可达，见 wrangler.jsonc 注释）。
 
 set -euo pipefail
 
-BASE="${1:-https://loongport-metrics.workers.dev}"
+BASE="${1:-https://metrics.loongport.dev}"
 BASE="${BASE%/}"
 
 fail() { echo "✘ $1" >&2; exit 1; }
@@ -33,4 +33,4 @@ PREFLIGHT=$(curl -fsS -X OPTIONS -D - -o /dev/null "$BASE/v1/snapshot") || fail 
 echo "$PREFLIGHT" | grep -qi "access-control-allow-methods:" || fail "预检缺 allow-methods"
 
 echo
-echo "✔ 线上验证全部通过（BASE=$BASE）"
+echo "✔ 线上验证全部通过（BASE=${BASE}）"

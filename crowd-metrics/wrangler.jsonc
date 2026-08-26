@@ -24,6 +24,14 @@
 			"id": "f3c37850231641cda571c75c46c6c961"
 		}
 	],
+	"routes": [
+		{
+			// workers.dev 在国内网络不可达（实测 SSL 重置），自定义域是主通路：
+			// 客户端/网站常量都指向这里。custom_domain 让 wrangler 自动建 DNS + 绑定。
+			"pattern": "metrics.loongport.dev",
+			"custom_domain": true
+		}
+	],
 	"triggers": {
 		"crons": [
 			"*/5 * * * *"
