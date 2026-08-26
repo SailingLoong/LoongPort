@@ -3319,15 +3319,9 @@
       "footnote": "Crowd-sourced from LoongPort users: hourly aggregates published behind a privacy threshold; cost is a blended reference value.",
       "notice": {
         "title": "Crowd-measured site stats",
-        "intro": "Share how the relay sites you use actually perform (speed, stability) and unlock measurements contributed by everyone.",
-        "sendsLabel": "Uploads: ",
-        "sendsBody": "site-level hourly aggregates (request counts, first-token time distribution, error rate, token and cache counters, cost).",
-        "neverLabel": "Never uploads: ",
-        "neverBody": "prompts, keys, account details, or anything that could identify you.",
-        "reciprocity": "Fair share: if you don't contribute uploads, you can't view other users' measurements.",
-        "idNote": "Uploads carry only a random ID that rotates daily for dedup — never linked to any account.",
-        "canChange": "You can turn this on or off in Settings at any time.",
-        "accept": "Join & unlock",
+        "question": "Want to see real-world stats for each relay site (first-token time, error rate)?",
+        "finePrint": "If you agree, anonymized site-level aggregates will be uploaded. You can turn this off anytime in Settings.",
+        "accept": "Agree",
         "decline": "Not now"
       },
       "distTitle": "First-token time distribution (sample counts)",
