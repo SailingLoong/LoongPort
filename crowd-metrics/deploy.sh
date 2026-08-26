@@ -23,7 +23,9 @@ if grep -q "REPLACE_WITH" wrangler.jsonc; then
 fi
 
 # schema 幂等（CREATE IF NOT EXISTS），每次部署重放即可拿到最新表形状。
-npx wrangler d1 execute loongport-metrics --remote --file schema.sql
+# -y 必须带：远端 execute 有一个「About to run N queries… Ok?」确认提示，
+# 不带时脚本就在那里挂住等人敲 y（2026-08-26 首次部署实测踩中）。
+npx wrangler d1 execute loongport-metrics -y --remote --file schema.sql
 
 npx wrangler deploy
 
