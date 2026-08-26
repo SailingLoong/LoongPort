@@ -100,6 +100,47 @@ describe("CrowdMeasuredSection 三态", () => {
     ).toBeTruthy();
   });
 
+  it("分布图：bins 与 edges 齐备时渲染 12 根分布条", () => {
+    const stats = makeStats({
+      w24: {
+        ...makeStats().w24!,
+        ttftBins: [3, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      },
+    });
+    render(
+      <CrowdMeasuredSection
+        stats={stats}
+        binEdges={[
+          200, 400, 600, 800, 1200, 1600, 2400, 3200, 4800, 6400, 9600,
+        ]}
+        enabled={true}
+        onJoin={vi.fn()}
+      />,
+    );
+    const bars = screen.getAllByTitle(/loongport.crowd.distTooltip/u);
+    expect(bars).toHaveLength(12);
+    expect(screen.getByTitle(/"range":"200ms–400ms".*"count":8/u)).toBeTruthy();
+  });
+
+  it("分布图：缺 edges（旧快照）不渲染分布条", () => {
+    const stats = makeStats({
+      w24: {
+        ...makeStats().w24!,
+        ttftBins: [3, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      },
+    });
+    render(
+      <CrowdMeasuredSection stats={stats} enabled={true} onJoin={vi.fn()} />,
+    );
+    expect(screen.queryAllByTitle(/loongport.crowd.distTooltip/u)).toHaveLength(
+      0,
+    );
+    // 时段条仍在
+    expect(
+      screen.getAllByTitle(/loongport.crowd.hour(Tooltip|Empty)/u),
+    ).toHaveLength(24);
+  });
+
   it("w24 缺席时用 w7 并标注窗口", () => {
     render(
       <CrowdMeasuredSection

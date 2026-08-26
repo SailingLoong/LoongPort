@@ -3329,7 +3329,12 @@
         "canChange": "You can turn this on or off in Settings at any time.",
         "accept": "Join & unlock",
         "decline": "Not now"
-      }
+      },
+      "distTitle": "First-token time distribution (sample counts)",
+      "distTooltip": "{{range}} · {{count}} samples",
+      "distFast": "fast",
+      "distSlow": "slow",
+      "distSr": "Histogram of first-token times, {{count}} samples total"
     },
     "site": {
       "removed": "Removed {{label}}"

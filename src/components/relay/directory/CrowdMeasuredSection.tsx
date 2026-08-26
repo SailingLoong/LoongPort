@@ -17,10 +17,63 @@ import { formatAvailability } from "./transitDisplay";
 interface CrowdMeasuredSectionProps {
   /** 该站的已发布数据；`null` = 样本/来源不足（k-匿名的正常缺席）。 */
   stats: CrowdSiteStats | null;
+  /** TTFT 桶上边界（快照下发；与 stats.ttftBins 同时在场才渲染分布图）。 */
+  binEdges?: number[];
   /** 共建开关（门禁事实来自后端命令，这里只管渲染形态）。 */
   enabled: boolean;
   /** 打开共建告知弹窗（锁定态的加入入口）。 */
   onJoin: () => void;
+}
+
+/** TTFT 样本分布（快桶在左、慢桶在右）。
+ *
+ * 分布公开本身就是反作弊防线：真实延迟近似对数正态（右偏、有尾巴），
+ * 刷出来的「整齐快」形状肉眼可见。桶区间来自快照顶层的 edges（唯源 Worker），
+ * 前端不复制常量。 */
+function DistBars({ bins, edges }: { bins: number[]; edges: number[] }) {
+  const { t } = useTranslation();
+  const total = bins.reduce((a, b) => a + b, 0);
+  const max = Math.max(...bins, 1);
+  const label = (ms: number) =>
+    ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+
+  return (
+    <div className="mt-3">
+      <div className="text-[10px] text-muted-foreground">
+        {t("loongport.crowd.distTitle")}
+      </div>
+      <div className="mt-1.5 flex h-12 items-end gap-[3px]" aria-hidden={false}>
+        {bins.map((count, i) => {
+          const lo = i === 0 ? 0 : edges[i - 1];
+          const hi = i < edges.length ? edges[i] : null;
+          return (
+            <div
+              key={i}
+              className={cn(
+                "flex-1 rounded-sm",
+                count > 0 ? "bg-primary/45" : "bg-border-default/50",
+              )}
+              style={{
+                height: `${Math.max((count / max) * 100, count > 0 ? 6 : 3)}%`,
+              }}
+              title={t("loongport.crowd.distTooltip", {
+                range:
+                  hi != null ? `${label(lo)}–${label(hi)}` : `≥${label(lo)}`,
+                count,
+              })}
+            />
+          );
+        })}
+      </div>
+      <div className="mt-1 flex justify-between text-[9px] text-muted-foreground">
+        <span>{t("loongport.crowd.distFast")}</span>
+        <span>{t("loongport.crowd.distSlow")}</span>
+      </div>
+      <span className="sr-only">
+        {t("loongport.crowd.distSr", { count: total })}
+      </span>
+    </div>
+  );
 }
 
 function StatCell({
@@ -107,6 +160,7 @@ function HourBars({ stats }: { stats: CrowdSiteStats }) {
  */
 export function CrowdMeasuredSection({
   stats,
+  binEdges,
   enabled,
   onJoin,
 }: CrowdMeasuredSectionProps) {
@@ -206,6 +260,11 @@ export function CrowdMeasuredSection({
               }
             />
           </div>
+          {stats &&
+            binEdges &&
+            stats.w24?.ttftBins?.length === binEdges.length + 1 && (
+              <DistBars bins={stats.w24.ttftBins} edges={binEdges} />
+            )}
           {stats && <HourBars stats={stats} />}
           <p className="mt-2 text-[10px] text-muted-foreground">
             {t("loongport.crowd.footnote")}

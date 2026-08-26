@@ -7,6 +7,7 @@
  */
 
 import { buildSnapshot, type RawRow } from "./aggregate";
+import { TTFT_BIN_EDGES_MS } from "./bins";
 import { handleIngest, type Env } from "./ingest";
 import { hourFloorUtc } from "./validate";
 import type { Snapshot } from "./types";
@@ -30,9 +31,9 @@ async function queryRawRows(env: Env, nowSec: number): Promise<RawRow[]> {
   // 7 天窗口 + 1 小时余量（整点对齐会把边界小时整桶切进切出）。
   const cutoff = hourFloorUtc(nowSec - 7 * 86400 - 3600);
   const { results } = await env.DB.prepare(
-    `SELECT hour, site, app, source, samples, errors, ttft_bins, ttft_count,
-            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-            cost_usd_micros
+    `SELECT hour, site, app, source, asn, ua_trusted, samples, errors,
+            ttft_bins, ttft_count, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens, cost_usd_micros
      FROM bucket_raw WHERE hour >= ?1 ORDER BY hour`,
   )
     .bind(cutoff)
@@ -43,6 +44,7 @@ async function queryRawRows(env: Env, nowSec: number): Promise<RawRow[]> {
 async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
   const rows = await queryRawRows(env, nowSec);
   const snapshot = buildSnapshot(rows, nowSec);
+  snapshot.ttftBinEdges = [...TTFT_BIN_EDGES_MS];
   await env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
   return snapshot;
 }

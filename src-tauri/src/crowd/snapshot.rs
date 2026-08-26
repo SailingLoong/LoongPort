@@ -25,6 +25,20 @@ pub struct Snapshot {
     pub version: i32,
     pub generated_at: i64,
     pub sites: std::collections::BTreeMap<String, SiteStats>,
+    /// TTFT 桶上边界（Worker 随快照下发；唯源在 crowd-metrics/src/bins.ts）。
+    /// 旧缓存/旧 Worker 缺此键时由 [`with_bin_edges`] 用本地常量补齐 —— 前端
+    /// 只认这一份，不在 TS 里再抄一版边界。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ttft_bin_edges: Vec<i64>,
+}
+
+/// 补齐快照里的桶边界（缺省时取本地常量）。边界常量本身有跨语言闸测试
+/// （`crowd::bins`）与 Worker 同源。
+pub fn with_bin_edges(mut snapshot: Snapshot) -> Snapshot {
+    if snapshot.ttft_bin_edges.is_empty() {
+        snapshot.ttft_bin_edges = crate::crowd::bins::TTFT_BIN_EDGES_MS.to_vec();
+    }
+    snapshot
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -45,6 +59,9 @@ pub struct WindowStats {
     pub err_rate: Option<f64>,
     pub cache_hit_rate: Option<f64>,
     pub cost_usd_per_m_tok: Option<f64>,
+    /// 合并后的 TTFT 直方图（展示分布用；旧快照缺此键读成空，UI 隐藏分布图）。
+    #[serde(default)]
+    pub ttft_bins: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -118,7 +135,8 @@ mod tests {
               "w24": {
                 "samples": 120, "sources": 3,
                 "ttftP50Ms": 812.5, "ttftP95Ms": 2140.0,
-                "errRate": 0.008, "cacheHitRate": 0.62, "costUsdPerMTok": 1.25
+                "errRate": 0.008, "cacheHitRate": 0.62, "costUsdPerMTok": 1.25,
+                "ttftBins": [1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
               },
               "w7": null,
               "hours": [
@@ -132,6 +150,10 @@ mod tests {
         assert_eq!(snap.sites.len(), 1);
         let site = &snap.sites["example.com"];
         assert_eq!(site.w24.as_ref().unwrap().sources, 3);
+        assert_eq!(
+            site.w24.as_ref().unwrap().ttft_bins,
+            vec![1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
         assert!(site.w7.is_none());
         assert_eq!(site.hours[1].samples, 42);
     }

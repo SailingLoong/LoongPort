@@ -3329,7 +3329,12 @@
         "canChange": "設定でいつでもオン / オフできます。",
         "accept": "参加して解放",
         "decline": "今はしない"
-      }
+      },
+      "distTitle": "初トークン時間の分布（サンプル数）",
+      "distTooltip": "{{range}} · {{count}} サンプル",
+      "distFast": "速い",
+      "distSlow": "遅い",
+      "distSr": "初トークン時間のヒストグラム、合計 {{count}} サンプル"
     },
     "site": {
       "removed": "{{label}} を削除しました"

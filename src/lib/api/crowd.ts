@@ -16,6 +16,8 @@ export interface CrowdWindowStats {
   cacheHitRate: number | null;
   /** 花费参考值（$/百万 token，模型混合会拉偏，展示必须带「参考」语义）。 */
   costUsdPerMTok: number | null;
+  /** 合并后的 TTFT 直方图（旧快照缺省 → UI 隐藏分布图）。 */
+  ttftBins?: number[];
 }
 
 export interface CrowdHourSlot {
@@ -33,6 +35,8 @@ export interface CrowdSnapshot {
   version: number;
   generatedAt: number;
   sites: Record<string, CrowdSiteStats>;
+  /** TTFT 桶上边界（后端随快照下发；唯源 Worker bins.ts，前端不复制常量）。 */
+  ttftBinEdges?: number[];
 }
 
 export const crowdApi = {

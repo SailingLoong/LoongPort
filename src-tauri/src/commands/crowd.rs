@@ -23,8 +23,10 @@ pub async fn crowd_get_snapshot() -> Result<Option<Snapshot>, AppError> {
                     }
                 });
             }
-            Ok(Some(cached))
+            Ok(Some(snapshot::with_bin_edges(cached)))
         }
-        None => snapshot::refresh_and_cache().await.map(Some),
+        None => snapshot::refresh_and_cache()
+            .await
+            .map(|s| Some(snapshot::with_bin_edges(s))),
     }
 }

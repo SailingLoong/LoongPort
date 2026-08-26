@@ -43,6 +43,9 @@ export interface WindowStats {
   cacheHitRate: number | null;
   /** 花费参考值：每百万 token 的美元数（模型混合会把该值拉偏，仅供粗参考）。 */
   costUsdPerMTok: number | null;
+  /** 合并后的 TTFT 直方图（与 TTFT_BIN_COUNT 等长）。展示用：真实分布近似
+   *  对数正态，刷量的「整齐快」分布肉眼可见 —— 分布公开本身就是防线。 */
+  ttftBins: number[];
 }
 
 /** 24 个 UTC 时段槽（近 7 天聚合）。k-匿名未达标的槽为 {p50Ms: null, samples: 0}。 */
@@ -62,4 +65,7 @@ export interface Snapshot {
   version: number;
   generatedAt: number;
   sites: Record<string, SiteStats>;
+  /** TTFT 桶上边界（唯源 src/bins.ts）。随快照下发，展示端不复制常量 —— 分布图的
+   *  悬浮提示需要真实毫秒区间，而边界调整必须与聚合侧同源。 */
+  ttftBinEdges?: number[];
 }

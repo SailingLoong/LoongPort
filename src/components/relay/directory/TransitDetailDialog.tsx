@@ -30,6 +30,8 @@ interface TransitDetailDialogProps {
   onDismiss: () => void;
   /** 该站的用户实测数据（快照 join 结果）；`null` = 无已发布数据。 */
   crowdStats: CrowdSiteStats | null;
+  /** TTFT 桶上边界（快照顶层下发；分布图悬浮提示用，缺省则不渲染分布图）。 */
+  crowdBinEdges?: number[];
   /** 共建开关（渲染实测区锁定态用）。 */
   crowdEnabled: boolean;
   /** 打开共建告知弹窗。 */
@@ -56,6 +58,7 @@ export function TransitDetailDialog({
   open,
   onDismiss,
   crowdStats,
+  crowdBinEdges,
   crowdEnabled,
   onOpenCrowdNotice,
 }: TransitDetailDialogProps) {
@@ -195,6 +198,7 @@ export function TransitDetailDialog({
 
         <CrowdMeasuredSection
           stats={crowdStats}
+          binEdges={crowdBinEdges}
           enabled={crowdEnabled}
           onJoin={onOpenCrowdNotice}
         />

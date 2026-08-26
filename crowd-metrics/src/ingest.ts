@@ -79,18 +79,31 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
     return jsonResponse({ error: "rate limited" }, 429);
   }
 
+  // 反作弊维度（都取自请求本身，载荷字段碰不到）：
+  // - asn 来自 Cloudflare 边缘（request.cf.asn），客户端伪造不了；
+  // - ua_trusted 是最懒脚本过滤器 —— 开源可查、可伪造，只用于 k-匿名计数，不是防御本体。
+  const asn = request.cf?.asn ?? 0;
+  const uaTrusted = (request.headers.get("user-agent") ?? "").startsWith(
+    "LoongPort/",
+  )
+    ? 1
+    : 0;
+
   const statements = parsed.payload.hours.map((b) =>
     env.DB.prepare(
       `INSERT OR REPLACE INTO bucket_raw (
-         hour, site, app, source, samples, errors, ttft_bins, ttft_count,
+         hour, site, app, source, asn, ua_trusted,
+         samples, errors, ttft_bins, ttft_count,
          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
          cost_usd_micros
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
     ).bind(
       b.hour,
       b.site,
       b.app,
       parsed.payload.sourceId,
+      asn,
+      uaTrusted,
       b.samples,
       b.errors,
       JSON.stringify(b.ttftBins),
