@@ -5,9 +5,8 @@
 	// Cron 每 5 分钟从 D1 重算 k-匿名后的快照写入 KV；原始桶保留 30 天。
 	//
 	// ⚠️ 绑定名必须是 `DB` / `SNAPSHOT` —— Worker 代码（src/ingest.ts 的 Env）按这两个
-	// 名字取资源；`wrangler d1 create` 交互式自动写入时会问绑定名，别让它另起一个
-	// （否则配置里会出现两条指向同一库的条目，deploy.sh 的占位闸也拦不住这种错）。
-	// KV 的 id 还在占位（REPLACE_WITH_KV_ID），deploy.sh 会拒绝带占位部署。
+	// 名字取资源；`wrangler d1/kv create` 交互式自动写入时会问绑定名，别让它另起一个
+	// （否则配置里会出现两条指向同一资源的条目，deploy.sh 的占位闸也拦不住这种错）。
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "loongport-metrics",
 	"main": "src/index.ts",
@@ -22,7 +21,7 @@
 	"kv_namespaces": [
 		{
 			"binding": "SNAPSHOT",
-			"id": "REPLACE_WITH_KV_ID"
+			"id": "f3c37850231641cda571c75c46c6c961"
 		}
 	],
 	"triggers": {
