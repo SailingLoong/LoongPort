@@ -1,29 +1,33 @@
 {
-  // crowd-metrics：中转站实测数据的聚合 Worker。
-  //
-  // 端点：POST /v1/ingest（客户端上传小时聚合桶）、GET /v1/snapshot（公共快照，CORS *）。
-  // Cron 每 5 分钟从 D1 重算 k-匿名后的快照写入 KV；原始桶保留 30 天。
-  //
-  // ⚠️ 两个 REPLACE_WITH_* 占位在首次部署前必须替换成真实 id（见 README「资源创建」），
-  // deploy.sh 会拒绝带占位部署。
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "loongport-metrics",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-07-01",
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "loongport-metrics",
-      "database_id": "REPLACE_WITH_D1_ID"
-    }
-  ],
-  "kv_namespaces": [
-    {
-      "binding": "SNAPSHOT",
-      "id": "REPLACE_WITH_KV_ID"
-    }
-  ],
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  }
+	// crowd-metrics：中转站实测数据的聚合 Worker。
+	//
+	// 端点：POST /v1/ingest（客户端上传小时聚合桶）、GET /v1/snapshot（公共快照，CORS *）。
+	// Cron 每 5 分钟从 D1 重算 k-匿名后的快照写入 KV；原始桶保留 30 天。
+	//
+	// ⚠️ 绑定名必须是 `DB` / `SNAPSHOT` —— Worker 代码（src/ingest.ts 的 Env）按这两个
+	// 名字取资源；`wrangler d1 create` 交互式自动写入时会问绑定名，别让它另起一个
+	// （否则配置里会出现两条指向同一库的条目，deploy.sh 的占位闸也拦不住这种错）。
+	// KV 的 id 还在占位（REPLACE_WITH_KV_ID），deploy.sh 会拒绝带占位部署。
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "loongport-metrics",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-01",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "loongport-metrics",
+			"database_id": "5b1950d0-319a-4e77-8159-50d3ff2d7111"
+		}
+	],
+	"kv_namespaces": [
+		{
+			"binding": "SNAPSHOT",
+			"id": "REPLACE_WITH_KV_ID"
+		}
+	],
+	"triggers": {
+		"crons": [
+			"*/5 * * * *"
+		]
+	}
 }
