@@ -159,6 +159,9 @@ pub async fn flush_once(db: &std::sync::Arc<Database>) -> Result<(), AppError> {
 async fn send(source_id: &str, buckets: &[HourBucket]) -> Result<(), AppError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        // UA 是服务端反作弊的最浅一层（LoongPort/ 前缀才计入 k-匿名来源）。
+        // 可伪造、不是防御本体 —— 但它把最懒的脚本挡在外面，成本为零。
+        .user_agent(concat!("LoongPort/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| AppError::Config(format!("构造 crowd 上传客户端失败: {e}")))?;
 

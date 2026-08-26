@@ -3330,7 +3330,12 @@
         "canChange": "可隨時在設定中開啟或關閉。",
         "accept": "參與並解鎖",
         "decline": "暫不參與"
-      }
+      },
+      "distTitle": "首字耗時分布（樣本計數）",
+      "distTooltip": "{{range}} · {{count}} 個樣本",
+      "distFast": "快",
+      "distSlow": "慢",
+      "distSr": "首字耗時分布直方圖，共 {{count}} 個樣本"
     },
     "site": {
       "removed": "已移除 {{label}}"
