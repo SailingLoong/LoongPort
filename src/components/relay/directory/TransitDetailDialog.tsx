@@ -10,9 +10,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import type { CrowdSiteStats } from "@/lib/api/crowd";
 import type { RelayDirectoryItem } from "@/lib/api/relay";
 import { cn } from "@/lib/utils";
 
+import { CrowdMeasuredSection } from "./CrowdMeasuredSection";
 import { openInBrowser } from "../openInBrowser";
 import {
   availabilityTextTone,
@@ -26,6 +28,12 @@ interface TransitDetailDialogProps {
   item: RelayDirectoryItem;
   open: boolean;
   onDismiss: () => void;
+  /** 该站的用户实测数据（快照 join 结果）；`null` = 无已发布数据。 */
+  crowdStats: CrowdSiteStats | null;
+  /** 共建开关（渲染实测区锁定态用）。 */
+  crowdEnabled: boolean;
+  /** 打开共建告知弹窗。 */
+  onOpenCrowdNotice: () => void;
 }
 
 /** meta 行的一个「标签 + 值」段；值缺席就不渲染（后端没有的事实不展示）。 */
@@ -39,25 +47,27 @@ function MetaField({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * 站方公开数据详情（ai-transit.v1 快照投影）：充值口径、逐分组
- * 倍率/缓存命中/可用性/延迟、来源披露。广场行保持两个徽章，丰富信息
- * 全部落在这里。
+ * 站点详情弹窗：站方公开数据（ai-transit.v1 快照投影）与**用户实测**
+ * （`CrowdMeasuredSection`，众测聚合）两个来源分列。没有 transit 快照的站点
+ * 也能打开 —— 那时只剩实测区（实测徽章是它的另一个入口）。
  */
 export function TransitDetailDialog({
   item,
   open,
   onDismiss,
+  crowdStats,
+  crowdEnabled,
+  onOpenCrowdNotice,
 }: TransitDetailDialogProps) {
   const { t, i18n } = useTranslation();
-  const transit = item.transit;
-  if (!transit) return null;
+  const transit = item.transit ?? null;
 
   // 取成 const 让 JSX 回调闭包保留收窄（避免非空断言）。
-  const supportUrl = transit.supportUrl;
-  const priceUrl = transit.priceUrl;
+  const supportUrl = transit?.supportUrl;
+  const priceUrl = transit?.priceUrl;
 
   const dataTime =
-    transit.syncedAt > 0
+    transit && transit.syncedAt > 0
       ? new Intl.DateTimeFormat(i18n.resolvedLanguage || undefined, {
           dateStyle: "medium",
           timeStyle: "short",
@@ -76,38 +86,40 @@ export function TransitDetailDialog({
           {item.displayName} · {t("loongport.directory.transit.detailTitle")}
         </DialogTitle>
 
-        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
-          {transit.rechargeMultiplier != null && (
-            <MetaField
-              label={t("loongport.directory.transit.rechargeMultiplier")}
-              value={formatMultiplier(transit.rechargeMultiplier)}
-            />
-          )}
-          {transit.minimumTopUp != null && (
-            <MetaField
-              label={t("loongport.directory.transit.minimumTopUp")}
-              value={formatTopUp(transit.minimumTopUp, transit.currency)}
-            />
-          )}
-          {transit.upstreamType != null && (
-            <MetaField
-              label={t("loongport.directory.transit.upstreamType")}
-              value={transit.upstreamType}
-            />
-          )}
-          {transit.isReverse != null && (
-            <MetaField
-              label={t("loongport.directory.transit.reversePool")}
-              value={t(
-                transit.isReverse
-                  ? "loongport.directory.transit.reverseYes"
-                  : "loongport.directory.transit.reverseNo",
-              )}
-            />
-          )}
-        </div>
+        {transit && (
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
+            {transit.rechargeMultiplier != null && (
+              <MetaField
+                label={t("loongport.directory.transit.rechargeMultiplier")}
+                value={formatMultiplier(transit.rechargeMultiplier)}
+              />
+            )}
+            {transit.minimumTopUp != null && (
+              <MetaField
+                label={t("loongport.directory.transit.minimumTopUp")}
+                value={formatTopUp(transit.minimumTopUp, transit.currency)}
+              />
+            )}
+            {transit.upstreamType != null && (
+              <MetaField
+                label={t("loongport.directory.transit.upstreamType")}
+                value={transit.upstreamType}
+              />
+            )}
+            {transit.isReverse != null && (
+              <MetaField
+                label={t("loongport.directory.transit.reversePool")}
+                value={t(
+                  transit.isReverse
+                    ? "loongport.directory.transit.reverseYes"
+                    : "loongport.directory.transit.reverseNo",
+                )}
+              />
+            )}
+          </div>
+        )}
 
-        {transit.groups.length > 0 && (
+        {transit && transit.groups.length > 0 && (
           <div className="mt-4 max-h-[50vh] overflow-auto rounded-lg border border-border-default">
             <Table>
               <TableHeader>
@@ -180,6 +192,12 @@ export function TransitDetailDialog({
             </Table>
           </div>
         )}
+
+        <CrowdMeasuredSection
+          stats={crowdStats}
+          enabled={crowdEnabled}
+          onJoin={onOpenCrowdNotice}
+        />
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
           <span>

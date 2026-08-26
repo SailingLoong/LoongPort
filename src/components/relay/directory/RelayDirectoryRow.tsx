@@ -7,6 +7,7 @@ import type { RelayDirectoryItem } from "@/lib/api/relay";
 import { cn } from "@/lib/utils";
 
 import { openInBrowser } from "../openInBrowser";
+import { formatLatency, ttftBadgeTone } from "./crowdDisplay";
 import {
   availabilityTone,
   formatAvailability,
@@ -18,8 +19,11 @@ interface RelayDirectoryRowProps {
   busy: boolean;
   disabled: boolean;
   onAuthenticate: (item: RelayDirectoryItem) => void;
-  /** 点倍率徽章打开站方公开数据详情；不传（测试）时徽章退化为纯展示。 */
+  /** 点倍率/实测徽章打开站点详情弹窗；不传（测试）时徽章退化为纯展示。 */
   onOpenTransit?: (item: RelayDirectoryItem) => void;
+  /** 用户实测的近程首字 p50（快照 join 结果）。有值才渲染实测徽章 ——
+   *  共建关闭时快照拿不到，徽章自然消失（不参与则看不到，含不吊胃口）。 */
+  measuredP50Ms?: number | null;
 }
 
 function scoreTone(score: number): string {
@@ -34,6 +38,7 @@ export function RelayDirectoryRow({
   disabled,
   onAuthenticate,
   onOpenTransit,
+  measuredP50Ms,
 }: RelayDirectoryRowProps) {
   const { t } = useTranslation();
 
@@ -114,6 +119,23 @@ export function RelayDirectoryRow({
             >
               {formatAvailability(item.transit.minAvailability)}
             </Badge>
+          )}
+          {measuredP50Ms != null && (
+            <button
+              type="button"
+              className={cn(
+                "rounded-full border px-2 py-0 text-[11px] font-medium tabular-nums",
+                ttftBadgeTone(measuredP50Ms),
+                onOpenTransit && "hover:border-blue-400 hover:text-blue-600",
+              )}
+              disabled={!onOpenTransit}
+              title={t("loongport.crowd.badgeHint")}
+              onClick={() => onOpenTransit?.(item)}
+            >
+              {t("loongport.crowd.badgeLabel", {
+                value: formatLatency(measuredP50Ms),
+              })}
+            </button>
           )}
           {item.scenarios.map((scenario) => (
             <Badge

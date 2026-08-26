@@ -9,6 +9,7 @@ pub fn start(app: tauri::AppHandle) {
     start_veridrop_directory_refresh(app.clone());
     start_models_dev_pricing_refresh(app.clone());
     start_relay_pricing_refresh(app.clone());
+    start_crowd_metrics_flush(app.clone());
     start_app_update_check(app);
 }
 
@@ -20,6 +21,23 @@ fn start_relay_pricing_refresh(app: tauri::AppHandle) {
     );
     scheduler::spawn_periodic("relay-pricing", schedule, move || {
         crate::refresh_due_relay_pricing(app.clone())
+    });
+}
+
+/// 站点实测共建：每 15 分钟 flush 已闭合的小时桶。
+///
+/// 门禁（`crowd_metrics_enabled`）在 `flush_once` 里读 —— 关着时任务是纯空转，
+/// 不需要在注册层再做一次判断（两处判断迟早分叉）。
+fn start_crowd_metrics_flush(app: tauri::AppHandle) {
+    let schedule = scheduler::TaskSchedule::new(
+        config::CROWD_METRICS_STARTUP_DELAY,
+        config::CROWD_METRICS_FLUSH_INTERVAL,
+        config::CROWD_METRICS_RETRY_DELAY,
+    );
+    let db = app.state::<crate::AppState>().db.clone();
+    scheduler::spawn_periodic("crowd-metrics-flush", schedule, move || {
+        let db = db.clone();
+        async move { crate::crowd::uploader::flush_once(&db).await }
     });
 }
 

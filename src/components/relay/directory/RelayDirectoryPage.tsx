@@ -17,13 +17,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { relayApi } from "@/lib/api";
+import { crowdApi } from "@/lib/api/crowd";
 import type { AppId } from "@/lib/api";
 import type {
   LeaderboardKind,
   RelayDirectoryItem,
   RelayImportError,
 } from "@/lib/api/relay";
+import { crowdKeys } from "@/lib/query/crowd";
 import { relayDirectoryKeys } from "@/lib/query/relayDirectory";
+import { useSettings } from "@/hooks/useSettings";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 import {
@@ -35,6 +38,7 @@ import {
   visibleDirectoryRange,
 } from "./directoryState";
 import { RelayDirectoryRow } from "./RelayDirectoryRow";
+import { CrowdNoticeDialog } from "../CrowdNoticeDialog";
 import { FirstVisitDomainDialog } from "./FirstVisitDomainDialog";
 import { TransitDetailDialog } from "./TransitDetailDialog";
 
@@ -84,6 +88,21 @@ export function RelayDirectoryPage({
   const [transitDetail, setTransitDetail] = useState<RelayDirectoryItem | null>(
     null,
   );
+  // 共建告知弹窗（从实测区的加入入口唤起）。
+  const [crowdNoticeOpen, setCrowdNoticeOpen] = useState(false);
+
+  const { settings: appSettings } = useSettings();
+  const crowdEnabled = appSettings?.crowdMetricsEnabled ?? false;
+  const crowdSnapshotQuery = useQuery({
+    queryKey: crowdKeys.snapshot,
+    queryFn: () => crowdApi.getSnapshot(),
+    // 门禁第一道：不参与就不发查询（后端命令是第二道，null 也是合法返回）。
+    enabled: crowdEnabled,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    retry: 1,
+  });
+  const crowdSnapshot = crowdSnapshotQuery.data ?? null;
 
   const directoryQuery = useQuery({
     queryKey: relayDirectoryKeys.byKind(view.kind),
@@ -211,8 +230,21 @@ export function RelayDirectoryPage({
           item={transitDetail}
           open
           onDismiss={() => setTransitDetail(null)}
+          crowdStats={
+            transitDetail
+              ? (crowdSnapshot?.sites[transitDetail.siteHost] ?? null)
+              : null
+          }
+          crowdEnabled={crowdEnabled}
+          onOpenCrowdNotice={() => setCrowdNoticeOpen(true)}
         />
       )}
+      {/* 共建告知：从实测区的「加入共建」入口唤起，表态后设置与快照缓存
+          都会被弹窗自己失效 —— 这里只负责开关。 */}
+      <CrowdNoticeDialog
+        open={crowdNoticeOpen}
+        onDone={() => setCrowdNoticeOpen(false)}
+      />
       <div className="flex items-start justify-between gap-4 border-b border-border-default py-4">
         <div className="flex min-w-0 items-start gap-3">
           {!embedded && (
@@ -377,6 +409,9 @@ export function RelayDirectoryPage({
                   void authenticate(selected.entryUrl, selected.siteHost);
                 }}
                 onOpenTransit={setTransitDetail}
+                measuredP50Ms={
+                  crowdSnapshot?.sites[item.siteHost]?.w24?.ttftP50Ms ?? null
+                }
               />
             ))}
           </div>

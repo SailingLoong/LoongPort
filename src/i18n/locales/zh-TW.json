@@ -911,7 +911,9 @@
     "piConfigDir": "Pi 設定目錄",
     "piConfigDirDescription": "覆寫 Pi 設定目錄（models.json、指示檔案、提示、Skills 與工作階段）。",
     "browsePlaceholderPi": "例如：/home/<您的帳號>/.pi/agent",
-    "tabAutoMode": "省心模式"
+    "tabAutoMode": "省心模式",
+    "crowdMetrics": "站點實測資料共建",
+    "crowdMetricsDescription": "上傳站點級聚合指標（首字耗時、錯誤率等，按小時聚合），並解鎖廣場的使用者實測資料。不含提示詞、金鑰或帳號資訊。"
   },
   "apps": {
     "claude": "Claude",
@@ -3295,6 +3297,40 @@
       "accept": "允許分享",
       "decline": "不分享",
       "idNote": "資料包含隨機產生的安裝識別碼，僅用於去重統計，與中轉站帳號無關。"
+    },
+    "crowd": {
+      "badgeLabel": "實測 {{value}}",
+      "badgeHint": "LoongPort 使用者實測的近 24 小時首字耗時中位數，點擊查看詳情",
+      "sectionTitle": "使用者實測",
+      "window24": "近 24 小時",
+      "window7": "近 7 天",
+      "noteSources": "{{count}} 位使用者 · {{samples}} 個樣本",
+      "ttftP50": "首字 p50",
+      "ttftP95": "首字 p95",
+      "errRate": "錯誤率",
+      "cacheHit": "快取命中",
+      "costRef": "花費參考",
+      "hoursTitle": "時段首字中位數（近 7 天 · UTC）",
+      "hourTooltip": "UTC {{slot}}:00 · {{value}} · {{count}} 個樣本",
+      "hourEmpty": "UTC {{slot}}:00 · 無資料",
+      "noData": "暫無實測資料（樣本或來源不足）",
+      "lockedTitle": "加入共建後可查看",
+      "lockedBody": "上傳你本機的站點聚合指標（首字耗時、錯誤率等），即可查看所有使用者的實測資料。",
+      "join": "加入共建",
+      "footnote": "資料來自 LoongPort 使用者共建：按小時聚合、經隱私門檻發布；花費為混合模型的參考值。",
+      "notice": {
+        "title": "站點實測資料共建",
+        "intro": "把你在用的中轉站真實表現（速度、穩定性）與其他使用者共享，也查看大家貢獻的實測資料。",
+        "sendsLabel": "將上傳：",
+        "sendsBody": "站點級的小時聚合指標（請求數、首字耗時分布、錯誤率、token 與快取計數、花費）。",
+        "neverLabel": "不會上傳：",
+        "neverBody": "提示詞、金鑰、帳號資訊，或任何能識別你的內容。",
+        "reciprocity": "對等條款：不參與上傳，也無法查看其他使用者的實測資料。",
+        "idNote": "上傳只帶一個每日輪替的隨機標識，用於統計去重，不與任何帳號關聯。",
+        "canChange": "可隨時在設定中開啟或關閉。",
+        "accept": "參與並解鎖",
+        "decline": "暫不參與"
+      }
     },
     "site": {
       "removed": "已移除 {{label}}"

@@ -422,6 +422,17 @@ pub struct AppSettings {
     /// 它回答「有多少个安装」，不是「这是谁」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats_install_id: Option<String>,
+    /// 站点实测数据共建：上传本地聚合指标（小时桶，见 `crowd` 模块文档那张表），
+    /// 同时解锁广场的实测数据展示（对等条款）。
+    ///
+    /// **默认关** —— 与 `enable_anonymous_stats` 的「默认开」刻意相反：那个是
+    /// 维护者需求、只报站点名单；这个是用户功能、数据更细粒度，必须知情后才参与。
+    #[serde(default)]
+    pub crowd_metrics_enabled: bool,
+    /// 共建告知弹窗表过态没。`None` = 还没表态 ⇒ 首次触达实测数据时弹一次。
+    /// 与 `stats_notice_confirmed` / `proxy_confirmed` 同一个惯例。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crowd_metrics_notice_confirmed: Option<bool>,
     /// 首启「是否一键导入 cc-switch 配置」问过没有。
     ///
     /// `None` = 还没问过 ⇒ 前端在第一次打开时弹一次（前提是检测到 `~/.cc-switch/cc-switch.db`）。
@@ -621,6 +632,8 @@ impl Default for AppSettings {
             enable_anonymous_stats: true,
             stats_notice_confirmed: None,
             stats_install_id: None,
+            crowd_metrics_enabled: false,
+            crowd_metrics_notice_confirmed: None,
             cc_switch_import_prompted: None,
             star_reward_claimed: None,
             enable_failover_toggle: false,
