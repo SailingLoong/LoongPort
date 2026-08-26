@@ -113,6 +113,7 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { RelaySection } from "@/components/relay/RelaySection";
 import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
+import { CrowdNoticeDialog } from "@/components/relay/CrowdNoticeDialog";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
@@ -1957,6 +1958,10 @@ function App() {
           `statsNoticeConfirmed`，没表态就一个字节都不发）。
           它自带「读设置 → 判要不要弹」的全部状态，这里只挂一行。 */}
       <StatsNoticeDialog />
+
+      {/* 站点实测共建的告知弹窗：主动告知（升级后首启、未表态则弹一次）+
+          广场「加入共建」再入口共用这一个实例 —— 组件自带全部状态，这里只挂一行。 */}
+      <CrowdNoticeDialog />
 
       {/* 「点 Star 领注册礼」弹窗：新人引导事件与红点点击共用，状态机在组件内；
           这里只持开关（offer 在即弹）。 */}
