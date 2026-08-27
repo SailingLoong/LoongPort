@@ -1308,21 +1308,64 @@ fn apply_codex_reasoning_level_override(
     true
 }
 
+/// Per-model window facts resolved from the official Codex catalog
+/// (`models_cache.json`) for a model whose slug matches an official entry.
+#[derive(Clone, Copy)]
+struct OfficialModelContext {
+    /// The window we default to: the official max when published (the
+    /// high-context default), else the official default window.
+    context: u64,
+    /// The official ceiling, when published.
+    max: Option<u64>,
+}
+
+fn official_context_for_slug(
+    slug: &str,
+    official_models: &[Value],
+) -> Option<OfficialModelContext> {
+    let entry = official_models.iter().find(|model| {
+        model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|official| official.eq_ignore_ascii_case(slug))
+    })?;
+    let max = entry
+        .get("max_context_window")
+        .and_then(Value::as_u64)
+        .filter(|max| *max > 0);
+    let context = max.or_else(|| {
+        entry
+            .get("context_window")
+            .and_then(Value::as_u64)
+            .filter(|context| *context > 0)
+    })?;
+    Some(OfficialModelContext { context, max })
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
     priority: usize,
     profile: CodexCatalogToolProfile,
     configured_context_window: Option<u64>,
+    official_models: &[Value],
 ) -> Value {
     let mut entry = template.clone();
     let Some(entry_obj) = entry.as_object_mut() else {
         return json!({});
     };
 
+    let official = official_context_for_slug(&spec.model, official_models);
     let display_name = spec.display_name.as_deref().unwrap_or(&spec.model);
-    let context_window = spec
+    // 262_144 was the blanket fallback this generator used before official
+    // per-model windows existed (and still is the neutral template's value);
+    // on a slug the official catalog knows it is residue, never a real
+    // window — drop it so the official value takes over.
+    let user_context = spec
         .context_window
+        .filter(|window| official.is_none() || *window != 262_144);
+    let context_window = user_context
+        .or(official.map(|official| official.context))
         .or(configured_context_window)
         .or_else(|| parse_codex_positive_u64(template.get("context_window")))
         .or_else(|| parse_codex_positive_u64(template.get("max_context_window")));
@@ -1331,13 +1374,27 @@ fn codex_catalog_model_entry(
     entry_obj.insert("description".to_string(), json!(display_name));
     if let Some(context_window) = context_window {
         entry_obj.insert("context_window".to_string(), json!(context_window));
+        match official {
+            // A published official ceiling is real data: keep it (raising it
+            // when the user's window exceeds it) so Codex clamps
+            // `model_context_window` overrides at the true model limit.
+            Some(official) => {
+                let ceiling = official
+                    .max
+                    .filter(|max| *max >= context_window)
+                    .unwrap_or(context_window);
+                entry_obj.insert("max_context_window".to_string(), json!(ceiling));
+            }
+            // No official knowledge of this slug: don't claim a ceiling we
+            // don't have (pinning max to the table value used to defeat the
+            // 1M-context opt-in — see models-manager `with_config_overrides`).
+            None => {
+                entry_obj.remove("max_context_window");
+            }
+        }
+    } else {
+        entry_obj.remove("max_context_window");
     }
-    // Codex clamps a config.toml `model_context_window` override to each
-    // catalog entry's `max_context_window` (models-manager
-    // `with_config_overrides`), so pinning max to the table value silently
-    // defeated the 1M-context opt-in for every row with an explicit window.
-    // For relay models we don't know the real ceiling — don't claim one.
-    entry_obj.remove("max_context_window");
     entry_obj.insert("priority".to_string(), json!(1000 + priority));
     entry_obj.insert("additional_speed_tiers".to_string(), json!([]));
     entry_obj.insert("service_tiers".to_string(), json!([]));
@@ -2014,16 +2071,40 @@ fn codex_model_catalog_from_specs(
     template: &Value,
     profile: CodexCatalogToolProfile,
     configured_context_window: Option<u64>,
+    official_models: &[Value],
 ) -> Value {
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            codex_catalog_model_entry(template, spec, index, profile, configured_context_window)
+            codex_catalog_model_entry(
+                template,
+                spec,
+                index,
+                profile,
+                configured_context_window,
+                official_models,
+            )
         })
         .collect();
 
     json!({ "models": entries })
+}
+
+/// The official Codex catalog entries (`models_cache.json`, written by the
+/// codex CLI). Slugs the user's relay serves under their official names get
+/// per-model window facts from here; a missing file simply yields no official
+/// knowledge and the neutral fallbacks apply.
+fn load_codex_official_models() -> Vec<Value> {
+    let path = get_codex_config_dir().join("models_cache.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|catalog| catalog.get("models").cloned())
+        .and_then(|models| models.as_array().cloned())
+        .unwrap_or_default()
 }
 
 fn codex_model_catalog_from_settings(
@@ -2052,6 +2133,7 @@ fn codex_model_catalog_from_settings(
 
     let configured_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window");
+    let official_models = load_codex_official_models();
 
     // Native providers use the bundled clean template (no freeform apply_patch,
     // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
@@ -2067,6 +2149,7 @@ fn codex_model_catalog_from_settings(
         &template,
         profile,
         configured_context_window,
+        &official_models,
     )))
 }
 
@@ -4546,6 +4629,7 @@ base_url = "https://production.api/v1"
             &template,
             CodexCatalogToolProfile::ProxyChat,
             None,
+            &[],
         );
         assert_eq!(
             catalog["models"][0]
@@ -4608,6 +4692,7 @@ base_url = "https://production.api/v1"
             &template,
             CodexCatalogToolProfile::ProxyChat,
             None,
+            &[],
         );
         let models = catalog
             .get("models")
@@ -4646,6 +4731,7 @@ base_url = "https://production.api/v1"
             &template,
             CodexCatalogToolProfile::ProxyChat,
             Some(500_000),
+            &[],
         );
         assert_eq!(
             configured_catalog["models"][0]
@@ -4693,6 +4779,91 @@ base_url = "https://production.api/v1"
                 .is_some_and(|value| value.is_null()),
             "generated third-party entries should not inherit GPT-5.5 launch messaging"
         );
+    }
+
+    #[test]
+    fn official_catalog_slugs_default_to_official_windows() {
+        let template = json!({
+            "slug": "tpl",
+            "context_window": 272_000,
+            "max_context_window": 272_000
+        });
+        let official = vec![
+            json!({ "slug": "gpt-5.6-sol", "context_window": 272000, "max_context_window": 872000 }),
+            json!({ "slug": "gpt-5.4", "context_window": 272000, "max_context_window": 1000000 }),
+            json!({ "slug": "gpt-5.4-mini", "context_window": 272000, "max_context_window": 272000 }),
+        ];
+        let settings = json!({
+            "modelCatalog": { "models": [
+                { "model": "gpt-5.6-sol" },
+                { "model": "gpt-5.4-mini", "contextWindow": 262144 },
+                { "model": "gpt-5.4", "contextWindow": 2000000 },
+                { "model": "kimi-k2.7-code", "contextWindow": 262144 },
+                { "model": "kimi-k3" }
+            ] }
+        });
+        let catalog = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &official,
+        );
+        let entry = |slug: &str| {
+            catalog["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|entry| entry["slug"] == slug)
+                .expect("slug present")
+                .clone()
+        };
+        // No explicit window → the official max is the default, and the
+        // official ceiling is published so Codex-side `model_context_window`
+        // overrides clamp at the true model limit.
+        let sol = entry("gpt-5.6-sol");
+        assert_eq!(sol["context_window"], json!(872_000));
+        assert_eq!(sol["max_context_window"], json!(872_000));
+        // The pre-official blanket 262144 is residue on official slugs — the
+        // official value takes over (mini's real ceiling IS 272k).
+        let mini = entry("gpt-5.4-mini");
+        assert_eq!(mini["context_window"], json!(272_000));
+        assert_eq!(mini["max_context_window"], json!(272_000));
+        // An explicit user window above the official max raises the ceiling
+        // with it (user override wins; mirrors the vendor-mirror rule).
+        let five_four = entry("gpt-5.4");
+        assert_eq!(five_four["context_window"], json!(2_000_000));
+        assert_eq!(five_four["max_context_window"], json!(2_000_000));
+        // Third-party models keep their genuine explicit windows (262144 for
+        // Kimi K2.7 is real, not residue) and claim no ceiling.
+        let kimi = entry("kimi-k2.7-code");
+        assert_eq!(kimi["context_window"], json!(262_144));
+        assert!(kimi.get("max_context_window").is_none());
+        // An unknown slug without a window falls back to the template default.
+        let k3 = entry("kimi-k3");
+        assert_eq!(k3["context_window"], json!(272_000));
+        assert!(k3.get("max_context_window").is_none());
+    }
+
+    #[test]
+    fn official_window_beats_configured_fallback_in_catalog() {
+        let template = json!({ "slug": "tpl", "context_window": 272000 });
+        let official = vec![
+            json!({ "slug": "gpt-5.5", "context_window": 272000, "max_context_window": 272000 }),
+        ];
+        let settings = json!({ "modelCatalog": { "models": [{ "model": "gpt-5.5" }] } });
+        let catalog = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            Some(500_000),
+            &official,
+        );
+        // Official per-model data beats the top-level configured fallback in
+        // the catalog; the toggle stays a runtime override, clamped by the
+        // official ceiling (gpt-5.5's real max is 272k).
+        assert_eq!(catalog["models"][0]["context_window"], json!(272_000));
+        assert_eq!(catalog["models"][0]["max_context_window"], json!(272_000));
     }
 
     #[test]
@@ -4981,7 +5152,7 @@ base_url = "https://production.api/v1"
             CodexCatalogToolProfile::NativeResponses,
             CodexCatalogToolProfile::Anthropic,
         ] {
-            let catalog = codex_model_catalog_from_specs(&specs, &template, profile, None);
+            let catalog = codex_model_catalog_from_specs(&specs, &template, profile, None, &[]);
             let models = catalog["models"].as_array().expect("models array");
             let modalities = |slug: &str| {
                 models
@@ -5296,6 +5467,7 @@ wire_api = "responses"
             &proxy_template,
             CodexCatalogToolProfile::ProxyChat,
             None,
+            &[],
         );
         assert_eq!(
             catalog["models"][0]
