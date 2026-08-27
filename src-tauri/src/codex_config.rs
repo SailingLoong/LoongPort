@@ -1331,8 +1331,13 @@ fn codex_catalog_model_entry(
     entry_obj.insert("description".to_string(), json!(display_name));
     if let Some(context_window) = context_window {
         entry_obj.insert("context_window".to_string(), json!(context_window));
-        entry_obj.insert("max_context_window".to_string(), json!(context_window));
     }
+    // Codex clamps a config.toml `model_context_window` override to each
+    // catalog entry's `max_context_window` (models-manager
+    // `with_config_overrides`), so pinning max to the table value silently
+    // defeated the 1M-context opt-in for every row with an explicit window.
+    // For relay models we don't know the real ceiling — don't claim one.
+    entry_obj.remove("max_context_window");
     entry_obj.insert("priority".to_string(), json!(1000 + priority));
     entry_obj.insert("additional_speed_tiers".to_string(), json!([]));
     entry_obj.insert("service_tiers".to_string(), json!([]));
@@ -1891,7 +1896,14 @@ fn codex_vendor_catalog_model_entry(
     }
     if let Some(context_window) = spec.context_window {
         entry_obj.insert("context_window".to_string(), json!(context_window));
-        entry_obj.insert("max_context_window".to_string(), json!(context_window));
+        // The vendor entry's max is real gateway data — keep it unless the
+        // user's window exceeds it. A ceiling below the declared window both
+        // contradicts the row and lets Codex clamp `model_context_window`
+        // overrides back down to the old max.
+        let vendor_max = entry_obj.get("max_context_window").and_then(Value::as_u64);
+        if vendor_max.is_none_or(|max| max < context_window) {
+            entry_obj.insert("max_context_window".to_string(), json!(context_window));
+        }
     }
     if let Some(parallel) = spec.supports_parallel_tool_calls {
         entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
@@ -4620,6 +4632,14 @@ base_url = "https://production.api/v1"
             Some(272_000),
             "unset model context must inherit the Codex template instead of shrinking to 128K"
         );
+        for entry in models {
+            assert!(
+                entry.get("max_context_window").is_none(),
+                "neutral entries must not declare a ceiling: Codex clamps \
+                 model_context_window overrides to max_context_window, which \
+                 would defeat the 1M opt-in for rows with an explicit window"
+            );
+        }
 
         let configured_catalog = codex_model_catalog_from_specs(
             &specs,
@@ -4640,6 +4660,12 @@ base_url = "https://production.api/v1"
                 .and_then(Value::as_u64),
             Some(500_000),
             "top-level configured context must override the Codex template"
+        );
+        assert!(
+            configured_catalog["models"][1]
+                .get("max_context_window")
+                .is_none(),
+            "the configured-context fallback must not pin max either"
         );
         assert!(
             models[0].get("model_messages").is_some(),
@@ -5084,6 +5110,11 @@ wire_api = "responses"
             flash.get("context_window").and_then(|v| v.as_u64()),
             Some(1_048_576)
         );
+        assert_eq!(
+            flash.get("max_context_window").and_then(|v| v.as_u64()),
+            Some(1_048_576),
+            "the vendor's own ceiling is real gateway data and survives mirroring"
+        );
         // Explicit user display name still wins over the official one.
         assert_eq!(
             flash.get("display_name").and_then(|v| v.as_str()),
@@ -5100,14 +5131,49 @@ wire_api = "responses"
             pro.get("context_window").and_then(|v| v.as_u64()),
             Some(500_000)
         );
+        // …but only lowers the window, not the ceiling: the official max
+        // stays so Codex-side `model_context_window` overrides are not
+        // clamped back down to the user's smaller value.
         assert_eq!(
             pro.get("max_context_window").and_then(|v| v.as_u64()),
-            Some(500_000)
+            Some(1_048_576)
         );
         // …while the untouched official display name is kept.
         assert_eq!(
             pro.get("display_name").and_then(|v| v.as_str()),
             Some("DeepSeek-V4-Pro")
+        );
+    }
+
+    #[test]
+    fn vendor_user_window_above_official_max_raises_ceiling() {
+        // A user window larger than the vendor's declared max must raise the
+        // ceiling with it: keeping the old max would leave a ceiling below the
+        // row's own window and let Codex clamp `model_context_window`
+        // overrides back down to the vendor value.
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{ "model": "deepseek-v4-flash", "contextWindow": 2_000_000 }]
+            }
+        });
+
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            DEEPSEEK_NATIVE_CONFIG,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("vendor catalog generation should not error")
+        .expect("non-empty modelCatalog must yield a catalog");
+
+        let flash = &catalog["models"][0];
+        assert_eq!(
+            flash.get("context_window").and_then(|v| v.as_u64()),
+            Some(2_000_000)
+        );
+        assert_eq!(
+            flash.get("max_context_window").and_then(|v| v.as_u64()),
+            Some(2_000_000),
+            "a user window above the vendor max must lift the ceiling, not keep it below the window"
         );
     }
 
