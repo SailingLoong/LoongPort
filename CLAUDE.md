@@ -130,13 +130,18 @@
    `min(该模型 entry 的 max_context_window)` 再生效（models-manager `with_config_overrides`，
    官方测试名就叫 `model_context_window_override_clamps_to_max_context_window`）。
    曾把映射表值同时钉进两个键，导致 1M 开关对任何填了窗口的行静默失效 —— PR #221 修根：
-   中性路径只写 `context_window`、不声明上限；厂商镜像路径保留厂商 max、用户值更高时抬升。
+   不再编造上限；厂商镜像路径保留厂商 max、用户值更高时抬升。
 3. **官方 catalog 的形状是两个不同的值**：`context_window`=默认窗口（官方模型当前全是
    272k，2026-08 快照、会漂移），`max_context_window`=上限（gpt-5.4=1M、5.6 系=872k、
    5.5/5.4-mini=272k）。`max_context_window` 是 serde 全可选字段，缺省=不钳制；
    `auto_compact_token_limit` 缺省时按窗口 90% 推导。
+4. **官方同名模型默认取官方高窗口**：生成 catalog 时按 slug 匹配本机
+   `models_cache.json`（codex 官方目录缓存），命中则默认窗口=官方上限、并如实声明
+   该上限（钳制语义因此是正确的）；未命中的第三方模型不声明上限，显式行值永远赢。
+   旧的全局兜底 262144 在官方 slug 上是残留，自动剥离让位；Kimi 系列的 262144 是
+   真实窗口，未命中官方目录所以保留。
 
-修后语义：映射表「上下文窗口」= 该模型默认窗口（逐模型可不同，与官方形状对齐）；
+修后语义：映射表「上下文窗口」= 该模型默认窗口（官方模型缺省=官方上限，逐模型不同）；
 1M 开关 = 全局覆盖（codex 官方对 `model_context_window` 的定义）；catalog 启动时加载，
 改完要重启 codex。生成逻辑全在 `codex_config.rs`：`codex_model_catalog_from_settings`
 入口（含 config 顶层 `model_context_window` 拾取）→ `codex_catalog_model_entry`
