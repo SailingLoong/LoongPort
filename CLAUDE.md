@@ -119,6 +119,29 @@
 3. **子模块指针一 bump 行号就集体失准**（纯注释 commit 也能让整片下移）。指针不自动 bump
    所以当前稳；bump 那天要么重新生成，要么降级成「只读结构、不引行号」。
 
+### 改 codex 模型目录 / 上下文窗口：三条外部事实（对着 codex-rs 源码核实过）
+
+1. **本地 catalog 是该 provider 的唯一权威**。config.toml 配了 `model_catalog_json` 后，
+   codex 给这个 provider 建 `StaticModelsManager`（model-provider/src/provider.rs），
+   官方 `models_cache.json` 的元数据**完全不参与** —— catalog 里写 262144，codex 就真跑
+   256k（比官方默认 272k 还低）。别拿官方缓存推断生成档位上的行为。
+2. **`model_context_window` 会被 `max_context_window` 钳制**。config.toml 顶层的
+   `model_context_window`（「1M 上下文窗口」开关写的值）在 codex 侧先
+   `min(该模型 entry 的 max_context_window)` 再生效（models-manager `with_config_overrides`，
+   官方测试名就叫 `model_context_window_override_clamps_to_max_context_window`）。
+   曾把映射表值同时钉进两个键，导致 1M 开关对任何填了窗口的行静默失效 —— PR #221 修根：
+   中性路径只写 `context_window`、不声明上限；厂商镜像路径保留厂商 max、用户值更高时抬升。
+3. **官方 catalog 的形状是两个不同的值**：`context_window`=默认窗口（官方模型当前全是
+   272k，2026-08 快照、会漂移），`max_context_window`=上限（gpt-5.4=1M、5.6 系=872k、
+   5.5/5.4-mini=272k）。`max_context_window` 是 serde 全可选字段，缺省=不钳制；
+   `auto_compact_token_limit` 缺省时按窗口 90% 推导。
+
+修后语义：映射表「上下文窗口」= 该模型默认窗口（逐模型可不同，与官方形状对齐）；
+1M 开关 = 全局覆盖（codex 官方对 `model_context_window` 的定义）；catalog 启动时加载，
+改完要重启 codex。生成逻辑全在 `codex_config.rs`：`codex_model_catalog_from_settings`
+入口（含 config 顶层 `model_context_window` 拾取）→ `codex_catalog_model_entry`
+（中性模板）/ `codex_vendor_catalog_model_entry`（厂商官方目录镜像）。
+
 ## 三、LoongPort 自己的代码在哪
 
 ```
