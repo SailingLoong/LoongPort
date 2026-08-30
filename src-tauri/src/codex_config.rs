@@ -3186,6 +3186,65 @@ pub fn prepare_codex_provider_live_config(
     })
 }
 
+/// 编辑弹窗读取 live 快照时，把 config.toml 里的 `experimental_bearer_token`
+/// 抬升进 `auth.OPENAI_API_KEY`：auth.json 是单槽共享文件，可能装着别家
+/// provider 的 key 或用户的 ChatGPT 登录，表单的展示与保存都必须以当前
+/// provider 自己的 key 为准，否则反复编辑会让 key 在共享 base_url 的
+/// provider 之间静默串档。
+///
+/// 判据与 [`should_restore_codex_provider_token_for_backfill`] 同源：
+/// official 档跳过；模板 auth 是纯 OAuth（无 API key）时不做静默改型。
+/// config 文本保持原样——live 文件里真实带着 bearer，编辑界面的 config
+/// 展示不该说谎。上游把这段放在前端弹窗里做（farion1231/cc-switch#6534），
+/// 本仓编辑快照统一走后端 `edit_settings` 命令，抬升收敛在这里。
+pub fn reconcile_codex_edit_auth(
+    settings: &mut Value,
+    database_settings: &Value,
+    category: Option<&str>,
+) {
+    if category == Some("official") {
+        return;
+    }
+
+    let Some(config_text) = settings
+        .get("config")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+
+    let Some(token) = extract_codex_experimental_bearer_token(&config_text) else {
+        return;
+    };
+
+    let auth_template = database_settings
+        .get("auth")
+        .filter(|value| value.is_object())
+        .cloned()
+        .or_else(|| {
+            settings
+                .get("auth")
+                .filter(|value| value.is_object())
+                .cloned()
+        })
+        .unwrap_or_else(|| json!({}));
+
+    let has_provider_api_key = extract_codex_auth_api_key(&auth_template).is_some();
+    let has_oauth_login = codex_auth_has_oauth_login_material(&auth_template);
+    if has_oauth_login && !has_provider_api_key {
+        return;
+    }
+
+    let mut auth = auth_template;
+    if let Some(obj) = auth.as_object_mut() {
+        obj.insert("OPENAI_API_KEY".to_string(), Value::String(token));
+    }
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert("auth".to_string(), auth);
+    }
+}
+
 /// During DB backfill, lift a live `experimental_bearer_token` back into
 /// `auth.OPENAI_API_KEY` so the stored provider keeps its canonical shape
 /// and generated live tokens don't leak into stored provider TOML.
@@ -6239,6 +6298,95 @@ base_url = "http://127.0.0.1:9999/v1"
         assert!(
             !cleaned.contains("cc-switch-official"),
             "旧标记那条路由必须被删掉，否则 codex 一直指着一个不再监听的端口: {cleaned}"
+        );
+    }
+
+    #[test]
+    fn edit_auth_reconcile_lifts_bearer_over_stale_shared_key() {
+        // bearer 模式：live config 带着 provider 自己的 token，而共享
+        // auth.json 装着别家的 key —— 表单必须看到自家 key。
+        let mut live = json!({
+            "auth": { "OPENAI_API_KEY": "sk-other-provider" },
+            "config": "model_provider = \"relay\"\n\n[model_providers.relay]\nname = \"relay\"\nexperimental_bearer_token = \"sk-relay-own\"\n"
+        });
+        let db = json!({ "auth": { "OPENAI_API_KEY": "sk-relay-own" } });
+
+        reconcile_codex_edit_auth(&mut live, &db, Some("custom"));
+
+        assert_eq!(
+            live["auth"]["OPENAI_API_KEY"].as_str(),
+            Some("sk-relay-own"),
+            "key 槽位必须是 config 里的 bearer，而不是共享 auth.json 的别家 key"
+        );
+        assert!(
+            live["config"]
+                .as_str()
+                .unwrap()
+                .contains("experimental_bearer_token"),
+            "config 文本保持原样，编辑界面不能对 live 文件说谎"
+        );
+    }
+
+    #[test]
+    fn edit_auth_reconcile_is_noop_without_bearer() {
+        // 默认模式：活跃 key 就在 auth.json 里，没有 bearer 就不动。
+        let mut live = json!({
+            "auth": { "OPENAI_API_KEY": "sk-active" },
+            "config": "model_provider = \"relay\"\n\n[model_providers.relay]\nname = \"relay\"\n"
+        });
+
+        reconcile_codex_edit_auth(&mut live, &json!({}), Some("custom"));
+
+        assert_eq!(
+            live["auth"]["OPENAI_API_KEY"].as_str(),
+            Some("sk-active"),
+            "没有 bearer 时不得改写 auth"
+        );
+    }
+
+    #[test]
+    fn edit_auth_reconcile_skips_official_and_oauth_only() {
+        let mut live = json!({
+            "auth": { "OPENAI_API_KEY": "sk-anything" },
+            "config": "model_provider = \"x\"\n\n[model_providers.x]\nname = \"x\"\nexperimental_bearer_token = \"sk-token\"\n"
+        });
+
+        let mut official = live.clone();
+        reconcile_codex_edit_auth(&mut official, &json!({}), Some("official"));
+        assert_eq!(
+            official["auth"]["OPENAI_API_KEY"].as_str(),
+            Some("sk-anything"),
+            "official 档不走 bearer 抬升"
+        );
+
+        // 模板是纯 OAuth 登录（无 API key）：不得静默改型成 key 供应商。
+        let mut oauth_only = live;
+        let db_oauth = json!({
+            "auth": { "tokens": { "access_token": "at", "refresh_token": "rt" }, "auth_mode": "chatgpt" }
+        });
+        reconcile_codex_edit_auth(&mut oauth_only, &db_oauth, Some("custom"));
+        assert_eq!(
+            oauth_only["auth"]["OPENAI_API_KEY"].as_str(),
+            Some("sk-anything"),
+            "纯 OAuth 模板不得被塞进 API key"
+        );
+    }
+
+    #[test]
+    fn edit_auth_reconcile_falls_back_to_live_auth_template() {
+        // 数据库没有 auth（新导入/同步来的行）：模板回落到 live auth，
+        // 判据也在这个模板上判。
+        let mut live = json!({
+            "auth": { "OPENAI_API_KEY": "sk-stale-shared" },
+            "config": "model_provider = \"x\"\n\n[model_providers.x]\nname = \"x\"\nexperimental_bearer_token = \"sk-relay-own\"\n"
+        });
+
+        reconcile_codex_edit_auth(&mut live, &json!({}), Some("custom"));
+
+        assert_eq!(
+            live["auth"]["OPENAI_API_KEY"].as_str(),
+            Some("sk-relay-own"),
+            "无库内 auth 时以 live auth 为模板，key 槽位换成自家 bearer"
         );
     }
 }
