@@ -6703,6 +6703,13 @@ impl ProviderService {
                     settings.insert("modelCatalog".to_string(), model_catalog);
                 }
             }
+            // live auth.json 是单槽共享文件；编辑表单的 key 槽位以 provider
+            // 自己的 bearer 为准（上游 #6534，收敛在后端命令层做）。
+            crate::codex_config::reconcile_codex_edit_auth(
+                &mut settings,
+                &database_settings,
+                provider.category.as_deref(),
+            );
         }
         Ok(settings)
     }
