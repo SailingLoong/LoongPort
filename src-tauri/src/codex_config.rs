@@ -385,11 +385,10 @@ impl CodexCatalogToolProfile {
 /// removed provider aliases.
 const CODEX_RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
     "amazon-bedrock",
+    "amazon-bedrock-runtime",
     "openai",
     "ollama",
     "lmstudio",
-    "oss",
-    "ollama-chat",
 ];
 
 /// 获取 Codex 配置目录路径
@@ -981,10 +980,10 @@ fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
 
 pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
     let id = id.trim();
-    !id.is_empty()
-        && !CODEX_RESERVED_MODEL_PROVIDER_IDS
-            .iter()
-            .any(|reserved| reserved.eq_ignore_ascii_case(id))
+    // 保留 id 精确匹配（大小写敏感），与 codex 的保留表查找一致：
+    // `OpenAI` 这类大小写变体是合法的自定义 id，不得按保留 id 处理
+    // （上游 43818101 修根，等值对齐）。
+    !id.is_empty() && !CODEX_RESERVED_MODEL_PROVIDER_IDS.contains(&id)
 }
 
 /// Write only Codex `config.toml` for provider switching.
@@ -2560,11 +2559,13 @@ pub fn extract_codex_experimental_bearer_token(config_text: &str) -> Option<Stri
             .and_then(|item| item.as_str())
     };
     let token = match provider_id.as_deref() {
+        // `as_table_like`（非 `as_table`）：用户配置可能用 inline table
+        // （`model_providers = { foo = {...} }`），as_table 对它返回 None。
         Some(id) if is_custom_codex_model_provider_id(id) => doc
             .get("model_providers")
-            .and_then(|item| item.as_table())
+            .and_then(|item| item.as_table_like())
             .and_then(|table| table.get(id))
-            .and_then(|item| item.as_table())
+            .and_then(|item| item.as_table_like())
             .and_then(|table| table.get("experimental_bearer_token"))
             .and_then(|item| item.as_str())
             .or_else(top_level_token),
@@ -2603,17 +2604,22 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
         return Ok(doc.to_string());
     }
 
-    if let Some(model_providers) = doc
+    // 用 as_table_like_mut 而非 as_table_mut：inline table（`model_providers =
+    // { foo = {...} }`，TOML 合法）时 as_table_mut 返回 None，token 会静默落到
+    // 顶层——codex 0.149 顶层没有这个字段、直接忽略（401 不消）。
+    if let Some(provider_table) = doc
         .get_mut("model_providers")
-        .and_then(|item| item.as_table_mut())
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|table| table.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_like_mut())
     {
-        if let Some(provider_table) = model_providers
-            .get_mut(provider_id.as_str())
-            .and_then(|item| item.as_table_mut())
-        {
-            provider_table["experimental_bearer_token"] = toml_edit::value(token);
-            return Ok(doc.to_string());
+        // 0.149 守卫：表已声明自有凭据（auth/aws/env_key/显式 Authorization
+        // header）时不注入——硬冲突会让整份配置解析失败，注入也没有收益。
+        if codex_provider_table_declares_auth(&*provider_table) {
+            return Ok(config_text.to_string());
         }
+        provider_table.insert("experimental_bearer_token", toml_edit::value(token));
+        return Ok(doc.to_string());
     }
 
     doc["experimental_bearer_token"] = toml_edit::value(token);
@@ -3125,6 +3131,15 @@ pub fn write_codex_live_for_provider(
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
+    // 对**每张** provider 表做语义预检（official 与第三方一视同仁，闲置表
+    // 也算）：0.149 加载即拒的字段组合没法归一化掉，提前用可操作的报错
+    // 拒绝切换，而不是写一份 codex 拒绝启动的配置。与下面两个 auth 安全
+    // 闸相互独立——那些只判活跃路由，带 key 时跳过。代理 backup/restore
+    // 等无闸路径不走这里（有意：不能对用户自己的备份 fail-closed）。
+    if let Some(text) = config_text {
+        preflight_codex_provider_table_conflicts(text)?;
+    }
+
     let unified_official_config =
         if category == Some("official") && crate::settings::unify_codex_session_history() {
             Some(inject_codex_unified_session_bucket(
@@ -3134,6 +3149,32 @@ pub fn write_codex_live_for_provider(
             None
         };
     let config_text = unified_official_config.as_deref().or(config_text);
+
+    // official 写入不经过 prepare_codex_provider_live_config，在这里同样做
+    // 保留表迁移与 name 回填：旧版本种下的 official 配置也可能带陈旧保留表
+    // 或无 name 的闲置自定义表，0.149 一并整份拒绝。official 语境下路由
+    // 永不跟随改名表。第三方 config-only 分支由 prepare 幂等地再做一遍。
+    let migrated_official = if category == Some("official") {
+        match config_text {
+            Some(text) => migrate_stale_reserved_provider_tables(text, true, false)?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let config_text = migrated_official.as_deref().or(config_text);
+    let named_official = if category == Some("official") {
+        match config_text {
+            Some(text) => backfill_codex_custom_provider_names(text)?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let config_text = named_official.as_deref().or(config_text);
+
+    let third_party_carries_key =
+        category != Some("official") && extract_codex_auth_api_key(auth).is_some();
 
     let should_write_auth = (category == Some("official") && codex_auth_has_login_material(auth))
         || (category != Some("official")
@@ -3147,6 +3188,30 @@ pub fn write_codex_live_for_provider(
         // 第三方档把 sk 写进 auth.json 时补 requires_openai_auth（不变式见本函数
         // 文档）。auth 里没有 API key（登录态形状）时不动——flag 会把那种凭据
         // 引到 ChatGPT 鉴权模式去打 provider 的 base_url。
+        //
+        // 这个 auth+config 分支同样不经过 prepare，第三方语境在这里做保留表
+        // 迁移（路由跟随视 key 而定）与 name 回填，保证写下去的配置可加载。
+        let migrated_third_party = if category != Some("official") {
+            match config_text {
+                Some(text) => {
+                    migrate_stale_reserved_provider_tables(text, false, third_party_carries_key)?
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let config_text = migrated_third_party.as_deref().or(config_text);
+        let named_third_party = if category != Some("official") {
+            match config_text {
+                Some(text) => backfill_codex_custom_provider_names(text)?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let config_text = named_third_party.as_deref().or(config_text);
+
         let config_text = match (category != Some("official"), config_text) {
             (true, Some(text)) if extract_codex_auth_api_key(auth).is_some() => {
                 Some(set_codex_provider_requires_openai_auth(text)?)
@@ -3160,6 +3225,370 @@ pub fn write_codex_live_for_provider(
     }
 }
 
+/// 会被 codex 整份拒绝加载的保留内置 id（`validate_reserved_model_provider_ids`，
+/// 0.148 起存在、大小写敏感；两个 bedrock id 被豁免——覆盖它们是合法的）。
+const CODEX_STALE_RESERVED_TABLE_IDS: &[&str] = &["openai", "ollama", "lmstudio"];
+
+/// cc-switch 持有的迁移目标 provider id（`cc-switch`、`cc-switch-2`…）。
+/// 不是 codex 保留 id，注入的 token 能落进表内。
+const CODEX_MIGRATED_PROVIDER_ID: &str = "cc-switch";
+
+fn codex_provider_table_falls_back_to_official_auth(table: &dyn toml_edit::TableLike) -> bool {
+    table
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false)
+        && table.get("env_key").is_none()
+        && table.get("experimental_bearer_token").is_none()
+}
+
+/// codex 0.149 守卫：已声明自有凭据来源的 provider 表不得再注入 bearer
+/// token。`auth`/`aws` 子表与 `experimental_bearer_token` 在反序列化时硬冲突
+/// ——整份 config.toml 解析失败、codex 拒绝启动。`env_key` 运行时优先级高于
+/// token，注入既无收益又把 key 泄进 config.toml。`http_headers`/
+/// `env_http_headers` 里显式 `Authorization` 是 header-auth 供应商在 0.149
+/// 上的活法——auth 在 provider headers 之后生效、会覆盖它。
+///
+/// `requires_openai_auth` 有意不参与本守卫，甚至关掉 header 检查：没有注入
+/// token 时它把鉴权引向保留的 auth.json OAuth 登录；注入 token 会短路它
+/// （preservation 桥接契约）。
+fn codex_provider_table_declares_auth(table: &dyn toml_edit::TableLike) -> bool {
+    let requires_openai_auth = table
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
+    table.get("auth").is_some()
+        || table.get("aws").is_some()
+        || table.get("env_key").is_some()
+        || (!requires_openai_auth
+            && (table_declares_authorization_header(table.get("http_headers"))
+                || table_declares_authorization_header(table.get("env_http_headers"))))
+}
+
+fn table_declares_authorization_header(item: Option<&toml_edit::Item>) -> bool {
+    // header 名在传输层大小写不敏感，TOML 键匹配同样大小写不敏感。
+    item.and_then(|item| item.as_table_like())
+        .is_some_and(|table| {
+            table
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+        })
+}
+
+/// 取第一个空闲的 cc-switch 持有 id，迁移永不覆盖用户手写的表。
+fn first_free_cc_switch_provider_id(model_providers: Option<&dyn toml_edit::TableLike>) -> String {
+    let mut candidate = CODEX_MIGRATED_PROVIDER_ID.to_string();
+    let mut suffix = 2usize;
+    while model_providers.is_some_and(|table| table.get(&candidate).is_some()) {
+        candidate = format!("{CODEX_MIGRATED_PROVIDER_ID}-{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
+/// 迁移陈旧的保留 provider 表（`[model_providers.openai]`、`.ollama`、
+/// `.lmstudio`）。保留内置 id 被覆盖时 codex 整份拒绝加载，幸存的表意味着
+/// 「切换报成功、codex 拒绝启动」——旧版 cc-switch 的接管投影正是这种形状
+/// 的制造源头（本仓还有 cc-switch 导入路径会带进来）。
+///
+/// 保留 id 精确匹配（`OpenAI` 等大小写变体是合法自定义 id，不动）。每张表
+/// 无损改名到第一个空闲的 cc-switch id，`wire_api = "responses"` 兜底补齐
+/// （三个内置在 0.149 上都说 Responses）。
+///
+/// 路由策略：改名表原本是活跃路由时，第三方写入跟随迁移后的 id——除非该表
+/// 会从 auth.json 解析鉴权（`codex_provider_table_falls_back_to_official_auth`）
+/// 且没有可注入的 token 短路它。从不回退 auth.json 的表——自有凭据
+/// （env_key / experimental_bearer_token）、header/query 鉴权、无鉴权本地
+/// 服务——保住合法路由；只有无凭据的 `requires_openai_auth = true` 表折回
+/// 内置 provider（跟着它会把保留的 OAuth 登录发去陈旧地址）。改名表同时
+/// 归一化成 0.149 能加载的形状：`wire_api` 钉成 "responses"（chat wire API
+/// 已移除，任何其它值让整份配置反序列化失败）、空/缺失的 `name` 回填（否则
+/// 加载即拒，无论是否活跃）。这些表自 0.148 起就没加载过，没有需要保留的
+/// 先前行为。official 写入永不跟随——official 档的路由属于内置 provider。
+/// 没有可迁移的内容时返回 None。
+fn migrate_stale_reserved_provider_tables(
+    config_text: &str,
+    official: bool,
+    has_token: bool,
+) -> Result<Option<String>, AppError> {
+    if !config_text.contains("model_providers") {
+        return Ok(None);
+    }
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    let stale_ids: Vec<&str> = CODEX_STALE_RESERVED_TABLE_IDS
+        .iter()
+        .copied()
+        .filter(|id| {
+            doc.get("model_providers")
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get(id))
+                .and_then(|item| item.as_table_like())
+                .is_some()
+        })
+        .collect();
+    if stale_ids.is_empty() {
+        return Ok(None);
+    }
+
+    for stale_id in stale_ids {
+        let migrated_id = first_free_cc_switch_provider_id(
+            doc.get("model_providers")
+                .and_then(|item| item.as_table_like()),
+        );
+        // `model_provider` 未设置时默认走内置 openai provider。
+        let table_is_active_route = match active_codex_model_provider_id(&doc) {
+            None => stale_id == "openai",
+            Some(active) => active == stale_id,
+        };
+
+        let Some(model_providers) = doc
+            .get_mut("model_providers")
+            .and_then(|item| item.as_table_like_mut())
+        else {
+            return Ok(None);
+        };
+        let Some(mut stale_item) = model_providers.remove(stale_id) else {
+            continue;
+        };
+        let mut falls_back_to_official = false;
+        if let Some(table) = stale_item.as_table_like_mut() {
+            // 0.149 彻底移除了 chat wire API：`wire_api = "chat"`（或任何其它
+            // 非 "responses" 值）让整份配置反序列化失败，无条件归一化。
+            if table.get("wire_api").and_then(|item| item.as_str()) != Some("responses") {
+                table.insert("wire_api", toml_edit::value("responses"));
+            }
+            // 空/缺失 `name` 的非 bedrock 表加载即拒（"provider name must not
+            // be empty"，无论是否活跃）——旧的更新路径正是无 name 表的源头。
+            if table
+                .get("name")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .is_none()
+            {
+                table.insert("name", toml_edit::value("Custom"));
+            }
+            falls_back_to_official = codex_provider_table_falls_back_to_official_auth(&*table);
+        }
+        model_providers.insert(&migrated_id, stale_item);
+
+        // 改名表不会泄漏官方登录时跟随改名：注入的 token 短路 auth.json 回退，
+        // 从不回退的表（自有凭据、header/query 鉴权、无鉴权本地服务）保住
+        // 合法的第三方路由。只有无凭据的 `requires_openai_auth = true` 表折回
+        // 内置 provider——跟着它会把保留的 OAuth 登录发去陈旧 base_url。
+        if table_is_active_route && !official && (has_token || !falls_back_to_official) {
+            doc["model_provider"] = toml_edit::value(migrated_id.as_str());
+        }
+    }
+
+    Ok(Some(doc.to_string()))
+}
+
+/// codex 0.149 在反序列化时拒绝任何非 Bedrock provider 表 `name` 为空或
+/// 缺失的整份配置——无论是否活跃（"provider name must not be empty"）。
+/// 历史 cc-switch 更新与手写配置造出过只带 `base_url` 的表，所以每次
+/// live 写入都把自定义表归一化成可加载的形状；name 是装饰性的，表 id
+/// 就是足够好的值。Bedrock 表相反：0.149 只允许它们覆盖
+/// base_url/auth/http_headers/aws.*，其它任何非默认字段——包括 `name`——
+/// 都会让内置 merge 拒绝整份配置，所以保留 id 完全跳过。
+fn backfill_codex_custom_provider_names(config_text: &str) -> Result<Option<String>, AppError> {
+    if !config_text.contains("model_providers") {
+        return Ok(None);
+    }
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let Some(model_providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return Ok(None);
+    };
+
+    let ids: Vec<String> = model_providers
+        .iter()
+        .filter(|(id, item)| {
+            is_custom_codex_model_provider_id(id) && item.as_table_like().is_some()
+        })
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let mut changed = false;
+    for id in ids {
+        let Some(table) = model_providers
+            .get_mut(&id)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        else {
+            continue;
+        };
+        if table
+            .get("name")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .is_none()
+        {
+            table.insert("name", toml_edit::value(id.as_str()));
+            changed = true;
+        }
+    }
+    Ok(changed.then(|| doc.to_string()))
+}
+
+/// codex 0.149 在反序列化时校验**每一张** provider 表——无论是否活跃——并对
+/// 它禁止的字段组合拒绝整份配置：两个 Bedrock 内置之外的 `aws`，以及命令式
+/// `auth` 与 `requires_openai_auth` / `env_key` / `experimental_bearer_token`
+/// 的组合（ModelProviderInfo::validate）。这些都没法归一化掉（删用户手写的
+/// 字段不归我们管），所以切换路径提前拒绝并给出可操作的报错，而不是写一份
+/// codex 拒绝启动的配置。有意只从切换写入路径调用：无闸路径（代理
+/// backup/restore）不能对用户自己的备份 fail-closed。
+fn preflight_codex_provider_table_conflicts(config_text: &str) -> Result<(), AppError> {
+    if !config_text.contains("model_providers") {
+        return Ok(());
+    }
+    let Ok(doc) = config_text.parse::<DocumentMut>() else {
+        // 语法非法的 TOML 稍后由写入校验器拒绝。
+        return Ok(());
+    };
+    let Some(model_providers) = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table_like())
+    else {
+        return Ok(());
+    };
+    for (id, item) in model_providers.iter() {
+        let Some(table) = item.as_table_like() else {
+            continue;
+        };
+        let is_bedrock = matches!(id, "amazon-bedrock" | "amazon-bedrock-runtime");
+        if !is_bedrock && table.get("aws").is_some() {
+            return Err(AppError::localized(
+                "provider.codex.config.invalid_provider_table",
+                format!(
+                    "Codex 0.149 拒绝加载该配置：`aws` 字段仅允许用于内置的 amazon-bedrock / amazon-bedrock-runtime，[model_providers.{id}] 不能携带它。请移除该字段或改用 Bedrock 内置 id"
+                ),
+                format!(
+                    "Codex 0.149 refuses to load this config: `aws` is only supported on the built-in amazon-bedrock / amazon-bedrock-runtime providers, so [model_providers.{id}] must not carry it. Remove the field or use a Bedrock built-in id"
+                ),
+            ));
+        }
+        if table.get("auth").is_some() {
+            let requires_openai_auth = table
+                .get("requires_openai_auth")
+                .and_then(|item| item.as_bool())
+                .unwrap_or(false);
+            let conflict = if requires_openai_auth {
+                Some("requires_openai_auth")
+            } else if table.get("env_key").is_some() {
+                Some("env_key")
+            } else if table.get("experimental_bearer_token").is_some() {
+                Some("experimental_bearer_token")
+            } else {
+                None
+            };
+            if let Some(conflict) = conflict {
+                return Err(AppError::localized(
+                    "provider.codex.config.invalid_provider_table",
+                    format!(
+                        "Codex 0.149 拒绝加载该配置：[model_providers.{id}] 的 `auth` 不能与 `{conflict}` 同时存在。请移除其中之一"
+                    ),
+                    format!(
+                        "Codex 0.149 refuses to load this config: `auth` on [model_providers.{id}] cannot be combined with `{conflict}`. Remove one of them"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 重写旧式「重路由内置 openai provider」形状——`model_provider` 未设置或
+/// 为 "openai" 且带顶层 `openai_base_url`——成名为 `cc-switch` 的自定义
+/// provider 表。codex 0.149 之前这个形状能跑：内置 provider 从 auth.json
+/// 读第三方 key（环境鉴权）；auth.json 不再携带第三方 key，key 需要一个
+/// provider 作用域的槽位。内置 `openai` provider 说 Responses wire 协议，
+/// 表钉住 `wire_api = "responses"`，流量语义不变。
+fn normalize_codex_legacy_openai_reroute(config_text: &str) -> Result<Option<String>, AppError> {
+    if !config_text.contains("openai_base_url") {
+        return Ok(None);
+    }
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    // 精确匹配：`openai_base_url` 只重路由内置 provider，内置查找大小写
+    // 敏感——路由到 `OpenAI` 的配置指向自定义表，不是这个旋钮。
+    let targets_built_in_openai = match active_codex_model_provider_id(&doc) {
+        None => true,
+        Some(id) => id == "openai",
+    };
+    if !targets_built_in_openai {
+        return Ok(None);
+    }
+    let Some(base_url) = doc
+        .get("openai_base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    // `model_providers` 存在但不是表（标量垃圾）：留给安全闸，不瞎猜。
+    // inline table **要**处理——代理 backup/restore 不带闸调用 prepare，
+    // 跳过它们会把 key 留在死掉的顶层字段里、旁边是活的 auth.json 凭据。
+    if let Some(item) = doc.get("model_providers") {
+        if !item.is_table_like() {
+            return Ok(None);
+        }
+    }
+
+    let migrated_id = first_free_cc_switch_provider_id(
+        doc.get("model_providers")
+            .and_then(|item| item.as_table_like()),
+    );
+
+    doc.as_table_mut().remove("openai_base_url");
+    doc["model_provider"] = toml_edit::value(migrated_id.as_str());
+
+    // 跟随容器自身的风格：标准表挂子表，inline `model_providers = { … }` 挂
+    // inline 成员。
+    let container_is_inline = doc
+        .get("model_providers")
+        .is_some_and(|item| item.as_table().is_none());
+    if doc.get("model_providers").is_none() {
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(true);
+        doc.insert("model_providers", toml_edit::Item::Table(table));
+    }
+    let Some(model_providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return Ok(None);
+    };
+    if container_is_inline {
+        let mut provider_table = toml_edit::InlineTable::new();
+        provider_table.insert("name", "Custom".into());
+        provider_table.insert("base_url", base_url.into());
+        provider_table.insert("wire_api", "responses".into());
+        model_providers.insert(
+            &migrated_id,
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(provider_table)),
+        );
+    } else {
+        let mut provider_table = toml_edit::Table::new();
+        provider_table.insert("name", toml_edit::value("Custom"));
+        provider_table.insert("base_url", toml_edit::value(base_url));
+        provider_table.insert("wire_api", toml_edit::value("responses"));
+        model_providers.insert(&migrated_id, toml_edit::Item::Table(provider_table));
+    }
+
+    Ok(Some(doc.to_string()))
+}
+
 /// Build the live Codex config for provider switching.
 ///
 /// The stored provider keeps its API key in `auth.OPENAI_API_KEY`. Live Codex
@@ -3170,6 +3599,9 @@ pub fn write_codex_live_for_provider(
 /// bearer 路必须不声明 `requires_openai_auth`（不变式见
 /// [`write_codex_live_for_provider`]）——存储模板带它（上游预设 / sub2api 面板
 /// 抄来的）也会在注入 token 时一并归一化掉。
+///
+/// 这里是唯一的归一化→注入入口：所有调用方——供应商切换、接管备份重建、
+/// 恢复——都会拿到保留表迁移与 name 回填，幂等。
 pub fn prepare_codex_provider_live_config(
     auth: &Value,
     config_text: &str,
@@ -3177,13 +3609,23 @@ pub fn prepare_codex_provider_live_config(
     let token = extract_codex_auth_api_key(auth)
         .or_else(|| extract_codex_experimental_bearer_token(config_text));
 
-    Ok(match token {
-        Some(token) => {
-            let with_token = set_codex_experimental_bearer_token(config_text, &token)?;
-            remove_codex_provider_requires_openai_auth(&with_token)?
-        }
-        None => config_text.to_string(),
-    })
+    // 无条件：陈旧的保留表让 codex 拒绝整份配置（0.148+），有无 token 都是。
+    // 第三方语境——可鉴权的表跟随改名（见迁移器）。
+    let migrated = migrate_stale_reserved_provider_tables(config_text, false, token.is_some())?;
+    let config_text = migrated.as_deref().unwrap_or(config_text);
+
+    // 同样无条件（覆盖无 key 的第三方路径；official 写入分支单独调用）：
+    // 0.149 对任何无 name 的自定义表拒绝整份配置，无论是否活跃。
+    let named = backfill_codex_custom_provider_names(config_text)?;
+    let config_text = named.as_deref().unwrap_or(config_text);
+
+    let Some(token) = token else {
+        return Ok(config_text.to_string());
+    };
+    let normalized = normalize_codex_legacy_openai_reroute(config_text)?;
+    let config_text = normalized.as_deref().unwrap_or(config_text);
+    let with_token = set_codex_experimental_bearer_token(config_text, &token)?;
+    remove_codex_provider_requires_openai_auth(&with_token)
 }
 
 /// 编辑弹窗读取 live 快照时，把 config.toml 里的 `experimental_bearer_token`
@@ -3323,6 +3765,32 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                 .map(str::to_string);
 
             if let Some(provider_key) = model_provider {
+                // validate_reserved_model_provider_ids（0.148 起）对配置里出现
+                // `[model_providers.openai]` 等保留 id 表整份报错（"Built-in
+                // providers cannot be overridden"），Codex 直接起不来。保留
+                // 判定是**大小写精确**的——`OpenAI` 等变体是合法自定义 id，
+                // 照常走建表分支；bedrock 两个 id 被豁免，覆盖表合法。
+                if provider_key == "openai" {
+                    // 内置 openai 的改址走它的正统机制——顶层
+                    // `openai_base_url`；wire_api 由 CLI 内置固定，无需写。
+                    if field == "base_url" {
+                        if trimmed.is_empty() {
+                            doc.as_table_mut().remove("openai_base_url");
+                        } else {
+                            doc["openai_base_url"] = toml_edit::value(trimmed);
+                        }
+                    }
+                    return Ok(doc.to_string());
+                }
+                if provider_key == "ollama" || provider_key == "lmstudio" {
+                    // 这两个保留 id 没有等价的顶层旋钮：建表=生成 Codex 拒绝
+                    // 加载的配置（接管期间整个 CLI 起不来），明确报错优于
+                    // 静默写出致命配置。
+                    return Err(format!(
+                        "Codex 禁止覆盖内置 provider `{provider_key}`（0.148 起会拒绝加载整份配置），无法改写其 {field}；请改用自定义 provider id"
+                    ));
+                }
+
                 // Ensure [model_providers] table exists
                 //
                 // 用 as_table_like_mut 而非 as_table_mut：用户把配置写成 inline table
@@ -3363,6 +3831,27 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                             provider_table.remove(field);
                         } else {
                             provider_table.insert(field, toml_edit::value(trimmed));
+                        }
+                        // 0.149 在反序列化时就拒绝 name 为空/缺失的非 bedrock 表
+                        // （"provider name must not be empty"，整份配置拒载）——
+                        // 历史上无 name 表的一大制造源头就是本函数（代理接管只写
+                        // base_url/wire_api），建表/改表时必须保证 name 非空。
+                        // 反向豁免两个 bedrock 保留 id：0.149 只允许它们覆盖
+                        // base_url/auth/http_headers/aws.*，写入 name 会让内置
+                        // merge 拒绝整份配置。
+                        let is_bedrock = matches!(
+                            provider_key.as_str(),
+                            "amazon-bedrock" | "amazon-bedrock-runtime"
+                        );
+                        if !is_bedrock
+                            && provider_table
+                                .get("name")
+                                .and_then(|item| item.as_str())
+                                .map(str::trim)
+                                .filter(|name| !name.is_empty())
+                                .is_none()
+                        {
+                            provider_table.insert("name", toml_edit::value(provider_key.as_str()));
                         }
                         return Ok(doc.to_string());
                     }
@@ -6346,7 +6835,7 @@ base_url = "http://127.0.0.1:9999/v1"
 
     #[test]
     fn edit_auth_reconcile_skips_official_and_oauth_only() {
-        let mut live = json!({
+        let live = json!({
             "auth": { "OPENAI_API_KEY": "sk-anything" },
             "config": "model_provider = \"x\"\n\n[model_providers.x]\nname = \"x\"\nexperimental_bearer_token = \"sk-token\"\n"
         });
@@ -6387,6 +6876,536 @@ base_url = "http://127.0.0.1:9999/v1"
             live["auth"]["OPENAI_API_KEY"].as_str(),
             Some("sk-relay-own"),
             "无库内 auth 时以 live auth 为模板，key 槽位换成自家 bearer"
+        );
+    }
+
+    #[test]
+    fn legacy_openai_reroute_is_normalized_into_a_custom_table() {
+        let legacy = r#"# keep me
+model = "gpt-5.4"
+model_provider = "openai"
+openai_base_url = "https://relay.example/v1"
+"#;
+        let normalized = normalize_codex_legacy_openai_reroute(legacy)
+            .expect("normalize")
+            .expect("legacy shape must be rewritten");
+
+        assert!(
+            !normalized.contains("openai_base_url"),
+            "the top-level reroute must be removed; got:\n{normalized}"
+        );
+        assert!(
+            normalized.contains("model_provider = \"cc-switch\"")
+                && normalized.contains("[model_providers.cc-switch]")
+                && normalized.contains("base_url = \"https://relay.example/v1\"")
+                && normalized.contains("wire_api = \"responses\""),
+            "routing must move to a loadable cc-switch table; got:\n{normalized}"
+        );
+        assert!(
+            normalized.contains("# keep me") && normalized.contains("model = \"gpt-5.4\""),
+            "unrelated content must survive; got:\n{normalized}"
+        );
+        // 幂等：归一化后的形状不再命中。
+        assert!(normalize_codex_legacy_openai_reroute(&normalized)
+            .expect("normalize")
+            .is_none());
+        // 重写后的形状给 key 一个 provider 作用域的槽位。
+        let injected =
+            prepare_codex_provider_live_config(&json!({"OPENAI_API_KEY": "sk-test"}), &normalized)
+                .expect("prepare live config");
+        assert!(
+            injected.contains("experimental_bearer_token = \"sk-test\""),
+            "token must land inside the cc-switch table; got:\n{injected}"
+        );
+    }
+
+    #[test]
+    fn legacy_reroute_normalization_covers_exact_built_in_openai_only() {
+        // 未设置 model_provider 时默认走内置 openai provider。
+        assert!(normalize_codex_legacy_openai_reroute(
+            "openai_base_url = \"https://relay.example/v1\"\n"
+        )
+        .expect("normalize")
+        .is_some());
+
+        for untouched in [
+            // 内置查找大小写敏感：`OpenAI` 指向自定义表，改址旋钮对它无效
+            "model_provider = \"OpenAI\"\nopenai_base_url = \"https://relay.example/v1\"\n",
+            // 自定义 provider：路由它的不是 openai_base_url
+            "model_provider = \"custom\"\nopenai_base_url = \"https://relay.example/v1\"\n\n[model_providers.custom]\nbase_url = \"https://aihubmix.example/v1\"\n",
+            // 非 openai 内置：openai_base_url 无效
+            "model_provider = \"ollama\"\nopenai_base_url = \"https://relay.example/v1\"\n",
+            // 没有可重写的内容
+            "model_provider = \"openai\"\n",
+            "openai_base_url = \"\"\n",
+        ] {
+            assert!(
+                normalize_codex_legacy_openai_reroute(untouched)
+                    .expect("normalize")
+                    .is_none(),
+                "shape must be left alone:\n{untouched}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_reroute_normalization_never_overwrites_a_user_cc_switch_table() {
+        // 用户手写的 [model_providers.cc-switch] 证明不了归属——覆盖它会丢
+        // 掉他们的 headers/query 参数再把丢失回填进数据库。迁移改用第一个
+        // 空闲的后缀 id 继续：直接拒绝会让代理 backup/restore（不带安全闸
+        // 调 prepare）写出带活 auth.json 凭据的未迁移形状。
+        let conflicted = r#"model_provider = "openai"
+openai_base_url = "https://relay.example/v1"
+
+[model_providers.cc-switch]
+name = "Mine"
+base_url = "https://mine.example/v1"
+http_headers = { x-team = "42" }
+"#;
+        let normalized = normalize_codex_legacy_openai_reroute(conflicted)
+            .expect("normalize")
+            .expect("conflicted shape must still migrate");
+        assert!(
+            normalized.contains("model_provider = \"cc-switch-2\"")
+                && normalized.contains("[model_providers.cc-switch-2]"),
+            "migration must pick the first free suffixed id; got:\n{normalized}"
+        );
+        assert!(
+            normalized.contains("name = \"Mine\"")
+                && normalized.contains("https://mine.example/v1")
+                && normalized.contains("x-team"),
+            "the user's own table must survive untouched; got:\n{normalized}"
+        );
+        assert!(
+            !normalized.contains("openai_base_url"),
+            "the reroute must still be rewritten away; got:\n{normalized}"
+        );
+    }
+
+    #[test]
+    fn legacy_reroute_normalization_handles_inline_model_providers() {
+        // 代理 backup/restore 不带闸调用 prepare，inline `model_providers = { … }`
+        // 旁边的 legacy 改址也必须迁移——跳过它会把 key 留在死掉的顶层字段里、
+        // 旁边是活的 auth.json 凭据。
+        let inline_shape = r#"model_provider = "openai"
+openai_base_url = "https://relay.example/v1"
+model_providers = { mine = { name = "Mine", base_url = "https://mine.example/v1" } }
+"#;
+        let prepared =
+            prepare_codex_provider_live_config(&json!({"OPENAI_API_KEY": "sk-test"}), inline_shape)
+                .expect("prepare live config");
+        assert!(
+            !prepared.contains("openai_base_url"),
+            "the reroute must be rewritten away; got:\n{prepared}"
+        );
+        assert!(
+            prepared.contains("model_provider = \"cc-switch\"")
+                && prepared.contains("cc-switch = {"),
+            "migration must add an inline member matching the container style; got:\n{prepared}"
+        );
+        assert!(
+            prepared.contains("mine = {") && prepared.contains("https://mine.example/v1"),
+            "the user's inline table must survive untouched; got:\n{prepared}"
+        );
+        assert_eq!(
+            extract_codex_experimental_bearer_token(&prepared).as_deref(),
+            Some("sk-test"),
+            "the key must resolve for the migrated inline provider"
+        );
+    }
+
+    #[test]
+    fn stale_reserved_tables_are_renamed_with_fallback_aware_routing() {
+        // 旧版 cc-switch 接管投影造出过保留 [model_providers.openai]/[.ollama]/
+        // [.lmstudio] 表；codex 0.148+ 整份拒绝加载。表被改名并变得可加载；
+        // 路由跟随——除非该表会从 auth.json 解析鉴权且没有可注入的 token 短路。
+        let stale = r#"model_provider = "openai"
+model = "gpt-5.4"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://relay.example/v1"
+http_headers = { x-team = "42" }
+"#;
+
+        // 带可注入 key：跟随改名表并注入——折回内置 provider 会静默给保留的
+        // 官方账号计费（或 preservation 关掉时 401）。
+        let prepared =
+            prepare_codex_provider_live_config(&json!({"OPENAI_API_KEY": "sk-test"}), stale)
+                .expect("prepare live config");
+        assert!(
+            !prepared.contains("[model_providers.openai]")
+                && prepared.contains("[model_providers.cc-switch]")
+                && prepared.contains("x-team")
+                && prepared.contains("wire_api = \"responses\""),
+            "the table must be renamed losslessly (wire_api defaulted); got:\n{prepared}"
+        );
+        assert!(
+            prepared.contains("model_provider = \"cc-switch\""),
+            "with a key the route must follow the renamed table; got:\n{prepared}"
+        );
+        assert_eq!(
+            extract_codex_experimental_bearer_token(&prepared).as_deref(),
+            Some("sk-test"),
+            "the key must land in the followed table"
+        );
+
+        // 无 key 但表带自有凭据（显式 Authorization header）：跟随——0.149
+        // 对它按无鉴权解析、provider headers 保留。无 name 的表同时回填，
+        // 改名表才能加载。
+        let header_auth_stale = r#"model_provider = "openai"
+
+[model_providers.openai]
+base_url = "https://relay.example/v1"
+http_headers = { Authorization = "Bearer own-key" }
+"#;
+        let keyless = prepare_codex_provider_live_config(&json!({}), header_auth_stale)
+            .expect("prepare live config without token");
+        assert!(
+            keyless.contains("model_provider = \"cc-switch\"") && keyless.contains("own-key"),
+            "self-authenticating tables must keep their route; got:\n{keyless}"
+        );
+        assert!(
+            keyless.contains("name = \"Custom\""),
+            "a missing name must be backfilled — 0.149 rejects the whole config otherwise; got:\n{keyless}"
+        );
+
+        // 无 key 也无凭据（requires_openai_auth 默认 false）：跟随——0.149 对
+        // 这种表按无鉴权解析、从不读 auth.json，本地/中转路由保住。陈旧的
+        // `wire_api = "chat"` 被归一化：0.149 移除了 chat wire API，任何非
+        // "responses" 值整份拒绝。
+        let unauthenticated_stale = r#"model_provider = "openai"
+
+[model_providers.openai]
+name = "Local Ollama"
+base_url = "http://127.0.0.1:11434/v1"
+wire_api = "chat"
+"#;
+        let local = prepare_codex_provider_live_config(&json!({}), unauthenticated_stale)
+            .expect("prepare live config without token");
+        assert!(
+            local.contains("model_provider = \"cc-switch\"")
+                && local.contains("wire_api = \"responses\"")
+                && !local.contains("wire_api = \"chat\""),
+            "unauthenticated tables keep their route and chat wire_api is normalized; got:\n{local}"
+        );
+
+        // 无 key 但表带自有 scoped token：跟随——`experimental_bearer_token`
+        // 在 0.149 短路链第二位，表自鉴权。
+        let scoped_token_stale = r#"model_provider = "openai"
+
+[model_providers.openai]
+name = "Relay"
+base_url = "https://relay.example/v1"
+experimental_bearer_token = "own-scoped-token"
+"#;
+        let scoped = prepare_codex_provider_live_config(&json!({}), scoped_token_stale)
+            .expect("prepare live config without token");
+        assert!(
+            scoped.contains("model_provider = \"cc-switch\"")
+                && scoped.contains("own-scoped-token"),
+            "tables with a scoped token must keep their route; got:\n{scoped}"
+        );
+
+        // 无 key 且无可用凭据（只有 requires_openai_auth）：永不跟随——路由
+        // 折回内置 provider，requires_openai_auth 回退不能对着陈旧的第三方
+        // 地址解析 auth.json。
+        let fallback_stale = r#"model_provider = "openai"
+
+[model_providers.openai]
+base_url = "https://relay.example/v1"
+requires_openai_auth = true
+"#;
+        let snapped = prepare_codex_provider_live_config(&json!({}), fallback_stale)
+            .expect("prepare live config without token");
+        assert!(
+            snapped.contains("model_provider = \"openai\"")
+                && !snapped.contains("[model_providers.openai]")
+                && snapped.contains("[model_providers.cc-switch]"),
+            "credential-less tables are renamed but the route snaps back; got:\n{snapped}"
+        );
+
+        // official 语境永不跟随，哪怕表里有凭据。
+        let official = migrate_stale_reserved_provider_tables(header_auth_stale, true, true)
+            .expect("migrate")
+            .expect("stale table must still be renamed");
+        assert!(
+            official.contains("model_provider = \"openai\"")
+                && official.contains("[model_providers.cc-switch]"),
+            "official routes never follow a renamed table; got:\n{official}"
+        );
+
+        // 三个保留 id 都迁移；不活跃的永不改路由。
+        let multi_stale = r#"model_provider = "third"
+
+[model_providers.third]
+base_url = "https://third.example/v1"
+
+[model_providers.ollama]
+base_url = "http://127.0.0.1:11434/v1"
+
+[model_providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+"#;
+        let cleaned = migrate_stale_reserved_provider_tables(multi_stale, false, true)
+            .expect("migrate")
+            .expect("stale tables must be renamed");
+        assert!(
+            !cleaned.contains("[model_providers.ollama]")
+                && !cleaned.contains("[model_providers.lmstudio]")
+                && cleaned.contains("[model_providers.cc-switch]")
+                && cleaned.contains("[model_providers.cc-switch-2]")
+                && cleaned.contains("model_provider = \"third\""),
+            "every reserved table is renamed, the active route stays; got:\n{cleaned}"
+        );
+
+        // 保留 id 校验大小写精确：`OpenAI` 是合法自定义 id，不动。
+        let custom_case_variant = r#"model_provider = "OpenAI"
+
+[model_providers.OpenAI]
+base_url = "https://mine.example/v1"
+"#;
+        assert!(
+            migrate_stale_reserved_provider_tables(custom_case_variant, false, true)
+                .expect("migrate")
+                .is_none(),
+            "case-variant custom ids are not stale residue"
+        );
+
+        // 无可迁移内容 -> 不重写。
+        assert!(
+            migrate_stale_reserved_provider_tables("model = \"gpt-5\"\n", false, true)
+                .expect("migrate")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn case_variant_reserved_ids_are_custom_providers() {
+        // 内置查找与保留 id 校验都大小写敏感，[model_providers.OpenAI] 是
+        // 合法自定义 provider——token 必须落进表里，而不是死掉的顶层字段。
+        assert!(is_custom_codex_model_provider_id("OpenAI"));
+        assert!(is_custom_codex_model_provider_id("Ollama"));
+        assert!(!is_custom_codex_model_provider_id("openai"));
+        // `oss` / `ollama-chat` 在 0.148/0.149 上不是保留 id——都按普通自定义
+        // 表加载，token 也必须能到达它们。
+        assert!(is_custom_codex_model_provider_id("oss"));
+        assert!(is_custom_codex_model_provider_id("ollama-chat"));
+        // 两个 bedrock 内置在 0.149 上是保留 id。
+        assert!(!is_custom_codex_model_provider_id("amazon-bedrock"));
+        assert!(!is_custom_codex_model_provider_id("amazon-bedrock-runtime"));
+
+        let case_variant = r#"model_provider = "OpenAI"
+model = "gpt-5.4"
+
+[model_providers.OpenAI]
+name = "Mine"
+base_url = "https://mine.example/v1"
+wire_api = "responses"
+"#;
+        let prepared =
+            prepare_codex_provider_live_config(&json!({"OPENAI_API_KEY": "sk-test"}), case_variant)
+                .expect("prepare live config");
+        assert!(
+            prepared.contains("[model_providers.OpenAI]"),
+            "the custom table must survive; got:\n{prepared}"
+        );
+        assert_eq!(
+            extract_codex_experimental_bearer_token(&prepared).as_deref(),
+            Some("sk-test"),
+        );
+        let parsed: toml::Value = toml::from_str(&prepared).expect("parse output");
+        assert!(
+            parsed
+                .get("model_providers")
+                .and_then(|mp| mp.get("OpenAI"))
+                .and_then(|t| t.get("experimental_bearer_token"))
+                .is_some(),
+            "the token must land inside the case-variant custom table; got:\n{prepared}"
+        );
+        assert!(
+            parsed.get("experimental_bearer_token").is_none(),
+            "no dead top-level token; got:\n{prepared}"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_provider_table_conflicts_codex_refuses_to_load() {
+        // 0.149 校验**每一张** provider 表（闲置表也含）并拒绝：Bedrock 内置
+        // 之外的 aws，以及 auth 与 requires_openai_auth / env_key /
+        // experimental_bearer_token 的组合。这些没法归一化掉，切换必须提前
+        // 拒绝。LoongPort 的预检挂在 write_codex_live_for_provider 头部，
+        // official 与第三方分支共用。
+        let rejected = [
+            // 自定义表上裸 aws，哪都没有 requires_openai_auth
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\nbase_url = \"https://relay.example/v1\"\naws = { region = \"us-east-1\" }\n",
+            // auth × requires_openai_auth —— 带 key 会跳过回退闸，预检必须
+            // 独立抓住它
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\nbase_url = \"https://relay.example/v1\"\nrequires_openai_auth = true\nauth = { command = \"my-auth\" }\n",
+            // auth × env_key / experimental_bearer_token
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\nbase_url = \"https://relay.example/v1\"\nenv_key = \"MY_KEY\"\nauth = { command = \"my-auth\" }\n",
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\nbase_url = \"https://relay.example/v1\"\nexperimental_bearer_token = \"tok\"\nauth = { command = \"my-auth\" }\n",
+            // 闲置的冲突表同样毒化整份配置
+            "model_provider = \"active\"\n\n[model_providers.active]\nname = \"Active\"\nbase_url = \"https://relay.example/v1\"\n\n[model_providers.idle]\nname = \"Idle\"\nbase_url = \"https://idle.example/v1\"\naws = { region = \"us-east-1\" }\n",
+        ];
+        for config in rejected {
+            assert!(
+                preflight_codex_provider_table_conflicts(config).is_err(),
+                "preflight must refuse:\n{config}"
+            );
+        }
+
+        // 可加载的形状保持放行：单独的命令式 auth，Bedrock 内置上的 aws。
+        let accepted = [
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\nbase_url = \"https://relay.example/v1\"\nauth = { command = \"my-auth\" }\n",
+            "model_provider = \"amazon-bedrock\"\n\n[model_providers.amazon-bedrock]\nbase_url = \"https://bedrock.example/v1\"\naws = { region = \"us-east-1\" }\n",
+            "model_provider = \"amazon-bedrock-runtime\"\n\n[model_providers.amazon-bedrock-runtime]\nbase_url = \"https://bedrock.example/v1\"\naws = { region = \"us-east-1\" }\n",
+            // 没有 model_providers / 语法损坏的 TOML 不在这里炸——稍后由
+            // 写入校验器拒绝。
+            "model = \"gpt-5\"\n",
+            "this is not = valid toml {{{\n",
+        ];
+        for config in accepted {
+            assert!(
+                preflight_codex_provider_table_conflicts(config).is_ok(),
+                "loadable shape must pass the preflight:\n{config}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_toml_field_backfills_provider_name() {
+        // 0.149 对任何无 name 的非 bedrock provider 表整份拒绝——本函数
+        // 历史上正是这类表的制造源头。建表/改表必须留下可加载的形状。
+        let created = update_codex_toml_field(
+            "model_provider = \"myrelay\"\n",
+            "base_url",
+            "https://relay.example/v1",
+        )
+        .expect("update");
+        assert!(
+            created.contains("name = \"myrelay\""),
+            "a newly created table must get a non-empty name; got:\n{created}"
+        );
+
+        let existing_nameless = r#"model_provider = "myrelay"
+
+[model_providers.myrelay]
+base_url = "https://old.example/v1"
+"#;
+        let touched =
+            update_codex_toml_field(existing_nameless, "base_url", "https://new.example/v1")
+                .expect("update");
+        assert!(
+            touched.contains("name = \"myrelay\""),
+            "touching a name-less table must backfill the name; got:\n{touched}"
+        );
+
+        let existing_named = r#"model_provider = "myrelay"
+
+[model_providers.myrelay]
+name = "My Relay"
+base_url = "https://old.example/v1"
+"#;
+        let kept = update_codex_toml_field(existing_named, "base_url", "https://new.example/v1")
+            .expect("update");
+        assert!(
+            kept.contains("name = \"My Relay\"") && !kept.contains("name = \"myrelay\""),
+            "an existing name must never be overwritten; got:\n{kept}"
+        );
+    }
+
+    #[test]
+    fn update_toml_field_leaves_bedrock_tables_nameless() {
+        // 0.149 只允许 Bedrock 内置覆盖 base_url/auth/http_headers/aws.*；
+        // 其它任何非默认字段——包括 `name`——都让内置 merge 拒绝整份配置。
+        // 代理接管通过本函数改写 base_url + wire_api，name 回填必须跳过这两
+        // 个保留 id。（wire_api 能活是因为 "responses" 是 0.149 唯一能反序
+        // 列化的值，恰等于默认。）
+        for id in ["amazon-bedrock", "amazon-bedrock-runtime"] {
+            let input = format!(
+                "model_provider = \"{id}\"\n\n[model_providers.{id}]\nbase_url = \"https://bedrock.example/v1\"\n"
+            );
+            let rerouted = update_codex_toml_field(&input, "base_url", "http://127.0.0.1:5000/v1")
+                .expect("update base_url");
+            let rerouted = update_codex_toml_field(&rerouted, "wire_api", "responses")
+                .expect("update wire_api");
+            assert!(
+                rerouted.contains("base_url = \"http://127.0.0.1:5000/v1\"")
+                    && rerouted.contains("wire_api = \"responses\""),
+                "the takeover overrides must land in the table; got:\n{rerouted}"
+            );
+            assert!(
+                !rerouted.contains("name ="),
+                "bedrock tables must never receive a name; got:\n{rerouted}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_toml_field_refuses_other_reserved_built_in_ids() {
+        // 0.148 起保留 id 表让 codex 整份拒绝加载——对 openai/ollama/lmstudio
+        // 建表就是制造致命配置。openai 走顶层 openai_base_url 正统旋钮；
+        // ollama/lmstudio 没有等价旋钮，明确报错。大小写变体是自定义 id，
+        // 照常可写。
+        let base = update_codex_toml_field(
+            "model_provider = \"openai\"\n",
+            "base_url",
+            "https://relay.example/v1",
+        )
+        .expect("update");
+        assert!(
+            base.contains("openai_base_url = \"https://relay.example/v1\"")
+                && !base.contains("[model_providers.openai]"),
+            "built-in openai reroutes via the top-level knob; got:\n{base}"
+        );
+
+        for reserved in ["ollama", "lmstudio"] {
+            let err = update_codex_toml_field(
+                &format!("model_provider = \"{reserved}\"\n"),
+                "base_url",
+                "https://relay.example/v1",
+            );
+            assert!(
+                err.is_err(),
+                "writing into reserved built-in `{reserved}` must refuse, got: {:?}",
+                err.unwrap()
+            );
+        }
+
+        let case_variant = update_codex_toml_field(
+            "model_provider = \"Ollama\"\n",
+            "base_url",
+            "http://127.0.0.1:5000/v1",
+        )
+        .expect("case-variant custom id must stay writable");
+        assert!(
+            case_variant.contains("[model_providers.Ollama]"),
+            "case variants take the custom table path; got:\n{case_variant}"
+        );
+    }
+
+    #[test]
+    fn prepare_backfills_names_for_idle_custom_tables() {
+        // 0.149 对任何无 name 的自定义表整份拒绝——无论是否活跃。prepare
+        // 是唯一的归一化入口，闲置表也必须被补上 name。
+        let nameless_idle = r#"model_provider = "active"
+
+[model_providers.active]
+name = "Active"
+base_url = "https://active.example/v1"
+
+[model_providers.idle]
+base_url = "https://idle.example/v1"
+"#;
+        let prepared = prepare_codex_provider_live_config(
+            &json!({"OPENAI_API_KEY": "sk-test"}),
+            nameless_idle,
+        )
+        .expect("prepare live config");
+        assert!(
+            prepared.contains("[model_providers.idle]") && prepared.contains("name = \"idle\""),
+            "idle name-less tables must be backfilled; got:\n{prepared}"
         );
     }
 }
