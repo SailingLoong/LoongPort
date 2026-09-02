@@ -45,7 +45,8 @@ use crate::provider::Provider;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp, login,
     model_verification::target as verification_target, newapi, newapi_provision, newapi_purchase,
-    pricing, provider_fingerprint, provision, purchase, reconcile, remote_config,
+    platform_map, pricing, provider_fingerprint, provision, purchase, reconcile, remote_config,
+    site_config,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -3067,6 +3068,9 @@ struct ManagedProvisionCandidate {
 #[derive(Default)]
 struct ManagedProvisionBatch {
     account_id: Option<i64>,
+    /// 登录/添加时按约定路径探测到的站点声明（relay/site_config.rs）。
+    /// `None` = 站长没放文件或拉取失败（探测语义，静默降级）。
+    site_declaration: Option<crate::relay::site_config::SiteDeclaredConfig>,
     candidates: Vec<ManagedProvisionCandidate>,
     /// Upstream-observed `(app_type, provider_id)` pairs that stale pruning must retain.
     observed_keep: std::collections::HashSet<(String, String)>,
@@ -3143,6 +3147,16 @@ async fn provision_backend(
     op: &creds::Relay,
     browser_fallback: Option<api::BrowserApiFallback>,
 ) -> Result<ManagedProvisionBatch, AppError> {
+    // 站点声明探测与 backend 无关（约定路径是 LoongPort 的约定，newapi 站长同样能放）：
+    // 404/失败/格式不认都是 None，绝不打断登录主流程。
+    let site_declaration = crate::relay::site_config::fetch_site_declaration(&op.site_origin).await;
+    if site_declaration.is_some() {
+        log::info!(
+            "{}",
+            crate::diagnostics::DiagnosticEvent::new("relay.site_config", "declaration_found")
+                .field_display("site", crate::url_for_log(&op.site_origin))
+        );
+    }
     match op.backend_kind {
         discovery::BackendKind::Sub2Api => {
             let mut client = api::Client::new(
@@ -3190,6 +3204,7 @@ async fn provision_backend(
                 .collect();
             Ok(ManagedProvisionBatch {
                 account_id: op.account_id,
+                site_declaration,
                 candidates,
                 observed_keep: std::collections::HashSet::new(),
                 failures: result
@@ -3216,6 +3231,7 @@ async fn provision_backend(
 
             let mut batch = ManagedProvisionBatch {
                 account_id: Some(result.account_id),
+                site_declaration,
                 candidates: Vec::new(),
                 observed_keep: newapi_observed_keep(
                     &op.site_origin,
@@ -3387,6 +3403,13 @@ fn persist_provision_batch(
             .get_provider_by_id(&provider_id, app_type.as_str())
             .ok()
             .flatten();
+        // 旧档位上已有的「站点推荐配置」标注：重放路径不重新应用声明（见下），
+        // 但配置里还带着当初声明的参数，标注不能丢。
+        let existing_site_declared = existing
+            .as_ref()
+            .and_then(|old| old.meta.as_ref())
+            .and_then(|meta| meta.site_declared_origin.clone());
+        let is_first_import = existing.is_none();
         let user_edited = match state.db.get_user_edited(app_type.as_str(), &provider_id) {
             Ok(user_edited) => user_edited,
             Err(error) => {
@@ -3398,7 +3421,7 @@ fn persist_provision_batch(
             }
         };
 
-        let settings_config = match existing {
+        let mut settings_config = match existing {
             Some(old) => {
                 if user_edited {
                     let mut kept = old.settings_config;
@@ -3415,6 +3438,40 @@ fn persist_provision_batch(
             None => defaults,
         };
 
+        // 站点声明段（relay/site_config.rs，上游提案 Wei-Shaw/sub2api#6518 先行落地）：
+        // **只在首次导入时自动应用**——开箱即站长版默认（deny-list 拦执行面，端点与
+        // 凭证不开放覆盖）。重放路径（非用户编辑的 defaults 重算）刻意不应用：
+        // `preserve_supported_model` 保住的可能是省心模式选下的模型，每次 provision
+        // 都拿站长默认覆盖它会让自动选档失效；站长更新后的同步走手动输入命令
+        // （用户显式动作）。同源校验失败按「没有声明」处理，不阻断建档。
+        let mut site_declared_origin: Option<String> = None;
+        if is_first_import {
+            if let Some(declared) = &batch.site_declaration {
+                if site_config::validate_same_origin(&declared.site_origin, &op.site_origin).is_ok()
+                {
+                    if let Some(platform) = platform_map::platform_for_app(app_type) {
+                        if let Some(segment) = declared.segment_for(platform) {
+                            match site_config::apply_segment_to_app(
+                                app_type,
+                                segment,
+                                &mut settings_config,
+                            ) {
+                                Ok(true) => {
+                                    site_declared_origin = Some(declared.site_origin.clone());
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    log::warn!(
+                                        "{display_name} 的站点声明段应用失败（按内置默认继续）: {error}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
 
         let provider = Provider {
@@ -3428,14 +3485,18 @@ fn persist_provision_batch(
             created_at: Some(chrono::Utc::now().timestamp_millis()),
             sort_index: Some(idx),
             notes: None,
-            meta: Some(managed_meta(
-                app_type,
-                batch.account_id,
-                Some(crate::provider::LoongportGroupIdentity {
-                    id: candidate.group_id.clone(),
-                    name: candidate.group_name.clone(),
-                }),
-            )),
+            meta: {
+                let mut meta = managed_meta(
+                    app_type,
+                    batch.account_id,
+                    Some(crate::provider::LoongportGroupIdentity {
+                        id: candidate.group_id.clone(),
+                        name: candidate.group_name.clone(),
+                    }),
+                );
+                meta.site_declared_origin = site_declared_origin.or(existing_site_declared);
+                Some(meta)
+            },
             icon: None,
             icon_color: None,
             in_failover_queue: false,
@@ -5088,6 +5149,108 @@ pub async fn relay_open_usage(app_handle: tauri::AppHandle, relay_id: i64) -> Re
     open_usage_window(&app_handle, relay_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 应用站长自报调用配置（`relay/site_config.rs`）的摘要：哪些档位吃到了声明段。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteConfigAppliedTier {
+    pub app_id: String,
+    pub provider_id: String,
+    pub display_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteConfigApplySummary {
+    pub site_origin: String,
+    pub declared_origin: String,
+    pub applied: Vec<SiteConfigAppliedTier>,
+}
+
+/// 应用站长自报的调用配置：用户贴入站长给的 URL / JSON / base64，把站长维护的
+/// 各平台默认配置同步到该站点的托管档位上。
+///
+/// 与自动路径（首次导入探测，见 `persist_provision_batch`）的语义差异：这是用户
+/// **显式动作**，允许覆盖用户编辑过的配置——用户明确要站长的这套；自动路径永远
+/// 不碰用户编辑。双重同源校验：手输 URL 先拦（不发往第三方域），内容里声明的
+/// `site_origin` 再拦（防内容冒名）。只对**该站点的托管档位**生效（`website_url`
+/// 等值匹配，宁漏配不误配）。
+#[tauri::command]
+pub async fn relay_apply_site_config(
+    app_handle: tauri::AppHandle,
+    relay_id: i64,
+    input: String,
+) -> Result<SiteConfigApplySummary, AppError> {
+    let op = usable_relay(&app_handle, relay_id).await?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput(
+            "请粘贴站长提供的配置链接或内容".into(),
+        ));
+    }
+    let declared = if trimmed.starts_with("https://") {
+        site_config::validate_same_origin(trimmed, &op.site_origin)?;
+        site_config::fetch_declaration_from_url(trimmed).await?
+    } else {
+        site_config::parse_site_config(trimmed)?
+    };
+    site_config::validate_same_origin(&declared.site_origin, &op.site_origin)?;
+
+    let state = app_handle.state::<crate::store::AppState>();
+    let mut applied = Vec::new();
+    // 声明里出现的每个平台 → 对应 app 的该站点托管档位逐个应用。
+    // platform 键来自 parse_platform（schema 合法键集），app_type() 拿 Mapped 目标。
+    let platforms: Vec<_> = declared
+        .platforms
+        .keys()
+        .filter_map(|key| platform_map::parse_platform(key))
+        .collect();
+    for platform in platforms {
+        let Some(app_type) = platform.app_type() else {
+            continue;
+        };
+        let Some(segment) = declared.segment_for(platform) else {
+            continue;
+        };
+        let providers = ProviderService::list(&state, app_type.clone())?;
+        for mut provider in providers.into_values() {
+            if !is_managed(&provider) {
+                continue;
+            }
+            if provider.website_url.as_deref() != Some(op.site_origin.as_str()) {
+                continue;
+            }
+            if !site_config::apply_segment_to_app(
+                &app_type,
+                segment,
+                &mut provider.settings_config,
+            )? {
+                continue;
+            }
+            let meta = provider.meta.get_or_insert_with(Default::default);
+            meta.site_declared_origin = Some(declared.site_origin.clone());
+            state
+                .db
+                .save_provider(app_type.as_str(), &provider)
+                .map_err(|e| AppError::Config(format!("保存档位 {} 失败: {e}", provider.name)))?;
+            applied.push(SiteConfigAppliedTier {
+                app_id: app_type.as_str().to_string(),
+                provider_id: provider.id.clone(),
+                display_name: provider.name.clone(),
+            });
+        }
+    }
+    if applied.is_empty() {
+        return Err(AppError::Config(
+            "该站点下没有可应用声明的托管档位——先登录或获取密钥建立档位".into(),
+        ));
+    }
+    Ok(SiteConfigApplySummary {
+        site_origin: op.site_origin,
+        declared_origin: declared.site_origin,
+        applied,
+    })
 }
 
 async fn open_purchase_window<R: tauri::Runtime>(
@@ -8047,6 +8210,7 @@ mod tests {
             .collect::<Vec<_>>();
         ManagedProvisionBatch {
             account_id: Some(account_id),
+            site_declaration: None,
             candidates: groups
                 .iter()
                 .flat_map(|group| {
@@ -8223,6 +8387,7 @@ mod tests {
             provision::newapi_provider_id_for(&account_seven.site_origin, 7, "removed");
         let failure_batch = ManagedProvisionBatch {
             account_id: Some(7),
+            site_declaration: None,
             candidates: Vec::new(),
             observed_keep: newapi_observed_keep(
                 &account_seven.site_origin,
@@ -9736,6 +9901,7 @@ mod tests {
         let provider_id = provision::provider_id_for(site, Some(7), 1);
         let batch = ManagedProvisionBatch {
             account_id: Some(7),
+            site_declaration: None,
             candidates: vec![ManagedProvisionCandidate {
                 provider_id: provider_id.clone(),
                 app_type: AppType::Codex,
@@ -9767,6 +9933,117 @@ mod tests {
             tier.rate_multiplier,
             Some(0.15),
             "⭐ 倍率必须从本地库读回来 —— 它不再靠任何网络请求补齐"
+        );
+    }
+
+    /// 站点声明（relay/site_config.rs）随首次导入自动应用：段覆盖内置默认的调用
+    /// 参数、deny 键进不来、meta 落「站点推荐配置」标注。spec 的 M2 硬门槛。
+    #[test]
+    fn first_import_applies_site_declaration_segment() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let site = "https://api.example.com";
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                site,
+                "Example",
+                site,
+                discovery::BackendKind::Sub2Api,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "tok",
+                None,
+                Some(i64::MAX),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+        let op = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load")
+            .expect("exists");
+
+        let declaration = crate::relay::site_config::parse_site_config(
+            r#"{
+                "schema_version": 1,
+                "site_origin": "https://api.example.com",
+                "platforms": {
+                    "openai": {
+                        "model": "gpt-5.6-codex",
+                        "model_reasoning_effort": "minimal",
+                        "model_context_window": 272000,
+                        "mcp_servers": { "evil": {} }
+                    }
+                }
+            }"#,
+        )
+        .expect("declaration");
+
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let batch = ManagedProvisionBatch {
+            account_id: Some(7),
+            site_declaration: Some(declaration),
+            candidates: vec![ManagedProvisionCandidate {
+                provider_id: provider_id.clone(),
+                app_type: AppType::Codex,
+                group_id: "1".into(),
+                group_name: "Pro池".into(),
+                rate_multiplier: Some(0.15),
+                api_key: "sk-test".into(),
+                model: "gpt-5.6-sol".into(),
+                models: None,
+                roles: None,
+                allow_image_generation: Some(false),
+                api_base_url: site.into(),
+            }],
+            observed_keep: Default::default(),
+            failures: Vec::new(),
+            keys_created: 0,
+        };
+        persist_provision_batch(&state, &op, batch).expect("persist");
+
+        let provider = state
+            .db
+            .get_provider_by_id(&provider_id, "codex")
+            .expect("read")
+            .expect("provider exists");
+        let config_text = provider.settings_config["config"].as_str().expect("toml");
+        let parsed: toml::Value = toml::from_str(config_text).expect("valid toml");
+        // 站长声明优先：模型与推理档位都来自声明段
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5.6-codex"));
+        assert_eq!(
+            parsed["model_reasoning_effort"].as_str(),
+            Some("minimal"),
+            "声明段覆盖内置写死的 high"
+        );
+        assert_eq!(parsed["model_context_window"].as_integer(), Some(272000));
+        // deny 键进不来；端点与 sk 保持建档值
+        assert!(parsed.get("mcp_servers").is_none());
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://api.example.com/v1")
+        );
+        assert_eq!(
+            provider.settings_config["auth"]["OPENAI_API_KEY"],
+            "sk-test"
+        );
+        // 来源标注（UI 的「站点推荐配置」徽标 + 回退入口数据）
+        assert_eq!(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|m| m.site_declared_origin.as_deref()),
+            Some("https://api.example.com")
         );
     }
 

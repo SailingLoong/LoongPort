@@ -1647,6 +1647,7 @@ pub fn run() {
             commands::relay_reconciliation,
             commands::relay_purchase,
             commands::relay_open_usage,
+            commands::relay_apply_site_config,
             commands::relay_restore_official_login,
             commands::list_verification_models,
             commands::start_model_verification,

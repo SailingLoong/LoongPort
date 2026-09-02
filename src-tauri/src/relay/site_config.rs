@@ -1,13 +1,13 @@
-//! 站点自报调用配置：站长自托管 JSON 的解析与受控合入（纯函数，零 IO）。
+//! 站点自报调用配置：站长自托管 JSON 的拉取、解析与受控合入。
 //!
 //! ## 这是什么（上游提案 Wei-Shaw/sub2api#6518 的先行落地，设计文档在私库 design 仓）
 //!
-//! 站长在自己域名下放一份声明（约定路径，也接受用户粘贴 URL / JSON / base64 JSON；
-//! 约定路径常量与拉取属 IO 层，在后续里程碑落地），LoongPort 拉取解析后把它**受控地**
-//! 合入该站点展开出的
-//! provider `settings_config`。理想通道是 sub2api 内置生成（上游提案 Wei-Shaw/sub2api#6518），
-//! 本模块是等上游期间的先行落地：拉取/输入是 IO 层的事，这里只负责「内容 → 结构 →
-//! 受控合并」，三条来源（约定路径 / 签名配置自定义路径 / 手动粘贴）共用本层。
+//! 站长在自己域名下放一份声明（约定路径 [`WELL_KNOWN_PATH`]，也接受用户粘贴
+//! URL / JSON / base64 JSON），LoongPort 拉取解析后把它**受控地**合入该站点展开出的
+//! provider `settings_config`。理想通道是 sub2api 内置生成，本模块是等上游期间的
+//! 先行落地：三条来源（约定路径探测 / 签名配置自定义路径 / 手动粘贴）共用
+//! 「内容 → 结构 → 受控合并」这一层。解析与合并是纯函数；拉取与 `transit.rs` 的
+//! well-known 拉取同构（免认证公开 JSON、自识 UA、失败静默），就近放在本模块。
 //!
 //! ## 拦性质，不拦名单（站长权限从宽的关键设计）
 //!
@@ -33,11 +33,6 @@
 //! 站长显式去掉）。未声明的平台段不动（内置默认兜底）；嵌套对象递归，标量/数组整体
 //! 替换。
 
-// 本里程碑只交付纯函数层；生产调用方（登录/添加成功后的约定路径探测与手动输入
-// command）在同分支的下一里程碑落地。届时**必须删除这行 allow**——留着它会让
-// 「合入层被接线遗忘」退化为静默事实（先例教训见 creds.rs 的注释）。
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
@@ -46,8 +41,69 @@ use super::platform_map::{parse_platform, Platform};
 use crate::app_config::AppType;
 use crate::error::AppError;
 
+/// 约定发现路径（RFC 8615 惯例，与 `/.well-known/ai-transit.json` 同目录）。
+pub const WELL_KNOWN_PATH: &str = "/.well-known/loongport.json";
+
 /// 唯一认的 schema 版本。不匹配按「该站没有声明」处理，不猜口径。
 const SCHEMA_VERSION: u64 = 1;
+
+/// 拉取超时，与 transit.rs 的快照拉取同量级。
+const FETCH_TIMEOUT_SECS: u64 = 12;
+
+/// 按约定路径探测站点声明：免认证公开 JSON，自识 UA（transit.rs 同款惯例——
+/// 让站方在访问日志里能分辨这是 LoongPort 的声明探测，而不是匿名爬虫）。
+///
+/// **探测语义，任何失败都返回 `None`**：404（站长没放文件）是最常见也最正常的
+/// 结果，网络失败、体积超限、schema 不认同样静默——「该站没有声明」不该打断
+/// 登录/添加主流程，也不值得在 UI 上制造一条噪音。
+/// 拉取**任意 URL** 的声明（手动输入路径：站长自定义路径/CDN 地址，约定路径之外
+/// 的补充）。与 [`fetch_site_declaration`] 同一套客户端构造，但**失败要报给用户**
+/// （探测的静默语义不适用——他刚显式贴了这个 URL，静默等于「贴了没反应」）。
+///
+/// 强制 HTTPS，理由同 transit.rs 的 snapshot_url：声明的传输若走明文，链路就能
+/// 注入改写用户拿到的配置。拉回的内容走同一条 [`parse_site_config`] 判别链
+/// （站点可能返回 base64）。
+pub async fn fetch_declaration_from_url(raw_url: &str) -> Result<SiteDeclaredConfig, AppError> {
+    let url = url::Url::parse(raw_url)
+        .map_err(|e| AppError::InvalidInput(format!("配置 URL 不合法: {e}")))?;
+    if url.scheme() != "https" {
+        return Err(AppError::InvalidInput(
+            "配置 URL 必须是 HTTPS（明文传输可被链路改写）".into(),
+        ));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .user_agent("LoongPort/site-config")
+        .build()
+        .map_err(|e| AppError::Config(format!("HTTP 客户端构建失败: {e}")))?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| AppError::InvalidInput(format!("拉取配置失败: {e}")))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| AppError::InvalidInput(format!("读取配置内容失败: {e}")))?;
+    if !status.is_success() {
+        return Err(AppError::InvalidInput(format!(
+            "拉取配置失败: HTTP {status}"
+        )));
+    }
+    parse_site_config(&body)
+}
+
+pub async fn fetch_site_declaration(site_origin: &str) -> Option<SiteDeclaredConfig> {
+    let url = format!("{site_origin}{WELL_KNOWN_PATH}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .user_agent("LoongPort/site-config")
+        .build()
+        .ok()?;
+    let body = client.get(url).send().await.ok()?.text().await.ok()?;
+    parse_site_config(&body).ok()
+}
 
 /// 内容体积闸：逐平台配置是几百字节的量级，256 KiB 宽裕得离谱。
 const MAX_CONTENT_BYTES: usize = 256 * 1024;
@@ -664,6 +720,19 @@ mod tests {
     /// 防过期闸：公开仓根的 example 文件是站长文档与上游提案的活样本（也是
     /// Wei-Shaw/sub2api#6518 要附的 git 直链），schema 演进后忘了同步改它，
     /// 这里直接红——示例与代码永不脱节（spec §6）。
+    #[tokio::test]
+    async fn url_fetch_rejects_non_https_before_any_network() {
+        // http 在发请求之前就被拒——同源校验与 HTTPS 闸都不依赖网络。
+        let err = fetch_declaration_from_url("http://api.example.com/config.json")
+            .await
+            .expect_err("http 必须被拒");
+        assert!(err.to_string().contains("HTTPS"));
+        let err = fetch_declaration_from_url("not a url at all")
+            .await
+            .expect_err("垃圾输入必须被拒");
+        assert!(err.to_string().contains("不合法"));
+    }
+
     #[test]
     fn example_file_stays_parseable_and_applicable() {
         let content = include_str!("../../../site-config.example.json");

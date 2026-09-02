@@ -72,6 +72,24 @@ pub enum PlatformMapping {
 ///
 /// 注意这里的 `_ => None` 是**对服务端字符串**兜底（上游新加平台走这条），
 /// 与 [`map_platform`] 那个不许有兜底分支的 `match` 不是一回事。
+/// app → platform 的反查（站点声明段应用用：拿到 provider 的 app_type，
+/// 去声明的 `platforms` 里找对应段）。
+///
+/// 只覆盖 [`map_platform`] 产生 `Mapped` 的四格——其余 app 没有站点平台归属，
+/// 返回 `None`（调用方按「该 app 不适用站点声明」处理）。CodexImage 与 codex
+/// 配置同形（`settings_config_for` 同一生成器），生图档位也吃 `openai` 段；
+/// ClaudeDesktop 同理吃 `anthropic` 段。
+pub fn platform_for_app(app_type: &crate::app_config::AppType) -> Option<Platform> {
+    use crate::app_config::AppType;
+    match app_type {
+        AppType::Claude | AppType::ClaudeDesktop => Some(Platform::Anthropic),
+        AppType::Codex | AppType::CodexImage => Some(Platform::OpenAI),
+        AppType::Gemini => Some(Platform::Gemini),
+        AppType::GrokBuild => Some(Platform::Grok),
+        _ => None,
+    }
+}
+
 pub fn parse_platform(s: &str) -> Option<Platform> {
     match s {
         "openai" => Some(Platform::OpenAI),
