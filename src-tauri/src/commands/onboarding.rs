@@ -33,9 +33,9 @@ struct RegisterCompletedPayload {
 /// （`star_reward_offered` 为空）。注意**不看账号数** —— 调用时机本身就是
 /// 「刚接入第一个站点」，比旧版首启判据（无账号）语义更直白。
 ///
-/// 其余两道闸（远端配置有 `star_reward` / 基线星数取得到）沿用
-/// [`star_reward::build_offer`]。任一不过都静默返回；「压根没拿到 offer」
-/// 不置位一次性标志（一次网络抖动不该把邀请永久吃掉），下次接入站点再试。
+/// 另一道闸（远端配置有 `star_reward`）沿用 [`star_reward::build_offer`]
+/// —— 纯本地读缓存，不打网络。不过就静默返回；「压根没拿到 offer」不置位
+/// 一次性标志（一次时序不巧不该把邀请永久吃掉），下次接入站点再试。
 pub(crate) async fn offer_star_reward_after_first_import(app_handle: &tauri::AppHandle) {
     let settings = crate::settings::get_settings();
     if settings.star_reward_claimed.is_some() || settings.star_reward_offered.is_some() {
@@ -48,8 +48,8 @@ pub(crate) async fn offer_star_reward_after_first_import(app_handle: &tauri::App
         crate::relay::remote_config::refresh_and_cache().await;
     }
 
-    let Some(offer) = star_reward::build_offer().await else {
-        log::info!("Star 邀约未发出（无 offer：没网 / 活动下线 / 基线取不到），下次接入站点再试");
+    let Some(offer) = star_reward::build_offer() else {
+        log::info!("Star 邀约未发出（远端配置无 star_reward），下次接入站点再试");
         return;
     };
     mark_star_reward_offered();
