@@ -35,6 +35,7 @@ function renderRow(
     busy: new Set(),
     onLogin: vi.fn(),
     onProvision: vi.fn(),
+    onSiteConfigApplied: vi.fn(),
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
     onPurchase: vi.fn(),

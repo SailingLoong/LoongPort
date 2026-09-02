@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "site_origin": "https://api.example.com",
+  "platforms": {
+    "anthropic": {
+      "env": {
+        "ANTHROPIC_MODEL": "claude-fable-5.1",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5.1",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5.1",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-5.1",
+        "API_TIMEOUT_MS": "600000"
+      }
+    },
+    "openai": {
+      "model": "gpt-5.6-codex",
+      "model_context_window": 272000,
+      "model_reasoning_effort": "high",
+      "disable_response_storage": true
+    },
+    "gemini": {
+      "env": {
+        "GEMINI_MODEL": "gemini-3-pro"
+      }
+    },
+    "grok": {
+      "defaultModel": "grok-5",
+      "enableThinking": true
+    }
+  }
+}

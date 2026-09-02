@@ -3282,6 +3282,8 @@
       "editConfirmButton": "Continue editing",
       "userEdited": "Manually maintained",
       "userEditedHint": "This connection profile contains manual changes. Group updates change only the API key and preserve all other settings. Select to restore the defaults.",
+      "siteDeclared": "site config",
+      "siteDeclaredHint": "Call parameters come from the operator declaration; reset from the import dialog",
       "editMissing": "This connection profile could not be found. Create the connection profiles again.",
       "editCurrentNote": "This connection profile is in use. If your changes do not take effect, quit and reopen the ChatGPT desktop app; a running ChatGPT app may overwrite the Codex configuration."
     },
@@ -3412,6 +3414,16 @@
       "howTo": "You do not need to restart after switching image-generation profiles; the next generation uses the new profile. After creating your first image-generation profile, open a new terminal to load image-generation support.",
       "emptyTitle": "No image-generation connection profiles",
       "emptyBody": "When you create connection profiles, LoongPort identifies groups that support only gpt-image models. If your relay service does not offer such a group, this page remains empty."
+    },
+    "siteConfig": {
+      "entry": "Import site config",
+      "title": "Site config",
+      "description": "Paste the config link or content from {{label}} (URL / JSON / base64)",
+      "placeholder": "https://example.com/.well-known/loongport.json",
+      "apply": "Apply",
+      "reset": "Reset to defaults",
+      "appliedToast": "Applied to {{count}} connection profiles",
+      "resetToast": "Restored built-in defaults ({{count}} connection profiles)"
     },
     "reconcile": {
       "entry": "View billing reconciliation",

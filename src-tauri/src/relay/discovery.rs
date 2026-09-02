@@ -933,11 +933,14 @@ mod tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let error =
-            tokio::time::timeout(std::time::Duration::from_millis(250), probe_site(&origin))
-                .await
-                .expect("oversized body is rejected before the stream ends")
-                .expect_err("oversized body cannot identify a backend");
+        // 这个 timeout 是**活性证明**不是性能断言：服务端流永远 pending（EOF 永不到来），
+        // 任何有限窗口内返回都证明「没挂着等 EOF」。窗口必须留足并发测试下的调度
+        // 余量——曾经是 250ms，全量并发跑时被调度延迟吃掉造成 flaky（单跑恒过）。
+        // 正常路径毫秒级返回；10s 只在体积闸真退化成「等 EOF」时才兜底。
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10), probe_site(&origin))
+            .await
+            .expect("oversized body is rejected before the stream ends")
+            .expect_err("oversized body cannot identify a backend");
 
         assert_eq!(error.kind, DiscoveryErrorKind::UnsupportedSite);
         server.abort();

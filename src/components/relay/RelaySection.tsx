@@ -929,6 +929,7 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
         onAddSite={() => onOpenAddHub("directory")}
         onLogin={(relayId) => void handleLogin(relayId)}
         onProvision={handleProvision}
+        onSiteConfigApplied={() => void reload()}
         onReorder={(ids) => void handleReorder(ids)}
         onSwitchTier={(relayId, tier) => void handleSwitchTier(relayId, tier)}
         onSelectTierModel={(tier, model) =>

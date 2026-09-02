@@ -114,6 +114,7 @@ const tier = {
   canVerifyModels: true,
   userEdited: false,
   allowImageGeneration: false,
+  siteDeclaredOrigin: null,
 };
 
 function renderRelayRow(
@@ -143,6 +144,7 @@ function renderRelayRow(
     busy: new Set(),
     onLogin,
     onProvision,
+    onSiteConfigApplied: vi.fn(),
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
     onPurchase: vi.fn(),

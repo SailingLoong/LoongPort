@@ -568,6 +568,14 @@ pub struct ProviderMeta {
     /// `website_url` 判站点，不能凭「账号对不上」就删（宁可漏删不可错删）。
     #[serde(rename = "loongportAccountId", skip_serializing_if = "Option::is_none")]
     pub loongport_account_id: Option<i64>,
+    /// 该 provider 的调用参数里应用了「站点自报声明」（relay/site_config.rs）的
+    /// 站点 origin。UI 据此显示「站点推荐配置」标注与一键回退；`None` = 纯内置默认。
+    #[serde(
+        default,
+        rename = "siteDeclaredOrigin",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub site_declared_origin: Option<String>,
     /// vendor（官网直连）账号归属。
     ///
     /// ⚠️ **不能复用 [`Self::loongport_account_id`]** —— 那是 `i64`，而 DeepSeek 的
