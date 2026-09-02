@@ -13,24 +13,12 @@ import { invoke } from "@tauri-apps/api/core";
 export interface StarRewardOffer {
   promoCode: string;
   amountUsd: number;
-  /** 邀请成立那一刻的 star 数；「我已点赞」后取新数与它比对。 */
-  baselineStars: number;
 }
 
 export const starRewardApi = {
-  /** 红点入口的邀请：null = 活动不在 / 基线取不到，回落「直接开仓库」。 */
+  /** 红点入口的邀请：null = 活动不在，回落「直接开仓库」。纯本地读缓存，无等待。 */
   async offer(): Promise<StarRewardOffer | null> {
     return await invoke("star_reward_offer");
-  },
-
-  /** 当前 star 数（「我已点赞」后的第二次取数）。失败按「网络波动，照发」处理。 */
-  async starCount(): Promise<number> {
-    return await invoke("github_star_count");
-  },
-
-  /** 用本机 gh CLI 直接点星（幂等）。false = 这条路不通，回落开浏览器。 */
-  async starViaGh(): Promise<boolean> {
-    return await invoke("github_star_via_gh");
   },
 
   /** 标记已领取（发码时刻调用）。后端专有事实走窄命令 RMW，不走全量 save。 */
@@ -38,7 +26,7 @@ export const starRewardApi = {
     await invoke("star_reward_mark_claimed");
   },
 
-  /** 打开官方站注册窗并预填奖励码（star 走通之后的终点）。 */
+  /** 打开官方站注册窗并预填奖励码（发码后的终点）。 */
   async openRegisterWindow(promoCode: string): Promise<void> {
     await invoke("onboarding_open_register_window", { promoCode });
   },

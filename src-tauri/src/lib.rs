@@ -1619,12 +1619,10 @@ pub fn run() {
             commands::switch_provider,
             // LoongPort 中转站
             commands::relay_status,
-            // 新人引导（点 Star 领注册礼 + 注册窗终点）与其机制层（星数 / gh 代点）
+            // 新人引导（点 Star 领注册礼 + 注册窗终点）与其机制层（邀请 payload）
             commands::onboarding_open_register_window,
             commands::star_reward_offer,
             commands::star_reward_mark_claimed,
-            commands::github_star_count,
-            commands::github_star_via_gh,
             commands::relay_check_session,
             commands::crowd_get_snapshot,
             commands::relay_stats_endpoint_configured,

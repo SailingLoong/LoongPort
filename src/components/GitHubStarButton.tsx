@@ -18,7 +18,7 @@ export function GitHubStarButton({
 }: {
   /** 礼还没领（claimed 判据；活动是否在线由点击时的 offer 兜底）。 */
   showDot: boolean;
-  /** 正在向后端要邀请 payload（那次基线取数要过网络）。 */
+  /** 正在向后端要邀请 payload（纯本地读远端配置缓存，无网络等待）。 */
   busy: boolean;
   onClick: () => void;
 }) {

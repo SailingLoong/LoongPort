@@ -629,7 +629,7 @@ function App() {
     setStarRewardOffer(payload);
   });
 
-  /** 红点按钮点击：活动在且未领取 → 问后端要邀请（含基线）弹窗；否则现状开仓库。 */
+  /** 红点按钮点击：活动在且未领取 → 问后端要邀请（纯本地读缓存）弹窗；否则现状开仓库。 */
   const handleGitHubStarClick = useCallback(async () => {
     if (starRewardActive !== true) {
       await settingsApi.openExternal(GITHUB_REPO);
@@ -637,8 +637,8 @@ function App() {
     }
     setStarRewardBusy(true);
     try {
-      // null = 活动刚下线 / 基线取不到 —— 按现状开仓库，不弹一个
-      // 兑现不了的 offer。
+      // null = 活动刚下线（远端配置无 star_reward）—— 按现状开仓库，
+      // 不弹一个兑现不了的 offer。
       const offer = (await starRewardApi.offer()) ?? null;
       if (offer) {
         setStarRewardOffer(offer);
