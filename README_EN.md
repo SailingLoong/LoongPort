@@ -4,7 +4,7 @@
 
 # LoongPort
 
-### Codex at 5% of official cost, Claude at 20%, no extra network setup
+### Type a domain, sign in once — Codex and Claude Code are ready to go
 
 [![Download](https://img.shields.io/github/v/release/SailingLoong/LoongPort?label=Download&color=2ea44f&style=for-the-badge)](../../releases/latest)
 
@@ -24,14 +24,15 @@
 
 ## What it does
 
-Running Codex CLI or Claude Code below official API rates normally means a tedious
-routine: sign up with a relay provider, hunt for their console, create an API key by
-hand, copy the `base_url` correctly, track down the config file, and get every field
-exactly right — then do it all again for another CLI or tier.
+Running Codex CLI or Claude Code through a relay normally means a tedious routine:
+sign up with the relay, hunt for their console, create an API key by hand, copy the
+`base_url` correctly, track down the config file, and get every field exactly right —
+then do it all again for another CLI or tier.
 
 LoongPort collapses that into two steps — **enter a domain, sign in once.** It
 provisions a key for every tier your account can reach, writes each CLI's config in
-its own shape, and switching tiers becomes a single click.
+its own shape, and switching tiers becomes a single click. You never touch a config
+file along the way.
 
 Beyond relay tiers, LoongPort ships built-in
 [official-direct tiers](#official-direct-official-apis) (DeepSeek, BigModel, opencode);
@@ -72,8 +73,10 @@ No config files to edit, no API keys to create by hand, no `base_url` to remembe
 
 ## If you run a relay
 
-You can hand LoongPort to your users as **a client for your own site** — it is a generic
-sub2api / new-api client and is not tied to any particular relay:
+Hand LoongPort to new users as **the client for your own site** — sign-up, top-up and
+key provisioning all happen on your site, and going from download to a working CLI
+shrinks to "enter a domain, sign in once". It is a generic sub2api / new-api client
+and is not tied to any particular relay:
 
 - **It replaces your setup guide.** Users no longer follow a tutorial to create a key,
   copy a `base_url`, and hunt down a config file. The four steps above are the whole
@@ -88,28 +91,15 @@ sub2api / new-api client and is not tied to any particular relay:
   referral code and a registration promo code, applied automatically at sign-up
   (this mechanism currently targets sub2api sites).
 
-## Why it costs so much less
+Three things it takes off your plate, each checkable in the source:
+`normalize_site_origin` (`relay/api.rs` — a domain pasted straight from the address
+bar is accepted), self-service signup on your own registration page (`relay/login.rs`
+— a fresh site lands on `/register`, a returning one on `/login`, referral codes
+riding along in the URL), and self-service top-up with the session injected
+(`relay/purchase.rs` — it opens `{your-domain}/purchase`).
 
-Two discount layers — Codex gets both, Claude gets one:
-
-| Factor | | Who gets it | Why |
-|---|---|---|---|
-| Tier multiplier | **×0.1** | Codex only | Most GPT tiers bill at a 0.1 multiplier — a tenth of the official rate for the same token usage. Anthropic tiers carry no such discount and bill at 1 |
-| Currency convention | **×1/6.7** | Codex and Claude alike | Relay sites generally price 1 CNY as if it were 1 USD, while the actual rate is roughly 6.7 CNY to the dollar |
-
-So Codex lands at `0.1 × 1/6.7 ≈ 0.015` — about **1.5% of the official API cost** — and
-Claude at `1 × 1/6.7 ≈ 0.15`, about **15% of official cost**. The headline says "5%" and
-"20%" because multipliers vary by tier and by site, so there is margin built in. Full
-derivation with caveats:
-**[loongport.dev/en/pricing](https://loongport.dev/en/pricing)**
-
-LoongPort is free. It never handles your payment and takes nothing out of your balance.
-You top up with the relay provider.
-
-> Registration links carry our referral code, which may earn us a rebate from the relay
-> site; `bestapi.store` is our own site, and the built-in `LOONGPORT` promo code is a
-> new-user credit there. Neither affects your price, and you can use any domain. Both
-> tables live in `src-tauri/src/relay/` — `aff.rs` and `promo.rs`.
+The benefits, the concerns, the technical prerequisites and how to get on board are
+all at **[loongport.dev/en/for-relays](https://loongport.dev/en/for-relays)**.
 
 ## Your official accounts stay untouched
 
@@ -316,22 +306,28 @@ Windows have the same feature set.
 > in place; what is missing is each one's config-writing adapter. If you run another
 > kind of relay backend, [opening an issue](../../issues) is the way to get it assessed.
 
-## If you run a relay service
+## Why it costs so much less
 
-**You can hand this to your users as the client for your own site** — no code changes
-needed, a user typing your domain already works. LoongPort has no account system and no
-server of its own, and handles neither the traffic nor the money: users register with you
-and pay you, and credentials live in a local SQLite database on their own machine.
+Two discount layers — Codex gets both, Claude gets one:
 
-Three things it takes off your plate, each checkable in the source: `normalize_site_origin`
-(`relay/api.rs` — a domain pasted straight from the address bar is accepted),
-self-service signup on your own registration page (`relay/login.rs` — a fresh site
-lands on `/register`, a returning one on `/login`, referral codes riding along in the URL),
-and self-service top-up with the session injected (`relay/purchase.rs` — it opens
-`{your-domain}/purchase`).
+| Factor | | Who gets it | Why |
+|---|---|---|---|
+| Tier multiplier | **×0.1** | Codex only | Most GPT tiers bill at a 0.1 multiplier — a tenth of the official rate for the same token usage. Anthropic tiers carry no such discount and bill at 1 |
+| Currency convention | **×1/6.7** | Codex and Claude alike | Relay sites generally price 1 CNY as if it were 1 USD, while the actual rate is roughly 6.7 CNY to the dollar |
 
-The benefits, the concerns, the technical prerequisites and how to get on board are all at
-**[loongport.dev/en/for-relays](https://loongport.dev/en/for-relays)**.
+So Codex lands at `0.1 × 1/6.7 ≈ 0.015` — about **1.5% of the official API cost** — and
+Claude at `1 × 1/6.7 ≈ 0.15`, about **15% of official cost**. Figures like "just 5% of
+official cost" that appear elsewhere are deliberately conservative: multipliers vary by
+tier and by site, so margin is built in. Full derivation with caveats:
+**[loongport.dev/en/pricing](https://loongport.dev/en/pricing)**
+
+LoongPort is free. It never handles your payment and takes nothing out of your balance.
+You top up with the relay provider.
+
+> Registration links carry our referral code, which may earn us a rebate from the relay
+> site; `bestapi.store` is our own site, and the built-in `LOONGPORT` promo code is a
+> new-user credit there. Neither affects your price, and you can use any domain. Both
+> tables live in `src-tauri/src/relay/` — `aff.rs` and `promo.rs`.
 
 ## Upstream projects
 
