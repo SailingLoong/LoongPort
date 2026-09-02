@@ -27,6 +27,7 @@ function tier(models: string[]): TierInfo {
     canVerifyModels: true,
     userEdited: false,
     allowImageGeneration: false,
+    siteDeclaredOrigin: null,
   };
 }
 
@@ -58,6 +59,7 @@ function renderRow(models: string[], onSelectTierModel = vi.fn()) {
         busy={new Set()}
         onLogin={vi.fn()}
         onProvision={vi.fn()}
+        onSiteConfigApplied={vi.fn()}
         onSwitchTier={vi.fn()}
         onSelectTierModel={onSelectTierModel}
         onPurchase={vi.fn()}

@@ -207,6 +207,26 @@ export interface TierInfo {
    * 不知道就别断言。
    */
   allowImageGeneration: boolean | null;
+  /**
+   * 这个档位的调用参数应用了站长自报声明（`/.well-known/loongport.json` 或手动
+   * 粘贴）。非空 = 显示「站点配置」标注；与 `userEdited` 不同，它是存库事实
+   * （meta.siteDeclaredOrigin），不是现算判据。
+   */
+  siteDeclaredOrigin: string | null;
+}
+
+/** `relay_apply_site_config` / `relay_reset_site_config` 的结果：动了哪些档位。 */
+export interface SiteConfigAppliedTier {
+  appId: string;
+  providerId: string;
+  displayName: string;
+}
+
+export interface SiteConfigApplySummary {
+  siteOrigin: string;
+  /** reset 时为空串（没有声明参与）。 */
+  declaredOrigin: string;
+  applied: SiteConfigAppliedTier[];
 }
 
 /**
@@ -392,6 +412,20 @@ export const relayApi = {
    * 读的是本地缓存（后端不发网络请求），所以调它不会让界面等。
    */
   listSponsors: (): Promise<Sponsor[]> => invoke("relay_list_sponsors"),
+
+  /**
+   * 应用站长自报的调用配置：贴 URL / JSON / base64，把站长维护的各平台默认
+   * 同步到该站点的托管档位。后端做双重同源校验与 deny-list 过滤。
+   */
+  applySiteConfig: (
+    relayId: number,
+    input: string,
+  ): Promise<SiteConfigApplySummary> =>
+    invoke("relay_apply_site_config", { relayId, input }),
+
+  /** 恢复内置默认：退掉站长声明、sk/端点/当前模型保留（「一键回退」）。 */
+  resetSiteConfig: (relayId: number): Promise<SiteConfigApplySummary> =>
+    invoke("relay_reset_site_config", { relayId }),
 
   /** 读取本地 VeriDrop 快照；缺失时后端会等待首次拉取。 */
   listDirectory: (kind: LeaderboardKind): Promise<RelayLeaderboard> =>

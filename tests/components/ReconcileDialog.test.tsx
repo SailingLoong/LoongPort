@@ -106,6 +106,7 @@ function relayWithCodexTier(): RelayRowData {
     canVerifyModels: true,
     userEdited: false,
     allowImageGeneration: false,
+    siteDeclaredOrigin: null,
   };
   return {
     id: 7,
@@ -253,6 +254,7 @@ describe("ReconcileDialog", () => {
           busy={new Set()}
           onLogin={vi.fn()}
           onProvision={vi.fn()}
+          onSiteConfigApplied={vi.fn()}
           onSwitchTier={vi.fn()}
           onSelectTierModel={vi.fn()}
           onPurchase={vi.fn()}
@@ -293,6 +295,7 @@ describe("ReconcileDialog", () => {
           busy={new Set()}
           onLogin={vi.fn()}
           onProvision={vi.fn()}
+          onSiteConfigApplied={vi.fn()}
           onSwitchTier={vi.fn()}
           onSelectTierModel={vi.fn()}
           onPurchase={vi.fn()}

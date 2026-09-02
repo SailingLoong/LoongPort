@@ -69,6 +69,8 @@ export interface RelayTierListProps {
   /** 行内动作，**都显式带 relayId**（后端命令直接吃它，不再靠全局「当前站」）。 */
   onLogin: (relayId: number) => void;
   onProvision: (relayId: number) => void | Promise<void>;
+  /** 站点配置应用/恢复成功后的纯刷新（不发网络，区别于 onProvision）。 */
+  onSiteConfigApplied: () => void | Promise<void>;
   onSwitchTier: (relayId: number, tier: TierInfo) => void;
   onSelectTierModel: (tier: TierInfo, model: string) => void;
   /** 拖动结束后的新顺序（完整 id 序列，下标即 sort_index）。 */
@@ -167,6 +169,7 @@ export function RelayTierList({
   onAddSite,
   onLogin,
   onProvision,
+  onSiteConfigApplied,
   onSwitchTier,
   onSelectTierModel,
   onReorder,
@@ -286,6 +289,7 @@ export function RelayTierList({
                   busy={busy}
                   onLogin={() => onLogin(op.id)}
                   onProvision={() => onProvision(op.id)}
+                  onSiteConfigApplied={onSiteConfigApplied}
                   onSwitchTier={(tier) => onSwitchTier(op.id, tier)}
                   onSelectTierModel={onSelectTierModel}
                   onPurchase={() => onPurchase(op.id)}

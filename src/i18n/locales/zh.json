@@ -3282,6 +3282,8 @@
       "editConfirmButton": "继续编辑",
       "userEdited": "手动维护",
       "userEditedHint": "此接入配置包含手动修改。更新分组时只会更新 API 密钥，不会覆盖其他内容。点击可恢复默认配置。",
+      "siteDeclared": "站点配置",
+      "siteDeclaredHint": "调用参数来自站长自报声明，可在导入配置弹窗一键恢复内置默认",
       "editMissing": "未找到此接入配置。请重新创建接入配置。",
       "editCurrentNote": "这是正在使用的接入配置。若修改未生效，请退出并重新打开 ChatGPT 桌面版；运行中的 ChatGPT 可能会覆盖 Codex 配置。"
     },
@@ -3412,6 +3414,16 @@
       "howTo": "切换图像生成接入配置后无需重启，下次生成起生效。首次创建图像生成接入配置后，请新开终端以加载图像生成功能。",
       "emptyTitle": "尚无图像生成接入配置",
       "emptyBody": "创建接入配置时，LoongPort 会识别仅支持 gpt-image 模型的分组。若中转站未提供这类分组，本页将保持为空。"
+    },
+    "siteConfig": {
+      "entry": "导入站点配置",
+      "title": "站点配置",
+      "description": "粘贴 {{label}} 站长提供的配置链接或内容（URL / JSON / base64 均可）",
+      "placeholder": "https://example.com/.well-known/loongport.json",
+      "apply": "应用",
+      "reset": "恢复默认",
+      "appliedToast": "已应用到 {{count}} 条接入配置",
+      "resetToast": "已恢复内置默认（{{count}} 条接入配置）"
     },
     "reconcile": {
       "entry": "查看扣费对账",

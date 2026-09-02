@@ -69,6 +69,7 @@ const tier = {
   canVerifyModels: true,
   userEdited: false,
   allowImageGeneration: false,
+  siteDeclaredOrigin: null,
 };
 
 function renderRow(overrides: Partial<ComponentProps<typeof RelayRow>> = {}) {
@@ -94,6 +95,7 @@ function renderRow(overrides: Partial<ComponentProps<typeof RelayRow>> = {}) {
     busy: new Set(),
     onLogin: vi.fn(),
     onProvision: vi.fn(),
+    onSiteConfigApplied: vi.fn(),
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
     onPurchase: vi.fn(),
@@ -237,6 +239,7 @@ function rowProps(
     busy: new Set(),
     onLogin: vi.fn(),
     onProvision: vi.fn(),
+    onSiteConfigApplied: vi.fn(),
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
     onPurchase: vi.fn(),

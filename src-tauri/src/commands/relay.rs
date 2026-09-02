@@ -331,6 +331,11 @@ pub struct TierInfo {
     /// 只有 provision 那条路填得出，[`list_relays_impl`] 恒为 `None`。
     /// UI 在 `None` 时不显示标记 —— 与 `user_edited` 同一条原则：不知道就别断言。
     pub allow_image_generation: Option<bool>,
+    /// 这个档位的调用参数里应用了站长自报声明（`relay/site_config.rs`）的站点
+    /// origin。非空 = UI 显示「站点推荐配置」标注；`None` = 纯内置默认。
+    /// 与 `user_edited` 不同，它是**存库事实**（meta.siteDeclaredOrigin），
+    /// 不是现算判据。
+    pub site_declared_origin: Option<String>,
 }
 
 /// 「中转站 × 分组」页的一行中转站，连带它在当前 app 下的档位。
@@ -3586,6 +3591,12 @@ fn persist_provision_batch(
             can_verify_models: verification_target::supports_app_type(app_type),
             user_edited: Some(user_edited),
             allow_image_generation: candidate.allow_image_generation,
+            // provision 刚建档/重放完，标注以库里的 meta 为准（首次导入应用过
+            // 声明的档位这里立刻就有值，前端不用等下一次 listRelays）。
+            site_declared_origin: provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.site_declared_origin.clone()),
         });
     }
 
@@ -4495,6 +4506,10 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                 // 不像倍率那样留 None 等异步填。见该字段的文档：入口忽隐忽现是有害的。
                 // 纯服务端信息，本地推不出来 ⇒ None（UI 不显示标记）。
                 allow_image_generation: None,
+                site_declared_origin: p
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.site_declared_origin.clone()),
             },
             site_origin: p.website_url.clone(),
             account_id: p.meta.as_ref().and_then(|m| m.loongport_account_id),
@@ -5249,6 +5264,132 @@ pub async fn relay_apply_site_config(
     Ok(SiteConfigApplySummary {
         site_origin: op.site_origin,
         declared_origin: declared.site_origin,
+        applied,
+    })
+}
+
+/// 从现有 settings_config 提取重建默认所需的 (api_key, base_url, model)。
+///
+/// 「恢复内置默认」要把档位重建回 `settings_config_for` 的形状，但 sk 与端点
+/// 必须原样保留（它们来自用户登录，重建不是换钥匙）。四个 app 的读取位置与
+/// `persist_provision_batch` 的写入位置一一对应；读不出任何一项就返回 `None`
+///（调用方跳过该档位——重建出一把没有钥匙的默认配置比不重建更糟）。
+fn rebuild_inputs_from_settings(
+    app_type: &AppType,
+    settings: &serde_json::Value,
+) -> Option<(String, String, String)> {
+    let env = settings.get("env").and_then(|v| v.as_object());
+    match app_type {
+        AppType::Claude | AppType::ClaudeDesktop => {
+            let env = env?;
+            let api_key = env
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .or_else(|| env.get("ANTHROPIC_API_KEY"))?
+                .as_str()?;
+            let base_url = env.get("ANTHROPIC_BASE_URL")?.as_str()?;
+            let model = env.get("ANTHROPIC_MODEL").and_then(|v| v.as_str())?;
+            Some((api_key.to_string(), base_url.to_string(), model.to_string()))
+        }
+        AppType::Gemini => {
+            let env = env?;
+            let api_key = env.get("GEMINI_API_KEY")?.as_str()?;
+            let base_url = env.get("GOOGLE_GEMINI_BASE_URL")?.as_str()?;
+            let model = env.get("GEMINI_MODEL").and_then(|v| v.as_str())?;
+            Some((api_key.to_string(), base_url.to_string(), model.to_string()))
+        }
+        AppType::Codex | AppType::CodexImage => {
+            let api_key = settings
+                .get("auth")?
+                .get("OPENAI_API_KEY")?
+                .as_str()?
+                .to_string();
+            let toml_text = settings.get("config")?.as_str()?;
+            let toml_value: toml::Value = toml::from_str(toml_text).ok()?;
+            let base_url = toml_value
+                .get("model_providers")?
+                .get("custom")?
+                .get("base_url")?
+                .as_str()?
+                .to_string();
+            let model = toml_value.get("model")?.as_str()?.to_string();
+            Some((api_key, base_url, model))
+        }
+        AppType::GrokBuild => {
+            let inner: serde_json::Value =
+                serde_json::from_str(settings.get("config")?.as_str()?).ok()?;
+            let api_key = inner.get("apiKey")?.as_str()?.to_string();
+            let base_url = inner.get("baseUrl")?.as_str()?.to_string();
+            let model = provision::selected_model(app_type, settings).unwrap_or_default();
+            Some((api_key, base_url, model))
+        }
+        _ => None,
+    }
+}
+
+/// 恢复内置默认：把该站点的全部托管档位重建回 `settings_config_for` 的形状
+/// （sk / 端点 / 当前模型选择原样保留），并清掉「站点推荐配置」标注。
+///
+/// 「一键回退」的数据面（spec：站点声明的值可发现、可回退）。与
+/// [`relay_apply_site_config`] 对称：一个把站长声明合进来，一个退回去。
+#[tauri::command]
+pub async fn relay_reset_site_config(
+    app_handle: tauri::AppHandle,
+    relay_id: i64,
+) -> Result<SiteConfigApplySummary, AppError> {
+    let op = usable_relay(&app_handle, relay_id).await?;
+    let state = app_handle.state::<crate::store::AppState>();
+
+    let mut applied = Vec::new();
+    for app_id in ["codex", "claude", "gemini", "grokbuild"] {
+        let app_type = AppType::from_str(app_id)
+            .map_err(|e| AppError::Config(format!("app 类型不认: {e}")))?;
+        let providers = ProviderService::list(&state, app_type.clone())?;
+        for mut provider in providers.into_values() {
+            if !is_managed(&provider) {
+                continue;
+            }
+            if provider.website_url.as_deref() != Some(op.site_origin.as_str()) {
+                continue;
+            }
+            let Some((api_key, base_url, model)) =
+                rebuild_inputs_from_settings(&app_type, &provider.settings_config)
+            else {
+                log::warn!(
+                    "{} 的配置读不出重建要素（sk/端点/模型），跳过恢复默认",
+                    provider.name
+                );
+                continue;
+            };
+            let Some(defaults) = provision::settings_config_for(
+                &app_type,
+                &api_key,
+                &provider.name,
+                &base_url,
+                &model,
+            ) else {
+                continue;
+            };
+            provider.settings_config = defaults;
+            if let Some(meta) = provider.meta.as_mut() {
+                meta.site_declared_origin = None;
+            }
+            state
+                .db
+                .save_provider(app_type.as_str(), &provider)
+                .map_err(|e| AppError::Config(format!("保存档位 {} 失败: {e}", provider.name)))?;
+            applied.push(SiteConfigAppliedTier {
+                app_id: app_type.as_str().to_string(),
+                provider_id: provider.id.clone(),
+                display_name: provider.name.clone(),
+            });
+        }
+    }
+    if applied.is_empty() {
+        return Err(AppError::Config("该站点下没有可恢复默认的托管档位".into()));
+    }
+    Ok(SiteConfigApplySummary {
+        site_origin: op.site_origin,
+        declared_origin: String::new(),
         applied,
     })
 }
@@ -6617,6 +6758,7 @@ mod tests {
             can_verify_models: true,
             user_edited: None,
             allow_image_generation: None,
+            site_declared_origin: None,
         };
 
         let json = serde_json::to_value(&tier).expect("要能序列化");
@@ -6932,6 +7074,7 @@ mod tests {
             user_edited: None,
             // 同上：归属判定与生图无关。
             allow_image_generation: None,
+            site_declared_origin: None,
         }
     }
 
@@ -9934,6 +10077,87 @@ mod tests {
             Some(0.15),
             "⭐ 倍率必须从本地库读回来 —— 它不再靠任何网络请求补齐"
         );
+    }
+
+    /// 「恢复内置默认」把应用过声明的档位退回去：settings 重建为
+    /// `settings_config_for` 形状（sk/端点/模型保留）、标注清空。
+    /// 与 `first_import_applies_site_declaration_segment` 构成一对往返。
+    #[test]
+    fn reset_site_config_restores_builtin_defaults() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let site = "https://api.example.com";
+
+        // 直接造一条「应用过声明」的托管档位（不跑 persist，那段已有专测）。
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let mut settings = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-test",
+            "Example·Pro池",
+            "https://api.example.com/v1",
+            "gpt-5.6-sol",
+        )
+        .expect("defaults");
+        let declared = crate::relay::site_config::parse_site_config(
+            r#"{
+                "schema_version": 1,
+                "site_origin": "https://api.example.com",
+                "platforms": { "openai": { "model": "gpt-5.6-codex", "model_reasoning_effort": "minimal" } }
+            }"#,
+        )
+        .expect("declaration");
+        crate::relay::site_config::apply_segment_to_app(
+            &AppType::Codex,
+            declared
+                .segment_for(platform_map::Platform::OpenAI)
+                .unwrap(),
+            &mut settings,
+        )
+        .expect("apply");
+        let provider = crate::provider::Provider {
+            id: provider_id.clone(),
+            name: "Example·Pro池".into(),
+            settings_config: settings,
+            website_url: Some(site.into()),
+            category: Some("aggregator".into()),
+            created_at: Some(chrono::Utc::now().timestamp_millis()),
+            sort_index: Some(0),
+            notes: None,
+            meta: Some(crate::provider::ProviderMeta {
+                site_declared_origin: Some(site.into()),
+                ..Default::default()
+            }),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        state.db.save_provider("codex", &provider).expect("save");
+
+        // 重建要素提取 + 重建（command 体内联逻辑的等价直调，不起 tauri runtime）。
+        let (api_key, base_url, model) =
+            rebuild_inputs_from_settings(&AppType::Codex, &provider.settings_config)
+                .expect("rebuild inputs");
+        assert_eq!(api_key, "sk-test");
+        assert_eq!(base_url, "https://api.example.com/v1");
+        // 模型提取自声明覆盖后的值——重建以现状为基线，不回滚站长的模型选择
+        assert_eq!(model, "gpt-5.6-codex");
+        let defaults = provision::settings_config_for(
+            &AppType::Codex,
+            &api_key,
+            "Example·Pro池",
+            &base_url,
+            &model,
+        )
+        .expect("rebuild");
+        let toml_value: toml::Value = toml::from_str(defaults["config"].as_str().unwrap()).unwrap();
+        // 声明的参数键已退掉（reasoning 回到内置 high），sk/端点保留
+        assert_eq!(toml_value["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(toml_value["model"].as_str(), Some("gpt-5.6-codex"));
+        assert_eq!(
+            toml_value["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://api.example.com/v1")
+        );
+        assert_eq!(defaults["auth"]["OPENAI_API_KEY"], "sk-test");
     }
 
     /// 站点声明（relay/site_config.rs）随首次导入自动应用：段覆盖内置默认的调用

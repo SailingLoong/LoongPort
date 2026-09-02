@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  FileDown,
   Fingerprint,
   GripVertical,
   Layers3,
@@ -33,6 +34,7 @@ import type { VerificationVerdict } from "@/lib/api/modelVerification";
 import { useEasyModeApps } from "@/lib/query/autoMode";
 import { ReconcileDialog } from "./ReconcileDialog";
 import { RowBalance } from "./RowBalance";
+import { SiteConfigDialog } from "./SiteConfigDialog";
 
 /**
  * 一行中转站 + 可折叠的档位列表。
@@ -103,6 +105,8 @@ export interface RelayRowProps {
   onPurchase: () => void;
   /** 带登录态开这一行的用量页（「查看用量」，入口资格由后端判定）。 */
   onOpenUsage: (() => void) | undefined;
+  /** 站点配置应用/恢复成功后刷新列表（档位 settings 与标注变了）。 */
+  onSiteConfigApplied: () => void | Promise<void>;
   /**
    * 检测某个档位的连通性。**复用上游的 `useStreamCheck`** —— 托管档位就是
    * 正常的 provider 记录（`category = "aggregator"`，在同一张表里），
@@ -159,6 +163,7 @@ export function RelayRow({
   onSelectTierModel,
   onPurchase,
   onOpenUsage,
+  onSiteConfigApplied,
   onCheckTier,
   isCheckingTier,
   verificationVerdictForTier,
@@ -173,6 +178,7 @@ export function RelayRow({
   // 「对账」弹窗的开合由这一行自己持有 —— 它只读这一个 relay 的事实，
   // 没有跨行状态要父组件管（与 `ModelVerificationDialog` 那种全局验证任务不同）。
   const [reconcileOpen, setReconcileOpen] = useState(false);
+  const [siteConfigOpen, setSiteConfigOpen] = useState(false);
   // 对账的资格（2026-08-16 定稿）：除了能查余额，还要求该站**有档位的 app
   // 至少一个开着省心模式** —— 估算的原料是带档位归因的本地路由流量
   // （实际消耗的 token / 成本），没有省心模式就没有这些数据，弹窗只剩
@@ -320,6 +326,22 @@ export function RelayRow({
                 <Activity className="h-3.5 w-3.5" />
               </Button>
             )}
+            {/* 「导入站点配置」入口。资格 = 当前行至少有一个档位 —— 没有档位的行
+                走「获取密钥」建档时后端已自动探测约定路径，手动导入对它没有对象。
+                与「对账」「查看用量」同为行级动作进 hover 组（低频次级动作不常驻）。 */}
+            {relay.tiers.length > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+                onClick={() => setSiteConfigOpen(true)}
+                title={t("loongport.siteConfig.entry")}
+                aria-label={t("loongport.siteConfig.entry")}
+              >
+                <FileDown className="h-3.5 w-3.5" />
+              </Button>
+            )}
             <RowDelete
               blocked={relay.usageBlockers.length > 0}
               busy={busy.has(`removeRelay:${relay.id}`)}
@@ -370,6 +392,19 @@ export function RelayRow({
             }
             open={reconcileOpen}
             onOpenChange={setReconcileOpen}
+          />
+        )}
+        {relay.tiers.length > 0 && (
+          <SiteConfigDialog
+            relayId={relay.id}
+            relayLabel={
+              relay.accountLabel
+                ? `${relay.siteName || relay.siteOrigin} · ${relay.accountLabel}`
+                : relay.siteName || relay.siteOrigin
+            }
+            open={siteConfigOpen}
+            onOpenChange={setSiteConfigOpen}
+            onApplied={onSiteConfigApplied}
           />
         )}
       </div>
@@ -681,6 +716,18 @@ function TierItem({
             >
               <PencilLine className="h-2.5 w-2.5" />
               {t("loongport.tier.userEdited")}
+            </span>
+          )}
+          {/* 「站点配置」标记：调用参数来自站长自报声明。**常驻**（状态不是动作，
+              与 userEdited 同判据），但用中性色 —— amber 是「需要留意」（脱离自动
+              维护），blue 是「当前在用」，站长声明是中性事实，不升格也不警示。 */}
+          {tier.siteDeclaredOrigin && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border"
+              title={t("loongport.tier.siteDeclaredHint")}
+            >
+              <FileDown className="h-2.5 w-2.5" />
+              {t("loongport.tier.siteDeclared")}
             </span>
           )}
           {verificationProblem && (

@@ -3283,6 +3283,8 @@
       "editConfirmButton": "繼續編輯",
       "userEdited": "手動維護",
       "userEditedHint": "此連線設定檔包含手動修改。更新群組時只會更新 API 金鑰，不會覆蓋其他內容。點一下可還原預設設定。",
+      "siteDeclared": "站點設定",
+      "siteDeclaredHint": "呼叫參數來自站長自報聲明，可在匯入設定對話框一鍵恢復內建預設",
       "editMissing": "找不到此連線設定檔。請重新建立連線設定檔。",
       "editCurrentNote": "這是正在使用的連線設定檔。若修改未生效，請結束並重新開啟 ChatGPT 桌面版；執行中的 ChatGPT 可能會覆蓋 Codex 設定。"
     },
@@ -3413,6 +3415,16 @@
       "howTo": "切換圖像生成連線設定檔後不必重新啟動，下次生成起生效。首次建立圖像生成連線設定檔後，請開啟新的終端機以載入圖像生成功能。",
       "emptyTitle": "尚無圖像生成連線設定檔",
       "emptyBody": "建立連線設定檔時，LoongPort 會識別只支援 gpt-image 模型的群組。若中轉站未提供這類群組，此頁面將保持空白。"
+    },
+    "siteConfig": {
+      "entry": "匯入站點設定",
+      "title": "站點設定",
+      "description": "貼上 {{label}} 站長提供的設定連結或內容（URL / JSON / base64 皆可）",
+      "placeholder": "https://example.com/.well-known/loongport.json",
+      "apply": "套用",
+      "reset": "恢復預設",
+      "appliedToast": "已套用到 {{count}} 條連線設定檔",
+      "resetToast": "已恢復內建預設（{{count}} 條連線設定檔）"
     },
     "reconcile": {
       "entry": "查看扣費對帳",
