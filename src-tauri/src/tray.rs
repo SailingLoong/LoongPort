@@ -511,7 +511,7 @@ fn tray_menu_providers(
 /// 返回 `(当前模型, 目录)`；其余情况 `None`（不挂子菜单）。
 ///
 /// 与主界面 `TierInfo.models` 同一份 `modelCatalog`（`models_from_settings`）。
-/// 目录按平台落库（codex / claude / gemini），没有目录的 app 自然不挂；
+/// 目录按平台落库（codex / claude / gemini / grokbuild），没有目录的 app 自然不挂；
 /// 非托管 provider 没有「选模型」这个概念，不预埋。
 fn tier_model_choices(
     provider: &crate::provider::Provider,
@@ -680,7 +680,7 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
                 return true;
             }
 
-            // 处理「模型」子菜单点击（只挂在 Codex 当前托管档位下）
+            // 处理「模型」子菜单点击（只挂在目录非空的当前托管档位下）
             if let Some(model) = suffix.strip_prefix(TIER_MODEL_EVENT_PREFIX) {
                 log::info!("切换{}档位模型: {model}", section.label);
                 let app_handle = app.clone();
@@ -930,9 +930,9 @@ fn handle_managed_tier_click(
     }
 }
 
-/// 托盘点「模型」子菜单：对**当前**托管 Codex 档位执行 `switch_tier_model_command`
+/// 托盘点「模型」子菜单：对**当前**托管档位执行 `switch_tier_model_command`
 /// （校验模型 ∈ 落库目录 → 更新 provider → 走切档位编排，失败回滚）。
-/// 模型子菜单只在当前档位是托管 Codex 项时才会挂出来，这里再验一遍是防
+/// 模型子菜单只在当前档位是托管项且目录非空时才会挂出来，这里再验一遍是防
 /// 菜单陈旧（刚切走、菜单还没重建）时点了个已不属于当前档位的模型。
 fn handle_tier_model_click(
     app: &tauri::AppHandle,
@@ -952,12 +952,14 @@ fn handle_tier_model_click(
     }
 
     // 点的就是当前模型 → 无操作（与主界面 `handleSelectTierModel` 的守卫对齐，
-    // 否则每次误点都会走一遍「退 ChatGPT」确认）。
+    // 否则每次误点都会走一遍「退 ChatGPT」确认）。读当前模型走按平台分派的
+    // `selected_model`（grok 档位的 config TOML 与 codex 不同形，codex 专用的
+    // `extract_model` 在那边读对只是靠行序的巧合）。
     let current = app_state
         .db
         .get_provider_by_id(&provider_id, app_type.as_str())?;
     if let Some(provider) = current {
-        if crate::relay::provision::extract_model(&provider.settings_config).as_deref()
+        if crate::relay::provision::selected_model(app_type, &provider.settings_config).as_deref()
             == Some(model)
         {
             return Ok(());
