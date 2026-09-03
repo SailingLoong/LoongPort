@@ -3386,6 +3386,17 @@ fn persist_provision_batch(
                 candidate.models.as_deref(),
                 provision::ProvisionStyle::default(),
             )
+        } else if matches!(app_type, AppType::GrokBuild) {
+            // grokbuild 同样落模型目录（收全部文本模型，见生成侧注释）——
+            // 主界面「支持的模型」芯片与托盘「模型」子菜单都从它取
+            provision::settings_config_with_models(
+                app_type,
+                &candidate.api_key,
+                &display_name,
+                &base_url,
+                &candidate.model,
+                candidate.models.as_deref(),
+            )
         } else {
             provision::settings_config_for(
                 app_type,
@@ -4421,8 +4432,8 @@ fn preserve_supported_codex_model(
 }
 
 /// [`preserve_supported_codex_model`] 的跨平台版：claude / gemini 走 env 形状
-/// （剥掉 `[1M]` 声明后对新目录查成员资格），其余平台没有「选模型」概念，
-/// 新默认直接接管。
+/// （剥掉 `[1M]` 声明后对新目录查成员资格），grokbuild 走 TOML 形状，其余平台
+/// 没有「选模型」概念，新默认直接接管。
 fn preserve_supported_model(
     app_type: &AppType,
     defaults: serde_json::Value,
@@ -4434,8 +4445,25 @@ fn preserve_supported_model(
             let catalog = models_from_settings(&defaults);
             provision::preserve_supported_env_model(app_type, defaults, previous, &catalog)
         }
+        AppType::GrokBuild => preserve_supported_grok_model(defaults, previous),
         _ => defaults,
     }
+}
+
+/// [`preserve_supported_codex_model`] 的 grok 版：读旧选中值（TOML 选中模型表的
+/// `model` 字段，[`provision::selected_model`]）对新目录查成员资格，命中就把新
+/// 默认的该字段改回旧值 —— profile 名、端点、密钥都不动。
+fn preserve_supported_grok_model(
+    defaults: serde_json::Value,
+    previous: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(old) = provision::selected_model(&AppType::GrokBuild, previous) else {
+        return defaults;
+    };
+    if !models_from_settings(&defaults).iter().any(|m| m == &old) {
+        return defaults;
+    }
+    select_grok_model(&defaults, &old).unwrap_or(defaults)
 }
 
 fn select_codex_model(
@@ -4459,6 +4487,24 @@ fn select_codex_model(
         .ok_or_else(|| AppError::Config("这个 Codex 档位缺少 config.toml".to_string()))?;
     let updated_config = crate::codex_config::update_codex_toml_field(config, "model", model)
         .map_err(AppError::Config)?;
+    let mut updated = settings.clone();
+    updated["config"] = serde_json::Value::String(updated_config);
+    Ok(updated)
+}
+
+/// [`select_codex_model`] 的 grok 版（成员资格校验由调用方对着目录做，与 env 分支
+/// 对齐）：改写 config TOML 里选中模型表的 `model` 字段。profile 名
+/// （`models.default` 指向的表名）、端点、密钥、上下文窗口都与模型无关，不动；
+/// toml_edit 保格式，用户的手工编辑不丢。
+fn select_grok_model(
+    settings: &serde_json::Value,
+    model: &str,
+) -> Result<serde_json::Value, AppError> {
+    let config = settings
+        .get("config")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AppError::Config("这个 Grok 档位缺少 config.toml".to_string()))?;
+    let updated_config = crate::grok_config::update_selected_model_string(config, "model", model)?;
     let mut updated = settings.clone();
     updated["config"] = serde_json::Value::String(updated_config);
     Ok(updated)
@@ -4655,10 +4701,14 @@ async fn select_tier_model_impl(
     quit_chatgpt: bool,
 ) -> Result<SwitchTierResult, AppError> {
     // 支持选模型的平台：codex（config TOML）/ claude（env.ANTHROPIC_MODEL）/
-    // gemini（env.GEMINI_MODEL）。目录（modelCatalog）三个平台同一份形状。
-    if !matches!(app_type, AppType::Codex | AppType::Claude | AppType::Gemini) {
+    // gemini（env.GEMINI_MODEL）/ grokbuild（config TOML 选中模型表的 model 字段）。
+    // 目录（modelCatalog）各平台同一份形状。
+    if !matches!(
+        app_type,
+        AppType::Codex | AppType::Claude | AppType::Gemini | AppType::GrokBuild
+    ) {
         return Err(AppError::Config(
-            "模型选择目前只支持 Codex / Claude / Gemini 档位".to_string(),
+            "模型选择目前只支持 Codex / Claude / Gemini / Grok 档位".to_string(),
         ));
     }
     if !crate::relay::is_managed(provider_id) {
@@ -4675,6 +4725,19 @@ async fn select_tier_model_impl(
         .settings_config;
     let settings = match &app_type {
         AppType::Codex => select_codex_model(&original_settings, model)?,
+        AppType::GrokBuild => {
+            let bare = model.trim();
+            if bare.is_empty()
+                || !models_from_settings(&original_settings)
+                    .iter()
+                    .any(|candidate| candidate == bare)
+            {
+                return Err(AppError::Config(format!(
+                    "模型 {bare:?} 不在这个档位支持的模型列表中"
+                )));
+            }
+            select_grok_model(&original_settings, bare)?
+        }
         // env 形状：成员资格对着目录校验（select_codex_model 内置，这里对齐）
         _ => {
             let bare = model.trim();
@@ -6691,6 +6754,55 @@ mod tests {
         let removed = codex_settings("gpt-removed", &["gpt-removed"]);
         let reset = preserve_supported_codex_model(defaults, &removed);
         assert_eq!(provision::extract_model(&reset).as_deref(), Some("gpt-a"));
+    }
+
+    /// 形状对齐 [`relay::provision`] 生成侧（`deeplink::build_grokbuild_settings`
+    /// + `modelCatalog`）：选中模型在 `[model."<default>"]` 表的 `model` 字段。
+    fn grok_settings(model: &str, models: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "config": format!(
+                "[models]\ndefault = \"{model}\"\n\n[model.\"{model}\"]\nmodel = \"{model}\"\nbase_url = \"https://api.example.com\"\nname = \"Test\"\napi_key = \"sk-test\"\napi_backend = \"responses\"\ncontext_window = 500000\n"
+            ),
+            "modelCatalog": {
+                "models": models.iter().map(|model| serde_json::json!({ "model": model })).collect::<Vec<_>>()
+            }
+        })
+    }
+
+    #[test]
+    fn selecting_a_grok_model_only_updates_the_model_field() {
+        let settings = grok_settings("grok-4.5", &["grok-4.5", "grok-4.6"]);
+
+        let selected = select_grok_model(&settings, "grok-4.6").expect("supported model");
+        assert_eq!(
+            provision::selected_model(&AppType::GrokBuild, &selected).as_deref(),
+            Some("grok-4.6")
+        );
+        // profile 名（models.default 指向的表）、端点、密钥、目录都不动 ——
+        // 它们与模型无关
+        let config = selected["config"].as_str().expect("config text");
+        assert!(config.contains("[model.\"grok-4.5\"]"), "{config}");
+        assert!(config.contains("base_url = \"https://api.example.com\""));
+        assert!(config.contains("api_key = \"sk-test\""));
+        assert_eq!(selected["modelCatalog"], settings["modelCatalog"]);
+    }
+
+    #[test]
+    fn refreshing_a_managed_grok_tier_keeps_only_a_still_supported_selection() {
+        let defaults = grok_settings("grok-4.5", &["grok-4.5", "grok-4.6"]);
+        let previous = grok_settings("grok-4.6", &["grok-4.5", "grok-4.6"]);
+        let kept = preserve_supported_grok_model(defaults.clone(), &previous);
+        assert_eq!(
+            provision::selected_model(&AppType::GrokBuild, &kept).as_deref(),
+            Some("grok-4.6")
+        );
+
+        let removed = grok_settings("grok-gone", &["grok-gone"]);
+        let reset = preserve_supported_grok_model(defaults, &removed);
+        assert_eq!(
+            provision::selected_model(&AppType::GrokBuild, &reset).as_deref(),
+            Some("grok-4.5")
+        );
     }
 
     /// ⭐ `relay_list_sponsors` 发给前端的**键名**必须是 camelCase。

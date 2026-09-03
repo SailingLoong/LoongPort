@@ -226,7 +226,12 @@ pub fn extract_base_url(config_toml: &str) -> Option<String> {
     Some(extract_model_config(config_toml)?.base_url)
 }
 
-fn update_selected_model_string(
+/// 把选中模型表（`[model."<models.default>"]`）里的一个字符串字段改写为 `value`，
+/// toml_edit 保格式保注释，用户的手工编辑不丢。
+///
+/// 供托管档位的「选模型」改 `model` 字段用（profile 名、端点、密钥、窗口都与模型
+/// 无关，不动）；proxy 接管与 sk 刷新也走这里改 `base_url` / `api_key`。
+pub fn update_selected_model_string(
     config_toml: &str,
     field: &str,
     value: &str,

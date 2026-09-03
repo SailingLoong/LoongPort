@@ -893,12 +893,17 @@ pub fn extract_model(settings_config: &serde_json::Value) -> Option<String> {
 /// 从 settings_config 读档位**选中的模型**（跨平台）。
 ///
 /// codex 系读 config TOML 的 `model` 行（[`extract_model`]）；claude 读
-/// `env.ANTHROPIC_MODEL`；gemini 读 `env.GEMINI_MODEL`。其余平台（没有
-/// 「档位选模型」概念）返回 `None`。目录本身统一走 `modelCatalog`
-/// （`commands::models_from_settings`，与 codex 同一份形状）。
+/// `env.ANTHROPIC_MODEL`；gemini 读 `env.GEMINI_MODEL`；grokbuild 读 config TOML 里
+/// 选中模型表的 `model` 字段（[`grok_config::extract_model_config`]，与目录同一
+/// 标识空间）。其余平台（没有「档位选模型」概念）返回 `None`。目录本身统一走
+/// `modelCatalog`（`commands::models_from_settings`，与 codex 同一份形状）。
 pub fn selected_model(app_type: &AppType, settings: &serde_json::Value) -> Option<String> {
     let env_key = match app_type {
         AppType::Codex | AppType::CodexImage => return extract_model(settings),
+        AppType::GrokBuild => {
+            let config = settings.get("config")?.as_str()?;
+            return crate::grok_config::extract_model_config(config).map(|c| c.model);
+        }
         AppType::Claude => "ANTHROPIC_MODEL",
         AppType::Gemini => "GEMINI_MODEL",
         _ => return None,
@@ -1122,6 +1127,8 @@ const CODEX_MAIN_CANDIDATES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.
 ///   挑出的模型名对支持 1M 的新一代模型附 `[1M]` 后缀声明（见 [`maybe_one_m`]）。
 /// - **codex**：主模型候选顺延（首位 `DEFAULT_MODEL` 命中即保持现状）。
 /// - **gemini**：优先取第一个 `gemini-*` 模型；没有时回落列表首项。
+/// - **grok**：`grok-*` 家族里取版本号新的那代（[`grok_model_rank`]）；没有该家族
+///   时回落列表首项。
 /// - **其它平台**：模型列表第一个文本模型。
 /// - **纯生图分组**（只有 `gpt-image-*`）：仍写最新的生图模型（复用作 `pick_model`）。
 /// - **列表拉不到**：回落 `DEFAULT_MODEL`（旧行为，最坏退化）。
@@ -1149,6 +1156,23 @@ pub fn pick_tier_models(app_type: &AppType, models: Option<&[String]>) -> TierMo
             main: models
                 .iter()
                 .find(|model| model.to_ascii_lowercase().starts_with("gemini-"))
+                .cloned()
+                .unwrap_or_else(|| models[0].clone()),
+            claude_roles: None,
+        },
+        AppType::GrokBuild => TierModels {
+            // 版本号排新而不是照抄列表首项（`normalize_model_names` 已排序，字典序会
+            // 把 grok-4.5 排在 grok-4.6 前面 —— 选旧弃新）。与 codex 的候选表不同，
+            // 这里不写死代名：grok 家族没有「跨全部站点查证过」的候选，而版本号是
+            // 模型名自带的数据，新一代自动跟上，不必改代码。
+            main: models
+                .iter()
+                .filter(|model| model.to_ascii_lowercase().starts_with("grok"))
+                .max_by(|a, b| {
+                    grok_model_rank(a)
+                        .cmp(&grok_model_rank(b))
+                        .then_with(|| a.as_str().cmp(b.as_str()))
+                })
                 .cloned()
                 .unwrap_or_else(|| models[0].clone()),
             claude_roles: None,
@@ -1271,6 +1295,26 @@ fn image_model_rank(model: &str) -> Vec<u32> {
         .filter(|seg| !seg.is_empty())
         .filter_map(|seg| seg.parse::<u32>().ok())
         .collect()
+}
+
+/// grok 家族模型名尾部的版本段（`grok-4.5` → `[4, 5]`），用于在多个 `grok-*` 里挑
+/// 最新一代。
+///
+/// 与 [`image_model_rank`] 同一动机：字典序会把 `grok-4.10` 排在 `grok-4.6` 前面、
+/// 把 `grok-4.5` 排在 `grok-4.6` 前面 —— 直接取排序后首项是**选旧弃新**。
+/// 取**最后一个 `-` 之后的版本号**：`grok-4.5` → `4.5`、`grok-code-4.6` → `4.6`。
+/// 尾段认不出数字（名字里没有版本号）返回空 —— 那种名字无从判断新旧，让它输给能判的。
+fn grok_model_rank(model: &str) -> Vec<u32> {
+    model
+        .rsplit('-')
+        .next()
+        .map(|tail| {
+            tail.split('.')
+                .filter(|seg| !seg.is_empty())
+                .filter_map(|seg| seg.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 这个模型名是生图模型吗（[`IMAGE_MODEL_PREFIX`] 前缀）。
@@ -2356,6 +2400,70 @@ mod tests {
             settings.get("modelCatalog").is_none(),
             "没有 gemini-* 时不能写一个空目录"
         );
+    }
+
+    /// grok 档位落模型目录：收全部**文本**模型（生图剔除），与其它平台同一份
+    /// JSON 形状；选中模型落在 config TOML 的选中模型表里，`selected_model`
+    /// 读得回来（与目录同一标识空间）。
+    #[test]
+    fn grok_settings_persist_the_text_model_catalog() {
+        let models = vec![
+            "grok-4.5".to_string(),
+            "grok-code-4.5".to_string(),
+            "gpt-image-2".to_string(),
+        ];
+        let settings = settings_config_with_models(
+            &AppType::GrokBuild,
+            "sk-test",
+            "Test",
+            "https://api.example.com",
+            "grok-4.5",
+            Some(&models),
+        )
+        .expect("Grok config");
+
+        assert_eq!(
+            settings["modelCatalog"]["models"],
+            serde_json::json!([
+                { "model": "grok-4.5" },
+                { "model": "grok-code-4.5" }
+            ])
+        );
+        assert_eq!(
+            selected_model(&AppType::GrokBuild, &settings).as_deref(),
+            Some("grok-4.5")
+        );
+    }
+
+    /// grok 默认模型按版本号挑最新一代，不照抄排序后首项（字典序会把
+    /// `grok-4.5` 排在 `grok-4.6` 前面 —— 选旧弃新）；没有 grok 家族时回落首项。
+    #[test]
+    fn grok_default_picks_the_newest_generation() {
+        let models = vec![
+            "grok-4.5".to_string(),
+            "grok-code-4.5".to_string(),
+            "grok-4.6".to_string(),
+        ];
+        let picked = pick_tier_models(&AppType::GrokBuild, Some(&models));
+        assert_eq!(picked.main, "grok-4.6");
+        assert!(picked.claude_roles.is_none());
+
+        // 没有该家族 → 回落列表首项，不报错（目录是异源数据，宁可用也不炸）
+        let no_family = vec!["gpt-5.6-sol".to_string(), "gpt-5.6-terra".to_string()];
+        let picked = pick_tier_models(&AppType::GrokBuild, Some(&no_family));
+        assert_eq!(picked.main, "gpt-5.6-sol");
+    }
+
+    /// 版本段解析：`grok-4.5` → [4,5]、`grok-4.10` > `grok-4.6`、
+    /// 带别名的 `grok-code-4.6` 取尾段、认不出数字的排最后。
+    #[test]
+    fn grok_model_rank_extracts_the_trailing_version() {
+        assert_eq!(grok_model_rank("grok-4.5"), vec![4, 5]);
+        assert_eq!(grok_model_rank("grok-4"), vec![4]);
+        assert_eq!(grok_model_rank("grok-code-4.6"), vec![4, 6]);
+        assert!(grok_model_rank("grok-4.10") > grok_model_rank("grok-4.6"));
+        assert!(grok_model_rank("grok-custom").is_empty());
+        assert!(grok_model_rank("grok-4.5") > grok_model_rank("grok-custom"));
     }
 
     /// env 形状的选模型：写 env 键（claude 补 [1M]）；保留偏好对「目录里还有」
