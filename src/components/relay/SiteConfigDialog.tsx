@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { FileDown, Loader2, RotateCcw } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -18,6 +19,10 @@ import { relayApi } from "@/lib/api/relay";
 /**
  * 「导入站点配置」弹窗：贴站长给的配置链接或内容（URL / JSON / base64 均可，
  * 后端自动判别），同步到该站点的托管档位。
+ *
+ * 格式基准 = `SwitchTierConfirmDialog`（`max-w-md` + Header/Footer + 三按钮权重
+ * 梯度）——这是仓内确认/输入类弹窗的统一形状，新弹窗从这里抄骨架，别自己拼
+ * flex 排布（那条路长出来过一版「左边孤零零一个 ghost」的怪布局）。
  *
  * 前端只做收集与反馈——三形态判别、双重同源校验、deny-list 过滤全在后端
  * （`relay_apply_site_config`），错误消息也是后端给的用户向文案，这里原样 toast。
@@ -94,7 +99,7 @@ export function SiteConfigDialog({
       open={open}
       onOpenChange={(next) => (next ? onOpenChange(true) : close())}
     >
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{t("loongport.siteConfig.title")}</DialogTitle>
           <DialogDescription>
@@ -109,48 +114,36 @@ export function SiteConfigDialog({
           spellCheck={false}
           disabled={busy}
         />
-        <div className="flex items-center justify-between gap-2">
+        {/* 三按钮，视觉权重从低到高（左 → 右），与 `SwitchTierConfirmDialog`
+            同一梯度：**取消**（ghost）/ 恢复默认（outline，次要动作）/ 应用（主）。
+            「恢复默认」不是退路也不是主流程——它是与应用对称的另一个方向，
+            放中间档正合适。 */}
+        <DialogFooter className="gap-2">
+          <Button variant="ghost" onClick={close} disabled={busy}>
+            {t("common.cancel")}
+          </Button>
           <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="gap-1 text-muted-foreground"
+            variant="outline"
             disabled={busy}
             onClick={() => void reset()}
           >
             {resetting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
-              <RotateCcw className="h-3.5 w-3.5" />
+              t("loongport.siteConfig.reset")
             )}
-            {t("loongport.siteConfig.reset")}
           </Button>
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={close}
-              disabled={busy}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="gap-1"
-              disabled={busy || input.trim().length === 0}
-              onClick={() => void apply()}
-            >
-              {applying ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <FileDown className="h-3.5 w-3.5" />
-              )}
-              {t("loongport.siteConfig.apply")}
-            </Button>
-          </div>
-        </div>
+          <Button
+            disabled={busy || input.trim().length === 0}
+            onClick={() => void apply()}
+          >
+            {applying ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              t("loongport.siteConfig.apply")
+            )}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
