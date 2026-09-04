@@ -996,7 +996,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               })}
             </p>
             {updateInfo.notes && (
-              <p className="text-muted-foreground line-clamp-3 leading-relaxed">
+              // notes 是 tag 正文（markdown 源文本），这里按纯文本滚动展示——
+              // 完整渲染的版本在旁边的「发行说明」按钮（GitHub Release 页），不重复造。
+              <p className="text-muted-foreground max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed">
                 {updateInfo.notes}
               </p>
             )}

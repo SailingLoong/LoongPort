@@ -876,7 +876,9 @@ jobs:
   assemble-latest-json:
     name: Assemble latest.json
     runs-on: ubuntu-22.04
-    needs: publish-release
+    # 同 publish-release：直接 needs tag-notes 才能拿到它的 output（job output
+    # 只从直接依赖取）。tag 正文在这里进 updater manifest 的 notes 字段。
+    needs: [publish-release, tag-notes]
     permissions:
       contents: write
     steps:
@@ -898,11 +900,15 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          TAG_NOTES: ${{ needs.tag-notes.outputs.notes }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://github.com/$REPO/releases/download/$TAG"
+          # tag 正文（发布说明唯一源）经 jq 转成合法 JSON 字符串。正文是自由文本，
+          # 拼进手写 JSON 必须走转义；这一段已用真实 tag 正文本地验证过逐字往返。
+          NOTES_JSON=$(printf '%s' "$TAG_NOTES" | jq -Rs .)
           # 初始化空平台映射
           mac_url=""; mac_sig=""
           win_x64_url=""; win_x64_sig=""
@@ -934,7 +940,7 @@ jobs:
           {
             echo '{'
             echo "  \"version\": \"$VERSION\",";
-            echo "  \"notes\": \"Release $TAG\",";
+            echo "  \"notes\": $NOTES_JSON,";
             echo "  \"pub_date\": \"$PUB_DATE\",";
             echo '  "platforms": {'
             first=1
@@ -969,6 +975,9 @@ jobs:
             echo '  }'
             echo '}'
           } > "$tmp_json"
+          # manifest 的 notes 现在是自由文本：一个坏转义上去就是「所有人检查更新失败」，
+          # 而且要到用户端才炸、CI 全绿。上传前先验一遍合法性，把它拦在发布当晚。
+          jq empty "$tmp_json"
           echo "Generated latest.json:" && cat "$tmp_json"
           # updater 未启用时一个 .sig 都不会有 ⇒ platforms 是空对象。那种 latest.json 传上去
           # 只会让人以为应用内更新已经能用（实际 lib.rs 里连插件都没注册），所以不传。
