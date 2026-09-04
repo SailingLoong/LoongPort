@@ -381,6 +381,9 @@ pub struct TierBoardTier {
     /// 7 天缓存命中率（0..1 分数，与首字耗时同窗口）；`None` = 无可判流量
     /// （分母为 0 时不显示，别把「不知道」当 0%）。
     pub cache_hit_rate: Option<f64>,
+    /// 近 6 小时活动时间线（15 分钟一桶固定 24 桶，空桶补零）；
+    /// `None` = 窗口内没有任何请求，前端不渲染时间线。
+    pub recent_activity: Option<Vec<crate::services::usage_stats::ProviderActivityBucket>>,
 }
 
 /// 省心模式档位看板：首页省心视图一次拉全的聚合 DTO。
@@ -427,6 +430,9 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let today = db.get_provider_today_stats(app_type).unwrap_or_default();
     let cache_hit_rates = db
         .get_provider_cache_hit_rates(app_type, chrono::Utc::now().timestamp() - 7 * 86400)
+        .unwrap_or_default();
+    let recent_activity = db
+        .get_provider_activity_buckets(app_type, chrono::Utc::now().timestamp() - 6 * 3600, 900, 24)
         .unwrap_or_default();
     let model_pref = auto_strategy::get_model_pref(db, app_type);
     let current_id = auto_strategy::effective_current_provider_id(db, app_type);
@@ -499,6 +505,7 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
             today_cost_usd: today.get(&p.id).map(|(cost, _)| *cost),
             today_requests: today.get(&p.id).map(|(_, requests)| *requests),
             cache_hit_rate: cache_hit_rates.get(&p.id).copied(),
+            recent_activity: recent_activity.get(&p.id).cloned(),
             provider_id: p.id.clone(),
             name: p.name.clone(),
             position,
@@ -852,10 +859,46 @@ mod tests {
 
         // 今天两行：$0.5 + $0.25；fresh input 10、cache read 90（claude 语义
         // input_tokens=fresh，semantics 缺省 0=legacy 也按 fresh 归一）
-        seed_board_usage(&db, "claude", &busy, "busy-t1", 0.5, 10, 0, 90, 0);
-        seed_board_usage(&db, "claude", &busy, "busy-t2", 0.25, 10, 0, 90, 0);
+        seed_board_usage(
+            &db,
+            "claude",
+            &busy,
+            "busy-t1",
+            0.5,
+            200,
+            10,
+            0,
+            90,
+            Some(10),
+            0,
+        );
+        seed_board_usage(
+            &db,
+            "claude",
+            &busy,
+            "busy-t2",
+            0.25,
+            200,
+            10,
+            0,
+            90,
+            Some(10),
+            0,
+        );
         // 昨天一行（now−2 天，双时区安全）：$9 不计入今日；token 全 0 不进缓存率
-        seed_board_usage(&db, "claude", &busy, "busy-y1", 9.0, 0, 0, 0, -2 * 86400);
+        seed_board_usage(
+            &db,
+            "claude",
+            &busy,
+            "busy-y1",
+            9.0,
+            200,
+            0,
+            0,
+            0,
+            Some(10),
+            -2 * 86400,
+        );
         // cold 档没有任何行
 
         let board = tier_board_impl(&state, "claude").await.unwrap();
@@ -871,6 +914,105 @@ mod tests {
         assert_eq!(cold_tier.cache_hit_rate, None, "分母为 0 不显示 0%");
     }
 
+    /// ⭐ 近期活动时间线：6 小时 / 15 分钟一桶固定 24 桶，每桶成功数/失败数/
+    /// 均首字；窗外行不计；窗口内没有任何行的档位 → `None`（前端不渲染时间线）。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_surfaces_recent_activity_buckets() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let busy = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let cold = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let tier = |id: &str| {
+            crate::provider::Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({ "config": "model = \"m-x\"\n" }),
+                None,
+            )
+        };
+        db.save_provider("claude", &tier(&busy)).unwrap();
+        db.save_provider("claude", &tier(&cold)).unwrap();
+
+        // 桶 0（窗口最早期）：两次成功 ttft 100/300 → 均 200
+        seed_board_usage(
+            &db,
+            "claude",
+            &busy,
+            "act-b0-a",
+            0.0,
+            200,
+            0,
+            0,
+            0,
+            Some(100),
+            -6 * 3600 + 120,
+        );
+        seed_board_usage(
+            &db,
+            "claude",
+            &busy,
+            "act-b0-b",
+            0.0,
+            200,
+            0,
+            0,
+            0,
+            Some(300),
+            -6 * 3600 + 240,
+        );
+        // 桶 23（最近）：一次失败（403，无首字）
+        seed_board_usage(
+            &db,
+            "claude",
+            &busy,
+            "act-b23-f",
+            0.0,
+            403,
+            0,
+            0,
+            0,
+            None,
+            -60,
+        );
+        // 窗外（8 小时前）：不计入
+        seed_board_usage(
+            &db,
+            "claude",
+            &busy,
+            "act-out",
+            0.0,
+            200,
+            0,
+            0,
+            0,
+            Some(10),
+            -8 * 3600,
+        );
+
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
+        let activity = by_id(&busy)
+            .recent_activity
+            .as_ref()
+            .expect("窗口内有行的档位必须有活动桶");
+        assert_eq!(activity.len(), 24, "固定 24 桶（空桶补零），时间线不断续");
+        assert_eq!(activity[0].success_count, 2);
+        assert_eq!(activity[0].fail_count, 0);
+        assert_eq!(activity[0].avg_first_token_ms, Some(200));
+        assert_eq!(activity[23].success_count, 0);
+        assert_eq!(activity[23].fail_count, 1);
+        assert_eq!(activity[23].avg_first_token_ms, None);
+        assert_eq!(activity[5].success_count, 0, "空桶补零");
+        assert_eq!(activity[5].avg_first_token_ms, None);
+        assert!(
+            by_id(&cold).recent_activity.is_none(),
+            "窗口内没有行的档位 → None，前端不渲染"
+        );
+    }
+
     /// 看板用量 seed：一行带花费与缓存 token 的明细（created_at = now + 偏移秒）。
     #[allow(clippy::too_many_arguments)]
     fn seed_board_usage(
@@ -879,9 +1021,11 @@ mod tests {
         provider_id: &str,
         request_id: &str,
         cost_usd: f64,
+        status_code: i64,
         input_tokens: i64,
         cache_creation: i64,
         cache_read: i64,
+        first_token_ms: Option<i64>,
         created_at_offset_secs: i64,
     ) {
         let conn = db.conn.lock().unwrap();
@@ -890,7 +1034,7 @@ mod tests {
                 request_id, provider_id, app_type, model,
                 input_tokens, cache_creation_tokens, cache_read_tokens,
                 total_cost_usd, latency_ms, first_token_ms, status_code, created_at
-            ) VALUES (?1, ?2, ?3, 'm', ?4, ?5, ?6, ?7, 10, 10, 200, ?8)",
+            ) VALUES (?1, ?2, ?3, 'm', ?4, ?5, ?6, ?7, 10, ?8, ?9, ?10)",
             rusqlite::params![
                 request_id,
                 provider_id,
@@ -899,6 +1043,8 @@ mod tests {
                 cache_creation,
                 cache_read,
                 cost_usd,
+                first_token_ms,
+                status_code,
                 chrono::Utc::now().timestamp() + created_at_offset_secs,
             ],
         )

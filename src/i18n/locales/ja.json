@@ -2663,7 +2663,8 @@
       "requestsUnit": "{{count}} 回",
       "cache": "キャッシュ",
       "reenable": "再有効化",
-      "retryAll": "まとめて再有効化"
+      "retryAll": "まとめて再有効化",
+      "recentTimeline": "直近 6 時間：成功 {{ok}} · 失敗 {{fail}} · 初字 {{ttft}}"
     },
     "modelHint": "モデルを選ぶと、カタログにそのモデルを含むティアのみが対象になります。明示的に選ぶと即座に最適なティアへ切替えます。",
     "advancedSection": "詳細（フェイルオーバーキューとサーキットブレーカー）",
