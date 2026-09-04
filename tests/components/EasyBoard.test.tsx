@@ -127,8 +127,7 @@ describe("EasyBoard", () => {
             ...nulls,
             isHealthy: false,
             consecutiveFailures: 4,
-            lastError:
-              "上游 HTTP 403: {\"error\":{\"message\":\"无可用渠道\"}}",
+            lastError: '上游 HTTP 403: {"error":{"message":"无可用渠道"}}',
           },
           {
             providerId: "tier-fine",
