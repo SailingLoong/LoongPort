@@ -350,7 +350,8 @@ pub async fn set_easy_mode_manual_order(
 pub struct TierBoardTier {
     pub provider_id: String,
     pub name: String,
-    /// 展示序即选路优先级序（含亲和置顶/手动序）。
+    /// 展示序 = 纯策略序（自动）或用户手动序；不含选路时的会话亲和置顶 ——
+    /// 当前档位靠 `is_current` 徽章表达，不靠排到第一。
     pub position: usize,
     pub is_current: bool,
     pub rate_multiplier: Option<f64>,
@@ -360,11 +361,19 @@ pub struct TierBoardTier {
     pub effective_model: Option<String>,
     pub avg_first_token_ms: Option<u64>,
     /// 站点钱包余额（美元）。sub2api 用档位 sk 直查 `GET /v1/usage`（同站各档
-    /// 共享一个账号钱包）；newapi 无此路 → `None`（前端显示 —，走登录态的余额链）。
+    /// 共享一个账号钱包）；问不出时回落 one-api 系 billing 双端点（newapi 站），
+    /// 仍问不到 → `None`，前端显示 —。
     pub balance_usd: Option<f64>,
     /// 模型验真合并判定（两源读侧合并、跨模型取最严重）。只上异常：
     /// "anomaly" | "suspicious"；Trusted/无报告 = `None`（被动监控不背书）。
     pub verification_verdict: Option<String>,
+    /// 健康快照（`provider_health`；缺行时 DAO 合成默认健康行 —— 契约如此）。
+    /// 从未失败 = `Some(true)` / `Some(0)` / `None`，前端据此不显示健康标记。
+    pub is_healthy: Option<bool>,
+    pub consecutive_failures: Option<u32>,
+    /// 最近一次失败的上游报错原文（`ProxyError::to_string()`，成功即被清空）。
+    /// 「为什么不选用」标签的数据源。
+    pub last_error: Option<String>,
 }
 
 /// 省心模式档位看板：首页省心视图一次拉全的聚合 DTO。
@@ -398,7 +407,10 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     require_auto_mode_app(app_type)?;
     let db = &state.db;
     let providers = db.get_all_providers(app_type).map_err(|e| e.to_string())?;
-    let ranked = auto_strategy::rank_managed_tier_candidates(db, app_type, true)
+    // honor_affinity=false：看板展示纯策略序/手动序。会话亲和置顶是选路语义
+    // （防中途换档丢提示词缓存），展示要的是「价格序 + 谁在用标当前 + 没在用
+    // 的给出原因」的心智模型，两者别共用一个形状。
+    let ranked = auto_strategy::rank_managed_tier_candidates(db, app_type, false)
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
     let multipliers = db.get_tier_rate_multipliers(app_type).unwrap_or_default();
@@ -409,6 +421,15 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let current_id = auto_strategy::effective_current_provider_id(db, app_type);
 
     let balances = fetch_site_balances(app_type, &ranked).await;
+
+    // 健康快照（缺行时 DAO 合成默认健康行，见 get_provider_health 的契约）
+    let mut health: std::collections::HashMap<String, crate::proxy::types::ProviderHealth> =
+        std::collections::HashMap::new();
+    for p in &ranked {
+        if let Ok(h) = db.get_provider_health(&p.id, app_type).await {
+            health.insert(p.id.clone(), h);
+        }
+    }
 
     // 验真判定（两源读侧合并已在 store 层做完）：跨模型取最严重，只上异常
     let provider_ids: Vec<String> = ranked.iter().map(|p| p.id.clone()).collect();
@@ -461,6 +482,9 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
             avg_first_token_ms: ttft.get(&p.id).copied(),
             balance_usd: balances.get(&p.id).copied(),
             verification_verdict: verification_verdict(&p.id),
+            is_healthy: health.get(&p.id).map(|h| h.is_healthy),
+            consecutive_failures: health.get(&p.id).map(|h| h.consecutive_failures),
+            last_error: health.get(&p.id).and_then(|h| h.last_error.clone()),
             provider_id: p.id.clone(),
             name: p.name.clone(),
             position,
@@ -477,10 +501,12 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     })
 }
 
-/// sub2api 站点钱包余额：按「站点 origin」去重，每个 origin 用第一把 sk 查一次
-/// `GET /v1/usage`（登录态过期也能查），回填到该站的全部档位上。newapi 站
-/// 403/404 → 该站各档 `None`。只对 https 端点发起（http/本地/无 sk 自然跳过，
-/// 单元测试零网络）。
+/// 站点钱包余额：按「站点 origin」去重，每个 origin 用第一把 sk 查一次，回填到
+/// 该站的全部档位上。两路按序试：先 sub2api 的 `GET /v1/usage`（sub2api 站短路，
+/// 不多花请求）；问不出（典型 newapi：该端点 404）再回落 one-api 系 billing 双端
+/// 点（见 [`crate::relay::api::billing_balance_with_api_key`] 的口径与限制）。
+/// 两路都拿不到 → 该站各档 `None`。只对 https 端点发起（http/本地/无 sk 自然
+/// 跳过，单元测试零网络）。
 async fn fetch_site_balances(
     app_type: &str,
     tiers: &[crate::provider::Provider],
@@ -517,7 +543,7 @@ async fn fetch_site_balances(
     let queries: Vec<_> = origin_key
         .into_iter()
         .map(|(origin, key)| async move {
-            let balance = crate::relay::api::usage_with_api_key(&origin, &key)
+            let sub2api_wallet = crate::relay::api::usage_with_api_key(&origin, &key)
                 .await
                 .ok()
                 .and_then(|usage| {
@@ -525,6 +551,13 @@ async fn fetch_site_balances(
                         .data
                         .and_then(|items| items.first().and_then(|item| item.remaining))
                 });
+            let balance = match sub2api_wallet {
+                Some(balance) => Some(balance),
+                None => crate::relay::api::billing_balance_with_api_key(&origin, &key)
+                    .await
+                    .ok()
+                    .flatten(),
+            };
             (origin, balance)
         })
         .collect();
@@ -665,6 +698,119 @@ mod tests {
         let board = tier_board_impl(&state, "claude").await.unwrap();
         assert_eq!(board.mode, "manual");
         assert_eq!(board.tiers[0].provider_id, expensive, "手动序优先");
+    }
+
+    /// ⭐ 看板是纯策略序：选路的会话亲和置顶只在请求时发生，展示不打乱顺序 ——
+    /// 当前档位靠 `is_current` 徽章表达，不靠排到第一。用户读看板的心智模型是
+    /// 「价格序 + 谁在用标当前 + 没在用的给出原因」。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_stays_pure_price_order_with_active_current() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let expensive = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let cheap = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let tier = |id: &str| {
+            crate::provider::Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({ "config": "model = \"m-x\"\n" }),
+                None,
+            )
+        };
+        db.save_provider("claude", &tier(&expensive)).unwrap();
+        db.save_provider("claude", &tier(&cheap)).unwrap();
+        db.set_tier_rate_multiplier("claude", &expensive, Some(2.0))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
+            .unwrap();
+        db.set_current_provider("claude", &expensive).unwrap();
+
+        // 当前档位（贵）30 分钟内有流量 → 选路会亲和置顶；看板必须保持纯价格序
+        seed_board_activity(&db, "claude", &expensive);
+
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        assert_eq!(
+            board.tiers[0].provider_id, cheap,
+            "看板第一张是最便宜的，不被亲和置顶顶走"
+        );
+        let current = board.tiers.iter().find(|t| t.is_current).unwrap();
+        assert_eq!(current.provider_id, expensive);
+        assert_eq!(current.position, 1, "当前徽章在它自己的价格位上");
+    }
+
+    /// ⭐ 失败原因透出：`provider_health` 的健康态/连续失败/`last_error`（上游
+    /// 报错原文）跟着看板走，给「为什么不选用」的标签用；没失败过的档位全 None。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_surfaces_provider_health_for_failed_tiers() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let dead = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let fine = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let tier = |id: &str| {
+            crate::provider::Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({ "config": "model = \"m-x\"\n" }),
+                None,
+            )
+        };
+        db.save_provider("claude", &tier(&dead)).unwrap();
+        db.save_provider("claude", &tier(&fine)).unwrap();
+
+        db.update_provider_health_with_threshold(
+            &dead,
+            "claude",
+            false,
+            Some("上游 HTTP 403: {\"error\":{\"message\":\"无可用渠道\"}}".to_string()),
+            1,
+        )
+        .await
+        .unwrap();
+
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
+        assert_eq!(by_id(&dead).is_healthy, Some(false));
+        assert_eq!(by_id(&dead).consecutive_failures, Some(1));
+        assert!(
+            by_id(&dead)
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("403")),
+            "上游报错原文必须原样透出"
+        );
+        assert_eq!(
+            by_id(&fine).is_healthy,
+            Some(true),
+            "没失败过的档位 = 健康（缺行时 DAO 合成默认健康行）"
+        );
+        assert_eq!(by_id(&fine).consecutive_failures, Some(0));
+        assert_eq!(by_id(&fine).last_error, None);
+    }
+
+    /// 亲和判据与选路同源（proxy_request_logs 近期流量），见
+    /// `auto_strategy::AFFINITY_WINDOW_SECS`。
+    fn seed_board_activity(db: &Database, app_type: &str, provider_id: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, total_cost_usd,
+                latency_ms, first_token_ms, status_code, created_at
+            ) VALUES (?1, ?2, ?3, 'm', 1, 1, '0', 10, 10, 200, ?4)",
+            rusqlite::params![
+                format!("board-{provider_id}"),
+                provider_id,
+                app_type,
+                chrono::Utc::now().timestamp(),
+            ],
+        )
+        .unwrap();
     }
 
     fn test_home() -> tempfile::TempDir {

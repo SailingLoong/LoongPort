@@ -23,7 +23,7 @@ export interface AutoModeStatus {
   cliInstalled: boolean;
 }
 
-/** 档位看板的一行：展示序即选路优先级序（后端唯源，前端只渲染）。 */
+/** 档位看板的一行：展示序 = 纯策略序/手动序（后端唯源，前端只渲染）。 */
 export interface TierBoardTier {
   providerId: string;
   name: string;
@@ -39,6 +39,11 @@ export interface TierBoardTier {
   balanceUsd: number | null;
   /** 模型验真合并判定，只上异常（`'anomaly' | 'suspicious'`）；`null` = 无异常（不背书）。 */
   verificationVerdict: "anomaly" | "suspicious" | null;
+  /** 健康快照（`provider_health`；`null` = 后端读失败）。健康且零失败 → 前端不显示标记。 */
+  isHealthy: boolean | null;
+  consecutiveFailures: number | null;
+  /** 最近一次失败的上游报错原文；`null` = 没有失败记录。 */
+  lastError: string | null;
 }
 
 export interface TierBoard {

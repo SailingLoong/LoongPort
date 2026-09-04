@@ -391,4 +391,48 @@ mod tests {
         assert_eq!(usage.remaining, Some(12.5));
         assert_eq!(usage.unit.as_deref(), Some("USD"));
     }
+
+    /// ⭐ newapi（one-api 家族）sk 直查余额：billing 双端点合成，
+    /// 余额 = `hard_limit_usd` − `total_usage`（美分）/100。
+    #[test]
+    fn billing_subscription_and_usage_compose_wallet_balance() {
+        let balance = api::parse_billing_balance(
+            r#"{"object":"billing.subscription","has_payment_method":true,"hard_limit_usd":12.5}"#,
+            r#"{"object":"list","total_usage":250.0}"#,
+        )
+        .expect("双端点合法 JSON 应能合成余额");
+        assert_eq!(balance, Some(10.0), "12.5 − 250美分/100 = 10.0 美元");
+    }
+
+    /// ⭐ 缺任一字段/端点不可用（空响应）不算数，坏 JSON 是 Err。
+    /// 只有额度没有用量时宁可不显示，也不能把额度当余额。
+    #[test]
+    fn billing_missing_fields_or_empty_bodies_are_not_a_balance() {
+        assert_eq!(
+            api::parse_billing_balance(
+                r#"{"object":"billing.subscription"}"#,
+                r#"{"object":"list","total_usage":1.0}"#,
+            )
+            .unwrap(),
+            None,
+            "没有 hard_limit_usd 就不猜"
+        );
+        assert_eq!(
+            api::parse_billing_balance(
+                r#"{"object":"billing.subscription","hard_limit_usd":5.0}"#,
+                r#"{"object":"list"}"#,
+            )
+            .unwrap(),
+            None,
+            "没有 total_usage 就不猜"
+        );
+        // 端点不可用（404/403/401）时上层给空串 —— 查不到不算错
+        assert_eq!(api::parse_billing_balance("", r#"{}"#).unwrap(), None);
+        assert_eq!(
+            api::parse_billing_balance(r#"{"hard_limit_usd":1.0}"#, "").unwrap(),
+            None
+        );
+        assert!(api::parse_billing_balance("not json", r#"{}"#).is_err());
+        assert!(api::parse_billing_balance(r#"{}"#, "not json").is_err());
+    }
 }
