@@ -223,13 +223,12 @@ pub async fn handle_non_streaming(
     // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
     _connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<Response, ProxyError> {
-    // 整包超时：仅在故障转移开启且配置值非零时生效
-    let body_timeout =
-        if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
-            Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
-        } else {
-            Duration::ZERO
-        };
+    // 整包超时：仅在故障转移行为启用（显式开关或省心模式）且配置值非零时生效
+    let body_timeout = if ctx.failover_active && ctx.app_config.non_streaming_timeout > 0 {
+        Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+    } else {
+        Duration::ZERO
+    };
     let (mut response_headers, status, body_bytes) =
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     // 托管档的非流式响应顺路观察（解压后的明文形状；满即丢不阻塞）

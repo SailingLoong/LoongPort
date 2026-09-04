@@ -148,6 +148,16 @@ pub fn is_auto_mode_enabled(db: &Database, app_type: &str) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+/// 该 app 的故障转移行为（请求内换档、重试、超时）是否生效。
+///
+/// 显式开关或省心模式任一开启即生效：省心模式的产品语义就是系统自动挑档并无缝
+/// 切换，不依赖用户再去高级区打开旧开关（它默认关）。选路侧省心模式优先于故障
+/// 转移队列（`provider_router::select_providers`），这里是转发/响应侧的同一判据
+/// —— 两处必须同真同假，别各写一份。
+pub fn failover_active(db: &Database, app_type: &str, auto_failover_enabled: bool) -> bool {
+    auto_failover_enabled || is_auto_mode_enabled(db, app_type)
+}
+
 /// 读全局策略（缺省 cheapest）。
 pub fn get_strategy(db: &Database) -> AutoStrategy {
     db.get_setting(SETTING_STRATEGY)
@@ -732,6 +742,21 @@ mod tests {
 
         set_enabled(&db, "claude", false).unwrap();
         assert!(!is_auto_mode_enabled(&db, "claude"));
+    }
+
+    /// 故障转移生效判据：显式开关或省心模式任一开启即生效（按 app 隔离）。
+    #[test]
+    fn failover_active_when_either_source_enabled() {
+        let db = Database::memory().unwrap();
+        assert!(!failover_active(&db, "claude", false));
+        assert!(failover_active(&db, "claude", true));
+
+        set_enabled(&db, "claude", true).unwrap();
+        assert!(
+            failover_active(&db, "claude", false),
+            "省心模式开启即蕴含故障转移"
+        );
+        assert!(!failover_active(&db, "codex", false), "按 app 隔离");
     }
 
     /// 模型偏好过滤：有偏好时只留「目录含该模型」的档位（无目录档位不保留 ——
