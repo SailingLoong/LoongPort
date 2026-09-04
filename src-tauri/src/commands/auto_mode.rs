@@ -374,6 +374,13 @@ pub struct TierBoardTier {
     /// 最近一次失败的上游报错原文（`ProxyError::to_string()`，成功即被清空）。
     /// 「为什么不选用」标签的数据源。
     pub last_error: Option<String>,
+    /// 今日花费（美元，本地时区「今天」，与限额页同口径）；`None` = 今天没有行。
+    pub today_cost_usd: Option<f64>,
+    /// 今日请求数（与 `today_cost_usd` 同一查询）。
+    pub today_requests: Option<u64>,
+    /// 7 天缓存命中率（0..1 分数，与首字耗时同窗口）；`None` = 无可判流量
+    /// （分母为 0 时不显示，别把「不知道」当 0%）。
+    pub cache_hit_rate: Option<f64>,
 }
 
 /// 省心模式档位看板：首页省心视图一次拉全的聚合 DTO。
@@ -416,6 +423,10 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let multipliers = db.get_tier_rate_multipliers(app_type).unwrap_or_default();
     let ttft = db
         .get_provider_avg_first_token_ms(app_type, chrono::Utc::now().timestamp() - 7 * 86400)
+        .unwrap_or_default();
+    let today = db.get_provider_today_stats(app_type).unwrap_or_default();
+    let cache_hit_rates = db
+        .get_provider_cache_hit_rates(app_type, chrono::Utc::now().timestamp() - 7 * 86400)
         .unwrap_or_default();
     let model_pref = auto_strategy::get_model_pref(db, app_type);
     let current_id = auto_strategy::effective_current_provider_id(db, app_type);
@@ -485,6 +496,9 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
             is_healthy: health.get(&p.id).map(|h| h.is_healthy),
             consecutive_failures: health.get(&p.id).map(|h| h.consecutive_failures),
             last_error: health.get(&p.id).and_then(|h| h.last_error.clone()),
+            today_cost_usd: today.get(&p.id).map(|(cost, _)| *cost),
+            today_requests: today.get(&p.id).map(|(_, requests)| *requests),
+            cache_hit_rate: cache_hit_rates.get(&p.id).copied(),
             provider_id: p.id.clone(),
             name: p.name.clone(),
             position,
@@ -808,6 +822,84 @@ mod tests {
                 provider_id,
                 app_type,
                 chrono::Utc::now().timestamp(),
+            ],
+        )
+        .unwrap();
+    }
+
+    /// ⭐ 今日运行事实（本地时区口径）+ 7 天缓存命中率：昨日行不计入今日；
+    /// 缓存率 = cache_read /（fresh_input + cache_creation + cache_read）；
+    /// 没有可判流量（分母 0）或没有行的档位 → `None`，不显示误导性 0%。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_surfaces_today_stats_and_cache_hit_rate() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let busy = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let cold = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let tier = |id: &str| {
+            crate::provider::Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({ "config": "model = \"m-x\"\n" }),
+                None,
+            )
+        };
+        db.save_provider("claude", &tier(&busy)).unwrap();
+        db.save_provider("claude", &tier(&cold)).unwrap();
+
+        // 今天两行：$0.5 + $0.25；fresh input 10、cache read 90（claude 语义
+        // input_tokens=fresh，semantics 缺省 0=legacy 也按 fresh 归一）
+        seed_board_usage(&db, "claude", &busy, "busy-t1", 0.5, 10, 0, 90, 0);
+        seed_board_usage(&db, "claude", &busy, "busy-t2", 0.25, 10, 0, 90, 0);
+        // 昨天一行（now−2 天，双时区安全）：$9 不计入今日；token 全 0 不进缓存率
+        seed_board_usage(&db, "claude", &busy, "busy-y1", 9.0, 0, 0, 0, -2 * 86400);
+        // cold 档没有任何行
+
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
+        let busy_tier = by_id(&busy);
+        assert_eq!(busy_tier.today_cost_usd, Some(0.75), "昨日的 $9 不计入");
+        assert_eq!(busy_tier.today_requests, Some(2));
+        // 7 天窗口：read 180 / (fresh 20 + creation 0 + read 180) = 0.9
+        assert!((busy_tier.cache_hit_rate.unwrap() - 0.9).abs() < 1e-9);
+        let cold_tier = by_id(&cold);
+        assert_eq!(cold_tier.today_cost_usd, None, "没有行 → None，前端显示 —");
+        assert_eq!(cold_tier.today_requests, None);
+        assert_eq!(cold_tier.cache_hit_rate, None, "分母为 0 不显示 0%");
+    }
+
+    /// 看板用量 seed：一行带花费与缓存 token 的明细（created_at = now + 偏移秒）。
+    #[allow(clippy::too_many_arguments)]
+    fn seed_board_usage(
+        db: &Database,
+        app_type: &str,
+        provider_id: &str,
+        request_id: &str,
+        cost_usd: f64,
+        input_tokens: i64,
+        cache_creation: i64,
+        cache_read: i64,
+        created_at_offset_secs: i64,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, cache_creation_tokens, cache_read_tokens,
+                total_cost_usd, latency_ms, first_token_ms, status_code, created_at
+            ) VALUES (?1, ?2, ?3, 'm', ?4, ?5, ?6, ?7, 10, 10, 200, ?8)",
+            rusqlite::params![
+                request_id,
+                provider_id,
+                app_type,
+                input_tokens,
+                cache_creation,
+                cache_read,
+                cost_usd,
+                chrono::Utc::now().timestamp() + created_at_offset_secs,
             ],
         )
         .unwrap();

@@ -5,6 +5,7 @@
  * 手动下拖动档位卡排序。全部档位事实来自后端看板（唯源），这里只渲染。
  */
 import { useTranslation } from "react-i18next";
+import { RefreshCw } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -20,6 +21,8 @@ import {
   useSetEasyModeMode,
   useTierBoard,
 } from "@/lib/query/autoMode";
+import { useResetCircuitBreaker } from "@/lib/query/failover";
+import { cn } from "@/lib/utils";
 import { TierList } from "./TierList";
 
 /** Select 不能用空串当 value 的哨兵（与 AutoModeTabContent 同一个约定）。 */
@@ -33,6 +36,22 @@ export function EasyBoard({ appId }: { appId: string }) {
   const setStrategy = useSetAutoModeStrategy();
   const setMode = useSetEasyModeMode();
   const setOrder = useSetEasyModeManualOrder();
+  const resetBreaker = useResetCircuitBreaker();
+
+  // 熔断/降级档位：右上角「重试全部」逐个清健康+熔断（单卡上另有单独按钮）
+  const failedTiers = (board?.tiers ?? []).filter(
+    (tier) => tier.isHealthy === false || (tier.consecutiveFailures ?? 0) > 0,
+  );
+  const handleRetryAll = async () => {
+    for (const tier of failedTiers) {
+      await resetBreaker
+        .mutateAsync({
+          providerId: tier.providerId,
+          appType: appId,
+        })
+        .catch(() => undefined);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -110,6 +129,25 @@ export function EasyBoard({ appId }: { appId: string }) {
             </ChoiceButton>
           </div>
         ) : null}
+
+        {failedTiers.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => void handleRetryAll()}
+            disabled={resetBreaker.isPending}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors hover:bg-accent disabled:opacity-50"
+          >
+            <RefreshCw
+              className={cn(
+                "h-3.5 w-3.5",
+                resetBreaker.isPending && "animate-spin",
+              )}
+            />
+            {t("autoMode.board.retryAll", {
+              defaultValue: "重试全部熔断档位",
+            })}
+          </button>
+        ) : null}
       </div>
 
       {manual ? (
@@ -128,6 +166,7 @@ export function EasyBoard({ appId }: { appId: string }) {
         <TierList
           tiers={board.tiers}
           manual={manual}
+          appType={appId}
           onReorder={(orderedIds) =>
             setOrder.mutate({ appType: appId, orderedIds })
           }

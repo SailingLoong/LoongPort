@@ -55,6 +55,10 @@ export function useResetCircuitBreaker() {
       queryClient.invalidateQueries({
         queryKey: proxyKeys.status,
       });
+      // 刷新省心看板（健康徽章/「重新启用」入口的数据源）
+      queryClient.invalidateQueries({
+        queryKey: ["easyModeTierBoard", variables.appType],
+      });
     },
   });
 }
