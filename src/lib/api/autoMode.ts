@@ -50,6 +50,15 @@ export interface TierBoardTier {
   todayRequests: number | null;
   /** 7 天缓存命中率（0..1 分数）；`null` = 无可判流量（前端显示 —）。 */
   cacheHitRate: number | null;
+  /** 近 6 小时活动时间线（15 分钟一桶固定 24 桶）；`null` = 窗口内无请求。 */
+  recentActivity: TierActivityBucket[] | null;
+}
+
+/** 近期活动时间线的一桶：成功数/失败数/桶内平均首字（ms）。 */
+export interface TierActivityBucket {
+  successCount: number;
+  failCount: number;
+  avgFirstTokenMs: number | null;
 }
 
 export interface TierBoard {

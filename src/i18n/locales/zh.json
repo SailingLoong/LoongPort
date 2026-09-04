@@ -2663,7 +2663,8 @@
       "requestsUnit": "{{count}} 次",
       "cache": "缓存",
       "reenable": "重新启用",
-      "retryAll": "重试全部熔断档位"
+      "retryAll": "重试全部熔断档位",
+      "recentTimeline": "近 6 小时：成功 {{ok}} · 失败 {{fail}} · 首字 {{ttft}}"
     },
     "modelHint": "选了模型后只在目录含该模型的档位里挑；显式点选会立即切到最优档位",
     "advancedSection": "高级（故障转移队列与熔断）",

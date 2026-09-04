@@ -15,6 +15,16 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
+/// 看板「近期活动时间线」的一桶（15 分钟）：成功数/失败数/均首字。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderActivityBucket {
+    pub success_count: u32,
+    pub fail_count: u32,
+    /// 桶内成功请求的平均首字耗时（毫秒）；`None` = 桶内没有带首字的请求。
+    pub avg_first_token_ms: Option<u64>,
+}
+
 /// 使用量汇总
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1365,6 +1375,58 @@ impl Database {
             if cacheable > 0 {
                 result.insert(provider_id, cache_read as f64 / cacheable as f64);
             }
+        }
+        Ok(result)
+    }
+
+    /// 看板「近期活动时间线」：窗口内各 provider 按 bucket 分桶的
+    /// 成功数/失败数/均首字。失败 = `status_code` 不在 2xx/3xx（网络层失败
+    /// 不落明细行，这里只能看到有响应的失败）。固定桶数、空桶补零 ——
+    /// 前端拿到的是不断续的时间线；窗口内没有任何行的 provider 不进 map。
+    pub fn get_provider_activity_buckets(
+        &self,
+        app_type: &str,
+        since: i64,
+        bucket_secs: i64,
+        bucket_count: usize,
+    ) -> Result<HashMap<String, Vec<ProviderActivityBucket>>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn.prepare(
+            "SELECT provider_id,
+                    (created_at - ?2) / ?3,
+                    SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 0 ELSE 1 END),
+                    SUM(first_token_ms) / NULLIF(
+                        SUM(CASE WHEN first_token_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
+             FROM proxy_request_logs
+             WHERE app_type = ?1 AND created_at >= ?2 AND created_at < ?2 + ?3 * ?4
+             GROUP BY provider_id, (created_at - ?2) / ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![app_type, since, bucket_secs, bucket_count as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )?;
+        let mut result: HashMap<String, Vec<ProviderActivityBucket>> = HashMap::new();
+        for row in rows {
+            let (provider_id, bucket, success, fail, avg_ttft) = row?;
+            let buckets = result
+                .entry(provider_id)
+                .or_insert_with(|| vec![ProviderActivityBucket::default(); bucket_count]);
+            // 窗口上界用严格 <，正常不会越界；min 兜底防时间戳毛刺
+            let idx = (bucket.max(0) as usize).min(bucket_count - 1);
+            buckets[idx] = ProviderActivityBucket {
+                success_count: success.unwrap_or(0).max(0) as u32,
+                fail_count: fail.unwrap_or(0).max(0) as u32,
+                avg_first_token_ms: avg_ttft.filter(|v| *v >= 0).map(|v| v as u64),
+            };
         }
         Ok(result)
     }

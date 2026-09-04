@@ -70,6 +70,20 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         todayCostUsd: 0.75,
         todayRequests: 128,
         cacheHitRate: 0.87,
+        recentActivity: [
+          ...Array.from({ length: 10 }, () => ({
+            successCount: 5,
+            failCount: 0,
+            avgFirstTokenMs: 800,
+          })),
+          { successCount: 3, failCount: 1, avgFirstTokenMs: 1200 },
+          ...Array.from({ length: 12 }, () => ({
+            successCount: 4,
+            failCount: 0,
+            avgFirstTokenMs: 900,
+          })),
+          { successCount: 0, failCount: 2, avgFirstTokenMs: null },
+        ],
       },
       {
         providerId: "tier-b",
@@ -88,6 +102,7 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         todayCostUsd: null,
         todayRequests: null,
         cacheHitRate: null,
+        recentActivity: null,
       },
     ],
     ...overrides,
@@ -124,6 +139,11 @@ describe("EasyBoard", () => {
     expect(screen.getByText("价格未知")).toBeDefined();
     expect(screen.getByText("今日 $0.75 · 128 次")).toBeDefined();
     expect(screen.getByText("缓存 87%")).toBeDefined();
+    // 有近期流量的档渲染时间线（title 汇总 + 首字折线）；无流量的档不渲染
+    expect(
+      screen.getByTitle("近 6 小时：成功 101 · 失败 3 · 首字 870ms"),
+    ).toBeDefined();
+    expect(document.querySelectorAll("polyline").length).toBeGreaterThan(0);
     // 当前命中只在 isCurrent 档出现一次
     expect(screen.getAllByText("当前")).toHaveLength(1);
   });
@@ -137,6 +157,7 @@ describe("EasyBoard", () => {
       todayCostUsd: null,
       todayRequests: null,
       cacheHitRate: null,
+      recentActivity: null,
     };
     setupBoard(
       boardFixture({
@@ -183,6 +204,7 @@ describe("EasyBoard", () => {
       todayCostUsd: null,
       todayRequests: null,
       cacheHitRate: null,
+      recentActivity: null,
     };
     setupBoard(
       boardFixture({

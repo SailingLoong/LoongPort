@@ -128,7 +128,7 @@ function SortableTierCard({
 }
 
 /**
- * 档位卡：序号 + 名称 + 当前命中 + 失败原因 + 重新启用 + 指标行。
+ * 档位卡：序号 + 名称 + 当前命中 + 失败原因 + 指标行 + 近期时间线 + 重新启用。
  * 指标行顺序按语义分组：定价（倍率/单价）→ 运行（今日/首字/缓存）→ 供给（余额）；
  * 金额/整数走全仓唯源 fmtUsd/fmtInt，未知值统一 —。
  */
@@ -254,6 +254,7 @@ function TierCard({
           </span>
         </div>
       </div>
+      <TierActivityTimeline tier={tier} />
       {failed ? (
         <button
           type="button"
@@ -351,5 +352,107 @@ function TierHealthBadge({ tier }: { tier: TierBoardTier }) {
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/**
+ * 近期活动时间线（卡片右缘）：上条 = 近 6 小时每 15 分钟一桶的成败
+ * （绿=全成、琥珀=有失败、红=全败、灰=无流量）；下线 = 桶均首字走势
+ * （缺口=该桶无首字样本，段间断开）。数据全部来自后端看板，前端只画。
+ */
+function TierActivityTimeline({ tier }: { tier: TierBoardTier }) {
+  const { t } = useTranslation();
+  const buckets = tier.recentActivity;
+  if (!buckets || buckets.length === 0) {
+    return null;
+  }
+  const ok = buckets.reduce((n, b) => n + b.successCount, 0);
+  const fail = buckets.reduce((n, b) => n + b.failCount, 0);
+  const ttftBuckets = buckets.filter((b) => b.avgFirstTokenMs != null);
+  const avgTtft = ttftBuckets.length
+    ? Math.round(
+        ttftBuckets.reduce((n, b) => n + (b.avgFirstTokenMs ?? 0), 0) /
+          ttftBuckets.length,
+      )
+    : null;
+
+  return (
+    <div className="flex w-24 shrink-0 flex-col gap-1" aria-hidden>
+      <div
+        className="flex h-3 items-stretch gap-px"
+        title={t("autoMode.board.recentTimeline", {
+          defaultValue:
+            "近 6 小时：成功 {{ok}} · 失败 {{fail}} · 首字 {{ttft}}",
+          ok,
+          fail,
+          ttft: avgTtft != null ? `${avgTtft}ms` : "—",
+        })}
+      >
+        {buckets.map((bucket, i) => {
+          const hasTraffic = bucket.successCount + bucket.failCount > 0;
+          const color = !hasTraffic
+            ? "bg-muted"
+            : bucket.successCount === 0
+              ? "bg-red-500"
+              : bucket.failCount > 0
+                ? "bg-amber-500"
+                : "bg-emerald-500/70";
+          return <div key={i} className={`flex-1 rounded-sm ${color}`} />;
+        })}
+      </div>
+      <TtftSparkline buckets={buckets} />
+    </div>
+  );
+}
+
+/** 首字走势迷你折线（纯 SVG，无图库依赖）：按窗口内 min/max 归一，空桶断段。 */
+function TtftSparkline({
+  buckets,
+}: {
+  buckets: NonNullable<TierBoardTier["recentActivity"]>;
+}) {
+  const values = buckets
+    .map((b) => b.avgFirstTokenMs)
+    .filter((v): v is number => v != null);
+  if (values.length < 2) {
+    return <div className="h-3" />;
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const x = (i: number) => (i / (buckets.length - 1)) * 96;
+  const y = (v: number) => 10 - ((v - min) / span) * 8;
+  // 连续非空段分别成线：缺首字的桶把走势断开，不硬连
+  const segments: string[][] = [];
+  let current: string[] = [];
+  buckets.forEach((b, i) => {
+    if (b.avgFirstTokenMs != null) {
+      current.push(`${x(i).toFixed(1)},${y(b.avgFirstTokenMs).toFixed(1)}`);
+    } else if (current.length > 0) {
+      segments.push(current);
+      current = [];
+    }
+  });
+  if (current.length > 0) segments.push(current);
+
+  return (
+    <svg
+      viewBox="0 0 96 12"
+      preserveAspectRatio="none"
+      className="h-3 w-full text-muted-foreground"
+    >
+      {segments
+        .filter((points) => points.length > 1)
+        .map((points, i) => (
+          <polyline
+            key={i}
+            points={points.join(" ")}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+    </svg>
   );
 }
