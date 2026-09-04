@@ -51,6 +51,9 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         avgFirstTokenMs: 420,
         balanceUsd: 10.347,
         verificationVerdict: null,
+        isHealthy: null,
+        consecutiveFailures: null,
+        lastError: null,
       },
       {
         providerId: "tier-b",
@@ -63,6 +66,9 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         avgFirstTokenMs: null,
         balanceUsd: null,
         verificationVerdict: null,
+        isHealthy: null,
+        consecutiveFailures: null,
+        lastError: null,
       },
     ],
     ...overrides,
@@ -98,6 +104,48 @@ describe("EasyBoard", () => {
     expect(screen.getByText("余额 $10.35")).toBeDefined();
     expect(screen.getByText("价格未知")).toBeDefined();
     // 当前命中只在 isCurrent 档出现一次
+    expect(screen.getAllByText("当前")).toHaveLength(1);
+  });
+
+  it("失败档位外露原因徽章（熔断），健康档位不显示健康标记", () => {
+    const nulls = {
+      effectiveModel: null,
+      avgFirstTokenMs: null,
+      balanceUsd: null,
+      verificationVerdict: null,
+    };
+    setupBoard(
+      boardFixture({
+        tiers: [
+          {
+            providerId: "tier-dead",
+            name: "熔断档",
+            position: 0,
+            isCurrent: false,
+            rateMultiplier: 1,
+            unitPricePerMillion: null,
+            ...nulls,
+            isHealthy: false,
+            consecutiveFailures: 4,
+            lastError: '上游 HTTP 403: {"error":{"message":"无可用渠道"}}',
+          },
+          {
+            providerId: "tier-fine",
+            name: "健康档",
+            position: 1,
+            isCurrent: true,
+            rateMultiplier: 1,
+            unitPricePerMillion: null,
+            ...nulls,
+            isHealthy: true,
+            consecutiveFailures: 0,
+            lastError: null,
+          },
+        ],
+      }),
+    );
+    expect(screen.getByText("熔断")).toBeDefined();
+    expect(screen.queryByText("降级")).toBeNull();
     expect(screen.getAllByText("当前")).toHaveLength(1);
   });
 

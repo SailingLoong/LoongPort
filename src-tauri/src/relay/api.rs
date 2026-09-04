@@ -1029,6 +1029,94 @@ fn usage_not_found(error: String) -> UsageResult {
     }
 }
 
+/// newapi（one-api 家族）sk 直查钱包余额：OpenAI 兼容的 billing 双端点。
+///
+/// - `GET /v1/dashboard/billing/subscription` → `hard_limit_usd`（美元）
+/// - `GET /v1/dashboard/billing/usage` → `total_usage`（已用，美分）
+///
+/// 余额 = `hard_limit_usd − total_usage / 100`（one-api 系社区通行的合成口径）。
+/// **两个端点都必须给出字段才算数** —— 只有额度没有用量时把额度当余额会虚高。
+/// 部分站方会关闭 billing 兼容层，或把 `hard_limit_usd` 配成 key 限额而非账户
+/// 余额；这类站点查出来的字段缺失或端点 404/403/401 一律 `Ok(None)`，与
+/// [`usage_with_api_key`] 同一条「查不到不算错」纪律 —— 拿不到就不显示。
+pub async fn billing_balance_with_api_key(
+    site_origin: &str,
+    api_key: &str,
+) -> Result<Option<f64>, AppError> {
+    let subscription =
+        billing_compat_get(site_origin, "/v1/dashboard/billing/subscription", api_key).await?;
+    let usage = billing_compat_get(site_origin, "/v1/dashboard/billing/usage", api_key).await?;
+    parse_billing_balance(&subscription, &usage)
+}
+
+/// billing 兼容层的单端点 GET。端点不存在/无权限（404/403/401）返回空串 ——
+/// 上层把空串当「这一路问不出」处理，不算错。
+async fn billing_compat_get(
+    site_origin: &str,
+    path: &str,
+    api_key: &str,
+) -> Result<String, AppError> {
+    let url = format!("{site_origin}{path}");
+    let resp = build_client()?
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|e| AppError::Config(format!("查询余额失败: {}", describe_send_error(&e))))?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::UNAUTHORIZED
+    {
+        return Ok(String::new());
+    }
+    if !status.is_success() {
+        return Err(AppError::Config(format!(
+            "查询余额失败: HTTP {}",
+            status.as_u16()
+        )));
+    }
+
+    resp.text()
+        .await
+        .map_err(|e| AppError::Config(format!("查询余额失败: 读响应出错 {e}")))
+}
+
+/// billing 双端点响应合成余额（纯函数，离线可测）。空串 = 端点不可用 → `None`；
+/// 缺 `hard_limit_usd` 或 `total_usage` → `None`（不猜）；坏 JSON → `Err`。
+pub(crate) fn parse_billing_balance(
+    subscription_body: &str,
+    usage_body: &str,
+) -> Result<Option<f64>, AppError> {
+    if subscription_body.trim().is_empty() || usage_body.trim().is_empty() {
+        return Ok(None);
+    }
+
+    #[derive(Deserialize)]
+    struct Subscription {
+        #[serde(default)]
+        hard_limit_usd: Option<f64>,
+    }
+    #[derive(Deserialize)]
+    struct UsageBody {
+        #[serde(default)]
+        total_usage: Option<f64>,
+    }
+
+    let subscription: Subscription = serde_json::from_str(subscription_body)
+        .map_err(|e| AppError::Config(format!("查询余额失败: 订阅响应解析出错 {e}")))?;
+    let usage: UsageBody = serde_json::from_str(usage_body)
+        .map_err(|e| AppError::Config(format!("查询余额失败: 用量响应解析出错 {e}")))?;
+
+    match (subscription.hard_limit_usd, usage.total_usage) {
+        (Some(hard_limit_usd), Some(total_usage_cents)) => {
+            Ok(Some(hard_limit_usd - total_usage_cents / 100.0))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// 用 refresh token 换一对新的 token。
 ///
 /// 这个端点**不需要** Bearer（refresh token 就在请求体里），所以是自由函数而不是
