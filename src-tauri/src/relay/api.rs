@@ -1111,11 +1111,23 @@ pub(crate) fn parse_billing_balance(
 
     match (subscription.hard_limit_usd, usage.total_usage) {
         (Some(hard_limit_usd), Some(total_usage_cents)) => {
-            Ok(Some(hard_limit_usd - total_usage_cents / 100.0))
+            let balance = hard_limit_usd - total_usage_cents / 100.0;
+            // one-api 系站点会把「无限额度」哨兵当 hard_limit 返回（实测：
+            // soft/hard/system 三个 limit 全 1e8、usage 0）。CLI 用户的预充值
+            // 不存在 $1e6 以上的量级 —— 超限即视为站点哨兵/单位错误，按
+            // 「查不到」处理显示 —，绝不显示假数字。
+            if balance > BILLING_BALANCE_CEILING_USD {
+                Ok(None)
+            } else {
+                Ok(Some(balance))
+            }
         }
         _ => Ok(None),
     }
 }
+
+/// billing 合成余额的可信上限（美元）：超过即视为站点哨兵值/单位错误。
+const BILLING_BALANCE_CEILING_USD: f64 = 1_000_000.0;
 
 /// 用 refresh token 换一对新的 token。
 ///
