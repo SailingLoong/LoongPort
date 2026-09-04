@@ -435,4 +435,16 @@ mod tests {
         assert!(api::parse_billing_balance("not json", r#"{}"#).is_err());
         assert!(api::parse_billing_balance(r#"{}"#, "not json").is_err());
     }
+
+    /// ⭐ new-api「无限额度」哨兵不是余额：实测站点三个 limit 全返 1e8、usage 为 0
+    /// ——把一亿美元当余额显示是笑话。超出常规预充值量级（$1e6）即按查不到处理。
+    #[test]
+    fn billing_unlimited_sentinel_is_not_a_balance() {
+        let balance = api::parse_billing_balance(
+            r#"{"object":"billing_subscription","has_payment_method":true,"soft_limit_usd":100000000,"hard_limit_usd":100000000,"system_hard_limit_usd":100000000,"access_until":0}"#,
+            r#"{"object":"list","total_usage":0}"#,
+        )
+        .unwrap();
+        assert_eq!(balance, None, "哨兵量级的余额必须被拒收");
+    }
 }
