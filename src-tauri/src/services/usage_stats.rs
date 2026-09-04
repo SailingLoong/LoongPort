@@ -1293,6 +1293,82 @@ impl Database {
         Ok(result)
     }
 
+    /// 看板「今日」运行事实：各 provider 今天的请求数与花费（美元）。
+    ///
+    /// 「今天」判定与 [`Self::check_provider_limits`] 同一口径：SQL 侧
+    /// `date(..., 'localtime')`。只查明细表成立——rollup 只折 `retain_days`
+    /// 之前的整日，今天的行永远留在 `proxy_request_logs`。
+    pub fn get_provider_today_stats(
+        &self,
+        app_type: &str,
+    ) -> Result<HashMap<String, (f64, u64)>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn.prepare(
+            "SELECT provider_id, SUM(CAST(total_cost_usd AS REAL)), COUNT(*)
+             FROM proxy_request_logs
+             WHERE app_type = ?1
+               AND date(datetime(created_at, 'unixepoch', 'localtime')) = date('now', 'localtime')
+             GROUP BY provider_id",
+        )?;
+        let rows = stmt.query_map(params![app_type], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<f64>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut result = HashMap::new();
+        for row in rows {
+            let (provider_id, cost, requests) = row?;
+            result.insert(provider_id, (cost.unwrap_or(0.0), requests.max(0) as u64));
+        }
+        Ok(result)
+    }
+
+    /// 看板「缓存命中率」：窗口内各 provider 的
+    /// `cache_read / (fresh_input + cache_creation + cache_read)`
+    /// （与 [`derive_real_total_and_hit_rate`] 同一公式；fresh 归一走
+    /// [`fresh_input_sql`]，claude 系与 codex/gemini 的 input 语义不同）。
+    /// 分母为 0（没有可判流量）的档位不进 map —— 调用方置 `None`，
+    /// 别把「不知道」显示成 0%。
+    pub fn get_provider_cache_hit_rates(
+        &self,
+        app_type: &str,
+        since: i64,
+    ) -> Result<HashMap<String, f64>, AppError> {
+        let fresh_input = fresh_input_sql("");
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT provider_id,
+                    SUM({fresh_input}),
+                    SUM(cache_creation_tokens),
+                    SUM(cache_read_tokens)
+             FROM proxy_request_logs
+             WHERE app_type = ?1 AND created_at >= ?2
+             GROUP BY provider_id",
+        ))?;
+        let rows = stmt.query_map(params![app_type, since], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        let mut result = HashMap::new();
+        for row in rows {
+            let (provider_id, fresh_input, cache_creation, cache_read) = row?;
+            let fresh_input = fresh_input.unwrap_or(0).max(0);
+            let cache_creation = cache_creation.unwrap_or(0).max(0);
+            let cache_read = cache_read.unwrap_or(0).max(0);
+            let cacheable = fresh_input + cache_creation + cache_read;
+            if cacheable > 0 {
+                result.insert(provider_id, cache_read as f64 / cacheable as f64);
+            }
+        }
+        Ok(result)
+    }
+
     /// 自动模式会话亲和：各供应商在该应用下的最近一次请求时间（unix 秒）。
     ///
     /// 用于判断「当前在用档位是否还在会话中」—— 切换会丢提示词缓存，

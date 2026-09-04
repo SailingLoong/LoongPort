@@ -2658,7 +2658,12 @@
       "balance": "Balance",
       "ttft": "TTFT",
       "ms": "{{value}}ms",
-      "empty": "No tiers available yet"
+      "empty": "No tiers available yet",
+      "today": "Today",
+      "requestsUnit": "{{count}} calls",
+      "cache": "Cache",
+      "reenable": "Re-enable",
+      "retryAll": "Retry tripped tiers"
     },
     "modelHint": "With a model picked, only tiers whose catalog includes it are chosen; an explicit pick switches to the best tier immediately.",
     "advancedSection": "Advanced (failover queue & circuit breaker)",

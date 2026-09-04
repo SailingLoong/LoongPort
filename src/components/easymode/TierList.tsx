@@ -23,7 +23,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Check, Copy, GripVertical } from "lucide-react";
+import { Check, Copy, GripVertical, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   Popover,
@@ -31,7 +31,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { copyText } from "@/lib/clipboard";
+import { useResetCircuitBreaker } from "@/lib/query/failover";
 import { cn } from "@/lib/utils";
+import { fmtInt, fmtUsd } from "@/components/usage/format";
 import type { TierBoardTier } from "@/lib/api/autoMode";
 import type { DraggableAttributes } from "@dnd-kit/core";
 import type { SyntheticListenerMap } from "@dnd-kit/core/dist/hooks/utilities";
@@ -39,10 +41,12 @@ import type { SyntheticListenerMap } from "@dnd-kit/core/dist/hooks/utilities";
 export function TierList({
   tiers,
   manual,
+  appType,
   onReorder,
 }: {
   tiers: TierBoardTier[];
   manual: boolean;
+  appType: string;
   onReorder: (orderedIds: string[]) => void;
 }) {
   const sensors = useSensors(
@@ -66,7 +70,7 @@ export function TierList({
     return (
       <div className="space-y-2">
         {tiers.map((tier) => (
-          <TierCard key={tier.providerId} tier={tier} />
+          <TierCard key={tier.providerId} tier={tier} appType={appType} />
         ))}
       </div>
     );
@@ -81,7 +85,11 @@ export function TierList({
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <div className="space-y-2">
           {tiers.map((tier) => (
-            <SortableTierCard key={tier.providerId} tier={tier} />
+            <SortableTierCard
+              key={tier.providerId}
+              tier={tier}
+              appType={appType}
+            />
           ))}
         </div>
       </SortableContext>
@@ -89,7 +97,13 @@ export function TierList({
   );
 }
 
-function SortableTierCard({ tier }: { tier: TierBoardTier }) {
+function SortableTierCard({
+  tier,
+  appType,
+}: {
+  tier: TierBoardTier;
+  appType: string;
+}) {
   const {
     attributes,
     listeners,
@@ -104,23 +118,36 @@ function SortableTierCard({ tier }: { tier: TierBoardTier }) {
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={isDragging ? "z-10" : undefined}
     >
-      <TierCard tier={tier} dragHandleProps={{ attributes, listeners }} />
+      <TierCard
+        tier={tier}
+        appType={appType}
+        dragHandleProps={{ attributes, listeners }}
+      />
     </div>
   );
 }
 
-/** 档位卡：序号 + 名称 + 当前命中 + 失败原因 + 倍率/单价/余额/首字耗时。未知值显示 —/「价格未知」。 */
+/**
+ * 档位卡：序号 + 名称 + 当前命中 + 失败原因 + 重新启用 + 指标行。
+ * 指标行顺序按语义分组：定价（倍率/单价）→ 运行（今日/首字/缓存）→ 供给（余额）；
+ * 金额/整数走全仓唯源 fmtUsd/fmtInt，未知值统一 —。
+ */
 function TierCard({
   tier,
+  appType,
   dragHandleProps,
 }: {
   tier: TierBoardTier;
+  appType: string;
   dragHandleProps?: {
     attributes?: DraggableAttributes;
     listeners?: SyntheticListenerMap;
   };
 }) {
   const { t } = useTranslation();
+  const resetBreaker = useResetCircuitBreaker();
+  const failed =
+    tier.isHealthy === false || (tier.consecutiveFailures ?? 0) > 0;
   return (
     <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
       {dragHandleProps ? (
@@ -191,12 +218,20 @@ function TierCard({
           </span>
           <span className="tabular-nums">
             {tier.unitPricePerMillion != null
-              ? `$${tier.unitPricePerMillion.toFixed(2)}/M`
+              ? `${fmtUsd(tier.unitPricePerMillion, 2)}/M`
               : t("autoMode.board.priceUnknown", { defaultValue: "价格未知" })}
           </span>
           <span className="tabular-nums">
-            {t("autoMode.board.balance", { defaultValue: "余额" })}{" "}
-            {tier.balanceUsd != null ? `$${tier.balanceUsd.toFixed(2)}` : "—"}
+            {t("autoMode.board.today", { defaultValue: "今日" })}{" "}
+            {tier.todayCostUsd != null && tier.todayRequests != null
+              ? `${fmtUsd(tier.todayCostUsd, 2, "—")} · ${t(
+                  "autoMode.board.requestsUnit",
+                  {
+                    defaultValue: "{{count}} 次",
+                    count: fmtInt(tier.todayRequests, undefined, "—"),
+                  },
+                )}`
+              : "—"}
           </span>
           <span className="tabular-nums">
             {t("autoMode.board.ttft", { defaultValue: "首字" })}{" "}
@@ -207,8 +242,39 @@ function TierCard({
                 })
               : "—"}
           </span>
+          <span className="tabular-nums">
+            {t("autoMode.board.cache", { defaultValue: "缓存" })}{" "}
+            {tier.cacheHitRate != null
+              ? `${Math.round(tier.cacheHitRate * 100)}%`
+              : "—"}
+          </span>
+          <span className="tabular-nums">
+            {t("autoMode.board.balance", { defaultValue: "余额" })}{" "}
+            {fmtUsd(tier.balanceUsd, 2, "—")}
+          </span>
         </div>
       </div>
+      {failed ? (
+        <button
+          type="button"
+          onClick={() =>
+            resetBreaker.mutate({ providerId: tier.providerId, appType })
+          }
+          disabled={resetBreaker.isPending}
+          title={t("autoMode.board.reenable", { defaultValue: "重新启用" })}
+          aria-label={t("autoMode.board.reenable", {
+            defaultValue: "重新启用",
+          })}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+        >
+          <RefreshCw
+            className={cn(
+              "h-3.5 w-3.5",
+              resetBreaker.isPending && "animate-spin",
+            )}
+          />
+        </button>
+      ) : null}
     </div>
   );
 }

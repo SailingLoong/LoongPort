@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { EasyBoard } from "@/components/easymode/EasyBoard";
@@ -12,6 +12,7 @@ const setModeMock = vi.hoisted(() => vi.fn());
 const setOrderMock = vi.hoisted(() => vi.fn());
 const tierBoardMock = vi.hoisted(() => vi.fn());
 const statusMock = vi.hoisted(() => vi.fn());
+const resetBreakerMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/query/autoMode", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/query/autoMode")>();
@@ -27,6 +28,18 @@ vi.mock("@/lib/query/autoMode", async (importOriginal) => {
     useSetEasyModeMode: () => ({ mutate: setModeMock, isPending: false }),
     useSetEasyModeManualOrder: () => ({
       mutate: setOrderMock,
+      isPending: false,
+    }),
+  };
+});
+
+vi.mock("@/lib/query/failover", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/query/failover")>();
+  return {
+    ...actual,
+    useResetCircuitBreaker: () => ({
+      mutate: resetBreakerMock,
+      mutateAsync: resetBreakerMock,
       isPending: false,
     }),
   };
@@ -54,6 +67,9 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         isHealthy: null,
         consecutiveFailures: null,
         lastError: null,
+        todayCostUsd: 0.75,
+        todayRequests: 128,
+        cacheHitRate: 0.87,
       },
       {
         providerId: "tier-b",
@@ -69,6 +85,9 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         isHealthy: null,
         consecutiveFailures: null,
         lastError: null,
+        todayCostUsd: null,
+        todayRequests: null,
+        cacheHitRate: null,
       },
     ],
     ...overrides,
@@ -103,6 +122,8 @@ describe("EasyBoard", () => {
     expect(screen.getByText("$2.00/M")).toBeDefined();
     expect(screen.getByText("余额 $10.35")).toBeDefined();
     expect(screen.getByText("价格未知")).toBeDefined();
+    expect(screen.getByText("今日 $0.75 · 128 次")).toBeDefined();
+    expect(screen.getByText("缓存 87%")).toBeDefined();
     // 当前命中只在 isCurrent 档出现一次
     expect(screen.getAllByText("当前")).toHaveLength(1);
   });
@@ -113,6 +134,9 @@ describe("EasyBoard", () => {
       avgFirstTokenMs: null,
       balanceUsd: null,
       verificationVerdict: null,
+      todayCostUsd: null,
+      todayRequests: null,
+      cacheHitRate: null,
     };
     setupBoard(
       boardFixture({
@@ -147,6 +171,72 @@ describe("EasyBoard", () => {
     expect(screen.getByText("熔断")).toBeDefined();
     expect(screen.queryByText("降级")).toBeNull();
     expect(screen.getAllByText("当前")).toHaveLength(1);
+  });
+
+  it("失败档位有重新启用按钮，头部出现重试全部；点击批量重试逐档调用", async () => {
+    resetBreakerMock.mockResolvedValue(undefined);
+    const nulls = {
+      effectiveModel: null,
+      avgFirstTokenMs: null,
+      balanceUsd: null,
+      verificationVerdict: null,
+      todayCostUsd: null,
+      todayRequests: null,
+      cacheHitRate: null,
+    };
+    setupBoard(
+      boardFixture({
+        tiers: [
+          {
+            providerId: "tier-dead-a",
+            name: "熔断档A",
+            position: 0,
+            isCurrent: false,
+            rateMultiplier: 1,
+            unitPricePerMillion: null,
+            ...nulls,
+            isHealthy: false,
+            consecutiveFailures: 4,
+            lastError: '上游 HTTP 403: {"error":{"message":"无可用渠道"}}',
+          },
+          {
+            providerId: "tier-degraded-b",
+            name: "降级档B",
+            position: 1,
+            isCurrent: true,
+            rateMultiplier: 1,
+            unitPricePerMillion: null,
+            ...nulls,
+            isHealthy: true,
+            consecutiveFailures: 2,
+            lastError: "上游 HTTP 429: rate limited",
+          },
+          {
+            providerId: "tier-fine",
+            name: "健康档",
+            position: 2,
+            isCurrent: false,
+            rateMultiplier: 1,
+            unitPricePerMillion: null,
+            ...nulls,
+            isHealthy: true,
+            consecutiveFailures: 0,
+            lastError: null,
+          },
+        ],
+      }),
+    );
+    // 失败档位各有一个重新启用（健康档没有）
+    expect(screen.getAllByLabelText("重新启用")).toHaveLength(2);
+    const retryAll = screen.getByText("重试全部熔断档位");
+    expect(retryAll).toBeDefined();
+
+    fireEvent.click(retryAll);
+    await waitFor(() => expect(resetBreakerMock).toHaveBeenCalledTimes(2));
+    expect(resetBreakerMock).toHaveBeenCalledWith({
+      providerId: "tier-dead-a",
+      appType: "claude",
+    });
   });
 
   it("点策略按钮落到 setStrategy mutation", () => {

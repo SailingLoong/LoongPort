@@ -2659,7 +2659,12 @@
       "balance": "餘額",
       "ttft": "首字",
       "ms": "{{value}}ms",
-      "empty": "還沒有可用檔位"
+      "empty": "還沒有可用檔位",
+      "today": "今日",
+      "requestsUnit": "{{count}} 次",
+      "cache": "快取",
+      "reenable": "重新啟用",
+      "retryAll": "重試全部斷路檔位"
     },
     "modelHint": "選了模型後只在目錄含該模型的檔位裡挑；顯式點選會立即切到最優檔位",
     "advancedSection": "進階（故障轉移佇列與熔斷）",

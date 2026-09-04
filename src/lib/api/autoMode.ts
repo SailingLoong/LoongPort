@@ -44,6 +44,12 @@ export interface TierBoardTier {
   consecutiveFailures: number | null;
   /** 最近一次失败的上游报错原文；`null` = 没有失败记录。 */
   lastError: string | null;
+  /** 今日花费（美元，本地时区「今天」）；`null` = 今天没有请求。 */
+  todayCostUsd: number | null;
+  /** 今日请求数；`null` = 今天没有请求。 */
+  todayRequests: number | null;
+  /** 7 天缓存命中率（0..1 分数）；`null` = 无可判流量（前端显示 —）。 */
+  cacheHitRate: number | null;
 }
 
 export interface TierBoard {
