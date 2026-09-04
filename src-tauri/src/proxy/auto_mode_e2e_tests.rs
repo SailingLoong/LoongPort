@@ -427,6 +427,25 @@ async fn failing_tier_fails_over_and_returns_when_recovered() {
     fx.server.stop().await.expect("stop server");
 }
 
+/// 省心模式开启即含请求内故障转移：显式「自动故障转移」开关（默认关）不再
+/// 单独决定重试行为 —— 否则省心模式退化成「一次请求只试一家」，每个死档位
+/// 都把原始错误抛给 CLI，靠 CLI 自己的重试预算一家一家试。
+#[tokio::test]
+#[serial]
+async fn easy_mode_fails_over_in_request_even_with_failover_toggle_off() {
+    let fx = E2eFixture::new().await;
+    let mut config = fx.db.get_proxy_config_for_app("claude").await.unwrap();
+    config.auto_failover_enabled = false;
+    fx.db.update_proxy_config_for_app(config).await.unwrap();
+
+    fx.cheap.set_status(500).await;
+
+    let marker = response_text(send_message(fx.port, "sess-e2e-implied-0001").await).await;
+    assert_eq!(marker, "served-by-expensive");
+    assert_eq!(fx.cheap.hits(), 1, "故障档位只应被探测一次");
+    fx.server.stop().await.expect("stop server");
+}
+
 /// 4. 被动模型监控：换芯流量（Claude 线路回 OpenAI 形状）→ 异源指纹 Anomaly
 ///    落库 + history(source=passive) + 档位看板点亮；干净档位零报告；
 ///    转发本身不受观察影响（客户端仍拿到 200 与原样响应体）。
