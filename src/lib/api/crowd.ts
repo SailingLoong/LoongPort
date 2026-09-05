@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 /**
  * 站点实测共建的公共快照（与后端 `crowd::snapshot` 的 DTO 同形）。
  *
- * `sites` 的键是归一化站点 host —— 与广场行的 `siteHost` 同一套归一，
- * 前端直接按 host join。k-匿名的口径在服务端：没过门槛的站/窗整个缺席。
+ * `sites` 的键是站点**注册域（apex）** —— 与广场行的 `siteDomain` 同一套身份，
+ * 前端直接按它 join。k-匿名的口径在服务端：没过门槛的站/窗整个缺席。
  */
 export interface CrowdWindowStats {
   samples: number;

@@ -13,6 +13,7 @@ import {
 function item(index: number, overrides: Partial<RelayDirectoryItem> = {}) {
   return {
     siteHost: `site-${index}.example`,
+    siteDomain: `site-${index}.example`,
     veridropHost: `probe-${index}.example`,
     displayName: `站点 ${index}`,
     rank: index,

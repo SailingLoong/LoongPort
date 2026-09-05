@@ -551,7 +551,8 @@ fn build_model_capabilities(snapshot: &TransitSnapshot) -> ModelProtocolCapabili
 /// 弹窗开一次抓一次。任何一步失败返回 `None`（站点没有公开数据 ⇒ 预筛
 /// 全部按 Unknown，行为退回无预筛）。
 pub async fn model_protocol_capabilities(site_origin: &str) -> Option<ModelProtocolCapabilities> {
-    let host = crate::relay::aff::lookup_host(site_origin);
+    // 取数地址（非身份）：well-known 要打的是这台真实主机。
+    let host = crate::relay::identity::request_host(site_origin);
     if host.is_empty() {
         return None;
     }

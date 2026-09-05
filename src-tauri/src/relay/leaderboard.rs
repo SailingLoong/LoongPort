@@ -58,6 +58,10 @@ pub struct ParsedLeaderboardItem {
 #[serde(rename_all = "camelCase")]
 pub struct RelayDirectoryItem {
     pub site_host: String,
+    /// 站点**身份**：注册域（apex，[`crate::relay::identity::site_domain`] 的产出）。
+    /// 与 `site_host`（真实 host）分工：身份给跨数据源的 join（如实测快照的
+    /// 站点键），真实 host 给链接与取数 —— 别拿一个当另一个用。
+    pub site_domain: String,
     pub veridrop_host: String,
     pub display_name: String,
     pub rank: Option<u32>,
@@ -303,7 +307,7 @@ pub fn parse_page(
         let host = row
             .value()
             .attr("data-impression-domain")
-            .map(crate::relay::aff::lookup_host)
+            .map(crate::relay::identity::request_host)
             .filter(|host| !host.is_empty())
             .ok_or_else(|| AppError::Config("VeriDrop 榜单行缺少域名".into()))?;
         let top = row.value().attr("data-impression-surface") == Some("leaderboard_top");
@@ -499,7 +503,7 @@ fn parse_detail_page(
         .and_then(|captures| captures.get(1))
         .map(|value| value.as_str().to_string())
         .unwrap_or_default();
-    let host = crate::relay::aff::lookup_host(host);
+    let host = crate::relay::identity::request_host(host);
     if host.is_empty() {
         return Ok(None);
     }
@@ -523,13 +527,13 @@ fn normalized_policy(policy: &RelayDirectoryPolicy) -> RelayDirectoryPolicy {
         blocked_hosts: policy
             .blocked_hosts
             .iter()
-            .map(|host| crate::relay::aff::lookup_host(host))
+            .map(|host| crate::relay::identity::request_host(host))
             .filter(|host| !host.is_empty())
             .collect(),
         sites: policy
             .sites
             .iter()
-            .map(|(host, site)| (crate::relay::aff::lookup_host(host), site.clone()))
+            .map(|(host, site)| (crate::relay::identity::request_host(host), site.clone()))
             .filter(|(host, _)| !host.is_empty())
             .collect(),
     }
@@ -543,7 +547,7 @@ fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
         let veridrop_host = site
             .veridrop_host
             .as_deref()
-            .map(crate::relay::aff::lookup_host)
+            .map(crate::relay::identity::request_host)
             .filter(|host| !host.is_empty())
             .unwrap_or_else(|| loongport_host.clone());
         aliases.insert(loongport_host.clone(), veridrop_host.clone());
@@ -556,25 +560,25 @@ fn managed_veridrop_hosts(config: &RemoteConfig) -> Vec<String> {
 
     let mut candidates = BTreeSet::new();
     for sponsor in &config.sponsors {
-        candidates.insert(crate::relay::aff::lookup_host(&sponsor.site_origin));
+        candidates.insert(crate::relay::identity::request_host(&sponsor.site_origin));
     }
     candidates.extend(
         config
             .aff_codes
             .keys()
-            .map(|host| crate::relay::aff::lookup_host(host)),
+            .map(|host| crate::relay::identity::request_host(host)),
     );
     candidates.extend(
         config
             .promo_codes
             .keys()
-            .map(|host| crate::relay::aff::lookup_host(host)),
+            .map(|host| crate::relay::identity::request_host(host)),
     );
     for (loongport_host, site) in &policy.sites {
         candidates.insert(
             site.veridrop_host
                 .as_deref()
-                .map(crate::relay::aff::lookup_host)
+                .map(crate::relay::identity::request_host)
                 .filter(|host| !host.is_empty())
                 .unwrap_or_else(|| loongport_host.clone()),
         );
@@ -603,19 +607,19 @@ pub(crate) fn managed_site_hosts(config: &RemoteConfig) -> Vec<String> {
     let blocked: BTreeSet<_> = policy.blocked_hosts.iter().cloned().collect();
     let mut hosts: BTreeSet<String> = policy.sites.into_keys().collect();
     for sponsor in &config.sponsors {
-        hosts.insert(crate::relay::aff::lookup_host(&sponsor.site_origin));
+        hosts.insert(crate::relay::identity::request_host(&sponsor.site_origin));
     }
     hosts.extend(
         config
             .aff_codes
             .keys()
-            .map(|host| crate::relay::aff::lookup_host(host)),
+            .map(|host| crate::relay::identity::request_host(host)),
     );
     hosts.extend(
         config
             .promo_codes
             .keys()
-            .map(|host| crate::relay::aff::lookup_host(host)),
+            .map(|host| crate::relay::identity::request_host(host)),
     );
     hosts
         .into_iter()
@@ -709,7 +713,7 @@ pub fn apply_policy(
         let veridrop_host = site
             .veridrop_host
             .as_deref()
-            .map(crate::relay::aff::lookup_host)
+            .map(crate::relay::identity::request_host)
             .filter(|host| !host.is_empty())
             .unwrap_or_else(|| loongport_host.clone());
         aliases.insert(veridrop_host, value);
@@ -749,8 +753,10 @@ pub fn apply_policy(
                 .and_then(|site| site.display_name)
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| site_host.clone());
+            let site_domain = crate::relay::identity::site_domain(&site_host);
             Some(RelayDirectoryItem {
                 site_host,
+                site_domain,
                 veridrop_host: item.veridrop_host,
                 display_name,
                 rank: item.rank,
@@ -1991,6 +1997,7 @@ mod tests {
         fn gated_item(site_host: &str) -> RelayDirectoryItem {
             RelayDirectoryItem {
                 site_host: site_host.into(),
+                site_domain: crate::relay::identity::site_domain(site_host),
                 veridrop_host: site_host.into(),
                 display_name: site_host.into(),
                 rank: None,
@@ -2072,6 +2079,7 @@ mod tests {
         fn row(site_host: &str) -> RelayDirectoryItem {
             RelayDirectoryItem {
                 site_host: site_host.into(),
+                site_domain: crate::relay::identity::site_domain(site_host),
                 veridrop_host: site_host.into(),
                 display_name: site_host.into(),
                 rank: None,
@@ -2112,6 +2120,7 @@ mod tests {
         fn row(site_host: &str, score: u8, rank: Option<u32>) -> RelayDirectoryItem {
             RelayDirectoryItem {
                 site_host: site_host.into(),
+                site_domain: crate::relay::identity::site_domain(site_host),
                 veridrop_host: site_host.into(),
                 display_name: site_host.into(),
                 rank,

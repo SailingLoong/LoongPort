@@ -199,7 +199,11 @@ fn resolve_relay(
             .map_err(|error| AppError::Database(format!("读取中转站失败: {error}")))?;
         creds::list(&conn)?
             .into_iter()
-            .filter(|candidate| candidate.site_origin == site_origin)
+            .filter(|candidate| {
+                // 注册域身份匹配：同站的面板域/API 域拼写不同也该认。
+                crate::relay::identity::site_domain(&candidate.site_origin)
+                    == crate::relay::identity::site_domain(site_origin)
+            })
             .collect()
     };
 

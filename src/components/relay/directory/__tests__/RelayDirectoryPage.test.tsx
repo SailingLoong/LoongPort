@@ -95,6 +95,7 @@ function deferred<T>() {
 function item(index: number): RelayDirectoryItem {
   return {
     siteHost: index === 1 ? "bestapi.store" : `site-${index}.example`,
+    siteDomain: index === 1 ? "bestapi.store" : `site-${index}.example`,
     veridropHost: index === 1 ? "bestapi.store" : `probe-${index}.example`,
     displayName: index === 1 ? "BestAPI" : `站点 ${index}`,
     rank: index,

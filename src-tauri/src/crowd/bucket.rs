@@ -2,8 +2,8 @@
 //!
 //! 三段式，各自可测：
 //! 1. [`query_raw_buckets`] —— SQL 按 `(hour, provider, app)` 切桶（provider 维度）；
-//! 2. [`resolve_relay_hosts`] —— 薄胶水：provider 指纹 → 归一 host，只留 relay 模块
-//!    登记过的站点（v1 边界，见模块文档）；
+//! 2. [`resolve_relay_hosts`] —— 薄胶水：provider 指纹 → 站点身份（注册域），
+//!    只留 relay 模块登记过的站点（v1 边界，见模块文档）；
 //! 3. [`merge_by_site`] —— 纯函数：按 `(hour, site, app)` 合并（同站多账号一桶，
 //!    与服务端幂等键同粒度）。
 //!
@@ -25,7 +25,7 @@ use crate::services::sql_helpers::fresh_input_sql;
 pub struct HourBucket {
     /// 小时起点（unix 秒，UTC 整点）。
     pub hour_epoch: i64,
-    /// 归一化站点 host（小写、无 scheme/端口/www）。
+    /// 站点身份：注册域（apex）。上传后就是快照的站点键。
     pub site: String,
     /// app 标识（`app_type` 原样）。
     pub app: String,
@@ -117,23 +117,30 @@ fn query_raw_buckets(
     Ok(raw_buckets)
 }
 
-/// provider → 归一 host，只保留 relay 模块登记过的站点。
+/// provider → 站点身份（注册域），只保留 relay 模块登记过的站点。
 ///
-/// 判据：provider 的 base_url 指纹归一成 host 后，命中 `loongport_relay` 表里
-/// 任一站点的归一 host。托管档（`loongport-` 前缀）创建时必写 creds 行，
-/// 所以这一条规则同时覆盖托管与手填档，不需要第二条特判。
+/// 判据：provider 的 base_url 指纹归到注册域后，命中 `loongport_relay` 表里任一
+/// 站点的注册域。站点的**两列**都算数（`site_origin` 面板域 + `api_base_url` API 域
+/// ——同一个站常分挂不同子域，2026-09-05 前只按 site_origin 的全 host 匹配，
+/// `api.` 子域全部静默失配、整桶丢弃）。托管档（`loongport-` 前缀）创建时必写
+/// creds 行，所以这一条规则同时覆盖托管与手填档，不需要第二条特判。
 fn resolve_relay_hosts(
     db: &Database,
     refs: &HashSet<(String, String)>,
 ) -> Result<HashMap<(String, String), String>, AppError> {
-    let relay_hosts: HashSet<String> = {
+    let relay_domains: HashSet<String> = {
         let conn = crate::database::lock_conn!(db.conn);
         crate::relay::creds::list(&conn)?
             .into_iter()
-            .map(|relay| crate::relay::aff::lookup_host(&relay.site_origin))
+            .flat_map(|relay| {
+                [
+                    crate::relay::identity::site_domain(&relay.site_origin),
+                    crate::relay::identity::site_domain(&relay.api_base_url),
+                ]
+            })
             .collect()
     };
-    if relay_hosts.is_empty() {
+    if relay_domains.is_empty() {
         return Ok(HashMap::new());
     }
 
@@ -153,9 +160,9 @@ fn resolve_relay_hosts(
             else {
                 continue;
             };
-            let host = crate::relay::aff::lookup_host(&origin);
-            if relay_hosts.contains(&host) {
-                hosts.insert((provider_id.clone(), app_str.to_string()), host);
+            let domain = crate::relay::identity::site_domain(&origin);
+            if relay_domains.contains(&domain) {
+                hosts.insert((provider_id.clone(), app_str.to_string()), domain);
             }
         }
     }
@@ -262,6 +269,60 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn resolve_matches_providers_by_registrable_domain() {
+        // 2026-09-05 的回归闸：站点的 API 域挂在 `api.` 子域（api_base_url 列）、
+        // provider 的 base_url 指向它 —— 身份按注册域匹配，必须命中同一站。
+        // 旧的「site_origin 全 host 匹配」在这里整桶丢弃（实测页空数据的根因）。
+        let db = setup_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::relay::creds::save_site(
+                &conn,
+                "https://panel.example",
+                "中性示例站",
+                "https://api.panel.example",
+            )
+            .unwrap();
+        }
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES (?1, 'codex', ?2, ?3, '{}')",
+                params![
+                    "acct-a",
+                    "示例档",
+                    serde_json::json!({
+                        "auth": {"OPENAI_API_KEY": "sk-test-not-a-real-key"},
+                        "base_url": "https://api.panel.example/v1"
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+        seed_log(
+            &db,
+            "a",
+            "acct-a",
+            "codex",
+            200,
+            Some(250),
+            "0.5",
+            11 * 3600 + 100,
+            "proxy",
+        );
+
+        let buckets = build_hour_buckets(&db, 0, 12 * 3600).unwrap();
+        assert_eq!(
+            buckets.len(),
+            1,
+            "api 子域上的 provider 必须归属到站点的注册域"
+        );
+        assert_eq!(buckets[0].site, "panel.example");
     }
 
     #[test]

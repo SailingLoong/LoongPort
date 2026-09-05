@@ -229,7 +229,7 @@ export function RelayDirectoryPage({
           onDismiss={() => setTransitDetail(null)}
           crowdStats={
             transitDetail
-              ? (crowdSnapshot?.sites[transitDetail.siteHost] ?? null)
+              ? (crowdSnapshot?.sites[transitDetail.siteDomain] ?? null)
               : null
           }
           crowdEnabled={crowdEnabled}
@@ -404,7 +404,7 @@ export function RelayDirectoryPage({
                 }}
                 onOpenTransit={setTransitDetail}
                 measuredP50Ms={
-                  crowdSnapshot?.sites[item.siteHost]?.w24?.ttftP50Ms ?? null
+                  crowdSnapshot?.sites[item.siteDomain]?.w24?.ttftP50Ms ?? null
                 }
               />
             ))}

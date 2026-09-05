@@ -125,6 +125,9 @@ export interface TransitSummary {
 
 export interface RelayDirectoryItem {
   siteHost: string;
+  /** 站点身份：注册域（apex）。跨数据源 join（如实测快照的站点键）用它，
+   *  链接与取数用 siteHost（真实 host）—— 两者别混用。 */
+  siteDomain: string;
   veridropHost: string;
   displayName: string;
   rank: number | null;

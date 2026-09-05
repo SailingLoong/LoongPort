@@ -27,6 +27,7 @@
 //! - [`balance`]：一行余额的有序回落链（cc-switch → sub2api sk → JWT），两类行共用
 //! - [`creds`]：凭据的内存结构与持久化（`loongport_credential` 表）
 //! - [`aff`]：站点 host → 我们的注册邀请码（编译期常量表）
+//! - [`identity`]：站点身份的唯一源 —— 注册域（apex）与取数地址两个归一，身份判断全走它
 //! - [`login`]：登录 WebView（加载中转站真实登录页，从 localStorage 取凭据回传）
 //! - [`purchase`]：充值 WebView（**与 `login` 方向相反** —— 把已有登录态注入进充值页）
 //! - [`platform_map`]：sub2api 的 `platform` ↔ cc-switch 的 `AppType` 映射表（唯一一处映射数据）
@@ -63,6 +64,7 @@ pub mod cc_switch_import;
 pub mod chatgpt_app;
 pub mod creds;
 pub mod discovery;
+pub mod identity;
 pub mod imagegen_mcp;
 pub mod leaderboard;
 pub mod login;

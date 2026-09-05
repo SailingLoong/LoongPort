@@ -98,7 +98,7 @@ pub struct Report {
     pub app_version: String,
     /// `macos` / `windows` / `linux`。**不带版本号** —— 精确的 OS 版本会缩小匿名集合。
     pub os: String,
-    /// 用户添加的站点 host，**已归一、已排序、已去重**。
+    /// 用户添加的站点注册域（apex），**已归一、已排序、已去重**。
     pub site_hosts: Vec<String>,
     /// **账号行数**，不是站点个数。
     ///
@@ -110,33 +110,19 @@ pub struct Report {
     pub relay_account_count: usize,
 }
 
-/// 把 `site_origin` 归一成上报用的 host。
-///
-/// 与 [`super::aff::aff_code_for`] 用同一套归一（小写、去 scheme、去端口、去 `www.`）——
-/// 不然同一个站在两边会算成不同的东西。
-///
-/// **端口必须去掉**，除了「同一个站不该算两个」之外还有个隐私理由：
-/// 一个非标准端口（`:8443`）本身就是**近乎唯一的指纹**，会把匿名集合缩到很小。
-fn report_host(site_origin: &str) -> String {
-    let without_scheme = site_origin
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(site_origin);
-    let host = without_scheme
-        .split(['/', ':'])
-        .next()
-        .unwrap_or(without_scheme)
-        .to_ascii_lowercase();
-    host.strip_prefix("www.").unwrap_or(&host).to_string()
-}
-
 /// 由站点 origin 列表构造载荷。
 ///
 /// `origins` 直接传 `creds::list` 的 `site_origin` 那一列（含重复 —— 同站多账号）。
+/// 归一走 [`super::identity::site_domain`]（注册域）—— 与 aff / 实测上传同一套身份，
+/// 不然同一个站在两边会算成不同的东西；端口被一并去掉也有隐私理由：
+/// 一个非标准端口（`:8443`）本身就是**近乎唯一的指纹**，会把匿名集合缩到很小。
 pub fn build_report(install_id: String, app_version: String, origins: &[String]) -> Report {
     let relay_account_count = origins.len();
 
-    let mut site_hosts: Vec<String> = origins.iter().map(|o| report_host(o)).collect();
+    let mut site_hosts: Vec<String> = origins
+        .iter()
+        .map(|o| super::identity::site_domain(o))
+        .collect();
     // 排序 + 去重：**排序是为了不泄漏添加顺序**（那是行为信息，而且能当指纹用），
     // 去重是因为 host 集合答的是「用了哪几家」。
     site_hosts.sort_unstable();
@@ -279,19 +265,20 @@ mod tests {
 
     #[test]
     fn hosts_are_normalized_the_same_way_as_the_aff_table() {
-        // 两边用同一套归一，否则同一个站在「有没有邀请码」与「上报」里会算成两个东西。
+        // 两边用同一套身份归一，否则同一个站在「有没有邀请码」与「上报」里会算成两个东西。
         let r = build_report(
             "i".into(),
             "v".into(),
             &[
                 "https://WawaPii.com".to_string(),
                 "https://www.wawapii.com:8443".to_string(),
+                "https://api.wawapii.com".to_string(),
             ],
         );
         assert_eq!(
             r.site_hosts,
             vec!["wawapii.com"],
-            "大小写 / www. / 端口都该归一成同一个 host"
+            "大小写 / www. / 端口 / api. 子域都该归一成同一个注册域"
         );
     }
 
