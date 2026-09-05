@@ -169,6 +169,22 @@ pub struct EvidenceFact {
     pub outcome: EvidenceOutcome,
 }
 
+/// 一次验证中失败腿的原始请求/响应（debug 边车，不参与判定）。
+///
+/// 只在对应证据事实 Failed 时采集；thinking/签名腿一律不采集（签名材料
+/// 不落盘）。请求体里天然没有凭证（认证走请求头），可安全展示给用户。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeDiagnostic {
+    /// 产出该事实的探针腿：core / identity / tool / structured / stream。
+    pub probe: String,
+    pub code: EvidenceCode,
+    /// 发出的完整请求体（JSON，截断至 4KB）。
+    pub request: String,
+    /// 收到的响应体（流式腿为事件类型序列 + 截断原文，共 8KB 上限）。
+    pub response: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationReport {

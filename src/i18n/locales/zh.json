@@ -3541,7 +3541,8 @@
           "signatureContinuation": "签名连续性",
           "foreignProtocol": "其他协议特征",
           "foreignSelfIdentification": "其他模型自我标识"
-        }
+        },
+        "diagnose": "查看原因"
       },
       "failure": {
         "authentication": "身份验证失败。请检查登录信息或 API 密钥后重试。",
@@ -3553,6 +3554,22 @@
         "modelUnavailable": "此模型不可用。请选择其他模型。",
         "cancelled": "验证已停止。",
         "invalidResponse": "服务商返回的响应无法验证。请稍后重试或人工复核。"
+      },
+      "diagnostic": {
+        "title": "未通过原因",
+        "loading": "读取中…",
+        "empty": "这条没有留存的原始数据（可能来自旧版本的验证）。",
+        "request": "发出的请求",
+        "response": "收到的响应",
+        "copy": "复制",
+        "copied": "已复制",
+        "probe": {
+          "core": "基础请求",
+          "identity": "身份自述",
+          "tool": "工具调用",
+          "structured": "结构化输出",
+          "stream": "流式请求"
+        }
       }
     },
     "firstSite": {

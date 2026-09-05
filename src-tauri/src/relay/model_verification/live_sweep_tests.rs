@@ -82,44 +82,7 @@ async fn live_sweep_verifies_every_managed_tier_with_current_probes() {
                 _ => protocols::anthropic::run_balanced(client, &resolved, &profile).await,
             };
             match result {
-                Ok(facts) => {
-                    // 失败诊断：流式生命周期/工具结构失败时，重发一次只收集
-                    // 事件类型序列（无内容载荷），把违规变体的形状打出来定位。
-                    let needs_stream_diag = facts.iter().any(|f| {
-                        f.code == crate::relay::model_verification::types::EvidenceCode::StreamLifecycle
-                            && f.outcome
-                                == crate::relay::model_verification::types::EvidenceOutcome::Failed
-                    });
-                    let needs_tool_diag = facts.iter().any(|f| {
-                        f.code == crate::relay::model_verification::types::EvidenceCode::ToolCallShape
-                            && f.outcome
-                                == crate::relay::model_verification::types::EvidenceOutcome::Failed
-                    });
-                    if needs_stream_diag {
-                        for sample in 1..=8 {
-                            if let Some(seq) =
-                                collect_stream_event_types(client, &resolved, &app).await
-                            {
-                                let collapsed = collapse_repeats(&seq);
-                                println!("DIAG  {provider_id} {model} stream#{sample}: {collapsed}");
-                            }
-                        }
-                    }
-                    let needs_envelope_diag = facts.iter().any(|f| {
-                        f.code == crate::relay::model_verification::types::EvidenceCode::BasicEnvelope
-                            && f.outcome
-                                == crate::relay::model_verification::types::EvidenceOutcome::Failed
-                    });
-                    if needs_envelope_diag {
-                        if let Some(shape) = inspect_core_response(client, &resolved, &app).await {
-                            println!("DIAG  {provider_id} {model} core 响应形状: {shape}");
-                        }
-                    }
-                    if needs_tool_diag {
-                        if let Some(shape) = inspect_tool_response(client, &resolved, &app).await {
-                            println!("DIAG  {provider_id} {model} tool 响应形状: {shape}");
-                        }
-                    }
+                Ok((facts, diagnostics)) => {
                     let facts = verdict::dedupe_facts(facts);
                     let (verdict, _) = verdict::evaluate(app, &profile, &facts);
                     let failed: Vec<String> = facts
@@ -133,13 +96,25 @@ async fn live_sweep_verifies_every_managed_tier_with_current_probes() {
                         .map(|fact| format!("{:?}", fact.code))
                         .collect();
                     if failed.is_empty() {
-                        println!("PASS  {provider_id} {app_type} {model} → {}", verdict.as_str());
+                        println!(
+                            "PASS  {provider_id} {app_type} {model} → {}",
+                            verdict.as_str()
+                        );
                         0
                     } else {
                         println!(
                             "FAIL  {provider_id} {app_type} {model} → {} failed={failed:?}",
                             verdict.as_str()
                         );
+                        // 内置失败诊断：打印各失败腿的响应头 200 字符（定位形状用）。
+                        for diagnostic in &diagnostics {
+                            let head: String = diagnostic.response.chars().take(200).collect();
+                            let code = format!("{:?}", diagnostic.code);
+                            println!(
+                                "DIAG  {provider_id} {model} [{}] {code}: {head}",
+                                diagnostic.probe
+                            );
+                        }
                         1
                     }
                 }
@@ -195,73 +170,6 @@ fn models_for(app_type: &str, settings_json: &str) -> Vec<String> {
         }
     }
     models
-}
-
-/// 失败诊断：重发流式探针，只收集事件类型（不含载荷）。
-async fn collect_stream_event_types(
-    client: &reqwest::Client,
-    resolved: &ResolvedTarget,
-    app: &AppType,
-) -> Option<Vec<String>> {
-    use crate::relay::model_verification::protocols::send_sse;
-    let model = resolved.target().model.clone();
-    let body = match app {
-        AppType::Codex => serde_json::json!({
-            "model": model, "input": "Reply with stream.",
-            "max_output_tokens": 512, "store": false, "stream": true,
-        }),
-        _ => serde_json::json!({
-            "model": model, "max_tokens": 32, "stream": true,
-            "messages": [{"role": "user", "content": "Reply with the word stream."}],
-        }),
-    };
-    let base = resolved.protocol_base().trim_end_matches('/');
-    let url = match app {
-        AppType::Codex => format!("{base}/responses"),
-        _ => format!("{base}/v1/messages"),
-    };
-    let request = client
-        .post(&url)
-        .bearer_auth(resolved.api_key())
-        .header("accept", "text/event-stream")
-        .json(&body);
-    send_sse(request, Vec::new, |events, raw| {
-        let data: Vec<&str> = raw
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim_start)
-            .collect();
-        let joined = data.join("\n");
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&joined) {
-            let kind = value.get("type").and_then(|k| k.as_str()).unwrap_or("?");
-            let index = value
-                .get("output_index")
-                .and_then(|i| i.as_u64())
-                .map(|i| i.to_string())
-                .unwrap_or_else(|| "-".into());
-            let detail = match kind {
-                "response.output_item.added" | "response.output_item.done" => value
-                    .pointer("/item/type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("?")
-                    .to_string(),
-                "response.content_part.added" | "response.content_part.done" => value
-                    .pointer("/part/type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("?")
-                    .to_string(),
-                _ => String::new(),
-            };
-            events.push(if detail.is_empty() {
-                kind.to_string()
-            } else {
-                format!("{kind}#{index}:{detail}")
-            });
-        }
-        Ok(())
-    })
-    .await
-    .ok()
 }
 
 /// 失败诊断：非流式工具探针的响应骨架（item 类型/status/model，无内容）。
@@ -424,26 +332,4 @@ async fn inspect_core_response(
         String::new()
     };
     Some(format!("len={} head={head:?}{sse_detail}", bytes.len()))
-}
-
-/// 压缩连续重复的事件名，序列列出来才可读。
-fn collapse_repeats(events: &[String]) -> String {
-    let mut parts: Vec<(&str, u32)> = Vec::new();
-    for event in events {
-        match parts.last_mut() {
-            Some((name, count)) if *name == event.as_str() => *count += 1,
-            _ => parts.push((event.as_str(), 1)),
-        }
-    }
-    parts
-        .into_iter()
-        .map(|(name, count)| {
-            if count > 1 {
-                format!("{name}x{count}")
-            } else {
-                name.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }

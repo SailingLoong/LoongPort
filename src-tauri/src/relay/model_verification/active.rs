@@ -49,7 +49,7 @@ impl ActiveVerifier for BalancedActiveVerifier {
                 completed_checks = completed_checks.saturating_add(1);
                 progress(completed_checks);
             };
-            let facts = match app_type {
+            let (facts, diagnostics) = match app_type {
                 AppType::Codex => {
                     protocols::openai_responses::run_balanced_with_progress(
                         &client,
@@ -72,17 +72,31 @@ impl ActiveVerifier for BalancedActiveVerifier {
             }
             .map_err(|failure| map_protocol_failure(&target, &app_type, failure))?;
             // 多腿探针会产出同名证据事实（如 core/stream 各一条 ModelMatch），
-            // 进判定前先按码合并，报告里每个证据码只有一条。
+            // 进判定前先按码合并，报告里每个证据码只有一条。诊断按码过滤，
+            // 只保留最终仍呈 Failed 的事实对应的腿。
             let facts = verdict::dedupe_facts(facts);
+            let diagnostics: Vec<_> = diagnostics
+                .into_iter()
+                .filter(|diagnostic| {
+                    facts.iter().any(|fact| {
+                        fact.code == diagnostic.code
+                            && fact.outcome
+                                == crate::relay::model_verification::types::EvidenceOutcome::Failed
+                    })
+                })
+                .collect();
             let (verdict, evidence_level) = verdict::evaluate(app_type, &profile, &facts);
-            Ok(VerificationReport {
-                target,
-                verdict,
-                evidence_level,
-                facts,
-                rules_version: RULES_VERSION,
-                checked_at: chrono::Utc::now().timestamp(),
-            })
+            Ok((
+                VerificationReport {
+                    target,
+                    verdict,
+                    evidence_level,
+                    facts,
+                    rules_version: RULES_VERSION,
+                    checked_at: chrono::Utc::now().timestamp(),
+                },
+                diagnostics,
+            ))
         });
         Ok(PreparedVerification {
             total_checks,

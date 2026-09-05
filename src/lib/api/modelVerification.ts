@@ -65,6 +65,15 @@ export interface VerificationReport {
   checkedAt: number;
 }
 
+/** 失败腿的原始请求/响应（诊断边车，只在证据 Failed 时有）。 */
+export interface ProbeDiagnostic {
+  /** 产出该事实的探针腿：core / identity / tool / structured / stream。 */
+  probe: string;
+  code: EvidenceCode;
+  request: string;
+  response: string;
+}
+
 export interface VerificationScopeSummary {
   providerId: string;
   appType: string;
@@ -109,6 +118,17 @@ export const modelVerificationApi = {
     appType: string,
   ): Promise<VerificationModelOption[]> =>
     invoke("list_verification_models", { providerId, appType }),
+
+  diagnostics: (
+    providerId: string,
+    appType: string,
+    model: string,
+  ): Promise<ProbeDiagnostic[]> =>
+    invoke("get_model_verification_diagnostics", {
+      providerId,
+      appType,
+      model,
+    }),
 
   start: (target: VerificationTarget): Promise<StartRunResponse> =>
     invoke("start_model_verification", {

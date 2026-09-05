@@ -4,8 +4,8 @@ use crate::{
     relay::model_verification::{
         history,
         types::{
-            verdict_severity, TargetScope, Verdict, VerificationReport, VerificationSource,
-            RULES_VERSION,
+            verdict_severity, ProbeDiagnostic, TargetKey, TargetScope, Verdict, VerificationReport,
+            VerificationSource, RULES_VERSION,
         },
         verdict::{merge_passive_over, report_precedes},
         MODEL_VERIFICATION_ENABLED,
@@ -34,6 +34,7 @@ pub(crate) fn create_results_table(conn: &Connection) -> Result<(), AppError> {
             passive_observed_at INTEGER,
             updated_at INTEGER NOT NULL,
             notified_fingerprints_json TEXT NOT NULL DEFAULT '[]',
+            active_diagnostics_json TEXT,
             PRIMARY KEY (provider_id, app_type, model),
             FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
         )",
@@ -100,15 +101,16 @@ pub fn upsert_active(db: &Database, report: &VerificationReport) -> Result<(), A
         .execute(
             "INSERT INTO model_verification_results (
             provider_id, app_type, model, active_report_json, verdict, evidence_level,
-            rules_version, active_checked_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            rules_version, active_checked_at, updated_at, active_diagnostics_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
         ON CONFLICT(provider_id, app_type, model) DO UPDATE SET
             active_report_json = excluded.active_report_json,
             verdict = excluded.verdict,
             evidence_level = excluded.evidence_level,
             rules_version = excluded.rules_version,
             active_checked_at = excluded.active_checked_at,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            active_diagnostics_json = NULL",
             params![
                 report.target.provider_id,
                 report.target.app_type,
@@ -320,6 +322,49 @@ pub fn list_for_provider_ids(
             merge_json_reports(active_json, passive_json).transpose()
         })
         .collect()
+}
+
+/// 把失败腿诊断挂到刚落库的 active 报告行上（新一次 upsert 会先清空）。
+/// 诊断是 debug 边车：不参与判定，不进合并语义，passive 写入不触碰此列。
+pub fn attach_diagnostics(
+    db: &Database,
+    target: &TargetKey,
+    diagnostics: &[ProbeDiagnostic],
+) -> Result<(), AppError> {
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let json = serde_json::to_string(diagnostics)
+        .map_err(|error| AppError::Config(format!("序列化验真诊断失败: {error}")))?;
+    let conn = lock_conn!(db.conn);
+    conn.execute(
+        "UPDATE model_verification_results SET active_diagnostics_json = ?1
+         WHERE provider_id = ?2 AND app_type = ?3 AND model = ?4",
+        params![json, target.provider_id, target.app_type, target.model],
+    )
+    .map_err(|error| AppError::Database(format!("保存验真诊断失败: {error}")))?;
+    Ok(())
+}
+
+/// 读取某条 active 报告的诊断边车（无诊断返回空）。
+pub fn active_diagnostics(
+    db: &Database,
+    provider_id: &str,
+    app_type: &str,
+    model: &str,
+) -> Result<Vec<ProbeDiagnostic>, AppError> {
+    let conn = lock_conn!(db.conn);
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT active_diagnostics_json FROM model_verification_results
+             WHERE provider_id = ?1 AND app_type = ?2 AND model = ?3",
+            params![provider_id, app_type, model],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+    Ok(json
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
 }
 
 /// 档位（provider）跨模型的读侧聚合：每个 provider 取最严重判定

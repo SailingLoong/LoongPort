@@ -6,9 +6,12 @@ use serde_json::{json, Value};
 use crate::proxy::model_mapper::strip_one_m_suffix_for_upstream;
 use crate::relay::model_verification::{
     capability_profiles::CapabilityProfile,
-    protocols::{model_matches_protocol_family, models_match, send_and_read, send_sse, RunFailure},
+    protocols::{
+        capture_leg_diagnostics, model_matches_protocol_family, models_match, record_event_types,
+        send_and_read, send_sse, RunFailure,
+    },
     target::ResolvedTarget,
-    types::{EvidenceCode, EvidenceFact, EvidenceOutcome},
+    types::{EvidenceCode, EvidenceFact, EvidenceOutcome, ProbeDiagnostic},
 };
 
 const REPORT_PROBE: &str = "report_probe";
@@ -38,7 +41,7 @@ pub(crate) async fn run_balanced(
     client: &reqwest::Client,
     target: &ResolvedTarget,
     profile: &CapabilityProfile,
-) -> Result<Vec<EvidenceFact>, RunFailure> {
+) -> Result<(Vec<EvidenceFact>, Vec<ProbeDiagnostic>), RunFailure> {
     run_balanced_with_progress(client, target, profile, &mut || {}).await
 }
 
@@ -47,71 +50,78 @@ pub(crate) async fn run_balanced_with_progress(
     target: &ResolvedTarget,
     profile: &CapabilityProfile,
     on_probe_complete: &mut impl FnMut(),
-) -> Result<Vec<EvidenceFact>, RunFailure> {
+) -> Result<(Vec<EvidenceFact>, Vec<ProbeDiagnostic>), RunFailure> {
     let model = upstream_model(&target.target().model);
     let endpoint = format!("{}/responses", target.protocol_base().trim_end_matches('/'));
     let api_key = target.api_key();
+    // 各腿带回 (请求体, 响应体)：诊断边车只在事实 Failed 时采集；流式腿的
+    // 「响应体」是事件类型序列（有界），非流式腿是原始响应。
     let mut probes = FuturesUnordered::new();
     probes.push(
         async {
+            let request = core_request(&model, profile);
             let result = async {
-                let body = send_response(client, &endpoint, api_key, core_request(&model, profile))
-                    .await?;
+                let body = send_response(client, &endpoint, api_key, request.clone()).await?;
                 reject_incomplete_response(&body)?;
-                Ok(parse_core_response(&body, &model))
+                Ok((parse_core_response(&body, &model), body))
             }
             .await;
-            (ProbeKind::Core, result)
+            let (result, raw) = unzip_probe_result(result);
+            (ProbeKind::Core, result, request, raw)
         }
         .boxed(),
     );
     probes.push(
         async {
+            let request = tool_request(&model, profile);
             let result = async {
-                let body = send_response(client, &endpoint, api_key, tool_request(&model, profile))
-                    .await?;
+                let body = send_response(client, &endpoint, api_key, request.clone()).await?;
                 reject_incomplete_response(&body)?;
-                Ok(vec![parse_tool_response(&body, &model)])
+                Ok((vec![parse_tool_response(&body, &model)], body))
             }
             .await;
-            (ProbeKind::Tool, result)
+            let (result, raw) = unzip_probe_result(result);
+            (ProbeKind::Tool, result, request, raw)
         }
         .boxed(),
     );
     if profile.supports_structured_output {
         probes.push(
             async {
+                let request = structured_output_request(&model, profile);
                 let result = async {
-                    let body = send_response(
-                        client,
-                        &endpoint,
-                        api_key,
-                        structured_output_request(&model, profile),
-                    )
-                    .await?;
+                    let body = send_response(client, &endpoint, api_key, request.clone()).await?;
                     reject_incomplete_response(&body)?;
-                    Ok(vec![parse_structured_response(&body)])
+                    Ok((vec![parse_structured_response(&body)], body))
                 }
                 .await;
-                (ProbeKind::Structured, result)
+                let (result, raw) = unzip_probe_result(result);
+                (ProbeKind::Structured, result, request, raw)
             }
             .boxed(),
         );
     }
     probes.push(
         async {
+            let request = stream_request(&model, profile);
+            // 诊断用：流事件类型序列（有界），随结果一起带回。
+            let mut event_log: Vec<String> = Vec::new();
             let result = async {
                 // 无 response.completed = 流被截断（干净 EOF 中途收尾），按错误
                 // 重试一次，而不是判「流式生命周期未通过」。
                 let mut terminal = None;
                 for _ in 0..2 {
+                    event_log.clear();
                     let state = send_stream(
                         client,
                         &endpoint,
                         api_key,
-                        stream_request(&model, profile),
+                        request.clone(),
                         || StreamReducer::new(&model),
-                        |stream, event| stream.observe(event),
+                        |stream, event| {
+                            record_event_types(&mut event_log, event);
+                            stream.observe(event)
+                        },
                     )
                     .await?;
                     if state.saw_completed {
@@ -123,19 +133,28 @@ pub(crate) async fn run_balanced_with_progress(
                 Ok(state.finish())
             }
             .await;
-            (ProbeKind::Stream, result)
+            let raw = result
+                .as_ref()
+                .ok()
+                .map(|_| event_log.join(" → ").into_bytes())
+                .unwrap_or_default();
+            (ProbeKind::Stream, result, request, raw)
         }
         .boxed(),
     );
 
     let mut results = BTreeMap::new();
-    while let Some((probe, result)) = probes.next().await {
+    let mut diagnostics: Vec<ProbeDiagnostic> = Vec::new();
+    while let Some((probe, result, request, raw_body)) = probes.next().await {
         on_probe_complete();
-        if let Err(failure) = result {
+        if let Err(failure) = &result {
             log::warn!(
                 "[model-verification] responses probe failed: probe={} failure={failure:?}",
                 probe.name()
             );
+        }
+        if let Ok(facts) = &result {
+            capture_leg_diagnostics(&mut diagnostics, probe.name(), facts, &request, &raw_body);
         }
         results.insert(probe, result);
     }
@@ -147,7 +166,18 @@ pub(crate) async fn run_balanced_with_progress(
             Err(failure) => return Err(failure),
         }
     }
-    Ok(facts)
+    Ok((facts, diagnostics))
+}
+
+/// 拆 (事实, 原始响应)：失败时原始响应丢弃（该腿整轮已失败，诊断对
+/// RunFailure 不适用——错误分类本身就会展示给用户）。
+fn unzip_probe_result(
+    result: Result<(Vec<EvidenceFact>, Vec<u8>), RunFailure>,
+) -> (Result<Vec<EvidenceFact>, RunFailure>, Vec<u8>) {
+    match result {
+        Ok((facts, body)) => (Ok(facts), body),
+        Err(failure) => (Err(failure), Vec::new()),
+    }
 }
 
 async fn send_response(
@@ -1110,7 +1140,7 @@ mod openai_responses_tests {
             }),
         ))
         .await;
-        let facts = run_balanced(
+        let (facts, _) = run_balanced(
             &reqwest::Client::new(),
             &target_for_model(&endpoint, "SENTINEL_API_KEY", "future-model-x"),
             &CapabilityProfile::for_target(&AppType::Codex, "future-model-x"),
@@ -1421,11 +1451,12 @@ mod openai_responses_tests {
             .unwrap();
 
         let mut completed_probes = 0;
-        let facts = run_balanced_with_progress(&client, &target, &profile, &mut || {
-            completed_probes += 1;
-        })
-        .await
-        .unwrap();
+        let (facts, _diagnostics) =
+            run_balanced_with_progress(&client, &target, &profile, &mut || {
+                completed_probes += 1;
+            })
+            .await
+            .unwrap();
 
         for code in [
             EvidenceCode::BasicEnvelope,
@@ -1533,7 +1564,7 @@ mod openai_responses_tests {
                 .with_state(requests),
         )
         .await;
-        let facts = run_balanced(
+        let (facts, _) = run_balanced(
             &reqwest::Client::new(),
             &target_for(&endpoint, "key"),
             &CapabilityProfile::for_target(&AppType::Codex, "gpt-5.6-sol"),
@@ -1740,7 +1771,7 @@ mod openai_responses_tests {
                 .with_state(calls),
         )
         .await;
-        let facts = run_balanced(
+        let (facts, _) = run_balanced(
             &reqwest::Client::new(),
             &target_for_model(&endpoint, "SENTINEL_API_KEY", "future-model-x"),
             &CapabilityProfile::for_target(&AppType::Codex, "future-model-x"),
