@@ -45,48 +45,22 @@
 //! 版本变**（`AffiliateCodeMaxLength` 是个常量，上游改它我们不会知道）。
 //! 客户端唯一该做的是 trim（防录表时手滑带空格），剩下让服务端判。
 
-/// 站点 host → 我们的 aff 码。
+/// 站点 → 我们的 aff 码。
 ///
-/// key 是**归一后的 host**（小写、去 `www.` 前缀、**不带端口**），不是完整 URL ——
-/// 见 [`aff_code_for`] 的文档。
+/// key 是**注册域（apex）**—— [`crate::relay::identity::site_domain`] 的产出，
+/// 不是完整 URL 也不是具体 host。子域（`api.` / `www.` / ……）与裸域共享同一条
+/// 身份（2026-09-05 维护者拍板：注册域是站点归属的唯一标识），所以站点从哪个
+/// 子域加进来都查得到同一条。
 ///
 /// 码按**原样大写**录入（服务端会 `ToUpper`，但表里就写成最终形态更少一层心智负担）。
 const AFF_CODES: &[(&str, &str)] = &[
-    ("api.aijws.com", "RJZUAA8XX6W7"),
+    ("aijws.com", "RJZUAA8XX6W7"),
     ("790053500.com", "FQSPPFUYXSSS"),
     ("wawapii.com", "4PAUD8SSZXG7"),
     ("hapiopen.cc", "HTL7AFBJLKKU"),
     ("999555999.com", "XNTZVS78F7WY"),
     // ⚠️ bestapi.store 有意不在表里 —— 那是维护者自己的站，见模块文档。
 ];
-
-/// 把 `site_origin` 归一成查表用的 host。
-///
-/// 三件事：**去 scheme、去端口、去 `www.` 前缀、转小写**。
-///
-/// ## 为什么按 host 查而不按完整 `site_origin`
-///
-/// - **端口必须丢掉**：`normalize_site_origin`（`api.rs`）**会保留端口**，
-///   所以存的可能是 `https://x.com:8443`。同一个站换个端口不该变成另一家中转站。
-/// - **`www.` 必须归一**：同一个站可能有 `https://x.com` 与 `https://www.x.com`
-///   两种 origin（维护者那份表里写的就是 `www.bestapi.store`，而我们存的是不带
-///   `www.` 的）。不归一会多一类「表里明明有却查不到」的静默失效。
-///
-/// ⚠️ **有意不做更聪明的匹配**：不做子域通配、不做模糊。那会把不相关的站匹进去，
-/// 后果是**给错的站带上我们的码** —— 比查不到糟得多。
-pub(crate) fn lookup_host(site_origin: &str) -> String {
-    let without_scheme = site_origin
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(site_origin);
-    // 端口与路径都切掉（`site_origin` 正常不带路径，但多切一次没坏处）。
-    let host = without_scheme
-        .split(['/', ':'])
-        .next()
-        .unwrap_or(without_scheme)
-        .to_ascii_lowercase();
-    host.strip_prefix("www.").unwrap_or(&host).to_string()
-}
 
 /// 查这个站有没有我们的 aff 码。
 ///
@@ -97,10 +71,10 @@ pub(crate) fn lookup_host(site_origin: &str) -> String {
 /// ⚠️ 这是**内置那一层**，不是最终取值：调用方走
 /// [`super::remote_config::resolve_aff_code`] 的两层回落，远端配置能覆盖也能撤销它。
 pub fn aff_code_for(site_origin: &str) -> Option<&'static str> {
-    let host = lookup_host(site_origin);
+    let domain = crate::relay::identity::site_domain(site_origin);
     AFF_CODES
         .iter()
-        .find(|(table_host, _)| *table_host == host)
+        .find(|(table_domain, _)| *table_domain == domain)
         .map(|(_, code)| *code)
 }
 
@@ -169,14 +143,19 @@ mod tests {
     }
 
     #[test]
-    fn subdomains_do_not_inherit_the_parent_codes() {
-        // ⚠️ 这条钉住「不做聪明匹配」：`api.aijws.com` 在表里，
-        // 但 `aijws.com` 与 `evil.aijws.com` **都不该**命中它。
-        // 给错的站带码比查不到糟得多。
-        assert_eq!(aff_code_for("https://aijws.com"), None);
-        assert_eq!(aff_code_for("https://evil.aijws.com"), None);
-        // 反过来：表里那个精确 host 要能查到。
-        assert_eq!(aff_code_for("https://api.aijws.com"), Some("RJZUAA8XX6W7"));
+    fn subdomains_share_the_sites_identity() {
+        // 2026-09-05 维护者拍板：注册域是站点唯一标识，子域（api./www./任意前缀）
+        // 都是该站自己的入口，共享身份 —— 与旧的「子域不继承」口径有意相反
+        // （那时防的是把码贴到不相关的站；同 apex 的子域按定义就是同一家）。
+        for origin in [
+            "https://aijws.com",
+            "https://www.aijws.com",
+            "https://api.aijws.com",
+        ] {
+            assert_eq!(aff_code_for(origin), Some("RJZUAA8XX6W7"), "{origin}");
+        }
+        // 别家还是别家：不同注册域不命中。
+        assert_eq!(aff_code_for("https://evil-other.example"), None);
     }
 
     #[test]
@@ -200,13 +179,17 @@ mod tests {
     }
 
     #[test]
-    fn table_hosts_are_already_normalized() {
-        // 表里的 key 若带 scheme / 端口 / `www.` / 大写，就永远查不到 ——
-        // 因为查表前 `lookup_host` 已经把输入归一了。这是个静默失效，必须有闸。
-        for (host, _) in AFF_CODES {
-            assert_eq!(&lookup_host(host), host, "表里的 key 没归一: {host}");
-            assert!(!host.contains("://"), "key 不该带 scheme: {host}");
-            assert!(!host.contains(':'), "key 不该带端口: {host}");
+    fn table_keys_are_already_registrable_domains() {
+        // 表里的 key 若带 scheme / 端口 / 子域前缀，就永远查不到 ——
+        // 因为查表前 `site_domain` 已经把输入归到注册域了。这是个静默失效，必须有闸。
+        for (domain, _) in AFF_CODES {
+            assert_eq!(
+                &crate::relay::identity::site_domain(domain),
+                domain,
+                "表里的 key 不是注册域: {domain}"
+            );
+            assert!(!domain.contains("://"), "key 不该带 scheme: {domain}");
+            assert!(!domain.contains(':'), "key 不该带端口: {domain}");
         }
     }
 

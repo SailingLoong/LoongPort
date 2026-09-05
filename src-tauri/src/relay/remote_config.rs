@@ -287,10 +287,11 @@ pub struct RemoteConfig {
     /// 赞助中转站，按维护者给的顺序（**不排序** —— 顺序是他的编排意图）。
     #[serde(default)]
     pub sponsors: Vec<Sponsor>,
-    /// 站点 host → 邀请码。key 必须是**归一后的 host**（与 [`super::aff`] 同一套）。
+    /// 站点 → 邀请码。key 推荐**注册域（apex）**；按具体 host 录入也认（读宽，
+    /// 见 [`remote_code_get`]），身份归一与 [`super::aff`] 同一套。
     #[serde(default)]
     pub aff_codes: std::collections::BTreeMap<String, String>,
-    /// 站点 host → 注册优惠码。key 同上（[`super::aff::lookup_host`] 归一后的 host）。
+    /// 站点 → 注册优惠码。key 同上（注册域优先、全 host 兜底）。
     ///
     /// ## 为什么与 `aff_codes` 分成两个 map，而不是一个 map 装两个码
     ///
@@ -690,11 +691,14 @@ fn configured_signed_site_url(
     label: &str,
 ) -> Result<Option<url::Url>, AppError> {
     let normalized_origin = super::api::normalize_site_origin(site_origin)?;
-    let host = super::aff::lookup_host(&normalized_origin);
+    // 身份按注册域匹配（读宽）：策略键按哪个子域录入都行，同一注册域就是同一家站。
+    let domain = super::identity::site_domain(&normalized_origin);
     let Some(configured) = config
         .relay_directory
         .sites
-        .get(&host)
+        .iter()
+        .find(|(key, _)| super::identity::site_domain(key) == domain)
+        .map(|(_, site)| site)
         .and_then(select)
         .map(str::trim)
         .filter(|url| !url.is_empty())
@@ -769,10 +773,8 @@ fn resolve_code(
     site_origin: &str,
     builtin: fn(&str) -> Option<&'static str>,
 ) -> Option<String> {
-    let host = super::aff::lookup_host(site_origin);
-
     // 第一层：远端（含缓存）。命中就用它 —— 它比内置新。
-    if let Some(code) = remote.and_then(|m| m.get(&host)) {
+    if let Some(code) = remote.and_then(|m| remote_code_get(m, site_origin)) {
         let trimmed = code.trim();
         // 空值当作「远端明确说这个站没有码」⇒ **不回落到内置**。
         // 那是维护者撤掉一个码的唯一手段，回落会让撤销失效。
@@ -785,6 +787,17 @@ fn resolve_code(
 
     // 第二层：编译期内置。
     builtin(site_origin).map(str::to_string)
+}
+
+/// 远端码表按键取值（读宽）：站点身份是注册域，但键可能按注册域或按具体 host
+/// 录入 —— 先按注册域查，再按全 host 兜底一次。两种拼写都认，新键推荐录注册域。
+fn remote_code_get<'a>(
+    map: &'a std::collections::BTreeMap<String, String>,
+    site_origin: &str,
+) -> Option<&'a str> {
+    map.get(&super::identity::site_domain(site_origin))
+        .or_else(|| map.get(&super::identity::request_host(site_origin)))
+        .map(String::as_str)
 }
 
 #[cfg(test)]
@@ -1580,7 +1593,7 @@ mod tests {
             resolve_promo_code(Some(&other), "https://bestapi.store").as_deref(),
             None
         );
-        // 归一同样生效（远端那层与内置那层共用 `lookup_host`）。
+        // 归一同样生效（远端那层与内置那层共用 `site_domain` 身份）。
         assert_eq!(
             resolve_promo_code(Some(&remote), "https://WWW.BestApi.store:443").as_deref(),
             Some("SUMMER2026")
@@ -1682,12 +1695,13 @@ mod tests {
             );
             // 每个赞助站都必须配邀请码 —— 这份文件存在的目的就是返利；
             // 少一条 = 那个站的返利静默归零。哪天某站确实没有返利计划，
-            // 再有意识地放宽这条并说明原因。
-            let host = crate::relay::aff::lookup_host(&sponsor.site_origin);
+            // 再有意识地放宽这条并说明原因。判键与 `resolve_code` 同一把尺
+            // （`remote_code_get`：注册域优先、全 host 兜底）。
             assert!(
-                cfg.aff_codes.contains_key(&host),
-                "sponsor {} 没有配邀请码（归一后 host={host}）",
-                sponsor.site_origin
+                remote_code_get(&cfg.aff_codes, &sponsor.site_origin).is_some(),
+                "sponsor {} 没有配邀请码（注册域={}）",
+                sponsor.site_origin,
+                crate::relay::identity::site_domain(&sponsor.site_origin)
             );
         }
         for (host, code) in &cfg.aff_codes {

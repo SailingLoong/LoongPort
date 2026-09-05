@@ -37,10 +37,10 @@
 //! 与 [`super::aff`] 同一条理由 —— 规则在服务端且可能随版本变。
 //! 但**录表时录错**是我们自己的问题，所以下面有一条编译期之外、录入那一刻的闸。
 
-/// 站点 host → 注册优惠码。
+/// 站点 → 注册优惠码。
 ///
-/// key 是**归一后的 host**（小写、去 `www.`、不带端口），与 [`super::aff::AFF_CODES`]
-/// 同一套归一规则 —— 两处共用 [`super::aff::lookup_host`]，不各写一份。
+/// key 是**注册域（apex）**，与 [`super::aff::AFF_CODES`] 同一套身份归一 ——
+/// 两处共用 [`super::identity::site_domain`]，不各写一份。
 const PROMO_CODES: &[(&str, &str)] = &[
     // 2026-08-16 起为空：唯一的码 LOONGPORT 已在服务端删除（见模块文档）。
 ];
@@ -50,10 +50,10 @@ const PROMO_CODES: &[(&str, &str)] = &[
 /// `None` = 表里没有 ⇒ 调用方**什么都不做**（不预填那个框）。
 /// 绝大多数站都会走这条路。
 pub fn promo_code_for(site_origin: &str) -> Option<&'static str> {
-    let host = super::aff::lookup_host(site_origin);
+    let domain = super::identity::site_domain(site_origin);
     PROMO_CODES
         .iter()
-        .find(|(table_host, _)| *table_host == host)
+        .find(|(table_domain, _)| *table_domain == domain)
         .map(|(_, code)| *code)
 }
 
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn host_normalization_is_shared_with_the_aff_table() {
-        // 复用 `aff::lookup_host` ⇒ 端口 / `www.` / 大小写的归一行为**必须一致**。
+        // 复用 `identity::site_domain` ⇒ 端口 / `www.` / 子域 / 大小写的归一行为**必须一致**。
         // 各写一份迟早会漂成「aff 查到了 promo 没查到」的静默失效。
         // 表清空后这条同时守「bestapi.store 的任何变体都不再把码带回来」。
         for origin in [
@@ -134,14 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn table_hosts_are_already_normalized() {
-        // 表里的 key 若带 scheme / 端口 / `www.` / 大写，就永远查不到 ——
-        // 因为查表前 `lookup_host` 已经把输入归一了。这是个静默失效，必须有闸。
-        for (host, _) in PROMO_CODES {
+    fn table_keys_are_already_registrable_domains() {
+        // 表里的 key 若带 scheme / 端口 / 子域前缀，就永远查不到 ——
+        // 因为查表前 `site_domain` 已经把输入归到注册域了。这是个静默失效，必须有闸。
+        for (domain, _) in PROMO_CODES {
             assert_eq!(
-                &super::super::aff::lookup_host(host),
-                host,
-                "表里的 key 没归一: {host}"
+                &crate::relay::identity::site_domain(domain),
+                domain,
+                "表里的 key 不是注册域: {domain}"
             );
         }
     }

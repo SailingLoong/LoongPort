@@ -3823,7 +3823,9 @@ pub(crate) fn belongs_to_account(
     if !is_managed(provider) {
         return false;
     }
-    if provider.website_url.as_deref() != Some(site_origin) {
+    // 归属按注册域身份判：website_url 与 site_origin 都是 provision 时写入的
+    // origin，同站不同子域拼写（面板域 vs API 域）也该认 —— 裸字符串相等会漏。
+    if !same_site_identity(provider.website_url.as_deref(), Some(site_origin)) {
         return false;
     }
     match (
@@ -3857,7 +3859,7 @@ pub(crate) fn belongs_to_relay(
     if !is_managed(provider) {
         return false;
     }
-    if provider.website_url.as_deref() != Some(site_origin) {
+    if !same_site_identity(provider.website_url.as_deref(), Some(site_origin)) {
         return false;
     }
     match (
@@ -3867,6 +3869,20 @@ pub(crate) fn belongs_to_relay(
         (Some(want), Some(owner)) => want == owner,
         (_, None) => true,
         (None, Some(_)) => false,
+    }
+}
+
+/// 两个可选 origin 是否指向**同一站点**（注册域身份，None 与任何值都不相等）。
+///
+/// 收拢 `website_url` ↔ `site_origin` 这类归属判据：两边都是持久化的 origin 字符串，
+/// 裸相等依赖「写入时同拼写」这个脆弱不变量 —— 同站的面板域与 API 域拼写不同
+/// 就静默失配。身份归一见 [`crate::relay::identity`]。
+fn same_site_identity(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            crate::relay::identity::site_domain(left) == crate::relay::identity::site_domain(right)
+        }
+        _ => false,
     }
 }
 
@@ -4259,7 +4275,9 @@ fn reset_tier_config_in_state(
     let account_id = existing.meta.as_ref().and_then(|m| m.loongport_account_id);
     let candidates: Vec<_> = with_conn(state, creds::list)?
         .into_iter()
-        .filter(|candidate| candidate.site_origin == site_origin)
+        .filter(|candidate| {
+            same_site_identity(Some(&candidate.site_origin), Some(site_origin.as_str()))
+        })
         .collect();
     let op = match account_id {
         Some(want) => candidates
@@ -4459,7 +4477,7 @@ fn tiers_of_site(
 ) -> Result<Vec<TierInfo>, AppError> {
     tiers
         .iter()
-        .filter(|owned| owned.site_origin.as_deref() == Some(site_origin))
+        .filter(|owned| same_site_identity(owned.site_origin.as_deref(), Some(site_origin)))
         .filter(|owned| match (account_id, owned.account_id) {
             // 两边都知道账号 ⇒ 必须相等。
             (Some(want), Some(owner)) => want == owner,
@@ -4963,10 +4981,10 @@ fn list_sites_impl(state: &AppState) -> Result<Vec<SiteInfo>, AppError> {
     with_conn(state, |conn| {
         let mut summaries = Vec::<SiteInfo>::new();
         for relay in creds::list(conn)? {
-            if let Some(summary) = summaries
-                .iter_mut()
-                .find(|summary| summary.site_origin == relay.site_origin)
-            {
+            // 按注册域身份聚行：同一站的 www/apex/api 拼写变体算一家，不再拆行。
+            if let Some(summary) = summaries.iter_mut().find(|summary| {
+                same_site_identity(Some(&summary.site_origin), Some(&relay.site_origin))
+            }) {
                 summary.account_count += usize::from(relay.account_id.is_some());
             } else {
                 summaries.push(SiteInfo {

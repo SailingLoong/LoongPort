@@ -575,7 +575,9 @@ mod tests {
             &managed_provider(
                 "loongport-fedcba9876543210",
                 AppType::Codex,
-                Some("https://missing.example.test"),
+                // 必须是**另一个注册域**：同域子域（如 missing.example.test）在
+                // 注册域身份下与种子站（api.example.test → example.test）同站。
+                Some("https://elsewhere.example"),
                 Some(7),
                 Some("sk-secret"),
             ),
