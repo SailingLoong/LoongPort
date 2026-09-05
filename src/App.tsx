@@ -1174,8 +1174,10 @@ function App() {
                     transition={{ duration: 0.15 }}
                     className="space-y-4"
                   >
-                    {/* LoongPort 省心视图：Beta 开 + 该 app 省心模式开 + 路由在跑时，
-                        整个 provider 页（中转站区 + 手工列表）替换为档位看板。 */}
+                    {/* LoongPort 省心视图：该 app 模式为「省心」时，provider 页
+                        （中转站区 + 手工列表）切换为档位看板；路由未跑时看板
+                        顶部有警告条，不静默回退。模式入口在内容区顶部的
+                        AppModeSegmented（唯源）。 */}
                     {showEasyBoard ? (
                       <EasyBoard appId={activeApp} />
                     ) : (
