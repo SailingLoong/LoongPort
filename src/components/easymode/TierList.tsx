@@ -34,6 +34,7 @@ import { copyText } from "@/lib/clipboard";
 import { useResetCircuitBreaker } from "@/lib/query/failover";
 import { cn } from "@/lib/utils";
 import { fmtInt, fmtUsd } from "@/components/usage/format";
+import { BoardVerdictDot } from "@/components/relay/model-verification/TierVerdictChip";
 import type { TierBoardTier } from "@/lib/api/autoMode";
 import type { DraggableAttributes } from "@dnd-kit/core";
 import type { SyntheticListenerMap } from "@dnd-kit/core/dist/hooks/utilities";
@@ -198,37 +199,8 @@ function TierCard({
             </Badge>
           ) : null}
           <TierHealthBadge tier={tier} />
-          {tier.verificationVerdict === "anomaly" ||
-          tier.verificationVerdict === "suspicious" ? (
-            <span
-              title={t(
-                `loongport.modelVerification.tierVerdict.${tier.verificationVerdict}`,
-                {
-                  defaultValue:
-                    tier.verificationVerdict === "anomaly"
-                      ? "检测到异常"
-                      : "需要复核",
-                },
-              )}
-              className={`h-2 w-2 shrink-0 rounded-full ${
-                tier.verificationVerdict === "anomaly"
-                  ? "bg-red-600"
-                  : "bg-amber-500"
-              }`}
-            >
-              <span className="sr-only">
-                {t(
-                  `loongport.modelVerification.tierVerdict.${tier.verificationVerdict}`,
-                  {
-                    defaultValue:
-                      tier.verificationVerdict === "anomaly"
-                        ? "检测到异常"
-                        : "需要复核",
-                  },
-                )}
-              </span>
-            </span>
-          ) : null}
+          {/* 验真状态点：模型验证模块自持（下线/无异常结论时不渲染）。 */}
+          <BoardVerdictDot verdict={tier.verificationVerdict} />
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span className="tabular-nums">

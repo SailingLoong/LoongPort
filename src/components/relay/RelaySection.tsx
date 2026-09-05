@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -20,17 +20,7 @@ import type {
   RelayUsageBlocker,
   TierInfo,
 } from "@/lib/api/relay";
-import {
-  modelVerificationApi,
-  type VerificationReport,
-  type VerificationScope,
-  type VerificationScopeSummary,
-  type VerificationVerdict,
-} from "@/lib/api/modelVerification";
-import {
-  MODEL_VERIFICATION_CHANGED,
-  ONBOARDING_REGISTER_COMPLETED,
-} from "@/lib/api/events";
+import { ONBOARDING_REGISTER_COMPLETED } from "@/lib/api/events";
 import { type OnboardingRegisterCompleted } from "@/lib/onboarding";
 import {
   vendorApi,
@@ -41,10 +31,10 @@ import { getAppLabel } from "@/config/appConfig";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
-import { ModelVerificationDialog } from "./model-verification/ModelVerificationDialog";
 import { ImageTabNotice } from "./ImageTabNotice";
 import { RelayTierList } from "./RelayTierList";
 import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
+import { TierVerificationProvider } from "./model-verification/TierVerificationProvider";
 import { rowBalanceKeys } from "./useRowBalanceQuery";
 import { openInBrowser } from "./openInBrowser";
 import { useRowBusy } from "./useRowBusy";
@@ -128,15 +118,6 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
    */
   const isImageTab = appId === "codex-image";
   const [relays, setRelays] = useState<RelayRowData[]>([]);
-  const [verificationSummaries, setVerificationSummaries] = useState<
-    Record<string, VerificationScopeSummary>
-  >({});
-  const [selectedVerificationTier, setSelectedVerificationTier] =
-    useState<TierInfo | null>(null);
-  const [verificationDialogOpen, setVerificationDialogOpen] = useState(false);
-  const [verifyingProviderId, setVerifyingProviderId] = useState<string | null>(
-    null,
-  );
   const [confirmSwitch, setConfirmSwitch] = useState<{
     name: string;
     run: (quitChatgpt: boolean) => void;
@@ -152,6 +133,21 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
   const relaysRef = useRef<RelayRowData[]>([]);
   relaysRef.current = relays;
 
+  // 验真 summaries 的拉取范围：本 tab 档位的 provider 去重集。拉取、弹窗与
+  // 结果变化订阅由模型验证模块的 Provider 自持，这里只提供稳定的 id 集。
+  const verificationProviderIds = useMemo(
+    () => [
+      ...new Set(
+        relays.flatMap((row) =>
+          row.tiers
+            .filter((tier) => tier.appId === appId)
+            .map((tier) => tier.providerId),
+        ),
+      ),
+    ],
+    [relays, appId],
+  );
+
   // ── 官网直连账号（vendor）──────────────────────────────────────────
   //
   // **与 relay 平级并列的一份状态**，不合进上面那些：两边的命令、DTO 与余额
@@ -166,7 +162,6 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
   // reload 的请求序号 —— 只让最后一次的结果落地，见 `reload` 里的说明。
   const reloadSeqRef = useRef(0);
   const vendorReloadSeqRef = useRef(0);
-  const verificationRequestRef = useRef(0);
   const { t, i18n } = useTranslation();
   // 余额由各行自己的 query 持有；这里只在「充值窗关了」「刷新」时让它们失效。
   const queryClient = useQueryClient();
@@ -189,76 +184,6 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
   const [confirmRemove, setConfirmRemove] = useState<RelayRowData | null>(null);
   // 连通检测整套复用上游的 hook —— 它自带 toast、i18n 与 per-id 的 checking 状态。
   const { checkProvider, isChecking } = useStreamCheck(appId);
-
-  const loadVerificationReports = useCallback(
-    async (rows: RelayRowData[]) => {
-      const request = ++verificationRequestRef.current;
-      const providerIds = [
-        ...new Set(
-          rows.flatMap((row) =>
-            row.tiers
-              .filter((tier) => tier.appId === appId)
-              .map((tier) => tier.providerId),
-          ),
-        ),
-      ];
-      if (providerIds.length === 0) {
-        setVerificationSummaries({});
-        return;
-      }
-
-      try {
-        const summaries = await modelVerificationApi.listSummaries(
-          providerIds,
-          appId,
-        );
-        if (request !== verificationRequestRef.current) return;
-        setVerificationSummaries(
-          Object.fromEntries(
-            summaries.map((summary) => [summary.providerId, summary]),
-          ),
-        );
-      } catch {
-        // Verification summaries are secondary status; retain the last complete backend view.
-      }
-    },
-    [appId],
-  );
-
-  const verificationVerdictForTier = useCallback(
-    (tier: TierInfo): VerificationVerdict | undefined =>
-      verificationSummaries[tier.providerId]?.badgeVerdict ?? undefined,
-    [verificationSummaries],
-  );
-
-  const handleVerifyTier = useCallback(
-    (tier: TierInfo) => {
-      if (
-        verifyingProviderId !== null &&
-        selectedVerificationTier?.providerId !== tier.providerId
-      ) {
-        return;
-      }
-      setSelectedVerificationTier(tier);
-      setVerificationDialogOpen(true);
-    },
-    [selectedVerificationTier, verifyingProviderId],
-  );
-
-  const selectedVerificationReport: VerificationReport | null =
-    selectedVerificationTier
-      ? (verificationSummaries[selectedVerificationTier.providerId]
-          ?.representativeReport ?? null)
-      : null;
-
-  const handleVerificationRunningChange = useCallback(
-    (running: boolean) => {
-      setVerifyingProviderId(
-        running ? (selectedVerificationTier?.providerId ?? null) : null,
-      );
-    },
-    [selectedVerificationTier],
-  );
 
   /**
    * 拉官网账号列表。**只读本地不发网络**（与 `listRelays` 同一条契约）。
@@ -396,7 +321,6 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
       const rows = await relayApi.listRelays(appId);
       if (isStale()) return;
       setRelays(rows);
-      void loadVerificationReports(rows);
     } catch (e) {
       toast.error(String(e));
     }
@@ -404,7 +328,7 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
     // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
     void reloadVendors();
     void reloadStatus();
-  }, [appId, loadVerificationReports, reloadStatus, reloadVendors]);
+  }, [appId, reloadStatus, reloadVendors]);
 
   useEffect(() => {
     void reload();
@@ -453,18 +377,6 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
   useTauriEvent<ProviderSwitchEvent>(PROVIDER_SWITCHED, (payload) => {
     if (payload?.appType !== appId) return;
     void reload();
-  });
-
-  useTauriEvent<VerificationScope>(MODEL_VERIFICATION_CHANGED, (scope) => {
-    if (
-      scope?.appType !== appId ||
-      !relaysRef.current.some((row) =>
-        row.tiers.some((tier) => tier.providerId === scope.providerId),
-      )
-    ) {
-      return;
-    }
-    void loadVerificationReports(relaysRef.current);
   });
 
   /**
@@ -923,59 +835,50 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
           )}
         </Button>
       </div>
-      <RelayTierList
-        relays={relays}
-        busy={busy}
-        onAddSite={() => onOpenAddHub("directory")}
-        onLogin={(relayId) => void handleLogin(relayId)}
-        onProvision={handleProvision}
-        onSiteConfigApplied={() => void reload()}
-        onReorder={(ids) => void handleReorder(ids)}
-        onSwitchTier={(relayId, tier) => void handleSwitchTier(relayId, tier)}
-        onSelectTierModel={(tier, model) =>
-          void handleSelectTierModel(tier, model)
-        }
-        onPurchase={(relayId) => void handlePurchase(relayId)}
-        onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
-        // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
-        // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
-        onCheckTier={(tier) =>
-          void checkProvider(tier.providerId, tier.displayName)
-        }
-        isCheckingTier={isChecking}
-        verificationVerdictForTier={verificationVerdictForTier}
-        onVerifyTier={handleVerifyTier}
-        isVerifyingTier={(providerId) => providerId === verifyingProviderId}
-        onResetTier={(tier) =>
-          setConfirmReset({
-            kind: "tier",
-            providerId: tier.providerId,
-            displayName: tier.displayName,
-            busyKey: `reset:${tier.providerId}`,
-          })
-        }
-        onEditTier={requestEdit}
-        onRemoveRelay={(relayId) => {
-          // ⚠️ **这处 `find` 保持 number 不动**：`relayId` 从 `RelayRow` 的
-          // `onDelete` 一路传回来，只在 relay 这一类里流转。官网行走的是
-          // `onRemoveVendor` 那条独立回调，不经过这里。
-          const row = relays.find((op) => op.id === relayId);
-          if (row) setConfirmRemove(row);
-        }}
-      />
-
-      {selectedVerificationTier && (
-        <ModelVerificationDialog
-          key={`${selectedVerificationTier.providerId}:${appId}`}
-          providerId={selectedVerificationTier.providerId}
-          appType={appId}
-          tierDisplayName={selectedVerificationTier.displayName}
-          open={verificationDialogOpen}
-          onOpenChange={setVerificationDialogOpen}
-          onRunningChange={handleVerificationRunningChange}
-          report={selectedVerificationReport}
+      {/* 模型验证的行级宿主：summaries 拉取、验真弹窗与结果变化订阅全在
+          Provider 内部；下线时它对外不可见（不拉取、入口/徽章不渲染）。 */}
+      <TierVerificationProvider
+        appId={appId}
+        providerIds={verificationProviderIds}
+      >
+        <RelayTierList
+          relays={relays}
+          busy={busy}
+          onAddSite={() => onOpenAddHub("directory")}
+          onLogin={(relayId) => void handleLogin(relayId)}
+          onProvision={handleProvision}
+          onSiteConfigApplied={() => void reload()}
+          onReorder={(ids) => void handleReorder(ids)}
+          onSwitchTier={(relayId, tier) => void handleSwitchTier(relayId, tier)}
+          onSelectTierModel={(tier, model) =>
+            void handleSelectTierModel(tier, model)
+          }
+          onPurchase={(relayId) => void handlePurchase(relayId)}
+          onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
+          // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
+          // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
+          onCheckTier={(tier) =>
+            void checkProvider(tier.providerId, tier.displayName)
+          }
+          isCheckingTier={isChecking}
+          onResetTier={(tier) =>
+            setConfirmReset({
+              kind: "tier",
+              providerId: tier.providerId,
+              displayName: tier.displayName,
+              busyKey: `reset:${tier.providerId}`,
+            })
+          }
+          onEditTier={requestEdit}
+          onRemoveRelay={(relayId) => {
+            // ⚠️ **这处 `find` 保持 number 不动**：`relayId` 从 `RelayRow` 的
+            // `onDelete` 一路传回来，只在 relay 这一类里流转。官网行走的是
+            // `onRemoveVendor` 那条独立回调，不经过这里。
+            const row = relays.find((op) => op.id === relayId);
+            if (row) setConfirmRemove(row);
+          }}
         />
-      )}
+      </TierVerificationProvider>
 
       {/* 官网直连账号块 —— 只在支持厂商的 tab 出现（gemini / grokbuild 无 preset，
           摆了也是骗人）。添加入口在顶栏大「+」。 */}

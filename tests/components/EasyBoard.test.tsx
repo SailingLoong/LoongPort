@@ -12,6 +12,12 @@ import {
 import { EasyBoard } from "@/components/easymode/EasyBoard";
 import type { TierBoard } from "@/lib/api/autoMode";
 
+// 看板验真徽章的呈现按模块启用测（下线契约在
+// model-verification/__tests__/offline.test.tsx 单独钉）。
+vi.mock("@/components/relay/model-verification/availability", () => ({
+  MODEL_VERIFICATION_ENABLED: true,
+}));
+
 // 本测试关注「看板怎么呈现事实 / 用户动作落到哪个 mutation」；
 // 事实的聚合正确性由后端 tier_board 的单测钉住。
 const setModelMock = vi.hoisted(() => vi.fn());

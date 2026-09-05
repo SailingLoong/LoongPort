@@ -19,7 +19,6 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
-import type { VerificationVerdict } from "@/lib/api/modelVerification";
 
 import { RelayRow } from "./RelayRow";
 import { parseRowKey, type RowKey, rowKey } from "./rowKey";
@@ -90,12 +89,6 @@ export interface RelayTierListProps {
   onCheckTier: (tier: TierInfo) => void;
   /** 某个档位是不是正在检测中。 */
   isCheckingTier: (providerId: string) => boolean;
-  /** 档位行的模型验证呈现输入；结果和运行状态仍由 RelaySection 持有。 */
-  verificationVerdictForTier: (
-    tier: TierInfo,
-  ) => VerificationVerdict | undefined;
-  onVerifyTier?: (tier: TierInfo) => void;
-  isVerifyingTier: (providerId: string) => boolean;
   /**
    * 把某个档位的配置恢复成默认值（改坏之后的回头路）。
    *
@@ -177,9 +170,6 @@ export function RelayTierList({
   onOpenUsage,
   onCheckTier,
   isCheckingTier,
-  verificationVerdictForTier,
-  onVerifyTier,
-  isVerifyingTier,
   onResetTier,
   onEditTier,
   onRemoveRelay,
@@ -298,9 +288,6 @@ export function RelayTierList({
                   }
                   onCheckTier={onCheckTier}
                   isCheckingTier={isCheckingTier}
-                  verificationVerdictForTier={verificationVerdictForTier}
-                  onVerifyTier={onVerifyTier}
-                  isVerifyingTier={isVerifyingTier}
                   onResetTier={onResetTier}
                   onEditTier={onEditTier}
                   onDelete={() => onRemoveRelay(op.id)}

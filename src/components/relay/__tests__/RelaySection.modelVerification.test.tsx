@@ -103,6 +103,11 @@ vi.mock("@/components/ui/select", () => ({
 vi.mock("@/hooks/useStreamCheck", () => ({
   useStreamCheck: () => ({ checkProvider: vi.fn(), isChecking: () => false }),
 }));
+// 这里测的是模块启用时的宿主接线；「下线即全部不展示」的契约在
+// model-verification/__tests__/offline.test.tsx 单独钉。
+vi.mock("../model-verification/availability", () => ({
+  MODEL_VERIFICATION_ENABLED: true,
+}));
 vi.mock("@/hooks/useTauriEvent", () => ({
   useTauriEvent: (event: string, handler: (payload: any) => void) => {
     eventHandlers.set(event, handler);
@@ -118,28 +123,38 @@ vi.mock("../useRowBusy", () => ({
 vi.mock("../useTierEditGuard", () => ({
   useTierEditGuard: () => ({ requestEdit: vi.fn(), editDialogs: null }),
 }));
-vi.mock("@/components/relay/RelayTierList", () => ({
-  RelayTierList: (props: any) => (
-    <div>
-      {props.relays.flatMap((relay: any) =>
-        relay.tiers.map((tier: any) => (
-          <div key={tier.providerId}>
-            <span data-testid={`verdict-${tier.providerId}`}>
-              {props.verificationVerdictForTier(tier) ?? "none"}
-            </span>
-            {props.onVerifyTier && tier.canVerifyModels && (
-              <button type="button" onClick={() => props.onVerifyTier(tier)}>
-                {props.isVerifyingTier(tier.providerId)
-                  ? `reopen ${tier.providerId}`
-                  : `verify ${tier.providerId}`}
-              </button>
-            )}
-          </div>
-        )),
-      )}
-    </div>
-  ),
-}));
+// RelayTierList 被 mock 掉后，验真的行内呈现改由模块自己的 context 驱动
+// （与真实 RelayRow 的消费方式一致），stub 只做每档位一行的最小呈现。
+vi.mock("@/components/relay/RelayTierList", async () => {
+  const { useTierVerification } =
+    await import("../model-verification/TierVerificationProvider");
+  return {
+    RelayTierList: (props: any) => {
+      const { verdictFor, openVerification, isVerifying } =
+        useTierVerification();
+      return (
+        <div>
+          {props.relays.flatMap((relay: any) =>
+            relay.tiers.map((tier: any) => (
+              <div key={tier.providerId}>
+                <span data-testid={`verdict-${tier.providerId}`}>
+                  {verdictFor(tier.providerId) ?? "none"}
+                </span>
+                {tier.canVerifyModels && (
+                  <button type="button" onClick={() => openVerification(tier)}>
+                    {isVerifying(tier.providerId)
+                      ? `reopen ${tier.providerId}`
+                      : `verify ${tier.providerId}`}
+                  </button>
+                )}
+              </div>
+            )),
+          )}
+        </div>
+      );
+    },
+  };
+});
 vi.mock("@/components/relay/ImageTabNotice", () => ({
   ImageTabNotice: () => null,
 }));
@@ -238,7 +253,10 @@ describe("RelaySection model verification ownership", () => {
     vi.clearAllMocks();
     eventHandlers.clear();
     progressListener = undefined;
-    api.listRelays.mockResolvedValue([relay]);
+    // 每次调用返回新数组引用：Provider 的 summaries 拉取由 providerIds 集合
+    // 的身份变化驱动，而真实后端每次响应都是新对象；固定引用会让 mock
+    // 与生产行为分叉（刷新后不重拉）。
+    api.listRelays.mockImplementation(async () => [relay]);
     api.listTierRates.mockResolvedValue([]);
     api.checkSession.mockResolvedValue([]);
     api.refreshAll.mockResolvedValue(emptyRefreshResult);

@@ -3,11 +3,9 @@ import { useTranslation } from "react-i18next";
 import {
   Activity,
   Check,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
   FileDown,
-  Fingerprint,
   GripVertical,
   Layers3,
   Loader2,
@@ -30,11 +28,13 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
-import type { VerificationVerdict } from "@/lib/api/modelVerification";
 import { useEasyModeApps } from "@/lib/query/autoMode";
 import { ReconcileDialog } from "./ReconcileDialog";
 import { RowBalance } from "./RowBalance";
 import { SiteConfigDialog } from "./SiteConfigDialog";
+import { TierVerifyButton } from "./model-verification/TierVerifyButton";
+import { TierVerdictChip } from "./model-verification/TierVerdictChip";
+import { useTierVerification } from "./model-verification/TierVerificationProvider";
 
 /**
  * 一行中转站 + 可折叠的档位列表。
@@ -115,14 +115,6 @@ export interface RelayRowProps {
   onCheckTier: (tier: TierInfo) => void;
   /** 某个档位是不是正在检测中（来自 `useStreamCheck` 的 `isChecking`）。 */
   isCheckingTier: (providerId: string) => boolean;
-  /** 档位当前的有限模型验证结论；结果归父级管理，行只负责呈现。 */
-  verificationVerdictForTier?: (
-    tier: TierInfo,
-  ) => VerificationVerdict | undefined;
-  /** 打开父级持有的模型验证弹窗。 */
-  onVerifyTier?: (tier: TierInfo) => void;
-  /** 目标档位是否正由该弹窗中的验证任务执行。 */
-  isVerifyingTier?: (providerId: string) => boolean;
   /**
    * 把某个档位的配置恢复成默认值（用户在编辑页改坏之后的回头路）。
    *
@@ -166,9 +158,6 @@ export function RelayRow({
   onSiteConfigApplied,
   onCheckTier,
   isCheckingTier,
-  verificationVerdictForTier,
-  onVerifyTier,
-  isVerifyingTier,
   onResetTier,
   onEditTier,
   onDelete,
@@ -367,13 +356,6 @@ export function RelayRow({
               onSelectModel={(model) => onSelectTierModel(tier, model)}
               onCheck={() => onCheckTier(tier)}
               checking={isCheckingTier(tier.providerId)}
-              verificationVerdict={verificationVerdictForTier?.(tier)}
-              onVerify={
-                onVerifyTier && tier.canVerifyModels
-                  ? () => onVerifyTier(tier)
-                  : undefined
-              }
-              verifying={isVerifyingTier?.(tier.providerId) ?? false}
               onReset={() => onResetTier(tier)}
               onEdit={() => onEditTier(tier)}
             />
@@ -638,9 +620,6 @@ function TierItem({
   onSelectModel,
   onCheck,
   checking,
-  verificationVerdict,
-  onVerify,
-  verifying,
   onReset,
   onEdit,
 }: {
@@ -650,23 +629,17 @@ function TierItem({
   onSelectModel: (model: string) => void;
   onCheck: () => void;
   checking: boolean;
-  verificationVerdict?: VerificationVerdict;
-  onVerify?: () => void;
-  verifying: boolean;
   onReset: () => void;
   onEdit: () => void;
 }) {
   const { t } = useTranslation();
+  // 模型验证的运行态（行内 spinner 与操作组钉住都读它）；模块下线时恒 false。
+  const verifying = useTierVerification().isVerifying(tier.providerId);
   // 只禁**这一个档位**正在切换的那个按钮。原来是 `disabled={anyBusy}`，
   // 于是别的中转站在获取密钥时，这里所有「使用」按钮都灰掉了。
   const switching = busy.has(`switch:${tier.providerId}`);
   const modelSwitching = busy.has(`model:${tier.providerId}`);
   const resetting = busy.has(`reset:${tier.providerId}`);
-  const verificationProblem =
-    verificationVerdict === "anomaly" || verificationVerdict === "suspicious"
-      ? verificationVerdict
-      : undefined;
-  const verificationPassed = verificationVerdict === "trusted";
 
   // ⚠️ **`=== true` 而不是 `??` 或直接判真值** —— `userEdited` 是三态：
   // `true`（改过）/ `false`（没改）/ `null`（**判不了**，读不出密钥或这个 CLI
@@ -730,32 +703,8 @@ function TierItem({
               {t("loongport.tier.siteDeclared")}
             </span>
           )}
-          {verificationProblem && (
-            <span
-              className={cn(
-                "inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
-                verificationProblem === "anomaly"
-                  ? "text-red-600 ring-red-500/30 dark:text-red-400"
-                  : "text-amber-600 ring-amber-500/30 dark:text-amber-400",
-              )}
-              title={t(
-                `loongport.modelVerification.tierVerdict.${verificationProblem}Hint`,
-              )}
-            >
-              {t(
-                `loongport.modelVerification.tierVerdict.${verificationProblem}`,
-              )}
-            </span>
-          )}
-          {verificationPassed && (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 ring-1 ring-inset ring-emerald-500/30 dark:text-emerald-400"
-              title={t("loongport.modelVerification.tierVerdict.trustedHint")}
-            >
-              <CheckCircle2 className="h-2.5 w-2.5" />
-              {t("loongport.modelVerification.tierVerdict.trusted")}
-            </span>
-          )}
+          {/* 验真结论 chip：模型验证模块自持（下线/无结论时不渲染）。 */}
+          <TierVerdictChip providerId={tier.providerId} />
         </div>
         <div className="text-xs text-muted-foreground">
           {tier.rateMultiplier !== null &&
@@ -855,22 +804,8 @@ function TierItem({
           )}
         </Button>
 
-        {onVerify && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
-            onClick={onVerify}
-            title={t("loongport.modelVerification.title")}
-          >
-            {verifying ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Fingerprint className="h-3.5 w-3.5" />
-            )}
-          </Button>
-        )}
+        {/* 模型验证入口：模块自持（下线/档位不可验证时不渲染）。 */}
+        <TierVerifyButton tier={tier} canVerify={tier.canVerifyModels} />
 
         {/* 「编辑配置」：跳 cc-switch 现成的编辑页 —— 那页支持全部字段，我们不重做
             （CLAUDE.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），

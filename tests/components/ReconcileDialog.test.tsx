@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ReconcileDialog } from "@/components/relay/ReconcileDialog";
 import { RelayRow } from "@/components/relay/RelayRow";
+import { TierVerificationProvider } from "@/components/relay/model-verification/TierVerificationProvider";
 import type {
   RelayRow as RelayRowData,
   ReconciliationReport,
@@ -247,24 +248,28 @@ describe("ReconcileDialog", () => {
     const relay = relayWithCodexTier();
     render(
       <QueryClientProvider client={createTestQueryClient()}>
-        <RelayRow
-          relay={relay}
-          open
-          onOpenChange={vi.fn()}
-          busy={new Set()}
-          onLogin={vi.fn()}
-          onProvision={vi.fn()}
-          onSiteConfigApplied={vi.fn()}
-          onSwitchTier={vi.fn()}
-          onSelectTierModel={vi.fn()}
-          onPurchase={vi.fn()}
-          onOpenUsage={undefined}
-          onCheckTier={vi.fn()}
-          isCheckingTier={() => false}
-          onResetTier={vi.fn()}
-          onEditTier={vi.fn()}
-          onDelete={vi.fn()}
-        />
+        {/* RelayRow 的验真 UI 读模块 Provider 的 context；本测试不测验真，
+            Provider 以默认（模块下线）形态挂上即可。 */}
+        <TierVerificationProvider appId="codex" providerIds={[]}>
+          <RelayRow
+            relay={relay}
+            open
+            onOpenChange={vi.fn()}
+            busy={new Set()}
+            onLogin={vi.fn()}
+            onProvision={vi.fn()}
+            onSiteConfigApplied={vi.fn()}
+            onSwitchTier={vi.fn()}
+            onSelectTierModel={vi.fn()}
+            onPurchase={vi.fn()}
+            onOpenUsage={undefined}
+            onCheckTier={vi.fn()}
+            isCheckingTier={() => false}
+            onResetTier={vi.fn()}
+            onEditTier={vi.fn()}
+            onDelete={vi.fn()}
+          />
+        </TierVerificationProvider>
       </QueryClientProvider>,
     );
 
@@ -288,24 +293,26 @@ describe("ReconcileDialog", () => {
     stubInvoke(flagsReport, false);
     render(
       <QueryClientProvider client={createTestQueryClient()}>
-        <RelayRow
-          relay={relayWithCodexTier()}
-          open
-          onOpenChange={vi.fn()}
-          busy={new Set()}
-          onLogin={vi.fn()}
-          onProvision={vi.fn()}
-          onSiteConfigApplied={vi.fn()}
-          onSwitchTier={vi.fn()}
-          onSelectTierModel={vi.fn()}
-          onPurchase={vi.fn()}
-          onOpenUsage={undefined}
-          onCheckTier={vi.fn()}
-          isCheckingTier={() => false}
-          onResetTier={vi.fn()}
-          onEditTier={vi.fn()}
-          onDelete={vi.fn()}
-        />
+        <TierVerificationProvider appId="codex" providerIds={[]}>
+          <RelayRow
+            relay={relayWithCodexTier()}
+            open
+            onOpenChange={vi.fn()}
+            busy={new Set()}
+            onLogin={vi.fn()}
+            onProvision={vi.fn()}
+            onSiteConfigApplied={vi.fn()}
+            onSwitchTier={vi.fn()}
+            onSelectTierModel={vi.fn()}
+            onPurchase={vi.fn()}
+            onOpenUsage={undefined}
+            onCheckTier={vi.fn()}
+            isCheckingTier={() => false}
+            onResetTier={vi.fn()}
+            onEditTier={vi.fn()}
+            onDelete={vi.fn()}
+          />
+        </TierVerificationProvider>
       </QueryClientProvider>,
     );
 
