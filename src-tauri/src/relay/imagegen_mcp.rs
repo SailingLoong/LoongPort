@@ -167,8 +167,11 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 struct GeneratedImage {
     /// 落盘位置。
     path: PathBuf,
-    /// 原始 base64。**要回给宿主当 image content block** —— 见 [`handle_tool_call`]。
+    /// 图片字节的 base64。**要回给宿主当 image content block** —— 见 [`handle_tool_call`]。
     b64: String,
+    /// 魔数嗅探出的真实格式（与文件扩展名同源）。url 变体可能下发 jpeg / webp，
+    /// mimeType 声明错了宿主可能渲染不了。
+    mime: &'static str,
 }
 
 /// 这次运行绑定的档位。
@@ -486,15 +489,20 @@ async fn generate_image(
     // ⚠️ **有意不发 `response_format`** —— 这里曾经加过 `"b64_json"`，是个过度修正
     // （第二轮 review 抓出）：
     //
-    // - `gpt-image-*` **只返回 base64，没有 url 模式**，所以下面只认 `b64_json` 的解析
-    //   本来就是对的，不需要这个字段来保证。
-    // - 而官方 `/v1/images/generations` 对 `gpt-image-*` 带这个字段**直接 400**
+    // - 官方 `/v1/images/generations` 对 `gpt-image-*` 带这个字段**直接 400**
     //   （`Unknown parameter: 'response_format'` —— 它是给已下线的 `dall-e-*` 留的）。
     // - sub2api 把请求体**原样透传**给上游（只改 `model`，见其
     //   `rewriteOpenAIImagesModel`）⇒ 上游是 API-key 类账号时那个 400 会真的打回来。
     //
     // ⚠️ **本地测出 200 不能证明它安全**：调度器挑到 OAuth 类账号时该字段被丢弃，
     // 于是同一个档位在不同的调度结果下表现不同。不发它则两条路都对。
+    //
+    // ## 响应形态：`b64_json` 与 `url` 两种都要认（2026-09-05 实测修正）
+    //
+    // 官方 API 的 `gpt-image-*` 只回 `b64_json`，但**中转站不一定**：实测有 new-api
+    // 站点对 `gpt-image-2` 回 `data[].url`（另一个模型才回 b64），其官方教程也明确
+    // 「两种形态都可能出现、客户端都要兼容」。只认 b64 的解析在这种站点上必报
+    // 「data 项里没有 b64_json」—— [`read_image_bytes`] 对两种形态都处理，url 走下载。
     let body = json!({
         "model": tier.model,
         "prompt": prompt,
@@ -538,22 +546,21 @@ async fn generate_image(
 
     let mut saved = Vec::new();
     for (idx, item) in items.iter().enumerate() {
-        let b64 = item
-            .get("b64_json")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "生图响应的 data 项里没有 b64_json".to_string())?;
-        let bytes = base64_decode(b64)?;
+        let bytes = read_image_bytes(&client, item).await?;
+        let (ext, mime) = image_format(&bytes);
 
-        // 文件名带序号与随机后缀 —— **不带时间戳**：这个进程里拿不到「当前时间」的
-        // 稳定来源不是问题，但同一秒内多张图会互相覆盖。用内容哈希则天然唯一且可复现。
-        let name = format!("gpt-image-{}-{idx}.png", short_hash(&bytes));
+        // 文件名带序号与内容哈希 —— **不带时间戳**：同一秒内多张图会互相覆盖，
+        // 内容哈希则天然唯一且可复现。扩展名来自魔数嗅探，不是写死 png
+        // （url 变体可能下发 jpeg / webp）。
+        let name = format!("gpt-image-{}-{idx}.{ext}", short_hash(&bytes));
         let path = dir.join(name);
         std::fs::write(&path, &bytes).map_err(|e| format!("写图片文件失败: {e}"))?;
-        // base64 原样留着 —— 下面要作为 MCP 的 image content block 回给宿主，
+        // 重新编码成 base64 —— 下面要作为 MCP 的 image content block 回给宿主，
         // 让模型**真的看到图**而不只是拿到一个路径。见 `handle_tool_call`。
         saved.push(GeneratedImage {
             path,
-            b64: b64.to_string(),
+            b64: base64_encode(&bytes),
+            mime,
         });
     }
 
@@ -631,6 +638,63 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .map_err(|e| format!("图片 base64 解码失败: {e}"))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// 一个 `data` 项 → 图片字节：`b64_json` 直接解码；`url` 变体下载
+/// （new-api 站点实测会对 `gpt-image-*` 回 url，见 `response_format` 那段注释）。
+/// 下载走的是**返回 url 的那个站点自己**或它的对象存储 —— 预签名链接，不带鉴权头
+/// （OpenAI images API 的 url 模式就是这个约定）。
+async fn read_image_bytes(client: &reqwest::Client, item: &Value) -> Result<Vec<u8>, String> {
+    if let Some(b64) = item.get("b64_json").and_then(Value::as_str) {
+        return base64_decode(b64);
+    }
+    let url = item
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| "生图响应的 data 项里没有 b64_json 或 url".to_string())?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("下载生图结果失败: {e}"))?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("读取生图结果失败: {e}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "下载生图结果失败（HTTP {}）：{}",
+            status.as_u16(),
+            url
+        ));
+    }
+    if bytes.is_empty() {
+        return Err("生图结果下载下来是空文件".into());
+    }
+    Ok(bytes.to_vec())
+}
+
+/// 魔数嗅探图片格式 →（文件扩展名， mimeType）。认不出按 png ——
+/// 生图端点的事实默认就是 png，错标也只是视图按扩展名猜的问题。
+fn image_format(bytes: &[u8]) -> (&'static str, &'static str) {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        ("png", "image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        ("jpg", "image/jpeg")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        ("webp", "image/webp")
+    } else if bytes.starts_with(b"GIF8") {
+        ("gif", "image/gif")
+    } else {
+        ("png", "image/png")
+    }
 }
 
 /// 内容哈希的前 12 位 hex，用作文件名。
@@ -755,7 +819,7 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
         content.push(json!({
             "type": "image",
             "data": img.b64,
-            "mimeType": "image/png",
+            "mimeType": img.mime,
         }));
     }
 
@@ -964,5 +1028,89 @@ base_url = "https://api.example.com/v1"
         assert_eq!(short_hash(b"abc"), short_hash(b"abc"));
         assert_ne!(short_hash(b"abc"), short_hash(b"abd"));
         assert_eq!(short_hash(b"abc").len(), 12);
+    }
+
+    /// 魔数嗅探：扩展名与 mimeType 同源，认不出回落 png。
+    #[test]
+    fn image_format_sniffs_magic_bytes() {
+        assert_eq!(
+            image_format(&[0x89, b'P', b'N', b'G', 0x00]),
+            ("png", "image/png")
+        );
+        assert_eq!(
+            image_format(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            ("jpg", "image/jpeg")
+        );
+        assert_eq!(
+            image_format(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            ("webp", "image/webp")
+        );
+        assert_eq!(image_format(b"GIF89a"), ("gif", "image/gif"));
+        // 认不出的按 png —— 生图端点的事实默认。
+        assert_eq!(image_format(b"\x00\x01\x02"), ("png", "image/png"));
+    }
+
+    /// **url 变体必须能出图**（2026-09-05 实测踩中：new-api 站点对 gpt-image-2 回
+    /// `data[].url`，只认 b64_json 的解析直接报「没有 b64_json」）。
+    ///
+    /// 伪服务就回一张 1×1 JPEG 的 url；同时钉住「两种形态都没有」的报错文案。
+    #[tokio::test]
+    async fn url_shaped_image_responses_are_downloaded_and_decoded() {
+        // 1×1 像素 JPEG（合法魔数 FFD8FF）。
+        const JPEG: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let origin = format!("http://{}", listener.local_addr().expect("addr"));
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            // 读完请求头（读到空行为止）再回 —— HTTP/1.1 的规矩。
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                let n = socket.read(&mut chunk).await.expect("read request");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: image/jpeg\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                JPEG.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, head.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, JPEG).await;
+        });
+
+        let client = reqwest::Client::new();
+        let item: Value = serde_json::json!({ "url": format!("{origin}/img.jpg") });
+        let bytes = read_image_bytes(&client, &item)
+            .await
+            .expect("url 变体必须下载成功");
+        assert_eq!(bytes, JPEG);
+        assert_eq!(image_format(&bytes), ("jpg", "image/jpeg"));
+        server.abort();
+
+        // b64 分支不受影响，两种形态都缺失时报错点名两者。
+        let b64_item: Value = serde_json::json!({ "b64_json": base64_encode(b"png!") });
+        assert_eq!(
+            read_image_bytes(&client, &b64_item)
+                .await
+                .expect("b64 分支照旧"),
+            b"png!"
+        );
+        let empty: Value = serde_json::json!({ "revised_prompt": "x" });
+        let error = read_image_bytes(&client, &empty)
+            .await
+            .expect_err("必须报错");
+        assert!(error.contains("b64_json"), "{error}");
+        assert!(error.contains("url"), "{error}");
     }
 }
