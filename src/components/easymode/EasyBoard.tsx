@@ -13,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useProxyStatus } from "@/hooks/useProxyStatus";
 import {
   useAutoModeStatus,
   useSetAutoModeModel,
@@ -31,6 +32,7 @@ const MODEL_ANY = "__any__";
 export function EasyBoard({ appId }: { appId: string }) {
   const { t } = useTranslation();
   const { data: board, isLoading } = useTierBoard(appId);
+  const { isRunning, startProxyServer } = useProxyStatus();
   const { data: status } = useAutoModeStatus(appId);
   const setModel = useSetAutoModeModel();
   const setStrategy = useSetAutoModeStrategy();
@@ -69,6 +71,24 @@ export function EasyBoard({ appId }: { appId: string }) {
 
   return (
     <div className="space-y-4">
+      {!isRunning ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            {t("autoMode.runMode.routingStopped", {
+              defaultValue: "本地路由未运行，流量不会经省心选路",
+            })}
+          </p>
+          <button
+            type="button"
+            onClick={() => void startProxyServer()}
+            className="rounded-md border px-2.5 py-1 text-xs transition-colors hover:bg-accent"
+          >
+            {t("autoMode.runMode.startRouting", {
+              defaultValue: "启动本地路由",
+            })}
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-3">
         {board.availableModels.length > 0 ? (
           <Select

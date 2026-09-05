@@ -2625,7 +2625,6 @@
   },
   "autoMode": {
     "title": "省心模式",
-    "tooltip": "省心模式：開啟後系統按策略自動挑選託管檔位，同一會話保持當前檔位不切換；關閉時將一併恢復該 CLI 的路由接管",
     "description": "系統從託管檔位裡自動挑最合適的，當前檔位會話中保持不變",
     "strategyLabel": "挑選策略（全域）",
     "strategy": {
@@ -2678,7 +2677,20 @@
     "masterOffToast": "省心模式已關閉，路由已停並復原全部設定",
     "noCandidatesHint": "沒有可用的託管檔位 —— 先在中轉站區登入並取得檔位",
     "cliMissingHint": "未偵測到該 CLI 的設定檔（未安裝或未初始化），無法接管；安裝並執行一次該 CLI 後再來開啟",
-    "masterHint": "總開關就是本地路由：開啟後才能為各應用開啟省心模式；關閉時會關閉全部應用的省心模式、復原設定並停止路由"
+    "masterHint": "總開關就是本地路由：開啟後才能為各應用開啟省心模式；關閉時會關閉全部應用的省心模式、復原設定並停止路由",
+    "runMode": {
+      "easy": "省心",
+      "self": "自主",
+      "easySubtitle": "系統在託管檔位間自動選路與切換",
+      "selfSubtitle": "由你指定唯一的供應商",
+      "routingStopped": "本地路由未執行，流量不會經省心選路",
+      "startRouting": "啟動本地路由",
+      "cliMissing": "該 CLI 未安裝，省心模式無法使用",
+      "noCandidates": "還沒有託管檔位，先在自主模式新增中轉站"
+    },
+    "tab": {
+      "switchMovedHint": "省心 / 自主的切換入口在主頁面頂部"
+    }
   },
   "proxy": {
     "panel": {

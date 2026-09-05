@@ -2624,7 +2624,6 @@
   },
   "autoMode": {
     "title": "Easy Mode",
-    "tooltip": "Easy Mode: when on, the system picks managed tiers by strategy and the tier sticks within a session; turning it off also restores that CLI's local routing",
     "description": "The system picks the best managed tier automatically and sticks within a session",
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
@@ -2677,7 +2676,20 @@
     "masterOffToast": "Easy Mode is off; routing stopped and all configs restored",
     "noCandidatesHint": "No managed tiers available — log in to a relay site and fetch tiers first",
     "cliMissingHint": "This CLI's config file was not found (not installed or not initialized); takeover is impossible. Install and run the CLI once, then come back",
-    "masterHint": "The master switch is local routing itself: only with it on can you enable Easy Mode per app; turning it off disables Easy Mode for every app, restores configs and stops routing"
+    "masterHint": "The master switch is local routing itself: only with it on can you enable Easy Mode per app; turning it off disables Easy Mode for every app, restores configs and stops routing",
+    "runMode": {
+      "easy": "Easy",
+      "self": "Self-managed",
+      "easySubtitle": "The system picks and switches among managed tiers",
+      "selfSubtitle": "You pick the single provider to use",
+      "routingStopped": "Local routing is not running; traffic bypasses easy-mode selection",
+      "startRouting": "Start local routing",
+      "cliMissing": "This CLI is not installed; easy mode is unavailable",
+      "noCandidates": "No managed tiers yet — add a relay site in self-managed mode first"
+    },
+    "tab": {
+      "switchMovedHint": "Switch Easy / Self-managed from the main page header"
+    }
   },
   "proxy": {
     "panel": {

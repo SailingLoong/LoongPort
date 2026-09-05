@@ -93,7 +93,7 @@ import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
-import { AutoModeToggle } from "@/components/proxy/AutoModeToggle";
+import { AppModeSegmented } from "@/components/proxy/AppModeSegmented";
 import { RoutingActivationBrand } from "@/components/proxy/RoutingActivationBrand";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
@@ -357,9 +357,9 @@ function App() {
     proxyAppId ?? activeApp,
     !!proxyAppId,
   );
-  const showEasyBoard = Boolean(
-    proxyAppId && activeAutoModeStatus?.enabled && isProxyRunning,
-  );
+  // 视图跟模式走（不再看路由是否在跑——服务未跑时看板照常渲染，
+  // 由 EasyBoard 顶部的警告条如实提示，不静默回退视图）
+  const showEasyBoard = Boolean(proxyAppId && activeAutoModeStatus?.enabled);
   const currentAppUsesProxy =
     proxyAppId !== null || activeApp === "claude-desktop";
   const isCurrentAppTakeoverActive = proxyAppId
@@ -1163,6 +1163,7 @@ function App() {
         default:
           return (
             <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
+              {proxyAppId ? <AppModeSegmented activeApp={proxyAppId} /> : null}
               <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
                 <AnimatePresence mode="wait">
                   <motion.div
@@ -1519,7 +1520,6 @@ function App() {
                       {settingsData?.enableFailoverToggle && (
                         <FailoverToggle activeApp={proxyAppId} />
                       )}
-                      <AutoModeToggle activeApp={proxyAppId} />
                     </>
                   ) : null}
                 </div>
