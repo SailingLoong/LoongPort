@@ -30,7 +30,8 @@ const URL_SENTINEL: &str = "SENTINEL_PRIVACY_URL_7B9E2A";
 const API_KEY_SENTINEL: &str = "SENTINEL_PRIVACY_API_KEY_31D4C8";
 const ASSISTANT_SENTINEL: &str = "SENTINEL_PRIVACY_ASSISTANT_946AF0";
 const THINKING_SENTINEL: &str = "SENTINEL_PRIVACY_THINKING_8ED315";
-const SIGNATURE_SENTINEL: &str = "SENTINEL_PRIVACY_SIGNATURE_F625BC";
+const SIGNATURE_SENTINEL: &str =
+    "SENTINEL_PRIVACY_SIGNATURE_F625BC_PADDED_OVER_FIFTY_CHARS_0123456789";
 const TOOL_ARGUMENTS_SENTINEL: &str = "SENTINEL_PRIVACY_TOOL_ARGUMENTS_0CA479";
 
 #[derive(Clone, Copy)]
@@ -296,6 +297,8 @@ fn assert_protocol_requests(protocol: MockProtocol, requests: &[CapturedRequest]
                     "thinking"
                 } else if is_claude_continuation(&request.body) {
                     "continuation"
+                } else if request.body["max_tokens"] == 200 {
+                    "identity"
                 } else {
                     "core"
                 });
@@ -305,9 +308,14 @@ fn assert_protocol_requests(protocol: MockProtocol, requests: &[CapturedRequest]
 
     let expected_kinds = match protocol {
         MockProtocol::Codex => BTreeSet::from(["core", "stream", "structured", "tool"]),
-        MockProtocol::Claude => {
-            BTreeSet::from(["continuation", "core", "stream", "thinking", "tool"])
-        }
+        MockProtocol::Claude => BTreeSet::from([
+            "continuation",
+            "core",
+            "identity",
+            "stream",
+            "thinking",
+            "tool",
+        ]),
     };
     assert_eq!(requests.len(), expected_kinds.len());
     assert_eq!(request_kinds, expected_kinds);

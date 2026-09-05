@@ -13,6 +13,8 @@ pub struct CapabilityProfile {
     pub supports_low_reasoning_effort: bool,
     pub supports_thinking_signature: bool,
     pub supports_signature_continuation: bool,
+    /// Claude 走身份自述探针（codex 暂不做，见 spec-模型验证判定规则修正.md）。
+    pub supports_identity_probe: bool,
 }
 
 impl CapabilityProfile {
@@ -23,15 +25,18 @@ impl CapabilityProfile {
                 supports_low_reasoning_effort: true,
                 supports_thinking_signature: false,
                 supports_signature_continuation: false,
+                supports_identity_probe: false,
             };
         }
 
-        if matches!(app_type, AppType::Claude) && supports_anthropic_signature_continuation(model) {
+        if matches!(app_type, AppType::Claude) {
+            let signature = supports_anthropic_signature_continuation(model);
             return Self {
                 supports_structured_output: false,
                 supports_low_reasoning_effort: false,
-                supports_thinking_signature: true,
-                supports_signature_continuation: true,
+                supports_thinking_signature: signature,
+                supports_signature_continuation: signature,
+                supports_identity_probe: true,
             };
         }
 
@@ -40,6 +45,7 @@ impl CapabilityProfile {
             supports_low_reasoning_effort: false,
             supports_thinking_signature: false,
             supports_signature_continuation: false,
+            supports_identity_probe: false,
         }
     }
 
@@ -62,6 +68,7 @@ impl CapabilityProfile {
         3 + u8::from(self.supports_structured_output)
             + u8::from(self.supports_thinking_signature)
             + u8::from(self.supports_signature_continuation)
+            + u8::from(self.supports_identity_probe)
     }
 }
 
@@ -199,7 +206,7 @@ mod tests {
         );
         assert_eq!(
             CapabilityProfile::for_target(&AppType::Claude, "claude-sonnet-5").active_probe_count(),
-            5
+            6
         );
     }
 }

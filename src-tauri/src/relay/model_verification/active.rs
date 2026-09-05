@@ -71,6 +71,9 @@ impl ActiveVerifier for BalancedActiveVerifier {
                 _ => unreachable!("supported app type checked before preparing the run"),
             }
             .map_err(|failure| map_protocol_failure(&target, &app_type, failure))?;
+            // 多腿探针会产出同名证据事实（如 core/stream 各一条 ModelMatch），
+            // 进判定前先按码合并，报告里每个证据码只有一条。
+            let facts = verdict::dedupe_facts(facts);
             let (verdict, evidence_level) = verdict::evaluate(app_type, &profile, &facts);
             Ok(VerificationReport {
                 target,

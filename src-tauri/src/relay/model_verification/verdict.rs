@@ -36,6 +36,35 @@ pub fn report_precedes(candidate: &VerificationReport, current: &VerificationRep
         || (candidate.verdict == current.verdict && candidate.checked_at > current.checked_at)
 }
 
+/// 同名证据码只留一条：任一腿 Failed 即 Failed，其次 Passed，最后 Skipped。
+/// 探针的多条腿（core/stream）会各产一条同名事实，不去重会出现
+/// 「模型标识 同时通过+未通过」的自相矛盾报告。合并策略只住在这里。
+pub fn dedupe_facts(facts: Vec<EvidenceFact>) -> Vec<EvidenceFact> {
+    let mut merged: Vec<EvidenceFact> = Vec::with_capacity(facts.len());
+    for fact in facts {
+        match merged
+            .iter_mut()
+            .find(|existing: &&mut EvidenceFact| existing.code == fact.code)
+        {
+            Some(existing) => {
+                if outcome_rank(fact.outcome) > outcome_rank(existing.outcome) {
+                    existing.outcome = fact.outcome;
+                }
+            }
+            None => merged.push(fact),
+        }
+    }
+    merged
+}
+
+fn outcome_rank(outcome: EvidenceOutcome) -> u8 {
+    match outcome {
+        EvidenceOutcome::Failed => 2,
+        EvidenceOutcome::Passed => 1,
+        EvidenceOutcome::Skipped => 0,
+    }
+}
+
 /// Reduces finite verification evidence to its single user-facing verdict.
 ///
 /// Protocol probes emit facts only; their meaning and precedence live here so adding a probe
@@ -117,6 +146,37 @@ mod tests {
 
     fn codex_profile(model: &str) -> CapabilityProfile {
         CapabilityProfile::for_target(&AppType::Codex, model)
+    }
+
+    #[test]
+    fn duplicate_fact_codes_merge_to_the_worst_outcome() {
+        use super::dedupe_facts;
+
+        let merged = dedupe_facts(vec![
+            passed(EvidenceCode::ModelMatch),
+            passed(EvidenceCode::UsageConsistency),
+            failed(EvidenceCode::ModelMatch),
+        ]);
+        assert_eq!(
+            merged,
+            vec![
+                failed(EvidenceCode::ModelMatch),
+                passed(EvidenceCode::UsageConsistency),
+            ]
+        );
+
+        // Passed + Skipped → Passed（Skipped 只在没有更强结论时保留）。
+        let merged = dedupe_facts(vec![
+            EvidenceFact {
+                code: EvidenceCode::ForeignSelfIdentification,
+                outcome: EvidenceOutcome::Skipped,
+            },
+            passed(EvidenceCode::ForeignSelfIdentification),
+        ]);
+        assert_eq!(
+            merged,
+            vec![passed(EvidenceCode::ForeignSelfIdentification)]
+        );
     }
 
     #[test]

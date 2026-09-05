@@ -257,11 +257,52 @@ pub(crate) async fn send_sse<State>(
 fn map_transport_failure(error: reqwest::Error) -> RunFailure {
     if error.is_timeout() {
         RunFailure::Timeout
-    } else if error.is_connect() || error.is_request() || error.is_body() {
+    } else if error.is_connect() || error.is_request() || error.is_body() || error.is_decode() {
+        // is_decode 覆盖 chunked 传输中途掐断（中转站实测高频）：按网络抖动重试，
+        // 而不是当成协议证据。
         RunFailure::Network
     } else {
         RunFailure::InvalidResponse
     }
+}
+
+/// 请求模型与验证协议是否「同家族」。跨家族（如 claude 模型走 codex 协议、
+/// deepseek 走 claude 协议）时网关在做跨协议转换，强制函数调用不被保证，
+/// 工具探针失败不算换芯信号。
+pub(crate) fn model_matches_protocol_family(model: &str, codex: bool) -> bool {
+    let model = model.to_ascii_lowercase();
+    if codex {
+        model.contains("gpt")
+            || model.contains("codex")
+            || model.starts_with("o1")
+            || model.starts_with("o3")
+            || model.starts_with("o4")
+    } else {
+        model.contains("claude") || model.contains("anthropic")
+    }
+}
+
+/// 模型名等价判定：请求名与响应回显名归一化（小写、`.`/`_` 统一为 `-`、
+/// 剥 `[1m]` 标记）后做双向前缀匹配。
+///
+/// 语义参照业界共识（alias ↔ 日期快照互认）：上游把 `claude-opus-5` 回显成
+/// `claude-opus-5-20251101`（订阅渠道常见）是等价，不是换芯；只有回显指向
+/// 另一个模型家族才是 ModelMatch 失败。
+pub(crate) fn models_match(requested: &str, echoed: &str) -> bool {
+    let normalize = |model: &str| -> String {
+        model
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['.', '_'], "-")
+            .trim_end_matches("[1m]")
+            .trim()
+            .to_string()
+    };
+    let requested = normalize(requested);
+    let echoed = normalize(echoed);
+    !requested.is_empty()
+        && !echoed.is_empty()
+        && (echoed.starts_with(&requested) || requested.starts_with(&echoed))
 }
 
 fn is_retryable_failure(failure: RunFailure) -> bool {
@@ -292,6 +333,24 @@ mod tests {
     use bytes::Bytes;
 
     use super::{send_and_read, send_sse, RunFailure, MAX_RESPONSE_BYTES};
+
+    #[test]
+    fn models_match_accepts_alias_snapshot_and_marker_forms() {
+        use super::models_match;
+
+        // 别名 ↔ 日期快照（订阅渠道常见回显形状）。
+        assert!(models_match("claude-opus-5", "claude-opus-5-20251101"));
+        assert!(models_match("claude-opus-5-20251101", "claude-opus-5"));
+        // 点分/下划线归一 + [1m] 标记剥除。
+        assert!(models_match("claude-sonnet-4.5[1M]", "claude-sonnet-4-5"));
+        assert!(models_match("gpt-5.6-sol[1m]", "gpt-5.6-sol"));
+        // 完全一致。
+        assert!(models_match("gpt-5.6-sol", "gpt-5.6-sol"));
+        // 指向另一个模型家族才算不匹配。
+        assert!(!models_match("claude-opus-5", "gpt-5.6-sol"));
+        assert!(!models_match("claude-opus-5", "claude-sonnet-5"));
+        assert!(!models_match("", "claude-opus-5"));
+    }
 
     #[tokio::test]
     async fn send_and_read_retries_transient_upstream_failure() {

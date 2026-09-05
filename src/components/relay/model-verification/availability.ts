@@ -5,10 +5,9 @@
  * 一律不渲染 —— 调用方「拿不到验真」即默认不展示，不需要各自判断。
  * 后端在读写下两侧同步收口（`relay/model_verification::MODEL_VERIFICATION_ENABLED`）。
  *
- * 下线原因（2026-09）：主动探针的判定规则对部分合规上游存在系统性误判 ——
- * 模型标识按请求名全等比对，撞上响应回显带日期快照模型名的上游即假异常；
- * 流式用量一致性检查要求了官方流式协议不保证的字段组合。判定规则修正后
- * 恢复：本开关与后端同名开关一起置回 `true`，并清空或按 `rules_version`
- * 过滤下线前落库的旧报告（读侧当前不过滤版本）。
+ * 2026-09-05 曾因判定规则系统性误判整体下线（v6.14.1）；规则修正
+ * （模型名前缀匹配、官方流式用量语义、SSE 归一化、证据去重等，
+ * 见 design 仓 spec-模型验证判定规则修正.md）后恢复，下线前存量报告
+ * 由后端按 rules_version=2 过滤作废。
  */
-export const MODEL_VERIFICATION_ENABLED = false;
+export const MODEL_VERIFICATION_ENABLED = true;
