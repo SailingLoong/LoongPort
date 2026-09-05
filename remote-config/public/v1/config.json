@@ -72,10 +72,6 @@
       "display_name": "codex666ai"
     },
     {
-      "site_origin": "https://fluxlane.cn",
-      "display_name": "智流（FluxLane）"
-    },
-    {
       "site_origin": "https://jizhiapi.site",
       "display_name": "极智API"
     },
@@ -111,7 +107,6 @@
     "api.ooapi.cc": "RQGYTDTQ7S9E",
     "cc-vibe.com": "EW7UMATLD67S",
     "codex666ai.com": "GCB7PPCGWHFG",
-    "fluxlane.cn": "QADYWCTSJ3GS",
     "jizhiapi.site": "6ABFYJGCNLHR",
     "sub.kedaya.xyz": "GCQD22VH47VN",
     "api.codepup.cn": "6sbG",
@@ -167,11 +162,6 @@
         "entry_url": "https://codex666ai.com",
         "usage_url": "https://codex666ai.com/usage",
         "display_name": "codex666ai"
-      },
-      "fluxlane.cn": {
-        "veridrop_host": "fluxlane.cn",
-        "entry_url": "https://fluxlane.cn",
-        "display_name": "智流（FluxLane）"
       },
       "jizhiapi.site": {
         "veridrop_host": "jizhiapi.site",
