@@ -3333,20 +3333,19 @@
       "sectionTitle": "User measurements",
       "window24": "last 24h",
       "window7": "last 7 days",
-      "noteSources": "{{count}} users · {{samples}} samples",
       "ttftP50": "TTFT p50",
       "ttftP95": "TTFT p95",
       "errRate": "Error rate",
       "cacheHit": "Cache hit",
       "costRef": "Cost ref.",
       "hoursTitle": "Median TTFT by hour (last 7 days · UTC)",
-      "hourTooltip": "UTC {{slot}}:00 · {{value}} · {{count}} samples",
+      "hourTooltip": "UTC {{slot}}:00 · {{value}}",
       "hourEmpty": "UTC {{slot}}:00 · no data",
-      "noData": "No measurements yet (not enough samples or sources)",
+      "noData": "No measurements yet",
       "lockedTitle": "Join the crowd data program to view",
       "lockedBody": "Share aggregated site metrics from your machine (first-token time, error rate, …) to unlock measurements from all users.",
       "join": "Join",
-      "footnote": "Crowd-sourced from LoongPort users: hourly aggregates published behind a privacy threshold; cost is a blended reference value.",
+      "footnote": "Crowd-sourced anonymously from LoongPort users; data with too few samples is not shown. Cost is a blended reference value.",
       "notice": {
         "title": "Crowd-measured site stats",
         "question": "Want to see real-world stats for each relay site (first-token time, error rate)?",
@@ -3354,11 +3353,11 @@
         "accept": "Agree",
         "decline": "Not now"
       },
-      "distTitle": "First-token time distribution (sample counts)",
-      "distTooltip": "{{range}} · {{count}} samples",
+      "distTitle": "First-token time distribution",
+      "distTooltip": "{{range}}",
       "distFast": "fast",
       "distSlow": "slow",
-      "distSr": "Histogram of first-token times, {{count}} samples total"
+      "distSr": "Histogram of first-token times"
     },
     "site": {
       "removed": "Removed {{label}}"

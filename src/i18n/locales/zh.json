@@ -3333,20 +3333,19 @@
       "sectionTitle": "用户实测",
       "window24": "近 24 小时",
       "window7": "近 7 天",
-      "noteSources": "{{count}} 位用户 · {{samples}} 个样本",
       "ttftP50": "首字 p50",
       "ttftP95": "首字 p95",
       "errRate": "错误率",
       "cacheHit": "缓存命中",
       "costRef": "花费参考",
       "hoursTitle": "时段首字中位数（近 7 天 · UTC）",
-      "hourTooltip": "UTC {{slot}}:00 · {{value}} · {{count}} 个样本",
+      "hourTooltip": "UTC {{slot}}:00 · {{value}}",
       "hourEmpty": "UTC {{slot}}:00 · 无数据",
-      "noData": "暂无实测数据（样本或来源不足）",
+      "noData": "暂无实测数据",
       "lockedTitle": "加入共建后可查看",
       "lockedBody": "上传你本地的站点聚合指标（首字耗时、错误率等），即可查看所有用户的实测数据。",
       "join": "加入共建",
-      "footnote": "数据来自 LoongPort 用户共建：按小时聚合、经隐私门槛发布；花费为混合模型的参考值。",
+      "footnote": "数据来自 LoongPort 用户匿名共建，样本不足时不展示；花费为混合模型的参考值。",
       "notice": {
         "title": "站点实测数据共建",
         "question": "是否愿意查看各站点的首字耗时、错误率等实测数据？",
@@ -3354,11 +3353,11 @@
         "accept": "同意",
         "decline": "暂不"
       },
-      "distTitle": "首字耗时分布（样本计数）",
-      "distTooltip": "{{range}} · {{count}} 个样本",
+      "distTitle": "首字耗时分布",
+      "distTooltip": "{{range}}",
       "distFast": "快",
       "distSlow": "慢",
-      "distSr": "首字耗时分布直方图，共 {{count}} 个样本"
+      "distSr": "首字耗时分布直方图"
     },
     "site": {
       "removed": "已移除 {{label}}"

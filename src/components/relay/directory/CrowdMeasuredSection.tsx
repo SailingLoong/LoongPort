@@ -1,4 +1,4 @@
-import { Lock, Users } from "lucide-react";
+import { Lock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -32,7 +32,6 @@ interface CrowdMeasuredSectionProps {
  * 前端不复制常量。 */
 function DistBars({ bins, edges }: { bins: number[]; edges: number[] }) {
   const { t } = useTranslation();
-  const total = bins.reduce((a, b) => a + b, 0);
   const max = Math.max(...bins, 1);
   const label = (ms: number) =>
     ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
@@ -59,7 +58,6 @@ function DistBars({ bins, edges }: { bins: number[]; edges: number[] }) {
               title={t("loongport.crowd.distTooltip", {
                 range:
                   hi != null ? `${label(lo)}–${label(hi)}` : `≥${label(lo)}`,
-                count,
               })}
             />
           );
@@ -69,9 +67,7 @@ function DistBars({ bins, edges }: { bins: number[]; edges: number[] }) {
         <span>{t("loongport.crowd.distFast")}</span>
         <span>{t("loongport.crowd.distSlow")}</span>
       </div>
-      <span className="sr-only">
-        {t("loongport.crowd.distSr", { count: total })}
-      </span>
+      <span className="sr-only">{t("loongport.crowd.distSr")}</span>
     </div>
   );
 }
@@ -131,7 +127,6 @@ function HourBars({ stats }: { stats: CrowdSiteStats }) {
                 ? t("loongport.crowd.hourTooltip", {
                     slot: String(slot).padStart(2, "0"),
                     value: formatLatency(height),
-                    count: slots[slot].samples,
                   })
                 : t("loongport.crowd.hourEmpty", {
                     slot: String(slot).padStart(2, "0"),
@@ -200,14 +195,9 @@ export function CrowdMeasuredSection({
         </h4>
         {active && (
           <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-            <Users className="h-3 w-3" />
-            {t("loongport.crowd.noteSources", {
-              count: active.sources,
-              samples: active.samples.toLocaleString(),
-            })}
             {stats?.w24
-              ? ` · ${t("loongport.crowd.window24")}`
-              : ` · ${t("loongport.crowd.window7")}`}
+              ? t("loongport.crowd.window24")
+              : t("loongport.crowd.window7")}
           </span>
         )}
       </div>
