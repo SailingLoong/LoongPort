@@ -13,21 +13,17 @@ pub mod verdict;
 /// 模型验证功能总开关：模块在此一处收口，false 时读写两侧整体下线
 /// （store 读一律空、写一律跳过），调用方拿不到验证数据即默认不展示。
 ///
-/// 下线原因（2026-09）：主动探针判定规则对部分合规上游存在系统性误判——
-/// 模型标识按请求名全等比对，撞上响应回显带日期快照模型名的上游即假异常；
-/// 流式用量一致性要求了官方流式协议不保证的字段组合。判定规则修正后恢复：
-/// 本开关与前端 `lib/api/modelVerification.ts` 同名开关一起置回 true，
-/// 并清空或按 `rules_version` 过滤下线前落库的旧报告（读侧当前不过滤版本）。
-#[cfg(not(test))]
-pub(crate) const MODEL_VERIFICATION_ENABLED: bool = false;
-
-/// 测试一律按启用跑：探针→落库→读侧合并→DTO 投影整条管线的既有测试
-/// 继续守护管线，恢复上线时不需要重新踩一遍。
-#[cfg(test)]
+/// 2026-09-05 曾因判定规则系统性误判整体下线（v6.14.1），规则修正
+/// （spec-模型验证判定规则修正.md：模型名前缀匹配、官方流式用量语义、
+/// 证据去重、SSE 归一化等）后随 RULES_VERSION=2 恢复；下线前的旧报告
+/// 由读侧按 rules_version 过滤作废。
 pub(crate) const MODEL_VERIFICATION_ENABLED: bool = true;
 
 #[cfg(test)]
 mod privacy_tests;
+
+#[cfg(test)]
+mod live_sweep_tests;
 
 #[cfg(test)]
 mod tests {
@@ -187,6 +183,34 @@ mod tests {
             ),
         )?;
         Ok(db)
+    }
+
+    #[test]
+    fn stale_rules_version_rows_are_invisible_to_reads() {
+        let db = Database::memory().unwrap();
+        insert_provider(&db, "provider-a", "codex").unwrap();
+        let current = report("provider-a", "codex", "gpt-a", Verdict::Trusted);
+        upsert_active(&db, &current).unwrap();
+        // 手写一条旧规则版本的存量行（rules_version=1）。
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO model_verification_results (
+                    provider_id, app_type, model, active_report_json, verdict,
+                    evidence_level, rules_version, active_checked_at, updated_at
+                ) VALUES ('provider-a', 'codex', 'gpt-b', NULL, 'anomaly',
+                    'insufficient', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let visible = list_for_provider_ids(&db, &["provider-a".into()]).unwrap();
+
+        // 只看得见当前规则版本的报告；升版即作废存量。
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].target.model, "gpt-a");
+        assert_eq!(visible[0].rules_version, RULES_VERSION);
     }
 
     #[test]

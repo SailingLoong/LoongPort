@@ -3,7 +3,10 @@ use crate::{
     error::AppError,
     relay::model_verification::{
         history,
-        types::{verdict_severity, TargetScope, Verdict, VerificationReport, VerificationSource},
+        types::{
+            verdict_severity, TargetScope, Verdict, VerificationReport, VerificationSource,
+            RULES_VERSION,
+        },
         verdict::{merge_passive_over, report_precedes},
         MODEL_VERIFICATION_ENABLED,
     },
@@ -148,15 +151,19 @@ pub fn upsert_passive(db: &Database, report: &VerificationReport) -> Result<bool
         .transaction()
         .map_err(|error| AppError::Database(format!("开始保存被动验证结果失败: {error}")))?;
 
+    // rules_version 过滤：旧规则下的存量报告视为不存在（升版即作废），
+    // 防降级比较也不会拿旧规则的重判定压制新信号。
     let (active_json, existing_passive_json): (Option<String>, Option<String>) = transaction
         .query_row(
             "SELECT active_report_json, passive_aggregate_json
              FROM model_verification_results
-             WHERE provider_id = ?1 AND app_type = ?2 AND model = ?3",
+             WHERE provider_id = ?1 AND app_type = ?2 AND model = ?3
+               AND rules_version = ?4",
             params![
                 report.target.provider_id,
                 report.target.app_type,
-                report.target.model
+                report.target.model,
+                RULES_VERSION,
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -244,25 +251,23 @@ pub fn list_for_providers(
     let placeholders = vec!["?"; provider_ids.len()].join(", ");
     let sql = format!(
         "SELECT active_report_json, passive_aggregate_json FROM model_verification_results
-         WHERE app_type = ? AND provider_id IN ({placeholders})
+         WHERE app_type = ? AND provider_id IN ({placeholders}) AND rules_version = ?
          ORDER BY provider_id, model"
     );
     let conn = lock_conn!(db.conn);
     let mut statement = conn
         .prepare(&sql)
         .map_err(|error| AppError::Database(format!("查询模型验证结果失败: {error}")))?;
+    let mut bindings = vec![app_type.to_string()];
+    bindings.extend(provider_ids.iter().cloned());
+    bindings.push(RULES_VERSION.to_string());
     let report_pairs = statement
-        .query_map(
-            params_from_iter(
-                std::iter::once(app_type).chain(provider_ids.iter().map(String::as_str)),
-            ),
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
-        )
+        .query_map(params_from_iter(bindings), |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
         .map_err(|error| AppError::Database(format!("读取模型验证结果失败: {error}")))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| AppError::Database(format!("解析模型验证结果失败: {error}")))?;
@@ -289,15 +294,17 @@ pub fn list_for_provider_ids(
     let placeholders = vec!["?"; provider_ids.len()].join(", ");
     let sql = format!(
         "SELECT active_report_json, passive_aggregate_json FROM model_verification_results
-         WHERE provider_id IN ({placeholders})
+         WHERE provider_id IN ({placeholders}) AND rules_version = ?
          ORDER BY provider_id, app_type, model"
     );
     let conn = lock_conn!(db.conn);
     let mut statement = conn
         .prepare(&sql)
         .map_err(|error| AppError::Database(format!("查询模型验证结果失败: {error}")))?;
+    let mut bindings = provider_ids.to_vec();
+    bindings.push(RULES_VERSION.to_string());
     let report_pairs = statement
-        .query_map(params_from_iter(provider_ids.iter()), |row| {
+        .query_map(params_from_iter(bindings), |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, Option<String>>(1)?,

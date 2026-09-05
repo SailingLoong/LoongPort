@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::proxy::model_mapper::strip_one_m_suffix_for_upstream;
 use crate::relay::model_verification::{
     capability_profiles::CapabilityProfile,
-    protocols::{send_and_read, send_sse, RunFailure},
+    protocols::{model_matches_protocol_family, models_match, send_and_read, send_sse, RunFailure},
     target::ResolvedTarget,
     types::{EvidenceCode, EvidenceFact, EvidenceOutcome},
 };
@@ -71,7 +71,7 @@ pub(crate) async fn run_balanced_with_progress(
                 let body = send_response(client, &endpoint, api_key, tool_request(&model, profile))
                     .await?;
                 reject_incomplete_response(&body)?;
-                Ok(vec![parse_tool_response(&body)])
+                Ok(vec![parse_tool_response(&body, &model)])
             }
             .await;
             (ProbeKind::Tool, result)
@@ -101,16 +101,26 @@ pub(crate) async fn run_balanced_with_progress(
     probes.push(
         async {
             let result = async {
-                let stream = send_stream(
-                    client,
-                    &endpoint,
-                    api_key,
-                    stream_request(&model, profile),
-                    || StreamReducer::new(&model),
-                    |stream, event| stream.observe(event),
-                )
-                .await?;
-                Ok(stream.finish())
+                // 无 response.completed = 流被截断（干净 EOF 中途收尾），按错误
+                // 重试一次，而不是判「流式生命周期未通过」。
+                let mut terminal = None;
+                for _ in 0..2 {
+                    let state = send_stream(
+                        client,
+                        &endpoint,
+                        api_key,
+                        stream_request(&model, profile),
+                        || StreamReducer::new(&model),
+                        |stream, event| stream.observe(event),
+                    )
+                    .await?;
+                    if state.saw_completed {
+                        terminal = Some(state);
+                        break;
+                    }
+                }
+                let state = terminal.ok_or(RunFailure::InvalidResponse)?;
+                Ok(state.finish())
             }
             .await;
             (ProbeKind::Stream, result)
@@ -146,14 +156,123 @@ async fn send_response(
     api_key: &str,
     payload: Value,
 ) -> Result<Vec<u8>, RunFailure> {
-    send_and_read(
+    let body = send_and_read(
         client
             .post(endpoint)
             .bearer_auth(api_key)
             .header("accept", "application/json")
             .json(&payload),
     )
-    .await
+    .await?;
+    // 部分网关对非流式请求也回 SSE（订阅号池实测高发）。SSE 不是换芯信号，
+    // 归一取出 terminal response.completed 里的 response 对象照常评估；
+    // 无终端事件视为截断错误。
+    if body_looks_like_sse(&body) {
+        let terminal = sse_terminal_response(&body).ok_or(RunFailure::InvalidResponse)?;
+        serde_json::to_vec(&terminal).map_err(|_| RunFailure::InvalidResponse)
+    } else {
+        Ok(body)
+    }
+}
+
+fn body_looks_like_sse(body: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&body[..body.len().min(256)]);
+    // SSE 注释行（": keepalive"）也是流的开头形态，逐行看前几行。
+    head.lines().take(4).any(|line| {
+        let line = line.trim_start();
+        line.starts_with("event:") || line.starts_with("data:")
+    })
+}
+
+/// 从 SSE 体里取 `response.completed` 事件的 response 对象。
+///
+/// 部分网关在 `store:false` 下的 terminal 快照**不带 output 项**（实测
+/// 空 `output: []`）：此时用事件流重建——`output_item.added` 的 item 骨架 +
+/// `output_text.delta` / `function_call_arguments.delta` 的增量累积。
+fn sse_terminal_response(body: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(body).ok()?;
+    let mut terminal: Option<Value> = None;
+    let mut items: Vec<(u64, Value)> = Vec::new();
+    let mut deltas: HashMap<u64, String> = HashMap::new();
+    let mut item_id_to_index: HashMap<String, u64> = HashMap::new();
+    for chunk in text.split("\n\n") {
+        let data = chunk
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("response.completed") => terminal = value.get("response").cloned(),
+            Some("response.output_item.added") => {
+                if let (Some(index), Some(item)) = (
+                    value.get("output_index").and_then(Value::as_u64),
+                    value.get("item").cloned(),
+                ) {
+                    if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+                        item_id_to_index.insert(item_id.to_string(), index);
+                    }
+                    // 流内重启会重放同 index 的 item，后到的为准。
+                    items.retain(|(existing, _)| *existing != index);
+                    items.push((index, item));
+                }
+            }
+            Some("response.output_text.delta" | "response.function_call_arguments.delta") => {
+                let index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .or_else(|| {
+                        value.get("item_id").and_then(Value::as_str).and_then(|id| {
+                            item_id_to_index
+                                .get(id)
+                                .copied()
+                                .or_else(|| id.parse::<u64>().ok())
+                        })
+                    });
+                if let (Some(index), Some(delta)) =
+                    (index, value.get("delta").and_then(Value::as_str))
+                {
+                    deltas.entry(index).or_default().push_str(delta);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut terminal = terminal?;
+    let output_empty = terminal
+        .get("output")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty);
+    if output_empty && !items.is_empty() {
+        let rebuilt: Vec<Value> = items
+            .into_iter()
+            .map(|(index, mut item)| {
+                if let Some(accumulated) = deltas.get(&index) {
+                    match item.get("type").and_then(Value::as_str) {
+                        Some("message") => {
+                            item["content"] = json!([{
+                                "type": "output_text",
+                                "text": accumulated,
+                            }]);
+                        }
+                        Some("function_call") => {
+                            item["arguments"] = Value::String(accumulated.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                item
+            })
+            .collect();
+        terminal["output"] = Value::Array(rebuilt);
+    }
+    Some(terminal)
 }
 
 async fn send_stream<State>(
@@ -289,7 +408,7 @@ pub(crate) fn parse_core_response(body: &[u8], expected_model: &str) -> Vec<Evid
         failed(EvidenceCode::BasicEnvelope)
     }];
     if let Some(model) = response.get("model").and_then(Value::as_str) {
-        facts.push(if model == expected_model {
+        facts.push(if models_match(expected_model, model) {
             passed(EvidenceCode::ModelMatch)
         } else {
             failed(EvidenceCode::ModelMatch)
@@ -303,7 +422,7 @@ pub(crate) fn parse_core_response(body: &[u8], expected_model: &str) -> Vec<Evid
     facts
 }
 
-pub(crate) fn parse_tool_response(body: &[u8]) -> EvidenceFact {
+pub(crate) fn parse_tool_response(body: &[u8], expected_model: &str) -> EvidenceFact {
     let Ok(response) = serde_json::from_slice::<Value>(body) else {
         return failed(EvidenceCode::ToolCallShape);
     };
@@ -313,6 +432,10 @@ pub(crate) fn parse_tool_response(body: &[u8]) -> EvidenceFact {
     if !is_response_envelope(&response) {
         return failed(EvidenceCode::ToolCallShape);
     }
+    // 跨家族网关（如 claude 模型走 codex 协议）在做跨协议转换：不保证强制
+    // 函数调用、也不保证调用形状完整。跨家族一律不因工具形状 Failed——
+    // 有合法调用记 Passed，否则 Skipped；只有同家族才严格判定。
+    let cross_family = !model_matches_protocol_family(expected_model, true);
     let valid_tool_call = response
         .get("output")
         .and_then(Value::as_array)
@@ -328,6 +451,8 @@ pub(crate) fn parse_tool_response(body: &[u8]) -> EvidenceFact {
         });
     if valid_tool_call {
         passed(EvidenceCode::ToolCallShape)
+    } else if cross_family {
+        skipped(EvidenceCode::ToolCallShape)
     } else {
         failed(EvidenceCode::ToolCallShape)
     }
@@ -409,14 +534,18 @@ fn usage_is_consistent(usage: Option<&Value>) -> bool {
     let Some(usage) = usage else {
         return false;
     };
-    let (Some(input), Some(output), Some(total)) = (
+    let (Some(input), Some(output)) = (
         usage.get("input_tokens").and_then(Value::as_u64),
         usage.get("output_tokens").and_then(Value::as_u64),
-        usage.get("total_tokens").and_then(Value::as_u64),
     ) else {
         return false;
     };
-    input.saturating_add(output) == total
+    // total_tokens 缺失或为 null 是网关常态：input+output 齐全即可，
+    // 只有 total 明确给出且对不上才算虚报。
+    match usage.get("total_tokens").and_then(Value::as_u64) {
+        Some(total) => input.saturating_add(output) == total,
+        None => true,
+    }
 }
 
 pub(crate) fn parse_stream(
@@ -436,7 +565,7 @@ pub(crate) fn parse_stream(
 struct StreamReducer<'a> {
     expected_model: &'a str,
     saw_created: bool,
-    saw_completed: bool,
+    pub(crate) saw_completed: bool,
     items: HashMap<u64, OutputItemLifecycle>,
     completed_messages: u8,
     lifecycle_order_valid: bool,
@@ -462,6 +591,9 @@ impl<'a> StreamReducer<'a> {
         }
     }
 
+    // collapsible_match 建议把失败条件折进 match guard，但这些条件要调
+    // &mut self 的状态推进（guard 不可变借用），折进去编译不过。
+    #[allow(clippy::collapsible_match)]
     fn observe(&mut self, event: &str) -> Result<(), RunFailure> {
         let data = event
             .lines()
@@ -483,18 +615,53 @@ impl<'a> StreamReducer<'a> {
             return Ok(());
         }
 
+        // 生命周期窗口之外的事件（created 前 / completed 后的网关泄漏，
+        // 实测有网关把 output_text.delta 漏在 created 之前）直接忽略：
+        // 它们不参与响应内容，记违规只会制造误报。
+        if !self.in_active_response()
+            && value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("response.") && kind != "response.created")
+        {
+            return Ok(());
+        }
+
         match value.get("type").and_then(Value::as_str) {
             Some("response.created") => {
-                if self.saw_created || self.saw_completed {
-                    self.lifecycle_order_valid = false;
+                if self.saw_created {
+                    // 流中间再次出现 created = 网关在流内做了上游故障转移并
+                    // 重放事件头（实测订阅号池高发）。重启段才是最终响应，
+                    // 重置状态机接着收，而不是记违规。
+                    self.items.clear();
+                    self.completed_messages = 0;
+                    self.saw_completed = false;
                 }
                 self.saw_created = true;
                 self.observe_response(value.get("response"), false);
             }
             Some("response.completed") => {
+                // 快照式流（OpenRouter 免费模型常见）：created→completed 之间
+                // 零增量事件，答案全在 completed 载荷里——从载荷的 output 数
+                // message 项补足计数。
+                if self.completed_messages == 0 {
+                    self.completed_messages = value
+                        .pointer("/response/output")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter(|item| {
+                                    item.get("type").and_then(Value::as_str) == Some("message")
+                                })
+                                .count() as u8
+                        })
+                        .unwrap_or(0);
+                }
+                // 多条 message 输出项是合法形状（网关分片常见）：要求至少一条。
                 if !self.saw_created
                     || self.items.values().any(|item| !item.closed)
-                    || self.completed_messages != 1
+                    || self.completed_messages < 1
                     || self.saw_completed
                 {
                     self.lifecycle_order_valid = false;
@@ -567,7 +734,10 @@ impl<'a> StreamReducer<'a> {
                     self.lifecycle_order_valid = false;
                 }
             }
-            _ => self.lifecycle_order_valid = false,
+            // 未知事件类型 = 网关注解（codex.rate_limits / responsesapi.* 等，
+            // 实测多家都有）：不是协议事件，忽略。异协议另有指纹与 message_
+            // 前缀两道闸，这里不需要第三道。
+            _ => {}
         }
         Ok(())
     }
@@ -590,7 +760,9 @@ impl<'a> StreamReducer<'a> {
             self.lifecycle_order_valid = false;
             return;
         };
-        if !self.in_active_response() || self.items.contains_key(&index) {
+        // 部分网关对多条 message 不递增 output_index（每条都用 0）：旧 item
+        // 已关闭时允许同 index 顶替开启新 item，只有「顶替未关闭项」才是违规。
+        if !self.in_active_response() || self.items.get(&index).is_some_and(|item| !item.closed) {
             self.lifecycle_order_valid = false;
             return;
         }
@@ -700,8 +872,12 @@ impl<'a> StreamReducer<'a> {
     }
 
     fn observe_response(&mut self, response: Option<&Value>, terminal: bool) {
-        let Some(response) = response else {
-            self.lifecycle_order_valid = false;
+        // created 事件的 response 载荷缺失或为 null 是网关常见形状（纯公告，
+        // 模型与用量信息后面 completed 会带）；completed 的载荷才是必需。
+        let Some(response) = response.filter(|value| !value.is_null()) else {
+            if terminal {
+                self.lifecycle_order_valid = false;
+            }
             return;
         };
         if has_foreign_protocol_fingerprint(response)
@@ -715,9 +891,11 @@ impl<'a> StreamReducer<'a> {
             self.lifecycle_order_valid = false;
         }
         if let Some(model) = response.get("model").and_then(Value::as_str) {
-            self.model_matches = Some(model == self.expected_model);
+            self.model_matches = Some(models_match(self.expected_model, model));
         }
-        if response.get("usage").is_some() {
+        // usage 只在 terminal（response.completed）评估：created 事件里的
+        // usage 常是空对象（实测网关常态），在那上面要求字段齐全必误报。
+        if terminal && response.get("usage").is_some() {
             self.saw_usage = true;
             self.usage_consistent &= usage_is_consistent(response.get("usage"));
         }
@@ -727,7 +905,7 @@ impl<'a> StreamReducer<'a> {
         let mut facts = vec![if self.lifecycle_order_valid
             && self.saw_created
             && self.items.values().all(|item| item.closed)
-            && self.completed_messages == 1
+            && self.completed_messages >= 1
             && self.saw_completed
         {
             passed(EvidenceCode::StreamLifecycle)
@@ -792,6 +970,13 @@ fn passed(code: EvidenceCode) -> EvidenceFact {
     }
 }
 
+fn skipped(code: EvidenceCode) -> EvidenceFact {
+    EvidenceFact {
+        code,
+        outcome: EvidenceOutcome::Skipped,
+    }
+}
+
 fn failed(code: EvidenceCode) -> EvidenceFact {
     EvidenceFact {
         code,
@@ -853,7 +1038,7 @@ mod openai_responses_tests {
     fn response_envelope_reduces_message_reasoning_and_usage_without_output_text() {
         let facts = parse_core_response(
             br#"{
-                "object":"response","status":"completed","model":"gpt-5.6-sol",
+                "object":"response","id":"resp_test000000000000","status":"completed","model":"gpt-5.6-sol",
                 "output":[
                     {"type":"reasoning","summary":[]},
                     {"type":"message","content":[{"type":"output_text","text":"SENTINEL_OUTPUT"}]}
@@ -901,7 +1086,92 @@ mod openai_responses_tests {
         );
     }
 
+    /// F2 回归：部分网关对非流式请求也回 SSE（订阅号池实测高发）。
+    /// 归一取出 terminal response.completed 后照常评估，不再三连误判。
+    #[tokio::test]
+    async fn sse_answer_to_non_stream_request_is_normalized_to_terminal_response() {
+        let sse_body = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"object\":\"response\",\"model\":\"future-model-x\"}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{",
+            "\"object\":\"response\",\"id\":\"resp_test000000000000\",\"status\":\"completed\",\"model\":\"future-model-x\",",
+            "\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ready\"}]}],",
+            "\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+        );
+        let endpoint = spawn_server(Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| async move {
+                let plain_core = body["stream"] != true
+                    && body.get("tools").is_none()
+                    && body.get("text").is_none();
+                if plain_core {
+                    return ([("content-type", "text/event-stream")], sse_body).into_response();
+                }
+                normal_response(&body)
+            }),
+        ))
+        .await;
+        let facts = run_balanced(
+            &reqwest::Client::new(),
+            &target_for_model(&endpoint, "SENTINEL_API_KEY", "future-model-x"),
+            &CapabilityProfile::for_target(&AppType::Codex, "future-model-x"),
+        )
+        .await
+        .unwrap();
+        assert!(facts.contains(&passed(EvidenceCode::BasicEnvelope)));
+        assert!(facts.contains(&passed(EvidenceCode::ModelMatch)));
+        assert!(facts.contains(&passed(EvidenceCode::UsageConsistency)));
+        assert!(facts.contains(&passed(EvidenceCode::ToolCallShape)));
+        assert!(facts.contains(&passed(EvidenceCode::StreamLifecycle)));
+    }
+
+    /// 回放聚合网关免费模型的实测序列（reasoning summary 事件 + 单 message），
+    /// 变体覆盖 created 事件的 response 载荷三种形状。
     #[test]
+    fn reasoning_summary_streams_and_null_created_payload_reduce_cleanly() {
+        let seq = |created_payload: &str| {
+            format!(
+                concat!(
+                    "event: response.created\ndata: {}\n\n",
+                    "event: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"reasoning\"}}}}\n\n",
+                    "event: response.reasoning_summary_part.added\ndata: {{\"type\":\"response.reasoning_summary_part.added\",\"output_index\":0,\"summary_index\":0,\"part\":{{\"type\":\"summary_text\"}}}}\n\n",
+                    "event: response.reasoning_summary_text.delta\ndata: {{\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"summary_index\":0,\"delta\":\"thinking\"}}\n\n",
+                    "event: response.reasoning_summary_text.done\ndata: {{\"type\":\"response.reasoning_summary_text.done\",\"output_index\":0,\"summary_index\":0,\"text\":\"thinking\"}}\n\n",
+                    "event: response.reasoning_summary_part.done\ndata: {{\"type\":\"response.reasoning_summary_part.done\",\"output_index\":0,\"summary_index\":0,\"part\":{{\"type\":\"summary_text\"}}}}\n\n",
+                    "event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"type\":\"reasoning\"}}}}\n\n",
+                    "event: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{{\"type\":\"message\"}}}}\n\n",
+                    "event: response.content_part.added\ndata: {{\"type\":\"response.content_part.added\",\"output_index\":1,\"part\":{{\"type\":\"output_text\"}}}}\n\n",
+                    "event: response.output_text.delta\ndata: {{\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"stream\"}}\n\n",
+                    "event: response.output_text.done\ndata: {{\"type\":\"response.output_text.done\",\"output_index\":1,\"text\":\"stream\"}}\n\n",
+                    "event: response.content_part.done\ndata: {{\"type\":\"response.content_part.done\",\"output_index\":1,\"part\":{{\"type\":\"output_text\"}}}}\n\n",
+                    "event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{{\"type\":\"message\"}}}}\n\n",
+                    "event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"object\":\"response\",\"status\":\"completed\",\"model\":\"future-model-x\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n"
+                ),
+                created_payload
+            )
+        };
+        let profile = CapabilityProfile::for_target(&AppType::Codex, "future-model-x");
+        let full_payload = r#"{"type":"response.created","response":{"object":"response","model":"future-model-x"}}"#;
+        let facts = parse_stream(&seq(full_payload), "future-model-x", &profile).unwrap();
+        assert!(
+            facts.contains(&passed(EvidenceCode::StreamLifecycle)),
+            "full payload: {facts:?}"
+        );
+
+        let null_payload = r#"{"type":"response.created","response":null}"#;
+        let facts = parse_stream(&seq(null_payload), "future-model-x", &profile).unwrap();
+        assert!(
+            facts.contains(&passed(EvidenceCode::StreamLifecycle)),
+            "null payload 应容忍: {facts:?}"
+        );
+
+        let missing_payload = r#"{"type":"response.created"}"#;
+        let facts = parse_stream(&seq(missing_payload), "future-model-x", &profile).unwrap();
+        assert!(
+            facts.contains(&passed(EvidenceCode::StreamLifecycle)),
+            "缺失 response 字段应容忍: {facts:?}"
+        );
+    }
+
     fn upstream_model_reuses_case_insensitive_one_m_normalization() {
         assert_eq!(upstream_model("gpt-5.6-sol[1m]"), "gpt-5.6-sol");
     }
@@ -909,10 +1179,11 @@ mod openai_responses_tests {
     #[test]
     fn function_and_structured_output_reducers_only_emit_finite_facts() {
         let tool = parse_tool_response(
-            br#"{"object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","name":"report_probe","arguments":"{\"ready\":true}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
+            br#"{"object":"response","id":"resp_test000000000000","status":"completed","model":"gpt-5.6-sol","output":[{"type":"function_call","name":"report_probe","arguments":"{\"ready\":true}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
+            "gpt-5.6-sol",
         );
         let structured = parse_structured_response(
-            br#"{"object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ready\":true}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
+            br#"{"object":"response","id":"resp_test000000000000","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ready\":true}"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
         );
 
         assert_eq!(tool, passed(EvidenceCode::ToolCallShape));
@@ -931,7 +1202,7 @@ mod openai_responses_tests {
                 "{{\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"output\":[{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"text\":{invalid_payload:?}}}]}}],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}"
             );
             assert_eq!(
-                parse_tool_response(tool.as_bytes()),
+                parse_tool_response(tool.as_bytes(), "gpt-5.6-sol"),
                 failed(EvidenceCode::ToolCallShape)
             );
             assert_eq!(
@@ -941,7 +1212,8 @@ mod openai_responses_tests {
         }
         assert_eq!(
             parse_tool_response(
-                br#"{"output":[{"type":"function_call","name":"report_probe","arguments":"{}"}]}"#
+                br#"{"output":[{"type":"function_call","name":"report_probe","arguments":"{}"}]}"#,
+                "gpt-5.6-sol",
             ),
             failed(EvidenceCode::ToolCallShape)
         );
@@ -953,7 +1225,7 @@ mod openai_responses_tests {
         );
         assert_eq!(
             parse_structured_response(
-                br#"{"object":"response","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","content":[{"type":"refusal","refusal":"no"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#
+                br#"{"object":"response","id":"resp_test000000000000","status":"completed","model":"gpt-5.6-sol","output":[{"type":"message","content":[{"type":"refusal","refusal":"no"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#
             ),
             failed(EvidenceCode::StructuredOutput)
         );
@@ -962,7 +1234,10 @@ mod openai_responses_tests {
     #[test]
     fn foreign_protocol_shapes_from_optional_probes_are_verdict_facts() {
         assert_eq!(
-            parse_tool_response(br#"{"object":"chat.completion","choices":[]}"#),
+            parse_tool_response(
+                br#"{"object":"chat.completion","choices":[]}"#,
+                "gpt-5.6-sol"
+            ),
             failed(EvidenceCode::ForeignProtocol)
         );
         assert_eq!(
@@ -1517,14 +1792,18 @@ mod openai_responses_tests {
             }),
         ))
         .await;
-        let facts = run_balanced(
-            &reqwest::Client::new(),
-            &target_for_model(&endpoint, "SENTINEL_API_KEY", "future-model-x"),
-            &CapabilityProfile::for_target(&AppType::Codex, "future-model-x"),
-        )
-        .await
-        .unwrap();
-        assert!(facts.contains(&failed(EvidenceCode::StreamLifecycle)));
+        // 缺 response.completed = 流被截断：按错误上报（重试一次仍无终端），
+        // 不再落成「流式生命周期未通过」的判定 —— 截断是网络事实，不是协议证据。
+        assert_eq!(
+            run_balanced(
+                &reqwest::Client::new(),
+                &target_for_model(&endpoint, "SENTINEL_API_KEY", "future-model-x"),
+                &CapabilityProfile::for_target(&AppType::Codex, "future-model-x"),
+            )
+            .await
+            .unwrap_err(),
+            RunFailure::InvalidResponse
+        );
     }
 
     #[derive(Debug, Clone)]
@@ -1611,7 +1890,7 @@ mod openai_responses_tests {
         }
         if body.get("tools").is_some() {
             return Json(json!({
-                "object":"response", "status":"completed", "model":"gpt-5.6-sol",
+                "object":"response", "id":"resp_test000000000000", "status":"completed", "model":"gpt-5.6-sol",
                 "output":[{"type":"function_call","name":"report_probe","arguments":"{\"ready\":true}"}],
                 "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
             }))
@@ -1619,14 +1898,14 @@ mod openai_responses_tests {
         }
         if body.get("text").is_some() {
             return Json(json!({
-                "object":"response", "status":"completed", "model":"gpt-5.6-sol",
+                "object":"response", "id":"resp_test000000000000", "status":"completed", "model":"gpt-5.6-sol",
                 "output":[{"type":"message","content":[{"type":"output_text","text":"{\"ready\":true}"}]}],
                 "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
             }))
             .into_response();
         }
         Json(json!({
-            "object":"response", "status":"completed", "model":"gpt-5.6-sol",
+            "object":"response", "id":"resp_test000000000000", "status":"completed", "model":"gpt-5.6-sol",
             "output":[{"type":"message","content":[{"type":"output_text","text":"SENTINEL_OUTPUT"}]}],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         }))
@@ -1682,7 +1961,7 @@ mod openai_responses_tests {
     fn normal_response(body: &Value) -> Response {
         if body.get("tools").is_some() {
             return Json(json!({
-                "object":"response", "status":"completed", "model":"future-model-x",
+                "object":"response", "id":"resp_test000000000000", "status":"completed", "model":"future-model-x",
                 "output":[{"type":"function_call","name":"report_probe","arguments":"{\"ready\":true}"}],
                 "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
             }))
@@ -1696,7 +1975,7 @@ mod openai_responses_tests {
                 .into_response();
         }
         Json(json!({
-            "object":"response", "status":"completed", "model":"future-model-x",
+            "object":"response", "id":"resp_test000000000000", "status":"completed", "model":"future-model-x",
             "output":[{"type":"message","content":[{"type":"output_text","text":"SENTINEL_OUTPUT"}]}],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         }))

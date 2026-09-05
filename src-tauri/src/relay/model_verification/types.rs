@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-pub const RULES_VERSION: i32 = 1;
+/// 判定规则版本：读侧只认当前版本的报告（store 过滤），升版即作废存量。
+/// v2：模型名前缀匹配、官方流式用量语义、证据按码去重、SSE 归一化（2026-09）。
+pub const RULES_VERSION: i32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
