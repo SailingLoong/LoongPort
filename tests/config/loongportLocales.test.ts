@@ -190,7 +190,6 @@ const requiredKeys = [
   "crowd.sectionTitle",
   "crowd.window24",
   "crowd.window7",
-  "crowd.noteSources",
   "crowd.ttftP50",
   "crowd.ttftP95",
   "crowd.errRate",

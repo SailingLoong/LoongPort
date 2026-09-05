@@ -3333,20 +3333,19 @@
       "sectionTitle": "ユーザー実測",
       "window24": "直近 24 時間",
       "window7": "直近 7 日間",
-      "noteSources": "{{count}} ユーザー · {{samples}} サンプル",
       "ttftP50": "初トークン p50",
       "ttftP95": "初トークン p95",
       "errRate": "エラー率",
       "cacheHit": "キャッシュ命中",
       "costRef": "費用参考",
       "hoursTitle": "時間帯別の初トークン中央値（直近 7 日 · UTC）",
-      "hourTooltip": "UTC {{slot}}:00 · {{value}} · {{count}} サンプル",
+      "hourTooltip": "UTC {{slot}}:00 · {{value}}",
       "hourEmpty": "UTC {{slot}}:00 · データなし",
-      "noData": "実測データはまだありません（サンプルまたはソース不足）",
+      "noData": "実測データはまだありません",
       "lockedTitle": "共同データに参加すると閲覧できます",
       "lockedBody": "使用中のサイトの集計指標（初トークン時間・エラー率など）を共有すると、全ユーザーの実測データを閲覧できます。",
       "join": "参加する",
-      "footnote": "LoongPort ユーザーによる共同データ：時間単位の集計をプライバシーしきい値付きで公開。費用はモデル混合の参考値。",
+      "footnote": "データは LoongPort ユーザーによる匿名の共同構築です。サンプルが少ないデータは表示されません。費用はモデル混合の参考値です。",
       "notice": {
         "title": "サイト実測データの共同利用",
         "question": "各サイトの初トークン時間やエラー率などの実測データを表示しますか？",
@@ -3354,11 +3353,11 @@
         "accept": "同意する",
         "decline": "後で"
       },
-      "distTitle": "初トークン時間の分布（サンプル数）",
-      "distTooltip": "{{range}} · {{count}} サンプル",
+      "distTitle": "初トークン時間の分布",
+      "distTooltip": "{{range}}",
       "distFast": "速い",
       "distSlow": "遅い",
-      "distSr": "初トークン時間のヒストグラム、合計 {{count}} サンプル"
+      "distSr": "初トークン時間のヒストグラム"
     },
     "site": {
       "removed": "{{label}} を削除しました"

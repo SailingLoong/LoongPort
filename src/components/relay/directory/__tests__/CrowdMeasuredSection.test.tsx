@@ -78,7 +78,7 @@ describe("CrowdMeasuredSection 三态", () => {
     expect(screen.queryByText("loongport.crowd.ttftP50")).toBeNull();
   });
 
-  it("参与且有数据：指标卡 + 来源注脚 + 时段条形", () => {
+  it("参与且有数据：指标卡 + 统计窗口 + 时段条形", () => {
     render(
       <CrowdMeasuredSection
         stats={makeStats()}
@@ -89,9 +89,7 @@ describe("CrowdMeasuredSection 三态", () => {
     // 812.5ms 落在 [800,1200) 的毫秒格式化（取整 813ms）。
     expect(screen.getByText("813ms")).toBeTruthy();
     expect(screen.getByText("2.1s")).toBeTruthy();
-    expect(
-      screen.getByText(/loongport.crowd.noteSources.*"count":3/u),
-    ).toBeTruthy();
+    expect(screen.getByText("loongport.crowd.window24")).toBeTruthy();
     // 24 根时段条都在（t 被 mock 成 key+JSON，按 mock 输出断言）。
     const bars = screen.getAllByTitle(/loongport.crowd.hour(Tooltip|Empty)/u);
     expect(bars).toHaveLength(24);
@@ -119,7 +117,7 @@ describe("CrowdMeasuredSection 三态", () => {
     );
     const bars = screen.getAllByTitle(/loongport.crowd.distTooltip/u);
     expect(bars).toHaveLength(12);
-    expect(screen.getByTitle(/"range":"200ms–400ms".*"count":8/u)).toBeTruthy();
+    expect(screen.getByTitle(/"range":"200ms–400ms"/u)).toBeTruthy();
   });
 
   it("分布图：缺 edges（旧快照）不渲染分布条", () => {
