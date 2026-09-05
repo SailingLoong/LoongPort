@@ -80,10 +80,6 @@
       "display_name": "Kedaya 中转站"
     },
     {
-      "site_origin": "https://api.codepup.cn",
-      "display_name": "代码狗"
-    },
-    {
       "site_origin": "https://nexaxis.ai",
       "display_name": "NEXAXIS"
     }
@@ -109,9 +105,7 @@
     "codex666ai.com": "GCB7PPCGWHFG",
     "jizhiapi.site": "6ABFYJGCNLHR",
     "sub.kedaya.xyz": "GCQD22VH47VN",
-    "api.codepup.cn": "6sbG",
     "nexaxis.ai": "N7oc",
-    "ai.codepup.cn": "6sbG",
     "1pkapi.com": "DLVHVZK3MBXL",
     "sub.callai.one": "ARHDEL2VWSGR",
     "aliuapi.top": "YMAQW3BXEDNF",
@@ -172,11 +166,6 @@
         "veridrop_host": "sub.kedaya.xyz",
         "entry_url": "https://sub.kedaya.xyz",
         "display_name": "Kedaya 中转站"
-      },
-      "api.codepup.cn": {
-        "veridrop_host": "api.codepup.cn",
-        "entry_url": "https://api.codepup.cn",
-        "display_name": "代码狗"
       },
       "nexaxis.ai": {
         "veridrop_host": "nexaxis.ai",
