@@ -72,10 +72,6 @@
       "display_name": "codex666ai"
     },
     {
-      "site_origin": "https://jizhiapi.site",
-      "display_name": "极智API"
-    },
-    {
       "site_origin": "https://sub.kedaya.xyz",
       "display_name": "Kedaya 中转站"
     },
@@ -103,7 +99,6 @@
     "api.ooapi.cc": "RQGYTDTQ7S9E",
     "cc-vibe.com": "EW7UMATLD67S",
     "codex666ai.com": "GCB7PPCGWHFG",
-    "jizhiapi.site": "6ABFYJGCNLHR",
     "sub.kedaya.xyz": "GCQD22VH47VN",
     "nexaxis.ai": "N7oc",
     "1pkapi.com": "DLVHVZK3MBXL",
@@ -156,11 +151,6 @@
         "entry_url": "https://codex666ai.com",
         "usage_url": "https://codex666ai.com/usage",
         "display_name": "codex666ai"
-      },
-      "jizhiapi.site": {
-        "veridrop_host": "jizhiapi.site",
-        "entry_url": "https://jizhiapi.site",
-        "display_name": "极智API"
       },
       "sub.kedaya.xyz": {
         "veridrop_host": "sub.kedaya.xyz",
