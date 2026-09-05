@@ -5,6 +5,7 @@ import {
   type EasyModeMode,
 } from "@/lib/api/autoMode";
 import { proxyApi } from "@/lib/api/proxy";
+import { providersApi } from "@/lib/api/providers";
 import { failoverApi } from "@/lib/api/failover";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -274,6 +275,58 @@ export function useDisableAutoMode() {
           defaultValue: "{{app}} 省心模式已关闭，路由接管已恢复",
         }),
       );
+    },
+    onError: (error) => {
+      toast.error(
+        t("autoMode.toggleFailed", { defaultValue: "操作失败" }) +
+          ": " +
+          extractErrorMessage(error),
+      );
+    },
+  });
+}
+
+/**
+ * 省心视图「切回官方/自建」：退省心（收接管）→ 切换到指定供应商。
+ *
+ * 顺序是硬的：官方/自建供应商的切换在接管态下会被拦（CLI 流量都走本地
+ * 代理），必须先把该 app 的省心关掉、恢复接管配置，再走正常切换写 live。
+ * confirmationRequired（ChatGPT 桌面版先退再切）原样透传给调用方，
+ * 由 useCodexSwitchGuard 的弹窗处理后带 quitChatgpt 重试。
+ */
+export function useSwitchToSelfManaged() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+  const disableFlow = useDisableAutoMode();
+
+  return useMutation({
+    mutationFn: async ({
+      appType,
+      providerId,
+      quitChatgpt,
+    }: {
+      appType: ProxyAppId;
+      providerId: string;
+      quitChatgpt?: boolean;
+    }) => {
+      await disableFlow.mutateAsync({ appType }).catch(() => undefined);
+      return providersApi.switch(providerId, appType, quitChatgpt);
+    },
+    onSuccess: (result, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["autoModeStatus", variables.appType],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["providers", variables.appType],
+      });
+      queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      if (result?.status !== "confirmationRequired") {
+        toast.success(
+          t("autoMode.board.switchBackDone", {
+            defaultValue: "已切回，该应用转为自主模式",
+          }),
+        );
+      }
     },
     onError: (error) => {
       toast.error(

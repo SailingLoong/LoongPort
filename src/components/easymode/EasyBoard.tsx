@@ -24,6 +24,7 @@ import {
 } from "@/lib/query/autoMode";
 import { useResetCircuitBreaker } from "@/lib/query/failover";
 import { cn } from "@/lib/utils";
+import { SelfManagedBar } from "./SelfManagedBar";
 import { TierList } from "./TierList";
 
 /** Select 不能用空串当 value 的哨兵（与 AutoModeTabContent 同一个约定）。 */
@@ -71,6 +72,7 @@ export function EasyBoard({ appId }: { appId: string }) {
 
   return (
     <div className="space-y-4">
+      <SelfManagedBar appId={appId} />
       {!isRunning ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2">
           <p className="text-xs text-amber-600 dark:text-amber-400">
