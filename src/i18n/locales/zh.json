@@ -2624,7 +2624,6 @@
   },
   "autoMode": {
     "title": "省心模式",
-    "tooltip": "省心模式：开启后系统按策略自动挑选托管档位，同一会话保持当前档位不切换；关闭时将一并恢复该 CLI 的路由接管",
     "description": "系统从托管档位里自动挑最合适的，当前档位会话中保持不变",
     "strategyLabel": "挑选策略（全局）",
     "strategy": {
@@ -2677,7 +2676,20 @@
     "masterOffToast": "省心模式已关闭，路由已停并恢复全部配置",
     "noCandidatesHint": "没有可用的托管档位 —— 先在中转站区登录并获取档位",
     "cliMissingHint": "未检测到该 CLI 的配置文件（未安装或未初始化），无法接管；安装并运行一次该 CLI 后再来开启",
-    "masterHint": "总开关就是本地路由：开启后才能为各应用打开省心模式；关闭时会关闭全部应用的省心模式、恢复配置并停止路由"
+    "masterHint": "总开关就是本地路由：开启后才能为各应用打开省心模式；关闭时会关闭全部应用的省心模式、恢复配置并停止路由",
+    "runMode": {
+      "easy": "省心",
+      "self": "自主",
+      "easySubtitle": "系统在托管档位间自动选路与切换",
+      "selfSubtitle": "由你指定唯一的供应商",
+      "routingStopped": "本地路由未运行，流量不会经省心选路",
+      "startRouting": "启动本地路由",
+      "cliMissing": "该 CLI 未安装，省心模式不可用",
+      "noCandidates": "还没有托管档位，先在自主模式添加中转站"
+    },
+    "tab": {
+      "switchMovedHint": "省心 / 自主的切换入口在主页面顶部"
+    }
   },
   "proxy": {
     "panel": {

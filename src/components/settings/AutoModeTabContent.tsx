@@ -46,9 +46,6 @@ import {
 import { FailoverControls } from "@/components/settings/FailoverControls";
 import {
   useAutoModeStatus,
-  useDisableAutoMode,
-  useEnableAutoMode,
-  useSetAutoModeEnabled,
   useSetEasyModeMaster,
   useSetAutoModeModel,
   useSetAutoModeStrategy,
@@ -226,11 +223,7 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
   const { t } = useTranslation();
   const { data: status, isLoading } = useAutoModeStatus(appType);
   const { isRunning, takeoverStatus } = useProxyStatus();
-  const setEnabled = useSetAutoModeEnabled();
-  const enableFlow = useEnableAutoMode();
-  const disableFlow = useDisableAutoMode();
   const setModel = useSetAutoModeModel();
-  const [showConfirm, setShowConfirm] = useState(false);
 
   const isEnabled = status?.enabled ?? false;
   const hasCandidates = status?.hasCandidates ?? false;
@@ -239,37 +232,6 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
   const availableModels = status?.availableModels ?? [];
   // 队列/熔断只作兜底展示，仍要求接管态（与迁移前同判据）。
   const advancedDisabled = !isRunning || !(takeoverStatus?.[appType] ?? false);
-  const isPending =
-    setEnabled.isPending || enableFlow.isPending || disableFlow.isPending;
-
-  const prerequisitesMet = !advancedDisabled;
-
-  const doEnable = () => {
-    if (prerequisitesMet) {
-      setEnabled.mutate({ appType, enabled: true });
-    } else {
-      enableFlow.mutate({ appType });
-    }
-  };
-
-  const handleToggle = (checked: boolean) => {
-    if (!checked) {
-      // 关闭默认连路由接管一起收回（开启编排的对称面）。
-      disableFlow.mutate({ appType });
-      return;
-    }
-    if (hasConfirmedAutoMode()) {
-      doEnable();
-    } else {
-      setShowConfirm(true);
-    }
-  };
-
-  const handleConfirm = () => {
-    markAutoModeConfirmed();
-    setShowConfirm(false);
-    doEnable();
-  };
 
   return (
     <div className="rounded-xl glass-card p-6 space-y-4">
@@ -320,16 +282,24 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
         {isLoading ? (
           <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
         ) : (
-          <Switch
-            checked={isEnabled}
-            onCheckedChange={handleToggle}
-            disabled={
-              isPending || !isRunning || !hasCandidates || !cliInstalled
+          <span
+            className={
+              isEnabled
+                ? "rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-400"
+                : "rounded-full border px-2 py-0.5 text-xs text-muted-foreground"
             }
-            aria-label={t("autoMode.title", "省心模式")}
-          />
+          >
+            {isEnabled
+              ? t("autoMode.runMode.easy", { defaultValue: "省心" })
+              : t("autoMode.runMode.self", { defaultValue: "自主" })}
+          </span>
         )}
       </div>
+      <p className="text-xs text-muted-foreground">
+        {t("autoMode.tab.switchMovedHint", {
+          defaultValue: "省心 / 自主的切换入口在主页面顶部",
+        })}
+      </p>
 
       {/* 模型偏好：只有存在模型目录的 app（Codex 系）才有这一栏。 */}
       {availableModels.length > 0 && (
@@ -411,19 +381,6 @@ function AutoModeAppCard({ appType }: { appType: ProxyAppId }) {
           </AccordionContent>
         </AccordionItem>
       </Accordion>
-
-      <ConfirmDialog
-        isOpen={showConfirm}
-        variant="info"
-        title={t("autoMode.confirm.title", "开启省心模式")}
-        message={t(
-          "autoMode.confirm.message",
-          "系统将按所选策略自动挑选并切换托管档位：同一会话内保持当前档位不变（避免丢失提示词缓存），当前档位故障或闲置后才切换到更合适的一档。若本地路由未开启，将一并开启并接管该 CLI 的配置（关闭省心模式时会一并恢复）。确定开启？",
-        )}
-        confirmText={t("autoMode.confirm.confirm", "开启")}
-        onConfirm={handleConfirm}
-        onCancel={() => setShowConfirm(false)}
-      />
     </div>
   );
 }

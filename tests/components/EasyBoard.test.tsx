@@ -13,6 +13,11 @@ const setOrderMock = vi.hoisted(() => vi.fn());
 const tierBoardMock = vi.hoisted(() => vi.fn());
 const statusMock = vi.hoisted(() => vi.fn());
 const resetBreakerMock = vi.hoisted(() => vi.fn());
+const proxyStatusMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/hooks/useProxyStatus", () => ({
+  useProxyStatus: proxyStatusMock,
+}));
 
 vi.mock("@/lib/query/autoMode", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/query/autoMode")>();
@@ -134,6 +139,10 @@ function setupBoard(board: TierBoard) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  proxyStatusMock.mockReturnValue({
+    isRunning: true,
+    startProxyServer: vi.fn().mockResolvedValue(undefined),
+  });
 });
 
 describe("EasyBoard", () => {
@@ -347,6 +356,20 @@ describe("EasyBoard", () => {
       appType: "claude",
       mode: "auto",
     });
+  });
+
+  it("本地路由未运行时显示警告条与启动按钮", () => {
+    const startRouting = vi.fn().mockResolvedValue(undefined);
+    proxyStatusMock.mockReturnValue({
+      isRunning: false,
+      startProxyServer: startRouting,
+    });
+    setupBoard(boardFixture());
+    expect(
+      screen.getByText("本地路由未运行，流量不会经省心选路"),
+    ).toBeDefined();
+    fireEvent.click(screen.getByText("启动本地路由"));
+    expect(startRouting).toHaveBeenCalledTimes(1);
   });
 
   it("空档位显示空态而不是崩", () => {

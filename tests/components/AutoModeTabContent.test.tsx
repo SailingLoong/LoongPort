@@ -162,18 +162,19 @@ describe("AutoModeTabContent", () => {
     expect(screen.queryByText("autoMode.confirm.title")).toBeNull();
   });
 
-  it("总开关关闭（路由未跑）时各 app 卡片开关全部禁用", () => {
+  it("卡片不再承载模式开关：只剩总开关，卡片显示模式徽章与指路提示", () => {
     useProxyStatusMock.mockReturnValue({
       isRunning: false,
       takeoverStatus: undefined,
     });
     renderTab();
 
-    const switches = screen.getAllByRole("switch");
-    // 卡片开关（总开关之后的四个）：全部禁用 —— 大开关不开，细节不可配置。
-    for (const sw of switches.slice(1, 5)) {
-      expect(sw).toBeDisabled();
-    }
+    // 唯一入口在主页面 —— 卡片不再有 switch；剩余 3 个 = 总开关 + 统一故障转移 + 主页面显示
+    expect(screen.getAllByRole("switch")).toHaveLength(3);
+    // 开着的 codex 显示「省心」徽章、关着的 claude 显示「自主」
+    expect(screen.getAllByText("autoMode.runMode.easy")).toHaveLength(2);
+    expect(screen.getAllByText("autoMode.runMode.self")).toHaveLength(2);
+    expect(screen.getAllByText("autoMode.tab.switchMovedHint")).toHaveLength(4);
   });
 
   it("统一故障转移行：切换走 setFailoverAll（全部 app）", () => {
@@ -188,77 +189,6 @@ describe("AutoModeTabContent", () => {
       apps: ["claude", "codex", "gemini", "grokbuild"],
       enabled: false,
     });
-  });
-
-  it("卡片：前置已满足时开启直接 setEnabled（已授权过）", () => {
-    markAutoModeConfirmed();
-    renderTab();
-
-    const switches = screen.getAllByRole("switch");
-    // switch 顺序：总开关(0)、claude 卡(1)、codex 卡(2)……
-    fireEvent.click(switches[1]);
-    expect(setEnabledMock).toHaveBeenCalledWith(
-      expect.objectContaining({ appType: "claude", enabled: true }),
-    );
-  });
-
-  it("卡片：路由在跑但该 app 未接管时，开启走一键编排", () => {
-    markAutoModeConfirmed();
-    // mock 要在渲染前生效（mockReturnValue 不会触发已渲染组件重算）
-    useProxyStatusMock.mockReturnValue({
-      isRunning: true,
-      takeoverStatus: {
-        claude: false,
-        codex: false,
-        gemini: false,
-        grokbuild: false,
-      },
-    });
-    renderTab();
-
-    const switches = screen.getAllByRole("switch");
-    fireEvent.click(switches[1]);
-    expect(enableFlowMock).toHaveBeenCalledWith({ appType: "claude" });
-    expect(setEnabledMock).not.toHaveBeenCalled();
-  });
-
-  it("卡片：有档位但 CLI 未装给出针对性提示并禁用", () => {
-    stubStatuses({
-      gemini: { enabled: false, hasCandidates: true, cliInstalled: false },
-    });
-    renderTab();
-
-    expect(screen.getByText("autoMode.cliMissingHint")).toBeTruthy();
-    // gemini 卡（第 4 个 switch：总开关、claude、codex、gemini）禁用
-    expect(screen.getAllByRole("switch")[3]).toBeDisabled();
-  });
-
-  it("卡片关闭走关态编排（连路由一起收回），不弹授权", () => {
-    renderTab();
-
-    const switches = screen.getAllByRole("switch");
-    // codex 卡开着（第 3 个 switch：总开关、claude、codex）
-    fireEvent.click(switches[2]);
-    expect(disableFlowMock).toHaveBeenCalledWith({ appType: "codex" });
-    expect(screen.queryByText("autoMode.confirm.title")).toBeNull();
-  });
-
-  it("未授权过时先弹一次性授权，确认后才继续", () => {
-    renderTab();
-
-    const switches = screen.getAllByRole("switch");
-    fireEvent.click(switches[1]);
-    expect(setEnabledMock).not.toHaveBeenCalled();
-    expect(enableFlowMock).not.toHaveBeenCalled();
-    expect(screen.getByText("autoMode.confirm.title")).toBeTruthy();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "autoMode.confirm.confirm" }),
-    );
-    expect(setEnabledMock).toHaveBeenCalledWith(
-      expect.objectContaining({ appType: "claude", enabled: true }),
-    );
-    expect(localStorage.getItem(AUTO_MODE_CONFIRMED_STORAGE_KEY)).toBe("true");
   });
 
   it("有模型目录的 app 显示模型偏好下拉，显式选择调用 setModel", () => {
