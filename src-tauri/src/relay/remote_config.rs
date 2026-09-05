@@ -249,6 +249,34 @@ pub struct StarRewardConfig {
     pub amount_usd: u64,
 }
 
+/// 中转站档位的**模型选型表**（远端可部分覆盖）。
+///
+/// 服务的场景：外部模型代际更替（新模型在中转站目录里铺开）快于客户端发版节奏，
+/// 维护者查证后可以直接调表，不必等一版客户端。合并纪律在
+/// `provision::ModelSelectionTables::merge`：字段级部分覆盖、缺席/清洗后为空回落内置。
+///
+/// 安全前提（为什么敢远程化，而生图家族表不敢）：候选的选中规则是「分组目录里
+/// **第一个精确命中**的」—— 远端给一个目录里不存在的名字会被自然顺延，坏值的
+/// 失败模式是「没生效」，不是「写出 404 档位」。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct RemoteModelSelection {
+    /// 目录拉不到时写的主模型回落值（内置 `DEFAULT_MODEL`）。
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// codex 主模型候选，优先级序（内置 `CODEX_MAIN_CANDIDATES`）。
+    #[serde(default)]
+    pub codex_main: Option<Vec<String>>,
+    /// claude 平台「最强档」候选（内置 `CLAUDE_OPUS_CANDIDATES`）。
+    #[serde(default)]
+    pub claude_opus: Option<Vec<String>>,
+    /// claude 平台「次强档」候选（内置 `CLAUDE_SONNET_CANDIDATES`）。
+    #[serde(default)]
+    pub claude_sonnet: Option<Vec<String>>,
+    /// claude 平台「弱档」候选（内置 `CLAUDE_HAIKU_CANDIDATES`）。
+    #[serde(default)]
+    pub claude_haiku: Option<Vec<String>>,
+}
+
 /// 远端配置的全文。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct RemoteConfig {
@@ -300,6 +328,10 @@ pub struct RemoteConfig {
     /// [`RemoteConfig::promo_codes`] 上的注释。
     #[serde(default)]
     pub star_reward: Option<StarRewardConfig>,
+    /// 中转站档位的模型选型表（部分覆盖内置）。`None`（旧线上配置/未配置）= 内置表，
+    /// 双向兼容的理由同 [`RemoteConfig::promo_codes`] 上的注释。
+    #[serde(default)]
+    pub relay_model_selection: Option<RemoteModelSelection>,
 }
 
 /// 端点与公钥都配好了没。任一没配就整条链路 no-op（走缓存/内置）。
@@ -762,6 +794,35 @@ mod tests {
     use serde::Deserialize;
     use std::sync::Mutex;
 
+    /// `relay_model_selection` 的双向兼容：老配置（无此键）解出 `None` 走内置表；
+    /// 新配置带此键正常解出 —— 字段级部分覆盖由 `provision` 侧 merge 落实。
+    #[test]
+    fn relay_model_selection_is_optional_and_parses() {
+        let legacy: RemoteConfig = serde_json::from_str("{}").expect("老配置必须可解");
+        assert!(legacy.relay_model_selection.is_none());
+
+        let with_field: RemoteConfig = serde_json::from_str(
+            r#"{
+                "relay_model_selection": {
+                    "codex_main": ["gpt-6-astra", "gpt-5.6-sol"],
+                    "claude_opus": ["claude-opus-6"]
+                }
+            }"#,
+        )
+        .expect("新配置必须可解");
+        let selection = with_field.relay_model_selection.expect("字段在场");
+        assert_eq!(
+            selection.codex_main,
+            Some(vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()])
+        );
+        assert_eq!(
+            selection.claude_opus,
+            Some(vec!["claude-opus-6".to_string()])
+        );
+        assert_eq!(selection.default_model, None);
+        assert_eq!(selection.claude_sonnet, None);
+    }
+
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct DirectoryV2Contract {
@@ -1068,6 +1129,7 @@ mod tests {
             tier_configs: std::collections::BTreeMap::new(),
             relay_directory: RelayDirectoryPolicy::default(),
             star_reward: None,
+            relay_model_selection: None,
         }
     }
 
@@ -1083,6 +1145,7 @@ mod tests {
             tier_configs: std::collections::BTreeMap::new(),
             relay_directory: RelayDirectoryPolicy::default(),
             star_reward: None,
+            relay_model_selection: None,
         }
     }
 
