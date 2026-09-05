@@ -3127,6 +3127,7 @@ fn newapi_candidates_for_group(
     account_id: i64,
     group: &newapi_provision::ReconciledGroup,
     models: &[String],
+    tables: &provision::ModelSelectionTables,
 ) -> Vec<ManagedProvisionCandidate> {
     let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.identity.0);
     // 纯生图分组只出生图候选，不扇出到三个聊天栏：把生图模型写成聊天模型是**调用必
@@ -3141,7 +3142,7 @@ fn newapi_candidates_for_group(
     app_types
         .into_iter()
         .map(|app_type| {
-            let picked = provision::pick_tier_models(&app_type, Some(models));
+            let picked = provision::pick_tier_models_with(&app_type, Some(models), tables);
             ManagedProvisionCandidate {
                 provider_id: provider_id.clone(),
                 app_type,
@@ -3180,6 +3181,9 @@ async fn provision_backend(
     op: &creds::Relay,
     browser_fallback: Option<api::BrowserApiFallback>,
 ) -> Result<ManagedProvisionBatch, AppError> {
+    // 一次 provision 解析一次选型表（内置 + 远端覆盖），两个 backend 共用 ——
+    // sub2api 与 newapi 的选型纪律必须来自同一份数据（尺子 1.4：一个事实一个 owner）。
+    let tables = provision::ModelSelectionTables::resolve();
     // 站点声明探测与 backend 无关（约定路径是 LoongPort 的约定，newapi 站长同样能放）：
     // 404/失败/格式不认都是 None，绝不打断登录主流程。
     let site_declaration = crate::relay::site_config::fetch_site_declaration(&op.site_origin).await;
@@ -3204,7 +3208,7 @@ async fn provision_backend(
             if let Some(fallback) = browser_fallback {
                 client = client.with_browser_fallback(fallback);
             }
-            let mut result = provision::provision(&client).await?;
+            let mut result = provision::provision(&client, &tables).await?;
             provision::sort_tiers(&mut result.tiers);
             let keys_created = result
                 .tiers
@@ -3353,6 +3357,7 @@ async fn provision_backend(
                     result.account_id,
                     &group,
                     &models,
+                    &tables,
                 ));
             }
             Ok(batch)
@@ -8539,7 +8544,14 @@ mod tests {
                     &group.identity,
                     Some(&models),
                 );
-                newapi_candidates_for_group(&op.site_origin, account_id, group, &models)
+                newapi_candidates_for_group(
+                    &op.site_origin,
+                    account_id,
+                    group,
+                    &models,
+                    // 测试钉内置表：选型断言不随本机真实远端缓存漂移。
+                    &provision::ModelSelectionTables::builtin(),
+                )
             })
             .collect();
         ManagedProvisionBatch {
@@ -8566,8 +8578,13 @@ mod tests {
             provision::normalize_model_names(vec!["nano-banana-2".into(), "gpt-image-2".into()]);
         let account_id = 7;
 
-        let candidates =
-            newapi_candidates_for_group(&op.site_origin, account_id, &group, &image_models);
+        let candidates = newapi_candidates_for_group(
+            &op.site_origin,
+            account_id,
+            &group,
+            &image_models,
+            &provision::ModelSelectionTables::builtin(),
+        );
         assert_eq!(candidates.len(), 1, "纯生图分组不该再扇出到聊天栏");
         assert_eq!(candidates[0].app_type, AppType::CodexImage);
         // 默认模型 = gpt-image 家族优先（跨家族并存时表里靠前的家族胜出）。

@@ -190,7 +190,10 @@ pub struct TargetedTier {
 ///
 /// 这比「按当前 tab 拉」好在：用户在任何一个 tab 登录一次，全部平台的档位都备好了 ——
 /// 不必为每个 tab 各点一次「获取密钥」，也不可能把某个平台的 sk 写成另一个平台的形状。
-pub async fn provision(client: &Client) -> Result<ProvisionResult, AppError> {
+pub async fn provision(
+    client: &Client,
+    tables: &ModelSelectionTables,
+) -> Result<ProvisionResult, AppError> {
     // 账号身份从 `client` 取，**不另收一个参数** —— 「用哪个账号建 Key」与
     // 「用哪个账号发请求」必须是同一个答案，两处各传一遍就可能不一致。
     let account_id = client.account_id();
@@ -232,7 +235,7 @@ pub async fn provision(client: &Client) -> Result<ProvisionResult, AppError> {
 
     let mut result = ProvisionResult::default();
     for (group, app_type) in usable {
-        match ensure_key_for(client, account_id, &app_type, &group, &existing).await {
+        match ensure_key_for(client, account_id, &app_type, &group, &existing, tables).await {
             Ok(tier) => {
                 // **纯生图分组落到生图那一栏**，不是 codex。
                 //
@@ -314,6 +317,7 @@ async fn ensure_key_for(
     app_type: &AppType,
     group: &Group,
     existing: &[ApiKey],
+    tables: &ModelSelectionTables,
 ) -> Result<Tier, AppError> {
     let (api_key, created) = match claim_key(existing, account_id, &group.platform, group.id) {
         // 正常路径：认领到了就直接用，不发任何写请求。
@@ -374,8 +378,8 @@ async fn ensure_key_for(
             None
         }
     };
-    let picked = pick_tier_models(app_type, models.as_deref());
-    if picked.main != DEFAULT_MODEL {
+    let picked = pick_tier_models_with(app_type, models.as_deref(), tables);
+    if picked.main != tables.default_model {
         // 写了非默认模型是**要留痕的判断**：它决定这条档位能不能用，
         // 而判据（模型列表）是网络来的、事后无从复现。
         log::info!(
@@ -987,13 +991,13 @@ pub fn preserve_supported_env_model(
 /// ⚠️ **它不再无条件套给每条 codex 档位** —— 纯生图分组（`/v1/models` 里只有
 /// `gpt-image-*`）写它就是必定 404。选哪个模型走 [`pick_model`]，本常量是那里的回落值。
 ///
-/// ## ⚠️ 改这个值时必须把旧值加进 [`HISTORICAL_DEFAULT_MODELS`]
+/// ## 换值的真实影响面（2026-09-05 重核，替换原先那段「必须把旧值加进历史表」的说法）
 ///
-/// 已存在的档位**不会**被 provision 改写模型名（只换 sk），所以改了这个常量之后，
-/// 它们的配置里还是旧模型 ⇒ 与「用户改过没有」的比对基准对不上 ⇒
-/// **界面上每一个档位都显示「已手动维护」**，而用户一个字都没改过。
-///
-/// 那个数组就是为此存在的（「读宽写窄」：认全部历史值，写入只产出当前值）。
+/// 「已手动维护」是**存库标记**（编辑页置位、恢复默认复位），不是内容比对 ——
+/// 换这个值（或远端覆盖它，见 [`ModelSelectionTables`]）不会把存量档位误标成手动
+/// 维护。重放对未编辑档位走 `preserve_supported_model`：旧模型还在新目录就保留 ⇒
+/// 换默认值只影响**新建**的档位与「旧模型已从目录下架」的档位 —— 后者正是想要的
+/// 「新一代自动跟上」。
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// 生图模型的名字前缀家族。**一个表唯源**：[`is_image_model`]（认不认）与
@@ -1071,14 +1075,22 @@ pub fn image_tier_app_type(app_type: &AppType, model: &str) -> AppType {
 /// `list_models` 可能因为站点没这个端点、权限不够、或临时故障而返回 `None`。
 /// 那时回落到旧行为：**最坏情况是退化成现状**（纯生图分组写错模型名、选中 404），
 /// 而报错会让整个「获取密钥」失败，把一个「某个档位模型名不对」放大成「一个档位都没有」。
+/// [`pick_model_with`] 的内置表形态：主链路走 `_with`（远端合并表），这个入口留给
+/// 测试与「不关心远端覆盖」的调用方 —— 测试钉内置表，选型断言不随本机缓存漂移。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn pick_model(available: Option<&[String]>) -> String {
+    pick_model_with(available, &ModelSelectionTables::builtin())
+}
+
+/// [`pick_model`] 的选型表注入版：provision 主链路传远端合并后的表，测试传内置表。
+pub fn pick_model_with(available: Option<&[String]>, tables: &ModelSelectionTables) -> String {
     let Some(models) = available else {
-        return DEFAULT_MODEL.to_string();
+        return tables.default_model.clone();
     };
     // 有任何一个非生图模型 ⇒ 这不是纯生图分组，照旧写默认文本模型。
     // 纯生图的判据见 [`is_pure_image_group`]（唯源），归一化在 [`is_image_model`] 里。
     if !is_pure_image_group(models) {
-        return DEFAULT_MODEL.to_string();
+        return tables.default_model.clone();
     }
     // 取**最新的那一代**，见 `image_model_rank`。
     // 空列表在 `list_models` 里已经归成 `None` 了，走不到这里；真走到也回落默认值。
@@ -1089,11 +1101,11 @@ pub fn pick_model(available: Option<&[String]>) -> String {
                 .cmp(&image_model_rank(b))
                 // 同代时按名字定序，让结果是该分组的一个确定函数（不随
                 // `/v1/models` 的返回顺序抖动 —— 那个顺序实测不稳定，而抖动会让
-                // `is_user_edited` 的基准跟着抖 ⇒ 「已手动维护」标记随机出现又消失）。
+                // 选型结果跟着抖 ⇒ 同一分组两次 provision 写出不同的模型名）。
                 .then_with(|| a.as_str().cmp(b.as_str()))
         })
         .cloned()
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+        .unwrap_or_else(|| tables.default_model.clone())
 }
 
 /// 一条档位该写进配置的模型：主模型 + claude 平台的角色模型。
@@ -1127,6 +1139,110 @@ const CLAUDE_HAIKU_CANDIDATES: &[&str] = &["claude-haiku-4-5", "gpt-5.6-luna", "
 /// **顺延**而不是照旧写一个列表里不存在的模型 —— 那是选中即 404。
 const CODEX_MAIN_CANDIDATES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4"];
 
+/// 解析后的模型选型表：内置常量经远端覆盖合并后的产物，选型逻辑的**唯一数据源**。
+///
+/// ## 为什么收成一张表
+///
+/// 散落的常量读取点没法整体替换：远端覆盖（remote_config 的 `relay_model_selection`，
+/// 2026-09-05 起）需要一处明确的合并位置，并保证 [`first_hit`]/回落语义不因数据来源
+/// （内置/远端）而变。调整候选就是改 [`ModelSelectionTables::builtin`] 那一份内置 +
+/// 远端配置，选型函数不动。
+///
+/// ## 远程化的安全前提（与生图家族表的区别）
+///
+/// 候选的选中规则是「分组目录里**第一个精确命中**的」（[`first_hit`]）⇒ 远端给一个
+/// 目录里不存在的名字会被自然顺延，坏值的失败模式是「没生效」而不是「写出 404 档位」。
+/// 这是模型候选表敢远程化、而生图家族表（能力判据，认错即错栏）暂不远程化的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSelectionTables {
+    /// 目录拉不到时写的主模型回落值（内置 [`DEFAULT_MODEL`]）。
+    pub default_model: String,
+    /// codex 主模型候选（优先级序，内置 `CODEX_MAIN_CANDIDATES`）。
+    pub codex_main: Vec<String>,
+    /// claude 平台「最强档」候选（内置 `CLAUDE_OPUS_CANDIDATES`）。
+    pub claude_opus: Vec<String>,
+    /// claude 平台「次强档」候选（内置 `CLAUDE_SONNET_CANDIDATES`）。
+    pub claude_sonnet: Vec<String>,
+    /// claude 平台「弱档」候选（内置 `CLAUDE_HAIKU_CANDIDATES`）。
+    pub claude_haiku: Vec<String>,
+}
+
+/// 远端一张候选列表的清洗：条目 trim 后为空的剔除，剔完整张表空了就当没给。
+fn merged_list(remote: Option<&Vec<String>>, builtin: &[&str]) -> Vec<String> {
+    match remote {
+        Some(list) => {
+            let filtered: Vec<String> = list
+                .iter()
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            if filtered.is_empty() {
+                builtin.iter().map(|entry| entry.to_string()).collect()
+            } else {
+                filtered
+            }
+        }
+        None => builtin.iter().map(|entry| entry.to_string()).collect(),
+    }
+}
+
+impl ModelSelectionTables {
+    /// 内置表。测试与「无远端覆盖」的回落共用这一份 —— 也因此选型测试不碰真实缓存。
+    pub fn builtin() -> Self {
+        Self {
+            default_model: DEFAULT_MODEL.to_string(),
+            codex_main: CODEX_MAIN_CANDIDATES
+                .iter()
+                .map(|entry| entry.to_string())
+                .collect(),
+            claude_opus: CLAUDE_OPUS_CANDIDATES
+                .iter()
+                .map(|entry| entry.to_string())
+                .collect(),
+            claude_sonnet: CLAUDE_SONNET_CANDIDATES
+                .iter()
+                .map(|entry| entry.to_string())
+                .collect(),
+            claude_haiku: CLAUDE_HAIKU_CANDIDATES
+                .iter()
+                .map(|entry| entry.to_string())
+                .collect(),
+        }
+    }
+
+    /// 字段级**部分覆盖**：远端给了才替换，缺席回落内置（与 vendor 侧
+    /// `tier_configs` / `RemoteClaudeRoleModels` 同一语义）—— 远端只想调 codex
+    /// 候选时不必复述 claude 那三张表。
+    pub fn merge(remote: Option<&crate::relay::remote_config::RemoteModelSelection>) -> Self {
+        let Some(remote) = remote else {
+            return Self::builtin();
+        };
+        Self {
+            default_model: remote
+                .default_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            codex_main: merged_list(remote.codex_main.as_ref(), CODEX_MAIN_CANDIDATES),
+            claude_opus: merged_list(remote.claude_opus.as_ref(), CLAUDE_OPUS_CANDIDATES),
+            claude_sonnet: merged_list(remote.claude_sonnet.as_ref(), CLAUDE_SONNET_CANDIDATES),
+            claude_haiku: merged_list(remote.claude_haiku.as_ref(), CLAUDE_HAIKU_CANDIDATES),
+        }
+    }
+
+    /// 生产解析：从**已验签**的远端缓存合并。缓存缺失/字段缺席都自然回落内置。
+    /// 签名保证的是完整性；正确性靠 [`first_hit`] 的精确命中兜底（见结构体文档）。
+    pub fn resolve() -> Self {
+        Self::merge(
+            crate::relay::remote_config::load_cached()
+                .as_ref()
+                .and_then(|config| config.relay_model_selection.as_ref()),
+        )
+    }
+}
+
 /// 一条档位的模型名：**按平台**从该分组模型列表里挑，而不是写死 [`DEFAULT_MODEL`]。
 ///
 /// ## 为什么必须有（2026-08-08 修复）
@@ -1147,24 +1263,30 @@ const CODEX_MAIN_CANDIDATES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.
 /// - **其它平台**：模型列表第一个文本模型。
 /// - **纯生图分组**（只有 `gpt-image-*`）：仍写最新的生图模型（复用作 `pick_model`）。
 /// - **列表拉不到**：回落 `DEFAULT_MODEL`（旧行为，最坏退化）。
-pub fn pick_tier_models(app_type: &AppType, models: Option<&[String]>) -> TierModels {
+///
+/// 候选的**数据源**是 [`ModelSelectionTables`]（内置 + 远端覆盖）。
+pub fn pick_tier_models_with(
+    app_type: &AppType,
+    models: Option<&[String]>,
+    tables: &ModelSelectionTables,
+) -> TierModels {
     let Some(models) = models else {
         return TierModels {
-            main: DEFAULT_MODEL.to_string(),
+            main: tables.default_model.clone(),
             claude_roles: None,
         };
     };
     // 纯生图分组（只有生图模型）：写它自己的生图模型，不分角色。
     if is_pure_image_group(models) {
         return TierModels {
-            main: pick_model(Some(models)),
+            main: pick_model_with(Some(models), tables),
             claude_roles: None,
         };
     }
     match app_type {
-        AppType::Claude => pick_claude_tier_models(models),
+        AppType::Claude => pick_claude_tier_models(models, tables),
         AppType::Codex | AppType::CodexImage => TierModels {
-            main: first_hit(CODEX_MAIN_CANDIDATES, models).unwrap_or_else(|| models[0].clone()),
+            main: first_hit(&tables.codex_main, models).unwrap_or_else(|| models[0].clone()),
             claude_roles: None,
         },
         AppType::Gemini => TierModels {
@@ -1199,20 +1321,27 @@ pub fn pick_tier_models(app_type: &AppType, models: Option<&[String]>) -> TierMo
     }
 }
 
+/// [`pick_tier_models_with`] 的内置表形态：主链路走 `_with`（远端合并表），这个入口
+/// 留给测试与「不关心远端覆盖」的调用方 —— 测试钉内置表，选型断言不随本机缓存漂移。
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn pick_tier_models(app_type: &AppType, models: Option<&[String]>) -> TierModels {
+    pick_tier_models_with(app_type, models, &ModelSelectionTables::builtin())
+}
+
 /// claude 平台的角色档位挑选：各角色取候选里第一个命中的，取不到顺延相邻档位。
 ///
 /// 主模型（`ANTHROPIC_MODEL`）用最高档（opus）；某个角色 miss 时指向 main，保证
-/// 结果可用且确定（同一列表每次挑出同一个值 —— `is_user_edited` 的比对基准不抖）。
-fn pick_claude_tier_models(models: &[String]) -> TierModels {
+/// 结果可用且确定（同一列表每次挑出同一个值）。
+fn pick_claude_tier_models(models: &[String], tables: &ModelSelectionTables) -> TierModels {
     let first_text = models.iter().find(|m| !is_image_model(m)).cloned();
-    let opus = first_hit(CLAUDE_OPUS_CANDIDATES, models);
-    let sonnet = first_hit(CLAUDE_SONNET_CANDIDATES, models);
-    let haiku = first_hit(CLAUDE_HAIKU_CANDIDATES, models);
+    let opus = first_hit(&tables.claude_opus, models);
+    let sonnet = first_hit(&tables.claude_sonnet, models);
+    let haiku = first_hit(&tables.claude_haiku, models);
     let main = opus
         .clone()
         .or_else(|| sonnet.clone())
         .or_else(|| first_text.clone())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        .unwrap_or_else(|| tables.default_model.clone());
     let opus = opus.unwrap_or_else(|| main.clone());
     let sonnet = sonnet.unwrap_or_else(|| main.clone());
     let haiku = haiku.unwrap_or_else(|| main.clone());
@@ -1234,11 +1363,14 @@ fn pick_claude_tier_models(models: &[String]) -> TierModels {
 }
 
 /// 从候选列表里取第一个在模型列表里**精确存在**的模型名。
-fn first_hit(candidates: &[&str], models: &[String]) -> Option<String> {
+///
+/// 候选来自 [`ModelSelectionTables`]（内置或远端合并后的）；精确命中意味着远端给的
+/// 目录里不存在的名字会被自然顺延 —— 那是远端候选「坏值只敢不生效」的安全前提。
+fn first_hit(candidates: &[String], models: &[String]) -> Option<String> {
     candidates
         .iter()
-        .find(|c| models.iter().any(|m| m == *c))
-        .map(|c| c.to_string())
+        .find(|candidate| models.iter().any(|model| model == *candidate))
+        .map(|candidate| candidate.to_string())
 }
 
 /// 该模型是否支持 1M 上下文 —— claude 平台档位给它附 `[1M]` 后缀声明。
@@ -1981,6 +2113,92 @@ mod tests {
         );
         let newer = vec!["nano-banana-2".to_string(), "nano-banana-3".to_string()];
         assert_eq!(pick_model(Some(&newer)), "nano-banana-3");
+    }
+
+    /// 远端选型表是**字段级部分覆盖**：给了才替换，缺席/清洗后为空回落内置。
+    /// 这是它敢远程化的纪律面（安全面在 [`ModelSelectionTables`] 的结构体文档）。
+    #[test]
+    fn model_selection_tables_partial_override_with_sanitization() {
+        let builtin = ModelSelectionTables::builtin();
+        let remote = crate::relay::remote_config::RemoteModelSelection {
+            // 空白值 → 回落内置。
+            default_model: Some("   ".into()),
+            // 有实条目 → 生效（空白条目被剔除）。
+            codex_main: Some(vec![" gpt-6-astra ".into(), " ".into()]),
+            // 整张清洗后为空 → 当没给。
+            claude_opus: Some(vec!["".into(), "  ".into()]),
+            claude_sonnet: None,
+            claude_haiku: None,
+        };
+        let merged = ModelSelectionTables::merge(Some(&remote));
+        assert_eq!(merged.default_model, builtin.default_model);
+        assert_eq!(merged.codex_main, vec!["gpt-6-astra".to_string()]);
+        assert_eq!(merged.claude_opus, builtin.claude_opus);
+        assert_eq!(merged.claude_sonnet, builtin.claude_sonnet);
+        assert_eq!(merged.claude_haiku, builtin.claude_haiku);
+
+        let trimmed = crate::relay::remote_config::RemoteModelSelection {
+            default_model: Some(" gpt-6-astra ".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ModelSelectionTables::merge(Some(&trimmed)).default_model,
+            "gpt-6-astra"
+        );
+        assert_eq!(
+            ModelSelectionTables::merge(None),
+            builtin,
+            "远端缺席 = 内置表，这是三层回落（远端 > 缓存 > 内置）落到选型的形态"
+        );
+    }
+
+    /// 远端候选**真的改变选型**，且坏值只敢「不生效」：
+    /// 目录里第一个精确命中的候选胜出，目录没有的远端名字被顺延、不会写进配置。
+    #[test]
+    fn pick_tier_models_with_honors_remote_candidates() {
+        let tables = ModelSelectionTables {
+            codex_main: vec!["gpt-6-astra".into(), "gpt-5.6-sol".into()],
+            ..ModelSelectionTables::builtin()
+        };
+        // 远端首位不在目录 → 顺延到次位（内置同款纪律：不写目录里不存在的模型）。
+        let catalog = vec!["gpt-5.6-sol".to_string(), "gpt-5.6-terra".to_string()];
+        assert_eq!(
+            pick_tier_models_with(&AppType::Codex, Some(&catalog), &tables).main,
+            "gpt-5.6-sol"
+        );
+        // 目录里有远端首位 → 命中。
+        let with_new = vec!["gpt-6-astra".to_string()];
+        assert_eq!(
+            pick_tier_models_with(&AppType::Codex, Some(&with_new), &tables).main,
+            "gpt-6-astra"
+        );
+
+        // claude 角色表覆盖；挑出的名字照常过 `[1M]` 声明规则（opus-6 不在名单 → 无后缀）。
+        let claude_tables = ModelSelectionTables {
+            claude_opus: vec!["claude-opus-6".into()],
+            ..ModelSelectionTables::builtin()
+        };
+        let claude_catalog = vec!["claude-opus-6".to_string(), "claude-haiku-4-5".to_string()];
+        let picked = pick_tier_models_with(&AppType::Claude, Some(&claude_catalog), &claude_tables);
+        let roles = picked.claude_roles.expect("claude 必须有角色模型");
+        assert_eq!(picked.main, "claude-opus-6");
+        assert_eq!(roles.opus, "claude-opus-6");
+
+        // default_model 覆盖：目录拉不到时的回落值跟着换。
+        let fallback = ModelSelectionTables {
+            default_model: "gpt-6-astra".into(),
+            ..ModelSelectionTables::builtin()
+        };
+        assert_eq!(
+            pick_tier_models_with(&AppType::Codex, None, &fallback).main,
+            "gpt-6-astra"
+        );
+        // 纯生图分组不受选型表影响（它写自己的生图模型，不走候选）。
+        let image_group = vec!["gpt-image-2".to_string()];
+        assert_eq!(
+            pick_tier_models_with(&AppType::CodexImage, Some(&image_group), &fallback).main,
+            "gpt-image-2"
+        );
     }
 
     #[test]
