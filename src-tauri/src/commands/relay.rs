@@ -6134,8 +6134,6 @@ mod tests {
     }
     use std::{
         collections::HashMap,
-        future::Future,
-        pin::Pin,
         sync::{Arc, Mutex},
     };
 
@@ -9381,9 +9379,21 @@ mod tests {
     /// 这正是它需要一条测试的原因。
     ///
     /// 会红的改法：把归属判据换回 `creds::load()` / 任何「全局当前」的东西。
+    type DiagCompletion = (
+        oneshot::Sender<
+            Result<
+                (
+                    VerificationReport,
+                    Vec<crate::relay::model_verification::types::ProbeDiagnostic>,
+                ),
+                RunFailureKind,
+            >,
+        >,
+        ProbeProgress,
+    );
+
     struct ResetVerifier {
-        senders:
-            Mutex<HashMap<TargetKey, oneshot::Sender<Result<VerificationReport, RunFailureKind>>>>,
+        senders: Mutex<HashMap<TargetKey, DiagCompletion>>,
     }
 
     impl ResetVerifier {
@@ -9398,7 +9408,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .remove(target)
-                .is_some_and(|sender| sender.send(Ok(report)).is_ok())
+                .is_some_and(|(sender, _)| sender.send(Ok((report, Vec::new()))).is_ok())
         }
     }
 
@@ -9409,14 +9419,12 @@ mod tests {
             progress: ProbeProgress,
         ) -> Result<PreparedVerification, RunFailureKind> {
             let (sender, receiver) = oneshot::channel();
-            self.senders.lock().unwrap().insert(target, sender);
-            let future: Pin<
-                Box<
-                    dyn Future<Output = Result<VerificationReport, RunFailureKind>>
-                        + Send
-                        + 'static,
-                >,
-            > = Box::pin(async move { receiver.await.unwrap() });
+            let progress_for_store = progress.clone();
+            self.senders
+                .lock()
+                .unwrap()
+                .insert(target, (sender, progress_for_store));
+            let future = Box::pin(async move { receiver.await.unwrap() });
             let future = Box::pin(async move {
                 let result = future.await;
                 if result.is_ok() {

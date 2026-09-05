@@ -2,9 +2,13 @@ use serde_json::{json, Value};
 
 use crate::relay::model_verification::{
     capability_profiles::CapabilityProfile,
-    protocols::{model_matches_protocol_family, models_match, send_and_read, send_sse, RunFailure},
+    protocols::{
+        capture_leg_diagnostics, model_matches_protocol_family, models_match, record_event_types,
+        send_and_read, send_sse, truncate_for_diagnostic, RunFailure, MAX_DIAGNOSTIC_REQUEST_BYTES,
+        MAX_DIAGNOSTIC_RESPONSE_BYTES,
+    },
     target::ResolvedTarget,
-    types::{EvidenceCode, EvidenceFact, EvidenceOutcome},
+    types::{EvidenceCode, EvidenceFact, EvidenceOutcome, ProbeDiagnostic},
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -14,7 +18,7 @@ pub(crate) async fn run_balanced(
     client: &reqwest::Client,
     target: &ResolvedTarget,
     profile: &CapabilityProfile,
-) -> Result<Vec<EvidenceFact>, RunFailure> {
+) -> Result<(Vec<EvidenceFact>, Vec<ProbeDiagnostic>), RunFailure> {
     run_balanced_with_progress(client, target, profile, &mut || {}).await
 }
 
@@ -23,42 +27,81 @@ pub(crate) async fn run_balanced_with_progress(
     target: &ResolvedTarget,
     profile: &CapabilityProfile,
     on_probe_complete: &mut impl FnMut(),
-) -> Result<Vec<EvidenceFact>, RunFailure> {
+) -> Result<(Vec<EvidenceFact>, Vec<ProbeDiagnostic>), RunFailure> {
     let model = upstream_model(&target.target().model);
+    let mut diagnostics: Vec<ProbeDiagnostic> = Vec::new();
     let endpoint = format!(
         "{}/v1/messages",
         target.protocol_base().trim_end_matches('/')
     );
 
-    let core = send_message(client, &endpoint, target.api_key(), core_request(&model)).await?;
+    let core_request_body = core_request(&model);
+    let core = send_message(
+        client,
+        &endpoint,
+        target.api_key(),
+        core_request_body.clone(),
+    )
+    .await?;
     let mut facts = parse_core_response(&core, &model);
+    capture_leg_diagnostics(&mut diagnostics, "core", &facts, &core_request_body, &core);
     on_probe_complete();
 
+    let identity_request_body = identity_request(&model);
     let identity = send_message(
         client,
         &endpoint,
         target.api_key(),
-        identity_request(&model),
+        identity_request_body.clone(),
     )
     .await?;
-    facts.push(parse_identity_response(&identity, &model));
+    let identity_fact = parse_identity_response(&identity, &model);
+    capture_leg_diagnostics(
+        &mut diagnostics,
+        "identity",
+        std::slice::from_ref(&identity_fact),
+        &identity_request_body,
+        &identity,
+    );
+    facts.push(identity_fact);
     on_probe_complete();
 
-    let tool = send_message(client, &endpoint, target.api_key(), tool_request(&model)).await?;
-    facts.push(parse_tool_response(&tool, &model));
+    let tool_request_body = tool_request(&model);
+    let tool = send_message(
+        client,
+        &endpoint,
+        target.api_key(),
+        tool_request_body.clone(),
+    )
+    .await?;
+    let tool_fact = parse_tool_response(&tool, &model);
+    capture_leg_diagnostics(
+        &mut diagnostics,
+        "tool",
+        std::slice::from_ref(&tool_fact),
+        &tool_request_body,
+        &tool,
+    );
+    facts.push(tool_fact);
     on_probe_complete();
 
     // 无 message_stop = 流被截断（干净 EOF 中途收尾），按错误重试一次而不是
     // 判「流式生命周期未通过」——截断是网络事实，不是协议证据。
-    let mut stream = None;
+    let stream_request_body = stream_request(&model);
+    let mut stream: Option<StreamReducer<'_>> = None;
+    let mut stream_raw_events: Vec<String> = Vec::new();
     for _ in 0..2 {
+        stream_raw_events.clear();
         let state = send_stream(
             client,
             &endpoint,
             target.api_key(),
-            stream_request(&model),
+            stream_request_body.clone(),
             || StreamReducer::new(&model),
-            |stream, event| stream.observe(event),
+            |stream, event| {
+                record_event_types(&mut stream_raw_events, event);
+                stream.observe(event)
+            },
         )
         .await?;
         if state.saw_message_stop {
@@ -66,10 +109,36 @@ pub(crate) async fn run_balanced_with_progress(
             break;
         }
     }
-    let stream = stream.ok_or(RunFailure::InvalidResponse)?;
-    facts.extend(stream.finish());
+    let Some(stream) = stream else {
+        // 截断重试仍无终端：把已见事件序列留进诊断再报错，方便定位。
+        diagnostics.push(ProbeDiagnostic {
+            probe: "stream".into(),
+            code: EvidenceCode::StreamLifecycle,
+            request: truncate_for_diagnostic(
+                &serde_json::to_string(&stream_request_body).unwrap_or_default(),
+                MAX_DIAGNOSTIC_REQUEST_BYTES,
+            ),
+            response: truncate_for_diagnostic(
+                &stream_raw_events.join(" → "),
+                MAX_DIAGNOSTIC_RESPONSE_BYTES,
+            ),
+        });
+        return Err(RunFailure::InvalidResponse);
+    };
+    let stream_facts = stream.finish();
+    let stream_summary = stream_raw_events.join(" → ");
+    capture_leg_diagnostics(
+        &mut diagnostics,
+        "stream",
+        &stream_facts,
+        &stream_request_body,
+        stream_summary.as_bytes(),
+    );
+    facts.extend(stream_facts);
     on_probe_complete();
 
+    // thinking/continuation 腿**不采集诊断**：响应携带服务端签名材料，
+    // 隐私红线是签名不落盘（privacy_tests 钉着）。
     if profile.supports_thinking_signature {
         let thinking = send_message(
             client,
@@ -108,7 +177,7 @@ pub(crate) async fn run_balanced_with_progress(
         }
     }
 
-    Ok(facts)
+    Ok((facts, diagnostics))
 }
 
 async fn send_message(
@@ -995,11 +1064,12 @@ mod tests {
         let profile = CapabilityProfile::for_target(&AppType::Claude, "claude-haiku-4-5");
 
         let mut completed_probes = 0;
-        let facts = run_balanced_with_progress(&client, &target, &profile, &mut || {
-            completed_probes += 1;
-        })
-        .await
-        .unwrap();
+        let (facts, _diagnostics) =
+            run_balanced_with_progress(&client, &target, &profile, &mut || {
+                completed_probes += 1;
+            })
+            .await
+            .unwrap();
 
         assert!(facts.contains(&passed(EvidenceCode::ToolCallShape)));
         assert!(facts.contains(&passed(EvidenceCode::StreamLifecycle)));
@@ -1053,6 +1123,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_facts_carry_request_and_response_diagnostics() {
+        // 首腿 core 回 OpenAI 形状（ForeignProtocol failed）→ 诊断带原始
+        // 请求与响应；通过腿（tool/stream）不带。
+        let calls = Arc::new(Mutex::new(0usize));
+        let endpoint = spawn_server(
+            Router::new()
+                .route("/v1/messages", post(foreign_then_happy_handler))
+                .with_state(calls),
+        )
+        .await;
+        let target = target_for(&endpoint, "SENTINEL_API_KEY");
+        let profile = CapabilityProfile::for_target(&AppType::Claude, "future-model-x");
+
+        let (facts, diagnostics) = run_balanced(&reqwest::Client::new(), &target, &profile)
+            .await
+            .unwrap();
+
+        assert!(facts
+            .iter()
+            .any(|fact| fact.code == EvidenceCode::ForeignProtocol
+                && fact.outcome == EvidenceOutcome::Failed));
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.code == EvidenceCode::ForeignProtocol)
+            .expect("failed leg carries a diagnostic");
+        assert_eq!(diagnostic.probe, "core");
+        assert!(diagnostic.request.contains("\"messages\""));
+        assert!(diagnostic.response.contains("chat.completion"));
+        assert!(!diagnostics
+            .iter()
+            .any(|d| d.code == EvidenceCode::ToolCallShape && d.response.is_empty()));
+    }
+
+    async fn foreign_then_happy_handler(Json(body): Json<Value>) -> Response {
+        if body.get("stream") == Some(&Value::Bool(true)) {
+            return ([("content-type", "text/event-stream")], happy_stream()).into_response();
+        }
+        if body.get("tools").is_some() {
+            return Json(json!({
+                "type": "message", "id": "msg_test000000000000000", "model": "future-model-x",
+                "content": [{"type": "tool_use", "id": "toolu_test00000000000", "name": REPORT_PROBE, "input": {"ready": true}}],
+                "usage": {"input_tokens": 1, "output_tokens": 1}, "stop_reason": "tool_use"
+            }))
+                .into_response();
+        }
+        Json(json!({"object": "chat.completion", "choices": [], "text": "SENTINEL_FOREIGN"}))
+            .into_response()
+    }
+
+    #[tokio::test]
     async fn http_failures_are_finite_and_do_not_include_error_body() {
         for (status, body, expected) in [
             (
@@ -1098,7 +1218,7 @@ mod tests {
         let target = target_for(&endpoint, "SENTINEL_API_KEY");
         let profile = CapabilityProfile::for_target(&AppType::Claude, "future-model-x");
 
-        let facts = run_balanced(&reqwest::Client::new(), &target, &profile)
+        let (facts, _) = run_balanced(&reqwest::Client::new(), &target, &profile)
             .await
             .unwrap();
 
@@ -1117,7 +1237,7 @@ mod tests {
         let target = target_for(&endpoint, "SENTINEL_API_KEY");
         let profile = CapabilityProfile::for_target(&AppType::Claude, "future-model-x");
 
-        let facts = run_balanced(&reqwest::Client::new(), &target, &profile)
+        let (facts, _) = run_balanced(&reqwest::Client::new(), &target, &profile)
             .await
             .unwrap();
 

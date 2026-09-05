@@ -29,12 +29,13 @@ mod live_sweep_tests;
 mod tests {
     use super::{
         store::{
-            clear_scope, list_for_provider_ids, list_for_providers, upsert_active, upsert_passive,
+            active_diagnostics, attach_diagnostics, clear_scope, list_for_provider_ids,
+            list_for_providers, upsert_active, upsert_passive,
         },
         types::{
-            EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, RunFailureKind, RunState,
-            StartRunResponse, TargetKey, TargetScope, Verdict, VerificationProgressEvent,
-            VerificationReport, VerificationSource, RULES_VERSION,
+            EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, ProbeDiagnostic,
+            RunFailureKind, RunState, StartRunResponse, TargetKey, TargetScope, Verdict,
+            VerificationProgressEvent, VerificationReport, VerificationSource, RULES_VERSION,
         },
     };
     use crate::{
@@ -183,6 +184,38 @@ mod tests {
             ),
         )?;
         Ok(db)
+    }
+
+    #[test]
+    fn diagnostics_roundtrip_and_clear_on_new_run() {
+        let db = Database::memory().unwrap();
+        insert_provider(&db, "provider-a", "claude").unwrap();
+        let target = TargetKey::new("provider-a", "claude", "gpt-a");
+        upsert_active(
+            &db,
+            &report("provider-a", "claude", "gpt-a", Verdict::Anomaly),
+        )
+        .unwrap();
+        let diagnostics = vec![ProbeDiagnostic {
+            probe: "core".into(),
+            code: EvidenceCode::ModelMatch,
+            request: "{...}".into(),
+            response: "{...}".into(),
+        }];
+        attach_diagnostics(&db, &target, &diagnostics).unwrap();
+
+        let loaded = active_diagnostics(&db, "provider-a", "claude", "gpt-a").unwrap();
+        assert_eq!(loaded, diagnostics);
+
+        // 新一轮 upsert 清空旧诊断（新报告还没跑完时不显示上一轮的原始数据）。
+        upsert_active(
+            &db,
+            &report("provider-a", "claude", "gpt-a", Verdict::Trusted),
+        )
+        .unwrap();
+        assert!(active_diagnostics(&db, "provider-a", "claude", "gpt-a")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -3542,7 +3542,8 @@
           "signatureContinuation": "簽章連續性",
           "foreignProtocol": "其他通訊協定特徵",
           "foreignSelfIdentification": "其他模型自我識別"
-        }
+        },
+        "diagnose": "查看原因"
       },
       "failure": {
         "authentication": "身分驗證失敗。請檢查登入資訊或 API 金鑰後再試一次。",
@@ -3554,6 +3555,22 @@
         "modelUnavailable": "此模型無法使用。請選擇其他模型。",
         "cancelled": "驗證已停止。",
         "invalidResponse": "服務商傳回的回應無法驗證。請稍後再試或人工複核。"
+      },
+      "diagnostic": {
+        "title": "未通過原因",
+        "loading": "讀取中…",
+        "empty": "這條沒有留存的原始資料（可能來自舊版本的驗證）。",
+        "request": "發出的請求",
+        "response": "收到的回應",
+        "copy": "複製",
+        "copied": "已複製",
+        "probe": {
+          "core": "基礎請求",
+          "identity": "身分自述",
+          "tool": "工具呼叫",
+          "structured": "結構化輸出",
+          "stream": "串流請求"
+        }
       }
     },
     "firstSite": {

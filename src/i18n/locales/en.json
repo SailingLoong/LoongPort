@@ -3541,7 +3541,8 @@
           "signatureContinuation": "Signature continuity",
           "foreignProtocol": "Other protocol characteristics",
           "foreignSelfIdentification": "Other model self-identification"
-        }
+        },
+        "diagnose": "Why it failed"
       },
       "failure": {
         "authentication": "Authentication failed. Check the sign-in session or API key and try again.",
@@ -3553,6 +3554,22 @@
         "modelUnavailable": "This model is unavailable. Select another model.",
         "cancelled": "Verification stopped.",
         "invalidResponse": "The provider's response could not be verified. Try again later or review it manually."
+      },
+      "diagnostic": {
+        "title": "Failure details",
+        "loading": "Loading…",
+        "empty": "No raw data kept for this item (possibly from an older verification).",
+        "request": "Request sent",
+        "response": "Response received",
+        "copy": "Copy",
+        "copied": "Copied",
+        "probe": {
+          "core": "Basic request",
+          "identity": "Identity probe",
+          "tool": "Tool call",
+          "structured": "Structured output",
+          "stream": "Streaming request"
+        }
       }
     },
     "firstSite": {

@@ -3541,7 +3541,8 @@
           "signatureContinuation": "シグネチャの連続性",
           "foreignProtocol": "他のプロトコル特性",
           "foreignSelfIdentification": "他のモデルによる自己識別"
-        }
+        },
+        "diagnose": "失敗の理由"
       },
       "failure": {
         "authentication": "認証に失敗しました。ログイン情報または API キーを確認して、もう一度お試しください。",
@@ -3553,6 +3554,22 @@
         "modelUnavailable": "このモデルは利用できません。別のモデルを選択してください。",
         "cancelled": "検証を停止しました。",
         "invalidResponse": "プロバイダーの応答を検証できませんでした。しばらくしてから再試行するか、手動で確認してください。"
+      },
+      "diagnostic": {
+        "title": "失敗の詳細",
+        "loading": "読み込み中…",
+        "empty": "この項目に保存された生データはありません（旧バージョンの検証の可能性）。",
+        "request": "送信したリクエスト",
+        "response": "受信したレスポンス",
+        "copy": "コピー",
+        "copied": "コピーしました",
+        "probe": {
+          "core": "基本リクエスト",
+          "identity": "識別プローブ",
+          "tool": "ツール呼び出し",
+          "structured": "構造化出力",
+          "stream": "ストリーミング"
+        }
       }
     },
     "firstSite": {

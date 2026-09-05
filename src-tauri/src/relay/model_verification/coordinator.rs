@@ -11,13 +11,18 @@ use tauri::Emitter;
 use crate::{
     database::Database,
     relay::model_verification::types::{
-        RunFailureKind, RunState, StartRunResponse, TargetKey, TargetScope,
+        ProbeDiagnostic, RunFailureKind, RunState, StartRunResponse, TargetKey, TargetScope,
         VerificationProgressEvent, VerificationReport,
     },
 };
 
-pub type VerificationFuture =
-    Pin<Box<dyn Future<Output = Result<VerificationReport, RunFailureKind>> + Send + 'static>>;
+pub type VerificationFuture = Pin<
+    Box<
+        dyn Future<Output = Result<(VerificationReport, Vec<ProbeDiagnostic>), RunFailureKind>>
+            + Send
+            + 'static,
+    >,
+>;
 pub type ProbeProgress = Arc<dyn Fn(u8) + Send + Sync + 'static>;
 
 pub struct PreparedVerification {
@@ -404,13 +409,22 @@ impl ModelVerificationCoordinator {
         target: TargetKey,
         run_id: String,
         generation: u64,
-        result: Result<Result<VerificationReport, RunFailureKind>, futures::future::Aborted>,
+        result: Result<
+            Result<(VerificationReport, Vec<ProbeDiagnostic>), RunFailureKind>,
+            futures::future::Aborted,
+        >,
     ) {
         match result {
-            Ok(Ok(report)) if report.target == target => {
+            Ok(Ok((report, diagnostics))) if report.target == target => {
                 let _ = self.persist_if_current_with(&target, &run_id, generation, || {
                     crate::relay::model_verification::store::upsert_active(&self.db, &report)
-                        .map_err(|_| RunFailureKind::InvalidResponse)
+                        .map_err(|_| RunFailureKind::InvalidResponse)?;
+                    crate::relay::model_verification::store::attach_diagnostics(
+                        &self.db,
+                        &report.target,
+                        &diagnostics,
+                    )
+                    .map_err(|_| RunFailureKind::InvalidResponse)
                 });
             }
             Ok(Err(failure)) => {
@@ -651,8 +665,6 @@ fn remove_scope_runs(
 mod tests {
     use std::{
         collections::HashMap,
-        future::Future,
-        pin::Pin,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
@@ -741,7 +753,15 @@ mod tests {
     }
 
     type BlockedCompletion = (
-        oneshot::Sender<Result<VerificationReport, RunFailureKind>>,
+        oneshot::Sender<
+            Result<
+                (
+                    VerificationReport,
+                    Vec<crate::relay::model_verification::types::ProbeDiagnostic>,
+                ),
+                RunFailureKind,
+            >,
+        >,
         ProbeProgress,
     );
 
@@ -773,7 +793,9 @@ mod tests {
                             progress(completed);
                         }
                     }
-                    sender.send(result).is_ok()
+                    sender
+                        .send(result.map(|report| (report, Vec::new())))
+                        .is_ok()
                 })
         }
 
@@ -801,13 +823,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(target, (sender, progress));
-            let future: Pin<
-                Box<
-                    dyn Future<Output = Result<VerificationReport, RunFailureKind>>
-                        + Send
-                        + 'static,
-                >,
-            > = Box::pin(async move { receiver.await.unwrap() });
+            let future = Box::pin(async move { receiver.await.unwrap() });
             Ok(PreparedVerification {
                 total_checks: 3,
                 future,
@@ -1146,10 +1162,13 @@ mod tests {
             target(),
             old.run_id,
             old_generation,
-            Ok(Ok(VerificationReport {
-                verdict: Verdict::Anomaly,
-                ..completed_report(target())
-            })),
+            Ok(Ok((
+                VerificationReport {
+                    verdict: Verdict::Anomaly,
+                    ..completed_report(target())
+                },
+                Vec::new(),
+            ))),
         );
 
         let duplicate = coordinator.start(target()).await.unwrap();

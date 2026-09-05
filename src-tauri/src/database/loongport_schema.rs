@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 17;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 18;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -263,6 +263,30 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 crate::relay::model_verification::history::rebuild_for_passive_source(conn)?;
                 set_version(conn, 17)?;
             }
+            // v17 → v18：模型验真结果表加诊断边车列（失败腿的原始请求/响应，
+            // 供用户点开查看未通过原因）。旧行为 NULL = 无诊断，语义兼容。
+            // 幂等：全新库走 create_tables 已是最终形态（列已在），这里探测
+            // 后跳过，只有停在 v17 的存量库才真正 ALTER。
+            17 => {
+                log::info!("LoongPort 数据迁移 v17 → v18（验真结果加诊断列）");
+                if table_exists(conn, "model_verification_results")?
+                    && !column_exists(
+                        conn,
+                        "model_verification_results",
+                        "active_diagnostics_json",
+                    )?
+                {
+                    conn.execute(
+                        "ALTER TABLE model_verification_results
+                         ADD COLUMN active_diagnostics_json TEXT",
+                        [],
+                    )
+                    .map_err(|error| {
+                        AppError::Database(format!("验真结果表加诊断列失败: {error}"))
+                    })?;
+                }
+                set_version(conn, 18)?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -273,6 +297,36 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+/// 表是否存在（迁移幂等用）。
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, AppError> {
+    let exists: Option<String> = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|error| AppError::Database(format!("查表存在失败: {error}")))?;
+    Ok(exists.is_some())
+}
+
+/// 表列是否存在（迁移幂等用）。
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, AppError> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| AppError::Database(format!("读表结构失败: {error}")))?;
+    let names: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| AppError::Database(format!("读表结构失败: {error}")))?
+        .collect::<Result<_, _>>()
+        .map_err(|error| AppError::Database(format!("读表结构失败: {error}")))?;
+    Ok(names.iter().any(|name| name == column))
 }
 
 /// 删除 `relay_balance_snapshots` 里「与同站上一条余额相同」的行 —— 每个等值

@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   start: vi.fn(),
   cancel: vi.fn(),
   onProgress: vi.fn(),
+  diagnostics: vi.fn(),
 }));
 
 vi.mock("@/lib/api/modelVerification", () => ({ modelVerificationApi: api }));
@@ -43,6 +44,12 @@ vi.mock("react-i18next", () => ({
         "loongport.modelVerification.history.empty": "暂无验证记录",
         "loongport.modelVerification.history.source.active": "当前验证",
         "loongport.modelVerification.evidence.fact.modelMatch": "模型身份",
+        "loongport.modelVerification.evidence.diagnose": "查看原因",
+        "loongport.modelVerification.diagnostic.title": "未通过原因",
+        "loongport.modelVerification.diagnostic.loading": "读取中…",
+        "loongport.modelVerification.diagnostic.empty": "这条没有留存。",
+        "loongport.modelVerification.diagnostic.request": "发出的请求",
+        "loongport.modelVerification.diagnostic.response": "收到的响应",
         "loongport.modelVerification.evidence.fact.streamLifecycle":
           "流式响应生命周期",
         "loongport.modelVerification.evidence.outcome.passed": "通过",
@@ -215,6 +222,49 @@ describe("ModelVerificationDialog", () => {
         progressListener = listener;
         return () => {};
       },
+    );
+  });
+
+  it("shows raw request/response when clicking the warning icon on a failed fact", async () => {
+    api.listModels.mockResolvedValue([
+      { name: "gpt-5.6-sol", fitness: "unknown" as const },
+    ]);
+    api.listHistory.mockResolvedValue([
+      {
+        source: "active" as const,
+        report: {
+          target: {
+            providerId: "provider-a",
+            appType: "codex",
+            model: "gpt-5.6-sol",
+          },
+          verdict: "suspicious",
+          evidenceLevel: "insufficient",
+          facts: [{ code: "modelMatch", outcome: "failed" }],
+          rulesVersion: 2,
+          checkedAt: 1,
+        },
+      },
+    ]);
+    api.diagnostics.mockResolvedValue([
+      {
+        probe: "core",
+        code: "modelMatch",
+        request: '{ "model": "gpt-5.6-sol" }',
+        response: '{ "model": "gpt-5.6-terra" }',
+      },
+    ]);
+    render(<DialogHarness />);
+
+    const trigger = await screen.findByTitle("查看原因");
+    fireEvent.click(trigger);
+
+    expect(await screen.findByText("未通过原因")).toBeInTheDocument();
+    expect(await screen.findByText(/gpt-5.6-terra/)).toBeInTheDocument();
+    expect(api.diagnostics).toHaveBeenCalledWith(
+      "provider-a",
+      "codex",
+      "gpt-5.6-sol",
     );
   });
 
