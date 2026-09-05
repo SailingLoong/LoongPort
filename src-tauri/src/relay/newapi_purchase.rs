@@ -265,6 +265,10 @@ pub(crate) fn build_window<R: tauri::Runtime>(
     // ⚠️ **必须 incognito**，理由同 sub2api 站点窗（purchase.rs 模块文档第 1 条）：
     // 持久 profile 是全 app 共享的，不隔离会读到别的账号残留的登录态 —— 钱充错账号。
     .incognito(true)
+    // 放行 window.open 弹窗：NewAPI 站点的支付 / OAuth 弹窗默认会被 wry 静默
+    // 吞掉，理由与 `relay::browser_import` 那段逐条相同（子窗口共享会话与
+    // opener 语义，无注入脚本与 IPC，不新增攻击面）。
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Allow)
     .build()
     .map_err(|e| AppError::Config(format!("打开站点窗口失败: {e}")))?;
 
