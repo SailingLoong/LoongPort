@@ -2670,7 +2670,10 @@
       "selfManagedTitle": "Official & self-managed",
       "switchBack": "Switch back",
       "selfManagedEmpty": "No official or self-managed providers yet (add in self-managed mode)",
-      "switchBackDone": "Switched back to {{name}}; this app is now self-managed"
+      "switchBackDone": "Switched back to {{name}}; this app is now self-managed",
+      "tiersShort": "tiers",
+      "modelFilterPlaceholder": "Filter models…",
+      "modelFilterEmpty": "No matching models"
     },
     "modelHint": "With a model picked, only tiers whose catalog includes it are chosen; an explicit pick switches to the best tier immediately.",
     "advancedSection": "Advanced (failover queue & circuit breaker)",

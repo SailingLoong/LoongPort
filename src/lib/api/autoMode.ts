@@ -67,11 +67,19 @@ export interface TierActivityBucket {
   avgFirstTokenMs: number | null;
 }
 
+/** 模型选择器的一行：模型名 + 覆盖档数 + 最便宜有效单价（倍率×单价）。 */
+export interface TierBoardModelOption {
+  model: string;
+  tierCount: number;
+  /** `null` = 价表未收录或倍率未知（不猜）。 */
+  cheapestPricePerMillion: number | null;
+}
+
 export interface TierBoard {
   mode: EasyModeMode;
   strategy: AutoModeStrategy;
   model: string | null;
-  availableModels: string[];
+  modelOptions: TierBoardModelOption[];
   currentProviderId: string | null;
   tiers: TierBoardTier[];
 }

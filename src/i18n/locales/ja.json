@@ -2670,7 +2670,10 @@
       "selfManagedTitle": "公式・自前",
       "switchBack": "切り替え",
       "selfManagedEmpty": "公式・自前のプロバイダーがまだありません（自選モードで追加）",
-      "switchBackDone": "{{name}} に切り替えました。このアプリは自選モードになりました"
+      "switchBackDone": "{{name}} に切り替えました。このアプリは自選モードになりました",
+      "tiersShort": "ティア",
+      "modelFilterPlaceholder": "モデル名で絞り込み…",
+      "modelFilterEmpty": "一致するモデルなし"
     },
     "modelHint": "モデルを選ぶと、カタログにそのモデルを含むティアのみが対象になります。明示的に選ぶと即座に最適なティアへ切替えます。",
     "advancedSection": "詳細（フェイルオーバーキューとサーキットブレーカー）",
