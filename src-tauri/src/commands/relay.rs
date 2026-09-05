@@ -3087,20 +3087,39 @@ fn newapi_app_types() -> [AppType; 3] {
     [AppType::Claude, AppType::Codex, AppType::Gemini]
 }
 
-fn newapi_observed_keep(
+/// 把「一个 new-api 分组被观察到了」这个事实写进 keep 白名单，**按分类只保真实槽位**。
+///
+/// keep 是 `prune_stale_tiers` 的白名单：不在里面的托管档位会被清掉。
+///
+/// - 分类已知（`models = Some(非空目录)`）：只保候选真正会落的槽位 —— 纯生图分组
+///   只占生图栏，它历史上被扇出到 claude/codex/gemini 的旧投影随这次 provision 一并
+///   清掉（那是「生图模型被写成聊天模型」的必 404 档位）。
+/// - 分类未知（`models = None`：目录拉不到、或分组对账没走完）：保全四个槽位 ——
+///   keep 的语义是「观察到了就别删」，宁可留旧档也不误删。
+///
+/// ⚠️ `Some` 必须非空：空目录的 [`provision::is_pure_image_group`] 是真空真，
+/// 会把「读不出目录」误判成「纯生图」（见该函数文档的闸说明）。
+fn newapi_keep_insert(
+    keep: &mut std::collections::HashSet<(String, String)>,
     site_origin: &str,
     account_id: i64,
-    observed_groups: &[newapi::GroupIdentity],
-) -> std::collections::HashSet<(String, String)> {
-    observed_groups
-        .iter()
-        .flat_map(|group| {
-            let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.0);
-            newapi_app_types()
-                .into_iter()
-                .map(move |app_type| (app_type.as_str().to_string(), provider_id.clone()))
-        })
-        .collect()
+    identity: &newapi::GroupIdentity,
+    models: Option<&[String]>,
+) {
+    let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &identity.0);
+    let app_types: Vec<AppType> = match models {
+        Some(models) if provision::is_pure_image_group(models) => vec![AppType::CodexImage],
+        Some(_) => newapi_app_types().into(),
+        None => vec![
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::CodexImage,
+        ],
+    };
+    for app_type in app_types {
+        keep.insert((app_type.as_str().to_string(), provider_id.clone()));
+    }
 }
 
 fn newapi_candidates_for_group(
@@ -3110,7 +3129,16 @@ fn newapi_candidates_for_group(
     models: &[String],
 ) -> Vec<ManagedProvisionCandidate> {
     let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.identity.0);
-    newapi_app_types()
+    // 纯生图分组只出生图候选，不扇出到三个聊天栏：把生图模型写成聊天模型是**调用必
+    // 404** 的档位（claude 拿 nano-banana-2 当 ANTHROPIC_MODEL、gemini 拿 gpt-image-2
+    // 当 GEMINI_MODEL —— 2026-09-05 真实 new-api 站点的生图分组实测踩中）。判据与 sub2api 路径的
+    // `image_tier_app_type` 同源：[`provision::is_pure_image_group`]。
+    let app_types: Vec<AppType> = if provision::is_pure_image_group(models) {
+        vec![AppType::CodexImage]
+    } else {
+        newapi_app_types().into()
+    };
+    app_types
         .into_iter()
         .map(|app_type| {
             let picked = provision::pick_tier_models(&app_type, Some(models));
@@ -3238,11 +3266,9 @@ async fn provision_backend(
                 account_id: Some(result.account_id),
                 site_declaration,
                 candidates: Vec::new(),
-                observed_keep: newapi_observed_keep(
-                    &op.site_origin,
-                    result.account_id,
-                    &result.observed_groups,
-                ),
+                // 分类感知的槽位在下面的分组循环里逐个补（`newapi_keep_insert`），
+                // 不再一次性保三个聊天栏 —— 纯生图分组只保生图栏。
+                observed_keep: std::collections::HashSet::new(),
                 failures: result
                     .failures
                     .into_iter()
@@ -3261,6 +3287,25 @@ async fn provision_backend(
                 keys_created: result.tokens_created,
             };
 
+            // 对账没走完的分组（建/列/揭示密钥失败，拿不到 sk 也拉不了目录）：
+            // 分类未知，保全四个槽位 —— 观察到了就别删。
+            let reconciled: std::collections::HashSet<newapi::GroupIdentity> = result
+                .groups
+                .iter()
+                .map(|group| group.identity.clone())
+                .collect();
+            for identity in &result.observed_groups {
+                if !reconciled.contains(identity) {
+                    newapi_keep_insert(
+                        &mut batch.observed_keep,
+                        &op.site_origin,
+                        result.account_id,
+                        identity,
+                        None,
+                    );
+                }
+            }
+
             for group in result.groups {
                 let models = match api::list_models(&op.site_origin, &group.api_key).await {
                     Ok(models) => match normalize_newapi_model_catalog(models) {
@@ -3270,6 +3315,14 @@ async fn provision_backend(
                                 group_name: group.name,
                                 reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
                             });
+                            // 目录拉不到 = 分类未知：保全四个槽位，别把旧档误删。
+                            newapi_keep_insert(
+                                &mut batch.observed_keep,
+                                &op.site_origin,
+                                result.account_id,
+                                &group.identity,
+                                None,
+                            );
                             continue;
                         }
                     },
@@ -3278,9 +3331,23 @@ async fn provision_backend(
                             group_name: group.name,
                             reason: format!("model_catalog: {error}"),
                         });
+                        newapi_keep_insert(
+                            &mut batch.observed_keep,
+                            &op.site_origin,
+                            result.account_id,
+                            &group.identity,
+                            None,
+                        );
                         continue;
                     }
                 };
+                newapi_keep_insert(
+                    &mut batch.observed_keep,
+                    &op.site_origin,
+                    result.account_id,
+                    &group.identity,
+                    Some(&models),
+                );
                 batch.candidates.extend(newapi_candidates_for_group(
                     &op.site_origin,
                     result.account_id,
@@ -8459,28 +8526,111 @@ mod tests {
         groups: &[crate::relay::newapi_provision::ReconciledGroup],
     ) -> ManagedProvisionBatch {
         let account_id = op.account_id.expect("test relay has account id");
-        let observed_groups = groups
+        // 与 provision_backend 同一条纪律：keep 槽位跟着分类走（混合目录 = 三个聊天栏）。
+        let mut observed_keep = std::collections::HashSet::new();
+        let candidates = groups
             .iter()
-            .map(|group| group.identity.clone())
-            .collect::<Vec<_>>();
+            .flat_map(|group| {
+                let models = newapi_models();
+                newapi_keep_insert(
+                    &mut observed_keep,
+                    &op.site_origin,
+                    account_id,
+                    &group.identity,
+                    Some(&models),
+                );
+                newapi_candidates_for_group(&op.site_origin, account_id, group, &models)
+            })
+            .collect();
         ManagedProvisionBatch {
             account_id: Some(account_id),
             site_declaration: None,
-            candidates: groups
-                .iter()
-                .flat_map(|group| {
-                    newapi_candidates_for_group(
-                        &op.site_origin,
-                        account_id,
-                        group,
-                        &newapi_models(),
-                    )
-                })
-                .collect(),
-            observed_keep: newapi_observed_keep(&op.site_origin, account_id, &observed_groups),
+            candidates,
+            observed_keep,
             failures: Vec::new(),
             keys_created: 0,
         }
+    }
+
+    /// **纯生图分组的 new-api 扇出只出生图候选**（2026-09-05 某 new-api 站点纯生图
+    /// 分组的实测形状：`gpt-image-2 + nano-banana-2`）。
+    ///
+    /// 旧行为把每个分组无条件扇出到 claude/codex/gemini：生图模型被写成聊天模型
+    /// （`ANTHROPIC_MODEL=nano-banana-2`、`GEMINI_MODEL=gpt-image-2`），切过去调用必
+    /// 404 —— 生图栏则永远零档位（「此账号在当前平台没有可用分组」）。
+    #[test]
+    fn newapi_pure_image_group_lands_only_in_the_image_column_and_migrates_legacy_tiers() {
+        let op = test_newapi_relay(7);
+        let group = test_newapi_group("图", "sk-image");
+        let image_models =
+            provision::normalize_model_names(vec!["nano-banana-2".into(), "gpt-image-2".into()]);
+        let account_id = 7;
+
+        let candidates =
+            newapi_candidates_for_group(&op.site_origin, account_id, &group, &image_models);
+        assert_eq!(candidates.len(), 1, "纯生图分组不该再扇出到聊天栏");
+        assert_eq!(candidates[0].app_type, AppType::CodexImage);
+        // 默认模型 = gpt-image 家族优先（跨家族并存时表里靠前的家族胜出）。
+        assert_eq!(candidates[0].model, "gpt-image-2");
+
+        // 先按旧行为落三栏（等价于升级前 provision 过的存量），再按新分类
+        // provision 一次：三个聊天栏的旧投影必须被清掉、生图栏出现新档位。
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        persist_provision_batch(&state, &op, newapi_batch(&op, std::slice::from_ref(&group)))
+            .expect("seed legacy three-column projections");
+        let provider_id =
+            provision::newapi_provider_id_for(&op.site_origin, account_id, &group.identity.0);
+        for app_type in newapi_app_types() {
+            assert!(db
+                .get_provider_by_id(&provider_id, app_type.as_str())
+                .expect("read legacy projection")
+                .is_some());
+        }
+
+        let mut keep = std::collections::HashSet::new();
+        newapi_keep_insert(
+            &mut keep,
+            &op.site_origin,
+            account_id,
+            &group.identity,
+            Some(&image_models),
+        );
+        let migrated = ManagedProvisionBatch {
+            account_id: Some(account_id),
+            site_declaration: None,
+            candidates,
+            observed_keep: keep,
+            failures: Vec::new(),
+            keys_created: 0,
+        };
+        let summary =
+            persist_provision_batch(&state, &op, migrated).expect("migrate to image column");
+        assert_eq!(summary.tiers.len(), 1);
+        assert_eq!(summary.tiers[0].app_id, AppType::CodexImage.as_str());
+        for app_type in newapi_app_types() {
+            assert!(
+                db.get_provider_by_id(&provider_id, app_type.as_str())
+                    .expect("read pruned projection")
+                    .is_none(),
+                "{} 的旧投影没被清掉",
+                app_type.as_str()
+            );
+        }
+        // 生图栏新档位：codex 形状（生图 MCP 的读取契约）+ 家族优先选出的模型。
+        let image_provider = db
+            .get_provider_by_id(&provider_id, AppType::CodexImage.as_str())
+            .expect("read image projection")
+            .expect("image projection exists");
+        assert_eq!(
+            provision::extract_model(&image_provider.settings_config).as_deref(),
+            Some("gpt-image-2")
+        );
+        assert_eq!(
+            provision::extract_api_key(&image_provider.settings_config, &AppType::CodexImage)
+                .as_deref(),
+            Some("sk-image")
+        );
     }
 
     #[test]
@@ -8604,7 +8754,7 @@ mod tests {
     }
 
     #[test]
-    fn newapi_observed_keep_retains_failed_group_and_prunes_only_the_current_account() {
+    fn newapi_unclassified_keep_retains_failed_group_and_prunes_only_the_current_account() {
         let account_seven = test_newapi_relay(7);
         let account_eight = test_newapi_relay(8);
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
@@ -8640,15 +8790,20 @@ mod tests {
             provision::newapi_provider_id_for(&account_seven.site_origin, 7, &observed.0);
         let removed_id =
             provision::newapi_provider_id_for(&account_seven.site_origin, 7, "removed");
+        // 对账没走完（拿到 observed 清单但没拿到 sk）：分类未知，保全四个槽位。
+        let mut failure_keep = std::collections::HashSet::new();
+        newapi_keep_insert(
+            &mut failure_keep,
+            &account_seven.site_origin,
+            7,
+            &observed,
+            None,
+        );
         let failure_batch = ManagedProvisionBatch {
             account_id: Some(7),
             site_declaration: None,
             candidates: Vec::new(),
-            observed_keep: newapi_observed_keep(
-                &account_seven.site_origin,
-                7,
-                std::slice::from_ref(&observed),
-            ),
+            observed_keep: failure_keep,
             failures: vec![FailureInfo {
                 group_name: "observed".into(),
                 reason: "reveal: temporary failure".into(),

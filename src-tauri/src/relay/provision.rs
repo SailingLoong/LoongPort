@@ -996,17 +996,32 @@ pub fn preserve_supported_env_model(
 /// 那个数组就是为此存在的（「读宽写窄」：认全部历史值，写入只产出当前值）。
 pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
-/// 生图模型的名字前缀。
+/// 生图模型的名字前缀家族。**一个表唯源**：[`is_image_model`]（认不认）与
+/// [`image_model_rank`]（谁更新）都从这里取 —— 两者必须对同一个集合给出一致答案。
 ///
-/// 判据来自上游 sub2api 的 `IsGPTImageGenerationModel`（`service/openai_images.go`）——
-/// **它先 `strings.ToLower` + `strings.TrimSpace` 再比前缀**，所以本仓的比较也必须
-/// 归一化，见 [`is_image_model`]。别在这里自造一套（如加上 `dall-e`：sub2api 不认它，
-/// 我们认了只会写出转发不了的配置）。
+/// ## 家族与准入依据
 ///
-/// ⚠️ 有意**只对齐 GPT 那一族**，不含上游 `isOpenAIImageGenerationModel` 另外认的三个
-/// grok 别名（`grok-imagine` / `-edit` / `-image*`）—— 生图工具只装在 codex 档位上
+/// - `gpt-image-`：对齐上游 sub2api 的 `IsGPTImageGenerationModel`
+///   （`service/openai_images.go`，`ToLower` + `TrimSpace` 后比前缀）。
+/// - `nano-banana`：Google 系生图模型在 new-api 站点的常用名。2026-09-05 实测准入：
+///   `nano-banana-2` 与 `gpt-image-2` 同走 `/v1/images/generations`（OpenAI images
+///   语义，b64_json 返回）。不认它的话，「`gpt-image-*` + `nano-banana-*`」的纯生图
+///   分组会被当混合分组落进聊天栏。
+///
+/// 仍然**不收** `dall-e` / `flux` / `imagen`：它们虽在 new-api 上游官方表
+/// `ImageGenerationModels`（`common/model.go`）里，但那张表是静态的、连 `gpt-image-2`
+/// 都没有，站点 fork 普遍自行扩展（实测有站点同时服务 `gpt-image-2` 与 `nano-banana-2`，
+/// 都不在官方表里）—— 即 new-api 侧**不存在一张可照抄的权威表**，本仓的准入口径是
+/// 「有站点实测背书才收」。目前也无 LoongPort 用户的真实分组踩到那三族；而且收了
+/// 会波及 sub2api 侧（其上游 `IsGPTImageGenerationModel` 只有 GPT 族，认了只会写出
+/// 转发不了的配置）。谁踩到新家族就在这里加一行 —— [`image_model_rank`] 的家族
+/// 优先级随之生效（**表里越靠前的家族跨家族并存时越优先**，`gpt-image-*` 是生图
+/// 管线的原生家族）。
+///
+/// ⚠️ 有意不含上游 `isOpenAIImageGenerationModel` 另外认的三个 grok 别名
+/// （`grok-imagine` / `-edit` / `-image*`）—— 生图工具只装在 codex 档位上
 /// （openai 平台），grok 档位落的是另一个 CLI。
-const IMAGE_MODEL_PREFIX: &str = "gpt-image-";
+const IMAGE_MODEL_FAMILIES: &[&str] = &["gpt-image-", "nano-banana"];
 
 /// 一条档位该落到哪一栏：纯生图的进 [`AppType::CodexImage`]，其余原样返回。
 ///
@@ -1061,8 +1076,8 @@ pub fn pick_model(available: Option<&[String]>) -> String {
         return DEFAULT_MODEL.to_string();
     };
     // 有任何一个非生图模型 ⇒ 这不是纯生图分组，照旧写默认文本模型。
-    // 走 `is_image_model` 而不是裸 `starts_with` —— 归一化在那个函数里，见它的文档。
-    if !models.iter().all(|m| is_image_model(m)) {
+    // 纯生图的判据见 [`is_pure_image_group`]（唯源），归一化在 [`is_image_model`] 里。
+    if !is_pure_image_group(models) {
         return DEFAULT_MODEL.to_string();
     }
     // 取**最新的那一代**，见 `image_model_rank`。
@@ -1139,8 +1154,8 @@ pub fn pick_tier_models(app_type: &AppType, models: Option<&[String]>) -> TierMo
             claude_roles: None,
         };
     };
-    // 纯生图分组（只有 gpt-image-*）：写它自己的生图模型，不分角色。
-    if models.iter().all(|m| is_image_model(m)) {
+    // 纯生图分组（只有生图模型）：写它自己的生图模型，不分角色。
+    if is_pure_image_group(models) {
         return TierModels {
             main: pick_model(Some(models)),
             claude_roles: None,
@@ -1266,7 +1281,7 @@ fn maybe_one_m(model: &str) -> String {
     }
 }
 
-/// 生图模型的「代」，用于在多个 `gpt-image-*` 里挑最新的那个。
+/// 生图模型的「家族优先级 + 版本代」，用于在多个生图模型里挑默认。
 ///
 /// ## 为什么不能直接比字符串（review 抓出）
 ///
@@ -1277,24 +1292,32 @@ fn maybe_one_m(model: &str) -> String {
 ///
 /// 换成 `max()` 也不对：字典序下 `"gpt-image-10" < "gpt-image-2"`。
 ///
-/// 所以按数字段比：`gpt-image-1.5` → `[1, 5]`、`gpt-image-2` → `[2]`、
-/// `gpt-image-10` → `[10]`。逐段比较，段数不同时短的算小（`1` < `1.5`）。
-/// 认不出数字的排最后（那种名字我们无从判断新旧，让它输给能判的）。
-fn image_model_rank(model: &str) -> Vec<u32> {
+/// 所以返回 `(家族优先级, 版本段)`：跨家族先比家族（[`IMAGE_MODEL_FAMILIES`] 里越靠前
+/// 优先级越高），同家族再按数字段比 —— `gpt-image-1.5` → `[1, 5]`、`gpt-image-2` →
+/// `[2]`、`gpt-image-10` → `[10]`，逐段比较，段数不同时短的算小（`1` < `1.5`）。
+/// 认不出数字的版本段排空（那种名字无从判断新旧，让它输给能判的）。
+fn image_model_rank(model: &str) -> (u32, Vec<u32>) {
     let normalized = model.trim().to_ascii_lowercase();
-    let Some(rest) = normalized.strip_prefix(IMAGE_MODEL_PREFIX) else {
-        return Vec::new();
-    };
-    // `1.5-mini` → 只取前面连续的数字与点，后缀（`-mini` 之类）不参与比较。
-    let version: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    version
-        .split('.')
-        .filter(|seg| !seg.is_empty())
-        .filter_map(|seg| seg.parse::<u32>().ok())
-        .collect()
+    for (index, prefix) in IMAGE_MODEL_FAMILIES.iter().enumerate() {
+        let Some(rest) = normalized.strip_prefix(prefix) else {
+            continue;
+        };
+        let precedence = (IMAGE_MODEL_FAMILIES.len() - index - 1) as u32;
+        // `gpt-image-1.5-mini` / `nano-banana-2` → 只取连续的数字与点，
+        // 前导 `-`（家族前缀不带尾连字符时）与后缀（`-mini`）不参与比较。
+        let version: String = rest
+            .trim_start_matches('-')
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        let segments = version
+            .split('.')
+            .filter(|seg| !seg.is_empty())
+            .filter_map(|seg| seg.parse::<u32>().ok())
+            .collect();
+        return (precedence, segments);
+    }
+    (0, Vec::new())
 }
 
 /// grok 家族模型名尾部的版本段（`grok-4.5` → `[4, 5]`），用于在多个 `grok-*` 里挑
@@ -1317,7 +1340,7 @@ fn grok_model_rank(model: &str) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// 这个模型名是生图模型吗（[`IMAGE_MODEL_PREFIX`] 前缀）。
+/// 这个模型名是生图模型吗（[`IMAGE_MODEL_FAMILIES`] 前缀家族）。
 ///
 /// UI 据此显示「生图档位」标记。判据放在**模型名**而不是「拉一次 `/v1/models` 看看」，
 /// 是因为 `relay_list_relays` 那条路**只读本地不发网络**（首屏契约）——
@@ -1336,10 +1359,22 @@ fn grok_model_rank(model: &str) -> Vec<u32> {
 /// **只归一化比较，不改写要写入的值** —— 服务端给什么名字就照原样写进配置，
 /// 那是它认得的形式。
 pub fn is_image_model(model: &str) -> bool {
-    model
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with(IMAGE_MODEL_PREFIX)
+    let normalized = model.trim().to_ascii_lowercase();
+    IMAGE_MODEL_FAMILIES
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+}
+
+/// 这个分组是不是「纯生图分组」：目录里一个非生图模型都没有。
+///
+/// 这是「分组落到哪一栏」的唯源判据（[`pick_model`] / [`pick_tier_models`] 的分支、
+/// new-api 扇出是否只出生图候选，都问它）—— 判据写成「全部是生图模型」而不是
+/// 「分组允许生图」：允许生图的**混合**分组仍然能聊天，该留在聊天栏。
+///
+/// ⚠️ **空目录恒为 true**（`all` 对空集的真空真）—— 调用方必须先保证目录非空才准问
+/// （new-api 路径里模型目录归一化后为空会走失败分支而不是走到这里，就是那道闸）。
+pub fn is_pure_image_group(models: &[String]) -> bool {
+    models.iter().all(|model| is_image_model(model))
 }
 
 /// sk 在各 CLI 的 `settings_config` 里的字段路径。[`patch_api_key`]、
@@ -1906,12 +1941,46 @@ mod tests {
 
     /// `is_image_model` 是 UI 判据（显示「生图档位」标记），别把文本模型认成生图的。
     #[test]
-    fn is_image_model_only_matches_the_image_prefix() {
+    fn is_image_model_only_matches_the_image_families() {
         assert!(is_image_model("gpt-image-2"));
         assert!(is_image_model("gpt-image-3-turbo"));
+        // nano-banana 家族（2026-09-05 实测准入，见 IMAGE_MODEL_FAMILIES 的文档）。
+        assert!(is_image_model("nano-banana-2"));
+        assert!(is_image_model("Nano-Banana-Pro"));
         assert!(!is_image_model(DEFAULT_MODEL));
         assert!(!is_image_model("gpt-5.4-mini"));
         assert!(!is_image_model(""));
+    }
+
+    /// 跨家族并存时表里靠前的家族（`gpt-image-*`）优先 —— 2026-09-05 实测的某 new-api
+    /// 站点纯生图分组正是 `gpt-image-2 + nano-banana-2` 混编：默认模型必须是 gpt-image-2
+    /// （站点教程背书的生图主力），而不是字典序/家族序碰巧选出的那个。
+    #[test]
+    fn gpt_image_wins_over_nano_banana_when_both_families_exist() {
+        let mixed = vec!["nano-banana-2".to_string(), "gpt-image-2".to_string()];
+        assert!(
+            is_pure_image_group(&mixed),
+            "两个都是生图模型，该判纯生图分组"
+        );
+        assert_eq!(
+            pick_model(Some(&mixed)),
+            "gpt-image-2",
+            "跨家族并存时 gpt-image 家族必须胜出"
+        );
+    }
+
+    /// 只有 nano-banana 家族时：认它（纯生图分组）、版本号新的胜出。
+    #[test]
+    fn a_nano_banana_only_group_gets_its_own_newest_model() {
+        let only = vec!["nano-banana-2".to_string()];
+        assert!(is_pure_image_group(&only));
+        assert_eq!(
+            pick_model(Some(&only)),
+            "nano-banana-2",
+            "独家生图模型必须被原样写出 —— 写 DEFAULT_MODEL 是选中即 404"
+        );
+        let newer = vec!["nano-banana-2".to_string(), "nano-banana-3".to_string()];
+        assert_eq!(pick_model(Some(&newer)), "nano-banana-3");
     }
 
     #[test]
