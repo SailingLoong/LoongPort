@@ -52,6 +52,12 @@ export interface TierBoardTier {
   cacheHitRate: number | null;
   /** 近 6 小时活动时间线（15 分钟一桶固定 24 桶）；`null` = 窗口内无请求。 */
   recentActivity: TierActivityBucket[] | null;
+  /** 内存熔断器状态（请求路径的真实闸门）；`null` = Closed 或代理未运行。 */
+  breakerState: "open" | "half_open" | null;
+  /** Open 距自动转探测的剩余秒数；`null` = 无（HalfOpen/Closed）。 */
+  breakerReopenInSecs: number | null;
+  /** 会话亲和剩余秒数（仅当前档位且亲和活跃）；`null` = 无。 */
+  affinityRemainingSecs: number | null;
 }
 
 /** 近期活动时间线的一桶：成功数/失败数/桶内平均首字（ms）。 */

@@ -288,6 +288,24 @@ impl ProviderRouter {
         }
     }
 
+    /// 批量读熔断器快照（看板「熔断/自动重试倒计时」用）。Closed（含从未
+    /// 记录过结果的）不进 map —— 只上报当前不正常的。
+    pub async fn breaker_states(
+        &self,
+        app_type: &str,
+        provider_ids: &[String],
+    ) -> HashMap<String, crate::proxy::circuit_breaker::BreakerSnapshot> {
+        let mut result = HashMap::new();
+        for provider_id in provider_ids {
+            let circuit_key = format!("{app_type}:{provider_id}");
+            let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+            if let Some(snapshot) = breaker.snapshot().await {
+                result.insert(provider_id.clone(), snapshot);
+            }
+        }
+        result
+    }
+
     /// 重置指定供应商的熔断器
     pub async fn reset_provider_breaker(&self, provider_id: &str, app_type: &str) {
         let circuit_key = format!("{app_type}:{provider_id}");
@@ -464,6 +482,37 @@ mod tests {
                 None => env::remove_var("CC_SWITCH_TEST_HOME"),
             }
         }
+    }
+
+    /// breaker_states：致命失败打开的熔断器带长冷却快照；Closed/未记录的不进 map。
+    #[tokio::test]
+    #[serial]
+    async fn breaker_states_report_open_only_for_unhealthy_breakers() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let dead = Provider::with_id("dead".to_string(), "Dead".to_string(), json!({}), None);
+        let fine = Provider::with_id("fine".to_string(), "Fine".to_string(), json!({}), None);
+        db.save_provider("claude", &dead).unwrap();
+        db.save_provider("claude", &fine).unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        router
+            .record_fatal_result("dead", "claude", false, Some("403".to_string()))
+            .await
+            .unwrap();
+
+        let states = router
+            .breaker_states("claude", &["dead".to_string(), "fine".to_string()])
+            .await;
+        let snapshot = states.get("dead").expect("致命打开的熔断器必须上报");
+        assert!(!snapshot.half_open);
+        let remaining = snapshot.reopen_in_secs.expect("Open 带倒计时");
+        assert!(
+            remaining > 1790 && remaining <= 1800,
+            "长冷却 1800：{remaining}"
+        );
+        assert!(!states.contains_key("fine"), "正常（Closed）熔断器不上报");
     }
 
     #[tokio::test]

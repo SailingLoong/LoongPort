@@ -147,7 +147,9 @@ function TierCard({
   const { t } = useTranslation();
   const resetBreaker = useResetCircuitBreaker();
   const failed =
-    tier.isHealthy === false || (tier.consecutiveFailures ?? 0) > 0;
+    tier.isHealthy === false ||
+    tier.breakerState != null ||
+    (tier.consecutiveFailures ?? 0) > 0;
   return (
     <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
       {dragHandleProps ? (
@@ -175,6 +177,24 @@ function TierCard({
               className="border-emerald-500/60 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
             >
               {t("autoMode.board.current", { defaultValue: "当前" })}
+            </Badge>
+          ) : null}
+          {tier.isCurrent && tier.affinityRemainingSecs != null ? (
+            <Badge
+              variant="outline"
+              title={t("autoMode.board.affinityTitle", {
+                defaultValue:
+                  "会话粘性中：中途换档会丢提示词缓存（未命中按全价计费）；闲置或当前档位故障后，由更优档位接管",
+              })}
+              className="border-muted-foreground/30 text-muted-foreground"
+            >
+              {t("autoMode.board.affinity", {
+                defaultValue: "粘性 · {{minutes}} 分钟",
+                minutes: Math.max(
+                  1,
+                  Math.ceil(tier.affinityRemainingSecs / 60),
+                ),
+              })}
             </Badge>
           ) : null}
           <TierHealthBadge tier={tier} />
@@ -290,7 +310,9 @@ function TierHealthBadge({ tier }: { tier: TierBoardTier }) {
   const [copied, setCopied] = useState(false);
 
   const failures = tier.consecutiveFailures ?? 0;
-  const circuitOpen = tier.isHealthy === false;
+  // 熔断判据以内存熔断器为准（请求路径的真实闸门，致命失败一次即开），
+  // DB 健康行要攒阈值 —— 两者任一命中都算熔断。
+  const circuitOpen = tier.isHealthy === false || tier.breakerState != null;
   if (!circuitOpen && failures === 0) {
     return null;
   }
@@ -329,6 +351,14 @@ function TierHealthBadge({ tier }: { tier: TierBoardTier }) {
       </PopoverTrigger>
       <PopoverContent className="w-96 max-w-[80vw]" sideOffset={6}>
         <div className="space-y-2">
+          {tier.breakerReopenInSecs != null ? (
+            <p className="text-xs text-muted-foreground">
+              {t("autoMode.board.retryIn", {
+                defaultValue: "约 {{minutes}} 分钟后自动重试",
+                minutes: Math.max(1, Math.ceil(tier.breakerReopenInSecs / 60)),
+              })}
+            </p>
+          ) : null}
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-muted-foreground">
               {label}

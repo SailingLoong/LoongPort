@@ -84,6 +84,11 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
           })),
           { successCount: 0, failCount: 2, avgFirstTokenMs: null },
         ],
+        breakerState: null,
+        breakerReopenInSecs: null,
+        // 当前档是 tier-b…不对：fixture 里 isCurrent 是 tier-b（贵档）；
+        // 粘性徽章断言放这条会混——tier-a 非当前，不给 affinity。
+        affinityRemainingSecs: null,
       },
       {
         providerId: "tier-b",
@@ -103,6 +108,9 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         todayRequests: null,
         cacheHitRate: null,
         recentActivity: null,
+        breakerState: null,
+        breakerReopenInSecs: null,
+        affinityRemainingSecs: 720,
       },
     ],
     ...overrides,
@@ -144,8 +152,10 @@ describe("EasyBoard", () => {
       screen.getByTitle("近 6 小时：成功 101 · 失败 3 · 首字 870ms"),
     ).toBeDefined();
     expect(document.querySelectorAll("polyline").length).toBeGreaterThan(0);
-    // 当前命中只在 isCurrent 档出现一次
+    // 当前命中只在 isCurrent 档出现一次；粘性倒计时跟着当前档走
     expect(screen.getAllByText("当前")).toHaveLength(1);
+    expect(screen.getByTitle(/会话粘性中/)).toBeDefined();
+    expect(screen.getByText("粘性 · 12 分钟")).toBeDefined();
   });
 
   it("失败档位外露原因徽章（熔断），健康档位不显示健康标记", () => {
@@ -158,6 +168,9 @@ describe("EasyBoard", () => {
       todayRequests: null,
       cacheHitRate: null,
       recentActivity: null,
+      breakerState: null,
+      breakerReopenInSecs: null,
+      affinityRemainingSecs: null,
     };
     setupBoard(
       boardFixture({
@@ -205,6 +218,9 @@ describe("EasyBoard", () => {
       todayRequests: null,
       cacheHitRate: null,
       recentActivity: null,
+      breakerState: null,
+      breakerReopenInSecs: null,
+      affinityRemainingSecs: null,
     };
     setupBoard(
       boardFixture({
@@ -257,6 +273,62 @@ describe("EasyBoard", () => {
     await waitFor(() => expect(resetBreakerMock).toHaveBeenCalledTimes(2));
     expect(resetBreakerMock).toHaveBeenCalledWith({
       providerId: "tier-dead-a",
+      appType: "claude",
+    });
+  });
+
+  it("内存熔断态（DB 仍健康）也外露熔断徽章并计入重试全部", async () => {
+    resetBreakerMock.mockResolvedValue(undefined);
+    const nulls = {
+      effectiveModel: null,
+      avgFirstTokenMs: null,
+      balanceUsd: null,
+      verificationVerdict: null,
+      todayCostUsd: null,
+      todayRequests: null,
+      cacheHitRate: null,
+      recentActivity: null,
+      affinityRemainingSecs: null,
+    };
+    setupBoard(
+      boardFixture({
+        tiers: [
+          {
+            providerId: "tier-fatal",
+            name: "致命档",
+            position: 0,
+            isCurrent: false,
+            rateMultiplier: 1,
+            unitPricePerMillion: null,
+            ...nulls,
+            isHealthy: true,
+            consecutiveFailures: 1,
+            lastError: "上游 HTTP 403: 无可用渠道",
+            breakerState: "open",
+            breakerReopenInSecs: 1740,
+          },
+          {
+            providerId: "tier-fine",
+            name: "健康档",
+            position: 1,
+            isCurrent: true,
+            rateMultiplier: 1,
+            unitPricePerMillion: null,
+            ...nulls,
+            isHealthy: true,
+            consecutiveFailures: 0,
+            lastError: null,
+            breakerState: null,
+            breakerReopenInSecs: null,
+          },
+        ],
+      }),
+    );
+    expect(screen.getByText("熔断")).toBeDefined();
+    fireEvent.click(screen.getByText("重试全部熔断档位"));
+    await waitFor(() => expect(resetBreakerMock).toHaveBeenCalledTimes(1));
+    expect(resetBreakerMock).toHaveBeenCalledWith({
+      providerId: "tier-fatal",
       appType: "claude",
     });
   });

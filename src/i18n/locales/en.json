@@ -2664,7 +2664,10 @@
       "cache": "Cache",
       "reenable": "Re-enable",
       "retryAll": "Retry tripped tiers",
-      "recentTimeline": "Last 6h: {{ok}} ok · {{fail}} failed · TTFT {{ttft}}"
+      "recentTimeline": "Last 6h: {{ok}} ok · {{fail}} failed · TTFT {{ttft}}",
+      "retryIn": "Auto-retry in ~{{minutes}} min",
+      "affinity": "Sticky · {{minutes}} min",
+      "affinityTitle": "Session is sticky: switching mid-session loses the prompt cache (cache misses bill at full price). After idle or a current-tier failure, a better tier takes over"
     },
     "modelHint": "With a model picked, only tiers whose catalog includes it are chosen; an explicit pick switches to the best tier immediately.",
     "advancedSection": "Advanced (failover queue & circuit breaker)",
