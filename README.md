@@ -183,6 +183,12 @@ dsh plugin --profile <profile> add loongport
 
 > **「在做」不是愿望清单。** gemini 与 grok 的档位映射表已经建全，缺的是各自的配置写入适配。如果你在运营其它类型的中转后端，欢迎[提交 issue](../../issues) 评估接入。
 
+## 充值与返利
+
+<!-- 2026-09-05 省钱/价格叙事整体下线（对外只讲「方便省心」），以下推导内容保留在
+     源码、线上不再展示；恢复时取消注释，并同步 README_EN.md 同节、官网 /pricing、
+     SavingSection 与 llms.txt（唯源见 LOONGPORT.md）。
+
 ## 为什么便宜这么多
 
 两层优惠叠加，Codex 两者均可享受，Claude 仅享受其一：
@@ -193,6 +199,7 @@ dsh plugin --profile <profile> add loongport
 | 汇率口径 | **×1/6.7** | Codex 与 Claude 均适用 | 中转站普遍按「1 人民币抵 1 美元」计价，而实际汇率约为 1 美元兑 6.7 人民币 |
 
 因此 Codex 为 `0.1 × 1/6.7 ≈ 0.015`，成本约为**官方 API 的 1.5%**；Claude 为 `1 × 1/6.7 ≈ 0.15`，约为**官方 API 的 15%**。「只花官方的 5%」「只花 20%」这类对外表述均为留有余量的保守说法，因为倍率随档位和站点浮动。完整推导与相关说明见 **[loongport.dev/zh/pricing](https://loongport.dev/zh/pricing)**。
+-->
 
 LoongPort 本身免费，不经手付款、不从你的余额抽成。你充值的对象是中转服务商。
 
@@ -202,7 +209,7 @@ LoongPort 本身免费，不经手付款、不从你的余额抽成。你充值�
 
 **[cc-switch](https://github.com/farion1231/cc-switch)**（作者 [@farion1231](https://github.com/farion1231)，MIT）—— 本项目的基座，自 v3.19.1 fork，已合并上游至 v3.20.0；图标衍生自它，版权声明保留于 [LICENSE](LICENSE)。
 
-cc-switch 是通用的多供应商管理器，管理所有 CLI 的所有供应商，还提供本地代理、MCP、Skills、Prompts 与会话管理。LoongPort 只做「用中转服务省钱运行 AI CLI」这一条链路。两者数据目录分离（`~/.cc-switch/` 与 `~/.loongport/`），可以同时安装、同时运行。
+cc-switch 是通用的多供应商管理器，管理所有 CLI 的所有供应商，还提供本地代理、MCP、Skills、Prompts 与会话管理。LoongPort 只做「用中转服务省心运行 AI CLI」这一条链路。两者数据目录分离（`~/.cc-switch/` 与 `~/.loongport/`），可以同时安装、同时运行。
 
 **[sub2api](https://github.com/Wei-Shaw/sub2api)**（LGPL-3.0）—— 多数中转站运行的后端。LoongPort 是它的**纯 HTTP 客户端**：不链接、不包含、也未复用其代码，仅依据其公开接口调用。LoongPort 为非官方客户端，与其作者无关联 —— 使用中遇到的问题请提交至本仓库。
 

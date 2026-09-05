@@ -306,6 +306,14 @@ Windows have the same feature set.
 > in place; what is missing is each one's config-writing adapter. If you run another
 > kind of relay backend, [opening an issue](../../issues) is the way to get it assessed.
 
+## Payments and referral rebates
+
+<!--
+2026-09-05: the cost-saving narrative was taken offline entirely (the public story is
+"convenient and worry-free"). The derivation below is kept in source but no longer
+rendered; restore by uncommenting, together with the zh README section, the website
+/pricing page, SavingSection and llms.txt (source of truth: LOONGPORT.md).
+
 ## Why it costs so much less
 
 Two discount layers — Codex gets both, Claude gets one:
@@ -320,6 +328,7 @@ Claude at `1 × 1/6.7 ≈ 0.15`, about **15% of official cost**. Figures like "j
 official cost" that appear elsewhere are deliberately conservative: multipliers vary by
 tier and by site, so margin is built in. Full derivation with caveats:
 **[loongport.dev/en/pricing](https://loongport.dev/en/pricing)**
+-->
 
 LoongPort is free. It never handles your payment and takes nothing out of your balance.
 You top up with the relay provider.
@@ -338,7 +347,7 @@ their copyright notice is kept in [LICENSE](LICENSE).
 
 cc-switch is a general multi-provider manager covering every CLI and every provider,
 plus proxy mode, MCP, Skills, Prompts and Session Manager. LoongPort does exactly one
-path: running an AI CLI cheaply through a relay service. The two install side by side
+path: running an AI CLI smoothly through a relay service. The two install side by side
 with separate data directories (`~/.cc-switch/` vs `~/.loongport/`) and can run at the
 same time.
 
