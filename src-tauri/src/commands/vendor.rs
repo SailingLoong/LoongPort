@@ -686,6 +686,9 @@ async fn do_login(
     // **同一个厂商永远只能挂第一个登录过的账号**，而多账号正是本表唯一索引
     // `(vendor_id, account_id)` 特意支持的能力。
     .incognito(true)
+    // 放行 window.open 弹窗：官网登录同样可能走弹窗式 OAuth，默认会被 wry 静默
+    // 吞掉；理由与 `relay::browser_import` 那段逐条相同。
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Allow)
     .initialization_script(crate::vendor::login_script(vendor, login_hint))
     .on_navigation(move |url| {
         match crate::vendor::parse_creds_navigation(vendor, url) {

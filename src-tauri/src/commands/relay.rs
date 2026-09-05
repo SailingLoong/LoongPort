@@ -1731,6 +1731,23 @@ async fn browser_import(
     // 一次导入只使用这一份纯内存会话：网页验证、协议探测、注册/登录都不换窗口，
     // 同时也不复用上一次导入的站点 cookie 或 token。
     .incognito(true)
+    // ⭐ **放行 window.open / target=_blank 弹窗**（`NewWindowResponse::Allow`）。
+    //
+    // 不设这个 handler 时 wry 会**静默拒绝**所有新窗口请求（macOS 的
+    // `createWebViewWith` 返回 nil、WebView2 `SetHandled(true)`），页面上就是
+    // 「点了没反应」：弹窗式 OAuth（老版 new-api 系站点的 GitHub 登录就是这么
+    // 发起的）和 sub2api 的支付弹窗全被吞掉。
+    //
+    // `Allow` 是浏览器保真语义：macOS 用 opener 的 WKWebViewConfiguration 建
+    // 子 WKWebView —— 同一 dataStore（cookie/localStorage 共享，本窗口注入脚本
+    // 的 setItem 劫持与轮询兜底照常接得住弹窗路径写入的登录态），
+    // `window.opener` / `window.close()` 正常工作；Windows 走 WebView2 运行时
+    // 默认弹窗（同 profile）。子窗口是裸 WebView：没有注入脚本、没有
+    // `on_navigation` 拦截、没有 Tauri IPC，不新增攻击面。
+    //
+    // 代价（明说）：子窗口由 wry 管理、不在 Tauri 窗口表里，本窗口销毁时不会
+    // 跟着关（用户手动关即可）—— 浏览器里多个标签页本来也是这个行为。
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Allow)
     // 所有导入都统一注入协议无关的候选抓取器。脚本不认识 Cloudflare、HTTP 403
     // 或任何其它验证产品；协议未知时，用户验证完成后它自然会在同源会话里读到候选响应。
     // fast path 已识别时，Rust context 已有值，重复探测回传会被忽略。
@@ -2276,6 +2293,9 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 中转站、以及 app 内其它 WebView 的登录态一起冲掉；而且它是异步的，
     // 没有完成回调可等 ⇒ 存在「还没清完页面就加载了」的竞态。
     .incognito(true)
+    // 放行 window.open 弹窗：重登同样会遇到弹窗式 OAuth（GitHub/Google 登录），
+    // 理由与 `browser_import` 那段逐条相同（子窗口共享会话与 opener 语义）。
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Allow)
     // sub2api 的 localStorage 回传脚本只注入到 sub2api 窗口。NewAPI 的 HttpOnly
     // refresh cookie 由外层 async 循环原生读取，绝不交给 JavaScript。
     .initialization_script(initialization_script)
@@ -5679,6 +5699,9 @@ async fn open_sub2api_site_window<R: tauri::Runtime>(
     // 它**不影响**注入：`initialization_script` 是 WKUserScript(AtDocumentStart)、
     // 与页面同一个 JS 世界，而 incognito 只决定这份 localStorage 落不落盘。
     .incognito(true)
+    // 放行 window.open 弹窗：充值页的支付二维码 / 收银台弹窗默认会被 wry 静默
+    // 吞掉（「点了支付没反应」），理由与 `browser_import` 那段逐条相同。
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Allow)
     .initialization_script(purchase::inject_script(
         &op.site_origin,
         &op.auth_token,
