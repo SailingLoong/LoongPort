@@ -1,5 +1,13 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import {
+  describe,
+  expect,
+  it,
+  vi,
+  beforeEach,
+  beforeAll,
+  afterAll,
+} from "vitest";
 
 import { EasyBoard } from "@/components/easymode/EasyBoard";
 import type { TierBoard } from "@/lib/api/autoMode";
@@ -65,7 +73,14 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
     mode: "auto",
     strategy: "cheapest",
     model: null,
-    availableModels: ["claude-fable-5", "deepseek-v4-flash"],
+    modelOptions: [
+      { model: "claude-fable-5", tierCount: 2, cheapestPricePerMillion: 1.5 },
+      {
+        model: "deepseek-v4-flash",
+        tierCount: 1,
+        cheapestPricePerMillion: null,
+      },
+    ],
     currentProviderId: "tier-b",
     tiers: [
       {
@@ -139,13 +154,35 @@ function setupBoard(board: TierBoard) {
       enabled: true,
       strategy: board.strategy,
       model: board.model,
-      availableModels: board.availableModels,
+      availableModels: board.modelOptions.map((option) => option.model),
       hasCandidates: true,
       cliInstalled: true,
     },
   });
   render(<EasyBoard appId="claude" />);
 }
+
+// cmdk（模型选择器）需要 scrollIntoView，jsdom 没有 —— 保存/恢复式打桩
+let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
+beforeAll(() => {
+  scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "scrollIntoView",
+  );
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
+afterAll(() => {
+  if (scrollIntoViewDescriptor) {
+    Object.defineProperty(
+      HTMLElement.prototype,
+      "scrollIntoView",
+      scrollIntoViewDescriptor,
+    );
+  }
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -414,6 +451,34 @@ describe("EasyBoard", () => {
         appType: "claude",
         providerId: "official-chatgpt",
         quitChatgpt: undefined,
+      }),
+    );
+  });
+
+  it("模型选择器：可输入过滤，候选项带档数与最低价", async () => {
+    setupBoard(boardFixture());
+    // 默认收起，触发器显示「不限模型」
+    expect(screen.getByRole("combobox", { name: "" })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("combobox"));
+    expect(await screen.findByText("claude-fable-5")).toBeDefined();
+    expect(screen.getByText("2 档 · $1.50/M")).toBeDefined();
+    expect(screen.getByText("deepseek-v4-flash")).toBeDefined();
+    expect(screen.getByText("1 档")).toBeDefined();
+
+    // 输入过滤：只剩匹配项
+    fireEvent.change(await screen.findByPlaceholderText("输入模型名筛选…"), {
+      target: { value: "deepseek" },
+    });
+    expect(screen.queryByText("claude-fable-5")).toBeNull();
+    expect(screen.getByText("deepseek-v4-flash")).toBeDefined();
+
+    // 选中 deepseek → setModel 收到 null 语义反转前的真实模型名
+    fireEvent.click(screen.getByText("deepseek-v4-flash"));
+    await waitFor(() =>
+      expect(setModelMock).toHaveBeenCalledWith({
+        appType: "claude",
+        model: "deepseek-v4-flash",
       }),
     );
   });

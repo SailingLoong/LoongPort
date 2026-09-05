@@ -2671,7 +2671,10 @@
       "selfManagedTitle": "官方與自建",
       "switchBack": "切回",
       "selfManagedEmpty": "還沒有官方或自建供應商（在自主模式新增）",
-      "switchBackDone": "已切回 {{name}}，該應用轉為自主模式"
+      "switchBackDone": "已切回 {{name}}，該應用轉為自主模式",
+      "tiersShort": "檔",
+      "modelFilterPlaceholder": "輸入模型名篩選…",
+      "modelFilterEmpty": "沒有符合的模型"
     },
     "modelHint": "選了模型後只在目錄含該模型的檔位裡挑；顯式點選會立即切到最優檔位",
     "advancedSection": "進階（故障轉移佇列與熔斷）",

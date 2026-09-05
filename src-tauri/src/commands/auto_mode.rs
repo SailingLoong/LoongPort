@@ -407,9 +407,21 @@ pub struct TierBoard {
     /// "cheapest" | "fastest"（全局一份）
     pub strategy: String,
     pub model: Option<String>,
-    pub available_models: Vec<String>,
+    /// 可选模型清单（目录并集，顺序 = 档位序 → 目录内序），带每模型的
+    /// 「几档可用 + 最便宜有效单价」——模型选择器的数据源。
+    pub model_options: Vec<TierBoardModelOption>,
     pub current_provider_id: Option<String>,
     pub tiers: Vec<TierBoardTier>,
+}
+
+/// 模型选择器的一行：模型名 + 覆盖度（几档的目录含它）+ 最便宜有效单价
+/// （倍率 × 模型单价，与排序同一套数据；价格/倍率未知 → `None`）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierBoardModelOption {
+    pub model: String,
+    pub tier_count: u32,
+    pub cheapest_price_per_million: Option<f64>,
 }
 
 /// 省心模式档位看板（首页省心视图数据源）。
@@ -545,11 +557,48 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
         })
         .collect();
 
+    // 模型选项：全部托管档的目录并集（不按偏好过滤——选择器清单不因当前
+    // 偏好缩水），每模型统计覆盖档数与最便宜「倍率×单价」（与排序同源；
+    // 倍率或价格未知的档不参与最低价比较）
+    let mut model_options: Vec<TierBoardModelOption> = Vec::new();
+    for provider in providers.values() {
+        if !crate::relay::is_managed(&provider.id) {
+            continue;
+        }
+        let multiplier = multipliers.get(&provider.id).copied();
+        for model in auto_strategy::tier_models(provider) {
+            let unit_price = model_unit_price(db, &model);
+            match model_options
+                .iter_mut()
+                .find(|option| option.model == model)
+            {
+                Some(option) => {
+                    option.tier_count += 1;
+                    if let (Some(multiplier), Some(price)) = (multiplier, unit_price) {
+                        option.cheapest_price_per_million = match option.cheapest_price_per_million
+                        {
+                            Some(current) => Some(current.min(multiplier * price)),
+                            None => Some(multiplier * price),
+                        };
+                    }
+                }
+                None => model_options.push(TierBoardModelOption {
+                    model: model.clone(),
+                    tier_count: 1,
+                    cheapest_price_per_million: match (multiplier, unit_price) {
+                        (Some(multiplier), Some(price)) => Some(multiplier * price),
+                        _ => None,
+                    },
+                }),
+            }
+        }
+    }
+
     Ok(TierBoard {
         mode: auto_strategy::get_mode(db, app_type).as_str().to_string(),
         strategy: auto_strategy::get_strategy(db).as_str().to_string(),
         model: model_pref,
-        available_models: auto_strategy::auto_mode_models(&providers),
+        model_options,
         current_provider_id: current_id,
         tiers,
     })
@@ -625,6 +674,20 @@ async fn fetch_site_balances(
         }
     }
     balances
+}
+
+/// 模型单价（每百万 token 输入+输出之和，美元）；价表未收录 → `None`。
+/// 与 `auto_strategy::tier_unit_price` 同一张表，只是按模型名直查。
+fn model_unit_price(db: &crate::Database, model: &str) -> Option<f64> {
+    let conn = db
+        .conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (input, output, _cache_read, _cache_creation) =
+        crate::services::usage_stats::find_model_pricing_row(&conn, model).ok()??;
+    let input: f64 = input.parse().ok()?;
+    let output: f64 = output.parse().ok()?;
+    Some(input + output)
 }
 
 /// 从 base_url 取 `scheme://authority`（`https://site/v1` → `https://site`）。
@@ -1018,6 +1081,64 @@ mod tests {
         assert_eq!(cold_tier.today_cost_usd, None, "没有行 → None，前端显示 —");
         assert_eq!(cold_tier.today_requests, None);
         assert_eq!(cold_tier.cache_hit_rate, None, "分母为 0 不显示 0%");
+    }
+
+    /// ⭐ 模型选项：目录并集带「几档可用 + 最便宜倍率×单价」；价表未收录或
+    /// 倍率未知的模型不给最低价（不猜）。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_model_options_carry_coverage_and_cheapest_price() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let cheap = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let expensive = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let with_catalog = |id: &str, models: &[&str]| {
+            crate::provider::Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({ "modelCatalog": { "models": models.iter().map(|m| json!({ "model": m })).collect::<Vec<_>>() } }),
+                None,
+            )
+        };
+        db.save_provider("codex", &with_catalog(&cheap, &["m-x", "m-y"]))
+            .unwrap();
+        db.save_provider("codex", &with_catalog(&expensive, &["m-x"]))
+            .unwrap();
+        db.set_tier_rate_multiplier("codex", &cheap, Some(0.5))
+            .unwrap();
+        db.set_tier_rate_multiplier("codex", &expensive, Some(2.0))
+            .unwrap();
+        // 价表只收录 m-x：$1 输入 + $1 输出 = 单价 2
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
+                 VALUES ('m-x', 'M X', '1', '1')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let board = tier_board_impl(&state, "codex").await.unwrap();
+        let by_model = |model: &str| {
+            board
+                .model_options
+                .iter()
+                .find(|option| option.model == model)
+                .unwrap_or_else(|| panic!("缺 {model}"))
+        };
+        let m_x = by_model("m-x");
+        assert_eq!(m_x.tier_count, 2, "两档目录都含 m-x");
+        // 最低 = min(0.5×2, 2.0×2) = 1.0
+        assert!((m_x.cheapest_price_per_million.unwrap() - 1.0).abs() < 1e-9);
+        let m_y = by_model("m-y");
+        assert_eq!(m_y.tier_count, 1);
+        assert_eq!(
+            m_y.cheapest_price_per_million, None,
+            "价表未收录 → 不给最低价"
+        );
     }
 
     /// ⭐ 近期活动时间线：6 小时 / 15 分钟一桶固定 24 桶，每桶成功数/失败数/

@@ -6,13 +6,7 @@
  */
 import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { ModelPicker } from "./ModelPicker";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import {
   useAutoModeStatus,
@@ -26,9 +20,6 @@ import { useResetCircuitBreaker } from "@/lib/query/failover";
 import { cn } from "@/lib/utils";
 import { SelfManagedBar } from "./SelfManagedBar";
 import { TierList } from "./TierList";
-
-/** Select 不能用空串当 value 的哨兵（与 AutoModeTabContent 同一个约定）。 */
-const MODEL_ANY = "__any__";
 
 export function EasyBoard({ appId }: { appId: string }) {
   const { t } = useTranslation();
@@ -92,31 +83,13 @@ export function EasyBoard({ appId }: { appId: string }) {
         </div>
       ) : null}
       <div className="flex flex-wrap items-center gap-3">
-        {board.availableModels.length > 0 ? (
-          <Select
-            value={board.model ?? MODEL_ANY}
+        {board.modelOptions.length > 0 ? (
+          <ModelPicker
+            model={board.model}
+            modelOptions={board.modelOptions}
             disabled={setModel.isPending}
-            onValueChange={(value) =>
-              setModel.mutate({
-                appType: appId,
-                model: value === MODEL_ANY ? null : value,
-              })
-            }
-          >
-            <SelectTrigger className="w-64">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={MODEL_ANY}>
-                {t("autoMode.modelAny", { defaultValue: "不限模型" })}
-              </SelectItem>
-              {board.availableModels.map((model) => (
-                <SelectItem key={model} value={model}>
-                  {model}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            onSelect={(model) => setModel.mutate({ appType: appId, model })}
+          />
         ) : null}
 
         <div className="grid grid-cols-2 gap-2">
