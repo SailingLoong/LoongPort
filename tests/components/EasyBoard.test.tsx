@@ -14,6 +14,12 @@ const tierBoardMock = vi.hoisted(() => vi.fn());
 const statusMock = vi.hoisted(() => vi.fn());
 const resetBreakerMock = vi.hoisted(() => vi.fn());
 const proxyStatusMock = vi.hoisted(() => vi.fn());
+const switchBackMock = vi.hoisted(() => vi.fn());
+const providersQueryMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/query/queries", () => ({
+  useProvidersQuery: providersQueryMock,
+}));
 
 vi.mock("@/hooks/useProxyStatus", () => ({
   useProxyStatus: proxyStatusMock,
@@ -33,6 +39,10 @@ vi.mock("@/lib/query/autoMode", async (importOriginal) => {
     useSetEasyModeMode: () => ({ mutate: setModeMock, isPending: false }),
     useSetEasyModeManualOrder: () => ({
       mutate: setOrderMock,
+      isPending: false,
+    }),
+    useSwitchToSelfManaged: () => ({
+      mutateAsync: switchBackMock,
       isPending: false,
     }),
   };
@@ -143,6 +153,25 @@ beforeEach(() => {
     isRunning: true,
     startProxyServer: vi.fn().mockResolvedValue(undefined),
   });
+  providersQueryMock.mockReturnValue({
+    data: {
+      providers: {
+        "loongport-d680a2ae9e42a740": {
+          id: "loongport-d680a2ae9e42a740",
+          name: "托管档（不该出现在栏里）",
+        },
+        "official-chatgpt": {
+          id: "official-chatgpt",
+          name: "ChatGPT 官方",
+        },
+        "my-custom": {
+          id: "my-custom",
+          name: "我的自建",
+        },
+      },
+    },
+  });
+  switchBackMock.mockResolvedValue({ status: "ok" });
 });
 
 describe("EasyBoard", () => {
@@ -370,6 +399,23 @@ describe("EasyBoard", () => {
     ).toBeDefined();
     fireEvent.click(screen.getByText("启动本地路由"));
     expect(startRouting).toHaveBeenCalledTimes(1);
+  });
+
+  it("官方与自建栏：只列非托管供应商，点击走切回编排", async () => {
+    setupBoard(boardFixture());
+    expect(screen.getByText("官方与自建")).toBeDefined();
+    expect(screen.getByText("ChatGPT 官方")).toBeDefined();
+    expect(screen.getByText("我的自建")).toBeDefined();
+    expect(screen.queryByText("托管档（不该出现在栏里）")).toBeNull();
+
+    fireEvent.click(screen.getByText("ChatGPT 官方"));
+    await waitFor(() =>
+      expect(switchBackMock).toHaveBeenCalledWith({
+        appType: "claude",
+        providerId: "official-chatgpt",
+        quitChatgpt: undefined,
+      }),
+    );
   });
 
   it("空档位显示空态而不是崩", () => {

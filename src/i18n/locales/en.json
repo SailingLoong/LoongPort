@@ -2666,7 +2666,11 @@
       "recentTimeline": "Last 6h: {{ok}} ok · {{fail}} failed · TTFT {{ttft}}",
       "retryIn": "Auto-retry in ~{{minutes}} min",
       "affinity": "Sticky · {{minutes}} min",
-      "affinityTitle": "Session is sticky: switching mid-session loses the prompt cache (cache misses bill at full price). After idle or a current-tier failure, a better tier takes over"
+      "affinityTitle": "Session is sticky: switching mid-session loses the prompt cache (cache misses bill at full price). After idle or a current-tier failure, a better tier takes over",
+      "selfManagedTitle": "Official & self-managed",
+      "switchBack": "Switch back",
+      "selfManagedEmpty": "No official or self-managed providers yet (add in self-managed mode)",
+      "switchBackDone": "Switched back to {{name}}; this app is now self-managed"
     },
     "modelHint": "With a model picked, only tiers whose catalog includes it are chosen; an explicit pick switches to the best tier immediately.",
     "advancedSection": "Advanced (failover queue & circuit breaker)",

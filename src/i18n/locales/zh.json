@@ -2666,7 +2666,11 @@
       "recentTimeline": "近 6 小时：成功 {{ok}} · 失败 {{fail}} · 首字 {{ttft}}",
       "retryIn": "约 {{minutes}} 分钟后自动重试",
       "affinity": "粘性 · {{minutes}} 分钟",
-      "affinityTitle": "会话粘性中：中途换档会丢提示词缓存（未命中按全价计费）；闲置或当前档位故障后，由更优档位接管"
+      "affinityTitle": "会话粘性中：中途换档会丢提示词缓存（未命中按全价计费）；闲置或当前档位故障后，由更优档位接管",
+      "selfManagedTitle": "官方与自建",
+      "switchBack": "切回",
+      "selfManagedEmpty": "还没有官方或自建供应商（在自主模式添加）",
+      "switchBackDone": "已切回 {{name}}，该应用转为自主模式"
     },
     "modelHint": "选了模型后只在目录含该模型的档位里挑；显式点选会立即切到最优档位",
     "advancedSection": "高级（故障转移队列与熔断）",

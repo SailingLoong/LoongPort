@@ -2667,7 +2667,11 @@
       "recentTimeline": "近 6 小時：成功 {{ok}} · 失敗 {{fail}} · 首字 {{ttft}}",
       "retryIn": "約 {{minutes}} 分鐘後自動重試",
       "affinity": "黏性 · {{minutes}} 分鐘",
-      "affinityTitle": "工作階段黏性中：中途切換會遺失提示詞快取（未命中按全價計費）；閒置或目前檔位故障後，由更優檔位接管"
+      "affinityTitle": "工作階段黏性中：中途切換會遺失提示詞快取（未命中按全價計費）；閒置或目前檔位故障後，由更優檔位接管",
+      "selfManagedTitle": "官方與自建",
+      "switchBack": "切回",
+      "selfManagedEmpty": "還沒有官方或自建供應商（在自主模式新增）",
+      "switchBackDone": "已切回 {{name}}，該應用轉為自主模式"
     },
     "modelHint": "選了模型後只在目錄含該模型的檔位裡挑；顯式點選會立即切到最優檔位",
     "advancedSection": "進階（故障轉移佇列與熔斷）",
