@@ -477,29 +477,15 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
         }
     }
 
-    // 验真判定（两源读侧合并已在 store 层做完）：跨模型取最严重，只上异常
-    let mut verification: std::collections::HashMap<
-        String,
-        crate::relay::model_verification::types::VerificationReport,
-    > = std::collections::HashMap::new();
-    for report in crate::relay::model_verification::store::list_for_provider_ids(db, &provider_ids)
-        .unwrap_or_default()
-    {
-        match verification.get(&report.target.provider_id) {
-            Some(current) => {
-                if crate::relay::model_verification::verdict::report_precedes(&report, current) {
-                    verification.insert(report.target.provider_id.clone(), report);
-                }
-            }
-            None => {
-                verification.insert(report.target.provider_id.clone(), report);
-            }
-        }
-    }
+    // 验真判定：跨模型聚合收在模型验证模块（worst_verdict_by_provider），
+    // 这里只做 DTO 字符串映射；模块下线时聚合恒为空 ⇒ 看板无验真列。
+    let verification =
+        crate::relay::model_verification::store::worst_verdict_by_provider(db, &provider_ids)
+            .unwrap_or_default();
     let verification_verdict = |provider_id: &str| -> Option<String> {
         verification
             .get(provider_id)
-            .and_then(|report| match report.verdict {
+            .and_then(|verdict| match verdict {
                 crate::relay::model_verification::types::Verdict::Anomaly => {
                     Some("anomaly".to_string())
                 }

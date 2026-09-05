@@ -55,6 +55,7 @@ import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
 
 import { RelayRow } from "../RelayRow";
 import { VendorRow } from "../VendorRow";
+import { TierVerificationProvider } from "../model-verification/TierVerificationProvider";
 
 // 这组测试只守两类行把统一刷新回调接到用量区，不重复验证余额查询本身。
 // `RowBalance.test.tsx` 已覆盖真实查询、布局和刷新顺序；这里隔离掉异步查询，
@@ -154,12 +155,19 @@ function renderRelayRow(
     onResetTier: vi.fn(),
     onEditTier: vi.fn(),
     onDelete: vi.fn(),
-    onVerifyTier: vi.fn(),
-    verificationVerdictForTier: () => undefined,
-    isVerifyingTier: () => false,
   };
 
-  return { onProvision, onLogin, ...renderWithQuery(<RelayRow {...props} />) };
+  // RelayRow 的验真 UI 读模块 Provider 的 context；本测试不测验真，
+  // Provider 以默认（模块下线）形态挂上即可 —— 不拉取、不渲染入口。
+  return {
+    onProvision,
+    onLogin,
+    ...renderWithQuery(
+      <TierVerificationProvider appId="codex" providerIds={[]}>
+        <RelayRow {...props} />
+      </TierVerificationProvider>,
+    ),
+  };
 }
 
 function renderVendorRow(

@@ -10,6 +10,22 @@ pub(crate) mod target;
 pub mod types;
 pub mod verdict;
 
+/// 模型验证功能总开关：模块在此一处收口，false 时读写两侧整体下线
+/// （store 读一律空、写一律跳过），调用方拿不到验证数据即默认不展示。
+///
+/// 下线原因（2026-09）：主动探针判定规则对部分合规上游存在系统性误判——
+/// 模型标识按请求名全等比对，撞上响应回显带日期快照模型名的上游即假异常；
+/// 流式用量一致性要求了官方流式协议不保证的字段组合。判定规则修正后恢复：
+/// 本开关与前端 `lib/api/modelVerification.ts` 同名开关一起置回 true，
+/// 并清空或按 `rules_version` 过滤下线前落库的旧报告（读侧当前不过滤版本）。
+#[cfg(not(test))]
+pub(crate) const MODEL_VERIFICATION_ENABLED: bool = false;
+
+/// 测试一律按启用跑：探针→落库→读侧合并→DTO 投影整条管线的既有测试
+/// 继续守护管线，恢复上线时不需要重新踩一遍。
+#[cfg(test)]
+pub(crate) const MODEL_VERIFICATION_ENABLED: bool = true;
+
 #[cfg(test)]
 mod privacy_tests;
 

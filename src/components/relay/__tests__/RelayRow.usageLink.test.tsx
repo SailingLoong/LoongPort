@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ComponentProps } from "react";
 import { RelayRow } from "../RelayRow";
+import { TierVerificationProvider } from "../model-verification/TierVerificationProvider";
 import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
 
 /** 「查看用量」入口的渲染闸：资格由后端 `canViewUsage` 拥有，行里只消费。 */
@@ -42,16 +43,17 @@ function renderRow(
     onOpenUsage,
     onCheckTier: vi.fn(),
     isCheckingTier: () => false,
-    verificationVerdictForTier: undefined,
-    onVerifyTier: vi.fn(),
-    isVerifyingTier: () => false,
     onResetTier: vi.fn(),
     onEditTier: vi.fn(),
     onDelete: vi.fn(),
   };
+  // RelayRow 的验真 UI 读模块 Provider 的 context；本测试不测验真，
+  // Provider 以默认（模块下线）形态挂上即可 —— 不拉取、不渲染入口。
   return render(
     <QueryClientProvider client={createTestQueryClient()}>
-      <RelayRow {...props} />
+      <TierVerificationProvider appId="codex" providerIds={[]}>
+        <RelayRow {...props} />
+      </TierVerificationProvider>
     </QueryClientProvider>,
   );
 }

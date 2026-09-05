@@ -3,12 +3,16 @@ use crate::{
     error::AppError,
     relay::model_verification::{
         history,
-        types::{verdict_severity, TargetScope, VerificationReport, VerificationSource},
-        verdict::merge_passive_over,
+        types::{verdict_severity, TargetScope, Verdict, VerificationReport, VerificationSource},
+        verdict::{merge_passive_over, report_precedes},
+        MODEL_VERIFICATION_ENABLED,
     },
 };
 use rusqlite::{params, params_from_iter, Connection};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const RESULTS_TABLE: &str = "model_verification_results";
 
@@ -75,6 +79,9 @@ fn unix_seconds() -> i64 {
 }
 
 pub fn upsert_active(db: &Database, report: &VerificationReport) -> Result<(), AppError> {
+    if !MODEL_VERIFICATION_ENABLED {
+        return Ok(());
+    }
     let active_report_json = serde_json::to_string(report)
         .map_err(|error| AppError::Config(format!("序列化验证报告失败: {error}")))?;
     let verdict = serde_json::to_string(&report.verdict)
@@ -131,6 +138,9 @@ pub fn upsert_active(db: &Database, report: &VerificationReport) -> Result<(), A
 /// verdict 列同步维护为两源合并后的对外判定（当前无独立读者，保持列语义
 /// 不撒谎，供将来直接 join）。
 pub fn upsert_passive(db: &Database, report: &VerificationReport) -> Result<bool, AppError> {
+    if !MODEL_VERIFICATION_ENABLED {
+        return Ok(false);
+    }
     let passive_report_json = serde_json::to_string(report)
         .map_err(|error| AppError::Config(format!("序列化验证报告失败: {error}")))?;
     let mut conn = lock_conn!(db.conn);
@@ -227,7 +237,7 @@ pub fn list_for_providers(
     app_type: &str,
     provider_ids: &[String],
 ) -> Result<Vec<VerificationReport>, AppError> {
-    if provider_ids.is_empty() {
+    if !MODEL_VERIFICATION_ENABLED || provider_ids.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -272,7 +282,7 @@ pub fn list_for_provider_ids(
     db: &Database,
     provider_ids: &[String],
 ) -> Result<Vec<VerificationReport>, AppError> {
-    if provider_ids.is_empty() {
+    if !MODEL_VERIFICATION_ENABLED || provider_ids.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -303,6 +313,32 @@ pub fn list_for_provider_ids(
             merge_json_reports(active_json, passive_json).transpose()
         })
         .collect()
+}
+
+/// 档位（provider）跨模型的读侧聚合：每个 provider 取最严重判定
+/// （严重者赢、同级取更新，规则见 `verdict::report_precedes`）。
+/// 看板等消费方只调这一条，不各自展开验真合并规则。
+pub fn worst_verdict_by_provider(
+    db: &Database,
+    provider_ids: &[String],
+) -> Result<HashMap<String, Verdict>, AppError> {
+    let mut worst: HashMap<String, VerificationReport> = HashMap::new();
+    for report in list_for_provider_ids(db, provider_ids)? {
+        match worst.get(&report.target.provider_id) {
+            Some(current) => {
+                if report_precedes(&report, current) {
+                    worst.insert(report.target.provider_id.clone(), report);
+                }
+            }
+            None => {
+                worst.insert(report.target.provider_id.clone(), report);
+            }
+        }
+    }
+    Ok(worst
+        .into_iter()
+        .map(|(provider_id, report)| (provider_id, report.verdict))
+        .collect())
 }
 
 pub fn clear_scope(db: &Database, scope: &TargetScope) -> Result<(), AppError> {

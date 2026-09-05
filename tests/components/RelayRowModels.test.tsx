@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { RelayRow } from "@/components/relay/RelayRow";
+import { TierVerificationProvider } from "@/components/relay/model-verification/TierVerificationProvider";
 import type { RelayRow as RelayRowData, TierInfo } from "@/lib/api/relay";
 
 import { createTestQueryClient } from "../utils/testQueryClient";
@@ -52,24 +53,28 @@ function relay(models: string[]): RelayRowData {
 function renderRow(models: string[], onSelectTierModel = vi.fn()) {
   render(
     <QueryClientProvider client={createTestQueryClient()}>
-      <RelayRow
-        relay={relay(models)}
-        open
-        onOpenChange={vi.fn()}
-        busy={new Set()}
-        onLogin={vi.fn()}
-        onProvision={vi.fn()}
-        onSiteConfigApplied={vi.fn()}
-        onSwitchTier={vi.fn()}
-        onSelectTierModel={onSelectTierModel}
-        onPurchase={vi.fn()}
-        onOpenUsage={undefined}
-        onCheckTier={vi.fn()}
-        isCheckingTier={() => false}
-        onResetTier={vi.fn()}
-        onEditTier={vi.fn()}
-        onDelete={vi.fn()}
-      />
+      {/* RelayRow 的验真 UI 读模块 Provider 的 context；本测试不测验真，
+          Provider 以默认（模块下线）形态挂上即可。 */}
+      <TierVerificationProvider appId="codex" providerIds={[]}>
+        <RelayRow
+          relay={relay(models)}
+          open
+          onOpenChange={vi.fn()}
+          busy={new Set()}
+          onLogin={vi.fn()}
+          onProvision={vi.fn()}
+          onSiteConfigApplied={vi.fn()}
+          onSwitchTier={vi.fn()}
+          onSelectTierModel={onSelectTierModel}
+          onPurchase={vi.fn()}
+          onOpenUsage={undefined}
+          onCheckTier={vi.fn()}
+          isCheckingTier={() => false}
+          onResetTier={vi.fn()}
+          onEditTier={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      </TierVerificationProvider>
     </QueryClientProvider>,
   );
   return onSelectTierModel;
