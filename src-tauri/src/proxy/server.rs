@@ -415,6 +415,18 @@ impl ProxyServer {
             .reset_provider_breaker(provider_id, app_type)
             .await;
     }
+
+    /// 批量读 Provider 熔断器快照（看板用）
+    pub async fn provider_breaker_states(
+        &self,
+        app_type: &str,
+        provider_ids: &[String],
+    ) -> std::collections::HashMap<String, crate::proxy::circuit_breaker::BreakerSnapshot> {
+        self.state
+            .provider_router
+            .breaker_states(app_type, provider_ids)
+            .await
+    }
 }
 
 #[cfg(test)]

@@ -101,6 +101,15 @@ pub struct CircuitBreaker {
     half_open_requests: Arc<AtomicU32>,
 }
 
+/// 熔断器对外的只读快照（看板「熔断/自动重试倒计时」用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreakerSnapshot {
+    /// `true` = HalfOpen（放行探测中）；`false` = Open。
+    pub half_open: bool,
+    /// Open 状态下距自动转 HalfOpen 的剩余秒数；HalfOpen 无倒计时。
+    pub reopen_in_secs: Option<u64>,
+}
+
 /// 熔断器放行结果
 ///
 /// `used_half_open_permit` 表示本次放行是否占用了 HalfOpen 探测名额。
@@ -341,6 +350,34 @@ impl CircuitBreaker {
         self.transition_to_open(true).await;
     }
 
+    /// 只读快照：`None` = Closed（正常，不上板）。
+    pub async fn snapshot(&self) -> Option<BreakerSnapshot> {
+        let state = *self.state.read().await;
+        match state {
+            CircuitState::Closed => None,
+            CircuitState::HalfOpen => Some(BreakerSnapshot {
+                half_open: true,
+                reopen_in_secs: None,
+            }),
+            CircuitState::Open => {
+                let cooldown = {
+                    let config = self.config.read().await;
+                    self.open_cooldown_secs(&config).await
+                };
+                let elapsed = self
+                    .last_opened_at
+                    .read()
+                    .await
+                    .map(|opened_at| opened_at.elapsed().as_secs())
+                    .unwrap_or(cooldown);
+                Some(BreakerSnapshot {
+                    half_open: false,
+                    reopen_in_secs: Some(cooldown.saturating_sub(elapsed)),
+                })
+            }
+        }
+    }
+
     /// 获取当前状态
     #[allow(dead_code)]
     pub async fn get_state(&self) -> CircuitState {
@@ -460,6 +497,56 @@ pub struct CircuitBreakerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_reports_open_with_countdown_and_closed_as_none() {
+        // 正常失败打开（阈值 1、冷却 600s）：Open + 剩余 ≈ 600
+        let config = CircuitBreakerConfig {
+            failure_threshold: 1,
+            timeout_seconds: 600,
+            ..Default::default()
+        };
+        let breaker = CircuitBreaker::new(config);
+        assert!(
+            breaker.snapshot().await.is_none(),
+            "Closed → None（正常态不上板）"
+        );
+
+        breaker.record_failure(false).await;
+        let snap = breaker.snapshot().await.expect("Open 必须有快照");
+        assert!(!snap.half_open);
+        let remaining = snap.reopen_in_secs.expect("Open 必须带倒计时");
+        assert!(
+            remaining > 590 && remaining <= 600,
+            "剩余 {remaining} 应接近 600"
+        );
+
+        // 致命失败：长冷却 1800
+        let fatal_breaker = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            timeout_seconds: 600,
+            ..Default::default()
+        });
+        fatal_breaker.record_fatal_failure(false).await;
+        let snap = fatal_breaker.snapshot().await.expect("致命 Open 有快照");
+        let remaining = snap.reopen_in_secs.expect("致命 Open 带长冷却倒计时");
+        assert!(
+            remaining > 1790 && remaining <= 1800,
+            "剩余 {remaining} 应接近 1800"
+        );
+
+        // 冷却 0：Open 超时 → is_available 转 HalfOpen → 快照 half_open 无倒计时
+        let instant = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            timeout_seconds: 0,
+            ..Default::default()
+        });
+        instant.record_failure(false).await;
+        assert!(instant.is_available().await, "冷却 0 应立即转 HalfOpen");
+        let snap = instant.snapshot().await.expect("HalfOpen 有快照");
+        assert!(snap.half_open);
+        assert!(snap.reopen_in_secs.is_none(), "HalfOpen 无倒计时");
+    }
 
     #[tokio::test]
     async fn test_circuit_breaker_closed_to_open() {

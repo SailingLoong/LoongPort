@@ -40,7 +40,10 @@ export function EasyBoard({ appId }: { appId: string }) {
 
   // 熔断/降级档位：右上角「重试全部」逐个清健康+熔断（单卡上另有单独按钮）
   const failedTiers = (board?.tiers ?? []).filter(
-    (tier) => tier.isHealthy === false || (tier.consecutiveFailures ?? 0) > 0,
+    (tier) =>
+      tier.isHealthy === false ||
+      tier.breakerState != null ||
+      (tier.consecutiveFailures ?? 0) > 0,
   );
   const handleRetryAll = async () => {
     for (const tier of failedTiers) {

@@ -384,6 +384,15 @@ pub struct TierBoardTier {
     /// 近 6 小时活动时间线（15 分钟一桶固定 24 桶，空桶补零）；
     /// `None` = 窗口内没有任何请求，前端不渲染时间线。
     pub recent_activity: Option<Vec<crate::services::usage_stats::ProviderActivityBucket>>,
+    /// 内存熔断器状态（请求路径的真实闸门）：`"open"` | `"half_open"`；
+    /// `None` = Closed 或代理未运行。致命打开但 DB 健康行还没到阈值的档位
+    /// 靠这个上报（熔断器一次即开，DB 要攒阈值）。
+    pub breaker_state: Option<String>,
+    /// Open 状态距自动转 HalfOpen（探测）的剩余秒数；HalfOpen/Closed 无。
+    pub breaker_reopen_in_secs: Option<u64>,
+    /// 会话亲和剩余秒数（仅当前档位、亲和窗口内有流量时）——解释「更便宜的
+    /// 档位为什么不马上接管」：中途换档丢提示词缓存，闲置后才重排。
+    pub affinity_remaining_secs: Option<u64>,
 }
 
 /// 省心模式档位看板：首页省心视图一次拉全的聚合 DTO。
@@ -437,6 +446,14 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let model_pref = auto_strategy::get_model_pref(db, app_type);
     let current_id = auto_strategy::effective_current_provider_id(db, app_type);
 
+    let last_activity = db.get_provider_last_activity(app_type).unwrap_or_default();
+    let now = chrono::Utc::now().timestamp();
+    let provider_ids: Vec<String> = ranked.iter().map(|p| p.id.clone()).collect();
+    let breaker_states = state
+        .proxy_service
+        .provider_breaker_states(app_type, &provider_ids)
+        .await;
+
     let balances = fetch_site_balances(app_type, &ranked).await;
 
     // 健康快照（缺行时 DAO 合成默认健康行，见 get_provider_health 的契约）
@@ -449,7 +466,6 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     }
 
     // 验真判定（两源读侧合并已在 store 层做完）：跨模型取最严重，只上异常
-    let provider_ids: Vec<String> = ranked.iter().map(|p| p.id.clone()).collect();
     let mut verification: std::collections::HashMap<
         String,
         crate::relay::model_verification::types::VerificationReport,
@@ -506,6 +522,23 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
             today_requests: today.get(&p.id).map(|(_, requests)| *requests),
             cache_hit_rate: cache_hit_rates.get(&p.id).copied(),
             recent_activity: recent_activity.get(&p.id).cloned(),
+            breaker_state: breaker_states
+                .get(&p.id)
+                .map(|snap| if snap.half_open { "half_open" } else { "open" }.to_string()),
+            breaker_reopen_in_secs: breaker_states
+                .get(&p.id)
+                .and_then(|snap| snap.reopen_in_secs),
+            affinity_remaining_secs: (current_id.as_deref() == Some(p.id.as_str()))
+                .then(|| {
+                    last_activity
+                        .get(&p.id)
+                        .map(|last| {
+                            (last + crate::proxy::auto_strategy::AFFINITY_WINDOW_SECS - now).max(0)
+                                as u64
+                        })
+                        .filter(|remaining| *remaining > 0)
+                })
+                .flatten(),
             provider_id: p.id.clone(),
             name: p.name.clone(),
             position,
@@ -812,6 +845,79 @@ mod tests {
         );
         assert_eq!(by_id(&fine).consecutive_failures, Some(0));
         assert_eq!(by_id(&fine).last_error, None);
+    }
+
+    /// ⭐ 倒计时双字段：亲和剩余只在「当前档位 + 窗口内有流量」时给出；
+    /// 熔断字段在代理未运行时全 None（无内存态可读，前端只信 DB 健康）。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_surfaces_affinity_countdown_for_active_current() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let current = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
+        let other = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let tier = |id: &str| {
+            crate::provider::Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({ "config": "model = \"m-x\"\n" }),
+                None,
+            )
+        };
+        db.save_provider("claude", &tier(&current)).unwrap();
+        db.save_provider("claude", &tier(&other)).unwrap();
+        db.set_current_provider("claude", &current).unwrap();
+        // 同一时刻给「别的档位」也 seed 流量：亲和剩余只跟当前档位自己的
+        // 最近流量走，别的档位有流量也不给倒计时
+        seed_board_usage(
+            &db,
+            "claude",
+            &current,
+            "aff-cur",
+            0.0,
+            200,
+            0,
+            0,
+            0,
+            Some(10),
+            -60,
+        );
+        seed_board_usage(
+            &db,
+            "claude",
+            &other,
+            "aff-oth",
+            0.0,
+            200,
+            0,
+            0,
+            0,
+            Some(10),
+            -60,
+        );
+
+        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
+        let remaining = by_id(&current)
+            .affinity_remaining_secs
+            .expect("活跃当前档位必须有亲和倒计时");
+        assert!(
+            remaining > 0 && remaining <= 30 * 60,
+            "剩余 {remaining} 应在 (0, 30min]"
+        );
+        assert_eq!(
+            by_id(&other).affinity_remaining_secs,
+            None,
+            "非当前档位不给亲和倒计时"
+        );
+        assert_eq!(
+            by_id(&current).breaker_state,
+            None,
+            "代理未运行 → 无内存熔断态"
+        );
+        assert_eq!(by_id(&current).breaker_reopen_in_secs, None);
     }
 
     /// 亲和判据与选路同源（proxy_request_logs 近期流量），见

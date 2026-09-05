@@ -4113,6 +4113,20 @@ impl ProxyService {
     /// 重置指定 Provider 的熔断器
     ///
     /// 如果代理服务器正在运行，立即重置内存中的熔断器状态
+    /// 批量读 Provider 熔断器快照（看板「熔断/自动重试倒计时」用）。
+    /// 代理未运行 → 空 map（没有内存熔断态可读）。
+    pub async fn provider_breaker_states(
+        &self,
+        app_type: &str,
+        provider_ids: &[String],
+    ) -> std::collections::HashMap<String, crate::proxy::circuit_breaker::BreakerSnapshot> {
+        let mut result = std::collections::HashMap::new();
+        if let Some(server) = self.server.read().await.as_ref() {
+            result = server.provider_breaker_states(app_type, provider_ids).await;
+        }
+        result
+    }
+
     pub async fn reset_provider_circuit_breaker(
         &self,
         provider_id: &str,
