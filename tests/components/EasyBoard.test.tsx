@@ -416,7 +416,7 @@ describe("EasyBoard", () => {
 
   it("点策略按钮落到 setStrategy mutation", () => {
     setupBoard(boardFixture());
-    fireEvent.click(screen.getByText("省时"));
+    fireEvent.click(screen.getByText("响应最快"));
     expect(setStrategyMock).toHaveBeenCalledWith({ strategy: "fastest" });
   });
 

@@ -1,7 +1,7 @@
 /**
  * 首页省心视图：省心模式生效时替换该 app 的 provider 页。
  *
- * 用户只做三件事：选模型、选模式（自动/手动）；自动下选策略（省钱/省时），
+ * 用户只做三件事：选模型、选模式（自动/手动）；自动下选策略（价格最低/响应最快），
  * 手动下拖动档位卡排序。全部档位事实来自后端看板（唯源），这里只渲染。
  */
 import { useTranslation } from "react-i18next";
@@ -116,14 +116,14 @@ export function EasyBoard({ appId }: { appId: string }) {
               disabled={setStrategy.isPending}
               onClick={() => setStrategy.mutate({ strategy: "cheapest" })}
             >
-              {t("autoMode.strategy.cheapest", { defaultValue: "省钱" })}
+              {t("autoMode.strategy.cheapest", { defaultValue: "价格最低" })}
             </ChoiceButton>
             <ChoiceButton
               active={board.strategy === "fastest"}
               disabled={setStrategy.isPending}
               onClick={() => setStrategy.mutate({ strategy: "fastest" })}
             >
-              {t("autoMode.strategy.fastest", { defaultValue: "省时" })}
+              {t("autoMode.strategy.fastest", { defaultValue: "响应最快" })}
             </ChoiceButton>
           </div>
         ) : null}
