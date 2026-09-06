@@ -1681,7 +1681,11 @@ mod tests {
         let cfg = parse_verified(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
             .expect("仓内 config.json + .sig 必须过客户端同一套验签与解析");
 
-        assert!(!cfg.sponsors.is_empty(), "推荐列表不该是空的");
+        // sponsors 允许为空：2026-09-06 起推荐屏随广场临时下线（站长推广期的
+        // 运营决策，恢复 = 回填 sponsors + 重新签名部署，见 c4296132）。有意的
+        // 运营状态不归这道闸管 —— 它拦的是「改了 JSON 忘了重签 / 写出客户端
+        // 解不出的形状」这类**事故**。下面的逐条校验在空列表上自然空转，
+        // 回填那天自动恢复约束力，无需再改本测试。
         for sponsor in &cfg.sponsors {
             assert!(
                 sponsor.site_origin.starts_with("https://"),
