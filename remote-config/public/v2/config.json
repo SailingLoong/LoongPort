@@ -1,0 +1,178 @@
+{
+  "issued_at": "2026-09-06T17:30:00Z",
+  "star_reward": {
+    "promo_code": "LOONGPORT5",
+    "amount_usd": 5
+  },
+  "vendor_invite_urls": {
+    "bigmodel": "https://www.bigmodel.cn/login?icode=9g7xCHQO8WMdZ54ByDv%2FI%2BZLO2QH3C0EBTSr%2BArzMw4%3D&from=invite&redirect=%2F"
+  },
+  "sponsors": [],
+  "aff_codes": {
+    "790053500.com": "FQSPPFUYXSSS",
+    "airelay.buzz": "WFPFW82LVFQ9"
+  },
+  "relay_directory": {
+    "blocked_hosts": [
+      "1pkapi.com",
+      "aliuapi.top",
+      "api-top.com",
+      "api.ooapi.cc",
+      "apinode.ltd",
+      "bb-api.com",
+      "bestapi.store",
+      "cc-vibe.com",
+      "cca.maya.today",
+      "codex666ai.com",
+      "hejuapi.com",
+      "mfttai.com",
+      "nexaxis.ai",
+      "onepig123.com",
+      "sub.callai.one",
+      "sub.kedaya.xyz",
+      "umapis.com",
+      "wawazz.xyz",
+      "yomiapi.com",
+      "yujianwudi.top"
+    ],
+    "sites": {
+      "bestapi.store": {
+        "veridrop_host": "bestapi.store",
+        "entry_url": "https://bestapi.store",
+        "purchase_url": "https://bestapi.store/purchase",
+        "usage_url": "https://bestapi.store/usage",
+        "display_name": "BestAPI"
+      },
+      "790053500.com": {
+        "veridrop_host": "api.790053500.com",
+        "entry_url": "https://790053500.com/keys",
+        "purchase_url": "https://790053500.com/purchase",
+        "usage_url": "https://790053500.com/usage",
+        "display_name": "鑫旺"
+      },
+      "api-top.com": {
+        "veridrop_host": "api-top.com",
+        "entry_url": "https://api-top.com/register",
+        "purchase_url": "https://api-top.com/wallet",
+        "display_name": "Top-API"
+      },
+      "api.ooapi.cc": {
+        "veridrop_host": "api.ooapi.cc",
+        "entry_url": "https://api.ooapi.cc",
+        "display_name": "玩转AI"
+      },
+      "cc-vibe.com": {
+        "veridrop_host": "cc-vibe.com",
+        "entry_url": "https://cc-vibe.com",
+        "display_name": "CCVibe"
+      },
+      "codex666ai.com": {
+        "veridrop_host": "codex666ai.com",
+        "entry_url": "https://codex666ai.com",
+        "usage_url": "https://codex666ai.com/usage",
+        "display_name": "codex666ai"
+      },
+      "sub.kedaya.xyz": {
+        "veridrop_host": "sub.kedaya.xyz",
+        "entry_url": "https://sub.kedaya.xyz",
+        "display_name": "Kedaya 中转站"
+      },
+      "nexaxis.ai": {
+        "veridrop_host": "nexaxis.ai",
+        "entry_url": "https://nexaxis.ai",
+        "display_name": "NEXAXIS"
+      },
+      "yomiapi.com": {
+        "veridrop_host": "yomiapi.com",
+        "entry_url": "https://yomiapi.com",
+        "display_name": "Yomi API"
+      },
+      "1pkapi.com": {
+        "veridrop_host": "1pkapi.com",
+        "entry_url": "https://1pkapi.com/register",
+        "purchase_url": "https://1pkapi.com/purchase",
+        "usage_url": "https://1pkapi.com/usage",
+        "display_name": "皓悦API"
+      },
+      "sub.callai.one": {
+        "veridrop_host": "sub.callai.one",
+        "entry_url": "https://sub.callai.one/register",
+        "purchase_url": "https://sub.callai.one/purchase",
+        "usage_url": "https://sub.callai.one/usage",
+        "display_name": "CallAI中转"
+      },
+      "aliuapi.top": {
+        "veridrop_host": "aliuapi.top",
+        "entry_url": "https://aliuapi.top/register",
+        "purchase_url": "https://aliuapi.top/purchase",
+        "usage_url": "https://aliuapi.top/usage",
+        "display_name": "AL-API"
+      },
+      "mfttai.com": {
+        "veridrop_host": "mfttai.com",
+        "entry_url": "https://mfttai.com/register",
+        "purchase_url": "https://mfttai.com/purchase",
+        "usage_url": "https://mfttai.com/usage",
+        "display_name": "MFAPI"
+      },
+      "bb-api.com": {
+        "veridrop_host": "www.bb-api.com",
+        "entry_url": "https://www.bb-api.com/register",
+        "usage_url": "https://www.bb-api.com/usage",
+        "display_name": "贝贝"
+      },
+      "cca.maya.today": {
+        "veridrop_host": "cca.maya.today",
+        "entry_url": "https://cca.maya.today/register",
+        "purchase_url": "https://cca.maya.today/purchase",
+        "usage_url": "https://cca.maya.today/usage",
+        "display_name": "BMCCA"
+      },
+      "apinode.ltd": {
+        "veridrop_host": "apinode.ltd",
+        "entry_url": "https://apinode.ltd/register",
+        "purchase_url": "https://apinode.ltd/purchase",
+        "usage_url": "https://apinode.ltd/usage",
+        "display_name": "APINode"
+      },
+      "hejuapi.com": {
+        "veridrop_host": "www.hejuapi.com",
+        "entry_url": "https://www.hejuapi.com/register",
+        "display_name": "合聚API"
+      },
+      "yujianwudi.top": {
+        "veridrop_host": "yujianwudi.top",
+        "entry_url": "https://yujianwudi.top/register",
+        "display_name": "天机阁"
+      },
+      "umapis.com": {
+        "veridrop_host": "www.umapis.com",
+        "entry_url": "https://www.umapis.com/register",
+        "display_name": "悠米AI中转"
+      },
+      "wawazz.xyz": {
+        "veridrop_host": "wawazz.xyz",
+        "entry_url": "https://wawazz.xyz/register",
+        "usage_url": "https://wawazz.xyz/usage",
+        "display_name": "WAWA ZZ API"
+      },
+      "onepig123.com": {
+        "veridrop_host": "onepig123.com",
+        "entry_url": "https://onepig123.com/register",
+        "usage_url": "https://onepig123.com/usage",
+        "display_name": "粉猪模型网关"
+      },
+      "airelay.buzz": {
+        "veridrop_host": "airelay.buzz",
+        "entry_url": "https://airelay.buzz/register",
+        "purchase_url": "https://airelay.buzz/purchase",
+        "usage_url": "https://airelay.buzz/usage",
+        "display_name": "Airelay"
+      }
+    }
+  },
+  "protected_hosts": [
+    "790053500.com",
+    "airelay.buzz"
+  ]
+}

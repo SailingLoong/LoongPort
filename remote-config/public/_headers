@@ -26,14 +26,14 @@
   Cache-Control: public, max-age=300
   Content-Type: application/octet-stream
 
-# v2 广场展示策略与它的签名：同一条「短缓存 + 同 max-age」不变式（理由同上）。
-# blocked_hosts 是展示策略的急停闸 —— 广场要重新收起来时，收窄后的名单要
-# 在 5 分钟内到达客户端，不能吃 Pages 默认缓存。
-/v2/plaza.json
+# v2 世代配置与它的签名：与 v1 同一条「短缓存 + 同 max-age」不变式。
+# blocked/protected 名单都是急停/策展闸 —— 改动要在 5 分钟内到达客户端，
+# 不能吃 Pages 默认缓存。
+/v2/config.json
   Cache-Control: public, max-age=300
   Content-Type: application/json; charset=utf-8
 
-/v2/plaza.json.sig
+/v2/config.json.sig
   Cache-Control: public, max-age=300
   Content-Type: application/octet-stream
 

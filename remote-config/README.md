@@ -42,51 +42,59 @@ $EDITOR public/v2/directory.json
 授权维护者在仓库外通过运行时环境变量 `LOONGPORT_CONFIG_KEY` 提供 Ed25519 私钥。
 私钥绝不提交、复制到文档或写入日志；密钥配置与恢复请查本机 `--help` 或组织私有 runbook。
 
-## v2 plaza policy（广场展示策略）
+## v2 config（世代切换：v2 = 策展重启的世界）
 
-`https://config.loongport.dev/v2/plaza.json`（签名同名加 `.sig`，明文源
-`public/v2/plaza.json`）是**广场展示否决**（`blocked_hosts`）的唯一权威来源。
-它与 v2 provider policy 是两回事：那份管「哪些站可被消费」，这份只管「广场
-展示谁」。
+`https://config.loongport.dev/v2/config.json`（签名同名加 `.sig`，明文源
+`public/v2/config.json`）是**现行世代**客户端的配置端点，schema 与 v1 完全相同
+（客户端同一个 `RemoteConfig` DTO），新增一个 `protected_hosts` 字段。两代的差别在**内容策略**：
 
-## 为什么展示策略要单独一个版本化端点（2026-09-06 广场下线的后续）
+| 面 | v1（冻结快照） | v2（现行，重新起步） |
+|---|---|---|
+| 广场行集 / blocked | 墓碑全量（广场关） | 从两家伙伴站起步（airelay.buzz、790053500.com），策展式加回 |
+| aff_codes | 全体受管站 | 只有两家伙伴（其余站重新谈、重新加） |
+| protected_hosts | 无此字段 | 显式受保护名单；缺省回落四源并集（全体受管站，保守向） |
+| sites（购买/用量入口 URL） | 全量 | **全量随行**——这是已配置站点上充值/用量按钮的数据源，不是策展面 |
+| star_reward / vendor 链接 | 全量 | 原样拷贝（活功能） |
 
-老客户端把 v1 URL 烧死在二进制里，只能看到 v1 `relay_directory.blocked_hosts`
-的**墓碑全量**（09-06 为下线广场填入的全部受管站 host）。广场的恢复如果仍在
-v1 上做（收窄 blocked_hosts），存量客户端会立刻重见广场。v2 plaza 只有新版本
-客户端读取（`remote_config.rs::load_plaza_config`），展示策略从此只对发了版的
-新代码生效；配套的每用户「广场开关」按首启归因播种（`relay/plaza.rs`），站长
-引流来的用户默认关。
+### 为什么这样做（2026-09-06 世代切换）
 
-分工纪律：**站点事实（别名、注册/购买/用量入口 URL）留在 v1 的
-`relay_directory.sites` 唯源**，v2 plaza 只拥有 blocked —— 改入口 URL 不动
-v2，改展示策略不动 v1，两份文件互不为对方的副本。由此 v1 上多了一条**墓碑
-不变式**（cargo 测试 `checked_in_config_keeps_the_plaza_tombstone_closed` 守着）：
-v1 的 `blocked_hosts` 必须 ⊇ v1 四源（sponsors/aff/promo/directory.sites）的
-全部 host —— 将来新收录一家站（加 aff 码）而忘了同步扩 v1 的 blocked，老
-客户端的广场会凭空多出一行；这条测试让那次忘记直接红。
+老版本客户端把 v1 URL 烧死在二进制里：在 v1 上收窄 blocked 恢复广场，存量客户端立刻重见广场。世代切换后，广场的恢复/策展、受保护名单、aff 码的增删**只动 v2**，存量客户端完全不受影响——这正是当年路径里留 `v1` 段的目的。
 
-日常更新 v2 plaza（比如恢复广场 = 收窄 blocked_hosts）：
+### v1 的退场纪律
+
+- **冻结，不是删除**：v1 内容不再编辑（`cargo test` 的墓碑不变式闸守着万一的破冰编辑）。文件留在 Pages 上持续喂老客户端，成本为零。
+- **紧急破冰**（真有非改不可的事）：改 v1 → `./sign.sh` → 部署，且必须保持「blocked ⊇ 四源」闭合，否则老客户端广场漏光。
+- **删除时机**：等升级渗透把 v1 世代客户端稀释到可忽略（看匿名统计的版本分布），届时仓内源与线上文件一起下掉；不急。
+
+### 客户端侧的对应物
+
+- 常量 `CONFIG_URL` 指向 v2（世代切换=发版动作；老二进制继续打 v1）。
+- 缓存文件名带世代（`remote-config-v2-cache.json`）：升级后**不会**读到上一代缓存——那份会把旧世界全体受管站判成受保护、一次性播种错一代人。
+- 广场可见性按首启归因播种（`relay/plaza.rs`）：弹窗域名命中 `protected_hosts` → 开关默认关。
+
+### 日常：策展操作（都在 v2 上）
 
 ```bash
 cd remote-config
-$EDITOR public/v2/plaza.json    # 改 blocked_hosts，记得更新 issued_at
-./sign-plaza.sh                 # 重新签名（忘了 = 客户端整份拒绝）
-./deploy.sh                     # 部署（会先验 v1+v2 三对签名）
-./verify-plaza.sh               # 验线上（等 ~30 秒再跑，CDN 300 秒缓存）
+$EDITOR public/v2/config.json   # 加一家站：aff_codes 加码 + sites 加条目（如需）+ 从 blocked 移出；记得更新 issued_at
+./sign-v2-config.sh             # 重新签名（忘了 = 客户端整份拒绝）
+./deploy.sh                     # 部署（先验 v1+v2 三对签名）
+./verify-v2-config.sh           # 验线上（等 ~30 秒再跑，CDN 300 秒缓存）
 ```
+
+改 v1（仅紧急破冰）：`./sign.sh` + `./deploy.sh` + `./verify.sh`（后者验的就是冻结世代那份仍然完好）。
 
 ## 日常：加一家赞助商 / 改一个邀请码
 
 ```bash
 cd remote-config
-$EDITOR public/v1/config.json     # 1. 改内容
-./sign.sh                         # 2. 重新签名（**忘了这步 = 客户端全部拒绝**）
+$EDITOR public/v2/config.json     # 1. 改内容（v1 已冻结，别碰）
+./sign-v2-config.sh               # 2. 重新签名（**忘了这步 = 客户端全部拒绝**）
 ./deploy.sh                       # 3. 部署
-./verify.sh                       # 4. 验线上（等 ~30 秒再跑，CDN 有 300 秒缓存）
+./verify-v2-config.sh             # 4. 验线上（等 ~30 秒再跑，CDN 有 300 秒缓存）
 ```
 
-四步都要跑。`sign.sh` 与 `verify.sh` 各自会自验并在出错时明确报出来。
+四步都要跑。`sign-v2-config.sh` 与 `verify-v2-config.sh` 各自会自验并在出错时明确报出来。
 
 `sign.sh` 和 `sign-v2.sh` 都要求授权维护者先在仓库外提供运行时环境变量
 `LOONGPORT_CONFIG_KEY`。私钥绝不提交或记录到日志；供应和恢复流程请查本机 `--help`
@@ -198,13 +206,15 @@ CDN 或攻击者可以重放一份**旧的、签名仍然有效**的配置，把
 
 | 脚本 | 干什么 | 什么时候跑 |
 |---|---|---|
-| `sign.sh` | 签名，然后**用代码里那把公钥**验一遍 | 每次改完 `config.json` |
+| `sign.sh` | 签名 v1（冻结世代，仅紧急破冰用），然后**用代码里那把公钥**验一遍 | 改 `v1/config.json` 后 |
+| `sign-v2-config.sh` | 签名现行 v2 config，同上自验 | 每次改完 `v2/config.json` |
 | `sign-v2.sh` | 签名 v2 directory，再用 production public key 自验 | 每次改完 `directory.json` |
-| `sign-plaza.sh` | 签名 v2 plaza，再用 production public key 自验 | 每次改完 `plaza.json` |
+
 | `deploy.sh` | 先本地验签，通过才部署到 Pages | 签完 |
-| `verify.sh` | 拉**线上**那两个文件验签，并比对与本地是否一致 | 部署后 |
+
 | `verify-v2.sh` | 验 v2 policy；`--local-only` 不访问网络 | 签名后、部署后 |
-| `verify-plaza.sh` | 验 v2 plaza；`--local-only` 不访问网络 | 签名后、部署后 |
+| `verify-v2-config.sh` | 验现行 v2 config；`--local-only` 不访问网络 | 签名后、部署后 |
+| `verify.sh` | 验 v1 冻结世代的线上那份仍然完好 | 部署后（deploy 尾部自动跑） |
 | `lib.sh` | 三者共用的函数（从 `.rs` 取常量、hex→DER、验签），**不单独执行** | — |
 
 ## 公开观测数据

@@ -69,10 +69,10 @@ verify_signed_pair \
   "$HERE/public/v2/directory.json.sig" \
   "./sign-v2.sh"
 verify_signed_pair \
-  "v2 plaza.json" \
-  "$HERE/public/v2/plaza.json" \
-  "$HERE/public/v2/plaza.json.sig" \
-  "./sign-plaza.sh"
+  "v2 config.json" \
+  "$HERE/public/v2/config.json" \
+  "$HERE/public/v2/config.json.sig" \
+  "./sign-v2-config.sh"
 
 # `pages deploy` discovers Functions from its project working directory. The current
 # Wrangler CLI deliberately has no separate Functions-directory option, so retain
@@ -85,7 +85,7 @@ echo "✔ 已部署。等 ~30 秒（CDN max-age=300）后自动验线上……"
 sleep 30
 "$HERE/verify.sh"
 "$HERE/verify-v2.sh"
-"$HERE/verify-plaza.sh"
+"$HERE/verify-v2-config.sh"
 
 echo
-echo "✔ 线上 v1 + v2（directory/plaza）验签全部通过。"
+echo "✔ 线上全部验签通过（v1 冻结世代 + v2 directory + v2 config）。"

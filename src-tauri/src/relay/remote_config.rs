@@ -40,24 +40,22 @@ use crate::error::AppError;
 
 /// 远端配置的 URL。
 ///
-/// 2026-08-03 接上真实端点（Cloudflare Pages 项目 `loongport-config`，
-/// 源文件与签名脚本在本仓库的 `remote-config/`）。
+/// ## ⚠️ 2026-09-06 起是 v2 世代：**v2 = 策展重启的世界**
 ///
-/// ## ⚠️ 这个 URL 是不可逆的对外契约，别再改它
+/// 老版本客户端烧死在 `/v1/` 上、只能看到 v1 的冻结快照（含广场墓碑全量）；
+/// 本版起客户端打 `/v2/` —— 两份文件 schema 相同（同一个 [`RemoteConfig`]），
+/// 差别在内容：v2 的推广面（广场行集 / aff 码 / 受保护名单）从两家伙伴站
+/// 重新起步，站点事实（购买/用量入口 URL）全量随行。广场内容的恢复/策展
+/// 从此只动 v2，存量客户端完全不受影响 —— 这正是当年路径里留 `v1` 段的目的。
 ///
-/// 已发出去的版本会**永远**打这个地址 —— 改它要发版，而且救不了老用户
-/// （他们的二进制里烧着旧地址）。所以它归尺子1 而不是尺子2：
-///
-/// - **用独立子域**而不是官网的子路径：以后把后端从 Pages 换成 R2 / Worker
-///   都只是改 DNS，客户端一个字节都不用动。
-/// - **路径里带 `v1`**：留给将来 schema 的破坏性变更 —— 那时新客户端打 `/v2/`，
-///   旧客户端继续吃 `/v1/`（那份要一直留着，不能删）。
-/// - **有意不用 `bestapi.store` 的子域**：那会把配置与维护者自己的中转站绑在一起，
-///   用户看到「工具去拉自家站的子域」会觉得这是在导流。
-const CONFIG_URL: &str = "https://config.loongport.dev/v1/config.json";
+/// 其余约束不变（它们对每一世代都成立）：
+/// - **独立子域**：后端从 Pages 换成 R2 / Worker 只是改 DNS；
+/// - **有意不用 `bestapi.store` 的子域**：那会把配置与维护者自己的中转站绑在一起。
+/// - 再有不可逆的世代切换时打 `/v3/`，`/v1/`、`/v2/` 都要一直留着喂旧客户端。
+const CONFIG_URL: &str = "https://config.loongport.dev/v2/config.json";
 
 /// 签名文件的 URL（与配置同目录、同名加 `.sig`）。
-const SIGNATURE_URL: &str = "https://config.loongport.dev/v1/config.json.sig";
+const SIGNATURE_URL: &str = "https://config.loongport.dev/v2/config.json.sig";
 
 /// Provider directory v2 的发布端点。
 ///
@@ -72,16 +70,17 @@ const DIRECTORY_V2_URL: &str = "https://config.loongport.dev/v2/directory.json";
 #[allow(dead_code)]
 const DIRECTORY_V2_SIGNATURE_URL: &str = "https://config.loongport.dev/v2/directory.json.sig";
 
-/// 广场展示策略 v2 的发布端点。
+/// v1 世代的配置端点（2026-09-06 起冻结，只喂老版本客户端）。
 ///
-/// 与 `DIRECTORY_V2_URL` 的定位不同：那份是 provider policy（哪些站可消费），
-/// 这份只拥有**广场展示否决**（`blocked_hosts`）。老客户端把 v1 URL 烧死在
-/// 二进制里、只能看到 v1 `relay_directory.blocked_hosts` 的墓碑全量 —— 广场的
-/// 恢复/下线从 v2 这里做，才不会惊动存量客户端（见 [`PlazaPolicy`] 的文档）。
-const PLAZA_V2_URL: &str = "https://config.loongport.dev/v2/plaza.json";
+/// 运行时不再读取；`remote-config/verify.sh` 用它持续验证线上老世代那份仍然
+/// 完好（deploy 部署整个 public/，冻结不等于可以部署坏文件）。
+// `remote-config/lib.sh::rc_const` 在仓库外部读取它。
+#[allow(dead_code)]
+const LEGACY_V1_CONFIG_URL: &str = "https://config.loongport.dev/v1/config.json";
 
-/// 广场展示策略 v2 的 detached Ed25519 签名端点。
-const PLAZA_V2_SIGNATURE_URL: &str = "https://config.loongport.dev/v2/plaza.json.sig";
+/// v1 世代配置的签名端点（冻结，脚本专用）。
+#[allow(dead_code)]
+const LEGACY_V1_SIGNATURE_URL: &str = "https://config.loongport.dev/v1/config.json.sig";
 
 /// 占位标记。端点含它就说明还没配真实域名。
 ///
@@ -240,32 +239,6 @@ pub struct RelayDirectoryPolicy {
     pub sites: std::collections::BTreeMap<String, RelayDirectorySite>,
 }
 
-/// v2 广场展示策略（[`PLAZA_V2_URL`]）。
-///
-/// 只拥有**展示否决**（`blocked_hosts`）；站点事实（别名、注册/购买/用量入口）
-/// 仍是 v1 `relay_directory.sites` 的唯源 —— 两份文件各管一件事：改入口 URL
-/// 不动 v2，改展示策略不动 v1，谁也不是谁的副本。
-///
-/// ## 为什么展示否决要单独一个版本化端点
-///
-/// 老客户端只能读 v1；在 v1 上收窄 `blocked_hosts` 恢复广场，存量客户端会立刻
-/// 重见广场（2026-09-06 下线要防的就是这个）。v2 端点只有新客户端认识 ⇒
-/// 展示策略的变更只对发了版的新代码生效，恢复节奏完全由维护者掌握。
-///
-/// ## 拉不到 v2 时回落**空策略**（不 block），而不是全 block
-///
-/// 广场给谁看由每用户的 `plaza_visible` 开关决定（`relay::plaza`），blocked
-/// 只管行集内容。空策略最坏的后果是「该藏的行没藏」，而开关已经把整个广场
-/// 藏住了 —— 方向安全。反过来全 block 会把「内容下线」误升级成「端点故障
-/// 时永远空广场」。
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-pub struct PlazaPolicy {
-    /// 广场不展示这些 host。与 v1 `relay_directory.blocked_hosts` 同一套
-    /// `request_host` 归一口径（leaderboard 侧统一归一）。空 = 不否决任何人。
-    #[serde(default)]
-    pub blocked_hosts: Vec<String>,
-}
-
 /// 「点 Star 领注册礼」的奖励配置（码 + 展示额度）。
 ///
 /// ## 整块缺席 = 活动下线
@@ -361,6 +334,14 @@ pub struct RemoteConfig {
     /// 中转站广场兼容策略。评分与排名不在这里，始终由 VeriDrop 提供。
     #[serde(default)]
     pub relay_directory: RelayDirectoryPolicy,
+    /// 归因播种的**受保护域名**名单（apex 口径，客户端读时归一）。
+    ///
+    /// 非空 ⇒ 受保护集合就是这份（维护者的关系态：哪些站长的引流要保护），
+    /// 未列出的站不再受保护；缺省/为空 ⇒ 回落四源并集（全体受管站，保守
+    /// 方向）。归因语义见 `relay::plaza::protected_site_domains`。
+    /// v1 冻结快照里没有这个字段 —— 老世代客户端也永远不会读到它。
+    #[serde(default)]
+    pub protected_hosts: Vec<String>,
     /// 「点 Star 领注册礼」的奖励配置。`None`（旧线上配置）= 活动不存在，
     /// 见 [`StarRewardConfig`] 的文档。`#[serde(default)]` 的双向兼容理由同
     /// [`RemoteConfig::promo_codes`] 上的注释。
@@ -477,7 +458,10 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 /// 存原文而不是解析后的结构：那样下次读它时能**再验一次签**，
 /// 而不是「相信一份自己写下的 JSON」—— 磁盘上的文件同样可以被改。
 fn cache_path() -> std::path::PathBuf {
-    cache_dir().join("remote-config-cache.json")
+    // 文件名带世代：升级后**不会**读到上一代的缓存 —— 那份的受保护语义
+    // （无 protected_hosts ⇒ 四源并集全保护）会把旧世界的全体受管站都判成
+    // 受保护，一次性播种错一代人。宁可首启冷一次。
+    cache_dir().join("remote-config-v2-cache.json")
 }
 
 /// 缓存所在目录。
@@ -496,16 +480,7 @@ fn cache_dir() -> std::path::PathBuf {
 
 /// 签名缓存。与配置分开存，**两者都在**才算一份可用的缓存。
 fn cache_sig_path() -> std::path::PathBuf {
-    cache_dir().join("remote-config-cache.sig")
-}
-
-/// v2 广场展示策略的缓存（与 v1 同目录、独立文件，验签规则相同）。
-fn plaza_cache_path() -> std::path::PathBuf {
-    cache_dir().join("remote-plaza-cache.json")
-}
-
-fn plaza_cache_sig_path() -> std::path::PathBuf {
-    cache_dir().join("remote-plaza-cache.sig")
+    cache_dir().join("remote-config-v2-cache.sig")
 }
 
 /// 读一个文件，**先看元数据、超限直接放弃**。
@@ -573,28 +548,7 @@ fn load_cached_with(public_key_hex: &str) -> Option<RemoteConfig> {
     load_cached_artifact_with(public_key_hex, &cache_path(), &cache_sig_path())
 }
 
-/// 读 v2 广场展示策略的缓存，并同样**重新验签**（规则与 v1 缓存完全一致）。
-pub fn load_plaza_policy_cached() -> Option<PlazaPolicy> {
-    load_cached_artifact_with(PUBLIC_KEY_HEX, &plaza_cache_path(), &plaza_cache_sig_path())
-}
-
-/// 广场展示视角的配置：v1 的全部事实 + v2 plaza 的展示否决。
-///
-/// 广场行集的消费方（leaderboard 的 `apply_policy` / `managed_*`、目录导入闸、
-/// 探针名单、transit 刷新）从这里拿配置 —— `relay_directory.blocked_hosts`
-/// 已换成 v2 的，`sites`（别名 / 入口 / 购买 / 用量 URL）保持 v1 唯源。
-/// **其余消费方**（aff 码、充值/用量入口、tier 配置）继续读 [`load_cached`]，
-/// 两套语义互不污染。
-pub fn load_plaza_config() -> RemoteConfig {
-    let mut config = load_cached().unwrap_or_default();
-    config.relay_directory.blocked_hosts = load_plaza_policy_cached()
-        .map(|plaza| plaza.blocked_hosts)
-        .unwrap_or_default();
-    config
-}
-
-/// 「读缓存 + 重新验签」的参数化核：v1 与 v2 plaza 共用同一套纪律（先看体积、
-/// 签名定长、验不过当没缓存），只差缓存文件与目标类型。
+/// 「读缓存 + 重新验签」的参数化核：先看体积、签名定长、验不过当没缓存。
 fn load_cached_artifact_with<T: serde::de::DeserializeOwned>(
     public_key_hex: &str,
     cache_json: &std::path::Path,
@@ -624,22 +578,6 @@ pub async fn refresh_and_cache() -> Option<RemoteConfig> {
     refresh_and_cache_with(CONFIG_URL, SIGNATURE_URL, PUBLIC_KEY_HEX).await
 }
 
-/// 拉一次 v2 广场展示策略、验签、落盘缓存。
-///
-/// 与 v1 同一个调度点刷新（maintenance 的 veridrop 周期任务）；失败语义相同：
-/// 返回 `None`、回落 [`load_plaza_policy_cached`] 的缓存（再没有就空策略），
-/// 绝不报错。
-pub async fn refresh_plaza_and_cache() -> Option<PlazaPolicy> {
-    refresh_signed_and_cache_with(
-        PLAZA_V2_URL,
-        PLAZA_V2_SIGNATURE_URL,
-        PUBLIC_KEY_HEX,
-        &plaza_cache_path(),
-        &plaza_cache_sig_path(),
-    )
-    .await
-}
-
 /// 参数化版本。**存在只为了让那道「未配置就早退」的守卫可测** ——
 /// 与 [`is_configured_with`] / [`verify_with`] 同一个理由。
 ///
@@ -662,7 +600,7 @@ async fn refresh_and_cache_with(
     .await
 }
 
-/// v1 / v2 plaza 共用的「拉取 → 验签 → 落盘」核。
+/// 「拉取 → 验签 → 落盘」核。
 ///
 /// 纪律只有一份：两个文件都必须拿到、验不过绝不落盘、任何失败返回 `None`
 /// 且不上抛 —— v2 plaza 与 v1 的安全边界完全相同（见模块文档「为什么必须验签」）。
@@ -1260,6 +1198,7 @@ mod tests {
             promo_codes: std::collections::BTreeMap::new(),
             tier_configs: std::collections::BTreeMap::new(),
             relay_directory: RelayDirectoryPolicy::default(),
+            protected_hosts: vec![],
             star_reward: None,
             relay_model_selection: None,
         }
@@ -1276,6 +1215,7 @@ mod tests {
             promo_codes,
             tier_configs: std::collections::BTreeMap::new(),
             relay_directory: RelayDirectoryPolicy::default(),
+            protected_hosts: vec![],
             star_reward: None,
             relay_model_selection: None,
         }
@@ -2202,31 +2142,44 @@ mod tests {
         assert!(!is_key_usable(&"z".repeat(64)), "非 hex 该判不可用");
     }
 
-    /// 一致性闸：仓内 v2 plaza.json + .sig 必须过客户端自己的验签与解析。
+    /// 一致性闸：仓内 v2 config.json + .sig 必须过客户端自己的验签与解析。
     ///
-    /// 与 `checked_in_config_passes_the_clients_own_gate` 同构 —— 改了 plaza.json
-    /// 忘了重跑 `./sign-plaza.sh` 时这条直接红。否则要到部署后才发现客户端整份
-    /// 拒绝，症状与「服务器挂了」一样难查。
+    /// 与 v1 那道闸同构 —— 改了 v2/config.json 忘了重跑 `./sign-v2-config.sh`
+    /// 时这条直接红。否则要到部署后才发现客户端整份拒绝，症状与「服务器挂了」
+    /// 一样难查。两家伙伴站的收录是本世代的立项内容，一并钉住（同 v2 directory
+    /// 闸钉 bestapi 的惯例：立项事实进闸，日常运营状态不进）。
     #[test]
-    fn checked_in_plaza_policy_passes_the_clients_own_gate() {
-        let body = include_str!("../../../remote-config/public/v2/plaza.json");
-        let sig = include_bytes!("../../../remote-config/public/v2/plaza.json.sig");
+    fn checked_in_v2_config_passes_the_clients_own_gate() {
+        let body = include_str!("../../../remote-config/public/v2/config.json");
+        let sig = include_bytes!("../../../remote-config/public/v2/config.json.sig");
         assert_eq!(sig.len(), 64, "Ed25519 签名必须是裸 64 字节");
 
-        let plaza = parse_verified::<PlazaPolicy>(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
-            .expect("仓内 plaza.json + .sig 必须过客户端同一套验签与解析");
-        assert!(
-            !plaza.blocked_hosts.is_empty(),
-            "plaza.json 的安全态 = 拷贝 v1 墓碑全量；提交空列表等于对存量客户端恢复广场"
-        );
+        let config: RemoteConfig = parse_verified(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
+            .expect("仓内 v2 config.json + .sig 必须过客户端同一套验签与解析");
+
+        let protected: std::collections::BTreeSet<String> = config
+            .protected_hosts
+            .iter()
+            .map(|host| crate::relay::identity::site_domain(host))
+            .collect();
+        for partner in ["790053500.com", "airelay.buzz"] {
+            assert!(
+                protected.contains(partner),
+                "v2 世代立项：{partner} 必须在受保护名单里"
+            );
+            assert!(
+                config.aff_codes.contains_key(partner),
+                "v2 世代立项：{partner} 的邀请码必须在 aff_codes 里"
+            );
+        }
     }
 
     /// v1 墓碑不变式：v1 `blocked_hosts` ⊇ v1 四源（sponsors/aff/promo/
     /// directory.sites）的全部 host。
     ///
-    /// v2 plaza 接管了**新客户端**的展示策略，但老客户端只认 v1：将来新收录一家站
-    /// （加 aff 码）而忘了同步扩 v1 的 blocked，老客户端的广场会凭空多出一行合成行
-    /// —— 09-06 下线要防的场景被一次普通收录复活。这条测试让那次忘记直接红。
+    /// v1 已随世代切换**冻结**（新客户端打 /v2/，v1 永久喂老客户端）；这条守的是
+    /// 将来万一破冰救火的编辑 —— 任何动了 v1 的 PR 都必须保持墓碑闭合，否则
+    /// 老客户端的广场凭空多出行（09-06 下线要防的场景被一次编辑复活）。
     #[test]
     fn checked_in_config_keeps_the_plaza_tombstone_closed() {
         let body = include_str!("../../../remote-config/public/v1/config.json");
@@ -2271,36 +2224,6 @@ mod tests {
         assert!(
             uncovered.is_empty(),
             "v1 墓碑有缺口 —— 这些受管 host 不在 blocked_hosts 里，老客户端的广场会             凭空多出行（新收录站点必须同步扩 v1 的 blocked，README 的 plaza 节有流程）：             {uncovered:?}"
-        );
-    }
-
-    /// v2 plaza 缓存的「写入 → 读回」+ [`load_plaza_config`] 的换源接缝。
-    ///
-    /// 换源是广场版本闸的全部机关：blocked 必须来自 plaza 缓存、sites 保持 v1。
-    /// 用仓内那份生产签名的字节当缓存内容（测试没有私钥，写不出能过生产公钥的
-    /// 签名 —— 而这份字节本来就是为此存在的）。
-    #[test]
-    fn plaza_cache_reads_back_and_load_plaza_config_swaps_blocked() {
-        let _guard = CacheDirGuard::new("plaza-swap");
-
-        let body = include_str!("../../../remote-config/public/v2/plaza.json");
-        let sig = include_bytes!("../../../remote-config/public/v2/plaza.json.sig");
-        write_cache_at(
-            &plaza_cache_path(),
-            &plaza_cache_sig_path(),
-            body.as_bytes(),
-            sig,
-        );
-
-        let policy = load_plaza_policy_cached()
-            .expect("生产签名的 plaza 字节必须能从缓存读回（红了说明 plaza 缓存链路坏了）");
-
-        // 没有 v1 缓存时 load_plaza_config 是「默认空配置 + plaza blocked」——
-        // 恰好把换源接缝单独暴露出来：blocked 换成了 v2 的，别处全默认。
-        let config = load_plaza_config();
-        assert_eq!(
-            config.relay_directory.blocked_hosts, policy.blocked_hosts,
-            "广场视角的 blocked 必须来自 v2 plaza，而不是 v1 的墓碑"
         );
     }
 }

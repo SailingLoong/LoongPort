@@ -12,11 +12,13 @@
 //! - 存量安装升级后没有弹窗可命中，按同一原则补一次播种：已配置任何受保护
 //!   域名的站 → 默认关；一个都没有 → 保持未播种（= 展示）。
 //!
-//! ## 受保护域名 = 四源并集，**不减 blocked**
+//! ## 受保护域名：显式名单优先（`protected_hosts`），缺省回落并集
+
 //!
-//! 广场展示用的 `managed_site_hosts`（[`super::leaderboard`]）会被 blocked 过滤，
-//! 归因**不能**减：blocked 是展示策略（v1 墓碑期间恒全量），站长关系还在 ——
-//! 被屏蔽站的用户照样来自那家站，照样默认关。两份清单语义不同，故意不共享。
+//! 受保护是维护者的**关系态**（哪些站长的引流要保护），不是「受管」的自动
+//! 推论 —— v2 配置的 `protected_hosts` 非空就是那份名单；缺省回落四源并集
+//! （**不减 blocked**：blocked 是展示策略，站长关系还在，被屏蔽站的用户照样
+//! 来自那家站）。两份清单语义不同，故意不共享。
 //!
 //! ## 触发归属
 //!
@@ -29,9 +31,24 @@ use std::collections::BTreeSet;
 use crate::relay::identity::site_domain;
 use crate::relay::remote_config::{self, RemoteConfig};
 
-/// 归因判定的「受保护域名」全集：sponsors ∪ aff_codes ∪ promo_codes ∪
-/// relay_directory.sites，按注册域（apex）归一，**不减 blocked**（理由见模块文档）。
+/// 归因判定的「受保护域名」全集，按注册域（apex）归一。
+///
+/// 配置里的 `protected_hosts` **非空 ⇒ 就是这份**：受保护是维护者的**关系态**
+/// （哪些站长正在引流、要保护），不是「受管」的自动推论 —— 改名单 = 改远端
+/// v2 配置，无需发版。缺省/为空 ⇒ 回落四源并集（sponsors ∪ aff_codes ∪
+/// promo_codes ∪ relay_directory.sites，**不减 blocked**，理由见模块文档）。
+/// 回落方向有意保守：拿不到名单时宁可多保护。由此「不保护任何人」是
+/// 不可表达状态 —— 那是危险向（每个站长的漏斗都裸奔），有意够不着。
 pub(crate) fn protected_site_domains(config: &RemoteConfig) -> BTreeSet<String> {
+    let explicit: BTreeSet<String> = config
+        .protected_hosts
+        .iter()
+        .map(|host| site_domain(host))
+        .filter(|domain| !domain.is_empty())
+        .collect();
+    if !explicit.is_empty() {
+        return explicit;
+    }
     let mut domains: BTreeSet<String> = config
         .sponsors
         .iter()
@@ -127,6 +144,30 @@ mod tests {
             .sites
             .insert("relay.example.net".into(), Default::default());
         config
+    }
+
+    #[test]
+    fn explicit_protected_hosts_override_the_derived_union() {
+        let mut config = config_with_sources();
+
+        // 非空名单 = 就是这份：并集里的其他站不再受保护（维护者只承诺了两家）。
+        config.protected_hosts = vec!["airelay.buzz".into(), "api.790053500.com".into()];
+        assert_eq!(
+            protected_site_domains(&config),
+            ["790053500.com", "airelay.buzz"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        assert!(!first_site_default("https://airelay.buzz", &config));
+        // 并集里的站（example.com）在显式名单之外 ⇒ 未命中 ⇒ 默认开。
+        assert!(first_site_default("https://panel.example.com", &config));
+
+        // 空名单（含只写了空串的退化形态）= 回落四源并集。
+        config.protected_hosts = vec![];
+        assert!(protected_site_domains(&config).contains("example.com"));
+        config.protected_hosts = vec![String::new()];
+        assert!(protected_site_domains(&config).contains("example.com"));
     }
 
     #[test]
