@@ -58,6 +58,12 @@ jobs:
               - "src-tauri/**"
               - "rust-toolchain.toml"
               - ".github/workflows/**"
+              # 仓内 remote-config 的字节被闸测试 include_str!/include_bytes!
+              # 编译期嵌入（remote_config.rs 的 checked_in_config_*）——改它
+              # 等于改 backend 的测试输入。漏在这里的代价实测过：2026-09-06
+              # sponsors 撤空那次提交两条 Backend Checks 都没跑，坏不变量
+              # 直接进了 main，下一个碰 src-tauri 的 PR 替它红。
+              - "remote-config/**"
 
   frontend:
     name: Frontend Checks
