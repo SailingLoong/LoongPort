@@ -4118,11 +4118,11 @@ impl ProxyService {
     pub async fn provider_breaker_states(
         &self,
         app_type: &str,
-        provider_ids: &[String],
+        providers: &[crate::provider::Provider],
     ) -> std::collections::HashMap<String, crate::proxy::circuit_breaker::BreakerSnapshot> {
         let mut result = std::collections::HashMap::new();
         if let Some(server) = self.server.read().await.as_ref() {
-            result = server.provider_breaker_states(app_type, provider_ids).await;
+            result = server.provider_breaker_states(app_type, providers).await;
         }
         result
     }

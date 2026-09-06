@@ -470,8 +470,21 @@ impl RequestForwarder {
         // 单 Provider 场景下跳过熔断器检查（故障转移关闭时）
         let bypass_circuit_breaker = providers.len() == 1;
 
+        // 致命失败（凭证/余额级）按账号拉黑：同站同账号的其他分组共享同一份
+        // 凭证与余额，接着试只会再吃一次 401/402。跨请求由账号级熔断器接管
+        //（record_fatal_result 同步打开），这里只管本请求内的候选跳跃。
+        let mut banned_accounts: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         // 依次尝试每个供应商
         for provider in providers.iter() {
+            // 同账号已被致命失败拉黑：跳过（不占尝试次数，也不动熔断器）
+            if provider
+                .failover_account_key()
+                .is_some_and(|account| banned_accounts.contains(&account))
+            {
+                continue;
+            }
             // 整流器重试标记：每个 provider 独立持有，避免标记跨 provider 短路故障转移
             // —— 首家 provider 整流后被 5xx/timeout 击落时，下家仍能用整流后的请求体走整流流程
             let mut rectifier_retried = false;
@@ -1068,6 +1081,16 @@ impl RequestForwarder {
                                     .field("app", app_type_str)
                                     .field("provider_id", provider.id.clone()),
                             );
+
+                            // 致命失败按账号拉黑：请求内不再尝试同账号的其他分组
+                            if fatal {
+                                if let Some(account) = provider.failover_account_key() {
+                                    log::warn!(
+                                        "[{app_type_str}] 凭证/余额级失败，本请求跳过同账号其余档位: {account}"
+                                    );
+                                    banned_accounts.insert(account);
+                                }
+                            }
 
                             {
                                 let mut status = self.status.write().await;
