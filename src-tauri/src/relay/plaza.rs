@@ -9,8 +9,10 @@
 //!
 //! - 弹窗提交的域名（apex 归一）命中受保护域名 → 开关默认**关**；否则默认**开**；
 //! - 用户此后手动翻转（窄命令 [`crate::commands::settings`]），翻转结果永远优先；
-//! - 存量安装升级后没有弹窗可命中，按同一原则补一次播种：已配置任何受保护
-//!   域名的站 → 默认关；一个都没有 → 保持未播种（= 展示）。
+//! - 存量安装升级后没有弹窗可命中，补一次播种（2026-09-07 定调）：**全部**
+//!   已配置站点都是受保护站 → 默认关；掺了任何一个非保护站（哪怕只有一家）
+//!   → 默认开；一个站都没有 → 保持未播种（= 展示）。存量无从知道首站归因，
+//!   「清一色受保护站」才是纯伙伴漏斗的可信信号，配过别家就是逛站用户。
 //!
 //! ## 受保护域名：显式名单优先（`protected_hosts`），缺省回落并集
 
@@ -25,6 +27,12 @@
 //! 播种是数据层行为：存量补播种挂在启动（maintenance 一次性任务）；弹窗播种
 //! 挂在用户提交动作本身（那是一次显式写入，不是视图读路径的副作用）。
 //! 广场页只读 settings 里的 `plaza_visible`（`None` = 展示），不驱动任何刷新。
+//!
+//! ## 受保护名单拿不到时两个播种点都**不播**
+//!
+//! 名单未知（离线 / 端点故障且无缓存）时任何域名都判「未命中」，播下去会把
+//! 伙伴用户永久误播成开（写-if-None，之后无人纠正）。留着 `None` 交给后续
+//! 启动补播 —— 可见行为不变（`None` = 展示），但名单到位后还能播对。
 
 use std::collections::BTreeSet;
 
@@ -74,39 +82,55 @@ fn first_site_default(domain: &str, config: &RemoteConfig) -> bool {
     !protected_site_domains(config).contains(&site_domain(domain))
 }
 
-/// 纯判定：存量安装补播种的结果。`None` = 不播种（没有任何受保护域名的站，
-/// 保持未播种 = 展示）。
+/// 纯判定：存量安装补播种的结果。`None` = 不播种。
+///
+/// **全部**站点都是受保护站（子域也算）→ `Some(false)`；掺了任何一个非保护
+/// 站（哪怕只有一家）→ `Some(true)`；一个站都没有 → `None`（未归因，保持
+/// 「展示」默认）。存量无从知道首站归因，「清一色受保护」是纯伙伴漏斗的唯一
+/// 可信信号；配过别家说明是逛站/比价用户 —— 广场正是给他们的。
 fn existing_install_default(origins: &[String], config: &RemoteConfig) -> Option<bool> {
+    if origins.is_empty() {
+        return None;
+    }
     let protected = protected_site_domains(config);
-    origins
+    let all_protected = origins
         .iter()
-        .any(|origin| protected.contains(&site_domain(origin)))
-        .then_some(false)
+        .all(|origin| protected.contains(&site_domain(origin)));
+    Some(!all_protected)
 }
 
 /// 首启「手填域名」弹窗提交的播种点（写-if-None，归因一次性）。
 ///
 /// 弹窗只在首启出现，那时远端配置可能还没拉过（maintenance 有启动延迟），
 /// 而归因判据就是这份配置 —— 花一次有上界的拉取（8s 超时）换正确归因。
-/// 拉不到就回落缓存；缓存也没有（离线新装）则判「不认识」→ 默认开：站长
-/// 保护不了，但开关在用户手里，方向安全。
+/// 拉不到就回落缓存；**缓存也没有（离线新装）则本进程不播**（见模块文档
+/// 「名单拿不到时不播」）—— 留着 `None` 交给后续启动的存量补播种纠正。
 pub async fn seed_from_first_site(domain: &str) {
     let config = remote_config::refresh_and_cache()
         .await
-        .or_else(remote_config::load_cached)
-        .unwrap_or_default();
-    seed_if_unsent(first_site_default(domain, &config));
+        .or_else(remote_config::load_cached);
+    if let Some(config) = config {
+        seed_if_unsent(first_site_default(domain, &config));
+    }
 }
 
 /// 存量安装升级后的补播种点（写-if-None）。调用方传入用户已配置的站点 origin
 /// 全集；触发 = 启动（见模块文档「触发归属」）。
-pub fn seed_for_existing_install(relay_origins: &[String]) {
+///
+/// 先刷一次配置再判：升级后的**首次启动**连世代缓存都还没有（缓存按世代
+/// 命名），空配置下「所有站都算非保护」会把纯伙伴用户误播成开。刷新失败且
+/// 无缓存则本启动不播（同上，「名单拿不到时不播」）。
+pub async fn seed_for_existing_install(relay_origins: &[String]) {
     if crate::settings::get_settings().plaza_visible.is_some() {
         return;
     }
-    let config = remote_config::load_cached().unwrap_or_default();
-    if let Some(visible) = existing_install_default(relay_origins, &config) {
-        seed_if_unsent(visible);
+    let config = remote_config::refresh_and_cache()
+        .await
+        .or_else(remote_config::load_cached);
+    if let Some(config) = config {
+        if let Some(visible) = existing_install_default(relay_origins, &config) {
+            seed_if_unsent(visible);
+        }
     }
 }
 
@@ -225,26 +249,51 @@ mod tests {
     }
 
     #[test]
-    fn existing_install_seeds_hidden_only_when_a_protected_site_is_configured() {
+    fn existing_install_seeds_hidden_only_when_every_configured_site_is_protected() {
         let config = config_with_sources();
 
-        // 一个受保护站都没有 → 不播种（None = 展示）。
+        // 一个站都没有 → 不播种（未归因，= 展示）。
         assert_eq!(existing_install_default(&[], &config), None);
-        assert_eq!(
-            existing_install_default(&["https://self.example.io".into()], &config),
-            None
-        );
 
-        // 有任一受保护站（子域也算）→ 默认关。
+        // 清一色受保护站（子域也算、多家也行）→ 默认关：纯伙伴漏斗的可信信号。
         assert_eq!(
             existing_install_default(&["https://api.example.com".into()], &config),
             Some(false)
+        );
+        assert_eq!(
+            existing_install_default(
+                &[
+                    "https://panel.example.com".into(),
+                    "https://shop.example.org".into(),
+                    "https://relay.example.net".into()
+                ],
+                &config
+            ),
+            Some(false)
+        );
+
+        // 掺了任何一个非保护站（哪怕只有一家）→ 默认开：逛站/比价用户。
+        assert_eq!(
+            existing_install_default(&["https://self.example.io".into()], &config),
+            Some(true)
+        );
+        assert_eq!(
+            existing_install_default(
+                &[
+                    "https://api.example.com".into(),
+                    "https://self.example.io".into()
+                ],
+                &config
+            ),
+            Some(true)
         );
     }
 
     #[test]
     fn empty_config_treats_everything_as_unattributed() {
-        // 离线新装（缓存空）时人人都是「不认识」→ 默认开，方向安全。
+        // 纯判定在空配置下：人人「不认识」→ 默认开。**调用方**在名单拿不到时
+        // 根本不进这个分支（见模块文档「名单拿不到时不播」）—— 这里钉的是
+        // 纯函数自身的合同，防止有人绕过那道守卫直接拿空配置播种。
         assert!(first_site_default(
             "anything.example.com",
             &RemoteConfig::default()
@@ -254,7 +303,7 @@ mod tests {
                 &["https://any.example.com".into()],
                 &RemoteConfig::default()
             ),
-            None
+            Some(true)
         );
     }
 }
