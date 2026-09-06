@@ -117,7 +117,8 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          # Core build tools and pkg-config
+          # Core build tools and pkg-config；musl-tools 供 loongport-cli 静态包
+          # （ring/rusqlite 的 C 编译要 musl-gcc）——注意别把注释插进续行中间
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             pkg-config \
@@ -126,7 +127,6 @@ jobs:
             file \
             patchelf \
             libssl-dev \
-            # loongport-cli 静态包的 musl 工具链（ring/rusqlite 的 C 编译要 musl-gcc）
             musl-tools \
             rpm \
             elfutils \
