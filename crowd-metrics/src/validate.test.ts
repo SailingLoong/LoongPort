@@ -204,3 +204,24 @@ describe("载荷隐私边界（对应客户端 Rust 侧的同类闸）", () => {
     }
   });
 });
+
+describe("P4b 跳闸计数校验", () => {
+  it("breakerTrips 可选、合法时逐位保留", () => {
+    const r1 = parseIngestPayload(makePayload(), NOW);
+    expect(r1.ok).toBe(true);
+    if (r1.ok) expect(r1.payload.hours[0].breakerTrips).toBeUndefined();
+
+    const r2 = parseIngestPayload(makePayload({ hours: [makeBucket({ breakerTrips: 2 })] }), NOW);
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.payload.hours[0].breakerTrips).toBe(2);
+  });
+
+  it("breakerTrips 非法值拒绝", () => {
+    expect(
+      parseIngestPayload(makePayload({ hours: [makeBucket({ breakerTrips: -1 })] }), NOW).ok,
+    ).toBe(false);
+    expect(
+      parseIngestPayload(makePayload({ hours: [makeBucket({ breakerTrips: 1e9 })] }), NOW).ok,
+    ).toBe(false);
+  });
+});

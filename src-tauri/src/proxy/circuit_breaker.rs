@@ -99,6 +99,9 @@ pub struct CircuitBreaker {
     config: Arc<RwLock<CircuitBreakerConfig>>,
     /// 半开状态已放行的请求数（用于限流）
     half_open_requests: Arc<AtomicU32>,
+    /// 累计跳闸次数（含致命；单调递增）。crowd 上传只取非致命跳闸计数，
+    /// record_failure/fatal 的返回值就是「本次调用是否新跳闸」。
+    trip_count: Arc<AtomicU32>,
 }
 
 /// 熔断器对外的只读快照（看板「熔断/自动重试倒计时」用）。
@@ -133,6 +136,7 @@ impl CircuitBreaker {
             fatal_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config: Arc::new(RwLock::new(config)),
             half_open_requests: Arc::new(AtomicU32::new(0)),
+            trip_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -254,8 +258,10 @@ impl CircuitBreaker {
         }
     }
 
-    /// 记录失败
-    pub async fn record_failure(&self, used_half_open_permit: bool) {
+    /// 记录失败。返回**本次调用是否新跳闸**（Closed/HalfOpen → Open）——
+    /// crowd 上传用它计数站点侧跳闸（致命变体不计：那是用户自己的凭证问题）。
+    pub async fn record_failure(&self, used_half_open_permit: bool) -> bool {
+        let trips_before = self.trip_count.load(Ordering::SeqCst);
         let state = *self.state.read().await;
         let config = self.config.read().await;
 
@@ -318,6 +324,7 @@ impl CircuitBreaker {
             }
             _ => {}
         }
+        self.trip_count.load(Ordering::SeqCst) > trips_before
     }
 
     /// 记录致命失败（凭证/余额级错误，如上游 401/402/403）
@@ -329,7 +336,8 @@ impl CircuitBreaker {
     ///
     /// 致命分级只在成功（`transition_to_closed`）时清除：半开探测失败会沿用上一次
     /// 打开时的致命冷却 —— 一个曾因欠费打开的档位，探测又失败，说明它还是坏的。
-    pub async fn record_fatal_failure(&self, used_half_open_permit: bool) {
+    pub async fn record_fatal_failure(&self, used_half_open_permit: bool) -> bool {
+        let trips_before = self.trip_count.load(Ordering::SeqCst);
         let config = self.config.read().await;
 
         if used_half_open_permit {
@@ -348,6 +356,7 @@ impl CircuitBreaker {
             log_cb::TRIGGERED_FATAL
         );
         self.transition_to_open(true).await;
+        self.trip_count.load(Ordering::SeqCst) > trips_before
     }
 
     /// 只读快照：`None` = Closed（正常，不上板）。
@@ -456,6 +465,7 @@ impl CircuitBreaker {
         self.fatal_open.store(fatal, Ordering::SeqCst);
         self.consecutive_failures.store(0, Ordering::SeqCst);
         self.consecutive_successes.store(0, Ordering::SeqCst);
+        self.trip_count.fetch_add(1, Ordering::SeqCst);
     }
 
     /// 转换到半开状态
@@ -497,6 +507,30 @@ pub struct CircuitBreakerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn record_failure_returns_tripped_only_on_transition() {
+        // P4b：跳闸返回值的语义钉死 —— 只在「本次调用导致 Closed/HalfOpen → Open」
+        // 时为 true；已在 Open 上继续失败、以及致命路径之外的成功都不算。
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            timeout_seconds: 600,
+            ..Default::default()
+        };
+        let breaker = CircuitBreaker::new(config);
+        assert!(!breaker.record_failure(false).await, "第 1 次失败未到阈值");
+        assert!(breaker.record_failure(false).await, "第 2 次失败触发跳闸");
+        assert!(
+            !breaker.record_failure(false).await,
+            "已 Open 再失败不重复计跳闸"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_fatal_failure_also_reports_tripped() {
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig::default());
+        assert!(breaker.record_fatal_failure(false).await, "致命一次即开");
+    }
 
     #[tokio::test]
     async fn snapshot_reports_open_with_countdown_and_closed_as_none() {

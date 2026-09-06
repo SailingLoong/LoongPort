@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS bucket_raw (
     cache_read_tokens   INTEGER NOT NULL,
     cache_creation_tokens INTEGER NOT NULL,
     cost_usd_micros     INTEGER NOT NULL, -- 该桶总花费（微美元）
+    breaker_trips       INTEGER NOT NULL DEFAULT 0, -- P4b：非致命熔断跳闸次数（站点侧信号）
     PRIMARY KEY (hour, site, app, source)
 ) WITHOUT ROWID;
 

@@ -22,6 +22,8 @@ export interface HourBucketPayload {
   costUsdMicros: number;
   /** P4（version 2）：模型子桶。version 1 载荷缺省。 */
   models?: ModelBucketPayload[];
+  /** P4b：非致命熔断跳闸次数（凭证级致命跳闸不计，同 errors 口径）。 */
+  breakerTrips?: number;
 }
 
 /** P4：站点 × app × 小时 × 模型 的子聚合（顶层字段仍是全量口径）。 */

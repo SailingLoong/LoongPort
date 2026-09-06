@@ -266,7 +266,19 @@ impl ProviderRouter {
                 }
             }
         } else {
-            breaker.record_failure(used_half_open_permit).await;
+            let tripped = breaker.record_failure(used_half_open_permit).await;
+            // 非致命跳闸落 crowd 事件表（站点侧信号；致命跳闸是用户自身凭证
+            // 问题，对齐 crowd errors 口径不计）。失败只打日志——计数是尽力而为
+            // 的统计，不能反过来影响转发主链路。
+            if tripped {
+                if let Err(e) = crate::crowd::events::record_breaker_trip(
+                    self.db.as_ref(),
+                    provider_id,
+                    app_type,
+                ) {
+                    log::debug!("[{app_type}] 记录跳闸事件失败: {e}");
+                }
+            }
         }
 
         // 3. 更新数据库健康状态（使用配置的阈值）
@@ -309,7 +321,7 @@ impl ProviderRouter {
         // 2. 更新熔断器状态（致命失败）
         let circuit_key = format!("{app_type}:{provider_id}");
         let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
-        breaker.record_fatal_failure(used_half_open_permit).await;
+        let _fatal_tripped = breaker.record_fatal_failure(used_half_open_permit).await;
 
         // 3. 账号级熔断同步打开（致命一次即开，长冷却）
         if let Some(provider) = self
@@ -320,7 +332,7 @@ impl ProviderRouter {
         {
             if let Some(account_key) = account_circuit_key(app_type, &provider) {
                 let account_breaker = self.get_or_create_circuit_breaker(&account_key).await;
-                account_breaker.record_fatal_failure(false).await;
+                let _ = account_breaker.record_fatal_failure(false).await;
             }
         }
 

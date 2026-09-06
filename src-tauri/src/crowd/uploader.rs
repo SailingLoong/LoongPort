@@ -55,6 +55,8 @@ pub(crate) struct HourBucketPayload<'a> {
     pub cost_usd_micros: i64,
     /// P4（version 2）：模型子桶。旧服务端忽略未知字段，发布顺序安全。
     pub models: Vec<ModelBucketPayload<'a>>,
+    /// P4b：非致命熔断跳闸次数（v2 追加，同上向后兼容）。
+    pub breaker_trips: i64,
 }
 
 /// P4：模型维度子桶的载荷形状（与 bucket::ModelBucket 同集）。
@@ -92,6 +94,7 @@ fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> Ing
                 cache_read_tokens: b.cache_read_tokens,
                 cache_creation_tokens: b.cache_creation_tokens,
                 cost_usd_micros: b.cost_usd_micros,
+                breaker_trips: b.breaker_trips,
                 models: b
                     .models
                     .iter()
@@ -185,7 +188,11 @@ pub async fn flush_once(db: &std::sync::Arc<Database>) -> Result<(), AppError> {
     // 否则空转周期会反复重算同一段空窗口。
     let db_for_watermark = std::sync::Arc::clone(db);
     tauri::async_runtime::spawn_blocking(move || {
-        db_for_watermark.set_setting(SETTING_FLUSHED_THROUGH, &last_closed_hour.to_string())
+        db_for_watermark.set_setting(SETTING_FLUSHED_THROUGH, &last_closed_hour.to_string())?;
+        // P4b：顺手裁掉窗口外的跳闸事件（挂上传节奏，不需要单独清理任务；
+        // 失败只影响下次多裁一次，不碰上传结果）。
+        let _ = super::events::prune_old_events(&db_for_watermark, now);
+        Ok::<(), AppError>(())
     })
     .await
     .map_err(|e| AppError::Message(format!("crowd flush 水位线写入任务失败: {e}")))??;
@@ -237,6 +244,7 @@ mod tests {
             cache_read_tokens: 300,
             cache_creation_tokens: 100,
             cost_usd_micros: 12_345,
+            breaker_trips: 1,
             models: vec![ModelBucket {
                 model: "example-model".to_string(),
                 samples: 10,
@@ -290,6 +298,7 @@ mod tests {
             hour_keys,
             vec![
                 "app",
+                "breakerTrips",
                 "cacheCreationTokens",
                 "cacheReadTokens",
                 "costUsdMicros",

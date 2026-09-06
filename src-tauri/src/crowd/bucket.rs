@@ -71,6 +71,8 @@ pub struct HourBucket {
     /// P4 模型维度：桶内按模型的子聚合（按模型名排序，载荷字节稳定）。
     /// 顶层字段仍是全量口径 —— 站点级聚合/旧消费方不受影响。
     pub models: Vec<ModelBucket>,
+    /// P4b：该小时该站的非致命熔断跳闸次数（事件表计数；口径见 events.rs）。
+    pub breaker_trips: i64,
 }
 
 /// P4：模型维度的子聚合（站点 × app × 小时 × 模型）。
@@ -327,6 +329,7 @@ fn merge_by_site(
             cache_creation_tokens: 0,
             cost_usd_micros: 0,
             models: Vec::new(),
+            breaker_trips: 0,
         });
         entry.samples += raw.samples;
         entry.errors += raw.errors;
@@ -388,6 +391,29 @@ fn merge_by_site(
     merged.into_values().collect()
 }
 
+/// P4b：跳闸事件按 (hour, provider, app) 计数。返回键与 RawBucket 的
+/// provider 维度同构，复用同一张 hosts 映射。
+fn query_breaker_trip_counts(
+    db: &Database,
+    after_epoch: i64,
+    before_epoch: i64,
+) -> Result<HashMap<(i64, String, String), i64>, AppError> {
+    let conn = crate::database::lock_conn!(db.conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT hour_epoch, provider_id, app_type, COUNT(*)              FROM crowd_breaker_events              WHERE hour_epoch > ?1 AND hour_epoch <= ?2              GROUP BY hour_epoch, provider_id, app_type",
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let mut rows = stmt
+        .query(params![after_epoch, before_epoch])
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let mut counts = HashMap::new();
+    while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+        counts.insert((row.get(0)?, row.get(1)?, row.get(2)?), row.get(3)?);
+    }
+    Ok(counts)
+}
+
 /// 组合入口：查桶 → 解析站点归属 → 合并。由 [`super::uploader`] 调用。
 pub fn build_hour_buckets(
     db: &Database,
@@ -404,7 +430,25 @@ pub fn build_hour_buckets(
         .map(|raw| (raw.provider_id.clone(), raw.app_type.clone()))
         .collect();
     let hosts = resolve_relay_hosts(db, &refs)?;
-    Ok(merge_by_site(raws, model_raws, &hosts))
+    let mut merged = merge_by_site(raws, model_raws, &hosts);
+    // P4b：跳闸计数并入。事件键是 provider 维度，先折成站点维度再对桶 ——
+    // 与桶共用同一张 hosts 映射（未登记 provider 的事件自然丢弃，无主计数不出门）。
+    let trips = query_breaker_trip_counts(db, after_epoch, before_epoch)?;
+    let mut trips_by_site: HashMap<(i64, String, String), i64> = HashMap::new();
+    for ((hour, provider, app), count) in &trips {
+        if let Some(site) = hosts.get(&(provider.clone(), app.clone())) {
+            *trips_by_site
+                .entry((*hour, site.clone(), app.clone()))
+                .or_insert(0) += count;
+        }
+    }
+    for bucket in &mut merged {
+        bucket.breaker_trips = trips_by_site
+            .get(&(bucket.hour_epoch, bucket.site.clone(), bucket.app.clone()))
+            .copied()
+            .unwrap_or(0);
+    }
+    Ok(merged)
 }
 
 #[cfg(test)]

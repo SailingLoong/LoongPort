@@ -10,6 +10,8 @@ import type { IngestPayload, ModelBucketPayload } from "./types";
 
 export const MAX_BODY_BYTES = 256 * 1024;
 export const MAX_HOURS_PER_UPLOAD = 200;
+/** P4b：单桶跳闸计数上限（一小时一万次跳闸必然是脏数据）。 */
+const MAX_TRIPS_PER_BUCKET = 10_000;
 /** P4：单小时桶的模型子桶数上限（长尾模型归 UI 侧聚合，这里只防垃圾填充）。 */
 const MAX_MODELS_PER_BUCKET = 64;
 /** 模型名形状：公开目录名 —— 字母数字与常规分隔符，拒绝任意可注入文本。 */
@@ -232,12 +234,22 @@ export function parseIngestPayload(
       }
     }
 
+    // P4b：跳闸计数（可选；上限远宽于合理值 —— 防垃圾填充不防真实值）。
+    let breakerTrips: number | undefined;
+    if (b.breakerTrips !== undefined) {
+      if (!isSafeUint(b.breakerTrips, MAX_TRIPS_PER_BUCKET)) {
+        return { ok: false, error: "bad breakerTrips" };
+      }
+      breakerTrips = b.breakerTrips;
+    }
+
     hours.push({
       hour: b.hour,
       site: b.site as string,
       app: b.app,
       samples,
       errors,
+      breakerTrips,
       ttftBins: b.ttftBins as number[],
       ttftCount,
       inputTokens: b.inputTokens as number,
