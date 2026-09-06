@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import {
   describe,
   expect,
@@ -511,5 +517,51 @@ describe("EasyBoard", () => {
     }));
     setupBoard(boardFixture({ tiers }));
     expect(screen.getAllByTitle("需要复核")).toHaveLength(2);
+  });
+
+  it("「当前」徽章跟实时在用档位走（active_targets），不卡在持久化指针上", () => {
+    // 看板 isCurrent 仍指 tier-b（贵档，持久化指针），但实际流量在 tier-a ——
+    // 徽章必须跟实际在用走，否则省心选路后盯屏看它不动（用户反馈的静态徽章）
+    proxyStatusMock.mockReturnValue({
+      isRunning: true,
+      startProxyServer: vi.fn().mockResolvedValue(undefined),
+      status: {
+        running: true,
+        active_targets: [
+          {
+            app_type: "claude",
+            provider_id: "tier-a",
+            provider_name: "便宜档",
+          },
+        ],
+      },
+    });
+    setupBoard(boardFixture());
+
+    expect(screen.getAllByText("当前")).toHaveLength(1);
+    const cheapRow = screen
+      .getByText("便宜档")
+      .closest("div.rounded-lg") as HTMLElement | null;
+    const expensiveRow = screen
+      .getByText("贵档")
+      .closest("div.rounded-lg") as HTMLElement | null;
+    expect(cheapRow).not.toBeNull();
+    expect(expensiveRow).not.toBeNull();
+    expect(within(cheapRow!).getByText("当前")).toBeDefined();
+    expect(within(expensiveRow!).queryByText("当前")).toBeNull();
+    // 实时当前档没有粘性数据（后端只给指针当前档填 affinity）→ 不硬凑粘性徽章
+    expect(screen.queryByText(/粘性/)).toBeNull();
+  });
+
+  it("无实时信号（路由未跑/尚无流量）时回退持久化 isCurrent", () => {
+    proxyStatusMock.mockReturnValue({
+      isRunning: true,
+      startProxyServer: vi.fn().mockResolvedValue(undefined),
+      status: { running: true, active_targets: [] },
+    });
+    setupBoard(boardFixture());
+    // 回退后与既有行为一致：当前在 tier-b、粘性徽章跟着 tier-b
+    expect(screen.getAllByText("当前")).toHaveLength(1);
+    expect(screen.getByText("粘性 · 12 分钟")).toBeDefined();
   });
 });

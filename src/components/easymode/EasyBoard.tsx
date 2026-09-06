@@ -24,13 +24,20 @@ import { TierList } from "./TierList";
 export function EasyBoard({ appId }: { appId: string }) {
   const { t } = useTranslation();
   const { data: board, isLoading } = useTierBoard(appId);
-  const { isRunning, startProxyServer } = useProxyStatus();
-  const { data: status } = useAutoModeStatus(appId);
+  const { status, isRunning, startProxyServer } = useProxyStatus();
+  const { data: autoStatus } = useAutoModeStatus(appId);
   const setModel = useSetAutoModeModel();
   const setStrategy = useSetAutoModeStrategy();
   const setMode = useSetEasyModeMode();
   const setOrder = useSetEasyModeManualOrder();
   const resetBreaker = useResetCircuitBreaker();
+
+  // 实际在用档位：后端每次成功转发实时写内存、经代理状态 2s 轮询透出
+  // （自主视图供应商卡的绿边用同一信号）。「当前」徽章跟它走，路由没跑/
+  // 尚无流量时回退看板的持久化 isCurrent。
+  const activeProviderId = status?.active_targets?.find(
+    (target) => target.app_type === appId,
+  )?.provider_id;
 
   // 熔断/降级档位：右上角「重试全部」逐个清健康+熔断（单卡上另有单独按钮）
   const failedTiers = (board?.tiers ?? []).filter(
@@ -165,13 +172,14 @@ export function EasyBoard({ appId }: { appId: string }) {
           tiers={board.tiers}
           manual={manual}
           appType={appId}
+          activeProviderId={activeProviderId}
           onReorder={(orderedIds) =>
             setOrder.mutate({ appType: appId, orderedIds })
           }
         />
       )}
 
-      {!status?.cliInstalled ? (
+      {!autoStatus?.cliInstalled ? (
         <p className="text-xs text-amber-600 dark:text-amber-400">
           {t("autoMode.cliMissingHint", {
             defaultValue: "该 CLI 未安装，接管不会生效",
