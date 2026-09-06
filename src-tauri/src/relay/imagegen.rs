@@ -549,6 +549,7 @@ pub(crate) fn gallery_images() -> Vec<GalleryImage> {
     items
 }
 
+#[cfg(feature = "gui")]
 /// 把出图目录加进 asset 协议的运行时白名单，前端画廊才能用 `convertFileSrc` 显示。
 ///
 /// 静态 scope（tauri.conf.json）写不了这里：出图目录跟着「LoongPort 配置目录」

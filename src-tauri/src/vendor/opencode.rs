@@ -182,6 +182,7 @@ fn decode_signal(url: &url::Url) -> Result<crate::vendor::VendorSession, AppErro
     })
 }
 
+#[cfg(feature = "gui")]
 /// 从窗口 cookie 里抽出 opencode 会话（`auth`）。`None` = 没拿到（报错由调用方定）。
 pub fn extract_session_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
     cookies

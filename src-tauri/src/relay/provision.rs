@@ -900,7 +900,7 @@ pub fn extract_model(settings_config: &serde_json::Value) -> Option<String> {
 /// `env.ANTHROPIC_MODEL`；gemini 读 `env.GEMINI_MODEL`；grokbuild 读 config TOML 里
 /// 选中模型表的 `model` 字段（[`grok_config::extract_model_config`]，与目录同一
 /// 标识空间）。其余平台（没有「档位选模型」概念）返回 `None`。目录本身统一走
-/// `modelCatalog`（`commands::models_from_settings`，与 codex 同一份形状）。
+/// `modelCatalog`（`models_from_settings`，与 codex 同一份形状）。
 pub fn selected_model(app_type: &AppType, settings: &serde_json::Value) -> Option<String> {
     let env_key = match app_type {
         AppType::Codex | AppType::CodexImage => return extract_model(settings),
@@ -1324,6 +1324,23 @@ pub fn pick_tier_models_with(
 /// [`pick_tier_models_with`] 的内置表形态：主链路走 `_with`（远端合并表），这个入口
 /// 留给测试与「不关心远端覆盖」的调用方 —— 测试钉内置表，选型断言不随本机缓存漂移。
 #[cfg_attr(not(test), allow(dead_code))]
+/// 从档位 settings_config 里读 `modelCatalog.models` 的模型 id 清单。
+///
+/// 托盘子菜单与自动模式策略共用这份解析（同一份 `modelCatalog` 多个消费者）。
+pub(crate) fn models_from_settings(settings: &serde_json::Value) -> Vec<String> {
+    settings
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("model").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 pub fn pick_tier_models(app_type: &AppType, models: Option<&[String]>) -> TierModels {
     pick_tier_models_with(app_type, models, &ModelSelectionTables::builtin())
 }

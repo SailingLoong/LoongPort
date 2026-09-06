@@ -1137,7 +1137,7 @@ mod tests {
     fn update_keeps_official_provider_id_when_binding_and_unbinding() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -2649,7 +2649,7 @@ requires_openai_auth = true
     fn add_first_managed_codex_with_reauth_required_account_is_rejected() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token("acct-legacy", "managed-token", None)
@@ -2678,7 +2678,7 @@ requires_openai_auth = true
     fn add_first_managed_codex_current_failure_rolls_back_provider_and_live_state() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -2745,7 +2745,7 @@ requires_openai_auth = true
     fn switch_from_managed_codex_official_to_unbound_clears_live_without_backfilling_token() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -2832,7 +2832,7 @@ requires_openai_auth = true
                 "switching to an unbound official provider should clear the recorded managed live auth"
             );
             assert_eq!(
-                tauri::async_runtime::block_on(
+                crate::rt::block_on(
                     state
                         .codex_oauth_manager
                         .test_refresh_token_for_account("acct-managed")
@@ -2860,7 +2860,7 @@ requires_openai_auth = true
     fn managed_codex_switch_adopts_outgoing_cli_rotation_before_account_or_key_overwrite() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -2922,7 +2922,7 @@ wire_api = "responses"
             ProviderService::switch(state, AppType::Codex, &provider_b.id)
                 .expect("switch managed A to managed B");
             assert_eq!(
-                tauri::async_runtime::block_on(
+                crate::rt::block_on(
                     state
                         .codex_oauth_manager
                         .test_refresh_token_for_account("acct-a")
@@ -2953,7 +2953,7 @@ wire_api = "responses"
             ProviderService::switch(state, AppType::Codex, &third_party.id)
                 .expect("switch managed B to API-key provider");
             assert_eq!(
-                tauri::async_runtime::block_on(
+                crate::rt::block_on(
                     state
                         .codex_oauth_manager
                         .test_refresh_token_for_account("acct-b")
@@ -2979,7 +2979,7 @@ wire_api = "responses"
     fn managed_codex_direct_update_adopts_outgoing_cli_rotation_and_commits_target_binding() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3008,7 +3008,7 @@ wire_api = "responses"
             ProviderService::switch(state, AppType::Codex, &provider.id)
                 .expect("activate managed account A");
             assert!(
-                tauri::async_runtime::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
+                crate::rt::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
                     .expect("read initial live backup")
                     .is_none(),
                 "direct update precondition requires no takeover backup"
@@ -3039,7 +3039,7 @@ wire_api = "responses"
                 .expect("directly update managed binding from A to B");
 
             assert_eq!(
-                tauri::async_runtime::block_on(
+                crate::rt::block_on(
                     state
                         .codex_oauth_manager
                         .test_refresh_token_for_account("acct-a")
@@ -3075,7 +3075,7 @@ wire_api = "responses"
                 "clearing outgoing account A must not remove account B's marker"
             );
             assert!(
-                tauri::async_runtime::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
+                crate::rt::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
                     .expect("read live backup after direct update")
                     .is_none(),
                 "direct update must not create a takeover backup"
@@ -3088,7 +3088,7 @@ wire_api = "responses"
     fn same_account_managed_codex_update_rejects_equal_timestamp_refresh_conflict() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3112,7 +3112,7 @@ wire_api = "responses"
             // timestamp is ambiguous at millisecond precision. A same-account
             // update has no outgoing-account guard, so its managed bundle
             // preflight itself must refuse to overwrite this CLI generation.
-            tauri::async_runtime::block_on(
+            crate::rt::block_on(
                 state
                     .codex_oauth_manager
                     .test_set_token_updated_at_ms("acct-managed", 1_700_000_000_000),
@@ -3145,7 +3145,7 @@ wire_api = "responses"
                 "same-account managed update must not overwrite ambiguous CLI token material"
             );
             assert_eq!(
-                tauri::async_runtime::block_on(
+                crate::rt::block_on(
                     state
                         .codex_oauth_manager
                         .test_refresh_token_for_account("acct-managed")
@@ -3172,7 +3172,7 @@ wire_api = "responses"
     fn switch_away_rejects_legacy_refresh_conflict_on_every_retry() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3204,7 +3204,7 @@ wire_api = "responses"
             ProviderService::switch(state, AppType::Codex, &managed.id)
                 .expect("activate managed provider");
 
-            tauri::async_runtime::block_on(
+            crate::rt::block_on(
                 state
                     .codex_oauth_manager
                     .test_set_token_updated_at_ms("acct-legacy", 0),
@@ -3246,7 +3246,7 @@ wire_api = "responses"
             }
 
             assert_eq!(
-                tauri::async_runtime::block_on(
+                crate::rt::block_on(
                     state
                         .codex_oauth_manager
                         .test_refresh_token_for_account("acct-legacy")
@@ -3263,7 +3263,7 @@ wire_api = "responses"
     fn codex_auth_center_remove_and_logout_clear_live_credentials_and_marker() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3284,10 +3284,8 @@ wire_api = "responses"
             assert!(crate::codex_config::get_codex_auth_path().exists());
             assert!(crate::codex_config::codex_managed_oauth_live_auth_marker_exists());
 
-            tauri::async_runtime::block_on(
-                state.codex_oauth_manager.remove_account("acct-managed"),
-            )
-            .expect("remove managed account");
+            crate::rt::block_on(state.codex_oauth_manager.remove_account("acct-managed"))
+                .expect("remove managed account");
             assert!(
                 !crate::codex_config::get_codex_auth_path().exists(),
                 "removing the active account must delete its refreshable live auth"
@@ -3308,7 +3306,7 @@ wire_api = "responses"
                 "the binding is retained so re-login with the same account can recover it"
             );
 
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3323,14 +3321,11 @@ wire_api = "responses"
                 .expect("reactivate managed provider after re-login");
             assert!(crate::codex_config::get_codex_auth_path().exists());
 
-            tauri::async_runtime::block_on(state.codex_oauth_manager.clear_auth())
+            crate::rt::block_on(state.codex_oauth_manager.clear_auth())
                 .expect("logout all managed accounts");
             assert!(!crate::codex_config::get_codex_auth_path().exists());
             assert!(!crate::codex_config::codex_managed_oauth_live_auth_marker_exists());
-            assert!(
-                tauri::async_runtime::block_on(state.codex_oauth_manager.list_accounts())
-                    .is_empty()
-            );
+            assert!(crate::rt::block_on(state.codex_oauth_manager.list_accounts()).is_empty());
         });
     }
 
@@ -3339,7 +3334,7 @@ wire_api = "responses"
     fn codex_auth_center_removal_waits_for_provider_switch_lock() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3351,7 +3346,7 @@ wire_api = "responses"
                     .expect("seed managed account");
             });
 
-            let switch_guard = tauri::async_runtime::block_on(
+            let switch_guard = crate::rt::block_on(
                 state
                     .proxy_service
                     .lock_switch_for_app(AppType::Codex.as_str()),
@@ -3361,7 +3356,7 @@ wire_api = "responses"
             std::thread::scope(|scope| {
                 scope.spawn(|| {
                     started_tx.send(()).expect("signal removal start");
-                    let result = tauri::async_runtime::block_on(
+                    let result = crate::rt::block_on(
                         crate::commands::remove_codex_oauth_account_with_switch_lock(
                             state,
                             "acct-managed",
@@ -3382,10 +3377,7 @@ wire_api = "responses"
                     .expect("removal should finish after lock release")
                     .expect("remove managed account");
             });
-            assert!(
-                tauri::async_runtime::block_on(state.codex_oauth_manager.list_accounts())
-                    .is_empty()
-            );
+            assert!(crate::rt::block_on(state.codex_oauth_manager.list_accounts()).is_empty());
         });
     }
 
@@ -3394,7 +3386,7 @@ wire_api = "responses"
     fn codex_auth_center_logout_waits_for_provider_switch_lock() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3415,7 +3407,7 @@ wire_api = "responses"
             assert!(crate::codex_config::get_codex_auth_path().exists());
             assert!(crate::codex_config::codex_managed_oauth_live_auth_marker_exists());
 
-            let switch_guard = tauri::async_runtime::block_on(
+            let switch_guard = crate::rt::block_on(
                 state
                     .proxy_service
                     .lock_switch_for_app(AppType::Codex.as_str()),
@@ -3425,7 +3417,7 @@ wire_api = "responses"
             std::thread::scope(|scope| {
                 scope.spawn(|| {
                     started_tx.send(()).expect("signal logout start");
-                    let result = tauri::async_runtime::block_on(
+                    let result = crate::rt::block_on(
                         crate::commands::logout_codex_oauth_with_switch_lock(state),
                     );
                     done_tx.send(result).expect("send logout result");
@@ -3444,10 +3436,7 @@ wire_api = "responses"
                     .expect("logout managed accounts");
             });
 
-            assert!(
-                tauri::async_runtime::block_on(state.codex_oauth_manager.list_accounts())
-                    .is_empty()
-            );
+            assert!(crate::rt::block_on(state.codex_oauth_manager.list_accounts()).is_empty());
             assert!(
                 !crate::codex_config::get_codex_auth_path().exists(),
                 "logout must clear the active managed live auth"
@@ -3464,7 +3453,7 @@ wire_api = "responses"
     fn managed_codex_switch_db_current_failure_restores_live_bundle_and_current() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3596,7 +3585,7 @@ wire_api = "responses"
     fn managed_codex_takeover_update_db_failure_restores_backup_live_and_binding() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3646,7 +3635,7 @@ wire_api = "responses"
             crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
                 .expect("set local current");
 
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .db
                     .update_proxy_config(ProxyConfig {
@@ -3674,7 +3663,7 @@ wire_api = "responses"
             });
 
             let backup_before =
-                tauri::async_runtime::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
+                crate::rt::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
                     .expect("read baseline backup")
                     .expect("baseline backup exists");
             let live_before = crate::codex_config::CodexLiveStateSnapshot::capture()
@@ -3728,7 +3717,7 @@ wire_api = "responses"
             );
 
             let backup_after =
-                tauri::async_runtime::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
+                crate::rt::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
                     .expect("read backup after rollback")
                     .expect("backup still exists");
             assert_eq!(backup_after.original_config, backup_before.original_config);
@@ -3746,7 +3735,7 @@ wire_api = "responses"
     fn managed_codex_update_rechecks_current_after_waiting_for_switch_lock() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
-            tauri::async_runtime::block_on(async {
+            crate::rt::block_on(async {
                 state
                     .codex_oauth_manager
                     .add_test_account_with_access_token(
@@ -3821,7 +3810,7 @@ wire_api = "responses"
                 .expect("managed binding")
                 .account_id = Some("acct-managed-b".to_string());
 
-            let switch_guard = tauri::async_runtime::block_on(
+            let switch_guard = crate::rt::block_on(
                 state
                     .proxy_service
                     .lock_switch_for_app(AppType::Codex.as_str()),

@@ -79,6 +79,7 @@ pub fn session_token_url(site_origin: &str) -> Result<url::Url, AppError> {
     .map_err(|error| AppError::InvalidInput(format!("NewAPI session 地址不对: {error}")))
 }
 
+#[cfg(feature = "gui")]
 pub fn extract_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
     cookies
         .iter()
@@ -90,6 +91,7 @@ pub fn extract_refresh_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<
         .map(|cookie| cookie.value().to_string())
 }
 
+#[cfg(feature = "gui")]
 pub fn extract_session_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
     cookies
         .iter()
@@ -97,6 +99,7 @@ pub fn extract_session_cookie(cookies: &[tauri::webview::Cookie<'_>]) -> Option<
         .map(|cookie| cookie.value().to_string())
 }
 
+#[cfg(feature = "gui")]
 /// 构造充值窗口要种的 refresh cookie（host-scoped、HttpOnly）。
 ///
 /// reqwest 栈过不了 Cloudflare 挑战，进充值页前要把 WebView 登录拿到的 refresh

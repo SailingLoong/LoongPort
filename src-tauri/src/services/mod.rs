@@ -1,3 +1,4 @@
+#[cfg(feature = "gui")]
 pub mod app_update;
 pub mod balance;
 pub mod codex_oauth_models;
@@ -17,6 +18,7 @@ pub mod prompt;
 pub mod provider;
 pub mod proxy;
 pub mod s3;
+#[cfg(feature = "gui")]
 pub mod s3_auto_sync;
 pub mod s3_sync;
 pub mod session_usage;
@@ -25,6 +27,7 @@ pub mod session_usage_gemini;
 pub mod session_usage_grokbuild;
 pub mod session_usage_opencode;
 pub mod session_usage_pi;
+#[cfg(feature = "gui")]
 pub mod site_balance_refresh;
 pub mod skill;
 pub mod speedtest;
@@ -36,6 +39,7 @@ pub mod sync_protocol;
 pub mod usage_cache;
 pub mod usage_stats;
 pub mod webdav;
+#[cfg(feature = "gui")]
 pub mod webdav_auto_sync;
 pub mod webdav_sync;
 

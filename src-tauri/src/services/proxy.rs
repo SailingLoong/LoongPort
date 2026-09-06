@@ -8,6 +8,7 @@ use crate::database::Database;
 use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::provider::Provider;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+#[cfg(feature = "gui")]
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
@@ -19,6 +20,7 @@ use crate::services::provider::{
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
+#[cfg(feature = "gui")]
 use tauri::Emitter;
 use tokio::sync::RwLock;
 
@@ -389,8 +391,11 @@ impl Drop for CodexAuthFileTransaction {
 #[derive(Clone)]
 pub struct ProxyService {
     db: Arc<Database>,
+    #[cfg(feature = "gui")]
+    #[cfg(feature = "gui")]
     server: Arc<RwLock<Option<ProxyServer>>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
+    #[cfg(feature = "gui")]
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
     /// 被动模型监控入口（从 ModelVerificationCoordinator 单向流入，随 server 组装传下去）
@@ -423,7 +428,9 @@ impl ProxyService {
             db,
             passive_ingress,
             codex_oauth_manager,
+            #[cfg(feature = "gui")]
             server: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "gui")]
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
         }
@@ -845,6 +852,7 @@ impl ProxyService {
         let Ok(Some(provider)) = self.get_current_provider_for_app(app_type) else {
             return;
         };
+        #[cfg(feature = "gui")]
         if let Some(server) = self.server.read().await.as_ref() {
             server
                 .set_active_target(app_type.as_str(), &provider.id, &provider.name)
@@ -922,6 +930,7 @@ impl ProxyService {
             .ok_or_else(|| format!("{app_type:?} 当前供应商不存在，无法接管 Live 配置"))
     }
 
+    #[cfg(feature = "gui")]
     /// 设置 AppHandle（在应用初始化时调用）
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
         futures::executor::block_on(async {
@@ -936,6 +945,7 @@ impl ProxyService {
         self.switch_locks.lock_for_app(app_type).await
     }
 
+    #[cfg(feature = "gui")]
     /// 启动代理服务器
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
         // 1. 启动时自动设置 proxy_enabled = true
@@ -1019,19 +1029,28 @@ impl ProxyService {
     }
 
     async fn start_before_takeover_if_ephemeral_port(&self) -> Result<bool, String> {
-        let config = self
-            .db
-            .get_proxy_config()
-            .await
-            .map_err(|e| format!("获取代理配置失败: {e}"))?;
-        if config.listen_port != 0 || self.is_running().await {
-            return Ok(false);
-        }
+        #[cfg(feature = "gui")]
+        {
+            let config = self
+                .db
+                .get_proxy_config()
+                .await
+                .map_err(|e| format!("获取代理配置失败: {e}"))?;
+            if config.listen_port != 0 || self.is_running().await {
+                return Ok(false);
+            }
 
-        self.start().await?;
-        Ok(true)
+            self.start().await?;
+            Ok(true)
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            // 无 GUI 构建没有代理服务器可启动（loongport-cli 不做路由）。
+            Ok(false)
+        }
     }
 
+    #[cfg(feature = "gui")]
     /// 启动代理服务器（带 Live 配置接管）
     pub async fn start_with_takeover(&self) -> Result<ProxyServerInfo, String> {
         // 1. 备份各应用的 Live 配置
@@ -1188,6 +1207,7 @@ impl ProxyService {
 
         if enabled {
             // 1) 代理服务未运行则自动启动
+            #[cfg(feature = "gui")]
             if !self.is_running().await {
                 self.start().await?;
             }
@@ -1336,6 +1356,7 @@ impl ProxyService {
                             &app, &provider,
                         )
                     {
+                        #[cfg(feature = "gui")]
                         if let Some(handle) = self.app_handle.read().await.as_ref() {
                             handle
                                 .emit(
@@ -1779,6 +1800,7 @@ impl ProxyService {
 
     /// 停止代理服务器
     pub async fn stop(&self) -> Result<(), String> {
+        #[cfg(feature = "gui")]
         if let Some(server) = self.server.write().await.take() {
             server
                 .stop()
@@ -1800,10 +1822,9 @@ impl ProxyService {
             }
 
             log::info!("代理服务器已停止");
-            Ok(())
-        } else {
-            Err("代理服务器未运行".to_string())
+            return Ok(());
         }
+        Err("代理服务器未运行".to_string())
     }
 
     /// 停止代理服务器（恢复 Live 配置，用户手动关闭时使用）
@@ -2013,6 +2034,7 @@ impl ProxyService {
         };
 
         let mut listen_port = config.listen_port;
+        #[cfg(feature = "gui")]
         if let Some(server) = self.server.read().await.as_ref() {
             let status = server.get_status().await;
             if status.running {
@@ -3305,6 +3327,7 @@ impl ProxyService {
             return Err(format!("更新当前供应商失败: {error}"));
         }
 
+        #[cfg(feature = "gui")]
         if let Some(server) = self.server.read().await.as_ref() {
             server
                 .set_active_target(app_type_enum.as_str(), &provider.id, &provider.name)
@@ -3963,15 +3986,15 @@ impl ProxyService {
 
     /// 获取服务器状态
     pub async fn get_status(&self) -> Result<ProxyStatus, String> {
+        #[cfg(feature = "gui")]
         if let Some(server) = self.server.read().await.as_ref() {
-            Ok(server.get_status().await)
-        } else {
-            // 服务器未运行时返回默认状态
-            Ok(ProxyStatus {
-                running: false,
-                ..Default::default()
-            })
+            return Ok(server.get_status().await);
         }
+        // 服务器未运行时返回默认状态
+        Ok(ProxyStatus {
+            running: false,
+            ..Default::default()
+        })
     }
 
     /// 获取代理配置
@@ -3982,6 +4005,7 @@ impl ProxyService {
             .map_err(|e| format!("获取代理配置失败: {e}"))
     }
 
+    #[cfg(feature = "gui")]
     /// 更新代理配置
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), String> {
         // 记录旧配置用于判定是否需要重启
@@ -4074,9 +4098,17 @@ impl ProxyService {
 
     /// 检查服务器是否正在运行
     pub async fn is_running(&self) -> bool {
-        self.server.read().await.is_some()
+        #[cfg(feature = "gui")]
+        {
+            self.server.read().await.is_some()
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            false
+        }
     }
 
+    #[cfg(feature = "gui")]
     /// 热更新熔断器配置
     ///
     /// 如果代理服务器正在运行，将新配置应用到所有已创建的熔断器实例
@@ -4093,6 +4125,7 @@ impl ProxyService {
         Ok(())
     }
 
+    #[cfg(feature = "gui")]
     /// 热更新指定应用的熔断器配置
     pub async fn update_circuit_breaker_config_for_app(
         &self,
@@ -4110,6 +4143,7 @@ impl ProxyService {
         Ok(())
     }
 
+    #[cfg(feature = "gui")]
     /// 重置指定 Provider 的熔断器
     ///
     /// 如果代理服务器正在运行，立即重置内存中的熔断器状态
@@ -4127,6 +4161,7 @@ impl ProxyService {
         result
     }
 
+    #[cfg(feature = "gui")]
     pub async fn reset_provider_circuit_breaker(
         &self,
         provider_id: &str,

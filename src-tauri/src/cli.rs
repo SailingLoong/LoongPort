@@ -1,7 +1,8 @@
-//! `--add-site`：一次性 CLI 配置，给无桌面 Linux（服务器）用户的最简接入路径。
+//! `loongport-cli --add-site`：一次性 CLI 配置，给无桌面 Linux（服务器、
+//! Ubuntu 20.04 等跑不了 GUI 二进制的老发行版）用户的最简接入路径。
 //!
 //! ```text
-//! LoongPort --add-site https://example.com --key sk-xxx [--app codex] [--model gpt-5.4]
+//! loongport-cli --add-site https://example.com --key sk-xxx [--app codex] [--model gpt-5.4]
 //! ```
 //!
 //! ## 定位（2026-09-06 立项时的边界，别滑成 daemon 产品线）
@@ -10,6 +11,13 @@
 //! CLI 配置文件写好就退出。不进 LoongPort 自己的数据库（服务器和桌面是两台
 //! 机器，互不影响），不做登录窗/多账号/档位/路由 —— 那些等真实服务器用户
 //! 反馈再议。
+//!
+//! ## 打包形状（为什么是独立 bin 而不是 GUI 二进制的 flag）
+//!
+//! GUI 二进制在 Ubuntu 20.04 上**加载期**就挂（focal 源无 webkit2gtk-4.1、
+//! glibc 2.35 符号墙），挂在 main.rs 的 flag 分流永远轮不到执行。所以这个
+//! 入口做成独立 bin，`--no-default-features --target x86_64-unknown-linux-musl`
+//! 静态构建，零动态依赖，任何 x86_64 Linux 都能跑。
 //!
 //! ## 复用面（几乎零新逻辑）
 //!
@@ -21,11 +29,11 @@
 //! - 落盘：[`write_live_snapshot`](crate::services::provider::write_live_snapshot)
 //!   （GUI 切档走的同一批文件级写入函数）
 //!
-//! ## 分流时机的约束（同 `--mcp-image-gen`）
+//! ## 异步边界
 //!
-//! 必须在 [`crate::run`] **之前**分流：`run()` 挂了 single-instance，GUI 已在跑
-//! 时第二个实例的参数会被转交给它并弹窗。服务器上没有 GUI，但「装着桌面版
-//! 的机器上跑 CLI」同样会被截走 —— 所以这里不碰 Tauri 的任何东西。
+//! 探测/拉模型是异步的，写盘是同步的（复用 GUI 的同步写入函数）。两个阶段
+//! 在 [`run_add_site`] 里先后完成——不在异步上下文里调用写盘路径，避免
+//! [`crate::rt::block_on`] 嵌套。
 
 use std::io::{IsTerminal, Write};
 use std::str::FromStr;
@@ -41,14 +49,18 @@ pub const ADD_SITE_FLAG: &str = "--add-site";
 /// 重复跑 = 覆盖同一 id（last-write-wins），不会堆积残条目。
 const CLI_PROVIDER_ID: &str = "loongport-relay";
 
-pub fn is_add_site_mode() -> bool {
-    std::env::args().any(|a| a == ADD_SITE_FLAG)
-}
-
 /// CLI 入口：返回进程退出码。不初始化 Tauri / GTK / 日志（写路径里的 `log::*`
 /// 在无 logger 时静默丢弃，真实错误都走 `Result` 返回）。
 pub fn run_add_site() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return 0;
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("loongport-cli {}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
     let options = match parse_args(&args) {
         Ok(options) => options,
         Err(message) => {
@@ -66,7 +78,14 @@ pub fn run_add_site() -> i32 {
             return 1;
         }
     };
-    match runtime.block_on(add_site(options)) {
+    let prepared = match runtime.block_on(prepare(options)) {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            eprintln!("❌ {message}");
+            return 1;
+        }
+    };
+    match write_config(prepared) {
         Ok(()) => 0,
         Err(message) => {
             eprintln!("❌ {message}");
@@ -76,7 +95,7 @@ pub fn run_add_site() -> i32 {
 }
 
 const USAGE: &str = "用法:
-  LoongPort --add-site <站点域名或完整网址> --key <sk-密钥> [--app <codex|claude|gemini|grok|opencode|openclaw|hermes>] [--model <模型id>]
+  loongport-cli --add-site <站点域名或完整网址> --key <sk-密钥> [--app <codex|claude|gemini|grok|opencode|openclaw|hermes>] [--model <模型id>]
 
 说明:
   --app    要配置的 CLI，默认 codex
@@ -88,6 +107,16 @@ struct AddSiteOptions {
     key: String,
     app: AppType,
     model: Option<String>,
+}
+
+/// 异步阶段的产出：探测与模型选择做完，剩下的全是同步写盘。
+struct Prepared {
+    site_origin: String,
+    site_name: String,
+    base_url: String,
+    key: String,
+    app: AppType,
+    model: String,
 }
 
 fn parse_args(args: &[String]) -> Result<AddSiteOptions, String> {
@@ -142,7 +171,8 @@ where
         .ok_or_else(|| format!("{flag} 需要一个值"))
 }
 
-async fn add_site(options: AddSiteOptions) -> Result<(), String> {
+/// 异步阶段：探测站点协议、确定 base_url、选定模型。
+async fn prepare(options: AddSiteOptions) -> Result<Prepared, String> {
     let site_origin =
         api::normalize_site_origin(&options.site).map_err(|e| format!("站点地址无法解析: {e}"))?;
     println!("探测站点 {site_origin} …");
@@ -165,12 +195,32 @@ async fn add_site(options: AddSiteOptions) -> Result<(), String> {
         None => pick_model(&base_url, &options.key).await?,
     };
 
-    let settings =
-        provision::settings_config_for(&options.app, &options.key, &site_name, &base_url, &model)
-            .ok_or_else(|| {
+    Ok(Prepared {
+        site_origin,
+        site_name,
+        base_url,
+        key: options.key,
+        app: options.app,
+        model,
+    })
+}
+
+/// 同步阶段：生成配置并落盘（GUI 切档同批写入函数）。
+fn write_config(prepared: Prepared) -> Result<(), String> {
+    let Prepared {
+        site_origin,
+        site_name,
+        base_url,
+        key,
+        app,
+        model,
+    } = prepared;
+
+    let settings = provision::settings_config_for(&app, &key, &site_name, &base_url, &model)
+        .ok_or_else(|| {
             format!(
                 "无法为 {} 生成配置（该 CLI 暂不支持 CLI 接入）",
-                options.app.as_str()
+                app.as_str()
             )
         })?;
 
@@ -180,16 +230,16 @@ async fn add_site(options: AddSiteOptions) -> Result<(), String> {
         settings,
         Some(site_origin.clone()),
     );
-    crate::services::provider::write_live_snapshot(&options.app, &provider)
+    crate::services::provider::write_live_snapshot(&app, &provider)
         .map_err(|e| format!("写入配置失败: {e}"))?;
 
     println!();
     println!(
         "✅ 已为 {} 配置「{site_name}」（模型 {model}）",
-        options.app.as_str()
+        app.as_str()
     );
     println!("   密钥已写进 CLI 自己的配置文件，无需再设环境变量。");
-    println!("   验证: {}", verify_hint(&options.app));
+    println!("   验证: {}", verify_hint(&app));
     println!("   （本命令只写该 CLI 的配置文件，不涉及 LoongPort 图形界面数据。）");
     Ok(())
 }

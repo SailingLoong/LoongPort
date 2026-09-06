@@ -1,15 +1,17 @@
 mod app_config;
 mod app_store;
+#[cfg(feature = "gui")]
 mod auto_launch;
 mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
-/// `--add-site` 一次性 CLI 配置（无桌面服务器用户）。分流在 `main.rs`，
-/// 必须发生在 [`run`] 之前（single-instance 会把参数转交给 GUI 实例）。
+/// `loongport-cli` 的一次性配置逻辑（无桌面服务器用户）。独立 bin 入口在
+/// `src/bin/loongport_cli.rs`，与 GUI 共享本库——唯源不分叉。
 pub mod cli;
 mod codex_config;
 mod codex_history_migration;
 mod codex_state_db;
+#[cfg(feature = "gui")]
 mod commands;
 mod config;
 mod crowd;
@@ -22,8 +24,9 @@ mod gemini_mcp;
 mod grok_config;
 pub mod hermes_config;
 mod init_status;
+#[cfg(feature = "gui")]
 mod lightweight;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "gui"))]
 mod linux_fix;
 mod maintenance;
 mod mcp;
@@ -37,6 +40,8 @@ mod prompt_files;
 mod provider;
 mod proxy;
 mod relay;
+/// 异步执行桥：GUI 走 tauri 全局运行时，无 GUI 构建自建 tokio（见模块注释）。
+mod rt;
 mod services;
 mod session_manager;
 mod settings;
@@ -49,7 +54,9 @@ mod store;
 #[cfg(test)]
 mod support_matrix;
 
+#[cfg(feature = "gui")]
 mod events;
+#[cfg(feature = "gui")]
 mod tray;
 mod usage_events;
 mod usage_script;
@@ -60,7 +67,9 @@ pub use codex_config::{
     get_codex_auth_path, get_codex_config_path, prepare_codex_provider_live_config,
     read_codex_live_settings, write_codex_live_atomic, write_codex_live_config_atomic,
 };
+#[cfg(feature = "gui")]
 pub use commands::open_provider_terminal;
+#[cfg(feature = "gui")]
 pub use commands::*;
 pub use config::{
     get_claude_mcp_path, get_claude_settings_path, read_json_file, APP_DIR_NAME, DB_FILE_NAME,
@@ -88,17 +97,27 @@ pub use services::{
 pub use settings::{update_settings, AppSettings};
 pub use store::AppState;
 
+#[cfg(feature = "gui")]
 use tauri_plugin_deep_link::DeepLinkExt;
+#[cfg(feature = "gui")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+use std::fmt;
+#[cfg(feature = "gui")]
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{fmt, sync::Arc};
+#[cfg(feature = "gui")]
+use std::sync::Arc;
+#[cfg(feature = "gui")]
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
+#[cfg(feature = "gui")]
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+#[cfg(feature = "gui")]
 use tauri::RunEvent;
+#[cfg(feature = "gui")]
 use tauri::{Emitter, Manager};
+#[cfg(feature = "gui")]
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 /// 主窗口的 label（`tauri.conf.json` 的 `app.windows[0].label`）。
@@ -261,10 +280,12 @@ pub(crate) fn redact_url_origin_for_log(url_str: &str) -> String {
     }
 }
 
+#[cfg(feature = "gui")]
 fn runtime_log_level_allows(level: log::Level, max_level: log::LevelFilter) -> bool {
     max_level.to_level().is_some_and(|maximum| level <= maximum)
 }
 
+#[cfg(feature = "gui")]
 /// 统一处理 ccswitch:// 深链接 URL
 ///
 /// - 解析 URL
@@ -331,6 +352,7 @@ fn handle_deeplink_url(
     true
 }
 
+#[cfg(feature = "gui")]
 /// 更新托盘菜单的Tauri命令
 #[tauri::command]
 async fn update_tray_menu(
@@ -353,6 +375,7 @@ async fn update_tray_menu(
     }
 }
 
+#[cfg(feature = "gui")]
 #[cfg(target_os = "macos")]
 fn macos_tray_icon() -> Option<Image<'static>> {
     const ICON_BYTES: &[u8] = include_bytes!("../icons/tray/macos/statusbar_template_3x.png");
@@ -389,6 +412,7 @@ pub fn run_imagegen_mcp() -> Result<(), String> {
 /// 两处各写一遍字面量迟早分叉，而症状是宿主那边"启动超时"，看不出是拼写问题。
 pub use relay::imagegen_mcp::IMAGEGEN_MCP_FLAG;
 
+#[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.loongport/crash.log）
@@ -2198,6 +2222,7 @@ pub fn run() {
 // 应用退出清理
 // ============================================================
 
+#[cfg(feature = "gui")]
 /// 应用退出前的清理工作
 ///
 /// 在应用退出前检查代理服务器状态，如果正在运行则停止代理并恢复 Live 配置。
@@ -2250,6 +2275,7 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
 /// 触发 tray-icon 内部的 `remove_tray_icon` → `Shell_NotifyIconW(NIM_DELETE)`，
 /// 在进程结束前干净地把图标摘掉。其它平台 `set_visible(false)` 也是
 /// 正常的隐藏/移除语义，作为跨平台兜底也安全。
+#[cfg(feature = "gui")]
 pub(crate) fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
     if let Some(tray) = app_handle.tray_by_id(tray::TRAY_ID) {
         if let Err(e) = tray.set_visible(false) {
@@ -2264,12 +2290,14 @@ pub(crate) fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
 // 启动时恢复代理状态
 // ============================================================
 
+#[cfg(feature = "gui")]
 /// 启动时根据 proxy_config 表中的代理状态自动恢复代理服务
 ///
 /// 检查 `proxy_config.enabled` 字段，如果有任一应用的状态为 `true`，
 /// 则自动启动代理服务并接管对应应用的 Live 配置。
 const PROXY_STARTUP_APP_TYPES: [&str; 4] = ["claude", "codex", "gemini", "grokbuild"];
 
+#[cfg(feature = "gui")]
 async fn enabled_proxy_apps_on_startup(db: &database::Database) -> Vec<&'static str> {
     let mut apps = Vec::new();
     for app_type in PROXY_STARTUP_APP_TYPES {
@@ -2284,6 +2312,7 @@ async fn enabled_proxy_apps_on_startup(db: &database::Database) -> Vec<&'static 
     apps
 }
 
+#[cfg(feature = "gui")]
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
     // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
     let apps_to_restore = enabled_proxy_apps_on_startup(&state.db).await;
@@ -2320,6 +2349,7 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
     }
 }
 
+#[cfg(feature = "gui")]
 fn initialize_common_config_snippets(state: &store::AppState) {
     // Auto-extract common config snippets from clean live files when snippet is missing.
     // This must run before proxy takeover is restored on startup, otherwise we'd read
@@ -2436,6 +2466,7 @@ fn initialize_common_config_snippets(state: &store::AppState) {
 // 迁移错误对话框辅助函数
 // ============================================================
 
+#[cfg(feature = "gui")]
 /// 检测是否为中文环境
 fn is_chinese_locale() -> bool {
     std::env::var("LANG")
@@ -2445,6 +2476,7 @@ fn is_chinese_locale() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "gui")]
 /// 显示迁移错误对话框
 /// 返回 true 表示用户选择重试，false 表示用户选择退出
 fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
@@ -2496,6 +2528,7 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
         .blocking_show()
 }
 
+#[cfg(feature = "gui")]
 /// 进入「数据库版本过新（应用过旧）」恢复模式。
 ///
 /// 记下 init error（前端 `main.tsx` 据 `kind = "db_version_too_new"` 渲染应用内
@@ -2521,6 +2554,7 @@ fn enter_db_version_too_new_recovery(
     }
 }
 
+#[cfg(feature = "gui")]
 /// 显示数据库初始化/Schema 迁移失败对话框
 /// 返回 true 表示用户选择重试，false 表示用户选择退出
 fn show_database_init_error_dialog(
@@ -2590,6 +2624,7 @@ fn show_database_init_error_dialog(
 // 退出请求分类
 // ============================================================
 
+#[cfg(feature = "gui")]
 /// `RunEvent::ExitRequested` 的三类来源，处理方式必须区分。
 ///
 /// 关键约束：重启请求（`code == RESTART_EXIT_CODE`）上 `prevent_exit()` 会被
@@ -2608,6 +2643,7 @@ enum ExitRequestAction {
     CleanupAndExit,
 }
 
+#[cfg(feature = "gui")]
 fn classify_exit_request(code: Option<i32>) -> ExitRequestAction {
     match code {
         None => ExitRequestAction::StayInTray,
@@ -2620,6 +2656,7 @@ fn classify_exit_request(code: Option<i32>) -> ExitRequestAction {
 // 在应用主动退出前显式持久化窗口状态
 // ============================================================
 
+#[cfg(feature = "gui")]
 /// 启动前丢弃**明显坏掉**的窗口状态。
 ///
 /// ## 为什么需要这道防护（2026-08-02 实测踩过）
@@ -2675,10 +2712,12 @@ fn discard_broken_window_state(app_config: &tauri::Config) {
     }
 }
 
+#[cfg(feature = "gui")]
 fn window_state_flags() -> StateFlags {
     StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED
 }
 
+#[cfg(feature = "gui")]
 /// 当前应用的退出路径会拦截 `ExitRequested` 并最终直接 `std::process::exit(0)`，
 /// 这里需要在真正结束进程前手动落盘，避免 window-state 插件的默认退出钩子被绕过。
 pub fn save_window_state_before_exit(app_handle: &tauri::AppHandle) {
@@ -2689,6 +2728,7 @@ pub fn save_window_state_before_exit(app_handle: &tauri::AppHandle) {
     }
 }
 
+#[cfg(feature = "gui")]
 /// 主动释放 single-instance 锁。
 ///
 /// macOS single-instance 使用 `/tmp/{identifier}.sock`。我们有若干路径会直接
@@ -2699,6 +2739,7 @@ pub fn destroy_single_instance_lock(app_handle: &tauri::AppHandle) {
     tauri_plugin_single_instance::destroy(app_handle);
 }
 
+#[cfg(feature = "gui")]
 /// 清理托盘图标、释放 single-instance 锁后重启当前应用。
 ///
 /// 直接走 `tauri::process::restart`（spawn 新进程 + `exit(0)`），不经过事件
@@ -2715,7 +2756,7 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
     tauri::process::restart(&app_handle.env());
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gui"))]
 mod tests {
     use super::{
         classify_exit_request, enabled_proxy_apps_on_startup, redact_url_for_log,

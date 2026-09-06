@@ -416,6 +416,7 @@ static REFRESH_INFLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::
 /// 充值窗口持有独占权时后台续期会把用户踢出充值页。本链路只走 sk
 /// （`usage_with_api_key` / `billing_balance_with_api_key`），不携带登录态、
 /// 不碰 cookie。⚠️ 若将来把这条链改走登录态，必须先补「充值窗口活跃站跳过」。
+#[cfg(feature = "gui")]
 pub fn spawn_stale_refresh<R: tauri::Runtime>(
     db: std::sync::Arc<crate::database::Database>,
     app_handle: Option<tauri::AppHandle<R>>,

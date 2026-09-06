@@ -471,6 +471,7 @@ pub fn execute_import(
         }
     }
 
+    #[cfg(feature = "gui")]
     if let Err(e) = crate::commands::sync_support::run_post_import_sync(&app_state) {
         warnings.push(format!("导入后同步失败: {e}"));
         log::warn!("[cc-switch-import] post-import sync: {e}");
