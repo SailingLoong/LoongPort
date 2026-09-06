@@ -53,14 +53,20 @@ describe("k-匿名与网络多样性门槛（L1）", () => {
     expect(snap.sites).toEqual({});
   });
 
-  it("来源够但都在同一个 ASN：不发布（一个出口刷不动）", () => {
+  it("来源够但都在同一个 ASN：不发布（一个出口刷不动）——临时门槛 1/1 下改判发布", () => {
+    // 2026-09-06 起门槛临时放开为 1/1（见 aggregate.ts 常量注释），单 ASN
+    // 也发布；恢复 3/2 时此断言自动回到「不发布」，不需要改这条测试。
     const rows = Array.from({ length: 4 }, (_, i) => ({
       ...makeRaw(),
       source: `src-${i}`,
       asn: 4134,
     }));
     const snap = buildSnapshot(rows, NOW);
-    expect(snap.sites).toEqual({});
+    if (MIN_ASN <= 1) {
+      expect(snap.sites["example.com"]).toBeDefined();
+    } else {
+      expect(snap.sites).toEqual({});
+    }
   });
 
   it("横跨 ≥MIN_ASN 个 ASN 时发布，sources 如实计数", () => {
@@ -76,8 +82,10 @@ describe("k-匿名与网络多样性门槛（L1）", () => {
   });
 
   it("两个窗口都没过门槛时站点不出现；仅 w7 过门槛时 w24 为 null", () => {
+    // 用常量相对构造（门槛临时放开/恢复都不用改这里）：
+    // w24 窗口内 MIN_SOURCES - 1 个源 + 一个 30h 前的旧源（只进 w7）。
     const rows = [
-      ...sources(2),
+      ...sources(MIN_SOURCES - 1),
       makeRaw({
         source: "old",
         asn: 4837,
@@ -88,7 +96,7 @@ describe("k-匿名与网络多样性门槛（L1）", () => {
     const site = snap.sites["example.com"];
     expect(site).toBeDefined();
     expect(site.w24).toBeNull();
-    expect(site.w7?.sources).toBe(3);
+    expect(site.w7?.sources).toBe(MIN_SOURCES);
   });
 });
 
@@ -206,9 +214,10 @@ describe("分布直方图与口径", () => {
   });
 
   it("时段槽按 UTC 小时落位，槽内来源不过门槛则置零", () => {
+    // 常量相对构造：槽 3 过门槛、槽 5 差一个（门槛临时放开/恢复都不用改）
     const rows = [
-      ...sources(3, { hour: "2026-08-26T03Z" }),
-      ...sources(2, { hour: "2026-08-26T05Z" }),
+      ...sources(MIN_SOURCES, { hour: "2026-08-26T03Z" }),
+      ...sources(MIN_SOURCES - 1, { hour: "2026-08-26T05Z" }),
     ];
     const snap = buildSnapshot(rows, NOW);
     const hours = snap.sites["example.com"]?.hours;
@@ -238,8 +247,8 @@ describe("分布直方图与口径", () => {
     expect(TTFT_BIN_EDGES_MS[0]).toBe(200);
   });
 
-  it("门槛常量钉住：MIN_SOURCES=3、MIN_ASN=2（调阈值要连着测试改）", () => {
-    expect(MIN_SOURCES).toBe(3);
-    expect(MIN_ASN).toBe(2);
+  it("门槛常量钉住：MIN_SOURCES=1、MIN_ASN=1（2026-09-06 临时放开，恢复 3/2 时连着常量注释与 README 一起改）", () => {
+    expect(MIN_SOURCES).toBe(1);
+    expect(MIN_ASN).toBe(1);
   });
 });

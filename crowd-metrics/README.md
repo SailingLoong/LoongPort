@@ -18,8 +18,10 @@
 
 - **只有聚合指标**：站点 host、请求数、错误数、TTFT 直方图、token 计数、微美元花费。
   没有提示词、密钥、账号、时间戳级明细。
-- **k-匿名**：任何发布的聚合 ≥ 3 个独立来源（`MIN_SOURCES`）；来源是客户端**每日轮换**
-  的随机 id，不是持久安装标识。
+- **k-匿名**：任何发布的聚合需 ≥ `MIN_SOURCES` 个独立来源（来源是客户端**每日轮换**
+  的随机 id，不是持久安装标识）。⚠️ **2026-09-06 起门槛临时放开为 1/1**
+  （参与用户还少，3×2 让实测页必然空白；单源数据实质是单个用户的使用画像，
+  属有意识的临时让步）——恢复条件与随改清单见 `src/aggregate.ts` 常量注释。
 - **接收端不记 IP**：限流只存 IP 的 SHA-256（`upload_ip_hour`），保留 2 天。
 - 原始桶保留 30 天后删除；KV 里只有 k-匿名后的快照。
 
@@ -55,7 +57,7 @@ deploy.sh 会：拒绝占位 id → 重放 `schema.sql`（幂等）→ `wrangler
 npx wrangler deploy --name loongport-metrics-dev   # 独立名字，不碰生产
 ./verify.sh https://loongport-metrics-dev.<account-subdomain>.workers.dev
 
-# POST 冒烟（写入的是 staging 的 D1，且单来源永远过不了 k-匿名，不会出现在快照里）：
+# POST 冒烟（写入的是 staging 的 D1；门槛临时 1/1 期间单来源也会进快照，恢复 3/2 后不会）：
 curl -X POST https://…/v1/ingest -H 'content-type: application/json' -d '{
   "version": 1,
   "sourceId": "00112233445566778899aabbccddeeff",

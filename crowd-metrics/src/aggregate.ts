@@ -25,10 +25,22 @@ import { binMidpoint, quantileFromBins, TTFT_BIN_COUNT } from "./bins";
 import { hourToEpochSec } from "./validate";
 import type { HourSlot, SiteStats, Snapshot, WindowStats } from "./types";
 
-/** k-匿名门槛：少于这么多受信独立来源的聚合不发布。 */
-export const MIN_SOURCES = 3;
-/** 网络多样性门槛：受信来源横跨的最少 ASN 数。 */
-export const MIN_ASN = 2;
+/**
+ * k-匿名门槛：少于这么多受信独立来源的聚合不发布。
+ * 网络多样性门槛：受信来源横跨的最少 ASN 数。
+ *
+ * ⚠️ **2026-09-06 起临时放开为 1/1**（用户拍板）：参与上传的用户还很少，
+ * 3 源 × 2 ASN 让实测页几乎必然空白。这是一次有意识的隐私让步——单源
+ * 站点的公开数据实质上就是该用户一人的使用画像。cohort（需 ≥2 源）与
+ * 极值裁剪（需 ≥5 源）在单源下天然不触发，防线代码保持原样。
+ *
+ * **恢复条件**：快照里稳定出现 ≥3 独立源的站点（或日均独立源 ≥5）时
+ * 改回 `MIN_SOURCES = 3 / MIN_ASN = 2`，并同步恢复：
+ * aggregate.test.ts 的钉值测试与「同一 ASN」测试、README 的门槛描述、
+ * 主仓 crowd/mod.rs 口径节的 k-匿描述。
+ */
+export const MIN_SOURCES = 1;
+export const MIN_ASN = 1;
 /** 触发极值源裁剪的最少来源数（≥5 才裁：保 3 个来源也过 k-匿名）。 */
 export const TRIM_THRESHOLD = 5;
 /** cohort 剔除的联合快慢因子（快于同行 3 倍）。 */
