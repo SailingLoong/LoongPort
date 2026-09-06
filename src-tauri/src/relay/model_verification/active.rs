@@ -7,7 +7,7 @@ use crate::{
         capability_profiles::CapabilityProfile,
         coordinator::{ActiveVerifier, PreparedVerification, ProbeProgress},
         protocols::{self, RunFailure},
-        target::ResolvedTarget,
+        target::{supports_app_type, ResolvedTarget},
         types::{RunFailureKind, TargetKey, VerificationReport, RULES_VERSION},
         verdict,
     },
@@ -35,7 +35,7 @@ impl ActiveVerifier for BalancedActiveVerifier {
     ) -> Result<PreparedVerification, RunFailureKind> {
         let app_type = AppType::from_str(&target.app_type)
             .ok()
-            .filter(|app_type| matches!(app_type, AppType::Codex | AppType::Claude))
+            .filter(supports_app_type)
             .ok_or(RunFailureKind::InvalidResponse)?;
         let resolved = ResolvedTarget::resolve(&self.db, target.clone())
             .map_err(|_| RunFailureKind::InvalidResponse)?;

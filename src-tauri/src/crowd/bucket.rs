@@ -504,10 +504,9 @@ pub fn build_hour_buckets(
             anomalies_by_site.get(&(bucket.hour_epoch, bucket.site.clone(), bucket.app.clone()))
         {
             for model_row in &mut bucket.models {
-                model_row.anomalies = per_model
-                    .get(&model_row.model)
-                    .copied()
-                    .unwrap_or(model_row.anomalies);
+                // 此处 `model_row.anomalies` 尚未被写过（初值 0），缺项就是 0 ——
+                // 明写出来，别用自引用的 `unwrap_or(model_row.anomalies)` 装作有状态。
+                model_row.anomalies = per_model.get(&model_row.model).copied().unwrap_or(0);
             }
         }
     }

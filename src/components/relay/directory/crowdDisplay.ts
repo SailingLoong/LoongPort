@@ -5,6 +5,7 @@
  */
 
 import { formatLatency } from "./transitDisplay";
+import { fmtUsd } from "@/components/usage/format";
 
 export { formatLatency };
 
@@ -14,9 +15,9 @@ export function formatErrRate(rate: number): string {
   return `${percent >= 1 ? percent.toFixed(1) : percent.toFixed(2)}%`;
 }
 
-/** 花费参考值：$1.25 / 百万 token。 */
+/** 花费参考值：$1.25 / 百万 token。美元金额走全仓唯源 fmtUsd，不手拼 $ 串。 */
 export function formatCostPerMTok(usd: number): string {
-  return `$${usd.toFixed(2)}`;
+  return fmtUsd(usd, 2);
 }
 
 /**

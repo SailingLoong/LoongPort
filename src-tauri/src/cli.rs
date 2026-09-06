@@ -94,6 +94,8 @@ pub fn run_add_site() -> i32 {
     }
 }
 
+// USAGE 里的 app 清单与 `cli_supported` 的穷尽 match 保持一致（新增 CLI 支持时
+// 两边都要动；解析与拒绝行为有测试兜着，这里只是帮助文本）。
 const USAGE: &str = "用法:
   loongport-cli --add-site <站点域名或完整网址> --key <sk-密钥> [--app <codex|claude|gemini|grok|opencode|openclaw|hermes>] [--model <模型id>]
 

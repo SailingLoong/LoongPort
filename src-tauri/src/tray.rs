@@ -14,7 +14,9 @@ use crate::store::AppState;
 
 use crate::config::OFFICIAL_WEBSITE;
 
-const TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION: &str = "official_subscription";
+// 唯一源在 commands/provider.rs（provider meta 的 wire 值），经 commands 的
+// glob re-export 引用，这里只消费。
+use crate::commands::TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION;
 const H_TIER_NAMES: &[&str] = &[crate::services::subscription::TIER_FIVE_HOUR];
 const W_TIER_NAMES: &[&str] = &[
     crate::services::subscription::TIER_WEEKLY_LIMIT,

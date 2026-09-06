@@ -482,13 +482,10 @@ fn round_decimal_string(raw: &str) -> Option<String> {
 
 // ─────────────────────────── HTTP ───────────────────────────
 
-/// 鉴权只要 Bearer（见模块文档），所以是个普通 HTTP 客户端。
-///
+/// 鉴权只要 Bearer（见模块文档），复用 relay 层的共享客户端构造器（30s 超时、
+/// 无会话特征）—— 平凡构造器各写一份只会各自漂。
 fn build_client() -> Result<reqwest::Client, AppError> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| AppError::Config(format!("创建 HTTP 客户端失败: {e}")))
+    crate::relay::api::build_client()
 }
 
 /// 一次 GET，返回响应体文本。

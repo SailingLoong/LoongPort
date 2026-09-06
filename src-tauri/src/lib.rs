@@ -1673,7 +1673,6 @@ pub fn run() {
             commands::relay_login,
             commands::relay_refresh,
             commands::relay_refresh_all,
-            commands::relay_provision,
             commands::relay_list_relays,
             commands::relay_reorder,
             commands::relay_reset_tier_config,

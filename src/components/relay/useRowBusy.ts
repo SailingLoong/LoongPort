@@ -9,7 +9,7 @@ import { useCallback, useState } from "react";
  * 进行中，所有行的按钮都 `disabled={busy !== null}` ⇒ **用户点 A 的「获取密钥」，
  * B / C 的按钮全灰了**（他明确指出过：中转站之间、账号之间本来没有依赖）。
  *
- * 那个全局禁用当时是在兜一个**真实的并发正确性问题**：后端 `relay_provision`
+ * 那个全局禁用当时是在兜一个**真实的并发正确性问题**：后端 provision 命令
  * 靠 `creds::load()` 读「`is_current = 1` 的那一行」，前端得先 `set_current(id)`
  * 才能让它作用到对的账号上 —— 而 `is_current` 是全局单例，两个 provision 并发时
  * 会互相改写对方的目标。

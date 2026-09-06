@@ -7,7 +7,7 @@
 //! | [`relay_status`] | 首启该弹哪个弹窗、当前是什么状态 |
 //! | [`relay_import_site`] | 发现协议；必要时让用户在可见 WebView 完成网页验证，并在同一会话登录 |
 //! | [`relay_login`] | 开登录 WebView，等凭据回来 |
-//! | [`relay_provision`] | 拉分组 → 每组备好 sk → 写成 codex provider |
+//! | [`relay_refresh`] | 探活 + 重拉分组（每组备好 sk → 写成 provider） |
 //! | [`relay_switch_tier`] | 选分组 → 退 ChatGPT → 切换 → 重开 |
 //!
 //! ## 为什么切换编排在 Rust 侧而不是前端
@@ -289,10 +289,10 @@ pub struct TierInfo {
     ///
     /// ## 为什么必须有它
     ///
-    /// [`do_provision`] 一次探**全部平台**，返回的 `tiers` 是全平台的，而 UI 那一行
-    /// 只显示当前 app 的档位。没有这个字段，前端拿到一堆档位却分不出哪条是自己的
-    /// ⇒ 「这个站没有该平台的分组」与「拉取失败」在界面上长得一样（都是零档位），
-    /// 而前者重试一百次也不会有、后者重试有意义。
+    /// provision 链路（[`refresh_relay_provision`]）一次探**全部平台**，返回的 `tiers`
+    /// 是全平台的，而 UI 那一行只显示当前 app 的档位。没有这个字段，前端拿到一堆档位
+    /// 却分不出哪条是自己的 ⇒ 「这个站没有该平台的分组」与「拉取失败」在界面上长得一样
+    /// （都是零档位），而前者重试一百次也不会有、后者重试有意义。
     ///
     /// [`list_tiers_impl`] 那条路填的是它被查询的那个 app（那条命令按 app 查，
     /// 结果天然同质），所以两条路的语义一致：**这条档位属于哪个 CLI**。
@@ -2719,7 +2719,7 @@ fn persist_new_relay_newapi_session(
 ///
 /// 界面是多行并列的，「当前站」这个概念在这里不成立 —— 靠它定位会让
 /// 「给 A 获取密钥」静默作用到 B 上（那是 review 抓出过的真实并发正确性问题，
-/// 见 [`relay_provision`] 的文档）。2026-08-04 连带 `is_current` 一起删掉了
+/// 见 [`refresh_relay_provision`] 的文档）。2026-08-04 连带 `is_current` 一起删掉了
 /// 那条 `Option` 分支。
 async fn usable_relay<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
@@ -3009,65 +3009,6 @@ fn persist_refreshed_session_with_identity_writer(
     }
 
     Ok(renewed)
-}
-
-/// 拉分组、为每组备好 sk、写成 provider 记录。
-///
-/// ## 一次探全部平台，各归各的 tab（2026-08-03 改）
-///
-/// **不吃 `app` 参数** —— 每个分组落到哪个 CLI 由它自己的 `platform` 决定
-/// （`openai → codex`、`anthropic → claude`、`gemini → gemini`、`grok → grokbuild`），
-/// 见 [`provision::provision`]。用户在任何一个 tab 登录一次，全部平台的档位都备好了。
-///
-/// ### 为什么去掉那个参数（它曾经是 bug 的根源）
-///
-/// 原来签名吃 `app`，于是「拉哪些分组」和「写成什么形状」都由调用方决定 ——
-/// 在 claude tab 点「获取密钥」时**拉的是 openai 分组、却写成 claude 的配置形状**
-/// （openai 的 sk 配在 `ANTHROPIC_BASE_URL` 上，调用必失败），
-/// 而用户看到的是「claude 页出现了 chatgpt 的分组」。
-///
-/// 根因是把「分组属于哪个 CLI」的决定权交给了调用方，而那是分组自身的属性。
-/// 现在 `provision` 返回 [`provision::TargetedTier`]（分组 + 它该落到的 app_type），
-/// 调用方不需要知道 platform 映射规则 —— 那才是低耦合。
-///
-/// 认不出配置形状的 CLI（`settings_config_for` 返回 `None`）在循环里跳过并计入
-/// `failures`，不让整批失败。
-///
-/// ## `relay_id`：显式指定作用于哪个中转站（2026-08-03 加）
-///
-/// 原来它只吃 `AppHandle`，靠 `creds::load()` 读「`is_current = 1` 的那一行」。
-/// 于是多行并列的页面必须先 `set_current(id)` 才能让它作用到对的账号上
-/// （前端那个 `focusRelay`）—— 而 `is_current` 是**全局单例状态**：
-///
-/// 两个中转站同时 provision 时，B 的 `set_current(B)` 会改掉 A 那次操作的目标，
-/// A 后续的 balance / refresh 全串到 B 上。前端当时是用「任一操作进行中就禁用所有行」
-/// 兜住的 —— **那是拿全局禁用换正确性，修的是症状**：中转站之间本来毫无依赖，
-/// 用户点 A 的按钮却发现 B、C 的按钮全灰了。
-///
-/// 现在把目标变成参数，全局状态不再参与定位 ⇒ 各行真正独立、可并发。
-/// 这也正是「中转站（登录态）一个模块、分组（sk）一个模块」该有的样子：
-/// 分组操作显式说明「给哪个中转站」，而不是去读一个由 UI 顺手改掉的全局变量。
-///
-/// `None` 保留给单站流程（LoongPort 页首启引导，全程只有一个站）。
-#[tauri::command]
-pub async fn relay_provision(
-    app_handle: tauri::AppHandle,
-    relay_id: i64,
-) -> Result<ProvisionSummary, String> {
-    do_provision(&app_handle, relay_id)
-        .await
-        // ⚠️ **失败必须落日志**（维护者实测抓出）。
-        //
-        // 这条路径原来一个字都不记，而前端「刷新」那处又把 `Promise.allSettled` 的
-        // `reason` 丢掉、只显示「<站名> 刷新失败」⇒ 两处一叠，**用户和维护者都拿不到
-        // 真实错误** —— 定位一次要手工从 DB 里取 token、逐个端点 curl 一遍。
-        //
-        // 带上 `relay_id`：多行并列时「哪一行失败了」本身就是信息，
-        // 而错误文案里未必有站名。
-        .inspect_err(|e| {
-            log::error!("provision 失败（relay_id={relay_id}）：{e}");
-        })
-        .map_err(|e| e.to_string())
 }
 
 #[derive(Clone)]
@@ -3380,14 +3321,44 @@ async fn provision_backend(
     }
 }
 
-async fn do_provision(
-    app_handle: &tauri::AppHandle,
-    relay_id: i64,
-) -> Result<ProvisionSummary, AppError> {
-    let op = usable_relay(app_handle, relay_id).await?;
-    provision_relay(app_handle, &op).await
-}
-
+/// 拉分组、为每组备好 sk、写成 provider 记录 —— provision 的唯一入口
+/// （`relay_refresh` 命令在探活后调它；曾经的独立 `relay_provision` 命令前端零调用，
+/// 2026-09-07 删除，见 git 历史）。
+///
+/// ## 一次探全部平台，各归各的 tab（2026-08-03 改）
+///
+/// **不吃 `app` 参数** —— 每个分组落到哪个 CLI 由它自己的 `platform` 决定
+/// （`openai → codex`、`anthropic → claude`、`gemini → gemini`、`grok → grokbuild`），
+/// 见 [`provision::provision`]。用户在任何一个 tab 登录一次，全部平台的档位都备好了。
+///
+/// ### 为什么去掉那个参数（它曾经是 bug 的根源）
+///
+/// 原来签名吃 `app`，于是「拉哪些分组」和「写成什么形状」都由调用方决定 ——
+/// 在 claude tab 点「获取密钥」时**拉的是 openai 分组、却写成 claude 的配置形状**
+/// （openai 的 sk 配在 `ANTHROPIC_BASE_URL` 上，调用必失败），
+/// 而用户看到的是「claude 页出现了 chatgpt 的分组」。
+///
+/// 根因是把「分组属于哪个 CLI」的决定权交给了调用方，而那是分组自身的属性。
+/// 现在 `provision` 返回 [`provision::TargetedTier`]（分组 + 它该落到的 app_type），
+/// 调用方不需要知道 platform 映射规则 —— 那才是低耦合。
+///
+/// 认不出配置形状的 CLI（`settings_config_for` 返回 `None`）在循环里跳过并计入
+/// `failures`，不让整批失败。
+///
+/// ## `relay_id`：显式指定作用于哪个中转站（2026-08-03 加）
+///
+/// 原来它只吃 `AppHandle`，靠 `creds::load()` 读「`is_current = 1` 的那一行」。
+/// 于是多行并列的页面必须先 `set_current(id)` 才能让它作用到对的账号上
+/// （前端那个 `focusRelay`）—— 而 `is_current` 是**全局单例状态**：
+///
+/// 两个中转站同时 provision 时，B 的 `set_current(B)` 会改掉 A 那次操作的目标，
+/// A 后续的 balance / refresh 全串到 B 上。前端当时是用「任一操作进行中就禁用所有行」
+/// 兜住的 —— **那是拿全局禁用换正确性，修的是症状**：中转站之间本来毫无依赖，
+/// 用户点 A 的按钮却发现 B、C 的按钮全灰了。
+///
+/// 现在把目标变成参数，全局状态不再参与定位 ⇒ 各行真正独立、可并发。
+/// 这也正是「中转站（登录态）一个模块、分组（sk）一个模块」该有的样子：
+/// 分组操作显式说明「给哪个中转站」，而不是去读一个由 UI 顺手改掉的全局变量。
 async fn refresh_relay_provision(
     app_handle: &tauri::AppHandle,
     relay_id: i64,
@@ -3758,7 +3729,7 @@ fn persist_provision_batch(
 /// 而且用户没有自救手段 —— UI 认为这个档位已经是当前项（`isCurrent` 为 true），
 /// 前端 `if (tier.isCurrent) return;` 会让「再点它一次」什么也不做。
 ///
-/// 两个调用方：[`do_provision`]（sk 被撤销后重建了一把）与
+/// 两个调用方：[`provision_relay`]（sk 被撤销后重建了一把）与
 /// [`reset_tier_config_impl`]（把被改坏的配置恢复成默认）。
 ///
 /// ## 为什么走 `sync_current_provider_for_app` 而不是 `switch`
@@ -4018,8 +3989,8 @@ fn prune_stale_tiers(
                 continue;
             }
             // 判据是 **(app_type, id) 组合**，不是光看 id ——
-            // 见 `do_provision` 里 `keep.insert` 那处的说明（同一个分组在两个 app
-            // 下是同一个 id，只看 id 会让串台的脏记录永远删不掉）。
+            // 见 `persist_provision_batch` 里 `keep.insert` 那处的说明（同一个分组
+            // 在两个 app 下是同一个 id，只看 id 会让串台的脏记录永远删不掉）。
             if keep.contains(&(app_type.as_str().to_string(), provider.id.clone())) {
                 continue;
             }
@@ -4184,7 +4155,7 @@ fn list_relays_impl(state: &AppState, app_type: AppType) -> Result<Vec<RelayRow>
 /// `OpenAI`（那会让会话历史分家）。这些改动都不会报错，只会让调用静默失败。
 ///
 /// 所以给一条回头路。**它是唯一会重写用户编辑的入口** —— 重复 provision 不再覆盖
-/// （见 `do_provision` 里那段），改配置的责任明确落在用户显式点这个按钮上。
+/// （见 `persist_provision_batch` 里那段），改配置的责任明确落在用户显式点这个按钮上。
 ///
 /// **sk 保留不变**：从现有配置里读出来再塞回去。恢复默认是「修配置」不是「换密钥」，
 /// 顺手换掉 sk 会让用户的其它设备上那把 key 失效（虽然认领逻辑会重新拿到，
@@ -4400,7 +4371,7 @@ fn reset_tier_config_in_state(
     // 默认配置，而 CLI 用的仍是那份坏配置 —— 且用户没有自救手段：UI 认为它已经是
     // 当前项，再点一次不会触发切换（前端 `if (tier.isCurrent) return;`）。
     //
-    // 与 `do_provision` 同一条路（见那边关于为什么用 `sync_current_provider_for_app`
+    // 与 `provision_relay` 同一条路（见那边关于为什么用 `sync_current_provider_for_app`
     // 而不是 `switch` 的说明）。失败只 warn：DB 已经是对的，切一次即生效，
     // 不该因为落地文件写不下去就报「恢复失败」。
     let is_current = ProviderService::current(state, app_type.clone())
@@ -5118,10 +5089,10 @@ fn remove_site_impl(
 
     // 生图工具跟着对齐一次 —— **这条路必须自己调**（review 抓出）。
     //
-    // 另一个调用点在 `do_provision` 收尾，但那条路依赖「还会再 provision 一次」。
-    // 删掉的正是拥有生图档位的那个账号时，**不会再有下一次** ⇒ `loongport-imagegen`
-    // 这条 MCP 记录永久留在用户的 CLI 配置里，而它每次被调用都报「还没有选定用哪个
-    // 档位生图」—— 一个删不掉的坏工具。
+    // 另一个调用点在 `mark_pricing_after_success`（provision 收尾），但那条路依赖
+    // 「还会再 provision 一次」。删掉的正是拥有生图档位的那个账号时，**不会再有
+    // 下一次** ⇒ `loongport-imagegen` 这条 MCP 记录永久留在用户的 CLI 配置里，
+    // 而它每次被调用都报「还没有选定用哪个档位生图」—— 一个删不掉的坏工具。
     //
     // 失败只 warn：站点记录马上就删了，不该因为一个 MCP 记录撤不掉而让「删站点」失败
     // （与上面那段清理档位同一条原则）。
@@ -5221,7 +5192,7 @@ fn relay_balance_inputs(state: &AppState, relay: &creds::Relay) -> (String, Vec<
 
 /// 余额。`relay_id` 指定查**哪一行**的。
 ///
-/// 与 [`relay_login`] / [`relay_provision`] 同一套纪律：显式指定查不到就报错，绝不
+/// 与 [`relay_login`] / [`relay_refresh`] 同一套纪律：显式指定查不到就报错，绝不
 /// 回落到其它站点 —— 那会把 B 的余额显示在 A 那一行上，比报错更糟。
 ///
 /// ## 一行一次请求是安全的
@@ -6643,6 +6614,29 @@ mod tests {
         }
     }
 
+    /// `RelayRowStatus` 的线上名由 `RelayRow.tsx` 的 `RowStatus` switch 直接消费
+    /// （裸字符串比较，无编译器把守）。这里把每个变体的 serde 输出钉死 ——
+    /// 改枚举变体名 / 改 rename 规则时这条会红，提醒同步前端 union。
+    #[test]
+    fn relay_row_statuses_serialize_to_the_wire_names_the_frontend_matches() {
+        for (status, wire) in [
+            (RelayRowStatus::NotLoggedIn, "\"notLoggedIn\""),
+            (RelayRowStatus::SessionExpired, "\"sessionExpired\""),
+            (
+                RelayRowStatus::SessionExpiredUsable,
+                "\"sessionExpiredUsable\"",
+            ),
+            (RelayRowStatus::NoTiers, "\"noTiers\""),
+            (RelayRowStatus::Ready, "\"ready\""),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&status).expect("status 可序列化"),
+                wire,
+                "{status:?} 的线上名变了，src/lib/api/relay.ts 的 union 与 RowStatus 要跟着改"
+            );
+        }
+    }
+
     #[test]
     fn new_site_import_discovery_stays_in_memory_until_authentication() {
         let context = browser_login_context(
@@ -7060,10 +7054,10 @@ mod tests {
     ///
     /// ## 它守的是什么缺陷（TODO 债 11）
     ///
-    /// [`do_provision`] 一次探**全部平台**，`tiers` 收的是全平台的结果，而 UI 那一行
-    /// 只显示**当前 app** 的档位。于是「这个站没有 anthropic 分组」与「拉取失败」
-    /// 在界面上长得一样（都是零档位 + 「该账号在此平台下没有可用分组」）——
-    /// 而前者重试一百次也不会有，后者重试有意义。
+    /// provision 链路（`refresh_relay_provision`）一次探**全部平台**，`tiers` 收的是
+    /// 全平台的结果，而 UI 那一行只显示**当前 app** 的档位。于是「这个站没有
+    /// anthropic 分组」与「拉取失败」在界面上长得一样（都是零档位 +
+    /// 「该账号在此平台下没有可用分组」）—— 而前者重试一百次也不会有，后者重试有意义。
     ///
     /// 区分它们所需的信息 provision 时**本来就在手上**（每个分组的 `app_type`），
     /// 少的只是把它发给前端。没有这个字段，前端拿到一堆 tiers 却分不出哪条是自己的。
@@ -9848,7 +9842,7 @@ mod tests {
     ///
     /// ## 为什么这条测试读源码而不是调函数
     ///
-    /// `do_provision` 仍吃 `&tauri::AppHandle`；reset 的数据库与协调器路径已经下沉到
+    /// provision 入口仍吃 `&tauri::AppHandle`；reset 的数据库与协调器路径已经下沉到
     /// `reset_tier_config_in_state` 并由真实行为测试覆盖，但“当前项刷新 live 文件”会触碰
     /// 用户配置，单元测试不能安全执行。第二路 review 实测证明了这条接线盲区的代价：
     /// 把那两处调用注释掉，2578 条测试**全绿**——
@@ -9862,11 +9856,11 @@ mod tests {
     fn refresh_live_for_current_tiers_is_wired_into_both_commands() {
         let src = include_str!("relay.rs");
 
-        // 取 `do_provision` 到 `prune_stale_tiers` 调用之间那段（provision 那条路）。
+        // 取 `refresh_relay_provision` 到 `prune_stale_tiers` 调用之间那段（provision 那条路）。
         let provision = {
             let start = src
-                .find("async fn do_provision")
-                .expect("do_provision 还在吗");
+                .find("async fn refresh_relay_provision")
+                .expect("refresh_relay_provision 还在吗");
             let end = src[start..]
                 .find("let removed = prune_stale_tiers")
                 .expect("provision 末尾那段清理还在吗");
@@ -9874,7 +9868,7 @@ mod tests {
         };
         assert!(
             provision.contains("refresh_live_for_current_tiers(state, &refresh_live)"),
-            "⭐ `do_provision` 不再刷新当前档位的 live config —— \
+            "⭐ provision 链路不再刷新当前档位的 live config —— \
              sk 被撤销重建后，CLI 会一直用旧密钥，而用户点不动那个档位（UI 认为它已是当前项）"
         );
 

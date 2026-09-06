@@ -17,11 +17,12 @@ use crate::services::{
 use crate::store::AppState;
 use std::str::FromStr;
 
-// 常量定义
+// 常量定义。`official_subscription` 是跨模块的 wire 值（tray 托盘用量后缀也按它分档，
+// 前端 UsageScriptModal 写进 provider meta），所以 pub(crate)；其余只在本文件用。
 const TEMPLATE_TYPE_GITHUB_COPILOT: &str = "github_copilot";
 const TEMPLATE_TYPE_TOKEN_PLAN: &str = "token_plan";
 const TEMPLATE_TYPE_BALANCE: &str = "balance";
-const TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION: &str = "official_subscription";
+pub(crate) const TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION: &str = "official_subscription";
 const COPILOT_UNIT_PREMIUM: &str = "requests";
 
 #[derive(Debug, serde::Serialize)]

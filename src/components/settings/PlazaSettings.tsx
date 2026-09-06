@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { ToggleRow } from "@/components/ui/toggle-row";
-import { settingsApi } from "@/lib/api";
+import { PLAZA_VISIBLE_DEFAULT, settingsApi } from "@/lib/api";
 import { useSettingsQuery } from "@/lib/query";
 
 /**
@@ -19,7 +19,7 @@ export function PlazaSettings() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data: settings } = useSettingsQuery();
-  const checked = settings?.plazaVisible ?? true;
+  const checked = settings?.plazaVisible ?? PLAZA_VISIBLE_DEFAULT;
 
   const toggle = (visible: boolean) => {
     settingsApi

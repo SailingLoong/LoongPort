@@ -52,9 +52,9 @@ impl Vendor {
 
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
-            "deepseek" => Some(Vendor::DeepSeek),
-            "bigmodel" => Some(Vendor::BigModel),
-            "opencode" => Some(Vendor::OpenCode),
+            deepseek::VENDOR_ID => Some(Vendor::DeepSeek),
+            bigmodel::VENDOR_ID => Some(Vendor::BigModel),
+            opencode::VENDOR_ID => Some(Vendor::OpenCode),
             _ => None,
         }
     }
@@ -82,16 +82,15 @@ pub struct PlanInfo {
 /// 单 plan 厂商的档位清单：段 = `vendor_id`、名字 = 厂商名 —— 与「一个账号一个
 /// endpoint」的旧世界完全一致（provider id 派生结果一个字节都没变）。
 ///
-/// `display_name` 在这里各写一份字面量（const 上下文调不了 `Vendor::display_name`），
-/// 一致性由测试 `single_plan_segments_mirror_the_vendor_identity` 钉住 —— 同
-/// `MANAGED_ID_PREFIX` 那道跨文件闸的模式。
+/// 两个都从 [`Vendor`] 的身份**派生**（`display_name` 是 const fn），不再各写字面量；
+/// 一致性另有测试 `single_plan_segments_mirror_the_vendor_identity` 钉住。
 const DEEPSEEK_PLANS: &[PlanInfo] = &[PlanInfo {
     id_segment: deepseek::VENDOR_ID,
-    display_name: "DeepSeek",
+    display_name: Vendor::DeepSeek.display_name(),
 }];
 const BIGMODEL_PLANS: &[PlanInfo] = &[PlanInfo {
     id_segment: bigmodel::VENDOR_ID,
-    display_name: "智谱 BigModel",
+    display_name: Vendor::BigModel.display_name(),
 }];
 
 /// 这个厂商账号展开出的全部 plan。数组序即展示序。
@@ -468,6 +467,32 @@ mod tests {
         assert_eq!(Vendor::from_id("deepseek"), Some(Vendor::DeepSeek));
         assert_eq!(Vendor::from_id("kimi"), None);
         assert_eq!(Vendor::DeepSeek.vendor_id(), "deepseek");
+    }
+
+    /// 前端 `VENDOR_CATALOG` 与本枚举是同一事实（厂商 id + 展示名）的两份拷贝。
+    /// 跨语言编译器管不到 `.ts`，分叉不报错：id 错了后端报「不认识的厂商」，
+    /// 名字错了「官方 API」页与账号行两个名字。形状照 `events.rs` 的跨语言闸。
+    #[test]
+    fn frontend_catalog_matches_the_rust_registry() {
+        let ts = include_str!("../../../src/lib/api/vendor.ts");
+        for (ts_const, vendor) in [
+            ("DEEPSEEK_VENDOR_ID", Vendor::DeepSeek),
+            ("BIGMODEL_VENDOR_ID", Vendor::BigModel),
+            ("OPENCODE_VENDOR_ID", Vendor::OpenCode),
+        ] {
+            let id = vendor.vendor_id();
+            assert!(
+                ts.contains(&format!("{ts_const} = \"{id}\"")),
+                "src/lib/api/vendor.ts 的 {ts_const} 与 Rust 侧 vendor_id 不一致\n  \
+                 Rust 侧的值: {id}"
+            );
+            let display = vendor.display_name();
+            assert!(
+                ts.contains(&format!("displayName: \"{display}\"")),
+                "src/lib/api/vendor.ts VENDOR_CATALOG 的 displayName 与 Rust 侧不一致\n  \
+                 Rust 侧的值: {display}"
+            );
+        }
     }
 
     /// 单 plan 厂商的档位段与名字必须与 `Vendor` 的身份一致 —— 段错了存量

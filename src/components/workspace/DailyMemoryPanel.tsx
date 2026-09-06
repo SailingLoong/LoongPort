@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Calendar, Trash2, Plus, Search, X, FolderOpen } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import { fmtBytes } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
@@ -31,12 +32,6 @@ function getTodayFilename(): string {
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}.md`;
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
@@ -455,7 +450,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
                           {result.date}
                         </span>
                         <span className="text-xs text-muted-foreground">
-                          {formatFileSize(result.sizeBytes)}
+                          {fmtBytes(result.sizeBytes)}
                         </span>
                         {result.matchCount > 0 && (
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
@@ -511,7 +506,7 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
                         {file.date}
                       </span>
                       <span className="text-xs text-muted-foreground">
-                        {formatFileSize(file.sizeBytes)}
+                        {fmtBytes(file.sizeBytes)}
                       </span>
                     </div>
                     {file.preview && (

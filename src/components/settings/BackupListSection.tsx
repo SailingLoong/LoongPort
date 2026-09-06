@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Pencil, RotateCcw, Check, X, Download, Trash2 } from "lucide-react";
+import { fmtBytes } from "@/lib/format";
 import {
   Dialog,
   DialogContent,
@@ -30,12 +31,6 @@ interface BackupListSectionProps {
     backupIntervalHours?: number;
     backupRetainCount?: number;
   }) => void;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function formatBackupDate(isoString: string): string {
@@ -351,7 +346,7 @@ export function BackupListSection({
                       </div>
                       <div className="text-xs text-muted-foreground">
                         {formatBackupDate(backup.createdAt)} &middot;{" "}
-                        {formatBytes(backup.sizeBytes)}
+                        {fmtBytes(backup.sizeBytes)}
                       </div>
                     </>
                   )}
