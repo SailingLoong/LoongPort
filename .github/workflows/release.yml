@@ -438,9 +438,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           rustup target add x86_64-unknown-linux-musl
-          cargo build --release --no-default-features \
+          # CLI 是独立成员 crate：-p 选成员，产物仍在 workspace 的 target/ 下
+          # （即 src-tauri/target/x86_64-unknown-linux-musl/release/loongport-cli）。
+          cargo build --release -p loongport-cli \
             --target x86_64-unknown-linux-musl \
-            --manifest-path src-tauri/Cargo.toml --bin loongport-cli
+            --manifest-path src-tauri/Cargo.toml
 
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'

@@ -1,0 +1,17 @@
+[package]
+# `loongport-cli`：无桌面环境（服务器、老发行版）的一次性配置工具。
+# 独立成员 crate 而非主 crate 的第二个 [[bin]] —— tauri 打包器在多 bin 的
+# crate 里会选错主程序（v6.17.0 事故，见上级 Cargo.toml 的 workspace 注释）。
+name = "loongport-cli"
+version.workspace = true
+description = "LoongPort 的无桌面配置入口（静态 musl 单文件）"
+edition = "2021"
+rust-version = "1.85.0"
+license = "MIT"
+repository = "https://github.com/SailingLoong/LoongPort"
+publish = false
+
+[dependencies]
+# 只依赖库（不带 gui/tauri/GTK/webkit）—— 静态 musl 链接后可在任何
+# x86_64 Linux 上跑，包括 GUI 版装不上的 Ubuntu 20.04。
+cc-switch = { path = "..", default-features = false }

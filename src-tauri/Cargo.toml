@@ -1,9 +1,22 @@
+[workspace]
+# `loongport-cli` 必须是**独立成员 crate**（2026-09-07 v6.17.0 事故修根）：
+# tauri 打包器按 crate 名选主程序、`mainBinaryName` 只管改名、不认 cargo 的
+# `default-run` —— 两个 [[bin]] 同仓时它会把 CLI 改名成主程序塞进 macOS/Windows
+# 包（5MB 的 CLI 冒充 GUI，用户双击即退）。一 crate 一 bin 是 tauri 唯一的
+# 确定性形状（tauri-apps/tauri#9180）。
+members = ["cli"]
+
+[workspace.package]
+# 版本唯源：两个 crate 都从这里继承（`version.workspace = true`）。
+# 发版 bump 时改这一处 + package.json + tauri.conf.json。
+version = "6.17.0"
+
 [package]
 # ⚠️ crate name 保持上游的 `cc-switch`，别改 —— 118 处引用、改了收益为零
-# （裁决见 CLAUDE.md「三点五」）。面向用户的二进制名走 tauri.conf.json 的
-# `mainBinaryName`（已是 `LoongPort`）。
+# （裁决见 CLAUDE.md「三点五」）。面向用户的二进制名走下方 [[bin]]
+# （与 tauri.conf.json 的 `mainBinaryName` 同名，闸钉着）。
 name = "cc-switch"
-version = "6.17.0"
+version.workspace = true
 description = "同样的 Codex，成本省 95% 以上 —— 填一个域名、登录一次，其余自动配好"
 authors = ["SailingLoong", "Jason Young"]
 license = "MIT"
@@ -18,19 +31,17 @@ name = "cc_switch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 doctest = false
 
-# GUI 主程序：带 tauri 的构建才有意义（main.rs 调 run()）。显式声明是为了
-# 挂 required-features —— `--no-default-features` 时只构建 loongport-cli。
+# GUI 主程序：本 crate 唯一的 bin，名字必须等于 crate 名（`cc-switch`）——
+# tauri 打包器**按 crate 名**找 `target/release/<crate 名>` 并把它改名为
+# tauri.conf.json 的 `mainBinaryName`（"LoongPort"，错误信息原文："failed to
+# rename app binary …/release/cc-switch"）。crate 里出现第二个 [[bin]] 会让它
+# 改错对象：v6.17.0 的 macOS/Windows 包因此整包打成了 loongport-cli（5MB 的
+# CLI 冒充 GUI，用户双击即退）—— 这就是 CLI 拆去独立成员 crate 的原因。
+# `required-features` 保留给 `--no-default-features` 的纯库构建。
 [[bin]]
 name = "cc-switch"
 path = "src/main.rs"
 required-features = ["gui"]
-
-[[bin]]
-# 无桌面（服务器/老发行版）用户的一次性配置工具：静态 musl 构建，
-# 不带 tauri/GTK/webkit（见 `gui` feature 注释）。与 GUI 共享同一份
-# 配置写入逻辑（`cli` 模块只是薄编排），唯源不分叉。
-name = "loongport-cli"
-path = "src/bin/loongport_cli.rs"
 
 [features]
 default = ["gui"]

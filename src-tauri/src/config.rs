@@ -890,6 +890,58 @@ mod brand_constant_consistency {
         );
     }
 
+    /// ⭐ **GUI crate 必须恰好一个 [[bin]]，且名字等于 crate 名（`cc-switch`）**。
+    ///
+    /// v6.17.0 事故（2026-09-07 实锤）：tauri 打包器**按 crate 名**找
+    /// `target/release/cc-switch` 并改名为 `mainBinaryName`（"LoongPort"）。
+    /// crate 里出现第二个 bin（headless 轮加的 `loongport-cli`）后，macOS 与
+    /// Windows 包整包打成了 loongport-cli —— 5MB 的 CLI 冒充 GUI，用户双击即
+    /// 退出，且构建全程不报错（Linux AppImage 携带运行时侥幸未见异常）。
+    /// 修根 = CLI 拆去独立成员 crate（`src-tauri/cli/`），本 crate 回到单 bin。
+    /// 这道闸把「主 crate 单 bin + 名字 == crate 名」钉住：再加第二个 [[bin]]
+    /// 或改名都会红 —— 那等于重演 v6.17.0。
+    #[test]
+    fn the_gui_crate_has_exactly_one_bin_named_after_the_crate() {
+        let cargo_toml = include_str!("../Cargo.toml");
+        // 只认**行首**的 `[[bin]]` 表头 —— 注释里也会出现这四个字符（包括本测试的
+        // 报错文案），拿 split 数会把注释误计成 bin。
+        let lines: Vec<&str> = cargo_toml.lines().collect();
+        let header_rows: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("[[bin]]"))
+            .map(|(idx, _)| idx)
+            .collect();
+        assert_eq!(
+            header_rows.len(),
+            1,
+            "cc-switch（GUI crate）只能有一个 [[bin]] —— tauri 打包器按 crate 名选主程序，\
+             第二个 bin 会让它打错包（v6.17.0：macOS/Windows 全打成了 loongport-cli）。\
+             新的可执行文件一律开独立成员 crate（先例：src-tauri/cli/）"
+        );
+        let bin_name = lines[header_rows[0] + 1..]
+            .iter()
+            // 段到下一个顶层表头为止。
+            .take_while(|line| !line.starts_with('['))
+            .find_map(|line| line.trim().strip_prefix("name = "))
+            .map(|name| name.trim_matches('"'))
+            .expect("GUI [[bin]] 有 name 字段");
+        let crate_name = env!("CARGO_PKG_NAME");
+        assert_eq!(
+            bin_name, crate_name,
+            "GUI 的 bin 名 ({bin_name}) 必须等于 crate 名 ({crate_name}) —— tauri 打包器按\
+             crate 名找二进制并改名为 mainBinaryName，名字分叉会让改名步骤找不到目标",
+        );
+
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 合法");
+        assert_eq!(
+            conf["mainBinaryName"].as_str(),
+            Some("LoongPort"),
+            "mainBinaryName 必须是 LoongPort（打包器把 crate 名二进制改名成它）"
+        );
+    }
+
     /// ⭐ **主窗口 label 必须与 `tauri.conf.json` 一致** —— 失配会让登录窗彻底卡死。
     ///
     /// `MAIN_WINDOW_LABEL` 被当**守卫**用：全局 `CloseRequested` 回调靠它判断
