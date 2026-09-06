@@ -8,8 +8,9 @@ import { invoke } from "@tauri-apps/api/core";
  * 界面上每个「$N」都从 `offer.amountUsd` 来，前端不另存数值。
  */
 
-/** 弹窗邀请的 payload（`ONBOARDING_STAR_REWARD_OFFER` 事件与 `star_reward_offer`
- * 命令共用；与 Rust 侧 `commands::star_reward::StarRewardOffer` 对应）。 */
+/** Star 对话框的 payload（`star_reward_offer` 命令返回；与 Rust 侧
+ * `commands::star_reward::StarRewardOffer` 对应。曾经的主动弹窗事件已删，
+ * 顶栏红点是唯一入口）。 */
 export interface StarRewardOffer {
   promoCode: string;
   amountUsd: number;

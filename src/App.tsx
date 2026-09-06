@@ -42,7 +42,6 @@ import {
   settingsApi,
   starRewardApi,
   type StarRewardOffer,
-  ONBOARDING_STAR_REWARD_OFFER,
   PROFILE_APPLIED,
   S3_SYNC_STATUS_UPDATED,
   UNIVERSAL_PROVIDER_SYNCED,
@@ -620,16 +619,9 @@ function App() {
     };
   }, []);
 
-  // 新人引导的邀请事件（后端已过三道闸：资格 + 配置 + 基线）：拿到即弹。
-  // 已领取的极端情形（红点先领了、引导事件才到）直接忽略。事件本身证明活动
-  // 在线，顺手点亮红点 —— 它到达时挂载检查可能刚在空缓存上判过 false。
-  useTauriEvent<StarRewardOffer>(ONBOARDING_STAR_REWARD_OFFER, (payload) => {
-    if (starRewardClaimedRef.current) return;
-    setStarRewardActive(true);
-    setStarRewardOffer(payload);
-  });
-
-  /** 红点按钮点击：活动在且未领取 → 问后端要邀请（纯本地读缓存）弹窗；否则现状开仓库。 */
+  /** 红点按钮点击：活动在且未领取 → 问后端要邀请（纯本地读缓存）弹窗；否则现状开仓库。
+   * （2026-09-06 起这是 Star 礼的唯一入口 —— 首导入成功后的主动弹窗事件已删，
+   * 用户刚接入站点时还没有使用感，此刻弹点赞礼只会被打断。） */
   const handleGitHubStarClick = useCallback(async () => {
     if (starRewardActive !== true) {
       await settingsApi.openExternal(GITHUB_REPO);

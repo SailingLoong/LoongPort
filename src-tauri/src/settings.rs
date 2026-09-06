@@ -495,15 +495,9 @@ pub struct AppSettings {
     /// 「点 Star 领注册礼」的主动邀请**已经弹过**一次（2026-08-17 起挂在首个
     /// 站点接入成功之后，见 `commands::onboarding`）。
     ///
-    /// 一次性标志：置位发生在确认拿到 offer、正要发事件那一刻；弹出去之后
-    /// 无论结局（领了 / 取消）都不再主动弹，未领取的用户回落顶栏红点。
-    /// 没弹成（没网 / 活动下线）不置位，下次接入站点再试。
-    ///
-    /// （历史：2026-08-15~16 曾用 `onboarding_register_prompted` 在首启弹，
-    /// 触发点改到接入成功后换成本字段；旧键不再读，留在老 settings.json 里
-    /// 会被下次全量保存自然挤掉。）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub star_reward_offered: Option<bool>,
+    // （`star_reward_offered` 一次性标志随 2026-09-06 删除主动弹窗一起移除：
+    // 它存在的唯一意义是防弹窗重复触发，弹窗没了字段就是死状态。旧
+    // settings.json 里的该键会被 serde 忽略并在下次全量保存时自然挤掉。）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 
@@ -645,7 +639,6 @@ impl Default for AppSettings {
             failover_confirmed: None,
             first_run_notice_confirmed: None,
             common_config_confirmed: None,
-            star_reward_offered: None,
             language: None,
             visible_apps: None,
             claude_config_dir: None,
