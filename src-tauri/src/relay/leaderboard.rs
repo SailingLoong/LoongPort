@@ -49,8 +49,9 @@ pub struct ParsedLeaderboardItem {
     pub issues: Vec<String>,
 }
 
-/// 广场的一行。veridrop 观测数据 + 站方一手 transit 摘要（后者可缺——
-/// New API 站与未部署公开协议的站就是没有，徽章不渲染）。
+/// 广场的一行。veridrop 观测数据 + 站方一手 transit 摘要（**两者都可缺** ——
+/// 未部署公开协议的站没有 transit；不在 veridrop 榜上的受管站连观测四件套
+/// 一起缺，行仍在、徽章不渲染，见 [`apply_policy`] 的合成兜底）。
 ///
 /// `Eq` 主动放弃：transit 摘要带 f64，而本结构只参与 `assert_eq!`
 /// （`PartialEq`）——没有 HashMap/HashSet 语义需要 `Eq`。
@@ -65,10 +66,13 @@ pub struct RelayDirectoryItem {
     pub veridrop_host: String,
     pub display_name: String,
     pub rank: Option<u32>,
-    pub score: u8,
-    pub samples: u32,
-    pub latest_date: String,
-    pub detail_url: String,
+    /// veridrop 观测四件套可整体缺席：受管站不在 veridrop 榜/详情页时，行由
+    /// [`apply_policy`] 合成，这四个字段全 `None`，前端不渲染对应徽章。
+    /// **不能拿 0 / 空串当「无数据」** —— 0 分、0 样本是真实可能的观测值。
+    pub score: Option<u8>,
+    pub samples: Option<u32>,
+    pub latest_date: Option<String>,
+    pub detail_url: Option<String>,
     pub protocol_scores: Vec<ProtocolScore>,
     pub claude_signature_rate: Option<u8>,
     pub scenarios: Vec<String>,
@@ -703,6 +707,7 @@ pub(crate) async fn refresh_site_probes_for_directory() {
 pub fn apply_policy(
     parsed: Vec<ParsedLeaderboardItem>,
     config: &RemoteConfig,
+    kind: LeaderboardKind,
 ) -> Vec<RelayDirectoryItem> {
     let policy = normalized_policy(&config.relay_directory);
     let blocked: BTreeSet<_> = policy.blocked_hosts.iter().cloned().collect();
@@ -726,7 +731,7 @@ pub fn apply_policy(
     // 点了大概率失败的按钮。
     let managed: BTreeSet<_> = managed_veridrop_hosts(config).into_iter().collect();
 
-    parsed
+    let mut items: Vec<RelayDirectoryItem> = parsed
         .into_iter()
         .filter_map(|item| {
             let (site_host, override_site) = aliases
@@ -760,16 +765,87 @@ pub fn apply_policy(
                 veridrop_host: item.veridrop_host,
                 display_name,
                 rank: item.rank,
-                score: item.score,
-                samples: item.samples,
-                latest_date: item.latest_date,
-                detail_url: item.detail_url,
+                score: Some(item.score),
+                samples: Some(item.samples),
+                latest_date: Some(item.latest_date),
+                detail_url: Some(item.detail_url),
                 protocol_scores: item.protocol_scores,
                 claude_signature_rate: item.claude_signature_rate,
                 scenarios: item.scenarios,
                 issues: item.issues,
                 entry_url,
                 auto_add,
+                transit: None,
+            })
+        })
+        .collect();
+
+    // 白名单是展示的**充分条件**（2026-09-06 维护者拍板）：受管站不在 veridrop
+    // 榜/详情页 ⇒ 缺的只是观测数据，不是行本身 —— 手动添加入口已删的当下，
+    // 广场行是用户接入受管站的唯一入口。仅在总榜合成：协议分榜是「该协议
+    // 有观测数据的站」的排序视图，混入无数据行会稀释它的语义。veridrop 逐步
+    // 被本地自测指标替换后，观测缺席只会更常见，这条兜底就是广场行源的底座。
+    if kind == LeaderboardKind::Overall {
+        items.extend(synthesized_rows_for_missing_sites(config, &policy, &items));
+    }
+    items
+}
+
+/// 给「白名单里有、veridrop 里一行都没有」的受管站合成无数据行。
+///
+/// 行的存在性由**受管名单**（[`managed_site_hosts`]，四张表的并集）决定，
+/// veridrop 只提供观测数据 —— `refresh_site_probes_for_directory` 里
+/// `leaderboard_missing` 那层日志早就宣示了「无排名数据但仍可展示」，本函数
+/// 是它的兑现。去重按**注册域**：sponsors 与 relay_directory 常各录一形
+/// （www. vs 裸域），同一 apex 是一站一行，不是两行。
+fn synthesized_rows_for_missing_sites(
+    config: &RemoteConfig,
+    policy: &RelayDirectoryPolicy,
+    existing: &[RelayDirectoryItem],
+) -> Vec<RelayDirectoryItem> {
+    let mut seen_domains: BTreeSet<String> = existing
+        .iter()
+        .map(|item| item.site_domain.clone())
+        .collect();
+    managed_site_hosts(config)
+        .into_iter()
+        .filter_map(|site_host| {
+            let site_domain = crate::relay::identity::site_domain(&site_host);
+            if !seen_domains.insert(site_domain.clone()) {
+                return None;
+            }
+            let site = policy.sites.get(&site_host);
+            let display_name = site
+                .and_then(|site| site.display_name.as_deref())
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| site_host.clone());
+            let veridrop_host = site
+                .and_then(|site| site.veridrop_host.as_deref())
+                .map(crate::relay::identity::request_host)
+                .filter(|host| !host.is_empty())
+                .unwrap_or_else(|| site_host.clone());
+            let entry_url = site
+                .and_then(|site| site.entry_url.as_deref())
+                .filter(|url| url::Url::parse(url).is_ok_and(|url| url.scheme() == "https"))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("https://{site_host}"));
+            Some(RelayDirectoryItem {
+                site_host,
+                site_domain,
+                veridrop_host,
+                display_name,
+                rank: None,
+                score: None,
+                samples: None,
+                latest_date: None,
+                detail_url: None,
+                protocol_scores: Vec::new(),
+                claude_signature_rate: None,
+                scenarios: Vec::new(),
+                issues: Vec::new(),
+                entry_url,
+                auto_add: true,
                 transit: None,
             })
         })
@@ -801,6 +877,7 @@ fn apply_policy_to_cached(cached: CachedLeaderboard, config: &RemoteConfig) -> R
         items: decorate_transit(renumber_ranks_by_score(apply_probe_gate(apply_policy(
             cached.items,
             config,
+            cached.kind,
         )))),
         synced_at: cached.synced_at,
     }
@@ -846,9 +923,9 @@ fn filter_probe_gated(
 /// 对用户就是乱序。重排后 `rank` = **本广场内的位置**，评分 / 样本数仍是
 /// veridrop 原值 —— 用户看到的既是连续名次，也不丢失「凭什么排这」的依据。
 ///
-/// 排序键：评分降序，同分时 veridrop 原名次小者在前（无原名次的站 —— 靠
-/// detail 页回填的那种 —— 排在同分有名次者之后），仍并列按 host 字典序钉死
-/// 顺序（快照测试友好，两次渲染不跳行）。
+/// 排序键：评分降序（无评分的合成行排在一切有评分者之后），同分时 veridrop
+/// 原名次小者在前（无原名次的站 —— 靠 detail 页回填的那种 —— 排在同分有名次者
+/// 之后），仍并列按 host 字典序钉死顺序（快照测试友好，两次渲染不跳行）。
 fn renumber_ranks_by_score(mut items: Vec<RelayDirectoryItem>) -> Vec<RelayDirectoryItem> {
     items.sort_by(|a, b| {
         b.score
@@ -999,7 +1076,7 @@ async fn refresh_with(
 ) -> Result<RelayLeaderboard, AppError> {
     let parsed =
         fetch_live_source_with(client, origin, kind, &managed_veridrop_hosts(config)).await?;
-    let items = apply_policy(parsed.clone(), config);
+    let items = apply_policy(parsed.clone(), config, kind);
     if items.is_empty() {
         return Err(AppError::Config("VeriDrop 榜单没有可展示站点".into()));
     }
@@ -1395,7 +1472,7 @@ mod tests {
             },
         ];
 
-        let items = apply_policy(parsed, &config_with_directory());
+        let items = apply_policy(parsed, &config_with_directory(), LeaderboardKind::Overall);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].site_host, "790053500.com");
@@ -1423,7 +1500,7 @@ mod tests {
             issues: vec![],
         }];
 
-        let items = apply_policy(parsed, &RemoteConfig::default());
+        let items = apply_policy(parsed, &RemoteConfig::default(), LeaderboardKind::Overall);
 
         assert!(items.is_empty(), "未受管站点不该出现在广场");
     }
@@ -1453,7 +1530,11 @@ mod tests {
             issues: vec![],
         };
 
-        let items = apply_policy(vec![row("wawazz.xyz"), row("top.example")], &config);
+        let items = apply_policy(
+            vec![row("wawazz.xyz"), row("top.example")],
+            &config,
+            LeaderboardKind::Overall,
+        );
 
         assert_eq!(items.len(), 1, "只有受管站点保留");
         assert_eq!(items[0].site_host, "wawazz.xyz");
@@ -1479,11 +1560,75 @@ mod tests {
         let items = apply_policy(
             vec![row("api.790053500.com", 12), row("790053500.com", 72)],
             &config_with_directory(),
+            LeaderboardKind::Overall,
         );
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].site_host, "790053500.com");
         assert_eq!(items[0].rank, Some(12));
+    }
+
+    #[test]
+    fn managed_sites_missing_from_veridrop_still_get_a_row_on_the_overall_board() {
+        // 白名单是展示的充分条件（2026-09-06 维护者拍板）：受管站不在 veridrop
+        // 榜/详情页 ⇒ 只是缺观测数据，行必须在 —— 手动添加入口已删的当下，
+        // 广场行是用户接入受管站的唯一入口。
+        let items = apply_policy(vec![], &config_with_directory(), LeaderboardKind::Overall);
+
+        assert_eq!(items.len(), 1, "blocked 站除外，受管站都要有行");
+        let item = &items[0];
+        assert_eq!(item.site_host, "790053500.com");
+        assert_eq!(item.display_name, "鑫旺");
+        assert_eq!(item.entry_url, "https://790053500.com/keys");
+        assert_eq!(item.veridrop_host, "api.790053500.com");
+        assert!(item.auto_add);
+        assert_eq!(item.rank, None);
+        assert_eq!(item.score, None);
+        assert_eq!(item.samples, None);
+        assert_eq!(item.latest_date, None);
+        assert_eq!(item.detail_url, None);
+    }
+
+    #[test]
+    fn protocol_boards_do_not_synthesize_rows() {
+        // 协议分榜是「该协议有观测数据的站」的排序视图，合成行只属于总榜。
+        let items = apply_policy(vec![], &config_with_directory(), LeaderboardKind::Claude);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn one_site_domain_one_synthesized_row_even_when_whitelisted_twice() {
+        // sponsors 与 relay_directory 常各录一形（www. vs 裸域）：同一注册域是
+        // 一站一行。受管名单的集合序里裸域先到，目录条目的名字/入口优先。
+        let mut config = config_with_directory();
+        config.sponsors = vec![crate::relay::remote_config::Sponsor {
+            site_origin: "https://www.790053500.com".into(),
+            display_name: "sponsor 形态".into(),
+            tagline: String::new(),
+        }];
+
+        let items = apply_policy(vec![], &config, LeaderboardKind::Overall);
+
+        assert_eq!(items.len(), 1, "同一注册域不能合成两行");
+        assert_eq!(items[0].display_name, "鑫旺");
+    }
+
+    #[test]
+    fn aff_only_sites_synthesize_a_row_named_by_host() {
+        // 只在 aff_codes 里、没录 relay_directory 的站也是受管站：名字与入口
+        // 回落 host 本身（想更体面随时补目录条目）。
+        let config = RemoteConfig {
+            aff_codes: BTreeMap::from([("aijws.example".to_string(), "CODE".to_string())]),
+            ..RemoteConfig::default()
+        };
+
+        let items = apply_policy(vec![], &config, LeaderboardKind::Overall);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].site_host, "aijws.example");
+        assert_eq!(items[0].display_name, "aijws.example");
+        assert_eq!(items[0].entry_url, "https://aijws.example");
     }
 
     #[test]
@@ -2001,10 +2146,10 @@ mod tests {
                 veridrop_host: site_host.into(),
                 display_name: site_host.into(),
                 rank: None,
-                score: 90,
-                samples: 30,
-                latest_date: "2026-08-16".into(),
-                detail_url: format!("https://veridrop.org/site/{site_host}"),
+                score: Some(90),
+                samples: Some(30),
+                latest_date: Some("2026-08-16".into()),
+                detail_url: Some(format!("https://veridrop.org/site/{site_host}")),
                 protocol_scores: vec![],
                 claude_signature_rate: None,
                 scenarios: vec![],
@@ -2083,10 +2228,10 @@ mod tests {
                 veridrop_host: site_host.into(),
                 display_name: site_host.into(),
                 rank: None,
-                score: 90,
-                samples: 30,
-                latest_date: "2026-08-21".into(),
-                detail_url: format!("https://veridrop.org/site/{site_host}"),
+                score: Some(90),
+                samples: Some(30),
+                latest_date: Some("2026-08-21".into()),
+                detail_url: Some(format!("https://veridrop.org/site/{site_host}")),
                 protocol_scores: vec![],
                 claude_signature_rate: None,
                 scenarios: vec![],
@@ -2117,7 +2262,7 @@ mod tests {
 
     #[test]
     fn renumber_ranks_by_score_closes_funnel_gaps() {
-        fn row(site_host: &str, score: u8, rank: Option<u32>) -> RelayDirectoryItem {
+        fn row(site_host: &str, score: Option<u8>, rank: Option<u32>) -> RelayDirectoryItem {
             RelayDirectoryItem {
                 site_host: site_host.into(),
                 site_domain: crate::relay::identity::site_domain(site_host),
@@ -2125,9 +2270,9 @@ mod tests {
                 display_name: site_host.into(),
                 rank,
                 score,
-                samples: 30,
-                latest_date: "2026-08-16".into(),
-                detail_url: format!("https://veridrop.org/site/{site_host}"),
+                samples: Some(30),
+                latest_date: Some("2026-08-16".into()),
+                detail_url: Some(format!("https://veridrop.org/site/{site_host}")),
                 protocol_scores: vec![],
                 claude_signature_rate: None,
                 scenarios: vec![],
@@ -2138,12 +2283,14 @@ mod tests {
             }
         }
 
-        // 名次带洞（2/7/None/1），评分乱序给出。
+        // 名次带洞（2/7/None/1），评分乱序给出；无评分的是合成行，垫在一切
+        // 有评分者之后。
         let items = vec![
-            row("gap.example", 88, Some(7)),
-            row("tie-a.example", 95, Some(2)),
-            row("backfilled.example", 92, None),
-            row("tie-b.example", 95, Some(1)),
+            row("gap.example", Some(88), Some(7)),
+            row("tie-a.example", Some(95), Some(2)),
+            row("backfilled.example", Some(92), None),
+            row("tie-b.example", Some(95), Some(1)),
+            row("synthesized.example", None, None),
         ];
 
         let renumbered = renumber_ranks_by_score(items);
@@ -2155,10 +2302,11 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                ("tie-b.example", Some(1)),      // 95 分、veridrop 原名次 1 → 并列在前
-                ("tie-a.example", Some(2)),      // 95 分、原名次 2
-                ("backfilled.example", Some(3)), // 92 分、无原名次也不丢位置
-                ("gap.example", Some(4)),        // 88 分
+                ("tie-b.example", Some(1)),       // 95 分、veridrop 原名次 1 → 并列在前
+                ("tie-a.example", Some(2)),       // 95 分、原名次 2
+                ("backfilled.example", Some(3)),  // 92 分、无原名次也不丢位置
+                ("gap.example", Some(4)),         // 88 分
+                ("synthesized.example", Some(5)), // 无观测数据，垫底但仍有行有名次
             ],
             "评分倒排 + 连续名次，洞被补上"
         );

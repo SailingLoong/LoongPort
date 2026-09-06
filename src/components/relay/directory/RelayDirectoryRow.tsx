@@ -156,34 +156,52 @@ export function RelayDirectoryRow({
           ))}
         </div>
 
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-          <span>
-            {t("loongport.directory.meta.samples", { count: item.samples })}
-          </span>
-          <span>
-            {t("loongport.directory.meta.latest", { date: item.latestDate })}
-          </span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
-            aria-label={t("loongport.directory.actions.history")}
-            onClick={() => openInBrowser(item.detailUrl)}
-          >
-            {t("loongport.directory.actions.history")}
-            <ExternalLink className="h-3 w-3" />
-          </button>
-        </div>
+        {(item.samples !== null ||
+          item.latestDate !== null ||
+          item.detailUrl !== null) && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            {item.samples !== null && (
+              <span>
+                {t("loongport.directory.meta.samples", { count: item.samples })}
+              </span>
+            )}
+            {item.latestDate !== null && (
+              <span>
+                {t("loongport.directory.meta.latest", {
+                  date: item.latestDate,
+                })}
+              </span>
+            )}
+            {item.detailUrl !== null && (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
+                aria-label={t("loongport.directory.actions.history")}
+                onClick={() => item.detailUrl && openInBrowser(item.detailUrl)}
+              >
+                {t("loongport.directory.actions.history")}
+                <ExternalLink className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="text-center">
-        <div
-          className={cn(
-            "text-2xl font-semibold tabular-nums tracking-tight",
-            scoreTone(item.score),
-          )}
-        >
-          {item.score}
-        </div>
+        {item.score === null ? (
+          <div className="text-2xl font-semibold text-muted-foreground/60">
+            —
+          </div>
+        ) : (
+          <div
+            className={cn(
+              "text-2xl font-semibold tabular-nums tracking-tight",
+              scoreTone(item.score),
+            )}
+          >
+            {item.score}
+          </div>
+        )}
         <div className="text-[10px] text-muted-foreground">
           {t("loongport.directory.scoreLabel")}
         </div>

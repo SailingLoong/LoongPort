@@ -429,6 +429,40 @@ describe("RelayDirectoryPage", () => {
     expect(row).not.toHaveTextContent("#0");
   });
 
+  it("renders a synthesized row without veridrop data as a usable card", async () => {
+    // 白名单是展示的充分条件（2026-09-06）：受管站不在 veridrop 榜上时，
+    // 行由后端合成、观测四件套全 null —— 行必须照常渲染、可一键登录；
+    // 分数位显示 —（不是 0），观测 meta 与「历史」链接不渲染。
+    listDirectory.mockResolvedValue(
+      leaderboard("claude", {
+        items: [
+          {
+            ...item(1),
+            score: null,
+            samples: null,
+            latestDate: null,
+            detailUrl: null,
+          },
+        ],
+      }),
+    );
+
+    renderDirectory({ sourceAppId: "claude", onBack: () => {} });
+
+    const row = (await screen.findByText("BestAPI")).closest("article")!;
+    expect(within(row).getByText("—")).toBeInTheDocument();
+    expect(
+      within(row).getByText("loongport.directory.actions.authenticate"),
+    ).toBeInTheDocument();
+    expect(
+      within(row).queryByRole("button", {
+        name: "loongport.directory.actions.history",
+      }),
+    ).not.toBeInTheDocument();
+    expect(row).not.toHaveTextContent("loongport.directory.meta.samples");
+    expect(row).not.toHaveTextContent("loongport.directory.meta.latest");
+  });
+
   it("searches and paginates twelve rows per page", async () => {
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
     await screen.findByText("BestAPI");
