@@ -537,6 +537,11 @@ interface ParsedModelRow {
   errors: number;
   ttftBins: number[];
   tpsBins: number[];
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsdMicros: number;
 }
 
 function parseModelRow(row: RawModelRow): ParsedModelRow | null {
@@ -562,22 +567,36 @@ function parseModelRow(row: RawModelRow): ParsedModelRow | null {
     errors: row.errors,
     ttftBins,
     tpsBins,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheCreationTokens: row.cache_creation_tokens,
+    costUsdMicros: row.cost_usd_micros,
   };
 }
 
 /** P4：模型桶指标（k-匿与站点桶同款；不过门槛返回 null —— 不发布）。 */
 function trendModelBucketOrNull(
   bucketRows: ParsedModelRow[],
-): (TrendBucket & { tpsP50Ms: number | null }) | null {
+): (TrendBucket & { tpsP50Ms: number | null; costUsdPerMTok: number | null }) | null {
   const trusted = bucketRows.filter((r) => r.uaTrusted);
   const sources = new Set(trusted.map((r) => r.source)).size;
   if (sources < MIN_SOURCES) return null;
-  const totals = { samples: 0, errors: 0, ttftBins: new Array<number>(TTFT_BIN_COUNT).fill(0), tpsBins: new Array<number>(TPS_BIN_COUNT).fill(0) };
+  const totals = {
+    samples: 0,
+    errors: 0,
+    ttftBins: new Array<number>(TTFT_BIN_COUNT).fill(0),
+    tpsBins: new Array<number>(TPS_BIN_COUNT).fill(0),
+    tokenTotal: 0,
+    costUsdMicros: 0,
+  };
   for (const r of bucketRows) {
     totals.samples += r.samples;
     totals.errors += r.errors;
     for (let i = 0; i < TTFT_BIN_COUNT; i++) totals.ttftBins[i] += r.ttftBins[i];
     for (let i = 0; i < TPS_BIN_COUNT; i++) totals.tpsBins[i] += r.tpsBins[i];
+    totals.tokenTotal += r.inputTokens + r.outputTokens + r.cacheReadTokens + r.cacheCreationTokens;
+    totals.costUsdMicros += r.costUsdMicros;
   }
   return {
     start: 0,
@@ -586,5 +605,7 @@ function trendModelBucketOrNull(
     errRate: totals.samples > 0 ? totals.errors / totals.samples : null,
     cacheRate: null,
     tpsP50Ms: tpsQuantileFromBins(totals.tpsBins, 0.5),
+    // $/Mtok 同站点窗口口径：微美元 / 总 token（含缓存）
+    costUsdPerMTok: totals.tokenTotal > 0 ? totals.costUsdMicros / totals.tokenTotal : null,
   };
 }

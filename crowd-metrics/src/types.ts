@@ -110,7 +110,7 @@ export interface SiteTrend {
 
 /** P4：模型趋势（无范围分布 —— 站点级已有，模型级省载荷）。 */
 export interface SiteTrendLite {
-  buckets: Array<TrendBucket & { tpsP50Ms?: number | null }>;
+  buckets: Array<TrendBucket & { tpsP50Ms?: number | null; costUsdPerMTok?: number | null }>;
 }
 
 /** 档位 → 站点趋势。 */
