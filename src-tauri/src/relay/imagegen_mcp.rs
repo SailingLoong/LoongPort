@@ -400,6 +400,16 @@ mod tests {
             "`get_imagegen_mcp_enabled` 的回落不再是「默认开」—— \
              这是个产品行为决定（升级用户的注册行为不变），改它要连着文档一起改"
         );
+
+        // 前端那份默认值（`?? true`）也必须与后端回落一致：分叉的症状是开关显示
+        // 「开」而后端行为是「关」（或反过来），跨语言编译器管不到 `.ts`。
+        let notice_tsx = include_str!("../../../src/components/relay/ImageTabNotice.tsx");
+        assert!(
+            notice_tsx.contains("settings?.imagegenMcpEnabled ?? true"),
+            "src/components/relay/ImageTabNotice.tsx 的开关默认值不再是 `?? true` —— \
+             它必须与 settings.rs 的 `imagegen_mcp_enabled.unwrap_or(true)` 保持一致，\
+             两边要一起改"
+        );
     }
 
     /// ⚠️ **这个 crate 的 logger 写 stdout，而 stdout 是 MCP 的协议通道。**

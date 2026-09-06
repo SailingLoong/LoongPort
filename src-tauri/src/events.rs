@@ -152,6 +152,7 @@ mod consistency_tests {
             ("S3_SYNC_STATUS_UPDATED", super::S3_SYNC_STATUS_UPDATED),
             ("PURCHASE_CLOSED", super::PURCHASE_CLOSED),
             ("VENDOR_LOGIN_ERROR", super::VENDOR_LOGIN_ERROR),
+            ("VENDOR_ACCOUNTS_CHANGED", super::VENDOR_ACCOUNTS_CHANGED),
             (
                 "MODEL_VERIFICATION_PROGRESS",
                 super::MODEL_VERIFICATION_PROGRESS,

@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::relay::backend::{
-    BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate, AUTH_DEAD_MARKER, RELOGIN_MARKER,
+    describe_send_error, BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate, AUTH_DEAD_MARKER,
+    RELOGIN_MARKER,
 };
 
 /// refresh cookie 的名字。`pub(crate)`：commands 层的命令级测试要按它构造 fake
@@ -33,13 +34,11 @@ const SESSION_TOKEN_PATH: &str = "/api/user/token";
 const NEWAPI_USER_HEADER: &str = "New-Api-User";
 const SESSION_SCHEME: &str = "loongport-newapi-session";
 
-pub fn login_url(site_origin: &str, login_identifier: &str) -> String {
-    if login_identifier.is_empty() {
-        format!("{site_origin}/register")
-    } else {
-        format!("{site_origin}/login")
-    }
-}
+/// 「新站落 `/register`、老站落 `/login`」这条约定与 sub2api 完全相同 —— 实现只有
+/// 一份，在 [`crate::relay::login::login_url`]（那边的文档记录了为什么按
+/// `login_identifier` 分流）。这里 re-export 而不是再抄一份：两份逐字相同的实现
+/// 只会各自漂移。
+pub use crate::relay::login::login_url;
 
 pub fn login_script() -> String {
     format!(
@@ -622,26 +621,6 @@ fn extract_rotated_refresh_cookie(
     Err(AppError::Config(
         "newapi refresh 响应缺少 rotated new_api_refresh cookie".into(),
     ))
-}
-
-fn describe_send_error(error: &reqwest::Error) -> String {
-    let kind = if error.is_timeout() {
-        "请求超时"
-    } else if error.is_connect() {
-        "连不上服务器"
-    } else if error.is_request() {
-        "请求发送失败"
-    } else {
-        "网络错误"
-    };
-
-    let mut output = format!("{kind}（{error}）");
-    let mut source = std::error::Error::source(error);
-    while let Some(next) = source {
-        output.push_str(&format!(" cause: {next}"));
-        source = next.source();
-    }
-    output
 }
 
 fn classify_authenticated_http_status(operation: &str, status: reqwest::StatusCode) -> AppError {

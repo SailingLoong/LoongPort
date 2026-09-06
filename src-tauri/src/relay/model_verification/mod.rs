@@ -27,6 +27,24 @@ mod live_sweep_tests;
 
 #[cfg(test)]
 mod tests {
+    /// 总开关在 Rust 与 TS 各有一份（两侧模块唯一收口处）。跨语言编译器管不到
+    /// `.ts`：只翻一边时另一侧照常渲染入口/徽章而数据恒空（或反过来），不报错。
+    /// v6.14.1 下线、v2 规则恢复时都是两边各改一遍才没出事 —— 这道闸把「忘了
+    /// 另一边」从静默失效变成测试红。形状照 `events.rs` 的跨语言闸。
+    #[test]
+    fn model_verification_enabled_matches_the_frontend_copy() {
+        const ENABLED: bool = super::MODEL_VERIFICATION_ENABLED;
+        let ts =
+            include_str!("../../../../src/components/relay/model-verification/availability.ts");
+        let expected = format!("export const MODEL_VERIFICATION_ENABLED = {ENABLED};");
+        assert!(
+            ts.contains(&expected),
+            "src/components/relay/model-verification/availability.ts 的总开关与 Rust 侧不一致\n  \
+             Rust 侧的值: {ENABLED}\n  \
+             期望 TS 里出现: {expected}"
+        );
+    }
+
     use super::{
         store::{
             clear_scope, list_for_provider_ids, list_for_providers, upsert_active, upsert_passive,

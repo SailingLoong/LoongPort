@@ -769,7 +769,8 @@ base_url = "https://api.example.com/v1"
     }
 
     /// 超时随张数线性放大（App 内入口的封顶），n=0 兜底按一张算 —— 不是 0 秒必超时。
-    /// MCP 入口固定 n=1 ⇒ 恒 240s（那条「给 codex 300s 留 60s 余量」的理由不动）。
+    /// 两个入口（App 内 / MCP）都按张数放大；n=1 时即那条「给 codex 300s 留 60s 余量」
+    /// 的基线 240s。
     #[test]
     fn request_timeout_scales_with_the_image_count() {
         assert_eq!(request_timeout(1).as_secs(), 240);

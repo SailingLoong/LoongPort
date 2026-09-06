@@ -247,8 +247,10 @@ pub fn is_official_proxy_provider_id(id: &str) -> bool { /* 认新旧两个 */ }
 | `relay::managed::prefix_matches_the_frontend_copy` | `MANAGED_ID_PREFIX` 必须与 `src/config/constants.ts` 一致 |
 
 **新增任何「跨语言/跨文件的同一事实」时，一并加闸** —— 否则它迟早分叉，
-而分叉那天没人会收到通知。已知还有一处同类：`OFFICIAL_WEBSITE`
-（`tray.rs` 与 `constants.ts` 各一份，改一边记得改另一边）。
+而分叉那天没人会收到通知。同类闸如今还有：`config.rs::brand_constant_consistency`
+（`OFFICIAL_WEBSITE` / `GITHUB_REPO` 与 `constants.ts` 比对）、`events.rs` 的
+事件名主表、`vendor::frontend_catalog_matches_the_rust_registry`
+（厂商 id + 展示名）、`relay` 两个状态枚举的线上名钉死测试。
 
 ### 前端只展示后端定义的业务事实
 

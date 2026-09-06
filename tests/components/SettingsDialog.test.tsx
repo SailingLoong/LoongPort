@@ -134,6 +134,8 @@ vi.mock("@/lib/api", () => ({
   settingsApi: {
     restart: vi.fn().mockResolvedValue(true),
   },
+  // PlazaSettings 从这里取展示侧默认值；mock 里给真值即可。
+  PLAZA_VISIBLE_DEFAULT: true,
 }));
 
 const TabsContext = createContext<{

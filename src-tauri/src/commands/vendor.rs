@@ -1421,6 +1421,29 @@ fn with_conn<T>(
 mod tests {
     use super::*;
 
+    /// `VendorAccountStatus` 的线上名由 `VendorRow.tsx` 的 `VendorStatus` switch 直接
+    /// 消费（裸字符串比较，无编译器把守）。这里把每个变体的 serde 输出钉死 ——
+    /// 改枚举变体名 / 改 rename 规则时这条会红，提醒同步前端 union。
+    #[test]
+    fn vendor_account_statuses_serialize_to_the_wire_names_the_frontend_matches() {
+        for (status, wire) in [
+            (VendorAccountStatus::NotLoggedIn, "\"notLoggedIn\""),
+            (VendorAccountStatus::SessionExpired, "\"sessionExpired\""),
+            (
+                VendorAccountStatus::SessionExpiredUsable,
+                "\"sessionExpiredUsable\"",
+            ),
+            (VendorAccountStatus::Ready, "\"ready\""),
+            (VendorAccountStatus::NoKey, "\"noKey\""),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&status).expect("status 可序列化"),
+                wire,
+                "{status:?} 的线上名变了，src/lib/api/vendor.ts 的 union 与 VendorStatus 要跟着改"
+            );
+        }
+    }
+
     fn row(auth_token: &str, api_key: &str, account_id: Option<&str>) -> creds::VendorRow {
         creds::VendorRow {
             id: 1,

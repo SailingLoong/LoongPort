@@ -17,6 +17,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
+import { fmtBytes } from "@/lib/format";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { FolderOpen, Loader2, Sparkles } from "lucide-react";
 import { toast } from "sonner";
@@ -288,11 +289,4 @@ export function ImagegenPlayground() {
       </Dialog>
     </div>
   );
-}
-
-/** 字节数的展示格式化（纯展示，本地就够了）。 */
-function fmtBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

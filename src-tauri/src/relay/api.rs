@@ -45,8 +45,8 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::provider::{UsageData, UsageResult};
 use crate::relay::backend::{
-    BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate, AUTH_DEAD_MARKER, AUTH_EXPIRED_MARKER,
-    RELOGIN_MARKER,
+    describe_send_error, BackendKind, DetectedSite, ProbeAdapter, ProbeCandidate, AUTH_DEAD_MARKER,
+    AUTH_EXPIRED_MARKER, RELOGIN_MARKER,
 };
 use crate::relay::platform_map::{parse_platform, Platform};
 
@@ -1299,47 +1299,6 @@ fn idempotency_key_for(account_id: Option<i64>, name: &str) -> String {
     hex::encode(h.finalize())
 }
 
-/// 把一个 `reqwest` 发送错误描述成**能定位问题**的一行。
-///
-/// ## 为什么不能直接 `{e}`
-///
-/// `reqwest::Error` 的 `Display` 只打印最外层，形如
-/// `error sending request for url (https://…)` —— **超时、DNS 解析失败、连接被拒、
-/// TLS 握手失败、代理不可达打印出来完全一样**，真实原因在 `std::error::Error::source()`
-/// 链里（hyper → 系统错误）。
-///
-/// 2026-08-03 的实测代价：用户报「获取分组列表失败: error sending request for url
-/// (https://bestapi.store/api/v1/groups/available)」，日志里就这一句。为判断是哪一类，
-/// 只能专门写一个最小复现程序传到那台 Windows 上，逐层验证 DNS / TCP / TLS / 5 种 client
-/// 变体 —— 而那本该是日志里现成的一行。
-///
-/// 所以这里做两件事：**给出失败类别**（`is_timeout` / `is_connect` 这些谓词，比原始
-/// 措辞更适合展示给用户），以及**展开整条 source 链**（给维护者定位用）。
-fn describe_send_error(e: &reqwest::Error) -> String {
-    // 类别前缀：用户看得懂的话术。判定顺序按「越具体越先」——
-    // 超时优先于连接：连接阶段超时时两个谓词可能同时为真，而「超时」对用户更有指导性
-    // （等一下重试），「连不上」会让人以为是地址错了。
-    let kind = if e.is_timeout() {
-        "请求超时"
-    } else if e.is_connect() {
-        "连不上服务器"
-    } else if e.is_request() {
-        "请求发送失败"
-    } else {
-        "网络错误"
-    };
-
-    let mut out = format!("{kind}（{e}）");
-    // 整条链都带上：真实原因常在第 2-3 层（hyper 之下的系统错误）。
-    // 首层往往就是判据本身（超时是 `operation timed out`、连接被拒是系统 errno）。
-    let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
-    while let Some(s) = src {
-        out.push_str(&format!(" cause: {s}"));
-        src = s.source();
-    }
-    out
-}
-
 pub(crate) fn build_client_with_user_agent(
     user_agent: Option<&str>,
 ) -> Result<reqwest::Client, AppError> {
@@ -2271,113 +2230,6 @@ mod tests {
         assert!(
             !error.contains(RESPONSE_MARKER),
             "error leaked authenticated response body: {error}"
-        );
-    }
-
-    /// **传输错误必须带上 `source()` 链**。
-    ///
-    /// 2026-08-03 实测代价：用户报「获取分组列表失败: error sending request for url
-    /// (https://bestapi.store/api/v1/groups/available)」，而那串正是 `{e}` 对
-    /// `reqwest::Error` 的全部输出 —— 超时 / DNS / 连接被拒 / TLS 失败**打印出来一模一样**，
-    /// 真实原因在 `source()` 链里被丢掉了。结果：为了知道是哪一种，只能专门编一个最小
-    /// 复现程序传到那台机器上跑（DNS、TCP、TLS、5 个 client 变体逐层验证），
-    /// 而这本该是日志里的一行。
-    ///
-    /// 这条钉住「链被展开了」，不钉具体措辞（那是 reqwest 的措辞，会随版本变）。
-    ///
-    /// ## 两处刻意的写法
-    ///
-    /// **1. 用本机 listener 制造失败，不打任何外部地址。** 起初用的是保留地址
-    /// `192.0.2.1`（RFC 5737）+ 1ms 超时，但那不由本进程说了算：CI 的网络命名空间可能
-    /// 立即回 network-unreachable（那是 connect 而非 timeout）、透明代理也可能把它接走
-    /// 变成一个 HTTP 响应 ⇒ 拿到 `Ok` 而不是错误。现在连一个**接受连接但永不回应**的
-    /// 本机 listener，超时由我们自己的 timeout 决定，与外网和 CI 网络配置无关。
-    ///
-    /// **2. 断言比对首层 source 的原文**，而不是「长度变长了」或「包含某个词」——
-    /// 那两种都能被类别前缀单独满足，把 source 遍历整段删掉测试照样过（codex review
-    /// 抓到的正是这一点）。
-    #[tokio::test]
-    async fn transport_errors_carry_their_source_chain() {
-        // 接受连接后什么都不做（连 listener 都不 drop）⇒ 客户端等响应等到超时。
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            // 握住连接不放：一 drop 就变成「连接被对端关闭」，那是另一类错误。
-            let mut held = Vec::new();
-            while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream);
-            }
-        });
-
-        // `.no_proxy()` 不可省，理由见下一条测试。
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(200))
-            .no_proxy()
-            .build()
-            .expect("build client");
-        let err = client
-            .get(format!("http://{addr}/whatever"))
-            .send()
-            .await
-            .expect_err("对端永不回应，必须超时");
-
-        let bare = format!("{err}");
-        let described = describe_send_error(&err);
-
-        // 前提一：`{e}` 真的什么都没说 —— 这正是 bug 的形状。
-        assert!(
-            !bare.contains("cause"),
-            "`{{e}}` 不该带 cause，否则这条测试的前提不成立: {bare}"
-        );
-        // 前提二：这个错误确实有 source 可展开（没有的话下面的断言就是空转）。
-        let first = std::error::Error::source(&err).expect("传输错误必须有 source 可展开");
-
-        // 本体：首层 source 的原文必须出现在描述里。删掉 source 遍历这条就会红。
-        assert!(
-            described.contains(&format!("cause: {first}")),
-            "描述必须带上首层 source 的原文\n  source: {first}\n  desc: {described}"
-        );
-    }
-
-    /// 分类前缀不能张冠李戴：连接失败不该被说成超时。
-    #[tokio::test]
-    async fn describe_send_error_labels_connect_failures_as_connect() {
-        // 先绑一个端口再立即释放 ⇒ 拿到一个**确定没人监听**的地址。
-        // 不用写死的 `127.0.0.1:1`：没有哪条规矩保证它在所有 CI 上都空着。
-        let addr = {
-            let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind probe");
-            probe.local_addr().expect("local addr")
-            // probe 在这里 drop，端口回到无人监听状态。
-        };
-
-        // `.no_proxy()` 不可省：维护者机器上开着 Clash，系统代理会把这个请求接走并回
-        // **503**（`proxy-connection: close`）⇒ 拿到的是 `Ok(response)` 而不是传输错误，
-        // 测试会以「这个端口竟然有人监听」的形式失败。这里要的是「连接失败」这个事件本身，
-        // 不该受运行环境有没有代理影响。
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .no_proxy()
-            .build()
-            .expect("build client");
-        let err = client
-            .get(format!("http://{addr}/whatever"))
-            .send()
-            .await
-            .expect_err("刚释放的端口不该有人监听");
-
-        // 前提：这确实是一个连接类失败、且不是超时。否则下面在验别的东西。
-        assert!(err.is_connect(), "前提不成立，这不是连接类错误: {err:?}");
-        assert!(!err.is_timeout(), "前提不成立，这是超时错误: {err:?}");
-
-        // 本体：分类前缀必须如实说「连不上」，不能标成超时或含糊的兜底措辞。
-        let described = describe_send_error(&err);
-        assert!(
-            described.starts_with("连不上服务器"),
-            "连接类失败的分类前缀必须是「连不上服务器」: {described}"
         );
     }
 }

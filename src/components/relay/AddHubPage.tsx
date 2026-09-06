@@ -4,7 +4,7 @@ import { ArrowLeft, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { AppId } from "@/lib/api";
+import { PLAZA_VISIBLE_DEFAULT, type AppId } from "@/lib/api";
 import { useSettingsQuery } from "@/lib/query";
 import { useVendorSupportedQuery } from "@/lib/query/vendor";
 import {
@@ -58,7 +58,7 @@ export function AddHubPage({
   // 未加载/未播种都按「展示」处理（未归因默认），且用派生值而非初值快照，
   // 设置晚到也能把已落在「广场」上的选中态拨回「手动添加」。
   const { data: settings } = useSettingsQuery();
-  const plazaVisible = settings?.plazaVisible ?? true;
+  const plazaVisible = settings?.plazaVisible ?? PLAZA_VISIBLE_DEFAULT;
   const [tab, setTab] = useState<AddHubTab>(initialTab);
   const effectiveTab: AddHubTab =
     !plazaVisible && tab === "directory" ? "manual" : tab;
