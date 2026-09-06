@@ -117,7 +117,7 @@ pub fn emit_provider_switched(
 
 /// 看板站点余额后台刷新完成。余额在后台单飞刷新（`relay::balance::spawn_stale_refresh`），
 /// 到货后靠这个事件让看板补值 —— 没有它，新余额要等下一次聚焦/30s stale 才出现。
-pub fn emit_site_balances_updated(app_handle: &tauri::AppHandle) {
+pub fn emit_site_balances_updated<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
     if let Err(e) = app_handle.emit(SITE_BALANCES_UPDATED, ()) {
         // 发不出去只是余额晚一点显示（下次看板重取自然带上），不值得报错。
         log::warn!("发射 {SITE_BALANCES_UPDATED} 事件失败: {e}");

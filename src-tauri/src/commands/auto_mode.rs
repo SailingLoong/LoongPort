@@ -428,19 +428,13 @@ pub struct TierBoardModelOption {
 #[tauri::command]
 pub async fn easy_mode_tier_board(
     state: tauri::State<'_, AppState>,
-    app_handle: tauri::AppHandle,
     app_type: String,
 ) -> Result<TierBoard, String> {
-    tier_board_impl(&state, &app_type, Some(app_handle)).await
+    tier_board_impl(&state, &app_type).await
 }
 
-/// 看板核心（真实 smoke 直接调它，不走 tauri State）。`app_handle` 只用于
-/// 余额后台刷新完成后发补值事件，headless 传 `None`。
-pub(crate) async fn tier_board_impl(
-    state: &AppState,
-    app_type: &str,
-    app_handle: Option<tauri::AppHandle>,
-) -> Result<TierBoard, String> {
+/// 看板核心（真实 smoke 直接调它，不走 tauri State）。
+pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<TierBoard, String> {
     require_auto_mode_app(app_type)?;
     let db = &state.db;
     let providers = db.get_all_providers(app_type).map_err(|e| e.to_string())?;
@@ -472,11 +466,13 @@ pub(crate) async fn tier_board_impl(
         .provider_breaker_states(app_type, &ranked)
         .await;
 
-    // 余额走缓存（SWR）：看板保持纯本地毫秒级返回，stale 站点由后台单飞
-    // 刷新（sk 直查 + 预算超时）补值，完成后发事件让前端重取。此前这里是
-    // 同步网络扇出 —— 20-30 家里一家超时型挂掉，整板就等它 30-90s，且冷
-    // 启动/窗口聚焦每次重演（用户反馈「每次打开软件省心模式卡好久」）。
-    let (tier_origins, site_keys) = tier_site_keys(app_type, &ranked);
+    // 余额走缓存：看板纯读（模式/视图不驱动刷新 —— 触发点与红线论证收在
+    // services::site_balance_refresh 与 relay::balance::spawn_stale_refresh）。
+    // 此前这里是同步网络扇出 —— 20-30 家里一家超时型挂掉，整板就等它
+    // 30-90s，且冷启动/窗口聚焦每次重演（用户反馈「每次打开软件省心模式
+    // 卡好久」）。
+    let (tier_origins, _site_keys) =
+        crate::services::site_balance_refresh::tier_site_keys(app_type, &ranked);
     let cached = crate::relay::balance::cached_site_balances(db);
     let balances: std::collections::HashMap<String, Option<f64>> = tier_origins
         .iter()
@@ -490,7 +486,6 @@ pub(crate) async fn tier_board_impl(
             )
         })
         .collect();
-    crate::relay::balance::spawn_stale_refresh(state.db.clone(), app_handle, site_keys);
 
     // 健康快照（缺行时 DAO 合成默认健康行，见 get_provider_health 的契约）
     let mut health: std::collections::HashMap<String, crate::proxy::types::ProviderHealth> =
@@ -614,46 +609,6 @@ pub(crate) async fn tier_board_impl(
     })
 }
 
-/// 档位 → 站点余额查询材料的解析（纯本地，无网络）：
-/// - `tier_origins`：档位 id → 站点 origin（https 端点才参与，http/本地/无 sk
-///   自然跳过 —— 单元测试零网络）；
-/// - `site_keys`：origin → 该站第一把 sk（同站多档共用一份站点余额）。
-///
-/// 网络查询本身在 [`crate::relay::balance::spawn_stale_refresh`]（后台 SWR）。
-fn tier_site_keys(
-    app_type: &str,
-    tiers: &[crate::provider::Provider],
-) -> (
-    std::collections::HashMap<String, String>,
-    std::collections::HashMap<String, String>,
-) {
-    use crate::app_config::AppType;
-    let mut tier_origins = std::collections::HashMap::new();
-    let mut site_keys = std::collections::HashMap::new();
-    let app = match AppType::from_str(app_type) {
-        Ok(app) => app,
-        Err(_) => return (tier_origins, site_keys),
-    };
-    let Some(adapter) = crate::proxy::providers::get_adapter(&app) else {
-        return (tier_origins, site_keys);
-    };
-    for tier in tiers {
-        let (base, auth) = match (adapter.extract_base_url(tier), adapter.extract_auth(tier)) {
-            (Ok(base), Some(auth)) => (base, auth),
-            _ => continue,
-        };
-        let Some(origin) = origin_of(&base) else {
-            continue;
-        };
-        if !origin.starts_with("https://") {
-            continue;
-        }
-        tier_origins.insert(tier.id.clone(), origin.clone());
-        site_keys.entry(origin).or_insert(auth.api_key);
-    }
-    (tier_origins, site_keys)
-}
-
 /// 模型单价（每百万 token 输入+输出之和，美元）；价表未收录 → `None`。
 /// 与 `auto_strategy::tier_unit_price` 同一张表，只是按模型名直查。
 fn model_unit_price(db: &crate::Database, model: &str) -> Option<f64> {
@@ -666,16 +621,6 @@ fn model_unit_price(db: &crate::Database, model: &str) -> Option<f64> {
     let input: f64 = input.parse().ok()?;
     let output: f64 = output.parse().ok()?;
     Some(input + output)
-}
-
-/// 从 base_url 取 `scheme://authority`（`https://site/v1` → `https://site`）。
-fn origin_of(base_url: &str) -> Option<String> {
-    let (scheme, rest) = base_url.split_once("://")?;
-    let authority = rest.split('/').next()?;
-    if authority.is_empty() {
-        return None;
-    }
-    Some(format!("{scheme}://{authority}"))
 }
 
 #[cfg(test)]
@@ -717,7 +662,7 @@ mod tests {
         db.save_provider("claude", &tier).unwrap();
 
         // 无缓存：余额 None（显示 —）
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         assert_eq!(board.tiers[0].balance_usd, None, "缓存未命中 → —");
 
         // 种子缓存（TTL 内）→ 上板；后台刷新因缓存新鲜而不触发（本测试零网络）
@@ -728,7 +673,7 @@ mod tests {
             (Some(12.34), now),
         )
         .unwrap();
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         assert_eq!(
             board.tiers[0].balance_usd,
             Some(12.34),
@@ -767,7 +712,7 @@ mod tests {
             .unwrap();
         db.set_current_provider("claude", &expensive).unwrap();
 
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         assert_eq!(board.mode, "auto");
         assert_eq!(board.strategy, "cheapest");
         assert_eq!(board.tiers.len(), 2);
@@ -807,7 +752,7 @@ mod tests {
             &verification_report(&expensive, "m-x", Verdict::Trusted),
         )
         .unwrap();
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         assert_eq!(
             by_id(&cheap).verification_verdict.as_deref(),
@@ -834,7 +779,7 @@ mod tests {
             &[expensive.clone(), cheap.clone()],
         )
         .unwrap();
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         assert_eq!(board.mode, "manual");
         assert_eq!(board.tiers[0].provider_id, expensive, "手动序优先");
     }
@@ -870,7 +815,7 @@ mod tests {
         // 当前档位（贵）30 分钟内有流量 → 选路会亲和置顶；看板必须保持纯价格序
         seed_board_activity(&db, "claude", &expensive);
 
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         assert_eq!(
             board.tiers[0].provider_id, cheap,
             "看板第一张是最便宜的，不被亲和置顶顶走"
@@ -912,7 +857,7 @@ mod tests {
         .await
         .unwrap();
 
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         assert_eq!(by_id(&dead).is_healthy, Some(false));
         assert_eq!(by_id(&dead).consecutive_failures, Some(1));
@@ -983,7 +928,7 @@ mod tests {
             -60,
         );
 
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         let remaining = by_id(&current)
             .affinity_remaining_secs
@@ -1092,7 +1037,7 @@ mod tests {
         );
         // cold 档没有任何行
 
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         let busy_tier = by_id(&busy);
         assert_eq!(busy_tier.today_cost_usd, Some(0.75), "昨日的 $9 不计入");
@@ -1143,7 +1088,7 @@ mod tests {
             .unwrap();
         }
 
-        let board = tier_board_impl(&state, "codex", None).await.unwrap();
+        let board = tier_board_impl(&state, "codex").await.unwrap();
         let by_model = |model: &str| {
             board
                 .model_options
@@ -1241,7 +1186,7 @@ mod tests {
             -8 * 3600,
         );
 
-        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        let board = tier_board_impl(&state, "claude").await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         let activity = by_id(&busy)
             .recent_activity
