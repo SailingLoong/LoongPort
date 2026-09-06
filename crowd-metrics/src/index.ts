@@ -6,7 +6,7 @@
  * - scheduled（每 5 分钟） 重算快照写 KV + 清理 30 天前的原始桶 / 2 天前的限流计数
  */
 
-import { buildSnapshot, type RawRow } from "./aggregate";
+import { buildSnapshot, buildTrends, type RawRow } from "./aggregate";
 import { TTFT_BIN_EDGES_MS } from "./bins";
 import { cleanupDue, isFresh } from "./freshness";
 import { handleIngest, type Env } from "./ingest";
@@ -19,6 +19,8 @@ const RAW_RETENTION_SECS = 30 * 86400;
 const RATE_LIMIT_RETENTION_SECS = 2 * 86400;
 /** KV 快照键。 */
 const SNAPSHOT_KEY = "snapshot:v1";
+/** KV 趋势键（三档一包，recompute 与快照同拍写、同 freshness 策略）。 */
+const TREND_KEY = "trend:v1";
 
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
@@ -29,8 +31,9 @@ const CORS_HEADERS: Record<string, string> = {
 const SNAPSHOT_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
 
 async function queryRawRows(env: Env, nowSec: number): Promise<RawRow[]> {
-  // 7 天窗口 + 1 小时余量（整点对齐会把边界小时整桶切进切出）。
-  const cutoff = hourFloorUtc(nowSec - 7 * 86400 - 3600);
+  // 30 天窗口 + 1 小时余量（整点对齐会把边界小时整桶切进切出）。
+  // 趋势（/v1/trend 的 30d 档）需要全保留期数据；快照仍按 epoch 过滤 7 天内。
+  const cutoff = hourFloorUtc(nowSec - 30 * 86400 - 3600);
   const { results } = await env.DB.prepare(
     `SELECT hour, site, app, source, asn, ua_trusted, samples, errors,
             ttft_bins, ttft_count, input_tokens, output_tokens,
@@ -46,13 +49,16 @@ async function queryRawRows(env: Env, nowSec: number): Promise<RawRow[]> {
 const CLEANUP_LAST_RUN_KEY = "cleanup:last-run";
 
 /**
- * 现算快照并写 KV。清理（保留期删除）折叠在这里、按小时时间闸节流 ——
- * cron 从未触发过（见 freshness.ts 的背景说明），保留期不能指望它。
+ * 现算快照+趋势并写 KV（一次查询喂两个聚合）。清理（保留期删除）折叠在这里、
+ * 按小时时间闸节流 —— cron 从未触发过（见 freshness.ts 的背景说明），
+ * 保留期不能指望它。
  */
 async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
   const rows = await queryRawRows(env, nowSec);
   const snapshot = buildSnapshot(rows, nowSec);
   snapshot.ttftBinEdges = [...TTFT_BIN_EDGES_MS];
+  const trend = buildTrends(rows, nowSec);
+  trend.ttftBinEdges = [...TTFT_BIN_EDGES_MS];
 
   const rawCutoff = hourFloorUtc(nowSec - RAW_RETENTION_SECS);
   const rlCutoff = hourFloorUtc(nowSec - RATE_LIMIT_RETENTION_SECS);
@@ -66,30 +72,33 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
     await env.SNAPSHOT.put(CLEANUP_LAST_RUN_KEY, String(nowSec));
   })();
 
-  await Promise.all([env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot)), cleanup]);
+  await Promise.all([
+    env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot)),
+    env.SNAPSHOT.put(TREND_KEY, JSON.stringify(trend)),
+    cleanup,
+  ]);
   return snapshot;
 }
 
-async function handleSnapshot(env: Env, allowCompute: boolean): Promise<Response> {
+/** 与快照同款：KV 新鲜直回、陈旧/缺失走现算自愈（CDN 60s 限流并发重算）。 */
+async function serveKvPayload(
+  env: Env,
+  key: string,
+  recompute: () => Promise<unknown>,
+): Promise<Response> {
   const nowSec = Math.floor(Date.now() / 1000);
-  const cached = await env.SNAPSHOT.get(SNAPSHOT_KEY);
-  // 新鲜（≤10min）直接回缓存；陈旧/缺失且允许计算 → 请求路径里现算自愈。
-  // 并发重算由前面的 CDN 缓存（max-age=60）天然限流到约每分钟一次。
-  if (cached !== null && (isFresh(cached, nowSec) || !allowCompute)) {
-    return new Response(cached, {
-      status: 200,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": SNAPSHOT_CACHE_CONTROL,
-        ...CORS_HEADERS,
-      },
-    });
+  const cached = await env.SNAPSHOT.get(key);
+  if (cached !== null && isFresh(cached, nowSec)) {
+    return cachedResponse(cached);
   }
-  if (!allowCompute) {
-    return jsonResponse({ error: "snapshot not ready" }, 503);
-  }
-  const snapshot = await recomputeSnapshot(env, nowSec);
-  return new Response(JSON.stringify(snapshot), {
+  await recompute();
+  const fresh = await env.SNAPSHOT.get(key);
+  if (fresh === null) return jsonResponse({ error: `${key} not ready` }, 503);
+  return cachedResponse(fresh);
+}
+
+function cachedResponse(body: string): Response {
+  return new Response(body, {
     status: 200,
     headers: {
       "content-type": "application/json; charset=utf-8",
@@ -118,9 +127,12 @@ export default {
       return handleIngest(request, env);
     }
     if (request.method === "GET" && pathname === "/v1/snapshot") {
-      return handleSnapshot(env, true);
+      return serveKvPayload(env, SNAPSHOT_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000)));
     }
-    if (request.method === "OPTIONS" && pathname === "/v1/snapshot") {
+    if (request.method === "GET" && pathname === "/v1/trend") {
+      return serveKvPayload(env, TREND_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000)));
+    }
+    if (request.method === "OPTIONS" && (pathname === "/v1/snapshot" || pathname === "/v1/trend")) {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
     if (request.method === "GET" && pathname === "/healthz") {

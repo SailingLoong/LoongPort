@@ -69,3 +69,27 @@ export interface Snapshot {
    *  悬浮提示需要真实毫秒区间，而边界调整必须与聚合侧同源。 */
   ttftBinEdges?: number[];
 }
+
+/** 趋势图的一个时间桶（GET /v1/trend）。k-匿未达标的桶各指标为 null。 */
+export interface TrendBucket {
+  /** 桶起点（epoch 秒，UTC）。 */
+  start: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  errRate: number | null;
+  cacheRate: number | null;
+}
+
+export interface SiteTrend {
+  buckets: TrendBucket[];
+  /** 该范围内合并的 TTFT 直方图（分布图随时间范围联动用）。 */
+  ttftBins: number[];
+}
+
+/** 档位 → 站点趋势。 */
+export type TrendPayload = {
+  version: 1;
+  generatedAt: number;
+  ranges: Record<'24h' | '7d' | '30d', { bucketSeconds: number; sites: Record<string, SiteTrend> }>;
+  ttftBinEdges?: number[];
+};

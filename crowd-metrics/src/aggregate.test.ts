@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSnapshot,
+  buildTrends,
   COHORT_FACTOR,
   MIN_ASN,
   MIN_SOURCES,
@@ -250,5 +251,45 @@ describe("分布直方图与口径", () => {
   it("门槛常量钉住：MIN_SOURCES=1、MIN_ASN=1（2026-09-06 临时放开，恢复 3/2 时连着常量注释与 README 一起改）", () => {
     expect(MIN_SOURCES).toBe(1);
     expect(MIN_ASN).toBe(1);
+  });
+});
+
+describe("趋势（buildTrends）", () => {
+  it("三档粒度与桶数：24h=24×1h、7d=56×3h、30d=60×12h", () => {
+    const trend = buildTrends(sources(3), NOW);
+    expect(Object.keys(trend.ranges).sort()).toEqual(["24h", "30d", "7d"]);
+    expect(trend.ranges["24h"].bucketSeconds).toBe(3600);
+    expect(trend.ranges["24h"].sites["example.com"].buckets).toHaveLength(24);
+    expect(trend.ranges["7d"].bucketSeconds).toBe(3 * 3600);
+    expect(trend.ranges["7d"].sites["example.com"].buckets).toHaveLength(56);
+    expect(trend.ranges["30d"].bucketSeconds).toBe(12 * 3600);
+    expect(trend.ranges["30d"].sites["example.com"].buckets).toHaveLength(60);
+  });
+
+  it("最后一格对齐当前小时；数据落倒数第二格，空桶为 null 占位", () => {
+    const trend = buildTrends(sources(3), NOW);
+    const buckets = trend.ranges["24h"].sites["example.com"].buckets;
+    const last = buckets[buckets.length - 1];
+    // 网格末格 = 当前（可能未满的）小时的整点起点
+    expect(last.start).toBe(Math.floor(NOW / 3600) * 3600);
+    expect(last.p50Ms).toBeNull(); // 当前小时还没数据
+    // makeRaw 的小时 = NOW 前一小时 → 倒数第二格
+    const dataBucket = buckets[buckets.length - 2];
+    expect(dataBucket.p50Ms).not.toBeNull();
+    expect(dataBucket.start).toBe(Math.floor(NOW / 3600) * 3600 - 3600);
+    expect(buckets[0].p50Ms).toBeNull(); // 只有一小时数据，其余桶为 null 占位
+  });
+
+  it("逐桶 k-匿：单来源的桶不发布（当前门槛 1/1 下未受信来源不算数）", () => {
+    const rows = [makeRaw({ source: "only", ua_trusted: 0 })];
+    const trend = buildTrends(rows, NOW);
+    expect(trend.ranges["24h"].sites["example.com"]).toBeUndefined();
+  });
+
+  it("范围分布累计（ttftBins）= 过桶行的 bins 合并", () => {
+    const trend = buildTrends(sources(3), NOW);
+    const bins = trend.ranges["24h"].sites["example.com"].ttftBins;
+    const sum = bins.reduce((s, c) => s + c, 0);
+    expect(sum).toBe(30); // 3 来源 × 10 样本全落 bin[2]
   });
 });
