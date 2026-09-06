@@ -17,7 +17,7 @@ import {
 } from "@/config/appConfig";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
-import { PROVIDER_SWITCHED } from "@/lib/api/events";
+import { PROVIDER_SWITCHED, SITE_BALANCES_UPDATED } from "@/lib/api/events";
 import type { ProviderSwitchEvent } from "@/lib/api/providers";
 
 /**
@@ -445,7 +445,7 @@ export function useSetFailoverAll() {
 
 /**
  * 档位看板（首页省心视图数据源）：顺序/倍率/单价/耗时/命中/余额一次拉全。
- * 余额链含站点查询，给个短 staleTime 避免频繁切 app 时反复打站点。
+ * 余额已是后端缓存（命令本身毫秒级），staleTime 防的是频繁切 app 时的重复聚合。
  */
 export function useTierBoard(appType: string, enabled = true) {
   const queryClient = useQueryClient();
@@ -456,6 +456,10 @@ export function useTierBoard(appType: string, enabled = true) {
     void queryClient.invalidateQueries({
       queryKey: ["easyModeTierBoard", appType],
     });
+  });
+  // 余额后台刷新完成（SWR 的补值时机）：站点余额跨 app 共享，失效全部看板。
+  useTauriEvent(SITE_BALANCES_UPDATED, () => {
+    void queryClient.invalidateQueries({ queryKey: ["easyModeTierBoard"] });
   });
   return useQuery({
     queryKey: ["easyModeTierBoard", appType],

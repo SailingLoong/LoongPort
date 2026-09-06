@@ -428,13 +428,19 @@ pub struct TierBoardModelOption {
 #[tauri::command]
 pub async fn easy_mode_tier_board(
     state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     app_type: String,
 ) -> Result<TierBoard, String> {
-    tier_board_impl(&state, &app_type).await
+    tier_board_impl(&state, &app_type, Some(app_handle)).await
 }
 
-/// 看板核心（真实 smoke 直接调它，不走 tauri State）。
-pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<TierBoard, String> {
+/// 看板核心（真实 smoke 直接调它，不走 tauri State）。`app_handle` 只用于
+/// 余额后台刷新完成后发补值事件，headless 传 `None`。
+pub(crate) async fn tier_board_impl(
+    state: &AppState,
+    app_type: &str,
+    app_handle: Option<tauri::AppHandle>,
+) -> Result<TierBoard, String> {
     require_auto_mode_app(app_type)?;
     let db = &state.db;
     let providers = db.get_all_providers(app_type).map_err(|e| e.to_string())?;
@@ -466,7 +472,25 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
         .provider_breaker_states(app_type, &ranked)
         .await;
 
-    let balances = fetch_site_balances(app_type, &ranked).await;
+    // 余额走缓存（SWR）：看板保持纯本地毫秒级返回，stale 站点由后台单飞
+    // 刷新（sk 直查 + 预算超时）补值，完成后发事件让前端重取。此前这里是
+    // 同步网络扇出 —— 20-30 家里一家超时型挂掉，整板就等它 30-90s，且冷
+    // 启动/窗口聚焦每次重演（用户反馈「每次打开软件省心模式卡好久」）。
+    let (tier_origins, site_keys) = tier_site_keys(app_type, &ranked);
+    let cached = crate::relay::balance::cached_site_balances(db);
+    let balances: std::collections::HashMap<String, Option<f64>> = tier_origins
+        .iter()
+        .map(|(tier_id, origin)| {
+            (
+                tier_id.clone(),
+                cached
+                    .get(origin)
+                    .map(|(balance, _)| *balance)
+                    .unwrap_or(None),
+            )
+        })
+        .collect();
+    crate::relay::balance::spawn_stale_refresh(state.db.clone(), app_handle, site_keys);
 
     // 健康快照（缺行时 DAO 合成默认健康行，见 get_provider_health 的契约）
     let mut health: std::collections::HashMap<String, crate::proxy::types::ProviderHealth> =
@@ -511,7 +535,7 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
             ),
             rate_multiplier: multipliers.get(&p.id).copied(),
             avg_first_token_ms: ttft.get(&p.id).copied(),
-            balance_usd: balances.get(&p.id).copied(),
+            balance_usd: balances.get(&p.id).copied().flatten(),
             verification_verdict: verification_verdict(&p.id),
             is_healthy: health.get(&p.id).map(|h| h.is_healthy),
             consecutive_failures: health.get(&p.id).map(|h| h.consecutive_failures),
@@ -590,29 +614,29 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     })
 }
 
-/// 站点钱包余额：按「站点 origin」去重，每个 origin 用第一把 sk 查一次，回填到
-/// 该站的全部档位上。两路按序试：先 sub2api 的 `GET /v1/usage`（sub2api 站短路，
-/// 不多花请求）；问不出（典型 newapi：该端点 404）再回落 one-api 系 billing 双端
-/// 点（见 [`crate::relay::api::billing_balance_with_api_key`] 的口径与限制）。
-/// 两路都拿不到 → 该站各档 `None`。只对 https 端点发起（http/本地/无 sk 自然
-/// 跳过，单元测试零网络）。
-async fn fetch_site_balances(
+/// 档位 → 站点余额查询材料的解析（纯本地，无网络）：
+/// - `tier_origins`：档位 id → 站点 origin（https 端点才参与，http/本地/无 sk
+///   自然跳过 —— 单元测试零网络）；
+/// - `site_keys`：origin → 该站第一把 sk（同站多档共用一份站点余额）。
+///
+/// 网络查询本身在 [`crate::relay::balance::spawn_stale_refresh`]（后台 SWR）。
+fn tier_site_keys(
     app_type: &str,
     tiers: &[crate::provider::Provider],
-) -> std::collections::HashMap<String, f64> {
+) -> (
+    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, String>,
+) {
     use crate::app_config::AppType;
+    let mut tier_origins = std::collections::HashMap::new();
+    let mut site_keys = std::collections::HashMap::new();
     let app = match AppType::from_str(app_type) {
         Ok(app) => app,
-        Err(_) => return std::collections::HashMap::new(),
+        Err(_) => return (tier_origins, site_keys),
     };
     let Some(adapter) = crate::proxy::providers::get_adapter(&app) else {
-        return std::collections::HashMap::new();
+        return (tier_origins, site_keys);
     };
-
-    let mut tier_origin: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut origin_key: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
     for tier in tiers {
         let (base, auth) = match (adapter.extract_base_url(tier), adapter.extract_auth(tier)) {
             (Ok(base), Some(auth)) => (base, auth),
@@ -624,42 +648,10 @@ async fn fetch_site_balances(
         if !origin.starts_with("https://") {
             continue;
         }
-        tier_origin.insert(tier.id.clone(), origin.clone());
-        origin_key.entry(origin).or_insert(auth.api_key);
+        tier_origins.insert(tier.id.clone(), origin.clone());
+        site_keys.entry(origin).or_insert(auth.api_key);
     }
-
-    let mut balances = std::collections::HashMap::new();
-    let queries: Vec<_> = origin_key
-        .into_iter()
-        .map(|(origin, key)| async move {
-            let sub2api_wallet = crate::relay::api::usage_with_api_key(&origin, &key)
-                .await
-                .ok()
-                .and_then(|usage| {
-                    usage
-                        .data
-                        .and_then(|items| items.first().and_then(|item| item.remaining))
-                });
-            let balance = match sub2api_wallet {
-                Some(balance) => Some(balance),
-                None => crate::relay::api::billing_balance_with_api_key(&origin, &key)
-                    .await
-                    .ok()
-                    .flatten(),
-            };
-            (origin, balance)
-        })
-        .collect();
-    for (origin, balance) in futures::future::join_all(queries).await {
-        if let Some(balance) = balance {
-            for (tier_id, tier_origin) in &tier_origin {
-                if tier_origin == &origin {
-                    balances.insert(tier_id.clone(), balance);
-                }
-            }
-        }
-    }
-    balances
+    (tier_origins, site_keys)
 }
 
 /// 模型单价（每百万 token 输入+输出之和，美元）；价表未收录 → `None`。
@@ -701,6 +693,49 @@ mod tests {
         assert!(require_auto_mode_app("pi").is_err());
     }
 
+    /// 看板余额走缓存（SWR）：种子缓存原样上板；缓存 TTL 内不触发任何刷新
+    /// （零网络、看板命令毫秒级返回）。
+    #[tokio::test]
+    #[serial]
+    async fn tier_board_reads_balances_from_cache_without_network() {
+        let _home = test_home();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+
+        let id = crate::relay::provision::provider_id_for("https://cache.example", Some(1), 1);
+        let tier = crate::provider::Provider::with_id(
+            id.clone(),
+            "缓存档".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://cache.example",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-test-not-a-real-key",
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &tier).unwrap();
+
+        // 无缓存：余额 None（显示 —）
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        assert_eq!(board.tiers[0].balance_usd, None, "缓存未命中 → —");
+
+        // 种子缓存（TTL 内）→ 上板；后台刷新因缓存新鲜而不触发（本测试零网络）
+        let now = chrono::Utc::now().timestamp();
+        crate::relay::balance::upsert_site_balance(
+            &db,
+            "https://cache.example",
+            (Some(12.34), now),
+        )
+        .unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
+        assert_eq!(
+            board.tiers[0].balance_usd,
+            Some(12.34),
+            "缓存值必须原样上板"
+        );
+    }
+
     /// 看板聚合：顺序=选路序、倍率/单价/耗时/命中齐全；手动模式反映手动序。
     /// 余额链对 http 端点零网络（真实站点路径由 ignored 的真实 smoke 覆盖）。
     #[tokio::test]
@@ -732,7 +767,7 @@ mod tests {
             .unwrap();
         db.set_current_provider("claude", &expensive).unwrap();
 
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         assert_eq!(board.mode, "auto");
         assert_eq!(board.strategy, "cheapest");
         assert_eq!(board.tiers.len(), 2);
@@ -772,7 +807,7 @@ mod tests {
             &verification_report(&expensive, "m-x", Verdict::Trusted),
         )
         .unwrap();
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         assert_eq!(
             by_id(&cheap).verification_verdict.as_deref(),
@@ -799,7 +834,7 @@ mod tests {
             &[expensive.clone(), cheap.clone()],
         )
         .unwrap();
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         assert_eq!(board.mode, "manual");
         assert_eq!(board.tiers[0].provider_id, expensive, "手动序优先");
     }
@@ -835,7 +870,7 @@ mod tests {
         // 当前档位（贵）30 分钟内有流量 → 选路会亲和置顶；看板必须保持纯价格序
         seed_board_activity(&db, "claude", &expensive);
 
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         assert_eq!(
             board.tiers[0].provider_id, cheap,
             "看板第一张是最便宜的，不被亲和置顶顶走"
@@ -877,7 +912,7 @@ mod tests {
         .await
         .unwrap();
 
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         assert_eq!(by_id(&dead).is_healthy, Some(false));
         assert_eq!(by_id(&dead).consecutive_failures, Some(1));
@@ -948,7 +983,7 @@ mod tests {
             -60,
         );
 
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         let remaining = by_id(&current)
             .affinity_remaining_secs
@@ -1057,7 +1092,7 @@ mod tests {
         );
         // cold 档没有任何行
 
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         let busy_tier = by_id(&busy);
         assert_eq!(busy_tier.today_cost_usd, Some(0.75), "昨日的 $9 不计入");
@@ -1108,7 +1143,7 @@ mod tests {
             .unwrap();
         }
 
-        let board = tier_board_impl(&state, "codex").await.unwrap();
+        let board = tier_board_impl(&state, "codex", None).await.unwrap();
         let by_model = |model: &str| {
             board
                 .model_options
@@ -1206,7 +1241,7 @@ mod tests {
             -8 * 3600,
         );
 
-        let board = tier_board_impl(&state, "claude").await.unwrap();
+        let board = tier_board_impl(&state, "claude", None).await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
         let activity = by_id(&busy)
             .recent_activity
