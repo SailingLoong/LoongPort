@@ -894,6 +894,35 @@ pub fn extract_model(settings_config: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// 档位**带模型目录**（`modelCatalog`）的 CLI 清单 —— 这是「哪些平台的档位有
+/// 模型目录/芯片/选模型」这一事实的**唯一源**。
+///
+/// 消费方（加平台时改这里，别在调用点再写一份名单）：
+/// - `persist_provision_batch`（provision 落库时写目录，四平台各自形状见那边）
+/// - `reset_tier_config_impl`（恢复默认时保留目录）
+/// - 选模型命令闸 / `preserve_supported_model`（刷新保留用户选的模型）
+/// - 一键回退站点声明的遍历名单
+///
+/// ⚠️ 为什么必须是函数而不是各处手写：2026-09 加 grok 目录时（PR #237）只改了
+/// persist 侧名单、漏了 reset 侧 ——「恢复默认」把 Claude/Gemini/Grok 的模型芯片
+/// 清空到下次 provision。两份名单必然漂移，这份清单就是那次事故的修根。
+///
+/// 注意与 [`selected_model`] 的名单**不**同：那个还收 CodexImage（读生图档位
+/// 自己的模型名），而这里只有「目录」概念的四个平台 —— 生图档位没有目录。
+pub fn model_catalog_apps() -> &'static [AppType] {
+    &[
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ]
+}
+
+/// [`model_catalog_apps`] 的成员判定。
+pub fn supports_model_catalog(app_type: &AppType) -> bool {
+    model_catalog_apps().contains(app_type)
+}
+
 /// 从 settings_config 读档位**选中的模型**（跨平台）。
 ///
 /// codex 系读 config TOML 的 `model` 行（[`extract_model`]）；claude 读

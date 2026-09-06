@@ -3125,12 +3125,12 @@ fn newapi_keep_insert(
     let app_types: Vec<AppType> = match models {
         Some(models) if provision::is_pure_image_group(models) => vec![AppType::CodexImage],
         Some(_) => newapi_app_types().into(),
-        None => vec![
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::CodexImage,
-        ],
+        // 分类未知：保全四个槽位（上面那份名单 + 生图栏），不再手写第二遍。
+        None => {
+            let mut slots = newapi_app_types().to_vec();
+            slots.push(AppType::CodexImage);
+            slots
+        }
     };
     for app_type in app_types {
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
@@ -3441,6 +3441,10 @@ fn persist_provision_batch(
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
         let base_url = api::base_url_for(app_type, &op.site_origin, &candidate.api_base_url);
+        // 下面这串分支是「带目录平台」的**生成器形状分派**（claude/gemini 走
+        // roles+models、codex/grokbuild 走 models）——「哪些平台带目录」这个名单
+        // 的事实唯源是 [`provision::model_catalog_apps`]，加平台时两边一起动
+        //（reset 侧与回归测试都按那份名单对齐）。
         let defaults = if matches!(app_type, AppType::Claude) {
             provision::settings_config_with_roles_and_models(
                 app_type,
@@ -4309,10 +4313,13 @@ fn reset_tier_config_in_state(
             AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
         })?;
 
-    // Codex 的远端模型目录已经存进 `modelCatalog`：恢复默认时按同一份目录重新挑
-    // 默认模型，并保留目录本身。否则这个动作会把刚外露的模型列表清空，还可能把
-    // 不支持 `DEFAULT_MODEL` 的分组重置成一条选中即 404 的配置。
-    let codex_models = if matches!(app_type, AppType::Codex) {
+    // 带模型目录的档位（唯一源 [`provision::model_catalog_apps`]）：远端目录已经
+    // 存进 `modelCatalog`，恢复默认时按同一份目录重新挑默认模型，并保留目录本身。
+    // 否则这个动作会把刚外露的模型列表清空，还可能把不支持 `DEFAULT_MODEL` 的分组
+    // 重置成一条选中即 404 的配置。claude / gemini 的角色分档（roles）是官网直连
+    // 才有的概念、中转站档位恒 `None`（`settings_config_with_models` 内部就是走
+    // `roles = None`），所以这里统一用 [`provision::settings_config_with_models`]。
+    let catalog_models = if provision::supports_model_catalog(&app_type) {
         models_from_settings(&existing.settings_config)
     } else {
         Vec::new()
@@ -4329,23 +4336,23 @@ fn reset_tier_config_in_state(
     //
     // 这**不是**「保留用户改的模型名」—— 用户把模型改成任何文本模型时仍然会被重置成
     // 默认值，那正是这个按钮该做的事。
-    let model = if codex_models.is_empty() {
+    let model = if catalog_models.is_empty() {
         provision::extract_model(&existing.settings_config)
             .filter(|m| provision::is_image_model(m))
             .unwrap_or_else(|| DEFAULT_MODEL.to_string())
     } else {
-        provision::pick_tier_models(&app_type, Some(&codex_models)).main
+        provision::pick_tier_models(&app_type, Some(&catalog_models)).main
     };
     let base_url = api::base_url_for(&app_type, &op.site_origin, &op.api_base_url);
 
-    let settings_config = if matches!(app_type, AppType::Codex) {
+    let settings_config = if !catalog_models.is_empty() {
         provision::settings_config_with_models(
             &app_type,
             &api_key,
             &existing.name,
             &base_url,
             &model,
-            Some(&codex_models),
+            Some(&catalog_models),
         )
     } else {
         provision::settings_config_for(&app_type, &api_key, &existing.name, &base_url, &model)
@@ -4525,7 +4532,8 @@ fn preserve_supported_codex_model(
 
 /// [`preserve_supported_codex_model`] 的跨平台版：claude / gemini 走 env 形状
 /// （剥掉 `[1M]` 声明后对新目录查成员资格），grokbuild 走 TOML 形状，其余平台
-/// 没有「选模型」概念，新默认直接接管。
+/// 没有「选模型」概念，新默认直接接管。四个 arm 与
+/// [`provision::model_catalog_apps`] 对齐（那边是名单唯一源，这里按形状分派）。
 fn preserve_supported_model(
     app_type: &AppType,
     defaults: serde_json::Value,
@@ -4792,13 +4800,11 @@ async fn select_tier_model_impl(
     model: &str,
     quit_chatgpt: bool,
 ) -> Result<SwitchTierResult, AppError> {
-    // 支持选模型的平台：codex（config TOML）/ claude（env.ANTHROPIC_MODEL）/
-    // gemini（env.GEMINI_MODEL）/ grokbuild（config TOML 选中模型表的 model 字段）。
-    // 目录（modelCatalog）各平台同一份形状。
-    if !matches!(
-        app_type,
-        AppType::Codex | AppType::Claude | AppType::Gemini | AppType::GrokBuild
-    ) {
+    // 支持选模型的平台 = 带模型目录的平台（唯一源
+    // [`provision::model_catalog_apps`]）：codex（config TOML）/ claude
+    // （env.ANTHROPIC_MODEL）/ gemini（env.GEMINI_MODEL）/ grokbuild（config TOML
+    // 选中模型表的 model 字段）。目录（modelCatalog）各平台同一份形状。
+    if !provision::supports_model_catalog(&app_type) {
         return Err(AppError::Config(
             "模型选择目前只支持 Codex / Claude / Gemini / Grok 档位".to_string(),
         ));
@@ -5495,9 +5501,10 @@ pub async fn relay_reset_site_config(
     let state = app_handle.state::<crate::store::AppState>();
 
     let mut applied = Vec::new();
-    for app_id in ["codex", "claude", "gemini", "grokbuild"] {
-        let app_type = AppType::from_str(app_id)
-            .map_err(|e| AppError::Config(format!("app 类型不认: {e}")))?;
+    // 遍历名单从 [`provision::model_catalog_apps`] 派生（不再是手写字符串数组 ——
+    // 那份曾经漏过生图档、和别处的平台名单各自漂移）。生图档位本来就从
+    // `rebuild_inputs_from_settings` 读不出重建要素，不在此列。
+    for app_type in provision::model_catalog_apps() {
         let providers = ProviderService::list(&state, app_type.clone())?;
         for mut provider in providers.into_values() {
             if !is_managed(&provider) {
@@ -5507,7 +5514,7 @@ pub async fn relay_reset_site_config(
                 continue;
             }
             let Some((api_key, base_url, model)) =
-                rebuild_inputs_from_settings(&app_type, &provider.settings_config)
+                rebuild_inputs_from_settings(app_type, &provider.settings_config)
             else {
                 log::warn!(
                     "{} 的配置读不出重建要素（sk/端点/模型），跳过恢复默认",
@@ -5516,7 +5523,7 @@ pub async fn relay_reset_site_config(
                 continue;
             };
             let Some(defaults) = provision::settings_config_for(
-                &app_type,
+                app_type,
                 &api_key,
                 &provider.name,
                 &base_url,
@@ -9760,6 +9767,92 @@ mod tests {
             .list_results(&[provider_id])
             .expect("target reports")
             .is_empty());
+    }
+
+    /// ⭐ 恢复默认必须保住**每一个**带目录平台的 `modelCatalog`。
+    ///
+    /// 回归背景：PR #237 给 grok 补目录时只改了 persist 侧的平台名单、漏了 reset 侧
+    /// ——「恢复默认」把 Claude / Gemini / Grok 的模型芯片清空到下次 provision。
+    /// 名单唯源是 [`provision::model_catalog_apps`]，这条测试按平台全量遍历：
+    /// 以后名单加平台，新平台自动被覆盖，不会再出现「persist 改了 reset 没跟」。
+    #[test]
+    fn reset_tier_config_keeps_the_model_catalog_for_every_catalog_app() {
+        for (app_type, model_names) in [
+            (AppType::Claude, vec!["claude-opus-5", "claude-sonnet-5"]),
+            (AppType::Codex, vec!["gpt-5.6-codex", "gpt-5.6-mini"]),
+            (AppType::Gemini, vec!["gemini-3-pro", "gemini-3-flash"]),
+            (AppType::GrokBuild, vec!["grok-4.6", "grok-4.5"]),
+        ] {
+            let models: Vec<String> = model_names.iter().map(|s| s.to_string()).collect();
+            let site = "https://catalog.example";
+            let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+            let state = AppState::new(db.clone());
+            let row_id = with_conn(&state, |conn| {
+                creds::save_site(conn, site, "Catalog", "https://catalog.example/v1")
+            })
+            .expect("save site");
+            with_conn(&state, |conn| {
+                creds::save_credentials(
+                    conn,
+                    row_id,
+                    creds::AccountIdentity {
+                        id: 7,
+                        label: "catalog@example.com",
+                        login_identifier: "catalog@example.com",
+                    },
+                    "token",
+                    None,
+                    None,
+                    creds::SessionEnvironment::default(),
+                )
+            })
+            .expect("save credentials");
+
+            let provider_id = provision::provider_id_for(site, Some(7), 1);
+            let settings = provision::settings_config_with_models(
+                &app_type,
+                "sk-catalog",
+                "Catalog·Pro",
+                "https://catalog.example/v1",
+                &models[0],
+                Some(&models),
+            )
+            .expect("settings with catalog");
+            // 前提：该平台的生成器真把目录写进了 settings（Gemini 只收 gemini-* 家族，
+            // 所以每个平台用自家家族的模型名）。
+            let before = models_from_settings(&settings);
+            assert_eq!(
+                before.len(),
+                models.len(),
+                "{} 的生成器没把目录写进 settings —— 测试前提不成立",
+                app_type.as_str()
+            );
+
+            db.save_provider(
+                app_type.as_str(),
+                &Provider {
+                    settings_config: settings,
+                    ..seeded_owned(&provider_id, "Catalog·Pro", Some(site), 7)
+                },
+            )
+            .expect("save provider");
+
+            reset_tier_config_in_state(&state, &provider_id, app_type.clone())
+                .expect("reset succeeds");
+
+            let after = state
+                .db
+                .get_provider_by_id(&provider_id, app_type.as_str())
+                .expect("read back")
+                .expect("provider 还在")
+                .settings_config;
+            assert_eq!(
+                models_from_settings(&after),
+                before,
+                "{} 恢复默认后 modelCatalog 必须原样保留",
+                app_type.as_str()
+            );
+        }
     }
 
     /// 备份是「删 auth.json」之前的唯一后路，所以它必须真的把内容拷出来。
