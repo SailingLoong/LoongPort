@@ -6061,8 +6061,8 @@ pub struct ImagegenGenerateResult {
 /// 与 MCP 工具（`--mcp-image-gen`）共用 [`imagegen`] 这一个核心 —— 档位选择、
 /// 请求形状、落盘与修剪完全一致，差别只在结果不进宿主对话。
 ///
-/// `n` = 张数（批量）。上限 4 是后端闸：前端选择器只放 1/2/4，但闸必须在后端 ——
-/// 一次 `n` 张就是 `n` 张的钱，别的入口（开发者工具直接 invoke）不该绕过它。
+/// `n` = 张数（批量）。范围判据的唯一源在核心层（`imagegen::validate_count`，
+/// 上限与计费后果的说明见那里），本层只做缺省补 1。
 #[tauri::command]
 pub async fn relay_imagegen_generate(
     app_handle: tauri::AppHandle,
@@ -6074,10 +6074,7 @@ pub async fn relay_imagegen_generate(
     if prompt.is_empty() {
         return Err("prompt 不能为空".into());
     }
-    let count = n.unwrap_or(1);
-    if !(1..=4).contains(&count) {
-        return Err("张数只支持 1 到 4".into());
-    }
+    let count = imagegen::validate_count(n.unwrap_or(1))?;
     let tier = imagegen::load_current_tier()?;
     let images = imagegen::generate_image(
         &tier,

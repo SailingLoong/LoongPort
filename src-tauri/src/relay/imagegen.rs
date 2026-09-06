@@ -338,24 +338,43 @@ pub(crate) fn output_dir() -> PathBuf {
 /// 一次请求的超时上限 = 每张图 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的既证预算 × 张数。
 ///
 /// 生图慢（实测单张 30-90s），串行上游的耗时随 `n` 线性涨，超时也跟着涨才不至于
-/// 把能出完的请求掐死。**各入口按自己的约束取值**：
+/// 把能出完的请求掐死。两条入口都按 [`request_timeout`] 取值：
 ///
-/// | 入口 | 取值 | 为什么 |
-/// |---|---|---|
-/// | MCP 工具 | `n` 恒为 1 ⇒ 240s | codex 的工具超时默认正好 300s，两边同为 300 时真正的超时那次是宿主先报它那句泛泛的错 —— 留 60s 余量让「请求生图接口失败」这条更具体的先到。多张**不放大**：宿主 300s 会先杀掉调用，放大无意义；agent 要多张本来就并发多次调用工具，每次各自 240s |
-/// | App 内直接生图 | `request_timeout(n)` | 没有宿主超时这层约束，按张数放大的封顶才是诚实的等待上限（n=4 ⇒ 16 分钟封顶；正常远快于此，超时只兜底死掉的上游） |
+/// - **App 内直接生图**没有宿主超时这层约束，按张数放大的封顶就是诚实的等待上限
+///   （n=4 ⇒ 16 分钟封顶；正常远快于此，超时只兜底死掉的上游）。
+/// - **MCP 工具**的 `n` 由宿主 agent 传（默认 1）。codex 的工具超时默认正好 300s，
+///   单张时两边同为 300 会让宿主先报它那句泛泛的错 —— 所以单张预算是 240s 而不是
+///   300s，留 60s 余量让「请求生图接口失败」这条更具体的先到；多张时宿主默认
+///   超时大概率先杀掉调用（schema 的 `n` 描述里写明了这点，并建议要更多张时
+///   并发多次调用工具、每次各自计时）。我们这层仍按张数放大：宿主侧调大了超时
+///   （或 claude / gemini 这类默认更宽的宿主）时，不该被我们自己的客户端掐死。
 const SINGLE_IMAGE_TIMEOUT_SECS: u64 = 240;
 
-/// 见 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的表：只有 App 内入口用它，MCP 入口固定 `n=1`。
+/// 见 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的文档。
 pub(crate) fn request_timeout(n: u32) -> std::time::Duration {
     std::time::Duration::from_secs(SINGLE_IMAGE_TIMEOUT_SECS * n.max(1) as u64)
 }
 
+/// 一次请求最多几张。闸在核心层这一份（两条入口都调 [`validate_count`]）：
+/// 一次 `n` 张就是 `n` 张的钱，前端选择器与工具 schema 只放合法值，
+/// 但真正的闸必须在后端 —— 别的入口不该绕过它。
+pub(crate) const MAX_IMAGE_COUNT: u32 = 4;
+
+/// 张数的唯一判据（合法原样返回，越界报错）。App 内命令与 MCP 工具共用，
+/// 各自再写一遍范围就会分叉。
+pub(crate) fn validate_count(n: u32) -> Result<u32, String> {
+    if (1..=MAX_IMAGE_COUNT).contains(&n) {
+        Ok(n)
+    } else {
+        Err(format!("张数只支持 1 到 {MAX_IMAGE_COUNT}"))
+    }
+}
+
 /// 调一次生图（`n` 张），返回落盘后的文件（每张一个元素）。
 ///
-/// `n` 由调用方给定：App 内入口来自生成视图的张数选择；MCP 入口恒为 1（工具
-/// schema 有意不暴露 `n`，理由见 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的表）。响应解析、
-/// 落盘与修剪从第一天起就按「一次可能多张」处理，这里只是把入口接上。
+/// `n` 由调用方给定并已过 [`validate_count`]：App 内入口来自生成视图的张数选择；
+/// MCP 入口来自工具参数（宿主 agent 传，默认 1）。响应解析、落盘与修剪从第一天起
+/// 就按「一次可能多张」处理，这里只是把入口接上。
 pub(crate) async fn generate_image(
     tier: &Tier,
     prompt: &str,
@@ -759,6 +778,17 @@ base_url = "https://api.example.com/v1"
             240,
             "n=0 必须兜底成一张的预算，否则是个 0 秒必超时的请求"
         );
+    }
+
+    /// 张数闸：合法原样返回、越界报错。两条入口共用这一份判据 ——
+    /// 它分叉的那天，App 内和 MCP 会各自接受不同的张数。
+    #[test]
+    fn validate_count_is_the_single_range_gate() {
+        assert_eq!(validate_count(1).unwrap(), 1);
+        assert_eq!(validate_count(4).unwrap(), 4);
+        for bad in [0, 5, 50] {
+            assert!(validate_count(bad).is_err(), "n={bad} 必须被拒");
+        }
     }
 
     /// 同一份内容得到同一个名字（可复现），不同内容不撞名。

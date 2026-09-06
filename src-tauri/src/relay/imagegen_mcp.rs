@@ -170,8 +170,9 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// 本 server 暴露的工具清单。
 ///
-/// **只有一个工具**：需求是「在对话里生图」。编辑图 / 批量 / 透明背景那些等有人真要
+/// **只有一个工具**：需求是「在对话里生图」。编辑图 / 透明背景那些等有人真要
 /// 再加 —— 每个工具都要写 schema、要在 prompt 里占位置，先把一件事做对。
+/// （张数 `n` 是参数不是工具：一次调 `n` 张与并发调 `n` 次是同一张账单。）
 fn tools_list() -> Value {
     json!([{
         "name": "generate_image",
@@ -186,6 +187,10 @@ fn tools_list() -> Value {
                 "size": {
                     "type": "string",
                     "description": "图片尺寸，形如 1024x1024 或 1536x1024。省略则用 1024x1024。注意上游可能返回与请求不同的实际尺寸。"
+                },
+                "n": {
+                    "type": "integer",
+                    "description": "一次生成几张（1-4，默认 1）。按张数计费且耗时成倍增加；宿主的工具超时（codex 默认 300 秒）可能在多张时先到 —— 要更多张时，并发多次调用本工具（每次各自计时）通常更稳。"
                 }
             },
             "required": ["prompt"]
@@ -240,15 +245,17 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
         .filter(|s| !s.is_empty())
         .ok_or("generate_image 需要非空的 prompt")?;
     let size = args.get("size").and_then(Value::as_str);
+    // 张数由宿主 agent 传，默认 1。校验放在读档位**之前**：越界是调用方的错，
+    // 该先报它（没配档位的机器上也能得到这条而不是「还没选定档位」）。
+    // 范围判据的唯一源在核心层（`imagegen::validate_count`），与 App 内入口共用。
+    let n = args.get("n").and_then(Value::as_u64).unwrap_or(1);
+    let n = imagegen::validate_count(u32::try_from(n).unwrap_or(u32::MAX))?;
 
     // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
     // 档位，下一次生图就该用新的，**不必重启 codex**。见 `imagegen::current_image_tier_id`。
-    //
-    // `n` 恒为 1（工具 schema 有意不暴露批量，理由见 `imagegen::SINGLE_IMAGE_TIMEOUT_SECS`
-    // 的表：宿主 300s 会先杀掉长调用，agent 要多张本来就并发多次调用工具）。
     let tier = imagegen::load_current_tier()?;
     let images =
-        imagegen::generate_image(&tier, prompt, size, 1, imagegen::request_timeout(1)).await?;
+        imagegen::generate_image(&tier, prompt, size, n, imagegen::request_timeout(n)).await?;
     let list = images
         .iter()
         .map(|i| i.path.display().to_string())
