@@ -974,8 +974,10 @@ pub fn select_env_model(
             "配置里缺少 env 对象，无法写入 {env_key}"
         )));
     };
+    // claude 平台选模型写入时与 provision 同一张 1M 前缀表（远端合并后的）——
+    // 否则远端更新名单后，用户一切模型就丢掉新声明。
     let value = if matches!(app_type, AppType::Claude) {
-        maybe_one_m(model)
+        maybe_one_m(&ModelSelectionTables::resolve(), model)
     } else {
         model.to_string()
     };
@@ -1168,6 +1170,27 @@ const CLAUDE_HAIKU_CANDIDATES: &[&str] = &["claude-haiku-4-5", "gpt-5.6-luna", "
 /// **顺延**而不是照旧写一个列表里不存在的模型 —— 那是选中即 404。
 const CODEX_MAIN_CANDIDATES: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4"];
 
+/// 支持 1M 上下文的模型**前缀**名单（内置兜底，远端可覆盖）。
+///
+/// 名单是**新一代旗舰模型**：Anthropic 官方这些模型统一 1M 窗口（opus-5 / sonnet-5 /
+/// haiku-4-5 / fable-5）、gpt-5.6 是 OpenAI 新一代（用户确认瓜子 api 支持 1M）、
+/// deepseek-v4 官网直连已确认（`vendor/deepseek.rs` 的 `PRO_1M`）。
+///
+/// gpt / deepseek 两家的裸名（`gpt-5.6` / `deepseek-v4`）**不是可访问的模型 id**
+/// （中转站只认 luna / sol / terra、pro / flash 这些子模型）—— 前缀带尾连字符，
+/// 只命中子模型形态，不会把裸名误判成「它支持 1M」。
+///
+/// 新一代模型发布时从远端 `relay_model_selection.one_m_prefixes` 覆盖即可（免发版）；
+/// 这里只作远端缺席/清洗后为空的内置回落。
+const ONE_M_MODEL_PREFIXES: &[&str] = &[
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+    "claude-fable-5",
+    "gpt-5.6-",
+    "deepseek-v4-",
+];
+
 /// 解析后的模型选型表：内置常量经远端覆盖合并后的产物，选型逻辑的**唯一数据源**。
 ///
 /// ## 为什么收成一张表
@@ -1194,6 +1217,11 @@ pub struct ModelSelectionTables {
     pub claude_sonnet: Vec<String>,
     /// claude 平台「弱档」候选（内置 `CLAUDE_HAIKU_CANDIDATES`）。
     pub claude_haiku: Vec<String>,
+    /// 支持 1M 上下文的模型前缀（内置 [`ONE_M_MODEL_PREFIXES`]）。远端覆盖的动机：
+    /// 新一代旗舰发布时免发版跟进。⚠️ 与候选表不同，前缀**没有** `first_hit` 式的
+    /// 「坏值只敢不生效」保护 —— 多认一个前缀 = 给不支持的模型声明 1M（Claude Code
+    /// 按更大窗口跑），所以远端这张表由维护者签名发布、同样宁保守。
+    pub one_m_prefixes: Vec<String>,
 }
 
 /// 远端一张候选列表的清洗：条目 trim 后为空的剔除，剔完整张表空了就当没给。
@@ -1236,6 +1264,10 @@ impl ModelSelectionTables {
                 .iter()
                 .map(|entry| entry.to_string())
                 .collect(),
+            one_m_prefixes: ONE_M_MODEL_PREFIXES
+                .iter()
+                .map(|entry| entry.to_string())
+                .collect(),
         }
     }
 
@@ -1258,6 +1290,7 @@ impl ModelSelectionTables {
             claude_opus: merged_list(remote.claude_opus.as_ref(), CLAUDE_OPUS_CANDIDATES),
             claude_sonnet: merged_list(remote.claude_sonnet.as_ref(), CLAUDE_SONNET_CANDIDATES),
             claude_haiku: merged_list(remote.claude_haiku.as_ref(), CLAUDE_HAIKU_CANDIDATES),
+            one_m_prefixes: merged_list(remote.one_m_prefixes.as_ref(), ONE_M_MODEL_PREFIXES),
         }
     }
 
@@ -1395,7 +1428,7 @@ fn pick_claude_tier_models(models: &[String], tables: &ModelSelectionTables) -> 
     //
     // `[1M]` 是 Claude Code 认的本地能力声明（转发到上游前剥掉），
     // codex 档位的 config.toml 不认后缀 —— 所以只在这里（claude 平台）加。
-    let one_m = |m: String| maybe_one_m(&m);
+    let one_m = |m: String| maybe_one_m(tables, &m);
     TierModels {
         claude_roles: Some(ClaudeRoleModels {
             opus: one_m(opus.clone()),
@@ -1421,38 +1454,29 @@ fn first_hit(candidates: &[String], models: &[String]) -> Option<String> {
 
 /// 该模型是否支持 1M 上下文 —— claude 平台档位给它附 `[1M]` 后缀声明。
 ///
-/// 名单是**新一代旗舰模型**：Anthropic 官方这些模型统一 1M 窗口（opus-5 / sonnet-5 /
-/// haiku-4-5 / fable-5）、gpt-5.6 是 OpenAI 新一代（用户确认瓜子 api 支持 1M）、
-/// deepseek-v4 官网直连已确认（`vendor/deepseek.rs` 的 `PRO_1M`）。
+/// 名单（[`ModelSelectionTables::one_m_prefixes`]，内置见 [`ONE_M_MODEL_PREFIXES`]，
+/// 可被远端 `relay_model_selection.one_m_prefixes` 覆盖）是**新一代旗舰模型**：
+/// Anthropic 官方这些模型统一 1M 窗口（opus-5 / sonnet-5 / haiku-4-5 / fable-5）、
+/// gpt-5.6 是 OpenAI 新一代（用户确认瓜子 api 支持 1M）、deepseek-v4 官网直连已确认
+/// （`vendor/deepseek.rs` 的 `PRO_1M`）。
 ///
 /// ⚠️ `[1M]` 是**本地能力声明**：Claude Code 认它、转发到上游前剥掉
 /// （`proxy/model_mapper.rs::strip_one_m_suffix_for_upstream`）。声明错了不会报错、
 /// 只是让 Claude Code 按更大的窗口跑 —— 所以名单宁保守、别乱扩。
-///
-/// ⚠️ 只匹配**带子模型后缀**的形态（`gpt-5.6-sol` 等）：裸 `gpt-5.6` 不是可访问的
-/// 模型 id（中转站只认 luna / sol / terra 这些子模型），不该被当成「它支持 1M」。
-fn supports_one_m(model: &str) -> bool {
-    const ONE_M_MODEL_PREFIXES: &[&str] = &[
-        "claude-opus-5",
-        "claude-sonnet-5",
-        "claude-haiku-4-5",
-        "claude-fable-5",
-        // 这两个家族的裸名（`gpt-5.6` / `deepseek-v4`）**不是可访问的模型 id** ——
-        // 必须带子模型后缀（luna/sol/terra、pro/flash）。前缀带尾连字符，
-        // 只命中子模型形态，不会把裸名误判成「它支持 1M」。
-        "gpt-5.6-",
-        "deepseek-v4-",
-    ];
+fn supports_one_m(tables: &ModelSelectionTables, model: &str) -> bool {
     let m = model.trim();
-    ONE_M_MODEL_PREFIXES.iter().any(|p| m.starts_with(p))
+    tables
+        .one_m_prefixes
+        .iter()
+        .any(|p| m.starts_with(p.as_str()))
 }
 
 /// claude 平台档位用：模型支持 1M 则附 `[1M]` 后缀，否则原样返回。
 ///
 /// 后缀复用 [`crate::claude_desktop_config::ONE_M_CONTEXT_MARKER`]（小写 `[1m]`，
 /// Claude Code 匹配大小写不敏感）。
-fn maybe_one_m(model: &str) -> String {
-    if supports_one_m(model) {
+fn maybe_one_m(tables: &ModelSelectionTables, model: &str) -> String {
+    if supports_one_m(tables, model) {
         format!("{model}{ONE_M_CONTEXT_MARKER}")
     } else {
         model.to_string()
@@ -2175,6 +2199,8 @@ mod tests {
             claude_opus: Some(vec!["".into(), "  ".into()]),
             claude_sonnet: None,
             claude_haiku: None,
+            // 前缀表同样字段级覆盖；清洗后为空回落内置。
+            one_m_prefixes: Some(vec!["".into(), "  ".into()]),
         };
         let merged = ModelSelectionTables::merge(Some(&remote));
         assert_eq!(merged.default_model, builtin.default_model);
@@ -2182,6 +2208,7 @@ mod tests {
         assert_eq!(merged.claude_opus, builtin.claude_opus);
         assert_eq!(merged.claude_sonnet, builtin.claude_sonnet);
         assert_eq!(merged.claude_haiku, builtin.claude_haiku);
+        assert_eq!(merged.one_m_prefixes, builtin.one_m_prefixes);
 
         let trimmed = crate::relay::remote_config::RemoteModelSelection {
             default_model: Some(" gpt-6-astra ".into()),
@@ -2410,20 +2437,49 @@ mod tests {
     /// `[1M]` 只声明给支持 1M 的新一代模型，且裸名（gpt-5.6 / deepseek-v4）不算数。
     #[test]
     fn one_m_suffix_only_for_supported_generations() {
-        assert_eq!(maybe_one_m("claude-opus-5"), "claude-opus-5[1m]");
-        assert_eq!(maybe_one_m("claude-sonnet-5"), "claude-sonnet-5[1m]");
-        assert_eq!(maybe_one_m("claude-haiku-4-5"), "claude-haiku-4-5[1m]");
-        assert_eq!(maybe_one_m("gpt-5.6-sol"), "gpt-5.6-sol[1m]");
-        assert_eq!(maybe_one_m("gpt-5.6-terra"), "gpt-5.6-terra[1m]");
-        assert_eq!(maybe_one_m("deepseek-v4-flash"), "deepseek-v4-flash[1m]");
+        let builtin = ModelSelectionTables::builtin();
+        assert_eq!(maybe_one_m(&builtin, "claude-opus-5"), "claude-opus-5[1m]");
+        assert_eq!(
+            maybe_one_m(&builtin, "claude-sonnet-5"),
+            "claude-sonnet-5[1m]"
+        );
+        assert_eq!(
+            maybe_one_m(&builtin, "claude-haiku-4-5"),
+            "claude-haiku-4-5[1m]"
+        );
+        assert_eq!(maybe_one_m(&builtin, "gpt-5.6-sol"), "gpt-5.6-sol[1m]");
+        assert_eq!(maybe_one_m(&builtin, "gpt-5.6-terra"), "gpt-5.6-terra[1m]");
+        assert_eq!(
+            maybe_one_m(&builtin, "deepseek-v4-flash"),
+            "deepseek-v4-flash[1m]"
+        );
         // 旧代 / 裸名 / 其它家族：不声明。
-        assert_eq!(maybe_one_m("gpt-5.4"), "gpt-5.4");
-        assert_eq!(maybe_one_m("claude-sonnet-4-5"), "claude-sonnet-4-5");
-        assert_eq!(maybe_one_m("gemini-3-pro"), "gemini-3-pro");
+        assert_eq!(maybe_one_m(&builtin, "gpt-5.4"), "gpt-5.4");
+        assert_eq!(
+            maybe_one_m(&builtin, "claude-sonnet-4-5"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(maybe_one_m(&builtin, "gemini-3-pro"), "gemini-3-pro");
         // 裸 gpt-5.6 不是可访问的模型 id，不该被当成「支持 1M」。
-        assert!(!supports_one_m("gpt-5.6"));
-        assert!(!supports_one_m("deepseek-v4"));
-        assert!(supports_one_m("gpt-5.6-luna"));
+        assert!(!supports_one_m(&builtin, "gpt-5.6"));
+        assert!(!supports_one_m(&builtin, "deepseek-v4"));
+        assert!(supports_one_m(&builtin, "gpt-5.6-luna"));
+
+        // 远端覆盖：新一代（claude-opus-6）免发版跟进，内置不在名单的旧代被替换掉。
+        let next_gen = ModelSelectionTables {
+            one_m_prefixes: vec!["claude-opus-6".into()],
+            ..builtin.clone()
+        };
+        assert_eq!(
+            maybe_one_m(&next_gen, "claude-opus-6"),
+            "claude-opus-6[1m]",
+            "远端名单让新代际立即拿到 1M 声明"
+        );
+        assert_eq!(
+            maybe_one_m(&next_gen, "claude-opus-5"),
+            "claude-opus-5",
+            "整表替换而不是追加 —— 维护者显式复述想保留的条目"
+        );
     }
 
     /// 这是「claude 档位写 gpt-5.6-sol」bug 的直接回归：挑模型 + 生成配置整条链路。
