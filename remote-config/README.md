@@ -42,6 +42,40 @@ $EDITOR public/v2/directory.json
 授权维护者在仓库外通过运行时环境变量 `LOONGPORT_CONFIG_KEY` 提供 Ed25519 私钥。
 私钥绝不提交、复制到文档或写入日志；密钥配置与恢复请查本机 `--help` 或组织私有 runbook。
 
+## v2 plaza policy（广场展示策略）
+
+`https://config.loongport.dev/v2/plaza.json`（签名同名加 `.sig`，明文源
+`public/v2/plaza.json`）是**广场展示否决**（`blocked_hosts`）的唯一权威来源。
+它与 v2 provider policy 是两回事：那份管「哪些站可被消费」，这份只管「广场
+展示谁」。
+
+## 为什么展示策略要单独一个版本化端点（2026-09-06 广场下线的后续）
+
+老客户端把 v1 URL 烧死在二进制里，只能看到 v1 `relay_directory.blocked_hosts`
+的**墓碑全量**（09-06 为下线广场填入的全部受管站 host）。广场的恢复如果仍在
+v1 上做（收窄 blocked_hosts），存量客户端会立刻重见广场。v2 plaza 只有新版本
+客户端读取（`remote_config.rs::load_plaza_config`），展示策略从此只对发了版的
+新代码生效；配套的每用户「广场开关」按首启归因播种（`relay/plaza.rs`），站长
+引流来的用户默认关。
+
+分工纪律：**站点事实（别名、注册/购买/用量入口 URL）留在 v1 的
+`relay_directory.sites` 唯源**，v2 plaza 只拥有 blocked —— 改入口 URL 不动
+v2，改展示策略不动 v1，两份文件互不为对方的副本。由此 v1 上多了一条**墓碑
+不变式**（cargo 测试 `checked_in_config_keeps_the_plaza_tombstone_closed` 守着）：
+v1 的 `blocked_hosts` 必须 ⊇ v1 四源（sponsors/aff/promo/directory.sites）的
+全部 host —— 将来新收录一家站（加 aff 码）而忘了同步扩 v1 的 blocked，老
+客户端的广场会凭空多出一行；这条测试让那次忘记直接红。
+
+日常更新 v2 plaza（比如恢复广场 = 收窄 blocked_hosts）：
+
+```bash
+cd remote-config
+$EDITOR public/v2/plaza.json    # 改 blocked_hosts，记得更新 issued_at
+./sign-plaza.sh                 # 重新签名（忘了 = 客户端整份拒绝）
+./deploy.sh                     # 部署（会先验 v1+v2 三对签名）
+./verify-plaza.sh               # 验线上（等 ~30 秒再跑，CDN 300 秒缓存）
+```
+
 ## 日常：加一家赞助商 / 改一个邀请码
 
 ```bash
@@ -166,9 +200,11 @@ CDN 或攻击者可以重放一份**旧的、签名仍然有效**的配置，把
 |---|---|---|
 | `sign.sh` | 签名，然后**用代码里那把公钥**验一遍 | 每次改完 `config.json` |
 | `sign-v2.sh` | 签名 v2 directory，再用 production public key 自验 | 每次改完 `directory.json` |
+| `sign-plaza.sh` | 签名 v2 plaza，再用 production public key 自验 | 每次改完 `plaza.json` |
 | `deploy.sh` | 先本地验签，通过才部署到 Pages | 签完 |
 | `verify.sh` | 拉**线上**那两个文件验签，并比对与本地是否一致 | 部署后 |
 | `verify-v2.sh` | 验 v2 policy；`--local-only` 不访问网络 | 签名后、部署后 |
+| `verify-plaza.sh` | 验 v2 plaza；`--local-only` 不访问网络 | 签名后、部署后 |
 | `lib.sh` | 三者共用的函数（从 `.rs` 取常量、hex→DER、验签），**不单独执行** | — |
 
 ## 公开观测数据
