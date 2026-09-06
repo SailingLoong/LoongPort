@@ -5,15 +5,20 @@ import { describe, expect, it, vi } from "vitest";
 import type { StarRewardOffer } from "@/lib/api";
 import { StarRewardDialog } from "@/components/StarRewardDialog";
 
-const { openRegisterWindow, openExternal, markClaimed } = vi.hoisted(() => ({
-  openRegisterWindow: vi.fn(),
-  openExternal: vi.fn(),
-  markClaimed: vi.fn(),
-}));
+const { openRegisterWindow, openExternal, markClaimed, autoStar } = vi.hoisted(
+  () => ({
+    openRegisterWindow: vi.fn(),
+    openExternal: vi.fn(),
+    markClaimed: vi.fn(),
+    // 默认 resolved：组件对它是 fire-and-forget（.catch 兜底），mock 返回
+    // undefined 会在 .catch 上直接 TypeError。
+    autoStar: vi.fn().mockResolvedValue(undefined),
+  }),
+);
 
 vi.mock("@/lib/api", () => ({
   settingsApi: { openExternal },
-  starRewardApi: { openRegisterWindow, markClaimed },
+  starRewardApi: { openRegisterWindow, markClaimed, autoStar },
 }));
 vi.mock("@/lib/clipboard", () => ({
   copyText: vi.fn().mockResolvedValue(undefined),
@@ -48,6 +53,8 @@ describe("StarRewardDialog", () => {
     expect(openExternal).toHaveBeenCalledWith(
       "https://github.com/SailingLoong/LoongPort",
     );
+    // gh 自动点星在领取时刻 fire-and-forget（后台尽力而为，不参与断言成败）
+    expect(autoStar).toHaveBeenCalled();
     expect(markClaimed).toHaveBeenCalled();
     await waitFor(() =>
       expect(openRegisterWindow).toHaveBeenCalledWith("LOONGPORT5"),
