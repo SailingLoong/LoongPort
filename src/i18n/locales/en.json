@@ -3207,7 +3207,7 @@
       "errorTitle": "Could not load the relay directory",
       "errorBody": "Neither live data nor the last successful cache is available.",
       "refreshFailed": "Could not refresh the VeriDrop leaderboard: {{reason}}",
-      "empty": "No sites match the current filters",
+      "empty": "No sites match the current filters — type in the search box to add one directly",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude thinking-signature verification rate",
       "transit": {
