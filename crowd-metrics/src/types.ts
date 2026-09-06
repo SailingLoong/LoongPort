@@ -111,6 +111,19 @@ export interface SiteTrend {
 /** P4：模型趋势（无范围分布 —— 站点级已有，模型级省载荷）。 */
 export interface SiteTrendLite {
   buckets: Array<TrendBucket & { tpsP50Ms?: number | null; costUsdPerMTok?: number | null }>;
+  /** P4c-2：该范围内该 (站点,模型) 的窗口聚合（斩杀线图阵的散点口径；
+   *  范围级 k-匿未达标则缺省）。 */
+  window?: ModelWindowStats;
+}
+
+/** P4c-2：(站点,模型,范围) 窗口聚合——样本加权，非逐桶平均。 */
+export interface ModelWindowStats {
+  samples: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  errRate: number | null;
+  tpsP50Ms: number | null;
+  costUsdPerMTok: number | null;
 }
 
 /** 档位 → 站点趋势。 */
