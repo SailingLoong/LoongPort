@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-09-06T12:00:00Z",
+  "issued_at": "2026-09-06T13:00:00Z",
   "star_reward": {
     "promo_code": "LOONGPORT5",
     "amount_usd": 5
@@ -7,79 +7,7 @@
   "vendor_invite_urls": {
     "bigmodel": "https://www.bigmodel.cn/login?icode=9g7xCHQO8WMdZ54ByDv%2FI%2BZLO2QH3C0EBTSr%2BArzMw4%3D&from=invite&redirect=%2F"
   },
-  "sponsors": [
-    {
-      "site_origin": "https://wawapii.com",
-      "display_name": "WawAPI",
-      "tagline": "WawAPI AI API Gateway Platform"
-    },
-    {
-      "site_origin": "https://hapiopen.cc",
-      "display_name": "H API",
-      "tagline": "H API"
-    },
-    {
-      "site_origin": "https://www.999555999.com",
-      "display_name": "猫肥Neko API",
-      "tagline": "最懂您"
-    },
-    {
-      "site_origin": "https://wawazz.xyz",
-      "display_name": "WAWA ZZ API"
-    },
-    {
-      "site_origin": "https://anpin.ai",
-      "display_name": "AnPin AI"
-    },
-    {
-      "site_origin": "https://onepig123.com",
-      "display_name": "粉猪模型网关"
-    },
-    {
-      "site_origin": "https://linkai.shop",
-      "display_name": "LinkAI"
-    },
-    {
-      "site_origin": "https://passion8.cc",
-      "display_name": "Passion8 API"
-    },
-    {
-      "site_origin": "https://api-top.com",
-      "display_name": "Top-API"
-    },
-    {
-      "site_origin": "https://x-llm.net",
-      "display_name": "x-llm"
-    },
-    {
-      "site_origin": "https://ssnaiyun.com",
-      "display_name": "SSN AI"
-    },
-    {
-      "site_origin": "https://relaybases.com",
-      "display_name": "RelayBases"
-    },
-    {
-      "site_origin": "https://api.ooapi.cc",
-      "display_name": "玩转AI"
-    },
-    {
-      "site_origin": "https://cc-vibe.com",
-      "display_name": "CCVibe"
-    },
-    {
-      "site_origin": "https://codex666ai.com",
-      "display_name": "codex666ai"
-    },
-    {
-      "site_origin": "https://sub.kedaya.xyz",
-      "display_name": "Kedaya 中转站"
-    },
-    {
-      "site_origin": "https://nexaxis.ai",
-      "display_name": "NEXAXIS"
-    }
-  ],
+  "sponsors": [],
   "aff_codes": {
     "api.aijws.com": "RJZUAA8XX6W7",
     "790053500.com": "FQSPPFUYXSSS",
