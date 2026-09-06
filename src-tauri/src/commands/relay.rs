@@ -9447,6 +9447,7 @@ mod tests {
             verdict,
             evidence_level: EvidenceLevel::ProtocolBehavior,
             facts: Vec::new(),
+            diagnostics: Vec::new(),
             rules_version: RULES_VERSION,
             checked_at: 1_786_214_400,
         }

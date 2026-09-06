@@ -564,11 +564,34 @@ fn persisted_rows(db: &Database) -> String {
         .join("\n")
 }
 
+/// 把序列化产物按 `"diagnostics":[...]` 段切开：诊断里的请求/响应原文
+/// 是有意承载的（用户查看原因），非诊断段仍按全口径断言。
+fn split_diagnostics(material: &str) -> (String, String) {
+    let key = "\"diagnostics\":[";
+    match (material.find(key), material.find("],\"rulesVersion\"")) {
+        (Some(start), Some(end)) if end > start => {
+            let diagnostics = material[start..end].to_string();
+            let rest = format!(
+                "{}{}",
+                &material[..start],
+                &material[end.min(material.len())..]
+            );
+            (rest, diagnostics)
+        }
+        _ => (material.to_string(), String::new()),
+    }
+}
+
 fn assert_no_private_values(
     label: &str,
     material: &str,
     request_private_strings: &BTreeSet<String>,
 ) {
+    // 诊断边车（report.diagnostics）有意承载失败腿的原始请求/响应——
+    // 这正是「点开查看原因」的功能。所以凭证三禁（API key / thinking /
+    // signature）是绝对红线；URL 与响应回显内容对诊断放行（URL 本就
+    // 存在 providers 表，非新增泄漏）。先把诊断段剥出来单独按宽口径检查。
+    let (material_without_diagnostics, diagnostics_material) = split_diagnostics(material);
     for sentinel in [
         URL_SENTINEL,
         API_KEY_SENTINEL,
@@ -580,13 +603,19 @@ fn assert_no_private_values(
     .into_iter()
     {
         assert!(
-            !material.contains(sentinel),
+            !material_without_diagnostics.contains(sentinel),
             "{label} leaked private sentinel {sentinel:?}"
+        );
+    }
+    for sentinel in [API_KEY_SENTINEL, THINKING_SENTINEL, SIGNATURE_SENTINEL] {
+        assert!(
+            !diagnostics_material.contains(sentinel),
+            "{label} diagnostics leaked credential/signature sentinel {sentinel:?}"
         );
     }
     for private_string in request_private_strings {
         assert!(
-            !material.contains(private_string),
+            !material_without_diagnostics.contains(private_string),
             "{label} leaked captured request content {private_string:?}"
         );
     }

@@ -1,12 +1,8 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { CircleAlert, Copy, Check } from "lucide-react";
 
-import type {
-  ProbeDiagnostic,
-  VerificationReport,
-} from "@/lib/api/modelVerification";
-import { modelVerificationApi } from "@/lib/api/modelVerification";
+import type { VerificationReport } from "@/lib/api/modelVerification";
 
 export interface VerificationEvidenceListProps {
   report: VerificationReport;
@@ -14,41 +10,21 @@ export interface VerificationEvidenceListProps {
 
 /**
  * 验证依据列表：未通过行带小叹号，点开在列表下方展开该腿留存的原始
- * 请求/响应（诊断边车）——用户知情与 debug 共用这一份。
+ * 请求/响应（报告自带的诊断——历史里展示哪份报告就显示哪份的诊断）。
  */
 export function VerificationEvidenceList({
   report,
 }: VerificationEvidenceListProps) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [items, setItems] = useState<ProbeDiagnostic[] | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const toggle = useCallback(
-    async (code: string) => {
-      if (expanded === code) {
-        setExpanded(null);
-        return;
-      }
-      setExpanded(code);
-      setItems(null);
-      try {
-        const loaded = await modelVerificationApi.diagnostics(
-          report.target.providerId,
-          report.target.appType,
-          report.target.model,
-        );
-        setItems(loaded.filter((item) => item.code === code));
-      } catch {
-        // 读不到就显示「无留存」，不给用户报错。
-        setItems([]);
-      }
-    },
-    [expanded, report.target],
-  );
+  const diagnosticsFor = (code: string) =>
+    (report.diagnostics ?? []).filter((item) => item.code === code);
 
-  const copyAll = async () => {
-    if (!items?.length) return;
+  const copyAll = async (code: string) => {
+    const items = diagnosticsFor(code);
+    if (!items.length) return;
     const text = items
       .map(
         (item) =>
@@ -86,7 +62,9 @@ export function VerificationEvidenceList({
                     title={t("loongport.modelVerification.evidence.diagnose")}
                     aria-label={`${label}: ${t("loongport.modelVerification.evidence.diagnose")}`}
                     aria-expanded={expanded === fact.code}
-                    onClick={() => void toggle(fact.code)}
+                    onClick={() =>
+                      setExpanded(expanded === fact.code ? null : fact.code)
+                    }
                   >
                     <CircleAlert className="h-3.5 w-3.5" />
                   </button>
@@ -107,11 +85,11 @@ export function VerificationEvidenceList({
             <p className="text-xs font-medium">
               {t("loongport.modelVerification.diagnostic.title")}
             </p>
-            {items?.length ? (
+            {diagnosticsFor(expanded).length ? (
               <button
                 type="button"
                 className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                onClick={() => void copyAll()}
+                onClick={() => void copyAll(expanded)}
               >
                 {copied ? (
                   <Check className="h-3 w-3" />
@@ -124,17 +102,12 @@ export function VerificationEvidenceList({
               </button>
             ) : null}
           </div>
-          {items === null && (
-            <p className="text-xs text-muted-foreground">
-              {t("loongport.modelVerification.diagnostic.loading")}
-            </p>
-          )}
-          {items?.length === 0 && (
+          {diagnosticsFor(expanded).length === 0 && (
             <p className="text-xs text-muted-foreground">
               {t("loongport.modelVerification.diagnostic.empty")}
             </p>
           )}
-          {items?.map((item, index) => (
+          {diagnosticsFor(expanded).map((item, index) => (
             <div key={index} className="space-y-1">
               <p className="text-xs text-muted-foreground">
                 {t(

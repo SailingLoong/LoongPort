@@ -82,6 +82,7 @@ pub fn evaluate_passive(
         verdict,
         evidence_level: EvidenceLevel::ProtocolBehavior,
         facts: batch.facts.clone(),
+        diagnostics: Vec::new(),
         rules_version: RULES_VERSION,
         checked_at: batch.observed_at,
     })

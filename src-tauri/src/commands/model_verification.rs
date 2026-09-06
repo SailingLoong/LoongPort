@@ -32,22 +32,6 @@ pub async fn list_verification_models(
 }
 
 #[tauri::command]
-pub async fn get_model_verification_diagnostics(
-    state: tauri::State<'_, AppState>,
-    provider_id: String,
-    app_type: String,
-    model: String,
-) -> Result<Vec<crate::relay::model_verification::types::ProbeDiagnostic>, String> {
-    crate::relay::model_verification::store::active_diagnostics(
-        &state.db,
-        &provider_id,
-        &app_type,
-        &model,
-    )
-    .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 pub async fn start_model_verification(
     state: tauri::State<'_, AppState>,
     provider_id: String,
@@ -257,6 +241,7 @@ mod tests {
                 verdict: Verdict::Trusted,
                 evidence_level: EvidenceLevel::ProtocolBehavior,
                 facts: vec![fact.clone()],
+                diagnostics: Vec::new(),
                 rules_version: RULES_VERSION,
                 checked_at: 1_700_000_000,
             },
@@ -281,6 +266,7 @@ mod tests {
                     verdict: Verdict::Trusted,
                     evidence_level: EvidenceLevel::ProtocolBehavior,
                     facts: vec![fact],
+                    diagnostics: Vec::new(),
                     rules_version: RULES_VERSION,
                     checked_at: 1_700_000_000,
                 },
@@ -316,6 +302,7 @@ mod tests {
                     verdict,
                     evidence_level: EvidenceLevel::ProtocolBehavior,
                     facts: Vec::new(),
+                    diagnostics: Vec::new(),
                     rules_version: RULES_VERSION,
                     checked_at,
                 },

@@ -61,6 +61,8 @@ export interface VerificationReport {
   verdict: VerificationVerdict;
   evidenceLevel: EvidenceLevel;
   facts: EvidenceFact[];
+  /** 失败腿的原始请求/响应（旧报告无此字段为 undefined）。 */
+  diagnostics?: ProbeDiagnostic[];
   rulesVersion: number;
   checkedAt: number;
 }
@@ -118,17 +120,6 @@ export const modelVerificationApi = {
     appType: string,
   ): Promise<VerificationModelOption[]> =>
     invoke("list_verification_models", { providerId, appType }),
-
-  diagnostics: (
-    providerId: string,
-    appType: string,
-    model: string,
-  ): Promise<ProbeDiagnostic[]> =>
-    invoke("get_model_verification_diagnostics", {
-      providerId,
-      appType,
-      model,
-    }),
 
   start: (target: VerificationTarget): Promise<StartRunResponse> =>
     invoke("start_model_verification", {

@@ -29,8 +29,7 @@ mod live_sweep_tests;
 mod tests {
     use super::{
         store::{
-            active_diagnostics, attach_diagnostics, clear_scope, list_for_provider_ids,
-            list_for_providers, upsert_active, upsert_passive,
+            clear_scope, list_for_provider_ids, list_for_providers, upsert_active, upsert_passive,
         },
         types::{
             EvidenceCode, EvidenceFact, EvidenceLevel, EvidenceOutcome, ProbeDiagnostic,
@@ -72,6 +71,7 @@ mod tests {
                 code: EvidenceCode::ModelMatch,
                 outcome: EvidenceOutcome::Passed,
             }],
+            diagnostics: Vec::new(),
             rules_version: RULES_VERSION,
             checked_at: 1_700_000_000,
         }
@@ -187,35 +187,23 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_roundtrip_and_clear_on_new_run() {
-        let db = Database::memory().unwrap();
-        insert_provider(&db, "provider-a", "claude").unwrap();
-        let target = TargetKey::new("provider-a", "claude", "gpt-a");
-        upsert_active(
-            &db,
-            &report("provider-a", "claude", "gpt-a", Verdict::Anomaly),
-        )
-        .unwrap();
-        let diagnostics = vec![ProbeDiagnostic {
+    fn diagnostics_travel_with_the_report_json() {
+        let mut failed = report("provider-a", "claude", "gpt-a", Verdict::Suspicious);
+        failed.diagnostics = vec![ProbeDiagnostic {
             probe: "core".into(),
             code: EvidenceCode::ModelMatch,
             request: "{...}".into(),
             response: "{...}".into(),
         }];
-        attach_diagnostics(&db, &target, &diagnostics).unwrap();
+        let json = serde_json::to_string(&failed).unwrap();
+        assert!(json.contains("\"diagnostics\""));
 
-        let loaded = active_diagnostics(&db, "provider-a", "claude", "gpt-a").unwrap();
-        assert_eq!(loaded, diagnostics);
-
-        // 新一轮 upsert 清空旧诊断（新报告还没跑完时不显示上一轮的原始数据）。
-        upsert_active(
-            &db,
-            &report("provider-a", "claude", "gpt-a", Verdict::Trusted),
-        )
-        .unwrap();
-        assert!(active_diagnostics(&db, "provider-a", "claude", "gpt-a")
-            .unwrap()
-            .is_empty());
+        // 旧报告（无该字段）反序列化为空诊断，不炸；无诊断的报告也不序列化该字段。
+        let legacy = report("provider-a", "claude", "gpt-b", Verdict::Trusted);
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        assert!(!legacy_json.contains("\"diagnostics\""));
+        let parsed: VerificationReport = serde_json::from_str(&legacy_json).unwrap();
+        assert!(parsed.diagnostics.is_empty());
     }
 
     #[test]

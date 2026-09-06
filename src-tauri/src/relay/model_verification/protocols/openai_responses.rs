@@ -154,7 +154,14 @@ pub(crate) async fn run_balanced_with_progress(
             );
         }
         if let Ok(facts) = &result {
-            capture_leg_diagnostics(&mut diagnostics, probe.name(), facts, &request, &raw_body);
+            capture_leg_diagnostics(
+                &mut diagnostics,
+                probe.name(),
+                facts,
+                &request,
+                &raw_body,
+                api_key,
+            );
         }
         results.insert(probe, result);
     }

@@ -415,16 +415,11 @@ impl ModelVerificationCoordinator {
         >,
     ) {
         match result {
-            Ok(Ok((report, diagnostics))) if report.target == target => {
+            Ok(Ok((report, _diagnostics))) if report.target == target => {
+                // 诊断已内嵌报告本体（upsert 序列化自动带上），无需单独落盘。
                 let _ = self.persist_if_current_with(&target, &run_id, generation, || {
                     crate::relay::model_verification::store::upsert_active(&self.db, &report)
-                        .map_err(|_| RunFailureKind::InvalidResponse)?;
-                    crate::relay::model_verification::store::attach_diagnostics(
-                        &self.db,
-                        &report.target,
-                        &diagnostics,
-                    )
-                    .map_err(|_| RunFailureKind::InvalidResponse)
+                        .map_err(|_| RunFailureKind::InvalidResponse)
                 });
             }
             Ok(Err(failure)) => {
@@ -1400,6 +1395,7 @@ mod tests {
             verdict: Verdict::Trusted,
             evidence_level: EvidenceLevel::ProtocolBehavior,
             facts: Vec::new(),
+            diagnostics: Vec::new(),
             rules_version: RULES_VERSION,
             checked_at: 1_700_000_000,
         }
