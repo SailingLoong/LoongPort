@@ -236,6 +236,26 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_request_logs_usage_indexes_if_supported(conn)?;
 
+        // 10b. crowd 跳闸事件（P4b）：非致命熔断跳闸的追加式事件流，
+        // 上传切桶时按 (hour, provider, app) 计数并入小时桶；清理见
+        // crowd::events::prune_old_events。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS crowd_breaker_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hour_epoch INTEGER NOT NULL,
+                provider_id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crowd_breaker_hour ON crowd_breaker_events(hour_epoch, provider_id, app_type)",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 11. Model Pricing 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_pricing (

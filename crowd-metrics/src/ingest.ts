@@ -95,8 +95,8 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
          hour, site, app, source, asn, ua_trusted,
          samples, errors, ttft_bins, ttft_count,
          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-         cost_usd_micros
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
+         cost_usd_micros, breaker_trips
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
     ).bind(
       b.hour,
       b.site,
@@ -113,6 +113,7 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
       b.cacheReadTokens,
       b.cacheCreationTokens,
       b.costUsdMicros,
+      b.breakerTrips ?? 0,
     );
     // P4：模型子桶落独立表（v1 载荷 models 为空 → 只有站点行）。
     const modelRows = (b.models ?? []).map((m) =>

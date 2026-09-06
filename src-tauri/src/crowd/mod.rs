@@ -48,5 +48,6 @@
 
 pub mod bins;
 pub mod bucket;
+pub mod events;
 pub mod snapshot;
 pub mod uploader;
