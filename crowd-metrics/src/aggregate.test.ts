@@ -331,6 +331,18 @@ describe("趋势模型维度（P4）", () => {
     expect(dataBucket.costUsdPerMTok).not.toBeNull();
   });
 
+  it("窗口聚合（P4c-2）：样本加权指标齐全", () => {
+    const trend = buildTrends(sources(3), NOW, [modelRaw(), modelRaw({ source: "src-m2" })]);
+    const win = trend.ranges["24h"].sites["example.com"].models?.["gpt-example"]?.window;
+    expect(win).toBeDefined();
+    expect(win!.samples).toBe(20);
+    expect(win!.p50Ms).not.toBeNull();
+    expect(win!.tpsP50Ms).not.toBeNull();
+    // 20 样本全落 bin[2]（[400,600)）→ rank=9.5 → 400+0.475*200=495ms
+    expect(win!.p50Ms).toBeCloseTo(495);
+    expect(win!.errRate).toBeCloseTo(0.1);
+  });
+
   it("模型桶逐 k-匿：单未受信源不发布", () => {
     const trend = buildTrends(sources(3), NOW, [modelRaw({ ua_trusted: 0 })]);
     const site = trend.ranges["24h"].sites["example.com"];

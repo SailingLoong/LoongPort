@@ -25,6 +25,7 @@ import { binMidpoint, quantileFromBins, TPS_BIN_COUNT, tpsQuantileFromBins, TTFT
 import { hourToEpochSec } from "./validate";
 import type {
   HourSlot,
+  ModelWindowStats,
   SiteTrendLite,
   SiteStats,
   SiteTrend,
@@ -495,7 +496,10 @@ export function buildTrends(rows: RawRow[], nowSec: number, modelRows: RawModelR
             modelBuckets.push({ start: bStart, p50Ms: null, p95Ms: null, errRate: null, cacheRate: null });
           }
         }
-        if (modelPublished) models[model] = { buckets: modelBuckets } satisfies SiteTrendLite;
+        if (modelPublished) {
+          const window = modelWindowOrNull(modelRowsOf);
+          models[model] = { buckets: modelBuckets, ...(window ? { window } : {}) } satisfies SiteTrendLite;
+        }
       }
 
       sites[site] = { buckets, ttftBins: rangeBins, ...(Object.keys(models).length > 0 ? { models } : {}) };
@@ -542,6 +546,37 @@ interface ParsedModelRow {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   costUsdMicros: number;
+}
+
+/** P4c-2：(站点,模型,范围) 窗口聚合 —— 样本加权合并整段（非逐桶平均），
+ *  k-匿与模型桶同款（受信来源门槛）。图阵散点用它而不是平均逐桶值：
+ *  平均会把 3 个满数据桶和 1 个空桶同等看待。 */
+function modelWindowOrNull(rows: ParsedModelRow[]): ModelWindowStats | null {
+  const trusted = rows.filter((r) => r.uaTrusted);
+  const sources = new Set(trusted.map((r) => r.source)).size;
+  if (sources < MIN_SOURCES) return null;
+  const ttftBins = new Array<number>(TTFT_BIN_COUNT).fill(0);
+  const tpsBins = new Array<number>(TPS_BIN_COUNT).fill(0);
+  let samples = 0;
+  let errors = 0;
+  let tokenTotal = 0;
+  let costUsdMicros = 0;
+  for (const r of rows) {
+    samples += r.samples;
+    errors += r.errors;
+    tokenTotal += r.inputTokens + r.outputTokens + r.cacheReadTokens + r.cacheCreationTokens;
+    costUsdMicros += r.costUsdMicros;
+    for (let i = 0; i < TTFT_BIN_COUNT; i++) ttftBins[i] += r.ttftBins[i];
+    for (let i = 0; i < TPS_BIN_COUNT; i++) tpsBins[i] += r.tpsBins[i];
+  }
+  return {
+    samples,
+    p50Ms: quantileFromBins(ttftBins, 0.5),
+    p95Ms: quantileFromBins(ttftBins, 0.95),
+    errRate: samples > 0 ? errors / samples : null,
+    tpsP50Ms: tpsQuantileFromBins(tpsBins, 0.5),
+    costUsdPerMTok: tokenTotal > 0 ? costUsdMicros / tokenTotal : null,
+  };
 }
 
 function parseModelRow(row: RawModelRow): ParsedModelRow | null {
