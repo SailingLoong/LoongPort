@@ -54,7 +54,7 @@ async function queryModelRows(env: Env, nowSec: number): Promise<RawModelRow[]> 
     const { results } = await env.DB.prepare(
       `SELECT hour, site, app, model, source, asn, ua_trusted, samples, errors,
               ttft_bins, tps_bins, input_tokens, output_tokens,
-              cache_read_tokens, cache_creation_tokens, cost_usd_micros
+              cache_read_tokens, cache_creation_tokens, cost_usd_micros, anomalies
        FROM bucket_model_raw WHERE hour >= ?1 ORDER BY hour`,
     )
       .bind(cutoff)
