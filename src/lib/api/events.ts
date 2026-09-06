@@ -48,7 +48,5 @@ export const MODEL_VERIFICATION_PROGRESS = "model-verification-progress";
 export const MODEL_VERIFICATION_CHANGED = "model-verification-changed";
 /** 新人引导注册窗完成（`RelaySection` 监听）：凭据已入库，前端做 toast + 档位预配 + 列表刷新。 */
 export const ONBOARDING_REGISTER_COMPLETED = "onboarding-register-completed";
-/** 新人引导的「点 Star 领注册礼」邀请（`App.tsx` 的 StarRewardDialog 监听）：Rust 判完资格+配置+基线才发。 */
-export const ONBOARDING_STAR_REWARD_OFFER = "onboarding-star-reward-offer";
 /** 看板站点余额后台刷新完成（`useTierBoard` 监听，失效所有看板查询补值；站点余额跨 app 共享，无 payload）。 */
 export const SITE_BALANCES_UPDATED = "site-balances-updated";

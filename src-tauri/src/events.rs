@@ -56,10 +56,6 @@ pub const MODEL_VERIFICATION_CHANGED: &str = "model-verification-changed";
 /// 新人引导注册窗完成（`RelaySection` 监听）：凭据已入库，前端做 toast +
 /// 档位预配 + 列表刷新。payload `{ relayId, siteName }`。
 pub const ONBOARDING_REGISTER_COMPLETED: &str = "onboarding-register-completed";
-/// 新人引导的「点 Star 领注册礼」邀请（`App.tsx` 的 StarRewardDialog 监听）。
-/// Rust 判完资格 + 远端配置后才发，前端拿到即弹；
-/// payload `{ promoCode, amountUsd }`。
-pub const ONBOARDING_STAR_REWARD_OFFER: &str = "onboarding-star-reward-offer";
 
 /// 看板站点余额后台刷新完成（`useTierBoard` 监听，失效看板查询补上新值）。
 /// 站点余额跨 app 共享，不带 payload —— 监听方把所有 app 的看板一起失效。
@@ -167,10 +163,6 @@ mod consistency_tests {
             (
                 "ONBOARDING_REGISTER_COMPLETED",
                 super::ONBOARDING_REGISTER_COMPLETED,
-            ),
-            (
-                "ONBOARDING_STAR_REWARD_OFFER",
-                super::ONBOARDING_STAR_REWARD_OFFER,
             ),
             ("SITE_BALANCES_UPDATED", super::SITE_BALANCES_UPDATED),
         ];

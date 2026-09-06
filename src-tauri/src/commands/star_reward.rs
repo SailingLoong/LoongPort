@@ -13,8 +13,8 @@
 
 use serde::Serialize;
 
-/// 弹窗邀请的 payload：`ONBOARDING_STAR_REWARD_OFFER` 事件与 `star_reward_offer`
-/// 命令共用；前端 `src/lib/api/starReward.ts` 的 `StarRewardOffer` 与之对应。
+/// Star 对话框的 payload：`star_reward_offer` 命令返回（顶栏红点是唯一入口，
+/// 曾经的主动弹窗事件已删）；前端 `src/lib/api/starReward.ts` 的 `StarRewardOffer` 与之对应。
 ///
 /// 序列化 camelCase（本仓 TS 侧惯例），与 `commands::onboarding` 的
 /// `RegisterCompletedPayload` 同一形状。
