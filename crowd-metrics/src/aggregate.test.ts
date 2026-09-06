@@ -327,6 +327,8 @@ describe("趋势模型维度（P4）", () => {
     expect(dataBucket.p50Ms).not.toBeNull();
     expect(dataBucket.tpsP50Ms).not.toBeNull();
     expect(dataBucket.errRate).toBeCloseTo(0.1);
+    // $/Mtok = 微美元/token：100000 微美元 / (1000+500+300+100)=1900 token
+    expect(dataBucket.costUsdPerMTok).not.toBeNull();
   });
 
   it("模型桶逐 k-匿：单未受信源不发布", () => {
