@@ -333,7 +333,23 @@ mod tests {
         //
         // 形状与 `backend.rs` 的 `browser_login_dispatch_keeps_protocol_details_out_of_commands`
         // 相同：include_str! 比对**另一个文件**的源码 —— 放在被检的文件里会自匹配。
-        let command_source = include_str!("../commands/relay.rs");
+        // commands::relay 已按领域拆成目录（2026-09-07），这里显式枚举全部模块文件 ——
+        // 加新模块时记得补一行。
+        let command_source = [
+            include_str!("../commands/relay/mod.rs"),
+            include_str!("../commands/relay/balance.rs"),
+            include_str!("../commands/relay/directory.rs"),
+            include_str!("../commands/relay/imagegen.rs"),
+            include_str!("../commands/relay/login.rs"),
+            include_str!("../commands/relay/official.rs"),
+            include_str!("../commands/relay/provision.rs"),
+            include_str!("../commands/relay/rows.rs"),
+            include_str!("../commands/relay/session.rs"),
+            include_str!("../commands/relay/site_config.rs"),
+            include_str!("../commands/relay/switch.rs"),
+            include_str!("../commands/relay/windows.rs"),
+        ]
+        .concat();
         for forbidden in ["payment_enabled", "purchase::purchase_url"] {
             assert!(
                 !command_source.contains(forbidden),
