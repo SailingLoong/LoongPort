@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   buildSnapshot,
   buildTrends,
+  type RawModelRow,
   COHORT_FACTOR,
   MIN_ASN,
   MIN_SOURCES,
   type RawRow,
 } from "./aggregate";
 import { hourFloorUtc } from "./validate";
+import { TPS_BIN_COUNT } from "./bins";
 import { TTFT_BIN_COUNT } from "./bins";
 
 // 固定「现在」：2026-08-26T12:00:00Z。测试用 example 域名（公开仓隐私纪律）。
@@ -291,5 +293,50 @@ describe("趋势（buildTrends）", () => {
     const bins = trend.ranges["24h"].sites["example.com"].ttftBins;
     const sum = bins.reduce((s, c) => s + c, 0);
     expect(sum).toBe(30); // 3 来源 × 10 样本全落 bin[2]
+  });
+});
+
+describe("趋势模型维度（P4）", () => {
+  const modelRaw = (overrides: Partial<RawModelRow> = {}): RawModelRow => ({
+    hour: hourFloorUtc(NOW - 3600),
+    site: "example.com",
+    app: "claude",
+    model: "gpt-example",
+    source: "src-m",
+    asn: 4134,
+    ua_trusted: 1,
+    samples: 10,
+    errors: 1,
+    ttft_bins: makeRaw().ttft_bins, // 已是 JSON 字符串，别再包一层
+    tps_bins: JSON.stringify(new Array<number>(TPS_BIN_COUNT).fill(0).map((_, i) => (i === 4 ? 10 : 0))),
+    input_tokens: 1000,
+    output_tokens: 500,
+    cache_read_tokens: 300,
+    cache_creation_tokens: 100,
+    cost_usd_micros: 100_000,
+    ...overrides,
+  });
+
+  it("模型趋势挂到站点 trend 的 models 下，桶粒度与站点一致", () => {
+    const trend = buildTrends(sources(3), NOW, [modelRaw(), modelRaw({ source: "src-m2" })]);
+    const site = trend.ranges["24h"].sites["example.com"];
+    const model = site.models?.["gpt-example"];
+    expect(model).toBeDefined();
+    expect(model!.buckets).toHaveLength(24);
+    const dataBucket = model!.buckets[22];
+    expect(dataBucket.p50Ms).not.toBeNull();
+    expect(dataBucket.tpsP50Ms).not.toBeNull();
+    expect(dataBucket.errRate).toBeCloseTo(0.1);
+  });
+
+  it("模型桶逐 k-匿：单未受信源不发布", () => {
+    const trend = buildTrends(sources(3), NOW, [modelRaw({ ua_trusted: 0 })]);
+    const site = trend.ranges["24h"].sites["example.com"];
+    expect(site.models?.["gpt-example"]).toBeUndefined();
+  });
+
+  it("无模型数据时 sites 不带 models 键（v1 期形状不变）", () => {
+    const trend = buildTrends(sources(3), NOW);
+    expect(trend.ranges["24h"].sites["example.com"].models).toBeUndefined();
   });
 });

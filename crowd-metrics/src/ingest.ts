@@ -89,8 +89,8 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
     ? 1
     : 0;
 
-  const statements = parsed.payload.hours.map((b) =>
-    env.DB.prepare(
+  const statements = parsed.payload.hours.flatMap((b) => {
+    const siteRow = env.DB.prepare(
       `INSERT OR REPLACE INTO bucket_raw (
          hour, site, app, source, asn, ua_trusted,
          samples, errors, ttft_bins, ttft_count,
@@ -113,8 +113,37 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
       b.cacheReadTokens,
       b.cacheCreationTokens,
       b.costUsdMicros,
-    ),
-  );
+    );
+    // P4：模型子桶落独立表（v1 载荷 models 为空 → 只有站点行）。
+    const modelRows = (b.models ?? []).map((m) =>
+      env.DB.prepare(
+        `INSERT OR REPLACE INTO bucket_model_raw (
+           hour, site, app, model, source, asn, ua_trusted,
+           samples, errors, ttft_bins, tps_bins,
+           input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+           cost_usd_micros
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
+      ).bind(
+        b.hour,
+        b.site,
+        b.app,
+        m.model,
+        parsed.payload.sourceId,
+        asn,
+        uaTrusted,
+        m.samples,
+        m.errors,
+        JSON.stringify(m.ttftBins),
+        JSON.stringify(m.tpsBins),
+        m.inputTokens,
+        m.outputTokens,
+        m.cacheReadTokens,
+        m.cacheCreationTokens,
+        m.costUsdMicros,
+      ),
+    );
+    return [siteRow, ...modelRows];
+  });
   await env.DB.batch(statements);
 
   return jsonResponse({ accepted: parsed.payload.hours.length }, 202);

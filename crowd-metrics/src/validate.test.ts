@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { TTFT_BIN_COUNT } from "./bins";
+import { TPS_BIN_COUNT, TTFT_BIN_COUNT } from "./bins";
 import { hourFloorUtc, hourToEpochSec, isValidSite, parseIngestPayload } from "./validate";
 import type { IngestPayload } from "./types";
 
@@ -33,6 +33,28 @@ function makePayload(overrides: Record<string, unknown> = {}): Record<string, un
     version: 1,
     sourceId: "0123456789abcdef0123456789abcdef",
     hours: [makeBucket()],
+    ...overrides,
+  };
+}
+
+/** P4：合法模型子桶（v2）。 */
+function makeModelBucket(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const ttft = new Array<number>(TTFT_BIN_COUNT).fill(0);
+  ttft[1] = 8;
+  const tps = new Array<number>(TPS_BIN_COUNT).fill(0);
+  tps[4] = 6;
+  tps[5] = 2;
+  return {
+    model: "gpt-example",
+    samples: 10,
+    errors: 1,
+    ttftBins: ttft,
+    tpsBins: tps,
+    inputTokens: 1000,
+    outputTokens: 500,
+    cacheReadTokens: 300,
+    cacheCreationTokens: 100,
+    costUsdMicros: 12_345,
     ...overrides,
   };
 }
@@ -77,8 +99,38 @@ describe("parseIngestPayload", () => {
     }
   });
 
-  it("版本不是 1 拒绝", () => {
+  it("版本不是 1/2 拒绝（v2 自 P4 起接受）", () => {
+    expect(parseIngestPayload(makePayload({ version: 3 }), NOW).ok).toBe(false);
+    expect(parseIngestPayload(makePayload({ version: 2 }), NOW).ok).toBe(false); // v2 必须 models
+  });
+
+  it("v2：模型子桶合法通过、逐位保留", () => {
+    const result = parseIngestPayload(makePayload({ version: 2, hours: [makeBucket({ models: [makeModelBucket()] })] }), NOW);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const m = result.payload.hours[0].models?.[0];
+      expect(m?.model).toBe("gpt-example");
+      expect(m?.tpsBins).toHaveLength(TPS_BIN_COUNT);
+    }
+  });
+
+  it("v2：缺 models 数组 / 坏模型名 / 子桶超母桶样本 / tps 桶长错 一律拒绝", () => {
     expect(parseIngestPayload(makePayload({ version: 2 }), NOW).ok).toBe(false);
+    expect(
+      parseIngestPayload(makePayload({ version: 2, hours: [makeBucket({ models: [makeModelBucket({ model: "bad name!" })] })] }), NOW).ok,
+    ).toBe(false);
+    expect(
+      parseIngestPayload(makePayload({ version: 2, hours: [makeBucket({ models: [makeModelBucket({ samples: 99 })] })] }), NOW).ok,
+    ).toBe(false);
+    expect(
+      parseIngestPayload(makePayload({ version: 2, hours: [makeBucket({ models: [makeModelBucket({ tpsBins: [1] })] })] }), NOW).ok,
+    ).toBe(false);
+  });
+
+  it("v1 载荷（无 models 键）照旧通过 —— 双版本兼容期", () => {
+    const result = parseIngestPayload(makePayload(), NOW);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.payload.hours[0].models).toBeUndefined();
   });
 
   it("sourceId 非 32 位小写 hex 拒绝", () => {

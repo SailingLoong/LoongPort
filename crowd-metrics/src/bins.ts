@@ -21,6 +21,52 @@ export const TTFT_BIN_COUNT = TTFT_BIN_EDGES_MS.length + 1;
 /** 溢出桶的上界外推值（[9600, ∞) 无法插值，按 1.5×末边外推）。 */
 const OVERFLOW_HI_MS = TTFT_BIN_EDGES_MS[TTFT_BIN_EDGES_MS.length - 1] * 1.5;
 
+/**
+ * TPS（输出速度，tokens/秒）直方图分桶边界，单位 tok/s。
+ *
+ * P4 引入（模型维度的输出速度分布）：与 TTFT 同样的跨语言共享常量
+ * （客户端 bins.rs 同名常量 + 一致性闸测试）。桶语义同上：最后一个桶是
+ * 溢出桶 [480, ∞)。分桶的行值 = output_tokens / max((latency -
+ * first_token)/1s, 0.1s)，只统计 output_tokens > 0 的行。
+ */
+export const TPS_BIN_EDGES: readonly number[] = [
+  5, 10, 20, 40, 60, 80, 120, 160, 240, 320, 480,
+];
+
+/** TPS 桶数 = 边界数 + 1（含溢出桶）。 */
+export const TPS_BIN_COUNT = TPS_BIN_EDGES.length + 1;
+
+/** 溢出桶的上界外推值（[480, ∞) 按 1.5×末边外推）。 */
+const TPS_OVERFLOW_HI = TPS_BIN_EDGES[TPS_BIN_EDGES.length - 1] * 1.5;
+
+/** TPS 桶 i 的 [lo, hi) 边界（lo_0 = 0）。 */
+export function tpsBinBounds(i: number): { lo: number; hi: number } {
+  const lo = i === 0 ? 0 : TPS_BIN_EDGES[i - 1];
+  const hi = i < TPS_BIN_EDGES.length ? TPS_BIN_EDGES[i] : TPS_OVERFLOW_HI;
+  return { lo, hi };
+}
+
+/** TPS 直方图求分位数（与 quantileFromBins 同一套插值近似）。 */
+export function tpsQuantileFromBins(
+  bins: readonly number[],
+  q: number,
+): number | null {
+  const total = bins.reduce((a, b) => a + b, 0);
+  if (total === 0) return null;
+  const rank = q * (total - 1);
+  let cumulative = 0;
+  for (let i = 0; i < bins.length; i++) {
+    const count = bins[i];
+    if (count === 0) continue;
+    if (rank < cumulative + count) {
+      const { lo, hi } = tpsBinBounds(i);
+      return lo + ((rank - cumulative) / count) * (hi - lo);
+    }
+    cumulative += count;
+  }
+  return TPS_OVERFLOW_HI;
+}
+
 /** 桶 i 的 [lo, hi) 边界。 */
 export function binBounds(i: number): { lo: number; hi: number } {
   const lo = i === 0 ? 0 : TTFT_BIN_EDGES_MS[i - 1];

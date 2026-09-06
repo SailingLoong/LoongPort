@@ -40,3 +40,26 @@ CREATE TABLE IF NOT EXISTS upload_ip_hour (
     count   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (ip_hash, hour)
 ) WITHOUT ROWID;
+
+-- P4 模型维度原始桶（v2 客户端）。一行 = 某来源在某小时对某站点某 app 某
+-- 模型的聚合。与 bucket_raw 同款幂等（PK + INSERT OR REPLACE）与反作弊列；
+-- 站点级聚合仍走 bucket_raw（顶层字段是全量口径），本表只喂模型维度的趋势/分布。
+CREATE TABLE IF NOT EXISTS bucket_model_raw (
+    hour                TEXT    NOT NULL,
+    site                TEXT    NOT NULL,
+    app                 TEXT    NOT NULL,
+    model               TEXT    NOT NULL,
+    source              TEXT    NOT NULL,
+    asn                 INTEGER NOT NULL DEFAULT 0,
+    ua_trusted          INTEGER NOT NULL DEFAULT 0,
+    samples             INTEGER NOT NULL,
+    errors              INTEGER NOT NULL,
+    ttft_bins           TEXT    NOT NULL,
+    tps_bins            TEXT    NOT NULL,
+    input_tokens        INTEGER NOT NULL,
+    output_tokens       INTEGER NOT NULL,
+    cache_read_tokens   INTEGER NOT NULL,
+    cache_creation_tokens INTEGER NOT NULL,
+    cost_usd_micros     INTEGER NOT NULL,
+    PRIMARY KEY (hour, site, app, model, source)
+) WITHOUT ROWID;

@@ -20,6 +20,24 @@ export interface HourBucketPayload {
   cacheCreationTokens: number;
   /** 该桶总花费，微美元（整数，避免浮点漂移）。 */
   costUsdMicros: number;
+  /** P4（version 2）：模型子桶。version 1 载荷缺省。 */
+  models?: ModelBucketPayload[];
+}
+
+/** P4：站点 × app × 小时 × 模型 的子聚合（顶层字段仍是全量口径）。 */
+export interface ModelBucketPayload {
+  /** 服务端模型名（公开目录名，白名单形状校验）。 */
+  model: string;
+  samples: number;
+  errors: number;
+  ttftBins: number[];
+  /** 输出速度直方图（tok/s），长度 = TPS_BIN_COUNT。 */
+  tpsBins: number[];
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsdMicros: number;
 }
 
 /** POST /v1/ingest 的载荷。一次 flush 携带若干个已闭合的小时桶。 */
@@ -84,6 +102,13 @@ export interface SiteTrend {
   buckets: TrendBucket[];
   /** 该范围内合并的 TTFT 直方图（分布图随时间范围联动用）。 */
   ttftBins: number[];
+  /** P4：模型维度的趋势（有 v2 数据才有；键=模型名）。 */
+  models?: Record<string, SiteTrendLite>;
+}
+
+/** P4：模型趋势（无范围分布 —— 站点级已有，模型级省载荷）。 */
+export interface SiteTrendLite {
+  buckets: Array<TrendBucket & { tpsP50Ms?: number | null }>;
 }
 
 /** 档位 → 站点趋势。 */

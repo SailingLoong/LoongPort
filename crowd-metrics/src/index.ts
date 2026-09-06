@@ -6,7 +6,7 @@
  * - scheduled（每 5 分钟） 重算快照写 KV + 清理 30 天前的原始桶 / 2 天前的限流计数
  */
 
-import { buildSnapshot, buildTrends, type RawRow } from "./aggregate";
+import { buildSnapshot, buildTrends, type RawModelRow, type RawRow } from "./aggregate";
 import { TTFT_BIN_EDGES_MS } from "./bins";
 import { cleanupDue, isFresh } from "./freshness";
 import { handleIngest, type Env } from "./ingest";
@@ -45,6 +45,25 @@ async function queryRawRows(env: Env, nowSec: number): Promise<RawRow[]> {
   return results ?? [];
 }
 
+/** P4：模型维度原始桶（v2 客户端写入；表不存在时容错为空 —— 部署顺序闸：
+ *  先跑 schema 重放（deploy.sh 自带）再进这里，但本地/灰度环境可能滞后）。 */
+async function queryModelRows(env: Env, nowSec: number): Promise<RawModelRow[]> {
+  const cutoff = hourFloorUtc(nowSec - 30 * 86400 - 3600);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT hour, site, app, model, source, asn, ua_trusted, samples, errors,
+              ttft_bins, tps_bins, input_tokens, output_tokens,
+              cache_read_tokens, cache_creation_tokens, cost_usd_micros
+       FROM bucket_model_raw WHERE hour >= ?1 ORDER BY hour`,
+    )
+      .bind(cutoff)
+      .all<RawModelRow>();
+    return results ?? [];
+  } catch {
+    return [];
+  }
+}
+
 /** KV 里记上次清理时间的键（值 = epoch 秒）。 */
 const CLEANUP_LAST_RUN_KEY = "cleanup:last-run";
 
@@ -54,10 +73,10 @@ const CLEANUP_LAST_RUN_KEY = "cleanup:last-run";
  * 保留期不能指望它。
  */
 async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
-  const rows = await queryRawRows(env, nowSec);
+  const [rows, modelRows] = await Promise.all([queryRawRows(env, nowSec), queryModelRows(env, nowSec)]);
   const snapshot = buildSnapshot(rows, nowSec);
   snapshot.ttftBinEdges = [...TTFT_BIN_EDGES_MS];
-  const trend = buildTrends(rows, nowSec);
+  const trend = buildTrends(rows, nowSec, modelRows);
   trend.ttftBinEdges = [...TTFT_BIN_EDGES_MS];
 
   const rawCutoff = hourFloorUtc(nowSec - RAW_RETENTION_SECS);
@@ -67,6 +86,7 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
     if (!cleanupDue(lastRun == null ? null : Number(lastRun), nowSec)) return;
     await env.DB.batch([
       env.DB.prepare("DELETE FROM bucket_raw WHERE hour < ?1").bind(rawCutoff),
+      env.DB.prepare("DELETE FROM bucket_model_raw WHERE hour < ?1").bind(rawCutoff),
       env.DB.prepare("DELETE FROM upload_ip_hour WHERE hour < ?1").bind(rlCutoff),
     ]);
     await env.SNAPSHOT.put(CLEANUP_LAST_RUN_KEY, String(nowSec));

@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rusqlite::params;
 
-use crate::crowd::bins::{ttft_bin_sum_exprs, TTFT_BIN_COUNT};
+use crate::crowd::bins::{tps_bin_sum_exprs, ttft_bin_sum_exprs, TPS_BIN_COUNT, TTFT_BIN_COUNT};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::services::sql_helpers::fresh_input_sql;
@@ -68,6 +68,27 @@ pub struct HourBucket {
     pub cache_creation_tokens: i64,
     /// 桶内总花费（微美元）。
     pub cost_usd_micros: i64,
+    /// P4 模型维度：桶内按模型的子聚合（按模型名排序，载荷字节稳定）。
+    /// 顶层字段仍是全量口径 —— 站点级聚合/旧消费方不受影响。
+    pub models: Vec<ModelBucket>,
+}
+
+/// P4：模型维度的子聚合（站点 × app × 小时 × 模型）。
+/// 字段是 HourBucket 的子集 + tps 直方图 —— 供网站模型筛选/斩杀线图阵。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelBucket {
+    /// 落库 `model` 原样（服务端模型名，公开目录名，无身份信息）。
+    pub model: String,
+    pub samples: i64,
+    pub errors: i64,
+    pub ttft_bins: Vec<i64>,
+    /// 输出速度直方图（tok/s，边界见 bins.rs `TPS_BIN_EDGES`），长度恒 [`TPS_BIN_COUNT`]。
+    pub tps_bins: Vec<i64>,
+    pub output_tokens: i64,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cost_usd_micros: i64,
 }
 
 /// SQL 切出的 provider 维度桶（站点归属尚未解析）。
@@ -80,6 +101,24 @@ struct RawBucket {
     errors: i64,
     ttft_bins: Vec<i64>,
     ttft_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_creation_tokens: i64,
+    cost_usd_micros: i64,
+}
+
+/// P4：模型维度的 provider 桶（站点归属尚未解析）。
+#[derive(Debug, Clone)]
+struct RawModelBucket {
+    hour_epoch: i64,
+    provider_id: String,
+    app_type: String,
+    model: String,
+    samples: i64,
+    errors: i64,
+    ttft_bins: Vec<i64>,
+    tps_bins: Vec<i64>,
     input_tokens: i64,
     output_tokens: i64,
     cache_read_tokens: i64,
@@ -144,6 +183,71 @@ fn query_raw_buckets(
     Ok(raw_buckets)
 }
 
+/// P4：模型维度切桶 —— 与 [`query_raw_buckets`] 同窗口同口径，只是多按
+/// `model` 分组并带 TPS 直方图。两次查询分开走（UNION ALL 会把 SQL 撑得
+/// 不可读，且模型行的列集不同）。
+fn query_raw_model_buckets(
+    db: &Database,
+    after_epoch: i64,
+    before_epoch: i64,
+) -> Result<Vec<RawModelBucket>, AppError> {
+    let ttft_exprs = ttft_bin_sum_exprs("l");
+    let tps_exprs = tps_bin_sum_exprs("l");
+    let sql = format!(
+        "SELECT CAST(l.created_at / 3600 AS INTEGER) * 3600 AS hour_epoch, \
+                l.provider_id, l.app_type, l.model, \
+                COUNT(*), \
+                SUM(CASE WHEN {site_side_error} THEN 1 ELSE 0 END), \
+                {ttft_exprs}, \
+                {tps_exprs}, \
+                SUM({fresh_input}), \
+                SUM(l.output_tokens), SUM(l.cache_read_tokens), SUM(l.cache_creation_tokens), \
+                CAST(ROUND(SUM(CAST(l.total_cost_usd AS REAL)) * 1000000.0) AS INTEGER) \
+         FROM proxy_request_logs l \
+         WHERE l.data_source = 'proxy' AND l.created_at > ?1 AND l.created_at <= ?2 \
+         GROUP BY hour_epoch, l.provider_id, l.app_type, l.model",
+        fresh_input = fresh_input_sql("l"),
+        site_side_error = SITE_SIDE_ERROR_EXPR,
+    );
+
+    let conn = crate::database::lock_conn!(db.conn);
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let mut rows = stmt
+        .query(params![after_epoch, before_epoch])
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+    let mut raws = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+        let mut ttft_bins = Vec::with_capacity(TTFT_BIN_COUNT);
+        for i in 0..TTFT_BIN_COUNT {
+            ttft_bins.push(row.get::<_, i64>(5 + i)?);
+        }
+        let mut tps_bins = Vec::with_capacity(TPS_BIN_COUNT);
+        for i in 0..TPS_BIN_COUNT {
+            tps_bins.push(row.get::<_, i64>(5 + TTFT_BIN_COUNT + i)?);
+        }
+        let base = 5 + TTFT_BIN_COUNT + TPS_BIN_COUNT;
+        raws.push(RawModelBucket {
+            hour_epoch: row.get(0)?,
+            provider_id: row.get(1)?,
+            app_type: row.get(2)?,
+            model: row.get(3)?,
+            samples: row.get(4)?,
+            errors: row.get(5)?,
+            ttft_bins,
+            tps_bins,
+            input_tokens: row.get(base)?,
+            output_tokens: row.get(base + 1)?,
+            cache_read_tokens: row.get(base + 2)?,
+            cache_creation_tokens: row.get(base + 3)?,
+            cost_usd_micros: row.get(base + 4)?,
+        });
+    }
+    Ok(raws)
+}
+
 /// provider → 站点身份（注册域），只保留 relay 模块登记过的站点。
 ///
 /// 判据：provider 的 base_url 指纹归到注册域后，命中 `loongport_relay` 表里任一
@@ -197,8 +301,10 @@ fn resolve_relay_hosts(
 }
 
 /// 纯函数：按 `(hour, site, app)` 合并。host 映射里没有的 provider 直接丢弃。
+/// P4：模型子桶按 `(hour, site, app, model)` 同步合并进 `HourBucket.models`。
 fn merge_by_site(
     raws: Vec<RawBucket>,
+    model_raws: Vec<RawModelBucket>,
     hosts: &HashMap<(String, String), String>,
 ) -> Vec<HourBucket> {
     let mut merged: BTreeMap<(i64, String, String), HourBucket> = BTreeMap::new();
@@ -220,6 +326,7 @@ fn merge_by_site(
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
             cost_usd_micros: 0,
+            models: Vec::new(),
         });
         entry.samples += raw.samples;
         entry.errors += raw.errors;
@@ -232,6 +339,51 @@ fn merge_by_site(
         entry.cache_read_tokens += raw.cache_read_tokens;
         entry.cache_creation_tokens += raw.cache_creation_tokens;
         entry.cost_usd_micros += raw.cost_usd_micros;
+    }
+
+    // 模型子桶：并进对应 HourBucket（键必然已存在 —— 模型行来自同一查询窗口，
+    // 顶层桶先合并完；万一站点级桶被丢弃，模型行同样丢弃，不产生孤儿）。
+    let mut models: BTreeMap<(i64, String, String, String), ModelBucket> = BTreeMap::new();
+    for raw in model_raws {
+        let Some(site) = hosts.get(&(raw.provider_id.clone(), raw.app_type.clone())) else {
+            continue;
+        };
+        let key = (
+            raw.hour_epoch,
+            site.clone(),
+            raw.app_type.clone(),
+            raw.model.clone(),
+        );
+        let entry = models.entry(key).or_insert_with(|| ModelBucket {
+            model: raw.model.clone(),
+            samples: 0,
+            errors: 0,
+            ttft_bins: vec![0; TTFT_BIN_COUNT],
+            tps_bins: vec![0; TPS_BIN_COUNT],
+            output_tokens: 0,
+            input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_usd_micros: 0,
+        });
+        entry.samples += raw.samples;
+        entry.errors += raw.errors;
+        for (i, count) in raw.ttft_bins.iter().enumerate() {
+            entry.ttft_bins[i] += count;
+        }
+        for (i, count) in raw.tps_bins.iter().enumerate() {
+            entry.tps_bins[i] += count;
+        }
+        entry.output_tokens += raw.output_tokens;
+        entry.input_tokens += raw.input_tokens;
+        entry.cache_read_tokens += raw.cache_read_tokens;
+        entry.cache_creation_tokens += raw.cache_creation_tokens;
+        entry.cost_usd_micros += raw.cost_usd_micros;
+    }
+    for ((hour_epoch, site, app, _), model_bucket) in models {
+        if let Some(hour_bucket) = merged.get_mut(&(hour_epoch, site.clone(), app.clone())) {
+            hour_bucket.models.push(model_bucket);
+        }
     }
     merged.into_values().collect()
 }
@@ -246,12 +398,13 @@ pub fn build_hour_buckets(
     if raws.is_empty() {
         return Ok(Vec::new());
     }
+    let model_raws = query_raw_model_buckets(db, after_epoch, before_epoch)?;
     let refs: HashSet<(String, String)> = raws
         .iter()
         .map(|raw| (raw.provider_id.clone(), raw.app_type.clone()))
         .collect();
     let hosts = resolve_relay_hosts(db, &refs)?;
-    Ok(merge_by_site(raws, &hosts))
+    Ok(merge_by_site(raws, model_raws, &hosts))
 }
 
 #[cfg(test)]
@@ -662,7 +815,7 @@ mod tests {
             "example.com".to_string(),
         );
 
-        let merged = merge_by_site(raws, &hosts);
+        let merged = merge_by_site(raws, Vec::new(), &hosts);
         assert_eq!(
             merged.len(),
             1,
