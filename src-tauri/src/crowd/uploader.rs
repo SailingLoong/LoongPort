@@ -73,6 +73,9 @@ pub(crate) struct ModelBucketPayload<'a> {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost_usd_micros: i64,
+    /// P5：被动观察到的模型真伪异常次数（Anomaly 级，v2 追加，旧服务端
+    /// 忽略未知字段向后兼容）。
+    pub anomalies: i64,
 }
 
 fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> IngestPayload<'a> {
@@ -109,6 +112,7 @@ fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> Ing
                         cache_read_tokens: m.cache_read_tokens,
                         cache_creation_tokens: m.cache_creation_tokens,
                         cost_usd_micros: m.cost_usd_micros,
+                        anomalies: m.anomalies,
                     })
                     .collect(),
             })
@@ -256,6 +260,7 @@ mod tests {
                 cache_read_tokens: 300,
                 cache_creation_tokens: 100,
                 cost_usd_micros: 12_345,
+                anomalies: 2,
             }],
         }
     }
@@ -327,6 +332,7 @@ mod tests {
         assert_eq!(
             model_keys,
             vec![
+                "anomalies",
                 "cacheCreationTokens",
                 "cacheReadTokens",
                 "costUsdMicros",

@@ -91,6 +91,10 @@ pub struct ModelBucket {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost_usd_micros: i64,
+    /// P5：被动观察到的模型真伪异常次数（Anomaly 级事件计数，事件源见
+    /// `crowd::events::record_model_anomaly`）。恒 ≤ `samples`（异常响应
+    /// 必然是被计数的请求之一）。
+    pub anomalies: i64,
 }
 
 /// SQL 切出的 provider 维度桶（站点归属尚未解析）。
@@ -368,6 +372,7 @@ fn merge_by_site(
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
             cost_usd_micros: 0,
+            anomalies: 0,
         });
         entry.samples += raw.samples;
         entry.errors += raw.errors;
@@ -414,6 +419,32 @@ fn query_breaker_trip_counts(
     Ok(counts)
 }
 
+/// P5：模型异常事件按 (hour, provider, app, model) 计数。返回键与
+/// RawModelBucket 的 provider 维度同构，复用同一张 hosts 映射。
+fn query_model_anomaly_counts(
+    db: &Database,
+    after_epoch: i64,
+    before_epoch: i64,
+) -> Result<HashMap<(i64, String, String, String), i64>, AppError> {
+    let conn = crate::database::lock_conn!(db.conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT hour_epoch, provider_id, app_type, model, COUNT(*)              FROM crowd_model_anomaly_events              WHERE hour_epoch > ?1 AND hour_epoch <= ?2              GROUP BY hour_epoch, provider_id, app_type, model",
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let mut rows = stmt
+        .query(params![after_epoch, before_epoch])
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let mut counts = HashMap::new();
+    while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+        counts.insert(
+            (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?),
+            row.get(4)?,
+        );
+    }
+    Ok(counts)
+}
+
 /// 组合入口：查桶 → 解析站点归属 → 合并。由 [`super::uploader`] 调用。
 pub fn build_hour_buckets(
     db: &Database,
@@ -447,6 +478,34 @@ pub fn build_hour_buckets(
             .get(&(bucket.hour_epoch, bucket.site.clone(), bucket.app.clone()))
             .copied()
             .unwrap_or(0);
+    }
+    // P5：模型异常计数并入模型子桶。事件键是 (hour, provider, app, model)，
+    // 先折成站点维度（同一张 hosts 映射，未登记 provider 丢弃），再对进已
+    // 合并的模型行 —— 异常响应必然有对应的请求日志（tap 只挂在转发路径），
+    // 模型行理论上恒命中；万一失配（日志被裁等）按「无主计数不出门」丢弃。
+    let anomalies = query_model_anomaly_counts(db, after_epoch, before_epoch)?;
+    let mut anomalies_by_site: HashMap<(i64, String, String), HashMap<String, i64>> =
+        HashMap::new();
+    for ((hour, provider, app, model), count) in &anomalies {
+        if let Some(site) = hosts.get(&(provider.clone(), app.clone())) {
+            *anomalies_by_site
+                .entry((*hour, site.clone(), app.clone()))
+                .or_default()
+                .entry(model.clone())
+                .or_insert(0) += count;
+        }
+    }
+    for bucket in &mut merged {
+        if let Some(per_model) =
+            anomalies_by_site.get(&(bucket.hour_epoch, bucket.site.clone(), bucket.app.clone()))
+        {
+            for model_row in &mut bucket.models {
+                model_row.anomalies = per_model
+                    .get(&model_row.model)
+                    .copied()
+                    .unwrap_or(model_row.anomalies);
+            }
+        }
     }
     Ok(merged)
 }
@@ -547,6 +606,74 @@ mod tests {
             "api 子域上的 provider 必须归属到站点的注册域"
         );
         assert_eq!(buckets[0].site, "panel.example");
+    }
+
+    #[test]
+    fn model_anomaly_events_fold_into_model_buckets() {
+        let db = setup_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::relay::creds::save_site(
+                &conn,
+                "https://panel.example",
+                "中性示例站",
+                "https://api.panel.example",
+            )
+            .unwrap();
+        }
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('acct-a', 'codex', '示例档', ?1, '{}')",
+                params![serde_json::json!({
+                    "auth": {"OPENAI_API_KEY": "sk-test-not-a-real-key"},
+                    "base_url": "https://api.panel.example/v1"
+                })
+                .to_string()],
+            )
+            .unwrap();
+        seed_log(
+            &db,
+            "a",
+            "acct-a",
+            "codex",
+            200,
+            Some(250),
+            "0.5",
+            11 * 3600 + 100,
+            "proxy",
+        );
+        // 两命事件 + 一条模型名对不上的 + 一条未登记 provider 的 —— 后两者
+        // 都按「无主计数不出门」丢弃。
+        for (provider, model) in [
+            ("acct-a", "test-model"),
+            ("acct-a", "test-model"),
+            ("acct-a", "other-model"),
+            ("ghost", "test-model"),
+        ] {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO crowd_model_anomaly_events
+                     (hour_epoch, provider_id, app_type, model, created_at)
+                     VALUES (11 * 3600, ?1, 'codex', ?2, 0)",
+                    params![provider, model],
+                )
+                .unwrap();
+        }
+
+        let buckets = build_hour_buckets(&db, 0, 12 * 3600).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].models.len(), 1, "模型行来自请求日志，恒为 1");
+        assert_eq!(buckets[0].models[0].model, "test-model");
+        assert_eq!(
+            buckets[0].models[0].anomalies, 2,
+            "只有命中同站点同模型的事件计数，其余丢弃"
+        );
+        assert_eq!(buckets[0].models[0].samples, 1);
     }
 
     #[test]

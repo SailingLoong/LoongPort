@@ -177,6 +177,20 @@ impl ModelVerificationCoordinator {
                 let Some(db) = db.upgrade() else {
                     continue;
                 };
+                // P5：Anomaly 级（异源指纹/自述冒充）按事件计数进众测管道。
+                // 独立于 upsert —— 计数语义是「观察到几次」，与结果表怎么
+                // 合并无关；失败只告警，不影响验证报告本身。
+                if report.verdict == crate::relay::model_verification::types::Verdict::Anomaly {
+                    if let Err(error) = crate::crowd::events::record_model_anomaly(
+                        &db,
+                        &batch.target.provider_id,
+                        &batch.target.app_type,
+                        &batch.target.model,
+                        report.checked_at,
+                    ) {
+                        log::warn!("模型异常事件落库失败: {error}");
+                    }
+                }
                 match crate::relay::model_verification::store::upsert_passive(&db, &report) {
                     Ok(true) => {
                         let scope = TargetScope::new(

@@ -256,6 +256,27 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 10c. crowd 模型异常事件（P5）：被动观察到的模型真伪异常（Anomaly 级）
+        // 追加式事件流，上传切桶时按 (hour, provider, app, model) 计数并入模型子桶；
+        // 清理与跳闸事件同走 crowd::events::prune_old_events。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS crowd_model_anomaly_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hour_epoch INTEGER NOT NULL,
+                provider_id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                model TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crowd_model_anomaly_hour ON crowd_model_anomaly_events(hour_epoch, provider_id, app_type, model)",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 11. Model Pricing 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_pricing (
