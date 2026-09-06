@@ -72,6 +72,9 @@ export function StarRewardDialog({
     // 开默认浏览器（系统 handler 自带焦点切换）。打不开也照样发码 ——
     // 用户仍可自己去仓库页点星。
     settingsApi.openExternal(GITHUB_REPO).catch(() => {});
+    // gh 自动点星（后台尽力而为，命令立即返回）：装了且登录了 gh 就替用户
+    // 点上，成败只进日志 —— 荣誉制不校验，浏览器里的仓库页仍是最终落点。
+    starRewardApi.autoStar().catch(() => {});
     grant();
   };
 

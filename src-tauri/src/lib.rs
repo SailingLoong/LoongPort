@@ -1634,6 +1634,7 @@ pub fn run() {
             commands::onboarding_open_register_window,
             commands::star_reward_offer,
             commands::star_reward_mark_claimed,
+            commands::star_reward_auto_star,
             commands::relay_check_session,
             commands::crowd_get_snapshot,
             commands::relay_stats_endpoint_configured,

@@ -31,4 +31,10 @@ export const starRewardApi = {
   async openRegisterWindow(promoCode: string): Promise<void> {
     await invoke("onboarding_open_register_window", { promoCode });
   },
+
+  /** gh CLI 自动点星（领取时刻调用）：命令立即返回，点星在后台尽力而为
+   * （3s 超时 + stdin 关闭 + kill_on_drop），成败只进后端日志、不影响领取。 */
+  async autoStar(): Promise<void> {
+    await invoke("star_reward_auto_star");
+  },
 };
