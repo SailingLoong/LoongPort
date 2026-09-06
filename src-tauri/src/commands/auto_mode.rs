@@ -762,6 +762,7 @@ mod tests {
                 evidence_level:
                     crate::relay::model_verification::types::EvidenceLevel::ProtocolBehavior,
                 facts: Vec::new(),
+                diagnostics: Vec::new(),
                 rules_version: RULES_VERSION,
                 checked_at: 1_700_000_000,
             };

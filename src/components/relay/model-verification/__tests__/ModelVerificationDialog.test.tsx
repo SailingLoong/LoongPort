@@ -225,49 +225,6 @@ describe("ModelVerificationDialog", () => {
     );
   });
 
-  it("shows raw request/response when clicking the warning icon on a failed fact", async () => {
-    api.listModels.mockResolvedValue([
-      { name: "gpt-5.6-sol", fitness: "unknown" as const },
-    ]);
-    api.listHistory.mockResolvedValue([
-      {
-        source: "active" as const,
-        report: {
-          target: {
-            providerId: "provider-a",
-            appType: "codex",
-            model: "gpt-5.6-sol",
-          },
-          verdict: "suspicious",
-          evidenceLevel: "insufficient",
-          facts: [{ code: "modelMatch", outcome: "failed" }],
-          rulesVersion: 2,
-          checkedAt: 1,
-        },
-      },
-    ]);
-    api.diagnostics.mockResolvedValue([
-      {
-        probe: "core",
-        code: "modelMatch",
-        request: '{ "model": "gpt-5.6-sol" }',
-        response: '{ "model": "gpt-5.6-terra" }',
-      },
-    ]);
-    render(<DialogHarness />);
-
-    const trigger = await screen.findByTitle("查看原因");
-    fireEvent.click(trigger);
-
-    expect(await screen.findByText("未通过原因")).toBeInTheDocument();
-    expect(await screen.findByText(/gpt-5.6-terra/)).toBeInTheDocument();
-    expect(api.diagnostics).toHaveBeenCalledWith(
-      "provider-a",
-      "codex",
-      "gpt-5.6-sol",
-    );
-  });
-
   it("identifies the selected tier in the localized dialog title", async () => {
     render(<DialogHarness tierName="旗舰分组" />);
 

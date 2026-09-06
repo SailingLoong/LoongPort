@@ -192,6 +192,10 @@ pub struct VerificationReport {
     pub verdict: Verdict,
     pub evidence_level: EvidenceLevel,
     pub facts: Vec<EvidenceFact>,
+    /// 失败腿的原始请求/响应（诊断边车，随报告本体走——历史里展示哪份
+    /// 报告就显示哪份的诊断）。`serde(default)` 兼容旧报告（无此字段）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<ProbeDiagnostic>,
     pub rules_version: i32,
     pub checked_at: i64,
 }

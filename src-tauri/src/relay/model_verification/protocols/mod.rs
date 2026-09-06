@@ -275,6 +275,7 @@ pub(crate) fn capture_leg_diagnostics(
     leg_facts: &[crate::relay::model_verification::types::EvidenceFact],
     request: &serde_json::Value,
     response: &[u8],
+    api_key: &str,
 ) {
     use crate::relay::model_verification::types::{EvidenceCode, EvidenceOutcome, ProbeDiagnostic};
     let failed_codes: Vec<EvidenceCode> = leg_facts
@@ -285,13 +286,19 @@ pub(crate) fn capture_leg_diagnostics(
     if failed_codes.is_empty() {
         return;
     }
-    let request = truncate_for_diagnostic(
-        &serde_json::to_string_pretty(request).unwrap_or_default(),
-        MAX_DIAGNOSTIC_REQUEST_BYTES,
+    let request = redact_diagnostic(
+        &truncate_for_diagnostic(
+            &serde_json::to_string_pretty(request).unwrap_or_default(),
+            MAX_DIAGNOSTIC_REQUEST_BYTES,
+        ),
+        api_key,
     );
-    let response = truncate_for_diagnostic(
-        &String::from_utf8_lossy(response),
-        MAX_DIAGNOSTIC_RESPONSE_BYTES,
+    let response = redact_diagnostic(
+        &truncate_for_diagnostic(
+            &String::from_utf8_lossy(response),
+            MAX_DIAGNOSTIC_RESPONSE_BYTES,
+        ),
+        api_key,
     );
     for code in failed_codes {
         diagnostics.push(ProbeDiagnostic {
@@ -315,6 +322,71 @@ pub(crate) fn truncate_for_diagnostic(text: &str, max_bytes: usize) -> String {
         cut -= 1;
     }
     format!("{}\n…(已截断)", &text[..cut])
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_diagnostic;
+
+    #[test]
+    fn field_values_are_redacted_in_compact_and_pretty_json() {
+        let compact = r#"{"private":{"thinking":"SECRET_THINKING","signature":"SECRET_SIG"}}"#;
+        assert_eq!(
+            redact_diagnostic(compact, "unused-key"),
+            r#"{"private":{"thinking":"[REDACTED]","signature":"[REDACTED]"}}"#
+        );
+        // 非 JSON 文本只做 key 替换，不动其他内容。
+        assert_eq!(redact_diagnostic("plain text", "unused"), "plain text");
+    }
+
+    #[test]
+    fn api_key_replaced_everywhere() {
+        let text = "Bearer sk-secret-123 in header and body sk-secret-123";
+        assert_eq!(
+            redact_diagnostic(text, "sk-secret-123"),
+            "Bearer [REDACTED] in header and body [REDACTED]"
+        );
+    }
+}
+
+/// 诊断脱敏：API key 整串替换；JSON 里 `signature`/`thinking` 字段值替换
+/// （网关可能在普通响应里也带 thinking 块，签名与思考原文不落盘是红线）。
+/// 能解析为 JSON 的走结构化遍历（保持形状），否则按纯文本做 key 替换。
+pub(crate) fn redact_diagnostic(text: &str, api_key: &str) -> String {
+    let redacted = if api_key.len() >= 8 {
+        text.replace(api_key, "[REDACTED]")
+    } else {
+        text.to_string()
+    };
+    match serde_json::from_str::<serde_json::Value>(&redacted) {
+        Ok(mut value) => {
+            redact_fields_in_place(&mut value);
+            serde_json::to_string(&value).unwrap_or(redacted)
+        }
+        Err(_) => redacted,
+    }
+}
+
+const DIAGNOSTIC_REDACTED_FIELDS: &[&str] = &["signature", "thinking"];
+
+fn redact_fields_in_place(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                if DIAGNOSTIC_REDACTED_FIELDS.contains(&key.as_str()) && entry.is_string() {
+                    *entry = serde_json::Value::String("[REDACTED]".into());
+                } else {
+                    redact_fields_in_place(entry);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_fields_in_place(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 记录事件类型（诊断用，有界）。

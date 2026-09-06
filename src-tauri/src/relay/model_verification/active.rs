@@ -92,10 +92,11 @@ impl ActiveVerifier for BalancedActiveVerifier {
                     verdict,
                     evidence_level,
                     facts,
+                    diagnostics,
                     rules_version: RULES_VERSION,
                     checked_at: chrono::Utc::now().timestamp(),
                 },
-                diagnostics,
+                Vec::new(),
             ))
         });
         Ok(PreparedVerification {

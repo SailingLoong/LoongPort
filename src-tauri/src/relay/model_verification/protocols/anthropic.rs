@@ -44,7 +44,14 @@ pub(crate) async fn run_balanced_with_progress(
     )
     .await?;
     let mut facts = parse_core_response(&core, &model);
-    capture_leg_diagnostics(&mut diagnostics, "core", &facts, &core_request_body, &core);
+    capture_leg_diagnostics(
+        &mut diagnostics,
+        "core",
+        &facts,
+        &core_request_body,
+        &core,
+        target.api_key(),
+    );
     on_probe_complete();
 
     let identity_request_body = identity_request(&model);
@@ -62,6 +69,7 @@ pub(crate) async fn run_balanced_with_progress(
         std::slice::from_ref(&identity_fact),
         &identity_request_body,
         &identity,
+        target.api_key(),
     );
     facts.push(identity_fact);
     on_probe_complete();
@@ -81,6 +89,7 @@ pub(crate) async fn run_balanced_with_progress(
         std::slice::from_ref(&tool_fact),
         &tool_request_body,
         &tool,
+        target.api_key(),
     );
     facts.push(tool_fact);
     on_probe_complete();
@@ -133,6 +142,7 @@ pub(crate) async fn run_balanced_with_progress(
         &stream_facts,
         &stream_request_body,
         stream_summary.as_bytes(),
+        target.api_key(),
     );
     facts.extend(stream_facts);
     on_probe_complete();

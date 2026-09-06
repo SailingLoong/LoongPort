@@ -132,6 +132,7 @@ pub fn list(db: &Database, scope: &TargetScope) -> Result<Vec<VerificationHistor
                             )
                             .map_err(|_| AppError::Config("解析验证证据等级失败".into()))?,
                         facts,
+                        diagnostics: Vec::new(),
                         rules_version,
                         checked_at,
                     },
