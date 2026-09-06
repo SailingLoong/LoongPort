@@ -23,7 +23,15 @@
 
 import { binMidpoint, quantileFromBins, TTFT_BIN_COUNT } from "./bins";
 import { hourToEpochSec } from "./validate";
-import type { HourSlot, SiteStats, Snapshot, WindowStats } from "./types";
+import type {
+  HourSlot,
+  SiteStats,
+  SiteTrend,
+  Snapshot,
+  TrendBucket,
+  TrendPayload,
+  WindowStats,
+} from "./types";
 
 /**
  * k-匿名门槛：少于这么多受信独立来源的聚合不发布。
@@ -373,4 +381,86 @@ export function buildSnapshot(rows: RawRow[], nowSec: number): Snapshot {
   }
 
   return { version: 1, generatedAt: nowSec, sites };
+}
+
+/** 趋势档位：跨度 + 输出桶粒度。粒度选点让每档点位数落在 24~60 之间
+ *  （折线可读、悬停可命中），且都是小时的整数倍（原始桶按小时存）。 */
+const TREND_RANGES = [
+  { key: "24h" as const, spanSecs: 24 * 3600, bucketSecs: 3600 },
+  { key: "7d" as const, spanSecs: 7 * 86400, bucketSecs: 3 * 3600 },
+  { key: "30d" as const, spanSecs: 30 * 86400, bucketSecs: 12 * 3600 },
+];
+
+/**
+ * 一个输出桶的统计：k-匿与时段槽同款（只看受信来源数，不加 ASN 门槛——
+ * 桶天然稀疏，主指标在窗口上）。不过门槛返回 null。bins 一并交回供
+ * 范围分布累计（与窗口统计同口径：用裁剪后的行）。
+ */
+function trendBucketOrNull(bucketRows: ParsedRow[]): { bucket: TrendBucket; bins: number[] } | null {
+  const trusted = bucketRows.filter((r) => r.uaTrusted);
+  const sources = new Set(trusted.map((r) => r.source)).size;
+  if (sources < MIN_SOURCES) return null;
+  const kept = trimExtremeSources(bucketRows);
+  const totals = emptyTotals();
+  for (const r of kept) addInto(totals, r);
+  const cacheDenom = totals.cacheReadTokens + totals.cacheCreationTokens + totals.inputTokens;
+  return {
+    bucket: {
+      // 桶起点由调用方给（对齐网格），这里只算指标
+      start: 0,
+      p50Ms: quantileFromBins(totals.bins, 0.5),
+      p95Ms: quantileFromBins(totals.bins, 0.95),
+      errRate: totals.samples > 0 ? totals.errors / totals.samples : null,
+      cacheRate: cacheDenom > 0 ? totals.cacheReadTokens / cacheDenom : null,
+    },
+    bins: totals.bins,
+  };
+}
+
+/** 由原始桶行构建三档趋势（30 天原始数据一次查询复用）。 */
+export function buildTrends(rows: RawRow[], nowSec: number): TrendPayload {
+  const bySite = new Map<string, ParsedRow[]>();
+  for (const row of rows) {
+    const parsed = parseRow(row);
+    if (parsed === null) continue;
+    const list = bySite.get(parsed.site) ?? [];
+    list.push(parsed);
+    bySite.set(parsed.site, list);
+  }
+
+  const ranges: TrendPayload["ranges"] = {} as TrendPayload["ranges"];
+  for (const { key, spanSecs, bucketSecs } of TREND_RANGES) {
+    // 网格锚在「整点对齐的窗口末尾」，最后一格是当前（可能未满的）小时。
+    const endHour = Math.floor(nowSec / 3600) * 3600;
+    const start = endHour - spanSecs + 3600;
+    const sites: Record<string, SiteTrend> = {};
+
+    for (const [site, siteRows] of bySite) {
+      const inRange = siteRows.filter((r) => r.epoch >= start && r.epoch <= endHour);
+      const bucketCount = spanSecs / bucketSecs;
+      const buckets: TrendBucket[] = [];
+      const rangeBins = new Array<number>(TTFT_BIN_COUNT).fill(0);
+      let anyPublished = false;
+
+      for (let i = 0; i < bucketCount; i++) {
+        const bStart = start + i * bucketSecs;
+        const bEnd = bStart + bucketSecs;
+        const bucketRows = inRange.filter((r) => r.epoch >= bStart && r.epoch < bEnd);
+        const computed = bucketRows.length > 0 ? trendBucketOrNull(bucketRows) : null;
+        if (computed) {
+          computed.bucket.start = bStart;
+          buckets.push(computed.bucket);
+          anyPublished = true;
+          for (let j = 0; j < TTFT_BIN_COUNT; j++) rangeBins[j] += computed.bins[j];
+        } else {
+          buckets.push({ start: bStart, p50Ms: null, p95Ms: null, errRate: null, cacheRate: null });
+        }
+      }
+      if (anyPublished) sites[site] = { buckets, ttftBins: rangeBins };
+    }
+
+    ranges[key] = { bucketSeconds: bucketSecs, sites };
+  }
+
+  return { version: 1, generatedAt: nowSec, ranges };
 }
