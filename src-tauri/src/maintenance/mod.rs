@@ -22,23 +22,35 @@ pub fn start(app: tauri::AppHandle) {
 /// 经 `seed_if_unsent` 的双重检查互斥。
 fn start_plaza_visibility_seeding(app: tauri::AppHandle) {
     let db = app.state::<crate::AppState>().db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let origins = match db.conn.lock() {
-            Ok(conn) => crate::relay::creds::list(&conn),
+    tauri::async_runtime::spawn(async move {
+        // 读库是阻塞操作，单独进 blocking；播种本身要先刷一次远端配置（见
+        // plaza::seed_for_existing_install 的文档），那是 await。
+        let origins = match tauri::async_runtime::spawn_blocking(move || {
+            let relays = db
+                .conn
+                .lock()
+                .map_err(|e| crate::error::AppError::Database(format!("获取数据库连接失败: {e}")))
+                .and_then(|conn| crate::relay::creds::list(&conn));
+            relays.map(|relays| {
+                relays
+                    .iter()
+                    .map(|relay| relay.site_origin.clone())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await
+        {
+            Ok(Ok(origins)) => origins,
+            Ok(Err(e)) => {
+                log::warn!("广场开关补播种：读站点列表失败，保持默认: {e}");
+                return;
+            }
             Err(e) => {
-                log::warn!("广场开关补播种：数据库连接锁已毒化，本次跳过: {e}");
+                log::warn!("广场开关补播种：读站点任务失败，保持默认: {e}");
                 return;
             }
         };
-        match origins {
-            Ok(relays) => crate::relay::plaza::seed_for_existing_install(
-                &relays
-                    .iter()
-                    .map(|relay| relay.site_origin.clone())
-                    .collect::<Vec<_>>(),
-            ),
-            Err(e) => log::warn!("广场开关补播种：读站点列表失败，保持默认: {e}"),
-        }
+        crate::relay::plaza::seed_for_existing_install(&origins).await;
     });
 }
 
