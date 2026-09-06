@@ -122,8 +122,8 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
            hour, site, app, model, source, asn, ua_trusted,
            samples, errors, ttft_bins, tps_bins,
            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-           cost_usd_micros
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
+           cost_usd_micros, anomalies
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`,
       ).bind(
         b.hour,
         b.site,
@@ -141,6 +141,7 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
         m.cacheReadTokens,
         m.cacheCreationTokens,
         m.costUsdMicros,
+        m.anomalies ?? 0,
       ),
     );
     return [siteRow, ...modelRows];

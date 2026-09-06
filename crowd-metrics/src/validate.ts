@@ -219,6 +219,12 @@ export function parseIngestPayload(
         ) {
           return { ok: false, error: "bad model tpsBins" };
         }
+        // P5：模型异常计数（可选；恒 ≤ 该模型样本数 —— 异常响应必然是被
+        // 计数的请求之一，超限即乱填）。
+        const mAnomalies = m.anomalies ?? 0;
+        if (!isSafeUint(mAnomalies, mSamples)) {
+          return { ok: false, error: "bad model anomalies (must be <= model samples)" };
+        }
         models.push({
           model: m.model,
           samples: mSamples,
@@ -230,6 +236,7 @@ export function parseIngestPayload(
           cacheReadTokens: m.cacheReadTokens as number,
           cacheCreationTokens: m.cacheCreationTokens as number,
           costUsdMicros: m.costUsdMicros as number,
+          anomalies: mAnomalies,
         });
       }
     }

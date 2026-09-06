@@ -529,6 +529,8 @@ export interface RawModelRow {
   cache_read_tokens: number;
   cache_creation_tokens: number;
   cost_usd_micros: number;
+  /** P5：被动观察到的模型真伪异常次数（列带 DEFAULT 0，旧行/旧行来源缺省）。 */
+  anomalies?: number;
 }
 
 interface ParsedModelRow {
@@ -546,6 +548,7 @@ interface ParsedModelRow {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   costUsdMicros: number;
+  anomalies: number;
 }
 
 /** P4c-2：(站点,模型,范围) 窗口聚合 —— 样本加权合并整段（非逐桶平均），
@@ -561,9 +564,11 @@ function modelWindowOrNull(rows: ParsedModelRow[]): ModelWindowStats | null {
   let errors = 0;
   let tokenTotal = 0;
   let costUsdMicros = 0;
+  let anomalies = 0;
   for (const r of rows) {
     samples += r.samples;
     errors += r.errors;
+    anomalies += r.anomalies;
     tokenTotal += r.inputTokens + r.outputTokens + r.cacheReadTokens + r.cacheCreationTokens;
     costUsdMicros += r.costUsdMicros;
     for (let i = 0; i < TTFT_BIN_COUNT; i++) ttftBins[i] += r.ttftBins[i];
@@ -576,6 +581,7 @@ function modelWindowOrNull(rows: ParsedModelRow[]): ModelWindowStats | null {
     errRate: samples > 0 ? errors / samples : null,
     tpsP50Ms: tpsQuantileFromBins(tpsBins, 0.5),
     costUsdPerMTok: tokenTotal > 0 ? costUsdMicros / tokenTotal : null,
+    anomalies,
   };
 }
 
@@ -607,13 +613,14 @@ function parseModelRow(row: RawModelRow): ParsedModelRow | null {
     cacheReadTokens: row.cache_read_tokens,
     cacheCreationTokens: row.cache_creation_tokens,
     costUsdMicros: row.cost_usd_micros,
+    anomalies: row.anomalies ?? 0,
   };
 }
 
 /** P4：模型桶指标（k-匿与站点桶同款；不过门槛返回 null —— 不发布）。 */
 function trendModelBucketOrNull(
   bucketRows: ParsedModelRow[],
-): (TrendBucket & { tpsP50Ms: number | null; costUsdPerMTok: number | null }) | null {
+): (TrendBucket & { tpsP50Ms: number | null; costUsdPerMTok: number | null; anomalies: number }) | null {
   const trusted = bucketRows.filter((r) => r.uaTrusted);
   const sources = new Set(trusted.map((r) => r.source)).size;
   if (sources < MIN_SOURCES) return null;
@@ -624,10 +631,12 @@ function trendModelBucketOrNull(
     tpsBins: new Array<number>(TPS_BIN_COUNT).fill(0),
     tokenTotal: 0,
     costUsdMicros: 0,
+    anomalies: 0,
   };
   for (const r of bucketRows) {
     totals.samples += r.samples;
     totals.errors += r.errors;
+    totals.anomalies += r.anomalies;
     for (let i = 0; i < TTFT_BIN_COUNT; i++) totals.ttftBins[i] += r.ttftBins[i];
     for (let i = 0; i < TPS_BIN_COUNT; i++) totals.tpsBins[i] += r.tpsBins[i];
     totals.tokenTotal += r.inputTokens + r.outputTokens + r.cacheReadTokens + r.cacheCreationTokens;
@@ -642,5 +651,6 @@ function trendModelBucketOrNull(
     tpsP50Ms: tpsQuantileFromBins(totals.tpsBins, 0.5),
     // $/Mtok 同站点窗口口径：微美元 / 总 token（含缓存）
     costUsdPerMTok: totals.tokenTotal > 0 ? totals.costUsdMicros / totals.tokenTotal : null,
+    anomalies: totals.anomalies,
   };
 }

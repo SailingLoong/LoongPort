@@ -62,5 +62,6 @@ CREATE TABLE IF NOT EXISTS bucket_model_raw (
     cache_read_tokens   INTEGER NOT NULL,
     cache_creation_tokens INTEGER NOT NULL,
     cost_usd_micros     INTEGER NOT NULL,
+    anomalies           INTEGER NOT NULL DEFAULT 0, -- P5：被动观察到的模型真伪异常（Anomaly 级）次数
     PRIMARY KEY (hour, site, app, model, source)
 ) WITHOUT ROWID;
