@@ -19,6 +19,30 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::services::sql_helpers::fresh_input_sql;
 
+/// `errors` 的口径：**站点侧失败** —— 失败行里剔除「不是站点的锅」的三类：
+///
+/// - 401/402：凭证/余额级，是上传者自己的账号问题（与转发侧
+///   `is_fatal_upstream_error` 的致命分级同一语义），不该抬站点的公开错误率；
+/// - 403 且 body 不含站点侧标记：凭证级 403。body 命中「余额不足/上游」的是
+///   newapi 家族把**站点侧**故障包成的 403（标记与 forwarder 的
+///   `SITE_SIDE_403_MARKERS` 同源），照算站点的锅；
+/// - 503 且是本机未出门的错误（无可用 Provider / 全部熔断 / 未配置）：
+///   请求根本没到站点。
+///
+/// 两个跨文件事实由单元测试钉住：403 的 LIKE 必须锚定落库文案前缀
+/// 「上游错误 (403): 」（前缀本身就含「上游」二字，裸 LIKE 会把所有上游
+/// 403 都判成站点侧）；503 的三条本机文案与 `error_mapper::get_error_message`
+/// 逐字一致 —— 测试用真实 mapper 输出播种，任一侧改文案当场红。
+const SITE_SIDE_ERROR_EXPR: &str = "(l.status_code < 200 OR l.status_code >= 400) \
+     AND NOT ( \
+         l.status_code IN (401, 402) \
+         OR (l.status_code = 403 \
+             AND COALESCE(l.error_message, '') NOT LIKE '上游错误 (403): %余额不足%' \
+             AND COALESCE(l.error_message, '') NOT LIKE '上游错误 (403): %上游%') \
+         OR (l.status_code = 503 AND COALESCE(l.error_message, '') IN ( \
+             '无可用 Provider', '所有供应商已熔断，无可用渠道', '未配置供应商')) \
+     )";
+
 /// 一个待上传的小时聚合桶。字段集合就是上传载荷的字段集合 ——
 /// 加字段前先回模块文档那张「传/不传」的表过一遍。
 #[derive(Debug, Clone, PartialEq)]
@@ -30,7 +54,9 @@ pub struct HourBucket {
     /// app 标识（`app_type` 原样）。
     pub app: String,
     pub samples: i64,
-    /// 失败请求数（status < 200 或 ≥ 400，含网络错误的 0）。
+    /// 站点侧失败请求数（口径见 [`SITE_SIDE_ERROR_EXPR`]：凭证/余额级与本机
+    /// 未出门的失败不计 —— 它们不反映站点健康，混进去会把上传者自己的
+    /// 账号问题变成全站的公开错误率）。
     pub errors: i64,
     /// TTFT 直方图计数，长度恒为 [`TTFT_BIN_COUNT`]。
     pub ttft_bins: Vec<i64>,
@@ -73,7 +99,7 @@ fn query_raw_buckets(
         "SELECT CAST(l.created_at / 3600 AS INTEGER) * 3600 AS hour_epoch, \
                 l.provider_id, l.app_type, \
                 COUNT(*), \
-                SUM(CASE WHEN l.status_code < 200 OR l.status_code >= 400 THEN 1 ELSE 0 END), \
+                SUM(CASE WHEN {site_side_error} THEN 1 ELSE 0 END), \
                 {bins_expr}, \
                 SUM(CASE WHEN l.first_token_ms IS NOT NULL THEN 1 ELSE 0 END), \
                 SUM({fresh_input}), \
@@ -83,6 +109,7 @@ fn query_raw_buckets(
          WHERE l.data_source = 'proxy' AND l.created_at > ?1 AND l.created_at <= ?2 \
          GROUP BY hour_epoch, l.provider_id, l.app_type",
         fresh_input = fresh_input_sql("l"),
+        site_side_error = SITE_SIDE_ERROR_EXPR,
     );
 
     let conn = crate::database::lock_conn!(db.conn);
@@ -453,6 +480,138 @@ mod tests {
             .collect();
         assert_eq!(by_hour[&(10 * 3600)], 1);
         assert_eq!(by_hour[&(11 * 3600)], 1);
+    }
+
+    /// `errors` 只数站点侧失败：凭证/余额级（401/402/凭证级 403）与本机未出门的
+    /// 503 不计，其余失败（429/5xx/网络 502/超时 504/站点侧 403）照数。
+    /// 文案全部用 `error_mapper` 的真实输出播种 —— SQL 里的 403 前缀锚定与
+    /// 本机 503 文案改任何一边，这条测试都会红（跨文件口径闸）。
+    #[test]
+    fn errors_count_site_side_failures_only() {
+        use crate::proxy::ProxyError;
+        let msg = crate::proxy::error_mapper::get_error_message;
+
+        // (status, error_message, 是否应计入 errors)
+        let cases: Vec<(i64, Option<String>, bool)> = vec![
+            (200, None, false),
+            (
+                429,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 429,
+                    body: Some("rate limited".to_string()),
+                })),
+                true,
+            ),
+            (
+                500,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 500,
+                    body: Some("internal".to_string()),
+                })),
+                true,
+            ),
+            (
+                502,
+                Some(msg(&ProxyError::ForwardFailed(
+                    "connection refused".to_string(),
+                ))),
+                true,
+            ),
+            (
+                504,
+                Some(msg(&ProxyError::Timeout("first byte".to_string()))),
+                true,
+            ),
+            // 凭证/余额级：上传者自己的账号问题，不抬站点公开错误率
+            (
+                401,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 401,
+                    body: Some("无效令牌".to_string()),
+                })),
+                false,
+            ),
+            (
+                402,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 402,
+                    body: Some("余额不足，请充值".to_string()),
+                })),
+                false,
+            ),
+            // 站点侧 403（newapi 把站点故障包成 403，body 命中标记）：算站点的锅
+            (
+                403,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 403,
+                    body: Some("上游线路余额不足，暂时无法完成请求".to_string()),
+                })),
+                true,
+            ),
+            (
+                403,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 403,
+                    body: Some("上游服务不可用".to_string()),
+                })),
+                true,
+            ),
+            // 凭证级 403（body 无站点侧标记）与无 body 的 403：不计
+            (
+                403,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 403,
+                    body: Some("无效令牌".to_string()),
+                })),
+                false,
+            ),
+            (
+                403,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 403,
+                    body: None,
+                })),
+                false,
+            ),
+            // 本机未出门的 503：请求根本没到站点
+            (503, Some(msg(&ProxyError::NoAvailableProvider)), false),
+            (503, Some(msg(&ProxyError::AllProvidersCircuitOpen)), false),
+            (503, Some(msg(&ProxyError::NoProvidersConfigured)), false),
+            // 真上游 503：照数
+            (
+                503,
+                Some(msg(&ProxyError::UpstreamError {
+                    status: 503,
+                    body: Some("service unavailable".to_string()),
+                })),
+                true,
+            ),
+        ];
+
+        let db = setup_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (i, (status, message, _)) in cases.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model, status_code, first_token_ms,
+                        total_cost_usd, latency_ms, created_at, data_source, error_message
+                     ) VALUES (?1, 'p1', 'claude', 'm', ?2, NULL, '0', 0, ?3, 'proxy', ?4)",
+                    params![format!("err-{i}"), status, 11 * 3600 + 100, message],
+                )
+                .unwrap();
+            }
+        }
+
+        let raws = query_raw_buckets(&db, 0, 12 * 3600).unwrap();
+        assert_eq!(raws.len(), 1);
+        let expected: i64 = cases.iter().filter(|(_, _, counted)| *counted).count() as i64;
+        assert_eq!(raws[0].samples, cases.len() as i64);
+        assert_eq!(
+            raws[0].errors, expected,
+            "errors 只数站点侧失败（429/5xx/网络/超时/站点侧 403），\
+             凭证余额级与本机未出门的不计"
+        );
     }
 
     #[test]
