@@ -16,7 +16,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { relayApi } from "@/lib/api";
+import { relayApi, settingsApi } from "@/lib/api";
 import { crowdApi } from "@/lib/api/crowd";
 import type { AppId } from "@/lib/api";
 import type {
@@ -218,6 +218,11 @@ export function RelayDirectoryPage({
         onDismiss={() => setFirstVisitOpen(false)}
         onSubmit={(domain) => {
           setFirstVisitOpen(false);
+          // 归因播种广场开关默认值：与导入成败无关（导入失败也来自那家站），
+          // fire-and-forget —— 后端写-if-None，失败只保持默认展示。
+          void settingsApi
+            .plazaSeedFromFirstSite(domain)
+            .catch(() => undefined);
           // 与广场搜索框手填完全同一条 manual 导入链（保守打开规则）。
           void authenticate(domain, domain, "manual");
         }}

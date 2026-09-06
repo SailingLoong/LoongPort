@@ -451,6 +451,11 @@ export interface Settings {
   // 主页面显示的应用（默认全部显示）
   visibleApps?: VisibleApps;
 
+  // 中转站广场开关：null/undefined = 未播种 = 展示（未归因默认）。
+  // 默认值由后端按首启归因播种；⚠️ 后端专有字段 —— 修改走
+  // settingsApi.plazaSetVisible（窄命令），不随全量保存提交。
+  plazaVisible?: boolean | null;
+
   // ===== 设备级目录覆盖 =====
   // 覆盖 Claude Code 配置目录（可选）
   claudeConfigDir?: string;

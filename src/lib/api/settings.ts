@@ -42,6 +42,19 @@ export const settingsApi = {
     return await invoke("save_settings", { settings });
   },
 
+  /**
+   * 用户手动翻转「中转站广场」开关。窄命令而非全量保存 —— plazaVisible 的
+   * 默认值由后端按归因播种，全量保存的旧快照会把它抹掉。
+   */
+  async plazaSetVisible(visible: boolean): Promise<boolean> {
+    return await invoke("plaza_set_visible", { visible });
+  },
+
+  /** 首启「手填域名」弹窗提交：按归因播种广场开关默认值（只在未播种时写入）。 */
+  async plazaSeedFromFirstSite(domain: string): Promise<boolean> {
+    return await invoke("plaza_seed_from_first_site", { domain });
+  },
+
   /** 是否存在统一 Codex 会话历史的迁移备份（关闭弹窗据此显示"恢复备份"勾选） */
   async hasCodexUnifyHistoryBackup(): Promise<boolean> {
     return await invoke("has_codex_unify_history_backup");
