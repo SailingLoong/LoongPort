@@ -43,11 +43,14 @@ export function TierList({
   tiers,
   manual,
   appType,
+  activeProviderId,
   onReorder,
 }: {
   tiers: TierBoardTier[];
   manual: boolean;
   appType: string;
+  /** 实际在用档位（代理实时信号）；缺省回退各档的持久化 isCurrent */
+  activeProviderId?: string;
   onReorder: (orderedIds: string[]) => void;
 }) {
   const sensors = useSensors(
@@ -71,7 +74,12 @@ export function TierList({
     return (
       <div className="space-y-2">
         {tiers.map((tier) => (
-          <TierCard key={tier.providerId} tier={tier} appType={appType} />
+          <TierCard
+            key={tier.providerId}
+            tier={tier}
+            appType={appType}
+            activeProviderId={activeProviderId}
+          />
         ))}
       </div>
     );
@@ -90,6 +98,7 @@ export function TierList({
               key={tier.providerId}
               tier={tier}
               appType={appType}
+              activeProviderId={activeProviderId}
             />
           ))}
         </div>
@@ -101,9 +110,11 @@ export function TierList({
 function SortableTierCard({
   tier,
   appType,
+  activeProviderId,
 }: {
   tier: TierBoardTier;
   appType: string;
+  activeProviderId?: string;
 }) {
   const {
     attributes,
@@ -122,6 +133,7 @@ function SortableTierCard({
       <TierCard
         tier={tier}
         appType={appType}
+        activeProviderId={activeProviderId}
         dragHandleProps={{ attributes, listeners }}
       />
     </div>
@@ -136,10 +148,12 @@ function SortableTierCard({
 function TierCard({
   tier,
   appType,
+  activeProviderId,
   dragHandleProps,
 }: {
   tier: TierBoardTier;
   appType: string;
+  activeProviderId?: string;
   dragHandleProps?: {
     attributes?: DraggableAttributes;
     listeners?: SyntheticListenerMap;
@@ -151,6 +165,12 @@ function TierCard({
     tier.isHealthy === false ||
     tier.breakerState != null ||
     (tier.consecutiveFailures ?? 0) > 0;
+  // 「当前」跟实际在用档位走（代理实时信号）；没有实时信号（路由没跑）时
+  // 回退持久化指针 —— 持久化指针本身只随显式切换/故障转移成功移动，盯屏
+  // 看板 30s 才重取，静态观感就来自它
+  const isCurrentTier = activeProviderId
+    ? tier.providerId === activeProviderId
+    : tier.isCurrent;
   return (
     <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
       {dragHandleProps ? (
@@ -172,7 +192,7 @@ function TierCard({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{tier.name}</span>
-          {tier.isCurrent ? (
+          {isCurrentTier ? (
             <Badge
               variant="outline"
               className="border-emerald-500/60 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
@@ -180,7 +200,7 @@ function TierCard({
               {t("autoMode.board.current", { defaultValue: "当前" })}
             </Badge>
           ) : null}
-          {tier.isCurrent && tier.affinityRemainingSecs != null ? (
+          {isCurrentTier && tier.affinityRemainingSecs != null ? (
             <Badge
               variant="outline"
               title={t("autoMode.board.affinityTitle", {

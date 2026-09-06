@@ -16,6 +16,9 @@ import {
   type ProxyAppId,
 } from "@/config/appConfig";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useTauriEvent } from "@/hooks/useTauriEvent";
+import { PROVIDER_SWITCHED } from "@/lib/api/events";
+import type { ProviderSwitchEvent } from "@/lib/api/providers";
 
 /**
  * 某应用的省心模式状态（enabled 是按 app 的，strategy 是全局的）
@@ -445,6 +448,15 @@ export function useSetFailoverAll() {
  * 余额链含站点查询，给个短 staleTime 避免频繁切 app 时反复打站点。
  */
 export function useTierBoard(appType: string, enabled = true) {
+  const queryClient = useQueryClient();
+  // 切档事件即时失效看板：否则「当前」徽章、粘性倒计时要等 30s stale
+  // 或窗口聚焦才刷新，盯屏时看起来是静态的。事件名唯源 events.ts（双侧闸守）。
+  useTauriEvent<ProviderSwitchEvent>(PROVIDER_SWITCHED, (payload) => {
+    if (payload?.appType !== appType) return;
+    void queryClient.invalidateQueries({
+      queryKey: ["easyModeTierBoard", appType],
+    });
+  });
   return useQuery({
     queryKey: ["easyModeTierBoard", appType],
     queryFn: () => autoModeApi.getTierBoard(appType),
