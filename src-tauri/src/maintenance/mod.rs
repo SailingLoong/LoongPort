@@ -1,10 +1,13 @@
 pub mod config;
+#[cfg(feature = "gui")]
 pub mod scheduler;
 
+#[cfg(feature = "gui")]
 use tauri::{Emitter, Manager};
 
 pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 
+#[cfg(feature = "gui")]
 pub fn start(app: tauri::AppHandle) {
     start_veridrop_directory_refresh(app.clone());
     start_models_dev_pricing_refresh(app.clone());
@@ -14,6 +17,7 @@ pub fn start(app: tauri::AppHandle) {
     start_app_update_check(app);
 }
 
+#[cfg(feature = "gui")]
 /// 广场开关的存量补播种：**一次性**（写-if-None），启动即跑。
 ///
 /// 触发归属（CLAUDE.md §1.4）：播种是数据层自己的初始化动作，挂在启动上；
@@ -54,6 +58,7 @@ fn start_plaza_visibility_seeding(app: tauri::AppHandle) {
     });
 }
 
+#[cfg(feature = "gui")]
 fn start_relay_pricing_refresh(app: tauri::AppHandle) {
     let schedule = scheduler::TaskSchedule::new(
         config::RELAY_PRICING_STARTUP_DELAY,
@@ -65,6 +70,7 @@ fn start_relay_pricing_refresh(app: tauri::AppHandle) {
     });
 }
 
+#[cfg(feature = "gui")]
 /// 站点实测共建：每 15 分钟 flush 已闭合的小时桶。
 ///
 /// 门禁（`crowd_metrics_enabled`）在 `flush_once` 里读 —— 关着时任务是纯空转，
@@ -82,6 +88,7 @@ fn start_crowd_metrics_flush(app: tauri::AppHandle) {
     });
 }
 
+#[cfg(feature = "gui")]
 fn start_app_update_check(app: tauri::AppHandle) {
     let schedule = scheduler::TaskSchedule::new(
         config::UPDATE_CHECK_STARTUP_DELAY,
@@ -104,6 +111,7 @@ fn start_app_update_check(app: tauri::AppHandle) {
     });
 }
 
+#[cfg(feature = "gui")]
 fn start_veridrop_directory_refresh(app: tauri::AppHandle) {
     let schedule = scheduler::TaskSchedule::new(
         config::VERIDROP_STARTUP_DELAY,
@@ -126,6 +134,7 @@ fn start_veridrop_directory_refresh(app: tauri::AppHandle) {
     });
 }
 
+#[cfg(feature = "gui")]
 fn start_models_dev_pricing_refresh(app: tauri::AppHandle) {
     let schedule = scheduler::TaskSchedule::new(
         std::time::Duration::ZERO,

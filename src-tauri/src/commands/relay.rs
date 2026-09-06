@@ -42,6 +42,7 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
+use crate::relay::provision::models_from_settings;
 use crate::relay::{
     api, backend, balance, browser_bridge, chatgpt_app, creds, discovery, imagegen, imagegen_mcp,
     login, model_verification::target as verification_target, newapi, newapi_provision,
@@ -4504,23 +4505,10 @@ fn tiers_of_site(
 // 拿一份不带归属的扁平列表没法渲染。2026-08-04 删掉命令壳，
 // `list_tiers_impl` 留着（`list_relays_impl` 在用它）。
 
-/// 内部版本额外带出每条档位的 `website_url`（= 所属站点的 origin），供
-/// [`list_relays_impl`] 按站分组。命令层把它丢掉 —— 那是实现细节，不进对外契约。
-///
-/// `pub(crate)`：托盘的「模型」子菜单也从这里取目录（同一份 `modelCatalog` 两个消费者）。
-pub(crate) fn models_from_settings(settings: &serde_json::Value) -> Vec<String> {
-    settings
-        .get("modelCatalog")
-        .and_then(|catalog| catalog.get("models"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("model").and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .map(str::to_string)
-        .collect()
-}
+// 拿一份不带归属的扁平列表没法渲染。2026-08-04 删掉命令壳，
+// `list_tiers_impl` 留着（`list_relays_impl` 在用它）。
+// （托盘「模型」子菜单与自动模式共用的目录解析已搬到
+// `relay::provision::models_from_settings`。）
 
 /// A LoongPort model-chip click is a managed preference, so refreshing the
 /// tier should keep it while the newly fetched catalog still advertises it.

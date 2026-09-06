@@ -6,6 +6,7 @@ use std::{
 };
 
 use futures::future::{AbortHandle, Abortable};
+#[cfg(feature = "gui")]
 use tauri::Emitter;
 
 use crate::{
@@ -39,6 +40,7 @@ pub trait ActiveVerifier: Send + Sync {
 }
 
 pub trait VerificationEventSink: Send + Sync {
+    #[cfg(feature = "gui")]
     fn attach_app_handle(&self, _app_handle: tauri::AppHandle) {}
     fn emit_progress(&self, event: &VerificationProgressEvent) -> Result<(), ()>;
     fn emit_changed(&self, scope: &TargetScope) -> Result<(), ()>;
@@ -56,11 +58,13 @@ impl VerificationEventSink for NoopEventSink {
     }
 }
 
+#[cfg(feature = "gui")]
 #[derive(Default)]
 pub(crate) struct TauriEventSink {
     app_handle: RwLock<Option<tauri::AppHandle>>,
 }
 
+#[cfg(feature = "gui")]
 impl VerificationEventSink for TauriEventSink {
     fn attach_app_handle(&self, app_handle: tauri::AppHandle) {
         *self
@@ -124,7 +128,11 @@ impl ModelVerificationCoordinator {
         let verifier = Arc::new(
             crate::relay::model_verification::active::BalancedActiveVerifier::new(db.clone()),
         );
-        Self::with_dependencies(db, verifier, Arc::new(TauriEventSink::default()))
+        #[cfg(feature = "gui")]
+        let sink: Arc<dyn VerificationEventSink> = Arc::new(TauriEventSink::default());
+        #[cfg(not(feature = "gui"))]
+        let sink: Arc<dyn VerificationEventSink> = Arc::new(NoopEventSink);
+        Self::with_dependencies(db, verifier, sink)
     }
 
     pub fn with_verifier(db: Arc<Database>, verifier: Arc<dyn ActiveVerifier>) -> Self {
@@ -167,7 +175,7 @@ impl ModelVerificationCoordinator {
         >,
     ) {
         let db = Arc::downgrade(db);
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             while let Some(batch) = receiver.recv().await {
                 let Some(report) =
                     crate::relay::model_verification::passive::evaluate_passive(&batch)
@@ -216,6 +224,7 @@ impl ModelVerificationCoordinator {
         self.db.clone()
     }
 
+    #[cfg(feature = "gui")]
     pub fn attach_app_handle(&self, app_handle: tauri::AppHandle) {
         self.event_sink.attach_app_handle(app_handle);
     }
@@ -285,7 +294,7 @@ impl ModelVerificationCoordinator {
         let coordinator = Arc::clone(self);
         let spawned_run_id = run_id.clone();
         let spawned_target = target.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             let result = Abortable::new(prepared.future, abort_registration).await;
             coordinator.finish(spawned_target, spawned_run_id, generation, result);
         });

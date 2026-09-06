@@ -50,4 +50,5 @@ pub mod bins;
 pub mod bucket;
 pub mod events;
 pub mod snapshot;
+#[cfg(feature = "gui")]
 pub mod uploader;

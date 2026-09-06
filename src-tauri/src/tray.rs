@@ -520,7 +520,7 @@ fn tier_model_choices(
     if !crate::relay::is_managed(&provider.id) {
         return None;
     }
-    let models = crate::commands::models_from_settings(&provider.settings_config);
+    let models = crate::relay::provision::models_from_settings(&provider.settings_config);
     if models.is_empty() {
         return None;
     }

@@ -18,8 +18,41 @@ name = "cc_switch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 doctest = false
 
+# GUI 主程序：带 tauri 的构建才有意义（main.rs 调 run()）。显式声明是为了
+# 挂 required-features —— `--no-default-features` 时只构建 loongport-cli。
+[[bin]]
+name = "cc-switch"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+# 无桌面（服务器/老发行版）用户的一次性配置工具：静态 musl 构建，
+# 不带 tauri/GTK/webkit（见 `gui` feature 注释）。与 GUI 共享同一份
+# 配置写入逻辑（`cli` 模块只是薄编排），唯源不分叉。
+name = "loongport-cli"
+path = "src/bin/loongport_cli.rs"
+
 [features]
-default = []
+default = ["gui"]
+# 图形界面全套：tauri 及其插件、剪贴板/开机自启/WebKitGTK 绑定。
+# 关掉它构建的就是无 GUI 的库（+ loongport-cli），用于静态 musl 包——
+# Ubuntu 20.04 等老发行版跑不了 GUI 二进制（webkit2gtk-4.1 缺失 +
+# glibc 2.35 符号墙），CLI 是它们唯一的接入路径。
+gui = [
+    "tauri",
+    "tauri-plugin-log",
+    "tauri-plugin-opener",
+    "tauri-plugin-process",
+    "tauri-plugin-updater",
+    "tauri-plugin-dialog",
+    "tauri-plugin-store",
+    "tauri-plugin-deep-link",
+    "tauri-plugin-window-state",
+    "tauri-plugin-single-instance",
+    "arboard",
+    "auto-launch",
+    "webkit2gtk",
+]
 test-hooks = []
 
 [build-dependencies]
@@ -30,21 +63,21 @@ serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-tauri = { version = "2.8.2", features = ["tray-icon", "protocol-asset", "image-png"] }
-tauri-plugin-log = "2"
-tauri-plugin-opener = "2"
-tauri-plugin-process = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-store = "2"
-tauri-plugin-deep-link = "2"
-tauri-plugin-window-state = "2"
+tauri = { version = "2.8.2", features = ["tray-icon", "protocol-asset", "image-png"], optional = true }
+tauri-plugin-log = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-process = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-store = { version = "2", optional = true }
+tauri-plugin-deep-link = { version = "2", optional = true }
+tauri-plugin-window-state = { version = "2", optional = true }
 dirs = "6.0"
 toml = "1.0"
 toml_edit = "0.25"
 reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
 cookie = "0.18.1"
-arboard = "3.6"
+arboard = { version = "3.6", optional = true }
 flate2 = "1"
 brotli = "8"
 zstd = "0.13"
@@ -75,7 +108,7 @@ zip = "4.6"
 serde_yaml = "0.9"
 tempfile = "3"
 url = "2.5"
-auto-launch = "0.6"
+auto-launch = { version = "0.6", optional = true }
 once_cell = "1.21.3"
 base64 = "0.23"
 rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks"] }
@@ -99,10 +132,16 @@ sys-locale = "0.3"
 psl = "2.1.229"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk = { version = "2.0.1", features = ["v2_16"] }
+webkit2gtk = { version = "2.0.1", features = ["v2_16"], optional = true }
+
+# musl 静态包（loongport-cli）专用：reqwest 的 default-tls（native-tls）在
+# musl 下没有系统 openssl 可链，vendored 让它随包静态编进去。GUI 构建
+# （gnu 目标）不走这段，TLS 行为零变化。
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"

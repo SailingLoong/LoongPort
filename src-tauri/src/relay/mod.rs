@@ -73,6 +73,7 @@ pub mod login;
 pub mod managed;
 pub mod newapi;
 pub mod newapi_provision;
+#[cfg(feature = "gui")]
 pub mod newapi_purchase;
 pub mod onboarding;
 // Phase 1 defines this crate-internal contract before Phase 2 consumes it.

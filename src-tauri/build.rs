@@ -1,5 +1,10 @@
 fn main() {
-    tauri_build::build();
+    // GUI 构建才跑 tauri_build（前端资源嵌入、应用 manifest 等）；无 GUI
+    // 构建（loongport-cli 静态包）没有 tauri 依赖，构建脚本必须整个跳过。
+    // build script 里看不到 cfg(feature)，只能读 cargo 注入的环境变量。
+    if std::env::var_os("CARGO_FEATURE_GUI").is_some() {
+        tauri_build::build();
+    }
 
     // Windows: Embed Common Controls v6 manifest for test binaries
     //

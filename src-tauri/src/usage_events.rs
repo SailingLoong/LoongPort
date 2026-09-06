@@ -14,13 +14,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter};
-
+#[cfg(feature = "gui")]
 use crate::events::USAGE_LOG_RECORDED;
+#[cfg(feature = "gui")]
+use tauri::{AppHandle, Emitter};
 
 /// 防抖窗口：合并 200ms 内的多次通知。
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(200);
 
+#[cfg(feature = "gui")]
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 /// 防抖标记：true 表示已有调度任务在等待 emit，后续通知合并到该任务。
@@ -30,6 +32,7 @@ static EMIT_SCHEDULED: AtomicBool = AtomicBool::new(false);
 ///
 /// 重复调用是无害的（OnceLock 仅首次写入生效），但应用启动期只该被
 /// `lib.rs::run` 调一次。
+#[cfg(feature = "gui")]
 pub fn init(handle: AppHandle) {
     if APP_HANDLE.set(handle).is_err() {
         log::debug!("usage_events::init 重复调用，已忽略");
@@ -42,6 +45,7 @@ pub fn init(handle: AppHandle) {
 ///
 /// 调用方**不**需要持有 AppHandle，可以从任意线程/任意写入路径调用。
 /// 内部 200ms 防抖合并，绝不阻塞调用线程。
+#[cfg(feature = "gui")]
 pub fn notify_log_recorded() {
     #[cfg(test)]
     TEST_NOTIFY_COUNT.with(|count| count.set(count.get().saturating_add(1)));
@@ -78,3 +82,7 @@ thread_local! {
 pub(crate) fn take_test_notify_count() -> u32 {
     TEST_NOTIFY_COUNT.with(|count| count.replace(0))
 }
+
+/// 无 GUI 构建：没有前端可通知，记录路径照常落库，通知为空操作。
+#[cfg(not(feature = "gui"))]
+pub fn notify_log_recorded() {}

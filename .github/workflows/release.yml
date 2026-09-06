@@ -126,6 +126,8 @@ jobs:
             file \
             patchelf \
             libssl-dev \
+            # loongport-cli 静态包的 musl 工具链（ring/rusqlite 的 C 编译要 musl-gcc）
+            musl-tools \
             rpm \
             elfutils \
             xdg-utils
@@ -428,6 +430,17 @@ jobs:
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
         run: pnpm tauri build --bundles appimage,deb,rpm
+
+      # 无桌面（服务器、Ubuntu 20.04 等老发行版）用户的一次性配置工具。
+      # GUI 三件套在 focal 上不可安装（webkit2gtk-4.1 缺失 + glibc 符号墙），
+      # 静态 musl 是它们唯一的接入路径。不参与 updater。
+      - name: Build Headless CLI (x86_64 musl static)
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --no-default-features \
+            --target x86_64-unknown-linux-musl \
+            --manifest-path src-tauri/Cargo.toml --bin loongport-cli
 
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'
@@ -742,6 +755,17 @@ jobs:
           else
             echo "No .deb found (optional)"
           fi
+          # 无桌面配置工具：静态 musl 单文件，打 tar.gz（保留可执行位）。
+          # 缺它是硬失败——release 清单里宣告了这个下载项，静默缺失等于
+          # 20.04 用户拿着 404 排查自己的问题。
+          CLI_BIN="src-tauri/target/x86_64-unknown-linux-musl/release/loongport-cli"
+          if [ ! -f "$CLI_BIN" ]; then
+            echo "No loongport-cli musl binary found" >&2
+            exit 1
+          fi
+          CLI_TAR="LoongPort-CLI-${VERSION}-Linux-x86_64.tar.gz"
+          tar -C "$(dirname "$CLI_BIN")" -czf "release-assets/$CLI_TAR" loongport-cli
+          echo "Headless CLI copied: $CLI_TAR"
           # 额外上传 .rpm（用于 Fedora/RHEL/openSUSE 等，不参与 Updater）
           RPM=$(find src-tauri/target/release/bundle -name "*.rpm" | head -1 || true)
           if [ -n "$RPM" ]; then

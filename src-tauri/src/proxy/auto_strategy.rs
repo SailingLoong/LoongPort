@@ -207,7 +207,7 @@ pub fn set_model_pref(
 /// 档位的模型目录（settings_config.modelCatalog）。目前只有 Codex 系托管档位
 /// 在 provision 时写目录；返回空 = 该档位没有目录（不参与模型过滤）。
 pub fn tier_models(tier: &Provider) -> Vec<String> {
-    crate::commands::models_from_settings(&tier.settings_config)
+    crate::relay::provision::models_from_settings(&tier.settings_config)
 }
 
 /// 自动模式的可选模型清单：该应用全部托管档位模型目录的**并集**（去重）。

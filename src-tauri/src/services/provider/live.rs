@@ -844,7 +844,7 @@ fn get_codex_managed_oauth_live_auth_value(
     account_id: String,
 ) -> Result<Value, AppError> {
     std::thread::spawn(move || {
-        tauri::async_runtime::block_on(async move {
+        crate::rt::block_on(async move {
             if let Some((refresh_token, id_token, last_refresh_ms)) =
                 crate::codex_config::read_codex_live_auth_refresh_for_account(&account_id)
             {
@@ -903,7 +903,7 @@ pub(crate) fn prepare_codex_managed_oauth_live_auth_switch_away(
     account_id: String,
 ) -> Result<Option<String>, AppError> {
     std::thread::spawn(move || {
-        tauri::async_runtime::block_on(async move {
+        crate::rt::block_on(async move {
             manager
                 .prepare_live_auth_for_account_switch_away(&account_id)
                 .await
@@ -2947,7 +2947,7 @@ base_url = "https://a.example/v1"
     fn category_less_managed_codex_binding_with_null_config_uses_selected_account_token() {
         let temp = tempfile::tempdir().expect("tempdir");
         let manager = Arc::new(CodexOAuthManager::new(temp.path().to_path_buf()));
-        tauri::async_runtime::block_on(async {
+        crate::rt::block_on(async {
             manager
                 .add_test_account_with_access_token(
                     "acct-managed",
@@ -3023,7 +3023,7 @@ base_url = "https://a.example/v1"
     fn codex_follow_login_without_binding_keeps_stored_auth() {
         let temp = tempfile::tempdir().expect("tempdir");
         let manager = Arc::new(CodexOAuthManager::new(temp.path().to_path_buf()));
-        tauri::async_runtime::block_on(async {
+        crate::rt::block_on(async {
             manager
                 .add_test_account_with_access_token("acct-managed", "managed-token", None)
                 .await

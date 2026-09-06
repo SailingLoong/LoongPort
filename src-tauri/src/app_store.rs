@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
+#[cfg(feature = "gui")]
 use tauri_plugin_store::StoreExt;
 
 use crate::error::AppError;
@@ -95,6 +96,7 @@ fn tauri_store_path() -> Option<PathBuf> {
     Some(base.join(identifier).join("app_paths.json"))
 }
 
+#[cfg(feature = "gui")]
 fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
     let store = match app.store_builder("app_paths.json").build() {
         Ok(store) => store,
@@ -133,6 +135,7 @@ fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 /// 从 Store 刷新 app_config_dir 覆盖值并更新缓存
+#[cfg(feature = "gui")]
 pub fn refresh_app_config_dir_override(app: &tauri::AppHandle) -> Option<PathBuf> {
     let value = read_override_from_store(app);
     update_cached_override(value.clone());
@@ -140,6 +143,7 @@ pub fn refresh_app_config_dir_override(app: &tauri::AppHandle) -> Option<PathBuf
 }
 
 /// 写入 app_config_dir 到 Tauri Store
+#[cfg(feature = "gui")]
 pub fn set_app_config_dir_to_store(
     app: &tauri::AppHandle,
     path: Option<&str>,
@@ -193,6 +197,7 @@ fn resolve_path(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
+#[cfg(feature = "gui")]
 /// 从旧的 settings.json 迁移 app_config_dir 到 Store
 pub fn migrate_app_config_dir_from_settings(app: &tauri::AppHandle) -> Result<(), AppError> {
     // app_config_dir 已从 settings.json 移除，此函数保留但不再执行迁移

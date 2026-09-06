@@ -10,11 +10,15 @@ pub(crate) mod content_encoding;
 pub mod copilot_optimizer;
 pub mod error;
 pub mod error_mapper;
+#[cfg(feature = "gui")]
 pub(crate) mod failover_switch;
+#[cfg(feature = "gui")]
 mod forwarder;
 pub mod gemini_url;
 pub mod handler_config;
+#[cfg(feature = "gui")]
 pub mod handler_context;
+#[cfg(feature = "gui")]
 mod handlers;
 pub mod http_client;
 pub mod hyper_client;
@@ -24,7 +28,9 @@ pub mod media_sanitizer;
 pub mod model_mapper;
 pub mod provider_router;
 pub mod providers;
+#[cfg(feature = "gui")]
 pub mod response_processor;
+#[cfg(feature = "gui")]
 pub(crate) mod server;
 pub mod session;
 pub(crate) mod sse;
@@ -37,6 +43,7 @@ pub(crate) mod types;
 pub mod usage;
 
 #[cfg(test)]
+#[cfg(feature = "gui")]
 mod auto_mode_e2e_tests;
 
 #[cfg(test)]

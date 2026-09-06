@@ -770,6 +770,7 @@ const CF_CLEARANCE_COOKIE_NAME: &str = "cf_clearance";
 /// 不能像 access token 那样从 localStorage 回传。
 ///
 /// 没有该 cookie 是**正常情况**（绝大多数站没开托管挑战），返回 `None`。
+#[cfg(feature = "gui")]
 pub fn extract_cf_clearance(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
     cookies
         .iter()

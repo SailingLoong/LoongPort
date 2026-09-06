@@ -189,6 +189,20 @@ jobs:
       - name: Run tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      # loongport-cli（无桌面静态包）的纯净闸：GUI 关掉后库必须仍能编译。
+      # 有人往共享模块里加了 tauri 引用就会在这里红——否则只有 release
+      # 打 musl 包时才炸。警告不拦（no-gui 下大量 gui-only 代码成为死代码，
+      # 属预期），只拦编译错误。
+      - name: Headless build check (no-default-features, musl target)
+        if: runner.os == 'Linux'
+        run: |
+          # 用 musl 目标检查：openssl 等 target 特有依赖问题只在 musl 下暴露
+          # （曾在 VPS 构建时才炸过一次）。GNU 宿主的 no-gui 检查覆盖不了这层。
+          sudo apt-get install -y --no-install-recommends musl-tools >/dev/null
+          rustup target add x86_64-unknown-linux-musl
+          cargo check --no-default-features --manifest-path src-tauri/Cargo.toml \
+            --target x86_64-unknown-linux-musl
+
   backend-windows-wsl2:
     name: Backend Checks (Windows + WSL2 home)
     runs-on: windows-2025
