@@ -285,6 +285,12 @@ pub struct RemoteModelSelection {
     /// claude 平台「弱档」候选（内置 `CLAUDE_HAIKU_CANDIDATES`）。
     #[serde(default)]
     pub claude_haiku: Option<Vec<String>>,
+    /// 支持 1M 上下文的模型**前缀**（内置 `ONE_M_MODEL_PREFIXES`）。新一代旗舰
+    /// 发布时维护者改这里即可免发版跟进。⚠️ 与候选表不同，前缀没有「坏值只敢不
+    /// 生效」的 `first_hit` 保护（多认 = 给不支持的模型声明 1M），所以这张表同样
+    /// 宁保守 —— 由维护者签名发布兜底。
+    #[serde(default)]
+    pub one_m_prefixes: Option<Vec<String>>,
 }
 
 /// 远端配置的全文。
@@ -875,7 +881,8 @@ mod tests {
             r#"{
                 "relay_model_selection": {
                     "codex_main": ["gpt-6-astra", "gpt-5.6-sol"],
-                    "claude_opus": ["claude-opus-6"]
+                    "claude_opus": ["claude-opus-6"],
+                    "one_m_prefixes": ["claude-opus-6", "gpt-5.6-"]
                 }
             }"#,
         )
@@ -888,6 +895,10 @@ mod tests {
         assert_eq!(
             selection.claude_opus,
             Some(vec!["claude-opus-6".to_string()])
+        );
+        assert_eq!(
+            selection.one_m_prefixes,
+            Some(vec!["claude-opus-6".to_string(), "gpt-5.6-".to_string()])
         );
         assert_eq!(selection.default_model, None);
         assert_eq!(selection.claude_sonnet, None);
