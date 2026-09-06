@@ -421,11 +421,16 @@ fn query_breaker_trip_counts(
 
 /// P5：模型异常事件按 (hour, provider, app, model) 计数。返回键与
 /// RawModelBucket 的 provider 维度同构，复用同一张 hosts 映射。
+type ModelAnomalyCounts = HashMap<(i64, String, String, String), i64>;
+
+/// 站点维度折叠的中间形状：(hour, site, app) → model → 异常次数。
+type SiteAnomalyCounts = HashMap<(i64, String, String), HashMap<String, i64>>;
+
 fn query_model_anomaly_counts(
     db: &Database,
     after_epoch: i64,
     before_epoch: i64,
-) -> Result<HashMap<(i64, String, String, String), i64>, AppError> {
+) -> Result<ModelAnomalyCounts, AppError> {
     let conn = crate::database::lock_conn!(db.conn);
     let mut stmt = conn
         .prepare(
@@ -484,8 +489,7 @@ pub fn build_hour_buckets(
     // 合并的模型行 —— 异常响应必然有对应的请求日志（tap 只挂在转发路径），
     // 模型行理论上恒命中；万一失配（日志被裁等）按「无主计数不出门」丢弃。
     let anomalies = query_model_anomaly_counts(db, after_epoch, before_epoch)?;
-    let mut anomalies_by_site: HashMap<(i64, String, String), HashMap<String, i64>> =
-        HashMap::new();
+    let mut anomalies_by_site: SiteAnomalyCounts = HashMap::new();
     for ((hour, provider, app, model), count) in &anomalies {
         if let Some(site) = hosts.get(&(provider.clone(), app.clone())) {
             *anomalies_by_site
