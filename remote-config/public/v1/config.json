@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-09-05T00:00:00Z",
+  "issued_at": "2026-09-06T00:00:00Z",
   "star_reward": {
     "promo_code": "LOONGPORT5",
     "amount_usd": 5
@@ -111,7 +111,8 @@
     "hejuapi.com": "iKOd",
     "yujianwudi.top": "55Et",
     "umapis.com": "GgIn",
-    "sub2.congmingai.com": "GKHHMLU3V8YL"
+    "sub2.congmingai.com": "GKHHMLU3V8YL",
+    "airelay.buzz": "WFPFW82LVFQ9"
   },
   "relay_directory": {
     "blocked_hosts": [],
@@ -241,6 +242,13 @@
         "entry_url": "https://onepig123.com/register",
         "usage_url": "https://onepig123.com/usage",
         "display_name": "粉猪模型网关"
+      },
+      "airelay.buzz": {
+        "veridrop_host": "airelay.buzz",
+        "entry_url": "https://airelay.buzz/register",
+        "purchase_url": "https://airelay.buzz/purchase",
+        "usage_url": "https://airelay.buzz/usage",
+        "display_name": "Airelay"
       }
     }
   }
