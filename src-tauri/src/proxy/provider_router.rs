@@ -20,6 +20,17 @@ pub(crate) fn provider_supports_failover(app_type: &str, provider: &Provider) ->
         || !crate::proxy::providers::is_codex_official_provider(provider)
 }
 
+/// 账号级熔断键：与档位键（`app_type:provider_id`）同表不同命名空间，
+/// `account:` 段保证不与任何 provider id 撞键。
+///
+/// app 维度与档位熔断一致（跨 app 不联动）：熔断器配置按 app 读取，
+/// 且同站同账号在不同 app 的档位走不同链路，跨 app 连坐会放大误伤。
+fn account_circuit_key(app_type: &str, provider: &Provider) -> Option<String> {
+    provider
+        .failover_account_key()
+        .map(|key| format!("{app_type}:account:{key}"))
+}
+
 /// 供应商路由器
 pub struct ProviderRouter {
     /// 数据库连接
@@ -129,10 +140,7 @@ impl ProviderRouter {
                     }
                     total_providers += 1;
 
-                    let circuit_key = format!("{app_type}:{}", provider.id);
-                    let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
-
-                    if breaker.is_available().await {
+                    if self.tier_and_account_available(app_type, &provider).await {
                         result.push(provider);
                     } else {
                         circuit_open_count += 1;
@@ -170,6 +178,9 @@ impl ProviderRouter {
     }
 
     /// 按熔断器可用性过滤候选，累计放行结果与熔断计数。
+    ///
+    /// 档位熔断与账号级熔断都可用才放行：致命错误（凭证/余额）按账号升级
+    /// 后，同账号其他分组即使自身熔断器是 Closed 也进不了候选。
     async fn filter_by_circuit_breaker(
         &self,
         app_type: &str,
@@ -178,15 +189,28 @@ impl ProviderRouter {
         circuit_open_count: &mut usize,
     ) {
         for provider in candidates {
-            let circuit_key = format!("{app_type}:{}", provider.id);
-            let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
-
-            if breaker.is_available().await {
+            if self.tier_and_account_available(app_type, &provider).await {
                 result.push(provider);
             } else {
                 *circuit_open_count += 1;
             }
         }
+    }
+
+    /// 档位与其所属账号的熔断器是否都可用（选路阶段判断，不占探测名额）。
+    async fn tier_and_account_available(&self, app_type: &str, provider: &Provider) -> bool {
+        let circuit_key = format!("{app_type}:{}", provider.id);
+        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+        if !breaker.is_available().await {
+            return false;
+        }
+        if let Some(account_key) = account_circuit_key(app_type, provider) {
+            let account_breaker = self.get_or_create_circuit_breaker(&account_key).await;
+            if !account_breaker.is_available().await {
+                return false;
+            }
+        }
+        true
     }
 
     /// 请求执行前获取熔断器“放行许可”
@@ -224,6 +248,23 @@ impl ProviderRouter {
 
         if success {
             breaker.record_success(used_half_open_permit).await;
+            // 账号级联动（成功解封）：账号熔断只由致命失败打开，也只有成功
+            // 能闭合它 —— 普通失败不碰账号维度。半开探测成功攒够阈值自然回落
+            // Closed，与档位熔断同一套恢复语义。
+            if let Some(provider) = self
+                .db
+                .get_provider_by_id(provider_id, app_type)
+                .ok()
+                .flatten()
+            {
+                if let Some(account_key) = account_circuit_key(app_type, &provider) {
+                    let breakers = self.circuit_breakers.read().await;
+                    // 只记录已存在的账号熔断器：没打开过就不为记账凭空建条目
+                    if let Some(account_breaker) = breakers.get(&account_key) {
+                        account_breaker.record_success(false).await;
+                    }
+                }
+            }
         } else {
             breaker.record_failure(used_half_open_permit).await;
         }
@@ -248,6 +289,10 @@ impl ProviderRouter {
     /// 区别只在熔断器：致命失败一次即 Open 且用长冷却
     /// （[`CircuitBreaker::record_fatal_failure`](crate::proxy::circuit_breaker::CircuitBreaker::record_fatal_failure)）。
     /// 什么时候算「致命」由调用方分类（forwarder 按上游状态码 401/402/403）。
+    ///
+    /// 致命 ⇒ 账号级升级：凭证与余额是账号级事实，同站同账号的其他分组
+    /// 必然同样 401/402 —— 账号熔断打开后，整个账号的档位在选路阶段被
+    /// 排除（[`Self::filter_by_circuit_breaker`]），不再逐组撞墙。
     pub async fn record_fatal_result(
         &self,
         provider_id: &str,
@@ -266,7 +311,20 @@ impl ProviderRouter {
         let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
         breaker.record_fatal_failure(used_half_open_permit).await;
 
-        // 3. 更新数据库健康状态（与普通失败同一张表）
+        // 3. 账号级熔断同步打开（致命一次即开，长冷却）
+        if let Some(provider) = self
+            .db
+            .get_provider_by_id(provider_id, app_type)
+            .ok()
+            .flatten()
+        {
+            if let Some(account_key) = account_circuit_key(app_type, &provider) {
+                let account_breaker = self.get_or_create_circuit_breaker(&account_key).await;
+                account_breaker.record_fatal_failure(false).await;
+            }
+        }
+
+        // 4. 更新数据库健康状态（与普通失败同一张表）
         self.db
             .update_provider_health_with_threshold(
                 provider_id,
@@ -290,26 +348,57 @@ impl ProviderRouter {
 
     /// 批量读熔断器快照（看板「熔断/自动重试倒计时」用）。Closed（含从未
     /// 记录过结果的）不进 map —— 只上报当前不正常的。
+    ///
+    /// 档位自身的熔断优先；档位自身 Closed 但**账号级熔断**打开时上报账号
+    /// 快照 —— 致命错误按账号升级后，同账号其他分组确实整段不可用，看板
+    /// 必须如实显示，否则「这家好好的为什么不接流量」无从解释。
     pub async fn breaker_states(
         &self,
         app_type: &str,
-        provider_ids: &[String],
+        providers: &[Provider],
     ) -> HashMap<String, crate::proxy::circuit_breaker::BreakerSnapshot> {
         let mut result = HashMap::new();
-        for provider_id in provider_ids {
-            let circuit_key = format!("{app_type}:{provider_id}");
+        for provider in providers {
+            let circuit_key = format!("{app_type}:{}", provider.id);
             let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
-            if let Some(snapshot) = breaker.snapshot().await {
-                result.insert(provider_id.clone(), snapshot);
+            let mut snapshot = breaker.snapshot().await;
+            if snapshot.is_none() {
+                if let Some(account_key) = account_circuit_key(app_type, provider) {
+                    // 只读既有条目：账号从未熔断过就不为看板凭空建熔断器
+                    let account_breaker = {
+                        let breakers = self.circuit_breakers.read().await;
+                        breakers.get(&account_key).cloned()
+                    };
+                    if let Some(account_breaker) = account_breaker {
+                        snapshot = account_breaker.snapshot().await;
+                    }
+                }
+            }
+            if let Some(snapshot) = snapshot {
+                result.insert(provider.id.clone(), snapshot);
             }
         }
         result
     }
 
     /// 重置指定供应商的熔断器
+    ///
+    /// 账号级连带重置：余额/凭证是账号级事实，用户点「重新启用」（通常已
+    /// 充值/换好凭证）就该放开整个账号 —— 只重置单档会让同账号其他档位仍
+    /// 被账号熔断挡着，看起来像「点了没生效」。
     pub async fn reset_provider_breaker(&self, provider_id: &str, app_type: &str) {
         let circuit_key = format!("{app_type}:{provider_id}");
         self.reset_circuit_breaker(&circuit_key).await;
+        if let Some(provider) = self
+            .db
+            .get_provider_by_id(provider_id, app_type)
+            .ok()
+            .flatten()
+        {
+            if let Some(account_key) = account_circuit_key(app_type, &provider) {
+                self.reset_circuit_breaker(&account_key).await;
+            }
+        }
     }
 
     /// 仅释放 HalfOpen permit，不影响健康统计（neutral 接口）
@@ -502,9 +591,7 @@ mod tests {
             .await
             .unwrap();
 
-        let states = router
-            .breaker_states("claude", &["dead".to_string(), "fine".to_string()])
-            .await;
+        let states = router.breaker_states("claude", &[dead, fine]).await;
         let snapshot = states.get("dead").expect("致命打开的熔断器必须上报");
         assert!(!snapshot.half_open);
         let remaining = snapshot.reopen_in_secs.expect("Open 带倒计时");
@@ -513,6 +600,136 @@ mod tests {
             "长冷却 1800：{remaining}"
         );
         assert!(!states.contains_key("fine"), "正常（Closed）熔断器不上报");
+    }
+
+    /// 托管档（中转站 tier）：`website_url`=站点 origin、meta 带账号身份 ——
+    /// 形状对齐 provision 建档路径（commands/relay.rs 落库字段）。
+    fn managed_tier(site: &str, account: i64, group: i64) -> Provider {
+        let id = crate::relay::provision::provider_id_for(site, Some(account), group);
+        let mut provider = Provider::with_id(
+            id,
+            format!("{site} · group {group}"),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": format!("{site}/v1"),
+                    "ANTHROPIC_AUTH_TOKEN": "tok",
+                }
+            }),
+            Some(site.to_string()),
+        );
+        provider.meta = Some(ProviderMeta {
+            loongport_account_id: Some(account),
+            ..ProviderMeta::default()
+        });
+        provider
+    }
+
+    /// 致命失败（凭证/余额级）按账号升级：同站同账号的其他分组在选路阶段被
+    /// 账号级熔断排除 —— 余额是账号级事实，逐组撞 402 只是浪费用户请求。
+    #[tokio::test]
+    #[serial]
+    async fn fatal_failure_excludes_sibling_tiers_of_the_same_account() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let a1 = managed_tier("https://a.example", 1, 11);
+        let a2 = managed_tier("https://a.example", 1, 22);
+        let b = managed_tier("https://b.example", 2, 33);
+        for provider in [&a1, &a2, &b] {
+            db.save_provider("claude", provider).unwrap();
+        }
+        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        assert_eq!(
+            router.select_providers("claude").await.unwrap().len(),
+            3,
+            "基线：无熔断时全部档位都在候选"
+        );
+
+        router
+            .record_fatal_result(&a1.id, "claude", false, Some("402".to_string()))
+            .await
+            .unwrap();
+
+        let selected: Vec<String> = router
+            .select_providers("claude")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|provider| provider.id)
+            .collect();
+        assert!(!selected.contains(&a1.id), "肇事档位被自身熔断排除");
+        assert!(
+            !selected.contains(&a2.id),
+            "同账号兄弟档位被账号级熔断排除（自身熔断器还是 Closed）"
+        );
+        assert!(selected.contains(&b.id), "其他账号不受连坐");
+    }
+
+    /// 「重新启用」连带放开整个账号：用户充值后点重置，同账号其余档位必须
+    /// 一起回来 —— 只重置单档会让账号熔断继续挡着兄弟档位，看起来像没生效。
+    #[tokio::test]
+    #[serial]
+    async fn reset_provider_breaker_releases_the_whole_account() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let a1 = managed_tier("https://a.example", 1, 11);
+        let a2 = managed_tier("https://a.example", 1, 22);
+        for provider in [&a1, &a2] {
+            db.save_provider("claude", provider).unwrap();
+        }
+        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        router
+            .record_fatal_result(&a1.id, "claude", false, Some("402".to_string()))
+            .await
+            .unwrap();
+        router.reset_provider_breaker(&a1.id, "claude").await;
+
+        assert_eq!(
+            router.select_providers("claude").await.unwrap().len(),
+            2,
+            "重置必须连带放开账号级熔断"
+        );
+    }
+
+    /// 看板如实显示账号级熔断：档位自身 Closed 但账号熔断打开时，兄弟档位
+    /// 上报账号快照（Open + 长冷却），不能显示成「健康」。
+    #[tokio::test]
+    #[serial]
+    async fn breaker_states_surface_account_open_on_sibling_tiers() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let a1 = managed_tier("https://a.example", 1, 11);
+        let a2 = managed_tier("https://a.example", 1, 22);
+        let b = managed_tier("https://b.example", 2, 33);
+        for provider in [&a1, &a2, &b] {
+            db.save_provider("claude", provider).unwrap();
+        }
+
+        let router = ProviderRouter::new(db.clone());
+        router
+            .record_fatal_result(&a1.id, "claude", false, Some("402".to_string()))
+            .await
+            .unwrap();
+
+        let (a1_id, a2_id, b_id) = (a1.id.clone(), a2.id.clone(), b.id.clone());
+        let states = router.breaker_states("claude", &[a1, a2, b]).await;
+        assert!(states.contains_key(&a1_id), "肇事档位：自身熔断 Open");
+        let sibling = states
+            .get(&a2_id)
+            .expect("兄弟档位必须上报账号级熔断，不能显示成健康");
+        assert!(!sibling.half_open);
+        let remaining = sibling.reopen_in_secs.expect("Open 带倒计时");
+        assert!(
+            remaining > 1790 && remaining <= 1800,
+            "账号级致命长冷却 1800：{remaining}"
+        );
+        assert!(!states.contains_key(&b_id), "其他账号不上报");
     }
 
     #[tokio::test]

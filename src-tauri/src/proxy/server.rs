@@ -420,11 +420,11 @@ impl ProxyServer {
     pub async fn provider_breaker_states(
         &self,
         app_type: &str,
-        provider_ids: &[String],
+        providers: &[crate::provider::Provider],
     ) -> std::collections::HashMap<String, crate::proxy::circuit_breaker::BreakerSnapshot> {
         self.state
             .provider_router
-            .breaker_states(app_type, provider_ids)
+            .breaker_states(app_type, providers)
             .await
     }
 }

@@ -87,6 +87,28 @@ impl Provider {
             || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
     }
 
+    /// 账号级故障域：同站同账号的托管档共享同一份凭证与余额 —— 一家吃到
+    /// 致命错误（401/402），同账号其他分组也过不去，故障转移该整个账号跳过。
+    ///
+    /// 键 = `website_url`（provision 写入的站点 origin）+ 账号 id
+    /// （[`ProviderMeta::loongport_account_id`]，vendor 档用字符串形态的
+    /// [`ProviderMeta::loongport_vendor_account`]）。`None` = 非托管档
+    /// （用户手工配置）或账号身份缺失：没有账号维度，档位各自独立，
+    /// 致命熔断只作用单档（既有行为）。
+    pub fn failover_account_key(&self) -> Option<String> {
+        let meta = self.meta.as_ref()?;
+        let origin = self.website_url.as_deref()?;
+        let account = match (
+            meta.loongport_account_id,
+            meta.loongport_vendor_account.as_deref(),
+        ) {
+            (Some(id), _) => id.to_string(),
+            (None, Some(vendor)) => vendor.to_string(),
+            (None, None) => return None,
+        };
+        Some(format!("{origin}/{account}"))
+    }
+
     /// Whether the provider form's "auth field" was explicitly set to
     /// ANTHROPIC_API_KEY. The form only persists `meta.apiKeyField` for the
     /// non-default choice, so `None` means the default ANTHROPIC_AUTH_TOKEN.
@@ -1076,6 +1098,69 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// 账号级故障域：同站同账号同键、站点或账号任一不同则不同键；
+    /// vendor 档用字符串账号；手工档/缺账号身份 → None（无账号维度）。
+    #[test]
+    fn failover_account_key_scopes_site_and_account() {
+        let tier = |site: Option<&str>, account: Option<i64>, vendor: Option<&str>| {
+            let mut provider = Provider::with_id(
+                "t".to_string(),
+                "t".to_string(),
+                json!({}),
+                site.map(str::to_string),
+            );
+            provider.meta = Some(ProviderMeta {
+                loongport_account_id: account,
+                loongport_vendor_account: vendor.map(str::to_string),
+                ..ProviderMeta::default()
+            });
+            provider
+        };
+
+        let a1 = tier(Some("https://a.example"), Some(1), None);
+        let a2 = tier(Some("https://a.example"), Some(1), None);
+        assert_eq!(
+            a1.failover_account_key(),
+            a2.failover_account_key(),
+            "同站同账号 = 同一故障域"
+        );
+
+        let other_account = tier(Some("https://a.example"), Some(2), None);
+        assert_ne!(
+            a1.failover_account_key(),
+            other_account.failover_account_key(),
+            "同站不同账号各自独立"
+        );
+
+        let other_site = tier(Some("https://b.example"), Some(1), None);
+        assert_ne!(
+            a1.failover_account_key(),
+            other_site.failover_account_key(),
+            "不同站点各自独立"
+        );
+
+        // vendor 档（DeepSeek 等）：账号 id 是字符串形态
+        let vendor = tier(Some("https://vendor.example"), None, Some("uuid-1"));
+        assert_eq!(
+            vendor.failover_account_key().as_deref(),
+            Some("https://vendor.example/uuid-1")
+        );
+
+        // 手工档（无 meta / 无站点 / 无账号身份）：没有账号维度，档位各自独立
+        let manual = Provider::with_id("m".to_string(), "m".to_string(), json!({}), None);
+        assert_eq!(manual.failover_account_key(), None);
+        assert_eq!(
+            tier(None, Some(1), None).failover_account_key(),
+            None,
+            "缺站点 origin"
+        );
+        assert_eq!(
+            tier(Some("https://a.example"), None, None).failover_account_key(),
+            None,
+            "缺账号身份"
+        );
+    }
 
     #[test]
     fn provider_meta_serializes_pricing_model_source() {

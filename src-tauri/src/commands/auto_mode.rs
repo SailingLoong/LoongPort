@@ -463,7 +463,7 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let provider_ids: Vec<String> = ranked.iter().map(|p| p.id.clone()).collect();
     let breaker_states = state
         .proxy_service
-        .provider_breaker_states(app_type, &provider_ids)
+        .provider_breaker_states(app_type, &ranked)
         .await;
 
     let balances = fetch_site_balances(app_type, &ranked).await;

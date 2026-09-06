@@ -613,6 +613,95 @@ async fn first_token_ms_excludes_time_spent_on_failed_attempts() {
     fx.server.stop().await.expect("stop server");
 }
 
+/// 致命失败（402 余额不足）按账号跳过，不逐组撞墙：同站同账号两档
+/// （a1 最便宜 ×0.5、a2 居中 ×1.0）+ 另一账号一档（b 最贵 ×2.0）。
+/// a1 吃 402 后：本请求内 a2 被跳过（余额是账号级事实，a2 必然同样 402）；
+/// 后续请求 a1/a2 都被账号级熔断排除，流量直达 b。
+#[tokio::test]
+#[serial]
+async fn fatal_402_skips_sibling_tiers_of_the_same_account() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    let a1_mock = MockUpstream::spawn("served-by-a1").await;
+    let a2_mock = MockUpstream::spawn("served-by-a2").await;
+    let b_mock = MockUpstream::spawn("served-by-b").await;
+
+    // 托管档形状对齐 provision 建档：website_url=站点 origin + meta 账号身份
+    let account_tier = |mock: &MockUpstream, site: &str, account: i64, group: i64| {
+        let id = crate::relay::provision::provider_id_for(site, Some(account), group);
+        let mut provider = Provider::with_id(
+            id,
+            format!("{site} · {group}"),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": mock.base_url(),
+                    "ANTHROPIC_AUTH_TOKEN": "tok",
+                }
+            }),
+            Some(site.to_string()),
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            loongport_account_id: Some(account),
+            ..Default::default()
+        });
+        provider
+    };
+    let a1 = account_tier(&a1_mock, "https://acc.example", 1, 11);
+    let a2 = account_tier(&a2_mock, "https://acc.example", 1, 22);
+    let b = account_tier(&b_mock, "https://other.example", 2, 33);
+    for provider in [&a1, &a2, &b] {
+        db.save_provider("claude", provider).unwrap();
+    }
+    db.set_tier_rate_multiplier("claude", &a1.id, Some(0.5))
+        .unwrap();
+    db.set_tier_rate_multiplier("claude", &a2.id, Some(1.0))
+        .unwrap();
+    db.set_tier_rate_multiplier("claude", &b.id, Some(2.0))
+        .unwrap();
+
+    let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.enabled = true;
+    config.auto_failover_enabled = true;
+    config.max_retries = 3;
+    db.update_proxy_config_for_app(config).await.unwrap();
+    auto_strategy::set_enabled(&db, "claude", true).unwrap();
+
+    let verification = Arc::new(
+        crate::relay::model_verification::coordinator::ModelVerificationCoordinator::new(
+            db.clone(),
+        ),
+    );
+    let server = ProxyServer::new(
+        ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        },
+        db.clone(),
+        None,
+        verification.passive_ingress(),
+    );
+    let info = server.start().await.expect("start proxy server");
+
+    a1_mock.set_status(402).await;
+
+    // 第一条请求：a1 → 402（致命）→ a2 同账号被跳过 → b 接住
+    let marker = response_text(send_message(info.port, "sess-e2e-acct-0001").await).await;
+    assert_eq!(marker, "served-by-b");
+    assert_eq!(a1_mock.hits(), 1);
+    assert_eq!(a2_mock.hits(), 0, "请求内不得再撞同账号的兄弟档位");
+    assert_eq!(b_mock.hits(), 1);
+
+    // 第二条请求：账号级熔断跨请求排除 a1/a2，流量直达 b
+    let marker = response_text(send_message(info.port, "sess-e2e-acct-0002").await).await;
+    assert_eq!(marker, "served-by-b");
+    assert_eq!(a1_mock.hits(), 1, "肇事档位被自身熔断排除");
+    assert_eq!(a2_mock.hits(), 0, "兄弟档位被账号级熔断排除");
+    assert_eq!(b_mock.hits(), 2);
+
+    server.stop().await.expect("stop server");
+}
+
 /// 4. 被动模型监控：换芯流量（Claude 线路回 OpenAI 形状）→ 异源指纹 Anomaly
 ///    落库 + history(source=passive) + 档位看板点亮；干净档位零报告；
 ///    转发本身不受观察影响（客户端仍拿到 200 与原样响应体）。
