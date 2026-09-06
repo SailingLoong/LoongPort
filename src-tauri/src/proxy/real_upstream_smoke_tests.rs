@@ -229,7 +229,7 @@ async fn real_tier_board_snapshot() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (_home, db) = smoke_db();
     let state = crate::store::AppState::new(db);
-    let board = crate::tier_board_impl(&state, "claude")
+    let board = crate::tier_board_impl(&state, "claude", None)
         .await
         .expect("tier board");
     println!(
@@ -265,7 +265,7 @@ async fn real_manual_order_routes_to_user_first_pick() {
     // 与自动策略序不同（否则证明力为零）。断言探针选「必有 HTTP 交换」的档位
     // ——网络层失败（连接拒绝/超时）不写 proxy_request_logs，只有 HTTP 交换
     // （2xx/4xx/5xx）留痕；newapi/sub2api 站点总会回 HTTP。
-    let board = crate::tier_board_impl(&state, "claude")
+    let board = crate::tier_board_impl(&state, "claude", None)
         .await
         .expect("tier board");
     assert!(board.tiers.len() >= 2, "至少两档才能构造证明性手动序");

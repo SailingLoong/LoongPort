@@ -759,7 +759,7 @@ async fn passive_anomaly_lands_and_surfaces() {
 
     // 档位看板点亮异常
     let state = crate::store::AppState::new(fx.db.clone());
-    let board = crate::commands::auto_mode::tier_board_impl(&state, "claude")
+    let board = crate::commands::auto_mode::tier_board_impl(&state, "claude", None)
         .await
         .unwrap();
     let tier = board

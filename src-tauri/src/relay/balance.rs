@@ -41,6 +41,7 @@
 
 use futures::future::join_all;
 
+use crate::error::AppError;
 use crate::provider::{UsageData, UsageResult};
 use crate::relay::{api, backend, creds};
 
@@ -280,9 +281,299 @@ fn wallet_usage(balance: f64) -> UsageResult {
     }
 }
 
+// ============================================================================
+// 站点余额缓存（省心看板 SWR）
+// ============================================================================
+
+/// 看板余额的缓存表：`origin → (余额, 拉取时刻)`，每站一行。
+///
+/// 由 `create_tables_on_conn`（全新库）与 LoongPort 迁移 v18 → v19（老库）
+/// 共同调用，两边建的必须是同一形态 —— 见 `database/loongport_schema.rs`
+/// 的头注释。
+pub fn create_site_balance_cache_table(conn: &rusqlite::Connection) -> Result<(), AppError> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS site_balance_cache (
+            site_origin TEXT PRIMARY KEY,
+            balance_usd REAL,
+            fetched_at INTEGER NOT NULL
+        )",
+        [],
+    )
+    .map_err(|e| AppError::Database(format!("创建 site_balance_cache 表失败: {e}")))?;
+    Ok(())
+}
+
+/// 缓存 TTL（秒）：超过视为 stale，看板读到时踢一次后台刷新。
+pub const SITE_BALANCE_TTL_SECS: i64 = 600;
+
+/// 单站余额链预算。usage → billing 双端点各自 30s 总超时且串行，不设预算时
+/// 一家黑洞站最坏拖 90s —— 刷新虽已在后台，超预算的站仍会长期占着单飞槽位。
+const SITE_BALANCE_FETCH_BUDGET_SECS: u64 = 15;
+
+/// 一行缓存：`balance` 为 `None` = 负缓存（最近查过、这家没有可用值）——
+/// 没有负缓存的话，查不出余额的站每次打开看板都会重查一遍。
+pub type SiteBalanceEntry = (Option<f64>, i64);
+
+/// 读全表（行数 = 站点数，个位到几十）。
+pub fn cached_site_balances(
+    db: &crate::database::Database,
+) -> std::collections::HashMap<String, SiteBalanceEntry> {
+    // 非 Result 返回值的锁惯例：毒锁取内值（与 commands::auto_mode 的直查一致），
+    // 读缓存失败按「无缓存」处理 —— 看板照常返回，stale 判定自然触发刷新。
+    let conn = db
+        .conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut stmt =
+        match conn.prepare("SELECT site_origin, balance_usd, fetched_at FROM site_balance_cache") {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                log::warn!("读 site_balance_cache 失败（按无缓存处理）: {e}");
+                return std::collections::HashMap::new();
+            }
+        };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            (row.get::<_, Option<f64>>(1)?, row.get::<_, i64>(2)?),
+        ))
+    });
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(e) => {
+            log::warn!("遍历 site_balance_cache 失败（按无缓存处理）: {e}");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// 幂等写一行（含负缓存）。
+pub fn upsert_site_balance(
+    db: &crate::database::Database,
+    origin: &str,
+    entry: SiteBalanceEntry,
+) -> Result<(), AppError> {
+    let conn = crate::database::lock_conn!(db.conn);
+    conn.execute(
+        "INSERT INTO site_balance_cache (site_origin, balance_usd, fetched_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(site_origin) DO UPDATE SET
+            balance_usd = excluded.balance_usd,
+            fetched_at = excluded.fetched_at",
+        rusqlite::params![origin, entry.0, entry.1],
+    )
+    .map_err(|e| AppError::Database(format!("写 site_balance_cache 失败: {e}")))?;
+    Ok(())
+}
+
+/// 哪些站需要刷新：没进过缓存的 + `fetched_at` 超 TTL 的（纯函数）。
+fn stale_balance_sites(
+    wanted: &std::collections::HashMap<String, String>,
+    cached: &std::collections::HashMap<String, SiteBalanceEntry>,
+    now: i64,
+) -> Vec<(String, String)> {
+    wanted
+        .iter()
+        .filter(|(origin, _)| match cached.get(*origin) {
+            Some((_, fetched_at)) => now - *fetched_at > SITE_BALANCE_TTL_SECS,
+            None => true,
+        })
+        .map(|(origin, key)| (origin.clone(), key.clone()))
+        .collect()
+}
+
+/// 单飞集合：正在后台刷新的 origin。看板查询可能高频触发（多 app + 窗口聚焦），
+/// 没有这道闸会叠出一串重复扇出。
+static REFRESH_INFLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// 读时惰性刷新（SWR 的 revalidate）：筛出 stale 站点交给后台任务 ——
+/// sk 直查 → 写缓存 → 发 [`crate::events::SITE_BALANCES_UPDATED`] 让前端补值。
+///
+/// **这不是 interval 轮询**：唯一触发点是「看板被读」这类用户可见时刻，与
+/// 2026-08「余额采样零新增路径、不做后台轮询」的决策（PR #127）一致。那条
+/// 决策防的是**登录态路**的周期请求 —— NewAPI 的 refresh cookie 一次性轮换，
+/// 充值窗口持有独占权时后台续期会把用户踢出充值页。本链路只走 sk
+/// （`usage_with_api_key` / `billing_balance_with_api_key`），不携带登录态、
+/// 不碰 cookie。⚠️ 若将来把这条链改走登录态，必须先补「充值窗口活跃站跳过」。
+pub fn spawn_stale_refresh(
+    db: std::sync::Arc<crate::database::Database>,
+    app_handle: Option<tauri::AppHandle>,
+    wanted: std::collections::HashMap<String, String>,
+) {
+    let now = chrono::Utc::now().timestamp();
+    let stale = {
+        let cached = cached_site_balances(&db);
+        let stale = stale_balance_sites(&wanted, &cached, now);
+        if stale.is_empty() {
+            return;
+        }
+        let inflight = REFRESH_INFLIGHT.get_or_init(Default::default);
+        let Ok(mut guard) = inflight.lock() else {
+            return;
+        };
+        let fresh: Vec<_> = stale
+            .into_iter()
+            .filter(|(origin, _)| guard.insert(origin.clone()))
+            .collect();
+        fresh
+    };
+    if stale.is_empty() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let origins: Vec<String> = stale.iter().map(|(origin, _)| origin.clone()).collect();
+        let results = futures::future::join_all(stale.into_iter().map(|(origin, key)| async move {
+            let fetched = match tokio::time::timeout(
+                std::time::Duration::from_secs(SITE_BALANCE_FETCH_BUDGET_SECS),
+                fetch_site_balance(&origin, &key),
+            )
+            .await
+            {
+                Ok(balance) => balance,
+                Err(_elapsed) => {
+                    log::warn!("[site-balance] {origin} 余额链超预算（{SITE_BALANCE_FETCH_BUDGET_SECS}s），本次记负缓存");
+                    None
+                }
+            };
+            (origin, fetched)
+        }))
+        .await;
+
+        let now = chrono::Utc::now().timestamp();
+        for (origin, balance) in results {
+            if let Err(e) = upsert_site_balance(&db, &origin, (balance, now)) {
+                log::warn!("[site-balance] 写缓存失败 {origin}: {e}");
+            }
+        }
+
+        if let Some(inflight) = REFRESH_INFLIGHT.get() {
+            if let Ok(mut guard) = inflight.lock() {
+                for origin in origins {
+                    guard.remove(&origin);
+                }
+            }
+        }
+
+        if let Some(app_handle) = app_handle {
+            crate::events::emit_site_balances_updated(&app_handle);
+        }
+    });
+}
+
+/// 单站余额链（sk 直查，从看板原 `fetch_site_balances` 迁入）：
+/// sub2api `/v1/usage` 钱包 → one-api 系 billing 双端点回落。
+async fn fetch_site_balance(origin: &str, key: &str) -> Option<f64> {
+    let sub2api_wallet = crate::relay::api::usage_with_api_key(origin, key)
+        .await
+        .ok()
+        .and_then(|usage| {
+            usage
+                .data
+                .and_then(|items| items.first().and_then(|item| item.remaining))
+        });
+    match sub2api_wallet {
+        Some(balance) => Some(balance),
+        None => crate::relay::api::billing_balance_with_api_key(origin, key)
+            .await
+            .ok()
+            .flatten(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== 站点余额缓存（看板 SWR） ====================
+
+    fn cache_db() -> crate::database::Database {
+        // Database::memory() 已按生产 schema 建齐全部表（含 v19 的
+        // site_balance_cache），别自建。
+        crate::database::Database::memory().expect("内存库")
+    }
+
+    /// 缓存读写 roundtrip：正/负缓存（None）都要能原样读回、upsert 幂等覆盖。
+    #[test]
+    fn site_balance_cache_roundtrips_including_negative_entries() {
+        let db = cache_db();
+        let now = 1_000_000_i64;
+        upsert_site_balance(&db, "https://a.example", (Some(9.5), now)).unwrap();
+        upsert_site_balance(&db, "https://dead.example", (None, now)).unwrap();
+
+        let cached = cached_site_balances(&db);
+        assert_eq!(cached.get("https://a.example"), Some(&(Some(9.5), now)));
+        assert_eq!(
+            cached.get("https://dead.example"),
+            Some(&(None, now)),
+            "负缓存（查过无值）也要占位，否则死站每次打开都重查"
+        );
+        assert!(!cached.contains_key("https://never.example"));
+
+        // 覆盖写：同站新值顶旧值
+        upsert_site_balance(&db, "https://a.example", (Some(8.0), now + 1)).unwrap();
+        assert_eq!(
+            cached_site_balances(&db).get("https://a.example"),
+            Some(&(Some(8.0), now + 1))
+        );
+    }
+
+    /// stale 判定：没进过缓存的、超 TTL 的要刷；TTL 内的（含负缓存）不刷。
+    #[test]
+    fn stale_balance_sites_pick_missing_and_over_ttl_only() {
+        let now = 10_000_i64;
+        let fresh = now - (SITE_BALANCE_TTL_SECS - 1);
+        let stale = now - (SITE_BALANCE_TTL_SECS + 1);
+        let mut wanted = std::collections::HashMap::new();
+        wanted.insert("https://fresh.example".to_string(), "k1".to_string());
+        wanted.insert("https://stale.example".to_string(), "k2".to_string());
+        wanted.insert("https://missing.example".to_string(), "k3".to_string());
+        wanted.insert(
+            "https://fresh-negative.example".to_string(),
+            "k4".to_string(),
+        );
+        let mut cached = std::collections::HashMap::new();
+        cached.insert("https://fresh.example".to_string(), (Some(1.0), fresh));
+        cached.insert("https://stale.example".to_string(), (Some(2.0), stale));
+        cached.insert("https://fresh-negative.example".to_string(), (None, fresh));
+
+        let mut stale_sites = stale_balance_sites(&wanted, &cached, now);
+        stale_sites.sort();
+        assert_eq!(
+            stale_sites,
+            vec![
+                ("https://missing.example".to_string(), "k3".to_string()),
+                ("https://stale.example".to_string(), "k2".to_string()),
+            ],
+            "TTL 内的正/负缓存都不刷；缺缓存与超 TTL 的要刷"
+        );
+    }
+
+    /// 后台管线贯通：不可达站点跑完「fetch（快速失败）→ 写缓存」后留下负缓存，
+    /// 下一次看板读取（TTL 内）不再重查。
+    #[tokio::test]
+    async fn background_refresh_writes_negative_cache_for_unreachable_site() {
+        let db = std::sync::Arc::new(cache_db());
+        let mut wanted = std::collections::HashMap::new();
+        // .example 是保留 TLD，DNS 必然快速失败（离线环境同样快速失败）
+        wanted.insert(
+            "https://nonexistent.example".to_string(),
+            "sk-x".to_string(),
+        );
+
+        crate::relay::balance::spawn_stale_refresh(db.clone(), None, wanted);
+
+        for _ in 0..250 {
+            let cached = cached_site_balances(&db);
+            if let Some((balance, _)) = cached.get("https://nonexistent.example") {
+                assert_eq!(*balance, None, "不可达站必须是负缓存而不是有值");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("后台刷新没有为不可达站写下负缓存");
+    }
 
     #[test]
     fn relay_wallet_balance_owns_the_top_up_prompt_fact() {

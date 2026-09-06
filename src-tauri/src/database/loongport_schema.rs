@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 18;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 19;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -286,6 +286,11 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                     })?;
                 }
                 set_version(conn, 18)?;
+            }
+            18 => {
+                log::info!("LoongPort 数据迁移 v18 → v19（站点余额缓存表）");
+                crate::relay::balance::create_site_balance_cache_table(conn)?;
+                set_version(conn, 19)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -973,6 +978,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(not_null, 0);
+    }
+
+    /// ⭐ v18→v19 建站点余额缓存表（看板 SWR）：停在 v18 的老库升级后必须有表且可写。
+    #[test]
+    fn v18_to_v19_creates_the_site_balance_cache_table() {
+        let conn = mem();
+        ensure_version_table(&conn).expect("建版本表");
+        set_version(&conn, 18).expect("设为 v18");
+        assert!(
+            !Database::table_exists(&conn, "site_balance_cache").expect("查表"),
+            "前提：升级前本表不存在"
+        );
+
+        apply(&conn).expect("迁移到 v19");
+
+        assert!(
+            Database::table_exists(&conn, "site_balance_cache").expect("查表"),
+            "v18 → v19 必须建出站点余额缓存表"
+        );
+        conn.execute(
+            "INSERT INTO site_balance_cache (site_origin, balance_usd, fetched_at)
+             VALUES ('https://a.example', 1.5, 0)",
+            [],
+        )
+        .expect("迁移后必须可写");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 
     /// ⭐ v13→v14 建中转站余额快照表：停在 v13 的老库升级后必须有表且可写。

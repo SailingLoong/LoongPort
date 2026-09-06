@@ -61,6 +61,10 @@ pub const ONBOARDING_REGISTER_COMPLETED: &str = "onboarding-register-completed";
 /// payload `{ promoCode, amountUsd }`。
 pub const ONBOARDING_STAR_REWARD_OFFER: &str = "onboarding-star-reward-offer";
 
+/// 看板站点余额后台刷新完成（`useTierBoard` 监听，失效看板查询补上新值）。
+/// 站点余额跨 app 共享，不带 payload —— 监听方把所有 app 的看板一起失效。
+pub const SITE_BALANCES_UPDATED: &str = "site-balances-updated";
+
 /// 广播「当前供应商变了」。
 ///
 /// ## 为什么必须发（2026-08-04 修的 bug）
@@ -108,6 +112,15 @@ pub fn emit_provider_switched(
         // 发不出去只是界面不刷新（用户重开面板就好），不该让切换本身失败 ——
         // 配置已经写进去了，报错会让用户以为没切成功而再切一次。
         log::warn!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
+    }
+}
+
+/// 看板站点余额后台刷新完成。余额在后台单飞刷新（`relay::balance::spawn_stale_refresh`），
+/// 到货后靠这个事件让看板补值 —— 没有它，新余额要等下一次聚焦/30s stale 才出现。
+pub fn emit_site_balances_updated(app_handle: &tauri::AppHandle) {
+    if let Err(e) = app_handle.emit(SITE_BALANCES_UPDATED, ()) {
+        // 发不出去只是余额晚一点显示（下次看板重取自然带上），不值得报错。
+        log::warn!("发射 {SITE_BALANCES_UPDATED} 事件失败: {e}");
     }
 }
 
@@ -159,6 +172,7 @@ mod consistency_tests {
                 "ONBOARDING_STAR_REWARD_OFFER",
                 super::ONBOARDING_STAR_REWARD_OFFER,
             ),
+            ("SITE_BALANCES_UPDATED", super::SITE_BALANCES_UPDATED),
         ];
 
         for (ts_name, rust_value) in pairs {
