@@ -5,11 +5,15 @@
  * 所有数值必须是安全非负整数且带合理上限；小时串必须日历合法且不未来、不太老。
  */
 
-import { TTFT_BIN_COUNT } from "./bins";
-import type { IngestPayload } from "./types";
+import { TPS_BIN_COUNT, TTFT_BIN_COUNT } from "./bins";
+import type { IngestPayload, ModelBucketPayload } from "./types";
 
-export const MAX_BODY_BYTES = 64 * 1024;
+export const MAX_BODY_BYTES = 256 * 1024;
 export const MAX_HOURS_PER_UPLOAD = 200;
+/** P4：单小时桶的模型子桶数上限（长尾模型归 UI 侧聚合，这里只防垃圾填充）。 */
+const MAX_MODELS_PER_BUCKET = 64;
+/** 模型名形状：公开目录名 —— 字母数字与常规分隔符，拒绝任意可注入文本。 */
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\/:+-]{0,119}$/;
 /** 单桶请求数上限：一小时十万次请求必然是脏数据。 */
 const MAX_SAMPLES = 100_000;
 /** token / 花费字段的数量级上限（防溢出与垃圾填充）。 */
@@ -90,7 +94,7 @@ export function parseIngestPayload(
   }
   const obj = json as Record<string, unknown>;
 
-  if (obj.version !== 1) {
+  if (obj.version !== 1 && obj.version !== 2) {
     return { ok: false, error: "unsupported version" };
   }
   if (typeof obj.sourceId !== "string" || !SOURCE_RE.test(obj.sourceId)) {
@@ -159,6 +163,75 @@ export function parseIngestPayload(
       return { ok: false, error: "ttftBins sum != ttftCount" };
     }
 
+    // P4（version 2）：模型子桶。v1 载荷没有 models 键 —— 跳过。
+    let models: ModelBucketPayload[] | undefined;
+    if (obj.version === 2) {
+      if (!Array.isArray(b.models)) {
+        return { ok: false, error: "v2 hour bucket must carry models array" };
+      }
+      if (b.models.length > MAX_MODELS_PER_BUCKET) {
+        return { ok: false, error: `too many model buckets (>${MAX_MODELS_PER_BUCKET})` };
+      }
+      const modelSeen = new Set<string>();
+      models = [];
+      for (const rawModel of b.models) {
+        if (typeof rawModel !== "object" || rawModel === null) {
+          return { ok: false, error: "model bucket must be an object" };
+        }
+        const m = rawModel as Record<string, unknown>;
+        if (typeof m.model !== "string" || !MODEL_RE.test(m.model)) {
+          return { ok: false, error: `bad model: ${String(m.model)}` };
+        }
+        if (modelSeen.has(m.model)) {
+          return { ok: false, error: "duplicate model bucket" };
+        }
+        modelSeen.add(m.model);
+        const mSamples = m.samples;
+        const mErrors = m.errors;
+        if (!isSafeUint(mSamples, samples)) {
+          return { ok: false, error: "bad model samples (must be <= bucket samples)" };
+        }
+        if (!isSafeUint(mErrors, mSamples)) {
+          return { ok: false, error: "bad model errors" };
+        }
+        if (
+          !isSafeUint(m.inputTokens, MAX_COUNT) ||
+          !isSafeUint(m.outputTokens, MAX_COUNT) ||
+          !isSafeUint(m.cacheReadTokens, MAX_COUNT) ||
+          !isSafeUint(m.cacheCreationTokens, MAX_COUNT) ||
+          !isSafeUint(m.costUsdMicros, MAX_COUNT)
+        ) {
+          return { ok: false, error: "bad model token/cost counters" };
+        }
+        if (
+          !Array.isArray(m.ttftBins) ||
+          m.ttftBins.length !== TTFT_BIN_COUNT ||
+          !m.ttftBins.every((c) => isSafeUint(c, mSamples))
+        ) {
+          return { ok: false, error: "bad model ttftBins" };
+        }
+        if (
+          !Array.isArray(m.tpsBins) ||
+          m.tpsBins.length !== TPS_BIN_COUNT ||
+          !m.tpsBins.every((c) => isSafeUint(c, mSamples))
+        ) {
+          return { ok: false, error: "bad model tpsBins" };
+        }
+        models.push({
+          model: m.model,
+          samples: mSamples,
+          errors: mErrors,
+          ttftBins: m.ttftBins as number[],
+          tpsBins: m.tpsBins as number[],
+          inputTokens: m.inputTokens as number,
+          outputTokens: m.outputTokens as number,
+          cacheReadTokens: m.cacheReadTokens as number,
+          cacheCreationTokens: m.cacheCreationTokens as number,
+          costUsdMicros: m.costUsdMicros as number,
+        });
+      }
+    }
+
     hours.push({
       hour: b.hour,
       site: b.site as string,
@@ -172,8 +245,9 @@ export function parseIngestPayload(
       cacheReadTokens: b.cacheReadTokens as number,
       cacheCreationTokens: b.cacheCreationTokens as number,
       costUsdMicros: b.costUsdMicros as number,
+      models,
     });
   }
 
-  return { ok: true, payload: { version: 1, sourceId: obj.sourceId, hours } };
+  return { ok: true, payload: { version: obj.version, sourceId: obj.sourceId, hours } };
 }

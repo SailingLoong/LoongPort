@@ -21,10 +21,11 @@
  * 花费参考值 = 微美元 / 总 token（$/Mtok，模型混合会拉偏，展示侧标「参考」）。
  */
 
-import { binMidpoint, quantileFromBins, TTFT_BIN_COUNT } from "./bins";
+import { binMidpoint, quantileFromBins, TPS_BIN_COUNT, tpsQuantileFromBins, TTFT_BIN_COUNT } from "./bins";
 import { hourToEpochSec } from "./validate";
 import type {
   HourSlot,
+  SiteTrendLite,
   SiteStats,
   SiteTrend,
   Snapshot,
@@ -417,8 +418,9 @@ function trendBucketOrNull(bucketRows: ParsedRow[]): { bucket: TrendBucket; bins
   };
 }
 
-/** 由原始桶行构建三档趋势（30 天原始数据一次查询复用）。 */
-export function buildTrends(rows: RawRow[], nowSec: number): TrendPayload {
+/** 由原始桶行构建三档趋势（30 天原始数据一次查询复用）。
+ *  P4：同时按模型出趋势（modelRows 来自 bucket_model_raw；v1 期数据缺省为空）。 */
+export function buildTrends(rows: RawRow[], nowSec: number, modelRows: RawModelRow[] = []): TrendPayload {
   const bySite = new Map<string, ParsedRow[]>();
   for (const row of rows) {
     const parsed = parseRow(row);
@@ -426,6 +428,14 @@ export function buildTrends(rows: RawRow[], nowSec: number): TrendPayload {
     const list = bySite.get(parsed.site) ?? [];
     list.push(parsed);
     bySite.set(parsed.site, list);
+  }
+  const bySiteModel = new Map<string, ParsedModelRow[]>();
+  for (const row of modelRows) {
+    const parsed = parseModelRow(row);
+    if (parsed === null) continue;
+    const list = bySiteModel.get(parsed.site) ?? [];
+    list.push(parsed);
+    bySiteModel.set(parsed.site, list);
   }
 
   const ranges: TrendPayload["ranges"] = {} as TrendPayload["ranges"];
@@ -456,11 +466,125 @@ export function buildTrends(rows: RawRow[], nowSec: number): TrendPayload {
           buckets.push({ start: bStart, p50Ms: null, p95Ms: null, errRate: null, cacheRate: null });
         }
       }
-      if (anyPublished) sites[site] = { buckets, ttftBins: rangeBins };
+      if (!anyPublished) continue;
+
+      // P4：该站在此档的模型趋势（逐 (site, model, bucket) 过 k-匿，
+      // 与站点桶同款规则；tpsP50Ms 从 tps 直方图求）。
+      const models: Record<string, SiteTrendLite> = {};
+      const siteModelRows = bySiteModel.get(site) ?? [];
+      const modelsSeen = new Map<string, ParsedModelRow[]>();
+      for (const row of siteModelRows) {
+        if (row.epoch < start || row.epoch > endHour) continue;
+        const list = modelsSeen.get(row.model) ?? [];
+        list.push(row);
+        modelsSeen.set(row.model, list);
+      }
+      for (const [model, modelRowsOf] of modelsSeen) {
+        const modelBuckets: TrendBucket[] = [];
+        let modelPublished = false;
+        for (let i = 0; i < bucketCount; i++) {
+          const bStart = start + i * bucketSecs;
+          const bEnd = bStart + bucketSecs;
+          const bucketRows = modelRowsOf.filter((r) => r.epoch >= bStart && r.epoch < bEnd);
+          const computed = bucketRows.length > 0 ? trendModelBucketOrNull(bucketRows) : null;
+          if (computed) {
+            computed.start = bStart;
+            modelBuckets.push(computed);
+            modelPublished = true;
+          } else {
+            modelBuckets.push({ start: bStart, p50Ms: null, p95Ms: null, errRate: null, cacheRate: null });
+          }
+        }
+        if (modelPublished) models[model] = { buckets: modelBuckets } satisfies SiteTrendLite;
+      }
+
+      sites[site] = { buckets, ttftBins: rangeBins, ...(Object.keys(models).length > 0 ? { models } : {}) };
     }
 
     ranges[key] = { bucketSeconds: bucketSecs, sites };
   }
 
   return { version: 1, generatedAt: nowSec, ranges };
+}
+
+/** P4：bucket_model_raw 的一行。 */
+export interface RawModelRow {
+  hour: string;
+  site: string;
+  app: string;
+  model: string;
+  source: string;
+  asn: number;
+  ua_trusted: number;
+  samples: number;
+  errors: number;
+  ttft_bins: string;
+  tps_bins: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd_micros: number;
+}
+
+interface ParsedModelRow {
+  epoch: number;
+  site: string;
+  model: string;
+  source: string;
+  uaTrusted: boolean;
+  samples: number;
+  errors: number;
+  ttftBins: number[];
+  tpsBins: number[];
+}
+
+function parseModelRow(row: RawModelRow): ParsedModelRow | null {
+  let ttftBins: number[];
+  let tpsBins: number[];
+  try {
+    const a: unknown = JSON.parse(row.ttft_bins);
+    const b: unknown = JSON.parse(row.tps_bins);
+    if (!Array.isArray(a) || a.length !== TTFT_BIN_COUNT) return null;
+    if (!Array.isArray(b) || b.length !== TPS_BIN_COUNT) return null;
+    ttftBins = a as number[];
+    tpsBins = b as number[];
+  } catch {
+    return null;
+  }
+  return {
+    epoch: hourToEpochSec(row.hour),
+    site: row.site,
+    model: row.model,
+    source: row.source,
+    uaTrusted: row.ua_trusted === 1,
+    samples: row.samples,
+    errors: row.errors,
+    ttftBins,
+    tpsBins,
+  };
+}
+
+/** P4：模型桶指标（k-匿与站点桶同款；不过门槛返回 null —— 不发布）。 */
+function trendModelBucketOrNull(
+  bucketRows: ParsedModelRow[],
+): (TrendBucket & { tpsP50Ms: number | null }) | null {
+  const trusted = bucketRows.filter((r) => r.uaTrusted);
+  const sources = new Set(trusted.map((r) => r.source)).size;
+  if (sources < MIN_SOURCES) return null;
+  const totals = { samples: 0, errors: 0, ttftBins: new Array<number>(TTFT_BIN_COUNT).fill(0), tpsBins: new Array<number>(TPS_BIN_COUNT).fill(0) };
+  for (const r of bucketRows) {
+    totals.samples += r.samples;
+    totals.errors += r.errors;
+    for (let i = 0; i < TTFT_BIN_COUNT; i++) totals.ttftBins[i] += r.ttftBins[i];
+    for (let i = 0; i < TPS_BIN_COUNT; i++) totals.tpsBins[i] += r.tpsBins[i];
+  }
+  return {
+    start: 0,
+    p50Ms: quantileFromBins(totals.ttftBins, 0.5),
+    p95Ms: quantileFromBins(totals.ttftBins, 0.95),
+    errRate: totals.samples > 0 ? totals.errors / totals.samples : null,
+    cacheRate: null,
+    tpsP50Ms: tpsQuantileFromBins(totals.tpsBins, 0.5),
+  };
 }

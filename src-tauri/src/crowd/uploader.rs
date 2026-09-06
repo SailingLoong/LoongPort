@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+#[cfg(test)]
+use crate::crowd::bucket::ModelBucket;
 use crate::crowd::bucket::{self, HourBucket};
 use crate::database::Database;
 use crate::error::AppError;
@@ -51,11 +53,29 @@ pub(crate) struct HourBucketPayload<'a> {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost_usd_micros: i64,
+    /// P4（version 2）：模型子桶。旧服务端忽略未知字段，发布顺序安全。
+    pub models: Vec<ModelBucketPayload<'a>>,
+}
+
+/// P4：模型维度子桶的载荷形状（与 bucket::ModelBucket 同集）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelBucketPayload<'a> {
+    pub model: &'a str,
+    pub samples: i64,
+    pub errors: i64,
+    pub ttft_bins: &'a [i64],
+    pub tps_bins: &'a [i64],
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cost_usd_micros: i64,
 }
 
 fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> IngestPayload<'a> {
     IngestPayload {
-        version: 1,
+        version: 2,
         source_id,
         hours: buckets
             .iter()
@@ -72,6 +92,22 @@ fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> Ing
                 cache_read_tokens: b.cache_read_tokens,
                 cache_creation_tokens: b.cache_creation_tokens,
                 cost_usd_micros: b.cost_usd_micros,
+                models: b
+                    .models
+                    .iter()
+                    .map(|m| ModelBucketPayload {
+                        model: &m.model,
+                        samples: m.samples,
+                        errors: m.errors,
+                        ttft_bins: &m.ttft_bins,
+                        tps_bins: &m.tps_bins,
+                        input_tokens: m.input_tokens,
+                        output_tokens: m.output_tokens,
+                        cache_read_tokens: m.cache_read_tokens,
+                        cache_creation_tokens: m.cache_creation_tokens,
+                        cost_usd_micros: m.cost_usd_micros,
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -201,6 +237,18 @@ mod tests {
             cache_read_tokens: 300,
             cache_creation_tokens: 100,
             cost_usd_micros: 12_345,
+            models: vec![ModelBucket {
+                model: "example-model".to_string(),
+                samples: 10,
+                errors: 1,
+                ttft_bins: vec![0; crate::crowd::bins::TTFT_BIN_COUNT],
+                tps_bins: vec![0; crate::crowd::bins::TPS_BIN_COUNT],
+                output_tokens: 500,
+                input_tokens: 1000,
+                cache_read_tokens: 300,
+                cache_creation_tokens: 100,
+                cost_usd_micros: 12_345,
+            }],
         }
     }
 
@@ -248,6 +296,7 @@ mod tests {
                 "errors",
                 "hour",
                 "inputTokens",
+                "models",
                 "outputTokens",
                 "samples",
                 "site",
@@ -255,6 +304,32 @@ mod tests {
                 "ttftCount",
             ],
             "小时桶的字段集合变了 —— 加字段前请回 crowd 模块文档那张表"
+        );
+
+        // P4：模型子桶的键集合同样钉死。
+        let model_json = &json["hours"][0]["models"][0];
+        let mut model_keys: Vec<&str> = model_json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        model_keys.sort_unstable();
+        assert_eq!(
+            model_keys,
+            vec![
+                "cacheCreationTokens",
+                "cacheReadTokens",
+                "costUsdMicros",
+                "errors",
+                "inputTokens",
+                "model",
+                "outputTokens",
+                "samples",
+                "tpsBins",
+                "ttftBins",
+            ],
+            "模型子桶的字段集合变了 —— 加字段前请回 crowd 模块文档那张表"
         );
 
         // 反面：身份/凭据形态一个都不许出现（判据同 relay::stats）。

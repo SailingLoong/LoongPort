@@ -31,6 +31,35 @@ pub(crate) fn ttft_bin_sum_exprs(alias: &str) -> String {
     exprs.join(", ")
 }
 
+/// 输出速度（tokens/秒）分桶上边界 —— 与 Worker 共享的第二组跨语言常量
+/// （P4 模型维度）。行值 = output_tokens / max((latency - first_token)/1s, 0.1s)，
+/// 只统计 output_tokens > 0 的行（0 输出的行没有速度语义）。
+pub const TPS_BIN_EDGES: &[i64] = &[5, 10, 20, 40, 60, 80, 120, 160, 240, 320, 480];
+
+/// TPS 桶数 = 边界数 + 1（含溢出桶）。上传载荷的 `tpsBins` 长度必须等于它。
+pub const TPS_BIN_COUNT: usize = TPS_BIN_EDGES.len() + 1;
+
+/// 逐桶计数表达式（与 `ttft_bin_sum_exprs` 同构）。行速度表达式在 SQL 里
+/// 内联生成（SQLite 无变量复用，重复求值无碍聚合正确性）。
+pub(crate) fn tps_bin_sum_exprs(alias: &str) -> String {
+    let row_tps = format!(
+        "CAST({alias}.output_tokens AS REAL) * 1000.0 / MAX({alias}.latency_ms - COALESCE({alias}.first_token_ms, 0), 100)"
+    );
+    let mut exprs = Vec::with_capacity(TPS_BIN_COUNT);
+    for i in 0..TPS_BIN_COUNT {
+        let lo = if i == 0 { 0 } else { TPS_BIN_EDGES[i - 1] };
+        let cond = if i < TPS_BIN_EDGES.len() {
+            format!("{row_tps} >= {lo} AND {row_tps} < {}", TPS_BIN_EDGES[i])
+        } else {
+            format!("{row_tps} >= {lo}")
+        };
+        exprs.push(format!(
+            "SUM(CASE WHEN {alias}.output_tokens > 0 AND ({cond}) THEN 1 ELSE 0 END)"
+        ));
+    }
+    exprs.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,27 +98,20 @@ mod tests {
         );
     }
 
-    /// ⭐ 跨语言一致性闸：Rust 侧边界必须与 Worker（crowd-metrics/src/bins.ts）
-    /// 完全一致 —— 服务端按位置求和，边界分叉 = 数据垃圾。
-    #[test]
-    fn ttft_edges_match_the_worker_typescript_constant() {
-        let ts = include_str!("../../../crowd-metrics/src/bins.ts");
-
+    /// 从 bins.ts 里按常量名提取数组字面量（用 "= [" 定位 —— 类型标注
+    /// `number[]` 里也有方括号，直接找第一个 '[' 会把类型标注误当数组体）。
+    fn ts_edges(ts: &str, name: &str) -> Vec<i64> {
         let start = ts
-            .find("TTFT_BIN_EDGES_MS")
-            .expect("bins.ts 里应有 TTFT_BIN_EDGES_MS 常量");
-        // 用 "= [" 定位数组字面量 —— 类型标注 `number[]` 里也有方括号，
-        // 直接找第一个 '[' 会把类型标注误当数组体。
+            .find(name)
+            .unwrap_or_else(|| panic!("bins.ts 里应有 {name} 常量"));
         let assign_offset = ts[start..]
             .find("= [")
-            .expect("TTFT_BIN_EDGES_MS 应有数组字面量初始化");
+            .unwrap_or_else(|| panic!("{name} 应有数组字面量初始化"));
         let array_start = start + assign_offset + 2; // "= [" 的 '[' 本身
         let bracket_end = ts[array_start..]
             .find("];")
-            .expect("TTFT_BIN_EDGES_MS 数组应闭合");
-        let body = &ts[array_start + 1..array_start + bracket_end];
-
-        let ts_edges: Vec<i64> = body
+            .unwrap_or_else(|| panic!("{name} 数组应闭合"));
+        ts[array_start + 1..array_start + bracket_end]
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -97,8 +119,16 @@ mod tests {
                 s.parse::<i64>()
                     .unwrap_or_else(|_| panic!("bins.ts 里出现非整数边界: {s}"))
             })
-            .collect();
+            .collect()
+    }
 
+    /// ⭐ 跨语言一致性闸：Rust 侧边界必须与 Worker（crowd-metrics/src/bins.ts）
+    /// 完全一致 —— 服务端按位置求和，边界分叉 = 数据垃圾。
+    #[test]
+    fn ttft_edges_match_the_worker_typescript_constant() {
+        let ts = include_str!("../../../crowd-metrics/src/bins.ts");
+
+        let ts_edges = ts_edges(ts, "TTFT_BIN_EDGES_MS");
         assert_eq!(
             ts_edges, TTFT_BIN_EDGES_MS,
             "Rust 与 Worker 的 TTFT 桶边界不一致 —— 两边必须一起改"
@@ -108,6 +138,22 @@ mod tests {
         assert!(
             ts.contains("TTFT_BIN_COUNT = TTFT_BIN_EDGES_MS.length + 1"),
             "bins.ts 的 TTFT_BIN_COUNT 公式变了 —— 检查两侧桶数定义是否仍同构"
+        );
+    }
+
+    /// ⭐ TPS 边界的同款跨语言闸（P4）。
+    #[test]
+    fn tps_edges_match_the_worker_typescript_constant() {
+        let ts = include_str!("../../../crowd-metrics/src/bins.ts");
+
+        let ts_edges = ts_edges(ts, "TPS_BIN_EDGES");
+        assert_eq!(
+            ts_edges, TPS_BIN_EDGES,
+            "Rust 与 Worker 的 TPS 桶边界不一致 —— 两边必须一起改"
+        );
+        assert!(
+            ts.contains("TPS_BIN_COUNT = TPS_BIN_EDGES.length + 1"),
+            "bins.ts 的 TPS_BIN_COUNT 公式变了 —— 检查两侧桶数定义是否仍同构"
         );
     }
 }
