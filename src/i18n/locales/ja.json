@@ -920,7 +920,7 @@
     "claudeDesktop": "Claude Desktop",
     "claude-desktop": "Claude Desktop",
     "codex": "Codex",
-    "codex-image": "Codex 画像生成",
+    "codex-image": "画像生成",
     "gemini": "Gemini",
     "grokbuild": "Grok Build",
     "opencode": "OpenCode",
@@ -3436,11 +3436,31 @@
       "editConfirmMessage": "保存後、LoongPort は現在のプラットフォームに対するこのプロバイダーアカウントの手動変更を上書きしません。キー設定を再適用しても API キーだけが更新されます。\n\n変更を取り消すには「デフォルト設定に戻す」を選択してください。API キーは保持されます。"
     },
     "imageTab": {
-      "companionNotice": "画像生成は Codex または Claude と組み合わせて使用します。",
-      "companionDetail": "画像生成にはこのページで選択した接続プロファイルが使用されます。チャットには Codex または Claude ページで選択したプロファイルが使用されるため、2 つの選択は互いに影響しません。",
-      "howTo": "画像生成用の接続プロファイルを切り替えても再起動は不要で、次回の生成から反映されます。初めて画像生成用プロファイルを作成した後は、新しいターミナルを開いて画像生成機能を読み込んでください。",
+      "companionNotice": "このページで直接生成、または CLI 会話から生成",
+      "companionDetail": "生成ビューでは CLI セッションを経由せず画像を生成します。画像生成とチャットの接続プロファイルは互いに独立で、切り替えは次回の生成から反映されます。",
       "emptyTitle": "画像生成用の接続プロファイルがありません",
-      "emptyBody": "接続プロファイルの作成時に、LoongPort は gpt-image モデルのみに対応するグループを識別します。中継サービスに該当するグループがない場合、このページは空のままです。"
+      "emptyBody": "接続プロファイルの作成時に、LoongPort は gpt-image モデルのみに対応するグループを識別します。中継サービスに該当するグループがない場合、このページは空のままです。",
+      "mcpSwitchLabel": "Codex / Claude の会話に画像生成ツールを提供",
+      "mcpSwitchHint": "オフにすると CLI への登録を停止します（このページでの直接生成には影響しません）。オンにした後は新しいターミナルで読み込まれます"
+    },
+    "imagegenPlayground": {
+      "view": {
+        "generate": "生成",
+        "tiers": "接続プロファイル"
+      },
+      "tierLabel": "現在の接続プロファイル",
+      "noTier": "未選択",
+      "noTierHint": "画像生成の接続プロファイルはまだありません。gpt-image 系モデルのみのグループから自動的に作られます。",
+      "promptPlaceholder": "生成する画像を説明してください…",
+      "sizeLabel": "サイズ",
+      "generate": "生成",
+      "generating": "生成中…",
+      "generateHint": "生成には時間がかかります（30 秒〜2 分程度）",
+      "generatedToast": "{{count}} 枚を生成しました（{{model}}）",
+      "galleryTitle": "生成履歴",
+      "galleryLoading": "読み込み中…",
+      "galleryEmpty": "まだ生成した画像はありません",
+      "reveal": "フォルダで表示"
     },
     "siteConfig": {
       "entry": "サイト設定を取り込む",
