@@ -335,22 +335,36 @@ pub(crate) fn output_dir() -> PathBuf {
     app_dir().join("generated_images")
 }
 
-/// 调一次生图，返回落盘后的文件。
+/// 一次请求的超时上限 = 每张图 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的既证预算 × 张数。
+///
+/// 生图慢（实测单张 30-90s），串行上游的耗时随 `n` 线性涨，超时也跟着涨才不至于
+/// 把能出完的请求掐死。**各入口按自己的约束取值**：
+///
+/// | 入口 | 取值 | 为什么 |
+/// |---|---|---|
+/// | MCP 工具 | `n` 恒为 1 ⇒ 240s | codex 的工具超时默认正好 300s，两边同为 300 时真正的超时那次是宿主先报它那句泛泛的错 —— 留 60s 余量让「请求生图接口失败」这条更具体的先到。多张**不放大**：宿主 300s 会先杀掉调用，放大无意义；agent 要多张本来就并发多次调用工具，每次各自 240s |
+/// | App 内直接生图 | `request_timeout(n)` | 没有宿主超时这层约束，按张数放大的封顶才是诚实的等待上限（n=4 ⇒ 16 分钟封顶；正常远快于此，超时只兜底死掉的上游） |
+const SINGLE_IMAGE_TIMEOUT_SECS: u64 = 240;
+
+/// 见 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的表：只有 App 内入口用它，MCP 入口固定 `n=1`。
+pub(crate) fn request_timeout(n: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(SINGLE_IMAGE_TIMEOUT_SECS * n.max(1) as u64)
+}
+
+/// 调一次生图（`n` 张），返回落盘后的文件（每张一个元素）。
+///
+/// `n` 由调用方给定：App 内入口来自生成视图的张数选择；MCP 入口恒为 1（工具
+/// schema 有意不暴露 `n`，理由见 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的表）。响应解析、
+/// 落盘与修剪从第一天起就按「一次可能多张」处理，这里只是把入口接上。
 pub(crate) async fn generate_image(
     tier: &Tier,
     prompt: &str,
     size: Option<&str>,
+    n: u32,
+    timeout: std::time::Duration,
 ) -> Result<Vec<GeneratedImage>, String> {
     let client = reqwest::Client::builder()
-        // 生图慢（实测 30-90s），默认超时会在出图前就断。
-        //
-        // **240 而不是 300**：codex 的 MCP 工具超时默认正好是 300s
-        // （`codex-rs/codex-mcp/src/rmcp_client.rs` 的 `DEFAULT_TOOL_TIMEOUT`）。
-        // MCP 入口两边同为 300 时，真正的超时那次是宿主先报它自己那句泛泛的超时，
-        // 我们这句「请求生图接口失败」反而抢不到 —— 留 60s 余量让**更具体的那条**
-        // 错误信息先到用户眼前。App 内入口没有这层约束，但共用同一个值：
-        // 真正的耗时在上游出图，240s 对两条入口都够。
-        .timeout(std::time::Duration::from_secs(240))
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
 
@@ -373,7 +387,7 @@ pub(crate) async fn generate_image(
     let body = serde_json::json!({
         "model": tier.model,
         "prompt": prompt,
-        "n": 1,
+        "n": n,
         "size": size.unwrap_or(DEFAULT_SIZE),
     });
 
@@ -731,6 +745,19 @@ base_url = "https://api.example.com/v1"
         assert_eq!(
             images_url("https://api.example.com/v1"),
             "https://api.example.com/v1/images/generations"
+        );
+    }
+
+    /// 超时随张数线性放大（App 内入口的封顶），n=0 兜底按一张算 —— 不是 0 秒必超时。
+    /// MCP 入口固定 n=1 ⇒ 恒 240s（那条「给 codex 300s 留 60s 余量」的理由不动）。
+    #[test]
+    fn request_timeout_scales_with_the_image_count() {
+        assert_eq!(request_timeout(1).as_secs(), 240);
+        assert_eq!(request_timeout(4).as_secs(), 960);
+        assert_eq!(
+            request_timeout(0).as_secs(),
+            240,
+            "n=0 必须兜底成一张的预算，否则是个 0 秒必超时的请求"
         );
     }
 

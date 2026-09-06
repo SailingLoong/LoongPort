@@ -3456,6 +3456,8 @@
       "noTierHint": "No image connection profiles yet — they are created from groups that only serve gpt-image models.",
       "promptPlaceholder": "Describe the image to generate…",
       "sizeLabel": "Size",
+      "countLabel": "Count",
+      "countHint": "Generates several at once: billed per image, and slower (roughly 30s to 2min each)",
       "generate": "Generate",
       "generating": "Generating…",
       "generateHint": "Generation is slow — usually 30 seconds to 2 minutes",

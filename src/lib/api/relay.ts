@@ -642,12 +642,20 @@ export const relayApi = {
   // 与 MCP 工具共用后端同一个核心（`relay::imagegen`）：档位、请求形状、落盘完全
   // 一致，差别只在这条链路不经过任何 CLI 会话。
 
-  /** App 内直接生图（生图页「生成」视图）。慢请求：后端超时 240s，前端勿再叠加短超时。 */
+  /**
+   * App 内直接生图（生图页「生成」视图）。`count` = 张数（批量），后端闸 1..=4。
+   * 慢请求：后端超时按张数放大（每张 240s 封顶），前端勿再叠加短超时。
+   */
   imagegenGenerate: (
     prompt: string,
     size?: string | null,
+    count?: number,
   ): Promise<ImagegenGenerateResult> =>
-    invoke("relay_imagegen_generate", { prompt, size: size ?? null }),
+    invoke("relay_imagegen_generate", {
+      prompt,
+      size: size ?? null,
+      n: count ?? 1,
+    }),
 
   /** 出图目录的画廊清单（MCP 与直接生图的产物同目录），mtime 从新到旧。 */
   imagegenListImages: (): Promise<ImagegenGalleryEntry[]> =>

@@ -243,8 +243,12 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
 
     // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
     // 档位，下一次生图就该用新的，**不必重启 codex**。见 `imagegen::current_image_tier_id`。
+    //
+    // `n` 恒为 1（工具 schema 有意不暴露批量，理由见 `imagegen::SINGLE_IMAGE_TIMEOUT_SECS`
+    // 的表：宿主 300s 会先杀掉长调用，agent 要多张本来就并发多次调用工具）。
     let tier = imagegen::load_current_tier()?;
-    let images = imagegen::generate_image(&tier, prompt, size).await?;
+    let images =
+        imagegen::generate_image(&tier, prompt, size, 1, imagegen::request_timeout(1)).await?;
     let list = images
         .iter()
         .map(|i| i.path.display().to_string())

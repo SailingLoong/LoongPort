@@ -3456,6 +3456,8 @@
       "noTierHint": "画像生成の接続プロファイルはまだありません。gpt-image 系モデルのみのグループから自動的に作られます。",
       "promptPlaceholder": "生成する画像を説明してください…",
       "sizeLabel": "サイズ",
+      "countLabel": "枚数",
+      "countHint": "複数枚を一度に生成：枚数分の課金になり、時間もかかります（1 枚 30 秒〜2 分程度）",
       "generate": "生成",
       "generating": "生成中…",
       "generateHint": "生成には時間がかかります（30 秒〜2 分程度）",

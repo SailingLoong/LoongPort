@@ -50,6 +50,9 @@ import {
 /** 尺寸档位：gpt-image 的三档（与 MCP 工具的 size 语义一致，不给「自动」）。 */
 const SIZE_OPTIONS = ["1024x1024", "1536x1024", "1024x1536"] as const;
 
+/** 张数档位。上限 4 是后端闸（一次 n 张就是 n 张的钱），这里只是选择器。 */
+const COUNT_OPTIONS = ["1", "2", "4"] as const;
+
 export function ImagegenPlayground() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -57,6 +60,7 @@ export function ImagegenPlayground() {
   const generate = useImagegenGenerate();
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState<string>("1024x1024");
+  const [count, setCount] = useState<string>("1");
   const [preview, setPreview] = useState<ImagegenGalleryEntry | null>(null);
 
   // 档位列表与「档位」视图同一条命令（listRelays 按栏查，结果天然同质）。
@@ -84,7 +88,7 @@ export function ImagegenPlayground() {
 
   const onGenerate = () => {
     generate.mutate(
-      { prompt: prompt.trim(), size },
+      { prompt: prompt.trim(), size, count: Number(count) },
       {
         onSuccess: (result) =>
           toast.success(
@@ -164,6 +168,23 @@ export function ImagegenPlayground() {
                 {SIZE_OPTIONS.map((option) => (
                   <SelectItem key={option} value={option}>
                     {option}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {/* 批量张数：一次点下去就是 n 张的钱，hint 把后果写在点上（计费/耗时）。 */}
+            <Select value={count} onValueChange={setCount}>
+              <SelectTrigger
+                className="w-[110px]"
+                aria-label={t("loongport.imagegenPlayground.countLabel")}
+                title={t("loongport.imagegenPlayground.countHint")}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {COUNT_OPTIONS.map((option) => (
+                  <SelectItem key={option} value={option}>
+                    ×{option}
                   </SelectItem>
                 ))}
               </SelectContent>

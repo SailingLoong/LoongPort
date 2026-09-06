@@ -6060,18 +6060,33 @@ pub struct ImagegenGenerateResult {
 ///
 /// 与 MCP 工具（`--mcp-image-gen`）共用 [`imagegen`] 这一个核心 —— 档位选择、
 /// 请求形状、落盘与修剪完全一致，差别只在结果不进宿主对话。
+///
+/// `n` = 张数（批量）。上限 4 是后端闸：前端选择器只放 1/2/4，但闸必须在后端 ——
+/// 一次 `n` 张就是 `n` 张的钱，别的入口（开发者工具直接 invoke）不该绕过它。
 #[tauri::command]
 pub async fn relay_imagegen_generate(
     app_handle: tauri::AppHandle,
     prompt: String,
     size: Option<String>,
+    n: Option<u32>,
 ) -> Result<ImagegenGenerateResult, String> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err("prompt 不能为空".into());
     }
+    let count = n.unwrap_or(1);
+    if !(1..=4).contains(&count) {
+        return Err("张数只支持 1 到 4".into());
+    }
     let tier = imagegen::load_current_tier()?;
-    let images = imagegen::generate_image(&tier, prompt, size.as_deref()).await?;
+    let images = imagegen::generate_image(
+        &tier,
+        prompt,
+        size.as_deref(),
+        count,
+        imagegen::request_timeout(count),
+    )
+    .await?;
     imagegen::ensure_asset_scope(&app_handle);
     Ok(ImagegenGenerateResult {
         tier_name: tier.display_name,
