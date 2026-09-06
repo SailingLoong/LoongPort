@@ -8,11 +8,10 @@ use crate::relay::imagegen;
 // 生图（MCP 注册 + App 内直接生图）
 // ============================================================================
 
-/// 重新对齐生图 MCP。进入生图页时调用，用来修复应用运行期间被外部改掉的投影。
-#[tauri::command]
-pub fn relay_sync_imagegen_mcp(state: State<'_, AppState>) -> Result<(), AppError> {
-    imagegen_mcp::sync_registration(&state)
-}
+// MCP 注册同步的触发点全部在数据层（2026-09-07 收口）：启动（lib.rs 无条件对齐
+// 一次）、provision 收尾（mark_pricing_after_success）、设置写入
+// （relay_set_imagegen_mcp_enabled）与删站点/账号。曾经还有「进入生图页时同步」
+// 的前端入口 —— 那是视图读路径驱动数据层行为，已删（命令与 App.tsx effect 一并）。
 
 /// 一张生成图片（App 内直接生图的结果条目）。
 #[derive(Serialize, Debug, Clone)]

@@ -290,14 +290,6 @@ function App() {
     [saveSettingsMutation, settingsData, visibleApps],
   );
 
-  useEffect(() => {
-    if (activeApp !== "codex-image") return;
-
-    void invoke("relay_sync_imagegen_mcp").catch((error) => {
-      console.error("[App] Failed to sync image generation MCP", error);
-    });
-  }, [activeApp]);
-
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {
     if (currentView === "mcp" && sharedFeatureApp === "pi") {
