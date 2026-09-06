@@ -202,6 +202,10 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           cargo check --no-default-features --manifest-path src-tauri/Cargo.toml \
             --target x86_64-unknown-linux-musl
+          # CLI 是独立成员 crate（v6.17.0 事故后的形状），单独在 musl 下过编译
+          # 检查 —— 它就是给无桌面环境用的，host 检查覆盖不了它的目标形态。
+          cargo check -p loongport-cli --manifest-path src-tauri/Cargo.toml \
+            --target x86_64-unknown-linux-musl
 
   backend-windows-wsl2:
     name: Backend Checks (Windows + WSL2 home)
