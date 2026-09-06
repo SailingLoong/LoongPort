@@ -46,7 +46,7 @@ reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks
 cookie = "0.18.1"
 arboard = "3.6"
 flate2 = "1"
-brotli = "8"
+brotli = "9"
 zstd = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "process"] }
 futures = "0.3"
