@@ -5736,10 +5736,26 @@ async fn open_sub2api_site_window<R: tauri::Runtime>(
     // 关窗刷余额。认 `Destroyed`（窗口真的没了）而不是 `CloseRequested`
     // （可被拦下的关闭请求，某些平台上会先于实际销毁触发、甚至可能被取消）。
     //
-    // 只 emit 事件、不在这里查余额：查余额要发 HTTP，而这个回调不能 await。
+    // 只 emit 事件、不在这里查余额：查余额要发 HTTP，而这个回调不能 await ——
+    // 站点级缓存（看板用）的失效+补刷走 spawn，不受此限。
+    let close_handle = app_handle.clone();
+    let close_site = op.site_origin.clone();
+    let close_api_base = op.api_base_url.clone();
     built.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             let _ = handle_for_close.emit(PURCHASE_CLOSED, closed_relay_id);
+            let handle = close_handle.clone();
+            let (site, api_base) = (close_site.clone(), close_api_base.clone());
+            // db 在事件内取：开窗路径不碰全局 state（headless 窗口测试没有 manage）
+            tauri::async_runtime::spawn(async move {
+                let db = handle.state::<AppState>().db.clone();
+                crate::services::site_balance_refresh::refresh_after_purchase(
+                    &db,
+                    Some(handle),
+                    &site,
+                    &api_base,
+                );
+            });
         }
     });
 

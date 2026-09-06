@@ -273,11 +273,27 @@ pub(crate) fn build_window<R: tauri::Runtime>(
     .map_err(|e| AppError::Config(format!("打开站点窗口失败: {e}")))?;
 
     // 认 `Destroyed`（窗口真的没了）而不是 `CloseRequested`（可被拦下、可能取消）：
-    // 关窗即刷余额（emit）+ 停 monitor（shutdown）。
+    // 关窗即刷余额（emit）+ 停 monitor（shutdown）。站点级缓存（看板用）的
+    // 失效+补刷走 spawn —— 与 sub2api 站点窗同一形状（回调不能 await）。
+    let close_handle = app_handle.clone();
+    let close_site = relay.site_origin.clone();
+    let close_api_base = relay.api_base_url.clone();
     built.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             let _ = handle_for_close.emit(PURCHASE_CLOSED, closed_relay_id);
             let _ = shutdown.send(true);
+            let handle = close_handle.clone();
+            let (site, api_base) = (close_site.clone(), close_api_base.clone());
+            // db 在事件内取：开窗路径不碰全局 state（headless 窗口测试没有 manage）
+            tauri::async_runtime::spawn(async move {
+                let db = handle.state::<AppState>().db.clone();
+                crate::services::site_balance_refresh::refresh_after_purchase(
+                    &db,
+                    Some(handle),
+                    &site,
+                    &api_base,
+                );
+            });
         }
     });
 

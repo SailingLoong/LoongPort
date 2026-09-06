@@ -366,6 +366,26 @@ pub fn upsert_site_balance(
     Ok(())
 }
 
+/// 删指定站的缓存行 —— 充值等「余额已确定变化」的时刻用：旧值必然错了，
+/// 留着只会误导，删掉后由紧随的单站刷新重新落值。
+pub fn drop_site_cache(
+    db: &crate::database::Database,
+    origins: &std::collections::HashSet<String>,
+) {
+    let conn = db
+        .conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for origin in origins {
+        if let Err(e) = conn.execute(
+            "DELETE FROM site_balance_cache WHERE site_origin = ?1",
+            rusqlite::params![origin],
+        ) {
+            log::warn!("[site-balance] 删缓存失败 {origin}: {e}");
+        }
+    }
+}
+
 /// 哪些站需要刷新：没进过缓存的 + `fetched_at` 超 TTL 的（纯函数）。
 fn stale_balance_sites(
     wanted: &std::collections::HashMap<String, String>,
@@ -396,9 +416,9 @@ static REFRESH_INFLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::
 /// 充值窗口持有独占权时后台续期会把用户踢出充值页。本链路只走 sk
 /// （`usage_with_api_key` / `billing_balance_with_api_key`），不携带登录态、
 /// 不碰 cookie。⚠️ 若将来把这条链改走登录态，必须先补「充值窗口活跃站跳过」。
-pub fn spawn_stale_refresh(
+pub fn spawn_stale_refresh<R: tauri::Runtime>(
     db: std::sync::Arc<crate::database::Database>,
-    app_handle: Option<tauri::AppHandle>,
+    app_handle: Option<tauri::AppHandle<R>>,
     wanted: std::collections::HashMap<String, String>,
 ) {
     let now = chrono::Utc::now().timestamp();
@@ -562,7 +582,7 @@ mod tests {
             "sk-x".to_string(),
         );
 
-        crate::relay::balance::spawn_stale_refresh(db.clone(), None, wanted);
+        crate::relay::balance::spawn_stale_refresh(db.clone(), None::<tauri::AppHandle>, wanted);
 
         for _ in 0..250 {
             let cached = cached_site_balances(&db);

@@ -1291,6 +1291,17 @@ pub fn run() {
             app.manage(crate::services::app_update::AppUpdateStage::new());
             maintenance::start(app.handle().clone());
 
+            // 站点余额冷启补刷（一次性、模式无关）：让用户点进任何视图时缓存
+            // 已就绪。延迟一会儿，避开启动高峰的 DB/网络初始化。
+            {
+                let db = app.state::<AppState>().db.clone();
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    crate::services::site_balance_refresh::startup_kick(&db, Some(handle));
+                });
+            }
+
             // 初始化 SkillService
             let skill_service = SkillService::new();
             app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));
