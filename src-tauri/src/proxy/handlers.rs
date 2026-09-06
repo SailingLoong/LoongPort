@@ -225,6 +225,7 @@ async fn handle_messages_for_app(
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.attempt_started_at = result.attempt_started_at;
     ctx.provider = result.provider;
     let api_format = result
         .claude_api_format
@@ -462,7 +463,7 @@ async fn handle_claude_transform(
                 .clone()
                 .unwrap_or_else(|| ctx.request_model.clone());
             let status_code = status.as_u16();
-            let start_time = ctx.start_time;
+            let start_time = ctx.attempt_started_at;
             let session_id = ctx.session_id.clone();
             // 用 ctx 的 app_type：Claude Desktop 网关也走此转换路径，硬编码
             // "claude" 会把 claude-desktop 的行错记到 claude 名下
@@ -811,6 +812,7 @@ pub async fn handle_chat_completions(
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.attempt_started_at = result.attempt_started_at;
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -906,6 +908,7 @@ async fn handle_responses_for_app(
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.attempt_started_at = result.attempt_started_at;
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -1022,6 +1025,7 @@ pub async fn handle_alpha_search(
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.attempt_started_at = result.attempt_started_at;
     ctx.provider = result.provider;
 
     process_response(
@@ -1105,6 +1109,7 @@ async fn handle_responses_compact_for_app(
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.attempt_started_at = result.attempt_started_at;
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -1336,7 +1341,7 @@ async fn handle_codex_chat_to_responses_transform(
                 .clone()
                 .unwrap_or_else(|| ctx.request_model.clone());
             let app_type_str = ctx.app_type_str;
-            let start_time = ctx.start_time;
+            let start_time = ctx.attempt_started_at;
             let session_id = ctx.session_id.clone();
 
             Some(SseUsageCollector::new(
@@ -1715,7 +1720,7 @@ fn build_codex_anthropic_sse_response(
             .clone()
             .unwrap_or_else(|| ctx.request_model.clone());
         let app_type_str = ctx.app_type_str;
-        let start_time = ctx.start_time;
+        let start_time = ctx.attempt_started_at;
         let session_id = ctx.session_id.clone();
 
         Some(SseUsageCollector::new(
@@ -2116,6 +2121,7 @@ pub async fn handle_gemini(
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.attempt_started_at = result.attempt_started_at;
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -2764,7 +2770,8 @@ fn log_forward_error(
         ctx.request_model.clone(),
         status_code,
         error_message,
-        ctx.latency_ms(),
+        // 错误行报整链耗时（用户等了多久），失败尝试没有「成功尝试」可归因
+        ctx.request_latency_ms(),
         is_streaming,
         Some(ctx.session_id.clone()),
         None,

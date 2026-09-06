@@ -504,7 +504,7 @@ pub(crate) fn create_usage_collector(
     // claude-desktop 的行错记到 claude 名下，导致供应商计价覆盖解析不到。
     let app_type_str = ctx.app_type_str;
     let tag = ctx.tag;
-    let start_time = ctx.start_time;
+    let start_time = ctx.attempt_started_at;
     let stream_parser = parser_config.stream_parser;
     let model_extractor = parser_config.model_extractor;
     let session_id = ctx.session_id.clone();

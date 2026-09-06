@@ -33,8 +33,16 @@ pub struct StreamingTimeoutConfig {
 /// - 日志标签
 /// - Session ID（用于日志关联）
 pub struct RequestContext {
-    /// 请求开始时间
+    /// 请求开始时间（客户端请求进入代理的时刻）
     pub start_time: Instant,
+    /// 最终成功尝试的开始时刻 —— latency/first_token 归因的锚点。
+    ///
+    /// 故障转移链上前面失败尝试的耗时属于「这家坏了」，不该算进接住请求的
+    /// 那家：首字/用时统计以这里为起点。初始等于 [`Self::start_time`]，
+    /// forward 成功后由 handler 回填为实际服务档位那次尝试的起点
+    /// （[`ForwardResult::attempt_started_at`](crate::proxy::forwarder::ForwardResult)）。
+    /// 整链耗时（含全部失败尝试，用户实际等待时长）用 [`Self::request_latency_ms`]。
+    pub attempt_started_at: Instant,
     /// 应用级代理配置（per-app，包含重试次数和超时配置）
     pub app_config: AppProxyConfig,
     /// 本次请求的故障转移行为（请求内换档、重试、超时）是否启用：显式
@@ -172,6 +180,7 @@ impl RequestContext {
 
         Ok(Self {
             start_time,
+            attempt_started_at: start_time,
             app_config,
             failover_active,
             provider,
@@ -264,9 +273,19 @@ impl RequestContext {
         self.providers.clone()
     }
 
-    /// 计算请求延迟（毫秒）
+    /// 归因耗时（毫秒）：从最终服务请求的那次尝试开始计。
+    ///
+    /// 故障转移时前面失败尝试的耗时不计入 —— 那段时间属于坏掉的档位，
+    /// 记到接住请求的档位头上会污染「首字/用时」均值与「响应最快」排序。
     #[inline]
     pub fn latency_ms(&self) -> u64 {
+        self.attempt_started_at.elapsed().as_millis() as u64
+    }
+
+    /// 整链耗时（毫秒）：从客户端请求进入代理开始计，含全部失败尝试。
+    /// 失败请求的错误日志用它 —— 那行要回答的是「用户等了多久」，不是「谁接住了」。
+    #[inline]
+    pub fn request_latency_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
     }
 

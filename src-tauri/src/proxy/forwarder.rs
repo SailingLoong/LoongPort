@@ -83,6 +83,10 @@ fn validate_codex_official_authorization(
 pub struct ForwardResult {
     pub response: ProxyResponse,
     pub provider: Provider,
+    /// 本次成功尝试的开始时刻（latency/first_token 归因锚点，
+    /// 见 [`RequestContext::attempt_started_at`]）。故障转移链上它晚于请求
+    /// 进入时刻 —— 两者之差就是前面失败尝试烧掉的时间，不归成功档位。
+    pub attempt_started_at: std::time::Instant,
     pub claude_api_format: Option<String>,
     /// 实际发往上游的模型名（路由接管/模型映射后的真值）。
     ///
@@ -519,6 +523,11 @@ impl RequestForwarder {
 
             attempted_providers += 1;
 
+            // 本次尝试的计时锚点：从「开始向这家发起请求」起算。同一家内部的
+            // 整流器/媒体降级重试不重置它（重试也是这家消费掉的时间），
+            // 换一家（下一轮循环）才换锚点。
+            let attempt_started_at = std::time::Instant::now();
+
             // 更新状态中的当前 Provider 信息（per-attempt 维度的标识）
             //
             // total_requests / last_request_at / active_connections 已由
@@ -583,6 +592,7 @@ impl RequestForwarder {
                     return Ok(ForwardResult {
                         response,
                         provider: provider.clone(),
+                        attempt_started_at,
                         claude_api_format,
                         outbound_model,
                         connection_guard: None,
@@ -676,6 +686,7 @@ impl RequestForwarder {
                                     return Ok(ForwardResult {
                                         response,
                                         provider: provider.clone(),
+                                        attempt_started_at,
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
@@ -815,6 +826,7 @@ impl RequestForwarder {
                                         return Ok(ForwardResult {
                                             response,
                                             provider: provider.clone(),
+                                            attempt_started_at,
                                             claude_api_format,
                                             outbound_model,
                                             connection_guard: None,
@@ -966,6 +978,7 @@ impl RequestForwarder {
                                     return Ok(ForwardResult {
                                         response,
                                         provider: provider.clone(),
+                                        attempt_started_at,
                                         claude_api_format,
                                         outbound_model,
                                         connection_guard: None,
