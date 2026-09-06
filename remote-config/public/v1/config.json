@@ -1,5 +1,5 @@
 {
-  "issued_at": "2026-09-06T00:00:00Z",
+  "issued_at": "2026-09-06T12:00:00Z",
   "star_reward": {
     "promo_code": "LOONGPORT5",
     "amount_usd": 5
@@ -115,7 +115,44 @@
     "airelay.buzz": "WFPFW82LVFQ9"
   },
   "relay_directory": {
-    "blocked_hosts": [],
+    "blocked_hosts": [
+      "1pkapi.com",
+      "790053500.com",
+      "999555999.com",
+      "airelay.buzz",
+      "aliuapi.top",
+      "anpin.ai",
+      "api-top.com",
+      "api.790053500.com",
+      "api.aijws.com",
+      "api.aliuapi.top",
+      "api.ooapi.cc",
+      "apinode.ltd",
+      "bb-api.com",
+      "bestapi.store",
+      "cc-vibe.com",
+      "cca.maya.today",
+      "codex666ai.com",
+      "hapiopen.cc",
+      "hejuapi.com",
+      "linkai.shop",
+      "mfttai.com",
+      "nexaxis.ai",
+      "onepig123.com",
+      "passion8.cc",
+      "relaybases.com",
+      "ssnaiyun.com",
+      "sub.callai.one",
+      "sub.kedaya.xyz",
+      "sub2.congmingai.com",
+      "umapis.com",
+      "wawapi.top",
+      "wawapii.com",
+      "wawazz.xyz",
+      "x-llm.net",
+      "yomiapi.com",
+      "yujianwudi.top"
+    ],
     "sites": {
       "bestapi.store": {
         "veridrop_host": "bestapi.store",
