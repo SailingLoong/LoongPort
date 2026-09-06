@@ -32,6 +32,12 @@ fn main() {
         return;
     }
 
+    // `--add-site` 一次性配置（无桌面服务器）：同样的分流理由 —— single-instance
+    // 会把参数转交给 GUI 实例并弹窗。CLI 模式不初始化 Tauri/GTK，无 DISPLAY 也能跑。
+    if cc_switch_lib::cli::is_add_site_mode() {
+        std::process::exit(cc_switch_lib::cli::run_add_site());
+    }
+
     // 在 Linux 上设置 WebKit 环境变量以解决 DMA-BUF 渲染问题
     // 某些 Linux 系统（如 Debian 13.2、Nvidia GPU）上 WebKitGTK 的 DMA-BUF 渲染器可能导致白屏/黑屏
     // 参考: https://github.com/tauri-apps/tauri/issues/9394

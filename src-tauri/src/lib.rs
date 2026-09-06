@@ -4,6 +4,9 @@ mod auto_launch;
 mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
+/// `--add-site` 一次性 CLI 配置（无桌面服务器用户）。分流在 `main.rs`，
+/// 必须发生在 [`run`] 之前（single-instance 会把参数转交给 GUI 实例）。
+pub mod cli;
 mod codex_config;
 mod codex_history_migration;
 mod codex_state_db;

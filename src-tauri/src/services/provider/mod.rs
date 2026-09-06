@@ -8,6 +8,10 @@ mod live;
 mod pi;
 mod usage;
 
+/// 给 `--add-site` CLI 用的落盘入口：不经过 DB/切换流程，直接把一份
+/// in-memory provider 写成各 CLI 的 live 配置（与 GUI 切档同一批写入函数）。
+pub(crate) use live::write_live_snapshot;
+
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
