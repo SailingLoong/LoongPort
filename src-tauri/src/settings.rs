@@ -505,6 +505,20 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_apps: Option<VisibleApps>,
 
+    /// 中转站广场开关（设置页那个开关的本体）。
+    ///
+    /// `None` = 未播种 = 按「展示」处理（未归因的默认）。两个播种点见
+    /// `relay::plaza`：首启「手填域名」弹窗提交时按归因播种；存量安装升级后
+    /// 首次启动按「已配置受管站」补播种一次。此后只有用户手动翻转能改它，
+    /// 归因永远不再翻动已播种的值。
+    ///
+    /// ⚠️ **后端专有字段**：全量保存不透传（`commands::settings` 的
+    /// `merge_settings_for_save` 保留现有值 —— 前端旧快照回写会抹掉并发播种，
+    /// 与 `star_reward_offered` 同一类已实测过的事故）；用户改它走窄命令
+    /// `plaza_set_visible`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaza_visible: Option<bool>,
+
     // ===== 设备级目录覆盖 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_config_dir: Option<String>,
@@ -641,6 +655,7 @@ impl Default for AppSettings {
             common_config_confirmed: None,
             language: None,
             visible_apps: None,
+            plaza_visible: None,
             claude_config_dir: None,
             codex_config_dir: None,
             gemini_config_dir: None,

@@ -912,7 +912,10 @@
     "browsePlaceholderPi": "例如：/home/<你的用户名>/.pi/agent",
     "tabAutoMode": "省心模式",
     "crowdMetrics": "站点实测数据共建",
-    "crowdMetricsDescription": "上传站点级聚合指标（首字耗时、错误率等，按小时聚合），并解锁广场的用户实测数据。不含提示词、密钥或账号信息。"
+    "crowdMetricsDescription": "上传站点级聚合指标（首字耗时、错误率等，按小时聚合），并解锁广场的用户实测数据。不含提示词、密钥或账号信息。",
+    "plazaVisibility": "中转站广场",
+    "plazaVisibilityToggle": "显示中转站广场",
+    "plazaVisibilityDescription": "在添加站点页展示中转站推荐列表；关闭后仍可通过搜索框手动添加站点"
   },
   "apps": {
     "claude": "Claude",

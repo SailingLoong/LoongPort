@@ -10,7 +10,36 @@ pub fn start(app: tauri::AppHandle) {
     start_models_dev_pricing_refresh(app.clone());
     start_relay_pricing_refresh(app.clone());
     start_crowd_metrics_flush(app.clone());
+    start_plaza_visibility_seeding(app.clone());
     start_app_update_check(app);
+}
+
+/// 广场开关的存量补播种：**一次性**（写-if-None），启动即跑。
+///
+/// 触发归属（CLAUDE.md §1.4）：播种是数据层自己的初始化动作，挂在启动上；
+/// 广场页与设置页只读 `plaza_visible` 的现成产出，不驱动它。首启弹窗那条
+/// 播种在用户提交动作里（`relay::plaza::seed_from_first_site`），与本任务
+/// 经 `seed_if_unsent` 的双重检查互斥。
+fn start_plaza_visibility_seeding(app: tauri::AppHandle) {
+    let db = app.state::<crate::AppState>().db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let origins = match db.conn.lock() {
+            Ok(conn) => crate::relay::creds::list(&conn),
+            Err(e) => {
+                log::warn!("广场开关补播种：数据库连接锁已毒化，本次跳过: {e}");
+                return;
+            }
+        };
+        match origins {
+            Ok(relays) => crate::relay::plaza::seed_for_existing_install(
+                &relays
+                    .iter()
+                    .map(|relay| relay.site_origin.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            Err(e) => log::warn!("广场开关补播种：读站点列表失败，保持默认: {e}"),
+        }
+    });
 }
 
 fn start_relay_pricing_refresh(app: tauri::AppHandle) {
@@ -73,6 +102,8 @@ fn start_veridrop_directory_refresh(app: tauri::AppHandle) {
         let app = app.clone();
         async move {
             crate::relay::remote_config::refresh_and_cache().await;
+            // 展示策略与 v1 同一调度点刷（blocked 的版本闸端点，见 remote_config）。
+            crate::relay::remote_config::refresh_plaza_and_cache().await;
             crate::refresh_stale_directories(app.clone()).await?;
             // 漏斗收尾（探针 + 三层日志）：best-effort，不把它记成任务失败 ——
             // 探针的单站失败已经作为 NetworkBlocked 落进了结果里。

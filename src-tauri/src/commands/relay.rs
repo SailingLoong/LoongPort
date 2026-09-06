@@ -1157,7 +1157,9 @@ async fn force_refresh_directory_and_emit(
 /// 读取路径会把新摘要合并进去（见 `leaderboard::decorate_transit`）。
 pub(crate) fn spawn_transit_refresh_and_emit(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let config = crate::relay::remote_config::load_cached().unwrap_or_default();
+        // 广场展示视角（blocked 来自 v2 plaza）：transit 刷新的站点名单必须
+        // 与广场行集同宽，否则会出现「行在、摘要永远缺」的漂移。
+        let config = crate::relay::remote_config::load_plaza_config();
         let hosts = crate::relay::leaderboard::managed_site_hosts(&config);
         if hosts.is_empty() {
             return;
@@ -1265,10 +1267,11 @@ pub async fn relay_import_directory_site(
     app_handle: tauri::AppHandle,
     site: String,
 ) -> Result<ImportResult, RelayImportError> {
-    let config = crate::relay::remote_config::load_cached().ok_or_else(|| RelayImportError {
-        kind: Some(RelayImportErrorKind::NotInDirectory),
-        message: "该站点需要手动添加".into(),
-    })?;
+    // 导入闸与广场行集同一份展示策略（v2 plaza 的 blocked）—— 广场显示的行
+    // 才允许一键接入，两侧必须同宽（见 leaderboard::managed_site_hosts 的唯源注释）。
+    // 没有缓存配置时这里得到空策略，由下面的 directory_entry_source 统一判
+    // 「不在目录」（与原行为等价：手动添加是唯一出路）。
+    let config = crate::relay::remote_config::load_plaza_config();
     let source = directory_entry_source(&config, &site).ok_or_else(|| RelayImportError {
         kind: Some(RelayImportErrorKind::NotInDirectory),
         message: "该站点需要手动添加".into(),

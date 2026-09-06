@@ -1706,6 +1706,8 @@ pub fn run() {
             commands::get_provider_edit_settings,
             commands::get_settings,
             commands::save_settings,
+            commands::plaza_set_visible,
+            commands::plaza_seed_from_first_site,
             commands::has_codex_unify_history_backup,
             commands::restore_codex_unified_history,
             commands::get_rectifier_config,

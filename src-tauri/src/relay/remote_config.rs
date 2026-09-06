@@ -72,6 +72,17 @@ const DIRECTORY_V2_URL: &str = "https://config.loongport.dev/v2/directory.json";
 #[allow(dead_code)]
 const DIRECTORY_V2_SIGNATURE_URL: &str = "https://config.loongport.dev/v2/directory.json.sig";
 
+/// 广场展示策略 v2 的发布端点。
+///
+/// 与 `DIRECTORY_V2_URL` 的定位不同：那份是 provider policy（哪些站可消费），
+/// 这份只拥有**广场展示否决**（`blocked_hosts`）。老客户端把 v1 URL 烧死在
+/// 二进制里、只能看到 v1 `relay_directory.blocked_hosts` 的墓碑全量 —— 广场的
+/// 恢复/下线从 v2 这里做，才不会惊动存量客户端（见 [`PlazaPolicy`] 的文档）。
+const PLAZA_V2_URL: &str = "https://config.loongport.dev/v2/plaza.json";
+
+/// 广场展示策略 v2 的 detached Ed25519 签名端点。
+const PLAZA_V2_SIGNATURE_URL: &str = "https://config.loongport.dev/v2/plaza.json.sig";
+
 /// 占位标记。端点含它就说明还没配真实域名。
 ///
 /// `.invalid` 是 RFC 2606 保留 TLD —— 占位期间万一判断失灵真发了请求，
@@ -227,6 +238,32 @@ pub struct RelayDirectoryPolicy {
     pub blocked_hosts: Vec<String>,
     #[serde(default)]
     pub sites: std::collections::BTreeMap<String, RelayDirectorySite>,
+}
+
+/// v2 广场展示策略（[`PLAZA_V2_URL`]）。
+///
+/// 只拥有**展示否决**（`blocked_hosts`）；站点事实（别名、注册/购买/用量入口）
+/// 仍是 v1 `relay_directory.sites` 的唯源 —— 两份文件各管一件事：改入口 URL
+/// 不动 v2，改展示策略不动 v1，谁也不是谁的副本。
+///
+/// ## 为什么展示否决要单独一个版本化端点
+///
+/// 老客户端只能读 v1；在 v1 上收窄 `blocked_hosts` 恢复广场，存量客户端会立刻
+/// 重见广场（2026-09-06 下线要防的就是这个）。v2 端点只有新客户端认识 ⇒
+/// 展示策略的变更只对发了版的新代码生效，恢复节奏完全由维护者掌握。
+///
+/// ## 拉不到 v2 时回落**空策略**（不 block），而不是全 block
+///
+/// 广场给谁看由每用户的 `plaza_visible` 开关决定（`relay::plaza`），blocked
+/// 只管行集内容。空策略最坏的后果是「该藏的行没藏」，而开关已经把整个广场
+/// 藏住了 —— 方向安全。反过来全 block 会把「内容下线」误升级成「端点故障
+/// 时永远空广场」。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct PlazaPolicy {
+    /// 广场不展示这些 host。与 v1 `relay_directory.blocked_hosts` 同一套
+    /// `request_host` 归一口径（leaderboard 侧统一归一）。空 = 不否决任何人。
+    #[serde(default)]
+    pub blocked_hosts: Vec<String>,
 }
 
 /// 「点 Star 领注册礼」的奖励配置（码 + 展示额度）。
@@ -462,6 +499,15 @@ fn cache_sig_path() -> std::path::PathBuf {
     cache_dir().join("remote-config-cache.sig")
 }
 
+/// v2 广场展示策略的缓存（与 v1 同目录、独立文件，验签规则相同）。
+fn plaza_cache_path() -> std::path::PathBuf {
+    cache_dir().join("remote-plaza-cache.json")
+}
+
+fn plaza_cache_sig_path() -> std::path::PathBuf {
+    cache_dir().join("remote-plaza-cache.sig")
+}
+
 /// 读一个文件，**先看元数据、超限直接放弃**。
 ///
 /// 存在的理由见 [`load_cached`]：缓存文件是磁盘上的东西，可以被换成任意大小，
@@ -480,23 +526,29 @@ fn read_capped(path: &std::path::Path, max: usize) -> Option<Vec<u8>> {
 }
 
 /// 落盘这次拉到的原文与签名。失败只记 log —— 缓存写不进去只是下次少一层兜底。
-fn write_cache(body: &[u8], signature: &[u8]) {
-    let (p, sp) = (cache_path(), cache_sig_path());
-    if let Some(dir) = p.parent() {
+/// v1 与 v2 plaza 各自的缓存文件走同一个实现，签名与配置的「两者都在才算一份」
+/// 语义只写一遍。
+fn write_cache_at(
+    cache_json: &std::path::Path,
+    cache_sig: &std::path::Path,
+    body: &[u8],
+    signature: &[u8],
+) {
+    if let Some(dir) = cache_json.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             log::debug!("远端配置缓存目录建不了（跳过缓存）: {e}");
             return;
         }
     }
-    if let Err(e) = std::fs::write(&p, body) {
+    if let Err(e) = std::fs::write(cache_json, body) {
         log::debug!("远端配置缓存写不进去（跳过）: {e}");
         return;
     }
-    if let Err(e) = std::fs::write(&sp, signature) {
+    if let Err(e) = std::fs::write(cache_sig, signature) {
         // 签名没写成 ⇒ 下次读缓存会因缺签名而拒（正确行为），
         // 但那份无签名的配置留在磁盘上是垃圾，删掉它。
         log::debug!("远端配置签名缓存写不进去，清掉配置缓存: {e}");
-        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(cache_json);
     }
 }
 
@@ -518,12 +570,42 @@ pub fn load_cached() -> Option<RemoteConfig> {
 ///
 /// 用生产公钥测不了这条：我们没有对应私钥，写不出一份能验过的缓存。
 fn load_cached_with(public_key_hex: &str) -> Option<RemoteConfig> {
+    load_cached_artifact_with(public_key_hex, &cache_path(), &cache_sig_path())
+}
+
+/// 读 v2 广场展示策略的缓存，并同样**重新验签**（规则与 v1 缓存完全一致）。
+pub fn load_plaza_policy_cached() -> Option<PlazaPolicy> {
+    load_cached_artifact_with(PUBLIC_KEY_HEX, &plaza_cache_path(), &plaza_cache_sig_path())
+}
+
+/// 广场展示视角的配置：v1 的全部事实 + v2 plaza 的展示否决。
+///
+/// 广场行集的消费方（leaderboard 的 `apply_policy` / `managed_*`、目录导入闸、
+/// 探针名单、transit 刷新）从这里拿配置 —— `relay_directory.blocked_hosts`
+/// 已换成 v2 的，`sites`（别名 / 入口 / 购买 / 用量 URL）保持 v1 唯源。
+/// **其余消费方**（aff 码、充值/用量入口、tier 配置）继续读 [`load_cached`]，
+/// 两套语义互不污染。
+pub fn load_plaza_config() -> RemoteConfig {
+    let mut config = load_cached().unwrap_or_default();
+    config.relay_directory.blocked_hosts = load_plaza_policy_cached()
+        .map(|plaza| plaza.blocked_hosts)
+        .unwrap_or_default();
+    config
+}
+
+/// 「读缓存 + 重新验签」的参数化核：v1 与 v2 plaza 共用同一套纪律（先看体积、
+/// 签名定长、验不过当没缓存），只差缓存文件与目标类型。
+fn load_cached_artifact_with<T: serde::de::DeserializeOwned>(
+    public_key_hex: &str,
+    cache_json: &std::path::Path,
+    cache_sig: &std::path::Path,
+) -> Option<T> {
     // ⚠️ **先看文件大小再读**（review 抓出：缓存被换成数 GB 的文件时，
     // `std::fs::read` 会在验签开始之前就把进程撑爆 —— 验签防不了 OOM）。
-    let body = read_capped(&cache_path(), MAX_CONFIG_BYTES)?;
+    let body = read_capped(cache_json, MAX_CONFIG_BYTES)?;
     // 签名**恰好** 64 字节。它不是「上限」而是定值，所以判等而不是判小于 ——
     // 不符合就说明那不是我们写的签名文件。
-    let signature = read_capped(&cache_sig_path(), ED25519_SIGNATURE_LEN)
+    let signature = read_capped(cache_sig, ED25519_SIGNATURE_LEN)
         .filter(|s| s.len() == ED25519_SIGNATURE_LEN)?;
     match parse_verified(public_key_hex, &body, Some(&signature)) {
         Ok(config) => Some(config),
@@ -542,6 +624,22 @@ pub async fn refresh_and_cache() -> Option<RemoteConfig> {
     refresh_and_cache_with(CONFIG_URL, SIGNATURE_URL, PUBLIC_KEY_HEX).await
 }
 
+/// 拉一次 v2 广场展示策略、验签、落盘缓存。
+///
+/// 与 v1 同一个调度点刷新（maintenance 的 veridrop 周期任务）；失败语义相同：
+/// 返回 `None`、回落 [`load_plaza_policy_cached`] 的缓存（再没有就空策略），
+/// 绝不报错。
+pub async fn refresh_plaza_and_cache() -> Option<PlazaPolicy> {
+    refresh_signed_and_cache_with(
+        PLAZA_V2_URL,
+        PLAZA_V2_SIGNATURE_URL,
+        PUBLIC_KEY_HEX,
+        &plaza_cache_path(),
+        &plaza_cache_sig_path(),
+    )
+    .await
+}
+
 /// 参数化版本。**存在只为了让那道「未配置就早退」的守卫可测** ——
 /// 与 [`is_configured_with`] / [`verify_with`] 同一个理由。
 ///
@@ -554,6 +652,27 @@ async fn refresh_and_cache_with(
     signature_url: &str,
     public_key_hex: &str,
 ) -> Option<RemoteConfig> {
+    refresh_signed_and_cache_with(
+        config_url,
+        signature_url,
+        public_key_hex,
+        &cache_path(),
+        &cache_sig_path(),
+    )
+    .await
+}
+
+/// v1 / v2 plaza 共用的「拉取 → 验签 → 落盘」核。
+///
+/// 纪律只有一份：两个文件都必须拿到、验不过绝不落盘、任何失败返回 `None`
+/// 且不上抛 —— v2 plaza 与 v1 的安全边界完全相同（见模块文档「为什么必须验签」）。
+async fn refresh_signed_and_cache_with<T: serde::de::DeserializeOwned>(
+    config_url: &str,
+    signature_url: &str,
+    public_key_hex: &str,
+    cache_json: &std::path::Path,
+    cache_sig: &std::path::Path,
+) -> Option<T> {
     if !is_configured_with(config_url, signature_url, public_key_hex) {
         return None;
     }
@@ -569,7 +688,7 @@ async fn refresh_and_cache_with(
 
     match parse_verified(public_key_hex, &body, Some(&signature)) {
         Ok(config) => {
-            write_cache(&body, &signature);
+            write_cache_at(cache_json, cache_sig, &body, &signature);
             Some(config)
         }
         Err(e) => {
@@ -587,11 +706,11 @@ async fn refresh_and_cache_with(
 /// 「配置拿到了但签名没拿到」。它必须报错而不是放行 —— 否则攻击者删掉 `.sig`
 /// `refresh_and_cache` 那边用 `?` 保证不会真的传 `None`，
 /// 而这里的显式拒绝让那条规则**有闸可守**（见 `a_missing_signature_is_rejected...`）。
-fn parse_verified(
+fn parse_verified<T: serde::de::DeserializeOwned>(
     public_key_hex: &str,
     body: &[u8],
     signature: Option<&[u8]>,
-) -> Result<RemoteConfig, AppError> {
+) -> Result<T, AppError> {
     let Some(signature) = signature else {
         return Err(AppError::Config(
             "配置缺少签名，拒绝使用（删掉签名文件不该能绕过校验）".into(),
@@ -936,7 +1055,7 @@ mod tests {
         let body = br#"{"sponsors":[{"site_origin":"https://x.com","display_name":"X"}],"aff_codes":{"x.com":"ROUNDTRIP1"}}"#;
         let signature = pair.sign(body);
 
-        write_cache(body, signature.as_ref());
+        write_cache_at(&cache_path(), &cache_sig_path(), body, signature.as_ref());
 
         // 两个文件都得写出来 —— 只写一个的话读回时会因缺签名而拒（正确但不是这里要的）。
         assert!(cache_path().exists(), "配置缓存没写出来");
@@ -1678,7 +1797,7 @@ mod tests {
         assert_eq!(sig.len(), 64, "Ed25519 签名必须是裸 64 字节");
 
         // 与生产同一条路径：生产公钥 → 验签 → 验过才解析。
-        let cfg = parse_verified(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
+        let cfg = parse_verified::<RemoteConfig>(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
             .expect("仓内 config.json + .sig 必须过客户端同一套验签与解析");
 
         // sponsors 允许为空：2026-09-06 起推荐屏随广场临时下线（站长推广期的
@@ -1864,7 +1983,7 @@ mod tests {
         // 攻击者只要能删掉 / 让签名文件 404，就能让任意配置被接受 ——
         // 而那份配置决定用户被引到哪个站、邀请收益归谁。
         // 所以缺签名必须**报错**，不是「宽容处理」。
-        let err = parse_verified(TEST_KEY_HEX, b"{}", None)
+        let err = parse_verified::<RemoteConfig>(TEST_KEY_HEX, b"{}", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("签名"), "错误要说清是签名缺失：{err}");
@@ -1881,9 +2000,10 @@ mod tests {
         //
         // 光用合法 JSON + 错签名测不出顺序（两条路都返回签名错），
         // 那样的断言是假闸 —— 实测过：把顺序反过来它照样绿。
-        let err = parse_verified(TEST_KEY_HEX, b"{ this is not json", Some(&[0u8; 64]))
-            .unwrap_err()
-            .to_string();
+        let err =
+            parse_verified::<RemoteConfig>(TEST_KEY_HEX, b"{ this is not json", Some(&[0u8; 64]))
+                .unwrap_err()
+                .to_string();
         assert!(
             err.contains("签名"),
             "必须先验签再解析：坏 JSON + 错签名该报签名错，报格式错说明顺序反了：{err}"
@@ -1907,7 +2027,7 @@ mod tests {
         let body = r#"{"sponsors":[{"site_origin":"https://790053500.com","display_name":"鑫旺","tagline":"中转"}],"aff_codes":{"790053500.com":"FQSPPFUYXSSS"}}"#.as_bytes();
         let signature = pair.sign(body);
 
-        let cfg = parse_verified(&public_key_hex, body, Some(signature.as_ref()))
+        let cfg = parse_verified::<RemoteConfig>(&public_key_hex, body, Some(signature.as_ref()))
             .expect("合法签名必须验过并解析成功 —— 红了说明验签逻辑拒绝了一切输入");
 
         assert_eq!(cfg.sponsors.len(), 1);
@@ -1927,7 +2047,12 @@ mod tests {
         let signature = pair.sign(original);
 
         // 先确认基线是过的，否则下面的「被拒」可能只是因为一切都被拒。
-        assert!(parse_verified(&public_key_hex, original, Some(signature.as_ref())).is_ok());
+        assert!(parse_verified::<RemoteConfig>(
+            &public_key_hex,
+            original,
+            Some(signature.as_ref())
+        )
+        .is_ok());
 
         for (tampered, label) in [
             // 改了值 —— 攻击者要做的那件事。
@@ -1940,7 +2065,8 @@ mod tests {
             ),
         ] {
             assert!(
-                parse_verified(&public_key_hex, tampered, Some(signature.as_ref())).is_err(),
+                parse_verified::<RemoteConfig>(&public_key_hex, tampered, Some(signature.as_ref()))
+                    .is_err(),
                 "{label}：改过的正文必须验不过（签名覆盖原始字节）"
             );
         }
@@ -2074,5 +2200,107 @@ mod tests {
         }
         assert!(!is_key_usable("d75a98"), "长度不对该判不可用");
         assert!(!is_key_usable(&"z".repeat(64)), "非 hex 该判不可用");
+    }
+
+    /// 一致性闸：仓内 v2 plaza.json + .sig 必须过客户端自己的验签与解析。
+    ///
+    /// 与 `checked_in_config_passes_the_clients_own_gate` 同构 —— 改了 plaza.json
+    /// 忘了重跑 `./sign-plaza.sh` 时这条直接红。否则要到部署后才发现客户端整份
+    /// 拒绝，症状与「服务器挂了」一样难查。
+    #[test]
+    fn checked_in_plaza_policy_passes_the_clients_own_gate() {
+        let body = include_str!("../../../remote-config/public/v2/plaza.json");
+        let sig = include_bytes!("../../../remote-config/public/v2/plaza.json.sig");
+        assert_eq!(sig.len(), 64, "Ed25519 签名必须是裸 64 字节");
+
+        let plaza = parse_verified::<PlazaPolicy>(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
+            .expect("仓内 plaza.json + .sig 必须过客户端同一套验签与解析");
+        assert!(
+            !plaza.blocked_hosts.is_empty(),
+            "plaza.json 的安全态 = 拷贝 v1 墓碑全量；提交空列表等于对存量客户端恢复广场"
+        );
+    }
+
+    /// v1 墓碑不变式：v1 `blocked_hosts` ⊇ v1 四源（sponsors/aff/promo/
+    /// directory.sites）的全部 host。
+    ///
+    /// v2 plaza 接管了**新客户端**的展示策略，但老客户端只认 v1：将来新收录一家站
+    /// （加 aff 码）而忘了同步扩 v1 的 blocked，老客户端的广场会凭空多出一行合成行
+    /// —— 09-06 下线要防的场景被一次普通收录复活。这条测试让那次忘记直接红。
+    #[test]
+    fn checked_in_config_keeps_the_plaza_tombstone_closed() {
+        let body = include_str!("../../../remote-config/public/v1/config.json");
+        let sig = include_bytes!("../../../remote-config/public/v1/config.json.sig");
+        let cfg: RemoteConfig = parse_verified(PUBLIC_KEY_HEX, body.as_bytes(), Some(sig))
+            .expect("v1 配置本身必须可解析（另一条闸的职责，这里只是前置）");
+
+        let blocked: std::collections::BTreeSet<String> = cfg
+            .relay_directory
+            .blocked_hosts
+            .iter()
+            .map(|host| crate::relay::identity::request_host(host))
+            .collect();
+        let mut declared: Vec<String> = cfg
+            .sponsors
+            .iter()
+            .map(|sponsor| crate::relay::identity::request_host(&sponsor.site_origin))
+            .collect();
+        declared.extend(
+            cfg.aff_codes
+                .keys()
+                .map(|host| crate::relay::identity::request_host(host)),
+        );
+        declared.extend(
+            cfg.promo_codes
+                .keys()
+                .map(|host| crate::relay::identity::request_host(host)),
+        );
+        declared.extend(
+            cfg.relay_directory
+                .sites
+                .keys()
+                .map(|host| crate::relay::identity::request_host(host)),
+        );
+
+        let uncovered: Vec<String> = declared
+            .into_iter()
+            .filter(|host| !host.is_empty() && !blocked.contains(host))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert!(
+            uncovered.is_empty(),
+            "v1 墓碑有缺口 —— 这些受管 host 不在 blocked_hosts 里，老客户端的广场会             凭空多出行（新收录站点必须同步扩 v1 的 blocked，README 的 plaza 节有流程）：             {uncovered:?}"
+        );
+    }
+
+    /// v2 plaza 缓存的「写入 → 读回」+ [`load_plaza_config`] 的换源接缝。
+    ///
+    /// 换源是广场版本闸的全部机关：blocked 必须来自 plaza 缓存、sites 保持 v1。
+    /// 用仓内那份生产签名的字节当缓存内容（测试没有私钥，写不出能过生产公钥的
+    /// 签名 —— 而这份字节本来就是为此存在的）。
+    #[test]
+    fn plaza_cache_reads_back_and_load_plaza_config_swaps_blocked() {
+        let _guard = CacheDirGuard::new("plaza-swap");
+
+        let body = include_str!("../../../remote-config/public/v2/plaza.json");
+        let sig = include_bytes!("../../../remote-config/public/v2/plaza.json.sig");
+        write_cache_at(
+            &plaza_cache_path(),
+            &plaza_cache_sig_path(),
+            body.as_bytes(),
+            sig,
+        );
+
+        let policy = load_plaza_policy_cached()
+            .expect("生产签名的 plaza 字节必须能从缓存读回（红了说明 plaza 缓存链路坏了）");
+
+        // 没有 v1 缓存时 load_plaza_config 是「默认空配置 + plaza blocked」——
+        // 恰好把换源接缝单独暴露出来：blocked 换成了 v2 的，别处全默认。
+        let config = load_plaza_config();
+        assert_eq!(
+            config.relay_directory.blocked_hosts, policy.blocked_hosts,
+            "广场视角的 blocked 必须来自 v2 plaza，而不是 v1 的墓碑"
+        );
     }
 }

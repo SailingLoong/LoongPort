@@ -44,6 +44,7 @@ import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettin
 import { SkillStorageLocationSettings } from "@/components/settings/SkillStorageLocationSettings";
 import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
+import { PlazaSettings } from "@/components/settings/PlazaSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
 import { CcSwitchImportSection } from "@/components/settings/CcSwitchImportSection";
@@ -297,6 +298,9 @@ export function SettingsPage({
                         handleAutoSave({ preferredTerminal: terminal })
                       }
                     />
+                    {/* 广场开关放在常规页最底部：默认值由首启归因播种，这里是
+                        用户回来翻开的唯一入口（窄命令，不走全量保存）。 */}
+                    <PlazaSettings />
                   </motion.div>
                 ) : null}
               </TabsContent>

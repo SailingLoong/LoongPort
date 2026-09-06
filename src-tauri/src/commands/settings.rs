@@ -47,6 +47,10 @@ fn merge_settings_for_save(
     // 前端全量保存的快照取自某个过去时刻，透传它们 = 把并发写入整体抹掉
     // （当晚实测 claimed 被旧快照抹除；"当前在用"指针被抹会让整片供应商失去选中态）。
     incoming.star_reward_claimed = existing.star_reward_claimed;
+    // 广场开关：默认值由后端按归因播种（relay::plaza），用户改它走窄命令
+    // plaza_set_visible —— 全量保存的旧快照会抹掉首启弹窗刚播的种（同一类
+    // 已实测过的丢失更新事故）。
+    incoming.plaza_visible = existing.plaza_visible;
     incoming.current_provider_claude = existing.current_provider_claude.clone();
     incoming.current_provider_claude_desktop = existing.current_provider_claude_desktop.clone();
     incoming.current_provider_codex = existing.current_provider_codex.clone();
@@ -632,6 +636,27 @@ mod tests {
 #[tauri::command]
 pub async fn get_auto_launch_status() -> Result<bool, String> {
     crate::auto_launch::is_auto_launch_enabled().map_err(|e| format!("获取开机自启状态失败: {e}"))
+}
+
+/// 用户手动翻转「中转站广场」开关（设置页）。
+///
+/// 窄命令而非全量保存：`plaza_visible` 是后端播种的字段，前端全量保存的旧
+/// 快照会把它抹掉（见 `merge_settings_for_save` 里那条闸）。
+#[tauri::command]
+pub async fn plaza_set_visible(visible: bool) -> Result<bool, String> {
+    crate::settings::mutate_settings(|settings| {
+        settings.plaza_visible = Some(visible);
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// 首启「手填域名」弹窗提交时按归因播种广场开关的默认值（只在未播种时写入；
+/// 用户此后的手动翻转永远优先）。
+#[tauri::command]
+pub async fn plaza_seed_from_first_site(domain: String) -> Result<bool, String> {
+    crate::relay::plaza::seed_from_first_site(&domain).await;
+    Ok(true)
 }
 
 /// 获取整流器配置

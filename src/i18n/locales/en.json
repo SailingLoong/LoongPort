@@ -912,7 +912,10 @@
     "browsePlaceholderPi": "e.g., /home/<your-username>/.pi/agent",
     "tabAutoMode": "Easy Mode",
     "crowdMetrics": "Crowd-measured site stats",
-    "crowdMetricsDescription": "Upload site-level hourly aggregates (first-token time, error rate, …) and unlock user-measured stats in the directory. No prompts, keys, or account info."
+    "crowdMetricsDescription": "Upload site-level hourly aggregates (first-token time, error rate, …) and unlock user-measured stats in the directory. No prompts, keys, or account info.",
+    "plazaVisibility": "Relay directory",
+    "plazaVisibilityToggle": "Show relay directory",
+    "plazaVisibilityDescription": "Show the recommended relay list on the add-site page; sites can still be added manually via the search box"
   },
   "apps": {
     "claude": "Claude",

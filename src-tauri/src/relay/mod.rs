@@ -36,6 +36,7 @@
 //! - [`remote_config`]：远端配置（赞助商 + 邀请码，Ed25519 验签、三层回落）
 //! - [`stats`]：匿名使用统计（只报站点 host 与个数，默认开、可关）
 //! - [`managed`]：「这条 provider 是不是托管的」的唯一判据 + 各入口的守卫
+//! - [`plaza`]：广场可见性（一个开关 + 首启归因播种；展示策略的版本闸见 `remote_config`）
 //! - [`chatgpt_app`]：ChatGPT 桌面版（bundle id `com.openai.codex`）的退出与重开
 //!
 //! ## 与 V1 LoongPort 的差异（有意简化，不是遗漏）
@@ -77,6 +78,7 @@ pub mod onboarding;
 #[allow(dead_code)]
 pub mod model_verification;
 pub mod platform_map;
+pub mod plaza;
 pub mod pricing;
 pub mod promo;
 pub(crate) mod provider_fingerprint;

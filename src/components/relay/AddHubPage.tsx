@@ -5,6 +5,7 @@ import { ArrowLeft, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AppId } from "@/lib/api";
+import { useSettingsQuery } from "@/lib/query";
 import { useVendorSupportedQuery } from "@/lib/query/vendor";
 import {
   AddProviderForm,
@@ -52,11 +53,19 @@ export function AddHubPage({
 }) {
   const { t } = useTranslation();
   const vendorSupported = useVendorSupportedQuery(sourceAppId);
+  // 广场开关（默认值由后端按首启归因播种，设置页可手动翻转）。false 时广场
+  // tab 整个不出现 —— 添加站点的路只剩官方 API 与手动添加（搜索框照样可加）。
+  // 未加载/未播种都按「展示」处理（未归因默认），且用派生值而非初值快照，
+  // 设置晚到也能把已落在「广场」上的选中态拨回「手动添加」。
+  const { data: settings } = useSettingsQuery();
+  const plazaVisible = settings?.plazaVisible ?? true;
   const [tab, setTab] = useState<AddHubTab>(initialTab);
+  const effectiveTab: AddHubTab =
+    !plazaVisible && tab === "directory" ? "manual" : tab;
 
   return (
     <Tabs
-      value={tab}
+      value={effectiveTab}
       onValueChange={(v) => setTab(v as AddHubTab)}
       className="mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6"
     >
@@ -72,9 +81,11 @@ export function AddHubPage({
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <TabsList>
-          <TabsTrigger value="directory">
-            {t("loongport.sections.relay")}
-          </TabsTrigger>
+          {plazaVisible && (
+            <TabsTrigger value="directory">
+              {t("loongport.sections.relay")}
+            </TabsTrigger>
+          )}
           {vendorSupported && (
             <TabsTrigger value="official">
               {t("loongport.sections.official")}
@@ -87,15 +98,17 @@ export function AddHubPage({
         </TabsList>
       </div>
 
-      <TabsContent value="directory" className="mt-0 min-h-0 flex-1">
-        <RelayDirectoryPage
-          sourceAppId={sourceAppId}
-          initialKind="overall"
-          onBack={onBack}
-          embedded
-          firstVisit={firstVisit}
-        />
-      </TabsContent>
+      {plazaVisible && (
+        <TabsContent value="directory" className="mt-0 min-h-0 flex-1">
+          <RelayDirectoryPage
+            sourceAppId={sourceAppId}
+            initialKind="overall"
+            onBack={onBack}
+            embedded
+            firstVisit={firstVisit}
+          />
+        </TabsContent>
+      )}
 
       {vendorSupported && (
         <TabsContent value="official" className="mt-0 min-h-0 flex-1">

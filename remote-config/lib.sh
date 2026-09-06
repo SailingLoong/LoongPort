@@ -214,6 +214,57 @@ if errors:
 PY
 }
 
+# 校验 v2 广场展示策略（plaza.json）的发布契约。
+#
+# 与 validate_config_json 同一个理由：语法合法 ≠ 客户端消费得对。blocked_hosts
+# 的归一口径（小写、无 www.、无 scheme/端口/路径）与 leaderboard 侧的
+# request_host 归一同一套 —— 录入形如 `https://Panel.Example.com` 的条目永远
+# 匹配不到任何站点，表现成「想下线那家站却没下线」，且不报错。
+validate_plaza_json() {
+  local plaza="$1"
+  python3 - "$plaza" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding='utf-8') as f:
+        plaza = json.load(f)
+except (OSError, json.JSONDecodeError) as e:
+    sys.exit(f"✘ v2 plaza.json 不是合法 JSON：{e}")
+
+errors = []
+
+issued = plaza.get("issued_at")
+if not isinstance(issued, str) or not issued:
+    errors.append("issued_at 必须是非空字符串（客户端忽略它；它是防回滚攻击攒的历史）")
+
+blocked = plaza.get("blocked_hosts")
+if not isinstance(blocked, list):
+    errors.append("blocked_hosts 必须是数组")
+else:
+    seen = set()
+    for index, host in enumerate(blocked):
+        prefix = f"blocked_hosts[{index}]"
+        if not isinstance(host, str) or not host:
+            errors.append(f"{prefix} 必须是非空字符串")
+            continue
+        if host != host.lower():
+            errors.append(f"{prefix} 必须全小写：{host}")
+        if host.startswith("www."):
+            errors.append(f"{prefix} 必须去掉 www. 前缀：{host}")
+        if "://" in host or "/" in host:
+            errors.append(f"{prefix} 是纯 host，不带 scheme 或路径：{host}")
+        if ":" in host:
+            errors.append(f"{prefix} 不能带端口：{host}")
+        if host in seen:
+            errors.append(f"{prefix} 重复：{host}")
+        seen.add(host)
+
+if errors:
+    sys.exit("✘ v2 plaza.json 不符合发布契约：\n" + "\n".join(f"  - {e}" for e in errors))
+PY
+}
+
 # hex 公钥 → DER SubjectPublicKeyInfo 文件（openssl 只吃 DER/PEM，不吃裸 hex）。
 #
 # Ed25519 的 SPKI 前缀是固定的 12 字节，后面直接跟 32 字节裸公钥。
