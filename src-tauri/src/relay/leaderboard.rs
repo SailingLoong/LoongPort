@@ -1631,6 +1631,51 @@ mod tests {
         assert_eq!(items[0].entry_url, "https://aijws.example");
     }
 
+    /// 用仓内真实远端配置（`remote-config/public/v1/config.json`，线上部署那份的
+    /// 源）做端到端实证：veridrop 完全没有数据时（parsed 为空），**每一个受管
+    /// 站点都在总榜有行、都能一键登录**。这是「白名单 = 展示充分条件」的总闸 ——
+    /// 配置侧键形漂移、身份归一化回退、合成逻辑被改坏，都会在这里红。
+    #[test]
+    fn every_site_in_the_shipped_config_gets_a_row_with_zero_veridrop_data() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../remote-config/public/v1/config.json");
+        let config: RemoteConfig = serde_json::from_slice(
+            &std::fs::read(&path).unwrap_or_else(|error| panic!("读不到 {:?}: {error}", path)),
+        )
+        .expect("仓内 v1 配置必须能被客户端 schema 解析");
+
+        let items = apply_policy(vec![], &config, LeaderboardKind::Overall);
+
+        let mut covered_domains: BTreeSet<String> =
+            items.iter().map(|item| item.site_domain.clone()).collect();
+        // blocked_hosts 是维护者的显式 kill switch，不算「漏斗拦」。
+        let blocked: BTreeSet<String> = config
+            .relay_directory
+            .blocked_hosts
+            .iter()
+            .map(|host| crate::relay::identity::site_domain(host))
+            .collect();
+        let managed_domains: BTreeSet<String> = managed_site_hosts(&config)
+            .into_iter()
+            .map(|host| crate::relay::identity::site_domain(&host))
+            .filter(|domain| !blocked.contains(domain))
+            .collect();
+        for domain in &managed_domains {
+            assert!(
+                covered_domains.remove(domain),
+                "受管域 {domain} 在零 veridrop 数据下没有广场行"
+            );
+        }
+        assert!(
+            covered_domains.is_empty(),
+            "多出了非受管的行: {covered_domains:?}"
+        );
+        assert!(
+            items.iter().all(|item| item.auto_add),
+            "每一行都必须可一键登录"
+        );
+    }
+
     #[test]
     fn cache_is_fresh_until_exactly_six_hours() {
         let synced_at = 1_786_680_000;
