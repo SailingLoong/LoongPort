@@ -412,6 +412,31 @@ mod tests {
         );
     }
 
+    /// ⭐ **注册同步的触发点全在数据层**（2026-09-07 收口，删掉了「进入生图页时
+    /// 同步」的前端入口——那是视图读路径驱动数据层行为）。
+    ///
+    /// 这道闸钉住**启动**那一处接线：其余触发点（provision 收尾、开关写入、删站点）
+    /// 各有行为测试或在源码闸里被顺带覆盖，启动这处在 lib.rs 的初始化闭包里，
+    /// 没有任何行为测试会碰它 —— 删掉它的症状是静默的：升级后不再对齐注册，
+    /// 用户的 CLI 里残留（或缺失）生图工具，直到下次 provision。
+    #[test]
+    fn startup_wires_the_registration_sync() {
+        let lib_rs = include_str!("../lib.rs");
+        assert!(
+            lib_rs.contains("imagegen_mcp::sync_registration(&app_state)"),
+            "lib.rs 的启动初始化不再调用 imagegen_mcp::sync_registration —— \
+             这是注册同步在数据层的启动触发点，删它要有替代方案（见触发点清单），\
+             别只是把断言改绿"
+        );
+        // 前端读路径不再有直接触发（那是这轮收口删掉的形状，别让它回来）。
+        let app_tsx = include_str!("../../../src/App.tsx");
+        assert!(
+            !app_tsx.contains("relay_sync_imagegen_mcp"),
+            "App.tsx 又出现了生图 MCP 同步的直接触发 —— 视图读路径不驱动数据层行为，\
+             触发点归数据层（启动/provision/设置写入/删除）"
+        );
+    }
+
     /// ⚠️ **这个 crate 的 logger 写 stdout，而 stdout 是 MCP 的协议通道。**
     ///
     /// 当前安全**只是因为 logger 在 [`crate::run`] 里才初始化**

@@ -246,45 +246,6 @@ describe("App integration with MSW", () => {
     expect(await screen.findAllByText("switch-codex-image")).toHaveLength(1);
   });
 
-  it("restores the image page and reconciles its MCP registration on startup", async () => {
-    let syncCalls = 0;
-    server.use(
-      http.post("http://tauri.local/relay_sync_imagegen_mcp", () => {
-        syncCalls += 1;
-        return HttpResponse.json(null);
-      }),
-    );
-    localStorage.setItem(LAST_APP_STORAGE_KEY, "codex-image");
-
-    renderApp();
-
-    await waitFor(() => {
-      expect(screen.getByTestId("app-switcher")).toHaveTextContent(
-        "codex-image",
-      );
-      expect(syncCalls).toBe(1);
-    });
-  });
-
-  it("reconciles the image MCP registration when switching to the image page", async () => {
-    let syncCalls = 0;
-    server.use(
-      http.post("http://tauri.local/relay_sync_imagegen_mcp", () => {
-        syncCalls += 1;
-        return HttpResponse.json(null);
-      }),
-    );
-
-    renderApp();
-    fireEvent.click(await screen.findByText("switch-codex-image"));
-
-    await waitFor(() => expect(syncCalls).toBe(1));
-    skillsPanelMocks.checkUpdates.mockReset();
-    skillsPanelMocks.openDiscovery.mockReset();
-    localStorage.removeItem(LAST_VIEW_STORAGE_KEY);
-    localStorage.removeItem(LAST_APP_STORAGE_KEY);
-  });
-
   it("covers basic provider flows via real hooks", async () => {
     renderApp();
 

@@ -1057,8 +1057,9 @@ pub fn run() {
 
             // 生图 MCP 是「生图栏里是否有托管档位」的派生状态。启动时无条件对齐一次，
             // 覆盖升级后已有档位但从未再次 provision、以及应用升级后可执行路径变化的情况。
+            // 其余触发点：provision 收尾、生图开关写入、删站点/账号（都在数据层）。
             if let Err(e) = crate::relay::imagegen_mcp::sync_registration(&app_state) {
-                log::warn!("启动时同步生图 MCP 失败（进入生图页时会重试）: {e}");
+                log::warn!("启动时同步生图 MCP 失败（下次 provision 或重启会重试）: {e}");
             }
 
             // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
@@ -1676,7 +1677,6 @@ pub fn run() {
             commands::relay_list_relays,
             commands::relay_reorder,
             commands::relay_reset_tier_config,
-            commands::relay_sync_imagegen_mcp,
             commands::relay_imagegen_generate,
             commands::relay_imagegen_list_images,
             commands::relay_imagegen_reveal_image,
