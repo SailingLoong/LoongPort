@@ -22,6 +22,7 @@ use crate::database::Database;
 use crate::provider::Provider;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -31,13 +32,17 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 /// 可编程 mock 上游：默认 200，可翻成 500 模拟故障；记录命中数与鉴权头。
-/// `foreign` 开关让 mock 回 OpenAI 形状（模拟换芯转发，供被动监控 E2E）。
+/// `foreign` 开关让 mock 回 OpenAI 形状（模拟换芯转发，供被动监控 E2E）；
+/// `stream` 开关回 Anthropic SSE 形状（供流式首字/用量链路 E2E）；
+/// `delay_ms` 在应答前 sleep（模拟「等了很久才失败」的档位，验证计时不被它污染）。
 #[derive(Clone)]
 struct MockUpstreamState {
     hits: Arc<AtomicUsize>,
     status: Arc<RwLock<u16>>,
     auth_header: Arc<RwLock<Option<String>>>,
     foreign: Arc<RwLock<bool>>,
+    stream: Arc<RwLock<bool>>,
+    delay_ms: Arc<std::sync::atomic::AtomicU64>,
     marker: &'static str,
 }
 
@@ -53,6 +58,8 @@ impl MockUpstream {
             status: Arc::new(RwLock::new(200)),
             auth_header: Arc::new(RwLock::new(None)),
             foreign: Arc::new(RwLock::new(false)),
+            stream: Arc::new(RwLock::new(false)),
+            delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             marker,
         };
         let app = axum::Router::new()
@@ -84,6 +91,16 @@ impl MockUpstream {
         *self.state.foreign.write().await = foreign;
     }
 
+    async fn set_stream(&self, stream: bool) {
+        *self.state.stream.write().await = stream;
+    }
+
+    fn set_delay_ms(&self, delay_ms: u64) {
+        self.state
+            .delay_ms
+            .store(delay_ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
     async fn auth_header(&self) -> Option<String> {
         self.state.auth_header.read().await.clone()
     }
@@ -93,14 +110,52 @@ async fn handle_mock(
     State(state): State<MockUpstreamState>,
     headers: HeaderMap,
     _body: axum::body::Bytes,
-) -> (StatusCode, Json<Value>) {
+) -> axum::response::Response {
     state.hits.fetch_add(1, Ordering::SeqCst);
     *state.auth_header.write().await = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let delay_ms = state.delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+    if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
     let status = *state.status.read().await;
     if status == 200 {
+        if *state.stream.read().await {
+            // Anthropic SSE 形状：message_start 立即到（首字锚点），usage 在
+            // message_start / message_delta 里（Claude 流式解析器的取数点）。
+            let sse = format!(
+                "event: message_start\ndata: {}\n\n\
+                 event: content_block_delta\ndata: {}\n\n\
+                 event: message_delta\ndata: {}\n\n\
+                 event: message_stop\ndata: {}\n\n",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_mock",
+                        "model": "claude-e2e",
+                        "usage": { "input_tokens": 1 },
+                    }
+                }),
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": state.marker },
+                }),
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn" },
+                    "usage": { "output_tokens": 1 },
+                }),
+                json!({ "type": "message_stop" }),
+            );
+            return axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(sse))
+                .expect("build sse response");
+        }
         if *state.foreign.read().await {
             // OpenAI chat.completions 形状出现在 Claude 线路 = 异源指纹（换芯转发）
             return (
@@ -113,7 +168,8 @@ async fn handle_mock(
                     }],
                     "usage": {},
                 })),
-            );
+            )
+                .into_response();
         }
         (
             StatusCode::OK,
@@ -127,6 +183,7 @@ async fn handle_mock(
                 "usage": { "input_tokens": 1, "output_tokens": 1 },
             })),
         )
+            .into_response()
     } else {
         (
             StatusCode::from_u16(status).expect("valid status"),
@@ -135,6 +192,7 @@ async fn handle_mock(
                 "error": { "type": "api_error", "message": "mock upstream failure" },
             })),
         )
+            .into_response()
     }
 }
 
@@ -337,6 +395,73 @@ async fn response_text(resp: reqwest::Response) -> String {
         .to_string()
 }
 
+/// 走真实代理端口的 Claude 流式请求（SSE）。
+async fn send_streaming_message(port: u16, session: &str) -> reqwest::Response {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build client")
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("x-api-key", "client-key-should-be-overridden")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-claude-code-session-id", session)
+        .json(&json!({
+            "model": "claude-e2e",
+            "max_tokens": 16,
+            "stream": true,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .expect("send request")
+}
+
+/// 等异步 usage 落库，取该档位最近一行的 (first_token_ms, latency_ms)。
+async fn await_logged_timing(fx: &E2eFixture, provider_id: &str) -> (u64, u64) {
+    for _ in 0..250 {
+        let row = {
+            let conn = fx.db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT first_token_ms, latency_ms FROM proxy_request_logs \
+                 WHERE provider_id = ?1 AND first_token_ms IS NOT NULL \
+                 ORDER BY rowid DESC LIMIT 1",
+                rusqlite::params![provider_id],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .ok()
+        };
+        if let Some(timing) = row {
+            return timing;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let dump = {
+        let conn = fx.db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, provider_id, first_token_ms, latency_ms, status_code \
+                      FROM proxy_request_logs ORDER BY rowid DESC LIMIT 5",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "(id={}, provider={}, ttft={:?}, latency={:?}, status={})",
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows.join(" | ")
+    };
+    panic!("usage row for {provider_id} never landed; recent rows: {dump}");
+}
+
 /// 闲置（无当前档位活跃会话）时，省心模式把流量交给最便宜档位。
 #[tokio::test]
 #[serial]
@@ -443,6 +568,48 @@ async fn easy_mode_fails_over_in_request_even_with_failover_toggle_off() {
     let marker = response_text(send_message(fx.port, "sess-e2e-implied-0001").await).await;
     assert_eq!(marker, "served-by-expensive");
     assert_eq!(fx.cheap.hits(), 1, "故障档位只应被探测一次");
+    fx.server.stop().await.expect("stop server");
+}
+
+/// 首字/用时归因只算成功档位自己的耗时：便宜档拖 500ms 才回 402、贵档接住
+/// 流式请求 —— 落库的 first_token_ms / latency_ms 归贵档，且不得含那 500ms。
+/// （修复前计时锚点是客户端请求进入时刻：失败尝试的耗时会记进成功档的
+/// 首字里，污染看板均值与「响应最快」排序。）
+#[tokio::test]
+#[serial]
+async fn first_token_ms_excludes_time_spent_on_failed_attempts() {
+    let fx = E2eFixture::new().await;
+    // 关掉流式超时（0=禁用），失败档位的 500ms 延迟不被超时改道
+    let mut config = fx.db.get_proxy_config_for_app("claude").await.unwrap();
+    config.non_streaming_timeout = 0;
+    config.streaming_first_byte_timeout = 0;
+    config.streaming_idle_timeout = 0;
+    fx.db.update_proxy_config_for_app(config).await.unwrap();
+
+    const FAILED_ATTEMPT_DELAY_MS: u64 = 500;
+    fx.cheap.set_delay_ms(FAILED_ATTEMPT_DELAY_MS);
+    fx.cheap.set_status(402).await;
+    fx.expensive.set_stream(true).await;
+
+    let resp = send_streaming_message(fx.port, "sess-e2e-ttft-00001").await;
+    assert_eq!(resp.status(), 200, "故障转移后必须成功");
+    let body = resp.text().await.expect("read sse body");
+    assert!(
+        body.contains("served-by-expensive"),
+        "流式响应必须来自接住请求的档位: {body}"
+    );
+    assert_eq!(fx.cheap.hits(), 1);
+    assert_eq!(fx.expensive.hits(), 1);
+
+    let (first_token_ms, latency_ms) = await_logged_timing(&fx, &fx.expensive_id).await;
+    assert!(
+        first_token_ms < FAILED_ATTEMPT_DELAY_MS,
+        "首字时长不得包含失败尝试的 {FAILED_ATTEMPT_DELAY_MS}ms：{first_token_ms}ms"
+    );
+    assert!(
+        latency_ms < FAILED_ATTEMPT_DELAY_MS,
+        "用时同口径按成功尝试计：{latency_ms}ms"
+    );
     fx.server.stop().await.expect("stop server");
 }
 
