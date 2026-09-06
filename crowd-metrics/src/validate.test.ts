@@ -114,6 +114,19 @@ describe("parseIngestPayload", () => {
     }
   });
 
+  it("P5：模型异常计数缺省 0、超模型样本数拒绝", () => {
+    const ok = parseIngestPayload(makePayload({ version: 2, hours: [makeBucket({ models: [makeModelBucket({ anomalies: 2 })] })] }), NOW);
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.payload.hours[0].models?.[0]?.anomalies).toBe(2);
+    // 缺省（旧客户端）→ 0
+    const legacy = parseIngestPayload(makePayload({ version: 2, hours: [makeBucket({ models: [makeModelBucket()] })] }), NOW);
+    if (legacy.ok) expect(legacy.payload.hours[0].models?.[0]?.anomalies).toBe(0);
+    // 异常次数恒 ≤ 该模型样本数（异常响应必然是被计数的请求之一）
+    expect(
+      parseIngestPayload(makePayload({ version: 2, hours: [makeBucket({ models: [makeModelBucket({ anomalies: 99 })] })] }), NOW).ok,
+    ).toBe(false);
+  });
+
   it("v2：缺 models 数组 / 坏模型名 / 子桶超母桶样本 / tps 桶长错 一律拒绝", () => {
     expect(parseIngestPayload(makePayload({ version: 2 }), NOW).ok).toBe(false);
     expect(

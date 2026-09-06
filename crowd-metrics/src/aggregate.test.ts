@@ -331,6 +331,19 @@ describe("趋势模型维度（P4）", () => {
     expect(dataBucket.costUsdPerMTok).not.toBeNull();
   });
 
+  it("P5：异常计数进桶与窗口（旧行缺省 0）", () => {
+    const trend = buildTrends(
+      sources(3),
+      NOW,
+      [modelRaw({ anomalies: 2 }), modelRaw({ source: "src-m2", anomalies: 1 }), modelRaw({ source: "src-m3" })],
+    );
+    const model = trend.ranges["24h"].sites["example.com"].models?.["gpt-example"];
+    expect(model).toBeDefined();
+    // 桶与窗口都是直加：2+1+缺省 0 = 3
+    expect(model!.buckets[22].anomalies).toBe(3);
+    expect(model!.window!.anomalies).toBe(3);
+  });
+
   it("窗口聚合（P4c-2）：样本加权指标齐全", () => {
     const trend = buildTrends(sources(3), NOW, [modelRaw(), modelRaw({ source: "src-m2" })]);
     const win = trend.ranges["24h"].sites["example.com"].models?.["gpt-example"]?.window;

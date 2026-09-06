@@ -40,6 +40,8 @@ export interface ModelBucketPayload {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   costUsdMicros: number;
+  /** P5：被动观察到的模型真伪异常次数（Anomaly 级）。旧客户端缺省 = 0。 */
+  anomalies?: number;
 }
 
 /** POST /v1/ingest 的载荷。一次 flush 携带若干个已闭合的小时桶。 */
@@ -110,7 +112,7 @@ export interface SiteTrend {
 
 /** P4：模型趋势（无范围分布 —— 站点级已有，模型级省载荷）。 */
 export interface SiteTrendLite {
-  buckets: Array<TrendBucket & { tpsP50Ms?: number | null; costUsdPerMTok?: number | null }>;
+  buckets: Array<TrendBucket & { tpsP50Ms?: number | null; costUsdPerMTok?: number | null; anomalies?: number }>;
   /** P4c-2：该范围内该 (站点,模型) 的窗口聚合（斩杀线图阵的散点口径；
    *  范围级 k-匿未达标则缺省）。 */
   window?: ModelWindowStats;
@@ -124,6 +126,8 @@ export interface ModelWindowStats {
   errRate: number | null;
   tpsP50Ms: number | null;
   costUsdPerMTok: number | null;
+  /** P5：该范围内被动观察到的模型真伪异常（Anomaly 级）总次数。 */
+  anomalies: number;
 }
 
 /** 档位 → 站点趋势。 */
