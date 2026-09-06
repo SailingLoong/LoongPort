@@ -131,10 +131,12 @@ export interface RelayDirectoryItem {
   veridropHost: string;
   displayName: string;
   rank: number | null;
-  score: number;
-  samples: number;
-  latestDate: string;
-  detailUrl: string;
+  /** veridrop 观测四件套可整体缺席：受管站不在 veridrop 榜上时行仍展示
+   *  （后端合成），徽章不渲染 —— null = 无数据，不要当 0 显示。 */
+  score: number | null;
+  samples: number | null;
+  latestDate: string | null;
+  detailUrl: string | null;
   protocolScores: ProtocolScore[];
   claudeSignatureRate: number | null;
   scenarios: string[];
