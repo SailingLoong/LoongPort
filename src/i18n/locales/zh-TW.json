@@ -3457,6 +3457,8 @@
       "noTierHint": "還沒有生圖連線設定檔；僅支援 gpt-image 模型的分組會自動產生。",
       "promptPlaceholder": "描述要生成的圖片…",
       "sizeLabel": "尺寸",
+      "countLabel": "張數",
+      "countHint": "一次生成多張：按張數計費，也會更慢（每張約半分鐘到兩分鐘）",
       "generate": "生成",
       "generating": "生成中…",
       "generateHint": "生圖較慢，通常需要半分鐘到兩分鐘",

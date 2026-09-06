@@ -335,22 +335,55 @@ pub(crate) fn output_dir() -> PathBuf {
     app_dir().join("generated_images")
 }
 
-/// 调一次生图，返回落盘后的文件。
+/// 一次请求的超时上限 = 每张图 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的既证预算 × 张数。
+///
+/// 生图慢（实测单张 30-90s），串行上游的耗时随 `n` 线性涨，超时也跟着涨才不至于
+/// 把能出完的请求掐死。两条入口都按 [`request_timeout`] 取值：
+///
+/// - **App 内直接生图**没有宿主超时这层约束，按张数放大的封顶就是诚实的等待上限
+///   （n=4 ⇒ 16 分钟封顶；正常远快于此，超时只兜底死掉的上游）。
+/// - **MCP 工具**的 `n` 由宿主 agent 传（默认 1）。codex 的工具超时默认正好 300s，
+///   单张时两边同为 300 会让宿主先报它那句泛泛的错 —— 所以单张预算是 240s 而不是
+///   300s，留 60s 余量让「请求生图接口失败」这条更具体的先到；多张时宿主默认
+///   超时大概率先杀掉调用（schema 的 `n` 描述里写明了这点，并建议要更多张时
+///   并发多次调用工具、每次各自计时）。我们这层仍按张数放大：宿主侧调大了超时
+///   （或 claude / gemini 这类默认更宽的宿主）时，不该被我们自己的客户端掐死。
+const SINGLE_IMAGE_TIMEOUT_SECS: u64 = 240;
+
+/// 见 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的文档。
+pub(crate) fn request_timeout(n: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(SINGLE_IMAGE_TIMEOUT_SECS * n.max(1) as u64)
+}
+
+/// 一次请求最多几张。闸在核心层这一份（两条入口都调 [`validate_count`]）：
+/// 一次 `n` 张就是 `n` 张的钱，前端选择器与工具 schema 只放合法值，
+/// 但真正的闸必须在后端 —— 别的入口不该绕过它。
+pub(crate) const MAX_IMAGE_COUNT: u32 = 4;
+
+/// 张数的唯一判据（合法原样返回，越界报错）。App 内命令与 MCP 工具共用，
+/// 各自再写一遍范围就会分叉。
+pub(crate) fn validate_count(n: u32) -> Result<u32, String> {
+    if (1..=MAX_IMAGE_COUNT).contains(&n) {
+        Ok(n)
+    } else {
+        Err(format!("张数只支持 1 到 {MAX_IMAGE_COUNT}"))
+    }
+}
+
+/// 调一次生图（`n` 张），返回落盘后的文件（每张一个元素）。
+///
+/// `n` 由调用方给定并已过 [`validate_count`]：App 内入口来自生成视图的张数选择；
+/// MCP 入口来自工具参数（宿主 agent 传，默认 1）。响应解析、落盘与修剪从第一天起
+/// 就按「一次可能多张」处理，这里只是把入口接上。
 pub(crate) async fn generate_image(
     tier: &Tier,
     prompt: &str,
     size: Option<&str>,
+    n: u32,
+    timeout: std::time::Duration,
 ) -> Result<Vec<GeneratedImage>, String> {
     let client = reqwest::Client::builder()
-        // 生图慢（实测 30-90s），默认超时会在出图前就断。
-        //
-        // **240 而不是 300**：codex 的 MCP 工具超时默认正好是 300s
-        // （`codex-rs/codex-mcp/src/rmcp_client.rs` 的 `DEFAULT_TOOL_TIMEOUT`）。
-        // MCP 入口两边同为 300 时，真正的超时那次是宿主先报它自己那句泛泛的超时，
-        // 我们这句「请求生图接口失败」反而抢不到 —— 留 60s 余量让**更具体的那条**
-        // 错误信息先到用户眼前。App 内入口没有这层约束，但共用同一个值：
-        // 真正的耗时在上游出图，240s 对两条入口都够。
-        .timeout(std::time::Duration::from_secs(240))
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
 
@@ -373,7 +406,7 @@ pub(crate) async fn generate_image(
     let body = serde_json::json!({
         "model": tier.model,
         "prompt": prompt,
-        "n": 1,
+        "n": n,
         "size": size.unwrap_or(DEFAULT_SIZE),
     });
 
@@ -732,6 +765,30 @@ base_url = "https://api.example.com/v1"
             images_url("https://api.example.com/v1"),
             "https://api.example.com/v1/images/generations"
         );
+    }
+
+    /// 超时随张数线性放大（App 内入口的封顶），n=0 兜底按一张算 —— 不是 0 秒必超时。
+    /// MCP 入口固定 n=1 ⇒ 恒 240s（那条「给 codex 300s 留 60s 余量」的理由不动）。
+    #[test]
+    fn request_timeout_scales_with_the_image_count() {
+        assert_eq!(request_timeout(1).as_secs(), 240);
+        assert_eq!(request_timeout(4).as_secs(), 960);
+        assert_eq!(
+            request_timeout(0).as_secs(),
+            240,
+            "n=0 必须兜底成一张的预算，否则是个 0 秒必超时的请求"
+        );
+    }
+
+    /// 张数闸：合法原样返回、越界报错。两条入口共用这一份判据 ——
+    /// 它分叉的那天，App 内和 MCP 会各自接受不同的张数。
+    #[test]
+    fn validate_count_is_the_single_range_gate() {
+        assert_eq!(validate_count(1).unwrap(), 1);
+        assert_eq!(validate_count(4).unwrap(), 4);
+        for bad in [0, 5, 50] {
+            assert!(validate_count(bad).is_err(), "n={bad} 必须被拒");
+        }
     }
 
     /// 同一份内容得到同一个名字（可复现），不同内容不撞名。

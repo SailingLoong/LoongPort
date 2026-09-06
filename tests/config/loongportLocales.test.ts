@@ -370,6 +370,9 @@ const requiredKeys = [
   "imagegenPlayground.noTierHint",
   "imagegenPlayground.promptPlaceholder",
   "imagegenPlayground.sizeLabel",
+  // 批量张数的计费/耗时提示是知情前提 —— 缺了它「×4」就是个不知价格的按钮。
+  "imagegenPlayground.countLabel",
+  "imagegenPlayground.countHint",
   "imagegenPlayground.generate",
   "imagegenPlayground.generating",
   "imagegenPlayground.generateHint",
