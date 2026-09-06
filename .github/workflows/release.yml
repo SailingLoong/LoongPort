@@ -75,8 +75,8 @@ jobs:
           - os: windows-11-arm
             arch: arm64
           - os: macos-14
-          # ⚠️ Linux 两条暂时摘掉，等维护者验证过 Linux 包再放回来：
-          #   - os: ubuntu-22.04
+          - os: ubuntu-22.04
+          # arm64 仍挂起：x64 真机验证过了再放回（连同下面两行一起取消注释）。
           #   - os: ubuntu-22.04-arm
           #     arch: arm64
           #
@@ -84,8 +84,7 @@ jobs:
           # `if: always()`，任一 matrix 分支失败就会把它 skip 掉 ⇒ 连已经编好的
           # Windows / macOS 包也发不出去（fail-fast: false 只保证其它分支跑完，
           # 不改变汇总那步的 skip 行为）。
-          # 放回来时把上面三行取消注释即可，下面那些 `if: runner.os == 'Linux'`
-          # 的步骤一直都在，不用动。
+          # Linux 的构建/收集步骤（`if: runner.os == 'Linux'`）一直都在，不用动。
 
     steps:
       - name: Checkout
@@ -827,8 +826,11 @@ jobs:
           # 「这版为什么值得升」，自动列表负责「具体合了哪些 PR」，各管一段，不重复维护。
           generate_release_notes: true
           # ⚠️ 下面的「下载」清单必须与 matrix 实际跑的平台一致 —— 列出不存在的文件名
-          # 等于让用户照着下载然后 404。Linux 两条现在是注释状态，所以这里也没有 Linux；
-          # 放回 matrix 时把那句「Linux 包暂未提供」换成 AppImage / .deb / .rpm 三件套说明。
+          # 等于让用户照着下载然后 404。Linux 当前只有 x86_64（arm64 仍挂起），
+          # 所以这里也只列 x86_64 三件套；arm64 放回 matrix 时记得同步加一行。
+          #
+          # 「Linux 包是否已验证」这类每版都可能变的话，写进 tag 正文（本次更新），
+          # 不写死在这份模板里。
           #
           # 那段 macOS「未签名 + xattr」说明是本 fork 自己的：上游写的是「已通过签名和公证」，
           # 那对 cc-switch 成立、对这里不成立。配齐上面三个 Apple secret 后本 workflow 会
@@ -850,8 +852,7 @@ jobs:
             - **macOS**: `LoongPort-${{ github.ref_name }}-macOS.dmg`（推荐）或 `LoongPort-${{ github.ref_name }}-macOS.zip`（解压即用）
             - **Windows (x86_64)**: `LoongPort-${{ github.ref_name }}-Windows-Setup.exe`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
             - **Windows (ARM64)**: `LoongPort-${{ github.ref_name }}-Windows-arm64-Setup.exe`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
-
-            > Linux 包暂未提供。
+            - **Linux (x86_64)**: `LoongPort-${{ github.ref_name }}-Linux-x86_64.AppImage`（推荐）或 `LoongPort-${{ github.ref_name }}-Linux-x86_64.deb` / `.rpm`（手动安装，不参与应用内自动更新）
 
             > 应用内会自动检查更新（启动后几秒，失败静默）；也可在「设置 → 关于」手动检查。
             > 免安装版不做原地更新 —— 它会带你回本页下载新版。
