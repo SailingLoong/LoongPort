@@ -3207,7 +3207,7 @@
       "errorTitle": "中継サイト一覧を読み込めません",
       "errorBody": "ライブデータと前回成功時のキャッシュのどちらも利用できません。",
       "refreshFailed": "VeriDrop ランキングを更新できませんでした：{{reason}}",
-      "empty": "現在の条件に一致するサイトはありません",
+      "empty": "現在の条件に一致するサイトはありません。検索ボックスから直接追加できます",
       "scoreLabel": "VeriDrop",
       "signatureHint": "Claude 思考署名の検証成功率",
       "transit": {
