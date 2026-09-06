@@ -652,9 +652,7 @@ fn cached_veridrop_hosts() -> BTreeSet<String> {
 ///
 /// 下一轮排查「这个站为什么不在广场」时，逐层翻日志就能回答。
 pub(crate) async fn refresh_site_probes_for_directory() {
-    let config = // 展示策略走 v2 plaza（blocked 从那里来；sites/白名单源仍是 v1）——
-    // 老客户端读不到 v2，广场内容的恢复/下线不惊动存量。
-    crate::relay::remote_config::load_plaza_config();
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
     let managed_hosts = managed_site_hosts(&config);
     if managed_hosts.is_empty() {
         log::info!(
@@ -962,16 +960,12 @@ fn is_fresh_for(cached: &CachedLeaderboard, now: i64, config: &RemoteConfig) -> 
 }
 
 pub fn read_cached(kind: LeaderboardKind) -> Result<Option<RelayLeaderboard>, AppError> {
-    let config = // 展示策略走 v2 plaza（blocked 从那里来；sites/白名单源仍是 v1）——
-    // 老客户端读不到 v2，广场内容的恢复/下线不惊动存量。
-    crate::relay::remote_config::load_plaza_config();
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
     Ok(read_cache(kind).map(|cached| apply_policy_to_cached(cached, &config)))
 }
 
 pub fn is_cache_fresh(kind: LeaderboardKind, now: i64) -> bool {
-    let config = // 展示策略走 v2 plaza（blocked 从那里来；sites/白名单源仍是 v1）——
-    // 老客户端读不到 v2，广场内容的恢复/下线不惊动存量。
-    crate::relay::remote_config::load_plaza_config();
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
     read_cache(kind).is_some_and(|cached| is_fresh_for(&cached, now, &config))
 }
 
@@ -1104,9 +1098,7 @@ async fn refresh_with(
 }
 
 async fn perform_refresh(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppError> {
-    let config = // 展示策略走 v2 plaza（blocked 从那里来；sites/白名单源仍是 v1）——
-    // 老客户端读不到 v2，广场内容的恢复/下线不惊动存量。
-    crate::relay::remote_config::load_plaza_config();
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
         .user_agent("LoongPort/relay-directory")
@@ -1116,9 +1108,7 @@ async fn perform_refresh(kind: LeaderboardKind) -> Result<RelayLeaderboard, AppE
 }
 
 fn read_fresh(kind: LeaderboardKind) -> Option<RelayLeaderboard> {
-    let config = // 展示策略走 v2 plaza（blocked 从那里来；sites/白名单源仍是 v1）——
-    // 老客户端读不到 v2，广场内容的恢复/下线不惊动存量。
-    crate::relay::remote_config::load_plaza_config();
+    let config = crate::relay::remote_config::load_cached().unwrap_or_default();
     let cached = read_cache(kind)?;
     is_fresh_for(&cached, chrono::Utc::now().timestamp(), &config)
         .then(|| apply_policy_to_cached(cached, &config))

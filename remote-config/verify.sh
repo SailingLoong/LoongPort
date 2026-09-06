@@ -32,8 +32,11 @@ if [ ! -f "$RS" ]; then
 fi
 
 # 三个事实都从代码里取，不手抄。
-CONFIG_URL=$(rc_const CONFIG_URL "$RS")
-SIGNATURE_URL=$(rc_const SIGNATURE_URL "$RS")
+# v1 世代已冻结（2026-09-06 起客户端打 /v2/，见 remote_config.rs 的 CONFIG_URL）。
+# 这份脚本持续验的是**老世代线上那份**仍然完好；现行世代的线上验证走
+# ./verify-v2-config.sh。
+CONFIG_URL=$(rc_const LEGACY_V1_CONFIG_URL "$RS")
+SIGNATURE_URL=$(rc_const LEGACY_V1_SIGNATURE_URL "$RS")
 PUBKEY_HEX=$(rc_const PUBLIC_KEY_HEX "$RS")
 
 echo "配置端点：${CONFIG_URL}"
