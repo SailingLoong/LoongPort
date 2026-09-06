@@ -553,6 +553,14 @@ pub struct AppSettings {
     /// 一边用鑫旺的 4K 分组生图。见 [`AppType::CodexImage`](crate::app_config::AppType::CodexImage)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_codex_image: Option<String>,
+    /// 是否把生图工具注册进 codex / claude / gemini（MCP）。`None` = 开（默认）。
+    ///
+    /// 关掉它的是「只想直接生图」的用户：工具只要注册着，其描述就占宿主每次会话的
+    /// 上下文、模型还可能主动调用 —— 他们要的是**根本不注册**。开关只管注册，
+    /// 不管 App 内直接生图（生图页「生成」视图永远可用，见 `relay::imagegen`）。
+    /// 生效点在 `relay::imagegen_mcp::sync_registration`（幂等，切开关即对齐）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imagegen_mcp_enabled: Option<bool>,
     /// 当前 Gemini 供应商 ID（本地存储，优先于数据库 is_current）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_gemini: Option<String>,
@@ -668,6 +676,7 @@ impl Default for AppSettings {
             current_provider_claude_desktop: None,
             current_provider_codex: None,
             current_provider_codex_image: None,
+            imagegen_mcp_enabled: None,
             current_provider_gemini: None,
             current_provider_grokbuild: None,
             current_provider_opencode: None,
@@ -1135,6 +1144,23 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
         AppType::Hermes => settings.current_provider_hermes.clone(),
         AppType::Pi => None,
     }
+}
+
+/// 生图工具是否注册进 codex / claude / gemini（MCP）。缺省 = 开：
+/// 升级用户的注册行为不变，这是一个明确的产品决定，不是随手默认。
+pub fn get_imagegen_mcp_enabled() -> bool {
+    settings_store()
+        .read()
+        .map(|settings| settings.imagegen_mcp_enabled.unwrap_or(true))
+        .unwrap_or(true)
+}
+
+/// 设置生图 MCP 注册开关并落盘。注册状态的对齐由调用方触发
+/// （`relay_set_imagegen_mcp_enabled` 命令里跟着跑一次 `sync_registration`）。
+pub fn set_imagegen_mcp_enabled(enabled: bool) -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        settings.imagegen_mcp_enabled = Some(enabled);
+    })
 }
 
 /// 设置指定应用类型的当前供应商 ID（保存到本地 settings）

@@ -811,9 +811,8 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
 
   return (
     <>
-      {/* 生图页顶部的说明。**只在这一页出现** —— 见 `ImageTabNotice` 的文档：
-          它是唯一一个不能独立使用的标签，那件事必须写出来。 */}
-      {isImageTab && <ImageTabNotice empty={false} />}
+      {/* 生图页的顶部说明与「生成 / 档位」分段在外层的 `ImageTabPage`（本组件被它
+          内嵌为「档位」视图）；这里只剩空态那一支在用 `ImageTabNotice`。 */}
       <div className="mb-3 flex justify-end">
         <Button
           type="button"

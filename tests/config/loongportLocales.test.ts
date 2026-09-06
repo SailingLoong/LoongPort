@@ -354,6 +354,30 @@ const requiredKeys = [
   "modelVerification.failure.modelUnavailable",
   "modelVerification.failure.cancelled",
   "modelVerification.failure.invalidResponse",
+  // 生图页：说明区（含 MCP 注册开关）与「生成」视图（直接生图 + 画廊）。
+  // 开关那两条是知情前提（关了会怎样 / 直接生图受不受影响），退化成 key 名
+  // 等于让人盲拨一个不知道后果的开关。
+  "imageTab.companionNotice",
+  "imageTab.companionDetail",
+  "imageTab.mcpSwitchLabel",
+  "imageTab.mcpSwitchHint",
+  "imageTab.emptyTitle",
+  "imageTab.emptyBody",
+  "imagegenPlayground.view.generate",
+  "imagegenPlayground.view.tiers",
+  "imagegenPlayground.tierLabel",
+  "imagegenPlayground.noTier",
+  "imagegenPlayground.noTierHint",
+  "imagegenPlayground.promptPlaceholder",
+  "imagegenPlayground.sizeLabel",
+  "imagegenPlayground.generate",
+  "imagegenPlayground.generating",
+  "imagegenPlayground.generateHint",
+  "imagegenPlayground.generatedToast",
+  "imagegenPlayground.galleryTitle",
+  "imagegenPlayground.galleryLoading",
+  "imagegenPlayground.galleryEmpty",
+  "imagegenPlayground.reveal",
 ] as const;
 
 type Translations = Record<string, unknown>;

@@ -110,6 +110,7 @@ import UnifiedSkillsPanel, {
 } from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
+import { ImageTabPage } from "@/components/relay/ImageTabPage";
 import { RelaySection } from "@/components/relay/RelaySection";
 import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
 import { CrowdNoticeDialog } from "@/components/relay/CrowdNoticeDialog";
@@ -1177,13 +1178,20 @@ function App() {
                         {/* LoongPort 的「中转站 × 分组」区，装在手工 provider 列表**上方**。
                         它自带全部状态（见 RelaySection 的文档）—— 这里只挂一行，
                         不把 relay 的逻辑摊进这个上游文件。
+                        生图页（codex-image）多一层外壳：ImageTabPage 提供
+                        「生成 / 档位」分段（生成 = App 内直接生图），档位视图内嵌
+                        同一个 RelaySection；其余 app 直接渲染 RelaySection。
                         它内部已按「中转站 / 官方 API」两大块渲染；两块与下面
                         「其他」的添加入口统一收在顶栏大「+」（点开是 AddHubPage
                         聚合页，三标签就地切换）。 */}
-                        <RelaySection
-                          appId={activeApp}
-                          onOpenAddHub={handleOpenAddHub}
-                        />
+                        {activeApp === "codex-image" ? (
+                          <ImageTabPage onOpenAddHub={handleOpenAddHub} />
+                        ) : (
+                          <RelaySection
+                            appId={activeApp}
+                            onOpenAddHub={handleOpenAddHub}
+                          />
+                        )}
 
                         {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口在顶栏 +。
                         生图页（codex-image）保持改动前的形态，不套三大块布局。 */}

@@ -47,4 +47,7 @@ export type {
   ProbeResult,
   TierInfo,
   SwitchTierResult,
+  ImagegenImageRef,
+  ImagegenGenerateResult,
+  ImagegenGalleryEntry,
 } from "./relay";

@@ -923,7 +923,7 @@
     "claudeDesktop": "Claude Desktop",
     "claude-desktop": "Claude Desktop",
     "codex": "Codex",
-    "codex-image": "Codex 生图",
+    "codex-image": "生图",
     "gemini": "Gemini",
     "grokbuild": "Grok Build",
     "opencode": "OpenCode",
@@ -3439,11 +3439,31 @@
       "editConfirmMessage": "保存后，LoongPort 将不再覆盖此服务商账号在当前平台的手动修改；后续重新应用密钥配置时只会更新 API 密钥。\n\n如需撤销修改，请选择“恢复默认配置”。API 密钥会保留。"
     },
     "imageTab": {
-      "companionNotice": "图像生成需要与 Codex 或 Claude 配合使用。",
-      "companionDetail": "图像生成使用此页面选择的接入配置；聊天使用 Codex 或 Claude 页面选择的接入配置，两者互不影响。",
-      "howTo": "切换图像生成接入配置后无需重启，下次生成起生效。首次创建图像生成接入配置后，请新开终端以加载图像生成功能。",
+      "companionNotice": "本页可直接生图，也可在 CLI 对话中生图",
+      "companionDetail": "生成视图直接出图，不经过 CLI 会话；生图与聊天各用各的接入配置，切换后下次生成即生效。",
       "emptyTitle": "尚无图像生成接入配置",
-      "emptyBody": "创建接入配置时，LoongPort 会识别仅支持 gpt-image 模型的分组。若中转站未提供这类分组，本页将保持为空。"
+      "emptyBody": "创建接入配置时，LoongPort 会识别仅支持 gpt-image 模型的分组。若中转站未提供这类分组，本页将保持为空。",
+      "mcpSwitchLabel": "在 Codex / Claude 对话中提供生图工具",
+      "mcpSwitchHint": "关闭后不再注册到 CLI（本页直接生图不受影响）；首次开启后需新开终端加载"
+    },
+    "imagegenPlayground": {
+      "view": {
+        "generate": "生成",
+        "tiers": "接入配置"
+      },
+      "tierLabel": "当前接入配置",
+      "noTier": "未选择",
+      "noTierHint": "还没有生图接入配置；仅支持 gpt-image 模型的分组会自动产生。",
+      "promptPlaceholder": "描述要生成的图片…",
+      "sizeLabel": "尺寸",
+      "generate": "生成",
+      "generating": "生成中…",
+      "generateHint": "生图较慢，通常需要半分钟到两分钟",
+      "generatedToast": "已生成 {{count}} 张（{{model}}）",
+      "galleryTitle": "生成记录",
+      "galleryLoading": "加载中…",
+      "galleryEmpty": "还没有生成过图片",
+      "reveal": "在文件夹中显示"
     },
     "siteConfig": {
       "entry": "导入站点配置",

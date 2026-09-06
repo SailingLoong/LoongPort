@@ -1,6 +1,11 @@
 //! 生图 MCP server：让 codex / claude 等 CLI 在**对话里**生图，用的是 LoongPort 已经
 //! 备好的中转站档位。
 //!
+//! 本模块只做 MCP 的事：注册生命周期、stdio JSON-RPC 协议、把工具调用翻译成对
+//! [`super::imagegen`]（生图核心：档位现读 → 调 `/v1/images/generations` → 落盘）
+//! 的调用。**生图实现不在两处** —— App 内直接生图（生图页「生成」视图，不消耗
+//! 任何 CLI 会话上下文）与这里是同一个核心的两个入口。
+//!
 //! # 为什么要有它（而不是让用户把档位的 `model` 改成 `gpt-image-2`）
 //!
 //! sub2api 上有两条生图链路，**它们要求上游提供的模型不同**：
@@ -8,13 +13,13 @@
 //! | 链路 | 端点 | 上游要能提供 |
 //! |---|---|---|
 //! | codex 主模型设成 `gpt-image-2` | `/v1/responses` | **`gpt-5.4-mini`**（见下） |
-//! | 本模块 | `/v1/images/generations` | `gpt-image-2` 本身 |
+//! | 本模块 / App 内直接生图 | `/v1/images/generations` | `gpt-image-2` 本身 |
 //!
 //! 第一条那个反直觉的要求来自上游的归一化：`normalizeOpenAIResponsesImageOnlyModel`
 //! 会把 image-only 主模型的请求改写成「文本主模型 + `image_generation` tool」的形状，
 //! 而它写死的那个文本主模型是 `gpt-5.4-mini`（sub2api `service/openai_images.go` 的
 //! `openAIImagesResponsesMainModel`）。⇒ 上游只挂了生图模型的中转站上，第一条**必然
-//! 502**（实测鑫旺 Neko API 的两个生图分组：`sync-models` 问上游只回 `gpt-image-2`）。
+//! 502**（实测有站点的两个生图分组：`sync-models` 问上游只回 `gpt-image-2`）。
 //!
 //! 而第二条在同一个档位上实测 200 出图。⇒ 走这条。
 //!
@@ -42,20 +47,20 @@
 //! 落在 `~/.codex/config.toml` 里，并且**档位刷新换了 sk 之后就失效**（用户看到的是
 //! 生图突然 401，而配置文件看起来一切正常）。
 //!
-//! 所以配置里只写 `--tier <provider_id>`，sk 在**每次启动时**从
-//! `~/.loongport/loongport.db` 现读。provision 换了 sk 下次生图自动是新的，不需要
-//! 任何同步逻辑 —— 这也是为什么这件事只有 LoongPort 做得漂亮：库在我们手里。
+//! 所以 sk 在**每次调用时**从 LoongPort 库里现读（见 [`super::imagegen`]）。
+//! provision 换了 sk 下次生图自动是新的，不需要任何同步逻辑 —— 这也是为什么这件事
+//! 只有 LoongPort 做得漂亮：库在我们手里。
 
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
 
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
-use crate::app_config::{AppType, McpApps, McpServer};
+use crate::app_config::{McpApps, McpServer};
 use crate::error::AppError;
 use crate::services::{McpService, ProviderService};
 use crate::store::AppState;
+
+use super::imagegen;
 
 /// 生图 MCP 在统一 MCP 数据源里的稳定 id。
 pub const IMAGEGEN_MCP_ID: &str = "loongport-imagegen";
@@ -63,19 +68,33 @@ pub const IMAGEGEN_MCP_ID: &str = "loongport-imagegen";
 /// 启动 MCP server 模式的命令行开关。
 pub const IMAGEGEN_MCP_FLAG: &str = "--mcp-image-gen";
 
-/// 让生图 MCP 注册状态与生图档位保持一致，并投影到支持它的 CLI。
+/// 让生图 MCP 注册状态与生图档位、用户开关保持一致，并投影到支持它的 CLI。
 ///
-/// 这是生图 MCP 生命周期的唯一入口。provision、删站、应用启动与进入生图页都调用它；
-/// 函数本身幂等，因此这些入口可以按各自生命周期无条件对齐。
+/// 这是生图 MCP 生命周期的唯一入口。provision、删站、应用启动、进入生图页与切换
+/// 「在 CLI 对话中提供生图工具」开关都调用它；函数本身幂等，因此这些入口可以按
+/// 各自生命周期无条件对齐。
+///
+/// 注销的判据有两个，满足其一即撤：
+///
+/// 1. 生图栏里没有托管档位了（没有可绑定的东西）；
+/// 2. 用户关了开关（`settings::imagegen_mcp_enabled`，见那里的文档：只要注册着，
+///    工具描述就占宿主每次会话的上下文 —— 只想直接生图的用户要的是**根本不注册**）。
 pub fn sync_registration(state: &AppState) -> Result<(), AppError> {
-    let has_image_tiers = ProviderService::list(state, AppType::CodexImage)?
+    let has_image_tiers = ProviderService::list(state, crate::app_config::AppType::CodexImage)?
         .values()
         .any(|provider| crate::relay::is_managed(&provider.id));
 
-    if !has_image_tiers {
+    let mcp_enabled = crate::settings::get_imagegen_mcp_enabled();
+
+    if !has_image_tiers || !mcp_enabled {
+        let reason = if !has_image_tiers {
+            "生图栏里没有档位了"
+        } else {
+            "用户关闭了「在 CLI 对话中提供生图工具」"
+        };
         let removed = McpService::delete_server(state, IMAGEGEN_MCP_ID)?;
         if removed {
-            log::info!("生图栏里没有档位了，撤掉生图 MCP 记录");
+            log::info!("{reason}，撤掉生图 MCP 记录");
         }
         return Ok(());
     }
@@ -105,7 +124,7 @@ fn registration_server(exe: &str) -> McpServer {
             ..Default::default()
         },
         description: Some(
-            "用 LoongPort「生图」标签页里当前那个档位生图（gpt-image 系列）。\
+            "用 LoongPort「生图」标签页里当前那个接入配置生图（gpt-image 系列）。\
              由 LoongPort 自动维护，密钥不写进 CLI 配置 —— 换档位也不必重启 CLI。"
                 .to_string(),
         ),
@@ -146,568 +165,8 @@ macro_rules! diag {
     }};
 }
 
-/// 走哪个模型生图。
-///
-/// **不是常量而是从档位配置里读**：档位的 `model` 已经由 provision 写成了该分组真实的
-/// `gpt-image-*`（见 [`super::provision::pick_model`]），中转站上 `gpt-image-3` 那天
-/// 自动跟上。读不出来时才回落到这个值。
-const FALLBACK_IMAGE_MODEL: &str = "gpt-image-2";
-
-/// 出图默认尺寸。
-///
-/// `gpt-image-2` 支持 `auto` 与任意合法 `WIDTHxHEIGHT`，但**不写 `auto`**：实测同一个
-/// 请求给 `1024x1024` 出的是 1254×1254（上游自己会调），而给 `auto` 时行为更不可预期。
-/// 给一个明确值让"用户没说尺寸"这件事有确定的含义。
-const DEFAULT_SIZE: &str = "1024x1024";
-
 /// MCP 协议版本。跟着 codex-cli 0.146 实际发的那个走。
 const PROTOCOL_VERSION: &str = "2024-11-05";
-
-/// 一张生成好的图。
-struct GeneratedImage {
-    /// 落盘位置。
-    path: PathBuf,
-    /// 图片字节的 base64。**要回给宿主当 image content block** —— 见 [`handle_tool_call`]。
-    b64: String,
-    /// 魔数嗅探出的真实格式（与文件扩展名同源）。url 变体可能下发 jpeg / webp，
-    /// mimeType 声明错了宿主可能渲染不了。
-    mime: &'static str,
-}
-
-/// 这次运行绑定的档位。
-struct Tier {
-    /// 明文 sk。
-    api_key: String,
-    /// 形如 `https://api.example.com/v1`（**末尾无斜杠**，见 [`images_url`]）。
-    base_url: String,
-    /// 生图模型名，取自档位配置里的 `model`。
-    model: String,
-    /// 档位显示名，只用于日志与 `image_service_status`。
-    display_name: String,
-}
-
-/// 这个进程该用哪个数据目录。
-///
-/// ⚠️ **不能直接用 [`crate::config::get_app_config_dir`]**（review 抓出）：它查的是
-/// `app_store` 里那个**进程内缓存**，而缓存只由 `refresh_app_config_dir_override`
-/// （要 `AppHandle`）填 —— MCP 进程在 `run()` 之前就分流走了，没有 Tauri app ⇒
-/// 缓存永远空 ⇒ 设过「LoongPort 配置目录」的用户会读到默认目录下的旧库（或读不到库），
-/// 两种都不报错。
-///
-/// 所以走 [`crate::app_store::read_app_config_dir_override_without_tauri`]：
-/// 直接读那个 store 文件。没设过覆盖时回落到默认目录 —— 与主程序一致。
-fn app_dir() -> PathBuf {
-    crate::app_store::read_app_config_dir_override_without_tauri()
-        .unwrap_or_else(crate::config::get_app_config_dir)
-}
-
-/// 从 LoongPort 库里读出某个档位的 sk / base_url / model。
-///
-/// ## 为什么直接读 sqlite 而不复用 `ProviderService`
-///
-/// 那一层要 `AppState`（Tauri 托管的状态），而这个进程**没有 Tauri app** —— 它在
-/// `run()` 之前就分流走了。为一个只读三个字段的场景把 Tauri 运行时拉起来是本末倒置。
-///
-/// 代价是这里对 `providers` 表的形状有了第二处依赖。可接受：读的是 `id` /
-/// `settings_config` 这两个最稳定的列（`settings_config` 的结构还共用
-/// [`super::provision::extract_api_key`]，没有另写一份解析）。
-/// 读出**当前**该用哪个档位生图。
-///
-/// ⚠️ **每次生图都重新调它**，不缓存 —— 那正是「切生图档位不用重启 codex」的实现：
-/// 用户在 LoongPort 里换了档位，下一次工具调用就读到新的。缓存一次就把这个好处抵消了。
-///
-/// 没有任何生图档位被启用时返回 `Err`，文案引导用户去 LoongPort 里选一个 ——
-/// **不自动挑一个**：用户可能压根不想用生图（他那个站可能没有生图分组），
-/// 替他选一个等于替他决定花钱。
-fn load_current_tier() -> Result<Tier, String> {
-    let provider_id = current_image_tier_id()?;
-    load_tier(&provider_id)
-}
-
-/// 「没选生图档位」时给用户的话。定义一次，两个调用点共用。
-const NO_IMAGE_TIER_HINT: &str =
-    "还没有选定用哪个档位生图。请打开 LoongPort 的「Codex 生图」标签页，在一个档位上点「启用」。";
-
-/// 当前该用哪个档位生图 = `codex-image` 栏的当前项。
-///
-/// ## 为什么与聊天档位共用同一套机制
-///
-/// 「哪个档位生图」和「哪个档位聊天」是**同一类事实**（当前项），只是分属两栏。
-/// 上一版为它另存了一个 `settings` 表的键（`loongport_current_image_tier`），那等于
-/// 同一个概念有两套实现 —— 而分栏之后 `providers.is_current` 天然就是每栏一份，
-/// 那个键成了纯粹的重复。已删除，不留兼容读取：它只在测试期存在过。
-///
-/// ## 两层来源，与主程序 `get_effective_current_provider` 严格对齐
-///
-/// | 层 | 位置 | 优先级 |
-/// |---|---|---|
-/// | 设备级 | `~/.loongport/settings.json` 的 `currentProviderCodexImage` | 高 |
-/// | 库 | `providers.is_current`（`app_type='codex-image'`） | 低（fallback） |
-///
-/// ⚠️ **两层都要读**：主程序 `switch` 时两处都写（`settings::set_current_provider` 与
-/// `db.set_current_provider`），所以只读 DB 那层在多数情况下也对。但设备级那层的存在
-/// 意义正是「这台机器上用哪个」—— 云同步把另一台机器的 `is_current` 带过来时，本机
-/// settings 才是对的。只读 DB 会让生图用错档位，而用户看界面（它读的是同一套两层逻辑）
-/// 会觉得没问题。
-///
-/// ⚠️ **每次生图都重新调它**，不缓存 —— 那正是「切生图档位不用重启 codex」的实现：
-/// 用户在 LoongPort 里换了档位，下一次工具调用就读到新的。缓存一次就把这个好处抵消了。
-///
-/// 一个都没有时返回 `Err`，文案引导用户去选 —— **不自动挑一个**：用户可能压根不想生图
-/// （他那个站可能没有生图分组），替他选一个等于替他决定花钱。
-fn current_image_tier_id() -> Result<String, String> {
-    let db_path: PathBuf = app_dir().join(crate::config::DB_FILE_NAME);
-    let conn = open_readonly(&db_path)?;
-
-    // 第一层：设备级 settings.json。读不到 / 解析失败都只是「没有覆盖」，不是错误。
-    if let Some(id) = device_level_image_tier() {
-        // 与主程序同一条校验：本机记的那个档位得真的还在库里，否则回落到 DB
-        // （`get_effective_current_provider` 在那种情况下会清掉本机的记录）。
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM providers WHERE id = ?1 AND app_type = ?2",
-                rusqlite::params![&id, IMAGE_APP_TYPE],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if exists > 0 {
-            return Ok(id);
-        }
-    }
-
-    // 第二层：库里的 is_current。
-    let value: Option<String> = conn
-        .query_row(
-            // ⚠️ **`ORDER BY id LIMIT 1`** —— 不省。
-            //
-            // 正常情况下这一栏只有一行 `is_current = 1`（`set_current_provider` 会先清
-            // 其余的）。但「正常情况」是个不变量，不是保证：迁移、云同步导入、外部改库
-            // 都可能留下两行，而 review 的探针实测抓到过一次（迁移换栏时带过去了 codex
-            // 栏的 is_current）。那时裸 `query_row` 拿的是 SQLite 的返回顺序 ⇒
-            // **用户选 4K 档、出的是 1K 的图，且换台机器结果不同、无法复现**。
-            //
-            // 排序不能修正「选错了哪一个」，但能让它**确定** —— 一个稳定的错比一个
-            // 随机的错好查一个量级。真正的修正在迁移那侧（清零 is_current）。
-            "SELECT id FROM providers WHERE app_type = ?1 AND is_current = 1 \
-             ORDER BY id LIMIT 1",
-            [IMAGE_APP_TYPE],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("读取当前生图档位失败: {e}"))?;
-
-    value
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| NO_IMAGE_TIER_HINT.to_string())
-}
-
-/// 生图栏的 `app_type` 字符串。**从枚举取，不写字面量** —— 那个值同时用在
-/// 三条 SQL 与写入侧，各写一遍迟早分叉，而症状是「切了没反应」。
-const IMAGE_APP_TYPE: &str = crate::app_config::AppType::CODEX_IMAGE_STR;
-
-/// 读设备级 settings.json 里记的生图档位。
-///
-/// ## 为什么不复用 `crate::settings::get_current_provider`
-///
-/// 那一层走一个进程内的 `OnceLock` 缓存（`settings_store()`），而它是在**主程序**
-/// 启动时填的。这个进程没有那段启动流程 ⇒ 拿到的是 `Default`（全 `None`）⇒
-/// 恒返回 `None`，而那是个静默的错误答案：生图会一直用 DB 那层，云同步场景下用错档位。
-///
-/// 所以直接读文件。路径与 `AppSettings::settings_path()` 必须一致 ——
-/// 已加闸 `the_settings_path_matches_the_main_programs`。
-fn device_level_image_tier() -> Option<String> {
-    let path = crate::config::get_home_dir()
-        .join(crate::config::APP_DIR_NAME)
-        .join("settings.json");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    // 键名由 `AppSettings` 的 `#[serde(rename_all = "camelCase")]` 决定。
-    let id = json.get("currentProviderCodexImage")?.as_str()?.trim();
-    (!id.is_empty()).then(|| id.to_string())
-}
-
-/// 只读打开数据库。
-///
-/// 只读是必须的：这个进程与主程序可能同时在跑，绝不能拿写锁。
-fn open_readonly(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
-    if !db_path.exists() {
-        return Err(format!(
-            "找不到 LoongPort 数据库（{}）。请先启动 LoongPort 并登录中转站。",
-            db_path.display()
-        ));
-    }
-    rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(|e| format!("打开数据库失败: {e}"))
-}
-
-fn load_tier(provider_id: &str) -> Result<Tier, String> {
-    let db_path: PathBuf = app_dir().join(crate::config::DB_FILE_NAME);
-    let conn = open_readonly(&db_path)?;
-
-    // ⚠️ **`app_type` 必须参与查询**（review 抓出）—— `providers` 的主键是
-    // `(id, app_type)`，一个 `provider_id` **真的会有多行**：实测维护者库里
-    // `loongport-vendor-…` 那条有 6 行（claude / claude-desktop / codex / hermes /
-    // openclaw / opencode）。
-    //
-    // 不带这个条件的后果：`query_row` 拿到的是 SQLite 先返回的那一行，若是 claude 那行，
-    // 下面 `extract_api_key(.., Codex)` 读不出 `auth.OPENAI_API_KEY` ⇒ 报
-    // 「配置里读不出密钥，请点获取密钥重新生成」—— 而**那条建议永远修不好它**
-    // （重新 provision 只会再造出同样的多行），且成败取决于返回顺序、无法复现。
-    //
-    // 取 `codex-image` 是因为**生图档位就存在那一栏**（provision 按
-    // `provision::image_tier_app_type` 分流）。取 codex 会查不到，症状是
-    // 「档位已经不在了」而它明明在界面上。
-    let (name, settings_raw): (String, String) = conn
-        .query_row(
-            "SELECT name, settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
-            rusqlite::params![provider_id, IMAGE_APP_TYPE],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|e| match e {
-            // 标记指向的档位没了（用户删了账号 / 中转站下架了那个分组）。
-            // ⚠️ **没有任何东西会自动清掉这个悬空的 `is_current`**（review 抓出）。
-            // 设备级那层读的时候会校验存在性并跳过（见 `current_image_tier_id`），
-            // 但库里那一行 `is_current = 1` 会一直留着 —— 删档位的路径（`remove_site_impl` /
-            // `prune_stale_tiers` / 用户手工删）都只删记录，不管这个标记。
-            //
-            // 不为它加一条清理：`ProviderService::delete` 删掉那行之后
-            // `is_current` 自然就查不到了（它是那一行上的列，不是一个独立指针）。
-            // 走到这条错误分支说明记录**已经不在**，所以下次读就会落到
-            // 「还没有选定」那条提示上 —— 状态自然收敛，不需要额外的清理逻辑。
-            //
-            // 所以这里只要把话说清楚：让用户去重选，而不是去「获取密钥」。
-            rusqlite::Error::QueryReturnedNoRows => format!(
-                "生图档位 {provider_id} 已经不在了（可能被删除，或中转站下架了那个分组）。请打开 LoongPort 的「Codex 生图」标签页，在一个档位上点「启用」。"
-            ),
-            other => format!("读取档位失败: {other}"),
-        })?;
-
-    let settings: Value =
-        serde_json::from_str(&settings_raw).map_err(|e| format!("档位配置解析失败: {e}"))?;
-
-    // sk 的位置按 CLI 分派，复用那一处定义 —— 硬编码 `auth.OPENAI_API_KEY` 会让将来
-    // 挂到 claude 档位上时静默取不到（那个在 `env.ANTHROPIC_AUTH_TOKEN`）。
-    let api_key = super::provision::extract_api_key(&settings, &crate::app_config::AppType::Codex)
-        .ok_or_else(|| {
-            format!(
-                "档位「{name}」的配置里读不出密钥。请在 LoongPort 里对它点「获取密钥」重新生成。"
-            )
-        })?;
-
-    let config_toml = settings
-        .get("config")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("档位「{name}」的配置里没有 config.toml 内容"))?;
-
-    let base_url = extract_toml_string(config_toml, "base_url")
-        .ok_or_else(|| format!("档位「{name}」的配置里没有 base_url"))?;
-    // 读不出 model 不是错误：老档位（本功能上线前 provision 的）可能没有生图模型名，
-    // 回落到默认值让它仍然能用。
-    let model = extract_toml_string(config_toml, "model").unwrap_or_else(|| {
-        diag!("档位「{name}」读不出 model，生图回落 {FALLBACK_IMAGE_MODEL}");
-        FALLBACK_IMAGE_MODEL.to_string()
-    });
-
-    Ok(Tier {
-        api_key,
-        base_url: base_url.trim_end_matches('/').to_string(),
-        model,
-        display_name: name,
-    })
-}
-
-/// 从 config.toml 文本里抠一个顶层或表内的 `key = "value"`。
-///
-/// **不引 toml 解析器**：这个进程要尽量轻，而要读的两个键都是 `key = "值"` 这种最简
-/// 形状（由 [`super::provision::codex_config_toml`] 生成，形状我们自己定的）。
-///
-/// ⚠️ 取**第一个**匹配。`base_url` 在生成的配置里只出现一次；`model` 则要小心 ——
-/// `model_provider` / `model_reasoning_effort` 都以 `model` 开头，所以必须匹配到
-/// 等号前的完整键名（下面 `split_once('=')` + `trim` 后严格相等）。
-fn extract_toml_string(toml_text: &str, key: &str) -> Option<String> {
-    for line in toml_text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        let Some((lhs, rhs)) = line.split_once('=') else {
-            continue;
-        };
-        if lhs.trim() != key {
-            continue;
-        }
-        let value = rhs.trim();
-        // 只认双引号字符串（生成器只产出这种）。
-        let unquoted = value.strip_prefix('"')?.strip_suffix('"')?;
-        if unquoted.is_empty() {
-            return None;
-        }
-        return Some(unquoted.to_string());
-    }
-    None
-}
-
-/// 生图端点的完整 URL。
-///
-/// `base_url` 已经带 `/v1`（[`super::api::codex_base_url`] 保证），所以这里只接
-/// `/images/generations`。
-fn images_url(base_url: &str) -> String {
-    format!("{base_url}/images/generations")
-}
-
-/// 出的图存哪。
-///
-/// 放 `~/.loongport/generated_images/`：与数据库同目录，用户找得到，也不会污染他当前
-/// 的工作目录（Agent 常在用户仓库里跑，往那里丢文件会进 git status）。
-fn output_dir() -> PathBuf {
-    // 同样走 `app_dir()` —— 用户把数据目录挪走了，图也该跟着落在那里，
-    // 而不是散在默认目录（他会找不到）。
-    app_dir().join("generated_images")
-}
-
-/// 调一次生图，返回落盘后的文件路径。
-async fn generate_image(
-    tier: &Tier,
-    prompt: &str,
-    size: Option<&str>,
-) -> Result<Vec<GeneratedImage>, String> {
-    let client = reqwest::Client::builder()
-        // 生图慢（实测 30-90s），默认超时会在出图前就断。
-        //
-        // **240 而不是 300**：codex 的 MCP 工具超时默认正好是 300s
-        // （`codex-rs/codex-mcp/src/rmcp_client.rs` 的 `DEFAULT_TOOL_TIMEOUT`，
-        // 本机 0.146 实测：310s 的调用在 300.16s 被它切断）。两边同为 300 时，
-        // 真的超时那次是宿主先报它自己那句泛泛的超时，我们这句「请求生图接口失败」
-        // 反而抢不到 —— 留 60s 余量让**更具体的那条**错误信息先到用户眼前。
-        .timeout(std::time::Duration::from_secs(240))
-        .build()
-        .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
-
-    // ⚠️ **有意不发 `response_format`** —— 这里曾经加过 `"b64_json"`，是个过度修正
-    // （第二轮 review 抓出）：
-    //
-    // - 官方 `/v1/images/generations` 对 `gpt-image-*` 带这个字段**直接 400**
-    //   （`Unknown parameter: 'response_format'` —— 它是给已下线的 `dall-e-*` 留的）。
-    // - sub2api 把请求体**原样透传**给上游（只改 `model`，见其
-    //   `rewriteOpenAIImagesModel`）⇒ 上游是 API-key 类账号时那个 400 会真的打回来。
-    //
-    // ⚠️ **本地测出 200 不能证明它安全**：调度器挑到 OAuth 类账号时该字段被丢弃，
-    // 于是同一个档位在不同的调度结果下表现不同。不发它则两条路都对。
-    //
-    // ## 响应形态：`b64_json` 与 `url` 两种都要认（2026-09-05 实测修正）
-    //
-    // 官方 API 的 `gpt-image-*` 只回 `b64_json`，但**中转站不一定**：实测有 new-api
-    // 站点对 `gpt-image-2` 回 `data[].url`（另一个模型才回 b64），其官方教程也明确
-    // 「两种形态都可能出现、客户端都要兼容」。只认 b64 的解析在这种站点上必报
-    // 「data 项里没有 b64_json」—— [`read_image_bytes`] 对两种形态都处理，url 走下载。
-    let body = json!({
-        "model": tier.model,
-        "prompt": prompt,
-        "n": 1,
-        "size": size.unwrap_or(DEFAULT_SIZE),
-    });
-
-    let resp = client
-        .post(images_url(&tier.base_url))
-        .bearer_auth(&tier.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求生图接口失败: {e}"))?;
-
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取生图响应失败: {e}"))?;
-
-    if !status.is_success() {
-        // 把服务端的错误原文带给用户 —— 生图失败的原因几乎全在服务端
-        // （余额不足、分组不允许生图、上游没挂这个模型），自己编一句会掩盖它。
-        return Err(format!(
-            "生图失败（HTTP {}）：{}",
-            status.as_u16(),
-            first_line(&text)
-        ));
-    }
-
-    let parsed: Value =
-        serde_json::from_str(&text).map_err(|e| format!("生图响应解析失败: {e}"))?;
-    let items = parsed
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "生图响应里没有 data 数组".to_string())?;
-
-    let dir = output_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
-
-    let mut saved = Vec::new();
-    for (idx, item) in items.iter().enumerate() {
-        let bytes = read_image_bytes(&client, item).await?;
-        let (ext, mime) = image_format(&bytes);
-
-        // 文件名带序号与内容哈希 —— **不带时间戳**：同一秒内多张图会互相覆盖，
-        // 内容哈希则天然唯一且可复现。扩展名来自魔数嗅探，不是写死 png
-        // （url 变体可能下发 jpeg / webp）。
-        let name = format!("gpt-image-{}-{idx}.{ext}", short_hash(&bytes));
-        let path = dir.join(name);
-        std::fs::write(&path, &bytes).map_err(|e| format!("写图片文件失败: {e}"))?;
-        // 重新编码成 base64 —— 下面要作为 MCP 的 image content block 回给宿主，
-        // 让模型**真的看到图**而不只是拿到一个路径。见 `handle_tool_call`。
-        saved.push(GeneratedImage {
-            path,
-            b64: base64_encode(&bytes),
-            mime,
-        });
-    }
-
-    if saved.is_empty() {
-        return Err("生图接口没有返回任何图片".into());
-    }
-    // 顺手修剪 —— 见 `prune_old_images`。**把这次刚写的排除在外**：它们的 mtime 是最新的，
-    // 正常不会被当成「最旧」删掉，但目录恰好满员时没有必要让「刚生成的图」参与这场竞争
-    // （返回给宿主的路径必须还在）。失败只记一行：修剪不成功不影响这次出图。
-    let just_written: Vec<&std::path::Path> = saved.iter().map(|i| i.path.as_path()).collect();
-    if let Err(e) = prune_old_images(&dir, &just_written) {
-        diag!("清理旧图片失败（不影响本次生成）: {e}");
-    }
-    Ok(saved)
-}
-
-/// 出图目录最多留多少张。
-///
-/// 一张 1024² 的 PNG 实测 0.7–2 MB，200 张约 150–400 MB —— 对「随手生成的中间产物」
-/// 这个量级够用，也不至于让用户某天发现家目录里躺了几十 G。
-///
-/// **不按时间修剪**：用户可能几个月才生一次图，按天数删会把他唯一那几张删掉；
-/// 而按数量删的语义清楚 ——「留最近的 N 张」。
-const MAX_KEPT_IMAGES: usize = 200;
-
-/// 把出图目录修剪到 [`MAX_KEPT_IMAGES`] 张，删最旧的。
-///
-/// ## 为什么要有它
-///
-/// 文件名是内容哈希，所以同图不会重复占位；但不同 prompt 会一直堆积，而**没有任何
-/// 东西会清它** —— 那就是「知情引入却没留痕的占位」，属技术债（本函数就是那笔债的偿还）。
-///
-/// 按 mtime 排序删最旧的。读不到 mtime 的排最前（当最旧）—— 那种文件多半是异常留下的。
-///
-/// ## 并发是安全的
-///
-/// codex 与 claude 各起一个 MCP 进程时，两边可能同时修剪。这不会互相删掉对方的图：
-/// 判据是 mtime，而另一个进程**刚写的图 mtime 是最新的**，排在末尾。删不掉的（已被
-/// 对方删了）只记一行，不当错误 —— 修剪是收尾动作，不该影响出图。
-///
-/// `keep` 是本次调用刚写的那些，一律排除（见调用处）。
-fn prune_old_images(dir: &std::path::Path, keep: &[&std::path::Path]) -> Result<(), String> {
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
-        .map_err(|e| format!("读出图目录失败: {e}"))?
-        .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
-        // 这次刚写的不参与 —— 调用方要把它们的路径返回给宿主。
-        .filter(|e| !keep.contains(&e.path().as_path()))
-        .map(|e| {
-            let mtime = e
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            (mtime, e.path())
-        })
-        .collect();
-
-    if files.len() <= MAX_KEPT_IMAGES {
-        return Ok(());
-    }
-    // 旧的在前，删掉超出的那些。
-    files.sort_by_key(|(mtime, _)| *mtime);
-    let excess = files.len() - MAX_KEPT_IMAGES;
-    for (_, path) in files.iter().take(excess) {
-        if let Err(e) = std::fs::remove_file(path) {
-            diag!("删不掉旧图片 {}: {e}", path.display());
-        }
-    }
-    diag!("出图目录已修剪：删掉 {excess} 张最旧的，保留 {MAX_KEPT_IMAGES} 张");
-    Ok(())
-}
-
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD
-        .decode(s)
-        .map_err(|e| format!("图片 base64 解码失败: {e}"))
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-/// 一个 `data` 项 → 图片字节：`b64_json` 直接解码；`url` 变体下载
-/// （new-api 站点实测会对 `gpt-image-*` 回 url，见 `response_format` 那段注释）。
-/// 下载走的是**返回 url 的那个站点自己**或它的对象存储 —— 预签名链接，不带鉴权头
-/// （OpenAI images API 的 url 模式就是这个约定）。
-async fn read_image_bytes(client: &reqwest::Client, item: &Value) -> Result<Vec<u8>, String> {
-    if let Some(b64) = item.get("b64_json").and_then(Value::as_str) {
-        return base64_decode(b64);
-    }
-    let url = item
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|url| !url.trim().is_empty())
-        .ok_or_else(|| "生图响应的 data 项里没有 b64_json 或 url".to_string())?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("下载生图结果失败: {e}"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("读取生图结果失败: {e}"))?;
-    if !status.is_success() {
-        return Err(format!(
-            "下载生图结果失败（HTTP {}）：{}",
-            status.as_u16(),
-            url
-        ));
-    }
-    if bytes.is_empty() {
-        return Err("生图结果下载下来是空文件".into());
-    }
-    Ok(bytes.to_vec())
-}
-
-/// 魔数嗅探图片格式 →（文件扩展名， mimeType）。认不出按 png ——
-/// 生图端点的事实默认就是 png，错标也只是视图按扩展名猜的问题。
-fn image_format(bytes: &[u8]) -> (&'static str, &'static str) {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        ("png", "image/png")
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        ("jpg", "image/jpeg")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        ("webp", "image/webp")
-    } else if bytes.starts_with(b"GIF8") {
-        ("gif", "image/gif")
-    } else {
-        ("png", "image/png")
-    }
-}
-
-/// 内容哈希的前 12 位 hex，用作文件名。
-fn short_hash(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    hex::encode(h.finalize())[..12].to_string()
-}
-
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("").chars().take(300).collect()
-}
 
 /// 本 server 暴露的工具清单。
 ///
@@ -716,7 +175,7 @@ fn first_line(s: &str) -> String {
 fn tools_list() -> Value {
     json!([{
         "name": "generate_image",
-        "description": "用 LoongPort 绑定的中转站档位生成图片（gpt-image 系列模型）。直接返回图片本身，同时给出保存到本地的路径。",
+        "description": "用 LoongPort 绑定的中转站接入配置生成图片（gpt-image 系列模型）。直接返回图片本身，同时给出保存到本地的路径。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -783,9 +242,9 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     let size = args.get("size").and_then(Value::as_str);
 
     // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
-    // 档位，下一次生图就该用新的，**不必重启 codex**。见 `current_image_tier_id`。
-    let tier = load_current_tier()?;
-    let images = generate_image(&tier, prompt, size).await?;
+    // 档位，下一次生图就该用新的，**不必重启 codex**。见 `imagegen::current_image_tier_id`。
+    let tier = imagegen::load_current_tier()?;
+    let images = imagegen::generate_image(&tier, prompt, size).await?;
     let list = images
         .iter()
         .map(|i| i.path.display().to_string())
@@ -809,7 +268,7 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     let mut content = vec![json!({
         "type": "text",
         "text": format!(
-            "已生成 {} 张图片（档位：{}，模型：{}），已存到：\n{list}",
+            "已生成 {} 张图片（接入配置：{}，模型：{}），已存到：\n{list}",
             images.len(),
             tier.display_name,
             tier.model
@@ -836,12 +295,12 @@ pub fn serve() -> Result<(), String> {
     // 「工具启动失败」，而正确的表达是「工具在，但你还没选用哪个档位」：
     // 前者像是软件坏了，后者是一句他能照做的话。所以这里只记一行诊断，
     // 真正的检查推迟到 `tools/call`（那时报的错会作为工具结果显示给模型与用户）。
-    match load_current_tier() {
+    match imagegen::load_current_tier() {
         Ok(tier) => diag!(
             "生图 MCP 启动：档位「{}」，模型 {}，端点 {}",
             tier.display_name,
             tier.model,
-            images_url(&tier.base_url)
+            imagegen::images_url(&tier.base_url)
         ),
         Err(e) => diag!("生图 MCP 启动（尚未选定档位）：{e}"),
     }
@@ -914,6 +373,24 @@ mod tests {
         );
     }
 
+    /// ⭐ **开关的 JSON 键名必须与 `AppSettings` 的字段对得上**，且默认值必须与
+    /// `get_imagegen_mcp_enabled` 的回落一致（缺省 = 开）。键名抄错 ⇒ 前端永远写不进
+    /// 那个开关；默认值分叉 ⇒ 升级后用户没动过开关，注册行为却变了。
+    #[test]
+    fn the_mcp_switch_key_and_default_match_the_settings_field() {
+        let settings_rs = include_str!("../settings.rs");
+        assert!(
+            settings_rs.contains("pub imagegen_mcp_enabled: Option<bool>"),
+            "`AppSettings::imagegen_mcp_enabled` 改名了 —— \
+             `sync_registration` 的开关判定与前端 camelCase 键名都跟着改"
+        );
+        assert!(
+            settings_rs.contains("imagegen_mcp_enabled.unwrap_or(true)"),
+            "`get_imagegen_mcp_enabled` 的回落不再是「默认开」—— \
+             这是个产品行为决定（升级用户的注册行为不变），改它要连着文档一起改"
+        );
+    }
+
     /// ⚠️ **这个 crate 的 logger 写 stdout，而 stdout 是 MCP 的协议通道。**
     ///
     /// 当前安全**只是因为 logger 在 [`crate::run`] 里才初始化**
@@ -949,168 +426,5 @@ mod tests {
             "stdout 日志 target 被移到了 run() 之前 ⇒ MCP 模式会往协议通道写日志、\
              导致宿主断连。要么去掉那个 target，要么给 MCP 模式装一个只写文件的 logger。"
         );
-    }
-
-    /// `model` 的前缀与 `model_provider` / `model_reasoning_effort` 撞车 ——
-    /// 抠错了会把 `"custom"` 当成模型名发出去（服务端 404，而错误信息里看不出原因）。
-    /// ⭐ **settings.json 的路径必须与主程序一致。**
-    ///
-    /// 这个进程读设备级「当前生图档位」是**自己拼路径读文件**（不能复用
-    /// `crate::settings`，见 [`device_level_image_tier`] 的文档）。路径一分叉，
-    /// 读到的永远是「没有覆盖」⇒ 静默回落到 DB 那层 ⇒ 云同步场景下生图用错档位，
-    /// 而界面显示的是对的（它走两层逻辑），没有任何东西会报错。
-    #[test]
-    fn the_settings_path_matches_the_main_programs() {
-        let settings_rs = include_str!("../settings.rs");
-        // 主程序那份是三段拼接：home / APP_DIR_NAME / "settings.json"。
-        assert!(
-            settings_rs.contains("crate::config::APP_DIR_NAME")
-                && settings_rs.contains("\"settings.json\""),
-            "主程序的 settings.json 路径拼法变了 —— 生图 MCP 那份手抄的跟着改，\
-             否则设备级「当前生图档位」永远读不到"
-        );
-    }
-
-    /// ⭐ **那个 JSON 键名必须与 `AppSettings` 的字段对得上。**
-    ///
-    /// 键名由 `#[serde(rename_all = "camelCase")]` 从字段名派生，所以这里是一份手抄。
-    /// 抄错的后果同上：静默读不到。
-    #[test]
-    fn the_device_level_key_matches_the_settings_field() {
-        let settings_rs = include_str!("../settings.rs");
-        assert!(
-            settings_rs.contains("pub current_provider_codex_image: Option<String>"),
-            "`AppSettings::current_provider_codex_image` 改名了 —— \
-             `device_level_image_tier` 里那个 camelCase 键名跟着改"
-        );
-    }
-
-    #[test]
-    fn extract_toml_string_matches_the_whole_key_not_a_prefix() {
-        let toml = r#"
-model_provider = "custom"
-model = "gpt-image-2"
-model_reasoning_effort = "high"
-
-[model_providers.custom]
-base_url = "https://api.example.com/v1"
-"#;
-        assert_eq!(
-            extract_toml_string(toml, "model").as_deref(),
-            Some("gpt-image-2"),
-            "把 model_provider 或 model_reasoning_effort 当成了 model"
-        );
-        assert_eq!(
-            extract_toml_string(toml, "base_url").as_deref(),
-            Some("https://api.example.com/v1")
-        );
-        assert_eq!(extract_toml_string(toml, "not_there"), None);
-    }
-
-    /// 空串等于没有 —— 回落到默认模型，而不是发一个空 model 出去。
-    #[test]
-    fn an_empty_value_reads_as_absent() {
-        assert_eq!(extract_toml_string(r#"model = """#, "model"), None);
-    }
-
-    /// base_url 已带 `/v1`，端点只补后半段。多一个 `/v1` 会 404。
-    #[test]
-    fn images_url_does_not_double_the_v1_prefix() {
-        assert_eq!(
-            images_url("https://api.example.com/v1"),
-            "https://api.example.com/v1/images/generations"
-        );
-    }
-
-    /// 同一份内容得到同一个名字（可复现），不同内容不撞名。
-    #[test]
-    fn file_names_are_content_addressed() {
-        assert_eq!(short_hash(b"abc"), short_hash(b"abc"));
-        assert_ne!(short_hash(b"abc"), short_hash(b"abd"));
-        assert_eq!(short_hash(b"abc").len(), 12);
-    }
-
-    /// 魔数嗅探：扩展名与 mimeType 同源，认不出回落 png。
-    #[test]
-    fn image_format_sniffs_magic_bytes() {
-        assert_eq!(
-            image_format(&[0x89, b'P', b'N', b'G', 0x00]),
-            ("png", "image/png")
-        );
-        assert_eq!(
-            image_format(&[0xFF, 0xD8, 0xFF, 0xE0]),
-            ("jpg", "image/jpeg")
-        );
-        assert_eq!(
-            image_format(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
-            ("webp", "image/webp")
-        );
-        assert_eq!(image_format(b"GIF89a"), ("gif", "image/gif"));
-        // 认不出的按 png —— 生图端点的事实默认。
-        assert_eq!(image_format(b"\x00\x01\x02"), ("png", "image/png"));
-    }
-
-    /// **url 变体必须能出图**（2026-09-05 实测踩中：new-api 站点对 gpt-image-2 回
-    /// `data[].url`，只认 b64_json 的解析直接报「没有 b64_json」）。
-    ///
-    /// 伪服务就回一张 1×1 JPEG 的 url；同时钉住「两种形态都没有」的报错文案。
-    #[tokio::test]
-    async fn url_shaped_image_responses_are_downloaded_and_decoded() {
-        // 1×1 像素 JPEG（合法魔数 FFD8FF）。
-        const JPEG: &[u8] = &[
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
-            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
-        ];
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let origin = format!("http://{}", listener.local_addr().expect("addr"));
-        let server = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt as _;
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            // 读完请求头（读到空行为止）再回 —— HTTP/1.1 的规矩。
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 512];
-            loop {
-                let n = socket.read(&mut chunk).await.expect("read request");
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: image/jpeg\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                JPEG.len()
-            );
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, head.as_bytes()).await;
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, JPEG).await;
-        });
-
-        let client = reqwest::Client::new();
-        let item: Value = serde_json::json!({ "url": format!("{origin}/img.jpg") });
-        let bytes = read_image_bytes(&client, &item)
-            .await
-            .expect("url 变体必须下载成功");
-        assert_eq!(bytes, JPEG);
-        assert_eq!(image_format(&bytes), ("jpg", "image/jpeg"));
-        server.abort();
-
-        // b64 分支不受影响，两种形态都缺失时报错点名两者。
-        let b64_item: Value = serde_json::json!({ "b64_json": base64_encode(b"png!") });
-        assert_eq!(
-            read_image_bytes(&client, &b64_item)
-                .await
-                .expect("b64 分支照旧"),
-            b"png!"
-        );
-        let empty: Value = serde_json::json!({ "revised_prompt": "x" });
-        let error = read_image_bytes(&client, &empty)
-            .await
-            .expect_err("必须报错");
-        assert!(error.contains("b64_json"), "{error}");
-        assert!(error.contains("url"), "{error}");
     }
 }

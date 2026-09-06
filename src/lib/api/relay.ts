@@ -636,4 +636,51 @@ export const relayApi = {
    */
   reconciliation: (relayId: number): Promise<ReconciliationReport> =>
     invoke("relay_reconciliation", { relayId }),
+
+  // ─── 生图（App 内直接生图 + MCP 注册开关） ────────────────────
+  //
+  // 与 MCP 工具共用后端同一个核心（`relay::imagegen`）：档位、请求形状、落盘完全
+  // 一致，差别只在这条链路不经过任何 CLI 会话。
+
+  /** App 内直接生图（生图页「生成」视图）。慢请求：后端超时 240s，前端勿再叠加短超时。 */
+  imagegenGenerate: (
+    prompt: string,
+    size?: string | null,
+  ): Promise<ImagegenGenerateResult> =>
+    invoke("relay_imagegen_generate", { prompt, size: size ?? null }),
+
+  /** 出图目录的画廊清单（MCP 与直接生图的产物同目录），mtime 从新到旧。 */
+  imagegenListImages: (): Promise<ImagegenGalleryEntry[]> =>
+    invoke("relay_imagegen_list_images"),
+
+  /** 在文件管理器里显示一张生成的图（后端只接受出图目录内的路径）。 */
+  imagegenRevealImage: (path: string): Promise<void> =>
+    invoke("relay_imagegen_reveal_image", { path }),
+
+  /** 切换「在 CLI 对话中提供生图工具（MCP）」；后端落设置并立刻对齐注册。 */
+  setImagegenMcpEnabled: (enabled: boolean): Promise<void> =>
+    invoke("relay_set_imagegen_mcp_enabled", { enabled }),
 };
+
+/** 一张生成图片的落盘事实（直接生图结果与画廊条目共用形状）。 */
+export interface ImagegenImageRef {
+  path: string;
+  mime: string;
+}
+
+/** `relayImagegenGenerate` 的返回：这次用了哪个档位/模型、图片落在哪。 */
+export interface ImagegenGenerateResult {
+  tierName: string;
+  model: string;
+  images: ImagegenImageRef[];
+}
+
+/** 画廊里一张图的元数据（路径 / 格式 / 大小 / mtime，均由后端给出）。 */
+export interface ImagegenGalleryEntry {
+  name: string;
+  path: string;
+  mime: string;
+  sizeBytes: number;
+  /** mtime 的 Unix 秒，展示格式化在前端做（纯展示偏好）。 */
+  modifiedAt: number;
+}
