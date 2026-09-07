@@ -342,7 +342,7 @@ jobs:
     name: Required Checks
     runs-on: ubuntu-latest
     if: always()
-    needs: [frontend, backend, backend-windows-wsl2]
+    needs: [frontend, backend, backend-windows-wsl2, workflow-lint]
     steps:
       - name: Gate on upstream results
         shell: bash
