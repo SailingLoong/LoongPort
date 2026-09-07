@@ -879,7 +879,7 @@ jobs:
             - **Windows (x86_64)**: `LoongPort-${{ github.ref_name }}-Windows-Setup.exe`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
             - **Windows (ARM64)**: `LoongPort-${{ github.ref_name }}-Windows-arm64-Setup.exe`（安装版）或 `LoongPort-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
             - **Linux (x86_64)**: `LoongPort-${{ github.ref_name }}-Linux-x86_64.AppImage`（推荐）或 `LoongPort-${{ github.ref_name }}-Linux-x86_64.deb` / `.rpm`（手动安装，不参与应用内自动更新）
-  > ⚠️ **桌面版需要 Ubuntu 22.04 或更高**（依赖 webkit2gtk 4.1 与较新的 glibc）。**Ubuntu 20.04 及更老、或无桌面的服务器请用下面的 LoongPort-CLI**（静态单文件零依赖）。
+              > ⚠️ **桌面版需要 Ubuntu 22.04 或更高**（依赖 webkit2gtk 4.1 与较新的 glibc）。**Ubuntu 20.04 及更老、或无桌面的服务器请用下面的 LoongPort-CLI**（静态单文件零依赖）。
             - **Linux 服务器/老发行版 (x86_64)**: `LoongPort-CLI-${{ github.ref_name }}-Linux-x86_64.tar.gz`（静态单文件零依赖，Ubuntu 20.04 / 纯服务器可用：`loongport-cli --add-site <域名> --key <sk> [--app codex] [--model <id>]`）
 
             > 应用内会自动检查更新（启动后几秒，失败静默）；也可在「设置 → 关于」手动检查。

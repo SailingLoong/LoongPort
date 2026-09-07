@@ -18,6 +18,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 2026-09-07 实踩：release.yml 的正文块标量（body: |）里混进一行浅缩进文本，
+  # 整个文件 YAML 解析失败 ⇒ GitHub 对**每次 push** 报「workflow file issue」
+  # （0 秒失败、零 job、邮件轰炸），且下一次 tag push 会当场死在发版上。
+  # 本地六道闸不看 workflow 文件；frontend/backend job 又被路径过滤跳过
+  # （纯改 .github 的 PR 两边都不跑），所以这道闸必须独立、必跑。
+  workflow-lint:
+    name: Workflow syntax check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Parse all workflow files
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          failed = False
+          for path in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  yaml.safe_load(open(path))
+                  print(f"OK   {path}")
+              except Exception as e:
+                  failed = True
+                  print(f"FAIL {path}: {e}")
+          sys.exit(1 if failed else 0)
+          PY
+
   changes:
     name: Detect changed areas
     runs-on: ubuntu-latest
