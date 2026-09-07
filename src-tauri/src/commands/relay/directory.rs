@@ -233,4 +233,25 @@ mod tests {
             "别把 snake_case 键发给前端（TS 那边按 camelCase 读）"
         );
     }
+
+    /// `directoryState.ts` 的 `defaultDirectoryKind` 是「app → 榜单分组」的 TS 镜像，
+    /// 分组键是后端 `LeaderboardKind` 的 serde 线上名。跨语言编译器管不到 `.ts`：
+    /// 后端改分键（或前端改默认分组）时两边各自漂移，症状是 tab 切过去查了一个
+    /// 不存在的榜单（空列表，不报错）。这道闸把映射钉住，形状照 events.rs 的跨语言闸。
+    #[test]
+    fn frontend_default_directory_kind_matches_the_backend_leaderboard_kinds() {
+        let ts = include_str!("../../../../src/components/relay/directory/directoryState.ts");
+        for line in [
+            r#"if (appId === "claude" || appId === "claude-desktop") return "claude";"#,
+            r#"if (appId === "codex" || appId === "codex-image") return "openai";"#,
+            r#"if (appId === "gemini") return "gemini";"#,
+            r#"return "overall";"#,
+        ] {
+            assert!(
+                ts.contains(line),
+                "directoryState.ts 的默认分组映射变了，与后端 LeaderboardKind 的线上名 \
+                 （overall/claude/openai/gemini）对不上一行：{line}"
+            );
+        }
+    }
 }
