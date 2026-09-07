@@ -3195,24 +3195,16 @@
     },
     "directory": {
       "title": "Relay directory",
-      "description": "Choose a site using VeriDrop's public test results. It is added to LoongPort only after registration or sign-in succeeds.",
-      "tabs": {
-        "overall": "Overall",
-        "claude": "Claude",
-        "openai": "OpenAI",
-        "gemini": "Gemini"
-      },
+      "description": "Pick a site; it is added to LoongPort once registration or sign-in succeeds.",
       "source": {
-        "syncedAt": "Live VeriDrop data · Updated {{time}}"
+        "syncedAt": "Community-measured data · Updated {{time}}"
       },
-      "searchPlaceholder": "Search sites, protocols, or use cases",
-      "loading": "Loading the VeriDrop leaderboard…",
+      "searchPlaceholder": "Search sites",
+      "loading": "Loading the relay directory…",
       "errorTitle": "Could not load the relay directory",
-      "errorBody": "Neither live data nor the last successful cache is available.",
-      "refreshFailed": "Could not refresh the VeriDrop leaderboard: {{reason}}",
+      "errorBody": "Read failed. Please try again later.",
+      "refreshFailed": "Could not refresh the relay directory: {{reason}}",
       "empty": "No sites match the current filters — type in the search box to add one directly",
-      "scoreLabel": "VeriDrop",
-      "signatureHint": "Claude thinking-signature verification rate",
       "transit": {
         "multiplierHint": "Lowest group composite multiplier published by the site (recharge rate x model multiplier) via its ai-transit public protocol. Lower is cheaper.",
         "availabilityHint": "Lowest group availability from the site's public monitoring; prefers the 7-day window and falls back to longer published windows.",
@@ -3237,16 +3229,10 @@
       },
       "compatibilityNote": "Some incompatible sites are not shown",
       "provisionFailed": "The account was added, but connection setup failed: {{reason}}. Retry from the relay list.",
-      "meta": {
-        "samples": "{{count}} tests",
-        "latest": "Latest {{date}}",
-        "supplementalRank": "Added"
-      },
       "actions": {
         "authenticate": "Register or sign in",
         "autoAddHint": "Added automatically when complete",
-        "history": "Full history",
-        "refresh": "Refresh live leaderboard",
+        "refresh": "Refresh data",
         "retry": "Retry"
       },
       "pagination": {
@@ -3332,7 +3318,9 @@
     },
     "crowd": {
       "badgeLabel": "Measured {{value}}",
+      "errBadgeLabel": "Error rate {{value}}",
       "badgeHint": "Median first-token time over the last 24h, measured by LoongPort users. Click for details",
+      "errBadgeHint": "Error rate over the last 24h, measured by LoongPort users. Click for details",
       "sectionTitle": "User measurements",
       "window24": "last 24h",
       "window7": "last 7 days",

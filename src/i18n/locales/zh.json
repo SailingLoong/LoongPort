@@ -3195,24 +3195,16 @@
     },
     "directory": {
       "title": "中转站广场",
-      "description": "基于 VeriDrop 公开检测结果选择站点，完成注册或登录后自动添加到 LoongPort。",
-      "tabs": {
-        "overall": "综合",
-        "claude": "Claude",
-        "openai": "OpenAI",
-        "gemini": "Gemini"
-      },
+      "description": "选择站点，完成注册或登录后自动添加到 LoongPort。",
       "source": {
-        "syncedAt": "VeriDrop 实时数据 · 更新于 {{time}}"
+        "syncedAt": "实测数据 · 更新于 {{time}}"
       },
-      "searchPlaceholder": "搜索站点、协议或适用场景",
-      "loading": "正在读取 VeriDrop 榜单…",
-      "errorTitle": "无法读取中转站榜单",
-      "errorBody": "实时数据和上次成功缓存均不可用。",
-      "refreshFailed": "刷新 VeriDrop 榜单失败：{{reason}}",
+      "searchPlaceholder": "搜索站点",
+      "loading": "正在读取广场…",
+      "errorTitle": "无法读取中转站列表",
+      "errorBody": "读取失败，请稍后重试。",
+      "refreshFailed": "刷新广场数据失败：{{reason}}",
       "empty": "没有符合当前筛选条件的站点，搜索框可以直接添加",
-      "scoreLabel": "VeriDrop",
-      "signatureHint": "Claude 思维签名验证通过率",
       "transit": {
         "multiplierHint": "站方公开的最低分组综合倍率（充值系数 × 模型倍率），越低越便宜。数据来自站点 ai-transit 公开协议。",
         "availabilityHint": "站方公开监测的最低分组可用性，取最差分组；窗口优先 7 日，缺失时取站方公开的更长窗口。",
@@ -3237,16 +3229,10 @@
       },
       "compatibilityNote": "部分不兼容站点不会展示",
       "provisionFailed": "账号已添加，但创建接入配置失败：{{reason}}。可返回中转站列表重试。",
-      "meta": {
-        "samples": "{{count}} 次检测",
-        "latest": "最近 {{date}}",
-        "supplementalRank": "补充"
-      },
       "actions": {
         "authenticate": "注册或登录",
         "autoAddHint": "完成后自动添加",
-        "history": "完整历史",
-        "refresh": "刷新实时榜单",
+        "refresh": "刷新数据",
         "retry": "重试"
       },
       "pagination": {
@@ -3332,7 +3318,9 @@
     },
     "crowd": {
       "badgeLabel": "实测 {{value}}",
+      "errBadgeLabel": "错误率 {{value}}",
       "badgeHint": "LoongPort 用户实测的近 24 小时首字耗时中位数，点击查看详情",
+      "errBadgeHint": "LoongPort 用户实测的近 24 小时错误率，点击查看详情",
       "sectionTitle": "用户实测",
       "window24": "近 24 小时",
       "window7": "近 7 天",

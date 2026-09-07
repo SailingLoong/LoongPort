@@ -25,16 +25,12 @@ const requiredKeys = [
   // 顶栏大「+」统一添加入口的触发提示。
   "addEntry.title",
   "addEntry.manual",
-  // 独立中转站广场。四个榜单、数据来源、评分证据、认证动作、缓存状态和分页
-  // 都是用户直接看到的主流程文案；漏一个 locale 会直接显示 key 名。
+  // 独立中转站广场。数据来源、实测/站方徽章、认证动作和分页都是用户直接看到的
+  // 主流程文案；漏一个 locale 会直接显示 key 名。
   "directory.title",
   "directory.noMatch",
   "directory.addAsSite",
   "directory.description",
-  "directory.tabs.overall",
-  "directory.tabs.claude",
-  "directory.tabs.openai",
-  "directory.tabs.gemini",
   "directory.source.syncedAt",
   "directory.searchPlaceholder",
   "directory.loading",
@@ -42,8 +38,6 @@ const requiredKeys = [
   "directory.errorBody",
   "directory.refreshFailed",
   "directory.empty",
-  "directory.scoreLabel",
-  "directory.signatureHint",
   "directory.transit.multiplierHint",
   "directory.transit.availabilityHint",
   // 站方公开数据详情弹窗（点倍率徽章打开）：充值口径、逐分组表格、
@@ -81,11 +75,8 @@ const requiredKeys = [
   "officialApi.bigmodelDesc",
   "officialApi.opencodeDesc",
   "directory.provisionFailed",
-  "directory.meta.samples",
-  "directory.meta.latest",
   "directory.actions.authenticate",
   "directory.actions.autoAddHint",
-  "directory.actions.history",
   "directory.actions.refresh",
   "directory.actions.retry",
   "directory.pagination.range",
@@ -185,8 +176,12 @@ const requiredKeys = [
   "stats.decline",
   // 站点实测共建。与 stats.* 同一个理：缺一条，详情弹窗的实测区或共建告知
   // 就会显示 key 名 —— 告知屏缺边界条目等于不诚实的告知。
+  // badge/errBadge 两组（label + hint）是广场行上**公开**的行级观测徽章，
+  // 四语言缺一条那一屏就露 key 名。
   "crowd.badgeLabel",
   "crowd.badgeHint",
+  "crowd.errBadgeLabel",
+  "crowd.errBadgeHint",
   "crowd.sectionTitle",
   "crowd.window24",
   "crowd.window7",

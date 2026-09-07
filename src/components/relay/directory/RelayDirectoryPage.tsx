@@ -15,15 +15,10 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { relayApi, settingsApi } from "@/lib/api";
 import { crowdApi } from "@/lib/api/crowd";
 import type { AppId } from "@/lib/api";
-import type {
-  LeaderboardKind,
-  RelayDirectoryItem,
-  RelayImportError,
-} from "@/lib/api/relay";
+import type { RelayDirectoryItem, RelayImportError } from "@/lib/api/relay";
 import { crowdKeys } from "@/lib/query/crowd";
 import { relayDirectoryKeys } from "@/lib/query/relayDirectory";
 import { useSettings } from "@/hooks/useSettings";
@@ -31,7 +26,6 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 
 import {
   DIRECTORY_PAGE_SIZE,
-  defaultDirectoryKind,
   filterDirectoryItems,
   pageDirectoryItems,
   reduceDirectoryView,
@@ -42,11 +36,8 @@ import { CROWD_NOTICE_OPEN_EVENT } from "../CrowdNoticeDialog";
 import { FirstVisitDomainDialog } from "./FirstVisitDomainDialog";
 import { TransitDetailDialog } from "./TransitDetailDialog";
 
-const KINDS: LeaderboardKind[] = ["overall", "claude", "openai", "gemini"];
-
 export interface RelayDirectoryPageProps {
   sourceAppId: AppId;
-  initialKind?: LeaderboardKind;
   onBack: () => void;
   onAuthenticated?: () => void;
   /**
@@ -64,7 +55,6 @@ export interface RelayDirectoryPageProps {
 
 export function RelayDirectoryPage({
   sourceAppId,
-  initialKind,
   onBack,
   onAuthenticated,
   embedded = false,
@@ -73,7 +63,6 @@ export function RelayDirectoryPage({
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [view, dispatch] = useReducer(reduceDirectoryView, {
-    kind: initialKind ?? defaultDirectoryKind(sourceAppId),
     search: "",
     page: 1,
   });
@@ -90,6 +79,8 @@ export function RelayDirectoryPage({
   );
   const { settings: appSettings } = useSettings();
   const crowdEnabled = appSettings?.crowdMetricsEnabled ?? false;
+  // 详情弹窗的实测深数据（w7/时段/分布）：共建门禁内 —— 行级观测徽章公开，
+  // 由列表 DTO 的 item.crowd 承载，不走这份门禁内快照。
   const crowdSnapshotQuery = useQuery({
     queryKey: crowdKeys.snapshot,
     queryFn: () => crowdApi.getSnapshot(),
@@ -102,16 +93,16 @@ export function RelayDirectoryPage({
   const crowdSnapshot = crowdSnapshotQuery.data ?? null;
 
   const directoryQuery = useQuery({
-    queryKey: relayDirectoryKeys.byKind(view.kind),
-    queryFn: () => relayApi.listDirectory(view.kind),
+    queryKey: relayDirectoryKeys.listing(),
+    queryFn: () => relayApi.listDirectory(),
     staleTime: Infinity,
     gcTime: Infinity,
   });
 
   const refreshMutation = useMutation({
-    mutationFn: () => relayApi.refreshDirectory(view.kind),
+    mutationFn: () => relayApi.refreshDirectory(),
     onSuccess: (result) => {
-      queryClient.setQueryData(relayDirectoryKeys.byKind(result.kind), result);
+      queryClient.setQueryData(relayDirectoryKeys.listing(), result);
     },
     onError: (reason) => {
       toast.error(
@@ -122,10 +113,10 @@ export function RelayDirectoryPage({
     },
   });
 
-  const visibleLeaderboard = directoryQuery.data ?? null;
+  const listing = directoryQuery.data ?? null;
   const filtered = useMemo(
-    () => filterDirectoryItems(visibleLeaderboard?.items ?? [], view.search),
-    [visibleLeaderboard?.items, view.search],
+    () => filterDirectoryItems(listing?.items ?? [], view.search),
+    [listing?.items, view.search],
   );
   const paged = pageDirectoryItems(filtered, view.page);
   const range = visibleDirectoryRange(
@@ -198,12 +189,13 @@ export function RelayDirectoryPage({
     }
   };
 
-  const syncedAt = visibleLeaderboard
-    ? new Intl.DateTimeFormat(i18n.resolvedLanguage || undefined, {
-        dateStyle: "medium",
-        timeStyle: "short",
-      }).format(new Date(visibleLeaderboard.syncedAt * 1000))
-    : "";
+  const syncedAt =
+    listing && listing.syncedAt > 0
+      ? new Intl.DateTimeFormat(i18n.resolvedLanguage || undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(new Date(listing.syncedAt * 1000))
+      : "";
 
   return (
     <div
@@ -268,7 +260,7 @@ export function RelayDirectoryPage({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-          {visibleLeaderboard && (
+          {syncedAt && (
             <span>
               {t("loongport.directory.source.syncedAt", { time: syncedAt })}
             </span>
@@ -293,26 +285,7 @@ export function RelayDirectoryPage({
         </div>
       </div>
 
-      <div className="flex items-center justify-between gap-4 py-4">
-        <Tabs
-          value={view.kind}
-          onValueChange={(kind) =>
-            dispatch({ type: "kind", kind: kind as LeaderboardKind })
-          }
-        >
-          <TabsList className="h-9">
-            {KINDS.map((kind) => (
-              <TabsTrigger
-                key={kind}
-                value={kind}
-                className="min-w-[88px] py-1"
-              >
-                {t(`loongport.directory.tabs.${kind}`)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-
+      <div className="flex items-center justify-end gap-4 py-4">
         <div className="relative w-full max-w-xs">
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
@@ -339,12 +312,12 @@ export function RelayDirectoryPage({
       </div>
 
       <section className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border-default bg-background shadow-sm">
-        {directoryQuery.isPending && !visibleLeaderboard ? (
+        {directoryQuery.isPending && !listing ? (
           <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             {t("loongport.directory.loading")}
           </div>
-        ) : directoryQuery.isError && !visibleLeaderboard ? (
+        ) : directoryQuery.isError && !listing ? (
           <div className="p-4">
             <Alert variant="destructive">
               <AlertTitle>{t("loongport.directory.errorTitle")}</AlertTitle>
@@ -400,7 +373,7 @@ export function RelayDirectoryPage({
           <div className="h-full overflow-auto">
             {paged.items.map((item: RelayDirectoryItem) => (
               <RelayDirectoryRow
-                key={`${item.siteHost}:${item.veridropHost}`}
+                key={item.siteHost}
                 item={item}
                 busy={authenticatingHost === item.siteHost}
                 disabled={authenticatingHost !== null}
@@ -408,9 +381,6 @@ export function RelayDirectoryPage({
                   void authenticate(selected.entryUrl, selected.siteHost);
                 }}
                 onOpenTransit={setTransitDetail}
-                measuredP50Ms={
-                  crowdSnapshot?.sites[item.siteDomain]?.w24?.ttftP50Ms ?? null
-                }
               />
             ))}
           </div>

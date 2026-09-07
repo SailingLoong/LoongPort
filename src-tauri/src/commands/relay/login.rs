@@ -184,7 +184,7 @@ pub async fn relay_import_site(
 /// 但调用方不能靠传一个布尔值把任意业务路径升级成受信入口。这里重新读取并验证
 /// 当前签名配置：完全匹配其中 HTTPS `entry_url` 的地址会保留 path/query/fragment；
 /// 其余受管站点（sponsors / aff / promo —— **与广场曝光同一份名单**，见
-/// `leaderboard::managed_site_hosts`）按手工输入的安全规则打开 origin 或协议登录页。
+/// `directory::managed_site_hosts`）按手工输入的安全规则打开 origin 或协议登录页。
 ///
 /// 两种拒绝（配置缓存缺失 / 站点不在受管名单）都报 `NotInDirectory` 而不是
 /// `UnsupportedSite`：前者的正确指引是「换手动输入框添加」，后者的指引是
@@ -302,10 +302,10 @@ pub(crate) fn directory_entry_source(
     }
 
     // 第二段：受管全集（sponsors / aff / promo 也算 —— **与广场曝光同一份名单**，
-    // 见 `leaderboard::managed_site_hosts` 的唯源注释）按 Manual 保守规则回落。
+    // 见 `directory::managed_site_hosts` 的唯源注释）按 Manual 保守规则回落。
     // 只认**裸 origin**：带 path 的输入不匹配，防止任意业务路径被当成受信入口。
     // wawapi.top 实测踩出的洞就在这：aff 名单让它进了广场，第一段却拒了它的接入。
-    crate::relay::leaderboard::managed_site_hosts(config)
+    crate::relay::directory::managed_site_hosts(config)
         .iter()
         .find_map(|host| {
             (browser_entry_url(host).ok()? == candidate).then_some(BrowserEntrySource::Manual)
@@ -1990,7 +1990,6 @@ mod tests {
                     (
                         "790053500.com".into(),
                         crate::relay::remote_config::RelayDirectorySite {
-                            veridrop_host: Some("api.790053500.com".into()),
                             entry_url: Some("https://790053500.com/keys".into()),
                             purchase_url: None,
                             usage_url: None,
@@ -2004,7 +2003,6 @@ mod tests {
                     (
                         "broken.example".into(),
                         crate::relay::remote_config::RelayDirectorySite {
-                            veridrop_host: None,
                             entry_url: Some("http://broken.example/keys".into()),
                             purchase_url: None,
                             usage_url: None,

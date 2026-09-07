@@ -69,16 +69,6 @@ export interface Sponsor {
   tagline: string;
 }
 
-export type LeaderboardKind = "overall" | "claude" | "openai" | "gemini";
-
-export interface ProtocolScore {
-  protocol: string;
-  score: number;
-  samples: number;
-  verdict: string | null;
-  reportUrl: string | null;
-}
-
 /**
  * 站方一手 transit 分组摘要（ai-transit.v1 公开协议），详情弹窗的表格行。
  * 可用性 / 延迟从站方监测条目按分组名 join；`null` = 站方快照里没有该数据。
@@ -123,32 +113,32 @@ export interface TransitSummary {
   groups: TransitGroupSummary[];
 }
 
+/**
+ * 自家实测观测（近 24 小时，crowd 快照按注册域 join 后的行级投影）。
+ * 行级观测**公开**（不参与共建也可见）；`null` = 无数据，不要当 0 显示。
+ */
+export interface CrowdSummary {
+  ttftP50Ms: number | null;
+  errRate: number | null;
+}
+
 export interface RelayDirectoryItem {
   siteHost: string;
   /** 站点身份：注册域（apex）。跨数据源 join（如实测快照的站点键）用它，
    *  链接与取数用 siteHost（真实 host）—— 两者别混用。 */
   siteDomain: string;
-  veridropHost: string;
   displayName: string;
-  rank: number | null;
-  /** veridrop 观测四件套可整体缺席：受管站不在 veridrop 榜上时行仍展示
-   *  （后端合成），徽章不渲染 —— null = 无数据，不要当 0 显示。 */
-  score: number | null;
-  samples: number | null;
-  latestDate: string | null;
-  detailUrl: string | null;
-  protocolScores: ProtocolScore[];
-  claudeSignatureRate: number | null;
-  scenarios: string[];
-  issues: string[];
+  /** 本广场内的位置（1..N，后端按实测健康序重排）。 */
+  rank: number;
+  /** 自家实测观测。缺席 = 该站没有过 k-匿的 w24 窗口，徽章不渲染。 */
+  crowd?: CrowdSummary;
   entryUrl: string;
-  autoAdd: boolean;
   transit?: TransitSummary;
 }
 
-export interface RelayLeaderboard {
-  kind: LeaderboardKind;
+export interface RelayDirectoryListing {
   items: RelayDirectoryItem[];
+  /** 实测快照的数据时间（Unix 秒）；0 = 没有快照，前端不显示时间戳。 */
   syncedAt: number;
 }
 
@@ -432,13 +422,13 @@ export const relayApi = {
   resetSiteConfig: (relayId: number): Promise<SiteConfigApplySummary> =>
     invoke("relay_reset_site_config", { relayId }),
 
-  /** 读取本地 VeriDrop 快照；缺失时后端会等待首次拉取。 */
-  listDirectory: (kind: LeaderboardKind): Promise<RelayLeaderboard> =>
-    invoke("relay_list_directory", { kind }),
+  /** 读广场列表（纯本地投影，零网络往返；快照陈旧时后台追新并广播事件）。 */
+  listDirectory: (): Promise<RelayDirectoryListing> =>
+    invoke("relay_list_directory"),
 
-  /** 强制刷新当前 VeriDrop 榜单，失败时保留原快照。 */
-  refreshDirectory: (kind: LeaderboardKind): Promise<RelayLeaderboard> =>
-    invoke("relay_refresh_directory", { kind }),
+  /** 刷新实测快照（同步）与 transit 摘要（异步），返回最新投影。 */
+  refreshDirectory: (): Promise<RelayDirectoryListing> =>
+    invoke("relay_refresh_directory"),
 
   /**
    * 导入第三方站点（广场白名单行）。原生发现失败时由后端打开可见网页，让用户

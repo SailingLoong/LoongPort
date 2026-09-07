@@ -217,8 +217,6 @@ pub struct RemoteClaudeRoleModels {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct RelayDirectorySite {
     #[serde(default)]
-    pub veridrop_host: Option<String>,
-    #[serde(default)]
     pub entry_url: Option<String>,
     #[serde(default)]
     pub purchase_url: Option<String>,
@@ -337,7 +335,8 @@ pub struct RemoteConfig {
     /// 由调用方忽略，远端配置只覆盖它明确提供且通过基本校验的值。
     #[serde(default)]
     pub tier_configs: std::collections::BTreeMap<String, RemoteTierConfig>,
-    /// 中转站广场兼容策略。评分与排名不在这里，始终由 VeriDrop 提供。
+    /// 中转站广场策略：受管名单 / block 名单 / 站点入口（广场行源，见
+    /// `relay::directory`）。
     #[serde(default)]
     pub relay_directory: RelayDirectoryPolicy,
     /// 归因播种的**受保护域名**名单（apex 口径，客户端读时归一）。
@@ -923,7 +922,6 @@ mod tests {
         invite_code: Option<String>,
         models: Vec<DirectoryModelV2Contract>,
         sponsorship: Option<DirectorySponsorshipV2Contract>,
-        veridrop_hosts: Vec<String>,
         authorization: Option<DirectoryAuthorizationV2Contract>,
         disabled: Option<bool>,
     }
@@ -1103,7 +1101,6 @@ mod tests {
                 sites: std::collections::BTreeMap::from([(
                     host.to_string(),
                     RelayDirectorySite {
-                        veridrop_host: None,
                         entry_url: entry_url.map(str::to_string),
                         purchase_url: purchase_url.map(str::to_string),
                         usage_url: None,
@@ -1187,7 +1184,6 @@ mod tests {
                 sites: std::collections::BTreeMap::from([(
                     host.to_string(),
                     RelayDirectorySite {
-                        veridrop_host: None,
                         entry_url: None,
                         purchase_url: None,
                         usage_url: Some(usage_url.to_string()),
@@ -1329,10 +1325,6 @@ mod tests {
                 .as_ref()
                 .map(|authorization| authorization.kind.as_str()),
             Some("manual-api-key")
-        );
-        assert!(
-            !bestapi.veridrop_hosts.is_empty(),
-            "each directory site must declare its Veridrop hosts"
         );
 
         if let Some(sponsorship) = &bestapi.sponsorship {

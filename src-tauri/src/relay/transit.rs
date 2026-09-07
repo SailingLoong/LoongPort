@@ -27,7 +27,7 @@
 //!
 //! ## 缓存语义：读不做新鲜度闸
 //!
-//! 刷新由 `maintenance` 的 veridrop-directory 周期（6 小时）驱动；读取路径
+//! 刷新由 `maintenance` 的 directory 周期（6 小时）驱动；读取路径
 //! （广场列表）只合并已有摘要。数据最多「旧一个周期」，比「因为刚抓取
 //! 失败就整个消失」好——徽章闪没闪现比数字旧几小时更伤信任。失败的站
 //! 保留上一轮的旧值，不擦除。
@@ -41,7 +41,7 @@ use crate::error::AppError;
 /// 发现端点的固定路径（RFC 8615 well-known 协议惯例）。
 const WELL_KNOWN_PATH: &str = "/.well-known/ai-transit.json";
 
-/// 快照与发现端点的公共体积上限。与 `leaderboard::MAX_PAGE_BYTES` 同量级：
+/// 快照与发现端点的公共体积上限。与广场时代 HTML 抓取的上限同量级：
 /// 一份真实快照几十 KB（含逐模型价格表），2 MiB 宽裕得离谱。
 const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
 
@@ -637,7 +637,7 @@ fn apply_results(
     (updated, failed)
 }
 
-/// `pub(crate)`：`leaderboard::tests` 的 decorate 用例要直接操纵这份缓存
+/// `pub(crate)`：`directory::tests` 的 decorate 用例要直接操纵这份缓存
 /// （写一条摘要、用 home 隔离挡住真实用户目录）。
 #[cfg(test)]
 pub(crate) mod tests {
@@ -645,7 +645,7 @@ pub(crate) mod tests {
 
     use serial_test::serial;
 
-    /// 缓存文件落在 `get_home_dir` 下——与 `leaderboard` 测试同一条纪律：
+    /// 缓存文件落在 `get_home_dir` 下——与广场测试同一条纪律：
     /// 用 `CC_SWITCH_TEST_HOME` 把它指到临时目录，跑完还原。
     /// `pub(crate)`：guard 必须在调用方作用域里活到断言结束（提前 Drop
     /// 会把 home 还原，后续读取就打到真实用户目录）。
@@ -693,7 +693,7 @@ pub(crate) mod tests {
     }
 
     /// 只关心两个徽章数字的测试用摘要（其余字段走空缺省）。
-    /// `pub(crate)`：`leaderboard::tests` 的 decorate 用例也用它写缓存条目。
+    /// `pub(crate)`：`directory::tests` 的 decorate 用例也用它写缓存条目。
     pub(crate) fn badge_summary(
         min_multiplier: Option<f64>,
         min_availability: Option<f64>,
