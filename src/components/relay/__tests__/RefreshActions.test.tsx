@@ -255,7 +255,7 @@ describe("行上的刷新动作", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("当前档位所在的中转站复用浅蓝当前态外框", () => {
+  it("当前档位所在的中转站复用浅蓝当前态（边框+淡底）", () => {
     renderRelayRow(vi.fn(), {
       isCurrent: true,
       tiers: [{ ...tier, isCurrent: true }],
@@ -264,6 +264,7 @@ describe("行上的刷新动作", () => {
     const row = screen.getByText("Relay").closest(".rounded-xl");
     expect(row).toHaveClass(
       "border-blue-500/60",
+      "bg-blue-500/10",
       "shadow-sm",
       "shadow-blue-500/10",
     );

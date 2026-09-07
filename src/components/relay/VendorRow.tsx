@@ -145,7 +145,7 @@ export function VendorRow({
           : isCurrent
             ? // 当前在用的行用蓝框，与 `TierItem` 的当前态同一个 token
               // （`ProviderCard.tsx:306`）—— 用户扫一眼列表首先要找到在用的那个。
-              "border-blue-500/60 shadow-sm shadow-blue-500/10"
+              "border-blue-500/60 bg-blue-500/10 shadow-sm shadow-blue-500/10"
             : userEdited
               ? // 已手动维护：amber，与 `RelayRow` 的档位行同一套语义
                 // （蓝 = 在用、绿 = 代理接管都已有主，amber = 需要留意）。
@@ -578,7 +578,7 @@ function PlanItem({
         "group/tier flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2 transition-all",
         // 三态优先级：当前在用 > 已手动维护 > 普通（同 `TierItem`）。
         plan.isCurrent
-          ? "border-blue-500/60 shadow-sm shadow-blue-500/10"
+          ? "border-blue-500/60 bg-blue-500/10 shadow-sm shadow-blue-500/10"
           : userEdited
             ? "border-amber-500/50 bg-amber-500/5 hover:border-amber-500/70"
             : "hover:border-border-active",

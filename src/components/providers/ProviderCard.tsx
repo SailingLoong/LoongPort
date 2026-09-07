@@ -317,8 +317,9 @@ export function ProviderCard({
           ? "hover:border-emerald-500/50"
           : "hover:border-border-active",
         shouldUseGreen &&
-          "border-emerald-500/60 shadow-sm shadow-emerald-500/10",
-        shouldUseBlue && "border-blue-500/60 shadow-sm shadow-blue-500/10",
+          "border-emerald-500/60 bg-emerald-500/10 shadow-sm shadow-emerald-500/10",
+        shouldUseBlue &&
+          "border-blue-500/60 bg-blue-500/10 shadow-sm shadow-blue-500/10",
         !hasStateHighlight && "hover:shadow-sm",
         dragHandleProps?.isDragging &&
           "cursor-grabbing border-primary shadow-lg scale-105 z-10",
