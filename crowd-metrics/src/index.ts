@@ -20,8 +20,9 @@ const RATE_LIMIT_RETENTION_SECS = 2 * 86400;
 /** KV 快照键。 */
 const SNAPSHOT_KEY = "snapshot:v1";
 /** KV 趋势键（三档一包，recompute 与快照同拍写、同 freshness 策略）。
- *  v2：P5 模型桶/窗口出参追加 anomalies —— 键升版强制旧缓存失效重算。 */
-const TREND_KEY = "trend:v2";
+ *  v2：P5 模型桶/窗口出参追加 anomalies。
+ *  v3：站点级每档补 window（指标格随时间档联动）—— 键升版强制旧缓存失效重算。 */
+const TREND_KEY = "trend:v3";
 
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",

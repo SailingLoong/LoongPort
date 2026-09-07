@@ -362,18 +362,7 @@ export function buildSnapshot(rows: RawRow[], nowSec: number): Snapshot {
 
   // 跨站来源集合：真源几乎必然出现在多家站（产品形态决定）—— 这是 cohort
   // 判定里「只此一家」那半个条件的唯一事实源。
-  const sitesBySource = new Map<string, Set<string>>();
-  for (const [site, list] of bySite) {
-    for (const r of list) {
-      const set = sitesBySource.get(r.source) ?? new Set<string>();
-      set.add(site);
-      sitesBySource.set(r.source, set);
-    }
-  }
-  const exclusiveSources = new Set<string>();
-  for (const [source, sites] of sitesBySource) {
-    if (sites.size === 1) exclusiveSources.add(source);
-  }
+  const exclusiveSources = exclusiveSourcesOf(bySite);
 
   const sites: Record<string, SiteStats> = {};
   // 站点按字典序产出，快照字节稳定（同数据 → 同输出，便于对账与缓存）。
@@ -383,6 +372,24 @@ export function buildSnapshot(rows: RawRow[], nowSec: number): Snapshot {
   }
 
   return { version: 1, generatedAt: nowSec, sites };
+}
+
+/** 「只出现在一家站」的来源集合：cohort 判定里「只此一家」半个条件的唯一
+ *  事实源。快照与趋势两处共用（各算一份会漂移）。 */
+function exclusiveSourcesOf(bySite: Map<string, ParsedRow[]>): Set<string> {
+  const sitesBySource = new Map<string, Set<string>>();
+  for (const [site, list] of bySite) {
+    for (const r of list) {
+      const set = sitesBySource.get(r.source) ?? new Set<string>();
+      set.add(site);
+      sitesBySource.set(r.source, set);
+    }
+  }
+  const exclusive = new Set<string>();
+  for (const [source, sites] of sitesBySource) {
+    if (sites.size === 1) exclusive.add(source);
+  }
+  return exclusive;
 }
 
 /** 趋势档位：跨度 + 输出桶粒度。粒度选点让每档点位数落在 24~60 之间
@@ -440,6 +447,8 @@ export function buildTrends(rows: RawRow[], nowSec: number, modelRows: RawModelR
   }
 
   const ranges: TrendPayload["ranges"] = {} as TrendPayload["ranges"];
+  // cohort 剔除的「只此一家」来源集合：与快照同源同算（唯源，两处共用）。
+  const exclusiveSources = exclusiveSourcesOf(bySite);
   for (const { key, spanSecs, bucketSecs } of TREND_RANGES) {
     // 网格锚在「整点对齐的窗口末尾」，最后一格是当前（可能未满的）小时。
     const endHour = Math.floor(nowSec / 3600) * 3600;
@@ -468,6 +477,10 @@ export function buildTrends(rows: RawRow[], nowSec: number, modelRows: RawModelR
         }
       }
       if (!anyPublished) continue;
+
+      // 站点在此档的窗口统计（与快照 w24/w7 同款聚合与门禁）——展示侧的
+      // 指标格随时间档切换读它，30d 档由此首次有了窗口口径。
+      const window = windowOrNull(inRange, exclusiveSources);
 
       // P4：该站在此档的模型趋势（逐 (site, model, bucket) 过 k-匿，
       // 与站点桶同款规则；tpsP50Ms 从 tps 直方图求）。
@@ -502,7 +515,12 @@ export function buildTrends(rows: RawRow[], nowSec: number, modelRows: RawModelR
         }
       }
 
-      sites[site] = { buckets, ttftBins: rangeBins, ...(Object.keys(models).length > 0 ? { models } : {}) };
+      sites[site] = {
+        buckets,
+        ttftBins: rangeBins,
+        ...(window ? { window } : {}),
+        ...(Object.keys(models).length > 0 ? { models } : {}),
+      };
     }
 
     ranges[key] = { bucketSeconds: bucketSecs, sites };

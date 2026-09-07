@@ -106,6 +106,9 @@ export interface SiteTrend {
   buckets: TrendBucket[];
   /** 该范围内合并的 TTFT 直方图（分布图随时间范围联动用）。 */
   ttftBins: number[];
+  /** 站点在此范围内的窗口统计（与快照 w24/w7 同款聚合与门禁）——展示侧
+   *  指标格随时间档切换读它；范围级门禁未过则缺省。 */
+  window?: WindowStats;
   /** P4：模型维度的趋势（有 v2 数据才有；键=模型名）。 */
   models?: Record<string, SiteTrendLite>;
 }

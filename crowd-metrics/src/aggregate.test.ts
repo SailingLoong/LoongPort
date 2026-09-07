@@ -294,6 +294,23 @@ describe("趋势（buildTrends）", () => {
     const sum = bins.reduce((s, c) => s + c, 0);
     expect(sum).toBe(30); // 3 来源 × 10 样本全落 bin[2]
   });
+
+  it("站点级每档带窗口统计（指标格随时间档联动的数据源；含 30d）", () => {
+    const trend = buildTrends(sources(3), NOW);
+    for (const key of ["24h", "7d", "30d"] as const) {
+      const site = trend.ranges[key].sites["example.com"];
+      expect(site.window).toBeDefined();
+      expect(site.window!.samples).toBe(30);
+      expect(site.window!.ttftP50Ms).not.toBeNull();
+      expect(site.window!.sources).toBe(3);
+    }
+  });
+
+  it("范围级窗口同门禁：全未受信来源 → window 缺省（桶仍可空占位）", () => {
+    const rows = [makeRaw({ source: "only", ua_trusted: 0 })];
+    const trend = buildTrends(rows, NOW);
+    expect(trend.ranges["24h"].sites["example.com"]).toBeUndefined();
+  });
 });
 
 describe("趋势模型维度（P4）", () => {
