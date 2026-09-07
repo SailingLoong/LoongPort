@@ -371,24 +371,39 @@ pub(crate) fn validate_count(n: u32) -> Result<u32, String> {
     }
 }
 
-/// >4 张的批量并发跑单张请求时，同时在途的请求数。
+/// 并发模式下同时在途的请求数。
 ///
 /// 50 个请求同时打一家中转站容易撞限流（429），排队比触发对方风控便宜；
-/// 4 与单请求的张数上限对齐，一个小批量就是一波。
+/// 4 与单请求的张数上限对齐，一个小批量就是一波。串行模式走 1（逐张）。
 const BATCH_CONCURRENCY: usize = 4;
 
-/// 批量生图的分单：
+/// 「并发提交」关掉时，合并成一条请求的张数上限。
 ///
-/// - `≤4` 张：**一条请求带 `n`**（现状路径）—— 账单一行、原子成功或失败。
-/// - `>4` 张：**拆成单张请求并发跑**。上游的 `n` 参数不是无限收的（官方 images
-///   API 单请求有上限，中转站各自截断），单张并发是唯一到处都通的形状；并发也让
-///   总耗时 ≈ 张数/并发数 × 单张时间，而不是串行叠加 —— 这正是放开到 50 张后
-///   超时仍然可控的原因。
-fn split_batch(total: u32) -> Vec<u32> {
-    if total <= 4 {
-        vec![total]
+/// 勾掉并发的用户要的是「别一下子打太多请求」：小批量合并一条（上游原生 `n`，
+/// 账单一行、原子成败）；大批量不能合并 —— 上游的 `n` 参数不是无限收的（官方
+/// images API 单请求有上限，中转站各自截断）—— 只能逐张串行。
+const SERIAL_MERGE_LIMIT: u32 = 4;
+
+/// 批量生图的分单 + 并发度，由「并发提交」一个开关决定（用户勾选，App 内入口）：
+///
+/// | 开关 | 张数 | 形状 | 体感 |
+/// |---|---|---|---|
+/// | 并发（默认） | >1 | 全部拆单张，并发 [`BATCH_CONCURRENCY`] 跑 | 快；总耗时 ≈ 张数÷4 × 单张 |
+/// | 串行 | ≤4 | **一条请求带 `n`** | 慢而稳：账单一行、原子成败、只占一个请求额度 |
+/// | 串行 | >4 | 拆单张逐张发 | 慢而稳：永不并发，对站点最友好 |
+///
+/// MCP 入口不传开关，恒为并发 —— agent 想串行有自己的表达（逐次调用工具天然串行），
+/// 不该为它加 schema 噪音。
+fn split_batch(total: u32, parallel: bool) -> (Vec<u32>, usize) {
+    if total <= 1 {
+        return (vec![1], 1);
+    }
+    if parallel {
+        (vec![1; total as usize], BATCH_CONCURRENCY)
+    } else if total <= SERIAL_MERGE_LIMIT {
+        (vec![total], 1)
     } else {
-        vec![1; total as usize]
+        (vec![1; total as usize], 1)
     }
 }
 
@@ -402,8 +417,9 @@ pub(crate) async fn generate_batch(
     prompt: &str,
     size: Option<&str>,
     total: u32,
+    parallel: bool,
 ) -> Result<(Vec<GeneratedImage>, usize), String> {
-    let batches = split_batch(total);
+    let (batches, concurrency) = split_batch(total, parallel);
     let results: Vec<Result<Vec<GeneratedImage>, String>> = {
         use futures::stream::StreamExt as _;
         // 先 `.copied()` 再闭包：闭包参数是所有权 u32 而不是引用 —— 闭包借迭代项
@@ -415,7 +431,7 @@ pub(crate) async fn generate_batch(
                 .copied()
                 .map(|n| generate_image(tier, prompt, size, n, request_timeout(n))),
         )
-        .buffered(BATCH_CONCURRENCY)
+        .buffered(concurrency)
         .collect()
         .await
     };
@@ -864,14 +880,22 @@ base_url = "https://api.example.com/v1"
         }
     }
 
-    /// 拆单规则：≤4 一条请求（账单一行、原子成败）；>4 拆并发单张
-    /// （上游 `n` 参数不是无限收的，单张并发是唯一到处都通的形状）。
+    /// 拆单规则（「并发提交」开关的完整语义，见 `split_batch` 的表）：
+    /// 单张无差别；并发=全拆单张、并发度 4；串行小批=合并一条（原生 n）；
+    /// 串行大批=逐张（上游不收大 n）。
     #[test]
-    fn split_batch_routes_small_totals_into_one_request() {
-        assert_eq!(split_batch(1), vec![1]);
-        assert_eq!(split_batch(4), vec![4]);
-        assert_eq!(split_batch(5), vec![1; 5]);
-        assert_eq!(split_batch(50), vec![1; 50]);
+    fn split_batch_follows_the_parallel_switch() {
+        // 单张：两种模式无差别。
+        assert_eq!(split_batch(1, true), (vec![1], 1));
+        assert_eq!(split_batch(1, false), (vec![1], 1));
+        // 并发：>1 全拆单张、并发度 4。
+        assert_eq!(split_batch(3, true), (vec![1; 3], 4));
+        assert_eq!(split_batch(50, true), (vec![1; 50], 4));
+        // 串行小批：合并成一条请求（账单一行、原子成败）。
+        assert_eq!(split_batch(4, false), (vec![4], 1));
+        // 串行大批：不能合并（上游不收），逐张串行。
+        assert_eq!(split_batch(5, false), (vec![1; 5], 1));
+        assert_eq!(split_batch(50, false), (vec![1; 50], 1));
     }
 
     /// 同一份内容得到同一个名字（可复现），不同内容不撞名。
