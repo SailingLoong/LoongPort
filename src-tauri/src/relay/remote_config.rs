@@ -298,6 +298,15 @@ pub struct RemoteConfig {
     /// key 是 `Vendor::vendor_id()`；值过 HTTPS + 同源闸（`vendor::login_url`）。
     #[serde(default)]
     pub vendor_invite_urls: std::collections::BTreeMap<String, String>,
+    /// 预设第三方厂商 → 维护者返佣注册链接（表单「获取 API Key」打开它）。
+    /// 与 `vendor_invite_urls`（官网厂商那条）平行的**商务覆盖**：代码里的
+    /// 中性链接是功能基线，这份是商务关系——谈成新码改远端配置即可、无需发版。
+    /// key 是 host（录入规则与 `aff_codes` 同：小写、无 `www.`、纯 host）；
+    /// 值是**完整注册 URL**——各家参数形状不同（`?aff=`、`/invite/`、`?ic=`），
+    /// 存整条而不是裸码，格式知识留在录入侧。值过 HTTPS 闸（命令层第二道）。
+    /// 兼容：老客户端忽略本键；新客户端读没有本键的旧配置靠 `#[serde(default)]`。
+    #[serde(default)]
+    pub preset_referral_urls: std::collections::BTreeMap<String, String>,
     /// 赞助中转站，按维护者给的顺序（**不排序** —— 顺序是他的编排意图）。
     #[serde(default)]
     pub sponsors: Vec<Sponsor>,
@@ -1200,6 +1209,7 @@ mod tests {
         aff_codes.insert(host.to_string(), code.to_string());
         RemoteConfig {
             vendor_invite_urls: std::collections::BTreeMap::new(),
+            preset_referral_urls: std::collections::BTreeMap::new(),
             sponsors: vec![],
             aff_codes,
             promo_codes: std::collections::BTreeMap::new(),
@@ -1217,6 +1227,7 @@ mod tests {
         promo_codes.insert(host.to_string(), code.to_string());
         RemoteConfig {
             vendor_invite_urls: std::collections::BTreeMap::new(),
+            preset_referral_urls: std::collections::BTreeMap::new(),
             sponsors: vec![],
             aff_codes: std::collections::BTreeMap::new(),
             promo_codes,

@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 import type { AppId } from "@/lib/api";
+import { usePresetReferralUrls } from "@/hooks/usePresetReferralUrls";
+import { resolvePresetReferralUrl } from "@/lib/presetReferrals";
 import type { ProviderCategory } from "@/types";
 import type { ProviderPreset } from "@/config/claudeProviderPresets";
 import type { CodexProviderPreset } from "@/config/codexProviderPresets";
@@ -35,6 +37,9 @@ export function useApiKeyLink({
   presetEntries,
   formWebsiteUrl,
 }: UseApiKeyLinkProps) {
+  // 返佣覆盖（远端配置）：命中时「获取 API Key」打开维护者的返佣链接，
+  // 未命中回落预设自带的中性链接。
+  const presetReferrals = usePresetReferralUrls();
   // 判断是否显示 API Key 获取链接
   const shouldShowApiKeyLink = useMemo(() => {
     return (
@@ -58,17 +63,18 @@ export function useApiKeyLink({
     if (currentPresetEntry) {
       const preset = currentPresetEntry.preset;
       // 对于 cn_official、aggregator、third_party，优先使用 apiKeyUrl（可能包含推广参数）
-      if (
+      const neutralUrl =
         preset.category === "cn_official" ||
         preset.category === "aggregator" ||
         preset.category === "third_party"
-      ) {
-        return preset.apiKeyUrl || preset.websiteUrl || "";
-      }
-      return preset.websiteUrl || "";
+          ? preset.apiKeyUrl || preset.websiteUrl || ""
+          : preset.websiteUrl || "";
+      return (
+        resolvePresetReferralUrl(neutralUrl, presetReferrals) ?? neutralUrl
+      );
     }
     return formWebsiteUrl || "";
-  }, [currentPresetEntry, formWebsiteUrl]);
+  }, [currentPresetEntry, formWebsiteUrl, presetReferrals]);
 
   return {
     shouldShowApiKeyLink:

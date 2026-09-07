@@ -221,6 +221,12 @@ export const providersApi = {
   async importHermesFromLive(): Promise<number> {
     return await invoke("import_hermes_providers_from_live");
   },
+  /**
+   * 预设第三方厂商的返佣注册链接覆盖（远端配置，key = host、值 = 完整 URL）。
+   * 后端同步读缓存配置，HTTPS 闸过滤坏值。
+   */
+  presetReferralUrls: (): Promise<Record<string, string>> =>
+    invoke("preset_referral_urls"),
 };
 
 // ============================================================================
