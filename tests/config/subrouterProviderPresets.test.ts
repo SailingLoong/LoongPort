@@ -9,7 +9,7 @@ import { opencodeProviderPresets } from "@/config/opencodeProviderPresets";
 import { hasIcon } from "@/icons/extracted";
 
 const WEBSITE_URL = "https://subrouter.ai";
-const API_KEY_URL = "https://subrouter.ai/register?aff=l3ri";
+const API_KEY_URL = "https://subrouter.ai/register";
 
 describe("SubRouter provider presets", () => {
   it("uses the Anthropic-compatible root endpoint for Claude", () => {

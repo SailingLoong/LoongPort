@@ -79,9 +79,9 @@ export function SkillStorageLocationSettings({
       </header>
       <div className="inline-flex gap-1 rounded-md border border-border-default bg-background p-1">
         <StorageButton
-          active={value === "cc_switch"}
+          active={value === "loongport"}
           disabled={isMigrating}
-          onClick={() => handleSelect("cc_switch")}
+          onClick={() => handleSelect("loongport")}
         >
           {t("settings.skillStorage.ccSwitch")}
         </StorageButton>

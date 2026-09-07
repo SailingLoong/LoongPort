@@ -66,9 +66,11 @@ pub enum SyncMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillStorageLocation {
-    /// CC Switch 管理目录 (~/.cc-switch/skills/)
+    /// LoongPort 管理目录（~/.loongport/skills/）。旧名 `cc_switch` 经 alias
+    /// 继续可解析——存量 settings.json 里的持久化值不必迁移。
     #[default]
-    CcSwitch,
+    #[serde(rename = "loongport", alias = "cc_switch")]
+    LoongPort,
     /// Agent Skills 统一标准目录 (~/.agents/skills/)
     Unified,
 }
@@ -562,7 +564,7 @@ impl SkillService {
     pub fn get_ssot_dir() -> Result<PathBuf> {
         let location = crate::settings::get_skill_storage_location();
         let dir = match location {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::LoongPort => get_app_config_dir().join("skills"),
             SkillStorageLocation::Unified => {
                 crate::config::get_home_dir().join(".agents").join("skills")
             }
@@ -1623,7 +1625,7 @@ impl SkillService {
         // 1. 解析旧目录和新目录（不改设置）
         let old_dir = Self::get_ssot_dir()?;
         let new_dir = match target {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::LoongPort => get_app_config_dir().join("skills"),
             SkillStorageLocation::Unified => {
                 crate::config::get_home_dir().join(".agents").join("skills")
             }
@@ -5458,7 +5460,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn uninstall_warns_when_the_pi_root_cannot_be_resolved() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir =
@@ -5755,7 +5757,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_rejects_an_aliased_destination_before_moving_skills() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir =
@@ -5777,7 +5779,7 @@ mod tests {
         );
         assert_eq!(
             crate::settings::get_skill_storage_location(),
-            SkillStorageLocation::CcSwitch
+            SkillStorageLocation::LoongPort
         );
         assert!(
             source.join("SKILL.md").exists(),
@@ -5802,7 +5804,7 @@ mod tests {
             .join("test-skill");
         write_skill(&old_source, "managed");
 
-        let result = SkillService::migrate_storage(&db, SkillStorageLocation::CcSwitch)
+        let result = SkillService::migrate_storage(&db, SkillStorageLocation::LoongPort)
             .expect("migrate away from alias");
         let new_source = crate::config::get_app_config_dir()
             .join("skills")
@@ -5861,7 +5863,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_retargets_a_managed_pi_symlink() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
@@ -5899,7 +5901,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_retargets_an_equivalent_relative_pi_symlink() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
         let temp = tempdir().expect("tempdir");
         let _home = TestHomeGuard::set(temp.path());
         let _pi_dir =
@@ -5939,7 +5941,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn migrate_storage_skips_bad_rows_without_moving_foreign_dirs() {
-        let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
+        let _location = StorageLocationGuard::set(SkillStorageLocation::LoongPort);
 
         let temp = tempdir().expect("tempdir");
         let _guard = TestHomeGuard::set(temp.path());

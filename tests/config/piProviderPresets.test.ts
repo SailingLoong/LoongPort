@@ -21,7 +21,7 @@ describe("Pi provider presets", () => {
     const keys = piProviderPresets.map((preset) => preset.providerKey);
 
     expect(new Set(keys).size).toBe(keys.length);
-    expect(keys.every((key) => key.startsWith("cc-switch-"))).toBe(true);
+    expect(keys.every((key) => key.startsWith("loongport-"))).toBe(true);
   });
 
   it("only supplies configuration defaults, never a second gateway decision", () => {
