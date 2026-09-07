@@ -29,6 +29,16 @@ const SETTING_FLUSHED_THROUGH: &str = "crowd_metrics_flushed_through";
 const SETTING_SOURCE_DAY: &str = "crowd_metrics_source_day";
 const SETTING_SOURCE_ID: &str = "crowd_metrics_source_id";
 
+/// flush 的两道门禁合成一个谓词（纯函数便于闸测试）：
+///
+/// 1. 开关关着 ⇒ 不发（连读都省）；
+/// 2. **共建告知没看过 ⇒ 同样不发** —— 2026-09-07 默认开拍板后，「看过告知」
+///    取代「点了同意」成为知情的证明：没见过那条告知的用户，无论默认值是什么，
+///    一个字节都不该离开本机。
+pub(crate) fn upload_allowed(enabled: bool, notice_confirmed: Option<bool>) -> bool {
+    enabled && notice_confirmed == Some(true)
+}
+
 /// 一次上传载荷。字段集合被闸测试钉死 —— 加字段前先过模块文档那张表。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -149,8 +159,13 @@ fn ensure_daily_source_id(db: &Database, now_epoch: i64) -> Result<String, AppEr
 /// 收 `&Arc<Database>`：阻塞 DB 工作要搬进 `spawn_blocking`（'static），
 /// 引用进不去 —— 与 `run_session_sync` 同一个形态。
 pub async fn flush_once(db: &std::sync::Arc<Database>) -> Result<(), AppError> {
-    // 共建门禁：设置里关着就一个字节都不发（连读都省）。
-    if !crate::settings::get_settings().crowd_metrics_enabled {
+    // 共建门禁（两道合成一个谓词，见 upload_allowed）：开关关着、或告知没看过，
+    // 都是一个字节都不发。
+    let settings = crate::settings::get_settings();
+    if !upload_allowed(
+        settings.crowd_metrics_enabled,
+        settings.crowd_metrics_notice_confirmed,
+    ) {
         return Ok(());
     }
 
@@ -368,6 +383,18 @@ mod tests {
                 "载荷里出现了 {forbidden}: {text}"
             );
         }
+    }
+
+    #[test]
+    fn upload_gate_truth_table() {
+        // 唯一放行组合：开关开着 且 看过告知。
+        assert!(upload_allowed(true, Some(true)));
+        // 默认开拍板后的两条红线：
+        // 没看过告知（含新装机默认 true 但告知还没弹）—— 绝不上传。
+        assert!(!upload_allowed(true, None));
+        // 已明确拒绝（显式 false）—— 永不被默认值翻回。
+        assert!(!upload_allowed(false, Some(true)));
+        assert!(!upload_allowed(false, None));
     }
 
     #[test]

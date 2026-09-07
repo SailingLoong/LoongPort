@@ -53,9 +53,10 @@ export function WindowSettings({ settings, onChange }: WindowSettingsProps) {
           }
         />
 
-        {/* 站点实测共建（第二个隐私开关，紧挨着第一个）。与匿名统计的区别：
-            默认关 + 对等条款（参与才解锁广场实测数据）。在这里打开也算一次
-            明确表态 —— 直接置 confirmed，不再追着弹告知。 */}
+        {/* 站点实测共建（第二个隐私开关，紧挨着第一个）。2026-09-07 起默认开、
+            与匿名统计一致；对等条款照旧（参与才解锁广场实测数据）。在这里
+            打开也算看过告知 —— 直接置 confirmed，不再追着弹。上传侧的知情
+            不变式（没看过告知不发字节）在后端 crowd::uploader。 */}
         <ToggleRow
           icon={<Gauge className="h-4 w-4 text-teal-500" />}
           title={t("settings.crowdMetrics")}

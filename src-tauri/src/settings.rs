@@ -425,11 +425,15 @@ pub struct AppSettings {
     /// 站点实测数据共建：上传本地聚合指标（小时桶，见 `crowd` 模块文档那张表），
     /// 同时解锁广场的实测数据展示（对等条款）。
     ///
-    /// **默认关** —— 与 `enable_anonymous_stats` 的「默认开」刻意相反：那个是
-    /// 维护者需求、只报站点名单；这个是用户功能、数据更细粒度，必须知情后才参与。
-    #[serde(default)]
+    /// **默认开**（2026-09-07 拍板，原为默认关）：广场名次已完全押在实测数据上，
+    /// 而 opt-in 冷启动一个月实测零外部参与者，空数据比默认开更伤产品。配套的
+    /// 知情不变式在 [`crate::crowd::uploader`]：**看过首启告知才会真的上传**，
+    /// `crowd_metrics_notice_confirmed != Some(true)` 时一个字节都不发。
+    /// 已明确拒绝过的用户存的是显式 `false`，翻默认值动不到他们。
+    #[serde(default = "default_true")]
     pub crowd_metrics_enabled: bool,
-    /// 共建告知弹窗表过态没。`None` = 还没表态 ⇒ 首次触达实测数据时弹一次。
+    /// 共建告知看过了没。`None` = 还没看过 ⇒ 有中转站后弹一次告知。
+    /// 置位（`Some(true)`）是上传的前置条件之一（见 `crowd::uploader` 的门禁），
     /// 与 `stats_notice_confirmed` / `proxy_confirmed` 同一个惯例。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crowd_metrics_notice_confirmed: Option<bool>,
@@ -655,7 +659,9 @@ impl Default for AppSettings {
             enable_anonymous_stats: true,
             stats_notice_confirmed: None,
             stats_install_id: None,
-            crowd_metrics_enabled: false,
+            // 默认开（2026-09-07 起）：知情由 uploader 的「看过告知」门禁保证，
+            // 见字段上的说明。显式拒绝过的用户不受默认值影响。
+            crowd_metrics_enabled: true,
             crowd_metrics_notice_confirmed: None,
             cc_switch_import_prompted: None,
             star_reward_claimed: None,
@@ -1395,6 +1401,31 @@ mod tests {
             serde_json::from_str(r#"{"unifyCodexSessionHistory":false}"#)
                 .expect("显式 false 应能解析");
         assert!(!explicit_off.unify_codex_session_history);
+    }
+
+    #[test]
+    fn crowd_metrics_defaults_on_but_explicit_opt_out_is_never_flipped() {
+        // 2026-09-07 默认开拍板的回归闸。两条路径都必须默认开：`Default` impl 管
+        // 新装机，字段级 serde default 管「settings.json 存在但缺这个键」
+        // （从未见过共建告知的存量用户）。
+        assert!(
+            AppSettings::default().crowd_metrics_enabled,
+            "新装机默认必须开"
+        );
+        let from_partial: AppSettings = serde_json::from_str("{}").expect("空对象应能解析");
+        assert!(
+            from_partial.crowd_metrics_enabled,
+            "settings.json 缺这个键时必须读成 true"
+        );
+
+        // 关键不变式：点过「暂不参与」的用户存的是显式 false，翻默认值绝不能
+        // 把他们静默重新拉进上传 —— 那等于推翻用户已做的明确选择。
+        let opted_out: AppSettings = serde_json::from_str(
+            r#"{"crowdMetricsEnabled":false,"crowdMetricsNoticeConfirmed":true}"#,
+        )
+        .expect("显式拒绝应能解析");
+        assert!(!opted_out.crowd_metrics_enabled);
+        assert_eq!(opted_out.crowd_metrics_notice_confirmed, Some(true));
     }
 
     #[test]

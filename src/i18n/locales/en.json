@@ -3296,9 +3296,9 @@
       "footnote": "Shared anonymously by users, for reference only; cost is a blended-model estimate.",
       "notice": {
         "title": "Crowd-measured site stats",
-        "question": "Want to see real-world stats for each relay site (first-token time, error rate)?",
-        "finePrint": "Only anonymous site metrics are uploaded — no prompts or keys. You can turn this off anytime in Settings.",
-        "accept": "Agree",
+        "question": "Join crowd-measured site stats? Participants anonymously upload site metrics (first-token time, error rate, hourly aggregates).",
+        "finePrint": "No prompts, keys, or account info. You can turn this off anytime in Settings.",
+        "accept": "Join",
         "decline": "Not now"
       },
       "distTitle": "First-token time distribution",
