@@ -355,10 +355,11 @@ pub(crate) fn request_timeout(n: u32) -> std::time::Duration {
     std::time::Duration::from_secs(SINGLE_IMAGE_TIMEOUT_SECS * n.max(1) as u64)
 }
 
-/// 一次请求最多几张。闸在核心层这一份（两条入口都调 [`validate_count`]）：
-/// 一次 `n` 张就是 `n` 张的钱，前端选择器与工具 schema 只放合法值，
-/// 但真正的闸必须在后端 —— 别的入口不该绕过它。
-pub(crate) const MAX_IMAGE_COUNT: u32 = 4;
+/// 一次生成最多几张。闸在核心层这一份（两条入口都调 [`validate_count`]）：
+/// 一次 `n` 张就是 `n` 张的钱，前端与工具 schema 只是入口，真正的闸必须在后端 ——
+/// 别的入口不该绕过它。50 是「用户明确要一批」的合理上限，也是防手滑的天花板
+/// （比如把循环变量当张数传进来）。
+pub(crate) const MAX_IMAGE_COUNT: u32 = 50;
 
 /// 张数的唯一判据（合法原样返回，越界报错）。App 内命令与 MCP 工具共用，
 /// 各自再写一遍范围就会分叉。
@@ -367,6 +368,75 @@ pub(crate) fn validate_count(n: u32) -> Result<u32, String> {
         Ok(n)
     } else {
         Err(format!("张数只支持 1 到 {MAX_IMAGE_COUNT}"))
+    }
+}
+
+/// >4 张的批量并发跑单张请求时，同时在途的请求数。
+///
+/// 50 个请求同时打一家中转站容易撞限流（429），排队比触发对方风控便宜；
+/// 4 与单请求的张数上限对齐，一个小批量就是一波。
+const BATCH_CONCURRENCY: usize = 4;
+
+/// 批量生图的分单：
+///
+/// - `≤4` 张：**一条请求带 `n`**（现状路径）—— 账单一行、原子成功或失败。
+/// - `>4` 张：**拆成单张请求并发跑**。上游的 `n` 参数不是无限收的（官方 images
+///   API 单请求有上限，中转站各自截断），单张并发是唯一到处都通的形状；并发也让
+///   总耗时 ≈ 张数/并发数 × 单张时间，而不是串行叠加 —— 这正是放开到 50 张后
+///   超时仍然可控的原因。
+fn split_batch(total: u32) -> Vec<u32> {
+    if total <= 4 {
+        vec![total]
+    } else {
+        vec![1; total as usize]
+    }
+}
+
+/// 批量生图入口：分单 → 有界并发执行 → 汇总。
+///
+/// **部分失败不整体报错**：成功的图都已落盘、用户拿得到，返回值带失败张数，
+/// 由调用方提示（App 内的 warning toast / MCP 的 text block）。全部失败才 `Err`
+/// —— 那时把第一条错误原文带出去（生图失败的原因几乎全在服务端）。
+pub(crate) async fn generate_batch(
+    tier: &Tier,
+    prompt: &str,
+    size: Option<&str>,
+    total: u32,
+) -> Result<(Vec<GeneratedImage>, usize), String> {
+    let batches = split_batch(total);
+    let results: Vec<Result<Vec<GeneratedImage>, String>> = {
+        use futures::stream::StreamExt as _;
+        // 先 `.copied()` 再闭包：闭包参数是所有权 u32 而不是引用 —— 闭包借迭代项
+        // 引用会撞上「closure 的 FnOnce 不够 general」的 HRTB 限制（编译器把签名
+        // 统一成对任意生命周期成立的那种，async 块办不到）。
+        futures::stream::iter(
+            batches
+                .iter()
+                .copied()
+                .map(|n| generate_image(tier, prompt, size, n, request_timeout(n))),
+        )
+        .buffered(BATCH_CONCURRENCY)
+        .collect()
+        .await
+    };
+
+    let mut images = Vec::new();
+    let mut failed = 0usize;
+    let mut first_error = None;
+    for (batch_size, result) in batches.iter().zip(results) {
+        match result {
+            Ok(mut saved) => images.append(&mut saved),
+            Err(e) => {
+                log::warn!("批量生图中一张（n={batch_size}）失败: {e}");
+                failed += *batch_size as usize;
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    if images.is_empty() {
+        Err(first_error.unwrap_or_else(|| "生图接口没有返回任何图片".into()))
+    } else {
+        Ok((images, failed))
     }
 }
 
@@ -788,9 +858,20 @@ base_url = "https://api.example.com/v1"
     fn validate_count_is_the_single_range_gate() {
         assert_eq!(validate_count(1).unwrap(), 1);
         assert_eq!(validate_count(4).unwrap(), 4);
-        for bad in [0, 5, 50] {
+        assert_eq!(validate_count(50).unwrap(), 50);
+        for bad in [0, 51, 500] {
             assert!(validate_count(bad).is_err(), "n={bad} 必须被拒");
         }
+    }
+
+    /// 拆单规则：≤4 一条请求（账单一行、原子成败）；>4 拆并发单张
+    /// （上游 `n` 参数不是无限收的，单张并发是唯一到处都通的形状）。
+    #[test]
+    fn split_batch_routes_small_totals_into_one_request() {
+        assert_eq!(split_batch(1), vec![1]);
+        assert_eq!(split_batch(4), vec![4]);
+        assert_eq!(split_batch(5), vec![1; 5]);
+        assert_eq!(split_batch(50), vec![1; 50]);
     }
 
     /// 同一份内容得到同一个名字（可复现），不同内容不撞名。

@@ -676,11 +676,13 @@ export interface ImagegenImageRef {
   mime: string;
 }
 
-/** `relayImagegenGenerate` 的返回：这次用了哪个档位/模型、图片落在哪。 */
+/** `relayImagegenGenerate` 的返回：这次用了哪个档位/模型、图片落在哪、几张没成。 */
 export interface ImagegenGenerateResult {
   tierName: string;
   model: string;
   images: ImagegenImageRef[];
+  /** 部分失败的张数（批量并发下成功的那部分已落盘）。 */
+  failed: number;
 }
 
 /** 画廊里一张图的元数据（路径 / 格式 / 大小 / mtime，均由后端给出）。 */

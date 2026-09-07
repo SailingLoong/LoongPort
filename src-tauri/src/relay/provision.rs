@@ -1033,6 +1033,8 @@ pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// 生图模型的名字前缀家族。**一个表唯源**：[`is_image_model`]（认不认）与
 /// [`image_model_rank`]（谁更新）都从这里取 —— 两者必须对同一个集合给出一致答案。
+/// grok 家族形态特殊（有精确匹配条目），单独放 [`is_grok_image_model`]，两处同样
+/// 引用它 —— 前缀表 + grok 特判合起来才是完整的「生图模型集合」。
 ///
 /// ## 家族与准入依据
 ///
@@ -1042,20 +1044,21 @@ pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 ///   `nano-banana-2` 与 `gpt-image-2` 同走 `/v1/images/generations`（OpenAI images
 ///   语义，b64_json 返回）。不认它的话，「`gpt-image-*` + `nano-banana-*`」的纯生图
 ///   分组会被当混合分组落进聊天栏。
+/// - grok 家族（[`is_grok_image_model`]，2026-09-07 准入）：照抄上游
+///   `isGrokImageGenerationModel` 的三条 —— `grok-imagine` / `grok-imagine-edit`
+///   精确匹配、`grok-imagine-image*` 前缀。中转站把 grok 生图挂在 **openai 平台
+///   分组**上卖（app_type 是 Codex，sk 走 `auth.OPENAI_API_KEY`），生图端点同一条
+///   `/v1/images/generations`，所以与 GPT 族同样准入。`grok-imagine-video` **不在**
+///   白名单：上游不认它（`isGrokImageGenerationModel` 的前缀是 `grok-imagine-image`），
+///   认了只会写出转发不了的配置。
 ///
 /// 仍然**不收** `dall-e` / `flux` / `imagen`：它们虽在 new-api 上游官方表
 /// `ImageGenerationModels`（`common/model.go`）里，但那张表是静态的、连 `gpt-image-2`
 /// 都没有，站点 fork 普遍自行扩展（实测有站点同时服务 `gpt-image-2` 与 `nano-banana-2`，
 /// 都不在官方表里）—— 即 new-api 侧**不存在一张可照抄的权威表**，本仓的准入口径是
-/// 「有站点实测背书才收」。目前也无 LoongPort 用户的真实分组踩到那三族；而且收了
-/// 会波及 sub2api 侧（其上游 `IsGPTImageGenerationModel` 只有 GPT 族，认了只会写出
-/// 转发不了的配置）。谁踩到新家族就在这里加一行 —— [`image_model_rank`] 的家族
-/// 优先级随之生效（**表里越靠前的家族跨家族并存时越优先**，`gpt-image-*` 是生图
-/// 管线的原生家族）。
-///
-/// ⚠️ 有意不含上游 `isOpenAIImageGenerationModel` 另外认的三个 grok 别名
-/// （`grok-imagine` / `-edit` / `-image*`）—— 生图工具只装在 codex 档位上
-/// （openai 平台），grok 档位落的是另一个 CLI。
+/// 「有上游判据或站点实测背书才收」。谁踩到新家族就在这里加一行 ——
+/// [`image_model_rank`] 的家族优先级随之生效（**表里越靠前的家族跨家族并存时越
+/// 优先**，`gpt-image-*` 是生图管线的原生家族，grok 家族垫底）。
 const IMAGE_MODEL_FAMILIES: &[&str] = &["gpt-image-", "nano-banana"];
 
 /// 一条档位该落到哪一栏：纯生图的进 [`AppType::CodexImage`]，其余原样返回。
@@ -1498,6 +1501,11 @@ fn maybe_one_m(tables: &ModelSelectionTables, model: &str) -> String {
 /// 优先级越高），同家族再按数字段比 —— `gpt-image-1.5` → `[1, 5]`、`gpt-image-2` →
 /// `[2]`、`gpt-image-10` → `[10]`，逐段比较，段数不同时短的算小（`1` < `1.5`）。
 /// 认不出数字的版本段排空（那种名字无从判断新旧，让它输给能判的）。
+///
+/// grok 家族（[`is_grok_image_model`]）不在前缀表里，表循环不命中后单独排：
+/// 优先级 0（垫底 —— 与 nano-banana 同级，但版本段从 `grok-imagine-image` 之后
+/// 抠，现无带版本号的形态 ⇒ 恒空段 ⇒ 跨家族并存时输给有版本的；`gpt-image-*`
+/// 与 grok 混编时 GPT 族靠表内优先级胜出）。
 fn image_model_rank(model: &str) -> (u32, Vec<u32>) {
     let normalized = model.trim().to_ascii_lowercase();
     for (index, prefix) in IMAGE_MODEL_FAMILIES.iter().enumerate() {
@@ -1518,6 +1526,20 @@ fn image_model_rank(model: &str) -> (u32, Vec<u32>) {
             .filter_map(|seg| seg.parse::<u32>().ok())
             .collect();
         return (precedence, segments);
+    }
+    if is_grok_image_model(&normalized) {
+        let rest = normalized.strip_prefix("grok-imagine-image").unwrap_or("");
+        let version: String = rest
+            .trim_start_matches('-')
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        let segments = version
+            .split('.')
+            .filter(|seg| !seg.is_empty())
+            .filter_map(|seg| seg.parse::<u32>().ok())
+            .collect();
+        return (0, segments);
     }
     (0, Vec::new())
 }
@@ -1542,7 +1564,7 @@ fn grok_model_rank(model: &str) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// 这个模型名是生图模型吗（[`IMAGE_MODEL_FAMILIES`] 前缀家族）。
+/// 这个模型名是生图模型吗（[`IMAGE_MODEL_FAMILIES`] 前缀家族 + grok 家族）。
 ///
 /// UI 据此显示「生图档位」标记。判据放在**模型名**而不是「拉一次 `/v1/models` 看看」，
 /// 是因为 `relay_list_relays` 那条路**只读本地不发网络**（首屏契约）——
@@ -1565,6 +1587,19 @@ pub fn is_image_model(model: &str) -> bool {
     IMAGE_MODEL_FAMILIES
         .iter()
         .any(|prefix| normalized.starts_with(prefix))
+        || is_grok_image_model(&normalized)
+}
+
+/// grok 生图家族，照抄上游 sub2api `isGrokImageGenerationModel` 的三条（接口事实）：
+/// `grok-imagine` / `grok-imagine-edit` 精确匹配，`grok-imagine-image*` 前缀。
+///
+/// 不并进 [`IMAGE_MODEL_FAMILIES`]（纯前缀表）—— `grok-imagine` 当前缀会连
+/// `grok-imagine-video` 一起收进来，而上游不认 video（写了转发不了）。
+/// 传入的串须已过 [`is_image_model`] 的归一化（trim + 小写）。
+fn is_grok_image_model(normalized: &str) -> bool {
+    normalized == "grok-imagine"
+        || normalized == "grok-imagine-edit"
+        || normalized.starts_with("grok-imagine-image")
 }
 
 /// 这个分组是不是「纯生图分组」：目录里一个非生图模型都没有。
@@ -2152,6 +2187,42 @@ mod tests {
         assert!(!is_image_model(DEFAULT_MODEL));
         assert!(!is_image_model("gpt-5.4-mini"));
         assert!(!is_image_model(""));
+    }
+
+    /// grok 家族照抄上游 `isGrokImageGenerationModel` 的三条（2026-09-07 准入，
+    /// 见 `is_grok_image_model` 的文档）—— 与上游分叉的方向都是坏的：
+    /// 我们认上游不认 ⇒ 写出转发不了的配置；上游认我们不认 ⇒ 纯生图分组被当
+    /// 混合分组落聊天栏、还写个文本模型进去。
+    #[test]
+    fn grok_image_family_matches_the_upstream_allowlist_exactly() {
+        // 三条白名单。
+        assert!(is_image_model("grok-imagine"));
+        assert!(is_image_model("grok-imagine-edit"));
+        assert!(is_image_model("grok-imagine-image"));
+        assert!(is_image_model("grok-imagine-image-quality"));
+        // 上游不认的近亲：video 是视频模型（写了转发不了），grok-4 是文本模型。
+        assert!(!is_image_model("grok-imagine-video"));
+        assert!(!is_image_model("grok-4"));
+        assert!(!is_image_model("grok-code-4.6"));
+        // 归一化与 GPT 族同一待遇。
+        assert!(is_image_model("  Grok-Imagine-Image  "));
+    }
+
+    /// 只挂 grok 生图模型的分组是纯生图分组，默认模型就是其中版本最新的那个
+    /// （而不是被当成混合分组写个文本模型进去）。
+    #[test]
+    fn a_grok_only_group_picks_its_own_model() {
+        let only = vec![
+            "grok-imagine-image".to_string(),
+            "grok-imagine-image-2".to_string(),
+        ];
+        assert!(is_pure_image_group(&only));
+        assert_eq!(pick_model(Some(&only)), "grok-imagine-image-2");
+
+        // 跨家族混编：gpt-image 靠表内家族优先级胜出。
+        let mixed = vec!["grok-imagine-image".to_string(), "gpt-image-2".to_string()];
+        assert!(is_pure_image_group(&mixed));
+        assert_eq!(pick_model(Some(&mixed)), "gpt-image-2");
     }
 
     /// 跨家族并存时表里靠前的家族（`gpt-image-*`）优先 —— 2026-09-05 实测的某 new-api

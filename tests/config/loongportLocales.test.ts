@@ -368,11 +368,16 @@ const requiredKeys = [
   "imagegenPlayground.tierLabel",
   "imagegenPlayground.noTier",
   "imagegenPlayground.noTierHint",
+  // 档位快切 Combobox 的筛选占位与空态（照中转站广场的筛选交互）。
+  "imagegenPlayground.tierFilterPlaceholder",
+  "imagegenPlayground.tierFilterEmpty",
   "imagegenPlayground.promptPlaceholder",
   "imagegenPlayground.sizeLabel",
-  // 批量张数的计费/耗时提示是知情前提 —— 缺了它「×4」就是个不知价格的按钮。
+  // 批量张数的计费/耗时提示是知情前提 —— 缺了它自由输入就是个不知价格的框；
+  // 部分失败 toast 是「成功的已到手、几张没成」的唯一交代。
   "imagegenPlayground.countLabel",
   "imagegenPlayground.countHint",
+  "imagegenPlayground.partialFailureToast",
   "imagegenPlayground.generate",
   "imagegenPlayground.generating",
   "imagegenPlayground.generateHint",

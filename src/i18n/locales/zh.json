@@ -3442,7 +3442,7 @@
       "companionNotice": "本页可直接生图，也可在 CLI 对话中生图",
       "companionDetail": "生成视图直接出图，不经过 CLI 会话；生图与聊天各用各的接入配置，切换后下次生成即生效。",
       "emptyTitle": "尚无图像生成接入配置",
-      "emptyBody": "创建接入配置时，LoongPort 会识别仅支持 gpt-image 模型的分组。若中转站未提供这类分组，本页将保持为空。",
+      "emptyBody": "创建接入配置时，LoongPort 会识别仅含生图模型（gpt-image、grok-imagine 等）的分组。若中转站未提供这类分组，本页将保持为空。",
       "mcpSwitchLabel": "在 Codex / Claude 对话中提供生图工具",
       "mcpSwitchHint": "关闭后不再注册到 CLI（本页直接生图不受影响）；首次开启后需新开终端加载"
     },
@@ -3453,11 +3453,13 @@
       },
       "tierLabel": "当前接入配置",
       "noTier": "未选择",
-      "noTierHint": "还没有生图接入配置；仅支持 gpt-image 模型的分组会自动产生。",
+      "noTierHint": "还没有生图接入配置；仅含生图模型（gpt-image、grok-imagine 等）的分组会自动产生。",
+      "tierFilterPlaceholder": "输入站点或模型筛选…",
+      "tierFilterEmpty": "没有匹配的接入配置",
       "promptPlaceholder": "描述要生成的图片…",
       "sizeLabel": "尺寸",
       "countLabel": "张数",
-      "countHint": "一次生成多张：按张数计费，也会更慢（每张约半分钟到两分钟）",
+      "countHint": "一次生成多张（1-50）：按张数计费；超过 4 张自动并发提交，耗时约等于张数÷4 乘单张时间",
       "generate": "生成",
       "generating": "生成中…",
       "generateHint": "生图较慢，通常需要半分钟到两分钟",
@@ -3465,7 +3467,8 @@
       "galleryTitle": "生成记录",
       "galleryLoading": "加载中…",
       "galleryEmpty": "还没有生成过图片",
-      "reveal": "在文件夹中显示"
+      "reveal": "在文件夹中显示",
+      "partialFailureToast": "已生成 {{count}} 张（{{model}}），{{failed}} 张失败"
     },
     "siteConfig": {
       "entry": "导入站点配置",
