@@ -10,11 +10,10 @@ import { emitTauriEvent } from "../msw/tauriMocks";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 describe("useRelayDirectoryCacheBridge", () => {
-  it("invalidates an existing leaderboard while the directory page is closed", async () => {
+  it("invalidates the listing while the directory page is closed", async () => {
     const client = createTestQueryClient();
-    const key = relayDirectoryKeys.byKind("claude");
+    const key = relayDirectoryKeys.listing();
     client.setQueryData(key, {
-      kind: "claude",
       items: [],
       syncedAt: 1,
     });
@@ -24,7 +23,7 @@ describe("useRelayDirectoryCacheBridge", () => {
     renderHook(() => useRelayDirectoryCacheBridge(), { wrapper });
 
     act(() => {
-      emitTauriEvent(RELAY_DIRECTORY_UPDATED_EVENT, { kind: "claude" });
+      emitTauriEvent(RELAY_DIRECTORY_UPDATED_EVENT, null);
     });
 
     expect(client.getQueryState(key)?.isInvalidated).toBe(true);

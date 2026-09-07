@@ -3195,24 +3195,16 @@
     },
     "directory": {
       "title": "中継サイト一覧",
-      "description": "VeriDrop の公開検証結果からサイトを選びます。登録またはログインに成功した場合のみ LoongPort に追加されます。",
-      "tabs": {
-        "overall": "総合",
-        "claude": "Claude",
-        "openai": "OpenAI",
-        "gemini": "Gemini"
-      },
+      "description": "サイトを選ぶと、登録またはログインに成功した場合のみ LoongPort に追加されます。",
       "source": {
-        "syncedAt": "VeriDrop ライブデータ · {{time}} 更新"
+        "syncedAt": "実測データ · {{time}} 更新"
       },
-      "searchPlaceholder": "サイト、プロトコル、用途を検索",
-      "loading": "VeriDrop ランキングを読み込んでいます…",
+      "searchPlaceholder": "サイトを検索",
+      "loading": "中継サイト一覧を読み込んでいます…",
       "errorTitle": "中継サイト一覧を読み込めません",
-      "errorBody": "ライブデータと前回成功時のキャッシュのどちらも利用できません。",
-      "refreshFailed": "VeriDrop ランキングを更新できませんでした：{{reason}}",
+      "errorBody": "読み込みに失敗しました。しばらくしてから再試行してください。",
+      "refreshFailed": "中継サイト一覧を更新できませんでした：{{reason}}",
       "empty": "現在の条件に一致するサイトはありません。検索ボックスから直接追加できます",
-      "scoreLabel": "VeriDrop",
-      "signatureHint": "Claude 思考署名の検証成功率",
       "transit": {
         "multiplierHint": "サイトが ai-transit 公開プロトコルで公表している最小グループの総合倍率（チャージ倍率 × モデル倍率）。低いほど安い。",
         "availabilityHint": "サイトの公開モニタリングによる最低グループ可用性。7 日窓を優先し、欠損時はより長い公開窓にフォールバック。",
@@ -3237,16 +3229,10 @@
       },
       "compatibilityNote": "一部の非互換サイトは表示されません",
       "provisionFailed": "アカウントは追加されましたが、接続設定の作成に失敗しました：{{reason}}。中継サイト一覧から再試行できます。",
-      "meta": {
-        "samples": "{{count}} 回の検証",
-        "latest": "最終 {{date}}",
-        "supplementalRank": "補足"
-      },
       "actions": {
         "authenticate": "登録またはログイン",
         "autoAddHint": "完了後に自動追加",
-        "history": "全履歴",
-        "refresh": "ライブランキングを更新",
+        "refresh": "データを更新",
         "retry": "再試行"
       },
       "pagination": {
@@ -3332,7 +3318,9 @@
     },
     "crowd": {
       "badgeLabel": "実測 {{value}}",
+      "errBadgeLabel": "エラー率 {{value}}",
       "badgeHint": "LoongPort ユーザーが実測した直近 24 時間の初トークン中央値。クリックで詳細",
+      "errBadgeHint": "LoongPort ユーザーが実測した直近 24 時間のエラー率。クリックで詳細",
       "sectionTitle": "ユーザー実測",
       "window24": "直近 24 時間",
       "window7": "直近 7 日間",

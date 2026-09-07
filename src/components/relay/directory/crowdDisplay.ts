@@ -44,3 +44,11 @@ export function errRateTone(rate: number): string {
   if (rate < 0.03) return "text-foreground";
   return "text-amber-600 dark:text-amber-400";
 }
+
+/** 错误率徽章底色版（同上档位）。 */
+export function errRateBadgeTone(rate: number): string {
+  if (rate < 0.005)
+    return "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300";
+  if (rate < 0.03) return "border-border-default bg-muted/40 text-foreground";
+  return "border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300";
+}

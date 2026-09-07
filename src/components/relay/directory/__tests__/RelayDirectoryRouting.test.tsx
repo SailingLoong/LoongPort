@@ -36,7 +36,7 @@ vi.mock("@/components/relay/RelaySection", () => ({
   RelaySection: ({ appId, onOpenAddHub }: any) => (
     <div data-testid="relay-section">
       <span data-testid="relay-source-app">{appId}</span>
-      {/* 普通添加入口已上收到顶栏大「+」（聚合页默认落综合榜）。 */}
+      {/* 普通添加入口已上收到顶栏大「+」（聚合页默认落中转站广场）。 */}
       <button onClick={() => onOpenAddHub("directory")}>
         open-first-run-directory
       </button>
@@ -45,29 +45,13 @@ vi.mock("@/components/relay/RelaySection", () => ({
 }));
 
 vi.mock("../RelayDirectoryPage", () => ({
-  RelayDirectoryPage: ({
-    sourceAppId,
-    initialKind,
-    onBack,
-    onAuthenticated,
-  }: any) => {
-    const sourceDefault =
-      sourceAppId === "claude" || sourceAppId === "claude-desktop"
-        ? "claude"
-        : sourceAppId === "codex" || sourceAppId === "codex-image"
-          ? "openai"
-          : sourceAppId === "gemini"
-            ? "gemini"
-            : "overall";
-    return (
-      <div data-testid="relay-directory">
-        <span data-testid="directory-source-app">{sourceAppId}</span>
-        <span data-testid="directory-kind">{initialKind ?? sourceDefault}</span>
-        <button onClick={onBack}>directory-back</button>
-        <button onClick={onAuthenticated}>directory-authenticated</button>
-      </div>
-    );
-  },
+  RelayDirectoryPage: ({ sourceAppId, onBack, onAuthenticated }: any) => (
+    <div data-testid="relay-directory">
+      <span data-testid="directory-source-app">{sourceAppId}</span>
+      <button onClick={onBack}>directory-back</button>
+      <button onClick={onAuthenticated}>directory-authenticated</button>
+    </div>
+  ),
 }));
 
 function renderApp() {
@@ -90,12 +74,12 @@ describe("relay directory routing", () => {
   });
 
   it.each([["claude"], ["codex"], ["gemini"], ["openclaw"]])(
-    "opens the add hub from %s with the overall leaderboard",
+    "opens the add hub from %s on the relay directory",
     async (appId) => {
       localStorage.setItem(LAST_APP_STORAGE_KEY, appId);
       renderApp();
 
-      // 顶栏大「+」进聚合页，默认落中转站标签、按当前 app 选榜
+      // 顶栏大「+」进聚合页，默认落中转站标签
       //（i18n 空资源下 aria-label 就是 key 本身）。
       fireEvent.click(
         await screen.findByRole("button", {
@@ -107,7 +91,6 @@ describe("relay directory routing", () => {
       expect(screen.getByTestId("directory-source-app")).toHaveTextContent(
         appId,
       );
-      expect(screen.getByTestId("directory-kind")).toHaveTextContent("overall");
       expect(screen.queryByTestId("app-switcher")).not.toBeInTheDocument();
       expect(document.querySelector("header")).toHaveAttribute("hidden");
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
@@ -117,7 +100,7 @@ describe("relay directory routing", () => {
     },
   );
 
-  it("opens the first-run entry on the overall leaderboard", async () => {
+  it("opens the first-run entry on the relay directory", async () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "codex");
     renderApp();
     fireEvent.click(await screen.findByText("open-first-run-directory"));
@@ -125,6 +108,5 @@ describe("relay directory routing", () => {
     expect(await screen.findByTestId("directory-source-app")).toHaveTextContent(
       "codex",
     );
-    expect(screen.getByTestId("directory-kind")).toHaveTextContent("overall");
   });
 });

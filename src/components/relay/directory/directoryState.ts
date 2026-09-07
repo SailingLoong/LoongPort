@@ -1,25 +1,14 @@
-import type { AppId } from "@/lib/api";
-import type { LeaderboardKind, RelayDirectoryItem } from "@/lib/api/relay";
+import type { RelayDirectoryItem } from "@/lib/api/relay";
 
 export const DIRECTORY_PAGE_SIZE = 12;
 
 export interface DirectoryViewState {
-  kind: LeaderboardKind;
   search: string;
   page: number;
 }
 
 export type DirectoryViewAction =
-  | { type: "kind"; kind: LeaderboardKind }
-  | { type: "search"; search: string }
-  | { type: "page"; page: number };
-
-export function defaultDirectoryKind(appId: AppId): LeaderboardKind {
-  if (appId === "claude" || appId === "claude-desktop") return "claude";
-  if (appId === "codex" || appId === "codex-image") return "openai";
-  if (appId === "gemini") return "gemini";
-  return "overall";
-}
+  { type: "search"; search: string } | { type: "page"; page: number };
 
 function normalizeSearch(value: string): string {
   return value
@@ -37,17 +26,7 @@ export function filterDirectoryItems(
   if (!query) return items;
   return items.filter((item) => {
     const haystack = normalizeSearch(
-      [
-        item.displayName,
-        item.siteHost,
-        item.veridropHost,
-        ...item.scenarios,
-        ...item.issues,
-        ...item.protocolScores.flatMap((score) => [
-          score.protocol,
-          score.verdict ?? "",
-        ]),
-      ].join(" "),
+      [item.displayName, item.siteHost, item.siteDomain].join(" "),
     );
     return haystack.includes(query);
   });
@@ -72,8 +51,6 @@ export function reduceDirectoryView(
   action: DirectoryViewAction,
 ): DirectoryViewState {
   switch (action.type) {
-    case "kind":
-      return { ...state, kind: action.kind, page: 1 };
     case "search":
       return { ...state, search: action.search, page: 1 };
     case "page":

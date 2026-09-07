@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { RelayDirectoryItem } from "@/lib/api/relay";
 import {
   DIRECTORY_PAGE_SIZE,
-  defaultDirectoryKind,
   filterDirectoryItems,
   pageDirectoryItems,
   reduceDirectoryView,
@@ -14,60 +13,23 @@ function item(index: number, overrides: Partial<RelayDirectoryItem> = {}) {
   return {
     siteHost: `site-${index}.example`,
     siteDomain: `site-${index}.example`,
-    veridropHost: `probe-${index}.example`,
     displayName: `站点 ${index}`,
     rank: index,
-    score: 90,
-    samples: 20,
-    latestDate: "2026-08-13",
-    detailUrl: `https://veridrop.org/leaderboard/site-${index}.example`,
-    protocolScores: [],
-    claudeSignatureRate: null,
-    scenarios: [],
-    issues: [],
     entryUrl: `https://site-${index}.example`,
-    autoAdd: false,
     ...overrides,
   } satisfies RelayDirectoryItem;
 }
 
 describe("relay directory state", () => {
-  it.each([
-    ["claude", "claude"],
-    ["claude-desktop", "claude"],
-    ["codex", "openai"],
-    ["codex-image", "openai"],
-    ["gemini", "gemini"],
-    ["grokbuild", "overall"],
-    ["opencode", "overall"],
-  ] as const)("maps %s to the %s leaderboard", (appId, kind) => {
-    expect(defaultDirectoryKind(appId)).toBe(kind);
-  });
-
-  it("searches normalized names, hosts, scenarios, issues, and protocols", () => {
+  it("searches normalized names and hosts", () => {
     const items = [
-      item(1, {
-        displayName: "Best API",
-        siteHost: "bestapi.store",
-        scenarios: ["Claude Code / Cursor 编程"],
-        issues: ["token_usage"],
-        protocolScores: [
-          {
-            protocol: "OpenAI",
-            score: 95,
-            samples: 27,
-            verdict: "通过",
-            reportUrl: null,
-          },
-        ],
-      }),
+      item(1, { displayName: "Best API", siteHost: "bestapi.store" }),
       item(2, { displayName: "鑫旺" }),
     ];
 
     expect(filterDirectoryItems(items, "  BESTAPI.STORE ")).toEqual([items[0]]);
-    expect(filterDirectoryItems(items, "cursor")).toEqual([items[0]]);
-    expect(filterDirectoryItems(items, "TOKEN USAGE")).toEqual([items[0]]);
-    expect(filterDirectoryItems(items, "openai")).toEqual([items[0]]);
+    expect(filterDirectoryItems(items, "鑫旺")).toEqual([items[1]]);
+    expect(filterDirectoryItems(items, "")).toEqual(items);
   });
 
   it("paginates in fixed groups of twelve", () => {
@@ -86,15 +48,16 @@ describe("relay directory state", () => {
     });
   });
 
-  it("returns to page one after changing the tab or search", () => {
-    const state = { kind: "claude" as const, search: "", page: 3 };
+  it("returns to page one after changing the search", () => {
+    const state = { search: "", page: 3 };
 
     expect(
-      reduceDirectoryView(state, { type: "kind", kind: "openai" }),
-    ).toEqual({ kind: "openai", search: "", page: 1 });
-    expect(
       reduceDirectoryView(state, { type: "search", search: "best" }),
-    ).toEqual({ kind: "claude", search: "best", page: 1 });
+    ).toEqual({ search: "best", page: 1 });
+    expect(reduceDirectoryView(state, { type: "page", page: 0 })).toEqual({
+      search: "",
+      page: 1,
+    });
   });
 
   it("describes the visible range without inventing rows for an empty result", () => {

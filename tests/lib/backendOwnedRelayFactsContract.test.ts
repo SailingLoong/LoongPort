@@ -24,14 +24,14 @@ describe("中转站业务事实由后端定义", () => {
     expect(main).not.toContain("setInterval");
   });
 
-  it("VeriDrop 后台更新事件和手动刷新命令有唯一契约", () => {
+  it("广场后台更新事件和手动刷新命令有唯一契约", () => {
     const constants = read("src/config/constants.ts");
     const relayApi = read("src/lib/api/relay.ts");
 
     expect(constants).toContain(
       'RELAY_DIRECTORY_UPDATED_EVENT = "relay-directory-updated"',
     );
-    expect(relayApi).toContain('invoke("relay_refresh_directory", { kind })');
+    expect(relayApi).toContain('invoke("relay_refresh_directory")');
   });
 
   it("页面不编排全量刷新或汇总业务结果", () => {

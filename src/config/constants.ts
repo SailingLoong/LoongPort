@@ -22,7 +22,7 @@ export const OFFICIAL_WEBSITE = "https://loongport.dev";
  */
 export const GITHUB_REPO = "https://github.com/SailingLoong/LoongPort";
 
-/** Rust 后台成功写入某个 VeriDrop 榜单缓存后的刷新通知。 */
+/** Rust 后台更新广场数据（实测快照 / transit 摘要）后的刷新通知。 */
 export const RELAY_DIRECTORY_UPDATED_EVENT = "relay-directory-updated";
 
 /** Rust 后台完成 models.dev 定价自动刷新后的通知。 */
