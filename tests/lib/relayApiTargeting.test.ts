@@ -80,6 +80,7 @@ describe("relayApi 的中转站定位参数", () => {
     await relayApi.balance(3);
     expect(invokeMock).toHaveBeenCalledWith("relay_balance", {
       relayId: 3,
+      force: false,
     });
   });
 

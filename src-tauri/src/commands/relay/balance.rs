@@ -69,12 +69,26 @@ pub(crate) fn relay_balance_inputs(
 ///
 /// **不返回 `Err`**（除了「这一行不存在」）：三条路都失败时回 `success:false`，
 /// 前端才有失败态可渲染、有刷新按钮可点。见 [`crate::relay::balance`] 模块文档。
+/// ## 读路径接进 `site_balance_cache`（2026-09-07 收口，修「没改透」）
+///
+/// 站点余额的唯一事实源是 [`crate::relay::balance`] 的缓存（看板 #283/#286 起
+/// 已走它）；本命令此前**每打一次都同步走全链路网络** —— 同一个事实两条读路径，
+/// 开页每行转圈、跨境抖动直接渲染成「查询失败」。现在同一张表：
+///
+/// - 缓存新鲜（TTL 内，含负缓存）→ **秒回缓存值**，零网络；
+/// - 缓存过期但有值 → 立即回旧值 + 踢后台单飞刷新（完成发
+///   `SITE_BALANCES_UPDATED`，前端失效重读）—— SWR；
+/// - 没进过缓存 / `force`（手动刷新按钮）→ 走下面的全链路解析，**结果写回缓存**
+///   （正/负都写），行路径从「旁路」变成「又一个写入方」。
+///
+/// 对账快照采样只在真查那条路上落（缓存命中没有新信息，不采样）。
 #[tauri::command]
 pub async fn relay_balance(
     app_handle: tauri::AppHandle,
     relay_id: i64,
+    force: Option<bool>,
 ) -> Result<balance::RowBalanceResult, String> {
-    relay_balance_impl(&app_handle, relay_id)
+    relay_balance_impl(&app_handle, relay_id, force.unwrap_or(false))
         .await
         .map_err(|error| error.to_string())
 }
@@ -82,6 +96,7 @@ pub async fn relay_balance(
 pub(crate) async fn relay_balance_impl<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
+    force: bool,
 ) -> Result<balance::RowBalanceResult, AppError> {
     let (relay, base_url, api_keys) = {
         let state = app_handle.state::<AppState>();
@@ -90,6 +105,25 @@ pub(crate) async fn relay_balance_impl<R: tauri::Runtime>(
         let (base_url, api_keys) = relay_balance_inputs(&state, &relay);
         (relay, base_url, api_keys)
     };
+
+    if !force {
+        let state = app_handle.state::<AppState>();
+        if let Some(entry) = balance::cached_site_balance(&state.db, &relay.site_origin) {
+            let fresh = chrono::Utc::now().timestamp() - entry.1 <= balance::SITE_BALANCE_TTL_SECS;
+            if !fresh {
+                // 过期：回旧值 + 后台刷（单飞/预算/事件都在那条链里；只用 sk，
+                // 不碰登录态 —— 充值窗口的 cookie 独占权不受影响）。
+                if let Some(key) = api_keys.first() {
+                    balance::spawn_stale_refresh(
+                        state.db.clone(),
+                        Some(app_handle.clone()),
+                        std::collections::HashMap::from([(relay.site_origin.clone(), key.clone())]),
+                    );
+                }
+            }
+            return Ok(balance::cached_row_balance_result(&entry));
+        }
+    }
 
     let usage = balance::resolve(
         balance::BalanceQuery {
@@ -107,9 +141,24 @@ pub(crate) async fn relay_balance_impl<R: tauri::Runtime>(
     .await
     .usage;
 
-    // 余额快照是扣费对账的旁路采样，挂在成功解析之后：写入条件与失败兜底都在
-    // `reconcile::capture_balance_snapshot` 里，这里只出一条调用，不拖垮余额显示。
-    reconcile::capture_balance_snapshot(&app_handle.state::<AppState>().db, relay_id, &usage);
+    {
+        // 真查的结果写回缓存（正/负都写）—— 行路径与看板/后台刷新写同一张表，
+        // 这是「一个事实一个 owner」的落点。快照采样保持只挂真查。
+        let state = app_handle.state::<AppState>();
+        let cached_value = usage
+            .data
+            .as_ref()
+            .and_then(|items| items.first())
+            .and_then(|item| item.remaining);
+        if let Err(e) = balance::upsert_site_balance(
+            &state.db,
+            &relay.site_origin,
+            (cached_value, chrono::Utc::now().timestamp()),
+        ) {
+            log::warn!("[site-balance] 行查询写缓存失败: {e}");
+        }
+        reconcile::capture_balance_snapshot(&state.db, relay_id, &usage);
+    }
 
     Ok(balance::row_balance_result(usage, true))
 }
@@ -125,6 +174,66 @@ mod tests {
             "/api/v1/user/profile",
             get(move || async move { Json(balance) }),
         )
+    }
+
+    /// 行级余额读路径接进 site_balance_cache 后的行为闸：
+    /// TTL 内第二次查询**秒回缓存**（mock 服务只被打一次），`force` 旁路缓存直查。
+    /// 这条守的是「开页不再每行转圈 / 抖动不再渲染成查询失败」的用户可见语义。
+    #[tokio::test]
+    async fn row_balance_serves_cache_within_ttl_and_force_bypasses() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_router = hits.clone();
+        let counting_router = {
+            use axum::{routing::get, Json, Router};
+            let balance = serde_json::json!({
+                "code": 0, "message": "success",
+                "data": { "id": 7, "username": "u", "email": "u@example.com",
+                          "balance": 3.25, "frozen_balance": 0.0 }
+            });
+            Router::new().route(
+                "/api/v1/user/profile",
+                get(move || async move {
+                    hits_for_router.fetch_add(1, Ordering::SeqCst);
+                    Json(balance)
+                }),
+            )
+        };
+        let (origin, _server) = spawn_balance_server(counting_router).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        // 第一次：缓存空 → 走真查（网络一次），结果写缓存。
+        let first = relay_balance_impl(app.handle(), relay_id, false)
+            .await
+            .expect("first resolve");
+        assert!(first.usage.success);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // 第二次：TTL 内 → 秒回缓存，网络零新增。
+        let second = relay_balance_impl(app.handle(), relay_id, false)
+            .await
+            .expect("cached read");
+        assert!(second.usage.success, "缓存正条目也要能拼出成功展示");
+        assert_eq!(
+            second
+                .usage
+                .data
+                .as_ref()
+                .and_then(|i| i.first())
+                .and_then(|i| i.remaining),
+            Some(3.25),
+            "缓存读回同一个数"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "TTL 内不该再打网络");
+
+        // force：手动刷新语义 → 旁路缓存直查（网络第二次）。
+        let forced = relay_balance_impl(app.handle(), relay_id, true)
+            .await
+            .expect("forced resolve");
+        assert!(forced.usage.success);
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "force 必须真的重新查");
     }
 
     #[tokio::test]
@@ -143,7 +252,7 @@ mod tests {
         .await;
         let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
 
-        let result = relay_balance_impl(app.handle(), relay_id)
+        let result = relay_balance_impl(app.handle(), relay_id, false)
             .await
             .expect("成功解析必须 Ok");
 
@@ -170,7 +279,7 @@ mod tests {
         let (origin, server) = spawn_balance_server(router).await;
         let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
 
-        let result = relay_balance_impl(app.handle(), relay_id)
+        let result = relay_balance_impl(app.handle(), relay_id, false)
             .await
             .expect("失败路回 success:false，仍是 Ok");
 
@@ -211,7 +320,7 @@ mod tests {
                 .expect("删表制造写入失败");
         }
 
-        let result = relay_balance_impl(app.handle(), relay_id)
+        let result = relay_balance_impl(app.handle(), relay_id, false)
             .await
             .expect("快照写入失败时余额命令仍必须 Ok");
         assert!(result.usage.success);

@@ -41,6 +41,7 @@ vi.mock("@/lib/api", () => ({
   VENDOR_LOGIN_ERROR: "vendor-login-error",
   VENDOR_ACCOUNTS_CHANGED: "vendor-accounts-changed",
   PROVIDER_SWITCHED: "provider-switched",
+  SITE_BALANCES_UPDATED: "site-balances-updated",
 }));
 vi.mock("@/lib/api/vendor", () => ({
   DEEPSEEK_VENDOR_ID: "deepseek",

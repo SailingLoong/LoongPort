@@ -87,7 +87,7 @@ describe("RowBalance", () => {
     );
 
     expect(await screen.findByText("42.50")).toBeInTheDocument();
-    expect(api.relayBalance).toHaveBeenCalledWith(1);
+    expect(api.relayBalance).toHaveBeenCalledWith(1, false);
   });
 
   /**
