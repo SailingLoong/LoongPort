@@ -3442,7 +3442,7 @@
       "companionNotice": "Generate images here, or from CLI chats",
       "companionDetail": "The Generate view creates images directly, without going through any CLI session; image and chat connection profiles are independent, and switches take effect on the next generation.",
       "emptyTitle": "No image-generation connection profiles",
-      "emptyBody": "When you create connection profiles, LoongPort identifies groups that support only gpt-image models. If your relay service does not offer such a group, this page remains empty.",
+      "emptyBody": "When creating connection profiles, LoongPort recognizes groups that only serve image models (gpt-image, grok-imagine, etc.). If the relay site offers no such group, this page stays empty.",
       "mcpSwitchLabel": "Offer the image tool in Codex / Claude chats",
       "mcpSwitchHint": "Turn off to stop registering the tool with CLIs (direct generation here is unaffected); after enabling, open a new terminal to load it"
     },
@@ -3453,11 +3453,13 @@
       },
       "tierLabel": "Current profile",
       "noTier": "Not selected",
-      "noTierHint": "No image connection profiles yet — they are created from groups that only serve gpt-image models.",
+      "noTierHint": "No image connection profiles yet — they are created from groups that only serve image models (gpt-image, grok-imagine, etc.).",
+      "tierFilterPlaceholder": "Filter by site or model…",
+      "tierFilterEmpty": "No matching connection profiles",
       "promptPlaceholder": "Describe the image to generate…",
       "sizeLabel": "Size",
       "countLabel": "Count",
-      "countHint": "Generates several at once: billed per image, and slower (roughly 30s to 2min each)",
+      "countHint": "Generate several at once (1-50): billed per image; more than 4 are submitted concurrently, taking about (count / 4) × single-image time",
       "generate": "Generate",
       "generating": "Generating…",
       "generateHint": "Generation is slow — usually 30 seconds to 2 minutes",
@@ -3465,7 +3467,8 @@
       "galleryTitle": "History",
       "galleryLoading": "Loading…",
       "galleryEmpty": "No images generated yet",
-      "reveal": "Reveal in folder"
+      "reveal": "Reveal in folder",
+      "partialFailureToast": "Generated {{count}} image(s) ({{model}}); {{failed}} failed"
     },
     "siteConfig": {
       "entry": "Import site config",

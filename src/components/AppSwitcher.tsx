@@ -22,10 +22,9 @@ const APP_BADGE_ICON: Partial<
 > = {
   claude: { icon: Terminal },
   "claude-desktop": { icon: Monitor, offsetY: 0.5 },
-  // 与 claude-desktop 同一个手法：同品牌图标 + 一个角标说明「这是那个 CLI 的另一面」。
-  // 角标是图片而不是文字，因为它要在 20px 的图标上认得出来。
   // （PR #116 上游合并时随上游版 AppSwitcher 丢过一次，别再丢。）
-  "codex-image": { icon: ImageIcon, offsetY: 0.5 },
+  // 生图页原也在此列（OpenAI 标 + 图片角标）—— tab 改名「生图」并支持多家生图
+  // 模型后已换成独立图标（见 AppGlyph 的生图分支），不再挂 codex 的品牌。
 };
 
 interface AppSwitcherProps {
@@ -38,11 +37,10 @@ interface AppSwitcherProps {
   onShowApp?: (app: AppId) => void;
 }
 
-const APP_ICON_NAME: Record<AppId, string> = {
+const APP_ICON_NAME: Record<Exclude<AppId, "codex-image">, string> = {
   claude: "claude",
   "claude-desktop": "claude",
   codex: "openai",
-  "codex-image": "openai",
   gemini: "gemini",
   grokbuild: "grok",
   opencode: "opencode",
@@ -53,6 +51,22 @@ const APP_ICON_NAME: Record<AppId, string> = {
 
 /** 应用图标 + 角标（Claude Code / Desktop 用角标区分终端与桌面） */
 function AppGlyph({ app, isActive }: { app: AppId; isActive: boolean }) {
+  // 生图页用独立的图片图标（跟页面的 violet 主题同色）：它不再从属于某一家 CLI
+  // （生图模型 gpt-image / nano-banana / grok-imagine 多家族），挂着 OpenAI 品牌
+  // 反而误导。其余 app 走品牌图标（+可选角标）。
+  if (app === "codex-image") {
+    return (
+      <ImageIcon
+        className={cn(
+          "h-5 w-5 shrink-0",
+          isActive
+            ? "text-violet-600 dark:text-violet-400"
+            : "text-muted-foreground",
+        )}
+        aria-hidden="true"
+      />
+    );
+  }
   const badgeConfig = APP_BADGE_ICON[app];
   const BadgeIcon = badgeConfig?.icon;
   return (

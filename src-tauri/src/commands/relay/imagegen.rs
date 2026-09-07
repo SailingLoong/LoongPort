@@ -21,15 +21,17 @@ pub struct ImagegenImageRef {
     pub mime: String,
 }
 
-/// `relay_imagegen_generate` 的返回：这次用了哪个档位/模型、图片落在哪。
+/// `relay_imagegen_generate` 的返回：这次用了哪个档位/模型、图片落在哪、几张没成。
 ///
-/// 模型名给前端展示用（「已生成（gpt-image-2）」），不是让前端替用户做任何决定。
+/// 模型名给前端展示用（「已生成（gpt-image-2）」），不是让前端替用户做任何决定；
+/// `failed` 是部分失败的张数（批量并发下成功的那部分已落盘，用户拿得到）。
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImagegenGenerateResult {
     pub tier_name: String,
     pub model: String,
     pub images: Vec<ImagegenImageRef>,
+    pub failed: usize,
 }
 
 /// App 内直接生图（生图页「生成」视图）：不经过任何 CLI 会话。
@@ -37,8 +39,9 @@ pub struct ImagegenGenerateResult {
 /// 与 MCP 工具（`--mcp-image-gen`）共用 [`imagegen`] 这一个核心 —— 档位选择、
 /// 请求形状、落盘与修剪完全一致，差别只在结果不进宿主对话。
 ///
-/// `n` = 张数（批量）。范围判据的唯一源在核心层（`imagegen::validate_count`，
-/// 上限与计费后果的说明见那里），本层只做缺省补 1。
+/// `n` = 张数（批量，1-50 自由输入）。范围判据的唯一源在核心层
+/// （`imagegen::validate_count`），>4 张的并发拆单与部分失败语义见
+/// `imagegen::generate_batch`，本层只做缺省补 1。
 #[tauri::command]
 pub async fn relay_imagegen_generate(
     app_handle: tauri::AppHandle,
@@ -52,14 +55,7 @@ pub async fn relay_imagegen_generate(
     }
     let count = imagegen::validate_count(n.unwrap_or(1))?;
     let tier = imagegen::load_current_tier()?;
-    let images = imagegen::generate_image(
-        &tier,
-        prompt,
-        size.as_deref(),
-        count,
-        imagegen::request_timeout(count),
-    )
-    .await?;
+    let (images, failed) = imagegen::generate_batch(&tier, prompt, size.as_deref(), count).await?;
     imagegen::ensure_asset_scope(&app_handle);
     Ok(ImagegenGenerateResult {
         tier_name: tier.display_name,
@@ -71,6 +67,7 @@ pub async fn relay_imagegen_generate(
                 mime: img.mime.to_string(),
             })
             .collect(),
+        failed,
     })
 }
 

@@ -124,7 +124,7 @@ fn registration_server(exe: &str) -> McpServer {
             ..Default::default()
         },
         description: Some(
-            "用 LoongPort「生图」标签页里当前那个接入配置生图（gpt-image 系列）。\
+            "用 LoongPort「生图」标签页里当前那个接入配置生图（gpt-image、grok-imagine 等生图模型）。\
              由 LoongPort 自动维护，密钥不写进 CLI 配置 —— 换档位也不必重启 CLI。"
                 .to_string(),
         ),
@@ -176,7 +176,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 fn tools_list() -> Value {
     json!([{
         "name": "generate_image",
-        "description": "用 LoongPort 绑定的中转站接入配置生成图片（gpt-image 系列模型）。直接返回图片本身，同时给出保存到本地的路径。",
+        "description": "用 LoongPort 绑定的中转站接入配置生成图片（gpt-image、grok-imagine 等生图模型）。直接返回图片本身，同时给出保存到本地的路径。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -190,7 +190,7 @@ fn tools_list() -> Value {
                 },
                 "n": {
                     "type": "integer",
-                    "description": "一次生成几张（1-4，默认 1）。按张数计费且耗时成倍增加；宿主的工具超时（codex 默认 300 秒）可能在多张时先到 —— 要更多张时，并发多次调用本工具（每次各自计时）通常更稳。"
+                    "description": "一次生成几张（1-50，默认 1）。按张数计费；超过 4 张会自动拆成并发单张请求。大批量耗时更长，宿主的工具超时（codex 默认 300 秒）可能在完成前先到 —— 超大批量时并发多次调用本工具（每次各自计时）通常更稳。"
                 }
             },
             "required": ["prompt"]
@@ -254,8 +254,7 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
     // 档位，下一次生图就该用新的，**不必重启 codex**。见 `imagegen::current_image_tier_id`。
     let tier = imagegen::load_current_tier()?;
-    let images =
-        imagegen::generate_image(&tier, prompt, size, n, imagegen::request_timeout(n)).await?;
+    let (images, failed) = imagegen::generate_batch(&tier, prompt, size, n).await?;
     let list = images
         .iter()
         .map(|i| i.path.display().to_string())
@@ -276,10 +275,15 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     //    不发等于白放着能力不用。
     //
     // bytes 在写文件前就在手上，所以这不额外发请求。
+    let failure_note = if failed > 0 {
+        format!("（另有 {failed} 张失败）")
+    } else {
+        String::new()
+    };
     let mut content = vec![json!({
         "type": "text",
         "text": format!(
-            "已生成 {} 张图片（接入配置：{}，模型：{}），已存到：\n{list}",
+            "已生成 {} 张图片{failure_note}（接入配置：{}，模型：{}），已存到：\n{list}",
             images.len(),
             tier.display_name,
             tier.model
