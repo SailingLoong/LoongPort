@@ -3,7 +3,7 @@
  *
  * - POST /v1/ingest   客户端上传小时聚合桶（见 ingest.ts）
  * - GET  /v1/snapshot 公共快照（CORS *、CDN 60s；KV 命中，冷启动兜底现算）
- * - scheduled（每 5 分钟） 重算快照写 KV + 清理 30 天前的原始桶 / 2 天前的限流计数
+ * - scheduled（每 10 分钟） 重算快照写 KV + 清理 30 天前的原始桶 / 2 天前的限流计数
  */
 
 import { buildSnapshot, buildTrends, type RawModelRow, type RawRow } from "./aggregate";

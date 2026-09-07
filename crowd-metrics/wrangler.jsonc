@@ -2,7 +2,9 @@
 	// crowd-metrics：中转站实测数据的聚合 Worker。
 	//
 	// 端点：POST /v1/ingest（客户端上传小时聚合桶）、GET /v1/snapshot（公共快照，CORS *）。
-	// Cron 每 5 分钟从 D1 重算 k-匿名后的快照写入 KV；原始桶保留 30 天。
+	// Cron 每 10 分钟从 D1 重算 k-匿名后的快照（snapshot+trend 两键）写入 KV；原始桶保留 30 天。
+	// 周期对齐 GET 自愈的 10 分钟新鲜窗（freshness.ts）；再放宽会把重算推到请求路径，
+	// 收紧则白烧 KV 免费写入配额（每 5 分钟 × 2 键 = 576 写/天，会触发免费档 50% 告警）。
 	//
 	// ⚠️ 绑定名必须是 `DB` / `SNAPSHOT` —— Worker 代码（src/ingest.ts 的 Env）按这两个
 	// 名字取资源；`wrangler d1/kv create` 交互式自动写入时会问绑定名，别让它另起一个
@@ -34,7 +36,7 @@
 	],
 	"triggers": {
 		"crons": [
-			"*/5 * * * *"
+			"*/10 * * * *"
 		]
 	}
 }
