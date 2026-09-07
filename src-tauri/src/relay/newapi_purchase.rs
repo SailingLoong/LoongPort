@@ -207,7 +207,7 @@ fn startup_timeout_error() -> AppError {
 }
 
 /// 从 relay 行取出非空的 refresh credential；空缺即「要求重新登录」的错误。
-fn required_refresh_credential(relay: &creds::Relay) -> Result<&str, AppError> {
+fn required_refresh_credential(relay: &creds::RelayAccount) -> Result<&str, AppError> {
     relay
         .refresh_token
         .as_deref()
@@ -235,7 +235,7 @@ fn required_refresh_credential(relay: &creds::Relay) -> Result<&str, AppError> {
 /// `shutdown` 是窗口销毁的停机信号端，接进 `Destroyed` 事件后交给 monitor。
 pub(crate) fn build_window<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    relay: &creds::Relay,
+    relay: &creds::RelayAccount,
     window: super::purchase::SiteWindow,
     target_url: &url::Url,
     refresh_credential: &str,
@@ -335,7 +335,7 @@ fn persist_refresh_credential<R: tauri::Runtime>(
 /// 本函数不持久化它们、不回传给前端。
 pub async fn open<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    relay: creds::Relay,
+    relay: creds::RelayAccount,
     window: super::purchase::SiteWindow,
     target_url: url::Url,
     lease: PurchaseSessionLease,
@@ -754,8 +754,8 @@ mod tests {
     // cookies_for_url 恒空，命令级 happy-path 走超时路径，URL 只能在建窗后观察）
     // ======================================================================
 
-    fn newapi_relay(id: i64, site_origin: &str) -> creds::Relay {
-        creds::Relay {
+    fn newapi_relay(id: i64, site_origin: &str) -> creds::RelayAccount {
+        creds::RelayAccount {
             id,
             site_origin: site_origin.into(),
             site_name: "NewAPI".into(),

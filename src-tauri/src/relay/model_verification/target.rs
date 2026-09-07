@@ -195,7 +195,7 @@ fn resolve_relay(
     db: &Database,
     site_origin: &str,
     account_id: Option<i64>,
-) -> Result<creds::Relay, AppError> {
+) -> Result<creds::RelayAccount, AppError> {
     let candidates: Vec<_> = {
         let conn = db
             .conn

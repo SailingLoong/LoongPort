@@ -171,12 +171,12 @@ pub fn is_token_expiry_failure(error: &AppError) -> bool {
 }
 
 pub enum RuntimeBackend<'a> {
-    Sub2Api { relay: &'a creds::Relay },
-    NewApi { relay: &'a creds::Relay },
+    Sub2Api { relay: &'a creds::RelayAccount },
+    NewApi { relay: &'a creds::RelayAccount },
 }
 
 impl<'a> RuntimeBackend<'a> {
-    pub fn for_relay(relay: &'a creds::Relay) -> Self {
+    pub fn for_relay(relay: &'a creds::RelayAccount) -> Self {
         match relay.backend_kind {
             BackendKind::Sub2Api => Self::Sub2Api { relay },
             BackendKind::NewApi => Self::NewApi { relay },
@@ -489,10 +489,10 @@ mod tests {
     }
 
     use super::*;
-    use crate::relay::creds::Relay;
+    use crate::relay::creds::RelayAccount;
 
-    fn relay(origin: &str, backend_kind: BackendKind) -> Relay {
-        Relay {
+    fn relay(origin: &str, backend_kind: BackendKind) -> RelayAccount {
+        RelayAccount {
             id: 7,
             site_origin: origin.to_string(),
             site_name: "Test relay".into(),
@@ -639,7 +639,7 @@ mod tests {
                         "success": true,
                         "data": {
                             "version": "1.0.0",
-                            "system_name": "Relay",
+                            "system_name": "RelayAccount",
                             "theme": "default",
                             "register_enabled": true,
                             "password_login_enabled": true,

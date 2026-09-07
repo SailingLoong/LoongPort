@@ -150,13 +150,19 @@
 ## 三、LoongPort 自己的代码在哪
 
 ```
-src-tauri/src/relay/     ← 中转站链路（api / creds / login / provision / chatgpt_app）
-src-tauri/src/commands/relay.rs
-src/components/relay/    ← 前端面板
-src/lib/api/relay.ts     ← 前端类型与 invoke 封装
+src-tauri/src/relay/          ← 中转站链路（sub2api / creds / login / provision / chatgpt_app）
+src-tauri/src/commands/relay/ ← 中转站命令层（按领域拆分，总览见该目录 mod.rs）
+src/components/relay/         ← 前端面板
+src/lib/api/relay.ts          ← 前端类型与 invoke 封装
 ```
 
 碰这几处之外的文件时，先问一句「这是在改上游吗、改动面能不能更小」。
+
+### 术语唯源在 docs/glossary.md
+
+中转站域的概念用词（站点 / 账号行 / 分组 / 档位 / 套餐 / provider 记录 / 平台 / app…）
+**定义与命名规矩唯一源在 [`docs/glossary.md`](docs/glossary.md)**，新代码命名前先查它；
+wire/DB 契约名在它的冻结名单里（读宽写窄，别改）。这里只指路，不复制内容。
 
 ### 这是 fork，不是「把 cc-switch 当依赖引入」
 

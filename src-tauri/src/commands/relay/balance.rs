@@ -15,7 +15,7 @@ use crate::relay::provision;
 /// 拿到结果的，同一行的每把 sk 问出的钱包余额是同一个账户的同一个数。
 pub(crate) fn relay_balance_inputs(
     state: &AppState,
-    relay: &creds::Relay,
+    relay: &creds::RelayAccount,
 ) -> (String, Vec<String>) {
     let mut base_url = None;
     let mut keys: Vec<String> = Vec::new();

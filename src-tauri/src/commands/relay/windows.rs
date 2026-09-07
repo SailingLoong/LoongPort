@@ -36,35 +36,35 @@ async fn open_purchase_window<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
 ) -> Result<(), AppError> {
-    let op = usable_relay(app_handle, relay_id).await?;
+    let site_account = usable_relay(app_handle, relay_id).await?;
 
     // 充值页直接承载付款动作，它指向哪由**签名配置**说了算 —— 客户端不再读站点
     // 公开设置的支付开关去推测 `/purchase` 还是 `/redeem`（那是在替站长决定入口）。
     // 配置没加载 / 这个站没配入口都明确报错，绝不回落到猜测的路由。
     let config = remote_config::load_cached()
         .ok_or_else(|| AppError::Config("中转站配置尚未加载，暂时无法打开充值入口".into()))?;
-    let purchase_url = remote_config::configured_purchase_url(&config, &op.site_origin)?
+    let purchase_url = remote_config::configured_purchase_url(&config, &site_account.site_origin)?
         .ok_or_else(|| AppError::Config("该中转站尚未配置充值入口".into()))?;
 
-    let window = purchase::purchase_window(relay_id, &op.site_origin);
-    dispatch_site_window(app_handle, op, window, purchase_url).await
+    let window = purchase::purchase_window(relay_id, &site_account.site_origin);
+    dispatch_site_window(app_handle, site_account, window, purchase_url).await
 }
 
 async fn open_usage_window<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
 ) -> Result<(), AppError> {
-    let op = usable_relay(app_handle, relay_id).await?;
+    let site_account = usable_relay(app_handle, relay_id).await?;
 
     // 用量页入口同样由签名配置拥有（sub2api 是 /usage，New API 是各自 console
     // 路由）——路由事实在站方，客户端不猜。
     let config = remote_config::load_cached()
         .ok_or_else(|| AppError::Config("中转站配置尚未加载，暂时无法打开用量入口".into()))?;
-    let usage_url = remote_config::configured_usage_url(&config, &op.site_origin)?
+    let usage_url = remote_config::configured_usage_url(&config, &site_account.site_origin)?
         .ok_or_else(|| AppError::Config("该中转站尚未配置用量入口".into()))?;
 
-    let window = purchase::usage_window(relay_id, &op.site_origin);
-    dispatch_site_window(app_handle, op, window, usage_url).await
+    let window = purchase::usage_window(relay_id, &site_account.site_origin);
+    dispatch_site_window(app_handle, site_account, window, usage_url).await
 }
 
 /// 按协议分派**站点页面窗**开窗；窗口身份（label/标题）与目标 URL 都必须由
@@ -75,7 +75,7 @@ async fn open_usage_window<R: tauri::Runtime>(
 /// 所以协议分派的回归测试直接驱动本函数、自己构造内存里的 `RemoteConfig`。
 pub(crate) async fn dispatch_site_window<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    op: creds::Relay,
+    site_account: creds::RelayAccount,
     window: purchase::SiteWindow,
     target_url: url::Url,
 ) -> Result<(), AppError> {
@@ -103,9 +103,9 @@ pub(crate) async fn dispatch_site_window<R: tauri::Runtime>(
         return Ok(());
     }
 
-    match op.backend_kind {
+    match site_account.backend_kind {
         creds::BackendKind::Sub2Api => {
-            open_sub2api_site_window(app_handle, op, window, target_url).await
+            open_sub2api_site_window(app_handle, site_account, window, target_url).await
         }
         // NewAPI 的站点窗是「cookie 形态登录态 + 轮换跟踪」的另一套实现
         // （`relay::newapi_purchase`，接线顺序的理由见它的模块文档）。
@@ -113,8 +113,8 @@ pub(crate) async fn dispatch_site_window<R: tauri::Runtime>(
         // （含「重新登录」文案）—— lease 在那之后才被消费。
         creds::BackendKind::NewApi => {
             let state = app_handle.state::<AppState>();
-            let lease = state.purchase_sessions.try_acquire(op.id)?;
-            newapi_purchase::open(app_handle, op, window, target_url, lease).await
+            let lease = state.purchase_sessions.try_acquire(site_account.id)?;
+            newapi_purchase::open(app_handle, site_account, window, target_url, lease).await
         }
     }
 }
@@ -127,7 +127,7 @@ pub(crate) async fn dispatch_site_window<R: tauri::Runtime>(
 /// 所以回归测试直接驱动本函数、自己构造内存里的 `RemoteConfig`。
 pub(crate) async fn open_sub2api_site_window<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    op: creds::Relay,
+    site_account: creds::RelayAccount,
     window: purchase::SiteWindow,
     target_url: url::Url,
 ) -> Result<(), AppError> {
@@ -142,17 +142,17 @@ pub(crate) async fn open_sub2api_site_window<R: tauri::Runtime>(
     // 所以在开窗前主动要一次续期：不看「现在还能不能用」，看「够不够撑完一次付款」。
     // 拿不到更长的 token 也照样开窗 —— 那时用户至少还能完成一笔快的（扫码即付），
     // 硬拦住他反而是把「可能不够」当成「一定不行」。
-    let op = ensure_token_outlasts_a_payment(app_handle, op).await;
+    let site_account = ensure_token_outlasts_a_payment(app_handle, site_account).await;
 
     // 先取账号档案。**必须在开窗之前** —— 站点的 router 守卫在页面启动那一刻就读
     // localStorage，注入脚本必须在那之前就带着完整的值。拿不到就别开窗：
     // 开一个注定落到登录页的窗口，用户只会以为「点了充值却要我重新登录」。
     let client = sub2api::Client::new(
-        &op.site_origin,
-        &op.auth_token,
-        op.account_id,
-        op.user_agent.as_deref(),
-        op.cf_clearance.as_deref(),
+        &site_account.site_origin,
+        &site_account.auth_token,
+        site_account.account_id,
+        site_account.user_agent.as_deref(),
+        site_account.cf_clearance.as_deref(),
     )?;
     let auth_user = purchase::auth_user_from_profile(client.profile_raw().await?)?;
 
@@ -161,7 +161,7 @@ pub(crate) async fn open_sub2api_site_window<R: tauri::Runtime>(
 
     // 关窗事件要带上是哪一行 —— 前端据此只刷那一行的余额。
     let handle_for_close = app_handle.clone();
-    let closed_relay_id = op.id;
+    let closed_relay_id = site_account.id;
 
     let built = tauri::WebviewWindowBuilder::new(
         app_handle,
@@ -191,8 +191,8 @@ pub(crate) async fn open_sub2api_site_window<R: tauri::Runtime>(
     // 吞掉（「点了支付没反应」），理由与 `browser_import` 那段逐条相同。
     .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Allow)
     .initialization_script(purchase::inject_script(
-        &op.site_origin,
-        &op.auth_token,
+        &site_account.site_origin,
+        &site_account.auth_token,
         &auth_user,
     ))
     .build()
@@ -204,8 +204,8 @@ pub(crate) async fn open_sub2api_site_window<R: tauri::Runtime>(
     // 只 emit 事件、不在这里查余额：查余额要发 HTTP，而这个回调不能 await ——
     // 站点级缓存（看板用）的失效+补刷走 spawn，不受此限。
     let close_handle = app_handle.clone();
-    let close_site = op.site_origin.clone();
-    let close_api_base = op.api_base_url.clone();
+    let close_site = site_account.site_origin.clone();
+    let close_api_base = site_account.api_base_url.clone();
     built.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             let _ = handle_for_close.emit(PURCHASE_CLOSED, closed_relay_id);
@@ -245,20 +245,20 @@ pub(crate) async fn open_sub2api_site_window<R: tauri::Runtime>(
 /// 让用户至少能完成一笔快的；把「可能不够」当成「一定不行」去拦住他更糟。
 async fn ensure_token_outlasts_a_payment<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    op: creds::Relay,
-) -> creds::Relay {
-    let Some(refresh) = op.refresh_token.clone() else {
+    site_account: creds::RelayAccount,
+) -> creds::RelayAccount {
+    let Some(refresh) = site_account.refresh_token.clone() else {
         log::info!("充值前想续期但没有 refresh token，用现有凭据开窗");
-        return op;
+        return site_account;
     };
 
-    match sub2api::refresh_token(&op.site_origin, &refresh).await {
+    match sub2api::refresh_token(&site_account.site_origin, &refresh).await {
         Ok(fresh) => {
             let state = app_handle.state::<AppState>();
             if let Err(e) = with_conn(&state, |conn| {
                 creds::update_tokens(
                     conn,
-                    op.id,
+                    site_account.id,
                     &fresh.auth_token,
                     // 服务端没轮换时沿用旧的 —— 覆写成 None 会让下次过期时无法续期。
                     fresh.refresh_token.as_deref().or(Some(refresh.as_str())),
@@ -269,18 +269,18 @@ async fn ensure_token_outlasts_a_payment<R: tauri::Runtime>(
                 // 只是下次还会再续一遍。
                 log::warn!("充值前续期成功但写库失败（不影响本次开窗）: {e}");
             }
-            creds::Relay {
+            creds::RelayAccount {
                 auth_token: fresh.auth_token,
                 refresh_token: fresh.refresh_token.or(Some(refresh)),
                 token_expires_at: fresh.token_expires_at,
-                ..op
+                ..site_account
             }
         }
         Err(e) => {
             // 续期失败不拦：现有 token 还没过期（`usable_relay` 已经保证了），
             // 只是可能撑不完一次慢付款。
             log::warn!("充值前续期失败，用现有凭据开窗: {e}");
-            op
+            site_account
         }
     }
 }
@@ -369,7 +369,7 @@ mod tests {
         // 所以两者恰好同源、`configured_purchase_url` 解析成功。
         let (app, relay_id) =
             saved_relay_app(&format!("http://{addr}"), discovery::BackendKind::Sub2Api);
-        let op = relay_credentials(&app, relay_id);
+        let site_account = relay_credentials(&app, relay_id);
 
         let configured = format!("https://{addr}/topup-center?flow=card");
         let config = remote_config::RemoteConfig {
@@ -388,12 +388,13 @@ mod tests {
             },
             ..remote_config::RemoteConfig::default()
         };
-        let purchase_url = remote_config::configured_purchase_url(&config, &op.site_origin)
-            .expect("签名目录解析不该报错")
-            .expect("这个站在目录里配了购买入口");
+        let purchase_url =
+            remote_config::configured_purchase_url(&config, &site_account.site_origin)
+                .expect("签名目录解析不该报错")
+                .expect("这个站在目录里配了购买入口");
 
-        let window = purchase::purchase_window(relay_id, &op.site_origin);
-        open_sub2api_site_window(app.handle(), op, window, purchase_url)
+        let window = purchase::purchase_window(relay_id, &site_account.site_origin);
+        open_sub2api_site_window(app.handle(), site_account, window, purchase_url)
             .await
             .expect("开充值窗");
 
@@ -496,9 +497,9 @@ mod tests {
             &origin.replacen("http://", "https://", 1),
             discovery::BackendKind::NewApi,
         );
-        let op = relay_credentials(&app, relay_id);
+        let site_account = relay_credentials(&app, relay_id);
         assert_eq!(
-            op.refresh_token.as_deref(),
+            site_account.refresh_token.as_deref(),
             Some("saved-refresh-token"),
             "前提：这行有非空 refresh credential"
         );
@@ -524,13 +525,14 @@ mod tests {
             },
             ..remote_config::RemoteConfig::default()
         };
-        let purchase_url = remote_config::configured_purchase_url(&config, &op.site_origin)
-            .expect("签名目录解析不该报错")
-            .expect("这个站在目录里配了购买入口");
+        let purchase_url =
+            remote_config::configured_purchase_url(&config, &site_account.site_origin)
+                .expect("签名目录解析不该报错")
+                .expect("这个站在目录里配了购买入口");
 
         // MockRuntime 的 cookies_for_url 恒返回空 ⇒ 走 300ms 启动超时路径（生产 20s）。
-        let window = purchase::purchase_window(relay_id, &op.site_origin);
-        let error = dispatch_site_window(app.handle(), op, window, purchase_url)
+        let window = purchase::purchase_window(relay_id, &site_account.site_origin);
+        let error = dispatch_site_window(app.handle(), site_account, window, purchase_url)
             .await
             .expect_err("mock 下观察不到轮换，必须按超时收场");
 
@@ -574,12 +576,12 @@ mod tests {
         let (app, relay_id) =
             saved_relay_app("https://newapi.example", discovery::BackendKind::NewApi);
         blank_saved_refresh_credential(&app, relay_id);
-        let op = relay_credentials(&app, relay_id);
+        let site_account = relay_credentials(&app, relay_id);
 
-        let window = purchase::purchase_window(relay_id, &op.site_origin);
+        let window = purchase::purchase_window(relay_id, &site_account.site_origin);
         let error = dispatch_site_window(
             app.handle(),
-            op,
+            site_account,
             window,
             url::Url::parse("https://newapi.example/console/topup").unwrap(),
         )
@@ -620,11 +622,11 @@ mod tests {
         .build()
         .expect("预建同 label 窗口");
 
-        let op = relay_credentials(&app, relay_id);
-        let window = purchase::purchase_window(relay_id, &op.site_origin);
+        let site_account = relay_credentials(&app, relay_id);
+        let window = purchase::purchase_window(relay_id, &site_account.site_origin);
         dispatch_site_window(
             app.handle(),
-            op,
+            site_account,
             window,
             url::Url::parse(&format!("{origin}/console/topup")).unwrap(),
         )
@@ -693,11 +695,11 @@ mod tests {
             id
         };
 
-        let op = relay_credentials(&app, relay2);
-        let window = purchase::purchase_window(relay2, &op.site_origin);
+        let site_account = relay_credentials(&app, relay2);
+        let window = purchase::purchase_window(relay2, &site_account.site_origin);
         let error = dispatch_site_window(
             app.handle(),
-            op,
+            site_account,
             window,
             url::Url::parse("https://newapi2.example/console/topup").unwrap(),
         )
@@ -727,15 +729,15 @@ mod tests {
     async fn newapi_purchase_reports_when_its_own_lease_is_already_held() {
         let (app, relay_id) =
             saved_relay_app("https://newapi.example", discovery::BackendKind::NewApi);
-        let op = relay_credentials(&app, relay_id);
+        let site_account = relay_credentials(&app, relay_id);
 
         let coordinator = Arc::clone(&app.state::<AppState>().purchase_sessions);
         let held = coordinator.try_acquire(relay_id).expect("预占自己的 lease");
 
-        let window = purchase::purchase_window(relay_id, &op.site_origin);
+        let window = purchase::purchase_window(relay_id, &site_account.site_origin);
         let error = dispatch_site_window(
             app.handle(),
-            op,
+            site_account,
             window,
             url::Url::parse("https://newapi.example/console/topup").unwrap(),
         )

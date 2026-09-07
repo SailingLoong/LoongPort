@@ -21,7 +21,7 @@ use crate::AppState;
 /// CLI 下，漏扫一个 app 就少算一块成本，对账比值会失真。归属判据用
 /// [`belongs_to_relay`]（严格版）：成本是要记到这一行头上的事实，未登录的行
 /// 不认别人账号的档位，否则 B 的消费会被算进 A 的对账。
-fn relay_provider_keys(state: &AppState, relay: &creds::Relay) -> Vec<(String, String)> {
+fn relay_provider_keys(state: &AppState, relay: &creds::RelayAccount) -> Vec<(String, String)> {
     let mut keys = Vec::new();
     for app_type in AppType::all() {
         let Ok(providers) = ProviderService::list(state, app_type.clone()) else {
@@ -71,8 +71,8 @@ fn reconcile(state: &AppState, relay_id: i64) -> Result<ReconciliationReport, Ap
 mod tests {
     use super::*;
 
-    fn relay_row(site: &str, account_id: Option<i64>) -> creds::Relay {
-        creds::Relay {
+    fn relay_row(site: &str, account_id: Option<i64>) -> creds::RelayAccount {
+        creds::RelayAccount {
             id: 1,
             site_origin: site.to_string(),
             site_name: "test".to_string(),

@@ -447,7 +447,7 @@ pub fn sort_tiers(tiers: &mut [TargetedTier]) {
 /// 那正好废掉「同站多账号」这个核心能力：库层面按 `(site_origin, account_id)`
 /// 分得很干净，档位层面却退化成只按站点。
 ///
-/// `None` = 那一行还没登录（`creds::Relay::account_id` 为 `NULL`）。
+/// `None` = 那一行还没登录（`creds::RelayAccount::account_id` 为 `NULL`）。
 /// 未登录的行本来就 provision 不出档位（没有 token 拉不到分组），
 /// 但签名要能表达这个状态 —— 用 `"anon"` 参与哈希而不是跳过，
 /// 免得「未登录」与「account_id 恰好是某个值」撞到同一个 id 上。

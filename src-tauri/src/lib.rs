@@ -1706,7 +1706,7 @@ pub fn run() {
             commands::vendor_balance,
             commands::vendor_remove,
             commands::vendor_reorder,
-            commands::vendor_reset_tier_config,
+            commands::vendor_reset_plan_config,
             commands::import_default_config,
             commands::get_claude_desktop_status,
             commands::get_claude_desktop_default_routes,

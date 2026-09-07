@@ -158,7 +158,7 @@ fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static s
 }
 
 pub(crate) async fn provision_backend(
-    op: &creds::Relay,
+    site_account: &creds::RelayAccount,
     browser_fallback: Option<sub2api::BrowserApiFallback>,
 ) -> Result<ManagedProvisionBatch, AppError> {
     // 一次 provision 解析一次选型表（内置 + 远端覆盖），两个 backend 共用 ——
@@ -166,22 +166,23 @@ pub(crate) async fn provision_backend(
     let tables = provision::ModelSelectionTables::resolve();
     // 站点声明探测与 backend 无关（约定路径是 LoongPort 的约定，newapi 站长同样能放）：
     // 404/失败/格式不认都是 None，绝不打断登录主流程。
-    let site_declaration = crate::relay::site_config::fetch_site_declaration(&op.site_origin).await;
+    let site_declaration =
+        crate::relay::site_config::fetch_site_declaration(&site_account.site_origin).await;
     if site_declaration.is_some() {
         log::info!(
             "{}",
             crate::diagnostics::DiagnosticEvent::new("relay.site_config", "declaration_found")
-                .field_display("site", crate::url_for_log(&op.site_origin))
+                .field_display("site", crate::url_for_log(&site_account.site_origin))
         );
     }
-    match op.backend_kind {
+    match site_account.backend_kind {
         discovery::BackendKind::Sub2Api => {
             let mut client = sub2api::Client::new(
-                &op.site_origin,
-                &op.auth_token,
-                op.account_id,
-                op.user_agent.as_deref(),
-                op.cf_clearance.as_deref(),
+                &site_account.site_origin,
+                &site_account.auth_token,
+                site_account.account_id,
+                site_account.user_agent.as_deref(),
+                site_account.cf_clearance.as_deref(),
             )?;
             // 登录后自动备 key 时登录窗还开着：站点被指纹级防护拦下（403 HTML）时，
             // 由登录窗代拉（见 `browser_api_fallback`）。测试等无 UI 上下文传 `None`。
@@ -202,8 +203,8 @@ pub(crate) async fn provision_backend(
                     let tier = targeted.tier;
                     ManagedProvisionCandidate {
                         provider_id: provision::provider_id_for(
-                            &op.site_origin,
-                            op.account_id,
+                            &site_account.site_origin,
+                            site_account.account_id,
                             tier.group_id,
                         ),
                         app_type: targeted.app_type,
@@ -215,12 +216,12 @@ pub(crate) async fn provision_backend(
                         models: tier.models,
                         roles: tier.roles,
                         allow_image_generation: Some(tier.allow_image_generation),
-                        api_base_url: op.api_base_url.clone(),
+                        api_base_url: site_account.api_base_url.clone(),
                     }
                 })
                 .collect();
             Ok(ManagedProvisionBatch {
-                account_id: op.account_id,
+                account_id: site_account.account_id,
                 site_declaration,
                 candidates,
                 observed_keep: std::collections::HashSet::new(),
@@ -234,12 +235,12 @@ pub(crate) async fn provision_backend(
         }
         discovery::BackendKind::NewApi => {
             let client = newapi::NewApiClient::with_optional_account_id(
-                &op.site_origin,
-                &op.auth_token,
-                op.account_id,
+                &site_account.site_origin,
+                &site_account.auth_token,
+                site_account.account_id,
             )?;
             let account = client.account().await?;
-            if op.account_id.is_some() && op.account_id != Some(account.id) {
+            if site_account.account_id.is_some() && site_account.account_id != Some(account.id) {
                 return Err(AppError::Config(
                     "NewAPI 登录态所属账号与本地中转站账号不一致，请重新登录".into(),
                 ));
@@ -282,7 +283,7 @@ pub(crate) async fn provision_backend(
                 if !reconciled.contains(identity) {
                     newapi_keep_insert(
                         &mut batch.observed_keep,
-                        &op.site_origin,
+                        &site_account.site_origin,
                         result.account_id,
                         identity,
                         None,
@@ -291,49 +292,50 @@ pub(crate) async fn provision_backend(
             }
 
             for group in result.groups {
-                let models = match sub2api::list_models(&op.site_origin, &group.api_key).await {
-                    Ok(models) => match normalize_newapi_model_catalog(models) {
-                        Some(models) => models,
-                        None => {
+                let models =
+                    match sub2api::list_models(&site_account.site_origin, &group.api_key).await {
+                        Ok(models) => match normalize_newapi_model_catalog(models) {
+                            Some(models) => models,
+                            None => {
+                                batch.failures.push(FailureInfo {
+                                    group_name: group.name,
+                                    reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
+                                });
+                                // 目录拉不到 = 分类未知：保全四个槽位，别把旧档误删。
+                                newapi_keep_insert(
+                                    &mut batch.observed_keep,
+                                    &site_account.site_origin,
+                                    result.account_id,
+                                    &group.identity,
+                                    None,
+                                );
+                                continue;
+                            }
+                        },
+                        Err(error) => {
                             batch.failures.push(FailureInfo {
                                 group_name: group.name,
-                                reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
+                                reason: format!("model_catalog: {error}"),
                             });
-                            // 目录拉不到 = 分类未知：保全四个槽位，别把旧档误删。
                             newapi_keep_insert(
                                 &mut batch.observed_keep,
-                                &op.site_origin,
+                                &site_account.site_origin,
                                 result.account_id,
                                 &group.identity,
                                 None,
                             );
                             continue;
                         }
-                    },
-                    Err(error) => {
-                        batch.failures.push(FailureInfo {
-                            group_name: group.name,
-                            reason: format!("model_catalog: {error}"),
-                        });
-                        newapi_keep_insert(
-                            &mut batch.observed_keep,
-                            &op.site_origin,
-                            result.account_id,
-                            &group.identity,
-                            None,
-                        );
-                        continue;
-                    }
-                };
+                    };
                 newapi_keep_insert(
                     &mut batch.observed_keep,
-                    &op.site_origin,
+                    &site_account.site_origin,
                     result.account_id,
                     &group.identity,
                     Some(&models),
                 );
                 batch.candidates.extend(newapi_candidates_for_group(
-                    &op.site_origin,
+                    &site_account.site_origin,
                     result.account_id,
                     &group,
                     &models,
@@ -387,19 +389,24 @@ pub(crate) async fn refresh_relay_provision(
     app_handle: &tauri::AppHandle,
     relay_id: i64,
 ) -> Result<ProvisionSummary, AppError> {
-    let op = usable_relay(app_handle, relay_id).await?;
-    let op = backfill_account_identity(app_handle, op).await;
-    provision_relay(app_handle, &op).await
+    let site_account = usable_relay(app_handle, relay_id).await?;
+    let site_account = backfill_account_identity(app_handle, site_account).await;
+    provision_relay(app_handle, &site_account).await
 }
 
 async fn provision_relay(
     app_handle: &tauri::AppHandle,
-    op: &creds::Relay,
+    site_account: &creds::RelayAccount,
 ) -> Result<ProvisionSummary, AppError> {
-    let batch = provision_backend(op, Some(browser_api_fallback(app_handle))).await?;
+    let batch = provision_backend(site_account, Some(browser_api_fallback(app_handle))).await?;
     let state = app_handle.state::<AppState>();
-    let result = persist_provision_batch(state.inner(), op, batch);
-    mark_pricing_after_success(state.inner(), op.id, chrono::Utc::now().timestamp(), result)
+    let result = persist_provision_batch(state.inner(), site_account, batch);
+    mark_pricing_after_success(
+        state.inner(),
+        site_account.id,
+        chrono::Utc::now().timestamp(),
+        result,
+    )
 }
 
 pub(crate) fn mark_pricing_after_success<T>(
@@ -417,7 +424,7 @@ pub(crate) fn mark_pricing_after_success<T>(
 
 pub(crate) fn persist_provision_batch(
     state: &AppState,
-    op: &creds::Relay,
+    site_account: &creds::RelayAccount,
     mut batch: ManagedProvisionBatch,
 ) -> Result<ProvisionSummary, AppError> {
     let mut tiers = Vec::new();
@@ -432,10 +439,12 @@ pub(crate) fn persist_provision_batch(
         // 先取出来：`candidate.group_name` 下面会被 move 进 failures，
         // 而倍率在那之后还要用。
         let rate_multiplier = candidate.rate_multiplier;
-        let display_name = provision::provider_display_name(&op.site_name, &candidate.group_name);
+        let display_name =
+            provision::provider_display_name(&site_account.site_name, &candidate.group_name);
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
-        let base_url = sub2api::base_url_for(app_type, &op.site_origin, &candidate.api_base_url);
+        let base_url =
+            sub2api::base_url_for(app_type, &site_account.site_origin, &candidate.api_base_url);
         // 下面这串分支是「带目录平台」的**生成器形状分派**（claude/gemini 走
         // roles+models、codex/grokbuild 走 models）——「哪些平台带目录」这个名单
         // 的事实唯源是 [`provision::model_catalog_apps`]，加平台时两边一起动
@@ -549,7 +558,11 @@ pub(crate) fn persist_provision_batch(
         let mut site_declared_origin: Option<String> = None;
         if is_first_import {
             if let Some(declared) = &batch.site_declaration {
-                if site_config::validate_same_origin(&declared.site_origin, &op.site_origin).is_ok()
+                if site_config::validate_same_origin(
+                    &declared.site_origin,
+                    &site_account.site_origin,
+                )
+                .is_ok()
                 {
                     if let Some(platform) = platform_map::platform_for_app(app_type) {
                         if let Some(segment) = declared.segment_for(platform) {
@@ -580,7 +593,7 @@ pub(crate) fn persist_provision_batch(
             id: provider_id.clone(),
             name: display_name.clone(),
             settings_config,
-            website_url: Some(op.site_origin.clone()),
+            website_url: Some(site_account.site_origin.clone()),
             // aggregator 而不是 official：official 那条分类会触发一批只对官方订阅成立的
             // 逻辑（stale auth 清理、统一会话桶注入）。
             category: Some("aggregator".to_string()),
@@ -699,9 +712,12 @@ pub(crate) fn persist_provision_batch(
 
     refresh_live_for_current_tiers(state, &refresh_live);
 
-    let removed = prune_stale_tiers(state, &op.site_origin, batch.account_id, &keep)?;
+    let removed = prune_stale_tiers(state, &site_account.site_origin, batch.account_id, &keep)?;
     if removed > 0 {
-        log::info!("清理了 {removed} 个不再存在的档位（{}）", op.site_origin);
+        log::info!(
+            "清理了 {removed} 个不再存在的档位（{}）",
+            site_account.site_origin
+        );
     }
 
     // 生图工具跟着「生图栏里有没有档位」对齐一次。见 `sync_imagegen_mcp` 的文档。
@@ -1449,12 +1465,12 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });
-        let op = creds::Relay {
+        let site_account = creds::RelayAccount {
             site_origin: origin,
             ..test_newapi_relay(7)
         };
 
-        let error = match provision_backend(&op, None).await {
+        let error = match provision_backend(&site_account, None).await {
             Ok(_) => panic!("persisted account mismatch must stop provisioning"),
             Err(error) => error,
         };
@@ -1507,10 +1523,10 @@ mod tests {
     }
 
     fn newapi_batch(
-        op: &creds::Relay,
+        site_account: &creds::RelayAccount,
         groups: &[crate::relay::newapi_provision::ReconciledGroup],
     ) -> ManagedProvisionBatch {
-        let account_id = op.account_id.expect("test relay has account id");
+        let account_id = site_account.account_id.expect("test relay has account id");
         // 与 provision_backend 同一条纪律：keep 槽位跟着分类走（混合目录 = 三个聊天栏）。
         let mut observed_keep = std::collections::HashSet::new();
         let candidates = groups
@@ -1519,13 +1535,13 @@ mod tests {
                 let models = newapi_models();
                 newapi_keep_insert(
                     &mut observed_keep,
-                    &op.site_origin,
+                    &site_account.site_origin,
                     account_id,
                     &group.identity,
                     Some(&models),
                 );
                 newapi_candidates_for_group(
-                    &op.site_origin,
+                    &site_account.site_origin,
                     account_id,
                     group,
                     &models,
@@ -1552,14 +1568,14 @@ mod tests {
     /// 404 —— 生图栏则永远零档位（「此账号在当前平台没有可用分组」）。
     #[test]
     fn newapi_pure_image_group_lands_only_in_the_image_column_and_migrates_legacy_tiers() {
-        let op = test_newapi_relay(7);
+        let site_account = test_newapi_relay(7);
         let group = test_newapi_group("图", "sk-image");
         let image_models =
             provision::normalize_model_names(vec!["nano-banana-2".into(), "gpt-image-2".into()]);
         let account_id = 7;
 
         let candidates = newapi_candidates_for_group(
-            &op.site_origin,
+            &site_account.site_origin,
             account_id,
             &group,
             &image_models,
@@ -1574,10 +1590,17 @@ mod tests {
         // provision 一次：三个聊天栏的旧投影必须被清掉、生图栏出现新档位。
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
         let state = AppState::new(db.clone());
-        persist_provision_batch(&state, &op, newapi_batch(&op, std::slice::from_ref(&group)))
-            .expect("seed legacy three-column projections");
-        let provider_id =
-            provision::newapi_provider_id_for(&op.site_origin, account_id, &group.identity.0);
+        persist_provision_batch(
+            &state,
+            &site_account,
+            newapi_batch(&site_account, std::slice::from_ref(&group)),
+        )
+        .expect("seed legacy three-column projections");
+        let provider_id = provision::newapi_provider_id_for(
+            &site_account.site_origin,
+            account_id,
+            &group.identity.0,
+        );
         for app_type in newapi_app_types() {
             assert!(db
                 .get_provider_by_id(&provider_id, app_type.as_str())
@@ -1588,7 +1611,7 @@ mod tests {
         let mut keep = std::collections::HashSet::new();
         newapi_keep_insert(
             &mut keep,
-            &op.site_origin,
+            &site_account.site_origin,
             account_id,
             &group.identity,
             Some(&image_models),
@@ -1601,8 +1624,8 @@ mod tests {
             failures: Vec::new(),
             keys_created: 0,
         };
-        let summary =
-            persist_provision_batch(&state, &op, migrated).expect("migrate to image column");
+        let summary = persist_provision_batch(&state, &site_account, migrated)
+            .expect("migrate to image column");
         assert_eq!(summary.tiers.len(), 1);
         assert_eq!(summary.tiers[0].app_id, AppType::CodexImage.as_str());
         for app_type in newapi_app_types() {
@@ -1632,9 +1655,9 @@ mod tests {
 
     #[test]
     fn newapi_group_expands_to_three_app_configs_with_one_provider_id() {
-        let op = test_newapi_relay(7);
+        let site_account = test_newapi_relay(7);
         let group = test_newapi_group(" vip/\u{4e2d}\u{6587} \u{1f680} ", "sk-shared");
-        let batch = newapi_batch(&op, std::slice::from_ref(&group));
+        let batch = newapi_batch(&site_account, std::slice::from_ref(&group));
 
         assert_eq!(batch.candidates.len(), 3);
         assert_eq!(batch.observed_keep.len(), 3);
@@ -1655,7 +1678,8 @@ mod tests {
 
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
         let state = AppState::new(db.clone());
-        let summary = persist_provision_batch(&state, &op, batch).expect("persist projections");
+        let summary =
+            persist_provision_batch(&state, &site_account, batch).expect("persist projections");
 
         assert_eq!(summary.tiers.len(), 3);
         for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
@@ -1669,7 +1693,7 @@ mod tests {
             );
             assert_eq!(
                 provider.website_url.as_deref(),
-                Some(op.site_origin.as_str())
+                Some(site_account.site_origin.as_str())
             );
             assert_eq!(
                 provider
@@ -1683,12 +1707,16 @@ mod tests {
 
     #[test]
     fn newapi_refresh_preserves_edited_config_but_recomputes_unedited_defaults() {
-        let op = test_newapi_relay(7);
+        let site_account = test_newapi_relay(7);
         let first_group = test_newapi_group("vip", "sk-first");
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
         let state = AppState::new(db.clone());
-        let first = persist_provision_batch(&state, &op, newapi_batch(&op, &[first_group]))
-            .expect("initial provision");
+        let first = persist_provision_batch(
+            &state,
+            &site_account,
+            newapi_batch(&site_account, &[first_group]),
+        )
+        .expect("initial provision");
         let provider_id = first.tiers[0].provider_id.clone();
 
         let mut edited = db
@@ -1724,8 +1752,8 @@ mod tests {
             .expect("save stale unedited provider");
 
         let second_group = test_newapi_group("vip", "sk-second");
-        let second_batch = newapi_batch(&op, &[second_group]);
-        persist_provision_batch(&state, &op, second_batch).expect("refresh provision");
+        let second_batch = newapi_batch(&site_account, &[second_group]);
+        persist_provision_batch(&state, &site_account, second_batch).expect("refresh provision");
 
         let edited_after = db
             .get_provider_by_id(&provider_id, AppType::Codex.as_str())
@@ -1833,7 +1861,7 @@ mod tests {
 
     #[test]
     fn newapi_provider_write_failure_keeps_successful_apps_and_reports_the_failure() {
-        let op = test_newapi_relay(7);
+        let site_account = test_newapi_relay(7);
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
         {
             let conn = db.conn.lock().expect("lock memory db");
@@ -1851,8 +1879,8 @@ mod tests {
 
         let summary = persist_provision_batch(
             &state,
-            &op,
-            newapi_batch(&op, &[test_newapi_group("partial", "sk-partial")]),
+            &site_account,
+            newapi_batch(&site_account, &[test_newapi_group("partial", "sk-partial")]),
         )
         .expect("two successful app projections keep the batch successful");
 
@@ -2310,7 +2338,7 @@ mod tests {
             )
         })
         .expect("credentials");
-        let op = with_conn(&state, |conn| creds::get(conn, row_id))
+        let site_account = with_conn(&state, |conn| creds::get(conn, row_id))
             .expect("load")
             .expect("exists");
 
@@ -2335,7 +2363,7 @@ mod tests {
             failures: Vec::new(),
             keys_created: 0,
         };
-        persist_provision_batch(&state, &op, batch).expect("persist");
+        persist_provision_batch(&state, &site_account, batch).expect("persist");
 
         let rows = list_relays_impl(&state, AppType::Codex).expect("list relays");
         let tier = rows

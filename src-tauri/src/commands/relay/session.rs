@@ -290,13 +290,13 @@ pub(crate) struct RelayPricingRefreshSummary {
 }
 
 pub(crate) async fn refresh_due_relay_pricing_rows<F, Fut>(
-    relays: Vec<creds::Relay>,
+    relays: Vec<creds::RelayAccount>,
     now: i64,
     interval: std::time::Duration,
     refresh: F,
 ) -> RelayPricingRefreshSummary
 where
-    F: Fn(creds::Relay) -> Fut + Sync,
+    F: Fn(creds::RelayAccount) -> Fut + Sync,
     Fut: Future<Output = Result<(), AppError>> + Send,
 {
     use futures::StreamExt;
@@ -345,16 +345,20 @@ pub(crate) async fn refresh_due_relay_pricing(
             async move {
                 // 倍率拉取是只读请求，走 401→续期→重试：`token_expires_at = NULL`
                 // 的行靠它从「永不续期、到点暴毙」的降级态自愈。
-                relay_read_with_refresh_retry(&app_handle, relay.id, |op| {
+                relay_read_with_refresh_retry(&app_handle, relay.id, |site_account| {
                     // 闭包要能调两次（原请求 + 重试），future 各自持有克隆出来的 Arc。
                     let db = Arc::clone(&db);
                     async move {
-                        let updates = pricing::fetch_rate_updates(&op).await?;
+                        let updates = pricing::fetch_rate_updates(&site_account).await?;
                         pricing::apply_rate_updates(&db, &updates)?;
                         let conn = db.conn.lock().map_err(|error| {
                             AppError::Database(format!("获取数据库连接失败: {error}"))
                         })?;
-                        creds::mark_pricing_synced(&conn, op.id, chrono::Utc::now().timestamp())
+                        creds::mark_pricing_synced(
+                            &conn,
+                            site_account.id,
+                            chrono::Utc::now().timestamp(),
+                        )
                     }
                 })
                 .await
@@ -558,8 +562,8 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
         let state = app_handle.state::<AppState>();
         with_conn(&state, creds::list)?
             .into_iter()
-            .filter(|op| !op.auth_token.is_empty())
-            .map(|op| op.id)
+            .filter(|site_account| !site_account.auth_token.is_empty())
+            .map(|site_account| site_account.id)
             .collect()
     };
 
@@ -572,8 +576,10 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
         // 拿 /user/profile 当探活请求（最便宜的鉴权端点）。撞上「登录已过期」类 401
         // 时先静默续期再重试一次 —— 那是 `token_expires_at = NULL` 的降级态行唯一
         // 的自救机会（详见 relay_read_with_refresh_retry 的文档）。
-        let probe = relay_read_with_refresh_retry(app_handle, id, |op| async move {
-            backend::RuntimeBackend::for_relay(&op).balance().await
+        let probe = relay_read_with_refresh_retry(app_handle, id, |site_account| async move {
+            backend::RuntimeBackend::for_relay(&site_account)
+                .balance()
+                .await
         })
         .await;
 
@@ -742,11 +748,14 @@ mod tests {
         let (origin, server) = spawn_balance_server(router).await;
         let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
 
-        let error = relay_read_with_refresh_retry(app.handle(), relay_id, |op| async move {
-            backend::RuntimeBackend::for_relay(&op).balance().await
-        })
-        .await
-        .expect_err("续期失败时原请求的错误必须往外抛");
+        let error =
+            relay_read_with_refresh_retry(app.handle(), relay_id, |site_account| async move {
+                backend::RuntimeBackend::for_relay(&site_account)
+                    .balance()
+                    .await
+            })
+            .await
+            .expect_err("续期失败时原请求的错误必须往外抛");
 
         assert!(error.to_string().contains("登录已过期"), "{error}");
         assert!(!error.to_string().contains("续期失败"), "{error}");
