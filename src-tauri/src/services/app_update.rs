@@ -288,11 +288,12 @@ async fn install_bytes_and_restart(
         // （插件内部 std::process::exit(0)，绕过 TrayIcon::drop、不发
         // NIM_DELETE，会残留死图标——与托盘"退出"路径相同的问题）。
         // 因此清理只能放在 install 前执行，且必须显式移除托盘图标。
+        // 应用退出与安装器写文件的竞速由 NSIS 钩子（installer-hooks.nsh 的
+        // WaitForMainBinaryWritable）在安装器侧等待兜底，应用侧无需再睡。
         crate::save_window_state_before_exit(app);
         crate::cleanup_before_exit(app).await;
         crate::remove_tray_icon_before_exit(app);
         crate::destroy_single_instance_lock(app);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         update.install(bytes).map_err(|e| {
             format!(
                 "Windows 更新安装失败: {e}。已执行退出前清理，代理或 Live 接管可能已暂停；请重启应用或重新开启代理后再试。"
