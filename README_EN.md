@@ -119,6 +119,7 @@ by hand. The mechanism differs between the two:
 |---|---|
 | **Windows** | Windows 10 or later (needs the WebView2 runtime, which Windows 10 and later generally ship with) |
 | **macOS** | macOS 12 (Monterey) or later |
+| **Linux** | Ubuntu 22.04 or later (needs webkit2gtk 4.1 and a recent glibc; on Ubuntu 20.04 and older use [loongport-cli](docs/loongport-cli.md)) |
 
 Download from the [Releases](../../releases) page. Every release is built automatically
 by GitHub Actions:
@@ -128,9 +129,24 @@ by GitHub Actions:
 | **Windows** | `…-Windows-Setup.exe` | **Recommended** — installer with a Start menu entry and in-app updates |
 | | `…-Windows-Portable.zip` | No-install build; download new versions manually |
 | **macOS** | `…-macOS.dmg` | Universal binary |
+| **Linux** | `…-Linux-x86_64.AppImage` | **Recommended** — no-install, run as-is (needs FUSE); in-app updates supported |
+| | `…-Linux-x86_64.deb` / `.rpm` | For distro package managers (no in-app updates) |
 
 On ARM64 Windows machines (Snapdragon laptops and the like), use the two files with
 `-arm64` in the name.
+
+### No desktop? Ubuntu 20.04 or older? Use loongport-cli
+
+Headless servers and older systems (Ubuntu 20.04 and earlier) cannot install the desktop
+build — for those there is **[loongport-cli](docs/loongport-cli.md)**: a UI-less, one-shot
+tool that writes your relay into the config of codex / claude (and five other CLIs) with a
+single command. A static single binary with zero dependencies — runs on any x86_64 Linux:
+
+```bash
+loongport-cli --add-site https://example.com --key sk-xxx --app codex
+```
+
+Full install and usage guide (in Chinese): **[docs/loongport-cli.md](docs/loongport-cli.md)**.
 
 > **macOS blocks the first launch.** The build is not signed or notarized by Apple, so
 > Gatekeeper reports it as "damaged" — it is not damaged, it is unsigned. **Drag it into

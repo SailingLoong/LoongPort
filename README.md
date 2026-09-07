@@ -76,6 +76,7 @@ LoongPort 将其压缩为两步 —— **填入一个域名，登录一次。** 
 |---|---|
 | **Windows** | Windows 10 或更高（需 WebView2 运行时，Windows 10 及以上基本自带） |
 | **macOS** | macOS 12（Monterey）或更高 |
+| **Linux** | Ubuntu 22.04 或更高（需要 webkit2gtk 4.1 与较新的 glibc；Ubuntu 20.04 及更老请用 [loongport-cli](docs/loongport-cli.md)） |
 
 前往 [Releases](../../releases) 页面下载。每个版本均由 GitHub Actions 自动构建：
 
@@ -84,8 +85,20 @@ LoongPort 将其压缩为两步 —— **填入一个域名，登录一次。** 
 | **Windows** | `…-Windows-Setup.exe` | **推荐** —— 安装版，会创建开始菜单项并支持应用内自动升级 |
 | | `…-Windows-Portable.zip` | 免安装版，解压即用；发现新版本后需手动下载 |
 | **macOS** | `…-macOS.dmg` | 两种芯片通用 |
+| **Linux** | `…-Linux-x86_64.AppImage` | **推荐** —— 免安装、双击即用（需 FUSE），支持应用内自动更新 |
+| | `…-Linux-x86_64.deb` / `.rpm` | 发行版包管理器安装（不参与应用内自动更新） |
 
 ARM64 架构的 Windows 设备（如骁龙笔记本）请使用带 `-arm64` 后缀的两个文件。
+
+### 没有界面？Ubuntu 20.04 及更老？用 loongport-cli
+
+服务器（无桌面环境）和 Ubuntu 20.04 及更早等老系统装不了桌面版——为此提供了 **[loongport-cli](docs/loongport-cli.md)**：无 UI 版本，一条命令把中转站写进 codex / claude 等 7 个 CLI 的配置文件。静态单文件零依赖，任何 x86_64 Linux 可直接运行：
+
+```bash
+loongport-cli --add-site https://example.com --key sk-xxx --app codex
+```
+
+完整安装与使用说明见 **[docs/loongport-cli.md](docs/loongport-cli.md)**。
 
 > **macOS 首次打开会被系统拦截。** 由于未做 Apple 签名与公证，Gatekeeper 会报「已损坏」—— 并非真的损坏，而是缺少签名。**请先拖入「应用程序」、暂不打开**，然后在终端执行一次：
 >
