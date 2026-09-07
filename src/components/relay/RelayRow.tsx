@@ -46,7 +46,7 @@ import { useTierVerification } from "./model-verification/TierVerificationProvid
  * （CLAUDE.md §一「什么时候可以不复用」正是这一条）。
  *
  * 但**视觉 token 全部抄它**，判据是「和旧页面放一起看不出是两个人写的」：
- * `rounded-xl border p-4`、选中态 `border-blue-500/60 shadow-sm shadow-blue-500/10`
+ * `rounded-xl border p-4`、选中态 `border-blue-500/60 bg-blue-500/10 shadow-sm shadow-blue-500/10`
  * （`ProviderCard.tsx:299-306`）、当前项用裸 `Check`（不是 `CheckCircle2`）。
  *
  * ## 折叠没有动画，这是事实不是遗漏
@@ -186,7 +186,7 @@ export function RelayRow({
           dragHandleProps?.isDragging
             ? "cursor-grabbing border-primary shadow-lg"
             : relay.isCurrent
-              ? "border-blue-500/60 shadow-sm shadow-blue-500/10 hover:border-blue-500"
+              ? "border-blue-500/60 bg-blue-500/10 shadow-sm shadow-blue-500/10 hover:border-blue-500"
               : "hover:border-border-active",
         )}
       >
@@ -670,7 +670,7 @@ function TierItem({
         // 「它脱离自动维护了，出问题你得自己回退」。判据是尺子1：用仓里已有的
         // 颜色语义，别新造一套。
         tier.isCurrent
-          ? "border-blue-500/60 shadow-sm shadow-blue-500/10"
+          ? "border-blue-500/60 bg-blue-500/10 shadow-sm shadow-blue-500/10"
           : userEdited
             ? "border-amber-500/50 bg-amber-500/5 hover:border-amber-500/70"
             : "hover:border-border-active",
@@ -752,7 +752,8 @@ function TierItem({
             当前档位那一支**照上游做成禁用的灰色按钮**（`ProviderActions.tsx:188-197`
             的 `isCurrent` 分支：`variant="secondary"` + `Check` + `bg-gray-200`），
             不再是一段裸文字 —— 两者在同一屏并排时，文字与按钮混排看着像没对齐。
-            当前态本身由行的蓝色边框表达（与上游卡片同一个做法）。 */}
+            当前态本身由行的蓝色边框+淡底表达（形状与本卡里的模型芯片选中态、
+            easymode 的 emerald 选中一致 —— 分组多时 1px 描边扫不出来，底色才扫得出来）。 */}
         {tier.isCurrent ? (
           <Button
             type="button"
