@@ -234,7 +234,10 @@ describe("ReconcileDialog", () => {
       screen.getByRole("button", { name: "loongport.reconcile.sampleNow" }),
     );
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("relay_balance", { relayId: 7 }),
+      expect(invoke).toHaveBeenCalledWith("relay_balance", {
+        relayId: 7,
+        force: false,
+      }),
     );
     // 采样完成前不重拉对账（先采样、后 invalidate 的顺序）。
     expect(reportCalls()).toHaveLength(1);

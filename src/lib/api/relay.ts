@@ -572,8 +572,12 @@ export const relayApi = {
    * ⚠️ **登录态过期也查得到**：后端前两步走 sk，不需要网页登录态。别在调用方
    * 按 `sessionExpired` 把这条路关掉。
    */
-  balance: (relayId: number): Promise<RowBalanceResult> =>
-    invoke("relay_balance", { relayId }),
+  /**
+   * `force = true` 绕过缓存直查（手动刷新按钮用）；缺省走 SWR ——
+   * 后端优先回 `site_balance_cache`（TTL 内秒回、过期回旧值并踢后台刷新）。
+   */
+  balance: (relayId: number, force = false): Promise<RowBalanceResult> =>
+    invoke("relay_balance", { relayId, force }),
 
   refresh: (relayId: number, app: AppId): Promise<RefreshResult> =>
     invoke("relay_refresh", { relayId, app }),

@@ -58,10 +58,20 @@ export function useRowBalanceQuery(
 ) {
   const { enabled = true } = options;
 
+  // 手动刷新要真值：refetch 前把 force 置位，queryFn 消费一次即复位。
+  // （后端 relay 路径的缓存是 SWR —— TTL 内普通读秒回缓存；点刷新按钮必须
+  // 旁路它。vendor 路径后端无缓存，force 参数被忽略。）
+  const forceRef = useRef(false);
+
   const query = useQuery<RowBalanceResult>({
     queryKey: rowBalanceKeys.row(kind, rowId),
-    queryFn: async () =>
-      kind === "relay" ? relayApi.balance(rowId) : vendorApi.balance(rowId),
+    queryFn: async () => {
+      const force = forceRef.current;
+      forceRef.current = false;
+      return kind === "relay"
+        ? relayApi.balance(rowId, force)
+        : vendorApi.balance(rowId);
+    },
     enabled,
     refetchOnWindowFocus: false,
     // 与 `useUsageQuery` 同语义：后端只在**瞬时传输失败**时 reject，retry 在那时
@@ -99,6 +109,7 @@ export function useRowBalanceQuery(
     loading: query.isFetching,
     lastQueriedAt,
     refetch: async () => {
+      forceRef.current = true;
       await query.refetch();
     },
   };

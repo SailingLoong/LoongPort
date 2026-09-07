@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import {
   relayApi,
   PURCHASE_CLOSED,
+  SITE_BALANCES_UPDATED,
   VENDOR_LOGIN_ERROR,
   VENDOR_ACCOUNTS_CHANGED,
   PROVIDER_SWITCHED,
@@ -354,6 +355,12 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
     void queryClient.invalidateQueries({
       queryKey: rowBalanceKeys.row("relay", relayId),
     });
+  });
+
+  // 站点余额后台刷新完成（SWR 补值时机）：站点余额跨行/跨 app 共享，
+  // 失效全部行级余额 query —— 行条与看板读的是同一张缓存表，一起收到新值。
+  useTauriEvent(SITE_BALANCES_UPDATED, () => {
+    void queryClient.invalidateQueries({ queryKey: rowBalanceKeys.all });
   });
 
   /**

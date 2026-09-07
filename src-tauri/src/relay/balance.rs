@@ -347,6 +347,52 @@ pub fn cached_site_balances(
     }
 }
 
+/// 读单站缓存（行级余额条的读路径）。`None` = 没进过缓存。
+pub fn cached_site_balance(
+    db: &crate::database::Database,
+    origin: &str,
+) -> Option<SiteBalanceEntry> {
+    let conn = db
+        .conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    conn.query_row(
+        "SELECT balance_usd, fetched_at FROM site_balance_cache WHERE site_origin = ?1",
+        rusqlite::params![origin],
+        |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, i64>(1)?)),
+    )
+    .ok()
+}
+
+/// 从缓存条目拼行级展示结果（正/负缓存同一入口）。
+///
+/// 负缓存（`balance = None`）的失败文案是泛化的 —— 具体错误原因不进缓存
+/// （会过期、也占库），前端 keep-last-good 与手动刷新（force 旁路）兜住展示。
+pub fn cached_row_balance_result(entry: &SiteBalanceEntry) -> RowBalanceResult {
+    let usage = match entry.0 {
+        Some(balance) => UsageResult {
+            success: true,
+            data: Some(vec![UsageData {
+                plan_name: None,
+                extra: None,
+                is_valid: None,
+                invalid_message: None,
+                total: None,
+                used: None,
+                remaining: Some(balance),
+                unit: Some("USD".to_string()),
+            }]),
+            error: None,
+        },
+        None => UsageResult {
+            success: false,
+            data: None,
+            error: Some("最近一次查询没有取到可用余额".to_string()),
+        },
+    };
+    row_balance_result(usage, true)
+}
+
 /// 幂等写一行（含负缓存）。
 pub fn upsert_site_balance(
     db: &crate::database::Database,

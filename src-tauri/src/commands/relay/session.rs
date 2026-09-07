@@ -390,7 +390,9 @@ async fn refresh_relay_outcome(
     } else {
         None
     };
-    let balance = relay_balance_impl(app_handle, relay_id).await;
+    // force：这是用户显式动作（刷新/获取密钥）链路的一环 —— 要真值不要缓存；
+    // 充值关窗那条路（refresh_after_purchase）已把旧缓存删掉，这里也不会读到旧值。
+    let balance = relay_balance_impl(app_handle, relay_id, true).await;
     RelayRefreshOutcome {
         name,
         row_id: relay_id,
