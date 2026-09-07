@@ -378,7 +378,6 @@ mod tests {
                 sites: std::collections::BTreeMap::from([(
                     "127.0.0.1".to_string(),
                     remote_config::RelayDirectorySite {
-                        veridrop_host: None,
                         entry_url: None,
                         purchase_url: Some(configured.clone()),
                         usage_url: None,
@@ -515,7 +514,6 @@ mod tests {
                 sites: std::collections::BTreeMap::from([(
                     "127.0.0.1".to_string(),
                     remote_config::RelayDirectorySite {
-                        veridrop_host: None,
                         entry_url: None,
                         purchase_url: Some(configured.clone()),
                         usage_url: None,

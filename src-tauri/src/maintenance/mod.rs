@@ -9,7 +9,7 @@ pub use config::{APP_UPDATE_CHECKED_EVENT, MODELS_DEV_PRICING_UPDATED_EVENT};
 
 #[cfg(feature = "gui")]
 pub fn start(app: tauri::AppHandle) {
-    start_veridrop_directory_refresh(app.clone());
+    start_directory_refresh(app.clone());
     start_models_dev_pricing_refresh(app.clone());
     start_relay_pricing_refresh(app.clone());
     start_crowd_metrics_flush(app.clone());
@@ -112,21 +112,23 @@ fn start_app_update_check(app: tauri::AppHandle) {
 }
 
 #[cfg(feature = "gui")]
-fn start_veridrop_directory_refresh(app: tauri::AppHandle) {
+fn start_directory_refresh(app: tauri::AppHandle) {
     let schedule = scheduler::TaskSchedule::new(
-        config::VERIDROP_STARTUP_DELAY,
-        config::VERIDROP_REFRESH_INTERVAL,
-        config::VERIDROP_RETRY_DELAY,
+        config::DIRECTORY_STARTUP_DELAY,
+        config::DIRECTORY_REFRESH_INTERVAL,
+        config::DIRECTORY_RETRY_DELAY,
     );
-    scheduler::spawn_periodic("veridrop-directory", schedule, move || {
+    scheduler::spawn_periodic("directory", schedule, move || {
         let app = app.clone();
         async move {
             crate::relay::remote_config::refresh_and_cache().await;
-            crate::refresh_stale_directories(app.clone()).await?;
-            // 漏斗收尾（探针 + 三层日志）：best-effort，不把它记成任务失败 ——
+            // 实测快照（行级观测的 owner）：数据层自己的周期触发；
+            // 读路径另有 SWR 追新兜底。失败返回 Err → 走 RETRY_DELAY 重试。
+            crate::crowd::snapshot::refresh_and_cache().await?;
+            // 探针落盘 + 逐站日志：best-effort，不把它记成任务失败 ——
             // 探针的单站失败已经作为 NetworkBlocked 落进了结果里。
-            crate::relay::leaderboard::refresh_site_probes_for_directory().await;
-            // transit 摘要与榜单同一周期刷（都是 6 小时口径的站方数据），
+            crate::relay::directory::refresh_site_probes_for_directory().await;
+            // transit 摘要（站方公开数据）与实测快照同一周期刷，
             // 与手动刷新按钮共用同一条「刷完广播」路径。
             crate::spawn_transit_refresh_and_emit(app.clone());
             Ok(())

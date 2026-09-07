@@ -1,12 +1,8 @@
-//! 中转站广场/榜单（transit 与 VeriDrop）命令与目录事件。
-//! 更大的图景与约束见本目录 mod.rs 的总览。
+//! 中转站广场命令与目录事件。更大的图景与约束见 `relay::directory` 的模块文档。
 
 use super::*;
 
 pub(crate) const RELAY_DIRECTORY_UPDATED_EVENT: &str = "relay-directory-updated";
-
-// `DEFAULT_MODEL` 住在 `provision` 里 —— `pick_model` 要在「问不出模型列表」时
-// 回落到它。这里只 `use`，避免在命令层另写一份。
 
 /// 匿名统计的上报端点配好了没。
 ///
@@ -52,140 +48,74 @@ pub fn relay_list_sponsors() -> Vec<crate::relay::remote_config::Sponsor> {
         .unwrap_or_default()
 }
 
+/// 读广场列表：三份本地缓存 + 探针记录的纯投影（同步、零网络往返）。
+///
+/// 实测快照陈旧或缺失时后台追新（SWR：先出画面，刷完广播事件让前端重拉）。
+/// 行级观测**公开**——这里与追新都不查共建开关；共建门禁只管详情弹窗的
+/// 深数据（`crowd_get_snapshot`），见 `relay::directory` 的「门禁分层」。
 #[tauri::command]
-pub async fn relay_list_directory(
+pub fn relay_list_directory(
     app_handle: tauri::AppHandle,
-    kind: crate::relay::leaderboard::LeaderboardKind,
-) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
-    if let Some(cached) =
-        crate::relay::leaderboard::read_cached(kind).map_err(|error| error.to_string())?
-    {
-        if !crate::relay::leaderboard::is_cache_fresh(kind, chrono::Utc::now().timestamp()) {
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = refresh_stale_directory_and_emit(&app_handle, kind).await {
-                    log::warn!("background VeriDrop refresh for {kind:?} failed: {error}");
-                }
-            });
-        }
-        return Ok(cached);
+) -> Result<crate::relay::directory::RelayDirectoryListing, String> {
+    if snapshot_needs_refresh() {
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = crate::crowd::snapshot::refresh_and_cache().await {
+                log::debug!("crowd 快照后台刷新失败（用旧值）: {error}");
+            }
+            emit_directory_update(&app_handle);
+        });
     }
-
-    refresh_stale_directory_and_emit(&app_handle, kind)
-        .await
-        .map_err(|error| error.to_string())
+    crate::relay::directory::read_listing().map_err(|error| error.to_string())
 }
 
+/// 手动刷新按钮：实测快照同步刷（几十 KB 的公共 JSON，一个超时上界内返回
+/// 新值），transit 摘要异步刷——不能让几十个站的快照抓取把按钮卡住十几秒，
+/// 刷完走事件广播。
 #[tauri::command]
 pub async fn relay_refresh_directory(
     app_handle: tauri::AppHandle,
-    kind: crate::relay::leaderboard::LeaderboardKind,
-) -> Result<crate::relay::leaderboard::RelayLeaderboard, String> {
-    force_refresh_directory_and_emit(&app_handle, kind)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RelayDirectoryUpdated {
-    kind: crate::relay::leaderboard::LeaderboardKind,
-}
-
-async fn force_refresh_directory_and_emit(
-    app_handle: &tauri::AppHandle,
-    kind: crate::relay::leaderboard::LeaderboardKind,
-) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
-    // 手动刷新按钮：榜单同步刷（返回值立刻要给 UI），transit 摘要异步刷
-    // ——不能让几十个站的快照抓取把按钮卡住十几秒，刷完走事件广播。
+) -> Result<crate::relay::directory::RelayDirectoryListing, String> {
     spawn_transit_refresh_and_emit(app_handle.clone());
-    let outcome = crate::relay::leaderboard::refresh(kind).await?;
-    emit_directory_update(app_handle, kind, outcome)
+    if let Err(error) = crate::crowd::snapshot::refresh_and_cache().await {
+        // 失败不拦返回：数据最多「旧一个周期」，比「刷新失败就整个消失」好。
+        log::warn!("crowd 快照刷新失败（用旧值）: {error}");
+    }
+    let listing = crate::relay::directory::read_listing().map_err(|error| error.to_string())?;
+    emit_directory_update(&app_handle);
+    Ok(listing)
 }
 
-/// 异步刷一轮 transit 摘要，完成后广播全部榜单的更新事件。
+/// 快照是否需要追新：没有缓存（新装首启）或已过陈旧线。
+fn snapshot_needs_refresh() -> bool {
+    match crate::crowd::snapshot::read_cached() {
+        None => true,
+        Some(snapshot) => crate::crowd::snapshot::is_stale(&snapshot),
+    }
+}
+
+/// 广场数据在「命令层之外」被更新（后台快照追新 / transit 周期刷新）后的广播：
+/// 前端作废重拉。与 [`relay_refresh_directory`] 共用事件契约，前端不区分来源。
+fn emit_directory_update(app_handle: &tauri::AppHandle) {
+    if let Err(error) = app_handle.emit(RELAY_DIRECTORY_UPDATED_EVENT, ()) {
+        log::warn!("发送广场更新事件失败: {error}");
+    }
+}
+
+/// 异步刷一轮 transit 摘要，完成后广播广场更新事件。
 ///
-/// maintenance 周期任务与手动刷新共用这一条：榜单与 transit 是两份数据、
+/// maintenance 周期任务与手动刷新共用这一条：行源与 transit 是两份数据、
 /// 各刷各的；前端对 `relay-directory-updated` 的反应是重拉列表，届时
-/// 读取路径会把新摘要合并进去（见 `leaderboard::decorate_transit`）。
+/// 读取路径会把新摘要合并进去（见 `relay::directory::decorate_transit`）。
 pub(crate) fn spawn_transit_refresh_and_emit(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let config = crate::relay::remote_config::load_cached().unwrap_or_default();
-        let hosts = crate::relay::leaderboard::managed_site_hosts(&config);
+        let hosts = crate::relay::directory::managed_site_hosts(&config);
         if hosts.is_empty() {
             return;
         }
         crate::relay::transit::refresh_for_hosts(&hosts).await;
-        emit_all_directory_updates(&app_handle);
+        emit_directory_update(&app_handle);
     });
-}
-
-/// 广场数据在「命令层之外」被更新（transit 后台刷新）后的广播：
-/// 4 个榜单各发一次同名事件，前端作废重拉。与 [`emit_directory_update`]
-/// 共用事件契约，前端不区分来源。
-pub(crate) fn emit_all_directory_updates(app_handle: &tauri::AppHandle) {
-    for kind in crate::relay::leaderboard::LeaderboardKind::ALL {
-        if let Err(error) = app_handle.emit(
-            RELAY_DIRECTORY_UPDATED_EVENT,
-            RelayDirectoryUpdated { kind },
-        ) {
-            log::warn!("发送广场更新事件失败（{kind:?}）: {error}");
-        }
-    }
-}
-
-async fn refresh_stale_directory_and_emit(
-    app_handle: &tauri::AppHandle,
-    kind: crate::relay::leaderboard::LeaderboardKind,
-) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
-    let outcome = crate::relay::leaderboard::refresh_if_stale(kind).await?;
-    emit_directory_update(app_handle, kind, outcome)
-}
-
-fn emit_directory_update(
-    app_handle: &tauri::AppHandle,
-    kind: crate::relay::leaderboard::LeaderboardKind,
-    outcome: crate::relay::leaderboard::RefreshOutcome,
-) -> Result<crate::relay::leaderboard::RelayLeaderboard, AppError> {
-    if outcome.updated {
-        app_handle
-            .emit(
-                RELAY_DIRECTORY_UPDATED_EVENT,
-                RelayDirectoryUpdated { kind },
-            )
-            .map_err(|error| AppError::Message(format!("发送 VeriDrop 更新事件失败: {error}")))?;
-    }
-    Ok(outcome.leaderboard)
-}
-
-pub(crate) async fn refresh_stale_directories(
-    app_handle: tauri::AppHandle,
-) -> Result<(), AppError> {
-    use futures::StreamExt;
-
-    let now = chrono::Utc::now().timestamp();
-    let stale = crate::relay::leaderboard::LeaderboardKind::ALL
-        .into_iter()
-        .filter(|kind| !crate::relay::leaderboard::is_cache_fresh(*kind, now));
-    let mut refreshes = futures::stream::iter(stale.map(|kind| {
-        let app_handle = app_handle.clone();
-        async move { refresh_stale_directory_and_emit(&app_handle, kind).await }
-    }))
-    .buffer_unordered(2);
-
-    let mut failures = Vec::new();
-    while let Some(result) = refreshes.next().await {
-        if let Err(error) = result {
-            failures.push(error.to_string());
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(AppError::Message(format!(
-            "部分 VeriDrop 榜单刷新失败: {}",
-            failures.join("; ")
-        )))
-    }
 }
 
 #[cfg(test)]
@@ -234,24 +164,62 @@ mod tests {
         );
     }
 
-    /// `directoryState.ts` 的 `defaultDirectoryKind` 是「app → 榜单分组」的 TS 镜像，
-    /// 分组键是后端 `LeaderboardKind` 的 serde 线上名。跨语言编译器管不到 `.ts`：
-    /// 后端改分键（或前端改默认分组）时两边各自漂移，症状是 tab 切过去查了一个
-    /// 不存在的榜单（空列表，不报错）。这道闸把映射钉住，形状照 events.rs 的跨语言闸。
+    /// ⭐ 广场列表发给前端的键名必须是 camelCase，且不得残留换源前的死键
+    /// （`veridropHost` / `score`…）——前端按新形状读，旧键漏删只会让 TS 侧
+    /// `undefined` 静默漂移。与 `list_sponsors` 同一条跨语言静默失效防线。
     #[test]
-    fn frontend_default_directory_kind_matches_the_backend_leaderboard_kinds() {
-        let ts = include_str!("../../../../src/components/relay/directory/directoryState.ts");
-        for line in [
-            r#"if (appId === "claude" || appId === "claude-desktop") return "claude";"#,
-            r#"if (appId === "codex" || appId === "codex-image") return "openai";"#,
-            r#"if (appId === "gemini") return "gemini";"#,
-            r#"return "overall";"#,
+    fn directory_listing_emits_camel_case_keys_and_no_legacy_fields() {
+        let item = crate::relay::directory::RelayDirectoryItem {
+            site_host: "x.com".into(),
+            site_domain: "x.com".into(),
+            display_name: "X".into(),
+            rank: 1,
+            crowd: Some(crate::relay::directory::CrowdSummary {
+                ttft_p50_ms: Some(812.5),
+                err_rate: Some(0.008),
+            }),
+            entry_url: "https://x.com".into(),
+            transit: None,
+        };
+        let listing = crate::relay::directory::RelayDirectoryListing {
+            items: vec![item],
+            synced_at: 1_786_680_000,
+        };
+
+        let value = serde_json::to_value(listing).expect("要能序列化");
+        let first = value["items"][0].as_object().expect("是个对象");
+
+        for key in [
+            "siteHost",
+            "siteDomain",
+            "displayName",
+            "rank",
+            "crowd",
+            "entryUrl",
         ] {
             assert!(
-                ts.contains(line),
-                "directoryState.ts 的默认分组映射变了，与后端 LeaderboardKind 的线上名 \
-                 （overall/claude/openai/gemini）对不上一行：{line}"
+                first.contains_key(key),
+                "前端要的键 {key} 不在返回里，实际：{:?}",
+                first.keys().collect::<Vec<_>>()
             );
+        }
+        let crowd = first["crowd"].as_object().expect("crowd 是个对象");
+        for key in ["ttftP50Ms", "errRate"] {
+            assert!(crowd.contains_key(key), "crowd 缺 {key}");
+        }
+        for legacy in [
+            "veridropHost",
+            "score",
+            "samples",
+            "latestDate",
+            "detailUrl",
+            "protocolScores",
+            "claudeSignatureRate",
+            "scenarios",
+            "issues",
+            "autoAdd",
+        ] {
+            assert!(!first.contains_key(legacy), "换源后的列表不该再带 {legacy}");
         }
     }
 }
