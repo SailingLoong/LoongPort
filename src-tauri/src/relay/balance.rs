@@ -92,7 +92,7 @@ pub struct BalanceQuery<'a> {
 /// 这一个 enum 上** —— 顺序本身仍然只在本模块定义一次，调用方无从改动它。
 pub enum SessionFallback<'a> {
     /// sub2api / NewAPI 中转站的 JWT 路。**NewAPI 站只有这一条**，不能删。
-    Relay(&'a creds::Relay),
+    Relay(&'a creds::RelayAccount),
     /// 官网厂商的网页登录态路。每家的会话接口不同（`vendor::balance` 分发）。
     Vendor {
         vendor: crate::vendor::Vendor,

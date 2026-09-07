@@ -36,7 +36,7 @@ pub async fn relay_apply_site_config(
     relay_id: i64,
     input: String,
 ) -> Result<SiteConfigApplySummary, AppError> {
-    let op = usable_relay(&app_handle, relay_id).await?;
+    let site_account = usable_relay(&app_handle, relay_id).await?;
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(AppError::InvalidInput(
@@ -44,12 +44,12 @@ pub async fn relay_apply_site_config(
         ));
     }
     let declared = if trimmed.starts_with("https://") {
-        site_config::validate_same_origin(trimmed, &op.site_origin)?;
+        site_config::validate_same_origin(trimmed, &site_account.site_origin)?;
         site_config::fetch_declaration_from_url(trimmed).await?
     } else {
         site_config::parse_site_config(trimmed)?
     };
-    site_config::validate_same_origin(&declared.site_origin, &op.site_origin)?;
+    site_config::validate_same_origin(&declared.site_origin, &site_account.site_origin)?;
 
     let state = app_handle.state::<crate::store::AppState>();
     let mut applied = Vec::new();
@@ -72,7 +72,7 @@ pub async fn relay_apply_site_config(
             if !is_managed(&provider) {
                 continue;
             }
-            if provider.website_url.as_deref() != Some(op.site_origin.as_str()) {
+            if provider.website_url.as_deref() != Some(site_account.site_origin.as_str()) {
                 continue;
             }
             if !site_config::apply_segment_to_app(
@@ -101,7 +101,7 @@ pub async fn relay_apply_site_config(
         ));
     }
     Ok(SiteConfigApplySummary {
-        site_origin: op.site_origin,
+        site_origin: site_account.site_origin,
         declared_origin: declared.site_origin,
         applied,
     })
@@ -175,7 +175,7 @@ pub async fn relay_reset_site_config(
     app_handle: tauri::AppHandle,
     relay_id: i64,
 ) -> Result<SiteConfigApplySummary, AppError> {
-    let op = usable_relay(&app_handle, relay_id).await?;
+    let site_account = usable_relay(&app_handle, relay_id).await?;
     let state = app_handle.state::<crate::store::AppState>();
 
     let mut applied = Vec::new();
@@ -188,7 +188,7 @@ pub async fn relay_reset_site_config(
             if !is_managed(&provider) {
                 continue;
             }
-            if provider.website_url.as_deref() != Some(op.site_origin.as_str()) {
+            if provider.website_url.as_deref() != Some(site_account.site_origin.as_str()) {
                 continue;
             }
             let Some((api_key, base_url, model)) =
@@ -228,7 +228,7 @@ pub async fn relay_reset_site_config(
         return Err(AppError::Config("该站点下没有可恢复默认的托管档位".into()));
     }
     Ok(SiteConfigApplySummary {
-        site_origin: op.site_origin,
+        site_origin: site_account.site_origin,
         declared_origin: String::new(),
         applied,
     })
@@ -352,7 +352,7 @@ mod tests {
             )
         })
         .expect("credentials");
-        let op = with_conn(&state, |conn| creds::get(conn, row_id))
+        let site_account = with_conn(&state, |conn| creds::get(conn, row_id))
             .expect("load")
             .expect("exists");
 
@@ -393,7 +393,7 @@ mod tests {
             failures: Vec::new(),
             keys_created: 0,
         };
-        persist_provision_batch(&state, &op, batch).expect("persist");
+        persist_provision_batch(&state, &site_account, batch).expect("persist");
 
         let provider = state
             .db

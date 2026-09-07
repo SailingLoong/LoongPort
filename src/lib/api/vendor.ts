@@ -151,7 +151,7 @@ export const vendorApi = {
    * 冲掉，而界面上没有任何地方告诉过他这一点。
    */
   resetTierConfig: (providerId: string, appId: AppId): Promise<void> =>
-    invoke("vendor_reset_tier_config", { providerId, appId }),
+    invoke("vendor_reset_plan_config", { providerId, appId }),
 
   /**
    * 开登录窗，等凭据回来，存成一行账号。

@@ -583,7 +583,7 @@ pub async fn vendor_open_login(
         .map(|r| r.login_identifier)
         .unwrap_or_default();
 
-    let Some(row_id) = do_login(&app_handle, vendor, &login_hint)
+    let Some(row_id) = login_via_browser(&app_handle, vendor, &login_hint)
         .await
         .map_err(|e| e.to_string())?
     else {
@@ -648,7 +648,7 @@ pub async fn vendor_refresh(
     ))
 }
 
-async fn do_login(
+async fn login_via_browser(
     app_handle: &tauri::AppHandle,
     vendor: Vendor,
     login_hint: &str,
@@ -660,7 +660,7 @@ async fn do_login(
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
     // 残留窗口可能是隐藏状态，而 `set_focus` 对不可见窗口是 no-op ⇒ 用户点了登录
-    // 什么都没发生，且 label 被占，再点多少次都一样（照 `relay::do_login` 那段）。
+    // 什么都没发生，且 label 被占，再点多少次都一样（照 `relay::login_via_browser` 那段）。
     if let Some(stale) = app_handle.get_webview_window(window_label) {
         log::info!("发现残留的官网登录窗口，销毁后重开");
         let _ = stale.destroy();
@@ -680,7 +680,7 @@ async fn do_login(
     .title(format!("登录 {}", vendor.display_name()))
     .inner_size(480.0, 720.0)
     .resizable(true)
-    // ⚠️ **每次登录都必须是全新的登录态**。理由与 `relay::do_login` 那处逐条相同
+    // ⚠️ **每次登录都必须是全新的登录态**。理由与 `relay::login_via_browser` 那处逐条相同
     // （详见那段长注释）：不加的话 WebView 用的是全 app 共享的**持久** profile，
     // 于是「删掉账号 → 重新添加」会被官网的 SPA 认成已登录直接跳走 ⇒
     // **同一个厂商永远只能挂第一个登录过的账号**，而多账号正是本表唯一索引
@@ -1061,15 +1061,15 @@ async fn provision_impl(
 /// 算的）。一次恢复六条会把他在别的 tab 里的编辑一起冲掉，而界面上没有任何地方
 /// 告诉过他这一点。
 #[tauri::command]
-pub async fn vendor_reset_tier_config(
+pub async fn vendor_reset_plan_config(
     state: State<'_, AppState>,
     provider_id: String,
     app_id: String,
 ) -> Result<(), String> {
-    vendor_reset_tier_config_impl(state.inner(), &provider_id, &app_id).map_err(|e| e.to_string())
+    vendor_reset_plan_config_impl(state.inner(), &provider_id, &app_id).map_err(|e| e.to_string())
 }
 
-fn vendor_reset_tier_config_impl(
+fn vendor_reset_plan_config_impl(
     state: &AppState,
     provider_id: &str,
     app_id: &str,

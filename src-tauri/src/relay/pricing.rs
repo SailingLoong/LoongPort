@@ -5,7 +5,7 @@ use rusqlite::params;
 use crate::{
     database::{lock_conn, Database},
     error::AppError,
-    relay::{backend::BackendKind, creds::Relay, newapi, provision, sub2api},
+    relay::{backend::BackendKind, creds::RelayAccount, newapi, provision, sub2api},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15,7 +15,7 @@ pub struct RateUpdate {
 }
 
 fn sub2api_rate_updates(
-    relay: &Relay,
+    relay: &RelayAccount,
     groups: Vec<sub2api::Group>,
     user_rates: HashMap<i64, f64>,
 ) -> Vec<RateUpdate> {
@@ -44,7 +44,7 @@ fn sub2api_rate_updates(
         .collect()
 }
 
-fn newapi_rate_updates(relay: &Relay, groups: Vec<newapi::Group>) -> Vec<RateUpdate> {
+fn newapi_rate_updates(relay: &RelayAccount, groups: Vec<newapi::Group>) -> Vec<RateUpdate> {
     let account_id = relay
         .account_id
         .expect("authenticated relay required for NewAPI pricing");
@@ -61,7 +61,7 @@ fn newapi_rate_updates(relay: &Relay, groups: Vec<newapi::Group>) -> Vec<RateUpd
         .collect()
 }
 
-pub async fn fetch_rate_updates(relay: &Relay) -> Result<Vec<RateUpdate>, AppError> {
+pub async fn fetch_rate_updates(relay: &RelayAccount) -> Result<Vec<RateUpdate>, AppError> {
     let account_id = relay
         .account_id
         .ok_or_else(|| AppError::InvalidInput("未登录中转站不能刷新倍率".into()))?;
@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use crate::relay::{
         backend::BackendKind,
-        creds::Relay,
+        creds::RelayAccount,
         newapi::{Group as NewApiGroup, GroupIdentity},
         provision, sub2api,
     };
@@ -131,8 +131,8 @@ mod tests {
         Json, Router,
     };
 
-    fn relay(backend_kind: BackendKind) -> Relay {
-        Relay {
+    fn relay(backend_kind: BackendKind) -> RelayAccount {
+        RelayAccount {
             id: 1,
             site_origin: "https://relay.example".into(),
             site_name: "Relay".into(),

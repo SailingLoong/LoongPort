@@ -172,7 +172,7 @@ pub fn relay_list_relays(state: State<'_, AppState>, app: String) -> Result<Vec<
 /// 「这一行能开带登录态的站点窗吗」——充值与查看用量共用同一判据
 /// （配置了入口 + 登录态有效 + NewAPI 还要有可轮换的 refresh cookie）。
 pub(crate) fn can_open_site_window(
-    relay: &creds::Relay,
+    relay: &creds::RelayAccount,
     logged_in: bool,
     configured_url: bool,
 ) -> bool {
@@ -203,76 +203,93 @@ pub(crate) fn list_relays_impl(
 
     relays
         .into_iter()
-        .map(|op| -> Result<RelayRow, AppError> {
-            let mine = tiers_of_site(state, &tiers, &op.site_origin, op.account_id, &app_type)?;
-            let logged_in = op.token_looks_valid(now);
-            let session_expired = op.session_expired(now);
-            let has_balance_key = !relay_balance_inputs(state, &op).1.is_empty();
+        .map(|site_account| -> Result<RelayRow, AppError> {
+            let mine = tiers_of_site(
+                state,
+                &tiers,
+                &site_account.site_origin,
+                site_account.account_id,
+                &app_type,
+            )?;
+            let logged_in = site_account.token_looks_valid(now);
+            let session_expired = site_account.session_expired(now);
+            let has_balance_key = !relay_balance_inputs(state, &site_account).1.is_empty();
             let status = if session_expired {
                 if has_balance_key {
                     RelayRowStatus::SessionExpiredUsable
                 } else {
                     RelayRowStatus::SessionExpired
                 }
-            } else if !logged_in && !op.can_refresh(now) {
+            } else if !logged_in && !site_account.can_refresh(now) {
                 RelayRowStatus::NotLoggedIn
             } else if mine.is_empty() {
                 RelayRowStatus::NoTiers
             } else {
                 RelayRowStatus::Ready
             };
-            let configured_url =
-                match remote_config::configured_purchase_url(&signed_config, &op.site_origin) {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    Err(_) => {
-                        let host = url::Url::parse(&op.site_origin)
-                            .ok()
-                            .and_then(|url| url.host_str().map(str::to_owned))
-                            .unwrap_or_else(|| "<unknown>".into());
-                        log::warn!("中转站 {host} 的购买入口配置无效，已禁用购买");
-                        false
-                    }
-                };
-            let usage_url_configured =
-                match remote_config::configured_usage_url(&signed_config, &op.site_origin) {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    Err(_) => {
-                        let host = url::Url::parse(&op.site_origin)
-                            .ok()
-                            .and_then(|url| url.host_str().map(str::to_owned))
-                            .unwrap_or_else(|| "<unknown>".into());
-                        log::warn!("中转站 {host} 的用量入口配置无效，已禁用查看用量");
-                        false
-                    }
-                };
-            let usage_blockers =
-                apps_using_this_accounts_tiers(state, &op.site_origin, op.account_id)
-                    .into_iter()
-                    .map(|(app_type, tier_name)| UsageBlocker {
-                        app: app_type.as_str().to_string(),
-                        tier_name,
-                    })
-                    .collect::<Vec<_>>();
+            let configured_url = match remote_config::configured_purchase_url(
+                &signed_config,
+                &site_account.site_origin,
+            ) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(_) => {
+                    let host = url::Url::parse(&site_account.site_origin)
+                        .ok()
+                        .and_then(|url| url.host_str().map(str::to_owned))
+                        .unwrap_or_else(|| "<unknown>".into());
+                    log::warn!("中转站 {host} 的购买入口配置无效，已禁用购买");
+                    false
+                }
+            };
+            let usage_url_configured = match remote_config::configured_usage_url(
+                &signed_config,
+                &site_account.site_origin,
+            ) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(_) => {
+                    let host = url::Url::parse(&site_account.site_origin)
+                        .ok()
+                        .and_then(|url| url.host_str().map(str::to_owned))
+                        .unwrap_or_else(|| "<unknown>".into());
+                    log::warn!("中转站 {host} 的用量入口配置无效，已禁用查看用量");
+                    false
+                }
+            };
+            let usage_blockers = apps_using_this_accounts_tiers(
+                state,
+                &site_account.site_origin,
+                site_account.account_id,
+            )
+            .into_iter()
+            .map(|(app_type, tier_name)| UsageBlocker {
+                app: app_type.as_str().to_string(),
+                tier_name,
+            })
+            .collect::<Vec<_>>();
             Ok(RelayRow {
-                id: op.id,
-                site_origin: op.site_origin.clone(),
-                site_name: op.site_name.clone(),
+                id: site_account.id,
+                site_origin: site_account.site_origin.clone(),
+                site_name: site_account.site_name.clone(),
                 // 有 account_id 才算真的认得这个账号 —— email 可能被中转站留空。
-                account_label: if op.account_id.is_some() {
-                    op.account_label.clone()
+                account_label: if site_account.account_id.is_some() {
+                    site_account.account_label.clone()
                 } else {
                     String::new()
                 },
                 status,
                 is_current: mine.iter().any(|tier| tier.is_current),
                 can_query_balance: logged_in || has_balance_key,
-                can_purchase: can_open_site_window(&op, logged_in, configured_url),
-                can_view_usage: can_open_site_window(&op, logged_in, usage_url_configured),
-                can_refresh: op.can_refresh(now),
+                can_purchase: can_open_site_window(&site_account, logged_in, configured_url),
+                can_view_usage: can_open_site_window(
+                    &site_account,
+                    logged_in,
+                    usage_url_configured,
+                ),
+                can_refresh: site_account.can_refresh(now),
                 usage_blockers,
-                remove_confirmation: if op.account_id.is_some() {
+                remove_confirmation: if site_account.account_id.is_some() {
                     RemoveConfirmation::Configured
                 } else {
                     RemoveConfirmation::NeverLoggedIn
@@ -382,7 +399,7 @@ pub(crate) fn reset_tier_config_in_state(
             same_site_identity(Some(&candidate.site_origin), Some(site_origin.as_str()))
         })
         .collect();
-    let op = match account_id {
+    let site_account = match account_id {
         Some(want) => candidates
             .into_iter()
             .find(|candidate| candidate.account_id == Some(want))
@@ -447,7 +464,11 @@ pub(crate) fn reset_tier_config_in_state(
     } else {
         provision::pick_tier_models(&app_type, Some(&catalog_models)).main
     };
-    let base_url = sub2api::base_url_for(&app_type, &op.site_origin, &op.api_base_url);
+    let base_url = sub2api::base_url_for(
+        &app_type,
+        &site_account.site_origin,
+        &site_account.api_base_url,
+    );
 
     let settings_config = if !catalog_models.is_empty() {
         provision::settings_config_with_models(
@@ -470,9 +491,9 @@ pub(crate) fn reset_tier_config_in_state(
 
     // 除 settings_config 外其余字段保持原样（sort_index / created_at 等都不该被重置）。
     //
-    // `managed_meta` 传 `op.account_id` 而不是上面那个 `account_id` ——
+    // `managed_meta` 传 `site_account.account_id` 而不是上面那个 `account_id` ——
     // 后者可能是 `None`（旧数据），而这次重建正好是**补上归属标记**的时机：
-    // 我们刚刚确认了它属于 `op` 这一行。
+    // 我们刚刚确认了它属于 `site_account` 这一行。
     //
     // 分组身份同样趁重建补上——但这条路拿不到分组数据（手上只有本地
     // `settings_config`），只能保留旧值；旧值也是 `None` 时维持 `None`
@@ -483,7 +504,11 @@ pub(crate) fn reset_tier_config_in_state(
         .and_then(|meta| meta.loongport_group.clone());
     let restored = Provider {
         settings_config,
-        meta: Some(managed_meta(&app_type, op.account_id, preserved_group)),
+        meta: Some(managed_meta(
+            &app_type,
+            site_account.account_id,
+            preserved_group,
+        )),
         ..existing
     };
 
@@ -876,10 +901,10 @@ pub(crate) fn remove_site_impl(
     // ⚠️ **`account_id` 与 `site_origin` 一样必须取**：删的是**一个账号**（一行），
     // 不是「这个站的全部」。同站另一个账号的档位不该被连带清掉 ——
     // 那正是 `prune_stale_tiers` 加账号维度要挡的事（见它的文档）。
-    let op = with_conn(state, |conn| creds::get(conn, id))?
+    let site_account = with_conn(state, |conn| creds::get(conn, id))?
         .ok_or_else(|| AppError::Config("这个站点已经不存在了".into()))?;
-    let site_origin = op.site_origin;
-    let account_id = op.account_id;
+    let site_origin = site_account.site_origin;
+    let account_id = site_account.account_id;
 
     // ⚠️ 闸：这个账号名下有档位正被某个 app 用着 ⇒ 默认**一条都不删，直接报错**；
     // `force == true` 才放行（只该来自点名了在用 app 的前端确认弹窗，见命令文档）。
@@ -1022,18 +1047,18 @@ mod tests {
     use super::*;
     use crate::commands::relay::test_support::*;
 
-    fn sub2api_with_session() -> creds::Relay {
+    fn sub2api_with_session() -> creds::RelayAccount {
         purchase_capability_relay(creds::BackendKind::Sub2Api)
     }
 
-    fn newapi_with_refresh_cookie() -> creds::Relay {
-        creds::Relay {
+    fn newapi_with_refresh_cookie() -> creds::RelayAccount {
+        creds::RelayAccount {
             refresh_token: Some("refresh-cookie".into()),
             ..purchase_capability_relay(creds::BackendKind::NewApi)
         }
     }
 
-    fn newapi_without_refresh_cookie() -> creds::Relay {
+    fn newapi_without_refresh_cookie() -> creds::RelayAccount {
         purchase_capability_relay(creds::BackendKind::NewApi)
     }
 
@@ -1053,7 +1078,7 @@ mod tests {
         assert!(!can_open_site_window(&sub2api_with_session(), false, true));
         assert!(!can_open_site_window(&sub2api_with_session(), true, false));
 
-        let newapi_with_blank_refresh_cookie = creds::Relay {
+        let newapi_with_blank_refresh_cookie = creds::RelayAccount {
             refresh_token: Some("   ".into()),
             ..newapi_with_refresh_cookie()
         };

@@ -96,7 +96,7 @@ impl FromSql for BackendKind {
 
 /// 一个站点 × 账号（含凭据）。
 #[derive(Debug, Clone)]
-pub struct Relay {
+pub struct RelayAccount {
     pub id: i64,
     pub site_origin: String,
     pub site_name: String,
@@ -173,7 +173,7 @@ pub struct Relay {
     pub sort_index: i64,
 }
 
-impl Relay {
+impl RelayAccount {
     /// 凭据是否还能用于发请求。
     ///
     /// **过期判定留 60 秒余量**：正好卡在边界上发请求会拿到 401，白跑一趟。
@@ -277,8 +277,8 @@ const SELECT_COLS: &str =
      auth_token, refresh_token, token_expires_at, sort_index, backend_kind, user_agent, \
      cf_clearance, pricing_synced_at";
 
-fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
-    Ok(Relay {
+fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelayAccount> {
+    Ok(RelayAccount {
         id: row.get(0)?,
         site_origin: row.get(1)?,
         site_name: row.get(2)?,
@@ -298,7 +298,7 @@ fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relay> {
 }
 
 /// 列出全部站点，当前选中的排在最前。
-pub fn list(conn: &Connection) -> Result<Vec<Relay>, AppError> {
+pub fn list(conn: &Connection) -> Result<Vec<RelayAccount>, AppError> {
     let mut stmt = conn
         .prepare(&format!(
             // ⚠️ 排序键必须是**用户拖出来的那个**，不能是任何会被别的操作改动的状态：
@@ -341,7 +341,7 @@ pub fn reorder(conn: &Connection, ids: &[i64]) -> Result<(), AppError> {
 }
 
 /// 按 id 读一行。
-pub fn get(conn: &Connection, id: i64) -> Result<Option<Relay>, AppError> {
+pub fn get(conn: &Connection, id: i64) -> Result<Option<RelayAccount>, AppError> {
     conn.query_row(
         &format!("SELECT {SELECT_COLS} FROM loongport_relay WHERE id = ?1"),
         params![id],
@@ -1533,14 +1533,14 @@ mod tests {
         assert!(!base.token_looks_valid(1000));
 
         // 服务端降级态（没给 expiry）不能判成「未就位」去轮询等 —— 那会永远等不到。
-        let no_expiry = Relay {
+        let no_expiry = RelayAccount {
             token_expires_at: None,
             ..base.clone()
         };
         assert!(no_expiry.token_looks_valid(i64::MAX - 100));
 
         // 没有 token 就是没登录，与过期是两件事。
-        let empty = Relay {
+        let empty = RelayAccount {
             auth_token: String::new(),
             ..base
         };
@@ -1577,7 +1577,7 @@ mod tests {
         assert!(!stale.session_expired(0));
 
         // 有 refresh_token 时**不报过期**：下次请求会自动续期，报了用户白跑一次重登。
-        let renewable = Relay {
+        let renewable = RelayAccount {
             refresh_token: Some("rt".into()),
             ..stale
         };

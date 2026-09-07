@@ -4,8 +4,8 @@
 //! 各域测试 mod 的头部统一 `use crate::commands::relay::test_support::*;`。
 use super::*;
 
-pub(crate) fn purchase_capability_relay(backend_kind: creds::BackendKind) -> creds::Relay {
-    creds::Relay {
+pub(crate) fn purchase_capability_relay(backend_kind: creds::BackendKind) -> creds::RelayAccount {
+    creds::RelayAccount {
         id: 1,
         site_origin: "https://relay.example".into(),
         site_name: "Relay".into(),
@@ -58,8 +58,8 @@ pub(crate) fn tier(id: &str) -> TierInfo {
     }
 }
 
-pub(crate) fn test_newapi_relay(account_id: i64) -> creds::Relay {
-    creds::Relay {
+pub(crate) fn test_newapi_relay(account_id: i64) -> creds::RelayAccount {
+    creds::RelayAccount {
         id: account_id,
         site_origin: "https://newapi.example".into(),
         site_name: "NewAPI".into(),
@@ -147,7 +147,7 @@ pub(crate) fn saved_relay_app(
 pub(crate) fn relay_credentials(
     app: &tauri::App<tauri::test::MockRuntime>,
     relay_id: i64,
-) -> creds::Relay {
+) -> creds::RelayAccount {
     let state = app.state::<AppState>();
     with_conn(&state, |conn| creds::get(conn, relay_id))
         .expect("read saved relay")

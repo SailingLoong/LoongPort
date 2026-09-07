@@ -1108,7 +1108,7 @@ pub async fn relay_login(
     app: String,
 ) -> Result<Option<RefreshResult>, String> {
     let app_type = AppType::from_str(&app).map_err(|error| error.to_string())?;
-    let login = do_login(&app_handle, relay_id)
+    let login = login_via_browser(&app_handle, relay_id)
         .await
         .map_err(|error| error.to_string())?;
     if !login.logged_in {
@@ -1119,13 +1119,20 @@ pub async fn relay_login(
     ))
 }
 
-async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<LoginResult, AppError> {
+async fn login_via_browser(
+    app_handle: &tauri::AppHandle,
+    target_id: i64,
+) -> Result<LoginResult, AppError> {
     // 记下行 id —— 凭据要写回这一行，而 `save_credentials` 可能因为发现重复账号
     // 而把它合并到别的行去。
     // 顺带取出登录标识：重登时预填进登录框，用户只需补密码与人机验证。
-    let op = load_validated_relay(app_handle, target_id).await?;
-    let (relay_id, site_origin, login_identifier, backend_kind) =
-        (op.id, op.site_origin, op.login_identifier, op.backend_kind);
+    let site_account = load_validated_relay(app_handle, target_id).await?;
+    let (relay_id, site_origin, login_identifier, backend_kind) = (
+        site_account.id,
+        site_account.site_origin,
+        site_account.login_identifier,
+        site_account.backend_kind,
+    );
 
     // 已经有一个登录窗时：**销毁它再开新的**，而不是聚焦了就早退。
     //
@@ -1134,7 +1141,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
     // 都没发生，且因为 label 被占，再点多少次都一样，只能重启 app。
     //
     // 直接销毁重开则总能给用户一个可见的窗口。代价是「他正在填的表单没了」，但能走到这里
-    // 说明上一轮的 `do_login` 已经返回（否则那边还持有窗口），也就是那个窗口已经没人在等它
+    // 说明上一轮的 `login_via_browser` 已经返回（否则那边还持有窗口），也就是那个窗口已经没人在等它
     // 的凭据了 —— 留着它反而是个陷阱。
     destroy_stale_login_window(app_handle).await;
 
@@ -1655,14 +1662,14 @@ fn persist_new_relay_newapi_session(
 pub(crate) async fn usable_relay<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
-) -> Result<creds::Relay, AppError> {
-    let op = load_validated_relay(app_handle, relay_id).await?;
+) -> Result<creds::RelayAccount, AppError> {
+    let site_account = load_validated_relay(app_handle, relay_id).await?;
 
-    if op.token_looks_valid(chrono::Utc::now().timestamp()) {
+    if site_account.token_looks_valid(chrono::Utc::now().timestamp()) {
         // ⭐ **token 够用，但账号身份可能缺** —— 补一次再返回。
         //
         // 「有 `auth_token` 却没 `account_id`」是个实测到的死局：
-        // [`creds::Relay::token_looks_valid`] 对 `token_expires_at = NULL` 返回
+        // [`creds::RelayAccount::token_looks_valid`] 对 `token_expires_at = NULL` 返回
         // `true`（有意的乐观降级）⇒ 这里直接早退 ⇒ 永远走不到下面那条**续期后打
         // profile** 的路径，而那原本是唯一拿得到 `account.id` 的地方。
         // 于是用户点任何刷新（provision / 余额 / 充值都经过本函数）都补不上。
@@ -1672,13 +1679,13 @@ pub(crate) async fn usable_relay<R: tauri::Runtime>(
         //
         // 放在这里而不是各调用点：本函数是 provision / balance / purchase /
         // check_session 的**必经点**，补一处就全覆盖。
-        if op.account_id.is_none() {
-            return Ok(backfill_account_identity(app_handle, op).await);
+        if site_account.account_id.is_none() {
+            return Ok(backfill_account_identity(app_handle, site_account).await);
         }
-        return Ok(op);
+        return Ok(site_account);
     }
 
-    let (renewed, refreshed) = refresh_relay_session(app_handle, &op).await?;
+    let (renewed, refreshed) = refresh_relay_session(app_handle, &site_account).await?;
 
     // 顺手刷一次账号身份：用户可能在中转站那边改了昵称或邮箱，而续期响应里没有账号信息
     // （`/auth/refresh` 只回 token），所以只有在这里额外打一次 profile 才发现得了。
@@ -1700,22 +1707,24 @@ pub(crate) async fn usable_relay<R: tauri::Runtime>(
 /// 有没有账号信息（NewAPI 回、sub2api 不回）来决定要不要补打一次 profile。
 async fn refresh_relay_session<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    op: &creds::Relay,
-) -> Result<(creds::Relay, backend::RefreshedSession), AppError> {
+    site_account: &creds::RelayAccount,
+) -> Result<(creds::RelayAccount, backend::RefreshedSession), AppError> {
     let state = app_handle.state::<AppState>();
     // ⭐ 充值窗口持有这个 NewAPI 账号的 refresh 轮换独占权时，后台续期不得抢跑：
     // NewAPI 的 refresh cookie 一次性轮换，这里并发续期会把充值窗口里那颗 cookie
     // 立刻作废（用户充值到一半被踢回登录页）。闸放在 `token_looks_valid` 早退**之后**：
     // token 仍然有效时根本不走续期，不受影响；sub2api 的续期也不受影响。
-    if op.backend_kind == creds::BackendKind::NewApi && state.purchase_sessions.is_active(op.id) {
+    if site_account.backend_kind == creds::BackendKind::NewApi
+        && state.purchase_sessions.is_active(site_account.id)
+    {
         return Err(AppError::Config(
             "充值窗口正在使用这个账号的登录态，请关闭充值窗口后重试".into(),
         ));
     }
-    let refreshed = backend::RuntimeBackend::for_relay(op)
-        .refresh_session(op.refresh_token.as_deref())
+    let refreshed = backend::RuntimeBackend::for_relay(site_account)
+        .refresh_session(site_account.refresh_token.as_deref())
         .await?;
-    let renewed = persist_refreshed_session(&state, op, &refreshed)?;
+    let renewed = persist_refreshed_session(&state, site_account, &refreshed)?;
     Ok((renewed, refreshed))
 }
 
@@ -1725,7 +1734,7 @@ async fn refresh_relay_session<R: tauri::Runtime>(
 /// ## 为什么必须有它（2026-08-17 bestapi.store 线上事故）
 ///
 /// `token_expires_at = NULL` 的行（登录快照没带回过期时间的站点）走的是
-/// [`creds::Relay::token_looks_valid`] 的乐观降级：永远「看起来有效」，于是
+/// [`creds::RelayAccount::token_looks_valid`] 的乐观降级：永远「看起来有效」，于是
 /// [`usable_relay`] 的主动续期**永不触发**。access token 在服务端到 24h 过期后，
 /// 启动探活撞上 401「登录已过期」直接清会话 —— refresh token 一次没用过就被连坐，
 /// 用户被迫重登，体感就是「登录态撑不过一两天」。
@@ -1753,21 +1762,21 @@ pub(crate) async fn relay_read_with_refresh_retry<R, F, Fut, T>(
 where
     R: tauri::Runtime,
     // Fn 而不是 FnOnce：原请求与续期后的重试各调一次。
-    F: Fn(creds::Relay) -> Fut,
+    F: Fn(creds::RelayAccount) -> Fut,
     Fut: std::future::Future<Output = Result<T, AppError>>,
 {
-    let op = usable_relay(app_handle, relay_id).await?;
-    match run(op.clone()).await {
+    let site_account = usable_relay(app_handle, relay_id).await?;
+    match run(site_account.clone()).await {
         Ok(value) => Ok(value),
         Err(original) => {
-            let has_refresh_credential = op
+            let has_refresh_credential = site_account
                 .refresh_token
                 .as_deref()
                 .is_some_and(|token| !token.trim().is_empty());
             if !has_refresh_credential || !backend::is_token_expiry_failure(&original) {
                 return Err(original);
             }
-            match refresh_relay_session(app_handle, &op).await {
+            match refresh_relay_session(app_handle, &site_account).await {
                 Ok((renewed, _)) => run(renewed).await,
                 Err(refresh_error) => {
                     log::warn!(
@@ -1783,15 +1792,15 @@ where
 async fn load_validated_relay<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     relay_id: i64,
-) -> Result<creds::Relay, AppError> {
-    let op = {
+) -> Result<creds::RelayAccount, AppError> {
+    let site_account = {
         let state = app_handle.state::<AppState>();
         with_conn(&state, |conn| creds::get(conn, relay_id))?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
     };
 
-    match discovery::probe_site(&op.site_origin).await {
-        Ok(detected) if detected.backend_kind == op.backend_kind => Ok(op),
+    match discovery::probe_site(&site_account.site_origin).await {
+        Ok(detected) if detected.backend_kind == site_account.backend_kind => Ok(site_account),
         Ok(_) => {
             let state = app_handle.state::<AppState>();
             with_conn(&state, |conn| creds::clear_credentials(conn, relay_id))?;
@@ -1807,11 +1816,11 @@ async fn load_validated_relay<R: tauri::Runtime>(
             discovery::DiscoveryErrorKind::UnsupportedSite => {
                 log::warn!(
                     "站点探针暂时无法识别 {}，沿用已保存的 {} 协议和凭据：{}",
-                    op.site_origin,
-                    op.backend_kind.as_str(),
+                    site_account.site_origin,
+                    site_account.backend_kind.as_str(),
                     error.message
                 );
-                Ok(op)
+                Ok(site_account)
             }
             discovery::DiscoveryErrorKind::ProtocolConflict => Err(AppError::Config(format!(
                 "站点协议识别结果冲突，未改动已有凭据：{}",
@@ -1821,7 +1830,7 @@ async fn load_validated_relay<R: tauri::Runtime>(
     }
 }
 
-/// 打一次 profile，把账号身份写回库并更新手上这份 `op`。
+/// 打一次 profile，把账号身份写回库并更新手上这份 `site_account`。
 ///
 /// 两个调用点、两种动机，但做的事完全一样，所以共用一个函数（各写一遍迟早分叉）：
 ///
@@ -1836,28 +1845,31 @@ async fn load_validated_relay<R: tauri::Runtime>(
 /// 判失败会让用户在「明明能用」的时候被挡住。
 pub(crate) async fn backfill_account_identity<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    mut op: creds::Relay,
-) -> creds::Relay {
-    let account = match backend::RuntimeBackend::for_relay(&op).account().await {
+    mut site_account: creds::RelayAccount,
+) -> creds::RelayAccount {
+    let account = match backend::RuntimeBackend::for_relay(&site_account)
+        .account()
+        .await
+    {
         Ok(a) => a,
         Err(e) => {
             log::warn!("读取账号信息失败（不影响使用）: {e}");
-            return op;
+            return site_account;
         }
     };
 
     let state = app_handle.state::<AppState>();
     if let Err(e) = with_conn(&state, |conn| {
-        creds::refresh_account_identity(conn, op.id, runtime_account_identity(&account))
+        creds::refresh_account_identity(conn, site_account.id, runtime_account_identity(&account))
     }) {
         log::warn!("刷新账号信息失败（不影响使用）: {e}");
-        return op;
+        return site_account;
     }
 
     // 写库成功才更新手上这份 —— 否则返回的结构与库里不一致，
     // 调用方据此判断 `account_id` 已补上，而下次读库又是空的。
-    apply_runtime_account_identity(&mut op, account);
-    op
+    apply_runtime_account_identity(&mut site_account, account);
+    site_account
 }
 
 fn runtime_account_identity(account: &backend::RuntimeAccount) -> creds::AccountIdentity<'_> {
@@ -1868,10 +1880,13 @@ fn runtime_account_identity(account: &backend::RuntimeAccount) -> creds::Account
     }
 }
 
-fn apply_runtime_account_identity(op: &mut creds::Relay, account: backend::RuntimeAccount) {
-    op.account_id = Some(account.id);
-    op.account_label = account.label;
-    op.login_identifier = account.login_identifier;
+fn apply_runtime_account_identity(
+    site_account: &mut creds::RelayAccount,
+    account: backend::RuntimeAccount,
+) {
+    site_account.account_id = Some(account.id);
+    site_account.account_label = account.label;
+    site_account.login_identifier = account.login_identifier;
 }
 
 pub(crate) fn should_clear_credentials_after_probe_error(error: &AppError) -> bool {
@@ -1880,9 +1895,9 @@ pub(crate) fn should_clear_credentials_after_probe_error(error: &AppError) -> bo
 
 pub(crate) fn persist_refreshed_session(
     state: &AppState,
-    current: &creds::Relay,
+    current: &creds::RelayAccount,
     refreshed: &backend::RefreshedSession,
-) -> Result<creds::Relay, AppError> {
+) -> Result<creds::RelayAccount, AppError> {
     persist_refreshed_session_with_identity_writer(
         state,
         current,
@@ -1897,10 +1912,10 @@ pub(crate) fn persist_refreshed_session(
 
 pub(crate) fn persist_refreshed_session_with_identity_writer(
     state: &AppState,
-    current: &creds::Relay,
+    current: &creds::RelayAccount,
     refreshed: &backend::RefreshedSession,
     write_identity: impl FnOnce(&AppState, i64, &backend::RuntimeAccount) -> Result<(), AppError>,
-) -> Result<creds::Relay, AppError> {
+) -> Result<creds::RelayAccount, AppError> {
     let refresh_token = refreshed
         .refresh_credential
         .clone()
@@ -1917,7 +1932,7 @@ pub(crate) fn persist_refreshed_session_with_identity_writer(
         )
     })?;
 
-    let mut renewed = creds::Relay {
+    let mut renewed = creds::RelayAccount {
         auth_token: refreshed.auth_token.clone(),
         refresh_token,
         token_expires_at: refreshed.token_expires_at,
@@ -2711,11 +2726,14 @@ mod tests {
         let (origin, server) = spawn_balance_server(router).await;
         let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
 
-        let balance = relay_read_with_refresh_retry(app.handle(), relay_id, |op| async move {
-            backend::RuntimeBackend::for_relay(&op).balance().await
-        })
-        .await
-        .expect("服务端 401 过期必须被静默续期救回");
+        let balance =
+            relay_read_with_refresh_retry(app.handle(), relay_id, |site_account| async move {
+                backend::RuntimeBackend::for_relay(&site_account)
+                    .balance()
+                    .await
+            })
+            .await
+            .expect("服务端 401 过期必须被静默续期救回");
 
         assert_eq!(balance.balance, 12.5);
         let creds = relay_credentials(&app, relay_id);
