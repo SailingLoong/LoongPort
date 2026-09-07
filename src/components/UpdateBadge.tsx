@@ -9,9 +9,10 @@ interface UpdateBadgeProps {
 }
 
 export function UpdateBadge({ className = "", onClick }: UpdateBadgeProps) {
-  const { hasUpdate, updateInfo } = useUpdate();
+  // 已跳过的版本不再亮徽章（跳过入口在设置→关于，「跳过本版本」）。
+  const { hasUpdate, updateInfo, isDismissed } = useUpdate();
   const { t } = useTranslation();
-  const isActive = hasUpdate && updateInfo;
+  const isActive = hasUpdate && updateInfo && !isDismissed;
   const title = isActive
     ? t("settings.updateAvailable", {
         version: updateInfo?.availableVersion ?? "",

@@ -750,6 +750,7 @@ dependencies = [
  "json5",
  "libc",
  "log",
+ "minisign-verify",
  "objc2",
  "objc2-app-kit",
  "once_cell",

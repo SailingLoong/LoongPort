@@ -250,6 +250,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     hasUpdate,
     updateInfo,
     resetDismiss,
+    isDismissed,
+    dismissUpdate,
     isChecking,
     checkUpdate,
     error,
@@ -1002,6 +1004,38 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 {updateInfo.notes}
               </p>
             )}
+            {/* 跳过是自动更新的逃生口：被跳过的版本不参与「重开即自动更新」，
+                徽章也不再亮；手动点升级仍然随时可以装。 */}
+            <div className="mt-2 flex items-center gap-2">
+              {isDismissed ? (
+                <>
+                  <span className="text-muted-foreground">
+                    {t("settings.updateVersionSkipped", {
+                      version: updateInfo.availableVersion,
+                    })}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 gap-1 px-2 text-xs"
+                    onClick={resetDismiss}
+                  >
+                    {t("settings.unskipUpdateVersion")}
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-xs"
+                  onClick={dismissUpdate}
+                >
+                  {t("settings.skipUpdateVersion")}
+                </Button>
+              )}
+            </div>
           </motion.div>
         )}
         {error && (

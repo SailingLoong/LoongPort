@@ -1,3 +1,5 @@
+use base64::Engine as _;
+use minisign_verify::{PublicKey, Signature};
 use serde::Serialize;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -7,6 +9,10 @@ use tokio::sync::oneshot;
 use crate::error::AppError;
 
 const APP_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// 启动闸门拉清单的超时：有意短于常规检查——闸门跑在启动关键路径上，
+/// 拿不到清单就放弃本次自动安装（保留预下载产物，下次启动再试），
+/// 不能让一次网络故障把开窗卡住半分钟。
+const STARTUP_PENDING_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn app_update_check_timeout() -> Duration {
     APP_UPDATE_CHECK_TIMEOUT
@@ -179,7 +185,9 @@ impl AppUpdateStage {
     }
 }
 
-/// 预下载安装包落盘目录（应用缓存目录下的自有子目录，启动时整体清扫）。
+/// 预下载安装包落盘目录（应用缓存目录下的自有子目录）。产物跨会话保留，
+/// 由启动闸门（`apply_pending_staged_update_on_startup`）在下一次启动时
+/// 重验后消费；周期检查的 reconcile（`DropStaged`）负责清理失效产物。
 fn staged_update_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path()
         .app_cache_dir()
@@ -187,15 +195,182 @@ fn staged_update_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
         .map(|dir| dir.join("app-updates"))
 }
 
-/// 启动时清扫上个会话残留的预下载文件：`Update` 对象不跨进程，
-/// 旧文件不可能再被安装，留着只占缓存。
-pub fn sweep_stale_staged_updates(app: &AppHandle) {
-    if let Some(dir) = staged_update_dir(app) {
-        if dir.is_dir() {
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
-                log::warn!("清扫预下载更新目录失败 {}: {e}", dir.display());
-            }
+/// 启动闸门的纯决策：给定落盘产物版本、本次清单版本与用户跳过的版本，
+/// 对这份产物该做什么。与 I/O 分离以便单测（`Update` 无法在测试中构造）。
+#[derive(Debug, PartialEq, Eq)]
+enum PendingUpdateAction {
+    /// 没有落盘产物（逐文件循环里不会出现，留给矩阵测试表达完整状态空间）。
+    NothingStaged,
+    /// 产物版本被用户「跳过本版本」：不自动装，保留供手动升级。
+    KeepForManual,
+    /// 更新已撤回或已有更新版本：产物失效，删除。
+    Drop,
+    /// 产物与本次清单同版本且未被跳过：立即安装。
+    Install,
+}
+
+fn pending_update_action(
+    staged: Option<&str>,
+    offered: Option<&str>,
+    dismissed: Option<&str>,
+) -> PendingUpdateAction {
+    let Some(staged) = staged else {
+        return PendingUpdateAction::NothingStaged;
+    };
+    // 跳过优先于一切：用户明确不装这个版本，哪怕它仍在线上
+    //（若已被撤回，周期检查的 reconcile 会随后清掉产物）。
+    if dismissed == Some(staged) {
+        return PendingUpdateAction::KeepForManual;
+    }
+    match offered {
+        Some(offered) if offered == staged => PendingUpdateAction::Install,
+        // 清单没有更新（撤回）或版本对不上（产物过时）：失效。
+        _ => PendingUpdateAction::Drop,
+    }
+}
+
+/// 列出预下载目录里的 `(版本, 安装包路径)`。文件名即版本
+/// （`prestage_download` 的落盘约定）。
+fn list_staged_installers(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let version = path
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".installer")?
+                .to_string();
+            Some((version, path))
+        })
+        .collect()
+}
+
+/// 从 tauri.conf.json 的插件配置读 updater 公钥（与插件同一份配置，不复制）。
+fn updater_pubkey(app: &AppHandle) -> Option<String> {
+    app.config()
+        .plugins
+        .0
+        .get("updater")?
+        .get("pubkey")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// minisign 验签，逐字对齐 updater 插件 `download()` 内联的 verify_signature
+/// （base64 解码 → key/signature decode → verify quiet）。
+fn verify_installer_signature(
+    bytes: &[u8],
+    release_signature: &str,
+    pub_key: &str,
+) -> Result<(), String> {
+    let decode = |value: &str, what: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .ok()
+            .and_then(|decoded| String::from_utf8(decoded).ok())
+            .ok_or_else(|| format!("{what} 不是有效的 base64/UTF-8"))
+    };
+    let public_key = PublicKey::decode(&decode(pub_key, "更新公钥")?)
+        .map_err(|e| format!("更新公钥解析失败: {e}"))?;
+    let signature = Signature::decode(&decode(release_signature, "更新签名")?)
+        .map_err(|e| format!("更新签名解析失败: {e}"))?;
+    public_key
+        .verify(bytes, &signature, true)
+        .map_err(|e| format!("更新签名校验失败: {e}"))
+}
+
+/// 启动闸门：应用上个会话预下载好的更新。
+///
+/// 在 setup 里同步调用（托盘/状态就绪之后、窗口显示/代理恢复/维护任务之前），
+/// 「重开即自动更新」在这里闭环：安装成功路径不返回（Windows 是 spawn
+/// 安装器后退出、安装器装完自动拉起新版；macOS/Linux 是 install 后
+/// restart_process），能返回到调用方就说明本次启动不装，继续正常启动。
+///
+/// 决策顺序本地优先：没有预下载产物、或产物版本被用户「跳过本版本」→ 直接
+/// 返回（跳过时保留产物，手动升级仍可瞬装）；只有存在候选产物时才拉一次
+/// 清单（5s 超时，失败保留产物下次再试）。安装前对产物字节做 minisign 重验
+/// ——updater 插件的验签在 `download()` 内联、不跨进程，`install(bytes)` 不
+/// 重复校验，跨会话复用落盘文件必须自己重新建立信任。
+pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
+    // 便携版不能原地升级：不自动装，也不动预下载产物（本来也不会产生）。
+    if crate::commands::portable_mode_enabled() {
+        return;
+    }
+    let Some(dir) = staged_update_dir(app) else {
+        return;
+    };
+    let staged_files = list_staged_installers(&dir);
+    if staged_files.is_empty() {
+        return;
+    }
+    let dismissed = crate::settings::get_settings().dismissed_update_version;
+
+    let updater = match app
+        .updater_builder()
+        .timeout(STARTUP_PENDING_CHECK_TIMEOUT)
+        .build()
+    {
+        Ok(updater) => updater,
+        Err(e) => {
+            log::warn!("启动闸门初始化更新器失败（保留预下载产物）: {e}");
+            return;
         }
+    };
+    let offered = match updater.check().await {
+        Ok(update) => update,
+        Err(e) => {
+            log::info!("启动闸门拿不到更新清单（保留预下载产物，下次启动再试）: {e}");
+            return;
+        }
+    };
+    let offered_version = offered.as_ref().map(|update| update.version.as_str());
+
+    let mut install_candidate: Option<std::path::PathBuf> = None;
+    for (version, installer) in staged_files {
+        match pending_update_action(Some(&version), offered_version, dismissed.as_deref()) {
+            PendingUpdateAction::NothingStaged => {}
+            PendingUpdateAction::KeepForManual => {
+                log::debug!("版本 {version} 已被用户跳过，保留预下载产物供手动升级");
+            }
+            PendingUpdateAction::Drop => {
+                log::info!("预下载产物 {version} 已失效（更新撤回或有更新版本），清除");
+                let _ = std::fs::remove_file(&installer);
+            }
+            PendingUpdateAction::Install => install_candidate = Some(installer),
+        }
+    }
+    // 决策矩阵保证 Install 仅在清单版本等于产物版本时出现。
+    let (Some(installer), Some(update)) = (install_candidate, offered) else {
+        return;
+    };
+
+    let bytes = match tokio::fs::read(&installer).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::warn!("预下载安装包读取失败，删除后继续正常启动: {e}");
+            let _ = std::fs::remove_file(&installer);
+            return;
+        }
+    };
+    let Some(pubkey) = updater_pubkey(app) else {
+        log::error!("tauri.conf.json 缺 updater pubkey，无法重验预下载产物，跳过自动安装");
+        return;
+    };
+    if let Err(e) = verify_installer_signature(&bytes, &update.signature, &pubkey) {
+        log::warn!("预下载安装包验签失败（疑似损坏/被篡改），删除后继续正常启动: {e}");
+        let _ = std::fs::remove_file(&installer);
+        return;
+    }
+    // 字节已读入内存且验签通过，产物文件使命完成；先删再装，成功路径
+    //（不返回）不留残留，下次启动也不用再靠 reconcile 清。
+    let _ = std::fs::remove_file(&installer);
+    log::info!("启动闸门：安装预下载更新 {}", update.version);
+    if let Err(e) = install_bytes_and_restart(app, update, bytes).await {
+        // 安装失败不算致命：正常启动，用户仍可手动升级（届时现场重下）。
+        log::error!("启动闸门安装预下载更新失败，继续正常启动: {e}");
     }
 }
 
@@ -447,8 +622,8 @@ pub async fn check(app: &tauri::AppHandle) -> Result<AppUpdateCheckResult, AppEr
 #[cfg(test)]
 mod tests {
     use super::{
-        app_update_check_timeout, prestage_action, should_publish_ready, AppUpdateCheckResult,
-        PrestageAction, StageInner,
+        app_update_check_timeout, pending_update_action, prestage_action, should_publish_ready,
+        AppUpdateCheckResult, PendingUpdateAction, PrestageAction, StageInner,
     };
     use std::time::Duration;
 
@@ -465,6 +640,39 @@ mod tests {
         assert_eq!(prestage_action(Some("6.8.3"), Some("6.8.3")), Keep);
         // 应用跨版本运行，来了更新的版本：换目标重新预下载。
         assert_eq!(prestage_action(Some("6.8.3"), Some("6.8.4")), Start);
+    }
+
+    #[test]
+    fn pending_update_action_matrix() {
+        use PendingUpdateAction::*;
+        // 没有落盘产物：闸门无事可做。
+        assert_eq!(
+            pending_update_action(None, Some("6.18.1"), None),
+            NothingStaged
+        );
+        assert_eq!(pending_update_action(None, None, None), NothingStaged);
+        // 产物与清单同版本、未跳过：安装。
+        assert_eq!(
+            pending_update_action(Some("6.18.1"), Some("6.18.1"), None),
+            Install
+        );
+        // 用户明确跳过产物版本：保留给手动升级，即使清单仍在线上。
+        assert_eq!(
+            pending_update_action(Some("6.18.1"), Some("6.18.1"), Some("6.18.1")),
+            KeepForManual
+        );
+        // 跳过的是旧版本，不影响新产物自动安装。
+        assert_eq!(
+            pending_update_action(Some("6.18.1"), Some("6.18.1"), Some("6.18.0")),
+            Install
+        );
+        // 清单已无更新（撤回）：产物失效。
+        assert_eq!(pending_update_action(Some("6.18.1"), None, None), Drop);
+        // 清单版本更新（产物过时）：失效，周期检查会预下载新版本。
+        assert_eq!(
+            pending_update_action(Some("6.18.1"), Some("6.18.2"), None),
+            Drop
+        );
     }
 
     #[test]

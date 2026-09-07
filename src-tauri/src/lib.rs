@@ -1313,10 +1313,18 @@ pub fn run() {
             );
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
-            // 应用更新预下载状态：启动时清扫上个会话的残留文件（Update 对象
-            // 不跨进程，旧产物不可能再被安装），再挂载状态供检查/安装命令共享。
-            crate::services::app_update::sweep_stale_staged_updates(app.handle());
+            // 应用更新预下载状态：供检查/安装命令共享。
             app.manage(crate::services::app_update::AppUpdateStage::new());
+            // 启动闸门：上个会话预下载好的更新就地应用（重开即自动更新）。
+            // 必须赶在窗口显示、代理状态恢复和 maintenance 启动之前——安装
+            // 路径会退出当前进程，任何已启动的服务都白起。成功路径不返回
+            //（Windows spawn 安装器 + exit，安装器装完自动拉起新版；
+            // macOS/Linux install + restart），能走到 maintenance::start
+            // 就说明本次启动不装更新。预下载产物跨会话保留，由闸门重验后
+            // 消费（插件验签在 download() 内联、不跨进程）。
+            tauri::async_runtime::block_on(
+                crate::services::app_update::apply_pending_staged_update_on_startup(app.handle()),
+            );
             maintenance::start(app.handle().clone());
 
             // 站点余额冷启补刷（一次性、模式无关）：让用户点进任何视图时缓存
@@ -1740,6 +1748,8 @@ pub fn run() {
             commands::save_settings,
             commands::plaza_set_visible,
             commands::plaza_seed_from_first_site,
+            commands::set_dismissed_update_version,
+            commands::get_dismissed_update_version,
             commands::has_codex_unify_history_backup,
             commands::restore_codex_unified_history,
             commands::get_rectifier_config,
