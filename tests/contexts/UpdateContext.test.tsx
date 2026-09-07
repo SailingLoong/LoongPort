@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const updaterMocks = vi.hoisted(() => ({
   checkForUpdate: vi.fn(),
+  getDismissedUpdateVersion: vi.fn(),
+  setDismissedUpdateVersion: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => {
@@ -22,6 +24,9 @@ const eventMocks = vi.hoisted(() => {
 
 vi.mock("@/lib/updater", () => ({
   checkForUpdate: () => updaterMocks.checkForUpdate(),
+  getDismissedUpdateVersion: () => updaterMocks.getDismissedUpdateVersion(),
+  setDismissedUpdateVersion: (version: string | null) =>
+    updaterMocks.setDismissedUpdateVersion(version),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -51,6 +56,12 @@ function UpdateState({
         }}
       >
         Check for updates
+      </button>
+      <button type="button" onClick={update.dismissUpdate}>
+        Dismiss update
+      </button>
+      <button type="button" onClick={update.resetDismiss}>
+        Reset dismiss
       </button>
     </>
   );
@@ -90,6 +101,10 @@ describe("UpdateProvider", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     updaterMocks.checkForUpdate.mockReset();
+    updaterMocks.getDismissedUpdateVersion.mockReset();
+    updaterMocks.getDismissedUpdateVersion.mockResolvedValue(null);
+    updaterMocks.setDismissedUpdateVersion.mockReset();
+    updaterMocks.setDismissedUpdateVersion.mockResolvedValue(true);
     eventMocks.listen.mockReset();
     eventMocks.listen.mockImplementation(
       (_eventName: string, handler: (event: { payload: unknown }) => void) =>
@@ -117,8 +132,8 @@ describe("UpdateProvider", () => {
     expect(updaterMocks.checkForUpdate).not.toHaveBeenCalled();
   });
 
-  it("keeps a dismissed version dismissed across identical backend events", async () => {
-    localStorage.setItem("ccswitch:update:dismissedVersion", "3.25.0");
+  it("keeps a backend-dismissed version dismissed across identical backend events", async () => {
+    updaterMocks.getDismissedUpdateVersion.mockResolvedValue("3.25.0");
     renderProvider();
     await act(async () => {});
 
@@ -130,7 +145,26 @@ describe("UpdateProvider", () => {
     expect(screen.getByText("dismissed")).toBeInTheDocument();
   });
 
-  it("migrates a legacy dismissed version before applying an event", async () => {
+  it("recomputes dismissed state when the dismissed version resolves after an update event", async () => {
+    let resolveDismissed: ((version: string | null) => void) | undefined;
+    updaterMocks.getDismissedUpdateVersion.mockReturnValue(
+      new Promise<string | null>((resolve) => {
+        resolveDismissed = resolve;
+      }),
+    );
+    renderProvider();
+    await act(async () => {
+      eventMocks.emit(available);
+    });
+
+    await act(async () => {
+      resolveDismissed?.("3.25.0");
+    });
+
+    expect(screen.getByText("dismissed")).toBeInTheDocument();
+  });
+
+  it("migrates a legacy localStorage dismissed version into backend settings", async () => {
     localStorage.setItem("dismissedUpdateVersion", "3.25.0");
     renderProvider();
     await act(async () => {});
@@ -140,14 +174,15 @@ describe("UpdateProvider", () => {
     });
 
     expect(screen.getByText("dismissed")).toBeInTheDocument();
-    expect(localStorage.getItem("ccswitch:update:dismissedVersion")).toBe(
+    expect(updaterMocks.setDismissedUpdateVersion).toHaveBeenCalledWith(
       "3.25.0",
     );
+    expect(localStorage.getItem("ccswitch:update:dismissedVersion")).toBeNull();
     expect(localStorage.getItem("dismissedUpdateVersion")).toBeNull();
   });
 
   it("clears update and dismissed state when the backend reports up to date", async () => {
-    localStorage.setItem("ccswitch:update:dismissedVersion", "3.25.0");
+    updaterMocks.getDismissedUpdateVersion.mockResolvedValue("3.25.0");
     renderProvider();
     await act(async () => {});
 
@@ -158,6 +193,27 @@ describe("UpdateProvider", () => {
 
     expect(screen.getByText("no update")).toBeInTheDocument();
     expect(screen.getByText("not dismissed")).toBeInTheDocument();
+  });
+
+  it("persists dismiss and reset through the backend command", async () => {
+    renderProvider();
+    await act(async () => {});
+
+    await act(async () => {
+      eventMocks.emit(available);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss update" }));
+    await act(async () => {});
+    expect(screen.getByText("dismissed")).toBeInTheDocument();
+    expect(updaterMocks.setDismissedUpdateVersion).toHaveBeenCalledWith(
+      "3.25.0",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset dismiss" }));
+    await act(async () => {});
+    expect(screen.getByText("not dismissed")).toBeInTheDocument();
+    expect(updaterMocks.setDismissedUpdateVersion).toHaveBeenCalledWith(null);
   });
 
   it("applies manual results through the same update state", async () => {

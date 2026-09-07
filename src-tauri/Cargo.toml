@@ -60,6 +60,7 @@ gui = [
     "tauri-plugin-deep-link",
     "tauri-plugin-window-state",
     "tauri-plugin-single-instance",
+    "minisign-verify",
     "arboard",
     "auto-launch",
     "webkit2gtk",
@@ -83,6 +84,10 @@ tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-store = { version = "2", optional = true }
 tauri-plugin-deep-link = { version = "2", optional = true }
 tauri-plugin-window-state = { version = "2", optional = true }
+# 启动闸门对预下载安装包做跨会话重验（updater 插件的 download() 内联验签
+# 不跨进程；install(bytes) 不重复校验）。与 tauri-plugin-updater 同一个库
+# 同一个主版本，验签行为逐字对齐其 verify_signature。
+minisign-verify = { version = "0.2", optional = true }
 dirs = "6.0"
 toml = "1.0"
 toml_edit = "0.25"

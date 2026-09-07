@@ -47,6 +47,9 @@ fn merge_settings_for_save(
     // 前端全量保存的快照取自某个过去时刻，透传它们 = 把并发写入整体抹掉
     // （当晚实测 claimed 被旧快照抹除；"当前在用"指针被抹会让整片供应商失去选中态）。
     incoming.star_reward_claimed = existing.star_reward_claimed;
+    // 「跳过本版本」：后端窄命令写（set_dismissed_update_version），启动闸门读；
+    // 全量保存的旧快照透传会把用户刚跳过的版本复活（同一类丢失更新事故）。
+    incoming.dismissed_update_version = existing.dismissed_update_version.clone();
     // 广场开关：默认值由后端按归因播种（relay::plaza），用户改它走窄命令
     // plaza_set_visible —— 全量保存的旧快照会抹掉首启弹窗刚播的种（同一类
     // 已实测过的丢失更新事故）。
@@ -657,6 +660,25 @@ pub async fn plaza_set_visible(visible: bool) -> Result<bool, String> {
 pub async fn plaza_seed_from_first_site(domain: String) -> Result<bool, String> {
     crate::relay::plaza::seed_from_first_site(&domain).await;
     Ok(true)
+}
+
+/// 用户「跳过本版本」/撤销跳过。
+///
+/// 窄命令而非全量保存，与 `plaza_set_visible` 同一个理由：启动闸门和前端
+/// 更新徽章都读这个事实，全量保存的旧快照透传会把刚写的跳过决定抹掉。
+#[tauri::command]
+pub async fn set_dismissed_update_version(version: Option<String>) -> Result<bool, String> {
+    crate::settings::mutate_settings(|settings| {
+        settings.dismissed_update_version = version;
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// 当前被「跳过本版本」的版本号（None = 没有跳过过）。
+#[tauri::command]
+pub async fn get_dismissed_update_version() -> Result<Option<String>, String> {
+    Ok(crate::settings::get_settings().dismissed_update_version)
 }
 
 /// 获取整流器配置

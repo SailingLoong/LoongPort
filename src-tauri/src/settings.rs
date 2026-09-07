@@ -451,6 +451,14 @@ pub struct AppSettings {
     /// 等一次性标志同一个惯例。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub star_reward_claimed: Option<bool>,
+    /// 用户明确「跳过本版本」的应用更新版本号。
+    ///
+    /// `None` = 没跳过过任何版本。启动闸门（`services::app_update` 的
+    /// 待装更新应用）读到它等于待装版本时放弃自动安装，保留预下载产物供
+    /// 手动升级；前端更新徽章与「跳过本版本」按钮同源读写。设备级、不随
+    /// 云同步 —— 要不要装新版本是单台机器上的决定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_update_version: Option<String>,
     /// Whether to show the failover toggle independently on the main page
     #[serde(default)]
     pub enable_failover_toggle: bool,
@@ -665,6 +673,7 @@ impl Default for AppSettings {
             crowd_metrics_notice_confirmed: None,
             cc_switch_import_prompted: None,
             star_reward_claimed: None,
+            dismissed_update_version: None,
             enable_failover_toggle: false,
             show_profile_switcher: true,
             // 见字段上的说明：这条保的是 ChatGPT 桌面版的登录凭据，LoongPort 必须默认开。
