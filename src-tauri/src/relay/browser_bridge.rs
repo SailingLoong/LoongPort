@@ -7,7 +7,7 @@
 //! 续期能力已卸掉，见 [`super::login::strip_refresh_keys_js`]）。
 //! NewAPI 登录窗在凭据交接时即关闭，对它的代拉走不通、返回可读错误。
 //!
-//! 本模块就是那条通道：[`super::api::Client`] 撞上防护层时，把**同一份请求**（method +
+//! 本模块就是那条通道：[`super::sub2api::Client`] 撞上防护层时，把**同一份请求**（method +
 //! URL + 头 + body）原样搬进登录窗页面上下文里 fetch，响应经自定义 scheme
 //! `loongport-creds://api-<id>` 回传（与凭据回传同一条传输通道，用 host 区分）。
 //!
@@ -113,7 +113,7 @@ impl BrowserBridge {
 /// 生成「让登录窗在页面上下文里同源重放一次 API 请求并回传」的注入脚本。
 ///
 /// 请求从 `request` 本身取（method / 完整 URL / 头 / body）—— 代拉必须与直连是
-/// **同一份请求**，由 [`super::api::Client::send`] 把原请求递进来，这里不重拼
+/// **同一份请求**，由 [`super::sub2api::Client::send`] 把原请求递进来，这里不重拼
 /// （重拼就是第二份事实源，多拼错一个头就多一种「浏览器能过、代拉过不了」的分叉）。
 ///
 /// ## 为什么 403 HTML 要重试（2026-08-13 实测加）

@@ -447,7 +447,7 @@ pub(crate) fn reset_tier_config_in_state(
     } else {
         provision::pick_tier_models(&app_type, Some(&catalog_models)).main
     };
-    let base_url = api::base_url_for(&app_type, &op.site_origin, &op.api_base_url);
+    let base_url = sub2api::base_url_for(&app_type, &op.site_origin, &op.api_base_url);
 
     let settings_config = if !catalog_models.is_empty() {
         provision::settings_config_with_models(

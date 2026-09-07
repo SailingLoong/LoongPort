@@ -105,7 +105,7 @@ fn parse_envelope<T: DeserializeOwned>(body: &str, what: &str) -> Result<T, Vend
 
 fn build_client() -> Result<reqwest::Client, AppError> {
     // 复用 relay 层的共享构造器（30s 超时、无会话特征），平凡构造器不各写一份。
-    crate::relay::api::build_client()
+    crate::relay::sub2api::build_client()
 }
 
 /// 发一次请求，带齐三个鉴权头。HTTP 401/403 视为登录态过期。

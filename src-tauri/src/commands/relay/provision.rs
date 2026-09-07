@@ -135,7 +135,7 @@ pub(crate) fn newapi_candidates_for_group(
                 roles: picked.claude_roles,
                 allow_image_generation: None,
                 // NewAPI exposes one OpenAI-compatible root. Per-app suffixes are projected by
-                // `api::base_url_for`, so no persisted sub2api base belongs here.
+                // `sub2api::base_url_for`, so no persisted sub2api base belongs here.
                 api_base_url: String::new(),
             }
         })
@@ -159,7 +159,7 @@ fn newapi_reconcile_stage(stage: newapi_provision::ReconcileStage) -> &'static s
 
 pub(crate) async fn provision_backend(
     op: &creds::Relay,
-    browser_fallback: Option<api::BrowserApiFallback>,
+    browser_fallback: Option<sub2api::BrowserApiFallback>,
 ) -> Result<ManagedProvisionBatch, AppError> {
     // 一次 provision 解析一次选型表（内置 + 远端覆盖），两个 backend 共用 ——
     // sub2api 与 newapi 的选型纪律必须来自同一份数据（尺子 1.4：一个事实一个 owner）。
@@ -176,7 +176,7 @@ pub(crate) async fn provision_backend(
     }
     match op.backend_kind {
         discovery::BackendKind::Sub2Api => {
-            let mut client = api::Client::new(
+            let mut client = sub2api::Client::new(
                 &op.site_origin,
                 &op.auth_token,
                 op.account_id,
@@ -291,7 +291,7 @@ pub(crate) async fn provision_backend(
             }
 
             for group in result.groups {
-                let models = match api::list_models(&op.site_origin, &group.api_key).await {
+                let models = match sub2api::list_models(&op.site_origin, &group.api_key).await {
                     Ok(models) => match normalize_newapi_model_catalog(models) {
                         Some(models) => models,
                         None => {
@@ -435,7 +435,7 @@ pub(crate) fn persist_provision_batch(
         let display_name = provision::provider_display_name(&op.site_name, &candidate.group_name);
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
-        let base_url = api::base_url_for(app_type, &op.site_origin, &candidate.api_base_url);
+        let base_url = sub2api::base_url_for(app_type, &op.site_origin, &candidate.api_base_url);
         // 下面这串分支是「带目录平台」的**生成器形状分派**（claude/gemini 走
         // roles+models、codex/grokbuild 走 models）——「哪些平台带目录」这个名单
         // 的事实唯源是 [`provision::model_catalog_apps`]，加平台时两边一起动

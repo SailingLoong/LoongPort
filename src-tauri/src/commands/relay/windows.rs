@@ -147,7 +147,7 @@ pub(crate) async fn open_sub2api_site_window<R: tauri::Runtime>(
     // 先取账号档案。**必须在开窗之前** —— 站点的 router 守卫在页面启动那一刻就读
     // localStorage，注入脚本必须在那之前就带着完整的值。拿不到就别开窗：
     // 开一个注定落到登录页的窗口，用户只会以为「点了充值却要我重新登录」。
-    let client = api::Client::new(
+    let client = sub2api::Client::new(
         &op.site_origin,
         &op.auth_token,
         op.account_id,
@@ -252,7 +252,7 @@ async fn ensure_token_outlasts_a_payment<R: tauri::Runtime>(
         return op;
     };
 
-    match api::refresh_token(&op.site_origin, &refresh).await {
+    match sub2api::refresh_token(&op.site_origin, &refresh).await {
         Ok(fresh) => {
             let state = app_handle.state::<AppState>();
             if let Err(e) = with_conn(&state, |conn| {
@@ -540,7 +540,7 @@ mod tests {
         );
 
         // 协议隔离：NewAPI 的充值分派不得打任何 sub2api 端点（协议字面量属于
-        // api.rs / 既有测试形状，这里只对照黑名单）。
+        // sub2api.rs / 既有测试形状，这里只对照黑名单）。
         let paths = requests.lock().unwrap().clone();
         for forbidden in [
             "/api/v1/settings/public",

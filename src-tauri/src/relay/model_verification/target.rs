@@ -4,7 +4,7 @@ use crate::{
     app_config::AppType,
     database::Database,
     error::AppError,
-    relay::{api, creds, provision},
+    relay::{creds, provision, sub2api},
 };
 
 use super::types::{ModelFitness, TargetKey, TargetScope, VerificationModelOption};
@@ -62,7 +62,7 @@ pub(crate) async fn list_models(
     // 模型列表与站点能力图**并行**取：能力图是公开 well-known，不打 sk、
     // 不阻塞在另一个请求后面；它失败也只意味着「无预筛」，模型列表照常。
     let (models, capabilities) = tokio::join!(
-        api::list_models(&scope.api_root, &scope.api_key),
+        sub2api::list_models(&scope.api_root, &scope.api_key),
         crate::relay::transit::model_protocol_capabilities(&scope.site_origin),
     );
     let mut models = models
@@ -162,8 +162,12 @@ impl ResolvedScope {
             })?;
 
         Ok(Self {
-            api_root: api::site_api_root(&relay.site_origin, &relay.api_base_url),
-            protocol_base: api::base_url_for(&app_type, &relay.site_origin, &relay.api_base_url),
+            api_root: sub2api::site_api_root(&relay.site_origin, &relay.api_base_url),
+            protocol_base: sub2api::base_url_for(
+                &app_type,
+                &relay.site_origin,
+                &relay.api_base_url,
+            ),
             api_key,
             site_origin: relay.site_origin.clone(),
             group: provider

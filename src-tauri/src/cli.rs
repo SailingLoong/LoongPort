@@ -22,7 +22,7 @@
 //! ## 复用面（几乎零新逻辑）
 //!
 //! - 协议探测：[`discovery::probe_site`]（纯 HTTP，GUI 同一条）
-//! - base_url 约定：[`api::base_url_for`]（claude/gemini 拿站点根、codex/grok
+//! - base_url 约定：[`sub2api::base_url_for`]（claude/gemini 拿站点根、codex/grok
 //!   拿 `/v1` 根 —— 唯一数据源，别在这里重写）
 //! - 配置生成：[`provision::settings_config_for`]（复用上游 deeplink 构造器，
 //!   全部 CLI 一份形状）
@@ -40,7 +40,7 @@ use std::str::FromStr;
 
 use crate::app_config::AppType;
 use crate::provider::Provider;
-use crate::relay::{api, discovery, provision};
+use crate::relay::{discovery, provision, sub2api};
 
 /// 触发标志，与 `--add-site <域名>` 的值成对出现。
 pub const ADD_SITE_FLAG: &str = "--add-site";
@@ -175,8 +175,8 @@ where
 
 /// 异步阶段：探测站点协议、确定 base_url、选定模型。
 async fn prepare(options: AddSiteOptions) -> Result<Prepared, String> {
-    let site_origin =
-        api::normalize_site_origin(&options.site).map_err(|e| format!("站点地址无法解析: {e}"))?;
+    let site_origin = sub2api::normalize_site_origin(&options.site)
+        .map_err(|e| format!("站点地址无法解析: {e}"))?;
     println!("探测站点 {site_origin} …");
     let detected = discovery::probe_site(&site_origin)
         .await
@@ -190,7 +190,7 @@ async fn prepare(options: AddSiteOptions) -> Result<Prepared, String> {
     } else {
         detected.site_name.clone()
     };
-    let base_url = api::base_url_for(&options.app, &site_origin, &detected.api_base_url);
+    let base_url = sub2api::base_url_for(&options.app, &site_origin, &detected.api_base_url);
 
     let model = match options.model {
         Some(model) => model,

@@ -753,7 +753,7 @@ fn configured_signed_site_url(
     select: fn(&RelayDirectorySite) -> Option<&str>,
     label: &str,
 ) -> Result<Option<url::Url>, AppError> {
-    let normalized_origin = super::api::normalize_site_origin(site_origin)?;
+    let normalized_origin = super::sub2api::normalize_site_origin(site_origin)?;
     // 身份按注册域匹配（读宽）：策略键按哪个子域录入都行，同一注册域就是同一家站。
     let domain = super::identity::site_domain(&normalized_origin);
     let Some(configured) = config

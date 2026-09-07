@@ -221,7 +221,7 @@ pub(crate) async fn import_site(
     } else {
         input
     };
-    let site_origin = api::normalize_site_origin(input).map_err(RelayImportError::from)?;
+    let site_origin = sub2api::normalize_site_origin(input).map_err(RelayImportError::from)?;
 
     let initial_detected = match discovery::probe_site(&site_origin).await {
         Ok(detected) => Some(detected),
@@ -349,7 +349,7 @@ pub(crate) fn browser_entry_url(input: &str) -> Result<url::Url, AppError> {
     } else {
         input.trim()
     };
-    let site_origin = api::normalize_site_origin(input)?;
+    let site_origin = sub2api::normalize_site_origin(input)?;
     let with_scheme = if input.contains("://") {
         input.to_string()
     } else {
@@ -414,7 +414,7 @@ pub(crate) fn browser_login_context(
     let backend_kind = detected.backend_kind;
     let login_script =
         backend::browser_login_script(site_origin, backend_kind, "", aff_code, promo_code);
-    let api_base_url = api::site_api_root(site_origin, &detected.api_base_url);
+    let api_base_url = sub2api::site_api_root(site_origin, &detected.api_base_url);
     let site_name = if detected.site_name.trim().is_empty() {
         site_origin
             .trim_start_matches("https://")
@@ -1445,7 +1445,7 @@ async fn do_login(app_handle: &tauri::AppHandle, target_id: i64) -> Result<Login
 ///
 /// 先走 reqwest fast path —— 绝大多数站这么拿就好。当站点启用了 Cloudflare 这类
 /// **指纹级**防护（reqwest 这种非浏览器 HTTP 栈必撞 403 HTML，README 里 `api.aijws.com`
-/// 就是实例），[`api::Client::send`] 内部会走浏览器代拉钩子：由仍开着的登录窗在
+/// 就是实例），[`sub2api::Client::send`] 内部会走浏览器代拉钩子：由仍开着的登录窗在
 /// **页面上下文**里同源重放同一份请求。登录窗本身就是真实浏览器，是唯一能过这种
 /// 防护的通道。判据是「HTTP 403 + 正文不是 JSON」—— sub2api 的 API 出错
 /// （403 权限类）回的是 JSON 信封，正文非 JSON 说明根本不是 API 在说话。
@@ -1453,8 +1453,8 @@ async fn resolve_login_account_identity(
     app_handle: &tauri::AppHandle,
     site_origin: &str,
     credentials: &login::Credentials,
-) -> Result<api::Account, AppError> {
-    api::Client::new(
+) -> Result<sub2api::Account, AppError> {
+    sub2api::Client::new(
         site_origin,
         &credentials.auth_token,
         None,
@@ -1468,13 +1468,13 @@ async fn resolve_login_account_identity(
 
 /// 构造浏览器代拉钩子：被防护层拦下的请求由登录窗在页面上下文里原样重放。
 ///
-/// [`api::Client::send`] 撞上「403 + 正文非 JSON」时调用（见那边的说明），把**同一份
+/// [`sub2api::Client::send`] 撞上「403 + 正文非 JSON」时调用（见那边的说明），把**同一份
 /// 请求**递进来。这里取当前登录窗（`loongport-login`；sub2api 登录成功后**留着**、
 /// 但已卸掉续期能力）、把请求注入页面 fetch，经 `loongport-creds://api-<id>` 回传
 /// （[`browser_bridge`] 按 id 认领）。窗口不在（用户关了，或 NewAPI 登录窗在凭据
 /// 交接时已自动关闭——它的 HttpOnly cookie 卸不掉续期能力，留着必炸 lineage）时
 /// 返回可读错误 —— 这类站只能靠真实浏览器过防护。
-pub(crate) fn browser_api_fallback(app_handle: &tauri::AppHandle) -> api::BrowserApiFallback {
+pub(crate) fn browser_api_fallback(app_handle: &tauri::AppHandle) -> sub2api::BrowserApiFallback {
     let handle = app_handle.clone();
     Arc::new(move |request: reqwest::Request| {
         let handle = handle.clone();
@@ -1521,7 +1521,7 @@ async fn persist_login_credentials(
     app_handle: &tauri::AppHandle,
     relay_id: i64,
     credentials: login::Credentials,
-    account: api::Account,
+    account: sub2api::Account,
 ) -> Result<(i64, i64), AppError> {
     // 账号身份由调用方先取好（`resolve_login_account_identity`）：去重键是
     // 「域名 + 账号」，而账号只有登录后才知道；取不到账号 = 登录不能算成功。
@@ -1555,7 +1555,7 @@ async fn persist_new_relay_login_credentials(
     app_handle: &tauri::AppHandle,
     site: &DiscoveredRelaySite,
     credentials: login::Credentials,
-    account: api::Account,
+    account: sub2api::Account,
 ) -> Result<(i64, i64), AppError> {
     let account_id = account.id;
     let state = app_handle.state::<AppState>();

@@ -15,7 +15,7 @@ pub(crate) fn for_provider(provider: &Provider, app_type: &AppType) -> Option<(S
     let base_url = crate::proxy::providers::get_adapter(app_type)?
         .extract_base_url(provider)
         .ok()?;
-    let origin = crate::relay::api::normalize_site_origin(&base_url).ok()?;
+    let origin = crate::relay::sub2api::normalize_site_origin(&base_url).ok()?;
     let api_key = crate::relay::provision::extract_api_key(&provider.settings_config, app_type)?;
     if origin.is_empty() || api_key.is_empty() {
         return None;

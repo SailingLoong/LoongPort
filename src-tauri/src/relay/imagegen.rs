@@ -319,7 +319,7 @@ fn extract_toml_string(toml_text: &str, key: &str) -> Option<String> {
 
 /// 生图端点的完整 URL。
 ///
-/// `base_url` 已经带 `/v1`（[`super::api::codex_base_url`] 保证），所以这里只接
+/// `base_url` 已经带 `/v1`（[`super::sub2api::codex_base_url`] 保证），所以这里只接
 /// `/images/generations`。
 pub(crate) fn images_url(base_url: &str) -> String {
     format!("{base_url}/images/generations")
