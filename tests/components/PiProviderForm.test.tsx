@@ -30,6 +30,10 @@ function completeModel(id: string, name = id.trim() || "Model") {
   };
 }
 
+vi.mock("@/hooks/usePresetReferralUrls", () => ({
+  usePresetReferralUrls: () => ({}),
+}));
+
 vi.mock("@/components/JsonEditor", () => ({
   default: ({
     id,

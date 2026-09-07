@@ -25,6 +25,28 @@ const TEMPLATE_TYPE_BALANCE: &str = "balance";
 pub(crate) const TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION: &str = "official_subscription";
 const COPILOT_UNIT_PREMIUM: &str = "requests";
 
+/// 预设第三方厂商的返佣注册链接覆盖（key = host、值 = 完整注册 URL）。
+///
+/// 读缓存配置（含重新验签），与 `relay_list_sponsors` 同一条纪律：读路径
+/// 不做网络往返、拿不到就返回空 map（预设自己的中性链接兜底）。值过
+/// HTTPS 闸——远端校验器拦第一道，这里第二道（坏值只敢不生效，不连坐）。
+#[tauri::command]
+pub fn preset_referral_urls() -> std::collections::BTreeMap<String, String> {
+    crate::relay::remote_config::load_cached()
+        .map(|cfg| https_only(cfg.preset_referral_urls))
+        .unwrap_or_default()
+}
+
+/// `preset_referral_urls` 的纯函数闸（命令层只做缓存读）：只放行能解析成
+/// HTTPS URL 的值。
+fn https_only(
+    urls: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    urls.into_iter()
+        .filter(|(_, url)| url::Url::parse(url).is_ok_and(|url| url.scheme() == "https"))
+        .collect()
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderView {

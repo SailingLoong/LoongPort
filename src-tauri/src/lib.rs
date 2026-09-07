@@ -1649,6 +1649,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_providers,
+            commands::preset_referral_urls,
             commands::get_current_provider,
             commands::add_provider,
             commands::duplicate_provider,

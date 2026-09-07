@@ -95,6 +95,28 @@ else:
         if not re.match(r'^[a-z0-9.-]+$', host):
             errors.append(f"aff_codes key 不像一个 host：{host}")
 
+# preset_referral_urls（预设第三方厂商的返佣注册链接；键可缺省）：
+# key 规则与 aff_codes 同一套（小写、无 www.、纯 host、无端口）；
+# 值必须是 https:// 开头的完整 URL——各家注册链接参数形状不同（?aff=、
+# /invite/、?ic=），存整条 URL 而不是裸码，格式知识留在录入侧。
+refurls = cfg.get('preset_referral_urls', {})
+if not isinstance(refurls, dict):
+    errors.append("preset_referral_urls 必须是对象")
+else:
+    for host, url_value in refurls.items():
+        if host != host.lower():
+            errors.append(f"preset_referral_urls key 必须全小写：{host}")
+        if host.startswith('www.'):
+            errors.append(f"preset_referral_urls key 必须去掉 www. 前缀：{host}")
+        if '://' in host or '/' in host:
+            errors.append(f"preset_referral_urls key 是纯 host，不带 scheme 或路径：{host}")
+        if ':' in host:
+            errors.append(f"preset_referral_urls key 不能带端口：{host}")
+        if not re.match(r'^[a-z0-9.-]+$', host):
+            errors.append(f"preset_referral_urls key 不像一个 host：{host}")
+        if not isinstance(url_value, str) or not url_value.startswith('https://'):
+            errors.append(f"preset_referral_urls[{host}] 必须是 https:// 开头的完整 URL：{url_value}")
+
 # protected_hosts（v2 世代新增；v1 冻结件没有这个键，天然跳过）：
 # 客户端按 apex 归一后比对，录入形如 `https://Panel.Example.com` 的条目
 # 永远命中不了（表现成"想保护的站没保护上"，不报错）。

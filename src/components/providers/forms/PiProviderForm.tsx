@@ -42,6 +42,8 @@ import { ProviderPresetSelector } from "./ProviderPresetSelector";
 import { RequestHeadersEditor } from "./RequestHeadersEditor";
 import { StructuredOptionsEditor } from "./StructuredOptionsEditor";
 import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
+import { usePresetReferralUrls } from "@/hooks/usePresetReferralUrls";
+import { resolvePresetReferralUrl } from "@/lib/presetReferrals";
 import {
   findRequestHeaderValue,
   normalizeRequestHeaders,
@@ -438,6 +440,13 @@ export function PiProviderForm({
   const [selectedPreset, setSelectedPreset] = useState<PiProviderPreset | null>(
     initialPreset,
   );
+
+  // 「获取 API Key」链接：返佣覆盖（远端配置）优先，未命中回落预设中性链接。
+  const presetReferrals = usePresetReferralUrls();
+  const piApiKeyUrl =
+    resolvePresetReferralUrl(selectedPreset?.apiKeyUrl, presetReferrals) ??
+    selectedPreset?.apiKeyUrl ??
+    "";
   const [category, setCategory] = useState<ProviderCategory>(
     initialData?.category ?? "custom",
   );
@@ -1421,8 +1430,8 @@ export function PiProviderForm({
               value={apiKey}
               onChange={handleApiKeyChange}
               category={category}
-              shouldShowLink={Boolean(selectedPreset?.apiKeyUrl)}
-              websiteUrl={selectedPreset?.apiKeyUrl ?? ""}
+              shouldShowLink={Boolean(piApiKeyUrl)}
+              websiteUrl={piApiKeyUrl}
             />
 
             <div className="space-y-2">
