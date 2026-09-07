@@ -1941,3 +1941,1079 @@ pub(crate) fn persist_refreshed_session_with_identity_writer(
 
     Ok(renewed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::relay::test_support::*;
+
+    #[test]
+    fn browser_entry_url_preserves_user_path_and_query_but_forces_https() {
+        let url = browser_entry_url("http://api.example.com/register?aff=ABC123")
+            .expect("valid browser entry URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register?aff=ABC123");
+    }
+
+    #[test]
+    fn browser_entry_url_accepts_bare_hosts_with_paths() {
+        let url = browser_entry_url("api.example.com/login?next=%2Fdashboard")
+            .expect("valid browser entry URL");
+
+        assert_eq!(
+            url.as_str(),
+            "https://api.example.com/login?next=%2Fdashboard"
+        );
+    }
+
+    #[test]
+    fn directory_entry_source_accepts_only_policy_owned_entries() {
+        let config = crate::relay::remote_config::RemoteConfig {
+            relay_directory: crate::relay::remote_config::RelayDirectoryPolicy {
+                blocked_hosts: vec![],
+                sites: std::collections::BTreeMap::from([
+                    (
+                        "790053500.com".into(),
+                        crate::relay::remote_config::RelayDirectorySite {
+                            veridrop_host: Some("api.790053500.com".into()),
+                            entry_url: Some("https://790053500.com/keys".into()),
+                            purchase_url: None,
+                            usage_url: None,
+                            display_name: Some("鑫旺".into()),
+                        },
+                    ),
+                    (
+                        "plain.example".into(),
+                        crate::relay::remote_config::RelayDirectorySite::default(),
+                    ),
+                    (
+                        "broken.example".into(),
+                        crate::relay::remote_config::RelayDirectorySite {
+                            veridrop_host: None,
+                            entry_url: Some("http://broken.example/keys".into()),
+                            purchase_url: None,
+                            usage_url: None,
+                            display_name: None,
+                        },
+                    ),
+                ]),
+            },
+            ..crate::relay::remote_config::RemoteConfig::default()
+        };
+
+        assert_eq!(
+            directory_entry_source(&config, "https://790053500.com/keys"),
+            Some(BrowserEntrySource::SignedDirectory)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://plain.example"),
+            Some(BrowserEntrySource::Manual)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://unknown.example"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://790053500.com/other"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://broken.example"),
+            Some(BrowserEntrySource::Manual)
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://broken.example/keys"),
+            None
+        );
+    }
+
+    /// wawapi.top 实测踩出的洞：aff / sponsor 名单里的站进了广场（曝光集合），
+    /// 导入闸却只认 relay_directory ⇒ 点「接入」被 NotInDirectory 拒。第二段回落
+    /// 补上：受管全集按 Manual 放行裸 origin；带 path / blocked / 名单外仍拒。
+    #[test]
+    fn directory_entry_source_falls_back_to_the_full_managed_set() {
+        let config = crate::relay::remote_config::RemoteConfig {
+            relay_directory: crate::relay::remote_config::RelayDirectoryPolicy {
+                blocked_hosts: vec!["blocked.example".into()],
+                sites: std::collections::BTreeMap::new(),
+            },
+            sponsors: vec![crate::relay::remote_config::Sponsor {
+                site_origin: "https://www.WawAPII.com".into(),
+                display_name: "WawAPI".into(),
+                tagline: String::new(),
+            }],
+            aff_codes: std::collections::BTreeMap::from([
+                ("wawapi.top".to_string(), "AFF".to_string()),
+                ("blocked.example".to_string(), "AFF".to_string()),
+            ]),
+            ..crate::relay::remote_config::RemoteConfig::default()
+        };
+
+        assert_eq!(
+            directory_entry_source(&config, "https://wawapi.top"),
+            Some(BrowserEntrySource::Manual)
+        );
+        // sponsor 的 www / 大小写变体归一后也要命中
+        assert_eq!(
+            directory_entry_source(&config, "https://wawapii.com"),
+            Some(BrowserEntrySource::Manual)
+        );
+        // Manual 回落只认裸 origin —— 带 path 的输入不给受信处理
+        assert_eq!(
+            directory_entry_source(&config, "https://wawapi.top/register"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://blocked.example"),
+            None
+        );
+        assert_eq!(
+            directory_entry_source(&config, "https://unknown.example"),
+            None
+        );
+    }
+
+    fn detected_sub2api() -> discovery::DetectedSite {
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::Sub2Api,
+            site_name: "Example".into(),
+            api_base_url: String::new(),
+            final_origin: None,
+        }
+    }
+
+    fn detected_newapi() -> discovery::DetectedSite {
+        discovery::DetectedSite {
+            backend_kind: discovery::BackendKind::NewApi,
+            site_name: "NewAPI".into(),
+            api_base_url: String::new(),
+            final_origin: None,
+        }
+    }
+
+    #[test]
+    fn import_anchor_origin_prefers_the_probe_final_origin() {
+        let redirected = discovery::DetectedSite {
+            final_origin: Some("https://panel.example".into()),
+            ..detected_sub2api()
+        };
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), Some(&redirected)),
+            "https://panel.example"
+        );
+        // 浏览器路径的回传不带 final_origin（守卫保证同源），探针也没跑成时同理：
+        // 都保持用户输入的 origin。
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), Some(&detected_sub2api())),
+            "https://apex.example"
+        );
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), None),
+            "https://apex.example"
+        );
+        let same_origin = discovery::DetectedSite {
+            final_origin: Some("https://apex.example".into()),
+            ..detected_sub2api()
+        };
+        assert_eq!(
+            import_anchor_origin("https://apex.example".into(), Some(&same_origin)),
+            "https://apex.example"
+        );
+    }
+
+    #[test]
+    fn browser_start_url_uses_origin_when_protocol_is_unknown_even_for_non_page_path() {
+        let url = browser_start_url(
+            "https://api.example.com/custom/subscription-token",
+            "https://api.example.com",
+            None,
+            BrowserEntrySource::Manual,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/");
+    }
+
+    #[test]
+    fn browser_start_url_preserves_auth_link_while_protocol_is_unknown() {
+        let url = browser_start_url(
+            "https://api.example.com/register?aff=ABC123",
+            "https://api.example.com",
+            None,
+            BrowserEntrySource::Manual,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register?aff=ABC123");
+    }
+
+    #[test]
+    fn browser_start_url_replaces_non_page_path_after_native_detection() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "https://api.example.com/custom/subscription-token",
+            "https://api.example.com",
+            Some(&detected),
+            BrowserEntrySource::Manual,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register");
+    }
+
+    #[test]
+    fn browser_start_url_preserves_a_signed_directory_entry_path() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "https://790053500.com/keys",
+            "https://790053500.com",
+            Some(&detected),
+            BrowserEntrySource::SignedDirectory,
+        )
+        .expect("valid signed directory entry URL");
+
+        assert_eq!(url.as_str(), "https://790053500.com/keys");
+    }
+
+    #[test]
+    fn browser_start_url_preserves_invitation_link_after_native_detection() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "http://api.example.com/register?aff=ABC123",
+            "https://api.example.com",
+            Some(&detected),
+            BrowserEntrySource::Manual,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register?aff=ABC123");
+    }
+
+    #[test]
+    fn browser_start_url_uses_protocol_registration_page_for_known_bare_origin() {
+        let detected = detected_sub2api();
+        let url = browser_start_url(
+            "api.example.com",
+            "https://api.example.com",
+            Some(&detected),
+            BrowserEntrySource::Manual,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(url.as_str(), "https://api.example.com/register");
+    }
+
+    #[test]
+    fn browser_start_url_uses_newapi_legacy_registration_page_for_known_bare_origin() {
+        let detected = detected_newapi();
+        let url = browser_start_url(
+            "api.example.com",
+            "https://api.example.com",
+            Some(&detected),
+            BrowserEntrySource::Manual,
+        )
+        .expect("valid browser start URL");
+
+        assert_eq!(
+            url.as_str(),
+            backend::browser_login_url(
+                "https://api.example.com",
+                discovery::BackendKind::NewApi,
+                ""
+            )
+        );
+    }
+
+    #[test]
+    fn native_protocol_conflict_is_terminal_while_unsupported_site_can_fall_back() {
+        let conflict = recoverable_native_discovery_error(discovery::DiscoveryError {
+            kind: discovery::DiscoveryErrorKind::ProtocolConflict,
+            message: "conflict".into(),
+        });
+        assert_eq!(
+            conflict
+                .expect_err("conflict must not open browser fallback")
+                .message,
+            "conflict"
+        );
+
+        let unsupported = recoverable_native_discovery_error(discovery::DiscoveryError {
+            kind: discovery::DiscoveryErrorKind::UnsupportedSite,
+            message: "unsupported".into(),
+        })
+        .expect("unsupported site can use browser fallback");
+        assert_eq!(unsupported.to_string(), "unsupported");
+    }
+
+    #[test]
+    fn new_site_import_close_is_a_typed_cancellation() {
+        let error = incomplete_new_site_import_error(IncompleteImportReason::Closed);
+
+        assert_eq!(error.kind, Some(RelayImportErrorKind::Cancelled));
+        assert_eq!(error.message, "注册或登录尚未完成");
+    }
+
+    fn bare_mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock app")
+    }
+
+    #[tokio::test]
+    async fn stale_login_window_destroy_returns_without_waiting_when_none_exists() {
+        // 没有残留窗口是绝大多数路径（上一轮窗口早就关了）：helper 必须立即返回，
+        // 不进等待循环 —— 否则每次导入/重登都白等一个轮询周期。
+        let app = bare_mock_app();
+        let start = std::time::Instant::now();
+        destroy_stale_login_window_with_timeout(app.handle(), std::time::Duration::from_secs(2))
+            .await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "没有残留窗口时不该等待，实际等了 {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_login_window_destroy_is_bounded_when_the_label_never_frees() {
+        // MockRuntime 不驱动事件循环 ⇒ destroy 后 manager 注册表里的 label 永不释放
+        // （与 newapi_purchase 超时用例同款不可观测性）。能钉住的不变量是「有界返回」：
+        // 到点必须继续走，否则真实运行时里事件循环卡一下，导入就永久卡死在等待里。
+        let app = bare_mock_app();
+        tauri::WebviewWindowBuilder::new(
+            app.handle(),
+            login::LOGIN_WINDOW_LABEL,
+            tauri::WebviewUrl::External(url::Url::parse("about:blank").unwrap()),
+        )
+        .build()
+        .expect("预建残留登录窗");
+
+        let start = std::time::Instant::now();
+        destroy_stale_login_window_with_timeout(
+            app.handle(),
+            std::time::Duration::from_millis(150),
+        )
+        .await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "label 永不释放时也必须有界返回，实际等了 {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn new_site_import_timeout_is_a_typed_cancellation() {
+        let error = incomplete_new_site_import_error(IncompleteImportReason::TimedOut);
+
+        assert_eq!(error.kind, Some(RelayImportErrorKind::Cancelled));
+        assert_eq!(error.message, "注册或登录等待超时，请重试");
+    }
+
+    /// ⭐ **kind 的线上格式必须与前端 union 逐字一致。**
+    ///
+    /// 前端 `src/lib/api/relay.ts` 的 `ImportErrorKind` 按这些字面量匹配（switch
+    /// 的是字符串，不是共享类型）。serde enum 的 rename 只在结构体字段上踩过 casing
+    /// 雷（PR #153 的 `target_name`），枚举变体同理 —— 这里把每个变体的线上值钉死。
+    #[test]
+    fn import_error_kinds_serialize_to_the_wire_names_the_frontend_matches() {
+        for (kind, wire) in [
+            (
+                RelayImportErrorKind::UnsupportedSite,
+                "\"unsupported_site\"",
+            ),
+            (RelayImportErrorKind::NotInDirectory, "\"not_in_directory\""),
+            (
+                RelayImportErrorKind::ProtocolConflict,
+                "\"protocol_conflict\"",
+            ),
+            (RelayImportErrorKind::Transport, "\"transport\""),
+            (RelayImportErrorKind::Cancelled, "\"cancelled\""),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&kind).expect("kind 可序列化"),
+                wire,
+                "{kind:?} 的线上名变了，前端 union 要跟着改"
+            );
+        }
+    }
+
+    #[test]
+    fn new_site_import_discovery_stays_in_memory_until_authentication() {
+        let context = browser_login_context(
+            "https://api.example.com",
+            detected_sub2api(),
+            Some("invite"),
+            None,
+        );
+
+        assert_eq!(context.site.site_origin, "https://api.example.com");
+        assert_eq!(context.site.site_name, "Example");
+        assert_eq!(context.site.api_base_url, "https://api.example.com");
+        assert_eq!(context.site.backend_kind, discovery::BackendKind::Sub2Api);
+    }
+
+    #[tokio::test]
+    async fn completed_refresh_wins_when_close_and_refresh_are_ready_together() {
+        let outcome =
+            await_refresh_preserving_rotation(async { Ok::<_, AppError>("refreshed") }, async {
+                "closed"
+            })
+            .await;
+
+        assert!(matches!(outcome, RefreshWait::Refreshed(Ok("refreshed"))));
+    }
+
+    #[tokio::test]
+    async fn refresh_started_before_close_is_drained_to_preserve_rotation() {
+        let (release_refresh, wait_for_release) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(await_refresh_preserving_rotation(
+            async {
+                wait_for_release
+                    .await
+                    .expect("test releases the refresh response");
+                Ok::<_, AppError>("rotated")
+            },
+            async { "closed" },
+        ));
+
+        tokio::task::yield_now().await;
+        release_refresh
+            .send(())
+            .expect("refresh waiter remains alive after close");
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), task)
+            .await
+            .expect("bounded refresh completes")
+            .expect("refresh task does not panic");
+
+        assert!(matches!(outcome, RefreshWait::Refreshed(Ok("rotated"))));
+    }
+
+    #[test]
+    fn persisting_newapi_login_session_stores_tokens_and_native_account_identity() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        let refreshed = crate::relay::newapi::RefreshedSession {
+            access_token: "new-access-token".into(),
+            access_expires_at: Some(1_900_000_000),
+            session_id: "session-id".into(),
+            account: crate::relay::newapi::SelfAccount {
+                id: 84,
+                username: "newapi-login".into(),
+                display_name: "NewAPI Display".into(),
+                email: "newapi@example.com".into(),
+                group: "default".into(),
+                quota: 0,
+                used_quota: 0,
+            },
+            refresh_cookie: "rotated-refresh-cookie".into(),
+        };
+
+        let (final_relay_id, account_id) =
+            persist_newapi_login_session(&state, relay_id, &refreshed).expect("persist login");
+        let persisted = with_conn(&state, |conn| creds::get(conn, final_relay_id))
+            .expect("load relay")
+            .expect("relay exists");
+
+        assert_eq!(account_id, 84);
+        assert_eq!(persisted.auth_token, "new-access-token");
+        assert_eq!(
+            persisted.refresh_token.as_deref(),
+            Some("rotated-refresh-cookie")
+        );
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_id, Some(84));
+        assert_eq!(persisted.account_label, "NewAPI Display");
+        assert_eq!(persisted.login_identifier, "newapi-login");
+    }
+
+    #[test]
+    fn persisting_legacy_newapi_session_keeps_refresh_fields_absent() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://legacy-newapi.example",
+                "Legacy NewAPI",
+                "https://legacy-newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        let session = crate::relay::newapi::RefreshedSession {
+            access_token: "long-lived-access-token".into(),
+            access_expires_at: None,
+            session_id: String::new(),
+            account: crate::relay::newapi::SelfAccount {
+                id: 42,
+                username: "legacy-login".into(),
+                display_name: "Legacy User".into(),
+                email: String::new(),
+                group: "default".into(),
+                quota: 0,
+                used_quota: 0,
+            },
+            refresh_cookie: String::new(),
+        };
+
+        let (final_relay_id, account_id) =
+            persist_newapi_login_session(&state, relay_id, &session).expect("persist login");
+        let persisted = with_conn(&state, |conn| creds::get(conn, final_relay_id))
+            .expect("load relay")
+            .expect("relay exists");
+
+        assert_eq!(account_id, 42);
+        assert_eq!(persisted.auth_token, "long-lived-access-token");
+        assert_eq!(persisted.refresh_token, None);
+        assert_eq!(persisted.token_expires_at, None);
+        assert_eq!(persisted.account_id, Some(42));
+    }
+
+    #[test]
+    fn import_result_uses_the_final_relay_id_after_account_merge() {
+        let result = ImportResult::authenticated(
+            DiscoveredRelaySite {
+                site_origin: "https://api.example.com".into(),
+                site_name: "Example".into(),
+                api_base_url: "https://api.example.com".into(),
+                backend_kind: discovery::BackendKind::NewApi,
+            },
+            11,
+        );
+
+        assert_eq!(result.relay_id, 11);
+    }
+
+    async fn spawn_discovery_server(
+        sub2api_body: Option<serde_json::Value>,
+        newapi_body: Option<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{routing::get, Json, Router};
+
+        let mut app = Router::new();
+        if let Some(body) = sub2api_body {
+            app = app.route(
+                "/api/v1/settings/public",
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+        }
+        if let Some(body) = newapi_body {
+            app = app.route(
+                "/api/status",
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind discovery test server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve discovery app");
+        });
+        (origin, server)
+    }
+
+    /// 把 `saved_relay_app` 存好的 relay 的 access token 显式置为已过期。
+    ///
+    /// 必须给一个**过去**的 `token_expires_at`：`saved_relay_app` 存的是 `None`，而
+    /// `token_looks_valid` 对 `None` 有意乐观降级（返回 true），`usable_relay` 会走
+    /// token 早退分支，永远到不了要测的续期路径。
+    fn expire_saved_relay_token(app: &tauri::App<tauri::test::MockRuntime>, relay_id: i64) {
+        let state = app.state::<AppState>();
+        let conn = state.db.conn.lock().expect("lock memory database");
+        conn.execute(
+            "UPDATE loongport_relay SET token_expires_at = ?1 WHERE id = ?2",
+            rusqlite::params![chrono::Utc::now().timestamp() - 3600, relay_id],
+        )
+        .expect("expire saved relay token");
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_accepts_the_same_detected_backend() {
+        let (origin, server) = spawn_discovery_server(None, Some(newapi_discovery_body())).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let relay = usable_relay(app.handle(), relay_id)
+            .await
+            .expect("same backend remains usable");
+
+        assert_eq!(relay.backend_kind, discovery::BackendKind::NewApi);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_clears_credentials_on_detected_backend_mismatch() {
+        let (origin, server) = spawn_discovery_server(Some(sub2api_discovery_body()), None).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("backend mismatch must stop runtime dispatch");
+
+        assert!(error.to_string().contains("协议"), "{error}");
+        let relay = relay_credentials(&app, relay_id);
+        assert!(relay.auth_token.is_empty());
+        assert!(relay.refresh_token.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_uses_saved_backend_when_probe_is_unsupported() {
+        let (origin, server) = spawn_discovery_server(
+            Some(serde_json::json!({ "unknown": "sub" })),
+            Some(serde_json::json!({ "unknown": "new" })),
+        )
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let relay = usable_relay(app.handle(), relay_id)
+            .await
+            .expect("unsupported probe should fall back to the saved backend");
+
+        assert_eq!(relay.backend_kind, discovery::BackendKind::NewApi);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_preserves_credentials_on_conflicting_protocol() {
+        let (origin, server) = spawn_discovery_server(
+            Some(sub2api_discovery_body()),
+            Some(newapi_discovery_body()),
+        )
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("conflicting probe must stop runtime dispatch");
+
+        let relay = relay_credentials(&app, relay_id);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn saved_relay_validation_preserves_credentials_on_transport_only_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind connection-drop server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            for _ in 0..discovery::PROBE_CANDIDATES.len() {
+                let (stream, _) = listener.accept().await.expect("accept probe request");
+                drop(stream);
+            }
+        });
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("transport failure must stop dispatch");
+
+        assert!(error.to_string().contains("连接"), "{error}");
+        let relay = relay_credentials(&app, relay_id);
+        assert_eq!(relay.auth_token, "saved-access-token");
+        assert_eq!(relay.refresh_token.as_deref(), Some("saved-refresh-token"));
+        server.await.expect("connection-drop server completes");
+    }
+
+    /// mock 站点轮换后回的假凭据：沿用 `saved_*` 前缀家族，仅供断言对得上号，
+    /// 不是任何真实站点的密钥。
+    const RENEWED_ACCESS: &str = "saved-access-token-renewed";
+
+    const RENEWED_ROTATION: &str = "saved-refresh-token-renewed";
+
+    /// ⭐ 回归闸（2026-08-17 bestapi.store 线上事故）：登录快照没带回过期时间
+    /// （`token_expires_at = NULL`）的行，`token_looks_valid` 永远乐观为真，
+    /// `usable_relay` 的主动续期永不触发；access token 在服务端到 24h 过期后，
+    /// 探活撞上 401「登录已过期」直接清会话 —— refresh token 一次没用过就被连坐。
+    /// 钉住：过期类 401 + 手里有 refresh token ⇒ 先静默续期一次、用新凭据重跑原请求。
+    #[tokio::test]
+    async fn relay_read_refreshes_once_and_retries_when_token_expires_server_side() {
+        use axum::{
+            http::{header, HeaderMap, StatusCode},
+            routing::{get, post},
+            Json, Router,
+        };
+        let router = Router::new()
+            .route(
+                "/api/v1/user/profile",
+                get(|headers: HeaderMap| async move {
+                    let stale = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.ends_with("saved-access-token"));
+                    if stale {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({
+                                "code": "TOKEN_EXPIRED",
+                                "message": "登录已过期，请重新登录"
+                            })),
+                        );
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "code": 0,
+                            "message": "success",
+                            "data": {
+                                "id": 7,
+                                "username": "Sub User",
+                                "email": "sub@example.com",
+                                "balance": 12.5,
+                                "frozen_balance": 0.0
+                            }
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/auth/refresh",
+                post(|Json(body): Json<serde_json::Value>| async move {
+                    assert_eq!(body["refresh_token"], "saved-refresh-token", "{body}");
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "code": 0,
+                            "message": "success",
+                            "data": {
+                                "access_token": RENEWED_ACCESS,
+                                "refresh_token": RENEWED_ROTATION,
+                                "expires_at": 4_102_444_800_000_i64
+                            }
+                        })),
+                    )
+                }),
+            );
+        let (origin, server) = spawn_balance_server(router).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let balance = relay_read_with_refresh_retry(app.handle(), relay_id, |op| async move {
+            backend::RuntimeBackend::for_relay(&op).balance().await
+        })
+        .await
+        .expect("服务端 401 过期必须被静默续期救回");
+
+        assert_eq!(balance.balance, 12.5);
+        let creds = relay_credentials(&app, relay_id);
+        assert_eq!(creds.auth_token, RENEWED_ACCESS);
+        assert_eq!(creds.refresh_token.as_deref(), Some(RENEWED_ROTATION));
+        assert!(
+            creds.token_expires_at.is_some(),
+            "续期响应带回的过期时间必须落库 —— 为 NULL 正是这起事故的起点"
+        );
+        server.abort();
+    }
+
+    /// ⭐ 回归闸：充值窗口持有 NewAPI 账号的 refresh 轮换独占权时，`usable_relay`
+    /// 的静默续期必须被拦下 —— NewAPI 的 refresh cookie 一次性轮换，后台并发续期会把
+    /// 充值窗口里种着的那颗 cookie 立刻作废（用户充值到一半被踢回登录页）。
+    ///
+    /// 两个断言互相补充：
+    /// 1. 持 lease 时：报「充值窗口」错误，且 fake 站点收到 **0** 个 refresh 请求
+    ///    （`newapi::refresh_url` 指向的端点）—— 闸必须挡在发请求之前，不是发完再补救。
+    /// 2. drop lease 后：同一 relay 的 `usable_relay` 正常走续期（端点收到请求、拿到
+    ///    新 token）—— 证明闸只认 lease，不是无条件挡路。
+    ///
+    /// 协议细节（refresh 端点路径、cookie 名）全部从 `newapi` owner 派生，本文件
+    /// 不写字面量 —— `browser_login_dispatch_keeps_protocol_details_out_of_commands`
+    /// 闸钉着 commands 层不得拥有这些细节。探测阶段会打 `/api/status`（还可能探别的
+    /// 候选端点吃 404），与断言无关 —— 请求日志里只数 refresh 端点的个数。
+    #[tokio::test]
+    async fn active_purchase_session_blocks_newapi_refresh() {
+        use axum::{
+            extract::Request,
+            http::{header, HeaderValue},
+            middleware,
+            middleware::Next,
+            response::IntoResponse,
+            routing::get,
+            routing::post,
+            Json, Router,
+        };
+
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let every_request = Arc::clone(&requests);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind refresh-block test server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        // refresh 端点路径从 owner 派生：fake 路由和下面的请求计数共用它，两边
+        // 永远指向同一个端点（写两份字面量迟早分叉，而且这份文件不许有字面量）。
+        let refresh_path = newapi::refresh_url(&origin)
+            .expect("newapi refresh url")
+            .path()
+            .to_string();
+
+        let site = Router::new()
+            .route(
+                "/api/status",
+                get(move || {
+                    let body = newapi_discovery_body();
+                    async move { Json(body) }
+                }),
+            )
+            // 不持 lease 的那次 `usable_relay` 要真的续期成功，回一个完整的 NewAPI
+            // refresh 信封（parser 要求带轮换后的 Set-Cookie，名字同样取自 owner）。
+            .route(
+                refresh_path.as_str(),
+                post(move || {
+                    async move {
+                        let set_cookie = format!(
+                            "{}=rotated-secret; Path=/; HttpOnly",
+                            newapi::REFRESH_COOKIE_NAME
+                        );
+                        (
+                            [(
+                                header::SET_COOKIE,
+                                // HeaderValue 拥有自己的字节：cookie 值是运行期拼出来的
+                                // （名字来自 owner 常量），借用拼不出 'static 响应。
+                                HeaderValue::from_str(&set_cookie).expect("合法 set-cookie"),
+                            )],
+                            Json(serde_json::json!({
+                                "success": true,
+                                "data": {
+                                    "access_token": "refreshed-access-token",
+                                    "access_expires_at": 4_102_444_800_i64,
+                                    "user": {
+                                        "id": 7,
+                                        "username": "saved-account",
+                                        "display_name": "Saved Account",
+                                        "email": "saved@example.test",
+                                        "group": "default",
+                                        "quota": 1,
+                                        "used_quota": 0
+                                    },
+                                    "session": { "sid": "sid-refreshed" }
+                                }
+                            })),
+                        )
+                            .into_response()
+                    }
+                }),
+            )
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
+                let requests = Arc::clone(&every_request);
+                async move {
+                    requests.lock().unwrap().push(req.uri().path().to_string());
+                    next.run(req).await
+                }
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, site)
+                .await
+                .expect("serve refresh-block app");
+        });
+
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::NewApi);
+        expire_saved_relay_token(&app, relay_id);
+
+        let refresh_count = || {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == refresh_path)
+                .count()
+        };
+
+        let coordinator = Arc::clone(&app.state::<AppState>().purchase_sessions);
+        let lease = coordinator.try_acquire(relay_id).expect("acquire lease");
+
+        let error = usable_relay(app.handle(), relay_id)
+            .await
+            .expect_err("持 lease 时后台续期必须被拦下");
+        assert!(error.to_string().contains("充值窗口"), "{error}");
+        assert_eq!(
+            refresh_count(),
+            0,
+            "闸必须挡在发请求之前：fake 站点不该收到任何 refresh 请求"
+        );
+
+        drop(lease);
+        let relay = usable_relay(app.handle(), relay_id)
+            .await
+            .expect("lease 释放后同一 relay 必须恢复续期");
+        assert_eq!(relay.auth_token, "refreshed-access-token");
+        assert_eq!(
+            refresh_count(),
+            1,
+            "不持 lease 时同一 relay 的 usable_relay 会正常尝试续期 —— 闸不是无条件挡路"
+        );
+
+        server.abort();
+    }
+
+    #[test]
+    fn session_probe_clears_only_confirmed_auth_failures() {
+        assert!(should_clear_credentials_after_probe_error(
+            &AppError::Config(
+                "newapi self 失败: 登录态已失效（HTTP 401），请重新登录中转站账号".into()
+            )
+        ));
+        assert!(should_clear_credentials_after_probe_error(
+            &AppError::Config("登录已过期，请重新登录".into())
+        ));
+        assert!(!should_clear_credentials_after_probe_error(
+            &AppError::Config("newapi self 请求失败: HTTP 500".into())
+        ));
+        assert!(!should_clear_credentials_after_probe_error(
+            &AppError::Config("newapi self 请求失败: 连不上服务器（boom）".into())
+        ));
+    }
+
+    #[test]
+    fn persisting_a_newapi_refresh_updates_rotated_cookie_and_account_identity() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Old Label",
+                    login_identifier: "old-login",
+                },
+                "stale-access",
+                Some("old-refresh"),
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load relay")
+            .expect("relay exists");
+        let renewed = persist_refreshed_session(
+            &state,
+            &current,
+            &backend::RefreshedSession {
+                auth_token: "new-access".into(),
+                refresh_credential: Some("rotated-refresh".into()),
+                token_expires_at: Some(1_900_000_000),
+                account: Some(backend::RuntimeAccount {
+                    id: 7,
+                    label: "NewAPI Display".into(),
+                    login_identifier: "newapi-login".into(),
+                }),
+            },
+        )
+        .expect("persist refresh");
+
+        assert_eq!(renewed.auth_token, "new-access");
+        assert_eq!(renewed.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(renewed.account_label, "NewAPI Display");
+        assert_eq!(renewed.login_identifier, "newapi-login");
+
+        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("reload relay")
+            .expect("relay exists");
+        assert_eq!(persisted.auth_token, "new-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_label, "NewAPI Display");
+        assert_eq!(persisted.login_identifier, "newapi-login");
+    }
+
+    #[test]
+    fn identity_refresh_failure_keeps_a_refreshed_session_usable() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://newapi.example",
+                "NewAPI",
+                "https://newapi.example",
+                discovery::BackendKind::NewApi,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "Old Label",
+                    login_identifier: "old-login",
+                },
+                "stale-access",
+                Some("old-refresh"),
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load relay")
+            .expect("relay exists");
+        let renewed = persist_refreshed_session_with_identity_writer(
+            &state,
+            &current,
+            &backend::RefreshedSession {
+                auth_token: "new-access".into(),
+                refresh_credential: Some("rotated-refresh".into()),
+                token_expires_at: Some(1_900_000_000),
+                account: Some(backend::RuntimeAccount {
+                    id: 7,
+                    label: "NewAPI Display".into(),
+                    login_identifier: "newapi-login".into(),
+                }),
+            },
+            |_state, _relay_id, _account| Err(AppError::Database("identity write failed".into())),
+        )
+        .expect("token refresh should stay usable");
+
+        assert_eq!(renewed.auth_token, "new-access");
+        assert_eq!(renewed.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(renewed.account_label, "Old Label");
+        assert_eq!(renewed.login_identifier, "old-login");
+
+        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("reload relay")
+            .expect("relay exists");
+        assert_eq!(persisted.auth_token, "new-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("rotated-refresh"));
+        assert_eq!(persisted.token_expires_at, Some(1_900_000_000));
+        assert_eq!(persisted.account_label, "Old Label");
+        assert_eq!(persisted.login_identifier, "old-login");
+    }
+}

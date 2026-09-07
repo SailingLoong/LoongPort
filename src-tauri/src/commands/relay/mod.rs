@@ -151,4 +151,4 @@ pub use switch::*;
 pub use windows::*;
 
 #[cfg(test)]
-mod tests;
+mod test_support;

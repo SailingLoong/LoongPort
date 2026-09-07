@@ -317,3 +317,75 @@ async fn switch_tier_impl(
         warnings,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 契约闸：前端 TS 类型手写断言了这份 wire 形状（`src/lib/api/relay.ts` 的
+    /// `SwitchTierCommandResult`），serde 的 enum 级 `rename_all` 只转变体名、
+    /// 不转变体字段 —— 没有这条闸的话 casing 分叉编译期完全静默
+    /// （2026-08-16 线上事故：`target_name` 蛇形下发，确认弹窗永不打开）。
+    #[test]
+    fn switch_tier_command_result_wire_contract_is_camel_case() {
+        let confirmation = serde_json::to_value(SwitchTierCommandResult::ConfirmationRequired {
+            target_name: "站点 · 分组".into(),
+        })
+        .unwrap();
+        assert_eq!(confirmation["status"], "confirmationRequired");
+        assert!(
+            confirmation.get("targetName").is_some(),
+            "变体字段必须驼峰下发：{confirmation}"
+        );
+        assert!(
+            confirmation.get("target_name").is_none(),
+            "蛇形键意味着前端读到 undefined：{confirmation}"
+        );
+
+        let switched = serde_json::to_value(SwitchTierCommandResult::Switched {
+            result: SwitchTierResult {
+                provider_name: "p".into(),
+                chatgpt_was_running: false,
+                chatgpt_relaunched: false,
+                warnings: vec![],
+            },
+        })
+        .unwrap();
+        assert_eq!(switched["status"], "switched");
+        assert!(
+            switched.get("providerName").is_some(),
+            "flatten 的结构体字段同样是驼峰契约：{switched}"
+        );
+    }
+
+    #[test]
+    fn chatgpt_quit_is_codex_only() {
+        // 用户同意 + codex ⇒ 退。
+        assert!(should_quit_chatgpt(true, &AppType::Codex));
+        // 用户同意但切的是别的平台 ⇒ **不退**。ChatGPT 桌面版只读 ~/.codex，
+        // 切 claude/gemini 档位去关它纯属扰民（关掉用户正开着的、与本次切换无关的对话）。
+        assert!(!should_quit_chatgpt(true, &AppType::Claude));
+        assert!(!should_quit_chatgpt(true, &AppType::Gemini));
+        // 用户没同意 ⇒ 一律不退，哪怕是 codex。
+        assert!(!should_quit_chatgpt(false, &AppType::Codex));
+    }
+
+    #[test]
+    fn switch_confirmation_is_decided_before_mutating_the_target() {
+        assert!(should_request_switch_confirmation(
+            &AppType::Codex,
+            None,
+            true
+        ));
+        assert!(!should_request_switch_confirmation(
+            &AppType::Claude,
+            None,
+            true
+        ));
+        assert!(!should_request_switch_confirmation(
+            &AppType::Codex,
+            Some(false),
+            true
+        ));
+    }
+}

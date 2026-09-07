@@ -1016,3 +1016,1165 @@ fn switch_affected_apps_to_official(
     }
     switched
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::relay::test_support::*;
+
+    fn sub2api_with_session() -> creds::Relay {
+        purchase_capability_relay(creds::BackendKind::Sub2Api)
+    }
+
+    fn newapi_with_refresh_cookie() -> creds::Relay {
+        creds::Relay {
+            refresh_token: Some("refresh-cookie".into()),
+            ..purchase_capability_relay(creds::BackendKind::NewApi)
+        }
+    }
+
+    fn newapi_without_refresh_cookie() -> creds::Relay {
+        purchase_capability_relay(creds::BackendKind::NewApi)
+    }
+
+    #[test]
+    fn purchase_capability_requires_login_config_and_backend_credentials() {
+        assert!(can_open_site_window(&sub2api_with_session(), true, true));
+        assert!(can_open_site_window(
+            &newapi_with_refresh_cookie(),
+            true,
+            true
+        ));
+        assert!(!can_open_site_window(
+            &newapi_without_refresh_cookie(),
+            true,
+            true
+        ));
+        assert!(!can_open_site_window(&sub2api_with_session(), false, true));
+        assert!(!can_open_site_window(&sub2api_with_session(), true, false));
+
+        let newapi_with_blank_refresh_cookie = creds::Relay {
+            refresh_token: Some("   ".into()),
+            ..newapi_with_refresh_cookie()
+        };
+        assert!(!can_open_site_window(
+            &newapi_with_blank_refresh_cookie,
+            true,
+            true
+        ));
+    }
+
+    /// `RelayRowStatus` 的线上名由 `RelayRow.tsx` 的 `RowStatus` switch 直接消费
+    /// （裸字符串比较，无编译器把守）。这里把每个变体的 serde 输出钉死 ——
+    /// 改枚举变体名 / 改 rename 规则时这条会红，提醒同步前端 union。
+    #[test]
+    fn relay_row_statuses_serialize_to_the_wire_names_the_frontend_matches() {
+        for (status, wire) in [
+            (RelayRowStatus::NotLoggedIn, "\"notLoggedIn\""),
+            (RelayRowStatus::SessionExpired, "\"sessionExpired\""),
+            (
+                RelayRowStatus::SessionExpiredUsable,
+                "\"sessionExpiredUsable\"",
+            ),
+            (RelayRowStatus::NoTiers, "\"noTiers\""),
+            (RelayRowStatus::Ready, "\"ready\""),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&status).expect("status 可序列化"),
+                wire,
+                "{status:?} 的线上名变了，src/lib/api/relay.ts 的 union 与 RowStatus 要跟着改"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_row_serializes_backend_owned_remove_confirmation() {
+        let row = RelayRow {
+            id: 7,
+            site_origin: "https://api.example.com".into(),
+            site_name: "Example".into(),
+            account_label: String::new(),
+            status: RelayRowStatus::NotLoggedIn,
+            is_current: false,
+            can_query_balance: false,
+            can_purchase: true,
+            can_view_usage: false,
+            can_refresh: false,
+            usage_blockers: Vec::new(),
+            remove_confirmation: RemoveConfirmation::NeverLoggedIn,
+            tiers: Vec::new(),
+        };
+
+        let json = serde_json::to_value(row).expect("serialize relay row");
+        assert_eq!(json["canPurchase"], true);
+        assert_eq!(json["canViewUsage"], false);
+        assert_eq!(json["removeConfirmation"], "neverLoggedIn");
+        assert_eq!(json["usageBlockers"], serde_json::json!([]));
+    }
+
+    fn codex_settings(model: &str, models: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "sk-test" },
+            "config": format!(
+                "model_provider = \"custom\"\nmodel = {model:?}\n\n[model_providers.custom]\nname = \"Test\"\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            ),
+            "modelCatalog": {
+                "models": models.iter().map(|model| serde_json::json!({ "model": model })).collect::<Vec<_>>()
+            }
+        })
+    }
+
+    #[test]
+    fn codex_model_list_requires_a_real_catalog() {
+        let settings = serde_json::json!({
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-current\"\n"
+        });
+
+        assert!(
+            models_from_settings(&settings).is_empty(),
+            "旧 provider 只有当前模型时，不能把它冒充成完整支持列表"
+        );
+    }
+
+    #[test]
+    fn selecting_a_codex_model_validates_and_only_updates_the_model_field() {
+        let settings = codex_settings("gpt-a", &["gpt-a", "gpt-b"]);
+
+        let selected = select_codex_model(&settings, " gpt-b ").expect("supported model");
+        assert_eq!(
+            provision::extract_model(&selected).as_deref(),
+            Some("gpt-b")
+        );
+        assert_eq!(selected["modelCatalog"], settings["modelCatalog"]);
+        assert_eq!(selected["auth"], settings["auth"]);
+
+        assert!(select_codex_model(&settings, "gpt-unknown").is_err());
+    }
+
+    #[test]
+    fn refreshing_a_managed_codex_tier_keeps_only_a_still_supported_selection() {
+        let defaults = codex_settings("gpt-a", &["gpt-a", "gpt-b"]);
+        let previous = codex_settings("gpt-b", &["gpt-a", "gpt-b"]);
+        let kept = preserve_supported_codex_model(defaults.clone(), &previous);
+        assert_eq!(provision::extract_model(&kept).as_deref(), Some("gpt-b"));
+
+        let removed = codex_settings("gpt-removed", &["gpt-removed"]);
+        let reset = preserve_supported_codex_model(defaults, &removed);
+        assert_eq!(provision::extract_model(&reset).as_deref(), Some("gpt-a"));
+    }
+
+    /// 形状对齐 [`relay::provision`] 生成侧（`deeplink::build_grokbuild_settings`
+    /// + `modelCatalog`）：选中模型在 `[model."<default>"]` 表的 `model` 字段。
+    fn grok_settings(model: &str, models: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "config": format!(
+                "[models]\ndefault = \"{model}\"\n\n[model.\"{model}\"]\nmodel = \"{model}\"\nbase_url = \"https://api.example.com\"\nname = \"Test\"\napi_key = \"sk-test\"\napi_backend = \"responses\"\ncontext_window = 500000\n"
+            ),
+            "modelCatalog": {
+                "models": models.iter().map(|model| serde_json::json!({ "model": model })).collect::<Vec<_>>()
+            }
+        })
+    }
+
+    #[test]
+    fn selecting_a_grok_model_only_updates_the_model_field() {
+        let settings = grok_settings("grok-4.5", &["grok-4.5", "grok-4.6"]);
+
+        let selected = select_grok_model(&settings, "grok-4.6").expect("supported model");
+        assert_eq!(
+            provision::selected_model(&AppType::GrokBuild, &selected).as_deref(),
+            Some("grok-4.6")
+        );
+        // profile 名（models.default 指向的表）、端点、密钥、目录都不动 ——
+        // 它们与模型无关
+        let config = selected["config"].as_str().expect("config text");
+        assert!(config.contains("[model.\"grok-4.5\"]"), "{config}");
+        assert!(config.contains("base_url = \"https://api.example.com\""));
+        assert!(config.contains("api_key = \"sk-test\""));
+        assert_eq!(selected["modelCatalog"], settings["modelCatalog"]);
+    }
+
+    #[test]
+    fn refreshing_a_managed_grok_tier_keeps_only_a_still_supported_selection() {
+        let defaults = grok_settings("grok-4.5", &["grok-4.5", "grok-4.6"]);
+        let previous = grok_settings("grok-4.6", &["grok-4.5", "grok-4.6"]);
+        let kept = preserve_supported_grok_model(defaults.clone(), &previous);
+        assert_eq!(
+            provision::selected_model(&AppType::GrokBuild, &kept).as_deref(),
+            Some("grok-4.6")
+        );
+
+        let removed = grok_settings("grok-gone", &["grok-gone"]);
+        let reset = preserve_supported_grok_model(defaults, &removed);
+        assert_eq!(
+            provision::selected_model(&AppType::GrokBuild, &reset).as_deref(),
+            Some("grok-4.5")
+        );
+    }
+
+    /// ⭐ **`TierInfo` 必须说清自己落在哪个 CLI 上。**
+    ///
+    /// ## 它守的是什么缺陷（TODO 债 11）
+    ///
+    /// provision 链路（`refresh_relay_provision`）一次探**全部平台**，`tiers` 收的是
+    /// 全平台的结果，而 UI 那一行只显示**当前 app** 的档位。于是「这个站没有
+    /// anthropic 分组」与「拉取失败」在界面上长得一样（都是零档位 +
+    /// 「该账号在此平台下没有可用分组」）—— 而前者重试一百次也不会有，后者重试有意义。
+    ///
+    /// 区分它们所需的信息 provision 时**本来就在手上**（每个分组的 `app_type`），
+    /// 少的只是把它发给前端。没有这个字段，前端拿到一堆 tiers 却分不出哪条是自己的。
+    ///
+    /// ## 为什么键名是 `appId`
+    ///
+    /// 前端那边这个概念叫 `AppId`（`lib/api/types.ts`），命令层签名也一直吃
+    /// `app_id`。发 `appType` 会让同一个东西在两侧各有一个名字。
+    #[test]
+    fn tier_info_tells_the_frontend_which_cli_it_landed_on() {
+        let tier = TierInfo {
+            provider_id: "loongport-0123456789abcdef".into(),
+            app_id: AppType::Claude.as_str().to_string(),
+            group_name: "pro池".into(),
+            display_name: "站 · pro池".into(),
+            model: "claude-sonnet-5".into(),
+            models: vec!["claude-sonnet-5".into()],
+            rate_multiplier: Some(1.0),
+            is_current: false,
+            can_verify_models: true,
+            user_edited: None,
+            allow_image_generation: None,
+            site_declared_origin: None,
+        };
+
+        let json = serde_json::to_value(&tier).expect("要能序列化");
+        let obj = json.as_object().expect("是个对象");
+
+        assert_eq!(
+            obj.get("appId").and_then(|v| v.as_str()),
+            Some("claude"),
+            "前端要靠 appId 判断这条档位是不是属于它当前那一屏，实际：{:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            obj.get("canVerifyModels").and_then(|value| value.as_bool()),
+            Some(true),
+            "模型验证支持资格必须由后端随档位返回"
+        );
+        assert!(
+            !obj.contains_key("app_id"),
+            "别把 snake_case 键发给前端（TS 那边按 camelCase 读）"
+        );
+    }
+
+    fn test_app() -> AppType {
+        AppType::Codex
+    }
+
+    /// 构造一条带归属的档位。`account` 为 `None` 表示升级前生成的旧档位。
+    fn owned(id: &str, site: Option<&str>, account: Option<i64>) -> OwnedTier {
+        OwnedTier {
+            tier: tier(id),
+            site_origin: site.map(str::to_string),
+            account_id: account,
+        }
+    }
+
+    /// `tiers_of_site` 的归属参数在归属测试里恒定，包一层省得每处重复。
+    /// 它内部造一个空内存库当 state（`tiers_of_site` 要读「已手工维护」标记；
+    /// 这些归属测试不关心标记，空库读出来全是 false 即可）。
+    fn tiers_of(tiers: &[OwnedTier], site: &str, account: Option<i64>) -> Vec<TierInfo> {
+        let state = AppState::new(std::sync::Arc::new(
+            crate::database::Database::memory().expect("内存库"),
+        ));
+        tiers_of_site(&state, tiers, site, account, &test_app()).expect("tiers_of_site 不该失败")
+    }
+
+    /// ⭐ **`tiers_of_site` 的 `user_edited` 来自存库标记，不是内容比对。**
+    ///
+    /// 旧实现靠比对 settings_config 与默认值算出「用户改过没有」；现在改为读
+    /// `providers.user_edited`（编辑页置位、恢复默认复位）。这条钉住：分组时
+    /// `user_edited` 如实反映库里标记，而不是原样透传 `None`。
+    #[test]
+    fn grouping_reads_the_user_edited_flag_from_the_database(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("内存库"));
+        let state = AppState::new(db.clone());
+        // 先造两条 provider 行（get_user_edited 读的是 providers 表，不是空表）。
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                    "INSERT INTO providers (id, app_type, name, settings_config) \
+                     VALUES ('t-default','codex','t-default','{}'), ('t-edited','codex','t-edited','{}')",
+                    [],
+                )
+                .expect("插行");
+        }
+        // 库里只给 t-edited 置位；t-default 不置。
+        db.set_user_edited(AppType::Codex.as_str(), "t-edited", true)
+            .expect("置位");
+
+        let tiers = vec![
+            owned("t-default", Some(site), Some(1)),
+            owned("t-edited", Some(site), Some(1)),
+        ];
+        let got = tiers_of_site(&state, &tiers, site, Some(1), &test_app()).expect("分组不该失败");
+        let flags: Vec<_> = got.iter().map(|t| t.user_edited).collect();
+        assert_eq!(
+            flags,
+            vec![Some(false), Some(true)],
+            "user_edited 该读库里标记（t-default 没置位=false，t-edited 置位=true）"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tiers_are_grouped_by_site_origin_not_by_guessing() {
+        let a = "https://bestapi.store";
+        let b = "https://other.dev";
+        let tiers = vec![
+            owned("t-a1", Some(a), Some(1)),
+            owned("t-b1", Some(b), Some(1)),
+            owned("t-a2", Some(a), Some(1)),
+            // 没有 website_url 的历史数据：不归任何站。
+            owned("t-orphan", None, Some(1)),
+        ];
+
+        assert_eq!(
+            tiers_of(&tiers, a, Some(1))
+                .iter()
+                .map(|t| t.provider_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["t-a1", "t-a2"],
+            "同站的档位要按原顺序全带上（顺序 = provision 时的 sort_index，倍率低的在前）"
+        );
+        assert_eq!(tiers_of(&tiers, b, Some(1)).len(), 1);
+
+        // 孤儿档位不能被塞给任何站 —— 塞错了用户会以为在 A 站买的档位属于 B 站。
+        let all: usize = [a, b]
+            .iter()
+            .map(|s| tiers_of(&tiers, s, Some(1)).len())
+            .sum();
+        assert_eq!(all, 3, "4 条里那条没有 website_url 的必须落空");
+    }
+
+    /// ⭐ **同一个站上的两个账号不能看到对方的档位。**
+    ///
+    /// 实测踩到的类：归属原本只判 `website_url`（站点），于是同站每一行都显示该站的
+    /// **全部**档位 —— 用户看到的档位数与他实际拥有的不符，点进去用的还是别人的 sk
+    /// （连账单都算到别人头上）。
+    #[test]
+    fn tiers_are_split_between_two_accounts_on_the_same_site() {
+        let site = "https://bestapi.store";
+        let tiers = vec![
+            owned("t-acct7", Some(site), Some(7)),
+            owned("t-acct9", Some(site), Some(9)),
+            // 升级前生成的：没记账号 ⇒ 只按站点归，两个账号都看得到（见函数文档）。
+            owned("t-legacy", Some(site), None),
+        ];
+
+        let seven: Vec<_> = tiers_of(&tiers, site, Some(7))
+            .iter()
+            .map(|t| t.provider_id.clone())
+            .collect();
+        assert_eq!(
+            seven,
+            vec!["t-acct7", "t-legacy"],
+            "账号 7 只该看到自己的 + 没记归属的旧档位，**不该看到账号 9 的**"
+        );
+
+        let nine: Vec<_> = tiers_of(&tiers, site, Some(9))
+            .iter()
+            .map(|t| t.provider_id.clone())
+            .collect();
+        assert_eq!(nine, vec!["t-acct9", "t-legacy"]);
+
+        // 还没登录的行（没有 account_id）：有主的档位都不是它的。
+        let anon: Vec<_> = tiers_of(&tiers, site, None)
+            .iter()
+            .map(|t| t.provider_id.clone())
+            .collect();
+        assert_eq!(anon, vec!["t-legacy"], "未登录的行不该认领任何有主的档位");
+    }
+
+    #[test]
+    fn site_matching_is_exact_not_prefix() {
+        // 前缀匹配会让 https://api.store 命中 https://api.store.evil.com。
+        let tiers = vec![owned("t1", Some("https://api.store"), Some(1))];
+        assert_eq!(tiers_of(&tiers, "https://api.store", Some(1)).len(), 1);
+        assert!(tiers_of(&tiers, "https://api.sto", Some(1)).is_empty());
+        assert!(tiers_of(&tiers, "https://api.store.evil.com", Some(1)).is_empty());
+    }
+
+    #[test]
+    fn default_site_is_the_placeholder_from_the_requirement() {
+        assert_eq!(DEFAULT_SITE, "790053500.com");
+    }
+
+    /// ⭐ 钉住「默认站在 aff **内置表**里有码」—— 这与它上一版的规则**正好相反**。
+    ///
+    /// 默认站曾是维护者自己的站，那时它**有意不在** aff 表里（服务端拒绝自己邀请自己）。
+    /// 换成 `790053500.com` 之后那条理由不再适用，有码才是对的 —— 但
+    /// [`crate::relay::aff`] 的测试里仍留着「维护者自己的站不该有码」那条，
+    /// 很容易有人按类比把默认站也从表里划掉，而那**不报任何错**，
+    /// 只是每一次「留空点确定」都白丢一笔返利。
+    ///
+    /// ⚠️ **它守的是内置那一层，不是运行时的最终取值**（codex review 纠正）：
+    /// 实际取码走 [`crate::relay::remote_config::resolve_aff_code`] 的两层回落，
+    /// 远端配置命中就用远端的，且**远端给空串 = 撤销、不回落到内置**。
+    /// 所以本条断言不能、也不该保证「线上一定带码」—— 那取决于维护者当天发的配置。
+    #[test]
+    fn the_default_site_has_a_builtin_affiliate_code() {
+        assert!(
+            crate::relay::aff::aff_code_for(&format!("https://{DEFAULT_SITE}")).is_some(),
+            "{DEFAULT_SITE} 是默认站且不是维护者自己的站，必须在 aff 内置表里"
+        );
+    }
+
+    fn verification_report(target: TargetKey, verdict: Verdict) -> VerificationReport {
+        VerificationReport {
+            target,
+            verdict,
+            evidence_level: EvidenceLevel::ProtocolBehavior,
+            facts: Vec::new(),
+            diagnostics: Vec::new(),
+            rules_version: RULES_VERSION,
+            checked_at: 1_786_214_400,
+        }
+    }
+
+    fn reset_state(valid_key: bool) -> (AppState, Arc<ResetVerifier>, String, String, TargetKey) {
+        let site = "https://reset.example";
+        let db = Arc::new(crate::database::Database::memory().expect("init db"));
+        let verifier = Arc::new(ResetVerifier::new());
+        let mut state = AppState::new(db.clone());
+        state.model_verification = Arc::new(ModelVerificationCoordinator::with_verifier(
+            db.clone(),
+            verifier.clone(),
+        ));
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "Reset", "https://reset.example/v1")
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "reset@example.com",
+                    login_identifier: "reset@example.com",
+                },
+                "token",
+                None,
+                None,
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let other_provider_id = provision::provider_id_for(site, Some(7), 2);
+        let settings_config = if valid_key {
+            provision::settings_config_for(
+                &AppType::Codex,
+                "sk-reset",
+                "Reset tier",
+                "https://reset.example/v1",
+                DEFAULT_MODEL,
+            )
+            .expect("codex config")
+        } else {
+            serde_json::json!({"model_provider":"custom"})
+        };
+        let provider = Provider {
+            settings_config,
+            ..seeded_owned(&provider_id, "Reset tier", Some(site), 7)
+        };
+        db.save_provider("codex", &provider).expect("save provider");
+        db.save_provider(
+            "codex",
+            &Provider {
+                settings_config: provision::settings_config_for(
+                    &AppType::Codex,
+                    "sk-other",
+                    "Other tier",
+                    "https://reset.example/v1",
+                    DEFAULT_MODEL,
+                )
+                .expect("other config"),
+                ..seeded_owned(&other_provider_id, "Other tier", Some(site), 7)
+            },
+        )
+        .expect("save other provider");
+        db.set_user_edited("codex", &provider_id, true)
+            .expect("mark edited");
+
+        let running = TargetKey::new(&provider_id, "codex", "gpt-running");
+        for report in [
+            verification_report(
+                TargetKey::new(&provider_id, "codex", "gpt-a"),
+                Verdict::Suspicious,
+            ),
+            verification_report(
+                TargetKey::new(&provider_id, "codex", "gpt-b"),
+                Verdict::Anomaly,
+            ),
+            verification_report(
+                TargetKey::new(&other_provider_id, "codex", "gpt-other"),
+                Verdict::Trusted,
+            ),
+        ] {
+            crate::relay::model_verification::store::upsert_active(&db, &report)
+                .expect("seed verification report");
+        }
+
+        (state, verifier, provider_id, other_provider_id, running)
+    }
+
+    #[tokio::test]
+    async fn reset_tier_config_validation_failure_cancels_run_but_preserves_all_reports() {
+        let (state, verifier, provider_id, other_provider_id, running) = reset_state(false);
+        state
+            .model_verification
+            .start(running.clone())
+            .await
+            .expect("start run");
+
+        let error = reset_tier_config_in_state(&state, &provider_id, AppType::Codex)
+            .expect_err("missing key must reject reset");
+
+        assert!(error.to_string().contains("密钥"));
+        assert_eq!(
+            state
+                .model_verification
+                .list_results(&[provider_id.clone(), other_provider_id.clone()])
+                .expect("list reports")
+                .len(),
+            3
+        );
+        let _ = verifier.complete(
+            &running,
+            verification_report(running.clone(), Verdict::Trusted),
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state
+                .model_verification
+                .list_results(&[provider_id, other_provider_id])
+                .expect("reports after late completion")
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_tier_config_save_failure_cancels_run_but_preserves_all_reports() {
+        let (state, verifier, provider_id, other_provider_id, running) = reset_state(true);
+        state
+            .model_verification
+            .start(running.clone())
+            .await
+            .expect("start run");
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_reset BEFORE UPDATE ON providers
+                     BEGIN SELECT RAISE(FAIL, 'reject reset'); END;",
+            )
+            .expect("install failure trigger");
+
+        let error = reset_tier_config_in_state(&state, &provider_id, AppType::Codex)
+            .expect_err("provider save must fail");
+
+        assert!(matches!(error, AppError::Database(_)));
+        assert_eq!(
+            state
+                .model_verification
+                .list_results(&[provider_id.clone(), other_provider_id.clone()])
+                .expect("list reports")
+                .len(),
+            3
+        );
+        let _ = verifier.complete(
+            &running,
+            verification_report(running.clone(), Verdict::Trusted),
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state
+                .model_verification
+                .list_results(&[provider_id, other_provider_id])
+                .expect("reports after late completion")
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_tier_config_success_clears_only_target_scope_and_rejects_late_completion() {
+        let (state, verifier, provider_id, other_provider_id, running) = reset_state(true);
+        state
+            .model_verification
+            .start(running.clone())
+            .await
+            .expect("start run");
+
+        reset_tier_config_in_state(&state, &provider_id, AppType::Codex).expect("reset succeeds");
+
+        let rows = state
+            .model_verification
+            .list_results(&[provider_id.clone(), other_provider_id.clone()])
+            .expect("list reports");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target.provider_id, other_provider_id);
+        assert!(!state
+            .db
+            .get_user_edited("codex", &provider_id)
+            .expect("edited flag"));
+        let _ = verifier.complete(
+            &running,
+            verification_report(running.clone(), Verdict::Trusted),
+        );
+        tokio::task::yield_now().await;
+        assert!(state
+            .model_verification
+            .list_results(&[provider_id])
+            .expect("target reports")
+            .is_empty());
+    }
+
+    /// ⭐ 恢复默认必须保住**每一个**带目录平台的 `modelCatalog`。
+    ///
+    /// 回归背景：PR #237 给 grok 补目录时只改了 persist 侧的平台名单、漏了 reset 侧
+    /// ——「恢复默认」把 Claude / Gemini / Grok 的模型芯片清空到下次 provision。
+    /// 名单唯源是 [`provision::model_catalog_apps`]，这条测试按平台全量遍历：
+    /// 以后名单加平台，新平台自动被覆盖，不会再出现「persist 改了 reset 没跟」。
+    #[test]
+    fn reset_tier_config_keeps_the_model_catalog_for_every_catalog_app() {
+        for (app_type, model_names) in [
+            (AppType::Claude, vec!["claude-opus-5", "claude-sonnet-5"]),
+            (AppType::Codex, vec!["gpt-5.6-codex", "gpt-5.6-mini"]),
+            (AppType::Gemini, vec!["gemini-3-pro", "gemini-3-flash"]),
+            (AppType::GrokBuild, vec!["grok-4.6", "grok-4.5"]),
+        ] {
+            let models: Vec<String> = model_names.iter().map(|s| s.to_string()).collect();
+            let site = "https://catalog.example";
+            let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+            let state = AppState::new(db.clone());
+            let row_id = with_conn(&state, |conn| {
+                creds::save_site(conn, site, "Catalog", "https://catalog.example/v1")
+            })
+            .expect("save site");
+            with_conn(&state, |conn| {
+                creds::save_credentials(
+                    conn,
+                    row_id,
+                    creds::AccountIdentity {
+                        id: 7,
+                        label: "catalog@example.com",
+                        login_identifier: "catalog@example.com",
+                    },
+                    "token",
+                    None,
+                    None,
+                    creds::SessionEnvironment::default(),
+                )
+            })
+            .expect("save credentials");
+
+            let provider_id = provision::provider_id_for(site, Some(7), 1);
+            let settings = provision::settings_config_with_models(
+                &app_type,
+                "sk-catalog",
+                "Catalog·Pro",
+                "https://catalog.example/v1",
+                &models[0],
+                Some(&models),
+            )
+            .expect("settings with catalog");
+            // 前提：该平台的生成器真把目录写进了 settings（Gemini 只收 gemini-* 家族，
+            // 所以每个平台用自家家族的模型名）。
+            let before = models_from_settings(&settings);
+            assert_eq!(
+                before.len(),
+                models.len(),
+                "{} 的生成器没把目录写进 settings —— 测试前提不成立",
+                app_type.as_str()
+            );
+
+            db.save_provider(
+                app_type.as_str(),
+                &Provider {
+                    settings_config: settings,
+                    ..seeded_owned(&provider_id, "Catalog·Pro", Some(site), 7)
+                },
+            )
+            .expect("save provider");
+
+            reset_tier_config_in_state(&state, &provider_id, app_type.clone())
+                .expect("reset succeeds");
+
+            let after = state
+                .db
+                .get_provider_by_id(&provider_id, app_type.as_str())
+                .expect("read back")
+                .expect("provider 还在")
+                .settings_config;
+            assert_eq!(
+                models_from_settings(&after),
+                before,
+                "{} 恢复默认后 modelCatalog 必须原样保留",
+                app_type.as_str()
+            );
+        }
+    }
+
+    /// ⭐ **默认路径下，删账号不许毁掉「别的平台」正在用的档位** —— 前端那道判据挡不住这一类。
+    ///
+    /// 这是 review 抓出的缺陷现场，复现路径：
+    ///
+    /// 1. `list_relays_impl` 吃 `app_type` ⇒ `RelayRow.tiers` 只含**当前 tab** 的档位；
+    /// 2. 如果删除资格只按当前 tab 的档位判断，claude tab 可能看不到 codex 的当前项；
+    /// 3. 而这个账号在 **codex** 下的档位正是 codex 的当前项 ⇒ 删下去把它清了，
+    ///    `~/.codex/config.toml` 却还指着它。
+    ///
+    /// 所以闸必须在后端、必须扫全部 app。**会红的改法**：把
+    /// `apps_using_this_accounts_tiers` 从只扫 `AppType::all()` 改成只扫某一个 app。
+    #[test]
+    fn removing_an_account_is_refused_while_another_app_still_uses_its_tier() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "BestApi", "https://bestapi.store/v1")
+        })
+        .expect("save site");
+
+        // 登录这一行 —— **必须有 `account_id`**：没有它的行派生不出 provider id、
+        // 名下不可能有档位，守卫对那种行有意不拦（见
+        // `an_untagged_row_is_not_blocked_by_another_accounts_current_tier`）。
+        let row_id = with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "me@example.com",
+                    login_identifier: "me@example.com",
+                },
+                "tok",
+                None,
+                None,
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        // 这个账号在 codex 下的档位，且**它就是 codex 的当前项**。
+        let codex_tier = provision::provider_id_for(site, Some(7), 1);
+        db.save_provider(
+            "codex",
+            &seeded_owned(&codex_tier, "BestApi · Pro", Some(site), 7),
+        )
+        .expect("seed codex tier");
+        db.set_current_provider("codex", &codex_tier)
+            .expect("set codex current");
+
+        // 用户此刻停在 claude tab 上（那边这一行没有当前项）—— 前端会放行，后端必须拦。
+        let err = remove_site_impl(&state, row_id, false, None)
+            .expect_err("⭐ 名下有档位是别的平台的当前项时，删除必须失败");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("codex"),
+            "文案必须点名是哪个平台 —— 用户要去那里切走，实际：{msg}"
+        );
+        assert!(
+            msg.contains("BestApi · Pro"),
+            "文案必须点名是哪个档位，实际：{msg}"
+        );
+
+        // 全有或全无：拦下之后**一条都不能少**，账号行也必须还在。
+        assert!(
+            db.get_provider_by_id(&codex_tier, "codex")
+                .expect("query")
+                .is_some(),
+            "被拦下时那条档位必须完好 —— 半删会留下用户处置不了的孤儿记录"
+        );
+        assert!(
+            with_conn(&state, |conn| creds::get(conn, row_id))
+                .expect("query row")
+                .is_some(),
+            "档位没删掉，账号行也不该删"
+        );
+    }
+
+    /// 反面：没有任何平台在用它时，删除照常进行（连带清掉档位）。
+    ///
+    /// 这条与上一条成对 —— 只有上一条的话，把闸写成「无条件拒绝」也能过。
+    #[test]
+    fn removing_an_account_still_works_when_no_app_uses_its_tiers() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "BestApi", "https://bestapi.store/v1")
+        })
+        .expect("save site");
+
+        let tier = provision::provider_id_for(site, None, 1);
+        db.save_provider("codex", &seeded(&tier, "BestApi · Pro", Some(site)))
+            .expect("seed");
+        // **不设 current** —— 别的 provider 是当前项，或压根没有当前项。
+
+        remove_site_impl(&state, row_id, false, None).expect("没人在用它时删除该成功");
+
+        assert!(
+            db.get_provider_by_id(&tier, "codex")
+                .expect("query")
+                .is_none(),
+            "档位该被连带清掉"
+        );
+        assert!(
+            with_conn(&state, |conn| creds::get(conn, row_id))
+                .expect("query row")
+                .is_none(),
+            "账号行该被删掉"
+        );
+    }
+
+    /// 第三条出路：用户在前端弹窗里看着「Codex 正在用 xxx」按了确认（`force`）⇒
+    /// 连在用的档位一起删干净。
+    ///
+    /// 这条与第一条成对 —— 没有它的话，把闸写成「在用就无条件拒绝（连 force 也拦）」
+    /// 也能过前两条。钉住的语义：
+    ///
+    /// - force 放行后**全有或全无**：档位、账号行都得没了（不留孤儿记录）；
+    /// - 被删的是 codex 的**当前项** —— 这条测试的内存库里**没有官方 seed**
+    ///   （`init_default_official_providers` 只在真应用启动时跑），切官方必然失败
+    ///   ⇒ 它同时钉住降级路径：**安置失败不阻断删除**，current 悬空自愈。
+    ///   （正向「切回官方」那条没法单测 —— `ProviderService::switch` 会写真实
+    ///   live 配置文件，codex/claude 没有测试沙箱；映射由
+    ///   `official_seed_id_maps_text_apps_and_denies_codex_image` 把守。）
+    #[test]
+    fn forced_removal_deletes_even_while_another_app_uses_its_tier() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "BestApi", "https://bestapi.store/v1")
+        })
+        .expect("save site");
+
+        let row_id = with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "me@example.com",
+                    login_identifier: "me@example.com",
+                },
+                "tok",
+                None,
+                None,
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        let codex_tier = provision::provider_id_for(site, Some(7), 1);
+        db.save_provider(
+            "codex",
+            &seeded_owned(&codex_tier, "BestApi · Pro", Some(site), 7),
+        )
+        .expect("seed codex tier");
+        db.set_current_provider("codex", &codex_tier)
+            .expect("set codex current");
+
+        remove_site_impl(&state, row_id, true, None).expect("force 是用户知情后的选择，该放行");
+
+        assert!(
+            db.get_provider_by_id(&codex_tier, "codex")
+                .expect("query")
+                .is_none(),
+            "force 该连当前项档位一起删掉"
+        );
+        assert!(
+            with_conn(&state, |conn| creds::get(conn, row_id))
+                .expect("query row")
+                .is_none(),
+            "账号行该被删掉"
+        );
+    }
+
+    /// ⭐ **还没登录的行（`account_id` 为 `None`）不该被别人的档位拦住**。
+    ///
+    /// 第二路 review 抓出的：`belongs_to_account` 对 `None` 返回 `true`（"不按账号过滤"），
+    /// 那对**删除**方向是对的（同站没记归属的旧档位该跟着清），但守卫方向反过来就成了
+    /// 「把别人正在用的档位算成你的」。
+    ///
+    /// 这种行真实可达：`clear_credentials` 会把 `account_id` 置 `NULL`（站点换了后端
+    /// 协议时走这条），而唯一索引把 `NULL` 视为互不相等 ⇒ 它与已登录的行并存。
+    /// 症状是用户删一个**空行**时被告知「你名下还有档位正在使用中：B 的档位（codex）」，
+    /// 而唯一出路是去 codex 把 B 切走。
+    ///
+    /// 会红的改法：去掉 `apps_using_this_accounts_tiers` 里那个 `account_id.is_some()`。
+    #[test]
+    fn an_untagged_row_is_not_blocked_by_another_accounts_current_tier() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 账号 9 的档位是 codex 的当前项。
+        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        db.save_provider("codex", &seeded_owned(&b_tier, "B 的档位", Some(site), 9))
+            .expect("seed");
+        db.set_current_provider("codex", &b_tier)
+            .expect("set current");
+
+        let state = AppState::new(db.clone());
+
+        assert!(
+            apps_using_this_accounts_tiers(&state, site, None).is_empty(),
+            "⭐ 还没登录的行认不出归属 ⇒ 不该拦。它派生不出 provider id，\
+                 名下本来就不可能有档位，漏拦没有代价；而误拦会让用户删不掉一个空行"
+        );
+
+        // 而删除方向的语义不变：`prune_stale_tiers` 传 `None` 时仍会清同站没记归属的档位。
+        // 这条只是确认上面那个改动没顺手改掉 `belongs_to_account` 本身。
+        let legacy = provision::provider_id_for(site, None, 5);
+        db.save_provider("codex", &seeded(&legacy, "旧数据", Some(site)))
+            .expect("seed legacy");
+        let legacy_provider = db
+            .get_provider_by_id(&legacy, "codex")
+            .expect("query")
+            .expect("在");
+        assert!(
+            belongs_to_account(&legacy_provider, site, None),
+            "删除方向对 `None` 仍是「算是我的」—— 那是旧数据能被清掉的前提"
+        );
+    }
+
+    /// ⭐ **登录态失效之后，那一行仍然带着它的档位、昵称和「已过期」这个状态。**
+    ///
+    /// 修之前 `check_session` 走的是 `clear_credentials`，它把 `account_id` 一起抹掉，
+    /// 于是三件事同时静默出错（都不报任何错）：
+    ///
+    /// 1. `tiers_of_site` 对「行没有 account_id、档位有」判为不属于它
+    ///    ⇒ **返回空 tiers**，界面退化成「没有可用分组 + 获取密钥」；
+    /// 2. `session_expired()` 要求 `account_id.is_some()` ⇒ 变成 `false`
+    ///    ⇒ 界面说「还没登录」，而用户明明登录过；
+    /// 3. `account_label` 被清空 ⇒ 昵称没了。
+    ///
+    /// 而 sk 一把都没失效。用户看到的是「密钥没了」，然后去重建一遍。
+    ///
+    /// 会红的改法：把 `check_session` 里的 `clear_session` 换回 `clear_credentials`。
+    #[test]
+    fn an_expired_session_keeps_its_tiers_label_and_usable_status() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site(conn, site, "BestAPI", "https://bestapi.store")
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "tok",
+                None,
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("save credentials");
+
+        let tier_id = provision::provider_id_for(site, Some(7), 1);
+        let settings_config = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-valid",
+            "Pro池",
+            "https://bestapi.store/v1",
+            "gpt-5.6-sol",
+        )
+        .expect("settings");
+        db.save_provider(
+            "codex",
+            &Provider {
+                settings_config,
+                ..seeded_owned(&tier_id, "Pro池", Some(site), 7)
+            },
+        )
+        .expect("seed tier");
+
+        with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
+
+        let rows = list_relays_impl(&state, AppType::Codex).expect("list relays");
+        let row = rows.iter().find(|r| r.id == row_id).expect("行还在");
+
+        assert!(
+            matches!(row.status, RelayRowStatus::SessionExpiredUsable),
+            "登录过 + 没 token + 没 refresh ⇒ 必须报「登录已过期」，而不是「还没登录」"
+        );
+        assert_eq!(row.account_label, "我的号", "昵称不该跟着会话一起没");
+        assert_eq!(
+            row.tiers.len(),
+            1,
+            "⭐ 分组与 sk 与网页登录态无关，不该从界面消失"
+        );
+        assert_eq!(row.tiers[0].provider_id, tier_id);
+    }
+
+    #[test]
+    fn a_relay_with_a_managed_key_can_query_balance_without_a_session() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        let provider_id = provision::provider_id_for(site, None, 1);
+        let settings = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-test",
+            "Pro池",
+            "https://bestapi.store/v1",
+            "gpt-5.6-sol",
+        )
+        .expect("settings");
+        db.save_provider(
+            "codex",
+            &Provider {
+                id: provider_id,
+                name: "Pro池".into(),
+                settings_config: settings,
+                website_url: Some(site.into()),
+                category: Some("aggregator".into()),
+                created_at: Some(1),
+                sort_index: Some(0),
+                notes: None,
+                meta: None,
+                icon: None,
+                icon_color: None,
+                in_failover_queue: false,
+            },
+        )
+        .expect("provider");
+
+        let row = list_relays_impl(&state, AppType::Codex)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == row_id)
+            .expect("row");
+        assert!(matches!(row.status, RelayRowStatus::NotLoggedIn));
+        assert!(row.can_query_balance);
+        assert!(!row.can_refresh);
+        assert!(
+            relay_refresh_targets(&state, &AppType::Codex)
+                .expect("refresh targets")
+                .iter()
+                .any(|(id, _, can_refresh)| *id == row_id && !can_refresh),
+            "顶部全量刷新也要包含只能用 SK 查余额的账号"
+        );
+    }
+
+    #[test]
+    fn a_refreshable_session_is_not_reported_as_not_logged_in() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "expired-token",
+                Some("refresh-token"),
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+
+        let row = list_relays_impl(&state, AppType::Codex)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == row_id)
+            .expect("row");
+
+        assert!(
+            !matches!(row.status, RelayRowStatus::NotLoggedIn),
+            "refresh token 可自动续期时，后端不能要求用户重新登录"
+        );
+        assert!(row.can_refresh);
+    }
+
+    #[test]
+    fn session_expired_usable_requires_an_extractable_managed_key() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "token",
+                None,
+                Some(1),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+
+        let tier_id = provision::provider_id_for(site, Some(7), 1);
+        db.save_provider(
+            "codex",
+            &Provider {
+                id: tier_id,
+                name: "坏配置".into(),
+                settings_config: serde_json::json!({}),
+                website_url: Some(site.into()),
+                category: Some("aggregator".into()),
+                created_at: Some(1),
+                sort_index: Some(0),
+                notes: None,
+                meta: Some(managed_meta(&AppType::Codex, Some(7), None)),
+                icon: None,
+                icon_color: None,
+                in_failover_queue: false,
+            },
+        )
+        .expect("provider");
+        with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
+
+        let row = list_relays_impl(&state, AppType::Codex)
+            .expect("list")
+            .into_iter()
+            .find(|row| row.id == row_id)
+            .expect("row");
+
+        assert!(matches!(row.status, RelayRowStatus::SessionExpired));
+        assert!(!row.can_query_balance);
+    }
+}

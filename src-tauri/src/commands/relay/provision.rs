@@ -1053,3 +1053,1326 @@ pub(crate) fn prune_stale_tiers(
     }
     Ok(removed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::relay::test_support::*;
+
+    fn provider_with_id(id: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: "t".into(),
+            settings_config: serde_json::json!({}),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    #[test]
+    fn managed_detection_matches_generated_ids_only() {
+        // 正面：provision 生成的 id 必须被认出来。
+        let real = provision::provider_id_for("https://bestapi.store", Some(1), 42);
+        assert!(is_managed(&provider_with_id(&real)));
+
+        // 反面：用户自己加的 provider 不能被当成托管的（否则会被 provision 覆盖）。
+        for id in ["custom-1", "codex-official", "", "LoongPort-1"] {
+            assert!(!is_managed(&provider_with_id(id)), "id: {id}");
+        }
+    }
+
+    #[test]
+    fn provision_merge_removes_only_same_app_unmanaged_duplicate() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let site = "https://relay.example";
+        let key = "sk-same";
+        let settings = provision::settings_config_for(
+            &app_type,
+            key,
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+
+        let duplicate = Provider {
+            id: "cc-switch-duplicate".into(),
+            name: "Imported duplicate".into(),
+            settings_config: settings.clone(),
+            website_url: Some(site.into()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        let different_key = Provider {
+            id: "cc-switch-different-key".into(),
+            name: "Keep different key".into(),
+            settings_config: provision::settings_config_for(
+                &app_type,
+                "sk-other",
+                "Other",
+                "https://relay.example/v1",
+                "model-a",
+            )
+            .expect("codex 配置"),
+            ..duplicate.clone()
+        };
+        let managed_duplicate = Provider {
+            id: provision::provider_id_for(site, Some(1), 42),
+            name: "Managed duplicate".into(),
+            meta: Some(managed_meta(&app_type, Some(1), None)),
+            ..duplicate.clone()
+        };
+        db.save_provider(app_type.as_str(), &duplicate)
+            .expect("写入重复项");
+        db.save_provider(app_type.as_str(), &different_key)
+            .expect("写入不同 key");
+        db.save_provider(app_type.as_str(), &managed_duplicate)
+            .expect("写入托管项");
+
+        let merged =
+            provider_fingerprint::remove_unmanaged_duplicates(&db, &app_type, &managed_duplicate)
+                .expect("收编不该失败");
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "Imported duplicate");
+        assert!(db
+            .get_provider_by_id("cc-switch-duplicate", app_type.as_str())
+            .expect("查询")
+            .is_none());
+        assert!(db
+            .get_provider_by_id("cc-switch-different-key", app_type.as_str())
+            .expect("查询")
+            .is_some());
+        assert!(db
+            .get_provider_by_id(&managed_duplicate.id, app_type.as_str())
+            .expect("查询")
+            .is_some());
+    }
+
+    #[test]
+    fn provision_merge_reports_when_duplicate_was_current() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let settings = provision::settings_config_for(
+            &app_type,
+            "sk-current",
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+        let duplicate = Provider {
+            id: "cc-switch-current".into(),
+            name: "Current imported duplicate".into(),
+            settings_config: settings,
+            website_url: Some("https://relay.example".into()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        db.save_provider(app_type.as_str(), &duplicate)
+            .expect("写入当前项");
+        db.set_current_provider(app_type.as_str(), &duplicate.id)
+            .expect("设为当前");
+
+        let managed = Provider {
+            id: provision::provider_id_for("https://relay.example", Some(1), 99),
+            name: "Managed replacement".into(),
+            meta: Some(managed_meta(&app_type, Some(1), None)),
+            ..duplicate.clone()
+        };
+        db.save_provider(app_type.as_str(), &managed)
+            .expect("写入托管替代项");
+
+        let merged = provider_fingerprint::remove_unmanaged_duplicates(&db, &app_type, &managed)
+            .expect("收编不该失败");
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].was_current);
+        assert_eq!(
+            db.get_current_provider(app_type.as_str())
+                .expect("读取收编后的当前项")
+                .as_deref(),
+            Some(managed.id.as_str())
+        );
+    }
+
+    #[test]
+    fn provision_merge_rolls_back_duplicate_deletion_when_current_transfer_fails() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let settings = provision::settings_config_for(
+            &app_type,
+            "sk-current",
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+        let duplicate = Provider {
+            id: "cc-switch-current".into(),
+            name: "Current imported duplicate".into(),
+            settings_config: settings,
+            website_url: Some("https://relay.example".into()),
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        db.save_provider(app_type.as_str(), &duplicate)
+            .expect("写入当前项");
+        db.set_current_provider(app_type.as_str(), &duplicate.id)
+            .expect("设为当前");
+
+        let managed = Provider {
+            id: provision::provider_id_for("https://relay.example", Some(1), 99),
+            name: "Managed replacement".into(),
+            meta: Some(managed_meta(&app_type, Some(1), None)),
+            ..duplicate.clone()
+        };
+        db.save_provider(app_type.as_str(), &managed)
+            .expect("写入托管替代项");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER fail_managed_current
+                     BEFORE UPDATE OF is_current ON providers
+                     WHEN NEW.id = '{}' AND NEW.is_current = 1
+                     BEGIN
+                       SELECT RAISE(FAIL, 'injected current transfer failure');
+                     END;",
+                managed.id
+            ))
+            .expect("install current-transfer failure");
+        }
+
+        let error = provider_fingerprint::remove_unmanaged_duplicates(&db, &app_type, &managed)
+            .expect_err("current transfer failure must roll back adoption")
+            .to_string();
+
+        assert!(error.contains("injected current transfer failure"));
+        assert!(db
+            .get_provider_by_id(&duplicate.id, app_type.as_str())
+            .expect("read duplicate")
+            .is_some());
+        assert_eq!(
+            db.get_current_provider(app_type.as_str())
+                .expect("read current after rollback")
+                .as_deref(),
+            Some(duplicate.id.as_str())
+        );
+    }
+
+    #[test]
+    fn provision_merge_never_uses_an_unmanaged_provider_as_the_owner() {
+        let db = crate::database::Database::memory().expect("内存库");
+        let app_type = AppType::Codex;
+        let settings = provision::settings_config_for(
+            &app_type,
+            "sk-shared",
+            "Imported",
+            "https://relay.example/v1",
+            "model-a",
+        )
+        .expect("codex 配置");
+        let imported = Provider {
+            id: "cc-switch-imported".into(),
+            name: "Imported".into(),
+            settings_config: settings.clone(),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        let non_managed_candidate = Provider {
+            id: "manual-provider".into(),
+            name: "Manual".into(),
+            settings_config: settings,
+            ..imported.clone()
+        };
+        db.save_provider(app_type.as_str(), &imported)
+            .expect("写入导入项");
+        db.save_provider(app_type.as_str(), &non_managed_candidate)
+            .expect("写入手工项");
+
+        assert!(provider_fingerprint::remove_unmanaged_duplicates(
+            &db,
+            &app_type,
+            &non_managed_candidate,
+        )
+        .expect("不该失败")
+        .is_empty());
+        assert!(db
+            .get_provider_by_id(&imported.id, app_type.as_str())
+            .expect("查询")
+            .is_some());
+    }
+
+    #[test]
+    fn provision_summary_reports_adopted_providers_to_the_frontend() {
+        let summary = ProvisionSummary {
+            tiers: Vec::new(),
+            failures: Vec::new(),
+            keys_created: 0,
+            merged_providers: vec![MergedProviderInfo {
+                name: "Imported duplicate".into(),
+                app_id: AppType::Codex.as_str().to_string(),
+            }],
+        };
+
+        let json = serde_json::to_value(summary).expect("应能序列化");
+        assert_eq!(json["mergedProviders"][0]["name"], "Imported duplicate");
+        assert_eq!(json["mergedProviders"][0]["appId"], "codex");
+    }
+
+    #[tokio::test]
+    async fn newapi_account_mismatch_stops_before_group_or_token_inventory() {
+        use axum::{
+            routing::{delete, get, post},
+            Json, Router,
+        };
+        use serde_json::json;
+
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let account_requests = Arc::clone(&requests);
+        let group_requests = Arc::clone(&requests);
+        let token_requests = Arc::clone(&requests);
+        let create_requests = Arc::clone(&requests);
+        let reveal_requests = Arc::clone(&requests);
+        let delete_requests = Arc::clone(&requests);
+        let app = Router::new()
+            .route(
+                "/api/user/self",
+                get(move || {
+                    let requests = Arc::clone(&account_requests);
+                    async move {
+                        requests.lock().unwrap().push("account".into());
+                        Json(json!({
+                            "success": true,
+                            "data": {
+                                "id": 99,
+                                "username": "other-account",
+                                "display_name": "Other Account",
+                                "email": "other@example.test",
+                                "group": "default",
+                                "quota": 0,
+                                "used_quota": 0
+                            }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/user/self/groups",
+                get(move || {
+                    let requests = Arc::clone(&group_requests);
+                    async move {
+                        requests.lock().unwrap().push("groups".into());
+                        Json(json!({ "success": true, "data": {} }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/",
+                get(move || {
+                    let requests = Arc::clone(&token_requests);
+                    async move {
+                        requests.lock().unwrap().push("tokens".into());
+                        Json(json!({
+                            "success": true,
+                            "data": {
+                                "page": 1,
+                                "page_size": 100,
+                                "total": 0,
+                                "items": []
+                            }
+                        }))
+                    }
+                })
+                .post(move || {
+                    let requests = Arc::clone(&create_requests);
+                    async move {
+                        requests.lock().unwrap().push("create".into());
+                        Json(json!({ "success": true }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/{id}/key",
+                post(move || {
+                    let requests = Arc::clone(&reveal_requests);
+                    async move {
+                        requests.lock().unwrap().push("reveal".into());
+                        Json(json!({ "success": true, "data": { "key": "unexpected" } }))
+                    }
+                }),
+            )
+            .route(
+                "/api/token/{id}",
+                delete(move || {
+                    let requests = Arc::clone(&delete_requests);
+                    async move {
+                        requests.lock().unwrap().push("delete".into());
+                        Json(json!({ "success": true }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind account-mismatch server");
+        let origin = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        let op = creds::Relay {
+            site_origin: origin,
+            ..test_newapi_relay(7)
+        };
+
+        let error = match provision_backend(&op, None).await {
+            Ok(_) => panic!("persisted account mismatch must stop provisioning"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("账号不一致"), "{error}");
+        assert_eq!(
+                requests.lock().unwrap().as_slice(),
+                ["account"],
+                "account preflight must be the only remote request; no group/token inventory or mutation may run"
+            );
+        server.abort();
+    }
+
+    fn test_newapi_group(
+        identity: &str,
+        api_key: &str,
+    ) -> crate::relay::newapi_provision::ReconciledGroup {
+        crate::relay::newapi_provision::ReconciledGroup {
+            identity: crate::relay::newapi::GroupIdentity(identity.into()),
+            name: identity.into(),
+            rate_multiplier: Some(1.25),
+            description: format!("{identity} description"),
+            api_key: api_key.into(),
+            token_was_created: false,
+        }
+    }
+
+    fn newapi_models() -> Vec<String> {
+        provision::normalize_model_names(vec![
+            "gemini-2.5-pro".into(),
+            "claude-haiku-4-5".into(),
+            "gpt-5.4".into(),
+            "claude-sonnet-4-5".into(),
+            "gpt-5.4".into(),
+        ])
+    }
+
+    #[test]
+    fn newapi_model_catalog_requires_at_least_one_normalized_model() {
+        assert!(normalize_newapi_model_catalog(None).is_none());
+        assert!(normalize_newapi_model_catalog(Some(vec!["  ".into(), "\n".into()])).is_none());
+        assert_eq!(
+            normalize_newapi_model_catalog(Some(vec![
+                " gpt-5.4 ".into(),
+                "gemini-2.5-pro".into(),
+                "gpt-5.4".into(),
+            ])),
+            Some(vec!["gemini-2.5-pro".into(), "gpt-5.4".into()])
+        );
+    }
+
+    fn newapi_batch(
+        op: &creds::Relay,
+        groups: &[crate::relay::newapi_provision::ReconciledGroup],
+    ) -> ManagedProvisionBatch {
+        let account_id = op.account_id.expect("test relay has account id");
+        // 与 provision_backend 同一条纪律：keep 槽位跟着分类走（混合目录 = 三个聊天栏）。
+        let mut observed_keep = std::collections::HashSet::new();
+        let candidates = groups
+            .iter()
+            .flat_map(|group| {
+                let models = newapi_models();
+                newapi_keep_insert(
+                    &mut observed_keep,
+                    &op.site_origin,
+                    account_id,
+                    &group.identity,
+                    Some(&models),
+                );
+                newapi_candidates_for_group(
+                    &op.site_origin,
+                    account_id,
+                    group,
+                    &models,
+                    // 测试钉内置表：选型断言不随本机真实远端缓存漂移。
+                    &provision::ModelSelectionTables::builtin(),
+                )
+            })
+            .collect();
+        ManagedProvisionBatch {
+            account_id: Some(account_id),
+            site_declaration: None,
+            candidates,
+            observed_keep,
+            failures: Vec::new(),
+            keys_created: 0,
+        }
+    }
+
+    /// **纯生图分组的 new-api 扇出只出生图候选**（2026-09-05 某 new-api 站点纯生图
+    /// 分组的实测形状：`gpt-image-2 + nano-banana-2`）。
+    ///
+    /// 旧行为把每个分组无条件扇出到 claude/codex/gemini：生图模型被写成聊天模型
+    /// （`ANTHROPIC_MODEL=nano-banana-2`、`GEMINI_MODEL=gpt-image-2`），切过去调用必
+    /// 404 —— 生图栏则永远零档位（「此账号在当前平台没有可用分组」）。
+    #[test]
+    fn newapi_pure_image_group_lands_only_in_the_image_column_and_migrates_legacy_tiers() {
+        let op = test_newapi_relay(7);
+        let group = test_newapi_group("图", "sk-image");
+        let image_models =
+            provision::normalize_model_names(vec!["nano-banana-2".into(), "gpt-image-2".into()]);
+        let account_id = 7;
+
+        let candidates = newapi_candidates_for_group(
+            &op.site_origin,
+            account_id,
+            &group,
+            &image_models,
+            &provision::ModelSelectionTables::builtin(),
+        );
+        assert_eq!(candidates.len(), 1, "纯生图分组不该再扇出到聊天栏");
+        assert_eq!(candidates[0].app_type, AppType::CodexImage);
+        // 默认模型 = gpt-image 家族优先（跨家族并存时表里靠前的家族胜出）。
+        assert_eq!(candidates[0].model, "gpt-image-2");
+
+        // 先按旧行为落三栏（等价于升级前 provision 过的存量），再按新分类
+        // provision 一次：三个聊天栏的旧投影必须被清掉、生图栏出现新档位。
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        persist_provision_batch(&state, &op, newapi_batch(&op, std::slice::from_ref(&group)))
+            .expect("seed legacy three-column projections");
+        let provider_id =
+            provision::newapi_provider_id_for(&op.site_origin, account_id, &group.identity.0);
+        for app_type in newapi_app_types() {
+            assert!(db
+                .get_provider_by_id(&provider_id, app_type.as_str())
+                .expect("read legacy projection")
+                .is_some());
+        }
+
+        let mut keep = std::collections::HashSet::new();
+        newapi_keep_insert(
+            &mut keep,
+            &op.site_origin,
+            account_id,
+            &group.identity,
+            Some(&image_models),
+        );
+        let migrated = ManagedProvisionBatch {
+            account_id: Some(account_id),
+            site_declaration: None,
+            candidates,
+            observed_keep: keep,
+            failures: Vec::new(),
+            keys_created: 0,
+        };
+        let summary =
+            persist_provision_batch(&state, &op, migrated).expect("migrate to image column");
+        assert_eq!(summary.tiers.len(), 1);
+        assert_eq!(summary.tiers[0].app_id, AppType::CodexImage.as_str());
+        for app_type in newapi_app_types() {
+            assert!(
+                db.get_provider_by_id(&provider_id, app_type.as_str())
+                    .expect("read pruned projection")
+                    .is_none(),
+                "{} 的旧投影没被清掉",
+                app_type.as_str()
+            );
+        }
+        // 生图栏新档位：codex 形状（生图 MCP 的读取契约）+ 家族优先选出的模型。
+        let image_provider = db
+            .get_provider_by_id(&provider_id, AppType::CodexImage.as_str())
+            .expect("read image projection")
+            .expect("image projection exists");
+        assert_eq!(
+            provision::extract_model(&image_provider.settings_config).as_deref(),
+            Some("gpt-image-2")
+        );
+        assert_eq!(
+            provision::extract_api_key(&image_provider.settings_config, &AppType::CodexImage)
+                .as_deref(),
+            Some("sk-image")
+        );
+    }
+
+    #[test]
+    fn newapi_group_expands_to_three_app_configs_with_one_provider_id() {
+        let op = test_newapi_relay(7);
+        let group = test_newapi_group(" vip/\u{4e2d}\u{6587} \u{1f680} ", "sk-shared");
+        let batch = newapi_batch(&op, std::slice::from_ref(&group));
+
+        assert_eq!(batch.candidates.len(), 3);
+        assert_eq!(batch.observed_keep.len(), 3);
+        let provider_ids = batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.provider_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(provider_ids.len(), 1);
+        assert_eq!(
+            batch
+                .candidates
+                .iter()
+                .map(|candidate| candidate.app_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "codex", "gemini"]
+        );
+
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let summary = persist_provision_batch(&state, &op, batch).expect("persist projections");
+
+        assert_eq!(summary.tiers.len(), 3);
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            let provider = db
+                .get_provider_by_id(summary.tiers[0].provider_id.as_str(), app_type.as_str())
+                .expect("read provider")
+                .expect("projection exists");
+            assert_eq!(
+                provision::extract_api_key(&provider.settings_config, &app_type).as_deref(),
+                Some("sk-shared")
+            );
+            assert_eq!(
+                provider.website_url.as_deref(),
+                Some(op.site_origin.as_str())
+            );
+            assert_eq!(
+                provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.loongport_account_id),
+                Some(7)
+            );
+        }
+    }
+
+    #[test]
+    fn newapi_refresh_preserves_edited_config_but_recomputes_unedited_defaults() {
+        let op = test_newapi_relay(7);
+        let first_group = test_newapi_group("vip", "sk-first");
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let first = persist_provision_batch(&state, &op, newapi_batch(&op, &[first_group]))
+            .expect("initial provision");
+        let provider_id = first.tiers[0].provider_id.clone();
+
+        let mut edited = db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+            .expect("read edited provider")
+            .expect("edited provider exists");
+        edited.settings_config = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-first",
+            "Custom Name",
+            "https://custom.example/v1",
+            "gpt-custom",
+        )
+        .expect("custom codex config");
+        let mut expected_edited = edited.settings_config.clone();
+        assert!(provision::patch_api_key(
+            &mut expected_edited,
+            &AppType::Codex,
+            "sk-second"
+        ));
+        db.save_provider(AppType::Codex.as_str(), &edited)
+            .expect("save edited provider");
+        db.set_user_edited(AppType::Codex.as_str(), &provider_id, true)
+            .expect("mark edited");
+
+        let mut unedited = db
+            .get_provider_by_id(&provider_id, AppType::Gemini.as_str())
+            .expect("read unedited provider")
+            .expect("unedited provider exists");
+        unedited.settings_config["env"]["GEMINI_MODEL"] =
+            serde_json::Value::String("gemini-stale".into());
+        db.save_provider(AppType::Gemini.as_str(), &unedited)
+            .expect("save stale unedited provider");
+
+        let second_group = test_newapi_group("vip", "sk-second");
+        let second_batch = newapi_batch(&op, &[second_group]);
+        persist_provision_batch(&state, &op, second_batch).expect("refresh provision");
+
+        let edited_after = db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())
+            .expect("read refreshed edited provider")
+            .expect("refreshed edited provider exists");
+        assert_eq!(edited_after.settings_config, expected_edited);
+        let unedited_after = db
+            .get_provider_by_id(&provider_id, AppType::Gemini.as_str())
+            .expect("read refreshed default provider")
+            .expect("refreshed default provider exists");
+        assert_eq!(
+            provision::extract_api_key(&unedited_after.settings_config, &AppType::Gemini)
+                .as_deref(),
+            Some("sk-second")
+        );
+        assert_eq!(
+            unedited_after
+                .settings_config
+                .pointer("/env/GEMINI_MODEL")
+                .and_then(serde_json::Value::as_str),
+            Some("gemini-2.5-pro")
+        );
+    }
+
+    #[test]
+    fn newapi_unclassified_keep_retains_failed_group_and_prunes_only_the_current_account() {
+        let account_seven = test_newapi_relay(7);
+        let account_eight = test_newapi_relay(8);
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+
+        persist_provision_batch(
+            &state,
+            &account_seven,
+            newapi_batch(
+                &account_seven,
+                &[
+                    test_newapi_group("observed", "sk-seven-observed"),
+                    test_newapi_group("removed", "sk-seven-removed"),
+                ],
+            ),
+        )
+        .expect("seed account seven");
+        persist_provision_batch(
+            &state,
+            &account_eight,
+            newapi_batch(
+                &account_eight,
+                &[
+                    test_newapi_group("observed", "sk-eight-observed"),
+                    test_newapi_group("removed", "sk-eight-removed"),
+                ],
+            ),
+        )
+        .expect("seed account eight");
+
+        let observed = crate::relay::newapi::GroupIdentity("observed".into());
+        let retained_id =
+            provision::newapi_provider_id_for(&account_seven.site_origin, 7, &observed.0);
+        let removed_id =
+            provision::newapi_provider_id_for(&account_seven.site_origin, 7, "removed");
+        // 对账没走完（拿到 observed 清单但没拿到 sk）：分类未知，保全四个槽位。
+        let mut failure_keep = std::collections::HashSet::new();
+        newapi_keep_insert(
+            &mut failure_keep,
+            &account_seven.site_origin,
+            7,
+            &observed,
+            None,
+        );
+        let failure_batch = ManagedProvisionBatch {
+            account_id: Some(7),
+            site_declaration: None,
+            candidates: Vec::new(),
+            observed_keep: failure_keep,
+            failures: vec![FailureInfo {
+                group_name: "observed".into(),
+                reason: "reveal: temporary failure".into(),
+            }],
+            keys_created: 0,
+        };
+        let summary = persist_provision_batch(&state, &account_seven, failure_batch)
+            .expect("retained existing providers keep the refresh partial-successful");
+
+        assert!(summary.tiers.is_empty());
+        assert_eq!(summary.failures.len(), 1);
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            assert!(db
+                .get_provider_by_id(&retained_id, app_type.as_str())
+                .expect("read retained provider")
+                .is_some());
+            assert!(db
+                .get_provider_by_id(&removed_id, app_type.as_str())
+                .expect("read removed provider")
+                .is_none());
+
+            let other_account_id =
+                provision::newapi_provider_id_for(&account_eight.site_origin, 8, "removed");
+            assert!(db
+                .get_provider_by_id(&other_account_id, app_type.as_str())
+                .expect("read other account provider")
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn newapi_provider_write_failure_keeps_successful_apps_and_reports_the_failure() {
+        let op = test_newapi_relay(7);
+        let db = Arc::new(crate::database::Database::memory().expect("memory db"));
+        {
+            let conn = db.conn.lock().expect("lock memory db");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_newapi_claude_write
+                     BEFORE INSERT ON providers
+                     WHEN NEW.app_type = 'claude'
+                     BEGIN
+                       SELECT RAISE(FAIL, 'injected claude write failure');
+                     END;",
+            )
+            .expect("install selective write failure");
+        }
+        let state = AppState::new(db.clone());
+
+        let summary = persist_provision_batch(
+            &state,
+            &op,
+            newapi_batch(&op, &[test_newapi_group("partial", "sk-partial")]),
+        )
+        .expect("two successful app projections keep the batch successful");
+
+        assert_eq!(
+            summary
+                .tiers
+                .iter()
+                .map(|tier| tier.app_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex", "gemini"]
+        );
+        assert_eq!(summary.failures.len(), 1);
+        assert_eq!(summary.failures[0].group_name, "partial");
+        assert!(summary.failures[0].reason.contains("claude"));
+        assert!(summary.failures[0]
+            .reason
+            .contains("injected claude write failure"));
+    }
+
+    #[test]
+    fn managed_meta_pins_api_format_for_codex_and_leaves_others_empty() {
+        // codex：不写 apiFormat 会落到 ProxyChat profile —— 那是唯一会 spawn codex
+        // 子进程的分支。
+        assert_eq!(
+            managed_meta(&AppType::Codex, Some(1), None)
+                .api_format
+                .as_deref(),
+            Some("openai_responses")
+        );
+
+        // 其它 CLI：`api_format` **只被 codex_config.rs 消费**，给它们填值不会有人读，
+        // 反而让人以为那里有语义。
+        for app_type in [AppType::Claude, AppType::Gemini] {
+            assert_eq!(
+                managed_meta(&app_type, Some(1), None).api_format,
+                None,
+                "{app_type:?} 不该有 api_format —— 只有 codex 会读它"
+            );
+        }
+    }
+
+    /// ⭐ **A 账号 provision 不能删掉同站 B 账号的档位。**
+    ///
+    /// 这是本轮实测追出来的一类：归属原本只判 `website_url`（站点），而 `keep` 只装
+    /// **这一次** provision（= 一个账号）生成的 id ⇒ A 刷新一次就把 B 的全部档位
+    /// 当成「不再存在」删光。同一个缺陷在 `remove_site_impl`（删一个账号）下更彻底：
+    /// 它传空 `keep`，等于清掉该站所有账号的档位。
+    #[test]
+    fn pruning_one_account_leaves_another_accounts_tiers_on_the_same_site() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 账号 7 的两条：一条这次仍在（keep 里），一条已失效。
+        let a_kept = provision::provider_id_for(site, Some(7), 1);
+        let a_stale = provision::provider_id_for(site, Some(7), 2);
+        // 账号 9 的一条：**这次压根没查它**（不同账号、不同分组集合）。
+        let b_tier = provision::provider_id_for(site, Some(9), 1);
+
+        for p in [
+            seeded_owned(&a_kept, "A·留", Some(site), 7),
+            seeded_owned(&a_stale, "A·废", Some(site), 7),
+            seeded_owned(&b_tier, "B·别动", Some(site), 9),
+        ] {
+            db.save_provider("codex", &p).expect("seed");
+        }
+
+        let state = AppState::new(db.clone());
+        let keep: std::collections::HashSet<(String, String)> =
+            [("codex".to_string(), a_kept.clone())]
+                .into_iter()
+                .collect();
+
+        // 以账号 7 的身份清理。
+        let removed = prune_stale_tiers(&state, site, Some(7), &keep).expect("prune");
+        assert_eq!(removed, 1, "只该删账号 7 那条失效的");
+
+        let ids = db.get_provider_ids("codex").expect("list");
+        assert!(ids.contains(&a_kept), "账号 7 这次生成的要留着");
+        assert!(!ids.contains(&a_stale), "账号 7 失效的那条该删");
+        assert!(
+            ids.contains(&b_tier),
+            "⭐ 账号 9 的档位**必须留着** —— 它不在这次的 keep 里只是因为压根没查它"
+        );
+    }
+
+    /// 这道闸守 `prune_stale_tiers` 的三个判据。
+    ///
+    /// 它是**唯一会删用户数据的 relay 代码路径**，判据放宽一点就会误删用户手工配置的
+    /// provider（不可挽回）；收紧一点则清不掉脏记录（就是用户撞见的「claude 下还有
+    /// codex 分组，点刷新也不消失」）。所以正反两面都要钉住。
+    #[test]
+    fn prune_only_touches_this_sites_managed_tiers() {
+        let site = "https://bestapi.store";
+        let other_site = "https://other.dev";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 这次 provision 生成的（该留）。
+        let kept_id = provision::provider_id_for(site, Some(1), 1);
+        // 同一个站的托管项，但这次没生成（该删 —— 分组已被中转站删掉 / 旧版本写错的）。
+        let stale_id = provision::provider_id_for(site, Some(1), 2);
+        // **别的站**的托管项：这次压根没查它的分组，凭「这次没生成」删它是错的。
+        let other_site_id = provision::provider_id_for(other_site, Some(1), 3);
+
+        for (app, p) in [
+            ("codex", seeded(&kept_id, "留下", Some(site))),
+            ("codex", seeded(&stale_id, "该删", Some(site))),
+            ("codex", seeded(&other_site_id, "别的站", Some(other_site))),
+            // 用户手工加的：id 不是我们生成的形状 ⇒ 一律不碰，哪怕 website_url 是同一个站。
+            ("codex", seeded("my-own-provider", "用户自己的", Some(site))),
+            // 托管项但没有 website_url（历史数据）⇒ 归属不明，不删（宁可漏删不可错删）。
+            (
+                "codex",
+                seeded(
+                    &provision::provider_id_for(site, Some(1), 9),
+                    "无归属",
+                    None,
+                ),
+            ),
+            // **另一个 app_type 下的脏记录** —— 正是用户撞见的那种（openai 分组被
+            // 旧代码写进了 claude 下）。必须也被清掉，所以不能只扫参数指定的那个 app。
+            ("claude", seeded(&stale_id, "串台到 claude", Some(site))),
+        ] {
+            db.save_provider(app, &p).expect("seed");
+        }
+
+        let state = AppState::new(db.clone());
+        // 这次只在 codex 下生成了 kept_id。
+        let keep: std::collections::HashSet<(String, String)> =
+            [("codex".to_string(), kept_id.clone())]
+                .into_iter()
+                .collect();
+
+        let removed = prune_stale_tiers(&state, site, Some(1), &keep).expect("prune");
+        assert_eq!(removed, 2, "该删的是 codex 与 claude 下那两条 stale");
+
+        let codex_ids = db.get_provider_ids("codex").expect("list codex");
+        assert!(codex_ids.contains(&kept_id), "这次生成的必须留着");
+        assert!(!codex_ids.contains(&stale_id), "同站的过期档位必须删掉");
+        assert!(
+            codex_ids.contains(&other_site_id),
+            "别的站的档位不能删 —— 这次没查它的分组"
+        );
+        assert!(
+            codex_ids.contains("my-own-provider"),
+            "用户手工配的 provider 绝不能删"
+        );
+        assert!(
+            codex_ids.contains(&provision::provider_id_for(site, Some(1), 9)),
+            "没有 website_url 的托管项归属不明，不该删"
+        );
+
+        let claude_ids = db.get_provider_ids("claude").expect("list claude");
+        assert!(
+            !claude_ids.contains(&stale_id),
+            "串到别的 app_type 下的脏记录也要清 —— 只扫一个 app 就漏了它"
+        );
+    }
+
+    /// ⭐ 用户实测那个 bug 的**精确复现**：同一个 id 在一个 app 下合法、在另一个下是脏的。
+    ///
+    /// ## 为什么上面那条测试放过了它
+    ///
+    /// 那条构造的串台记录在**两个 app 下都该删**（`keep` 里压根没有它）。
+    /// 而真实情形是：`pro池` 这个分组的 platform 是 openai ⇒ 它在 **codex 下合法**，
+    /// 但旧版本的 bug 把它也写进了 **claude** ⇒ claude 下那条是脏的。
+    ///
+    /// 而 `provider_id = sha256(site_origin + group_id)`，**不含 app_type** ⇒
+    /// 两条记录的 id **完全相同**（实测 `loongport-8c669ca0b007e7ea`）。
+    /// 于是「keep 只放 id」时：那个 id 因为 codex 下合法而进了 keep，
+    /// claude 下那条脏记录就被当成「该保留」⇒ **点多少次刷新都不消失**。
+    ///
+    /// 这正是用户反复报的那个现象。判据必须是 **(app_type, id) 组合**。
+    #[test]
+    fn a_group_valid_in_one_app_does_not_protect_its_twin_in_another_app() {
+        let site = "https://790053500.com";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 同一个分组（group_id = 1）⇒ 两个 app 下**同一个 id**。
+        let shared_id = provision::provider_id_for(site, Some(1), 1);
+        db.save_provider("codex", &seeded(&shared_id, "pro池", Some(site)))
+            .expect("seed codex");
+        db.save_provider("claude", &seeded(&shared_id, "pro池", Some(site)))
+            .expect("seed claude");
+
+        let state = AppState::new(db.clone());
+        // 这次 provision 只把它落到 codex（因为它的 platform 是 openai）。
+        let keep: std::collections::HashSet<(String, String)> =
+            [("codex".to_string(), shared_id.clone())]
+                .into_iter()
+                .collect();
+
+        let removed = prune_stale_tiers(&state, site, Some(1), &keep).expect("prune");
+
+        assert_eq!(removed, 1, "claude 下那条脏记录必须被删掉");
+        assert!(
+            db.get_provider_ids("codex")
+                .expect("codex")
+                .contains(&shared_id),
+            "codex 下那条是这次生成的，必须留着"
+        );
+        assert!(
+            !db.get_provider_ids("claude")
+                .expect("claude")
+                .contains(&shared_id),
+            "claude 下那条必须被删 —— 它与 codex 下那条 id 相同，\
+                 但『在 codex 下合法』不该保护它"
+        );
+    }
+
+    /// 当前项也删。
+    ///
+    /// `ProviderService::delete` 拒绝删当前项（防用户误删正在用的配置），但走到 prune
+    /// 这一步说明**服务端已经没有这个分组了**，它的 sk 是死的 —— 留着当「当前项」只会
+    /// 让 CLI 拿失效密钥去发请求。用户重新选一个可用的即可。
+    #[test]
+    fn prune_deletes_the_current_tier_too() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let stale_id = provision::provider_id_for(site, Some(1), 7);
+
+        db.save_provider("codex", &seeded(&stale_id, "过期的当前项", Some(site)))
+            .expect("seed");
+        db.set_current_provider("codex", &stale_id)
+            .expect("set current");
+
+        let state = AppState::new(db.clone());
+        let removed = prune_stale_tiers(&state, site, Some(1), &std::collections::HashSet::new())
+            .expect("prune");
+
+        assert_eq!(removed, 1, "当前项也该被删掉");
+        assert!(
+            db.get_provider_by_id(&stale_id, "codex")
+                .expect("query")
+                .is_none(),
+            "过期的当前项必须真的从库里消失"
+        );
+    }
+
+    /// ⭐ **命令层必须真的调 `refresh_live_for_current_tiers`** —— 两处都不能漏。
+    ///
+    /// ## 为什么这条测试读源码而不是调函数
+    ///
+    /// provision 入口仍吃 `&tauri::AppHandle`；reset 的数据库与协调器路径已经下沉到
+    /// `reset_tier_config_in_state` 并由真实行为测试覆盖，但“当前项刷新 live 文件”会触碰
+    /// 用户配置，单元测试不能安全执行。第二路 review 实测证明了这条接线盲区的代价：
+    /// 把那两处调用注释掉，2578 条测试**全绿**——
+    /// 那条集成测试（`loongport_codex_live.rs`）自己调服务层，所以它测的是服务层，
+    /// 不是「命令层有没有调服务层」。
+    ///
+    /// 源码断言是这里唯一能把那一步钉住的手段（与仓里 `vendorSwitchGuardContract`
+    /// 那条同一个理由与形态）。它守的不是实现细节，而是**这条链路还接着吗** ——
+    /// 断了的症状是静默的：界面提示刷新成功，而 CLI 一直用旧密钥。
+    #[test]
+    fn refresh_live_for_current_tiers_is_wired_into_both_commands() {
+        // 两条路各在各的领域模块里（provision 管线 / 行维护），各扫各的文件。
+        let src = include_str!("provision.rs");
+
+        // 取 `refresh_relay_provision` 到 `prune_stale_tiers` 调用之间那段（provision 那条路）。
+        let provision = {
+            let start = src
+                .find("async fn refresh_relay_provision")
+                .expect("refresh_relay_provision 还在吗");
+            let end = src[start..]
+                .find("let removed = prune_stale_tiers")
+                .expect("provision 末尾那段清理还在吗");
+            &src[start..start + end]
+        };
+        assert!(
+            provision.contains("refresh_live_for_current_tiers(state, &refresh_live)"),
+            "⭐ provision 链路不再刷新当前档位的 live config —— \
+                 sk 被撤销重建后，CLI 会一直用旧密钥，而用户点不动那个档位（UI 认为它已是当前项）"
+        );
+
+        // 取真正执行重置的 state helper 那段（在 rows.rs）。
+        let rows_src = include_str!("rows.rs");
+        let reset = {
+            let start = rows_src
+                .find("fn reset_tier_config_in_state")
+                .expect("reset_tier_config_in_state 还在吗");
+            let end = rows_src[start..]
+                .find("\n/// 保存中转站行的手工顺序")
+                .expect("reset 之后那个命令还在吗");
+            &rows_src[start..start + end]
+        };
+        assert!(
+            reset.contains("refresh_live_for_current_tiers("),
+            "⭐ `reset_tier_config_impl` 不再刷新 live config —— \
+                 那会让「恢复默认配置」这个按钮对当前项**整体无效**（改坏的配置就在 live 文件里）"
+        );
+    }
+
+    /// 闸的归属判据必须与 `prune_stale_tiers` 是**同一份** —— 否则守卫与删除各认一套：
+    /// 守卫说「这条不是你的、不拦」，删除说「这条是你的、删了」⇒ 恰好绕过守卫。
+    ///
+    /// 这条钉的是「别人的当前项不该拦住我」这一半（宽松方向的误判）。
+    #[test]
+    fn the_guard_ignores_another_accounts_current_tier_on_the_same_site() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 账号 9 的档位是 codex 的当前项。
+        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        db.save_provider("codex", &seeded_owned(&b_tier, "B 的档位", Some(site), 9))
+            .expect("seed");
+        db.set_current_provider("codex", &b_tier)
+            .expect("set current");
+
+        let state = AppState::new(db.clone());
+
+        // 以账号 7 的身份问「我名下有在用的吗」—— 答案必须是「没有」。
+        assert!(
+            apps_using_this_accounts_tiers(&state, site, Some(7)).is_empty(),
+            "同站另一个账号的当前项不该拦住我删自己的账号"
+        );
+        // 而账号 9 自己问，必须撞上。
+        assert_eq!(
+            apps_using_this_accounts_tiers(&state, site, Some(9)).len(),
+            1,
+            "账号 9 名下那条正是当前项，必须被认出来"
+        );
+    }
+
+    /// ⭐ **还没登录的 relay 行，不能把同站别人账号的档位记到自己头上。**
+    ///
+    /// Task 3 review 抓出的：把 `relay_balance_inputs` 的内联判据收敛到
+    /// `belongs_to_account` 时，`(relay.account_id, 档位账号)` 的 `(None, Some)` 那格
+    /// 从「不认」翻成了「认」—— 未登录行会收走别人档位的 sk、对账会把别人的成本
+    /// 算进这一行。现在余额 / 对账走严格版 [`belongs_to_relay`]（还原原内联语义
+    /// `(None, Some(_)) => false`），清理 / 守卫路径仍走宽松版 [`belongs_to_account`]。
+    ///
+    /// 会红的改法：`relay_balance_inputs` 改回 `belongs_to_account`。
+    #[test]
+    fn an_unlogged_relay_row_is_not_attributed_another_accounts_tier() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+
+        // 账号 9 的档位，带真实 sk（否则「没收走」的断言没有判别力）。
+        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        let mut b_provider = seeded_owned(&b_tier, "B 的档位", Some(site), 9);
+        b_provider.settings_config = serde_json::json!({ "auth": { "OPENAI_API_KEY": "sk-b" } });
+        db.save_provider("codex", &b_provider).expect("seed B");
+
+        // 同站一条没记账号的旧档位（升级前生成），也没有 sk —— 只用于钉住
+        // `(None, None) => true` 这格没被顺手改掉。
+        let legacy = provision::provider_id_for(site, None, 5);
+        db.save_provider("codex", &seeded(&legacy, "旧数据", Some(site)))
+            .expect("seed legacy");
+
+        let state = AppState::new(db.clone());
+        let mut unlogged = purchase_capability_relay(creds::BackendKind::Sub2Api);
+        unlogged.site_origin = site.to_string();
+        unlogged.account_id = None;
+
+        let (_, keys) = relay_balance_inputs(&state, &unlogged);
+        assert!(
+            keys.is_empty(),
+            "⭐ 未登录的行认不出归属 ⇒ 同站别人账号的档位（哪怕有 sk）不该被收走：{keys:?}"
+        );
+
+        // 对照组：账号 9 自己的行必须能拿到那把 sk —— 证明上面不是「本来就收不到」。
+        let mut owner_row = unlogged.clone();
+        owner_row.account_id = Some(9);
+        let (_, keys) = relay_balance_inputs(&state, &owner_row);
+        assert_eq!(
+            keys,
+            vec!["sk-b".to_string()],
+            "档位自己的账号必须收得到 sk"
+        );
+
+        // 两个判据函数在关键那格的分歧是**有意的**，钉住防止将来被「顺手统一」：
+        // 删除方向（belongs_to_account）对 None 宽松（旧数据要能清），
+        // 归属方向（belongs_to_relay）对 None 严格（别人的不能认领）。
+        let b_in_db = db
+            .get_provider_by_id(&b_tier, "codex")
+            .expect("query")
+            .expect("在");
+        assert!(
+            belongs_to_account(&b_in_db, site, None),
+            "删除方向对 `None` 仍宽松 —— 别改"
+        );
+        assert!(
+            !belongs_to_relay(&b_in_db, site, None),
+            "归属方向对 `(None, Some)` 必须严格 —— 别人的档位不能记到未登录行头上"
+        );
+        let legacy_in_db = db
+            .get_provider_by_id(&legacy, "codex")
+            .expect("query")
+            .expect("在");
+        assert!(
+            belongs_to_relay(&legacy_in_db, site, None),
+            "同站没记归属的旧档位仍是「可能是我的」（(None, None) => true）"
+        );
+    }
+
+    /// ⭐ **倍率必须活过 provision → 库 → `listRelays` 这一整条**。
+    ///
+    /// 它是这次改动的核心：倍率从「每次渲染现拉」改成「provision 写一次、之后只读本地」。
+    /// 链路上任何一环断掉，症状都是**界面永远显示「倍率未知」**，而没有报错 ——
+    /// 只有这条端到端的断言守得住。
+    ///
+    /// 会红的改法：`persist_provision_batch` 里不写 `set_tier_rate_multiplier`，
+    /// 或 `list_tiers_impl` 把 `rate_multiplier` 改回写死 `None`。
+    #[test]
+    fn a_provisioned_rate_survives_into_list_relays() {
+        let site = "https://bestapi.store";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let row_id =
+            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "tok",
+                None,
+                Some(i64::MAX),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+        let op = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load")
+            .expect("exists");
+
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let batch = ManagedProvisionBatch {
+            account_id: Some(7),
+            site_declaration: None,
+            candidates: vec![ManagedProvisionCandidate {
+                provider_id: provider_id.clone(),
+                app_type: AppType::Codex,
+                group_id: "1".into(),
+                group_name: "Pro池".into(),
+                rate_multiplier: Some(0.15),
+                api_key: "sk-test".into(),
+                model: "gpt-5.6-sol".into(),
+                models: None,
+                roles: None,
+                allow_image_generation: Some(false),
+                api_base_url: site.into(),
+            }],
+            observed_keep: Default::default(),
+            failures: Vec::new(),
+            keys_created: 0,
+        };
+        persist_provision_batch(&state, &op, batch).expect("persist");
+
+        let rows = list_relays_impl(&state, AppType::Codex).expect("list relays");
+        let tier = rows
+            .iter()
+            .find(|r| r.id == row_id)
+            .expect("行在")
+            .tiers
+            .first()
+            .expect("档位在");
+        assert_eq!(
+            tier.rate_multiplier,
+            Some(0.15),
+            "⭐ 倍率必须从本地库读回来 —— 它不再靠任何网络请求补齐"
+        );
+    }
+
+    fn pricing_timestamp_state(initial: Option<i64>) -> (AppState, i64) {
+        let db = Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+        let relay_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                "https://pricing.example",
+                "Pricing",
+                "https://pricing.example/v1",
+                discovery::BackendKind::Sub2Api,
+            )
+        })
+        .unwrap();
+        if let Some(initial) = initial {
+            with_conn(&state, |conn| {
+                creds::mark_pricing_synced(conn, relay_id, initial)
+            })
+            .unwrap();
+        }
+        (state, relay_id)
+    }
+
+    #[test]
+    fn successful_full_refresh_marks_pricing_fresh() {
+        let (state, relay_id) = pricing_timestamp_state(None);
+
+        mark_pricing_after_success(&state, relay_id, 456, Ok(())).unwrap();
+
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(relay.pricing_synced_at, Some(456));
+    }
+
+    #[test]
+    fn failed_full_refresh_keeps_the_previous_pricing_time() {
+        let (state, relay_id) = pricing_timestamp_state(Some(123));
+
+        let result: Result<(), AppError> = mark_pricing_after_success(
+            &state,
+            relay_id,
+            456,
+            Err(AppError::Message("expected failure".into())),
+        );
+
+        assert!(result.is_err());
+        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(relay.pricing_synced_at, Some(123));
+    }
+}

@@ -164,3 +164,90 @@ pub(crate) fn backup_codex_auth(auth_path: &std::path::Path) -> Result<Option<St
     crate::config::copy_file(auth_path, &dest)?;
     Ok(Some(dest.to_string_lossy().to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 备份是「删 auth.json」之前的唯一后路，所以它必须真的把内容拷出来。
+    ///
+    /// ⚠️ **测试绝不能碰真实的 `~/.codex/auth.json`** —— 那里面是用户的 OAuth
+    /// refresh token，跑一次测试把开发者自己的 ChatGPT 登录搞掉是不可接受的副作用
+    /// （`chatgpt_app.rs:349` 那条注释钉的是同一件事）。所以这里不调
+    /// `get_codex_auth_path()`，而是自己造一个临时文件喂给 `backup_codex_auth`，
+    /// 并用 `CC_SWITCH_TEST_HOME` 把备份目标也关进临时目录。
+    #[test]
+    #[serial_test::serial]
+    fn backup_copies_auth_json_before_it_gets_deleted() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+
+        let auth_path = temp.path().join("auth.json");
+        let payload = r#"{"tokens":{"refresh_token":"secret"}}"#;
+        std::fs::write(&auth_path, payload).expect("write fake auth.json");
+
+        let backup = backup_codex_auth(&auth_path)
+            .expect("备份不该失败")
+            .expect("有源文件时必须返回备份路径");
+
+        let backup_path = std::path::Path::new(&backup);
+        assert_eq!(
+            std::fs::read_to_string(backup_path).expect("read backup"),
+            payload,
+            "备份内容必须与原文件逐字节一致 —— 它是用户唯一的还原来源"
+        );
+        assert!(
+            auth_path.exists(),
+            "备份是**拷贝**不是移动：这一步失败时调用方要能原地中止，源文件必须还在"
+        );
+        assert!(
+            backup_path.starts_with(temp.path()),
+            "备份必须落在 CC_SWITCH_TEST_HOME 下，绝不能写到真实的 ~/.cc-switch"
+        );
+        let name = backup_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        assert!(
+            name.starts_with("codex-auth-") && name.ends_with(".json"),
+            "文件名要能让人一眼看出这是什么、什么时候备的，实际是 {name}"
+        );
+
+        match original_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+    }
+
+    /// 没有 `auth.json` 是正常状态（从没登录过 ChatGPT），**不是错误**。
+    ///
+    /// 判成错误的后果：整条「切回官方登录」在这类用户身上直接失败，
+    /// 而他们恰恰是最该能用它的人（想清掉 LoongPort 写的路由、自己去登录）。
+    #[test]
+    #[serial_test::serial]
+    fn missing_auth_json_is_not_an_error() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+
+        let absent = temp.path().join("auth.json");
+        assert!(!absent.exists(), "前提：这个文件本来就不存在");
+
+        assert!(
+            backup_codex_auth(&absent)
+                .expect("不存在不该报错")
+                .is_none(),
+            "没有源文件时返回 None（表示「没什么可备份」），而不是 Err"
+        );
+        assert!(
+            !temp.path().join(".loongport").join("backups").exists(),
+            "没东西要备份时不该顺手建出一个空的 backups 目录"
+        );
+
+        match original_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+    }
+}

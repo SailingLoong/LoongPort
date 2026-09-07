@@ -113,3 +113,117 @@ pub(crate) async fn relay_balance_impl<R: tauri::Runtime>(
 
     Ok(balance::row_balance_result(usage, true))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::relay::test_support::*;
+
+    fn profile_router(balance: serde_json::Value) -> axum::Router {
+        use axum::{routing::get, Json, Router};
+        Router::new().route(
+            "/api/v1/user/profile",
+            get(move || async move { Json(balance) }),
+        )
+    }
+
+    #[tokio::test]
+    async fn relay_balance_writes_one_snapshot_on_successful_resolve() {
+        let (origin, server) = spawn_balance_server(profile_router(serde_json::json!({
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": 7,
+                "username": "Sub User",
+                "email": "sub@example.com",
+                "balance": 12.5,
+                "frozen_balance": 0.0
+            }
+        })))
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let result = relay_balance_impl(app.handle(), relay_id)
+            .await
+            .expect("成功解析必须 Ok");
+
+        assert!(result.usage.success, "{:?}", result.usage.error);
+        let state = app.state::<AppState>();
+        let rows = state
+            .db
+            .list_balance_snapshots(relay_id, None)
+            .expect("读快照");
+        assert_eq!(rows.len(), 1, "成功路径恰好落一条快照");
+        assert_eq!(rows[0].balance_usd, 12.5);
+        assert_eq!(rows[0].source, "balance_query");
+        assert_eq!(rows[0].relay_id, relay_id);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_balance_writes_no_snapshot_when_resolve_fails() {
+        use axum::{http::StatusCode, routing::get, Router};
+        let router = Router::new().route(
+            "/api/v1/user/profile",
+            get(|| async { StatusCode::UNAUTHORIZED }),
+        );
+        let (origin, server) = spawn_balance_server(router).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let result = relay_balance_impl(app.handle(), relay_id)
+            .await
+            .expect("失败路回 success:false，仍是 Ok");
+
+        assert!(!result.usage.success);
+        let state = app.state::<AppState>();
+        assert_eq!(
+            state
+                .db
+                .list_balance_snapshots(relay_id, None)
+                .expect("读快照")
+                .len(),
+            0,
+            "三路全败不能落快照"
+        );
+        server.abort();
+    }
+
+    /// ⭐ 快照写入失败绝不能拖垮余额显示（对账是旁路能力，plan §三.2）。
+    #[tokio::test]
+    async fn relay_balance_returns_balance_even_when_snapshot_insert_fails() {
+        let (origin, server) = spawn_balance_server(profile_router(serde_json::json!({
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": 7,
+                "username": "Sub User",
+                "email": "sub@example.com",
+                "balance": 9.9,
+                "frozen_balance": 0.0
+            }
+        })))
+        .await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+        {
+            let state = app.state::<AppState>();
+            let conn = state.db.conn.lock().expect("lock memory database");
+            conn.execute("DROP TABLE relay_balance_snapshots", [])
+                .expect("删表制造写入失败");
+        }
+
+        let result = relay_balance_impl(app.handle(), relay_id)
+            .await
+            .expect("快照写入失败时余额命令仍必须 Ok");
+        assert!(result.usage.success);
+        assert_eq!(
+            result
+                .usage
+                .data
+                .as_ref()
+                .and_then(|items| items.first())
+                .and_then(|item| item.remaining),
+            Some(9.9)
+        );
+        server.abort();
+    }
+}
