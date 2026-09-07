@@ -286,7 +286,7 @@ fn runtime_log_level_allows(level: log::Level, max_level: log::LevelFilter) -> b
 }
 
 #[cfg(feature = "gui")]
-/// 统一处理 ccswitch:// 深链接 URL
+/// 统一处理 loongport:// 深链接 URL
 ///
 /// - 解析 URL
 /// - 向前端发射 `deeplink-import` / `deeplink-error` 事件

@@ -166,7 +166,7 @@ function buildPasswordPreservationKey(values: {
   return JSON.stringify({
     baseUrl: values.baseUrl ?? "",
     username: values.username ?? "",
-    remoteRoot: values.remoteRoot ?? "cc-switch-sync",
+    remoteRoot: values.remoteRoot ?? "loongport-sync",
     profile: values.profile ?? "default",
   });
 }
@@ -267,7 +267,7 @@ export function WebdavSyncSection({
     baseUrl: config?.baseUrl ?? "",
     username: config?.username ?? "",
     password: config?.password ?? "",
-    remoteRoot: config?.remoteRoot ?? "cc-switch-sync",
+    remoteRoot: config?.remoteRoot ?? "loongport-sync",
     profile: config?.profile ?? "default",
     autoSync: config?.autoSync ?? false,
   }));
@@ -284,7 +284,7 @@ export function WebdavSyncSection({
   );
   const [s3Endpoint, setS3Endpoint] = useState(s3Config?.endpoint ?? "");
   const [s3RemoteRoot, setS3RemoteRoot] = useState(
-    s3Config?.remoteRoot ?? "cc-switch-sync",
+    s3Config?.remoteRoot ?? "loongport-sync",
   );
   const [s3Profile, setS3Profile] = useState(s3Config?.profile ?? "default");
   const [s3AutoSync, setS3AutoSync] = useState(s3Config?.autoSync ?? false);
@@ -340,7 +340,7 @@ export function WebdavSyncSection({
     setForm(() => {
       const nextBaseUrl = config.baseUrl ?? "";
       const nextUsername = config.username ?? "";
-      const nextRemoteRoot = config.remoteRoot ?? "cc-switch-sync";
+      const nextRemoteRoot = config.remoteRoot ?? "loongport-sync";
       const nextProfile = config.profile ?? "default";
       const nextKey = buildPasswordPreservationKey({
         baseUrl: nextBaseUrl,

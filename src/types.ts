@@ -21,7 +21,7 @@ export interface Provider {
   notes?: string;
   // 新增：是否为商业合作伙伴
   isPartner?: boolean;
-  // 可选：供应商元数据（仅存于 ~/.cc-switch/config.json，不写入 live 配置）
+  // 可选：供应商元数据（仅存于本地数据目录，不写入 live 配置）
   meta?: ProviderMeta;
   // 图标配置
   icon?: string; // 图标名称（如 "openai", "anthropic"）
@@ -269,7 +269,7 @@ export interface ProviderMeta {
 export type SkillSyncMethod = "auto" | "symlink" | "copy";
 
 // Skill 存储位置
-export type SkillStorageLocation = "cc_switch" | "unified";
+export type SkillStorageLocation = "loongport" | "unified";
 
 // Claude API 格式类型
 // - "anthropic": 原生 Anthropic Messages API 格式，直接透传
@@ -379,7 +379,7 @@ export interface RemoteSnapshotInfo {
 }
 
 // 应用设置类型（用于设置对话框与 Tauri API）
-// 存储在本地 ~/.cc-switch/settings.json，不随数据库同步
+// 存储在本地 ~/.loongport/settings.json，不随数据库同步
 export interface Settings {
   // ===== 设备级 UI 设置 =====
   // 是否在系统托盘（macOS 菜单栏）显示图标
@@ -414,7 +414,7 @@ export interface Settings {
   enableAnonymousStats?: boolean;
   /** 用户看过那条统计告知了没。`undefined` = 还没看过 ⇒ 弹一次。 */
   statsNoticeConfirmed?: boolean;
-  /** 首启「是否一键导入 cc-switch」问过没。`undefined` = 还没问过 ⇒ 第一次打开时弹一次。 */
+  /** 首启「是否一键导入 cc-switch」问过没。`undefined` = 还没问过 ⇒ 第一次打开时弹一次。（导入来源就是 cc-switch，此处指名是事实性引用） */
   ccSwitchImportPrompted?: boolean;
   /** 「点 Star 领注册礼」领过没。`undefined` = 还没领 ⇒ 活动在时红点常亮。 */
   starRewardClaimed?: boolean;
@@ -489,7 +489,7 @@ export interface Settings {
   // ===== Skill 同步设置 =====
   // Skill 同步方式：auto（默认，优先 symlink）、symlink、copy
   skillSyncMethod?: SkillSyncMethod;
-  // Skill 存储位置：cc_switch（默认）或 unified（~/.agents/skills/）
+  // Skill 存储位置：loongport（默认，~/.loongport/skills/）或 unified（~/.agents/skills/）
   skillStorageLocation?: SkillStorageLocation;
 
   // ===== WebDAV v2 同步设置 =====

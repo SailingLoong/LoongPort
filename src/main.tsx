@@ -54,7 +54,7 @@ interface ConfigLoadErrorPayload {
 async function handleConfigLoadError(
   payload: ConfigLoadErrorPayload | null,
 ): Promise<void> {
-  const path = payload?.path ?? "~/.cc-switch/config.json";
+  const path = payload?.path ?? "~/.loongport/config.json";
   const detail = payload?.error ?? "Unknown error";
 
   await message(
@@ -94,6 +94,22 @@ void listen(MODELS_DEV_PRICING_UPDATED_EVENT, () => {
   reportFrontendError("models_dev_pricing_updated_listener", e);
 });
 
+// 主题偏好键改名（cc-switch-theme → loongport-theme）的一次性迁移：
+// 读旧写新，老用户的明暗偏好不丢。ThemeProvider 挂载前执行。
+try {
+  if (
+    localStorage.getItem("loongport-theme") === null &&
+    localStorage.getItem("cc-switch-theme") !== null
+  ) {
+    localStorage.setItem(
+      "loongport-theme",
+      localStorage.getItem("cc-switch-theme") as string,
+    );
+  }
+} catch {
+  // localStorage 不可用（极端环境）时按全新用户处理
+}
+
 async function bootstrap() {
   // 启动早期主动查询后端初始化错误，避免事件竞态
   try {
@@ -105,7 +121,7 @@ async function bootstrap() {
       ReactDOM.createRoot(document.getElementById("root")!).render(
         <React.StrictMode>
           <FrontendErrorBoundary>
-            <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
+            <ThemeProvider defaultTheme="system" storageKey="loongport-theme">
               <DatabaseUpgrade payload={initError} />
               <Toaster />
             </ThemeProvider>
@@ -130,7 +146,7 @@ async function bootstrap() {
     <React.StrictMode>
       <FrontendErrorBoundary>
         <QueryClientProvider client={queryClient}>
-          <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
+          <ThemeProvider defaultTheme="system" storageKey="loongport-theme">
             <UpdateProvider>
               <App />
               <Toaster />

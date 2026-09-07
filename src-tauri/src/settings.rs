@@ -116,7 +116,7 @@ pub struct WebDavSyncStatus {
 }
 
 fn default_remote_root() -> String {
-    "cc-switch-sync".to_string()
+    "loongport-sync".to_string()
 }
 fn default_profile() -> String {
     "default".to_string()
@@ -588,7 +588,7 @@ pub struct AppSettings {
     /// Skill 同步方式：auto（默认，优先 symlink）、symlink、copy
     #[serde(default)]
     pub skill_sync_method: SyncMethod,
-    /// Skill 存储位置：cc_switch（默认）或 unified（~/.agents/skills/）
+    /// Skill 存储位置：loongport（默认，~/.loongport/skills/）或 unified（~/.agents/skills/）
     #[serde(default)]
     pub skill_storage_location: SkillStorageLocation,
 
