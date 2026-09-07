@@ -5,10 +5,10 @@
 //! 将来接 new-api 时，只需增加候选与 detector，不改“打开网页 → 用户验证”的共用流程。
 
 use crate::error::AppError;
-use crate::relay::api;
 use crate::relay::backend::ProbeAdapter;
 pub use crate::relay::backend::{BackendKind, DetectedSite, ProbeCandidate};
 use crate::relay::newapi;
+use crate::relay::sub2api;
 use base64::Engine;
 use futures::StreamExt;
 use std::fmt;
@@ -24,7 +24,7 @@ const MAX_PROBE_COMPACT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROBE_RESPONSE_OVERHEAD_BYTES: usize = 512;
 
 pub const PROBE_CANDIDATES: &[ProbeCandidate] = &[
-    api::PROBE_ADAPTER.candidate,
+    sub2api::PROBE_ADAPTER.candidate,
     newapi::PROBE_ADAPTER.candidate,
 ];
 
@@ -65,7 +65,7 @@ impl std::error::Error for DiscoveryError {}
 const MAX_PROBE_BATCH_BYTES: usize =
     2 + PROBE_CANDIDATES.len() * (MAX_PROBE_BODY_BYTES * 6 + MAX_PROBE_RESPONSE_OVERHEAD_BYTES);
 
-const PROBE_ADAPTERS: &[ProbeAdapter] = &[api::PROBE_ADAPTER, newapi::PROBE_ADAPTER];
+const PROBE_ADAPTERS: &[ProbeAdapter] = &[sub2api::PROBE_ADAPTER, newapi::PROBE_ADAPTER];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ProbeResponse {
@@ -427,7 +427,7 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
 pub(crate) async fn probe_candidates(
     site_origin: &str,
 ) -> Result<Vec<ProbeResponse>, DiscoveryError> {
-    let client = api::build_client().map_err(|error| {
+    let client = sub2api::build_client().map_err(|error| {
         DiscoveryError::new(
             DiscoveryErrorKind::Transport,
             format!("无法建立站点连接: {error}"),
@@ -624,7 +624,7 @@ mod tests {
                     id: "sub2api",
                     path: "/api/v1/settings/public",
                     bearer_token_storage_key: Some("auth_token"),
-                    detector_json_paths: api::PROBE_ADAPTER.candidate.detector_json_paths,
+                    detector_json_paths: sub2api::PROBE_ADAPTER.candidate.detector_json_paths,
                 },
                 ProbeCandidate {
                     id: "newapi",

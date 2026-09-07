@@ -73,7 +73,7 @@ use std::collections::HashSet;
 use crate::app_config::AppType;
 use crate::claude_desktop_config::ONE_M_CONTEXT_MARKER;
 use crate::error::AppError;
-use crate::relay::api::{ApiKey, Client, Group};
+use crate::relay::sub2api::{ApiKey, Client, Group};
 
 /// Key 名字的前缀，也是「这把 Key 由本客户端管理」的识别标志。
 const MANAGED_PREFIX: &str = "LoongPort";
@@ -118,7 +118,7 @@ pub struct Tier {
     pub roles: Option<ClaudeRoleModels>,
     /// 服务端说这个分组允许生图（`allow_image_generation`）。
     ///
-    /// 与「这是纯生图档位」是两件事，见 [`super::api::Group::allow_image_generation`]。
+    /// 与「这是纯生图档位」是两件事，见 [`super::sub2api::Group::allow_image_generation`]。
     pub allow_image_generation: bool,
 }
 
@@ -367,7 +367,7 @@ async fn ensure_key_for(
     // ⚠️ **查失败不算错**：回落到 `DEFAULT_MODEL` = 本功能出现之前的行为。
     // 为一个「模型名可能不理想」中断整个分组的 provision 是把小问题放大成大问题
     // （用户会看到「获取密钥失败」而不是「某个档位模型名不对」）。
-    let models = match super::api::list_models(client.site_origin(), &api_key).await {
+    let models = match super::sub2api::list_models(client.site_origin(), &api_key).await {
         Ok(v) => v.map(normalize_model_names),
         Err(e) => {
             log::debug!(
@@ -538,7 +538,7 @@ pub fn provider_display_name(site_name: &str, group_name: &str) -> String {
 ///    而 sub2api 的 HTTP 路径对非空 `previous_response_id` **直接 400**（只有 WebSocket v2
 ///    支持），不是静默忽略。
 ///
-/// 4. **`base_url` 必须带 `/v1`**，见 [`crate::relay::api::codex_base_url`]。
+/// 4. **`base_url` 必须带 `/v1`**，见 [`crate::relay::sub2api::codex_base_url`]。
 pub fn codex_config_toml(display_name: &str, base_url: &str, model: &str) -> String {
     codex_config_toml_with_wire(display_name, base_url, model, "responses")
 }

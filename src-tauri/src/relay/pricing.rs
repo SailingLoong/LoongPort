@@ -5,7 +5,7 @@ use rusqlite::params;
 use crate::{
     database::{lock_conn, Database},
     error::AppError,
-    relay::{api, backend::BackendKind, creds::Relay, newapi, provision},
+    relay::{backend::BackendKind, creds::Relay, newapi, provision, sub2api},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,7 +16,7 @@ pub struct RateUpdate {
 
 fn sub2api_rate_updates(
     relay: &Relay,
-    groups: Vec<api::Group>,
+    groups: Vec<sub2api::Group>,
     user_rates: HashMap<i64, f64>,
 ) -> Vec<RateUpdate> {
     groups
@@ -67,7 +67,7 @@ pub async fn fetch_rate_updates(relay: &Relay) -> Result<Vec<RateUpdate>, AppErr
         .ok_or_else(|| AppError::InvalidInput("未登录中转站不能刷新倍率".into()))?;
     match relay.backend_kind {
         BackendKind::Sub2Api => {
-            let client = api::Client::new(
+            let client = sub2api::Client::new(
                 &relay.site_origin,
                 &relay.auth_token,
                 Some(account_id),
@@ -118,11 +118,10 @@ mod tests {
 
     use super::*;
     use crate::relay::{
-        api,
         backend::BackendKind,
         creds::Relay,
         newapi::{Group as NewApiGroup, GroupIdentity},
-        provision,
+        provision, sub2api,
     };
     use axum::{
         extract::State,
@@ -229,7 +228,7 @@ mod tests {
     #[test]
     fn sub2api_rates_map_to_existing_provider_ids_without_keys() {
         let relay = relay(BackendKind::Sub2Api);
-        let groups = vec![api::Group {
+        let groups = vec![sub2api::Group {
             id: 42,
             name: "OpenAI".into(),
             platform: "openai".into(),
@@ -253,7 +252,7 @@ mod tests {
     #[test]
     fn sub2api_rates_fall_back_to_the_finite_group_default() {
         let relay = relay(BackendKind::Sub2Api);
-        let groups = vec![api::Group {
+        let groups = vec![sub2api::Group {
             id: 42,
             name: "OpenAI".into(),
             platform: "openai".into(),

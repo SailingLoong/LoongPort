@@ -463,7 +463,7 @@ pub async fn exchange_session(
         return Err(AppError::InvalidInput("newapi user id 无效".into()));
     }
 
-    let client = crate::relay::api::build_client()?;
+    let client = crate::relay::sub2api::build_client()?;
     let response = client
         .get(format!("{site_origin}{SESSION_TOKEN_PATH}"))
         .header("Origin", site_origin)
@@ -541,7 +541,7 @@ pub async fn refresh_session(
         ));
     }
 
-    let client = crate::relay::api::build_client()?;
+    let client = crate::relay::sub2api::build_client()?;
     let mut request = client
         .post(format!("{site_origin}/api/user/auth/refresh"))
         .header("Origin", site_origin)
@@ -650,7 +650,7 @@ pub async fn fetch_status(site_origin: &str) -> Result<Status, AppError> {
         return Err(AppError::InvalidInput("newapi site_origin 不能为空".into()));
     }
 
-    let response = crate::relay::api::build_client()?
+    let response = crate::relay::sub2api::build_client()?
         .get(format!("{site_origin}/api/status"))
         .header("Origin", site_origin)
         .send()
@@ -716,7 +716,7 @@ impl NewApiClient {
             site_origin,
             access_token: access_token.to_string(),
             account_id: None,
-            http: crate::relay::api::build_client()?,
+            http: crate::relay::sub2api::build_client()?,
         })
     }
 

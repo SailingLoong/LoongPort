@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::relay::{api, creds, login, newapi};
+use crate::relay::{creds, login, newapi, sub2api};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -186,7 +186,7 @@ impl<'a> RuntimeBackend<'a> {
     pub async fn account(&self) -> Result<RuntimeAccount, AppError> {
         match self {
             Self::Sub2Api { relay } => {
-                let account = api::Client::new(
+                let account = sub2api::Client::new(
                     &relay.site_origin,
                     &relay.auth_token,
                     relay.account_id,
@@ -217,7 +217,7 @@ impl<'a> RuntimeBackend<'a> {
     pub async fn balance(&self) -> Result<RuntimeBalance, AppError> {
         match self {
             Self::Sub2Api { relay } => {
-                let balance = api::Client::new(
+                let balance = sub2api::Client::new(
                     &relay.site_origin,
                     &relay.auth_token,
                     relay.account_id,
@@ -266,7 +266,8 @@ impl<'a> RuntimeBackend<'a> {
 
         match self {
             Self::Sub2Api { relay } => {
-                let refreshed = api::refresh_token(&relay.site_origin, refresh_credential).await?;
+                let refreshed =
+                    sub2api::refresh_token(&relay.site_origin, refresh_credential).await?;
                 Ok(RefreshedSession {
                     auth_token: refreshed.auth_token,
                     refresh_credential: refreshed.refresh_token,

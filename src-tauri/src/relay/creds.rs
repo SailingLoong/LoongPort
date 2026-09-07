@@ -8,7 +8,7 @@
 //! | `site_origin` | 面板 origin，如 `https://bestapi.store` |
 //! | `site_name` | 展示名，来自探测结果 |
 //! | `backend_kind` | 已识别的中转站协议，如 `sub2api` 或 `newapi` |
-//! | `api_base_url` | 站点 **API 根**（不带 `/v1`）。各 CLI 的成品 `base_url` 由它派生，见 [`crate::relay::api::base_url_for`] |
+//! | `api_base_url` | 站点 **API 根**（不带 `/v1`）。各 CLI 的成品 `base_url` 由它派生，见 [`crate::relay::sub2api::base_url_for`] |
 //! | `account_id` | 服务端的用户 id。**登录后才知道**，未登录时为 `NULL` |
 //! | `account_label` | 给人看的账号名（昵称优先，回落邮箱） |
 //! | `login_identifier` | 重登时预填进登录框的值。**给机器填表单用**，见字段注释 |
@@ -742,7 +742,7 @@ pub fn update_refresh_credential(
 /// ## 为什么单独一个函数，而不是让 `update_tokens` 一起刷
 ///
 /// **续期响应里没有账号信息** —— `/api/v1/auth/refresh` 只回 `access_token` /
-/// `refresh_token` / `expires_at`（实测，见 [`crate::relay::api::refresh_token`]）。
+/// `refresh_token` / `expires_at`（实测，见 [`crate::relay::sub2api::refresh_token`]）。
 /// 想刷标签就得额外打一次 `/user/profile`，那是独立的一次网络请求，不该塞进
 /// 「只写库、不联网」的 `update_tokens` 里。
 ///

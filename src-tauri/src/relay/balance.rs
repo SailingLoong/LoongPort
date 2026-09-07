@@ -16,7 +16,7 @@
 //! | 步 | 路 | 命中谁 |
 //! |---|---|---|
 //! | 1 | [`crate::services::balance::get_balance`]（上游，按 base_url 主机名认厂商） | 官网行（DeepSeek 等） |
-//! | 2 | [`api::usage_with_api_key`]（sub2api 的 `GET /v1/usage`，**sk 鉴权**） | sub2api 中转站行 |
+//! | 2 | [`sub2api::usage_with_api_key`]（sub2api 的 `GET /v1/usage`，**sk 鉴权**） | sub2api 中转站行 |
 //! | 3 | 网页登录态（见 [`SessionFallback`]） | NewAPI 中转站行 —— **它只有这一条** |
 //!
 //! ⚠️ **顺序写反不会报错**，只会让每一行白打一轮无用请求：
@@ -43,7 +43,7 @@ use futures::future::join_all;
 
 use crate::error::AppError;
 use crate::provider::{UsageData, UsageResult};
-use crate::relay::{api, backend, creds};
+use crate::relay::{backend, creds, sub2api};
 
 const LOW_BALANCE_THRESHOLD_USD: f64 = 5.0;
 
@@ -201,7 +201,7 @@ async fn cc_switch_balance(
     None
 }
 
-/// 第 2 步：sub2api 的 sk 鉴权 `/v1/usage`。**只认 `balance`**（见 [`api::usage_with_api_key`]）。
+/// 第 2 步：sub2api 的 sk 鉴权 `/v1/usage`。**只认 `balance`**（见 [`sub2api::usage_with_api_key`]）。
 async fn sub2api_balance(
     site_origin: &str,
     api_keys: &[String],
@@ -210,7 +210,7 @@ async fn sub2api_balance(
     let results = join_all(
         api_keys
             .iter()
-            .map(|api_key| api::usage_with_api_key(site_origin, api_key)),
+            .map(|api_key| sub2api::usage_with_api_key(site_origin, api_key)),
     )
     .await;
 
@@ -486,7 +486,7 @@ pub fn spawn_stale_refresh<R: tauri::Runtime>(
 /// 单站余额链（sk 直查，从看板原 `fetch_site_balances` 迁入）：
 /// sub2api `/v1/usage` 钱包 → one-api 系 billing 双端点回落。
 async fn fetch_site_balance(origin: &str, key: &str) -> Option<f64> {
-    let sub2api_wallet = crate::relay::api::usage_with_api_key(origin, key)
+    let sub2api_wallet = crate::relay::sub2api::usage_with_api_key(origin, key)
         .await
         .ok()
         .and_then(|usage| {
@@ -496,7 +496,7 @@ async fn fetch_site_balance(origin: &str, key: &str) -> Option<f64> {
         });
     match sub2api_wallet {
         Some(balance) => Some(balance),
-        None => crate::relay::api::billing_balance_with_api_key(origin, key)
+        None => crate::relay::sub2api::billing_balance_with_api_key(origin, key)
             .await
             .ok()
             .flatten(),
@@ -678,7 +678,7 @@ mod tests {
     /// 多少额度」显示成「账户里还有多少钱」—— 数字看着像真的，含义完全不同。
     #[test]
     fn subscription_usage_without_balance_is_not_wallet_balance() {
-        let result = api::parse_usage_with_api_key_response(
+        let result = sub2api::parse_usage_with_api_key_response(
             r#"{"mode":"unrestricted","isValid":true,"planName":"月付组","remaining":42.0,"unit":"USD"}"#,
         )
         .expect("订阅型响应仍是合法 JSON");
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn wallet_usage_preserves_balance_plan_name_and_unit() {
-        let result = api::parse_usage_with_api_key_response(
+        let result = sub2api::parse_usage_with_api_key_response(
             r#"{"mode":"unrestricted","isValid":true,"planName":"钱包余额","remaining":12.5,"unit":"USD","balance":12.5}"#,
         )
         .expect("钱包型响应应能解析");
@@ -708,7 +708,7 @@ mod tests {
     /// 余额 = `hard_limit_usd` − `total_usage`（美分）/100。
     #[test]
     fn billing_subscription_and_usage_compose_wallet_balance() {
-        let balance = api::parse_billing_balance(
+        let balance = sub2api::parse_billing_balance(
             r#"{"object":"billing.subscription","has_payment_method":true,"hard_limit_usd":12.5}"#,
             r#"{"object":"list","total_usage":250.0}"#,
         )
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn billing_missing_fields_or_empty_bodies_are_not_a_balance() {
         assert_eq!(
-            api::parse_billing_balance(
+            sub2api::parse_billing_balance(
                 r#"{"object":"billing.subscription"}"#,
                 r#"{"object":"list","total_usage":1.0}"#,
             )
@@ -730,7 +730,7 @@ mod tests {
             "没有 hard_limit_usd 就不猜"
         );
         assert_eq!(
-            api::parse_billing_balance(
+            sub2api::parse_billing_balance(
                 r#"{"object":"billing.subscription","hard_limit_usd":5.0}"#,
                 r#"{"object":"list"}"#,
             )
@@ -739,20 +739,20 @@ mod tests {
             "没有 total_usage 就不猜"
         );
         // 端点不可用（404/403/401）时上层给空串 —— 查不到不算错
-        assert_eq!(api::parse_billing_balance("", r#"{}"#).unwrap(), None);
+        assert_eq!(sub2api::parse_billing_balance("", r#"{}"#).unwrap(), None);
         assert_eq!(
-            api::parse_billing_balance(r#"{"hard_limit_usd":1.0}"#, "").unwrap(),
+            sub2api::parse_billing_balance(r#"{"hard_limit_usd":1.0}"#, "").unwrap(),
             None
         );
-        assert!(api::parse_billing_balance("not json", r#"{}"#).is_err());
-        assert!(api::parse_billing_balance(r#"{}"#, "not json").is_err());
+        assert!(sub2api::parse_billing_balance("not json", r#"{}"#).is_err());
+        assert!(sub2api::parse_billing_balance(r#"{}"#, "not json").is_err());
     }
 
     /// ⭐ new-api「无限额度」哨兵不是余额：实测站点三个 limit 全返 1e8、usage 为 0
     /// ——把一亿美元当余额显示是笑话。超出常规预充值量级（$1e6）即按查不到处理。
     #[test]
     fn billing_unlimited_sentinel_is_not_a_balance() {
-        let balance = api::parse_billing_balance(
+        let balance = sub2api::parse_billing_balance(
             r#"{"object":"billing_subscription","has_payment_method":true,"soft_limit_usd":100000000,"hard_limit_usd":100000000,"system_hard_limit_usd":100000000,"access_until":0}"#,
             r#"{"object":"list","total_usage":0}"#,
         )

@@ -52,7 +52,7 @@ pub(crate) fn relay_balance_inputs(
 /// （sub2api 默认 `UserRPM = 240/分钟`，按 user_id 计数）—— 而且不同中转站行往往是
 /// **不同用户**，各记各的额度。N 行各打一次远远碰不到限流。
 ///
-/// ## 为什么返回 [`UsageResult`] 而不是 `api::Balance`
+/// ## 为什么返回 [`UsageResult`] 而不是 `sub2api::Balance`
 ///
 /// 这是本轮最主要的收敛（全局准则 §1.4）。原来中转站行回 `{balance, frozenBalance}`
 /// 数字、官网行回**后端已格式化好的字符串** `"¥547.08"` —— 同一个事实两套契约，

@@ -48,9 +48,9 @@ use crate::relay::provision::models_from_settings;
 // 遮蔽它们。需要那五个模块的文件各自 `use crate::relay::<名>;`。
 use crate::relay::provision::DEFAULT_MODEL;
 use crate::relay::{
-    api, backend, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp,
+    backend, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp,
     model_verification::target as verification_target, newapi, newapi_provision, newapi_purchase,
-    platform_map, pricing, provider_fingerprint, purchase, reconcile, remote_config,
+    platform_map, pricing, provider_fingerprint, purchase, reconcile, remote_config, sub2api,
 };
 use crate::services::ProviderService;
 use crate::store::AppState;

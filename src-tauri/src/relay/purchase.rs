@@ -86,7 +86,7 @@
 //! 站点自己的 `refreshUser()` 存进 `auth_user` 的是 `/auth/me` 的响应去掉 `run_mode`。
 //! 而逐字段核对过：**`/user/profile` 的 `data` 与那个结果完全相同**（服务端是同一个
 //! `userProfileResponseFromService` builder 构造的）⇒ 复用本仓已有的
-//! [`super::api::Client`] 打一次 `/user/profile` 就行，既不必新增端点，
+//! [`super::sub2api::Client`] 打一次 `/user/profile` 就行，既不必新增端点，
 //! 也不必做「删 `run_mode`」这一步。
 
 use crate::error::AppError;

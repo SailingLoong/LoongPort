@@ -57,7 +57,6 @@
 //! - **不做 failover 队列维护**（V1 `expand.rs` 的一半）：V2 第一版不开本地代理。
 
 pub mod aff;
-pub mod api;
 pub mod backend;
 pub mod balance;
 pub mod browser_bridge;
@@ -76,6 +75,7 @@ pub mod newapi_provision;
 #[cfg(feature = "gui")]
 pub mod newapi_purchase;
 pub mod onboarding;
+pub mod sub2api;
 // Phase 1 defines this crate-internal contract before Phase 2 consumes it.
 #[allow(dead_code)]
 pub mod model_verification;

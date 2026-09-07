@@ -200,7 +200,7 @@ fn source_origin(s: &SourceProvider) -> Option<String> {
     let base_url = crate::proxy::providers::get_adapter(&s.app_type)?
         .extract_base_url(&s.provider)
         .ok()?;
-    crate::relay::api::normalize_site_origin(&base_url).ok()
+    crate::relay::sub2api::normalize_site_origin(&base_url).ok()
 }
 
 /// 已登录中转站的 `api_base_url` 归一化 origin 集合（站点归并判据）。
@@ -212,7 +212,7 @@ fn managed_relay_origins(db: &Database) -> Result<HashSet<String>, AppError> {
     let ops = crate::relay::creds::list(&conn)?;
     Ok(ops
         .iter()
-        .filter_map(|op| crate::relay::api::normalize_site_origin(&op.api_base_url).ok())
+        .filter_map(|op| crate::relay::sub2api::normalize_site_origin(&op.api_base_url).ok())
         .collect())
 }
 
