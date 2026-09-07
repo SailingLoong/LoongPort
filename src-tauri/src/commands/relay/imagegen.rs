@@ -88,6 +88,82 @@ pub fn relay_imagegen_list_images(
     Ok(imagegen::gallery_images())
 }
 
+/// 当前生图存储目录（展示用，`PathBuf::to_string_lossy` 已是平台原生分隔符）。
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagegenOutputDir {
+    pub path: String,
+}
+
+/// `relay_imagegen_set_output_dir` 的返回：切换到了哪、搬迁模式下搬过去几张。
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagegenOutputDirSwitchResult {
+    pub path: String,
+    pub moved: usize,
+}
+
+/// 读当前生图存储目录。
+#[tauri::command]
+pub fn relay_imagegen_get_output_dir() -> Result<ImagegenOutputDir, String> {
+    Ok(ImagegenOutputDir {
+        path: imagegen::output_dir().to_string_lossy().to_string(),
+    })
+}
+
+/// 更改生图存储目录（绝对路径；`migrate` = 把旧目录里我们生成的图搬过去）。
+///
+/// 顺序是**先搬迁、验证都过了才写设置** —— 迁移失败时设置不变，目录还在原地，
+/// 用户重试幂等（同名跳过）。写入即生效：两条入口每次都现读 `imagegen::output_dir()`，
+/// codex 里的 MCP 不必重启。磁盘根目录与用户主目录拒绝（画廊会退化成无意义扫描）。
+#[tauri::command]
+pub fn relay_imagegen_set_output_dir(
+    app_handle: tauri::AppHandle,
+    path: String,
+    migrate: bool,
+) -> Result<ImagegenOutputDirSwitchResult, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("存储位置不能为空".into());
+    }
+    let target = std::path::PathBuf::from(trimmed);
+    if !target.is_absolute() {
+        return Err("存储位置必须是绝对路径".into());
+    }
+    // canonicalize：折叠 `..` 与软链成真实路径，顺带确认目录存在
+    // （目录选择对话框给的都存在，这里兜住别的入口）。
+    let canonical = target
+        .canonicalize()
+        .map_err(|e| format!("目录不存在：{e}"))?;
+    if canonical.parent().is_none() {
+        return Err("不能把磁盘根目录作为存储位置".into());
+    }
+    if canonical == crate::config::get_home_dir() {
+        return Err("不能把整个用户主目录作为存储位置".into());
+    }
+    let display = canonical.to_string_lossy().to_string();
+    let old = imagegen::output_dir();
+    if canonical == old {
+        return Ok(ImagegenOutputDirSwitchResult {
+            path: display,
+            moved: 0,
+        });
+    }
+    std::fs::create_dir_all(&canonical).map_err(|e| format!("创建目录失败: {e}"))?;
+    let moved = if migrate {
+        imagegen::migrate_images(&old, &canonical)?
+    } else {
+        0
+    };
+    crate::settings::set_imagegen_output_dir(display.clone())
+        .map_err(|e| format!("保存设置失败: {e}"))?;
+    imagegen::ensure_asset_scope(&app_handle);
+    Ok(ImagegenOutputDirSwitchResult {
+        path: display,
+        moved,
+    })
+}
+
 /// 在文件管理器里显示一张生成的图。
 ///
 /// 只接受出图目录内的路径 —— 这是个「打开本地文件」的命令，不该被拿去探测任意路径。

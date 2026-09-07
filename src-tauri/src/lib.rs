@@ -1680,6 +1680,8 @@ pub fn run() {
             commands::relay_imagegen_generate,
             commands::relay_imagegen_list_images,
             commands::relay_imagegen_reveal_image,
+            commands::relay_imagegen_get_output_dir,
+            commands::relay_imagegen_set_output_dir,
             commands::relay_set_imagegen_mcp_enabled,
             commands::relay_switch_tier,
             commands::relay_switch_tier_model,

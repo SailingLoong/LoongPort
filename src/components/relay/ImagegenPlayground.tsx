@@ -22,6 +22,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   Check,
   ChevronsUpDown,
+  FolderInput,
   FolderOpen,
   Loader2,
   Sparkles,
@@ -62,12 +63,14 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { relayApi, type ImagegenGalleryEntry } from "@/lib/api";
+import { relayApi, settingsApi, type ImagegenGalleryEntry } from "@/lib/api";
 import {
   imagegenKeys,
   useImageTiers,
   useImagegenGallery,
   useImagegenGenerate,
+  useImagegenOutputDir,
+  useImagegenSetOutputDir,
 } from "@/lib/query/imagegen";
 
 /** 尺寸档位：gpt-image 的三档（与 MCP 工具的 size 语义一致，不给「自动」）。 */
@@ -78,6 +81,8 @@ export function ImagegenPlayground() {
   const queryClient = useQueryClient();
   const gallery = useImagegenGallery();
   const generate = useImagegenGenerate();
+  const outputDir = useImagegenOutputDir();
+  const setOutputDir = useImagegenSetOutputDir();
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState<string>("1024x1024");
   const [count, setCount] = useState<string>("1");
@@ -85,6 +90,39 @@ export function ImagegenPlayground() {
   const [parallel, setParallel] = useState(true);
   const [preview, setPreview] = useState<ImagegenGalleryEntry | null>(null);
   const [tierPickerOpen, setTierPickerOpen] = useState(false);
+  // 存储位置迁移确认弹窗的待定目标（null = 不显示）。
+  const [dirConfirm, setDirConfirm] = useState<{
+    from: string;
+    to: string;
+  } | null>(null);
+
+  // 选目录 → 弹迁移确认（搬迁并切换 / 直接切换）。取消选择（null）什么都不做。
+  const handlePickOutputDir = async () => {
+    const picked = await settingsApi.pickDirectory(outputDir.data?.path);
+    if (!picked) return;
+    if (outputDir.data && picked === outputDir.data.path) return;
+    setDirConfirm({ from: outputDir.data?.path ?? "", to: picked });
+  };
+
+  const applyOutputDir = (migrate: boolean) => {
+    if (!dirConfirm) return;
+    const target = dirConfirm;
+    setDirConfirm(null);
+    setOutputDir.mutate(
+      { path: target.to, migrate },
+      {
+        onSuccess: (result) =>
+          toast.success(
+            migrate
+              ? t("loongport.imagegenPlayground.storageMovedToast", {
+                  count: result.moved,
+                })
+              : t("loongport.imagegenPlayground.storageSwitchedToast"),
+          ),
+        onError: (e) => toast.error(String(e)),
+      },
+    );
+  };
 
   // 档位列表与「档位」视图同一条命令（listRelays 按栏查，结果天然同质）。
   const tiersQuery = useImageTiers();
@@ -295,11 +333,31 @@ export function ImagegenPlayground() {
         </div>
       )}
 
-      {/* 画廊：MCP 生成的图也落在这里 —— 两个入口的产物汇成同一份记录。 */}
+      {/* 画廊：MCP 生成的图也落在这里 —— 两个入口的产物汇成同一份记录。
+          存储位置就近展示与更改（路径由后端给出，前端只展示）。 */}
       <section className="space-y-2">
-        <h3 className="text-sm font-medium">
-          {t("loongport.imagegenPlayground.galleryTitle")}
-        </h3>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-medium">
+            {t("loongport.imagegenPlayground.galleryTitle")}
+          </h3>
+          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="shrink-0">
+              {t("loongport.imagegenPlayground.storageLabel")}
+            </span>
+            <span className="truncate font-mono" title={outputDir.data?.path}>
+              {outputDir.data?.path ?? "…"}
+            </span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={handlePickOutputDir}
+            >
+              {t("loongport.imagegenPlayground.storageChange")}
+            </Button>
+          </div>
+        </div>
         {gallery.isLoading ? (
           <p className="text-sm text-muted-foreground">
             {t("loongport.imagegenPlayground.galleryLoading")}
@@ -369,6 +427,57 @@ export function ImagegenPlayground() {
             >
               <FolderOpen className="h-4 w-4" />
               {t("loongport.imagegenPlayground.reveal")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 存储位置迁移确认：形状与 SwitchTierConfirmDialog 同族（ghost→outline→主梯度）。
+          不做每图索引 —— 文件系统是唯一事实源，历史靠这一次性搬迁保住。 */}
+      <Dialog
+        open={dirConfirm != null}
+        onOpenChange={(open) => {
+          if (!open) setDirConfirm(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {t("loongport.imagegenPlayground.storageDialog.title")}
+            </DialogTitle>
+            <DialogDescription>
+              {t("loongport.imagegenPlayground.storageDialog.body")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1 break-all text-xs">
+            <p className="font-mono text-muted-foreground">
+              {dirConfirm?.from}
+            </p>
+            <p className="font-mono">{dirConfirm?.to}</p>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setDirConfirm(null)}
+            >
+              {t("loongport.imagegenPlayground.storageDialog.cancel")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={setOutputDir.isPending}
+              onClick={() => applyOutputDir(false)}
+            >
+              {t("loongport.imagegenPlayground.storageDialog.switchOnly")}
+            </Button>
+            <Button
+              type="button"
+              disabled={setOutputDir.isPending}
+              onClick={() => applyOutputDir(true)}
+            >
+              <FolderInput className="h-4 w-4" />
+              {t("loongport.imagegenPlayground.storageDialog.moveAndSwitch")}
             </Button>
           </DialogFooter>
         </DialogContent>
