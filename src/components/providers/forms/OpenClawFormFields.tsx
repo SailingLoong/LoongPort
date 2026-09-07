@@ -35,8 +35,6 @@ interface OpenClawFormFieldsProps {
   category?: ProviderCategory;
   shouldShowApiKeyLink: boolean;
   websiteUrl: string;
-  isPartner?: boolean;
-  partnerPromotionKey?: string;
 
   // API Protocol
   api: string;
@@ -59,8 +57,6 @@ export function OpenClawFormFields({
   category,
   shouldShowApiKeyLink,
   websiteUrl,
-  isPartner,
-  partnerPromotionKey,
   api,
   onApiChange,
   models,
@@ -251,8 +247,6 @@ export function OpenClawFormFields({
         category={category === "official" ? undefined : category}
         shouldShowLink={shouldShowApiKeyLink}
         websiteUrl={websiteUrl}
-        isPartner={isPartner}
-        partnerPromotionKey={partnerPromotionKey}
       />
 
       {/* User-Agent */}

@@ -2011,7 +2011,7 @@ fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
             .get_manager_mut(&AppType::Gemini)
             .expect("gemini manager");
         manager.current = "packy-meta".to_string();
-        let mut provider = Provider::with_id(
+        let provider = Provider::with_id(
             "packy-meta".to_string(),
             "Generic Gemini".to_string(),
             json!({
@@ -2022,10 +2022,6 @@ fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
             }),
             Some("https://example.com".to_string()),
         );
-        provider.meta = Some(ProviderMeta {
-            partner_promotion_key: Some("packycode".to_string()),
-            ..ProviderMeta::default()
-        });
         manager.providers.insert("packy-meta".to_string(), provider);
     }
 
@@ -2066,7 +2062,7 @@ fn switch_google_official_gemini_preserves_env_vars() {
             .get_manager_mut(&AppType::Gemini)
             .expect("gemini manager");
         manager.current = "google-official".to_string();
-        let mut provider = Provider::with_id(
+        let provider = Provider::with_id(
             "google-official".to_string(),
             "Google".to_string(),
             json!({
@@ -2076,10 +2072,6 @@ fn switch_google_official_gemini_preserves_env_vars() {
             }),
             Some("https://ai.google.dev".to_string()),
         );
-        provider.meta = Some(ProviderMeta {
-            partner_promotion_key: Some("google-official".to_string()),
-            ..ProviderMeta::default()
-        });
         manager
             .providers
             .insert("google-official".to_string(), provider);

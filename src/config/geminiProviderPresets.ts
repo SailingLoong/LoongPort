@@ -21,10 +21,7 @@ export interface GeminiProviderPreset {
   baseURL?: string;
   model?: string;
   description?: string;
-  category?: ProviderCategory;
-  isPartner?: boolean;
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
-  partnerPromotionKey?: string;
+  category?: ProviderCategory; // 置顶合作伙伴（顶级）：徽章显示为心形
   endpointCandidates?: string[];
   theme?: GeminiPresetTheme;
   // 图标配置
@@ -42,7 +39,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     },
     description: "Google 官方 Gemini API (OAuth)",
     category: "official",
-    partnerPromotionKey: "google-official",
     theme: {
       icon: "gemini",
       backgroundColor: "#4285F4",
@@ -66,8 +62,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "PackyCode",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "packycode",
     endpointCandidates: [
       "https://www.packyapi.ai",
       "https://cf.api.fan",
@@ -91,8 +85,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "APINebula",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "apinebula",
     endpointCandidates: ["https://apinebula.ai"],
     icon: "apinebula",
   },
@@ -110,8 +102,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "AICodeMirror",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "aicodemirror",
     endpointCandidates: ["https://api.aicodemirror.ai/api/gemini"],
     icon: "aicodemirror",
     iconColor: "#000000",
@@ -131,8 +121,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "google/gemini-3.6-flash",
     description: "Shengsuanyun",
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "shengsuanyun",
     icon: "shengsuanyun",
   },
   {
@@ -149,8 +137,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "AIGoCode",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "aigocode",
     endpointCandidates: ["https://api.aigocode.app"],
     icon: "aigocode",
     iconColor: "#5B7FFF",
@@ -170,8 +156,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "Qiniu",
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "qiniu",
     endpointCandidates: [
       "https://api.qnaigc.com/bypass/vertex",
       "https://api.modelink.ai/bypass/vertex",
@@ -192,8 +176,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "AICoding",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "aicoding",
     endpointCandidates: ["https://api.aicoding.inc"],
     icon: "aicoding",
     iconColor: "#000000",
@@ -212,8 +194,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "SubRouter",
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "subrouter",
     endpointCandidates: ["https://subrouter.ai/v1beta"],
     icon: "subrouter",
   },
@@ -232,8 +212,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "APIKEY.FUN",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "apikeyfun",
     endpointCandidates: ["https://api.apikey.fun", "https://slb.apikey.fun"],
     icon: "apikeyfun",
   },
@@ -251,8 +229,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "Code0",
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "code0",
     icon: "code0",
   },
   {
@@ -269,8 +245,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "A6API",
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "a6api",
     icon: "a6api",
   },
   {
@@ -287,8 +261,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "SSSAiCode",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "sssaicode",
     endpointCandidates: [
       "https://node-hk.sssaicodeapi.com/api",
       "https://node-hk.sssaiapi.com/api",
@@ -311,8 +283,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "ETok",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "etok",
     endpointCandidates: ["https://api.etok.ai/v1beta"],
     icon: "etok",
     iconColor: "#000000",
@@ -331,8 +301,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "Cubence",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "cubence",
     endpointCandidates: [
       "https://api.cubence.com/v1",
       "https://api-cf.cubence.com/v1",
@@ -356,8 +324,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "CrazyRouter",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "crazyrouter",
     endpointCandidates: ["https://cn.crazyrouter.com"],
     icon: "crazyrouter",
     iconColor: "#000000",
@@ -377,7 +343,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.1-flash-lite",
     description: "SudoCode.us",
     category: "third_party",
-    isPartner: true,
     endpointCandidates: ["https://sudocode.us", "https://sudocode.run"],
     icon: "sudocode-us",
   },
@@ -396,8 +361,6 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     model: "gemini-3.6-flash",
     description: "XycAi",
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "xycai",
     endpointCandidates: ["https://apicdn.xycai.us", "https://apicdn.xyc.ai"],
     icon: "xycai",
   },

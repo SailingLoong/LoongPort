@@ -33,8 +33,6 @@ export interface GrokBuildProviderPreset {
   auth: Record<string, any>;
   config: string; // Codex 风格 TOML 载体（只消费 base_url / model / wire_api）
   isOfficial?: boolean;
-  isPartner?: boolean;
-  partnerPromotionKey?: string;
   category?: ProviderCategory;
   endpointCandidates?: string[];
   icon?: string;
@@ -93,8 +91,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
       "https://www.packyapi.com/v1",
     ],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "packycode",
     icon: "packycode",
   },
   {
@@ -105,8 +101,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("ZetaAPI", "https://api.zetaapi.ai/v1"),
     endpointCandidates: ["https://api.zetaapi.ai/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "zetaapi",
     icon: "zetaapi",
   },
   {
@@ -118,8 +112,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     endpointCandidates: ["https://apinebula.ai/v1"],
     apiFormat: "openai_responses",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "apinebula",
     icon: "apinebula",
   },
   {
@@ -134,8 +126,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     endpointCandidates: [
       "https://api.aicodemirror.ai/api/codex/backend-api/codex",
     ],
-    isPartner: true,
-    partnerPromotionKey: "aicodemirror",
     icon: "aicodemirror",
     iconColor: "#000000",
   },
@@ -147,8 +137,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("PatewayAI", "https://api.pateway.ai/v1"),
     endpointCandidates: ["https://api.pateway.ai/v1"],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "patewayai",
     icon: "pateway",
   },
   {
@@ -160,8 +148,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("FennoAI", "https://api.fenno.ai"),
     endpointCandidates: ["https://api.fenno.ai"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "fenno",
     icon: "fenno",
   },
   {
@@ -172,8 +158,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("RunAPI", "https://runapi.host/v1"),
     endpointCandidates: ["https://runapi.host/v1", "https://runapi.co/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "runapi",
     icon: "runapi",
   },
   {
@@ -188,8 +172,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
       OPENROUTER_STYLE_GROK_MODEL,
     ),
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "shengsuanyun",
     icon: "shengsuanyun",
   },
   {
@@ -200,8 +182,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("AIGoCode", "https://api.aigocode.app"),
     endpointCandidates: ["https://api.aigocode.app"],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "aigocode",
     icon: "aigocode",
     iconColor: "#5B7FFF",
   },
@@ -220,8 +200,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
       "https://api.modelink.ai/bypass/openai/v1",
     ],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "qiniu",
     icon: "qiniu",
   },
   {
@@ -232,8 +210,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("SubRouter", "https://subrouter.ai/v1"),
     endpointCandidates: ["https://subrouter.ai/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "subrouter",
     icon: "subrouter",
   },
   {
@@ -248,8 +224,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     ],
     apiFormat: "openai_responses",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "apikeyfun",
     icon: "apikeyfun",
   },
   {
@@ -260,8 +234,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("Code0", "https://code0.ai/v1"),
     endpointCandidates: ["https://code0.ai/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "code0",
     icon: "code0",
   },
   {
@@ -272,8 +244,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("TeamoRouter", "https://api.teamorouter.com/v1"),
     endpointCandidates: ["https://api.teamorouter.com/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "teamorouter",
     icon: "teamorouter",
   },
   {
@@ -283,8 +253,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     auth: grokAuth(),
     config: grokPresetConfig("ClaudeCN", "https://claudecn.top/v1"),
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "claudecn",
     icon: "claudecn",
   },
   {
@@ -295,8 +263,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("A6API", "https://api.a6api.com/v1"),
     endpointCandidates: ["https://api.a6api.com/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "a6api",
     icon: "a6api",
   },
   {
@@ -308,8 +274,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("Compshare", "https://api.modelverse.cn/v1"),
     endpointCandidates: ["https://api.modelverse.cn/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "ucloud",
     icon: "ucloud",
     iconColor: "#000000",
   },
@@ -325,8 +289,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     ),
     endpointCandidates: ["https://cp.compshare.cn/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "ucloud",
     icon: "ucloud",
     iconColor: "#000000",
   },
@@ -338,8 +300,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("CCSub", "https://www.ccsub.net/v1"),
     endpointCandidates: ["https://www.ccsub.net/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "ccsub",
     icon: "ccsub",
   },
   {
@@ -357,8 +317,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
       "https://node-cf.sssaicodeapi.com/api/v1",
     ],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "sssaicode",
     icon: "sssaicode",
     iconColor: "#000000",
   },
@@ -370,8 +328,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("Micu", "https://www.micuapi.ai/v1"),
     endpointCandidates: ["https://www.micuapi.ai/v1"],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "micu",
     icon: "micu",
     iconColor: "#000000",
   },
@@ -382,8 +338,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     auth: grokAuth(),
     config: grokPresetConfig("RightCode", "https://www.rightapi.ai/codex/v1"),
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "rightcode",
     icon: "rc",
     iconColor: "#E96B2C",
   },
@@ -395,8 +349,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("ETok.ai", "https://api.etok.ai/v1"),
     endpointCandidates: ["https://api.etok.ai/v1"],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "etok",
     icon: "etok",
     iconColor: "#000000",
   },
@@ -413,8 +365,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
       "https://api-bwg.cubence.com/v1",
     ],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "cubence",
     icon: "cubence",
     iconColor: "#000000",
   },
@@ -425,8 +375,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     auth: grokAuth(),
     config: grokPresetConfig("CrazyRouter", "https://cn.crazyrouter.com/v1"),
     endpointCandidates: ["https://cn.crazyrouter.com/v1"],
-    isPartner: true,
-    partnerPromotionKey: "crazyrouter",
     icon: "crazyrouter",
     iconColor: "#000000",
   },
@@ -437,8 +385,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     config: grokPresetConfig("DMXAPI", "https://www.dmxapi.cn/v1"),
     endpointCandidates: ["https://www.dmxapi.cn/v1"],
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "dmxapi",
   },
   {
     name: "SudoCode.chat",
@@ -449,8 +395,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     endpointCandidates: ["https://api.sudocode.chat/v1"],
     apiFormat: "openai_responses",
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "sudocode",
     icon: "sudocode",
   },
   {
@@ -462,7 +406,6 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
     endpointCandidates: ["https://sudocode.us/v1", "https://sudocode.run/v1"],
     apiFormat: "openai_responses",
     category: "third_party",
-    isPartner: true,
     icon: "sudocode-us",
   },
   // ===== 非赞助商预设：应用内展示按显示名排序，此处文件顺序不影响展示 =====

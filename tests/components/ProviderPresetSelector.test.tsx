@@ -60,8 +60,6 @@ type TestPresetEntry = {
     websiteUrl: string;
     settingsConfig: Record<string, never>;
     category: ProviderCategory;
-    primePartner?: boolean;
-    isPartner?: boolean;
   };
 };
 
@@ -231,18 +229,12 @@ describe("ProviderPresetSelector pure helpers", () => {
     ).toEqual(["alpha", "beta", "delta", "gamma"]);
   });
 
-  it("original 模式按「官方 → 尊享伙伴 → 赞助商 → 非赞助商」四段排序，前三组保序、末组按显示名，双重身份不重复", () => {
-    // 故意打乱传入顺序，验证：
-    // - official 组置顶（officialOnly、officialPrime 按出现顺序）；
-    // - 非官方且 primePartner 的预设次之（primeAndPartner）；
-    // - 赞助商（isPartner）第三段，保持传入（预设文件）顺序：
-    //   partnerZeta 在 partnerAlpha 前，不按字母重排；
-    // - 非赞助商按显示名排序：restAlpha 排到 restZulu 前；
-    // - 既是 official 又是 primePartner 的只归入官方组；
-    //   既是 primePartner 又是 isPartner 的只归入 prime 组、不在赞助商组重复。
+  it("original 模式按「官方 → 其余」两段排序，官方组保序、其余按显示名", () => {
+    // 伙伴分层（尊享/赞助商置顶）已随上游伙伴营销体系一起拆除：
+    // 只剩官方置顶 + 其余按显示名（2026-09-07 维护者拍板不认上游合作体系）。
     const mixed: TestPresetEntry[] = [
       {
-        id: "restZulu",
+        id: "zuluRest",
         preset: {
           name: "Zulu Rest",
           websiteUrl: "https://rest-zulu.example.com",
@@ -251,24 +243,12 @@ describe("ProviderPresetSelector pure helpers", () => {
         },
       },
       {
-        id: "partnerZeta",
+        id: "zetaAgg",
         preset: {
-          name: "Zeta Partner",
-          websiteUrl: "https://partner-zeta.example.com",
+          name: "Zeta Agg",
+          websiteUrl: "https://zeta-agg.example.com",
           settingsConfig: {},
           category: "aggregator",
-          isPartner: true,
-        },
-      },
-      {
-        id: "primeAndPartner",
-        preset: {
-          name: "Prime And Partner",
-          websiteUrl: "https://prime-and-partner.example.com",
-          settingsConfig: {},
-          category: "cn_official",
-          primePartner: true,
-          isPartner: true,
         },
       },
       {
@@ -281,27 +261,7 @@ describe("ProviderPresetSelector pure helpers", () => {
         },
       },
       {
-        id: "officialPrime",
-        preset: {
-          name: "Official Prime",
-          websiteUrl: "https://official-prime.example.com",
-          settingsConfig: {},
-          category: "official",
-          primePartner: true,
-        },
-      },
-      {
-        id: "partnerAlpha",
-        preset: {
-          name: "Alpha Partner",
-          websiteUrl: "https://partner-alpha.example.com",
-          settingsConfig: {},
-          category: "third_party",
-          isPartner: true,
-        },
-      },
-      {
-        id: "restAlpha",
+        id: "alphaRest",
         preset: {
           name: "Alpha Rest",
           websiteUrl: "https://rest-alpha.example.com",
@@ -313,12 +273,9 @@ describe("ProviderPresetSelector pure helpers", () => {
 
     expect(getIds(sortPresetEntries(mixed, "original", t))).toEqual([
       "officialOnly",
-      "officialPrime",
-      "primeAndPartner",
-      "partnerZeta",
-      "partnerAlpha",
-      "restAlpha",
-      "restZulu",
+      "alphaRest",
+      "zetaAgg",
+      "zuluRest",
     ]);
   });
 });

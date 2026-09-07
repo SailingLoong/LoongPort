@@ -19,8 +19,6 @@ describe("SubRouter provider presets", () => {
     expect(preset?.websiteUrl).toBe(WEBSITE_URL);
     expect(preset?.apiKeyUrl).toBe(API_KEY_URL);
     expect(preset?.category).toBe("aggregator");
-    expect(preset?.isPartner).toBe(true);
-    expect(preset?.partnerPromotionKey).toBe("subrouter");
     expect(preset?.icon).toBe("subrouter");
 
     const env = (preset?.settingsConfig as { env: Record<string, string> }).env;
