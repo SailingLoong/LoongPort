@@ -5318,6 +5318,24 @@ impl ProviderService {
     /// 同时检查本地 settings 和数据库的当前供应商，防止删除任一端正在使用的供应商。
     /// 对于累加模式应用（OpenCode, OpenClaw），可以随时删除任意供应商，同时从 live 配置中移除。
     pub fn delete(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
+        Self::delete_with_policy(state, app_type, id, false)
+    }
+
+    /// [`delete`] 的「允许删当前项」策略变体，给**档位清理**用（prune_stale_tiers）：
+    /// 走到那一步说明这条档位在服务端已经不存在了，sk 是死的 —— 留着当「当前项」
+    /// 只会让 CLI 拿失效密钥发请求。与 [`delete`] 共享同一条管线（含 additive-mode
+    /// app 的 live config 清理），**唯一**差异是不做「当前项不许删」的保护 ——
+    /// 别处想要这个语义先想清楚：那个保护是防用户误删正在用的配置的。
+    pub fn delete_stale(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
+        Self::delete_with_policy(state, app_type, id, true)
+    }
+
+    fn delete_with_policy(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+        allow_current: bool,
+    ) -> Result<(), AppError> {
         if app_type == AppType::Pi {
             return pi::delete(state, id);
         }
@@ -5374,7 +5392,9 @@ impl ProviderService {
         let local_current = crate::settings::get_current_provider(&app_type);
         let db_current = state.db.get_current_provider(app_type.as_str())?;
 
-        if local_current.as_deref() == Some(id) || db_current.as_deref() == Some(id) {
+        if !allow_current
+            && (local_current.as_deref() == Some(id) || db_current.as_deref() == Some(id))
+        {
             return Err(AppError::Message(
                 "无法删除当前正在使用的供应商".to_string(),
             ));

@@ -980,13 +980,13 @@ pub(crate) fn apps_using_this_accounts_tiers(
 /// 留着当「当前项」只会让 CLI 拿一把失效密钥去发请求，报一个看不懂的 401。
 /// 用户重新选一个可用的就好。
 ///
-/// 所以当前项那条**直连 `state.db.delete_provider`** 绕过那层保护。
+/// 所以这里走 [`ProviderService::delete_stale`] —— 与手工删除**同一条管线**
+/// （含 additive-mode app 的 live config 清理），只是不做「当前项不许删」的保护。
+/// （历史上这里曾直连 `state.db.delete_provider` 绕过整个服务层，那条捷径会漏掉
+/// additive 的 live 清理 —— 2026-09-07 收口成策略变体，不再有第二条通道。）
 /// 悬空的 `is_current` 指针不用手工清：`settings::get_effective_current_provider`
 /// 会验证 id 在库里是否存在，不存在就自动清掉本地 settings 并回落
 /// （它的文档明说了这一条，正是为云同步导入后失效的场景写的）。
-///
-/// 非当前项走 `ProviderService::delete` —— 它顺带处理 additive-mode app 的
-/// live config 清理，那套逻辑不该在这里重写一遍。
 ///
 /// `AppType::all()` 是穷尽的（上游维护），加新 CLI 时这里自动覆盖。
 ///
@@ -1023,13 +1023,10 @@ pub(crate) fn prune_stale_tiers(
                 continue;
             }
 
-            let is_current = provider.id == current;
-            let outcome = if is_current {
-                // 绕过 ProviderService::delete 的「不许删当前项」保护（见上方说明）。
-                state.db.delete_provider(app_type.as_str(), &provider.id)
-            } else {
-                ProviderService::delete(state, app_type.clone(), &provider.id)
-            };
+            let was_current = provider.id == current;
+            // 单一删除通道：与用户手工删除走**同一条**服务层管线（含 additive-mode
+            // app 的 live config 清理），唯一差异是策略——见 [`ProviderService::delete_stale`]。
+            let outcome = ProviderService::delete_stale(state, app_type.clone(), &provider.id);
 
             match outcome {
                 Ok(()) => {
@@ -1038,7 +1035,7 @@ pub(crate) fn prune_stale_tiers(
                         provider.name,
                         app_type.as_str(),
                         provider.id,
-                        if is_current {
+                        if was_current {
                             " —— 它曾是当前项，请重新选一个档位"
                         } else {
                             ""
@@ -1903,6 +1900,37 @@ mod tests {
     /// **这一次** provision（= 一个账号）生成的 id ⇒ A 刷新一次就把 B 的全部档位
     /// 当成「不再存在」删光。同一个缺陷在 `remove_site_impl`（删一个账号）下更彻底：
     /// 它传空 `keep`，等于清掉该站所有账号的档位。
+    /// prune 对「当前项」档位也必须删得掉，且两条删除通道的行为差必须保持：
+    /// 手工删除通道的保护**仍然生效**（拒绝删当前项），prune 通道
+    /// （[`ProviderService::delete_stale`]）放行。曾经这里是直连
+    /// `db.delete_provider` 的第二通道，会漏 additive-mode app 的 live 清理
+    /// （2026-09-07 收口；这条测试钉住单一通道与保护语义）。
+    #[test]
+    fn pruning_removes_a_stale_tier_even_when_it_is_the_current_one() {
+        let site = "https://prune.example";
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let stale = provision::provider_id_for(site, Some(7), 1);
+        db.save_provider("codex", &seeded_owned(&stale, "Prune·废", Some(site), 7))
+            .expect("seed");
+        db.set_current_provider("codex", &stale)
+            .expect("set current");
+        let state = AppState::new(db.clone());
+
+        // 手工删除通道：当前项必须仍被保护。
+        assert!(
+            ProviderService::delete(&state, AppType::Codex, &stale).is_err(),
+            "用户手工删除当前项的保护不能被 prune 的需求破坏"
+        );
+
+        let keep: std::collections::HashSet<(String, String)> = Default::default();
+        let removed = prune_stale_tiers(&state, site, Some(7), &keep).expect("prune");
+        assert_eq!(removed, 1, "当前项档位该被 prune 删掉");
+        assert!(
+            !db.get_provider_ids("codex").expect("list").contains(&stale),
+            "库里不该再有那条"
+        );
+    }
+
     #[test]
     fn pruning_one_account_leaves_another_accounts_tiers_on_the_same_site() {
         let site = "https://bestapi.store";
