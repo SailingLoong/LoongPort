@@ -668,10 +668,35 @@ export const relayApi = {
   imagegenRevealImage: (path: string): Promise<void> =>
     invoke("relay_imagegen_reveal_image", { path }),
 
+  /** 读当前生图存储目录（后端给出的原生分隔符路径，前端只展示）。 */
+  imagegenGetOutputDir: (): Promise<ImagegenOutputDir> =>
+    invoke("relay_imagegen_get_output_dir"),
+
+  /**
+   * 更改生图存储目录。`migrate` = 把旧目录里我们生成的图搬过去（幂等；
+   * 后端先搬迁再写设置，失败则设置不变）。写入即生效，MCP 侧不必重启 codex。
+   */
+  imagegenSetOutputDir: (
+    path: string,
+    migrate: boolean,
+  ): Promise<ImagegenOutputDirSwitchResult> =>
+    invoke("relay_imagegen_set_output_dir", { path, migrate }),
+
   /** 切换「在 CLI 对话中提供生图工具（MCP）」；后端落设置并立刻对齐注册。 */
   setImagegenMcpEnabled: (enabled: boolean): Promise<void> =>
     invoke("relay_set_imagegen_mcp_enabled", { enabled }),
 };
+
+/** 当前生图存储目录。 */
+export interface ImagegenOutputDir {
+  path: string;
+}
+
+/** 更改存储目录的结果：切换到了哪、搬迁模式下搬过去几张。 */
+export interface ImagegenOutputDirSwitchResult {
+  path: string;
+  moved: number;
+}
 
 /** 一张生成图片的落盘事实（直接生图结果与画廊条目共用形状）。 */
 export interface ImagegenImageRef {

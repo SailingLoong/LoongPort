@@ -561,6 +561,13 @@ pub struct AppSettings {
     /// 生效点在 `relay::imagegen_mcp::sync_registration`（幂等，切开关即对齐）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imagegen_mcp_enabled: Option<bool>,
+    /// 生图文件的存储目录（**绝对路径**）。`None` = 默认 `<数据目录>/generated_images/`。
+    ///
+    /// 设备级（不进云同步 —— 另一台机器的磁盘布局不同）；由生图页「更改存储位置」
+    /// 写入。读取方是 `relay::imagegen::output_dir`（**直读 settings.json 文件**，
+    /// MCP 子进程没有主程序的设置缓存，读缓存会两边分叉）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imagegen_output_dir: Option<String>,
     /// 当前 Gemini 供应商 ID（本地存储，优先于数据库 is_current）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_gemini: Option<String>,
@@ -677,6 +684,7 @@ impl Default for AppSettings {
             current_provider_codex: None,
             current_provider_codex_image: None,
             imagegen_mcp_enabled: None,
+            imagegen_output_dir: None,
             current_provider_gemini: None,
             current_provider_grokbuild: None,
             current_provider_opencode: None,
@@ -1160,6 +1168,15 @@ pub fn get_imagegen_mcp_enabled() -> bool {
 pub fn set_imagegen_mcp_enabled(enabled: bool) -> Result<(), AppError> {
     mutate_settings(|settings| {
         settings.imagegen_mcp_enabled = Some(enabled);
+    })
+}
+
+/// 设置生图存储目录并落盘（绝对路径，校验在命令层）。**写入即生效**：
+/// 两个入口（App 内与 MCP）每次生图/列表都现读 `imagegen::output_dir()`，
+/// 没有「要重启才认新路径」这回事。
+pub fn set_imagegen_output_dir(dir: String) -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        settings.imagegen_output_dir = Some(dir);
     })
 }
 

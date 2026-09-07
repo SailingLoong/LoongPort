@@ -3470,6 +3470,17 @@
       "galleryLoading": "読み込み中…",
       "galleryEmpty": "まだ生成した画像はありません",
       "reveal": "フォルダで表示",
+      "storageLabel": "保存先",
+      "storageChange": "変更",
+      "storageMovedToast": "保存先を変更しました（{{count}} 枚を移動）",
+      "storageSwitchedToast": "保存先を変更しました",
+      "storageDialog": {
+        "title": "保存先の変更",
+        "body": "新しい場所が有効になると、以後の画像はそこに保存されます。既存の生成画像も移動しますか？",
+        "cancel": "キャンセル",
+        "switchOnly": "切り替えのみ",
+        "moveAndSwitch": "移動して切り替え"
+      },
       "partialFailureToast": "{{count}} 枚を生成しました（{{model}}）、{{failed}} 枚が失敗"
     },
     "siteConfig": {

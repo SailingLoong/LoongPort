@@ -3470,6 +3470,17 @@
       "galleryLoading": "Loading…",
       "galleryEmpty": "No images generated yet",
       "reveal": "Reveal in folder",
+      "storageLabel": "Stored in",
+      "storageChange": "Change",
+      "storageMovedToast": "Storage location changed; moved {{count}} image(s)",
+      "storageSwitchedToast": "Storage location changed",
+      "storageDialog": {
+        "title": "Change storage location",
+        "body": "New images will be stored in the new location. Move existing generated images there too?",
+        "cancel": "Cancel",
+        "switchOnly": "Switch only",
+        "moveAndSwitch": "Move & switch"
+      },
       "partialFailureToast": "Generated {{count}} image(s) ({{model}}); {{failed}} failed"
     },
     "siteConfig": {

@@ -389,6 +389,16 @@ const requiredKeys = [
   "imagegenPlayground.galleryLoading",
   "imagegenPlayground.galleryEmpty",
   "imagegenPlayground.reveal",
+  // 存储位置：展示行、更改入口与迁移确认弹窗（搬迁/直接切换是知情取舍）。
+  "imagegenPlayground.storageLabel",
+  "imagegenPlayground.storageChange",
+  "imagegenPlayground.storageMovedToast",
+  "imagegenPlayground.storageSwitchedToast",
+  "imagegenPlayground.storageDialog.title",
+  "imagegenPlayground.storageDialog.body",
+  "imagegenPlayground.storageDialog.cancel",
+  "imagegenPlayground.storageDialog.switchOnly",
+  "imagegenPlayground.storageDialog.moveAndSwitch",
 ] as const;
 
 type Translations = Record<string, unknown>;

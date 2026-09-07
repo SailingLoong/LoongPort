@@ -13,6 +13,8 @@ export const imagegenKeys = {
   gallery: ["imagegen", "gallery"] as const,
   /** 生图档位列表（与「档位」视图同一条 `listRelays` 命令，一个缓存两处用）。 */
   tiers: ["imagegen", "tiers"] as const,
+  /** 当前存储目录（展示行 + 更改入口）。 */
+  outputDir: ["imagegen", "outputDir"] as const,
 };
 
 /** 生图页共用一份的档位列表：生成视图的快切、页级的空态判定都读它。 */
@@ -59,6 +61,27 @@ export const useSetImagegenMcpEnabled = () => {
     mutationFn: (enabled: boolean) => relayApi.setImagegenMcpEnabled(enabled),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+};
+
+/** 当前生图存储目录（展示用）。 */
+export const useImagegenOutputDir = () =>
+  useQuery({
+    queryKey: imagegenKeys.outputDir,
+    queryFn: () => relayApi.imagegenGetOutputDir(),
+    staleTime: Infinity,
+  });
+
+/** 更改存储目录（migrate = 把旧图搬过去）。成功后失效目录与画廊。 */
+export const useImagegenSetOutputDir = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ path, migrate }: { path: string; migrate: boolean }) =>
+      relayApi.imagegenSetOutputDir(path, migrate),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: imagegenKeys.outputDir });
+      void queryClient.invalidateQueries({ queryKey: imagegenKeys.gallery });
     },
   });
 };

@@ -3471,6 +3471,17 @@
       "galleryLoading": "載入中…",
       "galleryEmpty": "還沒有生成過圖片",
       "reveal": "在資料夾中顯示",
+      "storageLabel": "儲存位置",
+      "storageChange": "變更",
+      "storageMovedToast": "已切換儲存位置，搬遷 {{count}} 張圖片",
+      "storageSwitchedToast": "已切換儲存位置",
+      "storageDialog": {
+        "title": "變更儲存位置",
+        "body": "新位置啟用後，之後產生的圖片都存在那裡。要把已產生的圖片也搬過去嗎？",
+        "cancel": "取消",
+        "switchOnly": "直接切換",
+        "moveAndSwitch": "搬遷並切換"
+      },
       "partialFailureToast": "已生成 {{count}} 張（{{model}}），{{failed}} 張失敗"
     },
     "siteConfig": {

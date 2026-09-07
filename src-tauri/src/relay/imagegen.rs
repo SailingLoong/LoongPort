@@ -327,12 +327,36 @@ pub(crate) fn images_url(base_url: &str) -> String {
 
 /// 出的图存哪。
 ///
-/// 放 `<数据目录>/generated_images/`：与数据库同目录，用户找得到，也不会污染他当前
-/// 的工作目录（Agent 常在用户仓库里跑，往那里丢文件会进 git status）。
+/// 优先用户自定义（settings.json 设备级 `imagegenOutputDir`，生图页「更改存储位置」
+/// 写入）；缺省 `<数据目录>/generated_images/`：与数据库同目录，用户找得到，也不会
+/// 污染他当前的工作目录（Agent 常在用户仓库里跑，往那里丢文件会进 git status）。
 pub(crate) fn output_dir() -> PathBuf {
+    if let Some(custom) = custom_output_dir() {
+        return custom;
+    }
     // 同样走 `app_dir()` —— 用户把数据目录挪走了，图也该跟着落在那里，
     // 而不是散在默认目录（他会找不到）。
     app_dir().join("generated_images")
+}
+
+/// 设备级设置里的自定义出图目录（绝对路径字符串）。
+///
+/// 直读 settings.json **文件**而不是 `crate::settings` 的进程内缓存 —— 与
+/// [`device_level_image_tier`] 同一个理由：MCP 子进程没有主程序的启动流程，缓存恒为
+/// 空，读缓存会一直得到「没有自定义」⇒ MCP 把图写进默认目录而 App 看自定义目录，
+/// 两边静默分叉。读文件让两个进程天然一致，且换路径后 **codex 不必重启**
+/// （MCP 每次生图现读，与切档位同一好处）。
+fn custom_output_dir() -> Option<PathBuf> {
+    let path = crate::config::get_home_dir()
+        .join(crate::config::APP_DIR_NAME)
+        .join("settings.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let dir = json.get("imagegenOutputDir")?.as_str()?.trim();
+    if dir.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(dir))
 }
 
 /// 一次请求的超时上限 = 每张图 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的既证预算 × 张数。
@@ -636,6 +660,8 @@ pub struct GalleryImage {
 /// 扫描出图目录，按 mtime 从新到旧返回（画廊顺序）。
 ///
 /// 目录不存在视为空画廊，不是错误 —— 没生成过图是常态。
+/// 只认 [`is_image_file`]（我们自己的命名）—— 存储路径指到用户目录时，
+/// 他的文件不进画廊。
 pub(crate) fn gallery_images() -> Vec<GalleryImage> {
     let dir = output_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -694,15 +720,72 @@ fn mime_from_extension(ext: &str) -> &'static str {
     }
 }
 
+/// 换存储位置时把旧目录里**我们生成的图**搬到新目录（一次性迁移）。
+///
+/// - 只搬 [`is_image_file`] 认的文件：旧目录若是用户自己的目录，他的东西不动。
+/// - 幂等：目标已有同名文件（内容寻址命名 ⇒ 同名即同内容）就跳过 ——
+///   中途失败重试不撞名、不重复占位；迁移发生在写设置**之前**，失败则设置不变。
+/// - 跨盘（如 C:→D:）`rename` 会失败，回落 copy + remove（对任何 rename 失败
+///   形态都安全）。
+/// - 返回实际搬过去的张数。
+pub(crate) fn migrate_images(from: &Path, to: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("创建新目录失败: {e}"))?;
+    let entries = std::fs::read_dir(from).map_err(|e| format!("读取旧目录失败: {e}"))?;
+    let mut moved = 0usize;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !is_image_file(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let dest = to.join(name);
+        if dest.exists() {
+            continue;
+        }
+        if std::fs::rename(&path, &dest).is_err() {
+            std::fs::copy(&path, &dest).map_err(|e| format!("复制图片失败: {e}"))?;
+            std::fs::remove_file(&path).map_err(|e| format!("删除旧图失败: {e}"))?;
+        }
+        moved += 1;
+    }
+    Ok(moved)
+}
+
+/// 这个文件是不是 **LoongPort 生成的图**：认 [`output_dir`] 里我们自己写的
+/// 内容寻址命名（`gpt-image-<12 位 hex>-<序号>.<图片扩展名>`，见 `generate_image`
+/// 的落盘处），不认「任何图片文件」。
+///
+/// ## 为什么必须按名字、不能按扩展名（自定义存储路径的安全前提）
+///
+/// 修剪（删最旧）和画廊都吃这个判据。用户一旦把存储路径指到**自己的目录**
+/// （比如放照片的文件夹），按扩展名过滤的修剪会把他自己的图当成「最旧的」
+/// **删掉**，画廊也会混进他的私人文件。按命名过滤则只认我们的产物：
+/// 用户目录里自己的文件永远不进画廊、永远不会被修剪碰到。
 fn is_image_file(path: &Path) -> bool {
-    path.extension()
-        .map(|ext| {
-            matches!(
-                ext.to_string_lossy().to_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "webp" | "gif"
-            )
-        })
-        .unwrap_or(false)
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif"
+    ) {
+        return false;
+    }
+    let Some((prefix, index)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    let Some(hash) = prefix.strip_prefix("gpt-image-") else {
+        return false;
+    };
+    hash.len() == 12
+        && hash.chars().all(|c| c.is_ascii_hexdigit())
+        && !index.is_empty()
+        && index.chars().all(|c| c.is_ascii_digit())
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
@@ -896,6 +979,61 @@ base_url = "https://api.example.com/v1"
         // 串行大批：不能合并（上游不收），逐张串行。
         assert_eq!(split_batch(5, false), (vec![1; 5], 1));
         assert_eq!(split_batch(50, false), (vec![1; 50], 1));
+    }
+
+    /// 只认自己写的内容寻址命名（`gpt-image-<12hex>-<序号>.<图片扩展名>`）——
+    /// 自定义存储路径的安全前提：用户的文件永远不进画廊、不被修剪碰到。
+    #[test]
+    fn is_image_file_only_recognizes_our_content_addressed_names() {
+        assert!(is_image_file(Path::new("/x/gpt-image-0123456789ab-0.png")));
+        assert!(is_image_file(Path::new("gpt-image-abcdef123456-12.webp")));
+        // 用户的图 / 命名形状不对的都不是我们的。
+        assert!(!is_image_file(Path::new("vacation.png")));
+        assert!(!is_image_file(Path::new("gpt-image-short-0.png")));
+        assert!(!is_image_file(Path::new("gpt-image-0123456789ab-x.png")));
+        assert!(!is_image_file(Path::new("gpt-image-0123456789ab.png")));
+        assert!(!is_image_file(Path::new("gpt-image-0123456789ab-0.txt")));
+    }
+
+    /// 迁移只搬我们的图、用户的文件留原地，且幂等（同名跳过，重试不撞）。
+    #[test]
+    fn migrate_moves_only_our_named_files_and_is_idempotent() {
+        let base = std::env::temp_dir().join(format!("lp-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let from = base.join("from");
+        let to = base.join("to");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("gpt-image-0123456789ab-0.png"), b"a").unwrap();
+        std::fs::write(from.join("gpt-image-abcdef123456-1.webp"), b"b").unwrap();
+        std::fs::write(from.join("vacation.png"), b"mine").unwrap();
+        std::fs::write(from.join("notes.txt"), b"x").unwrap();
+
+        assert_eq!(migrate_images(&from, &to).unwrap(), 2);
+        assert!(to.join("gpt-image-0123456789ab-0.png").exists());
+        assert!(!from.join("gpt-image-0123456789ab-0.png").exists());
+        assert!(
+            from.join("vacation.png").exists() && from.join("notes.txt").exists(),
+            "用户的文件必须留在原地"
+        );
+
+        // 幂等：旧目录再出现同名文件（中途失败的残局）时目标已有同名 ⇒ 跳过。
+        std::fs::write(from.join("gpt-image-0123456789ab-0.png"), b"a").unwrap();
+        assert_eq!(migrate_images(&from, &to).unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// ⭐ `imagegenOutputDir` 这个手抄的 JSON 键必须与 `AppSettings` 字段对得上
+    /// （serde camelCase 派生）。抄错 ⇒ 自定义路径永远读不到，图悄悄落回默认目录，
+    /// 而 App 与 MCP 两边一致地错 —— 没有任何东西会报错。
+    #[test]
+    fn the_output_dir_key_matches_the_settings_field() {
+        let settings_rs = include_str!("../settings.rs");
+        assert!(
+            settings_rs.contains("pub imagegen_output_dir: Option<String>"),
+            "`AppSettings::imagegen_output_dir` 改名了 —— `custom_output_dir` 里那个 \
+             camelCase 键名跟着改"
+        );
     }
 
     /// 同一份内容得到同一个名字（可复现），不同内容不撞名。

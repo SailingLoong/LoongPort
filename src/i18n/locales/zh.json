@@ -3470,6 +3470,17 @@
       "galleryLoading": "加载中…",
       "galleryEmpty": "还没有生成过图片",
       "reveal": "在文件夹中显示",
+      "storageLabel": "存储位置",
+      "storageChange": "更改",
+      "storageMovedToast": "已切换存储位置，搬迁 {{count}} 张图片",
+      "storageSwitchedToast": "已切换存储位置",
+      "storageDialog": {
+        "title": "更改存储位置",
+        "body": "新位置启用后，之后生成的图片都存在那里。要把已生成的图片也搬过去吗？",
+        "cancel": "取消",
+        "switchOnly": "直接切换",
+        "moveAndSwitch": "搬迁并切换"
+      },
       "partialFailureToast": "已生成 {{count}} 张（{{model}}），{{failed}} 张失败"
     },
     "siteConfig": {
