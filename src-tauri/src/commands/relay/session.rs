@@ -620,3 +620,177 @@ pub(crate) fn relay_status_impl(state: &AppState) -> Result<RelayStatus, AppErro
         should_prompt_add_site,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::relay::test_support::*;
+
+    #[test]
+    fn relay_status_owns_the_global_add_site_prompt_decision() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db);
+
+        assert!(
+            relay_status_impl(&state)
+                .expect("empty status")
+                .should_prompt_add_site
+        );
+
+        with_conn(&state, |conn| {
+            crate::vendor::creds::save_account(
+                conn,
+                crate::vendor::Vendor::DeepSeek,
+                "token",
+                &crate::vendor::VendorAccount {
+                    account_id: "account-7".into(),
+                    label: "DeepSeek user".into(),
+                    login_identifier: "13800000000".into(),
+                },
+            )?;
+            Ok(())
+        })
+        .expect("save vendor account");
+
+        assert!(
+            !relay_status_impl(&state)
+                .expect("configured status")
+                .should_prompt_add_site
+        );
+    }
+
+    #[test]
+    fn refresh_summary_counts_vendor_config_for_the_current_app() {
+        let summary = refresh_summary(
+            &AppType::Codex,
+            Vec::new(),
+            vec![(
+                "DeepSeek".into(),
+                Ok(crate::commands::vendor::VendorProvisionSummary {
+                    provider_id: "managed-deepseek".into(),
+                    platforms: vec![
+                        AppType::Codex.as_str().into(),
+                        AppType::Claude.as_str().into(),
+                    ],
+                    key_created: true,
+                    merged_providers: vec!["Imported DeepSeek".into()],
+                }),
+            )],
+        );
+
+        assert_eq!(summary.refreshed_accounts, 1);
+        assert_eq!(summary.tiers, 1);
+        assert_eq!(summary.other_platform_tiers, 0);
+        assert_eq!(summary.keys_created, 1);
+        assert_eq!(summary.merged_providers, 1);
+        assert!(matches!(summary.notice, RefreshNotice::UpdatedWithKeys));
+    }
+
+    #[test]
+    fn refresh_result_is_cloneable() {
+        let result = RefreshResult {
+            summary: RefreshSummary {
+                notice: RefreshNotice::None,
+                refreshed_accounts: 0,
+                tiers: 0,
+                keys_created: 0,
+                other_platform_tiers: 0,
+                merged_providers: 0,
+                failures: Vec::new(),
+            },
+            balances: Vec::new(),
+        };
+
+        let cloned = result.clone();
+        assert!(matches!(cloned.summary.notice, RefreshNotice::None));
+    }
+
+    /// 续期救不回来时（refresh token 也被服务端拒了），必须把**原错误**交回去：
+    /// `check_session` 靠错误分类决定清会话，换成续期那条报错会悄悄改变判读。
+    #[tokio::test]
+    async fn relay_read_returns_original_error_when_refresh_cannot_rescue() {
+        use axum::{
+            http::StatusCode,
+            routing::{get, post},
+            Json, Router,
+        };
+        let router = Router::new()
+            .route(
+                "/api/v1/user/profile",
+                get(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "code": "TOKEN_EXPIRED",
+                            "message": "登录已过期，请重新登录"
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/auth/refresh",
+                post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "code": "REFRESH_TOKEN_INVALID",
+                            "message": "refresh token 已失效"
+                        })),
+                    )
+                }),
+            );
+        let (origin, server) = spawn_balance_server(router).await;
+        let (app, relay_id) = saved_relay_app(&origin, discovery::BackendKind::Sub2Api);
+
+        let error = relay_read_with_refresh_retry(app.handle(), relay_id, |op| async move {
+            backend::RuntimeBackend::for_relay(&op).balance().await
+        })
+        .await
+        .expect_err("续期失败时原请求的错误必须往外抛");
+
+        assert!(error.to_string().contains("登录已过期"), "{error}");
+        assert!(!error.to_string().contains("续期失败"), "{error}");
+        let creds = relay_credentials(&app, relay_id);
+        assert_eq!(
+            creds.auth_token, "saved-access-token",
+            "续期失败不得改动库里的凭据"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pricing_refresh_skips_fresh_rows_and_continues_after_one_failure() {
+        let mut fresh = test_newapi_relay(1);
+        fresh.pricing_synced_at = Some(100);
+        let failed = test_newapi_relay(2);
+        let succeeded = test_newapi_relay(3);
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let attempts_for_refresh = Arc::clone(&attempts);
+
+        let summary = refresh_due_relay_pricing_rows(
+            vec![fresh, failed, succeeded],
+            159,
+            std::time::Duration::from_secs(60),
+            move |relay| {
+                let attempts = Arc::clone(&attempts_for_refresh);
+                async move {
+                    attempts.lock().unwrap().push(relay.id);
+                    if relay.id == 2 {
+                        Err(AppError::Message("expected failure".into()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(summary.attempted, 2);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].0, 2);
+        let mut attempted_ids = attempts.lock().unwrap().clone();
+        attempted_ids.sort_unstable();
+        assert_eq!(attempted_ids, vec![2, 3]);
+    }
+}

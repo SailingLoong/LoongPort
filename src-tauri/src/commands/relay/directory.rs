@@ -187,3 +187,50 @@ pub(crate) async fn refresh_stale_directories(
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_update_event_matches_the_frontend_constant() {
+        let frontend = include_str!("../../../../src/config/constants.ts");
+
+        assert!(frontend.contains(RELAY_DIRECTORY_UPDATED_EVENT));
+    }
+
+    /// ⭐ `relay_list_sponsors` 发给前端的**键名**必须是 camelCase。
+    ///
+    /// 这条守的是一个跨语言的静默失效：`Sponsor` 的 `Deserialize` 用 snake_case
+    /// （签名覆盖的配置契约，动不了），`Serialize` 用 camelCase（TS 侧惯例）。
+    /// 两者不一致看起来像疏漏，**很可能被人顺手统一** —— 而统一到 snake_case 时
+    /// 编译器一声不响，前端拿到的每个字段都是 `undefined` ⇒
+    /// **首启屏卡片全是空白按钮**（`displayName` 为 undefined、React 什么都不渲染）。
+    ///
+    /// 断言的是序列化后的键，不是结构体字段名 —— 后者与前端无关。
+    /// （`remote_config` 那边也有一条同向的闸，两处各守一端：
+    /// 那条管「结构体的两个方向」，这条管「命令实际吐出去的东西」。）
+    #[test]
+    fn list_sponsors_emits_camel_case_keys_for_the_frontend() {
+        let sponsor = crate::relay::remote_config::Sponsor {
+            site_origin: "https://x.com".into(),
+            display_name: "X".into(),
+            tagline: "T".into(),
+        };
+        // 命令的返回类型是 `Vec<Sponsor>`，所以按它实际的序列化形态断言。
+        let json = serde_json::to_value(vec![sponsor]).expect("要能序列化");
+        let first = json[0].as_object().expect("是个对象");
+
+        for key in ["siteOrigin", "displayName", "tagline"] {
+            assert!(
+                first.contains_key(key),
+                "前端要的键 {key} 不在返回里，实际：{:?}",
+                first.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            !first.contains_key("site_origin") && !first.contains_key("display_name"),
+            "别把 snake_case 键发给前端（TS 那边按 camelCase 读）"
+        );
+    }
+}

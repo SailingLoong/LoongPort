@@ -233,3 +233,200 @@ pub async fn relay_reset_site_config(
         applied,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 「恢复内置默认」把应用过声明的档位退回去：settings 重建为
+    /// `settings_config_for` 形状（sk/端点/模型保留）、标注清空。
+    /// 与 `first_import_applies_site_declaration_segment` 构成一对往返。
+    #[test]
+    fn reset_site_config_restores_builtin_defaults() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let site = "https://api.example.com";
+
+        // 直接造一条「应用过声明」的托管档位（不跑 persist，那段已有专测）。
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let mut settings = provision::settings_config_for(
+            &AppType::Codex,
+            "sk-test",
+            "Example·Pro池",
+            "https://api.example.com/v1",
+            "gpt-5.6-sol",
+        )
+        .expect("defaults");
+        let declared = crate::relay::site_config::parse_site_config(
+                r#"{
+                    "schema_version": 1,
+                    "site_origin": "https://api.example.com",
+                    "platforms": { "openai": { "model": "gpt-5.6-codex", "model_reasoning_effort": "minimal" } }
+                }"#,
+            )
+            .expect("declaration");
+        crate::relay::site_config::apply_segment_to_app(
+            &AppType::Codex,
+            declared
+                .segment_for(platform_map::Platform::OpenAI)
+                .unwrap(),
+            &mut settings,
+        )
+        .expect("apply");
+        let provider = crate::provider::Provider {
+            id: provider_id.clone(),
+            name: "Example·Pro池".into(),
+            settings_config: settings,
+            website_url: Some(site.into()),
+            category: Some("aggregator".into()),
+            created_at: Some(chrono::Utc::now().timestamp_millis()),
+            sort_index: Some(0),
+            notes: None,
+            meta: Some(crate::provider::ProviderMeta {
+                site_declared_origin: Some(site.into()),
+                ..Default::default()
+            }),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        state.db.save_provider("codex", &provider).expect("save");
+
+        // 重建要素提取 + 重建（command 体内联逻辑的等价直调，不起 tauri runtime）。
+        let (api_key, base_url, model) =
+            rebuild_inputs_from_settings(&AppType::Codex, &provider.settings_config)
+                .expect("rebuild inputs");
+        assert_eq!(api_key, "sk-test");
+        assert_eq!(base_url, "https://api.example.com/v1");
+        // 模型提取自声明覆盖后的值——重建以现状为基线，不回滚站长的模型选择
+        assert_eq!(model, "gpt-5.6-codex");
+        let defaults = provision::settings_config_for(
+            &AppType::Codex,
+            &api_key,
+            "Example·Pro池",
+            &base_url,
+            &model,
+        )
+        .expect("rebuild");
+        let toml_value: toml::Value = toml::from_str(defaults["config"].as_str().unwrap()).unwrap();
+        // 声明的参数键已退掉（reasoning 回到内置 high），sk/端点保留
+        assert_eq!(toml_value["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(toml_value["model"].as_str(), Some("gpt-5.6-codex"));
+        assert_eq!(
+            toml_value["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://api.example.com/v1")
+        );
+        assert_eq!(defaults["auth"]["OPENAI_API_KEY"], "sk-test");
+    }
+
+    /// 站点声明（relay/site_config.rs）随首次导入自动应用：段覆盖内置默认的调用
+    /// 参数、deny 键进不来、meta 落「站点推荐配置」标注。spec 的 M2 硬门槛。
+    #[test]
+    fn first_import_applies_site_declaration_segment() {
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let site = "https://api.example.com";
+        let row_id = with_conn(&state, |conn| {
+            creds::save_site_with_backend(
+                conn,
+                site,
+                "Example",
+                site,
+                discovery::BackendKind::Sub2Api,
+            )
+        })
+        .expect("save site");
+        with_conn(&state, |conn| {
+            creds::save_credentials(
+                conn,
+                row_id,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "我的号",
+                    login_identifier: "me@x.com",
+                },
+                "tok",
+                None,
+                Some(i64::MAX),
+                creds::SessionEnvironment::default(),
+            )
+        })
+        .expect("credentials");
+        let op = with_conn(&state, |conn| creds::get(conn, row_id))
+            .expect("load")
+            .expect("exists");
+
+        let declaration = crate::relay::site_config::parse_site_config(
+            r#"{
+                    "schema_version": 1,
+                    "site_origin": "https://api.example.com",
+                    "platforms": {
+                        "openai": {
+                            "model": "gpt-5.6-codex",
+                            "model_reasoning_effort": "minimal",
+                            "model_context_window": 272000,
+                            "mcp_servers": { "evil": {} }
+                        }
+                    }
+                }"#,
+        )
+        .expect("declaration");
+
+        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let batch = ManagedProvisionBatch {
+            account_id: Some(7),
+            site_declaration: Some(declaration),
+            candidates: vec![ManagedProvisionCandidate {
+                provider_id: provider_id.clone(),
+                app_type: AppType::Codex,
+                group_id: "1".into(),
+                group_name: "Pro池".into(),
+                rate_multiplier: Some(0.15),
+                api_key: "sk-test".into(),
+                model: "gpt-5.6-sol".into(),
+                models: None,
+                roles: None,
+                allow_image_generation: Some(false),
+                api_base_url: site.into(),
+            }],
+            observed_keep: Default::default(),
+            failures: Vec::new(),
+            keys_created: 0,
+        };
+        persist_provision_batch(&state, &op, batch).expect("persist");
+
+        let provider = state
+            .db
+            .get_provider_by_id(&provider_id, "codex")
+            .expect("read")
+            .expect("provider exists");
+        let config_text = provider.settings_config["config"].as_str().expect("toml");
+        let parsed: toml::Value = toml::from_str(config_text).expect("valid toml");
+        // 站长声明优先：模型与推理档位都来自声明段
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5.6-codex"));
+        assert_eq!(
+            parsed["model_reasoning_effort"].as_str(),
+            Some("minimal"),
+            "声明段覆盖内置写死的 high"
+        );
+        assert_eq!(parsed["model_context_window"].as_integer(), Some(272000));
+        // deny 键进不来；端点与 sk 保持建档值
+        assert!(parsed.get("mcp_servers").is_none());
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://api.example.com/v1")
+        );
+        assert_eq!(
+            provider.settings_config["auth"]["OPENAI_API_KEY"],
+            "sk-test"
+        );
+        // 来源标注（UI 的「站点推荐配置」徽标 + 回退入口数据）
+        assert_eq!(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|m| m.site_declared_origin.as_deref()),
+            Some("https://api.example.com")
+        );
+    }
+}
