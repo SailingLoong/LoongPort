@@ -283,7 +283,9 @@ async fn pick_model(base_url: &str, key: &str) -> Result<String, String> {
 
 fn verify_hint(app: &AppType) -> &'static str {
     match app {
-        AppType::Codex => "codex exec \"回复一个字：好\"",
+        // --skip-git-repo-check：服务器场景通常在 $HOME 这类非 git 目录里跑，
+        // 不带这个参数 codex 直接拒绝执行（20.04 真机实测）。
+        AppType::Codex => "codex exec --skip-git-repo-check \"回复一个字：好\"",
         AppType::Claude => "claude -p \"回复一个字：好\"",
         _ => "直接运行该 CLI 发一条消息",
     }

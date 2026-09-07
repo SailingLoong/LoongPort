@@ -54,7 +54,7 @@ $ loongport-cli --add-site https://example.com --key sk-xxxx --app codex
 探测站点 https://example.com …
 ✅ 已为 codex 配置「某中转站」（模型 gpt-5.4）
    密钥已写进 CLI 自己的配置文件，无需再设环境变量。
-   验证: codex exec "回复一个字：好"
+   验证: codex exec --skip-git-repo-check "回复一个字：好"
 ```
 
 ### `--model` 省略时会发生什么
@@ -80,13 +80,21 @@ $ loongport-cli --add-site https://example.com --key sk-xxxx --app codex
 配完直接用目标 CLI 验证：
 
 ```bash
-codex exec "回复一个字：好"    # 或
+codex exec --skip-git-repo-check "回复一个字：好"    # 或
 claude -p "回复一个字：好"
 ```
 
+> `--skip-git-repo-check` 是 codex 的要求：不在 git 仓库里执行时要显式带上
+> （服务器上通常就在 `$HOME`，实测必踩）。
+
 ## 前提与边界
 
-- **前提**：目标 CLI 本身（codex / claude 等）需要自己先装好，本工具只负责写配置
+- **前提**：目标 CLI 本身（codex / claude 等）需要自己先装好，本工具只负责写配置。两者都通过 npm 安装，**需要 Node 18+**——注意 Ubuntu 20.04 用 `apt` 装的 Node 是 12（太老），用 NodeSource 装：
+
+  ```bash
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
+  sudo npm install -g @openai/codex @anthropic-ai/claude-code
+  ```
 - **重复运行**：固定 provider id `loongport-relay`，再跑一次 = 覆盖上一次。换站、换 key、换模型都是重跑同一条命令，不会堆积残留
 - **不做的事**：浏览器 OAuth 登录、多账号、档位管理、本地路由与故障转移——那些是桌面版的能力；服务器上的多站多档位需求等真实用户反馈再议
 - 退出码：`0` 成功，`1` 运行错误（网络 / 密钥 / 写盘），`2` 参数错误
