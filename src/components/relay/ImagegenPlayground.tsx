@@ -29,6 +29,7 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Command,
   CommandEmpty,
@@ -80,6 +81,8 @@ export function ImagegenPlayground() {
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState<string>("1024x1024");
   const [count, setCount] = useState<string>("1");
+  // 并发提交是本次会话的生成偏好（默认开），不落设置 —— 折叠态这类 UI 偏好归前端。
+  const [parallel, setParallel] = useState(true);
   const [preview, setPreview] = useState<ImagegenGalleryEntry | null>(null);
   const [tierPickerOpen, setTierPickerOpen] = useState(false);
 
@@ -111,7 +114,7 @@ export function ImagegenPlayground() {
     const parsed = Number.parseInt(count, 10);
     const safe = Number.isNaN(parsed) ? 1 : Math.min(50, Math.max(1, parsed));
     generate.mutate(
-      { prompt: prompt.trim(), size, count: safe },
+      { prompt: prompt.trim(), size, count: safe, parallel },
       {
         onSuccess: (result) => {
           // 部分失败：成功的图已落盘画廊，warning 说明有几张没成，别当整体失败。
@@ -241,7 +244,7 @@ export function ImagegenPlayground() {
               </SelectContent>
             </Select>
             {/* 批量张数：自由输入（1-50，后端闸）。一次点下去就是 n 张的钱，
-                hint 把后果写在点上；>4 张后端自动拆并发单张，耗时 ≈ 张数/4 × 单张。 */}
+                hint 把后果写在点上；提交节奏（并发/串行）由旁边的勾选框决定。 */}
             <Input
               type="number"
               inputMode="numeric"
@@ -260,6 +263,19 @@ export function ImagegenPlayground() {
               title={t("loongport.imagegenPlayground.countHint")}
               className="w-[80px]"
             />
+            {/* 并发提交：勾=多张拆并发单张（快）；不勾=小批量合并一条、大批量逐张
+                （慢而稳，对站点最友好）。取舍归用户，语义唯源在后端 split_batch。 */}
+            <label
+              className="flex cursor-pointer select-none items-center gap-1.5 text-sm"
+              title={t("loongport.imagegenPlayground.parallelHint")}
+            >
+              <Checkbox
+                checked={parallel}
+                onCheckedChange={(checked) => setParallel(checked === true)}
+                aria-label={t("loongport.imagegenPlayground.parallelLabel")}
+              />
+              {t("loongport.imagegenPlayground.parallelLabel")}
+            </label>
             <Button
               type="button"
               onClick={onGenerate}

@@ -190,7 +190,7 @@ fn tools_list() -> Value {
                 },
                 "n": {
                     "type": "integer",
-                    "description": "一次生成几张（1-50，默认 1）。按张数计费；超过 4 张会自动拆成并发单张请求。大批量耗时更长，宿主的工具超时（codex 默认 300 秒）可能在完成前先到 —— 超大批量时并发多次调用本工具（每次各自计时）通常更稳。"
+                    "description": "一次生成几张（1-50，默认 1）。按张数计费；多张会自动拆成并发单张请求。大批量耗时更长，宿主的工具超时（codex 默认 300 秒）可能在完成前先到 —— 超大批量时并发多次调用本工具（每次各自计时）通常更稳。"
                 }
             },
             "required": ["prompt"]
@@ -254,7 +254,9 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
     // 档位，下一次生图就该用新的，**不必重启 codex**。见 `imagegen::current_image_tier_id`。
     let tier = imagegen::load_current_tier()?;
-    let (images, failed) = imagegen::generate_batch(&tier, prompt, size, n).await?;
+    // MCP 入口恒为并发：agent 想串行有自己的表达（逐次调用工具天然串行），
+    // 不为它加 schema 噪音。见 `imagegen::split_batch` 的表。
+    let (images, failed) = imagegen::generate_batch(&tier, prompt, size, n, true).await?;
     let list = images
         .iter()
         .map(|i| i.path.display().to_string())

@@ -30,7 +30,8 @@ export const useImagegenGallery = () =>
     staleTime: 30_000,
   });
 
-/** App 内直接生图（count = 张数，后端闸 1..=4）。成功后失效画廊（新图出现在最前面）。 */
+/** App 内直接生图（count = 张数 1..=50；parallel = 并发提交，缺省开）。
+ *  成功后失效画廊（新图出现在最前面）。 */
 export const useImagegenGenerate = () => {
   const queryClient = useQueryClient();
   return useMutation({
@@ -38,11 +39,13 @@ export const useImagegenGenerate = () => {
       prompt,
       size,
       count,
+      parallel,
     }: {
       prompt: string;
       size: string | null;
       count: number;
-    }) => relayApi.imagegenGenerate(prompt, size, count),
+      parallel: boolean;
+    }) => relayApi.imagegenGenerate(prompt, size, count, parallel),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: imagegenKeys.gallery });
     },

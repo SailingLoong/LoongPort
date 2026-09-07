@@ -39,15 +39,16 @@ pub struct ImagegenGenerateResult {
 /// 与 MCP 工具（`--mcp-image-gen`）共用 [`imagegen`] 这一个核心 —— 档位选择、
 /// 请求形状、落盘与修剪完全一致，差别只在结果不进宿主对话。
 ///
-/// `n` = 张数（批量，1-50 自由输入）。范围判据的唯一源在核心层
-/// （`imagegen::validate_count`），>4 张的并发拆单与部分失败语义见
-/// `imagegen::generate_batch`，本层只做缺省补 1。
+/// `n` = 张数（批量，1-50 自由输入），范围判据的唯一源在核心层
+/// （`imagegen::validate_count`）；`parallel` = 并发提交开关（生成视图的勾选框，
+/// 缺省开）——两种模式的形状与取舍见 `imagegen::split_batch` 的表，本层只做缺省补全。
 #[tauri::command]
 pub async fn relay_imagegen_generate(
     app_handle: tauri::AppHandle,
     prompt: String,
     size: Option<String>,
     n: Option<u32>,
+    parallel: Option<bool>,
 ) -> Result<ImagegenGenerateResult, String> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -55,7 +56,14 @@ pub async fn relay_imagegen_generate(
     }
     let count = imagegen::validate_count(n.unwrap_or(1))?;
     let tier = imagegen::load_current_tier()?;
-    let (images, failed) = imagegen::generate_batch(&tier, prompt, size.as_deref(), count).await?;
+    let (images, failed) = imagegen::generate_batch(
+        &tier,
+        prompt,
+        size.as_deref(),
+        count,
+        parallel.unwrap_or(true),
+    )
+    .await?;
     imagegen::ensure_asset_scope(&app_handle);
     Ok(ImagegenGenerateResult {
         tier_name: tier.display_name,
