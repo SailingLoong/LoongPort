@@ -73,8 +73,8 @@ fn start_relay_pricing_refresh(app: tauri::AppHandle) {
 #[cfg(feature = "gui")]
 /// 站点实测共建：每 15 分钟 flush 已闭合的小时桶。
 ///
-/// 门禁（`crowd_metrics_enabled`）在 `flush_once` 里读 —— 关着时任务是纯空转，
-/// 不需要在注册层再做一次判断（两处判断迟早分叉）。
+/// 门禁（开关 + 看过告知，见 `crowd::uploader::upload_allowed`）在 `flush_once`
+/// 里读 —— 不满足时任务是纯空转，不需要在注册层再做一次判断（两处判断迟早分叉）。
 fn start_crowd_metrics_flush(app: tauri::AppHandle) {
     let schedule = scheduler::TaskSchedule::new(
         config::CROWD_METRICS_STARTUP_DELAY,

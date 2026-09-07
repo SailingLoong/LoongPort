@@ -419,9 +419,9 @@ export interface Settings {
    * API key 名，复用它就能把上报对回一个付费账号。
    */
   statsInstallId?: string;
-  /** 站点实测共建：上传小时聚合指标 + 解锁广场实测数据（对等条款）。默认关。 */
+  /** 站点实测共建：上传小时聚合指标 + 解锁广场实测数据（对等条款）。默认开（2026-09-07 起）。 */
   crowdMetricsEnabled?: boolean;
-  /** 共建告知表过态没。`undefined` = 还没表态 ⇒ 首次触达实测区时给加入入口。 */
+  /** 共建告知看过了没。`undefined` = 还没看过 ⇒ 有中转站后弹一次；置位是上传的前置条件。 */
   crowdMetricsNoticeConfirmed?: boolean;
   enableFailoverToggle?: boolean;
   // Whether to show the project profile switcher on the main page header

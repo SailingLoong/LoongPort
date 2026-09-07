@@ -78,7 +78,9 @@ export function RelayDirectoryPage({
     null,
   );
   const { settings: appSettings } = useSettings();
-  const crowdEnabled = appSettings?.crowdMetricsEnabled ?? false;
+  // 兜底与后端默认值同向（2026-09-07 起默认开）：字段实际总在，只有极端的
+  // 缺键情形才会落到兜底。
+  const crowdEnabled = appSettings?.crowdMetricsEnabled ?? true;
   // 详情弹窗的实测深数据（w7/时段/分布）：共建门禁内 —— 行级观测徽章公开，
   // 由列表 DTO 的 item.crowd 承载，不走这份门禁内快照。
   const crowdSnapshotQuery = useQuery({
