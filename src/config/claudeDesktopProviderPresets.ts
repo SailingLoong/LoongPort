@@ -42,10 +42,7 @@ export interface ClaudeDesktopProviderPreset {
   nameKey?: string;
   websiteUrl: string;
   apiKeyUrl?: string;
-  category?: ProviderCategory;
-  isPartner?: boolean;
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
-  partnerPromotionKey?: string;
+  category?: ProviderCategory; // 置顶合作伙伴（顶级）：徽章显示为心形
 
   baseUrl: string;
   apiKeyField?: "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";
@@ -153,7 +150,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
   // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
   {
     name: "Kimi",
-    primePartner: true,
     websiteUrl: "https://platform.kimi.com",
     category: "cn_official",
     baseUrl: "https://api.moonshot.cn/anthropic",
@@ -164,13 +160,11 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "kimi-k2.7-code",
       "kimi-k2.7-code",
     ),
-    partnerPromotionKey: "kimi",
     icon: "kimi",
     iconColor: "#6366F1",
   },
   {
     name: "Kimi For Coding",
-    primePartner: true,
     websiteUrl: "https://www.kimi.com/code/",
     category: "cn_official",
     baseUrl: "https://api.kimi.com/coding/",
@@ -195,8 +189,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "https://slb-v1.api.fan",
       "https://www.packyapi.com",
     ],
-    isPartner: true,
-    partnerPromotionKey: "packycode",
     icon: "packycode",
   },
   {
@@ -208,8 +200,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "zetaapi",
     icon: "zetaapi",
   },
   {
@@ -222,8 +212,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://apinebula.ai"],
-    isPartner: true,
-    partnerPromotionKey: "apinebula",
     icon: "apinebula",
   },
   {
@@ -236,8 +224,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.aicodemirror.ai/api/claudecode"],
-    isPartner: true,
-    partnerPromotionKey: "aicodemirror",
     icon: "aicodemirror",
     iconColor: "#000000",
   },
@@ -250,8 +236,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "patewayai",
     icon: "pateway",
   },
   {
@@ -264,8 +248,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "fenno",
     icon: "fenno",
   },
   {
@@ -278,8 +260,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://runapi.host", "https://runapi.co"],
-    isPartner: true,
-    partnerPromotionKey: "runapi",
     icon: "runapi",
   },
   {
@@ -296,8 +276,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "anthropic/claude-opus-5",
       "anthropic/claude-haiku-4.5",
     ),
-    isPartner: true,
-    partnerPromotionKey: "shengsuanyun",
     icon: "shengsuanyun",
   },
   {
@@ -310,8 +288,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.aigocode.app"],
-    isPartner: true,
-    partnerPromotionKey: "aigocode",
     icon: "aigocode",
     iconColor: "#5B7FFF",
   },
@@ -326,8 +302,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.qnaigc.com", "https://api.modelink.ai"],
-    isPartner: true,
-    partnerPromotionKey: "qiniu",
     icon: "qiniu",
   },
   {
@@ -340,8 +314,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.aicoding.inc"],
-    isPartner: true,
-    partnerPromotionKey: "aicoding",
     icon: "aicoding",
     iconColor: "#000000",
   },
@@ -354,8 +326,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(true),
-    isPartner: true,
-    partnerPromotionKey: "subrouter",
     icon: "subrouter",
   },
   {
@@ -368,8 +338,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.apikey.fun", "https://slb.apikey.fun"],
-    isPartner: true,
-    partnerPromotionKey: "apikeyfun",
     icon: "apikeyfun",
   },
   {
@@ -381,8 +349,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "claudeapi",
     icon: "claudeapi",
   },
   {
@@ -394,8 +360,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "code0",
     icon: "code0",
   },
   {
@@ -407,8 +371,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "teamorouter",
     icon: "teamorouter",
   },
   {
@@ -416,8 +378,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     websiteUrl: "https://ppio.com",
     apiKeyUrl: "https://ppio.com",
     category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "ppio",
     baseUrl: "https://api.ppio.com/anthropic",
     mode: "proxy",
     apiFormat: "anthropic",
@@ -440,8 +400,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "claudecn",
     icon: "claudecn",
   },
   {
@@ -459,8 +417,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     ),
     icon: "huoshan",
     iconColor: "#3370FF",
-    isPartner: true,
-    partnerPromotionKey: "volcengine_agentplan",
   },
   {
     name: "火山 Coding Plan",
@@ -477,8 +433,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     ),
     icon: "huoshan",
     iconColor: "#3370FF",
-    isPartner: true,
-    partnerPromotionKey: "volcengine_codingplan",
   },
   {
     name: "BytePlus",
@@ -495,8 +449,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     ),
     icon: "byteplus",
     iconColor: "#3370FF",
-    isPartner: true,
-    partnerPromotionKey: "byteplus",
   },
   {
     name: "DouBaoSeed",
@@ -513,8 +465,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "doubao-seed-2-1-pro-260628",
       "doubao-seed-2-1-pro-260628",
     ),
-    isPartner: true,
-    partnerPromotionKey: "doubaoseed",
     icon: "doubao",
     iconColor: "#3370FF",
   },
@@ -531,8 +481,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "Pro/MiniMaxAI/MiniMax-M2.5",
       "Pro/MiniMaxAI/MiniMax-M2.5",
     ),
-    isPartner: true,
-    partnerPromotionKey: "siliconflow",
     icon: "siliconflow",
     iconColor: "#6E29F6",
   },
@@ -549,8 +497,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "MiniMaxAI/MiniMax-M3",
       "MiniMaxAI/MiniMax-M3",
     ),
-    isPartner: true,
-    partnerPromotionKey: "siliconflow",
     icon: "siliconflow",
     iconColor: "#000000",
   },
@@ -563,8 +509,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "a6api",
     icon: "a6api",
   },
   {
@@ -577,8 +521,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.atlascloud.ai"],
-    isPartner: true,
-    partnerPromotionKey: "atlascloud",
     icon: "atlascloud",
   },
   {
@@ -592,8 +534,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.modelverse.cn"],
-    isPartner: true,
-    partnerPromotionKey: "ucloud",
     icon: "ucloud",
     iconColor: "#000000",
   },
@@ -608,8 +548,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://cp.compshare.cn"],
-    isPartner: true,
-    partnerPromotionKey: "ucloud",
     icon: "ucloud",
     iconColor: "#000000",
   },
@@ -622,8 +560,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(true),
-    isPartner: true,
-    partnerPromotionKey: "ccsub",
     icon: "ccsub",
   },
   {
@@ -640,8 +576,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "https://node-hk.sssaiapi.com/api",
       "https://node-cf.sssaicodeapi.com/api",
     ],
-    isPartner: true,
-    partnerPromotionKey: "sssaicode",
     icon: "sssaicode",
     iconColor: "#000000",
   },
@@ -655,8 +589,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://www.micuapi.ai"],
-    isPartner: true,
-    partnerPromotionKey: "micu",
     icon: "micu",
     iconColor: "#000000",
   },
@@ -669,8 +601,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "rightcode",
     icon: "rc",
     iconColor: "#E96B2C",
   },
@@ -683,8 +613,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "direct",
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
-    isPartner: true,
-    partnerPromotionKey: "etok",
     icon: "etok",
     iconColor: "#000000",
   },
@@ -703,8 +631,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
       "https://api-dmit.cubence.com",
       "https://api-bwg.cubence.com",
     ],
-    isPartner: true,
-    partnerPromotionKey: "cubence",
     icon: "cubence",
     iconColor: "#000000",
   },
@@ -718,8 +644,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://cn.crazyrouter.com"],
-    isPartner: true,
-    partnerPromotionKey: "crazyrouter",
     icon: "crazyrouter",
     iconColor: "#000000",
   },
@@ -733,8 +657,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://www.dmxapi.cn", "https://api.dmxapi.cn"],
-    isPartner: true,
-    partnerPromotionKey: "dmxapi",
   },
   {
     name: "SudoCode.chat",
@@ -746,8 +668,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://api.sudocode.chat"],
-    isPartner: true,
-    partnerPromotionKey: "sudocode",
     icon: "sudocode",
   },
   {
@@ -760,7 +680,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://sudocode.us", "https://sudocode.run"],
-    isPartner: true,
     icon: "sudocode-us",
   },
   {
@@ -773,8 +692,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     apiFormat: "anthropic",
     modelRoutes: passthroughRoutes(),
     endpointCandidates: ["https://apicdn.xycai.us", "https://apicdn.xyc.ai"],
-    isPartner: true,
-    partnerPromotionKey: "xycai",
     icon: "xycai",
   },
   // ===== 非赞助商预设：应用内展示按显示名排序，此处文件顺序不影响展示 =====
@@ -869,7 +786,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     name: "OpenCode Go",
     websiteUrl: "https://opencode.ai/go",
     apiKeyUrl: "https://opencode.ai",
-    partnerPromotionKey: "opencode_go",
     category: "third_party",
     baseUrl: "https://opencode.ai/zen/go",
     mode: "proxy",
@@ -1041,7 +957,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "proxy",
     apiFormat: "anthropic",
     modelRoutes: brandedRoutes("MiniMax-M2.7", "MiniMax-M2.7", "MiniMax-M2.7"),
-    partnerPromotionKey: "minimax_cn",
     theme: {
       backgroundColor: "#f64551",
       textColor: "#FFFFFF",
@@ -1058,7 +973,6 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     mode: "proxy",
     apiFormat: "anthropic",
     modelRoutes: brandedRoutes("MiniMax-M2.7", "MiniMax-M2.7", "MiniMax-M2.7"),
-    partnerPromotionKey: "minimax_en",
     theme: {
       backgroundColor: "#f64551",
       textColor: "#FFFFFF",

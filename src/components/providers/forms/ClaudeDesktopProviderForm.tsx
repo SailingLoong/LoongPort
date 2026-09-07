@@ -63,8 +63,6 @@ import { isOAuthProviderType } from "@/config/constants";
 export type ClaudeDesktopProviderFormValues = ProviderFormData & {
   presetId?: string;
   presetCategory?: ProviderCategory;
-  isPartner?: boolean;
-  partnerPromotionKey?: string;
   meta?: ProviderMeta;
   providerKey?: string;
   suggestedDefaults?: OpenClawSuggestedDefaults;
@@ -286,8 +284,6 @@ export function ClaudeDesktopProviderForm({
   const [activePreset, setActivePreset] = useState<{
     id: string;
     category?: ProviderCategory;
-    isPartner?: boolean;
-    partnerPromotionKey?: string;
     providerType?: string;
     requiresOAuth?: boolean;
   } | null>(null);
@@ -399,18 +395,14 @@ export function ClaudeDesktopProviderForm({
 
   // API Key 获取/邀请链接（与 Claude Code 表单同款，见 ClaudeFormFields）
   const apiKeyLinkCategory = activePreset?.category ?? initialData?.category;
-  const {
-    shouldShowApiKeyLink,
-    websiteUrl: apiKeyLinkWebsiteUrl,
-    isPartner: apiKeyLinkIsPartner,
-    partnerPromotionKey: apiKeyLinkPromotionKey,
-  } = useApiKeyLink({
-    appId: "claude-desktop",
-    category: apiKeyLinkCategory,
-    selectedPresetId,
-    presetEntries,
-    formWebsiteUrl: form.watch("websiteUrl") || "",
-  });
+  const { shouldShowApiKeyLink, websiteUrl: apiKeyLinkWebsiteUrl } =
+    useApiKeyLink({
+      appId: "claude-desktop",
+      category: apiKeyLinkCategory,
+      selectedPresetId,
+      presetEntries,
+      formWebsiteUrl: form.watch("websiteUrl") || "",
+    });
 
   const applyDesktopPreset = (preset: ClaudeDesktopProviderPreset) => {
     form.setValue("name", preset.nameKey ? t(preset.nameKey) : preset.name);
@@ -484,8 +476,6 @@ export function ClaudeDesktopProviderForm({
     setActivePreset({
       id: value,
       category: entry.preset.category,
-      isPartner: entry.preset.isPartner,
-      partnerPromotionKey: entry.preset.partnerPromotionKey,
       providerType: entry.preset.providerType,
       requiresOAuth: entry.preset.requiresOAuth,
     });
@@ -819,8 +809,6 @@ export function ClaudeDesktopProviderForm({
       meta,
       presetId: activePreset?.id,
       presetCategory: activePreset?.category,
-      isPartner: activePreset?.isPartner,
-      partnerPromotionKey: activePreset?.partnerPromotionKey,
     });
   };
 
@@ -926,8 +914,6 @@ export function ClaudeDesktopProviderForm({
                 category={apiKeyLinkCategory}
                 shouldShowLink={shouldShowApiKeyLink}
                 websiteUrl={apiKeyLinkWebsiteUrl}
-                isPartner={apiKeyLinkIsPartner}
-                partnerPromotionKey={apiKeyLinkPromotionKey}
               />
             )}
 
