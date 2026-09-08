@@ -54,8 +54,15 @@
   </div>
 
   <div id="nologin" hidden>
-    <p>未检测到本站登录态。请先<a href="/">登录本站</a>，再回到本页。</p>
-    <p class="note">登录后本页无需刷新即可继续（会自动检测）。</p>
+    <p id="nologin-text">未检测到本站登录态。</p>
+    <p>
+      <a id="login-link" href="/login" target="_blank" rel="noopener">在新标签页登录本站</a>
+      ，登录完成后回到本页继续。
+    </p>
+    <p class="note">
+      登录后本页自动就绪，无需刷新；最后仍需点一次「打开 LoongPort」
+      （浏览器要求跳转本机应用必须由你点击触发）。
+    </p>
   </div>
 
   <div id="insecure" hidden>
@@ -94,11 +101,18 @@
     try {
       var t = localStorage.getItem(SUB2API_TOKEN_KEY);
       if (t && t.trim()) {
+        // 过期检测：sub2api 的过期时间就在 localStorage（毫秒）。已过期的凭据
+        // 移交过去也只会被客户端的 profile 验证打回，提前在这里拦下、引导重登。
+        var expiresRaw = (localStorage.getItem(SUB2API_EXPIRES_KEY) || '').trim();
+        var expiresMs = Number(expiresRaw);
         return {
           kind: 'sub2api',
           token: t.trim(),
-          expiresAt: (localStorage.getItem(SUB2API_EXPIRES_KEY) || '').trim(),
+          expiresAt: expiresRaw,
           userId: '',
+          expired: Number.isSafeInteger(expiresMs)
+            && expiresMs > 0
+            && expiresMs < Date.now(),
         };
       }
     } catch (_) { /* 私有模式等极端情况按未登录处理 */ }
@@ -134,11 +148,18 @@
   }
 
   function render(creds) {
-    // 三个状态区互斥：轮询会在登录态出现/消失时来回切，每次都归位。
+    // 状态区互斥：轮询会在登录态出现/消失/换新时来回切，每次都归位。
+    // 已过期的凭据按「需要重新登录」处理 —— 移交过去也只会被客户端验证打回。
     document.getElementById('status').hidden = true;
-    document.getElementById('nologin').hidden = !!creds;
-    document.getElementById('ready').hidden = !creds;
-    if (!creds) return;
+    var usable = !!creds && !creds.expired;
+    document.getElementById('nologin').hidden = usable;
+    document.getElementById('ready').hidden = !usable;
+    if (!usable) {
+      document.getElementById('nologin-text').textContent = creds && creds.expired
+        ? '本站的登录态已过期。'
+        : '未检测到本站登录态。';
+      return;
+    }
     document.getElementById('origin').textContent = location.origin;
     document.getElementById('kind').textContent = creds.kind;
     document.getElementById('preview').textContent = creds.token.slice(0, 8) + '…' + creds.token.slice(-4);
