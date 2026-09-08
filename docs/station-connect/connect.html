@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>连接 LoongPort</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font: 15px/1.7 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 24px; box-sizing: border-box;
+  }
+  main { max-width: 520px; width: 100%; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  .card {
+    border: 1px solid rgba(127,127,127,.35); border-radius: 12px; padding: 20px 22px;
+    background: rgba(127,127,127,.06);
+  }
+  ul { margin: 10px 0; padding-left: 18px; }
+  code { word-break: break-all; }
+  .note { color: rgba(127,127,127,1); font-size: 13px; }
+  button {
+    font: inherit; font-weight: 600; padding: 10px 22px; border-radius: 8px; cursor: pointer;
+    border: none; background: #2563eb; color: #fff; margin-top: 12px;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  a { color: #2563eb; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>连接 LoongPort</h1>
+  <p id="status">正在检查本站登录态…</p>
+
+  <div id="ready" hidden>
+    <p>将把本站登录凭据交给你本机安装的 LoongPort 桌面应用：</p>
+    <ul>
+      <li>站点：<code id="origin"></code></li>
+      <li>凭据类型：<code id="kind"></code></li>
+      <li>凭据预览：<code id="preview"></code></li>
+      <li id="expires-row">有效期至：<code id="expires"></code></li>
+    </ul>
+    <p class="note">
+      本页不向任何服务器发送数据，点击后仅请求打开本机的 LoongPort。
+      续期凭据（refresh token）不会被移交，你在当前浏览器的登录会话不受影响。
+    </p>
+    <button id="connect">打开 LoongPort</button>
+    <p class="note" id="fallback" hidden>
+      点击后没有弹出「打开 LoongPort」的询问？说明本机未安装应用或浏览器拦截了协议，
+      请先<a href="https://loongport.dev" target="_blank" rel="noopener">安装 LoongPort</a>。
+    </p>
+  </div>
+
+  <div id="nologin" hidden>
+    <p>未检测到本站登录态。请先<a href="/">登录本站</a>，再回到本页。</p>
+    <p class="note">登录后本页无需刷新即可继续（会自动检测）。</p>
+  </div>
+
+  <div id="insecure" hidden>
+    <p>此页面必须通过 HTTPS 访问才能移交登录凭据。</p>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  // 与 LoongPort 客户端约定的回调（tauri.conf.json 已注册的 OS 级 scheme）。
+  var CALLBACK_SCHEME = 'loongport://connect';
+
+  var qs = new URLSearchParams(location.search);
+  var state = qs.get('state') || '';
+
+  // sub2api 家族键名（事实源：sub2api frontend src/stores/auth.ts）。
+  var SUB2API_TOKEN_KEY = 'auth_token';
+  var SUB2API_EXPIRES_KEY = 'token_expires_at';
+  // new-api 家族：会话 cookie 名 session；localStorage 'user' JSON 内含 access_token。
+  var NEWAPI_SESSION_COOKIE = 'session';
+  var NEWAPI_USER_KEY = 'user';
+
+  function readCreds() {
+    try {
+      var t = localStorage.getItem(SUB2API_TOKEN_KEY);
+      if (t && t.trim()) {
+        return {
+          kind: 'sub2api',
+          token: t.trim(),
+          expiresAt: (localStorage.getItem(SUB2API_EXPIRES_KEY) || '').trim(),
+        };
+      }
+    } catch (_) { /* 私有模式等极端情况按未登录处理 */ }
+
+    var m = document.cookie.match(new RegExp('(?:^|;\\s*)' + NEWAPI_SESSION_COOKIE + '=([^;]+)'));
+    if (m) {
+      return { kind: 'newapi-session', token: decodeURIComponent(m[1]), expiresAt: '' };
+    }
+
+    try {
+      var raw = localStorage.getItem(NEWAPI_USER_KEY);
+      if (raw) {
+        var u = JSON.parse(raw);
+        if (u && typeof u.access_token === 'string' && u.access_token.trim()) {
+          return { kind: 'newapi-access-token', token: u.access_token.trim(), expiresAt: '' };
+        }
+      }
+    } catch (_) { /* 值不完整时按未登录处理 */ }
+
+    return null;
+  }
+
+  function render(creds) {
+    // 三个状态区互斥：轮询会在登录态出现/消失时来回切，每次都归位。
+    document.getElementById('status').hidden = true;
+    document.getElementById('nologin').hidden = !!creds;
+    document.getElementById('ready').hidden = !creds;
+    if (!creds) return;
+    document.getElementById('origin').textContent = location.origin;
+    document.getElementById('kind').textContent = creds.kind;
+    document.getElementById('preview').textContent = creds.token.slice(0, 8) + '…' + creds.token.slice(-4);
+    var expiresRow = document.getElementById('expires-row');
+    if (creds.expiresAt) {
+      // sub2api 存的是毫秒时间戳字符串，归一展示；原样随回调透传。
+      var ms = Number(creds.expiresAt);
+      document.getElementById('expires').textContent = Number.isSafeInteger(ms) && ms > 0
+        ? new Date(ms).toLocaleString()
+        : creds.expiresAt;
+    } else {
+      expiresRow.hidden = true;
+    }
+
+    document.getElementById('connect').addEventListener('click', function () {
+      // 显式用户点击（也是浏览器允许跳转自定义 scheme 所需的 user activation）。
+      // 手工拼串而非 new URL()：非特殊 scheme 的解析行为各浏览器不一致。
+      var params = [
+        'origin=' + encodeURIComponent(location.origin),
+        'state=' + encodeURIComponent(state),
+        'kind=' + encodeURIComponent(creds.kind),
+        'token=' + encodeURIComponent(creds.token),
+      ];
+      if (creds.expiresAt) params.push('expires_at=' + encodeURIComponent(creds.expiresAt));
+      location.href = CALLBACK_SCHEME + '?' + params.join('&');
+      document.getElementById('fallback').hidden = false;
+      document.getElementById('connect').disabled = true;
+    });
+  }
+
+  var localHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if (location.protocol !== 'https:' && !localHost) {
+    document.getElementById('status').hidden = true;
+    document.getElementById('insecure').hidden = false;
+    return;
+  }
+
+  // 未登录时轮询检测：用户去登录页登完回到本页，无需手动刷新即可继续。
+  // 按值签名比较——readCreds 每次返回新对象，比身份会每秒误判一次变更；
+  // 初始哨兵取 null：未登录的签名是 ''，取值相同的话首次渲染会被跳过。
+  var signature = null;
+  function scan() {
+    var creds = readCreds();
+    var next = creds ? creds.kind + ':' + creds.token : '';
+    if (next !== signature) {
+      signature = next;
+      render(creds);
+    }
+  }
+  scan();
+  window.setInterval(scan, 1000);
+})();
+</script>
+</body>
+</html>
