@@ -1788,6 +1788,8 @@ pub fn run() {
             commands::get_codex_oauth_models,
             commands::get_xai_oauth_models,
             commands::get_xai_oauth_quota,
+            // codex global reset feed（社区预告）
+            commands::get_codex_reset_feed,
             commands::get_coding_plan_quota,
             commands::get_balance,
             // New MCP via config.json (SSOT)

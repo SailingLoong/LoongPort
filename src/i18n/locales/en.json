@@ -3580,6 +3580,15 @@
       "copy": "Copy",
       "copied": "Copied",
       "registerNote": "The BestAPI sign-up window is open with the promo code pre-filled."
+    },
+    "codexReset": {
+      "label": "Global reset",
+      "eta": "Reset expected in {{time}}",
+      "etaTitle": "Community-predicted time; actual reset is up to OpenAI",
+      "lastReset": "Last verified reset: {{time}}",
+      "lastResetTitle": "Most recent reset confirmed by the community",
+      "announcement": "Announcement",
+      "source": "Community tracker · codex-reset.com"
     }
   },
   "firstRunNotice": {

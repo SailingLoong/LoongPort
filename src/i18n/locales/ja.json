@@ -3580,6 +3580,15 @@
       "copy": "コピー",
       "copied": "コピーしました",
       "registerNote": "BestAPI の登録ウィンドウが開き、プロモコードは自動入力されます。"
+    },
+    "codexReset": {
+      "label": "グローバルリセット",
+      "eta": "{{time}}後にリセット予定",
+      "etaTitle": "コミュニティによる予測時間です。実際の時間は公式による",
+      "lastReset": "前回確認済みリセット：{{time}}",
+      "lastResetTitle": "コミュニティで確認された直近のリセット",
+      "announcement": "最新のお知らせ",
+      "source": "コミュニティ予測 · codex-reset.com"
     }
   },
   "firstRunNotice": {
