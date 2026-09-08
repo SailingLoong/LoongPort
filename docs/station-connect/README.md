@@ -5,7 +5,26 @@
 
 站长接入只需要做一件事：**把这个文件挂到自己站点的域名下**。
 
-## 接入三步
+## 一键配置（推荐）
+
+能 SSH 登录服务器的话，一条命令完成（脚本事实源在
+LoongPort-website 仓 `public/connect/setup.sh`）：
+
+```sh
+curl -fsSL https://loongport.dev/connect/setup.sh | sudo sh -s -- <你的域名>
+```
+
+- 自动识别 宝塔 / 1Panel / nginx / Caddy，只写一个页面文件
+  （`/opt/loongport/connect.html`）和一段带标记的反代配置；
+- 改配置前自动备份（集中放 `/opt/loongport/backups`，不会污染配置目录），
+  `nginx -t` / `caddy validate` 通过才重载，失败自动还原；
+- 完成后自检 `https://<域名>/.well-known/loongport/connect`；
+- 再跑一遍就是更新；`sh setup.sh <你的域名> --remove` 完全移除。
+
+识别不了的环境（如反代跑在容器里、路径非标）会给出手动粘贴指引，
+配好后再跑一次命令即完成自检。手动步骤见下。
+
+## 接入三步（手动）
 
 1. 下载本目录的 [`connect.html`](./connect.html)（国内访问 GitHub 不稳时可直接取官网副本：
    `curl -o connect.html https://loongport.dev/connect/`——文件相同，事实源以本目录为准；
