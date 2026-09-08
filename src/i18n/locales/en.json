@@ -916,7 +916,7 @@
     "crowdMetrics": "Crowd-measured site stats",
     "crowdMetricsDescription": "Upload site-level hourly aggregates (first-token time, error rate, …) and unlock user-measured stats in the directory. No prompts, keys, or account info.",
     "plazaVisibility": "Relay directory",
-    "plazaVisibilityToggle": "Show relay directory",
+    "plazaVisibilityToggle": "Show recommended relay list",
     "plazaVisibilityDescription": "Show the recommended relay list on the add-site page; sites can still be added manually via the search box"
   },
   "apps": {

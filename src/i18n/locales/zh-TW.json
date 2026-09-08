@@ -917,7 +917,7 @@
     "crowdMetrics": "站點實測資料共建",
     "crowdMetricsDescription": "上傳站點級聚合指標（首字耗時、錯誤率等，按小時聚合），並解鎖廣場的使用者實測資料。不含提示詞、金鑰或帳號資訊。",
     "plazaVisibility": "中轉站廣場",
-    "plazaVisibilityToggle": "顯示中轉站廣場",
+    "plazaVisibilityToggle": "顯示廣場推薦列表",
     "plazaVisibilityDescription": "在新增站點頁展示中轉站推薦列表；關閉後仍可透過搜尋框手動新增站點"
   },
   "apps": {
