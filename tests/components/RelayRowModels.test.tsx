@@ -68,6 +68,7 @@ function renderRow(models: string[], onSelectTierModel = vi.fn()) {
           onSelectTierModel={onSelectTierModel}
           onPurchase={vi.fn()}
           onOpenUsage={undefined}
+          onBrowserLogin={undefined}
           onCheckTier={vi.fn()}
           isCheckingTier={() => false}
           onResetTier={vi.fn()}

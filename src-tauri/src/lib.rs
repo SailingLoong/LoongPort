@@ -1708,6 +1708,7 @@ pub fn run() {
             commands::relay_import_directory_site,
             commands::relay_import_site,
             commands::relay_login,
+            commands::relay_browser_login,
             commands::relay_refresh,
             commands::relay_refresh_all,
             commands::relay_list_relays,

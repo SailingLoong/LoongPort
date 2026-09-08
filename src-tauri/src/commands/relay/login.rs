@@ -1119,6 +1119,30 @@ pub async fn relay_login(
     ))
 }
 
+/// 在**默认浏览器**中登录这一行（站点握手页接力，契约见 `docs/station-connect`）。
+///
+/// 与 [`relay_login`]（应用内登录窗）是同一终点的两条入口：这条复用用户浏览器里
+/// 已有的会话，免输密码；代价是短期会话（无 refresh）。发起即返回 —— 登录在浏览器
+/// 里完成，凭据经 `loongport://connect` 深链回来由 [`crate::relay::browser_connect`]
+/// 验证落库，前端收 `ONBOARDING_REGISTER_COMPLETED` 收尾（toast + 档位预配 + 刷新）。
+///
+/// `Err` = 站点没部署握手页 / 网络问题（前端 toast 引导走应用内登录窗）。
+#[tauri::command]
+pub async fn relay_browser_login(
+    app_handle: tauri::AppHandle,
+    relay_id: i64,
+) -> Result<(), String> {
+    let site_origin = {
+        let state = app_handle.state::<AppState>();
+        with_conn(&state, |conn| creds::get(conn, relay_id))?
+            .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
+            .site_origin
+    };
+    crate::relay::browser_connect::begin_browser_login(&app_handle, &site_origin)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 async fn login_via_browser(
     app_handle: &tauri::AppHandle,
     target_id: i64,

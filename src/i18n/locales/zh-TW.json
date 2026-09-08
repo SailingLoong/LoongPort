@@ -3233,6 +3233,8 @@
       "refetchGroups": "更新可用群組",
       "purchaseHint": "開啟中轉站儲值頁面",
       "openUsageHint": "開啟中轉站用量頁面（帶登入態）",
+      "browserLoginHint": "在預設瀏覽器中登入（沿用瀏覽器裡已有的登入）",
+      "browserLoginOpened": "已在瀏覽器開啟登入頁，完成登入後會自動連回 LoongPort",
       "lowBalanceHint": "餘額較低，點一下儲值",
       "remove": "刪除帳號與連線設定檔",
       "removeInUseHint": "有連線設定檔正在使用——仍可刪除，需在彈出視窗中確認",

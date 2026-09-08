@@ -18,8 +18,9 @@
 //!
 //! - URL 参数全部按不可信处理：认证只认「拿 token 打站点 profile 成功」；
 //! - 不接受任何 refresh 凭据（浏览器会话与 app 会话不能共享一次性轮换的凭据）；
-//! - `state` 目前透传不校验（app 侧发起按钮未落地，用户手动开握手页没有
-//!   nonce 可绑）；发起端上线后在此补绑定校验；
+//! - `state` 绑定：`begin_browser_login` 发起时登记 nonce+origin（10 分钟 TTL），
+//!   带发起凭证的回调必须与发起完全匹配且一次性；无 `state` 的回调视为用户
+//!   手动打开握手页，放行（认证事实仍是 profile 验证）；
 //! - 坏 token / 坏站点 = 拒收且不落行；用户可见错误走 `deeplink-error`。
 
 use crate::error::AppError;
@@ -67,6 +68,9 @@ pub(crate) struct ConnectHandshake {
     pub origin: String,
     pub kind: ConnectKind,
     pub token: String,
+    /// 发起端（`begin_browser_login`）生成的 nonce，握手页原样透传；
+    /// `None` = 用户手动打开的握手页。
+    pub state: Option<String>,
     /// `newapi-session` 换 token 需要的账号 id（`New-Api-User` 头）。
     pub user_id: Option<i64>,
     /// sub2api 的毫秒时间戳字符串（原样透传，落库前归一成秒）。
@@ -85,6 +89,7 @@ pub(crate) fn parse_connect_url(url: &url::Url) -> Result<ConnectHandshake, AppE
     let mut origin = None;
     let mut kind = None;
     let mut token = None;
+    let mut state = None;
     let mut user_id = None;
     let mut expires_at = None;
     for (key, value) in url.query_pairs() {
@@ -92,9 +97,10 @@ pub(crate) fn parse_connect_url(url: &url::Url) -> Result<ConnectHandshake, AppE
             "origin" => origin = Some(value.into_owned()),
             "kind" => kind = Some(value.into_owned()),
             "token" => token = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
             "user_id" => user_id = Some(value.into_owned()),
             "expires_at" => expires_at = Some(value.into_owned()),
-            // 未知参数（含 state）忽略：握手页与消费端版本可以不同步。
+            // 未知参数忽略：握手页与消费端版本可以不同步。
             _ => {}
         }
     }
@@ -149,9 +155,128 @@ pub(crate) fn parse_connect_url(url: &url::Url) -> Result<ConnectHandshake, AppE
         origin,
         kind,
         token,
+        state: state.filter(|s| !s.trim().is_empty()),
         user_id,
         expires_at: expires_at.filter(|s| !s.trim().is_empty()),
     })
+}
+
+// ============================================================================
+// 发起端：行级「在默认浏览器中登录」按钮 → 握手页带 nonce 打开
+// ============================================================================
+
+/// 一次发起中的浏览器接力。`begin_browser_login` 写入、`validate_state_binding`
+/// 消费；nonce 把回调绑定到「app 自己发起的那次流程 + 那个站点」。
+#[derive(Debug, Clone)]
+struct PendingConnect {
+    state: String,
+    origin: String,
+    /// unix 秒。过期的 pending 视同没有（懒清理，不设后台任务）。
+    expires_at: i64,
+}
+
+const PENDING_CONNECT_TTL_SECS: i64 = 600;
+
+/// 站点握手页的约定路径（契约见 docs/station-connect/README.md）。
+const WELL_KNOWN_CONNECT_PATH: &str = "/.well-known/loongport/connect";
+
+static PENDING_CONNECT: std::sync::OnceLock<std::sync::Mutex<Option<PendingConnect>>> =
+    std::sync::OnceLock::new();
+
+/// 探测站点握手页部署了没有（只认 2xx；超时短，别让用户干等）。
+/// 没部署就别把用户扔到浏览器里看 404 —— 在门口拦下并引导走应用内登录。
+async fn probe_connect_page(site_origin: &str) -> Result<(), AppError> {
+    let page_url = format!("{site_origin}{WELL_KNOWN_CONNECT_PATH}");
+    let status = crate::relay::sub2api::build_client()?
+        .get(&page_url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|e| AppError::Config(format!("探测站点握手页失败（{site_origin}）: {e}")))?
+        .status();
+    if !status.is_success() {
+        return Err(AppError::Config(format!(
+            "该站未部署浏览器登录页（HTTP {status}）。可让站长按 docs/station-connect 接入，或改用应用内登录"
+        )));
+    }
+    Ok(())
+}
+
+/// 发起浏览器接力登录：探测握手页 → 登记 nonce → 用默认浏览器打开带 state 的页面。
+///
+/// 用户在浏览器完成登录并点击移交后，深链回来走 [`apply_connect`]。
+#[cfg(feature = "gui")]
+pub async fn begin_browser_login<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    site_origin: &str,
+) -> Result<(), AppError> {
+    probe_connect_page(site_origin).await?;
+
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    {
+        let pending = PENDING_CONNECT.get_or_init(Default::default);
+        let mut guard = pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(PendingConnect {
+            state: state.clone(),
+            origin: site_origin.to_string(),
+            expires_at: chrono::Utc::now().timestamp() + PENDING_CONNECT_TTL_SECS,
+        });
+    }
+
+    use tauri_plugin_opener::OpenerExt;
+    app_handle
+        .opener()
+        .open_url(
+            format!("{site_origin}{WELL_KNOWN_CONNECT_PATH}?state={state}"),
+            None::<String>,
+        )
+        .map_err(|e| AppError::Config(format!("打开默认浏览器失败: {e}")))?;
+    Ok(())
+}
+
+/// state 绑定裁决（验证前的准入闸，纯状态机便于测试）：
+///
+/// - 有进行中的发起（未过期）：state 匹配且 origin 一致 → 放行并**消费**（一次性）；
+///   无 state（用户手动开页）→ 放行（用户驱动的流程，pending 留着等真正的绑定回调）；
+///   state/origin 对不上 → **拒收**（别的页面往回调里塞凭据）。
+/// - 没有进行中的发起：无 state 放行（手动流程）；带 state → 拒收
+///   （发起已过期/不存在，stale nonce 不该再被认）。
+fn validate_state_binding(handshake: &ConnectHandshake, now: i64) -> Result<(), AppError> {
+    let pending_slot = PENDING_CONNECT.get_or_init(Default::default);
+    let mut guard = pending_slot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let pending = match guard.as_ref() {
+        Some(p) if p.expires_at > now => Some(p),
+        Some(_) => {
+            // 懒清理过期发起。
+            *guard = None;
+            None
+        }
+        None => None,
+    };
+
+    match (pending, handshake.state.as_deref()) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(AppError::InvalidInput(
+            "回调带着已失效的发起凭证（发起过期或不存在），请重新发起".into(),
+        )),
+        (Some(_), None) => Ok(()),
+        (Some(p), Some(state)) => {
+            if state == p.state && handshake.origin == p.origin {
+                // 绑定流程兑现：消费掉，一次发起只认一次回调。
+                *guard = None;
+                Ok(())
+            } else {
+                Err(AppError::InvalidInput(
+                    "回调与本次发起不匹配（站点或发起凭证不对），已拒收".into(),
+                ))
+            }
+        }
+    }
 }
 
 /// 落库结果：前端 toast + 档位预配（`ONBOARDING_REGISTER_COMPLETED`）要用的两件事。
@@ -338,6 +463,13 @@ pub async fn apply_connect<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, 
         handshake.origin,
         handshake.kind
     );
+
+    // 准入闸：state 绑定（有发起在途时严格匹配 origin+nonce；见 validate_state_binding）。
+    if let Err(error) = validate_state_binding(&handshake, chrono::Utc::now().timestamp()) {
+        log::warn!("[browser-connect] {error}");
+        emit_deeplink_error(app_handle, url_str, &error);
+        return;
+    }
 
     let state = app_handle.state::<AppState>();
     match connect(&state, &handshake).await {
@@ -708,5 +840,113 @@ mod tests {
     /// 测试 URL 里的 origin 需要 percent-encode（host 带端口时 `:` 与参数分隔冲突）。
     fn urlencoding_lite(s: &str) -> String {
         s.replace(':', "%3A").replace('/', "%2F")
+    }
+
+    // ==================== 发起端与 state 绑定 ====================
+
+    fn reset_pending(state: Option<(&str, &str, i64)>) {
+        let slot = PENDING_CONNECT.get_or_init(Default::default);
+        let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = state.map(|(state, origin, expires_at)| PendingConnect {
+            state: state.to_string(),
+            origin: origin.to_string(),
+            expires_at,
+        });
+    }
+
+    fn handshake_with(origin: &str, state: Option<&str>) -> ConnectHandshake {
+        ConnectHandshake {
+            origin: origin.to_string(),
+            kind: ConnectKind::Sub2Api,
+            token: "t".into(),
+            state: state.map(str::to_string),
+            user_id: None,
+            expires_at: None,
+        }
+    }
+
+    /// ⭐ state 绑定状态机：共享全局 pending，必须串行跑。
+    #[test]
+    #[serial_test::serial]
+    fn state_binding_full_lifecycle() {
+        let now = 10_000_i64;
+
+        // 无发起：无 state 放行（手动开页），带 state 拒收（stale nonce 不认）
+        reset_pending(None);
+        assert!(validate_state_binding(&handshake_with("https://a.example", None), now).is_ok());
+        assert!(
+            validate_state_binding(&handshake_with("https://a.example", Some("stale")), now)
+                .is_err()
+        );
+
+        // 有发起：匹配的 state+origin 放行且**一次性消费**
+        reset_pending(Some(("nonce-1", "https://a.example", now + 60)));
+        let matched = handshake_with("https://a.example", Some("nonce-1"));
+        assert!(validate_state_binding(&matched, now).is_ok());
+        assert!(
+            validate_state_binding(&matched, now).is_err(),
+            "绑定兑现后 pending 已消费，重放同一个回调必须被拒"
+        );
+
+        // 有发起：错 state / 错 origin 拒收，但 pending 不被消耗（真正的回调仍可兑现）
+        reset_pending(Some(("nonce-2", "https://a.example", now + 60)));
+        assert!(
+            validate_state_binding(&handshake_with("https://a.example", Some("evil")), now)
+                .is_err()
+        );
+        assert!(
+            validate_state_binding(&handshake_with("https://b.example", Some("nonce-2")), now)
+                .is_err()
+        );
+        assert!(
+            validate_state_binding(&handshake_with("https://a.example", Some("nonce-2")), now)
+                .is_ok()
+        );
+
+        // 有发起：无 state（手动开页）放行，pending 留给真正的绑定回调
+        reset_pending(Some(("nonce-3", "https://a.example", now + 60)));
+        assert!(validate_state_binding(&handshake_with("https://b.example", None), now).is_ok());
+        assert!(
+            validate_state_binding(&handshake_with("https://a.example", Some("nonce-3")), now)
+                .is_ok()
+        );
+
+        // 过期发起：视同没有（懒清理）—— 无 state 放行、带 state 拒收
+        reset_pending(Some(("nonce-4", "https://a.example", now - 1)));
+        assert!(validate_state_binding(&handshake_with("https://a.example", None), now).is_ok());
+        assert!(
+            validate_state_binding(&handshake_with("https://a.example", Some("nonce-4")), now)
+                .is_err()
+        );
+
+        reset_pending(None);
+    }
+
+    /// 探测闸：握手页在（2xx）放行到「打开浏览器」，不在（404）给出可行动的错误。
+    #[tokio::test]
+    async fn probe_accepts_deployed_page_and_rejects_missing() {
+        use axum::routing::get;
+        let (origin, _server) = spawn_server(
+            axum::Router::new()
+                .route(
+                    "/.well-known/loongport/connect",
+                    get(|| async { "<html>connect</html>" }),
+                )
+                .route(
+                    "/.well-known/missing",
+                    get(|| async { axum::http::StatusCode::NOT_FOUND }),
+                ),
+        )
+        .await;
+
+        assert!(probe_connect_page(&origin).await.is_ok());
+        let err = probe_connect_page(&format!("{origin}/well-known"))
+            .await
+            .err();
+        // 路径拼错 → 404 → 错误信息要能指导行动（提站点未部署）
+        assert!(
+            err.is_some_and(|e| e.to_string().contains("未部署")),
+            "未部署站点的错误要指明原因"
+        );
     }
 }

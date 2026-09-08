@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
   FileDown,
   GripVertical,
   Layers3,
@@ -105,6 +106,7 @@ export interface RelayRowProps {
   onPurchase: () => void;
   /** 带登录态开这一行的用量页（「查看用量」，入口资格由后端判定）。 */
   onOpenUsage: (() => void) | undefined;
+  onBrowserLogin?: (() => void) | undefined;
   /** 站点配置应用/恢复成功后刷新列表（档位 settings 与标注变了）。 */
   onSiteConfigApplied: () => void | Promise<void>;
   /**
@@ -155,6 +157,7 @@ export function RelayRow({
   onSelectTierModel,
   onPurchase,
   onOpenUsage,
+  onBrowserLogin,
   onSiteConfigApplied,
   onCheckTier,
   isCheckingTier,
@@ -313,6 +316,22 @@ export function RelayRow({
                 aria-label={t("loongport.row.openUsageHint")}
               >
                 <Activity className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {/* 「在浏览器中登录」入口（站点握手页接力）。与登录窗是同一终点的
+                另一条路：复用用户浏览器里已有的会话，免输密码。所有行都有 ——
+                站点没部署握手页时后端探测会报错并引导走应用内登录。 */}
+            {onBrowserLogin && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+                onClick={onBrowserLogin}
+                title={t("loongport.row.browserLoginHint")}
+                aria-label={t("loongport.row.browserLoginHint")}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
               </Button>
             )}
             {/* 「导入站点配置」入口。资格 = 当前行至少有一个档位 —— 没有档位的行
