@@ -916,7 +916,7 @@
     "crowdMetrics": "サイト実測データの共同利用",
     "crowdMetricsDescription": "サイト単位の集計指標（初トークン時間・エラー率など、時間別）を共有し、広場のユーザー実測データを解放します。プロンプト・キー・アカウント情報は含みません。",
     "plazaVisibility": "中継サイト一覧",
-    "plazaVisibilityToggle": "中継サイト一覧を表示",
+    "plazaVisibilityToggle": "広場のおすすめリストを表示",
     "plazaVisibilityDescription": "サイト追加ページに中継サイトのおすすめリストを表示。オフにしても検索ボックスから手動で追加できます"
   },
   "apps": {

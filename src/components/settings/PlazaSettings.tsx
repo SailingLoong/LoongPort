@@ -8,12 +8,14 @@ import { PLAZA_VISIBLE_DEFAULT, settingsApi } from "@/lib/api";
 import { useSettingsQuery } from "@/lib/query";
 
 /**
- * 「中转站广场」开关（设置 → 常规的最底部）。
+ * 「广场推荐列表」开关（设置 → 常规的最底部）。
  *
- * 这是广场可见性的**唯一**用户入口：默认值由后端按首启归因播种（站长引流
- * 来的用户默认关），用户在这里翻转的结果永远优先。它**不走**表单的全量
- * 保存 —— `plazaVisible` 是后端专有字段（旧快照回写会抹掉刚播的种），改它
- * 走窄命令 `plaza_set_visible`，改完手动失效 settings 查询。
+ * 只控制广场页内推荐列表的显隐（广场页与搜索框直连常驻，见
+ * `RelayDirectoryPage` 的消费）。这是该开关的**唯一**用户入口：默认值由
+ * 后端按首启归因播种（站长引流来的用户默认关），用户在这里翻转的结果永远
+ * 优先。它**不走**表单的全量保存 —— `plazaVisible` 是后端专有字段（旧快照
+ * 回写会抹掉刚播的种），改它走窄命令 `plaza_set_visible`，改完手动失效
+ * settings 查询。
  */
 export function PlazaSettings() {
   const { t } = useTranslation();

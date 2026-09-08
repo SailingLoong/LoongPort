@@ -41,6 +41,7 @@ const {
 }));
 
 vi.mock("@/lib/api", () => ({
+  PLAZA_VISIBLE_DEFAULT: true,
   relayApi: {
     listDirectory,
     refreshDirectory,
@@ -48,6 +49,12 @@ vi.mock("@/lib/api", () => ({
     importDirectorySite,
     refresh,
   },
+}));
+
+const useSettingsMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/hooks/useSettings", () => ({
+  useSettings: () => useSettingsMock(),
 }));
 
 vi.mock("../../openInBrowser", () => ({ openInBrowser }));
@@ -159,6 +166,9 @@ function listing(
 describe("RelayDirectoryPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // settings=null：两个消费字段都落兜底（crowdEnabled=true、plazaVisible=true），
+    // 与此前未 mock 该 hook 时的实际行为一致。
+    useSettingsMock.mockReturnValue({ settings: null });
     listDirectory.mockImplementation(() => Promise.resolve(listing()));
     refreshDirectory.mockImplementation(() => Promise.resolve(listing()));
     importSite.mockResolvedValue({
@@ -341,6 +351,33 @@ describe("RelayDirectoryPage", () => {
       expect(importSite).toHaveBeenCalledWith("https://my-own-relay.example"),
     );
     expect(importDirectorySite).not.toHaveBeenCalled();
+  });
+
+  it("hides only the recommended list when the plaza switch is off", async () => {
+    // 广场开关关：列表为空、不发清单请求；搜索框与「搜不到就地直连」保留 ——
+    // 关的是推荐列表，不是整个广场页。
+    useSettingsMock.mockReturnValue({ settings: { plazaVisible: false } });
+    const user = userEvent.setup();
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+
+    await screen.findByText("loongport.directory.empty");
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(
+      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
+    ).toBeInTheDocument();
+
+    await user.type(
+      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
+      "https://my-own-relay.example",
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: /loongport.directory.addAsSite/,
+      }),
+    );
+    await waitFor(() =>
+      expect(importSite).toHaveBeenCalledWith("https://my-own-relay.example"),
+    );
   });
 
   it("searches and paginates twelve rows per page", async () => {

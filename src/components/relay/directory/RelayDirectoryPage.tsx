@@ -15,7 +15,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { relayApi, settingsApi } from "@/lib/api";
+import { PLAZA_VISIBLE_DEFAULT, relayApi, settingsApi } from "@/lib/api";
 import { crowdApi } from "@/lib/api/crowd";
 import type { AppId } from "@/lib/api";
 import type { RelayDirectoryItem, RelayImportError } from "@/lib/api/relay";
@@ -81,6 +81,9 @@ export function RelayDirectoryPage({
   // 兜底与后端默认值同向（2026-09-07 起默认开）：字段实际总在，只有极端的
   // 缺键情形才会落到兜底。
   const crowdEnabled = appSettings?.crowdMetricsEnabled ?? true;
+  // 广场开关只藏推荐列表本身：关掉时列表为空（不拉清单）、页头同步时间与
+  // 刷新按钮退场，但搜索框与「搜不到就地直连」保留 —— 关列表不等于关广场。
+  const plazaVisible = appSettings?.plazaVisible ?? PLAZA_VISIBLE_DEFAULT;
   // 详情弹窗的实测深数据（w7/时段/分布）：共建门禁内 —— 行级观测徽章公开，
   // 由列表 DTO 的 item.crowd 承载，不走这份门禁内快照。
   const crowdSnapshotQuery = useQuery({
@@ -97,6 +100,9 @@ export function RelayDirectoryPage({
   const directoryQuery = useQuery({
     queryKey: relayDirectoryKeys.listing(),
     queryFn: () => relayApi.listDirectory(),
+    // 列表被广场开关藏起来时连清单都不发请求；即便命中旧缓存，下方的
+    // filtered 守卫也保证一行都不渲染。
+    enabled: plazaVisible,
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -117,8 +123,12 @@ export function RelayDirectoryPage({
 
   const listing = directoryQuery.data ?? null;
   const filtered = useMemo(
-    () => filterDirectoryItems(listing?.items ?? [], view.search),
-    [listing?.items, view.search],
+    () =>
+      filterDirectoryItems(
+        plazaVisible ? (listing?.items ?? []) : [],
+        view.search,
+      ),
+    [plazaVisible, listing?.items, view.search],
   );
   const paged = pageDirectoryItems(filtered, view.page);
   const range = visibleDirectoryRange(
@@ -262,28 +272,32 @@ export function RelayDirectoryPage({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-          {syncedAt && (
-            <span>
-              {t("loongport.directory.source.syncedAt", { time: syncedAt })}
-            </span>
+          {plazaVisible && (
+            <>
+              {syncedAt && (
+                <span>
+                  {t("loongport.directory.source.syncedAt", { time: syncedAt })}
+                </span>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                disabled={directoryQuery.isPending || refreshMutation.isPending}
+                onClick={() => refreshMutation.mutate()}
+                aria-label={t("loongport.directory.actions.refresh")}
+              >
+                <RefreshCw
+                  className={
+                    directoryQuery.isFetching || refreshMutation.isPending
+                      ? "h-4 w-4 animate-spin"
+                      : "h-4 w-4"
+                  }
+                />
+              </Button>
+            </>
           )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            disabled={directoryQuery.isPending || refreshMutation.isPending}
-            onClick={() => refreshMutation.mutate()}
-            aria-label={t("loongport.directory.actions.refresh")}
-          >
-            <RefreshCw
-              className={
-                directoryQuery.isFetching || refreshMutation.isPending
-                  ? "h-4 w-4 animate-spin"
-                  : "h-4 w-4"
-              }
-            />
-          </Button>
         </div>
       </div>
 
@@ -314,7 +328,7 @@ export function RelayDirectoryPage({
       </div>
 
       <section className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border-default bg-background shadow-sm">
-        {directoryQuery.isPending && !listing ? (
+        {plazaVisible && directoryQuery.isPending && !listing ? (
           <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             {t("loongport.directory.loading")}
