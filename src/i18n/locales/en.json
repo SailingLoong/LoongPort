@@ -3232,6 +3232,8 @@
       "refetchGroups": "Update available groups",
       "purchaseHint": "Open the relay service's top-up page",
       "openUsageHint": "Open the relay site's usage page (signed in)",
+      "browserLoginHint": "Sign in via your default browser (reuses your existing browser session)",
+      "browserLoginOpened": "Login page opened in your browser — LoongPort will connect automatically once you sign in",
       "lowBalanceHint": "Balance is low. Select to top up",
       "remove": "Delete account and connection profiles",
       "removeInUseHint": "Some connection profiles are in use — you can still delete, with confirmation",

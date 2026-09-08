@@ -467,6 +467,14 @@ export const relayApi = {
     invoke("relay_login", { relayId, app }),
 
   /**
+   * 在默认浏览器中登录这一行（站点握手页接力）：发起即返回，登录在浏览器完成，
+   * 凭据经 loongport://connect 深链回来落库，收尾由 ONBOARDING_REGISTER_COMPLETED
+   * 事件驱动（toast + 档位预配 + 列表刷新）。Err = 站点未部署握手页/网络问题。
+   */
+  browserLogin: (relayId: number): Promise<void> =>
+    invoke("relay_browser_login", { relayId }),
+
+  /**
    * 「中转站 × 分组」页的数据源：一次拿到全部中转站 + 各自在该 app 下的档位。
    *
    * `app` 传当前 tab 的 app_type（如 `"codex"`）。

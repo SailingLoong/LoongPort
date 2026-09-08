@@ -748,6 +748,17 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
       }
     });
 
+  /** 浏览器接力登录：发起即返回（不等待登录完成），成功提示去浏览器操作。 */
+  const handleBrowserLogin = (relayId: number) =>
+    run(`browserLogin:${relayId}`, async () => {
+      try {
+        await relayApi.browserLogin(relayId);
+        toast.success(t("loongport.row.browserLoginOpened"));
+      } catch (e) {
+        toast.error(String(e));
+      }
+    });
+
   const handleSwitchTier = (_relayId: number, tier: TierInfo) => {
     if (tier.isCurrent) return;
     void doSwitch(tier);
@@ -861,6 +872,7 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
           }
           onPurchase={(relayId) => void handlePurchase(relayId)}
           onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
+          onBrowserLogin={(relayId) => void handleBrowserLogin(relayId)}
           // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
           // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
           onCheckTier={(tier) =>
