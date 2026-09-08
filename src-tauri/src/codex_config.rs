@@ -1307,6 +1307,69 @@ fn apply_codex_reasoning_level_override(
     true
 }
 
+/// The official catalog entry whose slug matches, if any. Case-insensitive —
+/// mirrors how `official_context_for_slug` resolved slugs historically. Shared
+/// by the window-facts lookup and the reasoning-level mirror so both read the
+/// same entry.
+fn official_model_entry_for_slug<'a>(
+    slug: &str,
+    official_models: &'a [Value],
+) -> Option<&'a Value> {
+    official_models.iter().find(|model| {
+        model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|official| official.eq_ignore_ascii_case(slug))
+    })
+}
+
+/// Mirror the OFFICIAL catalog's `supported_reasoning_levels` onto a generated
+/// entry whose slug matches an official model. Only for native `/responses`
+/// providers — official model + official wire means the official level set is
+/// the truth — and only when the row declared none of its own: explicit
+/// `reasoningLevels` keep winning (the gateway may normalize or reject levels
+/// it does not know, and curated per-vendor rows encode that), and non-official
+/// slugs keep the template's conservative none/high (an aggregator behind an
+/// official-looking name gets no authority data to widen the set with).
+///
+/// `default_reasoning_level` is deliberately NOT mirrored: the config.toml we
+/// generate pins `model_reasoning_effort`, which wins over the catalog default
+/// anyway, so importing the official default would silently change behavior
+/// for users without the pin. The template default is kept when it stays
+/// inside the mirrored set; otherwise the set's highest level replaces it so
+/// the default can never reference a level the picker does not offer.
+fn mirror_official_reasoning_levels(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    template_default: Option<&str>,
+    slug: &str,
+    official_models: &[Value],
+) {
+    let Some(levels) = official_model_entry_for_slug(slug, official_models)
+        .and_then(|entry| entry.get("supported_reasoning_levels"))
+        .and_then(Value::as_array)
+        .filter(|levels| !levels.is_empty())
+    else {
+        return;
+    };
+    entry_obj.insert(
+        "supported_reasoning_levels".to_string(),
+        Value::Array(levels.clone()),
+    );
+
+    let supported_efforts: Vec<&str> = levels
+        .iter()
+        .filter_map(|level| level.get("effort").and_then(Value::as_str))
+        .collect();
+    if template_default.is_some_and(|default| supported_efforts.contains(&default)) {
+        return;
+    }
+    // Official arrays are ordered lowest → highest, so the last element is the
+    // strongest level offered.
+    if let Some(highest) = supported_efforts.last() {
+        entry_obj.insert("default_reasoning_level".to_string(), json!(highest));
+    }
+}
+
 /// Per-model window facts resolved from the official Codex catalog
 /// (`models_cache.json`) for a model whose slug matches an official entry.
 #[derive(Clone, Copy)]
@@ -1322,12 +1385,7 @@ fn official_context_for_slug(
     slug: &str,
     official_models: &[Value],
 ) -> Option<OfficialModelContext> {
-    let entry = official_models.iter().find(|model| {
-        model
-            .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(|official| official.eq_ignore_ascii_case(slug))
-    })?;
+    let entry = official_model_entry_for_slug(slug, official_models)?;
     let max = entry
         .get("max_context_window")
         .and_then(Value::as_u64)
@@ -1452,7 +1510,11 @@ fn codex_catalog_model_entry(
     let template_default = template
         .get("default_reasoning_level")
         .and_then(|value| value.as_str());
-    apply_codex_reasoning_level_override(entry_obj, template_default, spec);
+    if !apply_codex_reasoning_level_override(entry_obj, template_default, spec)
+        && profile == CodexCatalogToolProfile::NativeResponses
+    {
+        mirror_official_reasoning_levels(entry_obj, template_default, &spec.model, official_models);
+    }
 
     entry
 }
@@ -5517,6 +5579,204 @@ base_url = "https://production.api/v1"
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
             Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn native_responses_catalog_mirrors_official_reasoning_levels() {
+        // Relay-tier catalog rows carry no reasoningLevels, so the native
+        // template's conservative none/high collapses Codex's /model effort
+        // picker to two entries. A row whose slug is an OFFICIAL model must
+        // inherit the official level set instead (official model + official
+        // wire = official truth), while curated rows and unknown slugs keep
+        // the existing behavior.
+        let template = json!({
+            "slug": "tpl",
+            "context_window": 272000,
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [
+                { "effort": "none", "description": "Disable Thinking" },
+                { "effort": "high", "description": "Greater reasoning depth for complex problems" }
+            ]
+        });
+        let official = vec![
+            json!({
+                "slug": "gpt-5.6-sol",
+                "context_window": 272000,
+                "max_context_window": 872000,
+                "supported_reasoning_levels": [
+                    { "effort": "low", "description": "Fast responses with lighter reasoning" },
+                    { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
+                    { "effort": "high", "description": "Greater reasoning depth for complex problems" },
+                    { "effort": "xhigh", "description": "Extra high reasoning depth for complex problems" },
+                    { "effort": "max", "description": "Maximum reasoning depth for the hardest problems" },
+                    { "effort": "ultra", "description": "Maximum reasoning with automatic task delegation" }
+                ]
+            }),
+            // An official set that does not contain the template default
+            // ("high") exercises the default-consistency fallback.
+            json!({
+                "slug": "gpt-mini-fast",
+                "context_window": 272000,
+                "supported_reasoning_levels": [
+                    { "effort": "minimal", "description": "Minimal reasoning" },
+                    { "effort": "low", "description": "Fast responses with lighter reasoning" }
+                ]
+            }),
+        ];
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    // Relay-tier shape: official slug, no declared levels.
+                    { "model": "gpt-5.6-sol" },
+                    // Explicit curation wins over the official mirror.
+                    {
+                        "model": "gpt-mini-fast",
+                        "reasoningLevels": ["none", "high"]
+                    },
+                    // Unknown slug: conservative template levels stay.
+                    { "model": "kimi-k2.7-code" }
+                ]
+            }
+        });
+
+        let catalog = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &official,
+        );
+        let models = catalog["models"].as_array().expect("models array");
+        let efforts = |index: usize| -> Vec<&str> {
+            models[index]["supported_reasoning_levels"]
+                .as_array()
+                .expect("supported_reasoning_levels array")
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
+                .collect()
+        };
+        let default_level = |index: usize| {
+            models[index]
+                .get("default_reasoning_level")
+                .and_then(|v| v.as_str())
+        };
+
+        // Official levels are mirrored verbatim, and the template default is
+        // kept because it stays inside the mirrored set.
+        assert_eq!(
+            efforts(0),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(
+            models[0]["supported_reasoning_levels"][5]["description"],
+            json!("Maximum reasoning with automatic task delegation")
+        );
+        assert_eq!(default_level(0), Some("high"));
+
+        // The declared subset wins over the official mirror (the official
+        // gpt-mini-fast set is not consulted for this row).
+        assert_eq!(efforts(1), vec!["none", "high"]);
+        assert_eq!(default_level(1), Some("high"));
+
+        // Unknown slug: template's conservative none/high stays.
+        assert_eq!(efforts(2), vec!["none", "high"]);
+        assert_eq!(default_level(2), Some("high"));
+    }
+
+    #[test]
+    fn official_reasoning_level_mirror_fixes_inconsistent_default() {
+        // When the mirrored official set does not contain the template's
+        // default, the default falls back to the set's highest level so it can
+        // never reference an effort the picker does not offer.
+        let template = json!({
+            "slug": "tpl",
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [
+                { "effort": "none", "description": "Disable Thinking" },
+                { "effort": "high", "description": "Greater reasoning depth for complex problems" }
+            ]
+        });
+        let official = vec![json!({
+            "slug": "gpt-mini-fast",
+            "supported_reasoning_levels": [
+                { "effort": "minimal", "description": "Minimal reasoning" },
+                { "effort": "low", "description": "Fast responses with lighter reasoning" }
+            ]
+        })];
+        let settings = json!({ "modelCatalog": { "models": [{ "model": "gpt-mini-fast" }] } });
+
+        let catalog = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &official,
+        );
+        let entry = &catalog["models"][0];
+        let efforts: Vec<&str> = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("supported_reasoning_levels array")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(efforts, vec!["minimal", "low"]);
+        assert_eq!(
+            entry
+                .get("default_reasoning_level")
+                .and_then(|v| v.as_str()),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn proxy_chat_catalog_does_not_mirror_official_reasoning_levels() {
+        // Chat-completions providers run through the Responses→Chat converter
+        // with its own per-provider effort mapping (effortValueMode), so the
+        // official level set must not leak into their catalog entries.
+        let template = json!({
+            "slug": "tpl",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                { "effort": "low", "description": "Fast responses with lighter reasoning" },
+                { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
+                { "effort": "high", "description": "Greater reasoning depth for complex problems" },
+                { "effort": "xhigh", "description": "Extra high reasoning depth for complex problems" }
+            ]
+        });
+        let official = vec![json!({
+            "slug": "gpt-5.6-sol",
+            "supported_reasoning_levels": [
+                { "effort": "low", "description": "Fast responses with lighter reasoning" },
+                { "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" },
+                { "effort": "high", "description": "Greater reasoning depth for complex problems" },
+                { "effort": "xhigh", "description": "Extra high reasoning depth for complex problems" },
+                { "effort": "max", "description": "Maximum reasoning depth for the hardest problems" },
+                { "effort": "ultra", "description": "Maximum reasoning with automatic task delegation" }
+            ]
+        })];
+        let settings = json!({ "modelCatalog": { "models": [{ "model": "gpt-5.6-sol" }] } });
+
+        let catalog = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::ProxyChat,
+            None,
+            &official,
+        );
+        let entry = &catalog["models"][0];
+        let efforts: Vec<&str> = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("supported_reasoning_levels array")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(efforts, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            entry
+                .get("default_reasoning_level")
+                .and_then(|v| v.as_str()),
+            Some("medium")
         );
     }
 
