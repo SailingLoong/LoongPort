@@ -64,18 +64,30 @@ loongport://connect
     &user_id=<可选，newapi-session 时由页面带上>
 ```
 
-页面按站点家族自动检测凭据形状：
+页面按站点家族自动检测凭据形状（按顺序尝试，命中即止）：
 
-| kind | 家族 | 凭据来源 |
+| kind | 家族/版本 | 凭据来源 |
 |---|---|---|
 | `sub2api` | sub2api | `localStorage.auth_token`（键名事实源：sub2api `frontend/src/stores/auth.ts`） |
-| `newapi-session` | new-api | 会话 cookie `session`（仅当站点未设 `HttpOnly` 时可读） |
-| `newapi-access-token` | new-api | `localStorage.user` JSON 里的 `access_token`（one-api 血统的系统访问令牌） |
+| `newapi-session` | 旧版 new-api / one-api 形态 | 会话 cookie `session`（仅当未设 `HttpOnly` 时可读） |
+| `newapi-access-token` | 旧版 new-api | `localStorage.user` JSON 里的 `access_token`（one-api 血统的系统访问令牌） |
+| `newapi-access-token` | **现代版 new-api**（最新版真机实测） | 检测只认**非 httpOnly 的登录标志 cookie** `new_api_has_session=1`（零网络请求）；token 在点击「打开 LoongPort」时经同源 `POST /api/user/auth/refresh` **现铸一次** |
+
+现代版 new-api 的形状与边界（自建最新版实测，2026-09）：
+
+- 前端 localStorage **不存任何凭据**，会话在 httpOnly cookie 里，JWT 只在页面内存；
+- `GET /api/user/token`（铸独立系统令牌的老路）被安全验证门拦（403
+  `SECURITY_PROOF_REQUIRED`），页面走不通；
+- `POST /api/user/auth/refresh` 可以铸 token，但**每次调用都会轮换会话 cookie**，
+  短时间内多次铸会触发站点的 reuse 判定、把整个会话族连坐失效——所以检测用
+  标志 cookie、铸币只在点击时**恰好一次**，绝不轮询着铸；
+- 铸出的 token 有效期约 15 分钟（`expires_at` 是**秒**，消费端按「>1e11 才是
+  毫秒」归一）。接力产物是短期会话——但足够客户端完成档位预配（sk 长期有效）。
 
 `user_id` 只服务 `newapi-session`：客户端要拿会话 cookie 打 new-api 的
-`GET /api/user/token` 换一把 Bearer 访问令牌（只读、不消耗浏览器会话），该端点
-要求 `New-Api-User` 头，页面从 `localStorage.user.id` 读出随回调带上。
-`newapi-access-token` 与 `sub2api` 不需要它。
+`GET /api/user/token` 换一把 Bearer 访问令牌，该端点要求 `New-Api-User` 头，
+页面从 `localStorage.user.id` 读出随回调带上。`sub2api` 与现代版
+`newapi-access-token` 不需要它。
 
 用户资料（昵称等）**不在契约里**：客户端拿到凭据后自己调站点的 profile 端点
 获取，避免经手多余的个人数据（`user_id` 例外——它不是资料，是换令牌的调用参数）。
@@ -108,9 +120,8 @@ loongport://connect
 
 ## 已知边界
 
-- **new-api 家族是尽力而为**：`session` cookie 通常带 `HttpOnly`，静态页读不到；
-  `access_token` 依赖站点/用户开启。两路都不通时页面按未登录处理。new-api 的
-  可靠解是上游契约（见下），握手页只覆盖「cookie 可读或 access_token 存在」的站。
+- **new-api 已两代兼容**（旧版 cookie/localStorage 分支 + 现代版标志 cookie +
+  点击现铸，均真机验证）；再往后的可靠解仍是上游契约（见下）。
 - **客户端接收器已落地**：LoongPort 收到回调后拿凭据打一次站点 profile 验证
   （打不通拒收、不落行），成功即走与登录窗相同的落库链（合并/去重语义一致），
   toast + 自动预配档位。未安装应用的用户点击后浏览器不会有反应（页面会给出
