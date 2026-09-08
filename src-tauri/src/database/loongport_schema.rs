@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 19;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 20;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -291,6 +291,18 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 log::info!("LoongPort 数据迁移 v18 → v19（站点余额缓存表）");
                 crate::relay::balance::create_site_balance_cache_table(conn)?;
                 set_version(conn, 19)?;
+            }
+            19 => {
+                log::info!("LoongPort 数据迁移 v19 → v20（站点余额缓存改按站点+账号复合键）");
+                // v19 的表主键只有 site_origin，同站两个账号会共用一行缓存互相顶掉
+                // 余额。它是 TTL 600s 的纯缓存，直接弃旧表重建，不搬数据 —— 重建后
+                // 由冷启补刷 / 首次读取重新落值。
+                conn.execute("DROP TABLE IF EXISTS site_balance_cache", [])
+                    .map_err(|error| {
+                        AppError::Database(format!("删旧站点余额缓存表失败: {error}"))
+                    })?;
+                crate::relay::balance::create_site_balance_cache_table(conn)?;
+                set_version(conn, 20)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -991,18 +1003,64 @@ mod tests {
             "前提：升级前本表不存在"
         );
 
-        apply(&conn).expect("迁移到 v19");
+        apply(&conn).expect("迁移到最新");
 
         assert!(
             Database::table_exists(&conn, "site_balance_cache").expect("查表"),
             "v18 → v19 必须建出站点余额缓存表"
         );
         conn.execute(
+            "INSERT INTO site_balance_cache (site_origin, account_id, balance_usd, fetched_at)
+             VALUES ('https://a.example', 7, 1.5, 0)",
+            [],
+        )
+        .expect("迁移后必须可写（复合键形态）");
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+    }
+
+    /// ⭐ v19→v20 余额缓存换复合键形态：停在 v19 的老库（旧主键只有 site_origin）
+    /// 升级后必须重建出「站点+账号」复合键的表；旧缓存行允许直接丢弃（纯缓存，
+    /// 重建后重新落值）。
+    #[test]
+    fn v19_to_v20_rebuilds_balance_cache_with_composite_key() {
+        let conn = mem();
+        ensure_version_table(&conn).expect("建版本表");
+        // 造一个停在 v19、持有**旧形态**表和数据的库
+        conn.execute(
+            "CREATE TABLE site_balance_cache (
+                site_origin TEXT PRIMARY KEY,
+                balance_usd REAL,
+                fetched_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .expect("建旧形态表");
+        conn.execute(
             "INSERT INTO site_balance_cache (site_origin, balance_usd, fetched_at)
              VALUES ('https://a.example', 1.5, 0)",
             [],
         )
-        .expect("迁移后必须可写");
+        .expect("塞一条旧缓存");
+        set_version(&conn, 19).expect("设为 v19");
+
+        apply(&conn).expect("迁移到 v20");
+
+        // 复合键形态可写：同站两个账号各占一行不冲突（旧单列主键下第二条会顶掉第一条）
+        conn.execute(
+            "INSERT INTO site_balance_cache (site_origin, account_id, balance_usd, fetched_at)
+             VALUES ('https://a.example', 331, 4.0, 1),
+                    ('https://a.example', 354, 9.0, 1)",
+            [],
+        )
+        .expect("复合键下同站双账号必须能共存");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM site_balance_cache WHERE site_origin = 'https://a.example'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2, "旧单键缓存行已被弃表清掉，新行双账号共存");
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 

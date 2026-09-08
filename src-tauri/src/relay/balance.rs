@@ -285,23 +285,34 @@ fn wallet_usage(balance: f64) -> UsageResult {
 // 站点余额缓存（省心看板 SWR）
 // ============================================================================
 
-/// 看板余额的缓存表：`origin → (余额, 拉取时刻)`，每站一行。
+/// 看板余额的缓存表：`(origin, 账号) → (余额, 拉取时刻)`，每站**每账号**一行。
 ///
-/// 由 `create_tables_on_conn`（全新库）与 LoongPort 迁移 v18 → v19（老库）
-/// 共同调用，两边建的必须是同一形态 —— 见 `database/loongport_schema.rs`
+/// 由 `create_tables_on_conn`（全新库）与 LoongPort 迁移 v19 → v20（老库，弃旧表
+/// 重建）共同调用，两边建的必须是同一形态 —— 见 `database/loongport_schema.rs`
 /// 的头注释。
 pub fn create_site_balance_cache_table(conn: &rusqlite::Connection) -> Result<(), AppError> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS site_balance_cache (
-            site_origin TEXT PRIMARY KEY,
+            site_origin TEXT NOT NULL,
+            account_id INTEGER NOT NULL,
             balance_usd REAL,
-            fetched_at INTEGER NOT NULL
+            fetched_at INTEGER NOT NULL,
+            PRIMARY KEY (site_origin, account_id)
         )",
         [],
     )
     .map_err(|e| AppError::Database(format!("创建 site_balance_cache 表失败: {e}")))?;
     Ok(())
 }
+
+/// 缓存键：站点 origin × 账号 id。
+///
+/// 钱包余额归**账号**所有 —— 同一个站挂两个账号是两个独立事实，只按站点键控
+/// 会让后写的账号把先写的顶掉（档位层 `provision::provider_id_for` 修过同款
+/// 前科，见它那边的注释）。账号维度取自行的 `RelayAccount::account_id` /
+/// 档位的 `meta.loongport_account_id`；没有账号身份的（未登录行、vendor 档）
+/// 不参与这张缓存，各走自己的真查路径。
+pub type SiteAccountKey = (String, i64);
 
 /// 缓存 TTL（秒）：超过视为 stale，看板读到时踢一次后台刷新。
 pub const SITE_BALANCE_TTL_SECS: i64 = 600;
@@ -314,28 +325,29 @@ const SITE_BALANCE_FETCH_BUDGET_SECS: u64 = 15;
 /// 没有负缓存的话，查不出余额的站每次打开看板都会重查一遍。
 pub type SiteBalanceEntry = (Option<f64>, i64);
 
-/// 读全表（行数 = 站点数，个位到几十）。
+/// 读全表（行数 = 站点×账号，个位到几十）。
 pub fn cached_site_balances(
     db: &crate::database::Database,
-) -> std::collections::HashMap<String, SiteBalanceEntry> {
+) -> std::collections::HashMap<SiteAccountKey, SiteBalanceEntry> {
     // 非 Result 返回值的锁惯例：毒锁取内值（与 commands::auto_mode 的直查一致），
     // 读缓存失败按「无缓存」处理 —— 看板照常返回，stale 判定自然触发刷新。
     let conn = db
         .conn
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut stmt =
-        match conn.prepare("SELECT site_origin, balance_usd, fetched_at FROM site_balance_cache") {
-            Ok(stmt) => stmt,
-            Err(e) => {
-                log::warn!("读 site_balance_cache 失败（按无缓存处理）: {e}");
-                return std::collections::HashMap::new();
-            }
-        };
+    let mut stmt = match conn
+        .prepare("SELECT site_origin, account_id, balance_usd, fetched_at FROM site_balance_cache")
+    {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            log::warn!("读 site_balance_cache 失败（按无缓存处理）: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, String>(0)?,
-            (row.get::<_, Option<f64>>(1)?, row.get::<_, i64>(2)?),
+            (row.get::<_, String>(0)?, row.get::<_, i64>(1)?),
+            (row.get::<_, Option<f64>>(2)?, row.get::<_, i64>(3)?),
         ))
     });
     match rows {
@@ -347,18 +359,19 @@ pub fn cached_site_balances(
     }
 }
 
-/// 读单站缓存（行级余额条的读路径）。`None` = 没进过缓存。
+/// 读单条缓存（行级余额条的读路径）。`None` = 没进过缓存。
 pub fn cached_site_balance(
     db: &crate::database::Database,
-    origin: &str,
+    key: &SiteAccountKey,
 ) -> Option<SiteBalanceEntry> {
     let conn = db
         .conn
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     conn.query_row(
-        "SELECT balance_usd, fetched_at FROM site_balance_cache WHERE site_origin = ?1",
-        rusqlite::params![origin],
+        "SELECT balance_usd, fetched_at FROM site_balance_cache
+         WHERE site_origin = ?1 AND account_id = ?2",
+        rusqlite::params![key.0, key.1],
         |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, i64>(1)?)),
     )
     .ok()
@@ -396,62 +409,63 @@ pub fn cached_row_balance_result(entry: &SiteBalanceEntry) -> RowBalanceResult {
 /// 幂等写一行（含负缓存）。
 pub fn upsert_site_balance(
     db: &crate::database::Database,
-    origin: &str,
+    key: &SiteAccountKey,
     entry: SiteBalanceEntry,
 ) -> Result<(), AppError> {
     let conn = crate::database::lock_conn!(db.conn);
     conn.execute(
-        "INSERT INTO site_balance_cache (site_origin, balance_usd, fetched_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(site_origin) DO UPDATE SET
+        "INSERT INTO site_balance_cache (site_origin, account_id, balance_usd, fetched_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(site_origin, account_id) DO UPDATE SET
             balance_usd = excluded.balance_usd,
             fetched_at = excluded.fetched_at",
-        rusqlite::params![origin, entry.0, entry.1],
+        rusqlite::params![key.0, key.1, entry.0, entry.1],
     )
     .map_err(|e| AppError::Database(format!("写 site_balance_cache 失败: {e}")))?;
     Ok(())
 }
 
-/// 删指定站的缓存行 —— 充值等「余额已确定变化」的时刻用：旧值必然错了，
+/// 删指定键的缓存行 —— 充值等「余额已确定变化」的时刻用：旧值必然错了，
 /// 留着只会误导，删掉后由紧随的单站刷新重新落值。
 pub fn drop_site_cache(
     db: &crate::database::Database,
-    origins: &std::collections::HashSet<String>,
+    keys: &std::collections::HashSet<SiteAccountKey>,
 ) {
     let conn = db
         .conn
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for origin in origins {
+    for (origin, account_id) in keys {
         if let Err(e) = conn.execute(
-            "DELETE FROM site_balance_cache WHERE site_origin = ?1",
-            rusqlite::params![origin],
+            "DELETE FROM site_balance_cache WHERE site_origin = ?1 AND account_id = ?2",
+            rusqlite::params![origin, account_id],
         ) {
-            log::warn!("[site-balance] 删缓存失败 {origin}: {e}");
+            log::warn!("[site-balance] 删缓存失败 {origin}/#{account_id}: {e}");
         }
     }
 }
 
-/// 哪些站需要刷新：没进过缓存的 + `fetched_at` 超 TTL 的（纯函数）。
+/// 哪些键需要刷新：没进过缓存的 + `fetched_at` 超 TTL 的（纯函数）。
 fn stale_balance_sites(
-    wanted: &std::collections::HashMap<String, String>,
-    cached: &std::collections::HashMap<String, SiteBalanceEntry>,
+    wanted: &std::collections::HashMap<SiteAccountKey, String>,
+    cached: &std::collections::HashMap<SiteAccountKey, SiteBalanceEntry>,
     now: i64,
-) -> Vec<(String, String)> {
+) -> Vec<(SiteAccountKey, String)> {
     wanted
         .iter()
-        .filter(|(origin, _)| match cached.get(*origin) {
+        .filter(|(key, _)| match cached.get(*key) {
             Some((_, fetched_at)) => now - *fetched_at > SITE_BALANCE_TTL_SECS,
             None => true,
         })
-        .map(|(origin, key)| (origin.clone(), key.clone()))
+        .map(|(key, sk)| (key.clone(), sk.clone()))
         .collect()
 }
 
-/// 单飞集合：正在后台刷新的 origin。看板查询可能高频触发（多 app + 窗口聚焦），
+/// 单飞集合：正在后台刷新的 (origin, 账号)。看板查询可能高频触发（多 app + 窗口聚焦），
 /// 没有这道闸会叠出一串重复扇出。
-static REFRESH_INFLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::OnceLock::new();
+static REFRESH_INFLIGHT: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<SiteAccountKey>>,
+> = std::sync::OnceLock::new();
 
 /// 读时惰性刷新（SWR 的 revalidate）：筛出 stale 站点交给后台任务 ——
 /// sk 直查 → 写缓存 → 发 [`crate::events::SITE_BALANCES_UPDATED`] 让前端补值。
@@ -466,7 +480,7 @@ static REFRESH_INFLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::
 pub fn spawn_stale_refresh<R: tauri::Runtime>(
     db: std::sync::Arc<crate::database::Database>,
     app_handle: Option<tauri::AppHandle<R>>,
-    wanted: std::collections::HashMap<String, String>,
+    wanted: std::collections::HashMap<SiteAccountKey, String>,
 ) {
     let now = chrono::Utc::now().timestamp();
     let stale = {
@@ -481,7 +495,7 @@ pub fn spawn_stale_refresh<R: tauri::Runtime>(
         };
         let fresh: Vec<_> = stale
             .into_iter()
-            .filter(|(origin, _)| guard.insert(origin.clone()))
+            .filter(|(key, _)| guard.insert(key.clone()))
             .collect();
         fresh
     };
@@ -490,35 +504,39 @@ pub fn spawn_stale_refresh<R: tauri::Runtime>(
     }
 
     tokio::spawn(async move {
-        let origins: Vec<String> = stale.iter().map(|(origin, _)| origin.clone()).collect();
-        let results = futures::future::join_all(stale.into_iter().map(|(origin, key)| async move {
+        let keys: Vec<SiteAccountKey> = stale.iter().map(|(key, _)| key.clone()).collect();
+        let results = futures::future::join_all(stale.into_iter().map(|(key, sk)| async move {
             let fetched = match tokio::time::timeout(
                 std::time::Duration::from_secs(SITE_BALANCE_FETCH_BUDGET_SECS),
-                fetch_site_balance(&origin, &key),
+                fetch_site_balance(&key.0, &sk),
             )
             .await
             {
                 Ok(balance) => balance,
                 Err(_elapsed) => {
-                    log::warn!("[site-balance] {origin} 余额链超预算（{SITE_BALANCE_FETCH_BUDGET_SECS}s），本次记负缓存");
+                    log::warn!(
+                        "[site-balance] {}#{} 余额链超预算（{SITE_BALANCE_FETCH_BUDGET_SECS}s），本次记负缓存",
+                        key.0,
+                        key.1
+                    );
                     None
                 }
             };
-            (origin, fetched)
+            (key, fetched)
         }))
         .await;
 
         let now = chrono::Utc::now().timestamp();
-        for (origin, balance) in results {
-            if let Err(e) = upsert_site_balance(&db, &origin, (balance, now)) {
-                log::warn!("[site-balance] 写缓存失败 {origin}: {e}");
+        for (key, balance) in results {
+            if let Err(e) = upsert_site_balance(&db, &key, (balance, now)) {
+                log::warn!("[site-balance] 写缓存失败 {}#{}: {e}", key.0, key.1);
             }
         }
 
         if let Some(inflight) = REFRESH_INFLIGHT.get() {
             if let Ok(mut guard) = inflight.lock() {
-                for origin in origins {
-                    guard.remove(&origin);
+                for key in keys {
+                    guard.remove(&key);
                 }
             }
         }
@@ -566,23 +584,52 @@ mod tests {
     fn site_balance_cache_roundtrips_including_negative_entries() {
         let db = cache_db();
         let now = 1_000_000_i64;
-        upsert_site_balance(&db, "https://a.example", (Some(9.5), now)).unwrap();
-        upsert_site_balance(&db, "https://dead.example", (None, now)).unwrap();
+        upsert_site_balance(&db, &("https://a.example".into(), 7), (Some(9.5), now)).unwrap();
+        upsert_site_balance(&db, &("https://dead.example".into(), 7), (None, now)).unwrap();
 
         let cached = cached_site_balances(&db);
-        assert_eq!(cached.get("https://a.example"), Some(&(Some(9.5), now)));
         assert_eq!(
-            cached.get("https://dead.example"),
+            cached.get(&("https://a.example".to_string(), 7)),
+            Some(&(Some(9.5), now))
+        );
+        assert_eq!(
+            cached.get(&("https://dead.example".to_string(), 7)),
             Some(&(None, now)),
             "负缓存（查过无值）也要占位，否则死站每次打开都重查"
         );
-        assert!(!cached.contains_key("https://never.example"));
+        assert!(!cached.contains_key(&("https://never.example".to_string(), 7)));
 
-        // 覆盖写：同站新值顶旧值
-        upsert_site_balance(&db, "https://a.example", (Some(8.0), now + 1)).unwrap();
+        // 覆盖写：同键新值顶旧值
+        upsert_site_balance(&db, &("https://a.example".into(), 7), (Some(8.0), now + 1)).unwrap();
         assert_eq!(
-            cached_site_balances(&db).get("https://a.example"),
+            cached_site_balances(&db).get(&("https://a.example".to_string(), 7)),
             Some(&(Some(8.0), now + 1))
+        );
+    }
+
+    /// ⭐ 同站双账号是两个事实：A 的写入绝不能顶掉 B 的缓存行（键里必须有账号）。
+    #[test]
+    fn same_site_two_accounts_keep_independent_cache_rows() {
+        let db = cache_db();
+        let now = 1_000_000_i64;
+        upsert_site_balance(&db, &("https://a.example".into(), 331), (Some(4.0), now)).unwrap();
+        upsert_site_balance(&db, &("https://a.example".into(), 354), (Some(9.0), now)).unwrap();
+
+        let cached = cached_site_balances(&db);
+        assert_eq!(
+            cached.get(&("https://a.example".to_string(), 331)),
+            Some(&(Some(4.0), now)),
+            "后写另一账号不能顶掉先写账号的行"
+        );
+        assert_eq!(
+            cached.get(&("https://a.example".to_string(), 354)),
+            Some(&(Some(9.0), now))
+        );
+
+        // 单键读也只读到自己账号那条
+        assert_eq!(
+            cached_site_balance(&db, &("https://a.example".into(), 331)),
+            Some((Some(4.0), now))
         );
     }
 
@@ -593,25 +640,28 @@ mod tests {
         let fresh = now - (SITE_BALANCE_TTL_SECS - 1);
         let stale = now - (SITE_BALANCE_TTL_SECS + 1);
         let mut wanted = std::collections::HashMap::new();
-        wanted.insert("https://fresh.example".to_string(), "k1".to_string());
-        wanted.insert("https://stale.example".to_string(), "k2".to_string());
-        wanted.insert("https://missing.example".to_string(), "k3".to_string());
+        wanted.insert(("https://fresh.example".to_string(), 1), "k1".to_string());
+        wanted.insert(("https://stale.example".to_string(), 1), "k2".to_string());
+        wanted.insert(("https://missing.example".to_string(), 1), "k3".to_string());
         wanted.insert(
-            "https://fresh-negative.example".to_string(),
+            ("https://fresh-negative.example".to_string(), 1),
             "k4".to_string(),
         );
         let mut cached = std::collections::HashMap::new();
-        cached.insert("https://fresh.example".to_string(), (Some(1.0), fresh));
-        cached.insert("https://stale.example".to_string(), (Some(2.0), stale));
-        cached.insert("https://fresh-negative.example".to_string(), (None, fresh));
+        cached.insert(("https://fresh.example".to_string(), 1), (Some(1.0), fresh));
+        cached.insert(("https://stale.example".to_string(), 1), (Some(2.0), stale));
+        cached.insert(
+            ("https://fresh-negative.example".to_string(), 1),
+            (None, fresh),
+        );
 
         let mut stale_sites = stale_balance_sites(&wanted, &cached, now);
         stale_sites.sort();
         assert_eq!(
             stale_sites,
             vec![
-                ("https://missing.example".to_string(), "k3".to_string()),
-                ("https://stale.example".to_string(), "k2".to_string()),
+                (("https://missing.example".to_string(), 1), "k3".to_string()),
+                (("https://stale.example".to_string(), 1), "k2".to_string()),
             ],
             "TTL 内的正/负缓存都不刷；缺缓存与超 TTL 的要刷"
         );
@@ -625,7 +675,7 @@ mod tests {
         let mut wanted = std::collections::HashMap::new();
         // .example 是保留 TLD，DNS 必然快速失败（离线环境同样快速失败）
         wanted.insert(
-            "https://nonexistent.example".to_string(),
+            ("https://nonexistent.example".to_string(), 7),
             "sk-x".to_string(),
         );
 
@@ -633,7 +683,8 @@ mod tests {
 
         for _ in 0..250 {
             let cached = cached_site_balances(&db);
-            if let Some((balance, _)) = cached.get("https://nonexistent.example") {
+            if let Some((balance, _)) = cached.get(&("https://nonexistent.example".to_string(), 7))
+            {
                 assert_eq!(*balance, None, "不可达站必须是负缓存而不是有值");
                 return;
             }
