@@ -34,8 +34,8 @@ interface TransitDetailDialogProps {
   crowdBinEdges?: number[];
   /** 共建开关（渲染实测区锁定态用）。 */
   crowdEnabled: boolean;
-  /** 打开共建告知弹窗。 */
-  onOpenCrowdNotice: () => void;
+  /** 加入共建：直接开启（enabled + confirmed），与设置开关同一语义。 */
+  onJoinCrowd: () => void;
 }
 
 /** meta 行的一个「标签 + 值」段；值缺席就不渲染（后端没有的事实不展示）。 */
@@ -60,7 +60,7 @@ export function TransitDetailDialog({
   crowdStats,
   crowdBinEdges,
   crowdEnabled,
-  onOpenCrowdNotice,
+  onJoinCrowd,
 }: TransitDetailDialogProps) {
   const { t, i18n } = useTranslation();
   const transit = item.transit ?? null;
@@ -200,7 +200,7 @@ export function TransitDetailDialog({
           stats={crowdStats}
           binEdges={crowdBinEdges}
           enabled={crowdEnabled}
-          onJoin={onOpenCrowdNotice}
+          onJoin={onJoinCrowd}
         />
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">

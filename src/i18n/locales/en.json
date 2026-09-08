@@ -3302,10 +3302,9 @@
       "footnote": "Shared anonymously by users, for reference only; cost is a blended-model estimate.",
       "notice": {
         "title": "Crowd-measured site stats",
-        "question": "Join crowd-measured site stats? Participants anonymously upload site metrics (first-token time, error rate, hourly aggregates).",
-        "finePrint": "No prompts, keys, or account info. You can turn this off anytime in Settings.",
-        "accept": "Join",
-        "decline": "Not now"
+        "body": "You're sharing anonymous site metrics (first-token time, error rate, etc.) by default — no prompts, keys, or account info.",
+        "turnOffHint": "To turn it off: Settings → General → Crowd-measured site stats.",
+        "ok": "Got it"
       },
       "distTitle": "First-token time distribution",
       "distTooltip": "{{range}}",

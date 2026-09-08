@@ -5,10 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
 import type { Settings } from "@/types";
 
-import {
-  CROWD_NOTICE_OPEN_EVENT,
-  CrowdNoticeDialog,
-} from "../CrowdNoticeDialog";
+import { CrowdNoticeDialog } from "../CrowdNoticeDialog";
 
 const { get, save, listSites } = vi.hoisted(() => ({
   get: vi.fn(),
@@ -67,11 +64,11 @@ describe("CrowdNoticeDialog：没弹过 且 已有中转站 才弹（维护者 2
     vi.useRealTimers();
   });
 
-  it("存量用户（有站点 + 未表态）：启动延迟后弹一次", async () => {
+  it("存量用户（有站点 + 未确认）：启动延迟后弹一次", async () => {
     get.mockResolvedValue(makeSettings());
     renderDialog();
     await tick(5_100);
-    expect(screen.getByText("loongport.crowd.notice.question")).toBeTruthy();
+    expect(screen.getByText("loongport.crowd.notice.body")).toBeTruthy();
   });
 
   it("新用户（还没有站点）：不弹；站点出现后（轮询）弹 —— 覆盖首次登录后触发", async () => {
@@ -82,32 +79,21 @@ describe("CrowdNoticeDialog：没弹过 且 已有中转站 才弹（维护者 2
     get.mockResolvedValue(makeSettings());
     renderDialog();
     await tick(5_100);
-    expect(screen.queryByText("loongport.crowd.notice.question")).toBeNull();
+    expect(screen.queryByText("loongport.crowd.notice.body")).toBeNull();
 
     hasSites = true; // 模拟这一刻首次登录成功
     await tick(20_100);
-    expect(screen.getByText("loongport.crowd.notice.question")).toBeTruthy();
+    expect(screen.getByText("loongport.crowd.notice.body")).toBeTruthy();
   });
 
-  it("表过态（含拒绝过）：不弹", async () => {
+  it("确认过：不弹", async () => {
     get.mockResolvedValue(makeSettings({ crowdMetricsNoticeConfirmed: true }));
     renderDialog();
     await tick(25_100);
-    expect(screen.queryByText("loongport.crowd.notice.question")).toBeNull();
+    expect(screen.queryByText("loongport.crowd.notice.body")).toBeNull();
   });
 
-  it("广场再入口事件可以唤起（拒绝过的用户改主意）", async () => {
-    get.mockResolvedValue(makeSettings({ crowdMetricsNoticeConfirmed: true }));
-    renderDialog();
-    await tick(6_000);
-    act(() => {
-      window.dispatchEvent(new Event(CROWD_NOTICE_OPEN_EVENT));
-    });
-    await tick(0);
-    expect(screen.getByText("loongport.crowd.notice.question")).toBeTruthy();
-  });
-
-  it("拒绝也写 confirmed（之后不再主动弹），且 enable=false", async () => {
+  it("「知道了」只写确认标记，不动 enabled（未表态用户保持默认参与）", async () => {
     const captured: { saved?: Partial<Settings> } = {};
     get.mockResolvedValue(makeSettings());
     save.mockImplementation(async (s: Partial<Settings>) => {
@@ -117,17 +103,38 @@ describe("CrowdNoticeDialog：没弹过 且 已有中转站 才弹（维护者 2
     await tick(5_100);
 
     // fireEvent 而非 userEvent：假时钟下指针模拟的 setTimeout 链会死锁，
-    // 这里只要 onClick 触发 respond()。
+    // 这里只要 onClick 触发 acknowledge()。
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: "loongport.crowd.notice.decline" }),
+        screen.getByRole("button", { name: "loongport.crowd.notice.ok" }),
       );
       await vi.advanceTimersByTimeAsync(0);
     });
 
     expect(save).toHaveBeenCalled();
     expect(captured.saved?.crowdMetricsNoticeConfirmed).toBe(true);
+    // 告知不承载表态：enabled 原样回写（未表态 ⇒ 字段缺省 ⇒ 后端默认 true）。
+    expect(captured.saved?.crowdMetricsEnabled).toBeUndefined();
+    expect(screen.queryByText("loongport.crowd.notice.body")).toBeNull();
+  });
+
+  it("已在设置里显式关过（enabled=false 且未确认）：告知不把他翻回参与", async () => {
+    const captured: { saved?: Partial<Settings> } = {};
+    get.mockResolvedValue(makeSettings({ crowdMetricsEnabled: false }));
+    save.mockImplementation(async (s: Partial<Settings>) => {
+      captured.saved = s;
+    });
+    renderDialog();
+    await tick(5_100);
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "loongport.crowd.notice.ok" }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(captured.saved?.crowdMetricsNoticeConfirmed).toBe(true);
     expect(captured.saved?.crowdMetricsEnabled).toBe(false);
-    expect(screen.queryByText("loongport.crowd.notice.question")).toBeNull();
   });
 });

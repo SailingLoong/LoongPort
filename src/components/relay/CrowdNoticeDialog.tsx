@@ -8,15 +8,13 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
+  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { relayApi } from "@/lib/api/relay";
-import { crowdKeys } from "@/lib/query/crowd";
 import { settingsApi } from "@/lib/api";
 import type { Settings } from "@/types";
-
-/** 广场实测区「加入共建」按钮唤起本弹窗用的窗口事件（拒绝过的用户再次加入的入口）。 */
-export const CROWD_NOTICE_OPEN_EVENT = "loongport:crowd-notice-open";
 
 /** 启动后的首次判查延迟（避开首屏）。 */
 const FIRST_CHECK_DELAY_MS = 5_000;
@@ -26,20 +24,16 @@ const POLL_INTERVAL_MS = 20_000;
 const POLL_DEADLINE_MS = 15 * 60_000;
 
 /**
- * 站点实测共建的告知弹窗。**一屏只问一件事**（维护者 2026-08-26 拍板，
- * 砍掉长文案）：参不参与共建；一行小字交代边界（传什么、可关）。
- * 边界细节不在这屏展开 —— 设置里开关的描述常驻完整边界。
+ * 站点实测共建的告知弹窗（2026-09-09 拍板：纯告知形状）。
  *
- * 2026-09-07 起共建默认参与：这屏从「征求同意」变成「知情表态」—— 两个按钮
- * 仍都显式写 enabled（拒绝过的用户存显式 false，永不被默认值翻回），而上传
- * 的知情不变式在后端（看过告知才发字节，见 crowd::uploader::upload_allowed）。
+ * 共建自 2026-09-07 起默认参与，这屏只做两件事：告知「已默认参与 + 传什么」，
+ * 指明关闭入口（设置 → 通用 → 站点实测数据共建）。不设选择按钮 —— 拒绝只走
+ * 设置开关，显式关过的永不被默认值翻回。上传的知情不变式在后端（看过告知才
+ * 发字节，见 crowd::uploader::upload_allowed）。
  *
- * 弹窗时机（2026-08-26 拍板）：**没表态过 且 已有中转站**。存量用户启动即满足；
- * 新用户在首次成功登录/注册站点后满足 —— 用轮询观测 `relay_list_sites`，
- * 不用在各登录流程里到处埋事件。
- *
- * 每进程只主动弹一次；广场锁定卡的「加入共建」仍可经
- * [@link CROWD_NOTICE_OPEN_EVENT] 再次唤起。
+ * 弹窗时机（2026-08-26 拍板，沿用）：**没确认过 且 已有中转站**。存量用户启动
+ * 即满足；新用户在首次成功登录/注册站点后满足 —— 用轮询观测 `relay_list_sites`，
+ * 不用在各登录流程里到处埋事件。每进程只主动弹一次。
  */
 export function CrowdNoticeDialog() {
   const { t } = useTranslation();
@@ -49,7 +43,7 @@ export function CrowdNoticeDialog() {
   const [saving, setSaving] = useState(false);
   const autoAskDone = useRef(false);
 
-  // 每次打开前取最新设置：save 要回写整份对象。取失败就这一轮关掉（下次再问）。
+  // 每次打开前取最新设置：save 要回写整份对象。取失败就这一轮关掉（下次再弹）。
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -66,7 +60,7 @@ export function CrowdNoticeDialog() {
     };
   }, [open]);
 
-  // 主动告知：没表态 且 已有中转站 → 弹。setTimeout 链（先 5s、后每 20s），
+  // 主动告知：没确认过 且 已有中转站 → 弹。setTimeout 链（先 5s、后每 20s），
   // 弹过即停；超过兜底上限也停。
   useEffect(() => {
     let stopped = false;
@@ -87,7 +81,7 @@ export function CrowdNoticeDialog() {
           return;
         }
       } catch {
-        // 读不到就等下一轮；门禁在后端，没表态什么都不会发生。
+        // 读不到就等下一轮；门禁在后端，没看过告知什么都不会发生。
       }
       if (!stopped && Date.now() - startedAt < POLL_DEADLINE_MS) {
         timer = setTimeout(tick, POLL_INTERVAL_MS);
@@ -100,30 +94,21 @@ export function CrowdNoticeDialog() {
     };
   }, []);
 
-  // 广场「加入共建」的再入口（拒绝过的用户改主意）。
-  useEffect(() => {
-    const onOpenEvent = () => setOpen(true);
-    window.addEventListener(CROWD_NOTICE_OPEN_EVENT, onOpenEvent);
-    return () =>
-      window.removeEventListener(CROWD_NOTICE_OPEN_EVENT, onOpenEvent);
-  }, []);
-
-  const respond = async (participate: boolean) => {
+  const acknowledge = async () => {
     if (!settings || saving) return;
     setSaving(true);
     try {
       const { webdavSync: _webdavSync, ...rest } = settings;
+      // 只写确认标记，不动 enabled：用户若已在设置里显式关过（enabled=false、
+      // confirmed 未置），告知不能把他翻回参与 —— 「拒绝只走设置」的另一面。
       await settingsApi.save({
         ...rest,
         crowdMetricsNoticeConfirmed: true,
-        crowdMetricsEnabled: participate,
       });
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      // 参与的那一刻快照才有意义 —— 失效让它立即现拉（命令层门禁刚开）。
-      await queryClient.invalidateQueries({ queryKey: crowdKeys.all });
       setOpen(false);
     } catch {
-      // 存不进去：不置 confirmed（下次还能问），弹窗先收起别卡死用户。
+      // 存不进去：不置 confirmed（下次还能弹），弹窗先收起别卡死用户。
       setOpen(false);
     } finally {
       setSaving(false);
@@ -134,38 +119,26 @@ export function CrowdNoticeDialog() {
 
   return (
     <Dialog open onOpenChange={() => {}}>
-      {/* 有意不给关闭途径：这一屏要一个明确表态，两个按钮都能让它消失。
-          zIndex 用 top：可能从详情弹窗（也是 top）里经由事件唤起。 */}
-      <DialogContent className="max-w-[24rem] gap-0 p-6" zIndex="top">
-        <DialogTitle className="text-base font-semibold">
-          {t("loongport.crowd.notice.title")}
-        </DialogTitle>
-        <DialogDescription className="mt-2 text-sm leading-relaxed">
-          {t("loongport.crowd.notice.question")}
-        </DialogDescription>
-
-        {/* 一行小字：代价 + 退出通道。完整边界在设置开关的描述里常驻。 */}
-        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-          {t("loongport.crowd.notice.finePrint")}
-        </p>
-
-        <div className="mt-5 flex justify-end gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={saving}
-            onClick={() => void respond(false)}
-          >
-            {t("loongport.crowd.notice.decline")}
+      {/* 有意不给关闭途径：「知道了」同时是知情标记（后端门禁认 confirmed），
+          别的路子关掉等于没看过告知。zIndex 用 top：判查轮询可能落在用户已停在
+          任何弹窗里的时候首弹。 */}
+      <DialogContent className="max-w-md" zIndex="top">
+        <DialogHeader>
+          <DialogTitle>{t("loongport.crowd.notice.title")}</DialogTitle>
+          <DialogDescription>
+            {t("loongport.crowd.notice.body")}
+            <br />
+            {/* 一行小字指明关闭入口；边界细节在设置开关的描述里常驻。 */}
+            <span className="text-xs">
+              {t("loongport.crowd.notice.turnOffHint")}
+            </span>
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter className="gap-2">
+          <Button disabled={saving} onClick={() => void acknowledge()}>
+            {t("loongport.crowd.notice.ok")}
           </Button>
-          <Button
-            size="sm"
-            disabled={saving}
-            onClick={() => void respond(true)}
-          >
-            {t("loongport.crowd.notice.accept")}
-          </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
