@@ -204,10 +204,9 @@ const requiredKeys = [
   "crowd.distSlow",
   "crowd.distSr",
   "crowd.notice.title",
-  "crowd.notice.question",
-  "crowd.notice.finePrint",
-  "crowd.notice.accept",
-  "crowd.notice.decline",
+  "crowd.notice.body",
+  "crowd.notice.turnOffHint",
+  "crowd.notice.ok",
   // 一键「切回官方登录」。它会删掉用户的 codex 登录态（OAuth refresh token），
   // 所以确认弹窗那三条尤其不能退化成 key 名 —— 那等于让人盲点一个破坏性操作。
   "official.button",

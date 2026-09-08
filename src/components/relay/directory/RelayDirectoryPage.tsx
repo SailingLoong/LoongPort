@@ -32,7 +32,6 @@ import {
   visibleDirectoryRange,
 } from "./directoryState";
 import { RelayDirectoryRow } from "./RelayDirectoryRow";
-import { CROWD_NOTICE_OPEN_EVENT } from "../CrowdNoticeDialog";
 import { FirstVisitDomainDialog } from "./FirstVisitDomainDialog";
 import { TransitDetailDialog } from "./TransitDetailDialog";
 
@@ -96,6 +95,21 @@ export function RelayDirectoryPage({
     retry: 1,
   });
   const crowdSnapshot = crowdSnapshotQuery.data ?? null;
+
+  // 「加入共建」：告知弹窗已改纯告知形状（不再承载表态），加入动作直接置
+  // enabled + confirmed —— 与设置开关的打开侧完全同一语义（打开也算看过告知）。
+  const joinCrowd = async () => {
+    if (!appSettings) return;
+    const { webdavSync: _webdavSync, ...rest } = appSettings;
+    await settingsApi.save({
+      ...rest,
+      crowdMetricsEnabled: true,
+      crowdMetricsNoticeConfirmed: true,
+    });
+    await queryClient.invalidateQueries({ queryKey: ["settings"] });
+    // 参与的那一刻快照才有意义 —— 失效让实测区立即现拉（门禁刚开）。
+    await queryClient.invalidateQueries({ queryKey: crowdKeys.all });
+  };
 
   const directoryQuery = useQuery({
     queryKey: relayDirectoryKeys.listing(),
@@ -242,10 +256,7 @@ export function RelayDirectoryPage({
               : null
           }
           crowdEnabled={crowdEnabled}
-          onOpenCrowdNotice={() =>
-            // 弹窗单实例挂在 App 层（主动告知 + 广场再入口共用），这里只广播。
-            window.dispatchEvent(new Event(CROWD_NOTICE_OPEN_EVENT))
-          }
+          onJoinCrowd={() => void joinCrowd().catch(() => undefined)}
         />
       )}
       <div className="flex items-start justify-between gap-4 border-b border-border-default py-4">
