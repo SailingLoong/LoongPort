@@ -7,7 +7,7 @@
  */
 
 /** `ONBOARDING_REGISTER_COMPLETED` 事件的 payload（与 Rust 侧
- * `commands::onboarding::RegisterCompletedPayload` 对应）。 */
+ * `events::RegisterCompletedPayload` 对应；生产者是注册窗与浏览器接力登录）。 */
 export interface OnboardingRegisterCompleted {
   relayId: number;
   siteName: string;

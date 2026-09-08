@@ -51,6 +51,7 @@ loongport://connect
     &kind=<sub2api | newapi-session | newapi-access-token>
     &token=<登录凭据>
     &expires_at=<可选，sub2api 毫秒时间戳字符串，原样透传>
+    &user_id=<可选，newapi-session 时由页面带上>
 ```
 
 页面按站点家族自动检测凭据形状：
@@ -61,8 +62,13 @@ loongport://connect
 | `newapi-session` | new-api | 会话 cookie `session`（仅当站点未设 `HttpOnly` 时可读） |
 | `newapi-access-token` | new-api | `localStorage.user` JSON 里的 `access_token`（one-api 血统的系统访问令牌） |
 
-用户资料（昵称、账号 id）**不在契约里**：客户端拿到凭据后自己调站点的
-profile 端点获取，避免经手多余的个人数据。
+`user_id` 只服务 `newapi-session`：客户端要拿会话 cookie 打 new-api 的
+`GET /api/user/token` 换一把 Bearer 访问令牌（只读、不消耗浏览器会话），该端点
+要求 `New-Api-User` 头，页面从 `localStorage.user.id` 读出随回调带上。
+`newapi-access-token` 与 `sub2api` 不需要它。
+
+用户资料（昵称等）**不在契约里**：客户端拿到凭据后自己调站点的 profile 端点
+获取，避免经手多余的个人数据（`user_id` 例外——它不是资料，是换令牌的调用参数）。
 
 ## 安全模型
 
@@ -76,14 +82,29 @@ profile 端点获取，避免经手多余的个人数据。
   登录）。这是有意为之的边界，不是遗漏。
 - 凭据只出现在「页面 → 本机应用」的一次重定向里，不落任何中间服务器。
 
+## 登录态缺失或过期时
+
+页面不会替用户跳走（也不自动移交任何东西），给的是引导闭环：
+
+1. 未检测到登录态 / sub2api 登录态已过期（页面读 `token_expires_at` 预判，
+   过期凭据不移交——移交给客户端也只会被 profile 验证打回）；
+2. 点「在新标签页登录或注册本站账号」（`/login`，站内自行跳注册同样有效——
+   注册成功即自动登录）——**新标签**保证本页不丢，
+   页面以 1 秒轮询盯着本站凭据；
+3. 登录完成回到本页，**自动就绪，无需刷新**；点「打开 LoongPort」完成接力。
+
+最后一步的点击无法省掉：浏览器只允许由用户手势触发自定义 scheme 跳转
+（也是「本机应用被唤起必须用户知情」的安全边界），这属于有意设计。
+
 ## 已知边界
 
 - **new-api 家族是尽力而为**：`session` cookie 通常带 `HttpOnly`，静态页读不到；
   `access_token` 依赖站点/用户开启。两路都不通时页面按未登录处理。new-api 的
   可靠解是上游契约（见下），握手页只覆盖「cookie 可读或 access_token 存在」的站。
-- **客户端接收器随版本落地**：`loongport://connect` 的消费端在 LoongPort 后续
-  版本中发布；未安装应用的用户点击后浏览器不会有反应（页面会给出安装指引）。
-  站长先接入不会有任何副作用。
+- **客户端接收器已落地**：LoongPort 收到回调后拿凭据打一次站点 profile 验证
+  （打不通拒收、不落行），成功即走与登录窗相同的落库链（合并/去重语义一致），
+  toast + 自动预配档位。未安装应用的用户点击后浏览器不会有反应（页面会给出
+  安装指引）。
 
 ## 为什么需要这个页面
 

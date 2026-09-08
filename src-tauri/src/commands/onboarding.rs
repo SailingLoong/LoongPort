@@ -10,21 +10,12 @@
 //! 注册窗（[`onboarding_open_register_window`]）仍是 Star 对话框领取后
 //! 打开的终点。
 
-use serde::Serialize;
 use tauri::Emitter;
 
-use crate::events::ONBOARDING_REGISTER_COMPLETED;
+use crate::events::{RegisterCompletedPayload, ONBOARDING_REGISTER_COMPLETED};
 use crate::relay::onboarding;
 
 use super::relay::{import_site, BrowserEntrySource, ImportResult};
-
-/// 新人引导注册窗完成事件的 payload（前端 `src/lib/onboarding.ts` 消费）。
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RegisterCompletedPayload {
-    relay_id: i64,
-    site_name: String,
-}
 
 /// 打开官方站（BestAPI）注册窗 —— Star 对话框「领取」点击后调用，
 /// 所以优惠码必给且显式传入。
