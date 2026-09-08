@@ -136,7 +136,7 @@ export function CcSwitchImportDialog({
               <Button
                 type="button"
                 disabled={
-                  isImporting || status === "loading" || !preview?.sourceExists
+                  isImporting || status === "loading" || !preview?.canImport
                 }
                 onClick={handleConfirm}
               >
@@ -174,6 +174,19 @@ function PreviewBody({
         {t("settings.ccSwitchImport.noSource", {
           defaultValue:
             "未检测到 cc-switch 数据（~/.cc-switch/cc-switch.db）。",
+        })}
+      </p>
+    );
+  }
+
+  // 源库在但版本导不动（cc-switch 比当前应用新）—— 入口平时已隐藏，这里是「预览拉取后
+  // 源库被 cc-switch 升上去了」的竞态兜底：一条极简说明，确认键在上面已被禁用。
+  if (!preview.canImport) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        {t("settings.ccSwitchImport.versionUnsupported", {
+          defaultValue:
+            "这份 cc-switch 数据需要更新版本的 LoongPort 才能导入。",
         })}
       </p>
     );

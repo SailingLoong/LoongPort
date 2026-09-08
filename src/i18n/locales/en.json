@@ -446,6 +446,7 @@
       "sectionHint": "Copy cc-switch providers / MCP / skills / prompts over in one go; cc-switch itself is not modified.",
       "button": "Import from cc-switch",
       "noSource": "No cc-switch data found (~/.cc-switch/cc-switch.db)",
+      "versionUnsupported": "This cc-switch data requires a newer LoongPort version to import.",
       "loading": "Reading cc-switch data…",
       "confirm": "Import now",
       "importing": "Importing…",
