@@ -83,9 +83,13 @@
   // sub2api 家族键名（事实源：sub2api frontend src/stores/auth.ts）。
   var SUB2API_TOKEN_KEY = 'auth_token';
   var SUB2API_EXPIRES_KEY = 'token_expires_at';
-  // new-api 家族：会话 cookie 名 session；localStorage 'user' JSON 内含 access_token。
+  // new-api 家族：会话 cookie 名 session；localStorage 'user' JSON 内含 access_token；
+  // 现代版（JWT 在前端内存 + httpOnly 会话）用非 httpOnly 的登录标志 cookie 检测，
+  // 点击时经同源 refresh 端点现铸一把 token（mintNewapiToken）。
   var NEWAPI_SESSION_COOKIE = 'session';
   var NEWAPI_USER_KEY = 'user';
+  var NEWAPI_REFRESH_PATH = '/api/user/auth/refresh';
+  var NEWAPI_HAS_SESSION_COOKIE = 'new_api_has_session';
 
   function readCreds() {
     // new-api 的 user 对象里有账号 id（newapi-session 换访问令牌时客户端要放进
@@ -144,7 +148,34 @@
       } catch (_) { /* 值不完整时按未登录处理 */ }
     }
 
+    // 现代版 new-api：会话在 httpOnly cookie、JWT 只在前端内存里，上面全部读不到。
+    // 检测只认非 httpOnly 的登录标志 cookie（零副作用）；token 点击时现铸 ——
+    // refresh 会轮换会话 cookie，多铸会触发站点的 reuse 判定连坐失效，绝不能轮询着铸。
+    if (document.cookie.match(new RegExp('(?:^|;\\s*)' + NEWAPI_HAS_SESSION_COOKIE + '=1'))) {
+      return { kind: 'newapi-access-token', token: '', expiresAt: '', userId: '', needsMint: true };
+    }
     return null;
+  }
+
+  // 现代版 new-api：借同源 httpOnly 会话请站点铸一把全新 access token。
+  // 只在用户点击「打开 LoongPort」时调用一次 —— refresh 会轮换会话 cookie，
+  // 频繁铸会触发站点的 reuse 判定、把整个会话族连坐失效（真机实测），
+  // 所以检测用登录标志 cookie、铸币只此一次。
+  function mintNewapiToken() {
+    return fetch(NEWAPI_REFRESH_PATH, { method: 'POST', credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (body) {
+        var d = body && body.data;
+        if (d && typeof d.access_token === 'string' && d.access_token.trim()) {
+          return {
+            token: d.access_token.trim(),
+            // new-api 这里是**秒**；消费端与展示层都按「>1e11 才是毫秒」归一。
+            expiresAt: d.access_expires_at > 0 ? String(d.access_expires_at) : '',
+          };
+        }
+        return null;
+      })
+      .catch(function () { return null; });
   }
 
   function render(creds) {
@@ -162,12 +193,16 @@
     }
     document.getElementById('origin').textContent = location.origin;
     document.getElementById('kind').textContent = creds.kind;
-    document.getElementById('preview').textContent = creds.token.slice(0, 8) + '…' + creds.token.slice(-4);
+    document.getElementById('preview').textContent = creds.needsMint
+      ? '点击时从本站会话现取'
+      : creds.token.slice(0, 8) + '…' + creds.token.slice(-4);
     var expiresRow = document.getElementById('expires-row');
     if (creds.expiresAt) {
-      // sub2api 存的是毫秒时间戳字符串，归一展示；原样随回调透传。
-      var ms = Number(creds.expiresAt);
-      document.getElementById('expires').textContent = Number.isSafeInteger(ms) && ms > 0
+      // 归一展示（>1e11 是毫秒，否则按秒）：sub2api 存毫秒、new-api refresh 回秒。
+      // 原样随回调透传，归一留给消费端。
+      var n = Number(creds.expiresAt);
+      var ms = Number.isSafeInteger(n) && n > 0 ? (n > 1e11 ? n : n * 1000) : 0;
+      document.getElementById('expires').textContent = ms > 0
         ? new Date(ms).toLocaleString()
         : creds.expiresAt;
     } else {
@@ -176,19 +211,38 @@
 
     document.getElementById('connect').addEventListener('click', function () {
       // 显式用户点击（也是浏览器允许跳转自定义 scheme 所需的 user activation）。
-      // 手工拼串而非 new URL()：非特殊 scheme 的解析行为各浏览器不一致。
-      var params = [
-        'origin=' + encodeURIComponent(location.origin),
-        'state=' + encodeURIComponent(state),
-        'kind=' + encodeURIComponent(creds.kind),
-        'token=' + encodeURIComponent(creds.token),
-      ];
-      if (creds.expiresAt) params.push('expires_at=' + encodeURIComponent(creds.expiresAt));
-      if (creds.userId) params.push('user_id=' + encodeURIComponent(creds.userId));
-      location.href = CALLBACK_SCHEME + '?' + params.join('&');
-      document.getElementById('fallback').hidden = false;
-      document.getElementById('connect').disabled = true;
+      if (creds.needsMint) {
+        var button = document.getElementById('connect');
+        button.disabled = true;
+        mintNewapiToken().then(function (minted) {
+          if (!minted) {
+            button.textContent = '获取凭据失败，请重试';
+            button.disabled = false;
+            return;
+          }
+          creds.token = minted.token;
+          creds.expiresAt = minted.expiresAt;
+          redirect(creds);
+        });
+        return;
+      }
+      redirect(creds);
     });
+  }
+
+  // 拼回调并跳转（手工拼串而非 new URL()：非特殊 scheme 的解析行为各浏览器不一致）。
+  function redirect(creds) {
+    var params = [
+      'origin=' + encodeURIComponent(location.origin),
+      'state=' + encodeURIComponent(state),
+      'kind=' + encodeURIComponent(creds.kind),
+      'token=' + encodeURIComponent(creds.token),
+    ];
+    if (creds.expiresAt) params.push('expires_at=' + encodeURIComponent(creds.expiresAt));
+    if (creds.userId) params.push('user_id=' + encodeURIComponent(creds.userId));
+    location.href = CALLBACK_SCHEME + '?' + params.join('&');
+    document.getElementById('fallback').hidden = false;
+    document.getElementById('connect').disabled = true;
   }
 
   var localHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -212,6 +266,7 @@
   }
   scan();
   window.setInterval(scan, 1000);
+
 })();
 </script>
 </body>
