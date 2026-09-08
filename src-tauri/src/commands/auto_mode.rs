@@ -470,19 +470,16 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     // services::site_balance_refresh 与 relay::balance::spawn_stale_refresh）。
     // 此前这里是同步网络扇出 —— 20-30 家里一家超时型挂掉，整板就等它
     // 30-90s，且冷启动/窗口聚焦每次重演（用户反馈「每次打开软件省心模式
-    // 卡好久」）。
-    let (tier_origins, _site_keys) =
+    // 卡好久」）。缓存键是站点+账号：同站两个账号的档位各查各的钱包。
+    let (tier_keys, _site_keys) =
         crate::services::site_balance_refresh::tier_site_keys(app_type, &ranked);
     let cached = crate::relay::balance::cached_site_balances(db);
-    let balances: std::collections::HashMap<String, Option<f64>> = tier_origins
+    let balances: std::collections::HashMap<String, Option<f64>> = tier_keys
         .iter()
-        .map(|(tier_id, origin)| {
+        .map(|(tier_id, key)| {
             (
                 tier_id.clone(),
-                cached
-                    .get(origin)
-                    .map(|(balance, _)| *balance)
-                    .unwrap_or(None),
+                cached.get(key).map(|(balance, _)| *balance).unwrap_or(None),
             )
         })
         .collect();
@@ -648,7 +645,7 @@ mod tests {
         let state = AppState::new(db.clone());
 
         let id = crate::relay::provision::provider_id_for("https://cache.example", Some(1), 1);
-        let tier = crate::provider::Provider::with_id(
+        let mut tier = crate::provider::Provider::with_id(
             id.clone(),
             "缓存档".to_string(),
             json!({
@@ -659,6 +656,11 @@ mod tests {
             }),
             None,
         );
+        // 缓存键带账号维度：档位要带归属，看板才知道去 (origin, account) 哪条读
+        tier.meta = Some(crate::provider::ProviderMeta {
+            loongport_account_id: Some(1),
+            ..Default::default()
+        });
         db.save_provider("claude", &tier).unwrap();
 
         // 无缓存：余额 None（显示 —）
@@ -669,7 +671,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         crate::relay::balance::upsert_site_balance(
             &db,
-            "https://cache.example",
+            &("https://cache.example".to_string(), 1),
             (Some(12.34), now),
         )
         .unwrap();

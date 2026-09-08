@@ -278,12 +278,14 @@ pub(crate) fn build_window<R: tauri::Runtime>(
     let close_handle = app_handle.clone();
     let close_site = relay.site_origin.clone();
     let close_api_base = relay.api_base_url.clone();
+    let close_account = relay.account_id;
     built.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             let _ = handle_for_close.emit(PURCHASE_CLOSED, closed_relay_id);
             let _ = shutdown.send(true);
             let handle = close_handle.clone();
             let (site, api_base) = (close_site.clone(), close_api_base.clone());
+            let account_id = close_account;
             // db 在事件内取：开窗路径不碰全局 state（headless 窗口测试没有 manage）
             tauri::async_runtime::spawn(async move {
                 let db = handle.state::<AppState>().db.clone();
@@ -292,6 +294,7 @@ pub(crate) fn build_window<R: tauri::Runtime>(
                     Some(handle),
                     &site,
                     &api_base,
+                    account_id,
                 );
             });
         }

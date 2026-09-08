@@ -106,22 +106,29 @@ pub(crate) async fn relay_balance_impl<R: tauri::Runtime>(
         (relay, base_url, api_keys)
     };
 
+    // 缓存键 = (site_origin, account_id)。未登录（`account_id == None`）的行进不了
+    // 缓存：钱包事实归账号所有，没有账号维度就只能走真查，绝不能挂到别的账号
+    // 条目上 —— 同站两个账号曾经在这里互相顶掉对方的余额。
     if !force {
-        let state = app_handle.state::<AppState>();
-        if let Some(entry) = balance::cached_site_balance(&state.db, &relay.site_origin) {
-            let fresh = chrono::Utc::now().timestamp() - entry.1 <= balance::SITE_BALANCE_TTL_SECS;
-            if !fresh {
-                // 过期：回旧值 + 后台刷（单飞/预算/事件都在那条链里；只用 sk，
-                // 不碰登录态 —— 充值窗口的 cookie 独占权不受影响）。
-                if let Some(key) = api_keys.first() {
-                    balance::spawn_stale_refresh(
-                        state.db.clone(),
-                        Some(app_handle.clone()),
-                        std::collections::HashMap::from([(relay.site_origin.clone(), key.clone())]),
-                    );
+        if let Some(account_id) = relay.account_id {
+            let state = app_handle.state::<AppState>();
+            let key: balance::SiteAccountKey = (relay.site_origin.clone(), account_id);
+            if let Some(entry) = balance::cached_site_balance(&state.db, &key) {
+                let fresh =
+                    chrono::Utc::now().timestamp() - entry.1 <= balance::SITE_BALANCE_TTL_SECS;
+                if !fresh {
+                    // 过期：回旧值 + 后台刷（单飞/预算/事件都在那条链里；只用 sk，
+                    // 不碰登录态 —— 充值窗口的 cookie 独占权不受影响）。
+                    if let Some(sk) = api_keys.first() {
+                        balance::spawn_stale_refresh(
+                            state.db.clone(),
+                            Some(app_handle.clone()),
+                            std::collections::HashMap::from([(key, sk.clone())]),
+                        );
+                    }
                 }
+                return Ok(balance::cached_row_balance_result(&entry));
             }
-            return Ok(balance::cached_row_balance_result(&entry));
         }
     }
 
@@ -143,19 +150,22 @@ pub(crate) async fn relay_balance_impl<R: tauri::Runtime>(
 
     {
         // 真查的结果写回缓存（正/负都写）—— 行路径与看板/后台刷新写同一张表，
-        // 这是「一个事实一个 owner」的落点。快照采样保持只挂真查。
+        // 这是「一个事实一个 owner」的落点。未登录行没有账号维度，只采样不缓存。
+        // 快照采样保持只挂真查。
         let state = app_handle.state::<AppState>();
         let cached_value = usage
             .data
             .as_ref()
             .and_then(|items| items.first())
             .and_then(|item| item.remaining);
-        if let Err(e) = balance::upsert_site_balance(
-            &state.db,
-            &relay.site_origin,
-            (cached_value, chrono::Utc::now().timestamp()),
-        ) {
-            log::warn!("[site-balance] 行查询写缓存失败: {e}");
+        if let Some(account_id) = relay.account_id {
+            if let Err(e) = balance::upsert_site_balance(
+                &state.db,
+                &(relay.site_origin.clone(), account_id),
+                (cached_value, chrono::Utc::now().timestamp()),
+            ) {
+                log::warn!("[site-balance] 行查询写缓存失败: {e}");
+            }
         }
         reconcile::capture_balance_snapshot(&state.db, relay_id, &usage);
     }
@@ -234,6 +244,126 @@ mod tests {
             .expect("forced resolve");
         assert!(forced.usage.success);
         assert_eq!(hits.load(Ordering::SeqCst), 2, "force 必须真的重新查");
+    }
+
+    /// ⭐ 同站双账号端到端：A 行的余额查询不能命中、也不能覆盖 B 行的缓存
+    /// （缓存键 = 站点 + 账号）。修复前两行共用一个缓存槽，后查的账号把先查的
+    /// 顶掉 —— 界面上两行显示同一个数。
+    #[tokio::test]
+    async fn same_site_two_accounts_do_not_share_cache_entries() {
+        // mock 按 bearer token 回不同余额：token-a → 1.0，token-b → 2.0
+        let router = {
+            use axum::http::HeaderMap;
+            use axum::routing::get;
+            use axum::Json;
+            axum::Router::new().route(
+                "/api/v1/user/profile",
+                get(|headers: HeaderMap| async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    let balance = if auth.contains("token-b") { 2.0 } else { 1.0 };
+                    Json(serde_json::json!({
+                        "code": 0, "message": "success",
+                        "data": { "id": 7, "username": "u", "email": "u@example.com",
+                                  "balance": balance, "frozen_balance": 0.0 }
+                    }))
+                }),
+            )
+        };
+        let (origin, _server) = spawn_balance_server(router).await;
+
+        // 同站两行两个账号（7 / token-a，8 / token-b）
+        let db = std::sync::Arc::new(crate::database::Database::memory().expect("内存库"));
+        let (row_a, row_b) = {
+            let conn = db.conn.lock().expect("锁内存库");
+            let row_a = creds::save_site_with_backend(
+                &conn,
+                &origin,
+                "A",
+                &origin,
+                discovery::BackendKind::Sub2Api,
+            )
+            .expect("建 A 行");
+            creds::save_credentials(
+                &conn,
+                row_a,
+                creds::AccountIdentity {
+                    id: 7,
+                    label: "A",
+                    login_identifier: "a",
+                },
+                "token-a",
+                Some("refresh-a"),
+                None,
+                creds::SessionEnvironment::default(),
+            )
+            .expect("存 A 登录态");
+            let row_b = creds::save_site_with_backend(
+                &conn,
+                &origin,
+                "B",
+                &origin,
+                discovery::BackendKind::Sub2Api,
+            )
+            .expect("建 B 行");
+            creds::save_credentials(
+                &conn,
+                row_b,
+                creds::AccountIdentity {
+                    id: 8,
+                    label: "B",
+                    login_identifier: "b",
+                },
+                "token-b",
+                Some("refresh-b"),
+                None,
+                creds::SessionEnvironment::default(),
+            )
+            .expect("存 B 登录态");
+            (row_a, row_b)
+        };
+        let app = tauri::test::mock_builder()
+            .manage(AppState::new(db))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+
+        let remaining = |result: &balance::RowBalanceResult| {
+            result
+                .usage
+                .data
+                .as_ref()
+                .and_then(|items| items.first())
+                .and_then(|item| item.remaining)
+                .expect("成功路径必有余额")
+        };
+
+        // A 首查：真查落缓存（origin, 7) = 1.0
+        let a_first = relay_balance_impl(app.handle(), row_a, false)
+            .await
+            .expect("A 首查");
+        assert_eq!(remaining(&a_first), 1.0);
+
+        // B 查：不得命中 A 的缓存，必须真查到自己的 2.0（修复前这里秒回 A 的 1.0）
+        let b_first = relay_balance_impl(app.handle(), row_b, false)
+            .await
+            .expect("B 查询");
+        assert_eq!(
+            remaining(&b_first),
+            2.0,
+            "B 行必须查到 B 账号的钱包，不能读到 A 的缓存"
+        );
+
+        // A 再查：仍读自己的 1.0 —— B 的写入没有顶掉 A 的缓存行
+        let a_second = relay_balance_impl(app.handle(), row_a, false)
+            .await
+            .expect("A 再查");
+        assert_eq!(
+            remaining(&a_second),
+            1.0,
+            "B 的查询/写缓存不得影响 A 的缓存行"
+        );
     }
 
     #[tokio::test]
