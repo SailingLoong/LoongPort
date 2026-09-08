@@ -7,7 +7,8 @@
 
 ## 接入三步
 
-1. 下载本目录的 [`connect.html`](./connect.html)；
+1. 下载本目录的 [`connect.html`](./connect.html)（国内访问 GitHub 不稳时可直接取官网副本：
+   `curl -O https://loongport.dev/connect.html`——文件相同，事实源以本目录为准）；
 2. 部署为站点同源路径，推荐约定路径 `/.well-known/loongport/connect`（任意路径也可用，
    只是约定路径可以让客户端自动发现）；
 3. 完事。用户在浏览器登录站点后打开该页面，点「打开 LoongPort」即完成接力。
