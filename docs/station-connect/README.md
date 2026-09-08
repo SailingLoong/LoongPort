@@ -11,15 +11,18 @@
 LoongPort-website 仓 `public/connect/setup.sh`）：
 
 ```sh
-curl -fsSL https://loongport.dev/connect/setup.sh | sudo sh -s -- <你的域名>
+curl -fsSL https://loongport.dev/connect/setup.sh | sudo sh
 ```
 
+- 域名自动检测（事实源=本机反代配置：宝塔 vhost 文件名 / nginx
+  `server_name` / Caddy 站点地址）；www 与裸域并存取主域，多个不相关
+  域名会列出清单让你补一个参数重跑（`sh setup.sh <域名>`）；
 - 自动识别 宝塔 / 1Panel / nginx / Caddy，只写一个页面文件
   （`/opt/loongport/connect.html`）和一段带标记的反代配置；
 - 改配置前自动备份（集中放 `/opt/loongport/backups`，不会污染配置目录），
   `nginx -t` / `caddy validate` 通过才重载，失败自动还原；
 - 完成后自检 `https://<域名>/.well-known/loongport/connect`；
-- 再跑一遍就是更新；`sh setup.sh <你的域名> --remove` 完全移除。
+- 再跑一遍就是更新；`sh setup.sh --remove` 完全移除。
 
 识别不了的环境（如反代跑在容器里、路径非标）会给出手动粘贴指引，
 配好后再跑一次命令即完成自检。手动步骤见下。
