@@ -7,8 +7,8 @@
 
 ## 一键配置（推荐）
 
-能 SSH 登录服务器的话，一条命令完成（脚本事实源在
-LoongPort-website 仓 `public/connect/setup.sh`）：
+能 SSH 登录服务器的话，一条命令完成（执行前想审阅脚本：
+[源码在这里](https://github.com/SailingLoong/LoongPort-website/blob/main/public/connect/setup.sh)）：
 
 ```sh
 curl -fsSL https://loongport.dev/connect/setup.sh | sudo sh
