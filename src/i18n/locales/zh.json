@@ -3580,6 +3580,15 @@
       "copy": "复制",
       "copied": "已复制",
       "registerNote": "BestAPI 注册窗口已打开，优惠码会自动填好。"
+    },
+    "codexReset": {
+      "label": "全局重置",
+      "eta": "预计 {{time}} 后重置",
+      "etaTitle": "社区预告的预计时间，实际以官方为准",
+      "lastReset": "上次已验证重置：{{time}}",
+      "lastResetTitle": "最近一次被社区确认的全局重置",
+      "announcement": "最新公告",
+      "source": "社区预告 · codex-reset.com"
     }
   },
   "firstRunNotice": {

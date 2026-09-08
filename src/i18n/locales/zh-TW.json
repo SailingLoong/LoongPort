@@ -3581,6 +3581,15 @@
       "copy": "複製",
       "copied": "已複製",
       "registerNote": "BestAPI 註冊視窗已開啟，優惠碼會自動填好。"
+    },
+    "codexReset": {
+      "label": "全域重置",
+      "eta": "預計 {{time}} 後重置",
+      "etaTitle": "社群預告的預計時間，實際以官方為準",
+      "lastReset": "上次已驗證重置：{{time}}",
+      "lastResetTitle": "最近一次被社群確認的全域重置",
+      "announcement": "最新公告",
+      "source": "社群預告 · codex-reset.com"
     }
   },
   "firstRunNotice": {

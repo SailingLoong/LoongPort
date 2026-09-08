@@ -2,6 +2,7 @@ import React from "react";
 import { Loader2 } from "lucide-react";
 import { useCodexOauthQuotaByAccountId } from "@/lib/query/subscription";
 import { SubscriptionQuotaView } from "@/components/SubscriptionQuotaFooter";
+import CodexGlobalReset from "@/components/CodexGlobalReset";
 
 interface CodexOauthAccountQuotaProps {
   /** cc-switch 自管的 ChatGPT 账号 ID */
@@ -42,13 +43,16 @@ const CodexOauthAccountQuota: React.FC<CodexOauthAccountQuotaProps> = ({
   }
 
   return (
-    <SubscriptionQuotaView
-      quota={quota}
-      loading={loading}
-      refetch={refetch}
-      appIdForExpiredHint="codex_oauth"
-      inline={false}
-    />
+    <div>
+      <SubscriptionQuotaView
+        quota={quota}
+        loading={loading}
+        refetch={refetch}
+        appIdForExpiredHint="codex_oauth"
+        inline={false}
+      />
+      <CodexGlobalReset />
+    </div>
   );
 };
 
