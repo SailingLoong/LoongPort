@@ -446,6 +446,7 @@
       "sectionHint": "把 cc-switch 的 provider / MCP / skills / prompt 一次複製過來，不動 cc-switch。",
       "button": "從 cc-switch 匯入",
       "noSource": "未偵測到 cc-switch 資料（~/.cc-switch/cc-switch.db）",
+      "versionUnsupported": "這份 cc-switch 資料需要更新版本的 LoongPort 才能匯入。",
       "loading": "正在讀取 cc-switch 資料…",
       "confirm": "一鍵匯入",
       "importing": "匯入中…",

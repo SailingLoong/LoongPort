@@ -11,10 +11,11 @@ import { CcSwitchImportDialog } from "@/components/settings/CcSwitchImportDialog
 /**
  * 「从 cc-switch 导入」的总入口：**图标旁的小按钮 + 首次启动弹窗**。
  *
- * - **图标旁按钮**：LoongPort 品牌名旁边的小下载图标，检测到 `~/.cc-switch/cc-switch.db`
- *   才显示（`preview.sourceExists`），点了打开导入确认框。
- * - **首启弹窗**：第一次打开时（`ccSwitchImportPrompted` 还没置过）如果检测到 cc-switch
- *   数据，自动弹出「是否一键导入」的确认框；确认或关闭都记下「问过了」，
+ * - **图标旁按钮**：LoongPort 品牌名旁边的小下载图标，检测到**可导**的
+ *   `~/.cc-switch/cc-switch.db`（`preview.canImport`：源库在、且版本没超出当前应用支持
+ *   范围）才显示，点了打开导入确认框；cc-switch 比本仓新时静默不显示。
+ * - **首启弹窗**：第一次打开时（`ccSwitchImportPrompted` 还没置过）如果检测到可导的
+ *   cc-switch 数据，自动弹出「是否一键导入」的确认框；确认或关闭都记下「问过了」，
  *   下次启动不再打扰 —— 与 `StatsNoticeDialog` 的 `statsNoticeConfirmed` 同一个惯例。
  */
 export function CcSwitchImportEntry() {
@@ -27,13 +28,13 @@ export function CcSwitchImportEntry() {
 
   useEffect(() => {
     let cancelled = false;
-    // 两个事实都要：有没有 cc-switch 数据（决定弹不弹/显不显按钮）、问过没。
+    // 两个事实都要：有没有可导的 cc-switch 数据（决定弹不弹/显不显按钮）、问过没。
     Promise.all([settingsApi.get(), ccSwitchImportApi.getPreview()])
       .then(([s, p]) => {
         if (cancelled) return;
         setSettings(s);
         setPreview(p);
-        if (s.ccSwitchImportPrompted === undefined && p.sourceExists) {
+        if (s.ccSwitchImportPrompted === undefined && p.canImport) {
           setIsFirstLaunch(true);
           setDialogOpen(true);
         }
@@ -72,14 +73,14 @@ export function CcSwitchImportEntry() {
     void queryClient.invalidateQueries({ queryKey: ["providers"] });
   }, [queryClient]);
 
-  const sourceExists = preview?.sourceExists === true;
+  const canImport = preview?.canImport === true;
 
   return (
     <>
       {preview === null ? (
         // 预览还没回来：占个等宽位，避免头部跳动。
         <div className="w-8" />
-      ) : sourceExists ? (
+      ) : canImport ? (
         <Button
           variant="ghost"
           size="icon"

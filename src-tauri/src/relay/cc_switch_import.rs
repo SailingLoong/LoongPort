@@ -6,6 +6,13 @@
 //! 库。**绝不动源库** —— 这是「导入」不是「迁移」，cc-switch 可能还在被 cc-switch app 用。
 //! 集成测试用「导入前后源文件字节一致」钉着这条。
 //!
+//! ## 版本闸：cc-switch 比本仓新时收起入口
+//!
+//! cc-switch 升级可能把源库 `user_version` 推到本仓 [`SCHEMA_VERSION`] 之后，导入路径的
+//! 迁移层会拒（「数据库版本过新」）。与其让用户点了才见报错，预览直接给最终事实
+//! `can_import = user_version ≤ SCHEMA_VERSION`，前端据此隐藏全部入口 —— 判据与迁移闸
+//! 同一个常量，跟上游吸收新 schema 后入口自动恢复，不用改前端。
+//!
 //! ## 覆盖式：复用上游导入路径
 //!
 //! providers / MCP / prompts / skills 以 cc-switch 为准整体替换，走
@@ -41,7 +48,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::app_config::AppType;
-use crate::database::Database;
+use crate::database::{Database, SCHEMA_VERSION};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use crate::relay::provider_fingerprint;
@@ -67,7 +74,10 @@ pub struct SkippedProvider {
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlan {
     pub source_exists: bool,
-    pub source_version: Option<i64>,
+    /// 这份源库**当前应用能不能导**：源库在，且 `user_version` ≤ 内置 [`SCHEMA_VERSION`]
+    /// （与导入路径里迁移层版本闸同一个常量）。前端据此决定入口显隐 —— cc-switch 比
+    /// 本仓新时静默收起入口，别把「数据库版本过新」留给用户点了之后才弹。
+    pub can_import: bool,
     pub providers: ProviderPlan,
     pub mcp_servers: i64,
     pub prompts: i64,
@@ -334,7 +344,7 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
     if !source_path.exists() {
         return Ok(ImportPlan {
             source_exists: false,
-            source_version: None,
+            can_import: false,
             providers: ProviderPlan {
                 will_import: 0,
                 skipped: Vec::new(),
@@ -386,7 +396,7 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
 
     Ok(ImportPlan {
         source_exists: true,
-        source_version: Some(version),
+        can_import: version <= i64::from(SCHEMA_VERSION),
         providers: ProviderPlan {
             will_import: classified.will_import.len() + classified.cannot_fingerprint.len(),
             skipped: skipped_list,
@@ -886,9 +896,11 @@ mod tests {
 
     /// 建一个 cc-switch 源库文件：与托管档位同指纹的 codex provider、一个不同 sk 的、
     /// 一条 MCP、一条 cc-switch 自己的 settings（不该盖掉 LoongPort 的）。
-    fn create_source_db(path: &std::path::Path) {
+    /// `user_version` 由调用方给 —— 版本闸测试要拿「比本仓新 / 在范围内」两种形态。
+    fn create_source_db(path: &std::path::Path, user_version: i64) {
         let conn = Connection::open(path).expect("建源库");
-        conn.execute_batch("PRAGMA user_version=16;").unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version={user_version};"))
+            .unwrap();
 
         create_providers_table(&conn);
         // 与托管档位（sk-managed @ bestapi.store）同指纹 ⇒ 导入时跳过。
@@ -954,6 +966,32 @@ mod tests {
         .unwrap();
     }
 
+    /// cc-switch 比本仓新（源库 `user_version` 超过 [`SCHEMA_VERSION`]）⇒ 预览必须给
+    /// `can_import=false` —— 前端据此隐藏全部入口，别让用户点了才见「数据库版本过新」。
+    /// 纯读路径（不碰 home 目录），不用 `#[serial]`。
+    #[test]
+    fn plan_import_gates_on_source_schema_version() {
+        let db = Database::memory().expect("内存库");
+
+        // 比本仓支持的新：上游又发版推了 schema。
+        let newer = tempfile::NamedTempFile::new().unwrap();
+        create_source_db(newer.path(), i64::from(SCHEMA_VERSION) + 1);
+        let plan = plan_import(&db, newer.path()).expect("预览不该失败");
+        assert!(plan.source_exists, "源库在");
+        assert!(!plan.can_import, "超版本的源库必须判不可导");
+
+        // 恰好等于 SCHEMA_VERSION：可导（≤ 是闭区间）。
+        let current = tempfile::NamedTempFile::new().unwrap();
+        create_source_db(current.path(), i64::from(SCHEMA_VERSION));
+        let plan = plan_import(&db, current.path()).expect("预览不该失败");
+        assert!(plan.can_import, "等于 SCHEMA_VERSION 必须可导");
+
+        // 没有源库：不可导（入口本就不显）。
+        let plan = plan_import(&db, Path::new("/nonexistent/cc-switch.db")).expect("预览不该失败");
+        assert!(!plan.source_exists);
+        assert!(!plan.can_import);
+    }
+
     /// ⭐ 核心闸：导入把 cc-switch 的搬进来，同时托管档位回填、冲突项删掉、
     /// LoongPort 自己的表/settings 保留、**源库字节不变**、**「已手动维护」判定不变**。
     /// ⚠️ `#[serial]`：本测试要临时改进程级 `CC_SWITCH_TEST_HOME`（备份/设置读写用），
@@ -999,7 +1037,8 @@ mod tests {
 
         // ── cc-switch 源库文件 ──
         let src = tempfile::NamedTempFile::new().expect("临时源库");
-        create_source_db(src.path());
+        // 16（旧于当前 SCHEMA_VERSION）：顺带覆盖「导入路径把旧版本迁上来」的链路。
+        create_source_db(src.path(), 16);
         let before = std::fs::read(src.path()).expect("读源库字节");
 
         let report = {

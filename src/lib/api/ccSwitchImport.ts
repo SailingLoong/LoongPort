@@ -19,10 +19,10 @@ export interface ProviderPlan {
 
 /** 从 cc-switch 导入的预览（后端 `get_cc_switch_import_preview`）。 */
 export interface CcSwitchImportPreview {
-  /** `~/.cc-switch/cc-switch.db` 是否存在 —— 前端据此决定显不显入口。 */
+  /** `~/.cc-switch/cc-switch.db` 是否存在。 */
   sourceExists: boolean;
-  /** 源库 schema 版本。 */
-  sourceVersion: number | null;
+  /** 这份源库当前应用能不能导（后端判：源库在、且 schema 版本在支持范围内）—— 入口显隐唯据。 */
+  canImport: boolean;
   providers: ProviderPlan;
   mcpServers: number;
   prompts: number;

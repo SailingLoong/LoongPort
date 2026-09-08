@@ -10,7 +10,8 @@ import { CcSwitchImportDialog } from "@/components/settings/CcSwitchImportDialog
  * 设置页 advanced → data 区里的「从 cc-switch 导入」小节。
  *
  * 检测到 `~/.cc-switch/cc-switch.db` 才给按钮（`preview.sourceExists`），否则灰显提示 ——
- * 有源可导才值得占用户一眼。
+ * 有源可导才值得占用户一眼。源库在但版本导不动（cc-switch 比当前应用新）时**整节隐藏**
+ * —— 留一个点了必报「版本过新」的按钮，不如不给。
  */
 export function CcSwitchImportSection() {
   const { t } = useTranslation();
@@ -28,6 +29,11 @@ export function CcSwitchImportSection() {
   }, [queryClient]);
 
   const sourceExists = preview?.sourceExists === true;
+
+  // cc-switch 比当前应用新（版本导不动）→ 整节隐藏，入口层面就别让用户撞报错。
+  if (preview !== null && sourceExists && !preview.canImport) {
+    return null;
+  }
 
   return (
     <section className="space-y-4">
