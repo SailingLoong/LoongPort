@@ -54,8 +54,22 @@ pub const MODEL_VERIFICATION_PROGRESS: &str = "model-verification-progress";
 /// 模型验证持久化结果变化（档位行与模型验证弹窗监听）。
 pub const MODEL_VERIFICATION_CHANGED: &str = "model-verification-changed";
 /// 新人引导注册窗完成（`RelaySection` 监听）：凭据已入库，前端做 toast +
-/// 档位预配 + 列表刷新。payload `{ relayId, siteName }`。
+/// 档位预配 + 列表刷新。payload [`RegisterCompletedPayload`]。
+///
+/// 「注册窗完成」与「浏览器接力登录完成」（`relay::browser_connect`）是同一语义的
+/// 两个生产者 —— 都以「凭据已入库」收尾，共用本事件，前端收尾只有一份。
 pub const ONBOARDING_REGISTER_COMPLETED: &str = "onboarding-register-completed";
+
+/// [`ONBOARDING_REGISTER_COMPLETED`] 的 payload（前端 `src/lib/onboarding.ts` 消费）。
+///
+/// 定义在 events.rs（跨语言边界的主人）而不是某个生产者里：注册窗与浏览器接力
+/// 两个生产者共用，放任何一方都会让另一方反向依赖它。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterCompletedPayload {
+    pub relay_id: i64,
+    pub site_name: String,
+}
 
 /// 看板站点余额后台刷新完成（`useTierBoard` 监听，失效看板查询补上新值）。
 /// 站点余额跨 app 共享，不带 payload —— 监听方把所有 app 的看板一起失效。

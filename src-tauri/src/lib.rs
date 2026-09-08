@@ -288,7 +288,8 @@ fn runtime_log_level_allows(level: log::Level, max_level: log::LevelFilter) -> b
 #[cfg(feature = "gui")]
 /// 统一处理 loongport:// 深链接 URL
 ///
-/// - 解析 URL
+/// - `loongport://connect`：浏览器接力登录（握手页回传），后台验证 + 落库
+/// - 其余：按导入深链解析
 /// - 向前端发射 `deeplink-import` / `deeplink-error` 事件
 /// - 可选：在成功时聚焦主窗口
 fn handle_deeplink_url(
@@ -306,6 +307,26 @@ fn handle_deeplink_url(
         url_for_log(url_str)
     );
 
+    // 浏览器接力登录（docs/station-connect 契约）：先于导入解析截走 ——
+    // parse_deeplink_url 不认识这个 host，落下去只会变成一条解析错误。
+    // 验证要打网络（profile），放后台；窗口照常聚焦让用户看到结果。
+    if url_str
+        .strip_prefix(&format!("{}://", crate::deeplink::APP_SCHEME))
+        .is_some_and(|rest| {
+            rest == "connect" || rest.starts_with("connect?") || rest.starts_with("connect/")
+        })
+    {
+        let app_handle = app.clone();
+        let owned_url = url_str.to_string();
+        tauri::async_runtime::spawn(async move {
+            crate::relay::browser_connect::apply_connect(&app_handle, &owned_url).await;
+        });
+        if focus_main_window {
+            focus_main(app);
+        }
+        return true;
+    }
+
     match crate::deeplink::parse_deeplink_url(url_str) {
         Ok(request) => {
             log::info!(
@@ -322,16 +343,7 @@ fn handle_deeplink_url(
             }
 
             if focus_main_window {
-                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                    let _ = window.unminimize();
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    #[cfg(target_os = "linux")]
-                    {
-                        linux_fix::nudge_main_window(window.clone());
-                    }
-                    log::info!("✓ Window shown and focused");
-                }
+                focus_main(app);
             }
         }
         Err(e) => {
@@ -350,6 +362,21 @@ fn handle_deeplink_url(
     }
 
     true
+}
+
+#[cfg(feature = "gui")]
+/// 主窗口唤起（去最小化 + 显示 + 聚焦；Linux 另补一次 nudge）。
+fn focus_main(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        #[cfg(target_os = "linux")]
+        {
+            linux_fix::nudge_main_window(window.clone());
+        }
+        log::info!("✓ Window shown and focused");
+    }
 }
 
 #[cfg(feature = "gui")]

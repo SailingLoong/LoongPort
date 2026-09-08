@@ -790,6 +790,19 @@ pub fn parse_creds_navigation(url: &url::Url) -> Option<Result<Credentials, AppE
     Some(decode_creds(url))
 }
 
+/// sub2api 存的过期时间是**毫秒时间戳字符串**：归一成秒（判据：大于该阈值的
+/// 一定是毫秒）。解不出来按「可用但不知何时过期」处理（`None`）——与「没登录」
+/// 是两件事，不该因此把整份凭据扔掉。
+///
+/// 登录窗回传（[`decode_creds`]）与浏览器接力（[`crate::relay::browser_connect`]）
+/// 共用这一份归一规则。
+pub(crate) fn normalize_token_expires_at(raw: Option<&str>) -> Option<i64> {
+    raw?.trim()
+        .parse::<i64>()
+        .ok()
+        .map(|ms| if ms > 100_000_000_000 { ms / 1000 } else { ms })
+}
+
 fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
     let encoded = url
         .query_pairs()
@@ -820,12 +833,7 @@ fn decode_creds(url: &url::Url) -> Result<Credentials, AppError> {
         // 由原生 cookie 读取补上（HttpOnly，脚本回传里没有它）。
         cf_clearance: None,
         refresh_token: raw.refresh_token.filter(|t| !t.is_empty()),
-        // sub2api 存的是毫秒时间戳字符串。解不出来不算错 —— 那就是「可用但不知何时过期」，
-        // 与「没登录」是两件事，不该因此把整份凭据扔掉。
-        token_expires_at: raw
-            .token_expires_at
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .map(|ms| if ms > 100_000_000_000 { ms / 1000 } else { ms }),
+        token_expires_at: normalize_token_expires_at(raw.token_expires_at.as_deref()),
         user_agent: raw.user_agent.filter(|s| !s.is_empty()),
     })
 }

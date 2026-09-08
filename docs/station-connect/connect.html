@@ -81,6 +81,16 @@
   var NEWAPI_USER_KEY = 'user';
 
   function readCreds() {
+    // new-api 的 user 对象里有账号 id（newapi-session 换访问令牌时客户端要放进
+    // New-Api-User 头），顺手取；sub2api 分支用不到。
+    var newapiUserId = '';
+    try {
+      var rawUser = JSON.parse(localStorage.getItem(NEWAPI_USER_KEY) || 'null');
+      if (rawUser && Number.isSafeInteger(rawUser.id) && rawUser.id > 0) {
+        newapiUserId = String(rawUser.id);
+      }
+    } catch (_) { /* user 值不完整按没有处理 */ }
+
     try {
       var t = localStorage.getItem(SUB2API_TOKEN_KEY);
       if (t && t.trim()) {
@@ -88,24 +98,37 @@
           kind: 'sub2api',
           token: t.trim(),
           expiresAt: (localStorage.getItem(SUB2API_EXPIRES_KEY) || '').trim(),
+          userId: '',
         };
       }
     } catch (_) { /* 私有模式等极端情况按未登录处理 */ }
 
     var m = document.cookie.match(new RegExp('(?:^|;\\s*)' + NEWAPI_SESSION_COOKIE + '=([^;]+)'));
     if (m) {
-      return { kind: 'newapi-session', token: decodeURIComponent(m[1]), expiresAt: '' };
+      return {
+        kind: 'newapi-session',
+        token: decodeURIComponent(m[1]),
+        expiresAt: '',
+        userId: newapiUserId,
+      };
     }
 
-    try {
-      var raw = localStorage.getItem(NEWAPI_USER_KEY);
-      if (raw) {
-        var u = JSON.parse(raw);
-        if (u && typeof u.access_token === 'string' && u.access_token.trim()) {
-          return { kind: 'newapi-access-token', token: u.access_token.trim(), expiresAt: '' };
+    if (newapiUserId) {
+      try {
+        var raw = localStorage.getItem(NEWAPI_USER_KEY);
+        if (raw) {
+          var u = JSON.parse(raw);
+          if (u && typeof u.access_token === 'string' && u.access_token.trim()) {
+            return {
+              kind: 'newapi-access-token',
+              token: u.access_token.trim(),
+              expiresAt: '',
+              userId: newapiUserId,
+            };
+          }
         }
-      }
-    } catch (_) { /* 值不完整时按未登录处理 */ }
+      } catch (_) { /* 值不完整时按未登录处理 */ }
+    }
 
     return null;
   }
@@ -140,6 +163,7 @@
         'token=' + encodeURIComponent(creds.token),
       ];
       if (creds.expiresAt) params.push('expires_at=' + encodeURIComponent(creds.expiresAt));
+      if (creds.userId) params.push('user_id=' + encodeURIComponent(creds.userId));
       location.href = CALLBACK_SCHEME + '?' + params.join('&');
       document.getElementById('fallback').hidden = false;
       document.getElementById('connect').disabled = true;
