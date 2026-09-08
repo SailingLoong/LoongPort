@@ -8,28 +8,37 @@
 ## 接入三步
 
 1. 下载本目录的 [`connect.html`](./connect.html)（国内访问 GitHub 不稳时可直接取官网副本：
-   `curl -o connect.html https://loongport.dev/connect/`——文件相同，事实源以本目录为准；地址须带尾斜杠（无斜杠会被托管层 308））；
-2. 部署为站点同源路径，推荐约定路径 `/.well-known/loongport/connect`（任意路径也可用，
-   只是约定路径可以让客户端自动发现）；
+   `curl -o connect.html https://loongport.dev/connect/`——文件相同，事实源以本目录为准；
+   地址须带尾斜杠（无斜杠会被托管层 308）。用面板的文件管理器上传同理，
+   放哪个目录都行，下一步的路径对齐即可）；
+2. 按部署方式挂载到同源路径（见下节），推荐约定路径
+   `/.well-known/loongport/connect`（任意路径也可用，只是约定路径可以让客户端
+   自动发现）；
 3. 完事。用户在浏览器登录站点后打开该页面，点「打开 LoongPort」即完成接力。
 
-nginx 示例（一条 location）：
+## 按部署方式挂载
+
+- **宝塔 / 1Panel 等面板**：在站点的「配置文件 / 伪静态」编辑处，把 nginx 片段
+  贴进该域名的 `server { }` 里；`alias` 指到文件实际位置（宝塔默认站点根为
+  `/www/wwwroot/<站点目录名>/connect.html`）。
+- **手管 nginx**：片段加进该域名的 `server { }`：
 
 ```nginx
 location = /.well-known/loongport/connect {
     default_type text/html;
-    alias /opt/your-site/loongport-connect.html;
+    alias /opt/your-site/connect.html;   # 指向第一步下载的文件
 }
+# 「=」是精确匹配，保留原样即可
 ```
 
-Caddy 示例：
+- **Caddy**：加进该域名的站点块里（与已有的 reverse_proxy 并列）；该形状已在
+  `docker caddy:2-alpine` 实测通过（200 + `text/html` + 正确内容）：
 
 ```caddy
-handle_path /.well-known/loongport/connect {
+handle /.well-known/loongport/connect {
     root * /opt/your-site
-    file_server {
-        file loongport-connect.html  # 文件请改名对齐，或直接沿用 connect.html
-    }
+    rewrite * /connect.html
+    file_server
 }
 ```
 
