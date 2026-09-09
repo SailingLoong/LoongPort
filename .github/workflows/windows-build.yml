@@ -98,6 +98,10 @@ jobs:
       - name: 打包
         # 手动测试包不参与自动更新，所以显式关闭 updater artifact；否则没有 release
         # signing secret 的 workflow 会在安装包已生成后因缺私钥返回失败。
+        # shell: bash 必须显式指定：Windows 默认 pwsh 经 cmd shim 调 pnpm 时不保
+        # 单引号，--config 的 JSON 会被剥成 `{bundle:{...}}` 直接解析失败
+        #（release.yml 各步早已显式 bash，只有这条漏了）。
+        shell: bash
         run: pnpm tauri build --target ${{ matrix.target }} --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - uses: actions/upload-artifact@v4
