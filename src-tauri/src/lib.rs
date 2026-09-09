@@ -1452,10 +1452,14 @@ pub fn run() {
                 }
             }
 
-            // 匿名使用统计：启动后延迟一次性上报（只报站点 host 与个数）。
+            // 匿名使用统计：启动后延迟一次性上报（安装 id / 版本 / OS / 站点域名）。
             //
-            // **一次性、不定时重复**：它答的是「用户在用哪几家中转站」，那不是
-            // 高频变化的事实 —— 每次开 app 报一次已经够，加定时器只是多打请求。
+            // **发送闸只有设置开关**（2026-09-09 拍板）：统计默认开（VS Code /
+            // Homebrew 模式），从**首次启动**就开始上报 —— 告知弹窗（单按钮
+            // 「知道了」）是知情标记，不门控发送；设置里关掉后一个字节都不发。
+            //
+            // **一次性、不定时重复**：它答的是「多少安装、什么版本、在用哪几家中转站」，
+            // 每次开 app 报一次已经够，加定时器只是多打请求。
             //
             // 延迟 30 秒：启动那一刻要抢的是首屏渲染与凭据探活，统计排在最后。
             // 整条链路失败静默（`stats::send` 自己只返 Err 给日志）—— 它是我们的需求
@@ -1474,20 +1478,38 @@ pub fn run() {
                     return;
                 }
 
-                let settings = crate::settings::get_settings();
-                if !settings.enable_anonymous_stats {
-                    return;
-                }
-                // 用户还没看过首启告知就先不报 —— 告知之前上报等于没告知。
-                if settings.stats_notice_confirmed != Some(true) {
-                    log::debug!("用户还没确认统计告知，本次不上报");
+                // 开关关着 ⇒ 直接返回（也不生成 id：从一开始就关的用户，
+                // 机器上不躺任何为统计准备的东西）。
+                if !crate::settings::get_settings().enable_anonymous_stats {
                     return;
                 }
 
-                let Some(install_id) = settings.stats_install_id.clone() else {
-                    // id 由前端在用户确认告知那一刻生成并存下。没有就说明流程没走完。
-                    log::debug!("还没有 install_id，本次不上报");
-                    return;
+                // install id 由后端在首次上报时自生成（不绑告知弹窗）：只在开关
+                // 开着时生成、跨启动复用 —— 「关了再开」仍是同一个安装，不许被
+                // 计成两个。生成或落盘失败就跳过本轮，下次启动再试（不排队）。
+                // 设置读写是文件 IO，搬进 `spawn_blocking`（与下面的站点读一致）。
+                let install_id = match tauri::async_runtime::spawn_blocking(|| -> Result<String, AppError> {
+                    if crate::settings::get_settings().stats_install_id.is_none() {
+                        crate::settings::mutate_settings(|s| {
+                            s.stats_install_id
+                                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
+                        })?;
+                    }
+                    crate::settings::get_settings().stats_install_id.ok_or_else(|| {
+                        AppError::Config("install id 生成后仍缺失".to_string())
+                    })
+                })
+                .await
+                {
+                    Ok(Ok(id)) => id,
+                    Ok(Err(e)) => {
+                        log::debug!("install id 生成/落盘失败（本次跳过）: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        log::debug!("install id 生成任务失败（本次跳过）: {e}");
+                        return;
+                    }
                 };
 
                 // 读站点列表。**在 `spawn_blocking` 里读**，两个理由：
