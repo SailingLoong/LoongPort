@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 线上验证：healthz、snapshot（含 CORS/缓存头）、OPTIONS 预检。
+# 线上验证：healthz、snapshot（含 CORS/缓存头）、OPTIONS 预检、ping 坏载荷 400。
 #
 # 用法：./verify.sh [BASE_URL]
 # 不传 BASE 时用正式自定义域（workers.dev 在国内网络不可达，见 wrangler.jsonc 注释）。
@@ -31,6 +31,11 @@ node -e '
 echo "── OPTIONS $BASE/v1/snapshot"
 PREFLIGHT=$(curl -fsS -X OPTIONS -D - -o /dev/null "$BASE/v1/snapshot") || fail "预检失败"
 echo "$PREFLIGHT" | grep -qi "access-control-allow-methods:" || fail "预检缺 allow-methods"
+
+echo "── POST $BASE/v1/ping（坏载荷应 400：只验路由与校验，不落库）"
+PING_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/ping" \
+  -H 'content-type: application/json' -d '{"installId":"not-a-uuid"}')
+[ "$PING_CODE" = "400" ] || fail "ping 端点异常（期望 400，得 $PING_CODE）"
 
 echo
 echo "✔ 线上验证全部通过（BASE=${BASE}）"

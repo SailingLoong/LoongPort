@@ -65,3 +65,20 @@ CREATE TABLE IF NOT EXISTS bucket_model_raw (
     anomalies           INTEGER NOT NULL DEFAULT 0, -- P5：被动观察到的模型真伪异常（Anomaly 级）次数
     PRIMARY KEY (hour, site, app, model, source)
 ) WITHOUT ROWID;
+
+-- 匿名使用统计（relay::stats）的启动上报，ping.ts 写入。一行 = 一个安装。
+-- install_id 是客户端在用户**同意告知那一刻**生成的随机 UUID v4（模块专属，
+-- 与 device_id / crowd 的日轮换 source 永不交叉）—— 持久 id + 诚实披露是
+-- stats.rs 隐私评审定的口径，安装量去重正需要它跨次稳定。
+-- 每次 upsert：版本/OS/站点列表刷新为最新，first_seen 保留首次时间；
+-- last_seen 是保留期判定键（180 天未见活动即清理，见 index.ts）。
+-- ⚠️ 只进 D1、无公开读端点 —— 维护者经 wrangler/dashboard 查询，不进任何公开快照。
+CREATE TABLE IF NOT EXISTS stats_installs (
+    install_id           TEXT    NOT NULL PRIMARY KEY, -- 随机 UUID v4（客户端同意时生成）
+    app_version          TEXT    NOT NULL,
+    os                   TEXT    NOT NULL,             -- macos/windows/linux/other（不带版本号）
+    site_hosts           TEXT    NOT NULL,             -- 归一化注册域的 JSON 数组（服务端排序去重）
+    relay_account_count  INTEGER NOT NULL,             -- 账号行数（非站点数，口径见 stats.rs）
+    first_seen           INTEGER NOT NULL,             -- epoch 秒，首次上报
+    last_seen            INTEGER NOT NULL              -- epoch 秒，最近上报（保留期判定键）
+) WITHOUT ROWID;

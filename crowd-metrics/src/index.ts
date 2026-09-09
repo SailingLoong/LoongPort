@@ -2,14 +2,17 @@
  * loongport-metrics Worker 入口。
  *
  * - POST /v1/ingest   客户端上传小时聚合桶（见 ingest.ts）
+ * - POST /v1/ping     客户端匿名使用统计上报（见 ping.ts；只落 D1，无公开读端点）
  * - GET  /v1/snapshot 公共快照（CORS *、CDN 60s；KV 命中，冷启动兜底现算）
  * - scheduled（每 10 分钟） 重算快照写 KV + 清理 30 天前的原始桶 / 2 天前的限流计数
+ *   / 180 天未活跃的统计安装行
  */
 
 import { buildSnapshot, buildTrends, type RawModelRow, type RawRow } from "./aggregate";
 import { TTFT_BIN_EDGES_MS } from "./bins";
 import { cleanupDue, isFresh } from "./freshness";
 import { handleIngest, type Env } from "./ingest";
+import { handlePing } from "./ping";
 import { hourFloorUtc } from "./validate";
 import type { Snapshot } from "./types";
 
@@ -17,6 +20,12 @@ import type { Snapshot } from "./types";
 const RAW_RETENTION_SECS = 30 * 86400;
 /** 限流计数保留期（覆盖跨小时窗查询即可）。 */
 const RATE_LIMIT_RETENTION_SECS = 2 * 86400;
+/**
+ * 统计安装行保留期：180 天未见活动即清理（接收端「设保留期」义务，见
+ * stats.rs 模块文档）。安装量是长周期问题，留半年活跃窗口足够覆盖
+ * 「装了、用过、卸载/换机」的全部形态。
+ */
+const STATS_INSTALL_RETENTION_SECS = 180 * 86400;
 /** KV 快照键。 */
 const SNAPSHOT_KEY = "snapshot:v1";
 /** KV 趋势键（三档一包，recompute 与快照同拍写、同 freshness 策略）。
@@ -83,6 +92,7 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
 
   const rawCutoff = hourFloorUtc(nowSec - RAW_RETENTION_SECS);
   const rlCutoff = hourFloorUtc(nowSec - RATE_LIMIT_RETENTION_SECS);
+  const statsCutoff = nowSec - STATS_INSTALL_RETENTION_SECS;
   const cleanup = (async () => {
     const lastRun = await env.SNAPSHOT.get(CLEANUP_LAST_RUN_KEY);
     if (!cleanupDue(lastRun == null ? null : Number(lastRun), nowSec)) return;
@@ -90,6 +100,8 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
       env.DB.prepare("DELETE FROM bucket_raw WHERE hour < ?1").bind(rawCutoff),
       env.DB.prepare("DELETE FROM bucket_model_raw WHERE hour < ?1").bind(rawCutoff),
       env.DB.prepare("DELETE FROM upload_ip_hour WHERE hour < ?1").bind(rlCutoff),
+      // 统计安装行的保留期键是 epoch 秒（last_seen），与上面的小时串不同格式，直绑数值。
+      env.DB.prepare("DELETE FROM stats_installs WHERE last_seen < ?1").bind(statsCutoff),
     ]);
     await env.SNAPSHOT.put(CLEANUP_LAST_RUN_KEY, String(nowSec));
   })();
@@ -147,6 +159,9 @@ export default {
 
     if (request.method === "POST" && pathname === "/v1/ingest") {
       return handleIngest(request, env);
+    }
+    if (request.method === "POST" && pathname === "/v1/ping") {
+      return handlePing(request, env);
     }
     if (request.method === "GET" && pathname === "/v1/snapshot") {
       return serveKvPayload(env, SNAPSHOT_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000)));

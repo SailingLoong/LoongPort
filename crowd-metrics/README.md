@@ -4,11 +4,15 @@
 `proxy_request_logs` 聚合出的**小时级聚合桶**上传到这里，Worker 落 D1、
 定时聚合成 k-匿名后的公共快照，客户端与网站共用同一份快照。
 
+2026-09-09 起同一 Worker 还承载**匿名使用统计**（`relay::stats`，安装量/版本/OS/
+在用站点）：写入型端点 `/v1/ping`，只落 D1、**无公开读端点**，与公开快照互不相通。
+
 ## 端点
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/v1/ingest` | 客户端上传小时聚合桶（校验 + 每 IP 限流 20 次/时 + 幂等覆盖） |
+| POST | `/v1/ping` | 客户端匿名使用统计上报（安装 id + 版本 + OS + 站点域名；只落 D1，永不公开；与 ingest 共享每 IP 20 次/时限流） |
 | GET | `/v1/snapshot` | 公共快照（CORS `*`、CDN `max-age=60`；KV 命中，冷启动现算兜底） |
 | GET | `/healthz` | 探活 |
 
@@ -24,6 +28,25 @@
   属有意识的临时让步）——恢复条件与随改清单见 `src/aggregate.ts` 常量注释。
 - **接收端不记 IP**：限流只存 IP 的 SHA-256（`upload_ip_hour`），保留 2 天。
 - 原始桶保留 30 天后删除；KV 里只有 k-匿名后的快照。
+- **使用统计（`/v1/ping` → `stats_installs`）永不公开**：没有读端点、不进快照/KV，
+  维护者经 `wrangler d1 execute --remote` 直查。一行 = 一个安装（随机 UUID，与
+  device_id / crowd source id 永不交叉），**180 天**未见活动即删除（接收端
+  「设保留期」义务）。隐私口径的唯源是 `src-tauri/src/relay/stats.rs` 模块文档。
+
+## 维护者怎么查使用统计（示例）
+
+```bash
+cd crowd-metrics
+# 活跃安装（近 7 天上报过）
+npx wrangler d1 execute loongport-metrics --remote \
+  --command "SELECT COUNT(*) FROM stats_installs WHERE last_seen > strftime('%s','now') - 7*86400"
+# 版本分布 / 平台分布
+npx wrangler d1 execute loongport-metrics --remote \
+  --command "SELECT app_version, os, COUNT(*) n FROM stats_installs GROUP BY 1,2 ORDER BY n DESC"
+# 在用站点（站点列表存 JSON 数组，json_each 展开）
+npx wrangler d1 execute loongport-metrics --remote \
+  --command "SELECT json_each.value host, COUNT(*) n FROM stats_installs, json_each(site_hosts) GROUP BY 1 ORDER BY n DESC"
+```
 
 ## 首次资源创建（一次性）
 

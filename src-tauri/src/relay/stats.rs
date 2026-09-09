@@ -49,8 +49,10 @@
 //!   但那样**服务端看不到站点名**，只能数「有多少个不同的站」，答不了「用户在用哪几家」
 //! - **站点数粗粒度分桶**（1 / 2-3 / 4+）：便宜且有效，不影响主要问题
 //!
-//! **接收端侧的义务同样重要**（代码管不到，记在 TODO）：不记 IP、设保留期。
-//! 客户端这边做再多匿名化，服务端记了 IP 就全白费。
+//! **接收端侧的义务同样重要**：不记 IP、设保留期。2026-09-09 接收端落地
+//! （metrics Worker 的 `/v1/ping`）时一并兑现：IP 只以 SHA-256 进限流表
+//! （保留 2 天），安装行 180 天未见活动即删 —— 见 `crowd-metrics/README`
+//! 的隐私边界节。客户端这边做再多匿名化，服务端记了 IP 就全白费。
 //!
 //! ## 默认开，首启告知，可关
 //!
@@ -68,19 +70,15 @@ use serde::Serialize;
 
 use crate::error::AppError;
 
-/// 上报端点。
+/// 上报端点：metrics Worker（与实测共建同一个 Worker / D1，2026-09-09 切生产）。
 ///
-/// ⚠️ **占位值，还没有真实端点**（维护者的服务器待部署，2026-08-03）。
-/// [`is_configured`] 靠这个占位判断「还没配」⇒ 现在整条链路是 no-op，
-/// 一个字节都不会发出去。
-///
-/// **切生产只改这一行**（记在 `TODO.md` 的技术债清单里）。
-const ENDPOINT: &str = "https://stats.invalid/v1/ping";
+/// `/v1/ping` 是**写入型**端点：只落 D1、无公开读出口，永不进任何公开快照。
+/// 载荷校验、限流与保留期见 `crowd-metrics/src/ping.ts` 与该目录 README。
+const ENDPOINT: &str = "https://metrics.loongport.dev/v1/ping";
 
-/// 占位域名的标记。`ENDPOINT` 还含它就说明没配真实端点。
-///
-/// 用 `.invalid` 这个 **RFC 2606 保留 TLD**，而不是随便编一个域名 ——
-/// 万一判断失灵真发了请求，它也保证解析不到任何真实主机（不会误打到别人的服务器）。
+/// 占位域名的标记（`.invalid` 是 RFC 2606 保留 TLD）。端点已切生产，
+/// [`is_configured`] 恒为 true —— 保留这层判断是因为上报任务与首启告知
+/// 弹窗共用同一个「配好了没」判据，将来若有意回退占位不需要改两处。
 const UNCONFIGURED_MARKER: &str = ".invalid";
 
 /// 端点配好了没。没配就整条链路 no-op。
@@ -184,19 +182,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoint_is_still_a_placeholder_so_nothing_is_sent() {
-        // ⭐ 这条闸有两个作用：
-        //
-        // 1. 现在：钉住「还没配端点 ⇒ 整条链路 no-op」，防止误以为已经在收数据
-        // 2. 配了真端点那天：**这条会红**，提醒改它的人回来把断言反过来
-        //    （并顺手确认 TODO 里那条技术债已经勾掉）
+    fn endpoint_is_configured_to_production() {
+        // ⭐ 2026-09-09 切生产：端点指向 metrics Worker 的 /v1/ping。原占位
+        // 断言按它自己注释的指引翻转；「接收端还没建」那条技术债已同步销账。
         assert!(
-            !is_configured(),
-            "端点已配成真实域名了？那请把这条断言反过来，并更新 TODO 里那条技术债"
+            is_configured(),
+            "端点又指回占位了？首启告知弹窗会跟着一起消失 —— 若是有意回退，\
+             请把这条断言翻回去并在 TODO 重新立账"
         );
         assert!(
-            ENDPOINT.contains(UNCONFIGURED_MARKER),
-            "占位端点必须用 .invalid 这个保留 TLD —— 万一判断失灵也不会误打到真实主机"
+            !ENDPOINT.contains(UNCONFIGURED_MARKER),
+            "生产端点不该含占位标记"
         );
     }
 
@@ -331,13 +327,5 @@ mod tests {
             "os 不该带版本号: {os}"
         );
         assert!(["macos", "windows", "linux", "other"].contains(&os));
-    }
-
-    #[tokio::test]
-    async fn send_is_a_noop_while_the_endpoint_is_unconfigured() {
-        // 没配端点时 `send` 必须**成功且不发请求**（而不是报错）——
-        // 报错会让调用点的日志里堆满噪音。
-        let r = build_report("i".into(), "v".into(), &[]);
-        assert!(send(&r).await.is_ok());
     }
 }
