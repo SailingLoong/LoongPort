@@ -35,6 +35,7 @@ import { useResetCircuitBreaker } from "@/lib/query/failover";
 import { cn } from "@/lib/utils";
 import { fmtInt, fmtUsd } from "@/components/usage/format";
 import { BoardVerdictDot } from "@/components/relay/model-verification/TierVerdictChip";
+import { TierRateChip } from "@/components/relay/TierRateChip";
 import type { TierBoardTier } from "@/lib/api/autoMode";
 import type { DraggableAttributes } from "@dnd-kit/core";
 import type { SyntheticListenerMap } from "@dnd-kit/core/dist/hooks/utilities";
@@ -192,6 +193,9 @@ function TierCard({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{tier.name}</span>
+          {/* 倍率紧贴档位名（挑档位第一个要看的数字）；样式与 null 纪律
+              （不显示，原来的「×?」一并废掉）唯源 TierRateChip。 */}
+          <TierRateChip rate={tier.rateMultiplier} />
           {isCurrentTier ? (
             <Badge
               variant="outline"
@@ -223,11 +227,6 @@ function TierCard({
           <BoardVerdictDot verdict={tier.verificationVerdict} />
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span className="tabular-nums">
-            ×
-            {tier.rateMultiplier ??
-              t("autoMode.board.unknown", { defaultValue: "?" })}
-          </span>
           <span className="tabular-nums">
             {tier.unitPricePerMillion != null
               ? `${fmtUsd(tier.unitPricePerMillion, 2)}/M`

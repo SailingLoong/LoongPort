@@ -228,7 +228,9 @@ describe("EasyBoard", () => {
     setupBoard(boardFixture());
     expect(screen.getByText("便宜档")).toBeDefined();
     expect(screen.getByText("贵档")).toBeDefined();
-    expect(screen.getByText("×0.5")).toBeDefined();
+    // 倍率现在是紧贴档位名的 TierRateChip（i18n 模板「{{value}} 倍」），
+    // 不再是指标行里的内联「×0.5」。
+    expect(screen.getByText("0.5 倍")).toBeDefined();
     expect(screen.getByText("$2.00/M")).toBeDefined();
     expect(screen.getByText("余额 $10.35")).toBeDefined();
     expect(screen.getByText("价格未知")).toBeDefined();

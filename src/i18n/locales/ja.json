@@ -2616,7 +2616,6 @@
       "dragHint": "カードをドラッグして優先度を調整。障害時は次のティアへ切替、復旧後に戻ります",
       "dragHandle": "ドラッグで並べ替え",
       "current": "現在使用中",
-      "unknown": "?",
       "priceUnknown": "価格不明",
       "balance": "残高",
       "ttft": "初字",

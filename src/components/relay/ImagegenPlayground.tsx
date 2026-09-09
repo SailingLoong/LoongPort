@@ -29,6 +29,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { TierRateChip } from "./TierRateChip";
+
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -240,9 +242,10 @@ export function ImagegenPlayground() {
                       </span>
                       <span className="ml-2 shrink-0 text-xs text-muted-foreground">
                         {tier.model}
-                        {tier.rateMultiplier !== null &&
-                          ` · ${t("loongport.tier.rate", { value: tier.rateMultiplier })}`}
                       </span>
+                      {/* 倍率与另两处档位展示同款标签（唯源 TierRateChip），
+                          不再混进灰色的模型名后缀里。 */}
+                      <TierRateChip rate={tier.rateMultiplier} />
                     </CommandItem>
                   ))}
                 </CommandGroup>
