@@ -369,6 +369,37 @@ fn provider_uses_official_subscription_usage(app_type: &AppType, provider: &Prov
     }
 }
 
+/// 启动时刷新当前 Codex 供应商的 catalog 投影（外科式，语义见
+/// [`crate::codex_config::refresh_codex_catalog_projection`]）。无当前供应商、
+/// 投影不出 catalog、或内容与磁盘一致时为 no-op。
+pub fn refresh_current_codex_catalog_projection(state: &AppState) -> Result<bool, AppError> {
+    let current_id = ProviderService::current(state, AppType::Codex)?;
+    if current_id.is_empty() {
+        return Ok(false);
+    }
+    let providers = state.db.get_all_providers(AppType::Codex.as_str())?;
+    let Some(provider) = providers.get(&current_id) else {
+        return Ok(false);
+    };
+
+    let config_text = crate::codex_config::read_codex_config_text()?;
+    let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+    // 接管期间 config.toml 归代理所有（备份/占位符机制，同
+    // reapply_current_codex_official_live 的所有权判定）；catalog 文件仍可
+    // 刷新（两条配置指向同一文件），但指针键不写。
+    let live_taken_over =
+        futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
+            .ok()
+            .flatten()
+            .is_some();
+    crate::codex_config::refresh_codex_catalog_projection(
+        &provider.settings_config,
+        &config_text,
+        profile,
+        live_taken_over,
+    )
+}
+
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
 /// live 配置，使开关即时生效（无需等下一次切换）。
 /// 当前供应商非官方（或不存在）时为 no-op：注入只作用于官方配置，
