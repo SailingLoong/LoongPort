@@ -50,18 +50,21 @@ export function getAppDisplayName(app: AppId, t: TFunction): string {
   return app === "codex-image" ? t("apps.codex-image") : APP_DISPLAY_NAME[app];
 }
 
+// 默认只展示 4 个主流量入口（Claude / Codex / Grok / 生图），其余藏在「+」里由
+// 用户自己补回 —— settings 未加载的瞬间才会用到这份兜底，加载后以后端
+// VisibleApps::default 为准（两侧一致性由 settings.rs 的比对测试钉住）。
+// 生图保持默认可见：入口藏起来后，买了生图分组的用户会找不到（上一版踩过）。
 export const DEFAULT_VISIBLE_APPS: VisibleApps = {
   claude: true,
-  "claude-desktop": true,
+  "claude-desktop": false,
   codex: true,
-  // 生图标签默认可见（与后端 VisibleApps::codex_image 的默认一致）。
   "codex-image": true,
-  gemini: true,
+  gemini: false,
   grokbuild: true,
-  opencode: true,
-  openclaw: true,
-  hermes: true,
-  pi: true,
+  opencode: false,
+  openclaw: false,
+  hermes: false,
+  pi: false,
 };
 
 /** App IDs shown in Skills panels. */

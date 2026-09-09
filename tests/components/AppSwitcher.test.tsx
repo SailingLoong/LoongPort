@@ -1,10 +1,21 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AppSwitcher } from "@/components/AppSwitcher";
-import { DEFAULT_VISIBLE_APPS } from "@/config/appConfig";
 import type { VisibleApps } from "@/types";
 
-const allVisible = DEFAULT_VISIBLE_APPS;
+// 显式写全可见的夹具（产品默认集会随版本变，别拿 DEFAULT_VISIBLE_APPS 当测试前提）
+const allVisible: VisibleApps = {
+  claude: true,
+  "claude-desktop": true,
+  codex: true,
+  "codex-image": true,
+  gemini: true,
+  grokbuild: true,
+  opencode: true,
+  openclaw: true,
+  hermes: true,
+  pi: true,
+};
 
 /** 测试环境 i18n 资源为空，t() 回落成键名本身；× 的 title 即 "appSwitcher.hide" */
 const hideButtonSelector = "button[title='appSwitcher.hide']";

@@ -257,10 +257,14 @@ function App() {
   };
 
   useEffect(() => {
+    // settings 未加载前 visibleApps 只是 DEFAULT 兜底（渲染闪空用），不参与
+    // 裁决 —— 否则 lastApp 恰好是默认隐藏 app 的用户会在加载前被弹回 claude，
+    // 加载后真实可见集到了也不弹回去，「恢复上次应用」静默失效。
+    if (!settingsData) return;
     if (!visibleApps[activeApp]) {
       setActiveApp(getFirstVisibleApp());
     }
-  }, [visibleApps, activeApp]);
+  }, [visibleApps, activeApp, settingsData]);
 
   // tab 上的 ×：与设置页「主页面显示」同一开关，就地隐藏一个应用。
   // 发送与 DEFAULT_VISIBLE_APPS 合并后的完整对象（后端 visible_apps 是整体替换）；
@@ -1527,8 +1531,8 @@ function App() {
                   <ProfileSwitcher activeApp={activeApp} />
                 </div>
               )}
-            {/* 弹性中段：tab 不做自动折叠，放不下时由 overflow-hidden 裁剪左侧；
-                可见集由用户显式控制（tab 上的 × 或设置页「主页面显示」） */}
+            {/* 弹性中段：tab 不做自动折叠，放不下时在条带内滚轮 / 拖拽平移
+                （见 AppSwitcher）；可见集由用户显式控制（tab 上的 × 或设置页「主页面显示」） */}
             <div className="flex flex-1 min-w-0 items-center justify-end overflow-hidden py-4">
               {currentView === "providers" && (
                 <AppSwitcher
