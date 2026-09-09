@@ -2616,7 +2616,6 @@
       "dragHint": "Drag cards to set priority; failures fall through and switch back on recovery",
       "dragHandle": "Drag to reorder",
       "current": "Current",
-      "unknown": "?",
       "priceUnknown": "Unknown price",
       "balance": "Balance",
       "ttft": "TTFT",

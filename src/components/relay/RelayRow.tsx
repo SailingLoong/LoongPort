@@ -34,6 +34,7 @@ import { ReconcileDialog } from "./ReconcileDialog";
 import { RowBalance } from "./RowBalance";
 import { SiteConfigDialog } from "./SiteConfigDialog";
 import { TierVerifyButton } from "./model-verification/TierVerifyButton";
+import { TierRateChip } from "./TierRateChip";
 import { TierVerdictChip } from "./model-verification/TierVerdictChip";
 import { useTierVerification } from "./model-verification/TierVerificationProvider";
 
@@ -628,9 +629,8 @@ function StatusAction({
 /**
  * 一个档位。
  *
- * ⚠️ **`rateMultiplier` 为 null 时不显示倍率，绝不能显示成 0 或「免费」** ——
- * 列表命令只读本地，倍率是服务端定价，要 provision 才有值
- * （`relay.rs` 的 `TierInfo` 注释钉过这条）。显示成 0 会让用户以为这是最便宜的一档。
+ * 倍率的显示纪律（null 不渲染、绝不显示成 0/「免费」）和样式在
+ * `TierRateChip` —— 那是三处倍率展示的唯一形状源。
  */
 function TierItem({
   tier,
@@ -698,6 +698,9 @@ function TierItem({
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-sm">{tier.groupName}</span>
+          {/* 倍率紧贴分组名（用户扫档位行第一个要找的数字），比其余
+              状态 chip 更靠左；样式与 null 纪律唯源 TierRateChip。 */}
+          <TierRateChip rate={tier.rateMultiplier} />
           {/* 「已手动维护」标记。**常驻不藏进 hover** —— 它是状态不是动作，
               藏起来用户就得逐行 hover 才知道哪些档位脱离了自动维护。
               与「N 个档位」「余额」同一条判据（信息常驻、动作 hover）。 */}
@@ -724,10 +727,6 @@ function TierItem({
           )}
           {/* 验真结论 chip：模型验证模块自持（下线/无结论时不渲染）。 */}
           <TierVerdictChip providerId={tier.providerId} />
-        </div>
-        <div className="text-xs text-muted-foreground">
-          {tier.rateMultiplier !== null &&
-            t("loongport.tier.rate", { value: tier.rateMultiplier })}
         </div>
       </div>
 
