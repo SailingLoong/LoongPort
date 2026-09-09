@@ -31,11 +31,6 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-// id 生成做成确定值：断言「存了 id / 没覆盖已有 id」要钉具体值。
-vi.mock("@/utils/uuid", () => ({
-  generateUUID: () => "generated-test-id",
-}));
-
 function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     minimizeToTrayOnClose: true,
@@ -63,14 +58,14 @@ async function clickOk() {
   });
 }
 
-describe("StatsNoticeDialog：「知道了」的回写语义（纯告知形态，2026-09-09 拍板）", () => {
+describe("StatsNoticeDialog：「知道了」的回写语义（纯告知，2026-09-09）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     statsEndpointConfigured.mockResolvedValue(true);
     get.mockResolvedValue(makeSettings());
   });
 
-  it("写确认标记并生成 installId，不动 enabled", async () => {
+  it("只写确认标记：不动 enabled，也不生成 install id（id 归后端首次上报时自管）", async () => {
     const captured: { saved?: Partial<Settings> } = {};
     save.mockImplementation(async (s: Partial<Settings>) => {
       captured.saved = s;
@@ -80,21 +75,23 @@ describe("StatsNoticeDialog：「知道了」的回写语义（纯告知形态�
 
     expect(save).toHaveBeenCalled();
     expect(captured.saved?.statsNoticeConfirmed).toBe(true);
-    expect(captured.saved?.statsInstallId).toBe("generated-test-id");
     // 告知不承载表态：enabled 原样回写（未表态 ⇒ 字段缺省 ⇒ 后端默认 true）。
     expect(captured.saved?.enableAnonymousStats).toBeUndefined();
+    // id 的唯一写入者是后端上报任务 —— 这屏不许碰（第二个写入者=两个事实源）。
+    expect(captured.saved?.statsInstallId).toBeUndefined();
     expect(screen.queryByText("loongport.stats.body")).toBeNull();
   });
 
-  it("已有 installId：不覆盖", async () => {
+  it("已有 install id（后端早已生成）：原样透传，不被丢弃", async () => {
     const captured: { saved?: Partial<Settings> } = {};
-    get.mockResolvedValue(makeSettings({ statsInstallId: "existing-test-id" }));
+    get.mockResolvedValue(makeSettings({ statsInstallId: "backend-made-id" }));
     save.mockImplementation(async (s: Partial<Settings>) => {
       captured.saved = s;
     });
     await renderOpenDialog();
     await clickOk();
 
-    expect(captured.saved?.statsInstallId).toBe("existing-test-id");
+    expect(captured.saved?.statsNoticeConfirmed).toBe(true);
+    expect(captured.saved?.statsInstallId).toBe("backend-made-id");
   });
 });

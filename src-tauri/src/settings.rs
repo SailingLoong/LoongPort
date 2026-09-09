@@ -395,11 +395,12 @@ pub struct AppSettings {
     pub usage_confirmed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_dashboard_refresh_interval_ms: Option<u32>,
-    /// 匿名使用统计：**只上报「用户添加了哪些中转站」与站点个数**。
+    /// 匿名使用统计：上报安装 id / 版本 / OS / 站点域名（载荷边界见 `relay::stats` 模块文档）。
     ///
     /// **默认开**（维护者 2026-08-03 拍板），与 VS Code / Homebrew 同一个模式：
     /// 默认关的实际参与率通常不到 5%，那时数据严重偏向折腾型用户，**比没有数据更误导**。
-    /// 首启一次性告知（`stats_notice_confirmed`）+ 这里随时可关保证知情与可退出。
+    /// **这是唯一的发送闸**（2026-09-09 细化）：上报从首次启动就发生，首启告知弹窗
+    /// 只是知情标记；关掉这个开关后一个字节都不发。
     ///
     /// 报什么/不报什么的硬边界见 `relay::stats` 的模块文档。
     /// 注意默认值要改**两处**：这里的 serde default（决定已有 settings.json 缺这个键时
@@ -408,7 +409,8 @@ pub struct AppSettings {
     pub enable_anonymous_stats: bool,
     /// 用户看过那条「匿名统计上报什么」的首启告知了没。
     ///
-    /// `None` = 还没看过 ⇒ 前端弹一次。与 `proxy_confirmed` / `usage_confirmed` 同一个惯例。
+    /// `None` = 还没看过 ⇒ 前端弹一次。只控制弹窗，**不是上报闸**
+    /// （2026-09-09 起；上报只看 `enable_anonymous_stats`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats_notice_confirmed: Option<bool>,
     /// 匿名统计**专属**的随机安装 id。
@@ -422,7 +424,9 @@ pub struct AppSettings {
     /// 统计 id 与任何「能对回某个人」的标识永不交叉，是这个字段存在的全部理由，
     /// 不该因为其中一条关联恰好消失就放松。
     ///
-    /// 这个 id 只用于统计去重。
+    /// 这个 id 只用于统计去重。由**后端在首次上报时自生成**（只在开关开着时 ——
+    /// 从一开始就关的用户机器上不落地 id），跨启动复用：「关了再开」仍是同一个
+    /// 安装，不许被计成两个。
     ///
     /// 随机 UUID、不含任何设备指纹（不取硬件序列号 / MAC / hostname）——
     /// 它回答「有多少个安装」，不是「这是谁」。
