@@ -22,7 +22,9 @@ export function TierRateChip({ rate }: { rate: number | null }) {
   if (rate === null) return null;
   return (
     <span className="inline-flex shrink-0 items-center rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-foreground dark:bg-muted-foreground/20">
-      {t("loongport.tier.rate", { value: rate })}
+      {/* defaultValue 与 zh 资源同串：看板测试的全局 i18n 资源为空（TierList
+          全组件都用 defaultValue 出中文，同一习语）；生产恒走 zh.json。 */}
+      {t("loongport.tier.rate", { value: rate, defaultValue: "{{value}} 倍" })}
     </span>
   );
 }
