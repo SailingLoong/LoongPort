@@ -109,7 +109,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "gui")]
 use std::sync::Arc;
 #[cfg(feature = "gui")]
-#[cfg(target_os = "macos")]
 use tauri::image::Image;
 #[cfg(feature = "gui")]
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
@@ -411,6 +410,20 @@ fn macos_tray_icon() -> Option<Image<'static>> {
         Ok(icon) => Some(icon),
         Err(err) => {
             log::warn!("Failed to load macOS tray icon: {err}");
+            None
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+#[cfg(not(target_os = "macos"))]
+fn small_tray_icon() -> Option<Image<'static>> {
+    const ICON_BYTES: &[u8] = include_bytes!("../icons/tray/tray-32.png");
+
+    match Image::from_bytes(ICON_BYTES) {
+        Ok(icon) => Some(icon),
+        Err(err) => {
+            log::warn!("Failed to load small tray icon: {err}");
             None
         }
     }
@@ -1322,10 +1335,15 @@ pub fn run() {
 
             #[cfg(not(target_os = "macos"))]
             {
-                if let Some(icon) = app.default_window_icon() {
+                // default_window_icon 解码出的是 ico 里面积最大的 256px 帧，
+                // 外壳缩到托盘 16px 会糊成一团；专用 32px 小图才是给托盘的。
+                if let Some(icon) = small_tray_icon() {
+                    tray_builder = tray_builder.icon(icon);
+                } else if let Some(icon) = app.default_window_icon() {
+                    log::warn!("Falling back to default window icon for tray");
                     tray_builder = tray_builder.icon(icon.clone());
                 } else {
-                    log::warn!("Failed to get default window icon for tray");
+                    log::warn!("Failed to get small tray icon");
                 }
             }
 
