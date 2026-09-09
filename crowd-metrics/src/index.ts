@@ -46,7 +46,7 @@ async function queryRawRows(env: Env, nowSec: number): Promise<RawRow[]> {
   // 趋势（/v1/trend 的 30d 档）需要全保留期数据；快照仍按 epoch 过滤 7 天内。
   const cutoff = hourFloorUtc(nowSec - 30 * 86400 - 3600);
   const { results } = await env.DB.prepare(
-    `SELECT hour, site, app, source, asn, ua_trusted, samples, errors,
+    `SELECT hour, site, app, source, asn, ua_trusted, samples, errors, err_samples,
             ttft_bins, ttft_count, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens, cost_usd_micros
      FROM bucket_raw WHERE hour >= ?1 ORDER BY hour`,
@@ -62,7 +62,7 @@ async function queryModelRows(env: Env, nowSec: number): Promise<RawModelRow[]> 
   const cutoff = hourFloorUtc(nowSec - 30 * 86400 - 3600);
   try {
     const { results } = await env.DB.prepare(
-      `SELECT hour, site, app, model, source, asn, ua_trusted, samples, errors,
+      `SELECT hour, site, app, model, source, asn, ua_trusted, samples, errors, err_samples,
               ttft_bins, tps_bins, input_tokens, output_tokens,
               cache_read_tokens, cache_creation_tokens, cost_usd_micros, anomalies
        FROM bucket_model_raw WHERE hour >= ?1 ORDER BY hour`,

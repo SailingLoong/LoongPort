@@ -30,6 +30,7 @@ function makeRaw(overrides: Partial<RawRow> = {}): RawRow {
     ua_trusted: 1,
     samples: 10,
     errors: 1,
+    err_samples: 10,
     ttft_bins: JSON.stringify(bins),
     ttft_count: 10,
     input_tokens: 1000,
@@ -200,6 +201,32 @@ describe("极值裁剪（单点离群防线）", () => {
   });
 });
 
+describe("错误率分母（errSamples 口径，2026-09-10 修根）", () => {
+  it("直连桶（err_samples=0）错误率缺省而非 0% —— 没有错误观测不等于零失败", () => {
+    const snap = buildSnapshot([makeRaw({ err_samples: 0, errors: 0 })], NOW);
+    const w = snap.sites["example.com"]?.w24;
+    expect(w).toBeDefined();
+    expect(w!.samples).toBe(10); // session 行的用量照常计入
+    expect(w!.errRate).toBeNull(); // 纯直连桶无错误观测
+  });
+
+  it("混合桶分母只数错误可观测样本：10 错 1、其中 4 行有完整观测 → 25%", () => {
+    const snap = buildSnapshot(
+      [makeRaw({ err_samples: 4, errors: 1 })],
+      NOW,
+    );
+    expect(snap.sites["example.com"]?.w24?.errRate).toBeCloseTo(0.25);
+  });
+
+  it("旧行 err_samples=NULL（errSamples 引入前）回退 samples 分母", () => {
+    const snap = buildSnapshot(
+      [makeRaw({ err_samples: null })],
+      NOW,
+    );
+    expect(snap.sites["example.com"]?.w24?.errRate).toBeCloseTo(0.1);
+  });
+});
+
 describe("分布直方图与口径", () => {
   it("快照窗口带合并后的 ttftBins，求和覆盖全部样本", () => {
     const snap = buildSnapshot(sources(3), NOW);
@@ -324,6 +351,7 @@ describe("趋势模型维度（P4）", () => {
     ua_trusted: 1,
     samples: 10,
     errors: 1,
+    err_samples: 10,
     ttft_bins: makeRaw().ttft_bins, // 已是 JSON 字符串，别再包一层
     tps_bins: JSON.stringify(new Array<number>(TPS_BIN_COUNT).fill(0).map((_, i) => (i === 4 ? 10 : 0))),
     input_tokens: 1000,

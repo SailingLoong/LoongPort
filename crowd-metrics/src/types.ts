@@ -10,6 +10,9 @@ export interface HourBucketPayload {
   samples: number;
   /** 失败请求数（status ≥ 400 或网络错误）。 */
   errors: number;
+  /** 错误可观测样本数（errRate 分母）。可缺省：旧客户端行没有它，聚合回退
+   *  samples（当时桶只收 proxy 行，samples 即完整分母）。 */
+  errSamples?: number;
   /** TTFT 直方图计数，长度 = TTFT_BIN_COUNT。 */
   ttftBins: number[];
   /** 有 first_token_ms 的样本数，必须 = sum(ttftBins)。 */
@@ -32,6 +35,7 @@ export interface ModelBucketPayload {
   model: string;
   samples: number;
   errors: number;
+  errSamples?: number;
   ttftBins: number[];
   /** 输出速度直方图（tok/s），长度 = TPS_BIN_COUNT。 */
   tpsBins: number[];
@@ -59,7 +63,7 @@ export interface WindowStats {
   sources: number;
   ttftP50Ms: number | null;
   ttftP95Ms: number | null;
-  /** errors / samples；无样本为 null。 */
+  /** errors / errSamples（错误可观测样本数）；纯直连桶无错误观测为 null。 */
   errRate: number | null;
   /** cache_read / (cache_read + cache_creation + input)；分母为 0 为 null。 */
   cacheHitRate: number | null;

@@ -29,14 +29,15 @@ const SETTING_FLUSHED_THROUGH: &str = "crowd_metrics_flushed_through";
 const SETTING_SOURCE_DAY: &str = "crowd_metrics_source_day";
 const SETTING_SOURCE_ID: &str = "crowd_metrics_source_id";
 
-/// flush 的两道门禁合成一个谓词（纯函数便于闸测试）：
+/// flush 的发送闸（纯函数便于闸测试）：**只有设置开关**。
 ///
-/// 1. 开关关着 ⇒ 不发（连读都省）；
-/// 2. **共建告知没看过 ⇒ 同样不发** —— 2026-09-07 默认开拍板后，「看过告知」
-///    取代「点了同意」成为知情的证明：没见过那条告知的用户，无论默认值是什么，
-///    一个字节都不该离开本机。
-pub(crate) fn upload_allowed(enabled: bool, notice_confirmed: Option<bool>) -> bool {
-    enabled && notice_confirmed == Some(true)
+/// 与 `relay::stats` 2026-09-09 的拍板同形：告知弹窗是知情标记、不门控发送 ——
+/// 「看过告知才发」是 opt-in 时代的产物，默认参与拍板后它只剩一个边缘窗口
+/// （装机→加站→弹窗弹出前约一分钟），为一个字节都还没产生的窗口维持第二道闸，
+/// 换来的是「上报资格与使用方式纠缠」的口径窟窿。显式关过开关的用户
+/// 一个字节都不发，这条不变。
+pub(crate) fn upload_allowed(enabled: bool) -> bool {
+    enabled
 }
 
 /// 一次上传载荷。字段集合被闸测试钉死 —— 加字段前先过模块文档那张表。
@@ -56,6 +57,10 @@ pub(crate) struct HourBucketPayload<'a> {
     pub app: &'a str,
     pub samples: i64,
     pub errors: i64,
+    /// 错误可观测样本数（`errors` 的分母，口径见 `bucket::ERR_SAMPLE_EXPR`）。
+    /// v2 追加：旧服务端忽略未知字段；桶收 session 行后 `samples` 含无错误
+    /// 观测的行，错误率不能再用它当分母。
+    pub err_samples: i64,
     pub ttft_bins: &'a [i64],
     pub ttft_count: i64,
     pub input_tokens: i64,
@@ -76,6 +81,8 @@ pub(crate) struct ModelBucketPayload<'a> {
     pub model: &'a str,
     pub samples: i64,
     pub errors: i64,
+    /// 与 `HourBucketPayload::err_samples` 同款（模型维度的错误率分母）。
+    pub err_samples: i64,
     pub ttft_bins: &'a [i64],
     pub tps_bins: &'a [i64],
     pub input_tokens: i64,
@@ -100,6 +107,7 @@ fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> Ing
                 app: &b.app,
                 samples: b.samples,
                 errors: b.errors,
+                err_samples: b.err_samples,
                 ttft_bins: &b.ttft_bins,
                 ttft_count: b.ttft_count,
                 input_tokens: b.input_tokens,
@@ -115,6 +123,7 @@ fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> Ing
                         model: &m.model,
                         samples: m.samples,
                         errors: m.errors,
+                        err_samples: m.err_samples,
                         ttft_bins: &m.ttft_bins,
                         tps_bins: &m.tps_bins,
                         input_tokens: m.input_tokens,
@@ -159,13 +168,9 @@ fn ensure_daily_source_id(db: &Database, now_epoch: i64) -> Result<String, AppEr
 /// 收 `&Arc<Database>`：阻塞 DB 工作要搬进 `spawn_blocking`（'static），
 /// 引用进不去 —— 与 `run_session_sync` 同一个形态。
 pub async fn flush_once(db: &std::sync::Arc<Database>) -> Result<(), AppError> {
-    // 共建门禁（两道合成一个谓词，见 upload_allowed）：开关关着、或告知没看过，
-    // 都是一个字节都不发。
+    // 发送闸：只有设置开关（见 upload_allowed）。显式关过 = 一个字节不发。
     let settings = crate::settings::get_settings();
-    if !upload_allowed(
-        settings.crowd_metrics_enabled,
-        settings.crowd_metrics_notice_confirmed,
-    ) {
+    if !upload_allowed(settings.crowd_metrics_enabled) {
         return Ok(());
     }
 
@@ -256,6 +261,7 @@ mod tests {
             app: "claude".to_string(),
             samples: 10,
             errors: 1,
+            err_samples: 6,
             ttft_bins: vec![0; crate::crowd::bins::TTFT_BIN_COUNT],
             ttft_count: 0,
             input_tokens: 1000,
@@ -268,6 +274,7 @@ mod tests {
                 model: "example-model".to_string(),
                 samples: 10,
                 errors: 1,
+                err_samples: 6,
                 ttft_bins: vec![0; crate::crowd::bins::TTFT_BIN_COUNT],
                 tps_bins: vec![0; crate::crowd::bins::TPS_BIN_COUNT],
                 output_tokens: 500,
@@ -322,6 +329,7 @@ mod tests {
                 "cacheCreationTokens",
                 "cacheReadTokens",
                 "costUsdMicros",
+                "errSamples",
                 "errors",
                 "hour",
                 "inputTokens",
@@ -351,6 +359,7 @@ mod tests {
                 "cacheCreationTokens",
                 "cacheReadTokens",
                 "costUsdMicros",
+                "errSamples",
                 "errors",
                 "inputTokens",
                 "model",
@@ -387,14 +396,11 @@ mod tests {
 
     #[test]
     fn upload_gate_truth_table() {
-        // 唯一放行组合：开关开着 且 看过告知。
-        assert!(upload_allowed(true, Some(true)));
-        // 默认开拍板后的两条红线：
-        // 没看过告知（含新装机默认 true 但告知还没弹）—— 绝不上传。
-        assert!(!upload_allowed(true, None));
-        // 已明确拒绝（显式 false）—— 永不被默认值翻回。
-        assert!(!upload_allowed(false, Some(true)));
-        assert!(!upload_allowed(false, None));
+        // 唯一放行：开关开着。告知（crowdMetricsNoticeConfirmed）自 2026-09-10 起
+        // 是知情标记、不是发送闸 —— 与 relay::stats 的门禁形态一致。
+        assert!(upload_allowed(true));
+        // 显式关过开关 —— 一个字节都不发。
+        assert!(!upload_allowed(false));
     }
 
     #[test]

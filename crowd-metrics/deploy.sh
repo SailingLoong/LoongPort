@@ -45,6 +45,14 @@ MIGRATE_OUT=$(npx wrangler d1 execute loongport-metrics -y --remote   --command 
   echo "$MIGRATE_OUT" | grep -q "duplicate column" \
     || { echo "✘ bucket_model_raw.anomalies 列迁移失败："; echo "$MIGRATE_OUT"; exit 1; }
 }
+MIGRATE_OUT=$(npx wrangler d1 execute loongport-metrics -y --remote   --command "ALTER TABLE bucket_raw ADD COLUMN err_samples INTEGER" 2>&1) || {
+  echo "$MIGRATE_OUT" | grep -q "duplicate column" \
+    || { echo "✘ bucket_raw.err_samples 列迁移失败："; echo "$MIGRATE_OUT"; exit 1; }
+}
+MIGRATE_OUT=$(npx wrangler d1 execute loongport-metrics -y --remote   --command "ALTER TABLE bucket_model_raw ADD COLUMN err_samples INTEGER" 2>&1) || {
+  echo "$MIGRATE_OUT" | grep -q "duplicate column" \
+    || { echo "✘ bucket_model_raw.err_samples 列迁移失败："; echo "$MIGRATE_OUT"; exit 1; }
+}
 
 npx wrangler deploy
 

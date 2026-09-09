@@ -68,6 +68,8 @@ export interface RawRow {
   ua_trusted: number;
   samples: number;
   errors: number;
+  /** NULL = 旧客户端行（errSamples 引入前）—— parseRow 回退 samples。 */
+  err_samples: number | null;
   ttft_bins: string;
   ttft_count: number;
   input_tokens: number;
@@ -87,6 +89,7 @@ interface ParsedRow {
   uaTrusted: boolean;
   samples: number;
   errors: number;
+  errSamples: number;
   bins: number[];
   inputTokens: number;
   outputTokens: number;
@@ -119,6 +122,10 @@ function parseRow(row: RawRow): ParsedRow | null {
     uaTrusted: row.ua_trusted === 1,
     samples: row.samples,
     errors: row.errors,
+    // 旧行（列 NULL）= errSamples 引入前的数据，当时桶只收 proxy 行、
+    // samples 即完整错误分母 —— 回退保持旧行为；新行 0 是真实语义
+    // （纯直连使用，无错误观测），errRate 对它输出 null 而非 0%。
+    errSamples: row.err_samples ?? row.samples,
     bins,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
@@ -132,6 +139,7 @@ function parseRow(row: RawRow): ParsedRow | null {
 interface Totals {
   samples: number;
   errors: number;
+  errSamples: number;
   bins: number[];
   inputTokens: number;
   outputTokens: number;
@@ -144,6 +152,7 @@ function emptyTotals(): Totals {
   return {
     samples: 0,
     errors: 0,
+    errSamples: 0,
     bins: new Array<number>(TTFT_BIN_COUNT).fill(0),
     inputTokens: 0,
     outputTokens: 0,
@@ -156,6 +165,7 @@ function emptyTotals(): Totals {
 function addInto(t: Totals, r: ParsedRow): void {
   t.samples += r.samples;
   t.errors += r.errors;
+  t.errSamples += r.errSamples;
   for (let i = 0; i < TTFT_BIN_COUNT; i++) t.bins[i] += r.bins[i];
   t.inputTokens += r.inputTokens;
   t.outputTokens += r.outputTokens;
@@ -173,7 +183,7 @@ function totalsToWindow(t: Totals, sources: number): WindowStats {
     sources,
     ttftP50Ms: quantileFromBins(t.bins, 0.5),
     ttftP95Ms: quantileFromBins(t.bins, 0.95),
-    errRate: t.samples > 0 ? t.errors / t.samples : null,
+    errRate: t.errSamples > 0 ? t.errors / t.errSamples : null,
     cacheHitRate: cacheDenom > 0 ? t.cacheReadTokens / cacheDenom : null,
     // $/Mtok = (micros/1e6) / (tokens/1e6) = micros / tokens。
     costUsdPerMTok: tokenTotal > 0 ? t.costUsdMicros / tokenTotal : null,
@@ -419,7 +429,7 @@ function trendBucketOrNull(bucketRows: ParsedRow[]): { bucket: TrendBucket; bins
       start: 0,
       p50Ms: quantileFromBins(totals.bins, 0.5),
       p95Ms: quantileFromBins(totals.bins, 0.95),
-      errRate: totals.samples > 0 ? totals.errors / totals.samples : null,
+      errRate: totals.errSamples > 0 ? totals.errors / totals.errSamples : null,
       cacheRate: cacheDenom > 0 ? totals.cacheReadTokens / cacheDenom : null,
     },
     bins: totals.bins,
@@ -540,6 +550,8 @@ export interface RawModelRow {
   ua_trusted: number;
   samples: number;
   errors: number;
+  /** NULL = 旧客户端行（errSamples 引入前）—— parseModelRow 回退 samples。 */
+  err_samples: number | null;
   ttft_bins: string;
   tps_bins: string;
   input_tokens: number;
@@ -559,6 +571,7 @@ interface ParsedModelRow {
   uaTrusted: boolean;
   samples: number;
   errors: number;
+  errSamples: number;
   ttftBins: number[];
   tpsBins: number[];
   inputTokens: number;
@@ -580,12 +593,14 @@ function modelWindowOrNull(rows: ParsedModelRow[]): ModelWindowStats | null {
   const tpsBins = new Array<number>(TPS_BIN_COUNT).fill(0);
   let samples = 0;
   let errors = 0;
+  let errSamples = 0;
   let tokenTotal = 0;
   let costUsdMicros = 0;
   let anomalies = 0;
   for (const r of rows) {
     samples += r.samples;
     errors += r.errors;
+    errSamples += r.errSamples;
     anomalies += r.anomalies;
     tokenTotal += r.inputTokens + r.outputTokens + r.cacheReadTokens + r.cacheCreationTokens;
     costUsdMicros += r.costUsdMicros;
@@ -596,7 +611,7 @@ function modelWindowOrNull(rows: ParsedModelRow[]): ModelWindowStats | null {
     samples,
     p50Ms: quantileFromBins(ttftBins, 0.5),
     p95Ms: quantileFromBins(ttftBins, 0.95),
-    errRate: samples > 0 ? errors / samples : null,
+    errRate: errSamples > 0 ? errors / errSamples : null,
     tpsP50Ms: tpsQuantileFromBins(tpsBins, 0.5),
     costUsdPerMTok: tokenTotal > 0 ? costUsdMicros / tokenTotal : null,
     anomalies,
@@ -624,6 +639,7 @@ function parseModelRow(row: RawModelRow): ParsedModelRow | null {
     uaTrusted: row.ua_trusted === 1,
     samples: row.samples,
     errors: row.errors,
+    errSamples: row.err_samples ?? row.samples,
     ttftBins,
     tpsBins,
     inputTokens: row.input_tokens,
@@ -645,6 +661,7 @@ function trendModelBucketOrNull(
   const totals = {
     samples: 0,
     errors: 0,
+    errSamples: 0,
     ttftBins: new Array<number>(TTFT_BIN_COUNT).fill(0),
     tpsBins: new Array<number>(TPS_BIN_COUNT).fill(0),
     tokenTotal: 0,
@@ -654,6 +671,7 @@ function trendModelBucketOrNull(
   for (const r of bucketRows) {
     totals.samples += r.samples;
     totals.errors += r.errors;
+    totals.errSamples += r.errSamples;
     totals.anomalies += r.anomalies;
     for (let i = 0; i < TTFT_BIN_COUNT; i++) totals.ttftBins[i] += r.ttftBins[i];
     for (let i = 0; i < TPS_BIN_COUNT; i++) totals.tpsBins[i] += r.tpsBins[i];
@@ -664,7 +682,7 @@ function trendModelBucketOrNull(
     start: 0,
     p50Ms: quantileFromBins(totals.ttftBins, 0.5),
     p95Ms: quantileFromBins(totals.ttftBins, 0.95),
-    errRate: totals.samples > 0 ? totals.errors / totals.samples : null,
+    errRate: totals.errSamples > 0 ? totals.errors / totals.errSamples : null,
     cacheRate: null,
     tpsP50Ms: tpsQuantileFromBins(totals.tpsBins, 0.5),
     // $/Mtok 同站点窗口口径：微美元 / 总 token（含缓存）
