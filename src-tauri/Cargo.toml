@@ -9,7 +9,7 @@ members = ["cli"]
 [workspace.package]
 # 版本唯源：两个 crate 都从这里继承（`version.workspace = true`）。
 # 发版 bump 时改这一处 + package.json + tauri.conf.json。
-version = "6.21.1"
+version = "6.21.2"
 
 [package]
 # ⚠️ crate name 保持上游的 `cc-switch`，别改 —— 118 处引用、改了收益为零
