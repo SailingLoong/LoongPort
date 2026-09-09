@@ -161,19 +161,14 @@ const requiredKeys = [
   // 显示成 key 名比不显示更糟（用户会以为界面坏了）。
   "tier.userEdited",
   "tier.userEditedHint",
-  // 使用统计的首启告知。**十条都要有** —— 缺一条那一屏就会显示 key 名，
-  // 而那一屏是「默认开」的知情前提，退化成 key 名等于没告知。
+  // 使用统计的告知（2026-09-09 起纯告知形态，与共建告知同款）。**五条都要有** ——
+  // 缺一条那一屏就会显示 key 名，而那一屏是「默认开」的知情前提。
   // 尤其 `stats.idNote`（披露那个持久安装标识）—— 缺它就变成不诚实的告知。
   "stats.title",
-  "stats.intro",
-  "stats.sendsLabel",
-  "stats.sendsBody",
-  "stats.neverLabel",
-  "stats.neverBody",
+  "stats.body",
   "stats.idNote",
-  "stats.canChange",
-  "stats.accept",
-  "stats.decline",
+  "stats.turnOffHint",
+  "stats.ok",
   // 站点实测共建。与 stats.* 同一个理：缺一条，详情弹窗的实测区或共建告知
   // 就会显示 key 名 —— 告知屏缺边界条目等于不诚实的告知。
   // badge/errBadge 两组（label + hint）是广场行上**公开**的行级观测徽章，
@@ -543,52 +538,35 @@ describe("LoongPort tier page locale coverage", () => {
     [
       "zh",
       zh.loongport,
-      {
-        sendsLabel: "将收集",
-        neverLabel: "不会收集",
-        accept: "允许分享",
-        decline: "不分享",
-      },
+      { onByDefault: "已默认参与", settingsPath: "设置 → 通用" },
     ],
     [
       "zh-TW",
       zhTW.loongport,
-      {
-        sendsLabel: "將收集",
-        neverLabel: "不會收集",
-        accept: "允許分享",
-        decline: "不分享",
-      },
+      { onByDefault: "已預設參與", settingsPath: "設定 → 通用" },
     ],
     [
       "en",
       en.loongport,
-      {
-        sendsLabel: "Will collect",
-        neverLabel: "Will not collect",
-        accept: "Allow sharing",
-        decline: "Don't share",
-      },
+      { onByDefault: "On by default", settingsPath: "Settings → General" },
     ],
     [
       "ja",
       ja.loongport,
       {
-        sendsLabel: "収集する情報",
-        neverLabel: "収集しない情報",
-        accept: "共有を許可",
-        decline: "共有しない",
+        onByDefault: "デフォルトで参加しています",
+        settingsPath: "設定 → 一般",
       },
     ],
   ] as const)(
-    "%s states the approved sharing facts and consent actions",
+    "%s states the approved default-participation facts and the settings opt-out",
     (_locale, ns, expected) => {
-      expect(ns.stats).toMatchObject({
-        sendsLabel: expected.sendsLabel,
-        neverLabel: expected.neverLabel,
-        accept: expected.accept,
-        decline: expected.decline,
-      });
+      // 2026-09-09 纯告知形态：钉三件必须说清的事 —— 默认参与、关闭走设置、
+      // 持久安装标识的诚实披露（idNote 缺失等于不诚实的告知）。
+      expect(ns.stats.body).toContain(expected.onByDefault);
+      expect(ns.stats.turnOffHint).toContain(expected.settingsPath);
+      expect(ns.stats.idNote.length).toBeGreaterThan(0);
+      expect(ns.stats.ok.length).toBeGreaterThan(0);
     },
   );
 });
