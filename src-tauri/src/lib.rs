@@ -109,7 +109,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "gui")]
 use std::sync::Arc;
 #[cfg(feature = "gui")]
-#[cfg(target_os = "macos")]
 use tauri::image::Image;
 #[cfg(feature = "gui")]
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
