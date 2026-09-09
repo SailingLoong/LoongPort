@@ -43,6 +43,18 @@ const SITE_SIDE_ERROR_EXPR: &str = "(l.status_code < 200 OR l.status_code >= 400
              '无可用 Provider', '所有供应商已熔断，无可用渠道', '未配置供应商')) \
      )";
 
+/// proxy 观测资格：只有本地代理亲历过完整 HTTP 交互的行（`data_source = 'proxy'`）
+/// 才有错误观测与真实计时。两处消费：
+///
+/// - `err_samples`（错误率分母）：session 回填行 `status_code` 恒 200 写死（CLI
+///   会话文件不记失败请求），计入分母会把一切站点的公开错误率拉向 0% —— 比
+///   没有数据更误导；服务端 `errRate = errors / err_samples`，纯直连桶
+///   （`err_samples = 0`）错误率缺省而非归零。
+/// - TTFT/TPS 直方图资格：session 行没有延迟数据；现在 `first_token_ms` 缺省
+///   天然不进桶，但资格条件显式钉住口径 —— 将来 session 同步若开始回填延迟，
+///   必须先过「口径与代理观测一致」的审视，而不是静默混进同一张直方图。
+const PROXY_OBSERVED_EXPR: &str = "l.data_source = 'proxy'";
+
 /// 一个待上传的小时聚合桶。字段集合就是上传载荷的字段集合 ——
 /// 加字段前先回模块文档那张「传/不传」的表过一遍。
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +70,9 @@ pub struct HourBucket {
     /// 未出门的失败不计 —— 它们不反映站点健康，混进去会把上传者自己的
     /// 账号问题变成全站的公开错误率）。
     pub errors: i64,
+    /// 错误可观测样本数（= 桶内 proxy 观测行数，口径见 [`ERR_SAMPLE_EXPR`]）。
+    /// `errors` 的分母：session 回填行没有失败观测，只能贡献 `samples`。
+    pub err_samples: i64,
     /// TTFT 直方图计数，长度恒为 [`TTFT_BIN_COUNT`]。
     pub ttft_bins: Vec<i64>,
     /// 有 `first_token_ms` 的样本数（= `ttft_bins` 求和）。
@@ -83,6 +98,8 @@ pub struct ModelBucket {
     pub model: String,
     pub samples: i64,
     pub errors: i64,
+    /// 与 [`HourBucket::err_samples`] 同款口径（模型维度的错误率分母）。
+    pub err_samples: i64,
     pub ttft_bins: Vec<i64>,
     /// 输出速度直方图（tok/s，边界见 bins.rs `TPS_BIN_EDGES`），长度恒 [`TPS_BIN_COUNT`]。
     pub tps_bins: Vec<i64>,
@@ -105,6 +122,7 @@ struct RawBucket {
     app_type: String,
     samples: i64,
     errors: i64,
+    err_samples: i64,
     ttft_bins: Vec<i64>,
     ttft_count: i64,
     input_tokens: i64,
@@ -123,6 +141,7 @@ struct RawModelBucket {
     model: String,
     samples: i64,
     errors: i64,
+    err_samples: i64,
     ttft_bins: Vec<i64>,
     tps_bins: Vec<i64>,
     input_tokens: i64,
@@ -133,7 +152,9 @@ struct RawModelBucket {
 }
 
 /// 查询并切桶（provider 维度）。`after_epoch`（不含）到 `before_epoch`（含）限定行窗口；
-/// 只取 `data_source = 'proxy'` 的行（session 回填行时间戳是同步时间，见模块文档）。
+/// 取全部用量行（proxy 转发 + session 回填）—— 上报跟着「用没用」走，不跟使用
+/// 模式走；逐指标的可观测性差异由各列自己的资格条件表达（错误率分母见
+/// [`ERR_SAMPLE_EXPR`]，TTFT/TPS 直方图只收真实计时过的行）。
 fn query_raw_buckets(
     db: &Database,
     after_epoch: i64,
@@ -145,16 +166,18 @@ fn query_raw_buckets(
                 l.provider_id, l.app_type, \
                 COUNT(*), \
                 SUM(CASE WHEN {site_side_error} THEN 1 ELSE 0 END), \
+                SUM(CASE WHEN {proxy_observed} THEN 1 ELSE 0 END), \
                 {bins_expr}, \
-                SUM(CASE WHEN l.first_token_ms IS NOT NULL THEN 1 ELSE 0 END), \
+                SUM(CASE WHEN {proxy_observed} AND l.first_token_ms IS NOT NULL THEN 1 ELSE 0 END), \
                 SUM({fresh_input}), \
                 SUM(l.output_tokens), SUM(l.cache_read_tokens), SUM(l.cache_creation_tokens), \
                 CAST(ROUND(SUM(CAST(l.total_cost_usd AS REAL)) * 1000000.0) AS INTEGER) \
          FROM proxy_request_logs l \
-         WHERE l.data_source = 'proxy' AND l.created_at > ?1 AND l.created_at <= ?2 \
+         WHERE l.created_at > ?1 AND l.created_at <= ?2 \
          GROUP BY hour_epoch, l.provider_id, l.app_type",
         fresh_input = fresh_input_sql("l"),
         site_side_error = SITE_SIDE_ERROR_EXPR,
+        proxy_observed = PROXY_OBSERVED_EXPR,
     );
 
     let conn = crate::database::lock_conn!(db.conn);
@@ -169,7 +192,7 @@ fn query_raw_buckets(
     while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
         let mut bins = Vec::with_capacity(TTFT_BIN_COUNT);
         for i in 0..TTFT_BIN_COUNT {
-            bins.push(row.get::<_, i64>(5 + i)?);
+            bins.push(row.get::<_, i64>(6 + i)?);
         }
         raw_buckets.push(RawBucket {
             hour_epoch: row.get(0)?,
@@ -177,13 +200,14 @@ fn query_raw_buckets(
             app_type: row.get(2)?,
             samples: row.get(3)?,
             errors: row.get(4)?,
+            err_samples: row.get(5)?,
             ttft_bins: bins,
-            ttft_count: row.get(5 + TTFT_BIN_COUNT)?,
-            input_tokens: row.get(6 + TTFT_BIN_COUNT)?,
-            output_tokens: row.get(7 + TTFT_BIN_COUNT)?,
-            cache_read_tokens: row.get(8 + TTFT_BIN_COUNT)?,
-            cache_creation_tokens: row.get(9 + TTFT_BIN_COUNT)?,
-            cost_usd_micros: row.get(10 + TTFT_BIN_COUNT)?,
+            ttft_count: row.get(6 + TTFT_BIN_COUNT)?,
+            input_tokens: row.get(7 + TTFT_BIN_COUNT)?,
+            output_tokens: row.get(8 + TTFT_BIN_COUNT)?,
+            cache_read_tokens: row.get(9 + TTFT_BIN_COUNT)?,
+            cache_creation_tokens: row.get(10 + TTFT_BIN_COUNT)?,
+            cost_usd_micros: row.get(11 + TTFT_BIN_COUNT)?,
         });
     }
     Ok(raw_buckets)
@@ -204,16 +228,18 @@ fn query_raw_model_buckets(
                 l.provider_id, l.app_type, l.model, \
                 COUNT(*), \
                 SUM(CASE WHEN {site_side_error} THEN 1 ELSE 0 END), \
+                SUM(CASE WHEN {proxy_observed} THEN 1 ELSE 0 END), \
                 {ttft_exprs}, \
                 {tps_exprs}, \
                 SUM({fresh_input}), \
                 SUM(l.output_tokens), SUM(l.cache_read_tokens), SUM(l.cache_creation_tokens), \
                 CAST(ROUND(SUM(CAST(l.total_cost_usd AS REAL)) * 1000000.0) AS INTEGER) \
          FROM proxy_request_logs l \
-         WHERE l.data_source = 'proxy' AND l.created_at > ?1 AND l.created_at <= ?2 \
+         WHERE l.created_at > ?1 AND l.created_at <= ?2 \
          GROUP BY hour_epoch, l.provider_id, l.app_type, l.model",
         fresh_input = fresh_input_sql("l"),
         site_side_error = SITE_SIDE_ERROR_EXPR,
+        proxy_observed = PROXY_OBSERVED_EXPR,
     );
 
     let conn = crate::database::lock_conn!(db.conn);
@@ -228,13 +254,13 @@ fn query_raw_model_buckets(
     while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
         let mut ttft_bins = Vec::with_capacity(TTFT_BIN_COUNT);
         for i in 0..TTFT_BIN_COUNT {
-            ttft_bins.push(row.get::<_, i64>(5 + i)?);
+            ttft_bins.push(row.get::<_, i64>(6 + i)?);
         }
         let mut tps_bins = Vec::with_capacity(TPS_BIN_COUNT);
         for i in 0..TPS_BIN_COUNT {
-            tps_bins.push(row.get::<_, i64>(5 + TTFT_BIN_COUNT + i)?);
+            tps_bins.push(row.get::<_, i64>(6 + TTFT_BIN_COUNT + i)?);
         }
-        let base = 5 + TTFT_BIN_COUNT + TPS_BIN_COUNT;
+        let base = 6 + TTFT_BIN_COUNT + TPS_BIN_COUNT;
         raws.push(RawModelBucket {
             hour_epoch: row.get(0)?,
             provider_id: row.get(1)?,
@@ -242,6 +268,7 @@ fn query_raw_model_buckets(
             model: row.get(3)?,
             samples: row.get(4)?,
             errors: row.get(5)?,
+            err_samples: row.get(6)?,
             ttft_bins,
             tps_bins,
             input_tokens: row.get(base)?,
@@ -325,6 +352,7 @@ fn merge_by_site(
             app: raw.app_type.clone(),
             samples: 0,
             errors: 0,
+            err_samples: 0,
             ttft_bins: vec![0; TTFT_BIN_COUNT],
             ttft_count: 0,
             input_tokens: 0,
@@ -337,6 +365,7 @@ fn merge_by_site(
         });
         entry.samples += raw.samples;
         entry.errors += raw.errors;
+        entry.err_samples += raw.err_samples;
         for (i, count) in raw.ttft_bins.iter().enumerate() {
             entry.ttft_bins[i] += count;
         }
@@ -365,6 +394,7 @@ fn merge_by_site(
             model: raw.model.clone(),
             samples: 0,
             errors: 0,
+            err_samples: 0,
             ttft_bins: vec![0; TTFT_BIN_COUNT],
             tps_bins: vec![0; TPS_BIN_COUNT],
             output_tokens: 0,
@@ -376,6 +406,7 @@ fn merge_by_site(
         });
         entry.samples += raw.samples;
         entry.errors += raw.errors;
+        entry.err_samples += raw.err_samples;
         for (i, count) in raw.ttft_bins.iter().enumerate() {
             entry.ttft_bins[i] += count;
         }
@@ -680,9 +711,76 @@ mod tests {
     }
 
     #[test]
-    fn query_buckets_by_hour_and_skip_session_rows() {
+    fn claude_env_provider_shape_resolves_like_managed_sites() {
+        // E2E 实测时踩过的完整链：relay 站 + env 形状的 claude 档（托管站点写入
+        // settings_config 的真实形状）→ resolve 命中 + session 行并入 samples
+        // 不并入错误分母/TTFT。钉住「env.ANTHROPIC_BASE_URL 形状能解析身份」。
         let db = setup_db();
-        // 11:00 与 12:00 各两条 + 一条 session 回填（必须被忽略）。
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::relay::creds::save_site(
+                &conn,
+                "https://example.com",
+                "E2E Probe",
+                "https://api.example.com",
+            )
+            .unwrap();
+        }
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('e2e-probe', 'claude', 'E2E', ?1, '{}')",
+                params![serde_json::json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "sk-e2e-probe-not-a-real-key",
+                        "ANTHROPIC_BASE_URL": "https://api.example.com"
+                    }
+                })
+                .to_string()],
+            )
+            .unwrap();
+        seed_log(
+            &db,
+            "p1",
+            "e2e-probe",
+            "claude",
+            200,
+            Some(350),
+            "0.01",
+            11 * 3600 + 60,
+            "proxy",
+        );
+        seed_log(
+            &db,
+            "s1",
+            "e2e-probe",
+            "claude",
+            200,
+            None,
+            "0",
+            11 * 3600 + 90,
+            "session_log",
+        );
+        let buckets = build_hour_buckets(&db, 0, 12 * 3600).unwrap();
+        assert_eq!(
+            buckets.len(),
+            1,
+            "claude env 形状必须能 resolve 到 example.com"
+        );
+        let b = &buckets[0];
+        assert_eq!(b.site, "example.com");
+        assert_eq!(b.samples, 2);
+        assert_eq!(b.err_samples, 1);
+        assert_eq!(b.ttft_count, 1);
+    }
+
+    #[test]
+    fn session_rows_count_samples_but_not_error_denominator_or_histograms() {
+        let db = setup_db();
+        // 2026-09-10 修根闸：桶收全部使用 —— session 回填行计入 samples/花费，
+        // 但不进错误率分母（err_samples）与 TTFT/TPS 直方图（无错误观测、无计时）。
         seed_log(
             &db,
             "a",
@@ -733,14 +831,14 @@ mod tests {
             "p1",
             "claude",
             200,
-            Some(100),
+            None,
             "9",
             12 * 3600 + 500,
             "session_log",
         );
 
         let raws = query_raw_buckets(&db, 0, 13 * 3600).unwrap();
-        assert_eq!(raws.len(), 3, "两小时 × (p1, p2) 分桶，session 行不计");
+        assert_eq!(raws.len(), 3, "两小时 × (p1, p2) 分桶，session 行并桶");
 
         let h11_p1 = raws
             .iter()
@@ -748,6 +846,7 @@ mod tests {
             .expect("11 点 p1 桶存在");
         assert_eq!(h11_p1.samples, 2);
         assert_eq!(h11_p1.errors, 1);
+        assert_eq!(h11_p1.err_samples, 2, "两条都是 proxy 行");
         assert_eq!(h11_p1.ttft_count, 1);
         assert_eq!(h11_p1.ttft_bins[1], 1, "250ms 落 [200,400) 桶");
         assert_eq!(h11_p1.cost_usd_micros, 500_000);
@@ -756,8 +855,14 @@ mod tests {
             .iter()
             .find(|r| r.hour_epoch == 12 * 3600 && r.provider_id == "p1")
             .expect("12 点 p1 桶存在");
-        assert_eq!(h12_p1.samples, 1);
+        // proxy 行 c + session 行 sess 同桶：samples 含 session、错误分母与
+        // 直方图不含 —— 直连使用产出「有用量、无健康观测」的桶。
+        assert_eq!(h12_p1.samples, 2);
+        assert_eq!(h12_p1.err_samples, 1);
+        assert_eq!(h12_p1.errors, 0);
+        assert_eq!(h12_p1.ttft_count, 1);
         assert_eq!(h12_p1.ttft_bins[3], 1, "700ms 落 [600,800) 桶");
+        assert_eq!(h12_p1.cost_usd_micros, 10_500_000, "session 行花费并入桶");
     }
 
     #[test]

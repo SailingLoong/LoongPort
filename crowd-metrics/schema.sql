@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS bucket_raw (
     ua_trusted          INTEGER NOT NULL DEFAULT 0, -- 1 = User-Agent 是 LoongPort/ 客户端
     samples             INTEGER NOT NULL, -- 请求数
     errors              INTEGER NOT NULL, -- 失败请求数
+    err_samples         INTEGER,          -- 错误可观测样本数（errRate 分母；NULL = 旧客户端行，聚合回退 samples）
     ttft_bins           TEXT    NOT NULL, -- TTFT 直方图计数（JSON 数组，桶边界见 src/bins.ts）
     ttft_count          INTEGER NOT NULL, -- 有 first_token_ms 的样本数（= sum(ttft_bins)）
     input_tokens        INTEGER NOT NULL,
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS bucket_model_raw (
     ua_trusted          INTEGER NOT NULL DEFAULT 0,
     samples             INTEGER NOT NULL,
     errors              INTEGER NOT NULL,
+    err_samples         INTEGER,          -- 同 bucket_raw.err_samples（模型维度错误率分母）
     ttft_bins           TEXT    NOT NULL,
     tps_bins            TEXT    NOT NULL,
     input_tokens        INTEGER NOT NULL,

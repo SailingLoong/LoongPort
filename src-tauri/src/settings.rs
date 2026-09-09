@@ -436,15 +436,13 @@ pub struct AppSettings {
     /// 同时解锁广场的实测数据展示（对等条款）。
     ///
     /// **默认开**（2026-09-07 拍板，原为默认关）：广场名次已完全押在实测数据上，
-    /// 而 opt-in 冷启动一个月实测零外部参与者，空数据比默认开更伤产品。配套的
-    /// 知情不变式在 [`crate::crowd::uploader`]：**看过首启告知才会真的上传**，
-    /// `crowd_metrics_notice_confirmed != Some(true)` 时一个字节都不发。
-    /// 已明确拒绝过的用户存的是显式 `false`，翻默认值动不到他们。
+    /// 而 opt-in 冷启动一个月实测零外部参与者，空数据比默认开更伤产品。
+    /// 发送闸只有这一个开关（2026-09-10 起与 `relay::stats` 同形，见
+    /// [`crate::crowd::uploader`]）；显式关过的用户一个字节都不发。
     #[serde(default = "default_true")]
     pub crowd_metrics_enabled: bool,
     /// 共建告知看过了没。`None` = 还没看过 ⇒ 有中转站后弹一次告知。
-    /// 置位（`Some(true)`）是上传的前置条件之一（见 `crowd::uploader` 的门禁），
-    /// 与 `stats_notice_confirmed` / `proxy_confirmed` 同一个惯例。
+    /// 知情标记（防告知重复弹），不门控发送 —— 与 `stats_notice_confirmed` 同形。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crowd_metrics_notice_confirmed: Option<bool>,
     /// 首启「是否一键导入 cc-switch 配置」问过没有。

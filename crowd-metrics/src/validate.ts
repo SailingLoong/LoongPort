@@ -141,6 +141,11 @@ export function parseIngestPayload(
     if (!isSafeUint(errors, samples)) {
       return { ok: false, error: "bad errors" };
     }
+    // errSamples 可缺省（旧客户端）；给了就必须 ≤ samples —— 它是错误率的
+    // 分母，比总样本数还大说明口径坏了。
+    if (b.errSamples !== undefined && !isSafeUint(b.errSamples, samples)) {
+      return { ok: false, error: "bad errSamples" };
+    }
     if (!isSafeUint(ttftCount, samples)) {
       return { ok: false, error: "bad ttftCount" };
     }
@@ -196,6 +201,9 @@ export function parseIngestPayload(
         if (!isSafeUint(mErrors, mSamples)) {
           return { ok: false, error: "bad model errors" };
         }
+        if (m.errSamples !== undefined && !isSafeUint(m.errSamples, mSamples)) {
+          return { ok: false, error: "bad model errSamples" };
+        }
         if (
           !isSafeUint(m.inputTokens, MAX_COUNT) ||
           !isSafeUint(m.outputTokens, MAX_COUNT) ||
@@ -229,6 +237,7 @@ export function parseIngestPayload(
           model: m.model,
           samples: mSamples,
           errors: mErrors,
+          errSamples: m.errSamples,
           ttftBins: m.ttftBins as number[],
           tpsBins: m.tpsBins as number[],
           inputTokens: m.inputTokens as number,
@@ -256,6 +265,7 @@ export function parseIngestPayload(
       app: b.app,
       samples,
       errors,
+      errSamples: b.errSamples,
       breakerTrips,
       ttftBins: b.ttftBins as number[],
       ttftCount,

@@ -99,6 +99,25 @@ describe("parseIngestPayload", () => {
     }
   });
 
+  it("errSamples 必须穿透到解析产物（E2E 实测曾在校验后被丢）", () => {
+    const ok = parseIngestPayload(
+      makePayload({
+        version: 2,
+        hours: [makeBucket({ errSamples: 4, models: [makeModelBucket({ errSamples: 4 })] })],
+      }),
+      NOW,
+    );
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.payload.hours[0].errSamples).toBe(4);
+      expect(ok.payload.hours[0].models?.[0]?.errSamples).toBe(4);
+    }
+    // 缺省合法（旧客户端）——解析产物同样缺省。
+    const legacy = parseIngestPayload(makePayload(), NOW);
+    expect(legacy.ok).toBe(true);
+    if (legacy.ok) expect(legacy.payload.hours[0].errSamples).toBeUndefined();
+  });
+
   it("版本不是 1/2 拒绝（v2 自 P4 起接受）", () => {
     expect(parseIngestPayload(makePayload({ version: 3 }), NOW).ok).toBe(false);
     expect(parseIngestPayload(makePayload({ version: 2 }), NOW).ok).toBe(false); // v2 必须 models

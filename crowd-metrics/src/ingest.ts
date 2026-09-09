@@ -67,10 +67,10 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
     const siteRow = env.DB.prepare(
       `INSERT OR REPLACE INTO bucket_raw (
          hour, site, app, source, asn, ua_trusted,
-         samples, errors, ttft_bins, ttft_count,
+         samples, errors, err_samples, ttft_bins, ttft_count,
          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
          cost_usd_micros, breaker_trips
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`,
     ).bind(
       b.hour,
       b.site,
@@ -80,6 +80,7 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
       uaTrusted,
       b.samples,
       b.errors,
+      b.errSamples ?? null,
       JSON.stringify(b.ttftBins),
       b.ttftCount,
       b.inputTokens,
@@ -94,10 +95,10 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
       env.DB.prepare(
         `INSERT OR REPLACE INTO bucket_model_raw (
            hour, site, app, model, source, asn, ua_trusted,
-           samples, errors, ttft_bins, tps_bins,
+           samples, errors, err_samples, ttft_bins, tps_bins,
            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
            cost_usd_micros, anomalies
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`,
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`,
       ).bind(
         b.hour,
         b.site,
@@ -108,6 +109,7 @@ export async function handleIngest(request: Request, env: Env): Promise<Response
         uaTrusted,
         m.samples,
         m.errors,
+        m.errSamples ?? null,
         JSON.stringify(m.ttftBins),
         JSON.stringify(m.tpsBins),
         m.inputTokens,

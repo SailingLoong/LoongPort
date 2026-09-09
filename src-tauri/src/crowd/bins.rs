@@ -14,6 +14,10 @@ pub const TTFT_BIN_COUNT: usize = TTFT_BIN_EDGES_MS.len() + 1;
 
 /// 生成 SQL 里的逐桶计数表达式（逗号分隔），分桶条件由同一份边界生成 ——
 /// SQL 与 Rust 常量天然同源，不存在「SQL 里手写一份边界」的分叉。
+///
+/// 资格限定 `data_source = 'proxy'`：直方图只收本地代理亲历计时的行
+/// （session 回填行现在 `first_token_ms` 恒缺省、天然不进桶；资格条件把口径
+/// 钉死 —— 将来 session 侧若有延迟数据，先过口径审视再放开，别静默混桶）。
 pub(crate) fn ttft_bin_sum_exprs(alias: &str) -> String {
     let mut exprs = Vec::with_capacity(TTFT_BIN_COUNT);
     for i in 0..TTFT_BIN_COUNT {
@@ -26,7 +30,9 @@ pub(crate) fn ttft_bin_sum_exprs(alias: &str) -> String {
         } else {
             format!("{alias}.first_token_ms >= {lo}")
         };
-        exprs.push(format!("SUM(CASE WHEN {cond} THEN 1 ELSE 0 END)"));
+        exprs.push(format!(
+            "SUM(CASE WHEN {alias}.data_source = 'proxy' AND {cond} THEN 1 ELSE 0 END)"
+        ));
     }
     exprs.join(", ")
 }
@@ -41,6 +47,10 @@ pub const TPS_BIN_COUNT: usize = TPS_BIN_EDGES.len() + 1;
 
 /// 逐桶计数表达式（与 `ttft_bin_sum_exprs` 同构）。行速度表达式在 SQL 里
 /// 内联生成（SQLite 无变量复用，重复求值无碍聚合正确性）。
+///
+/// 资格限定 `data_source = 'proxy'`：桶自 2026-09 起收全部用量行（含 session
+/// 回填），而 session 行 `latency_ms` 恒 0 —— 0/100ms 兜底会把任何输出算成
+/// 10 倍 tok/s 的病态高速，灌进溢出桶。速度只在转发路径被真实计时。
 pub(crate) fn tps_bin_sum_exprs(alias: &str) -> String {
     let row_tps = format!(
         "CAST({alias}.output_tokens AS REAL) * 1000.0 / MAX({alias}.latency_ms - COALESCE({alias}.first_token_ms, 0), 100)"
@@ -54,7 +64,7 @@ pub(crate) fn tps_bin_sum_exprs(alias: &str) -> String {
             format!("{row_tps} >= {lo}")
         };
         exprs.push(format!(
-            "SUM(CASE WHEN {alias}.output_tokens > 0 AND ({cond}) THEN 1 ELSE 0 END)"
+            "SUM(CASE WHEN {alias}.data_source = 'proxy' AND {alias}.output_tokens > 0 AND ({cond}) THEN 1 ELSE 0 END)"
         ));
     }
     exprs.join(", ")
