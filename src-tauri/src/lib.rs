@@ -1383,6 +1383,24 @@ pub fn run() {
                 });
             }
 
+            // 启动即刷新当前 codex 档位的 catalog 投影：catalog 是投影产物，
+            // 升级带来的生成器变化必须下次启动就落盘，而不是等用户碰巧再切
+            // 一次档位（两例「升级/重装后修复不生效」反馈的根因）。外科式：
+            // 只动 catalog 文件与指针键，不碰 auth/model/effort。延迟几秒，
+            // 让开更新闸门与 maintenance 先行。
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let state = handle.state::<AppState>();
+                    if let Err(e) =
+                        crate::services::provider::refresh_current_codex_catalog_projection(&state)
+                    {
+                        log::warn!("启动刷新 codex catalog 投影失败: {e}");
+                    }
+                });
+            }
+
             // 初始化 SkillService
             let skill_service = SkillService::new();
             app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));

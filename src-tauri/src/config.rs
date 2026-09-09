@@ -328,6 +328,16 @@ fn sort_json_keys(value: &Value) -> Value {
     }
 }
 
+/// 序列化为落盘 JSON 的规范字节（键排序 + pretty）——所有 JSON 写入共用，
+/// 使「生成内容与磁盘比对」与写入格式逐字节一致。
+pub fn serialize_json_bytes<T: Serialize>(data: &T) -> Result<Vec<u8>, AppError> {
+    let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
+    let sorted_value = sort_json_keys(&value);
+    serde_json::to_string_pretty(&sorted_value)
+        .map(|json| json.into_bytes())
+        .map_err(|e| AppError::JsonSerialize { source: e })
+}
+
 /// 写入 JSON 配置文件并返回实际写入的字节。
 pub fn write_json_file_with_contents<T: Serialize>(
     path: &Path,
@@ -338,12 +348,7 @@ pub fn write_json_file_with_contents<T: Serialize>(
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
-    let sorted_value = sort_json_keys(&value);
-    let json = serde_json::to_string_pretty(&sorted_value)
-        .map_err(|e| AppError::JsonSerialize { source: e })?;
-
-    let contents = json.into_bytes();
+    let contents = serialize_json_bytes(data)?;
     atomic_write(path, &contents)?;
     Ok(contents)
 }

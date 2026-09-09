@@ -2294,6 +2294,13 @@ fn codex_model_catalog_from_settings(
     let configured_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window");
     let official_models = load_codex_official_models();
+    if official_models.is_empty() {
+        // bundled 与 models_cache.json 都没拿到官方数据（最常见：本机找不到
+        // codex CLI）。官方 slug 将落保守档位——这应当可见，而不是静默降级。
+        log::warn!(
+            "官方 codex 目录不可用（codex CLI 未发现且无 models_cache.json）：官方模型将使用保守档位"
+        );
+    }
 
     // Native providers use the bundled clean template (no freeform apply_patch,
     // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
@@ -2311,6 +2318,57 @@ fn codex_model_catalog_from_settings(
         configured_context_window,
         &official_models,
     )))
+}
+
+/// 启动时刷新**当前** codex 供应商的 catalog 投影。
+///
+/// catalog 是 provider 设置的投影产物，但重写触发只有切换/保存——升级带来
+/// 的生成器变化（镜像逻辑、官方数据源）不会自己落盘，用户不碰巧再切一次
+/// 档位就永远拿着旧文件，「修复不生效」（两例真实反馈的根因）。刷新的
+/// owner 是应用启动：每次启动都跑、无需用户仪式、幂等。
+///
+/// 外科式边界：只动 catalog 文件，以及（live 未被代理接管时）config.toml
+/// 里的 `model_catalog_json` 指针键。`auth.json`、`model`、
+/// `model_reasoning_effort` 与所有非 owned 键一概不碰——尤其启动做全量
+/// live 同步会把用户在 codex 侧 `/model` 选的模型打回档位默认，绝不可以。
+/// 投影不出 catalog 的供应商（无 `modelCatalog` 或空 specs）直接 no-op：
+/// 摘指针是切换路径的语义，启动不做删除。
+///
+/// 返回是否写了任何东西。
+pub fn refresh_codex_catalog_projection(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    live_taken_over: bool,
+) -> Result<bool, AppError> {
+    if settings.get("modelCatalog").is_none() {
+        return Ok(false);
+    }
+    let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? else {
+        return Ok(false);
+    };
+
+    let mut changed = false;
+    let catalog_path = get_codex_model_catalog_path();
+    let contents = crate::config::serialize_json_bytes(&catalog)?;
+    let existing = fs::read(&catalog_path).unwrap_or_default();
+    if existing != contents {
+        if let Some(parent) = catalog_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        }
+        crate::config::atomic_write(&catalog_path, &contents)?;
+        changed = true;
+    }
+
+    if !live_taken_over {
+        let updated = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
+        if updated != config_text {
+            write_text_file(&get_codex_config_path(), &updated)?;
+            changed = true;
+        }
+    }
+
+    Ok(changed)
 }
 
 fn set_codex_model_catalog_json_field(
@@ -5904,6 +5962,117 @@ base_url = "https://production.api/v1"
         assert_eq!(source_of("gpt-5.6-sol"), Some("bundled"));
         assert_eq!(source_of("gpt-6-astra"), Some("bundled"));
         assert_eq!(source_of("gpt-brand-new"), Some("cache"));
+    }
+
+    #[test]
+    #[serial]
+    fn startup_catalog_refresh_writes_file_and_pointer_surgically() {
+        // 隔离 home 下无 models_cache.json 且测试构建不 spawn codex ⇒ 无官方
+        // 数据 ⇒ 用非官方 slug 保证档位是确定性模板默认（none/high）。
+        let _home = CodexLiveTestHome::new();
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "vendor-model-x" }] }
+        });
+        let config_text = r#"model_provider = "custom"
+model = "vendor-model-x"
+model_reasoning_effort = "low"
+approval_policy = "never"
+
+[model_providers.custom]
+name = "x"
+base_url = "https://example.invalid/v1"
+wire_api = "responses"
+"#;
+
+        let changed = refresh_codex_catalog_projection(
+            &settings,
+            config_text,
+            CodexCatalogToolProfile::NativeResponses,
+            false,
+        )
+        .expect("refresh should succeed");
+
+        assert!(changed, "first refresh must write the catalog and pointer");
+        let catalog_path = get_codex_model_catalog_path();
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(&catalog_path).expect("catalog file written"),
+        )
+        .expect("catalog is valid JSON");
+        assert_eq!(
+            catalog["models"][0]["slug"],
+            json!("vendor-model-x"),
+            "catalog carries the tier model"
+        );
+
+        let live = std::fs::read_to_string(get_codex_config_path()).expect("config.toml written");
+        assert!(
+            live.contains("model_catalog_json = \"loongport-model-catalog.json\""),
+            "pointer key must be added: {live}"
+        );
+        // 外科式：owned 之外的用户键与 codex 侧选择一概不动。
+        assert!(live.contains("model_reasoning_effort = \"low\""));
+        assert!(live.contains("approval_policy = \"never\""));
+        assert!(live.contains("model = \"vendor-model-x\""));
+
+        // 幂等：内容一致时第二次刷新零写入。
+        let changed_again = refresh_codex_catalog_projection(
+            &settings,
+            &live,
+            CodexCatalogToolProfile::NativeResponses,
+            false,
+        )
+        .expect("second refresh should succeed");
+        assert!(!changed_again, "identical projection must not rewrite");
+    }
+
+    #[test]
+    #[serial]
+    fn startup_catalog_refresh_skips_pointer_during_live_takeover() {
+        let _home = CodexLiveTestHome::new();
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "vendor-model-x" }] }
+        });
+        let config_text = "model = \"vendor-model-x\"\n";
+
+        let changed = refresh_codex_catalog_projection(
+            &settings,
+            config_text,
+            CodexCatalogToolProfile::NativeResponses,
+            true,
+        )
+        .expect("refresh should succeed");
+
+        assert!(changed, "catalog file itself is still refreshed");
+        assert!(
+            !get_codex_config_path().exists(),
+            "config.toml must stay untouched while live is under proxy takeover"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn startup_catalog_refresh_is_noop_without_model_catalog() {
+        let _home = CodexLiveTestHome::new();
+        let settings = json!({ "auth": {} });
+        let config_text = "model = \"whatever\"\n";
+
+        let changed = refresh_codex_catalog_projection(
+            &settings,
+            config_text,
+            CodexCatalogToolProfile::NativeResponses,
+            false,
+        )
+        .expect("refresh should succeed");
+
+        assert!(!changed);
+        assert!(
+            !get_codex_model_catalog_path().exists(),
+            "no catalog projection ⇒ nothing written; removal is switch-time semantics"
+        );
+        assert!(
+            !get_codex_config_path().exists(),
+            "config.toml must not be created either"
+        );
     }
 
     #[test]
