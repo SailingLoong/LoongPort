@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
@@ -101,6 +101,9 @@ function AppGlyph({ app, isActive }: { app: AppId; isActive: boolean }) {
   );
 }
 
+/** 位移超过该值才算拖拽（在此之前松手照常触发 click 切换 tab）。 */
+const DRAG_START_THRESHOLD_PX = 4;
+
 export function AppSwitcher({
   activeApp,
   onSwitch,
@@ -110,6 +113,96 @@ export function AppSwitcher({
 }: AppSwitcherProps) {
   const { t } = useTranslation();
   const [addOpen, setAddOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
+  const stripRef = useRef<HTMLDivElement>(null);
+  const activeTabRef = useRef<HTMLButtonElement>(null);
+  const dragStateRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startScrollLeft: number;
+    dragging: boolean;
+  } | null>(null);
+  // 拖拽结束的那次 pointerup 会紧接着派发一次 click；不拦下它就会在松手瞬间
+  // 切到指针底下恰好停着的那个 tab。pointerdown 时清零、消费时清零。
+  const suppressClickRef = useRef(false);
+
+  // 纵向滚轮在条带上转成横向滚动（App 全局隐藏滚动条，滚轮/拖拽是仅有的两个
+  // 平移手段）。React 的 onWheel 是 passive 监听，preventDefault 不生效，须挂原生。
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0 || event.deltaX !== 0) return;
+      if (el.scrollWidth <= el.clientWidth) return;
+      const before = el.scrollLeft;
+      el.scrollLeft = before + event.deltaY;
+      if (el.scrollLeft !== before) event.preventDefault();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // 拖拽平移：pointerdown 不立即 capture（会把子按钮的 click 吞掉），超过阈值
+  // 才对条带 setPointerCapture —— 出窗后 move/up 仍能送达，非拖拽点击不受影响。
+  useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      const state = dragStateRef.current;
+      const el = stripRef.current;
+      if (!state || !el || state.pointerId !== event.pointerId) return;
+      const dx = event.clientX - state.startX;
+      if (!state.dragging) {
+        if (Math.abs(dx) < DRAG_START_THRESHOLD_PX) return;
+        state.dragging = true;
+        setDragging(true);
+        el.setPointerCapture(state.pointerId);
+      }
+      el.scrollLeft = state.startScrollLeft - dx;
+    };
+    const endDrag = (event: PointerEvent) => {
+      const state = dragStateRef.current;
+      if (!state || state.pointerId !== event.pointerId) return;
+      dragStateRef.current = null;
+      if (state.dragging) {
+        setDragging(false);
+        suppressClickRef.current = true;
+      }
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+    };
+  }, []);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    suppressClickRef.current = false;
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: stripRef.current?.scrollLeft ?? 0,
+      dragging: false,
+    };
+  };
+
+  const handleClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!suppressClickRef.current) return;
+    suppressClickRef.current = false;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  // 切到条带视野外的 tab（或激活 app 被隐藏后的自动回退）时把它滚进来。
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [activeApp]);
 
   const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
@@ -131,53 +224,66 @@ export function AppSwitcher({
 
   return (
     <div
-      className="inline-flex bg-muted rounded-xl p-1 gap-1"
+      className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-xl bg-muted p-1"
       style={{ WebkitAppRegion: "no-drag" } as any}
     >
-      {appsToShow.map((app) => {
-        const isActive = activeApp === app;
-        const name = getAppDisplayName(app, t);
-        return (
-          <div key={app} className="group relative">
-            <button
-              type="button"
-              onClick={() => handleSwitch(app)}
-              title={name}
-              aria-label={name}
-              className={cn(
-                "inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
-                isActive
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground hover:bg-background/50",
-              )}
-            >
-              <AppGlyph app={app} isActive={isActive} />
-            </button>
-            {canHide && (
+      {/* 可滚动 tab 条带：tab 多到放不下时不再被静默裁剪，滚轮 / 拖拽平移
+          （App 全局隐藏滚动条）；负 margin 抵掉为 × 角标留的溢出空间。 */}
+      <div
+        ref={stripRef}
+        onPointerDown={handlePointerDown}
+        onClickCapture={handleClickCapture}
+        className={cn(
+          "-mx-2 -my-2 flex min-w-0 touch-pan-x gap-1 overflow-x-auto px-2 py-2",
+          dragging && "cursor-grabbing",
+        )}
+      >
+        {appsToShow.map((app) => {
+          const isActive = activeApp === app;
+          const name = getAppDisplayName(app, t);
+          return (
+            <div key={app} className="group relative">
               <button
+                ref={isActive ? activeTabRef : undefined}
                 type="button"
-                title={t("appSwitcher.hide")}
-                aria-label={`${t("appSwitcher.hide")}: ${name}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onHideApp?.(app);
-                }}
+                onClick={() => handleSwitch(app)}
+                title={name}
+                aria-label={name}
                 className={cn(
-                  "absolute -top-1.5 -right-1 z-10 flex h-3.5 w-3.5 items-center justify-center",
-                  "rounded-full border border-border bg-background text-muted-foreground shadow-sm",
-                  "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:text-foreground",
+                  "inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
+                  isActive
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground hover:bg-background/50",
                 )}
               >
-                <X
-                  aria-hidden="true"
-                  className="h-[9px] w-[9px]"
-                  strokeWidth={2.5}
-                />
+                <AppGlyph app={app} isActive={isActive} />
               </button>
-            )}
-          </div>
-        );
-      })}
+              {canHide && (
+                <button
+                  type="button"
+                  title={t("appSwitcher.hide")}
+                  aria-label={`${t("appSwitcher.hide")}: ${name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onHideApp?.(app);
+                  }}
+                  className={cn(
+                    "absolute -top-1.5 -right-1 z-10 flex h-3.5 w-3.5 items-center justify-center",
+                    "rounded-full border border-border bg-background text-muted-foreground shadow-sm",
+                    "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:text-foreground",
+                  )}
+                >
+                  <X
+                    aria-hidden="true"
+                    className="h-[9px] w-[9px]"
+                    strokeWidth={2.5}
+                  />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
       {onShowApp && (
         <Popover open={addOpen} onOpenChange={setAddOpen}>
           <PopoverTrigger asChild>
@@ -186,7 +292,7 @@ export function AppSwitcher({
               title={t("appSwitcher.add")}
               aria-label={t("appSwitcher.add")}
               className={cn(
-                "inline-flex items-center px-3 h-8 rounded-md transition-all duration-200",
+                "inline-flex shrink-0 items-center px-3 h-8 rounded-md transition-all duration-200",
                 addOpen
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground hover:bg-background/50",

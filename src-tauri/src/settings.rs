@@ -63,18 +63,24 @@ pub struct VisibleApps {
 }
 
 impl Default for VisibleApps {
+    /// 新装用户的默认可见集：只放 4 个主流量入口（Claude / Codex / Grok / 生图），
+    /// 其余一律藏在「+」里由用户自己补回 —— 10 个 tab 平铺对新人是噪音，且
+    /// tab 条带放不下时要靠滚动才能看全。已保存过 `visible_apps` 的用户不受
+    /// 影响（读宽写窄：字段级 serde default 只服务旧配置文件，见上方各字段）。
+    /// 与前端 `DEFAULT_VISIBLE_APPS`（appConfig.tsx）是同一事实，一致性由
+    /// `default_visible_apps_match_the_frontend_copy` 钉住。
     fn default() -> Self {
         Self {
             claude: true,
-            claude_desktop: true,
+            claude_desktop: false,
             codex: true,
             codex_image: true,
-            gemini: true,
+            gemini: false,
             grokbuild: true,
-            opencode: true,
-            openclaw: true,
-            hermes: false, // 默认不显示，需用户手动启用
-            pi: true,
+            opencode: false,
+            openclaw: false,
+            hermes: false,
+            pi: false,
         }
     }
 }
@@ -1480,8 +1486,60 @@ mod tests {
             .visible_apps
             .expect("frontend settings must include visible apps");
 
+        // 默认可见集 = Claude / Codex / Grok / 生图 四个（见 VisibleApps::default 注释）
         assert!(visible.claude);
+        assert!(visible.codex);
+        assert!(visible.grokbuild);
+        assert!(visible.codex_image);
+        assert!(!visible.claude_desktop);
+        assert!(!visible.gemini);
+        assert!(!visible.opencode);
+        assert!(!visible.openclaw);
         assert!(!visible.hermes);
+        assert!(!visible.pi);
+    }
+
+    /// 「新装用户默认看哪些 app」在 Rust（`VisibleApps::default`）与 TS
+    /// （`DEFAULT_VISIBLE_APPS`，settings 未加载瞬间的兜底）各存一份 —— 跨语言
+    /// 编译器管不到，分叉只表现为两边短暂闪不同的 tab 集。这道闸把分叉变成
+    /// `cargo test` 秒红（CLAUDE.md §三点六；hermes 曾真实分叉过）。
+    #[test]
+    fn default_visible_apps_match_the_frontend_copy() {
+        let ts = include_str!("../../src/config/appConfig.tsx");
+        let block_start = ts
+            .find("export const DEFAULT_VISIBLE_APPS")
+            .expect("appConfig.tsx 里应有 DEFAULT_VISIBLE_APPS");
+        let block = &ts[block_start
+            ..ts[block_start..]
+                .find("\n};")
+                .map(|end| block_start + end + 3)
+                .unwrap_or(ts.len())];
+
+        let defaults = VisibleApps::default();
+        for (key, value) in [
+            ("claude", defaults.claude),
+            ("claude-desktop", defaults.claude_desktop),
+            ("codex", defaults.codex),
+            ("codex-image", defaults.codex_image),
+            ("gemini", defaults.gemini),
+            ("grokbuild", defaults.grokbuild),
+            ("opencode", defaults.opencode),
+            ("openclaw", defaults.openclaw),
+            ("hermes", defaults.hermes),
+            ("pi", defaults.pi),
+        ] {
+            // 键名与 serde 序列化一致；TS 里含连字符的键带引号（"claude-desktop"）
+            let expected = if key.contains('-') {
+                format!("\"{key}\": {value}")
+            } else {
+                format!("{key}: {value}")
+            };
+            assert!(
+                block.contains(&expected),
+                "DEFAULT_VISIBLE_APPS 的 `{key}` 与 Rust 侧 VisibleApps::default 不一致\n  \
+                 Rust 侧: {value}\n  期望 TS 里出现: {expected}"
+            );
+        }
     }
 
     #[test]

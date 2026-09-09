@@ -7,6 +7,9 @@ import { server } from "./msw/server";
 import { resetProviderState } from "./msw/state";
 import "./msw/tauriMocks";
 
+// jsdom 未实现 scrollIntoView；AppSwitcher 切换 tab 时会把活动 tab 滚进条带视野。
+Element.prototype.scrollIntoView = vi.fn();
+
 beforeAll(async () => {
   server.listen({ onUnhandledRequest: "warn" });
   await i18n.use(initReactI18next).init({
