@@ -1836,8 +1836,29 @@ fn codex_cli_candidates() -> Vec<PathBuf> {
 
     push_env_codex_cli_candidates(&mut candidates, &mut seen);
     push_home_codex_cli_candidates(&mut candidates, &mut seen, &get_home_dir());
+    push_path_codex_cli_candidates(&mut candidates, &mut seen);
 
     candidates
+}
+
+/// Materialize codex CLI paths from every `PATH` directory. The bare-name
+/// candidate only resolves `codex.exe` through CreateProcess, so npm's
+/// `codex.cmd` shim and custom install dirs on PATH (e.g. a tools folder on
+/// another drive) stay invisible to it — name the concrete files instead.
+/// Spawned last: earlier candidates already cover the standard layouts.
+fn push_path_codex_cli_candidates(candidates: &mut Vec<PathBuf>, seen: &mut HashSet<String>) {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return;
+    };
+    for dir in std::env::split_paths(&paths) {
+        #[cfg(windows)]
+        let names = ["codex.exe", "codex.cmd"];
+        #[cfg(not(windows))]
+        let names = ["codex"];
+        for name in names {
+            push_existing_codex_cli_candidate(candidates, seen, dir.join(name));
+        }
+    }
 }
 
 fn codex_bundled_models_command(candidate: &Path) -> Command {
@@ -2152,11 +2173,67 @@ fn codex_model_catalog_from_specs(
     json!({ "models": entries })
 }
 
-/// The official Codex catalog entries (`models_cache.json`, written by the
-/// codex CLI). Slugs the user's relay serves under their official names get
-/// per-model window facts from here; a missing file simply yields no official
-/// knowledge and the neutral fallbacks apply.
+/// The official Codex catalog entries used for mirroring official facts
+/// (context windows, reasoning levels) into generated catalogs.
+///
+/// Primary source is the catalog BUNDLED with the codex binary
+/// (`codex debug models --bundled`): it exists on every machine that has codex
+/// — including relay-only setups where the official models endpoint is never
+/// queried and `models_cache.json` is therefore never written (a pure relay
+/// user hit exactly that: official slugs on disk, no cache, no mirror). The
+/// bundled catalog is also what the running binary validates against, so its
+/// entry shape is compatible by construction. `models_cache.json` (written by
+/// codex after a successful official refresh, so it can be newer than the
+/// binary) fills slugs the bundled catalog lacks.
 fn load_codex_official_models() -> Vec<Value> {
+    merge_official_models(
+        load_codex_official_models_bundled(),
+        load_codex_official_models_from_cache(),
+    )
+}
+
+/// The codex binary's bundled catalog. Spawning a real codex is skipped in
+/// tests so unit tests never depend on a host codex install.
+#[cfg(not(test))]
+fn load_codex_official_models_bundled() -> Vec<Value> {
+    for candidate in codex_cli_candidates() {
+        let candidate_label = candidate.to_string_lossy();
+        let output = match codex_bundled_models_command(&candidate).output() {
+            Ok(output) => output,
+            Err(err) => {
+                log::debug!("failed to run `{candidate_label} debug models --bundled`: {err}");
+                continue;
+            }
+        };
+        if !output.status.success() {
+            log::debug!(
+                "`{candidate_label} debug models --bundled` failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            continue;
+        }
+        match serde_json::from_slice::<Value>(&output.stdout) {
+            Ok(catalog) => {
+                if let Some(models) = catalog.get("models").and_then(Value::as_array) {
+                    return models.clone();
+                }
+            }
+            Err(e) => {
+                log::debug!(
+                    "Failed to parse `{candidate_label} debug models --bundled` output: {e}"
+                );
+            }
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(test)]
+fn load_codex_official_models_bundled() -> Vec<Value> {
+    Vec::new()
+}
+
+fn load_codex_official_models_from_cache() -> Vec<Value> {
     let path = get_codex_config_dir().join("models_cache.json");
     let Ok(text) = fs::read_to_string(&path) else {
         return Vec::new();
@@ -2166,6 +2243,28 @@ fn load_codex_official_models() -> Vec<Value> {
         .and_then(|catalog| catalog.get("models").cloned())
         .and_then(|models| models.as_array().cloned())
         .unwrap_or_default()
+}
+
+/// Union two official-catalog lists by slug: `primary` entries win, `fallback`
+/// only fills slugs `primary` does not have.
+fn merge_official_models(primary: Vec<Value>, fallback: Vec<Value>) -> Vec<Value> {
+    let mut seen: HashSet<String> = primary
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("slug")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let mut merged = primary;
+    for entry in fallback {
+        let slug = entry.get("slug").and_then(Value::as_str);
+        if slug.is_some_and(|slug| seen.insert(slug.to_string())) {
+            merged.push(entry);
+        }
+    }
+    merged
 }
 
 fn codex_model_catalog_from_settings(
@@ -5778,6 +5877,33 @@ base_url = "https://production.api/v1"
                 .and_then(|v| v.as_str()),
             Some("medium")
         );
+    }
+
+    #[test]
+    fn merge_official_models_prefers_bundled_and_fills_from_cache() {
+        // The bundled catalog (what the running binary validates against)
+        // wins per slug; models_cache.json only fills slugs it lacks (the
+        // cache is written by codex after an official refresh, so it can be
+        // newer than the binary).
+        let bundled = vec![
+            json!({ "slug": "gpt-5.6-sol", "source": "bundled" }),
+            json!({ "slug": "gpt-6-astra", "source": "bundled" }),
+        ];
+        let cache = vec![
+            json!({ "slug": "gpt-5.6-sol", "source": "cache-stale" }),
+            json!({ "slug": "gpt-brand-new", "source": "cache" }),
+        ];
+        let merged = merge_official_models(bundled, cache);
+        let source_of = |slug: &str| {
+            merged
+                .iter()
+                .find(|entry| entry.get("slug").and_then(Value::as_str) == Some(slug))
+                .map(|entry| entry["source"].as_str().expect("source marker"))
+        };
+        assert_eq!(merged.len(), 3);
+        assert_eq!(source_of("gpt-5.6-sol"), Some("bundled"));
+        assert_eq!(source_of("gpt-6-astra"), Some("bundled"));
+        assert_eq!(source_of("gpt-brand-new"), Some("cache"));
     }
 
     #[test]
