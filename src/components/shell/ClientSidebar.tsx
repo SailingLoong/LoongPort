@@ -12,8 +12,10 @@ import {
   Waypoints,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import type { ClientView } from "./navigation";
+
+const sidebarItemClassName =
+  "h-10 w-full justify-start gap-3 px-3 font-normal aria-[current=page]:bg-primary/10 aria-[current=page]:text-primary aria-[current=page]:font-medium";
 
 const items = [
   {
@@ -80,10 +82,10 @@ export function ClientSidebar({
   const { t } = useTranslation();
   return (
     <aside
-      className="fixed bottom-0 left-0 z-40 flex w-[176px] flex-col border-r border-border-default bg-muted/25 px-3 py-5"
+      className="fixed bottom-0 left-0 z-40 flex w-[var(--sidebar-width)] flex-col border-r border-border-default bg-muted/35 px-3 py-5"
       style={{ top }}
     >
-      <div className="mb-7 flex items-center gap-2 px-2 text-lg font-semibold tracking-tight">
+      <div className="mb-7 flex items-center gap-2.5 px-3 text-lg font-semibold tracking-tight">
         <Waypoints className="h-5 w-5 text-primary" />
         LoongPort
       </div>
@@ -95,11 +97,7 @@ export function ClientSidebar({
             disabled={disabled}
             aria-current={item.children.includes(view) ? "page" : undefined}
             onClick={() => onNavigate(item.view)}
-            className={cn(
-              "h-10 w-full justify-start gap-2.5 px-2.5 font-normal",
-              item.children.includes(view) &&
-                "bg-background text-primary shadow-sm font-medium",
-            )}
+            className={sidebarItemClassName}
           >
             <item.icon className="h-4 w-4" />
             {t(`client.${item.key}`)}
@@ -109,7 +107,7 @@ export function ClientSidebar({
       <div className="mt-auto space-y-1 pt-6">
         <Button
           variant="ghost"
-          className="w-full justify-start gap-2.5 px-2.5"
+          className={sidebarItemClassName}
           disabled={disabled}
           aria-current={view === "settings" ? "page" : undefined}
           onClick={() => onNavigate("settings")}
@@ -119,7 +117,7 @@ export function ClientSidebar({
         </Button>
         <Button
           variant="ghost"
-          className="w-full justify-start gap-2.5 px-2.5"
+          className={sidebarItemClassName}
           onClick={onHelp}
         >
           <CircleHelp className="h-4 w-4" />

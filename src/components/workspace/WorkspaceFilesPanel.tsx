@@ -83,7 +83,7 @@ const WorkspaceFilesPanel: React.FC = () => {
   };
 
   return (
-    <div className="px-6 pt-4 pb-8">
+    <div className="page-content">
       <p
         className="text-sm text-muted-foreground mb-6 cursor-pointer hover:text-foreground transition-colors inline-flex items-center gap-1"
         onClick={() => workspaceApi.openDirectory("workspace")}

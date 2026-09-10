@@ -11,7 +11,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
 import { skillsApi, type MigrationResult } from "@/lib/api/skills";
 import type { SkillStorageLocation } from "@/types";
 
@@ -151,13 +150,9 @@ function StorageButton({
       onClick={onClick}
       disabled={disabled}
       size="sm"
-      variant={active ? "default" : "ghost"}
-      className={cn(
-        "min-w-[96px]",
-        active
-          ? "shadow-sm"
-          : "text-muted-foreground hover:text-foreground hover:bg-muted",
-      )}
+      variant="toggle"
+      aria-pressed={active}
+      className="min-w-[96px]"
     >
       {children}
     </Button>

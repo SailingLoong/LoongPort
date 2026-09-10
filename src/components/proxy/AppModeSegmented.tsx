@@ -4,11 +4,11 @@
  * 这是每个 app 模式切换的**唯一入口**（唯源）：省心 = 系统在托管档位间自动
  * 选路与切换；自主 = 用户指定唯一供应商（provider 页全部能力）。开启走与
  * 设置页同一编排（首次开启弹同款一次性授权），切自主走 [`useDisableAutoMode`]
- * （收该 app 的路由接管，不停全局路由）。按钮形状与 EasyBoard 的
- * ChoiceButton 一致（同款二选一，样式互指，别改一处忘一处）。
+ * （收该 app 的路由接管，不停全局路由）。
  */
 
 import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   hasConfirmedAutoMode,
@@ -65,7 +65,10 @@ export function AppModeSegmented({ activeApp }: AppModeSegmentedProps) {
 
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <div className="grid grid-cols-2 gap-2" role="group">
+      <div
+        className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1"
+        role="group"
+      >
         <SegmentedButton
           active={isEasy}
           disabled={busy || (!isEasy && easyBlocked)}
@@ -111,7 +114,7 @@ export function AppModeSegmented({ activeApp }: AppModeSegmentedProps) {
   );
 }
 
-/** 二选一分段按钮（形状与 EasyBoard 的 ChoiceButton 一致）。 */
+/** 二选一分段按钮。 */
 function SegmentedButton({
   active,
   disabled,
@@ -126,18 +129,16 @@ function SegmentedButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant="toggle"
+      size="sm"
+      aria-pressed={active}
       disabled={disabled}
       onClick={onClick}
       title={title}
-      className={
-        active
-          ? "rounded-md border border-emerald-500/60 bg-emerald-500/10 px-3 py-1.5 text-sm text-emerald-600 transition-colors dark:text-emerald-400"
-          : "rounded-md border px-3 py-1.5 text-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-      }
     >
       {children}
-    </button>
+    </Button>
   );
 }

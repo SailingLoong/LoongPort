@@ -2,7 +2,6 @@ import { useTranslation } from "react-i18next";
 import { FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ToggleRow } from "@/components/ui/toggle-row";
-import { cn } from "@/lib/utils";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type { AppId } from "@/lib/api";
@@ -122,13 +121,9 @@ function AppButton({
       onClick={onClick}
       disabled={disabled}
       size="sm"
-      variant={active ? "default" : "ghost"}
-      className={cn(
-        "min-w-[90px] w-auto gap-1.5 px-3",
-        active
-          ? "shadow-sm"
-          : "text-muted-foreground hover:text-foreground hover:bg-muted",
-      )}
+      variant="toggle"
+      aria-pressed={active}
+      className="min-w-[90px] w-auto gap-1.5 px-3"
     >
       <ProviderIcon icon={icon} name={name} size={14} />
       {children}

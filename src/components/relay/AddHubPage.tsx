@@ -61,7 +61,7 @@ export function AddHubPage({
   }
 
   return (
-    <div className="h-full overflow-auto">
+    <div className="page-content h-full overflow-auto">
       {account && (
         <PreservedView active={configuring}>
           <ServiceConfiguration
@@ -77,9 +77,9 @@ export function AddHubPage({
         <Tabs
           value={tab}
           onValueChange={(v) => setTab(v as AddHubTab)}
-          className="mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6"
+          className="flex min-h-full w-full flex-col"
         >
-          <div className="flex shrink-0 items-center gap-4 border-b border-border-default py-3">
+          <div className="flex shrink-0 flex-wrap items-center gap-4 border-b border-border-default pb-5">
             <Button
               type="button"
               variant="ghost"
@@ -88,7 +88,7 @@ export function AddHubPage({
               onClick={onBack}
               aria-label={t("common.back")}
             >
-              <ArrowLeft className="mr-2 h-4 w-4" />
+              <ArrowLeft className="h-4 w-4" />
               {t("common.back")}
             </Button>
             <TabsList>
@@ -151,7 +151,7 @@ export function AddHubPage({
           <TabsContent
             value="manual"
             forceMount
-            className="mt-0 min-h-0 flex-1 data-[state=inactive]:hidden"
+            className="mt-0 min-h-0 flex-1 pt-6 data-[state=inactive]:hidden"
           >
             <PreservedView active={tab === "manual"}>
               <AddProviderForm

@@ -258,7 +258,7 @@ const StandardPromptPanel = React.forwardRef<
     const enabledPrompt = promptEntries.find(([, prompt]) => prompt.enabled);
 
     return (
-      <div className="flex flex-col flex-1 min-h-0 px-6">
+      <div className="flex flex-col flex-1 min-h-0 page-content">
         <PromptLibrary
           prompts={prompts}
           loading={loading}

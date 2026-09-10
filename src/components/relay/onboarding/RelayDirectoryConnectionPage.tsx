@@ -21,7 +21,7 @@ export function RelayDirectoryConnectionPage({
   const [configuring, setConfiguring] = useState(false);
   const [domain, setDomain] = useState("");
   return (
-    <div className="h-full overflow-auto px-6">
+    <div className="page-content h-full overflow-auto">
       {account && (
         <PreservedView active={configuring}>
           <ServiceConfiguration
@@ -39,14 +39,14 @@ export function RelayDirectoryConnectionPage({
         </PreservedView>
       )}
       <PreservedView active={!configuring}>
-        <Button variant="ghost" className="mt-4" onClick={onBack}>
-          <ArrowLeft className="mr-2 h-4 w-4" />
+        <Button variant="ghost" className="mr-2" onClick={onBack}>
+          <ArrowLeft className="h-4 w-4" />
           {t("common.back")}
         </Button>
         {account && (
           <Button
             variant="outline"
-            className="mt-4"
+            className="mr-2"
             onClick={() => setConfiguring(true)}
           >
             {t("loongport.onboarding.resume")}

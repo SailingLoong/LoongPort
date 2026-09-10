@@ -1075,7 +1075,7 @@ function App() {
           return <AgentsPanel onOpenChange={goBack} />;
         case "universal":
           return (
-            <div className="px-6 pt-4">
+            <div className="page-content">
               <UniversalProviderPanel />
             </div>
           );
@@ -1097,9 +1097,9 @@ function App() {
           return <AgentsDefaultsPanel />;
         default:
           return (
-            <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
+            <div className="page-content flex flex-col flex-1 min-h-0 gap-5 overflow-hidden">
               {proxyAppId ? <AppModeSegmented activeApp={proxyAppId} /> : null}
-              <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
+              <div className="flex-1 overflow-y-auto overflow-x-hidden pb-4">
                 <AnimatePresence mode="wait">
                   <motion.div
                     key={activeApp}
@@ -1224,7 +1224,7 @@ function App() {
       <AnimatePresence mode="wait">
         <motion.div
           key={currentView}
-          className="flex-1 min-h-0"
+          className="flex flex-col flex-1 min-h-0"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -1238,7 +1238,7 @@ function App() {
 
   return (
     <div
-      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pb-4 pl-[176px]"
+      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pl-[var(--sidebar-width)]"
       style={{
         overflowX: "hidden",
         paddingTop: currentView === "addHub" ? dragBarHeight : contentTopOffset,
@@ -1348,7 +1348,7 @@ function App() {
 
       <header
         hidden={currentView === "addHub"}
-        className="fixed left-[176px] right-0 z-50 border-b border-border-default bg-background"
+        className="fixed left-[var(--sidebar-width)] right-0 z-50 border-b border-border-default bg-background"
         {...DRAG_REGION_ATTR}
         style={
           {
@@ -1359,7 +1359,7 @@ function App() {
         }
       >
         <div
-          className="flex h-full items-center justify-between gap-2 px-6"
+          className="flex h-full items-center justify-between gap-4 page-header"
           {...DRAG_REGION_ATTR}
           style={{ ...DRAG_REGION_STYLE } as any}
         >
@@ -1370,7 +1370,7 @@ function App() {
             {!isApplicationView ? (
               <div className="flex items-center gap-2">
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
                   disabled={managementBusy}
                   onClick={goBack}

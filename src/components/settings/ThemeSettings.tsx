@@ -1,6 +1,5 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 import { useTheme } from "@/components/theme-provider";
 
@@ -61,13 +60,9 @@ function ThemeButton({
       type="button"
       onClick={onClick}
       size="sm"
-      variant={active ? "default" : "ghost"}
-      className={cn(
-        "min-w-[96px] gap-1.5",
-        active
-          ? "shadow-sm"
-          : "text-muted-foreground hover:text-foreground hover:bg-muted",
-      )}
+      variant="toggle"
+      aria-pressed={active}
+      className="min-w-[96px] gap-1.5"
     >
       <Icon className="h-3.5 w-3.5" />
       {children}
