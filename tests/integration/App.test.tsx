@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 // 在收集阶段完成模块加载：若把 import 留在用例体内，超时后它仍可能续跑并越过 cleanup 再挂载 App。
@@ -149,20 +150,6 @@ vi.mock("@/components/ConfirmDialog", () => ({
     ) : null,
 }));
 
-vi.mock("@/components/AppSwitcher", () => ({
-  AppSwitcher: ({ activeApp, onSwitch }: any) => (
-    <div data-testid="app-switcher">
-      <span>{activeApp}</span>
-      <button onClick={() => onSwitch("claude")}>switch-claude</button>
-      <button onClick={() => onSwitch("codex")}>switch-codex</button>
-      <button onClick={() => onSwitch("codex-image")}>
-        switch-codex-image
-      </button>
-      <button onClick={() => onSwitch("openclaw")}>switch-openclaw</button>
-    </div>
-  ),
-}));
-
 vi.mock("@/components/skills/UnifiedSkillsPanel", async () => {
   const React = await import("react");
   const MockUnifiedSkillsPanel = React.forwardRef(
@@ -217,15 +204,20 @@ const renderApp = () => {
   );
 };
 
+async function selectApplication(name: string) {
+  const user = userEvent.setup();
+  await user.click(
+    await screen.findByRole("combobox", { name: "client.selectApplication" }),
+  );
+  await user.click(await screen.findByRole("option", { name }));
+}
+
 describe("App integration with MSW", () => {
   beforeEach(() => {
     resetProviderState();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
-    // 本文件全部用例测的是 provider 列表那一屏，而 LoongPort 的默认首屏是自己的主面板
-    // （`loongport`）。把「上次看的是 provider 列表」写进 localStorage —— 这既让这些用例
-    // 拿到它们要测的那一屏，也顺带覆盖了「记住上次视图」这个行为本身。
-    //
+    // Start each independent flow from the persisted application view.
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
   });
@@ -243,7 +235,34 @@ describe("App integration with MSW", () => {
   it("mounts exactly one App after the timeout cleanup", async () => {
     renderApp();
 
-    expect(await screen.findAllByText("switch-codex-image")).toHaveLength(1);
+    expect(
+      await screen.findAllByRole("button", { name: "client.image" }),
+    ).toHaveLength(1);
+    expect(
+      screen.getAllByRole("combobox", { name: "client.selectApplication" }),
+    ).toHaveLength(1);
+  });
+
+  it("opens image generation from the sidebar and returns to the prior application", async () => {
+    renderApp();
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list")).toHaveTextContent("claude-1"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "client.image" }));
+    await waitFor(() =>
+      expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("codex-image"),
+    );
+    expect(
+      screen.getByRole("button", { name: "client.image" }),
+    ).toHaveAttribute("aria-current", "page");
+    expect(
+      screen.queryByRole("combobox", { name: "client.selectApplication" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "common.back" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list")).toHaveTextContent("claude-1"),
+    );
+    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
   });
 
   it("covers basic provider flows via real hooks", async () => {
@@ -255,7 +274,7 @@ describe("App integration with MSW", () => {
       ),
     );
 
-    fireEvent.click(await screen.findByText("switch-codex"));
+    await selectApplication("Codex");
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
         "codex-1",
@@ -366,7 +385,7 @@ describe("App integration with MSW", () => {
 
     renderApp();
 
-    fireEvent.click(await screen.findByText("switch-openclaw"));
+    await selectApplication("OpenClaw");
 
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -431,9 +450,14 @@ describe("App integration with MSW", () => {
     );
   });
 
-  it("hosts the Skills check-update action in the App toolbar", async () => {
-    localStorage.setItem(LAST_VIEW_STORAGE_KEY, "skills");
+  it("opens Skills through extension resources and hosts its check-update action", async () => {
     renderApp();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "client.resources" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /client.features.skills/ }),
+    );
 
     expect(
       await screen.findByTestId("unified-skills-panel"),

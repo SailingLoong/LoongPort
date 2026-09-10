@@ -1,3 +1,4 @@
+import { serviceOnboardingKey } from "./serviceOnboarding";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -417,6 +418,7 @@ export const useSaveSettingsMutation = () => {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
+      await queryClient.invalidateQueries({ queryKey: serviceOnboardingKey });
       await queryClient.invalidateQueries({
         queryKey: ["opencode", "runtime-models"],
       });

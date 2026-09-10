@@ -11,6 +11,7 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
+import { PreservedView } from "@/components/ui/PreservedView";
 import { AuthSettingsPanel } from "@/components/providers/AuthSettingsPanel";
 import { UniversalProviderFormModal } from "@/components/universal/UniversalProviderFormModal";
 import { UniversalProviderPanel } from "@/components/universal";
@@ -413,21 +414,33 @@ export function AddProviderForm({
               </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="app-specific" className="mt-0">
-              <ProviderForm
-                appId={appId}
-                submitLabel={t("common.add")}
-                onSubmit={handleSubmit}
-                onCancel={() => onDone()}
-                onManageAuthAccounts={setAuthSettingsTarget}
-                onSubmittingChange={setIsFormSubmitting}
-                onSubmitReadyChange={handleSubmitReadyChange}
-                showButtons={false}
-              />
+            <TabsContent
+              value="app-specific"
+              forceMount
+              className="mt-0 data-[state=inactive]:hidden"
+            >
+              <PreservedView active={activeTab === "app-specific"}>
+                <ProviderForm
+                  appId={appId}
+                  submitLabel={t("common.add")}
+                  onSubmit={handleSubmit}
+                  onCancel={() => onDone()}
+                  onManageAuthAccounts={setAuthSettingsTarget}
+                  onSubmittingChange={setIsFormSubmitting}
+                  onSubmitReadyChange={handleSubmitReadyChange}
+                  showButtons={false}
+                />
+              </PreservedView>
             </TabsContent>
 
-            <TabsContent value="universal" className="mt-0">
-              <UniversalProviderPanel />
+            <TabsContent
+              value="universal"
+              forceMount
+              className="mt-0 data-[state=inactive]:hidden"
+            >
+              <PreservedView active={activeTab === "universal"}>
+                <UniversalProviderPanel />
+              </PreservedView>
             </TabsContent>
           </Tabs>
         ) : (

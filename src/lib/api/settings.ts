@@ -34,11 +34,11 @@ export interface WebDavSyncResult {
 export type FrontendSettings = Settings & { visibleApps: VisibleApps };
 
 /**
- * `plazaVisible` 为 null/undefined（未播种 / 未加载）时的展示侧默认值 = 展示。
+ * `plazaVisible` 为 null/undefined（未播种 / 未加载）时的展示侧默认值 = 关闭。
  * 语义 owner 在后端（`relay::plaza` 的未归因默认），这里只收拢前端那几处
- * `?? PLAZA_VISIBLE_DEFAULT`，别再各写一个裸 `true`。
+ * `?? PLAZA_VISIBLE_DEFAULT`，避免默认值分叉。
  */
-export const PLAZA_VISIBLE_DEFAULT = true;
+export const PLAZA_VISIBLE_DEFAULT = false;
 
 export const settingsApi = {
   async get(): Promise<FrontendSettings> {

@@ -6,6 +6,7 @@ import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AppId } from "@/lib/api";
 import { vendorApi, VENDOR_CATALOG } from "@/lib/api/vendor";
+import type { ConnectedService } from "./onboarding/useServiceOnboarding";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 /**
@@ -21,6 +22,7 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 export interface OfficialApiPageProps {
   sourceAppId: AppId;
   onBack: () => void;
+  onConnected?: (account: ConnectedService) => void;
   /** 内嵌在统一添加聚合页（`AddHubPage`）里时不带返回箭头与页面级容器。 */
   embedded?: boolean;
 }
@@ -29,6 +31,7 @@ export function OfficialApiPage({
   sourceAppId,
   onBack,
   embedded = false,
+  onConnected,
 }: OfficialApiPageProps) {
   const { t } = useTranslation();
   const [loginningVendor, setLoginningVendor] = useState<string | null>(null);
@@ -41,7 +44,15 @@ export function OfficialApiPage({
       // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
       if (result === null) return;
       toast.success(t("loongport.session.connected"));
-      onBack();
+      if (onConnected)
+        onConnected({
+          kind: "vendor",
+          rowId: result.rowId,
+          name:
+            VENDOR_CATALOG.find((vendor) => vendor.id === vendorId)
+              ?.displayName ?? vendorId,
+        });
+      else onBack();
     } catch (e) {
       toast.error(extractErrorMessage(e));
     } finally {
@@ -62,12 +73,13 @@ export function OfficialApiPage({
           <Button
             type="button"
             variant="ghost"
-            size="icon"
+            size="sm"
             className="mt-0.5 h-8 w-8 shrink-0"
             onClick={onBack}
             aria-label={t("common.back")}
           >
-            <ArrowLeft className="h-4 w-4" />
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            {t("common.back")}
           </Button>
         )}
         <div>

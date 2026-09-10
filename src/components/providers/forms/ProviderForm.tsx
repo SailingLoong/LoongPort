@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
@@ -382,49 +382,6 @@ function ProviderFormFull({
   const isOmoSlimCategory = appId === "opencode" && category === "omo-slim";
   const isAnyOmoCategory = isOmoCategory || isOmoSlimCategory;
 
-  useEffect(() => {
-    setSelectedPresetId(initialData ? null : "custom");
-    setActivePreset(null);
-
-    if (!initialData) {
-      setDraftCustomEndpoints([]);
-    }
-    setEndpointAutoSelect(initialData?.meta?.endpointAutoSelect ?? true);
-    setLocalIsFullUrl(
-      supportsFullUrl ? (initialData?.meta?.isFullUrl ?? false) : false,
-    );
-    setPricingConfig({
-      enabled:
-        initialData?.meta?.costMultiplier !== undefined ||
-        initialData?.meta?.pricingModelSource !== undefined,
-      costMultiplier: initialData?.meta?.costMultiplier,
-      pricingModelSource: normalizePricingSource(
-        initialData?.meta?.pricingModelSource,
-      ),
-    });
-    setSelectedGitHubAccountId(
-      resolveManagedAccountId(initialData?.meta, "github_copilot"),
-    );
-    setSelectedCodexAccountId(
-      resolveManagedAccountId(initialData?.meta, "codex_oauth"),
-    );
-    setHasValidCodexOfficialSelection(true);
-    setCodexFastMode(initialData?.meta?.codexFastMode ?? false);
-    setCodexChatReasoning(initialData?.meta?.codexChatReasoning ?? {});
-    setPromptCacheRouting(initialData?.meta?.promptCacheRouting ?? "auto");
-    setCustomUserAgent(initialData?.meta?.customUserAgent ?? "");
-    setLocalProxyHeadersOverride(
-      formatRequestOverrideObject(
-        initialData?.meta?.localProxyRequestOverrides?.headers,
-      ),
-    );
-    setLocalProxyBodyOverride(
-      formatRequestOverrideObject(
-        initialData?.meta?.localProxyRequestOverrides?.body,
-      ),
-    );
-  }, [appId, initialData, supportsFullUrl]);
-
   const defaultValues: ProviderFormData = useMemo(
     () => ({
       name: initialData?.name ?? "",
@@ -707,18 +664,69 @@ function ProviderFormFull({
     [setCodexConfig, debouncedValidate],
   );
 
+  const initializationKey = JSON.stringify([
+    appId,
+    providerId,
+    initialData ?? null,
+  ]);
+  const initializedInput = useRef<string | null>(null);
   useEffect(() => {
-    if (appId === "codex" && !initialData && selectedPresetId === "custom") {
+    if (initializedInput.current === initializationKey) return;
+    initializedInput.current = initializationKey;
+    form.reset(defaultValues);
+    if (appId === "codex" && !initialData) {
       const template = getCodexCustomTemplate();
       resetCodexConfig(template.auth, template.config);
-      setCodexChatReasoning({});
-      setPromptCacheRouting("auto");
     }
-  }, [appId, initialData, selectedPresetId, resetCodexConfig]);
+    setSelectedPresetId(initialData ? null : "custom");
+    setActivePreset(null);
 
-  useEffect(() => {
-    form.reset(defaultValues);
-  }, [defaultValues, form]);
+    if (!initialData) {
+      setDraftCustomEndpoints([]);
+    }
+    setEndpointAutoSelect(initialData?.meta?.endpointAutoSelect ?? true);
+    setLocalIsFullUrl(
+      supportsFullUrl ? (initialData?.meta?.isFullUrl ?? false) : false,
+    );
+    setPricingConfig({
+      enabled:
+        initialData?.meta?.costMultiplier !== undefined ||
+        initialData?.meta?.pricingModelSource !== undefined,
+      costMultiplier: initialData?.meta?.costMultiplier,
+      pricingModelSource: normalizePricingSource(
+        initialData?.meta?.pricingModelSource,
+      ),
+    });
+    setSelectedGitHubAccountId(
+      resolveManagedAccountId(initialData?.meta, "github_copilot"),
+    );
+    setSelectedCodexAccountId(
+      resolveManagedAccountId(initialData?.meta, "codex_oauth"),
+    );
+    setHasValidCodexOfficialSelection(true);
+    setCodexFastMode(initialData?.meta?.codexFastMode ?? false);
+    setCodexChatReasoning(initialData?.meta?.codexChatReasoning ?? {});
+    setPromptCacheRouting(initialData?.meta?.promptCacheRouting ?? "auto");
+    setCustomUserAgent(initialData?.meta?.customUserAgent ?? "");
+    setLocalProxyHeadersOverride(
+      formatRequestOverrideObject(
+        initialData?.meta?.localProxyRequestOverrides?.headers,
+      ),
+    );
+    setLocalProxyBodyOverride(
+      formatRequestOverrideObject(
+        initialData?.meta?.localProxyRequestOverrides?.body,
+      ),
+    );
+  }, [
+    initializationKey,
+    appId,
+    initialData,
+    supportsFullUrl,
+    form,
+    defaultValues,
+    resetCodexConfig,
+  ]);
 
   const presetCategoryLabels: Record<string, string> = useMemo(
     () => ({

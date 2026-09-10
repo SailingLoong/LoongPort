@@ -945,20 +945,6 @@ pub fn run() {
             let fresh_install_at_startup =
                 app_state.db.is_providers_empty().unwrap_or(false);
 
-            // 使用统计告知只对首装机弹（2026-09-10 拍板）：存量升级用户在这里
-            // 回填「已确认」，告知屏（StatsNoticeDialog）因此永不为老用户弹起。
-            // 该标记只防重复弹、不门控上报（上报闸始终是 enable_anonymous_stats）。
-            if !fresh_install_at_startup {
-                let mut s = crate::settings::get_settings();
-                if s.stats_notice_confirmed.is_none() {
-                    s.stats_notice_confirmed = Some(true);
-                    if let Err(e) = crate::settings::update_settings(s) {
-                        // 失败不阻塞启动，下次启动再试；代价只是告知屏多留一轮。
-                        log::debug!("○ Stats notice backfill failed: {e}");
-                    }
-                }
-            }
-
             for app_type in
                 crate::app_config::AppType::all().filter(|t| !t.is_additive_mode())
             {
@@ -1486,9 +1472,8 @@ pub fn run() {
 
             // 匿名使用统计：启动后延迟一次性上报（安装 id / 版本 / OS / 站点域名）。
             //
-            // **发送闸只有设置开关**（2026-09-09 拍板）：统计默认开（VS Code /
-            // Homebrew 模式），从**首次启动**就开始上报 —— 告知弹窗（单按钮
-            // 「知道了」）是知情标记，不门控发送；设置里关掉后一个字节都不发。
+            // Fresh installations remain disabled until an explicit sharing choice.
+            // Existing preferences are preserved; the persisted switch owns consent.
             //
             // **一次性、不定时重复**：它答的是「多少安装、什么版本、在用哪几家中转站」，
             // 每次开 app 报一次已经够，加定时器只是多打请求。
@@ -1554,8 +1539,7 @@ pub fn run() {
                         .conn
                         .lock()
                         .map_err(|e| format!("获取数据库连接失败: {e}"))?;
-                    crate::relay::creds::list(&conn)
-                        .map(|ops| ops.into_iter().map(|o| o.site_origin).collect::<Vec<_>>())
+                    crate::relay::stats::configured_service_origins(&conn)
                         .map_err(|e| e.to_string())
                 })
                 .await
@@ -1768,6 +1752,9 @@ pub fn run() {
             commands::relay_status,
             // 新人引导（点 Star 领注册礼 + 注册窗终点）与其机制层（邀请 payload）
             commands::onboarding_open_register_window,
+            commands::service_onboarding_status,
+            commands::service_onboarding_dismiss,
+            commands::service_onboarding_complete,
             commands::star_reward_offer,
             commands::star_reward_mark_claimed,
             commands::star_reward_auto_star,

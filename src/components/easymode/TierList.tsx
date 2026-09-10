@@ -50,7 +50,7 @@ export function TierList({
   tiers: TierBoardTier[];
   manual: boolean;
   appType: string;
-  /** 实际在用档位（代理实时信号）；缺省回退各档的持久化 isCurrent */
+  /** Backend routing target; it does not prove a request has occurred. */
   activeProviderId?: string;
   onReorder: (orderedIds: string[]) => void;
 }) {
@@ -142,7 +142,7 @@ function SortableTierCard({
 }
 
 /**
- * 档位卡：序号 + 名称 + 当前命中 + 失败原因 + 指标行 + 近期时间线 + 重新启用。
+ * 档位卡：序号 + 名称 + 配置与路由目标 + 失败原因 + 指标行 + 时间线 + 重新启用。
  * 指标行顺序按语义分组：定价（倍率/单价）→ 运行（今日/首字/缓存）→ 供给（余额）；
  * 金额/整数走全仓唯源 fmtUsd/fmtInt，未知值统一 —。
  */
@@ -166,12 +166,7 @@ function TierCard({
     tier.isHealthy === false ||
     tier.breakerState != null ||
     (tier.consecutiveFailures ?? 0) > 0;
-  // 「当前」跟实际在用档位走（代理实时信号）；没有实时信号（路由没跑）时
-  // 回退持久化指针 —— 持久化指针本身只随显式切换/故障转移成功移动，盯屏
-  // 看板 30s 才重取，静态观感就来自它
-  const isCurrentTier = activeProviderId
-    ? tier.providerId === activeProviderId
-    : tier.isCurrent;
+  const isRoutingTarget = tier.providerId === activeProviderId;
   return (
     <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
       {dragHandleProps ? (
@@ -196,15 +191,23 @@ function TierCard({
           {/* 倍率紧贴档位名（挑档位第一个要看的数字）；样式与 null 纪律
               （不显示，原来的「×?」一并废掉）唯源 TierRateChip。 */}
           <TierRateChip rate={tier.rateMultiplier} />
-          {isCurrentTier ? (
+          {tier.isCurrent ? (
             <Badge
               variant="outline"
               className="border-emerald-500/60 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
             >
-              {t("autoMode.board.current", { defaultValue: "当前" })}
+              {t("autoMode.board.configured", { defaultValue: "已配置" })}
             </Badge>
           ) : null}
-          {isCurrentTier && tier.affinityRemainingSecs != null ? (
+          {isRoutingTarget ? (
+            <Badge
+              variant="outline"
+              className="border-blue-500/40 text-blue-600 dark:text-blue-400"
+            >
+              {t("autoMode.board.routingTarget", { defaultValue: "路由目标" })}
+            </Badge>
+          ) : null}
+          {tier.affinityRemainingSecs != null ? (
             <Badge
               variant="outline"
               title={t("autoMode.board.affinityTitle", {

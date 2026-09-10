@@ -41,7 +41,8 @@ const {
 }));
 
 vi.mock("@/lib/api", () => ({
-  PLAZA_VISIBLE_DEFAULT: true,
+  PLAZA_VISIBLE_DEFAULT: false,
+  settingsApi: { plazaSeedFromFirstSite: vi.fn().mockResolvedValue(false) },
   relayApi: {
     listDirectory,
     refreshDirectory,
@@ -100,12 +101,12 @@ function deferred<T>() {
 
 function item(index: number): RelayDirectoryItem {
   return {
-    siteHost: index === 1 ? "bestapi.store" : `site-${index}.example`,
-    siteDomain: index === 1 ? "bestapi.store" : `site-${index}.example`,
-    displayName: index === 1 ? "BestAPI" : `站点 ${index}`,
+    siteHost: index === 1 ? "apex.example" : `site-${index}.example`,
+    siteDomain: index === 1 ? "apex.example" : `site-${index}.example`,
+    displayName: index === 1 ? "Apex Relay" : `站点 ${index}`,
     rank: index,
     entryUrl:
-      index === 1 ? "https://bestapi.store" : `https://site-${index}.example`,
+      index === 1 ? "https://apex.example" : `https://site-${index}.example`,
     // 自家实测观测：只有近 24 小时过了 k-匿的站才有（其余站整个缺席）。
     crowd:
       index === 1
@@ -126,8 +127,8 @@ function item(index: number): RelayDirectoryItem {
             currency: "CNY",
             upstreamType: "mixed",
             isReverse: true,
-            priceUrl: "https://bestapi.store/public/transit",
-            supportUrl: "https://t.me/bestapi-group",
+            priceUrl: "https://apex.example/public/transit",
+            supportUrl: "https://t.me/apex-group",
             groups: [
               {
                 name: "group-a",
@@ -166,21 +167,21 @@ function listing(
 describe("RelayDirectoryPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // settings=null：两个消费字段都落兜底（crowdEnabled=true、plazaVisible=true），
-    // 与此前未 mock 该 hook 时的实际行为一致。
-    useSettingsMock.mockReturnValue({ settings: null });
+    useSettingsMock.mockReturnValue({
+      settings: { plazaVisible: true, crowdMetricsEnabled: false },
+    });
     listDirectory.mockImplementation(() => Promise.resolve(listing()));
     refreshDirectory.mockImplementation(() => Promise.resolve(listing()));
     importSite.mockResolvedValue({
       relayId: 7,
-      siteOrigin: "https://bestapi.store",
-      siteName: "BestAPI",
+      siteOrigin: "https://apex.example",
+      siteName: "Apex Relay",
       backendKind: "sub2api",
     });
     importDirectorySite.mockResolvedValue({
       relayId: 7,
-      siteOrigin: "https://bestapi.store",
-      siteName: "BestAPI",
+      siteOrigin: "https://apex.example",
+      siteName: "Apex Relay",
       backendKind: "sub2api",
     });
     refresh.mockResolvedValue({
@@ -201,7 +202,7 @@ describe("RelayDirectoryPage", () => {
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
 
     // 有实测的站：TTFT 与错误率两个徽章（行级观测公开，不依赖共建开关）。
-    const bestRow = (await screen.findByText("BestAPI")).closest("article")!;
+    const bestRow = (await screen.findByText("Apex Relay")).closest("article")!;
     expect(
       within(bestRow as HTMLElement).getByTitle("loongport.crowd.badgeHint"),
     ).toHaveTextContent("loongport.crowd.badgeLabel");
@@ -239,7 +240,7 @@ describe("RelayDirectoryPage", () => {
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
 
     // 有摘要的站：倍率（可点开详情，title 是动作提示）与可用性两个徽章都渲染。
-    const bestRow = (await screen.findByText("BestAPI")).closest("article")!;
+    const bestRow = (await screen.findByText("Apex Relay")).closest("article")!;
     expect(
       within(bestRow as HTMLElement).getByTitle(
         "loongport.directory.transit.openDetail",
@@ -268,7 +269,7 @@ describe("RelayDirectoryPage", () => {
   it("opens the transit detail dialog from the multiplier badge", async () => {
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
 
-    const bestRow = (await screen.findByText("BestAPI")).closest("article")!;
+    const bestRow = (await screen.findByText("Apex Relay")).closest("article")!;
     await userEvent.click(
       within(bestRow as HTMLElement).getByTitle(
         "loongport.directory.transit.openDetail",
@@ -277,7 +278,7 @@ describe("RelayDirectoryPage", () => {
 
     // 弹窗标题：站名 + 站方公开数据。
     expect(
-      screen.getByText("BestAPI · loongport.directory.transit.detailTitle"),
+      screen.getByText("Apex Relay · loongport.directory.transit.detailTitle"),
     ).toBeInTheDocument();
     // 充值口径与披露 meta（i18n mock 直接渲染 key，值跟在标签后面）。
     const dialog = screen.getByRole("dialog");
@@ -300,7 +301,7 @@ describe("RelayDirectoryPage", () => {
       screen.getByText("loongport.directory.transit.viewPricePage"),
     );
     expect(openInBrowser).toHaveBeenCalledWith(
-      "https://bestapi.store/public/transit",
+      "https://apex.example/public/transit",
     );
   });
 
@@ -331,58 +332,32 @@ describe("RelayDirectoryPage", () => {
     expect(openInBrowser).not.toHaveBeenCalledWith("https://site-2.example");
   });
 
-  it("adds the unmatched search text as a site via the manual import", async () => {
-    const user = userEvent.setup();
-    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
-    await waitFor(() => expect(listDirectory).toHaveBeenCalled());
-
-    await user.type(
-      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
-      "https://my-own-relay.example",
-    );
-    await user.click(
-      await screen.findByRole("button", {
-        name: /loongport.directory.addAsSite/,
-      }),
-    );
-
-    // 搜索词直连走 Manual 导入（保守打开规则），不是白名单行的目录导入。
-    await waitFor(() =>
-      expect(importSite).toHaveBeenCalledWith("https://my-own-relay.example"),
-    );
-    expect(importDirectorySite).not.toHaveBeenCalled();
-  });
-
-  it("hides only the recommended list when the plaza switch is off", async () => {
-    // 广场开关关：列表为空、不发清单请求；搜索框与「搜不到就地直连」保留 ——
-    // 关的是推荐列表，不是整个广场页。
-    useSettingsMock.mockReturnValue({ settings: { plazaVisible: false } });
-    const user = userEvent.setup();
-    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
-
-    await screen.findByText("loongport.directory.empty");
-    expect(listDirectory).not.toHaveBeenCalled();
-    expect(
-      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
-    ).toBeInTheDocument();
-
-    await user.type(
-      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
-      "https://my-own-relay.example",
-    );
-    await user.click(
-      await screen.findByRole("button", {
-        name: /loongport.directory.addAsSite/,
-      }),
-    );
-    await waitFor(() =>
-      expect(importSite).toHaveBeenCalledWith("https://my-own-relay.example"),
-    );
-  });
+  it.each([true, false])(
+    "connects a custom domain with directory visibility %s",
+    async (plazaVisible) => {
+      useSettingsMock.mockReturnValue({
+        settings: { plazaVisible, crowdMetricsEnabled: false },
+      });
+      const user = userEvent.setup();
+      renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+      if (!plazaVisible) expect(listDirectory).not.toHaveBeenCalled();
+      await user.type(
+        screen.getByLabelText("loongport.onboarding.domain"),
+        "https://panel.example",
+      );
+      await user.click(
+        screen.getByRole("button", { name: "loongport.firstSite.confirm" }),
+      );
+      await waitFor(() =>
+        expect(importSite).toHaveBeenCalledWith("https://panel.example"),
+      );
+      expect(importDirectorySite).not.toHaveBeenCalled();
+    },
+  );
 
   it("searches and paginates twelve rows per page", async () => {
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
     expect(screen.queryByText("站点 13")).not.toBeInTheDocument();
     fireEvent.click(
@@ -393,10 +368,10 @@ describe("RelayDirectoryPage", () => {
     expect(screen.getByText("站点 13")).toBeInTheDocument();
 
     fireEvent.change(
-      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
-      { target: { value: "bestapi" } },
+      screen.getByPlaceholderText("loongport.onboarding.searchDirectory"),
+      { target: { value: "apex" } },
     );
-    expect(screen.getByText("BestAPI")).toBeInTheDocument();
+    expect(screen.getByText("Apex Relay")).toBeInTheDocument();
     expect(screen.queryByText("站点 13")).not.toBeInTheDocument();
   });
 
@@ -412,7 +387,7 @@ describe("RelayDirectoryPage", () => {
     // syncedAt = 0（没有实测快照）：时间戳整个不渲染，不显示假时间。
     listDirectory.mockResolvedValue(listing({ syncedAt: 0, items: [item(1)] }));
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
     expect(
       screen.queryByText(/loongport\.directory\.source\.syncedAt/),
     ).not.toBeInTheDocument();
@@ -423,7 +398,7 @@ describe("RelayDirectoryPage", () => {
       sourceAppId: "claude",
       onBack: () => {},
     });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
     const query = client.getQueryCache().find({
       queryKey: relayDirectoryKeys.listing(),
@@ -435,7 +410,7 @@ describe("RelayDirectoryPage", () => {
     const next = deferred<RelayDirectoryListing>();
     refreshDirectory.mockReturnValue(next.promise);
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -444,7 +419,7 @@ describe("RelayDirectoryPage", () => {
     );
 
     await waitFor(() => expect(refreshDirectory).toHaveBeenCalled());
-    expect(screen.getByText("BestAPI")).toBeInTheDocument();
+    expect(screen.getByText("Apex Relay")).toBeInTheDocument();
     expect(
       screen.getByRole("button", {
         name: "loongport.directory.actions.refresh",
@@ -458,7 +433,7 @@ describe("RelayDirectoryPage", () => {
   it("keeps the old list and reports a manual refresh failure", async () => {
     refreshDirectory.mockRejectedValue(new Error("刷新失败"));
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -471,7 +446,7 @@ describe("RelayDirectoryPage", () => {
         expect.stringContaining("刷新失败"),
       ),
     );
-    expect(screen.getByText("BestAPI")).toBeInTheDocument();
+    expect(screen.getByText("Apex Relay")).toBeInTheDocument();
   });
 
   it("waits for authentication and backend refresh before returning", async () => {
@@ -482,15 +457,15 @@ describe("RelayDirectoryPage", () => {
       onBack,
       onAuthenticated,
     });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
-    const row = screen.getByText("BestAPI").closest("article");
+    const row = screen.getByText("Apex Relay").closest("article");
     fireEvent.click(
       within(row!).getByText("loongport.directory.actions.authenticate"),
     );
 
     await waitFor(() =>
-      expect(importDirectorySite).toHaveBeenCalledWith("https://bestapi.store"),
+      expect(importDirectorySite).toHaveBeenCalledWith("https://apex.example"),
     );
     expect(refresh).toHaveBeenCalledWith(7, "claude");
     await waitFor(() => expect(onAuthenticated).toHaveBeenCalled());
@@ -504,9 +479,9 @@ describe("RelayDirectoryPage", () => {
     });
     const onBack = vi.fn();
     renderDirectory({ sourceAppId: "claude", onBack });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
-    const row = screen.getByText("BestAPI").closest("article");
+    const row = screen.getByText("Apex Relay").closest("article");
     fireEvent.click(
       within(row!).getByText("loongport.directory.actions.authenticate"),
     );
@@ -527,9 +502,9 @@ describe("RelayDirectoryPage", () => {
       onBack,
       onAuthenticated,
     });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
-    const row = screen.getByText("BestAPI").closest("article");
+    const row = screen.getByText("Apex Relay").closest("article");
     fireEvent.click(
       within(row!).getByText("loongport.directory.actions.authenticate"),
     );
@@ -548,9 +523,9 @@ describe("RelayDirectoryPage", () => {
   ])("maps %s to an actionable message", async (kind, key) => {
     importDirectorySite.mockRejectedValue({ kind, message: kind });
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
-    const row = screen.getByText("BestAPI").closest("article");
+    const row = screen.getByText("Apex Relay").closest("article");
     fireEvent.click(
       within(row!).getByText("loongport.directory.actions.authenticate"),
     );
@@ -561,9 +536,9 @@ describe("RelayDirectoryPage", () => {
   it("uses the localized fallback for an unknown object error", async () => {
     importDirectorySite.mockRejectedValue({ code: "unexpected" });
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
-    const row = screen.getByText("BestAPI").closest("article");
+    const row = screen.getByText("Apex Relay").closest("article");
     fireEvent.click(
       within(row!).getByText("loongport.directory.actions.authenticate"),
     );
@@ -587,9 +562,9 @@ describe("RelayDirectoryPage", () => {
     );
 
     renderDirectory({ sourceAppId: "claude", onBack: () => {} });
-    await screen.findByText("BestAPI");
+    await screen.findByText("Apex Relay");
 
-    const firstRow = screen.getByText("BestAPI").closest("article");
+    const firstRow = screen.getByText("Apex Relay").closest("article");
     const secondRow = screen.getByText("站点 2").closest("article");
     fireEvent.click(
       within(firstRow!).getByText("loongport.directory.actions.authenticate"),
@@ -610,41 +585,23 @@ describe("RelayDirectoryPage", () => {
     await act(async () => {
       finishImport({
         relayId: 7,
-        siteOrigin: "https://bestapi.store",
-        siteName: "BestAPI",
+        siteOrigin: "https://apex.example",
+        siteName: "Apex Relay",
         backendKind: "sub2api",
       });
     });
   });
 
-  it("offers the search text as a manual add only when nothing matches", async () => {
-    // 手填域名合并进搜索框：搜不到 → 列表区变成「把搜索词添加为中转站」的
-    // 整块虚框（白名单外的站也该能连，错误以可读 toast 呈现）；搜得到就不出现。
+  it("shows a search empty state without importing the query", async () => {
     const user = userEvent.setup();
     renderDirectory({ sourceAppId: "codex", onBack: () => {} });
-    await screen.findByText("BestAPI");
-
-    // 搜到白名单行：没有转添加的兜底。
+    await screen.findByText("Apex Relay");
     await user.type(
-      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
-      "Best",
+      screen.getByPlaceholderText("loongport.onboarding.searchDirectory"),
+      "unlisted.example{Enter}",
     );
     expect(
-      screen.queryByRole("button", { name: /loongport.directory.addAsSite/ }),
-    ).not.toBeInTheDocument();
-
-    // 搜不到：兜底出现。
-    await user.clear(
-      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
-    );
-    await user.type(
-      screen.getByPlaceholderText("loongport.directory.searchPlaceholder"),
-      "my-own-relay.example",
-    );
-    expect(
-      await screen.findByRole("button", {
-        name: /loongport.directory.addAsSite/,
-      }),
+      await screen.findByText("loongport.onboarding.noMatch"),
     ).toBeInTheDocument();
     expect(importSite).not.toHaveBeenCalled();
   });

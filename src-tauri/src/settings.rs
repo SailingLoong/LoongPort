@@ -397,22 +397,13 @@ pub struct AppSettings {
     pub usage_dashboard_refresh_interval_ms: Option<u32>,
     /// 匿名使用统计：上报安装 id / 版本 / OS / 站点域名（载荷边界见 `relay::stats` 模块文档）。
     ///
-    /// **默认开**（维护者 2026-08-03 拍板），与 VS Code / Homebrew 同一个模式：
-    /// 默认关的实际参与率通常不到 5%，那时数据严重偏向折腾型用户，**比没有数据更误导**。
-    /// **这是唯一的发送闸**（2026-09-09 细化）：上报从首次启动就发生，首启告知弹窗
-    /// 只是知情标记；关掉这个开关后一个字节都不发。
-    ///
-    /// 报什么/不报什么的硬边界见 `relay::stats` 的模块文档。
-    /// 注意默认值要改**两处**：这里的 serde default（决定已有 settings.json 缺这个键时
-    /// 读成什么）与 `Default` impl（决定新装机值）。只改后者对老用户无效。
+    /// Fresh installations keep sharing off until an explicit choice is saved.
+    /// The serde default preserves the previous behavior for existing settings.
     #[serde(default = "default_true")]
     pub enable_anonymous_stats: bool,
     /// 用户看过那条「匿名统计上报什么」的首启告知了没。
     ///
-    /// `None` = 还没看过 ⇒ 前端弹一次。只控制弹窗，**不是上报闸**
-    /// （2026-09-09 起；上报只看 `enable_anonymous_stats`）。
-    /// 2026-09-10 起告知只对首装机弹：存量升级用户由启动回填置 `Some(true)`
-    /// （见 lib.rs 1.5 节），此标记因此退化为「首装告知看没看过」。
+    /// Legacy acknowledgement, retained for existing settings compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats_notice_confirmed: Option<bool>,
     /// 匿名统计**专属**的随机安装 id。
@@ -437,14 +428,10 @@ pub struct AppSettings {
     /// 站点实测数据共建：上传本地聚合指标（小时桶，见 `crowd` 模块文档那张表），
     /// 同时解锁广场的实测数据展示（对等条款）。
     ///
-    /// **默认开**（2026-09-07 拍板，原为默认关）：广场名次已完全押在实测数据上，
-    /// 而 opt-in 冷启动一个月实测零外部参与者，空数据比默认开更伤产品。
-    /// 发送闸只有这一个开关（2026-09-10 起与 `relay::stats` 同形，见
-    /// [`crate::crowd::uploader`]）；显式关过的用户一个字节都不发。
+    /// Fresh installations default off; existing installations retain their choice.
     #[serde(default = "default_true")]
     pub crowd_metrics_enabled: bool,
-    /// 共建告知看过了没。`None` = 还没看过 ⇒ 有中转站后弹一次告知。
-    /// 知情标记（防告知重复弹），不门控发送 —— 与 `stats_notice_confirmed` 同形。
+    /// Legacy acknowledgement; onboarding now records the sharing decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crowd_metrics_notice_confirmed: Option<bool>,
     /// 首启「是否一键导入 cc-switch 配置」问过没有。
@@ -529,17 +516,17 @@ pub struct AppSettings {
 
     /// 中转站广场开关（设置页那个开关的本体）。
     ///
-    /// `None` = 未播种 = 按「展示」处理（未归因的默认）。两个播种点见
-    /// `relay::plaza`：首启「手填域名」弹窗提交时按归因播种；存量安装升级后
-    /// 首次启动按「已配置受管站」补播种一次。此后只有用户手动翻转能改它，
-    /// 归因永远不再翻动已播种的值。
-    ///
-    /// ⚠️ **后端专有字段**：全量保存不透传（`commands::settings` 的
-    /// `merge_settings_for_save` 保留现有值 —— 前端旧快照回写会抹掉并发播种，
-    /// 与 `star_reward_offered` 同一类已实测过的事故）；用户改它走窄命令
-    /// `plaza_set_visible`。
+    /// None means unclassified and hidden. Explicit user choices always win.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plaza_visible: Option<bool>,
+    /// First explicitly submitted domain, retained until attribution succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaza_first_site_domain: Option<String>,
+    /// Existing settings predate onboarding; only fresh installations start pending.
+    #[serde(default = "default_true")]
+    pub service_onboarding_completed: bool,
+    #[serde(default)]
+    pub service_onboarding_dismissed: bool,
 
     // ===== 设备级目录覆盖 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -673,13 +660,12 @@ impl Default for AppSettings {
             proxy_confirmed: None,
             usage_confirmed: None,
             usage_dashboard_refresh_interval_ms: None,
-            // 见字段上的说明：默认开，首启告知 + 可关。
-            enable_anonymous_stats: true,
+            // New installations await an explicit sharing decision.
+            enable_anonymous_stats: false,
             stats_notice_confirmed: None,
             stats_install_id: None,
-            // 默认开（2026-09-07 起）：知情由 uploader 的「看过告知」门禁保证，
-            // 见字段上的说明。显式拒绝过的用户不受默认值影响。
-            crowd_metrics_enabled: true,
+
+            crowd_metrics_enabled: false,
             crowd_metrics_notice_confirmed: None,
             cc_switch_import_prompted: None,
             star_reward_claimed: None,
@@ -696,6 +682,9 @@ impl Default for AppSettings {
             language: None,
             visible_apps: None,
             plaza_visible: None,
+            plaza_first_site_domain: None,
+            service_onboarding_completed: false,
+            service_onboarding_dismissed: false,
             claude_config_dir: None,
             codex_config_dir: None,
             gemini_config_dir: None,
@@ -1423,14 +1412,14 @@ mod tests {
     }
 
     #[test]
-    fn crowd_metrics_defaults_on_but_explicit_opt_out_is_never_flipped() {
-        // 2026-09-07 默认开拍板的回归闸。两条路径都必须默认开：`Default` impl 管
-        // 新装机，字段级 serde default 管「settings.json 存在但缺这个键」
-        // （从未见过共建告知的存量用户）。
-        assert!(
-            AppSettings::default().crowd_metrics_enabled,
-            "新装机默认必须开"
-        );
+    fn fresh_sharing_is_off_and_existing_preferences_are_preserved() {
+        assert!(!AppSettings::default().crowd_metrics_enabled);
+        assert!(!AppSettings::default().enable_anonymous_stats);
+        let fresh = AppSettings::default();
+        let restored: AppSettings =
+            serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
+        assert!(!restored.service_onboarding_completed);
+        assert!(!restored.enable_anonymous_stats && !restored.crowd_metrics_enabled);
         let from_partial: AppSettings = serde_json::from_str("{}").expect("空对象应能解析");
         assert!(
             from_partial.crowd_metrics_enabled,

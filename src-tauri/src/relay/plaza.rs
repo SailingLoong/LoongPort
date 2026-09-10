@@ -1,38 +1,6 @@
-//! 中转站广场的可见性：**一个开关**（`settings.plaza_visible`），两个播种点。
-//!
-//! ## 归因模型（2026-09-06 拍板）
-//!
-//! 广场是「冷启动发现面」：从站长教程引流来的用户（首启「手填域名」弹窗填的
-//! 就是那家站的域名）已经完成了发现，默认不该看到别家；没有归属的用户（直接
-//! 下载、填的是我们不认识的域）才需要广场。落地成**开关的默认值**，不是独立
-//! 的展示层：
-//!
-//! - 弹窗提交的域名（apex 归一）命中受保护域名 → 开关默认**关**；否则默认**开**；
-//! - 用户此后手动翻转（窄命令 [`crate::commands::settings`]），翻转结果永远优先；
-//! - 存量安装升级后没有弹窗可命中，补一次播种（2026-09-07 定调）：**全部**
-//!   已配置站点都是受保护站 → 默认关；掺了任何一个非保护站（哪怕只有一家）
-//!   → 默认开；一个站都没有 → 保持未播种（= 展示）。存量无从知道首站归因，
-//!   「清一色受保护站」才是纯伙伴漏斗的可信信号，配过别家就是逛站用户。
-//!
-//! ## 受保护域名：显式名单优先（`protected_hosts`），缺省回落并集
-
-//!
-//! 受保护是维护者的**关系态**（哪些站长的引流要保护），不是「受管」的自动
-//! 推论 —— v2 配置的 `protected_hosts` 非空就是那份名单；缺省回落四源并集
-//! （**不减 blocked**：blocked 是展示策略，站长关系还在，被屏蔽站的用户照样
-//! 来自那家站）。两份清单语义不同，故意不共享。
-//!
-//! ## 触发归属
-//!
-//! 播种是数据层行为：存量补播种挂在启动（maintenance 一次性任务）；弹窗播种
-//! 挂在用户提交动作本身（那是一次显式写入，不是视图读路径的副作用）。
-//! 广场页只读 settings 里的 `plaza_visible`（`None` = 展示），不驱动任何刷新。
-//!
-//! ## 受保护名单拿不到时两个播种点都**不播**
-//!
-//! 名单未知（离线 / 端点故障且无缓存）时任何域名都判「未命中」，播下去会把
-//! 伙伴用户永久误播成开（写-if-None，之后无人纠正）。留着 `None` 交给后续
-//! 启动补播 —— 可见行为不变（`None` = 展示），但名单到位后还能播对。
+//! Plaza visibility is owned by settings. Unclassified installations stay hidden.
+//! The first explicitly submitted valid domain is retained before network access.
+//! Startup and remote-config maintenance retry that domain; manual choices win.
 
 use std::collections::BTreeSet;
 
@@ -85,8 +53,7 @@ fn first_site_default(domain: &str, config: &RemoteConfig) -> bool {
 /// 纯判定：存量安装补播种的结果。`None` = 不播种。
 ///
 /// **全部**站点都是受保护站（子域也算）→ `Some(false)`；掺了任何一个非保护
-/// 站（哪怕只有一家）→ `Some(true)`；一个站都没有 → `None`（未归因，保持
-/// 「展示」默认）。存量无从知道首站归因，「清一色受保护」是纯伙伴漏斗的唯一
+/// 站（哪怕只有一家）→ `Some(true)`；一个站都没有 → `None`（未归因，保持关闭）。存量无从知道首站归因，「清一色受保护」是纯伙伴漏斗的唯一
 /// 可信信号；配过别家说明是逛站/比价用户 —— 广场正是给他们的。
 fn existing_install_default(origins: &[String], config: &RemoteConfig) -> Option<bool> {
     if origins.is_empty() {
@@ -99,27 +66,61 @@ fn existing_install_default(origins: &[String], config: &RemoteConfig) -> Option
     Some(!all_protected)
 }
 
-/// 首启「手填域名」弹窗提交的播种点（写-if-None，归因一次性）。
-///
-/// 弹窗只在首启出现，那时远端配置可能还没拉过（maintenance 有启动延迟），
-/// 而归因判据就是这份配置 —— 花一次有上界的拉取（8s 超时）换正确归因。
-/// 拉不到就回落缓存；**缓存也没有（离线新装）则本进程不播**（见模块文档
-/// 「名单拿不到时不播」）—— 留着 `None` 交给后续启动的存量补播种纠正。
-pub async fn seed_from_first_site(domain: &str) {
+fn remember_first_site(settings: &mut crate::settings::AppSettings, domain: &str) {
+    if settings.plaza_visible.is_none() && settings.plaza_first_site_domain.is_none() {
+        settings.plaza_first_site_domain = Some(domain.to_string());
+    }
+}
+
+fn apply_pending(settings: &mut crate::settings::AppSettings, config: &RemoteConfig) {
+    if settings.plaza_visible.is_none() {
+        if let Some(domain) = settings.plaza_first_site_domain.take() {
+            settings.plaza_visible = Some(first_site_default(&domain, config));
+        }
+    }
+}
+
+/// Explicit submission records attribution before attempting the remote lookup.
+pub async fn seed_from_first_site(domain: &str) -> Result<(), crate::error::AppError> {
+    let origin = crate::relay::sub2api::normalize_site_origin(domain)?;
+    let domain = site_domain(&origin);
+    crate::settings::mutate_settings(|settings| remember_first_site(settings, &domain))?;
+    if crate::settings::get_settings().plaza_visible.is_some() {
+        return Ok(());
+    }
     let config = remote_config::refresh_and_cache()
         .await
         .or_else(remote_config::load_cached);
     if let Some(config) = config {
-        seed_if_unsent(first_site_default(domain, &config));
+        resolve_pending(&config)?;
+    }
+    Ok(())
+}
+
+/// Called by data-layer startup and config maintenance, never a view read.
+pub(crate) fn resolve_pending(config: &RemoteConfig) -> Result<(), crate::error::AppError> {
+    let settings = crate::settings::get_settings();
+    if settings.plaza_visible.is_none() && settings.plaza_first_site_domain.is_some() {
+        crate::settings::mutate_settings(|settings| apply_pending(settings, config))?;
+    }
+    Ok(())
+}
+
+fn apply_startup_attribution(
+    settings: &mut crate::settings::AppSettings,
+    config: &RemoteConfig,
+    relay_origins: &[String],
+) {
+    if settings.plaza_visible.is_some() {
+        return;
+    }
+    if settings.plaza_first_site_domain.is_some() {
+        apply_pending(settings, config);
+    } else if settings.service_onboarding_completed {
+        settings.plaza_visible = existing_install_default(relay_origins, config);
     }
 }
 
-/// 存量安装升级后的补播种点（写-if-None）。调用方传入用户已配置的站点 origin
-/// 全集；触发 = 启动（见模块文档「触发归属」）。
-///
-/// 先刷一次配置再判：升级后的**首次启动**连世代缓存都还没有（缓存按世代
-/// 命名），空配置下「所有站都算非保护」会把纯伙伴用户误播成开。刷新失败且
-/// 无缓存则本启动不播（同上，「名单拿不到时不播」）。
 pub async fn seed_for_existing_install(relay_origins: &[String]) {
     if crate::settings::get_settings().plaza_visible.is_some() {
         return;
@@ -128,32 +129,59 @@ pub async fn seed_for_existing_install(relay_origins: &[String]) {
         .await
         .or_else(remote_config::load_cached);
     if let Some(config) = config {
-        if let Some(visible) = existing_install_default(relay_origins, &config) {
-            seed_if_unsent(visible);
+        // Re-read the first domain under the write lock after the network await.
+        if let Err(error) = crate::settings::mutate_settings(|settings| {
+            apply_startup_attribution(settings, &config, relay_origins);
+        }) {
+            log::warn!("Could not persist plaza attribution: {error}");
         }
-    }
-}
-
-/// 写-if-None 的播种核：开关一旦有值（播种过或用户翻过），播种永远不再碰它。
-///
-/// 双重检查（锁外的快路径 + `mutate_settings` 锁内复读）防两个播种点并发；
-/// 锁内复读依赖 [`crate::settings::mutate_settings`] 的 RMW 语义。
-fn seed_if_unsent(visible: bool) {
-    if crate::settings::get_settings().plaza_visible.is_some() {
-        return;
-    }
-    if let Err(e) = crate::settings::mutate_settings(|settings| {
-        if settings.plaza_visible.is_none() {
-            settings.plaza_visible = Some(visible);
-        }
-    }) {
-        log::warn!("广场开关播种失败（保持默认展示）: {e}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_uses_current_pending_domain_before_historical_accounts() {
+        let config = config_with_sources();
+        let origins = vec!["https://other.example".into()];
+        let mut settings = crate::settings::AppSettings {
+            service_onboarding_completed: true,
+            ..Default::default()
+        };
+        // A first submission arriving while config is in flight beats history.
+        remember_first_site(&mut settings, "example.com");
+        let restored = serde_json::to_value(&settings).unwrap();
+        settings = serde_json::from_value(restored).unwrap();
+        apply_startup_attribution(&mut settings, &config, &origins);
+        assert_eq!(settings.plaza_visible, Some(false));
+        assert_eq!(settings.plaza_first_site_domain, None);
+        // An explicit toggle arriving during that same fetch beats both sources.
+        settings.plaza_visible = Some(true);
+        settings.plaza_first_site_domain = Some("example.com".into());
+        apply_startup_attribution(&mut settings, &config, &origins);
+        assert_eq!(settings.plaza_visible, Some(true));
+    }
+
+    #[test]
+    fn first_domain_is_retained_until_classified_and_manual_choice_wins() {
+        let mut settings = crate::settings::AppSettings::default();
+        remember_first_site(&mut settings, "panel.example.com");
+        remember_first_site(&mut settings, "other.example.org");
+        assert_eq!(
+            settings.plaza_first_site_domain.as_deref(),
+            Some("panel.example.com")
+        );
+        assert_eq!(settings.plaza_visible, None);
+        apply_pending(&mut settings, &config_with_sources());
+        assert_eq!(settings.plaza_visible, Some(false));
+        assert_eq!(settings.plaza_first_site_domain, None);
+        settings.plaza_visible = Some(true);
+        remember_first_site(&mut settings, "panel.example.com");
+        apply_pending(&mut settings, &config_with_sources());
+        assert_eq!(settings.plaza_visible, Some(true));
+    }
 
     fn config_with_sources() -> RemoteConfig {
         let mut config = RemoteConfig::default();
@@ -175,15 +203,15 @@ mod tests {
         let mut config = config_with_sources();
 
         // 非空名单 = 就是这份：并集里的其他站不再受保护（维护者只承诺了两家）。
-        config.protected_hosts = vec!["airelay.buzz".into(), "api.790053500.com".into()];
+        config.protected_hosts = vec!["protected.example".into(), "api.partner.example".into()];
         assert_eq!(
             protected_site_domains(&config),
-            ["790053500.com", "airelay.buzz"]
+            ["partner.example", "protected.example"]
                 .into_iter()
                 .map(String::from)
                 .collect()
         );
-        assert!(!first_site_default("https://airelay.buzz", &config));
+        assert!(!first_site_default("https://protected.example", &config));
         // 并集里的站（example.com）在显式名单之外 ⇒ 未命中 ⇒ 默认开。
         assert!(first_site_default("https://panel.example.com", &config));
 

@@ -400,13 +400,12 @@ export interface Settings {
   usageConfirmed?: boolean;
   usageDashboardRefreshIntervalMs?: number;
   // Whether to show the failover toggle independently on the main page
-  /**
-   * 匿名使用统计：**只上报「添加了哪些中转站」与站点个数**（`relay::stats` 有硬边界）。
-   *
-   * 默认开（后端 serde default 与 `Default` impl 都是 true），首启告知一次、随时可关。
-   */
+  /** 服务使用统计。新安装等待引导或设置中的明确选择。 */
   enableAnonymousStats?: boolean;
-  /** 用户看过那条统计告知了没。`undefined` = 还没看过 ⇒ 弹一次。 */
+  /** 后端拥有的引导决策，设置保存时保留。 */
+  serviceOnboardingCompleted?: boolean;
+  serviceOnboardingDismissed?: boolean;
+  /** 既有安装的统计告知记录。 */
   statsNoticeConfirmed?: boolean;
   /** 首启「是否一键导入 cc-switch」问过没。`undefined` = 还没问过 ⇒ 第一次打开时弹一次。（导入来源就是 cc-switch，此处指名是事实性引用） */
   ccSwitchImportPrompted?: boolean;
@@ -419,9 +418,9 @@ export interface Settings {
    * API key 名，复用它就能把上报对回一个付费账号。
    */
   statsInstallId?: string;
-  /** 站点实测共建：上传小时聚合指标 + 解锁广场实测数据（对等条款）。默认开（2026-09-07 起）。 */
+  /** 服务实测共建：上传小时聚合指标并解锁社区实测展示。 */
   crowdMetricsEnabled?: boolean;
-  /** 共建告知看过了没。`undefined` = 还没看过 ⇒ 有中转站后弹一次；置位是上传的前置条件。 */
+  /** 既有安装的共建告知记录。 */
   crowdMetricsNoticeConfirmed?: boolean;
   enableFailoverToggle?: boolean;
   // Whether to show the project profile switcher on the main page header

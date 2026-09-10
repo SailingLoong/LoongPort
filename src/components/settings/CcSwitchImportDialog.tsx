@@ -76,7 +76,7 @@ export function CcSwitchImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* 不用 DialogHeader / DialogFooter 分区壳 —— 与 StatsNoticeDialog 同一条理由：
+      {/* 不用 DialogHeader / DialogFooter 分区壳 —— 保持简短的说明布局：
           那两个壳自带 border-b / border-t + bg-muted/20，是给表单类弹窗设计的分区。
           用在这（一段要读的说明 + 预览/报告）上会把内容切成三段，像系统报错框
           而不是一个邀请。直接在 DialogContent 里排版，仍用官方组件。 */}

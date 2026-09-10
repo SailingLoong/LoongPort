@@ -2636,7 +2636,11 @@
       "switchBackDone": "Switched back to {{name}}; this app is now self-managed",
       "tiersShort": "tiers",
       "modelFilterPlaceholder": "Filter models…",
-      "modelFilterEmpty": "No matching models"
+      "modelFilterEmpty": "No matching models",
+      "globalStrategy": "Global strategy",
+      "strategySettings": "Routing settings",
+      "configured": "Configured",
+      "routingTarget": "Routing target"
     },
     "modelHint": "With a model picked, only tiers whose catalog includes it are chosen; an explicit pick switches to the best tier immediately.",
     "advancedSection": "Advanced (failover queue & circuit breaker)",
@@ -3205,11 +3209,11 @@
     },
     "officialApi": {
       "title": "Official APIs",
-      "description": "Pick a vendor; after sign-in the key is provisioned and each app is configured automatically",
+      "description": "Connect an official account, then choose which apps to configure.",
       "connect": "Connect & fetch key",
-      "deepseekDesc": "DeepSeek platform: sign in to create/claim an API key for your coding agents",
-      "bigmodelDesc": "Zhipu BigModel platform: GLM model family; sign in to create/claim an API key",
-      "opencodeDesc": "opencode account: one sign-in wires up your API key for both plans — Zen (pay-as-you-go, full model catalog) and Go (subscription, curated open-source coding models)"
+      "deepseekDesc": "Connect your official DeepSeek account.",
+      "bigmodelDesc": "Connect your official BigModel account.",
+      "opencodeDesc": "Supports Zen pay-as-you-go and Go subscriptions."
     },
     "tierList": {
       "empty": "No relay services added",
@@ -3559,10 +3563,10 @@
       }
     },
     "firstSite": {
-      "title": "Add your first relay site",
+      "title": "Connect your first service",
       "placeholder": "bestapi.store",
       "confirm": "Go to sign-up / login",
-      "cancel": "Browse the plaza first"
+      "cancel": "Set up later"
     },
     "star": {
       "buttonTitle": "GitHub repository (star it if you like it)",
@@ -3586,6 +3590,45 @@
       "lastResetTitle": "Most recent reset confirmed by the community",
       "announcement": "Announcement",
       "source": "Community tracker · codex-reset.com"
+    },
+    "accounts": {
+      "title": "Services & accounts",
+      "description": "Manage connected relay and official API accounts.",
+      "add": "Add service",
+      "back": "Back to services & accounts",
+      "relay": "Relay",
+      "vendor": "Official API",
+      "detail": "Account details",
+      "application": "Application",
+      "openApp": "Open application settings",
+      "loadFailed": "Unable to load accounts. Try again.",
+      "empty": "No service accounts yet",
+      "status": {
+        "notLoggedIn": "Not signed in",
+        "sessionExpired": "Sign-in expired",
+        "sessionExpiredUsable": "Sign-in expired; key still usable",
+        "noTiers": "No connection profiles",
+        "ready": "Ready",
+        "noKey": "No API key yet"
+      }
+    },
+    "onboarding": {
+      "domain": "Relay URL",
+      "domainPlaceholder": "e.g. panel.example",
+      "browse": "Browse relay directory",
+      "searchDirectory": "Search directory",
+      "noMatch": "No matching services",
+      "configure": "Confirm application setup",
+      "chooseApps": "Choose applications and configurations for this service.",
+      "skipApp": "Leave unchanged",
+      "noConfigurations": "Account saved. No configurations are available yet.",
+      "finish": "Finish setup",
+      "resume": "Continue setup",
+      "shareLabel": "Share service usage and measurements to improve compatibility and view community results",
+      "shareDetails": "What is shared",
+      "shareUsage": "Usage statistics include configured service domains, account counts, app version and operating system, with a persistent random installation ID for deduplication.",
+      "shareMeasurements": "Measurements aggregate requests, errors, latency, speed, tokens and estimated costs by service, application, model and hour, using a random ID that changes daily.",
+      "shareControl": "Account identities, keys and conversation content are not uploaded. Random IDs can link reports within their lifetime; the receiver can see the source IP. Your choice is saved only when setup is completed. Sharing is optional and both settings can be changed separately later."
     }
   },
   "firstRunNotice": {
@@ -3738,5 +3781,53 @@
     "add": "Add apps to homepage",
     "allShown": "All apps are shown",
     "hide": "Hide from homepage"
+  },
+  "client": {
+    "navigation": "Main navigation",
+    "applications": "Applications",
+    "services": "Services & accounts",
+    "image": "Images",
+    "records": "Activity",
+    "resources": "Resources",
+    "plaza": "Relay directory",
+    "help": "Help",
+    "selectApplication": "Select application",
+    "favoriteApps": "Favorites",
+    "moreApps": "More applications",
+    "addService": "Add service",
+    "recordsDescription": "Review sessions and usage.",
+    "resourcesDescription": "Manage tools, instructions, and workspaces for your applications.",
+    "globalStrategy": "Global routing strategy",
+    "configMissing": "Application configuration was not found. Launch the application to initialize it first.",
+    "features": {
+      "usage": "Usage & costs",
+      "sessions": "Session history",
+      "mcp": "MCP",
+      "skills": "Skills",
+      "prompts": "Prompts",
+      "agents": "Agents",
+      "universal": "Universal providers",
+      "workspace": "Workspace files",
+      "openclawEnv": "Environment variables",
+      "openclawTools": "Tool permissions",
+      "openclawAgents": "Agent defaults",
+      "hermesMemory": "Hermes memory",
+      "hermesDashboard": "Hermes dashboard"
+    },
+    "featureDescriptions": {
+      "usage": "Review requests, tokens, and costs",
+      "sessions": "Find and resume previous sessions",
+      "mcp": "Connect external tools and data sources",
+      "skills": "Install and manage application skills",
+      "prompts": "Maintain prompts and templates",
+      "agents": "This feature is not yet available.",
+      "universal": "Manage shared provider configurations",
+      "workspace": "View and edit workspace resources",
+      "openclawEnv": "Configure the OpenClaw environment",
+      "openclawTools": "Manage OpenClaw tool permissions",
+      "openclawAgents": "Configure OpenClaw defaults",
+      "hermesMemory": "View and edit persistent memory",
+      "hermesDashboard": "Open the local management interface"
+    }
   }
 }

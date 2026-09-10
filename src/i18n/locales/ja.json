@@ -2636,7 +2636,11 @@
       "switchBackDone": "{{name}} に切り替えました。このアプリは自選モードになりました",
       "tiersShort": "ティア",
       "modelFilterPlaceholder": "モデル名で絞り込み…",
-      "modelFilterEmpty": "一致するモデルなし"
+      "modelFilterEmpty": "一致するモデルなし",
+      "globalStrategy": "全体の戦略",
+      "strategySettings": "ルーティング設定",
+      "configured": "設定済み",
+      "routingTarget": "ルーティング対象"
     },
     "modelHint": "モデルを選ぶと、カタログにそのモデルを含むティアのみが対象になります。明示的に選ぶと即座に最適なティアへ切替えます。",
     "advancedSection": "詳細（フェイルオーバーキューとサーキットブレーカー）",
@@ -3205,11 +3209,11 @@
     },
     "officialApi": {
       "title": "公式 API",
-      "description": "ベンダーを選択すると、サインイン後にキー取得と各アプリの設定が自動で完了します",
+      "description": "公式アカウントに接続し、設定するアプリを選択します。",
       "connect": "接続してキーを準備",
-      "deepseekDesc": "DeepSeek プラットフォーム：サインインで API キーを作成/引き継ぎ",
-      "bigmodelDesc": "智譜 BigModel プラットフォーム：GLM シリーズ。サインインで API キーを作成/引き継ぎ",
-      "opencodeDesc": "opencode アカウント：サインイン 1 回で API キーを自動設定。同じキーで 2 つの接続プロファイルが使えます —— Zen（従量課金・全モデルカタログ）と Go（サブスクリプション・精選オープンソースコーディングモデル）"
+      "deepseekDesc": "DeepSeek の公式アカウントに接続します。",
+      "bigmodelDesc": "BigModel の公式アカウントに接続します。",
+      "opencodeDesc": "Zen の従量課金と Go のサブスクリプションに対応。"
     },
     "tierList": {
       "empty": "中継サービスはまだ追加されていません",
@@ -3559,10 +3563,10 @@
       }
     },
     "firstSite": {
-      "title": "最初のリレーサイトを追加",
+      "title": "最初のサービスに接続",
       "placeholder": "bestapi.store",
       "confirm": "登録 / ログインへ進む",
-      "cancel": "まず広場を見る"
+      "cancel": "後で設定"
     },
     "star": {
       "buttonTitle": "GitHub リポジトリ（よければ ⭐ を）",
@@ -3586,6 +3590,45 @@
       "lastResetTitle": "コミュニティで確認された直近のリセット",
       "announcement": "最新のお知らせ",
       "source": "コミュニティ予測 · codex-reset.com"
+    },
+    "accounts": {
+      "title": "サービスとアカウント",
+      "description": "接続済みの中継サービスと公式 API を管理します。",
+      "add": "サービスを追加",
+      "back": "サービスとアカウントに戻る",
+      "relay": "中継サービス",
+      "vendor": "公式 API",
+      "detail": "アカウント詳細",
+      "application": "アプリ",
+      "openApp": "アプリ設定を開く",
+      "loadFailed": "アカウントを読み込めません。再試行してください。",
+      "empty": "サービスアカウントはまだありません",
+      "status": {
+        "notLoggedIn": "未ログイン",
+        "sessionExpired": "ログイン期限切れ",
+        "sessionExpiredUsable": "ログイン期限切れ・キーは利用可能",
+        "noTiers": "接続設定がありません",
+        "ready": "準備完了",
+        "noKey": "API キー未取得"
+      }
+    },
+    "onboarding": {
+      "domain": "中継サービスの URL",
+      "domainPlaceholder": "例: panel.example",
+      "browse": "中継サービスを探す",
+      "searchDirectory": "ディレクトリを検索",
+      "noMatch": "一致するサービスがありません",
+      "configure": "アプリの設定を確認",
+      "chooseApps": "このサービスで使うアプリと構成を選択してください。",
+      "skipApp": "変更しない",
+      "noConfigurations": "アカウントは保存されました。利用可能な構成はまだありません。",
+      "finish": "設定を完了",
+      "resume": "設定を続ける",
+      "shareLabel": "サービスの利用状況と測定データを共有し、対応改善とコミュニティの測定結果の閲覧に参加する",
+      "shareDetails": "共有する内容",
+      "shareUsage": "利用統計には、設定済みサービスのドメイン、アカウント数、アプリのバージョン、OS が含まれます。重複除去には永続的なランダムのインストール ID を使います。",
+      "shareMeasurements": "測定データは、リクエスト数、エラー、遅延、速度、トークン数、推定費用をサービス・アプリ・モデル・時間ごとに集計し、毎日変わるランダム ID を使います。",
+      "shareControl": "アカウントの識別情報、キー、会話内容は送信しません。ランダム ID は有効期間内の報告を関連付けられ、受信側は送信元 IP を確認できます。選択は設定完了時に保存されます。共有しなくても利用でき、後から設定で個別に変更できます。"
     }
   },
   "firstRunNotice": {
@@ -3738,5 +3781,53 @@
     "add": "アプリをホームページに追加",
     "allShown": "すべてのアプリが表示されています",
     "hide": "ホームページから隠す"
+  },
+  "client": {
+    "navigation": "メインナビゲーション",
+    "applications": "アプリ",
+    "services": "サービスとアカウント",
+    "image": "画像生成",
+    "records": "利用履歴",
+    "resources": "拡張機能",
+    "plaza": "中継サービス一覧",
+    "help": "ヘルプ",
+    "selectApplication": "アプリを選択",
+    "favoriteApps": "よく使うアプリ",
+    "moreApps": "その他のアプリ",
+    "addService": "サービスを追加",
+    "recordsDescription": "セッションと利用状況を確認します。",
+    "resourcesDescription": "アプリのツール、指示、ワークスペースを管理します。",
+    "globalStrategy": "全体のルーティング方針",
+    "configMissing": "アプリの設定が見つかりません。アプリを起動して初期設定を行ってください。",
+    "features": {
+      "usage": "使用量と料金",
+      "sessions": "セッション履歴",
+      "mcp": "MCP",
+      "skills": "Skills",
+      "prompts": "Prompts",
+      "agents": "Agents",
+      "universal": "共通プロバイダー",
+      "workspace": "ワークスペースファイル",
+      "openclawEnv": "環境変数",
+      "openclawTools": "ツール権限",
+      "openclawAgents": "Agent の既定設定",
+      "hermesMemory": "Hermes メモリ",
+      "hermesDashboard": "Hermes ダッシュボード"
+    },
+    "featureDescriptions": {
+      "usage": "リクエスト、Token、料金を確認",
+      "sessions": "過去のセッションを検索して再開",
+      "mcp": "外部ツールやデータソースを接続",
+      "skills": "アプリのスキルを管理",
+      "prompts": "プロンプトとテンプレートを管理",
+      "agents": "この機能はまだ利用できません。",
+      "universal": "アプリ共通のプロバイダー設定を管理",
+      "workspace": "ワークスペースのリソースを編集",
+      "openclawEnv": "OpenClaw の実行環境を設定",
+      "openclawTools": "OpenClaw のツール権限を管理",
+      "openclawAgents": "OpenClaw の既定動作を設定",
+      "hermesMemory": "永続メモリを確認・編集",
+      "hermesDashboard": "ローカル管理画面を開く"
+    }
   }
 }

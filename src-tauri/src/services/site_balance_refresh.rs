@@ -258,18 +258,22 @@ mod tests {
     /// 充值后旧值必然错 —— 删而不刷会让看板显示"—"直到下次启动，所以两步都要。
     #[tokio::test]
     async fn refresh_after_purchase_drops_and_refetches_that_site() {
+        // A local TLS peer closes connections immediately; no external DNS dependency.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("https://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
         let db = Arc::new(Database::memory().unwrap());
-        // 该站两个账号各一档（https、不可达 —— .example 保留域 DNS 快速失败）
+        // Two accounts share the same local failing endpoint.
         for (account_id, group_id) in [(1, 1), (2, 1)] {
             db.save_provider(
                 "claude",
                 &managed_tier(
-                    &crate::relay::provision::provider_id_for(
-                        "https://gone.example",
-                        Some(account_id),
-                        group_id,
-                    ),
-                    "https://gone.example",
+                    &crate::relay::provision::provider_id_for(&origin, Some(account_id), group_id),
+                    &origin,
                     Some(account_id),
                 ),
             )
@@ -277,41 +281,33 @@ mod tests {
         }
         // 充值前的旧值（不同 fetched_at，用远过去时间避开与刷新结果撞值）；
         // 顺带给**没充值的那个账号**放一条新鲜缓存，守「只动充值账号」的边界。
-        crate::relay::balance::upsert_site_balance(
-            &db,
-            &("https://gone.example".into(), 1),
-            (Some(1.23), 100),
-        )
-        .unwrap();
-        crate::relay::balance::upsert_site_balance(
-            &db,
-            &("https://gone.example".into(), 2),
-            (Some(9.99), 100),
-        )
-        .unwrap();
+        crate::relay::balance::upsert_site_balance(&db, &(origin.clone(), 1), (Some(1.23), 100))
+            .unwrap();
+        crate::relay::balance::upsert_site_balance(&db, &(origin.clone(), 2), (Some(9.99), 100))
+            .unwrap();
 
         crate::services::site_balance_refresh::refresh_after_purchase(
             &db,
             None::<tauri::AppHandle>,
-            "https://panel.gone.example",
-            "https://gone.example",
+            &origin,
+            &origin,
             Some(1),
         );
 
         for _ in 0..250 {
             let entry = crate::relay::balance::cached_site_balances(&db)
-                .get(&("https://gone.example".to_string(), 1))
+                .get(&(origin.clone(), 1))
                 .copied();
             // 旧值(1.23, 100)被删，最终落到补刷结果（负缓存、新 fetched_at）
             if let Some((balance, fetched_at)) = entry {
                 assert_eq!(balance, None, "不可达站补刷结果 = 负缓存");
                 assert!(fetched_at > 1_000, "必须是补刷写的新行，不是充值前旧值");
                 assert_eq!(
-                    crate::relay::balance::cached_site_balances(&db)
-                        .get(&("https://gone.example".to_string(), 2)),
+                    crate::relay::balance::cached_site_balances(&db).get(&(origin.clone(), 2)),
                     Some(&(Some(9.99), 100)),
                     "充值只失效充值账号的缓存，同站另一账号不动"
                 );
+                server.abort();
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

@@ -1,4 +1,4 @@
-//! 使用统计：**只报「用户添加了哪些中转站」与站点个数**。
+//! 使用统计：配置的中转站与官方服务注册域、账号数量和随机安装标识。
 //!
 //! ⚠️ **准确的词是「假名化」不是「匿名」** —— 见下方那一节（review 纠正的用词）。
 //!
@@ -54,16 +54,11 @@
 //! （保留 2 天），安装行 180 天未见活动即删 —— 见 `crowd-metrics/README`
 //! 的隐私边界节。客户端这边做再多匿名化，服务端记了 IP 就全白费。
 //!
-//! ## 默认开，首启告知，可关
+//! ## Explicit sharing choice
 //!
-//! 维护者 2026-08-03 拍板。与 VS Code / Homebrew 同一个模式：默认参与能拿到真实分布
-//! （默认关的实际参与率通常不到 5%，那时数据严重偏向折腾型用户，**比没有数据更误导**），
-//! 首启一次性告知 + 设置里随时可关保证了知情与可退出。
-//!
-//! 2026-09-09 细化：**发送闸只有设置开关**（`enable_anonymous_stats`）——
-//! 上报从首次启动就发生（安装量要的就是这一刻），告知弹窗（单按钮「知道了」）
-//! 是知情标记、**不门控发送**；设置里关掉后一个字节都不发。install id 由后端
-//! 在首次上报时自生成（只在开关开着时），跨启动复用防重复计数。
+//! Fresh installations keep sharing off until onboarding completion or a settings
+//! change. Existing settings retain their previous preferences. The persisted
+//! switch is the sending gate; opening or dismissing onboarding never changes it.
 //!
 //! ## 失败静默，绝不影响任何用户流程
 //!
@@ -103,7 +98,7 @@ pub struct Report {
     pub os: String,
     /// 用户添加的站点注册域（apex），**已归一、已排序、已去重**。
     pub site_hosts: Vec<String>,
-    /// **账号行数**，不是站点个数。
+    /// **服务账号行数**（包含官方服务）。保留旧字段名以兼容接收端。
     ///
     /// ⚠️ 名字曾叫 `relay_count` 且被弹窗文案说成「站点个数」——
     /// **那是不准的**（review 抓出）：同一个 host 挂三个账号时它是 3 而 `site_hosts`
@@ -113,9 +108,29 @@ pub struct Report {
     pub relay_account_count: usize,
 }
 
+/// One origin per configured service account. No account identity or credentials
+/// leave this projection; the receiver keeps its existing payload field names.
+pub(crate) fn configured_service_origins(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<String>, AppError> {
+    let mut origins: Vec<String> = crate::relay::creds::list(conn)?
+        .into_iter()
+        .map(|row| row.site_origin)
+        .collect();
+    origins.extend(
+        crate::vendor::creds::list(conn)?
+            .into_iter()
+            .filter_map(|row| {
+                crate::vendor::Vendor::from_id(&row.vendor_id)
+                    .map(|vendor| crate::vendor::builtin_login_url(vendor).to_string())
+            }),
+    );
+    Ok(origins)
+}
+
 /// 由站点 origin 列表构造载荷。
 ///
-/// `origins` 直接传 `creds::list` 的 `site_origin` 那一列（含重复 —— 同站多账号）。
+/// `origins` 来自 configured_service_origins（含重复：同服务多账号）。
 /// 归一走 [`super::identity::site_domain`]（注册域）—— 与 aff / 实测上传同一套身份，
 /// 不然同一个站在两边会算成不同的东西；端口被一并去掉也有隐私理由：
 /// 一个非标准端口（`:8443`）本身就是**近乎唯一的指纹**，会把匿名集合缩到很小。
@@ -187,6 +202,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn service_projection_counts_vendor_accounts_once_regardless_of_plans() {
+        let db = crate::database::Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        crate::relay::creds::save_site(
+            &conn,
+            "https://panel.example",
+            "Example",
+            "https://api.panel.example",
+        )
+        .unwrap();
+        for (vendor, account) in [
+            ("deepseek", "example-a"),
+            ("deepseek", "example-b"),
+            ("opencode", "example-c"),
+            ("bigmodel", "example-d"),
+        ] {
+            conn.execute("INSERT INTO loongport_vendor (vendor_id, account_id, auth_token, account_label) VALUES (?1, ?2, 'secret-example', 'private-example')", rusqlite::params![vendor, account]).unwrap();
+        }
+        let origins = configured_service_origins(&conn).unwrap();
+        let report = build_report("example-install".into(), "1.0".into(), &origins);
+        assert_eq!(report.relay_account_count, 5);
+        assert_eq!(
+            report.site_hosts,
+            vec![
+                "bigmodel.cn",
+                "deepseek.com",
+                "opencode.ai",
+                "panel.example"
+            ]
+        );
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("secret-example"));
+        assert!(!json.contains("private-example"));
+        assert!(!json.contains("example-a"));
+    }
+
+    #[test]
     fn endpoint_is_configured_to_production() {
         // ⭐ 2026-09-09 切生产：端点指向 metrics Worker 的 /v1/ping。原占位
         // 断言按它自己注释的指引翻转；「接收端还没建」那条技术债已同步销账。
@@ -210,7 +262,7 @@ mod tests {
         let json = serde_json::to_value(build_report(
             "install-abc".into(),
             "1.2.3".into(),
-            &["https://wawapii.com".to_string()],
+            &["https://panel.example".to_string()],
         ))
         .unwrap();
 
@@ -271,14 +323,14 @@ mod tests {
             "i".into(),
             "v".into(),
             &[
-                "https://WawaPii.com".to_string(),
-                "https://www.wawapii.com:8443".to_string(),
-                "https://api.wawapii.com".to_string(),
+                "https://Panel.Example".to_string(),
+                "https://www.panel.example:8443".to_string(),
+                "https://api.panel.example".to_string(),
             ],
         );
         assert_eq!(
             r.site_hosts,
-            vec!["wawapii.com"],
+            vec!["panel.example"],
             "大小写 / www. / 端口 / api. 子域都该归一成同一个注册域"
         );
     }
@@ -306,9 +358,9 @@ mod tests {
             "i".into(),
             "v".into(),
             &[
-                "https://wawapii.com".to_string(),
-                "https://wawapii.com".to_string(),
-                "https://999555999.com".to_string(),
+                "https://panel.example".to_string(),
+                "https://panel.example".to_string(),
+                "https://other.example".to_string(),
             ],
         );
         assert_eq!(r.relay_account_count, 3, "个数是行数");

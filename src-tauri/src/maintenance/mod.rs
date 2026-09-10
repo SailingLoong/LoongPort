@@ -23,7 +23,7 @@ pub fn start(app: tauri::AppHandle) {
 /// 触发归属（CLAUDE.md §1.4）：播种是数据层自己的初始化动作，挂在启动上；
 /// 广场页与设置页只读 `plaza_visible` 的现成产出，不驱动它。首启弹窗那条
 /// 播种在用户提交动作里（`relay::plaza::seed_from_first_site`），与本任务
-/// 经 `seed_if_unsent` 的双重检查互斥。
+/// 在同一设置写锁内裁决，显式首域与用户开关优先。
 fn start_plaza_visibility_seeding(app: tauri::AppHandle) {
     let db = app.state::<crate::AppState>().db.clone();
     tauri::async_runtime::spawn(async move {
@@ -121,9 +121,14 @@ fn start_directory_refresh(app: tauri::AppHandle) {
     scheduler::spawn_periodic("directory", schedule, move || {
         let app = app.clone();
         async move {
-            crate::relay::remote_config::refresh_and_cache().await;
+            if let Some(config) = crate::relay::remote_config::refresh_and_cache()
+                .await
+                .or_else(crate::relay::remote_config::load_cached)
+            {
+                crate::relay::plaza::resolve_pending(&config)?;
+            }
             // 实测快照（行级观测的 owner）：数据层自己的周期触发；
-            // 读路径另有 SWR 追新兜底。失败返回 Err → 走 RETRY_DELAY 重试。
+            // 失败返回 Err → 走 RETRY_DELAY 重试，读取路径只消费缓存。
             crate::crowd::snapshot::refresh_and_cache().await?;
             // 探针落盘 + 逐站日志：best-effort，不把它记成任务失败 ——
             // 探针的单站失败已经作为 NetworkBlocked 落进了结果里。

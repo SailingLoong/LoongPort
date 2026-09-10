@@ -2637,7 +2637,11 @@
       "switchBackDone": "已切回 {{name}}，該應用轉為自主模式",
       "tiersShort": "檔",
       "modelFilterPlaceholder": "輸入模型名篩選…",
-      "modelFilterEmpty": "沒有符合的模型"
+      "modelFilterEmpty": "沒有符合的模型",
+      "globalStrategy": "全域策略",
+      "strategySettings": "全域路由設定",
+      "configured": "已設定",
+      "routingTarget": "路由目標"
     },
     "modelHint": "選了模型後只在目錄含該模型的檔位裡挑；顯式點選會立即切到最優檔位",
     "advancedSection": "進階（故障轉移佇列與熔斷）",
@@ -3206,11 +3210,11 @@
     },
     "officialApi": {
       "title": "官方 API",
-      "description": "選擇廠商，登入後自動完成金鑰取得與各平台設定",
+      "description": "選擇官方服務，登入後選擇要設定的應用程式。",
       "connect": "連線並取得金鑰",
-      "deepseekDesc": "DeepSeek 開放平台：登入後自動建立/認領 API Key，接入各程式代理",
-      "bigmodelDesc": "智譜 BigModel 開放平台：GLM 系列模型，登入後自動建立/認領 API Key",
-      "opencodeDesc": "opencode 官網帳號：登入一次自動接入 API Key，同一把金鑰雙檔可用 —— Zen 按量計費全量模型目錄，Go 訂閱制精選開源編碼模型"
+      "deepseekDesc": "連接 DeepSeek 官方帳號。",
+      "bigmodelDesc": "連接智譜 BigModel 官方帳號。",
+      "opencodeDesc": "支援 Zen 按量計費與 Go 訂閱。"
     },
     "tierList": {
       "empty": "尚未新增中轉站",
@@ -3560,10 +3564,10 @@
       }
     },
     "firstSite": {
-      "title": "添加你的第一個中轉站",
+      "title": "連接你的第一個服務",
       "placeholder": "bestapi.store",
       "confirm": "進入註冊 / 登入",
-      "cancel": "先逛逛廣場"
+      "cancel": "暫不設定"
     },
     "star": {
       "buttonTitle": "GitHub 儲存庫（點個 ⭐ 支持一下）",
@@ -3587,6 +3591,45 @@
       "lastResetTitle": "最近一次被社群確認的全域重置",
       "announcement": "最新公告",
       "source": "社群預告 · codex-reset.com"
+    },
+    "accounts": {
+      "title": "服務與帳號",
+      "description": "管理已連接的中轉站與官方 API。",
+      "add": "新增服務",
+      "back": "返回服務與帳號",
+      "relay": "中轉站",
+      "vendor": "官方 API",
+      "detail": "帳號詳情",
+      "application": "應用",
+      "openApp": "開啟應用設定",
+      "loadFailed": "暫時無法讀取帳號，請重試。",
+      "empty": "尚未新增服務帳號",
+      "status": {
+        "notLoggedIn": "尚未登入",
+        "sessionExpired": "登入已過期",
+        "sessionExpiredUsable": "登入已過期，金鑰仍可用",
+        "noTiers": "尚無接入設定",
+        "ready": "已就緒",
+        "noKey": "尚未取得金鑰"
+      }
+    },
+    "onboarding": {
+      "domain": "中轉站網址",
+      "domainPlaceholder": "例如 panel.example",
+      "browse": "瀏覽中轉站廣場",
+      "searchDirectory": "搜尋廣場",
+      "noMatch": "沒有找到符合的服務",
+      "configure": "確認應用設定",
+      "chooseApps": "選擇要使用此服務的應用與設定。",
+      "skipApp": "暫不設定",
+      "noConfigurations": "帳號已儲存，暫時沒有可用設定。",
+      "finish": "完成設定",
+      "resume": "繼續設定",
+      "shareLabel": "分享服務使用與實測資料，幫助完善適配並查看社群實測",
+      "shareDetails": "瞭解分享內容",
+      "shareUsage": "使用統計包含已設定服務的網域、帳號數量、應用版本與作業系統，並使用固定的隨機安裝識別碼去重。",
+      "shareMeasurements": "實測資料按服務、應用、模型和小時彙總請求量、錯誤、延遲、速度、Token 與估算費用，使用每日輪換的隨機識別碼。",
+      "shareControl": "不上傳帳號身分、金鑰或對話內容。隨機識別碼可關聯同一時期的上報，接收端能看到來源 IP。完成設定後才儲存選擇；不勾選也能正常使用，之後可在設定中分別調整。"
     }
   },
   "firstRunNotice": {
@@ -3739,5 +3782,53 @@
     "add": "新增應用至主頁面",
     "allShown": "所有應用都已顯示",
     "hide": "從主頁面隱藏"
+  },
+  "client": {
+    "navigation": "主導覽",
+    "applications": "應用",
+    "services": "服務與帳號",
+    "image": "生圖",
+    "records": "使用記錄",
+    "resources": "擴充資源",
+    "plaza": "中轉站廣場",
+    "help": "說明",
+    "selectApplication": "選擇應用",
+    "favoriteApps": "常用應用",
+    "moreApps": "更多應用",
+    "addService": "新增服務",
+    "recordsDescription": "檢視工作階段歷史與用量。",
+    "resourcesDescription": "管理應用使用的工具、指令與工作區。",
+    "globalStrategy": "全域選路策略",
+    "configMissing": "尚未找到應用設定，請先啟動應用完成初始化。",
+    "features": {
+      "usage": "用量與費用",
+      "sessions": "工作階段歷史",
+      "mcp": "MCP",
+      "skills": "Skills",
+      "prompts": "Prompts",
+      "agents": "Agents",
+      "universal": "統一供應商",
+      "workspace": "工作區檔案",
+      "openclawEnv": "環境變數",
+      "openclawTools": "工具權限",
+      "openclawAgents": "Agent 預設設定",
+      "hermesMemory": "Hermes 記憶",
+      "hermesDashboard": "Hermes 控制台"
+    },
+    "featureDescriptions": {
+      "usage": "檢視請求、Token 與費用",
+      "sessions": "搜尋並繼續既有工作階段",
+      "mcp": "連接外部工具與資料來源",
+      "skills": "安裝與管理應用技能",
+      "prompts": "維護提示詞與範本",
+      "agents": "此功能尚未開放。",
+      "universal": "管理跨應用供應商設定",
+      "workspace": "檢視與編輯工作區資源",
+      "openclawEnv": "設定 OpenClaw 執行環境",
+      "openclawTools": "管理 OpenClaw 工具權限",
+      "openclawAgents": "設定 OpenClaw 預設行為",
+      "hermesMemory": "檢視與編輯持久記憶",
+      "hermesDashboard": "開啟本機管理介面"
+    }
   }
 }

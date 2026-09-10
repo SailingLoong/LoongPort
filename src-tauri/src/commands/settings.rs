@@ -54,6 +54,18 @@ fn merge_settings_for_save(
     // plaza_set_visible —— 全量保存的旧快照会抹掉首启弹窗刚播的种（同一类
     // 已实测过的丢失更新事故）。
     incoming.plaza_visible = existing.plaza_visible;
+    incoming.plaza_first_site_domain = existing.plaza_first_site_domain.clone();
+    // A settings snapshot taken before completion must not undo that decision.
+    if existing.service_onboarding_completed && !incoming.service_onboarding_completed {
+        incoming.enable_anonymous_stats = existing.enable_anonymous_stats;
+        incoming.crowd_metrics_enabled = existing.crowd_metrics_enabled;
+    }
+    // Editing either sharing preference is already an explicit decision. Keep
+    // the other preference unchanged and do not ask onboarding to choose again.
+    incoming.service_onboarding_completed = existing.service_onboarding_completed
+        || incoming.enable_anonymous_stats != existing.enable_anonymous_stats
+        || incoming.crowd_metrics_enabled != existing.crowd_metrics_enabled;
+    incoming.service_onboarding_dismissed = existing.service_onboarding_dismissed;
     incoming.current_provider_claude = existing.current_provider_claude.clone();
     incoming.current_provider_claude_desktop = existing.current_provider_claude_desktop.clone();
     incoming.current_provider_codex = existing.current_provider_codex.clone();
@@ -79,12 +91,17 @@ pub async fn save_settings(
     state: tauri::State<'_, crate::store::AppState>,
     settings: crate::settings::AppSettings,
 ) -> Result<bool, String> {
-    let existing = crate::settings::get_settings();
-    let merged = merge_settings_for_save(settings, &existing);
-    let unify_codex_changed =
-        merged.unify_codex_session_history != existing.unify_codex_session_history;
-    let unify_codex_enabled = merged.unify_codex_session_history;
-    crate::settings::update_settings(merged).map_err(|e| e.to_string())?;
+    let unify_codex_enabled = settings.unify_codex_session_history;
+    let mut previous_unify_codex_enabled = false;
+    let mut previous_unify_migrate_existing = None;
+    // Merge backend-owned facts and persist under the same settings write lock.
+    crate::settings::mutate_settings(|current| {
+        previous_unify_codex_enabled = current.unify_codex_session_history;
+        previous_unify_migrate_existing = current.unify_codex_migrate_existing;
+        *current = merge_settings_for_save(settings, current);
+    })
+    .map_err(|e| e.to_string())?;
+    let unify_codex_changed = unify_codex_enabled != previous_unify_codex_enabled;
 
     if let Err(error) =
         crate::services::ProviderService::sync_claude_plugin_integration(state.inner())
@@ -95,16 +112,16 @@ pub async fn save_settings(
     // 统一会话开关变更时立即重写当前官方 Codex 供应商的 live 配置，
     // 不必等下一次切换才生效。
     if unify_codex_changed {
-        // live 重写失败时回滚设置并把保存整体报失败：若设置保持已切换状态，
-        // live 仍跑旧桶，后续的历史迁移/还原会让会话再次分裂（开启=历史
-        // 迁走而新会话仍写 openai 桶；关闭=会话还原而 live 仍写 custom）。
-        // 报错让前端 saved=false 短路还原；回滚是整次保存的事务语义
-        // （本开关的保存只携带开关相关字段）。
+        // Compensate only the failed live-setting change. A concurrent sharing
+        // decision or attribution write must survive this rollback.
         if let Err(err) =
             crate::services::provider::reapply_current_codex_official_live(state.inner())
         {
             log::warn!("统一 Codex 会话历史开关变更后重写 live 配置失败，回滚设置: {err}");
-            if let Err(rollback_err) = crate::settings::update_settings(existing) {
+            if let Err(rollback_err) = crate::settings::mutate_settings(|current| {
+                current.unify_codex_session_history = previous_unify_codex_enabled;
+                current.unify_codex_migrate_existing = previous_unify_migrate_existing;
+            }) {
                 log::error!("回滚统一会话开关设置失败: {rollback_err}");
             }
             return Err(format!(
@@ -287,6 +304,55 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::{available_version, merge_settings_for_save};
+
+    #[test]
+    fn explicit_sharing_choice_completes_pending_decision_without_changing_other_preference() {
+        let existing = crate::settings::AppSettings {
+            service_onboarding_dismissed: true,
+            ..Default::default()
+        };
+        for stats in [true, false] {
+            let mut incoming = existing.clone();
+            if stats {
+                incoming.enable_anonymous_stats = true;
+            } else {
+                incoming.crowd_metrics_enabled = true;
+            }
+            let merged = merge_settings_for_save(incoming, &existing);
+            assert!(merged.service_onboarding_completed);
+            assert_eq!(merged.enable_anonymous_stats, stats);
+            assert_eq!(merged.crowd_metrics_enabled, !stats);
+            // Turning it back off remains an explicit decision, not a fresh draft.
+            let mut disabled = merged.clone();
+            disabled.enable_anonymous_stats = false;
+            disabled.crowd_metrics_enabled = false;
+            assert!(merge_settings_for_save(disabled, &merged).service_onboarding_completed);
+        }
+        let mut unrelated = existing.clone();
+        unrelated.show_profile_switcher = !existing.show_profile_switcher;
+        assert!(!merge_settings_for_save(unrelated, &existing).service_onboarding_completed);
+    }
+
+    #[test]
+    fn stale_settings_cannot_undo_completed_onboarding_or_pending_attribution() {
+        let incoming = crate::settings::AppSettings::default();
+        let existing = crate::settings::AppSettings {
+            service_onboarding_completed: true,
+            service_onboarding_dismissed: true,
+            enable_anonymous_stats: true,
+            crowd_metrics_enabled: true,
+            plaza_first_site_domain: Some("panel.example".into()),
+            ..Default::default()
+        };
+        let merged = merge_settings_for_save(incoming, &existing);
+        assert!(merged.service_onboarding_completed && merged.service_onboarding_dismissed);
+        assert!(merged.enable_anonymous_stats && merged.crowd_metrics_enabled);
+        assert_eq!(
+            merged.plaza_first_site_domain,
+            existing.plaza_first_site_domain
+        );
+    }
+
     use crate::services::app_update::AppUpdateCheckResult;
     use crate::settings::{
         AppSettings, CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
@@ -649,6 +715,7 @@ pub async fn get_auto_launch_status() -> Result<bool, String> {
 pub async fn plaza_set_visible(visible: bool) -> Result<bool, String> {
     crate::settings::mutate_settings(|settings| {
         settings.plaza_visible = Some(visible);
+        settings.plaza_first_site_domain = None;
     })
     .map_err(|e| e.to_string())?;
     Ok(true)
@@ -658,8 +725,12 @@ pub async fn plaza_set_visible(visible: bool) -> Result<bool, String> {
 /// 用户此后的手动翻转永远优先）。
 #[tauri::command]
 pub async fn plaza_seed_from_first_site(domain: String) -> Result<bool, String> {
-    crate::relay::plaza::seed_from_first_site(&domain).await;
-    Ok(true)
+    crate::relay::plaza::seed_from_first_site(&domain)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(crate::settings::get_settings()
+        .plaza_visible
+        .unwrap_or(false))
 }
 
 /// 用户「跳过本版本」/撤销跳过。

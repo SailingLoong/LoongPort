@@ -71,16 +71,16 @@ describe("AddHubPage", () => {
     expect(screen.getByTestId("manual-content")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "common.back" }));
-    expect(screen.queryByTestId("directory-content")).toBeInTheDocument;
+    expect(screen.queryByTestId("directory-content")).toBeInTheDocument();
   });
 
-  it("hides the official tab when the backend says the app is unsupported", async () => {
+  it("keeps official discovery available when the current app is unsupported", async () => {
     listVendorAccounts.mockResolvedValue({ supported: false, accounts: [] });
     renderHub("gemini");
 
     expect(
       screen.queryByRole("tab", { name: "loongport.sections.official" }),
-    ).not.toBeInTheDocument();
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("tab", { name: "loongport.sections.relay" }),
     ).toBeInTheDocument();

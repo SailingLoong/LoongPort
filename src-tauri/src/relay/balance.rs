@@ -671,21 +671,25 @@ mod tests {
     /// 下一次看板读取（TTL 内）不再重查。
     #[tokio::test]
     async fn background_refresh_writes_negative_cache_for_unreachable_site() {
+        // A local TLS peer closes connections immediately; no external DNS dependency.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("https://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
         let db = std::sync::Arc::new(cache_db());
         let mut wanted = std::collections::HashMap::new();
-        // .example 是保留 TLD，DNS 必然快速失败（离线环境同样快速失败）
-        wanted.insert(
-            ("https://nonexistent.example".to_string(), 7),
-            "sk-x".to_string(),
-        );
+        wanted.insert((origin.clone(), 7), "sk-x".to_string());
 
         crate::relay::balance::spawn_stale_refresh(db.clone(), None::<tauri::AppHandle>, wanted);
 
         for _ in 0..250 {
             let cached = cached_site_balances(&db);
-            if let Some((balance, _)) = cached.get(&("https://nonexistent.example".to_string(), 7))
-            {
+            if let Some((balance, _)) = cached.get(&(origin.clone(), 7)) {
                 assert_eq!(*balance, None, "不可达站必须是负缓存而不是有值");
+                server.abort();
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
