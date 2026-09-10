@@ -458,7 +458,10 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         if (active) setReceiveBetaUpdates(Boolean(current.receiveBetaUpdates));
       })
       .catch((error) => {
-        console.error("[AboutSection] Failed to load beta update setting", error);
+        console.error(
+          "[AboutSection] Failed to load beta update setting",
+          error,
+        );
       });
     return () => {
       active = false;
@@ -473,7 +476,10 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         await settingsApi.save({ ...current, receiveBetaUpdates: value });
       } catch (error) {
         setReceiveBetaUpdates(!value);
-        console.error("[AboutSection] Failed to save beta update setting", error);
+        console.error(
+          "[AboutSection] Failed to save beta update setting",
+          error,
+        );
         toast.error(t("settings.receiveBetaUpdatesSaveFailed"));
       }
     },
