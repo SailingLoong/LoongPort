@@ -30,6 +30,8 @@
     --ring: 210 100% 56%;
 
     --radius: 0.5rem;
+    --sidebar-width: 12rem;
+    --page-gutter: 1.5rem;
   }
 
   .dark {
@@ -57,6 +59,25 @@
     --border: 240 5% 24%;
     --input: 240 5% 24%;
     --ring: 210 100% 54%;
+  }
+}
+
+@layer components {
+  /* Route containers own the outer spacing; embedded content owns its interior. */
+  .page-content,
+  .page-header {
+    width: 100%;
+    min-width: 0;
+    max-width: 1180px;
+    margin-inline: auto;
+  }
+
+  .page-content {
+    padding: 24px var(--page-gutter) 32px;
+  }
+
+  .page-header {
+    padding-inline: var(--page-gutter);
   }
 }
 

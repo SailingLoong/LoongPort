@@ -192,6 +192,9 @@ pub fn provider_presentation_context(
     state: &AppState,
     app_type: &AppType,
 ) -> ProviderPresentationContext {
+    let pi_state = matches!(app_type, AppType::Pi)
+        .then(|| crate::services::pi_state::PiStateService::current(state).ok())
+        .flatten();
     let configured_provider_ids = match app_type {
         AppType::OpenCode => crate::opencode_config::get_providers()
             .ok()
@@ -199,6 +202,9 @@ pub fn provider_presentation_context(
         AppType::OpenClaw => crate::openclaw_config::get_providers()
             .ok()
             .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
+        AppType::Pi => pi_state
+            .as_ref()
+            .map(|state| state.enabled_provider_ids.iter().cloned().collect()),
         AppType::Hermes => crate::hermes_config::get_providers()
             .ok()
             .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
@@ -232,6 +238,7 @@ pub fn provider_presentation_context(
         None
     };
     let default_model_provider_id = match app_type {
+        AppType::Pi => pi_state.and_then(|state| state.default_provider_id),
         AppType::OpenClaw => crate::openclaw_config::get_default_model()
             .ok()
             .flatten()
@@ -278,8 +285,8 @@ pub fn provider_presentation_with_context(
         .configured_provider_ids
         .as_ref()
         .map(|provider_ids| provider_ids.contains(&provider.id))
-        .unwrap_or(true);
-    let is_default_model = matches!(app_type, AppType::OpenClaw | AppType::Hermes)
+        .unwrap_or(!app_type.is_additive_mode());
+    let is_default_model = matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
         && context.default_model_provider_id.as_deref() == Some(provider.id.as_str());
     let is_managed = crate::relay::is_managed(&provider.id);
     let is_read_only = matches!(app_type, AppType::Hermes)
@@ -704,6 +711,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -730,6 +738,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -759,6 +768,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -800,6 +810,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -6698,8 +6709,8 @@ impl ProviderService {
     }
 
     /// Return the settings snapshot that should seed provider editing. The
-    /// backend owns the live-vs-database decision and preserves DB-only Codex
-    /// metadata that a live config cannot represent.
+    /// backend owns the live-vs-database decision and preserves stored model
+    /// mappings that a native config cannot represent.
     pub fn edit_settings(
         state: &AppState,
         app_type: AppType,
@@ -6737,16 +6748,8 @@ impl ProviderService {
         let Some(mut settings) = live_settings else {
             return Ok(database_settings);
         };
+        live::restore_stored_model_catalog(&mut settings, &database_settings);
         if matches!(app_type, AppType::Codex) {
-            if let Some(model_catalog) = database_settings
-                .as_object()
-                .and_then(|settings| settings.get("modelCatalog"))
-                .cloned()
-            {
-                if let Some(settings) = settings.as_object_mut() {
-                    settings.insert("modelCatalog".to_string(), model_catalog);
-                }
-            }
             // live auth.json 是单槽共享文件；编辑表单的 key 槽位以 provider
             // 自己的 bearer 为准（上游 #6534，收敛在后端命令层做）。
             crate::codex_config::reconcile_codex_edit_auth(

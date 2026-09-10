@@ -3832,5 +3832,32 @@
       "hermesMemory": "View and edit persistent memory",
       "hermesDashboard": "Open the local management interface"
     }
+  },
+  "applications": {
+    "currentConfiguration": "Current configuration",
+    "enabledConfigurations": "Enabled configurations",
+    "currentDescription": "Configurations saved to this application.",
+    "switchService": "Switch service",
+    "selectDescription": "Choose an account, then a configuration.",
+    "addService": "Add service",
+    "search": "Search services, accounts, configurations or models",
+    "source": "Service source",
+    "default": "Default",
+    "configured": "Configured",
+    "use": "Use",
+    "manageAccount": "Manage account",
+    "empty": "No configuration selected",
+    "recent": "Recently used",
+    "useAgain": "Use again",
+    "manageConfigurations": "Manage configurations",
+    "manageDescription": "Edit, duplicate and manage manual or imported configurations. Manage service configurations in account details.",
+    "noMatches": "No matching configurations",
+    "loadFailed": "Unable to load configurations",
+    "sources": {
+      "all": "All",
+      "official": "Official",
+      "relay": "Relay",
+      "custom": "Custom"
+    }
   }
 }

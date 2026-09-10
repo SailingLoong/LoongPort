@@ -181,6 +181,7 @@ pub(crate) fn seeded(id: &str, name: &str, site: Option<&str>) -> Provider {
         icon: None,
         icon_color: None,
         in_failover_queue: false,
+        available_models: None,
     }
 }
 

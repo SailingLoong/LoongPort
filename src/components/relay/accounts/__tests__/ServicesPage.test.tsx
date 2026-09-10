@@ -149,3 +149,26 @@ describe("ServicesPage", () => {
     expect(onOpenAddHub).toHaveBeenCalledWith("directory");
   });
 });
+
+it("returns through navigation history when opened directly from an application", async () => {
+  const onBack = vi.fn();
+  const onSelectAccount = vi.fn();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <ServicesPage
+        appId="codex"
+        account={{ kind: "vendor", id: 1 }}
+        onSelectAccount={onSelectAccount}
+        onBack={onBack}
+        onOpenAddHub={vi.fn()}
+        onOpenApp={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "common.back" }));
+  expect(onBack).toHaveBeenCalledTimes(1);
+  expect(onSelectAccount).not.toHaveBeenCalled();
+});

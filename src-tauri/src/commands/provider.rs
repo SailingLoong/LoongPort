@@ -239,12 +239,19 @@ fn add_provider_internal(
     let provider_id = provider.id.clone();
     // `app_type` 下一步会被 move 进 impl，先扣出字符串给 set_user_edited 用。
     let app_type_name = app_type.as_str().to_string();
-    let result = add_provider_internal_impl(state, app_type, provider, add_to_live)?;
+    let result = add_provider_internal_impl(state, app_type.clone(), provider, add_to_live)?;
     // 用户手工新建的 provider 归他维护 ⇒ 置「已手工维护」标记。
     // provision 不走这条命令（直调 save_provider），所以托管档位不会被误置位。
     state
         .db
         .set_user_edited(&app_type_name, &provider_id, true)?;
+    if result && add_to_live && app_type.is_additive_mode() {
+        crate::services::application_overview::record_successful_selection(
+            &state.db,
+            &app_type,
+            &provider_id,
+        );
+    }
     Ok(result)
 }
 
@@ -425,7 +432,9 @@ fn switch_provider_internal(
     // 守卫落在这一层而不是 `ProviderService::switch`：那是上游代码，且 `relay_switch_tier`
     // 正当地要调它。
     crate::relay::reject_if_managed(id)?;
-    ProviderService::switch(state, app_type, id)
+    let result = ProviderService::switch(state, app_type.clone(), id)?;
+    crate::services::application_overview::record_successful_selection(&state.db, &app_type, id);
+    Ok(result)
 }
 
 #[cfg_attr(not(feature = "test-hooks"), doc(hidden))]

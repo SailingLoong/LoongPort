@@ -751,10 +751,7 @@ pub fn settings_config_with_roles_and_models(
                 // models. Those belong to the image-generation path and are
                 // not valid Codex conversation models, so do not turn them
                 // into clickable main-model choices.
-                let models = models
-                    .iter()
-                    .filter(|model| !is_image_model(model))
-                    .collect::<Vec<_>>();
+                let models = super::model_catalog::filter_models(app_type, models);
                 if models.is_empty() {
                     return Some(settings);
                 }
@@ -839,13 +836,7 @@ pub fn settings_config_with_roles_and_models(
             // - 其余平台目录收全部**文本**模型（claude 分组可能混 gpt-* / deepseek-*，
             //   瓜子跨家族对齐，角色挑选本来就跨家族）。
             if let Some(models) = models.filter(|models| !models.is_empty()) {
-                let family: Vec<&String> = match app_type {
-                    AppType::Gemini => models
-                        .iter()
-                        .filter(|m| m.to_ascii_lowercase().starts_with("gemini-"))
-                        .collect(),
-                    _ => models.iter().filter(|m| !is_image_model(m)).collect(),
-                };
+                let family = super::model_catalog::filter_models(app_type, models);
                 if !family.is_empty() {
                     config["modelCatalog"] = serde_json::json!({
                         "models": family

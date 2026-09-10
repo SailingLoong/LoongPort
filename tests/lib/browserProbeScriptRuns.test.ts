@@ -124,7 +124,7 @@ describe("browser probe generated script", () => {
       timeout: 5000,
     });
 
-    expect(fetchedPaths).toEqual(["/api/v1/settings/public"]);
+    expect(fetchedPaths).toEqual(["/api/v1/settings/public", "/api/status"]);
     expect(intervalCallbacks).toHaveLength(1);
 
     intervalCallbacks[0]();
@@ -132,7 +132,7 @@ describe("browser probe generated script", () => {
     expect(
       fetchedPaths,
       "ticks during a slow round must not start another round",
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     responseBodies[0].resolve('{"code":0}');
     await flushPromises();
@@ -184,7 +184,7 @@ describe("browser probe generated script", () => {
     expect(
       fetchedPaths,
       "a finished round releases the next interval",
-    ).toHaveLength(3);
+    ).toHaveLength(4);
   });
 
   it("keeps a valid oversized JSON detector response within the callback limit", async () => {
@@ -444,7 +444,7 @@ describe("browser probe generated script", () => {
     vm.runInNewContext(readFileSync(SCRIPT, "utf8"), sandbox, {
       timeout: 5000,
     });
-    expect(fetchedPaths).toEqual(["/api/v1/settings/public"]);
+    expect(fetchedPaths).toEqual(["/api/v1/settings/public", "/api/status"]);
     expect(navigations).toHaveLength(0);
 
     timeoutCallbacks[0]();

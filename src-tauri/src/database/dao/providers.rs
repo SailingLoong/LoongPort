@@ -5,6 +5,19 @@ use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::{HashMap, HashSet};
 
+fn read_available_models(raw: Option<String>) -> rusqlite::Result<Option<Vec<String>>> {
+    raw.map(|raw| {
+        serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    })
+    .transpose()
+}
+
 type OmoProviderRow = (
     String,
     String,
@@ -44,7 +57,7 @@ impl Database {
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
         let mut stmt = conn.prepare(
-            "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
+            "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue, available_models
              FROM providers WHERE app_type = ?1
              ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
         ).map_err(|e| AppError::Database(e.to_string()))?;
@@ -64,6 +77,7 @@ impl Database {
                 let icon_color: Option<String> = row.get(9)?;
                 let meta_str: String = row.get(10)?;
                 let in_failover_queue: bool = row.get(11)?;
+                let available_models = read_available_models(row.get(12)?)?;
 
                 let settings_config =
                     serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
@@ -84,6 +98,7 @@ impl Database {
                         icon,
                         icon_color,
                         in_failover_queue,
+                        available_models,
                     },
                 ))
             })
@@ -163,7 +178,7 @@ impl Database {
     ) -> Result<Option<Provider>, AppError> {
         let conn = lock_conn!(self.conn);
         let result = conn.query_row(
-            "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
+            "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue, available_models
              FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
             |row| {
@@ -179,6 +194,7 @@ impl Database {
                 let icon_color: Option<String> = row.get(8)?;
                 let meta_str: String = row.get(9)?;
                 let in_failover_queue: bool = row.get(10)?;
+                let available_models = read_available_models(row.get(11)?)?;
 
                 let settings_config = serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
                 let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
@@ -196,6 +212,7 @@ impl Database {
                     icon,
                     icon_color,
                     in_failover_queue,
+                    available_models,
                 })
             },
         );
@@ -363,6 +380,77 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// Only the relay catalog owner writes this column; regular provider saves preserve it.
+    pub(crate) fn set_available_models(
+        &self,
+        app: &str,
+        id: &str,
+        models: &[String],
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE providers SET available_models=?1 WHERE app_type=?2 AND id=?3",
+            params![
+                serde_json::to_string(models)
+                    .map_err(|error| AppError::Database(error.to_string()))?,
+                app,
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Complete a missing-inventory fetch only if the record still has its original binding.
+    /// Comparing settings is conservative: concurrent user edits defer repair to the next pass.
+    pub(crate) fn fill_missing_available_models(
+        &self,
+        app: &str,
+        original: &Provider,
+        expected_relay: &crate::relay::creds::RelayAccount,
+        models: &[String],
+    ) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let binding: Option<(String, String, Option<i64>)> = conn
+            .query_row(
+                "SELECT site_origin, api_base_url, account_id FROM loongport_relay WHERE id=?1",
+                [expected_relay.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if binding
+            != Some((
+                expected_relay.site_origin.clone(),
+                expected_relay.api_base_url.clone(),
+                expected_relay.account_id,
+            ))
+        {
+            return Ok(false);
+        }
+        let current: Option<(String, Option<String>, String)> = conn.query_row(
+            "SELECT settings_config, website_url, meta FROM providers WHERE app_type=?1 AND id=?2 AND available_models IS NULL",
+            params![app, original.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let Some((settings, website, meta)) = current else {
+            return Ok(false);
+        };
+        let settings: serde_json::Value = serde_json::from_str(&settings)
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let meta: ProviderMeta =
+            serde_json::from_str(&meta).map_err(|error| AppError::Database(error.to_string()))?;
+        if settings != original.settings_config
+            || website != original.website_url
+            || meta.loongport_account_id
+                != original
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.loongport_account_id)
+        {
+            return Ok(false);
+        }
+        let count = conn.execute("UPDATE providers SET available_models=?1 WHERE app_type=?2 AND id=?3 AND available_models IS NULL",
+            params![serde_json::to_string(models).map_err(|error| AppError::Database(error.to_string()))?, app, original.id])?;
+        Ok(count == 1)
     }
 
     /// 读档位的存库倍率。`None` = 还没查过 / 行不存在，**不是 0** ——
@@ -621,6 +709,7 @@ impl Database {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }))
     }
 

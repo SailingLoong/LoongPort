@@ -22,6 +22,8 @@
 
 /** 当前供应商切换后通知前端（`providersApi.onSwitched` / `RelaySection` 监听）。 */
 export const PROVIDER_SWITCHED = "provider-switched";
+/** 后台模型目录更新，只失效相关展示缓存，不代表配置切换。 */
+export const PROVIDER_MODELS_UPDATED = "provider-models-updated";
 /** 项目应用完成后的统一收尾事件（`App.tsx` / `PromptPanel` 监听）。 */
 export const PROFILE_APPLIED = "profile-applied";
 /** 用量缓存写入后通知前端 React Query 失效（`useUsageCacheBridge` 监听）。 */

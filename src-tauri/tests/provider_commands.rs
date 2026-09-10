@@ -79,6 +79,14 @@ fn grokbuild_import_and_switch_write_live_config() {
 
     switch_provider_test_hook(&state, AppType::GrokBuild, "relay")
         .expect("switch Grok Build provider");
+    assert_eq!(
+        state
+            .db
+            .get_setting("application_recent_providers_grokbuild")
+            .unwrap()
+            .as_deref(),
+        Some(r#"["relay"]"#)
+    );
 
     assert_eq!(
         std::fs::read_to_string(&live_path).expect("read switched Grok Build config"),
@@ -644,6 +652,11 @@ fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
 
     let err = switch_provider_test_hook(&app_state, AppType::Codex, "invalid")
         .expect_err("switching should fail when auth missing");
+    assert!(app_state
+        .db
+        .get_setting("application_recent_providers_codex")
+        .unwrap()
+        .is_none());
     match err {
         AppError::Config(msg) => assert!(
             msg.contains("auth"),
@@ -690,4 +703,100 @@ fn import_refuses_live_config_under_proxy_takeover() {
         providers.is_empty(),
         "taken-over live import must not create providers"
     );
+}
+
+#[test]
+fn unrelated_openclaw_defaults_edit_preserves_selection_history() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .save_provider(
+            "openclaw",
+            &Provider::with_id("current".into(), "Current".into(), json!({}), None),
+        )
+        .unwrap();
+    let history_key = "application_recent_providers_openclaw";
+    state
+        .db
+        .set_setting(history_key, r#"["recent","current"]"#)
+        .unwrap();
+    let defaults = serde_json::from_value(
+        json!({"model":{"primary":"current/example-model"},"timeoutSeconds":120}),
+    )
+    .unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, defaults).unwrap();
+    // Seed a later choice after initial default setup.
+    state
+        .db
+        .set_setting(history_key, r#"["recent","current"]"#)
+        .unwrap();
+    let edited = serde_json::from_value(
+        json!({"model":{"primary":"current/example-model"},"timeoutSeconds":180}),
+    )
+    .unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, edited).unwrap();
+    assert_eq!(
+        state.db.get_setting(history_key).unwrap().as_deref(),
+        Some(r#"["recent","current"]"#)
+    );
+    state
+        .db
+        .save_provider(
+            "openclaw",
+            &Provider::with_id("next".into(), "Next".into(), json!({}), None),
+        )
+        .unwrap();
+    let changed = serde_json::from_value(
+        json!({"model":{"primary":"next/example-model"},"timeoutSeconds":180}),
+    )
+    .unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, changed).unwrap();
+    assert_eq!(
+        state.db.get_setting(history_key).unwrap().as_deref(),
+        Some(r#"["next","recent","current"]"#)
+    );
+    let cleared = serde_json::from_value(json!({"timeoutSeconds":180})).unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, cleared).unwrap();
+    assert_eq!(
+        state.db.get_setting(history_key).unwrap().as_deref(),
+        Some(r#"["next","recent","current"]"#)
+    );
+}
+
+#[test]
+fn current_provider_editor_preserves_stored_mapping_when_live_omits_it() {
+    let _guard = test_mutex().lock().unwrap();
+    reset_test_fs();
+    ensure_test_home();
+    let state = create_test_state().unwrap();
+    let catalog = json!({"models": [{"model": "custom-model", "contextWindow": 123456}]});
+    let provider = Provider::with_id(
+        "mapping-test".into(),
+        "Mapping test".into(),
+        json!({
+            "env": {"ANTHROPIC_AUTH_TOKEN": "test-key"},
+            "modelCatalog": catalog
+        }),
+        None,
+    );
+    state.db.save_provider("claude", &provider).unwrap();
+    state
+        .db
+        .set_current_provider("claude", &provider.id)
+        .unwrap();
+    let live_path = cc_switch_lib::get_claude_settings_path();
+    std::fs::create_dir_all(live_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        live_path,
+        serde_json::to_string(
+            &json!({"env": {"ANTHROPIC_AUTH_TOKEN": "test-key", "USER_PREFERENCE": "keep"}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let edited = ProviderService::edit_settings(&state, AppType::Claude, &provider.id).unwrap();
+    assert_eq!(edited.get("modelCatalog"), Some(&catalog));
+    assert_eq!(edited.pointer("/env/USER_PREFERENCE"), Some(&json!("keep")));
 }

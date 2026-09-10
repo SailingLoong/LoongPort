@@ -2,6 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Portal } from "@radix-ui/react-tooltip";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import {
   Popover,
@@ -31,6 +38,8 @@ interface AppSwitcherProps {
   activeApp: AppId;
   onSwitch: (app: AppId) => void;
   visibleApps?: VisibleApps;
+  applications?: AppId[];
+  disabled?: boolean;
   /** tab 上的 ×：就地隐藏一个应用，与设置页「主页面显示」是同一开关 */
   onHideApp?: (app: AppId) => void;
   /** 末尾「+」：把隐藏的应用加回主页面 */
@@ -110,6 +119,8 @@ export function AppSwitcher({
   visibleApps,
   onHideApp,
   onShowApp,
+  applications = APP_IDS,
+  disabled = false,
 }: AppSwitcherProps) {
   const { t } = useTranslation();
   const [addOpen, setAddOpen] = useState(false);
@@ -211,122 +222,140 @@ export function AppSwitcher({
   };
 
   // Filter apps based on visibility settings (default all visible)
-  const appsToShow = APP_IDS.filter((app) => {
+  const appsToShow = applications.filter((app) => {
     if (!visibleApps) return true;
-    return visibleApps[app];
+    return visibleApps[app] || app === activeApp;
   });
   // 隐藏的应用（「+」的候选）；visibleApps 未加载时视为全部可见
   const hiddenApps = visibleApps
-    ? APP_IDS.filter((app) => !visibleApps[app])
+    ? applications.filter((app) => !visibleApps[app] && app !== activeApp)
     : [];
   // 与设置页同一护栏：只剩一个可见应用时不可再隐藏，否则没有任何 tab 可点
   const canHide = appsToShow.length > 1 && onHideApp !== undefined;
 
   return (
-    <div
-      className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-xl bg-muted p-1"
-      style={{ WebkitAppRegion: "no-drag" } as any}
-    >
-      {/* 可滚动 tab 条带：tab 多到放不下时不再被静默裁剪，滚轮 / 拖拽平移
-          （App 全局隐藏滚动条）；负 margin 抵掉为 × 角标留的溢出空间。 */}
+    <TooltipProvider delayDuration={350}>
       <div
-        ref={stripRef}
-        onPointerDown={handlePointerDown}
-        onClickCapture={handleClickCapture}
-        className={cn(
-          "-mx-2 -my-2 flex min-w-0 touch-pan-x gap-1 overflow-x-auto px-2 py-2",
-          dragging && "cursor-grabbing",
-        )}
+        className="inline-flex max-w-full min-w-0 items-center gap-2 rounded-2xl border border-border/60 bg-card p-2 shadow-sm"
+        style={{ WebkitAppRegion: "no-drag" } as any}
       >
-        {appsToShow.map((app) => {
-          const isActive = activeApp === app;
-          const name = getAppDisplayName(app, t);
-          return (
-            <div key={app} className="group relative">
+        {/* 可滚动 tab 条带：tab 多到放不下时不再被静默裁剪，滚轮 / 拖拽平移
+          （App 全局隐藏滚动条）；负 margin 抵掉为 × 角标留的溢出空间。 */}
+        <div
+          ref={stripRef}
+          onPointerDown={handlePointerDown}
+          onClickCapture={handleClickCapture}
+          className={cn(
+            "-mx-2 -my-2 flex min-w-0 touch-pan-x gap-1 overflow-x-auto px-2 py-2",
+            dragging && "cursor-grabbing",
+          )}
+        >
+          {appsToShow.map((app) => {
+            const isActive = activeApp === app;
+            const name = getAppDisplayName(app, t);
+            return (
+              <div key={app} className="group relative shrink-0">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      ref={isActive ? activeTabRef : undefined}
+                      type="button"
+                      onClick={() => handleSwitch(app)}
+                      disabled={disabled}
+                      aria-pressed={isActive}
+                      aria-label={name}
+                      className={cn(
+                        "inline-flex items-center justify-center w-12 h-11 rounded-xl text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
+                        isActive
+                          ? "bg-blue-500/10 text-blue-600 ring-1 ring-inset ring-blue-500/30 dark:text-blue-400"
+                          : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                      )}
+                    >
+                      <AppGlyph app={app} isActive={isActive} />
+                    </button>
+                  </TooltipTrigger>
+                  <Portal>
+                    <TooltipContent side="bottom">{name}</TooltipContent>
+                  </Portal>
+                </Tooltip>
+                {canHide && (
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    title={t("appSwitcher.hide")}
+                    aria-label={`${t("appSwitcher.hide")}: ${name}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onHideApp?.(app);
+                    }}
+                    className={cn(
+                      "absolute -top-1 -right-1 z-10 flex h-5 w-5 items-center justify-center",
+                      "rounded-full border border-border bg-background text-muted-foreground shadow-sm",
+                      "opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 hover:text-foreground",
+                    )}
+                  >
+                    <X
+                      aria-hidden="true"
+                      className="h-[9px] w-[9px]"
+                      strokeWidth={2.5}
+                    />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {onShowApp && (
+          <Popover open={addOpen} onOpenChange={setAddOpen}>
+            <PopoverTrigger asChild>
               <button
-                ref={isActive ? activeTabRef : undefined}
                 type="button"
-                onClick={() => handleSwitch(app)}
-                title={name}
-                aria-label={name}
+                disabled={disabled}
+                title={t("appSwitcher.add")}
+                aria-label={t("appSwitcher.add")}
                 className={cn(
-                  "inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
-                  isActive
+                  "inline-flex shrink-0 items-center justify-center w-10 h-11 rounded-xl border border-dashed border-border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
+                  addOpen
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground hover:bg-background/50",
                 )}
               >
-                <AppGlyph app={app} isActive={isActive} />
+                <Plus size={20} className="shrink-0" />
               </button>
-              {canHide && (
-                <button
-                  type="button"
-                  title={t("appSwitcher.hide")}
-                  aria-label={`${t("appSwitcher.hide")}: ${name}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onHideApp?.(app);
-                  }}
-                  className={cn(
-                    "absolute -top-1.5 -right-1 z-10 flex h-3.5 w-3.5 items-center justify-center",
-                    "rounded-full border border-border bg-background text-muted-foreground shadow-sm",
-                    "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:text-foreground",
-                  )}
-                >
-                  <X
-                    aria-hidden="true"
-                    className="h-[9px] w-[9px]"
-                    strokeWidth={2.5}
-                  />
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {onShowApp && (
-        <Popover open={addOpen} onOpenChange={setAddOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              title={t("appSwitcher.add")}
-              aria-label={t("appSwitcher.add")}
-              className={cn(
-                "inline-flex shrink-0 items-center px-3 h-8 rounded-md transition-all duration-200",
-                addOpen
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground hover:bg-background/50",
-              )}
+            </PopoverTrigger>
+            <PopoverContent
+              side="bottom"
+              align="end"
+              sideOffset={6}
+              className="z-[100] w-56 p-1"
             >
-              <Plus size={20} className="shrink-0" />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent
-            side="bottom"
-            align="end"
-            sideOffset={6}
-            className="z-[100] w-56 p-1"
-          >
-            {hiddenApps.length === 0 ? (
-              <p className="px-2.5 py-2 text-sm text-muted-foreground">
-                {t("appSwitcher.allShown")}
-              </p>
-            ) : (
-              hiddenApps.map((app) => (
-                <button
-                  key={app}
-                  type="button"
-                  onClick={() => onShowApp(app)}
-                  className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                >
-                  <AppGlyph app={app} isActive={false} />
-                  <span className="truncate">{getAppDisplayName(app, t)}</span>
-                </button>
-              ))
-            )}
-          </PopoverContent>
-        </Popover>
-      )}
-    </div>
+              {hiddenApps.length === 0 ? (
+                <p className="px-2.5 py-2 text-sm text-muted-foreground">
+                  {t("appSwitcher.allShown")}
+                </p>
+              ) : (
+                hiddenApps.map((app) => (
+                  <button
+                    key={app}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => {
+                      onShowApp(app);
+                      setAddOpen(false);
+                    }}
+                    className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <AppGlyph app={app} isActive={false} />
+                    <span className="truncate">
+                      {getAppDisplayName(app, t)}
+                    </span>
+                  </button>
+                ))
+              )}
+            </PopoverContent>
+          </Popover>
+        )}
+      </div>
+    </TooltipProvider>
   );
 }

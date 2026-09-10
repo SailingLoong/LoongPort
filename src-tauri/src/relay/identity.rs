@@ -43,6 +43,16 @@ pub(crate) fn site_domain(origin: &str) -> String {
     }
 }
 
+/// Compare persisted optional site origins through the canonical site identity.
+pub(crate) fn same_site_identity(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            crate::relay::identity::site_domain(left) == crate::relay::identity::site_domain(right)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

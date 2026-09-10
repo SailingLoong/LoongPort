@@ -25,6 +25,8 @@ use crate::app_config::AppType;
 
 /// 当前供应商切换后通知前端（`providersApi.onSwitched` / `RelaySection` 监听）。
 pub const PROVIDER_SWITCHED: &str = "provider-switched";
+/// Remote provider model inventories changed; payload contains appType.
+pub const PROVIDER_MODELS_UPDATED: &str = "provider-models-updated";
 /// 项目应用完成后的统一收尾事件（`App.tsx` / `PromptPanel` 监听）。
 pub const PROFILE_APPLIED: &str = "profile-applied";
 /// 用量缓存写入后通知前端 React Query 失效（`useUsageCacheBridge` 监听）。
@@ -151,6 +153,7 @@ mod consistency_tests {
         // (TS 里的常量名, Rust 侧的值)
         let pairs: &[(&str, &str)] = &[
             ("PROVIDER_SWITCHED", super::PROVIDER_SWITCHED),
+            ("PROVIDER_MODELS_UPDATED", super::PROVIDER_MODELS_UPDATED),
             ("PROFILE_APPLIED", super::PROFILE_APPLIED),
             ("USAGE_CACHE_UPDATED", super::USAGE_CACHE_UPDATED),
             ("USAGE_LOG_RECORDED", super::USAGE_LOG_RECORDED),

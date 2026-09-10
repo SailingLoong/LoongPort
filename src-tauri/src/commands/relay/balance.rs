@@ -20,7 +20,7 @@ pub(crate) fn relay_balance_inputs(
     let mut base_url = None;
     let mut keys: Vec<String> = Vec::new();
     for app_type in AppType::all() {
-        let Ok(providers) = ProviderService::list(state, app_type.clone()) else {
+        let Ok(providers) = state.db.get_all_providers(app_type.as_str()) else {
             continue;
         };
         for provider in providers.values() {

@@ -45,16 +45,27 @@ export const CLIENT_VIEWS: ClientView[] = [
   "hermesMemory",
   "addHub",
 ];
+export interface AccountRoute {
+  kind: "relay" | "vendor";
+  id: number;
+}
+
 export interface ClientRoute {
   view: ClientView;
   app: AppId;
+  account?: AccountRoute;
 }
 export interface NavigationState {
   current: ClientRoute;
   history: ClientRoute[];
 }
 type NavigationAction =
-  | { type: "navigate" | "replace"; view: ClientView; app?: AppId }
+  | {
+      type: "navigate" | "replace";
+      view: ClientView;
+      app?: AppId;
+      account?: AccountRoute;
+    }
   | { type: "app"; app: AppId }
   | { type: "back" };
 export function navigationReducer(
@@ -71,8 +82,19 @@ export function navigationReducer(
     };
   if (action.type === "app")
     return { ...state, current: { ...state.current, app: action.app } };
-  const current = { view: action.view, app: action.app ?? state.current.app };
-  if (current.view === state.current.view && current.app === state.current.app)
+  const current: ClientRoute = {
+    view: action.view,
+    app: action.app ?? state.current.app,
+    ...(action.view === "services" && action.account
+      ? { account: action.account }
+      : {}),
+  };
+  if (
+    current.view === state.current.view &&
+    current.app === state.current.app &&
+    current.account?.kind === state.current.account?.kind &&
+    current.account?.id === state.current.account?.id
+  )
     return state;
   return {
     current,
@@ -97,8 +119,8 @@ export function useClientNavigation(
     };
   });
   const navigate = useCallback(
-    (view: ClientView, app?: AppId) =>
-      dispatch({ type: "navigate", view, app }),
+    (view: ClientView, app?: AppId, account?: AccountRoute) =>
+      dispatch({ type: "navigate", view, app, account }),
     [],
   );
   const replace = useCallback(
@@ -113,6 +135,7 @@ export function useClientNavigation(
   return {
     view: state.current.view,
     app: state.current.app,
+    account: state.current.account,
     navigate,
     replace,
     setApp,

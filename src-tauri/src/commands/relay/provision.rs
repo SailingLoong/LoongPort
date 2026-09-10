@@ -532,20 +532,33 @@ pub(crate) fn persist_provision_batch(
             }
         };
 
+        let available_models = candidate
+            .models
+            .as_ref()
+            .map(|models| crate::relay::model_catalog::filter_models(app_type, models))
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|old| old.available_models.clone())
+            });
         let mut settings_config = match existing {
-            Some(old) => {
-                if user_edited {
-                    let mut kept = old.settings_config;
-                    if provision::patch_api_key(&mut kept, app_type, &candidate.api_key) {
-                        kept
-                    } else {
-                        log::warn!("{display_name} 的配置里找不到放密钥的位置，已重置为默认配置");
-                        defaults
-                    }
-                } else {
-                    preserve_supported_model(app_type, defaults, &old.settings_config)
+            Some(old) if user_edited || candidate.models.is_none() => {
+                // Remote availability never owns editable routing. An unavailable inventory
+                // also cannot establish that the previously selected model disappeared.
+                let mut kept = old.settings_config;
+                if !provision::patch_api_key(&mut kept, app_type, &candidate.api_key) {
+                    batch.failures.push(FailureInfo {
+                        group_name: candidate.group_name,
+                        reason: format!(
+                            "{}: existing configuration has no credential slot",
+                            app_type.as_str()
+                        ),
+                    });
+                    continue;
                 }
+                kept
             }
+            Some(old) => preserve_supported_model(app_type, defaults, &old.settings_config),
             None => defaults,
         };
 
@@ -615,6 +628,7 @@ pub(crate) fn persist_provision_batch(
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: available_models.clone(),
         };
 
         if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
@@ -626,6 +640,21 @@ pub(crate) fn persist_provision_batch(
                 ),
             });
             continue;
+        }
+
+        if let Some(models) = candidate.models.as_ref() {
+            let models = crate::relay::model_catalog::filter_models(app_type, models);
+            if let Err(error) =
+                state
+                    .db
+                    .set_available_models(app_type.as_str(), &provider_id, &models)
+            {
+                batch.failures.push(FailureInfo {
+                    group_name: candidate.group_name.clone(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
         }
 
         // 倍率落库。**这是它唯一的写入点** —— 「刷新倍率」= 重新 provision，
@@ -696,7 +725,7 @@ pub(crate) fn persist_provision_batch(
             display_name,
             model: provision::selected_model(app_type, &provider.settings_config)
                 .unwrap_or_default(),
-            models: models_from_settings(&provider.settings_config),
+            models: crate::relay::model_catalog::available_models(&provider),
             rate_multiplier,
             can_verify_models: verification_target::supports_app_type(app_type),
             user_edited: Some(user_edited),
@@ -861,40 +890,14 @@ pub(crate) fn belongs_to_account(
 ///
 /// 判据即 `relay_balance_inputs` 原内联那份（`(None, Some(_)) => false`），收成函数
 /// 供余额与 `relay_reconciliation`（`commands/reconcile.rs`）共用 —— 归属口径只有一份。
-pub(crate) fn belongs_to_relay(
-    provider: &Provider,
-    site_origin: &str,
-    account_id: Option<i64>,
-) -> bool {
-    if !is_managed(provider) {
-        return false;
-    }
-    if !same_site_identity(provider.website_url.as_deref(), Some(site_origin)) {
-        return false;
-    }
-    match (
-        account_id,
-        provider.meta.as_ref().and_then(|m| m.loongport_account_id),
-    ) {
-        (Some(want), Some(owner)) => want == owner,
-        (_, None) => true,
-        (None, Some(_)) => false,
-    }
-}
+pub(crate) use crate::relay::managed::belongs_to_relay;
 
 /// 两个可选 origin 是否指向**同一站点**（注册域身份，None 与任何值都不相等）。
 ///
 /// 收拢 `website_url` ↔ `site_origin` 这类归属判据：两边都是持久化的 origin 字符串，
 /// 裸相等依赖「写入时同拼写」这个脆弱不变量 —— 同站的面板域与 API 域拼写不同
 /// 就静默失配。身份归一见 [`crate::relay::identity`]。
-pub(crate) fn same_site_identity(left: Option<&str>, right: Option<&str>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => {
-            crate::relay::identity::site_domain(left) == crate::relay::identity::site_domain(right)
-        }
-        _ => false,
-    }
-}
+pub(crate) use crate::relay::identity::same_site_identity;
 
 /// 这个账号名下的档位里，有哪些**正是某个 app 的当前项**。返回 `(app_type, 档位名)`。
 ///
@@ -932,7 +935,7 @@ pub(crate) fn apps_using_this_accounts_tiers(
 ) -> Vec<(AppType, String)> {
     let mut in_use = Vec::new();
     for app_type in AppType::all() {
-        let Ok(list) = ProviderService::list(state, app_type.clone()) else {
+        let Ok(list) = state.db.get_all_providers(app_type.as_str()) else {
             log::warn!(
                 "检查「档位是否在用」时读不出 {} 的 provider 列表，跳过",
                 app_type.as_str()
@@ -1086,6 +1089,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -1129,6 +1133,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         };
         let different_key = Provider {
             id: "cc-switch-different-key".into(),
@@ -1201,6 +1206,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         };
         db.save_provider(app_type.as_str(), &duplicate)
             .expect("写入当前项");
@@ -1254,6 +1260,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         };
         db.save_provider(app_type.as_str(), &duplicate)
             .expect("写入当前项");
@@ -1324,6 +1331,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         };
         let non_managed_candidate = Provider {
             id: "manual-provider".into(),
@@ -1703,6 +1711,93 @@ mod tests {
                 Some(7)
             );
         }
+    }
+
+    #[test]
+    fn unavailable_catalog_refresh_preserves_previous_models_and_selection() {
+        let relay = test_newapi_relay(7);
+        let group = test_newapi_group("standard", "sk-first");
+        let db = Arc::new(crate::database::Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let first =
+            persist_provision_batch(&state, &relay, newapi_batch(&relay, &[group])).unwrap();
+        let id = &first.tiers[0].provider_id;
+        let before = db.get_provider_by_id(id, "codex").unwrap().unwrap();
+        let mut refresh = newapi_batch(&relay, &[test_newapi_group("standard", "sk-second")]);
+        for candidate in &mut refresh.candidates {
+            candidate.models = None;
+            candidate.model = "default-model".into();
+            candidate.roles = None;
+        }
+        persist_provision_batch(&state, &relay, refresh).unwrap();
+        let after = db.get_provider_by_id(id, "codex").unwrap().unwrap();
+        assert_eq!(after.available_models, before.available_models);
+        assert_eq!(
+            models_from_settings(&after.settings_config),
+            models_from_settings(&before.settings_config)
+        );
+        assert_eq!(
+            provision::selected_model(&AppType::Codex, &after.settings_config),
+            provision::selected_model(&AppType::Codex, &before.settings_config)
+        );
+        assert_eq!(
+            provision::extract_api_key(&after.settings_config, &AppType::Codex).as_deref(),
+            Some("sk-second")
+        );
+    }
+
+    #[test]
+    fn refreshed_catalog_repairs_edited_legacy_provider_without_resetting_configuration() {
+        let relay = test_newapi_relay(7);
+        let group = test_newapi_group("standard", "sk-first");
+        let db = Arc::new(crate::database::Database::memory().unwrap());
+        let state = AppState::new(db.clone());
+        let first =
+            persist_provision_batch(&state, &relay, newapi_batch(&relay, &[group])).unwrap();
+        let id = &first.tiers[0].provider_id;
+        let mut legacy = db.get_provider_by_id(id, "codex").unwrap().unwrap();
+        legacy
+            .settings_config
+            .as_object_mut()
+            .unwrap()
+            .remove("modelCatalog");
+        legacy.settings_config["config"] =
+            serde_json::json!("model = \"custom-model\"\nmodel_reasoning_effort = \"high\"\n");
+        let preserved_config = legacy.settings_config["config"].clone();
+        db.save_provider("codex", &legacy).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET available_models=NULL WHERE id=?1 AND app_type='codex'",
+                [id],
+            )
+            .unwrap();
+        db.set_user_edited("codex", id, true).unwrap();
+        let refreshed = persist_provision_batch(
+            &state,
+            &relay,
+            newapi_batch(&relay, &[test_newapi_group("standard", "sk-second")]),
+        )
+        .unwrap();
+        let after = db.get_provider_by_id(id, "codex").unwrap().unwrap();
+        assert_eq!(
+            refreshed
+                .tiers
+                .iter()
+                .find(|tier| tier.app_id == "codex")
+                .unwrap()
+                .models,
+            crate::relay::model_catalog::available_models(&after)
+        );
+        assert_eq!(
+            crate::proxy::auto_strategy::tier_models(&after),
+            crate::relay::model_catalog::available_models(&after)
+        );
+        assert!(!after.available_models.as_ref().unwrap().is_empty());
+        assert!(after.settings_config.get("modelCatalog").is_none());
+        assert_eq!(after.settings_config["config"], preserved_config);
+        assert!(db.get_user_edited("codex", id).unwrap());
     }
 
     #[test]

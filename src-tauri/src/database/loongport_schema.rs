@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 20;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 21;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -303,6 +303,20 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                     })?;
                 crate::relay::balance::create_site_balance_cache_table(conn)?;
                 set_version(conn, 20)?;
+            }
+            20 => {
+                if table_exists(conn, "providers")?
+                    && !column_exists(conn, "providers", "available_models")?
+                {
+                    conn.execute("ALTER TABLE providers ADD COLUMN available_models TEXT", [])
+                        .map_err(|error| AppError::Database(error.to_string()))?;
+                }
+                if table_exists(conn, "providers")?
+                    && column_exists(conn, "providers", "user_edited")?
+                {
+                    crate::relay::model_catalog::seed_legacy_inventories(conn)?;
+                }
+                set_version(conn, 21)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -2303,5 +2317,48 @@ mod tests {
             );
         }
         assert!(checked >= 1, "一个上游预检调用点都没找到 —— 匹配规则失效了");
+    }
+    #[test]
+    fn v20_model_inventory_migration_preserves_existing_configuration() {
+        let db = crate::database::Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("ALTER TABLE providers DROP COLUMN available_models", [])
+            .unwrap();
+        conn.execute("INSERT INTO providers(id,app_type,name,settings_config) VALUES('legacy','codex','Legacy','{}')", []).unwrap();
+        let generated =
+            crate::relay::provision::provider_id_for("https://relay.example", Some(1), 1);
+        let edited = crate::relay::provision::provider_id_for("https://relay.example", Some(1), 2);
+        for (id, user_edited) in [(&generated, false), (&edited, true)] {
+            conn.execute("INSERT INTO providers(id,app_type,name,settings_config,user_edited) VALUES(?1,'codex','Example',?2,?3)",
+                rusqlite::params![id, r#"{"modelCatalog":{"models":[{"model":"remote-model"}]}}"#, user_edited]).unwrap();
+        }
+        set_version(&conn, 20).unwrap();
+        apply(&conn).unwrap();
+        let seeded: Option<String> = conn
+            .query_row(
+                "SELECT available_models FROM providers WHERE id=?1",
+                [&generated],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(seeded.as_deref(), Some(r#"["remote-model"]"#));
+        let untrusted: Option<String> = conn
+            .query_row(
+                "SELECT available_models FROM providers WHERE id=?1",
+                [&edited],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(untrusted.is_none());
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT settings_config, available_models FROM providers WHERE id='legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("{}".into(), None));
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+        apply(&conn).unwrap();
     }
 }

@@ -63,9 +63,7 @@ export function OfficialApiPage({
   return (
     <div
       className={
-        embedded
-          ? "flex w-full flex-col"
-          : "mx-auto flex h-full w-full max-w-[1180px] flex-col px-6 pb-6"
+        embedded ? "flex w-full flex-col" : "page-content flex h-full flex-col"
       }
     >
       <div className="flex items-start gap-3 border-b border-border-default py-4">

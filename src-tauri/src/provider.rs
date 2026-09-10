@@ -13,6 +13,10 @@ pub struct Provider {
     pub name: String,
     #[serde(rename = "settingsConfig")]
     pub settings_config: Value,
+    /// Read-only projection of the relay-owned remote model inventory.
+    /// Generic provider saves and live configuration never own this value.
+    #[serde(skip)]
+    pub available_models: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "websiteUrl")]
     pub website_url: Option<String>,
@@ -64,6 +68,7 @@ impl Provider {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -880,6 +885,7 @@ impl UniversalProvider {
             icon: self.icon.clone(),
             icon_color: self.icon_color.clone(),
             in_failover_queue: false,
+            available_models: None,
         })
     }
 
@@ -945,6 +951,7 @@ requires_openai_auth = true"#
             icon: self.icon.clone(),
             icon_color: self.icon_color.clone(),
             in_failover_queue: false,
+            available_models: None,
         })
     }
 
@@ -980,6 +987,7 @@ requires_openai_auth = true"#
             icon: self.icon.clone(),
             icon_color: self.icon_color.clone(),
             in_failover_queue: false,
+            available_models: None,
         })
     }
 }

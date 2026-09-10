@@ -1398,6 +1398,16 @@ pub fn run() {
                     {
                         log::warn!("启动刷新 codex catalog 投影失败: {e}");
                     }
+                    match crate::relay::model_catalog::repair_missing(&state.db).await {
+                        Ok(changed) => {
+                            let apps: std::collections::HashSet<_> = changed.iter().map(|(app, _)| app.as_str()).collect();
+                            for app in apps {
+                                let _ = handle.emit(crate::events::PROVIDER_MODELS_UPDATED, serde_json::json!({"appType": app}));
+                            }
+                            if !changed.is_empty() { crate::tray::refresh_tray_menu(&handle); }
+                        }
+                        Err(error) => log::warn!("Could not repair missing model inventories: {error}"),
+                    }
                 });
             }
 
@@ -1740,6 +1750,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_providers,
+            commands::get_application_overview,
             commands::preset_referral_urls,
             commands::get_current_provider,
             commands::add_provider,
@@ -1833,6 +1844,7 @@ pub fn run() {
             commands::read_live_provider_settings,
             commands::get_provider_edit_settings,
             commands::get_settings,
+            commands::set_app_visibility,
             commands::save_settings,
             commands::plaza_set_visible,
             commands::plaza_seed_from_first_site,

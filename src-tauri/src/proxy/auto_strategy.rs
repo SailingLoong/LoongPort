@@ -204,10 +204,9 @@ pub fn set_model_pref(
     )
 }
 
-/// 档位的模型目录（settings_config.modelCatalog）。目前只有 Codex 系托管档位
-/// 在 provision 时写目录；返回空 = 该档位没有目录（不参与模型过滤）。
+/// 档位的可用模型由模型目录领域负责；编辑映射不决定中转站的远端库存。
 pub fn tier_models(tier: &Provider) -> Vec<String> {
-    crate::relay::provision::models_from_settings(&tier.settings_config)
+    crate::relay::model_catalog::available_models(tier)
 }
 
 /// 自动模式的可选模型清单：该应用全部托管档位模型目录的**并集**（去重）。
@@ -779,6 +778,12 @@ mod tests {
             let mut p = tier(id, id);
             p.settings_config = settings;
             db.save_provider("codex", &p).unwrap();
+            db.set_available_models(
+                "codex",
+                &p.id,
+                &crate::relay::provision::models_from_settings(&p.settings_config),
+            )
+            .unwrap();
         }
 
         // 偏好 sol → 只剩目录含 sol 的档位（无目录档位被排除）

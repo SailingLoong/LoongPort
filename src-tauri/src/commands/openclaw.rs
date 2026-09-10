@@ -55,9 +55,18 @@ pub fn get_openclaw_default_model() -> Result<Option<openclaw_config::OpenClawDe
 /// Set OpenClaw default model config (agents.defaults.model)
 #[tauri::command]
 pub fn set_openclaw_default_model(
+    state: State<'_, AppState>,
     model: openclaw_config::OpenClawDefaultModel,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    openclaw_config::set_default_model(&model).map_err(|e| e.to_string())
+    let outcome = openclaw_config::set_default_model(&model).map_err(|e| e.to_string())?;
+    if let Some((provider_id, _)) = model.primary.split_once('/') {
+        crate::services::application_overview::record_successful_selection(
+            &state.db,
+            &crate::app_config::AppType::OpenClaw,
+            provider_id,
+        );
+    }
+    Ok(outcome)
 }
 
 /// Get OpenClaw model catalog/allowlist (agents.defaults.models)
@@ -85,9 +94,42 @@ pub fn get_openclaw_agents_defaults(
 /// Set full agents.defaults config (all fields)
 #[tauri::command]
 pub fn set_openclaw_agents_defaults(
+    state: State<'_, AppState>,
     defaults: openclaw_config::OpenClawAgentsDefaults,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    openclaw_config::set_agents_defaults(&defaults).map_err(|e| e.to_string())
+    set_openclaw_agents_defaults_internal(state.inner(), defaults)
+}
+
+fn set_openclaw_agents_defaults_internal(
+    state: &AppState,
+    defaults: openclaw_config::OpenClawAgentsDefaults,
+) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
+    let previous = openclaw_config::get_default_model()
+        .map_err(|error| error.to_string())?
+        .map(|model| model.primary);
+    let outcome =
+        openclaw_config::set_agents_defaults(&defaults).map_err(|error| error.to_string())?;
+    if let Some(model) = defaults
+        .model
+        .filter(|model| previous.as_deref() != Some(model.primary.as_str()))
+    {
+        if let Some((provider_id, _)) = model.primary.split_once('/') {
+            crate::services::application_overview::record_successful_selection(
+                &state.db,
+                &crate::app_config::AppType::OpenClaw,
+                provider_id,
+            );
+        }
+    }
+    Ok(outcome)
+}
+
+#[cfg_attr(not(feature = "test-hooks"), doc(hidden))]
+pub fn set_openclaw_agents_defaults_test_hook(
+    state: &AppState,
+    defaults: openclaw_config::OpenClawAgentsDefaults,
+) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
+    set_openclaw_agents_defaults_internal(state, defaults)
 }
 
 // ============================================================================

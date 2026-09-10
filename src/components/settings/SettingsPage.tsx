@@ -221,7 +221,7 @@ export function SettingsPage({
   const isBusy = useMemo(() => isLoading && !settings, [isLoading, settings]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden px-6">
+    <div className="flex flex-col h-full overflow-hidden page-content">
       {isBusy ? (
         <div className="flex flex-1 items-center justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -232,7 +232,7 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full mb-6 glass rounded-lg grid-cols-6">
+          <TabsList className="grid w-full mb-6 shrink-0 grid-cols-6">
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
             </TabsTrigger>

@@ -41,6 +41,8 @@ export type FrontendSettings = Settings & { visibleApps: VisibleApps };
 export const PLAZA_VISIBLE_DEFAULT = false;
 
 export const settingsApi = {
+  setAppVisibility: (app: AppId, visible: boolean) =>
+    invoke<VisibleApps>("set_app_visibility", { app, visible }),
   async get(): Promise<FrontendSettings> {
     return await invoke("get_settings");
   },

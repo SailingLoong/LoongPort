@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import type { AccountRoute } from "@/components/shell/navigation";
 import { getAppDisplayName } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import { RelaySection, type RelaySectionProps } from "../RelaySection";
@@ -21,6 +22,9 @@ import {
 
 export interface ServicesPageProps {
   appId: AppId;
+  account?: AccountRoute;
+  onBack?: () => void;
+  onSelectAccount?: (account: AccountRoute | undefined, app: AppId) => void;
   onOpenAddHub: RelaySectionProps["onOpenAddHub"];
   onOpenApp: (appId: AppId) => void;
 }
@@ -30,16 +34,31 @@ const accountName = (account: ServiceAccount) =>
 
 export function ServicesPage({
   appId,
+  account,
+  onBack,
+  onSelectAccount,
   onOpenAddHub,
   onOpenApp,
 }: ServicesPageProps) {
   const { t } = useTranslation();
   const { accounts, isPending, error, reload } = useServiceAccounts();
-  const [selection, setSelection] = useState<{
+  const [localSelection, setLocalSelection] = useState<{
     kind: ServiceAccount["kind"];
     id: number;
     appId: AppId;
   } | null>(null);
+  const selection = onSelectAccount
+    ? account
+      ? { ...account, appId }
+      : null
+    : localSelection;
+  const setSelection = (
+    next: { kind: AccountRoute["kind"]; id: number; appId: AppId } | null,
+  ) => {
+    if (onSelectAccount)
+      onSelectAccount(next ?? undefined, next?.appId ?? appId);
+    else setLocalSelection(next);
+  };
   const selected =
     selection &&
     accounts.find(
@@ -49,16 +68,17 @@ export function ServicesPage({
 
   if (selection) {
     return (
-      <section className="space-y-6">
+      <section className="page-content space-y-6">
         <Button
           variant="ghost"
           onClick={() => {
-            setSelection(null);
+            if (onBack) onBack();
+            else setSelection(null);
             void reload();
           }}
         >
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          {t("loongport.accounts.back")}
+          <ArrowLeft className="h-4 w-4" />
+          {t(onBack ? "common.back" : "loongport.accounts.back")}
         </Button>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -103,7 +123,7 @@ export function ServicesPage({
                 onClick={() => onOpenApp(selection.appId)}
               >
                 {t("loongport.accounts.openApp")}
-                <ArrowRight className="ml-2 h-4 w-4" />
+                <ArrowRight className="h-4 w-4" />
               </Button>
             </div>
           )}
@@ -119,18 +139,15 @@ export function ServicesPage({
   }
 
   return (
-    <section className="space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-4">
+    <section className="page-content space-y-6">
+      <header className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {t("loongport.accounts.title")}
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground">
+          <p className="max-w-xl text-sm leading-6 text-muted-foreground">
             {t("loongport.accounts.description")}
           </p>
         </div>
         <Button onClick={() => onOpenAddHub("directory")}>
-          <Plus className="mr-2 h-4 w-4" />
+          <Plus className="h-4 w-4" />
           {t("loongport.accounts.add")}
         </Button>
       </header>
@@ -206,32 +223,34 @@ export function ServicesPage({
                   }
                 >
                   {t("loongport.accounts.detail")}
-                  <ArrowRight className="ml-2 h-4 w-4" />
+                  <ArrowRight className="h-4 w-4" />
                 </Button>
               </div>
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
-                <div className="flex flex-wrap gap-1">
-                  {apps.map((app) => (
-                    <Button
-                      key={app}
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 text-xs"
-                      onClick={() => onOpenApp(app)}
-                    >
-                      {getAppDisplayName(app, t)}
-                      <ArrowRight className="ml-1 h-3 w-3" />
-                    </Button>
-                  ))}
+              {(apps.length > 0 || account.row.canQueryBalance) && (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
+                  <div className="flex flex-wrap gap-1">
+                    {apps.map((app) => (
+                      <Button
+                        key={app}
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={() => onOpenApp(app)}
+                      >
+                        {getAppDisplayName(app, t)}
+                        <ArrowRight className="ml-1 h-3 w-3" />
+                      </Button>
+                    ))}
+                  </div>
+                  {account.row.canQueryBalance && (
+                    <RowBalance
+                      rowKind={account.kind}
+                      rowId={account.id}
+                      enabled={account.row.canQueryBalance}
+                    />
+                  )}
                 </div>
-                {account.row.canQueryBalance && (
-                  <RowBalance
-                    rowKind={account.kind}
-                    rowId={account.id}
-                    enabled={account.row.canQueryBalance}
-                  />
-                )}
-              </div>
+              )}
             </article>
           );
         })}

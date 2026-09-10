@@ -175,41 +175,12 @@ async fn select_tier_model_impl(
     }
 
     let state = app_handle.state::<AppState>();
-    let original_settings = state
+    let provider = state
         .db
         .get_provider_by_id(provider_id, app_type.as_str())?
-        .ok_or_else(|| AppError::Config("这个档位不存在".to_string()))?
-        .settings_config;
-    let settings = match &app_type {
-        AppType::Codex => select_codex_model(&original_settings, model)?,
-        AppType::GrokBuild => {
-            let bare = model.trim();
-            if bare.is_empty()
-                || !models_from_settings(&original_settings)
-                    .iter()
-                    .any(|candidate| candidate == bare)
-            {
-                return Err(AppError::Config(format!(
-                    "模型 {bare:?} 不在这个档位支持的模型列表中"
-                )));
-            }
-            select_grok_model(&original_settings, bare)?
-        }
-        // env 形状：成员资格对着目录校验（select_codex_model 内置，这里对齐）
-        _ => {
-            let bare = model.trim();
-            if bare.is_empty()
-                || !models_from_settings(&original_settings)
-                    .iter()
-                    .any(|candidate| candidate == bare)
-            {
-                return Err(AppError::Config(format!(
-                    "模型 {bare:?} 不在这个档位支持的模型列表中"
-                )));
-            }
-            provision::select_env_model(&app_type, &original_settings, bare)?
-        }
-    };
+        .ok_or_else(|| AppError::Config("这个档位不存在".to_string()))?;
+    let settings = crate::relay::model_catalog::select_model(&app_type, &provider, model)?;
+    let original_settings = provider.settings_config;
 
     state
         .db
@@ -303,6 +274,11 @@ async fn switch_tier_impl(
     //
     // 两条切换路径都发，共用 `commands::provider::emit_provider_switched` 那一份实现 ——
     // payload 形状复制第二遍的必然结局是两份分叉（那边的文档写了完整理由）。
+    crate::services::application_overview::record_successful_selection(
+        &app_handle.state::<AppState>().db,
+        &app_type_for_event,
+        provider_id,
+    );
     emit_provider_switched(app_handle, &app_type_for_event, provider_id);
 
     // 托盘也要跟上：这里不刷，用户从主界面切完档位、再看托盘标题还是旧的

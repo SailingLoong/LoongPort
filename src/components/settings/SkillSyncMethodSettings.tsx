@@ -1,6 +1,5 @@
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import type { SkillSyncMethod } from "@/types";
 
 export interface SkillSyncMethodSettingsProps {
@@ -64,13 +63,9 @@ function SyncMethodButton({
       type="button"
       onClick={onClick}
       size="sm"
-      variant={active ? "default" : "ghost"}
-      className={cn(
-        "min-w-[96px]",
-        active
-          ? "shadow-sm"
-          : "text-muted-foreground hover:text-foreground hover:bg-muted",
-      )}
+      variant="toggle"
+      aria-pressed={active}
+      className="min-w-[96px]"
     >
       {children}
     </Button>

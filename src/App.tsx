@@ -48,6 +48,7 @@ import { hermesApi } from "@/lib/api/hermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useRelayDirectoryCacheBridge } from "@/hooks/useRelayDirectoryCacheBridge";
+import { useProviderModelsCacheBridge } from "@/hooks/useProviderModelsCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
@@ -64,7 +65,7 @@ import {
   DRAG_REGION_STYLE,
 } from "@/lib/platform";
 import { PreservedView } from "@/components/ui/PreservedView";
-import { ApplicationPicker } from "@/components/shell/ApplicationPicker";
+import { AppSwitcher } from "@/components/AppSwitcher";
 import { ClientSidebar } from "@/components/shell/ClientSidebar";
 import { FeatureHub } from "@/components/shell/FeatureHub";
 import {
@@ -72,6 +73,7 @@ import {
   useClientNavigation,
   type ClientView as View,
 } from "@/components/shell/navigation";
+import { ApplicationWorkspace } from "@/components/applications/ApplicationWorkspace";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
 import { RelayDirectoryConnectionPage } from "@/components/relay/onboarding/RelayDirectoryConnectionPage";
 import { useServiceOnboardingStatus } from "@/components/relay/onboarding/useServiceOnboarding";
@@ -106,7 +108,6 @@ import UnifiedSkillsPanel, {
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { ImageTabPage } from "@/components/relay/ImageTabPage";
-import { RelaySection } from "@/components/relay/RelaySection";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
@@ -253,6 +254,7 @@ function App() {
 
   useUsageCacheBridge();
   useRelayDirectoryCacheBridge();
+  useProviderModelsCacheBridge();
 
   const promptPanelRef = useRef<PromptPanelHandle>(null);
   const [promptPrimaryAction, setPromptPrimaryAction] =
@@ -1000,7 +1002,78 @@ function App() {
     );
   };
 
+  const [visibilityBusy, setVisibilityBusy] = useState(false);
+  const changeAppVisibility = async (app: AppId, visible: boolean) => {
+    if (visibilityBusy) return;
+    setVisibilityBusy(true);
+    try {
+      const nextVisibility = await settingsApi.setAppVisibility(app, visible);
+      await queryClient.invalidateQueries({ queryKey: ["settings"] });
+      if (visible) setActiveApp(app);
+      else if (app === activeApp) {
+        const next = APP_IDS.find(
+          (candidate) =>
+            candidate !== app &&
+            candidate !== "codex-image" &&
+            nextVisibility[candidate],
+        );
+        if (next) setActiveApp(next);
+      }
+    } catch (error) {
+      toast.error(extractErrorMessage(error));
+    } finally {
+      setVisibilityBusy(false);
+    }
+  };
+
   const renderContent = () => {
+    const providerList = (
+      <ProviderList
+        providers={providers}
+        appId={activeApp}
+        isLoading={isLoading}
+        isProxyRunning={currentAppUsesProxy && isProxyRunning}
+        isProxyTakeover={isProxyRunning && isCurrentAppTakeoverActive}
+        activeProviderId={activeProviderId}
+        onSwitch={activeApp === "pi" ? handleEnablePiProvider : guardedSwitch}
+        onEdit={(provider) => {
+          setEditingProvider(provider);
+        }}
+        onDelete={(provider) =>
+          setConfirmAction({ provider, action: "delete" })
+        }
+        onRemoveFromConfig={
+          activeApp === "opencode" ||
+          activeApp === "openclaw" ||
+          activeApp === "hermes" ||
+          activeApp === "pi"
+            ? (provider) =>
+                setConfirmAction({
+                  provider,
+                  action: "remove",
+                })
+            : undefined
+        }
+        onDisableOmo={activeApp === "opencode" ? handleDisableOmo : undefined}
+        onDisableOmoSlim={
+          activeApp === "opencode" ? handleDisableOmoSlim : undefined
+        }
+        onDuplicate={handleDuplicateProvider}
+        onConfigureUsage={setUsageProvider}
+        onOpenWebsite={handleOpenWebsite}
+        onOpenTerminal={activeApp === "claude" ? handleOpenTerminal : undefined}
+        onCreate={() => handleOpenAddHub()}
+        onSetAsDefault={
+          activeApp === "openclaw"
+            ? setAsDefaultModel
+            : activeApp === "hermes"
+              ? // switchProvider 的第二参是 quitChatgpt?: boolean，
+                // 这里只需要 (provider) 形状，包一层避免与 modelId 签名冲突。
+                (provider) => switchProvider(provider)
+              : undefined
+        }
+      />
+    );
     const content = (() => {
       switch (currentView) {
         case "records":
@@ -1075,7 +1148,7 @@ function App() {
           return <AgentsPanel onOpenChange={goBack} />;
         case "universal":
           return (
-            <div className="px-6 pt-4">
+            <div className="page-content">
               <UniversalProviderPanel />
             </div>
           );
@@ -1097,9 +1170,24 @@ function App() {
           return <AgentsDefaultsPanel />;
         default:
           return (
-            <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
+            <div className="page-content flex flex-col flex-1 min-h-0 gap-5 overflow-hidden">
+              {activeApp !== "codex-image" && (
+                <div className="flex min-w-0">
+                  <AppSwitcher
+                    activeApp={activeApp}
+                    onSwitch={setActiveApp}
+                    visibleApps={visibleApps}
+                    applications={APP_IDS.filter(
+                      (app) => app !== "codex-image",
+                    )}
+                    disabled={visibilityBusy}
+                    onHideApp={(app) => void changeAppVisibility(app, false)}
+                    onShowApp={(app) => void changeAppVisibility(app, true)}
+                  />
+                </div>
+              )}
               {proxyAppId ? <AppModeSegmented activeApp={proxyAppId} /> : null}
-              <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
+              <div className="flex-1 overflow-y-auto overflow-x-hidden pb-4">
                 <AnimatePresence mode="wait">
                   <motion.div
                     key={activeApp}
@@ -1123,93 +1211,29 @@ function App() {
                       />
                     ) : (
                       <>
-                        {/* LoongPort 的「中转站 × 分组」区，装在手工 provider 列表**上方**。
-                        它自带全部状态（见 RelaySection 的文档）—— 这里只挂一行，
-                        不把 relay 的逻辑摊进这个上游文件。
-                        生图页（codex-image）多一层外壳：ImageTabPage 提供
-                        「生成 / 档位」分段（生成 = App 内直接生图），档位视图内嵌
-                        同一个 RelaySection；其余 app 直接渲染 RelaySection。
-                        它内部已按「中转站 / 官方 API」两大块渲染；两块与下面
-                        「其他」的添加入口统一收在顶栏大「+」（点开是 AddHubPage
-                        聚合页，三标签就地切换）。 */}
                         {activeApp === "codex-image" ? (
-                          <ImageTabPage onOpenAddHub={handleOpenAddHub} />
+                          <>
+                            <ImageTabPage onOpenAddHub={handleOpenAddHub} />
+                            {providerList}
+                          </>
                         ) : (
-                          <RelaySection
+                          <ApplicationWorkspace
+                            key={activeApp}
                             appId={activeApp}
-                            onOpenAddHub={handleOpenAddHub}
-                          />
+                            providers={providers}
+                            onSwitchProvider={
+                              activeApp === "pi"
+                                ? handleEnablePiProvider
+                                : guardedSwitch
+                            }
+                            onOpenAccount={(account) =>
+                              setCurrentView("services", activeApp, account)
+                            }
+                            onAdd={() => handleOpenAddHub()}
+                          >
+                            {providerList}
+                          </ApplicationWorkspace>
                         )}
-
-                        {/* 「其他」块：cc-switch 的供应商列表原样复用，添加入口在顶栏 +。
-                        生图页（codex-image）保持改动前的形态，不套三大块布局。 */}
-                        {activeApp !== "codex-image" && (
-                          <h2 className="text-sm font-medium">
-                            {t("loongport.sections.other")}
-                          </h2>
-                        )}
-
-                        <ProviderList
-                          providers={providers}
-                          appId={activeApp}
-                          isLoading={isLoading}
-                          isProxyRunning={currentAppUsesProxy && isProxyRunning}
-                          isProxyTakeover={
-                            isProxyRunning && isCurrentAppTakeoverActive
-                          }
-                          activeProviderId={activeProviderId}
-                          onSwitch={
-                            activeApp === "pi"
-                              ? handleEnablePiProvider
-                              : guardedSwitch
-                          }
-                          onEdit={(provider) => {
-                            setEditingProvider(provider);
-                          }}
-                          onDelete={(provider) =>
-                            setConfirmAction({ provider, action: "delete" })
-                          }
-                          onRemoveFromConfig={
-                            activeApp === "opencode" ||
-                            activeApp === "openclaw" ||
-                            activeApp === "hermes" ||
-                            activeApp === "pi"
-                              ? (provider) =>
-                                  setConfirmAction({
-                                    provider,
-                                    action: "remove",
-                                  })
-                              : undefined
-                          }
-                          onDisableOmo={
-                            activeApp === "opencode"
-                              ? handleDisableOmo
-                              : undefined
-                          }
-                          onDisableOmoSlim={
-                            activeApp === "opencode"
-                              ? handleDisableOmoSlim
-                              : undefined
-                          }
-                          onDuplicate={handleDuplicateProvider}
-                          onConfigureUsage={setUsageProvider}
-                          onOpenWebsite={handleOpenWebsite}
-                          onOpenTerminal={
-                            activeApp === "claude"
-                              ? handleOpenTerminal
-                              : undefined
-                          }
-                          onCreate={() => handleOpenAddHub()}
-                          onSetAsDefault={
-                            activeApp === "openclaw"
-                              ? setAsDefaultModel
-                              : activeApp === "hermes"
-                                ? // switchProvider 的第二参是 quitChatgpt?: boolean，
-                                  // 这里只需要 (provider) 形状，包一层避免与 modelId 签名冲突。
-                                  (provider) => switchProvider(provider)
-                                : undefined
-                          }
-                        />
                       </>
                     )}
                   </motion.div>
@@ -1224,7 +1248,7 @@ function App() {
       <AnimatePresence mode="wait">
         <motion.div
           key={currentView}
-          className="flex-1 min-h-0"
+          className="flex flex-col flex-1 min-h-0"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -1238,7 +1262,7 @@ function App() {
 
   return (
     <div
-      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pb-4 pl-[176px]"
+      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pl-[var(--sidebar-width)]"
       style={{
         overflowX: "hidden",
         paddingTop: currentView === "addHub" ? dragBarHeight : contentTopOffset,
@@ -1348,7 +1372,7 @@ function App() {
 
       <header
         hidden={currentView === "addHub"}
-        className="fixed left-[176px] right-0 z-50 border-b border-border-default bg-background"
+        className="fixed left-[var(--sidebar-width)] right-0 z-50 border-b border-border-default bg-background"
         {...DRAG_REGION_ATTR}
         style={
           {
@@ -1359,7 +1383,7 @@ function App() {
         }
       >
         <div
-          className="flex h-full items-center justify-between gap-2 px-6"
+          className="flex h-full items-center justify-between gap-4 page-header"
           {...DRAG_REGION_ATTR}
           style={{ ...DRAG_REGION_STYLE } as any}
         >
@@ -1370,7 +1394,7 @@ function App() {
             {!isApplicationView ? (
               <div className="flex items-center gap-2">
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
                   disabled={managementBusy}
                   onClick={goBack}
@@ -1462,16 +1486,6 @@ function App() {
                   <ProfileSwitcher activeApp={activeApp} />
                 </div>
               )}
-            {/* 应用选择保留完整应用目录。 */}
-            <div className="flex flex-1 min-w-0 items-center justify-end overflow-hidden py-4">
-              {currentView === "providers" && activeApp !== "codex-image" && (
-                <ApplicationPicker
-                  activeApp={activeApp}
-                  onSwitch={setActiveApp}
-                  visibleApps={visibleApps}
-                />
-              )}
-            </div>
             {/* 固定右端：主操作（添加供应商等）shrink-0，任何配置下不被挤出 */}
             <div className="flex shrink-0 items-center py-4">
               <div
@@ -1651,6 +1665,11 @@ function App() {
         <PreservedView active={currentView === "services"}>
           <ServicesPage
             appId={activeApp}
+            account={navigation.account}
+            onBack={navigation.back}
+            onSelectAccount={(account, app) =>
+              setCurrentView("services", app, account)
+            }
             onOpenAddHub={handleOpenAddHub}
             onOpenApp={(app) =>
               setCurrentView(app === "codex-image" ? "image" : "providers", app)

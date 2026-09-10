@@ -21,7 +21,10 @@ import type {
   RelayUsageBlocker,
   TierInfo,
 } from "@/lib/api/relay";
-import { ONBOARDING_REGISTER_COMPLETED } from "@/lib/api/events";
+import {
+  ONBOARDING_REGISTER_COMPLETED,
+  PROVIDER_MODELS_UPDATED,
+} from "@/lib/api/events";
 import { type OnboardingRegisterCompleted } from "@/lib/onboarding";
 import {
   vendorApi,
@@ -352,6 +355,9 @@ export function RelaySection({
   useTauriEvent<ProviderSwitchEvent>(PROVIDER_SWITCHED, (payload) => {
     if (payload?.appType !== appId) return;
     void reload();
+  });
+  useTauriEvent<{ appType: AppId }>(PROVIDER_MODELS_UPDATED, (payload) => {
+    if (payload.appType === appId) void reload();
   });
 
   /**

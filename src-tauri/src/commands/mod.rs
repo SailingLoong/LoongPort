@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+mod application_overview;
+pub use application_overview::*;
 mod auth;
 // 自动模式（系统按策略挑托管档位）：选路在 proxy 层，这里是开关/策略命令层。
 pub(crate) mod auto_mode;

@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
 type LanguageOption = "zh" | "zh-TW" | "en" | "ja";
@@ -53,13 +52,9 @@ function LanguageButton({ active, onClick, children }: LanguageButtonProps) {
       type="button"
       onClick={onClick}
       size="sm"
-      variant={active ? "default" : "ghost"}
-      className={cn(
-        "min-w-[96px]",
-        active
-          ? "shadow-sm"
-          : "text-muted-foreground hover:text-foreground hover:bg-muted",
-      )}
+      variant="toggle"
+      aria-pressed={active}
+      className="min-w-[96px]"
     >
       {children}
     </Button>

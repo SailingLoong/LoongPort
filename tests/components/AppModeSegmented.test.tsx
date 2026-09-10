@@ -59,7 +59,8 @@ describe("AppModeSegmented", () => {
     const easy = screen.getByRole("button", { name: "省心" });
     const self = screen.getByRole("button", { name: "自主" });
     expect(easy).toBeEnabled();
-    expect(self.className).toContain("emerald");
+    expect(self).toHaveAttribute("aria-pressed", "true");
+    expect(easy).toHaveAttribute("aria-pressed", "false");
     // 点已选中的模式是无操作，不触发任何编排
     fireEvent.click(self);
     expect(enableFlowMock).not.toHaveBeenCalled();

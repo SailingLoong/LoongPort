@@ -34,9 +34,9 @@ export function ServiceConfiguration({
     finish,
   } = useServiceConfiguration(account, sourceAppId, onDone);
   return (
-    <div className="mx-auto w-full max-w-2xl py-6">
+    <div className="mx-auto w-full max-w-2xl pb-6">
       <Button variant="ghost" onClick={onBack} disabled={busy}>
-        <ArrowLeft className="mr-2 h-4 w-4" />
+        <ArrowLeft className="h-4 w-4" />
         {t("common.back")}
       </Button>
       <h1 className="mt-5 text-xl font-semibold">
@@ -121,13 +121,15 @@ export function ServiceConfiguration({
           </details>
         </div>
       )}
-      <Button
-        onClick={() => void finish()}
-        disabled={busy || !choices.data || !status.data}
-      >
-        {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-        {t("loongport.onboarding.finish")}
-      </Button>
+      <div className="flex justify-end border-t border-border-default pt-5">
+        <Button
+          onClick={() => void finish()}
+          disabled={busy || !choices.data || !status.data}
+        >
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+          {t("loongport.onboarding.finish")}
+        </Button>
+      </div>
       <SwitchTierConfirmDialog
         targetName={confirmation}
         onCancel={() => resolveConfirmation(null)}

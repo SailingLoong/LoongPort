@@ -1,5 +1,20 @@
 import { useTranslation } from "react-i18next";
-import { ArrowRight } from "lucide-react";
+import {
+  ArrowRight,
+  Activity,
+  MessageSquare,
+  Plug,
+  Sparkles,
+  FileText,
+  Bot,
+  Layers3,
+  Folder,
+  Settings2,
+  Wrench,
+  Brain,
+  LayoutDashboard,
+  type LucideIcon,
+} from "lucide-react";
 import type { AppId } from "@/lib/api";
 import type { ClientView } from "./navigation";
 import { Button } from "@/components/ui/button";
@@ -18,32 +33,56 @@ export function FeatureHub({
   onLaunchDashboard: () => void;
 }) {
   const { t } = useTranslation();
-  const entries: { key: string; action: () => void }[] =
+  const entries: { key: string; icon: LucideIcon; action: () => void }[] =
     kind === "records"
       ? [
-          { key: "usage", action: onUsage },
+          { key: "usage", icon: Activity, action: onUsage },
           ...(appId !== "codex-image"
-            ? [{ key: "sessions", action: () => onNavigate("sessions") }]
+            ? [
+                {
+                  key: "sessions",
+                  icon: MessageSquare,
+                  action: () => onNavigate("sessions"),
+                },
+              ]
             : []),
         ]
       : [
           ...(appId !== "pi"
-            ? [{ key: "mcp", action: () => onNavigate("mcp") }]
+            ? [{ key: "mcp", icon: Plug, action: () => onNavigate("mcp") }]
             : []),
-          { key: "skills", action: () => onNavigate("skills") },
-          { key: "prompts", action: () => onNavigate("prompts") },
-          { key: "agents", action: () => onNavigate("agents") },
-          { key: "universal", action: () => onNavigate("universal") },
-          { key: "workspace", action: () => onNavigate("workspace") },
+          { key: "skills", icon: Sparkles, action: () => onNavigate("skills") },
+          {
+            key: "prompts",
+            icon: FileText,
+            action: () => onNavigate("prompts"),
+          },
+          { key: "agents", icon: Bot, action: () => onNavigate("agents") },
+          {
+            key: "universal",
+            icon: Layers3,
+            action: () => onNavigate("universal"),
+          },
+          {
+            key: "workspace",
+            icon: Folder,
+            action: () => onNavigate("workspace"),
+          },
           ...(appId === "openclaw"
             ? [
-                { key: "openclawEnv", action: () => onNavigate("openclawEnv") },
+                {
+                  key: "openclawEnv",
+                  icon: Settings2,
+                  action: () => onNavigate("openclawEnv"),
+                },
                 {
                   key: "openclawTools",
+                  icon: Wrench,
                   action: () => onNavigate("openclawTools"),
                 },
                 {
                   key: "openclawAgents",
+                  icon: Bot,
                   action: () => onNavigate("openclawAgents"),
                 },
               ]
@@ -52,36 +91,47 @@ export function FeatureHub({
             ? [
                 {
                   key: "hermesMemory",
+                  icon: Brain,
                   action: () => onNavigate("hermesMemory"),
                 },
-                { key: "hermesDashboard", action: onLaunchDashboard },
+                {
+                  key: "hermesDashboard",
+                  icon: LayoutDashboard,
+                  action: onLaunchDashboard,
+                },
               ]
             : []),
         ];
   return (
-    <div className="mx-auto w-full max-w-[1100px] px-7 py-5">
-      <p className="mb-5 text-sm text-muted-foreground">
+    <div className="page-content">
+      <p className="mb-6 text-sm leading-6 text-muted-foreground">
         {t(`client.${kind}Description`)}
       </p>
-      <div className="grid gap-x-7 md:grid-cols-2">
-        {entries.map((entry) => (
-          <Button
-            key={entry.key}
-            variant="ghost"
-            onClick={entry.action}
-            className="h-auto justify-between rounded-none border-b border-border-default px-1 py-5 text-left"
-          >
-            <span>
-              <span className="block text-sm font-medium">
-                {t(`client.features.${entry.key}`)}
+      <div className="grid gap-4 md:grid-cols-2">
+        {entries.map((entry) => {
+          const Icon = entry.icon;
+          return (
+            <Button
+              key={entry.key}
+              variant="ghost"
+              onClick={entry.action}
+              className="group h-auto min-h-28 justify-start gap-4 whitespace-normal rounded-xl border border-border-default bg-card p-5 text-left hover:border-primary/30 hover:bg-accent/50"
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground group-hover:text-primary">
+                <Icon className="h-5 w-5" />
               </span>
-              <span className="mt-1 block text-xs font-normal text-muted-foreground">
-                {t(`client.featureDescriptions.${entry.key}`)}
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold text-foreground">
+                  {t(`client.features.${entry.key}`)}
+                </span>
+                <span className="mt-1.5 block text-sm font-normal leading-5 text-muted-foreground">
+                  {t(`client.featureDescriptions.${entry.key}`)}
+                </span>
               </span>
-            </span>
-            <ArrowRight className="ml-3 h-4 w-4 shrink-0 text-muted-foreground" />
-          </Button>
-        ))}
+              <ArrowRight className="ml-3 h-4 w-4 shrink-0 text-muted-foreground" />
+            </Button>
+          );
+        })}
       </div>
     </div>
   );

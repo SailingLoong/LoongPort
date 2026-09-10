@@ -186,6 +186,7 @@ fn provisioned_provider_switches_and_lands_correct_config() {
         icon: None,
         icon_color: None,
         in_failover_queue: false,
+        available_models: None,
     };
     state
         .db
@@ -265,6 +266,7 @@ fn refreshing_the_current_tiers_key_updates_the_live_config() {
         icon: None,
         icon_color: None,
         in_failover_queue: false,
+        available_models: None,
     };
 
     // 先把它切成当前项 —— 这是缺陷成立的前提（非当前项本来就不该碰 live 文件）。

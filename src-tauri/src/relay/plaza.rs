@@ -80,7 +80,7 @@ fn apply_pending(settings: &mut crate::settings::AppSettings, config: &RemoteCon
     }
 }
 
-/// Explicit submission records attribution before attempting the remote lookup.
+/// Explicit submission records attribution locally; maintenance resolves missing config.
 pub async fn seed_from_first_site(domain: &str) -> Result<(), crate::error::AppError> {
     let origin = crate::relay::sub2api::normalize_site_origin(domain)?;
     let domain = site_domain(&origin);
@@ -88,9 +88,7 @@ pub async fn seed_from_first_site(domain: &str) -> Result<(), crate::error::AppE
     if crate::settings::get_settings().plaza_visible.is_some() {
         return Ok(());
     }
-    let config = remote_config::refresh_and_cache()
-        .await
-        .or_else(remote_config::load_cached);
+    let config = remote_config::load_cached();
     if let Some(config) = config {
         resolve_pending(&config)?;
     }
@@ -125,9 +123,7 @@ pub async fn seed_for_existing_install(relay_origins: &[String]) {
     if crate::settings::get_settings().plaza_visible.is_some() {
         return;
     }
-    let config = remote_config::refresh_and_cache()
-        .await
-        .or_else(remote_config::load_cached);
+    let config = remote_config::load_cached();
     if let Some(config) = config {
         // Re-read the first domain under the write lock after the network await.
         if let Err(error) = crate::settings::mutate_settings(|settings| {

@@ -512,7 +512,7 @@ fn tray_menu_providers(
 /// 「模型」子菜单的数据来源：当前档位是**托管项**且落库模型目录非空时，
 /// 返回 `(当前模型, 目录)`；其余情况 `None`（不挂子菜单）。
 ///
-/// 与主界面 `TierInfo.models` 同一份 `modelCatalog`（`models_from_settings`）。
+/// 与主界面 `TierInfo.models` 共用后端的可用模型快照。
 /// 目录按平台落库（codex / claude / gemini / grokbuild），没有目录的 app 自然不挂；
 /// 非托管 provider 没有「选模型」这个概念，不预埋。
 fn tier_model_choices(
@@ -522,7 +522,7 @@ fn tier_model_choices(
     if !crate::relay::is_managed(&provider.id) {
         return None;
     }
-    let models = crate::relay::provision::models_from_settings(&provider.settings_config);
+    let models = crate::relay::model_catalog::available_models(provider);
     if models.is_empty() {
         return None;
     }
@@ -869,6 +869,11 @@ fn handle_provider_click(
         // 切换供应商。需要本地路由的供应商也不在这里自动启动代理，
         // 由用户在页面/设置中手动开启。
         crate::services::ProviderService::switch(app_state.inner(), app_type.clone(), provider_id)?;
+        crate::services::application_overview::record_successful_selection(
+            &app_state.db,
+            app_type,
+            provider_id,
+        );
 
         // 更新托盘菜单
         if let Ok(new_menu) = create_tray_menu(app, app_state.inner()) {
@@ -1707,7 +1712,7 @@ mod tests {
             .iter()
             .map(|m| serde_json::json!({ "model": m }))
             .collect();
-        crate::provider::Provider::with_id(
+        let mut provider = crate::provider::Provider::with_id(
             id.to_string(),
             format!("站点 · {id}"),
             serde_json::json!({
@@ -1715,7 +1720,10 @@ mod tests {
                 "modelCatalog": { "models": catalog_json },
             }),
             None,
-        )
+        );
+        provider.available_models =
+            Some(catalog.iter().map(|model| (*model).to_string()).collect());
+        provider
     }
 
     /// 自动模式分区的模型清单：托管档位目录的并集（去重、保序），

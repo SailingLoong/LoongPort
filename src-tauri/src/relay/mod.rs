@@ -71,6 +71,7 @@ pub mod imagegen;
 pub mod imagegen_mcp;
 pub mod login;
 pub mod managed;
+pub(crate) mod model_catalog;
 pub mod newapi;
 pub mod newapi_provision;
 #[cfg(feature = "gui")]

@@ -181,7 +181,7 @@ const AgentsDefaultsPanel: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="px-6 pt-4 pb-8 flex items-center justify-center min-h-[200px]">
+      <div className="page-content flex items-center justify-center min-h-[200px]">
         <div className="text-sm text-muted-foreground">
           {t("common.loading")}
         </div>
@@ -197,7 +197,7 @@ const AgentsDefaultsPanel: React.FC = () => {
     typeof agentsData.timeoutSeconds !== "number";
 
   return (
-    <div className="px-6 pt-4 pb-8">
+    <div className="page-content">
       <p className="text-sm text-muted-foreground mb-6">
         {t("openclaw.agents.description")}
       </p>

@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AppSwitcher } from "@/components/AppSwitcher";
 import type { VisibleApps } from "@/types";
@@ -150,4 +151,33 @@ describe("AppSwitcher", () => {
     );
     expect(screen.queryByTitle("appSwitcher.add")).not.toBeInTheDocument();
   });
+});
+
+it("limits the rail to its application context and exposes the selected icon", () => {
+  render(
+    <AppSwitcher
+      activeApp="codex"
+      applications={["claude", "codex"]}
+      visibleApps={allVisible}
+      onSwitch={vi.fn()}
+      onShowApp={vi.fn()}
+    />,
+  );
+  expect(screen.queryByRole("button", { name: "Pi" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
+
+it("shows the application name in a hover tooltip", async () => {
+  render(
+    <AppSwitcher
+      activeApp="codex"
+      visibleApps={allVisible}
+      onSwitch={vi.fn()}
+    />,
+  );
+  await userEvent.hover(screen.getByRole("button", { name: "Codex" }));
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("Codex");
 });

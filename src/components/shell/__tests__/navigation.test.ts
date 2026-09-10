@@ -47,3 +47,22 @@ it("restores application context when returning from services to image", () => {
     app: "codex-image",
   });
 });
+
+it("restores exact account detail through navigation history", () => {
+  const account = { kind: "vendor" as const, id: 3 };
+  let state = navigationReducer(initial, {
+    type: "navigate",
+    view: "services",
+    account,
+  });
+  expect(state.current.account).toEqual(account);
+  state = navigationReducer(state, { type: "navigate", view: "addHub" });
+  expect(state.current.account).toBeUndefined();
+  state = navigationReducer(state, { type: "back" });
+  expect(state.current.account).toEqual(account);
+  state = navigationReducer(state, { type: "navigate", view: "services" });
+  expect(state.current.account).toBeUndefined();
+  expect(navigationReducer(state, { type: "back" }).current.account).toEqual(
+    account,
+  );
+});

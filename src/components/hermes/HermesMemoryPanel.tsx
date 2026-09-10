@@ -138,13 +138,13 @@ const HermesMemoryPanel: React.FC = () => {
   const userEnabled = limits?.userEnabled ?? true;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="page-content flex flex-col h-full">
       <Tabs
         value={activeTab}
         onValueChange={(v) => setActiveTab(v as HermesMemoryKind)}
         className="flex-1 flex flex-col"
       >
-        <div className="px-6 pt-4 flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
           <TabsList>
             <TabsTrigger value="memory">
               {t("hermes.memory.agentTab")}
@@ -161,14 +161,14 @@ const HermesMemoryPanel: React.FC = () => {
           </Button>
         </div>
 
-        <TabsContent value="memory" className="flex-1 px-6 pb-4 mt-4">
+        <TabsContent value="memory" className="flex-1 pb-4 mt-4">
           <MemoryTabPane
             kind="memory"
             limit={memoryLimit}
             enabled={memoryEnabled}
           />
         </TabsContent>
-        <TabsContent value="user" className="flex-1 px-6 pb-4 mt-4">
+        <TabsContent value="user" className="flex-1 pb-4 mt-4">
           <MemoryTabPane kind="user" limit={userLimit} enabled={userEnabled} />
         </TabsContent>
       </Tabs>

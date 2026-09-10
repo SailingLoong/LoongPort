@@ -441,7 +441,7 @@ pub(crate) fn reset_tier_config_in_state(
     // 才有的概念、中转站档位恒 `None`（`settings_config_with_models` 内部就是走
     // `roles = None`），所以这里统一用 [`provision::settings_config_with_models`]。
     let catalog_models = if provision::supports_model_catalog(&app_type) {
-        models_from_settings(&existing.settings_config)
+        crate::relay::model_catalog::available_models(&existing)
     } else {
         Vec::new()
     };
@@ -740,13 +740,12 @@ pub(crate) fn select_grok_model(
 }
 
 fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>, AppError> {
-    // AppType 没派生 Copy（上游结构，别为此改它），所以 clone 一份给第二个调用点。
     let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
     // 这条路按 app 查，所以结果天然同质 —— 每条档位的 `app_id` 就是被查的那个。
-    // 先取出来：`app_type` 下一行就被 move 进 `list` 了。
     let app_id = app_type.as_str().to_string();
     let can_verify_models = verification_target::supports_app_type(&app_type);
-    let providers = ProviderService::list(state, app_type.clone())?;
+    // Managed tiers are provisioned database records; listing them must not import native configs.
+    let providers = state.db.get_all_providers(app_type.as_str())?;
 
     let mut tiers: Vec<OwnedTier> = providers
         .values()
@@ -771,7 +770,7 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                 display_name: p.name.clone(),
                 model: provision::selected_model(&app_type, &p.settings_config).unwrap_or_default(),
                 // 目录没有就返回空 —— UI/托盘按「无目录」处理，不用按 app 分支
-                models: models_from_settings(&p.settings_config),
+                models: crate::relay::model_catalog::available_models(p),
                 is_current: current == p.id,
                 can_verify_models,
                 // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
@@ -1739,6 +1738,9 @@ mod tests {
             )
             .expect("save provider");
 
+            db.set_available_models(app_type.as_str(), &provider_id, &models)
+                .expect("save remote inventory");
+
             reset_tier_config_in_state(&state, &provider_id, app_type.clone())
                 .expect("reset succeeds");
 
@@ -2090,6 +2092,7 @@ mod tests {
                 icon: None,
                 icon_color: None,
                 in_failover_queue: false,
+                available_models: None,
             },
         )
         .expect("provider");
@@ -2188,6 +2191,7 @@ mod tests {
                 icon: None,
                 icon_color: None,
                 in_failover_queue: false,
+                available_models: None,
             },
         )
         .expect("provider");

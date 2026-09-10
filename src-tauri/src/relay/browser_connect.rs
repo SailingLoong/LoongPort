@@ -183,26 +183,7 @@ const WELL_KNOWN_CONNECT_PATH: &str = "/.well-known/loongport/connect";
 static PENDING_CONNECT: std::sync::OnceLock<std::sync::Mutex<Option<PendingConnect>>> =
     std::sync::OnceLock::new();
 
-/// 探测站点握手页部署了没有（只认 2xx；超时短，别让用户干等）。
-/// 没部署就别把用户扔到浏览器里看 404 —— 在门口拦下并引导走应用内登录。
-async fn probe_connect_page(site_origin: &str) -> Result<(), AppError> {
-    let page_url = format!("{site_origin}{WELL_KNOWN_CONNECT_PATH}");
-    let status = crate::relay::sub2api::build_client()?
-        .get(&page_url)
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-        .map_err(|e| AppError::Config(format!("探测站点握手页失败（{site_origin}）: {e}")))?
-        .status();
-    if !status.is_success() {
-        return Err(AppError::Config(format!(
-            "该站未部署浏览器登录页（HTTP {status}）。可让站长按 docs/station-connect 接入，或改用应用内登录"
-        )));
-    }
-    Ok(())
-}
-
-/// 发起浏览器接力登录：探测握手页 → 登记 nonce → 用默认浏览器打开带 state 的页面。
+/// 发起浏览器接力登录：登记 nonce，再用默认浏览器打开带 state 的页面。
 ///
 /// 用户在浏览器完成登录并点击移交后，深链回来走 [`apply_connect`]。
 #[cfg(feature = "gui")]
@@ -210,8 +191,21 @@ pub async fn begin_browser_login<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     site_origin: &str,
 ) -> Result<(), AppError> {
-    probe_connect_page(site_origin).await?;
+    use tauri_plugin_opener::OpenerExt;
+    begin_browser_login_with_opener(site_origin, |url| {
+        app_handle
+            .opener()
+            .open_url(url, None::<String>)
+            .map_err(|e| AppError::Config(format!("打开默认浏览器失败: {e}")))
+    })
+    .await
+}
 
+#[cfg(any(feature = "gui", test))]
+async fn begin_browser_login_with_opener(
+    site_origin: &str,
+    open: impl FnOnce(String) -> Result<(), AppError>,
+) -> Result<(), AppError> {
     let state = uuid::Uuid::new_v4().simple().to_string();
     {
         let pending = PENDING_CONNECT.get_or_init(Default::default);
@@ -225,15 +219,9 @@ pub async fn begin_browser_login<R: tauri::Runtime>(
         });
     }
 
-    use tauri_plugin_opener::OpenerExt;
-    app_handle
-        .opener()
-        .open_url(
-            format!("{site_origin}{WELL_KNOWN_CONNECT_PATH}?state={state}"),
-            None::<String>,
-        )
-        .map_err(|e| AppError::Config(format!("打开默认浏览器失败: {e}")))?;
-    Ok(())
+    open(format!(
+        "{site_origin}{WELL_KNOWN_CONNECT_PATH}?state={state}"
+    ))
 }
 
 /// state 绑定裁决（验证前的准入闸，纯状态机便于测试）：
@@ -922,31 +910,43 @@ mod tests {
         reset_pending(None);
     }
 
-    /// 探测闸：握手页在（2xx）放行到「打开浏览器」，不在（404）给出可行动的错误。
     #[tokio::test]
-    async fn probe_accepts_deployed_page_and_rejects_missing() {
-        use axum::routing::get;
-        let (origin, _server) = spawn_server(
-            axum::Router::new()
-                .route(
-                    "/.well-known/loongport/connect",
-                    get(|| async { "<html>connect</html>" }),
-                )
-                .route(
-                    "/.well-known/missing",
-                    get(|| async { axum::http::StatusCode::NOT_FOUND }),
-                ),
+    #[serial_test::serial]
+    async fn browser_handoff_opens_without_waiting_for_a_native_page_probe() {
+        let (origin, _server) = spawn_server(axum::Router::new().route(
+            WELL_KNOWN_CONNECT_PATH,
+            axum::routing::get(|| async {
+                std::future::pending::<()>().await;
+                ""
+            }),
+        ))
+        .await;
+        let mut opened = false;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            begin_browser_login_with_opener(&origin, |url| {
+                let url = url::Url::parse(&url).unwrap();
+                let state = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "state")
+                    .unwrap()
+                    .1
+                    .into_owned();
+                let guard = PENDING_CONNECT.get().unwrap().lock().unwrap();
+                let pending = guard.as_ref().expect("binding must precede browser launch");
+                assert_eq!(pending.state, state);
+                assert_eq!(pending.origin, origin);
+                opened = true;
+                Ok(())
+            }),
         )
         .await;
-
-        assert!(probe_connect_page(&origin).await.is_ok());
-        let err = probe_connect_page(&format!("{origin}/well-known"))
-            .await
-            .err();
-        // 路径拼错 → 404 → 错误信息要能指导行动（提站点未部署）
         assert!(
-            err.is_some_and(|e| e.to_string().contains("未部署")),
-            "未部署站点的错误要指明原因"
+            result.is_ok(),
+            "opening the real browser must not await a native request"
         );
+        result.unwrap().unwrap();
+        assert!(opened);
+        reset_pending(None);
     }
 }

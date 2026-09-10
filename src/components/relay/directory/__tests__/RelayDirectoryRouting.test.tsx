@@ -32,18 +32,6 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
-vi.mock("@/components/relay/RelaySection", () => ({
-  RelaySection: ({ appId, onOpenAddHub }: any) => (
-    <div data-testid="relay-section">
-      <span data-testid="relay-source-app">{appId}</span>
-      {/* 普通添加入口已上收到顶栏大「+」（聚合页默认落中转站广场）。 */}
-      <button onClick={() => onOpenAddHub("directory")}>
-        open-first-run-directory
-      </button>
-    </div>
-  ),
-}));
-
 vi.mock("../RelayDirectoryPage", () => ({
   RelayDirectoryPage: ({ sourceAppId, onBack, onAuthenticated }: any) => (
     <div data-testid="relay-directory">
@@ -96,14 +84,23 @@ describe("relay directory routing", () => {
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
 
       fireEvent.click(screen.getByText("directory-back"));
-      expect(await screen.findByTestId("provider-list")).toBeInTheDocument();
+      expect(
+        await screen.findByRole("button", {
+          name: "applications.switchService",
+        }),
+      ).toBeInTheDocument();
     },
   );
 
-  it("opens the first-run entry on the relay directory", async () => {
+  it("opens the overview add-service entry on the relay directory", async () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "codex");
     renderApp();
-    fireEvent.click(await screen.findByText("open-first-run-directory"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "applications.switchService" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "applications.addService" }),
+    );
 
     expect(await screen.findByTestId("directory-source-app")).toHaveTextContent(
       "codex",
