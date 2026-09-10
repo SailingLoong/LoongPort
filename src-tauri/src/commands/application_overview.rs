@@ -73,9 +73,23 @@ pub async fn get_application_overview(
     let app_type: AppType = app
         .parse()
         .map_err(|e: crate::error::AppError| e.to_string())?;
-    let providers = super::provider::get_providers(state.clone(), app.clone())?;
-    let relays = super::relay::relay_list_relays(state.clone(), app.clone())?;
-    let vendors = super::vendor::vendor_list_accounts(state.clone(), app).await?;
+    application_overview(state.inner(), &app_type)
+}
+
+fn application_overview(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<ApplicationOverview, String> {
+    // Catalog synchronization belongs to existing import/lifecycle actions, not this view.
+    let providers = state
+        .db
+        .get_all_providers(app_type.as_str())
+        .map_err(|error| error.to_string())?;
+    let presentation_context =
+        crate::services::provider::provider_presentation_context(state, app_type);
+    let relays = super::relay::list_relays_impl(state, app_type.clone())
+        .map_err(|error| error.to_string())?;
+    let vendors = super::vendor::list_vendor_accounts(state, app_type)?;
     let mut owners = HashMap::new();
     let mut ambiguous = std::collections::HashSet::new();
     for row in relays {
@@ -120,13 +134,25 @@ pub async fn get_application_overview(
     }
     let configurations = providers
         .into_values()
-        .map(|view| {
-            let owner = owners.remove(&view.provider.id);
-            configuration_for_provider(&app_type, view, owner)
+        .map(|provider| {
+            let owner = owners.remove(&provider.id);
+            let presentation = crate::services::provider::provider_presentation_with_context(
+                &presentation_context,
+                app_type,
+                &provider,
+            );
+            configuration_for_provider(
+                app_type,
+                super::provider::ProviderView {
+                    provider,
+                    presentation,
+                },
+                owner,
+            )
         })
         .collect();
     let recent_provider_ids =
-        crate::services::application_overview::recent_provider_ids(&state.db, &app_type)
+        crate::services::application_overview::recent_provider_ids(&state.db, app_type)
             .map_err(|e| e.to_string())?;
     Ok(ApplicationOverview {
         configurations,
@@ -153,10 +179,7 @@ fn configuration_for_provider(
         None => ConfigurationSource::Custom,
     };
     let can_select = view.presentation.switch_blocked_reason.is_none()
-        && owner
-            .as_ref()
-            .map(|o| o.can_select)
-            .unwrap_or(!view.presentation.is_managed);
+        && owner.as_ref().map(|o| o.can_select).unwrap_or(true);
     let model = crate::relay::provision::selected_model(app_type, &provider.settings_config)
         .and_then(nonempty);
     let (account, service_name, account_label, configuration_name, selection) = match owner {
@@ -167,7 +190,17 @@ fn configuration_for_provider(
             nonempty(owner.configuration_name),
             owner.selection,
         ),
-        None => (None, None, None, None, ConfigurationSelection::Provider),
+        None => (
+            None,
+            None,
+            None,
+            None,
+            if view.presentation.is_managed {
+                ConfigurationSelection::Relay
+            } else {
+                ConfigurationSelection::Provider
+            },
+        ),
     };
     ApplicationConfiguration {
         provider_id: provider.id,
@@ -282,7 +315,7 @@ mod tests {
             },
             None,
         );
-        assert!(!entry.can_select);
+        assert!(entry.can_select);
         assert!(entry.account.is_none());
     }
     #[test]
@@ -321,5 +354,76 @@ mod tests {
         let presentation = provider_presentation_with_context(&context, &AppType::Pi, &provider);
         assert!(!presentation.is_in_config);
         assert!(!presentation.is_default_model);
+    }
+    #[test]
+    #[serial_test::serial]
+    fn overview_reads_stored_pi_catalog_without_importing_or_updating_native_nodes() {
+        let _agent = crate::pi_config::test_support::TestAgentDir::new();
+        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let provider = Provider::with_id(
+            "saved".into(),
+            "Saved".into(),
+            serde_json::json!({"models":[{"id":"stored-model"}]}),
+            None,
+        );
+        state.db.save_provider("pi", &provider).unwrap();
+        let models = crate::pi_config::get_pi_models_path().unwrap();
+        std::fs::create_dir_all(models.parent().unwrap()).unwrap();
+        std::fs::write(
+            models,
+            r#"{"providers":{"saved":{"models":[{"id":"native-model"}]},"native-only":{}}}"#,
+        )
+        .unwrap();
+        // Include an account so its balance eligibility and usage scans run too.
+        state.db.conn.lock().unwrap().execute("INSERT INTO loongport_relay(site_origin,account_id) VALUES('https://relay.example',1)", []).unwrap();
+        let before = state.db.conn.lock().unwrap().total_changes();
+        let overview = application_overview(&state, &AppType::Pi).unwrap();
+        assert_eq!(state.db.conn.lock().unwrap().total_changes(), before);
+        assert_eq!(overview.configurations.len(), 1);
+        assert_eq!(overview.configurations[0].provider_id, "saved");
+        assert!(overview.configurations[0].presentation.is_in_config);
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id("saved", "pi")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            provider.settings_config
+        );
+        assert!(state
+            .db
+            .get_provider_by_id("native-only", "pi")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn ambiguous_legacy_account_metadata_does_not_block_relay_selection() {
+        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let site = "https://relay.example";
+        for account_id in [1, 2] {
+            state
+                .db
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO loongport_relay(site_origin,account_id) VALUES(?1,?2)",
+                    rusqlite::params![site, account_id],
+                )
+                .unwrap();
+        }
+        let id = crate::relay::provision::provider_id_for(site, None, 3);
+        state.db.save_provider("codex", &Provider::with_id(id.clone(), "Legacy tier".into(), serde_json::json!({"auth":{"OPENAI_API_KEY":"example-token"},"config":"model = \"example-model\""}), Some(site.into()))).unwrap();
+        let overview = application_overview(&state, &AppType::Codex).unwrap();
+        let entry = overview
+            .configurations
+            .iter()
+            .find(|entry| entry.provider_id == id)
+            .unwrap();
+        assert!(entry.account.is_none());
+        assert!(entry.can_select);
+        assert!(matches!(entry.selection, ConfigurationSelection::Relay));
     }
 }

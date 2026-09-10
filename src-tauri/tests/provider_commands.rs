@@ -704,3 +704,63 @@ fn import_refuses_live_config_under_proxy_takeover() {
         "taken-over live import must not create providers"
     );
 }
+
+#[test]
+fn unrelated_openclaw_defaults_edit_preserves_selection_history() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .save_provider(
+            "openclaw",
+            &Provider::with_id("current".into(), "Current".into(), json!({}), None),
+        )
+        .unwrap();
+    let history_key = "application_recent_providers_openclaw";
+    state
+        .db
+        .set_setting(history_key, r#"["recent","current"]"#)
+        .unwrap();
+    let defaults = serde_json::from_value(
+        json!({"model":{"primary":"current/example-model"},"timeoutSeconds":120}),
+    )
+    .unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, defaults).unwrap();
+    // Seed a later choice after initial default setup.
+    state
+        .db
+        .set_setting(history_key, r#"["recent","current"]"#)
+        .unwrap();
+    let edited = serde_json::from_value(
+        json!({"model":{"primary":"current/example-model"},"timeoutSeconds":180}),
+    )
+    .unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, edited).unwrap();
+    assert_eq!(
+        state.db.get_setting(history_key).unwrap().as_deref(),
+        Some(r#"["recent","current"]"#)
+    );
+    state
+        .db
+        .save_provider(
+            "openclaw",
+            &Provider::with_id("next".into(), "Next".into(), json!({}), None),
+        )
+        .unwrap();
+    let changed = serde_json::from_value(
+        json!({"model":{"primary":"next/example-model"},"timeoutSeconds":180}),
+    )
+    .unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, changed).unwrap();
+    assert_eq!(
+        state.db.get_setting(history_key).unwrap().as_deref(),
+        Some(r#"["next","recent","current"]"#)
+    );
+    let cleared = serde_json::from_value(json!({"timeoutSeconds":180})).unwrap();
+    cc_switch_lib::set_openclaw_agents_defaults_test_hook(&state, cleared).unwrap();
+    assert_eq!(
+        state.db.get_setting(history_key).unwrap().as_deref(),
+        Some(r#"["next","recent","current"]"#)
+    );
+}

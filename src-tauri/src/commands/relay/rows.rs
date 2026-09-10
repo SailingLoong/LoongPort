@@ -740,13 +740,12 @@ pub(crate) fn select_grok_model(
 }
 
 fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>, AppError> {
-    // AppType 没派生 Copy（上游结构，别为此改它），所以 clone 一份给第二个调用点。
     let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
     // 这条路按 app 查，所以结果天然同质 —— 每条档位的 `app_id` 就是被查的那个。
-    // 先取出来：`app_type` 下一行就被 move 进 `list` 了。
     let app_id = app_type.as_str().to_string();
     let can_verify_models = verification_target::supports_app_type(&app_type);
-    let providers = ProviderService::list(state, app_type.clone())?;
+    // Managed tiers are provisioned database records; listing them must not import native configs.
+    let providers = state.db.get_all_providers(app_type.as_str())?;
 
     let mut tiers: Vec<OwnedTier> = providers
         .values()

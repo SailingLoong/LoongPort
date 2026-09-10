@@ -932,7 +932,7 @@ pub(crate) fn apps_using_this_accounts_tiers(
 ) -> Vec<(AppType, String)> {
     let mut in_use = Vec::new();
     for app_type in AppType::all() {
-        let Ok(list) = ProviderService::list(state, app_type.clone()) else {
+        let Ok(list) = state.db.get_all_providers(app_type.as_str()) else {
             log::warn!(
                 "检查「档位是否在用」时读不出 {} 的 provider 列表，跳过",
                 app_type.as_str()

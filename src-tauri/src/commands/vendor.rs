@@ -303,17 +303,24 @@ pub async fn vendor_list_accounts(
             accounts: Vec::new(),
         });
     };
-    if !vendor_supports_app(&app_type) {
+    list_vendor_accounts(state.inner(), &app_type)
+}
+
+pub(crate) fn list_vendor_accounts(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<VendorAccountList, String> {
+    if !vendor_supports_app(app_type) {
         return Ok(VendorAccountList {
             supported: false,
             accounts: Vec::new(),
         });
     }
-    with_conn(state.inner(), creds::list)
+    with_conn(state, creds::list)
         .map(|rows| {
             let accounts = rows
                 .into_iter()
-                .map(|row| vendor_account_for_app(state.inner(), row, &app_type))
+                .map(|row| vendor_account_for_app(state, row, app_type))
                 .collect();
             VendorAccountList {
                 supported: true,
