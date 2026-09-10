@@ -34,6 +34,7 @@ import type {
 } from "@/lib/api/settings";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { motion } from "framer-motion";
 import appIcon from "@/assets/icons/app-icon.png";
 import { APP_ICON_MAP } from "@/config/appConfig";
@@ -230,6 +231,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     () => appVersionCache === null,
   );
   const [isDownloading, setIsDownloading] = useState(false);
+  const [receiveBetaUpdates, setReceiveBetaUpdates] = useState(false);
   const [toolVersions, setToolVersions] = useState<ToolVersion[]>(
     () => toolVersionsCache?.data ?? [],
   );
@@ -444,6 +446,45 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   }, []);
 
   // ... (handlers like handleOpenReleaseNotes, handleCheckUpdate) ...
+
+  // 「接收测试版更新」开关的事实 owner 在后端 settings（所有检测路径的端点
+  // 选择都读它）；这里只持镜像。读-改-写全量保存是仓内惯例（见
+  // UsageScriptModal 等），保存失败回滚显示，避免开关与事实分叉。
+  useEffect(() => {
+    let active = true;
+    void settingsApi
+      .get()
+      .then((current) => {
+        if (active) setReceiveBetaUpdates(Boolean(current.receiveBetaUpdates));
+      })
+      .catch((error) => {
+        console.error(
+          "[AboutSection] Failed to load beta update setting",
+          error,
+        );
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleBetaUpdatesToggle = useCallback(
+    async (value: boolean) => {
+      setReceiveBetaUpdates(value);
+      try {
+        const current = await settingsApi.get();
+        await settingsApi.save({ ...current, receiveBetaUpdates: value });
+      } catch (error) {
+        setReceiveBetaUpdates(!value);
+        console.error(
+          "[AboutSection] Failed to save beta update setting",
+          error,
+        );
+        toast.error(t("settings.receiveBetaUpdatesSaveFailed"));
+      }
+    },
+    [t],
+  );
 
   const handleOpenReleaseNotes = useCallback(async () => {
     try {
@@ -1038,6 +1079,21 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             </div>
           </motion.div>
         )}
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-background/50 px-4 py-2.5">
+          <div className="min-w-0">
+            <p className="text-sm leading-none">
+              {t("settings.receiveBetaUpdates")}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t("settings.receiveBetaUpdatesDescription")}
+            </p>
+          </div>
+          <Switch
+            checked={receiveBetaUpdates}
+            onCheckedChange={handleBetaUpdatesToggle}
+            aria-label={t("settings.receiveBetaUpdates")}
+          />
+        </div>
         {error && (
           <p role="alert" className="text-sm text-destructive">
             {error}

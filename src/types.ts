@@ -399,6 +399,8 @@ export interface Settings {
   // User has confirmed the usage query first-run notice
   usageConfirmed?: boolean;
   usageDashboardRefreshIntervalMs?: number;
+  /** 接收测试版更新：开启后检查更新包含预发布版本（beta 通道）。 */
+  receiveBetaUpdates?: boolean;
   // Whether to show the failover toggle independently on the main page
   /** 服务使用统计。新安装等待引导或设置中的明确选择。 */
   enableAnonymousStats?: boolean;

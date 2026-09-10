@@ -18,6 +18,28 @@ fn app_update_check_timeout() -> Duration {
     APP_UPDATE_CHECK_TIMEOUT
 }
 
+/// 按用户设置构建更新器：开启「接收测试版更新」时检测端点换到 beta 通道。
+///
+/// 所有 `check()` 路径（手动检测、安装流程、启动闸门）都必须经它构建更新器：
+/// 端点选择分叉的实害是「一处看到 beta、另一处按 stable 判定」——预下载产物
+/// 被启动闸门误判丢弃、或点升级时按 stable 查不到刚看到的版本而空转。
+fn channel_updater(
+    app: &AppHandle,
+    timeout: Option<Duration>,
+) -> Result<tauri_plugin_updater::Updater, tauri_plugin_updater::Error> {
+    let mut builder = app.updater_builder();
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    if crate::settings::get_settings().receive_beta_updates {
+        // 编译期常量，parse 失败只可能是笔误——当场炸好过静默回落 stable。
+        let url = tauri::Url::parse(crate::config::UPDATE_BETA_MANIFEST_URL)
+            .expect("beta 通道清单 URL 常量必须合法");
+        builder = builder.endpoints(vec![url])?;
+    }
+    builder.build()
+}
+
 /// 应用更新下载进度（通过 `update-download-progress` 事件发给前端）。
 /// 前端只在安装弹窗打开时监听；后台预下载发出的同名事件无人监听，无副作用。
 #[derive(Clone, serde::Serialize)]
@@ -308,11 +330,7 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
     }
     let dismissed = crate::settings::get_settings().dismissed_update_version;
 
-    let updater = match app
-        .updater_builder()
-        .timeout(STARTUP_PENDING_CHECK_TIMEOUT)
-        .build()
-    {
+    let updater = match channel_updater(app, Some(STARTUP_PENDING_CHECK_TIMEOUT)) {
         Ok(updater) => updater,
         Err(e) => {
             log::warn!("启动闸门初始化更新器失败（保留预下载产物）: {e}");
@@ -515,10 +533,7 @@ pub async fn install_staged_or_download_and_restart(app: &AppHandle) -> Result<b
         // 预下载失败/产物不可读 → 继续走全量流程。
     }
 
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
+    let updater = channel_updater(app, None).map_err(|e| format!("初始化更新器失败: {e}"))?;
     let Some(update) = updater
         .check()
         .await
@@ -583,10 +598,7 @@ impl AppUpdateCheckResult {
 }
 
 pub async fn check(app: &tauri::AppHandle) -> Result<AppUpdateCheckResult, AppError> {
-    let updater = app
-        .updater_builder()
-        .timeout(app_update_check_timeout())
-        .build()
+    let updater = channel_updater(app, Some(app_update_check_timeout()))
         .map_err(|error| AppError::Message(format!("初始化更新器失败: {error}")))?;
     let update = updater
         .check()

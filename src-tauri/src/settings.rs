@@ -456,6 +456,13 @@ pub struct AppSettings {
     /// 云同步 —— 要不要装新版本是单台机器上的决定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dismissed_update_version: Option<String>,
+    /// 接收测试版更新：开启后所有更新检测（手动检查、安装流程、启动闸门）
+    /// 的清单端点换到 beta 通道（`config::UPDATE_BETA_MANIFEST_URL`，服务端取
+    /// 最新发布、不分正式/预发布）。默认关 —— 只看正式版；beta 用户关掉开关
+    /// 也不会被降级（stable 清单版本低于当前时更新器不提示）。设备级、不随
+    /// 云同步 —— 与 `dismissed_update_version` 同一个惯例。
+    #[serde(default)]
+    pub receive_beta_updates: bool,
     /// Whether to show the failover toggle independently on the main page
     #[serde(default)]
     pub enable_failover_toggle: bool,
@@ -670,6 +677,7 @@ impl Default for AppSettings {
             cc_switch_import_prompted: None,
             star_reward_claimed: None,
             dismissed_update_version: None,
+            receive_beta_updates: false,
             enable_failover_toggle: false,
             show_profile_switcher: true,
             // 见字段上的说明：这条保的是 ChatGPT 桌面版的登录凭据，LoongPort 必须默认开。
