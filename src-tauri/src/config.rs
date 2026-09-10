@@ -44,6 +44,12 @@ pub const OFFICIAL_WEBSITE: &str = "https://loongport.dev";
 /// **另一份内容**，用户会以为那就是 LoongPort 的更新说明并装错 app。404 至少不误导。
 pub const GITHUB_REPO: &str = "https://github.com/SailingLoong/LoongPort";
 
+/// beta 更新通道的清单端点：「接收测试版更新」开关开启时替换默认检测端点。
+/// 归一化在 website 服务端（functions/api/latest-beta.json.ts，取最新创建的
+/// Release、不分正式/预发布）。仅 Rust 侧消费（前端不直接拉清单），所以
+/// **不进**文件末尾的 frontend_copies_match 对照闸。
+pub const UPDATE_BETA_MANIFEST_URL: &str = "https://loongport.dev/api/latest-beta.json";
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项

@@ -30,6 +30,7 @@ vi.mock("@/contexts/UpdateContext", () => ({
 
 vi.mock("@/lib/api", () => ({
   settingsApi: {
+    get: vi.fn().mockResolvedValue({ receiveBetaUpdates: false }),
     getToolVersions: vi.fn().mockResolvedValue([]),
     openExternal: vi.fn(),
     checkUpdates: mocks.checkUpdates,
