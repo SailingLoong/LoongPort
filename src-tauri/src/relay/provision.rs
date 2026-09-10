@@ -1039,7 +1039,10 @@ pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 /// ## 家族与准入依据
 ///
 /// - `gpt-image-`：对齐上游 sub2api 的 `IsGPTImageGenerationModel`
-///   （`service/openai_images.go`，`ToLower` + `TrimSpace` 后比前缀）。
+///   （`service/openai_images.go`，`ToLower` + `TrimSpace` 后比前缀）。家族内的
+///   代际由 [`image_model_rank`] 解析版本段（`gpt-image-2.5-sunburst` → `[2,5]`），
+///   2026-09-10 上游 sub2api 与 gpt_image_playground 双双适配 2.5（flare/sunburst
+///   双变体）后验证：前缀与代际排序天然覆盖，选型与落栏零改动。
 /// - `nano-banana`：Google 系生图模型在 new-api 站点的常用名。2026-09-05 实测准入：
 ///   `nano-banana-2` 与 `gpt-image-2` 同走 `/v1/images/generations`（OpenAI images
 ///   语义，b64_json 返回）。不认它的话，「`gpt-image-*` + `nano-banana-*`」的纯生图
@@ -2181,12 +2184,29 @@ mod tests {
     fn is_image_model_only_matches_the_image_families() {
         assert!(is_image_model("gpt-image-2"));
         assert!(is_image_model("gpt-image-3-turbo"));
+        // GPT Image 2.5（2026-09-10 准入：sub2api 在 /v1/models 广播的 flare/sunburst
+        // 双变体，前缀表天然覆盖，见 IMAGE_MODEL_FAMILIES 的文档）。
+        assert!(is_image_model("gpt-image-2.5-sunburst"));
+        assert!(is_image_model("gpt-image-2.5-flare"));
         // nano-banana 家族（2026-09-05 实测准入，见 IMAGE_MODEL_FAMILIES 的文档）。
         assert!(is_image_model("nano-banana-2"));
         assert!(is_image_model("Nano-Banana-Pro"));
         assert!(!is_image_model(DEFAULT_MODEL));
         assert!(!is_image_model("gpt-5.4-mini"));
         assert!(!is_image_model(""));
+    }
+
+    /// GPT Image 2.5（2026-09-10 准入）：代际 `[2,5] > [2]` 取新一代；同代
+    /// flare/sunburst 按名字定序选 sunburst——恰与上游 gpt_image_playground 的
+    /// 推荐默认一致。钉住这条排序，防止未来动 [`image_model_rank`] 时选旧弃新。
+    #[test]
+    fn pick_model_prefers_the_newest_gpt_image_generation() {
+        let models = vec![
+            "gpt-image-2".to_string(),
+            "gpt-image-2.5-flare".to_string(),
+            "gpt-image-2.5-sunburst".to_string(),
+        ];
+        assert_eq!(pick_model(Some(&models)), "gpt-image-2.5-sunburst");
     }
 
     /// grok 家族照抄上游 `isGrokImageGenerationModel` 的三条（2026-09-07 准入，
