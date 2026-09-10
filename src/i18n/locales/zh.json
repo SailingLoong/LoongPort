@@ -2636,7 +2636,11 @@
       "switchBackDone": "已切回 {{name}}，该应用转为自主模式",
       "tiersShort": "档",
       "modelFilterPlaceholder": "输入模型名筛选…",
-      "modelFilterEmpty": "没有匹配的模型"
+      "modelFilterEmpty": "没有匹配的模型",
+      "globalStrategy": "全局策略",
+      "strategySettings": "全局选路设置",
+      "configured": "已配置",
+      "routingTarget": "路由目标"
     },
     "modelHint": "选了模型后只在目录含该模型的档位里挑；显式点选会立即切到最优档位",
     "advancedSection": "高级（故障转移队列与熔断）",
@@ -3205,11 +3209,11 @@
     },
     "officialApi": {
       "title": "官方 API",
-      "description": "选择厂商，登录后自动完成密钥获取与各平台配置",
+      "description": "选择官方服务，登录后选择要配置的应用。",
       "connect": "连接并获取密钥",
-      "deepseekDesc": "DeepSeek 开放平台：登录后自动创建/认领 API Key，接入各编程代理",
-      "bigmodelDesc": "智谱 BigModel 开放平台：GLM 系列模型，登录后自动创建/认领 API Key",
-      "opencodeDesc": "opencode 官网账号：登录一次自动接入 API Key，同一把密钥双档可用 —— Zen 按量计费全量模型目录，Go 订阅制精选开源编码模型"
+      "deepseekDesc": "连接 DeepSeek 官方账号。",
+      "bigmodelDesc": "连接智谱 BigModel 官方账号。",
+      "opencodeDesc": "支持 Zen 按量计费与 Go 订阅。"
     },
     "tierList": {
       "empty": "尚未添加中转站",
@@ -3560,10 +3564,10 @@
       }
     },
     "firstSite": {
-      "title": "添加你的第一个中转站",
+      "title": "连接你的第一个服务",
       "placeholder": "bestapi.store",
       "confirm": "进入注册 / 登录",
-      "cancel": "先逛逛广场"
+      "cancel": "暂不设置"
     },
     "star": {
       "buttonTitle": "GitHub 仓库（点个 ⭐ 支持一下）",
@@ -3587,6 +3591,45 @@
       "lastResetTitle": "最近一次被社区确认的全局重置",
       "announcement": "最新公告",
       "source": "社区预告 · codex-reset.com"
+    },
+    "accounts": {
+      "title": "服务与账号",
+      "description": "管理已连接的中转站与官方 API。",
+      "add": "添加服务",
+      "back": "返回服务与账号",
+      "relay": "中转站",
+      "vendor": "官方 API",
+      "detail": "账号详情",
+      "application": "应用",
+      "openApp": "打开应用配置",
+      "loadFailed": "暂时无法读取账号，请重试。",
+      "empty": "尚未添加服务账号",
+      "status": {
+        "notLoggedIn": "尚未登录",
+        "sessionExpired": "登录已过期",
+        "sessionExpiredUsable": "登录已过期，密钥仍可用",
+        "noTiers": "尚无接入配置",
+        "ready": "已就绪",
+        "noKey": "尚未获取密钥"
+      }
+    },
+    "onboarding": {
+      "domain": "中转站网址",
+      "domainPlaceholder": "例如 panel.example",
+      "browse": "浏览中转站广场",
+      "searchDirectory": "搜索广场",
+      "noMatch": "没有找到匹配的服务",
+      "configure": "确认应用配置",
+      "chooseApps": "选择要使用此服务的应用与配置。",
+      "skipApp": "暂不配置",
+      "noConfigurations": "账号已保存，暂时没有可用配置。",
+      "finish": "完成设置",
+      "resume": "继续配置",
+      "shareLabel": "分享服务使用与实测数据，帮助完善适配并查看社区实测",
+      "shareDetails": "了解分享内容",
+      "shareUsage": "使用统计包含已配置服务的域名、账号数量、应用版本与操作系统，并使用固定的随机安装标识去重。",
+      "shareMeasurements": "实测数据按服务、应用、模型和小时汇总请求量、错误、延迟、速度、Token 与估算费用，使用每日轮换的随机标识。",
+      "shareControl": "不上传账号身份、密钥或对话内容。随机标识可关联同一时期的上报，接收端能看到来源 IP。完成设置后才保存选择；不勾选也能正常使用，之后可在设置中分别调整。"
     }
   },
   "firstRunNotice": {
@@ -3739,5 +3782,53 @@
     "add": "添加应用到主页面",
     "allShown": "所有应用都已显示",
     "hide": "从主页面隐藏"
+  },
+  "client": {
+    "navigation": "主导航",
+    "applications": "应用",
+    "services": "服务与账号",
+    "image": "生图",
+    "records": "使用记录",
+    "resources": "扩展资源",
+    "plaza": "中转站广场",
+    "help": "帮助",
+    "selectApplication": "选择应用",
+    "favoriteApps": "常用应用",
+    "moreApps": "更多应用",
+    "addService": "添加服务",
+    "recordsDescription": "查看会话历史与用量。",
+    "resourcesDescription": "管理应用使用的工具、指令和工作区。",
+    "globalStrategy": "全局选路策略",
+    "configMissing": "尚未找到应用配置，请先启动应用完成初始化。",
+    "features": {
+      "usage": "用量与费用",
+      "sessions": "会话历史",
+      "mcp": "MCP",
+      "skills": "Skills",
+      "prompts": "Prompts",
+      "agents": "Agents",
+      "universal": "统一供应商",
+      "workspace": "工作区文件",
+      "openclawEnv": "环境变量",
+      "openclawTools": "工具权限",
+      "openclawAgents": "Agent 默认设置",
+      "hermesMemory": "Hermes 记忆",
+      "hermesDashboard": "Hermes 控制台"
+    },
+    "featureDescriptions": {
+      "usage": "查看请求、Token 和费用",
+      "sessions": "搜索并继续已有会话",
+      "mcp": "连接外部工具与数据源",
+      "skills": "安装和管理应用技能",
+      "prompts": "维护提示词与模板",
+      "agents": "此功能尚未开放。",
+      "universal": "管理跨应用供应商配置",
+      "workspace": "查看与编辑工作区资源",
+      "openclawEnv": "配置 OpenClaw 运行环境",
+      "openclawTools": "管理 OpenClaw 工具权限",
+      "openclawAgents": "配置 OpenClaw 默认行为",
+      "hermesMemory": "查看与编辑持久记忆",
+      "hermesDashboard": "打开本地管理界面"
+    }
   }
 }

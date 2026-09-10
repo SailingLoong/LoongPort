@@ -121,15 +121,18 @@ pub struct VendorSession {
     pub account: VendorAccount,
 }
 
-/// 功能性登录页。远端配置的 `vendor_invite_urls`（维护者返利链接，
-/// 已过 HTTPS + 同源闸）存在且属于该厂商时，优先打开它 —— 归因在服务端完成，
-/// 对登录流程零侵入。
-pub fn login_url(vendor: Vendor) -> String {
-    let builtin = match vendor {
+/// Built-in login address from the vendor catalog, without referral parameters.
+pub(crate) fn builtin_login_url(vendor: Vendor) -> &'static str {
+    match vendor {
         Vendor::DeepSeek => deepseek::LOGIN_URL,
         Vendor::BigModel => bigmodel::LOGIN_URL,
         Vendor::OpenCode => opencode::LOGIN_URL,
-    };
+    }
+}
+
+/// Prefer a configured referral URL only after the existing same-origin check.
+pub fn login_url(vendor: Vendor) -> String {
+    let builtin = builtin_login_url(vendor);
     let invite = crate::relay::remote_config::load_cached()
         .and_then(|config| config.vendor_invite_urls.get(vendor.vendor_id()).cloned())
         .filter(|url| {

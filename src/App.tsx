@@ -6,37 +6,22 @@ import { invoke } from "@tauri-apps/api/core";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
-  Settings,
   ArrowLeft,
   Minus,
   Maximize2,
   Minimize2,
   X,
-  Book,
-  Brain,
-  Wrench,
   History,
-  BarChart2,
   Download,
   FolderArchive,
   Search,
-  FolderOpen,
-  KeyRound,
-  Shield,
-  Cpu,
-  LayoutDashboard,
   Loader2,
   RefreshCw,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
-import {
-  proxyKeys,
-  useProvidersQuery,
-  useSaveSettingsMutation,
-  useSettingsQuery,
-} from "@/lib/query";
+import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
   settingsApi,
@@ -78,7 +63,18 @@ import {
   DRAG_REGION_ATTR,
   DRAG_REGION_STYLE,
 } from "@/lib/platform";
-import { AppSwitcher } from "@/components/AppSwitcher";
+import { PreservedView } from "@/components/ui/PreservedView";
+import { ApplicationPicker } from "@/components/shell/ApplicationPicker";
+import { ClientSidebar } from "@/components/shell/ClientSidebar";
+import { FeatureHub } from "@/components/shell/FeatureHub";
+import {
+  CLIENT_VIEWS,
+  useClientNavigation,
+  type ClientView as View,
+} from "@/components/shell/navigation";
+import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
+import { RelayDirectoryConnectionPage } from "@/components/relay/onboarding/RelayDirectoryConnectionPage";
+import { useServiceOnboardingStatus } from "@/components/relay/onboarding/useServiceOnboarding";
 import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
 import { ProviderList } from "@/components/providers/ProviderList";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
@@ -93,7 +89,6 @@ import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
 import { AppModeSegmented } from "@/components/proxy/AppModeSegmented";
-import { RoutingActivationBrand } from "@/components/proxy/RoutingActivationBrand";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel, {
@@ -112,12 +107,9 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { ImageTabPage } from "@/components/relay/ImageTabPage";
 import { RelaySection } from "@/components/relay/RelaySection";
-import { StatsNoticeDialog } from "@/components/relay/StatsNoticeDialog";
-import { CrowdNoticeDialog } from "@/components/relay/CrowdNoticeDialog";
 import { useCodexSwitchGuard } from "@/components/relay/useCodexSwitchGuard";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
-import { McpIcon } from "@/components/BrandIcons";
 import { Button } from "@/components/ui/button";
 import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
 import {
@@ -139,23 +131,6 @@ import {
   isProxyAppId,
 } from "@/config/appConfig";
 
-type View =
-  | "providers"
-  | "settings"
-  | "prompts"
-  | "skills"
-  | "skillsDiscovery"
-  | "mcp"
-  | "agents"
-  | "universal"
-  | "sessions"
-  | "workspace"
-  | "openclawEnv"
-  | "openclawTools"
-  | "openclawAgents"
-  | "hermesMemory"
-  | "addHub";
-
 interface SyncStatusUpdatedPayload {
   source?: string;
   status?: string;
@@ -175,22 +150,7 @@ const getInitialApp = (): AppId => {
   return "claude";
 };
 
-const VALID_VIEWS: View[] = [
-  "providers",
-  "settings",
-  "prompts",
-  "skills",
-  "skillsDiscovery",
-  "mcp",
-  "agents",
-  "universal",
-  "sessions",
-  "workspace",
-  "openclawEnv",
-  "openclawTools",
-  "openclawAgents",
-  "hermesMemory",
-];
+const VALID_VIEWS: View[] = CLIENT_VIEWS.filter((view) => view !== "addHub");
 
 const getInitialView = (): View => {
   const saved = localStorage.getItem(LAST_VIEW_STORAGE_KEY) as View | null;
@@ -206,16 +166,19 @@ function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
+  const navigation = useClientNavigation(getInitialView, getInitialApp);
+  const activeApp = navigation.app;
+  const setActiveApp = navigation.setApp;
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
-  const [currentView, setCurrentView] = useState<View>(getInitialView);
-  // 聚合页进来落在哪个标签（顶栏 + / 空态占位 / 首启引导共用一个入口状态）。
-  const [addHubInitialTab, setAddHubInitialTab] =
-    useState<AddHubTab>("directory");
-  // 新人首启那次进广场带 firstVisit（弹「手填域名直达」）；普通「+」入口
-  // 不带。每进程至多一次，由 RelaySection 的 autoOpenedHubThisProcess 保证。
-  const [addHubFirstVisit, setAddHubFirstVisit] = useState(false);
+  const currentView = navigation.view;
+  const setCurrentView = navigation.navigate;
+  const goBack = navigation.back;
+  const isApplicationView =
+    currentView === "providers" || currentView === "image";
+  const [addHubEntries, setAddHubEntries] = useState<
+    Partial<Record<AppId, { id: number; tab: AddHubTab; firstVisit: boolean }>>
+  >({});
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
@@ -239,7 +202,6 @@ function App() {
   }, [currentView]);
 
   const { data: settingsData } = useSettingsQuery();
-  const saveSettingsMutation = useSaveSettingsMutation();
   const useAppWindowControls =
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
@@ -252,52 +214,14 @@ function App() {
     [settingsData?.visibleApps],
   );
 
-  const getFirstVisibleApp = (): AppId => {
-    return APP_IDS.find((app) => visibleApps[app]) ?? "claude";
-  };
-
   useEffect(() => {
-    // settings 未加载前 visibleApps 只是 DEFAULT 兜底（渲染闪空用），不参与
-    // 裁决 —— 否则 lastApp 恰好是默认隐藏 app 的用户会在加载前被弹回 claude，
-    // 加载后真实可见集到了也不弹回去，「恢复上次应用」静默失效。
-    if (!settingsData) return;
-    if (!visibleApps[activeApp]) {
-      setActiveApp(getFirstVisibleApp());
-    }
-  }, [visibleApps, activeApp, settingsData]);
-
-  // tab 上的 ×：与设置页「主页面显示」同一开关，就地隐藏一个应用。
-  // 发送与 DEFAULT_VISIBLE_APPS 合并后的完整对象（后端 visible_apps 是整体替换）；
-  // settings 还没加载时不动 —— 那次保存会把其余字段全部清成默认值。
-  // 不弹 toast：tab 消失即反馈，恢复入口就在旁边的「+」，顶部横幅反而会挡住
-  // 连续隐藏的操作（实测反馈）。
-  const hideAppFromMainPage = useCallback(
-    (app: AppId) => {
-      if (!settingsData) return;
-      saveSettingsMutation.mutate({
-        ...settingsData,
-        visibleApps: { ...visibleApps, [app]: false },
-      });
-    },
-    [saveSettingsMutation, settingsData, visibleApps],
-  );
-
-  // 末尾「+」的反向操作：把隐藏的应用加回来。效果（tab 出现）自解释，不弹 toast。
-  const showAppFromMainPage = useCallback(
-    (app: AppId) => {
-      if (!settingsData) return;
-      saveSettingsMutation.mutate({
-        ...settingsData,
-        visibleApps: { ...visibleApps, [app]: true },
-      });
-    },
-    [saveSettingsMutation, settingsData, visibleApps],
-  );
+    localStorage.setItem(LAST_APP_STORAGE_KEY, activeApp);
+  }, [activeApp]);
 
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {
     if (currentView === "mcp" && sharedFeatureApp === "pi") {
-      setCurrentView("providers");
+      navigation.replace("providers");
       return;
     }
     if (
@@ -311,7 +235,7 @@ function App() {
       sharedFeatureApp !== "hermes" &&
       sharedFeatureApp !== "pi"
     ) {
-      setCurrentView("providers");
+      navigation.replace("providers");
     }
   }, [sharedFeatureApp, currentView]);
 
@@ -347,8 +271,7 @@ function App() {
     status: proxyStatus,
   } = useProxyStatus();
   const proxyAppId = isProxyAppId(activeApp) ? activeApp : null;
-  // 省心视图替换判据：该 app 省心模式开 + 路由在跑（两个都是展示事实的
-  // 组合，业务开关本身仍由设置页/顶栏管理）。
+  // 应用模式由后端状态决定；路由运行状态由看板独立展示。
   const { data: activeAutoModeStatus } = useAutoModeStatus(
     proxyAppId ?? activeApp,
     !!proxyAppId,
@@ -384,17 +307,6 @@ function App() {
       currentView === "openclawAgents");
   const { data: openclawHealthWarnings = [] } =
     useOpenClawHealth(isOpenClawView);
-  const hasSkillsSupport = sharedFeatureApp !== "openclaw";
-  const hasSessionSupport =
-    sharedFeatureApp === "claude" ||
-    sharedFeatureApp === "codex" ||
-    sharedFeatureApp === "grokbuild" ||
-    sharedFeatureApp === "opencode" ||
-    sharedFeatureApp === "openclaw" ||
-    sharedFeatureApp === "gemini" ||
-    sharedFeatureApp === "hermes" ||
-    sharedFeatureApp === "pi";
-  const hasMcpSupport = sharedFeatureApp !== "pi";
 
   const {
     addProvider,
@@ -827,7 +739,7 @@ function App() {
       if (isTextEditableTarget(event.target)) return;
 
       event.preventDefault();
-      setCurrentView(view === "skillsDiscovery" ? "skills" : "providers");
+      goBack();
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -1049,31 +961,67 @@ function App() {
   /** 打开聚合页；`tab` 缺省落「中转站」（首启引导同）。 */
   const handleOpenAddHub = useCallback(
     (tab: AddHubTab = "directory", opts?: { firstVisit?: boolean }) => {
-      setAddHubInitialTab(tab);
-      setAddHubFirstVisit(opts?.firstVisit === true);
+      setAddHubEntries((entries) => ({
+        ...entries,
+        [activeApp]: {
+          id: (entries[activeApp]?.id ?? 0) + 1,
+          tab,
+          firstVisit: opts?.firstVisit === true,
+        },
+      }));
       setCurrentView("addHub");
     },
-    [],
+    [activeApp, setCurrentView],
   );
+
+  const onboarding = useServiceOnboardingStatus();
+  const onboardingOpened = useRef(false);
+  useEffect(() => {
+    if (onboarding.data?.shouldPrompt && !onboardingOpened.current) {
+      onboardingOpened.current = true;
+      handleOpenAddHub("directory", { firstVisit: true });
+    }
+  }, [onboarding.data?.shouldPrompt, handleOpenAddHub]);
+
+  const navigateSection = (view: View) => {
+    if (view === "plaza") {
+      void settingsApi
+        .plazaSetVisible(true)
+        .then(() => queryClient.invalidateQueries({ queryKey: ["settings"] }))
+        .catch((error) => toast.error(String(error)));
+    }
+    setCurrentView(
+      view,
+      view === "image"
+        ? "codex-image"
+        : activeApp === "codex-image"
+          ? "codex"
+          : activeApp,
+    );
+  };
 
   const renderContent = () => {
     const content = (() => {
       switch (currentView) {
-        case "addHub":
+        case "records":
+        case "resources":
           return (
-            <AddHubPage
-              sourceAppId={activeApp}
-              initialTab={addHubInitialTab}
-              onBack={() => setCurrentView("providers")}
-              onAddProvider={addProvider}
-              firstVisit={addHubFirstVisit}
+            <FeatureHub
+              kind={currentView}
+              appId={sharedFeatureApp}
+              onNavigate={setCurrentView}
+              onUsage={() => {
+                setSettingsDefaultTab("usage");
+                setCurrentView("settings");
+              }}
+              onLaunchDashboard={() => void openHermesWebUI()}
             />
           );
         case "settings":
           return (
             <SettingsPage
               open={true}
-              onOpenChange={() => setCurrentView("providers")}
+              onOpenChange={goBack}
               onImportSuccess={handleImportSuccess}
               defaultTab={settingsDefaultTab}
             />
@@ -1083,7 +1031,7 @@ function App() {
             <PromptPanel
               ref={promptPanelRef}
               open={true}
-              onOpenChange={() => setCurrentView("providers")}
+              onOpenChange={goBack}
               appId={sharedFeatureApp}
               onInteractionBlockedChange={setPromptManagementBusy}
               onNavigationBlockedChange={setPromptNavigationBusy}
@@ -1119,14 +1067,12 @@ function App() {
           return (
             <UnifiedMcpPanel
               ref={mcpPanelRef}
-              onOpenChange={() => setCurrentView("providers")}
+              onOpenChange={goBack}
               onInteractionBlockedChange={setMcpManagementBusy}
             />
           );
         case "agents":
-          return (
-            <AgentsPanel onOpenChange={() => setCurrentView("providers")} />
-          );
+          return <AgentsPanel onOpenChange={goBack} />;
         case "universal":
           return (
             <div className="px-6 pt-4">
@@ -1168,7 +1114,13 @@ function App() {
                         顶部有警告条，不静默回退。模式入口在内容区顶部的
                         AppModeSegmented（唯源）。 */}
                     {showEasyBoard ? (
-                      <EasyBoard appId={activeApp} />
+                      <EasyBoard
+                        appId={activeApp}
+                        onOpenSettings={() => {
+                          setSettingsDefaultTab("proxy");
+                          setCurrentView("settings");
+                        }}
+                      />
                     ) : (
                       <>
                         {/* LoongPort 的「中转站 × 分组」区，装在手工 provider 列表**上方**。
@@ -1286,7 +1238,7 @@ function App() {
 
   return (
     <div
-      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pb-4"
+      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pb-4 pl-[176px]"
       style={{
         overflowX: "hidden",
         paddingTop: currentView === "addHub" ? dragBarHeight : contentTopOffset,
@@ -1342,6 +1294,33 @@ function App() {
           )}
         </div>
       )}
+      <ClientSidebar
+        view={currentView}
+        top={dragBarHeight}
+        disabled={managementBusy}
+        onNavigate={navigateSection}
+        onHelp={() =>
+          void settingsApi
+            .openExternal(OFFICIAL_WEBSITE)
+            .catch((e) => toast.error(extractErrorMessage(e)))
+        }
+        footer={
+          <>
+            <CcSwitchImportEntry />
+            <UpdateBadge
+              onClick={() => {
+                setSettingsDefaultTab("about");
+                setCurrentView("settings");
+              }}
+            />
+            <GitHubStarButton
+              showDot={starRewardActive === true}
+              busy={starRewardBusy}
+              onClick={() => void handleGitHubStarClick()}
+            />
+          </>
+        }
+      />
       {showEnvBanner && envConflicts.length > 0 && (
         <EnvWarningBanner
           conflicts={envConflicts}
@@ -1369,7 +1348,7 @@ function App() {
 
       <header
         hidden={currentView === "addHub"}
-        className="fixed z-50 w-full transition-all duration-300 bg-background/80 backdrop-blur-md"
+        className="fixed left-[176px] right-0 z-50 border-b border-border-default bg-background"
         {...DRAG_REGION_ATTR}
         style={
           {
@@ -1388,27 +1367,27 @@ function App() {
             className="flex items-center gap-1"
             style={{ WebkitAppRegion: "no-drag" } as any}
           >
-            {currentView !== "providers" ? (
+            {!isApplicationView ? (
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
-                  size="icon"
+                  size="sm"
                   disabled={managementBusy}
-                  onClick={() =>
-                    setCurrentView(
-                      currentView === "skillsDiscovery"
-                        ? "skills"
-                        : "providers",
-                    )
-                  }
+                  onClick={goBack}
+                  aria-label={t("common.back")}
                   className={cn(
                     "mr-2 rounded-lg",
                     managementBusy && "disabled:opacity-100",
                   )}
                 >
                   <ArrowLeft className="w-4 h-4" />
+                  {t("common.back")}
                 </Button>
                 <h1 className="text-lg font-semibold">
+                  {currentView === "services" && t("client.services")}
+                  {currentView === "records" && t("client.records")}
+                  {currentView === "resources" && t("client.resources")}
+                  {currentView === "plaza" && t("client.plaza")}
                   {currentView === "settings" && t("settings.title")}
                   {currentView === "prompts" &&
                     t("prompts.title", {
@@ -1432,71 +1411,23 @@ function App() {
                 </h1>
               </div>
             ) : (
-              <div className="flex items-center gap-2">
-                {/* LoongPort seam：品牌是外链入口，点击打开官网 loongport.dev
-                    （与上游的 ccswitch.io 外链同构；回主面板语义已废弃——
-                    品牌只在 providers 视图渲染，原本就是空操作）。 */}
-                <RoutingActivationBrand
-                  active={isProxyRunning && isCurrentAppTakeoverActive}
-                  contextKey={activeApp}
-                  ready={
-                    proxyStatus !== undefined && takeoverStatus !== undefined
-                  }
-                  label="LoongPort"
-                  title={OFFICIAL_WEBSITE}
-                  onClick={() => {
-                    void settingsApi
-                      .openExternal(OFFICIAL_WEBSITE)
-                      .catch((error) => {
-                        console.error(
-                          "[App] Failed to open official website",
-                          error,
-                        );
-                      });
-                  }}
-                />
-                <CcSwitchImportEntry />
+              <div className="flex items-center gap-3">
                 <Button
                   variant="ghost"
-                  size="icon"
-                  onClick={() => {
-                    setSettingsDefaultTab("general");
-                    setCurrentView("settings");
-                  }}
-                  title={t("common.settings")}
-                  className="hover:bg-black/5 dark:hover:bg-white/5"
+                  size="sm"
+                  disabled={!navigation.canGoBack || managementBusy}
+                  onClick={goBack}
                 >
-                  <Settings className="w-4 h-4" />
+                  <ArrowLeft className="mr-1.5 h-4 w-4" />
+                  {t("common.back")}
                 </Button>
-                <UpdateBadge
-                  onClick={() => {
-                    setSettingsDefaultTab("about");
-                    setCurrentView("settings");
-                  }}
-                />
-                {/* GitHub 入口：star 领礼活动在且未领取时带红点；点击行为
-                    （弹邀请窗 / 直接开仓库）由 App 统一决定。 */}
-                <GitHubStarButton
-                  showDot={starRewardActive === true}
-                  busy={starRewardBusy}
-                  onClick={() => void handleGitHubStarClick()}
-                />
-                {isCurrentAppTakeoverActive && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => {
-                      setSettingsDefaultTab("usage");
-                      setCurrentView("settings");
-                    }}
-                    title={t("usage.title", {
-                      defaultValue: "使用统计",
-                    })}
-                    className="hover:bg-black/5 dark:hover:bg-white/5"
-                  >
-                    <BarChart2 className="w-4 h-4" />
-                  </Button>
-                )}
+                <h1 className="text-lg font-semibold">
+                  {t(
+                    activeApp === "codex-image"
+                      ? "client.image"
+                      : "client.applications",
+                  )}
+                </h1>
               </div>
             )}
           </div>
@@ -1531,16 +1462,13 @@ function App() {
                   <ProfileSwitcher activeApp={activeApp} />
                 </div>
               )}
-            {/* 弹性中段：tab 不做自动折叠，放不下时在条带内滚轮 / 拖拽平移
-                （见 AppSwitcher）；可见集由用户显式控制（tab 上的 × 或设置页「主页面显示」） */}
+            {/* 应用选择保留完整应用目录。 */}
             <div className="flex flex-1 min-w-0 items-center justify-end overflow-hidden py-4">
-              {currentView === "providers" && (
-                <AppSwitcher
+              {currentView === "providers" && activeApp !== "codex-image" && (
+                <ApplicationPicker
                   activeApp={activeApp}
                   onSwitch={setActiveApp}
                   visibleApps={visibleApps}
-                  onHideApp={hideAppFromMainPage}
-                  onShowApp={showAppFromMainPage}
                 />
               )}
             </div>
@@ -1698,179 +1626,15 @@ function App() {
                 )}
                 {currentView === "providers" && (
                   <>
-                    <div className="flex items-center gap-1 p-1 bg-muted rounded-xl">
-                      <AnimatePresence mode="wait">
-                        <motion.div
-                          key={
-                            activeApp === "openclaw"
-                              ? "openclaw"
-                              : activeApp === "hermes"
-                                ? "hermes"
-                                : activeApp === "grokbuild"
-                                  ? "grokbuild"
-                                  : "default"
-                          }
-                          className="flex items-center gap-1"
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          exit={{ opacity: 0 }}
-                          transition={{ duration: 0.15 }}
-                        >
-                          {activeApp === "hermes" ? (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("skills")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("skills.manage")}
-                              >
-                                <Wrench className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("hermesMemory")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("hermes.memory.title")}
-                              >
-                                <Brain className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => void openHermesWebUI()}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("hermes.webui.open")}
-                              >
-                                <LayoutDashboard className="w-4 h-4" />
-                              </Button>
-                              {hasMcpSupport && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setCurrentView("mcp")}
-                                  className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                  title={t("mcp.title")}
-                                >
-                                  <McpIcon size={16} />
-                                </Button>
-                              )}
-                            </>
-                          ) : activeApp === "openclaw" ? (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("workspace")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("workspace.manage")}
-                              >
-                                <FolderOpen className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("openclawEnv")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("openclaw.env.title")}
-                              >
-                                <KeyRound className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("openclawTools")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("openclaw.tools.title")}
-                              >
-                                <Shield className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("openclawAgents")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("openclaw.agents.title")}
-                              >
-                                <Cpu className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("sessions")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("sessionManager.title")}
-                              >
-                                <History className="w-4 h-4" />
-                              </Button>
-                            </>
-                          ) : (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("skills")}
-                                className={cn(
-                                  "text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5",
-                                  "transition-all duration-200 ease-in-out overflow-hidden",
-                                  hasSkillsSupport
-                                    ? "opacity-100 w-8 scale-100 px-2"
-                                    : "opacity-0 w-0 scale-75 pointer-events-none px-0 -ml-1",
-                                )}
-                                title={t("skills.manage")}
-                              >
-                                <Wrench className="flex-shrink-0 w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("prompts")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("prompts.manage")}
-                              >
-                                <Book className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("sessions")}
-                                className={cn(
-                                  "text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5",
-                                  "transition-all duration-200 ease-in-out overflow-hidden",
-                                  hasSessionSupport
-                                    ? "opacity-100 w-8 scale-100 px-2"
-                                    : "opacity-0 w-0 scale-75 pointer-events-none px-0 -ml-1",
-                                )}
-                                title={t("sessionManager.title")}
-                              >
-                                <History className="flex-shrink-0 w-4 h-4" />
-                              </Button>
-                              {hasMcpSupport && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setCurrentView("mcp")}
-                                  className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                  title={t("mcp.title")}
-                                >
-                                  <McpIcon size={16} />
-                                </Button>
-                              )}
-                            </>
-                          )}
-                        </motion.div>
-                      </AnimatePresence>
-                    </div>
-
                     <Button
                       onClick={() => handleOpenAddHub()}
-                      size="icon"
-                      className="ml-2 bg-orange-500 hover:bg-orange-600 dark:bg-orange-500 dark:hover:bg-orange-600 text-white shadow-lg shadow-orange-500/30 dark:shadow-orange-500/40 rounded-full w-8 h-8"
+                      size="sm"
+                      className="ml-2 gap-1.5"
                       aria-label={t("loongport.addEntry.title")}
                       title={t("loongport.addEntry.title")}
                     >
-                      <Plus className="w-5 h-5" />
+                      <Plus className="w-4 h-4" />
+                      {t("client.addService")}
                     </Button>
                   </>
                 )}
@@ -1884,7 +1648,39 @@ function App() {
         {isOpenClawView && openclawHealthWarnings.length > 0 && (
           <OpenClawHealthBanner warnings={openclawHealthWarnings} />
         )}
-        {renderContent()}
+        <PreservedView active={currentView === "services"}>
+          <ServicesPage
+            appId={activeApp}
+            onOpenAddHub={handleOpenAddHub}
+            onOpenApp={(app) =>
+              setCurrentView(app === "codex-image" ? "image" : "providers", app)
+            }
+          />
+        </PreservedView>
+        {APP_IDS.map((app) => (
+          <PreservedView
+            key={`add-${app}`}
+            active={currentView === "addHub" && activeApp === app}
+          >
+            <AddHubPage
+              sourceAppId={app}
+              entryRequest={addHubEntries[app]}
+              firstVisit={addHubEntries[app]?.firstVisit}
+              onBack={goBack}
+              onAddProvider={addProvider}
+            />
+          </PreservedView>
+        ))}
+        {APP_IDS.map((app) => (
+          <PreservedView
+            key={`plaza-${app}`}
+            active={currentView === "plaza" && activeApp === app}
+          >
+            <RelayDirectoryConnectionPage sourceAppId={app} onBack={goBack} />
+          </PreservedView>
+        ))}
+        {!["services", "addHub", "plaza"].includes(currentView) &&
+          renderContent()}
       </main>
 
       <EditProviderDialog
@@ -1950,15 +1746,6 @@ function App() {
       />
 
       <DeepLinkImportDialog />
-
-      {/* 匿名统计的首启告知。统计**默认开**，上报从首次启动就发生、只受设置开关
-          控制 —— 这一屏是知情标记（用户看过才知道默认在参与），不门控发送。
-          它自带「读设置 → 判要不要弹」的全部状态，这里只挂一行。 */}
-      <StatsNoticeDialog />
-
-      {/* 站点实测共建的告知弹窗：主动告知（升级后首启、未表态则弹一次）+
-          广场「加入共建」再入口共用这一个实例 —— 组件自带全部状态，这里只挂一行。 */}
-      <CrowdNoticeDialog />
 
       {/* 「点 Star 领注册礼」弹窗：新人引导事件与红点点击共用，状态机在组件内；
           这里只持开关（offer 在即弹）。 */}

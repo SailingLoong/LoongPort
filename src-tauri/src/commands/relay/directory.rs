@@ -50,21 +50,11 @@ pub fn relay_list_sponsors() -> Vec<crate::relay::remote_config::Sponsor> {
 
 /// 读广场列表：三份本地缓存 + 探针记录的纯投影（同步、零网络往返）。
 ///
-/// 实测快照陈旧或缺失时后台追新（SWR：先出画面，刷完广播事件让前端重拉）。
+/// 实测快照由启动与维护任务刷新，完成后广播事件让前端重拉。
 /// 行级观测**公开**——这里与追新都不查共建开关；共建门禁只管详情弹窗的
 /// 深数据（`crowd_get_snapshot`），见 `relay::directory` 的「门禁分层」。
 #[tauri::command]
-pub fn relay_list_directory(
-    app_handle: tauri::AppHandle,
-) -> Result<crate::relay::directory::RelayDirectoryListing, String> {
-    if snapshot_needs_refresh() {
-        tauri::async_runtime::spawn(async move {
-            if let Err(error) = crate::crowd::snapshot::refresh_and_cache().await {
-                log::debug!("crowd 快照后台刷新失败（用旧值）: {error}");
-            }
-            emit_directory_update(&app_handle);
-        });
-    }
+pub fn relay_list_directory() -> Result<crate::relay::directory::RelayDirectoryListing, String> {
     crate::relay::directory::read_listing().map_err(|error| error.to_string())
 }
 
@@ -83,14 +73,6 @@ pub async fn relay_refresh_directory(
     let listing = crate::relay::directory::read_listing().map_err(|error| error.to_string())?;
     emit_directory_update(&app_handle);
     Ok(listing)
-}
-
-/// 快照是否需要追新：没有缓存（新装首启）或已过陈旧线。
-fn snapshot_needs_refresh() -> bool {
-    match crate::crowd::snapshot::read_cached() {
-        None => true,
-        Some(snapshot) => crate::crowd::snapshot::is_stale(&snapshot),
-    }
 }
 
 /// 广场数据在「命令层之外」被更新（后台快照追新 / transit 周期刷新）后的广播：

@@ -1,14 +1,4 @@
-//! 新人引导命令层：薄调度，策略事实都在 [`crate::relay::onboarding`]。
-//!
-//! 见那个模块的文档 for 模块边界（策略收拢、机制复用、后续调整只动那边）。
-//!
-//! 引导形状（2026-09-06 起）：新人首启只**落到中转站广场**（`RelaySection`
-//! 的 `shouldPromptAddSite` 跳转），全程不弹任何邀约。「点 Star 领注册礼」
-//! 的入口只剩顶栏 GitHub 按钮的红点（常亮到领取为止，用户自己点）——
-//! 曾经挂在 `import_site` 成功路径上的主动弹窗已删：刚接入站点时用户
-//! 还没有任何使用感，此时弹点赞礼只会被打断，实测用户不愿意点。
-//! 注册窗（[`onboarding_open_register_window`]）仍是 Star 对话框领取后
-//! 打开的终点。
+//! Optional service onboarding and the existing reward registration command.
 
 use tauri::Emitter;
 
@@ -65,4 +55,96 @@ pub async fn onboarding_open_register_window(
     });
 
     Ok(())
+}
+
+/// Only backend-owned onboarding facts cross the command boundary.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceOnboardingStatus {
+    should_prompt: bool,
+    completed: bool,
+    plaza_visible: bool,
+}
+
+fn status(settings: &crate::settings::AppSettings) -> ServiceOnboardingStatus {
+    ServiceOnboardingStatus {
+        should_prompt: !settings.service_onboarding_completed
+            && !settings.service_onboarding_dismissed,
+        completed: settings.service_onboarding_completed,
+        plaza_visible: settings.plaza_visible.unwrap_or(false),
+    }
+}
+
+#[tauri::command]
+pub fn service_onboarding_status() -> ServiceOnboardingStatus {
+    status(&crate::settings::get_settings())
+}
+
+#[tauri::command]
+pub fn service_onboarding_dismiss() -> Result<ServiceOnboardingStatus, String> {
+    crate::settings::mutate_settings(|settings| settings.service_onboarding_dismissed = true)
+        .map_err(|error| error.to_string())?;
+    Ok(service_onboarding_status())
+}
+
+fn complete(settings: &mut crate::settings::AppSettings, share_data: bool) {
+    if settings.service_onboarding_completed {
+        return;
+    }
+    settings.enable_anonymous_stats = share_data;
+    settings.crowd_metrics_enabled = share_data;
+    settings.stats_notice_confirmed = Some(true);
+    settings.crowd_metrics_notice_confirmed = Some(true);
+    settings.service_onboarding_completed = true;
+}
+
+#[tauri::command]
+pub fn service_onboarding_complete(share_data: bool) -> Result<ServiceOnboardingStatus, String> {
+    crate::settings::mutate_settings(|settings| complete(settings, share_data))
+        .map_err(|error| error.to_string())?;
+    Ok(service_onboarding_status())
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+
+    #[test]
+    fn dismissal_never_grants_sharing_and_completion_saves_both_choices() {
+        let mut settings = crate::settings::AppSettings::default();
+        assert!(status(&settings).should_prompt);
+        assert!(!status(&settings).plaza_visible);
+        settings.service_onboarding_dismissed = true;
+        assert!(!status(&settings).should_prompt);
+        assert!(!settings.enable_anonymous_stats && !settings.crowd_metrics_enabled);
+        for enabled in [true, false] {
+            let mut settings = crate::settings::AppSettings::default();
+            complete(&mut settings, enabled);
+            assert!(status(&settings).completed);
+            assert_eq!(settings.enable_anonymous_stats, enabled);
+            assert_eq!(settings.crowd_metrics_enabled, enabled);
+            assert_eq!(settings.plaza_visible, None);
+            complete(&mut settings, !enabled);
+            assert_eq!(settings.enable_anonymous_stats, enabled);
+            assert_eq!(settings.crowd_metrics_enabled, enabled);
+        }
+    }
+
+    #[test]
+    fn upgrades_keep_preferences_and_do_not_show_new_install_prompt() {
+        let mut settings = serde_json::from_str::<crate::settings::AppSettings>(
+            r#"{"enableAnonymousStats":false,"crowdMetricsEnabled":true}"#,
+        )
+        .unwrap();
+        complete(&mut settings, true);
+        assert!(status(&settings).completed);
+        assert!(!status(&settings).should_prompt);
+        assert!(!settings.enable_anonymous_stats);
+        assert!(settings.crowd_metrics_enabled);
+        let value = serde_json::to_value(status(&settings)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"shouldPrompt":false,"completed":true,"plazaVisible":false})
+        );
+    }
 }

@@ -281,7 +281,7 @@ fn query_raw_model_buckets(
     Ok(raws)
 }
 
-/// provider → 站点身份（注册域），只保留 relay 模块登记过的站点。
+/// provider → 服务注册域，覆盖中转站登记与已配置官方账号的有效 plan 端点。
 ///
 /// 判据：provider 的 base_url 指纹归到注册域后，命中 `loongport_relay` 表里任一
 /// 站点的注册域。站点的**两列**都算数（`site_origin` 面板域 + `api_base_url` API 域
@@ -292,9 +292,9 @@ fn resolve_relay_hosts(
     db: &Database,
     refs: &HashSet<(String, String)>,
 ) -> Result<HashMap<(String, String), String>, AppError> {
-    let relay_domains: HashSet<String> = {
+    let service_domains: HashSet<String> = {
         let conn = crate::database::lock_conn!(db.conn);
-        crate::relay::creds::list(&conn)?
+        let mut domains: HashSet<String> = crate::relay::creds::list(&conn)?
             .into_iter()
             .flat_map(|relay| {
                 [
@@ -302,9 +302,24 @@ fn resolve_relay_hosts(
                     crate::relay::identity::site_domain(&relay.api_base_url),
                 ]
             })
-            .collect()
+            .collect();
+        for row in crate::vendor::creds::list(&conn)? {
+            let Some(vendor) = crate::vendor::Vendor::from_id(&row.vendor_id) else {
+                continue;
+            };
+            for plan in crate::vendor::plans(vendor) {
+                for app in crate::vendor::provision::VENDOR_APPS {
+                    if let Some((origin, _)) =
+                        crate::vendor::config_for(vendor, plan.id_segment, &app)
+                    {
+                        domains.insert(crate::relay::identity::site_domain(&origin));
+                    }
+                }
+            }
+        }
+        domains
     };
-    if relay_domains.is_empty() {
+    if service_domains.is_empty() {
         return Ok(HashMap::new());
     }
 
@@ -325,7 +340,7 @@ fn resolve_relay_hosts(
                 continue;
             };
             let domain = crate::relay::identity::site_domain(&origin);
-            if relay_domains.contains(&domain) {
+            if service_domains.contains(&domain) {
                 hosts.insert((provider_id.clone(), app_str.to_string()), domain);
             }
         }
@@ -586,6 +601,26 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn configured_vendor_accounts_resolve_without_relay_rows() {
+        let db = setup_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO loongport_vendor (vendor_id, account_id) VALUES ('deepseek', 'example-account')", []).unwrap();
+        conn.execute("INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('official-example', 'codex', 'Example', ?1, '{}')", params![serde_json::json!({"auth":{"OPENAI_API_KEY":"test-key"},"base_url":"https://api.deepseek.com/v1"}).to_string()]).unwrap();
+        drop(conn);
+        let hosts = resolve_relay_hosts(
+            &db,
+            &HashSet::from([("official-example".into(), "codex".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            hosts
+                .get(&("official-example".into(), "codex".into()))
+                .map(String::as_str),
+            Some("deepseek.com")
+        );
     }
 
     #[test]

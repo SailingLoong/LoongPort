@@ -1472,9 +1472,8 @@ pub fn run() {
 
             // 匿名使用统计：启动后延迟一次性上报（安装 id / 版本 / OS / 站点域名）。
             //
-            // **发送闸只有设置开关**（2026-09-09 拍板）：统计默认开（VS Code /
-            // Homebrew 模式），从**首次启动**就开始上报 —— 告知弹窗（单按钮
-            // 「知道了」）是知情标记，不门控发送；设置里关掉后一个字节都不发。
+            // Fresh installations remain disabled until an explicit sharing choice.
+            // Existing preferences are preserved; the persisted switch owns consent.
             //
             // **一次性、不定时重复**：它答的是「多少安装、什么版本、在用哪几家中转站」，
             // 每次开 app 报一次已经够，加定时器只是多打请求。
@@ -1540,8 +1539,7 @@ pub fn run() {
                         .conn
                         .lock()
                         .map_err(|e| format!("获取数据库连接失败: {e}"))?;
-                    crate::relay::creds::list(&conn)
-                        .map(|ops| ops.into_iter().map(|o| o.site_origin).collect::<Vec<_>>())
+                    crate::relay::stats::configured_service_origins(&conn)
                         .map_err(|e| e.to_string())
                 })
                 .await
@@ -1754,6 +1752,9 @@ pub fn run() {
             commands::relay_status,
             // 新人引导（点 Star 领注册礼 + 注册窗终点）与其机制层（邀请 payload）
             commands::onboarding_open_register_window,
+            commands::service_onboarding_status,
+            commands::service_onboarding_dismiss,
+            commands::service_onboarding_complete,
             commands::star_reward_offer,
             commands::star_reward_mark_claimed,
             commands::star_reward_auto_star,

@@ -16,7 +16,7 @@ import { CcSwitchImportDialog } from "@/components/settings/CcSwitchImportDialog
  *   范围）才显示，点了打开导入确认框；cc-switch 比本仓新时静默不显示。
  * - **首启弹窗**：第一次打开时（`ccSwitchImportPrompted` 还没置过）如果检测到可导的
  *   cc-switch 数据，自动弹出「是否一键导入」的确认框；确认或关闭都记下「问过了」，
- *   下次启动不再打扰 —— 与 `StatsNoticeDialog` 的 `statsNoticeConfirmed` 同一个惯例。
+ *   下次启动不再打扰 —— 由该导入流程的确认状态控制。
  */
 export function CcSwitchImportEntry() {
   const { t } = useTranslation();

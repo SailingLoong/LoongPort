@@ -29,13 +29,8 @@ const SETTING_FLUSHED_THROUGH: &str = "crowd_metrics_flushed_through";
 const SETTING_SOURCE_DAY: &str = "crowd_metrics_source_day";
 const SETTING_SOURCE_ID: &str = "crowd_metrics_source_id";
 
-/// flush 的发送闸（纯函数便于闸测试）：**只有设置开关**。
-///
-/// 与 `relay::stats` 2026-09-09 的拍板同形：告知弹窗是知情标记、不门控发送 ——
-/// 「看过告知才发」是 opt-in 时代的产物，默认参与拍板后它只剩一个边缘窗口
-/// （装机→加站→弹窗弹出前约一分钟），为一个字节都还没产生的窗口维持第二道闸，
-/// 换来的是「上报资格与使用方式纠缠」的口径窟窿。显式关过开关的用户
-/// 一个字节都不发，这条不变。
+/// The persisted sharing choice is the sending gate. Fresh installations start
+/// disabled; onboarding completion or an explicit settings change can enable it.
 pub(crate) fn upload_allowed(enabled: bool) -> bool {
     enabled
 }

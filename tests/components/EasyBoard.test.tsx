@@ -15,6 +15,9 @@ import {
   afterAll,
 } from "vitest";
 
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
+
 import { EasyBoard } from "@/components/easymode/EasyBoard";
 import type { TierBoard } from "@/lib/api/autoMode";
 
@@ -128,8 +131,7 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
         ],
         breakerState: null,
         breakerReopenInSecs: null,
-        // 当前档是 tier-b…不对：fixture 里 isCurrent 是 tier-b（贵档）；
-        // 粘性徽章断言放这条会混——tier-a 非当前，不给 affinity。
+        // The backend supplies no affinity window for this tier.
         affinityRemainingSecs: null,
       },
       {
@@ -159,7 +161,7 @@ function boardFixture(overrides: Partial<TierBoard> = {}): TierBoard {
   };
 }
 
-function setupBoard(board: TierBoard) {
+function setupBoard(board: TierBoard, onOpenSettings = vi.fn()) {
   tierBoardMock.mockReturnValue({ data: board, isLoading: false });
   statusMock.mockReturnValue({
     data: {
@@ -171,7 +173,7 @@ function setupBoard(board: TierBoard) {
       cliInstalled: true,
     },
   });
-  render(<EasyBoard appId="claude" />);
+  return render(<EasyBoard appId="claude" onOpenSettings={onOpenSettings} />);
 }
 
 // cmdk（模型选择器）需要 scrollIntoView，jsdom 没有 —— 保存/恢复式打桩
@@ -197,6 +199,18 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  i18n.addResource(
+    "zh",
+    "translation",
+    "client.configMissing",
+    zh.client.configMissing,
+  );
+  i18n.addResource(
+    "zh",
+    "translation",
+    "autoMode.strategy.cheapest",
+    zh.autoMode.strategy.cheapest,
+  );
   vi.clearAllMocks();
   proxyStatusMock.mockReturnValue({
     isRunning: true,
@@ -241,8 +255,8 @@ describe("EasyBoard", () => {
       screen.getByTitle("近 6 小时：成功 101 · 失败 3 · 首字 870ms"),
     ).toBeDefined();
     expect(document.querySelectorAll("polyline").length).toBeGreaterThan(0);
-    // 当前命中只在 isCurrent 档出现一次；粘性倒计时跟着当前档走
-    expect(screen.getAllByText("当前")).toHaveLength(1);
+    // Configured selection and affinity are independent backend facts.
+    expect(screen.getAllByText("已配置")).toHaveLength(1);
     expect(screen.getByTitle(/会话粘性中/)).toBeDefined();
     expect(screen.getByText("粘性 · 12 分钟")).toBeDefined();
   });
@@ -293,7 +307,7 @@ describe("EasyBoard", () => {
     );
     expect(screen.getByText("熔断")).toBeDefined();
     expect(screen.queryByText("降级")).toBeNull();
-    expect(screen.getAllByText("当前")).toHaveLength(1);
+    expect(screen.getAllByText("已配置")).toHaveLength(1);
   });
 
   it("失败档位有重新启用按钮，头部出现重试全部；点击批量重试逐档调用", async () => {
@@ -422,10 +436,30 @@ describe("EasyBoard", () => {
     });
   });
 
-  it("点策略按钮落到 setStrategy mutation", () => {
-    setupBoard(boardFixture());
-    fireEvent.click(screen.getByText("省时"));
-    expect(setStrategyMock).toHaveBeenCalledWith({ strategy: "fastest" });
+  it("全局策略只读展示，修改入口导航到设置而不直接写策略", () => {
+    const openSettings = vi.fn();
+    setupBoard(boardFixture(), openSettings);
+    expect(screen.getByText("全局策略")).toBeDefined();
+    expect(screen.getByText(zh.autoMode.strategy.cheapest)).toBeDefined();
+    expect(screen.queryByRole("button", { name: "省钱" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "省时" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "全局选路设置" }));
+    expect(openSettings).toHaveBeenCalledTimes(1);
+    expect(setStrategyMock).not.toHaveBeenCalled();
+  });
+
+  it("配置状态未知时不宣称应用未安装或配置缺失", () => {
+    const { rerender } = setupBoard(boardFixture());
+    statusMock.mockReturnValue({ data: undefined });
+    rerender(<EasyBoard appId="claude" onOpenSettings={vi.fn()} />);
+    expect(screen.queryByText(/尚未找到应用配置/)).toBeNull();
+    expect(screen.queryByText(/未安装/)).toBeNull();
+    statusMock.mockReturnValue({ data: { cliInstalled: false } });
+    rerender(<EasyBoard appId="claude" onOpenSettings={vi.fn()} />);
+    expect(
+      screen.getByText("尚未找到应用配置，请先启动应用完成初始化。"),
+    ).toBeDefined();
+    expect(screen.queryByText(/未安装/)).toBeNull();
   });
 
   it("切手动模式走 setMode；手动下不再显示策略按钮", () => {
@@ -521,9 +555,8 @@ describe("EasyBoard", () => {
     expect(screen.getAllByTitle("需要复核")).toHaveLength(2);
   });
 
-  it("「当前」徽章跟实时在用档位走（active_targets），不卡在持久化指针上", () => {
-    // 看板 isCurrent 仍指 tier-b（贵档，持久化指针），但实际流量在 tier-a ——
-    // 徽章必须跟实际在用走，否则省心选路后盯屏看它不动（用户反馈的静态徽章）
+  it("路由目标和已配置档位分别展示，不把目标冒充请求历史", () => {
+    // active_targets can change on a hot switch before any request succeeds.
     proxyStatusMock.mockReturnValue({
       isRunning: true,
       startProxyServer: vi.fn().mockResolvedValue(undefined),
@@ -540,7 +573,7 @@ describe("EasyBoard", () => {
     });
     setupBoard(boardFixture());
 
-    expect(screen.getAllByText("当前")).toHaveLength(1);
+    expect(screen.getAllByText("已配置")).toHaveLength(1);
     const cheapRow = screen
       .getByText("便宜档")
       .closest("div.rounded-lg") as HTMLElement | null;
@@ -549,21 +582,25 @@ describe("EasyBoard", () => {
       .closest("div.rounded-lg") as HTMLElement | null;
     expect(cheapRow).not.toBeNull();
     expect(expensiveRow).not.toBeNull();
-    expect(within(cheapRow!).getByText("当前")).toBeDefined();
-    expect(within(expensiveRow!).queryByText("当前")).toBeNull();
-    // 实时当前档没有粘性数据（后端只给指针当前档填 affinity）→ 不硬凑粘性徽章
-    expect(screen.queryByText(/粘性/)).toBeNull();
+    expect(within(cheapRow!).getByText("路由目标")).toBeDefined();
+    expect(within(cheapRow!).queryByText("已配置")).toBeNull();
+    expect(within(expensiveRow!).getByText("已配置")).toBeDefined();
+    expect(within(expensiveRow!).queryByText("路由目标")).toBeNull();
+    expect(screen.queryByText("最近请求")).toBeNull();
+    // The backend affinity fact remains visible on its owning tier.
+    expect(screen.getByText("粘性 · 12 分钟")).toBeDefined();
   });
 
-  it("无实时信号（路由未跑/尚无流量）时回退持久化 isCurrent", () => {
+  it("无路由目标信号时仍显示配置事实，不制造请求历史", () => {
     proxyStatusMock.mockReturnValue({
       isRunning: true,
       startProxyServer: vi.fn().mockResolvedValue(undefined),
       status: { running: true, active_targets: [] },
     });
     setupBoard(boardFixture());
-    // 回退后与既有行为一致：当前在 tier-b、粘性徽章跟着 tier-b
-    expect(screen.getAllByText("当前")).toHaveLength(1);
+    expect(screen.queryByText("路由目标")).toBeNull();
+    expect(screen.queryByText("最近请求")).toBeNull();
+    expect(screen.getAllByText("已配置")).toHaveLength(1);
     expect(screen.getByText("粘性 · 12 分钟")).toBeDefined();
   });
 });

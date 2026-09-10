@@ -1,8 +1,8 @@
 /**
  * 首页省心视图：省心模式生效时替换该 app 的 provider 页。
  *
- * 用户只做三件事：选模型、选模式（自动/手动）；自动下选策略（省钱/省时），
- * 手动下拖动档位卡排序。全部档位事实来自后端看板（唯源），这里只渲染。
+ * 应用内选择模型与自动/手动模式；全局策略只读展示并链接设置，
+ * 手动模式可拖动档位排序。全部档位事实来自后端看板。
  */
 import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
@@ -11,7 +11,6 @@ import { useProxyStatus } from "@/hooks/useProxyStatus";
 import {
   useAutoModeStatus,
   useSetAutoModeModel,
-  useSetAutoModeStrategy,
   useSetEasyModeManualOrder,
   useSetEasyModeMode,
   useTierBoard,
@@ -21,20 +20,24 @@ import { cn } from "@/lib/utils";
 import { SelfManagedBar } from "./SelfManagedBar";
 import { TierList } from "./TierList";
 
-export function EasyBoard({ appId }: { appId: string }) {
+export function EasyBoard({
+  appId,
+  onOpenSettings,
+}: {
+  appId: string;
+  onOpenSettings: () => void;
+}) {
   const { t } = useTranslation();
   const { data: board, isLoading } = useTierBoard(appId);
   const { status, isRunning, startProxyServer } = useProxyStatus();
   const { data: autoStatus } = useAutoModeStatus(appId);
   const setModel = useSetAutoModeModel();
-  const setStrategy = useSetAutoModeStrategy();
   const setMode = useSetEasyModeMode();
   const setOrder = useSetEasyModeManualOrder();
   const resetBreaker = useResetCircuitBreaker();
 
-  // 实际在用档位：后端每次成功转发实时写内存、经代理状态 2s 轮询透出
-  // （自主视图供应商卡的绿边用同一信号）。「当前」徽章跟它走，路由没跑/
-  // 尚无流量时回退看板的持久化 isCurrent。
+  // The backend target can change on a hot switch before any request succeeds.
+  // It is separate from the persisted configuration and is not request history.
   const activeProviderId = status?.active_targets?.find(
     (target) => target.app_type === appId,
   )?.provider_id;
@@ -117,21 +120,20 @@ export function EasyBoard({ appId }: { appId: string }) {
         </div>
 
         {!manual ? (
-          <div className="grid grid-cols-2 gap-2">
-            <ChoiceButton
-              active={board.strategy === "cheapest"}
-              disabled={setStrategy.isPending}
-              onClick={() => setStrategy.mutate({ strategy: "cheapest" })}
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">
+              {t("autoMode.board.globalStrategy", { defaultValue: "全局策略" })}
+            </span>
+            <span>{t(`autoMode.strategy.${board.strategy}`)}</span>
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="rounded-md border px-2.5 py-1 text-xs transition-colors hover:bg-accent"
             >
-              {t("autoMode.strategy.cheapest", { defaultValue: "省钱" })}
-            </ChoiceButton>
-            <ChoiceButton
-              active={board.strategy === "fastest"}
-              disabled={setStrategy.isPending}
-              onClick={() => setStrategy.mutate({ strategy: "fastest" })}
-            >
-              {t("autoMode.strategy.fastest", { defaultValue: "省时" })}
-            </ChoiceButton>
+              {t("autoMode.board.strategySettings", {
+                defaultValue: "全局选路设置",
+              })}
+            </button>
           </div>
         ) : null}
 
@@ -179,11 +181,9 @@ export function EasyBoard({ appId }: { appId: string }) {
         />
       )}
 
-      {!autoStatus?.cliInstalled ? (
+      {autoStatus?.cliInstalled === false ? (
         <p className="text-xs text-amber-600 dark:text-amber-400">
-          {t("autoMode.cliMissingHint", {
-            defaultValue: "该 CLI 未安装，接管不会生效",
-          })}
+          {t("client.configMissing")}
         </p>
       ) : null}
     </div>

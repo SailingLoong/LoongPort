@@ -82,6 +82,8 @@ export interface RelaySectionProps {
    * 且把「这是个受限取值域」这个事实写进类型里。
    */
   appId: AppId;
+  /** Display one account while retaining the existing action owner. */
+  accountFilter?: { kind: "relay" | "vendor"; id: number };
   /** 打开统一添加聚合页的指定标签。首启引导落「中转站」（综合榜）；
    * 两个区块的空态占位也经它指名跳转（中转站→directory / 官方 API→official）。 */
   onOpenAddHub: (
@@ -90,23 +92,11 @@ export interface RelaySectionProps {
   ) => void;
 }
 
-/**
- * 「这个进程里已经自动打开过广场了」——**模块级变量，有意不是 state / ref**。
- *
- * 需求是「以进程被打开为计算，进程不消亡就不重复跳」。而这个组件会**反复挂载卸载**：
- * `App.tsx` 只在 provider 视图下渲染它，用户切到设置页再切回来、或切换 app tab
- * （`appId` 变化本身不重挂，但视图切换会）都会走一次新的挂载。
- *
- * 所以标志不能放组件内：`useState` / `useRef` 随卸载一起丢 ⇒ 用户每次回到这一页
- * 都被弹一次。放模块作用域，生命周期正好等于「这个 JS 上下文」= 这个进程
- * （app 重启 / 更新后 WebView 重新加载模块，标志自然回到 false —— 那正是要的）。
- *
- * ⚠️ 用 `localStorage` 是**错的**：那会跨进程持久化 ⇒ 用户第一次关掉引导之后，
- * 以后每次启动都不再提醒，即使他一个站都还没配。
- */
-let autoOpenedHubThisProcess = false;
-
-export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
+export function RelaySection({
+  appId,
+  onOpenAddHub,
+  accountFilter,
+}: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
    *
@@ -206,27 +196,6 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
       toast.error(String(e));
     }
   }, [appId]);
-
-  const reloadStatus = useCallback(async () => {
-    try {
-      const status = await relayApi.status();
-      if (
-        isImageTab ||
-        !status.shouldPromptAddSite ||
-        autoOpenedHubThisProcess
-      ) {
-        return;
-      }
-      autoOpenedHubThisProcess = true;
-      // 新人（还没有任何站点账号）落到中转站广场挑站点 —— 落点 + 一次
-      // 「手填域名直达」弹窗（广场列表动态加载，站长给的域名先走）。
-      // 「点 Star 领注册礼」推迟到首个站点接入成功之后由后端直接发事件
-      // （见 `commands::onboarding`），用户有使用感觉再邀请。
-      onOpenAddHub("directory", { firstVisit: true });
-    } catch {
-      // 状态读不到时不猜业务事实；保留最后一次完整后端视图。
-    }
-  }, [isImageTab, onOpenAddHub]);
 
   const presentRefreshResult = useCallback(
     (result: RefreshResult) => {
@@ -328,8 +297,7 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
     // ⚠️ **官网行必须跟档位一起刷**（见上方 doc）：两类行的「当前在用」同源，
     // 只刷一边就会让切完档位后 DeepSeek 行继续显示旧的「在用」高亮。
     void reloadVendors();
-    void reloadStatus();
-  }, [appId, reloadStatus, reloadVendors]);
+  }, [appId, reloadVendors]);
 
   useEffect(() => {
     void reload();
@@ -831,79 +799,91 @@ export function RelaySection({ appId, onOpenAddHub }: RelaySectionProps) {
     <>
       {/* 生图页的顶部说明与「生成 / 档位」分段在外层的 `ImageTabPage`（本组件被它
           内嵌为「档位」视图）；这里只剩空态那一支在用 `ImageTabNotice`。 */}
-      <div className="mb-3 flex justify-end">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="relative h-7 w-7"
-          disabled={busy.has("refresh:all")}
-          onClick={() => void handleRefreshAll()}
-          title={t("loongport.refreshAll")}
-          aria-label={t("loongport.refreshAll")}
-        >
-          {busy.has("refresh:all") ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <>
-              <RefreshCw className="h-4 w-4" />
-              <Layers3 className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-sm bg-background" />
-            </>
-          )}
-        </Button>
-      </div>
+      {!accountFilter && (
+        <div className="mb-3 flex justify-end">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="relative h-7 w-7"
+            disabled={busy.has("refresh:all")}
+            onClick={() => void handleRefreshAll()}
+            title={t("loongport.refreshAll")}
+            aria-label={t("loongport.refreshAll")}
+          >
+            {busy.has("refresh:all") ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <>
+                <RefreshCw className="h-4 w-4" />
+                <Layers3 className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-sm bg-background" />
+              </>
+            )}
+          </Button>
+        </div>
+      )}
       {/* 模型验证的行级宿主：summaries 拉取、验真弹窗与结果变化订阅全在
           Provider 内部；下线时它对外不可见（不拉取、入口/徽章不渲染）。 */}
-      <TierVerificationProvider
-        appId={appId}
-        providerIds={verificationProviderIds}
-      >
-        <RelayTierList
-          relays={relays}
-          busy={busy}
-          onAddSite={() => onOpenAddHub("directory")}
-          onLogin={(relayId) => void handleLogin(relayId)}
-          onProvision={handleProvision}
-          onSiteConfigApplied={() => void reload()}
-          onReorder={(ids) => void handleReorder(ids)}
-          onSwitchTier={(relayId, tier) => void handleSwitchTier(relayId, tier)}
-          onSelectTierModel={(tier, model) =>
-            void handleSelectTierModel(tier, model)
-          }
-          onPurchase={(relayId) => void handlePurchase(relayId)}
-          onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
-          onBrowserLogin={(relayId) => void handleBrowserLogin(relayId)}
-          // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
-          // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
-          onCheckTier={(tier) =>
-            void checkProvider(tier.providerId, tier.displayName)
-          }
-          isCheckingTier={isChecking}
-          onResetTier={(tier) =>
-            setConfirmReset({
-              kind: "tier",
-              providerId: tier.providerId,
-              displayName: tier.displayName,
-              busyKey: `reset:${tier.providerId}`,
-            })
-          }
-          onEditTier={requestEdit}
-          onRemoveRelay={(relayId) => {
-            // ⚠️ **这处 `find` 保持 number 不动**：`relayId` 从 `RelayRow` 的
-            // `onDelete` 一路传回来，只在 relay 这一类里流转。官网行走的是
-            // `onRemoveVendor` 那条独立回调，不经过这里。
-            const row = relays.find((op) => op.id === relayId);
-            if (row) setConfirmRemove(row);
-          }}
-        />
-      </TierVerificationProvider>
+      {accountFilter?.kind !== "vendor" && (
+        <TierVerificationProvider
+          appId={appId}
+          providerIds={verificationProviderIds}
+        >
+          <RelayTierList
+            relays={
+              accountFilter
+                ? relays.filter((row) => row.id === accountFilter.id)
+                : relays
+            }
+            busy={busy}
+            onAddSite={() => onOpenAddHub("directory")}
+            onLogin={(relayId) => void handleLogin(relayId)}
+            onProvision={handleProvision}
+            onSiteConfigApplied={() => void reload()}
+            onReorder={(ids) => void handleReorder(ids)}
+            onSwitchTier={(relayId, tier) =>
+              void handleSwitchTier(relayId, tier)
+            }
+            onSelectTierModel={(tier, model) =>
+              void handleSelectTierModel(tier, model)
+            }
+            onPurchase={(relayId) => void handlePurchase(relayId)}
+            onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
+            onBrowserLogin={(relayId) => void handleBrowserLogin(relayId)}
+            // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
+            // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
+            onCheckTier={(tier) =>
+              void checkProvider(tier.providerId, tier.displayName)
+            }
+            isCheckingTier={isChecking}
+            onResetTier={(tier) =>
+              setConfirmReset({
+                kind: "tier",
+                providerId: tier.providerId,
+                displayName: tier.displayName,
+                busyKey: `reset:${tier.providerId}`,
+              })
+            }
+            onEditTier={requestEdit}
+            onRemoveRelay={(relayId) => {
+              // ⚠️ **这处 `find` 保持 number 不动**：`relayId` 从 `RelayRow` 的
+              // `onDelete` 一路传回来，只在 relay 这一类里流转。官网行走的是
+              // `onRemoveVendor` 那条独立回调，不经过这里。
+              const row = relays.find((op) => op.id === relayId);
+              if (row) setConfirmRemove(row);
+            }}
+          />
+        </TierVerificationProvider>
+      )}
 
       {/* 官网直连账号块 —— 只在支持厂商的 tab 出现（gemini / grokbuild 无 preset，
           摆了也是骗人）。添加入口在顶栏大「+」。 */}
-      {vendorSupported && (
+      {vendorSupported && accountFilter?.kind !== "relay" && (
         <VendorBlock
           vendor={{
-            accounts: vendors,
+            accounts: accountFilter
+              ? vendors.filter((row) => row.id === accountFilter.id)
+              : vendors,
             onLogin: (rowId) => {
               const row = vendors.find((v) => v.id === rowId);
               if (row) void handleVendorLogin(row.vendorId, rowId);
