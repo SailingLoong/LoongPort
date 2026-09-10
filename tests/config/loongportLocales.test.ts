@@ -161,12 +161,11 @@ const requiredKeys = [
   // 显示成 key 名比不显示更糟（用户会以为界面坏了）。
   "tier.userEdited",
   "tier.userEditedHint",
-  // 使用统计的告知（2026-09-09 起纯告知形态，与共建告知同款）。**五条都要有** ——
-  // 缺一条那一屏就会显示 key 名，而那一屏是「默认开」的知情前提。
-  // 尤其 `stats.idNote`（披露那个持久安装标识）—— 缺它就变成不诚实的告知。
+  // 使用统计的告知（2026-09-09 起纯告知形态，与共建告知同款；2026-09-10 起
+  // 只对首装机弹、安装标识披露折进 body 一句）。**四条都要有** —— 缺一条那一屏
+  // 就会显示 key 名，而那一屏是「默认开」的知情前提。
   "stats.title",
   "stats.body",
-  "stats.idNote",
   "stats.turnOffHint",
   "stats.ok",
   // 站点实测共建。与 stats.* 同一个理：缺一条，详情弹窗的实测区或共建告知
@@ -540,34 +539,47 @@ describe("LoongPort tier page locale coverage", () => {
     [
       "zh",
       zh.loongport,
-      { onByDefault: "已默认参与", settingsPath: "设置 → 通用" },
+      {
+        onByDefault: "默认匿名分享",
+        settingsPath: "设置 → 通用",
+        installId: "安装标识",
+      },
     ],
     [
       "zh-TW",
       zhTW.loongport,
-      { onByDefault: "已預設參與", settingsPath: "設定 → 通用" },
+      {
+        onByDefault: "預設匿名分享",
+        settingsPath: "設定 → 通用",
+        installId: "安裝識別碼",
+      },
     ],
     [
       "en",
       en.loongport,
-      { onByDefault: "On by default", settingsPath: "Settings → General" },
+      {
+        onByDefault: "On by default",
+        settingsPath: "Settings → General",
+        installId: "install ID",
+      },
     ],
     [
       "ja",
       ja.loongport,
       {
-        onByDefault: "デフォルトで参加しています",
+        onByDefault: "デフォルトで匿名共有",
         settingsPath: "設定 → 一般",
+        installId: "インストール ID",
       },
     ],
   ] as const)(
     "%s states the approved default-participation facts and the settings opt-out",
     (_locale, ns, expected) => {
       // 2026-09-09 纯告知形态：钉三件必须说清的事 —— 默认参与、关闭走设置、
-      // 持久安装标识的诚实披露（idNote 缺失等于不诚实的告知）。
+      // 随机安装标识的诚实披露（2026-09-10 起折进 body 一句，不单独成行）。
       expect(ns.stats.body).toContain(expected.onByDefault);
       expect(ns.stats.turnOffHint).toContain(expected.settingsPath);
-      expect(ns.stats.idNote.length).toBeGreaterThan(0);
+      expect(ns.stats.body).toContain(expected.installId);
       expect(ns.stats.ok.length).toBeGreaterThan(0);
     },
   );

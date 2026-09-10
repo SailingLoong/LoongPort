@@ -3272,9 +3272,8 @@
     },
     "stats": {
       "title": "Help improve LoongPort",
-      "body": "On by default: shares the relay services you've added, account counts, app version, and OS type so we can decide which services to support first. Sign-in details, email addresses, balances, API keys, and usage records are never collected.",
-      "idNote": "The data includes a randomly generated installation ID for deduplication. It is not linked to your relay service accounts.",
-      "turnOffHint": "To turn it off: Settings → General → Usage statistics.",
+      "body": "On by default: anonymously shares the relay services you've added, account counts, and version and system info to help us decide what to support first. Includes a random install ID; never keys, emails, or usage.",
+      "turnOffHint": "Turn off anytime: Settings → General → Usage statistics.",
       "ok": "Got it"
     },
     "crowd": {
