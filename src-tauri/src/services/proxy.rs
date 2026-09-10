@@ -1020,10 +1020,15 @@ impl ProxyService {
             return Ok(());
         }
 
-        let mut resolved_config = config.clone();
+        // 端口是全局字段，不能通过旧接口回写各应用独立的重试和超时配置。
+        let mut resolved_config = self
+            .db
+            .get_global_proxy_config()
+            .await
+            .map_err(|e| format!("获取全局代理配置失败: {e}"))?;
         resolved_config.listen_port = actual_port;
         self.db
-            .update_proxy_config(resolved_config)
+            .update_global_proxy_config(resolved_config)
             .await
             .map_err(|e| format!("保存动态代理端口失败: {e}"))
     }
@@ -1886,23 +1891,17 @@ impl ProxyService {
         // 2. 恢复原始 Live 配置
         self.restore_live_configs().await?;
 
-        // 3. 更新 proxy_config 表中的 live_takeover_active 标志（兼容旧版）
-        //    注意：保留 proxy_config.enabled 状态，下次启动时自动恢复
-        if let Ok(mut config) = self.db.get_proxy_config().await {
-            config.live_takeover_active = false;
-            self.db.update_proxy_config(config).await.warn_on_err(
-                DiagnosticEvent::new("proxy.shutdown", "persist_state_failed")
-                    .field("phase", "restore_keep_state"),
-            );
-        }
+        // 保留各应用的 enabled 和故障转移配置，下次启动时自动恢复。
+        // live_takeover_active 已废弃：旧接口的回写不带 WHERE，会把 Claude 行的
+        // 重试/超时字段盖到其余应用上（#7204），死写回直接删掉。
 
-        // 4. 删除备份（Live 配置已恢复，备份不再需要）
+        // 3. 删除备份（Live 配置已恢复，备份不再需要）
         self.db
             .delete_all_live_backups()
             .await
             .map_err(|e| format!("删除备份失败: {e}"))?;
 
-        // 5. 重置健康状态
+        // 4. 重置健康状态
         self.db
             .clear_all_provider_health()
             .await
@@ -4242,6 +4241,100 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("set test proxy config to an ephemeral port");
+    }
+
+    /// 给四个应用种下互不相同的代理配置（#7204 的回归底料：任何一个应用的
+    /// 字段被别的应用盖掉都会被逐字段比对抓到）。
+    async fn seed_distinct_app_proxy_configs(db: &Database) -> Vec<Value> {
+        let mut configs = Vec::new();
+        for (app, retries) in [("claude", 6), ("codex", 0), ("gemini", 2), ("grokbuild", 3)] {
+            let mut config = db.get_proxy_config_for_app(app).await.unwrap();
+            config.enabled = retries % 2 == 0;
+            config.auto_failover_enabled = retries % 2 != 0;
+            config.max_retries = retries;
+            config.streaming_first_byte_timeout = 30 + retries;
+            config.streaming_idle_timeout = 90 + retries;
+            config.non_streaming_timeout = 300 + retries;
+            config.circuit_failure_threshold = 5 + retries;
+            configs.push(serde_json::to_value(&config).unwrap());
+            db.update_proxy_config_for_app(config).await.unwrap();
+        }
+        configs
+    }
+
+    async fn assert_app_proxy_configs_unchanged(db: &Database, configs: &[Value]) {
+        for expected in configs {
+            let app = expected["appType"].as_str().unwrap();
+            let actual = db.get_proxy_config_for_app(app).await.unwrap();
+            assert_eq!(serde_json::to_value(actual).unwrap(), *expected, "{app}");
+        }
+    }
+
+    /// 正常退出的关停路径不得把 Claude 行的重试/超时字段盖到其他应用上（#7204）。
+    #[tokio::test]
+    #[serial]
+    async fn shutdown_preserves_app_proxy_configs() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let configs = seed_distinct_app_proxy_configs(&db).await;
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
+
+        let backup = json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com"}});
+        db.save_live_backup("claude", &backup.to_string())
+            .await
+            .unwrap();
+
+        service.stop_with_restore_keep_state().await.unwrap();
+
+        assert_app_proxy_configs_unchanged(&db, &configs).await;
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::config::get_claude_settings_path())
+                .unwrap(),
+            backup
+        );
+        assert!(db.get_live_backup("claude").await.unwrap().is_none());
+    }
+
+    /// 动态端口的落盘只许碰全局的 listen 字段，各应用独立配置原样保留（#7204）。
+    #[tokio::test]
+    async fn ephemeral_port_preserves_app_proxy_configs() {
+        let db = Arc::new(Database::memory().unwrap());
+        let configs = seed_distinct_app_proxy_configs(&db).await;
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
+        let mut config = db.get_proxy_config().await.unwrap();
+        config.listen_port = 0;
+        let mut expected_global = db.get_global_proxy_config().await.unwrap();
+        expected_global.listen_port = 23456;
+
+        service
+            .persist_ephemeral_listen_port_if_needed(&config, 23456)
+            .await
+            .unwrap();
+
+        assert_app_proxy_configs_unchanged(&db, &configs).await;
+        assert_eq!(
+            serde_json::to_value(db.get_global_proxy_config().await.unwrap()).unwrap(),
+            serde_json::to_value(expected_global).unwrap()
+        );
+
+        // 已固定的端口不再重复落盘。
+        config.listen_port = 23456;
+        service
+            .persist_ephemeral_listen_port_if_needed(&config, 34567)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_global_proxy_config().await.unwrap().listen_port,
+            23456
+        );
+        assert_app_proxy_configs_unchanged(&db, &configs).await;
     }
 
     #[tokio::test]
@@ -6885,24 +6978,68 @@ wire_api = "responses"
     }
 
     #[test]
-    fn update_toml_base_url_falls_back_to_top_level_base_url() {
+    fn update_toml_base_url_uses_implicit_openai_override() {
         let input = r#"
 model = "gpt-5.1-codex"
 "#;
 
         let new_url = "http://127.0.0.1:5000/v1";
         let output = crate::codex_config::update_codex_toml_field(input, "base_url", new_url)
-            .expect("update top-level base_url");
+            .expect("update implicit openai base_url");
 
         let parsed: toml::Value =
             toml::from_str(&output).expect("updated config should be valid TOML");
 
         let base_url = parsed
-            .get("base_url")
+            .get("openai_base_url")
             .and_then(|v| v.as_str())
-            .expect("base_url should exist");
+            .expect("openai_base_url should exist");
 
         assert_eq!(base_url, new_url);
+    }
+
+    /// selector 缺省的 Codex 接管也必须落到本地带鉴权的路由上（#7263）：
+    /// 走内置 openai 的 `openai_base_url` 改址，而不是写一个 Codex 根本不读的
+    /// 顶层 `base_url` 让请求直连 api.openai.com。
+    #[test]
+    fn codex_takeover_without_provider_selects_a_local_authenticated_route() {
+        for input in [
+            "",
+            "model = \"gpt-5\"\nbase_url = \"https://old.example/v1\"\n",
+            "model_providers = { cc-switch = { name = \"Existing\", base_url = \"https://keep.example/v1\" } }\n",
+        ] {
+            let url = "http://127.0.0.1:15721/v1";
+            let projected =
+                ProxyService::apply_codex_proxy_toml_config_for_provider(input, url, None).unwrap();
+            let auth = json!({"OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER});
+            let live =
+                crate::codex_config::prepare_codex_provider_live_config(&auth, &projected).unwrap();
+            let doc: toml::Value = toml::from_str(&live).unwrap();
+            let id = doc["model_provider"].as_str().expect("explicit provider");
+            assert_ne!(id, "openai");
+            let table = &doc["model_providers"][id];
+            assert_eq!(table["base_url"].as_str(), Some(url));
+            assert_eq!(table["wire_api"].as_str(), Some("responses"));
+            assert_eq!(
+                table["experimental_bearer_token"].as_str(),
+                Some(PROXY_TOKEN_PLACEHOLDER)
+            );
+            if input.contains("Existing") {
+                assert_eq!(
+                    doc["model_providers"]["cc-switch"]["base_url"].as_str(),
+                    Some("https://keep.example/v1")
+                );
+            }
+            let repeated =
+                ProxyService::apply_codex_proxy_toml_config_for_provider(&live, url, None).unwrap();
+            let repeated =
+                crate::codex_config::prepare_codex_provider_live_config(&auth, &repeated).unwrap();
+            assert_eq!(
+                toml::from_str::<toml::Value>(&repeated).unwrap(),
+                doc,
+                "重复投影必须幂等"
+            );
+        }
     }
 
     #[tokio::test]
