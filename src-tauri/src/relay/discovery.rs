@@ -205,8 +205,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
     probeInFlight = true;
 
     try {{
-      const responses = [];
-      for (const candidate of candidates) {{
+      const responses = await Promise.all(candidates.map(async (candidate) => {{
         const controller = new AbortController();
         let timeoutId;
         try {{
@@ -233,7 +232,7 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
           const trimmed = body.trim();
           const jsonLike = Boolean(trimmed) && (trimmed[0] === '{{' || trimmed[0] === '[');
           const bodyForDetector = jsonLike ? detectorBody(candidate, body, bodyBytes) : '';
-          responses.push({{
+          return {{
             candidate_id: candidate.id,
             body: bodyForDetector,
             status: Number.isInteger(response.status) ? response.status : null,
@@ -242,9 +241,9 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
             detector_body_bytes: byteLength(bodyForDetector),
             json_like: jsonLike,
             error_kind: null,
-          }});
+          }};
         }} catch (error) {{
-          responses.push({{
+          return {{
             candidate_id: candidate.id,
             body: '',
             status: null,
@@ -253,11 +252,11 @@ pub fn browser_probe_script(site_origin: &str, candidates: &[ProbeCandidate]) ->
             detector_body_bytes: 0,
             json_like: false,
             error_kind: safeErrorKind(error),
-          }});
+          }};
         }} finally {{
           if (timeoutId !== undefined) clearTimeout(timeoutId);
         }}
-      }}
+      }}));
 
       const batch = JSON.stringify(responses);
       if (batch === previousBatch) return;
@@ -393,9 +392,21 @@ pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, DiscoveryErro
     discover_site(site_origin).await
 }
 
+pub(crate) async fn probe_site_with_timeout(
+    site_origin: &str,
+    timeout: std::time::Duration,
+) -> Result<DetectedSite, DiscoveryError> {
+    let responses = probe_candidates_with_timeout(site_origin, Some(timeout)).await?;
+    discover_from_responses(responses)
+}
+
 /// 原生 HTTP 探测所有候选，再复用 WebView 原始回传使用的同一收敛规则。
 pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryError> {
     let responses = probe_candidates(site_origin).await?;
+    discover_from_responses(responses)
+}
+
+fn discover_from_responses(responses: Vec<ProbeResponse>) -> Result<DetectedSite, DiscoveryError> {
     // 与旧内联实现同一条判据：**没有任何候选完成过一次 HTTP 往返**才算传输失败
     // （连不上 / 中途断流）；只要有一个候选拿到过响应（哪怕 404 / 超大），
     // 就按「站点答了话但认不出」走 UnsupportedSite。
@@ -427,86 +438,97 @@ pub async fn discover_site(site_origin: &str) -> Result<DetectedSite, DiscoveryE
 pub(crate) async fn probe_candidates(
     site_origin: &str,
 ) -> Result<Vec<ProbeResponse>, DiscoveryError> {
+    probe_candidates_with_timeout(site_origin, None).await
+}
+
+async fn probe_candidates_with_timeout(
+    site_origin: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<Vec<ProbeResponse>, DiscoveryError> {
     let client = sub2api::build_client().map_err(|error| {
         DiscoveryError::new(
             DiscoveryErrorKind::Transport,
             format!("无法建立站点连接: {error}"),
         )
     })?;
-    let mut responses = Vec::new();
-
-    for candidate in PROBE_CANDIDATES {
-        let url = format!("{site_origin}{}", candidate.path);
-        let mut response = ProbeResponse {
-            candidate_id: candidate.id.to_string(),
-            ..ProbeResponse::default()
-        };
-        let sent = match client.get(&url).send().await {
-            Ok(sent) => sent,
-            Err(error) => {
-                response.error_kind = Some(sanitize_probe_log_value(&error.to_string(), 64));
-                responses.push(response);
-                continue;
-            }
-        };
-        response.status = Some(sent.status().as_u16());
-        response.final_origin = Some(sent.url().origin().ascii_serialization());
-        response.content_type = sent
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        if !sent.status().is_success() {
-            responses.push(response);
-            continue;
-        }
-
-        // 上限按**压缩前的源大小**算，与浏览器那条路径一致（见 `detectorBody`）：
-        // 站点把大段用户可见配置塞进公共设置里是常事（实测 bestapi.store 已 143 KiB），
-        // 在 64 KiB 就丢弃会把一个完全正常的 sub2api 站误判成「协议无法识别」。
-        // 真正的指纹只有几个字段，读完再投影即可。
-        if sent
-            .content_length()
-            .is_some_and(|length| length > MAX_PROBE_COMPACT_SOURCE_BYTES as u64)
-        {
-            responses.push(response);
-            continue;
-        }
-
-        let mut body = Vec::new();
-        let mut oversized = false;
-        let mut stream = sent.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(chunk) if body.len() + chunk.len() <= MAX_PROBE_COMPACT_SOURCE_BYTES => {
-                    body.extend_from_slice(&chunk);
-                }
-                Ok(_) => {
-                    oversized = true;
-                    break;
-                }
+    let responses = futures::future::join_all(PROBE_CANDIDATES.iter().map(|candidate| {
+        let client = &client;
+        async move {
+            let url = format!("{site_origin}{}", candidate.path);
+            let mut response = ProbeResponse {
+                candidate_id: candidate.id.to_string(),
+                ..ProbeResponse::default()
+            };
+            let request = client.get(&url);
+            let request = match timeout {
+                Some(timeout) => request.timeout(timeout),
+                None => request,
+            };
+            let sent = match request.send().await {
+                Ok(sent) => sent,
                 Err(error) => {
                     response.error_kind = Some(sanitize_probe_log_value(&error.to_string(), 64));
-                    break;
+                    return response;
+                }
+            };
+            response.status = Some(sent.status().as_u16());
+            response.final_origin = Some(sent.url().origin().ascii_serialization());
+            response.content_type = sent
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            if !sent.status().is_success() {
+                return response;
+            }
+
+            // 上限按**压缩前的源大小**算，与浏览器那条路径一致（见 `detectorBody`）：
+            // 站点把大段用户可见配置塞进公共设置里是常事，
+            // 在 64 KiB 就丢弃会把一个完全正常的 sub2api 站误判成「协议无法识别」。
+            // 真正的指纹只有几个字段，读完再投影即可。
+            if sent
+                .content_length()
+                .is_some_and(|length| length > MAX_PROBE_COMPACT_SOURCE_BYTES as u64)
+            {
+                return response;
+            }
+
+            let mut body = Vec::new();
+            let mut oversized = false;
+            let mut stream = sent.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) if body.len() + chunk.len() <= MAX_PROBE_COMPACT_SOURCE_BYTES => {
+                        body.extend_from_slice(&chunk);
+                    }
+                    Ok(_) => {
+                        oversized = true;
+                        break;
+                    }
+                    Err(error) => {
+                        response.error_kind =
+                            Some(sanitize_probe_log_value(&error.to_string(), 64));
+                        break;
+                    }
                 }
             }
+            if response.error_kind.is_some() || oversized {
+                // 读流中断（error）之外的两种「没读到指纹」都按答话处理：正文超上限
+                // 时丢弃半截正文 —— 存 2 MiB 解不开的 JSON 没有意义，status 已说明一切。
+                return response;
+            }
+            response.body_bytes = body.len();
+            response.detector_body_bytes = body.len();
+            response.json_like = body
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|byte| byte == b'{' || byte == b'[');
+            response.body = String::from_utf8_lossy(&body).into_owned();
+            response
         }
-        if response.error_kind.is_some() || oversized {
-            // 读流中断（error）之外的两种「没读到指纹」都按答话处理：正文超上限
-            // 时丢弃半截正文 —— 存 2 MiB 解不开的 JSON 没有意义，status 已说明一切。
-            responses.push(response);
-            continue;
-        }
-        response.body_bytes = body.len();
-        response.detector_body_bytes = body.len();
-        response.json_like = body
-            .iter()
-            .copied()
-            .find(|byte| !byte.is_ascii_whitespace())
-            .is_some_and(|byte| byte == b'{' || byte == b'[');
-        response.body = String::from_utf8_lossy(&body).into_owned();
-        responses.push(response);
-    }
+    }))
+    .await;
 
     Ok(responses)
 }
@@ -603,6 +625,80 @@ mod tests {
         }"#
     }
 
+    #[tokio::test]
+    async fn bounded_discovery_keeps_canonical_success_when_another_candidate_stalls() {
+        let panel =
+            Router::new().route("/api/v1/settings/public", get(|| async { sub2api_body() }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let panel_origin = format!("http://{}", listener.local_addr().unwrap());
+        let panel_server = tokio::spawn(async move { axum::serve(listener, panel).await.unwrap() });
+        let redirect = format!("{panel_origin}/api/v1/settings/public");
+        let apex = Router::new()
+            .route(
+                "/api/v1/settings/public",
+                get(move || async move { axum::response::Redirect::temporary(&redirect) }),
+            )
+            .route(
+                "/api/status",
+                get(|| async { std::future::pending::<String>().await }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let apex_server = tokio::spawn(async move { axum::serve(listener, apex).await.unwrap() });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            probe_site_with_timeout(&origin, std::time::Duration::from_millis(100)),
+        )
+        .await;
+        apex_server.abort();
+        panel_server.abort();
+        let detected = result
+            .expect("a stalled candidate must settle within the request deadline")
+            .expect("one validated canonical candidate remains usable");
+        assert_eq!(detected.backend_kind, BackendKind::Sub2Api);
+        assert_eq!(
+            detected.final_origin.as_deref(),
+            Some(panel_origin.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn candidates_start_together_and_still_converge_protocol_conflicts() {
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let sub_barrier = barrier.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/settings/public",
+                get(move || {
+                    let barrier = sub_barrier.clone();
+                    async move {
+                        barrier.wait().await;
+                        sub2api_body()
+                    }
+                }),
+            )
+            .route(
+                "/api/status",
+                get(move || {
+                    let barrier = barrier.clone();
+                    async move {
+                        barrier.wait().await;
+                        newapi_status_body()
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe_site(&origin)).await;
+        server.abort();
+        let error = result
+            .expect("both independent candidates must start before either finishes")
+            .expect_err("a complete batch must preserve protocol conflicts");
+        assert_eq!(error.kind, DiscoveryErrorKind::ProtocolConflict);
+    }
+
     #[test]
     fn backend_kind_serializes_to_stable_protocol_names() {
         assert_eq!(
@@ -659,7 +755,6 @@ mod tests {
         assert!(script.contains("credentials: 'include'"));
         assert!(script.contains(PROBE_SCHEME));
         assert!(script.contains("window.location.origin"));
-        assert!(script.contains("const responses = []"));
         assert!(script.contains("function detectorBody(candidate, body, bodyBytes)"));
         assert!(script.contains("candidate.detector_json_paths"));
         assert!(script.contains("const maxCompactSourceBytes = 2097152;"));

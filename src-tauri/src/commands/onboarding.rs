@@ -23,9 +23,10 @@ pub async fn onboarding_open_register_window(
 ) -> Result<(), String> {
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
+        let registration_url = format!("{}/register", onboarding::OFFICIAL_SITE_ORIGIN);
         match import_site(
             &handle,
-            onboarding::OFFICIAL_SITE_ORIGIN,
+            &registration_url,
             BrowserEntrySource::Onboarding,
             Some(&promo_code),
         )
