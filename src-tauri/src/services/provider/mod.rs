@@ -192,6 +192,9 @@ pub fn provider_presentation_context(
     state: &AppState,
     app_type: &AppType,
 ) -> ProviderPresentationContext {
+    let pi_state = matches!(app_type, AppType::Pi)
+        .then(|| crate::services::pi_state::PiStateService::current(state).ok())
+        .flatten();
     let configured_provider_ids = match app_type {
         AppType::OpenCode => crate::opencode_config::get_providers()
             .ok()
@@ -199,6 +202,9 @@ pub fn provider_presentation_context(
         AppType::OpenClaw => crate::openclaw_config::get_providers()
             .ok()
             .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
+        AppType::Pi => pi_state
+            .as_ref()
+            .map(|state| state.enabled_provider_ids.iter().cloned().collect()),
         AppType::Hermes => crate::hermes_config::get_providers()
             .ok()
             .map(|providers| providers.into_iter().map(|(id, _)| id).collect()),
@@ -232,6 +238,7 @@ pub fn provider_presentation_context(
         None
     };
     let default_model_provider_id = match app_type {
+        AppType::Pi => pi_state.and_then(|state| state.default_provider_id),
         AppType::OpenClaw => crate::openclaw_config::get_default_model()
             .ok()
             .flatten()
@@ -278,8 +285,8 @@ pub fn provider_presentation_with_context(
         .configured_provider_ids
         .as_ref()
         .map(|provider_ids| provider_ids.contains(&provider.id))
-        .unwrap_or(true);
-    let is_default_model = matches!(app_type, AppType::OpenClaw | AppType::Hermes)
+        .unwrap_or(!app_type.is_additive_mode());
+    let is_default_model = matches!(app_type, AppType::OpenClaw | AppType::Hermes | AppType::Pi)
         && context.default_model_provider_id.as_deref() == Some(provider.id.as_str());
     let is_managed = crate::relay::is_managed(&provider.id);
     let is_read_only = matches!(app_type, AppType::Hermes)

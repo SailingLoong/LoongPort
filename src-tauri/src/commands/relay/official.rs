@@ -129,6 +129,11 @@ async fn restore_official_login_impl(
     // 补在后端而不是让 `RestoreOfficialLoginButton` 自己刷：那个按钮在设置页，
     // 与中转站区互不相识；发事件是上游已有的机制，一处发射喂到全部监听者
     // （`provider.rs::emit_provider_switched` 的文档写了完整论证）。
+    crate::services::application_overview::record_successful_selection(
+        &app_handle.state::<AppState>().db,
+        &AppType::Codex,
+        crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+    );
     emit_provider_switched(
         app_handle,
         &AppType::Codex,

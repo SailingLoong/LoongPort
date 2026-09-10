@@ -79,6 +79,14 @@ fn grokbuild_import_and_switch_write_live_config() {
 
     switch_provider_test_hook(&state, AppType::GrokBuild, "relay")
         .expect("switch Grok Build provider");
+    assert_eq!(
+        state
+            .db
+            .get_setting("application_recent_providers_grokbuild")
+            .unwrap()
+            .as_deref(),
+        Some(r#"["relay"]"#)
+    );
 
     assert_eq!(
         std::fs::read_to_string(&live_path).expect("read switched Grok Build config"),
@@ -644,6 +652,11 @@ fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
 
     let err = switch_provider_test_hook(&app_state, AppType::Codex, "invalid")
         .expect_err("switching should fail when auth missing");
+    assert!(app_state
+        .db
+        .get_setting("application_recent_providers_codex")
+        .unwrap()
+        .is_none());
     match err {
         AppError::Config(msg) => assert!(
             msg.contains("auth"),

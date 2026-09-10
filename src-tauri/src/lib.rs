@@ -1740,6 +1740,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_providers,
+            commands::get_application_overview,
             commands::preset_referral_urls,
             commands::get_current_provider,
             commands::add_provider,
@@ -1833,6 +1834,7 @@ pub fn run() {
             commands::read_live_provider_settings,
             commands::get_provider_edit_settings,
             commands::get_settings,
+            commands::set_app_visibility,
             commands::save_settings,
             commands::plaza_set_visible,
             commands::plaza_seed_from_first_site,

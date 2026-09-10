@@ -303,6 +303,11 @@ async fn switch_tier_impl(
     //
     // 两条切换路径都发，共用 `commands::provider::emit_provider_switched` 那一份实现 ——
     // payload 形状复制第二遍的必然结局是两份分叉（那边的文档写了完整理由）。
+    crate::services::application_overview::record_successful_selection(
+        &app_handle.state::<AppState>().db,
+        &app_type_for_event,
+        provider_id,
+    );
     emit_provider_switched(app_handle, &app_type_for_event, provider_id);
 
     // 托盘也要跟上：这里不刷，用户从主界面切完档位、再看托盘标题还是旧的

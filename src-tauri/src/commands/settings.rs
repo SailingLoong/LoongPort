@@ -85,6 +85,29 @@ pub async fn get_settings() -> Result<crate::settings::AppSettings, String> {
     Ok(crate::settings::get_settings_for_frontend())
 }
 
+/// Update one app preference under the settings owner's write lock.
+#[tauri::command]
+pub fn set_app_visibility(
+    app: String,
+    visible: bool,
+) -> Result<crate::settings::VisibleApps, String> {
+    let app: crate::app_config::AppType = app
+        .parse()
+        .map_err(|error: crate::error::AppError| error.to_string())?;
+    let mut outcome = None;
+    crate::settings::mutate_settings(|settings| {
+        let mut next = settings.visible_apps.clone().unwrap_or_default();
+        outcome = Some(next.set_visible(&app, visible).map(|()| {
+            settings.visible_apps = Some(next.clone());
+            next
+        }));
+    })
+    .map_err(|error| error.to_string())?;
+    outcome
+        .expect("settings mutator runs once")
+        .map_err(|error| error.to_string())
+}
+
 /// 保存设置
 #[tauri::command]
 pub async fn save_settings(

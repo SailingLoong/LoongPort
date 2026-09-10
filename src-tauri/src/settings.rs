@@ -86,6 +86,35 @@ impl Default for VisibleApps {
 }
 
 impl VisibleApps {
+    pub fn set_visible(&mut self, app: &AppType, visible: bool) -> Result<(), AppError> {
+        if !visible
+            && !matches!(app, AppType::CodexImage)
+            && !AppType::all().any(|candidate| {
+                candidate != *app
+                    && !matches!(candidate, AppType::CodexImage)
+                    && self.is_visible(&candidate)
+            })
+        {
+            return Err(AppError::Message(
+                "Keep at least one application visible".into(),
+            ));
+        }
+        let slot = match app {
+            AppType::Claude => &mut self.claude,
+            AppType::ClaudeDesktop => &mut self.claude_desktop,
+            AppType::Codex => &mut self.codex,
+            AppType::CodexImage => &mut self.codex_image,
+            AppType::Gemini => &mut self.gemini,
+            AppType::GrokBuild => &mut self.grokbuild,
+            AppType::OpenCode => &mut self.opencode,
+            AppType::OpenClaw => &mut self.openclaw,
+            AppType::Hermes => &mut self.hermes,
+            AppType::Pi => &mut self.pi,
+        };
+        *slot = visible;
+        Ok(())
+    }
+
     /// Check if the specified app is visible
     pub fn is_visible(&self, app: &AppType) -> bool {
         match app {
@@ -1550,5 +1579,24 @@ mod tests {
             resolve_override_path(r"~\pi\agent"),
             home.join("pi").join("agent")
         );
+    }
+}
+
+#[cfg(test)]
+mod app_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn visibility_changes_preserve_other_apps_and_keep_one_application() {
+        let mut visible = VisibleApps::default();
+        visible.set_visible(&AppType::Claude, false).unwrap();
+        visible.set_visible(&AppType::GrokBuild, false).unwrap();
+        assert!(visible.set_visible(&AppType::Codex, false).is_err());
+        assert!(visible.codex);
+        assert!(visible.codex_image);
+        visible.set_visible(&AppType::Pi, true).unwrap();
+        visible.set_visible(&AppType::Codex, false).unwrap();
+        assert!(visible.pi);
+        assert!(!visible.codex);
     }
 }

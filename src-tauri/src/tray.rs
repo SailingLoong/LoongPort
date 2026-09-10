@@ -869,6 +869,11 @@ fn handle_provider_click(
         // 切换供应商。需要本地路由的供应商也不在这里自动启动代理，
         // 由用户在页面/设置中手动开启。
         crate::services::ProviderService::switch(app_state.inner(), app_type.clone(), provider_id)?;
+        crate::services::application_overview::record_successful_selection(
+            &app_state.db,
+            app_type,
+            provider_id,
+        );
 
         // 更新托盘菜单
         if let Ok(new_menu) = create_tray_menu(app, app_state.inner()) {

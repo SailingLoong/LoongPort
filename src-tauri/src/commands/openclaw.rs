@@ -55,9 +55,18 @@ pub fn get_openclaw_default_model() -> Result<Option<openclaw_config::OpenClawDe
 /// Set OpenClaw default model config (agents.defaults.model)
 #[tauri::command]
 pub fn set_openclaw_default_model(
+    state: State<'_, AppState>,
     model: openclaw_config::OpenClawDefaultModel,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    openclaw_config::set_default_model(&model).map_err(|e| e.to_string())
+    let outcome = openclaw_config::set_default_model(&model).map_err(|e| e.to_string())?;
+    if let Some((provider_id, _)) = model.primary.split_once('/') {
+        crate::services::application_overview::record_successful_selection(
+            &state.db,
+            &crate::app_config::AppType::OpenClaw,
+            provider_id,
+        );
+    }
+    Ok(outcome)
 }
 
 /// Get OpenClaw model catalog/allowlist (agents.defaults.models)
@@ -85,9 +94,22 @@ pub fn get_openclaw_agents_defaults(
 /// Set full agents.defaults config (all fields)
 #[tauri::command]
 pub fn set_openclaw_agents_defaults(
+    state: State<'_, AppState>,
     defaults: openclaw_config::OpenClawAgentsDefaults,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    openclaw_config::set_agents_defaults(&defaults).map_err(|e| e.to_string())
+    let outcome = openclaw_config::set_agents_defaults(&defaults).map_err(|e| e.to_string())?;
+    if let Some((provider_id, _)) = defaults
+        .model
+        .as_ref()
+        .and_then(|model| model.primary.split_once('/'))
+    {
+        crate::services::application_overview::record_successful_selection(
+            &state.db,
+            &crate::app_config::AppType::OpenClaw,
+            provider_id,
+        );
+    }
+    Ok(outcome)
 }
 
 // ============================================================================
