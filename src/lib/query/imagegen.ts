@@ -40,14 +40,16 @@ export const useImagegenGenerate = () => {
     mutationFn: ({
       prompt,
       size,
+      quality,
       count,
       parallel,
     }: {
       prompt: string;
       size: string | null;
+      quality: string | null;
       count: number;
       parallel: boolean;
-    }) => relayApi.imagegenGenerate(prompt, size, count, parallel),
+    }) => relayApi.imagegenGenerate(prompt, size, count, parallel, quality),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: imagegenKeys.gallery });
     },

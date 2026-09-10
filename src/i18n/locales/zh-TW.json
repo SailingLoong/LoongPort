@@ -3403,6 +3403,8 @@
       "tierFilterEmpty": "沒有符合的連線設定檔",
       "promptPlaceholder": "描述要生成的圖片…",
       "sizeLabel": "尺寸",
+      "qualityLabel": "品質",
+      "qualityDefault": "預設",
       "countLabel": "張數",
       "parallelLabel": "並行提交",
       "countHint": "一次生成多張（1-50）：按張數計費",

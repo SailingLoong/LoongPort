@@ -78,6 +78,17 @@ import {
 /** 尺寸档位：gpt-image 的三档（与 MCP 工具的 size 语义一致，不给「自动」）。 */
 const SIZE_OPTIONS = ["1024x1024", "1536x1024", "1024x1536"] as const;
 
+/** 质量档的 gpt-image 基础值域；2.5 代际另加 xhigh/max（对老模型发会被站点拒）。
+ *  判据用宽松 contains（trim + 小写后），自定义变体名（如 xxx-gpt-image-2.5-proxy）也认，
+ *  与上游 gpt_image_playground 的 isGptImage25Model 同口径。 */
+const BASE_QUALITY_OPTIONS = ["low", "medium", "high"] as const;
+const QUALITY_DEFAULT = "default"; // Select 的「默认」哨兵值（Radix 不允许空串 value）
+
+const isGptImageModel = (model: string) =>
+  model.trim().toLowerCase().includes("gpt-image-");
+const isGptImage25Model = (model: string) =>
+  model.trim().toLowerCase().includes("gpt-image-2.5");
+
 export function ImagegenPlayground() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -88,6 +99,8 @@ export function ImagegenPlayground() {
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState<string>("1024x1024");
   const [count, setCount] = useState<string>("1");
+  // 质量档：与尺寸/张数同为本次会话偏好（默认「不发 = 站点默认」），不落设置。
+  const [quality, setQuality] = useState<string>(QUALITY_DEFAULT);
   // 并发提交是本次会话的生成偏好（默认开），不落设置 —— 折叠态这类 UI 偏好归前端。
   const [parallel, setParallel] = useState(true);
   const [preview, setPreview] = useState<ImagegenGalleryEntry | null>(null);
@@ -135,6 +148,21 @@ export function ImagegenPlayground() {
   );
   const currentTier = tiers.find((tier) => tier.isCurrent);
 
+  // 质量选择器只对 gpt-image 系档位有意义（nano-banana / grok-imagine 走别的
+  // 参数语义）；档位切到不支持当前质量档的模型时，就地回落「默认」而非发非法值。
+  const tierModel = currentTier?.model ?? "";
+  const qualityOptions = isGptImage25Model(tierModel)
+    ? [...BASE_QUALITY_OPTIONS, "xhigh", "max"]
+    : [...BASE_QUALITY_OPTIONS];
+  const qualityValue =
+    quality !== QUALITY_DEFAULT && qualityOptions.includes(quality)
+      ? quality
+      : QUALITY_DEFAULT;
+  const submitQuality =
+    isGptImageModel(tierModel) && qualityValue !== QUALITY_DEFAULT
+      ? qualityValue
+      : null;
+
   const switchTier = async (providerId: string, name: string) => {
     try {
       const result = await relayApi.switchTier(providerId, "codex-image");
@@ -154,7 +182,13 @@ export function ImagegenPlayground() {
     const parsed = Number.parseInt(count, 10);
     const safe = Number.isNaN(parsed) ? 1 : Math.min(50, Math.max(1, parsed));
     generate.mutate(
-      { prompt: prompt.trim(), size, count: safe, parallel },
+      {
+        prompt: prompt.trim(),
+        size,
+        quality: submitQuality,
+        count: safe,
+        parallel,
+      },
       {
         onSuccess: (result) => {
           // 部分失败：成功的图已落盘画廊，warning 说明有几张没成，别当整体失败。
@@ -284,6 +318,28 @@ export function ImagegenPlayground() {
                 ))}
               </SelectContent>
             </Select>
+            {/* 质量档：只对 gpt-image 系档位显示。默认 = 不发该参数（站点默认），
+                选项随当前档位模型代际过滤（xhigh/max 仅 2.5）。 */}
+            {isGptImageModel(tierModel) && (
+              <Select value={qualityValue} onValueChange={setQuality}>
+                <SelectTrigger
+                  className="w-[110px]"
+                  aria-label={t("loongport.imagegenPlayground.qualityLabel")}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={QUALITY_DEFAULT}>
+                    {t("loongport.imagegenPlayground.qualityDefault")}
+                  </SelectItem>
+                  {qualityOptions.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {option}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             {/* 批量张数：自由输入（1-50，后端闸）。一次点下去就是 n 张的钱，
                 hint 把后果写在点上；提交节奏（并发/串行）由旁边的勾选框决定。 */}
             <Input

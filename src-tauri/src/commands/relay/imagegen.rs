@@ -42,11 +42,13 @@ pub struct ImagegenGenerateResult {
 /// `n` = 张数（批量，1-50 自由输入），范围判据的唯一源在核心层
 /// （`imagegen::validate_count`）；`parallel` = 并发提交开关（生成视图的勾选框，
 /// 缺省开）——两种模式的形状与取舍见 `imagegen::split_batch` 的表，本层只做缺省补全。
+/// `quality` = 质量档（`None` 不发该参数，用站点默认；透传语义见核心层的请求组装）。
 #[tauri::command]
 pub async fn relay_imagegen_generate(
     app_handle: tauri::AppHandle,
     prompt: String,
     size: Option<String>,
+    quality: Option<String>,
     n: Option<u32>,
     parallel: Option<bool>,
 ) -> Result<ImagegenGenerateResult, String> {
@@ -60,6 +62,7 @@ pub async fn relay_imagegen_generate(
         &tier,
         prompt,
         size.as_deref(),
+        quality.as_deref(),
         count,
         parallel.unwrap_or(true),
     )
