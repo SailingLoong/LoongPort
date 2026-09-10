@@ -1664,6 +1664,7 @@ function App() {
           <ServicesPage
             appId={activeApp}
             account={navigation.account}
+            onBack={navigation.back}
             onSelectAccount={(account, app) =>
               setCurrentView("services", app, account)
             }

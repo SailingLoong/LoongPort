@@ -23,6 +23,7 @@ import {
 export interface ServicesPageProps {
   appId: AppId;
   account?: AccountRoute;
+  onBack?: () => void;
   onSelectAccount?: (account: AccountRoute | undefined, app: AppId) => void;
   onOpenAddHub: RelaySectionProps["onOpenAddHub"];
   onOpenApp: (appId: AppId) => void;
@@ -34,6 +35,7 @@ const accountName = (account: ServiceAccount) =>
 export function ServicesPage({
   appId,
   account,
+  onBack,
   onSelectAccount,
   onOpenAddHub,
   onOpenApp,
@@ -70,12 +72,13 @@ export function ServicesPage({
         <Button
           variant="ghost"
           onClick={() => {
-            setSelection(null);
+            if (onBack) onBack();
+            else setSelection(null);
             void reload();
           }}
         >
           <ArrowLeft className="h-4 w-4" />
-          {t("loongport.accounts.back")}
+          {t(onBack ? "common.back" : "loongport.accounts.back")}
         </Button>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>

@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AppSwitcher } from "@/components/AppSwitcher";
 import type { VisibleApps } from "@/types";
@@ -167,4 +168,18 @@ it("limits the rail to its application context and exposes the selected icon", (
     "aria-pressed",
     "true",
   );
+});
+
+it("shows the application name in a hover tooltip", async () => {
+  render(
+    <AppSwitcher
+      activeApp="codex"
+      visibleApps={allVisible}
+      onSwitch={vi.fn()}
+    />,
+  );
+  await userEvent.hover(
+    screen.getByRole("button", { name: "Codex", exact: true }),
+  );
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("Codex");
 });
