@@ -362,6 +362,8 @@ const requiredKeys = [
   "imagegenPlayground.tierFilterEmpty",
   "imagegenPlayground.promptPlaceholder",
   "imagegenPlayground.sizeLabel",
+  "imagegenPlayground.qualityLabel",
+  "imagegenPlayground.qualityDefault",
   // 批量张数的计费/耗时提示是知情前提 —— 缺了它自由输入就是个不知价格的框；
   // 部分失败 toast 是「成功的已到手、几张没成」的唯一交代；
   // 并发开关的两句是快/稳取舍的知情前提。

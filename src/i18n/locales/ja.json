@@ -3402,6 +3402,8 @@
       "tierFilterEmpty": "一致する接続プロファイルはありません",
       "promptPlaceholder": "生成する画像を説明してください…",
       "sizeLabel": "サイズ",
+      "qualityLabel": "品質",
+      "qualityDefault": "デフォルト",
       "countLabel": "枚数",
       "parallelLabel": "並列送信",
       "countHint": "一度に複数枚生成（1-50）：枚数分の課金になります",

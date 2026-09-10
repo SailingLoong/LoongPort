@@ -440,6 +440,7 @@ pub(crate) async fn generate_batch(
     tier: &Tier,
     prompt: &str,
     size: Option<&str>,
+    quality: Option<&str>,
     total: u32,
     parallel: bool,
 ) -> Result<(Vec<GeneratedImage>, usize), String> {
@@ -453,7 +454,7 @@ pub(crate) async fn generate_batch(
             batches
                 .iter()
                 .copied()
-                .map(|n| generate_image(tier, prompt, size, n, request_timeout(n))),
+                .map(|n| generate_image(tier, prompt, size, quality, n, request_timeout(n))),
         )
         .buffered(concurrency)
         .collect()
@@ -489,6 +490,7 @@ pub(crate) async fn generate_image(
     tier: &Tier,
     prompt: &str,
     size: Option<&str>,
+    quality: Option<&str>,
     n: u32,
     timeout: std::time::Duration,
 ) -> Result<Vec<GeneratedImage>, String> {
@@ -513,12 +515,19 @@ pub(crate) async fn generate_image(
     // 站点对 `gpt-image-2` 回 `data[].url`（另一个模型才回 b64），其官方教程也明确
     // 「两种形态都可能出现、客户端都要兼容」。只认 b64 的解析在这种站点上必报
     // 「data 项里没有 b64_json」—— [`read_image_bytes`] 对两种形态都处理，url 走下载。
-    let body = serde_json::json!({
+    // `quality` 与 `response_format` 同一条纪律：**不发 = 站点默认**。App 内入口的
+    // 选项按当前档位模型过滤（`xhigh`/`max` 仅 gpt-image-2.5），但本层不做白名单 ——
+    // 与 `size` 一样原样透传：值域由上游模型代际决定，写死会随代际演进过期
+    // （2.5 的 `xhigh`/`max` 就是 2026-09-10 才出现的）。
+    let mut body = serde_json::json!({
         "model": tier.model,
         "prompt": prompt,
         "n": n,
         "size": size.unwrap_or(DEFAULT_SIZE),
     });
+    if let Some(q) = quality.map(str::trim).filter(|q| !q.is_empty()) {
+        body["quality"] = serde_json::Value::String(q.to_string());
+    }
 
     let resp = client
         .post(images_url(&tier.base_url))

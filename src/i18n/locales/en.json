@@ -3402,6 +3402,8 @@
       "tierFilterEmpty": "No matching connection profiles",
       "promptPlaceholder": "Describe the image to generate…",
       "sizeLabel": "Size",
+      "qualityLabel": "Quality",
+      "qualityDefault": "Default",
       "countLabel": "Count",
       "parallelLabel": "Submit in parallel",
       "countHint": "Generate several at once (1-50): billed per image",

@@ -647,6 +647,7 @@ export const relayApi = {
   /**
    * App 内直接生图（生图页「生成」视图）。`count` = 张数（后端闸 1..=50），
    * `parallel` = 并发提交开关（缺省开；两种模式的形状见后端 `split_batch` 的表）。
+   * `quality` = 质量档（`null` 不发该参数，用站点默认；后端原样透传）。
    * 慢请求：后端超时按张数放大（每张 240s 封顶），前端勿再叠加短超时。
    */
   imagegenGenerate: (
@@ -654,12 +655,14 @@ export const relayApi = {
     size?: string | null,
     count?: number,
     parallel?: boolean,
+    quality?: string | null,
   ): Promise<ImagegenGenerateResult> =>
     invoke("relay_imagegen_generate", {
       prompt,
       size: size ?? null,
       n: count ?? 1,
       parallel: parallel ?? true,
+      quality: quality ?? null,
     }),
 
   /** 出图目录的画廊清单（MCP 与直接生图的产物同目录），mtime 从新到旧。 */

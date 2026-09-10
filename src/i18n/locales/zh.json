@@ -3402,6 +3402,8 @@
       "tierFilterEmpty": "没有匹配的接入配置",
       "promptPlaceholder": "描述要生成的图片…",
       "sizeLabel": "尺寸",
+      "qualityLabel": "质量",
+      "qualityDefault": "默认",
       "countLabel": "张数",
       "parallelLabel": "并发提交",
       "countHint": "一次生成多张（1-50）：按张数计费",

@@ -188,6 +188,10 @@ fn tools_list() -> Value {
                     "type": "string",
                     "description": "图片尺寸，形如 1024x1024 或 1536x1024。省略则用 1024x1024。注意上游可能返回与请求不同的实际尺寸。"
                 },
+                "quality": {
+                    "type": "string",
+                    "description": "图片质量：low / medium / high；gpt-image-2.5 系另有 xhigh / max。省略则不发该参数（用站点默认）。仅 gpt-image 系模型支持。"
+                },
                 "n": {
                     "type": "integer",
                     "description": "一次生成几张（1-50，默认 1）。按张数计费；多张会自动拆成并发单张请求。大批量耗时更长，宿主的工具超时（codex 默认 300 秒）可能在完成前先到 —— 超大批量时并发多次调用本工具（每次各自计时）通常更稳。"
@@ -245,6 +249,7 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
         .filter(|s| !s.is_empty())
         .ok_or("generate_image 需要非空的 prompt")?;
     let size = args.get("size").and_then(Value::as_str);
+    let quality = args.get("quality").and_then(Value::as_str);
     // 张数由宿主 agent 传，默认 1。校验放在读档位**之前**：越界是调用方的错，
     // 该先报它（没配档位的机器上也能得到这条而不是「还没选定档位」）。
     // 范围判据的唯一源在核心层（`imagegen::validate_count`），与 App 内入口共用。
@@ -256,7 +261,7 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
     let tier = imagegen::load_current_tier()?;
     // MCP 入口恒为并发：agent 想串行有自己的表达（逐次调用工具天然串行），
     // 不为它加 schema 噪音。见 `imagegen::split_batch` 的表。
-    let (images, failed) = imagegen::generate_batch(&tier, prompt, size, n, true).await?;
+    let (images, failed) = imagegen::generate_batch(&tier, prompt, size, quality, n, true).await?;
     let list = images
         .iter()
         .map(|i| i.path.display().to_string())
