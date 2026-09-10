@@ -945,6 +945,20 @@ pub fn run() {
             let fresh_install_at_startup =
                 app_state.db.is_providers_empty().unwrap_or(false);
 
+            // 使用统计告知只对首装机弹（2026-09-10 拍板）：存量升级用户在这里
+            // 回填「已确认」，告知屏（StatsNoticeDialog）因此永不为老用户弹起。
+            // 该标记只防重复弹、不门控上报（上报闸始终是 enable_anonymous_stats）。
+            if !fresh_install_at_startup {
+                let mut s = crate::settings::get_settings();
+                if s.stats_notice_confirmed.is_none() {
+                    s.stats_notice_confirmed = Some(true);
+                    if let Err(e) = crate::settings::update_settings(s) {
+                        // 失败不阻塞启动，下次启动再试；代价只是告知屏多留一轮。
+                        log::debug!("○ Stats notice backfill failed: {e}");
+                    }
+                }
+            }
+
             for app_type in
                 crate::app_config::AppType::all().filter(|t| !t.is_additive_mode())
             {
