@@ -3832,5 +3832,32 @@
       "hermesMemory": "永続メモリを確認・編集",
       "hermesDashboard": "ローカル管理画面を開く"
     }
+  },
+  "applications": {
+    "currentConfiguration": "現在の設定",
+    "enabledConfigurations": "有効な設定",
+    "currentDescription": "アプリに保存された設定です。",
+    "switchService": "サービスを切り替え",
+    "selectDescription": "アカウントを選択してから、設定を選びます。",
+    "addService": "サービスを追加",
+    "search": "サービス、アカウント、設定、モデルを検索",
+    "source": "サービスの種類",
+    "default": "既定",
+    "configured": "設定済み",
+    "use": "使用",
+    "manageAccount": "アカウント管理",
+    "empty": "設定が選択されていません",
+    "recent": "最近使用した設定",
+    "useAgain": "再び使用",
+    "manageConfigurations": "設定管理",
+    "manageDescription": "手動追加またはインポートした設定の編集・複製・管理。サービスの設定はアカウント詳細から変更できます。",
+    "noMatches": "一致する設定がありません",
+    "loadFailed": "設定を読み込めませんでした",
+    "sources": {
+      "all": "すべて",
+      "official": "公式",
+      "relay": "中継サービス",
+      "custom": "カスタム"
+    }
   }
 }

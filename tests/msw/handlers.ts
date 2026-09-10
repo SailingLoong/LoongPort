@@ -142,6 +142,42 @@ export const handlers = [
     return success(providerViews(app));
   }),
 
+  http.post(
+    `${TAURI_ENDPOINT}/get_application_overview`,
+    async ({ request }) => {
+      const { app } = await withJson<{ app: AppId }>(request);
+      return success({
+        isAdditive: ["opencode", "openclaw", "hermes", "pi"].includes(app),
+        recentProviderIds: [],
+        configurations: Object.values(providerViews(app)).map((provider) => ({
+          providerId: provider.id,
+          name: provider.name,
+          source: provider.category === "official" ? "official" : "custom",
+          account: null,
+          serviceName: null,
+          accountLabel: null,
+          configurationName: null,
+          model: null,
+          presentation: provider.presentation,
+          selection: { kind: "provider" },
+          canSelect: true,
+        })),
+      });
+    },
+  ),
+  http.post(`${TAURI_ENDPOINT}/service_onboarding_status`, () =>
+    success({ shouldPrompt: false, completed: true, plazaVisible: false }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/set_app_visibility`, async ({ request }) => {
+    const { app, visible } = await withJson<{ app: AppId; visible: boolean }>(
+      request,
+    );
+    const settings = getSettings();
+    const visibleApps = { ...settings.visibleApps, [app]: visible };
+    setSettings({ ...settings, visibleApps });
+    return success(visibleApps);
+  }),
+
   http.post(`${TAURI_ENDPOINT}/get_current_provider`, async ({ request }) => {
     const { app } = await withJson<{ app: AppId }>(request);
     return success(getCurrentProviderId(app));

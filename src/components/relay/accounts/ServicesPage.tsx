@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import type { AccountRoute } from "@/components/shell/navigation";
 import { getAppDisplayName } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import { RelaySection, type RelaySectionProps } from "../RelaySection";
@@ -21,6 +22,8 @@ import {
 
 export interface ServicesPageProps {
   appId: AppId;
+  account?: AccountRoute;
+  onSelectAccount?: (account: AccountRoute | undefined, app: AppId) => void;
   onOpenAddHub: RelaySectionProps["onOpenAddHub"];
   onOpenApp: (appId: AppId) => void;
 }
@@ -30,16 +33,30 @@ const accountName = (account: ServiceAccount) =>
 
 export function ServicesPage({
   appId,
+  account,
+  onSelectAccount,
   onOpenAddHub,
   onOpenApp,
 }: ServicesPageProps) {
   const { t } = useTranslation();
   const { accounts, isPending, error, reload } = useServiceAccounts();
-  const [selection, setSelection] = useState<{
+  const [localSelection, setLocalSelection] = useState<{
     kind: ServiceAccount["kind"];
     id: number;
     appId: AppId;
   } | null>(null);
+  const selection = onSelectAccount
+    ? account
+      ? { ...account, appId }
+      : null
+    : localSelection;
+  const setSelection = (
+    next: { kind: AccountRoute["kind"]; id: number; appId: AppId } | null,
+  ) => {
+    if (onSelectAccount)
+      onSelectAccount(next ?? undefined, next?.appId ?? appId);
+    else setLocalSelection(next);
+  };
   const selected =
     selection &&
     accounts.find(

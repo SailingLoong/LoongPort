@@ -151,3 +151,20 @@ describe("AppSwitcher", () => {
     expect(screen.queryByTitle("appSwitcher.add")).not.toBeInTheDocument();
   });
 });
+
+it("limits the rail to its application context and exposes the selected icon", () => {
+  render(
+    <AppSwitcher
+      activeApp="codex"
+      applications={["claude", "codex"]}
+      visibleApps={allVisible}
+      onSwitch={vi.fn()}
+      onShowApp={vi.fn()}
+    />,
+  );
+  expect(screen.queryByRole("button", { name: "Pi" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});

@@ -33,6 +33,12 @@ vi.mock("sonner", () => ({
   },
 }));
 
+// These integration cases exercise provider actions; workspace presentation has
+// its own interaction tests. Keep the existing action harness immediately visible.
+vi.mock("@/components/applications/ApplicationWorkspace", () => ({
+  ApplicationWorkspace: ({ children }: any) => <>{children}</>,
+}));
+
 vi.mock("@/components/providers/ProviderList", () => ({
   ProviderList: ({
     providers,
@@ -206,10 +212,10 @@ const renderApp = () => {
 
 async function selectApplication(name: string) {
   const user = userEvent.setup();
-  await user.click(
-    await screen.findByRole("combobox", { name: "client.selectApplication" }),
-  );
-  await user.click(await screen.findByRole("option", { name }));
+  if (!screen.queryByRole("button", { name, exact: true })) {
+    await user.click(screen.getByRole("button", { name: "appSwitcher.add" }));
+  }
+  await user.click(await screen.findByRole("button", { name, exact: true }));
 }
 
 describe("App integration with MSW", () => {
@@ -239,7 +245,7 @@ describe("App integration with MSW", () => {
       await screen.findAllByRole("button", { name: "client.image" }),
     ).toHaveLength(1);
     expect(
-      screen.getAllByRole("combobox", { name: "client.selectApplication" }),
+      screen.getAllByRole("button", { name: "Claude Code", exact: true }),
     ).toHaveLength(1);
   });
 
@@ -255,9 +261,11 @@ describe("App integration with MSW", () => {
     expect(
       screen.getByRole("button", { name: "client.image" }),
     ).toHaveAttribute("aria-current", "page");
-    expect(
-      screen.queryByRole("combobox", { name: "client.selectApplication" }),
-    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Claude Code", exact: true }),
+      ).not.toBeInTheDocument(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "common.back" }));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list")).toHaveTextContent("claude-1"),

@@ -3832,5 +3832,32 @@
       "hermesMemory": "查看与编辑持久记忆",
       "hermesDashboard": "打开本地管理界面"
     }
+  },
+  "applications": {
+    "currentConfiguration": "当前配置",
+    "enabledConfigurations": "已启用配置",
+    "currentDescription": "已写入应用的配置，可在下方切换。",
+    "switchService": "切换服务",
+    "selectDescription": "选择服务与账号，再选择需要的配置。",
+    "addService": "添加服务",
+    "search": "搜索服务、账号、配置或模型",
+    "source": "服务来源",
+    "default": "默认",
+    "configured": "已配置",
+    "use": "使用",
+    "manageAccount": "管理账号",
+    "empty": "尚未选择配置",
+    "recent": "最近使用",
+    "useAgain": "再次使用",
+    "manageConfigurations": "配置管理",
+    "manageDescription": "编辑、复制和管理手动添加或导入的配置。服务账号的配置可在账号详情中调整。",
+    "noMatches": "没有匹配的配置",
+    "loadFailed": "配置加载失败",
+    "sources": {
+      "all": "全部",
+      "official": "官方服务",
+      "relay": "中转站",
+      "custom": "自定义"
+    }
   }
 }
