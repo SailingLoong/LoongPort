@@ -970,6 +970,7 @@ async fn provision_impl(
                 icon: Some(vendor_icon(vendor).to_string()),
                 icon_color: Some(vendor_icon_color(vendor).to_string()),
                 in_failover_queue: false,
+                available_models: None,
             };
 
             state
@@ -1587,6 +1588,7 @@ mod tests {
                 icon: Some("deepseek".into()),
                 icon_color: None,
                 in_failover_queue: false,
+                available_models: None,
             },
         )
         .expect("save provider");
@@ -1687,6 +1689,7 @@ mod tests {
                 icon: Some("deepseek".into()),
                 icon_color: None,
                 in_failover_queue: false,
+                available_models: None,
             },
         )
         .expect("save provider");
@@ -2014,6 +2017,7 @@ mod tests {
                 icon: None,
                 icon_color: None,
                 in_failover_queue: false,
+                available_models: None,
             };
             state
                 .db

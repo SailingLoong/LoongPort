@@ -1075,6 +1075,10 @@ mod tests {
             .unwrap();
         db.save_provider("codex", &with_catalog(&expensive, &["m-x"]))
             .unwrap();
+        db.set_available_models("codex", &cheap, &["m-x".into(), "m-y".into()])
+            .unwrap();
+        db.set_available_models("codex", &expensive, &["m-x".into()])
+            .unwrap();
         db.set_tier_rate_multiplier("codex", &cheap, Some(0.5))
             .unwrap();
         db.set_tier_rate_multiplier("codex", &expensive, Some(2.0))

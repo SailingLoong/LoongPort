@@ -101,6 +101,28 @@ pub fn reject_if_managed(provider_id: &str) -> Result<(), crate::error::AppError
     Ok(())
 }
 
+/// Strict account attribution, shared by relay facts and catalog repair.
+pub(crate) fn belongs_to_relay(
+    provider: &crate::provider::Provider,
+    site_origin: &str,
+    account_id: Option<i64>,
+) -> bool {
+    if !is_managed(&provider.id) {
+        return false;
+    }
+    if !super::identity::same_site_identity(provider.website_url.as_deref(), Some(site_origin)) {
+        return false;
+    }
+    match (
+        account_id,
+        provider.meta.as_ref().and_then(|m| m.loongport_account_id),
+    ) {
+        (Some(want), Some(owner)) => want == owner,
+        (_, None) => true,
+        (None, Some(_)) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

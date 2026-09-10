@@ -286,6 +286,19 @@ describe("RelaySection model verification ownership", () => {
     );
   });
 
+  it("reloads repaired model inventory only for the visible app", async () => {
+    renderSection("codex");
+    await waitFor(() => expect(api.listRelays).toHaveBeenCalledTimes(1));
+    act(() =>
+      eventHandlers.get("provider-models-updated")?.({ appType: "claude" }),
+    );
+    expect(api.listRelays).toHaveBeenCalledTimes(1);
+    act(() =>
+      eventHandlers.get("provider-models-updated")?.({ appType: "codex" }),
+    );
+    await waitFor(() => expect(api.listRelays).toHaveBeenCalledTimes(2));
+  });
+
   it("renders backend summaries from initial and refreshed relay fetches", async () => {
     renderSection("codex");
     await waitFor(() =>

@@ -764,3 +764,39 @@ fn unrelated_openclaw_defaults_edit_preserves_selection_history() {
         Some(r#"["next","recent","current"]"#)
     );
 }
+
+#[test]
+fn current_provider_editor_preserves_stored_mapping_when_live_omits_it() {
+    let _guard = test_mutex().lock().unwrap();
+    reset_test_fs();
+    ensure_test_home();
+    let state = create_test_state().unwrap();
+    let catalog = json!({"models": [{"model": "custom-model", "contextWindow": 123456}]});
+    let provider = Provider::with_id(
+        "mapping-test".into(),
+        "Mapping test".into(),
+        json!({
+            "env": {"ANTHROPIC_AUTH_TOKEN": "test-key"},
+            "modelCatalog": catalog
+        }),
+        None,
+    );
+    state.db.save_provider("claude", &provider).unwrap();
+    state
+        .db
+        .set_current_provider("claude", &provider.id)
+        .unwrap();
+    let live_path = cc_switch_lib::get_claude_settings_path();
+    std::fs::create_dir_all(live_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        live_path,
+        serde_json::to_string(
+            &json!({"env": {"ANTHROPIC_AUTH_TOKEN": "test-key", "USER_PREFERENCE": "keep"}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let edited = ProviderService::edit_settings(&state, AppType::Claude, &provider.id).unwrap();
+    assert_eq!(edited.get("modelCatalog"), Some(&catalog));
+    assert_eq!(edited.pointer("/env/USER_PREFERENCE"), Some(&json!("keep")));
+}

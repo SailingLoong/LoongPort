@@ -30,6 +30,7 @@ impl Database {
                 app_type TEXT NOT NULL,
                 name TEXT NOT NULL,
                 settings_config TEXT NOT NULL,
+                available_models TEXT,
                 website_url TEXT,
                 category TEXT,
                 created_at INTEGER,

@@ -184,6 +184,7 @@ async fn unsupported_apps_and_user_providers_are_rejected_before_network_io() {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         },
     )
     .unwrap();
@@ -524,6 +525,7 @@ fn managed_db(endpoint: &str, app_type: AppType) -> Arc<Database> {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         },
     )
     .unwrap();

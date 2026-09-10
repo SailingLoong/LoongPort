@@ -1039,11 +1039,20 @@ fn strip_injected_kimi_for_coding_context_defaults(settings: &mut Value, provide
     }
 }
 
+/// Native settings are a lossy projection of the stored model mappings.
+/// Use this when reading that projection for editing or switch-away backfill.
+pub(super) fn restore_stored_model_catalog(settings: &mut Value, stored: &Value) {
+    if let (Some(catalog), Some(target)) = (stored.get("modelCatalog"), settings.as_object_mut()) {
+        target.insert("modelCatalog".to_string(), catalog.clone());
+    }
+}
+
 fn restore_live_settings_for_provider_backfill(
     app_type: &AppType,
     provider: &Provider,
-    live_settings: Value,
+    mut live_settings: Value,
 ) -> Value {
+    restore_stored_model_catalog(&mut live_settings, &provider.settings_config);
     if matches!(app_type, AppType::Claude) {
         let mut settings = live_settings;
         strip_injected_codex_oauth_context_defaults(&mut settings, provider);
@@ -1104,19 +1113,6 @@ fn restore_live_settings_for_provider_backfill(
                 "Failed to strip unified session bucket while backfilling '{}': {err}",
                 provider.id
             );
-        }
-    }
-
-    // `modelCatalog` is a cc-switch–private field whose SSOT is the DB. Live's
-    // `config.toml` only carries a lossy projection (`model_catalog_json` →
-    // generated catalog file) that proxy takeover/restore cycles and Codex.app
-    // config rewrites can drop, so `read_live_settings` may reconstruct it as
-    // absent. Never let a switch-away backfill from Live erase the stored
-    // mapping: prefer the DB provider's `modelCatalog`, falling back to whatever
-    // Live reconstructed only when the DB has none.
-    if let Some(stored_catalog) = provider.settings_config.get("modelCatalog") {
-        if let Some(obj) = settings.as_object_mut() {
-            obj.insert("modelCatalog".to_string(), stored_catalog.clone());
         }
     }
 
@@ -3271,6 +3267,27 @@ base_url = "https://a.example/v1"
             .map(|value| value.as_str().expect("tool id should be string"))
             .collect();
         assert_eq!(values, vec!["tool2"]);
+    }
+
+    #[test]
+    fn non_codex_backfill_preserves_database_model_mappings() {
+        for app in [AppType::Claude, AppType::Gemini, AppType::GrokBuild] {
+            let provider = Provider::with_id(
+                "catalog-test".into(),
+                "Catalog test".into(),
+                json!({"modelCatalog": {"models": [{"model": "custom-model", "contextWindow": 123456}]}}),
+                None,
+            );
+            let live = json!({"env": {"USER_SETTING": "keep"}, "config": "[models]\ndefault = \"custom\"\n"});
+            let result = restore_live_settings_for_provider_backfill(&app, &provider, live);
+            assert_eq!(
+                result.get("modelCatalog"),
+                provider.settings_config.get("modelCatalog"),
+                "{} backfill must preserve stored mappings",
+                app.as_str()
+            );
+            assert_eq!(result.pointer("/env/USER_SETTING"), Some(&json!("keep")));
+        }
     }
 
     #[test]

@@ -441,7 +441,7 @@ pub(crate) fn reset_tier_config_in_state(
     // 才有的概念、中转站档位恒 `None`（`settings_config_with_models` 内部就是走
     // `roles = None`），所以这里统一用 [`provision::settings_config_with_models`]。
     let catalog_models = if provision::supports_model_catalog(&app_type) {
-        models_from_settings(&existing.settings_config)
+        crate::relay::model_catalog::available_models(&existing)
     } else {
         Vec::new()
     };
@@ -770,7 +770,7 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                 display_name: p.name.clone(),
                 model: provision::selected_model(&app_type, &p.settings_config).unwrap_or_default(),
                 // 目录没有就返回空 —— UI/托盘按「无目录」处理，不用按 app 分支
-                models: models_from_settings(&p.settings_config),
+                models: crate::relay::model_catalog::available_models(p),
                 is_current: current == p.id,
                 can_verify_models,
                 // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
@@ -1738,6 +1738,9 @@ mod tests {
             )
             .expect("save provider");
 
+            db.set_available_models(app_type.as_str(), &provider_id, &models)
+                .expect("save remote inventory");
+
             reset_tier_config_in_state(&state, &provider_id, app_type.clone())
                 .expect("reset succeeds");
 
@@ -2089,6 +2092,7 @@ mod tests {
                 icon: None,
                 icon_color: None,
                 in_failover_queue: false,
+                available_models: None,
             },
         )
         .expect("provider");
@@ -2187,6 +2191,7 @@ mod tests {
                 icon: None,
                 icon_color: None,
                 in_failover_queue: false,
+                available_models: None,
             },
         )
         .expect("provider");

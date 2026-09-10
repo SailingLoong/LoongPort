@@ -48,6 +48,7 @@ import { hermesApi } from "@/lib/api/hermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useRelayDirectoryCacheBridge } from "@/hooks/useRelayDirectoryCacheBridge";
+import { useProviderModelsCacheBridge } from "@/hooks/useProviderModelsCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
@@ -253,6 +254,7 @@ function App() {
 
   useUsageCacheBridge();
   useRelayDirectoryCacheBridge();
+  useProviderModelsCacheBridge();
 
   const promptPanelRef = useRef<PromptPanelHandle>(null);
   const [promptPrimaryAction, setPromptPrimaryAction] =

@@ -711,6 +711,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -737,6 +738,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -766,6 +768,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -807,6 +810,7 @@ mod tests {
             icon: None,
             icon_color: None,
             in_failover_queue: false,
+            available_models: None,
         }
     }
 
@@ -6705,8 +6709,8 @@ impl ProviderService {
     }
 
     /// Return the settings snapshot that should seed provider editing. The
-    /// backend owns the live-vs-database decision and preserves DB-only Codex
-    /// metadata that a live config cannot represent.
+    /// backend owns the live-vs-database decision and preserves stored model
+    /// mappings that a native config cannot represent.
     pub fn edit_settings(
         state: &AppState,
         app_type: AppType,
@@ -6744,16 +6748,8 @@ impl ProviderService {
         let Some(mut settings) = live_settings else {
             return Ok(database_settings);
         };
+        live::restore_stored_model_catalog(&mut settings, &database_settings);
         if matches!(app_type, AppType::Codex) {
-            if let Some(model_catalog) = database_settings
-                .as_object()
-                .and_then(|settings| settings.get("modelCatalog"))
-                .cloned()
-            {
-                if let Some(settings) = settings.as_object_mut() {
-                    settings.insert("modelCatalog".to_string(), model_catalog);
-                }
-            }
             // live auth.json 是单槽共享文件；编辑表单的 key 槽位以 provider
             // 自己的 bearer 为准（上游 #6534，收敛在后端命令层做）。
             crate::codex_config::reconcile_codex_edit_auth(
