@@ -411,6 +411,8 @@ pub struct AppSettings {
     ///
     /// `None` = 还没看过 ⇒ 前端弹一次。只控制弹窗，**不是上报闸**
     /// （2026-09-09 起；上报只看 `enable_anonymous_stats`）。
+    /// 2026-09-10 起告知只对首装机弹：存量升级用户由启动回填置 `Some(true)`
+    /// （见 lib.rs 1.5 节），此标记因此退化为「首装告知看没看过」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats_notice_confirmed: Option<bool>,
     /// 匿名统计**专属**的随机安装 id。

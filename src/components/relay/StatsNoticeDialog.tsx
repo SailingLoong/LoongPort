@@ -31,6 +31,12 @@ import type { Settings } from "@/types";
  * 触发条件之一是「端点已配」（`relayApi.statsEndpointConfigured`，后端与
  * 上报任务共用同一个 `stats::is_configured`）。端点 2026-09-09 已切生产 ——
  * 这条判据保留是给将来回退 / 预发环境用的，两处共用一个事实不会漂移。
+ *
+ * ## 只对首装机弹（2026-09-10 拍板）
+ *
+ * 存量升级用户由后端启动回填 `stats_notice_confirmed`（lib.rs 1.5 节，判据
+ * 唯源 `fresh_install_at_startup`），这屏因此只为新装机首次启动弹一次；
+ * 「知道了」落标记后永不再弹。
  */
 export function StatsNoticeDialog() {
   const { t } = useTranslation();
@@ -90,19 +96,17 @@ export function StatsNoticeDialog() {
     <Dialog open onOpenChange={() => {}}>
       {/* 有意不给关闭途径：「知道了」同时是知情标记，别的路子关掉等于没看过告知。 */}
       <DialogContent className="max-w-md" zIndex="top">
-        <DialogHeader>
+        {/* 通知型弹窗：标题/正文/按钮全部居中（与 CrowdNoticeDialog 同款）。 */}
+        <DialogHeader className="sm:text-center">
           <DialogTitle>{t("loongport.stats.title")}</DialogTitle>
           <DialogDescription>
             {t("loongport.stats.body")}
             <br />
-            {/* 两行小字：持久安装标识的诚实披露（不声称「完全匿名」）+ 关闭入口。
-                边界细节在设置开关的描述里常驻。 */}
-            <span className="text-xs">{t("loongport.stats.idNote")}</span>
-            <br />
+            {/* 一行小字指明关闭入口；安装标识等边界细节在设置开关描述里常驻。 */}
             <span className="text-xs">{t("loongport.stats.turnOffHint")}</span>
           </DialogDescription>
         </DialogHeader>
-        <DialogFooter className="gap-2">
+        <DialogFooter className="sm:justify-center">
           <Button disabled={saving} onClick={() => void acknowledge()}>
             {t("loongport.stats.ok")}
           </Button>

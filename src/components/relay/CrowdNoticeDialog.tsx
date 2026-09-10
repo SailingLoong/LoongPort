@@ -123,7 +123,8 @@ export function CrowdNoticeDialog() {
           别的路子关掉等于没看过告知。zIndex 用 top：判查轮询可能落在用户已停在
           任何弹窗里的时候首弹。 */}
       <DialogContent className="max-w-md" zIndex="top">
-        <DialogHeader>
+        {/* 通知型弹窗：标题/正文/按钮全部居中（与 StatsNoticeDialog 同款）。 */}
+        <DialogHeader className="sm:text-center">
           <DialogTitle>{t("loongport.crowd.notice.title")}</DialogTitle>
           <DialogDescription>
             {t("loongport.crowd.notice.body")}
@@ -134,7 +135,7 @@ export function CrowdNoticeDialog() {
             </span>
           </DialogDescription>
         </DialogHeader>
-        <DialogFooter className="gap-2">
+        <DialogFooter className="sm:justify-center">
           <Button disabled={saving} onClick={() => void acknowledge()}>
             {t("loongport.crowd.notice.ok")}
           </Button>
