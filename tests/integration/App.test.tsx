@@ -212,10 +212,10 @@ const renderApp = () => {
 
 async function selectApplication(name: string) {
   const user = userEvent.setup();
-  if (!screen.queryByRole("button", { name, exact: true })) {
+  if (!screen.queryByRole("button", { name })) {
     await user.click(screen.getByRole("button", { name: "appSwitcher.add" }));
   }
-  await user.click(await screen.findByRole("button", { name, exact: true }));
+  await user.click(await screen.findByRole("button", { name }));
 }
 
 describe("App integration with MSW", () => {
@@ -244,9 +244,9 @@ describe("App integration with MSW", () => {
     expect(
       await screen.findAllByRole("button", { name: "client.image" }),
     ).toHaveLength(1);
-    expect(
-      screen.getAllByRole("button", { name: "Claude Code", exact: true }),
-    ).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Claude Code" })).toHaveLength(
+      1,
+    );
   });
 
   it("opens image generation from the sidebar and returns to the prior application", async () => {
@@ -263,7 +263,7 @@ describe("App integration with MSW", () => {
     ).toHaveAttribute("aria-current", "page");
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "Claude Code", exact: true }),
+        screen.queryByRole("button", { name: "Claude Code" }),
       ).not.toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: "common.back" }));

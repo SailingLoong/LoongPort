@@ -1,4 +1,5 @@
 import { http, HttpResponse } from "msw";
+import { DEFAULT_VISIBLE_APPS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 // 上游从 lib 导出该常量；本仓 models.dev 走后端命令，前端模块不再导出 —— 测试里就地声明。
 const MODELS_DEV_API_URL = "https://models.dev/api.json";
@@ -173,7 +174,11 @@ export const handlers = [
       request,
     );
     const settings = getSettings();
-    const visibleApps = { ...settings.visibleApps, [app]: visible };
+    const visibleApps = {
+      ...DEFAULT_VISIBLE_APPS,
+      ...settings.visibleApps,
+      [app]: visible,
+    };
     setSettings({ ...settings, visibleApps });
     return success(visibleApps);
   }),

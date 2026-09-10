@@ -178,8 +178,6 @@ it("shows the application name in a hover tooltip", async () => {
       onSwitch={vi.fn()}
     />,
   );
-  await userEvent.hover(
-    screen.getByRole("button", { name: "Codex", exact: true }),
-  );
+  await userEvent.hover(screen.getByRole("button", { name: "Codex" }));
   expect(await screen.findByRole("tooltip")).toHaveTextContent("Codex");
 });
