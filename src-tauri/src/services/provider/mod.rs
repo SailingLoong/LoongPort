@@ -4533,6 +4533,100 @@ wire_api = "responses"
             );
         });
     }
+
+    /// 统一供应商同步不得清空子供应商的应用专属配置（用量脚本/通用配置开关/
+    /// 端点自动选择等）与排序/创建时间——那些字段不归统一供应商管（#7134）。
+    #[test]
+    #[serial]
+    fn sync_universal_to_apps_preserves_child_metadata() {
+        with_test_home(|state, _home| {
+            let mut universal = UniversalProvider::new(
+                "metadata".into(),
+                "Original".into(),
+                "custom".into(),
+                "https://old.example".into(),
+                "old-key".into(),
+            );
+            universal.apps.claude = true;
+            universal.apps.codex = true;
+            universal.apps.gemini = true;
+            universal.meta = Some(
+                serde_json::from_value(json!({
+                    "usage_script": {"enabled": false, "language": "javascript", "code": "parent"}
+                }))
+                .unwrap(),
+            );
+            state.db.save_universal_provider(&universal).unwrap();
+            ProviderService::sync_universal_to_apps(state, &universal.id).unwrap();
+
+            let mut expected = Vec::new();
+            for (index, app) in ["claude", "codex", "gemini"].iter().enumerate() {
+                let id = format!("universal-{app}-metadata");
+                let mut child = state.db.get_provider_by_id(&id, app).unwrap().unwrap();
+                child.meta = Some(
+                    serde_json::from_value(json!({
+                        "usage_script": {"enabled": true, "language": "javascript", "code": app,
+                            "apiKey": "usage-only-key", "autoQueryInterval": 15},
+                        "commonConfigEnabled": false,
+                        "endpointAutoSelect": true
+                    }))
+                    .unwrap(),
+                );
+                child.created_at = Some(123 + index as i64);
+                child.sort_index = Some(10 + index);
+                child.settings_config["local_setting"] = json!(app);
+                state.db.save_provider(app, &child).unwrap();
+                state
+                    .db
+                    .add_custom_endpoint(app, &id, "https://extra.example")
+                    .unwrap();
+                expected.push(child);
+            }
+
+            universal.name = "Updated".into();
+            universal.base_url = "https://new.example".into();
+            universal.api_key = "new-key".into();
+            universal.notes = Some("shared note".into());
+            universal.models = serde_json::from_value(json!({
+                "claude": {"model": "claude-new"},
+                "codex": {"model": "codex-new", "reasoningEffort": "low"},
+                "gemini": {"model": "gemini-new"}
+            }))
+            .unwrap();
+            // 父级 meta 无论缺省还是存在，都不得覆盖子供应商的应用专属配置。
+            for parent_meta in [None, universal.meta.clone()] {
+                universal.meta = parent_meta;
+                state.db.save_universal_provider(&universal).unwrap();
+                ProviderService::sync_universal_to_apps(state, &universal.id).unwrap();
+                for (app, before) in ["claude", "codex", "gemini"].iter().zip(&expected) {
+                    let after = state
+                        .db
+                        .get_provider_by_id(&before.id, app)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(&after.meta).unwrap(),
+                        serde_json::to_value(&before.meta).unwrap(),
+                        "{app}"
+                    );
+                    assert_eq!(after.created_at, before.created_at, "{app}");
+                    assert_eq!(after.sort_index, before.sort_index, "{app}");
+                    assert_eq!(after.name, "Updated");
+                    assert_eq!(after.notes.as_deref(), Some("shared note"));
+                    assert_eq!(after.settings_config["local_setting"], json!(app));
+                    assert_eq!(
+                        state.db.get_all_providers(app).unwrap()[&before.id]
+                            .meta
+                            .as_ref()
+                            .unwrap()
+                            .custom_endpoints
+                            .len(),
+                        1
+                    );
+                }
+            }
+        });
+    }
 }
 
 impl ProviderService {
@@ -7570,6 +7664,10 @@ impl ProviderService {
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &claude_provider.settings_config);
                 claude_provider.settings_config = merged;
+                // 已有子供应商的应用专属配置与排序不属于统一供应商管理的字段。
+                claude_provider.meta = existing.meta;
+                claude_provider.created_at = existing.created_at;
+                claude_provider.sort_index = existing.sort_index;
             }
             state.db.save_provider("claude", &claude_provider)?;
         } else {
@@ -7589,6 +7687,10 @@ impl ProviderService {
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &codex_provider.settings_config);
                 codex_provider.settings_config = merged;
+                // 已有子供应商的应用专属配置与排序不属于统一供应商管理的字段。
+                codex_provider.meta = existing.meta;
+                codex_provider.created_at = existing.created_at;
+                codex_provider.sort_index = existing.sort_index;
             }
             state.db.save_provider("codex", &codex_provider)?;
         } else {
@@ -7607,6 +7709,10 @@ impl ProviderService {
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &gemini_provider.settings_config);
                 gemini_provider.settings_config = merged;
+                // 已有子供应商的应用专属配置与排序不属于统一供应商管理的字段。
+                gemini_provider.meta = existing.meta;
+                gemini_provider.created_at = existing.created_at;
+                gemini_provider.sort_index = existing.sort_index;
             }
             state.db.save_provider("gemini", &gemini_provider)?;
         } else {
