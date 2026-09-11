@@ -5804,6 +5804,11 @@ impl ProviderService {
             .and_then(|current_id| providers.get(current_id))
             .and_then(Self::managed_codex_oauth_account_id);
         let mut backfill_completed = false;
+        // 旧档**回填前**的存储 auth：第三方目标的 auth.json 残留清理用它做归属
+        // 判别（live key 与旧档存储 key 相等才算「旧档的钥匙」，见
+        // clear_stale_codex_live_auth_after_config_only_switch）。不能用回填后的
+        // 行——那份 auth 来自 live，与 live auth.json 天然同源，判别恒真。
+        let mut outgoing_stored_auth: Option<Value> = None;
         if let Some(current_id) = current_id {
             if current_id != id {
                 // Additive mode apps - all providers coexist in the same file,
@@ -5812,6 +5817,8 @@ impl ProviderService {
                     // Only backfill when switching to a different provider
                     if let Ok(live_config) = read_live_settings(app_type.clone()) {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
+                            outgoing_stored_auth =
+                                current_provider.settings_config.get("auth").cloned();
                             // 切走前先把 live 里的可共享改动（含用户直接在应用内
                             // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
                             // 详见 sync_common_config_snippet_from_live 的文档。
@@ -5853,15 +5860,17 @@ impl ProviderService {
         // 会把「marker 在场时整体替换过 auth.json」误判成 config-only，进而把
         // 刚写入的活 key 当残留删掉（managed_codex_switch_adopts_outgoing_cli_rotation
         // 测试盯住这条）。
+        let target_codex_category = if crate::proxy::providers::is_codex_official_provider(provider)
+        {
+            // 写入路径会把这个形状归一化成 official（apply_codex_official_auth），
+            // 判据必须看到同一个 category。
+            Some("official")
+        } else {
+            provider.category.as_deref()
+        };
         let target_live_write_replaces_auth = matches!(app_type, AppType::Codex)
             && crate::codex_config::codex_live_write_replaces_auth(
-                if crate::proxy::providers::is_codex_official_provider(provider) {
-                    // 写入路径会把这个形状归一化成 official（apply_codex_official_auth），
-                    // 判据必须看到同一个 category。
-                    Some("official")
-                } else {
-                    provider.category.as_deref()
-                },
+                target_codex_category,
                 provider
                     .settings_config
                     .get("auth")
@@ -5965,7 +5974,17 @@ impl ProviderService {
             && target_managed_codex_account_id.is_none()
             && !target_live_write_replaces_auth
         {
-            match crate::codex_config::clear_stale_codex_live_auth_after_config_only_switch() {
+            // 第三方目标：residue 是惰性的（活档 key 走 bearer），只清可证明属于
+            // 旧档的副本（live key == 旧档回填前存储 key）；codex CLI API-key
+            // 登录与无主历史 key 归 preserve 契约保护，不动。official 目标传
+            // None：residue 无论归属都会被发去 official 端点，无条件清。
+            match crate::codex_config::clear_stale_codex_live_auth_after_config_only_switch(
+                if target_codex_category == Some("official") {
+                    None
+                } else {
+                    outgoing_stored_auth.as_ref()
+                },
+            ) {
                 Ok(true) => log::info!(
                     "Removed stale third-party auth.json after config-only Codex switch to '{}'",
                     provider.id

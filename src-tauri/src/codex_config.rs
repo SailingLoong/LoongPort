@@ -1153,6 +1153,14 @@ pub fn codex_live_auth_is_stale_third_party_residue(live_auth: &Value) -> bool {
 /// while a missing file yields NotAuthenticated and the login screen,
 /// matching Codex's own logout.
 ///
+/// Ownership: third-party targets pass the outgoing tier's **pre-backfill
+/// stored auth** (`Some`) — residue is inert there (the active tier's key
+/// rides the bearer), so only the copy provably owned by the outgoing tier
+/// (live key == stored key) is deleted; a codex CLI API-key login or an
+/// ownerless legacy key falls under the preserve contract and stays.
+/// Official targets pass `None` — the residue would be sent to the official
+/// endpoint regardless of who owns it, so it is cleared unconditionally.
+///
 /// Callers must only invoke this when the live write did NOT replace
 /// auth.json (same predicate, same instant) and after the outgoing provider
 /// was successfully backfilled into the DB — that backfill holds the only
@@ -1163,7 +1171,9 @@ pub fn codex_live_auth_is_stale_third_party_residue(live_auth: &Value) -> bool {
 /// safety depends on it — do not align the two guards.
 ///
 /// Returns Ok(true) when the file was deleted.
-pub fn clear_stale_codex_live_auth_after_config_only_switch() -> Result<bool, AppError> {
+pub fn clear_stale_codex_live_auth_after_config_only_switch(
+    outgoing_stored_auth: Option<&Value>,
+) -> Result<bool, AppError> {
     let auth_path = get_codex_auth_path();
     if !auth_path.exists() {
         return Ok(false);
@@ -1171,6 +1181,11 @@ pub fn clear_stale_codex_live_auth_after_config_only_switch() -> Result<bool, Ap
     let live_auth: Value = read_json_file(&auth_path)?;
     if !codex_live_auth_is_stale_third_party_residue(&live_auth) {
         return Ok(false);
+    }
+    if let Some(outgoing_auth) = outgoing_stored_auth {
+        if extract_codex_auth_api_key(&live_auth) != extract_codex_auth_api_key(outgoing_auth) {
+            return Ok(false);
+        }
     }
     delete_file(&auth_path)?;
     Ok(true)
