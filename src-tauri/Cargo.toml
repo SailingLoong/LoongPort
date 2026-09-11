@@ -88,15 +88,15 @@ tauri-plugin-window-state = { version = "2", optional = true }
 # 不跨进程；install(bytes) 不重复校验）。与 tauri-plugin-updater 同一个库
 # 同一个主版本，验签行为逐字对齐其 verify_signature。
 minisign-verify = { version = "0.2", optional = true }
-dirs = "6.0"
+dirs = "7.0"
 toml = "1.0"
 toml_edit = "0.25"
 reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
 cookie = "0.18.1"
 arboard = { version = "3.6", optional = true }
 flate2 = "1"
-brotli = "8"
-zstd = "0.13"
+brotli = "9"
+zstd = "0.14"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "process"] }
 futures = "0.3"
 async-stream = "0.3"
@@ -116,7 +116,7 @@ rustls = "0.23"
 webpki-roots = "1.0"
 rustls-native-certs = "0.8"
 regex = "1.10"
-rquickjs = { version = "0.12", features = ["array-buffer", "classes"] }
+rquickjs = { version = "0.13", features = ["array-buffer", "classes"] }
 thiserror = "2.0"
 anyhow = "1.0"
 zip = "4.6"
