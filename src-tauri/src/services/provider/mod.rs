@@ -3987,6 +3987,153 @@ wire_api = "responses"
         });
     }
 
+    /// 第三方 Codex 档的最小合法形状：preserve 路 bearer 注入要求 config 可解析
+    /// 且带自定义 provider 表；wire_api 用 responses（chat wire 在 codex 0.149
+    /// 已移除）。
+    fn third_party_codex_provider(id: &str, api_key: &str) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Provider {id}"),
+            json!({
+                "auth": { "OPENAI_API_KEY": api_key },
+                "config": format!(
+                    "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\nbase_url = \"https://{id}.example/v1\"\nwire_api = \"responses\"\n"
+                )
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        provider
+    }
+
+    /// 非托管切换的提交纪律与托管分支对齐：live 写失败时 current 不得已经
+    /// 挪到新档（否则 UI 打 ✓ 而 CLI 还在旧档跑）。
+    #[test]
+    #[serial]
+    fn non_managed_switch_live_failure_keeps_current_unchanged() {
+        with_test_home(|state, home| {
+            crate::settings::reload_settings().expect("reload settings");
+
+            let baseline = third_party_codex_provider("baseline", "sk-baseline");
+            let target = third_party_codex_provider("target", "sk-target");
+
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &baseline)
+                .expect("save baseline");
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("save target");
+
+            ProviderService::switch(state, AppType::Codex, "baseline").expect("switch to baseline");
+
+            // 基线切换已建立 ~/.codex；先拆掉再用同名文件占位，让下一次 live
+            // 写入在目录创建处失败。
+            let codex_dir = home.join(".codex");
+            fs::remove_dir_all(&codex_dir).expect("remove codex dir");
+            fs::write(&codex_dir, "not a directory").expect("block codex dir");
+
+            let result = ProviderService::switch(state, AppType::Codex, "target");
+            assert!(
+                result.is_err(),
+                "switch must fail when the live write fails"
+            );
+
+            assert_eq!(
+                crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+                Some("baseline"),
+                "local settings current must stay on the previous provider"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .get_current_provider(AppType::Codex.as_str())
+                    .expect("read DB current")
+                    .as_deref(),
+                Some("baseline"),
+                "DB is_current must stay on the previous provider"
+            );
+        });
+    }
+
+    /// preserve 默认开的第三方互切走 config-only 分支，auth.json 原样留在盘上
+    /// ——残留的旧档 key（无登录态形状）必须被切走后清掉，不能永久滞留。
+    #[test]
+    #[serial]
+    fn third_party_switch_cleans_stale_auth_json_residue() {
+        with_test_home(|state, _| {
+            crate::settings::reload_settings().expect("reload settings");
+
+            let baseline = third_party_codex_provider("baseline", "sk-baseline");
+            let target = third_party_codex_provider("target", "sk-target");
+
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &baseline)
+                .expect("save baseline");
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("save target");
+
+            ProviderService::switch(state, AppType::Codex, "baseline").expect("switch to baseline");
+
+            // 模拟 preserve 关闭时代（或 codex CLI `login --api-key`）留下的
+            // residue 形状 auth.json：只有旧档 key、没有任何登录态。
+            write_json_file(
+                &crate::codex_config::get_codex_auth_path(),
+                &json!({ "OPENAI_API_KEY": "sk-baseline" }),
+            )
+            .expect("seed stale third-party auth.json");
+
+            ProviderService::switch(state, AppType::Codex, "target").expect("switch to target");
+
+            assert!(
+                !crate::codex_config::get_codex_auth_path().exists(),
+                "config-only switch must remove the orphaned third-party key from auth.json"
+            );
+        });
+    }
+
+    /// preserve 关闭的第三方互切走 auth+config 分支（key 写进 auth.json），
+    /// 同一清理不得误删**当前档自己的** key——闸门必须复用写入分支的判据。
+    #[test]
+    #[serial]
+    fn auth_json_switch_keeps_target_key_written_by_auth_branch() {
+        with_test_home(|state, _| {
+            crate::settings::update_settings(crate::settings::AppSettings {
+                preserve_codex_official_auth_on_switch: false,
+                ..Default::default()
+            })
+            .expect("disable preserve for this test");
+            crate::settings::reload_settings().expect("reload settings");
+
+            let baseline = third_party_codex_provider("baseline", "sk-baseline");
+            let target = third_party_codex_provider("target", "sk-target");
+
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &baseline)
+                .expect("save baseline");
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("save target");
+
+            ProviderService::switch(state, AppType::Codex, "baseline").expect("switch to baseline");
+            ProviderService::switch(state, AppType::Codex, "target").expect("switch to target");
+
+            let live_auth: Value = read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read live auth.json");
+            assert_eq!(
+                live_auth["OPENAI_API_KEY"].as_str(),
+                Some("sk-target"),
+                "auth+config switch wrote the target's own key; the residue cleanup must not delete it"
+            );
+        });
+    }
+
     #[test]
     #[serial]
     fn import_opencode_providers_from_live_marks_provider_as_live_managed() {
@@ -5668,6 +5815,11 @@ impl ProviderService {
             .and_then(|current_id| providers.get(current_id))
             .and_then(Self::managed_codex_oauth_account_id);
         let mut backfill_completed = false;
+        // 旧档**回填前**的存储 auth：第三方目标的 auth.json 残留清理用它做归属
+        // 判别（live key 与旧档存储 key 相等才算「旧档的钥匙」，见
+        // clear_stale_codex_live_auth_after_config_only_switch）。不能用回填后的
+        // 行——那份 auth 来自 live，与 live auth.json 天然同源，判别恒真。
+        let mut outgoing_stored_auth: Option<Value> = None;
         if let Some(current_id) = current_id {
             if current_id != id {
                 // Additive mode apps - all providers coexist in the same file,
@@ -5676,6 +5828,8 @@ impl ProviderService {
                     // Only backfill when switching to a different provider
                     if let Ok(live_config) = read_live_settings(app_type.clone()) {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
+                            outgoing_stored_auth =
+                                current_provider.settings_config.get("auth").cloned();
                             // 切走前先把 live 里的可共享改动（含用户直接在应用内
                             // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
                             // 详见 sync_common_config_snippet_from_live 的文档。
@@ -5711,6 +5865,29 @@ impl ProviderService {
         }
 
         let target_managed_codex_account_id = Self::managed_codex_oauth_account_id(provider);
+
+        // 求值一次、写入与清理共用：目标档这次 live 写入会不会重写 auth.json。
+        // 必须在托管事务动手（写入后清 ownership marker）**之前**求值——事后重评
+        // 会把「marker 在场时整体替换过 auth.json」误判成 config-only，进而把
+        // 刚写入的活 key 当残留删掉（managed_codex_switch_adopts_outgoing_cli_rotation
+        // 测试盯住这条）。
+        let target_codex_category = if crate::proxy::providers::is_codex_official_provider(provider)
+        {
+            // 写入路径会把这个形状归一化成 official（apply_codex_official_auth），
+            // 判据必须看到同一个 category。
+            Some("official")
+        } else {
+            provider.category.as_deref()
+        };
+        let target_live_write_replaces_auth = matches!(app_type, AppType::Codex)
+            && crate::codex_config::codex_live_write_replaces_auth(
+                target_codex_category,
+                provider
+                    .settings_config
+                    .get("auth")
+                    .unwrap_or(&serde_json::Value::Null),
+            );
+
         let outgoing_managed_codex_account_id = current_managed_codex_account_id
             .as_ref()
             .filter(|account_id| target_managed_codex_account_id.as_ref() != Some(*account_id))
@@ -5776,12 +5953,8 @@ impl ProviderService {
                 ));
             }
         } else {
-            // Additive mode apps skip setting is_current (no such concept).
-            if !app_type.is_additive_mode() {
-                crate::settings::set_current_provider(&app_type, Some(id))?;
-                state.db.set_current_provider(app_type.as_str(), id)?;
-            }
-
+            // Live 先行，与上面托管分支同一纪律：live 写失败时 current 还在旧档，
+            // UI 与 CLI 保持一致（先前 current-first 会在报错的同时把 ✓ 打到新档）。
             // Sync to live (write_gemini_live handles security flag internally for Gemini).
             Self::write_preflighted_or_current_live(
                 state,
@@ -5789,27 +5962,42 @@ impl ProviderService {
                 provider,
                 preflighted_provider.as_ref(),
             )?;
+
+            // Additive mode apps skip setting is_current (no such concept).
+            if !app_type.is_additive_mode() {
+                crate::settings::set_current_provider(&app_type, Some(id))?;
+                state.db.set_current_provider(app_type.as_str(), id)?;
+            }
         }
 
-        // A material-less official Codex provider gets a config-only live
-        // write, which can leave the previous third-party key in
-        // ~/.codex/auth.json and strand the user on a 401 with no login
-        // screen. Only clean up after a successful backfill — the DB copy
-        // made above is what keeps that key recoverable. Failures degrade to
-        // a log entry: config.toml and is_current are already committed, so
-        // failing the switch here would report a switch that in fact happened.
+        // A config-only Codex live write (material-less official, or a
+        // third-party tier while the preserve toggle keeps the ChatGPT login)
+        // leaves ~/.codex/auth.json untouched, where the previous tier's key
+        // can linger as an orphaned credential. Gate on the same
+        // single-evaluation answer the write branch used
+        // (target_live_write_replaces_auth). Only clean up after a successful
+        // backfill — the DB copy made above is what keeps that key recoverable.
+        // Failures degrade to a log entry: config.toml and is_current are
+        // already committed, so failing the switch here would report a switch
+        // that in fact happened.
         if matches!(app_type, AppType::Codex)
             && backfill_completed
-            && (provider.category.as_deref() == Some("official")
-                || crate::proxy::providers::is_codex_official_provider(provider))
             && target_managed_codex_account_id.is_none()
+            && !target_live_write_replaces_auth
         {
-            let db_auth = provider.settings_config.get("auth");
-            match crate::codex_config::clear_stale_codex_live_auth_after_official_switch(
-                db_auth.unwrap_or(&serde_json::Value::Null),
+            // 第三方目标：residue 是惰性的（活档 key 走 bearer），只清可证明属于
+            // 旧档的副本（live key == 旧档回填前存储 key）；codex CLI API-key
+            // 登录与无主历史 key 归 preserve 契约保护，不动。official 目标传
+            // None：residue 无论归属都会被发去 official 端点，无条件清。
+            match crate::codex_config::clear_stale_codex_live_auth_after_config_only_switch(
+                if target_codex_category == Some("official") {
+                    None
+                } else {
+                    outgoing_stored_auth.as_ref()
+                },
             ) {
                 Ok(true) => log::info!(
-                    "Removed stale third-party auth.json after switching to official Codex provider '{}'",
+                    "Removed stale third-party auth.json after config-only Codex switch to '{}'",
                     provider.id
                 ),
                 Ok(false) => {}
