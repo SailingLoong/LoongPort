@@ -55,6 +55,16 @@ const SITE_SIDE_ERROR_EXPR: &str = "(l.status_code < 200 OR l.status_code >= 400
 ///   必须先过「口径与代理观测一致」的审视，而不是静默混进同一张直方图。
 const PROXY_OBSERVED_EXPR: &str = "l.data_source = 'proxy'";
 
+/// crowd 计数对账的配对资格（宁缺毋认从采集口径开始）。首条与
+/// [`PROXY_OBSERVED_EXPR`] 同判据但**自包含**——format! 参数不会嵌套展开
+/// 占位符，引用别的常量字面量会把 `{}` 残留进 SQL：本机代理亲历的成功
+/// 交互，且本地计数与上游回显计数**都**为正 —— 任何一侧缺失就不进对账样本
+/// （`local_input_tokens` 的 0 即「未采」，错误行天然出局）。判定不在客户端：
+/// 桶只带三元组事实，比值/跳变/样本门槛全在服务端。
+const TOKEN_PAIR_EXPR: &str = "l.data_source = 'proxy' \
+     AND l.status_code >= 200 AND l.status_code < 400 \
+     AND l.local_input_tokens > 0 AND l.input_tokens > 0";
+
 /// 一个待上传的小时聚合桶。字段集合就是上传载荷的字段集合 ——
 /// 加字段前先回模块文档那张「传/不传」的表过一遍。
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +122,12 @@ pub struct ModelBucket {
     /// `crowd::events::record_model_anomaly`）。恒 ≤ `samples`（异常响应
     /// 必然是被计数的请求之一）。
     pub anomalies: i64,
+    /// 计数对账三元组（配对口径见 [`TOKEN_PAIR_EXPR`]）：本地计数的和、
+    /// 上游回显 input 计数的和、配对行数。比值 = local_sum / remote_sum，
+    /// 服务端按「同站同模型」窗口看稳定性，样本不足不结论。
+    pub tok_local_sum: i64,
+    pub tok_remote_sum: i64,
+    pub tok_pair_count: i64,
 }
 
 /// SQL 切出的 provider 维度桶（站点归属尚未解析）。
@@ -149,6 +165,9 @@ struct RawModelBucket {
     cache_read_tokens: i64,
     cache_creation_tokens: i64,
     cost_usd_micros: i64,
+    tok_local_sum: i64,
+    tok_remote_sum: i64,
+    tok_pair_count: i64,
 }
 
 /// 查询并切桶（provider 维度）。`after_epoch`（不含）到 `before_epoch`（含）限定行窗口；
@@ -233,11 +252,15 @@ fn query_raw_model_buckets(
                 {tps_exprs}, \
                 SUM({fresh_input}), \
                 SUM(l.output_tokens), SUM(l.cache_read_tokens), SUM(l.cache_creation_tokens), \
-                CAST(ROUND(SUM(CAST(l.total_cost_usd AS REAL)) * 1000000.0) AS INTEGER) \
+                CAST(ROUND(SUM(CAST(l.total_cost_usd AS REAL)) * 1000000.0) AS INTEGER), \
+                SUM(CASE WHEN {token_pair} THEN l.local_input_tokens ELSE 0 END), \
+                SUM(CASE WHEN {token_pair} THEN l.input_tokens ELSE 0 END), \
+                SUM(CASE WHEN {token_pair} THEN 1 ELSE 0 END) \
          FROM proxy_request_logs l \
          WHERE l.created_at > ?1 AND l.created_at <= ?2 \
          GROUP BY hour_epoch, l.provider_id, l.app_type, l.model",
         fresh_input = fresh_input_sql("l"),
+        token_pair = TOKEN_PAIR_EXPR,
         site_side_error = SITE_SIDE_ERROR_EXPR,
         proxy_observed = PROXY_OBSERVED_EXPR,
     );
@@ -252,15 +275,19 @@ fn query_raw_model_buckets(
 
     let mut raws = Vec::new();
     while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+        // 列起点 = 7：hour/provider/app/model/COUNT/errors/err_samples 之后才是
+        // ttft 直方图（顶层桶没有 model 列所以从 6 起——两处的起点不同，历史
+        // 上这里跟着顶层写成 6，模型桶所有列错位一格：err_samples 被当 ttft[0]、
+        // fresh 被当 output……随三元组测试一并修根。
         let mut ttft_bins = Vec::with_capacity(TTFT_BIN_COUNT);
         for i in 0..TTFT_BIN_COUNT {
-            ttft_bins.push(row.get::<_, i64>(6 + i)?);
+            ttft_bins.push(row.get::<_, i64>(7 + i)?);
         }
         let mut tps_bins = Vec::with_capacity(TPS_BIN_COUNT);
         for i in 0..TPS_BIN_COUNT {
-            tps_bins.push(row.get::<_, i64>(6 + TTFT_BIN_COUNT + i)?);
+            tps_bins.push(row.get::<_, i64>(7 + TTFT_BIN_COUNT + i)?);
         }
-        let base = 6 + TTFT_BIN_COUNT + TPS_BIN_COUNT;
+        let base = 7 + TTFT_BIN_COUNT + TPS_BIN_COUNT;
         raws.push(RawModelBucket {
             hour_epoch: row.get(0)?,
             provider_id: row.get(1)?,
@@ -276,6 +303,9 @@ fn query_raw_model_buckets(
             cache_read_tokens: row.get(base + 2)?,
             cache_creation_tokens: row.get(base + 3)?,
             cost_usd_micros: row.get(base + 4)?,
+            tok_local_sum: row.get(base + 5)?,
+            tok_remote_sum: row.get(base + 6)?,
+            tok_pair_count: row.get(base + 7)?,
         });
     }
     Ok(raws)
@@ -418,6 +448,9 @@ fn merge_by_site(
             cache_creation_tokens: 0,
             cost_usd_micros: 0,
             anomalies: 0,
+            tok_local_sum: 0,
+            tok_remote_sum: 0,
+            tok_pair_count: 0,
         });
         entry.samples += raw.samples;
         entry.errors += raw.errors;
@@ -433,6 +466,9 @@ fn merge_by_site(
         entry.cache_read_tokens += raw.cache_read_tokens;
         entry.cache_creation_tokens += raw.cache_creation_tokens;
         entry.cost_usd_micros += raw.cost_usd_micros;
+        entry.tok_local_sum += raw.tok_local_sum;
+        entry.tok_remote_sum += raw.tok_remote_sum;
+        entry.tok_pair_count += raw.tok_pair_count;
     }
     for ((hour_epoch, site, app, _), model_bucket) in models {
         if let Some(hour_bucket) = merged.get_mut(&(hour_epoch, site.clone(), app.clone())) {
@@ -567,6 +603,40 @@ mod tests {
         // `Database::memory()` 已按生产 schema 建齐全部表 —— 这里不再自建
         // （自建会撞「table already exists」，且形状迟早与生产漂移）。
         Database::memory().expect("内存库")
+    }
+
+    /// 计数对账三元组的采集口径：只收「proxy 亲历 + 2xx/3xx + 两侧计数都为正」
+    /// 的行 —— 错误行、session 回填、未采（local=0）与无回显（remote=0）全部
+    /// 出局，比值分母不被污染（宁缺毋认从采集端开始）。
+    #[test]
+    fn token_pair_triples_only_admit_fully_observed_success_rows() {
+        let db = setup_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let seed = |id: &str, status: i64, source: &str, local: i64, remote: i64| {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model, status_code,
+                        input_tokens, local_input_tokens, latency_ms, created_at, data_source
+                     ) VALUES (?1, 'p', 'codex', 'gpt-6', ?2, ?3, ?4, 0, 1000, ?5)",
+                    params![id, status, remote, local, source],
+                )
+                .unwrap();
+            };
+            seed("ok-1", 200, "proxy", 110, 100);
+            seed("ok-2", 302, "proxy", 230, 200); // 3xx 也是成功交互
+            seed("err", 500, "proxy", 999, 900); // 失败行出局
+            seed("session", 200, "session_log", 50, 50); // 非代理观测出局
+            seed("unlocal", 200, "proxy", 0, 100); // 本地未采出局
+            seed("unremote", 200, "proxy", 80, 0); // 上游未回显出局
+        }
+        let raws = query_raw_model_buckets(&db, 0, 2000).expect("切桶");
+        assert_eq!(raws.len(), 1);
+        let m = &raws[0];
+        assert_eq!(m.model, "gpt-6");
+        assert_eq!(m.tok_local_sum, 110 + 230);
+        assert_eq!(m.tok_remote_sum, 100 + 200);
+        assert_eq!(m.tok_pair_count, 2);
     }
 
     #[allow(clippy::too_many_arguments)] // 测试播种器：一列一参，比构造器结构直白

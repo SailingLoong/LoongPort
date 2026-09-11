@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 21;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 22;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -317,6 +317,23 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                     crate::relay::model_catalog::seed_legacy_inventories(conn)?;
                 }
                 set_version(conn, 21)?;
+            }
+            21 => {
+                log::info!("LoongPort 数据迁移 v21 → v22（请求日志添加本地 token 计数）");
+                // crowd 计数对账的采集列（0 = 未采）。新库已由 create_tables
+                // 建成最终形态，这里只服务已存在的库；幂等加列。
+                if table_exists(conn, "proxy_request_logs")?
+                    && !column_exists(conn, "proxy_request_logs", "local_input_tokens")?
+                {
+                    conn.execute(
+                        "ALTER TABLE proxy_request_logs ADD COLUMN local_input_tokens INTEGER NOT NULL DEFAULT 0",
+                        [],
+                    )
+                    .map_err(|error| {
+                        AppError::Database(format!("加 local_input_tokens 列失败: {error}"))
+                    })?;
+                }
+                set_version(conn, 22)?;
             }
             other => {
                 return Err(AppError::Database(format!(

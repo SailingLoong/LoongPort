@@ -78,6 +78,10 @@ pub struct RequestContext {
     pub session_id: String,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
+    /// 请求体的本地 token 计数（口径见 [`crate::proxy::local_tokens`]，0 = 未采）。
+    /// crowd 计数对账的采集事实：与上游回显的 `usage.input_tokens` 在桶里配对，
+    /// 判定在服务端。
+    pub local_input_tokens: u64,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -138,6 +142,10 @@ impl RequestContext {
             .unwrap_or("unknown")
             .to_string();
 
+        // 请求体本地 token 计数（crowd 对账事实，0 = 未采）。构造点手上
+        // 有完整 body，是整条链路里唯一无痛的 tokenize 挂点；落库点从这里取。
+        let local_input_tokens = crate::proxy::local_tokens::count_request_tokens(body);
+
         // 提取 Session ID
         let session_result = extract_session_id(headers, body, app_type_str);
         let session_id = session_result.session_id.clone();
@@ -193,6 +201,7 @@ impl RequestContext {
             app_type,
             session_id,
             session_client_provided: session_result.client_provided,
+            local_input_tokens,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,

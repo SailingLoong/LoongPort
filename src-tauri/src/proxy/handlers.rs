@@ -309,6 +309,7 @@ struct ClaudeUsageLog {
     latency_ms: u64,
     status_code: u16,
     is_streaming: bool,
+    local_input_tokens: u64,
 }
 
 fn prepare_claude_usage_log(
@@ -338,6 +339,7 @@ fn prepare_claude_usage_log(
         app_type: ctx.app_type_str,
         provider_id: ctx.provider.id.clone(),
         session_id: ctx.session_id.clone(),
+        local_input_tokens: ctx.local_input_tokens,
         usage,
         latency_ms: ctx.latency_ms(),
         status_code,
@@ -359,6 +361,7 @@ async fn write_claude_usage_log(state: &ProxyState, log: ClaudeUsageLog) {
         log.is_streaming,
         log.status_code,
         Some(log.session_id),
+        log.local_input_tokens,
     )
     .await;
 }
@@ -469,6 +472,7 @@ async fn handle_claude_transform(
             // "claude" 会把 claude-desktop 的行错记到 claude 名下
             let app_type_str = ctx.app_type_str;
 
+            let local_input_tokens = ctx.local_input_tokens;
             Some(SseUsageCollector::new(
                 start_time,
                 Some(claude_stream_usage_event_filter),
@@ -500,6 +504,7 @@ async fn handle_claude_transform(
                                 true,
                                 status_code,
                                 Some(session_id),
+                                local_input_tokens,
                             )
                             .await;
                         });
@@ -1260,6 +1265,7 @@ async fn handle_codex_responses_namespace_restore(
                     let provider_id = ctx.provider.id.clone();
                     let session_id = ctx.session_id.clone();
                     let latency_ms = ctx.latency_ms();
+                    let local_input_tokens = ctx.local_input_tokens;
                     async move {
                         log_usage(
                             &state,
@@ -1274,6 +1280,7 @@ async fn handle_codex_responses_namespace_restore(
                             false,
                             status.as_u16(),
                             Some(session_id),
+                            local_input_tokens,
                         )
                         .await;
                     }
@@ -1344,6 +1351,7 @@ async fn handle_codex_chat_to_responses_transform(
             let start_time = ctx.attempt_started_at;
             let session_id = ctx.session_id.clone();
 
+            let local_input_tokens = ctx.local_input_tokens;
             Some(SseUsageCollector::new(
                 start_time,
                 Some(codex_stream_usage_event_filter),
@@ -1386,6 +1394,7 @@ async fn handle_codex_chat_to_responses_transform(
                             true,
                             status.as_u16(),
                             Some(session_id),
+                            local_input_tokens,
                         )
                         .await;
                     });
@@ -1494,6 +1503,7 @@ async fn handle_codex_chat_to_responses_transform(
             let provider_id = ctx.provider.id.clone();
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
+            let local_input_tokens = ctx.local_input_tokens;
             async move {
                 log_usage(
                     &state,
@@ -1508,6 +1518,7 @@ async fn handle_codex_chat_to_responses_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    local_input_tokens,
                 )
                 .await;
             }
@@ -1658,6 +1669,7 @@ async fn handle_codex_anthropic_to_responses_transform(
             let provider_id = ctx.provider.id.clone();
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
+            let local_input_tokens = ctx.local_input_tokens;
             async move {
                 log_usage(
                     &state,
@@ -1672,6 +1684,7 @@ async fn handle_codex_anthropic_to_responses_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    local_input_tokens,
                 )
                 .await;
             }
@@ -1723,6 +1736,7 @@ fn build_codex_anthropic_sse_response(
         let start_time = ctx.attempt_started_at;
         let session_id = ctx.session_id.clone();
 
+        let local_input_tokens = ctx.local_input_tokens;
         Some(SseUsageCollector::new(
             start_time,
             Some(codex_stream_usage_event_filter),
@@ -1759,6 +1773,7 @@ fn build_codex_anthropic_sse_response(
                         true,
                         status.as_u16(),
                         Some(session_id),
+                        local_input_tokens,
                     )
                     .await;
                 });
@@ -2798,6 +2813,7 @@ async fn log_usage(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    local_input_tokens: u64,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -2833,6 +2849,7 @@ async fn log_usage(
         session_id,
         None, // provider_type
         is_streaming,
+        local_input_tokens,
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
