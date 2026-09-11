@@ -493,6 +493,7 @@ pub(crate) fn create_usage_collector(
     let state = state.clone();
     let provider_id = ctx.provider.id.clone();
     let request_model = ctx.request_model.clone();
+    let local_input_tokens = ctx.local_input_tokens;
     // 流式事件缺失模型名时的归因兜底：映射后的出站模型（路由接管真值）优先，
     // 其次才是客户端请求别名
     let fallback_model = ctx
@@ -537,6 +538,7 @@ pub(crate) fn create_usage_collector(
                         true, // is_streaming
                         status_code,
                         Some(session_id),
+                        local_input_tokens,
                     )
                     .await;
                 });
@@ -563,6 +565,7 @@ pub(crate) fn create_usage_collector(
                         true, // is_streaming
                         status_code,
                         Some(session_id),
+                        local_input_tokens,
                     )
                     .await;
                 });
@@ -601,6 +604,7 @@ fn spawn_log_usage(
         .unwrap_or_else(|| ctx.request_model.clone());
     let latency_ms = ctx.latency_ms();
     let session_id = ctx.session_id.clone();
+    let local_input_tokens = ctx.local_input_tokens;
 
     tokio::spawn(async move {
         log_usage_internal(
@@ -616,6 +620,7 @@ fn spawn_log_usage(
             is_streaming,
             status_code,
             Some(session_id),
+            local_input_tokens,
         )
         .await;
     });
@@ -649,6 +654,7 @@ async fn log_usage_internal(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    local_input_tokens: u64,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -688,6 +694,7 @@ async fn log_usage_internal(
         session_id,
         None, // provider_type
         is_streaming,
+        local_input_tokens,
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
@@ -1175,6 +1182,7 @@ mod tests {
             false,
             200,
             None,
+            0,
         )
         .await;
 
@@ -1245,6 +1253,7 @@ mod tests {
             false,
             200,
             None,
+            0,
         )
         .await;
 
@@ -1325,6 +1334,7 @@ mod tests {
             false,
             200,
             None,
+            0,
         )
         .await;
 

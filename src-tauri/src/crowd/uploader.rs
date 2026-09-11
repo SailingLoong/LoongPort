@@ -88,6 +88,11 @@ pub(crate) struct ModelBucketPayload<'a> {
     /// P5：被动观察到的模型真伪异常次数（Anomaly 级，v2 追加，旧服务端
     /// 忽略未知字段向后兼容）。
     pub anomalies: i64,
+    /// 计数对账三元组（v2 追加，向后兼容同上）：本地计数和、上游回显 input
+    /// 计数和、配对行数。判定（比值稳定性/样本门槛）全在服务端。
+    pub tok_local_sum: i64,
+    pub tok_remote_sum: i64,
+    pub tok_pair_count: i64,
 }
 
 fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> IngestPayload<'a> {
@@ -127,6 +132,9 @@ fn payload_from_bucket<'a>(source_id: &'a str, buckets: &'a [HourBucket]) -> Ing
                         cache_creation_tokens: m.cache_creation_tokens,
                         cost_usd_micros: m.cost_usd_micros,
                         anomalies: m.anomalies,
+                        tok_local_sum: m.tok_local_sum,
+                        tok_remote_sum: m.tok_remote_sum,
+                        tok_pair_count: m.tok_pair_count,
                     })
                     .collect(),
             })
@@ -278,6 +286,9 @@ mod tests {
                 cache_creation_tokens: 100,
                 cost_usd_micros: 12_345,
                 anomalies: 2,
+                tok_local_sum: 0,
+                tok_remote_sum: 0,
+                tok_pair_count: 0,
             }],
         }
     }
@@ -360,6 +371,9 @@ mod tests {
                 "model",
                 "outputTokens",
                 "samples",
+                "tokLocalSum",
+                "tokPairCount",
+                "tokRemoteSum",
                 "tpsBins",
                 "ttftBins",
             ],
