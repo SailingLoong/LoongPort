@@ -41,7 +41,7 @@ pub struct RestoreOfficialLoginResult {
 /// 各不相同且都很糟：只删 `auth.json` ⇒ 仍走中转站（token 还在 `config.toml` 里）；
 /// 只切 provider ⇒ 走 ChatGPT auth 模式但没登录态 ⇒ codex 报 credentials incomplete。
 ///
-/// **2 不可省**：`ProviderService::switch` 自己那套清理（`clear_stale_codex_live_auth_after_official_switch`）
+/// **2 不可省**：`ProviderService::switch` 自己那套清理（`clear_stale_codex_live_auth_after_config_only_switch`）
 /// **有意不删带 OAuth 的 auth.json**（见 `codex_config::codex_auth_has_credential_login_material`）——
 /// 用户的 ChatGPT 登录正是它拒绝碰的那一类，所以第 4 步必须自己动手，而动手之前必须留后路。
 #[tauri::command]

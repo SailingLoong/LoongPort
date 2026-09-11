@@ -1140,33 +1140,30 @@ pub fn codex_live_auth_is_stale_third_party_residue(live_auth: &Value) -> bool {
         .is_some_and(|key| !key.is_empty())
 }
 
-/// After a normal switch to an official provider that carries no login
-/// material of its own, delete a live `auth.json` that only holds a stale
-/// third-party API key, so Codex shows its login screen instead of sending
-/// the wrong key to the official endpoint (401 with no way to re-login).
+/// After a normal switch whose live write was config-only (see
+/// [`codex_live_write_replaces_auth`] — a material-less official provider, or a
+/// third-party tier while the preserve toggle keeps the ChatGPT login), delete
+/// a live `auth.json` that only holds a stale third-party API key, so the file
+/// stops claiming a credential that belongs to no active tier. For official
+/// targets this also restores Codex's login screen instead of sending the
+/// wrong key to the official endpoint (401 with no way to re-login).
 ///
 /// Deleting the file — not writing `{}` — is deliberate: Codex resolves an
 /// empty object to ChatGPT mode without tokens and errors at bootstrap,
 /// while a missing file yields NotAuthenticated and the login screen,
 /// matching Codex's own logout.
 ///
-/// Callers must only invoke this after the outgoing provider was
-/// successfully backfilled into the DB — that backfill holds the only other
-/// copy of the third-party key. The switch backfill intentionally lacks the
-/// proxy-side "no credentials in the builtin official row" guard
+/// Callers must only invoke this when the live write did NOT replace
+/// auth.json (same predicate, same instant) and after the outgoing provider
+/// was successfully backfilled into the DB — that backfill holds the only
+/// other copy of the third-party key. The switch backfill intentionally lacks
+/// the proxy-side "no credentials in the builtin official row" guard
 /// (`services/proxy.rs` `sync_live_config_to_provider`): that asymmetry is
 /// what heals official API-key logins into the DB row, and this cleanup's
 /// safety depends on it — do not align the two guards.
 ///
 /// Returns Ok(true) when the file was deleted.
-pub fn clear_stale_codex_live_auth_after_official_switch(
-    db_auth: &Value,
-) -> Result<bool, AppError> {
-    if codex_auth_has_login_material(db_auth) {
-        // A material-carrying official provider gets a full auth write;
-        // nothing stale can remain.
-        return Ok(false);
-    }
+pub fn clear_stale_codex_live_auth_after_config_only_switch() -> Result<bool, AppError> {
     let auth_path = get_codex_auth_path();
     if !auth_path.exists() {
         return Ok(false);
@@ -3325,6 +3322,23 @@ pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(),
     Ok(())
 }
 
+/// 判定一次 Codex live 写入会不会重写 `auth.json`（auth+config 分支），
+/// 还是只动 `config.toml`、把 auth.json 原样留在盘上（config-only 分支）。
+///
+/// 唯一判据源：写入分支（[`write_codex_live_for_provider`]）与切换后的
+/// 残留清理闸（`clear_stale_codex_live_auth_after_config_only_switch` 的调用方）
+/// 回答的是同一个问题——「这次写入动没动 auth.json」——必须消费同一份答案，
+/// 各自重推一遍就是两处判据漂移的起点（官方目标的旧清理闸正是这么长出来的）。
+pub fn codex_live_write_replaces_auth(category: Option<&str>, auth: &Value) -> bool {
+    (category == Some("official") && codex_auth_has_login_material(auth))
+        || (category != Some("official")
+            && (!crate::settings::preserve_codex_official_auth_on_switch()
+                // live auth 带 ownership marker = 它是托管 Codex 账号的登录，不是用户
+                // 自己的 ChatGPT 登录缓存 ——「preserve」不适用，切走时按托管事务
+                // 语义整体替换 auth.json，随后的 clear_outgoing 才能收干净。
+                || get_codex_managed_oauth_live_auth_marker_path().exists()))
+}
+
 /// Route a Codex live write between full auth+config or config-only.
 ///
 /// Official providers with usable login material own `auth.json`. Third-party
@@ -3395,13 +3409,7 @@ pub fn write_codex_live_for_provider(
     let third_party_carries_key =
         category != Some("official") && extract_codex_auth_api_key(auth).is_some();
 
-    let should_write_auth = (category == Some("official") && codex_auth_has_login_material(auth))
-        || (category != Some("official")
-            && (!crate::settings::preserve_codex_official_auth_on_switch()
-                // live auth 带 ownership marker = 它是托管 Codex 账号的登录，不是用户
-                // 自己的 ChatGPT 登录缓存 ——「preserve」不适用，切走时按托管事务
-                // 语义整体替换 auth.json，随后的 clear_outgoing 才能收干净。
-                || get_codex_managed_oauth_live_auth_marker_path().exists()));
+    let should_write_auth = codex_live_write_replaces_auth(category, auth);
 
     if should_write_auth {
         // 第三方档把 sk 写进 auth.json 时补 requires_openai_auth（不变式见本函数
