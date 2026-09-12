@@ -214,11 +214,12 @@ export const grokBuildProviderPresets: GrokBuildProviderPreset[] = [
   },
   {
     name: "APIKEY.FUN",
-    websiteUrl: "https://apikey.fun",
-    apiKeyUrl: "https://apikey.fun/register",
+    websiteUrl: "https://apikey.fan",
+    apiKeyUrl: "https://apikey.fan/register",
     auth: grokAuth(),
-    config: grokPresetConfig("APIKEY.FUN", "https://api.apikey.fun/v1"),
+    config: grokPresetConfig("APIKEY.FUN", "https://api.apikey.fan/v1"),
     endpointCandidates: [
+      "https://api.apikey.fan/v1",
       "https://api.apikey.fun/v1",
       "https://slb.apikey.fun/v1",
     ],

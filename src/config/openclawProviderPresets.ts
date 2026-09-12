@@ -615,10 +615,10 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
   },
   {
     name: "APIKEY.FUN",
-    websiteUrl: "https://apikey.fun",
-    apiKeyUrl: "https://apikey.fun/register",
+    websiteUrl: "https://apikey.fan",
+    apiKeyUrl: "https://apikey.fan/register",
     settingsConfig: {
-      baseUrl: "https://api.apikey.fun",
+      baseUrl: "https://api.apikey.fan",
       apiKey: "",
       api: "anthropic-messages",
       models: [
