@@ -370,11 +370,11 @@ const piProviderPresetDefinitions: PiProviderPreset[] = [
   {
     name: "APIKEY.FUN",
     providerKey: "loongport-apikey-fun",
-    websiteUrl: "https://apikey.fun",
-    apiKeyUrl: "https://apikey.fun/register",
+    websiteUrl: "https://apikey.fan",
+    apiKeyUrl: "https://apikey.fan/register",
     settingsConfig: {
       name: "APIKEY.FUN",
-      baseUrl: "https://api.apikey.fun",
+      baseUrl: "https://api.apikey.fan",
       api: "anthropic-messages",
       apiKey: "",
       models: [

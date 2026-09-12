@@ -653,13 +653,13 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
   },
   {
     name: "APIKEY.FUN",
-    websiteUrl: "https://apikey.fun",
-    apiKeyUrl: "https://apikey.fun/register",
+    websiteUrl: "https://apikey.fan",
+    apiKeyUrl: "https://apikey.fan/register",
     settingsConfig: {
       npm: "@ai-sdk/anthropic",
       name: "APIKEY.FUN",
       options: {
-        baseURL: "https://api.apikey.fun/v1",
+        baseURL: "https://api.apikey.fan/v1",
         apiKey: "",
         setCacheKey: true,
       },
