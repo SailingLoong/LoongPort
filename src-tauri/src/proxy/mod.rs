@@ -2,6 +2,7 @@
 //!
 //! 提供本地HTTP代理服务，支持多Provider故障转移和请求透传
 
+pub(crate) mod auto_health;
 pub mod auto_strategy;
 pub mod body_filter;
 pub mod cache_injector;

@@ -29,11 +29,14 @@ use crate::services::sql_helpers::fresh_input_sql;
 /// - 503 且是本机未出门的错误（无可用 Provider / 全部熔断 / 未配置）：
 ///   请求根本没到站点。
 ///
+/// 两个消费方共用这套口径：众测上传桶（本模块）与省心模式选路健康信号
+/// （`proxy::auto_health`）——同一把尺子，别在任何一侧再发明第二份。
+///
 /// 两个跨文件事实由单元测试钉住：403 的 LIKE 必须锚定落库文案前缀
 /// 「上游错误 (403): 」（前缀本身就含「上游」二字，裸 LIKE 会把所有上游
 /// 403 都判成站点侧）；503 的三条本机文案与 `error_mapper::get_error_message`
 /// 逐字一致 —— 测试用真实 mapper 输出播种，任一侧改文案当场红。
-const SITE_SIDE_ERROR_EXPR: &str = "(l.status_code < 200 OR l.status_code >= 400) \
+pub(crate) const SITE_SIDE_ERROR_EXPR: &str = "(l.status_code < 200 OR l.status_code >= 400) \
      AND NOT ( \
          l.status_code IN (401, 402) \
          OR (l.status_code = 403 \
@@ -44,7 +47,8 @@ const SITE_SIDE_ERROR_EXPR: &str = "(l.status_code < 200 OR l.status_code >= 400
      )";
 
 /// proxy 观测资格：只有本地代理亲历过完整 HTTP 交互的行（`data_source = 'proxy'`）
-/// 才有错误观测与真实计时。两处消费：
+/// 才有错误观测与真实计时。消费方同 [`SITE_SIDE_ERROR_EXPR`]（上传桶 +
+/// 省心选路健康信号），两处消费：
 ///
 /// - `err_samples`（错误率分母）：session 回填行 `status_code` 恒 200 写死（CLI
 ///   会话文件不记失败请求），计入分母会把一切站点的公开错误率拉向 0% —— 比
@@ -53,7 +57,7 @@ const SITE_SIDE_ERROR_EXPR: &str = "(l.status_code < 200 OR l.status_code >= 400
 /// - TTFT/TPS 直方图资格：session 行没有延迟数据；现在 `first_token_ms` 缺省
 ///   天然不进桶，但资格条件显式钉住口径 —— 将来 session 同步若开始回填延迟，
 ///   必须先过「口径与代理观测一致」的审视，而不是静默混进同一张直方图。
-const PROXY_OBSERVED_EXPR: &str = "l.data_source = 'proxy'";
+pub(crate) const PROXY_OBSERVED_EXPR: &str = "l.data_source = 'proxy'";
 
 /// crowd 计数对账的配对资格（宁缺毋认从采集口径开始）。首条与
 /// [`PROXY_OBSERVED_EXPR`] 同判据但**自包含**——format! 参数不会嵌套展开
@@ -80,7 +84,7 @@ pub struct HourBucket {
     /// 未出门的失败不计 —— 它们不反映站点健康，混进去会把上传者自己的
     /// 账号问题变成全站的公开错误率）。
     pub errors: i64,
-    /// 错误可观测样本数（= 桶内 proxy 观测行数，口径见 [`ERR_SAMPLE_EXPR`]）。
+    /// 错误可观测样本数（= 桶内 proxy 观测行数，口径见 [`PROXY_OBSERVED_EXPR`]）。
     /// `errors` 的分母：session 回填行没有失败观测，只能贡献 `samples`。
     pub err_samples: i64,
     /// TTFT 直方图计数，长度恒为 [`TTFT_BIN_COUNT`]。

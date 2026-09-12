@@ -2595,9 +2595,9 @@
     "strategyLabel": "Selection strategy (global)",
     "strategy": {
       "cheapest": "Cheapest",
-      "cheapestHint": "By rate multiplier × model unit price (unpriced models last)",
+      "cheapestHint": "Cost first, then stability and speed",
       "fastest": "Fastest",
-      "fastestHint": "Ordered by 7-day avg first-token time"
+      "fastestHint": "Speed first, then stability and cost"
     },
     "activeHint": "Easy Mode is active and takes precedence over the failover queue. The current tier sticks within a session; on persistent failures it switches by strategy order (switching loses the prompt cache). Tier prices are verified against live site rates, and models are confirmed genuine by model verification.",
     "confirm": {
