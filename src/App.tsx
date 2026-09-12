@@ -75,6 +75,7 @@ import {
 } from "@/components/shell/navigation";
 import { ApplicationWorkspace } from "@/components/applications/ApplicationWorkspace";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
+import { useAccountSessionStartup } from "@/components/relay/accounts/useAccountSessionStartup";
 import { RelayDirectoryConnectionPage } from "@/components/relay/onboarding/RelayDirectoryConnectionPage";
 import { useServiceOnboardingStatus } from "@/components/relay/onboarding/useServiceOnboarding";
 import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
@@ -89,8 +90,6 @@ import { StarRewardDialog } from "@/components/StarRewardDialog";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
-import { FailoverToggle } from "@/components/proxy/FailoverToggle";
-import { AppModeSegmented } from "@/components/proxy/AppModeSegmented";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel, {
@@ -118,8 +117,6 @@ import {
   useDisableCurrentOmoSlim,
 } from "@/lib/query/omo";
 import { invalidatePiProviderCaches, usePiCurrentState } from "@/lib/query/pi";
-import { useAutoModeStatus } from "@/lib/query/autoMode";
-import { EasyBoard } from "@/components/easymode/EasyBoard";
 import WorkspaceFilesPanel from "@/components/workspace/WorkspaceFilesPanel";
 import EnvPanel from "@/components/openclaw/EnvPanel";
 import ToolsPanel from "@/components/openclaw/ToolsPanel";
@@ -252,6 +249,7 @@ function App() {
   const effectiveEditingProvider = useLastValidValue(editingProvider);
   const effectiveUsageProvider = useLastValidValue(usageProvider);
 
+  useAccountSessionStartup();
   useUsageCacheBridge();
   useRelayDirectoryCacheBridge();
   useProviderModelsCacheBridge();
@@ -273,14 +271,6 @@ function App() {
     status: proxyStatus,
   } = useProxyStatus();
   const proxyAppId = isProxyAppId(activeApp) ? activeApp : null;
-  // 应用模式由后端状态决定；路由运行状态由看板独立展示。
-  const { data: activeAutoModeStatus } = useAutoModeStatus(
-    proxyAppId ?? activeApp,
-    !!proxyAppId,
-  );
-  // 视图跟模式走（不再看路由是否在跑——服务未跑时看板照常渲染，
-  // 由 EasyBoard 顶部的警告条如实提示，不静默回退视图）
-  const showEasyBoard = Boolean(proxyAppId && activeAutoModeStatus?.enabled);
   const currentAppUsesProxy =
     proxyAppId !== null || activeApp === "claude-desktop";
   const isCurrentAppTakeoverActive = proxyAppId
@@ -1029,6 +1019,7 @@ function App() {
   const renderContent = () => {
     const providerList = (
       <ProviderList
+        showFailoverControls={false}
         providers={providers}
         appId={activeApp}
         isLoading={isLoading}
@@ -1186,7 +1177,6 @@ function App() {
                   />
                 </div>
               )}
-              {proxyAppId ? <AppModeSegmented activeApp={proxyAppId} /> : null}
               <div className="flex-1 overflow-y-auto overflow-x-hidden pb-4">
                 <AnimatePresence mode="wait">
                   <motion.div
@@ -1197,44 +1187,28 @@ function App() {
                     transition={{ duration: 0.15 }}
                     className="space-y-4"
                   >
-                    {/* LoongPort 省心视图：该 app 模式为「省心」时，provider 页
-                        （中转站区 + 手工列表）切换为档位看板；路由未跑时看板
-                        顶部有警告条，不静默回退。模式入口在内容区顶部的
-                        AppModeSegmented（唯源）。 */}
-                    {showEasyBoard ? (
-                      <EasyBoard
-                        appId={activeApp}
-                        onOpenSettings={() => {
-                          setSettingsDefaultTab("proxy");
-                          setCurrentView("settings");
-                        }}
-                      />
-                    ) : (
+                    {activeApp === "codex-image" ? (
                       <>
-                        {activeApp === "codex-image" ? (
-                          <>
-                            <ImageTabPage onOpenAddHub={handleOpenAddHub} />
-                            {providerList}
-                          </>
-                        ) : (
-                          <ApplicationWorkspace
-                            key={activeApp}
-                            appId={activeApp}
-                            providers={providers}
-                            onSwitchProvider={
-                              activeApp === "pi"
-                                ? handleEnablePiProvider
-                                : guardedSwitch
-                            }
-                            onOpenAccount={(account) =>
-                              setCurrentView("services", activeApp, account)
-                            }
-                            onAdd={() => handleOpenAddHub()}
-                          >
-                            {providerList}
-                          </ApplicationWorkspace>
-                        )}
+                        <ImageTabPage onOpenAddHub={handleOpenAddHub} />
+                        {providerList}
                       </>
+                    ) : (
+                      <ApplicationWorkspace
+                        key={activeApp}
+                        appId={activeApp}
+                        providers={providers}
+                        onSwitchProvider={
+                          activeApp === "pi"
+                            ? handleEnablePiProvider
+                            : guardedSwitch
+                        }
+                        onOpenAccount={(account) =>
+                          setCurrentView("services", activeApp, account)
+                        }
+                        onAdd={() => handleOpenAddHub()}
+                      >
+                        {providerList}
+                      </ApplicationWorkspace>
                     )}
                   </motion.div>
                 </AnimatePresence>
@@ -1469,9 +1443,6 @@ function App() {
                     <>
                       {settingsData?.enableLocalProxy && (
                         <ProxyToggle activeApp={proxyAppId} />
-                      )}
-                      {settingsData?.enableFailoverToggle && (
-                        <FailoverToggle activeApp={proxyAppId} />
                       )}
                     </>
                   ) : null}

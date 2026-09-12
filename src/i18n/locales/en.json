@@ -921,7 +921,11 @@
     "crowdMetricsDescription": "Upload site-level hourly aggregates (first-token time, error rate, …) and unlock user-measured stats in the directory. No prompts, keys, or account info.",
     "plazaVisibility": "Relay directory",
     "plazaVisibilityToggle": "Show recommended relay list",
-    "plazaVisibilityDescription": "Show the recommended relay list on the add-site page; sites can still be added manually via the search box"
+    "plazaVisibilityDescription": "Show the recommended relay list on the add-site page; sites can still be added manually via the search box",
+    "tabConnection": "Connection settings",
+    "connection": {
+      "applicationsHint": "Configure tier selection, priority and automatic failover on the Applications page."
+    }
   },
   "apps": {
     "claude": "Claude",
@@ -3613,7 +3617,14 @@
         "noTiers": "No connection profiles",
         "ready": "Ready",
         "noKey": "No API key yet"
-      }
+      },
+      "configure": "One-click setup",
+      "recharge": "Recharge",
+      "hideDetails": "Hide account details",
+      "showDetails": "Show account details",
+      "removeRelay": "Delete “{{label}}”? This removes its login information and all groups and tiers across all applications. The provider balance is unaffected.",
+      "removeRelayInUse": "Delete “{{label}}”? This removes its login information and all groups and tiers across all applications. Currently used by: {{usages}}. Affected applications return to official login and may require signing in again and restarting. The provider balance is unaffected.",
+      "removeVendor": "Delete “{{label}}”? This removes its login information, local API keys and all plans and configurations across all applications. API keys on the provider’s website will remain."
     },
     "onboarding": {
       "domain": "Relay URL",
@@ -3840,11 +3851,11 @@
     "switchService": "Switch service",
     "selectDescription": "Choose an account, then a configuration.",
     "addService": "Add service",
-    "search": "Search services, accounts, configurations or models",
+    "search": "Search providers, accounts, tiers or models",
     "source": "Service source",
     "default": "Default",
-    "configured": "Configured",
-    "use": "Use",
+    "configured": "Current",
+    "use": "Use tier",
     "manageAccount": "Manage account",
     "empty": "No configuration selected",
     "recent": "Recently used",
@@ -3858,6 +3869,37 @@
       "official": "Official",
       "relay": "Relay",
       "custom": "Custom"
-    }
+    },
+    "availableTiers": "Available tiers",
+    "priority": "Priority",
+    "tier": "Tier / account",
+    "action": "Action",
+    "autoFailover": "Automatic failover",
+    "priorityHint": "Lower numbers have higher priority. When automatic failover is enabled, retries follow this order after the current tier.",
+    "orderHint": "Drag to reorder tiers or sort by a metric.",
+    "dragTier": "Reorder {{name}}",
+    "lastError": "Last error",
+    "metricsHint": "Error rate, first token time and cache hits cover the last 7 days. — means no data. Balance is shared by the account.",
+    "updateFailed": "Update failed. Please retry.",
+    "metrics": {
+      "rateMultiplier": "Multiplier",
+      "errorRate": "Error rate",
+      "avgFirstTokenMs": "First token",
+      "balanceUsd": "Balance",
+      "cacheHitRate": "Cache hits",
+      "todayCostUsd": "Today’s cost"
+    },
+    "skipReasons": {
+      "official_account": "This official account requires manual switching",
+      "model_incompatible": "Skipped: selected model is not supported",
+      "circuit_open": "Temporarily skipped: waiting for connection recovery",
+      "before_current": "Before the current tier; excluded from subsequent failover",
+      "current_official_account": "Automatic failover is unavailable while using the current official sign-in.",
+      "native_configuration": "Uses native application sign-in; unavailable for automatic failover."
+    },
+    "routingPaused": "Automatic failover is paused. The connection service is stopped or this application is disconnected.",
+    "resumeRouting": "Resume connection",
+    "enabled": "Enabled",
+    "enable": "Enable"
   }
 }

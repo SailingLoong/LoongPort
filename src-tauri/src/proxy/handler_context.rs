@@ -133,7 +133,8 @@ impl RequestContext {
         let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
 
         let current_provider_id =
-            crate::settings::get_current_provider(&app_type).unwrap_or_default();
+            super::application_routing::current_provider_id(&state.db, app_type_str)
+                .unwrap_or_default();
 
         // 从请求体提取模型名称
         let request_model = body

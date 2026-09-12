@@ -14,6 +14,7 @@ import { getAppDisplayName } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import { RelaySection, type RelaySectionProps } from "../RelaySection";
 import { RowBalance } from "../RowBalance";
+import { useAccountVisibility } from "./useAccountVisibility";
 import {
   configuredApps,
   useServiceAccounts,
@@ -41,6 +42,8 @@ export function ServicesPage({
   onOpenApp,
 }: ServicesPageProps) {
   const { t } = useTranslation();
+  const { isAccountDetailsHidden, setAccountDetailsHidden } =
+    useAccountVisibility();
   const { accounts, isPending, error, reload } = useServiceAccounts();
   const [localSelection, setLocalSelection] = useState<{
     kind: ServiceAccount["kind"];
@@ -132,129 +135,195 @@ export function ServicesPage({
           key={`${selection.kind}:${selection.id}:${selection.appId}`}
           appId={selection.appId}
           accountFilter={{ kind: selection.kind, id: selection.id }}
+          accountSnapshot={
+            selected && selected.apps.has(selection.appId)
+              ? selected.kind === "relay"
+                ? {
+                    kind: "relay",
+                    row: selected.apps.get(selection.appId)!,
+                    appId: selection.appId,
+                  }
+                : {
+                    kind: "vendor",
+                    row: selected.apps.get(selection.appId)!,
+                    appId: selection.appId,
+                  }
+              : null
+          }
           onOpenAddHub={onOpenAddHub}
+          onAccountChanged={() => void reload()}
         />
       </section>
     );
   }
 
   return (
-    <section className="page-content space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <p className="max-w-xl text-sm leading-6 text-muted-foreground">
-            {t("loongport.accounts.description")}
-          </p>
-        </div>
-        <Button onClick={() => onOpenAddHub("directory")}>
-          <Plus className="h-4 w-4" />
-          {t("loongport.accounts.add")}
-        </Button>
-      </header>
-      {isPending && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {t("common.loading")}
-        </p>
-      )}
-      {error && (
-        <div
-          role="alert"
-          className="rounded-xl border border-destructive/30 p-4 text-sm"
-        >
-          <p>{t("loongport.accounts.loadFailed")}</p>
-          <Button
-            variant="outline"
-            className="mt-3"
-            onClick={() => void reload()}
-          >
-            {t("common.refresh")}
-          </Button>
-        </div>
-      )}
-      {!isPending && !error && accounts.length === 0 && (
-        <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">
-          {t("loongport.accounts.empty")}
-        </div>
-      )}
-      <div className="grid gap-3">
-        {accounts.map((account) => {
-          const Icon = account.kind === "relay" ? Server : ShieldCheck;
-          const apps = configuredApps(account);
-          const contextApp = account.apps.has(appId)
-            ? appId
-            : account.apps.keys().next().value!;
-          const row = account.apps.get(contextApp)!;
-          return (
-            <article
-              key={`${account.kind}:${account.id}`}
-              className="rounded-xl border border-border bg-card p-5"
+    <RelaySection
+      appId={appId}
+      accountSnapshot={null}
+      onOpenAddHub={onOpenAddHub}
+      onAccountChanged={() => void reload()}
+      renderAccounts={(renderActions) => (
+        <section className="page-content space-y-6">
+          <header className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <p className="max-w-xl text-sm leading-6 text-muted-foreground">
+                {t("loongport.accounts.description")}
+              </p>
+            </div>
+            <Button onClick={() => onOpenAddHub("directory")}>
+              <Plus className="h-4 w-4" />
+              {t("loongport.accounts.add")}
+            </Button>
+          </header>
+          {isPending && (
+            <p role="status" className="text-sm text-muted-foreground">
+              {t("common.loading")}
+            </p>
+          )}
+          {error && (
+            <div
+              role="alert"
+              className="rounded-xl border border-destructive/30 p-4 text-sm"
             >
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div className="flex min-w-0 items-start gap-3">
-                  <div className="rounded-lg bg-muted p-2.5">
-                    <Icon className="h-5 w-5 text-muted-foreground" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="font-medium">{accountName(account)}</h2>
-                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        {t(`loongport.accounts.${account.kind}`)}
-                      </span>
-                    </div>
-                    {account.row.accountLabel && (
-                      <p className="mt-1 break-all text-sm text-muted-foreground">
-                        {account.row.accountLabel}
-                      </p>
-                    )}
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {getAppDisplayName(contextApp, t)} ·{" "}
-                      {t(`loongport.accounts.status.${row.status}`)}
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    setSelection({
-                      kind: account.kind,
-                      id: account.id,
-                      appId: contextApp,
-                    })
-                  }
+              <p>{t("loongport.accounts.loadFailed")}</p>
+              <Button
+                variant="outline"
+                className="mt-3"
+                onClick={() => void reload()}
+              >
+                {t("common.refresh")}
+              </Button>
+            </div>
+          )}
+          {!isPending && !error && accounts.length === 0 && (
+            <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">
+              {t("loongport.accounts.empty")}
+            </div>
+          )}
+          <div className="grid gap-3">
+            {accounts.map((account) => {
+              const detailsHidden = isAccountDetailsHidden(account);
+              const Icon = account.kind === "relay" ? Server : ShieldCheck;
+              const apps = configuredApps(account);
+              const contextApp = account.apps.has(appId)
+                ? appId
+                : account.apps.keys().next().value!;
+              const row = account.apps.get(contextApp)!;
+              return (
+                <article
+                  key={`${account.kind}:${account.id}`}
+                  className="rounded-xl border border-border bg-card p-5"
                 >
-                  {t("loongport.accounts.detail")}
-                  <ArrowRight className="h-4 w-4" />
-                </Button>
-              </div>
-              {(apps.length > 0 || account.row.canQueryBalance) && (
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
-                  <div className="flex flex-wrap gap-1">
-                    {apps.map((app) => (
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <div className="rounded-lg bg-muted p-2.5">
+                        <Icon className="h-5 w-5 text-muted-foreground" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h2 className="font-medium">
+                            {accountName(account)}
+                          </h2>
+                          <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                            {t(`loongport.accounts.${account.kind}`)}
+                          </span>
+                        </div>
+                        {!detailsHidden && account.row.accountLabel && (
+                          <p className="mt-1 break-all text-sm text-muted-foreground">
+                            {account.row.accountLabel}
+                          </p>
+                        )}
+                        {!detailsHidden && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {getAppDisplayName(contextApp, t)} ·{" "}
+                            {t(`loongport.accounts.status.${row.status}`)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
                       <Button
-                        key={app}
                         variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs"
-                        onClick={() => onOpenApp(app)}
+                        onClick={() =>
+                          setAccountDetailsHidden(account, !detailsHidden)
+                        }
                       >
-                        {getAppDisplayName(app, t)}
-                        <ArrowRight className="ml-1 h-3 w-3" />
+                        {t(
+                          detailsHidden
+                            ? "loongport.accounts.showDetails"
+                            : "loongport.accounts.hideDetails",
+                          {
+                            defaultValue: detailsHidden
+                              ? "Show account details"
+                              : "Hide account details",
+                          },
+                        )}
                       </Button>
-                    ))}
+                      {!detailsHidden && (
+                        <Button
+                          variant="outline"
+                          onClick={() =>
+                            setSelection({
+                              kind: account.kind,
+                              id: account.id,
+                              appId: contextApp,
+                            })
+                          }
+                        >
+                          {t("loongport.accounts.detail")}
+                          <ArrowRight className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                  {account.row.canQueryBalance && (
-                    <RowBalance
-                      rowKind={account.kind}
-                      rowId={account.id}
-                      enabled={account.row.canQueryBalance}
-                    />
+                  {!detailsHidden && (
+                    <div className="mt-3">
+                      {account.kind === "relay"
+                        ? renderActions({
+                            kind: "relay",
+                            row: account.apps.get(contextApp)!,
+                            appId: contextApp,
+                          })
+                        : renderActions({
+                            kind: "vendor",
+                            row: account.apps.get(contextApp)!,
+                            appId: contextApp,
+                          })}
+                    </div>
                   )}
-                </div>
-              )}
-            </article>
-          );
-        })}
-      </div>
-    </section>
+                  {(apps.length > 0 ||
+                    (!detailsHidden && account.row.canQueryBalance)) && (
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
+                      <div className="flex flex-wrap gap-1">
+                        {apps.map((app) => (
+                          <Button
+                            key={app}
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => onOpenApp(app)}
+                          >
+                            {getAppDisplayName(app, t)}
+                            <ArrowRight className="ml-1 h-3 w-3" />
+                          </Button>
+                        ))}
+                      </div>
+                      {!detailsHidden && account.row.canQueryBalance && (
+                        <RowBalance
+                          rowKind={account.kind}
+                          rowId={account.id}
+                          enabled={account.row.canQueryBalance}
+                        />
+                      )}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
+    />
   );
 }

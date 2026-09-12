@@ -2018,6 +2018,7 @@ pub fn run() {
             commands::update_global_proxy_config,
             commands::get_proxy_config_for_app,
             commands::update_proxy_config_for_app,
+            commands::update_proxy_options_for_app,
             commands::get_default_cost_multiplier,
             commands::set_default_cost_multiplier,
             commands::get_pricing_model_source,
@@ -2038,6 +2039,9 @@ pub fn run() {
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
             // Auto mode (LoongPort): 系统按策略自动挑托管档位
+            commands::get_application_routing,
+            commands::set_application_priority,
+            commands::set_application_failover,
             commands::get_auto_mode_status,
             commands::set_auto_mode_enabled,
             commands::set_auto_mode_strategy,

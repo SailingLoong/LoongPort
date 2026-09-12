@@ -76,13 +76,6 @@ pub struct TrayTexts {
     pub cancel_label: &'static str,
     /// 托盘切档位失败时的错误对话框标题。
     pub tier_switch_failed_title: &'static str,
-    /// 自动模式：策略名（托盘 app→模型 映射的「自动」项后缀）。
-    pub auto_strategy_cheapest: &'static str,
-    pub auto_strategy_fastest: &'static str,
-    /// 自动模式：「不限模型」项。
-    pub auto_model_any: &'static str,
-    /// 自动模式：无模型目录 app 的占位项。
-    pub auto_mode_active: &'static str,
 }
 
 /// 将系统区域标识映射为托盘支持的语言码。
@@ -152,10 +145,6 @@ impl TrayTexts {
                 tier_quit_and_switch: "Quit & Switch",
                 cancel_label: "Cancel",
                 tier_switch_failed_title: "Switch failed",
-                auto_strategy_cheapest: "Cheapest",
-                auto_strategy_fastest: "Fastest",
-                auto_model_any: "Auto (any model)",
-                auto_mode_active: "Auto mode active",
             },
             "ja" => Self {
                 show_main: "メインウィンドウを開く",
@@ -173,10 +162,6 @@ impl TrayTexts {
                 tier_quit_and_switch: "終了して切り替え",
                 cancel_label: "キャンセル",
                 tier_switch_failed_title: "切り替えに失敗しました",
-                auto_strategy_cheapest: "最安",
-                auto_strategy_fastest: "最速",
-                auto_model_any: "自動（モデル指定なし）",
-                auto_mode_active: "自動モード有効",
             },
             "zh-TW" => Self {
                 show_main: "開啟主介面",
@@ -194,10 +179,6 @@ impl TrayTexts {
                 tier_quit_and_switch: "退出並切換",
                 cancel_label: "取消",
                 tier_switch_failed_title: "切換失敗",
-                auto_strategy_cheapest: "價格最低",
-                auto_strategy_fastest: "回應最快",
-                auto_model_any: "自動（不限模型）",
-                auto_mode_active: "自動模式生效中",
             },
             _ => Self {
                 show_main: "打开主界面",
@@ -215,10 +196,6 @@ impl TrayTexts {
                 tier_quit_and_switch: "退出并切换",
                 cancel_label: "取消",
                 tier_switch_failed_title: "切换失败",
-                auto_strategy_cheapest: "价格最低",
-                auto_strategy_fastest: "响应最快",
-                auto_model_any: "自动（不限模型）",
-                auto_mode_active: "自动模式生效中",
             },
         }
     }
@@ -721,66 +698,6 @@ fn handle_auto_click(app: &tauri::AppHandle, app_type: &AppType) -> Result<(), A
     if let Some(app_state) = app.try_state::<AppState>() {
         let app_type_str = app_type.as_str();
 
-        // 强一致语义：Auto 模式开启后立即切到队列 P1（P1→P2→...）
-        // 若队列为空，则尝试把“当前供应商”自动加入队列作为 P1，避免用户陷入无法开启的死锁。
-        let all_providers = app_state.db.get_all_providers(app_type_str)?;
-        let mut queue = app_state
-            .db
-            .get_failover_queue(app_type_str)?
-            .into_iter()
-            .filter(|item| {
-                all_providers
-                    .get(&item.provider_id)
-                    .is_some_and(|provider| {
-                        crate::proxy::provider_router::provider_supports_failover(
-                            app_type_str,
-                            provider,
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        if queue.is_empty() {
-            let current_id =
-                crate::settings::get_effective_current_provider(&app_state.db, app_type)?;
-            let Some(current_id) = current_id else {
-                return Err(AppError::Message(
-                    "故障转移队列为空，且未设置当前供应商，无法启用 Auto 模式".to_string(),
-                ));
-            };
-            let current = app_state
-                .db
-                .get_provider_by_id(&current_id, app_type_str)?
-                .ok_or_else(|| AppError::Message(format!("供应商不存在: {current_id}")))?;
-            if !crate::proxy::provider_router::provider_supports_failover(app_type_str, &current) {
-                return Err(AppError::Message(
-                    "Codex Official 账号卡不支持自动故障转移".to_string(),
-                ));
-            }
-            app_state
-                .db
-                .add_to_failover_queue(app_type_str, &current_id)?;
-            queue = app_state
-                .db
-                .get_failover_queue(app_type_str)?
-                .into_iter()
-                .filter(|item| {
-                    all_providers
-                        .get(&item.provider_id)
-                        .is_some_and(|provider| {
-                            crate::proxy::provider_router::provider_supports_failover(
-                                app_type_str,
-                                provider,
-                            )
-                        })
-                })
-                .collect();
-        }
-
-        let p1_provider_id = queue
-            .first()
-            .map(|item| item.provider_id.clone())
-            .ok_or_else(|| AppError::Message("故障转移队列为空，无法启用 Auto 模式".to_string()))?;
-
         // 真正启用 failover：启动代理服务 + 执行接管 + 开启 auto_failover
         let proxy_service = &app_state.proxy_service;
 
@@ -803,42 +720,12 @@ fn handle_auto_click(app: &tauri::AppHandle, app_type: &AppType) -> Result<(), A
             return Err(AppError::Message(format!("执行接管失败: {e}")));
         }
 
-        // 3) 设置 auto_failover_enabled = true
-        app_state
-            .db
-            .set_proxy_flags_sync(app_type_str, true, true)?;
-
-        // 3.1) 立即切到队列 P1（热切换：不写 Live，仅更新 DB/settings/备份）
-        if let Err(e) = futures::executor::block_on(
-            proxy_service.switch_proxy_target(app_type_str, &p1_provider_id),
-        ) {
-            log::error!("[Tray] Auto 模式切换到队列 P1 失败: {e}");
-            return Err(AppError::Message(format!(
-                "Auto 模式切换到队列 P1 失败: {e}"
-            )));
-        }
-
-        // 4) 更新托盘菜单
-        if let Ok(new_menu) = create_tray_menu(app, app_state.inner()) {
-            if let Some(tray) = app.tray_by_id(TRAY_ID) {
-                let _ = tray.set_menu(Some(new_menu));
-            }
-        }
-
-        // 5) 发射事件到前端
-        let event_data = serde_json::json!({
-            "appType": app_type_str,
-            "proxyEnabled": true,
-            "autoFailoverEnabled": true,
-            "providerId": p1_provider_id
-        });
-        if let Err(e) = app.emit("proxy-flags-changed", event_data.clone()) {
-            log::error!("发射 proxy-flags-changed 事件失败: {e}");
-        }
-        // 发射 provider-switched 事件（保持向后兼容，Auto 切换也算一种切换）
-        if let Err(e) = app.emit(PROVIDER_SWITCHED, event_data) {
-            log::error!("发射 {PROVIDER_SWITCHED} 事件失败: {e}");
-        }
+        futures::executor::block_on(crate::proxy::application_routing::set_failover(
+            &app_state.db,
+            app_type_str,
+            true,
+        ))?;
+        refresh_tray_menu(app);
     }
     Ok(())
 }
@@ -860,12 +747,8 @@ fn handle_provider_click(
     if let Some(app_state) = app.try_state::<AppState>() {
         let app_type_str = app_type.as_str();
 
-        // 获取当前 proxy 状态，保持 enabled 不变，只关闭 auto_failover
-        let (proxy_enabled, _) = app_state.db.get_proxy_flags_sync(app_type_str);
-        app_state
-            .db
-            .set_proxy_flags_sync(app_type_str, proxy_enabled, false)?;
-
+        let (proxy_enabled, auto_failover_enabled) =
+            app_state.db.get_proxy_flags_sync(app_type_str);
         // 切换供应商。需要本地路由的供应商也不在这里自动启动代理，
         // 由用户在页面/设置中手动开启。
         crate::services::ProviderService::switch(app_state.inner(), app_type.clone(), provider_id)?;
@@ -886,7 +769,7 @@ fn handle_provider_click(
         let event_data = serde_json::json!({
             "appType": app_type_str,
             "proxyEnabled": proxy_enabled,
-            "autoFailoverEnabled": false,
+            "autoFailoverEnabled": auto_failover_enabled,
             "providerId": provider_id
         });
         if let Err(e) = app.emit("proxy-flags-changed", event_data.clone()) {
@@ -969,6 +852,11 @@ fn handle_tier_model_click(
         if crate::relay::provision::selected_model(app_type, &provider.settings_config).as_deref()
             == Some(model)
         {
+            crate::proxy::application_routing::set_model(
+                &app_state.db,
+                app_type.as_str(),
+                Some(model),
+            )?;
             return Ok(());
         }
     }
@@ -993,6 +881,11 @@ fn handle_tier_model_click(
                 for warning in &result.warnings {
                     log::warn!("[Tray] 切换档位模型后警告: {warning}");
                 }
+                crate::proxy::application_routing::set_model(
+                    &app_state.db,
+                    app_type.as_str(),
+                    Some(model),
+                )?;
                 return Ok(());
             }
         }
@@ -1125,129 +1018,61 @@ pub fn create_tray_menu(
 
             let mut submenu_builder = SubmenuBuilder::with_id(app, &submenu_id, &submenu_label);
 
-            // M3 自动模式形态：分区收敛为 app→模型 映射，不再列档位。
-            // 开启入口只在设置页（保守形态），这里只对已开启的 app 生效；
-            // 有模型目录的 app（Codex 系）列「自动（不限）+ 模型清单」，
-            // 没有目录的 app 只放一个「自动模式生效中」占位。
-            let auto_mode_on =
-                crate::proxy::auto_strategy::is_auto_mode_enabled(&app_state.db, app_type_str);
-
-            if auto_mode_on {
-                let strategy_label = match crate::proxy::auto_strategy::get_strategy(&app_state.db)
-                {
-                    crate::proxy::auto_strategy::AutoStrategy::Cheapest => {
-                        tray_texts.auto_strategy_cheapest
-                    }
-                    crate::proxy::auto_strategy::AutoStrategy::Fastest => {
-                        tray_texts.auto_strategy_fastest
-                    }
-                };
-                let models = crate::proxy::auto_strategy::auto_mode_models(&providers);
-                let model_pref =
-                    crate::proxy::auto_strategy::get_model_pref(&app_state.db, app_type_str);
-
-                if models.is_empty() {
-                    let label = format!("{} · {}", tray_texts.auto_mode_active, strategy_label);
-                    let item = MenuItem::with_id(
-                        app,
-                        format!("{event_prefix}{AUTO_PREF_NONE}"),
-                        &label,
-                        false,
-                        None::<&str>,
-                    )
-                    .map_err(|e| {
-                        AppError::Message(format!("创建{}自动模式占位失败: {e}", section.label))
-                    })?;
-                    submenu_builder = submenu_builder.item(&item);
+            for (id, provider) in menu_providers {
+                let is_current = current_id == *id;
+                let is_official_blocked = is_app_taken_over
+                    && provider.category.as_deref() == Some("official")
+                    && !crate::services::provider::official_provider_supports_proxy_takeover(
+                        &section.app_type,
+                        provider,
+                    );
+                let label = if is_official_blocked {
+                    format!("{} \u{26D4}", &provider.name) // ⛔ emoji
                 } else {
-                    let any_label = format!("{} · {}", tray_texts.auto_model_any, strategy_label);
-                    let any_item = CheckMenuItem::with_id(
-                        app,
-                        format!("{event_prefix}{AUTO_PREF_NONE}"),
-                        &any_label,
-                        true,
-                        model_pref.is_none(),
-                        None::<&str>,
-                    )
-                    .map_err(|e| {
-                        AppError::Message(format!("创建{}自动项失败: {e}", section.label))
-                    })?;
-                    submenu_builder = submenu_builder.item(&any_item).separator();
+                    provider.name.clone()
+                };
+                let item = CheckMenuItem::with_id(
+                    app,
+                    format!("{event_prefix}{id}"),
+                    &label,
+                    !is_official_blocked, // disabled when blocked
+                    is_current,
+                    None::<&str>,
+                )
+                .map_err(|e| AppError::Message(format!("创建{}菜单项失败: {e}", section.label)))?;
+                submenu_builder = submenu_builder.item(&item);
+            }
 
-                    for model in &models {
-                        let item = CheckMenuItem::with_id(
-                            app,
-                            format!("{event_prefix}{AUTO_MODEL_PREFIX}{model}"),
-                            model,
-                            true,
-                            model_pref.as_deref() == Some(model.as_str()),
-                            None::<&str>,
-                        )
-                        .map_err(|e| {
-                            AppError::Message(format!("创建{}模型菜单项失败: {e}", section.label))
-                        })?;
-                        submenu_builder = submenu_builder.item(&item);
-                    }
-                }
-            } else {
-                for (id, provider) in menu_providers {
-                    let is_current = current_id == *id;
-                    let is_official_blocked = is_app_taken_over
-                        && provider.category.as_deref() == Some("official")
-                        && !crate::services::provider::official_provider_supports_proxy_takeover(
-                            &section.app_type,
-                            provider,
-                        );
-                    let label = if is_official_blocked {
-                        format!("{} \u{26D4}", &provider.name) // ⛔ emoji
-                    } else {
-                        provider.name.clone()
-                    };
+            // 「模型」二级子菜单：只挂在 Codex 分区、且当前档位是托管项且有模型目录时。
+            // 点击走 `handle_tier_model_click` → `switch_tier_model_command`（选模型即
+            // 激活该档位，与主界面模型按钮组同一条路径）。
+            if let Some((current_model, models)) =
+                current_provider.and_then(|p| tier_model_choices(p, &section.app_type))
+            {
+                let mut models_builder = SubmenuBuilder::with_id(
+                    app,
+                    format!("submenu_{app_type_str}_models"),
+                    tray_texts.tier_model_label,
+                );
+                for model in &models {
                     let item = CheckMenuItem::with_id(
                         app,
-                        format!("{event_prefix}{id}"),
-                        &label,
-                        !is_official_blocked, // disabled when blocked
-                        is_current,
+                        format!("{event_prefix}{TIER_MODEL_EVENT_PREFIX}{model}"),
+                        model,
+                        true,
+                        current_model.as_deref() == Some(model.as_str()),
                         None::<&str>,
                     )
                     .map_err(|e| {
-                        AppError::Message(format!("创建{}菜单项失败: {e}", section.label))
+                        AppError::Message(format!("创建{}模型菜单项失败: {e}", section.label))
                     })?;
-                    submenu_builder = submenu_builder.item(&item);
+                    models_builder = models_builder.item(&item);
                 }
-
-                // 「模型」二级子菜单：只挂在 Codex 分区、且当前档位是托管项且有模型目录时。
-                // 点击走 `handle_tier_model_click` → `switch_tier_model_command`（选模型即
-                // 激活该档位，与主界面模型按钮组同一条路径）。
-                if let Some((current_model, models)) =
-                    current_provider.and_then(|p| tier_model_choices(p, &section.app_type))
-                {
-                    let mut models_builder = SubmenuBuilder::with_id(
-                        app,
-                        format!("submenu_{app_type_str}_models"),
-                        tray_texts.tier_model_label,
-                    );
-                    for model in &models {
-                        let item = CheckMenuItem::with_id(
-                            app,
-                            format!("{event_prefix}{TIER_MODEL_EVENT_PREFIX}{model}"),
-                            model,
-                            true,
-                            current_model.as_deref() == Some(model.as_str()),
-                            None::<&str>,
-                        )
-                        .map_err(|e| {
-                            AppError::Message(format!("创建{}模型菜单项失败: {e}", section.label))
-                        })?;
-                        models_builder = models_builder.item(&item);
-                    }
-                    let models_submenu = models_builder.build().map_err(|e| {
-                        AppError::Message(format!("构建{}模型子菜单失败: {e}", section.label))
-                    })?;
-                    submenu_builder = submenu_builder.separator().item(&models_submenu);
-                }
-            } // 自动模式 off：常规档位列表 + 当前档位模型子菜单
+                let models_submenu = models_builder.build().map_err(|e| {
+                    AppError::Message(format!("构建{}模型子菜单失败: {e}", section.label))
+                })?;
+                submenu_builder = submenu_builder.separator().item(&models_submenu);
+            }
 
             let submenu = submenu_builder
                 .build()
@@ -1726,10 +1551,9 @@ mod tests {
         provider
     }
 
-    /// 自动模式分区的模型清单：托管档位目录的并集（去重、保序），
-    /// 非托管供应商的目录（就算有）不掺进来。
+    /// Application model catalogs include every configured provider, deduplicated in order.
     #[test]
-    fn auto_mode_models_unions_managed_tier_catalogs_deduped() {
+    fn auto_mode_models_unions_all_provider_catalogs_deduped() {
         let a = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let b = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
 
@@ -1742,7 +1566,7 @@ mod tests {
             b.clone(),
             codex_tier_provider(&b, "gpt-5.6-nano", &["gpt-5.6-nano", "gpt-5.5"]),
         );
-        // 非托管供应商带目录也不算
+        // Custom providers contribute their model catalogs too.
         providers.insert(
             "vendor-1".to_string(),
             codex_tier_provider("vendor-1", "", &["vendor-only-model"]),
@@ -1754,7 +1578,8 @@ mod tests {
             vec![
                 "gpt-5.6-sol".to_string(),
                 "gpt-5.6-nano".to_string(),
-                "gpt-5.5".to_string()
+                "gpt-5.5".to_string(),
+                "vendor-only-model".to_string()
             ]
         );
     }

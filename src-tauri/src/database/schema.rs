@@ -278,6 +278,8 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        crate::database::dao::provider_attempts::create_schema(conn)?;
+
         // 11. Model Pricing 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_pricing (

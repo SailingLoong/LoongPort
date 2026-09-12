@@ -12,6 +12,9 @@ import type {
   TierInfo,
 } from "@/lib/api/relay";
 
+import type { ProxyTakeoverStatus } from "@/types/proxy";
+import { proxyKeys } from "@/lib/query/proxy";
+
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 // 对账弹窗的数据链路是 `useReconciliationQuery → relayApi → invoke`，在 invoke
@@ -62,19 +65,23 @@ const flagsReport: ReconciliationReport = {
   ],
 };
 
-function stubInvoke(report: ReconciliationReport, easyModeEnabled = true) {
+function stubInvoke(
+  report: ReconciliationReport,
+  takeover: Partial<ProxyTakeoverStatus> = { codex: true },
+) {
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === "relay_reconciliation") return report;
-    // RelayRow 的对账资格要读省心模式状态（useEasyModeApps → 4 个 app）。
-    if (cmd === "get_auto_mode_status")
+    if (cmd === "get_proxy_takeover_status")
       return {
-        enabled: easyModeEnabled,
-        strategy: "cheapest",
-        model: null,
-        availableModels: [],
-        hasCandidates: true,
-        cliInstalled: true,
-      };
+        claude: false,
+        codex: false,
+        gemini: false,
+        grokbuild: false,
+        opencode: false,
+        openclaw: false,
+        hermes: false,
+        ...takeover,
+      } satisfies ProxyTakeoverStatus;
     throw new Error(`command not stubbed in this test: ${cmd}`);
   });
 }
@@ -246,7 +253,7 @@ describe("ReconcileDialog", () => {
     await waitFor(() => expect(reportCalls().length).toBeGreaterThanOrEqual(2));
   });
 
-  it("exposes the entry on RelayRow and opens the dialog from there", async () => {
+  it("opens reconciliation for an account with a tier in a taken-over app", async () => {
     stubInvoke(flagsReport);
     const relay = relayWithCodexTier();
     render(
@@ -276,7 +283,7 @@ describe("ReconcileDialog", () => {
       </QueryClientProvider>,
     );
 
-    // 入口在行上（hover 操作区）；省心模式状态异步回来后才具备资格，先等它。
+    // Wait for the actual takeover query before opening reconciliation.
     const entry = await screen.findByRole("button", {
       name: "loongport.reconcile.entry",
     });
@@ -291,45 +298,63 @@ describe("ReconcileDialog", () => {
     );
   });
 
-  it("hides the entry on RelayRow when Easy Mode is off (no attributed traffic to reconcile)", async () => {
-    // 省心模式全关：估算没有原料（带档位归因的本地路由流量），入口不出现。
-    stubInvoke(flagsReport, false);
-    render(
-      <QueryClientProvider client={createTestQueryClient()}>
-        <TierVerificationProvider appId="codex" providerIds={[]}>
-          <RelayRow
-            relay={relayWithCodexTier()}
-            open
-            onOpenChange={vi.fn()}
-            busy={new Set()}
-            onLogin={vi.fn()}
-            onProvision={vi.fn()}
-            onSiteConfigApplied={vi.fn()}
-            onSwitchTier={vi.fn()}
-            onSelectTierModel={vi.fn()}
-            onPurchase={vi.fn()}
-            onOpenUsage={undefined}
-            onCheckTier={vi.fn()}
-            isCheckingTier={() => false}
-            onResetTier={vi.fn()}
-            onEditTier={vi.fn()}
-            onDelete={vi.fn()}
-          />
-        </TierVerificationProvider>
-      </QueryClientProvider>,
-    );
-
-    // 省心模式状态先回来，入口资格才会判定；稳态后入口应当不存在。
-    await waitFor(() => {
-      const calls = invoke.mock.calls.filter(
-        ([cmd]) => cmd === "get_auto_mode_status",
+  it.each([
+    {
+      name: "no apps are taken over",
+      takeover: { codex: false },
+      canQueryBalance: true,
+    },
+    {
+      name: "only an unrelated app is taken over",
+      takeover: { claude: true, codex: false },
+      canQueryBalance: true,
+    },
+    {
+      name: "the account cannot query balance",
+      takeover: { codex: true },
+      canQueryBalance: false,
+    },
+  ])(
+    "hides reconciliation when $name",
+    async ({ takeover, canQueryBalance }) => {
+      stubInvoke(flagsReport, takeover);
+      const client = createTestQueryClient();
+      render(
+        <QueryClientProvider client={client}>
+          <TierVerificationProvider appId="codex" providerIds={[]}>
+            <RelayRow
+              relay={{ ...relayWithCodexTier(), canQueryBalance }}
+              open
+              onOpenChange={vi.fn()}
+              busy={new Set()}
+              onLogin={vi.fn()}
+              onProvision={vi.fn()}
+              onSiteConfigApplied={vi.fn()}
+              onSwitchTier={vi.fn()}
+              onSelectTierModel={vi.fn()}
+              onPurchase={vi.fn()}
+              onOpenUsage={undefined}
+              onCheckTier={vi.fn()}
+              isCheckingTier={() => false}
+              onResetTier={vi.fn()}
+              onEditTier={vi.fn()}
+              onDelete={vi.fn()}
+            />
+          </TierVerificationProvider>
+        </QueryClientProvider>,
       );
-      expect(calls.length).toBeGreaterThanOrEqual(4);
-    });
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("button", { name: "loongport.reconcile.entry" }),
-      ).toBeNull(),
-    );
-  });
+
+      // Wait until the query has committed its response, not just started a request.
+      await waitFor(() =>
+        expect(client.getQueryState(proxyKeys.takeoverStatus)?.status).toBe(
+          "success",
+        ),
+      );
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "loongport.reconcile.entry" }),
+        ).toBeNull(),
+      );
+    },
+  );
 });

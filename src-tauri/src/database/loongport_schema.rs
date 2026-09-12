@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 22;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 23;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -334,6 +334,10 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                     })?;
                 }
                 set_version(conn, 22)?;
+            }
+            22 => {
+                crate::database::dao::provider_attempts::create_schema(conn)?;
+                set_version(conn, 23)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -921,6 +925,30 @@ mod tests {
 
     fn mem() -> Connection {
         Connection::open_in_memory().expect("内存库")
+    }
+
+    #[test]
+    fn v22_adds_empty_attempt_history_without_rewriting_request_totals() {
+        let conn = mem();
+        ensure_version_table(&conn).unwrap();
+        set_version(&conn, 22).unwrap();
+        conn.execute_batch("CREATE TABLE proxy_request_logs (status_code INTEGER); INSERT INTO proxy_request_logs VALUES (200), (500);").unwrap();
+        apply(&conn).unwrap();
+        apply(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
+        let attempts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM provider_attempt_outcomes", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let requests: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            attempts, 0,
+            "request totals cannot recover intermediate attempts"
+        );
+        assert_eq!(requests, 2);
     }
 
     fn migrated_database_at_version(version: i32) -> Connection {

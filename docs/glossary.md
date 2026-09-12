@@ -35,7 +35,9 @@ tier / group / plan / provider 四个词交替指称。本表是这些术语的*
 | 实测 / 众测 crowd        | 用户共享的匿名实测指标                                                          | `crowd/`、metrics Worker                                                                          | 实测        |                                                            |
 | 验真 verification        | 模型真伪探查（手动主动探针 + 被动异常上报）                                     | `relay/model_verification/`                                                                       | 验真        | 与熔断区分：验真管「真不真」，熔断管「还能不能用」         |
 | 熔断 breaker             | 账号 / 站点级故障隔离与恢复                                                     | `CircuitBreaker`                                                                                  | —           |                                                            |
-| 省心模式 easy mode       | 自动选路模式（与自主模式相对）                                                  | `auto_mode`                                                                                       | 省心        |                                                            |
+| 应用档位 application tier | 应用页可直接选择的一条接入配置，统一展示中转站档位、官方 API 套餐和自定义配置 | `ApplicationRoutingTier`、`ApplicationConfiguration` | 档位 | 跨域展示单位；各账号域仍保留 tier / plan 命名 |
+| 优先级 priority | 用户保存的档位顺序，数字越小越优先；排序不改变当前选择 | `application_routing`、`application_priority_<app>` | 优先级 | 自动故障切换从当前档位向下尝试，不自动切回 |
+| 自动故障切换 automatic failover | 允许请求失败后按优先级尝试后续可用档位 | `application_routing`、`auto_failover_enabled` | 自动故障切换 | 不影响手动选择当前档位；账号维护在服务器与账号页 |
 | 生图栏 codex-image       | 纯生图档位所在的独立页签                                                        | `AppType::CodexImage`                                                                             | 生图        | 生图模型家族唯一源 `IMAGE_MODEL_FAMILIES`                  |
 | 登录态 session           | 浏览器拿到的会话凭据及其寿命                                                    | refresh 链、`token_expires_at`                                                                    | 登录态      | 与凭据（credentials / sk）区分：登录态换 token，凭据是 key |
 

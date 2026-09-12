@@ -16,8 +16,18 @@ use tokio::sync::RwLock;
 /// header. Reusing that request against another account card would cross the
 /// account boundary, so these cards must never participate in provider retry.
 pub(crate) fn provider_supports_failover(app_type: &str, provider: &Provider) -> bool {
-    app_type != AppType::Codex.as_str()
-        || !crate::proxy::providers::is_codex_official_provider(provider)
+    provider_supports_proxy_routing(app_type, provider)
+        && (app_type != AppType::Codex.as_str()
+            || !crate::proxy::providers::is_codex_official_provider(provider))
+}
+
+pub(crate) fn provider_supports_proxy_routing(app_type: &str, provider: &Provider) -> bool {
+    let Ok(app) = AppType::from_str(app_type) else {
+        return false;
+    };
+    app.supports_local_proxy()
+        && (provider.category.as_deref() != Some("official")
+            || crate::services::provider::official_provider_supports_proxy_takeover(&app, provider))
 }
 
 /// 账号级熔断键：与档位键（`app_type:provider_id`）同表不同命名空间，
@@ -48,153 +58,55 @@ impl ProviderRouter {
         }
     }
 
-    /// 选择可用的供应商（支持故障转移）
-    ///
-    /// 返回按优先级排序的可用供应商列表，优先级从高到低：
-    /// - 自动模式开启时：托管档位按策略排序（Cheapest/Fastest，会话亲和置顶当前档位）
-    /// - 故障转移开启时：仅使用故障转移队列，按队列顺序依次尝试（P1 → P2 → ...）
-    /// - 两者都关闭时：仅返回当前供应商
+    pub fn record_attempt(&self, app_type: &str, provider_id: &str, success: bool) {
+        if let Err(error) = self
+            .db
+            .record_provider_attempt(app_type, provider_id, success)
+        {
+            log::warn!("Could not record provider attempt outcome: {error}");
+        }
+    }
+
+    pub fn preferred_model(&self, app_type: &str, provider: &Provider) -> Option<String> {
+        super::application_routing::model_for_provider(&self.db, app_type, provider)
+    }
+
+    /// Keep explicit selection first, then try only later persistent priorities.
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
+        use super::application_routing;
+        let ordered = application_routing::ordered_providers(&self.db, app_type)?;
+        let current_id = application_routing::current_provider_id(&self.db, app_type);
+        let current = ordered
+            .iter()
+            .find(|p| Some(p.id.as_str()) == current_id.as_deref());
+        let enabled = self
+            .db
+            .get_proxy_config_for_app(app_type)
+            .await?
+            .auto_failover_enabled;
         let mut result = Vec::new();
-        let mut total_providers = 0usize;
-        let mut circuit_open_count = 0usize;
-        let current_id = AppType::from_str(app_type)
-            .ok()
-            .and_then(|app_enum| {
-                crate::settings::get_effective_current_provider(&self.db, &app_enum)
-                    .ok()
-                    .flatten()
-            })
-            .or_else(|| self.db.get_current_provider(app_type).ok().flatten());
-        let current_provider = current_id
-            .as_deref()
-            .map(|id| self.db.get_provider_by_id(id, app_type))
-            .transpose()?
-            .flatten();
-
-        // 自动模式（LoongPort）：托管档位按策略排序，优先于故障转移队列 ——
-        // 同时开着两个时以自动模式为准（用户把选择权交给了系统，队列不再有意义）。
-        // 没有托管档位时回落到下面的常规选路，别让请求直接失败。
-        let auto_mode_candidates =
-            if crate::proxy::auto_strategy::is_auto_mode_enabled(&self.db, app_type) {
-                match self.collect_auto_mode_candidates(app_type).await? {
-                    Some(candidates) => {
-                        total_providers = candidates.len();
-                        Some(candidates)
-                    }
-                    None => {
-                        log::warn!("[{app_type}] 自动模式开启但没有托管档位，回退到常规选路");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-        if let Some(candidates) = auto_mode_candidates {
-            self.filter_by_circuit_breaker(
-                app_type,
-                candidates,
-                &mut result,
-                &mut circuit_open_count,
-            )
-            .await;
-        } else {
-            // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
-            let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
-                Ok(config) => config.auto_failover_enabled,
-                Err(e) => {
-                    log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
-                    false
-                }
-            };
-
-            if auto_failover_enabled
-                && current_provider
-                    .as_ref()
-                    .is_some_and(|provider| !provider_supports_failover(app_type, provider))
+        if let Some(current) = current.filter(|p| provider_supports_proxy_routing(app_type, p)) {
+            result.push(current.clone());
+            if !enabled || !provider_supports_failover(app_type, current) {
+                return Ok(result);
+            }
+        } else if !enabled {
+            return Err(AppError::NoProvidersConfigured);
+        }
+        let start = current
+            .and_then(|p| ordered.iter().position(|entry| entry.id == p.id))
+            .map_or(0, |index| index + 1);
+        for provider in ordered.into_iter().skip(start) {
+            if application_routing::fallback_exclusion(&self.db, app_type, &provider).is_none()
+                && self.tier_and_account_available(app_type, &provider).await
             {
-                // A selected Codex Official account is an explicit account choice.
-                // Keep it as a single route even if an old failover setting remains
-                // enabled; retrying would reuse its inbound token for another card.
-                total_providers = 1;
-                result.push(current_provider.expect("checked above"));
-            } else if auto_failover_enabled {
-                // 故障转移开启：仅按队列顺序依次尝试（P1 → P2 → ...）
-                let all_providers = self.db.get_all_providers(app_type)?;
-
-                // 使用 DAO 返回的排序结果，确保和前端展示一致
-                let ordered_ids: Vec<String> = self
-                    .db
-                    .get_failover_queue(app_type)?
-                    .into_iter()
-                    .map(|item| item.provider_id)
-                    .collect();
-
-                for provider_id in ordered_ids {
-                    let Some(provider) = all_providers.get(&provider_id).cloned() else {
-                        continue;
-                    };
-                    if !provider_supports_failover(app_type, &provider) {
-                        continue;
-                    }
-                    total_providers += 1;
-
-                    if self.tier_and_account_available(app_type, &provider).await {
-                        result.push(provider);
-                    } else {
-                        circuit_open_count += 1;
-                    }
-                }
-            } else {
-                // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
-                if let Some(current) = current_provider {
-                    total_providers = 1;
-                    result.push(current);
-                }
-            }
-        }
-
-        if result.is_empty() {
-            if total_providers > 0 && circuit_open_count == total_providers {
-                log::warn!("[{app_type}] [FO-004] 所有供应商均已熔断");
-                return Err(AppError::AllProvidersCircuitOpen);
-            } else {
-                log::warn!("[{app_type}] [FO-005] 未配置供应商");
-                return Err(AppError::NoProvidersConfigured);
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// 自动模式候选：委托给 `auto_strategy::rank_managed_tier_candidates`
-    /// （选路与「开启即切最优」命令共用同一份实现，唯源）。
-    async fn collect_auto_mode_candidates(
-        &self,
-        app_type: &str,
-    ) -> Result<Option<Vec<Provider>>, AppError> {
-        crate::proxy::auto_strategy::rank_managed_tier_candidates(&self.db, app_type, true)
-    }
-
-    /// 按熔断器可用性过滤候选，累计放行结果与熔断计数。
-    ///
-    /// 档位熔断与账号级熔断都可用才放行：致命错误（凭证/余额）按账号升级
-    /// 后，同账号其他分组即使自身熔断器是 Closed 也进不了候选。
-    async fn filter_by_circuit_breaker(
-        &self,
-        app_type: &str,
-        candidates: Vec<Provider>,
-        result: &mut Vec<Provider>,
-        circuit_open_count: &mut usize,
-    ) {
-        for provider in candidates {
-            if self.tier_and_account_available(app_type, &provider).await {
                 result.push(provider);
-            } else {
-                *circuit_open_count += 1;
             }
         }
+        if result.is_empty() {
+            return Err(AppError::NoProvidersConfigured);
+        }
+        Ok(result)
     }
 
     /// 档位与其所属账号的熔断器是否都可用（选路阶段判断，不占探测名额）。
@@ -304,7 +216,7 @@ impl ProviderRouter {
     ///
     /// 致命 ⇒ 账号级升级：凭证与余额是账号级事实，同站同账号的其他分组
     /// 必然同样 401/402 —— 账号熔断打开后，整个账号的档位在选路阶段被
-    /// 排除（[`Self::filter_by_circuit_breaker`]），不再逐组撞墙。
+    /// 排除（[`Self::select_providers`]），不再逐组撞墙。
     pub async fn record_fatal_result(
         &self,
         provider_id: &str,
@@ -372,9 +284,17 @@ impl ProviderRouter {
         let mut result = HashMap::new();
         for provider in providers {
             let circuit_key = format!("{app_type}:{}", provider.id);
-            let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
-            let mut snapshot = breaker.snapshot().await;
-            if snapshot.is_none() {
+            let breaker = self
+                .circuit_breakers
+                .read()
+                .await
+                .get(&circuit_key)
+                .cloned();
+            let mut snapshot = match breaker {
+                Some(breaker) => breaker.snapshot().await,
+                None => None,
+            };
+            {
                 if let Some(account_key) = account_circuit_key(app_type, provider) {
                     // 只读既有条目：账号从未熔断过就不为看板凭空建熔断器
                     let account_breaker = {
@@ -382,7 +302,14 @@ impl ProviderRouter {
                         breakers.get(&account_key).cloned()
                     };
                     if let Some(account_breaker) = account_breaker {
-                        snapshot = account_breaker.snapshot().await;
+                        let account_snapshot = account_breaker.snapshot().await;
+                        if snapshot.is_none()
+                            || account_snapshot.as_ref().is_some_and(|state| {
+                                state.reopen_in_secs.is_some_and(|secs| secs > 0)
+                            })
+                        {
+                            snapshot = account_snapshot;
+                        }
                     }
                 }
             }
@@ -588,6 +515,248 @@ mod tests {
     /// breaker_states：致命失败打开的熔断器带长冷却快照；Closed/未记录的不进 map。
     #[tokio::test]
     #[serial]
+    async fn application_routing_migrates_once_and_toggle_preserves_selection() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        for id in ["a", "b", "c"] {
+            db.save_provider(
+                "claude",
+                &Provider::with_id(id.into(), id.into(), json!({}), None),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("claude", "b").unwrap();
+        super::super::auto_strategy::set_manual_order(&db, "claude", &["c".into(), "b".into()])
+            .unwrap();
+        super::super::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+        db.add_to_failover_queue("claude", "a").unwrap();
+        let _state = crate::store::AppState::new(db.clone());
+        assert!(super::super::application_routing::failover_enabled(&db, "claude").unwrap());
+        assert!(db.get_failover_queue("claude").unwrap().is_empty());
+        assert!(!super::super::auto_strategy::is_auto_mode_enabled(
+            &db, "claude"
+        ));
+        let ids = || {
+            super::super::application_routing::ordered_providers(&db, "claude")
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(), vec!["c", "b", "a"]);
+        super::super::application_routing::set_failover(&db, "claude", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_current_provider("claude").unwrap().as_deref(),
+            Some("b")
+        );
+        assert!(
+            super::super::application_routing::set_failover(&db, "claude", true)
+                .await
+                .is_err()
+        );
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        super::super::application_routing::set_failover(&db, "claude", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_current_provider("claude").unwrap().as_deref(),
+            Some("b")
+        );
+        super::super::application_routing::migrate(&db, "claude").unwrap();
+        assert_eq!(ids(), vec!["c", "b", "a"]);
+        let before = db.conn.lock().unwrap().total_changes();
+        assert!(super::super::application_routing::set_order(
+            &db,
+            "claude",
+            &["a".into(), "a".into()]
+        )
+        .is_err());
+        assert!(
+            super::super::application_routing::set_order(&db, "claude", &["missing".into()])
+                .is_err()
+        );
+        assert_eq!(db.conn.lock().unwrap().total_changes(), before);
+        assert_eq!(ids(), vec!["c", "b", "a"]);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn application_routing_manual_selection_ignores_model_and_breaker() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        for id in ["a", "b", "c"] {
+            db.save_provider(
+                "claude",
+                &Provider::with_id(
+                    id.into(),
+                    id.into(),
+                    json!({"env": {"ANTHROPIC_MODEL": "actual-model"}}),
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("claude", "b").unwrap();
+        super::super::auto_strategy::set_model_pref(&db, "claude", Some("selected-model")).unwrap();
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        let router = ProviderRouter::new(db.clone());
+        router
+            .record_fatal_result("b", "claude", false, Some("401".into()))
+            .await
+            .unwrap();
+        let providers = router.select_providers("claude").await.unwrap();
+        assert_eq!(
+            providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
+        assert!(
+            super::super::application_routing::set_model(&db, "claude", Some("other-model"))
+                .is_err()
+        );
+        assert_eq!(
+            super::super::auto_strategy::get_model_pref(&db, "claude").as_deref(),
+            Some("selected-model")
+        );
+        assert_eq!(
+            db.get_current_provider("claude").unwrap().as_deref(),
+            Some("b")
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[tokio::test]
+    #[serial]
+    async fn application_routing_getter_is_pure_and_shows_all_apps_and_errors() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = crate::store::AppState::new(db.clone());
+        for app in ["claude", "pi"] {
+            for id in ["a", "b"] {
+                db.save_provider(
+                    app,
+                    &Provider::with_id(id.into(), id.into(), json!({}), None),
+                )
+                .unwrap();
+            }
+            db.set_current_provider(app, "b").unwrap();
+            db.update_provider_health_with_threshold(
+                "a",
+                app,
+                false,
+                Some("upstream failure".into()),
+                5,
+            )
+            .await
+            .unwrap();
+            let before = db.conn.lock().unwrap().total_changes();
+            let board = crate::commands::application_routing_impl(&state, app)
+                .await
+                .unwrap();
+            assert_eq!(
+                db.conn.lock().unwrap().total_changes(),
+                before,
+                "view read must not mutate the database"
+            );
+            assert_eq!(board.tiers.len(), 2);
+            assert_eq!(
+                board.tiers[0].skip_reason, None,
+                "recorded error is not a routing exclusion"
+            );
+            assert_eq!(board.tiers[0].error_rate, None);
+            assert!(
+                board.model_options.is_empty(),
+                "native mode must not expose proxy-only model controls"
+            );
+            assert_eq!(
+                board.tiers[0].tier.last_error.as_deref(),
+                Some("upstream failure")
+            );
+            assert!(board.tiers[1].tier.is_current);
+            for (request, status, age) in
+                [("ok", 200, 30), ("fail", 500, 60), ("old", 500, 8 * 86400)]
+            {
+                db.conn.lock().unwrap().execute(
+                    "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model, latency_ms, status_code, created_at) VALUES (?1, 'a', ?2, 'model', 10, ?3, ?4)",
+                    rusqlite::params![format!("{app}-{request}"), app, status, chrono::Utc::now().timestamp() - age],
+                ).unwrap();
+            }
+            let with_usage = crate::commands::application_routing_impl(&state, app)
+                .await
+                .unwrap();
+            assert_eq!(
+                with_usage.tiers[0].error_rate, None,
+                "request history cannot backfill missing attempt outcomes"
+            );
+            assert_eq!(with_usage.tiers[1].error_rate, None);
+            super::super::application_routing::set_order(&db, app, &["b".into(), "a".into()])
+                .unwrap();
+            let board = crate::commands::application_routing_impl(&state, app)
+                .await
+                .unwrap();
+            assert_eq!(board.tiers[0].tier.provider_id, "b");
+            if app == "claude" {
+                let mut selected = db.get_provider_by_id("b", app).unwrap().unwrap();
+                selected.settings_config = json!({
+                    "env": {"ANTHROPIC_MODEL": "native-model"},
+                    "modelCatalog": {"models": [{"model": "preferred-model"}]}
+                });
+                db.save_provider(app, &selected).unwrap();
+                super::super::auto_strategy::set_model_pref(&db, app, Some("preferred-model"))
+                    .unwrap();
+                let dormant = crate::commands::application_routing_impl(&state, app)
+                    .await
+                    .unwrap();
+                assert!(!dormant.routing_active);
+                assert!(dormant.model_options.is_empty());
+                assert_eq!(
+                    dormant.tiers[0].tier.effective_model.as_deref(),
+                    Some("native-model")
+                );
+            }
+            if app == "pi" {
+                assert!(!board.auto_failover_enabled);
+                assert!(board.tiers.iter().all(|tier| !tier.can_failover));
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn application_routing_honors_current_and_only_later_priorities() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        for (index, id) in ["a", "b", "c"].iter().enumerate() {
+            let mut provider = Provider::with_id(id.to_string(), id.to_string(), json!({}), None);
+            provider.sort_index = Some(index);
+            db.save_provider("claude", &provider).unwrap();
+            db.add_to_failover_queue("claude", id).unwrap();
+        }
+        db.set_current_provider("claude", "b").unwrap();
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        let router = ProviderRouter::new(db.clone());
+        let selected = router.select_providers("claude").await.unwrap();
+        assert_eq!(
+            selected.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+        db.set_current_provider("claude", "c").unwrap();
+        let selected = router.select_providers("claude").await.unwrap();
+        assert_eq!(
+            selected.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["c"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn breaker_states_report_open_only_for_unhealthy_breakers() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
@@ -650,7 +819,9 @@ mod tests {
         for provider in [&a1, &a2, &b] {
             db.save_provider("claude", provider).unwrap();
         }
-        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
 
         let router = ProviderRouter::new(db.clone());
         assert_eq!(
@@ -692,7 +863,9 @@ mod tests {
         for provider in [&a1, &a2] {
             db.save_provider("claude", provider).unwrap();
         }
-        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
 
         let router = ProviderRouter::new(db.clone());
         router
@@ -780,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_failover_enabled_uses_queue_order_ignoring_current() {
+    async fn test_failover_enabled_honors_current_after_earlier_priority() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 
@@ -807,15 +980,13 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
         let providers = router.select_providers("claude").await.unwrap();
 
-        assert_eq!(providers.len(), 2);
-        // 故障转移开启时：仅按队列顺序选择（忽略当前供应商）
-        assert_eq!(providers[0].id, "b");
-        assert_eq!(providers[1].id, "a");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "a");
     }
 
     #[tokio::test]
     #[serial]
-    async fn test_failover_enabled_uses_queue_only_even_if_current_not_in_queue() {
+    async fn test_failover_enabled_honors_current_outside_legacy_queue() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 
@@ -840,7 +1011,7 @@ mod tests {
         let providers = router.select_providers("claude").await.unwrap();
 
         assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].id, "b");
+        assert_eq!(providers[0].id, "a");
     }
 
     /// 队列里的托管档位必须能被选路（自动模式选路的地基）。
@@ -920,14 +1091,21 @@ mod tests {
         .unwrap();
         db.add_to_failover_queue("claude", "vendor-1").unwrap();
 
-        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
 
         let router = ProviderRouter::new(db.clone());
         let providers = router.select_providers("claude").await.unwrap();
 
-        assert_eq!(providers.len(), 2, "只有托管档位进候选");
-        assert_eq!(providers[0].id, cheap, "cheapest 策略下倍率低者第一");
-        assert_eq!(providers[1].id, expensive);
+        assert_eq!(
+            providers.len(),
+            3,
+            "all providers participate regardless of account origin"
+        );
+        assert!(providers.iter().any(|p| p.id == cheap));
+        assert!(providers.iter().any(|p| p.id == expensive));
+        assert!(providers.iter().any(|p| p.id == "vendor-1"));
     }
 
     /// 自动模式开启但没有托管档位：回退常规选路（故障转移队列），
@@ -954,7 +1132,9 @@ mod tests {
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
-        crate::proxy::auto_strategy::set_enabled(&db, "claude", true).unwrap();
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
 
         let router = ProviderRouter::new(db.clone());
         let providers = router.select_providers("claude").await.unwrap();
@@ -984,6 +1164,23 @@ mod tests {
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
+        let state = crate::store::AppState::new(db.clone());
+        let board = crate::commands::application_routing_impl(&state, "codex")
+            .await
+            .unwrap();
+        let relay_row = board
+            .tiers
+            .iter()
+            .find(|p| p.tier.provider_id == fallback.id)
+            .unwrap();
+        assert!(
+            relay_row.can_failover,
+            "current account does not change relay capability"
+        );
+        assert_eq!(
+            relay_row.skip_reason.as_deref(),
+            Some("current_official_account")
+        );
         let providers = ProviderRouter::new(db)
             .select_providers("codex")
             .await
@@ -1030,7 +1227,7 @@ mod tests {
                 .iter()
                 .map(|provider| provider.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fallback"]
+            vec!["third-party"]
         );
     }
 

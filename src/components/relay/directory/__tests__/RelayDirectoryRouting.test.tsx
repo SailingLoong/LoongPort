@@ -86,7 +86,7 @@ describe("relay directory routing", () => {
       fireEvent.click(screen.getByText("directory-back"));
       expect(
         await screen.findByRole("button", {
-          name: "applications.switchService",
+          name: "applications.addService",
         }),
       ).toBeInTheDocument();
     },
@@ -95,9 +95,6 @@ describe("relay directory routing", () => {
   it("opens the overview add-service entry on the relay directory", async () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "codex");
     renderApp();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "applications.switchService" }),
-    );
     fireEvent.click(
       await screen.findByRole("button", { name: "applications.addService" }),
     );

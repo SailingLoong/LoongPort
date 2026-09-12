@@ -45,6 +45,7 @@ impl FailoverSwitchManager {
         app_type: &str,
         provider_id: &str,
         provider_name: &str,
+        expected_current: &str,
     ) -> Result<bool, AppError> {
         let switch_key = format!("{app_type}:{provider_id}");
 
@@ -60,7 +61,13 @@ impl FailoverSwitchManager {
 
         // 执行切换（确保最后清理 pending 标记）
         let result = self
-            .do_switch(app_handle, app_type, provider_id, provider_name)
+            .do_switch(
+                app_handle,
+                app_type,
+                provider_id,
+                provider_name,
+                expected_current,
+            )
             .await;
 
         // 清理 pending 标记
@@ -78,11 +85,12 @@ impl FailoverSwitchManager {
         app_type: &str,
         provider_id: &str,
         provider_name: &str,
+        expected_current: &str,
     ) -> Result<bool, AppError> {
         // 检查该应用是否已被代理接管（enabled=true）
         // 只有被接管的应用才允许执行故障转移切换
         let app_enabled = match self.db.get_proxy_config_for_app(app_type).await {
-            Ok(config) => config.enabled,
+            Ok(config) => config.enabled && config.auto_failover_enabled,
             Err(e) => {
                 log::warn!("[FO-002] 无法读取 {app_type} 配置: {e}，跳过切换");
                 return Ok(false);
@@ -100,12 +108,36 @@ impl FailoverSwitchManager {
 
         if let Some(app) = app_handle {
             if let Some(app_state) = app.try_state::<crate::store::AppState>() {
+                let guard = app_state.proxy_service.lock_switch_for_app(app_type).await;
+                // A completed request must not overwrite a newer explicit selection or
+                // move back to a priority that another request has already passed.
+                let current = super::application_routing::current_provider_id(&self.db, app_type);
+                if current.as_deref().unwrap_or_default() != expected_current {
+                    return Ok(false);
+                }
+                let order = super::application_routing::ordered_providers(&self.db, app_type)?;
+                let target_index = order.iter().position(|p| p.id == provider_id);
+                let current_index = order
+                    .iter()
+                    .position(|p| Some(p.id.as_str()) == current.as_deref());
+                if target_index.is_none()
+                    || current_index
+                        .zip(target_index)
+                        .is_some_and(|(from, to)| to <= from)
+                {
+                    return Ok(false);
+                }
+
+                if !super::application_routing::failover_enabled(&self.db, app_type)? {
+                    return Ok(false);
+                }
                 switched = app_state
                     .proxy_service
-                    .hot_switch_provider(app_type, provider_id)
+                    .hot_switch_provider_inner(app_type, provider_id)
                     .await
                     .map_err(AppError::Message)?
                     .logical_target_changed;
+                drop(guard);
 
                 if !switched {
                     return Ok(false);

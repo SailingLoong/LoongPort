@@ -1,5 +1,5 @@
 /**
- * 省心视图的模型选择器：可输入过滤的 Combobox（形状抄 ProfileSwitcher
+ * 应用页的模型选择器：可输入过滤的 Combobox（形状抄 ProfileSwitcher
  * 的 Command-in-Popover）。每行除了模型名，还带「N 档 · 最低 $X.XX/M」
  * ——覆盖度与决策成本两个数，都由看板后端算好（唯源）。
  */
@@ -25,7 +25,7 @@ import { cn } from "@/lib/utils";
 import { fmtUsd } from "@/components/usage/format";
 import type { TierBoardModelOption } from "@/lib/api/autoMode";
 
-/** Select 不能用空串当 value 的哨兵（与 EasyBoard 同一个约定）。 */
+/** Select 不能用空串当 value 的哨兵。 */
 export const MODEL_ANY = "__any__";
 
 export function ModelPicker({
