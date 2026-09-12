@@ -73,7 +73,10 @@ pub(crate) fn is_confirmed_text_only_model(model: &str) -> bool {
         "ark-code-latest",
         "deepseek-chat",
         "deepseek-reasoner",
-        "deepseek-v4-flash",
+        // `deepseek-v4-flash` is intentionally absent: it is a legacy alias the
+        // vendor still accepts and routes to the vision-capable `deepseek-flash`
+        // (api-docs.deepseek.com/guides/vision), so it must fail open. Pro stays
+        // confirmed text-only per the vendor's own catalog.
         "deepseek-v4-pro",
         "glm-5.1",
         // Exact rather than prefix matching: GLM visual models use a `v`
@@ -216,6 +219,8 @@ mod tests {
     #[test]
     fn confirmed_text_only_registry_normalizes_namespaces_and_context_markers() {
         assert!(is_confirmed_text_only_model("deepseek/deepseek-v4-pro"));
+        // v4-flash 是官方仍接受的视觉别名，必须放行（fail open），不得回注册表。
+        assert!(!is_confirmed_text_only_model("deepseek/deepseek-v4-flash"));
         assert!(is_confirmed_text_only_model("GLM-5.2[1M]"));
         assert!(is_confirmed_text_only_model("qwen/qwen3-coder-plus"));
         assert!(is_confirmed_text_only_model(

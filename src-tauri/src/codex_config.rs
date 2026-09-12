@@ -6359,7 +6359,7 @@ wire_api = "responses"
         let settings = json!({
             "modelCatalog": {
                 "models": [
-                    { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash" },
+                    { "model": "deepseek-flash", "displayName": "DeepSeek Flash" },
                     { "model": "deepseek-v4-pro", "contextWindow": 500_000 }
                 ]
             }
@@ -6376,7 +6376,7 @@ wire_api = "responses"
         let flash = &catalog["models"][0];
         assert_eq!(
             flash.get("slug").and_then(|v| v.as_str()),
-            Some("deepseek-v4-flash")
+            Some("deepseek-flash")
         );
         assert_eq!(
             flash.get("apply_patch_tool_type").and_then(|v| v.as_str()),
@@ -6397,7 +6397,9 @@ wire_api = "responses"
             .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
             .collect();
         assert_eq!(efforts, vec!["low", "high", "max"]);
-        assert_eq!(flash.get("supports_search_tool"), Some(&json!(true)));
+        // DeepSeek 不支持 tool_search；置 true 会让 Codex 把 MCP 工具都藏到
+        // tool search 后面一个也调不出来（#6647），镜像官方目录时保持 false。
+        assert_eq!(flash.get("supports_search_tool"), Some(&json!(false)));
         assert_eq!(
             flash.get("web_search_tool_type").and_then(|v| v.as_str()),
             Some("text")
@@ -6406,7 +6408,12 @@ wire_api = "responses"
             flash.get("supports_reasoning_summaries"),
             Some(&json!(true))
         );
-        assert_eq!(flash.get("input_modalities"), Some(&json!(["text"])));
+        // deepseek-flash 按厂商目录与视觉指南接受图片输入；遗留别名
+        // deepseek-v4-flash 路由到它，不得被闸成纯文本（#7283）。
+        assert_eq!(
+            flash.get("input_modalities"),
+            Some(&json!(["text", "image"]))
+        );
         assert!(
             flash.get("model_messages").is_some(),
             "official entries are mirrored verbatim, incl. model_messages"
@@ -6425,7 +6432,7 @@ wire_api = "responses"
         // Explicit user display name still wins over the official one.
         assert_eq!(
             flash.get("display_name").and_then(|v| v.as_str()),
-            Some("DeepSeek V4 Flash")
+            Some("DeepSeek Flash")
         );
 
         let pro = &catalog["models"][1];
@@ -6449,6 +6456,35 @@ wire_api = "responses"
         assert_eq!(
             pro.get("display_name").and_then(|v| v.as_str()),
             Some("DeepSeek-V4-Pro")
+        );
+    }
+
+    #[test]
+    fn deepseek_official_catalog_legacy_flash_alias_stays_image_capable() {
+        // 厂商目录现在只发 `deepseek-flash`；预设默认写过的遗留 id
+        // `deepseek-v4-flash` 仍被 API 接受并路由到同一个视觉-capable Flash，
+        // 所以它必须克隆旗舰并解析为支持图片，而不是被闸成纯文本（#7283）。
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+        });
+
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            DEEPSEEK_NATIVE_CONFIG,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("vendor catalog generation should not error")
+        .expect("non-empty modelCatalog must yield a catalog");
+
+        let entry = &catalog["models"][0];
+        assert_eq!(
+            entry.get("slug").and_then(|v| v.as_str()),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            entry.get("input_modalities"),
+            Some(&json!(["text", "image"])),
+            "the legacy alias routes to the vision-capable Flash model and must fail open"
         );
     }
 
@@ -6914,7 +6950,7 @@ web_search = "disabled"
                 { "slug": "gpt-5.4", "input_modalities": ["text", "image"] },
                 { "slug": "deepseek-v4-pro", "input_modalities": ["text"] },
                 { "slug": "gpt-text-override", "input_modalities": ["text"] },
-                { "slug": "deepseek-v4-flash", "input_modalities": ["text", "image"] }
+                { "slug": "glm-5.2", "input_modalities": ["text", "image"] }
             ]
         }"#;
 
