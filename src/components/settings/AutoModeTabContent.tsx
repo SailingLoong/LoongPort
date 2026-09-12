@@ -159,14 +159,17 @@ export function AutoModeTabContent({
                 {
                   value: "cheapest",
                   label: t("autoMode.strategy.cheapest", "价格最低"),
-                  hint: t("autoMode.strategy.cheapestHint", "按档位倍率升序"),
+                  hint: t(
+                    "autoMode.strategy.cheapestHint",
+                    "价格优先，兼顾稳定与速度",
+                  ),
                 },
                 {
                   value: "fastest",
                   label: t("autoMode.strategy.fastest", "响应最快"),
                   hint: t(
                     "autoMode.strategy.fastestHint",
-                    "按近 7 天首字耗时升序",
+                    "速度优先，兼顾稳定与价格",
                   ),
                 },
               ] as const

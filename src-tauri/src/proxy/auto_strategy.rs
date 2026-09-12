@@ -1,11 +1,23 @@
 //! 自动模式策略排序（LoongPort）。
 //!
-//! 产品语义：用户只选 app（和模型，M3），系统从可用托管档位里按策略挑最合适的：
-//! - **Cheapest（默认）**：按 `倍率 × 模型单价` 升序 —— 只比倍率会漏掉「低倍率
-//!   配贵模型」的档位。单价取有效模型（偏好优先，否则档位选中模型）每百万
+//! 产品语义：用户只选 app（和模型，M3），系统从可用托管档位里按策略挑最合适的。
+//! 排序是**字典序**（分桶粗比，不做加权综合分——权重是魔法数，结果不可解释，
+//! 加新维度 = 插一层比较，不用重调全局权重）：
+//!
+//! - **Cheapest（默认）**：`倍率 × 模型单价` 精确比价。只比倍率会漏掉「低倍率
+//!   配贵模型」的档位；单价取有效模型（偏好优先，否则档位选中模型）每百万
 //!   token 输入+输出之和；查不到价的模型保守排在有价模型之后（组内按倍率比），
 //!   倍率来自站点实时数据、永远可信，单价表可能没收录新模型。
-//! - **Fastest**：按最近窗口的平均首字耗时（TTFT）升序。
+//! - **Fastest**：首字（TTFT）分桶粗比。
+//!
+//! 主键之后两种策略共享同一条体验判据链：**先比稳定（站点侧错误率分桶）、
+//! 再补齐另一维度**（Cheapest 补首字桶、Fastest 补价格）——稳定永远在主键
+//! 之后第一个出场。体验维度走粗桶：同桶内不认为有差别，交给下一级键决胜，
+//! 价格在「体验同级」的档位之间真正说话。
+//!
+//! 稳定与首字的数据来源唯源在 [`crate::proxy::auto_health`]：本地近窗实测
+//! 优先、回落众测站点快照、无数据按最差档参与——冷启动（全部无数据）时
+//! 排序退化为纯价格序，与上一代行为等价。
 //!
 //! ## 会话亲和（硬需求）
 //!
@@ -109,10 +121,6 @@ pub fn set_manual_order(
 /// 30 分钟 ≈ 一次长编码会话的自然间隔，期间不因策略重排切走。
 /// 公开给 `provider_router`（非托管当前供应商的置顶判断用同一窗口，别两处各写一份）。
 pub const AFFINITY_WINDOW_SECS: i64 = 30 * 60;
-
-/// TTFT 统计窗口：只看最近 7 天的首字耗时（更早的对「现在谁快」没有代表性，
-/// 且窗口必须 ≤ 明细保留天数，prune 掉的数据不参与）。
-const TTFT_WINDOW_SECS: i64 = 7 * 86400;
 
 /// 自动模式策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +310,10 @@ pub fn rank_managed_tier_candidates(
         None
     };
     let now = chrono::Utc::now().timestamp();
+    // 健康信号（首字/错误率）与排序同步采集：本地近窗实测优先，众测快照只读
+    // 本地缓存（不触发刷新，见 auto_health 模块文档），无数据按最差档参与。
+    let snapshot = crate::proxy::auto_health::cached_snapshot_for_ranking(now);
+    let health = crate::proxy::auto_health::collect(db, app_type, &tiers, now, snapshot.as_ref());
     // 手动模式：清单序优先（亲和交给下面的置顶块统一处理，rank_tiers 里不再预置顶，
     // 否则策略预置顶会被清单重排冲掉）；自动模式：策略排序（含内部亲和置顶）。
     let mut ranked = match get_mode(db, app_type) {
@@ -311,10 +323,12 @@ pub fn rank_managed_tier_candidates(
             &tiers,
             current_id.as_deref(),
             get_strategy(db),
+            &health,
             now,
         ),
         EasyModeMode::Manual => {
-            let by_strategy = rank_tiers(db, app_type, &tiers, None, get_strategy(db), now);
+            let by_strategy =
+                rank_tiers(db, app_type, &tiers, None, get_strategy(db), &health, now);
             apply_manual_order(&get_manual_order(db, app_type), by_strategy)
         }
     };
@@ -339,7 +353,9 @@ pub fn rank_managed_tier_candidates(
 
 /// 对托管档位按策略排序；当前在用档位在亲和窗口内保持置顶。
 ///
-/// `now` 由调用方注入（unix 秒），测试里可以拨时钟。
+/// `now` 由调用方注入（unix 秒），测试里可以拨时钟。`health` 是健康信号
+/// （首字/错误率，阶梯解析后的结果，采集唯源在 [`crate::proxy::auto_health`]），
+/// 由调用方注入——排序本体不做任何查询以外的 I/O，测试可以直接摆数据。
 /// 排序键带上档位 id 做最终 tie-breaker，保证结果确定（同名倍率/同无样本时
 /// 不会因 HashMap 遍历序而抖动）。
 pub fn rank_tiers(
@@ -348,12 +364,10 @@ pub fn rank_tiers(
     tiers: &[Provider],
     current_id: Option<&str>,
     strategy: AutoStrategy,
+    health: &crate::proxy::auto_health::TierHealthIndex,
     now: i64,
 ) -> Vec<Provider> {
     let multipliers = db.get_tier_rate_multipliers(app_type).unwrap_or_default();
-    let ttft = db
-        .get_provider_avg_first_token_ms(app_type, now - TTFT_WINDOW_SECS)
-        .unwrap_or_default();
     let last_activity = db.get_provider_last_activity(app_type).unwrap_or_default();
 
     // 各档位有效模型的单价一次性查出（短锁，不跨排序持有；毒锁恢复继续）。
@@ -386,20 +400,22 @@ pub fn rank_tiers(
         ka.cmp(&kb)
             .then_with(|| va.partial_cmp(&vb).unwrap_or(Ordering::Equal))
     };
-    let ttft_of = |p: &Provider| -> u64 { ttft.get(&p.id).copied().unwrap_or(u64::MAX) };
+    // 体验维度走粗桶（同桶交给下一级键决胜）；缺条目/无数据由桶函数按最差档处理。
+    let ttft_of = |p: &Provider| crate::proxy::auto_health::ttft_bucket(health.get(&p.id));
+    let err_of = |p: &Provider| crate::proxy::auto_health::err_rate_bucket(health.get(&p.id));
 
     let mut ranked = tiers.to_vec();
     ranked.sort_by(|a, b| {
+        // 字典序：主键由策略定；此后固定「先比稳、再补齐另一维度」——
+        // 稳定（站点侧错误率）在两种策略里都是主键之后的第一个判据。
         let primary = match strategy {
             AutoStrategy::Cheapest => cmp_cost(a, b),
             AutoStrategy::Fastest => ttft_of(a).cmp(&ttft_of(b)),
         };
-        // 次级键互为 fallback： cheapest 时更快者先（同价选快的），
-        // fastest 时更便宜者先（同速选便宜的），冷启动（无 TTFT 样本）也能有序。
-        let secondary = match strategy {
+        let secondary = err_of(a).cmp(&err_of(b)).then_with(|| match strategy {
             AutoStrategy::Cheapest => ttft_of(a).cmp(&ttft_of(b)),
             AutoStrategy::Fastest => cmp_cost(a, b),
-        };
+        });
         primary.then(secondary).then_with(|| a.id.cmp(&b.id))
     });
 
@@ -507,6 +523,25 @@ mod tests {
         chrono::Utc::now().timestamp()
     }
 
+    /// 手摆健康索引：排序比较器的契约测试直接钉数据，不走采集。
+    /// 元组 = (档位 id, 首字毫秒, 站点侧错误率)，`None` = 无数据（最差档）。
+    fn hand_health(
+        entries: &[(&str, Option<f64>, Option<f64>)],
+    ) -> crate::proxy::auto_health::TierHealthIndex {
+        entries
+            .iter()
+            .map(|(id, ttft, err)| {
+                (
+                    (*id).to_string(),
+                    crate::proxy::auto_health::TierHealth {
+                        ttft_ms: *ttft,
+                        err_rate: *err,
+                    },
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn cheapest_orders_by_multiplier_with_unknown_last() {
         let db = Database::memory().unwrap();
@@ -524,7 +559,15 @@ mod tests {
         db.set_tier_rate_multiplier("claude", &mid, Some(1.2))
             .unwrap();
 
-        let ranked = rank_tiers(&db, "claude", &tiers, None, AutoStrategy::Cheapest, now());
+        let ranked = rank_tiers(
+            &db,
+            "claude",
+            &tiers,
+            None,
+            AutoStrategy::Cheapest,
+            &hand_health(&[]),
+            now(),
+        );
         let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
         // 倍率未知（None）当最贵处理，排最后 —— 别让「不知道价格」变成「最便宜」
         assert_eq!(ids, vec![cheap.as_str(), mid.as_str(), unknown.as_str()]);
@@ -542,10 +585,181 @@ mod tests {
         seed_activity(&db, "claude", &fast, t - 60, 120);
         seed_activity(&db, "claude", &slow, t - 60, 900);
 
-        let ranked = rank_tiers(&db, "claude", &tiers, None, AutoStrategy::Fastest, t);
+        let health = crate::proxy::auto_health::collect(&db, "claude", &tiers, t, None);
+        let ranked = rank_tiers(
+            &db,
+            "claude",
+            &tiers,
+            None,
+            AutoStrategy::Fastest,
+            &health,
+            t,
+        );
         let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        // 有样本的按耗时升序；无 TTFT 样本（cold）排最后 —— 冷启动不抢跑
+        // 有样本的按桶升序（120ms 快桶、900ms 中桶）；无 TTFT 样本（cold）最差档
         assert_eq!(ids, vec![fast.as_str(), slow.as_str(), cold.as_str()]);
+    }
+
+    /// Fastest 的完整字典序：首字桶 → 错误率桶 → 价格。同桶速度差（300 vs
+    /// 700ms）不再是排序依据——桶内先比稳、再比价；「便宜但爱错」不许靠
+    /// 桶内小便宜爬到「稳」前面。
+    #[test]
+    fn fastest_breaks_ttft_bucket_ties_by_stability_then_price() {
+        let db = Database::memory().unwrap();
+        let clean_cheap = managed_id("https://a.example", 1, 1);
+        let clean_pricy = managed_id("https://b.example", 1, 2);
+        let flaky_cheap = managed_id("https://c.example", 1, 3);
+        let tiers = vec![
+            tier(&flaky_cheap, "FlakyCheap"),
+            tier(&clean_pricy, "CleanPricy"),
+            tier(&clean_cheap, "CleanCheap"),
+        ];
+        for p in &tiers {
+            db.save_provider("claude", p).unwrap();
+        }
+        // 倍率×单价：flaky_cheap 0.5 < clean_cheap 1.0 < clean_pricy 2.0 ——
+        // 若只看价格，flaky_cheap 第一；排序必须先过稳定关。
+        db.set_tier_rate_multiplier("claude", &flaky_cheap, Some(0.5))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &clean_cheap, Some(1.0))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &clean_pricy, Some(2.0))
+            .unwrap();
+
+        // 三档同在首字快桶（300/500/700ms）；flaky 错误率 5%（劣化桶），
+        // 两 clean 0%（健康桶）。
+        let health = hand_health(&[
+            (&clean_cheap, Some(500.0), Some(0.0)),
+            (&clean_pricy, Some(700.0), Some(0.0)),
+            (&flaky_cheap, Some(300.0), Some(0.05)),
+        ]);
+        let ranked = rank_tiers(
+            &db,
+            "claude",
+            &tiers,
+            None,
+            AutoStrategy::Fastest,
+            &health,
+            now(),
+        );
+        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                clean_cheap.as_str(),
+                clean_pricy.as_str(),
+                flaky_cheap.as_str()
+            ],
+            "同快桶内：稳的在前（按价决胜）、爱错的垫底——桶内速度差不参与排序"
+        );
+    }
+
+    /// Cheapest 的契约钉死：价格是主键，健康只做次级——便宜但爱错的档位
+    /// 仍然排第一（它的错误由故障转移兜底），策略语义不能被健康篡位。
+    #[test]
+    fn cheapest_keeps_cost_primary_over_health() {
+        let db = Database::memory().unwrap();
+        let cheap_flaky = managed_id("https://a.example", 1, 1);
+        let pricey_clean = managed_id("https://b.example", 1, 2);
+        let tiers = vec![tier(&cheap_flaky, "CF"), tier(&pricey_clean, "PC")];
+        for p in &tiers {
+            db.save_provider("claude", p).unwrap();
+        }
+        db.set_tier_rate_multiplier("claude", &cheap_flaky, Some(0.5))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &pricey_clean, Some(2.0))
+            .unwrap();
+
+        let health = hand_health(&[
+            (&cheap_flaky, None, Some(0.30)),
+            (&pricey_clean, Some(400.0), Some(0.0)),
+        ]);
+        let ranked = rank_tiers(
+            &db,
+            "claude",
+            &tiers,
+            None,
+            AutoStrategy::Cheapest,
+            &health,
+            now(),
+        );
+        assert_eq!(
+            ranked[0].id, cheap_flaky,
+            "Cheapest 主键是价格，30% 错误率也不篡位"
+        );
+    }
+
+    /// Cheapest 的次级链：同价先比稳、再比快。
+    #[test]
+    fn cheapest_breaks_cost_ties_by_stability_then_ttft() {
+        let db = Database::memory().unwrap();
+        let slow_stable = managed_id("https://a.example", 1, 1);
+        let fast_flaky = managed_id("https://b.example", 1, 2);
+        let fast_stable = managed_id("https://c.example", 1, 3);
+        let tiers = vec![
+            tier(&slow_stable, "SS"),
+            tier(&fast_flaky, "FF"),
+            tier(&fast_stable, "FS"),
+        ];
+        for p in &tiers {
+            db.save_provider("claude", p).unwrap();
+        }
+        // 同价（不设倍率 → 全部未知同档，倍率组内相等）
+        let health = hand_health(&[
+            (&slow_stable, Some(2500.0), Some(0.0)),
+            (&fast_flaky, Some(300.0), Some(0.30)),
+            (&fast_stable, Some(400.0), Some(0.0)),
+        ]);
+        let ranked = rank_tiers(
+            &db,
+            "claude",
+            &tiers,
+            None,
+            AutoStrategy::Cheapest,
+            &health,
+            now(),
+        );
+        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                fast_stable.as_str(),
+                slow_stable.as_str(),
+                fast_flaky.as_str()
+            ],
+            "同价：稳的在前；稳与稳之间快桶者先；爱错的垫底"
+        );
+    }
+
+    /// 冷启动等价闸：完全没有健康数据时（新装/新档位），两种策略都退化为
+    /// 纯价格序——与上一代行为逐位相同，数据长出来才逐档接管。
+    #[test]
+    fn cold_start_degrades_to_cost_order_under_both_strategies() {
+        let db = Database::memory().unwrap();
+        let cheap = managed_id("https://a.example", 1, 1);
+        let mid = managed_id("https://b.example", 1, 2);
+        let pricey = managed_id("https://c.example", 1, 3);
+        let tiers = vec![tier(&pricey, "P"), tier(&cheap, "C"), tier(&mid, "M")];
+        for p in &tiers {
+            db.save_provider("claude", p).unwrap();
+        }
+        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &mid, Some(1.0))
+            .unwrap();
+        db.set_tier_rate_multiplier("claude", &pricey, Some(2.0))
+            .unwrap();
+
+        let empty = hand_health(&[]);
+        for strategy in [AutoStrategy::Cheapest, AutoStrategy::Fastest] {
+            let ranked = rank_tiers(&db, "claude", &tiers, None, strategy, &empty, now());
+            let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
+            assert_eq!(
+                ids,
+                vec![cheap.as_str(), mid.as_str(), pricey.as_str()],
+                "无数据（全最差档平手）→ 价格决胜，{strategy:?} 同样退化为价格序"
+            );
+        }
     }
 
     #[test]
@@ -590,7 +804,15 @@ mod tests {
         db.set_tier_rate_multiplier("claude", &unpriced, Some(0.1))
             .unwrap();
 
-        let ranked = rank_tiers(&db, "claude", &tiers, None, AutoStrategy::Cheapest, now());
+        let ranked = rank_tiers(
+            &db,
+            "claude",
+            &tiers,
+            None,
+            AutoStrategy::Cheapest,
+            &hand_health(&[]),
+            now(),
+        );
         let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
         // 0.5×2=1.0 < 1.0×2=2.0 <（无价）0.1
         assert_eq!(
@@ -624,6 +846,7 @@ mod tests {
             &tiers,
             Some(&expensive_current),
             AutoStrategy::Cheapest,
+            &hand_health(&[]),
             t,
         );
         assert_eq!(ranked[0].id, expensive_current);
@@ -635,6 +858,7 @@ mod tests {
             &tiers,
             Some(&expensive_current),
             AutoStrategy::Cheapest,
+            &hand_health(&[]),
             t + AFFINITY_WINDOW_SECS + 1,
         );
         assert_eq!(ranked_idle[0].id, cheap);
