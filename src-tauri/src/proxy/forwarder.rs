@@ -307,10 +307,17 @@ impl RequestForwarder {
         let app_type = app_type.to_string();
         let provider_id = provider.id.clone();
         let provider_name = provider.name.clone();
+        let expected_current = self.current_provider_id_at_start.clone();
 
         tokio::spawn(async move {
             manager
-                .try_switch(app_handle.as_ref(), &app_type, &provider_id, &provider_name)
+                .try_switch(
+                    app_handle.as_ref(),
+                    &app_type,
+                    &provider_id,
+                    &provider_name,
+                    &expected_current,
+                )
                 .await
                 .warn_on_err(
                     DiagnosticEvent::new("proxy.failover.switch", "failed")
@@ -504,15 +511,16 @@ impl RequestForwarder {
 
             // 发起请求前先获取熔断器放行许可（HalfOpen 会占用探测名额）
             // 单 Provider 场景下跳过此检查，避免熔断器阻塞所有请求
-            let (allowed, used_half_open_permit) = if bypass_circuit_breaker {
-                (true, false)
-            } else {
-                let permit = self
-                    .router
-                    .allow_provider_request(&provider.id, app_type_str)
-                    .await;
-                (permit.allowed, permit.used_half_open_permit)
-            };
+            let (allowed, used_half_open_permit) =
+                if bypass_circuit_breaker || self.current_provider_id_at_start == provider.id {
+                    (true, false)
+                } else {
+                    let permit = self
+                        .router
+                        .allow_provider_request(&provider.id, app_type_str)
+                        .await;
+                    (permit.allowed, permit.used_half_open_permit)
+                };
 
             if !allowed {
                 continue;
@@ -1196,6 +1204,28 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
+        let result = self
+            .forward_attempt(
+                app_type, method, provider, endpoint, body, headers, extensions, adapter,
+            )
+            .await;
+        self.router
+            .record_attempt(app_type.as_str(), &provider.id, result.is_ok());
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_attempt(
+        &self,
+        app_type: &AppType,
+        method: &http::Method,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+        headers: &axum::http::HeaderMap,
+        extensions: &Extensions,
+        adapter: &dyn ProviderAdapter,
+    ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
 
@@ -1249,6 +1279,11 @@ impl RequestForwarder {
         // the optional Responses -> Chat/Anthropic bridge.
         if matches!(app_type, AppType::GrokBuild) {
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
+
+        let application_model = self.router.preferred_model(app_type.as_str(), provider);
+        if let Some(model) = application_model.as_deref() {
+            mapped_body["model"] = Value::String(model.to_string());
         }
 
         if is_copilot {
@@ -1517,7 +1552,9 @@ impl RequestForwarder {
                     "[Codex] Restored or enriched {restored} cached function call item(s) for Chat upstream"
                 );
             }
-            super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
+            if application_model.is_none() {
+                super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
+            }
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
             let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
@@ -1534,7 +1571,9 @@ impl RequestForwarder {
             chat_body
         } else if codex_responses_to_anthropic {
             let mut mapped_body = mapped_body;
-            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            if application_model.is_none() {
+                super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            }
             // Per-provider output ceiling override. Codex does not forward its
             // `model_max_output_tokens` in the request body, so honor the value
             // configured on the provider here — it takes precedence over any

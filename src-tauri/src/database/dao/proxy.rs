@@ -313,6 +313,48 @@ impl Database {
         Ok(())
     }
 
+    /// A single atomic update leaves independently owned routing switches untouched.
+    pub async fn update_proxy_options_for_app(
+        &self,
+        options: AppProxyOptions,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        let changed = conn
+            .execute(
+                "UPDATE proxy_config SET
+                max_retries = ?2,
+                streaming_first_byte_timeout = ?3,
+                streaming_idle_timeout = ?4,
+                non_streaming_timeout = ?5,
+                circuit_failure_threshold = ?6,
+                circuit_success_threshold = ?7,
+                circuit_timeout_seconds = ?8,
+                circuit_error_rate_threshold = ?9,
+                circuit_min_requests = ?10,
+                updated_at = datetime('now')
+             WHERE app_type = ?1",
+                rusqlite::params![
+                    options.app_type,
+                    options.max_retries,
+                    options.streaming_first_byte_timeout,
+                    options.streaming_idle_timeout,
+                    options.non_streaming_timeout,
+                    options.circuit_failure_threshold,
+                    options.circuit_success_threshold,
+                    options.circuit_timeout_seconds,
+                    options.circuit_error_rate_threshold,
+                    options.circuit_min_requests,
+                ],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        if changed != 1 {
+            return Err(AppError::Database(
+                "Application proxy configuration not found".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// 确保指定 app_type 的 proxy_config 行存在（同步版本，用于 set_* 函数）
     ///
     /// 使用与 schema.rs seed 相同的 per-app 默认值
@@ -906,6 +948,45 @@ impl Database {
 mod tests {
     use crate::database::Database;
     use crate::error::AppError;
+
+    #[tokio::test]
+    async fn proxy_options_preserve_routing_switches() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        for (enabled, failover) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut current = db.get_proxy_config_for_app("codex").await?;
+            current.enabled = enabled;
+            current.auto_failover_enabled = failover;
+            db.update_proxy_config_for_app(current).await?;
+            db.update_proxy_options_for_app(crate::proxy::types::AppProxyOptions {
+                app_type: "codex".into(),
+                max_retries: 7,
+                streaming_first_byte_timeout: 45,
+                streaming_idle_timeout: 90,
+                non_streaming_timeout: 300,
+                circuit_failure_threshold: 6,
+                circuit_success_threshold: 3,
+                circuit_timeout_seconds: 75,
+                circuit_error_rate_threshold: 0.4,
+                circuit_min_requests: 20,
+            })
+            .await?;
+            let saved = db.get_proxy_config_for_app("codex").await?;
+            assert_eq!(
+                (saved.enabled, saved.auto_failover_enabled),
+                (enabled, failover)
+            );
+            assert_eq!(saved.max_retries, 7);
+            assert_eq!(saved.streaming_first_byte_timeout, 45);
+            assert_eq!(saved.streaming_idle_timeout, 90);
+            assert_eq!(saved.non_streaming_timeout, 300);
+            assert_eq!(saved.circuit_failure_threshold, 6);
+            assert_eq!(saved.circuit_success_threshold, 3);
+            assert_eq!(saved.circuit_timeout_seconds, 75);
+            assert_eq!(saved.circuit_error_rate_threshold, 0.4);
+            assert_eq!(saved.circuit_min_requests, 20);
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_default_cost_multiplier_round_trip() -> Result<(), AppError> {

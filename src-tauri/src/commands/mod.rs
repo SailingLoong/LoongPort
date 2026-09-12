@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+mod application_routing;
+pub use application_routing::*;
+
 mod application_overview;
 pub use application_overview::*;
 mod auth;

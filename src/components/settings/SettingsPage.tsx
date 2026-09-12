@@ -51,8 +51,7 @@ import { CcSwitchImportSection } from "@/components/settings/CcSwitchImportSecti
 import { BackupListSection } from "@/components/settings/BackupListSection";
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
-import { AutoModeTabContent } from "@/components/settings/AutoModeTabContent";
-import { LocalRoutingServicePanel } from "@/components/settings/LocalRoutingServicePanel";
+import { ConnectionSettingsTabContent } from "@/components/settings/ConnectionSettingsTabContent";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConnectivityCheckConfigPanel } from "@/components/usage/ConnectivityCheckConfigPanel";
@@ -237,7 +236,7 @@ export function SettingsPage({
               {t("settings.tabGeneral")}
             </TabsTrigger>
             <TabsTrigger value="proxy">
-              {t("settings.tabAutoMode", "省心模式")}
+              {t("settings.tabConnection", { defaultValue: "连接设置" })}
             </TabsTrigger>
             <TabsTrigger value="auth">
               {t("settings.tabAuth", { defaultValue: "认证" })}
@@ -307,7 +306,7 @@ export function SettingsPage({
 
               <TabsContent value="proxy" className="space-y-6 mt-0 pb-4">
                 {settings ? (
-                  <AutoModeTabContent
+                  <ConnectionSettingsTabContent
                     settings={settings}
                     onAutoSave={handleAutoSave}
                   />
@@ -541,15 +540,6 @@ export function SettingsPage({
                           <LogConfigPanel />
                         </AccordionContent>
                       </AccordionItem>
-
-                      {/* 路由基础设施三项：自动模式主入口化后从原路由页迁入
-                          （#165 过渡 tab 的最终归宿），产品语义是底层配置。 */}
-                      {settings ? (
-                        <LocalRoutingServicePanel
-                          settings={settings}
-                          onAutoSave={handleAutoSave}
-                        />
-                      ) : null}
 
                       <AccordionItem
                         value="rectifier"

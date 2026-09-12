@@ -186,6 +186,22 @@ pub struct AppProxyConfig {
     pub circuit_min_requests: u32,
 }
 
+/// Numeric connection options; routing switches have separate owners.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppProxyOptions {
+    pub app_type: String,
+    pub max_retries: u32,
+    pub streaming_first_byte_timeout: u32,
+    pub streaming_idle_timeout: u32,
+    pub non_streaming_timeout: u32,
+    pub circuit_failure_threshold: u32,
+    pub circuit_success_threshold: u32,
+    pub circuit_timeout_seconds: u32,
+    pub circuit_error_rate_threshold: f64,
+    pub circuit_min_requests: u32,
+}
+
 /// 整流器配置
 ///
 /// 存储在 settings 表中
@@ -370,6 +386,23 @@ impl LogConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proxy_options_reject_routing_switches() {
+        let payload = serde_json::json!({
+            "appType": "codex", "maxRetries": 7,
+            "streamingFirstByteTimeout": 45, "streamingIdleTimeout": 90,
+            "nonStreamingTimeout": 300, "circuitFailureThreshold": 6,
+            "circuitSuccessThreshold": 3, "circuitTimeoutSeconds": 75,
+            "circuitErrorRateThreshold": 0.4, "circuitMinRequests": 20
+        });
+        assert!(serde_json::from_value::<super::AppProxyOptions>(payload.clone()).is_ok());
+        for field in ["enabled", "autoFailoverEnabled"] {
+            let mut with_switch = payload.clone();
+            with_switch[field] = serde_json::json!(true);
+            assert!(serde_json::from_value::<super::AppProxyOptions>(with_switch).is_err());
+        }
+    }
+
     use super::*;
 
     #[test]

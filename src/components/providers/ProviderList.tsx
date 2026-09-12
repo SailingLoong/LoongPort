@@ -53,6 +53,8 @@ interface ProviderListProps {
   onOpenTerminal?: (provider: Provider) => void;
   onCreate?: () => void;
   isLoading?: boolean;
+  /** LoongPort uses the application priority table instead of the upstream queue editor. */
+  showFailoverControls?: boolean;
   isProxyRunning?: boolean; // 代理服务运行状态
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管）
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
@@ -75,6 +77,7 @@ export function ProviderList({
   onCreate,
   isLoading = false,
   isProxyRunning = false,
+  showFailoverControls = true,
   isProxyTakeover = false,
   activeProviderId,
   onSetAsDefault,
@@ -103,13 +106,17 @@ export function ProviderList({
   const supportsFailover = isProxyAppId(appId);
   const { data: isAutoFailoverEnabled } = useAutoFailoverEnabled(
     appId,
-    supportsFailover,
+    supportsFailover && showFailoverControls,
   );
-  const { data: failoverQueue } = useFailoverQueue(appId, supportsFailover);
+  const { data: failoverQueue } = useFailoverQueue(
+    appId,
+    supportsFailover && showFailoverControls,
+  );
   const addToQueue = useAddToFailoverQueue();
   const removeFromQueue = useRemoveFromFailoverQueue();
 
   const isFailoverModeActive =
+    showFailoverControls &&
     supportsFailover &&
     isProxyTakeover === true &&
     isAutoFailoverEnabled === true;

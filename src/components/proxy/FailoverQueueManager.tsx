@@ -41,8 +41,7 @@ export function FailoverQueueManager({
   const { t } = useTranslation();
   const [selectedProviderId, setSelectedProviderId] = useState<string>("");
 
-  // 「自动故障转移」开关不在这里：它已收为省心模式设置页的统一入口（一次
-  // 作用于全部 app），这里只管队列内容本身。
+  // 应用页拥有自动故障切换开关；此组件保留队列编辑能力。
   // 查询数据
   const {
     data: queue,

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -76,6 +83,10 @@ import { vendorBusyKey, vendorPlanBusyKey } from "./VendorRow";
  * - 不再需要 `focusRelay`（那个函数已删）—— 它靠 `set_current` 副作用定位，
  *   既会串目标，又会因为排序而让行序跳动
  */
+export type AccountActionTarget =
+  | { kind: "relay"; row: RelayRowData; appId: AppId }
+  | { kind: "vendor"; row: VendorAccountRow; appId: AppId };
+
 export interface RelaySectionProps {
   /**
    * 当前 tab 的 app_type。决定拉哪个 app 下的档位、切换写哪个 app 的配置。
@@ -87,6 +98,13 @@ export interface RelaySectionProps {
   appId: AppId;
   /** Display one account while retaining the existing action owner. */
   accountFilter?: { kind: "relay" | "vendor"; id: number };
+  /** Public account-page snapshot; null means it is loading or absent. */
+  accountSnapshot?: AccountActionTarget | null;
+  /** One lifecycle owner renders controls for every overview card. */
+  renderAccounts?: (
+    renderActions: (target: AccountActionTarget) => ReactNode,
+  ) => ReactNode;
+  onAccountChanged?: () => void;
   /** 打开统一添加聚合页的指定标签。首启引导落「中转站」（综合榜）；
    * 两个区块的空态占位也经它指名跳转（中转站→directory / 官方 API→official）。 */
   onOpenAddHub: (
@@ -99,6 +117,9 @@ export function RelaySection({
   appId,
   onOpenAddHub,
   accountFilter,
+  accountSnapshot,
+  renderAccounts,
+  onAccountChanged,
 }: RelaySectionProps) {
   /**
    * 当前这一屏是不是生图页。
@@ -111,7 +132,16 @@ export function RelaySection({
    * 一对命令 + 一个 settings 键，那些现在全删了。
    */
   const isImageTab = appId === "codex-image";
-  const [relays, setRelays] = useState<RelayRowData[]>([]);
+  const [localRelays, setRelays] = useState<RelayRowData[]>([]);
+  const relays = useMemo(
+    () =>
+      accountSnapshot === undefined
+        ? localRelays
+        : accountSnapshot?.kind === "relay"
+          ? [accountSnapshot.row]
+          : [],
+    [accountSnapshot, localRelays],
+  );
   const [confirmSwitch, setConfirmSwitch] = useState<{
     name: string;
     run: (quitChatgpt: boolean) => void;
@@ -146,8 +176,21 @@ export function RelaySection({
   //
   // **与 relay 平级并列的一份状态**，不合进上面那些：两边的命令、DTO 与余额
   // 类型全不同（余额那边是后端格式化好的字符串），合起来只会让每处多一个分支。
-  const [vendors, setVendors] = useState<VendorAccountRow[]>([]);
-  const [vendorSupported, setVendorSupported] = useState(false);
+  const [localVendors, setVendors] = useState<VendorAccountRow[]>([]);
+  const [localVendorSupported, setVendorSupported] = useState(false);
+  const vendors = useMemo(
+    () =>
+      accountSnapshot === undefined
+        ? localVendors
+        : accountSnapshot?.kind === "vendor"
+          ? [accountSnapshot.row]
+          : [],
+    [accountSnapshot, localVendors],
+  );
+  const vendorSupported =
+    accountSnapshot === undefined
+      ? localVendorSupported
+      : accountSnapshot?.kind === "vendor";
   const [confirmRemoveVendor, setConfirmRemoveVendor] =
     useState<VendorAccountRow | null>(null);
   // 异步编辑、恢复默认与切换动作返回时，需要按 id 读取最新的行数据。
@@ -174,7 +217,7 @@ export function RelaySection({
     displayName: string;
     busyKey: string;
   } | null>(null);
-  // 待确认删除的中转站行。存整行：确认框里要显示它的名字与档位数。
+  // 待确认删除的中转站行。存整行：确认框展示账号名称和跨应用使用情况。
   const [confirmRemove, setConfirmRemove] = useState<RelayRowData | null>(null);
   // 连通检测整套复用上游的 hook —— 它自带 toast、i18n 与 per-id 的 checking 状态。
   const { checkProvider, isChecking } = useStreamCheck(appId);
@@ -185,7 +228,14 @@ export function RelaySection({
    * `appId` 传给后端用于计算当前平台的支持状态、配置状态与当前项；前端直接消费
    * `supported/accounts`，不复制厂商支持列表。
    */
+  const accountOwnerRef = useRef({ accountSnapshot, onAccountChanged });
+  accountOwnerRef.current = { accountSnapshot, onAccountChanged };
+
   const reloadVendors = useCallback(async () => {
+    if (accountOwnerRef.current.accountSnapshot !== undefined) {
+      accountOwnerRef.current.onAccountChanged?.();
+      return;
+    }
     const seq = ++vendorReloadSeqRef.current;
     const isStale = () => seq !== vendorReloadSeqRef.current;
 
@@ -281,6 +331,10 @@ export function RelaySection({
    * 一起刷齐，否则切档位后 DeepSeek 行会停在旧高亮上（2026-08-07 修的互斥 bug）。
    */
   const reload = useCallback(async () => {
+    if (accountOwnerRef.current.accountSnapshot !== undefined) {
+      accountOwnerRef.current.onAccountChanged?.();
+      return;
+    }
     // ⚠️ **请求序号：只让最后一次 reload 的结果落地。**
     //
     // 这一区在每个动作后都 reload，而它们会重叠 —— 典型的一串是
@@ -303,7 +357,7 @@ export function RelaySection({
   }, [appId, reloadVendors]);
 
   useEffect(() => {
-    void reload();
+    if (accountOwnerRef.current.accountSnapshot === undefined) void reload();
   }, [reload]);
 
   // 「编辑配置」的事前警告 + 编辑页 + 保存后刷新（见 useTierEditGuard）。
@@ -360,39 +414,6 @@ export function RelaySection({
     if (payload.appType === appId) void reload();
   });
 
-  /**
-   * 启动时探一次凭据是不是真的还活着。
-   *
-   * 首屏行状态只看本地凭据。凭据在网页端被撤销、账号被禁用、
-   * 会话被踢掉时它仍是 true ⇒ 用户看到界面一切正常，点任何操作才报错。
-   * 这一次探活把那种状态提前暴露出来（后端探到失效会清掉本地凭据）。
-   *
-   * 有意不 await 进 `reload`：首屏该立刻渲染，不该卡在网络请求上。
-   *
-   * ⚠️ 2026-08-04 从已删的 LoongPort 独立页接过来 —— 那个页面删掉之后
-   * 这个探活一度没人调，于是「凭据在服务端已失效」这件事又只能靠用户撞错误发现。
-   */
-  useEffect(() => {
-    let cancelled = false;
-    relayApi
-      .checkSession()
-      .then((expiredIds) => {
-        // 返回的是**这次被清掉凭据的行 id**，空数组 = 全都还好。
-        if (expiredIds.length === 0 || cancelled) return;
-        // 一条 toast 说清有几个账号需要重新登录 —— 逐行弹会在多行同时过期时
-        // 糊满屏幕，而具体是哪几行界面上已经各自标出来了（`sessionExpired` 分支）。
-        toast.info(
-          t("loongport.session.expired", { count: expiredIds.length }),
-        );
-        void reload();
-      })
-      // 探活自身失败（网络不通）不打扰用户 —— 凭据没被清掉，操作时会自然报错。
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [reload, t]);
-
   // ══ 官网直连账号（vendor）══════════════════════════════════════════
 
   /**
@@ -421,6 +442,7 @@ export function RelaySection({
   useTauriEvent<OnboardingRegisterCompleted>(
     ONBOARDING_REGISTER_COMPLETED,
     async (payload) => {
+      if (accountFilter || renderAccounts) return;
       toast.success(
         t("loongport.addSite.connected", { name: payload.siteName }),
       );
@@ -440,25 +462,31 @@ export function RelaySection({
    * 那边直接调 `vendor_open_login` —— 同账号重登会靠唯一索引
    * `(vendor_id, account_id)` 合并回同一行）。
    */
-  const handleVendorLogin = (vendorId: string, rowId: number) =>
+  const handleVendorLogin = (
+    vendorId: string,
+    rowId: number,
+    targetApp = appId,
+  ) =>
     run(vendorBusyKey("login", rowId), async () => {
       try {
-        const result = await vendorApi.openLogin(vendorId, appId);
+        const result = await vendorApi.openLogin(vendorId, targetApp);
         // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
         if (result === null) return;
         toast.success(t("loongport.session.connected"));
         presentRefreshResult(result.refresh);
         await reloadVendors();
+        if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
         toast.error(String(e));
       }
     });
 
-  const handleVendorProvision = (rowId: number) =>
+  const handleVendorProvision = (rowId: number, targetApp = appId) =>
     run(vendorBusyKey("provision", rowId), async () => {
       try {
-        presentRefreshResult(await vendorApi.refresh(rowId, appId));
+        presentRefreshResult(await vendorApi.refresh(rowId, targetApp));
         await reload();
+        if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (error) {
         toast.error(String(error));
       }
@@ -516,6 +544,7 @@ export function RelaySection({
         // 删掉的可能正是当前在用的那条 ⇒ 全量重读（`reload` 顺带刷 vendors），
         // 否则高亮会停在一个不存在的行上。
         await reload();
+        if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
         toast.error(String(e));
       }
@@ -534,11 +563,11 @@ export function RelaySection({
     }
   };
 
-  const handleLogin = (relayId: number) =>
+  const handleLogin = (relayId: number, targetApp = appId) =>
     run(`login:${relayId}`, async () => {
       try {
         // 显式传 id —— 不传会作用到「当前站」，可能是别的行。
-        const result = await relayApi.login(relayId, appId);
+        const result = await relayApi.login(relayId, targetApp);
         if (result) {
           // 登录窗不会自动关闭（它已跳到 dashboard，用户可能要在那儿充值或看用量）。
           toast.success(t("loongport.session.connected"));
@@ -546,17 +575,19 @@ export function RelaySection({
         }
         // ok === false 是用户自己关了窗口，不出提示（他知道自己干了什么）。
         await reload();
+        if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
         toast.error(String(e));
       }
     });
 
   /** 重新拉这个中转站的可用分组（真的打 sub2api 的 `/groups/available`）。 */
-  const handleProvision = (relayId: number) =>
+  const handleProvision = (relayId: number, targetApp = appId) =>
     run(`provision:${relayId}`, async () => {
       try {
-        presentRefreshResult(await relayApi.refresh(relayId, appId));
+        presentRefreshResult(await relayApi.refresh(relayId, targetApp));
         await reload();
+        if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
         toast.error(String(e));
       }
@@ -633,6 +664,7 @@ export function RelaySection({
           }),
         );
         await reload();
+        if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
         toast.error(String(e));
       }
@@ -797,15 +829,103 @@ export function RelaySection({
   // 在这里摆一个「添加中转站」按钮会让用户以为要再加一个站，而正确的动作是
   // 去 codex 页点「获取密钥」，或者根本不做（他那个站可能没有生图分组）。
   // codex-image 整页保持改动前的形态，不套三大块布局。
-  if (isImageTab && bothEmpty) {
+  const renderAccountActions = (target: AccountActionTarget) => {
+    const { row } = target;
+    const isRelay = target.kind === "relay";
+    const loginBusy = busy.has(
+      isRelay ? `login:${row.id}` : vendorBusyKey("login", row.id),
+    );
+    const provisionBusy = busy.has(
+      isRelay ? `provision:${row.id}` : vendorBusyKey("provision", row.id),
+    );
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={loginBusy}
+          onClick={() =>
+            isRelay
+              ? void handleLogin(row.id, target.appId)
+              : void handleVendorLogin(
+                  (row as VendorAccountRow).vendorId,
+                  row.id,
+                  target.appId,
+                )
+          }
+        >
+          {t(
+            row.status === "notLoggedIn"
+              ? "loongport.row.login"
+              : "loongport.row.reLogin",
+          )}
+        </Button>
+        <Button
+          size="sm"
+          disabled={!row.canRefresh || provisionBusy}
+          onClick={() =>
+            isRelay
+              ? void handleProvision(row.id, target.appId)
+              : void handleVendorProvision(row.id, target.appId)
+          }
+        >
+          {t("loongport.accounts.configure", {
+            defaultValue: "One-click configuration",
+          })}
+        </Button>
+        {isRelay && (row as RelayRowData).canPurchase && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy.has(`purchase:${row.id}`)}
+            onClick={() => void handlePurchase(row.id)}
+          >
+            {t("loongport.accounts.recharge", {
+              defaultValue: "Recharge",
+            })}
+          </Button>
+        )}
+        {(isRelay || (row as VendorAccountRow).canDelete) && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              isRelay
+                ? setConfirmRemove(row as RelayRowData)
+                : setConfirmRemoveVendor(row as VendorAccountRow)
+            }
+          >
+            {t("common.delete")}
+          </Button>
+        )}
+      </div>
+    );
+  };
+
+  if (!renderAccounts && !accountFilter && isImageTab && bothEmpty) {
     return <ImageTabNotice empty />;
   }
 
   return (
     <>
+      {renderAccounts?.(renderAccountActions)}
+      {!renderAccounts &&
+        accountFilter &&
+        (() => {
+          if (accountFilter.kind === "relay") {
+            const row = relays.find((row) => row.id === accountFilter.id);
+            return row
+              ? renderAccountActions({ kind: "relay", row, appId })
+              : null;
+          }
+          const row = vendors.find((row) => row.id === accountFilter.id);
+          return row
+            ? renderAccountActions({ kind: "vendor", row, appId })
+            : null;
+        })()}
       {/* 生图页的顶部说明与「生成 / 档位」分段在外层的 `ImageTabPage`（本组件被它
           内嵌为「档位」视图）；这里只剩空态那一支在用 `ImageTabNotice`。 */}
-      {!accountFilter && (
+      {!renderAccounts && !accountFilter && (
         <div className="mb-3 flex justify-end">
           <Button
             type="button"
@@ -830,7 +950,7 @@ export function RelaySection({
       )}
       {/* 模型验证的行级宿主：summaries 拉取、验真弹窗与结果变化订阅全在
           Provider 内部；下线时它对外不可见（不拉取、入口/徽章不渲染）。 */}
-      {accountFilter?.kind !== "vendor" && (
+      {!renderAccounts && accountFilter?.kind !== "vendor" && (
         <TierVerificationProvider
           appId={appId}
           providerIds={verificationProviderIds}
@@ -884,50 +1004,54 @@ export function RelaySection({
 
       {/* 官网直连账号块 —— 只在支持厂商的 tab 出现（gemini / grokbuild 无 preset，
           摆了也是骗人）。添加入口在顶栏大「+」。 */}
-      {vendorSupported && accountFilter?.kind !== "relay" && (
-        <VendorBlock
-          vendor={{
-            accounts: accountFilter
-              ? vendors.filter((row) => row.id === accountFilter.id)
-              : vendors,
-            onLogin: (rowId) => {
-              const row = vendors.find((v) => v.id === rowId);
-              if (row) void handleVendorLogin(row.vendorId, rowId);
-            },
-            onProvision: handleVendorProvision,
-            onUse: (rowId, plan) => handleVendorUse(rowId, plan),
-            onRemove: (rowId) => {
-              const row = vendors.find((v) => v.id === rowId);
-              if (row) setConfirmRemoveVendor(row);
-            },
-            // 编辑走与档位**同一个** `useTierEditGuard`（同一道事前警告、同一个
-            // cc-switch 编辑页）。按 plan 编辑 —— 一行（opencode）背后每 plan
-            // 各六条记录，各改各的。
-            onEdit: (_account, plan) =>
-              requestEdit({
-                kind: "vendor",
-                providerId: plan.providerId,
-                displayName: plan.planName,
-                isCurrent: plan.isCurrent,
-              }),
-            onReset: (_account, plan) =>
-              setConfirmReset({
-                kind: "vendor",
-                providerId: plan.providerId,
-                displayName: plan.planName,
-                busyKey: vendorPlanBusyKey("resetVendor", plan.providerId),
-              }),
-            onReorder: (ids) => void handleVendorReorder(ids),
-          }}
-          busy={busy}
-          onAddAccount={() => onOpenAddHub("official")}
-        />
-      )}
+      {!renderAccounts &&
+        vendorSupported &&
+        accountFilter?.kind !== "relay" && (
+          <VendorBlock
+            vendor={{
+              accounts: accountFilter
+                ? vendors.filter((row) => row.id === accountFilter.id)
+                : vendors,
+              onLogin: (rowId) => {
+                const row = vendors.find((v) => v.id === rowId);
+                if (row) void handleVendorLogin(row.vendorId, rowId);
+              },
+              onProvision: handleVendorProvision,
+              onUse: (rowId, plan) => handleVendorUse(rowId, plan),
+              onRemove: (rowId) => {
+                const row = vendors.find((v) => v.id === rowId);
+                if (row) setConfirmRemoveVendor(row);
+              },
+              // 编辑走与档位**同一个** `useTierEditGuard`（同一道事前警告、同一个
+              // cc-switch 编辑页）。按 plan 编辑 —— 一行（opencode）背后每 plan
+              // 各六条记录，各改各的。
+              onEdit: (_account, plan) =>
+                requestEdit({
+                  kind: "vendor",
+                  providerId: plan.providerId,
+                  displayName: plan.planName,
+                  isCurrent: plan.isCurrent,
+                }),
+              onReset: (_account, plan) =>
+                setConfirmReset({
+                  kind: "vendor",
+                  providerId: plan.providerId,
+                  displayName: plan.planName,
+                  busyKey: vendorPlanBusyKey("resetVendor", plan.providerId),
+                }),
+              onReorder: (ids) => void handleVendorReorder(ids),
+            }}
+            busy={busy}
+            onAddAccount={() => onOpenAddHub("official")}
+          />
+        )}
 
       <ConfirmDialog
         isOpen={confirmRemoveVendor !== null}
         title={t("loongport.vendor.removeConfirmTitle")}
-        message={t("loongport.vendor.removeConfirmMessage", {
+        message={t("loongport.accounts.removeVendor", {
+          defaultValue:
+            "Delete “{{label}}”? This removes the sign-in session, local API key, and all plans from all applications. The API key on the provider website is not deleted; you can sign in again later.",
           label:
             confirmRemoveVendor?.accountLabel ||
             confirmRemoveVendor?.vendorName ||
@@ -944,34 +1068,26 @@ export function RelaySection({
       <ConfirmDialog
         isOpen={confirmRemove !== null}
         title={t("loongport.row.removeConfirmTitle")}
-        // 文案三个变体，前端只按后端给的事实选：名下有档位在用（强删确认，
-        // 点名哪些 app）> 已登录 > 从未登录。`confirmRemove` 为 null 时弹窗
-        // 不显示，兜底值不会被看到。
-        message={
+        message={t(
           confirmRemove && confirmRemove.usageBlockers.length > 0
-            ? t("loongport.row.removeConfirmMessageInUse", {
-                label:
-                  confirmRemove.accountLabel ||
-                  confirmRemove.siteName ||
-                  confirmRemove.siteOrigin ||
-                  "",
-                count: confirmRemove.tiers.length,
-                usages: formatUsageBlockers(confirmRemove.usageBlockers),
-              })
-            : t(
-                confirmRemove?.removeConfirmation === "configured"
-                  ? "loongport.row.removeConfirmMessage"
-                  : "loongport.row.removeConfirmMessageNeverLoggedIn",
-                {
-                  label:
-                    confirmRemove?.accountLabel ||
-                    confirmRemove?.siteName ||
-                    confirmRemove?.siteOrigin ||
-                    "",
-                  count: confirmRemove?.tiers.length ?? 0,
-                },
-              )
-        }
+            ? "loongport.accounts.removeRelayInUse"
+            : "loongport.accounts.removeRelay",
+          {
+            defaultValue:
+              confirmRemove && confirmRemove.usageBlockers.length > 0
+                ? "Delete “{{label}}”? This removes the account and all its groups and tiers from all applications. Currently used by: {{usages}}. These apps return to official sign-in; you may need to sign in again and restart running apps. Your balance remains with the relay service."
+                : "Delete “{{label}}”? This removes the account and all its groups and tiers from all applications.",
+            label:
+              confirmRemove?.accountLabel ||
+              confirmRemove?.siteName ||
+              confirmRemove?.siteOrigin ||
+              "",
+            usages:
+              confirmRemove && confirmRemove.usageBlockers.length > 0
+                ? formatUsageBlockers(confirmRemove.usageBlockers)
+                : "",
+          },
+        )}
         confirmText={t("common.delete")}
         onConfirm={() => {
           if (confirmRemove) {

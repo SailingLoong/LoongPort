@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Save, Loader2, Info } from "lucide-react";
 import { toast } from "sonner";
-import { useAppProxyConfig, useUpdateAppProxyConfig } from "@/lib/query/proxy";
+import { useAppProxyConfig, useUpdateAppProxyOptions } from "@/lib/query/proxy";
 
 export interface AutoFailoverConfigPanelProps {
   appType: string;
@@ -19,11 +19,10 @@ export function AutoFailoverConfigPanel({
 }: AutoFailoverConfigPanelProps) {
   const { t } = useTranslation();
   const { data: config, isLoading, error } = useAppProxyConfig(appType);
-  const updateConfig = useUpdateAppProxyConfig();
+  const updateConfig = useUpdateAppProxyOptions();
 
   // 使用字符串状态以支持完全清空数字输入框
   const [formData, setFormData] = useState({
-    autoFailoverEnabled: false,
     maxRetries: "3",
     streamingFirstByteTimeout: "60",
     streamingIdleTimeout: "120",
@@ -38,7 +37,6 @@ export function AutoFailoverConfigPanel({
   useEffect(() => {
     if (config) {
       setFormData({
-        autoFailoverEnabled: config.autoFailoverEnabled,
         maxRetries: String(config.maxRetries),
         streamingFirstByteTimeout: String(config.streamingFirstByteTimeout),
         streamingIdleTimeout: String(config.streamingIdleTimeout),
@@ -161,8 +159,6 @@ export function AutoFailoverConfigPanel({
     try {
       await updateConfig.mutateAsync({
         appType,
-        enabled: config.enabled,
-        autoFailoverEnabled: formData.autoFailoverEnabled,
         maxRetries: raw.maxRetries,
         streamingFirstByteTimeout: raw.streamingFirstByteTimeout,
         streamingIdleTimeout: raw.streamingIdleTimeout,
@@ -187,7 +183,6 @@ export function AutoFailoverConfigPanel({
   const handleReset = () => {
     if (config) {
       setFormData({
-        autoFailoverEnabled: config.autoFailoverEnabled,
         maxRetries: String(config.maxRetries),
         streamingFirstByteTimeout: String(config.streamingFirstByteTimeout),
         streamingIdleTimeout: String(config.streamingIdleTimeout),

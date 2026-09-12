@@ -921,7 +921,11 @@
     "crowdMetricsDescription": "サイト単位の集計指標（初トークン時間・エラー率など、時間別）を共有し、広場のユーザー実測データを解放します。プロンプト・キー・アカウント情報は含みません。",
     "plazaVisibility": "中継サイト一覧",
     "plazaVisibilityToggle": "広場のおすすめリストを表示",
-    "plazaVisibilityDescription": "サイト追加ページに中継サイトのおすすめリストを表示。オフにしても検索ボックスから手動で追加できます"
+    "plazaVisibilityDescription": "サイト追加ページに中継サイトのおすすめリストを表示。オフにしても検索ボックスから手動で追加できます",
+    "tabConnection": "接続設定",
+    "connection": {
+      "applicationsHint": "接続設定の選択・優先順位・自動フェイルオーバーはアプリページで設定できます。"
+    }
   },
   "apps": {
     "claude": "Claude",
@@ -3613,7 +3617,14 @@
         "noTiers": "接続設定がありません",
         "ready": "準備完了",
         "noKey": "API キー未取得"
-      }
+      },
+      "configure": "ワンクリック設定",
+      "recharge": "チャージ",
+      "hideDetails": "アカウント情報を非表示",
+      "showDetails": "アカウント情報を表示",
+      "removeRelay": "「{{label}}」を削除しますか？ログイン情報と、すべてのアプリの関連グループおよび接続設定を削除します。サービスの残高には影響しません。",
+      "removeRelayInUse": "「{{label}}」を削除しますか？ログイン情報と、すべてのアプリの関連グループおよび接続設定を削除します。現在の使用状況：{{usages}}。対象アプリは公式ログインに戻り、再ログインや再起動が必要になる場合があります。残高には影響しません。",
+      "removeVendor": "「{{label}}」を削除しますか？ログイン情報、ローカル API キー、すべてのアプリの関連プランと接続設定を削除します。サービス側の API キーは削除されません。"
     },
     "onboarding": {
       "domain": "中継サービスの URL",
@@ -3840,11 +3851,11 @@
     "switchService": "サービスを切り替え",
     "selectDescription": "アカウントを選択してから、設定を選びます。",
     "addService": "サービスを追加",
-    "search": "サービス、アカウント、設定、モデルを検索",
+    "search": "サービス、アカウント、接続設定、モデルを検索",
     "source": "サービスの種類",
     "default": "既定",
-    "configured": "設定済み",
-    "use": "使用",
+    "configured": "現在",
+    "use": "使用する",
     "manageAccount": "アカウント管理",
     "empty": "設定が選択されていません",
     "recent": "最近使用した設定",
@@ -3858,6 +3869,37 @@
       "official": "公式",
       "relay": "中継サービス",
       "custom": "カスタム"
-    }
+    },
+    "availableTiers": "利用可能な接続設定",
+    "priority": "優先順位",
+    "tier": "接続設定 / アカウント",
+    "action": "操作",
+    "autoFailover": "自動フェイルオーバー",
+    "priorityHint": "数字が小さいほど優先されます。自動フェイルオーバーを有効にすると、現在のティアから下の順に試行します。",
+    "orderHint": "ドラッグまたは指標の並べ替えで順序を変更できます。",
+    "dragTier": "{{name}} の優先順位を変更",
+    "lastError": "直近のエラー",
+    "metricsHint": "エラー率、初回トークン時間、キャッシュヒット率は過去7日間の統計です。— はデータなし。残高はアカウント共通です。",
+    "updateFailed": "更新できませんでした。再試行してください。",
+    "metrics": {
+      "rateMultiplier": "倍率",
+      "errorRate": "エラー率",
+      "avgFirstTokenMs": "初回トークン",
+      "balanceUsd": "残高",
+      "cacheHitRate": "キャッシュヒット",
+      "todayCostUsd": "本日の費用"
+    },
+    "skipReasons": {
+      "official_account": "この公式アカウントは手動切り替えのみ対応",
+      "model_incompatible": "スキップ：選択したモデルに非対応",
+      "circuit_open": "一時スキップ：接続の回復を待機中",
+      "before_current": "現在の設定より前のため、後続の切り替え対象外",
+      "current_official_account": "現在の公式ログインでは自動フェイルオーバーを利用できません。",
+      "native_configuration": "アプリの標準ログインを使用するため、自動フェイルオーバーの対象外です。"
+    },
+    "routingPaused": "接続サービスが停止中、またはアプリが未接続のため、自動フェイルオーバーは一時停止中です。",
+    "resumeRouting": "接続を再開",
+    "enabled": "有効",
+    "enable": "有効にする"
   }
 }

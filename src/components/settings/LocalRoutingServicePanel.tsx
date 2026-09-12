@@ -1,10 +1,4 @@
-/**
- * 「本地路由服务」高级设置项：路由服务的开关/状态/地址端口/日志/统计。
- *
- * 自动模式升为设置主入口（#165）后路由页降级为过渡 tab，本组件是它的最终
- * 归宿 —— 高级 tab 的一个折叠项。产品语义上它是自动模式/接管的**基础设施**，
- * 不再占据独立 tab；首开确认（`confirm.proxy.*`）与主页面开关设置随面板一起迁。
- */
+/** Local proxy runtime controls shared by connection settings. */
 
 import { useState } from "react";
 import { Server, Activity } from "lucide-react";
@@ -95,6 +89,7 @@ export function LocalRoutingServicePanel({
       </AccordionTrigger>
       <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
         <ProxyPanel
+          showProviderQueues={false}
           enableLocalProxy={settings?.enableLocalProxy ?? false}
           onEnableLocalProxyChange={(checked) =>
             onAutoSave({ enableLocalProxy: checked })

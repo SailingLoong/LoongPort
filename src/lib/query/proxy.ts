@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { proxyApi } from "@/lib/api/proxy";
+import { proxyApi, type AppProxyOptions } from "@/lib/api/proxy";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type {
@@ -136,6 +136,21 @@ export function useUpdateAppProxyConfig() {
       toast.error(
         t("proxy.settings.toast.saveFailed", { error: error.message }),
       );
+    },
+  });
+}
+
+/** Save numeric connection options without changing application routing switches. */
+export function useUpdateAppProxyOptions() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (options: AppProxyOptions) =>
+      proxyApi.updateProxyOptionsForApp(options),
+    onSuccess: (_, options) => {
+      queryClient.invalidateQueries({
+        queryKey: proxyKeys.appConfig(options.appType),
+      });
+      queryClient.invalidateQueries({ queryKey: ["circuitBreakerConfig"] });
     },
   });
 }

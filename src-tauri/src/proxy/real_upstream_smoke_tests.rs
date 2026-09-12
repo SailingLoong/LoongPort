@@ -286,13 +286,7 @@ async fn real_manual_order_routes_to_user_first_pick() {
         .effective_model
         .clone()
         .expect("手动序第一档要有有效模型");
-    crate::proxy::auto_strategy::set_mode(
-        &state.db,
-        "claude",
-        crate::proxy::auto_strategy::EasyModeMode::Manual,
-    )
-    .unwrap();
-    crate::proxy::auto_strategy::set_manual_order(&state.db, "claude", &manual).unwrap();
+    crate::proxy::application_routing::set_order(&state.db, "claude", &manual).unwrap();
 
     let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
     config.enabled = true;

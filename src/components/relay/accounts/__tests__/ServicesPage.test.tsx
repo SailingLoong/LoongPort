@@ -18,9 +18,13 @@ vi.mock("@/lib/api/relay", () => ({ relayApi: { listRelays: mocks.relays } }));
 vi.mock("@/lib/api/vendor", () => ({ vendorApi: { list: mocks.vendors } }));
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
 vi.mock("../../RelaySection", () => ({
-  RelaySection: (props: unknown) => {
+  RelaySection: (props: any) => {
     mocks.detail(props);
-    return <div>Account operations</div>;
+    return props.renderAccounts ? (
+      props.renderAccounts(() => <div>Account controls</div>)
+    ) : (
+      <div>Account operations</div>
+    );
   },
 }));
 vi.mock("../../RowBalance", () => ({
@@ -72,6 +76,7 @@ const vendor: VendorAccountRow = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   mocks.relays.mockResolvedValue([relay]);
   mocks.vendors.mockImplementation(async (app: AppId) => ({
     supported: app === "codex",
@@ -171,4 +176,24 @@ it("returns through navigation history when opened directly from an application"
   await userEvent.click(screen.getByRole("button", { name: "common.back" }));
   expect(onBack).toHaveBeenCalledTimes(1);
   expect(onSelectAccount).not.toHaveBeenCalled();
+});
+
+it("hides account details persistently without hiding configured application links", async () => {
+  const { user } = setup();
+  await screen.findByText("Example Official");
+  await user.click(
+    screen.getAllByRole("button", {
+      name: "loongport.accounts.hideDetails",
+    })[1],
+  );
+  expect(screen.queryByText("Official account")).not.toBeInTheDocument();
+  expect(screen.queryByText("Account balance")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Codex" })).toBeInTheDocument();
+  expect(localStorage.getItem("loongport.accountDetailsHidden")).toContain(
+    "vendor:1",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "loongport.accounts.showDetails" }),
+  );
+  expect(screen.getByText("Official account")).toBeInTheDocument();
 });

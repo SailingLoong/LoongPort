@@ -17,7 +17,7 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 export function useApplicationOverview(
   appId: AppId,
   providers: Record<string, Provider>,
-  onSwitchProvider: (provider: Provider) => void,
+  onSwitchProvider: (provider: Provider) => void | Promise<void>,
 ) {
   const client = useQueryClient();
   const { t } = useTranslation();
@@ -54,16 +54,16 @@ export function useApplicationOverview(
     quitChatgpt?: boolean,
   ) => {
     if (!target.canSelect || pending.current) return;
-    if (target.selection.kind === "provider") {
-      const provider = providers[target.providerId];
-      if (provider) onSwitchProvider(provider);
-      return;
-    }
     const generation = lifecycle.current;
     pending.current = true;
     setBusy(true);
     setConfirmation(null);
     try {
+      if (target.selection.kind === "provider") {
+        const provider = providers[target.providerId];
+        if (provider) await onSwitchProvider(provider);
+        return;
+      }
       const result =
         target.selection.kind === "vendor"
           ? await vendorApi.switch(

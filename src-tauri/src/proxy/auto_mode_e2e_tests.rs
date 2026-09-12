@@ -1,18 +1,7 @@
-//! 省心模式端到端（HTTP 线路）测试。
-//!
-//! `auto_strategy` / `provider_router` 的单元测试各自钉住排序与选路判定；
-//! 这里把整条链拉直了打真实流量：本地 axum mock 上游 + 真实 `ProxyServer`
-//! + reqwest 客户端，验证三条产品语义在线路上的落点：
-//!
-//! 1. 活跃会话外（无亲和）流量落最便宜档位；
-//! 2. 活跃会话内不切换 —— 当前档位 30 分钟内有流量时，更便宜的档位不抢
-//!    （中途换供应商丢提示词缓存，未命中按全价计费，是硬约束）；
-//! 3. 当前档位故障时请求仍成功（请求内故障转移 + 熔断），恢复后回到在用档位。
-//!
-//! headless 边界：`FailoverSwitchManager::do_switch` 的热切换只在有
-//! `AppHandle` 时执行（托盘/事件/写 live 都依赖它），本测试无 GUI，
-//! DB「当前档位」不会因故障转移而变 —— 所以断言落点是「哪家 mock 收到了
-//! 流量」与客户端最终拿到谁的响应，不断言热切换副作用。
+//! Application routing over local mock HTTP upstreams: explicit selection,
+//! persistent priority, fallback permission, account exclusion and usage facts.
+//! No live config or external upstream is used. With no AppHandle, successful
+//! fallback does not persist its target; tests explicitly model that owner step.
 
 use super::auto_strategy;
 use super::server::ProxyServer;
@@ -40,6 +29,7 @@ struct MockUpstreamState {
     hits: Arc<AtomicUsize>,
     status: Arc<RwLock<u16>>,
     auth_header: Arc<RwLock<Option<String>>>,
+    model: Arc<RwLock<Option<String>>>,
     foreign: Arc<RwLock<bool>>,
     stream: Arc<RwLock<bool>>,
     delay_ms: Arc<std::sync::atomic::AtomicU64>,
@@ -57,6 +47,7 @@ impl MockUpstream {
             hits: Arc::new(AtomicUsize::new(0)),
             status: Arc::new(RwLock::new(200)),
             auth_header: Arc::new(RwLock::new(None)),
+            model: Arc::new(RwLock::new(None)),
             foreign: Arc::new(RwLock::new(false)),
             stream: Arc::new(RwLock::new(false)),
             delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -112,6 +103,13 @@ async fn handle_mock(
     _body: axum::body::Bytes,
 ) -> axum::response::Response {
     state.hits.fetch_add(1, Ordering::SeqCst);
+    *state.model.write().await = serde_json::from_slice::<Value>(&_body)
+        .ok()
+        .and_then(|body| {
+            body.get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     *state.auth_header.write().await = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -307,7 +305,12 @@ impl E2eFixture {
         config.circuit_timeout_seconds = 0;
         db.update_proxy_config_for_app(config).await.unwrap();
 
-        auto_strategy::set_enabled(&db, "claude", true).expect("enable auto mode");
+        super::application_routing::set_order(
+            &db,
+            "claude",
+            &[cheap_id.clone(), expensive_id.clone()],
+        )
+        .unwrap();
 
         // 真协调器：被动异常经消费 worker 落库（干净流量不落库，既有三条
         // 测试的正常 Claude 形状不会产生任何报告）
@@ -462,10 +465,10 @@ async fn await_logged_timing(fx: &E2eFixture, provider_id: &str) -> (u64, u64) {
     panic!("usage row for {provider_id} never landed; recent rows: {dump}");
 }
 
-/// 闲置（无当前档位活跃会话）时，省心模式把流量交给最便宜档位。
+/// Initial routing follows persistent priority without policy ranking.
 #[tokio::test]
 #[serial]
-async fn idle_traffic_goes_to_cheapest_tier() {
+async fn no_selection_uses_first_persistent_priority() {
     let fx = E2eFixture::new().await;
 
     let marker = response_text(send_message(fx.port, "sess-e2e-idle-000001").await).await;
@@ -478,14 +481,12 @@ async fn idle_traffic_goes_to_cheapest_tier() {
     fx.server.stop().await.expect("stop server");
 }
 
-/// 活跃会话不切换：当前档位（贵）30 分钟内有流量时，更便宜的档位不抢，
-/// 同一 session 连续请求全部落在当前档位；鉴权头注入的是该档位自己的 token。
+/// An explicit idle selection remains current regardless of price.
 #[tokio::test]
 #[serial]
-async fn active_session_sticks_to_current_tier_over_cheaper_one() {
+async fn explicit_selection_stays_current_without_recent_activity() {
     let fx = E2eFixture::new().await;
     fx.set_current(&fx.expensive_id);
-    fx.seed_recent_activity(&fx.expensive_id);
 
     for i in 0..3 {
         let marker = response_text(send_message(fx.port, "sess-e2e-sticky-000001").await).await;
@@ -502,15 +503,13 @@ async fn active_session_sticks_to_current_tier_over_cheaper_one() {
     fx.server.stop().await.expect("stop server");
 }
 
-/// 手动模式：用户清单序优先于策略序（便宜者让位）——首页看板拖拽落定的
-/// 语义在真实选路链上的落点。
+/// User priority determines initial routing when no current provider is selected.
 #[tokio::test]
 #[serial]
-async fn manual_order_overrides_strategy_in_routing() {
+async fn persistent_order_controls_initial_routing() {
     let fx = E2eFixture::new().await;
     // 手动序：贵档第一（与 cheapest 策略序相反）
-    auto_strategy::set_mode(&fx.db, "claude", auto_strategy::EasyModeMode::Manual).unwrap();
-    auto_strategy::set_manual_order(
+    super::application_routing::set_order(
         &fx.db,
         "claude",
         &[fx.expensive_id.clone(), fx.cheap_id.clone()],
@@ -524,16 +523,15 @@ async fn manual_order_overrides_strategy_in_routing() {
     fx.server.stop().await.expect("stop server");
 }
 
-/// 在用档位（便宜）故障：请求内故障转移到下一家、客户端始终拿到 200；
-/// 恢复后回到在用档位。熔断 1 次失败即开 + 冷却 0 ⇒ 每条请求允许探测一次。
+/// Failure moves forward; a recovered earlier tier never takes over automatically.
 #[tokio::test]
 #[serial]
-async fn failing_tier_fails_over_and_returns_when_recovered() {
+async fn failing_tier_falls_forward_without_automatic_switchback() {
     let fx = E2eFixture::new().await;
     fx.set_current(&fx.cheap_id);
     fx.seed_recent_activity(&fx.cheap_id);
 
-    fx.cheap.set_status(500).await;
+    fx.cheap.set_status(402).await;
 
     // 两条请求：每条先探测在用档位（500 → 熔断计失败），请求内落到贵档位
     let marker = response_text(send_message(fx.port, "sess-e2e-failover-0001").await).await;
@@ -543,32 +541,178 @@ async fn failing_tier_fails_over_and_returns_when_recovered() {
     assert_eq!(fx.cheap.hits(), 2, "每条请求只应探测故障档位一次");
     assert_eq!(fx.expensive.hits(), 2);
 
-    // 在用档位恢复 → 探测成功，回到在用档位（省心模式不因一次故障就弃用它）
+    // Model the successful fallback persistence normally performed with AppHandle.
+    fx.set_current(&fx.expensive_id);
     fx.cheap.set_status(200).await;
     let marker = response_text(send_message(fx.port, "sess-e2e-failover-0001").await).await;
-    assert_eq!(marker, "served-by-cheap");
-    assert_eq!(fx.cheap.hits(), 3);
-    assert_eq!(fx.expensive.hits(), 2, "恢复后不应继续占用备胎档位");
+    assert_eq!(marker, "served-by-expensive");
+    assert_eq!(fx.cheap.hits(), 2, "recovery must not switch back");
+    assert_eq!(fx.expensive.hits(), 3);
+    fx.expensive.set_status(500).await;
+    assert!(!send_message(fx.port, "sess-e2e-failover-0002")
+        .await
+        .status()
+        .is_success());
+    assert_eq!(
+        fx.cheap.hits(),
+        2,
+        "the last priority cannot retry an earlier tier"
+    );
     fx.server.stop().await.expect("stop server");
 }
 
-/// 省心模式开启即含请求内故障转移：显式「自动故障转移」开关（默认关）不再
-/// 单独决定重试行为 —— 否则省心模式退化成「一次请求只试一家」，每个死档位
-/// 都把原始错误抛给 CLI，靠 CLI 自己的重试预算一家一家试。
+/// A stale easy-mode flag cannot bypass disabled fallback permission.
 #[tokio::test]
 #[serial]
-async fn easy_mode_fails_over_in_request_even_with_failover_toggle_off() {
+async fn retired_easy_mode_cannot_override_disabled_fallback() {
     let fx = E2eFixture::new().await;
     let mut config = fx.db.get_proxy_config_for_app("claude").await.unwrap();
     config.auto_failover_enabled = false;
     fx.db.update_proxy_config_for_app(config).await.unwrap();
 
+    fx.set_current(&fx.cheap_id);
+    auto_strategy::set_enabled(&fx.db, "claude", true).unwrap();
     fx.cheap.set_status(500).await;
 
-    let marker = response_text(send_message(fx.port, "sess-e2e-implied-0001").await).await;
-    assert_eq!(marker, "served-by-expensive");
+    assert!(!send_message(fx.port, "sess-e2e-implied-0001")
+        .await
+        .status()
+        .is_success());
+    assert_eq!(fx.expensive.hits(), 0);
     assert_eq!(fx.cheap.hits(), 1, "故障档位只应被探测一次");
     fx.server.stop().await.expect("stop server");
+}
+
+/// Recovered provider failures are attempts, not extra billable requests.
+#[tokio::test]
+#[serial]
+async fn recovered_failures_contribute_to_attempt_error_rate() {
+    let fx = E2eFixture::new().await;
+    fx.set_current(&fx.cheap_id);
+    fx.seed_recent_activity(&fx.cheap_id); // Historical request success is not an attempt sample.
+    fx.cheap.set_status(500).await;
+    assert_eq!(
+        response_text(send_message(fx.port, "attempt-rate").await).await,
+        "served-by-expensive"
+    );
+    let state = crate::store::AppState::new(fx.db.clone());
+    let board = crate::commands::application_routing_impl(&state, "claude")
+        .await
+        .unwrap();
+    let cheap = board
+        .tiers
+        .iter()
+        .find(|tier| tier.tier.provider_id == fx.cheap_id)
+        .unwrap();
+    let expensive = board
+        .tiers
+        .iter()
+        .find(|tier| tier.tier.provider_id == fx.expensive_id)
+        .unwrap();
+    assert_eq!(cheap.error_rate, Some(1.0));
+    assert_eq!(expensive.error_rate, Some(0.0));
+    assert_eq!(fx.cheap.hits(), 1);
+    assert_eq!(fx.expensive.hits(), 1);
+    fx.server.stop().await.unwrap();
+}
+
+/// Native Official placeholders must not consume the retry needed by a usable tier.
+#[tokio::test]
+#[serial]
+async fn native_official_is_excluded_before_retry_budget() {
+    let fx = E2eFixture::new().await;
+    let mut official =
+        Provider::with_id("native-official".into(), "Official".into(), json!({}), None);
+    official.category = Some("official".into());
+    fx.db.save_provider("claude", &official).unwrap();
+    super::application_routing::set_order(
+        &fx.db,
+        "claude",
+        &[
+            fx.cheap_id.clone(),
+            official.id.clone(),
+            fx.expensive_id.clone(),
+        ],
+    )
+    .unwrap();
+    let mut config = fx.db.get_proxy_config_for_app("claude").await.unwrap();
+    config.max_retries = 1;
+    fx.db.update_proxy_config_for_app(config).await.unwrap();
+    fx.set_current(&fx.cheap_id);
+    fx.cheap.set_status(500).await;
+    assert_eq!(
+        response_text(send_message(fx.port, "native-official-skip").await).await,
+        "served-by-expensive"
+    );
+    let state = crate::store::AppState::new(fx.db.clone());
+    let board = crate::commands::application_routing_impl(&state, "claude")
+        .await
+        .unwrap();
+    let native = board
+        .tiers
+        .iter()
+        .find(|tier| tier.tier.provider_id == official.id)
+        .unwrap();
+    assert!(!native.can_failover);
+    assert_eq!(native.skip_reason.as_deref(), Some("native_configuration"));
+    assert_eq!(native.error_rate, None);
+    fx.set_current(&official.id);
+    let board = crate::commands::application_routing_impl(&state, "claude")
+        .await
+        .unwrap();
+    let native = board
+        .tiers
+        .iter()
+        .find(|tier| tier.tier.provider_id == official.id)
+        .unwrap();
+    assert!(native.tier.is_current);
+    assert_eq!(native.skip_reason.as_deref(), Some("native_configuration"));
+    let relay = board
+        .tiers
+        .iter()
+        .find(|tier| tier.tier.provider_id == fx.expensive_id)
+        .unwrap();
+    assert!(relay.can_failover);
+    assert_eq!(relay.skip_reason, None);
+    assert_eq!(
+        response_text(send_message(fx.port, "native-current-skip").await).await,
+        "served-by-expensive"
+    );
+    assert_eq!(fx.cheap.hits(), 1, "must not wrap to earlier priority");
+    fx.server.stop().await.unwrap();
+}
+
+/// An incompatible manual selection replaces stale routing intent; fallback
+/// preserves that effective model even when its native default is different.
+#[tokio::test]
+#[serial]
+async fn manual_model_intent_is_preserved_across_fallback() {
+    let fx = E2eFixture::new().await;
+    for (id, native_model) in [
+        (&fx.cheap_id, "manual-model"),
+        (&fx.expensive_id, "different-default"),
+    ] {
+        let mut provider = fx.db.get_provider_by_id(id, "claude").unwrap().unwrap();
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!(native_model);
+        fx.db.save_provider("claude", &provider).unwrap();
+        fx.db
+            .set_available_models("claude", id, &["manual-model".to_string()])
+            .unwrap();
+    }
+    fx.set_current(&fx.cheap_id);
+    auto_strategy::set_model_pref(&fx.db, "claude", Some("stale-model")).unwrap();
+    fx.cheap.set_status(500).await;
+    let marker = response_text(send_message(fx.port, "sess-model-intent").await).await;
+    assert_eq!(marker, "served-by-expensive");
+    assert_eq!(
+        fx.cheap.state.model.read().await.as_deref(),
+        Some("manual-model")
+    );
+    assert_eq!(
+        fx.expensive.state.model.read().await.as_deref(),
+        Some("manual-model")
+    );
+    fx.server.stop().await.unwrap();
 }
 
 /// 首字/用时归因只算成功档位自己的耗时：便宜档拖 500ms 才回 402、贵档接住
@@ -665,7 +809,12 @@ async fn fatal_402_skips_sibling_tiers_of_the_same_account() {
     config.auto_failover_enabled = true;
     config.max_retries = 3;
     db.update_proxy_config_for_app(config).await.unwrap();
-    auto_strategy::set_enabled(&db, "claude", true).unwrap();
+    super::application_routing::set_order(
+        &db,
+        "claude",
+        &[a1.id.clone(), a2.id.clone(), b.id.clone()],
+    )
+    .unwrap();
 
     let verification = Arc::new(
         crate::relay::model_verification::coordinator::ModelVerificationCoordinator::new(

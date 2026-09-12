@@ -18,6 +18,13 @@ import zh from "@/i18n/locales/zh.json";
  * 照 `toolManagementLocales.test.ts` / `xaiOauthLocales.test.ts` 的形状写（仓库已有惯例）。
  */
 const requiredKeys = [
+  "accounts.configure",
+  "accounts.recharge",
+  "accounts.hideDetails",
+  "accounts.showDetails",
+  "accounts.removeRelay",
+  "accounts.removeRelayInUse",
+  "accounts.removeVendor",
   // 三大块的区块标题。
   "sections.relay",
   "sections.official",
@@ -466,9 +473,11 @@ describe("LoongPort tier page locale coverage", () => {
     ["en", en.loongport, "connection profile", /\btier(?:s)?\b/iu],
     ["ja", ja.loongport, "接続プロファイル", /プラン|ティア|枠/u],
   ] as const)(
-    "%s uses the approved connection-profile terminology",
+    "%s keeps connection-profile terminology in configuration maintenance",
     (_locale, ns, approvedTerm, deprecatedTerm) => {
-      const copy = visibleCopy(ns);
+      // Account deletion also names the routing tiers removed by this action.
+      const { accounts: _accounts, ...configurationCopy } = ns;
+      const copy = visibleCopy(configurationCopy);
 
       expect(copy).toContain(approvedTerm);
       expect(copy).not.toMatch(deprecatedTerm);

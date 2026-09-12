@@ -1,9 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ComponentProps } from "react";
+import { proxyApi } from "@/lib/api/proxy";
 import { RelayRow } from "../RelayRow";
 import { TierVerificationProvider } from "../model-verification/TierVerificationProvider";
 import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
@@ -85,4 +86,55 @@ describe("RelayRow 查看用量入口", () => {
       screen.queryByRole("button", { name: "loongport.row.openUsageHint" }),
     ).not.toBeInTheDocument();
   });
+});
+
+describe("reconciliation with manual routing", () => {
+  const tier: ComponentProps<typeof RelayRow>["relay"]["tiers"][number] = {
+    providerId: "example-tier",
+    appId: "codex",
+    groupName: "standard",
+    displayName: "Standard",
+    model: "example-model",
+    models: [],
+    rateMultiplier: null,
+    isCurrent: false,
+    canVerifyModels: false,
+    userEdited: false,
+    allowImageGeneration: false,
+    siteDeclaredOrigin: null,
+  };
+  it.each([
+    [true, true, true],
+    [false, true, false],
+    [true, false, false],
+  ])(
+    "takeover=%s balance=%s shows reconciliation=%s with failover off",
+    async (codex, canQueryBalance, visible) => {
+      const status = vi
+        .spyOn(proxyApi, "getProxyTakeoverStatus")
+        .mockResolvedValue({
+          claude: true,
+          codex,
+          gemini: false,
+          grokbuild: false,
+          opencode: false,
+          openclaw: false,
+          hermes: false,
+        });
+      renderRow({ tiers: [tier], canQueryBalance }, undefined);
+      await waitFor(() => expect(status).toHaveBeenCalled());
+      if (visible) {
+        expect(
+          await screen.findByRole("button", {
+            name: "loongport.reconcile.entry",
+          }),
+        ).toBeInTheDocument();
+      } else {
+        expect(
+          screen.queryByRole("button", { name: "loongport.reconcile.entry" }),
+        ).not.toBeInTheDocument();
+      }
+      status.mockRestore();
+    },
+  );
 });

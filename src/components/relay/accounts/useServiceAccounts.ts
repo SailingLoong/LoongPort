@@ -16,7 +16,7 @@ export type ServiceAccount =
       apps: Map<AppId, VendorAccountRow>;
     };
 
-const serviceAccountsKey = ["serviceAccounts"] as const;
+export const serviceAccountsKey = ["serviceAccounts"] as const;
 
 /** Keeps app-specific backend projections intact; the list itself is global. */
 export function useServiceAccounts() {

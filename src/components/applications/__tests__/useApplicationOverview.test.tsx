@@ -41,6 +41,40 @@ beforeEach(() => {
   });
 });
 describe("configuration selection", () => {
+  it("serializes manual custom-provider switches like managed tier switches", async () => {
+    let finish!: () => void;
+    const switchProvider = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const custom = {
+      ...target,
+      providerId: "custom",
+      selection: { kind: "provider" },
+    } as ApplicationConfiguration;
+    const customProviders = { custom: { id: "custom", name: "Custom" } } as any;
+    const { result } = renderHook(
+      () => useApplicationOverview("codex", customProviders, switchProvider),
+      { wrapper },
+    );
+    let first: Promise<void>;
+    await act(async () => {
+      first = result.current.select(custom);
+    });
+    expect(result.current.busy).toBe(true);
+    await act(async () => {
+      await result.current.select(custom);
+    });
+    expect(switchProvider).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      finish();
+      await first;
+    });
+    expect(result.current.busy).toBe(false);
+  });
+
   it("keeps the backend confirmation boundary and cancellation writes nothing further", async () => {
     mocks.relay.mockResolvedValue({
       status: "confirmationRequired",

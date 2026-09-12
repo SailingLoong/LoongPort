@@ -1,15 +1,9 @@
-//! 自动模式命令（LoongPort）。
-//!
-//! 自动模式：用户只选 app（和模型，M3），系统按全局策略（价格最低默认 /
-//! 响应最快）从托管档位里自动挑最合适的，当前档位带会话亲和。
-//! 选路注入在 `proxy::provider_router::select_providers`，这里只负责开关、
-//! 策略与「开启即切到策略第一名」的编排。
+//! Compatibility commands and TierBoard facts for application routing.
+//! Priority and fallback mutations belong to `proxy::application_routing`.
 
-use crate::events::PROVIDER_SWITCHED;
-use crate::proxy::auto_strategy::{self, AutoStrategy};
+use crate::proxy::auto_strategy;
 use crate::store::AppState;
 use std::str::FromStr;
-use tauri::Emitter;
 
 /// 自动模式状态快照（前端一次拉全）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -40,12 +34,10 @@ fn require_auto_mode_app(app_type: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 有没有可用的托管档位。与 `set_auto_mode_enabled` 里的开启判据同一份实现
-/// （`rank_managed_tier_candidates`），别各写一个判据 —— 分叉的结局是
-/// 「状态说能开、开启却报错」。
-fn has_managed_candidates(db: &crate::store::AppState, app_type: &str) -> bool {
-    auto_strategy::rank_managed_tier_candidates(&db.db, app_type, true)
-        .map(|ranked| ranked.is_some_and(|candidates| !candidates.is_empty()))
+/// Whether the application has any configured routing entries.
+fn has_routing_candidates(state: &crate::store::AppState, app_type: &str) -> bool {
+    crate::proxy::application_routing::ordered_providers(&state.db, app_type)
+        .map(|providers| !providers.is_empty())
         .unwrap_or(false)
 }
 
@@ -81,20 +73,17 @@ pub async fn get_auto_mode_status(
         .get_all_providers(&app_type)
         .map_err(|e| e.to_string())?;
     Ok(AutoModeStatus {
-        enabled: auto_strategy::is_auto_mode_enabled(&state.db, &app_type),
+        enabled: crate::proxy::application_routing::failover_enabled(&state.db, &app_type)
+            .map_err(|e| e.to_string())?,
         strategy: auto_strategy::get_strategy(&state.db).as_str().to_string(),
-        model: auto_strategy::get_model_pref(&state.db, &app_type),
+        model: crate::proxy::application_routing::effective_model(&state.db, &app_type),
         available_models: auto_strategy::auto_mode_models(&providers),
-        has_candidates: has_managed_candidates(&state, &app_type),
+        has_candidates: has_routing_candidates(&state, &app_type),
         cli_installed: cli_config_present(&app_type),
     })
 }
 
-/// 设置某应用的自动模式开关。
-///
-/// 开启要求该应用已处于代理接管态（与故障转移同一条前置：自动切换只发生在
-/// 接管态，CLI 流量走本地代理，热切换无感）。开启成功后立即切到策略第一名，
-/// 让「开了自动模式」的语义当场兑现；关闭只落开关，不动当前供应商。
+/// Legacy toggle delegates to application fallback permission without switching.
 #[tauri::command]
 pub async fn set_auto_mode_enabled(
     app: tauri::AppHandle,
@@ -102,87 +91,23 @@ pub async fn set_auto_mode_enabled(
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
-    require_auto_mode_app(&app_type)?;
-    log::info!("[AutoMode] Setting enabled: app_type='{app_type}', enabled={enabled}");
-
-    if enabled {
-        let config = state
-            .db
-            .get_proxy_config_for_app(&app_type)
-            .await
-            .map_err(|e| e.to_string())?;
-        if !config.enabled {
-            return Err("需要先启用该应用的代理接管，再开启自动模式".to_string());
-        }
-
-        // 候选必须非空才允许开 —— 空开会在 select_providers 里静默回退常规选路，
-        // 用户以为开了自动模式实际没生效。
-        // 排序与选路共用同一份实现（auto_strategy::rank_managed_tier_candidates，
-        // 含会话亲和置顶）：活跃会话里第一名就是当前档位，切换为 no-op，不丢缓存。
-        let Some(ranked) = auto_strategy::rank_managed_tier_candidates(&state.db, &app_type, true)
-            .map_err(|e| e.to_string())?
-        else {
-            return Err(
-                "没有可用的托管档位，无法开启自动模式。请先在中转站区登录并获取档位。".to_string(),
-            );
-        };
-
-        if let Some(best) = ranked.first() {
-            let best_id = best.id.clone();
-            let current_id = auto_strategy::effective_current_provider_id(&state.db, &app_type);
-            if current_id.as_deref() != Some(best_id.as_str()) {
-                state
-                    .proxy_service
-                    .switch_proxy_target(&app_type, &best_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                let _ = app.emit(
-                    PROVIDER_SWITCHED,
-                    serde_json::json!({
-                        "appType": app_type,
-                        "providerId": best_id,
-                        "source": "autoModeEnabled"
-                    }),
-                );
-            }
-        }
-    }
-
-    auto_strategy::set_enabled(&state.db, &app_type, enabled).map_err(|e| e.to_string())?;
-
-    // 刷新托盘菜单，确保状态同步
-    if let Ok(new_menu) = crate::tray::create_tray_menu(&app, &state) {
-        if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
-            let _ = tray.set_menu(Some(new_menu));
-        }
-    }
-
-    Ok(())
+    let _ = app;
+    crate::proxy::application_routing::set_failover(&state.db, &app_type, enabled)
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// 设置全局策略（cheapest / fastest）。
-///
-/// 只落设置不主动切换：新策略从下一批请求的排序生效（会话亲和仍然优先，
-/// 活跃会话不会被策略切换打断 —— 那正是亲和规则存在的理由）。
+/// Policy reranking is retired; callers must submit an explicit priority order.
 #[tauri::command]
 pub async fn set_auto_mode_strategy(
     state: tauri::State<'_, AppState>,
     strategy: String,
 ) -> Result<(), String> {
-    let parsed = match strategy.as_str() {
-        "cheapest" => AutoStrategy::Cheapest,
-        "fastest" => AutoStrategy::Fastest,
-        other => return Err(format!("未知的自动模式策略: {other}")),
-    };
-    auto_strategy::set_strategy(&state.db, parsed).map_err(|e| e.to_string())
+    let _ = (state, strategy);
+    Err("Policy routing has been retired; set application priority instead".into())
 }
 
-/// 设置某应用的自动模式模型偏好（M3 托盘 app→模型 映射的落点）。
-///
-/// `model = None` 表示「不限模型」。点选模型是**显式**选择：绕过会话亲和立即
-/// 切到「目录含该模型、策略最优」的档位（亲和保护的是系统重排别打断会话，
-/// 不替用户拒绝他刚点的选择），并把该档位的选中模型对齐到偏好。
+/// Set model intent without changing the selected provider.
 #[tauri::command]
 pub async fn set_auto_mode_model(
     app: tauri::AppHandle,
@@ -193,155 +118,46 @@ pub async fn set_auto_mode_model(
     set_auto_mode_model_impl(app, &state, &app_type, model.as_deref()).await
 }
 
-/// `set_auto_mode_model` 的可从托盘调用的核心（托盘事件处理拿不到
-/// `tauri::State`，但有 `AppHandle`）。
+/// Shared model mutation for the application API and legacy tray events.
 pub(crate) async fn set_auto_mode_model_impl(
     app: tauri::AppHandle,
     state: &AppState,
     app_type: &str,
     model: Option<&str>,
 ) -> Result<(), String> {
-    require_auto_mode_app(app_type)?;
-    if !auto_strategy::is_auto_mode_enabled(&state.db, app_type) {
-        return Err("自动模式未开启，请先在设置中开启再选择模型".to_string());
+    let _ = app;
+    if !crate::proxy::application_routing::takeover_enabled(&state.db, app_type)
+        .map_err(|e| e.to_string())?
+        || !state.proxy_service.is_running().await
+    {
+        return Err("Model routing requires a running application proxy and takeover".into());
     }
-    let config = state
-        .db
-        .get_proxy_config_for_app(app_type)
-        .await
-        .map_err(|e| e.to_string())?;
-    if !config.enabled {
-        return Err("自动模式需要代理接管态，请先恢复接管".to_string());
-    }
-
-    auto_strategy::set_model_pref(&state.db, app_type, model).map_err(|e| e.to_string())?;
-
-    // 显式选择：绕过亲和（honor_affinity=false），立即切到过滤+排序后的第一名
-    let ranked = auto_strategy::rank_managed_tier_candidates(&state.db, app_type, false)
-        .map_err(|e| e.to_string())?;
-    let Some(best) = ranked.and_then(|mut r| {
-        if r.is_empty() {
-            None
-        } else {
-            Some(r.remove(0))
-        }
-    }) else {
-        return Ok(()); // 偏好已落库；没有可切档位时下一次选路自然生效
-    };
-
-    let current_id = auto_strategy::effective_current_provider_id(&state.db, app_type);
-    if current_id.as_deref() != Some(best.id.as_str()) {
-        state
-            .proxy_service
-            .switch_proxy_target(app_type, &best.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let _ = app.emit(
-            PROVIDER_SWITCHED,
-            serde_json::json!({
-                "appType": app_type,
-                "providerId": best.id,
-                "source": "autoModeModel"
-            }),
-        );
-    }
-
-    // 对齐档位的选中模型（接管态下走热路径，无 ChatGPT 退重开编排）
-    if let Some(model) = model {
-        let wants_model = auto_strategy::tier_models(&best).iter().any(|m| m == model);
-        let current_model = crate::relay::provision::extract_model(&best.settings_config);
-        if wants_model && current_model.as_deref() != Some(model) {
-            let mut user_choice = None;
-            loop {
-                let outcome = crate::commands::switch_tier_model_command(
-                    &app,
-                    &best.id,
-                    crate::app_config::AppType::from_str(app_type).map_err(|e| e.to_string())?,
-                    model,
-                    user_choice,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                match outcome {
-                    crate::commands::SwitchTierCommandResult::ConfirmationRequired {
-                        target_name,
-                    } => {
-                        // 原生确认对话框是阻塞调用，丢到 blocking 线程池别卡 async worker
-                        // （接管态下通常不会走到这里，见 needs_user_attention）
-                        let app_for_dialog = app.clone();
-                        let confirmed = tauri::async_runtime::spawn_blocking(move || {
-                            crate::tray::confirm_quit_chatgpt(&app_for_dialog, &target_name)
-                        })
-                        .await
-                        .unwrap_or(false);
-                        if !confirmed {
-                            return Ok(());
-                        }
-                        user_choice = Some(true);
-                    }
-                    crate::commands::SwitchTierCommandResult::Switched { result } => {
-                        for warning in &result.warnings {
-                            log::warn!("[AutoMode] 切换档位模型后警告: {warning}");
-                        }
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    // 刷新托盘菜单，确保勾选状态同步
-    if let Ok(new_menu) = crate::tray::create_tray_menu(&app, state) {
-        if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
-            let _ = tray.set_menu(Some(new_menu));
-        }
-    }
-
-    Ok(())
+    crate::proxy::application_routing::set_model(&state.db, app_type, model)
+        .map_err(|e| e.to_string())
 }
 
-/// 设置某应用的省心选路模式（auto / manual）。
-///
-/// 首次切到 manual 且还没有手动清单时，把当前选路序快照成初始清单 ——
-/// 用户从现状开始拖，不给空白列表。
+/// Only persistent manual ordering remains supported.
 #[tauri::command]
 pub async fn set_easy_mode_mode(
     state: tauri::State<'_, AppState>,
     app_type: String,
     mode: String,
 ) -> Result<(), String> {
-    require_auto_mode_app(&app_type)?;
-    let parsed = auto_strategy::EasyModeMode::from_setting_value(&mode);
-    if parsed.as_str() != mode {
-        return Err(format!("未知的省心选路模式: {mode}"));
+    if mode != "manual" {
+        return Err("Policy routing has been retired; set application priority instead".into());
     }
-    if parsed == auto_strategy::EasyModeMode::Manual
-        && auto_strategy::get_manual_order(&state.db, &app_type).is_empty()
-    {
-        let snapshot: Vec<String> =
-            auto_strategy::rank_managed_tier_candidates(&state.db, &app_type, false)
-                .map_err(|e| e.to_string())?
-                .unwrap_or_default()
-                .into_iter()
-                .map(|p| p.id)
-                .collect();
-        if !snapshot.is_empty() {
-            auto_strategy::set_manual_order(&state.db, &app_type, &snapshot)
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    auto_strategy::set_mode(&state.db, &app_type, parsed).map_err(|e| e.to_string())
+    crate::proxy::application_routing::migrate(&state.db, &app_type).map_err(|e| e.to_string())
 }
 
-/// 写某应用的手动档位顺序（前端拖拽落定后整份提交）。
+/// Compatibility alias for application priority.
 #[tauri::command]
 pub async fn set_easy_mode_manual_order(
     state: tauri::State<'_, AppState>,
     app_type: String,
     ordered_ids: Vec<String>,
 ) -> Result<(), String> {
-    require_auto_mode_app(&app_type)?;
-    auto_strategy::set_manual_order(&state.db, &app_type, &ordered_ids).map_err(|e| e.to_string())
+    crate::proxy::application_routing::set_order(&state.db, &app_type, &ordered_ids)
+        .map_err(|e| e.to_string())
 }
 
 /// 省心模式档位看板的一行（首页省心视图的展示事实，全部后端算好）。
@@ -371,8 +187,7 @@ pub struct TierBoardTier {
     /// 从未失败 = `Some(true)` / `Some(0)` / `None`，前端据此不显示健康标记。
     pub is_healthy: Option<bool>,
     pub consecutive_failures: Option<u32>,
-    /// 最近一次失败的上游报错原文（`ProxyError::to_string()`，成功即被清空）。
-    /// 「为什么不选用」标签的数据源。
+    /// Last recorded upstream failure, independent of routing eligibility.
     pub last_error: Option<String>,
     /// 今日花费（美元，本地时区「今天」，与限额页同口径）；`None` = 今天没有行。
     pub today_cost_usd: Option<f64>,
@@ -435,15 +250,11 @@ pub async fn easy_mode_tier_board(
 
 /// 看板核心（真实 smoke 直接调它，不走 tauri State）。
 pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<TierBoard, String> {
-    require_auto_mode_app(app_type)?;
+    crate::app_config::AppType::from_str(app_type).map_err(|e| e.to_string())?;
     let db = &state.db;
     let providers = db.get_all_providers(app_type).map_err(|e| e.to_string())?;
-    // honor_affinity=false：看板展示纯策略序/手动序。会话亲和置顶是选路语义
-    // （防中途换档丢提示词缓存），展示要的是「价格序 + 谁在用标当前 + 没在用
-    // 的给出原因」的心智模型，两者别共用一个形状。
-    let ranked = auto_strategy::rank_managed_tier_candidates(db, app_type, false)
-        .map_err(|e| e.to_string())?
-        .unwrap_or_default();
+    let ranked = crate::proxy::application_routing::ordered_providers(db, app_type)
+        .map_err(|e| e.to_string())?;
     let multipliers = db.get_tier_rate_multipliers(app_type).unwrap_or_default();
     let ttft = db
         .get_provider_avg_first_token_ms(app_type, chrono::Utc::now().timestamp() - 7 * 86400)
@@ -455,11 +266,14 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let recent_activity = db
         .get_provider_activity_buckets(app_type, chrono::Utc::now().timestamp() - 6 * 3600, 900, 24)
         .unwrap_or_default();
-    let model_pref = auto_strategy::get_model_pref(db, app_type);
-    let current_id = auto_strategy::effective_current_provider_id(db, app_type);
+    let routing_active = crate::proxy::application_routing::takeover_enabled(db, app_type)
+        .map_err(|e| e.to_string())?
+        && state.proxy_service.is_running().await;
+    let model_pref = routing_active
+        .then(|| crate::proxy::application_routing::effective_model(db, app_type))
+        .flatten();
+    let current_id = crate::proxy::application_routing::current_provider_id(db, app_type);
 
-    let last_activity = db.get_provider_last_activity(app_type).unwrap_or_default();
-    let now = chrono::Utc::now().timestamp();
     let provider_ids: Vec<String> = ranked.iter().map(|p| p.id.clone()).collect();
     let breaker_states = state
         .proxy_service
@@ -515,47 +329,46 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     let tiers = ranked
         .into_iter()
         .enumerate()
-        .map(|(position, p)| TierBoardTier {
-            is_current: current_id.as_deref() == Some(p.id.as_str()),
-            effective_model: model_pref
-                .clone()
-                .or_else(|| crate::relay::provision::extract_model(&p.settings_config)),
-            unit_price_per_million: auto_strategy::effective_unit_price(
-                db,
-                &p,
-                model_pref.as_deref(),
-            ),
-            rate_multiplier: multipliers.get(&p.id).copied(),
-            avg_first_token_ms: ttft.get(&p.id).copied(),
-            balance_usd: balances.get(&p.id).copied().flatten(),
-            verification_verdict: verification_verdict(&p.id),
-            is_healthy: health.get(&p.id).map(|h| h.is_healthy),
-            consecutive_failures: health.get(&p.id).map(|h| h.consecutive_failures),
-            last_error: health.get(&p.id).and_then(|h| h.last_error.clone()),
-            today_cost_usd: today.get(&p.id).map(|(cost, _)| *cost),
-            today_requests: today.get(&p.id).map(|(_, requests)| *requests),
-            cache_hit_rate: cache_hit_rates.get(&p.id).copied(),
-            recent_activity: recent_activity.get(&p.id).cloned(),
-            breaker_state: breaker_states
-                .get(&p.id)
-                .map(|snap| if snap.half_open { "half_open" } else { "open" }.to_string()),
-            breaker_reopen_in_secs: breaker_states
-                .get(&p.id)
-                .and_then(|snap| snap.reopen_in_secs),
-            affinity_remaining_secs: (current_id.as_deref() == Some(p.id.as_str()))
-                .then(|| {
-                    last_activity
-                        .get(&p.id)
-                        .map(|last| {
-                            (last + crate::proxy::auto_strategy::AFFINITY_WINDOW_SECS - now).max(0)
-                                as u64
+        .map(|(position, p)| {
+            let effective_model = routing_active
+                .then(|| crate::proxy::application_routing::model_for_provider(db, app_type, &p))
+                .flatten()
+                .or_else(|| {
+                    crate::app_config::AppType::from_str(app_type)
+                        .ok()
+                        .and_then(|app| {
+                            crate::relay::provision::selected_model(&app, &p.settings_config)
                         })
-                        .filter(|remaining| *remaining > 0)
-                })
-                .flatten(),
-            provider_id: p.id.clone(),
-            name: p.name.clone(),
-            position,
+                });
+            let unit_price_per_million = effective_model
+                .as_deref()
+                .and_then(|model| auto_strategy::effective_unit_price(db, &p, Some(model)));
+            TierBoardTier {
+                is_current: current_id.as_deref() == Some(p.id.as_str()),
+                effective_model,
+                unit_price_per_million,
+                rate_multiplier: multipliers.get(&p.id).copied(),
+                avg_first_token_ms: ttft.get(&p.id).copied(),
+                balance_usd: balances.get(&p.id).copied().flatten(),
+                verification_verdict: verification_verdict(&p.id),
+                is_healthy: health.get(&p.id).map(|h| h.is_healthy),
+                consecutive_failures: health.get(&p.id).map(|h| h.consecutive_failures),
+                last_error: health.get(&p.id).and_then(|h| h.last_error.clone()),
+                today_cost_usd: today.get(&p.id).map(|(cost, _)| *cost),
+                today_requests: today.get(&p.id).map(|(_, requests)| *requests),
+                cache_hit_rate: cache_hit_rates.get(&p.id).copied(),
+                recent_activity: recent_activity.get(&p.id).cloned(),
+                breaker_state: breaker_states
+                    .get(&p.id)
+                    .map(|snap| if snap.half_open { "half_open" } else { "open" }.to_string()),
+                breaker_reopen_in_secs: breaker_states
+                    .get(&p.id)
+                    .and_then(|snap| snap.reopen_in_secs),
+                affinity_remaining_secs: None,
+                provider_id: p.id.clone(),
+                name: p.name.clone(),
+                position,
+            }
         })
         .collect();
 
@@ -564,9 +377,6 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     // 倍率或价格未知的档不参与最低价比较）
     let mut model_options: Vec<TierBoardModelOption> = Vec::new();
     for provider in providers.values() {
-        if !crate::relay::is_managed(&provider.id) {
-            continue;
-        }
         let multiplier = multipliers.get(&provider.id).copied();
         for model in auto_strategy::tier_models(provider) {
             let unit_price = model_unit_price(db, &model);
@@ -597,7 +407,7 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
     }
 
     Ok(TierBoard {
-        mode: auto_strategy::get_mode(db, app_type).as_str().to_string(),
+        mode: "manual".to_string(),
         strategy: auto_strategy::get_strategy(db).as_str().to_string(),
         model: model_pref,
         model_options,
@@ -714,8 +524,14 @@ mod tests {
             .unwrap();
         db.set_current_provider("claude", &expensive).unwrap();
 
+        crate::proxy::application_routing::set_order(
+            &db,
+            "claude",
+            &[cheap.clone(), expensive.clone()],
+        )
+        .unwrap();
         let board = tier_board_impl(&state, "claude").await.unwrap();
-        assert_eq!(board.mode, "auto");
+        assert_eq!(board.mode, "manual");
         assert_eq!(board.strategy, "cheapest");
         assert_eq!(board.tiers.len(), 2);
         assert_eq!(board.tiers[0].provider_id, cheap, "自动模式便宜在前");
@@ -768,14 +584,7 @@ mod tests {
         );
         assert_eq!(list_for_provider_ids(&db, &[]).unwrap().len(), 0);
 
-        // 手动模式：手动序反映到看板
-        crate::proxy::auto_strategy::set_mode(
-            &db,
-            "claude",
-            crate::proxy::auto_strategy::EasyModeMode::Manual,
-        )
-        .unwrap();
-        crate::proxy::auto_strategy::set_manual_order(
+        crate::proxy::application_routing::set_order(
             &db,
             "claude",
             &[expensive.clone(), cheap.clone()],
@@ -791,7 +600,7 @@ mod tests {
     /// 「价格序 + 谁在用标当前 + 没在用的给出原因」。
     #[tokio::test]
     #[serial]
-    async fn tier_board_stays_pure_price_order_with_active_current() {
+    async fn tier_board_keeps_priority_with_active_current() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone());
@@ -816,6 +625,12 @@ mod tests {
 
         // 当前档位（贵）30 分钟内有流量 → 选路会亲和置顶；看板必须保持纯价格序
         seed_board_activity(&db, "claude", &expensive);
+        crate::proxy::application_routing::set_order(
+            &db,
+            "claude",
+            &[cheap.clone(), expensive.clone()],
+        )
+        .unwrap();
 
         let board = tier_board_impl(&state, "claude").await.unwrap();
         assert_eq!(
@@ -883,7 +698,7 @@ mod tests {
     /// 熔断字段在代理未运行时全 None（无内存态可读，前端只信 DB 健康）。
     #[tokio::test]
     #[serial]
-    async fn tier_board_surfaces_affinity_countdown_for_active_current() {
+    async fn tier_board_does_not_imply_automatic_switchback_after_idle() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone());
@@ -932,13 +747,7 @@ mod tests {
 
         let board = tier_board_impl(&state, "claude").await.unwrap();
         let by_id = |id: &str| board.tiers.iter().find(|t| t.provider_id == id).unwrap();
-        let remaining = by_id(&current)
-            .affinity_remaining_secs
-            .expect("活跃当前档位必须有亲和倒计时");
-        assert!(
-            remaining > 0 && remaining <= 30 * 60,
-            "剩余 {remaining} 应在 (0, 30min]"
-        );
+        assert_eq!(by_id(&current).affinity_remaining_secs, None);
         assert_eq!(
             by_id(&other).affinity_remaining_secs,
             None,
@@ -952,8 +761,7 @@ mod tests {
         assert_eq!(by_id(&current).breaker_reopen_in_secs, None);
     }
 
-    /// 亲和判据与选路同源（proxy_request_logs 近期流量），见
-    /// `auto_strategy::AFFINITY_WINDOW_SECS`。
+    /// Recent usage must not reorder persistent application priorities.
     fn seed_board_activity(db: &Database, app_type: &str, provider_id: &str) {
         let conn = db.conn.lock().unwrap();
         conn.execute(

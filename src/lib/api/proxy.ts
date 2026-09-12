@@ -7,6 +7,11 @@ import type {
   AppProxyConfig,
 } from "@/types/proxy";
 
+export type AppProxyOptions = Omit<
+  AppProxyConfig,
+  "enabled" | "autoFailoverEnabled"
+>;
+
 export const proxyApi = {
   // ========== 代理服务器控制 API ==========
 
@@ -65,6 +70,10 @@ export const proxyApi = {
   // 更新指定应用的代理配置
   async updateProxyConfigForApp(config: AppProxyConfig): Promise<void> {
     return invoke("update_proxy_config_for_app", { config });
+  },
+
+  async updateProxyOptionsForApp(options: AppProxyOptions): Promise<void> {
+    return invoke("update_proxy_options_for_app", { options });
   },
 
   // ========== 计费默认配置 API ==========

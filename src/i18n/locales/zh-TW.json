@@ -922,7 +922,11 @@
     "crowdMetricsDescription": "上傳站點級聚合指標（首字耗時、錯誤率等，按小時聚合），並解鎖廣場的使用者實測資料。不含提示詞、金鑰或帳號資訊。",
     "plazaVisibility": "中轉站廣場",
     "plazaVisibilityToggle": "顯示廣場推薦列表",
-    "plazaVisibilityDescription": "在新增站點頁展示中轉站推薦列表；關閉後仍可透過搜尋框手動新增站點"
+    "plazaVisibilityDescription": "在新增站點頁展示中轉站推薦列表；關閉後仍可透過搜尋框手動新增站點",
+    "tabConnection": "連線設定",
+    "connection": {
+      "applicationsHint": "檔位選擇、排序和自動故障切換在應用程式頁設定。"
+    }
   },
   "apps": {
     "claude": "Claude",
@@ -3614,7 +3618,14 @@
         "noTiers": "尚無接入設定",
         "ready": "已就緒",
         "noKey": "尚未取得金鑰"
-      }
+      },
+      "configure": "一鍵設定",
+      "recharge": "儲值",
+      "hideDetails": "隱藏帳號資訊",
+      "showDetails": "顯示帳號資訊",
+      "removeRelay": "刪除「{{label}}」？這將刪除該帳號的登入資訊，以及所有應用程式中的全部分組和檔位。中轉站餘額不受影響。",
+      "removeRelayInUse": "刪除「{{label}}」？這將刪除該帳號的登入資訊，以及所有應用程式中的全部分組和檔位。目前使用情況：{{usages}}。受影響的應用程式將切回官方登入，可能需要重新登入並重新啟動。中轉站餘額不受影響。",
+      "removeVendor": "刪除「{{label}}」？這將刪除該帳號的登入資訊、本機 API 金鑰，以及所有應用程式中的全部方案與接入設定。服務商網站上的 API 金鑰不會被刪除。"
     },
     "onboarding": {
       "domain": "中轉站網址",
@@ -3841,11 +3852,11 @@
     "switchService": "切換服務",
     "selectDescription": "選擇服務與帳號，再選擇需要的設定。",
     "addService": "新增服務",
-    "search": "搜尋服務、帳號、設定或模型",
+    "search": "搜尋中轉站、帳號、檔位或模型",
     "source": "服務來源",
     "default": "預設",
-    "configured": "已設定",
-    "use": "使用",
+    "configured": "目前",
+    "use": "設為目前檔位",
     "manageAccount": "管理帳號",
     "empty": "尚未選擇設定",
     "recent": "最近使用",
@@ -3859,6 +3870,37 @@
       "official": "官方服務",
       "relay": "中轉站",
       "custom": "自訂"
-    }
+    },
+    "availableTiers": "可用檔位",
+    "priority": "優先級",
+    "tier": "檔位 / 帳號",
+    "action": "操作",
+    "autoFailover": "自動故障切換",
+    "priorityHint": "數字越小，優先級越高。開啟自動故障切換後，從目前檔位依序向下嘗試。",
+    "orderHint": "拖曳調整檔位順序，也可點擊指標排序。",
+    "dragTier": "拖曳調整 {{name}} 的優先級",
+    "lastError": "最近錯誤",
+    "metricsHint": "錯誤率、首字耗時與快取命中率統計近 7 天；— 表示暫無資料。餘額為帳號共用餘額。",
+    "updateFailed": "更新失敗，請重試",
+    "metrics": {
+      "rateMultiplier": "倍率",
+      "errorRate": "錯誤率",
+      "avgFirstTokenMs": "首字耗時",
+      "balanceUsd": "帳號餘額",
+      "cacheHitRate": "快取命中率",
+      "todayCostUsd": "今日花費"
+    },
+    "skipReasons": {
+      "official_account": "此官方帳號僅支援手動切換",
+      "model_incompatible": "已略過：不支援目前選擇的模型",
+      "circuit_open": "暫時略過：等待連線恢復",
+      "before_current": "位於目前檔位之前，不參與後續故障切換",
+      "current_official_account": "目前使用官方登入，不進行自動故障切換",
+      "native_configuration": "使用應用程式原生登入，不參與自動故障切換"
+    },
+    "routingPaused": "自動故障切換已暫停，連線服務未執行或應用程式未接入。",
+    "resumeRouting": "恢復連線",
+    "enabled": "已啟用",
+    "enable": "啟用"
   }
 }

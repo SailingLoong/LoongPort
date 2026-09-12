@@ -921,7 +921,11 @@
     "crowdMetricsDescription": "上传站点级聚合指标（首字耗时、错误率等，按小时聚合），并解锁广场的用户实测数据。不含提示词、密钥或账号信息。",
     "plazaVisibility": "中转站广场",
     "plazaVisibilityToggle": "显示广场推荐列表",
-    "plazaVisibilityDescription": "在添加站点页展示中转站推荐列表；关闭后仍可通过搜索框手动添加站点"
+    "plazaVisibilityDescription": "在添加站点页展示中转站推荐列表；关闭后仍可通过搜索框手动添加站点",
+    "tabConnection": "连接设置",
+    "connection": {
+      "applicationsHint": "档位选择、排序和自动故障切换在应用页设置。"
+    }
   },
   "apps": {
     "claude": "Claude",
@@ -3613,7 +3617,14 @@
         "noTiers": "尚无接入配置",
         "ready": "已就绪",
         "noKey": "尚未获取密钥"
-      }
+      },
+      "configure": "一键配置",
+      "recharge": "充值",
+      "hideDetails": "隐藏账号信息",
+      "showDetails": "显示账号信息",
+      "removeRelay": "删除“{{label}}”？这将删除该账号的登录信息，以及所有应用中的全部分组和档位。中转站余额不会受影响。",
+      "removeRelayInUse": "删除“{{label}}”？这将删除该账号的登录信息，以及所有应用中的全部分组和档位。当前使用情况：{{usages}}。受影响的应用将切回官方登录，可能需要重新登录并重启。中转站余额不会受影响。",
+      "removeVendor": "删除“{{label}}”？这将删除该账号的登录信息、本地 API 密钥，以及所有应用中的全部套餐与接入配置。服务商网站上的 API 密钥不会被删除。"
     },
     "onboarding": {
       "domain": "中转站网址",
@@ -3840,11 +3851,11 @@
     "switchService": "切换服务",
     "selectDescription": "选择服务与账号，再选择需要的配置。",
     "addService": "添加服务",
-    "search": "搜索服务、账号、配置或模型",
+    "search": "搜索中转站、账号、档位或模型",
     "source": "服务来源",
     "default": "默认",
-    "configured": "已配置",
-    "use": "使用",
+    "configured": "当前",
+    "use": "设为当前",
     "manageAccount": "管理账号",
     "empty": "尚未选择配置",
     "recent": "最近使用",
@@ -3858,6 +3869,37 @@
       "official": "官方服务",
       "relay": "中转站",
       "custom": "自定义"
-    }
+    },
+    "availableTiers": "可用档位",
+    "priority": "优先级",
+    "tier": "档位 / 账号",
+    "action": "操作",
+    "autoFailover": "自动故障切换",
+    "priorityHint": "数字越小，优先级越高。开启自动故障切换后，从当前档位依次向下尝试。",
+    "orderHint": "拖动调整档位顺序，也可点击指标排序。",
+    "dragTier": "拖动调整 {{name}} 的优先级",
+    "lastError": "最近错误",
+    "metricsHint": "错误率、首字耗时与缓存命中率统计近 7 天；— 表示暂无数据。余额为账号共享余额。",
+    "updateFailed": "更新失败，请重试",
+    "metrics": {
+      "rateMultiplier": "倍率",
+      "errorRate": "错误率",
+      "avgFirstTokenMs": "首字耗时",
+      "balanceUsd": "账号余额",
+      "cacheHitRate": "缓存命中率",
+      "todayCostUsd": "今日花费"
+    },
+    "skipReasons": {
+      "official_account": "仅支持手动切换此官方账号",
+      "model_incompatible": "已跳过：不支持当前选择的模型",
+      "circuit_open": "暂时跳过：等待连接恢复",
+      "before_current": "位于当前档位之前，不参与后续故障切换",
+      "current_official_account": "当前使用官方登录，不进行自动故障切换",
+      "native_configuration": "使用应用原生登录，不参与自动故障切换"
+    },
+    "routingPaused": "自动故障切换已暂停，连接服务未运行或应用未接入。",
+    "resumeRouting": "恢复连接",
+    "enabled": "已启用",
+    "enable": "启用"
   }
 }

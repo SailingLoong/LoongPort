@@ -60,10 +60,10 @@ pub async fn stream_check_all_providers(
         if let Ok(Some(current_id)) = state.db.get_current_provider(app_type.as_str()) {
             ids.insert(current_id);
         }
-        if let Ok(queue) = state.db.get_failover_queue(app_type.as_str()) {
-            for item in queue {
-                ids.insert(item.provider_id);
-            }
+        for provider in
+            crate::proxy::application_routing::ordered_providers(&state.db, app_type.as_str())?
+        {
+            ids.insert(provider.id);
         }
         Some(ids)
     } else {

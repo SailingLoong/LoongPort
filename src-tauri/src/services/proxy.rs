@@ -424,6 +424,14 @@ impl ProxyService {
         codex_oauth_manager: Arc<CodexOAuthManager>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
     ) -> Self {
+        for app in AppType::all() {
+            if let Err(error) = crate::proxy::application_routing::migrate(&db, app.as_str()) {
+                log::error!(
+                    "Application routing migration failed for {}: {error}",
+                    app.as_str()
+                );
+            }
+        }
         Self {
             db,
             passive_ingress,

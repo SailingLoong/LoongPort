@@ -1,40 +1,8 @@
-//! 自动模式策略排序（LoongPort）。
-//!
-//! 产品语义：用户只选 app（和模型，M3），系统从可用托管档位里按策略挑最合适的。
-//! 排序是**字典序**（分桶粗比，不做加权综合分——权重是魔法数，结果不可解释，
-//! 加新维度 = 插一层比较，不用重调全局权重）：
-//!
-//! - **Cheapest（默认）**：`倍率 × 模型单价` 精确比价。只比倍率会漏掉「低倍率
-//!   配贵模型」的档位；单价取有效模型（偏好优先，否则档位选中模型）每百万
-//!   token 输入+输出之和；查不到价的模型保守排在有价模型之后（组内按倍率比），
-//!   倍率来自站点实时数据、永远可信，单价表可能没收录新模型。
-//! - **Fastest**：首字（TTFT）分桶粗比。
-//!
-//! 主键之后两种策略共享同一条体验判据链：**先比稳定（站点侧错误率分桶）、
-//! 再补齐另一维度**（Cheapest 补首字桶、Fastest 补价格）——稳定永远在主键
-//! 之后第一个出场。体验维度走粗桶：同桶内不认为有差别，交给下一级键决胜，
-//! 价格在「体验同级」的档位之间真正说话。
-//!
-//! 稳定与首字的数据来源唯源在 [`crate::proxy::auto_health`]：本地近窗实测
-//! 优先、回落众测站点快照、无数据按最差档参与——冷启动（全部无数据）时
-//! 排序退化为纯价格序，与上一代行为等价。
-//!
-//! ## 会话亲和（硬需求）
-//!
-//! 同一会话中途切换供应商会丢失提示词缓存，未命中缓存的请求按全价计费 ——
-//! 所以**当前在用档位只要近期还有流量，就保持置顶**，策略重排只影响它身后的
-//! 候选顺序（当前档位故障熔断后自然落到重排结果上）。闲置超过亲和窗口，
-//! 重排才真正接管（下一批请求由策略第一名服务，成功后热切换）。
-//!
-//! ## 为什么是独立模块
-//!
-//! `provider_router` / `circuit_breaker` 来自上游，选路骨架保持最小改动；
-//! 自动模式的排序判据、窗口、亲和规则全是 LoongPort 语义，收在这里。
+//! Legacy setting keys plus shared model and pricing facts.
+//! Policy ranking and affinity have been retired in favor of application priority.
 
 use crate::database::Database;
 use crate::provider::Provider;
-use std::cmp::Ordering;
-use std::str::FromStr;
 
 /// settings 表里「某应用自动模式是否开启」的 key 前缀（`auto_mode_enabled_<app>`）。
 pub const SETTING_ENABLED_PREFIX: &str = "auto_mode_enabled_";
@@ -51,50 +19,6 @@ pub const SETTING_MODE_PREFIX: &str = "easy_mode_mode_";
 /// 读取函数兜底：不认识的忽略、漏掉的按策略序追加 —— 手动序永远不能让档位丢失。
 pub const SETTING_MANUAL_ORDER_PREFIX: &str = "easy_mode_manual_order_";
 
-/// 省心模式的选路模式：自动按策略排序 / 用户手动定序。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EasyModeMode {
-    /// 系统按策略（cheapest/fastest）排序，会话亲和照常。
-    Auto,
-    /// 用户拖拽定的顺序即优先级；亲和、熔断、故障转移照常（定序 ≠ 关保险）。
-    Manual,
-}
-
-impl EasyModeMode {
-    /// 从 settings 值解析；不认识的值落回默认（auto）。
-    pub fn from_setting_value(value: &str) -> Self {
-        match value {
-            "manual" => Self::Manual,
-            _ => Self::Auto,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Manual => "manual",
-        }
-    }
-}
-
-/// 读某应用的选路模式（缺省 auto）。
-pub fn get_mode(db: &Database, app_type: &str) -> EasyModeMode {
-    db.get_setting(&format!("{SETTING_MODE_PREFIX}{app_type}"))
-        .ok()
-        .flatten()
-        .map(|value| EasyModeMode::from_setting_value(&value))
-        .unwrap_or(EasyModeMode::Auto)
-}
-
-/// 写某应用的选路模式。
-pub fn set_mode(
-    db: &Database,
-    app_type: &str,
-    mode: EasyModeMode,
-) -> Result<(), crate::error::AppError> {
-    db.set_setting(&format!("{SETTING_MODE_PREFIX}{app_type}"), mode.as_str())
-}
-
 /// 读某应用的手动档位顺序。脏数据 / 不存在 → 空清单（等同「全按策略追加」）。
 pub fn get_manual_order(db: &Database, app_type: &str) -> Vec<String> {
     db.get_setting(&format!("{SETTING_MANUAL_ORDER_PREFIX}{app_type}"))
@@ -105,6 +29,7 @@ pub fn get_manual_order(db: &Database, app_type: &str) -> Vec<String> {
 }
 
 /// 写某应用的手动档位顺序（完整清单，前端拖拽落定后整份提交）。
+#[cfg(test)]
 pub fn set_manual_order(
     db: &Database,
     app_type: &str,
@@ -116,11 +41,6 @@ pub fn set_manual_order(
             .map_err(|e| crate::error::AppError::Config(format!("序列化手动顺序失败: {e}")))?,
     )
 }
-
-/// 会话亲和窗口：当前档位最近一次请求距今小于该值即视为「会话进行中」。
-/// 30 分钟 ≈ 一次长编码会话的自然间隔，期间不因策略重排切走。
-/// 公开给 `provider_router`（非托管当前供应商的置顶判断用同一窗口，别两处各写一份）。
-pub const AFFINITY_WINDOW_SECS: i64 = 30 * 60;
 
 /// 自动模式策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +69,7 @@ impl AutoStrategy {
 }
 
 /// 某应用的自动模式是否开启（settings 表，缺省 false）。
+#[cfg(test)]
 pub fn is_auto_mode_enabled(db: &Database, app_type: &str) -> bool {
     db.get_setting(&format!("{SETTING_ENABLED_PREFIX}{app_type}"))
         .ok()
@@ -156,14 +77,10 @@ pub fn is_auto_mode_enabled(db: &Database, app_type: &str) -> bool {
         .is_some_and(|value| value == "true")
 }
 
-/// 该 app 的故障转移行为（请求内换档、重试、超时）是否生效。
-///
-/// 显式开关或省心模式任一开启即生效：省心模式的产品语义就是系统自动挑档并无缝
-/// 切换，不依赖用户再去高级区打开旧开关（它默认关）。选路侧省心模式优先于故障
-/// 转移队列（`provider_router::select_providers`），这里是转发/响应侧的同一判据
-/// —— 两处必须同真同假，别各写一份。
-pub fn failover_active(db: &Database, app_type: &str, auto_failover_enabled: bool) -> bool {
-    auto_failover_enabled || is_auto_mode_enabled(db, app_type)
+/// Request retries use only application fallback permission. Legacy mode state
+/// is migrated at owner startup and cannot override this setting.
+pub fn failover_active(_db: &Database, _app_type: &str, auto_failover_enabled: bool) -> bool {
+    auto_failover_enabled
 }
 
 /// 读全局策略（缺省 cheapest）。
@@ -176,6 +93,7 @@ pub fn get_strategy(db: &Database) -> AutoStrategy {
 }
 
 /// 写入某应用的自动模式开关。
+#[cfg(test)]
 pub fn set_enabled(
     db: &Database,
     app_type: &str,
@@ -185,11 +103,6 @@ pub fn set_enabled(
         &format!("{SETTING_ENABLED_PREFIX}{app_type}"),
         if enabled { "true" } else { "false" },
     )
-}
-
-/// 写入全局策略。
-pub fn set_strategy(db: &Database, strategy: AutoStrategy) -> Result<(), crate::error::AppError> {
-    db.set_setting(SETTING_STRATEGY, strategy.as_str())
 }
 
 /// 读某应用的模型偏好（`None` = 不限模型）。
@@ -225,9 +138,6 @@ pub fn tier_models(tier: &Provider) -> Vec<String> {
 pub fn auto_mode_models(providers: &indexmap::IndexMap<String, Provider>) -> Vec<String> {
     let mut models: Vec<String> = Vec::new();
     for provider in providers.values() {
-        if !crate::relay::is_managed(&provider.id) {
-            continue;
-        }
         for model in tier_models(provider) {
             if !models.contains(&model) {
                 models.push(model);
@@ -235,218 +145,6 @@ pub fn auto_mode_models(providers: &indexmap::IndexMap<String, Provider>) -> Vec
         }
     }
     models
-}
-
-/// 按模型偏好过滤候选：只保留目录里含偏好模型的档位。
-///
-/// 两类回退都不拦人：偏好的模型已从所有目录下架（过滤后为空）→ 回退全量，
-/// 选路不能因为一个过期偏好就没档位可用；该应用根本没有目录（非 Codex 系）
-/// → 过滤无意义，直接全量。无目录档位在有偏好时**不**保留 —— 目录都没有，
-/// 无法证明它能服务这个模型。
-fn filter_by_model_pref(tiers: Vec<Provider>, model_pref: Option<&str>) -> Vec<Provider> {
-    let Some(model) = model_pref else {
-        return tiers;
-    };
-    let has_catalogs = tiers.iter().any(|t| !tier_models(t).is_empty());
-    if !has_catalogs {
-        return tiers;
-    }
-    let filtered: Vec<Provider> = tiers
-        .iter()
-        .filter(|t| tier_models(t).iter().any(|m| m == model))
-        .cloned()
-        .collect();
-    if filtered.is_empty() {
-        log::warn!("[AutoMode] 模型偏好 {model} 不在任何档位目录中，回退全量候选");
-        return tiers;
-    }
-    filtered
-}
-
-/// 当前供应商 id：本地 settings 优先（校验存在性），fallback 到数据库 is_current。
-/// `provider_router` 的常规选路与自动模式候选共用这一份解析。
-pub fn effective_current_provider_id(db: &Database, app_type: &str) -> Option<String> {
-    crate::app_config::AppType::from_str(app_type)
-        .ok()
-        .and_then(|app_enum| {
-            crate::settings::get_effective_current_provider(db, &app_enum)
-                .ok()
-                .flatten()
-        })
-        .or_else(|| db.get_current_provider(app_type).ok().flatten())
-}
-
-/// 自动模式候选（选路与「开启即切最优/选模型」命令共用，唯源）：
-/// 该应用全部托管档位，按模型偏好过滤后按策略排序；当前在用档位（含非托管）
-/// 会话活跃时置顶。没有任何托管档位时返回 `None`（调用方回退常规选路 / 拒绝开启）。
-///
-/// 当前在用的是**非托管**供应商（用户自选的官网直连等）且会话活跃时，同样置顶 ——
-/// 亲和规则的判据是「切换丢缓存」，与在用的是不是托管档位无关；用户的手动选择
-/// 在他闲置或该供应商熔断之前不被系统挤走。
-///
-/// `honor_affinity`：托盘点选模型是**显式**选择，绕过亲和立即切到目标 ——
-/// 亲和保护的是「系统重排别打断会话」，不是替用户拒绝他刚点的选择。
-pub fn rank_managed_tier_candidates(
-    db: &Database,
-    app_type: &str,
-    honor_affinity: bool,
-) -> Result<Option<Vec<Provider>>, crate::error::AppError> {
-    let tiers: Vec<Provider> = db
-        .get_all_providers(app_type)?
-        .values()
-        .filter(|p| crate::relay::is_managed(&p.id))
-        .cloned()
-        .collect();
-
-    if tiers.is_empty() {
-        return Ok(None);
-    }
-
-    let tiers = filter_by_model_pref(tiers, get_model_pref(db, app_type).as_deref());
-
-    let current_id = if honor_affinity {
-        effective_current_provider_id(db, app_type)
-    } else {
-        None
-    };
-    let now = chrono::Utc::now().timestamp();
-    // 健康信号（首字/错误率）与排序同步采集：本地近窗实测优先，众测快照只读
-    // 本地缓存（不触发刷新，见 auto_health 模块文档），无数据按最差档参与。
-    let snapshot = crate::proxy::auto_health::cached_snapshot_for_ranking(now);
-    let health = crate::proxy::auto_health::collect(db, app_type, &tiers, now, snapshot.as_ref());
-    // 手动模式：清单序优先（亲和交给下面的置顶块统一处理，rank_tiers 里不再预置顶，
-    // 否则策略预置顶会被清单重排冲掉）；自动模式：策略排序（含内部亲和置顶）。
-    let mut ranked = match get_mode(db, app_type) {
-        EasyModeMode::Auto => rank_tiers(
-            db,
-            app_type,
-            &tiers,
-            current_id.as_deref(),
-            get_strategy(db),
-            &health,
-            now,
-        ),
-        EasyModeMode::Manual => {
-            let by_strategy =
-                rank_tiers(db, app_type, &tiers, None, get_strategy(db), &health, now);
-            apply_manual_order(&get_manual_order(db, app_type), by_strategy)
-        }
-    };
-
-    if let Some(current_id) = current_id.as_deref() {
-        let already_first = ranked.first().is_some_and(|p| p.id == current_id);
-        if !already_first {
-            let session_active = db
-                .get_provider_last_activity(app_type)?
-                .get(current_id)
-                .is_some_and(|last| now - *last < AFFINITY_WINDOW_SECS);
-            if session_active {
-                if let Some(current) = db.get_provider_by_id(current_id, app_type)? {
-                    ranked.insert(0, current);
-                }
-            }
-        }
-    }
-
-    Ok(Some(ranked))
-}
-
-/// 对托管档位按策略排序；当前在用档位在亲和窗口内保持置顶。
-///
-/// `now` 由调用方注入（unix 秒），测试里可以拨时钟。`health` 是健康信号
-/// （首字/错误率，阶梯解析后的结果，采集唯源在 [`crate::proxy::auto_health`]），
-/// 由调用方注入——排序本体不做任何查询以外的 I/O，测试可以直接摆数据。
-/// 排序键带上档位 id 做最终 tie-breaker，保证结果确定（同名倍率/同无样本时
-/// 不会因 HashMap 遍历序而抖动）。
-pub fn rank_tiers(
-    db: &Database,
-    app_type: &str,
-    tiers: &[Provider],
-    current_id: Option<&str>,
-    strategy: AutoStrategy,
-    health: &crate::proxy::auto_health::TierHealthIndex,
-    now: i64,
-) -> Vec<Provider> {
-    let multipliers = db.get_tier_rate_multipliers(app_type).unwrap_or_default();
-    let last_activity = db.get_provider_last_activity(app_type).unwrap_or_default();
-
-    // 各档位有效模型的单价一次性查出（短锁，不跨排序持有；毒锁恢复继续）。
-    let model_pref = get_model_pref(db, app_type);
-    let mut unit_prices = std::collections::HashMap::new();
-    {
-        let conn = db
-            .conn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for p in tiers {
-            let price = tier_unit_price(&conn, p, model_pref.as_deref());
-            unit_prices.insert(p.id.clone(), price);
-        }
-    }
-
-    // 价格最低的排序键：(单价未知, 倍率×单价)。第一维把「查不到价」的档位
-    // 保守排到有价之后 —— 宁可错过便宜也别把「不知道」当「最便宜」；
-    // 组内按倍率比（倍率来自站点实时数据，永远可信）。
-    let cost_of = |p: &Provider| -> (bool, f64) {
-        let multiplier = multipliers.get(&p.id).copied().unwrap_or(f64::INFINITY);
-        match unit_prices.get(&p.id).copied().flatten() {
-            Some(unit) => (false, multiplier * unit),
-            None => (true, multiplier),
-        }
-    };
-    let cmp_cost = |a: &Provider, b: &Provider| -> Ordering {
-        let (ka, va) = cost_of(a);
-        let (kb, vb) = cost_of(b);
-        ka.cmp(&kb)
-            .then_with(|| va.partial_cmp(&vb).unwrap_or(Ordering::Equal))
-    };
-    // 体验维度走粗桶（同桶交给下一级键决胜）；缺条目/无数据由桶函数按最差档处理。
-    let ttft_of = |p: &Provider| crate::proxy::auto_health::ttft_bucket(health.get(&p.id));
-    let err_of = |p: &Provider| crate::proxy::auto_health::err_rate_bucket(health.get(&p.id));
-
-    let mut ranked = tiers.to_vec();
-    ranked.sort_by(|a, b| {
-        // 字典序：主键由策略定；此后固定「先比稳、再补齐另一维度」——
-        // 稳定（站点侧错误率）在两种策略里都是主键之后的第一个判据。
-        let primary = match strategy {
-            AutoStrategy::Cheapest => cmp_cost(a, b),
-            AutoStrategy::Fastest => ttft_of(a).cmp(&ttft_of(b)),
-        };
-        let secondary = err_of(a).cmp(&err_of(b)).then_with(|| match strategy {
-            AutoStrategy::Cheapest => ttft_of(a).cmp(&ttft_of(b)),
-            AutoStrategy::Fastest => cmp_cost(a, b),
-        });
-        primary.then(secondary).then_with(|| a.id.cmp(&b.id))
-    });
-
-    // 会话亲和：当前档位近期活跃 → 置顶（见模块文档）。不活跃/无记录则不动。
-    if let Some(current_id) = current_id {
-        let session_active = last_activity
-            .get(current_id)
-            .is_some_and(|last| now - *last < AFFINITY_WINDOW_SECS);
-        if session_active {
-            if let Some(pos) = ranked.iter().position(|p| p.id == current_id) {
-                let current = ranked.remove(pos);
-                ranked.insert(0, current);
-            }
-        }
-    }
-
-    ranked
-}
-
-/// 手动序套在策略序上：清单里的按清单序排前，漏掉的（清单写之后的**新档位**）
-/// 按策略序追加 —— 清单是用户的显式意志，但绝不能因为清单过期让新档位拿不到流量；
-/// 清单里已不存在的 id（档位被删）自然被忽略。
-fn apply_manual_order(order: &[String], mut by_strategy: Vec<Provider>) -> Vec<Provider> {
-    let mut ranked: Vec<Provider> = Vec::with_capacity(by_strategy.len());
-    for id in order {
-        if let Some(pos) = by_strategy.iter().position(|p| &p.id == id) {
-            ranked.push(by_strategy.remove(pos));
-        }
-    }
-    ranked.extend(by_strategy);
-    ranked
 }
 
 /// 看板命令展示用的单价入口：与排序同一份实现（唯源），别在看板侧再算一遍。
@@ -485,559 +183,25 @@ fn tier_unit_price(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
-    use crate::relay::provision;
-    use serde_json::json;
-
-    /// 生成一个真实形状的托管档位 id（钉住 is_managed 判据，别手写假的）。
-    fn managed_id(site: &str, group: i64, salt: i64) -> String {
-        let id = provision::provider_id_for(site, Some(group), salt);
-        assert!(crate::relay::is_managed(&id));
-        id
-    }
-
-    fn tier(id: &str, name: &str) -> Provider {
-        Provider::with_id(id.to_string(), name.to_string(), json!({}), None)
-    }
-
-    fn seed_activity(db: &Database, app_type: &str, provider_id: &str, at: i64, ttft_ms: i64) {
-        let conn = db.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO proxy_request_logs (
-                request_id, provider_id, app_type, model,
-                input_tokens, output_tokens, total_cost_usd,
-                latency_ms, first_token_ms, status_code, created_at
-            ) VALUES (?1, ?2, ?3, 'm', 1, 1, '0', 10, ?4, 200, ?5)",
-            rusqlite::params![
-                format!("act-{provider_id}-{at}-{ttft_ms}"),
-                provider_id,
-                app_type,
-                ttft_ms,
-                at
-            ],
-        )
-        .unwrap();
-    }
-
-    fn now() -> i64 {
-        chrono::Utc::now().timestamp()
-    }
-
-    /// 手摆健康索引：排序比较器的契约测试直接钉数据，不走采集。
-    /// 元组 = (档位 id, 首字毫秒, 站点侧错误率)，`None` = 无数据（最差档）。
-    fn hand_health(
-        entries: &[(&str, Option<f64>, Option<f64>)],
-    ) -> crate::proxy::auto_health::TierHealthIndex {
-        entries
-            .iter()
-            .map(|(id, ttft, err)| {
-                (
-                    (*id).to_string(),
-                    crate::proxy::auto_health::TierHealth {
-                        ttft_ms: *ttft,
-                        err_rate: *err,
-                    },
-                )
-            })
-            .collect()
-    }
 
     #[test]
-    fn cheapest_orders_by_multiplier_with_unknown_last() {
+    fn retired_mode_cannot_override_application_permission() {
         let db = Database::memory().unwrap();
-        let cheap = managed_id("https://a.example", 1, 1);
-        let mid = managed_id("https://b.example", 1, 2);
-        let unknown = managed_id("https://c.example", 1, 3);
-        let tiers = vec![tier(&unknown, "U"), tier(&cheap, "C"), tier(&mid, "M")];
-
-        // 倍率是 providers 表的列：行不存在时 UPDATE 静默落空，必须先存行
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &mid, Some(1.2))
-            .unwrap();
-
-        let ranked = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            None,
-            AutoStrategy::Cheapest,
-            &hand_health(&[]),
-            now(),
-        );
-        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        // 倍率未知（None）当最贵处理，排最后 —— 别让「不知道价格」变成「最便宜」
-        assert_eq!(ids, vec![cheap.as_str(), mid.as_str(), unknown.as_str()]);
-    }
-
-    #[test]
-    fn fastest_orders_by_ttft_with_sampleless_last() {
-        let db = Database::memory().unwrap();
-        let fast = managed_id("https://a.example", 1, 1);
-        let slow = managed_id("https://b.example", 1, 2);
-        let cold = managed_id("https://c.example", 1, 3);
-        let tiers = vec![tier(&cold, "Cold"), tier(&slow, "S"), tier(&fast, "F")];
-
-        let t = now();
-        seed_activity(&db, "claude", &fast, t - 60, 120);
-        seed_activity(&db, "claude", &slow, t - 60, 900);
-
-        let health = crate::proxy::auto_health::collect(&db, "claude", &tiers, t, None);
-        let ranked = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            None,
-            AutoStrategy::Fastest,
-            &health,
-            t,
-        );
-        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        // 有样本的按桶升序（120ms 快桶、900ms 中桶）；无 TTFT 样本（cold）最差档
-        assert_eq!(ids, vec![fast.as_str(), slow.as_str(), cold.as_str()]);
-    }
-
-    /// Fastest 的完整字典序：首字桶 → 错误率桶 → 价格。同桶速度差（300 vs
-    /// 700ms）不再是排序依据——桶内先比稳、再比价；「便宜但爱错」不许靠
-    /// 桶内小便宜爬到「稳」前面。
-    #[test]
-    fn fastest_breaks_ttft_bucket_ties_by_stability_then_price() {
-        let db = Database::memory().unwrap();
-        let clean_cheap = managed_id("https://a.example", 1, 1);
-        let clean_pricy = managed_id("https://b.example", 1, 2);
-        let flaky_cheap = managed_id("https://c.example", 1, 3);
-        let tiers = vec![
-            tier(&flaky_cheap, "FlakyCheap"),
-            tier(&clean_pricy, "CleanPricy"),
-            tier(&clean_cheap, "CleanCheap"),
-        ];
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        // 倍率×单价：flaky_cheap 0.5 < clean_cheap 1.0 < clean_pricy 2.0 ——
-        // 若只看价格，flaky_cheap 第一；排序必须先过稳定关。
-        db.set_tier_rate_multiplier("claude", &flaky_cheap, Some(0.5))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &clean_cheap, Some(1.0))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &clean_pricy, Some(2.0))
-            .unwrap();
-
-        // 三档同在首字快桶（300/500/700ms）；flaky 错误率 5%（劣化桶），
-        // 两 clean 0%（健康桶）。
-        let health = hand_health(&[
-            (&clean_cheap, Some(500.0), Some(0.0)),
-            (&clean_pricy, Some(700.0), Some(0.0)),
-            (&flaky_cheap, Some(300.0), Some(0.05)),
-        ]);
-        let ranked = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            None,
-            AutoStrategy::Fastest,
-            &health,
-            now(),
-        );
-        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                clean_cheap.as_str(),
-                clean_pricy.as_str(),
-                flaky_cheap.as_str()
-            ],
-            "同快桶内：稳的在前（按价决胜）、爱错的垫底——桶内速度差不参与排序"
-        );
-    }
-
-    /// Cheapest 的契约钉死：价格是主键，健康只做次级——便宜但爱错的档位
-    /// 仍然排第一（它的错误由故障转移兜底），策略语义不能被健康篡位。
-    #[test]
-    fn cheapest_keeps_cost_primary_over_health() {
-        let db = Database::memory().unwrap();
-        let cheap_flaky = managed_id("https://a.example", 1, 1);
-        let pricey_clean = managed_id("https://b.example", 1, 2);
-        let tiers = vec![tier(&cheap_flaky, "CF"), tier(&pricey_clean, "PC")];
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        db.set_tier_rate_multiplier("claude", &cheap_flaky, Some(0.5))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &pricey_clean, Some(2.0))
-            .unwrap();
-
-        let health = hand_health(&[
-            (&cheap_flaky, None, Some(0.30)),
-            (&pricey_clean, Some(400.0), Some(0.0)),
-        ]);
-        let ranked = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            None,
-            AutoStrategy::Cheapest,
-            &health,
-            now(),
-        );
-        assert_eq!(
-            ranked[0].id, cheap_flaky,
-            "Cheapest 主键是价格，30% 错误率也不篡位"
-        );
-    }
-
-    /// Cheapest 的次级链：同价先比稳、再比快。
-    #[test]
-    fn cheapest_breaks_cost_ties_by_stability_then_ttft() {
-        let db = Database::memory().unwrap();
-        let slow_stable = managed_id("https://a.example", 1, 1);
-        let fast_flaky = managed_id("https://b.example", 1, 2);
-        let fast_stable = managed_id("https://c.example", 1, 3);
-        let tiers = vec![
-            tier(&slow_stable, "SS"),
-            tier(&fast_flaky, "FF"),
-            tier(&fast_stable, "FS"),
-        ];
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        // 同价（不设倍率 → 全部未知同档，倍率组内相等）
-        let health = hand_health(&[
-            (&slow_stable, Some(2500.0), Some(0.0)),
-            (&fast_flaky, Some(300.0), Some(0.30)),
-            (&fast_stable, Some(400.0), Some(0.0)),
-        ]);
-        let ranked = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            None,
-            AutoStrategy::Cheapest,
-            &health,
-            now(),
-        );
-        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                fast_stable.as_str(),
-                slow_stable.as_str(),
-                fast_flaky.as_str()
-            ],
-            "同价：稳的在前；稳与稳之间快桶者先；爱错的垫底"
-        );
-    }
-
-    /// 冷启动等价闸：完全没有健康数据时（新装/新档位），两种策略都退化为
-    /// 纯价格序——与上一代行为逐位相同，数据长出来才逐档接管。
-    #[test]
-    fn cold_start_degrades_to_cost_order_under_both_strategies() {
-        let db = Database::memory().unwrap();
-        let cheap = managed_id("https://a.example", 1, 1);
-        let mid = managed_id("https://b.example", 1, 2);
-        let pricey = managed_id("https://c.example", 1, 3);
-        let tiers = vec![tier(&pricey, "P"), tier(&cheap, "C"), tier(&mid, "M")];
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &mid, Some(1.0))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &pricey, Some(2.0))
-            .unwrap();
-
-        let empty = hand_health(&[]);
-        for strategy in [AutoStrategy::Cheapest, AutoStrategy::Fastest] {
-            let ranked = rank_tiers(&db, "claude", &tiers, None, strategy, &empty, now());
-            let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-            assert_eq!(
-                ids,
-                vec![cheap.as_str(), mid.as_str(), pricey.as_str()],
-                "无数据（全最差档平手）→ 价格决胜，{strategy:?} 同样退化为价格序"
-            );
-        }
-    }
-
-    #[test]
-    fn cheapest_multiplies_unit_price_and_sorts_unpriced_last() {
-        let db = Database::memory().unwrap();
-        // 价表：m-x 每百万 input 1 + output 1 = 单价 2；m-y 不收录（单价未知）。
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
-                 VALUES ('m-x', 'M X', '1', '1')",
-                [],
-            )
-            .unwrap();
-        }
-
-        // 有价档位比「倍率×单价」：1.0×2=2.0 vs 0.5×2=1.0（只比倍率会把
-        // 低倍率排第一，错）；无价档位（选中模型 m-y）倍率再低也保守排最后。
-        let low_mul = managed_id("https://a.example", 1, 1);
-        let high_mul = managed_id("https://b.example", 1, 2);
-        let unpriced = managed_id("https://c.example", 1, 3);
-        let with_model = |id: &str, name: &str, model: &str| {
-            Provider::with_id(
-                id.to_string(),
-                name.to_string(),
-                json!({ "config": format!("model = \"{model}\"\n") }),
-                None,
-            )
-        };
-        let tiers = vec![
-            with_model(&low_mul, "LowMul", "m-x"),
-            with_model(&high_mul, "HighMul", "m-x"),
-            with_model(&unpriced, "Unpriced", "m-y"),
-        ];
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        db.set_tier_rate_multiplier("claude", &low_mul, Some(1.0))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &high_mul, Some(0.5))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &unpriced, Some(0.1))
-            .unwrap();
-
-        let ranked = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            None,
-            AutoStrategy::Cheapest,
-            &hand_health(&[]),
-            now(),
-        );
-        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        // 0.5×2=1.0 < 1.0×2=2.0 <（无价）0.1
-        assert_eq!(
-            ids,
-            vec![high_mul.as_str(), low_mul.as_str(), unpriced.as_str()]
-        );
-    }
-
-    #[test]
-    fn affinity_hoists_recently_active_current_tier() {
-        let db = Database::memory().unwrap();
-        let expensive_current = managed_id("https://a.example", 1, 1);
-        let cheap = managed_id("https://b.example", 1, 2);
-        let tiers = vec![tier(&expensive_current, "Cur"), tier(&cheap, "C")];
-
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        db.set_tier_rate_multiplier("claude", &expensive_current, Some(2.0))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
-            .unwrap();
-
-        let t = now();
-        // 当前档位 10 分钟前还有流量 → 会话进行中，保持置顶
-        seed_activity(&db, "claude", &expensive_current, t - 600, 500);
-
-        let ranked = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            Some(&expensive_current),
-            AutoStrategy::Cheapest,
-            &hand_health(&[]),
-            t,
-        );
-        assert_eq!(ranked[0].id, expensive_current);
-
-        // 闲置超过亲和窗口 → 重排接管，最便宜的回到第一
-        let ranked_idle = rank_tiers(
-            &db,
-            "claude",
-            &tiers,
-            Some(&expensive_current),
-            AutoStrategy::Cheapest,
-            &hand_health(&[]),
-            t + AFFINITY_WINDOW_SECS + 1,
-        );
-        assert_eq!(ranked_idle[0].id, cheap);
-    }
-
-    /// 手动模式：清单序优先，清单外的新档位按策略序追加（绝不能丢流量），
-    /// 清单里已删档位的 id 被忽略；亲和照常置顶活跃当前档位（定序 ≠ 关掉会话保护）。
-    #[test]
-    fn manual_mode_orders_by_user_list_with_strategy_fallback() {
-        let db = Database::memory().unwrap();
-        let expensive = managed_id("https://a.example", 1, 1);
-        let cheap = managed_id("https://b.example", 1, 2);
-        let fresh = managed_id("https://c.example", 1, 3);
-        let tiers = vec![tier(&expensive, "E"), tier(&cheap, "C"), tier(&fresh, "F")];
-        for p in &tiers {
-            db.save_provider("claude", p).unwrap();
-        }
-        db.set_tier_rate_multiplier("claude", &expensive, Some(2.0))
-            .unwrap();
-        db.set_tier_rate_multiplier("claude", &cheap, Some(0.5))
-            .unwrap();
-        // fresh 不设倍率：策略序垫底，但不在清单里也必须被追加
-
-        // 自动模式基线：便宜在前
-        let ranked = rank_managed_tier_candidates(&db, "claude", false)
-            .unwrap()
-            .expect("候选非空");
-        assert_eq!(ranked[0].id, cheap);
-
-        // 手动序：贵档第一；清单里塞一个已删档位的 id（被忽略）
-        set_mode(&db, "claude", EasyModeMode::Manual).unwrap();
-        set_manual_order(
-            &db,
-            "claude",
-            &[
-                expensive.clone(),
-                "loongport-deadbeefdeadbeef".to_string(),
-                cheap.clone(),
-            ],
-        )
-        .unwrap();
-        let ranked = rank_managed_tier_candidates(&db, "claude", true)
-            .unwrap()
-            .expect("手动模式候选非空");
-        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![expensive.as_str(), cheap.as_str(), fresh.as_str()],
-            "手动序优先，漏档按策略序追加"
-        );
-
-        // 亲和：当前档位（fresh）活跃 → 手动序之上仍被置顶
-        seed_activity(&db, "claude", &fresh, now() - 60, 500);
-        db.set_current_provider("claude", &fresh).unwrap();
-        let ranked = rank_managed_tier_candidates(&db, "claude", true)
-            .unwrap()
-            .expect("候选非空");
-        assert_eq!(ranked[0].id, fresh, "活跃会话在手动模式下同样不被打断");
-    }
-
-    #[test]
-    fn mode_and_manual_order_setting_roundtrip() {
-        let db = Database::memory().unwrap();
-        assert_eq!(get_mode(&db, "claude"), EasyModeMode::Auto);
-
-        set_mode(&db, "claude", EasyModeMode::Manual).unwrap();
-        assert_eq!(get_mode(&db, "claude"), EasyModeMode::Manual);
-        assert_eq!(get_mode(&db, "codex"), EasyModeMode::Auto, "按 app 隔离");
-        // 脏数据落回默认，别炸选路
-        db.set_setting(&format!("{SETTING_MODE_PREFIX}claude"), "nonsense")
-            .unwrap();
-        assert_eq!(get_mode(&db, "claude"), EasyModeMode::Auto);
-
-        // 手动序：脏数据 → 空清单（等同全按策略追加）
-        db.set_setting(&format!("{SETTING_MANUAL_ORDER_PREFIX}claude"), "not-json")
-            .unwrap();
-        assert!(get_manual_order(&db, "claude").is_empty());
-        set_manual_order(&db, "claude", &["x".to_string(), "y".to_string()]).unwrap();
-        assert_eq!(get_manual_order(&db, "claude"), vec!["x", "y"]);
-    }
-
-    #[test]
-    fn strategy_setting_roundtrip_and_default() {
-        let db = Database::memory().unwrap();
-        assert_eq!(get_strategy(&db), AutoStrategy::Cheapest);
-
-        set_strategy(&db, AutoStrategy::Fastest).unwrap();
-        assert_eq!(get_strategy(&db), AutoStrategy::Fastest);
-
-        // 脏数据不炸选路：落回默认
-        db.set_setting(SETTING_STRATEGY, "nonsense").unwrap();
-        assert_eq!(get_strategy(&db), AutoStrategy::Cheapest);
-    }
-
-    #[test]
-    fn enabled_flag_roundtrip() {
-        let db = Database::memory().unwrap();
-        assert!(!is_auto_mode_enabled(&db, "claude"));
-
         set_enabled(&db, "claude", true).unwrap();
-        assert!(is_auto_mode_enabled(&db, "claude"));
-        // 按 app 隔离
-        assert!(!is_auto_mode_enabled(&db, "codex"));
-
-        set_enabled(&db, "claude", false).unwrap();
-        assert!(!is_auto_mode_enabled(&db, "claude"));
-    }
-
-    /// 故障转移生效判据：显式开关或省心模式任一开启即生效（按 app 隔离）。
-    #[test]
-    fn failover_active_when_either_source_enabled() {
-        let db = Database::memory().unwrap();
         assert!(!failover_active(&db, "claude", false));
         assert!(failover_active(&db, "claude", true));
-
-        set_enabled(&db, "claude", true).unwrap();
-        assert!(
-            failover_active(&db, "claude", false),
-            "省心模式开启即蕴含故障转移"
-        );
-        assert!(!failover_active(&db, "codex", false), "按 app 隔离");
     }
 
-    /// 模型偏好过滤：有偏好时只留「目录含该模型」的档位（无目录档位不保留 ——
-    /// 无法证明它能服务这个模型）；偏好过期（不在任何目录）回退全量；
-    /// 无偏好全量。经 rank_managed_tier_candidates（honor_affinity=false）走真实路径。
     #[test]
-    fn model_pref_filters_candidates_with_stale_fallback() {
+    fn model_preference_remains_per_application_and_can_be_cleared() {
         let db = Database::memory().unwrap();
-        let has_sol = managed_id("https://a.example", 1, 1);
-        let has_nano = managed_id("https://b.example", 1, 2);
-        let no_catalog = managed_id("https://c.example", 1, 3);
-
-        let with_catalog =
-            |model: &str| serde_json::json!({ "modelCatalog": { "models": [{ "model": model }] } });
-        for (id, settings) in [
-            (&has_sol, with_catalog("gpt-5.6-sol")),
-            (&has_nano, with_catalog("gpt-5.6-nano")),
-            (&no_catalog, serde_json::json!({})),
-        ] {
-            let mut p = tier(id, id);
-            p.settings_config = settings;
-            db.save_provider("codex", &p).unwrap();
-            db.set_available_models(
-                "codex",
-                &p.id,
-                &crate::relay::provision::models_from_settings(&p.settings_config),
-            )
-            .unwrap();
-        }
-
-        // 偏好 sol → 只剩目录含 sol 的档位（无目录档位被排除）
-        set_model_pref(&db, "codex", Some("gpt-5.6-sol")).unwrap();
-        let ranked = rank_managed_tier_candidates(&db, "codex", false)
-            .unwrap()
-            .expect("候选不应为空");
-        let ids: Vec<&str> = ranked.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec![has_sol.as_str()]);
-
-        // 过期偏好（不在任何目录）→ 回退全量，选路不能没档位可用
-        set_model_pref(&db, "codex", Some("gone-model")).unwrap();
-        let ranked = rank_managed_tier_candidates(&db, "codex", false)
-            .unwrap()
-            .expect("过期偏好必须回退全量");
-        assert_eq!(ranked.len(), 3);
-
-        // 无偏好 → 全量
-        set_model_pref(&db, "codex", None).unwrap();
-        let ranked = rank_managed_tier_candidates(&db, "codex", false)
-            .unwrap()
-            .expect("无偏好全量");
-        assert_eq!(ranked.len(), 3);
-
-        // 读写往返
-        assert_eq!(get_model_pref(&db, "codex"), None);
-        set_model_pref(&db, "codex", Some("gpt-5.6-nano")).unwrap();
+        set_model_pref(&db, "claude", Some("selected-model")).unwrap();
         assert_eq!(
-            get_model_pref(&db, "codex").as_deref(),
-            Some("gpt-5.6-nano")
+            get_model_pref(&db, "claude").as_deref(),
+            Some("selected-model")
         );
+        assert_eq!(get_model_pref(&db, "codex"), None);
+        set_model_pref(&db, "claude", None).unwrap();
+        assert_eq!(get_model_pref(&db, "claude"), None);
     }
 }
