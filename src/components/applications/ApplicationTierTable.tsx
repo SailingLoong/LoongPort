@@ -290,7 +290,18 @@ function TierRow({
         </td>
       ))}
       <td className="sticky right-0 bg-card px-3 py-3 text-right align-top">
-        <div className="flex justify-end gap-1">
+        {/* 动作组 hover / focus 才显形 —— 信息常驻、动作按需出现（2026-09-13 用户定调：
+            档位多时每行一个蓝色按钮全是噪音）。当前行状态由「当前」徽章与行底色表达，
+            不需要常驻按钮。进行中的切换钉住可见；触屏无 hover 常显；
+            `pointer-events-none` 不能省（透明按钮仍然可点）。 */}
+        <div
+          className={cn(
+            "flex justify-end gap-1 transition-opacity duration-200",
+            busy
+              ? "pointer-events-auto opacity-100 [@media(hover:none)]:opacity-100"
+              : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
+          )}
+        >
           {item.account && (
             <Button
               size="icon"

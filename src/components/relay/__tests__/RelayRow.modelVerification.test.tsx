@@ -179,15 +179,13 @@ describe("RelayRow model verification", () => {
     );
   });
 
-  it("keeps the primary tier action visible without hover", () => {
+  it("keeps the primary tier action inside the hover group", () => {
     renderWithQuery(<RelayRow {...rowProps()} />);
 
+    // 信息常驻、动作 hover（2026-09-13 定调）：主按钮与次要图标同在
+    // 一个 hover 组里，没悬停时整组藏起。
     const enable = screen.getByRole("button", { name: "启用" });
-    // 主按钮在 hover 组外常驻：自身与直接父级都不带 hover 组的 opacity-0。
-    expect(enable.className).not.toContain("opacity-0");
-    expect(enable.parentElement?.className).not.toContain("opacity-0");
-    // 次要图标仍在 hover 组里（同屏两级显隐的分界）。
-    expect(screen.getByTitle("测试连接").parentElement?.className).toContain(
+    expect(enable.parentElement?.className).toContain(
       "group-hover/tier:opacity-100",
     );
   });
