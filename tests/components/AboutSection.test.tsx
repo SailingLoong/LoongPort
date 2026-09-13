@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -9,7 +15,7 @@ const mocks = vi.hoisted(() => {
       hasUpdate: false,
       updateInfo: null,
       isChecking: false,
-      error: "network offline",
+      error: "network offline" as string | null,
       isDismissed: false,
       dismissUpdate: vi.fn(),
       checkUpdate,
@@ -44,6 +50,10 @@ vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("3.24.0"),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));
+
 import { AboutSection } from "@/components/settings/AboutSection";
 
 describe("AboutSection", () => {
@@ -74,5 +84,56 @@ describe("AboutSection", () => {
       "[AboutSection] Update check failed",
       checkError,
     );
+  });
+});
+
+describe("AboutSection manual update download progress", () => {
+  it("surfaces percent and speed on the updating button while chunks arrive", async () => {
+    const settings = await import("@/lib/api");
+    const event = await import("@tauri-apps/api/event");
+    let handler:
+      | ((e: { payload: { downloaded: number; total: number | null } }) => void)
+      | undefined;
+    vi.mocked(event.listen).mockImplementation(
+      // 桩只关心 handler 本体；事件对象的其余字段与泛型收缩用 as 对齐。
+      (async (_name: string, cb: never) => {
+        handler = cb;
+        return () => {};
+      }) as unknown as typeof event.listen,
+    );
+    const emit = (payload: { downloaded: number; total: number | null }) =>
+      handler?.({ payload });
+    let now = 0;
+    const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+
+    mocks.value = {
+      ...mocks.value,
+      hasUpdate: true,
+      updateInfo: { availableVersion: "9.9.9" } as never,
+      error: null,
+    };
+    vi.mocked(settings.settingsApi.installUpdateAndRestart).mockImplementation(
+      () => new Promise<boolean>(() => {}),
+    );
+
+    render(<AboutSection isPortable={false} />);
+    const download = await screen.findByRole("button", {
+      name: /settings.updateTo/,
+    });
+    fireEvent.click(download);
+
+    await act(async () => {
+      emit?.({ downloaded: 0, total: 10 * 1024 * 1024 });
+    });
+    now = 500;
+    await act(async () => {
+      emit?.({ downloaded: 2 * 1024 * 1024, total: 10 * 1024 * 1024 });
+    });
+
+    const updating = screen.getByRole("button", { name: /settings.updating/ });
+    expect(updating).toHaveTextContent("20%");
+    expect(updating).toHaveTextContent("4.0 MB/s");
+
+    nowSpy.mockRestore();
   });
 });
