@@ -367,128 +367,132 @@ export function ProviderActions({
           );
         })()}
 
-      {/* disabled:pointer-events-none prevents the native title from firing,
-          so the wrapper owns the explanatory tooltip and cursor. */}
-      <span
-        title={buttonState.title}
-        className={cn(
-          "inline-flex",
-          buttonState.disabled && "cursor-not-allowed",
-        )}
-      >
-        <Button
-          size="sm"
-          variant={buttonState.variant}
-          onClick={handleMainButtonClick}
-          disabled={buttonState.disabled}
-          className={cn("w-[4.5rem] px-2.5", buttonState.className)}
-        >
-          {buttonState.icon}
-          {buttonState.text}
-        </Button>
-      </span>
-
-      {/* 次要动作组：hover / focus 才显形（透明的按钮仍然可点，`pointer-events-none`
-          不能省）；主按钮在上面常驻 —— 行的主操作不该靠鼠标扫出来。
-          进行中的检测（spinner）钉住可见，鼠标移开也知道还在跑。 */}
+      {/* 整组（含主按钮）hover / focus 才显形 —— 信息常驻、动作按需出现
+          （2026-09-13 用户定调；#400 曾把主按钮留在组外常驻，当天收回）。
+          透明的按钮仍然可点，`pointer-events-none` 不能省；进行中的检测
+          （spinner）钉住可见，鼠标移开也知道还在跑。 */}
       <div
         className={cn(
-          "flex items-center gap-1 transition-opacity duration-200",
+          "flex items-center gap-1.5 transition-opacity duration-200",
           isTesting
             ? "pointer-events-auto opacity-100"
             : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100",
         )}
       >
-        <Button
-          size="icon"
-          variant="ghost"
-          onClick={canEdit ? onEdit : undefined}
-          disabled={!canEdit}
-          aria-label={t("common.edit")}
-          title={canEdit ? t("common.edit") : readOnlyHint}
+        {/* disabled:pointer-events-none prevents the native title from firing,
+          so the wrapper owns the explanatory tooltip and cursor. */}
+        <span
+          title={buttonState.title}
           className={cn(
-            iconButtonClass,
-            !canEdit && "opacity-40 cursor-not-allowed text-muted-foreground",
+            "inline-flex",
+            buttonState.disabled && "cursor-not-allowed",
           )}
         >
-          <Edit className="h-4 w-4" />
-        </Button>
-
-        {onDuplicate && (
           <Button
-            size="icon"
-            variant="ghost"
-            onClick={onDuplicate}
-            title={t("provider.duplicate")}
-            className={iconButtonClass}
+            size="sm"
+            variant={buttonState.variant}
+            onClick={handleMainButtonClick}
+            disabled={buttonState.disabled}
+            className={cn("w-[4.5rem] px-2.5", buttonState.className)}
           >
-            <Copy className="h-4 w-4" />
+            {buttonState.icon}
+            {buttonState.text}
           </Button>
-        )}
+        </span>
 
-        <Button
-          size="icon"
-          variant="ghost"
-          onClick={onTest || undefined}
-          disabled={isTesting}
-          title={t("provider.connectivityCheck", "检测连通")}
-          className={cn(
-            iconButtonClass,
-            !onTest && "opacity-40 cursor-not-allowed text-muted-foreground",
-          )}
-        >
-          {isTesting ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Activity className="h-4 w-4" />
-          )}
-        </Button>
-
-        <Button
-          size="icon"
-          variant="ghost"
-          onClick={onConfigureUsage || undefined}
-          title={t("provider.configureUsage")}
-          className={cn(
-            iconButtonClass,
-            !onConfigureUsage &&
-              "opacity-40 cursor-not-allowed text-muted-foreground",
-          )}
-        >
-          <BarChart3 className="h-4 w-4" />
-        </Button>
-
-        {onOpenTerminal && (
+        {/* 次要图标排（整组 gating 在上面那个容器上）。 */}
+        <div className="flex items-center gap-1">
           <Button
             size="icon"
             variant="ghost"
-            onClick={onOpenTerminal}
-            title={t("provider.openTerminal", "打开终端")}
+            onClick={canEdit ? onEdit : undefined}
+            disabled={!canEdit}
+            aria-label={t("common.edit")}
+            title={canEdit ? t("common.edit") : readOnlyHint}
             className={cn(
               iconButtonClass,
-              "hover:text-emerald-600 dark:hover:text-emerald-400",
+              !canEdit && "opacity-40 cursor-not-allowed text-muted-foreground",
             )}
           >
-            <Terminal className="h-4 w-4" />
+            <Edit className="h-4 w-4" />
           </Button>
-        )}
 
-        <Button
-          size="icon"
-          variant="ghost"
-          onClick={deleteEnabled ? onDelete : undefined}
-          disabled={!deleteEnabled}
-          aria-label={t("common.delete")}
-          title={deleteHint}
-          className={cn(
-            iconButtonClass,
-            deleteEnabled && "hover:text-red-500 dark:hover:text-red-400",
-            !deleteEnabled &&
-              "opacity-40 cursor-not-allowed text-muted-foreground",
+          {onDuplicate && (
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={onDuplicate}
+              title={t("provider.duplicate")}
+              className={iconButtonClass}
+            >
+              <Copy className="h-4 w-4" />
+            </Button>
           )}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
+
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onTest || undefined}
+            disabled={isTesting}
+            title={t("provider.connectivityCheck", "检测连通")}
+            className={cn(
+              iconButtonClass,
+              !onTest && "opacity-40 cursor-not-allowed text-muted-foreground",
+            )}
+          >
+            {isTesting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Activity className="h-4 w-4" />
+            )}
+          </Button>
+
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onConfigureUsage || undefined}
+            title={t("provider.configureUsage")}
+            className={cn(
+              iconButtonClass,
+              !onConfigureUsage &&
+                "opacity-40 cursor-not-allowed text-muted-foreground",
+            )}
+          >
+            <BarChart3 className="h-4 w-4" />
+          </Button>
+
+          {onOpenTerminal && (
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={onOpenTerminal}
+              title={t("provider.openTerminal", "打开终端")}
+              className={cn(
+                iconButtonClass,
+                "hover:text-emerald-600 dark:hover:text-emerald-400",
+              )}
+            >
+              <Terminal className="h-4 w-4" />
+            </Button>
+          )}
+
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={deleteEnabled ? onDelete : undefined}
+            disabled={!deleteEnabled}
+            aria-label={t("common.delete")}
+            title={deleteHint}
+            className={cn(
+              iconButtonClass,
+              deleteEnabled && "hover:text-red-500 dark:hover:text-red-400",
+              !deleteEnabled &&
+                "opacity-40 cursor-not-allowed text-muted-foreground",
+            )}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
     </div>
   );

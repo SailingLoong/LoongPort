@@ -135,6 +135,20 @@ describe("application workspace", () => {
       );
     },
   );
+  it("keeps row actions hover-revealed instead of always visible", async () => {
+    render(<ApplicationWorkspace {...props} />);
+    // 信息常驻、动作按需出现（2026-09-13 定调）：未悬停的行不摆一排
+    // 「设为当前」按钮；组仍可聚焦（键盘可达）与点按（opacity 不摘出 DOM）。
+    const use = await screen.findByRole("button", {
+      name: "applications.use Premium",
+    });
+    const group = use.closest("div");
+    expect(group?.className).toContain("opacity-0");
+    expect(group?.className).toContain("group-hover:opacity-100");
+    expect(group?.className).toContain("group-focus-within:opacity-100");
+    expect(group?.className).toContain("[@media(hover:none)]:opacity-100");
+  });
+
   it("searches immediately without changing priority or current selection", async () => {
     render(<ApplicationWorkspace {...props} />);
     await userEvent.type(screen.getByRole("searchbox"), "Premium");

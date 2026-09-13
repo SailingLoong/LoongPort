@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * 钉住「主按钮常驻、次要图标 hover 才显形」这套布局约定。
+ * 钉住「动作按钮 hover 才显形」这套布局约定。
  *
  * ## 为什么是读源码断言 class，而不是渲染后查 DOM
  *
@@ -11,16 +11,13 @@ import { describe, expect, it } from "vitest";
  * 的布局）。要验的性质是**纯 CSS 的**：`opacity-0` + `group-hover:opacity-100`
  * 在 jsdom 里查不出效果 —— jsdom 不算 Tailwind 的样式，也不模拟 `:hover`。
  * 渲染测试只能断言「按钮在 DOM 里」，而它本来就在（藏起来的按钮也在 DOM 里），
- * 于是这类缺陷渲染测试**照样绿**。
+ * 于是这次的缺陷渲染测试**照样绿**。
  *
- * ## 它守的是什么缺陷
+ * ## 它守的是什么契约
  *
- * - 2026-08-03 一度把主按钮留在 hover 容器**外**常驻、与上游整组 hover 的形态
- *   分叉；随后对齐成「整组（含主按钮）hover 才显形」。
- * - 2026-09-13 用户定调反转：**行的主操作不靠鼠标扫出来** —— 主按钮（启用/使用中）
- *   常驻在 hover 组外，只有次要图标（检测/验真/编辑/恢复）留在组里；
- *   `ProviderActions`（ProviderCard）、`VendorRow` 同批改成同一形状。
- *   本闸现在钉的就是这个新契约：主按钮进组（回退旧形态）或图标组裸奔都会红。
+ * 「信息常驻、动作 hover」——2026-09-13 用户定调（档位多时每行常驻按钮全是
+ * 噪音）。#400 曾把主按钮提出组外常驻、当天收回；本闸钉住**整组（含主按钮）
+ * hover 才显形**，谁再提出去都会红。
  */
 const RELAY_ROW_TSX = path.resolve(
   __dirname,
@@ -55,7 +52,7 @@ const source = fs.readFileSync(RELAY_ROW_TSX, "utf8");
 describe("RelayRow hover-reveal actions", () => {
   it("keeps pointer-events in lockstep with opacity", () => {
     // ⚠️ 只改 opacity 的话透明按钮**仍然可点** —— 鼠标扫过看似空白的地方会误触删除。
-    // 那串 class 里 `pointer-events-none` 与 `opacity-0` 总是成对出现。
+    // 上游那串 class 里 `pointer-events-none` 与 `opacity-0` 总是成对出现。
     for (const constant of ["ROW_HOVER_ACTIONS", "TIER_HOVER_ACTIONS"]) {
       const match = source.match(
         new RegExp(`const ${constant} =\\s*\\n?\\s*"([^"]+)"`),
@@ -102,20 +99,25 @@ describe("RelayRow hover-reveal actions", () => {
     }
   });
 
-  it("keeps the main enable button outside the hover group (always visible)", () => {
-    // ⭐ 主按钮（启用/使用中）**常驻**在 hover 组外 —— 行的主操作不靠 hover 扫出来
-    // （2026-09-13 定调；旧闸恰好断言相反的旧形态，已随形态一起反转）。
+  it("puts the main enable button inside the hover group, like ProviderActions does", () => {
+    // ⭐ **这次的缺陷本身**：主按钮曾被留在 hover 容器外面 ⇒ 常驻。
+    //
+    // 判据取自上游 `ProviderCard.tsx`：那个 hover 容器包住整个 `ProviderActions`，
+    // 而 `ProviderActions` 的第一个孩子就是主按钮 ⇒ 没 hover 时右侧彻底空的。
     const tierItem = source.slice(source.indexOf("function TierItem"));
 
     // ⚠️ **断言的是 JSX 的嵌套关系，不是字符串先后顺序。**
     //
-    // 做法：从 `TIER_HOVER_ACTIONS` 所在的 `<div>` 起，按 `<div`/`</div>` 数深度找到
-    // **配对**的收标签，截出真正的子树（不能图省事用第一个 `</div>` —— 容器里有
-    // 三元，里面还有 div）。
+    // 初版断言「`provider.enable` 出现在 `TIER_HOVER_ACTIONS` 之后」—— 那是**假闸**：
+    // 变异测试证明把 `: TIER_HOVER_ACTIONS` 整条删掉（按钮就常驻了）它照样绿，
+    // 因为两个字符串的相对位置没变。必须真的确认主按钮是那个容器的**孩子**。
     //
-    // ⚠️ 用 **lastIndexOf**：`indexOf` 会先命中行根 div 注释里的常量名
-    // （「见 `TIER_HOVER_ACTIONS` 的说明」），截出来的「子树」是整行，断言失真。
-    // TierItem 切片内最后一次出现才是图标组 className 三元里的真用点。
+    // 做法：从 `TIER_HOVER_ACTIONS` 所在的 `<div>` 起，按 `<div`/`</div>` 数深度找到
+    // **配对**的收标签，截出真正的子树。
+    //
+    // ⚠️ 不能图省事用 `indexOf("</div>")` —— 容器里有 `{tier.isCurrent ? (…) : (…)}`
+    // 三元，里面还有 div，第一个 `</div>` 是内层的（初版这么写，对正确的代码也报红）。
+    // ⚠️ lastIndexOf：行根 div 的注释里也提到常量名，indexOf 会截出整行（假闸）。
     const anchor = tierItem.lastIndexOf("TIER_HOVER_ACTIONS");
     expect(anchor, "档位行没有 hover 组？").toBeGreaterThan(0);
     const divStart = tierItem.lastIndexOf("<div", anchor);
@@ -130,50 +132,48 @@ describe("RelayRow hover-reveal actions", () => {
       throw new Error("hover 容器的 <div> 没有配对的收标签？");
     })();
 
-    // 主按钮的两种文案都不许进 hover 组 —— 进去就回退成「没 hover 时右侧全空」。
+    // 主按钮的两种文案都必须在这个子树**内**（提出去就常驻了）。
     for (const key of ["provider.enable", "provider.inUse"]) {
       expect(
         subtree,
-        `${key} 跑进 hover 组了 ⇒ 主按钮会整组藏起来，回到旧形态`,
-      ).not.toContain(key);
+        `${key} 不在 hover 容器的子树里 ⇒ 它会常驻显示`,
+      ).toContain(key);
     }
-    // 组里住的是次要图标，且 className 的三元真的在用 TIER_HOVER_ACTIONS
-    // （断言表达式形状而非名字 —— 名字也出现在注释里，名字断言是假闸）。
-    expect(subtree).toContain('t("loongport.tier.checkConnectivity")');
+    // 而且容器**真的**把那两个常量用在了 className 的三元里。
+    //
+    // ⚠️ 断言 `subtree.toContain("TIER_HOVER_ACTIONS")` 是不够的（变异测试证明的）：
+    // 那个名字也出现在子树的**注释**里，于是把 `: TIER_HOVER_ACTIONS` 整条删掉
+    // （按钮就常驻了）它照样绿。必须匹配到实际的表达式形状。
     expect(subtree, "hover 容器的 className 没在用 TIER_HOVER_ACTIONS").toMatch(
       /\?\s*HOVER_ACTIONS_PINNED\s*\n?\s*:\s*TIER_HOVER_ACTIONS/,
     );
-    // 主按钮渲染在组**之前**（同一个外层动作容器里），不能只是被删掉。
-    expect(tierItem.slice(0, divStart)).toContain('t("provider.enable")');
-    expect(tierItem.slice(0, divStart)).toContain('t("provider.inUse")');
   });
 
-  it("pins the group visible while an icon action is running", () => {
-    // 操作进行中鼠标一移开就看不到自己点的东西还在跑 —— 图标侧的 busy 都要算
-    // （主按钮常驻，它自己的 switching 转圈天然可见，不靠钉）。
+  it("pins the group visible while an action is running", () => {
+    // 操作进行中鼠标一移开就看不到自己点的东西还在跑 —— 图标与主按钮的
+    // busy 标志都要算（主按钮的 switching 转圈也在组里）。
     expect(source).toContain("HOVER_ACTIONS_PINNED");
     expect(source).toMatch(
-      /checking \|\| resetting \|\| verifying\s*\n?\s*\?\s*HOVER_ACTIONS_PINNED/,
+      /checking \|\| resetting \|\| switching \|\| modelSwitching \|\| verifying\s*\n?\s*\?\s*HOVER_ACTIONS_PINNED/,
     );
   });
 
-  it("keeps ProviderActions on the same shape: primary outside, icons hover-gated", () => {
-    // 跨文件的同一事实要有闸（CLAUDE.md §三点六）：「主按钮常驻、图标组 hover」
-    // 这条分界线在 RelayRow（本文件上面的用例）与 ProviderActions（ProviderCard
-    // 的动作区）两处各写了一份 —— 哪边回退成整组 hover 都会悄悄分叉。
+  it("keeps ProviderActions on the same shape: main button inside the gate", () => {
+    // 跨文件的同一事实要有闸（CLAUDE.md §三点六）：「整组 hover（含主按钮）」
+    // 这条分界线在 RelayRow（上面的用例）与 ProviderActions（ProviderCard 的
+    // 动作区，gating 已从 ProviderCard 外层包装收进组件内部）两处各写一份。
     const actions = fs.readFileSync(PROVIDER_ACTIONS_TSX, "utf8");
     const gate = actions.indexOf("pointer-events-none opacity-0");
     const main = actions.indexOf("buttonState.text");
-    expect(gate, "ProviderActions 没有图标 hover 组？").toBeGreaterThan(0);
+    expect(gate, "ProviderActions 没有 hover 组？").toBeGreaterThan(0);
     expect(main, "ProviderActions 的主按钮渲染没了？").toBeGreaterThan(0);
-    // 主按钮先于 hover 闸出现 ⇒ 在组外常驻；反过来就是整组被包住了。
-    expect(main).toBeLessThan(gate);
+    // 主按钮在 hover 闸**之后**出现 ⇒ 在组内；先于闸出现就是被提出组外常驻了。
+    expect(main).toBeGreaterThan(gate);
 
-    // ProviderCard 那层不许再把整个动作区包回 hover 容器（旧形态的出处）。
+    // ProviderCard 那层不许再包一层自己的 hover 容器（双闸会打架）。
     const card = fs.readFileSync(PROVIDER_CARD_TSX, "utf8");
-    expect(
-      card,
-      "ProviderCard 又把整个动作区（含主按钮）包进 hover 容器了",
-    ).not.toContain("opacity-0 pointer-events-none group-hover:opacity-100");
+    expect(card, "ProviderCard 又包了一层自己的 hover 容器").not.toContain(
+      "opacity-0 pointer-events-none group-hover:opacity-100",
+    );
   });
 });
