@@ -446,18 +446,10 @@ function VendorStatus({
   if (account.status === "ready" || account.status === "sessionExpiredUsable") {
     return (
       <div className="flex shrink-0 items-center gap-2">
-        {/* 主按钮（「使用 / 在用」）+ 次要动作，**整组 hover 才出** —— 与
-            `TierItem:712` / cc-switch `ProviderCard` 同一形态：没 hover 时
-            右侧是空的，「在用」态靠行上的蓝色边框表达。进行中钉住可见。 */}
-        <div
-          className={cn(
-            "flex shrink-0 items-center gap-0.5",
-            HOVER_ACTIONS_BASE,
-            switching || provisioning || loggingIn
-              ? HOVER_ACTIONS_PINNED
-              : ROW_HOVER_ACTIONS,
-          )}
-        >
+        {/* 主按钮（「使用 / 在用」）常驻 —— 与 `TierItem` / `ProviderActions`
+            同一形状（2026-09-13 定调：行的主操作不靠 hover 扫出来）。这里整组
+            都没有次要图标，唯一同组的「重登」是登录过期状态的出口，也常驻。 */}
+        <div className="flex shrink-0 items-center gap-0.5">
           {/* 主按钮。**文案与图标复用上游的 `provider.enable` / `provider.inUse`**
               （四 locale 早就齐了）—— 与 `TierItem` 里那两支逐字相同，
               否则同一个操作会在两种行上有两种叫法。 */}
@@ -599,15 +591,10 @@ function PlanItem({
         </div>
       </div>
 
-      {/* 整组 hover / focus 才出现，`pointer-events-none` 不能省（透明的按钮
-          仍然可点，鼠标扫过空白处会误触）—— 逐字抄 `TierItem` 那段。 */}
-      <div
-        className={cn(
-          "flex flex-shrink-0 items-center gap-0.5",
-          HOVER_ACTIONS_BASE,
-          switching || resetting ? HOVER_ACTIONS_PINNED : PLAN_HOVER_ACTIONS,
-        )}
-      >
+      {/* 主按钮（「使用 / 在用」）常驻 —— 同 `TierItem` / `ProviderActions`
+          的形状（2026-09-13 定调）；图标组 hover 才出，`pointer-events-none`
+          不能省（透明按钮仍可点），进行中钉住。 */}
+      <div className="flex flex-shrink-0 items-center gap-1">
         {plan.isCurrent ? (
           <Button
             type="button"
@@ -635,36 +622,44 @@ function PlanItem({
           </Button>
         )}
 
-        {plan.canEditConfig && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
-            onClick={onEdit}
-            title={t("loongport.tier.edit")}
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </Button>
-        )}
+        <div
+          className={cn(
+            "flex items-center gap-0.5",
+            HOVER_ACTIONS_BASE,
+            resetting ? HOVER_ACTIONS_PINNED : PLAN_HOVER_ACTIONS,
+          )}
+        >
+          {plan.canEditConfig && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+              onClick={onEdit}
+              title={t("loongport.tier.edit")}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+          )}
 
-        {plan.canEditConfig && !userEdited && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
-            disabled={resetting}
-            onClick={onReset}
-            title={t("loongport.tier.resetConfig")}
-          >
-            {resetting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Undo2 className="h-3.5 w-3.5" />
-            )}
-          </Button>
-        )}
+          {plan.canEditConfig && !userEdited && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+              disabled={resetting}
+              onClick={onReset}
+              title={t("loongport.tier.resetConfig")}
+            >
+              {resetting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Undo2 className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* 「恢复默认配置」的**常驻**版，只给已手动维护的档位（同 `TierItem`：

@@ -186,22 +186,18 @@ it("leaves back navigation to the shell for a routed account detail", async () =
   expect(onSelectAccount).not.toHaveBeenCalled();
 });
 
-it("hides account details persistently without hiding configured application links", async () => {
-  const { user } = setup();
+it("shows account details inline without a visibility toggle", async () => {
+  setup();
   await screen.findByText("Example Official");
-  await user.click(
-    screen.getAllByRole("button", {
-      name: "loongport.accounts.hideDetails",
-    })[1],
-  );
-  expect(screen.queryByText("Official account")).not.toBeInTheDocument();
-  expect(screen.queryByText("Account balance")).not.toBeInTheDocument();
+  // 账号信息常驻：标签（并进「label · app · 状态」一行）与余额直接可见，
+  // 不再有「显示/隐藏账号信息」开关。
+  expect(screen.getByText(/Official account/)).toBeInTheDocument();
+  expect(screen.getByText("Account balance")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Codex" })).toBeInTheDocument();
-  expect(localStorage.getItem("loongport.accountDetailsHidden")).toContain(
-    "vendor:1",
-  );
-  await user.click(
-    screen.getByRole("button", { name: "loongport.accounts.showDetails" }),
-  );
-  expect(screen.getByText("Official account")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "loongport.accounts.showDetails" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "loongport.accounts.hideDetails" }),
+  ).not.toBeInTheDocument();
 });

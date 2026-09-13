@@ -60,7 +60,8 @@ import { useTierVerification } from "./model-verification/TierVerificationProvid
  * 与仓库现有消费者（`HermesFormFields` 等）一致。别去找那个不存在的动画。
  */
 /**
- * 「hover / focus 才显形的动作组」那套 class。**逐字抄 `ProviderCard.tsx:559`**。
+ * 「hover / focus 才显形的动作组」那套 class（**只包次要图标**；主按钮 2026-09-13
+ * 起常驻，不进组 —— 见 `TierItem` 动作区注释）。
  *
  * ## `pointer-events-none` 不能省
  *
@@ -726,39 +727,15 @@ function TierItem({
         </div>
       </div>
 
-      {/* ⚠️ **整组（含主按钮「启用 / 使用中」）都是 hover / focus 才出现** ——
-          这一点上一轮弄错了：只把两个图标放进了 hover 组，`启用` 留在容器外面常驻。
+      {/* 主按钮（「启用 / 使用中」）**常驻**，不进 hover 组 —— 行的主操作不该
+          靠鼠标扫出来才能发现（2026-09-13 定调；此前逐字照抄上游整组 hover 的
+          形态作废，`ProviderCard` / `VendorRow` 同批改成同一形状：主按钮常驻、
+          图标组 hover）。
 
-          上游的真相在 `ProviderCard.tsx:559`：那个 `opacity-0 pointer-events-none
-          group-hover:opacity-100 …` 的容器**包住整个 `ProviderActions`**，而
-          `ProviderActions` 的第一个孩子就是主按钮（`ProviderActions.tsx:263-281`）。
-          所以上游卡片没 hover 时右侧是**彻底空的**，连「使用中」都不显示 ——
-          维护者的截图正是这样：蓝色高亮的 OpenAI Official 右边一片空白，
-          只有鼠标底下的 default 那张才浮出「启用 + 5 个图标」。
-
-          那串 class 逐字抄它，`pointer-events-none` 不能省 —— 只改 opacity 的话
-          透明按钮仍然可点，鼠标扫过空白处会误触。
-
-          **顺序也照它**：主按钮在左、图标组在右（`ProviderActions` 内部就是这个次序），
-          原来我把图标放在了主按钮左边，跟 provider 页反着。
-
-          尺度**有意用 h-7 而不是上游的 h-8**：档位行是中转站卡片内的嵌套行，
-          外层那些控件都是 h-7，跟着上游升到 h-8 会让内外不一致。
-
-          进行中的操作用 `opacity-100 pointer-events-auto` 钉住可见：
-          否则鼠标一移开就看不到自己点的东西还在跑。**`switching` 也要算进去**
-          （原来只算了 checking / resetting，而主按钮以前在组外所以没暴露这个问题）。 */}
-      <div
-        className={cn(
-          "flex flex-shrink-0 items-center gap-0.5",
-          HOVER_ACTIONS_BASE,
-          checking || resetting || switching || modelSwitching
-            ? HOVER_ACTIONS_PINNED
-            : verifying
-              ? HOVER_ACTIONS_PINNED
-              : TIER_HOVER_ACTIONS,
-        )}
-      >
+          图标组的 `pointer-events-none` 不能省、两个 group 为什么取名字，
+          见文件头 `ROW_HOVER_ACTIONS` 那段注释。进行中的检测 / 恢复 / 验真
+          钉住图标组可见；主按钮自己的转圈（switching）天然可见。 */}
+      <div className="flex flex-shrink-0 items-center gap-1">
         {/* 主按钮。**文案与图标复用上游的 `provider.enable` / `provider.inUse`** ——
             那两个 key 四个 locale 早就齐了，另建「使用」是重复发明（而且与上游同一屏
             出现两种叫法，用户会以为是两种不同操作）。
@@ -795,7 +772,18 @@ function TierItem({
           </Button>
         )}
 
-        {/* 连通检测。**这个按钮是白捡的** —— 托管档位就是正常的 provider 记录
+        {/* 次要图标组：hover / focus 才显形（`pointer-events-none` 不能省 ——
+            透明按钮仍然可点，鼠标扫过空白处会误触）。进行中钉住可见。 */}
+        <div
+          className={cn(
+            "flex items-center gap-0.5",
+            HOVER_ACTIONS_BASE,
+            checking || resetting || verifying
+              ? HOVER_ACTIONS_PINNED
+              : TIER_HOVER_ACTIONS,
+          )}
+        >
+          {/* 连通检测。**这个按钮是白捡的** —— 托管档位就是正常的 provider 记录
             （`category = "aggregator"`、写在同一张 provider 表里），所以上游那条
             `stream_check_provider` 命令直接就能用，前端也直接复用 `useStreamCheck`
             （它自带 toast、i18n 与 per-id 的 checking 状态）。
@@ -803,59 +791,60 @@ function TierItem({
             结果只走 toast、不在行上留状态标记：`ProviderHealthBadge` 那个徽章的数据源是
             `provider_health` 表，只被**真实转发流量**写入，而连通检测明确不碰它
             （`stream_check.rs` 开头就写了「不触碰故障转移熔断器」）⇒ 借那个徽章会显示假信息。 */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
-          disabled={checking}
-          onClick={onCheck}
-          title={t("loongport.tier.checkConnectivity")}
-        >
-          {checking ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Activity className="h-3.5 w-3.5" />
-          )}
-        </Button>
-
-        {/* 模型验证入口：模块自持（下线/档位不可验证时不渲染）。 */}
-        <TierVerifyButton tier={tier} canVerify={tier.canVerifyModels} />
-
-        {/* 「编辑配置」：跳 cc-switch 现成的编辑页 —— 那页支持全部字段，我们不重做
-            （CLAUDE.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），
-            那个判断在宿主里，不在这儿：本组件不知道用户勾过「不再提示」没有。 */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
-          onClick={onEdit}
-          title={t("loongport.tier.edit")}
-        >
-          <Pencil className="h-3.5 w-3.5" />
-        </Button>
-
-        {/* 「恢复默认配置」的 hover 版，给**没手动维护过**的档位。
-            手动维护过的那些走下面常驻的那个 —— 两处只会渲染一个（`!userEdited`
-            与 `userEdited` 互斥），不会同时出现两个恢复按钮。 */}
-        {!userEdited && (
           <Button
             type="button"
             variant="ghost"
             size="icon"
             className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
-            disabled={resetting}
-            onClick={onReset}
-            title={t("loongport.tier.resetConfig")}
+            disabled={checking}
+            onClick={onCheck}
+            title={t("loongport.tier.checkConnectivity")}
           >
-            {resetting ? (
+            {checking ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
-              <Undo2 className="h-3.5 w-3.5" />
+              <Activity className="h-3.5 w-3.5" />
             )}
           </Button>
-        )}
+
+          {/* 模型验证入口：模块自持（下线/档位不可验证时不渲染）。 */}
+          <TierVerifyButton tier={tier} canVerify={tier.canVerifyModels} />
+
+          {/* 「编辑配置」：跳 cc-switch 现成的编辑页 —— 那页支持全部字段，我们不重做
+            （CLAUDE.md §一）。点它先弹一道警告（保存后这个档位归用户自己维护），
+            那个判断在宿主里，不在这儿：本组件不知道用户勾过「不再提示」没有。 */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+            onClick={onEdit}
+            title={t("loongport.tier.edit")}
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </Button>
+
+          {/* 「恢复默认配置」的 hover 版，给**没手动维护过**的档位。
+            手动维护过的那些走下面常驻的那个 —— 两处只会渲染一个（`!userEdited`
+            与 `userEdited` 互斥），不会同时出现两个恢复按钮。 */}
+          {!userEdited && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 p-1 text-muted-foreground hover:text-foreground"
+              disabled={resetting}
+              onClick={onReset}
+              title={t("loongport.tier.resetConfig")}
+            >
+              {resetting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Undo2 className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* 「恢复默认配置」的**常驻**版，只给已手动维护的档位。

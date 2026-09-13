@@ -179,6 +179,19 @@ describe("RelayRow model verification", () => {
     );
   });
 
+  it("keeps the primary tier action visible without hover", () => {
+    renderWithQuery(<RelayRow {...rowProps()} />);
+
+    const enable = screen.getByRole("button", { name: "启用" });
+    // 主按钮在 hover 组外常驻：自身与直接父级都不带 hover 组的 opacity-0。
+    expect(enable.className).not.toContain("opacity-0");
+    expect(enable.parentElement?.className).not.toContain("opacity-0");
+    // 次要图标仍在 hover 组里（同屏两级显隐的分界）。
+    expect(screen.getByTitle("测试连接").parentElement?.className).toContain(
+      "group-hover/tier:opacity-100",
+    );
+  });
+
   it("does not expose verification for unmanaged app tiers", () => {
     renderWithQuery(
       <RelayRow

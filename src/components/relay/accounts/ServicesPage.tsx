@@ -14,7 +14,6 @@ import { getAppDisplayName } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import { RelaySection, type RelaySectionProps } from "../RelaySection";
 import { RowBalance } from "../RowBalance";
-import { useAccountVisibility } from "./useAccountVisibility";
 import {
   configuredApps,
   useServiceAccounts,
@@ -42,8 +41,6 @@ export function ServicesPage({
   onOpenApp,
 }: ServicesPageProps) {
   const { t } = useTranslation();
-  const { isAccountDetailsHidden, setAccountDetailsHidden } =
-    useAccountVisibility();
   const { accounts, isPending, error, reload } = useServiceAccounts();
   const [localSelection, setLocalSelection] = useState<{
     kind: ServiceAccount["kind"];
@@ -136,6 +133,7 @@ export function ServicesPage({
         <RelaySection
           key={`${selection.kind}:${selection.id}:${selection.appId}`}
           appId={selection.appId}
+          accountActionsOnly
           accountFilter={{ kind: selection.kind, id: selection.id }}
           accountSnapshot={
             selected && selected.apps.has(selection.appId)
@@ -203,9 +201,8 @@ export function ServicesPage({
               {t("loongport.accounts.empty")}
             </div>
           )}
-          <div className="grid gap-3">
+          <div className="grid gap-2">
             {accounts.map((account) => {
-              const detailsHidden = isAccountDetailsHidden(account);
               const Icon = account.kind === "relay" ? Server : ShieldCheck;
               const apps = configuredApps(account);
               const contextApp = account.apps.has(appId)
@@ -215,7 +212,7 @@ export function ServicesPage({
               return (
                 <article
                   key={`${account.kind}:${account.id}`}
-                  className="group relative rounded-xl border border-border bg-card p-5 pr-14"
+                  className="group relative rounded-xl border border-border bg-card p-3 pr-12"
                 >
                   {account.kind === "relay"
                     ? renderDelete({
@@ -228,93 +225,69 @@ export function ServicesPage({
                         row: account.apps.get(contextApp)!,
                         appId: contextApp,
                       })}
-                  <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div className="flex min-w-0 items-start gap-3">
-                      <div className="rounded-lg bg-muted p-2.5">
-                        <Icon className="h-5 w-5 text-muted-foreground" />
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <div className="rounded-lg bg-muted p-2">
+                        <Icon className="h-4 w-4 text-muted-foreground" />
                       </div>
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <h2 className="font-medium">
+                          <h2 className="text-sm font-medium">
                             {accountName(account)}
                           </h2>
                           <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                             {t(`loongport.accounts.${account.kind}`)}
                           </span>
                         </div>
-                        {!detailsHidden && account.row.accountLabel && (
-                          <p className="mt-1 break-all text-sm text-muted-foreground">
-                            {account.row.accountLabel}
-                          </p>
-                        )}
-                        {!detailsHidden && (
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {getAppDisplayName(contextApp, t)} ·{" "}
-                            {t(`loongport.accounts.status.${row.status}`)}
-                          </p>
-                        )}
+                        <p className="mt-0.5 break-all text-xs text-muted-foreground">
+                          {[
+                            account.row.accountLabel,
+                            getAppDisplayName(contextApp, t),
+                            t(`loongport.accounts.status.${row.status}`),
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
                       </div>
                     </div>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="ghost"
-                        onClick={() =>
-                          setAccountDetailsHidden(account, !detailsHidden)
-                        }
-                      >
-                        {t(
-                          detailsHidden
-                            ? "loongport.accounts.showDetails"
-                            : "loongport.accounts.hideDetails",
-                          {
-                            defaultValue: detailsHidden
-                              ? "Show account details"
-                              : "Hide account details",
-                          },
-                        )}
-                      </Button>
-                      {!detailsHidden && (
-                        <Button
-                          variant="outline"
-                          onClick={() =>
-                            setSelection({
-                              kind: account.kind,
-                              id: account.id,
-                              appId: contextApp,
-                            })
-                          }
-                        >
-                          {t("loongport.accounts.detail")}
-                          <ArrowRight className="h-4 w-4" />
-                        </Button>
-                      )}
-                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7"
+                      onClick={() =>
+                        setSelection({
+                          kind: account.kind,
+                          id: account.id,
+                          appId: contextApp,
+                        })
+                      }
+                    >
+                      {t("loongport.accounts.detail")}
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </Button>
                   </div>
-                  {!detailsHidden && (
-                    <div className="mt-3">
-                      {account.kind === "relay"
-                        ? renderActions({
-                            kind: "relay",
-                            row: account.apps.get(contextApp)!,
-                            appId: contextApp,
-                          })
-                        : renderActions({
-                            kind: "vendor",
-                            row: account.apps.get(contextApp)!,
-                            appId: contextApp,
-                          })}
-                    </div>
-                  )}
-                  {(apps.length > 0 ||
-                    (!detailsHidden && account.row.canQueryBalance)) && (
-                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
+                  <div className="mt-2">
+                    {account.kind === "relay"
+                      ? renderActions({
+                          kind: "relay",
+                          row: account.apps.get(contextApp)!,
+                          appId: contextApp,
+                        })
+                      : renderActions({
+                          kind: "vendor",
+                          row: account.apps.get(contextApp)!,
+                          appId: contextApp,
+                        })}
+                  </div>
+                  {(apps.length > 0 || account.row.canQueryBalance) && (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-2">
                       <div className="flex flex-wrap gap-1">
                         {apps.map((app) => (
                           <Button
                             key={app}
                             variant="ghost"
                             size="sm"
-                            className="h-7 text-xs"
+                            className="h-6 px-2 text-xs"
                             onClick={() => onOpenApp(app)}
                           >
                             {getAppDisplayName(app, t)}
@@ -322,7 +295,7 @@ export function ServicesPage({
                           </Button>
                         ))}
                       </div>
-                      {!detailsHidden && account.row.canQueryBalance && (
+                      {account.row.canQueryBalance && (
                         <RowBalance
                           rowKind={account.kind}
                           rowId={account.id}

@@ -19,8 +19,6 @@ import zh from "@/i18n/locales/zh.json";
  */
 const requiredKeys = [
   "accounts.recharge",
-  "accounts.hideDetails",
-  "accounts.showDetails",
   "accounts.removeRelay",
   "accounts.removeRelayInUse",
   "accounts.removeVendor",

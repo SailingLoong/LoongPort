@@ -622,7 +622,9 @@ export function ProviderCard({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 flex-shrink-0 opacity-0 pointer-events-none group-hover:opacity-100 group-focus-within:opacity-100 group-hover:pointer-events-auto group-focus-within:pointer-events-auto transition-opacity duration-200">
+          {/* 主按钮常驻、次要图标 hover 才显形 —— 那条分界线在 `ProviderActions`
+              内部（主按钮在上、图标组自带 hover 组），这里不再整组包一层。 */}
+          <div className="flex-shrink-0">
             <ProviderActions
               appId={appId}
               isCurrent={isCurrent}

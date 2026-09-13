@@ -99,6 +99,11 @@ export interface RelaySectionProps {
   appId: AppId;
   /** Display one account while retaining the existing action owner. */
   accountFilter?: { kind: "relay" | "vendor"; id: number };
+  /**
+   * 账号详情视图只要账号/站点级操作（登录、刷新、站点配置、充值），
+   * 不渲染档位列表与官方 plan 档——档位维护归应用页的工作台，这里不再养第二份。
+   */
+  accountActionsOnly?: boolean;
   /** Public account-page snapshot; null means it is loading or absent. */
   accountSnapshot?: AccountActionTarget | null;
   /** One lifecycle owner renders controls for every overview card. */
@@ -119,6 +124,7 @@ export function RelaySection({
   appId,
   onOpenAddHub,
   accountFilter,
+  accountActionsOnly = false,
   accountSnapshot,
   renderAccounts,
   onAccountChanged,
@@ -976,62 +982,66 @@ export function RelaySection({
         </div>
       )}
       {/* 模型验证的行级宿主：summaries 拉取、验真弹窗与结果变化订阅全在
-          Provider 内部；下线时它对外不可见（不拉取、入口/徽章不渲染）。 */}
-      {!renderAccounts && accountFilter?.kind !== "vendor" && (
-        <TierVerificationProvider
-          appId={appId}
-          providerIds={verificationProviderIds}
-        >
-          <RelayTierList
-            relays={
-              accountFilter
-                ? relays.filter((row) => row.id === accountFilter.id)
-                : relays
-            }
-            busy={busy}
-            onAddSite={() => onOpenAddHub("directory")}
-            onLogin={(relayId) => void handleLogin(relayId)}
-            onProvision={handleProvision}
-            onSiteConfigApplied={() => void reload()}
-            onReorder={(ids) => void handleReorder(ids)}
-            onSwitchTier={(relayId, tier) =>
-              void handleSwitchTier(relayId, tier)
-            }
-            onSelectTierModel={(tier, model) =>
-              void handleSelectTierModel(tier, model)
-            }
-            onPurchase={(relayId) => void handlePurchase(relayId)}
-            onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
-            onBrowserLogin={(relayId) => void handleBrowserLogin(relayId)}
-            // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
-            // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
-            onCheckTier={(tier) =>
-              void checkProvider(tier.providerId, tier.displayName)
-            }
-            isCheckingTier={isChecking}
-            onResetTier={(tier) =>
-              setConfirmReset({
-                kind: "tier",
-                providerId: tier.providerId,
-                displayName: tier.displayName,
-                busyKey: `reset:${tier.providerId}`,
-              })
-            }
-            onEditTier={requestEdit}
-            onRemoveRelay={(relayId) => {
-              // ⚠️ **这处 `find` 保持 number 不动**：`relayId` 从 `RelayRow` 的
-              // `onDelete` 一路传回来，只在 relay 这一类里流转。官网行走的是
-              // `onRemoveVendor` 那条独立回调，不经过这里。
-              const row = relays.find((op) => op.id === relayId);
-              if (row) setConfirmRemove(row);
-            }}
-          />
-        </TierVerificationProvider>
-      )}
+          Provider 内部；下线时它对外不可见（不拉取、入口/徽章不渲染）。
+          `accountActionsOnly` 的账号详情视图不养档位，整块跳过（含 Provider）。 */}
+      {!renderAccounts &&
+        !accountActionsOnly &&
+        accountFilter?.kind !== "vendor" && (
+          <TierVerificationProvider
+            appId={appId}
+            providerIds={verificationProviderIds}
+          >
+            <RelayTierList
+              relays={
+                accountFilter
+                  ? relays.filter((row) => row.id === accountFilter.id)
+                  : relays
+              }
+              busy={busy}
+              onAddSite={() => onOpenAddHub("directory")}
+              onLogin={(relayId) => void handleLogin(relayId)}
+              onProvision={handleProvision}
+              onSiteConfigApplied={() => void reload()}
+              onReorder={(ids) => void handleReorder(ids)}
+              onSwitchTier={(relayId, tier) =>
+                void handleSwitchTier(relayId, tier)
+              }
+              onSelectTierModel={(tier, model) =>
+                void handleSelectTierModel(tier, model)
+              }
+              onPurchase={(relayId) => void handlePurchase(relayId)}
+              onOpenUsage={(relayId) => void handleOpenUsage(relayId)}
+              onBrowserLogin={(relayId) => void handleBrowserLogin(relayId)}
+              // 档位的 providerId 就是 provider 表的主键，直接喂给上游那条命令。
+              // 名字用 displayName（那是用户在这一行看到的），检测结果的 toast 里会带它。
+              onCheckTier={(tier) =>
+                void checkProvider(tier.providerId, tier.displayName)
+              }
+              isCheckingTier={isChecking}
+              onResetTier={(tier) =>
+                setConfirmReset({
+                  kind: "tier",
+                  providerId: tier.providerId,
+                  displayName: tier.displayName,
+                  busyKey: `reset:${tier.providerId}`,
+                })
+              }
+              onEditTier={requestEdit}
+              onRemoveRelay={(relayId) => {
+                // ⚠️ **这处 `find` 保持 number 不动**：`relayId` 从 `RelayRow` 的
+                // `onDelete` 一路传回来，只在 relay 这一类里流转。官网行走的是
+                // `onRemoveVendor` 那条独立回调，不经过这里。
+                const row = relays.find((op) => op.id === relayId);
+                if (row) setConfirmRemove(row);
+              }}
+            />
+          </TierVerificationProvider>
+        )}
 
       {/* 官网直连账号块 —— 只在支持厂商的 tab 出现（gemini / grokbuild 无 preset，
-          摆了也是骗人）。添加入口在顶栏大「+」。 */}
+          摆了也是骗人）。添加入口在顶栏大「+」。plan 档同样不进账号详情视图。 */}
       {!renderAccounts &&
+        !accountActionsOnly &&
         vendorSupported &&
         accountFilter?.kind !== "relay" && (
           <VendorBlock

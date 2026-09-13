@@ -27,7 +27,6 @@ import type { ApplicationConfiguration } from "@/lib/api/applicationOverview";
 import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
 import type { AccountRoute } from "@/components/shell/navigation";
 import { Button } from "@/components/ui/button";
-import { useAccountVisibility } from "@/components/relay/accounts/useAccountVisibility";
 import { cn } from "@/lib/utils";
 import { tierMetrics, type TierMetric, type TierSort } from "./tierMetrics";
 
@@ -211,10 +210,6 @@ function TierRow({
     isDragging,
   } = useSortable({ id: item.providerId, disabled: dragDisabled });
   const name = item.configurationName ?? item.name;
-  const { isAccountDetailsHidden } = useAccountVisibility();
-  const accountHidden = item.account
-    ? isAccountDetailsHidden(item.account)
-    : false;
   return (
     <tr
       ref={setNodeRef}
@@ -256,9 +251,8 @@ function TierRow({
           )}
         </div>
         <p className="break-words text-xs leading-5 text-muted-foreground">
-          {[item.serviceName, accountHidden ? null : item.accountLabel]
-            .filter(Boolean)
-            .join(" · ") || t(`applications.sources.${item.source}`)}
+          {[item.serviceName, item.accountLabel].filter(Boolean).join(" · ") ||
+            t(`applications.sources.${item.source}`)}
         </p>
         {(tier?.effectiveModel ?? item.model) && (
           <p className="break-all text-xs leading-5 text-muted-foreground">
@@ -287,8 +281,7 @@ function TierRow({
           className="whitespace-nowrap px-3 py-3 text-right align-top tabular-nums"
         >
           <span className="inline-block py-1.5">
-            {(accountHidden && metric.key === "balanceUsd") ||
-            tier?.[metric.key] == null ? (
+            {tier?.[metric.key] == null ? (
               <span className="text-muted-foreground">—</span>
             ) : (
               metric.format(tier[metric.key]!)
