@@ -40,6 +40,13 @@ updates:
       - dependency-name: "zip"
         update-types:
           - "version-update:semver-major"
+      # 下面两个是 tauri 官方工具链钉住的传递依赖，安全公告在我们树内无解
+      # （latest-resolvable 低于修复版，security_update_not_possible 每天
+      # 失败两单、发邮件）。两者都不是本仓直依赖，name 级 ignore 零附带损失；
+      # tauri 上游升级后（kuchikiki/selectors 摆脱 phf 0.8、GTK 栈升 0.20）
+      # 移除这两条恢复告警。
+      - dependency-name: "rand"
+      - dependency-name: "glib"
 
   - package-ecosystem: "github-actions"
     directory: "/"
