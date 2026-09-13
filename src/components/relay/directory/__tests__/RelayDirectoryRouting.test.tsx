@@ -33,11 +33,23 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 vi.mock("../RelayDirectoryPage", () => ({
-  RelayDirectoryPage: ({ sourceAppId, onBack, onAuthenticated }: any) => (
+  RelayDirectoryPage: ({
+    sourceAppId,
+    onBack,
+    onAuthenticated,
+    onConnected,
+  }: any) => (
     <div data-testid="relay-directory">
       <span data-testid="directory-source-app">{sourceAppId}</span>
       <button onClick={onBack}>directory-back</button>
       <button onClick={onAuthenticated}>directory-authenticated</button>
+      <button
+        onClick={() =>
+          onConnected({ kind: "relay", rowId: 7, name: "Example" })
+        }
+      >
+        connect-account
+      </button>
     </div>
   ),
 }));
@@ -61,6 +73,41 @@ describe("relay directory routing", () => {
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
   });
 
+  it("keeps the primary plaza page free of Back controls", async () => {
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "client.plaza" }),
+    );
+    expect(await screen.findByTestId("relay-directory")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "common.back" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("returns from configuration to the add flow on Escape without leaving onboarding", async () => {
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "loongport.addEntry.title" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "connect-account" }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "loongport.onboarding.configure",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "common.back" })).toHaveLength(
+      1,
+    );
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(await screen.findByTestId("relay-directory")).toBeVisible();
+    expect(document.querySelector("header")).toHaveAttribute("hidden");
+    expect(screen.getAllByRole("button", { name: "common.back" })).toHaveLength(
+      1,
+    );
+  });
+
   it.each([["claude"], ["codex"], ["gemini"], ["openclaw"]])(
     "opens the add hub from %s on the relay directory",
     async (appId) => {
@@ -81,6 +128,9 @@ describe("relay directory routing", () => {
       );
       expect(screen.queryByTestId("app-switcher")).not.toBeInTheDocument();
       expect(document.querySelector("header")).toHaveAttribute("hidden");
+      expect(
+        screen.getAllByRole("button", { name: "common.back" }),
+      ).toHaveLength(1);
       expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("providers");
 
       fireEvent.click(screen.getByText("directory-back"));

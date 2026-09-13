@@ -698,15 +698,15 @@ function App() {
     checkEnvOnSwitch();
   }, [activeApp]);
 
-  const currentViewRef = useRef(currentView);
+  const canGoBackRef = useRef(navigation.canGoBack);
   const managementBusy =
     mcpManagementBusy || skillsNavigationBusy || promptNavigationBusy;
   const managementBusyRef = useRef(false);
   managementBusyRef.current = managementBusy;
 
   useEffect(() => {
-    currentViewRef.current = currentView;
-  }, [currentView]);
+    canGoBackRef.current = navigation.canGoBack;
+  }, [navigation.canGoBack]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -724,8 +724,7 @@ function App() {
 
       if (document.body.style.overflow === "hidden") return;
 
-      const view = currentViewRef.current;
-      if (view === "providers") return;
+      if (!canGoBackRef.current) return;
       if (managementBusyRef.current) return;
 
       if (isTextEditableTarget(event.target)) return;
@@ -1367,20 +1366,22 @@ function App() {
           >
             {!isApplicationView ? (
               <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={managementBusy}
-                  onClick={goBack}
-                  aria-label={t("common.back")}
-                  className={cn(
-                    "mr-2 rounded-lg",
-                    managementBusy && "disabled:opacity-100",
-                  )}
-                >
-                  <ArrowLeft className="w-4 h-4" />
-                  {t("common.back")}
-                </Button>
+                {navigation.canGoBack && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={managementBusy}
+                    onClick={goBack}
+                    aria-label={t("common.back")}
+                    className={cn(
+                      "mr-2 rounded-lg",
+                      managementBusy && "disabled:opacity-100",
+                    )}
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    {t("common.back")}
+                  </Button>
+                )}
                 <h1 className="text-lg font-semibold">
                   {currentView === "services" && t("client.services")}
                   {currentView === "records" && t("client.records")}
@@ -1410,15 +1411,6 @@ function App() {
               </div>
             ) : (
               <div className="flex items-center gap-3">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={!navigation.canGoBack || managementBusy}
-                  onClick={goBack}
-                >
-                  <ArrowLeft className="mr-1.5 h-4 w-4" />
-                  {t("common.back")}
-                </Button>
                 <h1 className="text-lg font-semibold">
                   {t(
                     activeApp === "codex-image"

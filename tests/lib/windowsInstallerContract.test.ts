@@ -13,6 +13,39 @@ const read = (path: string) =>
  * 进入 Config.Msi rollback 路径，恢复 Error 1926。
  */
 describe("Windows NSIS 安装与自动更新契约", () => {
+  it("沿用原生目录选择页及同一用户的安装目录登记", () => {
+    const config = JSON.parse(read("src-tauri/tauri.conf.json"));
+    const windows = JSON.parse(read("src-tauri/tauri.windows.conf.json"));
+    // Tauri owns the directory page and registry restore; see src-tauri/nsis/README.md.
+    // Check platform overrides too: changing scope or registry identity loses the saved path.
+    expect(windows.productName ?? config.productName).toBe("LoongPort");
+    expect(windows.bundle?.publisher ?? config.bundle.publisher).toBe(
+      "SailingLoong",
+    );
+    for (const nsis of [
+      config.bundle.windows.nsis,
+      windows.bundle?.windows?.nsis ?? {},
+    ]) {
+      expect(nsis.template ?? null).toBeNull();
+      expect(nsis.installMode ?? "currentUser").toBe("currentUser");
+    }
+  });
+
+  it("安装 hook 不重写模板或用户选定的安装目录", () => {
+    const hooks = read("src-tauri/nsis/installer-hooks.nsh")
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith(";"))
+      .join("\n");
+    // Static guard for direct path assignments and page overrides, not an NSIS interpreter.
+    expect(hooks).not.toMatch(
+      /^\s*(?:StrCpy|ReadRegStr|ReadINIStr|Pop|GetFullPathName)\s+"?\$INSTDIR\b/im,
+    );
+    expect(hooks).not.toMatch(/^\s*(?:InstallDir|InstallDirRegKey)\b/im);
+    expect(hooks).not.toMatch(
+      /\b(?:MUI_PAGE_DIRECTORY|MUI_PAGE_CUSTOMFUNCTION_PRE)\b/,
+    );
+  });
+
   it("Tauri 默认 bundle 含 NSIS（唯一 Windows 格式），并挂载旧 MSI 迁移 hook", () => {
     const config = JSON.parse(read("src-tauri/tauri.conf.json"));
     // 默认 targets 列全平台格式，让任何系统上裸 `pnpm tauri build` 都能出对应包；

@@ -1,8 +1,10 @@
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getAppDisplayName, APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api";
+import { isTextEditableTarget } from "@/utils/domUtils";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { SwitchTierConfirmDialog } from "../SwitchTierConfirmDialog";
 import type { ConnectedService } from "./useServiceOnboarding";
@@ -33,6 +35,24 @@ export function ServiceConfiguration({
     resolveConfirmation,
     finish,
   } = useServiceConfiguration(account, sourceAppId, onDone);
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== "Escape" ||
+        event.defaultPrevented ||
+        document.body.style.overflow === "hidden" ||
+        isTextEditableTarget(event.target)
+      )
+        return;
+      event.preventDefault();
+      if (!busy) onBack();
+    };
+    // The active stage handles Escape before the shell's window listener.
+    // PreservedView suspends this effect when the stage is hidden.
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [busy, onBack]);
+
   return (
     <div className="mx-auto w-full max-w-2xl pb-6">
       <Button variant="ghost" onClick={onBack} disabled={busy}>

@@ -45,6 +45,33 @@ export const CLIENT_VIEWS: ClientView[] = [
   "hermesMemory",
   "addHub",
 ];
+// Routes without a parent are primary destinations. Only subordinate flows
+// retain their caller; selecting a primary destination starts a new branch.
+const parentViews: Partial<Record<ClientView, ClientView>> = {
+  addHub: "services",
+  sessions: "records",
+  skills: "resources",
+  skillsDiscovery: "skills",
+  mcp: "resources",
+  prompts: "resources",
+  agents: "resources",
+  universal: "resources",
+  workspace: "resources",
+  openclawEnv: "resources",
+  openclawTools: "resources",
+  openclawAgents: "resources",
+  hermesMemory: "resources",
+};
+
+export function getNavigationSection(view: ClientView): ClientView {
+  const parent = parentViews[view];
+  return parent ? getNavigationSection(parent) : view;
+}
+
+function getParentView(route: ClientRoute): ClientView | undefined {
+  return route.account ? "services" : parentViews[route.view];
+}
+
 export interface AccountRoute {
   kind: "relay" | "vendor";
   id: number;
@@ -72,14 +99,14 @@ export function navigationReducer(
   state: NavigationState,
   action: NavigationAction,
 ): NavigationState {
-  if (action.type === "back")
+  if (action.type === "back") {
+    const parent = getParentView(state.current);
+    if (!parent) return state;
     return {
-      current: state.history.at(-1) ?? {
-        view: "providers",
-        app: state.current.app === "codex-image" ? "codex" : state.current.app,
-      },
+      current: state.history.at(-1) ?? { view: parent, app: state.current.app },
       history: state.history.slice(0, -1),
     };
+  }
   if (action.type === "app")
     return { ...state, current: { ...state.current, app: action.app } };
   const current: ClientRoute = {
@@ -96,10 +123,15 @@ export function navigationReducer(
     current.account?.id === state.current.account?.id
   )
     return state;
+  const sameAccount =
+    current.account !== undefined &&
+    current.account.kind === state.current.account?.kind &&
+    current.account.id === state.current.account?.id;
   return {
     current,
-    history:
-      action.type === "navigate"
+    history: !getParentView(current)
+      ? []
+      : action.type === "navigate" && !sameAccount
         ? [...state.history, state.current]
         : state.history,
   };
@@ -140,6 +172,6 @@ export function useClientNavigation(
     replace,
     setApp,
     back,
-    canGoBack: state.history.length > 0 || state.current.view !== "providers",
+    canGoBack: getParentView(state.current) !== undefined,
   };
 }

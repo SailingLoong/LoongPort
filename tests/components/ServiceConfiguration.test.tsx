@@ -1,5 +1,11 @@
 import { PreservedView } from "@/components/ui/PreservedView";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,6 +55,42 @@ function renderConfiguration() {
   return { onDone, onBack };
 }
 describe("ServiceConfiguration", () => {
+  it("owns Escape before shell navigation and blocks it while finishing", async () => {
+    const user = userEvent.setup();
+    let resolveSwitch!: (value: unknown) => void;
+    switchTier.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const shellBack = vi.fn();
+    const shellKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) shellBack();
+    };
+    window.addEventListener("keydown", shellKeyDown);
+    try {
+      const { onBack } = renderConfiguration();
+      await screen.findByText("Standard");
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      expect(onBack).toHaveBeenCalledTimes(1);
+      expect(shellBack).not.toHaveBeenCalled();
+      await user.click(
+        screen.getByRole("button", { name: "loongport.onboarding.finish" }),
+      );
+      expect(
+        screen.getByRole("button", { name: "common.back" }),
+      ).toBeDisabled();
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      expect(onBack).toHaveBeenCalledTimes(1);
+      expect(shellBack).not.toHaveBeenCalled();
+      await act(async () => resolveSwitch({ status: "cancelled" }));
+    } finally {
+      window.removeEventListener("keydown", shellKeyDown);
+      switchTier.mockReset();
+    }
+  });
+
   it("does not save consent when the required application exit confirmation is cancelled", async () => {
     const user = userEvent.setup();
     switchTier.mockResolvedValue({
