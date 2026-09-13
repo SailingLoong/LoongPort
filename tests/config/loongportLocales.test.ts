@@ -18,7 +18,6 @@ import zh from "@/i18n/locales/zh.json";
  * 照 `toolManagementLocales.test.ts` / `xaiOauthLocales.test.ts` 的形状写（仓库已有惯例）。
  */
 const requiredKeys = [
-  "accounts.configure",
   "accounts.recharge",
   "accounts.hideDetails",
   "accounts.showDetails",

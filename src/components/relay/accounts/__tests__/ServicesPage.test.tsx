@@ -21,7 +21,10 @@ vi.mock("../../RelaySection", () => ({
   RelaySection: (props: any) => {
     mocks.detail(props);
     return props.renderAccounts ? (
-      props.renderAccounts(() => <div>Account controls</div>)
+      props.renderAccounts(
+        () => <div>Account controls</div>,
+        () => null,
+      )
     ) : (
       <div>Account operations</div>
     );
@@ -155,7 +158,7 @@ describe("ServicesPage", () => {
   });
 });
 
-it("returns through navigation history when opened directly from an application", async () => {
+it("leaves back navigation to the shell for a routed account detail", async () => {
   const onBack = vi.fn();
   const onSelectAccount = vi.fn();
   const client = new QueryClient({
@@ -173,8 +176,13 @@ it("returns through navigation history when opened directly from an application"
       />
     </QueryClientProvider>,
   );
-  await userEvent.click(screen.getByRole("button", { name: "common.back" }));
-  expect(onBack).toHaveBeenCalledTimes(1);
+  expect(
+    screen.queryByRole("button", { name: "common.back" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "loongport.accounts.back" }),
+  ).not.toBeInTheDocument();
+  expect(onBack).not.toHaveBeenCalled();
   expect(onSelectAccount).not.toHaveBeenCalled();
 });
 

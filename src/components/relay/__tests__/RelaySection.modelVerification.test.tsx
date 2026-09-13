@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -26,6 +27,7 @@ const api = vi.hoisted(() => ({
   list: vi.fn(),
   openLogin: vi.fn(),
   vendorRefresh: vi.fn(),
+  applySiteConfig: vi.fn(),
 }));
 const dialogState = vi.hoisted(() => ({
   onOpenChange: (_open: boolean) => {},
@@ -269,6 +271,7 @@ let progressListener: ((event: any) => void) | undefined;
 describe("RelaySection model verification ownership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     eventHandlers.clear();
     progressListener = undefined;
     // 每次调用返回新数组引用：Provider 的 summaries 拉取由 providerIds 集合
@@ -311,18 +314,18 @@ describe("RelaySection model verification ownership", () => {
     expect(api.refresh).not.toHaveBeenCalled();
   });
 
-  it("configures the selected account only after an explicit click and warns about cross-app deletion", async () => {
+  it("refreshes the selected account only after an explicit click and warns about cross-app deletion", async () => {
     render(
       <QueryClientProvider client={createTestQueryClient()}>
-        <RelaySection
+        <ServicesPage
           appId="codex"
-          accountFilter={{ kind: "relay", id: 1 }}
+          onOpenApp={vi.fn()}
           onOpenAddHub={vi.fn()}
         />
       </QueryClientProvider>,
     );
     fireEvent.click(
-      await screen.findByRole("button", { name: "One-click configuration" }),
+      await screen.findByRole("button", { name: "common.refresh" }),
     );
     await waitFor(() => expect(api.refresh).toHaveBeenCalledWith(1, "codex"));
     fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
@@ -363,7 +366,7 @@ describe("RelaySection model verification ownership", () => {
         </QueryClientProvider>,
       );
       expect(
-        await screen.findByRole("button", { name: "One-click configuration" }),
+        await screen.findByRole("button", { name: "common.refresh" }),
       ).toBeEnabled();
       api.listRelays.mockResolvedValue([
         {
@@ -376,7 +379,7 @@ describe("RelaySection model verification ownership", () => {
       await act(async () => finishProbe([1]));
       await waitFor(() =>
         expect(
-          screen.getByRole("button", { name: "One-click configuration" }),
+          screen.getByRole("button", { name: "common.refresh" }),
         ).toBeDisabled(),
       );
       expect(
@@ -401,20 +404,106 @@ describe("RelaySection model verification ownership", () => {
       </QueryClientProvider>,
     );
     expect(
-      await screen.findAllByRole("button", { name: "One-click configuration" }),
+      await screen.findAllByRole("button", { name: "common.refresh" }),
     ).toHaveLength(2);
     // The public account query is the only snapshot owner.
     expect(api.listRelays).toHaveBeenCalledTimes(APP_IDS.length);
     expect(api.list).toHaveBeenCalledTimes(APP_IDS.length);
     expect(api.checkSession).not.toHaveBeenCalled();
     fireEvent.click(
-      screen.getAllByRole("button", { name: "One-click configuration" })[1],
+      screen.getAllByRole("button", { name: "common.refresh" })[1],
     );
     await waitFor(() => expect(api.refresh).toHaveBeenCalledWith(2, "codex"));
     await waitFor(() =>
       expect(api.listRelays).toHaveBeenCalledTimes(APP_IDS.length * 2),
     );
     expect(api.list).toHaveBeenCalledTimes(APP_IDS.length * 2);
+  });
+
+  it.each([
+    "https://relay.example/.well-known/loongport.json",
+    '{"site_origin":"https://relay.example","platforms":{}}',
+    "eyJzaXRlX29yaWdpbiI6Imh0dHBzOi8vcmVsYXkuZXhhbXBsZSJ9",
+  ])(
+    "imports account-wide configuration from Gemini when only Codex has tiers: %s",
+    async (input) => {
+      api.listRelays.mockImplementation(async (app: string) => [
+        {
+          ...relay,
+          canQueryBalance: false,
+          tiers: app === "codex" ? relay.tiers : [],
+        },
+      ]);
+      api.applySiteConfig.mockResolvedValue({
+        siteOrigin: "https://relay.example",
+        declaredOrigin: "https://relay.example",
+        applied: [],
+      });
+      render(
+        <QueryClientProvider client={createTestQueryClient()}>
+          <ServicesPage
+            appId="gemini"
+            onOpenApp={vi.fn()}
+            onOpenAddHub={vi.fn()}
+          />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "loongport.siteConfig.entry",
+        }),
+      );
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: input },
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "loongport.siteConfig.apply" }),
+      );
+      await waitFor(() =>
+        expect(api.applySiteConfig).toHaveBeenCalledWith(1, input),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("textbox")).not.toBeInTheDocument(),
+      );
+      expect(api.refresh).not.toHaveBeenCalled();
+      expect(api.refreshAll).not.toHaveBeenCalled();
+      expect(api.vendorRefresh).not.toHaveBeenCalled();
+      expect(api.listRelays).toHaveBeenCalledTimes(APP_IDS.length * 2);
+    },
+  );
+
+  it("keeps an accessible corner delete control when account details are hidden", async () => {
+    api.listRelays.mockResolvedValue([{ ...relay, canQueryBalance: false }]);
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <ServicesPage
+          appId="codex"
+          onOpenApp={vi.fn()}
+          onOpenAddHub={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Hide account details" }),
+    );
+    const remove = screen.getByRole("button", { name: "common.delete" });
+    expect(remove.textContent).toBe("");
+    expect(remove).toHaveClass(
+      "absolute",
+      "right-2",
+      "top-2",
+      "group-hover:opacity-100",
+      "group-focus-within:opacity-100",
+      "[@media(hover:none)]:opacity-100",
+    );
+    remove.focus();
+    expect(remove).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      "all its groups and tiers",
+    );
+    expect(api.removeSite).not.toHaveBeenCalled();
+    localStorage.clear();
   });
 
   it("returns vendor login refresh to the public account owner", async () => {
@@ -475,7 +564,7 @@ describe("RelaySection model verification ownership", () => {
       </QueryClientProvider>,
     );
     const buttons = await screen.findAllByRole("button", {
-      name: "One-click configuration",
+      name: "common.refresh",
     });
     expect(api.listRelays).toHaveBeenCalledTimes(1);
     expect(api.list).toHaveBeenCalledTimes(1);
@@ -492,9 +581,9 @@ describe("RelaySection model verification ownership", () => {
     ]);
     render(
       <QueryClientProvider client={createTestQueryClient()}>
-        <RelaySection
+        <ServicesPage
           appId="codex"
-          accountFilter={{ kind: "relay", id: 1 }}
+          onOpenApp={vi.fn()}
           onOpenAddHub={vi.fn()}
         />
       </QueryClientProvider>,
@@ -510,6 +599,7 @@ describe("RelaySection model verification ownership", () => {
   });
 
   it("explains that deleting a vendor account retains the remote API key", async () => {
+    api.listRelays.mockResolvedValue([]);
     api.list.mockResolvedValue({
       supported: true,
       accounts: [
@@ -525,9 +615,9 @@ describe("RelaySection model verification ownership", () => {
     });
     render(
       <QueryClientProvider client={createTestQueryClient()}>
-        <RelaySection
+        <ServicesPage
           appId="codex"
-          accountFilter={{ kind: "vendor", id: 9 }}
+          onOpenApp={vi.fn()}
           onOpenAddHub={vi.fn()}
         />
       </QueryClientProvider>,

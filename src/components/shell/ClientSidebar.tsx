@@ -12,7 +12,7 @@ import {
   Waypoints,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { ClientView } from "./navigation";
+import { getNavigationSection, type ClientView } from "./navigation";
 
 const sidebarItemClassName =
   "h-10 w-full justify-start gap-3 px-3 font-normal aria-[current=page]:bg-primary/10 aria-[current=page]:text-primary aria-[current=page]:font-medium";
@@ -22,46 +22,28 @@ const items = [
     view: "providers",
     icon: AppWindow,
     key: "applications",
-    children: ["providers"],
   },
   {
     view: "services",
     icon: Layers3,
     key: "services",
-    children: ["services", "addHub"],
   },
-  { view: "image", icon: Image, key: "image", children: ["image"] },
+  { view: "image", icon: Image, key: "image" },
   {
     view: "records",
     icon: History,
     key: "records",
-    children: ["records", "sessions"],
   },
   {
     view: "resources",
     icon: Plug,
     key: "resources",
-    children: [
-      "resources",
-      "skills",
-      "skillsDiscovery",
-      "mcp",
-      "prompts",
-      "agents",
-      "universal",
-      "workspace",
-      "openclawEnv",
-      "openclawTools",
-      "openclawAgents",
-      "hermesMemory",
-    ],
   },
-  { view: "plaza", icon: Compass, key: "plaza", children: ["plaza"] },
+  { view: "plaza", icon: Compass, key: "plaza" },
 ] satisfies {
   view: ClientView;
   icon: typeof AppWindow;
   key: string;
-  children: string[];
 }[];
 
 export function ClientSidebar({
@@ -95,7 +77,9 @@ export function ClientSidebar({
             key={item.view}
             variant="ghost"
             disabled={disabled}
-            aria-current={item.children.includes(view) ? "page" : undefined}
+            aria-current={
+              getNavigationSection(view) === item.view ? "page" : undefined
+            }
             onClick={() => onNavigate(item.view)}
             className={sidebarItemClassName}
           >

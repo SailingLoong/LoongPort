@@ -36,7 +36,14 @@ vi.mock("sonner", () => ({
 // These integration cases exercise provider actions; workspace presentation has
 // its own interaction tests. Keep the existing action harness immediately visible.
 vi.mock("@/components/applications/ApplicationWorkspace", () => ({
-  ApplicationWorkspace: ({ children }: any) => <>{children}</>,
+  ApplicationWorkspace: ({ children, onOpenAccount }: any) => (
+    <>
+      {children}
+      <button onClick={() => onOpenAccount({ kind: "relay", id: 1 })}>
+        open-account
+      </button>
+    </>
+  ),
 }));
 
 vi.mock("@/components/providers/ProviderList", () => ({
@@ -249,7 +256,7 @@ describe("App integration with MSW", () => {
     );
   });
 
-  it("opens image generation from the sidebar and returns to the prior application", async () => {
+  it("switches primary pages through the sidebar without Back or Escape history", async () => {
     renderApp();
     await waitFor(() =>
       expect(screen.getByTestId("provider-list")).toHaveTextContent("claude-1"),
@@ -266,11 +273,72 @@ describe("App integration with MSW", () => {
         screen.queryByRole("button", { name: "Claude Code" }),
       ).not.toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "common.back" }));
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list")).toHaveTextContent("claude-1"),
+    expect(
+      screen.queryByRole("button", { name: "common.back" }),
+    ).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("image");
+    fireEvent.click(
+      screen.getByRole("button", { name: "client.applications" }),
     );
-    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("claude");
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list")).toHaveTextContent("codex-1"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "common.back" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps Back and Escape within subordinate resource navigation", async () => {
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "client.resources" }),
+    );
+    expect(
+      screen.queryByRole("button", { name: "common.back" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /client.features.skills/ }),
+    );
+    expect(
+      await screen.findByTestId("unified-skills-panel"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "common.back" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "client.resources" }),
+    ).toHaveAttribute("aria-current", "page");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("resources");
+    expect(
+      screen.queryByRole("button", { name: "common.back" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders one account-detail Back and clears detail through sidebar navigation", async () => {
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "open-account" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "loongport.accounts.detail" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "common.back" })).toHaveLength(
+      1,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.back" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "open-account" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "client.resources" }));
+    fireEvent.click(screen.getByRole("button", { name: "client.services" }));
+    expect(
+      screen.queryByRole("heading", { name: "loongport.accounts.detail" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "common.back" }),
+    ).not.toBeInTheDocument();
   });
 
   it("covers basic provider flows via real hooks", async () => {

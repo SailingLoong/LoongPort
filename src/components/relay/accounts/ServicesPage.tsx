@@ -72,17 +72,19 @@ export function ServicesPage({
   if (selection) {
     return (
       <section className="page-content space-y-6">
-        <Button
-          variant="ghost"
-          onClick={() => {
-            if (onBack) onBack();
-            else setSelection(null);
-            void reload();
-          }}
-        >
-          <ArrowLeft className="h-4 w-4" />
-          {t(onBack ? "common.back" : "loongport.accounts.back")}
-        </Button>
+        {!onSelectAccount && (
+          <Button
+            variant="ghost"
+            onClick={() => {
+              if (onBack) onBack();
+              else setSelection(null);
+              void reload();
+            }}
+          >
+            <ArrowLeft className="h-4 w-4" />
+            {t(onBack ? "common.back" : "loongport.accounts.back")}
+          </Button>
+        )}
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <p className="text-xs text-muted-foreground">
@@ -163,7 +165,7 @@ export function ServicesPage({
       accountSnapshot={null}
       onOpenAddHub={onOpenAddHub}
       onAccountChanged={() => void reload()}
-      renderAccounts={(renderActions) => (
+      renderAccounts={(renderActions, renderDelete) => (
         <section className="page-content space-y-6">
           <header className="flex flex-wrap items-center justify-between gap-4">
             <div>
@@ -213,8 +215,19 @@ export function ServicesPage({
               return (
                 <article
                   key={`${account.kind}:${account.id}`}
-                  className="rounded-xl border border-border bg-card p-5"
+                  className="group relative rounded-xl border border-border bg-card p-5 pr-14"
                 >
+                  {account.kind === "relay"
+                    ? renderDelete({
+                        kind: "relay",
+                        row: account.apps.get(contextApp)!,
+                        appId: contextApp,
+                      })
+                    : renderDelete({
+                        kind: "vendor",
+                        row: account.apps.get(contextApp)!,
+                        appId: contextApp,
+                      })}
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="flex min-w-0 items-start gap-3">
                       <div className="rounded-lg bg-muted p-2.5">

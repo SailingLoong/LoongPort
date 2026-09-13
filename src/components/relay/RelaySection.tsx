@@ -9,7 +9,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
-import { Layers3, Loader2, RefreshCw } from "lucide-react";
+import { FileDown, Layers3, Loader2, RefreshCw, X } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -43,6 +43,7 @@ import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
 import { ImageTabNotice } from "./ImageTabNotice";
+import { SiteConfigDialog } from "./SiteConfigDialog";
 import { RelayTierList } from "./RelayTierList";
 import { SwitchTierConfirmDialog } from "./SwitchTierConfirmDialog";
 import { TierVerificationProvider } from "./model-verification/TierVerificationProvider";
@@ -103,6 +104,7 @@ export interface RelaySectionProps {
   /** One lifecycle owner renders controls for every overview card. */
   renderAccounts?: (
     renderActions: (target: AccountActionTarget) => ReactNode,
+    renderDelete: (target: AccountActionTarget) => ReactNode,
   ) => ReactNode;
   onAccountChanged?: () => void;
   /** 打开统一添加聚合页的指定标签。首启引导落「中转站」（综合榜）；
@@ -219,6 +221,9 @@ export function RelaySection({
   } | null>(null);
   // 待确认删除的中转站行。存整行：确认框展示账号名称和跨应用使用情况。
   const [confirmRemove, setConfirmRemove] = useState<RelayRowData | null>(null);
+  const [siteConfigTarget, setSiteConfigTarget] = useState<RelayRowData | null>(
+    null,
+  );
   // 连通检测整套复用上游的 hook —— 它自带 toast、i18n 与 per-id 的 checking 状态。
   const { checkProvider, isChecking } = useStreamCheck(appId);
 
@@ -861,6 +866,7 @@ export function RelaySection({
           )}
         </Button>
         <Button
+          variant="outline"
           size="sm"
           disabled={!row.canRefresh || provisionBusy}
           onClick={() =>
@@ -869,10 +875,18 @@ export function RelaySection({
               : void handleVendorProvision(row.id, target.appId)
           }
         >
-          {t("loongport.accounts.configure", {
-            defaultValue: "One-click configuration",
-          })}
+          {t("common.refresh")}
         </Button>
+        {target.kind === "relay" && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setSiteConfigTarget(target.row)}
+          >
+            <FileDown className="h-4 w-4" />
+            {t("loongport.siteConfig.entry")}
+          </Button>
+        )}
         {isRelay && (row as RelayRowData).canPurchase && (
           <Button
             variant="outline"
@@ -885,20 +899,33 @@ export function RelaySection({
             })}
           </Button>
         )}
-        {(isRelay || (row as VendorAccountRow).canDelete) && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() =>
-              isRelay
-                ? setConfirmRemove(row as RelayRowData)
-                : setConfirmRemoveVendor(row as VendorAccountRow)
-            }
-          >
-            {t("common.delete")}
-          </Button>
-        )}
       </div>
+    );
+  };
+
+  const renderAccountDelete = (target: AccountActionTarget) => {
+    if (target.kind === "vendor" && !target.row.canDelete) return null;
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="absolute right-2 top-2 h-9 w-9 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100"
+        title={t("common.delete")}
+        aria-label={t("common.delete")}
+        disabled={busy.has(
+          target.kind === "relay"
+            ? `removeRelay:${target.row.id}`
+            : vendorBusyKey("removeVendor", target.row.id),
+        )}
+        onClick={() =>
+          target.kind === "relay"
+            ? setConfirmRemove(target.row)
+            : setConfirmRemoveVendor(target.row)
+        }
+      >
+        <X className="h-4 w-4" aria-hidden="true" />
+      </Button>
     );
   };
 
@@ -908,7 +935,7 @@ export function RelaySection({
 
   return (
     <>
-      {renderAccounts?.(renderAccountActions)}
+      {renderAccounts?.(renderAccountActions, renderAccountDelete)}
       {!renderAccounts &&
         accountFilter &&
         (() => {
@@ -1045,6 +1072,23 @@ export function RelaySection({
             onAddAccount={() => onOpenAddHub("official")}
           />
         )}
+
+      {siteConfigTarget && (
+        <SiteConfigDialog
+          key={siteConfigTarget.id}
+          relayId={siteConfigTarget.id}
+          relayLabel={
+            siteConfigTarget.accountLabel
+              ? `${siteConfigTarget.siteName || siteConfigTarget.siteOrigin} · ${siteConfigTarget.accountLabel}`
+              : siteConfigTarget.siteName || siteConfigTarget.siteOrigin
+          }
+          open
+          onOpenChange={(open) => {
+            if (!open) setSiteConfigTarget(null);
+          }}
+          onApplied={reload}
+        />
+      )}
 
       <ConfirmDialog
         isOpen={confirmRemoveVendor !== null}

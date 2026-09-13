@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { ArrowLeft } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -39,10 +38,6 @@ export function RelayDirectoryConnectionPage({
         </PreservedView>
       )}
       <PreservedView active={!configuring}>
-        <Button variant="ghost" className="mr-2" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4" />
-          {t("common.back")}
-        </Button>
         {account && (
           <Button
             variant="outline"

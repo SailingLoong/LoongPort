@@ -15,7 +15,8 @@ describe("client navigation", () => {
     state = navigationReducer(state, { type: "back" });
     expect(state.current.view).toBe("services");
     state = navigationReducer(state, { type: "back" });
-    expect(state).toEqual(initial);
+    expect(state.current.view).toBe("services");
+    expect(state.history).toEqual([]);
   });
   it("does not duplicate a page when it is selected again", () => {
     const state = navigationReducer(initial, {
@@ -31,21 +32,73 @@ describe("client navigation", () => {
   });
 });
 
-it("restores application context when returning from services to image", () => {
-  let state = navigationReducer(initial, {
+it.each([
+  "providers",
+  "services",
+  "image",
+  "records",
+  "resources",
+  "plaza",
+  "settings",
+] as const)("clears account detail and history when selecting %s", (view) => {
+  const detail = navigationReducer(initial, {
     type: "navigate",
-    view: "image",
-    app: "codex-image",
+    view: "services",
+    account: { kind: "relay", id: 1 },
   });
-  state = navigationReducer(state, {
+  const state = navigationReducer(detail, { type: "navigate", view });
+  expect(state.current.account).toBeUndefined();
+  expect(state.history).toEqual([]);
+  expect(navigationReducer(state, { type: "back" })).toEqual(state);
+});
+
+it("restores image context after an account detail flow", () => {
+  const image: NavigationState = {
+    current: { view: "image", app: "codex-image" },
+    history: [],
+  };
+  const detail = navigationReducer(image, {
     type: "navigate",
     view: "services",
     app: "codex",
+    account: { kind: "relay", id: 1 },
   });
-  expect(navigationReducer(state, { type: "back" }).current).toEqual({
-    view: "image",
-    app: "codex-image",
-  });
+  expect(navigationReducer(detail, { type: "back" })).toEqual(image);
+});
+
+it.each([
+  "providers",
+  "services",
+  "image",
+  "records",
+  "resources",
+  "plaza",
+  "settings",
+] as const)(
+  "returns from add onboarding to %s without exposing old history",
+  (view) => {
+    const caller: NavigationState = {
+      current: { view, app: view === "image" ? "codex-image" : "claude" },
+      history: [],
+    };
+    const wizard = navigationReducer(caller, {
+      type: "navigate",
+      view: "addHub",
+    });
+    expect(navigationReducer(wizard, { type: "back" })).toEqual(caller);
+  },
+);
+
+it("returns a restored subordinate page to its parent", () => {
+  const restored: NavigationState = {
+    current: { view: "skillsDiscovery", app: "claude" },
+    history: [],
+  };
+  const skills = navigationReducer(restored, { type: "back" });
+  expect(skills.current.view).toBe("skills");
+  expect(navigationReducer(skills, { type: "back" }).current.view).toBe(
+    "resources",
+  );
 });
 
 it("restores exact account detail through navigation history", () => {
@@ -62,7 +115,30 @@ it("restores exact account detail through navigation history", () => {
   expect(state.current.account).toEqual(account);
   state = navigationReducer(state, { type: "navigate", view: "services" });
   expect(state.current.account).toBeUndefined();
-  expect(navigationReducer(state, { type: "back" }).current.account).toEqual(
+  expect(state.history).toEqual([]);
+  expect(
+    navigationReducer(state, { type: "back" }).current.account,
+  ).toBeUndefined();
+});
+
+it("changes app context within the same account without adding a Back step", () => {
+  const accounts: NavigationState = {
+    current: { view: "services", app: "codex" },
+    history: [],
+  };
+  const account = { kind: "relay" as const, id: 1 };
+  let state = navigationReducer(accounts, {
+    type: "navigate",
+    view: "services",
+    app: "codex",
     account,
-  );
+  });
+  state = navigationReducer(state, {
+    type: "navigate",
+    view: "services",
+    app: "claude",
+    account,
+  });
+  expect(state.current.app).toBe("claude");
+  expect(navigationReducer(state, { type: "back" })).toEqual(accounts);
 });
