@@ -40,13 +40,11 @@ updates:
       - dependency-name: "zip"
         update-types:
           - "version-update:semver-major"
-      # 下面两个是 tauri 官方工具链钉住的传递依赖，安全公告在我们树内无解
-      # （latest-resolvable 低于修复版，security_update_not_possible 每天
-      # 失败两单、发邮件）。两者都不是本仓直依赖，name 级 ignore 零附带损失；
-      # tauri 上游升级后（kuchikiki/selectors 摆脱 phf 0.8、GTK 栈升 0.20）
-      # 移除这两条恢复告警。
-      - dependency-name: "rand"
-      - dependency-name: "glib"
+      # rand/glib 的 tauri 结构性安全公告（selectors→phf 0.8 钉 rand 0.7、
+      # GTK 0.18 栈钉 glib 0.18）曾每天失败两单发邮件——实测 ignore（含
+      # name 级全区间）拦不住 security_update_not_possible（任务死在解析
+      # 阶段、到不了 ignore 判定），最终靠仓库设置关 Dependabot security
+      # updates 止噪（告警仍在 Security 页）。tauri 上游升级后可开回设置。
 
   - package-ecosystem: "github-actions"
     directory: "/"
