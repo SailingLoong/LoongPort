@@ -388,7 +388,17 @@ export function ProviderActions({
         </Button>
       </span>
 
-      <div className="flex items-center gap-1">
+      {/* 次要动作组：hover / focus 才显形（透明的按钮仍然可点，`pointer-events-none`
+          不能省）；主按钮在上面常驻 —— 行的主操作不该靠鼠标扫出来。
+          进行中的检测（spinner）钉住可见，鼠标移开也知道还在跑。 */}
+      <div
+        className={cn(
+          "flex items-center gap-1 transition-opacity duration-200",
+          isTesting
+            ? "pointer-events-auto opacity-100"
+            : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100",
+        )}
+      >
         <Button
           size="icon"
           variant="ghost"

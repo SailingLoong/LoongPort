@@ -3619,8 +3619,6 @@
         "noKey": "No API key yet"
       },
       "recharge": "Recharge",
-      "hideDetails": "Hide account details",
-      "showDetails": "Show account details",
       "removeRelay": "Delete “{{label}}”? This removes its login information and all groups and tiers across all applications. The provider balance is unaffected.",
       "removeRelayInUse": "Delete “{{label}}”? This removes its login information and all groups and tiers across all applications. Currently used by: {{usages}}. Affected applications return to official login and may require signing in again and restarting. The provider balance is unaffected.",
       "removeVendor": "Delete “{{label}}”? This removes its login information, local API keys and all plans and configurations across all applications. API keys on the provider’s website will remain."

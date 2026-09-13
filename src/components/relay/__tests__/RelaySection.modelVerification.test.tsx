@@ -472,7 +472,7 @@ describe("RelaySection model verification ownership", () => {
     },
   );
 
-  it("keeps an accessible corner delete control when account details are hidden", async () => {
+  it("keeps an accessible corner delete control on account cards", async () => {
     api.listRelays.mockResolvedValue([{ ...relay, canQueryBalance: false }]);
     render(
       <QueryClientProvider client={createTestQueryClient()}>
@@ -483,9 +483,7 @@ describe("RelaySection model verification ownership", () => {
         />
       </QueryClientProvider>,
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Hide account details" }),
-    );
+    await screen.findByRole("button", { name: "common.delete" });
     const remove = screen.getByRole("button", { name: "common.delete" });
     expect(remove.textContent).toBe("");
     expect(remove).toHaveClass(
@@ -503,7 +501,27 @@ describe("RelaySection model verification ownership", () => {
       "all its groups and tiers",
     );
     expect(api.removeSite).not.toHaveBeenCalled();
-    localStorage.clear();
+  });
+
+  it("keeps tier management out of the account detail view", async () => {
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <ServicesPage
+          appId="codex"
+          account={{ kind: "relay", id: 1 }}
+          onSelectAccount={vi.fn()}
+          onOpenAddHub={vi.fn()}
+          onOpenApp={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    // 账号/站点级操作（登录、刷新…）在；档位行与验真徽章不在 ——
+    // 档位维护归应用页的工作台，账号详情不再养第二份。
+    expect(
+      await screen.findByRole("button", { name: "common.refresh" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("provider-a")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("verdict-provider-a")).not.toBeInTheDocument();
   });
 
   it("returns vendor login refresh to the public account owner", async () => {
