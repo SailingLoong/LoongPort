@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Download,
   Copy,
@@ -26,6 +26,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
 import { GITHUB_REPO, OFFICIAL_WEBSITE } from "@/config/constants";
 import type {
@@ -231,6 +232,16 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     () => appVersionCache === null,
   );
   const [isDownloading, setIsDownloading] = useState(false);
+  // 手动「更新到 vX」的下载进度与速度：后端 `download_update_bytes` 逐 chunk 发
+  // `update-download-progress`（DatabaseUpgrade 弹窗同款事件），这里接住换算成
+  // 百分比 + 窗口速度给按钮文案 —— 转圈三十秒不知道在下载什么，是用户明确要修的。
+  const [downloadProgress, setDownloadProgress] = useState<{
+    downloaded: number;
+    total: number | null;
+  } | null>(null);
+  const [downloadSpeedBps, setDownloadSpeedBps] = useState<number | null>(null);
+  const speedSamplesRef = useRef<{ at: number; downloaded: number }[]>([]);
+  const progressUnlistenRef = useRef<UnlistenFn | null>(null);
   const [receiveBetaUpdates, setReceiveBetaUpdates] = useState(false);
   const [toolVersions, setToolVersions] = useState<ToolVersion[]>(
     () => toolVersionsCache?.data ?? [],
@@ -408,6 +419,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     await refreshToolVersions([toolName], { [toolName]: nextPref });
   };
 
+  // 下载中途卸载组件时摘掉进度监听（正常路径的 finally 已处理，这是兜底）。
+  useEffect(() => () => progressUnlistenRef.current?.(), []);
+
   useEffect(() => {
     let active = true;
 
@@ -521,7 +535,40 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       }
 
       setIsDownloading(true);
+      setDownloadProgress(null);
+      setDownloadSpeedBps(null);
+      speedSamplesRef.current = [];
       try {
+        // 先挂进度监听再发命令（DatabaseUpgrade.startUpgrade 同款时序），漏掉的
+        // 顶多是第一两个 chunk。监听挂不上不拦更新（进度是展示性的），
+        // 窗口法算速度：保留最近 ~1.6s 的 (时刻, 字节) 样本，首尾相除 ——
+        // 瞬时 chunk 抖动被窗口抹平。
+        progressUnlistenRef.current?.();
+        try {
+          progressUnlistenRef.current = await listen<{
+            downloaded: number;
+            total: number | null;
+          }>("update-download-progress", (event) => {
+            const { downloaded, total } = event.payload;
+            setDownloadProgress({ downloaded, total });
+            const samples = speedSamplesRef.current;
+            const now = performance.now();
+            samples.push({ at: now, downloaded });
+            while (samples.length > 1 && now - samples[0].at > 1600) {
+              samples.shift();
+            }
+            const first = samples[0];
+            const dtSeconds = (now - first.at) / 1000;
+            if (samples.length > 1 && dtSeconds >= 0.4) {
+              setDownloadSpeedBps((downloaded - first.downloaded) / dtSeconds);
+            }
+          });
+        } catch (listenError) {
+          console.error(
+            "[AboutSection] update progress listener unavailable",
+            listenError,
+          );
+        }
         resetDismiss();
         const installed = await settingsApi.installUpdateAndRestart();
         if (!installed) {
@@ -542,7 +589,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           );
         }
       } finally {
+        progressUnlistenRef.current?.();
+        progressUnlistenRef.current = null;
         setIsDownloading(false);
+        setDownloadProgress(null);
+        setDownloadSpeedBps(null);
       }
       return;
     }
@@ -909,6 +960,30 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     Object.keys(toolActions).length > 0 ||
     preflightTools.size > 0;
 
+  // 下载状态短文案：`42% · 2.3 MB/s`（总量未知时 `12.4 MB · 2.3 MB/s`）。
+  // 纯数字与单位，不进 i18n；tabular-nums 防数字跳动时按钮宽度乱颤。
+  const downloadStatusText = (() => {
+    if (!isDownloading) return null;
+    const parts: string[] = [];
+    if (downloadProgress) {
+      if (downloadProgress.total && downloadProgress.total > 0) {
+        parts.push(
+          `${Math.min(100, Math.round((downloadProgress.downloaded / downloadProgress.total) * 100))}%`,
+        );
+      } else {
+        parts.push(`${(downloadProgress.downloaded / 1048576).toFixed(1)} MB`);
+      }
+    }
+    if (downloadSpeedBps != null && downloadSpeedBps > 0) {
+      parts.push(
+        downloadSpeedBps >= 1048576
+          ? `${(downloadSpeedBps / 1048576).toFixed(1)} MB/s`
+          : `${Math.max(1, Math.round(downloadSpeedBps / 1024))} KB/s`,
+      );
+    }
+    return parts.length ? parts.join(" · ") : null;
+  })();
+
   return (
     <motion.section
       initial={{ opacity: 0, y: 10 }}
@@ -1004,6 +1079,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   {t("settings.updating")}
+                  {downloadStatusText && (
+                    <span className="tabular-nums text-muted-foreground">
+                      {downloadStatusText}
+                    </span>
+                  )}
                 </>
               ) : hasUpdate ? (
                 <>
