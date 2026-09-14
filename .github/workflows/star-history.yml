@@ -20,8 +20,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
-    env:
-      STAR_HISTORY_DIR: ${{ runner.temp }}/star-history
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -33,7 +31,11 @@ jobs:
 
       # 数据分支与主仓解耦：worktree 挂到 runner 临时目录，存在则续在其上，
       # 不存在则建孤儿分支，main 的历史零污染。
+      # 注意 STAR_HISTORY_DIR 用 runner.temp，只能在 step 级 env 引用——
+      # job 级 env 拿不到 runner context，写上去整个文件会被 GitHub 拒收。
       - name: Prepare data branch worktree
+        env:
+          STAR_HISTORY_DIR: ${{ runner.temp }}/star-history
         run: |
           if git fetch --no-tags --depth=1 origin star-history; then
             git worktree add --detach "$STAR_HISTORY_DIR" origin/star-history
@@ -46,10 +48,13 @@ jobs:
       - name: Generate snapshot
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          STAR_HISTORY_DIR: ${{ runner.temp }}/star-history
         run: node .github/scripts/star-history.mjs snapshot "$STAR_HISTORY_DIR"
 
       # 产物只在星数变化时产生 diff；无新星的当天不产生空提交。
       - name: Publish snapshot
+        env:
+          STAR_HISTORY_DIR: ${{ runner.temp }}/star-history
         run: |
           git -C "$STAR_HISTORY_DIR" config user.name "github-actions[bot]"
           git -C "$STAR_HISTORY_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
