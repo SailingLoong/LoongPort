@@ -952,15 +952,30 @@ fn pick_latest_version(
     Some(best)
 }
 
+/// npm 包 dist-tags 专用端点的 URL。
+///
+/// 该端点的响应体就是 dist-tags 对象本身(几十到几千字节);而 `/{package}` 返回的是
+/// 含每个历史版本元数据的完整 packument,codex / opencode / openclaw 这类高频发版的包
+/// 已有十几到二十几 MB,一次刷新要下几十 MB。scoped 包名的 `/` 按 registry
+/// 约定转义成 `%2f`。
+fn npm_dist_tags_url(package: &str) -> String {
+    format!(
+        "https://registry.npmjs.org/-/package/{}/dist-tags",
+        package.replace('/', "%2f")
+    )
+}
+
 /// 拉取 npm 包的完整 dist-tags(单次请求即含 latest/next/beta/...)。
+///
+/// 包不存在时端点返回 404 与一个 JSON 字符串体,解析成 Map 失败,落到 None。
 async fn fetch_npm_dist_tags(
     client: &reqwest::Client,
     package: &str,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let url = format!("https://registry.npmjs.org/{package}");
-    let resp = client.get(&url).send().await.ok()?;
-    let json = resp.json::<serde_json::Value>().await.ok()?;
-    json.get("dist-tags")?.as_object().cloned()
+    let resp = client.get(npm_dist_tags_url(package)).send().await.ok()?;
+    resp.json::<serde_json::Map<String, serde_json::Value>>()
+        .await
+        .ok()
 }
 
 /// 查询某 npm 工具要展示的"最新版本":取 `latest`,并在本地版本领先时按工具的
@@ -4976,6 +4991,20 @@ mod tests {
         assert_eq!(
             pick_latest_version(map, &["beta"], Some("0.200.0")),
             Some("0.135.0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_npm_dist_tags_url() {
+        // 普通包名直接拼进路径
+        assert_eq!(
+            npm_dist_tags_url("openclaw"),
+            "https://registry.npmjs.org/-/package/openclaw/dist-tags"
+        );
+        // scoped 包名的 `/` 按 registry 约定转义成 %2f
+        assert_eq!(
+            npm_dist_tags_url("@openai/codex"),
+            "https://registry.npmjs.org/-/package/@openai%2fcodex/dist-tags"
         );
     }
 
