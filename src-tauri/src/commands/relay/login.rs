@@ -2291,6 +2291,7 @@ mod tests {
         let (_error_tx, mut error_rx) = tokio::sync::mpsc::channel(1);
         let entered = Arc::new(tokio::sync::Notify::new());
         let entered_server = entered.clone();
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new().route(
@@ -2325,6 +2326,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_discovery_timeout_is_inconclusive() {
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new().route(
@@ -2725,6 +2727,7 @@ mod tests {
                 }),
             );
         }
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind discovery test server");
@@ -2843,6 +2846,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_relay_validation_preserves_credentials_on_transport_only_failure() {
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind connection-drop server");
@@ -2988,6 +2992,7 @@ mod tests {
         let requests = Arc::new(Mutex::new(Vec::<String>::new()));
         let every_request = Arc::clone(&requests);
 
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind refresh-block test server");

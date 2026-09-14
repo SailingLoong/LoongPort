@@ -1466,6 +1466,7 @@ mod tests {
                     }
                 }),
             );
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind account-mismatch server");

@@ -160,6 +160,7 @@ pub(crate) fn relay_credentials(
 pub(crate) async fn spawn_balance_server(
     app: axum::Router,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    crate::relay::discovery::ensure_no_proxy_for_loopback();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {

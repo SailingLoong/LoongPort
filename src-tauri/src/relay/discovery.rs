@@ -388,6 +388,18 @@ fn sanitize_probe_log_value(value: &str, max_chars: usize) -> String {
 ///
 /// 任何传输失败、非成功状态或 detector 不匹配都只意味着“这个候选没有识别出来”；
 /// 不在这里把某次失败宣判成站点类型。全部候选都不匹配时，调用方可切到可见 WebView。
+/// 环回 mock server 的统一前置：系统代理（WinINET/系统配置）会把 127.0.0.1 的
+/// 探测截走并代答状态码，令「传输失败」类断言变成「站点答话」。进程内一次性
+/// 压制环回代理，与 coding_plan 测试的既有护栏同款。
+#[cfg(test)]
+pub(crate) fn ensure_no_proxy_for_loopback() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        std::env::set_var("no_proxy", "127.0.0.1,localhost");
+    });
+}
+
 pub async fn probe_site(site_origin: &str) -> Result<DetectedSite, DiscoveryError> {
     discover_site(site_origin).await
 }
