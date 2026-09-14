@@ -21,8 +21,12 @@ jobs:
   # 2026-09-07 实踩：release.yml 的正文块标量（body: |）里混进一行浅缩进文本，
   # 整个文件 YAML 解析失败 ⇒ GitHub 对**每次 push** 报「workflow file issue」
   # （0 秒失败、零 job、邮件轰炸），且下一次 tag push 会当场死在发版上。
-  # 本地六道闸不看 workflow 文件；frontend/backend job 又被路径过滤跳过
-  # （纯改 .github 的 PR 两边都不跑），所以这道闸必须独立、必跑。
+  # 2026-09-14 二踩：star-history.yml 在 job 级 env 引 runner.temp（该层拿不到
+  # runner context），同样是整文件拒收——两次都属于 YAML 语法之外的 schema/
+  # 表达式错，纯解析查不出。所以这道闸必须独立、必跑，且升级为 actionlint
+  # （YAML 语法 + workflow schema + 表达式 + shellcheck 一把抓；shellcheck 用
+  # runner 预装的，pyflakes 未预装会自动跳过）。版本与维护者本机 brew 钉同版
+  # （本地绿 ⇒ CI 绿），升级时同步改这里。
   workflow-lint:
     name: Workflow syntax check
     runs-on: ubuntu-latest
@@ -32,20 +36,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Parse all workflow files
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
         run: |
-          python3 - <<'PY'
-          import glob, sys, yaml
-          failed = False
-          for path in sorted(glob.glob(".github/workflows/*.yml")):
-              try:
-                  yaml.safe_load(open(path))
-                  print(f"OK   {path}")
-              except Exception as e:
-                  failed = True
-                  print(f"FAIL {path}: {e}")
-          sys.exit(1 if failed else 0)
-          PY
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          ./actionlint -version
+
+      - name: Lint all workflow files
+        run: ./actionlint
 
   changes:
     name: Detect changed areas
@@ -123,7 +123,7 @@ jobs:
       - name: Get pnpm store directory
         id: pnpm-store
         shell: bash
-        run: echo "path=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Cache pnpm store
         uses: actions/cache@v5
