@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DatabaseUpgrade } from "./components/DatabaseUpgrade";
+import { SecretUnlock } from "./components/SecretUnlock";
 import { UpdateProvider } from "./contexts/UpdateContext";
 import "./index.css";
 // 导入国际化配置
@@ -116,6 +117,26 @@ async function bootstrap() {
     const initError = (await invoke(
       "get_init_error",
     )) as ConfigLoadErrorPayload | null;
+    if (
+      initError?.kind === "secret_locked" ||
+      initError?.kind === "secret_initialization_failed"
+    ) {
+      ReactDOM.createRoot(document.getElementById("root")!).render(
+        <React.StrictMode>
+          <FrontendErrorBoundary>
+            <ThemeProvider defaultTheme="system" storageKey="loongport-theme">
+              <SecretUnlock
+                initialError={initError.error}
+                requiresRestart={
+                  initError.kind === "secret_initialization_failed"
+                }
+              />
+            </ThemeProvider>
+          </FrontendErrorBoundary>
+        </React.StrictMode>,
+      );
+      return;
+    }
     if (initError && initError.kind === "db_version_too_new") {
       // 数据库版本过新：渲染应用内「升级应用」恢复界面，不进入正常 App
       ReactDOM.createRoot(document.getElementById("root")!).render(

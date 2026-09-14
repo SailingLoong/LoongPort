@@ -29,6 +29,20 @@ describe("ImportExportSection Component", () => {
     baseProps.onClear.mockReset();
   });
 
+  it("passes the backup password on deliberate import and clears it after the attempt", async () => {
+    baseProps.onImport.mockResolvedValue(undefined);
+    render(
+      <ImportExportSection {...baseProps} selectedFile="/tmp/portable.sql" />,
+    );
+    const password = screen.getByLabelText("portableBackup.password");
+    fireEvent.change(password, {
+      target: { value: "backup recovery password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /settings\.import/ }));
+    expect(baseProps.onImport).toHaveBeenCalledWith("backup recovery password");
+    await vi.waitFor(() => expect(password).toHaveValue(""));
+  });
+
   it("should disable import button and show placeholder when no file selected", () => {
     render(<ImportExportSection {...baseProps} />);
 
