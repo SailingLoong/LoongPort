@@ -127,7 +127,6 @@ fn allow_full_access(sid: PSID, trustee_type: i32) -> EXPLICIT_ACCESS_W {
         grfAccessMode: SET_ACCESS,
         grfInheritance: NO_INHERITANCE,
         Trustee: trustee,
-        ..Default::default()
     }
 }
 
