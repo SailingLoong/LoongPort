@@ -267,17 +267,15 @@ LoongPort 的首个版本。以下是本 fork 在 cc-switch v3.19.2 之上新增
   **省钱口径改为「只花百分之几」。** 用户可见文案是「Codex 只花官方的 5%、Claude 只花
   20%」而不是「省 95%」—— 推导与说明在定价页。
 
-- **Both commercial relationships disclosed in the README.** Registration links
+- **Commercial relationship disclosed in the README.** Registration links
   carry a referral code from a compile-time table
-  (`src-tauri/src/operator/aff.rs`), and one preset site — the only entry in the
-  built-in promo-code table (`operator/promo.rs`) — is run by the maintainer.
-  Both tables are compiled into the binary and visible in the source. Neither
-  affects the user's price and nothing is deducted from their balance.
+  (`src-tauri/src/operator/aff.rs`). The table is compiled into the binary and
+  visible in the source. It never affects the user's price and nothing is
+  deducted from their balance.
 
-  **README 里把两层商业关系都说清。** 一是注册链接带编译期常量表里的邀请码
-  （`src-tauri/src/operator/aff.rs`）；二是有一个预置站点由维护者自己运营，它也是内置
-  优惠码表（`operator/promo.rs`）里唯一的一条。两张表都编译进二进制、源码里看得到。
-  两者都不影响用户的价格，也不从余额里扣。
+  **README 里把商业关系说清。** 注册链接带编译期常量表里的邀请码
+  （`src-tauri/src/operator/aff.rs`）。这张表编译进二进制、源码里看得到。
+  不影响用户的价格，也不从余额里扣。
 
 ### Removed / 移除
 

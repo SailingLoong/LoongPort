@@ -1434,11 +1434,9 @@ mod tests {
         assert_eq!(DEFAULT_SITE, "790053500.com");
     }
 
-    /// ⭐ 钉住「默认站在 aff **内置表**里有码」—— 这与它上一版的规则**正好相反**。
+    /// ⭐ 钉住「默认站在 aff **内置表**里有码」。
     ///
-    /// 默认站曾是维护者自己的站，那时它**有意不在** aff 表里（服务端拒绝自己邀请自己）。
-    /// 换成 `790053500.com` 之后那条理由不再适用，有码才是对的 —— 但
-    /// [`crate::relay::aff`] 的测试里仍留着「维护者自己的站不该有码」那条，
+    /// [`crate::relay::aff`] 的测试里钉着个别站**有意缺席**，
     /// 很容易有人按类比把默认站也从表里划掉，而那**不报任何错**，
     /// 只是每一次「留空点确定」都白丢一笔返利。
     ///
@@ -1450,7 +1448,7 @@ mod tests {
     fn the_default_site_has_a_builtin_affiliate_code() {
         assert!(
             crate::relay::aff::aff_code_for(&format!("https://{DEFAULT_SITE}")).is_some(),
-            "{DEFAULT_SITE} 是默认站且不是维护者自己的站，必须在 aff 内置表里"
+            "{DEFAULT_SITE} 是默认站，必须在 aff 内置表里有码"
         );
     }
 

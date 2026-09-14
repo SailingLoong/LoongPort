@@ -50,7 +50,7 @@ use crate::error::AppError;
 ///
 /// 其余约束不变（它们对每一世代都成立）：
 /// - **独立子域**：后端从 Pages 换成 R2 / Worker 只是改 DNS；
-/// - **有意不用 `bestapi.store` 的子域**：那会把配置与维护者自己的中转站绑在一起。
+/// - **有意不用中转站的子域**：配置分发不该绑在某个中转站的存亡上。
 /// - 再有不可逆的世代切换时打 `/v3/`，`/v1/`、`/v2/` 都要一直留着喂旧客户端。
 const CONFIG_URL: &str = "https://config.loongport.dev/v2/config.json";
 
@@ -1635,8 +1635,8 @@ mod tests {
     }
 
     #[test]
-    fn the_maintainers_own_site_stays_absent_through_both_layers() {
-        // 自己邀请自己会被服务端拒。远端没提它、内置也没有 ⇒ 两层都该是 None。
+    fn bestapi_stays_absent_through_both_layers() {
+        // 内置表有意不含它；远端也没提它 ⇒ 两层都该是 None。
         assert_eq!(resolve_aff_code(None, "https://bestapi.store"), None);
         let unrelated = cfg_with("wawapii.com", "X1234567890A");
         assert_eq!(

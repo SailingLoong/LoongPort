@@ -229,7 +229,7 @@ pub fn login_script(
     // `super::remote_config::resolve_aff_code`）。本模块不自己查表 ——
     // 那样远端那层永远进不来，而且会让 login 依赖 aff 的实现细节。
     //
-    // `None` ⇒ **整段不生成**：绝大多数站走这条路（包括维护者自己的站），
+    // `None` ⇒ **整段不生成**：绝大多数站走这条路，
     // 那时脚本里连提都不该提这件事。
     let aff_snippet = aff_code.map(aff_seed_snippet).unwrap_or_default();
 
@@ -1134,7 +1134,7 @@ mod tests {
         );
         assert!(seeded.contains("4PAUD8SSZXG7"), "码要真的插进去");
 
-        // 表里没有的站（含维护者自己的站）：**整段都不该出现**。
+        // 表里没有的站：**整段都不该出现**。
         // 不是「写一个空码」——那会在站点那边存一条 code 为空的脏数据。
         for origin in ["https://bestapi.store", "https://unknown-relay.com"] {
             let bare = script(origin, "", None);

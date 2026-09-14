@@ -1,9 +1,8 @@
 //! Existing reward registration presentation. Optional service onboarding state
 //! and sharing decisions are owned by commands::onboarding and settings.
 
-/// 新人引导自动打开的官方站。BestAPI 是维护者自己的站，是「注册即用 +
-/// 新人大礼包」承诺的承载方；与优惠码表（`promo::PROMO_CODES`）里键的
-/// host 保持一致。
+/// 新人引导自动打开的注册站，「注册即用 + 新人大礼包」承诺的承载方；
+/// 与优惠码表（`promo::PROMO_CODES`）里键的 host 保持一致。
 pub const OFFICIAL_SITE_ORIGIN: &str = "https://bestapi.store";
 
 // 注册窗完成事件名见 `crate::events::ONBOARDING_REGISTER_COMPLETED`（跨语言
