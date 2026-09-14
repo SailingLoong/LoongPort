@@ -99,6 +99,7 @@ fn optional(path: &Path) -> Result<Vec<u8>, AppError> {
         Ok(Vec::new())
     }
 }
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn sync_dir(path: &Path) -> Result<(), AppError> {
     #[cfg(unix)]
     std::fs::File::open(path)

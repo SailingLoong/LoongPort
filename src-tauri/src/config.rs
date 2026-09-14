@@ -424,7 +424,7 @@ pub fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
             }
             return Err(AppError::io(path, error));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -490,7 +490,7 @@ pub fn ensure_private_file(path: &Path) -> Result<(), AppError> {
         }
         windows_private_file::restrict_existing(path, false)
             .map_err(|error| AppError::io(path, error))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]

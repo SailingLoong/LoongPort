@@ -102,6 +102,7 @@ fn read_optional(path: &Path) -> Result<Vec<u8>, AppError> {
     }
     std::fs::read(path).map_err(|e| AppError::io(path, e))
 }
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn sync_dir(path: &Path) -> Result<(), AppError> {
     #[cfg(unix)]
     std::fs::File::open(path)

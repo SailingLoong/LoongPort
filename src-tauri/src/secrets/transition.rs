@@ -117,6 +117,7 @@ fn safe_relative(value: &str) -> Result<&Path, AppError> {
     }
     Ok(path)
 }
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn sync_directory(path: &Path) -> Result<(), AppError> {
     #[cfg(unix)]
     std::fs::File::open(path)

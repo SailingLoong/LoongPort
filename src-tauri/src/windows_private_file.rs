@@ -10,7 +10,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS,
-    SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_IS_WELL_KNOWN_GROUP,
+    SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     AclSizeInformation, CreateWellKnownSid, EqualSid, GetAce, GetAclInformation,
@@ -116,14 +116,19 @@ fn well_known_sid(kind: i32) -> io::Result<[u8; SECURITY_MAX_SID_SIZE as usize]>
 }
 
 fn allow_full_access(sid: PSID, trustee_type: i32) -> EXPLICIT_ACCESS_W {
-    let mut entry = EXPLICIT_ACCESS_W::default();
-    entry.grfAccessPermissions = FILE_ALL_ACCESS;
-    entry.grfAccessMode = SET_ACCESS;
-    entry.grfInheritance = NO_INHERITANCE;
-    entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    entry.Trustee.TrusteeType = trustee_type;
-    entry.Trustee.ptstrName = sid.cast();
-    entry
+    let trustee = TRUSTEE_W {
+        TrusteeForm: TRUSTEE_IS_SID,
+        TrusteeType: trustee_type,
+        ptstrName: sid.cast(),
+        ..Default::default()
+    };
+    EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_ALL_ACCESS,
+        grfAccessMode: SET_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: trustee,
+        ..Default::default()
+    }
 }
 
 fn invalid_private_acl(message: &'static str) -> io::Error {

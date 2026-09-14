@@ -176,6 +176,7 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
     Ok(destination)
 }
 
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn sync_directory(path: &Path) -> Result<(), AppError> {
     #[cfg(unix)]
     std::fs::File::open(path)
