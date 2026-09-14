@@ -37,16 +37,19 @@ impl KeyStore for MemoryKeyStore {
 }
 
 pub(crate) fn initialize_database() -> Result<Database, AppError> {
+    let test_home = std::env::var_os("CC_SWITCH_TEST_HOME")
+        .expect("disk tests must select an isolated home before initializing the secret session");
+    let app_root = crate::config::get_app_config_dir();
+    // Tripwire：解析结果必须落在测试 home 内。曾因 Windows 的 v3.10.3 legacy
+    // 回退读到真实用户目录，测试密钥把真实数据库做了 vault 迁移——宁可当场
+    // 炸掉也不允许测试碰真实数据。
     assert!(
-        std::env::var_os("CC_SWITCH_TEST_HOME").is_some(),
-        "disk tests must select an isolated home"
+        app_root.starts_with(std::path::Path::new(&test_home)),
+        "test app root {} escaped the isolated test home",
+        app_root.display()
     );
     static STORE: OnceLock<MemoryKeyStore> = OnceLock::new();
-    let session = SecretSession::open(
-        &crate::config::get_app_config_dir(),
-        STORE.get_or_init(MemoryKeyStore::default),
-        None,
-    )?;
+    let session = SecretSession::open(&app_root, STORE.get_or_init(MemoryKeyStore::default), None)?;
     crate::settings::unlock_settings_for_test(session.clone())?;
     Database::init_with_secrets(session)
 }

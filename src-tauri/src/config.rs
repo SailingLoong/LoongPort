@@ -259,10 +259,13 @@ pub fn get_app_config_dir() -> PathBuf {
     // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
     // 这里仅在“默认位置没有数据库”时回退到旧位置，避免再次出现“供应商消失”问题，
     // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
+    // `CC_SWITCH_TEST_HOME` 显式指定的测试 home 是权威路径：此时 HOME 指向的
+    // 是真实用户目录，回退会把测试读写劫持到真实数据上（Windows SSH 会话默认
+    // 带 HOME，曾在真机上触发测试密钥迁移真实库的事故），必须禁用。
     #[cfg(windows)]
     {
         let default_db = default_dir.join(DB_FILE_NAME);
-        if !default_db.exists() {
+        if !default_db.exists() && std::env::var_os("CC_SWITCH_TEST_HOME").is_none() {
             if let Ok(home_env) = std::env::var("HOME") {
                 let trimmed = home_env.trim();
                 if !trimmed.is_empty() {
@@ -730,6 +733,38 @@ fn atomic_write_with_unix_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows SSH/开发会话可能带 `HOME`，v3.10.3 legacy 回退曾借它把测试读写
+    /// 劫持到真实用户目录（真机上发生过测试密钥迁移真实库的事故）。
+    /// 显式测试 home 在位时必须完全压过该回退。
+    #[cfg(windows)]
+    #[test]
+    #[serial_test::serial]
+    fn test_home_override_wins_over_v3103_legacy_fallback() {
+        let legacy = tempfile::tempdir().unwrap();
+        let legacy_app = legacy.path().join(APP_DIR_NAME);
+        fs::create_dir_all(&legacy_app).unwrap();
+        fs::write(legacy_app.join(DB_FILE_NAME), b"legacy marker").unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("HOME", legacy.path());
+        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+
+        let resolved = get_app_config_dir();
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+
+        assert_eq!(resolved, home.path().join(APP_DIR_NAME));
+    }
 
     fn assert_atomic_write_replaces_existing_file(dir: &Path) {
         let path = dir.join("atomic-write-contract.json");
