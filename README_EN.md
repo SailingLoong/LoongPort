@@ -350,9 +350,8 @@ LoongPort is free. It never handles your payment and takes nothing out of your b
 You top up with the relay provider.
 
 > Registration links carry our referral code, which may earn us a rebate from the relay
-> site; `bestapi.store` is our own site, and the built-in `LOONGPORT` promo code is a
-> new-user credit there. Neither affects your price, and you can use any domain. Both
-> tables live in `src-tauri/src/relay/` — `aff.rs` and `promo.rs`.
+> site. This never affects your price, and you can use any domain. Both tables live in
+> `src-tauri/src/relay/` — `aff.rs` and `promo.rs`.
 
 ## Upstream projects
 

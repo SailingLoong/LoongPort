@@ -222,7 +222,7 @@ dsh plugin --profile <profile> add loongport
 
 LoongPort 本身免费，不经手付款、不从你的余额抽成。你充值的对象是中转服务商。
 
-> 注册链接会附带我们的邀请码，我们可能因此从中转站获得返利；其中 `bestapi.store` 是我们自运营的站点，内置的 `LOONGPORT` 优惠码是该站的新用户赠额。以上均不影响你的价格，域名可任意填写。两张表位于 `src-tauri/src/relay/` 的 `aff.rs` 与 `promo.rs`。
+> 注册链接会附带我们的邀请码，我们可能因此从中转站获得返利。这不影响你的价格，域名可任意填写。两张表位于 `src-tauri/src/relay/` 的 `aff.rs` 与 `promo.rs`。
 
 ## 上游项目
 

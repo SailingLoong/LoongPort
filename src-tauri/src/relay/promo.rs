@@ -18,10 +18,9 @@
 //!
 //! 两张表的排除理由不同，别看到「同一个站」就想「修正」其中一张：
 //!
-//! - **aff 表排除它**：服务端拒绝自己邀请自己（`affiliate_service.go:300`），
-//!   `inviterSummary.UserID == userID` ⇒ `ErrAffiliateCodeInvalid`。
-//! - **promo 表曾包含它**（优惠码是站主给新用户的赠额活动，与服务端身份比对无关），
-//!   但那个码 `LOONGPORT` 已于 **2026-08-16 在服务端删除**：内置条目随之清空，
+//! - **aff 表排除它**：有意缺席，见 [`super::aff`] 的模块文档。
+//! - **promo 表曾包含它**，但那个码 `LOONGPORT` 已于 **2026-08-16 在服务端删除**：
+//!   内置条目随之清空，
 //!   对已发出去的客户端同日由远端配置下发
 //!   `promo_codes: {"bestapi.store": ""}` 撤销（`resolve_code` 的
 //!   「远端空串 = 撤销、不回落内置」语义）。两层一起收口，注册页不再预填。
@@ -68,13 +67,11 @@ mod tests {
         assert!(PROMO_CODES.is_empty(), "再加码请连着更新这条与模块文档");
     }
 
-    /// ⭐ **这条钉住「两张表都不含 bestapi.store」各自的理由，防止有人反向「补齐」。**
+    /// ⭐ **这条钉住「两张表都不含 bestapi.store」，防止有人反向「补齐」。**
     ///
-    /// 排除理由不同（见模块文档）：aff 是服务端拒绝自己邀请自己；
-    /// promo 是码已删除。给 aff 表补上它会让服务端日志多一条
-    /// `ErrAffiliateCodeInvalid`；给 promo 表补回旧码会让注册页弹「优惠码无效」。
+    /// 排除理由见模块文档。给 promo 表补回旧码会让注册页弹「优惠码无效」。
     #[test]
-    fn neither_table_carries_the_maintainers_site_anymore() {
+    fn neither_table_carries_bestapi_anymore() {
         let origin = "https://bestapi.store";
         assert_eq!(
             promo_code_for(origin),
@@ -84,7 +81,7 @@ mod tests {
         assert_eq!(
             super::super::aff::aff_code_for(origin),
             None,
-            "返利码是邀请关系，服务端拒绝自己邀请自己"
+            "aff 内置表有意不含 bestapi.store"
         );
     }
 
