@@ -33,17 +33,19 @@ use windows_sys::Win32::System::SystemServices::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// VACUUM 等以改名重建文件后的瞬间，按名新建句柄可能短暂收到 ACCESS_DENIED
-/// （名字空间沉降 / 杀软扫描窗口）。有界重试覆盖该瞬态；重试耗尽仍失败才报错，
-/// 真实的权限问题不会被吞掉。
+/// （名字空间沉降 / 杀软扫描窗口）。并行负载下窗口会拉长，用指数退避覆盖；
+/// 重试耗尽仍失败才报错，真实的权限问题不会被吞掉。
 fn settle_retry<T>(mut action: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    for attempt in 0..5u32 {
+    let mut delay_ms = 50u64;
+    for attempt in 0..6u32 {
         let result = action();
         let transient =
             matches!(&result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied);
-        if !transient || attempt == 4 {
+        if !transient || attempt == 5 {
             return result;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        delay_ms *= 2;
     }
     unreachable!("settle_retry returns on the final attempt");
 }
@@ -398,16 +400,6 @@ pub(crate) fn create_new(path: &Path) -> io::Result<std::fs::File> {
 
 /// Tighten an existing app-owned file or directory and verify the effective DACL.
 pub(crate) fn restrict_existing(path: &Path, directory: bool) -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || (directory && !metadata.is_dir())
-        || (!directory && !metadata.is_file())
-    {
-        return Err(invalid_private_acl(
-            "private path is not the expected regular file type",
-        ));
-    }
-
     let (_token, mut user_buffer) = current_user_token()?;
     let user_sid = token_user_sid(&mut user_buffer);
     let mut system_sid = well_known_sid(WinLocalSystemSid)?;
@@ -424,14 +416,24 @@ pub(crate) fn restrict_existing(path: &Path, directory: bool) -> io::Result<()> 
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    // SAFETY: path_wide is writable NUL-terminated UTF-16 and the ACL remains alive.
-    // 目标文件可能刚被 VACUUM/改名重建，名字层面的操作走沉降重试。
     let flags = if directory {
         FILE_FLAG_BACKUP_SEMANTICS
     } else {
         FILE_ATTRIBUTE_NORMAL
     };
+    // 目标文件可能刚被 VACUUM/改名重建，连元数据查询在内的一切按名操作都
+    // 可能撞上短暂 ACCESS_DENIED——整体走沉降重试。
     settle_retry(|| {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink()
+            || (directory && !metadata.is_dir())
+            || (!directory && !metadata.is_file())
+        {
+            return Err(invalid_private_acl(
+                "private path is not expected regular file type",
+            ));
+        }
+        // SAFETY: path_wide is writable NUL-terminated UTF-16 and the ACL remains alive.
         let security_result = unsafe {
             SetNamedSecurityInfoW(
                 path_wide.as_mut_ptr(),
