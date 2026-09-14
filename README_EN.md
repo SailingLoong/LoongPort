@@ -420,6 +420,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Before touching the relay-account path, 
 why (`model_provider` must be `custom`, `requires_openai_auth` must be absent, quitting
 ChatGPT goes by bundle id). Each has a test pinning it.
 
+## Star History
+
+[![Star History](https://raw.githubusercontent.com/SailingLoong/LoongPort/star-history/star-history.svg)](https://github.com/SailingLoong/LoongPort/stargazers)
+
 ## License
 
 [MIT](LICENSE).

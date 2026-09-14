@@ -277,6 +277,10 @@ pnpm tsc --noEmit                                 # 类型检查
 （`model_provider` 为何必须是 `custom`、为何不能声明 `requires_openai_auth`、
 退出 ChatGPT 为何按 bundle id）。每条约束均有测试钉住。
 
+## Star History
+
+[![Star History](https://raw.githubusercontent.com/SailingLoong/LoongPort/star-history/star-history.svg)](https://github.com/SailingLoong/LoongPort/stargazers)
+
 ## 许可证
 
 [MIT](LICENSE)。

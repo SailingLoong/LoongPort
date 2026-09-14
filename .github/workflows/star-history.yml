@@ -1,0 +1,62 @@
+name: Star History
+
+# GitHub 自 2026-06 起 stargazers 时间线（starred_at）仅仓库 admin/collaborator
+# 可读，star-history.com 的公共嵌入图因此对所有公开仓失效。这里用 Actions
+# 自带的 GITHUB_TOKEN（对本仓即 owner 身份）每日拉取时间线、渲染 SVG，提交到
+# 专用的 `star-history` 数据分支；README 引用该分支上的图，不再依赖第三方服务。
+on:
+  schedule:
+    - cron: "41 16 * * *" # 00:41 Beijing time
+  workflow_dispatch:
+
+concurrency:
+  group: star-history
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    name: Update star-history snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      STAR_HISTORY_DIR: ${{ runner.temp }}/star-history
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      # 数据分支与主仓解耦：worktree 挂到 runner 临时目录，存在则续在其上，
+      # 不存在则建孤儿分支，main 的历史零污染。
+      - name: Prepare data branch worktree
+        run: |
+          if git fetch --no-tags --depth=1 origin star-history; then
+            git worktree add --detach "$STAR_HISTORY_DIR" origin/star-history
+          else
+            git worktree add --detach "$STAR_HISTORY_DIR"
+            git -C "$STAR_HISTORY_DIR" checkout --orphan star-history
+            git -C "$STAR_HISTORY_DIR" rm -rf --quiet .
+          fi
+
+      - name: Generate snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/star-history.mjs snapshot "$STAR_HISTORY_DIR"
+
+      # 产物只在星数变化时产生 diff；无新星的当天不产生空提交。
+      - name: Publish snapshot
+        run: |
+          git -C "$STAR_HISTORY_DIR" config user.name "github-actions[bot]"
+          git -C "$STAR_HISTORY_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$STAR_HISTORY_DIR" add README.md history.json star-history.svg
+          if git -C "$STAR_HISTORY_DIR" diff --cached --quiet; then
+            echo "Star history already up to date"
+            exit 0
+          fi
+          git -C "$STAR_HISTORY_DIR" commit -m "chore: update star history snapshot"
+          git -C "$STAR_HISTORY_DIR" push origin HEAD:refs/heads/star-history
