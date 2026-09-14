@@ -398,17 +398,7 @@ pub(crate) fn create_new(path: &Path) -> io::Result<std::fs::File> {
 
 /// Tighten an existing app-owned file or directory and verify the effective DACL.
 pub(crate) fn restrict_existing(path: &Path, directory: bool) -> io::Result<()> {
-    let probe_start = std::time::Instant::now();
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!(
-                "PROBE restrict metadata err at {:?}: {e:?}",
-                probe_start.elapsed()
-            );
-            return Err(e);
-        }
-    };
+    let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || (directory && !metadata.is_dir())
         || (!directory && !metadata.is_file())
@@ -435,15 +425,13 @@ pub(crate) fn restrict_existing(path: &Path, directory: bool) -> io::Result<()> 
         .chain(std::iter::once(0))
         .collect();
     // SAFETY: path_wide is writable NUL-terminated UTF-16 and the ACL remains alive.
-    eprintln!("PROBE restrict enter at {:?}", probe_start.elapsed());
     // 目标文件可能刚被 VACUUM/改名重建，名字层面的操作走沉降重试。
     let flags = if directory {
         FILE_FLAG_BACKUP_SEMANTICS
     } else {
         FILE_ATTRIBUTE_NORMAL
     };
-    let probe_acl = std::time::Instant::now();
-    let outcome = settle_retry(|| {
+    settle_retry(|| {
         let security_result = unsafe {
             SetNamedSecurityInfoW(
                 path_wide.as_mut_ptr(),
@@ -476,26 +464,13 @@ pub(crate) fn restrict_existing(path: &Path, directory: bool) -> io::Result<()> 
         }
         // SAFETY: CreateFileW returned a unique owned handle that File will close exactly once.
         let file = unsafe { std::fs::File::from_raw_handle(handle) };
-        let verdict = verify_private_dacl(
+        verify_private_dacl(
             file.as_raw_handle(),
             user_sid,
             system_sid,
             administrators_sid,
-        );
-        if verdict.is_err() {
-            eprintln!(
-                "PROBE restrict verify err at {:?}: {verdict:?}",
-                probe_acl.elapsed()
-            );
-        }
-        verdict
-    });
-    eprintln!(
-        "PROBE restrict settled at {:?}: {:?}",
-        probe_acl.elapsed(),
-        outcome.as_ref().map_err(|e| e.kind())
-    );
-    outcome
+        )
+    })
 }
 
 /// 打开已存在的文件并 fsync。刚被 VACUUM/改名重建的文件按名打开可能撞上
