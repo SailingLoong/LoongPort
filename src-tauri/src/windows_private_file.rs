@@ -10,7 +10,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS,
-    SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    SE_FILE_OBJECT, SUB_CONTAINERS_AND_INHERIT, SUB_OBJECTS_AND_INHERIT, TRUSTEE_IS_SID,
+    TRUSTEE_IS_USER, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     AclSizeInformation, CreateWellKnownSid, EqualSid, GetAce, GetAclInformation,
@@ -30,6 +31,22 @@ use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+/// VACUUM 等以改名重建文件后的瞬间，按名新建句柄可能短暂收到 ACCESS_DENIED
+/// （名字空间沉降 / 杀软扫描窗口）。有界重试覆盖该瞬态；重试耗尽仍失败才报错，
+/// 真实的权限问题不会被吞掉。
+fn settle_retry<T>(mut action: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for attempt in 0..5u32 {
+        let result = action();
+        let transient =
+            matches!(&result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied);
+        if !transient || attempt == 4 {
+            return result;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unreachable!("settle_retry returns on the final attempt");
+}
 
 struct OwnedHandle(HANDLE);
 
@@ -115,7 +132,7 @@ fn well_known_sid(kind: i32) -> io::Result<[u8; SECURITY_MAX_SID_SIZE as usize]>
     Ok(sid)
 }
 
-fn allow_full_access(sid: PSID, trustee_type: i32) -> EXPLICIT_ACCESS_W {
+fn allow_full_access(sid: PSID, trustee_type: i32, inheritance: u32) -> EXPLICIT_ACCESS_W {
     let trustee = TRUSTEE_W {
         TrusteeForm: TRUSTEE_IS_SID,
         TrusteeType: trustee_type,
@@ -125,24 +142,46 @@ fn allow_full_access(sid: PSID, trustee_type: i32) -> EXPLICIT_ACCESS_W {
     EXPLICIT_ACCESS_W {
         grfAccessPermissions: FILE_ALL_ACCESS,
         grfAccessMode: SET_ACCESS,
-        grfInheritance: NO_INHERITANCE,
+        grfInheritance: inheritance,
         Trustee: trustee,
     }
 }
 
-fn invalid_private_acl(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, message)
-}
-
+/// 文件自身的受限 DACL：仅当前用户、SYSTEM 与本机管理员，且不向子对象继承。
 fn private_acl(
     user_sid: PSID,
     system_sid: PSID,
     administrators_sid: PSID,
 ) -> io::Result<LocalAllocation> {
+    private_acl_with(user_sid, system_sid, administrators_sid, NO_INHERITANCE)
+}
+
+/// 目录的受限 DACL。ACE 可继承：SQLite VACUUM 会以改名重建数据库文件，重建
+/// 产物带进程默认 DACL——可继承的目录 ACE 保证这类重建文件自动获得同等保护，
+/// 不需要每个重建点各自补救。
+fn private_acl_inheritable(
+    user_sid: PSID,
+    system_sid: PSID,
+    administrators_sid: PSID,
+) -> io::Result<LocalAllocation> {
+    private_acl_with(
+        user_sid,
+        system_sid,
+        administrators_sid,
+        SUB_CONTAINERS_AND_INHERIT | SUB_OBJECTS_AND_INHERIT,
+    )
+}
+
+fn private_acl_with(
+    user_sid: PSID,
+    system_sid: PSID,
+    administrators_sid: PSID,
+    inheritance: u32,
+) -> io::Result<LocalAllocation> {
     let entries = [
-        allow_full_access(user_sid, TRUSTEE_IS_USER),
-        allow_full_access(system_sid, TRUSTEE_IS_WELL_KNOWN_GROUP),
-        allow_full_access(administrators_sid, TRUSTEE_IS_WELL_KNOWN_GROUP),
+        allow_full_access(user_sid, TRUSTEE_IS_USER, inheritance),
+        allow_full_access(system_sid, TRUSTEE_IS_WELL_KNOWN_GROUP, inheritance),
+        allow_full_access(administrators_sid, TRUSTEE_IS_WELL_KNOWN_GROUP, inheritance),
     ];
     let mut acl = std::ptr::null_mut();
     // SAFETY: all trustee SID buffers remain alive for this call; OldAcl is null so the
@@ -162,6 +201,10 @@ fn private_acl(
         return Err(invalid_private_acl("Windows returned an empty private ACL"));
     }
     Ok(LocalAllocation(acl.cast()))
+}
+
+fn invalid_private_acl(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
 fn verify_private_dacl(
@@ -371,56 +414,72 @@ pub(crate) fn restrict_existing(path: &Path, directory: bool) -> io::Result<()> 
     let mut administrators_sid = well_known_sid(WinBuiltinAdministratorsSid)?;
     let system_sid: PSID = system_sid.as_mut_ptr().cast();
     let administrators_sid: PSID = administrators_sid.as_mut_ptr().cast();
-    let acl = private_acl(user_sid, system_sid, administrators_sid)?;
+    let acl = if directory {
+        private_acl_inheritable(user_sid, system_sid, administrators_sid)?
+    } else {
+        private_acl(user_sid, system_sid, administrators_sid)?
+    };
     let mut path_wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
     // SAFETY: path_wide is writable NUL-terminated UTF-16 and the ACL remains alive.
-    let security_result = unsafe {
-        SetNamedSecurityInfoW(
-            path_wide.as_mut_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            acl.0.cast(),
-            std::ptr::null(),
-        )
-    };
-    if security_result != 0 {
-        return Err(io::Error::from_raw_os_error(security_result as i32));
-    }
-
+    // 目标文件可能刚被 VACUUM/改名重建，名字层面的操作走沉降重试。
     let flags = if directory {
         FILE_FLAG_BACKUP_SEMANTICS
     } else {
         FILE_ATTRIBUTE_NORMAL
     };
-    // SAFETY: path_wide remains NUL-terminated; the returned handle is checked and owned below.
-    let handle = unsafe {
-        CreateFileW(
-            path_wide.as_ptr(),
-            FILE_GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            flags,
-            std::ptr::null_mut(),
+    settle_retry(|| {
+        let security_result = unsafe {
+            SetNamedSecurityInfoW(
+                path_wide.as_mut_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                acl.0.cast(),
+                std::ptr::null(),
+            )
+        };
+        if security_result != 0 {
+            return Err(io::Error::from_raw_os_error(security_result as i32));
+        }
+
+        // SAFETY: path_wide remains NUL-terminated; the returned handle is checked and owned below.
+        let handle = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                FILE_GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                flags,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: CreateFileW returned a unique owned handle that File will close exactly once.
+        let file = unsafe { std::fs::File::from_raw_handle(handle) };
+        verify_private_dacl(
+            file.as_raw_handle(),
+            user_sid,
+            system_sid,
+            administrators_sid,
         )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: CreateFileW returned a unique owned handle that File will close exactly once.
-    let file = unsafe { std::fs::File::from_raw_handle(handle) };
-    verify_private_dacl(
-        file.as_raw_handle(),
-        user_sid,
-        system_sid,
-        administrators_sid,
-    )
+    })
+}
+
+/// 打开已存在的文件并 fsync。刚被 VACUUM/改名重建的文件按名打开可能撞上
+/// 短暂 ACCESS_DENIED，走沉降重试。
+pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
+    settle_retry(|| {
+        let file = std::fs::File::open(path)?;
+        file.sync_all()
+    })
 }
 
 #[cfg(test)]
@@ -429,7 +488,11 @@ mod tests {
 
     fn set_world_full_access(path: &Path) {
         let mut world = well_known_sid(windows_sys::Win32::Security::WinWorldSid).unwrap();
-        let entry = allow_full_access(world.as_mut_ptr().cast(), TRUSTEE_IS_WELL_KNOWN_GROUP);
+        let entry = allow_full_access(
+            world.as_mut_ptr().cast(),
+            TRUSTEE_IS_WELL_KNOWN_GROUP,
+            NO_INHERITANCE,
+        );
         let mut acl = std::ptr::null_mut();
         // SAFETY: the world SID remains alive and the output ACL pointer is writable.
         assert_eq!(
@@ -486,5 +549,78 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"new credential");
         assert_restricted_dacl(&path);
+    }
+
+    /// 目录收紧后，VACUUM/改名重建出的文件必须自动继承同等保护，
+    /// 而不是落到进程默认 DACL 上。
+    #[test]
+    fn restricted_directory_grants_children_inherited_access() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("private-root");
+        std::fs::create_dir(&root).unwrap();
+
+        restrict_existing(&root, true).unwrap();
+
+        // 模拟 SQLite VACUUM：在受保护目录里新建一个未指定 DACL 的文件。
+        let rebuilt = root.join("loongport.db");
+        std::fs::write(&rebuilt, b"rebuilt").unwrap();
+        assert_eq!(std::fs::read(&rebuilt).unwrap(), b"rebuilt");
+
+        // 继承来的 ACE 必须把当前用户（含 FILE_ALL_ACCESS）列进 DACL。
+        // 生产校验器拒绝继承 ACE（要求文件自身 PROTECTED），这里单独按继承形状断言。
+        let file = std::fs::File::open(&rebuilt).unwrap();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                GetSecurityInfo(
+                    file.as_raw_handle(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                )
+            },
+            0
+        );
+        let _descriptor = LocalAllocation(descriptor);
+        let mut size = ACL_SIZE_INFORMATION::default();
+        assert_ne!(
+            unsafe {
+                GetAclInformation(
+                    dacl,
+                    (&mut size as *mut ACL_SIZE_INFORMATION).cast(),
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                )
+            },
+            0
+        );
+        assert!(
+            size.AceCount >= 3,
+            "child inherits the restricted directory entries"
+        );
+        let (_token, mut user_buffer) = current_user_token().unwrap();
+        let user_sid = token_user_sid(&mut user_buffer);
+        let mut matched_user = false;
+        for index in 0..size.AceCount {
+            let mut raw_ace = std::ptr::null_mut();
+            assert_ne!(unsafe { GetAce(dacl, index, &mut raw_ace) }, 0);
+            let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
+            let sid: PSID = (&ace.SidStart as *const u32).cast_mut().cast();
+            if unsafe { EqualSid(sid, user_sid) } != 0 {
+                assert_eq!(ace.Mask, FILE_ALL_ACCESS);
+                assert_ne!(
+                    unsafe { &*raw_ace.cast::<ACE_HEADER>() }.AceFlags as u32 & INHERITED_ACE,
+                    0,
+                    "child entry for the user must be inherited from the directory"
+                );
+                matched_user = true;
+            }
+        }
+        assert!(matched_user, "child DACL includes the current user");
     }
 }

@@ -163,9 +163,10 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
     destination
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; VACUUM;")
         .map_err(db_error)?;
-    std::fs::File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| AppError::io(path, e))?;
+    // VACUUM 以改名重建数据库文件：重建产物带的是临时目录的 DACL，且按名打开
+    // 有短暂沉降窗口——先重新收紧，再用带重试的 fsync 落盘。
+    crate::config::ensure_private_file(path)?;
+    crate::config::sync_private_file(path)?;
     let backup_dir = root.join("backups");
     std::fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
     let recovery = backup_dir.join(format!("vault-migration-{}.db", uuid::Uuid::new_v4()));

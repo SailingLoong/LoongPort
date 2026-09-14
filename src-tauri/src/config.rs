@@ -499,6 +499,21 @@ pub fn ensure_private_file(path: &Path) -> Result<(), AppError> {
     ))
 }
 
+/// fsync 一个已存在的私有文件。Windows 上刚被 VACUUM/改名重建的文件按名打开
+/// 可能撞上短暂 ACCESS_DENIED，由平台层做有界沉降重试。
+pub fn sync_private_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(windows)]
+    {
+        windows_private_file::sync_file(path).map_err(|error| AppError::io(path, error))
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| AppError::io(path, error))
+    }
+}
+
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     atomic_write_with_unix_mode(path, data, None)

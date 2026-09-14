@@ -756,11 +756,10 @@ fn finish(
                         "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; VACUUM;",
                     )
                     .map_err(db_error)?;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&main_path)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|e| AppError::io(&main_path, e))?;
+                // VACUUM 以改名重建数据库文件：重建产物带的是临时目录 DACL，
+                // 且按名打开有短暂沉降窗口——重收紧后再 fsync。
+                crate::config::ensure_private_file(&main_path)?;
+                crate::config::sync_private_file(&main_path)?;
                 sync_directory(root)?;
                 hook(Checkpoint::Database)?;
             }

@@ -196,6 +196,11 @@ impl Database {
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }
+        // auto-vacuum 迁移会对有表的库执行一次 VACUUM；Windows 上 VACUUM 以改名
+        // 重建数据库文件，会丢掉收紧过的 DACL——这里补一次收紧（幂等）。
+        if let Err(e) = crate::config::ensure_private_file(&db_path) {
+            log::warn!("Failed to re-restrict database file after auto-vacuum: {e}");
+        }
         db.ensure_model_pricing_seeded()?;
         if let Err(e) = crate::services::model_pricing::sync_local_model_pricing(&db) {
             log::warn!("Failed to sync local model pricing file: {e}");
