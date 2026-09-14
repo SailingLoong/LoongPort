@@ -499,8 +499,8 @@ pub fn ensure_private_file(path: &Path) -> Result<(), AppError> {
     ))
 }
 
-/// fsync 一个已存在的私有文件。Windows 上刚被 VACUUM/改名重建的文件按名打开
-/// 可能撞上短暂 ACCESS_DENIED，由平台层做有界沉降重试。
+/// fsync 一个已存在的私有文件。Windows 上 FlushFileBuffers 要求句柄带写权限，
+/// 平台层以读写方式打开；unix 侧只读打开即可。
 pub fn sync_private_file(path: &Path) -> Result<(), AppError> {
     #[cfg(windows)]
     {

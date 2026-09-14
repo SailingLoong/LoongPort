@@ -163,8 +163,8 @@ pub(crate) fn prepare(path: &Path, vault: &VaultContext) -> Result<Connection, A
     destination
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; VACUUM;")
         .map_err(db_error)?;
-    // VACUUM 以改名重建数据库文件：重建产物带的是临时目录的 DACL，且按名打开
-    // 有短暂沉降窗口——先重新收紧，再用带重试的 fsync 落盘。
+    // VACUUM 以改名重建数据库文件，重建产物携带的是临时目录的 DACL——
+    // 重新收紧后再 fsync。
     crate::config::ensure_private_file(path)?;
     crate::config::sync_private_file(path)?;
     let backup_dir = root.join("backups");

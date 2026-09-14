@@ -32,24 +32,6 @@ use windows_sys::Win32::System::SystemServices::{
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-/// VACUUM 等以改名重建文件后的瞬间，按名新建句柄可能短暂收到 ACCESS_DENIED
-/// （名字空间沉降 / 杀软扫描窗口）。并行负载下窗口会拉长，用指数退避覆盖；
-/// 重试耗尽仍失败才报错，真实的权限问题不会被吞掉。
-fn settle_retry<T>(mut action: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    let mut delay_ms = 50u64;
-    for attempt in 0..6u32 {
-        let result = action();
-        let transient =
-            matches!(&result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied);
-        if !transient || attempt == 5 {
-            return result;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        delay_ms *= 2;
-    }
-    unreachable!("settle_retry returns on the final attempt");
-}
-
 struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
@@ -421,67 +403,64 @@ pub(crate) fn restrict_existing(path: &Path, directory: bool) -> io::Result<()> 
     } else {
         FILE_ATTRIBUTE_NORMAL
     };
-    // 目标文件可能刚被 VACUUM/改名重建，连元数据查询在内的一切按名操作都
-    // 可能撞上短暂 ACCESS_DENIED——整体走沉降重试。
-    settle_retry(|| {
-        let metadata = std::fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink()
-            || (directory && !metadata.is_dir())
-            || (!directory && !metadata.is_file())
-        {
-            return Err(invalid_private_acl(
-                "private path is not expected regular file type",
-            ));
-        }
-        // SAFETY: path_wide is writable NUL-terminated UTF-16 and the ACL remains alive.
-        let security_result = unsafe {
-            SetNamedSecurityInfoW(
-                path_wide.as_mut_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                acl.0.cast(),
-                std::ptr::null(),
-            )
-        };
-        if security_result != 0 {
-            return Err(io::Error::from_raw_os_error(security_result as i32));
-        }
-
-        // SAFETY: path_wide remains NUL-terminated; the returned handle is checked and owned below.
-        let handle = unsafe {
-            CreateFileW(
-                path_wide.as_ptr(),
-                FILE_GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                flags,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: CreateFileW returned a unique owned handle that File will close exactly once.
-        let file = unsafe { std::fs::File::from_raw_handle(handle) };
-        verify_private_dacl(
-            file.as_raw_handle(),
-            user_sid,
-            system_sid,
-            administrators_sid,
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(invalid_private_acl(
+            "private path is not expected regular file type",
+        ));
+    }
+    // SAFETY: path_wide is writable NUL-terminated UTF-16 and the ACL remains alive.
+    let security_result = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl.0.cast(),
+            std::ptr::null(),
         )
-    })
+    };
+    if security_result != 0 {
+        return Err(io::Error::from_raw_os_error(security_result as i32));
+    }
+
+    // SAFETY: path_wide remains NUL-terminated; the returned handle is checked and owned below.
+    let handle = unsafe {
+        CreateFileW(
+            path_wide.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            flags,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreateFileW returned a unique owned handle that File will close exactly once.
+    let file = unsafe { std::fs::File::from_raw_handle(handle) };
+    verify_private_dacl(
+        file.as_raw_handle(),
+        user_sid,
+        system_sid,
+        administrators_sid,
+    )
 }
 
-/// 打开已存在的文件并 fsync。刚被 VACUUM/改名重建的文件按名打开可能撞上
-/// 短暂 ACCESS_DENIED，走沉降重试。
+/// 打开已存在的文件并 fsync。FlushFileBuffers 要求句柄具有写权限，
+/// 只读句柄在 Windows 上会得到 ACCESS_DENIED——必须以读写方式打开。
 pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
-    settle_retry(|| {
-        let file = std::fs::File::open(path)?;
-        file.sync_all()
-    })
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
