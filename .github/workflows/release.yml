@@ -912,8 +912,13 @@ jobs:
       contents: write
     steps:
       - name: Prepare GH
+        # gh 不在就尽力装；装不上不在这里红，后续用 gh 的步骤自然暴露
         run: |
-          gh --version || (type -p curl >/dev/null && sudo apt-get update && sudo apt-get install -y gh || true)
+          if ! gh --version >/dev/null 2>&1; then
+            if type -p curl >/dev/null && sudo apt-get update; then
+              sudo apt-get install -y gh || true
+            fi
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Download all release assets

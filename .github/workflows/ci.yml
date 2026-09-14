@@ -25,8 +25,10 @@ jobs:
   # runner context），同样是整文件拒收——两次都属于 YAML 语法之外的 schema/
   # 表达式错，纯解析查不出。所以这道闸必须独立、必跑，且升级为 actionlint
   # （YAML 语法 + workflow schema + 表达式 + shellcheck 一把抓；shellcheck 用
-  # runner 预装的，pyflakes 未预装会自动跳过）。版本与维护者本机 brew 钉同版
-  # （本地绿 ⇒ CI 绿），升级时同步改这里。
+  # runner 预装的，pyflakes 未预装会自动跳过）。actionlint 版本与维护者本机
+  # brew 钉同版，其自身规则本地绿 ⇒ CI 绿；shellcheck 发现项随 runner 预装
+  # 版本可能漂移（实测 08:18 那轮 runner 报 SC2015 而本机 0.11 不报），
+  # 撞上即修。升级时同步改 ACTIONLINT_VERSION。
   workflow-lint:
     name: Workflow syntax check
     runs-on: ubuntu-latest
