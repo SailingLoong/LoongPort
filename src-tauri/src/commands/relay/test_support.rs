@@ -112,6 +112,7 @@ pub(crate) fn saved_relay_app(
 ) -> (tauri::App<tauri::test::MockRuntime>, i64) {
     let db = Arc::new(crate::database::Database::memory().expect("memory database"));
     let relay_id = {
+        let vault = db.secrets.read().unwrap();
         let conn = db.conn.lock().expect("lock memory database");
         let relay_id = creds::save_site_with_backend(
             &conn,
@@ -123,6 +124,7 @@ pub(crate) fn saved_relay_app(
         .expect("save relay");
         creds::save_credentials(
             &conn,
+            &vault,
             relay_id,
             creds::AccountIdentity {
                 id: 7,
@@ -138,7 +140,7 @@ pub(crate) fn saved_relay_app(
         relay_id
     };
     let app = tauri::test::mock_builder()
-        .manage(AppState::new(db))
+        .manage(AppState::new(db).unwrap())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("build mock app");
     (app, relay_id)
@@ -149,7 +151,7 @@ pub(crate) fn relay_credentials(
     relay_id: i64,
 ) -> creds::RelayAccount {
     let state = app.state::<AppState>();
-    with_conn(&state, |conn| creds::get(conn, relay_id))
+    with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))
         .expect("read saved relay")
         .expect("saved relay exists")
 }

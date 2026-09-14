@@ -153,10 +153,7 @@ pub(crate) fn effective_unit_price(
     tier: &Provider,
     model_pref: Option<&str>,
 ) -> Option<f64> {
-    let conn = db
-        .conn
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let conn = db.conn.lock().ok()?;
     tier_unit_price(&conn, tier, model_pref)
 }
 

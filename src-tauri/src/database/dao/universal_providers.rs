@@ -2,7 +2,7 @@
 //!
 //! 提供统一供应商的 CRUD 操作。
 
-use crate::database::{lock_conn, to_json_string, Database};
+use crate::database::{to_json_string, Database};
 use crate::error::AppError;
 use crate::provider::UniversalProvider;
 use std::collections::HashMap;
@@ -15,15 +15,7 @@ impl Database {
     pub fn get_all_universal_providers(
         &self,
     ) -> Result<HashMap<String, UniversalProvider>, AppError> {
-        let conn = lock_conn!(self.conn);
-
-        let mut stmt = conn
-            .prepare("SELECT value FROM settings WHERE key = ?")
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let result: Option<String> = stmt
-            .query_row([UNIVERSAL_PROVIDERS_KEY], |row| row.get(0))
-            .ok();
+        let result = self.get_setting(UNIVERSAL_PROVIDERS_KEY)?;
 
         match result {
             Some(json) => serde_json::from_str(&json)
@@ -60,15 +52,52 @@ impl Database {
         &self,
         providers: &HashMap<String, UniversalProvider>,
     ) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
         let json = to_json_string(providers)?;
+        self.set_setting(UNIVERSAL_PROVIDERS_KEY, &json)
+    }
+}
 
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            [UNIVERSAL_PROVIDERS_KEY, &json],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        Ok(())
+    #[test]
+    fn secret_universal_provider_uses_protected_settings() {
+        let db = Database::memory().unwrap();
+        let provider = UniversalProvider::new(
+            "universal".into(),
+            "Provider".into(),
+            "openai".into(),
+            "https://api.example".into(),
+            "universal-canary".into(),
+        );
+        db.save_universal_provider(&provider).unwrap();
+        assert_eq!(
+            db.get_universal_provider(&provider.id)
+                .unwrap()
+                .unwrap()
+                .api_key,
+            provider.api_key
+        );
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM settings WHERE key='universal_providers'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("universal-canary"));
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE settings SET value='corrupt' WHERE key='universal_providers'",
+                [],
+            )
+            .unwrap();
+        assert!(db.get_all_universal_providers().is_err());
     }
 }

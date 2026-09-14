@@ -1131,16 +1131,14 @@ mod tests {
         app_type: &str,
         meta: ProviderMeta,
     ) -> Result<(), AppError> {
-        let meta_json =
-            serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?;
-        let conn = crate::database::lock_conn!(db.conn);
-        conn.execute(
-            "INSERT INTO providers (id, app_type, name, settings_config, meta)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![id, app_type, "Test Provider", "{}", meta_json],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(())
+        let mut provider = crate::provider::Provider::with_id(
+            id.into(),
+            "Test Provider".into(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.meta = Some(meta);
+        db.save_provider(app_type, &provider)
     }
 
     #[tokio::test]

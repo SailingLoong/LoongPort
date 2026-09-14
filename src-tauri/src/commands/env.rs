@@ -11,12 +11,18 @@ pub fn check_env_conflicts(app: String) -> Result<Vec<EnvConflict>, String> {
 
 /// Delete environment variables with backup
 #[tauri::command]
-pub fn delete_env_vars(conflicts: Vec<EnvConflict>) -> Result<BackupInfo, String> {
-    delete_vars(conflicts)
+pub fn delete_env_vars(
+    state: tauri::State<crate::store::AppState>,
+    conflicts: Vec<EnvConflict>,
+) -> Result<BackupInfo, String> {
+    delete_vars(state.db.secret_session(), conflicts)
 }
 
 /// Restore environment variables from backup file
 #[tauri::command]
-pub fn restore_env_backup(backup_path: String) -> Result<(), String> {
-    restore_from_backup(backup_path)
+pub fn restore_env_backup(
+    state: tauri::State<crate::store::AppState>,
+    backup_path: String,
+) -> Result<(), String> {
+    restore_from_backup(state.db.secret_session(), backup_path)
 }

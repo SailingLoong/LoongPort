@@ -5,6 +5,7 @@
 use super::{lock_conn, Database};
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
+use crate::secrets::{VaultContext, VaultMetadata};
 use chrono::{Local, Utc};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
@@ -12,7 +13,7 @@ use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use tempfile::{Builder, NamedTempFile};
+use tempfile::Builder;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
 
@@ -75,34 +76,21 @@ fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hoo
 
     if escapes_temp_db {
         // SQLite 只会回一句 "not authorized"，不记日志就无从知道是哪条语句被拦。
-        log::warn!("SQL 导入拒绝了越界语句: {:?}", context.action);
+        log::warn!("SQL import rejected an unauthorized statement");
         Authorization::Deny
     } else {
         Authorization::Allow
     }
 }
 
-/// Tables whose data rows are skipped when exporting for WebDAV sync.
-///
-/// ⚠️ **LoongPort 的两张表在这里，理由与上游那几张不同**：上游列进来的是「本机专属 /
-/// 可重建」的日志与缓存，我们列进来的是**明文凭据**（见下方 `loongport_*` 两项）。
+/// Device-local login sessions, logs, and runtime backups are excluded from sync.
+/// Their local rows are preserved when a downloaded snapshot is installed.
 const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
     "proxy_live_backup",
     "usage_daily_rollups",
-    // ↓ LoongPort 自己的两张表：**存明文凭据，绝不出本机**。
-    //
-    // `loongport_relay` 有 `auth_token` / `refresh_token`，`loongport_vendor` 有
-    // `api_key`。`dump_sql` 是按 `sqlite_master` **通用枚举**所有表的（不在这个列表里
-    // 就整表导出），所以新建的表**默认会进同步文件** —— 用户开了 WebDAV/S3 之后，
-    // 登录态就明文躺在他自己配的云端，而他不会收到任何提示。
-    //
-    // 不同步不影响多机复用：Key 的命名是**账号粒度**的
-    // （`relay/provision.rs` 的 `key_name_for`，不含机器标识），所以另一台机器
-    // 登录同一个账号会 claim 到**同一把 key**，只是要重新登录一次。
-    // 拿「少登录一次」换「凭据上云」不值得。
     "loongport_relay",
     "loongport_vendor",
     "session_log_sync",
@@ -134,28 +122,159 @@ pub struct BackupEntry {
     pub created_at: String, // ISO 8601
 }
 
+/// An authenticated source staged for one destination vault generation.
+pub(crate) struct ValidatedSyncSnapshot {
+    connection: Connection,
+    destination: VaultMetadata,
+}
+
 impl Database {
-    /// 导出为 SQLite 兼容的 SQL 文本（内存字符串，完整导出）
-    pub fn export_sql_string(&self) -> Result<String, AppError> {
+    /// Raw snapshots are test fixtures; public file exports require portable keys.
+    #[cfg(test)]
+    pub(crate) fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
         Self::dump_sql(&snapshot, &[])
     }
 
-    /// Export SQL for sync (WebDAV), skipping local-only tables' data
-    pub fn export_sql_string_for_sync(&self) -> Result<String, AppError> {
+    /// Legacy fixture exporter for testing local-table preservation.
+    #[cfg(test)]
+    fn export_sql_string_for_sync(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
         Self::dump_sql(&snapshot, SYNC_SKIP_TABLES)
     }
 
+    /// SQL and public key metadata come from the same SQLite backup while the
+    /// active vault generation is pinned. Callers never read live metadata later.
+    pub(crate) fn export_sync_snapshot(&self) -> Result<(String, VaultMetadata), AppError> {
+        self.export_portable_snapshot(SYNC_SKIP_TABLES, "sync.recovery_password_required")
+    }
+
+    fn export_portable_snapshot(
+        &self,
+        skip_tables: &[&str],
+        password_error: &str,
+    ) -> Result<(String, VaultMetadata), AppError> {
+        let vault = self.secrets.read()?;
+        let snapshot = self.snapshot_to_memory()?;
+        super::vault::check_identity(&snapshot, &vault)?;
+        crate::secrets::inventory::validate_database(&snapshot, &vault)?;
+        let metadata = super::vault::stored_metadata(&snapshot)?
+            .ok_or_else(|| AppError::Config("sync.vault_metadata_required".into()))?;
+        if metadata.wrapped_key.is_none() {
+            return Err(AppError::Config(password_error.into()));
+        }
+        Ok((Self::dump_sql(&snapshot, skip_tables)?, metadata))
+    }
+
+    /// Explicit file restore authenticates the source password, then keeps this
+    /// device's active generation instead of adopting an older backup key.
+    pub(crate) fn prepare_backup_content(
+        sql: &str,
+        password: Option<&str>,
+        current: &VaultContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
+        let connection = Self::stage_import_sql(sql, true)?;
+        if let Some(metadata) = super::vault::stored_metadata(&connection)? {
+            let password = password
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::Config("backup.password_required".into()))?;
+            let source = VaultContext::from_password(metadata, password)
+                .map_err(crate::secrets::inventory::secret_error)?;
+            super::vault::upgrade_staging(&connection, &source)?;
+            crate::secrets::inventory::transform_database(&connection, Some(&source), current)?;
+            super::vault::stamp(&connection, current)?;
+        } else {
+            super::vault::upgrade_staging(&connection, current)?;
+        }
+        Ok(ValidatedSyncSnapshot {
+            connection,
+            destination: current.metadata().clone(),
+        })
+    }
+
+    /// Automatic sync may use an authenticated older wrapper for the same key,
+    /// but adopting another vault, key, or newer metadata is an explicit action.
+    pub(crate) fn validate_sync_source(
+        vault: &VaultContext,
+        source: &VaultMetadata,
+    ) -> Result<(), AppError> {
+        let local = vault.metadata();
+        if source.vault_id != local.vault_id || source.key_id != local.key_id {
+            return Err(AppError::Config("sync.vault_adoption_required".into()));
+        }
+        if source.revision > local.revision {
+            return Err(AppError::Config("sync.vault_revision_newer".into()));
+        }
+        if source.revision == local.revision && source != local {
+            return Err(AppError::Config("sync.vault_metadata_conflict".into()));
+        }
+        VaultContext::from_key(source.clone(), vault.export_key())
+            .map_err(crate::secrets::inventory::secret_error)?;
+        Ok(())
+    }
+
+    /// Authenticate the manifest and embedded stamp before any local mutation.
+    /// The caller pins lifecycle changes with the shared sync mutex until installation.
+    pub(crate) fn validate_sync_snapshot(
+        sql: &str,
+        expected: &VaultMetadata,
+        vault: &VaultContext,
+    ) -> Result<ValidatedSyncSnapshot, AppError> {
+        Self::validate_sync_source(vault, expected)?;
+        let connection = Self::stage_import_sql(sql, true)?;
+        if super::vault::stored_metadata(&connection)?.as_ref() != Some(expected) {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        super::vault::upgrade_staging(&connection, vault)?;
+        Ok(ValidatedSyncSnapshot {
+            connection,
+            destination: vault.metadata().clone(),
+        })
+    }
+
+    /// Preserve device-local rows under the incoming key while the transition
+    /// engine holds the current session generation and database connection.
+    pub(crate) fn prepare_sync_join(
+        incoming: ValidatedSyncSnapshot,
+        current_conn: &Connection,
+        current: &VaultContext,
+        next: &VaultContext,
+    ) -> Result<Connection, AppError> {
+        if &incoming.destination != next.metadata() {
+            return Err(AppError::Config("sync.source_identity_mismatch".into()));
+        }
+        super::vault::check_identity(current_conn, current)?;
+        let local = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
+        Self::create_tables_on_conn(&local)?;
+        super::loongport_schema::apply(&local)?;
+        Self::restore_tables(current_conn, &local, SYNC_PRESERVE_TABLES)?;
+        crate::secrets::inventory::transform_database(&local, Some(current), next)?;
+        Self::restore_tables(&local, &incoming.connection, SYNC_PRESERVE_TABLES)?;
+        crate::secrets::inventory::validate_database(&incoming.connection, next)?;
+        Ok(incoming.connection)
+    }
+
+    #[cfg(test)]
+    fn apply_sync_snapshot(
+        &self,
+        staged: ValidatedSyncSnapshot,
+        vault: &VaultContext,
+    ) -> Result<String, AppError> {
+        if &staged.destination != vault.metadata() {
+            return Err(AppError::Config("sync.vault_metadata_conflict".into()));
+        }
+        self.replace_from_staging(&staged.connection, SYNC_PRESERVE_TABLES, vault)
+    }
+
     /// 导出为 SQLite 兼容的 SQL 文本
     pub fn export_sql(&self, target_path: &Path) -> Result<(), AppError> {
-        let dump = self.export_sql_string()?;
+        let (dump, _) = self.export_portable_snapshot(&[], "backup.recovery_password_required")?;
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        crate::config::atomic_write(target_path, dump.as_bytes())
+        crate::config::atomic_write_private(target_path, dump.as_bytes())
     }
 
     /// 从 SQL 文件导入，返回生成的备份 ID（若无备份则为空字符串）
@@ -179,7 +298,8 @@ impl Database {
 
     /// Import SQL generated for sync, then restore local-only tables from the
     /// current live database before replacing it.
-    pub(crate) fn import_sql_string_for_sync(&self, sql_raw: &str) -> Result<String, AppError> {
+    #[cfg(test)]
+    fn import_sql_string_for_sync(&self, sql_raw: &str) -> Result<String, AppError> {
         self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES)
     }
 
@@ -239,17 +359,19 @@ impl Database {
     where
         F: FnOnce() -> Result<(), AppError>,
     {
+        let vault = self.secrets.read()?;
+        let temp_conn = Self::stage_import_sql(sql_raw, strict_schema)?;
+        super::vault::upgrade_staging(&temp_conn, &vault)?;
+        on_staging_ready()?;
+        self.replace_from_staging(&temp_conn, preserve_tables, &vault)
+    }
+
+    fn stage_import_sql(sql_raw: &str, strict_schema: bool) -> Result<Connection, AppError> {
         let sql_content = sql_raw.trim_start_matches('\u{feff}');
         Self::validate_cc_switch_sql_export(sql_content)?;
 
-        // 在临时数据库执行导入，确保失败不会污染主库
-        let temp_file = NamedTempFile::new().map_err(|e| AppError::IoContext {
-            context: "创建临时数据库文件失败".to_string(),
-            source: e,
-        })?;
-        let temp_path = temp_file.path().to_path_buf();
         let temp_conn =
-            Connection::open(&temp_path).map_err(|e| AppError::Database(e.to_string()))?;
+            Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         // SQLite Backup copies the source database header into the destination.
         // Configure the empty staging database before creating any tables so a
         // SQL import cannot downgrade the main DB from incremental vacuum to NONE.
@@ -269,7 +391,16 @@ impl Database {
                 None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
             )
             .map_err(|e| AppError::Database(format!("摘除导入 authorizer 失败: {e}")))?;
-        batch_result.map_err(|e| AppError::Database(format!("执行 SQL 导入失败: {e}")))?;
+        batch_result.map_err(|error| {
+            let code = if error.sqlite_error_code()
+                == Some(rusqlite::ErrorCode::AuthorizationForStatementDenied)
+            {
+                "backup.sql.unauthorized"
+            } else {
+                "backup.sql.invalid"
+            };
+            AppError::Config(code.into())
+        })?;
         if !temp_conn.is_autocommit() {
             let _ = temp_conn.execute_batch("ROLLBACK;");
             return Err(AppError::localized(
@@ -287,27 +418,33 @@ impl Database {
             Self::validate_minimal_imported_schema(&temp_conn)?;
         }
 
-        // 补齐缺失表/索引并执行迁移
-        Self::create_tables_on_conn(&temp_conn)?;
-        Self::apply_schema_migrations_on_conn(&temp_conn)?;
-        // LoongPort 那套迁移也要跑 —— **每一条建库路径都得跑，漏一条就是一个版本号
-        // 停在 0 的库**。上游只有两步，它不知道有第三步，所以这一行必须手工补齐；
-        // 守它的闸在 `super::loongport_schema` 的 `every_database_entry_point_*`。
-        crate::database::loongport_schema::apply(&temp_conn)?;
-        on_staging_ready()?;
+        Ok(temp_conn)
+    }
 
+    fn replace_from_staging(
+        &self,
+        temp_conn: &Connection,
+        preserve_tables: &[&str],
+        vault: &VaultContext,
+    ) -> Result<String, AppError> {
         let backup_file_guard = lock_backup_file_operations()?;
         // Keep one main-DB guard across the safety snapshot, local-table read,
         // and final replacement so neither the rollback point nor preserved
         // device-local rows can miss writes that arrived during staging.
         let backup_path = {
             let mut main_conn = lock_conn!(self.conn);
-            let backup_path =
-                Self::backup_database_file_from_conn(&backup_file_guard, &main_conn, &[])?;
+            super::vault::check_identity(&main_conn, vault)?;
+            let backup_path = Self::backup_database_file_from_conn(
+                &backup_file_guard,
+                &main_conn,
+                self.secrets.root(),
+                vault,
+                &[],
+            )?;
             if !preserve_tables.is_empty() {
-                Self::restore_tables(&main_conn, &temp_conn, preserve_tables)?;
+                Self::restore_tables(&main_conn, temp_conn, preserve_tables)?;
             }
-            let backup = Backup::new(&temp_conn, &mut main_conn)
+            let backup = Backup::new(temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "替换主数据库")?;
             backup_path
@@ -335,7 +472,7 @@ impl Database {
         Ok(snapshot)
     }
 
-    fn complete_backup(backup: &Backup<'_, '_>, context: &str) -> Result<(), AppError> {
+    pub(super) fn complete_backup(backup: &Backup<'_, '_>, context: &str) -> Result<(), AppError> {
         let result = backup
             .step(-1)
             .map_err(|e| AppError::Database(format!("{context}失败: {e}")))?;
@@ -485,10 +622,11 @@ impl Database {
     pub(crate) fn periodic_backup_if_needed(&self) -> Result<(), AppError> {
         let interval_hours = crate::settings::effective_backup_interval_hours();
         if interval_hours > 0 {
+            let vault = self.secrets.read()?;
             let backup_file_guard = lock_backup_file_operations()?;
-            let backup_dir = get_app_config_dir().join("backups");
+            let backup_dir = self.secrets.root().join("backups");
             if !backup_dir.exists() {
-                self.backup_database_file_locked(&backup_file_guard)?;
+                self.backup_database_file_locked(&backup_file_guard, &vault)?;
             } else {
                 let latest = fs::read_dir(&backup_dir).ok().and_then(|entries| {
                     entries
@@ -511,7 +649,7 @@ impl Database {
                     log::info!(
                         "Periodic backup: latest backup is older than {interval_hours} hours, creating new backup"
                     );
-                    self.backup_database_file_locked(&backup_file_guard)?;
+                    self.backup_database_file_locked(&backup_file_guard, &vault)?;
                 }
             }
         }
@@ -546,16 +684,24 @@ impl Database {
 
     /// 生成一致性快照备份，返回备份文件路径（不存在主库时返回 None）
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
+        let vault = self.secrets.read()?;
         let backup_file_guard = lock_backup_file_operations()?;
-        self.backup_database_file_locked(&backup_file_guard)
+        self.backup_database_file_locked(&backup_file_guard, &vault)
     }
 
     fn backup_database_file_locked(
         &self,
         backup_file_guard: &BackupFileOperationGuard,
+        vault: &VaultContext,
     ) -> Result<Option<PathBuf>, AppError> {
         let conn = lock_conn!(self.conn);
-        Self::backup_database_file_from_conn(backup_file_guard, &conn, &[])
+        Self::backup_database_file_from_conn(
+            backup_file_guard,
+            &conn,
+            self.secrets.root(),
+            vault,
+            &[],
+        )
     }
 
     /// Create a safety backup from a connection whose caller already owns both
@@ -563,11 +709,15 @@ impl Database {
     fn backup_database_file_from_conn(
         backup_file_guard: &BackupFileOperationGuard,
         source_conn: &Connection,
+        root: &Path,
+        vault: &VaultContext,
         protected_paths: &[&Path],
     ) -> Result<Option<PathBuf>, AppError> {
         Self::backup_database_file_from_conn_with_hook(
             backup_file_guard,
             source_conn,
+            root,
+            vault,
             protected_paths,
             |_, _| Ok(()),
         )
@@ -576,23 +726,35 @@ impl Database {
     fn backup_database_file_from_conn_with_hook<F>(
         _backup_file_guard: &BackupFileOperationGuard,
         source_conn: &Connection,
+        root: &Path,
+        vault: &VaultContext,
         protected_paths: &[&Path],
         before_publish: F,
     ) -> Result<Option<PathBuf>, AppError>
     where
         F: FnOnce(&Path, &Path) -> Result<(), AppError>,
     {
-        let db_path = get_app_config_dir().join(crate::config::DB_FILE_NAME);
+        let db_path = root.join(crate::config::DB_FILE_NAME);
         if !db_path.exists() {
             return Ok(None);
         }
+
+        // Authenticate a consistent in-memory image before any snapshot bytes
+        // reach disk. The same image is published even if another connection writes.
+        let mut snapshot = Connection::open_in_memory()?;
+        {
+            let backup = Backup::new(source_conn, &mut snapshot)?;
+            Self::complete_backup(&backup, "创建安全备份内存快照")?;
+        }
+        super::vault::check_identity(&snapshot, vault)?;
+        crate::secrets::inventory::validate_database(&snapshot, vault)?;
 
         let backup_dir = db_path
             .parent()
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        crate::config::ensure_private_directory(&backup_dir)?;
 
         let base_id = format!("db_backup_{}", Local::now().format("%Y%m%d_%H%M%S"));
         let mut next_suffix = 0;
@@ -609,9 +771,10 @@ impl Database {
             .map_err(|e| AppError::io(&backup_dir, e))?
             .into_temp_path();
         let temp_db_path: &Path = temp_path.as_ref();
+        crate::config::ensure_private_file(temp_db_path)?;
         let mut dest_conn =
             Connection::open(temp_db_path).map_err(|e| AppError::Database(e.to_string()))?;
-        let backup = Backup::new(source_conn, &mut dest_conn)
+        let backup = Backup::new(&snapshot, &mut dest_conn)
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::complete_backup(&backup, "创建数据库安全备份")?;
         drop(backup);
@@ -632,6 +795,8 @@ impl Database {
                 Err(error) => return Err(AppError::io(&backup_path, error.error)),
             }
         }
+
+        crate::config::ensure_private_file(&backup_path)?;
 
         // The newly created safety backup must never be the cleanup victim.
         // During restore, the selected source is protected as well. If the
@@ -1109,8 +1274,9 @@ impl Database {
             ));
         }
 
+        let vault = self.secrets.read()?;
         let backup_file_guard = lock_backup_file_operations()?;
-        let backup_dir = get_app_config_dir().join("backups");
+        let backup_dir = self.secrets.root().join("backups");
         let backup_path = backup_dir.join(filename);
 
         if !backup_path.exists() {
@@ -1130,12 +1296,8 @@ impl Database {
         // Stage and fully validate the selected file before touching the live
         // connection. A corrupt/future-schema backup or failed migration must
         // leave the current database unchanged.
-        let temp_file = NamedTempFile::new().map_err(|e| AppError::IoContext {
-            context: "创建数据库恢复暂存文件失败".to_string(),
-            source: e,
-        })?;
         let mut staging_conn =
-            Connection::open(temp_file.path()).map_err(|e| AppError::Database(e.to_string()))?;
+            Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         {
             let backup = Backup::new(&source_conn, &mut staging_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
@@ -1146,10 +1308,7 @@ impl Database {
         Self::validate_sqlite_integrity(&staging_conn)?;
         Self::validate_imported_schema(&staging_conn)?;
         Self::ensure_incremental_auto_vacuum_on_conn(&staging_conn)?;
-        Self::create_tables_on_conn(&staging_conn)?;
-        Self::apply_schema_migrations_on_conn(&staging_conn)?;
-        // LoongPort 第三步迁移（守门测试：每个建库/迁移点后面必须跟它）
-        crate::database::loongport_schema::apply(&staging_conn)?;
+        super::vault::upgrade_staging(&staging_conn, &vault)?;
         Self::ensure_model_pricing_seeded_on_conn(&staging_conn)?;
         Self::validate_sqlite_integrity(&staging_conn)?;
 
@@ -1160,6 +1319,8 @@ impl Database {
             let safety_backup = Self::backup_database_file_from_conn(
                 &backup_file_guard,
                 &main_conn,
+                self.secrets.root(),
+                &vault,
                 &[backup_path.as_path()],
             )?;
             before_replace(safety_backup.as_deref())?;
@@ -1271,9 +1432,256 @@ impl Database {
 mod tests {
     use super::{lock_backup_file_operations, Database};
     use crate::error::AppError;
+    use crate::secrets::VaultContext;
     use crate::settings::{get_settings, update_settings, AppSettings};
     use rusqlite::Connection;
     use serial_test::serial;
+
+    fn sync_test_database(vault: &VaultContext, root: &std::path::Path) -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;")
+            .unwrap();
+        Database::create_tables_on_conn(&conn).unwrap();
+        Database::apply_schema_migrations_on_conn(&conn).unwrap();
+        super::super::loongport_schema::apply(&conn).unwrap();
+        super::super::vault::stamp(&conn, vault).unwrap();
+        Database::from_connection(
+            conn,
+            crate::secrets::session::SecretSession::from_context(root.to_path_buf(), vault.clone()),
+        )
+    }
+
+    fn same_vault_database(source: &Database) -> Result<Database, AppError> {
+        let vault = source.secrets.read()?;
+        Ok(sync_test_database(&vault, source.secrets.root()))
+    }
+
+    // Existing SQL fixtures describe logical data. Seal them once before testing
+    // encrypted backup behavior; production readers never accept these plaintext rows.
+    fn seal_fixture_rows(db: &Database) -> Result<(), AppError> {
+        let vault = db.secrets.read()?;
+        let conn = crate::database::lock_conn!(db.conn);
+        crate::secrets::inventory::transform_database(&conn, None, &vault)
+    }
+
+    #[test]
+    #[serial]
+    fn portable_sql_export_requires_a_recovery_password_before_creating_a_file(
+    ) -> Result<(), AppError> {
+        let home = TestHomeGuard::new();
+        let db = Database::memory()?;
+        let destination = home.path().join("portable.sql");
+        let error = db.export_sql(&destination).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("backup.recovery_password_required"));
+        assert!(!destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn encrypted_backup_requires_the_source_key_before_replacing_local_data() -> Result<(), AppError>
+    {
+        let _home = TestHomeGuard::new();
+        let source = Database::memory()?;
+        source.set_setting("common_config_claude", "foreign-backup-canary")?;
+        let exported = source.export_sql_string()?;
+        assert!(!exported.contains("foreign-backup-canary"));
+        let target = Database::memory()?;
+        target.set_setting("common_config_claude", "local-backup-canary")?;
+        let before = target.export_sql_string()?;
+
+        let error = target.import_sql_string(&exported).unwrap_err();
+
+        assert!(error.to_string().contains("secret.source_key_required"));
+        assert!(target
+            .export_sql_string()?
+            .lines()
+            .skip(3)
+            .eq(before.lines().skip(3)));
+        assert_eq!(
+            target.get_setting("common_config_claude")?.as_deref(),
+            Some("local-backup-canary")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn encrypted_backup_rejects_plaintext_inside_an_authenticated_vault() -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
+        let source = Database::memory()?;
+        source.set_setting("common_config_claude", "valid-source")?;
+        {
+            let conn = crate::database::lock_conn!(source.conn);
+            conn.execute(
+                "UPDATE settings SET value='unsealed-value' WHERE key='common_config_claude'",
+                [],
+            )?;
+        }
+        let exported = source.export_sql_string()?;
+        let target = same_vault_database(&source)?;
+        target.set_setting("common_config_claude", "local-backup-canary")?;
+        let before = target.export_sql_string()?;
+
+        assert!(target.import_sql_string(&exported).is_err());
+        assert!(target
+            .export_sql_string()?
+            .lines()
+            .skip(3)
+            .eq(before.lines().skip(3)));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn encrypted_sync_export_requires_portable_key_and_pairs_stamp_with_sql() {
+        let home = TestHomeGuard::new();
+        let initial = VaultContext::generate().unwrap();
+        let keychain_only = sync_test_database(&initial, home.path());
+        assert!(keychain_only
+            .export_sync_snapshot()
+            .unwrap_err()
+            .to_string()
+            .contains("sync.recovery_password_required"));
+        let portable = initial.with_password("snapshot-test-password").unwrap();
+        let db = sync_test_database(&portable, home.path());
+        db.set_setting("common_config_claude", "sync-plaintext-canary")
+            .unwrap();
+        let (sql, metadata) = db.export_sync_snapshot().unwrap();
+        assert!(!sql.contains("sync-plaintext-canary"));
+        let exported = Database::stage_import_sql(&sql, true).unwrap();
+        assert_eq!(
+            super::super::vault::stored_metadata(&exported).unwrap(),
+            Some(metadata.clone())
+        );
+        assert_eq!(&metadata, portable.metadata());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE settings SET value='accidental-plaintext' WHERE key='common_config_claude'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            db.export_sync_snapshot().is_err(),
+            "plaintext in a stamped database must not publish"
+        );
+        db.set_setting("common_config_claude", "sync-plaintext-canary")
+            .unwrap();
+        super::super::vault::stamp(&db.conn.lock().unwrap(), &initial).unwrap();
+        assert!(
+            db.export_sync_snapshot().is_err(),
+            "mismatched live stamp must not publish"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn encrypted_sync_old_wrapper_rewraps_to_current_without_metadata_downgrade() {
+        let home = TestHomeGuard::new();
+        let old = VaultContext::generate()
+            .unwrap()
+            .with_password("old-snapshot-password")
+            .unwrap();
+        let current = old.with_password("current-snapshot-password").unwrap();
+        let source = sync_test_database(&old, home.path());
+        source
+            .set_setting("common_config_claude", "source-secret-canary")
+            .unwrap();
+        let (sql, metadata) = source.export_sync_snapshot().unwrap();
+        let destination = sync_test_database(&current, home.path());
+        destination
+            .set_setting("local-sentinel", "keep-before-apply")
+            .unwrap();
+        let vault = destination.secrets.read().unwrap();
+        let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
+        assert_eq!(
+            super::super::vault::stored_metadata(&staged.connection)
+                .unwrap()
+                .as_ref(),
+            Some(current.metadata())
+        );
+        destination.apply_sync_snapshot(staged, &vault).unwrap();
+        drop(vault);
+        assert_eq!(
+            destination
+                .get_setting("common_config_claude")
+                .unwrap()
+                .as_deref(),
+            Some("source-secret-canary")
+        );
+        assert_eq!(
+            super::super::vault::stored_metadata(&destination.conn.lock().unwrap())
+                .unwrap()
+                .as_ref(),
+            Some(current.metadata())
+        );
+        assert!(!destination
+            .export_sql_string()
+            .unwrap()
+            .contains("source-secret-canary"));
+    }
+
+    #[test]
+    #[serial]
+    fn encrypted_sync_rejects_foreign_newer_forged_and_plaintext_sources_without_local_mutation() {
+        let home = TestHomeGuard::new();
+        let current = VaultContext::generate()
+            .unwrap()
+            .with_password("source-current-password")
+            .unwrap();
+        let source = sync_test_database(&current, home.path());
+        source
+            .set_setting("common_config_claude", "remote-secret-canary")
+            .unwrap();
+        let (sql, metadata) = source.export_sync_snapshot().unwrap();
+        let destination = sync_test_database(&current, home.path());
+        destination
+            .set_setting("local-sentinel", "untouched")
+            .unwrap();
+        let before = destination
+            .export_sql_string()
+            .unwrap()
+            .lines()
+            .skip(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let vault = destination.secrets.read().unwrap();
+        let foreign = VaultContext::generate()
+            .unwrap()
+            .with_password("foreign-source-password")
+            .unwrap();
+        assert!(Database::validate_sync_snapshot(&sql, foreign.metadata(), &vault).is_err());
+        let newer = current.with_password("newer-source-password").unwrap();
+        assert!(Database::validate_sync_snapshot(&sql, newer.metadata(), &vault).is_err());
+        let mut forged = metadata.clone();
+        forged.revision -= 1;
+        assert!(Database::validate_sync_snapshot(&sql, &forged, &vault).is_err());
+        let rotated = current.rotate_key().unwrap();
+        assert!(Database::validate_sync_snapshot(&sql, rotated.metadata(), &vault).is_err());
+        let wrong_stamp = sql.replace(&metadata.key_id, &foreign.metadata().key_id);
+        assert!(Database::validate_sync_snapshot(&wrong_stamp, &metadata, &vault).is_err());
+        let plaintext = format!(
+            "{sql}\nUPDATE settings SET value='legacy-plaintext' WHERE key='common_config_claude';"
+        );
+        assert!(Database::validate_sync_snapshot(&plaintext, &metadata, &vault).is_err());
+        let missing_stamp = format!("{sql}\nDELETE FROM loongport_vault;");
+        assert!(Database::validate_sync_snapshot(&missing_stamp, &metadata, &vault).is_err());
+        assert_eq!(
+            destination
+                .export_sql_string()
+                .unwrap()
+                .lines()
+                .skip(2)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            before
+        );
+        assert!(!home.path().join(".cc-switch/backups").exists());
+    }
 
     /// ⭐ **存凭据的表必须两个同步列表都在。**
     ///
@@ -1452,9 +1860,10 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&source)?;
         let exported = source.export_sql_string()?;
 
-        let target = Database::memory()?;
+        let target = same_vault_database(&source)?;
         target.import_sql_string(&exported)?;
 
         let conn = crate::database::lock_conn!(target.conn);
@@ -1487,9 +1896,10 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&source)?;
         let sql = source.export_sql_string()?;
 
-        let target = Database::memory()?;
+        let target = same_vault_database(&source)?;
         {
             let conn = crate::database::lock_conn!(target.conn);
             conn.execute(
@@ -1568,9 +1978,10 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&source)?;
         let sql = source.export_sql_string()?;
 
-        let target = Database::memory()?;
+        let target = same_vault_database(&source)?;
         {
             let conn = crate::database::lock_conn!(target.conn);
             assert_eq!(Database::get_auto_vacuum_mode(&conn)?, 2);
@@ -1591,7 +2002,11 @@ mod tests {
     #[serial]
     fn sql_file_api_round_trips_existing_export_behavior() -> Result<(), AppError> {
         let test_home = TestHomeGuard::new();
-        let source = Database::memory()?;
+        let vault = VaultContext::generate()
+            .unwrap()
+            .with_password("portable backup password")
+            .unwrap();
+        let source = sync_test_database(&vault, test_home.path());
         {
             let conn = crate::database::lock_conn!(source.conn);
             conn.execute_batch(
@@ -1606,9 +2021,10 @@ mod tests {
         }
 
         let backup_path = test_home.path().join("round-trip.sql");
+        seal_fixture_rows(&source)?;
         source.export_sql(&backup_path)?;
 
-        let target = Database::memory()?;
+        let target = same_vault_database(&source)?;
         {
             let conn = crate::database::lock_conn!(target.conn);
             conn.execute(
@@ -1741,6 +2157,10 @@ mod tests {
         let target = Database::memory()?;
         target.import_sql_string(&legacy)?;
 
+        let loaded = target
+            .get_provider_by_id("legacy-provider", "claude")?
+            .unwrap();
+        assert_eq!(loaded.settings_config["anthropicApiKey"], "sk-old");
         let conn = crate::database::lock_conn!(target.conn);
         let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         assert_eq!(user_version, crate::database::SCHEMA_VERSION);
@@ -1749,13 +2169,9 @@ mod tests {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        assert_eq!(
-            provider,
-            (
-                "Legacy Provider".into(),
-                "{\"anthropicApiKey\":\"sk-old\"}".into()
-            )
-        );
+        assert_eq!(provider.0, "Legacy Provider");
+        assert!(provider.1.starts_with("lpenc1."));
+        assert!(!provider.1.contains("sk-old"));
         let cost_multiplier: String = conn.query_row(
             "SELECT cost_multiplier FROM providers WHERE id = 'legacy-provider'",
             [],
@@ -1793,6 +2209,7 @@ mod tests {
             }
         }
 
+        seal_fixture_rows(&db)?;
         let sql = db.export_sql_string()?;
         let insert_count = sql.matches("INSERT INTO \"providers\"").count();
         assert_eq!(
@@ -1800,7 +2217,7 @@ mod tests {
             "450 行应合并为 3 条多行 INSERT（每批 200 行），实际 {insert_count} 条"
         );
 
-        let target = Database::memory()?;
+        let target = same_vault_database(&db)?;
         target.import_sql_string(&sql)?;
         let conn = crate::database::lock_conn!(target.conn);
         let row_count: i64 =
@@ -2200,59 +2617,60 @@ mod tests {
         let _test_home = TestHomeGuard::new();
         // 多行 VALUES 的转义面比单行宽：单引号、换行、英文逗号（列分隔符）、
         // 中文、emoji、BLOB、NULL——任何一个处理错都会让整批语法崩掉或数据变形。
-        let source = Database::memory()?;
+        let source = Connection::open_in_memory()?;
+        source.execute_batch("CREATE TABLE special_values (id TEXT, app_type TEXT, name TEXT, payload, meta TEXT, category TEXT)")?;
         {
-            let conn = crate::database::lock_conn!(source.conn);
+            let conn = &source;
             conn.execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                "INSERT INTO special_values (id, app_type, name, payload, meta)
                  VALUES ('special', 'claude', ?1, ?2, '{}')",
                 rusqlite::params!["O'Brien,\n第二行 \"quoted\" 😀", "{\"key\": \"it's, ok\"}"],
             )?;
             conn.execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                "INSERT INTO special_values (id, app_type, name, payload, meta)
                  VALUES ('with-blob', 'claude', 'blob', X'00FF10', '{}')",
                 [],
             )?;
             conn.execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta, category)
+                "INSERT INTO special_values (id, app_type, name, payload, meta, category)
                  VALUES ('with-null', 'claude', 'nullcat', '{}', '{}', NULL)",
                 [],
             )?;
         }
 
-        let sql = source.export_sql_string()?;
-        let target = Database::memory()?;
-        target.import_sql_string(&sql)?;
+        let sql = Database::dump_sql(&source, &[])?;
+        let target = Connection::open_in_memory()?;
+        target.execute_batch(&sql)?;
 
-        let conn = crate::database::lock_conn!(target.conn);
+        let conn = &target;
         let name: String = conn.query_row(
-            "SELECT name FROM providers WHERE id = 'special'",
+            "SELECT name FROM special_values WHERE id = 'special'",
             [],
             |row| row.get(0),
         )?;
         assert_eq!(name, "O'Brien,\n第二行 \"quoted\" 😀");
         let cfg: String = conn.query_row(
-            "SELECT settings_config FROM providers WHERE id = 'special'",
+            "SELECT payload FROM special_values WHERE id = 'special'",
             [],
             |row| row.get(0),
         )?;
         assert_eq!(cfg, "{\"key\": \"it's, ok\"}");
 
         let blob_type: String = conn.query_row(
-            "SELECT typeof(settings_config) FROM providers WHERE id = 'with-blob'",
+            "SELECT typeof(payload) FROM special_values WHERE id = 'with-blob'",
             [],
             |row| row.get(0),
         )?;
         assert_eq!(blob_type, "blob", "BLOB 存储类型必须在往返后保留");
         let blob: Vec<u8> = conn.query_row(
-            "SELECT settings_config FROM providers WHERE id = 'with-blob'",
+            "SELECT payload FROM special_values WHERE id = 'with-blob'",
             [],
             |row| row.get(0),
         )?;
         assert_eq!(blob, vec![0x00, 0xFF, 0x10]);
 
         let category: Option<String> = conn.query_row(
-            "SELECT category FROM providers WHERE id = 'with-null'",
+            "SELECT category FROM special_values WHERE id = 'with-null'",
             [],
             |row| row.get(0),
         )?;
@@ -2276,8 +2694,9 @@ mod tests {
             )?;
         }
 
+        seal_fixture_rows(&source)?;
         let sql = source.export_sql_string()?;
-        let target = Database::memory()?;
+        let target = same_vault_database(&source)?;
         target.import_sql_string(&sql)?;
 
         let conn = crate::database::lock_conn!(target.conn);
@@ -2338,6 +2757,7 @@ mod tests {
                  ) VALUES ('/remote/sessions/one.jsonl', 9, 99, 999);",
             )?;
         }
+        seal_fixture_rows(&remote_db)?;
         let remote_sql = remote_db.export_sql_string_for_sync()?;
         let exported = Connection::open_in_memory()?;
         exported.execute_batch(&remote_sql)?;
@@ -2363,7 +2783,7 @@ mod tests {
         )?;
         assert_eq!(skipped_counts, (0, 0, 0, 0, 0, 0));
 
-        let local_db = Database::memory()?;
+        let local_db = same_vault_database(&remote_db)?;
         {
             let conn = crate::database::lock_conn!(local_db.conn);
             conn.execute_batch(
@@ -2394,8 +2814,10 @@ mod tests {
             )?;
         }
 
+        seal_fixture_rows(&local_db)?;
         local_db.import_sql_string_for_sync(&remote_sql)?;
 
+        let vault = local_db.secrets.read()?;
         let conn = crate::database::lock_conn!(local_db.conn);
         let providers = conn
             .prepare("SELECT id FROM providers ORDER BY id")?
@@ -2468,7 +2890,16 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!(
-            live_backup,
+            (
+                crate::secrets::inventory::open_db(
+                    &vault,
+                    "proxy_live_backup",
+                    "original_config",
+                    &["claude"],
+                    &live_backup.0
+                )?,
+                live_backup.1
+            ),
             ("{\"local\":true}".into(), "2026-03-01".into())
         );
         let session_cursor: (String, i64, i64, i64) = conn.query_row(
@@ -2492,9 +2923,34 @@ mod tests {
 
     #[test]
     #[serial]
+    fn internal_backup_rejects_plaintext_before_creating_files() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('global_proxy_url','backup-plaintext-canary')", [])?;
+        }
+        let backup_dir = db.secrets.root().join("backups");
+        let entries = || -> Vec<_> {
+            let mut paths = std::fs::read_dir(&backup_dir)
+                .into_iter()
+                .flatten()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths
+        };
+        let before = entries();
+        assert!(db.backup_database_file().is_err());
+        assert_eq!(entries(), before);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
     fn failed_backup_publish_leaves_no_visible_or_temporary_file() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
-        let db = Database::init()?;
+        let db = crate::secrets::testing::initialize_database()?;
         let backup_dir = crate::config::get_app_config_dir().join("backups");
         std::fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
         let mut files_before = std::fs::read_dir(&backup_dir)
@@ -2510,11 +2966,14 @@ mod tests {
         visible_before.sort();
 
         let error = {
+            let vault = db.secrets.read()?;
             let backup_file_guard = lock_backup_file_operations()?;
             let conn = crate::database::lock_conn!(db.conn);
             Database::backup_database_file_from_conn_with_hook(
                 &backup_file_guard,
                 &conn,
+                db.secrets.root(),
+                &vault,
                 &[],
                 |temp_path, target_path| {
                     assert!(
@@ -2556,16 +3015,19 @@ mod tests {
     #[serial]
     fn backup_publish_retries_a_noclobber_name_collision() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
         let _settings = SettingsGuard::with_backup_retain_count(10);
-        let db = Database::init()?;
         let mut claimed_path = None;
 
         let published_path = {
+            let vault = db.secrets.read()?;
             let backup_file_guard = lock_backup_file_operations()?;
             let conn = crate::database::lock_conn!(db.conn);
             Database::backup_database_file_from_conn_with_hook(
                 &backup_file_guard,
                 &conn,
+                db.secrets.root(),
+                &vault,
                 &[],
                 |_, target_path| {
                     claimed_path = Some(target_path.to_path_buf());
@@ -2611,8 +3073,8 @@ mod tests {
     #[serial]
     fn concurrent_backup_renames_never_overwrite_the_shared_target() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
         let _settings = SettingsGuard::with_backup_retain_count(10);
-        let db = Database::init()?;
         let mut source_filenames = Vec::new();
         for provider_id in ["first-source", "second-source"] {
             {
@@ -2624,6 +3086,7 @@ mod tests {
                     [provider_id],
                 )?;
             }
+            seal_fixture_rows(&db)?;
             let source_path = db
                 .backup_database_file()?
                 .expect("file-backed database should create a backup");
@@ -2695,9 +3158,10 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&remote_db)?;
         let remote_sql = remote_db.export_sql_string_for_sync()?;
 
-        let local_db = Database::memory()?;
+        let local_db = same_vault_database(&remote_db)?;
         {
             let conn = crate::database::lock_conn!(local_db.conn);
             conn.execute(
@@ -2707,6 +3171,8 @@ mod tests {
             )?;
         }
 
+        seal_fixture_rows(&local_db)?;
+        let writer_vault = local_db.secrets.read()?.clone();
         local_db.import_sql_string_inner_with_hook(
             &remote_sql,
             super::SYNC_PRESERVE_TABLES,
@@ -2735,6 +3201,8 @@ mod tests {
                          file_path, last_modified, last_line_offset, last_synced_at
                      ) VALUES ('/local/sessions/late.jsonl', 1, 2, 3);",
                 )?;
+                let sealed = crate::secrets::inventory::seal_db(&writer_vault, "proxy_live_backup", "original_config", &["claude"], "late-live")?;
+                conn.execute("UPDATE proxy_live_backup SET original_config=?1 WHERE app_type='claude'", [sealed])?;
                 Ok(())
             },
         )?;
@@ -2750,7 +3218,7 @@ mod tests {
                 (SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'late-request'),
                 (SELECT COUNT(*) FROM usage_daily_rollups WHERE date = '2026-08-04'),
                 (SELECT COUNT(*) FROM stream_check_logs WHERE message = 'late'),
-                (SELECT COUNT(*) FROM proxy_live_backup WHERE original_config = 'late-live'),
+                (SELECT COUNT(*) FROM proxy_live_backup WHERE app_type = 'claude'),
                 (SELECT COUNT(*) FROM session_log_sync WHERE file_path = '/local/sessions/late.jsonl')",
             [],
             |row| {
@@ -2771,7 +3239,8 @@ mod tests {
     #[serial]
     fn sync_import_safety_backup_captures_late_local_writes() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
-        let remote_db = Database::memory()?;
+        let local_db = crate::secrets::testing::initialize_database()?;
+        let remote_db = same_vault_database(&local_db)?;
         {
             let conn = crate::database::lock_conn!(remote_db.conn);
             conn.execute(
@@ -2780,9 +3249,9 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&remote_db)?;
         let remote_sql = remote_db.export_sql_string_for_sync()?;
 
-        let local_db = Database::init()?;
         {
             let conn = crate::database::lock_conn!(local_db.conn);
             conn.execute("DELETE FROM providers", [])?;
@@ -2793,6 +3262,7 @@ mod tests {
             )?;
         }
 
+        seal_fixture_rows(&local_db)?;
         let safety_id = local_db.import_sql_string_inner_with_hook(
             &remote_sql,
             super::SYNC_PRESERVE_TABLES,
@@ -2851,8 +3321,8 @@ mod tests {
     #[serial]
     fn restore_with_retain_one_keeps_source_and_exact_safety_snapshot() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
         let _settings = SettingsGuard::with_backup_retain_count(1);
-        let db = Database::init()?;
 
         {
             let conn = crate::database::lock_conn!(db.conn);
@@ -2863,6 +3333,7 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&db)?;
         let source_path = db
             .backup_database_file()?
             .expect("file-backed database should create a backup");
@@ -2885,6 +3356,7 @@ mod tests {
             )?;
         }
 
+        seal_fixture_rows(&db)?;
         let safety_id = db.restore_from_backup(&source_filename)?;
         let safety_path = backup_dir.join(format!("{safety_id}.db"));
         assert!(
@@ -2932,8 +3404,8 @@ mod tests {
     #[serial]
     fn restore_protects_case_variant_source_path_from_retention() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
         let _settings = SettingsGuard::with_backup_retain_count(1);
-        let db = Database::init()?;
         let source_path = db
             .backup_database_file()?
             .expect("file-backed database should create a backup");
@@ -2962,7 +3434,7 @@ mod tests {
     #[serial]
     fn restore_blocks_backup_deletion_until_live_replacement_finishes() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
-        let db = Database::init()?;
+        let db = crate::secrets::testing::initialize_database()?;
         {
             let conn = crate::database::lock_conn!(db.conn);
             conn.execute("DELETE FROM providers", [])?;
@@ -2972,6 +3444,7 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&db)?;
         let source_path = db
             .backup_database_file()?
             .expect("file-backed database should create a backup");
@@ -2994,6 +3467,7 @@ mod tests {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let mut delete_handle = None;
         let mut observed_safety_filename = None;
+        seal_fixture_rows(&db)?;
         let safety_id = db.restore_from_backup_with_hook(&source_filename, |safety_path| {
             let safety_path = safety_path.ok_or_else(|| {
                 AppError::Config("restore should create a safety backup".to_string())
@@ -3050,7 +3524,7 @@ mod tests {
     #[serial]
     fn restore_rejects_corrupt_db_before_touching_live_database() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
-        let db = Database::init()?;
+        let db = crate::secrets::testing::initialize_database()?;
         {
             let conn = crate::database::lock_conn!(db.conn);
             conn.execute("DELETE FROM providers", [])?;
@@ -3096,7 +3570,7 @@ mod tests {
     #[serial]
     fn restore_rejects_future_schema_before_touching_live_database() -> Result<(), AppError> {
         let _test_home = TestHomeGuard::new();
-        let db = Database::init()?;
+        let db = crate::secrets::testing::initialize_database()?;
 
         {
             let conn = crate::database::lock_conn!(db.conn);
@@ -3107,6 +3581,7 @@ mod tests {
                 [],
             )?;
         }
+        seal_fixture_rows(&db)?;
         let source_path = db
             .backup_database_file()?
             .expect("file-backed database should create a backup");
@@ -3144,7 +3619,9 @@ mod tests {
             .restore_from_backup(&source_filename)
             .expect_err("future-schema backup must be rejected");
         assert!(
-            error.to_string().contains("newer")
+            error
+                .to_string()
+                .contains("secret.database_version_too_new")
                 || error.to_string().contains("过新")
                 || error.to_string().contains("版本"),
             "unexpected error: {error}"

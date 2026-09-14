@@ -6,6 +6,10 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
+#[cfg(windows)]
+#[path = "windows_private_file.rs"]
+mod windows_private_file;
+
 /// 应用私有数据目录名（位于用户主目录下）。
 ///
 /// **这是与 cc-switch 隔离的关键，不是外观改名。** V1 踩过：只改了 `tauri.conf.json` 的
@@ -364,12 +368,135 @@ pub fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), AppErr
     write_json_file_with_contents(path, data).map(|_| ())
 }
 
+/// 写入包含凭据的 JSON 文件。Unix 上新文件和替换文件始终使用 0600。
+pub fn write_json_file_private<T: Serialize>(path: &Path, data: &T) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+    }
+
+    let contents = serialize_json_bytes(data)?;
+    atomic_write_private(path, &contents)
+}
+
 /// 原子写入文本文件（用于 TOML/纯文本）
 pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
     atomic_write(path, data.as_bytes())
+}
+
+/// Create or tighten one application-owned directory without changing its parent.
+/// Callers create nested application directories one level at a time.
+pub fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(AppError::io(path, error)),
+        }
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|error| AppError::io(path, error))?;
+        directory
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|error| AppError::io(path, error))?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        let created = match fs::create_dir(path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => return Err(AppError::io(path, error)),
+        };
+        if let Err(error) = windows_private_file::restrict_existing(path, true) {
+            if created {
+                let _ = fs::remove_dir(path);
+            }
+            return Err(AppError::io(path, error));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    Err(AppError::Config(
+        "private directory permissions are unsupported on this platform".into(),
+    ))
+}
+
+/// Create or tighten one application-owned database/container file without truncating it.
+pub fn ensure_private_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let file = loop {
+            match fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(path)
+            {
+                Ok(file) => break file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                        .open(path)
+                    {
+                        Ok(file) => break file,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(error) => return Err(AppError::io(path, error)),
+                    }
+                }
+                Err(error) => return Err(AppError::io(path, error)),
+            }
+        };
+        if !file
+            .metadata()
+            .map_err(|error| AppError::io(path, error))?
+            .is_file()
+        {
+            return Err(AppError::Config(format!(
+                "private file path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| AppError::io(path, error))?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        match windows_private_file::create_new(path) {
+            Ok(file) => {
+                drop(file);
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(AppError::io(path, error)),
+        }
+        windows_private_file::restrict_existing(path, false)
+            .map_err(|error| AppError::io(path, error))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    Err(AppError::Config(
+        "private file permissions are unsupported on this platform".into(),
+    ))
 }
 
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
@@ -387,7 +514,9 @@ fn atomic_write_with_unix_mode(
     data: &[u8],
     unix_mode: Option<u32>,
 ) -> Result<(), AppError> {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let private = unix_mode.is_some();
+    #[cfg(not(any(unix, windows)))]
     let _ = unix_mode;
 
     if let Some(parent) = path.parent() {
@@ -422,7 +551,15 @@ fn atomic_write_with_unix_mode(
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(mode);
             }
-            match options.open(&candidate) {
+            #[cfg(windows)]
+            let opened = if private {
+                windows_private_file::create_new(&candidate)
+            } else {
+                options.open(&candidate)
+            };
+            #[cfg(not(windows))]
+            let opened = options.open(&candidate);
+            match opened {
                 Ok(file) => return Ok((candidate, file)),
                 Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
                     last_collision = Some((candidate, source));
@@ -462,6 +599,34 @@ fn atomic_write_with_unix_mode(
         use windows_sys::Win32::{
             Foundation::ERROR_NOT_SUPPORTED, Storage::FileSystem::ReplaceFileW,
         };
+
+        if private {
+            let mut last_error = None;
+            for _ in 0..3 {
+                match fs::rename(&tmp, path) {
+                    Ok(()) => return Ok(()),
+                    Err(source)
+                        if matches!(
+                            source.kind(),
+                            std::io::ErrorKind::AlreadyExists
+                                | std::io::ErrorKind::PermissionDenied
+                        ) =>
+                    {
+                        last_error = Some(source);
+                    }
+                    Err(source) => {
+                        last_error = Some(source);
+                        break;
+                    }
+                }
+            }
+            let source = last_error.unwrap_or_else(std::io::Error::last_os_error);
+            let _ = fs::remove_file(&tmp);
+            return Err(AppError::IoContext {
+                context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
+                source,
+            });
+        }
 
         let replaced: Vec<u16> = path
             .as_os_str()
@@ -576,6 +741,59 @@ mod tests {
     fn atomic_write_replaces_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         assert_atomic_write_replaces_existing_file(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_creation_and_repair_do_not_change_the_parent_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = root.path().join("app-owned");
+
+        ensure_private_directory(&directory).unwrap();
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        ensure_private_directory(&directory).unwrap();
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_creation_and_repair_preserve_existing_contents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("existing.db");
+        fs::write(&existing, b"database fixture").unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o644)).unwrap();
+
+        ensure_private_file(&existing).unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), b"database fixture");
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let created = root.path().join("created.db");
+        ensure_private_file(&created).unwrap();
+        assert_eq!(fs::read(&created).unwrap(), b"");
+        assert_eq!(
+            fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[cfg(windows)]

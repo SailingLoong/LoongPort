@@ -30,11 +30,12 @@ fn start_plaza_visibility_seeding(app: tauri::AppHandle) {
         // 读库是阻塞操作，单独进 blocking；播种本身要先刷一次远端配置（见
         // plaza::seed_for_existing_install 的文档），那是 await。
         let origins = match tauri::async_runtime::spawn_blocking(move || {
+            let vault = db.secrets.read()?;
             let relays = db
                 .conn
                 .lock()
                 .map_err(|e| crate::error::AppError::Database(format!("获取数据库连接失败: {e}")))
-                .and_then(|conn| crate::relay::creds::list(&conn));
+                .and_then(|conn| crate::relay::creds::list(&conn, &vault));
             relays.map(|relays| {
                 relays
                     .iter()

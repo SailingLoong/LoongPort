@@ -375,10 +375,10 @@ pub struct PromptRoot {
     pub hermes: PromptConfig,
 }
 
-use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
 use crate::error::AppError;
 use crate::prompt_files::prompt_file_path;
 use crate::provider::ProviderManager;
+use crate::secrets::{files::OwnedFile, session::SecretSession};
 
 /// 应用类型
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -631,27 +631,28 @@ impl Default for MultiAppConfig {
 }
 
 impl MultiAppConfig {
-    /// 从文件加载配置（仅支持 v2 结构）
-    pub fn load() -> Result<Self, AppError> {
-        let config_path = get_app_config_path();
-
-        if !config_path.exists() {
-            log::info!("配置文件不存在，创建新的多应用配置并自动导入提示词");
-            // 使用新的方法，支持自动导入提示词
-            let config = Self::default_with_auto_import()?;
-            // 立即保存到磁盘
-            config.save()?;
-            return Ok(config);
+    /// Read the protected legacy archive without writing during a read.
+    pub fn load(session: &SecretSession) -> Result<Self, AppError> {
+        let file = OwnedFile::registered("config.json")?;
+        match std::fs::symlink_metadata(file.path(session)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Self::default_with_auto_import()
+            }
+            Err(error) => return Err(AppError::io(file.path(session), error)),
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Err(AppError::Config("secret.invalid_storage_path".into()))
+            }
+            Ok(_) => {}
         }
+        Self::from_legacy_bytes(&file.read(session)?)
+    }
 
-        // 尝试读取文件
-        let content =
-            std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-
+    /// Convert an explicitly supplied legacy document entirely in memory.
+    pub fn from_legacy_bytes(content: &[u8]) -> Result<Self, AppError> {
         // 先解析为 Value，以便严格判定是否为 v1 结构；
         // 满足：顶层同时包含 providers(object) + current(string)，且不包含 version/apps/mcp 关键键，即视为 v1
-        let value: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| AppError::json(&config_path, e))?;
+        let value: serde_json::Value = serde_json::from_slice(content)
+            .map_err(|_| AppError::Config("Invalid legacy configuration".into()))?;
         let is_v1 = value.as_object().is_some_and(|map| {
             let has_providers = map.get("providers").map(|v| v.is_object()).unwrap_or(false);
             let has_current = map.get("current").map(|v| v.is_string()).unwrap_or(false);
@@ -667,57 +668,16 @@ impl MultiAppConfig {
             ));
         }
 
-        let has_skills_in_config = value
-            .as_object()
-            .is_some_and(|map| map.contains_key("skills"));
-
-        // 解析 v2 结构
-        let mut config: Self =
-            serde_json::from_value(value).map_err(|e| AppError::json(&config_path, e))?;
-        let mut updated = false;
-
-        if !has_skills_in_config {
-            let skills_path = get_app_config_dir().join("skills.json");
-            if skills_path.exists() {
-                match std::fs::read_to_string(&skills_path) {
-                    Ok(content) => match serde_json::from_str::<SkillStore>(&content) {
-                        Ok(store) => {
-                            config.skills = store;
-                            updated = true;
-                            log::info!("已从旧版 skills.json 导入 Claude Skills 配置");
-                        }
-                        Err(e) => {
-                            log::warn!("解析旧版 skills.json 失败: {e}");
-                        }
-                    },
-                    Err(e) => {
-                        log::warn!("读取旧版 skills.json 失败: {e}");
-                    }
-                }
-            }
-        }
-
+        let mut config: Self = serde_json::from_value(value)
+            .map_err(|_| AppError::Config("Invalid legacy configuration".into()))?;
         // 确保 gemini 应用存在（兼容旧配置文件）
         if !config.apps.contains_key("gemini") {
             config
                 .apps
                 .insert("gemini".to_string(), ProviderManager::default());
-            updated = true;
         }
 
-        // 执行 MCP 迁移（v3.6.x → v3.7.0）
-        let migrated = config.migrate_mcp_to_unified()?;
-        if migrated {
-            log::info!("MCP 配置已迁移到 v3.7.0 统一结构，保存配置...");
-            updated = true;
-        }
-
-        // 对于已经存在的配置文件，如果此前版本还没有 Prompt 功能，
-        // 且 prompts 仍然是空的，则尝试自动导入现有提示词文件。
-        let imported_prompts = config.maybe_auto_import_prompts_for_existing_config()?;
-        if imported_prompts {
-            updated = true;
-        }
+        config.migrate_mcp_to_unified()?;
 
         // 迁移通用配置片段：claude_common_config_snippet → common_config_snippets.claude
         if let Some(old_claude_snippet) = config.claude_common_config_snippet.take() {
@@ -725,30 +685,59 @@ impl MultiAppConfig {
                 "迁移通用配置：claude_common_config_snippet → common_config_snippets.claude"
             );
             config.common_config_snippets.claude = Some(old_claude_snippet);
-            updated = true;
-        }
-
-        if updated {
-            log::info!("配置结构已更新（包括 MCP 迁移或 Prompt 自动导入），保存配置...");
-            config.save()?;
         }
 
         Ok(config)
     }
 
-    /// 保存配置到文件
-    pub fn save(&self) -> Result<(), AppError> {
-        let config_path = get_app_config_path();
-        // 先备份旧版（若存在）到 ~/.cc-switch/config.json.bak，再写入新内容
-        if config_path.exists() {
-            let backup_path = get_app_config_dir().join("config.json.bak");
-            if let Err(e) = copy_file(&config_path, &backup_path) {
-                log::warn!("备份 config.json 到 .bak 失败: {e}");
+    /// Import companion documents explicitly during the one-time legacy migration.
+    pub(crate) fn import_legacy_companions(
+        &mut self,
+        original: &[u8],
+        root: &std::path::Path,
+    ) -> Result<(), AppError> {
+        let value: serde_json::Value = serde_json::from_slice(original)
+            .map_err(|_| AppError::Config("Invalid legacy configuration".into()))?;
+        if value.get("skills").is_none() {
+            let path = root.join("skills.json");
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    self.skills = serde_json::from_slice(&bytes).map_err(|_| {
+                        AppError::Config("Invalid legacy skills configuration".into())
+                    })?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::io(&path, error)),
             }
         }
-
-        write_json_file(&config_path, self)?;
+        self.maybe_auto_import_prompts_for_existing_config()?;
         Ok(())
+    }
+
+    pub fn save(&self, session: &SecretSession) -> Result<(), AppError> {
+        let file = OwnedFile::registered("config.json")?;
+        let vault = session.read()?;
+        let existing = match std::fs::symlink_metadata(file.path(session)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(AppError::io(file.path(session), error)),
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Err(AppError::Config("secret.invalid_storage_path".into()))
+            }
+            Ok(_) => true,
+        };
+        if existing {
+            let current = std::fs::read(file.path(session))
+                .map_err(|e| AppError::io(file.path(session), e))?;
+            let plaintext = file.decode(&vault, &current)?;
+            let backup = OwnedFile::registered("config.json.bak")?;
+            let ciphertext = backup.encode(&vault, &plaintext)?;
+            crate::secrets::session::write_durable(&backup.path(session), &ciphertext)?;
+        }
+        let plaintext = zeroize::Zeroizing::new(
+            serde_json::to_vec_pretty(self).map_err(|e| AppError::JsonSerialize { source: e })?,
+        );
+        let ciphertext = file.encode(&vault, &plaintext)?;
+        crate::secrets::session::write_durable(&file.path(session), &ciphertext)
     }
 
     /// 获取指定应用的管理器
@@ -1054,6 +1043,60 @@ impl MultiAppConfig {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn broken_archive_link_is_an_error_instead_of_an_empty_configuration() {
+        let _home = TempHome::new();
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::secrets::session::SecretSession::from_context(
+            dir.path().to_path_buf(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        std::os::unix::fs::symlink(
+            dir.path().join("absent.json"),
+            dir.path().join("config.json"),
+        )
+        .unwrap();
+        assert!(MultiAppConfig::load(&session).is_err());
+        assert!(MultiAppConfig::default().save(&session).is_err());
+        assert!(std::fs::symlink_metadata(dir.path().join("config.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn saved_legacy_configuration_and_previous_archive_are_encrypted() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::secrets::session::SecretSession::from_context(
+            dir.path().to_path_buf(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        let mut config = MultiAppConfig::default();
+        config.common_config_snippets.claude = Some("archive-canary".into());
+        config.save(&session).unwrap();
+        config.save(&session).unwrap();
+        for name in ["config.json", "config.json.bak"] {
+            let file = OwnedFile::registered(name).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&std::fs::read(file.path(&session)).unwrap())
+                    .contains("archive-canary")
+            );
+            assert!(
+                String::from_utf8_lossy(&file.read(&session).unwrap()).contains("archive-canary")
+            );
+        }
+        assert_eq!(
+            MultiAppConfig::load(&session)
+                .unwrap()
+                .common_config_snippets
+                .claude
+                .as_deref(),
+            Some("archive-canary")
+        );
+    }
+
     use super::*;
     use serial_test::serial;
     use std::env;
@@ -1138,7 +1181,7 @@ mod tests {
         let _home = TempHome::new();
         write_prompt_file(AppType::Claude, "# hello");
 
-        let config = MultiAppConfig::load().expect("load config");
+        let config = MultiAppConfig::default_with_auto_import().expect("import prompts");
 
         assert_eq!(config.prompts.claude.prompts.len(), 1);
         let prompt = config
@@ -1153,8 +1196,8 @@ mod tests {
 
         let config_path = crate::config::get_app_config_path();
         assert!(
-            config_path.exists(),
-            "auto import should persist config to disk"
+            !config_path.exists(),
+            "importing prompts must not write legacy configuration"
         );
     }
 
@@ -1164,7 +1207,7 @@ mod tests {
         let _home = TempHome::new();
         write_prompt_file(AppType::Claude, "   \n  ");
 
-        let config = MultiAppConfig::load().expect("load config");
+        let config = MultiAppConfig::default_with_auto_import().expect("import prompts");
         assert!(
             config.prompts.claude.prompts.is_empty(),
             "empty files must be ignored"
@@ -1177,7 +1220,7 @@ mod tests {
         let _home = TempHome::new();
         write_prompt_file(AppType::Claude, "first version");
 
-        let first = MultiAppConfig::load().expect("load config");
+        let first = MultiAppConfig::default_with_auto_import().expect("import prompts");
         assert_eq!(first.prompts.claude.prompts.len(), 1);
         let claude_prompt = first
             .prompts
@@ -1190,9 +1233,15 @@ mod tests {
             .clone();
         assert_eq!(claude_prompt, "first version");
 
+        let session = SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        first.save(&session).unwrap();
+
         // 覆盖文件内容，但保留 config.json
         write_prompt_file(AppType::Claude, "second version");
-        let second = MultiAppConfig::load().expect("load config again");
+        let second = MultiAppConfig::load(&session).expect("load config again");
 
         assert_eq!(second.prompts.claude.prompts.len(), 1);
         let prompt = second
@@ -1214,7 +1263,7 @@ mod tests {
         let _home = TempHome::new();
         write_prompt_file(AppType::Gemini, "# Gemini Prompt\n\nTest content");
 
-        let config = MultiAppConfig::load().expect("load config");
+        let config = MultiAppConfig::default_with_auto_import().expect("import prompts");
 
         assert_eq!(config.prompts.gemini.prompts.len(), 1);
         let prompt = config
@@ -1238,7 +1287,7 @@ mod tests {
         let _home = TempHome::new();
         write_prompt_file(AppType::GrokBuild, "# Grok Build Prompt\n\nTest content");
 
-        let config = MultiAppConfig::load().expect("load config");
+        let config = MultiAppConfig::default_with_auto_import().expect("import prompts");
 
         assert_eq!(config.prompts.grokbuild.prompts.len(), 1);
         let prompt = config
@@ -1264,7 +1313,7 @@ mod tests {
         write_prompt_file(AppType::Codex, "# Codex prompt");
         write_prompt_file(AppType::Gemini, "# Gemini prompt");
 
-        let config = MultiAppConfig::load().expect("load config");
+        let config = MultiAppConfig::default_with_auto_import().expect("import prompts");
 
         // 验证所有三个应用的提示词都被导入
         assert_eq!(config.prompts.claude.prompts.len(), 1);

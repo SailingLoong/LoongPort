@@ -3,8 +3,11 @@
 //! 处理 `~/.openclaw/openclaw.json` 配置文件的读写操作（JSON5 格式）。
 //! OpenClaw 使用累加式供应商管理，所有供应商配置共存于同一配置文件中。
 
-use crate::config::{atomic_write, get_app_config_dir};
+use crate::config::atomic_write_private;
+#[cfg(test)]
+use crate::config::get_app_config_dir;
 use crate::error::AppError;
+use crate::secrets::{files::OwnedFile, session::SecretSession};
 use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
 use chrono::Local;
 use indexmap::IndexMap;
@@ -321,7 +324,10 @@ impl OpenClawConfigDocument {
         Ok(())
     }
 
-    fn save(self) -> Result<OpenClawWriteOutcome, AppError> {
+    fn save(
+        self,
+        backup_session: Option<&SecretSession>,
+    ) -> Result<OpenClawWriteOutcome, AppError> {
         let _guard = openclaw_write_lock().lock()?;
 
         let current_source = if self.path.exists() {
@@ -352,13 +358,16 @@ impl OpenClawConfigDocument {
             });
         }
 
-        let backup_path = current_source
-            .as_ref()
-            .map(|source| create_openclaw_backup(source))
-            .transpose()?
-            .map(|path| path.display().to_string());
+        let backup_path = match (current_source.as_ref(), backup_session) {
+            (Some(source), Some(session)) => Some(
+                create_openclaw_backup(session, source)?
+                    .display()
+                    .to_string(),
+            ),
+            _ => None,
+        };
 
-        atomic_write(&self.path, next_source.as_bytes())?;
+        atomic_write_private(&self.path, next_source.as_bytes())?;
 
         let warnings = scan_openclaw_health_from_value(
             &json5::from_str::<Value>(&next_source).map_err(|e| {
@@ -376,14 +385,26 @@ impl OpenClawConfigDocument {
     }
 }
 
-fn write_root_section(section: &str, value: &Value) -> Result<OpenClawWriteOutcome, AppError> {
-    let mut document = OpenClawConfigDocument::load()?;
-    document.set_root_section(section, value)?;
-    document.save()
+fn write_root_section(
+    session: &SecretSession,
+    section: &str,
+    value: &Value,
+) -> Result<OpenClawWriteOutcome, AppError> {
+    write_root_section_with_backup(Some(session), section, value)
 }
 
-fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
-    let backup_dir = get_app_config_dir().join("backups").join("openclaw");
+fn write_root_section_with_backup(
+    backup_session: Option<&SecretSession>,
+    section: &str,
+    value: &Value,
+) -> Result<OpenClawWriteOutcome, AppError> {
+    let mut document = OpenClawConfigDocument::load()?;
+    document.set_root_section(section, value)?;
+    document.save(backup_session)
+}
+
+fn create_openclaw_backup(session: &SecretSession, source: &str) -> Result<PathBuf, AppError> {
+    let backup_dir = session.root().join("backups").join("openclaw");
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
     let base_id = format!("openclaw_{}", Local::now().format("%Y%m%d_%H%M%S"));
@@ -397,9 +418,40 @@ fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
         counter += 1;
     }
 
-    atomic_write(&backup_path, source.as_bytes())?;
+    OwnedFile::at_path(session, &backup_path)?.write(session, source.as_bytes())?;
     cleanup_openclaw_backups(&backup_dir)?;
     Ok(backup_path)
+}
+
+/// Restore an application-owned encrypted backup to the downstream configuration.
+#[cfg(test)]
+pub fn restore_openclaw_backup(
+    session: &SecretSession,
+    backup_path: &Path,
+) -> Result<(), AppError> {
+    let file = OwnedFile::at_path(session, backup_path)?;
+    if file.relative_path().parent() != Some(Path::new("backups/openclaw")) {
+        return Err(AppError::Config("secret.unregistered_file".into()));
+    }
+    let plaintext = file.read(session)?;
+    let valid = json5::from_str::<Value>(
+        std::str::from_utf8(&plaintext)
+            .map_err(|_| AppError::Config("Invalid backup data".into()))?,
+    )
+    .map(|value| value.is_object())
+    .map_err(|_| AppError::Config("Invalid backup data".into()))?;
+    if !valid {
+        return Err(AppError::Config("Invalid backup data".into()));
+    }
+    let path = get_openclaw_config_path();
+    match fs::read_to_string(&path) {
+        Ok(current) => {
+            create_openclaw_backup(session, &current)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::io(&path, error)),
+    }
+    atomic_write_private(&path, &plaintext)
 }
 
 fn cleanup_openclaw_backups(dir: &Path) -> Result<(), AppError> {
@@ -409,10 +461,11 @@ fn cleanup_openclaw_backups(dir: &Path) -> Result<(), AppError> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             entry
-                .path()
-                .extension()
-                .map(|ext| ext == "json5" || ext == "json")
+                .file_type()
+                .map(|kind| kind.is_file())
                 .unwrap_or(false)
+                && OwnedFile::registered(Path::new("backups/openclaw").join(entry.file_name()))
+                    .is_ok()
         })
         .collect::<Vec<_>>();
 
@@ -656,7 +709,26 @@ pub fn get_provider(id: &str) -> Result<Option<Value>, AppError> {
 /// 设置供应商配置（原始 JSON）
 ///
 /// 写入到 `models.providers`
-pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOutcome, AppError> {
+pub fn set_provider(
+    session: &SecretSession,
+    id: &str,
+    provider_config: Value,
+) -> Result<OpenClawWriteOutcome, AppError> {
+    set_provider_with_backup(Some(session), id, provider_config)
+}
+
+pub(crate) fn set_provider_standalone(
+    id: &str,
+    provider_config: Value,
+) -> Result<OpenClawWriteOutcome, AppError> {
+    set_provider_with_backup(None, id, provider_config)
+}
+
+fn set_provider_with_backup(
+    backup_session: Option<&SecretSession>,
+    id: &str,
+    provider_config: Value,
+) -> Result<OpenClawWriteOutcome, AppError> {
     let mut full_config = read_openclaw_config()?;
     let root = ensure_object(&mut full_config);
     let models = root.entry("models".to_string()).or_insert_with(|| {
@@ -676,11 +748,14 @@ pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOut
             "providers": {}
         })
     });
-    write_root_section("models", &models_value)
+    write_root_section_with_backup(backup_session, "models", &models_value)
 }
 
 /// 删除供应商配置
-pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
+pub fn remove_provider(
+    session: &SecretSession,
+    id: &str,
+) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
     let mut removed = false;
 
@@ -702,7 +777,7 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
             "providers": {}
         })
     });
-    write_root_section("models", &models_value)
+    write_root_section(session, "models", &models_value)
 }
 
 // ============================================================================
@@ -730,11 +805,20 @@ pub fn get_typed_providers() -> Result<IndexMap<String, OpenClawProviderConfig>,
 
 /// 设置供应商配置（类型化）
 pub fn set_typed_provider(
+    session: &SecretSession,
     id: &str,
     config: &OpenClawProviderConfig,
 ) -> Result<OpenClawWriteOutcome, AppError> {
     let value = serde_json::to_value(config).map_err(|e| AppError::JsonSerialize { source: e })?;
-    set_provider(id, value)
+    set_provider(session, id, value)
+}
+
+pub(crate) fn set_typed_provider_standalone(
+    id: &str,
+    config: &OpenClawProviderConfig,
+) -> Result<OpenClawWriteOutcome, AppError> {
+    let value = serde_json::to_value(config).map_err(|e| AppError::JsonSerialize { source: e })?;
+    set_provider_standalone(id, value)
 }
 
 // ============================================================================
@@ -759,7 +843,10 @@ pub fn get_default_model() -> Result<Option<OpenClawDefaultModel>, AppError> {
 }
 
 /// 设置默认模型配置（agents.defaults.model）
-pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOutcome, AppError> {
+pub fn set_default_model(
+    session: &SecretSession,
+    model: &OpenClawDefaultModel,
+) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
     let root = ensure_object(&mut config);
     let agents = root
@@ -777,7 +864,7 @@ pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOu
         .get("agents")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
-    write_root_section("agents", &agents_value)
+    write_root_section(session, "agents", &agents_value)
 }
 
 /// 读取模型目录/允许列表（agents.defaults.models）
@@ -799,6 +886,7 @@ pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalog
 
 /// 设置模型目录/允许列表（agents.defaults.models）
 pub fn set_model_catalog(
+    session: &SecretSession,
     catalog: &HashMap<String, OpenClawModelCatalogEntry>,
 ) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
@@ -818,7 +906,7 @@ pub fn set_model_catalog(
         .get("agents")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
-    write_root_section("agents", &agents_value)
+    write_root_section(session, "agents", &agents_value)
 }
 
 // ============================================================================
@@ -840,6 +928,7 @@ pub fn get_agents_defaults() -> Result<Option<OpenClawAgentsDefaults>, AppError>
 
 /// Write the full agents.defaults config
 pub fn set_agents_defaults(
+    session: &SecretSession,
     defaults: &OpenClawAgentsDefaults,
 ) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
@@ -857,7 +946,7 @@ pub fn set_agents_defaults(
         .get("agents")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
-    write_root_section("agents", &agents_value)
+    write_root_section(session, "agents", &agents_value)
 }
 
 // ============================================================================
@@ -879,9 +968,12 @@ pub fn get_env_config() -> Result<OpenClawEnvConfig, AppError> {
 }
 
 /// Write the env config section
-pub fn set_env_config(env: &OpenClawEnvConfig) -> Result<OpenClawWriteOutcome, AppError> {
+pub fn set_env_config(
+    session: &SecretSession,
+    env: &OpenClawEnvConfig,
+) -> Result<OpenClawWriteOutcome, AppError> {
     let value = serde_json::to_value(env).map_err(|e| AppError::JsonSerialize { source: e })?;
-    write_root_section("env", &value)
+    write_root_section(session, "env", &value)
 }
 
 // ============================================================================
@@ -906,13 +998,57 @@ pub fn get_tools_config() -> Result<OpenClawToolsConfig, AppError> {
 }
 
 /// Write the tools config section
-pub fn set_tools_config(tools: &OpenClawToolsConfig) -> Result<OpenClawWriteOutcome, AppError> {
+pub fn set_tools_config(
+    session: &SecretSession,
+    tools: &OpenClawToolsConfig,
+) -> Result<OpenClawWriteOutcome, AppError> {
     let value = serde_json::to_value(tools).map_err(|e| AppError::JsonSerialize { source: e })?;
-    write_root_section("tools", &value)
+    write_root_section(session, "tools", &value)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial]
+    fn encrypted_backup_restore_writes_plaintext_to_the_live_config() {
+        let original = r#"{key: 'restore-canary'}"#;
+        with_test_paths(original, |live| {
+            let session = test_session();
+            let backup = create_openclaw_backup(&session, original).unwrap();
+            std::fs::write(live, "{key: 'changed'}").unwrap();
+            restore_openclaw_backup(&session, &backup).unwrap();
+            assert_eq!(std::fs::read_to_string(live).unwrap(), original);
+            assert!(!std::fs::read_to_string(backup)
+                .unwrap()
+                .contains("restore-canary"));
+        });
+    }
+
+    #[test]
+    fn own_backup_encrypts_and_restores_the_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::secrets::session::SecretSession::from_context(
+            dir.path().to_path_buf(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        let source = r#"{key: 'owned-backup-canary'}"#;
+        let path = create_openclaw_backup(&session, source).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("owned-backup-canary"));
+        let original = OwnedFile::at_path(&session, &path)
+            .unwrap()
+            .read(&session)
+            .unwrap();
+        assert_eq!(&*original, source.as_bytes());
+    }
+
+    fn test_session() -> std::sync::Arc<crate::SecretSession> {
+        crate::secrets::session::SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        )
+    }
     use super::*;
     use serial_test::serial;
     use std::sync::{Mutex, OnceLock};
@@ -979,11 +1115,14 @@ mod tests {
 "#;
 
         with_test_paths(source, |_| {
-            let outcome = set_default_model(&OpenClawDefaultModel {
-                primary: "provider/model".to_string(),
-                fallbacks: Vec::new(),
-                extra: HashMap::new(),
-            })
+            let outcome = set_default_model(
+                &test_session(),
+                &OpenClawDefaultModel {
+                    primary: "provider/model".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: HashMap::new(),
+                },
+            )
             .unwrap();
 
             assert!(outcome.backup_path.is_some());
@@ -1013,7 +1152,7 @@ mod tests {
                 extra: HashMap::new(),
             };
 
-            let first_outcome = set_default_model(&model).unwrap();
+            let first_outcome = set_default_model(&test_session(), &model).unwrap();
             assert!(first_outcome.backup_path.is_some());
 
             let first_written = fs::read_to_string(get_openclaw_config_path()).unwrap();
@@ -1021,7 +1160,7 @@ mod tests {
             let backup_count = fs::read_dir(&backup_dir).unwrap().count();
             assert_eq!(backup_count, 1);
 
-            let second_outcome = set_default_model(&model).unwrap();
+            let second_outcome = set_default_model(&test_session(), &model).unwrap();
             assert!(second_outcome.backup_path.is_none());
 
             let second_written = fs::read_to_string(get_openclaw_config_path()).unwrap();
@@ -1048,7 +1187,8 @@ mod tests {
                 .unwrap();
 
             fs::write(config_path, "{ changedExternally: true }\n").unwrap();
-            let err = document.save().unwrap_err();
+            let session = test_session();
+            let err = document.save(Some(&session)).unwrap_err();
             assert!(err.to_string().contains("OpenClaw config changed on disk"));
         });
     }
@@ -1069,7 +1209,7 @@ mod tests {
 "#;
 
         with_test_paths(source, |_| {
-            let outcome = remove_provider("1-copy").unwrap();
+            let outcome = remove_provider(&test_session(), "1-copy").unwrap();
             assert!(outcome.backup_path.is_some());
 
             let config = read_openclaw_config().unwrap();

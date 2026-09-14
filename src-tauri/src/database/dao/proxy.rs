@@ -823,13 +823,24 @@ impl Database {
         app_type: &str,
         config_json: &str,
     ) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
             "INSERT OR REPLACE INTO proxy_live_backup (app_type, original_config, backed_up_at)
              VALUES (?1, ?2, ?3)",
-            rusqlite::params![app_type, config_json, now],
+            rusqlite::params![
+                app_type,
+                crate::secrets::inventory::seal_db(
+                    &vault,
+                    "proxy_live_backup",
+                    "original_config",
+                    &[app_type],
+                    config_json
+                )?,
+                now
+            ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -850,6 +861,7 @@ impl Database {
 
     /// 获取 Live 配置备份
     pub async fn get_live_backup(&self, app_type: &str) -> Result<Option<LiveBackup>, AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
 
         let result = conn.query_row(
@@ -865,7 +877,16 @@ impl Database {
         );
 
         match result {
-            Ok(backup) => Ok(Some(backup)),
+            Ok(mut backup) => {
+                backup.original_config = crate::secrets::inventory::open_db(
+                    &vault,
+                    "proxy_live_backup",
+                    "original_config",
+                    &[app_type],
+                    &backup.original_config,
+                )?;
+                Ok(Some(backup))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
@@ -948,6 +969,38 @@ impl Database {
 mod tests {
     use crate::database::Database;
     use crate::error::AppError;
+
+    #[tokio::test]
+    async fn secret_live_backup_roundtrips_without_plaintext() {
+        let db = Database::memory().unwrap();
+        let config = r#"{"api_key":"backup-canary"}"#;
+        db.save_live_backup("claude", config).await.unwrap();
+        assert_eq!(
+            db.get_live_backup("claude")
+                .await
+                .unwrap()
+                .unwrap()
+                .original_config,
+            config
+        );
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT original_config FROM proxy_live_backup WHERE app_type='claude'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("backup-canary"));
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE proxy_live_backup SET original_config='corrupt'", [])
+            .unwrap();
+        assert!(db.get_live_backup("claude").await.is_err());
+    }
 
     #[tokio::test]
     async fn proxy_options_preserve_routing_switches() -> Result<(), AppError> {

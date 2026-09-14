@@ -41,14 +41,14 @@
 //! 新版本号却没建对应的列。当前（2026-08-04）还在测试阶段，所以历史上那几步
 //! 被合并成了 v1 —— 见本文件的 git 历史。
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::AppError;
 
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 23;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 24;
 
 /// 存版本号的表。**只有一行**（`id = 1`）。
 ///
@@ -82,14 +82,18 @@ pub(crate) fn current_version(conn: &Connection) -> Result<i32, AppError> {
 ///
 /// 与 [`current_version`] 的差别就是少那一步 `ensure_version_table` ——
 /// 预检（[`stored_version_exceeds_supported`]）靠它守住「先于任何写入」。
-fn read_stored_version(conn: &Connection) -> Result<i32, AppError> {
+pub(crate) fn read_stored_version(conn: &Connection) -> Result<i32, AppError> {
+    if !table_exists(conn, VERSION_TABLE)? {
+        return Ok(0);
+    }
     let version: Option<i32> = conn
         .query_row(
             &format!("SELECT version FROM {VERSION_TABLE} WHERE id = 1"),
             [],
             |row| row.get(0),
         )
-        .ok();
+        .optional()
+        .map_err(|e| AppError::Database(format!("读取数据版本失败: {e}")))?;
     Ok(version.unwrap_or(0))
 }
 
@@ -338,6 +342,10 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
             22 => {
                 crate::database::dao::provider_attempts::create_schema(conn)?;
                 set_version(conn, 23)?;
+            }
+            23 => {
+                super::vault::create_schema(conn)?;
+                set_version(conn, 24)?;
             }
             other => {
                 return Err(AppError::Database(format!(
@@ -2192,10 +2200,12 @@ mod tests {
     /// 或上游新增一条建库路径而我们没跟上。
     #[test]
     fn every_database_entry_point_also_runs_the_loongport_migrations() {
-        // 三份源码里找「上游迁移入口」的**调用**点（定义处不算）。
+        // 检查存储入口的上游迁移调用点（定义处不算）。
         let sources = [
             ("database/mod.rs", include_str!("mod.rs")),
             ("database/backup.rs", include_str!("backup.rs")),
+            ("database/vault.rs", include_str!("vault.rs")),
+            ("database/migration.rs", include_str!("migration.rs")),
         ];
 
         let mut checked = 0;
@@ -2281,6 +2291,15 @@ mod tests {
             stored_version_exceeds_supported(file.path()).unwrap(),
             Some(LOONGPORT_SCHEMA_VERSION + 1)
         );
+    }
+
+    #[test]
+    fn the_precheck_rejects_a_malformed_version_table() {
+        let file = temp_db_file();
+        let conn = Connection::open(file.path()).unwrap();
+        conn.execute_batch("CREATE TABLE loongport_schema_version (id INTEGER, version TEXT); INSERT INTO loongport_schema_version VALUES (1, 'broken');").unwrap();
+        drop(conn);
+        assert!(stored_version_exceeds_supported(file.path()).is_err());
     }
 
     #[test]

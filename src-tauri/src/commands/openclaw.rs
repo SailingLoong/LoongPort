@@ -58,7 +58,8 @@ pub fn set_openclaw_default_model(
     state: State<'_, AppState>,
     model: openclaw_config::OpenClawDefaultModel,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    let outcome = openclaw_config::set_default_model(&model).map_err(|e| e.to_string())?;
+    let outcome = openclaw_config::set_default_model(state.db.secret_session(), &model)
+        .map_err(|e| e.to_string())?;
     if let Some((provider_id, _)) = model.primary.split_once('/') {
         crate::services::application_overview::record_successful_selection(
             &state.db,
@@ -79,9 +80,11 @@ pub fn get_openclaw_model_catalog(
 /// Set OpenClaw model catalog/allowlist (agents.defaults.models)
 #[tauri::command]
 pub fn set_openclaw_model_catalog(
+    state: State<'_, AppState>,
     catalog: HashMap<String, openclaw_config::OpenClawModelCatalogEntry>,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    openclaw_config::set_model_catalog(&catalog).map_err(|e| e.to_string())
+    openclaw_config::set_model_catalog(state.db.secret_session(), &catalog)
+        .map_err(|e| e.to_string())
 }
 
 /// Get full agents.defaults config (all fields)
@@ -107,8 +110,8 @@ fn set_openclaw_agents_defaults_internal(
     let previous = openclaw_config::get_default_model()
         .map_err(|error| error.to_string())?
         .map(|model| model.primary);
-    let outcome =
-        openclaw_config::set_agents_defaults(&defaults).map_err(|error| error.to_string())?;
+    let outcome = openclaw_config::set_agents_defaults(state.db.secret_session(), &defaults)
+        .map_err(|error| error.to_string())?;
     if let Some(model) = defaults
         .model
         .filter(|model| previous.as_deref() != Some(model.primary.as_str()))
@@ -145,9 +148,10 @@ pub fn get_openclaw_env() -> Result<openclaw_config::OpenClawEnvConfig, String> 
 /// Set OpenClaw env config (env section of openclaw.json)
 #[tauri::command]
 pub fn set_openclaw_env(
+    state: State<'_, AppState>,
     env: openclaw_config::OpenClawEnvConfig,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    openclaw_config::set_env_config(&env).map_err(|e| e.to_string())
+    openclaw_config::set_env_config(state.db.secret_session(), &env).map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -163,7 +167,8 @@ pub fn get_openclaw_tools() -> Result<openclaw_config::OpenClawToolsConfig, Stri
 /// Set OpenClaw tools config (tools section of openclaw.json)
 #[tauri::command]
 pub fn set_openclaw_tools(
+    state: State<'_, AppState>,
     tools: openclaw_config::OpenClawToolsConfig,
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
-    openclaw_config::set_tools_config(&tools).map_err(|e| e.to_string())
+    openclaw_config::set_tools_config(state.db.secret_session(), &tools).map_err(|e| e.to_string())
 }

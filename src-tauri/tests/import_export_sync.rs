@@ -920,11 +920,12 @@ fn import_from_claude_merges_into_config() {
 fn create_backup_skips_missing_file() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let home = ensure_test_home();
-    let config_path = home.join(cc_switch_lib::APP_DIR_NAME).join("config.json");
+    let database = cc_switch_lib::Database::memory().unwrap();
+    let config_path = database.secret_session().root().join("config.json");
 
     // 未创建文件时应返回空字符串，不报错
-    let result = ConfigService::create_backup(&config_path).expect("create backup");
+    let result = ConfigService::create_backup(database.secret_session(), &config_path)
+        .expect("create backup");
     assert!(
         result.is_empty(),
         "expected empty backup id when config file missing"
@@ -935,13 +936,16 @@ fn create_backup_skips_missing_file() {
 fn create_backup_generates_snapshot_file() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let home = ensure_test_home();
-    let config_dir = home.join(cc_switch_lib::APP_DIR_NAME);
+    let database = cc_switch_lib::Database::memory().unwrap();
+    let config_dir = database.secret_session().root().to_path_buf();
     let config_path = config_dir.join("config.json");
     fs::create_dir_all(&config_dir).expect("prepare config dir");
-    fs::write(&config_path, r#"{"version":2}"#).expect("write config file");
+    cc_switch_lib::MultiAppConfig::default()
+        .save(database.secret_session())
+        .unwrap();
 
-    let backup_id = ConfigService::create_backup(&config_path).expect("backup success");
+    let backup_id = ConfigService::create_backup(database.secret_session(), &config_path)
+        .expect("backup success");
     assert!(
         !backup_id.is_empty(),
         "backup id should contain timestamp information"
@@ -956,7 +960,7 @@ fn create_backup_generates_snapshot_file() {
 
     let backup_content = fs::read_to_string(&backup_path).expect("read backup");
     assert!(
-        backup_content.contains(r#""version":2"#),
+        backup_content.starts_with("lpenc1.") && !backup_content.contains("version"),
         "backup content should match original config"
     );
 }
@@ -965,23 +969,25 @@ fn create_backup_generates_snapshot_file() {
 fn create_backup_retains_only_latest_entries() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let home = ensure_test_home();
-    let config_dir = home.join(cc_switch_lib::APP_DIR_NAME);
+    let database = cc_switch_lib::Database::memory().unwrap();
+    let config_dir = database.secret_session().root().to_path_buf();
     let config_path = config_dir.join("config.json");
     fs::create_dir_all(&config_dir).expect("prepare config dir");
-    fs::write(&config_path, r#"{"version":3}"#).expect("write config file");
+    cc_switch_lib::MultiAppConfig::default()
+        .save(database.secret_session())
+        .unwrap();
 
     let backups_dir = config_dir.join("backups");
     fs::create_dir_all(&backups_dir).expect("create backups dir");
     for idx in 0..12 {
-        let manual = backups_dir.join(format!("manual_{idx:02}.json"));
+        let manual = backups_dir.join(format!("backup_20260101_0000{idx:02}.json"));
         fs::write(&manual, format!("{{\"idx\":{idx}}}")).expect("seed manual backup");
     }
 
     std::thread::sleep(std::time::Duration::from_secs(1));
 
-    let latest_backup_id =
-        ConfigService::create_backup(&config_path).expect("create backup with cleanup");
+    let latest_backup_id = ConfigService::create_backup(database.secret_session(), &config_path)
+        .expect("create backup with cleanup");
     assert!(
         !latest_backup_id.is_empty(),
         "backup id should not be empty when config exists"
@@ -1008,7 +1014,7 @@ fn create_backup_retains_only_latest_entries() {
     let manual_kept = entries
         .iter()
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .any(|name| name.starts_with("manual_"));
+        .any(|name| name.starts_with("backup_20260101"));
     assert!(
         manual_kept,
         "cleanup should keep part of the older backups to maintain history"

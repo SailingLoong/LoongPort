@@ -298,6 +298,7 @@ mod tests {
         AppState::new(Arc::new(
             Database::memory().expect("create in-memory database"),
         ))
+        .unwrap()
     }
 
     fn input(model_id: &str) -> Provider {

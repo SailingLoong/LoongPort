@@ -79,6 +79,38 @@ pub(crate) fn success_payload_with_warning(backup_id: String, warning: Option<St
     )
 }
 
+/// Caller keeps the shared sync mutex through the transition and live projection.
+pub(crate) async fn restore_downloaded_snapshot(
+    app_state: AppState,
+    snapshot: crate::services::sync_protocol::DownloadedSnapshot,
+    password: zeroize::Zeroizing<String>,
+    expected_snapshot_id: String,
+) -> Result<(crate::services::sync_protocol::DownloadedSnapshot, Value), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::services::sync_protocol::restore_from_sync(
+            &app_state.db,
+            &snapshot,
+            &expected_snapshot_id,
+            &password,
+            &crate::secrets::key_store::SystemKeyStore,
+        )
+        .map_err(|error| match error {
+            AppError::Localized { key, .. } => key.to_owned(),
+            AppError::Config(code) if code.starts_with("sync.") || code.starts_with("secret.") => {
+                code
+            }
+            other => other.to_string(),
+        })?;
+        let warning = run_post_import_sync(&app_state)
+            .err()
+            .map(post_sync_warning);
+        let result = attach_warning(json!({"status":"restored"}), warning);
+        Ok((snapshot, result))
+    })
+    .await
+    .map_err(|_| "secret.operation_failed".to_owned())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::{attach_warning, post_sync_warning_from_result};

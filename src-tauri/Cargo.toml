@@ -118,15 +118,20 @@ rustls-native-certs = "0.8"
 regex = "1.10"
 rquickjs = { version = "0.13", features = ["array-buffer", "classes"] }
 thiserror = "2.0"
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+argon2 = { version = "0.5", features = ["zeroize"] }
+zeroize = "1.8"
+getrandom = "0.4"
 anyhow = "1.0"
 zip = "4.6"
+walkdir = "2.5"
 serde_yaml = "0.9"
 tempfile = "3"
 url = "2.5"
 auto-launch = { version = "0.6", optional = true }
 once_cell = "1.21.3"
 base64 = "0.23"
-rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks", "serialize"] }
 indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
 uuid = { version = "1.11", features = ["v4"] }
@@ -151,6 +156,7 @@ tiktoken-rs = "0.12.0"
 tauri-plugin-single-instance = { version = "2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }
 webkit2gtk = { version = "2.0.1", features = ["v2_16"], optional = true }
 
 # musl 静态包（loongport-cli）专用：reqwest 的 default-tls（native-tls）在
@@ -163,10 +169,15 @@ openssl = { version = "0.10", features = ["vendored"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
 winreg = "0.56"
 windows-sys = { version = "0.61", features = [
     "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
 ] }
 
@@ -179,6 +190,7 @@ windows-sys = { version = "0.61", features = [
 rquickjs = { version = "0.13", features = ["bindgen"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSColor"] }
 

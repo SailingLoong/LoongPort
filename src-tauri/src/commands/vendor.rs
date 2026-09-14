@@ -395,8 +395,8 @@ pub async fn vendor_switch(
 ) -> Result<super::relay::SwitchTierCommandResult, String> {
     let app_type = app.parse::<AppType>().map_err(|error| error.to_string())?;
     let state = app_handle.state::<AppState>();
-    let row = with_conn(&state, |conn| {
-        creds::get(conn, row_id)?
+    let row = with_conn(&state, |conn, _vault| {
+        creds::get(conn, _vault, row_id)?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))
     })
     .map_err(|error| error.to_string())?;
@@ -495,7 +495,7 @@ async fn refresh_vendor_session_balance(
     state: &AppState,
     row_id: i64,
 ) -> Result<Option<crate::relay::balance::RowBalanceResult>, AppError> {
-    let row = with_conn(state, |conn| creds::get(conn, row_id))?
+    let row = with_conn(state, |conn, _vault| creds::get(conn, _vault, row_id))?
         .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))?;
     if row.auth_token.trim().is_empty() {
         return Ok(None);
@@ -597,17 +597,19 @@ pub async fn vendor_open_login(
         return Ok(None);
     };
     let (provision, balance) = refresh_vendor_account(state.inner(), row_id, true).await;
-    let name = with_conn(state.inner(), |conn| creds::get(conn, row_id))
-        .ok()
-        .flatten()
-        .map(|row| {
-            if row.account_label.is_empty() {
-                vendor.display_name().to_string()
-            } else {
-                row.account_label
-            }
-        })
-        .unwrap_or_else(|| vendor.display_name().to_string());
+    let name = with_conn(state.inner(), |conn, _vault| {
+        creds::get(conn, _vault, row_id)
+    })
+    .ok()
+    .flatten()
+    .map(|row| {
+        if row.account_label.is_empty() {
+            vendor.display_name().to_string()
+        } else {
+            row.account_label
+        }
+    })
+    .unwrap_or_else(|| vendor.display_name().to_string());
     Ok(Some(VendorLoginResult {
         row_id,
         refresh: super::relay::finish_refresh_result(
@@ -630,18 +632,20 @@ pub async fn vendor_refresh(
     app: String,
 ) -> Result<super::relay::RefreshResult, String> {
     let app_type: AppType = app.parse().map_err(|error: AppError| error.to_string())?;
-    let name = with_conn(state.inner(), |conn| creds::get(conn, row_id))
-        .map_err(|error| error.to_string())?
-        .map(|row| {
-            if row.account_label.is_empty() {
-                Vendor::from_id(&row.vendor_id)
-                    .map(|vendor| vendor.display_name().to_string())
-                    .unwrap_or(row.vendor_id)
-            } else {
-                row.account_label
-            }
-        })
-        .unwrap_or_else(|| format!("官方账号 #{row_id}"));
+    let name = with_conn(state.inner(), |conn, _vault| {
+        creds::get(conn, _vault, row_id)
+    })
+    .map_err(|error| error.to_string())?
+    .map(|row| {
+        if row.account_label.is_empty() {
+            Vendor::from_id(&row.vendor_id)
+                .map(|vendor| vendor.display_name().to_string())
+                .unwrap_or(row.vendor_id)
+        } else {
+            row.account_label
+        }
+    })
+    .unwrap_or_else(|| format!("官方账号 #{row_id}"));
     let (provision, balance) = refresh_vendor_account(state.inner(), row_id, true).await;
     Ok(super::relay::finish_refresh_result(
         &app_type,
@@ -762,12 +766,14 @@ async fn login_via_browser(
     let account = creds.account;
 
     let state = app_handle.state::<AppState>();
-    let row_id = with_conn(&state, |conn| {
-        creds::save_account(conn, vendor, &token, &account)
+    let row_id = with_conn(&state, |conn, _vault| {
+        creds::save_account(conn, _vault, vendor, &token, &account)
     })?;
 
     if let Some(plaintext) = harvested_key {
-        with_conn(&state, |conn| creds::set_api_key(conn, row_id, &plaintext))?;
+        with_conn(&state, |conn, _vault| {
+            creds::set_api_key(conn, _vault, row_id, &plaintext)
+        })?;
     }
 
     // 广播账号行集合变化：登录入口是 App 级的 OfficialApiPage，够不到
@@ -810,8 +816,8 @@ async fn provision_impl(
     row_id: i64,
 ) -> Result<VendorProvisionSummary, VendorActionError> {
     // ── 1. 取行 + 账号 id ───────────────────────────────────────────
-    let row = with_conn(state, |conn| {
-        creds::get(conn, row_id)?
+    let row = with_conn(state, |conn, _vault| {
+        creds::get(conn, _vault, row_id)?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))
     })?;
 
@@ -874,7 +880,10 @@ async fn provision_impl(
         };
         key_created = true;
 
-        with_conn(state, |conn| creds::set_api_key(conn, row_id, &plaintext)).map_err(|e| {
+        with_conn(state, |conn, _vault| {
+            creds::set_api_key(conn, _vault, row_id, &plaintext)
+        })
+        .map_err(|e| {
             // 最坏情况：官网多了一把、本地没记住。必须告诉用户重试会自愈
             // （下一轮的第 3 步正好把它删掉），否则他会以为要去官网手工清理。
             AppError::Database(format!(
@@ -1198,7 +1207,7 @@ pub(crate) async fn vendor_balance_impl(
     state: &AppState,
     row_id: i64,
 ) -> Result<crate::relay::balance::RowBalanceResult, AppError> {
-    let row = with_conn(state, |conn| creds::get(conn, row_id))?
+    let row = with_conn(state, |conn, _vault| creds::get(conn, _vault, row_id))?
         .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))?;
     let vendor = Vendor::from_id(&row.vendor_id)
         .ok_or_else(|| AppError::Config(format!("不认识的厂商：{}", row.vendor_id)))?;
@@ -1262,7 +1271,7 @@ pub async fn vendor_remove(state: State<'_, AppState>, row_id: i64) -> Result<()
 }
 
 fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
-    let row = with_conn(state, |conn| creds::get(conn, row_id))?
+    let row = with_conn(state, |conn, _vault| creds::get(conn, _vault, row_id))?
         .ok_or_else(|| AppError::Config("这个账号已经不存在了".into()))?;
 
     if let (Some(vendor), Some(account_id)) = (Vendor::from_id(&row.vendor_id), row.account_id) {
@@ -1306,7 +1315,7 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
         }
     }
 
-    with_conn(state, |conn| creds::remove(conn, row_id))
+    with_conn(state, |conn, _vault| creds::remove(conn, row_id))
 }
 
 /// 保存官网账号行的手工顺序。`ids` 是拖动后的完整顺序，下标即新的 `sort_index`。
@@ -1315,7 +1324,7 @@ fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
 /// 两类行的 `sort_index` 各自存在自己的表里，本来就没有一个共同的序。
 #[tauri::command]
 pub async fn vendor_reorder(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
-    with_conn(state.inner(), |conn| creds::reorder(conn, &ids)).map_err(|e| e.to_string())
+    with_conn(state.inner(), |conn, _vault| creds::reorder(conn, &ids)).map_err(|e| e.to_string())
 }
 
 /// vendor provider 的 `meta`。
@@ -1404,7 +1413,7 @@ fn on_vendor_error(state: &AppState, row_id: i64, e: &VendorError) {
     if !matches!(e, VendorError::AuthExpired) {
         return;
     }
-    if let Err(err) = with_conn(state, |conn| creds::clear_token(conn, row_id)) {
+    if let Err(err) = with_conn(state, |conn, _vault| creds::clear_token(conn, row_id)) {
         log::warn!("清除失效登录态失败: {err}");
     }
 }
@@ -1415,14 +1424,15 @@ fn on_vendor_error(state: &AppState, row_id: i64, e: &VendorError) {
 /// 辅助函数变成两个模块之间的接口，而它就是三行。
 fn with_conn<T>(
     state: &AppState,
-    f: impl FnOnce(&rusqlite::Connection) -> Result<T, AppError>,
+    f: impl FnOnce(&rusqlite::Connection, &crate::secrets::VaultContext) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
+    let vault = state.db.secrets.read()?;
     let conn = state
         .db
         .conn
         .lock()
         .map_err(|e| AppError::Database(format!("获取数据库连接失败: {e}")))?;
-    f(&conn)
+    f(&conn, &vault)
 }
 
 #[cfg(test)]
@@ -1536,10 +1546,11 @@ mod tests {
     #[test]
     fn current_app_capabilities_require_its_provider_record() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id = with_conn(&state, |conn| {
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
             let row_id = creds::save_account(
                 conn,
+                _vault,
                 Vendor::DeepSeek,
                 "token",
                 &crate::vendor::VendorAccount {
@@ -1548,12 +1559,12 @@ mod tests {
                     login_identifier: "13800000000".into(),
                 },
             )?;
-            creds::set_api_key(conn, row_id, "sk-plaintext")?;
+            creds::set_api_key(conn, _vault, row_id, "sk-plaintext")?;
             creds::clear_token(conn, row_id)?;
             Ok(row_id)
         })
         .expect("seed vendor row");
-        let base = with_conn(&state, |conn| creds::get(conn, row_id))
+        let base = with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
             .expect("load vendor row")
             .expect("vendor row exists");
 
@@ -1669,7 +1680,7 @@ mod tests {
     #[test]
     fn is_current_tracks_the_providers_current_of_the_app() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let in_use = VendorAccountRow::from(row("tok", "sk", Some("uuid-a")));
         let idle = VendorAccountRow::from(row("tok", "sk", Some("uuid-b")));
@@ -1705,7 +1716,7 @@ mod tests {
     #[test]
     fn an_unlogged_row_is_never_current() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let never = VendorAccountRow::from(row("", "", None));
         assert!(never.plans[0].provider_id.is_empty());
         assert!(!is_current_for(&state, &never.plans[0], &AppType::Claude));
@@ -1790,10 +1801,11 @@ mod tests {
 
     fn in_memory_state() -> (AppState, i64) {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("内存库"));
-        let state = AppState::new(db);
-        let id = with_conn(&state, |conn| {
+        let state = AppState::new(db).unwrap();
+        let id = with_conn(&state, |conn, _vault| {
             let id = creds::save_account(
                 conn,
+                _vault,
                 Vendor::DeepSeek,
                 "tok",
                 &crate::vendor::VendorAccount {
@@ -1802,7 +1814,7 @@ mod tests {
                     login_identifier: "13800000000".into(),
                 },
             )?;
-            creds::set_api_key(conn, id, "sk-plaintext")?;
+            creds::set_api_key(conn, _vault, id, "sk-plaintext")?;
             Ok(id)
         })
         .expect("准备数据");
@@ -1814,7 +1826,7 @@ mod tests {
         let (state, id) = in_memory_state();
         on_vendor_error(&state, id, &VendorError::AuthExpired);
 
-        let row = with_conn(&state, |conn| creds::get(conn, id))
+        let row = with_conn(&state, |conn, _vault| creds::get(conn, _vault, id))
             .expect("读")
             .expect("有");
         assert!(row.auth_token.is_empty(), "40002 要清掉失效的登录态");
@@ -1833,7 +1845,7 @@ mod tests {
             VendorError::Transient("网断了".into()),
         ] {
             on_vendor_error(&state, id, &e);
-            let row = with_conn(&state, |conn| creds::get(conn, id))
+            let row = with_conn(&state, |conn, _vault| creds::get(conn, _vault, id))
                 .expect("读")
                 .expect("有");
             assert_eq!(
@@ -1959,13 +1971,15 @@ mod tests {
         AppState::new(std::sync::Arc::new(
             crate::database::Database::memory().expect("init db"),
         ))
+        .unwrap()
     }
 
     fn seed_vendor_row(state: &AppState, account_id: Option<&str>) -> i64 {
-        with_conn(state, |conn| {
+        with_conn(state, |conn, _vault| {
             match account_id {
                 Some(acct) => creds::save_account(
                     conn,
+                    _vault,
                     Vendor::DeepSeek,
                     "tok",
                     &crate::vendor::VendorAccount {
@@ -1979,11 +1993,24 @@ mod tests {
                 None => {
                     conn.execute(
                         "INSERT INTO loongport_vendor (vendor_id, account_id, auth_token, api_key)
-                         VALUES ('deepseek', NULL, 'tok', 'sk-x')",
+                         VALUES ('deepseek', NULL, '', '')",
                         [],
                     )
                     .map_err(|e| AppError::Database(e.to_string()))?;
-                    Ok(conn.last_insert_rowid())
+                    let id = conn.last_insert_rowid();
+                    let auth = crate::secrets::inventory::seal_db(
+                        _vault,
+                        "loongport_vendor",
+                        "auth_token",
+                        &[&id.to_string()],
+                        "tok",
+                    )?;
+                    conn.execute(
+                        "UPDATE loongport_vendor SET auth_token=?1 WHERE id=?2",
+                        rusqlite::params![auth, id],
+                    )?;
+                    creds::set_api_key(conn, _vault, id, "sk-x")?;
+                    Ok(id)
                 }
             }
         })
@@ -2140,7 +2167,7 @@ mod tests {
             );
         }
         assert!(
-            with_conn(&state, |conn| creds::get(conn, row_id))
+            with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
                 .expect("查行")
                 .is_some(),
             "配置没删掉，账号行也不该删"
@@ -2184,7 +2211,7 @@ mod tests {
             );
         }
         assert!(
-            with_conn(&state, |conn| creds::get(conn, row_id))
+            with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
                 .expect("查行")
                 .is_none(),
             "账号行该被删掉"
@@ -2194,9 +2221,10 @@ mod tests {
     // ─────────────── 多 plan（opencode）───────────────
 
     fn seed_opencode_row(state: &AppState) -> i64 {
-        with_conn(state, |conn| {
+        with_conn(state, |conn, _vault| {
             creds::save_account(
                 conn,
+                _vault,
                 Vendor::OpenCode,
                 "tok",
                 &crate::vendor::VendorAccount {

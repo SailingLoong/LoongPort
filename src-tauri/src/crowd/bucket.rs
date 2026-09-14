@@ -327,8 +327,9 @@ fn resolve_relay_hosts(
     refs: &HashSet<(String, String)>,
 ) -> Result<HashMap<(String, String), String>, AppError> {
     let service_domains: HashSet<String> = {
+        let vault = db.secrets.read()?;
         let conn = crate::database::lock_conn!(db.conn);
-        let mut domains: HashSet<String> = crate::relay::creds::list(&conn)?
+        let mut domains: HashSet<String> = crate::relay::creds::list(&conn, &vault)?
             .into_iter()
             .flat_map(|relay| {
                 [
@@ -337,7 +338,7 @@ fn resolve_relay_hosts(
                 ]
             })
             .collect();
-        for row in crate::vendor::creds::list(&conn)? {
+        for row in crate::vendor::creds::list(&conn, &vault)? {
             let Some(vendor) = crate::vendor::Vendor::from_id(&row.vendor_id) else {
                 continue;
             };
@@ -609,6 +610,14 @@ mod tests {
         Database::memory().expect("内存库")
     }
 
+    fn seed_provider(db: &Database, id: &str, app: &str, settings: serde_json::Value) {
+        db.save_provider(
+            app,
+            &crate::provider::Provider::with_id(id.into(), "Example".into(), settings, None),
+        )
+        .unwrap();
+    }
+
     /// 计数对账三元组的采集口径：只收「proxy 亲历 + 2xx/3xx + 两侧计数都为正」
     /// 的行 —— 错误行、session 回填、未采（local=0）与无回显（remote=0）全部
     /// 出局，比值分母不被污染（宁缺毋认从采集端开始）。
@@ -682,8 +691,14 @@ mod tests {
         let db = setup_db();
         let conn = db.conn.lock().unwrap();
         conn.execute("INSERT INTO loongport_vendor (vendor_id, account_id) VALUES ('deepseek', 'example-account')", []).unwrap();
-        conn.execute("INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('official-example', 'codex', 'Example', ?1, '{}')", params![serde_json::json!({"auth":{"OPENAI_API_KEY":"test-key"},"base_url":"https://api.deepseek.com/v1"}).to_string()]).unwrap();
+
         drop(conn);
+        seed_provider(
+            &db,
+            "official-example",
+            "codex",
+            serde_json::json!({"auth":{"OPENAI_API_KEY":"test-key"},"base_url":"https://api.deepseek.com/v1"}),
+        );
         let hosts = resolve_relay_hosts(
             &db,
             &HashSet::from([("official-example".into(), "codex".into())]),
@@ -713,23 +728,15 @@ mod tests {
             )
             .unwrap();
         }
-        db.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta)
-                 VALUES (?1, 'codex', ?2, ?3, '{}')",
-                params![
-                    "acct-a",
-                    "示例档",
-                    serde_json::json!({
-                        "auth": {"OPENAI_API_KEY": "sk-test-not-a-real-key"},
-                        "base_url": "https://api.panel.example/v1"
-                    })
-                    .to_string()
-                ],
-            )
-            .unwrap();
+        seed_provider(
+            &db,
+            "acct-a",
+            "codex",
+            serde_json::json!({
+                "auth": {"OPENAI_API_KEY": "sk-test-not-a-real-key"},
+                "base_url": "https://api.panel.example/v1"
+            }),
+        );
         seed_log(
             &db,
             "a",
@@ -764,19 +771,15 @@ mod tests {
             )
             .unwrap();
         }
-        db.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta)
-                 VALUES ('acct-a', 'codex', '示例档', ?1, '{}')",
-                params![serde_json::json!({
-                    "auth": {"OPENAI_API_KEY": "sk-test-not-a-real-key"},
-                    "base_url": "https://api.panel.example/v1"
-                })
-                .to_string()],
-            )
-            .unwrap();
+        seed_provider(
+            &db,
+            "acct-a",
+            "codex",
+            serde_json::json!({
+                "auth": {"OPENAI_API_KEY": "sk-test-not-a-real-key"},
+                "base_url": "https://api.panel.example/v1"
+            }),
+        );
         seed_log(
             &db,
             "a",
@@ -835,21 +838,17 @@ mod tests {
             )
             .unwrap();
         }
-        db.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, meta)
-                 VALUES ('e2e-probe', 'claude', 'E2E', ?1, '{}')",
-                params![serde_json::json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "sk-e2e-probe-not-a-real-key",
-                        "ANTHROPIC_BASE_URL": "https://api.example.com"
-                    }
-                })
-                .to_string()],
-            )
-            .unwrap();
+        seed_provider(
+            &db,
+            "e2e-probe",
+            "claude",
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-e2e-probe-not-a-real-key",
+                    "ANTHROPIC_BASE_URL": "https://api.example.com"
+                }
+            }),
+        );
         seed_log(
             &db,
             "p1",

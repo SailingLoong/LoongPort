@@ -221,18 +221,45 @@ pub async fn ensure_remote_directories(
     Ok(())
 }
 
-/// PUT bytes to a remote WebDAV URL.
+/// Create immutable bytes. An identical existing object is a successful retry.
 pub async fn put_bytes(
     url: &str,
     auth: &WebDavAuth,
     bytes: Vec<u8>,
     content_type: &str,
 ) -> Result<(), AppError> {
+    if put_bytes_conditional(
+        url,
+        auth,
+        bytes.clone(),
+        content_type,
+        &super::sync_protocol::PutCondition::Absent,
+    )
+    .await?
+    .is_none()
+    {
+        let existing = get_bytes(url, auth, bytes.len().saturating_add(1)).await?;
+        if existing.as_ref().map(|v| v.0.as_slice()) != Some(bytes.as_slice()) {
+            return Err(super::sync_protocol::publication_conflict());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn put_bytes_conditional(
+    url: &str,
+    auth: &WebDavAuth,
+    bytes: Vec<u8>,
+    content_type: &str,
+    condition: &super::sync_protocol::PutCondition,
+) -> Result<Option<String>, AppError> {
+    let (condition_name, condition_value) = condition.header()?;
     let client = http_client::get();
     let resp = apply_auth(
         client
             .put(url)
             .header("Content-Type", content_type)
+            .header(condition_name, condition_value)
             .body(bytes)
             .timeout(Duration::from_secs(TRANSFER_TIMEOUT_SECS)),
         auth,
@@ -241,8 +268,14 @@ pub async fn put_bytes(
     .await
     .map_err(|e| webdav_transport_error("webdav.put_failed", "PUT 请求", "PUT request", url, &e))?;
 
+    if resp.status() == StatusCode::PRECONDITION_FAILED {
+        return Ok(None);
+    }
     if resp.status().is_success() {
-        return Ok(());
+        return super::sync_protocol::require_strong_etag(
+            resp.headers().get("etag").and_then(|v| v.to_str().ok()),
+        )
+        .map(Some);
     }
     Err(webdav_status_error("PUT", resp.status(), url))
 }
@@ -297,37 +330,6 @@ pub async fn get_bytes(
     Ok(Some((bytes, etag)))
 }
 
-/// HEAD request to retrieve the ETag. Returns `None` on 404.
-pub async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, AppError> {
-    let client = http_client::get();
-    let resp = apply_auth(
-        client
-            .head(url)
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
-        auth,
-    )
-    .send()
-    .await
-    .map_err(|e| {
-        webdav_transport_error("webdav.head_failed", "HEAD 请求", "HEAD request", url, &e)
-    })?;
-
-    if resp.status() == StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    if !resp.status().is_success() {
-        return Err(webdav_status_error("HEAD", resp.status(), url));
-    }
-    Ok(resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string()))
-}
-
-// ─── Internal helpers ────────────────────────────────────────
-
-/// PROPFIND Depth=0 to check if a remote resource exists.
 async fn propfind_exists(
     client: &reqwest::Client,
     url: &str,
@@ -439,6 +441,67 @@ fn ensure_content_length_within_limit(
         return Err(response_too_large_error(url, max_bytes));
     }
     Ok(())
+}
+
+/// Inspect one exact object. Missing or weak ETags cannot authorize deletion.
+pub(crate) async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, AppError> {
+    let response = apply_auth(
+        http_client::get()
+            .head(url)
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+        auth,
+    )
+    .send()
+    .await
+    .map_err(|e| {
+        webdav_transport_error("webdav.head_failed", "HEAD 请求", "HEAD request", url, &e)
+    })?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(webdav_status_error("HEAD", response.status(), url));
+    }
+    super::sync_protocol::require_strong_etag(
+        response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .map(Some)
+}
+
+pub(crate) async fn delete_conditional(
+    url: &str,
+    auth: &WebDavAuth,
+    etag: &str,
+) -> Result<super::sync_cleanup::DeleteResult, AppError> {
+    use super::sync_cleanup::DeleteResult;
+    let etag = super::sync_protocol::require_strong_etag(Some(etag))?;
+    let response = apply_auth(
+        http_client::get()
+            .delete(url)
+            .header("If-Match", etag)
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+        auth,
+    )
+    .send()
+    .await
+    .map_err(|e| {
+        webdav_transport_error(
+            "webdav.delete_failed",
+            "DELETE 请求",
+            "DELETE request",
+            url,
+            &e,
+        )
+    })?;
+    match response.status() {
+        StatusCode::PRECONDITION_FAILED => Ok(DeleteResult::PreconditionFailed),
+        StatusCode::NOT_FOUND => Ok(DeleteResult::Missing),
+        status if status.is_success() => Ok(DeleteResult::Removed),
+        status => Err(webdav_status_error("DELETE", status, url)),
+    }
 }
 
 #[cfg(test)]

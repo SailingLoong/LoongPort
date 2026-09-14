@@ -31,9 +31,11 @@ pub struct AppState {
 
 impl AppState {
     /// 创建新的应用状态
-    pub fn new(db: Arc<Database>) -> Self {
-        let codex_oauth_manager =
-            Arc::new(CodexOAuthManager::new(crate::config::get_app_config_dir()));
+    pub fn new(db: Arc<Database>) -> Result<Self, crate::error::AppError> {
+        let codex_oauth_manager = Arc::new(
+            CodexOAuthManager::new(db.secrets.clone())
+                .map_err(|e| crate::error::AppError::Config(e.to_string()))?,
+        );
         let model_verification = Arc::new(ModelVerificationCoordinator::new(db.clone()));
         // 被动观察入口单向流入代理：proxy 只管顺路观察提交，不知道 coordinator 存在
         let proxy_service = ProxyService::new_with_codex_oauth_manager(
@@ -42,7 +44,7 @@ impl AppState {
             model_verification.passive_ingress(),
         );
 
-        Self {
+        Ok(Self {
             db,
             proxy_service,
             usage_cache: Arc::new(UsageCache::new()),
@@ -50,6 +52,6 @@ impl AppState {
             browser_bridge: Arc::new(BrowserBridge::default()),
             purchase_sessions: Arc::new(PurchaseSessionCoordinator::default()),
             codex_oauth_manager,
-        }
+        })
     }
 }

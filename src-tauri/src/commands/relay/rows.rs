@@ -562,7 +562,10 @@ pub(crate) fn reset_tier_config_in_state(
 /// 现在改成按 `sort_index` 排，而这个命令是唯一会写它的地方 —— 只有用户拖动才改顺序。
 #[tauri::command]
 pub fn relay_reorder(state: State<'_, AppState>, relay_ids: Vec<i64>) -> Result<(), String> {
-    with_conn(state.inner(), |conn| creds::reorder(conn, &relay_ids)).map_err(|e| e.to_string())
+    with_conn(state.inner(), |conn, _vault| {
+        creds::reorder(conn, &relay_ids)
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// 一条档位 + 它的归属信息。
@@ -815,9 +818,9 @@ pub fn relay_list_sites(state: State<'_, AppState>) -> Result<Vec<SiteInfo>, Str
 }
 
 fn list_sites_impl(state: &AppState) -> Result<Vec<SiteInfo>, AppError> {
-    with_conn(state, |conn| {
+    with_conn(state, |conn, _vault| {
         let mut summaries = Vec::<SiteInfo>::new();
-        for relay in creds::list(conn)? {
+        for relay in creds::list(conn, _vault)? {
             // 按注册域身份聚行：同一站的 www/apex/api 拼写变体算一家，不再拆行。
             if let Some(summary) = summaries.iter_mut().find(|summary| {
                 same_site_identity(Some(&summary.site_origin), Some(&relay.site_origin))
@@ -900,7 +903,7 @@ pub(crate) fn remove_site_impl(
     // ⚠️ **`account_id` 与 `site_origin` 一样必须取**：删的是**一个账号**（一行），
     // 不是「这个站的全部」。同站另一个账号的档位不该被连带清掉 ——
     // 那正是 `prune_stale_tiers` 加账号维度要挡的事（见它的文档）。
-    let site_account = with_conn(state, |conn| creds::get(conn, id))?
+    let site_account = with_conn(state, |conn, _vault| creds::get(conn, _vault, id))?
         .ok_or_else(|| AppError::Config("这个站点已经不存在了".into()))?;
     let site_origin = site_account.site_origin;
     let account_id = site_account.account_id;
@@ -984,7 +987,7 @@ pub(crate) fn remove_site_impl(
         log::warn!("删除站点 {site_origin} 后同步生图工具记录失败: {e}");
     }
 
-    with_conn(state, |conn| creds::remove(conn, id))
+    with_conn(state, |conn, _vault| creds::remove(conn, id))
 }
 
 /// force 删的收尾一步：把受影响的 app 切回各自的官方 seed provider。
@@ -1308,7 +1311,8 @@ mod tests {
     fn tiers_of(tiers: &[OwnedTier], site: &str, account: Option<i64>) -> Vec<TierInfo> {
         let state = AppState::new(std::sync::Arc::new(
             crate::database::Database::memory().expect("内存库"),
-        ));
+        ))
+        .unwrap();
         tiers_of_site(&state, tiers, site, account, &test_app()).expect("tiers_of_site 不该失败")
     }
 
@@ -1322,7 +1326,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("内存库"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         // 先造两条 provider 行（get_user_edited 读的是 providers 表，不是空表）。
         {
             let conn = crate::database::lock_conn!(db.conn);
@@ -1468,18 +1472,19 @@ mod tests {
         let site = "https://reset.example";
         let db = Arc::new(crate::database::Database::memory().expect("init db"));
         let verifier = Arc::new(ResetVerifier::new());
-        let mut state = AppState::new(db.clone());
+        let mut state = AppState::new(db.clone()).unwrap();
         state.model_verification = Arc::new(ModelVerificationCoordinator::with_verifier(
             db.clone(),
             verifier.clone(),
         ));
-        let row_id = with_conn(&state, |conn| {
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site(conn, site, "Reset", "https://reset.example/v1")
         })
         .expect("save site");
-        with_conn(&state, |conn| {
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -1685,14 +1690,15 @@ mod tests {
             let models: Vec<String> = model_names.iter().map(|s| s.to_string()).collect();
             let site = "https://catalog.example";
             let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-            let state = AppState::new(db.clone());
-            let row_id = with_conn(&state, |conn| {
+            let state = AppState::new(db.clone()).unwrap();
+            let row_id = with_conn(&state, |conn, _vault| {
                 creds::save_site(conn, site, "Catalog", "https://catalog.example/v1")
             })
             .expect("save site");
-            with_conn(&state, |conn| {
+            with_conn(&state, |conn, _vault| {
                 creds::save_credentials(
                     conn,
+                    _vault,
                     row_id,
                     creds::AccountIdentity {
                         id: 7,
@@ -1772,8 +1778,8 @@ mod tests {
     fn removing_an_account_is_refused_while_another_app_still_uses_its_tier() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id = with_conn(&state, |conn| {
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site(conn, site, "BestApi", "https://bestapi.store/v1")
         })
         .expect("save site");
@@ -1781,9 +1787,10 @@ mod tests {
         // 登录这一行 —— **必须有 `account_id`**：没有它的行派生不出 provider id、
         // 名下不可能有档位，守卫对那种行有意不拦（见
         // `an_untagged_row_is_not_blocked_by_another_accounts_current_tier`）。
-        let row_id = with_conn(&state, |conn| {
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -1829,7 +1836,7 @@ mod tests {
             "被拦下时那条档位必须完好 —— 半删会留下用户处置不了的孤儿记录"
         );
         assert!(
-            with_conn(&state, |conn| creds::get(conn, row_id))
+            with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
                 .expect("query row")
                 .is_some(),
             "档位没删掉，账号行也不该删"
@@ -1843,8 +1850,8 @@ mod tests {
     fn removing_an_account_still_works_when_no_app_uses_its_tiers() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id = with_conn(&state, |conn| {
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site(conn, site, "BestApi", "https://bestapi.store/v1")
         })
         .expect("save site");
@@ -1863,7 +1870,7 @@ mod tests {
             "档位该被连带清掉"
         );
         assert!(
-            with_conn(&state, |conn| creds::get(conn, row_id))
+            with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
                 .expect("query row")
                 .is_none(),
             "账号行该被删掉"
@@ -1887,15 +1894,16 @@ mod tests {
     fn forced_removal_deletes_even_while_another_app_uses_its_tier() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id = with_conn(&state, |conn| {
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site(conn, site, "BestApi", "https://bestapi.store/v1")
         })
         .expect("save site");
 
-        let row_id = with_conn(&state, |conn| {
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -1928,7 +1936,7 @@ mod tests {
             "force 该连当前项档位一起删掉"
         );
         assert!(
-            with_conn(&state, |conn| creds::get(conn, row_id))
+            with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
                 .expect("query row")
                 .is_none(),
             "账号行该被删掉"
@@ -1959,7 +1967,7 @@ mod tests {
         db.set_current_provider("codex", &b_tier)
             .expect("set current");
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         assert!(
             apps_using_this_accounts_tiers(&state, site, None).is_empty(),
@@ -2000,15 +2008,16 @@ mod tests {
     fn an_expired_session_keeps_its_tiers_label_and_usable_status() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
-        let row_id = with_conn(&state, |conn| {
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site(conn, site, "BestAPI", "https://bestapi.store")
         })
         .expect("save site");
-        with_conn(&state, |conn| {
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -2041,7 +2050,8 @@ mod tests {
         )
         .expect("seed tier");
 
-        with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
+        with_conn(&state, |conn, _vault| creds::clear_session(conn, row_id))
+            .expect("clear session");
 
         let rows = list_relays_impl(&state, AppType::Codex).expect("list relays");
         let row = rows.iter().find(|r| r.id == row_id).expect("行还在");
@@ -2063,9 +2073,11 @@ mod tests {
     fn a_relay_with_a_managed_key_can_query_balance_without_a_session() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id =
-            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
+            creds::save_site(conn, site, "BestAPI", site)
+        })
+        .expect("site");
         let provider_id = provision::provider_id_for(site, None, 1);
         let settings = provision::settings_config_for(
             &AppType::Codex,
@@ -2116,12 +2128,15 @@ mod tests {
     fn a_refreshable_session_is_not_reported_as_not_logged_in() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db);
-        let row_id =
-            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
-        with_conn(&state, |conn| {
+        let state = AppState::new(db).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
+            creds::save_site(conn, site, "BestAPI", site)
+        })
+        .expect("site");
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -2153,12 +2168,15 @@ mod tests {
     fn session_expired_usable_requires_an_extractable_managed_key() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id =
-            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
-        with_conn(&state, |conn| {
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
+            creds::save_site(conn, site, "BestAPI", site)
+        })
+        .expect("site");
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -2193,7 +2211,8 @@ mod tests {
             },
         )
         .expect("provider");
-        with_conn(&state, |conn| creds::clear_session(conn, row_id)).expect("clear session");
+        with_conn(&state, |conn, _vault| creds::clear_session(conn, row_id))
+            .expect("clear session");
 
         let row = list_relays_impl(&state, AppType::Codex)
             .expect("list")

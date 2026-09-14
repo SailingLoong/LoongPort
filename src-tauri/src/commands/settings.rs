@@ -75,6 +75,7 @@ fn merge_settings_for_save(
     incoming.current_provider_opencode = existing.current_provider_opencode.clone();
     incoming.current_provider_openclaw = existing.current_provider_openclaw.clone();
     incoming.current_provider_hermes = existing.current_provider_hermes.clone();
+    incoming.webdav_backup = existing.webdav_backup.clone();
 
     incoming
 }
@@ -82,7 +83,7 @@ fn merge_settings_for_save(
 /// 获取设置
 #[tauri::command]
 pub async fn get_settings() -> Result<crate::settings::AppSettings, String> {
-    Ok(crate::settings::get_settings_for_frontend())
+    crate::settings::get_settings_for_frontend().map_err(|error| error.to_string())
 }
 
 /// Update one app preference under the settings owner's write lock.
@@ -538,6 +539,22 @@ mod tests {
                 .map(|v| v.secret_access_key.as_str()),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn save_settings_preserves_legacy_webdav_backup_hidden_from_frontend() {
+        let legacy = serde_json::json!({
+            "username": "legacy-user",
+            "password": "legacy-canary-secret"
+        });
+        let existing = AppSettings {
+            webdav_backup: Some(legacy.clone()),
+            ..AppSettings::default()
+        };
+
+        let merged = merge_settings_for_save(AppSettings::default(), &existing);
+
+        assert_eq!(merged.webdav_backup, Some(legacy));
     }
 
     #[test]

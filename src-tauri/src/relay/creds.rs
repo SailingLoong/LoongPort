@@ -69,6 +69,10 @@ use rusqlite::{
 use std::time::Duration;
 
 use crate::error::AppError;
+use crate::secrets::{
+    inventory::{open_db, seal_db},
+    VaultContext,
+};
 
 /// LoongPort 支持的 relay 协议；由 discovery 定义，持久层直接复用同一个类型。
 pub use super::backend::BackendKind;
@@ -277,8 +281,8 @@ const SELECT_COLS: &str =
      auth_token, refresh_token, token_expires_at, sort_index, backend_kind, user_agent, \
      cf_clearance, pricing_synced_at";
 
-fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelayAccount> {
-    Ok(RelayAccount {
+fn row_to_relay(row: &rusqlite::Row<'_>, vault: &VaultContext) -> Result<RelayAccount, AppError> {
+    let mut account = RelayAccount {
         id: row.get(0)?,
         site_origin: row.get(1)?,
         site_name: row.get(2)?,
@@ -294,11 +298,28 @@ fn row_to_relay(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelayAccount> {
         user_agent: row.get(12)?,
         cf_clearance: row.get(13)?,
         pricing_synced_at: row.get(14)?,
-    })
+    };
+    let id = account.id.to_string();
+    account.auth_token = open_db(
+        vault,
+        "loongport_relay",
+        "auth_token",
+        &[&id],
+        &account.auth_token,
+    )?;
+    account.refresh_token = account
+        .refresh_token
+        .map(|raw| open_db(vault, "loongport_relay", "refresh_token", &[&id], &raw))
+        .transpose()?;
+    account.cf_clearance = account
+        .cf_clearance
+        .map(|raw| open_db(vault, "loongport_relay", "cf_clearance", &[&id], &raw))
+        .transpose()?;
+    Ok(account)
 }
 
 /// 列出全部站点，当前选中的排在最前。
-pub fn list(conn: &Connection) -> Result<Vec<RelayAccount>, AppError> {
+pub fn list(conn: &Connection, vault: &VaultContext) -> Result<Vec<RelayAccount>, AppError> {
     let mut stmt = conn
         .prepare(&format!(
             // ⚠️ 排序键必须是**用户拖出来的那个**，不能是任何会被别的操作改动的状态：
@@ -311,10 +332,10 @@ pub fn list(conn: &Connection) -> Result<Vec<RelayAccount>, AppError> {
         ))
         .map_err(|e| AppError::Database(format!("准备查询失败: {e}")))?;
     let rows = stmt
-        .query_map([], row_to_relay)
+        .query_map([], |row| Ok(row_to_relay(row, vault)))
         .map_err(|e| AppError::Database(format!("列出中转站失败: {e}")))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| AppError::Database(format!("读取中转站行失败: {e}")))
+    rows.map(|row| row.map_err(AppError::from).and_then(|row| row))
+        .collect()
 }
 
 /// 按用户拖出来的顺序重写 `sort_index`。
@@ -341,14 +362,18 @@ pub fn reorder(conn: &Connection, ids: &[i64]) -> Result<(), AppError> {
 }
 
 /// 按 id 读一行。
-pub fn get(conn: &Connection, id: i64) -> Result<Option<RelayAccount>, AppError> {
+pub fn get(
+    conn: &Connection,
+    vault: &VaultContext,
+    id: i64,
+) -> Result<Option<RelayAccount>, AppError> {
     conn.query_row(
         &format!("SELECT {SELECT_COLS} FROM loongport_relay WHERE id = ?1"),
         params![id],
-        row_to_relay,
+        |row| Ok(row_to_relay(row, vault)),
     )
-    .optional()
-    .map_err(|e| AppError::Database(format!("读取中转站失败: {e}")))
+    .optional()?
+    .transpose()
 }
 
 pub fn mark_pricing_synced(
@@ -501,6 +526,7 @@ pub struct AuthenticatedRelay<'a> {
 /// and account identification have all completed successfully.
 pub fn save_authenticated_relay(
     conn: &Connection,
+    vault: &VaultContext,
     relay: AuthenticatedRelay<'_>,
 ) -> Result<i64, AppError> {
     let AuthenticatedRelay {
@@ -525,59 +551,48 @@ pub fn save_authenticated_relay(
         .map_err(|e| AppError::Database(format!("查询已有中转站账号失败: {e}")))?;
     let now = now_unix();
 
-    let id = if let Some(id) = existing {
-        transaction
-            .execute(
-                "UPDATE loongport_relay
-                 SET site_name = ?1, api_base_url = ?2, backend_kind = ?3,
-                     account_label = ?4, login_identifier = ?5, auth_token = ?6,
-                     refresh_token = ?7, token_expires_at = ?8, user_agent = ?9,
-                     cf_clearance = ?10, updated_at = ?11
-                 WHERE id = ?12",
-                params![
-                    site.site_name,
-                    site.api_base_url,
-                    site.backend_kind.as_str(),
-                    account.label,
-                    account.login_identifier,
-                    auth_token,
-                    refresh_token,
-                    token_expires_at,
-                    session.user_agent,
-                    session.cf_clearance,
-                    now,
-                    id,
-                ],
-            )
-            .map_err(|e| AppError::Database(format!("更新中转站账号失败: {e}")))?;
-        id
-    } else {
-        transaction
-            .execute(
-                "INSERT INTO loongport_relay
-                    (site_origin, site_name, api_base_url, backend_kind,
-                     account_id, account_label, login_identifier, auth_token,
-                     refresh_token, token_expires_at, user_agent, cf_clearance, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    site.site_origin,
-                    site.site_name,
-                    site.api_base_url,
-                    site.backend_kind.as_str(),
-                    account.id,
-                    account.label,
-                    account.login_identifier,
-                    auth_token,
-                    refresh_token,
-                    token_expires_at,
-                    session.user_agent,
-                    session.cf_clearance,
-                    now,
-                ],
-            )
-            .map_err(|e| AppError::Database(format!("保存认证中转站失败: {e}")))?;
-        transaction.last_insert_rowid()
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            transaction.execute("INSERT INTO loongport_relay (site_origin,site_name,api_base_url,backend_kind,account_id) VALUES (?1,?2,?3,?4,?5)", params![site.site_origin,site.site_name,site.api_base_url,site.backend_kind.as_str(),account.id])?;
+            transaction.last_insert_rowid()
+        }
     };
+    let identity = id.to_string();
+    let auth_token = seal_db(
+        vault,
+        "loongport_relay",
+        "auth_token",
+        &[&identity],
+        auth_token,
+    )?;
+    let refresh_token = refresh_token
+        .map(|value| {
+            seal_db(
+                vault,
+                "loongport_relay",
+                "refresh_token",
+                &[&identity],
+                value,
+            )
+        })
+        .transpose()?;
+    let cf_clearance = session
+        .cf_clearance
+        .map(|value| {
+            seal_db(
+                vault,
+                "loongport_relay",
+                "cf_clearance",
+                &[&identity],
+                value,
+            )
+        })
+        .transpose()?;
+    transaction.execute(
+        "UPDATE loongport_relay SET site_name=?1,api_base_url=?2,backend_kind=?3,account_label=?4,login_identifier=?5,auth_token=?6,refresh_token=?7,token_expires_at=?8,user_agent=?9,cf_clearance=?10,updated_at=?11 WHERE id=?12",
+        params![site.site_name,site.api_base_url,site.backend_kind.as_str(),account.label,account.login_identifier,auth_token,refresh_token,token_expires_at,session.user_agent,cf_clearance,now,id],
+    )?;
 
     transaction
         .commit()
@@ -589,8 +604,10 @@ pub fn save_authenticated_relay(
 ///
 /// 返回**最终生效的那一行的 id** —— 可能不是传进来的 `id`：如果这个站上已经有同一个账号的
 /// 行（用户重新添加了已配过的站），凭据写进那一行、把刚建的这条删掉。
+#[allow(clippy::too_many_arguments)]
 pub fn save_credentials(
     conn: &Connection,
+    vault: &VaultContext,
     id: i64,
     account: AccountIdentity<'_>,
     auth_token: &str,
@@ -638,6 +655,36 @@ pub fn save_credentials(
         .map_err(|e| AppError::Database(format!("查询重复账号失败: {e}")))?;
 
     let target = duplicate.unwrap_or(id);
+    let identity = target.to_string();
+    let auth_token = seal_db(
+        vault,
+        "loongport_relay",
+        "auth_token",
+        &[&identity],
+        auth_token,
+    )?;
+    let refresh_token = refresh_token
+        .map(|value| {
+            seal_db(
+                vault,
+                "loongport_relay",
+                "refresh_token",
+                &[&identity],
+                value,
+            )
+        })
+        .transpose()?;
+    let cf_clearance = cf_clearance
+        .map(|value| {
+            seal_db(
+                vault,
+                "loongport_relay",
+                "cf_clearance",
+                &[&identity],
+                value,
+            )
+        })
+        .transpose()?;
 
     transaction
         .execute(
@@ -687,6 +734,7 @@ pub fn save_credentials(
 /// ⇒ 没有重复可言。走那条会白查一次重复，还得传一遍已知的 account_id。
 pub fn update_tokens(
     conn: &Connection,
+    vault: &VaultContext,
     id: i64,
     auth_token: &str,
     refresh_token: Option<&str>,
@@ -697,7 +745,27 @@ pub fn update_tokens(
             "UPDATE loongport_relay
              SET auth_token = ?1, refresh_token = ?2, token_expires_at = ?3, updated_at = ?4
              WHERE id = ?5",
-            params![auth_token, refresh_token, token_expires_at, now_unix(), id],
+            params![
+                seal_db(
+                    vault,
+                    "loongport_relay",
+                    "auth_token",
+                    &[&id.to_string()],
+                    auth_token
+                )?,
+                refresh_token
+                    .map(|value| seal_db(
+                        vault,
+                        "loongport_relay",
+                        "refresh_token",
+                        &[&id.to_string()],
+                        value
+                    ))
+                    .transpose()?,
+                token_expires_at,
+                now_unix(),
+                id
+            ],
         )
         .map_err(|e| AppError::Database(format!("更新 token 失败: {e}")))?;
     if changed == 0 {
@@ -720,13 +788,24 @@ pub fn update_tokens(
 /// credential 值不进日志、不进错误文案。
 pub fn update_refresh_credential(
     conn: &Connection,
+    vault: &VaultContext,
     relay_id: i64,
     refresh_credential: &str,
 ) -> Result<(), AppError> {
     let changed = conn
         .execute(
             "UPDATE loongport_relay SET refresh_token = ?1, updated_at = ?2 WHERE id = ?3",
-            params![refresh_credential, now_unix(), relay_id],
+            params![
+                seal_db(
+                    vault,
+                    "loongport_relay",
+                    "refresh_token",
+                    &[&relay_id.to_string()],
+                    refresh_credential
+                )?,
+                now_unix(),
+                relay_id
+            ],
         )
         .map_err(|e| AppError::Database(format!("更新 refresh credential 失败: {e}")))?;
     if changed == 0 {
@@ -908,34 +987,128 @@ mod tests {
         }
     }
 
-    fn seed_authenticated_relay(conn: &Connection, site_origin: &str, account_id: i64) -> i64 {
-        save_authenticated_relay(conn, authenticated(site_origin, account_id, "access-token"))
-            .unwrap()
+    #[test]
+    fn encrypted_relay_insert_rolls_back_allocated_identity_if_update_fails() {
+        let conn = mem();
+        let vault = VaultContext::generate().unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_credential BEFORE UPDATE OF auth_token ON loongport_relay BEGIN SELECT RAISE(ABORT, 'reject update'); END;").unwrap();
+        assert!(save_authenticated_relay(
+            &conn,
+            &vault,
+            authenticated("https://relay.example", 1, "canary")
+        )
+        .is_err());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM loongport_relay", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn secret_relay_storage_roundtrips_without_plaintext() {
+        let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
+        let mut account = authenticated("https://relay.example", 7, "relay-auth-canary");
+        account.refresh_token = Some("relay-refresh-canary");
+        account.session.cf_clearance = Some("relay-cookie-canary");
+        let id = save_authenticated_relay(&conn, &_vault, account).unwrap();
+        assert_eq!(
+            get(&conn, &_vault, id).unwrap().unwrap().auth_token,
+            "relay-auth-canary"
+        );
+        let raw: (String, String, String) = conn
+            .query_row(
+                "SELECT auth_token, refresh_token, cf_clearance FROM loongport_relay WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        for value in [raw.0, raw.1, raw.2] {
+            assert!(!value.contains("canary"));
+        }
+    }
+
+    #[test]
+    fn encrypted_relay_credentials_reject_row_transplant_and_foreign_key() {
+        let conn = mem();
+        let vault = VaultContext::generate().unwrap();
+        let first = save_authenticated_relay(
+            &conn,
+            &vault,
+            authenticated("https://one.example", 1, "first-secret"),
+        )
+        .unwrap();
+        let second = save_authenticated_relay(
+            &conn,
+            &vault,
+            authenticated("https://two.example", 2, "second-secret"),
+        )
+        .unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT auth_token FROM loongport_relay WHERE id=?1",
+                [first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE loongport_relay SET auth_token=?1 WHERE id=?2",
+            params![raw, second],
+        )
+        .unwrap();
+        assert!(get(&conn, &vault, second).is_err());
+        assert!(list(&conn, &vault).is_err());
+        assert!(get(&conn, &VaultContext::generate().unwrap(), first).is_err());
+    }
+
+    fn seed_authenticated_relay(
+        conn: &Connection,
+        vault: &VaultContext,
+        site_origin: &str,
+        account_id: i64,
+    ) -> i64 {
+        save_authenticated_relay(
+            conn,
+            vault,
+            authenticated(site_origin, account_id, "access-token"),
+        )
+        .unwrap()
     }
 
     #[test]
     fn marking_one_relay_pricing_fresh_does_not_touch_another() {
         let conn = mem();
-        let first = seed_authenticated_relay(&conn, "https://a.example", 1);
-        let second = seed_authenticated_relay(&conn, "https://b.example", 2);
+        let _vault = VaultContext::generate().unwrap();
+        let first = seed_authenticated_relay(&conn, &_vault, "https://a.example", 1);
+        let second = seed_authenticated_relay(&conn, &_vault, "https://b.example", 2);
         mark_pricing_synced(&conn, first, 123).unwrap();
         assert_eq!(
-            get(&conn, first).unwrap().unwrap().pricing_synced_at,
+            get(&conn, &_vault, first)
+                .unwrap()
+                .unwrap()
+                .pricing_synced_at,
             Some(123)
         );
-        assert_eq!(get(&conn, second).unwrap().unwrap().pricing_synced_at, None);
+        assert_eq!(
+            get(&conn, &_vault, second)
+                .unwrap()
+                .unwrap()
+                .pricing_synced_at,
+            None
+        );
     }
 
     #[test]
     fn pricing_is_fresh_only_within_the_interval() {
         let conn = mem();
-        let relay_id = seed_authenticated_relay(&conn, "https://relay.example", 1);
-        let unsynced = get(&conn, relay_id).unwrap().unwrap();
+        let _vault = VaultContext::generate().unwrap();
+        let relay_id = seed_authenticated_relay(&conn, &_vault, "https://relay.example", 1);
+        let unsynced = get(&conn, &_vault, relay_id).unwrap().unwrap();
         let interval = std::time::Duration::from_secs(60);
         assert!(!unsynced.pricing_is_fresh(159, interval));
 
         mark_pricing_synced(&conn, relay_id, 100).unwrap();
-        let synced = get(&conn, relay_id).unwrap().unwrap();
+        let synced = get(&conn, &_vault, relay_id).unwrap().unwrap();
         assert!(synced.pricing_is_fresh(159, interval));
         assert!(!synced.pricing_is_fresh(160, interval));
     }
@@ -943,9 +1116,10 @@ mod tests {
     #[test]
     fn pricing_is_fresh_tolerates_the_clock_moving_backwards() {
         let conn = mem();
-        let relay_id = seed_authenticated_relay(&conn, "https://relay.example", 1);
+        let _vault = VaultContext::generate().unwrap();
+        let relay_id = seed_authenticated_relay(&conn, &_vault, "https://relay.example", 1);
         mark_pricing_synced(&conn, relay_id, 100).unwrap();
-        let relay = get(&conn, relay_id).unwrap().unwrap();
+        let relay = get(&conn, &_vault, relay_id).unwrap().unwrap();
 
         assert!(relay.pricing_is_fresh(99, std::time::Duration::from_secs(60)));
     }
@@ -953,14 +1127,16 @@ mod tests {
     #[test]
     fn save_authenticated_relay_inserts_only_a_complete_logged_in_row() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
 
         let id = save_authenticated_relay(
             &conn,
+            &_vault,
             authenticated("https://relay.example", 7, "access-token"),
         )
         .unwrap();
 
-        let rows = list(&conn).unwrap();
+        let rows = list(&conn, &_vault).unwrap();
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.id, id);
@@ -972,20 +1148,23 @@ mod tests {
     #[test]
     fn save_authenticated_relay_updates_the_existing_account_without_staging_a_row() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let first = save_authenticated_relay(
             &conn,
+            &_vault,
             authenticated("https://relay.example", 7, "old-token"),
         )
         .unwrap();
 
         let second = save_authenticated_relay(
             &conn,
+            &_vault,
             authenticated("https://relay.example", 7, "new-token"),
         )
         .unwrap();
 
         assert_eq!(second, first);
-        let rows = list(&conn).unwrap();
+        let rows = list(&conn, &_vault).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].auth_token, "new-token");
         assert!(rows.iter().all(|row| row.account_id.is_some()));
@@ -1006,9 +1185,11 @@ mod tests {
     #[test]
     fn select_cols_match_the_row_reader() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let id = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             id,
             ident(7, "标签", "me@x.com"),
             "tok",
@@ -1019,7 +1200,7 @@ mod tests {
         .unwrap();
 
         // 每个字段都取回**它自己**的值 —— 索引错位时这些会互相串或直接报错。
-        let op = get(&conn, id).unwrap().expect("那一行该在");
+        let op = get(&conn, &_vault, id).unwrap().expect("那一行该在");
         assert_eq!(op.id, id);
         assert_eq!(op.site_origin, "https://a.dev");
         assert_eq!(op.site_name, "A");
@@ -1063,6 +1244,7 @@ mod tests {
         );
 
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let newapi_id = save_site_with_backend(
             &conn,
             "https://newapi.example",
@@ -1080,11 +1262,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            get(&conn, newapi_id).unwrap().unwrap().backend_kind,
+            get(&conn, &_vault, newapi_id)
+                .unwrap()
+                .unwrap()
+                .backend_kind,
             BackendKind::NewApi
         );
         assert_eq!(
-            get(&conn, legacy_id).unwrap().unwrap().backend_kind,
+            get(&conn, &_vault, legacy_id)
+                .unwrap()
+                .unwrap()
+                .backend_kind,
             BackendKind::Sub2Api,
             "旧 save_site 调用必须继续默认使用 sub2api"
         );
@@ -1093,6 +1281,7 @@ mod tests {
     #[test]
     fn saving_a_detected_backend_updates_an_existing_unlogged_site() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let id = save_site(
             &conn,
             "https://site.example",
@@ -1111,19 +1300,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(same_id, id);
-        let relay = get(&conn, id).unwrap().unwrap();
+        let relay = get(&conn, &_vault, id).unwrap().unwrap();
         assert_eq!(relay.site_name, "新名称");
         assert_eq!(relay.backend_kind, BackendKind::NewApi);
     }
 
     #[test]
     fn list_is_empty_before_any_site_saved() {
-        assert!(list(&mem()).unwrap().is_empty());
+        assert!(list(&mem(), &VaultContext::generate().unwrap())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn create_table_removes_legacy_unauthenticated_placeholders() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         conn.execute(
             "INSERT INTO loongport_relay
                 (site_origin, site_name, api_base_url, account_id, auth_token)
@@ -1134,27 +1326,33 @@ mod tests {
 
         create_table(&conn).unwrap();
 
-        assert!(list(&conn).unwrap().is_empty());
+        assert!(list(&conn, &_vault).unwrap().is_empty());
     }
 
     #[test]
     fn adding_the_same_site_twice_before_login_reuses_one_row() {
         // 用户连点两次「添加」不该得到两行。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://a.dev", "A 改名了", "https://a.dev/v1").unwrap();
         assert_eq!(a, b, "未登录的同站行应被复用");
-        assert_eq!(list(&conn).unwrap().len(), 1);
+        assert_eq!(list(&conn, &_vault).unwrap().len(), 1);
         // 顺带更新了展示名。
-        assert_eq!(get(&conn, a).unwrap().unwrap().site_name, "A 改名了");
+        assert_eq!(
+            get(&conn, &_vault, a).unwrap().unwrap().site_name,
+            "A 改名了"
+        );
     }
 
     #[test]
     fn same_site_different_accounts_coexist() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             first,
             ident(100, "me@x.com", "me@x.com"),
             "tok1",
@@ -1169,6 +1367,7 @@ mod tests {
         assert_ne!(first, second, "已登录的行不该被复用");
         let final_id = save_credentials(
             &conn,
+            &_vault,
             second,
             ident(200, "alt@x.com", "alt@x.com"),
             "tok2",
@@ -1179,16 +1378,18 @@ mod tests {
         .unwrap();
         assert_eq!(final_id, second);
 
-        assert_eq!(list(&conn).unwrap().len(), 2);
+        assert_eq!(list(&conn, &_vault).unwrap().len(), 2);
     }
 
     #[test]
     fn re_adding_a_site_with_the_same_account_merges_instead_of_duplicating() {
         // 这条是用户明确要的去重：同「域名 + 账号」只留一份。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let first = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             first,
             ident(100, "me@x.com", "me@x.com"),
             "old-token",
@@ -1202,6 +1403,7 @@ mod tests {
         let second = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let final_id = save_credentials(
             &conn,
+            &_vault,
             second,
             ident(100, "me@x.com", "me@x.com"),
             "new-token",
@@ -1213,15 +1415,16 @@ mod tests {
 
         // 合并到原来那行，新建的那条被删掉。
         assert_eq!(final_id, first, "应合并回已有记录");
-        assert_eq!(list(&conn).unwrap().len(), 1);
+        assert_eq!(list(&conn, &_vault).unwrap().len(), 1);
         // 凭据用的是新的那份。
-        let op = get(&conn, first).unwrap().unwrap();
+        let op = get(&conn, &_vault, first).unwrap().unwrap();
         assert_eq!(op.auth_token, "new-token");
     }
 
     #[test]
     fn duplicate_account_merge_keeps_existing_identity_and_copies_fresh_site_metadata() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let existing = save_site_with_backend(
             &conn,
             "https://a.dev",
@@ -1232,6 +1435,7 @@ mod tests {
         .unwrap();
         save_credentials(
             &conn,
+            &_vault,
             existing,
             ident(100, "Old account", "old-login"),
             "old-token",
@@ -1256,6 +1460,7 @@ mod tests {
         .unwrap();
         let final_id = save_credentials(
             &conn,
+            &_vault,
             source,
             ident(100, "Fresh account", "fresh-login"),
             "fresh-token",
@@ -1266,7 +1471,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(final_id, existing);
-        let merged = get(&conn, existing).unwrap().unwrap();
+        let merged = get(&conn, &_vault, existing).unwrap().unwrap();
         assert_eq!(merged.sort_index, 9);
         assert_eq!(merged.site_name, "Fresh NewAPI name");
         assert_eq!(merged.api_base_url, "https://a.dev/new-api");
@@ -1275,12 +1480,13 @@ mod tests {
         assert_eq!(merged.login_identifier, "fresh-login");
         assert_eq!(merged.auth_token, "fresh-token");
         assert_eq!(merged.refresh_token.as_deref(), Some("fresh-refresh"));
-        assert!(get(&conn, source).unwrap().is_none());
+        assert!(get(&conn, &_vault, source).unwrap().is_none());
     }
 
     #[test]
     fn duplicate_account_merge_rolls_back_when_source_delete_fails() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let existing = save_site_with_backend(
             &conn,
             "https://a.dev",
@@ -1291,6 +1497,7 @@ mod tests {
         .unwrap();
         save_credentials(
             &conn,
+            &_vault,
             existing,
             ident(100, "Old account", "old-login"),
             "old-token",
@@ -1316,6 +1523,7 @@ mod tests {
 
         save_credentials(
             &conn,
+            &_vault,
             source,
             ident(100, "Fresh account", "fresh-login"),
             "fresh-token",
@@ -1325,13 +1533,13 @@ mod tests {
         )
         .expect_err("delete failure must roll the merge back");
 
-        let unchanged = get(&conn, existing).unwrap().unwrap();
+        let unchanged = get(&conn, &_vault, existing).unwrap().unwrap();
         assert_eq!(unchanged.site_name, "Old name");
         assert_eq!(unchanged.api_base_url, "https://a.dev/old-api");
         assert_eq!(unchanged.backend_kind, BackendKind::Sub2Api);
         assert_eq!(unchanged.auth_token, "old-token");
         assert_eq!(unchanged.refresh_token.as_deref(), Some("old-refresh"));
-        assert!(get(&conn, source).unwrap().is_some());
+        assert!(get(&conn, &_vault, source).unwrap().is_some());
     }
 
     #[test]
@@ -1340,9 +1548,11 @@ mod tests {
         // account_id 在新后端毫无意义，必须一起清。
         // ⚠️ 「登录态失效」走的**不是**这个函数，走 `clear_session`（见下一条）。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(100, "me@x.com", "me@x.com"),
             "tok",
@@ -1352,7 +1562,7 @@ mod tests {
         )
         .unwrap();
         clear_credentials(&conn, a).unwrap();
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert_eq!(op.auth_token, "");
         assert!(op.account_id.is_none());
         assert_eq!(op.account_label, "");
@@ -1367,9 +1577,11 @@ mod tests {
     #[test]
     fn clear_session_keeps_the_account_identity() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(100, "我的号", "me@x.com"),
             "tok",
@@ -1384,7 +1596,7 @@ mod tests {
 
         clear_session(&conn, a).unwrap();
 
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert_eq!(op.auth_token, "", "会话必须清掉");
         assert!(op.refresh_token.is_none());
         assert!(op.token_expires_at.is_none());
@@ -1410,9 +1622,11 @@ mod tests {
     #[test]
     fn clear_session_makes_the_row_report_session_expired() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(100, "me@x.com", "me@x.com"),
             "tok",
@@ -1424,7 +1638,7 @@ mod tests {
 
         clear_session(&conn, a).unwrap();
 
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert!(!op.token_looks_valid(0));
         assert!(
             op.session_expired(0),
@@ -1439,9 +1653,11 @@ mod tests {
     #[test]
     fn relogin_on_an_expired_row_can_switch_to_a_different_account() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(100, "old@x.com", "old@x.com"),
             "tok",
@@ -1454,6 +1670,7 @@ mod tests {
 
         let target = save_credentials(
             &conn,
+            &_vault,
             a,
             ident(200, "new@x.com", "new@x.com"),
             "tok2",
@@ -1464,10 +1681,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(target, a, "没有别的行持有 200，就该写回本行");
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert_eq!(op.account_id, Some(200));
         assert_eq!(op.account_label, "new@x.com");
-        assert_eq!(list(&conn).unwrap().len(), 1, "不该多出一行");
+        assert_eq!(list(&conn, &_vault).unwrap().len(), 1, "不该多出一行");
     }
 
     #[test]
@@ -1476,23 +1693,25 @@ mod tests {
         // 断言的是「删掉当前站要把剩下最早那条提为当前」。`is_current` 整个概念
         // 已删 ⇒ 现在要钉的是更简单的事实：删一行只影响那一行。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
 
         remove(&conn, b).unwrap();
 
-        let rows = list(&conn).unwrap();
+        let rows = list(&conn, &_vault).unwrap();
         assert_eq!(rows.len(), 1, "只该少掉被删那一行");
         assert_eq!(rows[0].id, a);
-        assert!(get(&conn, b).unwrap().is_none(), "b 该真的没了");
+        assert!(get(&conn, &_vault, b).unwrap().is_none(), "b 该真的没了");
     }
 
     #[test]
     fn removing_the_last_site_leaves_nothing() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         remove(&conn, a).unwrap();
-        assert!(list(&conn).unwrap().is_empty());
+        assert!(list(&conn, &_vault).unwrap().is_empty());
     }
 
     #[test]
@@ -1500,6 +1719,7 @@ mod tests {
         // 静默成功会让「登录成功但什么都没存下」变成查不出来的问题。
         let err = save_credentials(
             &mem(),
+            &VaultContext::generate().unwrap(),
             999,
             ident(1, "x@x.com", "x@x.com"),
             "tok",
@@ -1514,9 +1734,11 @@ mod tests {
     #[test]
     fn token_validity_leaves_a_margin_and_tolerates_missing_expiry() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(1, "x@x.com", "x@x.com"),
             "tok",
@@ -1525,7 +1747,7 @@ mod tests {
             SessionEnvironment::default(),
         )
         .unwrap();
-        let base = get(&conn, a).unwrap().unwrap();
+        let base = get(&conn, &_vault, a).unwrap().unwrap();
 
         assert!(base.token_looks_valid(0));
         // 60 秒余量内算已过期：卡边界发请求只会拿到 401，白跑一趟。
@@ -1550,10 +1772,11 @@ mod tests {
     #[test]
     fn session_expired_separates_never_logged_in_from_credentials_gone_stale() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
 
         // 从没登录：token 无效但也**不是过期** —— 前端该摆「登录」而不是「登录已过期」。
-        let fresh = get(&conn, a).unwrap().unwrap();
+        let fresh = get(&conn, &_vault, a).unwrap().unwrap();
         assert!(!fresh.token_looks_valid(0));
         assert!(
             !fresh.session_expired(0),
@@ -1563,6 +1786,7 @@ mod tests {
         // 登录过 + token 过期 + 没有 refresh_token ⇒ 真过期。
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(1, "x@x.com", "x@x.com"),
             "tok",
@@ -1571,7 +1795,7 @@ mod tests {
             SessionEnvironment::default(),
         )
         .unwrap();
-        let stale = get(&conn, a).unwrap().unwrap();
+        let stale = get(&conn, &_vault, a).unwrap().unwrap();
         assert!(stale.session_expired(2000));
         // 同一条记录在 token 还有效时不算过期。
         assert!(!stale.session_expired(0));
@@ -1590,9 +1814,11 @@ mod tests {
     #[test]
     fn refresh_token_keeps_a_row_refreshable_until_reauthentication_is_required() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let id = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             id,
             ident(1, "x@x.com", "x@x.com"),
             "tok",
@@ -1601,7 +1827,7 @@ mod tests {
             SessionEnvironment::default(),
         )
         .unwrap();
-        let mut renewable = get(&conn, id).unwrap().unwrap();
+        let mut renewable = get(&conn, &_vault, id).unwrap().unwrap();
         renewable.auth_token.clear();
         assert!(renewable.can_refresh(0));
 
@@ -1620,11 +1846,16 @@ mod tests {
         // **除了 `reorder`，没有任何操作能改变行序** —— 这里拿「登录」当代表，
         // 它是当初真的会让行跳位的那个操作（`save_credentials` 曾在末尾 `set_current`）。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
         let c = save_site(&conn, "https://c.dev", "C", "https://c.dev/v1").unwrap();
 
-        let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
+        let order: Vec<i64> = list(&conn, &_vault)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
         assert_eq!(
             order,
             vec![a, b, c],
@@ -1634,6 +1865,7 @@ mod tests {
         // 给最后那行登录 —— 行序仍然不能变（这正是用户报的那个 bug 的形态）。
         save_credentials(
             &conn,
+            &_vault,
             c,
             ident(1, "c@x.com", "c@x.com"),
             "tok",
@@ -1642,12 +1874,17 @@ mod tests {
             SessionEnvironment::default(),
         )
         .unwrap();
-        let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
+        let order: Vec<i64> = list(&conn, &_vault)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
         assert_eq!(order, vec![a, b, c], "登录某一行不该让它跳到最前");
 
         // 给第一行登录也一样。
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(2, "a@x.com", "a@x.com"),
             "tok",
@@ -1656,25 +1893,35 @@ mod tests {
             SessionEnvironment::default(),
         )
         .unwrap();
-        let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
+        let order: Vec<i64> = list(&conn, &_vault)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
         assert_eq!(order, vec![a, b, c], "任何登录都不该改变行序");
     }
 
     #[test]
     fn reorder_persists_user_order() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         let b = save_site(&conn, "https://b.dev", "B", "https://b.dev/v1").unwrap();
         let c = save_site(&conn, "https://c.dev", "C", "https://c.dev/v1").unwrap();
 
         // 用户把 C 拖到最前。
         reorder(&conn, &[c, a, b]).unwrap();
-        let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
+        let order: Vec<i64> = list(&conn, &_vault)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
         assert_eq!(order, vec![c, a, b]);
 
         // 拖完之后登录其中一行，顺序仍不变 —— 两件事互不干扰。
         save_credentials(
             &conn,
+            &_vault,
             b,
             ident(1, "b@x.com", "b@x.com"),
             "tok",
@@ -1683,7 +1930,11 @@ mod tests {
             SessionEnvironment::default(),
         )
         .unwrap();
-        let order: Vec<i64> = list(&conn).unwrap().into_iter().map(|o| o.id).collect();
+        let order: Vec<i64> = list(&conn, &_vault)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
         assert_eq!(order, vec![c, a, b], "登录不该动用户拖出来的顺序");
     }
 
@@ -1692,9 +1943,11 @@ mod tests {
         // 这条是这个字段存在的理由：设了昵称的用户，`account_label` 是昵称而不是邮箱
         // —— 拿它去预填登录框就填错了（sub2api 那个框要邮箱格式）。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(7, "张三", "me@x.com"),
             "tok",
@@ -1704,7 +1957,7 @@ mod tests {
         )
         .unwrap();
 
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert_eq!(op.account_label, "张三", "给人看的是昵称");
         assert_eq!(op.login_identifier, "me@x.com", "填表单用的是登录标识");
     }
@@ -1713,9 +1966,11 @@ mod tests {
     fn clearing_credentials_keeps_the_login_identifier() {
         // clear_credentials 正是「重登前的那一步」，把预填值一起清掉等于让用户重新输邮箱。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(7, "张三", "me@x.com"),
             "tok",
@@ -1727,7 +1982,7 @@ mod tests {
 
         clear_credentials(&conn, a).unwrap();
 
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert_eq!(op.auth_token, "", "凭据该清掉");
         assert_eq!(op.account_id, None, "account_id 该清掉（下次可能换账号）");
         assert_eq!(
@@ -1741,9 +1996,11 @@ mod tests {
         // 用户在中转站那边改了昵称与邮箱：服务端主键不变 ⇒ 仍是同一个账号，
         // 只有展示与预填要跟上。续期路径靠这个函数刷，否则站点选择器一直挂旧标签。
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         save_credentials(
             &conn,
+            &_vault,
             a,
             ident(7, "老名字", "old@x.com"),
             "tok",
@@ -1756,7 +2013,7 @@ mod tests {
         // 传一个**不同的** account_id（99）：已有值非空 ⇒ 必须不被覆盖。
         refresh_account_identity(&conn, a, ident(99, "新名字", "new@x.com")).unwrap();
 
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert_eq!(op.account_label, "新名字");
         assert_eq!(op.login_identifier, "new@x.com");
         assert_eq!(
@@ -1780,19 +2037,20 @@ mod tests {
     #[test]
     fn refreshing_identity_backfills_a_missing_account_id() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let a = save_site(&conn, "https://a.dev", "A", "https://a.dev/v1").unwrap();
         // 造出那种半成品行：有 token、没账号身份（`save_site` 不写 account_id，
         // 再单独塞一把 token 进去 —— 与实测到的脏数据同形）。
-        update_tokens(&conn, a, "tok", Some("refresh"), None).unwrap();
+        update_tokens(&conn, &_vault, a, "tok", Some("refresh"), None).unwrap();
         assert_eq!(
-            get(&conn, a).unwrap().unwrap().account_id,
+            get(&conn, &_vault, a).unwrap().unwrap().account_id,
             None,
             "前提：这行确实没有 account_id"
         );
 
         refresh_account_identity(&conn, a, ident(42, "名字", "me@x.com")).unwrap();
 
-        let op = get(&conn, a).unwrap().unwrap();
+        let op = get(&conn, &_vault, a).unwrap().unwrap();
         assert_eq!(
             op.account_id,
             Some(42),
@@ -1820,13 +2078,14 @@ mod tests {
     #[test]
     fn update_refresh_credential_rotates_only_the_refresh_column() {
         let conn = mem();
+        let _vault = VaultContext::generate().unwrap();
         let mut relay = authenticated("https://newapi.example", 7, "access-token");
         relay.site.backend_kind = BackendKind::NewApi;
         relay.session = SessionEnvironment {
             user_agent: Some("UA/1"),
             cf_clearance: Some("cf-clearance"),
         };
-        let id = save_authenticated_relay(&conn, relay).unwrap();
+        let id = save_authenticated_relay(&conn, &_vault, relay).unwrap();
         mark_pricing_synced(&conn, id, 555).unwrap();
         conn.execute(
             "UPDATE loongport_relay SET sort_index = 9 WHERE id = ?1",
@@ -1843,9 +2102,9 @@ mod tests {
         )
         .unwrap();
 
-        let before = get(&conn, id).unwrap().unwrap();
-        update_refresh_credential(&conn, id, "rotated-refresh").unwrap();
-        let after = get(&conn, id).unwrap().unwrap();
+        let before = get(&conn, &_vault, id).unwrap().unwrap();
+        update_refresh_credential(&conn, &_vault, id, "rotated-refresh").unwrap();
+        let after = get(&conn, &_vault, id).unwrap().unwrap();
 
         assert_eq!(after.refresh_token.as_deref(), Some("rotated-refresh"));
         // 除 refresh_token 外整行必须原样（updated_at 不进结构体，钉在最后）。
@@ -1885,7 +2144,13 @@ mod tests {
 
     #[test]
     fn update_refresh_credential_on_a_missing_row_is_a_visible_error() {
-        let err = update_refresh_credential(&mem(), 999, "rotated-refresh").unwrap_err();
+        let err = update_refresh_credential(
+            &mem(),
+            &VaultContext::generate().unwrap(),
+            999,
+            "rotated-refresh",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("站点记录不存在"), "{err}");
         assert!(!err.to_string().contains("rotated-refresh"), "{err}");
     }

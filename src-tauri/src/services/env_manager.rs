@@ -1,4 +1,5 @@
 use super::env_checker::EnvConflict;
+use crate::secrets::{files::OwnedFile, session::SecretSession};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -18,9 +19,12 @@ pub struct BackupInfo {
 }
 
 /// Delete environment variables with automatic backup
-pub fn delete_env_vars(conflicts: Vec<EnvConflict>) -> Result<BackupInfo, String> {
+pub fn delete_env_vars(
+    session: &SecretSession,
+    conflicts: Vec<EnvConflict>,
+) -> Result<BackupInfo, String> {
     // Step 1: Create backup
-    let backup_info = create_backup(&conflicts)?;
+    let backup_info = create_backup(session, &conflicts)?;
 
     // Step 2: Delete variables
     for conflict in &conflicts {
@@ -40,9 +44,9 @@ pub fn delete_env_vars(conflicts: Vec<EnvConflict>) -> Result<BackupInfo, String
 }
 
 /// Create backup file before deletion
-fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
+fn create_backup(session: &SecretSession, conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
     // Get backup directory
-    let backup_dir = get_backup_dir()?;
+    let backup_dir = get_backup_dir(session);
     fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
 
     // Generate backup file name with timestamp
@@ -57,18 +61,21 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
     };
 
     // Write backup file
-    let json = serde_json::to_string_pretty(&backup_info)
-        .map_err(|e| format!("序列化备份数据失败: {e}"))?;
+    let json = zeroize::Zeroizing::new(
+        serde_json::to_vec_pretty(&backup_info)
+            .map_err(|_| "Invalid environment backup".to_string())?,
+    );
 
-    fs::write(&backup_file, json).map_err(|e| format!("写入备份文件失败: {e}"))?;
+    OwnedFile::at_path(session, &backup_file)
+        .and_then(|file| file.write(session, &json))
+        .map_err(|e| e.to_string())?;
 
     Ok(backup_info)
 }
 
 /// Get backup directory path
-fn get_backup_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
-    Ok(home.join(".cc-switch").join("backups"))
+fn get_backup_dir(session: &SecretSession) -> PathBuf {
+    session.root().join("backups")
 }
 
 /// Delete a single environment variable
@@ -150,12 +157,23 @@ fn delete_single_env(conflict: &EnvConflict) -> Result<(), String> {
 }
 
 /// Restore environment variables from backup
-pub fn restore_from_backup(backup_path: String) -> Result<(), String> {
+pub fn restore_from_backup(session: &SecretSession, backup_path: String) -> Result<(), String> {
     // Read backup file
-    let content = fs::read_to_string(&backup_path).map_err(|e| format!("读取备份文件失败: {e}"))?;
+    let file = OwnedFile::at_path(session, std::path::Path::new(&backup_path))
+        .map_err(|e| e.to_string())?;
+    if file.relative_path().parent() != Some(std::path::Path::new("backups"))
+        || !file
+            .relative_path()
+            .file_name()
+            .and_then(|v| v.to_str())
+            .is_some_and(|v| v.starts_with("env-backup-"))
+    {
+        return Err("secret.unregistered_file".into());
+    }
+    let content = file.read(session).map_err(|e| e.to_string())?;
 
     let backup_info: BackupInfo =
-        serde_json::from_str(&content).map_err(|e| format!("解析备份文件失败: {e}"))?;
+        serde_json::from_slice(&content).map_err(|_| "Invalid environment backup".to_string())?;
 
     // Restore each variable
     for conflict in &backup_info.conflicts {
@@ -230,11 +248,40 @@ fn restore_single_env(conflict: &EnvConflict) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn environment_backup_round_trip_keeps_only_the_live_file_plaintext() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = crate::secrets::session::SecretSession::from_context(
+            directory.path().to_path_buf(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        let live = directory.path().join("test-shell-config");
+        std::fs::write(&live, "export EXAMPLE_KEY=environment-canary\n").unwrap();
+        let conflict = EnvConflict {
+            var_name: "EXAMPLE_KEY".into(),
+            var_value: "environment-canary".into(),
+            source_type: "file".into(),
+            source_path: format!("{}:1", live.display()),
+        };
+        let backup = delete_env_vars(&session, vec![conflict]).unwrap();
+        assert!(!std::fs::read_to_string(&backup.backup_path)
+            .unwrap()
+            .contains("environment-canary"));
+        assert!(!std::fs::read_to_string(&live)
+            .unwrap()
+            .contains("environment-canary"));
+        restore_from_backup(&session, backup.backup_path).unwrap();
+        assert!(std::fs::read_to_string(&live)
+            .unwrap()
+            .contains("environment-canary"));
+    }
+
     use super::*;
 
     #[test]
     fn test_backup_dir_creation() {
-        let backup_dir = get_backup_dir();
-        assert!(backup_dir.is_ok());
+        let db = crate::database::Database::memory().unwrap();
+        assert!(get_backup_dir(db.secret_session()).starts_with(db.secret_session().root()));
     }
 }

@@ -9,8 +9,8 @@ mod pi;
 mod usage;
 
 /// 给 `--add-site` CLI 用的落盘入口：不经过 DB/切换流程，直接把一份
-/// in-memory provider 写成各 CLI 的 live 配置（与 GUI 切档同一批写入函数）。
-pub(crate) use live::write_live_snapshot;
+/// in-memory provider 写成各 CLI 的 live 配置（与 GUI 切档共用内部 app 分派）。
+pub(crate) use live::write_standalone_live_snapshot;
 
 use indexmap::IndexMap;
 use regex::Regex;
@@ -590,7 +590,9 @@ mod tests {
         std::env::set_var("HOME", temp.path());
 
         let db = Arc::new(Database::memory().expect("in-memory database"));
-        let state = AppState::new(db);
+        crate::settings::unlock_settings_for_test(db.secrets.clone())
+            .expect("unlock isolated settings");
+        let state = AppState::new(db).unwrap();
         let result = test(&state, temp.path());
 
         match old_test_home {
@@ -1395,7 +1397,7 @@ mod tests {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         ProviderService::scrub_leaked_gemini_common_config(&state)
@@ -1436,7 +1438,7 @@ mod tests {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         ProviderService::scrub_leaked_gemini_common_config(&state)
@@ -1460,7 +1462,7 @@ mod tests {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         ProviderService::scrub_leaked_gemini_common_config(&state)
@@ -1510,7 +1512,7 @@ mod tests {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         // 上一轮改到一半就中止的情形：完成标记没置位，下次启动会重跑，但那时
@@ -1540,7 +1542,7 @@ mod tests {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         // 没有当前供应商——这正是 sync_current_provider_for_app 直接返回 Ok 而
@@ -1579,7 +1581,7 @@ mod tests {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         // 这是一次用户没主动触发的启动期清理，不该顺手重写与泄漏无关的内容。
@@ -1629,7 +1631,7 @@ GEMINI_TIMEOUT_MS=30000
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         // 关代理时这份快照会被原样写回 live。若清不动它却照样清了片段、置了完成标记，
@@ -1668,7 +1670,7 @@ GEMINI_TIMEOUT_MS=30000
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         ProviderService::scrub_leaked_gemini_common_config(&state)
@@ -1701,7 +1703,7 @@ GEMINI_TIMEOUT_MS=30000
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         seed_leaked_gemini_state(&db);
 
         ProviderService::scrub_leaked_gemini_common_config(&state)
@@ -2018,7 +2020,7 @@ command = "legacy-cmd"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let original = Provider::with_id(
             "p1".into(),
@@ -2142,7 +2144,7 @@ command = "legacy-cmd"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let mut original = Provider::with_id(
             "p1".into(),
@@ -2272,7 +2274,7 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let mut original = Provider::with_id(
             "p1".into(),
@@ -2441,6 +2443,7 @@ requires_openai_auth = true
             ProviderService::add(state, AppType::OpenClaw, following, false)
                 .expect("seed following provider");
             crate::openclaw_config::set_provider(
+                state.db.secret_session(),
                 "deepseek-copy",
                 json!({
                     "baseUrl": "https://live.example.com",
@@ -4207,8 +4210,12 @@ wire_api = "responses"
                     "name": "Claude Sonnet 4"
                 }
             ]);
-            crate::openclaw_config::set_provider(&provider.id, provider.settings_config.clone())
-                .expect("seed openclaw live provider");
+            crate::openclaw_config::set_provider(
+                state.db.secret_session(),
+                &provider.id,
+                provider.settings_config.clone(),
+            )
+            .expect("seed openclaw live provider");
 
             let imported = import_openclaw_providers_from_live(state)
                 .expect("import openclaw providers from live");
@@ -4249,8 +4256,12 @@ wire_api = "responses"
             let mut live_settings = provider.settings_config.clone();
             live_settings["baseUrl"] = Value::String("https://api.example.com/v1".to_string());
             live_settings["models"][0]["name"] = Value::String("Claude Sonnet 4.1".to_string());
-            crate::openclaw_config::set_provider(&provider.id, live_settings)
-                .expect("seed edited live openclaw provider");
+            crate::openclaw_config::set_provider(
+                state.db.secret_session(),
+                &provider.id,
+                live_settings,
+            )
+            .expect("seed edited live openclaw provider");
 
             let updated = import_openclaw_providers_from_live(state)
                 .expect("import openclaw providers from live");
@@ -4286,8 +4297,12 @@ wire_api = "responses"
             let mut live_settings = provider.settings_config.clone();
             live_settings["base_url"] = Value::String("https://api.hermes.example/v1".to_string());
             live_settings["models"]["gpt-4o"]["name"] = Value::String("GPT-4o Updated".to_string());
-            crate::hermes_config::set_provider(&provider.id, live_settings)
-                .expect("seed edited live hermes provider");
+            crate::hermes_config::set_provider(
+                state.db.secret_session(),
+                &provider.id,
+                live_settings,
+            )
+            .expect("seed edited live hermes provider");
 
             let updated = import_hermes_providers_from_live(state)
                 .expect("import hermes providers from live");
@@ -4580,7 +4595,9 @@ wire_api = "responses"
                     .db
                     .add_custom_endpoint(app, &id, "https://extra.example")
                     .unwrap();
-                expected.push(child);
+                // 端点唯源在 provider_endpoints 表，读路径会把它们合并回 meta；
+                // expected 须按加端点后的库内形状重读，否则断言拿的是过期内存快照。
+                expected.push(state.db.get_provider_by_id(&id, app).unwrap().unwrap());
             }
 
             universal.name = "Updated".into();
@@ -4688,7 +4705,7 @@ impl ProviderService {
         preflighted_provider: Option<&Provider>,
     ) -> Result<(), AppError> {
         if let Some(effective_provider) = preflighted_provider {
-            live::write_live_snapshot(app_type, effective_provider)
+            live::write_live_snapshot(state.db.secret_session(), app_type, effective_provider)
         } else {
             write_live_with_common_config_for_state(state, app_type, provider)
         }
@@ -5662,8 +5679,12 @@ impl ProviderService {
             if Self::check_live_config_exists(&app_type, id, live_managed)? {
                 match app_type {
                     AppType::OpenCode => remove_opencode_provider_from_live(id)?,
-                    AppType::OpenClaw => remove_openclaw_provider_from_live(id)?,
-                    AppType::Hermes => remove_hermes_provider_from_live(id)?,
+                    AppType::OpenClaw => {
+                        remove_openclaw_provider_from_live(state.db.secret_session(), id)?
+                    }
+                    AppType::Hermes => {
+                        remove_hermes_provider_from_live(state.db.secret_session(), id)?
+                    }
                     _ => {}
                 }
             }
@@ -5730,10 +5751,10 @@ impl ProviderService {
                 }
             }
             AppType::OpenClaw => {
-                remove_openclaw_provider_from_live(id)?;
+                remove_openclaw_provider_from_live(state.db.secret_session(), id)?;
             }
             AppType::Hermes => {
-                remove_hermes_provider_from_live(id)?;
+                remove_hermes_provider_from_live(state.db.secret_session(), id)?;
             }
             _ => {
                 return Err(AppError::Message(format!(
@@ -6104,9 +6125,11 @@ impl ProviderService {
         // only shuffle entries in custom_providers[] while Hermes keeps using
         // whatever `model.provider` was set before.
         if matches!(app_type, AppType::Hermes) {
-            if let Err(e) =
-                crate::hermes_config::apply_switch_defaults(&provider.id, &provider.settings_config)
-            {
+            if let Err(e) = crate::hermes_config::apply_switch_defaults(
+                state.db.secret_session(),
+                &provider.id,
+                &provider.settings_config,
+            ) {
                 log::warn!(
                     "Failed to update Hermes model defaults after switching to '{}': {e}",
                     provider.id
@@ -6130,8 +6153,12 @@ impl ProviderService {
             if let Err(e) = state.db.save_provider(app_type.as_str(), &updated) {
                 let rollback_result = match app_type {
                     AppType::OpenCode => remove_opencode_provider_from_live(&provider.id),
-                    AppType::OpenClaw => remove_openclaw_provider_from_live(&provider.id),
-                    AppType::Hermes => remove_hermes_provider_from_live(&provider.id),
+                    AppType::OpenClaw => {
+                        remove_openclaw_provider_from_live(state.db.secret_session(), &provider.id)
+                    }
+                    AppType::Hermes => {
+                        remove_hermes_provider_from_live(state.db.secret_session(), &provider.id)
+                    }
                     _ => Ok(()),
                 };
 

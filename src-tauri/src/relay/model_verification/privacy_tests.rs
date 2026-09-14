@@ -494,11 +494,21 @@ fn sse_response(events: &[Value]) -> Response {
 fn managed_db(endpoint: &str, app_type: AppType) -> Arc<Database> {
     let db = Database::memory().unwrap();
     {
+        let vault = db.secrets.read().unwrap();
         let conn = db.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO loongport_relay (site_origin, site_name, api_base_url, account_id, account_label, login_identifier, auth_token, sort_index) \
-             VALUES (?1, 'Privacy test', ?1, 7, 'privacy', 'privacy', 'token', 0)",
+             VALUES (?1, 'Privacy test', ?1, 7, 'privacy', 'privacy', '', 0)",
             [endpoint],
+        )
+        .unwrap();
+        crate::relay::creds::update_tokens(
+            &conn,
+            &vault,
+            conn.last_insert_rowid(),
+            "token",
+            None,
+            None,
         )
         .unwrap();
     }

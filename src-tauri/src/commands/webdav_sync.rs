@@ -41,7 +41,9 @@ fn webdav_sync_disabled_error() -> String {
 }
 
 fn require_enabled_webdav_settings() -> Result<WebDavSyncSettings, String> {
-    let settings = settings::get_webdav_sync_settings().ok_or_else(webdav_not_configured_error)?;
+    let settings = settings::get_webdav_sync_settings()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(webdav_not_configured_error)?;
     if !settings.enabled {
         return Err(webdav_sync_disabled_error());
     }
@@ -112,11 +114,8 @@ pub async fn webdav_test_connection(
     #[allow(non_snake_case)] preserveEmptyPassword: Option<bool>,
 ) -> Result<Value, String> {
     let preserve_empty = preserveEmptyPassword.unwrap_or(true);
-    let resolved = resolve_password_for_request(
-        settings,
-        settings::get_webdav_sync_settings(),
-        preserve_empty,
-    );
+    let existing = settings::get_webdav_sync_settings().map_err(|error| error.to_string())?;
+    let resolved = resolve_password_for_request(settings, existing, preserve_empty);
     webdav_sync_service::check_connection(&resolved)
         .await
         .map_err(|e| e.to_string())?;
@@ -173,12 +172,35 @@ pub async fn webdav_sync_download(state: State<'_, AppState>) -> Result<Value, S
 }
 
 #[tauri::command]
+pub async fn webdav_sync_restore(
+    state: State<'_, AppState>,
+    password: String,
+    expected_snapshot_id: String,
+) -> Result<Value, String> {
+    let password = zeroize::Zeroizing::new(password);
+    let mut settings = require_enabled_webdav_settings()?;
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
+    let snapshot = webdav_sync_service::fetch_snapshot(&settings)
+        .await
+        .map_err(|error| error.to_string())?;
+    let (snapshot, result) = crate::commands::sync_support::restore_downloaded_snapshot(
+        state.inner().clone(),
+        snapshot,
+        password,
+        expected_snapshot_id,
+    )
+    .await?;
+    webdav_sync_service::persist_download_success(&mut settings, &snapshot);
+    Ok(result)
+}
+
+#[tauri::command]
 pub async fn webdav_sync_save_settings(
     settings: WebDavSyncSettings,
     #[allow(non_snake_case)] passwordTouched: Option<bool>,
 ) -> Result<Value, String> {
     let password_touched = passwordTouched.unwrap_or(false);
-    let existing = settings::get_webdav_sync_settings();
+    let existing = settings::get_webdav_sync_settings().map_err(|error| error.to_string())?;
     let mut sync_settings =
         resolve_password_for_request(settings, existing.clone(), !password_touched);
 
@@ -348,6 +370,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_home);
         std::fs::create_dir_all(&test_home).expect("create test home");
         std::env::set_var("CC_SWITCH_TEST_HOME", &test_home);
+        crate::settings::unlock_settings_for_test(
+            crate::secrets::session::SecretSession::ephemeral().expect("ephemeral session"),
+        )
+        .expect("unlock isolated settings");
 
         crate::settings::update_settings(AppSettings::default()).expect("reset settings");
         let mut current = WebDavSyncSettings {
@@ -368,7 +394,9 @@ mod tests {
             "manual",
         );
 
-        let after = crate::settings::get_webdav_sync_settings().expect("read webdav settings");
+        let after = crate::settings::get_webdav_sync_settings()
+            .expect("read protected settings")
+            .expect("webdav settings");
         assert_eq!(after.base_url, "https://dav.example.com/dav/");
         assert_eq!(after.username, "alice");
         assert_eq!(after.password, "secret");
@@ -393,6 +421,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_home);
         std::fs::create_dir_all(&test_home).expect("create test home");
         std::env::set_var("CC_SWITCH_TEST_HOME", &test_home);
+        crate::settings::unlock_settings_for_test(
+            crate::secrets::session::SecretSession::ephemeral().expect("ephemeral session"),
+        )
+        .expect("unlock isolated settings");
 
         crate::settings::update_settings(AppSettings::default()).expect("reset settings");
         crate::settings::set_webdav_sync_settings(Some(WebDavSyncSettings {
@@ -418,6 +450,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_home);
         std::fs::create_dir_all(&test_home).expect("create test home");
         std::env::set_var("CC_SWITCH_TEST_HOME", &test_home);
+        crate::settings::unlock_settings_for_test(
+            crate::secrets::session::SecretSession::ephemeral().expect("ephemeral session"),
+        )
+        .expect("unlock isolated settings");
 
         crate::settings::update_settings(AppSettings::default()).expect("reset settings");
         crate::settings::set_webdav_sync_settings(Some(WebDavSyncSettings {
@@ -434,4 +470,34 @@ mod tests {
         assert!(settings.enabled);
         assert_eq!(settings.base_url, "https://dav.example.com/dav/");
     }
+}
+
+#[tauri::command]
+pub async fn webdav_sync_legacy_cleanup_preview(
+    state: State<'_, AppState>,
+) -> Result<crate::services::sync_cleanup::LegacyCleanupPreview, String> {
+    let settings = require_enabled_webdav_settings()?;
+    settings.validate().map_err(|error| error.to_string())?;
+    let remote = webdav_sync_service::LegacyCleanupRemote(&settings);
+    crate::services::sync_protocol::run_with_sync_lock(crate::services::sync_cleanup::preview(
+        &state.db, &remote,
+    ))
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn webdav_sync_cleanup_legacy(
+    state: State<'_, AppState>,
+    expected_receipt: String,
+) -> Result<Value, String> {
+    let settings = require_enabled_webdav_settings()?;
+    settings.validate().map_err(|error| error.to_string())?;
+    let remote = webdav_sync_service::LegacyCleanupRemote(&settings);
+    let deleted = crate::services::sync_protocol::run_with_sync_lock(
+        crate::services::sync_cleanup::cleanup(&state.db, &remote, &expected_receipt),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(json!({"deletedObjects":deleted}))
 }

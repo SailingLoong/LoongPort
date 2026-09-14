@@ -74,7 +74,10 @@ async fn restore_official_login_impl(
         // 在切换之前做，且失败就**中止**（`?`）—— 这一步的全部意义是「删之前留后路」，
         // 留不下后路就不该往下走，那是拿用户的 OAuth 登录去赌。
         // 没有这个文件是正常状态（从没登录过 ChatGPT），不是错误。
-        let backup_path = backup_codex_auth(&auth_path)?;
+        let backup_path = backup_codex_auth(
+            app_handle.state::<AppState>().db.secret_session(),
+            &auth_path,
+        )?;
 
         // ── 切到 codex-official ──
         //
@@ -154,19 +157,24 @@ async fn restore_official_login_impl(
 ///
 /// 抽成独立函数是为了可测：它是这条链路上唯一碰用户文件的一步，
 /// 而 `restore_official_login_impl` 需要 `AppHandle` 才能跑（测不了）。
-pub(crate) fn backup_codex_auth(auth_path: &std::path::Path) -> Result<Option<String>, AppError> {
-    if !auth_path.exists() {
-        return Ok(None);
-    }
+pub(crate) fn backup_codex_auth(
+    session: &crate::SecretSession,
+    auth_path: &std::path::Path,
+) -> Result<Option<String>, AppError> {
+    let bytes = match std::fs::read(auth_path) {
+        Ok(bytes) => zeroize::Zeroizing::new(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io(auth_path, error)),
+    };
     // 沿用仓库既有的 backups 目录惯例（`~/.cc-switch/backups/<用途>`），
     // 与 hermes / openclaw / codex-history 那几处同一个根。
-    let dir = crate::config::get_app_config_dir().join("backups");
+    let dir = session.root().join("backups");
     std::fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
     let dest = dir.join(format!(
         "codex-auth-{}.json",
         chrono::Local::now().format("%Y%m%d_%H%M%S")
     ));
-    crate::config::copy_file(auth_path, &dest)?;
+    crate::secrets::files::OwnedFile::at_path(session, &dest)?.write(session, &bytes)?;
     Ok(Some(dest.to_string_lossy().to_string()))
 }
 
@@ -192,13 +200,27 @@ mod tests {
         let payload = r#"{"tokens":{"refresh_token":"secret"}}"#;
         std::fs::write(&auth_path, payload).expect("write fake auth.json");
 
-        let backup = backup_codex_auth(&auth_path)
+        let session = crate::secrets::session::SecretSession::from_context(
+            temp.path().to_path_buf(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        let backup = backup_codex_auth(&session, &auth_path)
             .expect("备份不该失败")
             .expect("有源文件时必须返回备份路径");
 
         let backup_path = std::path::Path::new(&backup);
+        assert!(!std::fs::read_to_string(backup_path)
+            .unwrap()
+            .contains("secret"));
         assert_eq!(
-            std::fs::read_to_string(backup_path).expect("read backup"),
+            String::from_utf8(
+                crate::secrets::files::OwnedFile::at_path(&session, backup_path)
+                    .unwrap()
+                    .read(&session)
+                    .unwrap()
+                    .to_vec()
+            )
+            .unwrap(),
             payload,
             "备份内容必须与原文件逐字节一致 —— 它是用户唯一的还原来源"
         );
@@ -240,9 +262,15 @@ mod tests {
         assert!(!absent.exists(), "前提：这个文件本来就不存在");
 
         assert!(
-            backup_codex_auth(&absent)
-                .expect("不存在不该报错")
-                .is_none(),
+            backup_codex_auth(
+                &crate::secrets::session::SecretSession::from_context(
+                    temp.path().to_path_buf(),
+                    crate::secrets::VaultContext::generate().unwrap()
+                ),
+                &absent
+            )
+            .expect("不存在不该报错")
+            .is_none(),
             "没有源文件时返回 None（表示「没什么可备份」），而不是 Err"
         );
         assert!(

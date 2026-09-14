@@ -1893,32 +1893,26 @@ impl Database {
         provider_id: &str,
         app_type: &str,
     ) -> Result<ProviderLimitStatus, AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
-
-        // 获取 provider 的限额设置
-        let (limit_daily, limit_monthly) = conn
-            .query_row(
-                "SELECT meta FROM providers WHERE id = ? AND app_type = ?",
-                params![provider_id, app_type],
-                |row| {
-                    let meta_str: String = row.get(0)?;
-                    Ok(meta_str)
-                },
-            )
-            .ok()
-            .and_then(|meta_str| serde_json::from_str::<serde_json::Value>(&meta_str).ok())
-            .map(|meta| {
-                let daily = meta
-                    .get("limitDailyUsd")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok());
-                let monthly = meta
-                    .get("limitMonthlyUsd")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok());
-                (daily, monthly)
+        let meta = Self::get_provider_meta_on_connection(&conn, &vault, provider_id, app_type)?;
+        let parse_limit = |raw: Option<&str>| -> Result<Option<f64>, AppError> {
+            raw.map(|raw| {
+                raw.parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .ok_or_else(|| AppError::Database("Invalid provider spending limit".into()))
             })
-            .unwrap_or((None, None));
+            .transpose()
+        };
+        let limit_daily = parse_limit(
+            meta.as_ref()
+                .and_then(|meta| meta.limit_daily_usd.as_deref()),
+        )?;
+        let limit_monthly = parse_limit(
+            meta.as_ref()
+                .and_then(|meta| meta.limit_monthly_usd.as_deref()),
+        )?;
 
         // 计算今日使用量 (detail logs + rollup)
         let daily_usage: f64 = conn
@@ -1937,7 +1931,7 @@ impl Database {
                 params![provider_id, app_type, provider_id, app_type],
                 |row| row.get(0),
             )
-            .unwrap_or(0.0);
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         // 计算本月使用量 (detail logs + rollup)
         let monthly_usage: f64 = conn
@@ -1956,7 +1950,7 @@ impl Database {
                 params![provider_id, app_type, provider_id, app_type],
                 |row| row.get(0),
             )
-            .unwrap_or(0.0);
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         let daily_exceeded = limit_daily
             .map(|limit| daily_usage >= limit)
@@ -2568,6 +2562,39 @@ fn should_try_pricing_prefix_match(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_limits_reject_corrupted_or_malformed_protected_metadata() {
+        let db = Database::memory().unwrap();
+        let mut provider = crate::provider::Provider::with_id(
+            "limits".into(),
+            "Limits".into(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            limit_daily_usd: Some("invalid".into()),
+            ..Default::default()
+        });
+        db.save_provider("claude", &provider).unwrap();
+        assert!(db.check_provider_limits("limits", "claude").is_err());
+        provider.meta.as_mut().unwrap().limit_daily_usd = Some("0".into());
+        db.save_provider("claude", &provider).unwrap();
+        assert!(
+            db.check_provider_limits("limits", "claude")
+                .unwrap()
+                .daily_exceeded
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET meta='plaintext' WHERE id='limits'",
+                [],
+            )
+            .unwrap();
+        assert!(db.check_provider_limits("limits", "claude").is_err());
+    }
 
     fn local_ts(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
         match Local.with_ymd_and_hms(year, month, day, hour, minute, second) {
@@ -3395,15 +3422,19 @@ mod tests {
         let db = Database::memory()?;
         let detail_ts = local_ts(2026, 6, 10, 12, 0, 0);
 
+        for (id, name) in [("prov-a", "Provider A"), ("prov-b", "Provider B")] {
+            db.save_provider(
+                "claude",
+                &crate::provider::Provider::with_id(
+                    id.into(),
+                    name.into(),
+                    serde_json::json!({}),
+                    None,
+                ),
+            )?;
+        }
         {
             let conn = lock_conn!(db.conn);
-            conn.execute(
-                "INSERT INTO providers (id, app_type, name, settings_config) VALUES
-                 ('prov-a', 'claude', 'Packy', '{}'),
-                 ('prov-b', 'claude', 'DeepSeek', '{}')",
-                [],
-            )?;
-
             insert_usage_log(
                 &conn,
                 "a-1",
@@ -3485,8 +3516,8 @@ mod tests {
         }
 
         // ① 汇总按 Provider 展示名过滤：明细 + rollup 都命中。
-        let packy = db.get_usage_summary(None, None, None, Some("Packy"), None)?;
-        assert_eq!(packy.total_requests, 7, "a-1 + a-2 + rollup 5");
+        let provider_a = db.get_usage_summary(None, None, None, Some("Provider A"), None)?;
+        assert_eq!(provider_a.total_requests, 7, "a-1 + a-2 + rollup 5");
 
         // ② 汇总按模型过滤（有效计价模型口径）。
         let deepseek = db.get_usage_summary(None, None, None, None, Some("deepseek-v3"))?;
@@ -3502,21 +3533,21 @@ mod tests {
         let session = db.get_usage_summary(None, None, None, Some("Claude (Session)"), None)?;
         assert_eq!(session.total_requests, 1);
 
-        // ⑤ Provider 统计 + 模型过滤：只剩 DeepSeek 一行。
+        // ⑤ Provider 统计 + 模型过滤：只剩 Provider B 一行。
         let provider_stats = db.get_provider_stats(None, None, None, None, Some("deepseek-v3"))?;
         assert_eq!(provider_stats.len(), 1);
-        assert_eq!(provider_stats[0].provider_name, "DeepSeek");
+        assert_eq!(provider_stats[0].provider_name, "Provider B");
         assert_eq!(provider_stats[0].request_count, 8);
 
-        // ⑥ 模型统计 + Provider 过滤：只剩 Packy 名下的模型。
-        let model_stats = db.get_model_stats(None, None, None, Some("Packy"), None)?;
+        // ⑥ 模型统计 + Provider 过滤：只剩 Provider A 名下的模型。
+        let model_stats = db.get_model_stats(None, None, None, Some("Provider A"), None)?;
         let models: Vec<&str> = model_stats.iter().map(|m| m.model.as_str()).collect();
         assert!(models.contains(&"claude-sonnet-4-6"));
         assert!(models.contains(&"real-model"));
         assert!(!models.contains(&"deepseek-v3"));
 
         // ⑦ 分应用汇总（Hero 卡片数据源）同样受过滤影响。
-        let by_app = db.get_usage_summary_by_app(None, None, Some("Packy"), None)?;
+        let by_app = db.get_usage_summary_by_app(None, None, Some("Provider A"), None)?;
         assert_eq!(by_app.len(), 1);
         assert_eq!(by_app[0].app_type, "claude");
         assert_eq!(by_app[0].summary.total_requests, 7);
@@ -3524,7 +3555,8 @@ mod tests {
         // ⑧ 趋势（>24h 走天分桶 + rollup 分支）。
         let t_start = local_ts(2026, 6, 8, 0, 0, 0);
         let t_end = local_ts(2026, 6, 10, 23, 59, 0);
-        let trends = db.get_daily_trends(Some(t_start), Some(t_end), None, Some("Packy"), None)?;
+        let trends =
+            db.get_daily_trends(Some(t_start), Some(t_end), None, Some("Provider A"), None)?;
         let total_req: u64 = trends.iter().map(|d| d.request_count).sum();
         assert_eq!(total_req, 7, "明细 2 + rollup 5");
 
@@ -3536,7 +3568,7 @@ mod tests {
             Some(h_start),
             Some(h_end),
             None,
-            Some("Packy"),
+            Some("Provider A"),
             Some("claude-sonnet-4-6"),
         )?;
         let hourly_req: u64 = hourly.iter().map(|d| d.request_count).sum();
@@ -3545,7 +3577,7 @@ mod tests {
         // ⑩ 请求日志列表与下拉同口径：精确名 + 有效计价模型。
         let logs = db.get_request_logs(
             &LogFilters {
-                provider_name: Some("Packy".to_string()),
+                provider_name: Some("Provider A".to_string()),
                 model: Some("real-model".to_string()),
                 ..Default::default()
             },

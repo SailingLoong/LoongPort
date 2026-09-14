@@ -4,11 +4,13 @@
 //! from xAI's OpenID Connect discovery document so authentication protocol
 //! changes do not require duplicating endpoint constants across the app.
 
+use crate::secrets::{files::CredentialFile, session::SecretSession};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(test)]
 use std::fs;
-use std::io::Write;
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -29,6 +31,9 @@ const MAX_OAUTH_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum XaiOAuthError {
+    #[error("Credential storage error: {0}")]
+    ProtectedStorage(#[from] crate::error::AppError),
+
     #[error("等待用户授权中")]
     AuthorizationPending,
     #[error("用户拒绝授权")]
@@ -195,11 +200,11 @@ pub struct XaiOAuthManager {
     pending_device_codes: Arc<RwLock<HashMap<String, PendingDeviceCode>>>,
     discovered_endpoints: Arc<RwLock<Option<OAuthEndpoints>>>,
     mutation_lock: Arc<Mutex<()>>,
-    storage_path: PathBuf,
+    secrets: Arc<SecretSession>,
 }
 
 impl XaiOAuthManager {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub(crate) fn new(secrets: Arc<SecretSession>) -> Result<Self, XaiOAuthError> {
         let manager = Self {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             default_account_id: Arc::new(RwLock::new(None)),
@@ -208,13 +213,11 @@ impl XaiOAuthManager {
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
             discovered_endpoints: Arc::new(RwLock::new(None)),
             mutation_lock: Arc::new(Mutex::new(())),
-            storage_path: data_dir.join("xai_oauth_auth.json"),
+            secrets,
         };
 
-        if let Err(error) = manager.load_from_disk_sync() {
-            log::warn!("[XaiOAuth] 加载存储失败: {error}");
-        }
-        manager
+        manager.load_from_disk_sync()?;
+        Ok(manager)
     }
 
     pub async fn start_device_flow(&self) -> Result<GitHubDeviceCodeResponse, XaiOAuthError> {
@@ -469,9 +472,7 @@ impl XaiOAuthManager {
 
     pub async fn clear_auth(&self) -> Result<(), XaiOAuthError> {
         let _mutation_guard = self.mutation_lock.lock().await;
-        if self.storage_path.exists() {
-            fs::remove_file(&self.storage_path)?;
-        }
+        CredentialFile::Xai.remove(&self.secrets)?;
         *self.accounts.write().await = HashMap::new();
         *self.default_account_id.write().await = None;
         self.access_tokens.write().await.clear();
@@ -676,8 +677,10 @@ impl XaiOAuthManager {
             accounts: accounts.clone(),
             default_account_id: default_account_id.clone(),
         };
-        let content = serde_json::to_string_pretty(&store)
-            .map_err(|error| XaiOAuthError::ParseError(error.to_string()))?;
+        let content = zeroize::Zeroizing::new(
+            serde_json::to_string_pretty(&store)
+                .map_err(|error| XaiOAuthError::ParseError(error.to_string()))?,
+        );
         self.write_store_atomic(&content)?;
         *self.accounts.write().await = accounts;
         *self.default_account_id.write().await = default_account_id;
@@ -787,12 +790,11 @@ impl XaiOAuthManager {
     }
 
     fn load_from_disk_sync(&self) -> Result<(), XaiOAuthError> {
-        if !self.storage_path.exists() {
+        let Some(content) = CredentialFile::Xai.read(&self.secrets)? else {
             return Ok(());
-        }
-        let content = fs::read_to_string(&self.storage_path)?;
-        let store: XaiOAuthStore = serde_json::from_str(&content)
-            .map_err(|error| XaiOAuthError::ParseError(error.to_string()))?;
+        };
+        let store: XaiOAuthStore = serde_json::from_slice(&content)
+            .map_err(|_| XaiOAuthError::ParseError("Invalid credential data".into()))?;
         if let Ok(mut accounts) = self.accounts.try_write() {
             *accounts = store.accounts;
         }
@@ -803,63 +805,7 @@ impl XaiOAuthManager {
     }
 
     fn write_store_atomic(&self, content: &str) -> Result<(), XaiOAuthError> {
-        let parent = self
-            .storage_path
-            .parent()
-            .ok_or_else(|| XaiOAuthError::IoError("无效的存储路径".to_string()))?;
-        fs::create_dir_all(parent)?;
-        let file_name = self
-            .storage_path
-            .file_name()
-            .ok_or_else(|| XaiOAuthError::IoError("无效的存储文件名".to_string()))?
-            .to_string_lossy();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let temporary_path = parent.join(format!("{file_name}.tmp.{nonce}"));
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let result = (|| -> Result<(), std::io::Error> {
-                let mut file = fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&temporary_path)?;
-                file.write_all(content.as_bytes())?;
-                file.flush()?;
-                fs::rename(&temporary_path, &self.storage_path)?;
-                fs::set_permissions(&self.storage_path, fs::Permissions::from_mode(0o600))?;
-                Ok(())
-            })();
-            if result.is_err() {
-                let _ = fs::remove_file(&temporary_path);
-            }
-            result?;
-        }
-
-        #[cfg(windows)]
-        {
-            let result = (|| -> Result<(), std::io::Error> {
-                let mut file = fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&temporary_path)?;
-                file.write_all(content.as_bytes())?;
-                file.flush()?;
-                if self.storage_path.exists() {
-                    fs::remove_file(&self.storage_path)?;
-                }
-                fs::rename(&temporary_path, &self.storage_path)?;
-                Ok(())
-            })();
-            if result.is_err() {
-                let _ = fs::remove_file(&temporary_path);
-            }
-            result?;
-        }
+        CredentialFile::Xai.write(&self.secrets, content.as_bytes())?;
         Ok(())
     }
 }
@@ -999,6 +945,39 @@ fn format_oauth_error(status: reqwest::StatusCode, value: &serde_json::Value) ->
 
 #[cfg(test)]
 mod tests {
+    fn test_session(root: PathBuf) -> Arc<SecretSession> {
+        SecretSession::from_context(root, crate::secrets::VaultContext::generate().unwrap())
+    }
+
+    fn test_manager(root: PathBuf) -> XaiOAuthManager {
+        XaiOAuthManager::new(test_session(root)).unwrap()
+    }
+
+    #[test]
+    fn constructor_rejects_unreadable_credentials_without_overwriting_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path().to_path_buf());
+        let path = CredentialFile::Xai.path(&session);
+        std::fs::write(&path, b"lpenc1.invalid").unwrap();
+        assert!(XaiOAuthManager::new(session.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"lpenc1.invalid");
+        CredentialFile::Xai
+            .write(&session, b"not valid JSON")
+            .unwrap();
+        assert!(XaiOAuthManager::new(session).is_err());
+    }
+
+    #[test]
+    fn credential_writer_never_persists_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path().to_path_buf());
+        manager
+            .write_store_atomic(r#"{"version":1,"accounts":{},"github_token":"oauth-canary"}"#)
+            .unwrap();
+        let bytes = std::fs::read(CredentialFile::Xai.path(&manager.secrets)).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("oauth-canary"));
+    }
+
     use super::*;
 
     fn unsigned_jwt(payload: &serde_json::Value) -> String {
@@ -1128,7 +1107,8 @@ mod tests {
     #[tokio::test]
     async fn account_store_round_trips_and_persists_reauth_state() {
         let data_dir = tempfile::tempdir().unwrap();
-        let manager = XaiOAuthManager::new(data_dir.path().to_path_buf());
+        let session = test_session(data_dir.path().to_path_buf());
+        let manager = XaiOAuthManager::new(session.clone()).unwrap();
         manager
             .add_account_internal(
                 "account-one".to_string(),
@@ -1151,7 +1131,9 @@ mod tests {
             .unwrap();
         manager.set_default_account("account-one").await.unwrap();
 
-        let reloaded = XaiOAuthManager::new(data_dir.path().to_path_buf());
+        let raw = std::fs::read(CredentialFile::Xai.path(&session)).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("refresh-one"));
+        let reloaded = XaiOAuthManager::new(session.clone()).unwrap();
         let status = reloaded.get_status().await;
         assert_eq!(status.accounts.len(), 2);
         assert_eq!(status.default_account_id.as_deref(), Some("account-one"));
@@ -1161,7 +1143,8 @@ mod tests {
             .all(|account| !account.requires_reauth));
 
         reloaded.mark_reauth_required("account-one").await.unwrap();
-        let after_reauth = XaiOAuthManager::new(data_dir.path().to_path_buf())
+        let after_reauth = XaiOAuthManager::new(session.clone())
+            .unwrap()
             .get_status()
             .await;
         assert_eq!(
@@ -1190,8 +1173,8 @@ mod tests {
     async fn failed_persistence_does_not_commit_account_in_memory() {
         let data_dir = tempfile::tempdir().unwrap();
         let blocker = data_dir.path().join("not-a-directory");
+        let manager = test_manager(blocker.clone());
         fs::write(&blocker, b"block").unwrap();
-        let manager = XaiOAuthManager::new(blocker);
 
         let result = manager
             .add_account_internal(
@@ -1202,14 +1185,14 @@ mod tests {
                 None,
             )
             .await;
-        assert!(matches!(result, Err(XaiOAuthError::IoError(_))));
+        assert!(matches!(result, Err(XaiOAuthError::ProtectedStorage(_))));
         assert!(manager.list_accounts().await.is_empty());
     }
 
     #[tokio::test]
     async fn cached_token_cannot_bypass_account_state() {
         let data_dir = tempfile::tempdir().unwrap();
-        let manager = XaiOAuthManager::new(data_dir.path().to_path_buf());
+        let manager = test_manager(data_dir.path().to_path_buf());
         let cached_token = CachedAccessToken {
             token: "cached-access-token".to_string(),
             expires_at_ms: chrono::Utc::now().timestamp_millis() + 3_600_000,
@@ -1253,7 +1236,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_commit_cannot_restore_removed_or_replaced_account() {
         let data_dir = tempfile::tempdir().unwrap();
-        let manager = XaiOAuthManager::new(data_dir.path().to_path_buf());
+        let manager = test_manager(data_dir.path().to_path_buf());
         manager
             .add_account_internal(
                 "account-one".to_string(),
@@ -1333,7 +1316,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_pending_login_cannot_restore_account_or_cache() {
         let data_dir = tempfile::tempdir().unwrap();
-        let manager = XaiOAuthManager::new(data_dir.path().to_path_buf());
+        let manager = test_manager(data_dir.path().to_path_buf());
         let result = manager
             .add_account_internal(
                 "account-one".to_string(),

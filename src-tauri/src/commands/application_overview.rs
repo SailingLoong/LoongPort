@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn overview_has_only_display_fields_and_uses_existing_presentation() {
-        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
         let provider = Provider::with_id(
             "sample".into(),
             "Example configuration".into(),
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn failed_selection_and_provisioning_do_not_create_history() {
-        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
         let id = crate::relay::provision::provider_id_for("https://relay.example", Some(1), 2);
         let provider = Provider::with_id(
             id.clone(),
@@ -322,7 +322,7 @@ mod tests {
     #[serial_test::serial]
     fn pi_presentation_reads_enabled_membership_and_default_from_native_state() {
         let _agent = crate::pi_config::test_support::TestAgentDir::new();
-        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
         let models = crate::pi_config::get_pi_models_path().unwrap();
         std::fs::create_dir_all(models.parent().unwrap()).unwrap();
         std::fs::write(models, r#"{"providers":{"enabled":{}}}"#).unwrap();
@@ -359,7 +359,7 @@ mod tests {
     #[serial_test::serial]
     fn overview_reads_stored_pi_catalog_without_importing_or_updating_native_nodes() {
         let _agent = crate::pi_config::test_support::TestAgentDir::new();
-        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
         let provider = Provider::with_id(
             "saved".into(),
             "Saved".into(),
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn ambiguous_legacy_account_metadata_does_not_block_relay_selection() {
-        let state = AppState::new(Arc::new(Database::memory().unwrap()));
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
         let site = "https://relay.example";
         for account_id in [1, 2] {
             state

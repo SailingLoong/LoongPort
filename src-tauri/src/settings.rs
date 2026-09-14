@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
@@ -755,15 +756,6 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    fn settings_path() -> Option<PathBuf> {
-        // settings.json 保留用于旧版本迁移和无数据库场景
-        Some(
-            crate::config::get_home_dir()
-                .join(crate::config::APP_DIR_NAME)
-                .join("settings.json"),
-        )
-    }
-
     fn normalize_paths(&mut self) {
         self.claude_config_dir = self
             .claude_config_dir
@@ -842,74 +834,408 @@ impl AppSettings {
             }
         }
     }
+}
 
-    fn load_from_file() -> Self {
-        let Some(path) = Self::settings_path() else {
-            return Self::default();
+const PROTECTED_SETTINGS_FIELDS: [&str; 3] = ["webdavSync", "s3Sync", "webdavBackup"];
+
+pub(crate) fn settings_path() -> PathBuf {
+    crate::config::get_home_dir()
+        .join(crate::config::APP_DIR_NAME)
+        .join("settings.json")
+}
+
+fn protected_field_identity(field: &str) -> [&str; 3] {
+    ["file", "settings.json", field]
+}
+
+fn settings_object(
+    value: &mut serde_json::Value,
+) -> Result<&mut serde_json::Map<String, serde_json::Value>, AppError> {
+    value
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("settings.invalid_document".into()))
+}
+
+/// Encode the file representation without acquiring a session or resolving a path.
+/// Startup migration owns the only plaintext input to this API.
+pub(crate) fn encode_settings_with_vault(
+    settings: &AppSettings,
+    vault: &crate::secrets::VaultContext,
+) -> Result<Vec<u8>, AppError> {
+    let mut normalized = settings.clone();
+    normalized.normalize_paths();
+    let mut value =
+        serde_json::to_value(normalized).map_err(|source| AppError::JsonSerialize { source })?;
+    let object = settings_object(&mut value)?;
+    for field in PROTECTED_SETTINGS_FIELDS {
+        let Some(protected) = object.get_mut(field) else {
+            continue;
         };
-        if let Ok(content) = fs::read_to_string(&path) {
-            match serde_json::from_str::<AppSettings>(&content) {
-                Ok(mut settings) => {
-                    settings.normalize_paths();
-                    settings
-                }
-                Err(err) => {
-                    log::warn!(
-                        "解析设置文件失败，将使用默认设置。路径: {}, 错误: {}",
-                        path.display(),
-                        err
-                    );
-                    Self::default()
-                }
-            }
-        } else {
-            Self::default()
+        if protected.is_null() {
+            continue;
+        }
+        let plaintext =
+            serde_json::to_vec(protected).map_err(|source| AppError::JsonSerialize { source })?;
+        let ciphertext = vault
+            .seal(&protected_field_identity(field), &plaintext)
+            .map_err(crate::secrets::inventory::secret_error)?;
+        *protected = serde_json::Value::String(ciphertext);
+    }
+    serde_json::to_vec_pretty(&value).map_err(|source| AppError::JsonSerialize { source })
+}
+
+/// Normal runtime decoding is ciphertext-only for every registered protected field.
+pub(crate) fn decode_settings_with_vault(
+    bytes: &[u8],
+    vault: &crate::secrets::VaultContext,
+) -> Result<AppSettings, AppError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let object = settings_object(&mut value)?;
+    for field in PROTECTED_SETTINGS_FIELDS {
+        let Some(protected) = object.get_mut(field) else {
+            continue;
+        };
+        if protected.is_null() {
+            continue;
+        }
+        let ciphertext = protected
+            .as_str()
+            .ok_or_else(|| AppError::Config("secret.plaintext_settings".into()))?;
+        let plaintext = vault
+            .open(&protected_field_identity(field), ciphertext)
+            .map_err(crate::secrets::inventory::secret_error)?;
+        *protected = serde_json::from_slice(&plaintext)
+            .map_err(|_| AppError::Config("secret.invalid_settings_payload".into()))?;
+    }
+    let mut settings: AppSettings =
+        serde_json::from_value(value).map_err(|source| AppError::json("settings.json", source))?;
+    settings.normalize_paths();
+    Ok(settings)
+}
+
+/// Controlled migration entrypoint. Normal reads never accept this plaintext form.
+pub(crate) fn encrypt_legacy_settings_with_vault(
+    bytes: &[u8],
+    vault: &crate::secrets::VaultContext,
+) -> Result<Vec<u8>, AppError> {
+    let mut settings: AppSettings =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    settings.normalize_paths();
+    encode_settings_with_vault(&settings, vault)
+}
+
+/// Explicit key-loss recovery preserves device preferences and clears all
+/// registered credential bundles without trying to decode their ciphertext.
+pub(crate) fn reset_protected_settings(
+    bytes: &[u8],
+    vault: &crate::secrets::VaultContext,
+) -> Result<Vec<u8>, AppError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let object = settings_object(&mut value)?;
+    for field in PROTECTED_SETTINGS_FIELDS {
+        object.remove(field);
+    }
+    let settings: AppSettings =
+        serde_json::from_value(value).map_err(|source| AppError::json("settings.json", source))?;
+    encode_settings_with_vault(&settings, vault)
+}
+
+fn clear_protected_settings(settings: &mut AppSettings) {
+    settings.webdav_sync = None;
+    settings.s3_sync = None;
+    settings.webdav_backup = None;
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BootstrapSettings {
+    #[serde(default)]
+    pub(crate) silent_startup: bool,
+    #[serde(default = "default_minimize_to_tray_on_close")]
+    pub(crate) minimize_to_tray_on_close: bool,
+    #[serde(default)]
+    pub(crate) receive_beta_updates: bool,
+    #[serde(default)]
+    pub(crate) claude_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) codex_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) gemini_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) grok_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) opencode_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) openclaw_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) hermes_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) pi_config_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) current_provider_codex_image: Option<String>,
+    #[serde(default)]
+    pub(crate) imagegen_output_dir: Option<String>,
+}
+
+impl BootstrapSettings {
+    fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            silent_startup: settings.silent_startup,
+            minimize_to_tray_on_close: settings.minimize_to_tray_on_close,
+            receive_beta_updates: settings.receive_beta_updates,
+            claude_config_dir: settings.claude_config_dir.clone(),
+            codex_config_dir: settings.codex_config_dir.clone(),
+            gemini_config_dir: settings.gemini_config_dir.clone(),
+            grok_config_dir: settings.grok_config_dir.clone(),
+            opencode_config_dir: settings.opencode_config_dir.clone(),
+            openclaw_config_dir: settings.openclaw_config_dir.clone(),
+            hermes_config_dir: settings.hermes_config_dir.clone(),
+            pi_config_dir: settings.pi_config_dir.clone(),
+            current_provider_codex_image: settings.current_provider_codex_image.clone(),
+            imagegen_output_dir: settings.imagegen_output_dir.clone(),
+        }
+    }
+
+    fn into_settings_projection(self) -> AppSettings {
+        AppSettings {
+            silent_startup: self.silent_startup,
+            minimize_to_tray_on_close: self.minimize_to_tray_on_close,
+            receive_beta_updates: self.receive_beta_updates,
+            claude_config_dir: self.claude_config_dir,
+            codex_config_dir: self.codex_config_dir,
+            gemini_config_dir: self.gemini_config_dir,
+            grok_config_dir: self.grok_config_dir,
+            opencode_config_dir: self.opencode_config_dir,
+            openclaw_config_dir: self.openclaw_config_dir,
+            hermes_config_dir: self.hermes_config_dir,
+            pi_config_dir: self.pi_config_dir,
+            current_provider_codex_image: self.current_provider_codex_image,
+            imagegen_output_dir: self.imagegen_output_dir,
+            ..AppSettings::default()
         }
     }
 }
 
-fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
-    let mut normalized = settings.clone();
-    normalized.normalize_paths();
-    let Some(path) = AppSettings::settings_path() else {
-        return Err(AppError::Config("无法获取用户主目录".to_string()));
-    };
+impl Default for BootstrapSettings {
+    fn default() -> Self {
+        Self::from_settings(&AppSettings::default())
+    }
+}
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+fn decode_bootstrap_settings(bytes: &[u8]) -> Result<BootstrapSettings, AppError> {
+    let bootstrap: BootstrapSettings =
+        serde_json::from_slice(bytes).map_err(|source| AppError::json("settings.json", source))?;
+    let mut projection = bootstrap.into_settings_projection();
+    projection.normalize_paths();
+    Ok(BootstrapSettings::from_settings(&projection))
+}
+
+fn read_bootstrap_at(path: &Path) -> Result<BootstrapSettings, AppError> {
+    match fs::read(path) {
+        Ok(bytes) => decode_bootstrap_settings(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(BootstrapSettings::default())
+        }
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
+
+/// Read the current non-secret device preferences without initializing a vault.
+pub(crate) fn read_bootstrap_settings() -> Result<BootstrapSettings, AppError> {
+    read_bootstrap_at(&settings_path())
+}
+
+fn read_encrypted_at(
+    path: &Path,
+    session: &crate::secrets::session::SecretSession,
+) -> Result<AppSettings, AppError> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let vault = session.read()?;
+            decode_settings_with_vault(&bytes, &vault)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
+
+fn retained_error(error: &AppError) -> String {
+    match error {
+        AppError::Config(code) => code.clone(),
+        AppError::Json { .. } => "settings.invalid_json".into(),
+        AppError::Io { .. } | AppError::IoContext { .. } => "settings.read_failed".into(),
+        AppError::Lock(_) => "settings.lock_unavailable".into(),
+        _ => "settings.unavailable".into(),
+    }
+}
+
+struct StoredSettings {
+    settings: AppSettings,
+    failure: Option<String>,
+}
+
+struct SettingsStore {
+    path: PathBuf,
+    session: Arc<crate::secrets::session::SecretSession>,
+    state: RwLock<StoredSettings>,
+}
+
+impl SettingsStore {
+    fn open_at(
+        path: PathBuf,
+        session: Arc<crate::secrets::session::SecretSession>,
+    ) -> Result<Arc<Self>, AppError> {
+        let settings = read_encrypted_at(&path, &session)?;
+        Ok(Arc::new(Self {
+            path,
+            session,
+            state: RwLock::new(StoredSettings {
+                settings,
+                failure: None,
+            }),
+        }))
     }
 
-    let json = serde_json::to_string_pretty(&normalized)
-        .map_err(|e| AppError::JsonSerialize { source: e })?;
-    #[cfg(unix)]
+    fn snapshot(&self) -> AppSettings {
+        self.state
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .settings
+            .clone()
+    }
+
+    fn ready_snapshot(&self) -> Result<AppSettings, AppError> {
+        let state = self.state.read()?;
+        if let Some(error) = &state.failure {
+            return Err(AppError::Config(error.clone()));
+        }
+        Ok(state.settings.clone())
+    }
+
+    fn webdav_sync(&self) -> Result<Option<WebDavSyncSettings>, AppError> {
+        Ok(self.ready_snapshot()?.webdav_sync)
+    }
+
+    fn s3_sync(&self) -> Result<Option<S3SyncSettings>, AppError> {
+        Ok(self.ready_snapshot()?.s3_sync)
+    }
+
+    fn mutate<F, T>(&self, mutator: F) -> Result<T, AppError>
+    where
+        F: FnOnce(&mut AppSettings) -> T,
     {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| AppError::io(&path, e))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| AppError::io(&path, e))?;
+        // The session read guard pins one key generation through encryption and publication.
+        let vault = self.session.read()?;
+        let mut state = self.state.write()?;
+        if let Some(error) = &state.failure {
+            return Err(AppError::Config(error.clone()));
+        }
+        let mut next = state.settings.clone();
+        let result = mutator(&mut next);
+        next.normalize_paths();
+        let bytes = encode_settings_with_vault(&next, &vault)?;
+        crate::config::atomic_write_private(&self.path, &bytes)?;
+        state.settings = next;
+        Ok(result)
     }
 
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
+    fn reload(&self) -> Result<(), AppError> {
+        // Match mutate's lock order so reload cannot replace a newer in-memory write
+        // with a stale file snapshot.
+        let vault = self.session.read()?;
+        let mut state = self.state.write()?;
+        let loaded = match fs::read(&self.path) {
+            Ok(bytes) => decode_settings_with_vault(&bytes, &vault),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(AppSettings::default())
+            }
+            Err(error) => Err(AppError::io(&self.path, error)),
+        };
+        match loaded {
+            Ok(settings) => {
+                state.settings = settings;
+                state.failure = None;
+                Ok(())
+            }
+            Err(error) => {
+                state.failure = Some(retained_error(&error));
+                Err(error)
+            }
+        }
     }
+}
 
+struct SettingsRuntime {
+    bootstrap: BootstrapSettings,
+    failure: Option<String>,
+    unlocked: Option<Arc<SettingsStore>>,
+}
+
+static SETTINGS_STORE: OnceLock<RwLock<SettingsRuntime>> = OnceLock::new();
+
+fn settings_store() -> &'static RwLock<SettingsRuntime> {
+    SETTINGS_STORE.get_or_init(|| {
+        let (bootstrap, failure) = match read_bootstrap_at(&settings_path()) {
+            Ok(settings) => (settings, None),
+            Err(error) => (BootstrapSettings::default(), Some(retained_error(&error))),
+        };
+        RwLock::new(SettingsRuntime {
+            bootstrap,
+            failure,
+            unlocked: None,
+        })
+    })
+}
+
+/// Read the narrow, nonsecret startup projection without opening or generating a key.
+pub(crate) fn bootstrap_settings() -> Result<BootstrapSettings, AppError> {
+    let runtime = settings_store().read()?;
+    if let Some(error) = &runtime.failure {
+        return Err(AppError::Config(error.clone()));
+    }
+    Ok(runtime.bootstrap.clone())
+}
+
+/// Publish the startup-owned session into the settings persistence boundary.
+pub fn unlock_settings(
+    session: Arc<crate::secrets::session::SecretSession>,
+) -> Result<(), AppError> {
+    let store = SettingsStore::open_at(settings_path(), session)?;
+    let bootstrap = BootstrapSettings::from_settings(&store.snapshot());
+    let mut runtime = settings_store().write()?;
+    if runtime.unlocked.is_some() {
+        return Err(AppError::Config("settings.already_unlocked".into()));
+    }
+    runtime.bootstrap = bootstrap;
+    runtime.failure = None;
+    runtime.unlocked = Some(store);
     Ok(())
 }
 
-static SETTINGS_STORE: OnceLock<RwLock<AppSettings>> = OnceLock::new();
+#[cfg(test)]
+pub(crate) fn unlock_settings_for_test(
+    session: Arc<crate::secrets::session::SecretSession>,
+) -> Result<(), AppError> {
+    let store = SettingsStore::open_at(settings_path(), session)?;
+    let bootstrap = BootstrapSettings::from_settings(&store.snapshot());
+    let mut runtime = settings_store().write()?;
+    runtime.bootstrap = bootstrap;
+    runtime.failure = None;
+    runtime.unlocked = Some(store);
+    Ok(())
+}
 
-fn settings_store() -> &'static RwLock<AppSettings> {
-    SETTINGS_STORE.get_or_init(|| RwLock::new(AppSettings::load_from_file()))
+fn unlocked_settings_store() -> Result<Arc<SettingsStore>, AppError> {
+    let runtime = settings_store().read()?;
+    if let Some(error) = &runtime.failure {
+        return Err(AppError::Config(error.clone()));
+    }
+    runtime
+        .unlocked
+        .clone()
+        .ok_or_else(|| AppError::Config("secret.locked".into()))
 }
 
 pub(crate) fn resolve_override_path(raw: &str) -> PathBuf {
@@ -938,13 +1264,18 @@ pub(crate) fn resolve_override_path(raw: &str) -> PathBuf {
 }
 
 pub fn get_settings() -> AppSettings {
-    settings_store()
+    let runtime = settings_store()
         .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
+        .unwrap_or_else(|error| error.into_inner());
+    runtime
+        .unlocked
+        .as_ref()
+        .map(|store| {
+            let mut settings = store.snapshot();
+            clear_protected_settings(&mut settings);
+            settings
         })
-        .clone()
+        .unwrap_or_else(|| runtime.bootstrap.clone().into_settings_projection())
 }
 
 fn prepare_settings_for_frontend(mut settings: AppSettings) -> AppSettings {
@@ -961,19 +1292,17 @@ fn prepare_settings_for_frontend(mut settings: AppSettings) -> AppSettings {
     settings
 }
 
-pub fn get_settings_for_frontend() -> AppSettings {
-    prepare_settings_for_frontend(get_settings())
+pub fn get_settings_for_frontend() -> Result<AppSettings, AppError> {
+    unlocked_settings_store()?
+        .ready_snapshot()
+        .map(prepare_settings_for_frontend)
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     new_settings.normalize_paths();
-    save_settings_file(&new_settings)?;
-
-    let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
-        e.into_inner()
-    });
-    *guard = new_settings;
+    let store = unlocked_settings_store()?;
+    store.mutate(|settings| *settings = new_settings)?;
+    refresh_bootstrap_from(&store)?;
     Ok(())
 }
 
@@ -983,15 +1312,14 @@ pub(crate) fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut AppSettings),
 {
-    let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
-        e.into_inner()
-    });
-    let mut next = guard.clone();
-    mutator(&mut next);
-    next.normalize_paths();
-    save_settings_file(&next)?;
-    *guard = next;
+    let store = unlocked_settings_store()?;
+    store.mutate(mutator)?;
+    refresh_bootstrap_from(&store)?;
+    Ok(())
+}
+
+fn refresh_bootstrap_from(store: &SettingsStore) -> Result<(), AppError> {
+    settings_store().write()?.bootstrap = BootstrapSettings::from_settings(&store.snapshot());
     Ok(())
 }
 
@@ -1090,17 +1418,35 @@ pub fn clear_codex_unify_migrate_existing() -> Result<(), AppError> {
 /// 从文件重新加载设置到内存缓存
 /// 用于导入配置等场景，确保内存缓存与文件同步
 pub fn reload_settings() -> Result<(), AppError> {
-    let fresh_settings = AppSettings::load_from_file();
-    let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
-        e.into_inner()
-    });
-    *guard = fresh_settings;
-    Ok(())
+    let store = {
+        let runtime = settings_store().read()?;
+        runtime.unlocked.clone()
+    };
+    if let Some(store) = store {
+        store.reload()?;
+        return refresh_bootstrap_from(&store);
+    }
+
+    let path = settings_path();
+    match read_bootstrap_at(&path) {
+        Ok(bootstrap) => {
+            let mut runtime = settings_store().write()?;
+            runtime.bootstrap = bootstrap;
+            runtime.failure = None;
+            Ok(())
+        }
+        Err(error) => {
+            settings_store()
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .failure = Some(retained_error(&error));
+            Err(error)
+        }
+    }
 }
 
 pub fn get_claude_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .claude_config_dir
         .as_ref()
@@ -1108,7 +1454,7 @@ pub fn get_claude_override_dir() -> Option<PathBuf> {
 }
 
 pub fn get_codex_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .codex_config_dir
         .as_ref()
@@ -1116,7 +1462,7 @@ pub fn get_codex_override_dir() -> Option<PathBuf> {
 }
 
 pub fn get_gemini_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .gemini_config_dir
         .as_ref()
@@ -1124,7 +1470,7 @@ pub fn get_gemini_override_dir() -> Option<PathBuf> {
 }
 
 pub fn get_grok_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .grok_config_dir
         .as_ref()
@@ -1132,7 +1478,7 @@ pub fn get_grok_override_dir() -> Option<PathBuf> {
 }
 
 pub fn get_opencode_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .opencode_config_dir
         .as_ref()
@@ -1140,7 +1486,7 @@ pub fn get_opencode_override_dir() -> Option<PathBuf> {
 }
 
 pub fn get_openclaw_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .openclaw_config_dir
         .as_ref()
@@ -1148,7 +1494,7 @@ pub fn get_openclaw_override_dir() -> Option<PathBuf> {
 }
 
 pub fn get_hermes_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .hermes_config_dir
         .as_ref()
@@ -1156,7 +1502,7 @@ pub fn get_hermes_override_dir() -> Option<PathBuf> {
 }
 
 pub fn get_pi_override_dir() -> Option<PathBuf> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     settings
         .pi_config_dir
         .as_ref()
@@ -1164,23 +1510,11 @@ pub fn get_pi_override_dir() -> Option<PathBuf> {
 }
 
 pub fn preserve_codex_official_auth_on_switch() -> bool {
-    settings_store()
-        .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
-        })
-        .preserve_codex_official_auth_on_switch
+    get_settings().preserve_codex_official_auth_on_switch
 }
 
 pub fn unify_codex_session_history() -> bool {
-    settings_store()
-        .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
-        })
-        .unify_codex_session_history
+    get_settings().unify_codex_session_history
 }
 
 // ===== 当前供应商管理函数 =====
@@ -1190,7 +1524,7 @@ pub fn unify_codex_session_history() -> bool {
 /// 这是设备级别的设置，不随数据库同步。
 /// 如果本地没有设置，调用者应该 fallback 到数据库的 `is_current` 字段。
 pub fn get_current_provider(app_type: &AppType) -> Option<String> {
-    let settings = settings_store().read().ok()?;
+    let settings = get_settings();
     match app_type {
         AppType::Claude => settings.current_provider_claude.clone(),
         AppType::ClaudeDesktop => settings.current_provider_claude_desktop.clone(),
@@ -1208,10 +1542,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
 /// 生图工具是否注册进 codex / claude / gemini（MCP）。缺省 = 开：
 /// 升级用户的注册行为不变，这是一个明确的产品决定，不是随手默认。
 pub fn get_imagegen_mcp_enabled() -> bool {
-    settings_store()
-        .read()
-        .map(|settings| settings.imagegen_mcp_enabled.unwrap_or(true))
-        .unwrap_or(true)
+    get_settings().imagegen_mcp_enabled.unwrap_or(true)
 }
 
 /// 设置生图 MCP 注册开关并落盘。注册状态的对齐由调用方触发
@@ -1290,26 +1621,14 @@ pub fn get_effective_current_provider(
 
 /// 获取 Skill 同步方式配置
 pub fn get_skill_sync_method() -> SyncMethod {
-    settings_store()
-        .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
-        })
-        .skill_sync_method
+    get_settings().skill_sync_method
 }
 
 // ===== Skill 存储位置管理函数 =====
 
 /// 获取 Skill 存储位置配置
 pub fn get_skill_storage_location() -> SkillStorageLocation {
-    settings_store()
-        .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
-        })
-        .skill_storage_location
+    get_settings().skill_storage_location
 }
 
 /// 设置 Skill 存储位置
@@ -1323,24 +1642,12 @@ pub fn set_skill_storage_location(location: SkillStorageLocation) -> Result<(), 
 
 /// Get the effective auto-backup interval in hours (default 24)
 pub fn effective_backup_interval_hours() -> u32 {
-    settings_store()
-        .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
-        })
-        .backup_interval_hours
-        .unwrap_or(24)
+    get_settings().backup_interval_hours.unwrap_or(24)
 }
 
 /// Get the effective backup retain count (default 10, minimum 1)
 pub fn effective_backup_retain_count() -> usize {
-    settings_store()
-        .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
-        })
+    get_settings()
         .backup_retain_count
         .map(|n| (n as usize).max(1))
         .unwrap_or(10)
@@ -1350,21 +1657,14 @@ pub fn effective_backup_retain_count() -> usize {
 
 /// 获取首选终端应用
 pub fn get_preferred_terminal() -> Option<String> {
-    settings_store()
-        .read()
-        .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
-            e.into_inner()
-        })
-        .preferred_terminal
-        .clone()
+    get_settings().preferred_terminal
 }
 
 // ===== WebDAV 同步设置管理函数 =====
 
 /// 获取 WebDAV 同步设置
-pub fn get_webdav_sync_settings() -> Option<WebDavSyncSettings> {
-    settings_store().read().ok()?.webdav_sync.clone()
+pub fn get_webdav_sync_settings() -> Result<Option<WebDavSyncSettings>, AppError> {
+    unlocked_settings_store()?.webdav_sync()
 }
 
 /// 保存 WebDAV 同步设置
@@ -1385,8 +1685,8 @@ pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppErro
 
 // ===== S3 同步设置管理函数 =====
 
-pub fn get_s3_sync_settings() -> Option<S3SyncSettings> {
-    settings_store().read().ok()?.s3_sync.clone()
+pub fn get_s3_sync_settings() -> Result<Option<S3SyncSettings>, AppError> {
+    unlocked_settings_store()?.s3_sync()
 }
 
 pub fn set_s3_sync_settings(settings: Option<S3SyncSettings>) -> Result<(), AppError> {
@@ -1407,6 +1707,183 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+
+    fn credential_settings() -> AppSettings {
+        AppSettings {
+            claude_config_dir: Some("~/agents/claude".into()),
+            webdav_sync: Some(WebDavSyncSettings {
+                enabled: true,
+                auto_sync: true,
+                base_url: "https://user:embedded-secret@sync.example.invalid/dav".into(),
+                username: "sync-user".into(),
+                password: "webdav-canary-secret".into(),
+                ..WebDavSyncSettings::default()
+            }),
+            s3_sync: Some(S3SyncSettings {
+                enabled: true,
+                region: "test-region".into(),
+                bucket: "test-bucket".into(),
+                access_key_id: "s3-canary-identifier".into(),
+                secret_access_key: "s3-canary-secret".into(),
+                endpoint: "https://objects.example.invalid/?credential=query-canary".into(),
+                ..S3SyncSettings::default()
+            }),
+            webdav_backup: Some(serde_json::json!({
+                "username": "legacy-user",
+                "password": "legacy-canary-secret"
+            })),
+            ..AppSettings::default()
+        }
+    }
+
+    #[test]
+    fn bootstrap_file_reads_observe_changes_and_reject_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        assert!(read_bootstrap_at(&path)
+            .unwrap()
+            .current_provider_codex_image
+            .is_none());
+        fs::write(
+            &path,
+            br#"{"currentProviderCodexImage":"first","imagegenOutputDir":"/tmp/images"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_bootstrap_at(&path)
+                .unwrap()
+                .current_provider_codex_image
+                .as_deref(),
+            Some("first")
+        );
+        fs::write(&path, br#"{"currentProviderCodexImage":"second"}"#).unwrap();
+        assert_eq!(
+            read_bootstrap_at(&path)
+                .unwrap()
+                .current_provider_codex_image
+                .as_deref(),
+            Some("second")
+        );
+        fs::write(&path, b"{").unwrap();
+        assert!(read_bootstrap_at(&path).is_err());
+    }
+
+    #[test]
+    fn settings_codec_encrypts_protected_bundles_and_keeps_bootstrap_paths_readable() {
+        let vault = crate::secrets::VaultContext::generate().unwrap();
+        let encrypted = encrypt_legacy_settings_with_vault(
+            &serde_json::to_vec(&credential_settings()).unwrap(),
+            &vault,
+        )
+        .unwrap();
+        let raw = String::from_utf8(encrypted.clone()).unwrap();
+        for canary in [
+            "embedded-secret",
+            "sync-user",
+            "webdav-canary-secret",
+            "s3-canary-identifier",
+            "s3-canary-secret",
+            "query-canary",
+            "legacy-canary-secret",
+        ] {
+            assert!(!raw.contains(canary), "settings leaked {canary}");
+        }
+        assert!(raw.contains("~/agents/claude"));
+
+        let bootstrap = decode_bootstrap_settings(&encrypted).unwrap();
+        assert_eq!(
+            bootstrap.claude_config_dir.as_deref(),
+            Some("~/agents/claude")
+        );
+        assert!(!bootstrap.silent_startup);
+
+        let restored = decode_settings_with_vault(&encrypted, &vault).unwrap();
+        assert_eq!(
+            restored.webdav_sync.unwrap().password,
+            "webdav-canary-secret"
+        );
+        assert_eq!(
+            restored.s3_sync.unwrap().secret_access_key,
+            "s3-canary-secret"
+        );
+        assert_eq!(
+            restored.webdav_backup.unwrap()["password"],
+            "legacy-canary-secret"
+        );
+    }
+
+    #[test]
+    fn normal_settings_decode_rejects_plaintext_protected_values() {
+        let vault = crate::secrets::VaultContext::generate().unwrap();
+        let plaintext = serde_json::to_vec(&credential_settings()).unwrap();
+        assert!(decode_settings_with_vault(&plaintext, &vault).is_err());
+    }
+
+    #[test]
+    fn failed_reload_keeps_last_good_but_blocks_protected_reads_and_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let session = crate::secrets::session::SecretSession::ephemeral().unwrap();
+        let encrypted = {
+            let vault = session.read().unwrap();
+            encrypt_legacy_settings_with_vault(
+                &serde_json::to_vec(&credential_settings()).unwrap(),
+                &vault,
+            )
+            .unwrap()
+        };
+        std::fs::write(&path, encrypted).unwrap();
+        let store = SettingsStore::open_at(path.clone(), session).unwrap();
+        assert_eq!(
+            store.webdav_sync().unwrap().unwrap().password,
+            "webdav-canary-secret"
+        );
+
+        std::fs::write(&path, b"{broken").unwrap();
+        let broken = std::fs::read(&path).unwrap();
+        assert!(store.reload().is_err());
+        assert_eq!(
+            store.snapshot().claude_config_dir.as_deref(),
+            Some("~/agents/claude")
+        );
+        assert!(store.webdav_sync().is_err());
+        assert!(store
+            .mutate(|settings| settings.show_in_tray = false)
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn missing_settings_file_is_the_only_default_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = crate::secrets::session::SecretSession::ephemeral().unwrap();
+        let store = SettingsStore::open_at(directory.path().join("missing.json"), session).unwrap();
+        assert!(store.snapshot().show_in_tray);
+        assert!(store.webdav_sync().unwrap().is_none());
+    }
+
+    #[test]
+    fn settings_store_writes_private_ciphertext() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let session = crate::secrets::session::SecretSession::ephemeral().unwrap();
+        let store = SettingsStore::open_at(path.clone(), session).unwrap();
+
+        store
+            .mutate(|settings| *settings = credential_settings())
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("webdav-canary-secret"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[test]
     fn preserve_codex_official_auth_defaults_on_in_both_paths() {

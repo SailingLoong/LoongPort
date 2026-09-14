@@ -197,11 +197,12 @@ fn resolve_relay(
     account_id: Option<i64>,
 ) -> Result<creds::RelayAccount, AppError> {
     let candidates: Vec<_> = {
+        let vault = db.secrets.read()?;
         let conn = db
             .conn
             .lock()
             .map_err(|error| AppError::Database(format!("读取中转站失败: {error}")))?;
-        creds::list(&conn)?
+        creds::list(&conn, &vault)?
             .into_iter()
             .filter(|candidate| {
                 // 注册域身份匹配：同站的面板域/API 域拼写不同也该认。

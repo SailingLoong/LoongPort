@@ -258,9 +258,10 @@ async fn ensure_token_outlasts_a_payment<R: tauri::Runtime>(
     match sub2api::refresh_token(&site_account.site_origin, &refresh).await {
         Ok(fresh) => {
             let state = app_handle.state::<AppState>();
-            if let Err(e) = with_conn(&state, |conn| {
+            if let Err(e) = with_conn(&state, |conn, _vault| {
                 creds::update_tokens(
                     conn,
+                    _vault,
                     site_account.id,
                     &fresh.auth_token,
                     // 服务端没轮换时沿用旧的 —— 覆写成 None 会让下次过期时无法续期。
@@ -482,12 +483,10 @@ mod tests {
     /// 把 `saved_relay_app` 存好的 refresh credential 覆写成空白（模拟凭据缺失的行）。
     fn blank_saved_refresh_credential(app: &tauri::App<tauri::test::MockRuntime>, relay_id: i64) {
         let state = app.state::<AppState>();
+        let vault = state.db.secrets.read().unwrap();
         let conn = state.db.conn.lock().expect("lock memory database");
-        conn.execute(
-            "UPDATE loongport_relay SET refresh_token = ?1 WHERE id = ?2",
-            rusqlite::params!["   ", relay_id],
-        )
-        .expect("blank refresh credential");
+        creds::update_refresh_credential(&conn, &vault, relay_id, "   ")
+            .expect("blank refresh credential");
     }
 
     #[tokio::test]
@@ -670,6 +669,7 @@ mod tests {
         // 第二行：另一个 NewAPI 站点账号，自己的 id 与有效 refresh credential。
         let relay2 = {
             let state = app.state::<AppState>();
+            let vault = state.db.secrets.read().unwrap();
             let conn = state.db.conn.lock().expect("lock memory database");
             let id = creds::save_site_with_backend(
                 &conn,
@@ -681,6 +681,7 @@ mod tests {
             .expect("save second relay");
             creds::save_credentials(
                 &conn,
+                &vault,
                 id,
                 creds::AccountIdentity {
                     id: 8,

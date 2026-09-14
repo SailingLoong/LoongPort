@@ -419,10 +419,7 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
 /// 模型单价（每百万 token 输入+输出之和，美元）；价表未收录 → `None`。
 /// 与 `auto_strategy::tier_unit_price` 同一张表，只是按模型名直查。
 fn model_unit_price(db: &crate::Database, model: &str) -> Option<f64> {
-    let conn = db
-        .conn
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let conn = db.conn.lock().ok()?;
     let (input, output, _cache_read, _cache_creation) =
         crate::services::usage_stats::find_model_pricing_row(&conn, model).ok()??;
     let input: f64 = input.parse().ok()?;
@@ -452,7 +449,7 @@ mod tests {
     async fn tier_board_reads_balances_from_cache_without_network() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let id = crate::relay::provision::provider_id_for("https://cache.example", Some(1), 1);
         let mut tier = crate::provider::Provider::with_id(
@@ -500,7 +497,7 @@ mod tests {
     async fn tier_board_aggregates_display_facts() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let expensive = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let cheap = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
@@ -603,7 +600,7 @@ mod tests {
     async fn tier_board_keeps_priority_with_active_current() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let expensive = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let cheap = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
@@ -649,7 +646,7 @@ mod tests {
     async fn tier_board_surfaces_provider_health_for_failed_tiers() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let dead = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let fine = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
@@ -701,7 +698,7 @@ mod tests {
     async fn tier_board_does_not_imply_automatic_switchback_after_idle() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let current = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let other = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
@@ -788,7 +785,7 @@ mod tests {
     async fn tier_board_surfaces_today_stats_and_cache_hit_rate() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let busy = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let cold = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
@@ -867,7 +864,7 @@ mod tests {
     async fn tier_board_model_options_carry_coverage_and_cheapest_price() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let cheap = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let expensive = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
@@ -929,7 +926,7 @@ mod tests {
     async fn tier_board_surfaces_recent_activity_buckets() {
         let _home = test_home();
         let db = Arc::new(Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let busy = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
         let cold = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);

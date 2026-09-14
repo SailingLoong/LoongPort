@@ -1195,7 +1195,7 @@ pub async fn relay_browser_login(
 ) -> Result<(), String> {
     let site_origin = {
         let state = app_handle.state::<AppState>();
-        with_conn(&state, |conn| creds::get(conn, relay_id))?
+        with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
             .site_origin
     };
@@ -1213,7 +1213,7 @@ async fn login_via_browser(
     // 顺带取出登录标识：重登时预填进登录框，用户只需补密码与人机验证。
     let site_account = {
         let state = app_handle.state::<AppState>();
-        with_conn(&state, |conn| creds::get(conn, target_id))?
+        with_conn(&state, |conn, _vault| creds::get(conn, _vault, target_id))?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {target_id} 的中转站")))?
     };
     let saved_account = site_account.clone();
@@ -1636,9 +1636,10 @@ async fn persist_login_credentials(
     let account_id = account.id;
 
     let state = app_handle.state::<AppState>();
-    let final_relay_id = with_conn(&state, |conn| {
+    let final_relay_id = with_conn(&state, |conn, _vault| {
         creds::save_credentials(
             conn,
+            _vault,
             relay_id,
             creds::AccountIdentity {
                 id: account.id,
@@ -1668,9 +1669,10 @@ async fn persist_new_relay_login_credentials(
     let account_id = account.id;
     let state = app_handle.state::<AppState>();
     let account_label = account.display_name();
-    let final_relay_id = with_conn(&state, |conn| {
+    let final_relay_id = with_conn(&state, |conn, _vault| {
         creds::save_authenticated_relay(
             conn,
+            _vault,
             creds::AuthenticatedRelay {
                 site: creds::RelaySite {
                     site_origin: &site.site_origin,
@@ -1703,9 +1705,10 @@ pub(crate) fn persist_newapi_login_session(
     refreshed: &newapi::RefreshedSession,
 ) -> Result<(i64, i64), AppError> {
     let account = backend::newapi_runtime_account(&refreshed.account);
-    let final_relay_id = with_conn(state, |conn| {
+    let final_relay_id = with_conn(state, |conn, _vault| {
         creds::save_credentials(
             conn,
+            _vault,
             relay_id,
             runtime_account_identity(&account),
             &refreshed.access_token,
@@ -1726,9 +1729,10 @@ fn persist_new_relay_newapi_session(
     refreshed: &newapi::RefreshedSession,
 ) -> Result<(i64, i64), AppError> {
     let account = backend::newapi_runtime_account(&refreshed.account);
-    let final_relay_id = with_conn(state, |conn| {
+    let final_relay_id = with_conn(state, |conn, _vault| {
         creds::save_authenticated_relay(
             conn,
+            _vault,
             creds::AuthenticatedRelay {
                 site: creds::RelaySite {
                     site_origin: &site.site_origin,
@@ -1915,7 +1919,7 @@ async fn load_validated_relay<R: tauri::Runtime>(
 ) -> Result<creds::RelayAccount, AppError> {
     let site_account = {
         let state = app_handle.state::<AppState>();
-        with_conn(&state, |conn| creds::get(conn, relay_id))?
+        with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
     };
 
@@ -1933,7 +1937,9 @@ fn validate_relay_protocol<R: tauri::Runtime>(
         Ok(detected) if detected.backend_kind == site_account.backend_kind => Ok(site_account),
         Ok(_) => {
             let state = app_handle.state::<AppState>();
-            with_conn(&state, |conn| creds::clear_credentials(conn, relay_id))?;
+            with_conn(&state, |conn, _vault| {
+                creds::clear_credentials(conn, relay_id)
+            })?;
             Err(AppError::Config(
                 "站点协议已变化，已清除旧凭据，请重新添加或登录".into(),
             ))
@@ -1989,7 +1995,7 @@ pub(crate) async fn backfill_account_identity<R: tauri::Runtime>(
     };
 
     let state = app_handle.state::<AppState>();
-    if let Err(e) = with_conn(&state, |conn| {
+    if let Err(e) = with_conn(&state, |conn, _vault| {
         creds::refresh_account_identity(conn, site_account.id, runtime_account_identity(&account))
     }) {
         log::warn!("刷新账号信息失败（不影响使用）: {e}");
@@ -2033,7 +2039,7 @@ pub(crate) fn persist_refreshed_session(
         current,
         refreshed,
         |state, relay_id, account| {
-            with_conn(state, |conn| {
+            with_conn(state, |conn, _vault| {
                 creds::refresh_account_identity(conn, relay_id, runtime_account_identity(account))
             })
         },
@@ -2052,9 +2058,10 @@ pub(crate) fn persist_refreshed_session_with_identity_writer(
         .or_else(|| current.refresh_token.clone());
     // 走 update_tokens 而不是 save_credentials：续期是「同一个账号换一把新 token」，
     // 账号没变 ⇒ 没有重复可言，不该走那条会查重并可能合并行的路径。
-    with_conn(state, |conn| {
+    with_conn(state, |conn, _vault| {
         creds::update_tokens(
             conn,
+            _vault,
             current.id,
             &refreshed.auth_token,
             refresh_token.as_deref(),
@@ -2586,8 +2593,8 @@ mod tests {
     #[test]
     fn persisting_newapi_login_session_stores_tokens_and_native_account_identity() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db);
-        let relay_id = with_conn(&state, |conn| {
+        let state = AppState::new(db).unwrap();
+        let relay_id = with_conn(&state, |conn, _vault| {
             creds::save_site_with_backend(
                 conn,
                 "https://newapi.example",
@@ -2615,9 +2622,11 @@ mod tests {
 
         let (final_relay_id, account_id) =
             persist_newapi_login_session(&state, relay_id, &refreshed).expect("persist login");
-        let persisted = with_conn(&state, |conn| creds::get(conn, final_relay_id))
-            .expect("load relay")
-            .expect("relay exists");
+        let persisted = with_conn(&state, |conn, _vault| {
+            creds::get(conn, _vault, final_relay_id)
+        })
+        .expect("load relay")
+        .expect("relay exists");
 
         assert_eq!(account_id, 84);
         assert_eq!(persisted.auth_token, "new-access-token");
@@ -2634,8 +2643,8 @@ mod tests {
     #[test]
     fn persisting_legacy_newapi_session_keeps_refresh_fields_absent() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db);
-        let relay_id = with_conn(&state, |conn| {
+        let state = AppState::new(db).unwrap();
+        let relay_id = with_conn(&state, |conn, _vault| {
             creds::save_site_with_backend(
                 conn,
                 "https://legacy-newapi.example",
@@ -2663,9 +2672,11 @@ mod tests {
 
         let (final_relay_id, account_id) =
             persist_newapi_login_session(&state, relay_id, &session).expect("persist login");
-        let persisted = with_conn(&state, |conn| creds::get(conn, final_relay_id))
-            .expect("load relay")
-            .expect("relay exists");
+        let persisted = with_conn(&state, |conn, _vault| {
+            creds::get(conn, _vault, final_relay_id)
+        })
+        .expect("load relay")
+        .expect("relay exists");
 
         assert_eq!(account_id, 42);
         assert_eq!(persisted.auth_token, "long-lived-access-token");
@@ -2746,7 +2757,7 @@ mod tests {
         let (app, relay_id) =
             saved_relay_app("https://relay.example", discovery::BackendKind::NewApi);
         let state = app.state::<AppState>();
-        let saved = with_conn(&state, |conn| creds::get(conn, relay_id))
+        let saved = with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))
             .unwrap()
             .unwrap();
         let original_token = saved.auth_token.clone();
@@ -2756,7 +2767,7 @@ mod tests {
             .await
             .expect("user cancellation is not a login error");
         assert!(result.is_none());
-        let persisted = with_conn(&state, |conn| creds::get(conn, relay_id))
+        let persisted = with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))
             .unwrap()
             .unwrap();
         assert_eq!(persisted.auth_token, original_token);
@@ -3108,8 +3119,8 @@ mod tests {
     #[test]
     fn persisting_a_newapi_refresh_updates_rotated_cookie_and_account_identity() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id = with_conn(&state, |conn| {
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site_with_backend(
                 conn,
                 "https://newapi.example",
@@ -3119,9 +3130,10 @@ mod tests {
             )
         })
         .expect("save site");
-        with_conn(&state, |conn| {
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -3136,7 +3148,7 @@ mod tests {
         })
         .expect("save credentials");
 
-        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+        let current = with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
             .expect("load relay")
             .expect("relay exists");
         let renewed = persist_refreshed_session(
@@ -3160,7 +3172,7 @@ mod tests {
         assert_eq!(renewed.account_label, "NewAPI Display");
         assert_eq!(renewed.login_identifier, "newapi-login");
 
-        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+        let persisted = with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
             .expect("reload relay")
             .expect("relay exists");
         assert_eq!(persisted.auth_token, "new-access");
@@ -3173,8 +3185,8 @@ mod tests {
     #[test]
     fn identity_refresh_failure_keeps_a_refreshed_session_usable() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let row_id = with_conn(&state, |conn| {
+        let state = AppState::new(db.clone()).unwrap();
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site_with_backend(
                 conn,
                 "https://newapi.example",
@@ -3184,9 +3196,10 @@ mod tests {
             )
         })
         .expect("save site");
-        with_conn(&state, |conn| {
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -3201,7 +3214,7 @@ mod tests {
         })
         .expect("save credentials");
 
-        let current = with_conn(&state, |conn| creds::get(conn, row_id))
+        let current = with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
             .expect("load relay")
             .expect("relay exists");
         let renewed = persist_refreshed_session_with_identity_writer(
@@ -3226,7 +3239,7 @@ mod tests {
         assert_eq!(renewed.account_label, "Old Label");
         assert_eq!(renewed.login_identifier, "old-login");
 
-        let persisted = with_conn(&state, |conn| creds::get(conn, row_id))
+        let persisted = with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
             .expect("reload relay")
             .expect("relay exists");
         assert_eq!(persisted.auth_token, "new-access");

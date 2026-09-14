@@ -35,6 +35,12 @@ pub fn get_init_error() -> Option<InitErrorPayload> {
     cell().read().ok()?.clone()
 }
 
+pub(crate) fn clear_init_error() {
+    if let Ok(mut guard) = cell().write() {
+        *guard = None;
+    }
+}
+
 // ============================================================
 // 迁移结果状态
 // ============================================================

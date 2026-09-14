@@ -492,11 +492,6 @@ impl Database {
     }
 
     /// 应用 Schema 迁移
-    pub(crate) fn apply_schema_migrations(&self) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
-        Self::apply_schema_migrations_on_conn(&conn)
-    }
-
     /// 在指定连接上应用 Schema 迁移
     pub(crate) fn apply_schema_migrations_on_conn(conn: &Connection) -> Result<(), AppError> {
         conn.execute("SAVEPOINT schema_migration;", [])

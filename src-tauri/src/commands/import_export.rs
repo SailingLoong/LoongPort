@@ -52,19 +52,22 @@ pub async fn export_config_to_file(
 #[tauri::command]
 pub async fn import_config_from_file(
     #[allow(non_snake_case)] filePath: String,
+    password: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    let password = password.map(zeroize::Zeroizing::new);
     let app_state_for_sync = state.inner().clone();
     let db = app_state_for_sync.db.clone();
     run_with_database_restore_lock(move || {
         tauri::async_runtime::spawn_blocking(move || {
             let path_buf = PathBuf::from(&filePath);
-            let backup_id = {
-                // SQL restore replaces the `skills` table. Exclude local Skill
-                // mutations while the database image is being swapped.
-                let _skill_state_guard = skill_state_write_guard();
-                db.import_sql(&path_buf)?
-            };
+            let sql = std::fs::read_to_string(&path_buf).map_err(|e| AppError::io(&path_buf, e))?;
+            let backup_id = crate::services::backup_transfer::restore_sql(
+                &db,
+                &sql,
+                password.as_deref().map(String::as_str),
+                &crate::secrets::key_store::SystemKeyStore,
+            )?;
             let warning =
                 post_sync_warning_from_result(Ok(run_post_import_sync(&app_state_for_sync)));
             if let Some(msg) = warning.as_ref() {
@@ -125,7 +128,7 @@ pub async fn import_from_cc_switch(
 pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<Value, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let app_state = AppState::new(db);
+        let app_state = AppState::new(db).unwrap();
         ProviderService::sync_current_to_live(&app_state)?;
         Ok::<_, AppError>(json!({
             "success": true,

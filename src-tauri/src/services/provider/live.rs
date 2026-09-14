@@ -10,7 +10,9 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
-use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
+use crate::config::{
+    delete_file, get_claude_settings_path, read_json_file, write_json_file, write_json_file_private,
+};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -766,7 +768,7 @@ pub(crate) fn write_live_with_common_config_for_codex_oauth_manager(
         return Ok(());
     }
 
-    write_live_snapshot(app_type, &effective_provider)
+    write_live_snapshot(db.secret_session(), app_type, &effective_provider)
 }
 
 pub(crate) fn build_effective_provider_for_live_with_codex_oauth_manager(
@@ -1214,7 +1216,7 @@ impl LiveSnapshot {
             LiveSnapshot::Claude { settings } => {
                 let path = get_claude_settings_path();
                 if let Some(value) = settings {
-                    write_json_file(&path, value)?;
+                    write_json_file_private(&path, value)?;
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
@@ -1223,7 +1225,7 @@ impl LiveSnapshot {
                 let auth_path = get_codex_auth_path();
                 let config_path = get_codex_config_path();
                 if let Some(value) = auth {
-                    write_json_file(&auth_path, value)?;
+                    crate::codex_config::write_codex_auth_file(value)?;
                 } else if auth_path.exists() {
                     delete_file(&auth_path)?;
                 }
@@ -1263,13 +1265,40 @@ impl LiveSnapshot {
     }
 }
 
-/// Write live configuration snapshot for a provider
-pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
+#[derive(Clone, Copy)]
+enum LiveBackup<'a> {
+    Vault(&'a crate::SecretSession),
+    Disabled,
+}
+
+/// Write a provider's downstream configuration with encrypted application-owned backups.
+pub(crate) fn write_live_snapshot(
+    session: &crate::SecretSession,
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<(), AppError> {
+    write_live_snapshot_inner(LiveBackup::Vault(session), app_type, provider)
+}
+
+/// Write only the downstream CLI configuration for the standalone headless tool.
+/// This path deliberately owns no LoongPort database, vault, or backup history.
+pub(crate) fn write_standalone_live_snapshot(
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<(), AppError> {
+    write_live_snapshot_inner(LiveBackup::Disabled, app_type, provider)
+}
+
+fn write_live_snapshot_inner(
+    backup: LiveBackup<'_>,
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<(), AppError> {
     match app_type {
         AppType::Claude => {
             let path = get_claude_settings_path();
             let settings = sanitize_claude_settings_for_live(&provider.settings_config);
-            write_json_file(&path, &settings)?;
+            write_json_file_private(&path, &settings)?;
         }
         AppType::CodexImage => {
             // **明确报错而不是委托给 codex** —— 后者会用生图档位的配置覆盖用户
@@ -1396,7 +1425,14 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
 
             match openclaw_config_result {
                 Ok(config) => {
-                    openclaw_config::set_typed_provider(&provider.id, &config)?;
+                    match backup {
+                        LiveBackup::Vault(session) => {
+                            openclaw_config::set_typed_provider(session, &provider.id, &config)?;
+                        }
+                        LiveBackup::Disabled => {
+                            openclaw_config::set_typed_provider_standalone(&provider.id, &config)?;
+                        }
+                    }
                     log::info!("OpenClaw provider '{}' written to live config", provider.id);
                 }
                 Err(e) => {
@@ -1410,10 +1446,17 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
                         || provider.settings_config.get("api").is_some()
                         || provider.settings_config.get("models").is_some()
                     {
-                        openclaw_config::set_provider(
-                            &provider.id,
-                            provider.settings_config.clone(),
-                        )?;
+                        match backup {
+                            LiveBackup::Vault(session) => openclaw_config::set_provider(
+                                session,
+                                &provider.id,
+                                provider.settings_config.clone(),
+                            )?,
+                            LiveBackup::Disabled => openclaw_config::set_provider_standalone(
+                                &provider.id,
+                                provider.settings_config.clone(),
+                            )?,
+                        };
                         log::info!(
                             "OpenClaw provider '{}' written as raw JSON to live config",
                             provider.id
@@ -1428,7 +1471,17 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             }
         }
         AppType::Hermes => {
-            crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())?;
+            match backup {
+                LiveBackup::Vault(session) => crate::hermes_config::set_provider(
+                    session,
+                    &provider.id,
+                    provider.settings_config.clone(),
+                )?,
+                LiveBackup::Disabled => crate::hermes_config::set_provider_standalone(
+                    &provider.id,
+                    provider.settings_config.clone(),
+                )?,
+            };
             log::debug!("Hermes provider '{}' written to live config", provider.id);
         }
         AppType::Pi => {
@@ -2333,7 +2386,10 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
 ///
 /// This removes a specific provider from ~/.hermes/config.yaml
 /// without affecting other providers in the file.
-pub fn remove_hermes_provider_from_live(provider_id: &str) -> Result<(), AppError> {
+pub fn remove_hermes_provider_from_live(
+    session: &crate::SecretSession,
+    provider_id: &str,
+) -> Result<(), AppError> {
     use crate::hermes_config;
 
     // Check if Hermes config directory exists
@@ -2342,7 +2398,7 @@ pub fn remove_hermes_provider_from_live(provider_id: &str) -> Result<(), AppErro
         return Ok(());
     }
 
-    hermes_config::remove_provider(provider_id)?;
+    hermes_config::remove_provider(session, provider_id)?;
     log::info!("Hermes provider '{provider_id}' removed from live config");
 
     Ok(())
@@ -2352,7 +2408,10 @@ pub fn remove_hermes_provider_from_live(provider_id: &str) -> Result<(), AppErro
 ///
 /// This removes a specific provider from ~/.openclaw/openclaw.json
 /// without affecting other providers in the file.
-pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppError> {
+pub fn remove_openclaw_provider_from_live(
+    session: &crate::SecretSession,
+    provider_id: &str,
+) -> Result<(), AppError> {
     use crate::openclaw_config;
 
     // Check if OpenClaw config directory exists
@@ -2361,7 +2420,7 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
         return Ok(());
     }
 
-    openclaw_config::remove_provider(provider_id)?;
+    openclaw_config::remove_provider(session, provider_id)?;
     log::info!("OpenClaw provider '{provider_id}' removed from live config");
 
     Ok(())
@@ -2372,6 +2431,78 @@ mod tests {
     use super::*;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
     use serde_json::json;
+    #[cfg(unix)]
+    use serial_test::serial;
+    #[cfg(unix)]
+    use std::fs;
+
+    #[cfg(unix)]
+    struct TestHome {
+        _dir: tempfile::TempDir,
+        original: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl TestHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("create isolated home");
+            let original = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            crate::settings::reload_settings().expect("reload isolated settings");
+            Self {
+                _dir: dir,
+                original,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn claude_live_write_restricts_settings_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _home = TestHome::new();
+        let settings_path = get_claude_settings_path();
+        fs::create_dir_all(settings_path.parent().expect("settings parent"))
+            .expect("create settings parent");
+        fs::write(&settings_path, "{}").expect("seed Claude settings");
+        fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o644))
+            .expect("set permissive fixture mode");
+        let provider = Provider::with_id(
+            "claude-private-write-test".to_string(),
+            "Claude private write test".to_string(),
+            json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "test-token" } }),
+            None,
+        );
+
+        write_live_snapshot(
+            crate::database::Database::memory()
+                .unwrap()
+                .secret_session(),
+            &AppType::Claude,
+            &provider,
+        )
+        .expect("write Claude live settings");
+
+        let mode = fs::metadata(&settings_path)
+            .expect("read settings metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     /// ⭐ **写 live 对生图栏是个空操作，不是错误。**
     ///
@@ -2402,7 +2533,7 @@ mod tests {
 
         // 必须 Ok —— 报错会让「编辑并保存一个当前生图档位」失败。
         // （上游把收口改名为 _for_state 并委托 _codex_oauth_manager，守卫在 _for_state 顶层。）
-        let state = crate::store::AppState::new(std::sync::Arc::new(db));
+        let state = crate::store::AppState::new(std::sync::Arc::new(db)).unwrap();
         write_live_with_common_config_for_state(&state, &AppType::CodexImage, &provider)
             .expect("写 live 对生图栏该是空操作，不该报错");
     }
@@ -2423,7 +2554,8 @@ mod tests {
     fn syncing_all_apps_to_live_survives_a_current_image_tier() {
         let state = crate::store::AppState::new(std::sync::Arc::new(
             Database::memory().expect("create memory db"),
-        ));
+        ))
+        .unwrap();
         let id = "loongport-aaaaaaaaaaaaaaaa";
         let provider = Provider::with_id(
             id.to_string(),
@@ -2460,8 +2592,14 @@ mod tests {
             json!({ "config": "model = \"gpt-image-2\"\n" }),
             None,
         );
-        let err = write_live_snapshot(&AppType::CodexImage, &provider)
-            .expect_err("直接写 live 快照必须被拒绝");
+        let err = write_live_snapshot(
+            crate::database::Database::memory()
+                .unwrap()
+                .secret_session(),
+            &AppType::CodexImage,
+            &provider,
+        )
+        .expect_err("直接写 live 快照必须被拒绝");
         // 只断言「报了错」而不是错误文案 —— 文案会随 i18n 变，判据是「拒绝了」。
         assert!(
             format!("{err}").contains("生图"),
@@ -2942,7 +3080,13 @@ base_url = "https://a.example/v1"
     #[test]
     fn category_less_managed_codex_binding_with_null_config_uses_selected_account_token() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let manager = Arc::new(CodexOAuthManager::new(temp.path().to_path_buf()));
+        let manager = Arc::new(
+            CodexOAuthManager::new(crate::secrets::session::SecretSession::from_context(
+                temp.path().to_path_buf(),
+                crate::secrets::VaultContext::generate().unwrap(),
+            ))
+            .unwrap(),
+        );
         crate::rt::block_on(async {
             manager
                 .add_test_account_with_access_token(
@@ -3018,7 +3162,13 @@ base_url = "https://a.example/v1"
     #[test]
     fn codex_follow_login_without_binding_keeps_stored_auth() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let manager = Arc::new(CodexOAuthManager::new(temp.path().to_path_buf()));
+        let manager = Arc::new(
+            CodexOAuthManager::new(crate::secrets::session::SecretSession::from_context(
+                temp.path().to_path_buf(),
+                crate::secrets::VaultContext::generate().unwrap(),
+            ))
+            .unwrap(),
+        );
         crate::rt::block_on(async {
             manager
                 .add_test_account_with_access_token("acct-managed", "managed-token", None)

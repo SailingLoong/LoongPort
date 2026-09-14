@@ -1,9 +1,42 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
+use crate::secrets::{
+    inventory::{open_db, seal_db},
+    VaultContext,
+};
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::{HashMap, HashSet};
+
+pub(crate) fn insert_endpoint_on_tx(
+    tx: &Transaction<'_>,
+    vault: &VaultContext,
+    provider: &str,
+    app: &str,
+    url: &str,
+    added_at: i64,
+) -> Result<(), AppError> {
+    tx.execute(
+        "INSERT INTO provider_endpoints(provider_id,app_type,url,added_at) VALUES (?1,?2,'',?3)",
+        params![provider, app, added_at],
+    )
+    .map_err(|e| AppError::Database(e.to_string()))?;
+    let id = tx.last_insert_rowid();
+    let ciphertext = seal_db(
+        vault,
+        "provider_endpoints",
+        "url",
+        &[&id.to_string(), provider, app],
+        url,
+    )?;
+    tx.execute(
+        "UPDATE provider_endpoints SET url=?1 WHERE id=?2",
+        params![ciphertext, id],
+    )
+    .map_err(|e| AppError::Database(e.to_string()))?;
+    Ok(())
+}
 
 fn read_available_models(raw: Option<String>) -> rusqlite::Result<Option<Vec<String>>> {
     raw.map(|raw| {
@@ -18,6 +51,64 @@ fn read_available_models(raw: Option<String>) -> rusqlite::Result<Option<Vec<Str
     .transpose()
 }
 
+#[cfg(test)]
+mod encrypted_endpoints_tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_urls_are_encrypted_and_removal_uses_the_plaintext_contract() {
+        let db = Database::memory().unwrap();
+        let provider = Provider::with_id(
+            "fixture".into(),
+            "Fixture".into(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("codex", &provider).unwrap();
+        let url = "https://user:endpoint-canary@example.invalid/v1?token=query-canary";
+        db.add_custom_endpoint("codex", "fixture", url).unwrap();
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT url FROM provider_endpoints", [], |r| r.get(0))
+            .unwrap();
+        assert!(!raw.contains("endpoint-canary"));
+        assert!(!raw.contains("query-canary"));
+        let loaded = db.get_provider_by_id("fixture", "codex").unwrap().unwrap();
+        assert!(loaded.meta.unwrap().custom_endpoints.contains_key(url));
+        db.remove_custom_endpoint("codex", "fixture", url).unwrap();
+        assert!(db
+            .get_provider_by_id("fixture", "codex")
+            .unwrap()
+            .unwrap()
+            .meta
+            .unwrap()
+            .custom_endpoints
+            .is_empty());
+    }
+
+    #[test]
+    fn moving_an_endpoint_to_another_provider_does_not_authenticate() {
+        let db = Database::memory().unwrap();
+        for id in ["first", "second"] {
+            db.save_provider(
+                "codex",
+                &Provider::with_id(id.into(), "Fixture".into(), serde_json::json!({}), None),
+            )
+            .unwrap();
+        }
+        db.add_custom_endpoint("codex", "first", "https://example.invalid")
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE provider_endpoints SET provider_id='second'", [])
+            .unwrap();
+        assert!(db.get_provider_by_id("second", "codex").is_err());
+    }
+}
+
 type OmoProviderRow = (
     String,
     String,
@@ -30,12 +121,45 @@ type OmoProviderRow = (
 );
 
 impl Database {
+    fn decode_provider_json<T: serde::de::DeserializeOwned + Default>(
+        vault: &VaultContext,
+        column: &str,
+        id: &str,
+        app_type: &str,
+        raw: &str,
+    ) -> Result<T, AppError> {
+        let plaintext = open_db(vault, "providers", column, &[id, app_type], raw)?;
+        if plaintext.is_empty() {
+            return Ok(T::default());
+        }
+        serde_json::from_str(&plaintext)
+            .map_err(|_| AppError::Database(format!("Invalid provider {column}")))
+    }
+
+    pub(crate) fn get_provider_meta_on_connection(
+        conn: &rusqlite::Connection,
+        vault: &VaultContext,
+        id: &str,
+        app_type: &str,
+    ) -> Result<Option<ProviderMeta>, AppError> {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT meta FROM providers WHERE id=?1 AND app_type=?2",
+                params![id, app_type],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|raw| Self::decode_provider_json(vault, "meta", id, app_type, &raw))
+            .transpose()
+    }
+
     pub fn get_all_providers(
         &self,
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
-        Self::get_all_providers_on_connection(&conn, app_type)
+        Self::get_all_providers_on_connection(&conn, &vault, app_type)
     }
 
     /// Read current-provider state and provider rows through an active transaction.
@@ -44,16 +168,18 @@ impl Database {
     /// calling this helper so the decision is based on one database snapshot.
     pub(crate) fn get_provider_snapshot_in_transaction(
         transaction: &Transaction<'_>,
+        vault: &VaultContext,
         app_type: &str,
     ) -> Result<(Option<String>, IndexMap<String, Provider>), AppError> {
         Ok((
             Self::get_current_provider_on_connection(transaction, app_type)?,
-            Self::get_all_providers_on_connection(transaction, app_type)?,
+            Self::get_all_providers_on_connection(transaction, vault, app_type)?,
         ))
     }
 
     fn get_all_providers_on_connection(
         conn: &rusqlite::Connection,
+        vault: &VaultContext,
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
         let mut stmt = conn.prepare(
@@ -79,70 +205,87 @@ impl Database {
                 let in_failover_queue: bool = row.get(11)?;
                 let available_models = read_available_models(row.get(12)?)?;
 
-                let settings_config =
-                    serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
-                let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
-
                 Ok((
                     id,
                     Provider {
                         id: "".to_string(), // Placeholder, set below
                         name,
-                        settings_config,
+                        settings_config: serde_json::Value::Null,
                         website_url,
                         category,
                         created_at,
                         sort_index,
                         notes,
-                        meta: Some(meta),
+                        meta: None,
                         icon,
                         icon_color,
                         in_failover_queue,
                         available_models,
                     },
+                    settings_config_str,
+                    meta_str,
                 ))
             })
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut providers = IndexMap::new();
         for provider_res in provider_iter {
-            let (id, mut provider) = provider_res.map_err(|e| AppError::Database(e.to_string()))?;
+            let (id, mut provider, settings, meta) = provider_res?;
+            provider.settings_config =
+                Self::decode_provider_json(vault, "settings_config", &id, app_type, &settings)?;
+            provider.meta = Some(Self::decode_provider_json(
+                vault, "meta", &id, app_type, &meta,
+            )?);
             provider.id = id.clone();
 
-            let mut stmt_endpoints = conn.prepare(
-                "SELECT url, added_at FROM provider_endpoints WHERE provider_id = ?1 AND app_type = ?2 ORDER BY added_at ASC, url ASC"
-            ).map_err(|e| AppError::Database(e.to_string()))?;
-
-            let endpoints_iter = stmt_endpoints
-                .query_map(params![id, app_type], |row| {
-                    let url: String = row.get(0)?;
-                    let added_at: Option<i64> = row.get(1)?;
-                    Ok((
-                        url,
-                        crate::settings::CustomEndpoint {
-                            url: "".to_string(),
-                            added_at: added_at.unwrap_or(0),
-                            last_used: None,
-                        },
-                    ))
-                })
-                .map_err(|e| AppError::Database(e.to_string()))?;
-
-            let mut custom_endpoints = HashMap::new();
-            for ep_res in endpoints_iter {
-                let (url, mut ep) = ep_res.map_err(|e| AppError::Database(e.to_string()))?;
-                ep.url = url.clone();
-                custom_endpoints.insert(url, ep);
-            }
-
             if let Some(meta) = &mut provider.meta {
-                meta.custom_endpoints = custom_endpoints;
+                meta.custom_endpoints =
+                    Self::get_endpoints_on_connection(conn, vault, &id, app_type)?;
             }
 
             providers.insert(id, provider);
         }
 
         Ok(providers)
+    }
+
+    fn get_endpoints_on_connection(
+        conn: &rusqlite::Connection,
+        vault: &VaultContext,
+        id: &str,
+        app_type: &str,
+    ) -> Result<HashMap<String, crate::settings::CustomEndpoint>, AppError> {
+        let mut stmt = conn.prepare("SELECT id,url,added_at FROM provider_endpoints WHERE provider_id=?1 AND app_type=?2 ORDER BY added_at ASC,id ASC").map_err(|e|AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![id, app_type], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut endpoints = HashMap::new();
+        for row in rows {
+            let (endpoint_id, ciphertext, added_at) =
+                row.map_err(|e| AppError::Database(e.to_string()))?;
+            let url = open_db(
+                vault,
+                "provider_endpoints",
+                "url",
+                &[&endpoint_id.to_string(), id, app_type],
+                &ciphertext,
+            )?;
+            endpoints.insert(
+                url.clone(),
+                crate::settings::CustomEndpoint {
+                    url,
+                    added_at: added_at.unwrap_or(0),
+                    last_used: None,
+                },
+            );
+        }
+        Ok(endpoints)
     }
 
     pub fn get_current_provider(&self, app_type: &str) -> Result<Option<String>, AppError> {
@@ -176,6 +319,7 @@ impl Database {
         id: &str,
         app_type: &str,
     ) -> Result<Option<Provider>, AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
         let result = conn.query_row(
             "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue, available_models
@@ -196,35 +340,44 @@ impl Database {
                 let in_failover_queue: bool = row.get(10)?;
                 let available_models = read_available_models(row.get(11)?)?;
 
-                let settings_config = serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
-                let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
-
-                Ok(Provider {
+                Ok((Provider {
                     id: id.to_string(),
                     name,
-                    settings_config,
+                    settings_config: serde_json::Value::Null,
                     website_url,
                     category,
                     created_at,
                     sort_index,
                     notes,
-                    meta: Some(meta),
+                    meta: None,
                     icon,
                     icon_color,
                     in_failover_queue,
                     available_models,
-                })
+                }, settings_config_str, meta_str))
             },
         );
 
         match result {
-            Ok(provider) => Ok(Some(provider)),
+            Ok((mut provider, settings, meta)) => {
+                provider.settings_config =
+                    Self::decode_provider_json(&vault, "settings_config", id, app_type, &settings)?;
+                provider.meta = Some(Self::decode_provider_json(
+                    &vault, "meta", id, app_type, &meta,
+                )?);
+                if let Some(meta) = &mut provider.meta {
+                    meta.custom_endpoints =
+                        Self::get_endpoints_on_connection(&conn, &vault, id, app_type)?;
+                }
+                Ok(Some(provider))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
     }
 
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
@@ -232,6 +385,21 @@ impl Database {
 
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
+        let settings = seal_db(
+            &vault,
+            "providers",
+            "settings_config",
+            &[&provider.id, app_type],
+            &serde_json::to_string(&provider.settings_config)
+                .map_err(|e| AppError::Database(e.to_string()))?,
+        )?;
+        let meta = seal_db(
+            &vault,
+            "providers",
+            "meta",
+            &[&provider.id, app_type],
+            &serde_json::to_string(&meta_clone).map_err(|e| AppError::Database(e.to_string()))?,
+        )?;
 
         let existing: Option<(bool, bool)> = tx
             .query_row(
@@ -263,9 +431,7 @@ impl Database {
                 WHERE id = ?13 AND app_type = ?14",
                 params![
                     provider.name,
-                    serde_json::to_string(&provider.settings_config).map_err(|e| {
-                        AppError::Database(format!("Failed to serialize settings_config: {e}"))
-                    })?,
+                    settings,
                     provider.website_url,
                     provider.category,
                     provider.created_at,
@@ -273,9 +439,7 @@ impl Database {
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
-                    serde_json::to_string(&meta_clone).map_err(|e| AppError::Database(format!(
-                        "Failed to serialize meta: {e}"
-                    )))?,
+                    meta,
                     is_current,
                     in_failover_queue,
                     provider.id,
@@ -293,8 +457,7 @@ impl Database {
                     provider.id,
                     app_type,
                     provider.name,
-                    serde_json::to_string(&provider.settings_config)
-                        .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
+                    settings,
                     provider.website_url,
                     provider.category,
                     provider.created_at,
@@ -302,8 +465,7 @@ impl Database {
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
-                    serde_json::to_string(&meta_clone)
-                        .map_err(|e| AppError::Database(format!("Failed to serialize meta: {e}")))?,
+                    meta,
                     is_current,
                     in_failover_queue,
                 ],
@@ -311,12 +473,14 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
             for (url, endpoint) in endpoints {
-                tx.execute(
-                    "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![provider.id, app_type, url, endpoint.added_at],
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                insert_endpoint_on_tx(
+                    &tx,
+                    &vault,
+                    &provider.id,
+                    app_type,
+                    &url,
+                    endpoint.added_at,
+                )?;
             }
         }
 
@@ -411,6 +575,7 @@ impl Database {
         expected_relay: &crate::relay::creds::RelayAccount,
         models: &[String],
     ) -> Result<bool, AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
         let binding: Option<(String, String, Option<i64>)> = conn
             .query_row(
@@ -434,10 +599,10 @@ impl Database {
         let Some((settings, website, meta)) = current else {
             return Ok(false);
         };
-        let settings: serde_json::Value = serde_json::from_str(&settings)
-            .map_err(|error| AppError::Database(error.to_string()))?;
+        let settings: serde_json::Value =
+            Self::decode_provider_json(&vault, "settings_config", &original.id, app, &settings)?;
         let meta: ProviderMeta =
-            serde_json::from_str(&meta).map_err(|error| AppError::Database(error.to_string()))?;
+            Self::decode_provider_json(&vault, "meta", &original.id, app, &meta)?;
         if settings != original.settings_config
             || website != original.website_url
             || meta.loongport_account_id
@@ -525,13 +690,19 @@ impl Database {
         provider_id: &str,
         settings_config: &serde_json::Value,
     ) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
         conn.execute(
             "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = ?3",
             params![
-                serde_json::to_string(settings_config).map_err(|e| AppError::Database(format!(
-                    "Failed to serialize settings_config: {e}"
-                )))?,
+                seal_db(
+                    &vault,
+                    "providers",
+                    "settings_config",
+                    &[provider_id, app_type],
+                    &serde_json::to_string(settings_config)
+                        .map_err(|e| AppError::Database(e.to_string()))?
+                )?,
                 provider_id,
                 app_type
             ],
@@ -546,13 +717,14 @@ impl Database {
         provider_id: &str,
         url: &str,
     ) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
+        let vault = self.secrets.read()?;
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
         let added_at = chrono::Utc::now().timestamp_millis();
-        conn.execute(
-            "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at) VALUES (?1, ?2, ?3, ?4)",
-            params![provider_id, app_type, url, added_at],
-        ).map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(())
+        insert_endpoint_on_tx(&tx, &vault, provider_id, app_type, url, added_at)?;
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))
     }
 
     pub fn remove_custom_endpoint(
@@ -561,12 +733,36 @@ impl Database {
         provider_id: &str,
         url: &str,
     ) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
-        conn.execute(
-            "DELETE FROM provider_endpoints WHERE provider_id = ?1 AND app_type = ?2 AND url = ?3",
-            params![provider_id, app_type, url],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        let vault = self.secrets.read()?;
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut stmt = tx
+            .prepare("SELECT id,url FROM provider_endpoints WHERE provider_id=?1 AND app_type=?2")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![provider_id, app_type], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        drop(stmt);
+        for (id, ciphertext) in rows {
+            if open_db(
+                &vault,
+                "provider_endpoints",
+                "url",
+                &[&id.to_string(), provider_id, app_type],
+                &ciphertext,
+            )? == url
+            {
+                tx.execute("DELETE FROM provider_endpoints WHERE id=?1", [id])
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+        }
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -653,6 +849,7 @@ impl Database {
         app_type: &str,
         category: &str,
     ) -> Result<Option<Provider>, AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
         let row_data: Result<OmoProviderRow, rusqlite::Error> = conn.query_row(
             "SELECT id, name, settings_config, category, created_at, sort_index, notes, meta
@@ -681,20 +878,15 @@ impl Database {
                 Err(e) => return Err(AppError::Database(e.to_string())),
             };
 
-        let settings_config = serde_json::from_str(&settings_config_str).map_err(|e| {
-            AppError::Database(format!(
-                "Failed to parse {category} provider settings_config (provider_id={id}): {e}"
-            ))
-        })?;
-        let meta: crate::provider::ProviderMeta = if meta_str.trim().is_empty() {
-            crate::provider::ProviderMeta::default()
-        } else {
-            serde_json::from_str(&meta_str).map_err(|e| {
-                AppError::Database(format!(
-                    "Failed to parse {category} provider meta (provider_id={id}): {e}"
-                ))
-            })?
-        };
+        let settings_config = Self::decode_provider_json(
+            &vault,
+            "settings_config",
+            &id,
+            app_type,
+            &settings_config_str,
+        )?;
+        let meta: ProviderMeta =
+            Self::decode_provider_json(&vault, "meta", &id, app_type, &meta_str)?;
 
         Ok(Some(Provider {
             id,
@@ -1035,5 +1227,118 @@ mod ensure_official_seed_tests {
         let result =
             db.ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::Claude);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn secret_provider_metadata_and_omo_use_the_full_primary_key() {
+        let db = Database::memory().unwrap();
+        let mut provider = Provider::with_id(
+            "shared-id".into(),
+            "Provider".into(),
+            json!({"api_key":"omo-canary"}),
+            None,
+        );
+        provider.category = Some("omo".into());
+        provider.meta = Some(serde_json::from_value(json!({"usage_script":{"enabled":true,"language":"javascript","code":"return []", "apiKey":"usage-canary"}})).unwrap());
+        db.save_provider("opencode", &provider).unwrap();
+        db.save_provider("claude", &provider).unwrap();
+        db.set_omo_provider_current("opencode", &provider.id, "omo")
+            .unwrap();
+        let current = db
+            .get_current_omo_provider("opencode", "omo")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.settings_config, provider.settings_config);
+        assert_eq!(
+            current
+                .meta
+                .unwrap()
+                .usage_script
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("usage-canary")
+        );
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT meta FROM providers WHERE id='shared-id' AND app_type='opencode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("usage-canary"));
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET meta=?1 WHERE id='shared-id' AND app_type='claude'",
+                [raw],
+            )
+            .unwrap();
+        assert!(db.get_provider_by_id(&provider.id, "claude").is_err());
+    }
+
+    #[test]
+    fn provider_secrets_roundtrip_and_reject_swapped_ciphertext() {
+        let db = Database::memory().unwrap();
+        let provider = Provider::with_id(
+            "protected-provider".into(),
+            "Provider".into(),
+            json!({"api_key":"provider-canary"}),
+            None,
+        );
+        db.save_provider("claude", &provider).unwrap();
+        let updated = json!({"api_key":"updated-canary"});
+        db.update_provider_settings_config("claude", &provider.id, &updated)
+            .unwrap();
+        assert_eq!(
+            db.get_provider_by_id(&provider.id, "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            updated
+        );
+        db.save_provider("claude", &provider).unwrap();
+        assert_eq!(
+            db.get_provider_by_id(&provider.id, "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            provider.settings_config
+        );
+        assert_eq!(
+            db.get_all_providers("claude").unwrap()[&provider.id].settings_config,
+            provider.settings_config
+        );
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id=?1",
+                [&provider.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("provider-canary"));
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET meta=settings_config WHERE id=?1",
+                [&provider.id],
+            )
+            .unwrap();
+        assert!(db.get_provider_by_id(&provider.id, "claude").is_err());
+        assert!(db.get_all_providers("claude").is_err());
     }
 }

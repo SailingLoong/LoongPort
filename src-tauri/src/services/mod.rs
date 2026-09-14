@@ -1,6 +1,7 @@
 #[cfg(feature = "gui")]
 pub mod app_update;
 pub mod application_overview;
+pub(crate) mod backup_transfer;
 pub mod balance;
 pub mod codex_oauth_models;
 pub mod coding_plan;
@@ -36,6 +37,7 @@ pub mod sql_helpers;
 pub mod stream_check;
 pub mod subscription;
 pub mod subscription_grok;
+pub(crate) mod sync_cleanup;
 pub mod sync_protocol;
 pub mod usage_cache;
 pub mod usage_stats;

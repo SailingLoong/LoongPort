@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn reset_site_config_restores_builtin_defaults() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let site = "https://api.example.com";
 
         // 直接造一条「应用过声明」的托管档位（不跑 persist，那段已有专测）。
@@ -325,9 +325,9 @@ mod tests {
     #[test]
     fn first_import_applies_site_declaration_segment() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let site = "https://api.example.com";
-        let row_id = with_conn(&state, |conn| {
+        let row_id = with_conn(&state, |conn, _vault| {
             creds::save_site_with_backend(
                 conn,
                 site,
@@ -337,9 +337,10 @@ mod tests {
             )
         })
         .expect("save site");
-        with_conn(&state, |conn| {
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -353,7 +354,7 @@ mod tests {
             )
         })
         .expect("credentials");
-        let site_account = with_conn(&state, |conn| creds::get(conn, row_id))
+        let site_account = with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
             .expect("load")
             .expect("exists");
 

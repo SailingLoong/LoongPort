@@ -530,7 +530,7 @@ mod tests {
             .unwrap();
         super::super::auto_strategy::set_enabled(&db, "claude", true).unwrap();
         db.add_to_failover_queue("claude", "a").unwrap();
-        let _state = crate::store::AppState::new(db.clone());
+        let _state = crate::store::AppState::new(db.clone()).unwrap();
         assert!(super::super::application_routing::failover_enabled(&db, "claude").unwrap());
         assert!(db.get_failover_queue("claude").unwrap().is_empty());
         assert!(!super::super::auto_strategy::is_auto_mode_enabled(
@@ -635,7 +635,7 @@ mod tests {
     async fn application_routing_getter_is_pure_and_shows_all_apps_and_errors() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
         for app in ["claude", "pi"] {
             for id in ["a", "b"] {
                 db.save_provider(
@@ -1164,7 +1164,7 @@ mod tests {
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
         let board = crate::commands::application_routing_impl(&state, "codex")
             .await
             .unwrap();

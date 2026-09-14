@@ -331,10 +331,9 @@ pub fn cached_site_balances(
 ) -> std::collections::HashMap<SiteAccountKey, SiteBalanceEntry> {
     // 非 Result 返回值的锁惯例：毒锁取内值（与 commands::auto_mode 的直查一致），
     // 读缓存失败按「无缓存」处理 —— 看板照常返回，stale 判定自然触发刷新。
-    let conn = db
-        .conn
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Ok(conn) = db.conn.lock() else {
+        return std::collections::HashMap::new();
+    };
     let mut stmt = match conn
         .prepare("SELECT site_origin, account_id, balance_usd, fetched_at FROM site_balance_cache")
     {
@@ -364,10 +363,7 @@ pub fn cached_site_balance(
     db: &crate::database::Database,
     key: &SiteAccountKey,
 ) -> Option<SiteBalanceEntry> {
-    let conn = db
-        .conn
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let conn = db.conn.lock().ok()?;
     conn.query_row(
         "SELECT balance_usd, fetched_at FROM site_balance_cache
          WHERE site_origin = ?1 AND account_id = ?2",
@@ -431,10 +427,7 @@ pub fn drop_site_cache(
     db: &crate::database::Database,
     keys: &std::collections::HashSet<SiteAccountKey>,
 ) {
-    let conn = db
-        .conn
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Ok(conn) = db.conn.lock() else { return };
     for (origin, account_id) in keys {
         if let Err(e) = conn.execute(
             "DELETE FROM site_balance_cache WHERE site_origin = ?1 AND account_id = ?2",

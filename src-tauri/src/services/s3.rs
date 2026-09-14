@@ -358,13 +358,38 @@ pub(crate) async fn test_connection(creds: &S3Credentials) -> Result<(), AppErro
     Err(s3_status_error("HEAD bucket", resp.status(), &url_str))
 }
 
-/// Upload bytes to an S3 object.
+/// Create immutable bytes. An identical existing object is a successful retry.
 pub(crate) async fn put_object(
     creds: &S3Credentials,
     key: &str,
     bytes: Vec<u8>,
     content_type: &str,
 ) -> Result<(), AppError> {
+    if put_object_conditional(
+        creds,
+        key,
+        bytes.clone(),
+        content_type,
+        &super::sync_protocol::PutCondition::Absent,
+    )
+    .await?
+    .is_none()
+    {
+        let existing = get_object(creds, key, bytes.len().saturating_add(1)).await?;
+        if existing.as_ref().map(|v| v.0.as_slice()) != Some(bytes.as_slice()) {
+            return Err(super::sync_protocol::publication_conflict());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn put_object_conditional(
+    creds: &S3Credentials,
+    key: &str,
+    bytes: Vec<u8>,
+    content_type: &str,
+    condition: &super::sync_protocol::PutCondition,
+) -> Result<Option<String>, AppError> {
     let url_str = build_object_url(creds, key);
     let url = Url::parse(&url_str).map_err(|e| {
         AppError::localized(
@@ -374,10 +399,17 @@ pub(crate) async fn put_object(
         )
     })?;
 
+    let (condition_name, condition_value) = condition.header()?;
     let client = http_client::get();
     let body_hash = sha256_hex(&bytes);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("content-type", content_type.parse().unwrap());
+    headers.insert(
+        condition_name,
+        condition_value
+            .parse()
+            .map_err(|_| AppError::InvalidInput("Invalid ETag".into()))?,
+    );
     sign_request(
         "PUT",
         &url,
@@ -396,8 +428,14 @@ pub(crate) async fn put_object(
         .await
         .map_err(|e| s3_transport_error("s3.put_failed", "PUT 请求", "PUT request", &e))?;
 
+    if resp.status() == StatusCode::PRECONDITION_FAILED {
+        return Ok(None);
+    }
     if resp.status().is_success() {
-        return Ok(());
+        return super::sync_protocol::require_strong_etag(
+            resp.headers().get("etag").and_then(|v| v.to_str().ok()),
+        )
+        .map(Some);
     }
     Err(s3_status_error("PUT", resp.status(), &url_str))
 }
@@ -471,7 +509,7 @@ pub(crate) async fn get_object(
     Ok(Some((bytes, etag)))
 }
 
-/// Retrieve the ETag of an S3 object via HEAD. Returns `None` on 404.
+/// Retrieve the strong ETag of an S3 object via HEAD. Returns `None` on 404.
 pub(crate) async fn head_object(
     creds: &S3Credentials,
     key: &str,
@@ -511,11 +549,12 @@ pub(crate) async fn head_object(
     if !resp.status().is_success() {
         return Err(s3_status_error("HEAD", resp.status(), &url_str));
     }
-    Ok(resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string()))
+    super::sync_protocol::require_strong_etag(
+        resp.headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .map(Some)
 }
 
 // ─── Tests ───────────────────────────────────────────────────
@@ -922,5 +961,43 @@ mod integration_tests {
         println!("PASS: get_object(404) returned None");
 
         println!("ALL LIVE S3 TESTS PASSED");
+    }
+}
+
+pub(crate) async fn delete_object_conditional(
+    creds: &S3Credentials,
+    key: &str,
+    etag: &str,
+) -> Result<super::sync_cleanup::DeleteResult, AppError> {
+    use super::sync_cleanup::DeleteResult;
+    let url_str = build_object_url(creds, key);
+    let url = Url::parse(&url_str).map_err(|_| AppError::Config("s3.url.invalid".into()))?;
+    let etag = super::sync_protocol::require_strong_etag(Some(etag))?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "if-match",
+        etag.parse()
+            .map_err(|_| AppError::Config("sync.strong_etag_required".into()))?,
+    );
+    sign_request(
+        "DELETE",
+        &url,
+        &mut headers,
+        &sha256_hex(b""),
+        creds,
+        chrono::Utc::now(),
+    );
+    let response = http_client::get()
+        .delete(url.as_str())
+        .headers(headers)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| s3_transport_error("s3.delete_failed", "DELETE 请求", "DELETE request", &e))?;
+    match response.status() {
+        StatusCode::PRECONDITION_FAILED => Ok(DeleteResult::PreconditionFailed),
+        StatusCode::NOT_FOUND => Ok(DeleteResult::Missing),
+        status if status.is_success() => Ok(DeleteResult::Removed),
+        status => Err(s3_status_error("DELETE", status, &url_str)),
     }
 }

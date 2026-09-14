@@ -105,14 +105,15 @@ fn managed_meta(
 
 fn with_conn<T>(
     state: &AppState,
-    f: impl FnOnce(&rusqlite::Connection) -> Result<T, AppError>,
+    f: impl FnOnce(&rusqlite::Connection, &crate::secrets::VaultContext) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
+    let vault = state.db.secrets.read()?;
     let conn = state
         .db
         .conn
         .lock()
         .map_err(|e| AppError::Database(format!("获取数据库连接失败: {e}")))?;
-    f(&conn)
+    f(&conn, &vault)
 }
 
 // ─────────────────────── 领域模块与再导出 ───────────────────────

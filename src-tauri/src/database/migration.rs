@@ -5,17 +5,19 @@
 use super::{lock_conn, to_json_string, Database};
 use crate::app_config::MultiAppConfig;
 use crate::error::AppError;
+use crate::secrets::{inventory::seal_db, VaultContext};
 use rusqlite::{params, Connection};
 
 impl Database {
     /// 从 MultiAppConfig 迁移数据到数据库
     pub fn migrate_from_json(&self, config: &MultiAppConfig) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        Self::migrate_from_json_tx(&tx, config)?;
+        Self::migrate_from_json_tx(&tx, config, &vault)?;
 
         tx.commit()
             .map_err(|e| AppError::Database(format!("Commit migration failed: {e}")))?;
@@ -26,15 +28,17 @@ impl Database {
     ///
     /// 用于部署前验证迁移逻辑是否正确。
     pub fn migrate_from_json_dry_run(config: &MultiAppConfig) -> Result<(), AppError> {
+        let vault = VaultContext::generate().map_err(crate::secrets::inventory::secret_error)?;
         let mut conn =
             Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_tables_on_conn(&conn)?;
         Self::apply_schema_migrations_on_conn(&conn)?;
+        super::loongport_schema::apply(&conn)?;
 
         let tx = conn
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
-        Self::migrate_from_json_tx(&tx, config)?;
+        Self::migrate_from_json_tx(&tx, config, &vault)?;
 
         // 显式 drop transaction 而不提交（内存数据库会被丢弃）
         drop(tx);
@@ -45,12 +49,13 @@ impl Database {
     fn migrate_from_json_tx(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
+        vault: &VaultContext,
     ) -> Result<(), AppError> {
         // 1. 迁移 Providers
-        Self::migrate_providers(tx, config)?;
+        Self::migrate_providers(tx, config, vault)?;
 
         // 2. 迁移 MCP Servers
-        Self::migrate_mcp_servers(tx, config)?;
+        Self::migrate_mcp_servers(tx, config, vault)?;
 
         // 3. 迁移 Prompts
         Self::migrate_prompts(tx, config)?;
@@ -59,7 +64,7 @@ impl Database {
         Self::migrate_skills(tx, config)?;
 
         // 5. 迁移 Common Config
-        Self::migrate_common_config(tx, config)?;
+        Self::migrate_common_config(tx, config, vault)?;
 
         Ok(())
     }
@@ -68,6 +73,7 @@ impl Database {
     fn migrate_providers(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
+        vault: &VaultContext,
     ) -> Result<(), AppError> {
         for (app_key, manager) in &config.apps {
             let app_type = app_key;
@@ -89,7 +95,13 @@ impl Database {
                         id,
                         app_type,
                         provider.name,
-                        to_json_string(&provider.settings_config)?,
+                        seal_db(
+                            vault,
+                            "providers",
+                            "settings_config",
+                            &[id, app_type],
+                            &to_json_string(&provider.settings_config)?
+                        )?,
                         provider.website_url,
                         provider.category,
                         provider.created_at,
@@ -97,7 +109,13 @@ impl Database {
                         provider.notes,
                         provider.icon,
                         provider.icon_color,
-                        to_json_string(&meta_clone)?,
+                        seal_db(
+                            vault,
+                            "providers",
+                            "meta",
+                            &[id, app_type],
+                            &to_json_string(&meta_clone)?
+                        )?,
                         is_current,
                     ],
                 )
@@ -105,12 +123,14 @@ impl Database {
 
                 // 迁移 Endpoints
                 for (url, endpoint) in endpoints {
-                    tx.execute(
-                        "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![id, app_type, url, endpoint.added_at],
-                    )
-                    .map_err(|e| AppError::Database(format!("Migrate endpoint failed: {e}")))?;
+                    super::dao::providers::insert_endpoint_on_tx(
+                        tx,
+                        vault,
+                        id,
+                        app_type,
+                        &url,
+                        endpoint.added_at,
+                    )?;
                 }
             }
         }
@@ -121,6 +141,7 @@ impl Database {
     fn migrate_mcp_servers(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
+        vault: &VaultContext,
     ) -> Result<(), AppError> {
         if let Some(servers) = &config.mcp.servers {
             for (id, server) in servers {
@@ -132,7 +153,13 @@ impl Database {
                     params![
                         id,
                         server.name,
-                        to_json_string(&server.server)?,
+                        seal_db(
+                            vault,
+                            "mcp_servers",
+                            "server_config",
+                            &[id],
+                            &to_json_string(&server.server)?
+                        )?,
                         server.description,
                         server.homepage,
                         server.docs,
@@ -217,25 +244,53 @@ impl Database {
     fn migrate_common_config(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
+        vault: &VaultContext,
     ) -> Result<(), AppError> {
         if let Some(snippet) = &config.common_config_snippets.claude {
             tx.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-                params!["common_config_claude", snippet],
+                params![
+                    "common_config_claude",
+                    seal_db(
+                        vault,
+                        "settings",
+                        "value",
+                        &["common_config_claude"],
+                        snippet
+                    )?
+                ],
             )
             .map_err(|e| AppError::Database(format!("Migrate settings failed: {e}")))?;
         }
         if let Some(snippet) = &config.common_config_snippets.codex {
             tx.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-                params!["common_config_codex", snippet],
+                params![
+                    "common_config_codex",
+                    seal_db(
+                        vault,
+                        "settings",
+                        "value",
+                        &["common_config_codex"],
+                        snippet
+                    )?
+                ],
             )
             .map_err(|e| AppError::Database(format!("Migrate settings failed: {e}")))?;
         }
         if let Some(snippet) = &config.common_config_snippets.gemini {
             tx.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-                params!["common_config_gemini", snippet],
+                params![
+                    "common_config_gemini",
+                    seal_db(
+                        vault,
+                        "settings",
+                        "value",
+                        &["common_config_gemini"],
+                        snippet
+                    )?
+                ],
             )
             .map_err(|e| AppError::Database(format!("Migrate settings failed: {e}")))?;
         }

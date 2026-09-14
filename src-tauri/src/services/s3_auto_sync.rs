@@ -115,7 +115,7 @@ async fn run_auto_sync_upload(
     db: &crate::database::Database,
     app: &AppHandle,
 ) -> Result<(), AppError> {
-    let mut settings = settings::get_s3_sync_settings();
+    let mut settings = settings::get_s3_sync_settings()?;
     if !should_run_auto_sync(settings.as_ref()) {
         return Ok(());
     }

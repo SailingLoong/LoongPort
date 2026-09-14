@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    atomic_write, delete_file, get_home_dir, path_is_within, read_json_file,
-    sanitize_provider_name, write_json_file, write_text_file,
+    atomic_write, atomic_write_private, delete_file, get_home_dir, path_is_within, read_json_file,
+    sanitize_provider_name, write_json_file, write_json_file_private, write_text_file,
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
@@ -218,6 +218,13 @@ impl CodexLiveFileState {
             None => delete_file(&self.path),
         }
     }
+
+    fn restore_private(&self) -> Result<(), AppError> {
+        match self.contents.as_deref() {
+            Some(contents) => atomic_write_private(&self.path, contents),
+            None => delete_file(&self.path),
+        }
+    }
 }
 
 /// Rollback point for the cc-switch-owned model catalog. Catalog projection
@@ -300,13 +307,11 @@ impl CodexLiveStateSnapshot {
             }
         }
         if !preserve_current_auth {
-            for (label, state) in [
-                ("auth", &self.auth),
-                ("managed marker", &self.managed_marker),
-            ] {
-                if let Err(error) = state.restore() {
-                    failures.push(format!("{label}: {error}"));
-                }
+            if let Err(error) = self.auth.restore_private() {
+                failures.push(format!("auth: {error}"));
+            }
+            if let Err(error) = self.managed_marker.restore() {
+                failures.push(format!("managed marker: {error}"));
             }
         }
 
@@ -403,6 +408,11 @@ pub fn get_codex_config_dir() -> PathBuf {
 /// 获取 Codex auth.json 路径
 pub fn get_codex_auth_path() -> PathBuf {
     get_codex_config_dir().join("auth.json")
+}
+
+/// Write Codex CLI's credential-bearing live auth file atomically and privately.
+pub fn write_codex_auth_file(auth: &Value) -> Result<(), AppError> {
+    write_json_file_private(&get_codex_auth_path(), auth)
 }
 
 fn get_codex_managed_oauth_live_auth_marker_path() -> PathBuf {
@@ -763,7 +773,7 @@ pub fn sync_codex_managed_oauth_live_auth_after_refresh(
     let was_recorded_managed = marker_path.exists()
         && codex_auth_matches_recorded_managed_oauth(&current_auth, account_id)?;
 
-    write_json_file(&auth_path, refreshed_auth)?;
+    write_codex_auth_file(refreshed_auth)?;
     if was_recorded_managed {
         record_codex_managed_oauth_live_auth(refreshed_auth)?;
     }
@@ -843,7 +853,7 @@ pub fn write_codex_live_atomic(
     }
 
     // 第一步：写 auth.json
-    write_json_file(&auth_path, auth)?;
+    write_codex_auth_file(auth)?;
 
     // 第二步：写 config.toml（失败则回滚 auth.json）
     //
@@ -858,12 +868,17 @@ pub fn write_codex_live_atomic(
     );
     if let Err(e) = write_text_file(&config_path, &merged) {
         // 回滚 auth.json
-        if let Some(bytes) = old_auth {
-            let _ = atomic_write(&auth_path, &bytes);
+        let rollback = if let Some(bytes) = old_auth {
+            atomic_write_private(&auth_path, &bytes)
         } else {
-            let _ = delete_file(&auth_path);
-        }
-        return Err(e);
+            delete_file(&auth_path)
+        };
+        return match rollback {
+            Ok(()) => Err(e),
+            Err(rollback_error) => Err(AppError::Message(format!(
+                "写入 Codex config 失败: {e}; 回滚 Codex auth 同时失败: {rollback_error}"
+            ))),
+        };
     }
 
     Ok(())
@@ -4191,7 +4206,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("create isolated Codex live test home");
             let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-            crate::settings::reload_settings().expect("reload settings for isolated test home");
+            crate::secrets::testing::initialize_database().expect("initialize isolated settings");
 
             Self {
                 _dir: dir,
@@ -4208,6 +4223,66 @@ mod tests {
             }
             let _ = crate::settings::reload_settings();
         }
+    }
+
+    #[cfg(unix)]
+    fn unix_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::metadata(path)
+            .expect("read file metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_unix_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .expect("set fixture permissions");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn codex_live_write_restricts_existing_auth_file_permissions() {
+        let _home = CodexLiveTestHome::new();
+        let auth_path = get_codex_auth_path();
+        fs::create_dir_all(auth_path.parent().expect("auth parent")).expect("create auth parent");
+        fs::write(&auth_path, br#"{"OPENAI_API_KEY":"old"}"#).expect("seed auth");
+        set_unix_mode(&auth_path, 0o644);
+
+        write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "replacement" }),
+            Some("model = \"example-model\"\n"),
+        )
+        .expect("write Codex live files");
+
+        assert_eq!(unix_mode(&auth_path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn codex_live_state_rollback_restricts_restored_auth_permissions() {
+        let _home = CodexLiveTestHome::new();
+        let auth_path = get_codex_auth_path();
+        fs::create_dir_all(auth_path.parent().expect("auth parent")).expect("create auth parent");
+        let original = br#"{"OPENAI_API_KEY":"original"}"#;
+        fs::write(&auth_path, original).expect("seed original auth");
+        set_unix_mode(&auth_path, 0o644);
+        let snapshot = CodexLiveStateSnapshot::capture().expect("capture live state");
+
+        fs::write(&auth_path, br#"{"OPENAI_API_KEY":"replacement"}"#).expect("replace live auth");
+        set_unix_mode(&auth_path, 0o644);
+        snapshot
+            .restore_preserving_newer_same_account_auth()
+            .expect("restore live state");
+
+        assert_eq!(fs::read(&auth_path).expect("read restored auth"), original);
+        assert_eq!(unix_mode(&auth_path), 0o600);
     }
 
     #[derive(Debug, PartialEq)]

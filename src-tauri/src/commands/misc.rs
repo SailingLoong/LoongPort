@@ -3854,7 +3854,8 @@ fn write_claude_config(
     let config_json =
         serde_json::to_string_pretty(&config_obj).map_err(|e| format!("序列化配置失败: {e}"))?;
 
-    std::fs::write(config_file, config_json).map_err(|e| format!("写入配置文件失败: {e}"))
+    crate::config::atomic_write_private(config_file, config_json.as_bytes())
+        .map_err(|e| format!("写入配置文件失败: {e}"))
 }
 
 /// macOS: 根据用户首选终端启动
@@ -4622,6 +4623,27 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_specific_claude_config_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp directory");
+        let path = dir.path().join("claude-provider-settings.json");
+        write_claude_config(
+            &path,
+            &[("ANTHROPIC_AUTH_TOKEN".to_string(), "test-token".to_string())],
+        )
+        .expect("write provider-specific Claude settings");
+
+        let mode = std::fs::metadata(&path)
+            .expect("read settings metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     /// 探测 helper 正常路径：spawn（含 pre_exec setsid）能启动、输出能捕获。
     /// `/bin/echo --version` 在 macOS/Linux 均即刻成功退出。

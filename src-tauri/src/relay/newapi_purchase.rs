@@ -319,12 +319,13 @@ fn persist_refresh_credential<R: tauri::Runtime>(
     value: &str,
 ) -> Result<(), AppError> {
     let state = app_handle.state::<AppState>();
+    let vault = state.db.secrets.read()?;
     let conn = state
         .db
         .conn
         .lock()
         .map_err(|e| AppError::Database(format!("获取数据库连接失败: {e}")))?;
-    creds::update_refresh_credential(&conn, relay_id, value)
+    creds::update_refresh_credential(&conn, &vault, relay_id, value)
 }
 
 /// 打开 NewAPI 的站点页面窗（充值 / 查看用量）：种 cookie → 导航 → 等首次轮换落库

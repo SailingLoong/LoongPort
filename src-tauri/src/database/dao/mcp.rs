@@ -5,13 +5,17 @@
 use crate::app_config::{AppType, McpApps, McpServer};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
+use crate::secrets::{
+    inventory::{open_db, seal_db},
+    VaultContext,
+};
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Row};
 
 const MCP_SERVER_SELECT: &str =
     "SELECT id, name, server_config, description, homepage, docs, tags, enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes FROM mcp_servers";
 
-fn row_to_mcp_server(row: &Row<'_>) -> rusqlite::Result<(String, McpServer)> {
+fn row_to_mcp_server(row: &Row<'_>, vault: &VaultContext) -> Result<(String, McpServer), AppError> {
     let id: String = row.get(0)?;
     let name: String = row.get(1)?;
     let server_config_str: String = row.get(2)?;
@@ -26,7 +30,19 @@ fn row_to_mcp_server(row: &Row<'_>) -> rusqlite::Result<(String, McpServer)> {
     let enabled_opencode: bool = row.get(11)?;
     let enabled_hermes: bool = row.get(12)?;
 
-    let server = serde_json::from_str(&server_config_str).unwrap_or_default();
+    let server_config = open_db(
+        vault,
+        "mcp_servers",
+        "server_config",
+        &[&id],
+        &server_config_str,
+    )?;
+    let server = if server_config.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&server_config)
+            .map_err(|_| AppError::Database("Invalid MCP server config".into()))?
+    };
     let tags = serde_json::from_str(&tags_str).unwrap_or_default();
 
     Ok((
@@ -54,18 +70,19 @@ fn row_to_mcp_server(row: &Row<'_>) -> rusqlite::Result<(String, McpServer)> {
 impl Database {
     /// 获取所有 MCP 服务器
     pub fn get_all_mcp_servers(&self) -> Result<IndexMap<String, McpServer>, AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
         let mut stmt = conn
             .prepare(&format!("{MCP_SERVER_SELECT} ORDER BY name ASC, id ASC"))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let server_iter = stmt
-            .query_map([], row_to_mcp_server)
+            .query_map([], |row| Ok(row_to_mcp_server(row, &vault)))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut servers = IndexMap::new();
         for server_res in server_iter {
-            let (id, server) = server_res.map_err(|e| AppError::Database(e.to_string()))?;
+            let (id, server) = server_res??;
             servers.insert(id, server);
         }
         Ok(servers)
@@ -82,7 +99,9 @@ impl Database {
         app: &AppType,
         enabled: bool,
     ) -> Result<Option<McpServer>, AppError> {
-        let conn = lock_conn!(self.conn);
+        let vault = self.secrets.read()?;
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn.transaction()?;
         let column = match app {
             AppType::Claude => Some("enabled_claude"),
             AppType::Codex => Some("enabled_codex"),
@@ -97,7 +116,7 @@ impl Database {
         if let Some(column) = column {
             // `column` comes exclusively from the fixed allow-list above.
             let sql = format!("UPDATE mcp_servers SET {column} = ?1 WHERE id = ?2");
-            let affected = conn
+            let affected = tx
                 .execute(&sql, params![enabled, id])
                 .map_err(|e| AppError::Database(e.to_string()))?;
             if affected == 0 {
@@ -105,17 +124,22 @@ impl Database {
             }
         }
 
-        conn.query_row(
-            &format!("{MCP_SERVER_SELECT} WHERE id = ?1"),
-            params![id],
-            |row| row_to_mcp_server(row).map(|(_, server)| server),
-        )
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))
+        let server = tx
+            .query_row(
+                &format!("{MCP_SERVER_SELECT} WHERE id = ?1"),
+                params![id],
+                |row| Ok(row_to_mcp_server(row, &vault).map(|(_, server)| server)),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .transpose()?;
+        tx.commit()?;
+        Ok(server)
     }
 
     /// 保存 MCP 服务器
     pub fn save_mcp_server(&self, server: &McpServer) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
         let conn = lock_conn!(self.conn);
         conn.execute(
             "INSERT OR REPLACE INTO mcp_servers (
@@ -125,9 +149,7 @@ impl Database {
             params![
                 server.id,
                 server.name,
-                serde_json::to_string(&server.server).map_err(|e| AppError::Database(format!(
-                    "Failed to serialize server config: {e}"
-                )))?,
+                seal_db(&vault, "mcp_servers", "server_config", &[&server.id], &serde_json::to_string(&server.server).map_err(|e| AppError::Database(e.to_string()))?)?,
                 server.description,
                 server.homepage,
                 server.docs,
@@ -160,6 +182,53 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Barrier};
     use std::thread;
+
+    #[test]
+    fn secret_server_config_roundtrips_and_corruption_rolls_back_toggle() {
+        let db = Database::memory().unwrap();
+        let mut server = test_server();
+        server.server =
+            json!({"command":"echo", "args":["arg-canary"], "env":{"TOKEN":"mcp-canary"}});
+        db.save_mcp_server(&server).unwrap();
+        assert_eq!(
+            db.get_all_mcp_servers().unwrap()[&server.id].server,
+            server.server
+        );
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT server_config FROM mcp_servers WHERE id=?1",
+                [&server.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("mcp-canary"));
+        assert!(!raw.contains("arg-canary"));
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mcp_servers SET server_config='corrupt' WHERE id=?1",
+                [&server.id],
+            )
+            .unwrap();
+        assert!(db
+            .update_mcp_server_app_enabled(&server.id, &AppType::Claude, true)
+            .is_err());
+        let enabled: bool = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT enabled_claude FROM mcp_servers WHERE id=?1",
+                [&server.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!enabled);
+    }
 
     fn test_server() -> McpServer {
         McpServer {

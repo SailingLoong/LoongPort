@@ -4,6 +4,7 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
+use crate::secrets::inventory::{is_protected_setting, open_db, seal_db};
 use rusqlite::params;
 
 impl Database {
@@ -15,6 +16,9 @@ impl Database {
 
     /// 获取设置值
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, AppError> {
+        let vault = is_protected_setting(key)
+            .then(|| self.secrets.read())
+            .transpose()?;
         let conn = lock_conn!(self.conn);
         let mut stmt = conn
             .prepare("SELECT value FROM settings WHERE key = ?1")
@@ -25,9 +29,11 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         if let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
-            Ok(Some(
-                row.get(0).map_err(|e| AppError::Database(e.to_string()))?,
-            ))
+            let value: String = row.get(0)?;
+            Ok(Some(match vault.as_deref() {
+                Some(vault) => open_db(vault, "settings", "value", &[key], &value)?,
+                None => value,
+            }))
         } else {
             Ok(None)
         }
@@ -47,6 +53,13 @@ impl Database {
 
     /// 设置值
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
+        let vault = is_protected_setting(key)
+            .then(|| self.secrets.read())
+            .transpose()?;
+        let value = match vault.as_deref() {
+            Some(vault) => seal_db(vault, "settings", "value", &[key], value)?,
+            None => value.to_owned(),
+        };
         let conn = lock_conn!(self.conn);
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
@@ -323,5 +336,81 @@ impl Database {
         let json = serde_json::to_string(config)
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn protected_settings_roundtrip_without_plaintext_storage() {
+        let db = Database::memory().unwrap();
+        db.set_setting(
+            "global_proxy_url",
+            "https://canary-user:canary-secret@proxy.example",
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_setting("global_proxy_url").unwrap().as_deref(),
+            Some("https://canary-user:canary-secret@proxy.example")
+        );
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM settings WHERE key='global_proxy_url'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("canary-secret"));
+        db.set_setting("common_config_claude_cleared", "true")
+            .unwrap();
+        assert_eq!(
+            db.get_setting("common_config_claude_cleared")
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn protected_settings_reject_plaintext_and_wrong_identity() {
+        let db = Database::memory().unwrap();
+        db.set_setting("global_proxy_url", "canary-secret").unwrap();
+        let ciphertext: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM settings WHERE key='global_proxy_url'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let other = Database::memory().unwrap();
+        other
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO settings (key,value) VALUES ('global_proxy_url', ?1)",
+                [ciphertext],
+            )
+            .unwrap();
+        assert!(other.get_setting("global_proxy_url").is_err());
+        db.conn.lock().unwrap().execute("INSERT INTO settings (key,value) SELECT 'claude_desktop_gateway_token',value FROM settings WHERE key='global_proxy_url'", []).unwrap();
+        assert!(db.get_setting("claude_desktop_gateway_token").is_err());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE settings SET value='plaintext' WHERE key='global_proxy_url'",
+                [],
+            )
+            .unwrap();
+        assert!(db.get_setting("global_proxy_url").is_err());
     }
 }

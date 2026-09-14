@@ -96,16 +96,15 @@ mod tests {
     }
 
     fn insert_provider(db: &Database, provider_id: &str, app_type: &str) -> Result<(), AppError> {
-        let conn = db
-            .conn
-            .lock()
-            .map_err(|error| AppError::Database(error.to_string()))?;
-        conn.execute(
-            "INSERT INTO providers (id, app_type, name, settings_config) VALUES (?1, ?2, ?3, '{}')",
-            rusqlite::params![provider_id, app_type, provider_id],
+        db.save_provider(
+            app_type,
+            &Provider::with_id(
+                provider_id.into(),
+                provider_id.into(),
+                serde_json::json!({}),
+                None,
+            ),
         )
-        .map_err(|error| AppError::Database(error.to_string()))?;
-        Ok(())
     }
 
     fn seed_relay(
@@ -114,16 +113,25 @@ mod tests {
         api_base_url: &str,
         account_id: Option<i64>,
     ) -> Result<(), AppError> {
+        let vault = db.secrets.read()?;
         let conn = db
             .conn
             .lock()
             .map_err(|error| AppError::Database(error.to_string()))?;
         conn.execute(
             "INSERT INTO loongport_relay (site_origin, site_name, api_base_url, account_id, account_label, login_identifier, auth_token, sort_index) \
-             VALUES (?1, 'Example', ?2, ?3, 'example@example.test', 'example@example.test', 'token', 0)",
+             VALUES (?1, 'Example', ?2, ?3, 'example@example.test', 'example@example.test', '', 0)",
             rusqlite::params![site_origin, api_base_url, account_id],
         )
         .map_err(|error| AppError::Database(error.to_string()))?;
+        crate::relay::creds::update_tokens(
+            &conn,
+            &vault,
+            conn.last_insert_rowid(),
+            "token",
+            None,
+            None,
+        )?;
         Ok(())
     }
 

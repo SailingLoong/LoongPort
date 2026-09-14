@@ -260,6 +260,8 @@ impl E2eFixture {
     async fn new() -> Self {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("init db"));
+        crate::settings::unlock_settings_for_test(db.secrets.clone())
+            .expect("unlock isolated settings");
 
         let cheap = MockUpstream::spawn("served-by-cheap").await;
         let expensive = MockUpstream::spawn("served-by-expensive").await;
@@ -595,7 +597,7 @@ async fn recovered_failures_contribute_to_attempt_error_rate() {
         response_text(send_message(fx.port, "attempt-rate").await).await,
         "served-by-expensive"
     );
-    let state = crate::store::AppState::new(fx.db.clone());
+    let state = crate::store::AppState::new(fx.db.clone()).unwrap();
     let board = crate::commands::application_routing_impl(&state, "claude")
         .await
         .unwrap();
@@ -644,7 +646,7 @@ async fn native_official_is_excluded_before_retry_budget() {
         response_text(send_message(fx.port, "native-official-skip").await).await,
         "served-by-expensive"
     );
-    let state = crate::store::AppState::new(fx.db.clone());
+    let state = crate::store::AppState::new(fx.db.clone()).unwrap();
     let board = crate::commands::application_routing_impl(&state, "claude")
         .await
         .unwrap();
@@ -907,7 +909,7 @@ async fn passive_anomaly_lands_and_surfaces() {
     );
 
     // 档位看板点亮异常
-    let state = crate::store::AppState::new(fx.db.clone());
+    let state = crate::store::AppState::new(fx.db.clone()).unwrap();
     let board = crate::commands::auto_mode::tier_board_impl(&state, "claude")
         .await
         .unwrap();

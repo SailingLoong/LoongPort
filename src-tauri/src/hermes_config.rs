@@ -30,8 +30,9 @@
 //!     args: ["-y", "@modelcontextprotocol/server-filesystem"]
 //! ```
 
-use crate::config::{atomic_write, get_app_config_dir};
+use crate::config::atomic_write_private;
 use crate::error::AppError;
+use crate::secrets::{files::OwnedFile, session::SecretSession};
 use crate::settings::{effective_backup_retain_count, get_hermes_override_dir};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -360,8 +361,8 @@ fn replace_yaml_section(
 // Backup & Cleanup
 // ============================================================================
 
-fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
-    let backup_dir = get_app_config_dir().join("backups").join("hermes");
+fn create_hermes_backup(session: &SecretSession, source: &str) -> Result<PathBuf, AppError> {
+    let backup_dir = session.root().join("backups").join("hermes");
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
     let base_id = format!("hermes_{}", Local::now().format("%Y%m%d_%H%M%S"));
@@ -375,9 +376,34 @@ fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
         counter += 1;
     }
 
-    atomic_write(&backup_path, source.as_bytes())?;
+    OwnedFile::at_path(session, &backup_path)?.write(session, source.as_bytes())?;
     cleanup_hermes_backups(&backup_dir)?;
     Ok(backup_path)
+}
+
+/// Restore an application-owned encrypted backup to the downstream configuration.
+pub fn restore_hermes_backup(session: &SecretSession, backup_path: &Path) -> Result<(), AppError> {
+    let _guard = hermes_write_lock().lock()?;
+    let file = OwnedFile::at_path(session, backup_path)?;
+    if file.relative_path().parent() != Some(Path::new("backups/hermes")) {
+        return Err(AppError::Config("secret.unregistered_file".into()));
+    }
+    let plaintext = file.read(session)?;
+    let valid = serde_yaml::from_slice::<serde_yaml::Value>(&plaintext)
+        .map(|value| value.is_mapping())
+        .map_err(|_| AppError::Config("Invalid backup data".into()))?;
+    if !valid {
+        return Err(AppError::Config("Invalid backup data".into()));
+    }
+    let path = get_hermes_config_path();
+    match fs::read_to_string(&path) {
+        Ok(current) => {
+            create_hermes_backup(session, &current)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::io(&path, error)),
+    }
+    atomic_write_private(&path, &plaintext)
 }
 
 fn cleanup_hermes_backups(dir: &Path) -> Result<(), AppError> {
@@ -387,10 +413,11 @@ fn cleanup_hermes_backups(dir: &Path) -> Result<(), AppError> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             entry
-                .path()
-                .extension()
-                .map(|ext| ext == "yaml" || ext == "yml")
+                .file_type()
+                .map(|kind| kind.is_file())
                 .unwrap_or(false)
+                && OwnedFile::registered(Path::new("backups/hermes").join(entry.file_name()))
+                    .is_ok()
         })
         .collect::<Vec<_>>();
 
@@ -421,15 +448,25 @@ fn cleanup_hermes_backups(dir: &Path) -> Result<(), AppError> {
 /// This preserves comments and unrelated sections while only modifying the
 /// target section.
 fn write_yaml_section_to_config(
+    session: &SecretSession,
     section_key: &str,
     value: &serde_yaml::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
     let _guard = hermes_write_lock().lock()?;
-    write_yaml_section_to_config_locked(section_key, value)
+    write_yaml_section_to_config_locked(session, section_key, value)
 }
 
 /// Inner write helper — caller must already hold the write lock.
 fn write_yaml_section_to_config_locked(
+    session: &SecretSession,
+    section_key: &str,
+    value: &serde_yaml::Value,
+) -> Result<HermesWriteOutcome, AppError> {
+    write_yaml_section_to_config_locked_with_backup(Some(session), section_key, value)
+}
+
+fn write_yaml_section_to_config_locked_with_backup(
+    backup_session: Option<&SecretSession>,
     section_key: &str,
     value: &serde_yaml::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
@@ -446,17 +483,16 @@ fn write_yaml_section_to_config_locked(
         return Ok(HermesWriteOutcome::default());
     }
 
-    let backup_path = if !raw.is_empty() {
-        Some(create_hermes_backup(&raw)?)
-    } else {
-        None
+    let backup_path = match (raw.is_empty(), backup_session) {
+        (false, Some(session)) => Some(create_hermes_backup(session, &raw)?),
+        _ => None,
     };
 
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    atomic_write(&config_path, new_raw.as_bytes())?;
+    atomic_write_private(&config_path, new_raw.as_bytes())?;
 
     log::debug!(
         "Hermes config section '{}' written to {:?}",
@@ -790,6 +826,22 @@ pub fn get_provider(name: &str) -> Result<Option<serde_json::Value>, AppError> {
 /// The entire read-modify-write is done under the write lock to prevent
 /// TOCTOU races.
 pub fn set_provider(
+    session: &SecretSession,
+    name: &str,
+    provider_config: serde_json::Value,
+) -> Result<HermesWriteOutcome, AppError> {
+    set_provider_with_backup(Some(session), name, provider_config)
+}
+
+pub(crate) fn set_provider_standalone(
+    name: &str,
+    provider_config: serde_json::Value,
+) -> Result<HermesWriteOutcome, AppError> {
+    set_provider_with_backup(None, name, provider_config)
+}
+
+fn set_provider_with_backup(
+    backup_session: Option<&SecretSession>,
     name: &str,
     provider_config: serde_json::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
@@ -857,7 +909,11 @@ pub fn set_provider(
     }
 
     let providers_value = serde_yaml::Value::Sequence(providers);
-    write_yaml_section_to_config_locked("custom_providers", &providers_value)
+    write_yaml_section_to_config_locked_with_backup(
+        backup_session,
+        "custom_providers",
+        &providers_value,
+    )
 }
 
 /// Remove a custom provider by name.
@@ -865,7 +921,10 @@ pub fn set_provider(
 /// Filters out the matching entry from the `custom_providers:` sequence.
 /// No-op if the section is missing or no entry matches. The entire
 /// read-modify-write is done under the write lock to prevent TOCTOU races.
-pub fn remove_provider(name: &str) -> Result<HermesWriteOutcome, AppError> {
+pub fn remove_provider(
+    session: &SecretSession,
+    name: &str,
+) -> Result<HermesWriteOutcome, AppError> {
     let _guard = hermes_write_lock().lock()?;
     let config = read_hermes_config()?;
 
@@ -884,7 +943,7 @@ pub fn remove_provider(name: &str) -> Result<HermesWriteOutcome, AppError> {
     }
 
     let providers_value = serde_yaml::Value::Sequence(providers);
-    write_yaml_section_to_config_locked("custom_providers", &providers_value)
+    write_yaml_section_to_config_locked(session, "custom_providers", &providers_value)
 }
 
 // ============================================================================
@@ -904,11 +963,14 @@ pub fn get_model_config() -> Result<Option<HermesModelConfig>, AppError> {
 }
 
 /// Set the `model` section.
-pub fn set_model_config(model: &HermesModelConfig) -> Result<HermesWriteOutcome, AppError> {
+pub fn set_model_config(
+    session: &SecretSession,
+    model: &HermesModelConfig,
+) -> Result<HermesWriteOutcome, AppError> {
     let json_val =
         serde_json::to_value(model).map_err(|e| AppError::JsonSerialize { source: e })?;
     let yaml_val = json_to_yaml(&json_val)?;
-    write_yaml_section_to_config("model", &yaml_val)
+    write_yaml_section_to_config(session, "model", &yaml_val)
 }
 
 /// Apply the top-level `model:` defaults when switching to a Hermes provider.
@@ -925,6 +987,7 @@ pub fn set_model_config(model: &HermesModelConfig) -> Result<HermesWriteOutcome,
 /// Existing fields in `model:` (`context_length` / `max_tokens` / `base_url`
 /// / `extra`) are preserved via struct-update.
 pub fn apply_switch_defaults(
+    session: &SecretSession,
     provider_id: &str,
     settings_config: &serde_json::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
@@ -943,7 +1006,7 @@ pub fn apply_switch_defaults(
         provider: Some(provider_id.to_string()),
         ..current
     };
-    set_model_config(&merged)
+    set_model_config(session, &merged)
 }
 
 // ============================================================================
@@ -963,7 +1026,7 @@ pub fn get_mcp_servers_yaml() -> Result<serde_yaml::Mapping, AppError> {
 /// Atomically read-modify-write the `mcp_servers` section under the write lock.
 ///
 /// Prevents TOCTOU races when multiple sync operations run concurrently.
-pub fn update_mcp_servers_yaml<F>(updater: F) -> Result<(), AppError>
+pub fn update_mcp_servers_yaml<F>(session: &SecretSession, updater: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut serde_yaml::Mapping) -> Result<(), AppError>,
 {
@@ -976,7 +1039,7 @@ where
         .unwrap_or_default();
     updater(&mut servers)?;
     let value = serde_yaml::Value::Mapping(servers);
-    write_yaml_section_to_config_locked("mcp_servers", &value)?;
+    write_yaml_section_to_config_locked(session, "mcp_servers", &value)?;
     Ok(())
 }
 
@@ -1055,7 +1118,7 @@ pub fn read_memory(kind: MemoryKind) -> Result<String, AppError> {
 /// write without a separate `create_dir_all` call.
 pub fn write_memory(kind: MemoryKind, content: &str) -> Result<(), AppError> {
     let path = memories_dir().join(kind.filename());
-    atomic_write(&path, content.as_bytes())
+    atomic_write_private(&path, content.as_bytes())
 }
 
 /// Character budget + enable flags for the two memory blobs, as configured
@@ -1086,7 +1149,11 @@ impl Default for HermesMemoryLimits {
 /// settings, etc.). Hermes stores the user-profile toggle under
 /// `user_profile_enabled` (not `user_enabled`), so the mapping to on-disk keys
 /// lives here rather than leaking to callers.
-pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<HermesWriteOutcome, AppError> {
+pub fn set_memory_enabled(
+    session: &SecretSession,
+    kind: MemoryKind,
+    enabled: bool,
+) -> Result<HermesWriteOutcome, AppError> {
     let _guard = hermes_write_lock().lock()?;
     let config = read_hermes_config()?;
 
@@ -1104,7 +1171,7 @@ pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<HermesWrite
         serde_yaml::Value::Bool(enabled),
     );
 
-    write_yaml_section_to_config_locked("memory", &serde_yaml::Value::Mapping(memory))
+    write_yaml_section_to_config_locked(session, "memory", &serde_yaml::Value::Mapping(memory))
 }
 
 /// Read memory budgets + toggles from `config.yaml`. Missing/unparsable
@@ -1139,6 +1206,49 @@ pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial]
+    fn encrypted_backup_restore_writes_plaintext_to_the_live_config() {
+        with_test_home(|| {
+            let session = test_session();
+            let original = "key: restore-canary\n";
+            let backup = create_hermes_backup(&session, original).unwrap();
+            let live = get_hermes_config_path();
+            std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+            std::fs::write(&live, "key: changed\n").unwrap();
+            restore_hermes_backup(&session, &backup).unwrap();
+            assert_eq!(std::fs::read_to_string(live).unwrap(), original);
+            assert!(!std::fs::read_to_string(backup)
+                .unwrap()
+                .contains("restore-canary"));
+        });
+    }
+
+    #[test]
+    fn own_backup_encrypts_and_restores_the_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::secrets::session::SecretSession::from_context(
+            dir.path().to_path_buf(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        let source = "key: owned-backup-canary\n";
+        let path = create_hermes_backup(&session, source).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("owned-backup-canary"));
+        let original = OwnedFile::at_path(&session, &path)
+            .unwrap()
+            .read(&session)
+            .unwrap();
+        assert_eq!(&*original, source.as_bytes());
+    }
+
+    fn test_session() -> std::sync::Arc<crate::SecretSession> {
+        crate::secrets::session::SecretSession::from_context(
+            crate::config::get_app_config_dir(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        )
+    }
     use super::*;
     use serial_test::serial;
     use std::sync::{Mutex, OnceLock};
@@ -1166,6 +1276,13 @@ mod tests {
         let old_local_appdata = std::env::var_os("LOCALAPPDATA");
         std::env::remove_var("HERMES_HOME");
         std::env::remove_var("LOCALAPPDATA");
+        crate::settings::unlock_settings_for_test(
+            crate::secrets::session::SecretSession::from_context(
+                tmp.path().join(crate::APP_DIR_NAME),
+                crate::secrets::VaultContext::generate().unwrap(),
+            ),
+        )
+        .unwrap();
         let result = test_fn();
         match old_local_appdata {
             Some(value) => std::env::set_var("LOCALAPPDATA", value),
@@ -1597,7 +1714,7 @@ model:
                 "base_url": "https://openrouter.ai/api/v1",
                 "api_key": "sk-or-test"
             });
-            set_provider("openrouter", config).unwrap();
+            set_provider(&test_session(), "openrouter", config).unwrap();
 
             let providers = get_providers().unwrap();
             assert_eq!(providers.len(), 1);
@@ -1612,13 +1729,13 @@ model:
                 "base_url": "https://openrouter.ai/api/v2",
                 "api_key": "sk-or-updated"
             });
-            set_provider("openrouter", config2).unwrap();
+            set_provider(&test_session(), "openrouter", config2).unwrap();
 
             let provider = get_provider("openrouter").unwrap().unwrap();
             assert_eq!(provider["base_url"], "https://openrouter.ai/api/v2");
 
             // Remove the provider
-            remove_provider("openrouter").unwrap();
+            remove_provider(&test_session(), "openrouter").unwrap();
             let providers = get_providers().unwrap();
             assert!(providers.is_empty());
         });
@@ -1649,7 +1766,7 @@ custom_providers:
                 "base_url": "https://new.example.com",
                 "api_key": "sk-new"
             });
-            set_provider("acme", update).unwrap();
+            set_provider(&test_session(), "acme", update).unwrap();
 
             let provider = get_provider("acme").unwrap().unwrap();
             assert_eq!(provider["base_url"], "https://new.example.com");
@@ -1741,7 +1858,7 @@ providers:
             fs::write(&config_path, yaml).unwrap();
 
             let update = serde_json::json!({ "base_url": "https://hacked.example.com" });
-            let err = set_provider("anthropic", update).unwrap_err();
+            let err = set_provider(&test_session(), "anthropic", update).unwrap_err();
             assert!(
                 format!("{err}").contains("providers:"),
                 "error message should point user at providers dict: {err}"
@@ -1763,7 +1880,7 @@ providers:
             fs::create_dir_all(config_path.parent().unwrap()).unwrap();
             fs::write(&config_path, yaml).unwrap();
 
-            assert!(remove_provider("anthropic").is_err());
+            assert!(remove_provider(&test_session(), "anthropic").is_err());
         });
     }
 
@@ -1827,7 +1944,7 @@ custom_providers:
                 max_tokens: None,
                 extra: HashMap::new(),
             };
-            set_model_config(&model).unwrap();
+            set_model_config(&test_session(), &model).unwrap();
 
             let read_model = get_model_config().unwrap().unwrap();
             assert_eq!(
@@ -1920,7 +2037,7 @@ custom_providers:
                     { "id": "model-b", "context_length": 100000 },
                 ]
             });
-            set_provider("demo", config).unwrap();
+            set_provider(&test_session(), "demo", config).unwrap();
 
             // Read raw YAML to verify the on-disk shape is a sequence under `custom_providers:`.
             let raw = fs::read_to_string(get_hermes_config_path()).unwrap();
@@ -1973,7 +2090,7 @@ custom_providers:
                     { "id": "third", "context_length": 3 },
                 ]
             });
-            set_provider("order", input).unwrap();
+            set_provider(&test_session(), "order", input).unwrap();
 
             let providers = get_providers().unwrap();
             let provider = providers.get("order").unwrap();
@@ -1995,7 +2112,7 @@ custom_providers:
                 "base_url": "https://api.example.com/v1",
                 "api_key": "sk-test"
             });
-            set_provider("simple", input).unwrap();
+            set_provider(&test_session(), "simple", input).unwrap();
             let providers = get_providers().unwrap();
             let provider = providers.get("simple").unwrap();
             assert!(provider.get("models").is_none());
@@ -2019,7 +2136,7 @@ custom_providers:
                     { "id": "fallback", "context_length": 100000 },
                 ]
             });
-            apply_switch_defaults("demo", &settings).unwrap();
+            apply_switch_defaults(&test_session(), "demo", &settings).unwrap();
 
             let model = get_model_config().unwrap().unwrap();
             assert_eq!(model.default.as_deref(), Some("primary-model"));
@@ -2040,12 +2157,12 @@ custom_providers:
                 max_tokens: Some(16384),
                 extra: HashMap::new(),
             };
-            set_model_config(&initial).unwrap();
+            set_model_config(&test_session(), &initial).unwrap();
 
             let settings = serde_json::json!({
                 "models": [{ "id": "new-model" }]
             });
-            apply_switch_defaults("new-provider", &settings).unwrap();
+            apply_switch_defaults(&test_session(), "new-provider", &settings).unwrap();
 
             let model = get_model_config().unwrap().unwrap();
             assert_eq!(model.default.as_deref(), Some("new-model"));
@@ -2071,7 +2188,7 @@ custom_providers:
                 provider: Some("legacy-provider".to_string()),
                 ..Default::default()
             };
-            set_model_config(&initial).unwrap();
+            set_model_config(&test_session(), &initial).unwrap();
 
             // New provider has no `models` list — previously this would no-op
             // and leave `model.provider` pointing at the legacy provider,
@@ -2079,7 +2196,7 @@ custom_providers:
             let settings = serde_json::json!({
                 "base_url": "https://api.example.com/v1"
             });
-            apply_switch_defaults("bare", &settings).unwrap();
+            apply_switch_defaults(&test_session(), "bare", &settings).unwrap();
 
             let model = get_model_config().unwrap().unwrap();
             assert_eq!(model.provider.as_deref(), Some("bare"));
@@ -2096,12 +2213,12 @@ custom_providers:
                 provider: Some("prev-provider".to_string()),
                 ..Default::default()
             };
-            set_model_config(&initial).unwrap();
+            set_model_config(&test_session(), &initial).unwrap();
 
             let settings = serde_json::json!({
                 "models": [{ "id": "   " }, { "id": "real" }]
             });
-            apply_switch_defaults("edge", &settings).unwrap();
+            apply_switch_defaults(&test_session(), "edge", &settings).unwrap();
 
             let model = get_model_config().unwrap().unwrap();
             // Provider always updates.
@@ -2172,7 +2289,7 @@ memory:
             fs::create_dir_all(config_path.parent().unwrap()).unwrap();
             fs::write(&config_path, yaml).unwrap();
 
-            set_memory_enabled(MemoryKind::Memory, false).unwrap();
+            set_memory_enabled(&test_session(), MemoryKind::Memory, false).unwrap();
 
             let limits = read_memory_limits().unwrap();
             assert!(!limits.memory_enabled, "toggle applied");
