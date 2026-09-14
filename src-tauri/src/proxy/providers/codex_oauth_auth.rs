@@ -15,12 +15,12 @@
 //! - Provider 通过 meta.authBinding 关联账号（auth_provider = "codex_oauth"）
 //! - 通过 JWT id_token 提取 chatgpt_account_id 作为账号唯一标识
 
+use crate::secrets::{files::CredentialFile, session::SecretSession};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -68,6 +68,9 @@ const CODEX_USER_AGENT: &str = "cc-switch-codex-oauth";
 /// Codex OAuth 错误
 #[derive(Debug, thiserror::Error)]
 pub enum CodexOAuthError {
+    #[error("Credential storage error: {0}")]
+    ProtectedStorage(#[from] crate::error::AppError),
+
     #[error("等待用户授权中")]
     AuthorizationPending,
 
@@ -307,7 +310,7 @@ pub struct CodexOAuthManager {
     pending_device_codes: Arc<RwLock<HashMap<String, PendingDeviceCode>>>,
     /// 清除全部认证时递增，使已经在网络请求中的登录流程无法重新登记。
     login_epoch: AtomicU64,
-    storage_path: PathBuf,
+    secrets: Arc<SecretSession>,
     /// 持久化串行锁：`save_to_disk` 与 `clear_auth` 的「快照+写盘/删文件」都在此锁内
     /// 完成。此前由外层 `RwLock<CodexOAuthManager>` 的写锁隐式串行化；去掉外层锁后
     /// 需要它防止并发保存/清除交错，导致已删账号被旧快照复活。
@@ -315,9 +318,7 @@ pub struct CodexOAuthManager {
 }
 
 impl CodexOAuthManager {
-    pub fn new(data_dir: PathBuf) -> Self {
-        let storage_path = data_dir.join("codex_oauth_auth.json");
-
+    pub(crate) fn new(secrets: Arc<SecretSession>) -> Result<Self, CodexOAuthError> {
         let manager = Self {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             default_account_id: Arc::new(RwLock::new(None)),
@@ -326,15 +327,13 @@ impl CodexOAuthManager {
             lifecycle_lock: Arc::new(RwLock::new(())),
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
             login_epoch: AtomicU64::new(0),
-            storage_path,
+            secrets,
             storage_lock: Arc::new(Mutex::new(())),
         };
 
-        if let Err(e) = manager.load_from_disk_sync() {
-            log::warn!("[CodexOAuth] 加载存储失败: {e}");
-        }
+        manager.load_from_disk_sync()?;
 
-        manager
+        Ok(manager)
     }
 
     // ==================== 设备码流程 ====================
@@ -1250,9 +1249,7 @@ impl CodexOAuthManager {
             pending.clear();
         }
 
-        if self.storage_path.exists() {
-            std::fs::remove_file(&self.storage_path)?;
-        }
+        CredentialFile::Codex.remove(&self.secrets)?;
 
         Ok(())
     }
@@ -1451,68 +1448,16 @@ impl CodexOAuthManager {
     }
 
     fn write_store_atomic(&self, content: &str) -> Result<(), CodexOAuthError> {
-        if let Some(parent) = self.storage_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let parent = self
-            .storage_path
-            .parent()
-            .ok_or_else(|| CodexOAuthError::IoError("无效的存储路径".to_string()))?;
-        let file_name = self
-            .storage_path
-            .file_name()
-            .ok_or_else(|| CodexOAuthError::IoError("无效的存储文件名".to_string()))?
-            .to_string_lossy()
-            .to_string();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp_path = parent.join(format!("{file_name}.tmp.{ts}"));
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.flush()?;
-
-            fs::rename(&tmp_path, &self.storage_path)?;
-            fs::set_permissions(&self.storage_path, fs::Permissions::from_mode(0o600))?;
-        }
-
-        #[cfg(windows)]
-        {
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.flush()?;
-
-            if self.storage_path.exists() {
-                let _ = fs::remove_file(&self.storage_path);
-            }
-            fs::rename(&tmp_path, &self.storage_path)?;
-        }
-
+        CredentialFile::Codex.write(&self.secrets, content.as_bytes())?;
         Ok(())
     }
 
     fn load_from_disk_sync(&self) -> Result<(), CodexOAuthError> {
-        if !self.storage_path.exists() {
+        let Some(content) = CredentialFile::Codex.read(&self.secrets)? else {
             return Ok(());
-        }
-
-        let content = std::fs::read_to_string(&self.storage_path)?;
-        let store: CodexOAuthStore = serde_json::from_str(&content)
-            .map_err(|e| CodexOAuthError::ParseError(e.to_string()))?;
+        };
+        let store: CodexOAuthStore = serde_json::from_slice(&content)
+            .map_err(|_| CodexOAuthError::ParseError("Invalid credential data".into()))?;
 
         if let Ok(mut accounts) = self.accounts.try_write() {
             *accounts = store.accounts;
@@ -1543,8 +1488,10 @@ impl CodexOAuthManager {
             default_account_id: default,
         };
 
-        let content = serde_json::to_string_pretty(&store)
-            .map_err(|e| CodexOAuthError::ParseError(e.to_string()))?;
+        let content = zeroize::Zeroizing::new(
+            serde_json::to_string_pretty(&store)
+                .map_err(|e| CodexOAuthError::ParseError(e.to_string()))?,
+        );
 
         self.write_store_atomic(&content)?;
 
@@ -1654,6 +1601,39 @@ fn extract_identity_from_tokens(tokens: &OAuthTokenResponse) -> (Option<String>,
 
 #[cfg(test)]
 mod tests {
+    fn test_session(root: PathBuf) -> Arc<SecretSession> {
+        SecretSession::from_context(root, crate::secrets::VaultContext::generate().unwrap())
+    }
+
+    fn test_manager(root: PathBuf) -> CodexOAuthManager {
+        CodexOAuthManager::new(test_session(root)).unwrap()
+    }
+
+    #[test]
+    fn constructor_rejects_unreadable_credentials_without_overwriting_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path().to_path_buf());
+        let path = CredentialFile::Codex.path(&session);
+        std::fs::write(&path, b"lpenc1.invalid").unwrap();
+        assert!(CodexOAuthManager::new(session.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"lpenc1.invalid");
+        CredentialFile::Codex
+            .write(&session, b"not valid JSON")
+            .unwrap();
+        assert!(CodexOAuthManager::new(session).is_err());
+    }
+
+    #[test]
+    fn credential_writer_never_persists_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path().to_path_buf());
+        manager
+            .write_store_atomic(r#"{"version":1,"accounts":{},"github_token":"oauth-canary"}"#)
+            .unwrap();
+        let bytes = std::fs::read(CredentialFile::Codex.path(&manager.secrets)).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("oauth-canary"));
+    }
+
     use super::*;
 
     #[test]
@@ -1755,7 +1735,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_initial_state() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         assert!(!manager.is_authenticated().await);
         assert!(manager.list_accounts().await.is_empty());
     }
@@ -1764,10 +1744,11 @@ mod tests {
     async fn test_manager_save_and_load() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().to_path_buf();
+        let session = test_session(path);
 
         // Manually inject an account through internal methods
         {
-            let manager = CodexOAuthManager::new(path.clone());
+            let manager = CodexOAuthManager::new(session.clone()).unwrap();
             manager
                 .add_account_internal(
                     "acc-123".to_string(),
@@ -1781,8 +1762,10 @@ mod tests {
                 .unwrap();
         }
 
+        let raw = std::fs::read(CredentialFile::Codex.path(&session)).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("rt-secret"));
         // New manager should load from disk
-        let manager2 = CodexOAuthManager::new(path);
+        let manager2 = CodexOAuthManager::new(session).unwrap();
         let accounts = manager2.list_accounts().await;
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acc-123");
@@ -1791,7 +1774,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_account() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
 
         manager
             .add_account_internal(
@@ -1825,7 +1808,7 @@ mod tests {
     #[tokio::test]
     async fn adopt_account_refresh_token_syncs_rotated_value() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
             .await
@@ -1880,7 +1863,7 @@ mod tests {
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_older_live_generation() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
             .await
@@ -1919,7 +1902,7 @@ mod tests {
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_undated_live_generation() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
             .await
@@ -1949,7 +1932,7 @@ mod tests {
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_stale_id_token_with_same_refresh() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-new"))
             .await
@@ -1989,7 +1972,7 @@ mod tests {
     #[tokio::test]
     async fn adopt_account_refresh_token_rejects_equal_timestamp_generation() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-1"))
             .await
@@ -2028,7 +2011,7 @@ mod tests {
     #[tokio::test]
     async fn adopt_account_refresh_token_keeps_legacy_conflict_ambiguous_across_retries() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-manager"))
             .await
@@ -2075,7 +2058,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_manager_token_adopts_different_disk_token_without_timestamp() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager
             .add_test_account_with_access_token("acc-1", "access-cached", Some("id-manager"))
             .await
@@ -2108,7 +2091,7 @@ mod tests {
     #[tokio::test]
     async fn device_commit_rejects_flow_cleared_during_network_poll() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         manager.pending_device_codes.write().await.insert(
             "device-auth-id".to_string(),
             PendingDeviceCode {
@@ -2131,13 +2114,13 @@ mod tests {
 
         assert!(matches!(result, Err(CodexOAuthError::ExpiredToken)));
         assert!(manager.list_accounts().await.is_empty());
-        assert!(!manager.storage_path.exists());
+        assert!(!CredentialFile::Codex.path(&manager.secrets).exists());
     }
 
     #[tokio::test]
     async fn device_start_rejects_flow_cleared_during_network_request() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        let manager = test_manager(temp.path().to_path_buf());
         let login_epoch = manager.login_epoch.load(Ordering::Acquire);
 
         manager.clear_auth().await.unwrap();

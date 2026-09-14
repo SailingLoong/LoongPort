@@ -50,7 +50,8 @@ mod tests {
         let _agent = TestAgentDir::new();
         let state = AppState::new(Arc::new(
             Database::memory().expect("create in-memory database"),
-        ));
+        ))
+        .unwrap();
         let models_path = crate::pi_config::get_pi_models_path().expect("models path");
         fs::create_dir_all(models_path.parent().expect("models directory"))
             .expect("create models directory");
@@ -107,7 +108,8 @@ mod tests {
         let _agent = TestAgentDir::new();
         let state = AppState::new(Arc::new(
             Database::memory().expect("create in-memory database"),
-        ));
+        ))
+        .unwrap();
         let models_path = crate::pi_config::get_pi_models_path().expect("models path");
         fs::create_dir_all(models_path.parent().expect("models directory"))
             .expect("create models directory");

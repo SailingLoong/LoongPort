@@ -409,7 +409,7 @@ pub(crate) async fn refresh_relay_result(
 ) -> RefreshResult {
     let name = {
         let state = app_handle.state::<AppState>();
-        with_conn(&state, |conn| creds::get(conn, relay_id))
+        with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))
             .ok()
             .flatten()
             .map(|relay| {
@@ -598,7 +598,7 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
             // 那不是凭据的问题，清掉只会逼用户在网络恢复后白重登一次。
             if should_clear_credentials_after_probe_error(&e) {
                 let state = app_handle.state::<AppState>();
-                with_conn(&state, |conn| creds::clear_session(conn, id))?;
+                with_conn(&state, |conn, _vault| creds::clear_session(conn, id))?;
                 let msg = e.to_string();
                 log::info!("中转站 {id} 登录态已失效，已清除会话（分组与密钥保留）：{msg}");
                 expired.push(id);
@@ -616,8 +616,9 @@ async fn check_session(app_handle: &tauri::AppHandle) -> Result<Vec<i64>, AppErr
 /// `RelayStatus.should_prompt_add_site` 与新人引导（`commands::onboarding`）都读它：
 /// 同一个业务事实只算一次，两处不会因为各写一份判据而分叉。
 pub(crate) fn user_has_no_accounts(state: &AppState) -> Result<bool, AppError> {
-    with_conn(state, |conn| {
-        Ok(creds::list(conn)?.is_empty() && crate::vendor::creds::list(conn)?.is_empty())
+    with_conn(state, |conn, _vault| {
+        Ok(creds::list(conn, _vault)?.is_empty()
+            && crate::vendor::creds::list(conn, _vault)?.is_empty())
     })
 }
 
@@ -637,7 +638,7 @@ mod tests {
     #[test]
     fn relay_status_owns_the_global_add_site_prompt_decision() {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db);
+        let state = AppState::new(db).unwrap();
 
         assert!(
             relay_status_impl(&state)
@@ -645,9 +646,10 @@ mod tests {
                 .should_prompt_add_site
         );
 
-        with_conn(&state, |conn| {
+        with_conn(&state, |conn, _vault| {
             crate::vendor::creds::save_account(
                 conn,
+                _vault,
                 crate::vendor::Vendor::DeepSeek,
                 "token",
                 &crate::vendor::VendorAccount {

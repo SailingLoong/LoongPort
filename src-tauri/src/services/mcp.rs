@@ -91,10 +91,10 @@ impl McpService {
     }
 
     /// 将 MCP 服务器同步到所有启用的应用
-    fn sync_server_to_apps(_state: &AppState, server: &McpServer) -> Result<(), AppError> {
+    fn sync_server_to_apps(state: &AppState, server: &McpServer) -> Result<(), AppError> {
         let mut failures = Vec::new();
         for app in server.apps.enabled_apps() {
-            if let Err(err) = Self::sync_server_to_app_no_config(server, &app) {
+            if let Err(err) = Self::sync_server_to_app_no_config(state, server, &app) {
                 log::warn!("同步 MCP '{}' 到 {app:?} 失败: {err}", server.id);
                 failures.push(format!("{}: {err}", app.as_str()));
             }
@@ -112,14 +112,18 @@ impl McpService {
 
     /// 将 MCP 服务器同步到指定应用
     fn sync_server_to_app(
-        _state: &AppState,
+        state: &AppState,
         server: &McpServer,
         app: &AppType,
     ) -> Result<(), AppError> {
-        Self::sync_server_to_app_no_config(server, app)
+        Self::sync_server_to_app_no_config(state, server, app)
     }
 
-    fn sync_server_to_app_no_config(server: &McpServer, app: &AppType) -> Result<(), AppError> {
+    fn sync_server_to_app_no_config(
+        state: &AppState,
+        server: &McpServer,
+        app: &AppType,
+    ) -> Result<(), AppError> {
         match app {
             AppType::Claude => {
                 mcp::sync_single_server_to_claude(&Default::default(), &server.id, &server.server)?;
@@ -158,7 +162,12 @@ impl McpService {
                 log::debug!("OpenClaw MCP support is still in development, skipping sync");
             }
             AppType::Hermes => {
-                mcp::sync_single_server_to_hermes(&Default::default(), &server.id, &server.server)?;
+                mcp::sync_single_server_to_hermes(
+                    state.db.secret_session(),
+                    &Default::default(),
+                    &server.id,
+                    &server.server,
+                )?;
             }
             AppType::Pi => {}
         }
@@ -178,7 +187,7 @@ impl McpService {
         Ok(())
     }
 
-    fn remove_server_from_app(_state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
+    fn remove_server_from_app(state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
         match app {
             AppType::Claude => mcp::remove_server_from_claude(id)?,
             AppType::ClaudeDesktop => {
@@ -198,7 +207,7 @@ impl McpService {
                 log::debug!("OpenClaw MCP support is still in development, skipping remove");
             }
             AppType::Hermes => {
-                mcp::remove_server_from_hermes(id)?;
+                mcp::remove_server_from_hermes(state.db.secret_session(), id)?;
             }
             AppType::Pi => {}
         }

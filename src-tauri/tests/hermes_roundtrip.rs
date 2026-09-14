@@ -61,7 +61,12 @@ fn set_provider_preserves_unknown_and_future_fields() {
             ]
         });
 
-        hermes_config::set_provider("myhost", patch).expect("set_provider");
+        hermes_config::set_provider(
+            cc_switch_lib::Database::memory().unwrap().secret_session(),
+            "myhost",
+            patch,
+        )
+        .expect("set_provider");
 
         let written = std::fs::read_to_string(&config_path).expect("read written config");
 

@@ -49,12 +49,13 @@ pub(crate) fn remove_unmanaged_duplicates(
     let Some(fingerprint) = for_provider(managed_provider, app_type) else {
         return Ok(Vec::new());
     };
+    let vault = db.secrets.read()?;
     let mut conn = crate::database::lock_conn!(db.conn);
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| AppError::Database(error.to_string()))?;
     let (current_id, providers) =
-        Database::get_provider_snapshot_in_transaction(&tx, app_type.as_str())?;
+        Database::get_provider_snapshot_in_transaction(&tx, &vault, app_type.as_str())?;
     let mut duplicates = Vec::new();
 
     for provider in providers.values() {
@@ -113,6 +114,35 @@ pub(crate) fn remove_unmanaged_duplicates(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypted_provider_snapshot_adopts_duplicate_and_transfers_current() {
+        let db = Database::memory().unwrap();
+        let settings = serde_json::json!({"env":{"ANTHROPIC_BASE_URL":"https://api.example", "ANTHROPIC_AUTH_TOKEN":"fingerprint-canary"}});
+        let duplicate = Provider::with_id("manual".into(), "Manual".into(), settings.clone(), None);
+        let managed = Provider::with_id(
+            crate::relay::provision::provider_id_for("https://api.example", Some(1), 1),
+            "Managed".into(),
+            settings,
+            None,
+        );
+        db.save_provider("claude", &duplicate).unwrap();
+        db.save_provider("claude", &managed).unwrap();
+        db.set_current_provider("claude", &duplicate.id).unwrap();
+        let merged = remove_unmanaged_duplicates(&db, &AppType::Claude, &managed).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].was_current);
+        assert!(db
+            .get_provider_by_id(&duplicate.id, "claude")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.get_current_provider("claude").unwrap().as_deref(),
+            Some(managed.id.as_str())
+        );
+    }
+
     #[test]
     fn duplicate_adoption_snapshots_inside_an_immediate_transaction() {
         let source = include_str!("provider_fingerprint.rs");

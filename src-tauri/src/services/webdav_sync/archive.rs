@@ -17,13 +17,6 @@ use crate::services::sync_protocol::{
 /// Maximum number of entries allowed in a zip archive.
 const MAX_EXTRACT_ENTRIES: usize = 10_000;
 
-pub(crate) struct SkillsBackup {
-    _tmp: TempDir,
-    backup_dir: PathBuf,
-    ssot_path: PathBuf,
-    existed: bool,
-}
-
 pub(crate) fn zip_skills_ssot(dest_path: &Path) -> Result<(), AppError> {
     let source = SkillService::get_ssot_dir().map_err(|e| {
         localized(
@@ -65,7 +58,13 @@ pub(crate) fn zip_skills_ssot(dest_path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn restore_skills_zip(raw: &[u8]) -> Result<(), AppError> {
+pub(crate) struct PreparedSkills {
+    _temporary: TempDir,
+    pub(crate) source: PathBuf,
+}
+
+/// Validate and extract remote skills without changing the live skills directory.
+pub(crate) fn stage_skills_zip(raw: &[u8]) -> Result<PreparedSkills, AppError> {
     let tmp = tempdir().map_err(|e| {
         io_context_localized(
             "webdav.sync.skills_extract_tmpdir_failed",
@@ -133,75 +132,10 @@ pub(crate) fn restore_skills_zip(raw: &[u8]) -> Result<(), AppError> {
         )?;
     }
 
-    let ssot = SkillService::get_ssot_dir().map_err(|e| {
-        localized(
-            "webdav.sync.skills_ssot_dir_failed",
-            format!("获取 Skills SSOT 目录失败: {e}"),
-            format!("Failed to resolve Skills SSOT directory: {e}"),
-        )
-    })?;
-    let bak = ssot.with_extension("bak");
-
-    if ssot.exists() {
-        if bak.exists() {
-            let _ = fs::remove_dir_all(&bak);
-        }
-        fs::rename(&ssot, &bak).map_err(|e| AppError::io(&ssot, e))?;
-    }
-
-    if let Err(e) = copy_dir_recursive(&extracted, &ssot) {
-        if bak.exists() {
-            let _ = fs::remove_dir_all(&ssot);
-            let _ = fs::rename(&bak, &ssot);
-        }
-        return Err(e);
-    }
-
-    let _ = fs::remove_dir_all(&bak);
-    Ok(())
-}
-
-pub(crate) fn backup_current_skills() -> Result<SkillsBackup, AppError> {
-    let ssot = SkillService::get_ssot_dir().map_err(|e| {
-        localized(
-            "webdav.sync.skills_ssot_dir_failed",
-            format!("获取 Skills SSOT 目录失败: {e}"),
-            format!("Failed to resolve Skills SSOT directory: {e}"),
-        )
-    })?;
-    let tmp = tempdir().map_err(|e| {
-        io_context_localized(
-            "webdav.sync.skills_backup_tmpdir_failed",
-            "创建 skills 备份临时目录失败",
-            "Failed to create temporary directory for skills backup",
-            e,
-        )
-    })?;
-    let backup_dir = tmp.path().join("skills-backup");
-
-    let existed = ssot.exists();
-    if existed {
-        copy_dir_recursive(&ssot, &backup_dir)?;
-    }
-
-    Ok(SkillsBackup {
-        _tmp: tmp,
-        backup_dir,
-        ssot_path: ssot,
-        existed,
+    Ok(PreparedSkills {
+        _temporary: tmp,
+        source: extracted,
     })
-}
-
-pub(crate) fn restore_skills_from_backup(backup: &SkillsBackup) -> Result<(), AppError> {
-    if backup.ssot_path.exists() {
-        fs::remove_dir_all(&backup.ssot_path).map_err(|e| AppError::io(&backup.ssot_path, e))?;
-    }
-
-    if backup.existed {
-        copy_dir_recursive(&backup.backup_dir, &backup.ssot_path)?;
-    }
-
-    Ok(())
 }
 
 fn zip_dir_recursive(
@@ -287,40 +221,6 @@ fn zip_dir_recursive(
                     format!("Failed to write ZIP file content: {e}"),
                 )
             })?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), AppError> {
-    let mut visited = HashSet::new();
-    copy_dir_recursive_inner(src, dest, &mut visited)
-}
-
-fn copy_dir_recursive_inner(
-    src: &Path,
-    dest: &Path,
-    visited: &mut HashSet<PathBuf>,
-) -> Result<(), AppError> {
-    if !src.exists() {
-        return Ok(());
-    }
-    if !mark_visited_dir(src, visited)? {
-        log::warn!(
-            "[WebDAV] Skipping already visited copy path: {}",
-            src.display()
-        );
-        return Ok(());
-    }
-    fs::create_dir_all(dest).map_err(|e| AppError::io(dest, e))?;
-    for entry in fs::read_dir(src).map_err(|e| AppError::io(src, e))? {
-        let entry = entry.map_err(|e| AppError::io(src, e))?;
-        let path = entry.path();
-        let dest_path = dest.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursive_inner(&path, &dest_path, visited)?;
-        } else {
-            fs::copy(&path, &dest_path).map_err(|e| AppError::io(&dest_path, e))?;
         }
     }
     Ok(())

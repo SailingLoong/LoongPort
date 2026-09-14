@@ -575,7 +575,7 @@ mod managed_guard_tests {
     use std::sync::Arc;
 
     fn empty_state() -> AppState {
-        AppState::new(Arc::new(Database::memory().expect("in-memory database")))
+        AppState::new(Arc::new(Database::memory().expect("in-memory database"))).unwrap()
     }
 
     /// 库里**已经有**那条托管档位的 state。

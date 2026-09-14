@@ -13,6 +13,14 @@ export interface ConfigTransferResult {
   message: string;
   filePath?: string;
   backupId?: string;
+  warning?: string;
+}
+
+export interface LegacyCleanupPreview {
+  paths: string[];
+  canClean: boolean;
+  receipt: string | null;
+  blockedReason: string | null;
 }
 
 export interface WebDavTestResult {
@@ -146,8 +154,28 @@ export const settingsApi = {
     return await invoke("export_config_to_file", { filePath });
   },
 
-  async importConfigFromFile(filePath: string): Promise<ConfigTransferResult> {
-    return await invoke("import_config_from_file", { filePath });
+  async importConfigFromFile(
+    filePath: string,
+    password?: string,
+  ): Promise<ConfigTransferResult> {
+    return await invoke("import_config_from_file", { filePath, password });
+  },
+
+  async webdavSyncLegacyCleanupPreview(): Promise<LegacyCleanupPreview> {
+    return await invoke("webdav_sync_legacy_cleanup_preview");
+  },
+  async webdavSyncCleanupLegacy(
+    expectedReceipt: string,
+  ): Promise<{ deletedObjects: number }> {
+    return await invoke("webdav_sync_cleanup_legacy", { expectedReceipt });
+  },
+  async s3SyncLegacyCleanupPreview(): Promise<LegacyCleanupPreview> {
+    return await invoke("s3_sync_legacy_cleanup_preview");
+  },
+  async s3SyncCleanupLegacy(
+    expectedReceipt: string,
+  ): Promise<{ deletedObjects: number }> {
+    return await invoke("s3_sync_cleanup_legacy", { expectedReceipt });
   },
 
   // ─── WebDAV sync ──────────────────────────────────────────
@@ -168,6 +196,16 @@ export const settingsApi = {
 
   async webdavSyncDownload(): Promise<WebDavSyncResult> {
     return await invoke("webdav_sync_download");
+  },
+
+  async webdavSyncRestore(
+    password: string,
+    expectedSnapshotId: string,
+  ): Promise<WebDavSyncResult> {
+    return await invoke("webdav_sync_restore", {
+      password,
+      expectedSnapshotId,
+    });
   },
 
   async webdavSyncSaveSettings(
@@ -204,6 +242,13 @@ export const settingsApi = {
 
   async s3SyncDownload(): Promise<WebDavSyncResult> {
     return await invoke("s3_sync_download");
+  },
+
+  async s3SyncRestore(
+    password: string,
+    expectedSnapshotId: string,
+  ): Promise<WebDavSyncResult> {
+    return await invoke("s3_sync_restore", { password, expectedSnapshotId });
   },
 
   async s3SyncSaveSettings(

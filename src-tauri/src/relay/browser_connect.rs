@@ -361,6 +361,7 @@ pub(crate) async fn connect(
     };
     let site_name_fallback = origin_host(&handshake.origin);
     let relay_id = {
+        let vault = state.db.secrets.read()?;
         let conn = crate::database::lock_conn!(state.db.conn);
         let existing: Option<i64> = conn
             .query_row(
@@ -375,6 +376,7 @@ pub(crate) async fn connect(
         match existing {
             Some(relay_id) => creds::save_credentials(
                 &conn,
+                &vault,
                 relay_id,
                 identity,
                 &verified.auth_token,
@@ -386,6 +388,7 @@ pub(crate) async fn connect(
             )?,
             None => creds::save_authenticated_relay(
                 &conn,
+                &vault,
                 AuthenticatedRelay {
                     site: RelaySite {
                         site_origin: &handshake.origin,
@@ -525,6 +528,7 @@ mod tests {
         AppState::new(std::sync::Arc::new(
             crate::database::Database::memory().expect("内存库"),
         ))
+        .unwrap()
     }
 
     fn sub2api_profile_router(expected_token: &str, user_id: i64) -> axum::routing::MethodRouter {
@@ -784,14 +788,13 @@ mod tests {
         .await
         .expect("会话接力成功");
 
-        let stored_token: String = {
+        let stored_token = {
+            let vault = state.db.secrets.read().unwrap();
             let conn = state.db.conn.lock().expect("锁内存库");
-            conn.query_row(
-                "SELECT auth_token FROM loongport_relay WHERE id = ?1",
-                rusqlite::params![outcome.relay_id],
-                |row| row.get(0),
-            )
-            .unwrap()
+            creds::get(&conn, &vault, outcome.relay_id)
+                .unwrap()
+                .unwrap()
+                .auth_token
         };
         assert_eq!(
             stored_token, "exchanged-bearer",

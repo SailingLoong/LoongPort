@@ -228,7 +228,7 @@ async fn real_upstream_roundtrip_through_local_proxy() {
 async fn real_tier_board_snapshot() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (_home, db) = smoke_db();
-    let state = crate::store::AppState::new(db);
+    let state = crate::store::AppState::new(db).unwrap();
     let board = crate::tier_board_impl(&state, "claude")
         .await
         .expect("tier board");
@@ -259,7 +259,7 @@ async fn real_tier_board_snapshot() {
 async fn real_manual_order_routes_to_user_first_pick() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (_home, db) = smoke_db();
-    let state = crate::store::AppState::new(db);
+    let state = crate::store::AppState::new(db).unwrap();
 
     // 手动序 = [看板第 2 位, 看板第 1 位, 其余反转]：第 2 位提到第 1 之前，
     // 与自动策略序不同（否则证明力为零）。断言探针选「必有 HTTP 交换」的档位

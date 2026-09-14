@@ -3,9 +3,12 @@
 //! 提供代理服务器的启动、停止和配置管理
 
 use crate::app_config::AppType;
-use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
+#[cfg(test)]
+use crate::config::write_json_file;
+use crate::config::{get_claude_settings_path, read_json_file};
 use crate::database::Database;
 use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
+use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 #[cfg(feature = "gui")]
@@ -149,6 +152,20 @@ impl CodexAuthFileTransaction {
             }
         }
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    format!(
+                        "收紧 Codex auth 权限失败，原凭据未修改 ({}): {error}",
+                        path.display()
+                    )
+                },
+            )?;
+        }
+
         let quarantine = Self::unique_sibling_path(&path, "restore-backup")?;
         match std::fs::rename(&path, &quarantine) {
             Ok(()) => {}
@@ -197,29 +214,12 @@ impl CodexAuthFileTransaction {
         }
         let temporary = Self::unique_sibling_path(&self.path, "restore-new")?;
         let write_result = (|| -> Result<(), String> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary).map_err(|error| {
+            crate::config::atomic_write_private(&temporary, &contents).map_err(|error| {
                 format!(
-                    "创建 Codex auth 临时文件失败 ({}): {error}",
+                    "写入 Codex auth 临时文件失败 ({}): {error}",
                     temporary.display()
                 )
             })?;
-            use std::io::Write;
-            file.write_all(&contents)
-                .and_then(|_| file.flush())
-                .map_err(|error| {
-                    format!(
-                        "写入 Codex auth 临时文件失败 ({}): {error}",
-                        temporary.display()
-                    )
-                })?;
-            drop(file);
 
             match std::fs::hard_link(&temporary, &self.path) {
                 Ok(()) => Ok(()),
@@ -412,11 +412,17 @@ impl ProxyService {
     pub fn new(
         db: Arc<Database>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
-    ) -> Self {
-        let codex_oauth_manager =
-            Arc::new(CodexOAuthManager::new(crate::config::get_app_config_dir()));
+    ) -> Result<Self, AppError> {
+        let codex_oauth_manager = Arc::new(
+            CodexOAuthManager::new(db.secrets.clone())
+                .map_err(|e| AppError::Config(e.to_string()))?,
+        );
 
-        Self::new_with_codex_oauth_manager(db, codex_oauth_manager, passive_ingress)
+        Ok(Self::new_with_codex_oauth_manager(
+            db,
+            codex_oauth_manager,
+            passive_ingress,
+        ))
     }
 
     pub fn new_with_codex_oauth_manager(
@@ -3688,7 +3694,8 @@ impl ProxyService {
     fn write_claude_live(&self, config: &Value) -> Result<(), String> {
         let path = get_claude_settings_path();
         let settings = crate::services::provider::sanitize_claude_settings_for_live(config);
-        write_json_file(&path, &settings).map_err(|e| format!("写入 Claude 配置失败: {e}"))
+        crate::config::write_json_file_private(&path, &settings)
+            .map_err(|e| format!("写入 Claude 配置失败: {e}"))
     }
 
     fn read_codex_live(&self) -> Result<Value, String> {
@@ -3827,7 +3834,7 @@ impl ProxyService {
         config: &Value,
         expected_auth: Option<&CodexAuthFileSnapshot>,
     ) -> Result<(), String> {
-        use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
+        use crate::codex_config::get_codex_config_path;
 
         let auth = config.get("auth");
         let config_str = config.get("config").and_then(|v| v.as_str());
@@ -3937,7 +3944,7 @@ impl ProxyService {
                     if auth.as_object().is_some_and(Map::is_empty) {
                         Ok(())
                     } else {
-                        write_json_file(&get_codex_auth_path(), auth)
+                        crate::codex_config::write_codex_auth_file(auth)
                             .map_err(|e| format!("写入 Codex auth 失败: {e}"))
                     }
                 }
@@ -4192,6 +4199,74 @@ mod tests {
     use std::env;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn codex_auth_only_restore_restricts_live_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(
+            db,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        )
+        .unwrap();
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        std::fs::create_dir_all(auth_path.parent().expect("auth parent"))
+            .expect("create auth parent");
+        std::fs::write(&auth_path, br#"{"OPENAI_API_KEY":"old"}"#).expect("seed auth");
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set permissive fixture mode");
+
+        service
+            .write_codex_live_verbatim(&json!({
+                "auth": { "OPENAI_API_KEY": "replacement" }
+            }))
+            .expect("write auth-only Codex live state");
+
+        let mode = std::fs::metadata(&auth_path)
+            .expect("read auth metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn guarded_codex_auth_rollback_restricts_restored_generation_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _home = TempHome::new();
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        std::fs::create_dir_all(auth_path.parent().expect("auth parent"))
+            .expect("create auth parent");
+        let original = br#"{"OPENAI_API_KEY":"original"}"#;
+        std::fs::write(&auth_path, original).expect("seed original auth");
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set permissive fixture mode");
+        let snapshot = CodexAuthFileSnapshot::capture().expect("capture auth generation");
+
+        let mut transaction = CodexAuthFileTransaction::begin(&snapshot).expect("begin restore");
+        transaction
+            .install(Some(br#"{"OPENAI_API_KEY":"replacement"}"#.to_vec()))
+            .expect("install replacement generation");
+        transaction.rollback().expect("roll back replacement");
+
+        assert_eq!(
+            std::fs::read(&auth_path).expect("read restored auth"),
+            original
+        );
+        let mode = std::fs::metadata(&auth_path)
+            .expect("read auth metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
     struct TempHome {
         #[allow(dead_code)]
         dir: TempDir,
@@ -4289,7 +4364,8 @@ mod tests {
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let backup = json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com"}});
         db.save_live_backup("claude", &backup.to_string())
@@ -4315,7 +4391,8 @@ mod tests {
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let mut config = db.get_proxy_config().await.unwrap();
         config.listen_port = 0;
         let mut expected_global = db.get_global_proxy_config().await.unwrap();
@@ -4351,7 +4428,8 @@ mod tests {
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         assert!(service.set_takeover_for_app("pi", true).await.is_err());
         assert!(!service.is_running().await);
@@ -4872,7 +4950,8 @@ mod tests {
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider = Provider::with_id(
             "p1".to_string(),
@@ -4940,7 +5019,7 @@ mod tests {
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
         state
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -5087,7 +5166,8 @@ mod tests {
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5180,7 +5260,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5269,7 +5350,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5354,7 +5436,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -5469,7 +5552,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -5587,7 +5671,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -5741,7 +5826,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -5831,7 +5917,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         crate::codex_config::write_codex_live_atomic(
             &json!({ "OPENAI_API_KEY": "sk-real" }),
             Some("model = \"gpt-5.4\"\n"),
@@ -5870,7 +5957,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let auth = json!({ "OPENAI_API_KEY": "sk-real" });
         crate::codex_config::write_codex_live_atomic(&auth, Some("model = \"gpt-5.4\"\n"))
             .expect("seed auth");
@@ -5897,7 +5985,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let mut official = Provider::with_id(
             crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
             "OpenAI Official".to_string(),
@@ -5947,7 +6036,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6025,7 +6115,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -6132,7 +6223,7 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6244,7 +6335,7 @@ wire_api = "responses"
         .expect("enable Codex official auth preservation");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6356,7 +6447,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6505,7 +6597,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6584,7 +6677,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -6652,7 +6746,8 @@ experimental_bearer_token = "PROXY_MANAGED"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -7060,7 +7155,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider = Provider::with_id(
             "p1".to_string(),
@@ -7119,7 +7215,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider = Provider::with_id(
             "p1".to_string(),
@@ -7178,7 +7275,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -7243,7 +7341,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -7411,7 +7510,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -7507,7 +7607,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -7605,7 +7706,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let mut provider = Provider::with_id(
             "p1".to_string(),
@@ -7659,7 +7761,8 @@ model = "gpt-5.1-codex"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let mut provider = Provider::with_id(
             "p1".to_string(),
@@ -7720,7 +7823,8 @@ base_url = "https://codex.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -7803,7 +7907,8 @@ base_url = "https://codex.example/v1"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -7890,7 +7995,8 @@ base_url = "https://codex.example/v1"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let native_auth = json!({
             "auth_mode": "chatgpt",
             "OPENAI_API_KEY": null,
@@ -7934,7 +8040,8 @@ base_url = "https://codex.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let mut provider = Provider::with_id(
             "managed-official".to_string(),
             "OpenAI Official".to_string(),
@@ -8148,7 +8255,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let native_auth = json!({
             "auth_mode": "chatgpt",
             "OPENAI_API_KEY": null,
@@ -8209,7 +8317,8 @@ wire_api = "responses"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         db.save_live_backup(
             "codex",
@@ -8287,7 +8396,8 @@ base_url = "https://new.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -8461,7 +8571,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let provider_a = Provider::with_id(
             "a".to_string(),
@@ -8591,7 +8702,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         db.save_live_backup(
             "codex",
@@ -8683,7 +8795,7 @@ command = "latest-command"
         seed_codex_model_template();
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
 
         db.set_config_snippet(
             "codex",
@@ -8834,7 +8946,7 @@ requires_openai_auth = true
         seed_codex_model_template();
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
 
         let proxy_config = ProxyConfig {
             listen_port: 0,
@@ -8943,7 +9055,7 @@ requires_openai_auth = true
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
-        let state = crate::store::AppState::new(db.clone());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
         db.update_proxy_config(ProxyConfig {
             listen_port: 0,
             ..Default::default()
@@ -9048,7 +9160,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         service
             .codex_oauth_manager
             .add_test_account_with_access_token(
@@ -9167,7 +9280,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         // Pre-takeover Live state: config.toml points at the cc-switch generated
         // catalog file, and that file exists on disk (takeover never touches it).
@@ -9234,7 +9348,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         // Catalog projection needs a model template; seed `models_cache.json`
         // with the template slug so we don't depend on the `codex` CLI.
@@ -9315,7 +9430,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         let codex_dir = crate::codex_config::get_codex_config_dir();
         std::fs::create_dir_all(&codex_dir).expect("create codex dir");
@@ -9375,7 +9491,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         // Seed DB with a current provider that has a real API key
         let provider = Provider::with_id(
@@ -9479,7 +9596,8 @@ requires_openai_auth = true
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         // Backup snapshot: third-party API-key shape (pre-login state)
         db.save_live_backup(
@@ -9561,7 +9679,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         db.save_live_backup(
             "codex",
@@ -9605,7 +9724,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let mut official = Provider::with_id(
             crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
             "OpenAI Official".to_string(),
@@ -9669,7 +9789,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         db.save_live_backup(
             "codex",
             &serde_json::to_string(&json!({
@@ -9707,7 +9828,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let auth_path = crate::codex_config::get_codex_auth_path();
         write_json_file(
             &auth_path,
@@ -9754,7 +9876,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let provider = Provider::with_id(
             "third-party".to_string(),
             "Third Party".to_string(),
@@ -9815,7 +9938,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let error = service
             .write_codex_live_verbatim_with_auth_guard(
                 &json!({
@@ -9934,7 +10058,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let error = service
             .write_codex_live_verbatim_with_auth_guard(
                 &json!({
@@ -9967,7 +10092,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         db.save_live_backup(
             "codex",
@@ -10028,7 +10154,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         db.save_live_backup(
             "codex",
@@ -10090,7 +10217,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         db.save_live_backup(
             "codex",
@@ -10141,7 +10269,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         db.save_live_backup(
             "codex",
@@ -10200,7 +10329,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         // Seed a GOOD backup (the "real" original Live)
         let good_backup = serde_json::to_string(&json!({
@@ -10256,7 +10386,8 @@ base_url = "https://third.example/v1"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
 
         // Seed good backups for all three apps
         let good_backup = serde_json::to_string(&json!({
@@ -10362,7 +10493,8 @@ experimental_bearer_token = "PROXY_MANAGED"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let provider_a = Provider::with_id(
             "grok-a".to_string(),
             "Grok A".to_string(),
@@ -10432,7 +10564,8 @@ experimental_bearer_token = "PROXY_MANAGED"
         let service = ProxyService::new(
             db.clone(),
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
-        );
+        )
+        .unwrap();
         let provider_a = Provider::with_id(
             "grok-a".to_string(),
             "Grok A".to_string(),

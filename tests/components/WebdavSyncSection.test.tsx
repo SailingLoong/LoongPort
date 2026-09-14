@@ -4,7 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
-import type { WebDavSyncSettings } from "@/types";
+import type { WebDavSyncSettings, S3SyncSettings } from "@/types";
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -81,6 +81,10 @@ const { settingsApiMock } = vi.hoisted(() => ({
     webdavSyncFetchRemoteInfo: vi.fn(),
     webdavSyncUpload: vi.fn(),
     webdavSyncDownload: vi.fn(),
+    webdavSyncRestore: vi.fn(),
+    s3SyncFetchRemoteInfo: vi.fn(),
+    s3SyncDownload: vi.fn(),
+    s3SyncRestore: vi.fn(),
   },
 }));
 
@@ -99,7 +103,7 @@ const baseConfig: WebDavSyncSettings = {
   status: {},
 };
 
-function renderSection(config?: WebDavSyncSettings) {
+function renderSection(config?: WebDavSyncSettings, s3Config?: S3SyncSettings) {
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -108,7 +112,7 @@ function renderSection(config?: WebDavSyncSettings) {
   });
   const view = render(
     <QueryClientProvider client={client}>
-      <WebdavSyncSection config={config} />
+      <WebdavSyncSection config={config} s3Config={s3Config} />
     </QueryClientProvider>,
   );
   return { ...view, client };
@@ -125,6 +129,10 @@ describe("WebdavSyncSection", () => {
     settingsApiMock.webdavSyncFetchRemoteInfo.mockReset();
     settingsApiMock.webdavSyncUpload.mockReset();
     settingsApiMock.webdavSyncDownload.mockReset();
+    settingsApiMock.webdavSyncRestore.mockReset();
+    settingsApiMock.s3SyncFetchRemoteInfo.mockReset();
+    settingsApiMock.s3SyncDownload.mockReset();
+    settingsApiMock.s3SyncRestore.mockReset();
 
     settingsApiMock.webdavSyncSaveSettings.mockResolvedValue({ success: true });
     settingsApiMock.webdavTestConnection.mockResolvedValue({
@@ -143,6 +151,116 @@ describe("WebdavSyncSection", () => {
     settingsApiMock.webdavSyncDownload.mockResolvedValue({
       status: "downloaded",
     });
+  });
+
+  it("requires an explicit password restore after foreign vault admission and binds the reviewed snapshot", async () => {
+    settingsApiMock.webdavSyncDownload.mockRejectedValue(
+      "配置错误: sync.vault_adoption_required",
+    );
+    settingsApiMock.webdavSyncRestore.mockResolvedValue({ status: "restored" });
+    renderSection(baseConfig);
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.webdavSync.download" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.webdavSync.confirmDownload.confirm",
+      }),
+    );
+    expect(
+      await screen.findByText("syncRestore.description"),
+    ).toBeInTheDocument();
+    expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
+    const confirm = screen.getByRole("button", { name: "syncRestore.confirm" });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("syncRestore.password"), {
+      target: { value: "source protection password" },
+    });
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(settingsApiMock.webdavSyncRestore).toHaveBeenCalledWith(
+        "source protection password",
+        "snapshot-1",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText("syncRestore.password"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps restore deliberate when password verification fails", async () => {
+    settingsApiMock.webdavSyncDownload.mockRejectedValue(
+      "sync.vault_revision_newer",
+    );
+    settingsApiMock.webdavSyncRestore.mockRejectedValue(
+      "secret.authentication_failed",
+    );
+    renderSection(baseConfig);
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.webdavSync.download" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.webdavSync.confirmDownload.confirm",
+      }),
+    );
+    const password = await screen.findByLabelText("syncRestore.password");
+    fireEvent.change(password, { target: { value: "incorrect password" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "syncRestore.confirm" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "syncRestore.failed",
+    );
+    expect(password).toHaveValue("");
+    expect(settingsApiMock.webdavSyncDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the S3 restore action only after deliberate confirmation", async () => {
+    settingsApiMock.s3SyncFetchRemoteInfo.mockResolvedValue({
+      deviceName: "Source device",
+      snapshotId: "s3-snapshot",
+      compatible: true,
+      createdAt: "2026-02-01T10:00:00Z",
+      artifacts: ["db.sql", "skills.zip"],
+    });
+    settingsApiMock.s3SyncDownload.mockRejectedValue(
+      "sync.vault_adoption_required",
+    );
+    settingsApiMock.s3SyncRestore.mockResolvedValue({ status: "restored" });
+    renderSection(undefined, {
+      enabled: true,
+      bucket: "test-bucket",
+      region: "test",
+      accessKeyId: "test",
+      secretAccessKey: "test",
+      status: {},
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.s3Sync.download" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "settings.s3Sync.confirmDownload.confirm",
+      }),
+    );
+    const password = await screen.findByLabelText("syncRestore.password");
+    expect(settingsApiMock.s3SyncRestore).not.toHaveBeenCalled();
+    fireEvent.change(password, {
+      target: { value: "cloud protection password" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "syncRestore.confirm" }),
+    );
+    await waitFor(() =>
+      expect(settingsApiMock.s3SyncRestore).toHaveBeenCalledWith(
+        "cloud protection password",
+        "s3-snapshot",
+      ),
+    );
+    expect(settingsApiMock.webdavSyncRestore).not.toHaveBeenCalled();
   });
 
   it("shows auto sync error callout when last auto sync failed", () => {

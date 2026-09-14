@@ -2,6 +2,7 @@ use super::provider::{sanitize_claude_settings_for_live, ProviderService};
 use crate::app_config::{AppType, MultiAppConfig};
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::secrets::{files::OwnedFile, session::SecretSession};
 use chrono::Utc;
 use serde_json::Value;
 use std::fs;
@@ -14,10 +15,20 @@ pub struct ConfigService;
 
 impl ConfigService {
     /// 为当前 config.json 创建备份，返回备份 ID（若文件不存在则返回空字符串）。
-    pub fn create_backup(config_path: &Path) -> Result<String, AppError> {
-        if !config_path.exists() {
-            return Ok(String::new());
+    pub fn create_backup(session: &SecretSession, config_path: &Path) -> Result<String, AppError> {
+        let source = OwnedFile::at_path(session, config_path)?;
+        if source.relative_path() != Path::new("config.json") {
+            return Err(AppError::Config("secret.unregistered_file".into()));
         }
+        match fs::symlink_metadata(config_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(error) => return Err(AppError::io(config_path, error)),
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Err(AppError::Config("secret.invalid_storage_path".into()))
+            }
+            Ok(_) => {}
+        }
+        let contents = source.read(session)?;
 
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let backup_id = format!("backup_{timestamp}");
@@ -30,8 +41,7 @@ impl ConfigService {
         fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
         let backup_path = backup_dir.join(format!("{backup_id}.json"));
-        let contents = fs::read(config_path).map_err(|e| AppError::io(config_path, e))?;
-        fs::write(&backup_path, contents).map_err(|e| AppError::io(&backup_path, e))?;
+        OwnedFile::at_path(session, &backup_path)?.write(session, &contents)?;
 
         Self::cleanup_old_backups(&backup_dir, MAX_BACKUPS)?;
 
@@ -47,11 +57,11 @@ impl ConfigService {
             Ok(iter) => iter
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .map(|ext| ext == "json")
-                        .unwrap_or(false)
+                    entry.file_name().to_str().is_some_and(|name| {
+                        name.starts_with("backup_")
+                            && OwnedFile::registered(std::path::Path::new("backups").join(name))
+                                .is_ok()
+                    })
                 })
                 .collect::<Vec<_>>(),
             Err(_) => return Ok(()),

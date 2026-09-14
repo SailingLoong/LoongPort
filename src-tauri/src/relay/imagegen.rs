@@ -85,9 +85,14 @@ fn app_dir() -> PathBuf {
 /// 没有任何生图档位被启用时返回 `Err`，文案引导用户去 LoongPort 里选一个 ——
 /// **不自动挑一个**：用户可能压根不想用生图（他那个站可能没有生图分组），
 /// 替他选一个等于替他决定花钱。
-pub(crate) fn load_current_tier() -> Result<Tier, String> {
-    let provider_id = current_image_tier_id()?;
-    load_tier(&provider_id)
+pub(crate) fn load_current_tier(
+    session: &crate::secrets::session::SecretSession,
+) -> Result<Tier, String> {
+    let vault = session.read().map_err(|e| e.to_string())?;
+    let conn = open_readonly(&session.root().join(crate::config::DB_FILE_NAME))?;
+    crate::database::vault::check_identity(&conn, &vault).map_err(|e| e.to_string())?;
+    let provider_id = current_image_tier_id(&conn)?;
+    load_tier(&conn, &vault, &provider_id)
 }
 
 /// 「没选生图档位」时给用户的话。定义一次，两个调用点共用。
@@ -115,12 +120,9 @@ pub(crate) const NO_IMAGE_TIER_HINT: &str =
 /// 意义正是「这台机器上用哪个」—— 云同步把另一台机器的 `is_current` 带过来时，本机
 /// settings 才是对的。只读 DB 会让生图用错档位，而用户看界面（它读的是同一套两层逻辑）
 /// 会觉得没问题。
-fn current_image_tier_id() -> Result<String, String> {
-    let db_path: PathBuf = app_dir().join(crate::config::DB_FILE_NAME);
-    let conn = open_readonly(&db_path)?;
-
+fn current_image_tier_id(conn: &rusqlite::Connection) -> Result<String, String> {
     // 第一层：设备级 settings.json。读不到 / 解析失败都只是「没有覆盖」，不是错误。
-    if let Some(id) = device_level_image_tier() {
+    if let Some(id) = device_level_image_tier()? {
         // 与主程序同一条校验：本机记的那个档位得真的还在库里，否则回落到 DB
         // （`get_effective_current_provider` 在那种情况下会清掉本机的记录）。
         let exists: i64 = conn
@@ -165,25 +167,13 @@ fn current_image_tier_id() -> Result<String, String> {
 /// 三条 SQL 与写入侧，各写一遍迟早分叉，而症状是「切了没反应」。
 const IMAGE_APP_TYPE: &str = crate::app_config::AppType::CODEX_IMAGE_STR;
 
-/// 读设备级 settings.json 里记的生图档位。
-///
-/// ## 为什么不复用 `crate::settings::get_current_provider`
-///
-/// 那一层走一个进程内的 `OnceLock` 缓存（`settings_store()`），而它是在**主程序**
-/// 启动时填的。MCP 子进程没有那段启动流程 ⇒ 拿到的是 `Default`（全 `None`）⇒
-/// 恒返回 `None`，而那是个静默的错误答案：生图会一直用 DB 那层，云同步场景下用错档位。
-///
-/// 所以直接读文件。路径与 `AppSettings::settings_path()` 必须一致 ——
-/// 已加闸 `the_settings_path_matches_the_main_programs`。
-fn device_level_image_tier() -> Option<String> {
-    let path = crate::config::get_home_dir()
-        .join(crate::config::APP_DIR_NAME)
-        .join("settings.json");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    // 键名由 `AppSettings` 的 `#[serde(rename_all = "camelCase")]` 决定。
-    let id = json.get("currentProviderCodexImage")?.as_str()?.trim();
-    (!id.is_empty()).then(|| id.to_string())
+/// Read fresh device preferences so a running MCP process observes GUI changes.
+fn device_level_image_tier() -> Result<Option<String>, String> {
+    Ok(crate::settings::read_bootstrap_settings()
+        .map_err(|e| e.to_string())?
+        .current_provider_codex_image
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty()))
 }
 
 /// 只读打开数据库。
@@ -213,10 +203,11 @@ fn open_readonly(db_path: &std::path::Path) -> Result<rusqlite::Connection, Stri
 /// 代价是对 `providers` 表的形状有了第二处依赖。可接受：读的是 `id` /
 /// `settings_config` 这两个最稳定的列（`settings_config` 的结构还共用
 /// [`super::provision::extract_api_key`]，没有另写一份解析）。
-fn load_tier(provider_id: &str) -> Result<Tier, String> {
-    let db_path: PathBuf = app_dir().join(crate::config::DB_FILE_NAME);
-    let conn = open_readonly(&db_path)?;
-
+fn load_tier(
+    conn: &rusqlite::Connection,
+    vault: &crate::secrets::VaultContext,
+    provider_id: &str,
+) -> Result<Tier, String> {
     // ⚠️ **`app_type` 必须参与查询** —— `providers` 的主键是
     // `(id, app_type)`，一个 `provider_id` **真的会有多行**：同一个 id 能合法地挂在
     // 多个 app 栏下。不带这个条件的后果：`query_row` 拿到的是 SQLite 先返回的那一行，
@@ -252,8 +243,16 @@ fn load_tier(provider_id: &str) -> Result<Tier, String> {
             other => format!("读取档位失败: {other}"),
         })?;
 
+    let settings_raw = crate::secrets::inventory::open_db(
+        vault,
+        "providers",
+        "settings_config",
+        &[provider_id, IMAGE_APP_TYPE],
+        &settings_raw,
+    )
+    .map_err(|e| e.to_string())?;
     let settings: Value =
-        serde_json::from_str(&settings_raw).map_err(|e| format!("档位配置解析失败: {e}"))?;
+        serde_json::from_str(&settings_raw).map_err(|_| "档位配置解析失败".to_string())?;
 
     // sk 的位置按 CLI 分派，复用那一处定义 —— 硬编码 `auth.OPENAI_API_KEY` 会让将来
     // 挂到 claude 档位上时静默取不到（那个在 `env.ANTHROPIC_AUTH_TOKEN`）。
@@ -330,33 +329,14 @@ pub(crate) fn images_url(base_url: &str) -> String {
 /// 优先用户自定义（settings.json 设备级 `imagegenOutputDir`，生图页「更改存储位置」
 /// 写入）；缺省 `<数据目录>/generated_images/`：与数据库同目录，用户找得到，也不会
 /// 污染他当前的工作目录（Agent 常在用户仓库里跑，往那里丢文件会进 git status）。
-pub(crate) fn output_dir() -> PathBuf {
-    if let Some(custom) = custom_output_dir() {
-        return custom;
-    }
-    // 同样走 `app_dir()` —— 用户把数据目录挪走了，图也该跟着落在那里，
-    // 而不是散在默认目录（他会找不到）。
-    app_dir().join("generated_images")
-}
-
-/// 设备级设置里的自定义出图目录（绝对路径字符串）。
-///
-/// 直读 settings.json **文件**而不是 `crate::settings` 的进程内缓存 —— 与
-/// [`device_level_image_tier`] 同一个理由：MCP 子进程没有主程序的启动流程，缓存恒为
-/// 空，读缓存会一直得到「没有自定义」⇒ MCP 把图写进默认目录而 App 看自定义目录，
-/// 两边静默分叉。读文件让两个进程天然一致，且换路径后 **codex 不必重启**
-/// （MCP 每次生图现读，与切档位同一好处）。
-fn custom_output_dir() -> Option<PathBuf> {
-    let path = crate::config::get_home_dir()
-        .join(crate::config::APP_DIR_NAME)
-        .join("settings.json");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let dir = json.get("imagegenOutputDir")?.as_str()?.trim();
-    if dir.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(dir))
+pub(crate) fn output_dir() -> Result<PathBuf, String> {
+    let settings = crate::settings::read_bootstrap_settings().map_err(|e| e.to_string())?;
+    Ok(settings
+        .imagegen_output_dir
+        .map(|dir| dir.trim().to_owned())
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_dir().join("generated_images")))
 }
 
 /// 一次请求的超时上限 = 每张图 [`SINGLE_IMAGE_TIMEOUT_SECS`] 的既证预算 × 张数。
@@ -560,7 +540,7 @@ pub(crate) async fn generate_image(
         .and_then(Value::as_array)
         .ok_or_else(|| "生图响应里没有 data 数组".to_string())?;
 
-    let dir = output_dir();
+    let dir = output_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
 
     let mut saved = Vec::new();
@@ -671,10 +651,10 @@ pub struct GalleryImage {
 /// 目录不存在视为空画廊，不是错误 —— 没生成过图是常态。
 /// 只认 [`is_image_file`]（我们自己的命名）—— 存储路径指到用户目录时，
 /// 他的文件不进画廊。
-pub(crate) fn gallery_images() -> Vec<GalleryImage> {
-    let dir = output_dir();
+pub(crate) fn gallery_images() -> Result<Vec<GalleryImage>, String> {
+    let dir = output_dir()?;
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut items: Vec<GalleryImage> = entries
         .filter_map(Result::ok)
@@ -700,7 +680,7 @@ pub(crate) fn gallery_images() -> Vec<GalleryImage> {
         })
         .collect();
     items.sort_by_key(|item| std::cmp::Reverse(item.modified_at));
-    items
+    Ok(items)
 }
 
 #[cfg(feature = "gui")]
@@ -711,10 +691,12 @@ pub(crate) fn gallery_images() -> Vec<GalleryImage> {
 /// 失败只记日志 —— 画廊显示不出来不该把生图本身也拖死。
 pub(crate) fn ensure_asset_scope(app: &tauri::AppHandle) {
     use tauri::Manager as _;
-    if let Err(e) = app
-        .asset_protocol_scope()
-        .allow_directory(output_dir(), true)
-    {
+    let result = output_dir().and_then(|dir| {
+        app.asset_protocol_scope()
+            .allow_directory(dir, true)
+            .map_err(|e| e.to_string())
+    });
+    if let Err(e) = result {
         log::warn!("把出图目录加进 asset 协议白名单失败: {e}");
     }
 }
@@ -877,36 +859,42 @@ fn first_line(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// ⭐ **settings.json 的路径必须与主程序一致。**
-    ///
-    /// 读设备级「当前生图档位」是**自己拼路径读文件**（不能复用
-    /// `crate::settings`，见 [`device_level_image_tier`] 的文档）。路径一分叉，
-    /// 读到的永远是「没有覆盖」⇒ 静默回落到 DB 那层 ⇒ 云同步场景下生图用错档位，
-    /// 而界面显示的是对的（它走两层逻辑），没有任何东西会报错。
     #[test]
-    fn the_settings_path_matches_the_main_programs() {
-        let settings_rs = include_str!("../settings.rs");
-        // 主程序那份是三段拼接：home / APP_DIR_NAME / "settings.json"。
-        assert!(
-            settings_rs.contains("crate::config::APP_DIR_NAME")
-                && settings_rs.contains("\"settings.json\""),
-            "主程序的 settings.json 路径拼法变了 —— 生图那份手抄的跟着改，\
-             否则设备级「当前生图档位」永远读不到"
+    fn readonly_tier_reader_requires_the_matching_vault() {
+        let db = crate::database::Database::memory().unwrap();
+        let provider = crate::provider::Provider::with_id(
+            "image-test".into(),
+            "Image test".into(),
+            serde_json::json!({"auth":{"OPENAI_API_KEY":"image-canary"}, "config":r#"model = "gpt-image-2"
+model_provider = "example"
+[model_providers.example]
+base_url = "https://api.example/v1""#}),
+            None,
         );
-    }
-
-    /// ⭐ **那个 JSON 键名必须与 `AppSettings` 的字段对得上。**
-    ///
-    /// 键名由 `#[serde(rename_all = "camelCase")]` 从字段名派生，所以这里是一份手抄。
-    /// 抄错的后果同上：静默读不到。
-    #[test]
-    fn the_device_level_key_matches_the_settings_field() {
-        let settings_rs = include_str!("../settings.rs");
-        assert!(
-            settings_rs.contains("pub current_provider_codex_image: Option<String>"),
-            "`AppSettings::current_provider_codex_image` 改名了 —— \
-             `device_level_image_tier` 里那个 camelCase 键名跟着改"
+        db.save_provider(IMAGE_APP_TYPE, &provider).unwrap();
+        let path = db.secrets.root().join("readonly-test.db");
+        {
+            let conn = db.conn.lock().unwrap();
+            let mut target = rusqlite::Connection::open(&path).unwrap();
+            rusqlite::backup::Backup::new(&conn, &mut target)
+                .unwrap()
+                .run_to_completion(5, std::time::Duration::from_millis(1), None)
+                .unwrap();
+        }
+        let conn = open_readonly(&path).unwrap();
+        let vault = db.secrets.read().unwrap();
+        crate::database::vault::check_identity(&conn, &vault).unwrap();
+        assert_eq!(
+            load_tier(&conn, &vault, &provider.id).unwrap().api_key,
+            "image-canary"
         );
+        assert!(load_tier(
+            &conn,
+            &crate::secrets::VaultContext::generate().unwrap(),
+            &provider.id
+        )
+        .is_err());
+        assert!(conn.execute("DELETE FROM providers", []).is_err());
     }
 
     #[test]
@@ -1030,19 +1018,6 @@ base_url = "https://api.example.com/v1"
         assert_eq!(migrate_images(&from, &to).unwrap(), 0);
 
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// ⭐ `imagegenOutputDir` 这个手抄的 JSON 键必须与 `AppSettings` 字段对得上
-    /// （serde camelCase 派生）。抄错 ⇒ 自定义路径永远读不到，图悄悄落回默认目录，
-    /// 而 App 与 MCP 两边一致地错 —— 没有任何东西会报错。
-    #[test]
-    fn the_output_dir_key_matches_the_settings_field() {
-        let settings_rs = include_str!("../settings.rs");
-        assert!(
-            settings_rs.contains("pub imagegen_output_dir: Option<String>"),
-            "`AppSettings::imagegen_output_dir` 改名了 —— `custom_output_dir` 里那个 \
-             camelCase 键名跟着改"
-        );
     }
 
     /// 同一份内容得到同一个名字（可复现），不同内容不撞名。

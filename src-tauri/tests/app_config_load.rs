@@ -24,7 +24,8 @@ fn load_v1_config_returns_error_and_does_not_write() {
     fs::write(&path, v1_json).expect("seed v1 json");
     let before = fs::read_to_string(&path).expect("read before");
 
-    let err = MultiAppConfig::load().expect_err("v1 should not be auto-migrated");
+    let err = MultiAppConfig::from_legacy_bytes(&fs::read(&path).unwrap())
+        .expect_err("v1 should not be auto-migrated");
     match err {
         AppError::Localized { key, .. } => assert_eq!(key, "config.unsupported_v1"),
         other => panic!("expected Localized v1 error, got {other:?}"),
@@ -50,7 +51,8 @@ fn load_v1_with_extra_version_still_treated_as_v1() {
     std::fs::write(&path, v1_like).expect("seed v1-like json");
     let before = std::fs::read_to_string(&path).expect("read before");
 
-    let err = MultiAppConfig::load().expect_err("v1-like should not be parsed as v2");
+    let err = MultiAppConfig::from_legacy_bytes(&fs::read(&path).unwrap())
+        .expect_err("v1-like should not be parsed as v2");
     match err {
         AppError::Localized { key, .. } => assert_eq!(key, "config.unsupported_v1"),
         other => panic!("expected Localized v1 error, got {other:?}"),
@@ -73,10 +75,11 @@ fn load_invalid_json_returns_parse_error_and_does_not_write() {
     fs::write(&path, "{not json").expect("seed invalid json");
     let before = fs::read_to_string(&path).expect("read before");
 
-    let err = MultiAppConfig::load().expect_err("invalid json should error");
+    let err = MultiAppConfig::from_legacy_bytes(&fs::read(&path).unwrap())
+        .expect_err("invalid json should error");
     match err {
-        AppError::Json { .. } => {}
-        other => panic!("expected Json error, got {other:?}"),
+        AppError::Config(_) => {}
+        other => panic!("expected sanitized configuration error, got {other:?}"),
     }
 
     let after = fs::read_to_string(&path).expect("read after");
@@ -98,7 +101,8 @@ fn load_valid_v2_config_succeeds() {
     let json = serde_json::to_string_pretty(&default_cfg).expect("serialize default cfg");
     fs::write(&path, json).expect("write v2 json");
 
-    let loaded = MultiAppConfig::load().expect("v2 should load successfully");
+    let loaded = MultiAppConfig::from_legacy_bytes(&fs::read(&path).unwrap())
+        .expect("v2 should load successfully");
     assert_eq!(loaded.version, 2);
     assert!(loaded
         .get_manager(&cc_switch_lib::AppType::Claude)

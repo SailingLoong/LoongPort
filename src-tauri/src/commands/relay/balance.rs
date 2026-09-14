@@ -100,7 +100,7 @@ pub(crate) async fn relay_balance_impl<R: tauri::Runtime>(
 ) -> Result<balance::RowBalanceResult, AppError> {
     let (relay, base_url, api_keys) = {
         let state = app_handle.state::<AppState>();
-        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))?
+        let relay = with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?;
         let (base_url, api_keys) = relay_balance_inputs(&state, &relay);
         (relay, base_url, api_keys)
@@ -277,6 +277,7 @@ mod tests {
         // 同站两行两个账号（7 / token-a，8 / token-b）
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("内存库"));
         let (row_a, row_b) = {
+            let vault = db.secrets.read().unwrap();
             let conn = db.conn.lock().expect("锁内存库");
             let row_a = creds::save_site_with_backend(
                 &conn,
@@ -288,6 +289,7 @@ mod tests {
             .expect("建 A 行");
             creds::save_credentials(
                 &conn,
+                &vault,
                 row_a,
                 creds::AccountIdentity {
                     id: 7,
@@ -310,6 +312,7 @@ mod tests {
             .expect("建 B 行");
             creds::save_credentials(
                 &conn,
+                &vault,
                 row_b,
                 creds::AccountIdentity {
                     id: 8,
@@ -325,7 +328,7 @@ mod tests {
             (row_a, row_b)
         };
         let app = tauri::test::mock_builder()
-            .manage(AppState::new(db))
+            .manage(AppState::new(db).unwrap())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("mock app");
 

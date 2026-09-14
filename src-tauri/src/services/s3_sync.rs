@@ -1,9 +1,7 @@
-//! S3 v2 sync protocol layer.
+//! S3 immutable snapshot sync protocol layer.
 //!
 //! Implements manifest-based synchronization on top of the S3 transport
 //! primitives in [`super::s3`]. Artifact set: `db.sql` + `skills.zip`.
-
-use std::collections::BTreeMap;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -14,10 +12,12 @@ use crate::settings::{update_s3_sync_status, S3SyncSettings, WebDavSyncStatus};
 
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
-    apply_snapshot, build_local_snapshot, localized, persist_sync_success_best_effort, sha256_hex,
-    validate_artifact_size_limit, validate_manifest_compat, verify_artifact, ArtifactMeta,
-    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES,
-    PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    apply_downloaded_snapshot, build_local_snapshot, localized, persist_sync_success_best_effort,
+    publication_condition, publication_conflict, sha256_hex, snapshot_artifact_path,
+    validate_artifact_size_limit, validate_manifest_compat, validate_upload_metadata,
+    verify_artifact, verify_write_conditions, DownloadedSnapshot, RemoteLayout, SyncManifest,
+    DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION,
+    REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -40,49 +40,71 @@ pub async fn upload(
     settings: &mut S3SyncSettings,
 ) -> Result<Value, AppError> {
     settings.validate()?;
+    let snapshot = build_local_snapshot(db)?;
+    let manifest: SyncManifest =
+        serde_json::from_slice(&snapshot.manifest_bytes).map_err(|source| AppError::Json {
+            path: REMOTE_MANIFEST.into(),
+            source,
+        })?;
+
     let creds = creds_for(settings);
 
-    let snapshot = build_local_snapshot(db)?;
-
-    // Upload order: artifacts first, manifest last (best-effort consistency)
-    let db_key = s3_key(settings, REMOTE_DB_SQL);
-    s3::put_object(&creds, &db_key, snapshot.db_sql, "application/sql").await?;
-
-    let skills_key = s3_key(settings, REMOTE_SKILLS_ZIP);
-    s3::put_object(&creds, &skills_key, snapshot.skills_zip, "application/zip").await?;
-
     let manifest_key = s3_key(settings, REMOTE_MANIFEST);
-    s3::put_object(
+    let remote = s3::get_object(&creds, &manifest_key, MAX_MANIFEST_BYTES).await?;
+    let condition = publication_condition(
+        remote
+            .as_ref()
+            .map(|(bytes, etag)| (bytes.as_slice(), etag.as_deref())),
+        settings.status.last_remote_manifest_hash.as_deref(),
+    )?;
+    if let Some((bytes, _)) = &remote {
+        let remote_manifest: SyncManifest =
+            serde_json::from_slice(bytes).map_err(|source| AppError::Json {
+                path: REMOTE_MANIFEST.into(),
+                source,
+            })?;
+        validate_manifest_compat(&remote_manifest, RemoteLayout::Current)?;
+        validate_upload_metadata(
+            manifest.vault_metadata()?,
+            remote_manifest.vault_metadata()?,
+        )?;
+    }
+    let db_key = s3_key(settings, &snapshot_artifact_path(&manifest, REMOTE_DB_SQL)?);
+    s3::put_object(&creds, &db_key, snapshot.db_sql.clone(), "application/sql").await?;
+    verify_write_conditions(|condition| {
+        let bytes = snapshot.db_sql.clone();
+        let key = &db_key;
+        let creds = &creds;
+        async move { s3::put_object_conditional(creds, key, bytes, "application/sql", &condition).await }
+    }).await?;
+    let skills_key = s3_key(
+        settings,
+        &snapshot_artifact_path(&manifest, REMOTE_SKILLS_ZIP)?,
+    );
+    s3::put_object(&creds, &skills_key, snapshot.skills_zip, "application/zip").await?;
+    let etag = s3::put_object_conditional(
         &creds,
         &manifest_key,
         snapshot.manifest_bytes,
         "application/json",
+        &condition,
     )
-    .await?;
-
-    // Fetch etag (best-effort, don't fail the upload)
-    let etag = match s3::head_object(&creds, &manifest_key).await {
-        Ok(e) => e,
-        Err(e) => {
-            log::debug!("[S3] Failed to fetch ETag after upload: {e}");
-            None
-        }
-    };
+    .await?
+    .ok_or_else(publication_conflict)?;
 
     let _persisted = persist_sync_success_best_effort(
         settings,
         snapshot.manifest_hash,
-        etag,
+        Some(etag),
         persist_sync_success,
     );
     Ok(serde_json::json!({ "status": "uploaded" }))
 }
 
 /// Download remote snapshot and apply to local database + skills.
-pub async fn download(
-    db: &crate::database::Database,
-    settings: &mut S3SyncSettings,
-) -> Result<Value, AppError> {
+pub(crate) async fn fetch_snapshot(
+    settings: &S3SyncSettings,
+) -> Result<DownloadedSnapshot, AppError> {
     settings.validate()?;
     let creds = creds_for(settings);
 
@@ -106,17 +128,42 @@ pub async fn download(
     validate_manifest_compat(&manifest, RemoteLayout::Current)?;
 
     // Download and verify artifacts
-    let db_sql = download_and_verify(settings, &creds, REMOTE_DB_SQL, &manifest.artifacts).await?;
-    let skills_zip =
-        download_and_verify(settings, &creds, REMOTE_SKILLS_ZIP, &manifest.artifacts).await?;
+    let db_sql = download_and_verify(settings, &creds, REMOTE_DB_SQL, &manifest).await?;
+    let skills_zip = download_and_verify(settings, &creds, REMOTE_SKILLS_ZIP, &manifest).await?;
 
-    // Apply snapshot
-    apply_snapshot(db, &db_sql, &skills_zip)?;
+    Ok(DownloadedSnapshot {
+        manifest_hash: sha256_hex(&manifest_bytes),
+        etag,
+        source_path: s3_dir_display(settings),
+        layout: RemoteLayout::Current,
+        manifest,
+        db_sql,
+        skills_zip,
+    })
+}
 
-    let manifest_hash = sha256_hex(&manifest_bytes);
-    let _persisted =
-        persist_sync_success_best_effort(settings, manifest_hash, etag, persist_sync_success);
-    Ok(serde_json::json!({ "status": "downloaded" }))
+pub async fn download(
+    db: &std::sync::Arc<crate::database::Database>,
+    settings: &mut S3SyncSettings,
+) -> Result<Value, AppError> {
+    let snapshot = fetch_snapshot(settings).await?;
+    let snapshot = apply_downloaded_snapshot(db.clone(), snapshot).await?;
+    persist_download_success(settings, &snapshot);
+    Ok(
+        serde_json::json!({ "status": "downloaded", "sourceLayout": snapshot.layout.as_str(), "sourcePath": snapshot.source_path }),
+    )
+}
+
+pub(crate) fn persist_download_success(
+    settings: &mut S3SyncSettings,
+    snapshot: &DownloadedSnapshot,
+) {
+    let _persisted = persist_sync_success_best_effort(
+        settings,
+        snapshot.manifest_hash.clone(),
+        snapshot.etag.clone(),
+        persist_sync_success,
+    );
 }
 
 /// Fetch remote manifest info without downloading artifacts.
@@ -177,9 +224,9 @@ async fn download_and_verify(
     settings: &S3SyncSettings,
     creds: &S3Credentials,
     artifact_name: &str,
-    artifacts: &BTreeMap<String, ArtifactMeta>,
+    manifest: &SyncManifest,
 ) -> Result<Vec<u8>, AppError> {
-    let meta = artifacts.get(artifact_name).ok_or_else(|| {
+    let meta = manifest.artifacts.get(artifact_name).ok_or_else(|| {
         localized(
             "s3.sync.manifest_missing_artifact",
             format!("manifest 中缺少 artifact: {artifact_name}"),
@@ -188,7 +235,7 @@ async fn download_and_verify(
     })?;
     validate_artifact_size_limit(artifact_name, meta.size)?;
 
-    let key = s3_key(settings, artifact_name);
+    let key = s3_key(settings, &snapshot_artifact_path(manifest, artifact_name)?);
     let (bytes, _) = s3::get_object(creds, &key, MAX_SYNC_ARTIFACT_BYTES as usize)
         .await?
         .ok_or_else(|| {
@@ -208,7 +255,7 @@ async fn download_and_verify(
 /// Build the S3 object key for a given artifact.
 ///
 /// Format: `{remote_root}/v{PROTOCOL_VERSION}/db-v{DB_COMPAT_VERSION}/{profile}/{artifact}`
-/// Example: `cc-switch-sync/v2/db-v6/default/manifest.json`
+/// Example: `cc-switch-sync/v3/db-v7/default/manifest.json`
 fn s3_key(settings: &S3SyncSettings, artifact: &str) -> String {
     format!(
         "{}/v{}/db-v{}/{}/{}",
@@ -235,6 +282,53 @@ fn creds_for(settings: &S3SyncSettings) -> S3Credentials {
 
 // ─── Tests ───────────────────────────────────────────────────
 
+pub(crate) struct LegacyCleanupRemote<'a>(pub &'a S3SyncSettings);
+impl super::sync_cleanup::LegacyRemote for LegacyCleanupRemote<'_> {
+    fn scope(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.0.endpoint, self.0.bucket, self.0.remote_root, self.0.profile
+        )
+    }
+    fn legacy_roots(&self) -> Vec<(String, u32)> {
+        super::sync_cleanup::legacy_roots(&self.0.remote_root, &self.0.profile, false)
+    }
+    fn current_root(&self) -> String {
+        s3_dir_display(self.0)
+    }
+    async fn snapshot(&self) -> Result<DownloadedSnapshot, AppError> {
+        fetch_snapshot(self.0).await
+    }
+    async fn get(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Option<(Vec<u8>, Option<String>)>, AppError> {
+        s3::get_object(&creds_for(self.0), path, limit).await
+    }
+    async fn head(&self, path: &str) -> Result<Option<String>, AppError> {
+        s3::head_object(&creds_for(self.0), path).await
+    }
+    async fn put_probe(&self, path: &str, bytes: Vec<u8>) -> Result<String, AppError> {
+        s3::put_object_conditional(
+            &creds_for(self.0),
+            path,
+            bytes,
+            "application/octet-stream",
+            &super::sync_protocol::PutCondition::Absent,
+        )
+        .await?
+        .ok_or_else(|| AppError::Config("sync.cleanup_changed".into()))
+    }
+    async fn delete(
+        &self,
+        path: &str,
+        etag: &str,
+    ) -> Result<super::sync_cleanup::DeleteResult, AppError> {
+        s3::delete_object_conditional(&creds_for(self.0), path, etag).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,10 +342,10 @@ mod tests {
     }
 
     #[test]
-    fn s3_key_uses_v2_and_correct_format() {
+    fn s3_key_uses_v3_and_correct_format() {
         let settings = test_settings();
         let key = s3_key(&settings, "manifest.json");
-        assert_eq!(key, "cc-switch-sync/v2/db-v6/default/manifest.json");
+        assert_eq!(key, "cc-switch-sync/v3/db-v7/default/manifest.json");
     }
 
     #[test]
@@ -261,7 +355,7 @@ mod tests {
             profile: "work".to_string(),
             ..S3SyncSettings::default()
         };
-        assert_eq!(s3_key(&settings, "db.sql"), "my-root/v2/db-v6/work/db.sql");
+        assert_eq!(s3_key(&settings, "db.sql"), "my-root/v3/db-v7/work/db.sql");
     }
 
     #[test]
@@ -272,8 +366,8 @@ mod tests {
         let parts: Vec<&str> = key.splitn(5, '/').collect();
         assert_eq!(parts.len(), 5);
         assert_eq!(parts[0], "cc-switch-sync");
-        assert_eq!(parts[1], "v2");
-        assert_eq!(parts[2], "db-v6");
+        assert_eq!(parts[1], "v3");
+        assert_eq!(parts[2], "db-v7");
         assert_eq!(parts[3], "default");
         assert_eq!(parts[4], "skills.zip");
     }

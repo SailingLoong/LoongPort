@@ -875,7 +875,7 @@ fn test_import_prompt_allows_space_in_base64_content() {
     assert_eq!(request.content.as_deref(), Some("Pj4 "));
 
     let db = Arc::new(Database::memory().expect("create memory db"));
-    let state = AppState::new(db.clone());
+    let state = AppState::new(db.clone()).unwrap();
 
     let prompt_id = import_prompt_from_deeplink(&state, request.clone()).expect("import prompt");
 

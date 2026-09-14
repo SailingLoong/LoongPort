@@ -203,7 +203,10 @@ fn tools_list() -> Value {
 }
 
 /// 处理一条 JSON-RPC 请求，返回要写回去的响应（`None` = 这是个通知，不必回）。
-async fn handle_request(req: &Value) -> Option<Value> {
+async fn handle_request(
+    req: &Value,
+    session: &crate::secrets::session::SecretSession,
+) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     // 通知（没有 id）不需要响应。`notifications/initialized` 就是这种。
     let id = req.get("id")?.clone();
@@ -215,7 +218,7 @@ async fn handle_request(req: &Value) -> Option<Value> {
             "serverInfo": { "name": "loongport-imagegen", "version": env!("CARGO_PKG_VERSION") }
         })),
         "tools/list" => Ok(json!({ "tools": tools_list() })),
-        "tools/call" => handle_tool_call(req).await,
+        "tools/call" => handle_tool_call(req, session).await,
         // ping 是协议里的保活，必须答。
         "ping" => Ok(json!({})),
         other => Err(format!("不支持的方法: {other}")),
@@ -232,7 +235,10 @@ async fn handle_request(req: &Value) -> Option<Value> {
     })
 }
 
-async fn handle_tool_call(req: &Value) -> Result<Value, String> {
+async fn handle_tool_call(
+    req: &Value,
+    session: &crate::secrets::session::SecretSession,
+) -> Result<Value, String> {
     let params = req.get("params").ok_or("tools/call 缺 params")?;
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     if name != "generate_image" {
@@ -258,7 +264,7 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
 
     // ⚠️ **每次调用都重查当前档位**，不用启动时那份 —— 用户在 LoongPort 里换了生图
     // 档位，下一次生图就该用新的，**不必重启 codex**。见 `imagegen::current_image_tier_id`。
-    let tier = imagegen::load_current_tier()?;
+    let tier = imagegen::load_current_tier(session)?;
     // MCP 入口恒为并发：agent 想串行有自己的表达（逐次调用工具天然串行），
     // 不为它加 schema 噪音。见 `imagegen::split_batch` 的表。
     let (images, failed) = imagegen::generate_batch(&tier, prompt, size, quality, n, true).await?;
@@ -312,12 +318,14 @@ async fn handle_tool_call(req: &Value) -> Result<Value, String> {
 /// ⚠️ **stdout 只许写协议消息** —— 宿主按行解析 JSON，掺一句日志进去它就断连。
 /// 本模块的诊断一律走 **stderr**（[`diag!`]），绝不 `println!`、也不用 `log::`
 /// （见 [`diag!`] 的文档：那个宏在这个进程里是空操作）。
-pub fn serve() -> Result<(), String> {
+pub(crate) fn serve(
+    session: std::sync::Arc<crate::secrets::session::SecretSession>,
+) -> Result<(), String> {
     // ⚠️ **启动时不要求「已选定生图档位」** —— 那会让没选过的用户在 codex 里看到
     // 「工具启动失败」，而正确的表达是「工具在，但你还没选用哪个档位」：
     // 前者像是软件坏了，后者是一句他能照做的话。所以这里只记一行诊断，
     // 真正的检查推迟到 `tools/call`（那时报的错会作为工具结果显示给模型与用户）。
-    match imagegen::load_current_tier() {
+    match imagegen::load_current_tier(&session) {
         Ok(tier) => diag!(
             "生图 MCP 启动：档位「{}」，模型 {}，端点 {}",
             tier.display_name,
@@ -349,7 +357,7 @@ pub fn serve() -> Result<(), String> {
                 continue;
             }
         };
-        if let Some(resp) = runtime.block_on(handle_request(&req)) {
+        if let Some(resp) = runtime.block_on(handle_request(&req, &session)) {
             let mut out =
                 serde_json::to_string(&resp).map_err(|e| format!("序列化响应失败: {e}"))?;
             out.push('\n');

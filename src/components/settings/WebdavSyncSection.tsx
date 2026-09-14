@@ -33,6 +33,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { settingsApi } from "@/lib/api";
+import { SyncRestoreDialog, isSyncRestoreRequired } from "./SyncRestoreDialog";
+import { LegacySyncCleanup } from "./LegacySyncCleanup";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type {
@@ -314,6 +316,10 @@ export function WebdavSyncSection({
   const [dialogType, setDialogType] = useState<DialogType>(null);
   const [remoteInfo, setRemoteInfo] = useState<RemoteSnapshotInfo | null>(null);
   const [showAutoSyncConfirm, setShowAutoSyncConfirm] = useState(false);
+  const [restoreRequest, setRestoreRequest] = useState<{
+    transport: SyncType;
+    snapshot: RemoteSnapshotInfo;
+  } | null>(null);
 
   const closeDialog = useCallback(() => {
     setDialogType(null);
@@ -639,6 +645,10 @@ export function WebdavSyncSection({
       toast.success(t("settings.webdavSync.downloadSuccess"));
       await queryClient.invalidateQueries();
     } catch (error) {
+      if (isSyncRestoreRequired(error) && remoteInfo) {
+        setRestoreRequest({ transport: "webdav", snapshot: remoteInfo });
+        return;
+      }
       toast.error(
         t("settings.webdavSync.downloadFailed", {
           error: (error as Error)?.message ?? String(error),
@@ -647,7 +657,7 @@ export function WebdavSyncSection({
     } finally {
       setActionState("idle");
     }
-  }, [closeDialog, dirty, queryClient, t]);
+  }, [closeDialog, dirty, queryClient, remoteInfo, t]);
 
   // ─── S3 helpers ────────────────────────────────────────────
 
@@ -850,6 +860,10 @@ export function WebdavSyncSection({
       toast.success(t("settings.s3Sync.downloadSuccess"));
       await queryClient.invalidateQueries();
     } catch (error) {
+      if (isSyncRestoreRequired(error) && s3RemoteInfo) {
+        setRestoreRequest({ transport: "s3", snapshot: s3RemoteInfo });
+        return;
+      }
       toast.error(
         t("settings.s3Sync.downloadFailed", {
           error: (error as Error)?.message ?? String(error),
@@ -858,7 +872,7 @@ export function WebdavSyncSection({
     } finally {
       setS3ActionState("idle");
     }
-  }, [closeS3Dialog, s3Dirty, queryClient, t]);
+  }, [closeS3Dialog, s3Dirty, queryClient, s3RemoteInfo, t]);
 
   // ─── Sync type switching with mutual exclusion ─────────────
 
@@ -941,8 +955,6 @@ export function WebdavSyncSection({
   const lastError = config?.status?.lastError?.trim();
   const showAutoSyncError =
     !!lastError && config?.status?.lastErrorSource === "auto";
-  const currentRemotePath = `/${form.remoteRoot.trim() || "cc-switch-sync"}/v2/db-v6/${form.profile.trim() || "default"}`;
-  const currentS3RemotePath = `${s3Bucket.trim() || "bucket"}/${s3RemoteRoot.trim() || "cc-switch-sync"}/v2/db-v6/${s3Profile.trim() || "default"}`;
   const remoteDbCompatDisplay = formatDbCompatVersion(
     remoteInfo?.dbCompatVersion,
   );
@@ -960,6 +972,22 @@ export function WebdavSyncSection({
 
   return (
     <section className="space-y-4">
+      {restoreRequest && (
+        <SyncRestoreDialog
+          deviceName={restoreRequest.snapshot.deviceName}
+          onClose={() => setRestoreRequest(null)}
+          onRestore={async (password) => {
+            const restore =
+              restoreRequest.transport === "webdav"
+                ? settingsApi.webdavSyncRestore
+                : settingsApi.s3SyncRestore;
+            await restore(password, restoreRequest.snapshot.snapshotId);
+            setRestoreRequest(null);
+            toast.success(t("syncRestore.success"));
+            await queryClient.invalidateQueries();
+          }}
+        />
+      )}
       <header className="space-y-2">
         <h3 className="text-base font-semibold text-foreground">
           {t("settings.webdavSync.title")}
@@ -1216,6 +1244,10 @@ export function WebdavSyncSection({
                   : t("settings.webdavSync.downloading")
               }
               idleLabel={t("settings.webdavSync.download")}
+            />
+            <LegacySyncCleanup
+              transport="webdav"
+              disabled={!hasSavedConfig || dirty || actionState !== "idle"}
             />
           </div>
           {!hasSavedConfig && (
@@ -1530,6 +1562,12 @@ export function WebdavSyncSection({
               }
               idleLabel={t("settings.s3Sync.download")}
             />
+            <LegacySyncCleanup
+              transport="s3"
+              disabled={
+                !hasS3SavedConfig || s3Dirty || s3ActionState !== "idle"
+              }
+            />
           </div>
           {!hasS3SavedConfig && (
             <p className="text-xs text-muted-foreground">
@@ -1559,13 +1597,6 @@ export function WebdavSyncSection({
                   <li>{t("settings.webdavSync.confirmUpload.dbItem")}</li>
                   <li>{t("settings.webdavSync.confirmUpload.skillsItem")}</li>
                 </ul>
-                <p className="text-muted-foreground">
-                  {t("settings.webdavSync.confirmUpload.targetPath")}
-                  {": "}
-                  <code className="ml-1 text-xs bg-muted px-1.5 py-0.5 rounded">
-                    {currentRemotePath}
-                  </code>
-                </p>
                 {remoteInfo && (
                   <div className="rounded-lg border border-border bg-muted/50 p-3 space-y-2">
                     <p className="text-xs font-medium text-foreground">
@@ -1720,13 +1751,6 @@ export function WebdavSyncSection({
                   <li>{t("settings.s3Sync.confirmUpload.dbItem")}</li>
                   <li>{t("settings.s3Sync.confirmUpload.skillsItem")}</li>
                 </ul>
-                <p className="text-muted-foreground">
-                  {t("settings.s3Sync.confirmUpload.targetPath")}
-                  {": "}
-                  <code className="ml-1 text-xs bg-muted px-1.5 py-0.5 rounded">
-                    {currentS3RemotePath}
-                  </code>
-                </p>
                 {s3RemoteInfo && (
                   <div className="rounded-lg border border-border bg-muted/50 p-3 space-y-2">
                     <p className="text-xs font-medium text-foreground">

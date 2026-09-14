@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", windows))]
 use crate::config::get_home_dir;
-use crate::config::{atomic_write, delete_file, read_json_file, write_json_file};
+use crate::config::{
+    atomic_write, atomic_write_private, delete_file, read_json_file, write_json_file,
+    write_json_file_private,
+};
 use crate::database::Database;
 use crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID;
 use crate::error::AppError;
@@ -91,6 +94,7 @@ pub struct DirectGatewayCredentials {
 struct FileSnapshot {
     path: PathBuf,
     content: Option<Vec<u8>>,
+    private: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1004,7 +1008,7 @@ fn apply_provider_to_paths_inner(
 
     write_deployment_mode(&paths.normal_config_path, "3p")?;
     write_deployment_mode(&paths.threep_config_path, "3p")?;
-    write_json_file(&paths.profile_path, &profile)?;
+    write_json_file_private(&paths.profile_path, &profile)?;
     write_meta(&paths.meta_path, Some(PROFILE_ID))?;
 
     Ok(())
@@ -1061,13 +1065,13 @@ fn read_json_or_empty(path: &Path) -> Result<Value, AppError> {
 
 fn snapshot_files(paths: &ClaudeDesktopPaths) -> Result<Vec<FileSnapshot>, AppError> {
     [
-        &paths.normal_config_path,
-        &paths.threep_config_path,
-        &paths.profile_path,
-        &paths.meta_path,
+        (&paths.normal_config_path, false),
+        (&paths.threep_config_path, false),
+        (&paths.profile_path, true),
+        (&paths.meta_path, false),
     ]
     .into_iter()
-    .map(|path| {
+    .map(|(path, private)| {
         let content = if path.exists() {
             Some(fs::read(path).map_err(|e| AppError::io(path, e))?)
         } else {
@@ -1076,6 +1080,7 @@ fn snapshot_files(paths: &ClaudeDesktopPaths) -> Result<Vec<FileSnapshot>, AppEr
         Ok(FileSnapshot {
             path: path.clone(),
             content,
+            private,
         })
     })
     .collect()
@@ -1088,7 +1093,11 @@ fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<(), AppError> {
                 if let Some(parent) = snapshot.path.parent() {
                     fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
                 }
-                atomic_write(&snapshot.path, content)?;
+                if snapshot.private {
+                    atomic_write_private(&snapshot.path, content)?;
+                } else {
+                    atomic_write(&snapshot.path, content)?;
+                }
             }
             None => {
                 delete_file(&snapshot.path)?;
@@ -1483,6 +1492,68 @@ mod tests {
             ..Default::default()
         });
         provider
+    }
+
+    #[cfg(unix)]
+    fn unix_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::metadata(path)
+            .expect("read file metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_unix_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .expect("set fixture permissions");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_desktop_profile_write_restricts_credential_permissions() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        fs::create_dir_all(paths.profile_path.parent().expect("profile parent"))
+            .expect("create profile parent");
+        fs::write(&paths.profile_path, "{}").expect("seed profile");
+        set_unix_mode(&paths.profile_path, 0o644);
+
+        apply_provider_to_paths(&test_db(), &direct_provider("direct"), &paths)
+            .expect("apply provider");
+
+        assert_eq!(unix_mode(&paths.profile_path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_desktop_snapshot_rollback_restricts_restored_profile_permissions() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        fs::create_dir_all(paths.profile_path.parent().expect("profile parent"))
+            .expect("create profile parent");
+        let original = br#"{"inferenceGatewayApiKey":"original"}"#;
+        fs::write(&paths.profile_path, original).expect("seed profile");
+        set_unix_mode(&paths.profile_path, 0o644);
+        let snapshots = snapshot_files(&paths).expect("capture snapshots");
+
+        fs::write(
+            &paths.profile_path,
+            br#"{"inferenceGatewayApiKey":"replacement"}"#,
+        )
+        .expect("replace profile");
+        set_unix_mode(&paths.profile_path, 0o644);
+        restore_snapshots(&snapshots).expect("restore snapshots");
+
+        assert_eq!(
+            fs::read(&paths.profile_path).expect("read restored profile"),
+            original
+        );
+        assert_eq!(unix_mode(&paths.profile_path), 0o600);
     }
 
     #[test]

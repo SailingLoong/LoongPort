@@ -1875,10 +1875,20 @@ mod openai_responses_tests {
     fn target_for_model(endpoint: &str, api_key: &str, model: &str) -> ResolvedTarget {
         let db = Database::memory().unwrap();
         {
+            let vault = db.secrets.read().unwrap();
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO loongport_relay (site_origin, site_name, api_base_url, account_id, account_label, login_identifier, auth_token, sort_index) VALUES (?1, 'Test', ?1, 7, 'test', 'test', 'token', 0)",
+                "INSERT INTO loongport_relay (site_origin, site_name, api_base_url, account_id, account_label, login_identifier, auth_token, sort_index) VALUES (?1, 'Test', ?1, 7, 'test', 'test', '', 0)",
                 [endpoint],
+            )
+            .unwrap();
+            crate::relay::creds::update_tokens(
+                &conn,
+                &vault,
+                conn.last_insert_rowid(),
+                "token",
+                None,
+                None,
             )
             .unwrap();
         }

@@ -15,10 +15,10 @@
 //! - Provider 通过 meta.authBinding 关联账号
 //! - 自动迁移 v1 单账号格式到 v3 多账号 + 默认账号格式
 
+use crate::secrets::{files::CredentialFile, session::SecretSession};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -218,6 +218,9 @@ struct CopilotModelsResponseItem {
 /// Copilot 认证错误
 #[derive(Debug, thiserror::Error)]
 pub enum CopilotAuthError {
+    #[error("Credential storage error: {0}")]
+    ProtectedStorage(#[from] crate::error::AppError),
+
     #[error("设备码流程未启动")]
     DeviceFlowNotStarted,
 
@@ -382,7 +385,7 @@ struct GitHubAccountData {
     /// GitHub OAuth Token
     ///
     /// 安全说明：为了复用登录状态，本地会持久化该令牌。
-    /// 当前实现未接入系统钥匙串，依赖私有文件权限（Unix 下 0600）保护。
+    /// 通过凭据文件适配器加密保存。
     pub github_token: String,
     /// 用户信息
     pub user: GitHubUser,
@@ -429,7 +432,7 @@ pub struct CopilotAuthManager {
     /// 每个账号的端点拉取锁，避免并发拉取重复打 GitHub API
     endpoint_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
     /// 存储路径
-    storage_path: PathBuf,
+    secrets: Arc<SecretSession>,
     /// 待迁移的旧格式 token
     pending_migration: Arc<RwLock<Option<String>>>,
     /// 旧认证数据迁移失败时的状态消息
@@ -438,9 +441,7 @@ pub struct CopilotAuthManager {
 
 impl CopilotAuthManager {
     /// 创建新的认证管理器
-    pub fn new(data_dir: PathBuf) -> Self {
-        let storage_path = data_dir.join("copilot_auth.json");
-
+    pub(crate) fn new(secrets: Arc<SecretSession>) -> Result<Self, CopilotAuthError> {
         let manager = Self {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             default_account_id: Arc::new(RwLock::new(None)),
@@ -449,17 +450,15 @@ impl CopilotAuthManager {
             copilot_models: Arc::new(RwLock::new(HashMap::new())),
             api_endpoints: Arc::new(RwLock::new(HashMap::new())),
             endpoint_locks: Arc::new(RwLock::new(HashMap::new())),
-            storage_path,
+            secrets,
             pending_migration: Arc::new(RwLock::new(None)),
             migration_error: Arc::new(RwLock::new(None)),
         };
 
         // 尝试从磁盘加载（同步，不发起网络请求）
-        if let Err(e) = manager.load_from_disk_sync() {
-            log::warn!("[CopilotAuth] 加载存储失败: {e}");
-        }
+        manager.load_from_disk_sync()?;
 
-        manager
+        Ok(manager)
     }
 
     // ==================== 多账号管理方法 ====================
@@ -1165,9 +1164,7 @@ impl CopilotAuthManager {
         }
 
         // 最后删除存储文件
-        if self.storage_path.exists() {
-            std::fs::remove_file(&self.storage_path)?;
-        }
+        CredentialFile::Copilot.remove(&self.secrets)?;
 
         Ok(())
     }
@@ -1249,57 +1246,7 @@ impl CopilotAuthManager {
     }
 
     fn write_store_atomic(&self, content: &str) -> Result<(), CopilotAuthError> {
-        if let Some(parent) = self.storage_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let parent = self
-            .storage_path
-            .parent()
-            .ok_or_else(|| CopilotAuthError::IoError("无效的存储路径".to_string()))?;
-        let file_name = self
-            .storage_path
-            .file_name()
-            .ok_or_else(|| CopilotAuthError::IoError("无效的存储文件名".to_string()))?
-            .to_string_lossy()
-            .to_string();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp_path = parent.join(format!("{file_name}.tmp.{ts}"));
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.flush()?;
-
-            fs::rename(&tmp_path, &self.storage_path)?;
-            fs::set_permissions(&self.storage_path, fs::Permissions::from_mode(0o600))?;
-        }
-
-        #[cfg(windows)]
-        {
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.flush()?;
-
-            if self.storage_path.exists() {
-                let _ = fs::remove_file(&self.storage_path);
-            }
-            fs::rename(&tmp_path, &self.storage_path)?;
-        }
-
+        CredentialFile::Copilot.write(&self.secrets, content.as_bytes())?;
         Ok(())
     }
 
@@ -1392,13 +1339,11 @@ impl CopilotAuthManager {
 
     /// 从磁盘加载（仅加载 token，不发起网络请求）
     fn load_from_disk_sync(&self) -> Result<(), CopilotAuthError> {
-        if !self.storage_path.exists() {
+        let Some(content) = CredentialFile::Copilot.read(&self.secrets)? else {
             return Ok(());
-        }
-
-        let content = std::fs::read_to_string(&self.storage_path)?;
-        let store: CopilotAuthStore = serde_json::from_str(&content)
-            .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
+        };
+        let store: CopilotAuthStore = serde_json::from_slice(&content)
+            .map_err(|_| CopilotAuthError::ParseError("Invalid credential data".into()))?;
 
         if store.version >= 2 {
             // v2 多账号格式
@@ -1498,8 +1443,10 @@ impl CopilotAuthManager {
             authenticated_at: None,
         };
 
-        let content = serde_json::to_string_pretty(&store)
-            .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
+        let content = zeroize::Zeroizing::new(
+            serde_json::to_string_pretty(&store)
+                .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?,
+        );
 
         self.write_store_atomic(&content)?;
 
@@ -1514,6 +1461,73 @@ impl CopilotAuthManager {
 
 #[cfg(test)]
 mod tests {
+    fn test_session(root: PathBuf) -> Arc<SecretSession> {
+        SecretSession::from_context(root, crate::secrets::VaultContext::generate().unwrap())
+    }
+
+    fn test_manager(root: PathBuf) -> CopilotAuthManager {
+        CopilotAuthManager::new(test_session(root)).unwrap()
+    }
+
+    #[test]
+    fn constructor_rejects_unreadable_credentials_without_overwriting_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path().to_path_buf());
+        let path = CredentialFile::Copilot.path(&session);
+        std::fs::write(&path, b"lpenc1.invalid").unwrap();
+        assert!(CopilotAuthManager::new(session.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"lpenc1.invalid");
+        CredentialFile::Copilot
+            .write(&session, b"not valid JSON")
+            .unwrap();
+        assert!(CopilotAuthManager::new(session).is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_restores_registered_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path().to_path_buf());
+        let manager = CopilotAuthManager::new(session.clone()).unwrap();
+        manager.accounts.write().await.insert(
+            "7".into(),
+            GitHubAccountData {
+                github_token: "github-token-canary".into(),
+                user: GitHubUser {
+                    login: "example".into(),
+                    id: 7,
+                    avatar_url: None,
+                },
+                authenticated_at: 1,
+                github_domain: DEFAULT_GITHUB_DOMAIN.into(),
+            },
+        );
+        manager.save_to_disk().await.unwrap();
+        let raw = std::fs::read(CredentialFile::Copilot.path(&session)).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("github-token-canary"));
+        let restored = CopilotAuthManager::new(session).unwrap();
+        assert_eq!(
+            restored
+                .accounts
+                .read()
+                .await
+                .get("7")
+                .unwrap()
+                .github_token,
+            "github-token-canary"
+        );
+    }
+
+    #[test]
+    fn credential_writer_never_persists_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path().to_path_buf());
+        manager
+            .write_store_atomic(r#"{"version":1,"accounts":{},"github_token":"oauth-canary"}"#)
+            .unwrap();
+        let bytes = std::fs::read(CredentialFile::Copilot.path(&manager.secrets)).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("oauth-canary"));
+    }
+
     use super::*;
     use tempfile::tempdir;
 
@@ -1699,7 +1713,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_model_vendor_from_cache() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         {
             let mut default_account_id = manager.default_account_id.write().await;
@@ -1755,7 +1769,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_api_endpoint_returns_cached_value() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         // 手动设置 api_endpoints 缓存
         {
@@ -1773,7 +1787,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_api_endpoint_returns_default_when_not_cached() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         let endpoint = manager.get_api_endpoint("99999").await;
         assert_eq!(endpoint, "https://api.githubcopilot.com");
@@ -1782,7 +1796,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_default_api_endpoint_uses_default_account() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         // 设置默认账号
         {
@@ -1822,7 +1836,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_account_clears_api_endpoint_cache() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         // 添加账号数据
         {
@@ -1869,7 +1883,7 @@ mod tests {
     #[tokio::test]
     async fn test_clear_auth_clears_all_api_endpoint_cache() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         // 添加多个账号的 API endpoint 缓存
         {
@@ -1903,10 +1917,10 @@ mod tests {
     #[tokio::test]
     async fn test_clear_auth_cleans_memory_even_when_file_removal_fails() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         // Create a directory at storage_path so remove_file fails
-        std::fs::create_dir_all(&manager.storage_path).unwrap();
+        std::fs::create_dir_all(CredentialFile::Copilot.path(&manager.secrets)).unwrap();
 
         {
             let mut accounts = manager.accounts.write().await;
@@ -1957,7 +1971,7 @@ mod tests {
     async fn test_get_api_endpoint_cache_hit_skips_fetch() {
         // 缓存命中时应直接返回，不发起网络请求
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         let enterprise_endpoint = "https://copilot-api.enterprise.example.com".to_string();
         {
@@ -1973,7 +1987,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_api_endpoint_returns_default_for_unknown_account() {
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         let endpoint = manager.get_api_endpoint("12345").await;
         assert_eq!(endpoint, copilot_api_base(DEFAULT_GITHUB_DOMAIN));
@@ -1983,7 +1997,7 @@ mod tests {
     async fn test_fetch_and_cache_endpoint_requires_account() {
         // 账号不存在时 fetch_and_cache_endpoint 应返回 AccountNotFound 错误
         let temp_dir = tempdir().unwrap();
-        let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
+        let manager = test_manager(temp_dir.path().to_path_buf());
 
         let result = manager.fetch_and_cache_endpoint("nonexistent").await;
         assert!(result.is_err());

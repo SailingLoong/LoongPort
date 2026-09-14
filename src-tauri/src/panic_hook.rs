@@ -14,11 +14,32 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CRASH_LOG_MAX_SIZE: u64 = 5 * 1024 * 1024;
 const CRASH_LOG_ARCHIVES_TO_KEEP: usize = 2;
 
-static APP_CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+static DIAGNOSTIC_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static CRASH_LOG_LOCK: Mutex<()> = Mutex::new(());
 
-pub fn init_app_config_dir(dir: PathBuf) {
-    let _ = APP_CONFIG_DIR.set(dir);
+pub fn init_app_config_dir(dir: PathBuf) -> Result<(), crate::error::AppError> {
+    let root = diagnostic_root_for(&dir)?;
+    crate::config::ensure_private_directory(&root)?;
+    let _ = DIAGNOSTIC_ROOT.set(root);
+    Ok(())
+}
+
+pub(crate) fn diagnostic_root_for(root: &Path) -> Result<PathBuf, crate::error::AppError> {
+    if !crate::secrets::reset::pending(root)? {
+        return Ok(root.to_owned());
+    }
+    // Resolve once during startup. Both ordinary and panic logging must stay
+    // outside a root whose directory entry belongs to reset recovery.
+    let mut name = root
+        .file_name()
+        .ok_or_else(|| crate::error::AppError::Config("secret.invalid_path".into()))?
+        .to_os_string();
+    name.push(".recovery-diagnostics");
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| crate::error::AppError::Config("secret.invalid_path".into()))?;
+    Ok(parent.join(name))
 }
 
 /// 获取默认应用配置目录（不会 panic）
@@ -28,9 +49,9 @@ fn default_app_config_dir() -> PathBuf {
         .join(crate::config::APP_DIR_NAME)
 }
 
-/// 获取应用配置目录（优先使用初始化时写入的值；不会 panic）
-fn get_app_config_dir() -> PathBuf {
-    APP_CONFIG_DIR
+/// 本进程固定使用的诊断目录；日志读取不触发凭据恢复。
+fn diagnostic_root() -> PathBuf {
+    DIAGNOSTIC_ROOT
         .get()
         .cloned()
         .unwrap_or_else(default_app_config_dir)
@@ -38,7 +59,7 @@ fn get_app_config_dir() -> PathBuf {
 
 /// 获取崩溃日志文件路径
 fn get_crash_log_path() -> PathBuf {
-    get_app_config_dir().join("crash.log")
+    diagnostic_root().join(CRASH_LOG_FILE)
 }
 
 fn rotated_crash_log_path(path: &Path, index: usize) -> PathBuf {
@@ -86,8 +107,29 @@ fn rotate_crash_log_if_needed(path: &Path) -> std::io::Result<()> {
 }
 
 /// 获取日志目录路径
+pub(crate) const LOG_DIRECTORY: &str = "logs";
+pub(crate) const CRASH_LOG_FILE: &str = "crash.log";
+
+pub(crate) fn diagnostic_entries() -> Vec<std::ffi::OsString> {
+    std::iter::once(std::ffi::OsString::from(LOG_DIRECTORY))
+        .chain(std::iter::once(std::ffi::OsString::from(CRASH_LOG_FILE)))
+        .chain(
+            (1..=CRASH_LOG_ARCHIVES_TO_KEEP)
+                .map(|index| std::ffi::OsString::from(format!("{CRASH_LOG_FILE}.{index}"))),
+        )
+        .collect()
+}
+
+pub(crate) fn is_diagnostic_path(relative: &Path) -> bool {
+    relative.components().next().is_some_and(|first| {
+        diagnostic_entries()
+            .iter()
+            .any(|name| name == first.as_os_str())
+    })
+}
+
 pub fn get_log_dir() -> PathBuf {
-    get_app_config_dir().join("logs")
+    diagnostic_root().join(LOG_DIRECTORY)
 }
 
 /// 安全获取环境信息（不会 panic）

@@ -113,18 +113,20 @@ pub struct Report {
 pub(crate) fn configured_service_origins(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<String>, AppError> {
-    let mut origins: Vec<String> = crate::relay::creds::list(conn)?
-        .into_iter()
-        .map(|row| row.site_origin)
-        .collect();
-    origins.extend(
-        crate::vendor::creds::list(conn)?
-            .into_iter()
-            .filter_map(|row| {
-                crate::vendor::Vendor::from_id(&row.vendor_id)
-                    .map(|vendor| crate::vendor::builtin_login_url(vendor).to_string())
-            }),
-    );
+    let mut relay_stmt =
+        conn.prepare("SELECT site_origin FROM loongport_relay ORDER BY sort_index,id")?;
+    let mut origins = relay_stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut vendor_stmt =
+        conn.prepare("SELECT vendor_id FROM loongport_vendor ORDER BY sort_index,id")?;
+    let vendors = vendor_stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    origins.extend(vendors.into_iter().filter_map(|id| {
+        crate::vendor::Vendor::from_id(&id)
+            .map(|vendor| crate::vendor::builtin_login_url(vendor).to_string())
+    }));
     Ok(origins)
 }
 
@@ -204,6 +206,7 @@ mod tests {
     #[test]
     fn service_projection_counts_vendor_accounts_once_regardless_of_plans() {
         let db = crate::database::Database::memory().unwrap();
+        let vault = db.secrets.read().unwrap();
         let conn = db.conn.lock().unwrap();
         crate::relay::creds::save_site(
             &conn,
@@ -218,7 +221,21 @@ mod tests {
             ("opencode", "example-c"),
             ("bigmodel", "example-d"),
         ] {
-            conn.execute("INSERT INTO loongport_vendor (vendor_id, account_id, auth_token, account_label) VALUES (?1, ?2, 'secret-example', 'private-example')", rusqlite::params![vendor, account]).unwrap();
+            conn.execute("INSERT INTO loongport_vendor (vendor_id, account_id, auth_token, account_label) VALUES (?1, ?2, '', 'private-example')", rusqlite::params![vendor, account]).unwrap();
+            let id = conn.last_insert_rowid();
+            let encrypted = crate::secrets::inventory::seal_db(
+                &vault,
+                "loongport_vendor",
+                "auth_token",
+                &[&id.to_string()],
+                "secret-example",
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE loongport_vendor SET auth_token=?1 WHERE id=?2",
+                rusqlite::params![encrypted, id],
+            )
+            .unwrap();
         }
         let origins = configured_service_origins(&conn).unwrap();
         let report = build_report("example-install".into(), "1.0".into(), &origins);

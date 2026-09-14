@@ -29,6 +29,7 @@ mod dao;
 pub(crate) mod loongport_schema;
 mod migration;
 mod schema;
+pub(crate) mod vault;
 
 #[cfg(test)]
 mod tests;
@@ -87,7 +88,25 @@ pub(crate) use lock_conn;
 /// 使用 Mutex 包装 Connection 以支持在多线程环境（如 Tauri State）中共享。
 /// rusqlite::Connection 本身不是 Sync 的，因此需要这层包装。
 pub struct Database {
-    pub(crate) conn: Mutex<Connection>,
+    pub(crate) conn: ConnectionMutex,
+    pub(crate) secrets: std::sync::Arc<crate::secrets::session::SecretSession>,
+}
+
+/// Serializes SQLite access and denies business operations after an interrupted
+/// credential transition, including DAOs that do not read encrypted columns.
+pub(crate) struct ConnectionMutex {
+    inner: Mutex<Connection>,
+    secrets: std::sync::Arc<crate::SecretSession>,
+}
+impl ConnectionMutex {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, AppError> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|_| AppError::Database("Database lock unavailable".into()))?;
+        self.secrets.ensure_available()?;
+        Ok(conn)
+    }
 }
 
 fn register_db_change_hook(conn: &Connection) -> Result<(), AppError> {
@@ -125,19 +144,45 @@ fn configure_wal_mode(conn: &Connection) -> Result<(), AppError> {
 }
 
 impl Database {
+    pub(crate) fn from_connection(
+        conn: Connection,
+        secrets: std::sync::Arc<crate::SecretSession>,
+    ) -> Self {
+        Self {
+            conn: ConnectionMutex {
+                inner: Mutex::new(conn),
+                secrets: secrets.clone(),
+            },
+            secrets,
+        }
+    }
+
+    /// Opaque credential context for adapters sharing this database's lifecycle.
+    pub fn secret_session(&self) -> &crate::secrets::session::SecretSession {
+        &self.secrets
+    }
+
     /// 初始化数据库连接并创建表
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
-        let db_path = get_app_config_dir().join(crate::config::DB_FILE_NAME);
-        let db_exists = db_path.exists();
+        vault::preflight(&get_app_config_dir().join(crate::config::DB_FILE_NAME))?;
+        let secrets = crate::secrets::session::SecretSession::open(
+            &get_app_config_dir(),
+            &crate::secrets::key_store::SystemKeyStore,
+            None,
+        )?;
+        Self::init_with_secrets(secrets)
+    }
 
-        // 确保父目录存在
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-
-        let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
+    pub fn init_with_secrets(
+        secrets: std::sync::Arc<crate::secrets::session::SecretSession>,
+    ) -> Result<Self, AppError> {
+        let db_path = secrets.root().join(crate::config::DB_FILE_NAME);
+        let conn = {
+            let context = secrets.read()?;
+            vault::prepare(&db_path, &context)?
+        };
 
         if let Err(e) = configure_wal_mode(&conn) {
             log::warn!("Failed to enable SQLite WAL journal mode, continuing with fallback: {e}");
@@ -146,43 +191,15 @@ impl Database {
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
-        if !db_exists {
-            // For a brand-new database, configure incremental auto-vacuum
-            // before creating any tables so no rebuild is needed later.
-            conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
         register_db_change_hook(&conn)?;
-
-        let db = Self {
-            conn: Mutex::new(conn),
-        };
-        db.create_tables()?;
-
-        // Pre-migration backup: only when upgrading from an existing database
-        {
-            let conn = lock_conn!(db.conn);
-            let version = Self::get_user_version(&conn)?;
-            drop(conn);
-            if version > 0 && version < SCHEMA_VERSION {
-                log::info!(
-                    "Creating pre-migration database backup (v{version} → v{SCHEMA_VERSION})"
-                );
-                if let Err(e) = db.backup_database_file() {
-                    log::warn!("Pre-migration backup failed, continuing migration: {e}");
-                }
-            }
-        }
-
-        db.apply_schema_migrations()?;
-        // LoongPort 自己那套 —— **在上游之后跑**：我们的表可能引用上游的表，
-        // 反之不会（上游不知道我们存在）。它用自己的版本号，不碰 `user_version`。
-        {
-            let conn = lock_conn!(db.conn);
-            loongport_schema::apply(&conn)?;
-        }
+        let db = Self::from_connection(conn, secrets);
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
+        }
+        // auto-vacuum 迁移会对有表的库执行一次 VACUUM；Windows 上 VACUUM 以改名
+        // 重建数据库文件，会丢掉收紧过的 DACL——这里补一次收紧（幂等）。
+        if let Err(e) = crate::config::ensure_private_file(&db_path) {
+            log::warn!("Failed to re-restrict database file after auto-vacuum: {e}");
         }
         db.ensure_model_pricing_seeded()?;
         if let Err(e) = crate::services::model_pricing::sync_local_model_pricing(&db) {
@@ -218,7 +235,8 @@ impl Database {
         if !db_path.exists() {
             return Ok(None);
         }
-        let conn = Connection::open(db_path).map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| AppError::Database(e.to_string()))?;
         let version = Self::get_user_version(&conn)?;
         Ok((version > SCHEMA_VERSION).then_some(version))
     }
@@ -234,9 +252,7 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         register_db_change_hook(&conn)?;
 
-        let db = Self {
-            conn: Mutex::new(conn),
-        };
+        let db = Self::from_connection(conn, crate::secrets::session::SecretSession::ephemeral()?);
         db.create_tables()?;
         // 与 `init` / 导入路径一致地把 LoongPort 的版本号 stamp 上。
         //
@@ -244,8 +260,10 @@ impl Database {
         // 不存在的形态，等于测试保真度有个缺口：将来加 v1→v2 的迁移时，单测覆盖不到
         // 「已经是最新形态的表又被迁一次」这条真实路径。
         {
+            let context = db.secrets.read()?;
             let conn = lock_conn!(db.conn);
             loongport_schema::apply(&conn)?;
+            vault::stamp(&conn, &context)?;
         }
         db.ensure_model_pricing_seeded()?;
 

@@ -3008,7 +3008,7 @@ mod tests {
         // CODEX_REPLAY_DISK=1 时用临时 HOME 下的磁盘库：逐行 autocommit 的
         // 主要成本是磁盘 journal fsync，内存库测不出真实写库开销。
         let db = if std::env::var("CODEX_REPLAY_DISK").is_ok() {
-            Database::init()?
+            crate::secrets::testing::initialize_database()?
         } else {
             Database::memory()?
         };

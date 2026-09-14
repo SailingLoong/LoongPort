@@ -532,7 +532,8 @@ mod tests {
     fn syncing_prompts_skips_apps_without_prompt_files() {
         let state = crate::store::AppState::new(std::sync::Arc::new(
             crate::database::Database::memory().expect("create in-memory database"),
-        ));
+        ))
+        .unwrap();
 
         super::PromptService::sync_to_live(&state, crate::app_config::AppType::CodexImage)
             .expect("生图栏没有提示词文件，该是 Ok 而不是失败");
@@ -597,7 +598,8 @@ mod pi_prompt_tests {
         let _agent = TestAgentDir::new();
         let state = AppState::new(Arc::new(
             Database::memory().expect("create in-memory database"),
-        ));
+        ))
+        .unwrap();
         state
             .db
             .save_prompt(AppType::Pi.as_str(), &prompt(true))
@@ -635,7 +637,8 @@ mod pi_prompt_tests {
         let _agent = TestAgentDir::new();
         let state = AppState::new(Arc::new(
             Database::memory().expect("create in-memory database"),
-        ));
+        ))
+        .unwrap();
         state
             .db
             .save_prompt(AppType::Pi.as_str(), &prompt(false))
@@ -658,7 +661,8 @@ mod pi_prompt_tests {
         let _agent = TestAgentDir::new();
         let state = AppState::new(Arc::new(
             Database::memory().expect("create in-memory database"),
-        ));
+        ))
+        .unwrap();
         let first = prompt(false);
         let mut duplicate = first.clone();
         duplicate.id = "duplicate-prompt".to_string();
@@ -698,7 +702,8 @@ mod pi_prompt_tests {
         let _agent = TestAgentDir::new();
         let state = AppState::new(Arc::new(
             Database::memory().expect("create in-memory database"),
-        ));
+        ))
+        .unwrap();
         let previous = prompt(false);
         state
             .db

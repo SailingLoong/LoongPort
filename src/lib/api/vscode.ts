@@ -76,9 +76,10 @@ export const vscodeApi = {
     });
   },
 
-  async importConfigFromFile(filePath: string) {
+  async importConfigFromFile(filePath: string, password?: string) {
     return await invoke("import_config_from_file", {
       filePath,
+      password,
     });
   },
 

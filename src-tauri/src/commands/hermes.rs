@@ -72,10 +72,12 @@ pub fn get_hermes_memory_limits() -> Result<hermes_config::HermesMemoryLimits, S
 
 #[tauri::command]
 pub fn set_hermes_memory_enabled(
+    state: tauri::State<'_, AppState>,
     kind: hermes_config::MemoryKind,
     enabled: bool,
 ) -> Result<hermes_config::HermesWriteOutcome, String> {
-    hermes_config::set_memory_enabled(kind, enabled).map_err(|e| e.to_string())
+    hermes_config::set_memory_enabled(state.db.secret_session(), kind, enabled)
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================

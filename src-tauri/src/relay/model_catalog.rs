@@ -174,11 +174,12 @@ where
 {
     use futures::StreamExt;
     let relays = {
+        let vault = db.secrets.read()?;
         let conn = db
             .conn
             .lock()
             .map_err(|error| AppError::Database(error.to_string()))?;
-        super::creds::list(&conn)?
+        super::creds::list(&conn, &vault)?
     };
     let mut targets = Vec::new();
     for app in provision::model_catalog_apps() {

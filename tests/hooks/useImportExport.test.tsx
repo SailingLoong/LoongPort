@@ -48,6 +48,27 @@ afterEach(() => {
 });
 
 describe("useImportExport Hook", () => {
+  it("submits the explicit backup password and uses the backend projection result", async () => {
+    openFileDialogMock.mockResolvedValue("/tmp/portable.sql");
+    importConfigMock.mockResolvedValue({
+      success: true,
+      warning: "Projection needs attention",
+    });
+    const { result } = renderHook(() => useImportExport());
+    await act(async () => {
+      await result.current.selectImportFile();
+    });
+    await act(async () => {
+      await result.current.importConfig("backup password");
+    });
+    expect(importConfigMock).toHaveBeenCalledWith(
+      "/tmp/portable.sql",
+      "backup password",
+    );
+    expect(result.current.status).toBe("partial-success");
+    expect(syncCurrentProvidersLiveMock).not.toHaveBeenCalled();
+  });
+
   it("should update state after successfully selecting file", async () => {
     openFileDialogMock.mockResolvedValue("/path/config.json");
     const { result } = renderHook(() => useImportExport());

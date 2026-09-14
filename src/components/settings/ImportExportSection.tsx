@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -8,6 +8,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useTranslation } from "react-i18next";
 import type { ImportStatus } from "@/hooks/useImportExport";
 
@@ -18,7 +20,7 @@ interface ImportExportSectionProps {
   backupId: string | null;
   isImporting: boolean;
   onSelectFile: () => Promise<void>;
-  onImport: () => Promise<void>;
+  onImport: (password?: string) => Promise<void>;
   onExport: () => Promise<void>;
   onClear: () => void;
 }
@@ -35,6 +37,15 @@ export function ImportExportSection({
   onClear,
 }: ImportExportSectionProps) {
   const { t } = useTranslation();
+  const [password, setPassword] = useState("");
+  useEffect(() => setPassword(""), [selectedFile]);
+  const importSelectedFile = async () => {
+    try {
+      await onImport(password || undefined);
+    } finally {
+      setPassword("");
+    }
+  };
 
   const selectedFileName = useMemo(() => {
     if (!selectedFile) return "";
@@ -61,7 +72,7 @@ export function ImportExportSection({
             <Button
               type="button"
               className={`w-full h-auto py-3 px-4 bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700 text-white ${selectedFile && !isImporting ? "flex-col items-start" : "items-center"}`}
-              onClick={!selectedFile ? onSelectFile : onImport}
+              onClick={!selectedFile ? onSelectFile : importSelectedFile}
               disabled={isImporting}
             >
               <div className="flex items-center gap-2 w-full justify-center">
@@ -113,6 +124,24 @@ export function ImportExportSection({
           </div>
         </div>
 
+        {selectedFile && (
+          <div className="space-y-2">
+            <Label htmlFor="backup-protection-password">
+              {t("portableBackup.password")}
+            </Label>
+            <Input
+              id="backup-protection-password"
+              type="password"
+              autoComplete="off"
+              value={password}
+              disabled={isImporting}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+            <p className="text-sm text-muted-foreground">
+              {t("portableBackup.importNotice")}
+            </p>
+          </div>
+        )}
         <ImportStatusMessage
           status={status}
           errorMessage={errorMessage}

@@ -174,6 +174,7 @@ fn convert_from_hermes_format(id: &str, spec: &Value) -> Result<Value, AppError>
 /// 3. Set `enabled: true`
 /// 4. Write back
 pub fn sync_single_server_to_hermes(
+    session: &crate::SecretSession,
     _config: &MultiAppConfig,
     id: &str,
     server_spec: &Value,
@@ -185,7 +186,7 @@ pub fn sync_single_server_to_hermes(
     let hermes_spec = convert_to_hermes_format(server_spec)?;
     let id_owned = id.to_string();
 
-    hermes_config::update_mcp_servers_yaml(|servers| {
+    hermes_config::update_mcp_servers_yaml(session, |servers| {
         let id_yaml = serde_yaml::Value::String(id_owned.clone());
 
         let merged_json = if let Some(existing_yaml) = servers.get(&id_yaml) {
@@ -233,13 +234,13 @@ fn merge_hermes_spec(existing: &Value, new_spec: &Value) -> Value {
 }
 
 /// Remove a single MCP server from Hermes live config
-pub fn remove_server_from_hermes(id: &str) -> Result<(), AppError> {
+pub fn remove_server_from_hermes(session: &crate::SecretSession, id: &str) -> Result<(), AppError> {
     if !should_sync_hermes_mcp() {
         return Ok(());
     }
 
     let id_owned = id.to_string();
-    hermes_config::update_mcp_servers_yaml(|servers| {
+    hermes_config::update_mcp_servers_yaml(session, |servers| {
         servers.remove(serde_yaml::Value::String(id_owned.clone()));
         Ok(())
     })

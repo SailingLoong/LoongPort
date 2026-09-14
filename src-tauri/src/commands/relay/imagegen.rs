@@ -57,7 +57,7 @@ pub async fn relay_imagegen_generate(
         return Err("prompt 不能为空".into());
     }
     let count = imagegen::validate_count(n.unwrap_or(1))?;
-    let tier = imagegen::load_current_tier()?;
+    let tier = imagegen::load_current_tier(&app_handle.state::<AppState>().db.secrets)?;
     let (images, failed) = imagegen::generate_batch(
         &tier,
         prompt,
@@ -88,7 +88,7 @@ pub fn relay_imagegen_list_images(
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<imagegen::GalleryImage>, String> {
     imagegen::ensure_asset_scope(&app_handle);
-    Ok(imagegen::gallery_images())
+    imagegen::gallery_images()
 }
 
 /// 当前生图存储目录（展示用，`PathBuf::to_string_lossy` 已是平台原生分隔符）。
@@ -110,14 +110,14 @@ pub struct ImagegenOutputDirSwitchResult {
 #[tauri::command]
 pub fn relay_imagegen_get_output_dir() -> Result<ImagegenOutputDir, String> {
     Ok(ImagegenOutputDir {
-        path: imagegen::output_dir().to_string_lossy().to_string(),
+        path: imagegen::output_dir()?.to_string_lossy().to_string(),
     })
 }
 
 /// 更改生图存储目录（绝对路径；`migrate` = 把旧目录里我们生成的图搬过去）。
 ///
 /// 顺序是**先搬迁、验证都过了才写设置** —— 迁移失败时设置不变，目录还在原地，
-/// 用户重试幂等（同名跳过）。写入即生效：两条入口每次都现读 `imagegen::output_dir()`，
+/// 用户重试幂等（同名跳过）。写入即生效：两条入口每次都现读 `imagegen::output_dir()?`，
 /// codex 里的 MCP 不必重启。磁盘根目录与用户主目录拒绝（画廊会退化成无意义扫描）。
 #[tauri::command]
 pub fn relay_imagegen_set_output_dir(
@@ -145,7 +145,7 @@ pub fn relay_imagegen_set_output_dir(
         return Err("不能把整个用户主目录作为存储位置".into());
     }
     let display = canonical.to_string_lossy().to_string();
-    let old = imagegen::output_dir();
+    let old = imagegen::output_dir()?;
     if canonical == old {
         return Ok(ImagegenOutputDirSwitchResult {
             path: display,
@@ -182,7 +182,7 @@ pub async fn relay_imagegen_reveal_image(
     let canonical = target
         .canonicalize()
         .map_err(|e| format!("找不到这张图：{e}"))?;
-    let dir = imagegen::output_dir()
+    let dir = imagegen::output_dir()?
         .canonicalize()
         .map_err(|e| format!("出图目录不存在：{e}"))?;
     if !canonical.starts_with(&dir) {

@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{atomic_write, get_claude_mcp_path};
+use crate::config::{atomic_write_private, get_claude_mcp_path};
 use crate::error::AppError;
 
 /// 需要在 Windows 上用 cmd /c 包装的命令
@@ -116,7 +116,7 @@ fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
     }
     let json =
         serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })?;
-    atomic_write(path, json.as_bytes())
+    atomic_write_private(path, json.as_bytes())
 }
 
 pub fn get_mcp_status() -> Result<McpStatus, AppError> {
@@ -407,6 +407,38 @@ pub fn set_mcp_servers_map(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_mcp_write_restricts_credential_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".claude.json");
+        fs::write(&path, "{}").expect("seed Claude MCP config");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("set permissive fixture mode");
+
+        write_json_value(
+            &path,
+            &json!({
+                "mcpServers": {
+                    "example": {
+                        "command": "example-command",
+                        "env": { "EXAMPLE_TOKEN": "test-token" }
+                    }
+                }
+            }),
+        )
+        .expect("write Claude MCP config");
+
+        let mode = fs::metadata(&path)
+            .expect("read MCP metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     /// 测试 Windows 命令包装功能
     /// 由于使用条件编译，在非 Windows 平台上测试的是空函数

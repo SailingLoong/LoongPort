@@ -24,6 +24,10 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::AppError;
+use crate::secrets::{
+    inventory::{open_db, seal_db},
+    VaultContext,
+};
 use crate::vendor::{Vendor, VendorAccount};
 
 /// 一行「厂商 × 账号」。
@@ -45,8 +49,8 @@ pub struct VendorRow {
 const SELECT_COLS: &str = "id, vendor_id, account_id, account_label, login_identifier,
      auth_token, api_key, sort_index";
 
-fn row_to_vendor(row: &rusqlite::Row<'_>) -> rusqlite::Result<VendorRow> {
-    Ok(VendorRow {
+fn row_to_vendor(row: &rusqlite::Row<'_>, vault: &VaultContext) -> Result<VendorRow, AppError> {
+    let mut account = VendorRow {
         id: row.get(0)?,
         vendor_id: row.get(1)?,
         account_id: row.get(2)?,
@@ -55,7 +59,23 @@ fn row_to_vendor(row: &rusqlite::Row<'_>) -> rusqlite::Result<VendorRow> {
         auth_token: row.get(5)?,
         api_key: row.get(6)?,
         sort_index: row.get(7)?,
-    })
+    };
+    let id = account.id.to_string();
+    account.auth_token = open_db(
+        vault,
+        "loongport_vendor",
+        "auth_token",
+        &[&id],
+        &account.auth_token,
+    )?;
+    account.api_key = open_db(
+        vault,
+        "loongport_vendor",
+        "api_key",
+        &[&id],
+        &account.api_key,
+    )?;
+    Ok(account)
 }
 
 /// 建表 + 索引。
@@ -106,31 +126,36 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
-pub fn list(conn: &Connection) -> Result<Vec<VendorRow>, AppError> {
+pub fn list(conn: &Connection, vault: &VaultContext) -> Result<Vec<VendorRow>, AppError> {
     let sql = format!("SELECT {SELECT_COLS} FROM loongport_vendor ORDER BY sort_index, id");
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| AppError::Database(format!("准备查询失败: {e}")))?;
     let rows = stmt
-        .query_map([], row_to_vendor)
+        .query_map([], |row| Ok(row_to_vendor(row, vault)))
         .map_err(|e| AppError::Database(format!("查询 vendor 列表失败: {e}")))?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.map_err(|e| AppError::Database(format!("读取 vendor 行失败: {e}")))?);
+        out.push(r??);
     }
     Ok(out)
 }
 
-pub fn get(conn: &Connection, row_id: i64) -> Result<Option<VendorRow>, AppError> {
+pub fn get(
+    conn: &Connection,
+    vault: &VaultContext,
+    row_id: i64,
+) -> Result<Option<VendorRow>, AppError> {
     let sql = format!("SELECT {SELECT_COLS} FROM loongport_vendor WHERE id = ?1");
-    conn.query_row(&sql, params![row_id], row_to_vendor)
-        .optional()
-        .map_err(|e| AppError::Database(format!("查询 vendor 行失败: {e}")))
+    conn.query_row(&sql, params![row_id], |row| Ok(row_to_vendor(row, vault)))
+        .optional()?
+        .transpose()
 }
 
 /// 存一个账号（登录成功后调）。同 `(vendor_id, account_id)` 已存在则**更新**。
 pub fn save_account(
     conn: &Connection,
+    vault: &VaultContext,
     vendor: Vendor,
     token: &str,
     acct: &VendorAccount,
@@ -140,53 +165,51 @@ pub fn save_account(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let existing: Option<i64> = conn
+    let transaction = conn.unchecked_transaction()?;
+    let existing: Option<i64> = transaction
         .query_row(
             "SELECT id FROM loongport_vendor WHERE vendor_id = ?1 AND account_id = ?2",
             params![vendor.vendor_id(), &acct.account_id],
-            |r| r.get(0),
+            |row| row.get(0),
         )
-        .optional()
-        .map_err(|e| AppError::Database(format!("查询已有账号失败: {e}")))?;
-
+        .optional()?;
     let id = match existing {
-        Some(id) => {
-            conn.execute(
-                "UPDATE loongport_vendor
-                 SET auth_token = ?1, account_label = ?2, login_identifier = ?3, updated_at = ?4
-                 WHERE id = ?5",
-                params![token, &acct.label, &acct.login_identifier, now, id],
-            )
-            .map_err(|e| AppError::Database(format!("更新账号失败: {e}")))?;
-            id
-        }
+        Some(id) => id,
         None => {
-            conn.execute(
-                "INSERT INTO loongport_vendor
-                    (vendor_id, account_id, account_label, login_identifier,
-                     auth_token, sort_index, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    vendor.vendor_id(),
-                    &acct.account_id,
-                    &acct.label,
-                    &acct.login_identifier,
-                    token,
-                    now,
-                    now
-                ],
-            )
-            .map_err(|e| AppError::Database(format!("保存账号失败: {e}")))?;
-            conn.last_insert_rowid()
+            transaction.execute("INSERT INTO loongport_vendor (vendor_id, account_id, sort_index, updated_at) VALUES (?1,?2,?3,?3)", params![vendor.vendor_id(), &acct.account_id, now])?;
+            transaction.last_insert_rowid()
         }
     };
+    let encrypted = seal_db(
+        vault,
+        "loongport_vendor",
+        "auth_token",
+        &[&id.to_string()],
+        token,
+    )?;
+    transaction.execute("UPDATE loongport_vendor SET auth_token=?1,account_label=?2,login_identifier=?3,updated_at=?4 WHERE id=?5", params![encrypted, &acct.label, &acct.login_identifier, now, id])?;
+    transaction.commit()?;
     Ok(id)
 }
 
-pub fn set_api_key(conn: &Connection, row_id: i64, api_key: &str) -> Result<(), AppError> {
+pub fn set_api_key(
+    conn: &Connection,
+    vault: &VaultContext,
+    row_id: i64,
+    api_key: &str,
+) -> Result<(), AppError> {
     conn.execute(
         "UPDATE loongport_vendor SET api_key = ?1 WHERE id = ?2",
-        params![api_key, row_id],
+        params![
+            seal_db(
+                vault,
+                "loongport_vendor",
+                "api_key",
+                &[&row_id.to_string()],
+                api_key
+            )?,
+            row_id
+        ],
     )
     .map_err(|e| AppError::Database(format!("保存密钥失败: {e}")))?;
     Ok(())
@@ -249,6 +272,69 @@ mod tests {
         conn
     }
 
+    #[test]
+    fn encrypted_vendor_insert_rolls_back_allocated_identity_if_update_fails() {
+        let conn = setup();
+        let vault = VaultContext::generate().unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_credential BEFORE UPDATE OF auth_token ON loongport_vendor BEGIN SELECT RAISE(ABORT, 'reject update'); END;").unwrap();
+        assert!(save_account(&conn, &vault, Vendor::DeepSeek, "canary", &acct("one")).is_err());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM loongport_vendor", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn secret_vendor_storage_roundtrips_without_plaintext() {
+        let conn = setup();
+        let _vault = VaultContext::generate().unwrap();
+        let id = save_account(
+            &conn,
+            &_vault,
+            Vendor::DeepSeek,
+            "vendor-auth-canary",
+            &acct("one"),
+        )
+        .unwrap();
+        set_api_key(&conn, &_vault, id, "vendor-api-canary").unwrap();
+        assert_eq!(
+            get(&conn, &_vault, id).unwrap().unwrap().api_key,
+            "vendor-api-canary"
+        );
+        let raw: (String, String) = conn
+            .query_row(
+                "SELECT auth_token,api_key FROM loongport_vendor WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(!raw.0.contains("canary"));
+        assert!(!raw.1.contains("canary"));
+    }
+
+    #[test]
+    fn encrypted_vendor_credentials_reject_plaintext_and_field_transplant() {
+        let conn = setup();
+        let vault = VaultContext::generate().unwrap();
+        let id =
+            save_account(&conn, &vault, Vendor::DeepSeek, "auth-secret", &acct("one")).unwrap();
+        set_api_key(&conn, &vault, id, "api-secret").unwrap();
+        conn.execute(
+            "UPDATE loongport_vendor SET api_key=auth_token WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+        assert!(get(&conn, &vault, id).is_err());
+        conn.execute(
+            "UPDATE loongport_vendor SET api_key='plaintext' WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+        assert!(list(&conn, &vault).is_err());
+    }
+
     fn acct(id: &str) -> VendorAccount {
         VendorAccount {
             account_id: id.to_string(),
@@ -260,14 +346,18 @@ mod tests {
     #[test]
     fn saving_the_same_account_twice_updates_one_row() {
         let conn = setup();
-        let first =
-            save_account(&conn, Vendor::DeepSeek, "tok-1", &acct("uuid-a")).expect("第一次");
-        let second =
-            save_account(&conn, Vendor::DeepSeek, "tok-2", &acct("uuid-a")).expect("第二次");
+        let _vault = VaultContext::generate().unwrap();
+        let first = save_account(&conn, &_vault, Vendor::DeepSeek, "tok-1", &acct("uuid-a"))
+            .expect("第一次");
+        let second = save_account(&conn, &_vault, Vendor::DeepSeek, "tok-2", &acct("uuid-a"))
+            .expect("第二次");
         assert_eq!(first, second, "同一个账号重登要合并成一行，不是新建");
-        assert_eq!(list(&conn).expect("列表").len(), 1);
+        assert_eq!(list(&conn, &_vault).expect("列表").len(), 1);
         assert_eq!(
-            get(&conn, first).expect("取").expect("有").auth_token,
+            get(&conn, &_vault, first)
+                .expect("取")
+                .expect("有")
+                .auth_token,
             "tok-2"
         );
     }
@@ -275,21 +365,24 @@ mod tests {
     #[test]
     fn two_accounts_of_the_same_vendor_are_separate_rows() {
         let conn = setup();
-        let a = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
-        let b = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
+        let _vault = VaultContext::generate().unwrap();
+        let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
+        let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
         assert_ne!(a, b, "同一厂商的两个账号是两行");
-        assert_eq!(list(&conn).expect("列表").len(), 2);
+        assert_eq!(list(&conn, &_vault).expect("列表").len(), 2);
     }
 
     #[test]
     fn clearing_the_token_keeps_the_api_key() {
         let conn = setup();
-        let id = save_account(&conn, Vendor::DeepSeek, "tok", &acct("uuid-a")).expect("存");
-        set_api_key(&conn, id, "sk-plaintext").expect("存 key");
+        let _vault = VaultContext::generate().unwrap();
+        let id =
+            save_account(&conn, &_vault, Vendor::DeepSeek, "tok", &acct("uuid-a")).expect("存");
+        set_api_key(&conn, &_vault, id, "sk-plaintext").expect("存 key");
 
         clear_token(&conn, id).expect("清 token");
 
-        let row = get(&conn, id).expect("取").expect("有");
+        let row = get(&conn, &_vault, id).expect("取").expect("有");
         assert!(row.auth_token.is_empty(), "token 要清掉");
         assert_eq!(
             row.api_key, "sk-plaintext",
@@ -300,10 +393,15 @@ mod tests {
     #[test]
     fn clearing_the_token_keeps_the_login_identifier() {
         let conn = setup();
-        let id = save_account(&conn, Vendor::DeepSeek, "tok", &acct("uuid-a")).expect("存");
+        let _vault = VaultContext::generate().unwrap();
+        let id =
+            save_account(&conn, &_vault, Vendor::DeepSeek, "tok", &acct("uuid-a")).expect("存");
         clear_token(&conn, id).expect("清");
         assert_eq!(
-            get(&conn, id).expect("取").expect("有").login_identifier,
+            get(&conn, &_vault, id)
+                .expect("取")
+                .expect("有")
+                .login_identifier,
             "13800000000",
             "清 token 正是重登前那一步，清掉预填值等于让用户重输一遍手机号"
         );
@@ -312,8 +410,9 @@ mod tests {
     #[test]
     fn list_is_ordered_by_sort_index() {
         let conn = setup();
-        let a = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
-        let b = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
+        let _vault = VaultContext::generate().unwrap();
+        let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
+        let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
         conn.execute(
             "UPDATE loongport_vendor SET sort_index = 5 WHERE id = ?1",
             [a],
@@ -324,20 +423,29 @@ mod tests {
             [b],
         )
         .expect("改序");
-        let ids: Vec<i64> = list(&conn).expect("列表").iter().map(|r| r.id).collect();
+        let ids: Vec<i64> = list(&conn, &_vault)
+            .expect("列表")
+            .iter()
+            .map(|r| r.id)
+            .collect();
         assert_eq!(ids, vec![b, a]);
     }
 
     #[test]
     fn reorder_writes_the_dragged_order() {
         let conn = setup();
-        let a = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
-        let b = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
-        let c = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-c")).expect("c");
+        let _vault = VaultContext::generate().unwrap();
+        let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
+        let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
+        let c = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-c")).expect("c");
 
         reorder(&conn, &[c, a, b]).expect("排序");
 
-        let ids: Vec<i64> = list(&conn).expect("列表").iter().map(|r| r.id).collect();
+        let ids: Vec<i64> = list(&conn, &_vault)
+            .expect("列表")
+            .iter()
+            .map(|r| r.id)
+            .collect();
         assert_eq!(ids, vec![c, a, b], "list 的顺序要跟着 sort_index 走");
     }
 
@@ -346,46 +454,59 @@ mod tests {
     #[test]
     fn reorder_ignores_ids_that_are_not_in_this_table() {
         let conn = setup();
-        let a = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
-        let b = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
+        let _vault = VaultContext::generate().unwrap();
+        let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
+        let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
 
         reorder(&conn, &[9999, b, 8888, a]).expect("不该报错");
 
-        let ids: Vec<i64> = list(&conn).expect("列表").iter().map(|r| r.id).collect();
+        let ids: Vec<i64> = list(&conn, &_vault)
+            .expect("列表")
+            .iter()
+            .map(|r| r.id)
+            .collect();
         assert_eq!(ids, vec![b, a]);
     }
 
     #[test]
     fn removing_a_row_leaves_the_others() {
         let conn = setup();
-        let a = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
-        let b = save_account(&conn, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
+        let _vault = VaultContext::generate().unwrap();
+        let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
+        let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
         remove(&conn, a).expect("删");
-        let ids: Vec<i64> = list(&conn).expect("列表").iter().map(|r| r.id).collect();
+        let ids: Vec<i64> = list(&conn, &_vault)
+            .expect("列表")
+            .iter()
+            .map(|r| r.id)
+            .collect();
         assert_eq!(ids, vec![b]);
     }
 
     #[test]
     fn create_table_is_idempotent() {
         let conn = setup();
+        let _vault = VaultContext::generate().unwrap();
         create_table(&conn).expect("再建一次不该报错");
     }
 
     /// 老库（v20，没有本表）升级后必须有这张表且可写。
     #[test]
     fn an_upgraded_database_gets_the_table() {
+        let _vault = VaultContext::generate().unwrap();
         let conn = Connection::open_in_memory().expect("内存库");
         // 模拟 v20：只建 relay 的表，不建 vendor 的
         crate::relay::creds::create_table(&conn).expect("relay 表");
         assert!(
-            list(&conn).is_err(),
+            list(&conn, &_vault).is_err(),
             "前提：升级前本表不存在（否则这条闸没有判别力）"
         );
 
         create_table(&conn).expect("迁移建表");
-        assert!(list(&conn).is_ok(), "迁移后必须可读");
+        assert!(list(&conn, &_vault).is_ok(), "迁移后必须可读");
         save_account(
             &conn,
+            &_vault,
             Vendor::DeepSeek,
             "t",
             &VendorAccount {

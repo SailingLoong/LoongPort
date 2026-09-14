@@ -26,8 +26,8 @@
 //!   拿 `/v1` 根 —— 唯一数据源，别在这里重写）
 //! - 配置生成：[`provision::settings_config_for`]（复用上游 deeplink 构造器，
 //!   全部 CLI 一份形状）
-//! - 落盘：[`write_live_snapshot`](crate::services::provider::write_live_snapshot)
-//!   （GUI 切档走的同一批文件级写入函数）
+//! - 落盘：[`write_standalone_live_snapshot`](crate::services::provider::write_standalone_live_snapshot)
+//!   （与 GUI 切档共用 app 分派，但不创建 LoongPort 自有备份）
 //!
 //! ## 异步边界
 //!
@@ -232,7 +232,7 @@ fn write_config(prepared: Prepared) -> Result<(), String> {
         settings,
         Some(site_origin.clone()),
     );
-    crate::services::provider::write_live_snapshot(&app, &provider)
+    crate::services::provider::write_standalone_live_snapshot(&app, &provider)
         .map_err(|e| format!("写入配置失败: {e}"))?;
 
     println!();
@@ -294,6 +294,7 @@ fn verify_hint(app: &AppType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn arg(list: &[&str]) -> Result<AddSiteOptions, String> {
         let owned: Vec<String> = list.iter().map(|s| s.to_string()).collect();
@@ -368,5 +369,121 @@ mod tests {
         ])
         .unwrap_err();
         assert!(image.contains("生图"), "{image}");
+    }
+
+    #[test]
+    #[serial]
+    fn standalone_writer_supports_every_cli_app_without_a_loongport_vault() {
+        struct TestHome {
+            directory: tempfile::TempDir,
+            previous_test_home: Option<std::ffi::OsString>,
+            previous_hermes_home: Option<std::ffi::OsString>,
+        }
+
+        impl TestHome {
+            fn new() -> Self {
+                let directory = tempfile::tempdir().unwrap();
+                let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+                let previous_hermes_home = std::env::var_os("HERMES_HOME");
+                std::env::set_var("CC_SWITCH_TEST_HOME", directory.path());
+                std::env::set_var("HERMES_HOME", directory.path().join(".hermes"));
+                Self {
+                    directory,
+                    previous_test_home,
+                    previous_hermes_home,
+                }
+            }
+        }
+
+        impl Drop for TestHome {
+            fn drop(&mut self) {
+                match self.previous_test_home.take() {
+                    Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                }
+                match self.previous_hermes_home.take() {
+                    Some(value) => std::env::set_var("HERMES_HOME", value),
+                    None => std::env::remove_var("HERMES_HOME"),
+                }
+            }
+        }
+
+        let home = TestHome::new();
+        let app_root = crate::config::get_app_config_dir();
+        assert!(!app_root.exists());
+
+        for path in [
+            crate::codex_config::get_codex_auth_path(),
+            crate::codex_config::get_codex_config_path(),
+            crate::config::get_claude_settings_path(),
+            crate::gemini_config::get_gemini_env_path(),
+            crate::gemini_config::get_gemini_settings_path(),
+            crate::grok_config::get_grok_config_path(),
+            crate::opencode_config::get_opencode_config_path(),
+            crate::openclaw_config::get_openclaw_config_path(),
+            crate::hermes_config::get_hermes_config_path(),
+        ] {
+            assert!(
+                path.starts_with(home.directory.path()),
+                "test output escaped its temporary home: {}",
+                path.display()
+            );
+        }
+
+        for (path, contents) in [
+            (
+                crate::openclaw_config::get_openclaw_config_path(),
+                "{ models: { mode: 'merge', providers: {} } }\n",
+            ),
+            (
+                crate::hermes_config::get_hermes_config_path(),
+                "custom_providers: []\n",
+            ),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+
+        for app in [
+            AppType::Codex,
+            AppType::Claude,
+            AppType::Gemini,
+            AppType::GrokBuild,
+            AppType::OpenCode,
+            AppType::OpenClaw,
+            AppType::Hermes,
+        ] {
+            write_config(Prepared {
+                site_origin: "https://relay.example".into(),
+                site_name: "Example Relay".into(),
+                base_url: "https://relay.example/v1".into(),
+                key: "sk-example".into(),
+                app,
+                model: "example-model".into(),
+            })
+            .unwrap();
+        }
+
+        let codex_config = crate::codex_config::get_codex_config_path();
+        assert!(codex_config.exists());
+        assert!(std::fs::read_to_string(codex_config)
+            .unwrap()
+            .contains("sk-example"));
+        assert!(crate::config::get_claude_settings_path().exists());
+        assert!(crate::gemini_config::get_gemini_env_path().exists());
+        assert!(crate::grok_config::get_grok_config_path().exists());
+        assert!(crate::opencode_config::get_opencode_config_path().exists());
+        assert!(crate::openclaw_config::get_openclaw_config_path().exists());
+        assert!(crate::hermes_config::get_hermes_config_path().exists());
+        assert!(crate::openclaw_config::get_provider(CLI_PROVIDER_ID)
+            .unwrap()
+            .is_some());
+        assert!(crate::hermes_config::get_provider(CLI_PROVIDER_ID)
+            .unwrap()
+            .is_some());
+        assert!(
+            !app_root.exists(),
+            "standalone CLI must not create LoongPort state"
+        );
     }
 }

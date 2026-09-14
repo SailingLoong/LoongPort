@@ -218,8 +218,9 @@ fn source_origin(s: &SourceProvider) -> Option<String> {
 /// `api_base_url` 是「归一后的 codex base_url（带 /v1）」（见 `creds.rs` 模块文档），
 /// 与 cc-switch provider 的 base_url 经 `normalize_site_origin` 后可比。
 fn managed_relay_origins(db: &Database) -> Result<HashSet<String>, AppError> {
+    let vault = db.secrets.read()?;
     let conn = db.conn.lock().unwrap();
-    let ops = crate::relay::creds::list(&conn)?;
+    let ops = crate::relay::creds::list(&conn, &vault)?;
     Ok(ops
         .iter()
         .filter_map(|op| crate::relay::sub2api::normalize_site_origin(&op.api_base_url).ok())
@@ -1045,7 +1046,7 @@ mod tests {
 
         let report = {
             let _guard = TestHomeGuard::set(tempfile::tempdir().unwrap().path());
-            execute_import(crate::store::AppState::new(db.clone()), src.path())
+            execute_import(crate::store::AppState::new(db.clone()).unwrap(), src.path())
                 .expect("导入不该失败")
         };
 

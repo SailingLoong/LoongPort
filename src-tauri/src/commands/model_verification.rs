@@ -166,7 +166,7 @@ mod tests {
 
     fn state_with_verifier(verifier: Arc<dyn ActiveVerifier>) -> AppState {
         let db = Arc::new(Database::memory().unwrap());
-        let mut state = AppState::new(db.clone());
+        let mut state = AppState::new(db.clone()).unwrap();
         state.model_verification =
             Arc::new(ModelVerificationCoordinator::with_verifier(db, verifier));
         state

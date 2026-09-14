@@ -416,7 +416,7 @@ pub(crate) fn mark_pricing_after_success<T>(
     result: Result<T, AppError>,
 ) -> Result<T, AppError> {
     let value = result?;
-    with_conn(state, |conn| {
+    with_conn(state, |conn, _vault| {
         creds::mark_pricing_synced(conn, relay_id, synced_at)
     })?;
     Ok(value)
@@ -1466,6 +1466,7 @@ mod tests {
                     }
                 }),
             );
+        crate::relay::discovery::ensure_no_proxy_for_loopback();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind account-mismatch server");
@@ -1597,7 +1598,7 @@ mod tests {
         // 先按旧行为落三栏（等价于升级前 provision 过的存量），再按新分类
         // provision 一次：三个聊天栏的旧投影必须被清掉、生图栏出现新档位。
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         persist_provision_batch(
             &state,
             &site_account,
@@ -1685,7 +1686,7 @@ mod tests {
         );
 
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let summary =
             persist_provision_batch(&state, &site_account, batch).expect("persist projections");
 
@@ -1718,7 +1719,7 @@ mod tests {
         let relay = test_newapi_relay(7);
         let group = test_newapi_group("standard", "sk-first");
         let db = Arc::new(crate::database::Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let first =
             persist_provision_batch(&state, &relay, newapi_batch(&relay, &[group])).unwrap();
         let id = &first.tiers[0].provider_id;
@@ -1751,7 +1752,7 @@ mod tests {
         let relay = test_newapi_relay(7);
         let group = test_newapi_group("standard", "sk-first");
         let db = Arc::new(crate::database::Database::memory().unwrap());
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let first =
             persist_provision_batch(&state, &relay, newapi_batch(&relay, &[group])).unwrap();
         let id = &first.tiers[0].provider_id;
@@ -1805,7 +1806,7 @@ mod tests {
         let site_account = test_newapi_relay(7);
         let first_group = test_newapi_group("vip", "sk-first");
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let first = persist_provision_batch(
             &state,
             &site_account,
@@ -1878,7 +1879,7 @@ mod tests {
         let account_seven = test_newapi_relay(7);
         let account_eight = test_newapi_relay(8);
         let db = Arc::new(crate::database::Database::memory().expect("memory db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         persist_provision_batch(
             &state,
@@ -1970,7 +1971,7 @@ mod tests {
             )
             .expect("install selective write failure");
         }
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let summary = persist_provision_batch(
             &state,
@@ -2037,7 +2038,7 @@ mod tests {
             .expect("seed");
         db.set_current_provider("codex", &stale)
             .expect("set current");
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         // 手工删除通道：当前项必须仍被保护。
         assert!(
@@ -2073,7 +2074,7 @@ mod tests {
             db.save_provider("codex", &p).expect("seed");
         }
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let keep: std::collections::HashSet<(String, String)> =
             [("codex".to_string(), a_kept.clone())]
                 .into_iter()
@@ -2132,7 +2133,7 @@ mod tests {
             db.save_provider(app, &p).expect("seed");
         }
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         // 这次只在 codex 下生成了 kept_id。
         let keep: std::collections::HashSet<(String, String)> =
             [("codex".to_string(), kept_id.clone())]
@@ -2191,7 +2192,7 @@ mod tests {
         db.save_provider("claude", &seeded(&shared_id, "pro池", Some(site)))
             .expect("seed claude");
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         // 这次 provision 只把它落到 codex（因为它的 platform 是 openai）。
         let keep: std::collections::HashSet<(String, String)> =
             [("codex".to_string(), shared_id.clone())]
@@ -2232,7 +2233,7 @@ mod tests {
         db.set_current_provider("codex", &stale_id)
             .expect("set current");
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let removed = prune_stale_tiers(&state, site, Some(1), &std::collections::HashSet::new())
             .expect("prune");
 
@@ -2314,7 +2315,7 @@ mod tests {
         db.set_current_provider("codex", &b_tier)
             .expect("set current");
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         // 以账号 7 的身份问「我名下有在用的吗」—— 答案必须是「没有」。
         assert!(
@@ -2355,7 +2356,7 @@ mod tests {
         db.save_provider("codex", &seeded(&legacy, "旧数据", Some(site)))
             .expect("seed legacy");
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let mut unlogged = purchase_capability_relay(creds::BackendKind::Sub2Api);
         unlogged.site_origin = site.to_string();
         unlogged.account_id = None;
@@ -2413,13 +2414,16 @@ mod tests {
     fn a_provisioned_rate_survives_into_list_relays() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
-        let row_id =
-            with_conn(&state, |conn| creds::save_site(conn, site, "BestAPI", site)).expect("site");
-        with_conn(&state, |conn| {
+        let row_id = with_conn(&state, |conn, _vault| {
+            creds::save_site(conn, site, "BestAPI", site)
+        })
+        .expect("site");
+        with_conn(&state, |conn, _vault| {
             creds::save_credentials(
                 conn,
+                _vault,
                 row_id,
                 creds::AccountIdentity {
                     id: 7,
@@ -2433,7 +2437,7 @@ mod tests {
             )
         })
         .expect("credentials");
-        let site_account = with_conn(&state, |conn| creds::get(conn, row_id))
+        let site_account = with_conn(&state, |conn, _vault| creds::get(conn, _vault, row_id))
             .expect("load")
             .expect("exists");
 
@@ -2477,8 +2481,8 @@ mod tests {
 
     fn pricing_timestamp_state(initial: Option<i64>) -> (AppState, i64) {
         let db = Arc::new(crate::database::Database::memory().expect("init db"));
-        let state = AppState::new(db);
-        let relay_id = with_conn(&state, |conn| {
+        let state = AppState::new(db).unwrap();
+        let relay_id = with_conn(&state, |conn, _vault| {
             creds::save_site_with_backend(
                 conn,
                 "https://pricing.example",
@@ -2489,7 +2493,7 @@ mod tests {
         })
         .unwrap();
         if let Some(initial) = initial {
-            with_conn(&state, |conn| {
+            with_conn(&state, |conn, _vault| {
                 creds::mark_pricing_synced(conn, relay_id, initial)
             })
             .unwrap();
@@ -2503,7 +2507,7 @@ mod tests {
 
         mark_pricing_after_success(&state, relay_id, 456, Ok(())).unwrap();
 
-        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+        let relay = with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))
             .unwrap()
             .unwrap();
         assert_eq!(relay.pricing_synced_at, Some(456));
@@ -2521,7 +2525,7 @@ mod tests {
         );
 
         assert!(result.is_err());
-        let relay = with_conn(&state, |conn| creds::get(conn, relay_id))
+        let relay = with_conn(&state, |conn, _vault| creds::get(conn, _vault, relay_id))
             .unwrap()
             .unwrap();
         assert_eq!(relay.pricing_synced_at, Some(123));

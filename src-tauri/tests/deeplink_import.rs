@@ -16,7 +16,7 @@ fn deeplink_import_claude_provider_persists_to_db() {
     let request = parse_deeplink_url(url).expect("parse deeplink url");
 
     let db = Arc::new(Database::memory().expect("create memory db"));
-    let state = AppState::new(db.clone());
+    let state = AppState::new(db.clone()).unwrap();
 
     let (provider_id, _) = import_provider_from_deeplink(&state, request.clone())
         .expect("import provider from deeplink");
@@ -52,7 +52,7 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
     let request = parse_deeplink_url(url).expect("parse deeplink url");
 
     let db = Arc::new(Database::memory().expect("create memory db"));
-    let state = AppState::new(db.clone());
+    let state = AppState::new(db.clone()).unwrap();
 
     let (provider_id, _) = import_provider_from_deeplink(&state, request.clone())
         .expect("import provider from deeplink");
@@ -142,7 +142,7 @@ fn deeplink_cannot_forge_a_managed_provider_id() {
         let request = parse_deeplink_url(&url).expect("parse deeplink url");
 
         let db = Arc::new(Database::memory().expect("create memory db"));
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
         let (provider_id, _) =
             import_provider_from_deeplink(&state, request).expect("import should succeed");
 

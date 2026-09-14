@@ -42,7 +42,10 @@ mod proxy;
 mod relay;
 /// 异步执行桥：GUI 走 tauri 全局运行时，无 GUI 构建自建 tokio（见模块注释）。
 mod rt;
+mod secrets;
 mod services;
+pub use secrets::key_store::{KeyStore, KeyStoreError};
+pub use secrets::session::SecretSession;
 mod session_manager;
 mod settings;
 mod store;
@@ -94,13 +97,11 @@ pub use services::{
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,
 };
-pub use settings::{update_settings, AppSettings};
+pub use settings::{reload_settings, unlock_settings, update_settings, AppSettings};
 pub use store::AppState;
 
 #[cfg(feature = "gui")]
 use tauri_plugin_deep_link::DeepLinkExt;
-#[cfg(feature = "gui")]
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use std::fmt;
 #[cfg(feature = "gui")]
@@ -442,7 +443,15 @@ fn small_tray_icon() -> Option<Image<'static>> {
 /// 一个转发函数只暴露真正要暴露的东西，`main.rs` 那侧读起来也更清楚
 /// ——「这个二进制有两种启动方式」正好对应这里的两个 `pub fn`。
 pub fn run_imagegen_mcp() -> Result<(), String> {
-    relay::imagegen_mcp::serve().map_err(|error| diagnostics::redact_log_text(&error))
+    let root = config::get_app_config_dir();
+    database::vault::preflight(&root.join(config::DB_FILE_NAME)).map_err(|e| e.to_string())?;
+    let session = secrets::session::SecretSession::open_existing(
+        &root,
+        &secrets::key_store::SystemKeyStore,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    relay::imagegen_mcp::serve(session).map_err(|error| diagnostics::redact_log_text(&error))
 }
 
 /// 启动 MCP server 模式的命令行开关，给 `main.rs` 用。
@@ -451,6 +460,943 @@ pub fn run_imagegen_mcp() -> Result<(), String> {
 /// `args`）与读参数的这一侧（`main.rs` 的分流判断）必须是同一个字符串，
 /// 两处各写一遍字面量迟早分叉，而症状是宿主那边"启动超时"，看不出是拼写问题。
 pub use relay::imagegen_mcp::IMAGEGEN_MCP_FLAG;
+
+#[cfg(feature = "gui")]
+fn initialize_runtime(
+    app: &tauri::AppHandle,
+    session: Arc<secrets::session::SecretSession>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let legacy_allowed = session.migration_pending()?;
+    secrets::migration::prepare_files(&session, legacy_allowed)?;
+    settings::unlock_settings(session.clone())?;
+    let migration_config = if session.legacy_json_pending()? {
+        let original = secrets::files::OwnedFile::registered("config.json")?.read(&session)?;
+        let mut config = crate::app_config::MultiAppConfig::from_legacy_bytes(&original)?;
+        config.import_legacy_companions(&original, session.root())?;
+        Some(config)
+    } else {
+        None
+    };
+
+    let db = Arc::new(crate::database::Database::init_with_secrets(
+        session.clone(),
+    )?);
+    let copilot_auth_manager =
+        crate::proxy::providers::copilot_auth::CopilotAuthManager::new(session.clone())?;
+    let xai_oauth_manager =
+        crate::proxy::providers::xai_oauth_auth::XaiOAuthManager::new(session.clone())?;
+    // 数据库可用后立即应用持久化日志级别，避免后续服务初始化
+    // 继续使用启动阶段的 Info 回退。损坏配置显式 fail-closed 到 Info。
+    match db.get_log_config() {
+        Ok(log_config) => {
+            log::set_max_level(log_config.to_level_filter());
+            log::info!(
+                "已加载日志配置: enabled={}, level={}",
+                log_config.enabled,
+                log_config.level
+            );
+        }
+        Err(e) => {
+            log::set_max_level(log::LevelFilter::Info);
+            log::warn!("读取日志配置失败，已回退到 info: {e}");
+        }
+    }
+
+    // 如果有预加载的配置，执行迁移
+    if let Some(config) = migration_config {
+        db.migrate_from_json(&config)?;
+        let original = secrets::files::OwnedFile::registered("config.json")?;
+        let archive = secrets::files::OwnedFile::registered("config.json.migrated")?;
+        archive.write(&session, &original.read(&session)?)?;
+        crate::init_status::set_migration_success();
+    }
+
+    let app_state = AppState::new(db)?;
+    session.complete_migration()?;
+
+    // 设置 AppHandle 用于代理故障转移时的 UI 更新
+    app_state.proxy_service.set_app_handle(app.clone());
+    app_state.model_verification.attach_app_handle(app.clone());
+
+    // ============================================================
+    // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
+    // ============================================================
+
+    // 1. 初始化默认 Skills 仓库（已有内置检查：表非空则跳过）
+    match app_state.db.init_default_skill_repos() {
+        Ok(count) if count > 0 => {
+            log::info!("✓ Initialized {count} default skill repositories");
+        }
+        Ok(_) => {} // 表非空，静默跳过
+        Err(e) => log::warn!("✗ Failed to initialize default skill repos: {e}"),
+    }
+
+    // 1.1. Skills 统一管理迁移：当数据库迁移到 v3 结构后，自动从各应用目录导入到 SSOT
+    // 触发条件由 schema 迁移设置 settings.skills_ssot_migration_pending = true 控制。
+    match app_state.db.get_setting("skills_ssot_migration_pending") {
+        Ok(Some(flag)) if flag == "true" || flag == "1" => {
+            // 安全保护：如果用户已经有 v3 结构的 Skills 数据，就不要自动清空重建。
+            let has_existing = app_state
+                .db
+                .get_all_installed_skills()
+                .map(|skills| !skills.is_empty())
+                .unwrap_or(false);
+
+            if has_existing {
+                log::info!(
+                            "Detected skills_ssot_migration_pending but skills table not empty; skipping auto import."
+                        );
+                if let Err(error) = app_state
+                    .db
+                    .set_setting("skills_ssot_migration_pending", "false")
+                {
+                    log::warn!(
+                        "{}",
+                        crate::diagnostics::DiagnosticEvent::new(
+                            "startup.skills_migration",
+                            "clear_pending_failed",
+                        )
+                        .field("phase", "skip_existing")
+                        .field_display("error", error)
+                    );
+                }
+            } else {
+                match crate::services::skill::migrate_skills_to_ssot(&app_state.db) {
+                    Ok(count) => {
+                        log::info!("✓ Auto imported {count} skill(s) into SSOT");
+                        if count > 0 {
+                            crate::init_status::set_skills_migration_result(count);
+                        }
+                        if let Err(error) = app_state
+                            .db
+                            .set_setting("skills_ssot_migration_pending", "false")
+                        {
+                            log::warn!(
+                                "{}",
+                                crate::diagnostics::DiagnosticEvent::new(
+                                    "startup.skills_migration",
+                                    "clear_pending_failed",
+                                )
+                                .field("phase", "after_import")
+                                .field_display("error", error)
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("✗ Failed to auto import legacy skills to SSOT: {e}");
+                        crate::init_status::set_skills_migration_error(e.to_string());
+                        // 保留 pending 标志，方便下次启动重试
+                    }
+                }
+            }
+        }
+        Ok(_) => {} // 未开启迁移标志，静默跳过
+        Err(e) => log::warn!("✗ Failed to read skills migration flag: {e}"),
+    }
+
+    // 1.5. 自动导入 live 配置 + seed 官方预设供应商（Claude / Codex / Gemini）
+    //
+    // 先 import 后 seed 是有意为之：先把用户手动配置的 settings.json / auth.json / .env
+    // 落成 "default" provider 设为 current，再追加官方预设（is_current=false）。
+    // 这样用户切到官方预设时，回填机制会保护原 live 配置不丢失。
+    //
+    // 捕获首次运行快照：所有全新装用户都会看到欢迎弹窗介绍 CC Switch 的工作方式。
+    // 读失败时默认不弹，宁可漏弹也不要因为故障打扰用户。
+    let first_run_already_confirmed = crate::settings::get_settings()
+        .first_run_notice_confirmed
+        .unwrap_or(false);
+    let fresh_install_at_startup = app_state.db.is_providers_empty().unwrap_or(false);
+
+    for app_type in crate::app_config::AppType::all().filter(|t| !t.is_additive_mode()) {
+        if !crate::services::provider::should_import_default_config_on_startup(
+            &app_state, &app_type,
+        )
+        .unwrap_or(false)
+        {
+            log::debug!(
+                "○ {} already has providers; live import skipped",
+                app_type.as_str()
+            );
+            continue;
+        }
+
+        match crate::services::provider::import_default_config(&app_state, app_type.clone()) {
+            Ok(true) => log::info!(
+                "✓ Imported live config for {} as default provider",
+                app_type.as_str()
+            ),
+            Ok(false) => log::debug!(
+                "○ {} already has providers; live import skipped",
+                app_type.as_str()
+            ),
+            Err(e) => log::debug!("○ No live config to import for {}: {e}", app_type.as_str()),
+        }
+    }
+
+    match app_state.db.init_default_official_providers() {
+        Ok(count) if count > 0 => {
+            log::info!("✓ Seeded {count} official provider(s)");
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
+    }
+
+    {
+        let db_for_codex_history_migration = app_state.db.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            match crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
+                        &db_for_codex_history_migration,
+                    ) {
+                        Ok(outcome) => {
+                            if let Some(reason) = outcome.skipped_reason {
+                                log::debug!("○ Codex history provider bucket migration skipped: {reason}");
+                            } else {
+                                log::info!(
+                                    "✓ Codex history provider bucket migration completed: sources={}, jsonl_files={}, state_rows={}",
+                                    outcome.source_provider_ids.len(),
+                                    outcome.migrated_jsonl_files,
+                                    outcome.migrated_state_rows
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("✗ Codex history provider bucket migration failed: {e}");
+                        }
+                    }
+
+            match crate::codex_history_migration::maybe_migrate_codex_provider_template_bucket(
+                &db_for_codex_history_migration,
+            ) {
+                Ok(outcome) => {
+                    if let Some(reason) = outcome.skipped_reason {
+                        log::debug!("○ Codex provider template bucket migration skipped: {reason}");
+                    } else if !outcome.migrated_provider_ids.is_empty() {
+                        log::info!(
+                            "✓ Codex provider template bucket migration completed: providers={}",
+                            outcome.migrated_provider_ids.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!("✗ Codex provider template bucket migration failed: {e}");
+                }
+            }
+
+            // 统一会话开关的官方历史迁移：开关开启但上次未完成（如文件被占用
+            // 中途失败）时在启动期重试；函数内部自门控，开关关闭时直接跳过。
+            match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
+                        Ok(outcome) => {
+                            if let Some(reason) = outcome.skipped_reason {
+                                log::debug!("○ Codex official history unify migration skipped: {reason}");
+                            } else {
+                                log::info!(
+                                    "✓ Codex official history unify migration completed: jsonl_files={}, state_rows={}",
+                                    outcome.migrated_jsonl_files,
+                                    outcome.migrated_state_rows
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("✗ Codex official history unify migration failed: {e}");
+                        }
+                    }
+        });
+    }
+
+    // 老用户 / 已确认的路径由 `fresh_install_at_startup` 自行拦截，这里不做写入。
+    // 字段只由前端在用户点击"我知道了"时 save_settings 回写，语义是"用户显式确认过"。
+    if !first_run_already_confirmed && fresh_install_at_startup {
+        log::info!("✓ First-run welcome notice pending");
+    }
+
+    // 1.6. 自动同步累加模式应用的原生 providers 到数据库
+    //
+    // additive 模式的 import 函数按 id 幂等——
+    // 新 id 执行导入，已有 id 则更新 settings 和 display name，所以每次
+    // 启动都跑是安全的：既保证新装用户开箱可见 live 中的供应商，也让外部
+    // 修改的 live 文件能在重启后同步到数据库（与之前依赖前端"导入当前配置"
+    // 按钮手动触发不同）。
+    //
+    // 底层 read_*_config 在文件不存在时返回默认空配置，因此新装且无
+    // live 文件的用户走 Ok(0) 路径，不会产生错误日志噪音。
+    match crate::services::provider::import_opencode_providers_from_live(&app_state) {
+        Ok(count) if count > 0 => {
+            log::info!("✓ Synced {count} OpenCode provider(s) from live config");
+        }
+        Ok(_) => log::debug!("○ No OpenCode provider changes from live config"),
+        Err(e) => log::warn!("✗ Failed to import OpenCode providers: {e}"),
+    }
+    match crate::services::provider::import_openclaw_providers_from_live(&app_state) {
+        Ok(count) if count > 0 => {
+            log::info!("✓ Synced {count} OpenClaw provider(s) from live config");
+        }
+        Ok(_) => log::debug!("○ No OpenClaw provider changes from live config"),
+        Err(e) => log::warn!("✗ Failed to import OpenClaw providers: {e}"),
+    }
+    match crate::services::provider::import_hermes_providers_from_live(&app_state) {
+        Ok(count) if count > 0 => {
+            log::info!("✓ Synced {count} Hermes provider(s) from live config");
+        }
+        Ok(_) => log::debug!("○ No Hermes provider changes from live config"),
+        Err(e) => log::warn!("✗ Failed to import Hermes providers: {e}"),
+    }
+    match crate::services::provider::import_pi_providers_from_live(&app_state) {
+        Ok(count) if count > 0 => {
+            log::info!("✓ Synced {count} Pi provider(s) from native config");
+        }
+        Ok(_) => log::debug!("○ No Pi provider changes from native config"),
+        Err(e) => log::warn!("✗ Failed to import Pi providers: {e}"),
+    }
+
+    // 生图 MCP 是「生图栏里是否有托管档位」的派生状态。启动时无条件对齐一次，
+    // 覆盖升级后已有档位但从未再次 provision、以及应用升级后可执行路径变化的情况。
+    // 其余触发点：provision 收尾、生图开关写入、删站点/账号（都在数据层）。
+    if let Err(e) = crate::relay::imagegen_mcp::sync_registration(&app_state) {
+        log::warn!("启动时同步生图 MCP 失败（下次 provision 或重启会重试）: {e}");
+    }
+
+    // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
+    {
+        let has_omo = app_state
+            .db
+            .get_all_providers("opencode")
+            .map(|providers| {
+                providers
+                    .values()
+                    .any(|p| p.category.as_deref() == Some("omo"))
+            })
+            .unwrap_or(false);
+        if !has_omo {
+            match crate::services::OmoService::import_from_local(
+                &app_state,
+                &crate::services::omo::STANDARD,
+            ) {
+                Ok(provider) => {
+                    log::info!(
+                        "✓ Imported OMO config from local as provider '{}'",
+                        provider.name
+                    );
+                }
+                Err(AppError::OmoConfigNotFound) => {
+                    log::debug!("○ No OMO config to import");
+                }
+                Err(e) => {
+                    log::warn!("✗ Failed to import OMO config from local: {e}");
+                }
+            }
+        }
+    }
+
+    // 2.3 OMO Slim config import (when no omo-slim provider in DB, import from local)
+    {
+        let has_omo_slim = app_state
+            .db
+            .get_all_providers("opencode")
+            .map(|providers| {
+                providers
+                    .values()
+                    .any(|p| p.category.as_deref() == Some("omo-slim"))
+            })
+            .unwrap_or(false);
+        if !has_omo_slim {
+            match crate::services::OmoService::import_from_local(
+                &app_state,
+                &crate::services::omo::SLIM,
+            ) {
+                Ok(provider) => {
+                    log::info!(
+                        "✓ Imported OMO Slim config from local as provider '{}'",
+                        provider.name
+                    );
+                }
+                Err(AppError::OmoConfigNotFound) => {
+                    log::debug!("○ No OMO Slim config to import");
+                }
+                Err(e) => {
+                    log::warn!("✗ Failed to import OMO Slim config from local: {e}");
+                }
+            }
+        }
+    }
+
+    // 3. 导入 MCP 服务器配置（表空时触发）
+    if app_state.db.is_mcp_table_empty().unwrap_or(false) {
+        log::info!("MCP table empty, importing from live configurations...");
+
+        match crate::services::mcp::McpService::import_from_claude(&app_state) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} MCP server(s) from Claude");
+            }
+            Ok(_) => log::debug!("○ No Claude MCP servers found to import"),
+            Err(e) => log::warn!("✗ Failed to import Claude MCP: {e}"),
+        }
+
+        match crate::services::mcp::McpService::import_from_codex(&app_state) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} MCP server(s) from Codex");
+            }
+            Ok(_) => log::debug!("○ No Codex MCP servers found to import"),
+            Err(e) => log::warn!("✗ Failed to import Codex MCP: {e}"),
+        }
+
+        match crate::services::mcp::McpService::import_from_gemini(&app_state) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} MCP server(s) from Gemini");
+            }
+            Ok(_) => log::debug!("○ No Gemini MCP servers found to import"),
+            Err(e) => log::warn!("✗ Failed to import Gemini MCP: {e}"),
+        }
+
+        match crate::services::mcp::McpService::import_from_grokbuild(&app_state) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} MCP server(s) from Grok Build");
+            }
+            Ok(_) => log::debug!("○ No Grok Build MCP servers found to import"),
+            Err(e) => log::warn!("✗ Failed to import Grok Build MCP: {e}"),
+        }
+
+        match crate::services::mcp::McpService::import_from_opencode(&app_state) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} MCP server(s) from OpenCode");
+            }
+            Ok(_) => log::debug!("○ No OpenCode MCP servers found to import"),
+            Err(e) => log::warn!("✗ Failed to import OpenCode MCP: {e}"),
+        }
+
+        match crate::services::mcp::McpService::import_from_hermes(&app_state) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} MCP server(s) from Hermes");
+            }
+            Ok(_) => log::debug!("○ No Hermes MCP servers found to import"),
+            Err(e) => log::warn!("✗ Failed to import Hermes MCP: {e}"),
+        }
+    }
+
+    // 4. 导入提示词文件（表空时触发）
+    if app_state.db.is_prompts_table_empty().unwrap_or(false) {
+        log::info!("Prompts table empty, importing from live configurations...");
+
+        for app in crate::app_config::AppType::all().filter(|app| app.supports_prompts()) {
+            match crate::services::prompt::PromptService::import_from_file_on_first_launch(
+                &app_state,
+                app.clone(),
+            ) {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Imported {count} prompt(s) for {}", app.as_str());
+                }
+                Ok(_) => log::debug!("○ No prompt file found for {}", app.as_str()),
+                Err(e) => log::warn!("✗ Failed to import prompt for {}: {e}", app.as_str()),
+            }
+        }
+    }
+
+    // 启动阶段不再无条件保存,避免意外覆盖用户配置。
+
+    // 注册 deep-link URL 处理器（使用正确的 DeepLinkExt API）
+    log::info!("=== Registering deep-link URL handler ===");
+
+    // Linux 和 Windows 调试模式需要显式注册
+    #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+    {
+        #[cfg(target_os = "linux")]
+        {
+            // Use Tauri's path API to get correct path (includes app identifier)
+            // tauri-plugin-deep-link writes to: ~/.local/share/com.ccswitch.desktop/applications/cc-switch-handler.desktop
+            // Only register if .desktop file doesn't exist to avoid overwriting user customizations
+            let should_register = app
+                .path()
+                .data_dir()
+                .map(|d| !d.join("applications/cc-switch-handler.desktop").exists())
+                .unwrap_or(true);
+
+            if should_register {
+                if let Err(e) = app.deep_link().register_all() {
+                    log::error!("✗ Failed to register deep link schemes: {}", e);
+                } else {
+                    log::info!("✓ Deep link schemes registered (Linux)");
+                }
+            } else {
+                log::info!("⊘ Deep link handler already exists, skipping registration");
+            }
+        }
+
+        #[cfg(all(debug_assertions, windows))]
+        {
+            if let Err(e) = app.deep_link().register_all() {
+                log::error!("✗ Failed to register deep link schemes: {}", e);
+            } else {
+                log::info!("✓ Deep link schemes registered (Windows debug)");
+            }
+        }
+    }
+
+    // 注册 URL 处理回调（所有平台通用）
+    app.deep_link().on_open_url({
+        let app_handle = app.clone();
+        move |event| {
+            log::info!("=== Deep Link Event Received (on_open_url) ===");
+            let urls = event.urls();
+            log::info!("Received {} URL(s)", urls.len());
+
+            if crate::lightweight::is_lightweight_mode() {
+                if let Err(e) = crate::lightweight::exit_lightweight_mode(&app_handle) {
+                    log::error!("退出轻量模式重建窗口失败: {e}");
+                }
+            }
+
+            for (i, url) in urls.iter().enumerate() {
+                let url_str = url.as_str();
+                log::debug!("  URL[{i}]: {}", url_for_log(url_str));
+
+                if handle_deeplink_url(&app_handle, url_str, true, "on_open_url") {
+                    break; // Process only first ccswitch:// URL
+                }
+            }
+        }
+    });
+    log::info!("✓ Deep-link URL handler registered");
+
+    // 创建动态托盘菜单
+    let menu = tray::create_tray_menu(app, &app_state)?;
+
+    // 构建托盘
+    let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
+        .tooltip("LoongPort") // 鼠标悬停提示
+        .on_tray_icon_event(|tray, event| match event {
+            // 鼠标悬停/点击到托盘图标时，后台异步刷新用量缓存，
+            // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
+            // refresh_all_usage_in_tray 内部有 10 秒防抖。
+            TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. } => {
+                let app = tray.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::tray::refresh_all_usage_in_tray(&app).await;
+                });
+            }
+            _ => log::debug!("unhandled event {event:?}"),
+        })
+        .menu(&menu)
+        .on_menu_event(|app, event| {
+            tray::handle_tray_menu_event(app, &event.id.0);
+        })
+        .show_menu_on_left_click(true);
+
+    // 使用平台对应的托盘图标（macOS 使用模板图标适配深浅色）
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(icon) = macos_tray_icon() {
+            tray_builder = tray_builder.icon(icon).icon_as_template(true);
+        } else if let Some(icon) = app.default_window_icon() {
+            log::warn!("Falling back to default window icon for tray");
+            tray_builder = tray_builder.icon(icon.clone());
+        } else {
+            log::warn!("Failed to load macOS tray icon for tray");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // default_window_icon 解码出的是 ico 里面积最大的 256px 帧，
+        // 外壳缩到托盘 16px 会糊成一团；专用 32px 小图才是给托盘的。
+        if let Some(icon) = small_tray_icon() {
+            tray_builder = tray_builder.icon(icon);
+        } else if let Some(icon) = app.default_window_icon() {
+            log::warn!("Falling back to default window icon for tray");
+            tray_builder = tray_builder.icon(icon.clone());
+        } else {
+            log::warn!("Failed to get small tray icon");
+        }
+    }
+
+    let _tray = tray_builder.build(app)?;
+    crate::services::webdav_auto_sync::start_worker(app_state.db.clone(), app.clone());
+    crate::services::s3_auto_sync::start_worker(app_state.db.clone(), app.clone());
+    // 将同一个实例注入到全局状态，避免重复创建导致的不一致
+    app.manage(app_state);
+    // 应用更新预下载状态：供检查/安装命令共享。
+    app.manage(crate::services::app_update::AppUpdateStage::new());
+    // 启动闸门：上个会话预下载好的更新就地应用（重开即自动更新）。
+    // 必须赶在窗口显示、代理状态恢复和 maintenance 启动之前——安装
+    // 路径会退出当前进程，任何已启动的服务都白起。成功路径不返回
+    //（Windows spawn 安装器 + exit，安装器装完自动拉起新版；
+    // macOS/Linux install + restart），能走到 maintenance::start
+    // 就说明本次启动不装更新。预下载产物跨会话保留，由闸门重验后
+    // 消费（插件验签在 download() 内联、不跨进程）。
+    tauri::async_runtime::block_on(
+        crate::services::app_update::apply_pending_staged_update_on_startup(app),
+    );
+    maintenance::start(app.clone());
+
+    // 站点余额冷启补刷（一次性、模式无关）：让用户点进任何视图时缓存
+    // 已就绪。延迟一会儿，避开启动高峰的 DB/网络初始化。
+    {
+        let db = app.state::<AppState>().db.clone();
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            crate::services::site_balance_refresh::startup_kick(&db, Some(handle));
+        });
+    }
+
+    // 启动即刷新当前 codex 档位的 catalog 投影：catalog 是投影产物，
+    // 升级带来的生成器变化必须下次启动就落盘，而不是等用户碰巧再切
+    // 一次档位（两例「升级/重装后修复不生效」反馈的根因）。外科式：
+    // 只动 catalog 文件与指针键，不碰 auth/model/effort。延迟几秒，
+    // 让开更新闸门与 maintenance 先行。
+    {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let state = handle.state::<AppState>();
+            if let Err(e) =
+                crate::services::provider::refresh_current_codex_catalog_projection(&state)
+            {
+                log::warn!("启动刷新 codex catalog 投影失败: {e}");
+            }
+            match crate::relay::model_catalog::repair_missing(&state.db).await {
+                Ok(changed) => {
+                    let apps: std::collections::HashSet<_> =
+                        changed.iter().map(|(app, _)| app.as_str()).collect();
+                    for app in apps {
+                        let _ = handle.emit(
+                            crate::events::PROVIDER_MODELS_UPDATED,
+                            serde_json::json!({"appType": app}),
+                        );
+                    }
+                    if !changed.is_empty() {
+                        crate::tray::refresh_tray_menu(&handle);
+                    }
+                }
+                Err(error) => log::warn!("Could not repair missing model inventories: {error}"),
+            }
+        });
+    }
+
+    // 初始化 SkillService
+    let skill_service = SkillService::new();
+    app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));
+
+    // 初始化 CopilotAuthManager
+    {
+        use commands::CopilotAuthState;
+        use tokio::sync::RwLock;
+
+        app.manage(CopilotAuthState(Arc::new(RwLock::new(
+            copilot_auth_manager,
+        ))));
+        log::info!("✓ CopilotAuthManager initialized");
+    }
+
+    // 初始化 CodexOAuthManager (ChatGPT Plus/Pro 反代)
+    {
+        use commands::CodexOAuthState;
+
+        let codex_oauth_manager = app.state::<AppState>().codex_oauth_manager.clone();
+        app.manage(CodexOAuthState(codex_oauth_manager));
+        log::info!("✓ CodexOAuthManager initialized");
+    }
+
+    // 初始化 xAI OAuthManager (Grok API 反代)
+    {
+        use commands::XaiOAuthState;
+        use tokio::sync::RwLock;
+
+        app.manage(XaiOAuthState(Arc::new(RwLock::new(xai_oauth_manager))));
+        log::info!("✓ XaiOAuthManager initialized");
+    }
+
+    // 初始化全局出站代理 HTTP 客户端
+    {
+        let db = &app.state::<AppState>().db;
+        let proxy_url = db.get_global_proxy_url().ok().flatten();
+
+        if let Err(e) = crate::proxy::http_client::init(proxy_url.as_deref()) {
+            log::error!("[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}");
+
+            // 清除无效的代理配置
+            if proxy_url.is_some() {
+                log::warn!("[GlobalProxy] [GP-006] Clearing invalid proxy config from database");
+                if let Err(clear_err) = db.set_global_proxy_url(None) {
+                    log::error!(
+                        "[GlobalProxy] [GP-007] Failed to clear invalid config: {clear_err}"
+                    );
+                }
+            }
+
+            // 使用直连模式重新初始化
+            if let Err(fallback_err) = crate::proxy::http_client::init(None) {
+                log::error!(
+                    "[GlobalProxy] [GP-008] Failed to initialize direct connection: {fallback_err}"
+                );
+            }
+        }
+    }
+
+    // 匿名使用统计：启动后延迟一次性上报（安装 id / 版本 / OS / 站点域名）。
+    //
+    // Fresh installations remain disabled until an explicit sharing choice.
+    // Existing preferences are preserved; the persisted switch owns consent.
+    //
+    // **一次性、不定时重复**：它答的是「多少安装、什么版本、在用哪几家中转站」，
+    // 每次开 app 报一次已经够，加定时器只是多打请求。
+    //
+    // 延迟 30 秒：启动那一刻要抢的是首屏渲染与凭据探活，统计排在最后。
+    // 整条链路失败静默（`stats::send` 自己只返 Err 给日志）—— 它是我们的需求
+    // 不是用户要的功能，绝不能影响任何用户流程。
+    let db_for_stats = app.state::<AppState>().db.clone();
+    // 版本号**在 spawn 之前**取好：`AppHandle` 持有的运行时句柄不是 `Send`，
+    // 把它带进 async 块会让整个 future 变成 non-Send（编译不过）。
+    // 我们只要一个 String，不需要把整个 handle 搬进去。
+    let stats_app_version = app.package_info().version.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        // 端点还没配时整条链路 no-op，连读设置都不必。
+        if !crate::relay::stats::is_configured() {
+            log::debug!("匿名统计端点未配置，跳过上报");
+            return;
+        }
+
+        // 开关关着 ⇒ 直接返回（也不生成 id：从一开始就关的用户，
+        // 机器上不躺任何为统计准备的东西）。
+        if !crate::settings::get_settings().enable_anonymous_stats {
+            return;
+        }
+
+        // install id 由后端在首次上报时自生成（不绑告知弹窗）：只在开关
+        // 开着时生成、跨启动复用 —— 「关了再开」仍是同一个安装，不许被
+        // 计成两个。生成或落盘失败就跳过本轮，下次启动再试（不排队）。
+        // 设置读写是文件 IO，搬进 `spawn_blocking`（与下面的站点读一致）。
+        let install_id =
+            match tauri::async_runtime::spawn_blocking(|| -> Result<String, AppError> {
+                if crate::settings::get_settings().stats_install_id.is_none() {
+                    crate::settings::mutate_settings(|s| {
+                        s.stats_install_id
+                            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
+                    })?;
+                }
+                crate::settings::get_settings()
+                    .stats_install_id
+                    .ok_or_else(|| AppError::Config("install id 生成后仍缺失".to_string()))
+            })
+            .await
+            {
+                Ok(Ok(id)) => id,
+                Ok(Err(e)) => {
+                    log::debug!("install id 生成/落盘失败（本次跳过）: {e}");
+                    return;
+                }
+                Err(e) => {
+                    log::debug!("install id 生成任务失败（本次跳过）: {e}");
+                    return;
+                }
+            };
+
+        // 读站点列表。**在 `spawn_blocking` 里读**，两个理由：
+        //
+        // 1. `MutexGuard` 不是 `Send` —— 在 async 块里持有它（哪怕只在一个
+        //    内层作用域）会让整个 future 变成 non-Send，`spawn` 直接编译不过
+        // 2. SQLite 读是阻塞 IO，本来就该离开 async 执行器
+        let origins = match tauri::async_runtime::spawn_blocking(move || {
+            let conn = db_for_stats
+                .conn
+                .lock()
+                .map_err(|e| format!("获取数据库连接失败: {e}"))?;
+            crate::relay::stats::configured_service_origins(&conn).map_err(|e| e.to_string())
+        })
+        .await
+        {
+            Ok(Ok(origins)) => origins,
+            Ok(Err(e)) => {
+                log::debug!("统计读站点列表失败（跳过）: {e}");
+                return;
+            }
+            Err(e) => {
+                log::debug!("统计读站点列表的任务失败（跳过）: {e}");
+                return;
+            }
+        };
+
+        let report = crate::relay::stats::build_report(install_id, stats_app_version, &origins);
+        if let Err(e) = crate::relay::stats::send(&report).await {
+            // 只记 log，不重试、不排队补发。拿不到这次就算了。
+            log::debug!("匿名统计上报失败（不影响使用）: {e}");
+        }
+    });
+
+    // 异常退出恢复 + 代理状态自动恢复
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app_handle.state::<AppState>();
+
+        // 检查是否有 Live 备份（表示上次异常退出时可能处于接管状态）
+        let has_backups = match state.db.has_any_live_backup().await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("检查 Live 备份失败: {e}");
+                false
+            }
+        };
+        // 检查 Live 配置是否仍处于被接管状态（包含占位符）
+        let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
+
+        if has_backups || live_taken_over {
+            log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
+            if let Err(e) = state.proxy_service.recover_from_crash().await {
+                log::error!("恢复 Live 配置失败: {e}");
+            } else {
+                log::info!("Live 配置已恢复");
+            }
+        }
+
+        // 旧版被动模型验证可能留下自己的 Codex / Claude 接管租约。只恢复有租约
+        // 的应用，成功后再删租约；失败保留，供下次启动重试。必须先于普通代理
+        // 状态恢复，避免把旧版自动接管误当成用户主动开启的代理。
+        if let Err(error) =
+            crate::relay::model_verification::legacy_cleanup::cleanup_legacy_runtime(
+                &state.db,
+                &state.proxy_service,
+            )
+            .await
+        {
+            log::warn!("清理旧版被动模型验证代理接管失败（下次启动会重试）: {error}");
+        }
+
+        // 必须排在 auto-extract 之前：先把历史泄漏进 Gemini 共享片段的凭据
+        // 清干净，否则紧接着的提取会基于被污染的 live 再写一遍。
+        if let Err(e) =
+            crate::services::provider::ProviderService::scrub_leaked_gemini_common_config(&state)
+                .await
+        {
+            log::warn!("清理 Gemini 通用配置泄漏凭据失败: {e}");
+        }
+
+        initialize_common_config_snippets(&state);
+
+        // 检查 settings 表中的代理状态，自动恢复代理服务
+        restore_proxy_state_on_startup(&state).await;
+
+        // Periodic backup check (on startup)
+        if let Err(e) = state.db.periodic_backup_if_needed() {
+            log::warn!("Periodic backup failed on startup: {e}");
+        }
+
+        // Periodic maintenance timer: run once per day while the app is running
+        let db_for_timer = state.db.clone();
+        tauri::async_runtime::spawn(async move {
+            const PERIODIC_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                PERIODIC_MAINTENANCE_INTERVAL_SECS,
+            ));
+            interval.tick().await; // skip immediate first tick (already checked above)
+            loop {
+                interval.tick().await;
+                if let Err(e) = db_for_timer.periodic_backup_if_needed() {
+                    log::warn!("Periodic maintenance timer failed: {e}");
+                }
+            }
+        });
+
+        // Session log usage sync: 启动时同步一次，之后每 60 秒检查
+        let db_for_session_sync = state.db.clone();
+        tauri::async_runtime::spawn(async move {
+            const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
+
+            async fn run_session_sync(
+                db: std::sync::Arc<crate::database::Database>,
+                backfill: bool,
+            ) {
+                let _guard = crate::services::session_usage::session_sync_mutex()
+                    .lock()
+                    .await;
+                let task = tauri::async_runtime::spawn_blocking(move || {
+                    if backfill {
+                        if let Err(error) = db.backfill_missing_usage_costs() {
+                            log::warn!("Usage cost startup backfill failed: {error}");
+                        }
+                    }
+                    crate::services::session_usage::sync_all_unlocked(&db)
+                });
+                match task.await {
+                    Ok(result) if !result.errors.is_empty() => {
+                        log::warn!(
+                            "Session usage sync completed with {} error(s)",
+                            result.errors.len()
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("Session usage blocking task failed: {error}"),
+                }
+            }
+
+            // 首次同步（含费用回填）
+            run_session_sync(db_for_session_sync.clone(), true).await;
+
+            // 定期同步
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(SESSION_SYNC_INTERVAL_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                run_session_sync(db_for_session_sync.clone(), false).await;
+            }
+        });
+    });
+
+    // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+            let _ = window.with_webview(|webview| {
+                use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
+                let wk_webview = webview.inner();
+                if let Some(settings) = WebViewExt::settings(&wk_webview) {
+                    SettingsExt::set_hardware_acceleration_policy(
+                        &settings,
+                        HardwareAccelerationPolicy::Never,
+                    );
+                    log::info!("已禁用 WebKitGTK 硬件加速");
+                }
+            });
+        }
+    }
+
+    // 静默启动：根据设置决定是否显示主窗口
+    let settings = crate::settings::get_settings();
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        // 在窗口首次显示前同步装饰状态，避免前端加载后再切换导致标题栏闪烁
+        // 仅 Linux 生效：解决 Wayland 下系统窗口按钮不可用的问题
+        #[cfg(target_os = "linux")]
+        let _ = window.set_decorations(!settings.use_app_window_controls);
+        if settings.silent_startup {
+            // 静默启动模式：保持窗口隐藏
+            let _ = window.hide();
+            #[cfg(target_os = "windows")]
+            let _ = window.set_skip_taskbar(true);
+            #[cfg(target_os = "macos")]
+            tray::apply_tray_policy(app, false);
+            log::info!("静默启动模式：主窗口已隐藏");
+        } else {
+            // 正常启动模式：显示窗口
+            #[cfg(not(target_os = "windows"))]
+            let _ = window.show();
+            #[cfg(target_os = "windows")]
+            log::info!("正常启动模式：等待主页面加载完成后显示主窗口");
+            #[cfg(not(target_os = "windows"))]
+            log::info!("正常启动模式：主窗口已显示");
+
+            // Linux: 解决首次启动 UI 无响应问题（Tauri #10746 + wry #637）。
+            // 启动时 webview 未获取焦点 + surface 尺寸协商失败，导致点击无效。
+            // 这里做 set_focus + 伪 resize，等价于无视觉版本的"最大化-还原"。
+            #[cfg(target_os = "linux")]
+            {
+                linux_fix::nudge_main_window(window.clone());
+            }
+        }
+    }
+
+    Ok(())
+}
 
 #[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -625,7 +1571,7 @@ pub fn run() {
 
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
             app_store::refresh_app_config_dir_override(app.handle());
-            panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
+            panic_hook::init_app_config_dir(crate::config::get_app_config_dir())?;
 
             // 初始化日志（输出到 <app_config_dir>/logs/loongport.log）
             {
@@ -699,41 +1645,6 @@ pub fn run() {
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
             let db_path = app_config_dir.join(crate::config::DB_FILE_NAME);
-            let json_path = app_config_dir.join("config.json");
-
-            // 检查是否需要从 config.json 迁移到 SQLite
-            let has_json = json_path.exists();
-            let has_db = db_path.exists();
-
-            // 如果需要迁移，先验证 config.json 是否可以加载（在创建数据库之前）
-            // 这样如果加载失败用户选择退出，数据库文件还没被创建，下次可以正常重试
-            let migration_config = if !has_db && has_json {
-                log::info!("检测到旧版配置文件，验证配置文件...");
-
-                // 循环：支持用户重试加载配置文件
-                loop {
-                    match crate::app_config::MultiAppConfig::load() {
-                        Ok(config) => {
-                            log::info!("✓ 配置文件加载成功");
-                            break Some(config);
-                        }
-                        Err(e) => {
-                            log::error!("加载旧配置文件失败: {e}");
-                            // 弹出系统对话框让用户选择
-                            if !show_migration_error_dialog(app.handle(), &e.to_string()) {
-                                // 用户选择退出（此时数据库还没创建，下次启动可以重试）
-                                log::info!("用户选择退出程序");
-                                std::process::exit(1);
-                            }
-                            // 用户选择重试，继续循环
-                            log::info!("用户选择重试加载配置文件");
-                        }
-                    }
-                }
-            } else {
-                None
-            };
-
             // 现在创建数据库（包含 Schema 迁移）
             //
             // 说明：从 v3.8.* 升级的用户通常会走到这里的 SQLite schema 迁移，
@@ -789,966 +1700,21 @@ pub fn run() {
                 }
             }
 
-            let db = loop {
-                match crate::database::Database::init() {
-                    Ok(db) => break Arc::new(db),
-                    Err(e) => {
-                        log::error!("Failed to init database: {e}");
-
-                        if !show_database_init_error_dialog(app.handle(), &db_path, &e.to_string())
-                        {
-                            log::info!("用户选择退出程序");
-                            std::process::exit(1);
-                        }
-
-                        log::info!("用户选择重试初始化数据库");
-                    }
-                }
-            };
-
-            // 数据库可用后立即应用持久化日志级别，避免后续服务初始化
-            // 继续使用启动阶段的 Info 回退。损坏配置显式 fail-closed 到 Info。
-            match db.get_log_config() {
-                Ok(log_config) => {
-                    log::set_max_level(log_config.to_level_filter());
-                    log::info!(
-                        "已加载日志配置: enabled={}, level={}",
-                        log_config.enabled,
-                        log_config.level
-                    );
-                }
-                Err(e) => {
-                    log::set_max_level(log::LevelFilter::Info);
-                    log::warn!("读取日志配置失败，已回退到 info: {e}");
-                }
-            }
-
-            // 如果有预加载的配置，执行迁移
-            if let Some(config) = migration_config {
-                log::info!("开始执行数据迁移...");
-
-                match db.migrate_from_json(&config) {
-                    Ok(_) => {
-                        log::info!("✓ 配置迁移成功");
-                        // 标记迁移成功，供前端显示 Toast
-                        crate::init_status::set_migration_success();
-                        // 归档旧配置文件（重命名而非删除，便于用户恢复）
-                        let archive_path = json_path.with_extension("json.migrated");
-                        if let Err(e) = std::fs::rename(&json_path, &archive_path) {
-                            log::warn!("归档旧配置文件失败: {e}");
-                        } else {
-                            log::info!("✓ 旧配置已归档为 config.json.migrated");
-                        }
-                    }
-                    Err(e) => {
-                        // 配置加载成功但迁移失败的情况极少（磁盘满等），仅记录日志
-                        log::error!("配置迁移失败: {e}，将从现有配置导入");
-                    }
-                }
-            }
-
-            let app_state = AppState::new(db);
-
-            // 设置 AppHandle 用于代理故障转移时的 UI 更新
-            app_state.proxy_service.set_app_handle(app.handle().clone());
-            app_state
-                .model_verification
-                .attach_app_handle(app.handle().clone());
-
-            // ============================================================
-            // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
-            // ============================================================
-
-            // 1. 初始化默认 Skills 仓库（已有内置检查：表非空则跳过）
-            match app_state.db.init_default_skill_repos() {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Initialized {count} default skill repositories");
-                }
-                Ok(_) => {} // 表非空，静默跳过
-                Err(e) => log::warn!("✗ Failed to initialize default skill repos: {e}"),
-            }
-
-            // 1.1. Skills 统一管理迁移：当数据库迁移到 v3 结构后，自动从各应用目录导入到 SSOT
-            // 触发条件由 schema 迁移设置 settings.skills_ssot_migration_pending = true 控制。
-            match app_state.db.get_setting("skills_ssot_migration_pending") {
-                Ok(Some(flag)) if flag == "true" || flag == "1" => {
-                    // 安全保护：如果用户已经有 v3 结构的 Skills 数据，就不要自动清空重建。
-                    let has_existing = app_state
-                        .db
-                        .get_all_installed_skills()
-                        .map(|skills| !skills.is_empty())
-                        .unwrap_or(false);
-
-                    if has_existing {
-                        log::info!(
-                            "Detected skills_ssot_migration_pending but skills table not empty; skipping auto import."
-                        );
-                        if let Err(error) = app_state
-                            .db
-                            .set_setting("skills_ssot_migration_pending", "false")
-                        {
-                            log::warn!(
-                                "{}",
-                                crate::diagnostics::DiagnosticEvent::new(
-                                    "startup.skills_migration",
-                                    "clear_pending_failed",
-                                )
-                                .field("phase", "skip_existing")
-                                .field_display("error", error)
-                            );
-                        }
-                    } else {
-                        match crate::services::skill::migrate_skills_to_ssot(&app_state.db) {
-                            Ok(count) => {
-                                log::info!("✓ Auto imported {count} skill(s) into SSOT");
-                                if count > 0 {
-                                    crate::init_status::set_skills_migration_result(count);
-                                }
-                                if let Err(error) = app_state
-                                    .db
-                                    .set_setting("skills_ssot_migration_pending", "false")
-                                {
-                                    log::warn!(
-                                        "{}",
-                                        crate::diagnostics::DiagnosticEvent::new(
-                                            "startup.skills_migration",
-                                            "clear_pending_failed",
-                                        )
-                                        .field("phase", "after_import")
-                                        .field_display("error", error)
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("✗ Failed to auto import legacy skills to SSOT: {e}");
-                                crate::init_status::set_skills_migration_error(e.to_string());
-                                // 保留 pending 标志，方便下次启动重试
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {} // 未开启迁移标志，静默跳过
-                Err(e) => log::warn!("✗ Failed to read skills migration flag: {e}"),
-            }
-
-            // 1.5. 自动导入 live 配置 + seed 官方预设供应商（Claude / Codex / Gemini）
-            //
-            // 先 import 后 seed 是有意为之：先把用户手动配置的 settings.json / auth.json / .env
-            // 落成 "default" provider 设为 current，再追加官方预设（is_current=false）。
-            // 这样用户切到官方预设时，回填机制会保护原 live 配置不丢失。
-            //
-            // 捕获首次运行快照：所有全新装用户都会看到欢迎弹窗介绍 CC Switch 的工作方式。
-            // 读失败时默认不弹，宁可漏弹也不要因为故障打扰用户。
-            let first_run_already_confirmed = crate::settings::get_settings()
-                .first_run_notice_confirmed
-                .unwrap_or(false);
-            let fresh_install_at_startup =
-                app_state.db.is_providers_empty().unwrap_or(false);
-
-            for app_type in
-                crate::app_config::AppType::all().filter(|t| !t.is_additive_mode())
-            {
-                if !crate::services::provider::should_import_default_config_on_startup(
-                    &app_state,
-                    &app_type,
-                )
-                .unwrap_or(false)
-                {
-                    log::debug!(
-                        "○ {} already has providers; live import skipped",
-                        app_type.as_str()
-                    );
-                    continue;
-                }
-
-                match crate::services::provider::import_default_config(
-                    &app_state,
-                    app_type.clone(),
-                ) {
-                    Ok(true) => log::info!(
-                        "✓ Imported live config for {} as default provider",
-                        app_type.as_str()
-                    ),
-                    Ok(false) => log::debug!(
-                        "○ {} already has providers; live import skipped",
-                        app_type.as_str()
-                    ),
-                    Err(e) => log::debug!(
-                        "○ No live config to import for {}: {e}",
-                        app_type.as_str()
-                    ),
-                }
-            }
-
-            match app_state.db.init_default_official_providers() {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Seeded {count} official provider(s)");
-                }
-                Ok(_) => {}
-                Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
-            }
-
-            {
-                let db_for_codex_history_migration = app_state.db.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    match crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
-                        &db_for_codex_history_migration,
-                    ) {
-                        Ok(outcome) => {
-                            if let Some(reason) = outcome.skipped_reason {
-                                log::debug!("○ Codex history provider bucket migration skipped: {reason}");
-                            } else {
-                                log::info!(
-                                    "✓ Codex history provider bucket migration completed: sources={}, jsonl_files={}, state_rows={}",
-                                    outcome.source_provider_ids.len(),
-                                    outcome.migrated_jsonl_files,
-                                    outcome.migrated_state_rows
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("✗ Codex history provider bucket migration failed: {e}");
-                        }
-                    }
-
-                    match crate::codex_history_migration::maybe_migrate_codex_provider_template_bucket(
-                        &db_for_codex_history_migration,
-                    ) {
-                        Ok(outcome) => {
-                            if let Some(reason) = outcome.skipped_reason {
-                                log::debug!("○ Codex provider template bucket migration skipped: {reason}");
-                            } else if !outcome.migrated_provider_ids.is_empty() {
-                                log::info!(
-                                    "✓ Codex provider template bucket migration completed: providers={}",
-                                    outcome.migrated_provider_ids.len()
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("✗ Codex provider template bucket migration failed: {e}");
-                        }
-                    }
-
-                    // 统一会话开关的官方历史迁移：开关开启但上次未完成（如文件被占用
-                    // 中途失败）时在启动期重试；函数内部自门控，开关关闭时直接跳过。
-                    match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
-                        Ok(outcome) => {
-                            if let Some(reason) = outcome.skipped_reason {
-                                log::debug!("○ Codex official history unify migration skipped: {reason}");
-                            } else {
-                                log::info!(
-                                    "✓ Codex official history unify migration completed: jsonl_files={}, state_rows={}",
-                                    outcome.migrated_jsonl_files,
-                                    outcome.migrated_state_rows
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("✗ Codex official history unify migration failed: {e}");
-                        }
-                    }
-                });
-            }
-
-            // 老用户 / 已确认的路径由 `fresh_install_at_startup` 自行拦截，这里不做写入。
-            // 字段只由前端在用户点击"我知道了"时 save_settings 回写，语义是"用户显式确认过"。
-            if !first_run_already_confirmed && fresh_install_at_startup {
-                log::info!("✓ First-run welcome notice pending");
-            }
-
-            // 1.6. 自动同步累加模式应用的原生 providers 到数据库
-            //
-            // additive 模式的 import 函数按 id 幂等——
-            // 新 id 执行导入，已有 id 则更新 settings 和 display name，所以每次
-            // 启动都跑是安全的：既保证新装用户开箱可见 live 中的供应商，也让外部
-            // 修改的 live 文件能在重启后同步到数据库（与之前依赖前端"导入当前配置"
-            // 按钮手动触发不同）。
-            //
-            // 底层 read_*_config 在文件不存在时返回默认空配置，因此新装且无
-            // live 文件的用户走 Ok(0) 路径，不会产生错误日志噪音。
-            match crate::services::provider::import_opencode_providers_from_live(&app_state) {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Synced {count} OpenCode provider(s) from live config");
-                }
-                Ok(_) => log::debug!("○ No OpenCode provider changes from live config"),
-                Err(e) => log::warn!("✗ Failed to import OpenCode providers: {e}"),
-            }
-            match crate::services::provider::import_openclaw_providers_from_live(&app_state) {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Synced {count} OpenClaw provider(s) from live config");
-                }
-                Ok(_) => log::debug!("○ No OpenClaw provider changes from live config"),
-                Err(e) => log::warn!("✗ Failed to import OpenClaw providers: {e}"),
-            }
-            match crate::services::provider::import_hermes_providers_from_live(&app_state) {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Synced {count} Hermes provider(s) from live config");
-                }
-                Ok(_) => log::debug!("○ No Hermes provider changes from live config"),
-                Err(e) => log::warn!("✗ Failed to import Hermes providers: {e}"),
-            }
-            match crate::services::provider::import_pi_providers_from_live(&app_state) {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Synced {count} Pi provider(s) from native config");
-                }
-                Ok(_) => log::debug!("○ No Pi provider changes from native config"),
-                Err(e) => log::warn!("✗ Failed to import Pi providers: {e}"),
-            }
-
-            // 生图 MCP 是「生图栏里是否有托管档位」的派生状态。启动时无条件对齐一次，
-            // 覆盖升级后已有档位但从未再次 provision、以及应用升级后可执行路径变化的情况。
-            // 其余触发点：provision 收尾、生图开关写入、删站点/账号（都在数据层）。
-            if let Err(e) = crate::relay::imagegen_mcp::sync_registration(&app_state) {
-                log::warn!("启动时同步生图 MCP 失败（下次 provision 或重启会重试）: {e}");
-            }
-
-            // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
-            {
-                let has_omo = app_state
-                    .db
-                    .get_all_providers("opencode")
-                    .map(|providers| providers.values().any(|p| p.category.as_deref() == Some("omo")))
-                    .unwrap_or(false);
-                if !has_omo {
-                    match crate::services::OmoService::import_from_local(&app_state, &crate::services::omo::STANDARD) {
-                        Ok(provider) => {
-                            log::info!("✓ Imported OMO config from local as provider '{}'", provider.name);
-                        }
-                        Err(AppError::OmoConfigNotFound) => {
-                            log::debug!("○ No OMO config to import");
-                        }
-                        Err(e) => {
-                            log::warn!("✗ Failed to import OMO config from local: {e}");
-                        }
-                    }
-                }
-            }
-
-            // 2.3 OMO Slim config import (when no omo-slim provider in DB, import from local)
-            {
-                let has_omo_slim = app_state
-                    .db
-                    .get_all_providers("opencode")
-                    .map(|providers| {
-                        providers
-                            .values()
-                            .any(|p| p.category.as_deref() == Some("omo-slim"))
-                    })
-                    .unwrap_or(false);
-                if !has_omo_slim {
-                    match crate::services::OmoService::import_from_local(&app_state, &crate::services::omo::SLIM) {
-                        Ok(provider) => {
-                            log::info!(
-                                "✓ Imported OMO Slim config from local as provider '{}'",
-                                provider.name
-                            );
-                        }
-                        Err(AppError::OmoConfigNotFound) => {
-                            log::debug!("○ No OMO Slim config to import");
-                        }
-                        Err(e) => {
-                            log::warn!("✗ Failed to import OMO Slim config from local: {e}");
-                        }
-                    }
-                }
-            }
-
-            // 3. 导入 MCP 服务器配置（表空时触发）
-            if app_state.db.is_mcp_table_empty().unwrap_or(false) {
-                log::info!("MCP table empty, importing from live configurations...");
-
-                match crate::services::mcp::McpService::import_from_claude(&app_state) {
-                    Ok(count) if count > 0 => {
-                        log::info!("✓ Imported {count} MCP server(s) from Claude");
-                    }
-                    Ok(_) => log::debug!("○ No Claude MCP servers found to import"),
-                    Err(e) => log::warn!("✗ Failed to import Claude MCP: {e}"),
-                }
-
-                match crate::services::mcp::McpService::import_from_codex(&app_state) {
-                    Ok(count) if count > 0 => {
-                        log::info!("✓ Imported {count} MCP server(s) from Codex");
-                    }
-                    Ok(_) => log::debug!("○ No Codex MCP servers found to import"),
-                    Err(e) => log::warn!("✗ Failed to import Codex MCP: {e}"),
-                }
-
-                match crate::services::mcp::McpService::import_from_gemini(&app_state) {
-                    Ok(count) if count > 0 => {
-                        log::info!("✓ Imported {count} MCP server(s) from Gemini");
-                    }
-                    Ok(_) => log::debug!("○ No Gemini MCP servers found to import"),
-                    Err(e) => log::warn!("✗ Failed to import Gemini MCP: {e}"),
-                }
-
-                match crate::services::mcp::McpService::import_from_grokbuild(&app_state) {
-                    Ok(count) if count > 0 => {
-                        log::info!("✓ Imported {count} MCP server(s) from Grok Build");
-                    }
-                    Ok(_) => log::debug!("○ No Grok Build MCP servers found to import"),
-                    Err(e) => log::warn!("✗ Failed to import Grok Build MCP: {e}"),
-                }
-
-                match crate::services::mcp::McpService::import_from_opencode(&app_state) {
-                    Ok(count) if count > 0 => {
-                        log::info!("✓ Imported {count} MCP server(s) from OpenCode");
-                    }
-                    Ok(_) => log::debug!("○ No OpenCode MCP servers found to import"),
-                    Err(e) => log::warn!("✗ Failed to import OpenCode MCP: {e}"),
-                }
-
-                match crate::services::mcp::McpService::import_from_hermes(&app_state) {
-                    Ok(count) if count > 0 => {
-                        log::info!("✓ Imported {count} MCP server(s) from Hermes");
-                    }
-                    Ok(_) => log::debug!("○ No Hermes MCP servers found to import"),
-                    Err(e) => log::warn!("✗ Failed to import Hermes MCP: {e}"),
-                }
-            }
-
-            // 4. 导入提示词文件（表空时触发）
-            if app_state.db.is_prompts_table_empty().unwrap_or(false) {
-                log::info!("Prompts table empty, importing from live configurations...");
-
-                for app in crate::app_config::AppType::all().filter(|app| app.supports_prompts())
-                {
-                    match crate::services::prompt::PromptService::import_from_file_on_first_launch(
-                        &app_state,
-                        app.clone(),
-                    ) {
-                        Ok(count) if count > 0 => {
-                            log::info!("✓ Imported {count} prompt(s) for {}", app.as_str());
-                        }
-                        Ok(_) => log::debug!("○ No prompt file found for {}", app.as_str()),
-                        Err(e) => log::warn!("✗ Failed to import prompt for {}: {e}", app.as_str()),
-                    }
-                }
-            }
-
-            // 迁移旧的 app_config_dir 配置到 Store
-            if let Err(e) = app_store::migrate_app_config_dir_from_settings(app.handle()) {
-                log::warn!("迁移 app_config_dir 失败: {e}");
-            }
-
-            // 启动阶段不再无条件保存,避免意外覆盖用户配置。
-
-            // 注册 deep-link URL 处理器（使用正确的 DeepLinkExt API）
-            log::info!("=== Registering deep-link URL handler ===");
-
-            // Linux 和 Windows 调试模式需要显式注册
-            #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
-            {
-                #[cfg(target_os = "linux")]
-                {
-                    // Use Tauri's path API to get correct path (includes app identifier)
-                    // tauri-plugin-deep-link writes to: ~/.local/share/com.ccswitch.desktop/applications/cc-switch-handler.desktop
-                    // Only register if .desktop file doesn't exist to avoid overwriting user customizations
-                    let should_register = app
-                        .path()
-                        .data_dir()
-                        .map(|d| !d.join("applications/cc-switch-handler.desktop").exists())
-                        .unwrap_or(true);
-
-                    if should_register {
-                        if let Err(e) = app.deep_link().register_all() {
-                            log::error!("✗ Failed to register deep link schemes: {}", e);
-                        } else {
-                            log::info!("✓ Deep link schemes registered (Linux)");
-                        }
-                    } else {
-                        log::info!("⊘ Deep link handler already exists, skipping registration");
-                    }
-                }
-
-                #[cfg(all(debug_assertions, windows))]
-                {
-                    if let Err(e) = app.deep_link().register_all() {
-                        log::error!("✗ Failed to register deep link schemes: {}", e);
-                    } else {
-                        log::info!("✓ Deep link schemes registered (Windows debug)");
-                    }
-                }
-            }
-
-            // 注册 URL 处理回调（所有平台通用）
-            app.deep_link().on_open_url({
-                let app_handle = app.handle().clone();
-                move |event| {
-                    log::info!("=== Deep Link Event Received (on_open_url) ===");
-                    let urls = event.urls();
-                    log::info!("Received {} URL(s)", urls.len());
-
-                    if crate::lightweight::is_lightweight_mode() {
-                        if let Err(e) = crate::lightweight::exit_lightweight_mode(&app_handle) {
-                            log::error!("退出轻量模式重建窗口失败: {e}");
-                        }
-                    }
-
-                    for (i, url) in urls.iter().enumerate() {
-                        let url_str = url.as_str();
-                        log::debug!("  URL[{i}]: {}", url_for_log(url_str));
-
-                        if handle_deeplink_url(&app_handle, url_str, true, "on_open_url") {
-                            break; // Process only first ccswitch:// URL
-                        }
-                    }
-                }
-            });
-            log::info!("✓ Deep-link URL handler registered");
-
-            // 创建动态托盘菜单
-            let menu = tray::create_tray_menu(app.handle(), &app_state)?;
-
-            // 构建托盘
-            let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("LoongPort") // 鼠标悬停提示
-                .on_tray_icon_event(|tray, event| match event {
-                    // 鼠标悬停/点击到托盘图标时，后台异步刷新用量缓存，
-                    // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
-                    // refresh_all_usage_in_tray 内部有 10 秒防抖。
-                    TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. } => {
-                        let app = tray.app_handle().clone();
-                        tauri::async_runtime::spawn(async move {
-                            crate::tray::refresh_all_usage_in_tray(&app).await;
-                        });
-                    }
-                    _ => log::debug!("unhandled event {event:?}"),
-                })
-                .menu(&menu)
-                .on_menu_event(|app, event| {
-                    tray::handle_tray_menu_event(app, &event.id.0);
-                })
-                .show_menu_on_left_click(true);
-
-            // 使用平台对应的托盘图标（macOS 使用模板图标适配深浅色）
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(icon) = macos_tray_icon() {
-                    tray_builder = tray_builder.icon(icon).icon_as_template(true);
-                } else if let Some(icon) = app.default_window_icon() {
-                    log::warn!("Falling back to default window icon for tray");
-                    tray_builder = tray_builder.icon(icon.clone());
-                } else {
-                    log::warn!("Failed to load macOS tray icon for tray");
-                }
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                // default_window_icon 解码出的是 ico 里面积最大的 256px 帧，
-                // 外壳缩到托盘 16px 会糊成一团；专用 32px 小图才是给托盘的。
-                if let Some(icon) = small_tray_icon() {
-                    tray_builder = tray_builder.icon(icon);
-                } else if let Some(icon) = app.default_window_icon() {
-                    log::warn!("Falling back to default window icon for tray");
-                    tray_builder = tray_builder.icon(icon.clone());
-                } else {
-                    log::warn!("Failed to get small tray icon");
-                }
-            }
-
-            let _tray = tray_builder.build(app)?;
-            crate::services::webdav_auto_sync::start_worker(
-                app_state.db.clone(),
-                app.handle().clone(),
-            );
-            crate::services::s3_auto_sync::start_worker(
-                app_state.db.clone(),
-                app.handle().clone(),
-            );
-            // 将同一个实例注入到全局状态，避免重复创建导致的不一致
-            app.manage(app_state);
-            // 应用更新预下载状态：供检查/安装命令共享。
-            app.manage(crate::services::app_update::AppUpdateStage::new());
-            // 启动闸门：上个会话预下载好的更新就地应用（重开即自动更新）。
-            // 必须赶在窗口显示、代理状态恢复和 maintenance 启动之前——安装
-            // 路径会退出当前进程，任何已启动的服务都白起。成功路径不返回
-            //（Windows spawn 安装器 + exit，安装器装完自动拉起新版；
-            // macOS/Linux install + restart），能走到 maintenance::start
-            // 就说明本次启动不装更新。预下载产物跨会话保留，由闸门重验后
-            // 消费（插件验签在 download() 内联、不跨进程）。
-            tauri::async_runtime::block_on(
-                crate::services::app_update::apply_pending_staged_update_on_startup(app.handle()),
-            );
-            maintenance::start(app.handle().clone());
-
-            // 站点余额冷启补刷（一次性、模式无关）：让用户点进任何视图时缓存
-            // 已就绪。延迟一会儿，避开启动高峰的 DB/网络初始化。
-            {
-                let db = app.state::<AppState>().db.clone();
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                    crate::services::site_balance_refresh::startup_kick(&db, Some(handle));
-                });
-            }
-
-            // 启动即刷新当前 codex 档位的 catalog 投影：catalog 是投影产物，
-            // 升级带来的生成器变化必须下次启动就落盘，而不是等用户碰巧再切
-            // 一次档位（两例「升级/重装后修复不生效」反馈的根因）。外科式：
-            // 只动 catalog 文件与指针键，不碰 auth/model/effort。延迟几秒，
-            // 让开更新闸门与 maintenance 先行。
-            {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let state = handle.state::<AppState>();
-                    if let Err(e) =
-                        crate::services::provider::refresh_current_codex_catalog_projection(&state)
-                    {
-                        log::warn!("启动刷新 codex catalog 投影失败: {e}");
-                    }
-                    match crate::relay::model_catalog::repair_missing(&state.db).await {
-                        Ok(changed) => {
-                            let apps: std::collections::HashSet<_> = changed.iter().map(|(app, _)| app.as_str()).collect();
-                            for app in apps {
-                                let _ = handle.emit(crate::events::PROVIDER_MODELS_UPDATED, serde_json::json!({"appType": app}));
-                            }
-                            if !changed.is_empty() { crate::tray::refresh_tray_menu(&handle); }
-                        }
-                        Err(error) => log::warn!("Could not repair missing model inventories: {error}"),
-                    }
-                });
-            }
-
-            // 初始化 SkillService
-            let skill_service = SkillService::new();
-            app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));
-
-            // 初始化 CopilotAuthManager
-            {
-                use crate::proxy::providers::copilot_auth::CopilotAuthManager;
-                use commands::CopilotAuthState;
-                use tokio::sync::RwLock;
-
-                let app_config_dir = crate::config::get_app_config_dir();
-                let copilot_auth_manager = CopilotAuthManager::new(app_config_dir);
-                app.manage(CopilotAuthState(Arc::new(RwLock::new(copilot_auth_manager))));
-                log::info!("✓ CopilotAuthManager initialized");
-            }
-
-            // 初始化 CodexOAuthManager (ChatGPT Plus/Pro 反代)
-            {
-                use commands::CodexOAuthState;
-
-                let codex_oauth_manager =
-                    app.state::<AppState>().codex_oauth_manager.clone();
-                app.manage(CodexOAuthState(codex_oauth_manager));
-                log::info!("✓ CodexOAuthManager initialized");
-            }
-
-            // 初始化 xAI OAuthManager (Grok API 反代)
-            {
-                use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
-                use commands::XaiOAuthState;
-                use tokio::sync::RwLock;
-
-                let app_config_dir = crate::config::get_app_config_dir();
-                let xai_oauth_manager = XaiOAuthManager::new(app_config_dir);
-                app.manage(XaiOAuthState(Arc::new(RwLock::new(xai_oauth_manager))));
-                log::info!("✓ XaiOAuthManager initialized");
-            }
-
-            // 初始化全局出站代理 HTTP 客户端
-            {
-                let db = &app.state::<AppState>().db;
-                let proxy_url = db.get_global_proxy_url().ok().flatten();
-
-                if let Err(e) = crate::proxy::http_client::init(proxy_url.as_deref()) {
-                    log::error!(
-                        "[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}"
-                    );
-
-                    // 清除无效的代理配置
-                    if proxy_url.is_some() {
-                        log::warn!(
-                            "[GlobalProxy] [GP-006] Clearing invalid proxy config from database"
-                        );
-                        if let Err(clear_err) = db.set_global_proxy_url(None) {
-                            log::error!(
-                                "[GlobalProxy] [GP-007] Failed to clear invalid config: {clear_err}"
-                            );
-                        }
-                    }
-
-                    // 使用直连模式重新初始化
-                    if let Err(fallback_err) = crate::proxy::http_client::init(None) {
-                        log::error!(
-                            "[GlobalProxy] [GP-008] Failed to initialize direct connection: {fallback_err}"
-                        );
-                    }
-                }
-            }
-
-            // 匿名使用统计：启动后延迟一次性上报（安装 id / 版本 / OS / 站点域名）。
-            //
-            // Fresh installations remain disabled until an explicit sharing choice.
-            // Existing preferences are preserved; the persisted switch owns consent.
-            //
-            // **一次性、不定时重复**：它答的是「多少安装、什么版本、在用哪几家中转站」，
-            // 每次开 app 报一次已经够，加定时器只是多打请求。
-            //
-            // 延迟 30 秒：启动那一刻要抢的是首屏渲染与凭据探活，统计排在最后。
-            // 整条链路失败静默（`stats::send` 自己只返 Err 给日志）—— 它是我们的需求
-            // 不是用户要的功能，绝不能影响任何用户流程。
-            let db_for_stats = app.state::<AppState>().db.clone();
-            // 版本号**在 spawn 之前**取好：`AppHandle` 持有的运行时句柄不是 `Send`，
-            // 把它带进 async 块会让整个 future 变成 non-Send（编译不过）。
-            // 我们只要一个 String，不需要把整个 handle 搬进去。
-            let stats_app_version = app.package_info().version.to_string();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-
-                // 端点还没配时整条链路 no-op，连读设置都不必。
-                if !crate::relay::stats::is_configured() {
-                    log::debug!("匿名统计端点未配置，跳过上报");
-                    return;
-                }
-
-                // 开关关着 ⇒ 直接返回（也不生成 id：从一开始就关的用户，
-                // 机器上不躺任何为统计准备的东西）。
-                if !crate::settings::get_settings().enable_anonymous_stats {
-                    return;
-                }
-
-                // install id 由后端在首次上报时自生成（不绑告知弹窗）：只在开关
-                // 开着时生成、跨启动复用 —— 「关了再开」仍是同一个安装，不许被
-                // 计成两个。生成或落盘失败就跳过本轮，下次启动再试（不排队）。
-                // 设置读写是文件 IO，搬进 `spawn_blocking`（与下面的站点读一致）。
-                let install_id = match tauri::async_runtime::spawn_blocking(|| -> Result<String, AppError> {
-                    if crate::settings::get_settings().stats_install_id.is_none() {
-                        crate::settings::mutate_settings(|s| {
-                            s.stats_install_id
-                                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
-                        })?;
-                    }
-                    crate::settings::get_settings().stats_install_id.ok_or_else(|| {
-                        AppError::Config("install id 生成后仍缺失".to_string())
-                    })
-                })
-                .await
-                {
-                    Ok(Ok(id)) => id,
-                    Ok(Err(e)) => {
-                        log::debug!("install id 生成/落盘失败（本次跳过）: {e}");
-                        return;
-                    }
-                    Err(e) => {
-                        log::debug!("install id 生成任务失败（本次跳过）: {e}");
-                        return;
-                    }
-                };
-
-                // 读站点列表。**在 `spawn_blocking` 里读**，两个理由：
-                //
-                // 1. `MutexGuard` 不是 `Send` —— 在 async 块里持有它（哪怕只在一个
-                //    内层作用域）会让整个 future 变成 non-Send，`spawn` 直接编译不过
-                // 2. SQLite 读是阻塞 IO，本来就该离开 async 执行器
-                let origins = match tauri::async_runtime::spawn_blocking(move || {
-                    let conn = db_for_stats
-                        .conn
-                        .lock()
-                        .map_err(|e| format!("获取数据库连接失败: {e}"))?;
-                    crate::relay::stats::configured_service_origins(&conn)
-                        .map_err(|e| e.to_string())
-                })
-                .await
-                {
-                    Ok(Ok(origins)) => origins,
-                    Ok(Err(e)) => {
-                        log::debug!("统计读站点列表失败（跳过）: {e}");
-                        return;
-                    }
-                    Err(e) => {
-                        log::debug!("统计读站点列表的任务失败（跳过）: {e}");
-                        return;
-                    }
-                };
-
-                let report = crate::relay::stats::build_report(
-                    install_id,
-                    stats_app_version,
-                    &origins,
-                );
-                if let Err(e) = crate::relay::stats::send(&report).await {
-                    // 只记 log，不重试、不排队补发。拿不到这次就算了。
-                    log::debug!("匿名统计上报失败（不影响使用）: {e}");
-                }
-            });
-
-            // 异常退出恢复 + 代理状态自动恢复
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app_handle.state::<AppState>();
-
-                // 检查是否有 Live 备份（表示上次异常退出时可能处于接管状态）
-                let has_backups = match state.db.has_any_live_backup().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::error!("检查 Live 备份失败: {e}");
-                        false
-                    }
-                };
-                // 检查 Live 配置是否仍处于被接管状态（包含占位符）
-                let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
-
-                if has_backups || live_taken_over {
-                    log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
-                    if let Err(e) = state.proxy_service.recover_from_crash().await {
-                        log::error!("恢复 Live 配置失败: {e}");
-                    } else {
-                        log::info!("Live 配置已恢复");
-                    }
-                }
-
-                // 旧版被动模型验证可能留下自己的 Codex / Claude 接管租约。只恢复有租约
-                // 的应用，成功后再删租约；失败保留，供下次启动重试。必须先于普通代理
-                // 状态恢复，避免把旧版自动接管误当成用户主动开启的代理。
-                if let Err(error) =
-                    crate::relay::model_verification::legacy_cleanup::cleanup_legacy_runtime(
-                        &state.db,
-                        &state.proxy_service,
-                    )
-                    .await
-                {
-                    log::warn!("清理旧版被动模型验证代理接管失败（下次启动会重试）: {error}");
-                }
-
-                // 必须排在 auto-extract 之前：先把历史泄漏进 Gemini 共享片段的凭据
-                // 清干净，否则紧接着的提取会基于被污染的 live 再写一遍。
-                if let Err(e) =
-                    crate::services::provider::ProviderService::scrub_leaked_gemini_common_config(
-                        &state,
-                    )
-                    .await
-                {
-                    log::warn!("清理 Gemini 通用配置泄漏凭据失败: {e}");
-                }
-
-                initialize_common_config_snippets(&state);
-
-                // 检查 settings 表中的代理状态，自动恢复代理服务
-                restore_proxy_state_on_startup(&state).await;
-
-                // Periodic backup check (on startup)
-                if let Err(e) = state.db.periodic_backup_if_needed() {
-                    log::warn!("Periodic backup failed on startup: {e}");
-                }
-
-                // Periodic maintenance timer: run once per day while the app is running
-                let db_for_timer = state.db.clone();
-                tauri::async_runtime::spawn(async move {
-                    const PERIODIC_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                        PERIODIC_MAINTENANCE_INTERVAL_SECS,
-                    ));
-                    interval.tick().await; // skip immediate first tick (already checked above)
-                    loop {
-                        interval.tick().await;
-                        if let Err(e) = db_for_timer.periodic_backup_if_needed() {
-                            log::warn!("Periodic maintenance timer failed: {e}");
-                        }
-                    }
-                });
-
-                // Session log usage sync: 启动时同步一次，之后每 60 秒检查
-                let db_for_session_sync = state.db.clone();
-                tauri::async_runtime::spawn(async move {
-                    const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
-
-                    async fn run_session_sync(db: std::sync::Arc<crate::database::Database>, backfill: bool) {
-                        let _guard = crate::services::session_usage::session_sync_mutex()
-                            .lock()
-                            .await;
-                        let task = tauri::async_runtime::spawn_blocking(move || {
-                            if backfill {
-                                if let Err(error) = db.backfill_missing_usage_costs() {
-                                    log::warn!("Usage cost startup backfill failed: {error}");
-                                }
-                            }
-                            crate::services::session_usage::sync_all_unlocked(&db)
-                        });
-                        match task.await {
-                            Ok(result) if !result.errors.is_empty() => {
-                                log::warn!(
-                                    "Session usage sync completed with {} error(s)",
-                                    result.errors.len()
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(error) => log::warn!("Session usage blocking task failed: {error}"),
-                        }
-                    }
-
-                    // 首次同步（含费用回填）
-                    run_session_sync(db_for_session_sync.clone(), true).await;
-
-                    // 定期同步
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                        SESSION_SYNC_INTERVAL_SECS,
-                    ));
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    interval.tick().await; // skip immediate first tick
-                    loop {
-                        interval.tick().await;
-                        run_session_sync(db_for_session_sync.clone(), false).await;
-                    }
-                });
-            });
-
-            // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
-            #[cfg(target_os = "linux")]
-            {
-                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                    let _ = window.with_webview(|webview| {
-                        use webkit2gtk::{WebViewExt, SettingsExt, HardwareAccelerationPolicy};
-                        let wk_webview = webview.inner();
-                        if let Some(settings) = WebViewExt::settings(&wk_webview) {
-                            SettingsExt::set_hardware_acceleration_policy(&settings, HardwareAccelerationPolicy::Never);
-                            log::info!("已禁用 WebKitGTK 硬件加速");
-                        }
-                    });
-                }
-            }
-
-            // 静默启动：根据设置决定是否显示主窗口
-            let settings = crate::settings::get_settings();
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                // 在窗口首次显示前同步装饰状态，避免前端加载后再切换导致标题栏闪烁
-                // 仅 Linux 生效：解决 Wayland 下系统窗口按钮不可用的问题
-                #[cfg(target_os = "linux")]
-                let _ = window.set_decorations(!settings.use_app_window_controls);
-                if settings.silent_startup {
-                    // 静默启动模式：保持窗口隐藏
-                    let _ = window.hide();
-                    #[cfg(target_os = "windows")]
-                    let _ = window.set_skip_taskbar(true);
-                    #[cfg(target_os = "macos")]
-                    tray::apply_tray_policy(app.handle(), false);
-                    log::info!("静默启动模式：主窗口已隐藏");
-                } else {
-                    // 正常启动模式：显示窗口
-                    #[cfg(not(target_os = "windows"))]
-                    let _ = window.show();
-                    #[cfg(target_os = "windows")]
-                    log::info!("正常启动模式：等待主页面加载完成后显示主窗口");
-                    #[cfg(not(target_os = "windows"))]
-                    log::info!("正常启动模式：主窗口已显示");
-
-                    // Linux: 解决首次启动 UI 无响应问题（Tauri #10746 + wry #637）。
-                    // 启动时 webview 未获取焦点 + surface 尺寸协商失败，导致点击无效。
-                    // 这里做 set_focus + 伪 resize，等价于无视觉版本的"最大化-还原"。
-                    #[cfg(target_os = "linux")]
-                    {
-                        linux_fix::nudge_main_window(window.clone());
-                    }
-                }
-            }
-
+            let coordinator = secrets::startup::StartupCoordinator::new(app_config_dir);
+            app.manage(coordinator);
+            secrets::startup::try_automatic_unlock(app.handle());
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            secrets::startup::unlock_secret_vault,
+            secrets::startup::preview_secret_reset,
+            secrets::startup::reset_secret_vault,
+            secrets::startup::preview_startup_restore,
+            secrets::startup::restore_startup_vault,
+            secrets::rewrap::get_secret_protection,
+            secrets::rewrap::set_secret_password,
+            secrets::rewrap::rotate_secret_key,
             commands::get_providers,
             commands::get_application_overview,
             commands::preset_referral_urls,
@@ -1950,11 +1916,17 @@ pub fn run() {
             commands::webdav_test_connection,
             commands::webdav_sync_upload,
             commands::webdav_sync_download,
+            commands::webdav_sync_restore,
+            commands::webdav_sync_legacy_cleanup_preview,
+            commands::webdav_sync_cleanup_legacy,
             commands::webdav_sync_save_settings,
             commands::webdav_sync_fetch_remote_info,
             commands::s3_test_connection,
             commands::s3_sync_upload,
             commands::s3_sync_download,
+            commands::s3_sync_restore,
+            commands::s3_sync_legacy_cleanup_preview,
+            commands::s3_sync_cleanup_legacy,
             commands::s3_sync_save_settings,
             commands::s3_sync_fetch_remote_info,
             commands::save_file_dialog,
@@ -2581,70 +2553,8 @@ fn initialize_common_config_snippets(state: &store::AppState) {
 }
 
 // ============================================================
-// 迁移错误对话框辅助函数
+// 启动恢复
 // ============================================================
-
-#[cfg(feature = "gui")]
-/// 检测是否为中文环境
-fn is_chinese_locale() -> bool {
-    std::env::var("LANG")
-        .or_else(|_| std::env::var("LC_ALL"))
-        .or_else(|_| std::env::var("LC_MESSAGES"))
-        .map(|lang| lang.starts_with("zh"))
-        .unwrap_or(false)
-}
-
-#[cfg(feature = "gui")]
-/// 显示迁移错误对话框
-/// 返回 true 表示用户选择重试，false 表示用户选择退出
-fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
-    let title = if is_chinese_locale() {
-        "配置迁移失败"
-    } else {
-        "Migration Failed"
-    };
-
-    let message = if is_chinese_locale() {
-        format!(
-            "从旧版本迁移配置时发生错误：\n\n{error}\n\n\
-            您的数据尚未丢失，旧配置文件仍然保留。\n\
-            建议回退到旧版本 LoongPort 以保护数据。\n\n\
-            点击「重试」重新尝试迁移\n\
-            点击「退出」关闭程序（可回退版本后重新打开）"
-        )
-    } else {
-        format!(
-            "An error occurred while migrating configuration:\n\n{error}\n\n\
-            Your data is NOT lost - the old config file is still preserved.\n\
-            Consider rolling back to an older LoongPort version.\n\n\
-            Click 'Retry' to attempt migration again\n\
-            Click 'Exit' to close the program"
-        )
-    };
-
-    let retry_text = if is_chinese_locale() {
-        "重试"
-    } else {
-        "Retry"
-    };
-    let exit_text = if is_chinese_locale() {
-        "退出"
-    } else {
-        "Exit"
-    };
-
-    // 使用 blocking_show 同步等待用户响应
-    // OkCancelCustom: 第一个按钮（重试）返回 true，第二个按钮（退出）返回 false
-    app.dialog()
-        .message(&message)
-        .title(title)
-        .kind(MessageDialogKind::Error)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            retry_text.to_string(),
-            exit_text.to_string(),
-        ))
-        .blocking_show()
-}
 
 #[cfg(feature = "gui")]
 /// 进入「数据库版本过新（应用过旧）」恢复模式。
@@ -2670,72 +2580,6 @@ fn enter_db_version_too_new_recovery(
         let _ = window.show();
         let _ = window.set_focus();
     }
-}
-
-#[cfg(feature = "gui")]
-/// 显示数据库初始化/Schema 迁移失败对话框
-/// 返回 true 表示用户选择重试，false 表示用户选择退出
-fn show_database_init_error_dialog(
-    app: &tauri::AppHandle,
-    db_path: &std::path::Path,
-    error: &str,
-) -> bool {
-    let title = if is_chinese_locale() {
-        "数据库初始化失败"
-    } else {
-        "Database Initialization Failed"
-    };
-
-    let message = if is_chinese_locale() {
-        format!(
-            "初始化数据库或迁移数据库结构时发生错误：\n\n{error}\n\n\
-            数据库文件路径：\n{db}\n\n\
-            您的数据尚未丢失，应用不会自动删除数据库文件。\n\
-            常见原因包括：数据库版本过新、文件损坏、权限不足、磁盘空间不足等。\n\n\
-            建议：\n\
-            1) 先备份整个配置目录（包含 loongport.db）\n\
-            2) 如果提示“数据库版本过新”，请升级到更新版本\n\
-            3) 如果刚升级出现异常，可回退旧版本导出/备份后再升级\n\n\
-            点击「重试」重新尝试初始化\n\
-            点击「退出」关闭程序",
-            db = db_path.display()
-        )
-    } else {
-        format!(
-            "An error occurred while initializing or migrating the database:\n\n{error}\n\n\
-            Database file path:\n{db}\n\n\
-            Your data is NOT lost - the app will not delete the database automatically.\n\
-            Common causes include: newer database version, corrupted file, permission issues, or low disk space.\n\n\
-            Suggestions:\n\
-            1) Back up the entire config directory (including loongport.db)\n\
-            2) If you see “database version is newer”, please upgrade LoongPort\n\
-            3) If this happened right after upgrading, consider rolling back to export/backup then upgrade again\n\n\
-            Click 'Retry' to attempt initialization again\n\
-            Click 'Exit' to close the program",
-            db = db_path.display()
-        )
-    };
-
-    let retry_text = if is_chinese_locale() {
-        "重试"
-    } else {
-        "Retry"
-    };
-    let exit_text = if is_chinese_locale() {
-        "退出"
-    } else {
-        "Exit"
-    };
-
-    app.dialog()
-        .message(&message)
-        .title(title)
-        .kind(MessageDialogKind::Error)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            retry_text.to_string(),
-            exit_text.to_string(),
-        ))
-        .blocking_show()
 }
 
 // ============================================================

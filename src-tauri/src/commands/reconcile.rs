@@ -51,12 +51,13 @@ pub async fn relay_reconciliation(
 
 fn reconcile(state: &AppState, relay_id: i64) -> Result<ReconciliationReport, AppError> {
     let relay = {
+        let vault = state.db.secrets.read()?;
         let conn = state
             .db
             .conn
             .lock()
             .map_err(|e| AppError::Database(format!("获取数据库连接失败: {e}")))?;
-        creds::get(&conn, relay_id)?
+        creds::get(&conn, &vault, relay_id)?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {relay_id} 的中转站")))?
     };
     let provider_keys = relay_provider_keys(state, &relay);
@@ -113,7 +114,7 @@ mod tests {
         .expect("反序列化 provider");
         db.save_provider("codex", &provider).expect("seed B");
 
-        let state = AppState::new(db.clone());
+        let state = AppState::new(db.clone()).unwrap();
 
         let unlogged = relay_row(site, None);
         assert!(

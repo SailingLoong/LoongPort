@@ -561,14 +561,17 @@ impl SkillService {
     // ========== 路径管理 ==========
 
     /// 获取 SSOT 目录（根据设置返回 ~/.cc-switch/skills/ 或 ~/.agents/skills/）
-    pub fn get_ssot_dir() -> Result<PathBuf> {
-        let location = crate::settings::get_skill_storage_location();
-        let dir = match location {
+    pub(crate) fn resolve_ssot_dir() -> PathBuf {
+        match crate::settings::get_skill_storage_location() {
             SkillStorageLocation::LoongPort => get_app_config_dir().join("skills"),
             SkillStorageLocation::Unified => {
                 crate::config::get_home_dir().join(".agents").join("skills")
             }
-        };
+        }
+    }
+
+    pub fn get_ssot_dir() -> Result<PathBuf> {
+        let dir = Self::resolve_ssot_dir();
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }

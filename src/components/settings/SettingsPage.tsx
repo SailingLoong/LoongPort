@@ -52,6 +52,7 @@ import { BackupListSection } from "@/components/settings/BackupListSection";
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { ConnectionSettingsTabContent } from "@/components/settings/ConnectionSettingsTabContent";
+import { SecretProtectionSettings } from "@/components/settings/SecretProtectionSettings";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConnectivityCheckConfigPanel } from "@/components/usage/ConnectivityCheckConfigPanel";
@@ -321,6 +322,7 @@ export function SettingsPage({
                   className="space-y-6"
                 >
                   <AuthCenterPanel />
+                  <SecretProtectionSettings />
                 </motion.div>
               </TabsContent>
 
