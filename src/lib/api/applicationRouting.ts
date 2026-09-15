@@ -24,9 +24,6 @@ export const applicationRoutingApi = {
     invoke("get_application_routing", { appType }),
   setOrder: (appType: string, orderedIds: string[]): Promise<void> =>
     invoke("set_application_priority", { appType, orderedIds }),
-  /** Proxy routing preference; requires routingActive. Does not edit native config. */
-  setModel: (appType: string, model: string | null): Promise<void> =>
-    invoke("set_auto_mode_model", { appType, model }),
   setFailover: (appType: string, enabled: boolean): Promise<void> =>
     invoke("set_application_failover", { appType, enabled }),
 };

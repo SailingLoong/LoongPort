@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, Plus, Search, Settings2 } from "lucide-react";
+import { ChevronDown, ListFilter, Plus, Search, Settings2 } from "lucide-react";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
 import type { AccountRoute } from "@/components/shell/navigation";
@@ -23,7 +23,6 @@ import {
 import { SwitchTierConfirmDialog } from "@/components/relay/SwitchTierConfirmDialog";
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
-import { ModelPicker } from "./ModelPicker";
 import { ApplicationTierTable } from "./ApplicationTierTable";
 import {
   defaultDescending,
@@ -31,6 +30,28 @@ import {
   type TierMetric,
   type TierSort,
 } from "./tierMetrics";
+
+/** 模型可用性分数：分子着色（全可用绿 / 部分可用橙 / 全不可用灰，同 utilizationColor 语义），分母恒灰。 */
+function ModelAvailability({
+  available,
+  total,
+}: {
+  available: number;
+  total: number;
+}) {
+  const numerator =
+    available === total
+      ? "text-green-600 dark:text-green-400"
+      : available > 0
+        ? "text-orange-500 dark:text-orange-400"
+        : "text-muted-foreground";
+  return (
+    <span className="flex shrink-0 items-baseline gap-0.5 tabular-nums">
+      <span className={numerator}>{available}</span>
+      <span className="text-muted-foreground">/{total}</span>
+    </span>
+  );
+}
 
 interface Props {
   appId: AppId;
@@ -118,19 +139,34 @@ export function ApplicationWorkspace({
   }, [configurations]);
   // 模型筛选的选项 = 各档位实际会用的模型（effectiveModel 优先），去重排序；
   // 当前路由模型置顶加 ⚡，故障切换场景「选模型 → 过滤看链上还有谁」一步到位。
+  // 每个模型带 可用/总数 分数：可用 = 路由侧无跳过原因（skipReason 为 null），
+  // 与列表行的跳过徽章同源同义；全不可用的模型置灰但可选（选完正好逐行看原因）。
   const tierModels = useMemo(() => {
     const byId = new Map(
-      tiers.map((tier) => [tier.providerId, tier.effectiveModel]),
+      tiers.map((tier) => [
+        tier.providerId,
+        { model: tier.effectiveModel, available: !tier.skipReason },
+      ]),
     );
-    const models = new Set<string>();
+    const stats = new Map<
+      string,
+      { model: string; available: number; total: number }
+    >();
     for (const item of configurations) {
-      const model = byId.get(item.providerId) ?? item.model;
-      if (model) models.add(model);
+      const tier = byId.get(item.providerId);
+      const model = tier?.model ?? item.model;
+      if (!model) continue;
+      const entry = stats.get(model) ?? { model, available: 0, total: 0 };
+      entry.total += 1;
+      if (tier?.available ?? true) entry.available += 1;
+      stats.set(model, entry);
     }
     const routingModel = routing.data?.model;
-    return [...models]
-      .sort((a, b) => a.localeCompare(b))
-      .sort((a, b) => (a === routingModel ? -1 : b === routingModel ? 1 : 0));
+    return [...stats.values()]
+      .sort((a, b) => a.model.localeCompare(b.model))
+      .sort((a, b) =>
+        a.model === routingModel ? -1 : b.model === routingModel ? 1 : 0,
+      );
   }, [configurations, tiers, routing.data?.model]);
   const routingModel = routing.data?.model ?? null;
   const orderBusy =
@@ -179,45 +215,6 @@ export function ApplicationWorkspace({
           </Button>
         </header>
         <div className="flex flex-wrap items-center gap-3">
-          {isProxyAppId(appId) &&
-            routing.data?.routingActive &&
-            Boolean(routing.data?.modelOptions?.length) && (
-              <ModelPicker
-                model={routing.data?.model ?? null}
-                modelOptions={routing.data?.modelOptions ?? []}
-                disabled={routing.busy}
-                onSelect={(value) => {
-                  void routing.setModel(value).catch(() => undefined);
-                }}
-              />
-            )}
-          {tierModels.length > 1 && (
-            <Select
-              value={modelFilter ?? "all"}
-              onValueChange={(value) =>
-                setModelFilter(value === "all" ? null : value)
-              }
-            >
-              <SelectTrigger
-                className="w-56"
-                aria-label={t("applications.modelFilter")}
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  {t("applications.allModels")}
-                </SelectItem>
-                {tierModels.map((modelOption) => (
-                  <SelectItem key={modelOption} value={modelOption}>
-                    {modelOption === routingModel
-                      ? `⚡ ${modelOption}`
-                      : modelOption}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
           {accounts.length > 1 && (
             <Select
               value={accountFilter ?? "all"}
@@ -226,10 +223,13 @@ export function ApplicationWorkspace({
               }
             >
               <SelectTrigger
-                className="w-56"
+                className="w-48"
                 aria-label={t("applications.accountFilter")}
               >
-                <SelectValue />
+                <span className="flex items-center gap-2 truncate">
+                  <ListFilter className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <SelectValue />
+                </span>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">
@@ -238,6 +238,50 @@ export function ApplicationWorkspace({
                 {accounts.map((account) => (
                   <SelectItem key={account.key} value={account.key}>
                     {account.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {tierModels.length > 1 && (
+            <Select
+              value={modelFilter ?? "all"}
+              onValueChange={(value) =>
+                setModelFilter(value === "all" ? null : value)
+              }
+            >
+              <SelectTrigger
+                className="w-64"
+                aria-label={t("applications.modelFilter")}
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <ListFilter className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <SelectValue />
+                </span>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {t("applications.allModels")}
+                </SelectItem>
+                {tierModels.map((option) => (
+                  <SelectItem
+                    key={option.model}
+                    value={option.model}
+                    className={
+                      option.available === 0 ? "text-muted-foreground" : ""
+                    }
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="truncate">
+                        {option.model === routingModel
+                          ? `⚡ ${option.model}`
+                          : option.model}
+                      </span>
+                      <ModelAvailability
+                        available={option.available}
+                        total={option.total}
+                      />
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>

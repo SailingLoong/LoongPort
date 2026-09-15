@@ -220,28 +220,38 @@ describe("application workspace", () => {
     expect(header("applications.metrics.errorRate")).not.toBeNull();
     expect(header("applications.metrics.balanceUsd")).toBeNull();
   });
-  it("filters tiers by tier model and pins the routing model first", async () => {
+  it("filters tiers by tier model with availability counts, pinning the routing model first", async () => {
     state.routing.model = "gpt-5";
     state.routing.modelOptions = ["gpt-5", "grok-4.6"];
     state.routing.routingActive = true;
     state.routing.tiers[0].effectiveModel = "gpt-5";
     state.routing.tiers[1].effectiveModel = "grok-4.6";
     state.routing.tiers[2].effectiveModel = "gpt-5";
+    // gpt-5: a 可用、c 限流中 → 1/2（部分可用，分子橙色）；
+    // grok-4.6: b 也限流 → 0/1（全不可用，整行置灰但可选）。
+    state.routing.tiers[1].skipReason = "circuit_open";
+    state.routing.tiers[2].skipReason = "circuit_open";
     render(<ApplicationWorkspace {...props} />);
     const filter = screen.getByRole("combobox", {
       name: "applications.modelFilter",
     });
     await userEvent.click(filter);
-    // 当前路由模型置顶（⚡ 前缀），其余按字典序。
-    const options = screen
-      .getAllByRole("option")
-      .map((option) => option.textContent);
+    // 当前路由模型置顶（⚡ 前缀）+ 可用/总数分数；其余按字典序。
+    const optionElements = screen.getAllByRole("option");
+    const options = optionElements.map((option) => option.textContent);
     expect(options[0]).toBe("applications.allModels");
-    expect(options[1]).toBe("⚡ gpt-5");
-    expect(options).toContain("grok-4.6");
-    await userEvent.click(screen.getByRole("option", { name: "⚡ gpt-5" }));
-    // 只剩 effectiveModel=gpt-5 的两行。
+    expect(options[1]).toContain("⚡ gpt-5");
+    expect(options[1]).toContain("1/2");
+    expect(optionElements[1].querySelector(".text-orange-500")).not.toBeNull();
+    const grok = optionElements.find((option) =>
+      option.textContent?.includes("grok-4.6"),
+    )!;
+    expect(grok.textContent).toContain("0/1");
+    expect(grok.className).toContain("text-muted-foreground");
+    await userEvent.click(screen.getByRole("option", { name: /⚡ gpt-5/ }));
+    // 只剩 effectiveModel=gpt-5 的两行（含限流中的那行，方便逐行看跳过原因）。
     expect(screen.getByText("Standard")).toBeVisible();
+    expect(screen.getByText("Unknown")).toBeVisible();
     expect(screen.queryByText("Premium")).not.toBeInTheDocument();
     expect(state.setOrder).not.toHaveBeenCalled();
   });
