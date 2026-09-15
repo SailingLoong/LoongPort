@@ -186,6 +186,15 @@ fn sync_directory(path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 前 fork 上游时代的备份：没有 LoongPort 版本计数、user_version 却高于当前
+/// 迁移链（上游 3.x 的编号在本 fork 定格之后仍自顾自前进过）。本代无法理解
+/// 这类文件——迁移与轮换一律跳过并保留原样（其中可能仍有明文），绝不能让
+/// 一份历史备份劫持启动或密钥轮换。
+pub(crate) fn is_prefork_relic(conn: &Connection) -> Result<bool, AppError> {
+    Ok(super::loongport_schema::read_stored_version(conn)? == 0
+        && Database::get_user_version(conn)? > super::SCHEMA_VERSION)
+}
+
 pub(crate) fn migrate_backups(
     root: &Path,
     vault: &VaultContext,
@@ -211,6 +220,14 @@ pub(crate) fn migrate_backups(
         }
         let source = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(db_error)?;
+        if is_prefork_relic(&source)? {
+            log::warn!(
+                "跳过前代上游备份（本代无法迁移，保留原样、可能含明文）: {}",
+                path.display()
+            );
+            drop(source);
+            continue;
+        }
         if let Some(metadata) = stored_metadata(&source)? {
             if metadata.vault_id != vault.metadata().vault_id
                 || metadata.key_id != vault.metadata().key_id
@@ -254,6 +271,58 @@ pub(crate) fn migrate_backups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 前代上游备份（无 LoongPort 计数、user_version 高于当前链）不得劫持
+    /// 备份迁移：跳过、原样保留；同目录的正常备份照常加密。真机事故回归。
+    #[test]
+    fn prefork_relic_backups_do_not_block_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = dir.path().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+
+        // 遗物：上游 3.x 形状（user_version=20，无 loongport_schema_version 表）。
+        let relic_path = backups.join("pre-renumber-relic.db");
+        {
+            let relic = Connection::open(&relic_path).unwrap();
+            relic
+                .execute_batch(
+                    "CREATE TABLE providers (id TEXT PRIMARY KEY);
+                     INSERT INTO providers (id) VALUES ('upstream-era');
+                     PRAGMA user_version = 20;",
+                )
+                .unwrap();
+        }
+        let relic_before = std::fs::read(&relic_path).unwrap();
+
+        // 正常明文备份：当前链可理解的形状（最新表结构 + 当前计数、无 vault 元数据）。
+        let modern_path = backups.join("db_backup_modern.db");
+        {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL;")
+                .unwrap();
+            Database::create_tables_on_conn(&conn).unwrap();
+            Database::apply_schema_migrations_on_conn(&conn).unwrap();
+            super::super::loongport_schema::apply(&conn).unwrap();
+            let bytes: Vec<u8> = conn.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
+            std::fs::write(&modern_path, bytes).unwrap();
+        }
+
+        let vault = VaultContext::generate().unwrap();
+        migrate_backups(dir.path(), &vault, true).unwrap();
+
+        assert_eq!(
+            std::fs::read(&relic_path).unwrap(),
+            relic_before,
+            "前代遗物必须逐字节原样保留"
+        );
+        let modern =
+            Connection::open_with_flags(&modern_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        assert!(
+            stored_metadata(&modern).unwrap().is_some(),
+            "正常备份应已被迁移为带 vault 元数据的加密形态"
+        );
+    }
 
     #[test]
     fn published_migration_stage_is_resumed_and_authenticated_before_replacement() {

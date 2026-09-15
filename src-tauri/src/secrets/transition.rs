@@ -377,6 +377,14 @@ where
         for path in database_backups(root)? {
             let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(db_error)?;
+            if vault::is_prefork_relic(&source)? {
+                log::warn!(
+                    "跳过前代上游备份（本代无法迁移，保留原样、可能含明文）: {}",
+                    path.display()
+                );
+                drop(source);
+                continue;
+            }
             let metadata = vault::stored_metadata(&source)?
                 .ok_or_else(|| AppError::Config("secret.plaintext_backup".into()))?;
             if metadata.vault_id != current.metadata().vault_id
