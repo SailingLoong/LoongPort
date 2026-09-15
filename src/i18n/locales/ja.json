@@ -3851,6 +3851,8 @@
     "search": "サービス、アカウント、接続設定、モデルを検索",
     "accountFilter": "アカウントで絞り込み",
     "allAccounts": "すべてのアカウント",
+    "modelFilter": "ティアモデル",
+    "allModels": "すべてのモデル",
     "source": "サービスの種類",
     "default": "既定",
     "configured": "現在",

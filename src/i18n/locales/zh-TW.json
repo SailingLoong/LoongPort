@@ -3852,6 +3852,8 @@
     "search": "搜尋中轉站、帳號、檔位或模型",
     "accountFilter": "按帳號篩選",
     "allAccounts": "全部帳號",
+    "modelFilter": "檔位模型",
+    "allModels": "全部模型",
     "source": "服務來源",
     "default": "預設",
     "configured": "目前",

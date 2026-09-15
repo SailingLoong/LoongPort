@@ -220,6 +220,31 @@ describe("application workspace", () => {
     expect(header("applications.metrics.errorRate")).not.toBeNull();
     expect(header("applications.metrics.balanceUsd")).toBeNull();
   });
+  it("filters tiers by tier model and pins the routing model first", async () => {
+    state.routing.model = "gpt-5";
+    state.routing.modelOptions = ["gpt-5", "grok-4.6"];
+    state.routing.routingActive = true;
+    state.routing.tiers[0].effectiveModel = "gpt-5";
+    state.routing.tiers[1].effectiveModel = "grok-4.6";
+    state.routing.tiers[2].effectiveModel = "gpt-5";
+    render(<ApplicationWorkspace {...props} />);
+    const filter = screen.getByRole("combobox", {
+      name: "applications.modelFilter",
+    });
+    await userEvent.click(filter);
+    // 当前路由模型置顶（⚡ 前缀），其余按字典序。
+    const options = screen
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(options[0]).toBe("applications.allModels");
+    expect(options[1]).toBe("⚡ gpt-5");
+    expect(options).toContain("grok-4.6");
+    await userEvent.click(screen.getByRole("option", { name: "⚡ gpt-5" }));
+    // 只剩 effectiveModel=gpt-5 的两行。
+    expect(screen.getByText("Standard")).toBeVisible();
+    expect(screen.queryByText("Premium")).not.toBeInTheDocument();
+    expect(state.setOrder).not.toHaveBeenCalled();
+  });
   it("filters tiers by account and shows all again from the dropdown", async () => {
     state.data.configurations = [
       config("a", "Standard", true),

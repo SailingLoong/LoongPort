@@ -37,6 +37,7 @@ interface Props {
   storedIds: string[];
   search: string;
   accountFilter: string | null;
+  modelFilter: string | null;
   additive: boolean;
   busy: boolean;
   orderBusy: boolean;
@@ -68,6 +69,9 @@ export function ApplicationTierTable(props: Props) {
       (!props.accountFilter ||
         (item.account &&
           `${item.account.kind}:${item.account.id}` === props.accountFilter)) &&
+      (!props.modelFilter ||
+        (metrics.get(id)?.effectiveModel ?? item.model) ===
+          props.modelFilter) &&
       (!needle ||
         [
           item.name,
@@ -83,7 +87,8 @@ export function ApplicationTierTable(props: Props) {
     props.orderBusy ||
     Boolean(needle) ||
     Boolean(props.sort) ||
-    Boolean(props.accountFilter);
+    Boolean(props.accountFilter) ||
+    Boolean(props.modelFilter);
   return (
     <DndContext
       sensors={sensors}
