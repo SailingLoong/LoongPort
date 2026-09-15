@@ -18,7 +18,6 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   ArrowDown,
   ArrowUp,
-  ArrowUpDown,
   Check,
   GripVertical,
   Settings2,
@@ -34,7 +33,10 @@ interface Props {
   configurations: ApplicationConfiguration[];
   tiers: ApplicationRoutingTier[];
   orderedIds: string[];
+  /** 数据库里的档位序：优先级列号与拖拽的基准，不随视图排序变化。 */
+  storedIds: string[];
   search: string;
+  accountFilter: string | null;
   additive: boolean;
   busy: boolean;
   orderBusy: boolean;
@@ -56,10 +58,16 @@ export function ApplicationTierTable(props: Props) {
     props.configurations.map((item) => [item.providerId, item]),
   );
   const metrics = new Map(props.tiers.map((tier) => [tier.providerId, tier]));
+  const storedPriority = new Map(
+    props.storedIds.map((id, index) => [id, index + 1]),
+  );
   const needle = props.search.trim().toLocaleLowerCase();
-  const visible = props.orderedIds.flatMap((id, index) => {
+  const visible = props.orderedIds.flatMap((id) => {
     const item = configurations.get(id);
     return item &&
+      (!props.accountFilter ||
+        (item.account &&
+          `${item.account.kind}:${item.account.id}` === props.accountFilter)) &&
       (!needle ||
         [
           item.name,
@@ -68,10 +76,14 @@ export function ApplicationTierTable(props: Props) {
           item.configurationName,
           item.model,
         ].some((value) => value?.toLocaleLowerCase().includes(needle)))
-      ? [{ item, priority: index + 1 }]
+      ? [item]
       : [];
   });
-  const dragDisabled = props.orderBusy || Boolean(needle);
+  const dragDisabled =
+    props.orderBusy ||
+    Boolean(needle) ||
+    Boolean(props.sort) ||
+    Boolean(props.accountFilter);
   return (
     <DndContext
       sensors={sensors}
@@ -105,11 +117,9 @@ export function ApplicationTierTable(props: Props) {
               </th>
               {tierMetrics.map((metric) => {
                 const active = props.sort?.key === metric.key;
-                const Icon = active
-                  ? props.sort?.descending
-                    ? ArrowDown
-                    : ArrowUp
-                  : ArrowUpDown;
+                // 只有当前排序的指标常驻箭头；未排序的指标不摆任何方向符号
+                //（2026-09-15 用户定调：默认不展示，激活才常驻）。
+                const Icon = props.sort?.descending ? ArrowDown : ArrowUp;
                 return (
                   <th
                     key={metric.key}
@@ -131,7 +141,7 @@ export function ApplicationTierTable(props: Props) {
                       onClick={() => props.onSort(metric.key)}
                     >
                       {t(`applications.metrics.${metric.key}`)}
-                      <Icon className="h-3 w-3" />
+                      {active && <Icon className="h-3 w-3" />}
                     </button>
                   </th>
                 );
@@ -149,11 +159,11 @@ export function ApplicationTierTable(props: Props) {
             strategy={verticalListSortingStrategy}
           >
             <tbody>
-              {visible.map(({ item, priority }) => (
+              {visible.map((item) => (
                 <TierRow
                   key={item.providerId}
                   item={item}
-                  priority={priority}
+                  priority={storedPriority.get(item.providerId) ?? 0}
                   tier={metrics.get(item.providerId)}
                   additive={props.additive}
                   current={

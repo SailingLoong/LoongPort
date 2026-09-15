@@ -158,41 +158,94 @@ describe("application workspace", () => {
     expect(state.setOrder).not.toHaveBeenCalled();
     expect(state.select).not.toHaveBeenCalled();
   });
-  it("persists metric sort with unknown values last, and reverses on second click", async () => {
+  it("sorts by the metric's default direction without persisting, reverses on second click, restores on third", async () => {
     render(<ApplicationWorkspace {...props} />);
-    await userEvent.click(
-      screen.getByRole("button", {
-        name: "applications.metrics.rateMultiplier",
-      }),
-    );
-    expect(state.setOrder).toHaveBeenLastCalledWith(["b", "a", "c"]);
+    const rateHeader = screen.getByRole("button", {
+      name: "applications.metrics.rateMultiplier",
+    });
+    // 第一击：默认向（倍率升序），视图排序、不落库。
+    await userEvent.click(rateHeader);
+    expect(state.setOrder).not.toHaveBeenCalled();
     await waitFor(() => expect(names()[0]).toBe("applications.use Premium"));
-    await userEvent.click(
-      screen.getByRole("button", {
-        name: "applications.metrics.rateMultiplier",
-      }),
-    );
-    expect(state.setOrder).toHaveBeenLastCalledWith(["a", "b", "c"]);
-    expect(state.select).not.toHaveBeenCalled();
-  });
-  it("restores the previous order when saving the priority fails", async () => {
-    state.setOrder.mockRejectedValueOnce(new Error("save failed"));
-    render(<ApplicationWorkspace {...props} />);
-    await userEvent.click(
-      screen.getByRole("button", {
-        name: "applications.metrics.rateMultiplier",
-      }),
-    );
+    // 优先级列仍显示数据库档位序。
+    const premiumRow = screen.getByText("Premium").closest("tr")!;
+    expect(within(premiumRow).getByText("2")).toBeVisible();
+    // 第二击：反向（降序），箭头翻转。
+    await userEvent.click(rateHeader);
+    expect(state.setOrder).not.toHaveBeenCalled();
     await waitFor(() => expect(names()[0]).toBe("applications.use Standard"));
+    // 第三击：取消排序，回到数据库档位序。
+    await userEvent.click(rateHeader);
+    await waitFor(() => expect(names()[0]).toBe("applications.use Standard"));
+    expect(names().join()).toContain("Standard");
+    expect(names()).toEqual([
+      "applications.use Standard",
+      "applications.use Premium",
+      "applications.use Unknown",
+    ]);
     expect(state.select).not.toHaveBeenCalled();
   });
-  it("sorts balance high first and retains all rows", async () => {
+  it("switching to another metric drops the previous sort and applies that metric's default direction", async () => {
     render(<ApplicationWorkspace {...props} />);
+    // 余额默认降序：Premium(50) 在前。
     await userEvent.click(
       screen.getByRole("button", { name: "applications.metrics.balanceUsd" }),
     );
-    expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]);
+    await waitFor(() => expect(names()[0]).toBe("applications.use Premium"));
+    // 换错误率（默认升序）：旧排序就地取消，按错误率排，Standard(0.02) 仍在前？
+    // a=0.02、b=0.01 → 升序 b 在前。
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.metrics.errorRate" }),
+    );
+    await waitFor(() => expect(names()[0]).toBe("applications.use Premium"));
+    expect(state.setOrder).not.toHaveBeenCalled();
     expect(names()).toHaveLength(3);
+  });
+  it("shows the sort arrow only on the active metric column", async () => {
+    render(<ApplicationWorkspace {...props} />);
+    const header = (name: string) =>
+      screen.getByRole("button", { name }).querySelector("svg");
+    // 默认无任何方向箭头。
+    for (const key of [
+      "rateMultiplier",
+      "errorRate",
+      "avgFirstTokenMs",
+      "balanceUsd",
+    ]) {
+      expect(header(`applications.metrics.${key}`)).toBeNull();
+    }
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.metrics.errorRate" }),
+    );
+    expect(header("applications.metrics.errorRate")).not.toBeNull();
+    expect(header("applications.metrics.balanceUsd")).toBeNull();
+  });
+  it("filters tiers by account and shows all again from the dropdown", async () => {
+    state.data.configurations = [
+      config("a", "Standard", true),
+      {
+        ...config("b", "Premium"),
+        account: { kind: "relay", id: 9 },
+        accountLabel: "Team",
+      },
+      config("c", "Unknown"),
+    ];
+    render(<ApplicationWorkspace {...props} />);
+    const filter = screen.getByRole("combobox", {
+      name: "applications.accountFilter",
+    });
+    await userEvent.click(filter);
+    await userEvent.click(
+      screen.getByRole("option", { name: "Example service · Team" }),
+    );
+    expect(screen.queryByText("Standard")).not.toBeInTheDocument();
+    expect(screen.getByText("Premium")).toBeVisible();
+    await userEvent.click(filter);
+    await userEvent.click(
+      screen.getByRole("option", { name: "applications.allAccounts" }),
+    );
+    expect(screen.getByText("Standard")).toBeVisible();
+    expect(screen.getByText("Unknown")).toBeVisible();
   });
   it("retains skipped tiers with a visible reason and manual action", async () => {
     state.routing.tiers[0].skipReason = "circuit_open";
