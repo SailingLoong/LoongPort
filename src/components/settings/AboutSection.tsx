@@ -961,7 +961,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     preflightTools.size > 0;
 
   // 下载状态短文案：`42% · 2.3 MB/s`（总量未知时 `12.4 MB · 2.3 MB/s`）。
-  // 纯数字与单位，不进 i18n；tabular-nums 防数字跳动时按钮宽度乱颤。
+  // 纯数字与单位，不进 i18n；渲染在按钮旁边的独立文本上（对比度与按钮宽度
+  // 都不受影响，见按钮旁注释），tabular-nums 让数字本身不跳。
   const downloadStatusText = (() => {
     if (!isDownloading) return null;
     const parts: string[] = [];
@@ -1079,11 +1080,6 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   {t("settings.updating")}
-                  {downloadStatusText && (
-                    <span className="tabular-nums text-muted-foreground">
-                      {downloadStatusText}
-                    </span>
-                  )}
                 </>
               ) : hasUpdate ? (
                 <>
@@ -1104,6 +1100,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 </>
               )}
             </Button>
+            {/* 进度文案放按钮外：贴主按钮底色对比度不足，且数字长短变化会撑动
+                按钮宽度；旁边的独立文本换多长都不影响布局。 */}
+            {downloadStatusText && (
+              <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+                {downloadStatusText}
+              </span>
+            )}
           </div>
         </div>
 
