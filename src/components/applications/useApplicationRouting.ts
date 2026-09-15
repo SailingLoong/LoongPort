@@ -64,16 +64,9 @@ export function useApplicationRouting(appId: AppId) {
     },
     onError,
   });
-  const model = useMutation({
-    mutationFn: (model: string | null) =>
-      applicationRoutingApi.setModel(appId, model),
-    onSuccess: refresh,
-    onError,
-  });
   return {
     ...query,
-    busy: order.isPending || failover.isPending || model.isPending,
-    setModel: model.mutateAsync,
+    busy: order.isPending || failover.isPending,
     setOrder: order.mutateAsync,
     setFailover: failover.mutateAsync,
   };
