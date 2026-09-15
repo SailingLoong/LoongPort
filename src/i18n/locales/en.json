@@ -3851,6 +3851,8 @@
     "search": "Search providers, accounts, tiers or models",
     "accountFilter": "Filter by account",
     "allAccounts": "All accounts",
+    "modelFilter": "Tier model",
+    "allModels": "All models",
     "source": "Service source",
     "default": "Default",
     "configured": "Current",

@@ -3851,6 +3851,8 @@
     "search": "搜索中转站、账号、档位或模型",
     "accountFilter": "按账号筛选",
     "allAccounts": "全部账号",
+    "modelFilter": "档位模型",
+    "allModels": "全部模型",
     "source": "服务来源",
     "default": "默认",
     "configured": "当前",

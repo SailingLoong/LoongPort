@@ -55,6 +55,7 @@ export function ApplicationWorkspace({
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<TierSort | null>(null);
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
+  const [modelFilter, setModelFilter] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // This is an optimistic UI snapshot, replaced by the next backend result.
   const [order, setOrder] = useState<{
@@ -115,6 +116,23 @@ export function ApplicationWorkspace({
     }
     return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
   }, [configurations]);
+  // 模型筛选的选项 = 各档位实际会用的模型（effectiveModel 优先），去重排序；
+  // 当前路由模型置顶加 ⚡，故障切换场景「选模型 → 过滤看链上还有谁」一步到位。
+  const tierModels = useMemo(() => {
+    const byId = new Map(
+      tiers.map((tier) => [tier.providerId, tier.effectiveModel]),
+    );
+    const models = new Set<string>();
+    for (const item of configurations) {
+      const model = byId.get(item.providerId) ?? item.model;
+      if (model) models.add(model);
+    }
+    const routingModel = routing.data?.model;
+    return [...models]
+      .sort((a, b) => a.localeCompare(b))
+      .sort((a, b) => (a === routingModel ? -1 : b === routingModel ? 1 : 0));
+  }, [configurations, tiers, routing.data?.model]);
+  const routingModel = routing.data?.model ?? null;
   const orderBusy =
     saving || routing.busy || routing.isPending || Boolean(routing.error);
   return (
@@ -173,6 +191,33 @@ export function ApplicationWorkspace({
                 }}
               />
             )}
+          {tierModels.length > 1 && (
+            <Select
+              value={modelFilter ?? "all"}
+              onValueChange={(value) =>
+                setModelFilter(value === "all" ? null : value)
+              }
+            >
+              <SelectTrigger
+                className="w-56"
+                aria-label={t("applications.modelFilter")}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {t("applications.allModels")}
+                </SelectItem>
+                {tierModels.map((modelOption) => (
+                  <SelectItem key={modelOption} value={modelOption}>
+                    {modelOption === routingModel
+                      ? `⚡ ${modelOption}`
+                      : modelOption}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           {accounts.length > 1 && (
             <Select
               value={accountFilter ?? "all"}
@@ -258,6 +303,7 @@ export function ApplicationWorkspace({
           storedIds={baseIds}
           search={search}
           accountFilter={accountFilter}
+          modelFilter={modelFilter}
           additive={model.data?.isAdditive ?? false}
           busy={model.busy}
           orderBusy={orderBusy}
