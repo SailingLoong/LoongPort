@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, Plus, Search, Settings2 } from "lucide-react";
 import type { Provider } from "@/types";
@@ -7,6 +7,13 @@ import type { AccountRoute } from "@/components/shell/navigation";
 import { isProxyAppId } from "@/config/appConfig";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
   Collapsible,
@@ -19,8 +26,8 @@ import { useApplicationRouting } from "./useApplicationRouting";
 import { ModelPicker } from "./ModelPicker";
 import { ApplicationTierTable } from "./ApplicationTierTable";
 import {
+  defaultDescending,
   sortTierIds,
-  tierMetrics,
   type TierMetric,
   type TierSort,
 } from "./tierMetrics";
@@ -47,6 +54,7 @@ export function ApplicationWorkspace({
   const [managing, setManaging] = useState(false);
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<TierSort | null>(null);
+  const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // This is an optimistic UI snapshot, replaced by the next backend result.
   const [order, setOrder] = useState<{
@@ -66,32 +74,47 @@ export function ApplicationWorkspace({
       .filter((item) => !rankedSet.has(item.providerId))
       .map((item) => item.providerId),
   ];
-  const orderedIds =
+  const baseIds =
     order && order.source === routing.data ? order.ids : storedIds;
-  const changeOrder = async (next: string[], nextSort: TierSort | null) => {
+  // 视图排序只重排展示，不落库；默认序 = 数据库档位序（拖拽维护）。
+  const orderedIds = sort ? sortTierIds(baseIds, tiers, sort) : baseIds;
+  const changeOrder = async (next: string[]) => {
     if (saving || routing.busy) return;
-    const previousOrder = order,
-      previousSort = sort;
+    const previousOrder = order;
     setSaving(true);
-    setSort(nextSort);
     setOrder({ source: routing.data, ids: next });
     try {
       await routing.setOrder(next);
     } catch {
       setOrder(previousOrder);
-      setSort(previousSort);
     } finally {
       setSaving(false);
     }
   };
+  // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
   const sortBy = (key: TierMetric) => {
-    const descending =
-      sort?.key === key
-        ? !sort.descending
-        : tierMetrics.find((metric) => metric.key === key)!.descending;
-    const nextSort = { key, descending };
-    void changeOrder(sortTierIds(orderedIds, tiers, nextSort), nextSort);
+    if (sort?.key !== key) {
+      setSort({ key, descending: defaultDescending(key) });
+      return;
+    }
+    if (sort.descending === defaultDescending(key)) {
+      setSort({ key, descending: !sort.descending });
+    } else {
+      setSort(null);
+    }
   };
+  const accounts = useMemo(() => {
+    const byKey = new Map<string, { key: string; label: string }>();
+    for (const item of configurations) {
+      if (!item.account) continue;
+      const key = `${item.account.kind}:${item.account.id}`;
+      const label =
+        [item.serviceName, item.accountLabel].filter(Boolean).join(" · ") ||
+        key;
+      if (!byKey.has(key)) byKey.set(key, { key, label });
+    }
+    return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [configurations]);
   const orderBusy =
     saving || routing.busy || routing.isPending || Boolean(routing.error);
   return (
@@ -150,6 +173,31 @@ export function ApplicationWorkspace({
                 }}
               />
             )}
+          {accounts.length > 1 && (
+            <Select
+              value={accountFilter ?? "all"}
+              onValueChange={(value) =>
+                setAccountFilter(value === "all" ? null : value)
+              }
+            >
+              <SelectTrigger
+                className="w-56"
+                aria-label={t("applications.accountFilter")}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {t("applications.allAccounts")}
+                </SelectItem>
+                {accounts.map((account) => (
+                  <SelectItem key={account.key} value={account.key}>
+                    {account.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <div className="relative min-w-60 max-w-md flex-1">
             <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
             <Input
@@ -207,14 +255,16 @@ export function ApplicationWorkspace({
           configurations={configurations}
           tiers={tiers}
           orderedIds={orderedIds}
+          storedIds={baseIds}
           search={search}
+          accountFilter={accountFilter}
           additive={model.data?.isAdditive ?? false}
           busy={model.busy}
           orderBusy={orderBusy}
           sort={sort}
           onSort={sortBy}
           onReorder={(next) => {
-            void changeOrder(next, null);
+            void changeOrder(next);
           }}
           onSelect={(item) => {
             void model.select(item);

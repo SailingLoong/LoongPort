@@ -14,7 +14,7 @@ export const tierMetrics = [
   },
   {
     key: "avgFirstTokenMs",
-    descending: false,
+    descending: true,
     format: (value: number) => `${(value / 1000).toFixed(2)}s`,
   },
   {
@@ -39,7 +39,12 @@ export interface TierSort {
   descending: boolean;
 }
 
-/** A user-requested snapshot order. Metric updates never reorder the list. */
+/** 某指标的首次点击方向（用户为每个指标定的「默认那个」↑/↓）。 */
+export function defaultDescending(key: TierMetric): boolean {
+  return tierMetrics.find((metric) => metric.key === key)!.descending;
+}
+
+/** 视图排序：只重排当前展示，不落库。默认序 = 数据库里的档位序（拖拽维护）。 */
 export function sortTierIds(
   ids: string[],
   tiers: ApplicationRoutingTier[],
