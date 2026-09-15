@@ -88,7 +88,7 @@ describe("AboutSection", () => {
 });
 
 describe("AboutSection manual update download progress", () => {
-  it("surfaces percent and speed on the updating button while chunks arrive", async () => {
+  it("shows percent and speed beside (not on) the updating button while chunks arrive", async () => {
     const settings = await import("@/lib/api");
     const event = await import("@tauri-apps/api/event");
     let handler:
@@ -131,8 +131,10 @@ describe("AboutSection manual update download progress", () => {
     });
 
     const updating = screen.getByRole("button", { name: /settings.updating/ });
-    expect(updating).toHaveTextContent("20%");
-    expect(updating).toHaveTextContent("4.0 MB/s");
+    // 进度文案在按钮外的独立文本上（对比度 + 按钮宽度稳定），按钮本体只有转圈与「更新中」。
+    expect(updating).not.toHaveTextContent("20%");
+    const status = screen.getByText(/20% · 4\.0 MB\/s/);
+    expect(updating).not.toContainElement(status);
 
     nowSpy.mockRestore();
   });
