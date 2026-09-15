@@ -14,8 +14,5 @@ pub(crate) mod startup;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod transition;
-#[cfg(test)]
-mod upgrade_diag_test;
-
 pub(crate) use crypto::{VaultContext, VaultMetadata};
 pub(crate) use error::SecretError;

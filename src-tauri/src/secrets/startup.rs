@@ -191,6 +191,7 @@ pub(crate) async fn restore_startup_vault(
 }
 
 fn present_error(app: &tauri::AppHandle, error: &str) {
+    log::error!("启动解锁失败（secret startup failed）: {error}");
     crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
         path: String::new(),
         error: error.to_owned(),
