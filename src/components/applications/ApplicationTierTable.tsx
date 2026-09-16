@@ -395,7 +395,7 @@ function TierRow({
           <Button
             size="sm"
             variant={current ? "outline" : "default"}
-            disabled={busy || !item.canSelect}
+            disabled={busy || !item.canSelect || (!additive && current)}
             aria-label={`${t(additive ? "applications.enable" : "applications.use")} ${name}`}
             onClick={() => onSelect(item)}
           >
