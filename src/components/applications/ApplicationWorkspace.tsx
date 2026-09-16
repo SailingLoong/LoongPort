@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Check,
@@ -107,20 +107,18 @@ export function ApplicationWorkspace({
       .map((item) => item.providerId),
   ];
   const failoverEnabled = Boolean(routing.data?.autoFailoverEnabled);
-  // 故障切换关掉时暂存失去提交入口，就地丢弃，避免幽灵待应用状态。
-  useEffect(() => {
-    if (!failoverEnabled) setStagedIds(null);
-  }, [failoverEnabled]);
-  const baseIds = failoverEnabled
-    ? (stagedIds ?? storedIds)
-    : order && order.source === routing.data
-      ? order.ids
-      : storedIds;
+  // 草稿语义统一（2026-09-16 用户定调）：路由类应用的任何调整（拖拽/排序）
+  // 都只进草稿，点「应用」才写库——与故障切换开关状态无关；非路由类应用
+  // （无故障切换概念）维持拖拽即时保存。
+  const draftOrdering = isProxyAppId(appId);
+  const baseIds =
+    stagedIds ??
+    (order && order.source === routing.data ? order.ids : storedIds);
   // 视图排序只重排展示，不落库；默认序 = 数据库档位序（拖拽维护）。
   const orderedIds = sort ? sortTierIds(baseIds, tiers, sort) : baseIds;
   const changeOrder = async (next: string[]) => {
     if (saving || routing.busy) return;
-    if (failoverEnabled) {
+    if (draftOrdering) {
       setStagedIds(next);
       return;
     }
@@ -139,7 +137,7 @@ export function ApplicationWorkspace({
   // 排出来的顺序同样算——排序视图下也想「就按这个顺序切换」。待应用计数 =
   // 显示序与存储序位置不同的档位数；两者一致（纯筛选视图）就没有待应用。
   const pendingOrderCount = (() => {
-    if (!failoverEnabled) return 0;
+    if (!draftOrdering) return 0;
     if (orderedIds.length !== storedIds.length) return orderedIds.length;
     let count = 0;
     for (let index = 0; index < orderedIds.length; index += 1) {
@@ -260,9 +258,10 @@ export function ApplicationWorkspace({
                   {t("applications.autoFailover")}
                 </label>
               )}
-              {failoverEnabled && pendingOrderCount > 0 && (
+              {draftOrdering && pendingOrderCount > 0 && (
                 <>
-                  {/* 撤回比主操作轻一级（ghost），丢弃未应用的拖拽/排序回到存储序。 */}
+                  {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序，
+                      回到之前的配置（存储序）。 */}
                   <Button
                     size="sm"
                     variant="ghost"

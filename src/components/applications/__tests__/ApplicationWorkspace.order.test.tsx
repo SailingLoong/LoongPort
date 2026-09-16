@@ -121,24 +121,38 @@ describe("failover order staging", () => {
     await waitFor(() =>
       expect(state.setOrder).toHaveBeenCalledWith(["c", "a", "b"]),
     );
-    await waitFor(() =>
+    // 模拟真实链路的应用后刷新：routing 查询换新对象、tiers 序=已应用序，
+    // 乐观快照随之失效、待应用归零、按钮消失。
+    state.routing = {
+      ...state.routing,
+      tiers: [
+        state.routing.tiers[2],
+        state.routing.tiers[0],
+        state.routing.tiers[1],
+      ],
+    };
+    view.rerender(<ApplicationWorkspace {...props} />);
+    await waitFor(() => {
+      expect(tableProps.current.orderedIds).toEqual(["c", "a", "b"]);
       expect(
         screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-      ).not.toBeInTheDocument(),
-    );
+      ).not.toBeInTheDocument();
+    });
     view.unmount();
   });
 
-  it("persists immediately when failover is off (no apply button)", async () => {
+  it("stages even when failover is off: only Apply persists (unified draft)", async () => {
     state.routing.autoFailoverEnabled = false;
     render(<ApplicationWorkspace {...props} />);
     await drag(["b", "a", "c"]);
+    // 草稿语义统一（2026-09-16 定调）：故障切换关着也一样——只暂存，不落库。
+    expect(state.setOrder).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications\.applyOrder/ }),
+    );
     await waitFor(() =>
       expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
     );
-    expect(
-      screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-    ).not.toBeInTheDocument();
   });
 
   it("offers Apply for a metric-sorted view and applies the displayed order", async () => {
@@ -155,10 +169,19 @@ describe("failover order staging", () => {
     await waitFor(() =>
       expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
     );
-    // 应用后临时排序与暂存一起清空，按钮消失。
+    // 应用后临时排序与暂存一起清空；模拟刷新后显示序=已应用的排序序。
+    state.routing = {
+      ...state.routing,
+      tiers: [
+        state.routing.tiers[1],
+        state.routing.tiers[0],
+        state.routing.tiers[2],
+      ],
+    };
+    view.rerender(<ApplicationWorkspace {...props} />);
     await waitFor(() => {
       expect(tableProps.current.sort).toBeNull();
-      expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+      expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
       expect(
         screen.queryByRole("button", { name: /applications\.applyOrder/ }),
       ).not.toBeInTheDocument();
@@ -189,25 +212,18 @@ describe("failover order staging", () => {
     view.unmount();
   });
 
-  it("discards staged order when failover turns off (no ghost pending state)", async () => {
+  it("staged draft survives failover toggling until applied", async () => {
     const view = render(<ApplicationWorkspace {...props} />);
     await drag(["b", "a", "c"]);
-    expect(
-      screen.getByRole("button", { name: /applications\.applyOrder/ }),
-    ).toBeInTheDocument();
     state.routing.autoFailoverEnabled = false;
     view.rerender(<ApplicationWorkspace {...props} />);
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-      ).not.toBeInTheDocument(),
+    // 开关切换不吞草稿：仍可应用。
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications\.applyOrder/ }),
     );
-    // 重新开启后暂存不复活：丢弃是一次性的。
-    state.routing.autoFailoverEnabled = true;
-    view.rerender(<ApplicationWorkspace {...props} />);
-    expect(
-      screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-    ).not.toBeInTheDocument();
-    expect(state.setOrder).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
+    );
+    view.unmount();
   });
 });
