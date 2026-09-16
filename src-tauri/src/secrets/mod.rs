@@ -2,6 +2,7 @@
 pub(crate) mod bootstrap_restore;
 mod crypto;
 pub(crate) mod error;
+pub(crate) mod export;
 pub(crate) mod files;
 pub(crate) mod inventory;
 pub(crate) mod key_store;

@@ -3960,7 +3960,15 @@
     "resetFailed": "无法重置。请检查新口令，或关闭此窗口后重新检查数据。",
     "enterApp": "重启应用",
     "setupTitle": "设置保护口令",
-    "setupDescription": "系统凭据库不可用。请设置至少 12 个字符的保护口令，用于加密数据和以后解锁。"
+    "setupDescription": "系统凭据库不可用。请设置至少 12 个字符的保护口令，用于加密数据和以后解锁。",
+    "exportPlainTitle": "导出明文备份",
+    "exportPlainDescription": "把全部密钥与凭据导出为一份明文 JSON 文件（仅本机保存，0600 权限）。日常存储始终加密，此导出仅在你主动需要时使用。",
+    "exportPlainAction": "导出明文备份…",
+    "exportPlainConfirmTitle": "导出明文密钥备份？",
+    "exportPlainWarning": "导出的文件将以明文包含你的全部站点密钥、OAuth 凭据等敏感信息，请妥善保管（建议存放于加密盘并避免分享）。此操作不改变应用的加密存储。",
+    "exportPlainConfirm": "导出",
+    "exportPlainDone": "已导出（见所选位置）",
+    "exportPlainFailed": "导出失败"
   },
   "syncRestore": {
     "title": "恢复云端配置",

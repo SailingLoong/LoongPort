@@ -3960,7 +3960,15 @@
     "resetFailed": "Unable to reset. Check the new password, or close this dialog and review the data again.",
     "enterApp": "Restart app",
     "setupTitle": "Set a protection password",
-    "setupDescription": "The system credential store is unavailable. Set a password of at least 12 characters to encrypt your data and unlock it later."
+    "setupDescription": "The system credential store is unavailable. Set a password of at least 12 characters to encrypt your data and unlock it later.",
+    "exportPlainTitle": "Export plaintext backup",
+    "exportPlainDescription": "Exports all keys and credentials as a plaintext JSON file (saved locally with 0600 permissions). Storage stays encrypted; use this only when you explicitly need it.",
+    "exportPlainAction": "Export plaintext…",
+    "exportPlainConfirmTitle": "Export plaintext key backup?",
+    "exportPlainWarning": "The exported file will contain all your site keys, OAuth credentials and other secrets in plaintext. Store it carefully (an encrypted drive is recommended) and never share it. This does not change the app's encrypted storage.",
+    "exportPlainConfirm": "Export",
+    "exportPlainDone": "Exported (see the chosen location)",
+    "exportPlainFailed": "Export failed"
   },
   "syncRestore": {
     "title": "Restore cloud configuration",

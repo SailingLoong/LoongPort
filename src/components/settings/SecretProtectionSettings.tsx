@@ -2,10 +2,19 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { FileDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface ProtectionStatus {
   automaticUnlock: boolean;
@@ -20,6 +29,11 @@ export function SecretProtectionSettings() {
   const [password, setPassword] = useState("");
   const [rotate, setRotate] = useState(false);
   const [automatic, setAutomatic] = useState<boolean | null>(null);
+  const [confirmExport, setConfirmExport] = useState(false);
+  const exportPlain = useMutation({
+    mutationFn: () => invoke<string | null>("export_plaintext_secrets"),
+    onSuccess: () => setConfirmExport(false),
+  });
   const status = useQuery({
     queryKey: protectionKey,
     queryFn: () => invoke<ProtectionStatus>("get_secret_protection"),
@@ -130,6 +144,54 @@ export function SecretProtectionSettings() {
           </Button>
         </form>
       ) : null}
+      <div className="flex items-center justify-between gap-4 border-t pt-4">
+        <div className="space-y-1">
+          <Label>{t("secrets.exportPlainTitle")}</Label>
+          <p className="text-xs text-muted-foreground">
+            {t("secrets.exportPlainDescription")}
+          </p>
+          {exportPlain.isSuccess && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {t("secrets.exportPlainDone")}
+            </p>
+          )}
+          {exportPlain.isError && (
+            <p role="alert" className="text-xs text-destructive">
+              {t("secrets.exportPlainFailed")}
+            </p>
+          )}
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => setConfirmExport(true)}
+          disabled={exportPlain.isPending}
+        >
+          <FileDown className="h-4 w-4" />
+          {t("secrets.exportPlainAction")}
+        </Button>
+      </div>
+      <Dialog open={confirmExport} onOpenChange={setConfirmExport}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("secrets.exportPlainConfirmTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("secrets.exportPlainWarning")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" onClick={() => setConfirmExport(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              disabled={exportPlain.isPending}
+              onClick={() => exportPlain.mutate()}
+            >
+              {t("secrets.exportPlainConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

@@ -1715,6 +1715,7 @@ pub fn run() {
             secrets::rewrap::get_secret_protection,
             secrets::rewrap::set_secret_password,
             secrets::rewrap::rotate_secret_key,
+            secrets::export::export_plaintext_secrets,
             commands::get_providers,
             commands::get_application_overview,
             commands::preset_referral_urls,
