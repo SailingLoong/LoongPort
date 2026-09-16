@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+mod announcements;
+pub use announcements::*;
 mod application_routing;
 pub use application_routing::*;
 

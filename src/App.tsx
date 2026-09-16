@@ -104,6 +104,7 @@ import {
 import UnifiedSkillsPanel, {
   type SkillsCheckUpdatesState,
 } from "@/components/skills/UnifiedSkillsPanel";
+import { AnnouncementDialog } from "@/components/AnnouncementDialog";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { ImageTabPage } from "@/components/relay/ImageTabPage";
@@ -1728,6 +1729,9 @@ function App() {
       />
 
       <DeepLinkImportDialog />
+
+      {/* 远端公告：状态机在组件内，这里只挂一行。无公告时零存在感。 */}
+      <AnnouncementDialog />
 
       {/* 「点 Star 领注册礼」弹窗：新人引导事件与红点点击共用，状态机在组件内；
           这里只持开关（offer 在即弹）。 */}

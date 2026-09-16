@@ -257,6 +257,22 @@ pub struct StarRewardConfig {
     pub amount_usd: u64,
 }
 
+/// 远端公告（2026-09-16 预留）：数据随签名远端配置下发，改文案零发版。
+///
+/// 当前 `type` 只实现 `"dialog"`（启动后弹一次、确认即不再弹）；未知类型
+/// 静默跳过——远端先行发新类型时老客户端自然自愈，不需要跟随发版。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct Announcement {
+    /// 稳定标识：客户端按它记「已确认」。要再弹一次必须换 id。
+    pub id: String,
+    /// 展示类型（JSON 键名 `type`；Rust 侧避开关键字）。当前认 `dialog`。
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub title: String,
+    /// 正文，支持换行（前端 `whitespace-pre-line`）。
+    pub body: String,
+}
+
 /// 中转站档位的**模型选型表**（远端可部分覆盖）。
 ///
 /// 服务的场景：外部模型代际更替（新模型在中转站目录里铺开）快于客户端发版节奏，
@@ -310,6 +326,10 @@ pub struct RemoteConfig {
     /// 赞助中转站，按维护者给的顺序（**不排序** —— 顺序是他的编排意图）。
     #[serde(default)]
     pub sponsors: Vec<Sponsor>,
+    /// 公告列表（见 [`Announcement`]）。空列表/缺席 = 没有公告，一切如旧；
+    /// 维护者撤空即可下线。老配置无此键靠 `#[serde(default)]`。
+    #[serde(default)]
+    pub announcements: Vec<Announcement>,
     /// 站点 → 邀请码。key 推荐**注册域（apex）**；按具体 host 录入也认（读宽，
     /// 见 [`remote_code_get`]），身份归一与 [`super::aff`] 同一套。
     #[serde(default)]
@@ -539,6 +559,20 @@ fn write_cache_at(
         log::debug!("远端配置签名缓存写不进去，清掉配置缓存: {e}");
         let _ = std::fs::remove_file(cache_json);
     }
+}
+
+/// 过滤出当前客户端认识且内容完整的公告：未知类型、空 id/标题/正文一律跳过
+/// （远端坏值的失败模式 = 「不弹」，不是阻断整份配置的其它字段）。
+pub fn effective_announcements(cfg: &RemoteConfig) -> Vec<&Announcement> {
+    cfg.announcements
+        .iter()
+        .filter(|a| {
+            a.kind == "dialog"
+                && !a.id.trim().is_empty()
+                && !a.title.trim().is_empty()
+                && !a.body.trim().is_empty()
+        })
+        .collect()
 }
 
 /// 读上次成功拉取的缓存，**并重新验签**。
@@ -1211,6 +1245,7 @@ mod tests {
             vendor_invite_urls: std::collections::BTreeMap::new(),
             preset_referral_urls: std::collections::BTreeMap::new(),
             sponsors: vec![],
+            announcements: vec![],
             aff_codes,
             promo_codes: std::collections::BTreeMap::new(),
             tier_configs: std::collections::BTreeMap::new(),
@@ -1229,6 +1264,7 @@ mod tests {
             vendor_invite_urls: std::collections::BTreeMap::new(),
             preset_referral_urls: std::collections::BTreeMap::new(),
             sponsors: vec![],
+            announcements: vec![],
             aff_codes: std::collections::BTreeMap::new(),
             promo_codes,
             tier_configs: std::collections::BTreeMap::new(),

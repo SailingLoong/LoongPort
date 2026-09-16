@@ -535,6 +535,10 @@ pub struct AppSettings {
     /// User has confirmed the first-run welcome notice
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_run_notice_confirmed: Option<bool>,
+    /// 远端公告「已确认」的 id 清单（设备本地）。任何关闭方式都算已读；
+    /// 只登记远端当前存在的 id（见 `commands::announcements`），坏值灌不进来。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acknowledged_announcements: Vec<String>,
     /// User has confirmed the common config first-run notice
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub common_config_confirmed: Option<bool>,
@@ -716,6 +720,7 @@ impl Default for AppSettings {
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
             first_run_notice_confirmed: None,
+            acknowledged_announcements: Vec::new(),
             common_config_confirmed: None,
             language: None,
             visible_apps: None,

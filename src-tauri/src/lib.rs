@@ -2015,6 +2015,8 @@ pub fn run() {
             commands::get_application_routing,
             commands::set_application_priority,
             commands::set_application_tier_blocked,
+            commands::get_pending_announcements,
+            commands::acknowledge_announcement,
             commands::set_application_failover,
             commands::get_auto_mode_status,
             commands::set_auto_mode_enabled,
