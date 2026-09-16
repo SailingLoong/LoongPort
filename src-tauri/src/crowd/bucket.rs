@@ -1003,7 +1003,8 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         // (id, model, status, source, input, output, cache_read, cost)
         // input 语义按 codex LEGACY：input 含 cache_read，fresh = input - cache_read。
-        let rows: &[(&str, &str, i64, &str, i64, i64, i64, &str)] = &[
+        type SeedRow<'a> = (&'a str, &'a str, i64, &'a str, i64, i64, i64, &'a str);
+        let rows: &[SeedRow] = &[
             ("a", "gpt-sol", 200, "proxy", 1000, 500, 800, "0.5"),
             ("b", "gpt-sol", 200, "proxy", 600, 300, 0, "0.3"),
             ("c", "gpt-terra", 500, "proxy", 0, 0, 0, "0"),
