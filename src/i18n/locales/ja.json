@@ -3906,7 +3906,19 @@
     "applyOrder": "順序を適用",
     "blockTier": "ブロック",
     "unblockTier": "ブロック解除",
-    "discardOrder": "キャンセル"
+    "discardOrder": "キャンセル",
+    "orderProfiles": "順序プロファイル",
+    "orderProfilesEmpty": "プロファイルはまだありません。現在の順序を保存して作成できます",
+    "orderProfileSaveCurrent": "現在の順序を保存…",
+    "orderProfileSaveHint": "現在表示中の順序（未適用のドラッグ・並べ替えを含む）を保存します。同名は上書き。",
+    "orderProfileNamePlaceholder": "プロファイル名",
+    "orderProfileDelete": "{{name}} を削除",
+    "orderProfileSaveFailed": "プロファイル操作に失敗しました",
+    "orderProfileSaved": "「{{name}}」を保存しました",
+    "orderProfilesImported": "{{count}} 件のプロファイルをインポートしました",
+    "orderProfileExported": "プロファイルをエクスポートしました",
+    "orderProfileImport": "インポート…",
+    "orderProfileExport": "エクスポート…"
   },
   "secrets": {
     "unlockTitle": "認証情報のロック解除",

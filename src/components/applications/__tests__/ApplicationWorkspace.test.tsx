@@ -43,6 +43,10 @@ vi.mock("react-i18next", () => ({
 vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
   SwitchTierConfirmDialog: () => null,
 }));
+// 配置档菜单走 react-query，主文件不包 Provider；其行为在 order.test 专测。
+vi.mock("../OrderProfilesMenu", () => ({
+  OrderProfilesMenu: () => null,
+}));
 const config = (id: string, name: string, current = false) => ({
   providerId: id,
   name,

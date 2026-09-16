@@ -3906,7 +3906,19 @@
     "applyOrder": "应用此顺序",
     "blockTier": "屏蔽",
     "unblockTier": "取消屏蔽",
-    "discardOrder": "取消"
+    "discardOrder": "取消",
+    "orderProfiles": "配置档",
+    "orderProfilesEmpty": "暂无配置档，先「保存当前顺序」建一份",
+    "orderProfileSaveCurrent": "保存当前顺序…",
+    "orderProfileSaveHint": "保存的是当前显示顺序（含未应用的拖拽与排序）；同名覆盖。",
+    "orderProfileNamePlaceholder": "配置名称",
+    "orderProfileDelete": "删除 {{name}}",
+    "orderProfileSaveFailed": "配置档操作失败",
+    "orderProfileSaved": "已保存「{{name}}」",
+    "orderProfilesImported": "已导入 {{count}} 份配置档",
+    "orderProfileExported": "已导出配置档",
+    "orderProfileImport": "导入…",
+    "orderProfileExport": "导出…"
   },
   "secrets": {
     "unlockTitle": "解锁凭据",

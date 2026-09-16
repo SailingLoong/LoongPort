@@ -31,6 +31,7 @@ import { SwitchTierConfirmDialog } from "@/components/relay/SwitchTierConfirmDia
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
 import { ApplicationTierTable } from "./ApplicationTierTable";
+import { OrderProfilesMenu } from "./OrderProfilesMenu";
 import {
   defaultDescending,
   sortTierIds,
@@ -284,6 +285,18 @@ export function ApplicationWorkspace({
                     <span className="tabular-nums">({pendingOrderCount})</span>
                   </Button>
                 </>
+              )}
+              {draftOrdering && (
+                <OrderProfilesMenu
+                  appType={appId}
+                  displayedIds={orderedIds}
+                  storedIds={storedIds}
+                  onLoadDraft={(ids) => {
+                    // 载入配置档 = 进草稿：清临时排序，照常「应用/取消」。
+                    setSort(null);
+                    setStagedIds(ids);
+                  }}
+                />
               )}
             </div>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">

@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+mod order_profiles;
+pub use order_profiles::*;
 mod announcements;
 pub use announcements::*;
 mod application_routing;

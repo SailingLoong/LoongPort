@@ -3906,7 +3906,19 @@
     "applyOrder": "Apply order",
     "blockTier": "Block",
     "unblockTier": "Unblock",
-    "discardOrder": "Cancel"
+    "discardOrder": "Cancel",
+    "orderProfiles": "Order profiles",
+    "orderProfilesEmpty": "No profiles yet — save the current order to create one",
+    "orderProfileSaveCurrent": "Save current order…",
+    "orderProfileSaveHint": "Saves the currently displayed order (including unapplied drags and sorting); same name overwrites.",
+    "orderProfileNamePlaceholder": "Profile name",
+    "orderProfileDelete": "Delete {{name}}",
+    "orderProfileSaveFailed": "Profile operation failed",
+    "orderProfileSaved": "Saved \"{{name}}\"",
+    "orderProfilesImported": "Imported {{count}} profiles",
+    "orderProfileExported": "Profiles exported",
+    "orderProfileImport": "Import…",
+    "orderProfileExport": "Export…"
   },
   "secrets": {
     "unlockTitle": "Unlock credentials",
