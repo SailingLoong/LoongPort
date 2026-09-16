@@ -1298,11 +1298,41 @@ fn codex_supported_reasoning_levels(levels: &[String]) -> Value {
     json!(entries)
 }
 
+/// Apply a reasoning-level set onto a catalog entry. Returns true when the
+/// set yielded at least one canonical effort, so callers can skip further
+/// fallbacks. `template_default` is the base entry's `default_reasoning_level`
+/// (from the profile template or an official vendor entry) used as the
+/// fallback when no explicit default applies; `explicit_default` is the
+/// caller's own declared default (validated against the canonical set).
+fn apply_codex_reasoning_levels(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    template_default: Option<&str>,
+    explicit_default: Option<&str>,
+    levels: &[String],
+) -> bool {
+    let canonical = codex_canonical_efforts(levels);
+    if canonical.is_empty() {
+        return false;
+    }
+    let supported = codex_supported_reasoning_levels(levels);
+    entry_obj.insert("supported_reasoning_levels".to_string(), supported);
+
+    // Default: explicit value wins; otherwise keep the base default when it
+    // is still supported; otherwise fall back to the highest supported level
+    // in canonical order. All candidates are validated against the canonical
+    // set so the default can never reference a dropped effort.
+    let default_level = explicit_default
+        .filter(|level| canonical.contains(level))
+        .or_else(|| template_default.filter(|level| canonical.contains(level)))
+        .or_else(|| canonical.last().copied());
+    if let Some(default_level) = default_level {
+        entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
+    }
+    true
+}
+
 /// Apply a per-model reasoning-level override onto a catalog entry. Returns
 /// true when the override was applied (so callers can skip further work).
-/// `template_default` is the base entry's `default_reasoning_level` (from the
-/// profile template or an official vendor entry) used as the fallback when the
-/// user did not declare one explicitly.
 fn apply_codex_reasoning_level_override(
     entry_obj: &mut serde_json::Map<String, Value>,
     template_default: Option<&str>,
@@ -1311,27 +1341,12 @@ fn apply_codex_reasoning_level_override(
     let Some(levels) = spec.reasoning_levels.as_deref() else {
         return false;
     };
-    let canonical = codex_canonical_efforts(levels);
-    if canonical.is_empty() {
-        return false;
-    }
-    let supported = codex_supported_reasoning_levels(levels);
-    entry_obj.insert("supported_reasoning_levels".to_string(), supported);
-
-    // Default: explicit user value wins; otherwise keep the base default when
-    // it is still supported; otherwise fall back to the highest supported
-    // level in canonical order. All candidates are validated against the
-    // canonical set so the default can never reference a dropped effort.
-    let default_level = spec
-        .default_reasoning_level
-        .as_deref()
-        .filter(|level| canonical.contains(level))
-        .or_else(|| template_default.filter(|level| canonical.contains(level)))
-        .or_else(|| canonical.last().copied());
-    if let Some(default_level) = default_level {
-        entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
-    }
-    true
+    apply_codex_reasoning_levels(
+        entry_obj,
+        template_default,
+        spec.default_reasoning_level.as_deref(),
+        levels,
+    )
 }
 
 /// The official catalog entry whose slug matches, if any. Case-insensitive —
@@ -1365,18 +1380,20 @@ fn official_model_entry_for_slug<'a>(
 /// for users without the pin. The template default is kept when it stays
 /// inside the mirrored set; otherwise the set's highest level replaces it so
 /// the default can never reference a level the picker does not offer.
+///
+/// Returns whether an official match replaced the level set.
 fn mirror_official_reasoning_levels(
     entry_obj: &mut serde_json::Map<String, Value>,
     template_default: Option<&str>,
     slug: &str,
     official_models: &[Value],
-) {
+) -> bool {
     let Some(levels) = official_model_entry_for_slug(slug, official_models)
         .and_then(|entry| entry.get("supported_reasoning_levels"))
         .and_then(Value::as_array)
         .filter(|levels| !levels.is_empty())
     else {
-        return;
+        return false;
     };
     entry_obj.insert(
         "supported_reasoning_levels".to_string(),
@@ -1388,13 +1405,14 @@ fn mirror_official_reasoning_levels(
         .filter_map(|level| level.get("effort").and_then(Value::as_str))
         .collect();
     if template_default.is_some_and(|default| supported_efforts.contains(&default)) {
-        return;
+        return true;
     }
     // Official arrays are ordered lowest → highest, so the last element is the
     // strongest level offered.
     if let Some(highest) = supported_efforts.last() {
         entry_obj.insert("default_reasoning_level".to_string(), json!(highest));
     }
+    true
 }
 
 /// Per-model window facts resolved from the official Codex catalog
@@ -1531,16 +1549,30 @@ fn codex_catalog_model_entry(
         }
     }
 
-    // Per-model reasoning levels override the template's conservative
-    // none/high default (e.g. a LiteLLM gateway serving a model that accepts
-    // low/medium/high/xhigh/max). Applies to every profile.
+    // Reasoning levels resolve in priority order: an explicit per-row
+    // declaration wins (the gateway may normalize or reject levels it does
+    // not know — vendor presets encode exactly that), then the official
+    // mirror (official model + official wire = official truth, native
+    // `/responses` only), then the curated vendor fallback for known
+    // third-party models on otherwise-bare rows (relay/aggregator tiers).
+    // Anything else keeps the template's conservative none/high.
     let template_default = template
         .get("default_reasoning_level")
         .and_then(|value| value.as_str());
-    if !apply_codex_reasoning_level_override(entry_obj, template_default, spec)
-        && profile == CodexCatalogToolProfile::NativeResponses
-    {
-        mirror_official_reasoning_levels(entry_obj, template_default, &spec.model, official_models);
+    let explicit = apply_codex_reasoning_level_override(entry_obj, template_default, spec);
+    let mut mirrored = false;
+    if !explicit && profile == CodexCatalogToolProfile::NativeResponses {
+        mirrored = mirror_official_reasoning_levels(
+            entry_obj,
+            template_default,
+            &spec.model,
+            official_models,
+        );
+    }
+    if !explicit && !mirrored {
+        if let Some(curated) = curated_reasoning_levels_for_slug(&spec.model) {
+            apply_codex_reasoning_levels(entry_obj, template_default, None, &curated);
+        }
     }
 
     entry
@@ -1771,7 +1803,18 @@ fn push_home_codex_cli_candidates(
     seen: &mut HashSet<String>,
     home: &Path,
 ) {
+    // A codex installed as an app-server plugin (e.g. by a desktop client that
+    // embeds codex) is the ONLY codex on some machines — never on PATH, never
+    // in a package-manager layout. Without this candidate the bundled official
+    // catalog is unreachable there and every official-slug tier falls back to
+    // the conservative reasoning levels.
+    let codex_plugin_appserver = if cfg!(windows) {
+        ".codex/plugins/.plugin-appserver/codex.exe"
+    } else {
+        ".codex/plugins/.plugin-appserver/codex"
+    };
     for relative in [
+        codex_plugin_appserver,
         ".nvm/current/bin/codex",
         ".volta/bin/codex",
         ".asdf/shims/codex",
@@ -1990,6 +2033,58 @@ fn load_codex_deepseek_official_catalog_models() -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Reference table of per-model reasoning levels for third-party models on
+/// rows that declare nothing (relay/aggregator tiers list bare model ids).
+/// Values are the union of the vendor-endpoint curations in the frontend
+/// presets (`src/config/codexProviderPresets.ts`) — same vendor truth, merged
+/// across gateways; a vitest gate keeps the two sources from drifting apart.
+/// Only consulted when the row declared no `reasoningLevels` AND the slug is
+/// not an official codex model (official rows mirror the official set).
+fn load_codex_curated_reasoning_levels() -> Vec<(String, Vec<String>)> {
+    let text = include_str!("resources/codex_curated_reasoning_levels.json");
+    let catalog: Value =
+        serde_json::from_str(text).expect("bundled curated reasoning levels must be valid JSON");
+    catalog
+        .get("models")
+        .and_then(|models| models.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|entry| {
+                    let slug = entry.get("model")?.as_str()?.trim().to_string();
+                    let levels = entry
+                        .get("reasoningLevels")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|level| level.as_str().map(str::to_string))
+                        .collect::<Vec<_>>();
+                    if slug.is_empty() || levels.is_empty() {
+                        return None;
+                    }
+                    Some((slug, levels))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Curated reasoning levels for `slug`, if the reference table knows it.
+/// Matches the slug case-insensitively, then retries on the basename (after
+/// a `vendor/` prefix) so `zai-org/glm-5.1` also serves a bare `glm-5.1` row.
+fn curated_reasoning_levels_for_slug(slug: &str) -> Option<Vec<String>> {
+    let table = load_codex_curated_reasoning_levels();
+    let matches = |candidate: &str| candidate.eq_ignore_ascii_case(slug.trim());
+    table
+        .iter()
+        .find(|(candidate, _)| matches(candidate))
+        .or_else(|| {
+            table
+                .iter()
+                .find(|(candidate, _)| candidate.rsplit('/').next().is_some_and(matches))
+        })
+        .map(|(_, levels)| levels.clone())
+}
+
 /// Official vendor catalog entries for the provider in `config_text`, if its
 /// gateway ships one. Only the `NativeResponses` profile qualifies: ProxyChat
 /// runs through cc-switch's converter (gpt-5.5 template contract) and the
@@ -2200,27 +2295,14 @@ fn codex_model_catalog_from_specs(
     json!({ "models": entries })
 }
 
-/// The official Codex catalog entries used for mirroring official facts
-/// (context windows, reasoning levels) into generated catalogs.
-///
-/// Primary source is the catalog BUNDLED with the codex binary
-/// (`codex debug models --bundled`): it exists on every machine that has codex
-/// — including relay-only setups where the official models endpoint is never
-/// queried and `models_cache.json` is therefore never written (a pure relay
-/// user hit exactly that: official slugs on disk, no cache, no mirror). The
-/// bundled catalog is also what the running binary validates against, so its
-/// entry shape is compatible by construction. `models_cache.json` (written by
-/// codex after a successful official refresh, so it can be newer than the
-/// binary) fills slugs the bundled catalog lacks.
-fn load_codex_official_models() -> Vec<Value> {
-    merge_official_models(
-        load_codex_official_models_bundled(),
-        load_codex_official_models_from_cache(),
-    )
-}
-
-/// The codex binary's bundled catalog. Spawning a real codex is skipped in
-/// tests so unit tests never depend on a host codex install.
+/// The codex binary's bundled catalog, read via `codex debug models
+/// --bundled`. It exists on every machine that has codex — including
+/// relay-only setups where the official models endpoint is never queried and
+/// `models_cache.json` is therefore never written (a pure relay user hit
+/// exactly that: official slugs on disk, no cache, no mirror). It is also
+/// what codex itself reads when we point it at no catalog, so redundancy
+/// decisions and mirroring both key off it. Spawning a real codex is skipped
+/// in tests so unit tests never depend on a host codex install.
 #[cfg(not(test))]
 fn load_codex_official_models_bundled() -> Vec<Value> {
     for candidate in codex_cli_candidates() {
@@ -2294,14 +2376,68 @@ fn merge_official_models(primary: Vec<Value>, fallback: Vec<Value>) -> Vec<Value
     merged
 }
 
+/// What a provider's catalog projection amounts to.
+#[derive(Debug)]
+enum CodexCatalogProjection {
+    /// No `modelCatalog` rows at all — nothing to project.
+    Absent,
+    /// Every row is a bare official slug, so codex's own bundled catalog
+    /// already serves the provider identically (or better: official
+    /// base_instructions and windows). Writing a file would only shadow it
+    /// with a copy that goes stale whenever our official-data pipeline
+    /// breaks. No file is written and the pointer is released instead.
+    Redundant,
+    /// A generated catalog to persist and point codex at.
+    Generated(Value),
+}
+
+/// Option-shaped view over the projection for the existing tests: Absent and
+/// Redundant both surface as `None`.
+#[cfg(test)]
 fn codex_model_catalog_from_settings(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<Option<Value>, AppError> {
+    Ok(
+        match codex_catalog_projection_from_settings(settings, config_text, profile)? {
+            CodexCatalogProjection::Generated(catalog) => Some(catalog),
+            CodexCatalogProjection::Absent | CodexCatalogProjection::Redundant => None,
+        },
+    )
+}
+
+fn codex_catalog_projection_from_settings(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> Result<CodexCatalogProjection, AppError> {
+    let bundled = load_codex_official_models_bundled();
+    let official_models =
+        merge_official_models(bundled.clone(), load_codex_official_models_from_cache());
+    codex_catalog_projection_with_official(
+        settings,
+        config_text,
+        profile,
+        &bundled,
+        &official_models,
+    )
+}
+
+/// Pure decision core behind [`codex_catalog_projection_from_settings`];
+/// `bundled_official_models` is the codex binary's own catalog (what codex
+/// reads when we point it at nothing) and `official_models` is the merged
+/// bundled+cache list used for entry generation.
+fn codex_catalog_projection_with_official(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    bundled_official_models: &[Value],
+    official_models: &[Value],
+) -> Result<CodexCatalogProjection, AppError> {
     let specs = codex_catalog_model_specs(settings);
     if specs.is_empty() {
-        return Ok(None);
+        return Ok(CodexCatalogProjection::Absent);
     }
 
     // Vendors that publish an OFFICIAL Codex models.json for their native
@@ -2315,12 +2451,15 @@ fn codex_model_catalog_from_settings(
             .enumerate()
             .map(|(index, spec)| codex_vendor_catalog_model_entry(&vendor_models, spec, index))
             .collect();
-        return Ok(Some(json!({ "models": entries })));
+        return Ok(CodexCatalogProjection::Generated(
+            json!({ "models": entries }),
+        ));
     }
 
-    let configured_context_window =
-        extract_codex_top_level_u64(config_text, "model_context_window");
-    let official_models = load_codex_official_models();
+    if codex_catalog_projection_redundant(&specs, profile, bundled_official_models) {
+        return Ok(CodexCatalogProjection::Redundant);
+    }
+
     if official_models.is_empty() {
         // bundled 与 models_cache.json 都没拿到官方数据（最常见：本机找不到
         // codex CLI）。官方 slug 将落保守档位——这应当可见，而不是静默降级。
@@ -2329,6 +2468,8 @@ fn codex_model_catalog_from_settings(
         );
     }
 
+    let configured_context_window =
+        extract_codex_top_level_u64(config_text, "model_context_window");
     // Native providers use the bundled clean template (no freeform apply_patch,
     // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
     // entry so the proxy can rewrite custom<->function tools as before.
@@ -2338,13 +2479,53 @@ fn codex_model_catalog_from_settings(
         }
         CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
     };
-    Ok(Some(codex_model_catalog_from_specs(
-        &specs,
-        &template,
+    Ok(CodexCatalogProjection::Generated(
+        codex_model_catalog_from_specs(
+            &specs,
+            &template,
+            profile,
+            configured_context_window,
+            official_models,
+        ),
+    ))
+}
+
+/// A projection is redundant when codex's own bundled catalog already serves
+/// every row: every slug must be official — matched against the BUNDLED list
+/// only, because `models_cache.json` can know slugs the running codex does
+/// not, and a skip decision must hold for the catalog codex itself will read
+/// — and every row must be bare (explicit levels, windows or names are user
+/// truth the projection must carry). Anthropic always projects: its transform
+/// contract (dropped custom tools, thinking translation) differs from the
+/// official catalog's.
+fn codex_catalog_projection_redundant(
+    specs: &[CodexCatalogModelSpec],
+    profile: CodexCatalogToolProfile,
+    bundled_official_models: &[Value],
+) -> bool {
+    if !matches!(
         profile,
-        configured_context_window,
-        &official_models,
-    )))
+        CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::ProxyChat
+    ) {
+        return false;
+    }
+    if bundled_official_models.is_empty() {
+        return false;
+    }
+    specs.iter().all(|spec| {
+        *spec
+            == CodexCatalogModelSpec {
+                model: spec.model.clone(),
+                display_name: None,
+                context_window: None,
+                supports_parallel_tool_calls: None,
+                input_modalities: None,
+                base_instructions: None,
+                reasoning_levels: None,
+                default_reasoning_level: None,
+            }
+            && official_model_entry_for_slug(&spec.model, bundled_official_models).is_some()
+    })
 }
 
 /// 启动时刷新**当前** codex 供应商的 catalog 投影。
@@ -2358,8 +2539,12 @@ fn codex_model_catalog_from_settings(
 /// 里的 `model_catalog_json` 指针键。`auth.json`、`model`、
 /// `model_reasoning_effort` 与所有非 owned 键一概不碰——尤其启动做全量
 /// live 同步会把用户在 codex 侧 `/model` 选的模型打回档位默认，绝不可以。
-/// 投影不出 catalog 的供应商（无 `modelCatalog` 或空 specs）直接 no-op：
-/// 摘指针是切换路径的语义，启动不做删除。
+///
+/// - [`CodexCatalogProjection::Absent`]（无 `modelCatalog` 或空 specs）直接
+///   no-op：摘指针是切换路径的语义，启动不做删除。
+/// - [`CodexCatalogProjection::Redundant`]（纯官方档位）释放指针：升级可能
+///   让一个原本被投影的档位变成冗余（发现链修复、官方目录更新），不释放
+///   的话陈旧文件会一直遮蔽官方目录——正是本刷新存在的意义。接管期不碰。
 ///
 /// 返回是否写了任何东西。
 pub fn refresh_codex_catalog_projection(
@@ -2371,28 +2556,49 @@ pub fn refresh_codex_catalog_projection(
     if settings.get("modelCatalog").is_none() {
         return Ok(false);
     }
-    let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? else {
-        return Ok(false);
-    };
+    let projection = codex_catalog_projection_from_settings(settings, config_text, profile)?;
+    apply_codex_catalog_refresh(projection, config_text, live_taken_over)
+}
 
+/// Apply-side of [`refresh_codex_catalog_projection`], split out so tests can
+/// drive each projection arm without the env-dependent official-data source.
+fn apply_codex_catalog_refresh(
+    projection: CodexCatalogProjection,
+    config_text: &str,
+    live_taken_over: bool,
+) -> Result<bool, AppError> {
     let mut changed = false;
     let catalog_path = get_codex_model_catalog_path();
-    let contents = crate::config::serialize_json_bytes(&catalog)?;
-    let existing = fs::read(&catalog_path).unwrap_or_default();
-    if existing != contents {
-        if let Some(parent) = catalog_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-        crate::config::atomic_write(&catalog_path, &contents)?;
-        changed = true;
-    }
+    match projection {
+        CodexCatalogProjection::Generated(catalog) => {
+            let contents = crate::config::serialize_json_bytes(&catalog)?;
+            let existing = fs::read(&catalog_path).unwrap_or_default();
+            if existing != contents {
+                if let Some(parent) = catalog_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+                }
+                crate::config::atomic_write(&catalog_path, &contents)?;
+                changed = true;
+            }
 
-    if !live_taken_over {
-        let updated = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
-        if updated != config_text {
-            write_text_file(&get_codex_config_path(), &updated)?;
-            changed = true;
+            if !live_taken_over {
+                let updated = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
+                if updated != config_text {
+                    write_text_file(&get_codex_config_path(), &updated)?;
+                    changed = true;
+                }
+            }
         }
+        CodexCatalogProjection::Redundant => {
+            if !live_taken_over {
+                let updated = set_codex_model_catalog_json_field(config_text, None)?;
+                if updated != config_text {
+                    write_text_file(&get_codex_config_path(), &updated)?;
+                    changed = true;
+                }
+            }
+        }
+        CodexCatalogProjection::Absent => {}
     }
 
     Ok(changed)
@@ -2485,34 +2691,48 @@ pub fn prepare_codex_config_text_with_model_catalog(
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
-    let catalog_path = get_codex_model_catalog_path();
+    let projection = codex_catalog_projection_from_settings(settings, config_text, profile)?;
+    apply_codex_catalog_projection_to_config(projection, config_text, profile)
+}
 
-    if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text, profile)? {
-        let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
-        // Disable web_search only for native gateways on the reject blacklist
-        // (MiMo/LongCat/MiniMax by host or model brand; Qwen3-Coder by model).
-        // Everything else — relays, DouBao, web-search-capable Qwen models,
-        // unknown providers — keeps Codex's default.
-        let disable_web_search = match profile {
-            // The Responses→Anthropic transform silently drops the Codex web_search
-            // hosted tool, so always disable it here rather than present a dead tool.
-            CodexCatalogToolProfile::Anthropic => true,
-            CodexCatalogToolProfile::NativeResponses => {
-                codex_native_gateway_rejects_web_search(&config_text)
-            }
-            CodexCatalogToolProfile::ProxyChat => false,
-        };
-        let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
-        write_json_file(&catalog_path, &catalog)?;
-        Ok(config_text)
-    } else {
-        let config_text = set_codex_model_catalog_json_field(config_text, None)?;
-        // Even without a generated catalog, the Responses→Anthropic transform drops the
-        // Codex web_search hosted tool, so keep the invariant that an Anthropic provider
-        // never presents it as a dead tool.
-        let disable_web_search = profile == CodexCatalogToolProfile::Anthropic;
-        set_codex_native_web_search_field(&config_text, disable_web_search)
-    }
+/// Apply-side of [`prepare_codex_config_text_with_model_catalog`], split out so
+/// tests can drive each projection arm without the env-dependent official-data
+/// source.
+fn apply_codex_catalog_projection_to_config(
+    projection: CodexCatalogProjection,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> Result<String, AppError> {
+    let catalog_path = get_codex_model_catalog_path();
+    let config_text = match projection {
+        CodexCatalogProjection::Generated(catalog) => {
+            let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
+            write_json_file(&catalog_path, &catalog)?;
+            config_text
+        }
+        // Absent and Redundant both project nothing: release the pointer so
+        // codex falls back to its own catalog.
+        CodexCatalogProjection::Absent | CodexCatalogProjection::Redundant => {
+            set_codex_model_catalog_json_field(config_text, None)?
+        }
+    };
+
+    // Web-search gating is bound to the provider's gateway, not to whether a
+    // catalog was written: the Responses→Anthropic transform silently drops
+    // the Codex web_search hosted tool (always disable rather than present a
+    // dead tool), and native gateways on the reject blacklist (MiMo/LongCat/
+    // MiniMax by host or model brand; Qwen3-Coder by model) must not be
+    // offered the tool either. Applied uniformly across all projection
+    // outcomes so switching between providers cannot leave a stale owned
+    // sentinel behind.
+    let disable_web_search = match profile {
+        CodexCatalogToolProfile::Anthropic => true,
+        CodexCatalogToolProfile::NativeResponses => {
+            codex_native_gateway_rejects_web_search(&config_text)
+        }
+        CodexCatalogToolProfile::ProxyChat => false,
+    };
+    set_codex_native_web_search_field(&config_text, disable_web_search)
 }
 
 /// Reverse of `prepare_codex_config_text_with_model_catalog`: read the
@@ -5900,7 +6120,7 @@ base_url = "https://production.api/v1"
                         "reasoningLevels": ["none", "high"]
                     },
                     // Unknown slug: conservative template levels stay.
-                    { "model": "kimi-k2.7-code" }
+                    { "model": "mystery-relay-model" }
                 ]
             }
         });
@@ -5947,6 +6167,68 @@ base_url = "https://production.api/v1"
         // Unknown slug: template's conservative none/high stays.
         assert_eq!(efforts(2), vec!["none", "high"]);
         assert_eq!(default_level(2), Some("high"));
+    }
+
+    #[test]
+    fn curated_reasoning_levels_fill_bare_relay_rows() {
+        // Relay/aggregator tiers list bare model ids with no reasoningLevels;
+        // for third-party models the vendor-curated reference table is the
+        // best available truth, replacing the conservative none/high.
+        let template = json!({
+            "slug": "tpl",
+            "context_window": 262144,
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [
+                { "effort": "none", "description": "Disable Thinking" },
+                { "effort": "high", "description": "Enabled Thinking" }
+            ]
+        });
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    // Bare relay row for a curated third-party model.
+                    { "model": "kimi-k3" },
+                    // Basename match also serves vendor-prefixed table slugs.
+                    { "model": "glm-5.1" },
+                    // Case-insensitive match.
+                    { "model": "minimax-m3" },
+                    // A curated set narrower than the conservative template
+                    // is applied as-is — vendor truth over template default.
+                    { "model": "kimi-k2.7-code" },
+                    // Explicit declaration still wins over the curated set.
+                    {
+                        "model": "deepseek-v4-flash",
+                        "reasoningLevels": ["low", "high"]
+                    },
+                    // Unknown third-party slug: conservative none/high stays.
+                    { "model": "not-in-any-table" }
+                ]
+            }
+        });
+
+        let catalog = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &[],
+        );
+        let models = catalog["models"].as_array().expect("models array");
+        let efforts = |index: usize| -> Vec<&str> {
+            models[index]["supported_reasoning_levels"]
+                .as_array()
+                .expect("supported_reasoning_levels array")
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
+                .collect()
+        };
+
+        assert_eq!(efforts(0), vec!["low", "high", "max"]);
+        assert_eq!(efforts(1), vec!["none", "high"]);
+        assert_eq!(efforts(2), vec!["none", "high"]);
+        assert_eq!(efforts(3), vec!["high"]);
+        assert_eq!(efforts(4), vec!["low", "high"]);
+        assert_eq!(efforts(5), vec!["none", "high"]);
     }
 
     #[test]
@@ -6180,6 +6462,183 @@ wire_api = "responses"
         assert!(
             !get_codex_config_path().exists(),
             "config.toml must not be created either"
+        );
+    }
+
+    #[test]
+    fn catalog_projection_skips_pure_official_tiers() {
+        // A tier whose every row is a bare official slug is already served by
+        // codex's own bundled catalog; projecting would only shadow it with a
+        // copy that goes stale when our official-data pipeline breaks.
+        let bundled = vec![json!({
+            "slug": "gpt-5.6-sol",
+            "context_window": 272000,
+            "max_context_window": 872000,
+            "supported_reasoning_levels": [
+                { "effort": "low", "description": "Fast responses with lighter reasoning" },
+                { "effort": "high", "description": "Greater reasoning depth for complex problems" }
+            ]
+        })];
+        let official = bundled.clone();
+        let config_text = "model = \"gpt-5.6-sol\"\n";
+
+        let pure = json!({
+            "modelCatalog": { "models": [{ "model": "GPT-5.6-SOL" }] }
+        });
+        assert!(matches!(
+            codex_catalog_projection_with_official(
+                &pure,
+                config_text,
+                CodexCatalogToolProfile::NativeResponses,
+                &bundled,
+                &official,
+            )
+            .expect("projection should not error"),
+            CodexCatalogProjection::Redundant
+        ));
+        assert!(matches!(
+            codex_catalog_projection_with_official(
+                &pure,
+                config_text,
+                CodexCatalogToolProfile::ProxyChat,
+                &bundled,
+                &official,
+            )
+            .expect("projection should not error"),
+            CodexCatalogProjection::Redundant
+        ));
+
+        // One non-official row makes the projection necessary again.
+        let mixed = json!({
+            "modelCatalog": {
+                "models": [{ "model": "gpt-5.6-sol" }, { "model": "gpt-reserve" }]
+            }
+        });
+        assert!(matches!(
+            codex_catalog_projection_with_official(
+                &mixed,
+                config_text,
+                CodexCatalogToolProfile::NativeResponses,
+                &bundled,
+                &official,
+            )
+            .expect("projection should not error"),
+            CodexCatalogProjection::Generated(_)
+        ));
+
+        // Explicit per-row truth must be projected, even on official slugs.
+        for row in [
+            json!({ "model": "gpt-5.6-sol", "reasoningLevels": ["low", "high"] }),
+            json!({ "model": "gpt-5.6-sol", "contextWindow": 100000 }),
+            json!({ "model": "gpt-5.6-sol", "displayName": "Custom Name" }),
+        ] {
+            let settings = json!({ "modelCatalog": { "models": [row] } });
+            assert!(
+                matches!(
+                    codex_catalog_projection_with_official(
+                        &settings,
+                        config_text,
+                        CodexCatalogToolProfile::NativeResponses,
+                        &bundled,
+                        &official,
+                    )
+                    .expect("projection should not error"),
+                    CodexCatalogProjection::Generated(_)
+                ),
+                "declared rows must keep the projection"
+            );
+        }
+
+        // No bundled data ⇒ no proof of redundancy ⇒ keep projecting.
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "gpt-5.6-sol" }] }
+        });
+        assert!(matches!(
+            codex_catalog_projection_with_official(
+                &settings,
+                config_text,
+                CodexCatalogToolProfile::NativeResponses,
+                &[],
+                &[],
+            )
+            .expect("projection should not error"),
+            CodexCatalogProjection::Generated(_)
+        ));
+
+        // The Anthropic transform's contract differs from the official
+        // catalog's (custom tools dropped, thinking translated) — always
+        // project.
+        assert!(matches!(
+            codex_catalog_projection_with_official(
+                &pure,
+                config_text,
+                CodexCatalogToolProfile::Anthropic,
+                &bundled,
+                &official,
+            )
+            .expect("projection should not error"),
+            CodexCatalogProjection::Generated(_)
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn prepare_releases_pointer_for_redundant_projection() {
+        let _home = CodexLiveTestHome::new();
+        let config_text =
+            "model = \"gpt-5.6-sol\"\nmodel_catalog_json = \"loongport-model-catalog.json\"\n";
+
+        let updated = apply_codex_catalog_projection_to_config(
+            CodexCatalogProjection::Redundant,
+            config_text,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("apply should succeed");
+
+        assert!(
+            !updated.contains("model_catalog_json"),
+            "redundant projection must release the pointer: {updated}"
+        );
+        assert!(
+            !get_codex_model_catalog_path().exists(),
+            "redundant projection must not write a catalog file"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn startup_refresh_releases_pointer_for_redundant_projection() {
+        let _home = CodexLiveTestHome::new();
+        let config_text =
+            "model = \"gpt-5.6-sol\"\nmodel_catalog_json = \"loongport-model-catalog.json\"\n";
+
+        let changed =
+            apply_codex_catalog_refresh(CodexCatalogProjection::Redundant, config_text, false)
+                .expect("refresh should succeed");
+        assert!(changed, "pointer release must count as a change");
+        let live = std::fs::read_to_string(get_codex_config_path()).expect("config.toml written");
+        assert!(!live.contains("model_catalog_json"));
+
+        // During proxy takeover the live config stays untouched.
+        std::fs::remove_file(get_codex_config_path()).expect("reset config.toml");
+        let changed =
+            apply_codex_catalog_refresh(CodexCatalogProjection::Redundant, config_text, true)
+                .expect("refresh under takeover should succeed");
+        assert!(!changed);
+        assert!(
+            !get_codex_config_path().exists(),
+            "config.toml must stay untouched while live is under proxy takeover"
+        );
+
+        // Absent stays a no-op — pointer removal for providers that never had
+        // a catalog is switch-time semantics.
+        let changed =
+            apply_codex_catalog_refresh(CodexCatalogProjection::Absent, config_text, false)
+                .expect("refresh should succeed");
+        assert!(!changed);
+        assert!(
+            !get_codex_config_path().exists(),
+            "Absent projection must not touch config.toml"
         );
     }
 
@@ -7167,6 +7626,35 @@ web_search = "disabled"
                 candidate.display()
             );
         }
+    }
+
+    #[test]
+    fn codex_cli_candidates_include_plugin_appserver_install() {
+        // A codex installed as an app-server plugin lives in
+        // `.codex/plugins/.plugin-appserver/` and is often the only codex on
+        // the machine (never on PATH) — the bundled official catalog is
+        // unreachable without this candidate.
+        let temp_home = tempfile::tempdir().expect("create temp home");
+        let home = temp_home.path();
+        let binary_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+        let expected = home
+            .join(".codex")
+            .join("plugins")
+            .join(".plugin-appserver")
+            .join(binary_name);
+        std::fs::create_dir_all(expected.parent().expect("candidate parent"))
+            .expect("create candidate parent");
+        std::fs::write(&expected, "").expect("create candidate");
+
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        push_home_codex_cli_candidates(&mut candidates, &mut seen, home);
+
+        assert!(
+            candidates.contains(&expected),
+            "app-server plugin Codex CLI candidate should be discovered: {}",
+            expected.display()
+        );
     }
 
     #[test]
