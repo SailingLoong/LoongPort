@@ -309,10 +309,11 @@ Browser authorization is not automated; the website documents the advanced custo
 |---|---|---|
 | **Relay services** | sub2api · new-api | — |
 | **AI CLIs** | codex · claude | gemini · grok |
-| **Platforms** | macOS · Windows | Linux |
+| **Platforms** | macOS · Windows · Linux | — |
 
-You can point it at your own site domain; a working one is preset by default. macOS and
-Windows have the same feature set.
+You can point it at your own site domain; a working one is preset by default. All three
+platforms ship the same desktop feature set; when switching a Codex tier, macOS asks
+ChatGPT to quit (you can cancel) while Windows ends the process outright.
 
 > **The "AI CLIs" row is about chat tiers.** The image tool registers with codex,
 > claude **and gemini** — "gemini in progress" means it cannot yet be the target of a

@@ -194,9 +194,9 @@ dsh plugin --profile <profile> add loongport
 |---|---|---|
 | **中转服务** | sub2api · new-api | — |
 | **AI CLI** | codex · claude | gemini · grok |
-| **平台** | macOS · Windows | Linux |
+| **平台** | macOS · Windows · Linux | — |
 
-站点域名可自行填写，默认预置一个可用站点。macOS 与 Windows 功能一致。
+站点域名可自行填写，默认预置一个可用站点。三个平台提供同一套桌面版能力；切换 Codex 档位时关闭 ChatGPT 的方式，macOS 与 Windows 不同（macOS 发出退出请求、可以取消，Windows 直接结束进程）。
 
 > **「AI CLI」一行指对话档位。** 生图工具可安装至 codex、claude **与 gemini** 三个 CLI ——「gemini 在做」指它尚不能作为对话档位的目标（配置写入形状尚未完成），并非完全未接入。
 
