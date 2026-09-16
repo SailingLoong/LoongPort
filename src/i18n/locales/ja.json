@@ -3906,7 +3906,7 @@
     "applyOrder": "順序を適用",
     "blockTier": "ブロック",
     "unblockTier": "ブロック解除",
-    "discardOrder": "取り消す"
+    "discardOrder": "キャンセル"
   },
   "secrets": {
     "unlockTitle": "認証情報のロック解除",
