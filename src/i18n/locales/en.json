@@ -3905,7 +3905,8 @@
     "enable": "Enable",
     "applyOrder": "Apply order",
     "blockTier": "Block",
-    "unblockTier": "Unblock"
+    "unblockTier": "Unblock",
+    "discardOrder": "Discard"
   },
   "secrets": {
     "unlockTitle": "Unlock credentials",

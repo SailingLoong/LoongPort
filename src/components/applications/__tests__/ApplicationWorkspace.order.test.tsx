@@ -97,9 +97,9 @@ describe("failover order staging", () => {
     state.routing = {
       autoFailoverEnabled: true,
       tiers: [
-        { providerId: "a", position: 0, skipReason: null },
-        { providerId: "b", position: 1, skipReason: null },
-        { providerId: "c", position: 2, skipReason: null },
+        { providerId: "a", position: 0, skipReason: null, rateMultiplier: 2 },
+        { providerId: "b", position: 1, skipReason: null, rateMultiplier: 1 },
+        { providerId: "c", position: 2, skipReason: null, rateMultiplier: 3 },
       ],
     };
   });
@@ -139,6 +139,54 @@ describe("failover order staging", () => {
     expect(
       screen.queryByRole("button", { name: /applications\.applyOrder/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers Apply for a metric-sorted view and applies the displayed order", async () => {
+    const view = render(<ApplicationWorkspace {...props} />);
+    // 倍率升序：b(1), a(2), c(3)——显示序不同于存储序 [a,b,c]。
+    await act(async () => {
+      tableProps.current.onSort("rateMultiplier");
+    });
+    const apply = await screen.findByRole("button", {
+      name: /applications\.applyOrder/,
+    });
+    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
+    await userEvent.click(apply);
+    await waitFor(() =>
+      expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
+    );
+    // 应用后临时排序与暂存一起清空，按钮消失。
+    await waitFor(() => {
+      expect(tableProps.current.sort).toBeNull();
+      expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+      expect(
+        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
+      ).not.toBeInTheDocument();
+    });
+    view.unmount();
+  });
+
+  it("discarding drops staged drags and sorting back to the stored order", async () => {
+    const view = render(<ApplicationWorkspace {...props} />);
+    await drag(["b", "a", "c"]);
+    await act(async () => {
+      tableProps.current.onSort("rateMultiplier");
+    });
+    expect(
+      screen.getByRole("button", { name: /applications\.discardOrder/ }),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications\.discardOrder/ }),
+    );
+    await waitFor(() => {
+      expect(tableProps.current.sort).toBeNull();
+      expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+      expect(
+        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
+      ).not.toBeInTheDocument();
+    });
+    expect(state.setOrder).not.toHaveBeenCalled();
+    view.unmount();
   });
 
   it("discards staged order when failover turns off (no ghost pending state)", async () => {
