@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { motion } from "framer-motion";
 import {
   Loader2,
   Save,
@@ -252,16 +251,11 @@ export function SettingsPage({
           <div className="flex-1 min-h-0 flex flex-col">
             <div
               ref={tabScrollContainerRef}
-              className="flex-1 overflow-y-auto overflow-x-hidden pr-2"
+              className="flex-1 overflow-y-auto overflow-x-hidden pr-2 [transform:translateZ(0)]"
             >
               <TabsContent value="general" className="space-y-6 mt-0">
                 {settings ? (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3 }}
-                    className="space-y-6"
-                  >
+                  <div className="space-y-6">
                     <LanguageSettings
                       value={settings.language}
                       onChange={(lang) => handleAutoSave({ language: lang })}
@@ -301,7 +295,7 @@ export function SettingsPage({
                     {/* 广场开关放在常规页最底部：默认值由首启归因播种，这里是
                         用户回来翻开的唯一入口（窄命令，不走全量保存）。 */}
                     <PlazaSettings />
-                  </motion.div>
+                  </div>
                 ) : null}
               </TabsContent>
 
@@ -315,25 +309,15 @@ export function SettingsPage({
               </TabsContent>
 
               <TabsContent value="auth" className="space-y-6 mt-0 pb-4">
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className="space-y-6"
-                >
+                <div className="space-y-6">
                   <AuthCenterPanel />
                   <SecretProtectionSettings />
-                </motion.div>
+                </div>
               </TabsContent>
 
               <TabsContent value="advanced" className="space-y-6 mt-0 pb-4">
                 {settings ? (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3 }}
-                    className="space-y-4"
-                  >
+                  <div className="space-y-4">
                     <Accordion
                       type="multiple"
                       defaultValue={[]}
@@ -587,7 +571,7 @@ export function SettingsPage({
                         </AccordionContent>
                       </AccordionItem>
                     </Accordion>
-                  </motion.div>
+                  </div>
                 ) : null}
               </TabsContent>
 
