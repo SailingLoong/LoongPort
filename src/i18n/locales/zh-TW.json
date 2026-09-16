@@ -3961,7 +3961,15 @@
     "resetFailed": "無法重置。請檢查新口令，或關閉此視窗後重新檢查資料。",
     "enterApp": "重新啟動應用程式",
     "setupTitle": "設定保護口令",
-    "setupDescription": "系統憑據庫無法使用。請設定至少 12 個字元的保護口令，用於加密資料與日後解鎖。"
+    "setupDescription": "系統憑據庫無法使用。請設定至少 12 個字元的保護口令，用於加密資料與日後解鎖。",
+    "exportPlainTitle": "匯出明文備份",
+    "exportPlainDescription": "把全部密鑰與憑證匯出為一份明文 JSON 檔案（僅本機保存，0600 權限）。日常儲存始終加密，此匯出僅在你主動需要時使用。",
+    "exportPlainAction": "匯出明文備份…",
+    "exportPlainConfirmTitle": "匯出明文密鑰備份？",
+    "exportPlainWarning": "匯出的檔案將以明文包含你的全部站點密鑰、OAuth 憑證等敏感資訊，請妥善保管（建議存放於加密碟並避免分享）。此操作不改變應用的加密儲存。",
+    "exportPlainConfirm": "匯出",
+    "exportPlainDone": "已匯出（見所選位置）",
+    "exportPlainFailed": "匯出失敗"
   },
   "syncRestore": {
     "title": "還原雲端設定",

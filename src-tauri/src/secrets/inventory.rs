@@ -138,6 +138,30 @@ pub(crate) fn transform_database(
     }
 }
 
+/// 按表名查身份列（导出投影给键起名用）；未知表返回空。
+pub(crate) fn table_identity_columns(table: &str) -> &'static [&'static str] {
+    TABLES
+        .iter()
+        .find(|entry| entry.name == table)
+        .map(|entry| entry.identity_columns)
+        .unwrap_or(&[])
+}
+
+/// 明文导出投影（只读）：按 `TABLES` 唯源遍历，把每个受保护值解密成明文交给
+/// 调用方收集；不写库、不改密文。与迁移/轮换走同一个 walker，覆盖面不分叉。
+pub(crate) fn collect_plaintext_values(
+    conn: &Connection,
+    vault: &VaultContext,
+    mut collect: impl FnMut(&str, &str, Vec<String>, String),
+) -> Result<(), AppError> {
+    process_values(conn, |table, column, keys: &[&str], value| {
+        let owned: Vec<String> = keys.iter().map(|key| (*key).to_string()).collect();
+        let plaintext = open_db(vault, table, column, keys, value)?;
+        collect(table, column, owned, plaintext);
+        Ok(None)
+    })
+}
+
 /// Authenticate every protected value without changing SQLite state or ciphertext.
 pub(crate) fn validate_database(conn: &Connection, vault: &VaultContext) -> Result<(), AppError> {
     process_values(conn, |table, column, keys, value| {
