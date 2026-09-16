@@ -39,6 +39,18 @@ export function useApplicationRouting(appId: AppId) {
     onSuccess: refresh,
     onError,
   });
+  // 屏蔽即时生效（用户显式动作，不等顺序确认）；写入后刷新看板与选路状态。
+  const blockTier = useMutation({
+    mutationFn: ({
+      providerId,
+      blocked,
+    }: {
+      providerId: string;
+      blocked: boolean;
+    }) => applicationRoutingApi.setTierBlocked(appId, providerId, blocked),
+    onSuccess: refresh,
+    onError,
+  });
   const failover = useMutation({
     mutationFn: async (enabled: boolean) => {
       if (enabled) {
@@ -66,8 +78,9 @@ export function useApplicationRouting(appId: AppId) {
   });
   return {
     ...query,
-    busy: order.isPending || failover.isPending,
+    busy: order.isPending || failover.isPending || blockTier.isPending,
     setOrder: order.mutateAsync,
     setFailover: failover.mutateAsync,
+    blockTier: blockTier.mutateAsync,
   };
 }

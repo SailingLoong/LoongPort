@@ -58,18 +58,22 @@ pub(crate) async fn application_routing_impl(
         .db
         .provider_attempt_error_rates(app_type)
         .unwrap_or_default();
+    let blocked = routing::blocked_tier_ids(&state.db, app_type);
     let tiers = board
         .tiers
         .into_iter()
         .map(|tier| {
             let exclusion = providers
                 .get(&tier.provider_id)
-                .and_then(|p| routing::fallback_exclusion(&state.db, app_type, p));
+                .and_then(|p| routing::fallback_exclusion_with(&state.db, app_type, p, &blocked));
             let circuit_open = tier.breaker_state.as_deref() == Some("open")
                 && tier.breaker_reopen_in_secs.is_some_and(|s| s > 0);
-            let skip_reason = if !supports_proxy
-                || (tier.is_current && exclusion != Some("native_configuration"))
-            {
+            // 屏蔽是用户显式动作：当前档被屏蔽也照常显示原因（其余排除不压过当前档）。
+            let skip_reason = if !supports_proxy {
+                None
+            } else if exclusion == Some("blocked") {
+                Some("blocked".to_string())
+            } else if tier.is_current && exclusion != Some("native_configuration") {
                 None
             } else if let Some(reason) = exclusion {
                 Some(reason.to_string())
@@ -114,6 +118,17 @@ pub async fn set_application_priority(
     ordered_ids: Vec<String>,
 ) -> Result<(), String> {
     routing::set_order(&state.db, &app_type, &ordered_ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_application_tier_blocked(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    provider_id: String,
+    blocked: bool,
+) -> Result<(), String> {
+    routing::set_tier_blocked(&state.db, &app_type, &provider_id, blocked)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

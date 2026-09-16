@@ -3876,7 +3876,7 @@
     "tier": "档位 / 账号",
     "action": "操作",
     "autoFailover": "自动故障切换",
-    "priorityHint": "数字越小，优先级越高。开启自动故障切换后，从当前档位依次向下尝试。",
+    "priorityHint": "数字越小，优先级越高。开启自动故障切换后，从当前档位依次向下尝试；拖动调整顺序后，点「应用此顺序」生效。",
     "orderHint": "拖动调整档位顺序（会保存）；点击指标列临时排序，再点反向，第三次恢复原序。",
     "dragTier": "拖动调整 {{name}} 的优先级",
     "lastError": "最近错误",
@@ -3896,12 +3896,16 @@
       "circuit_open": "暂时跳过：等待连接恢复",
       "before_current": "位于当前档位之前，不参与后续故障切换",
       "current_official_account": "当前使用官方登录，不进行自动故障切换",
-      "native_configuration": "使用应用原生登录，不参与自动故障切换"
+      "native_configuration": "使用应用原生登录，不参与自动故障切换",
+      "blocked": "已屏蔽：不参与自动切换"
     },
     "routingPaused": "自动故障切换已暂停，连接服务未运行或应用未接入。",
     "resumeRouting": "恢复连接",
     "enabled": "已启用",
-    "enable": "启用"
+    "enable": "启用",
+    "applyOrder": "应用此顺序",
+    "blockTier": "屏蔽",
+    "unblockTier": "取消屏蔽"
   },
   "secrets": {
     "unlockTitle": "解锁凭据",

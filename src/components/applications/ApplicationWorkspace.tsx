@@ -1,6 +1,13 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, ListFilter, Plus, Search, Settings2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ListFilter,
+  Plus,
+  Search,
+  Settings2,
+} from "lucide-react";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
 import type { AccountRoute } from "@/components/shell/navigation";
@@ -83,6 +90,9 @@ export function ApplicationWorkspace({
     source: typeof routing.data;
     ids: string[];
   } | null>(null);
+  // 故障切换开启时的暂存顺序：拖拽只改这里，点「应用此顺序」才写库；
+  // 关闭故障切换时拖拽照旧即时落库（无应用按钮）。
+  const [stagedIds, setStagedIds] = useState<string[] | null>(null);
   const configurations = model.data?.configurations ?? [];
   const tiers = routing.data?.tiers ?? [];
   const ids = new Set(configurations.map((item) => item.providerId));
@@ -96,17 +106,53 @@ export function ApplicationWorkspace({
       .filter((item) => !rankedSet.has(item.providerId))
       .map((item) => item.providerId),
   ];
-  const baseIds =
-    order && order.source === routing.data ? order.ids : storedIds;
+  const failoverEnabled = Boolean(routing.data?.autoFailoverEnabled);
+  // 故障切换关掉时暂存失去提交入口，就地丢弃，避免幽灵待应用状态。
+  useEffect(() => {
+    if (!failoverEnabled) setStagedIds(null);
+  }, [failoverEnabled]);
+  const baseIds = failoverEnabled
+    ? (stagedIds ?? storedIds)
+    : order && order.source === routing.data
+      ? order.ids
+      : storedIds;
   // 视图排序只重排展示，不落库；默认序 = 数据库档位序（拖拽维护）。
   const orderedIds = sort ? sortTierIds(baseIds, tiers, sort) : baseIds;
   const changeOrder = async (next: string[]) => {
     if (saving || routing.busy) return;
+    if (failoverEnabled) {
+      setStagedIds(next);
+      return;
+    }
     const previousOrder = order;
     setSaving(true);
     setOrder({ source: routing.data, ids: next });
     try {
       await routing.setOrder(next);
+    } catch {
+      setOrder(previousOrder);
+    } finally {
+      setSaving(false);
+    }
+  };
+  // 待应用计数 = 暂存序与存储序位置不同的档位数（长度不一致按全部待应用兜底）。
+  const pendingOrderCount = (() => {
+    if (!stagedIds) return 0;
+    if (stagedIds.length !== storedIds.length) return stagedIds.length;
+    let count = 0;
+    for (let index = 0; index < stagedIds.length; index += 1) {
+      if (stagedIds[index] !== storedIds[index]) count += 1;
+    }
+    return count;
+  })();
+  const applyStagedOrder = async () => {
+    if (!stagedIds || saving || routing.busy) return;
+    const previousOrder = order;
+    setSaving(true);
+    setOrder({ source: routing.data, ids: stagedIds });
+    try {
+      await routing.setOrder(stagedIds);
+      setStagedIds(null);
     } catch {
       setOrder(previousOrder);
     } finally {
@@ -139,13 +185,19 @@ export function ApplicationWorkspace({
   }, [configurations]);
   // 模型筛选的选项 = 各档位实际会用的模型（effectiveModel 优先），去重排序；
   // 当前路由模型置顶加 ⚡，故障切换场景「选模型 → 过滤看链上还有谁」一步到位。
-  // 每个模型带 可用/总数 分数：可用 = 路由侧无跳过原因（skipReason 为 null），
-  // 与列表行的跳过徽章同源同义；全不可用的模型置灰但可选（选完正好逐行看原因）。
+  // 每个模型带 可用/总数 分数：不可用只算「已嗅探到的错误」（circuit_open=
+  // 限流/网络/余额等真实失败累积触发的熔断）与用户屏蔽；模型不匹配/能力声明/
+  // 位置语义一概不扣——它们对别的模型恒真，不是错误（2026-09-16 用户定调）。
+  // 全不可用的模型置灰但可选（选完正好逐行看原因）。
   const tierModels = useMemo(() => {
     const byId = new Map(
       tiers.map((tier) => [
         tier.providerId,
-        { model: tier.effectiveModel, available: !tier.skipReason },
+        {
+          model: tier.effectiveModel,
+          available:
+            tier.skipReason !== "circuit_open" && tier.skipReason !== "blocked",
+        },
       ]),
     );
     const stats = new Map<
@@ -199,6 +251,20 @@ export function ApplicationWorkspace({
                   />
                   {t("applications.autoFailover")}
                 </label>
+              )}
+              {failoverEnabled && pendingOrderCount > 0 && (
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    void applyStagedOrder();
+                  }}
+                  disabled={orderBusy}
+                  className="h-7 gap-1.5 text-xs"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  {t("applications.applyOrder")}
+                  <span className="tabular-nums">({pendingOrderCount})</span>
+                </Button>
               )}
             </div>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">
@@ -344,7 +410,7 @@ export function ApplicationWorkspace({
           configurations={configurations}
           tiers={tiers}
           orderedIds={orderedIds}
-          storedIds={baseIds}
+          failoverEnabled={failoverEnabled}
           search={search}
           accountFilter={accountFilter}
           modelFilter={modelFilter}
@@ -360,6 +426,11 @@ export function ApplicationWorkspace({
             void model.select(item);
           }}
           onOpenAccount={onOpenAccount}
+          onBlockTier={(providerId, blocked) => {
+            void routing
+              .blockTier({ providerId, blocked })
+              .catch(() => undefined);
+          }}
         />
         <p className="text-xs text-muted-foreground">
           {t("applications.metricsHint")}

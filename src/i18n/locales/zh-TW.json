@@ -3877,7 +3877,7 @@
     "tier": "檔位 / 帳號",
     "action": "操作",
     "autoFailover": "自動故障切換",
-    "priorityHint": "數字越小，優先級越高。開啟自動故障切換後，從目前檔位依序向下嘗試。",
+    "priorityHint": "數字越小，優先級越高。開啟自動故障切換後，從目前檔位依序向下嘗試；拖動調整順序後，點「套用此順序」生效。",
     "orderHint": "拖動調整檔位順序（會保存）；點擊指標列暫時排序，再點反向，第三次恢復原序。",
     "dragTier": "拖曳調整 {{name}} 的優先級",
     "lastError": "最近錯誤",
@@ -3897,12 +3897,16 @@
       "circuit_open": "暫時略過：等待連線恢復",
       "before_current": "位於目前檔位之前，不參與後續故障切換",
       "current_official_account": "目前使用官方登入，不進行自動故障切換",
-      "native_configuration": "使用應用程式原生登入，不參與自動故障切換"
+      "native_configuration": "使用應用程式原生登入，不參與自動故障切換",
+      "blocked": "已屏蔽：不參與自動切換"
     },
     "routingPaused": "自動故障切換已暫停，連線服務未執行或應用程式未接入。",
     "resumeRouting": "恢復連線",
     "enabled": "已啟用",
-    "enable": "啟用"
+    "enable": "啟用",
+    "applyOrder": "套用此順序",
+    "blockTier": "屏蔽",
+    "unblockTier": "取消屏蔽"
   },
   "secrets": {
     "unlockTitle": "解鎖憑證",

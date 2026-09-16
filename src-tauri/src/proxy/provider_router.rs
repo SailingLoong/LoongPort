@@ -96,8 +96,10 @@ impl ProviderRouter {
         let start = current
             .and_then(|p| ordered.iter().position(|entry| entry.id == p.id))
             .map_or(0, |index| index + 1);
+        let blocked = application_routing::blocked_tier_ids(&self.db, app_type);
         for provider in ordered.into_iter().skip(start) {
-            if application_routing::fallback_exclusion(&self.db, app_type, &provider).is_none()
+            if application_routing::fallback_exclusion_with(&self.db, app_type, &provider, &blocked)
+                .is_none()
                 && self.tier_and_account_available(app_type, &provider).await
             {
                 result.push(provider);
@@ -949,6 +951,45 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_blocked_tier_is_skipped_in_failover_chain() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        // a 在前（当前），b 在后本应进入故障切换链；屏蔽 b 后链里只剩 a。
+        let mut provider_a =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        provider_a.sort_index = Some(1);
+        let mut provider_b =
+            Provider::with_id("b".to_string(), "Provider B".to_string(), json!({}), None);
+        provider_b.sort_index = Some(2);
+
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+        db.add_to_failover_queue("claude", "a").unwrap();
+        db.add_to_failover_queue("claude", "b").unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+        assert_eq!(providers.len(), 2, "未屏蔽时 b 应进入链");
+
+        crate::proxy::application_routing::set_tier_blocked(&db, "claude", "b", true).unwrap();
+        let providers = router.select_providers("claude").await.unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "a", "屏蔽的档位不得进入故障切换链");
+
+        // 取消屏蔽即恢复（写入即生效，无需重启/失效通知）。
+        crate::proxy::application_routing::set_tier_blocked(&db, "claude", "b", false).unwrap();
+        let providers = router.select_providers("claude").await.unwrap();
+        assert_eq!(providers.len(), 2);
     }
 
     #[tokio::test]

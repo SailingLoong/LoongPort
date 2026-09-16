@@ -3876,7 +3876,7 @@
     "tier": "Tier / account",
     "action": "Action",
     "autoFailover": "Automatic failover",
-    "priorityHint": "Lower numbers have higher priority. When automatic failover is enabled, retries follow this order after the current tier.",
+    "priorityHint": "Lower numbers have higher priority. With automatic failover on, tiers are tried top-down from the current one; drag to rearrange, then click \"Apply order\".",
     "orderHint": "Drag to reorder tiers (saved). Click a metric column for a temporary sort; click again to reverse, once more to restore.",
     "dragTier": "Reorder {{name}}",
     "lastError": "Last error",
@@ -3896,12 +3896,16 @@
       "circuit_open": "Temporarily skipped: waiting for connection recovery",
       "before_current": "Before the current tier; excluded from subsequent failover",
       "current_official_account": "Automatic failover is unavailable while using the current official sign-in.",
-      "native_configuration": "Uses native application sign-in; unavailable for automatic failover."
+      "native_configuration": "Uses native application sign-in; unavailable for automatic failover.",
+      "blocked": "Blocked: skipped by automatic failover"
     },
     "routingPaused": "Automatic failover is paused. The connection service is stopped or this application is disconnected.",
     "resumeRouting": "Resume connection",
     "enabled": "Enabled",
-    "enable": "Enable"
+    "enable": "Enable",
+    "applyOrder": "Apply order",
+    "blockTier": "Block",
+    "unblockTier": "Unblock"
   },
   "secrets": {
     "unlockTitle": "Unlock credentials",
