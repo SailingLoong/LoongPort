@@ -335,14 +335,20 @@ describe("application workspace", () => {
     expect(screen.getByText("Unknown")).toBeVisible();
   });
   it("retains skipped tiers with a visible reason and manual action", async () => {
-    state.routing.tiers[0].skipReason = "circuit_open";
+    state.routing.tiers[1].skipReason = "circuit_open";
     render(<ApplicationWorkspace {...props} />);
     expect(
       screen.getByText("applications.skipReasons.circuit_open"),
     ).toBeVisible();
+    // 被熔断的非当前档位仍可手动切换（手动切换不受熔断）。
+    expect(
+      screen.getByRole("button", { name: "applications.use Premium" }),
+    ).toBeEnabled();
+    // 已是当前的档位，「设为当前」不可再点——点了会重跑整段切换编排
+    //（退 CLI → 重写配置 → 重开），对当前档位纯属 disruptive 空转。
     expect(
       screen.getByRole("button", { name: "applications.use Standard" }),
-    ).toBeEnabled();
+    ).toBeDisabled();
   });
   it("shows a paused notice when failover is configured but routing is inactive", async () => {
     state.routing.autoFailoverEnabled = true;
