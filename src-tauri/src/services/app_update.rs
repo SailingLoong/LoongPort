@@ -26,10 +26,14 @@ fn app_update_check_timeout() -> Duration {
 fn channel_updater(
     app: &AppHandle,
     timeout: Option<Duration>,
+    direct: bool,
 ) -> Result<tauri_plugin_updater::Updater, tauri_plugin_updater::Error> {
     let mut builder = app.updater_builder();
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
+    }
+    if direct {
+        builder = builder.no_proxy();
     }
     if crate::settings::get_settings().receive_beta_updates {
         // 编译期常量，parse 失败只可能是笔误——当场炸好过静默回落 stable。
@@ -38,6 +42,42 @@ fn channel_updater(
         builder = builder.endpoints(vec![url])?;
     }
     builder.build()
+}
+
+/// 检查更新：系统代理优先（尊重用户意图），**连接层失败自动改直连重试一次**。
+///
+/// 为什么必须有这一层（2026-09-16 allen-windows 实测根因）：核心用户几乎人手
+/// 本地代理（Clash 系），节点抖动是常态；更新检查一旦碰上坏节点就
+/// `error sending request` 整体失败，普通用户无从自救——而更新清单与下载
+/// 走的 loongport.dev 大陆直连本来就是通的。直连重试只救连接层故障；
+/// HTTP 404 / 签名失败等业务错误不重试。
+///
+/// 下载沿用检查时的通道（`Update` 绑定构造它的 updater 客户端）：代理在
+/// 检查后、下载中坏掉的失败由下一次检查的回退自愈（预下载周期重试 /
+/// 用户重点一次升级按钮）。
+async fn check_update_with_proxy_fallback(
+    app: &AppHandle,
+    timeout: Option<Duration>,
+) -> Result<Option<tauri_plugin_updater::Update>, tauri_plugin_updater::Error> {
+    let updater = channel_updater(app, timeout, false)?;
+    match updater.check().await {
+        Ok(update) => Ok(update),
+        Err(error) if is_connection_failure(&error) => {
+            log::warn!("更新检查走系统代理失败，改用直连重试: {error}");
+            channel_updater(app, timeout, true)?.check().await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 连接层故障判据：reqwest 的连接/超时/发送类错误（DNS 失败也归入连接类）。
+fn is_connection_failure(error: &tauri_plugin_updater::Error) -> bool {
+    match error {
+        tauri_plugin_updater::Error::Reqwest(error) => {
+            error.is_connect() || error.is_timeout() || error.is_request()
+        }
+        _ => false,
+    }
 }
 
 /// 应用更新下载进度（通过 `update-download-progress` 事件发给前端）。
@@ -330,20 +370,14 @@ pub async fn apply_pending_staged_update_on_startup(app: &AppHandle) {
     }
     let dismissed = crate::settings::get_settings().dismissed_update_version;
 
-    let updater = match channel_updater(app, Some(STARTUP_PENDING_CHECK_TIMEOUT)) {
-        Ok(updater) => updater,
-        Err(e) => {
-            log::warn!("启动闸门初始化更新器失败（保留预下载产物）: {e}");
-            return;
-        }
-    };
-    let offered = match updater.check().await {
-        Ok(update) => update,
-        Err(e) => {
-            log::info!("启动闸门拿不到更新清单（保留预下载产物，下次启动再试）: {e}");
-            return;
-        }
-    };
+    let offered =
+        match check_update_with_proxy_fallback(app, Some(STARTUP_PENDING_CHECK_TIMEOUT)).await {
+            Ok(update) => update,
+            Err(e) => {
+                log::info!("启动闸门拿不到更新清单（保留预下载产物，下次启动再试）: {e}");
+                return;
+            }
+        };
     let offered_version = offered.as_ref().map(|update| update.version.as_str());
 
     let mut install_candidate: Option<std::path::PathBuf> = None;
@@ -533,9 +567,7 @@ pub async fn install_staged_or_download_and_restart(app: &AppHandle) -> Result<b
         // 预下载失败/产物不可读 → 继续走全量流程。
     }
 
-    let updater = channel_updater(app, None).map_err(|e| format!("初始化更新器失败: {e}"))?;
-    let Some(update) = updater
-        .check()
+    let Some(update) = check_update_with_proxy_fallback(app, None)
         .await
         .map_err(|e| format!("检查更新失败: {e}"))?
     else {
@@ -598,10 +630,7 @@ impl AppUpdateCheckResult {
 }
 
 pub async fn check(app: &tauri::AppHandle) -> Result<AppUpdateCheckResult, AppError> {
-    let updater = channel_updater(app, Some(app_update_check_timeout()))
-        .map_err(|error| AppError::Message(format!("初始化更新器失败: {error}")))?;
-    let update = updater
-        .check()
+    let update = check_update_with_proxy_fallback(app, Some(app_update_check_timeout()))
         .await
         .map_err(|error| AppError::Message(format!("检查更新失败: {error}")))?;
 
