@@ -14,6 +14,46 @@ fn priority_key(app: &str) -> String {
     format!("application_priority_{app}")
 }
 
+/// 用户屏蔽的档位名单（按 app 持久化，形状与优先级序同款 settings JSON 列表）。
+fn blocked_key(app: &str) -> String {
+    format!("application_blocked_{app}")
+}
+
+pub fn blocked_tier_ids(db: &Database, app: &str) -> HashSet<String> {
+    db.get_setting(&blocked_key(app))
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .map(|ids| ids.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// 屏蔽是用户显式意图：写入即生效（选路侧每次现读，无需失效通知）。
+pub fn set_tier_blocked(
+    db: &Database,
+    app: &str,
+    provider_id: &str,
+    blocked: bool,
+) -> Result<(), AppError> {
+    if !ordered_providers(db, app)?
+        .iter()
+        .any(|p| p.id == provider_id)
+    {
+        return Err(AppError::Config("Unknown provider for this app".into()));
+    }
+    let mut ids = blocked_tier_ids(db, app);
+    if blocked {
+        ids.insert(provider_id.to_string());
+    } else {
+        ids.remove(provider_id);
+    }
+    let ordered: Vec<String> = ids.into_iter().collect();
+    db.set_setting(
+        &blocked_key(app),
+        &serde_json::to_string(&ordered).map_err(|e| AppError::Config(e.to_string()))?,
+    )
+}
+
 pub fn ordered_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppError> {
     AppType::from_str(app)?;
     let order: Vec<String> = db
@@ -51,7 +91,17 @@ pub fn current_provider_id(db: &Database, app: &str) -> Option<String> {
 }
 
 /// A static exclusion shared by route selection and its presentation.
-pub fn fallback_exclusion(db: &Database, app: &str, provider: &Provider) -> Option<&'static str> {
+/// 调用方在循环外预载屏蔽名单传入（选路与看板都逐档位调用，避免逐次查 settings）。
+/// 屏蔽排在最前：用户显式意图压过能力/模型等推断性原因。
+pub fn fallback_exclusion_with(
+    db: &Database,
+    app: &str,
+    provider: &Provider,
+    blocked: &HashSet<String>,
+) -> Option<&'static str> {
+    if blocked.contains(&provider.id) {
+        return Some("blocked");
+    }
     if !super::provider_router::provider_supports_proxy_routing(app, provider) {
         return Some("native_configuration");
     }
@@ -246,4 +296,38 @@ pub fn takeover_enabled(db: &Database, app: &str) -> Result<bool, AppError> {
         )
         .optional()?
         .unwrap_or(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn blocked_tiers_round_trip_and_exclude_from_fallback() {
+        let db = crate::Database::memory().unwrap();
+        let provider =
+            crate::provider::Provider::with_id("a".into(), "A".into(), serde_json::json!({}), None);
+        db.save_provider("claude", &provider).unwrap();
+        let exclusion = |blocked: &std::collections::HashSet<String>| {
+            fallback_exclusion_with(&db, "claude", &provider, blocked)
+        };
+        assert!(blocked_tier_ids(&db, "claude").is_empty());
+        assert_eq!(exclusion(&Default::default()), None);
+
+        set_tier_blocked(&db, "claude", "a", true).unwrap();
+        let blocked = blocked_tier_ids(&db, "claude");
+        assert!(blocked.contains("a"));
+        // 屏蔽压过其他推断性原因（模型不匹配/能力声明）——用户显式意图优先。
+        assert_eq!(exclusion(&blocked), Some("blocked"));
+
+        // 取消屏蔽恢复原状；名单按 app 隔离（codex 不受 claude 影响）。
+        set_tier_blocked(&db, "claude", "a", false).unwrap();
+        assert!(blocked_tier_ids(&db, "claude").is_empty());
+        assert!(blocked_tier_ids(&db, "codex").is_empty());
+        assert_eq!(exclusion(&Default::default()), None);
+
+        // 未知档位拒绝写入。
+        assert!(set_tier_blocked(&db, "claude", "ghost", true).is_err());
+    }
 }

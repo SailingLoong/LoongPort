@@ -2014,6 +2014,7 @@ pub fn run() {
             // Auto mode (LoongPort): 系统按策略自动挑托管档位
             commands::get_application_routing,
             commands::set_application_priority,
+            commands::set_application_tier_blocked,
             commands::set_application_failover,
             commands::get_auto_mode_status,
             commands::set_auto_mode_enabled,

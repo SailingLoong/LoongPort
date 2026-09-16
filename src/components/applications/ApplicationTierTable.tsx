@@ -18,6 +18,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   ArrowDown,
   ArrowUp,
+  Ban,
   Check,
   GripVertical,
   Settings2,
@@ -29,12 +30,31 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { tierMetrics, type TierMetric, type TierSort } from "./tierMetrics";
 
+/**
+ * 可见行之间换位、未显示行原位不动（splice 语义）：筛选视图里拖拽只改
+ * 可见档位的相对顺序，隐藏档位各守其位。`from`/`to` 是可见序列里的下标。
+ */
+export function reorderWithinVisible(
+  orderedIds: string[],
+  visibleIds: string[],
+  from: number,
+  to: number,
+): string[] {
+  if (from < 0 || to < 0 || from === to) return orderedIds;
+  const reorderedVisible = arrayMove(visibleIds, from, to);
+  const visibleSet = new Set(visibleIds);
+  let cursor = 0;
+  return orderedIds.map((id) =>
+    visibleSet.has(id) ? reorderedVisible[cursor++]! : id,
+  );
+}
+
 interface Props {
   configurations: ApplicationConfiguration[];
   tiers: ApplicationRoutingTier[];
   orderedIds: string[];
-  /** 数据库里的档位序：优先级列号与拖拽的基准，不随视图排序变化。 */
-  storedIds: string[];
+  /** 故障切换开启才出现优先级列与屏蔽按钮（2026-09-16 用户定调的三隐边界）。 */
+  failoverEnabled: boolean;
   search: string;
   accountFilter: string | null;
   modelFilter: string | null;
@@ -46,6 +66,7 @@ interface Props {
   onReorder: (ids: string[]) => void;
   onSelect: (item: ApplicationConfiguration) => void;
   onOpenAccount: (account: AccountRoute) => void;
+  onBlockTier: (providerId: string, blocked: boolean) => void;
 }
 export function ApplicationTierTable(props: Props) {
   const { t } = useTranslation();
@@ -59,9 +80,6 @@ export function ApplicationTierTable(props: Props) {
     props.configurations.map((item) => [item.providerId, item]),
   );
   const metrics = new Map(props.tiers.map((tier) => [tier.providerId, tier]));
-  const storedPriority = new Map(
-    props.storedIds.map((id, index) => [id, index + 1]),
-  );
   const needle = props.search.trim().toLocaleLowerCase();
   const visible = props.orderedIds.flatMap((id) => {
     const item = configurations.get(id);
@@ -83,22 +101,34 @@ export function ApplicationTierTable(props: Props) {
       ? [item]
       : [];
   });
-  const dragDisabled =
-    props.orderBusy ||
-    Boolean(needle) ||
-    Boolean(props.sort) ||
-    Boolean(props.accountFilter) ||
-    Boolean(props.modelFilter);
+  const isBlocked = (id: string) => metrics.get(id)?.skipReason === "blocked";
+  // 优先级 = 纯显示的行位置（2026-09-16 用户定调）：永远从 1 起、按列表顺序
+  // 连续编号，不断档不逆序；被屏蔽的行不占号，下一行顶上。
+  let rank = 0;
+  const visibleRank = new Map(
+    visible.map((item) => {
+      const blocked = isBlocked(item.providerId);
+      return [item.providerId, blocked ? null : ++rank] as const;
+    }),
+  );
+  // 拖拽只在指标排序期间禁用：排序是临时视图序，与拖拽打架；筛选是稳定子集，
+  // 可见行之间换位（未显示行原位不动）。
+  const dragDisabled = props.orderBusy || Boolean(props.sort);
   return (
     <DndContext
       sensors={sensors}
       collisionDetection={closestCenter}
       onDragEnd={({ active, over }) => {
         if (dragDisabled || !over || active.id === over.id) return;
-        const from = props.orderedIds.indexOf(String(active.id)),
-          to = props.orderedIds.indexOf(String(over.id));
-        if (from >= 0 && to >= 0)
-          props.onReorder(arrayMove(props.orderedIds, from, to));
+        const visibleIds = visible.map((item) => item.providerId);
+        props.onReorder(
+          reorderWithinVisible(
+            props.orderedIds,
+            visibleIds,
+            visibleIds.indexOf(String(active.id)),
+            visibleIds.indexOf(String(over.id)),
+          ),
+        );
       }}
     >
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
@@ -108,12 +138,14 @@ export function ApplicationTierTable(props: Props) {
         >
           <thead className="bg-muted/50 text-xs text-muted-foreground">
             <tr>
-              <th
-                scope="col"
-                className="min-w-24 px-3 py-3 text-left font-medium"
-              >
-                {t("applications.priority")}
-              </th>
+              {props.failoverEnabled && (
+                <th
+                  scope="col"
+                  className="min-w-24 px-3 py-3 text-left font-medium"
+                >
+                  {t("applications.priority")}
+                </th>
+              )}
               <th
                 scope="col"
                 className="min-w-52 px-3 py-3 text-left font-medium"
@@ -168,8 +200,9 @@ export function ApplicationTierTable(props: Props) {
                 <TierRow
                   key={item.providerId}
                   item={item}
-                  priority={storedPriority.get(item.providerId) ?? 0}
+                  priority={visibleRank.get(item.providerId) ?? null}
                   tier={metrics.get(item.providerId)}
+                  failoverEnabled={props.failoverEnabled}
                   additive={props.additive}
                   current={
                     props.additive
@@ -180,6 +213,7 @@ export function ApplicationTierTable(props: Props) {
                   busy={props.busy}
                   onSelect={props.onSelect}
                   onOpenAccount={props.onOpenAccount}
+                  onBlockTier={props.onBlockTier}
                 />
               ))}
             </tbody>
@@ -198,22 +232,27 @@ function TierRow({
   item,
   priority,
   tier,
+  failoverEnabled,
   current,
   additive,
   dragDisabled,
   busy,
   onSelect,
   onOpenAccount,
+  onBlockTier,
 }: {
   item: ApplicationConfiguration;
-  priority: number;
+  /** 列表位置号；null = 被屏蔽，不占号（下一行顶上）。 */
+  priority: number | null;
   tier?: ApplicationRoutingTier;
+  failoverEnabled: boolean;
   current: boolean;
   additive: boolean;
   dragDisabled: boolean;
   busy: boolean;
   onSelect: Props["onSelect"];
   onOpenAccount: Props["onOpenAccount"];
+  onBlockTier: Props["onBlockTier"];
 }) {
   const { t } = useTranslation();
   const {
@@ -225,6 +264,7 @@ function TierRow({
     isDragging,
   } = useSortable({ id: item.providerId, disabled: dragDisabled });
   const name = item.configurationName ?? item.name;
+  const blocked = tier?.skipReason === "blocked";
   return (
     <tr
       ref={setNodeRef}
@@ -232,24 +272,30 @@ function TierRow({
       className={cn(
         "group border-t border-border/60",
         current ? "bg-blue-500/5" : "hover:bg-muted/30",
+        // 屏蔽的档位整行置灰：自动切换永不选它，但仍在列表里，可筛选、可手动切换。
+        blocked && "opacity-55",
         isDragging && "relative z-20 bg-card shadow-lg",
       )}
     >
-      <td className="px-3 py-3 align-top">
-        <div className="flex h-8 items-center gap-3">
-          <button
-            type="button"
-            {...attributes}
-            {...listeners}
-            disabled={dragDisabled}
-            aria-label={t("applications.dragTier", { name })}
-            className="cursor-grab rounded p-1 text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing disabled:cursor-default disabled:opacity-30"
-          >
-            <GripVertical className="h-4 w-4" />
-          </button>
-          <span className="tabular-nums text-muted-foreground">{priority}</span>
-        </div>
-      </td>
+      {failoverEnabled && (
+        <td className="px-3 py-3 align-top">
+          <div className="flex h-8 items-center gap-3">
+            <button
+              type="button"
+              {...attributes}
+              {...listeners}
+              disabled={dragDisabled}
+              aria-label={t("applications.dragTier", { name })}
+              className="cursor-grab rounded p-1 text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing disabled:cursor-default disabled:opacity-30"
+            >
+              <GripVertical className="h-4 w-4" />
+            </button>
+            <span className="tabular-nums text-muted-foreground">
+              {priority ?? "—"}
+            </span>
+          </div>
+        </td>
+      )}
       <td className="max-w-80 px-3 py-3">
         <div className="flex min-h-6 flex-wrap items-center gap-2">
           <span className="break-words font-medium">{name}</span>
@@ -327,6 +373,23 @@ function TierRow({
               onClick={() => item.account && onOpenAccount(item.account)}
             >
               <Settings2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {failoverEnabled && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              disabled={busy}
+              aria-label={t(
+                blocked ? "applications.unblockTier" : "applications.blockTier",
+              )}
+              title={t(
+                blocked ? "applications.unblockTier" : "applications.blockTier",
+              )}
+              onClick={() => onBlockTier(item.providerId, !blocked)}
+            >
+              <Ban className="h-3.5 w-3.5" />
             </Button>
           )}
           <Button

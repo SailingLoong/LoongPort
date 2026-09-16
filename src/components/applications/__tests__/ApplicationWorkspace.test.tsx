@@ -2,6 +2,7 @@ import { render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { ApplicationWorkspace } from "../ApplicationWorkspace";
+import { reorderWithinVisible } from "../ApplicationTierTable";
 
 const state = vi.hoisted(() => ({
   data: {} as any,
@@ -9,6 +10,7 @@ const state = vi.hoisted(() => ({
   select: vi.fn(),
   setOrder: vi.fn(),
   setFailover: vi.fn(),
+  blockTier: vi.fn(),
 }));
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
@@ -32,6 +34,7 @@ vi.mock("../useApplicationRouting", () => ({
     busy: false,
     setOrder: state.setOrder,
     setFailover: state.setFailover,
+    blockTier: state.blockTier,
   }),
 }));
 vi.mock("react-i18next", () => ({
@@ -74,6 +77,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.setFailover.mockResolvedValue(undefined);
   state.setOrder.mockResolvedValue(undefined);
+  state.blockTier.mockResolvedValue(undefined);
   state.data = {
     configurations: [
       config("a", "Standard", true),
@@ -119,9 +123,14 @@ describe("application workspace", () => {
     async (enabled) => {
       state.routing.autoFailoverEnabled = enabled;
       render(<ApplicationWorkspace {...props} />);
+      // 优先级列与屏蔽按钮只在故障切换开启时出现（2026-09-16 三隐定调）。
       expect(
-        screen.getByRole("columnheader", { name: "applications.priority" }),
-      ).toBeVisible();
+        Boolean(
+          screen.queryByRole("columnheader", {
+            name: "applications.priority",
+          }),
+        ),
+      ).toBe(enabled);
       expect(screen.getByText("Standard")).toBeVisible();
       expect(screen.getByText("Premium")).toBeVisible();
       expect(
@@ -150,15 +159,18 @@ describe("application workspace", () => {
   });
 
   it("searches immediately without changing priority or current selection", async () => {
+    state.routing.autoFailoverEnabled = true;
     render(<ApplicationWorkspace {...props} />);
     await userEvent.type(screen.getByRole("searchbox"), "Premium");
     expect(screen.queryByText("Standard")).not.toBeInTheDocument();
     const row = screen.getByText("Premium").closest("tr")!;
-    expect(within(row).getByText("2")).toBeVisible();
+    // 筛选视图优先级 = 可见行局部序，从 1 连续编号（2026-09-16 用户定调，无断层）。
+    expect(within(row).getByText("1")).toBeVisible();
     expect(state.setOrder).not.toHaveBeenCalled();
     expect(state.select).not.toHaveBeenCalled();
   });
   it("sorts by the metric's default direction without persisting, reverses on second click, restores on third", async () => {
+    state.routing.autoFailoverEnabled = true;
     render(<ApplicationWorkspace {...props} />);
     const rateHeader = screen.getByRole("button", {
       name: "applications.metrics.rateMultiplier",
@@ -167,9 +179,9 @@ describe("application workspace", () => {
     await userEvent.click(rateHeader);
     expect(state.setOrder).not.toHaveBeenCalled();
     await waitFor(() => expect(names()[0]).toBe("applications.use Premium"));
-    // 优先级列仍显示数据库档位序。
+    // 优先级列永远按列表顺序连续编号：排序后 Premium 排第一就是 1。
     const premiumRow = screen.getByText("Premium").closest("tr")!;
-    expect(within(premiumRow).getByText("2")).toBeVisible();
+    expect(within(premiumRow).getByText("1")).toBeVisible();
     // 第二击：反向（降序），箭头翻转。
     await userEvent.click(rateHeader);
     expect(state.setOrder).not.toHaveBeenCalled();
@@ -220,23 +232,22 @@ describe("application workspace", () => {
     expect(header("applications.metrics.errorRate")).not.toBeNull();
     expect(header("applications.metrics.balanceUsd")).toBeNull();
   });
-  it("filters tiers by tier model with availability counts, pinning the routing model first", async () => {
+  it("counts only detected errors (and blocks) as unavailable, never model incompatibility", async () => {
     state.routing.model = "gpt-5";
-    state.routing.modelOptions = ["gpt-5", "grok-4.6"];
     state.routing.routingActive = true;
     state.routing.tiers[0].effectiveModel = "gpt-5";
     state.routing.tiers[1].effectiveModel = "grok-4.6";
     state.routing.tiers[2].effectiveModel = "gpt-5";
-    // gpt-5: a 可用、c 限流中 → 1/2（部分可用，分子橙色）；
-    // grok-4.6: b 也限流 → 0/1（全不可用，整行置灰但可选）。
-    state.routing.tiers[1].skipReason = "circuit_open";
+    // gpt-5: a 可用、c 限流中（circuit_open=已嗅探错误）→ 1/2 部分可用，分子橙；
+    // grok-4.6: b 标 model_incompatible —— 对当前模型 gpt-5 恒真、不是错误，
+    // 不得扣分（beta.4 回归：曾把其他模型分子全清零）→ 1/1 全可用，分子绿。
+    state.routing.tiers[1].skipReason = "model_incompatible";
     state.routing.tiers[2].skipReason = "circuit_open";
     render(<ApplicationWorkspace {...props} />);
     const filter = screen.getByRole("combobox", {
       name: "applications.modelFilter",
     });
     await userEvent.click(filter);
-    // 当前路由模型置顶（⚡ 前缀）+ 可用/总数分数；其余按字典序。
     const optionElements = screen.getAllByRole("option");
     const options = optionElements.map((option) => option.textContent);
     expect(options[0]).toBe("applications.allModels");
@@ -246,14 +257,55 @@ describe("application workspace", () => {
     const grok = optionElements.find((option) =>
       option.textContent?.includes("grok-4.6"),
     )!;
-    expect(grok.textContent).toContain("0/1");
-    expect(grok.className).toContain("text-muted-foreground");
+    expect(grok.textContent).toContain("1/1");
+    expect(grok.querySelector(".text-green-600")).not.toBeNull();
+    expect(options.some((text) => text?.includes("0/"))).toBe(false);
+    // 过滤行为：选 gpt-5 只留 effectiveModel=gpt-5 的行（含限流中的，看原因）。
     await userEvent.click(screen.getByRole("option", { name: /⚡ gpt-5/ }));
-    // 只剩 effectiveModel=gpt-5 的两行（含限流中的那行，方便逐行看跳过原因）。
     expect(screen.getByText("Standard")).toBeVisible();
     expect(screen.getByText("Unknown")).toBeVisible();
     expect(screen.queryByText("Premium")).not.toBeInTheDocument();
     expect(state.setOrder).not.toHaveBeenCalled();
+  });
+  it("blocked tiers gray out, free their priority number, and unblock from the row action", async () => {
+    state.routing.autoFailoverEnabled = true;
+    state.routing.tiers[1].skipReason = "blocked";
+    render(<ApplicationWorkspace {...props} />);
+    const premiumRow = screen.getByText("Premium").closest("tr")!;
+    // 整行置灰；被屏蔽的行不占优先级号，下一行顶上。
+    expect(premiumRow.className).toContain("opacity-55");
+    // 优先级格 = 行首单元格（故障切换开启时）；指标列的「—」不参与此断言。
+    expect(within(premiumRow.cells[0]!).getByText("—")).toBeVisible();
+    const standardRow = screen.getByText("Standard").closest("tr")!;
+    const unknownRow = screen.getByText("Unknown").closest("tr")!;
+    expect(within(standardRow).getByText("1")).toBeVisible();
+    expect(within(unknownRow).getByText("2")).toBeVisible();
+    // 屏蔽只挡自动切换：手动「设为当前」仍在。
+    expect(
+      within(premiumRow).getByRole("button", {
+        name: "applications.use Premium",
+      }),
+    ).toBeVisible();
+    // 取消屏蔽走行动作（即时生效，不经「应用此顺序」）。
+    await userEvent.click(
+      within(premiumRow).getByRole("button", {
+        name: "applications.unblockTier",
+      }),
+    );
+    expect(state.blockTier).toHaveBeenCalledWith({
+      providerId: "b",
+      blocked: false,
+    });
+    // 屏蔽一个正常档位同理。
+    await userEvent.click(
+      within(standardRow).getByRole("button", {
+        name: "applications.blockTier",
+      }),
+    );
+    expect(state.blockTier).toHaveBeenCalledWith({
+      providerId: "a",
+      blocked: true,
+    });
   });
   it("filters tiers by account and shows all again from the dropdown", async () => {
     state.data.configurations = [
@@ -325,5 +377,23 @@ describe("application workspace", () => {
       screen.getByRole("button", { name: "applications.manageConfigurations" }),
     );
     expect(screen.getByText("Advanced configuration actions")).toBeVisible();
+  });
+});
+
+describe("reorderWithinVisible (splice semantics)", () => {
+  it("swaps only the visible rows and leaves hidden rows in place", () => {
+    const fn = reorderWithinVisible;
+    // 全序 [A,B,C,D,E]，筛选只显示 B,D；把 D 拖到 B 前 → [A,D,C,B,E]。
+    expect(fn(["A", "B", "C", "D", "E"], ["B", "D"], 1, 0)).toEqual([
+      "A",
+      "D",
+      "C",
+      "B",
+      "E",
+    ]);
+    // 未筛选时等价整体换位。
+    expect(fn(["A", "B", "C"], ["A", "B", "C"], 2, 0)).toEqual(["C", "A", "B"]);
+    // 非法下标原样返回。
+    expect(fn(["A", "B"], ["A", "B"], -1, 0)).toEqual(["A", "B"]);
   });
 });

@@ -24,6 +24,12 @@ export const applicationRoutingApi = {
     invoke("get_application_routing", { appType }),
   setOrder: (appType: string, orderedIds: string[]): Promise<void> =>
     invoke("set_application_priority", { appType, orderedIds }),
+  setTierBlocked: (
+    appType: string,
+    providerId: string,
+    blocked: boolean,
+  ): Promise<void> =>
+    invoke("set_application_tier_blocked", { appType, providerId, blocked }),
   setFailover: (appType: string, enabled: boolean): Promise<void> =>
     invoke("set_application_failover", { appType, enabled }),
 };
