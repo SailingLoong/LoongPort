@@ -72,20 +72,27 @@ impl ProviderRouter {
     }
 
     /// Keep explicit selection first, then try only later persistent priorities.
+    ///
+    /// 候选链唯源 = 存储链（用户已应用的列表，见 [`chain_providers`]）：链外档位
+    /// 不是后备，永不参与自动重试。当前档照旧排第一位（它是用户的手动选择）；
+    /// 当前档被应用出链时，整条链从链顶开始都算后继候选。
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
         use super::application_routing;
-        let ordered = application_routing::ordered_providers(&self.db, app_type)?;
+        let chain = application_routing::chain_providers(&self.db, app_type)?;
         let current_id = application_routing::current_provider_id(&self.db, app_type);
-        let current = ordered
-            .iter()
-            .find(|p| Some(p.id.as_str()) == current_id.as_deref());
+        let current = current_id
+            .as_deref()
+            .and_then(|id| self.db.get_provider_by_id(id, app_type).ok().flatten());
         let enabled = self
             .db
             .get_proxy_config_for_app(app_type)
             .await?
             .auto_failover_enabled;
         let mut result = Vec::new();
-        if let Some(current) = current.filter(|p| provider_supports_proxy_routing(app_type, p)) {
+        if let Some(current) = current
+            .as_ref()
+            .filter(|p| provider_supports_proxy_routing(app_type, p))
+        {
             result.push(current.clone());
             if !enabled || !provider_supports_failover(app_type, current) {
                 return Ok(result);
@@ -94,10 +101,11 @@ impl ProviderRouter {
             return Err(AppError::NoProvidersConfigured);
         }
         let start = current
-            .and_then(|p| ordered.iter().position(|entry| entry.id == p.id))
+            .as_ref()
+            .and_then(|p| chain.iter().position(|entry| entry.id == p.id))
             .map_or(0, |index| index + 1);
         let blocked = application_routing::blocked_tier_ids(&self.db, app_type);
-        for provider in ordered.into_iter().skip(start) {
+        for provider in chain.into_iter().skip(start) {
             if application_routing::fallback_exclusion_with(&self.db, app_type, &provider, &blocked)
                 .is_none()
                 && self.tier_and_account_available(app_type, &provider).await
@@ -1182,6 +1190,69 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "vendor-1");
+    }
+
+    /// 链 = 用户已应用的列表（2026-09-16 定调）：被筛出链的档位不是后备，
+    /// `select_providers` 永不返回它，即使熔断/屏蔽/模型全部放行。
+    #[tokio::test]
+    #[serial]
+    async fn select_providers_never_walks_tiers_outside_the_applied_chain() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        for id in ["a", "b", "x"] {
+            db.save_provider(
+                "claude",
+                &Provider::with_id(id.to_string(), id.to_string(), json!({}), None),
+            )
+            .unwrap();
+        }
+        super::super::application_routing::set_order(&db, "claude", &["b".into(), "a".into()])
+            .unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+
+        let ids: Vec<_> = providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "a"], "x 不在已应用的链里，不是后备");
+    }
+
+    /// 当前档被应用出链：仍排第一位（手动选择不受应用影响），整条链从链顶
+    /// 开始都是后继候选——没有档位因为「排在当前之前」被跳过。
+    #[tokio::test]
+    #[serial]
+    async fn select_providers_walks_from_chain_top_when_current_is_outside_chain() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        for id in ["a", "b", "c"] {
+            db.save_provider(
+                "claude",
+                &Provider::with_id(id.to_string(), id.to_string(), json!({}), None),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("claude", "c").unwrap();
+        super::super::application_routing::set_order(&db, "claude", &["b".into(), "a".into()])
+            .unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+
+        let ids: Vec<_> = providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["c", "b", "a"],
+            "当前档在链外 → 链顶开始全是候选，而不是找不到候选"
+        );
     }
 
     #[tokio::test]

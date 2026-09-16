@@ -49,6 +49,59 @@ export function reorderWithinVisible(
   );
 }
 
+/**
+ * 可见性唯源：筛选（账号/模型）+ 搜索对显示序的过滤。表格渲染与工作台的
+ * 「应用此顺序」目标计算共用这一个判定——两处各写一份必然分叉。
+ * 屏蔽不在这层：它是链资格语义，目标计算另行排除，表格另行置灰。
+ */
+export function visibleTierIds({
+  orderedIds,
+  configurations,
+  metrics,
+  search,
+  accountFilter,
+  modelFilter,
+}: {
+  orderedIds: string[];
+  configurations: Map<string, ApplicationConfiguration>;
+  metrics: Map<string, ApplicationRoutingTier>;
+  search: string;
+  accountFilter: string | null;
+  modelFilter: string | null;
+}): string[] {
+  const needle = search.trim().toLocaleLowerCase();
+  return orderedIds.filter((id) => {
+    const item = configurations.get(id);
+    if (!item) return false;
+    if (
+      accountFilter &&
+      (!item.account ||
+        `${item.account.kind}:${item.account.id}` !== accountFilter)
+    ) {
+      return false;
+    }
+    if (
+      modelFilter &&
+      (metrics.get(id)?.effectiveModel ?? item.model) !== modelFilter
+    ) {
+      return false;
+    }
+    if (
+      needle &&
+      ![
+        item.name,
+        item.serviceName,
+        item.accountLabel,
+        item.configurationName,
+        item.model,
+      ].some((value) => value?.toLocaleLowerCase().includes(needle))
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 interface Props {
   configurations: ApplicationConfiguration[];
   tiers: ApplicationRoutingTier[];
@@ -80,30 +133,21 @@ export function ApplicationTierTable(props: Props) {
     props.configurations.map((item) => [item.providerId, item]),
   );
   const metrics = new Map(props.tiers.map((tier) => [tier.providerId, tier]));
-  const needle = props.search.trim().toLocaleLowerCase();
-  const visible = props.orderedIds.flatMap((id) => {
+  const visible = visibleTierIds({
+    orderedIds: props.orderedIds,
+    configurations,
+    metrics,
+    search: props.search,
+    accountFilter: props.accountFilter,
+    modelFilter: props.modelFilter,
+  }).flatMap((id) => {
     const item = configurations.get(id);
-    return item &&
-      (!props.accountFilter ||
-        (item.account &&
-          `${item.account.kind}:${item.account.id}` === props.accountFilter)) &&
-      (!props.modelFilter ||
-        (metrics.get(id)?.effectiveModel ?? item.model) ===
-          props.modelFilter) &&
-      (!needle ||
-        [
-          item.name,
-          item.serviceName,
-          item.accountLabel,
-          item.configurationName,
-          item.model,
-        ].some((value) => value?.toLocaleLowerCase().includes(needle)))
-      ? [item]
-      : [];
+    return item ? [item] : [];
   });
   const isBlocked = (id: string) => metrics.get(id)?.skipReason === "blocked";
-  // 优先级 = 纯显示的行位置（2026-09-16 用户定调）：永远从 1 起、按列表顺序
-  // 连续编号，不断档不逆序；被屏蔽的行不占号，下一行顶上。
+  // 优先级 = 「应用此顺序」目标的序号（可见 ∧ 未屏蔽，按显示序）：永远从 1 起、
+  // 按列表顺序连续编号，不断档不逆序；被屏蔽的行不占号，下一行顶上——
+  // 应用写入的就是这串编号对应的 id 序（2026-09-16 定调）。
   let rank = 0;
   const visibleRank = new Map(
     visible.map((item) => {

@@ -15,13 +15,19 @@ const state = vi.hoisted(() => ({
 
 // 表格子组件打桩：直接拿 onReorder 模拟拖拽产物（splice 语义在主测试文件
 // 纯函数覆盖），这里专测工作台的「拖拽暂存 → 应用此顺序」状态机。
+// visibleTierIds 是可见性唯源（工作台算应用目标也用它），mock 里保留真实现。
 const tableProps = vi.hoisted(() => ({ current: null as any }));
-vi.mock("../ApplicationTierTable", () => ({
-  ApplicationTierTable: (props: unknown) => {
-    tableProps.current = props;
-    return <table aria-label="tier table" />;
-  },
-}));
+vi.mock("../ApplicationTierTable", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../ApplicationTierTable")>();
+  return {
+    ...actual,
+    ApplicationTierTable: (props: unknown) => {
+      tableProps.current = props;
+      return <table aria-label="tier table" />;
+    },
+  };
+});
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
     data: state.data,
@@ -134,6 +140,7 @@ describe("failover order staging", () => {
     };
     state.routing = {
       autoFailoverEnabled: true,
+      chainIds: ["a", "b", "c"],
       tiers: [
         { providerId: "a", position: 0, skipReason: null, rateMultiplier: 2 },
         { providerId: "b", position: 1, skipReason: null, rateMultiplier: 1 },
@@ -153,16 +160,17 @@ describe("failover order staging", () => {
     const apply = screen.getByRole("button", {
       name: /applications\.applyOrder/,
     });
-    // 三行位置全变 → 待应用计数 3。
+    // 计数 = 应用目标的大小（链里将有 3 个）。
     expect(apply).toHaveTextContent("(3)");
     await userEvent.click(apply);
     await waitFor(() =>
       expect(state.setOrder).toHaveBeenCalledWith(["c", "a", "b"]),
     );
-    // 模拟真实链路的应用后刷新：routing 查询换新对象、tiers 序=已应用序，
+    // 模拟真实链路的应用后刷新：routing 查询换新对象、链与 tiers 序=已应用序，
     // 乐观快照随之失效、待应用归零、按钮消失。
     state.routing = {
       ...state.routing,
+      chainIds: ["c", "a", "b"],
       tiers: [
         state.routing.tiers[2],
         state.routing.tiers[0],
@@ -207,9 +215,10 @@ describe("failover order staging", () => {
     await waitFor(() =>
       expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
     );
-    // 应用后临时排序与暂存一起清空；模拟刷新后显示序=已应用的排序序。
+    // 应用后临时排序与暂存一起清空；模拟刷新后链与显示序=已应用的排序序。
     state.routing = {
       ...state.routing,
+      chainIds: ["b", "a", "c"],
       tiers: [
         state.routing.tiers[1],
         state.routing.tiers[0],
@@ -227,12 +236,16 @@ describe("failover order staging", () => {
     view.unmount();
   });
 
-  it("discarding drops staged drags and sorting back to the stored order", async () => {
+  it("discarding drops staged drags, sorting and filters back to the stored chain", async () => {
     const view = renderWorkspace();
     await drag(["b", "a", "c"]);
     await act(async () => {
       tableProps.current.onSort("rateMultiplier");
     });
+    await userEvent.type(
+      screen.getByRole("searchbox", { name: "applications.search" }),
+      "Premium",
+    );
     expect(
       screen.getByRole("button", { name: /applications\.discardOrder/ }),
     ).toBeInTheDocument();
@@ -241,6 +254,7 @@ describe("failover order staging", () => {
     );
     await waitFor(() => {
       expect(tableProps.current.sort).toBeNull();
+      expect(tableProps.current.search).toBe("");
       expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
       expect(
         screen.queryByRole("button", { name: /applications\.applyOrder/ }),
@@ -250,7 +264,58 @@ describe("failover order staging", () => {
     view.unmount();
   });
 
-  it("loads an order profile into the draft (filtered to known tiers, padded), then applies", async () => {
+  it("lights Apply from filtering alone and narrows the chain to the visible tiers", async () => {
+    const view = renderWorkspace();
+    // 筛选（搜索）一变目标就变：可见只剩 b，不需要先拖一下。
+    await userEvent.type(
+      screen.getByRole("searchbox", { name: "applications.search" }),
+      "Premium",
+    );
+    const apply = screen.getByRole("button", {
+      name: /applications\.applyOrder/,
+    });
+    expect(apply).toHaveTextContent("(1)");
+    await userEvent.click(apply);
+    // 应用写入 = 可见 ∧ 未屏蔽的显示序——链收窄为 [b]，其余档位出链（不是后备）。
+    await waitFor(() => expect(state.setOrder).toHaveBeenCalledWith(["b"]));
+    view.unmount();
+  });
+
+  it("blocked tiers are excluded from the applied chain and blocking alone does not nag", async () => {
+    state.routing.tiers[2].skipReason = "blocked";
+    const view = renderWorkspace();
+    // 屏蔽即时生效且不制造待应用：目标与参照都剔除 c，两者一致 → 无按钮。
+    expect(
+      screen.queryByRole("button", { name: /applications\.applyOrder/ }),
+    ).not.toBeInTheDocument();
+    // 拖拽后应用：写入的目标不含被屏蔽的 c。
+    await drag(["b", "a", "c"]);
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications\.applyOrder/ }),
+    );
+    await waitFor(() =>
+      expect(state.setOrder).toHaveBeenCalledWith(["b", "a"]),
+    );
+    view.unmount();
+  });
+
+  it("chain ghosts from upstream deletions light Apply until the user re-applies", async () => {
+    state.routing.chainIds = ["a", "b", "c", "ghost"];
+    const view = renderWorkspace();
+    // 幽灵不在视图里（configurations 没有它）→ 目标 [a,b,c] ≠ 参照 [a,b,c,ghost]。
+    const apply = screen.getByRole("button", {
+      name: /applications\.applyOrder/,
+    });
+    expect(apply).toHaveTextContent("(3)");
+    await userEvent.click(apply);
+    // 应用即清理幽灵。
+    await waitFor(() =>
+      expect(state.setOrder).toHaveBeenCalledWith(["a", "b", "c"]),
+    );
+    view.unmount();
+  });
+
+  it("loads an order profile into the draft (filtered to known tiers, no padding), then applies", async () => {
     profilesApi.saved = [
       { name: "便宜优先", providerIds: ["c", "ghost", "b"] },
     ];
@@ -259,19 +324,20 @@ describe("failover order staging", () => {
       screen.getByRole("button", { name: "applications.orderProfiles" }),
     );
     await userEvent.click(screen.getByRole("menuitem", { name: /便宜优先/ }));
-    // 载入 = 进草稿：认不出的 id 滤掉、剩余档位按存储序垫底 → [c,b,a]。
-    expect(tableProps.current.orderedIds).toEqual(["c", "b", "a"]);
+    // 载入 = 进草稿：认不出的 id 滤掉、不垫底——链外档位（a）从视图消失。
+    expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
     expect(state.setOrder).not.toHaveBeenCalled();
     await userEvent.click(
       screen.getByRole("button", { name: /applications\.applyOrder/ }),
     );
+    // 应用写入就是档内这批——链 = [c,b]，a 出链。
     await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["c", "b", "a"]),
+      expect(state.setOrder).toHaveBeenCalledWith(["c", "b"]),
     );
     view.unmount();
   });
 
-  it("saves the displayed order as a named profile", async () => {
+  it("saves the apply target (visible and unblocked) as a named profile", async () => {
     const view = renderWorkspace();
     await drag(["b", "a", "c"]);
     await userEvent.click(

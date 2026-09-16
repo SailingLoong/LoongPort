@@ -19,6 +19,9 @@ pub struct ApplicationRouting {
     pub routing_active: bool,
     pub model: Option<String>,
     pub model_options: Vec<TierBoardModelOption>,
+    /// 故障切换链的原始 id 序（可能含上游已删除的幽灵；前端据此算优先级号与
+    /// 「应用此顺序」的待应用差异）。链未初始化时回落全量显示序——与 migrate 播种等价。
+    pub chain_ids: Vec<String>,
     pub tiers: Vec<ApplicationRoutingTier>,
 }
 
@@ -59,6 +62,17 @@ pub(crate) async fn application_routing_impl(
         .provider_attempt_error_rates(app_type)
         .unwrap_or_default();
     let blocked = routing::blocked_tier_ids(&state.db, app_type);
+    let chain = routing::chain_ids(&state.db, app_type).map_err(|e| e.to_string())?;
+    let chain_position: std::collections::HashMap<&str, usize> = chain
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect();
+    // 「已在当前档之前」按链位置判（链外档位不是重试候选，不参与比较）；
+    // 当前档被应用出链时取不到链位 → 没有档位算 before_current（整条链都是后继）。
+    let current_chain_position = current_position
+        .and_then(|index| board.tiers.get(index))
+        .and_then(|tier| chain_position.get(tier.provider_id.as_str()).copied());
     let tiers = board
         .tiers
         .into_iter()
@@ -81,7 +95,11 @@ pub(crate) async fn application_routing_impl(
                 Some("current_official_account".to_string())
             } else if circuit_open {
                 Some("circuit_open".to_string())
-            } else if enabled && current_position.is_some_and(|index| tier.position < index) {
+            } else if enabled
+                && chain_position.contains_key(tier.provider_id.as_str())
+                && current_chain_position
+                    .is_some_and(|current| chain_position[tier.provider_id.as_str()] < current)
+            {
                 Some("before_current".to_string())
             } else {
                 None
@@ -107,6 +125,7 @@ pub(crate) async fn application_routing_impl(
         } else {
             Vec::new()
         },
+        chain_ids: chain,
         tiers,
     })
 }

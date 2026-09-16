@@ -24,23 +24,23 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 /**
- * 档位顺序配置档（2026-09-16）：命名的顺序快照，多份共存、可覆盖/导入/导出。
+ * 档位顺序配置档：命名的链快照，多份共存、可覆盖/导入/导出。
  *
  * - **载入 = 进草稿**：点配置档把该顺序载入暂存（认不出的档位 id 滤掉、
- *   剩余档位按存储序垫底），之后照常「应用/取消」——不直接写库
- * - **保存 = 当前显示序**：拖过/排过序的都算，同名覆盖
+ *   **不垫底**——链外档位从视图消失，应用后即出链），之后照常「应用/取消」
+ * - **保存 = 应用目标**：当前可见 ∧ 未屏蔽的显示序，与应用按钮同一口径，同名覆盖
  * - 导入导出走 JSON 文件（跨机导入的 id 解析不了会自愈滤掉，只剩同机备份意义）
  */
 export function OrderProfilesMenu({
   appType,
-  displayedIds,
+  targetIds,
   storedIds,
   onLoadDraft,
 }: {
   appType: string;
-  /** 当前显示序（拖拽/排序后的），保存进配置档的就是它。 */
-  displayedIds: string[];
-  /** 已知档位全集（存储序），载入时垫底用。 */
+  /** 「应用此顺序」的目标（可见 ∧ 未屏蔽的显示序），保存进配置档的就是它。 */
+  targetIds: string[];
+  /** 已知档位全集（存储序），载入时滤掉认不出的 id 用。 */
   storedIds: string[];
   onLoadDraft: (ids: string[]) => void;
 }) {
@@ -56,22 +56,17 @@ export function OrderProfilesMenu({
     client.invalidateQueries({ queryKey: ["orderProfiles", appType] });
 
   const load = (providerIds: string[]) => {
-    // 载入顺序 = 配置档里认得出的档位（按档内序）+ 不在档内的已知档位垫底
-    //（垫底序 = 存储序）——与后端 set_order 的合流语义一致。
+    // 载入顺序 = 配置档里认得出的档位（按档内序），不垫底：配置档是链快照，
+    // 应用后链就是档内这批——垫底会把链外档位拉回链里，违背链语义。
     const known = new Set(storedIds);
-    const inProfile = providerIds.filter((id) => known.has(id));
-    const inProfileSet = new Set(inProfile);
-    onLoadDraft([
-      ...inProfile,
-      ...storedIds.filter((id) => !inProfileSet.has(id)),
-    ]);
+    onLoadDraft(providerIds.filter((id) => known.has(id)));
   };
 
   const save = async () => {
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      await orderProfilesApi.save(appType, trimmed, displayedIds);
+      await orderProfilesApi.save(appType, trimmed, targetIds);
       toast.success(t("applications.orderProfileSaved", { name: trimmed }));
       setSaveOpen(false);
       setName("");
