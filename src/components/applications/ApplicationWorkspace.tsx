@@ -30,7 +30,7 @@ import {
 import { SwitchTierConfirmDialog } from "@/components/relay/SwitchTierConfirmDialog";
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
-import { ApplicationTierTable } from "./ApplicationTierTable";
+import { ApplicationTierTable, visibleTierIds } from "./ApplicationTierTable";
 import { OrderProfilesMenu } from "./OrderProfilesMenu";
 import {
   defaultDescending,
@@ -91,8 +91,8 @@ export function ApplicationWorkspace({
     source: typeof routing.data;
     ids: string[];
   } | null>(null);
-  // 故障切换开启时的暂存顺序：拖拽只改这里，点「应用此顺序」才写库；
-  // 关闭故障切换时拖拽照旧即时落库（无应用按钮）。
+  // 顺序草稿（路由类应用）：拖拽只改这里；载入配置档会整体替换成档内 id 集
+  // （不垫底——链外档位从视图消失，应用后即出链）；点「应用」才写库。
   const [stagedIds, setStagedIds] = useState<string[] | null>(null);
   const configurations = model.data?.configurations ?? [];
   const tiers = routing.data?.tiers ?? [];
@@ -134,25 +134,49 @@ export function ApplicationWorkspace({
       setSaving(false);
     }
   };
-  // 「应用此顺序」应用的是**当前显示序**（2026-09-16 定调）：拖拽暂存与指标排序
-  // 排出来的顺序同样算——排序视图下也想「就按这个顺序切换」。待应用计数 =
-  // 显示序与存储序位置不同的档位数；两者一致（纯筛选视图）就没有待应用。
-  const pendingOrderCount = (() => {
-    if (!draftOrdering) return 0;
-    if (orderedIds.length !== storedIds.length) return orderedIds.length;
-    let count = 0;
-    for (let index = 0; index < orderedIds.length; index += 1) {
-      if (orderedIds[index] !== storedIds[index]) count += 1;
-    }
-    return count;
-  })();
-  const applyStagedOrder = async () => {
+  // 应用目标 = 当前可见 ∧ 未屏蔽的档位，按显示序（2026-09-16 用户定调：
+  // 筛选一变目标就变，不需要先拖一下；可见性判定与表格共用 visibleTierIds）。
+  // 应用写入的就是它——链外档位不是后备，上游删掉的幽灵由应用清理。
+  const blockedIds = new Set(
+    tiers
+      .filter((tier) => tier.skipReason === "blocked")
+      .map((tier) => tier.providerId),
+  );
+  const targetIds = visibleTierIds({
+    orderedIds,
+    configurations: new Map(
+      configurations.map((item) => [item.providerId, item]),
+    ),
+    metrics: new Map(tiers.map((tier) => [tier.providerId, tier])),
+    search,
+    accountFilter,
+    modelFilter,
+  }).filter((id) => !blockedIds.has(id));
+  // 参照 = 存储链去掉被屏蔽的 id（幽灵保留——上游有删减时按钮亮起，应用即清理；
+  // 屏蔽是即时生效的显式动作，单独屏蔽不制造待应用）。
+  const referenceIds = (routing.data?.chainIds ?? storedIds).filter(
+    (id) => !blockedIds.has(id),
+  );
+  const matchesAppliedChain =
+    targetIds.length === referenceIds.length &&
+    targetIds.every((id, index) => id === referenceIds[index]);
+  // 待应用计数 = 应用目标的大小（「链里将有几个」），视图与已应用链一致时为 0。
+  const pendingOrderCount =
+    draftOrdering && targetIds.length > 0 && !matchesAppliedChain
+      ? targetIds.length
+      : 0;
+  const applyOrder = async () => {
     if (pendingOrderCount === 0 || saving || routing.busy) return;
     const previousOrder = order;
+    const appliedSet = new Set(targetIds);
     setSaving(true);
-    setOrder({ source: routing.data, ids: orderedIds });
+    // 乐观快照 = 应用目标在前、链外档位跟后（镜像后端展示序），后端结果一到即替换。
+    setOrder({
+      source: routing.data,
+      ids: [...targetIds, ...storedIds.filter((id) => !appliedSet.has(id))],
+    });
     try {
-      await routing.setOrder(orderedIds);
+      await routing.setOrder(targetIds);
       setStagedIds(null);
       setSort(null);
     } catch {
@@ -161,10 +185,14 @@ export function ApplicationWorkspace({
       setSaving(false);
     }
   };
-  // 撤回 = 丢弃未应用的改动（拖拽暂存与临时排序一起清），回到存储序。
-  const discardStagedOrder = () => {
+  // 撤回 = 丢弃未应用的改动（拖拽暂存、临时排序、筛选与搜索一起清），
+  // 回到存储链的全量视图。
+  const discardOrder = () => {
     setStagedIds(null);
     setSort(null);
+    setAccountFilter(null);
+    setModelFilter(null);
+    setSearch("");
   };
   // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
   const sortBy = (key: TierMetric) => {
@@ -261,12 +289,12 @@ export function ApplicationWorkspace({
               )}
               {draftOrdering && pendingOrderCount > 0 && (
                 <>
-                  {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序，
-                      回到之前的配置（存储序）。 */}
+                  {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序/筛选，
+                      回到已应用的链视图。 */}
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={discardStagedOrder}
+                    onClick={discardOrder}
                     disabled={orderBusy}
                     className="h-7 text-xs"
                   >
@@ -275,7 +303,7 @@ export function ApplicationWorkspace({
                   <Button
                     size="sm"
                     onClick={() => {
-                      void applyStagedOrder();
+                      void applyOrder();
                     }}
                     disabled={orderBusy}
                     className="h-7 gap-1.5 text-xs"
@@ -289,7 +317,7 @@ export function ApplicationWorkspace({
               {draftOrdering && (
                 <OrderProfilesMenu
                   appType={appId}
-                  displayedIds={orderedIds}
+                  targetIds={targetIds}
                   storedIds={storedIds}
                   onLoadDraft={(ids) => {
                     // 载入配置档 = 进草稿：清临时排序，照常「应用/取消」。

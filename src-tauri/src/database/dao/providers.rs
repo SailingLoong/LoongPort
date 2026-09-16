@@ -485,6 +485,22 @@ impl Database {
         }
 
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        // 释放连接锁再追加链成员：note_provider_created 内部要拿同一把锁，
+        // conn 守卫活到函数尾的话这里就死锁了。
+        drop(conn);
+
+        // 链成员资格：新档位（插入分支）自动进链垫底——上游新增默认排在最后生效。
+        // 只挂创建、不挂更新：被用户应用出链的档位刷新后不能爬回链里。
+        // 追加失败只警告不阻断——主写入已成功，链是辅助状态（与 record_attempt 同款尽力而为）。
+        if !is_update {
+            if let Err(e) = crate::proxy::application_routing::note_provider_created(
+                self,
+                app_type,
+                &provider.id,
+            ) {
+                log::warn!("Could not append new provider to application chain: {e}");
+            }
+        }
         Ok(())
     }
 

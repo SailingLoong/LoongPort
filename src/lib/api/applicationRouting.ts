@@ -16,6 +16,11 @@ export interface ApplicationRouting {
   routingActive: boolean;
   model: string | null;
   modelOptions: TierBoardModelOption[];
+  /**
+   * 故障切换链的原始 id 序（后端唯源；可能含上游已删除的幽灵）。
+   * 「应用此顺序」的差异比较以它为参照；未初始化时后端已回落全量显示序。
+   */
+  chainIds: string[];
   tiers: ApplicationRoutingTier[];
 }
 

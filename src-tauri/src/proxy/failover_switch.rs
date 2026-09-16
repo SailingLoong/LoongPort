@@ -115,9 +115,11 @@ impl FailoverSwitchManager {
                 if current.as_deref().unwrap_or_default() != expected_current {
                     return Ok(false);
                 }
-                let order = super::application_routing::ordered_providers(&self.db, app_type)?;
-                let target_index = order.iter().position(|p| p.id == provider_id);
-                let current_index = order
+                // 只沿链前进（链 = 用户已应用的列表，链外档位不是切换候选）。
+                // 当前档被应用出链时在链内取不到位置 → 任意链内目标都算前进。
+                let chain = super::application_routing::chain_providers(&self.db, app_type)?;
+                let target_index = chain.iter().position(|p| p.id == provider_id);
+                let current_index = chain
                     .iter()
                     .position(|p| Some(p.id.as_str()) == current.as_deref());
                 if target_index.is_none()

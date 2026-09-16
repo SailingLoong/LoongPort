@@ -56,12 +56,7 @@ pub fn set_tier_blocked(
 
 pub fn ordered_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppError> {
     AppType::from_str(app)?;
-    let order: Vec<String> = db
-        .get_setting(&priority_key(app))?
-        .map(|value| serde_json::from_str(&value))
-        .transpose()
-        .map_err(|e| AppError::Config(e.to_string()))?
-        .unwrap_or_default();
+    let order = stored_order(db, app)?;
     let mut providers: Vec<_> = db.get_all_providers(app)?.into_values().collect();
     providers.sort_by(|a, b| {
         let rank = |id: &str| {
@@ -80,6 +75,66 @@ pub fn ordered_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppE
             .then(a.id.cmp(&b.id))
     });
     Ok(providers)
+}
+
+/// 存储链的原始 id 列表（可能含上游已删除的幽灵）；链未初始化时为 None。
+fn stored_order(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
+    Ok(db
+        .get_setting(&priority_key(app))?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|e| AppError::Config(e.to_string()))?
+        .unwrap_or_default())
+}
+
+/// 故障切换链的有效 id 全集（2026-09-16 用户定调：链 = 用户已应用的列表）。
+///
+/// - 链已初始化：严格按存储链返回，幽灵原样带出（调用方各自跳过）。
+///   `set_order` 拒绝空列表，所以已初始化的链绝不退化成空表。
+/// - 链未初始化：回落全量显示序——与启动 migrate 的全量播种等价的读时默认，
+///   让「从没应用过」和「应用了全部」在读取侧无歧义地同形。
+pub fn chain_ids(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
+    AppType::from_str(app)?;
+    match db.get_setting(&priority_key(app))? {
+        Some(raw) => serde_json::from_str(&raw).map_err(|e| AppError::Config(e.to_string())),
+        None => Ok(ordered_providers(db, app)?
+            .into_iter()
+            .map(|p| p.id)
+            .collect()),
+    }
+}
+
+/// 链成员（按存储序，幽灵跳过）——选路与故障切换重试的全集与顺序唯源。
+/// 链外档位不是后备：被用户应用出链的档位永不参与自动重试。
+pub fn chain_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppError> {
+    let ids = chain_ids(db, app)?;
+    let providers = db.get_all_providers(app)?;
+    Ok(ids
+        .into_iter()
+        .filter_map(|id| providers.get(&id).cloned())
+        .collect())
+}
+
+/// 新档位自动进链垫底（上游新增默认排在最后生效）。
+///
+/// 只在链已初始化且 id 不在链里时追加；未初始化交给 migrate 全量播种，不抢跑。
+/// 只由 [`crate::database::Database::save_provider`] 的插入分支调用——编辑更新
+/// 不追加，否则被用户应用出链的档位一刷新就爬回链里。
+pub fn note_provider_created(db: &Database, app: &str, id: &str) -> Result<(), AppError> {
+    let key = priority_key(app);
+    let Some(raw) = db.get_setting(&key)? else {
+        return Ok(());
+    };
+    let mut order: Vec<String> =
+        serde_json::from_str(&raw).map_err(|e| AppError::Config(e.to_string()))?;
+    if order.iter().any(|entry| entry == id) {
+        return Ok(());
+    }
+    order.push(id.to_string());
+    db.set_setting(
+        &key,
+        &serde_json::to_string(&order).map_err(|e| AppError::Config(e.to_string()))?,
+    )
 }
 
 /// Read local selection without the legacy getter's stale-setting cleanup.
@@ -164,7 +219,15 @@ pub fn migrate(db: &Database, app: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 写入链 = 用户「应用此顺序」的载荷：当前可见且未屏蔽的档位按显示序，恰好这么多。
+///
+/// 不再垫底（2026-09-16 定调）：被筛出视图的档位不是后备，链外档位永不参与自动重试。
+/// 新档位由 [`note_provider_created`] 在创建时自动垫底；上游删掉的档位以幽灵形式
+/// 留在链里（选路跳过），用户下次应用即清理。空列表拒绝——故障切换链至少要有一个成员。
 pub fn set_order(db: &Database, app: &str, ids: &[String]) -> Result<(), AppError> {
+    if ids.is_empty() {
+        return Err(AppError::Config("Application chain cannot be empty".into()));
+    }
     let providers = ordered_providers(db, app)?;
     let mut seen = HashSet::new();
     if ids
@@ -176,16 +239,9 @@ pub fn set_order(db: &Database, app: &str, ids: &[String]) -> Result<(), AppErro
         ));
     }
     migrate(db, app)?;
-    let mut order = ids.to_vec();
-    order.extend(
-        providers
-            .into_iter()
-            .map(|p| p.id)
-            .filter(|id| seen.insert(id.clone())),
-    );
     db.set_setting(
         &priority_key(app),
-        &serde_json::to_string(&order).map_err(|e| AppError::Config(e.to_string()))?,
+        &serde_json::to_string(ids).map_err(|e| AppError::Config(e.to_string()))?,
     )
 }
 
@@ -302,6 +358,10 @@ pub fn takeover_enabled(db: &Database, app: &str) -> Result<bool, AppError> {
 mod tests {
     use super::*;
 
+    fn provider(id: &str) -> Provider {
+        Provider::with_id(id.into(), id.into(), serde_json::json!({}), None)
+    }
+
     #[test]
     #[serial_test::serial]
     fn blocked_tiers_round_trip_and_exclude_from_fallback() {
@@ -329,5 +389,100 @@ mod tests {
 
         // 未知档位拒绝写入。
         assert!(set_tier_blocked(&db, "claude", "ghost", true).is_err());
+    }
+
+    /// 链 = 用户「应用此顺序」的载荷本身：原样落库不垫底（被筛出的档位不是后备），
+    /// 空列表拒绝（故障切换链至少要有一个成员）。
+    #[test]
+    #[serial_test::serial]
+    fn set_order_stores_exactly_what_was_applied() {
+        let db = crate::Database::memory().unwrap();
+        for id in ["a", "b", "x"] {
+            db.save_provider("claude", &provider(id)).unwrap();
+        }
+
+        set_order(&db, "claude", &["b".into(), "a".into()]).unwrap();
+        assert_eq!(chain_ids(&db, "claude").unwrap(), vec!["b", "a"]);
+
+        assert!(set_order(&db, "claude", &[]).is_err());
+        assert!(
+            set_order(&db, "claude", &["b".into(), "ghost".into()]).is_err(),
+            "未知档位拒绝写入"
+        );
+    }
+
+    /// 链未初始化时读取回落全量显示序——与启动 migrate 的全量播种等价，
+    /// 「从没应用过」与「应用了全部」在读取侧同形。
+    #[test]
+    #[serial_test::serial]
+    fn uninitialized_chain_reads_as_full_display_order() {
+        let db = crate::Database::memory().unwrap();
+        for id in ["a", "b"] {
+            db.save_provider("claude", &provider(id)).unwrap();
+        }
+        assert_eq!(chain_ids(&db, "claude").unwrap(), vec!["a", "b"]);
+        assert_eq!(
+            chain_providers(&db, "claude")
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    /// 上游删掉的档位以幽灵形式留在链里（选路自然跳过），用户下次应用即清理。
+    #[test]
+    #[serial_test::serial]
+    fn deleted_tiers_linger_as_ghosts_until_next_apply() {
+        let db = crate::Database::memory().unwrap();
+        for id in ["a", "b"] {
+            db.save_provider("claude", &provider(id)).unwrap();
+        }
+        set_order(&db, "claude", &["a".into(), "b".into()]).unwrap();
+
+        db.delete_provider("claude", "b").unwrap();
+        assert_eq!(
+            chain_ids(&db, "claude").unwrap(),
+            vec!["a", "b"],
+            "幽灵留在存储链里，等用户应用清理"
+        );
+        assert_eq!(
+            chain_providers(&db, "claude")
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "选路侧跳过幽灵"
+        );
+    }
+
+    /// 新档位自动进链垫底（上游新增默认排在最后生效）；编辑更新不追加——
+    /// 被用户应用出链的档位刷新后不能爬回链里；链未初始化不抢跑（migrate 播种负责）。
+    #[test]
+    #[serial_test::serial]
+    fn new_providers_join_chain_tail_but_updates_neither_append_nor_return() {
+        let db = crate::Database::memory().unwrap();
+        db.save_provider("claude", &provider("a")).unwrap();
+        // 链未初始化：插入不追加。
+        db.save_provider("claude", &provider("b")).unwrap();
+        migrate(&db, "claude").unwrap();
+        assert_eq!(chain_ids(&db, "claude").unwrap(), vec!["a", "b"]);
+
+        // 初始化后新增 → 追加到链尾。
+        db.save_provider("claude", &provider("c")).unwrap();
+        assert_eq!(chain_ids(&db, "claude").unwrap(), vec!["a", "b", "c"]);
+
+        // 应用把 c 筛出链；c 再刷新（更新）→ 不回链。
+        set_order(&db, "claude", &["a".into(), "b".into()]).unwrap();
+        let mut refreshed = provider("c");
+        refreshed.name = "C refreshed".into();
+        db.save_provider("claude", &refreshed).unwrap();
+        assert_eq!(
+            chain_ids(&db, "claude").unwrap(),
+            vec!["a", "b"],
+            "链外档位编辑后不爬回链里"
+        );
     }
 }

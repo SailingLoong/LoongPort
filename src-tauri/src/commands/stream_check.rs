@@ -60,8 +60,9 @@ pub async fn stream_check_all_providers(
         if let Ok(Some(current_id)) = state.db.get_current_provider(app_type.as_str()) {
             ids.insert(current_id);
         }
+        // 探测范围跟随切换链（链外档位不会被选路，探了也不参与重试决策）。
         for provider in
-            crate::proxy::application_routing::ordered_providers(&state.db, app_type.as_str())?
+            crate::proxy::application_routing::chain_providers(&state.db, app_type.as_str())?
         {
             ids.insert(provider.id);
         }
