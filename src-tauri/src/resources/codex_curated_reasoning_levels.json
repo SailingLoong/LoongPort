@@ -1,0 +1,181 @@
+{
+  "models": [
+    {
+      "model": "ark-code-latest",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "model": "deepseek-v4-flash",
+      "reasoningLevels": [
+        "none",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "model": "deepseek-v4-pro",
+      "reasoningLevels": [
+        "none",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "model": "doubao-seed-2-1-pro-260628",
+      "reasoningLevels": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "model": "glm-5.1",
+      "reasoningLevels": [
+        "none",
+        "high"
+      ]
+    },
+    {
+      "model": "glm-5.2",
+      "reasoningLevels": [
+        "none",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "model": "grok-4.5",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "model": "hy3",
+      "reasoningLevels": [
+        "low",
+        "high"
+      ]
+    },
+    {
+      "model": "hy3-preview",
+      "reasoningLevels": [
+        "low",
+        "high"
+      ]
+    },
+    {
+      "model": "k3",
+      "reasoningLevels": [
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "model": "k3-256k",
+      "reasoningLevels": [
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "model": "kimi-for-coding",
+      "reasoningLevels": [
+        "high"
+      ]
+    },
+    {
+      "model": "kimi-for-coding-highspeed",
+      "reasoningLevels": [
+        "high"
+      ]
+    },
+    {
+      "model": "kimi-k2.7-code",
+      "reasoningLevels": [
+        "high"
+      ]
+    },
+    {
+      "model": "kimi-k3",
+      "reasoningLevels": [
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "model": "LongCat-2.0",
+      "reasoningLevels": [
+        "high"
+      ]
+    },
+    {
+      "model": "mimo-v2.5",
+      "reasoningLevels": [
+        "none",
+        "high"
+      ]
+    },
+    {
+      "model": "mimo-v2.5-pro",
+      "reasoningLevels": [
+        "none",
+        "high"
+      ]
+    },
+    {
+      "model": "MiniMax-M3",
+      "reasoningLevels": [
+        "none",
+        "high"
+      ]
+    },
+    {
+      "model": "MiniMaxAI/MiniMax-M3",
+      "reasoningLevels": [
+        "none",
+        "high"
+      ]
+    },
+    {
+      "model": "qianfan-code-latest",
+      "reasoningLevels": [
+        "none",
+        "high"
+      ]
+    },
+    {
+      "model": "step-3.5-flash-2603",
+      "reasoningLevels": [
+        "low",
+        "high"
+      ]
+    },
+    {
+      "model": "step-3.7-flash",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "model": "zai-org/glm-5.1",
+      "reasoningLevels": [
+        "none",
+        "high"
+      ]
+    }
+  ]
+}

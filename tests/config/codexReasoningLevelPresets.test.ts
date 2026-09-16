@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 
@@ -174,6 +175,61 @@ describe("Codex preset pre-filled reasoning levels", () => {
             model.defaultReasoningLevel,
           );
         }
+      }
+    }
+  });
+});
+
+// 跨语言一致性闸：后端 catalog 生成用 Rust 侧参考表（curated_reasoning_
+// levels_for_slug）为中转站裸行填档位，值来自本文件消费的同一批预设策展。
+// 两边各自维护同一事实就会漂移——本闸要求：预设里出现过的每个 slug，其
+// 「所有预设声明的并集」必须与 Rust 资源表逐值一致（Rust 表可以收录预设
+// 没有的 slug，反向不行）。
+describe("curated reasoning levels Rust table parity", () => {
+  const rustTable: Record<string, string[]> = (() => {
+    const parsed = JSON.parse(
+      readFileSync(
+        "src-tauri/src/resources/codex_curated_reasoning_levels.json",
+        "utf8",
+      ),
+    ) as {
+      models: Array<{ model: string; reasoningLevels: string[] }>;
+    };
+    return Object.fromEntries(
+      parsed.models.map((row) => [row.model, row.reasoningLevels]),
+    );
+  })();
+
+  it("matches the union of preset declarations per slug", () => {
+    const declared = new Map<string, Set<string>>();
+    for (const preset of codexProviderPresets) {
+      for (const model of preset.modelCatalog ?? []) {
+        if (!model.reasoningLevels?.length) continue;
+        const levels = declared.get(model.model) ?? new Set<string>();
+        for (const level of model.reasoningLevels) levels.add(level);
+        declared.set(model.model, levels);
+      }
+    }
+    expect(declared.size).toBeGreaterThan(0);
+    for (const [slug, levels] of declared) {
+      // 顺序按 canonical 归一后比对；并集里删掉再插会乱序，排序消掉噪音。
+      const canonical = (values: Iterable<string>) =>
+        CANONICAL_EFFORTS.filter((effort) => new Set(values).has(effort));
+      expect(
+        rustTable[slug],
+        `Rust curated table must cover preset slug ${slug} with the union of preset declarations`,
+      ).toBeDefined();
+      expect(canonical(rustTable[slug])).toEqual(canonical(levels));
+    }
+  });
+
+  it("only declares canonical Codex efforts", () => {
+    for (const [slug, levels] of Object.entries(rustTable)) {
+      for (const level of levels) {
+        expect(
+          CANONICAL_EFFORTS,
+          `Rust table ${slug} level "${level}"`,
+        ).toContain(level);
       }
     }
   });
