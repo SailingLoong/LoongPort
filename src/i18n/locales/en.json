@@ -3279,7 +3279,7 @@
     },
     "stats": {
       "title": "Help improve LoongPort",
-      "body": "Shares the relay services you've added, account counts, and version and system info to help us decide what to support first. Includes a random install ID; never keys, emails, or usage.",
+      "body": "On by default: shares the relay services you've added, account counts, and version and system info to help us decide what to support first. Includes a random install ID; never keys, emails, or usage.",
       "turnOffHint": "Turn off anytime: Settings → General → Usage statistics.",
       "ok": "Got it"
     },
@@ -3306,7 +3306,7 @@
       "footnote": "Shared by users, for reference only; cost is a blended-model estimate.",
       "notice": {
         "title": "Crowd-measured site stats",
-        "body": "You're sharing anonymous site metrics (first-token time, error rate, etc.) by default — no prompts, keys, or account info.",
+        "body": "You're sharing site metrics (first-token time, error rate, etc.) by default — no prompts, keys, or account info.",
         "turnOffHint": "To turn it off: Settings → General → Crowd-measured site stats.",
         "ok": "Got it"
       },

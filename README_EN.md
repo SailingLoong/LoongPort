@@ -272,8 +272,9 @@ reconciliation data exists.
   generated install ID with no hardware fingerprint (it exists for de-duplication, so it
   is persistent). Crowd measurements: time to first token, error rate, tokens and cost
   aggregated per "site × hour", with a source ID that rotates daily. Neither includes
-  prompts, request bodies, account identities or keys. New installs make an explicit
-  choice once during onboarding; upgrades keep whatever you had. Both switches live under
+  prompts, request bodies, account identities or keys. New installs confirm once during
+  onboarding — the sharing option is **ticked by default**, so untick it to opt out;
+  upgrades keep whatever you had. Both switches live under
   **Settings → General → Window Behavior**.
 - The accurate word is **pseudonymised**, not "anonymous": there are no direct identity
   fields, but the install ID is persistent and an unusual combination of sites can itself

@@ -546,7 +546,7 @@ describe("LoongPort tier page locale coverage", () => {
       "zh",
       zh.loongport,
       {
-        onByDefault: "默认匿名分享",
+        onByDefault: "默认分享",
         settingsPath: "设置 → 通用",
         installId: "安装标识",
       },
@@ -555,7 +555,7 @@ describe("LoongPort tier page locale coverage", () => {
       "zh-TW",
       zhTW.loongport,
       {
-        onByDefault: "預設匿名分享",
+        onByDefault: "預設分享",
         settingsPath: "設定 → 通用",
         installId: "安裝識別碼",
       },
@@ -573,7 +573,7 @@ describe("LoongPort tier page locale coverage", () => {
       "ja",
       ja.loongport,
       {
-        onByDefault: "デフォルトで匿名共有",
+        onByDefault: "デフォルトで共有",
         settingsPath: "設定 → 一般",
         installId: "インストール ID",
       },
