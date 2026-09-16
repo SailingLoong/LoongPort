@@ -3905,7 +3905,8 @@
     "enable": "有効にする",
     "applyOrder": "順序を適用",
     "blockTier": "ブロック",
-    "unblockTier": "ブロック解除"
+    "unblockTier": "ブロック解除",
+    "discardOrder": "取り消す"
   },
   "secrets": {
     "unlockTitle": "認証情報のロック解除",

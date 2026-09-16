@@ -3905,7 +3905,8 @@
     "enable": "启用",
     "applyOrder": "应用此顺序",
     "blockTier": "屏蔽",
-    "unblockTier": "取消屏蔽"
+    "unblockTier": "取消屏蔽",
+    "discardOrder": "撤回"
   },
   "secrets": {
     "unlockTitle": "解锁凭据",

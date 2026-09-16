@@ -135,29 +135,37 @@ export function ApplicationWorkspace({
       setSaving(false);
     }
   };
-  // 待应用计数 = 暂存序与存储序位置不同的档位数（长度不一致按全部待应用兜底）。
+  // 「应用此顺序」应用的是**当前显示序**（2026-09-16 定调）：拖拽暂存与指标排序
+  // 排出来的顺序同样算——排序视图下也想「就按这个顺序切换」。待应用计数 =
+  // 显示序与存储序位置不同的档位数；两者一致（纯筛选视图）就没有待应用。
   const pendingOrderCount = (() => {
-    if (!stagedIds) return 0;
-    if (stagedIds.length !== storedIds.length) return stagedIds.length;
+    if (!failoverEnabled) return 0;
+    if (orderedIds.length !== storedIds.length) return orderedIds.length;
     let count = 0;
-    for (let index = 0; index < stagedIds.length; index += 1) {
-      if (stagedIds[index] !== storedIds[index]) count += 1;
+    for (let index = 0; index < orderedIds.length; index += 1) {
+      if (orderedIds[index] !== storedIds[index]) count += 1;
     }
     return count;
   })();
   const applyStagedOrder = async () => {
-    if (!stagedIds || saving || routing.busy) return;
+    if (pendingOrderCount === 0 || saving || routing.busy) return;
     const previousOrder = order;
     setSaving(true);
-    setOrder({ source: routing.data, ids: stagedIds });
+    setOrder({ source: routing.data, ids: orderedIds });
     try {
-      await routing.setOrder(stagedIds);
+      await routing.setOrder(orderedIds);
       setStagedIds(null);
+      setSort(null);
     } catch {
       setOrder(previousOrder);
     } finally {
       setSaving(false);
     }
+  };
+  // 撤回 = 丢弃未应用的改动（拖拽暂存与临时排序一起清），回到存储序。
+  const discardStagedOrder = () => {
+    setStagedIds(null);
+    setSort(null);
   };
   // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
   const sortBy = (key: TierMetric) => {
@@ -253,18 +261,30 @@ export function ApplicationWorkspace({
                 </label>
               )}
               {failoverEnabled && pendingOrderCount > 0 && (
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    void applyStagedOrder();
-                  }}
-                  disabled={orderBusy}
-                  className="h-7 gap-1.5 text-xs"
-                >
-                  <Check className="h-3.5 w-3.5" />
-                  {t("applications.applyOrder")}
-                  <span className="tabular-nums">({pendingOrderCount})</span>
-                </Button>
+                <>
+                  {/* 撤回比主操作轻一级（ghost），丢弃未应用的拖拽/排序回到存储序。 */}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={discardStagedOrder}
+                    disabled={orderBusy}
+                    className="h-7 text-xs"
+                  >
+                    {t("applications.discardOrder")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      void applyStagedOrder();
+                    }}
+                    disabled={orderBusy}
+                    className="h-7 gap-1.5 text-xs"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    {t("applications.applyOrder")}
+                    <span className="tabular-nums">({pendingOrderCount})</span>
+                  </Button>
+                </>
               )}
             </div>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">
