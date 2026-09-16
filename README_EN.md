@@ -8,7 +8,7 @@
 
 [![Download](https://img.shields.io/github/v/release/SailingLoong/LoongPort?label=Download&color=2ea44f&style=for-the-badge)](../../releases/latest)
 
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](../../releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](../../releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -64,7 +64,7 @@ giving up the tier you chat on.
    post-login credentials and **never handles your password**.
 4. **Done** — every tier your account can use already has a key, and the configs are
    written. From there:
-   - **Switch tiers**: one click on **Enable**
+   - **Switch tiers**: one click on **Use tier**
    - **Top up**: the button next to the balance opens the site's own payment page
    - **Generate images** (when the site has image tiers): see
      [Generating images in your CLI](#generating-images-in-your-cli)
@@ -168,8 +168,8 @@ Full install and usage guide (in Chinese): **[docs/loongport-cli.md](docs/loongp
 3. **Keys provisioned** — one per available tier. Existing keys with matching names are
    reused before new ones get created, so hitting refresh never litters your account.
 4. **Click the tier you want** — Codex uses OpenAI tiers, Claude uses Anthropic tiers.
-   One click writes the matching config (`~/.codex/config.toml`, or Claude's settings),
-   and Codex or Claude Code just works from there.
+   Clicking **Use tier** on it writes the matching config (`~/.codex/config.toml`, or
+   Claude's settings), and Codex or Claude Code just works from there.
 
 > **When switching a Codex tier**, the ChatGPT desktop app is quit and reopened for you —
 > it only reads its config at startup, so without a restart the new tier has no effect.
@@ -208,9 +208,12 @@ the system:
   time. Turning it on also starts the local router and takes over that CLI's config;
   turning it off restores the original config.
 
-Easy Mode lives under Settings → Easy Mode. With it off, everything works as before:
-manual switching and the failover queue remain available, and the underlying routing
-config sits in the Advanced settings page.
+The Easy Mode toggle sits at the top of the application page; the master switch is
+**Settings → Advanced → Local Routing** — once the router is on, that persistent toggle
+appears (the same section has "Show Routing Toggle on Main Page" to control whether it
+shows). With Easy Mode off, everything works as before: manual switching and the failover
+queue remain available, and the underlying routing config likewise sits in the Advanced
+settings page.
 
 ## Official-direct (Official APIs)
 
@@ -248,6 +251,38 @@ ratio shown; windows where the actual deduction is markedly higher than the esti
 flagged. The feature becomes available once Easy Mode is on for a relevant app and
 reconciliation data exists.
 
+## Data and privacy
+
+- **Credentials are encrypted at rest on your machine.** API keys, OAuth tokens, sign-in
+  state, and the credentials carried inside tier configs and MCP configs are stored as
+  ciphertext in the `~/.loongport/` database and credential files; automatic backups and
+  cloud-sync snapshots get the same protection. They are unlocked by default through the
+  **system credential store** (macOS Keychain / Windows Credential Manager / Linux Secret
+  Service), so there is nothing to remember. You can also set a protection passphrase,
+  used for recovering data and for cross-device sync.
+- **One place is still plaintext: the config written for your downstream CLI.** Codex
+  reads `~/.codex/config.toml` and Claude reads its own config; a tool that has to read
+  the file directly means the file has to stay readable — that part is mitigated by tight
+  file permissions, not by encryption. Likewise, credentials must be sent to the site you
+  chose when you call upstream, so "keys never leave this machine" does not hold.
+- **Usage records stay on your machine.** Request counts, cost and token statistics from
+  the local router never leave it, and neither does billing reconciliation.
+- **Two reports do leave the machine, and both can be switched off.** Installation
+  statistics: site domains, site count, app version, operating system, plus a randomly
+  generated install ID with no hardware fingerprint (it exists for de-duplication, so it
+  is persistent). Crowd measurements: time to first token, error rate, tokens and cost
+  aggregated per "site × hour", with a source ID that rotates daily. Neither includes
+  prompts, request bodies, account identities or keys. New installs confirm once during
+  onboarding — the sharing option is **ticked by default**, so untick it to opt out;
+  upgrades keep whatever you had. Both switches live under
+  **Settings → General → Window Behavior**.
+- The accurate word is **pseudonymised**, not "anonymous": there are no direct identity
+  fields, but the install ID is persistent and an unusual combination of sites can itself
+  form a quasi-identifier. The local router used by Easy Mode binds to **`127.0.0.1`**
+  only.
+- For the full picture, including what happens if you lose both the passphrase and the
+  system credential entry, see the user manual's security section.
+
 ## Generating images in your CLI
 
 Tiers that only serve image models are collected on their own **Codex Images** tab
@@ -274,11 +309,11 @@ Four things worth knowing:
 
 ## Updating
 
-**The Windows Setup and the macOS build check for updates on their own**: a few
-seconds after launch they ask once in the background, and a newer version shows up
-under Settings → About — one click downloads, installs and restarts. A failed check
-never bothers you (being offline or unable to reach GitHub is common enough), and you
-can press "check for updates" yourself at any time.
+**The Windows Setup, the macOS build and the Linux AppImage check for updates on their
+own**: a few seconds after launch they ask once in the background, and a newer version
+shows up under Settings → About — one click downloads, installs and restarts. A failed
+check never bothers you (being offline or unable to reach GitHub is common enough), and
+you can press "check for updates" yourself at any time.
 
 > **The Windows portable build does not update in place** — it cannot replace itself
 > while running. It still tells you a new version exists, but you download the new zip
@@ -309,10 +344,11 @@ Browser authorization is not automated; the website documents the advanced custo
 |---|---|---|
 | **Relay services** | sub2api · new-api | — |
 | **AI CLIs** | codex · claude | gemini · grok |
-| **Platforms** | macOS · Windows | Linux |
+| **Platforms** | macOS · Windows · Linux | — |
 
-You can point it at your own site domain; a working one is preset by default. macOS and
-Windows have the same feature set.
+You can point it at your own site domain; a working one is preset by default. All three
+platforms ship the same desktop feature set; when switching a Codex tier, macOS asks
+ChatGPT to quit (you can cancel) while Windows ends the process outright.
 
 > **The "AI CLIs" row is about chat tiers.** The image tool registers with codex,
 > claude **and gemini** — "gemini in progress" means it cannot yet be the target of a

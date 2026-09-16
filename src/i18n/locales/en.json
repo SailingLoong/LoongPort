@@ -912,7 +912,7 @@
     },
     "saveFailedGeneric": "Save failed, please try again",
     "anonymousStats": "Usage statistics",
-    "anonymousStatsDescription": "Reports the relay site domains you added and how many accounts, to help prioritise support. Includes a random install ID; never accounts, balances, or keys.",
+    "anonymousStatsDescription": "Reports the relay site domains you added and how many accounts, to help prioritise support. Includes a random install ID; never account identities, balances, or keys.",
     "piConfigDir": "Pi Configuration Directory",
     "piConfigDirDescription": "Override the Pi configuration directory (models.json, instruction files, prompts, skills, and sessions).",
     "browsePlaceholderPi": "e.g., /home/<your-username>/.pi/agent",
@@ -3279,7 +3279,7 @@
     },
     "stats": {
       "title": "Help improve LoongPort",
-      "body": "On by default: anonymously shares the relay services you've added, account counts, and version and system info to help us decide what to support first. Includes a random install ID; never keys, emails, or usage.",
+      "body": "On by default: shares the relay services you've added, account counts, and version and system info to help us decide what to support first. Includes a random install ID; never keys, emails, or usage.",
       "turnOffHint": "Turn off anytime: Settings → General → Usage statistics.",
       "ok": "Got it"
     },
@@ -3301,12 +3301,12 @@
       "hourEmpty": "UTC {{slot}}:00 · no data",
       "noData": "No measurements yet",
       "lockedTitle": "Join the crowd data program to view",
-      "lockedBody": "Share anonymous site speed and reliability data to unlock measurements from everyone; no prompts or keys are included.",
+      "lockedBody": "Share site speed and reliability data to unlock measurements from everyone; no prompts or keys are included.",
       "join": "Join",
-      "footnote": "Shared anonymously by users, for reference only; cost is a blended-model estimate.",
+      "footnote": "Shared by users, for reference only; cost is a blended-model estimate.",
       "notice": {
         "title": "Crowd-measured site stats",
-        "body": "You're sharing anonymous site metrics (first-token time, error rate, etc.) by default — no prompts, keys, or account info.",
+        "body": "You're sharing site metrics (first-token time, error rate, etc.) by default — no prompts, keys, or account info.",
         "turnOffHint": "To turn it off: Settings → General → Crowd-measured site stats.",
         "ok": "Got it"
       },

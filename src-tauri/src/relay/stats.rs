@@ -14,10 +14,14 @@
 //! | app 版本、os（`macos` / `windows` / `linux`） | 密钥（sk / token 任何一种） |
 //! | 一个**本模块专属**的随机 id（见下） | 档位、分组、切换记录 |
 //!
-//! ⚠️ **绝不复用 `creds` 的 `device_id`。** 那个 id 被写进中转站服务器上的 API key 名
-//! （`provision::key_name_for` → `LoongPort/<device_id>/<platform>/<group_id>`）⇒
-//! 任何看得到它的中转站都能把一条上报**对回一个具体的付费账号**。
-//! 本模块自己生成一个只用于统计的随机 id，两者永不交叉。
+//! ⚠️ **绝不复用站点侧看得见的账号标识。** relay 会把账号标识写进中转站服务器上的
+//! API key 名（`provision::key_name_for` → `LoongPort/a<账号ID>/<平台>/<分组ID>`，
+//! 没有账号身份时退化为 `LoongPort/anon/…`）⇒ 任何看得到它的中转站都能把一条上报
+//! **对回一个具体的付费账号**。本模块自己生成一个只用于统计的随机 id，两者永不交叉。
+//!
+//! （这段原先用的论据是 `creds` 的 `device_id`；那一列已于 2026-08-04 删除，且有测试
+//! 钉住不许机器标识回到密钥名里。要守的边界与具体字段无关 —— 凡是站点侧看得见的
+//! 标识，都不能进统计上报。）
 //!
 //! ## 为什么要那个 id（而不是完全无状态）
 //!
@@ -90,7 +94,7 @@ pub fn is_configured() -> bool {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
-    /// 本模块专属的随机安装 id（**不是** `creds` 的 `device_id`，见模块文档）。
+    /// 本模块专属的随机安装 id（**不是**站点侧看得见的账号标识，见模块文档）。
     pub install_id: String,
     /// app 版本，用于分辨「老版本用户在用什么」。
     pub app_version: String,

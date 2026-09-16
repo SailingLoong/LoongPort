@@ -58,9 +58,11 @@ README 双语「为什么便宜这么多」推导转 HTML 注释（充值与返�
 |---|---|---|
 | 中转站 | sub2api · new-api（2026-08 登录/充值/档位全套落地，`BackendKind::NewApi`） | — |
 | CLI | codex · claude | gemini / grok（`platform_map` 映射表已建全，缺各自的配置写入形状） |
-| 平台 | macOS · Windows | Linux |
+| 平台 | macOS · Windows · Linux | — |
 
 **Windows 自 2026-08-03 起可用**（安装包已在维护者机器上打出并验证）。
+**Linux 桌面版已发布**（`AppImage` / `.deb` / `.rpm`，Ubuntu 22.04+；Ubuntu 20.04 及更早请用 `loongport-cli`）——
+发布流程把 AppImage 列为 Linux 主推包，并对缺失做硬失败。
 
 **ChatGPT 自动退出/重开两个平台都已实现**（Windows 于 2026-08-04 补完）。
 但**手段与语义不同，写对外文案时别当成完全等价**：
@@ -266,5 +268,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib probe_live_site -- --ignor
 
 - **本地代理 / failover**：sub2api 原生支持 codex 的 `/v1/responses`，不需要协议转换。
   `proxy/` 那套留在仓里但不接线。
-- **凭据加密**：token 明文存 SQLite。同一个库里已经躺着明文 sk（上游行为），只加密 token
-  没有实际收益。要做就两者一起进 keyring。
+- ~~**凭据加密**：token 明文存 SQLite。同一个库里已经躺着明文 sk（上游行为），只加密 token
+  没有实际收益。要做就两者一起进 keyring。~~ **已改判并于 2026-09 落地** —— 见
+  `src-tauri/src/secrets/`：随机数据密钥 + XChaCha20-Poly1305 认证加密，落点登记在
+  `src-tauri/src/secrets/inventory.rs`；数据密钥由系统凭据库保管，或用 Argon2id 从保护口令派生的密钥包裹。
+  覆盖库内凭据列（含 relay / vendor）、`providers` 的配置与 meta、MCP 配置、受保护的 settings 键、
+  OAuth 凭据文件，以及自动备份与云同步快照。仍不在覆盖范围的：调用上游时发出的凭据，
+  以及下游 CLI 必须直接读到的明文配置。
