@@ -973,6 +973,101 @@ mod tests {
         assert_eq!(h12_p1.cost_usd_micros, 10_500_000, "session 行花费并入桶");
     }
 
+    /// 顶层桶与模型子桶的字段对位一致性闸（2026-09-16 D1 实锤复盘：线上
+    /// `bucket_model_raw` 存量数据列错位一格——cache_read 列装的是 output、
+    /// output 列装的是 fresh input，模型查询取列曾跟着顶层写成 6 起）。
+    /// 三元组测试只钉住三元组三列；这条把 samples/errors/err_samples 与全部
+    /// token/花费列一次钉死：任何一侧列序漂移，Σ模型 ≠ 顶层 当场红。
+    #[test]
+    fn model_buckets_aggregate_identically_to_top_level() {
+        let db = setup_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::relay::creds::save_site(
+                &conn,
+                "https://panel.example",
+                "中性示例站",
+                "https://api.panel.example",
+            )
+            .unwrap();
+        }
+        seed_provider(
+            &db,
+            "acct-a",
+            "codex",
+            serde_json::json!({
+                "auth": {"OPENAI_API_KEY": "sk-test-not-a-real-key"},
+                "base_url": "https://api.panel.example/v1"
+            }),
+        );
+        let conn = db.conn.lock().unwrap();
+        // (id, model, status, source, input, output, cache_read, cost)
+        // input 语义按 codex LEGACY：input 含 cache_read，fresh = input - cache_read。
+        let rows: &[(&str, &str, i64, &str, i64, i64, i64, &str)] = &[
+            ("a", "gpt-sol", 200, "proxy", 1000, 500, 800, "0.5"),
+            ("b", "gpt-sol", 200, "proxy", 600, 300, 0, "0.3"),
+            ("c", "gpt-terra", 500, "proxy", 0, 0, 0, "0"),
+            ("d", "gpt-terra", 200, "session_log", 50, 20, 0, "0.01"),
+        ];
+        for (id, model, status, source, input, output, cache_read, cost) in rows {
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model, status_code,
+                    input_tokens, output_tokens, cache_read_tokens,
+                    total_cost_usd, latency_ms, created_at, data_source
+                 ) VALUES (?1, 'acct-a', 'codex', ?2, ?3, ?4, ?5, ?6, ?7, 0, 11*3600+100, ?8)",
+                params![id, model, status, input, output, cache_read, cost, source],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let buckets = build_hour_buckets(&db, 0, 12 * 3600).unwrap();
+        assert_eq!(buckets.len(), 1, "同小时同站同 app 一桶");
+        let b = &buckets[0];
+
+        // 顶层桶 = 手工期望：fresh = (1000-800) + 600 + 0 + 50。
+        assert_eq!(b.samples, 4);
+        assert_eq!(b.errors, 1, "500 计站点侧失败");
+        assert_eq!(b.err_samples, 3, "session 回填行不进错误分母");
+        assert_eq!(b.input_tokens, 850);
+        assert_eq!(b.output_tokens, 820);
+        assert_eq!(b.cache_read_tokens, 800);
+        assert_eq!(b.cache_creation_tokens, 0);
+        assert_eq!(b.cost_usd_micros, 810_000);
+
+        // Σ模型子桶逐字段 == 顶层桶（列对位一致性本体）。
+        assert_eq!(b.models.len(), 2);
+        let sum = |f: &dyn Fn(&ModelBucket) -> i64| b.models.iter().map(f).sum::<i64>();
+        assert_eq!(sum(&|m| m.samples), b.samples);
+        assert_eq!(sum(&|m| m.errors), b.errors);
+        assert_eq!(sum(&|m| m.err_samples), b.err_samples);
+        assert_eq!(sum(&|m| m.input_tokens), b.input_tokens);
+        assert_eq!(sum(&|m| m.output_tokens), b.output_tokens);
+        assert_eq!(sum(&|m| m.cache_read_tokens), b.cache_read_tokens);
+        assert_eq!(sum(&|m| m.cache_creation_tokens), b.cache_creation_tokens);
+        assert_eq!(sum(&|m| m.cost_usd_micros), b.cost_usd_micros);
+
+        // 单模型抽查（防「Σ 对但两模型互相串列」的假绿）：sol 全成功、terra 含
+        // 失败与 session 行。
+        let sol = b.models.iter().find(|m| m.model == "gpt-sol").unwrap();
+        assert_eq!((sol.samples, sol.errors, sol.err_samples), (2, 0, 2));
+        assert_eq!(
+            (sol.input_tokens, sol.output_tokens, sol.cache_read_tokens),
+            (800, 800, 800)
+        );
+        let terra = b.models.iter().find(|m| m.model == "gpt-terra").unwrap();
+        assert_eq!((terra.samples, terra.errors, terra.err_samples), (2, 1, 1));
+        assert_eq!(
+            (
+                terra.input_tokens,
+                terra.output_tokens,
+                terra.cache_read_tokens
+            ),
+            (50, 20, 0)
+        );
+    }
+
     #[test]
     fn query_window_bounds_are_exclusive_after_inclusive_before() {
         let db = setup_db();
