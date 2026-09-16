@@ -9,9 +9,9 @@ import {
   Plug,
   Settings,
   History,
-  Waypoints,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import appIcon from "@/assets/icons/app-icon.png";
 import { getNavigationSection, type ClientView } from "./navigation";
 
 const sidebarItemClassName =
@@ -68,7 +68,7 @@ export function ClientSidebar({
       style={{ top }}
     >
       <div className="mb-7 flex items-center gap-2.5 px-3 text-lg font-semibold tracking-tight">
-        <Waypoints className="h-5 w-5 text-primary" />
+        <img src={appIcon} alt="" aria-hidden className="h-5 w-5 rounded-sm" />
         LoongPort
       </div>
       <nav aria-label={t("client.navigation")} className="space-y-1">
