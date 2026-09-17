@@ -3909,6 +3909,8 @@
     "discardOrder": "Cancel",
     "orderProfiles": "Order profiles",
     "orderProfilesEmpty": "No profiles yet — save the current order to create one",
+    "orderProfileRename": "Rename {{name}}",
+    "orderProfileRenameTitle": "Rename profile",
     "orderProfileSaveCurrent": "Save current order…",
     "orderProfileSaveHint": "Saves the currently displayed order (including unapplied drags and sorting); same name overwrites.",
     "orderProfileNamePlaceholder": "Profile name",

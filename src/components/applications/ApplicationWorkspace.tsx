@@ -1,5 +1,7 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   Check,
   ChevronDown,
@@ -28,6 +30,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { SwitchTierConfirmDialog } from "@/components/relay/SwitchTierConfirmDialog";
+import { orderProfilesApi } from "@/lib/api/orderProfiles";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
 import { ApplicationTierTable, visibleTierIds } from "./ApplicationTierTable";
@@ -108,10 +112,20 @@ export function ApplicationWorkspace({
       .map((item) => item.providerId),
   ];
   const failoverEnabled = Boolean(routing.data?.autoFailoverEnabled);
-  // 草稿语义统一（2026-09-16 用户定调）：路由类应用的任何调整（拖拽/排序）
-  // 都只进草稿，点「应用」才写库——与故障切换开关状态无关；非路由类应用
+  // 路由类应用的顺序调整（拖拽/排序）只进草稿，点「应用」才写库；非路由类应用
   // （无故障切换概念）维持拖拽即时保存。
   const draftOrdering = isProxyAppId(appId);
+  // 链编辑只在故障切换开启时存在（2026-09-17 用户定调）：关着时顺序与配置档
+  // 没有任何运行时作用，整套编辑面（应用/取消/配置档/优先级列/拖拽/屏蔽）不出现。
+  // 筛选/搜索/指标排序保留——纯查看，与链无关。
+  const chainEditing = draftOrdering && failoverEnabled;
+  // 故障切换一关就丢弃未应用的草稿：不留幽灵待应用，重开时从存储链干净起步。
+  useEffect(() => {
+    if (draftOrdering && !failoverEnabled) {
+      setStagedIds(null);
+      setSort(null);
+    }
+  }, [draftOrdering, failoverEnabled]);
   const baseIds =
     stagedIds ??
     (order && order.source === routing.data ? order.ids : storedIds);
@@ -162,9 +176,17 @@ export function ApplicationWorkspace({
     targetIds.every((id, index) => id === referenceIds[index]);
   // 待应用计数 = 应用目标的大小（「链里将有几个」），视图与已应用链一致时为 0。
   const pendingOrderCount =
-    draftOrdering && targetIds.length > 0 && !matchesAppliedChain
+    chainEditing && targetIds.length > 0 && !matchesAppliedChain
       ? targetIds.length
       : 0;
+  // 配置档状态（列表 + 当前配置文件名）：应用此顺序默认保存进当前档。
+  const client = useQueryClient();
+  const { data: profilesState } = useQuery({
+    queryKey: ["orderProfiles", appId],
+    queryFn: () => orderProfilesApi.list(appId),
+  });
+  const refreshProfiles = () =>
+    client.invalidateQueries({ queryKey: ["orderProfiles", appId] });
   const applyOrder = async () => {
     if (pendingOrderCount === 0 || saving || routing.busy) return;
     const previousOrder = order;
@@ -179,6 +201,18 @@ export function ApplicationWorkspace({
       await routing.setOrder(targetIds);
       setStagedIds(null);
       setSort(null);
+      // 链已生效；快照进当前配置档失败只警告——链是活事实，配置档可手动再存。
+      const currentProfile = profilesState?.current;
+      if (currentProfile) {
+        try {
+          await orderProfilesApi.save(appId, currentProfile, targetIds);
+        } catch (error) {
+          toast.warning(t("applications.orderProfileSaveFailed"), {
+            description: extractErrorMessage(error) || undefined,
+          });
+        }
+        void refreshProfiles();
+      }
     } catch {
       setOrder(previousOrder);
     } finally {
@@ -219,12 +253,18 @@ export function ApplicationWorkspace({
     return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
   }, [configurations]);
   // 模型筛选的选项 = 各档位实际会用的模型（effectiveModel 优先），去重排序；
+  // 聚合范围跟随账号筛选——选了账号后分数必须只数该账号的档位，不能仍报全量
+  // （2026-09-17 用户报的 bug：7 档筛剩 5，模型分数仍是 7/7）。
   // 当前路由模型置顶加 ⚡，故障切换场景「选模型 → 过滤看链上还有谁」一步到位。
   // 每个模型带 可用/总数 分数：不可用只算「已嗅探到的错误」（circuit_open=
   // 限流/网络/余额等真实失败累积触发的熔断）与用户屏蔽；模型不匹配/能力声明/
   // 位置语义一概不扣——它们对别的模型恒真，不是错误（2026-09-16 用户定调）。
   // 全不可用的模型置灰但可选（选完正好逐行看原因）。
   const tierModels = useMemo(() => {
+    const accountMatch = (item: (typeof configurations)[number]) =>
+      !accountFilter ||
+      (item.account &&
+        `${item.account.kind}:${item.account.id}` === accountFilter);
     const byId = new Map(
       tiers.map((tier) => [
         tier.providerId,
@@ -240,6 +280,7 @@ export function ApplicationWorkspace({
       { model: string; available: number; total: number }
     >();
     for (const item of configurations) {
+      if (!accountMatch(item)) continue;
       const tier = byId.get(item.providerId);
       const model = tier?.model ?? item.model;
       if (!model) continue;
@@ -254,7 +295,30 @@ export function ApplicationWorkspace({
       .sort((a, b) =>
         a.model === routingModel ? -1 : b.model === routingModel ? 1 : 0,
       );
-  }, [configurations, tiers, routing.data?.model]);
+  }, [configurations, accountFilter, tiers, routing.data?.model]);
+  // 账号筛选收窄后，已选模型可能不在选项里（该账号没有这个模型）——
+  // 留着会让触发器显示空值、可见行被滤成零；清掉回到该账号全量视图。
+  useEffect(() => {
+    if (
+      modelFilter &&
+      !tierModels.some((option) => option.model === modelFilter)
+    ) {
+      setModelFilter(null);
+    }
+  }, [tierModels, modelFilter]);
+  // 模型下拉的显隐看**全量**模型数：账号筛选收窄到单模型时下拉仍要可见——
+  // 分数（该账号可用/总数）本身就是用户要看的信息。
+  const hasMultipleModelsOverall = useMemo(() => {
+    const byId = new Map(
+      tiers.map((tier) => [tier.providerId, tier.effectiveModel]),
+    );
+    const models = new Set(
+      configurations
+        .map((item) => byId.get(item.providerId) ?? item.model)
+        .filter((model): model is string => Boolean(model)),
+    );
+    return models.size > 1;
+  }, [configurations, tiers]);
   const routingModel = routing.data?.model ?? null;
   const orderBusy =
     saving || routing.busy || routing.isPending || Boolean(routing.error);
@@ -287,7 +351,7 @@ export function ApplicationWorkspace({
                   {t("applications.autoFailover")}
                 </label>
               )}
-              {draftOrdering && pendingOrderCount > 0 && (
+              {chainEditing && pendingOrderCount > 0 && (
                 <>
                   {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序/筛选，
                       回到已应用的链视图。 */}
@@ -314,9 +378,10 @@ export function ApplicationWorkspace({
                   </Button>
                 </>
               )}
-              {draftOrdering && (
+              {chainEditing && (
                 <OrderProfilesMenu
                   appType={appId}
+                  state={profilesState}
                   targetIds={targetIds}
                   storedIds={storedIds}
                   onLoadDraft={(ids) => {
@@ -327,13 +392,15 @@ export function ApplicationWorkspace({
                 />
               )}
             </div>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              {t(
-                isProxyAppId(appId)
-                  ? "applications.priorityHint"
-                  : "applications.orderHint",
-              )}
-            </p>
+            {(!isProxyAppId(appId) || failoverEnabled) && (
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                {t(
+                  isProxyAppId(appId)
+                    ? "applications.priorityHint"
+                    : "applications.orderHint",
+                )}
+              </p>
+            )}
           </div>
           <Button variant="outline" onClick={onAdd}>
             <Plus className="h-4 w-4" />
@@ -369,7 +436,7 @@ export function ApplicationWorkspace({
               </SelectContent>
             </Select>
           )}
-          {tierModels.length > 1 && (
+          {hasMultipleModelsOverall && (
             <Select
               value={modelFilter ?? "all"}
               onValueChange={(value) =>
