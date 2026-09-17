@@ -3909,6 +3909,8 @@
     "discardOrder": "取消",
     "orderProfiles": "配置档",
     "orderProfilesEmpty": "暂无配置档，先「保存当前顺序」建一份",
+    "orderProfileRename": "重命名 {{name}}",
+    "orderProfileRenameTitle": "重命名配置档",
     "orderProfileSaveCurrent": "保存当前顺序…",
     "orderProfileSaveHint": "保存的是当前显示顺序（含未应用的拖拽与排序）；同名覆盖。",
     "orderProfileNamePlaceholder": "配置名称",

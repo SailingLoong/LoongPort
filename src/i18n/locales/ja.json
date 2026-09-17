@@ -3909,6 +3909,8 @@
     "discardOrder": "キャンセル",
     "orderProfiles": "順序プロファイル",
     "orderProfilesEmpty": "プロファイルはまだありません。現在の順序を保存して作成できます",
+    "orderProfileRename": "{{name}} の名前を変更",
+    "orderProfileRenameTitle": "プロファイル名を変更",
     "orderProfileSaveCurrent": "現在の順序を保存…",
     "orderProfileSaveHint": "現在表示中の順序（未適用のドラッグ・並べ替えを含む）を保存します。同名は上書き。",
     "orderProfileNamePlaceholder": "プロファイル名",

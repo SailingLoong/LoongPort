@@ -58,17 +58,37 @@ vi.mock("react-i18next", () => ({
 }));
 const profilesApi = vi.hoisted(() => ({
   saved: [] as { name: string; providerIds: string[] }[],
+  current: "default",
+  saveCalls: [] as { appType: string; name: string; ids: string[] }[],
+  setCurrent: vi.fn(),
+  rename: vi.fn(),
 }));
 vi.mock("@/lib/api/orderProfiles", () => ({
   orderProfilesApi: {
-    list: vi.fn(() => Promise.resolve(profilesApi.saved)),
+    list: vi.fn(() =>
+      Promise.resolve({
+        profiles: profilesApi.saved,
+        current: profilesApi.current,
+      }),
+    ),
     save: vi.fn(
-      (_appType: string, name: string, providerIds: string[]) =>
+      (appType: string, name: string, providerIds: string[]) =>
         new Promise<void>((resolve) => {
+          profilesApi.saveCalls.push({ appType, name, ids: providerIds });
           profilesApi.saved.push({ name, providerIds });
+          profilesApi.current = name;
           resolve();
         }),
     ),
+    setCurrent: (appType: string, name: string): Promise<void> => {
+      profilesApi.setCurrent(appType, name);
+      profilesApi.current = name;
+      return Promise.resolve();
+    },
+    rename: (appType: string, from: string, to: string): Promise<void> => {
+      profilesApi.rename(appType, from, to);
+      return Promise.resolve();
+    },
     remove: vi.fn(
       (_appType: string, name: string) =>
         new Promise<void>((resolve) => {
@@ -129,6 +149,8 @@ describe("failover order staging", () => {
     state.setFailover.mockResolvedValue(undefined);
     state.blockTier.mockResolvedValue(undefined);
     profilesApi.saved = [];
+    profilesApi.current = "default";
+    profilesApi.saveCalls = [];
     state.data = {
       configurations: [
         config("a", "Standard", true),
@@ -166,6 +188,14 @@ describe("failover order staging", () => {
     await waitFor(() =>
       expect(state.setOrder).toHaveBeenCalledWith(["c", "a", "b"]),
     );
+    // 应用即保存进当前配置档（2026-09-17 定调：default 是落点）。
+    await waitFor(() =>
+      expect(profilesApi.saveCalls).toContainEqual({
+        appType: "codex",
+        name: "default",
+        ids: ["c", "a", "b"],
+      }),
+    );
     // 模拟真实链路的应用后刷新：routing 查询换新对象、链与 tiers 序=已应用序，
     // 乐观快照随之失效、待应用归零、按钮消失。
     state.routing = {
@@ -187,18 +217,37 @@ describe("failover order staging", () => {
     view.unmount();
   });
 
-  it("stages even when failover is off: only Apply persists (unified draft)", async () => {
-    state.routing.autoFailoverEnabled = false;
-    renderWorkspace();
+  it("hides chain editing entirely when failover is off (order has no runtime effect)", async () => {
+    const view = renderWorkspace();
     await drag(["b", "a", "c"]);
-    // 草稿语义统一（2026-09-16 定调）：故障切换关着也一样——只暂存，不落库。
-    expect(state.setOrder).not.toHaveBeenCalled();
-    await userEvent.click(
+    expect(
       screen.getByRole("button", { name: /applications\.applyOrder/ }),
-    );
-    await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
-    );
+    ).toBeInTheDocument();
+    // 关掉故障切换：顺序与配置档没有任何运行时作用（2026-09-17 定调）——
+    // 整套链编辑面消失，未应用草稿随之丢弃。
+    state.routing.autoFailoverEnabled = false;
+    rerenderWorkspace(view);
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /applications\.discardOrder/ }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByTitle("applications.orderProfiles")).toBeNull();
+    });
+    expect(state.setOrder).not.toHaveBeenCalled();
+    // 重新打开：无幽灵待应用（草稿已在关闭时丢弃），配置档回来。
+    state.routing.autoFailoverEnabled = true;
+    rerenderWorkspace(view);
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByTitle("applications.orderProfiles")).toBeVisible();
+    });
+    expect(state.setOrder).not.toHaveBeenCalled();
+    view.unmount();
   });
 
   it("offers Apply for a metric-sorted view and applies the displayed order", async () => {
@@ -320,29 +369,56 @@ describe("failover order staging", () => {
       { name: "便宜优先", providerIds: ["c", "ghost", "b"] },
     ];
     const view = renderWorkspace();
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.orderProfiles" }),
-    );
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
     await userEvent.click(screen.getByRole("menuitem", { name: /便宜优先/ }));
-    // 载入 = 进草稿：认不出的 id 滤掉、不垫底——链外档位（a）从视图消失。
+    // 载入 = 进草稿 + 切换当前配置档：认不出的 id 滤掉、不垫底——链外档位（a）从视图消失。
     expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
+    expect(profilesApi.setCurrent).toHaveBeenCalledWith("codex", "便宜优先");
     expect(state.setOrder).not.toHaveBeenCalled();
     await userEvent.click(
       screen.getByRole("button", { name: /applications\.applyOrder/ }),
     );
-    // 应用写入就是档内这批——链 = [c,b]，a 出链。
+    // 应用写入就是档内这批——链 = [c,b]，a 出链；落进切换后的当前档。
     await waitFor(() =>
       expect(state.setOrder).toHaveBeenCalledWith(["c", "b"]),
+    );
+    await waitFor(() =>
+      expect(profilesApi.saveCalls).toContainEqual({
+        appType: "codex",
+        name: "便宜优先",
+        ids: ["c", "b"],
+      }),
     );
     view.unmount();
   });
 
-  it("saves the apply target (visible and unblocked) as a named profile", async () => {
+  it("renames a profile from the row action", async () => {
+    profilesApi.saved = [{ name: "便宜优先", providerIds: ["c", "b"] }];
+    const view = renderWorkspace();
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.orderProfileRename" }),
+    );
+    const input = screen.getByRole("textbox", {
+      name: "applications.orderProfileNamePlaceholder",
+    });
+    await userEvent.clear(input);
+    await userEvent.type(input, "快的优先");
+    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() =>
+      expect(profilesApi.rename).toHaveBeenCalledWith(
+        "codex",
+        "便宜优先",
+        "快的优先",
+      ),
+    );
+    view.unmount();
+  });
+
+  it("saves the apply target (visible and unblocked) as a named profile and switches to it", async () => {
     const view = renderWorkspace();
     await drag(["b", "a", "c"]);
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.orderProfiles" }),
-    );
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
     await userEvent.click(
       screen.getByRole("menuitem", {
         name: "applications.orderProfileSaveCurrent",
@@ -360,15 +436,17 @@ describe("failover order staging", () => {
         { name: "快的优先", providerIds: ["b", "a", "c"] },
       ]),
     );
+    // 另存为新档 = 切换过去（后端 save 设当前，mock 同步 current）。
+    expect(profilesApi.current).toBe("快的优先");
     view.unmount();
   });
 
-  it("staged draft survives failover toggling until applied", async () => {
+  it("staged draft survives provider refresh until applied", async () => {
     const view = renderWorkspace();
     await drag(["b", "a", "c"]);
-    state.routing.autoFailoverEnabled = false;
+    // 5s 轮询换新 routing 对象（引用变化）——草稿是独立 state，不随之丢失。
+    state.routing = { ...state.routing };
     rerenderWorkspace(view);
-    // 开关切换不吞草稿：仍可应用。
     await userEvent.click(
       screen.getByRole("button", { name: /applications\.applyOrder/ }),
     );

@@ -40,12 +40,18 @@ vi.mock("../useApplicationRouting", () => ({
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
+// 工作台本体直接用 react-query 取配置档状态（列表+当前档）；主文件不包
+// Provider，把 useQuery/useQueryClient 打桩，配置档数据流在 order.test 专测。
+vi.mock("@tanstack/react-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-query")>();
+  return {
+    ...actual,
+    useQuery: () => ({ data: undefined, isPending: false }),
+    useQueryClient: () => ({ invalidateQueries: vi.fn() }),
+  };
+});
 vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
   SwitchTierConfirmDialog: () => null,
-}));
-// 配置档菜单走 react-query，主文件不包 Provider；其行为在 order.test 专测。
-vi.mock("../OrderProfilesMenu", () => ({
-  OrderProfilesMenu: () => null,
 }));
 const config = (id: string, name: string, current = false) => ({
   providerId: id,
@@ -135,6 +141,10 @@ describe("application workspace", () => {
           }),
         ),
       ).toBe(enabled);
+      // 链编辑面同门（2026-09-17 定调）：配置档只在故障切换开启时存在。
+      expect(Boolean(screen.queryByTitle("applications.orderProfiles"))).toBe(
+        enabled,
+      );
       expect(screen.getByText("Standard")).toBeVisible();
       expect(screen.getByText("Premium")).toBeVisible();
       expect(
@@ -270,6 +280,56 @@ describe("application workspace", () => {
     expect(screen.getByText("Unknown")).toBeVisible();
     expect(screen.queryByText("Premium")).not.toBeInTheDocument();
     expect(state.setOrder).not.toHaveBeenCalled();
+  });
+  it("scopes model filter options and scores to the selected account", async () => {
+    state.routing.autoFailoverEnabled = true;
+    state.routing.tiers[0].effectiveModel = "gpt-5";
+    state.routing.tiers[1].effectiveModel = "gpt-5";
+    state.routing.tiers[2].effectiveModel = "gpt-4";
+    state.data.configurations = [
+      config("a", "Standard", true),
+      config("b", "Premium"),
+      {
+        ...config("c", "Unknown"),
+        serviceName: "Other service",
+        accountLabel: "Team",
+        account: { kind: "relay", id: 9 },
+      },
+    ];
+    render(<ApplicationWorkspace {...props} />);
+
+    // 筛到另一个账号（7 档只剩 Team 那 1 档的同构场景）→ 模型选项与分数
+    // 必须跟着账号收窄，不能仍报全量（2026-09-17 用户报的 bug）。
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.accountFilter" }),
+    );
+    await userEvent.click(
+      screen.getByRole("option", { name: /Other service · Team/ }),
+    );
+    expect(screen.queryByText("Standard")).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    const options = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(options[0]).toBe("applications.allModels");
+    expect(options).toHaveLength(2);
+    expect(options[1]).toContain("gpt-4");
+    expect(options[1]).toContain("1/1");
+    expect(options[1]).not.toContain("gpt-5");
+    await userEvent.click(screen.getByRole("option", { name: /gpt-4/ }));
+
+    // 切回主账号：gpt-4 不在该账号的模型里 → 模型筛选自动清空，行回到该账号全量。
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.accountFilter" }),
+    );
+    await userEvent.click(
+      screen.getByRole("option", { name: /Example service · Personal/ }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Standard")).toBeVisible();
+      expect(screen.getByText("Premium")).toBeVisible();
+      expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
+    });
   });
   it("blocked tiers gray out, free their priority number, and unblock from the row action", async () => {
     state.routing.autoFailoverEnabled = true;

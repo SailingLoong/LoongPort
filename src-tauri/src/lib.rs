@@ -2020,6 +2020,8 @@ pub fn run() {
             commands::acknowledge_announcement,
             commands::get_order_profiles,
             commands::save_order_profile,
+            commands::set_current_order_profile,
+            commands::rename_order_profile,
             commands::delete_order_profile,
             commands::export_order_profiles,
             commands::import_order_profiles,
