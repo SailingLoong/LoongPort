@@ -1,5 +1,13 @@
 {
   "issued_at": "2026-09-16T13:13:39Z",
+  "announcements": [
+    {
+      "id": "join-qq-group-2026-09-17",
+      "type": "dialog",
+      "title": "加入 LoongPort 用户群",
+      "body": "打开 QQ 扫一扫，申请进群：\n\n![QQ 群二维码](https://config.loongport.dev/img/qq-group.jpeg)"
+    }
+  ],
   "star_reward": {
     "promo_code": "LOONGPORT5",
     "amount_usd": 5
