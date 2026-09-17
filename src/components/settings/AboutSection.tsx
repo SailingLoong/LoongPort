@@ -1101,9 +1101,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               )}
             </Button>
             {/* 进度文案放按钮外：贴主按钮底色对比度不足，且数字长短变化会撑动
-                按钮宽度；旁边的独立文本换多长都不影响布局。 */}
+                按钮宽度。span 再给固定最小宽度（19ch）：`9%`↔`100%`、KB/s↔MB/s
+                这类长短变化在已知总量场景全被吃进盒子里——按钮与图标全程不动，
+                不随每个进度事件横移。 */}
             {downloadStatusText && (
-              <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+              <span className="min-w-[19ch] whitespace-nowrap text-xs tabular-nums text-muted-foreground">
                 {downloadStatusText}
               </span>
             )}

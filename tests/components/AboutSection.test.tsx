@@ -135,6 +135,10 @@ describe("AboutSection manual update download progress", () => {
     expect(updating).not.toHaveTextContent("20%");
     const status = screen.getByText(/20% · 4\.0 MB\/s/);
     expect(updating).not.toContainElement(status);
+    // 固定最小宽度：`9%`↔`100%`、KB/s↔MB/s 的长短变化全被盒子吃掉，
+    // 按钮和图标不随进度事件横移（2026-09-17 用户报「icon 飘」）。
+    expect(status.className).toContain("min-w-[19ch]");
+    expect(status.className).toContain("tabular-nums");
 
     nowSpy.mockRestore();
   });
