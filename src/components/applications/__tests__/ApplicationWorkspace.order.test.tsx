@@ -196,6 +196,8 @@ describe("failover order staging", () => {
         ids: ["c", "a", "b"],
       }),
     );
+    // 没选模型筛选的应用不碰当前档（调序 ≠ 换用途）。
+    expect(state.select).not.toHaveBeenCalled();
     // 模拟真实链路的应用后刷新：routing 查询换新对象、链与 tiers 序=已应用序，
     // 乐观快照随之失效、待应用归零、按钮消失。
     state.routing = {
@@ -412,6 +414,70 @@ describe("failover order staging", () => {
         "快的优先",
       ),
     );
+    view.unmount();
+  });
+
+  it("applying with a model filter switches current to the first available tier of that model", async () => {
+    // a(当前)=gpt-4、b=gpt-5、c=gpt-4：选 gpt-5 后应用 = 切到 b，
+    // 走标准切换编排（select → 确认框 → 退 ChatGPT → 切 → 重开）。
+    state.routing.tiers[0].effectiveModel = "gpt-4";
+    state.routing.tiers[1].effectiveModel = "gpt-5";
+    state.routing.tiers[2].effectiveModel = "gpt-4";
+    const view = renderWorkspace();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /gpt-5/ }));
+    const apply = screen.getByRole("button", {
+      name: /applications\.applyOrder/,
+    });
+    expect(apply).toHaveTextContent("(1)");
+    await userEvent.click(apply);
+    await waitFor(() => expect(state.setOrder).toHaveBeenCalledWith(["b"]));
+    await waitFor(() =>
+      expect(state.select).toHaveBeenCalledWith(
+        expect.objectContaining({ providerId: "b" }),
+      ),
+    );
+    view.unmount();
+  });
+
+  it("applying with a model filter keeps current when it already serves that model", async () => {
+    state.routing.tiers[0].effectiveModel = "gpt-4";
+    state.routing.tiers[1].effectiveModel = "gpt-5";
+    state.routing.tiers[2].effectiveModel = "gpt-4";
+    const view = renderWorkspace();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /gpt-4/ }));
+    // 当前档 a 就在应用目标里（它服务 gpt-4）→ 不折腾、零打扰。
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications\.applyOrder/ }),
+    );
+    await waitFor(() =>
+      expect(state.setOrder).toHaveBeenCalledWith(["a", "c"]),
+    );
+    expect(state.select).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("applying with a model filter skips circuit-open tiers and does not switch when none is available", async () => {
+    state.routing.tiers[0].effectiveModel = "gpt-4";
+    state.routing.tiers[1].effectiveModel = "gpt-5";
+    state.routing.tiers[2].effectiveModel = "gpt-4";
+    // gpt-5 只有一个档位且正熔断 → 链照常应用，但不切换（熔断档位不算可用）。
+    state.routing.tiers[1].skipReason = "circuit_open";
+    const view = renderWorkspace();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /gpt-5/ }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications\.applyOrder/ }),
+    );
+    await waitFor(() => expect(state.setOrder).toHaveBeenCalledWith(["b"]));
+    expect(state.select).not.toHaveBeenCalled();
     view.unmount();
   });
 
