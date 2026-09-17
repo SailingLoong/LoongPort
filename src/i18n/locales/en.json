@@ -3904,6 +3904,7 @@
     "enabled": "Enabled",
     "enable": "Enable",
     "applyOrder": "Apply order",
+    "applyOrderNoSwitchableTier": "Order applied; no available tier to switch to under the current filter",
     "blockTier": "Block",
     "unblockTier": "Unblock",
     "discardOrder": "Cancel",

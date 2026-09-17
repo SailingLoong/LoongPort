@@ -3905,6 +3905,7 @@
     "enabled": "已啟用",
     "enable": "啟用",
     "applyOrder": "套用此順序",
+    "applyOrderNoSwitchableTier": "已套用順序；目前篩選下沒有可切換的可用檔位",
     "blockTier": "屏蔽",
     "unblockTier": "取消屏蔽",
     "discardOrder": "取消",

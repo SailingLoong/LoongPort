@@ -191,6 +191,7 @@ export function ApplicationWorkspace({
     if (pendingOrderCount === 0 || saving || routing.busy) return;
     const previousOrder = order;
     const appliedSet = new Set(targetIds);
+    const switchModel = modelFilter;
     setSaving(true);
     // 乐观快照 = 应用目标在前、链外档位跟后（镜像后端展示序），后端结果一到即替换。
     setOrder({
@@ -212,6 +213,31 @@ export function ApplicationWorkspace({
           });
         }
         void refreshProfiles();
+      }
+      // 筛选模型 + 应用 = 切模型（2026-09-17 用户定调）：当前档不在应用目标里
+      // （它不服务这个模型/被筛出）时，把目标里第一个可用档位设为当前，走标准
+      // 切换编排（codex 弹「退出并切换」确认 → 退 → 切 → 重开）。只有调序/
+      // 筛账号的应用不碰进程；切换弹窗该取消取消，取消不影响已应用的链。
+      if (switchModel) {
+        const currentId = configurations.find(
+          (item) => item.presentation.isCurrent,
+        )?.providerId;
+        if (currentId == null || !appliedSet.has(currentId)) {
+          const unavailable = new Set(
+            tiers
+              .filter((tier) => tier.skipReason === "circuit_open")
+              .map((tier) => tier.providerId),
+          );
+          const candidate = targetIds
+            .filter((id) => id !== currentId && !unavailable.has(id))
+            .map((id) => configurations.find((item) => item.providerId === id))
+            .find((item) => item?.canSelect);
+          if (candidate) {
+            void model.select(candidate);
+          } else {
+            toast.info(t("applications.applyOrderNoSwitchableTier"));
+          }
+        }
       }
     } catch {
       setOrder(previousOrder);
