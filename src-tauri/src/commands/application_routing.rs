@@ -15,6 +15,11 @@ pub struct ApplicationRoutingTier {
     /// app 类型支持验证 **且** 是 LoongPort 托管的中转站档位 —— 工作台表格
     /// 混着官网直连/自定义配置，验证入口只给能验的行。
     pub can_verify_models: bool,
+    /// 档位模型目录（provision 嗅探 `/v1/models` 落库，唯源
+    /// `auto_strategy::tier_models`——与模型选择器并集同一来源）。工作台
+    /// 的模型筛选按它命中「分组支持」，而非只看当前 `effective_model`；
+    /// 空目录（非 Codex 系/未嗅探）回落单模型语义。
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -120,6 +125,10 @@ pub(crate) async fn application_routing_impl(
                     && providers
                         .get(&tier.provider_id)
                         .is_some_and(|p| crate::relay::is_managed(&p.id)),
+                models: providers
+                    .get(&tier.provider_id)
+                    .map(crate::proxy::auto_strategy::tier_models)
+                    .unwrap_or_default(),
                 tier,
                 skip_reason,
                 error_rate,
@@ -260,6 +269,7 @@ mod tests {
             error_rate: None,
             can_failover: true,
             can_verify_models: true,
+            models: vec!["gpt-5.6-sol".into(), "gpt-5.5".into()],
         };
         let json = serde_json::to_value(&tier).expect("要能序列化");
         let obj = json.as_object().expect("是个对象");
@@ -270,5 +280,12 @@ mod tests {
             obj.keys().collect::<Vec<_>>()
         );
         assert!(!obj.contains_key("can_verify_models"));
+        // 模型目录是工作台「分组支持」筛选的数据源：必须以数组随档位下发。
+        assert_eq!(
+            obj.get("models").and_then(|v| v.as_array()).map(Vec::len),
+            Some(2),
+            "模型目录必须以 models 数组下发，实际键：{:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
     }
 }

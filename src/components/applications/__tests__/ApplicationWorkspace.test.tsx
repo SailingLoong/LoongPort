@@ -111,6 +111,11 @@ beforeEach(() => {
         errorRate: 0.02,
         balanceUsd: 10,
         skipReason: null,
+        canFailover: true,
+        canVerifyModels: true,
+        // 目录里只有当前模型；档位 b 的目录多一个模型——目录筛选测试靠它。
+        models: ["gpt-5.6-sol"],
+        effectiveModel: "gpt-5.6-sol",
       },
       {
         providerId: "b",
@@ -119,6 +124,10 @@ beforeEach(() => {
         errorRate: 0.01,
         balanceUsd: 50,
         skipReason: null,
+        canFailover: true,
+        canVerifyModels: true,
+        models: ["gpt-5.6-sol", "gpt-5.5"],
+        effectiveModel: "gpt-5.6-sol",
       },
       {
         providerId: "c",
@@ -127,6 +136,11 @@ beforeEach(() => {
         errorRate: null,
         balanceUsd: null,
         skipReason: null,
+        canFailover: true,
+        canVerifyModels: true,
+        // 无目录档位：回落单模型（effectiveModel）语义。
+        models: [],
+        effectiveModel: "gpt-4.1",
       },
     ],
   };
@@ -159,6 +173,9 @@ describe("application workspace", () => {
       );
       expect(state.select).toHaveBeenCalledWith(
         expect.objectContaining({ providerId: "b" }),
+        // 未筛选模型 → 第三参不传模型（纯切档位）。
+        undefined,
+        undefined,
       );
     },
   );
@@ -181,6 +198,18 @@ describe("application workspace", () => {
     expect(
       within(rows[2]).queryByTitle("loongport.modelVerification.title"),
     ).not.toBeInTheDocument();
+  });
+  it("filters tiers by catalog support, not just the model in use", async () => {
+    render(<ApplicationWorkspace {...props} />);
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    // gpt-5.5 只在 b 的目录里（b 当前用的是 gpt-5.6-sol）——目录模型也要进
+    // 选项（「分组支持」语义），选中后只留 b。
+    await userEvent.click(screen.getByRole("option", { name: /gpt-5\.5/ }));
+    expect(screen.getByText("Premium")).toBeVisible();
+    expect(screen.queryByText("Standard")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
   });
   it("keeps row actions hover-revealed instead of always visible", async () => {
     render(<ApplicationWorkspace {...props} />);
@@ -276,6 +305,10 @@ describe("application workspace", () => {
     state.routing.tiers[0].effectiveModel = "gpt-5";
     state.routing.tiers[1].effectiveModel = "grok-4.6";
     state.routing.tiers[2].effectiveModel = "gpt-5";
+    // 目录跟随场景（筛选按「分组支持」命中）：a、c 目录有 gpt-5，b 只有 grok-4.6。
+    state.routing.tiers[0].models = ["gpt-5"];
+    state.routing.tiers[1].models = ["grok-4.6"];
+    state.routing.tiers[2].models = ["gpt-5"];
     // gpt-5: a 可用、c 限流中（circuit_open=已嗅探错误）→ 1/2 部分可用，分子橙；
     // grok-4.6: b 标 model_incompatible —— 对当前模型 gpt-5 恒真、不是错误，
     // 不得扣分（beta.4 回归：曾把其他模型分子全清零）→ 1/1 全可用，分子绿。

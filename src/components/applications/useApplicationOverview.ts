@@ -31,6 +31,8 @@ export function useApplicationOverview(
   const [confirmation, setConfirmation] = useState<{
     target: ApplicationConfiguration;
     name: string;
+    /** 中转档位要一并切过去的模型（模型筛选场景）；确认往返不丢。 */
+    model?: string;
   } | null>(null);
   const lifecycle = useRef(0);
   useEffect(() => {
@@ -52,6 +54,7 @@ export function useApplicationOverview(
   const select = async (
     target: ApplicationConfiguration,
     quitChatgpt?: boolean,
+    model?: string,
   ) => {
     if (!target.canSelect || pending.current) return;
     const generation = lifecycle.current;
@@ -72,10 +75,19 @@ export function useApplicationOverview(
               appId,
               quitChatgpt,
             )
-          : await relayApi.switchTier(target.providerId, appId, quitChatgpt);
+          : // 带模型 = 模型筛选场景：档位与模型一次切过去（后端校验目录成员，
+            // 过期 UI 指向不支持的模型会得到明确报错，不会写坏配置）。
+            model
+            ? await relayApi.switchTierModel(
+                target.providerId,
+                appId,
+                model,
+                quitChatgpt,
+              )
+            : await relayApi.switchTier(target.providerId, appId, quitChatgpt);
       if (generation !== lifecycle.current) return;
       if (result.status === "confirmationRequired") {
-        setConfirmation({ target, name: result.targetName });
+        setConfirmation({ target, name: result.targetName, model });
         return;
       }
       toast.success(
@@ -108,6 +120,7 @@ export function useApplicationOverview(
     confirmation: confirmation?.name ?? null,
     cancel: () => setConfirmation(null),
     confirm: (quit: boolean) =>
-      confirmation && void select(confirmation.target, quit),
+      confirmation &&
+      void select(confirmation.target, quit, confirmation.model),
   };
 }
