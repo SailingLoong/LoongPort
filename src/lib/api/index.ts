@@ -34,6 +34,13 @@ export type {
   ManagedAuthDeviceCodeResponse,
 } from "./auth";
 export { relayApi } from "./relay";
+export {
+  diagnosticsApi,
+  feedbackApi,
+  type DiagnosticsExportResult,
+  type FeedbackSubmitInput,
+  type FeedbackScreenshotPayload,
+} from "./diagnostics";
 export { ccSwitchImportApi } from "./ccSwitchImport";
 export type {
   CcSwitchImportPreview,
