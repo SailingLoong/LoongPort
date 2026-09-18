@@ -338,7 +338,41 @@ pub fn effective_model(db: &Database, app: &str) -> Option<String> {
 }
 
 pub fn model_for_provider(db: &Database, app: &str, provider: &Provider) -> Option<String> {
-    effective_model(db, app).filter(|model| auto_strategy::tier_models(provider).contains(model))
+    if let Some(model) = effective_model(db, app) {
+        if auto_strategy::tier_models(provider).contains(&model) {
+            return Some(model);
+        }
+    }
+    codex_tier_selected_model(app, provider)
+}
+
+/// codex 系档位的兜底模型：档位已选模型（config.toml `model`）。
+///
+/// 站点按请求里的模型名计费，而 codex 客户端侧的选型（Codex Desktop 的
+/// 会话模型记忆/新线程默认）不是计费意图的来源——用户在 LoongPort 档位上
+/// 选的模型才是。没有显式模型偏好（或偏好不被该档位服务）时，出站模型
+/// 回落到档位已选模型，而不是放行客户端模型——否则会出现「选了 5.6 sol、
+/// 实际按更贵的客户端默认模型计费」的静默分叉。偏好不兼容档位时的回落
+/// （[`effective_model`]）本就是档位已选模型，这里是同一条规则的「无偏好」
+/// 分支补齐。
+///
+/// 豁免与不参与的边界：
+/// - **codex 官方直通**：订阅计费，模型选择权归用户，不强制。
+/// - **claude**：角色映射（haiku/sonnet/opus → 档位角色模型）已在
+///   `model_mapper` 对齐，这里再兜底会压平角色档。
+/// - **gemini**：模型在 URL 里，body 改写触达不到。
+/// - **grokbuild**：`apply_codex_upstream_model` 已自行锚定出站模型。
+/// - **档位没写模型**（手工配置、问不出目录）：无从对齐，维持透传。
+fn codex_tier_selected_model(app: &str, provider: &Provider) -> Option<String> {
+    let app_type = AppType::from_str(app).ok()?;
+    if !matches!(app_type, AppType::Codex | AppType::CodexImage) {
+        return None;
+    }
+    if super::providers::is_codex_official_provider(provider) {
+        return None;
+    }
+    crate::relay::provision::selected_model(&app_type, &provider.settings_config)
+        .filter(|model| !model.trim().is_empty())
 }
 
 /// Takeover permission is separate from whether fallback is allowed.
@@ -483,6 +517,106 @@ mod tests {
             chain_ids(&db, "claude").unwrap(),
             vec!["a", "b"],
             "链外档位编辑后不爬回链里"
+        );
+    }
+
+    fn codex_tier(id: &str, model: &str) -> Provider {
+        Provider::with_id(
+            id.into(),
+            id.into(),
+            serde_json::json!({ "config": format!("model = \"{model}\"\n") }),
+            None,
+        )
+    }
+
+    /// codex 档位没有模型偏好时，出站模型回落到档位已选模型——
+    /// 站点按请求里的模型名计费，codex 客户端侧的选型（Codex Desktop
+    /// 的会话模型记忆/默认）不是计费意图的来源。
+    #[test]
+    #[serial_test::serial]
+    fn codex_tier_without_preference_enforces_selected_model() {
+        let db = crate::Database::memory().unwrap();
+        let tier = codex_tier("relay", "gpt-5.6-sol");
+        assert_eq!(
+            model_for_provider(&db, "codex", &tier),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            model_for_provider(&db, "codex-image", &tier),
+            Some("gpt-5.6-sol".to_string()),
+            "生图档位同规：档位已选模型即计费契约"
+        );
+    }
+
+    /// codex 官方直通豁免：订阅计费下模型选择权归用户，不强制档位模型。
+    #[test]
+    #[serial_test::serial]
+    fn codex_official_passthrough_keeps_client_choice() {
+        let db = crate::Database::memory().unwrap();
+        let mut official = codex_tier(crate::database::CODEX_OFFICIAL_PROVIDER_ID, "gpt-5.6-sol");
+        official.category = Some("official".into());
+        assert_eq!(model_for_provider(&db, "codex", &official), None);
+    }
+
+    /// 档位没写模型（手工配置、问不出目录）→ 无从对齐，维持客户端模型透传。
+    #[test]
+    #[serial_test::serial]
+    fn codex_tier_without_selected_model_stays_verbatim() {
+        let db = crate::Database::memory().unwrap();
+        let tier = Provider::with_id(
+            "relay".into(),
+            "relay".into(),
+            serde_json::json!({ "config": "model_provider = \"custom\"\n" }),
+            None,
+        );
+        assert_eq!(model_for_provider(&db, "codex", &tier), None);
+    }
+
+    /// claude / gemini 不参与 codex 兜底：claude 的角色映射（haiku/sonnet/opus →
+    /// 档位角色模型）已在 model_mapper 对齐，这里再兜底会压平角色档；gemini
+    /// 的模型在 URL 里，body 改写触达不到。
+    #[test]
+    #[serial_test::serial]
+    fn claude_and_gemini_without_preference_keep_client_choice() {
+        let db = crate::Database::memory().unwrap();
+        let claude = Provider::with_id(
+            "relay".into(),
+            "relay".into(),
+            serde_json::json!({ "env": { "ANTHROPIC_MODEL": "claude-opus-5" } }),
+            None,
+        );
+        assert_eq!(model_for_provider(&db, "claude", &claude), None);
+        let gemini = Provider::with_id(
+            "relay".into(),
+            "relay".into(),
+            serde_json::json!({ "env": { "GEMINI_MODEL": "gemini-3.5-flash" } }),
+            None,
+        );
+        assert_eq!(model_for_provider(&db, "gemini", &gemini), None);
+    }
+
+    /// 显式模型偏好照旧优先；偏好不被目标档位服务时（故障切换到服务
+    /// 其它模型的档位），回落到目标档位自己的已选模型，而不是放行
+    /// 客户端模型。
+    #[test]
+    #[serial_test::serial]
+    fn preference_wins_and_failover_tier_falls_back_to_own_selection() {
+        let db = crate::Database::memory().unwrap();
+        let mut pref_tier = codex_tier("current", "gpt-5.6-sol");
+        pref_tier.settings_config["modelCatalog"] =
+            serde_json::json!({ "models": [ { "model": "gpt-5.6-luna" } ] });
+        auto_strategy::set_model_pref(&db, "codex", Some("gpt-5.6-luna")).unwrap();
+        assert_eq!(
+            model_for_provider(&db, "codex", &pref_tier),
+            Some("gpt-5.6-luna".to_string()),
+            "偏好被档位服务时照旧优先"
+        );
+
+        let failover_target = codex_tier("other", "gpt-5.6-terra");
+        assert_eq!(
+            model_for_provider(&db, "codex", &failover_target),
+            Some("gpt-5.6-terra".to_string()),
+            "目标档位不服务偏好 → 回落目标档位已选模型"
         );
     }
 }
