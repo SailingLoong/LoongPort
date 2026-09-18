@@ -164,9 +164,33 @@ describe("failover order staging", () => {
       autoFailoverEnabled: true,
       chainIds: ["a", "b", "c"],
       tiers: [
-        { providerId: "a", position: 0, skipReason: null, rateMultiplier: 2 },
-        { providerId: "b", position: 1, skipReason: null, rateMultiplier: 1 },
-        { providerId: "c", position: 2, skipReason: null, rateMultiplier: 3 },
+        {
+          providerId: "a",
+          position: 0,
+          skipReason: null,
+          rateMultiplier: 2,
+          canFailover: true,
+          canVerifyModels: true,
+          models: [],
+        },
+        {
+          providerId: "b",
+          position: 1,
+          skipReason: null,
+          rateMultiplier: 1,
+          canFailover: true,
+          canVerifyModels: true,
+          models: [],
+        },
+        {
+          providerId: "c",
+          position: 2,
+          skipReason: null,
+          rateMultiplier: 3,
+          canFailover: true,
+          canVerifyModels: true,
+          models: [],
+        },
       ],
     };
   });
@@ -437,6 +461,9 @@ describe("failover order staging", () => {
     await waitFor(() =>
       expect(state.select).toHaveBeenCalledWith(
         expect.objectContaining({ providerId: "b" }),
+        undefined,
+        // 模型筛选下切换把模型一起带过去（switchTierModel 链）。
+        "gpt-5",
       ),
     );
     view.unmount();

@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
+import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
 import type { AccountRoute } from "@/components/shell/navigation";
 import { isProxyAppId } from "@/config/appConfig";
 import { Button } from "@/components/ui/button";
@@ -80,6 +81,13 @@ interface Props {
   onOpenAccount: (account: AccountRoute) => void;
   onAdd: () => void;
   children: ReactNode;
+}
+/** 档位的可筛模型：模型目录优先（「分组支持」语义），无目录回落当前生效模型。
+ *  选项聚合与下拉显隐共用这一份——两处各写一遍必然分叉。 */
+function supportedModels(tier: ApplicationRoutingTier): string[] {
+  return tier.models.length
+    ? tier.models
+    : [tier.effectiveModel].filter((model): model is string => Boolean(model));
 }
 export function ApplicationWorkspace({
   appId,
@@ -230,15 +238,33 @@ export function ApplicationWorkspace({
         }
         void refreshProfiles();
       }
-      // 筛选模型 + 应用 = 切模型（2026-09-17 用户定调）：当前档不在应用目标里
-      // （它不服务这个模型/被筛出）时，把目标里第一个可用档位设为当前，走标准
-      // 切换编排（codex 弹「退出并切换」确认 → 退 → 切 → 重开）。只有调序/
-      // 筛账号的应用不碰进程；切换弹窗该取消取消，取消不影响已应用的链。
+      // 筛选模型 + 应用 = 切模型（2026-09-17 用户定调；模型筛选命中「分组
+      // 支持」后语义补全）：筛选模型下应用，最终要**正在服务**这个模型——
+      //   - 当前档不在目标里（被筛出）：目标里第一个可用档位设为当前；
+      //   - 当前档在目标里但没在用这个模型：就地把它切到该模型。
+      // 两种都把模型一起传给切换编排（codex 弹「退出并切换」确认 → 退 → 切 →
+      // 重开；后端校验目录成员）。只有调序/筛账号的应用不碰进程；切换弹窗
+      // 该取消取消，取消不影响已应用的链。
       if (switchModel) {
         const currentId = configurations.find(
           (item) => item.presentation.isCurrent,
         )?.providerId;
-        if (currentId == null || !appliedSet.has(currentId)) {
+        const tierById = new Map(tiers.map((tier) => [tier.providerId, tier]));
+        const serving = (id: string | undefined) =>
+          id ? (tierById.get(id)?.effectiveModel ?? null) : null;
+        const currentConfig = currentId
+          ? configurations.find((item) => item.providerId === currentId)
+          : undefined;
+        if (
+          currentId != null &&
+          // 在应用目标里 = 过滤器放行 = 它支持这个模型；此时没在用才就地切。
+          // 不在目标里的当前档走下面换档位分支，别对它强写不支持的模型。
+          appliedSet.has(currentId) &&
+          currentConfig?.selection.kind === "relay" &&
+          serving(currentId) !== switchModel
+        ) {
+          void model.select(currentConfig, undefined, switchModel);
+        } else if (currentId == null || !appliedSet.has(currentId)) {
           const unavailable = new Set(
             tiers
               .filter((tier) => tier.skipReason === "circuit_open")
@@ -249,7 +275,7 @@ export function ApplicationWorkspace({
             .map((id) => configurations.find((item) => item.providerId === id))
             .find((item) => item?.canSelect);
           if (candidate) {
-            void model.select(candidate);
+            void model.select(candidate, undefined, switchModel);
           } else {
             toast.info(t("applications.applyOrderNoSwitchableTier"));
           }
@@ -294,9 +320,11 @@ export function ApplicationWorkspace({
     }
     return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
   }, [configurations]);
-  // 模型筛选的选项 = 各档位实际会用的模型（effectiveModel 优先），去重排序；
-  // 聚合范围跟随账号筛选——选了账号后分数必须只数该账号的档位，不能仍报全量
-  // （2026-09-17 用户报的 bug：7 档筛剩 5，模型分数仍是 7/7）。
+  // 模型筛选的选项 = 各档位**模型目录**的并集（「分组支持」语义——一个档位
+  // 通常支持多个模型，别只认当前在用的那个）；无目录的档位回落单模型
+  // （effectiveModel）。聚合范围跟随账号筛选——选了账号后分数必须只数该账号
+  // 的档位，不能仍报全量（2026-09-17 用户报的 bug：7 档筛剩 5，模型分数仍
+  // 是 7/7）。
   // 当前路由模型置顶加 ⚡，故障切换场景「选模型 → 过滤看链上还有谁」一步到位。
   // 每个模型带 可用/总数 分数：不可用只算「已嗅探到的错误」（circuit_open=
   // 限流/网络/余额等真实失败累积触发的熔断）与用户屏蔽；模型不匹配/能力声明/
@@ -311,7 +339,7 @@ export function ApplicationWorkspace({
       tiers.map((tier) => [
         tier.providerId,
         {
-          model: tier.effectiveModel,
+          models: supportedModels(tier),
           available:
             tier.skipReason !== "circuit_open" && tier.skipReason !== "blocked",
         },
@@ -324,12 +352,15 @@ export function ApplicationWorkspace({
     for (const item of configurations) {
       if (!accountMatch(item)) continue;
       const tier = byId.get(item.providerId);
-      const model = tier?.model ?? item.model;
-      if (!model) continue;
-      const entry = stats.get(model) ?? { model, available: 0, total: 0 };
-      entry.total += 1;
-      if (tier?.available ?? true) entry.available += 1;
-      stats.set(model, entry);
+      // 目录之外的回显模型（item.model）也算支持——目录可能滞后于实际配置。
+      const models = new Set(tier?.models ?? []);
+      if (item.model) models.add(item.model);
+      for (const model of models) {
+        const entry = stats.get(model) ?? { model, available: 0, total: 0 };
+        entry.total += 1;
+        if (tier?.available ?? true) entry.available += 1;
+        stats.set(model, entry);
+      }
     }
     const routingModel = routing.data?.model;
     return [...stats.values()]
@@ -348,17 +379,17 @@ export function ApplicationWorkspace({
       setModelFilter(null);
     }
   }, [tierModels, modelFilter]);
-  // 模型下拉的显隐看**全量**模型数：账号筛选收窄到单模型时下拉仍要可见——
-  // 分数（该账号可用/总数）本身就是用户要看的信息。
+  // 模型下拉的显隐看**全量**模型数（目录并集）：账号筛选收窄到单模型时下拉
+  // 仍要可见——分数（该账号可用/总数）本身就是用户要看的信息。
   const hasMultipleModelsOverall = useMemo(() => {
     const byId = new Map(
-      tiers.map((tier) => [tier.providerId, tier.effectiveModel]),
+      tiers.map((tier) => [tier.providerId, supportedModels(tier)]),
     );
-    const models = new Set(
-      configurations
-        .map((item) => byId.get(item.providerId) ?? item.model)
-        .filter((model): model is string => Boolean(model)),
-    );
+    const models = new Set<string>();
+    for (const item of configurations) {
+      for (const model of byId.get(item.providerId) ?? []) models.add(model);
+      if (item.model) models.add(item.model);
+    }
     return models.size > 1;
   }, [configurations, tiers]);
   const routingModel = routing.data?.model ?? null;
@@ -622,7 +653,9 @@ export function ApplicationWorkspace({
               void changeOrder(next);
             }}
             onSelect={(item) => {
-              void model.select(item);
+              // 模型筛选下点「设为当前」：档位与筛选模型一次切过去（用户视角
+              // 就是「用这个档位跑这个模型」）；未筛选时纯切档位。
+              void model.select(item, undefined, modelFilter ?? undefined);
             }}
             onOpenAccount={onOpenAccount}
             onBlockTier={(providerId, blocked) => {

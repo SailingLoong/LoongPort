@@ -10,6 +10,9 @@ export interface ApplicationRoutingTier extends TierBoardTier {
   canFailover: boolean;
   /** 模型验证资格（后端唯源：app 类型支持 ∧ LoongPort 托管档位）。false = 行内不出验证入口。 */
   canVerifyModels: boolean;
+  /** 档位模型目录（provision 嗅探落库）。模型筛选按它命中「分组支持」；
+   * 空 = 无目录（非 Codex 系/未嗅探），筛选回落单模型（effectiveModel）语义。 */
+  models: string[];
 }
 
 export interface ApplicationRouting {

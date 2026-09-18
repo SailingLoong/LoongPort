@@ -83,11 +83,15 @@ export function visibleTierIds({
     ) {
       return false;
     }
-    if (
-      modelFilter &&
-      (metrics.get(id)?.effectiveModel ?? item.model) !== modelFilter
-    ) {
-      return false;
+    if (modelFilter) {
+      // 模型筛选命中「分组支持」：目录含它，或当前正在用它（目录可能滞后于
+      // 实际回显）。无目录的档位回落单模型（effectiveModel）语义。
+      const tier = metrics.get(id);
+      const effective = tier?.effectiveModel ?? item.model;
+      const supports =
+        (tier?.models.includes(modelFilter) ?? false) ||
+        effective === modelFilter;
+      if (!supports) return false;
     }
     if (
       needle &&
