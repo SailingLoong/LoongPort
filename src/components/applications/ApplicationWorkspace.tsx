@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   Check,
   ChevronDown,
+  CircleHelp,
   ListFilter,
   Plus,
   Search,
@@ -24,6 +25,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Collapsible,
   CollapsibleContent,
@@ -361,21 +368,45 @@ export function ApplicationWorkspace({
                 </span>
               </h2>
               {isProxyAppId(appId) && (
-                <label className="inline-flex cursor-pointer items-center gap-2 text-sm">
-                  <Switch
-                    checked={routing.data?.autoFailoverEnabled ?? false}
-                    disabled={
-                      routing.busy ||
-                      routing.isPending ||
-                      Boolean(routing.error)
-                    }
-                    aria-label={t("applications.autoFailover")}
-                    onCheckedChange={(checked) => {
-                      void routing.setFailover(checked).catch(() => undefined);
-                    }}
-                  />
-                  {t("applications.autoFailover")}
-                </label>
+                <div className="inline-flex items-center gap-1">
+                  <label className="inline-flex cursor-pointer items-center gap-2 text-sm">
+                    <Switch
+                      checked={routing.data?.autoFailoverEnabled ?? false}
+                      disabled={
+                        routing.busy ||
+                        routing.isPending ||
+                        Boolean(routing.error)
+                      }
+                      aria-label={t("applications.autoFailover")}
+                      onCheckedChange={(checked) => {
+                        void routing
+                          .setFailover(checked)
+                          .catch(() => undefined);
+                      }}
+                    />
+                    {t("applications.autoFailover")}
+                  </label>
+                  {/* 问号在 label 外：悬停说明语义，点击不触发开关。 */}
+                  <TooltipProvider delayDuration={250}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span
+                          tabIndex={0}
+                          aria-label={t("applications.autoFailoverHint")}
+                          className="inline-flex cursor-help items-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+                        >
+                          <CircleHelp className="h-3.5 w-3.5 text-muted-foreground/60 hover:text-muted-foreground" />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent
+                        side="bottom"
+                        className="max-w-xs leading-relaxed"
+                      >
+                        {t("applications.autoFailoverHint")}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
               )}
               {chainEditing && pendingOrderCount > 0 && (
                 <>
