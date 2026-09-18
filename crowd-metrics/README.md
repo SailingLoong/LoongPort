@@ -8,10 +8,10 @@
 在用站点）：写入型端点 `/v1/ping`，只落 D1、**无公开读端点**，与公开快照互不相通。
 
 2026-09-18 起还承载**问题反馈回传**（`/v1/feedback`）：客户端的描述+截图+可选诊断包
-multipart 上传，附件存 R2（不可猜 key、90 天过期），并自动建
+multipart 上传，附件存 KV（不可猜 key、TTL 90 天原生过期），并自动建
 `SailingLoong/loongport-feedback` 私有仓的 GitHub issue（正文含环境摘要与截图内联、
-诊断包下载链接）。GitHub 官方 API 无附件端点，附件自存 R2 的不可猜 URL 模型与
-GitHub 私有仓原生附件等同。客户端入口按钮只在 v2 config 下发 `feedback_url` 时出现
+诊断包下载链接）。GitHub 官方 API 无附件端点，附件自存 KV 的不可猜 URL 模型与
+GitHub 私有仓原生附件等同（KV 单值 25MB > 10MB 整包闸，且免清理任务）。客户端入口按钮只在 v2 config 下发 `feedback_url` 时出现
 （缺键=功能休眠；被滥用时远端删键即止血，无需发版）。
 
 ## 端点
@@ -20,7 +20,7 @@ GitHub 私有仓原生附件等同。客户端入口按钮只在 v2 config 下�
 |---|---|---|
 | POST | `/v1/ingest` | 客户端上传小时聚合桶（校验 + 每 IP 限流 20 次/时 + 幂等覆盖） |
 | POST | `/v1/ping` | 客户端匿名使用统计上报（安装 id + 版本 + OS + 站点域名；只落 D1，永不公开；与 ingest 共享每 IP 20 次/时限流） |
-| POST | `/v1/feedback` | 问题反馈（multipart：meta/截图/诊断包 zip；每 IP 5 次/日独立限流；附件入 R2 → 私有仓 issue） |
+| POST | `/v1/feedback` | 问题反馈（multipart：meta/截图/诊断包 zip；每 IP 5 次/日独立限流；附件入 KV → 私有仓 issue） |
 | GET | `/v1/feedback-asset/<day>/<file>` | 按不可猜 key 读回反馈附件（issue 正文内嵌/下载用；key 含 uuid 段不可枚举） |
 | GET | `/v1/snapshot` | 公共快照（CORS `*`、CDN `max-age=60`；KV 命中，冷启动现算兜底） |
 | GET | `/healthz` | 探活 |
@@ -81,13 +81,14 @@ npx wrangler kv namespace create SNAPSHOT
 # 输出 id → 填进 wrangler.jsonc 的 REPLACE_WITH_KV_ID
 
 # 反馈回传（/v1/feedback）的资源：
-npx wrangler r2 bucket create loongport-feedback
+npx wrangler kv namespace create FEEDBACK
+# 输出 id → 填进 wrangler.jsonc 的 FEEDBACK 绑定
 # 私有仓 issue 凭据：GitHub 建私有仓 SailingLoong/loongport-feedback，
-# 设置页建 fine-grained PAT（仅该仓、Issues Read and write），然后：
-npx wrangler secret put GH_FEEDBACK_TOKEN   # 粘贴该 PAT
+# 建仅该仓 Issues 读写的 token，然后：
+npx wrangler secret put GH_FEEDBACK_TOKEN   # 粘贴 token
 ```
 
-⚠️ **`/v1/feedback` 部署硬顺序**：bucket → secret → worker → 远端 config 加
+⚠️ **`/v1/feedback` 部署硬顺序**：KV namespace → secret → worker → 远端 config 加
 `feedback_url` → 客户端发版。顺序反了客户端会 POST 到未就绪端点（可恢复的提交失败）。
 
 可选：自定义域 `metrics.loongport.dev`（zone 在同账号下，DNS 加一条 CNAME 或在
@@ -105,7 +106,7 @@ deploy.sh 会：拒绝占位 id → 重放 `schema.sql`（幂等）→ `wrangler
 
 GitHub 通知即达：issue 在 `SailingLoong/loongport-feedback`（标题=描述首行截断，
 正文含环境摘要 JSON、截图内联、诊断包 zip 下载链接；`sourceId` 可与同日后续反馈对号）。
-附件 90 天过期（R2 清理），issue 本体不删。
+附件 90 天过期（KV TTL），issue 本体不删。
 
 ## 本地与 staging 验证
 

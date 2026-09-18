@@ -7,19 +7,25 @@
  * - 图片部件 screenshots（≤6 张、单张 ≤5MB、image/*）
  * - 可选 bundle 部件（诊断包 zip ≤10MB）
  *
- * 流：体积闸 → 表单校验 → IP-日限流 → 附件存 R2（不可猜 key）→ 建私有仓 issue。
+ * 流：体积闸 → 表单校验 → IP-日限流 → 附件存 KV（不可猜 key、TTL 90 天）→ 建私有仓 issue。
  *
- * ## 为什么附件自存 R2 而不是 GitHub
+ * ## 为什么附件自存而不是 GitHub
  *
  * GitHub 官方 API 没有附件上传端点（issue 级与 user 级都没有，网页端走未公开
- * 内部端点）。附件存 R2、以不可猜 URL 引进 issue 正文 —— 这与 GitHub 私有仓
- * 原生附件的安全模型等同（user-images CDN + 匿名不可猜 URL），不是降级。
+ * 内部端点）。附件以不可猜 URL 引进 issue 正文 —— 这与 GitHub 私有仓原生附件的
+ * 安全模型等同（user-images CDN + 匿名不可猜 URL），不是降级。
+ *
+ * ## 为什么 KV 而不是 R2（2026-09-18 部署时定）
+ *
+ * KV 单值上限 25MB > 本端点 10MB 整包闸；`expirationTtl` 原生过期（无需清理任务）；
+ * 且维护者现有的部署凭据只覆盖 Workers/D1/KV（R2 需要另开权限面）。附件是
+ * 写一次、极少读的小体量数据，KV 免费档（1GB 存储 / 千写每天）绰绰有余。
  */
 
 export interface FeedbackEnv {
   DB: D1Database;
-  FEEDBACK: R2Bucket;
-  /** fine-grained PAT：仅 SailingLoong/loongport-feedback 私有仓 Issues 读写。未配置 = 503。 */
+  FEEDBACK: KVNamespace;
+  /** GitHub 凭据（建私有仓 issue 用）。未配置 = 503。 */
   GH_FEEDBACK_TOKEN?: string;
 }
 
@@ -34,13 +40,13 @@ export const MAX_DESCRIPTION_CHARS = 8_000;
 export const MAX_META_BYTES = 32 * 1024;
 /** 每来源 IP 每自然日（UTC）的提交上限。 */
 export const MAX_SUBMITS_PER_IP_DAY = 5;
-/** 附件保留期：过期的 R2 对象由 scheduled 清理（issue 不删）。 */
+/** 附件保留期：KV expirationTtl 原生过期（issue 不删，正文旧链接随之失效）。 */
 export const FEEDBACK_RETENTION_SECS = 90 * 86400;
 
 const SOURCE_RE = /^[0-9a-f]{32}$/;
 const APP_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/;
 const ASSET_ROUTE_PREFIX = "/v1/feedback-asset/";
-const R2_PREFIX = "feedback/";
+const KEY_PREFIX = "feedback/";
 
 export type FeedbackForm =
   | {
@@ -128,7 +134,7 @@ function jsonResponse(body: unknown, status: number): Response {
   });
 }
 
-/** epoch 秒 → UTC 日串（限流键与 R2 key 的日期段共用同一口径）。 */
+/** epoch 秒 → UTC 日串（限流键与 KV key 的日期段共用同一口径）。 */
 export function dayUtc(nowSec: number): string {
   return new Date(nowSec * 1000).toISOString().slice(0, 10);
 }
@@ -145,7 +151,7 @@ async function ipHash(ip: string): Promise<string> {
 
 /**
  * 反馈独立限流预算（feedback_ip_day 表）：与 ingest 的 upload_ip_hour 分开 ——
- * 反馈每次是 R2 写 + GitHub 建 issue，成本比桶写入贵一个量级。只存 IP 哈希
+ * 反馈每次是 KV 写 + GitHub 建 issue，成本比桶写入贵一个量级。只存 IP 哈希
  * （与 ratelimit.ts 同一隐私纪律）。
  */
 export async function allowFeedbackByIp(
@@ -176,7 +182,7 @@ function extensionForType(type: string): string {
 }
 
 function assetUrl(origin: string, key: string): string {
-  return `${origin}${ASSET_ROUTE_PREFIX}${key.slice(R2_PREFIX.length)}`;
+  return `${origin}${ASSET_ROUTE_PREFIX}${key.slice(KEY_PREFIX.length)}`;
 }
 
 export function buildIssueTitle(description: string): string {
@@ -278,18 +284,20 @@ export async function handleFeedback(
 
   let bundleUrl: string | null = null;
   if (parsed.bundle) {
-    const key = `${R2_PREFIX}${day}/${id}.zip`;
+    const key = `${KEY_PREFIX}${day}/${id}.zip`;
     await env.FEEDBACK.put(key, await parsed.bundle.arrayBuffer(), {
-      httpMetadata: { contentType: "application/zip" },
+      expirationTtl: FEEDBACK_RETENTION_SECS,
+      metadata: { ct: "application/zip" },
     });
     bundleUrl = assetUrl(origin, key);
   }
 
   const imageUrls: string[] = [];
   for (const [index, shot] of parsed.screenshots.entries()) {
-    const key = `${R2_PREFIX}${day}/${id}-shot-${index + 1}.${extensionForType(shot.type)}`;
+    const key = `${KEY_PREFIX}${day}/${id}-shot-${index + 1}.${extensionForType(shot.type)}`;
     await env.FEEDBACK.put(key, await shot.arrayBuffer(), {
-      httpMetadata: { contentType: shot.type },
+      expirationTtl: FEEDBACK_RETENTION_SECS,
+      metadata: { ct: shot.type },
     });
     imageUrls.push(assetUrl(origin, key));
   }
@@ -300,7 +308,7 @@ export async function handleFeedback(
     buildIssueBody(parsed, imageUrls, bundleUrl),
   );
   if (!issue.ok) {
-    // R2 对象已写（清理任务按保留期兜底回收）；给客户端一个可重试的失败。
+    // KV 对象已写但 TTL 会自动回收；给客户端一个可重试的失败。
     console.error(`feedback issue creation failed: ${issue.error}`);
     return jsonResponse({ error: "issue creation failed" }, 502);
   }
@@ -318,40 +326,25 @@ export async function handleFeedbackAsset(
   if (!/^[0-9a-zA-Z][0-9a-zA-Z._-]*$/.test(assetPath)) {
     return jsonResponse({ error: "bad asset path" }, 400);
   }
-  const object = await env.FEEDBACK.get(`${R2_PREFIX}${assetPath}`);
-  if (!object) {
+  const stored = await env.FEEDBACK.getWithMetadata<{ ct?: string }>(
+    `${KEY_PREFIX}${assetPath}`,
+    { type: "arrayBuffer" },
+  );
+  if (stored.value === null) {
     return jsonResponse({ error: "not found" }, 404);
   }
+  const contentType =
+    typeof stored.metadata?.ct === "string"
+      ? stored.metadata.ct
+      : "application/octet-stream";
   const headers = new Headers({
-    "content-type": object.httpMetadata?.contentType ?? "application/octet-stream",
+    "content-type": contentType,
     "cache-control": "private, max-age=3600",
   });
-  if ((object.httpMetadata?.contentType ?? "").startsWith("image/")) {
+  if (contentType.startsWith("image/")) {
     headers.set("content-disposition", "inline");
   } else {
     headers.set("content-disposition", "attachment");
   }
-  return new Response(object.body, { status: 200, headers });
-}
-
-/** scheduled 用：删除超过保留期的附件（issue 不删，正文里的旧链接随之失效）。 */
-export async function cleanupOldFeedback(
-  env: Pick<FeedbackEnv, "FEEDBACK">,
-  nowSec: number,
-): Promise<number> {
-  const cutoff = new Date((nowSec - FEEDBACK_RETENTION_SECS) * 1000);
-  let deleted = 0;
-  let cursor: string | undefined;
-  do {
-    const listing = await env.FEEDBACK.list({ prefix: R2_PREFIX, cursor });
-    const doomed = listing.objects
-      .filter((object) => object.uploaded < cutoff)
-      .map((object) => object.key);
-    if (doomed.length > 0) {
-      await Promise.all(doomed.map((key) => env.FEEDBACK.delete(key)));
-      deleted += doomed.length;
-    }
-    cursor = listing.truncated ? listing.cursor : undefined;
-  } while (cursor);
-  return deleted;
+  return new Response(stored.value, { status: 200, headers });
 }

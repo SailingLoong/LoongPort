@@ -144,7 +144,7 @@ describe("issue 组装", () => {
 });
 
 describe("dayUtc", () => {
-  it("钉死 UTC 日串口径（限流键与 R2 key 共用）", () => {
+  it("钉死 UTC 日串口径（限流键与 KV key 共用）", () => {
     expect(dayUtc(0)).toBe("1970-01-01");
     // 2026-09-18T23:30Z = epoch 1789774200（跨日边界前的最后半小时）
     expect(dayUtc(1789774200)).toBe("2026-09-18");

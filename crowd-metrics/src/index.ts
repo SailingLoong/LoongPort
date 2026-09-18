@@ -11,7 +11,7 @@
 import { buildSnapshot, buildTrends, type RawModelRow, type RawRow } from "./aggregate";
 import { TTFT_BIN_EDGES_MS } from "./bins";
 import { cleanupDue, isFresh } from "./freshness";
-import { handleFeedback, handleFeedbackAsset, cleanupOldFeedback, dayUtc } from "./feedback";
+import { handleFeedback, handleFeedbackAsset, dayUtc } from "./feedback";
 import { handleIngest, type Env } from "./ingest";
 import { handlePing } from "./ping";
 import { hourFloorUtc } from "./validate";
@@ -78,8 +78,6 @@ async function queryModelRows(env: Env, nowSec: number): Promise<RawModelRow[]> 
 
 /** KV 里记上次清理时间的键（值 = epoch 秒）。 */
 const CLEANUP_LAST_RUN_KEY = "cleanup:last-run";
-/** 反馈附件清理的上次运行键（日级：R2 list 比 D1 delete 贵，用不着每小时跑）。 */
-const FEEDBACK_CLEANUP_LAST_RUN_KEY = "cleanup:feedback-last-run";
 
 /**
  * 现算快照+趋势并写 KV（一次查询喂两个聚合）。清理（保留期删除）折叠在这里、
@@ -111,20 +109,12 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
     await env.SNAPSHOT.put(CLEANUP_LAST_RUN_KEY, String(nowSec));
   })();
 
-  // 反馈附件（R2）按天清：超过保留期（90 天）的对象删除，issue 里的旧链接随之失效。
-  const feedbackCleanup = (async () => {
-    const lastRun = await env.SNAPSHOT.get(FEEDBACK_CLEANUP_LAST_RUN_KEY);
-    if (lastRun !== null && nowSec - Number(lastRun) < 86400) return;
-    const deleted = await cleanupOldFeedback(env, nowSec);
-    if (deleted > 0) console.log(`feedback cleanup removed ${deleted} objects`);
-    await env.SNAPSHOT.put(FEEDBACK_CLEANUP_LAST_RUN_KEY, String(nowSec));
-  })();
+  // 反馈附件在 KV 里靠 expirationTtl 原生过期，无需清理任务（见 feedback.ts 模块文档）。
 
   await Promise.all([
     env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot)),
     env.SNAPSHOT.put(TREND_KEY, JSON.stringify(trend)),
     cleanup,
-    feedbackCleanup,
   ]);
   return snapshot;
 }

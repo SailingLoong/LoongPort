@@ -11,9 +11,9 @@ import { allowByIp } from "./ratelimit";
 export interface Env {
   DB: D1Database;
   SNAPSHOT: KVNamespace;
-  /** 问题反馈附件桶（/v1/feedback 写入、/v1/feedback-asset 读回）。 */
-  FEEDBACK: R2Bucket;
-  /** 私有仓 issue 凭据（fine-grained PAT）。未配置时 /v1/feedback 一律 503。 */
+  /** 问题反馈附件 KV（/v1/feedback 写入、/v1/feedback-asset 读回；TTL 90 天原生过期）。 */
+  FEEDBACK: KVNamespace;
+  /** 私有仓 issue 凭据。未配置时 /v1/feedback 一律 503。 */
   GH_FEEDBACK_TOKEN?: string;
 }
 
