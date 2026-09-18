@@ -28,6 +28,9 @@ import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
 import type { AccountRoute } from "@/components/shell/navigation";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { TierVerifyButton } from "@/components/relay/model-verification/TierVerifyButton";
+import { TierVerdictChip } from "@/components/relay/model-verification/TierVerdictChip";
+import { useTierVerification } from "@/components/relay/model-verification/TierVerificationProvider";
 import { tierMetrics, type TierMetric, type TierSort } from "./tierMetrics";
 
 /**
@@ -307,6 +310,8 @@ function TierRow({
     transition,
     isDragging,
   } = useSortable({ id: item.providerId, disabled: dragDisabled });
+  // 验证进行中也是「进行中的操作」：动作组钉住，转圈不因移开鼠标而消失。
+  const verifying = useTierVerification().isVerifying(item.providerId);
   const name = item.configurationName ?? item.name;
   const blocked = tier?.skipReason === "blocked";
   return (
@@ -349,6 +354,8 @@ function TierRow({
               {t(additive ? "applications.enabled" : "applications.configured")}
             </span>
           )}
+          {/* 验真结论 chip：模块自持（下线/无结论时不渲染）。 */}
+          <TierVerdictChip providerId={item.providerId} />
           {item.presentation.isDefaultModel && (
             <span className="text-xs text-muted-foreground">
               {t("applications.default")}
@@ -397,12 +404,12 @@ function TierRow({
       <td className="sticky right-0 bg-card px-3 py-3 text-right align-top">
         {/* 动作组 hover / focus 才显形 —— 信息常驻、动作按需出现（2026-09-13 用户定调：
             档位多时每行一个蓝色按钮全是噪音）。当前行状态由「当前」徽章与行底色表达，
-            不需要常驻按钮。进行中的切换钉住可见；触屏无 hover 常显；
+            不需要常驻按钮。进行中的切换/验证钉住可见；触屏无 hover 常显；
             `pointer-events-none` 不能省（透明按钮仍然可点）。 */}
         <div
           className={cn(
             "flex justify-end gap-1 transition-opacity duration-200",
-            busy
+            busy || verifying
               ? "pointer-events-auto opacity-100 [@media(hover:none)]:opacity-100"
               : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
           )}
@@ -436,6 +443,11 @@ function TierRow({
               <Ban className="h-3.5 w-3.5" />
             </Button>
           )}
+          {/* 模型验证入口：模块自持（下线/档位不可验证时不渲染）。 */}
+          <TierVerifyButton
+            tier={{ providerId: item.providerId, displayName: name }}
+            canVerify={tier?.canVerifyModels ?? false}
+          />
           <Button
             size="sm"
             variant={current ? "outline" : "default"}

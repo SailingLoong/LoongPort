@@ -8,6 +8,8 @@ export interface ApplicationRoutingTier extends TierBoardTier {
   errorRate: number | null;
   /** Tier capability, independent of current selection, model, circuit, toggle and position. */
   canFailover: boolean;
+  /** 模型验证资格（后端唯源：app 类型支持 ∧ LoongPort 托管档位）。false = 行内不出验证入口。 */
+  canVerifyModels: boolean;
 }
 
 export interface ApplicationRouting {

@@ -1,4 +1,5 @@
 use super::auto_mode::{tier_board_impl, TierBoardModelOption, TierBoardTier};
+use crate::relay::model_verification::target as verification_target;
 use crate::{app_config::AppType, proxy::application_routing as routing, store::AppState};
 use std::str::FromStr;
 
@@ -10,6 +11,10 @@ pub struct ApplicationRoutingTier {
     pub skip_reason: Option<String>,
     pub error_rate: Option<f64>,
     pub can_failover: bool,
+    /// 模型验证资格（与 relay 行级 `TierInfo::can_verify_models` 同名同源）：
+    /// app 类型支持验证 **且** 是 LoongPort 托管的中转站档位 —— 工作台表格
+    /// 混着官网直连/自定义配置，验证入口只给能验的行。
+    pub can_verify_models: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -37,9 +42,10 @@ pub(crate) async fn application_routing_impl(
     state: &AppState,
     app_type: &str,
 ) -> Result<ApplicationRouting, String> {
-    let supports_proxy = AppType::from_str(app_type)
-        .map_err(|e| e.to_string())?
-        .supports_local_proxy();
+    let app = AppType::from_str(app_type).map_err(|e| e.to_string())?;
+    let supports_proxy = app.supports_local_proxy();
+    // 验证资格的判据收在 target 模块（relay 行级同一条）；这里只对托管档位放行。
+    let verification_supported = verification_target::supports_app_type(&app);
     let board = tier_board_impl(state, app_type).await?;
     let providers = state
         .db
@@ -110,6 +116,10 @@ pub(crate) async fn application_routing_impl(
                     && providers.get(&tier.provider_id).is_some_and(|p| {
                         crate::proxy::provider_router::provider_supports_failover(app_type, p)
                     }),
+                can_verify_models: verification_supported
+                    && providers
+                        .get(&tier.provider_id)
+                        .is_some_and(|p| crate::relay::is_managed(&p.id)),
                 tier,
                 skip_reason,
                 error_rate,
@@ -217,5 +227,48 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// 工作台表格按 camelCase 读 `canVerifyModels`（蛇形键会让前端拿到
+    /// `undefined` → 验证按钮静默消失）。与 rows.rs 的 TierInfo 契约测试同款。
+    #[test]
+    fn application_routing_tier_serializes_can_verify_models_camel_case() {
+        let tier = super::ApplicationRoutingTier {
+            tier: super::TierBoardTier {
+                provider_id: "loongport-0123456789abcdef".into(),
+                name: "站 · pro池".into(),
+                position: 1,
+                is_current: false,
+                rate_multiplier: Some(1.0),
+                unit_price_per_million: None,
+                effective_model: Some("gpt-5.6-sol".into()),
+                avg_first_token_ms: None,
+                balance_usd: None,
+                verification_verdict: None,
+                is_healthy: Some(true),
+                consecutive_failures: Some(0),
+                last_error: None,
+                today_cost_usd: None,
+                today_requests: None,
+                cache_hit_rate: None,
+                recent_activity: None,
+                breaker_state: None,
+                breaker_reopen_in_secs: None,
+                affinity_remaining_secs: None,
+            },
+            skip_reason: None,
+            error_rate: None,
+            can_failover: true,
+            can_verify_models: true,
+        };
+        let json = serde_json::to_value(&tier).expect("要能序列化");
+        let obj = json.as_object().expect("是个对象");
+        assert_eq!(
+            obj.get("canVerifyModels").and_then(|v| v.as_bool()),
+            Some(true),
+            "验证资格必须以 camelCase 随档位下发，实际键：{:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(!obj.contains_key("can_verify_models"));
     }
 }

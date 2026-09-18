@@ -42,6 +42,7 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
 import { ApplicationTierTable, visibleTierIds } from "./ApplicationTierTable";
+import { TierVerificationProvider } from "@/components/relay/model-verification/TierVerificationProvider";
 import { OrderProfilesMenu } from "./OrderProfilesMenu";
 import {
   defaultDescending,
@@ -106,7 +107,15 @@ export function ApplicationWorkspace({
   // （不垫底——链外档位从视图消失，应用后即出链）；点「应用」才写库。
   const [stagedIds, setStagedIds] = useState<string[] | null>(null);
   const configurations = model.data?.configurations ?? [];
-  const tiers = routing.data?.tiers ?? [];
+  // 引用稳定性：tiers 下游有效应依赖链（验真 summaries 重拉），identity 必须只随
+  // routing.data 变 —— `?? []` 每渲染换新引用会在加载期造成「effect→setState→渲染」循环。
+  const tiers = useMemo(() => routing.data?.tiers ?? [], [routing.data]);
+  // 验真 Provider 的档位集：随 routing 数据换引用（数据变 → 重拉 summaries；
+  // 数据不变 → 引用稳定，不触发多余请求）。与 RelaySection 同一形状。
+  const verificationProviderIds = useMemo(
+    () => [...new Set(tiers.map((tier) => tier.providerId))],
+    [tiers],
+  );
   const ids = new Set(configurations.map((item) => item.providerId));
   const ranked = tiers
     .map((tier) => tier.providerId)
@@ -590,32 +599,39 @@ export function ApplicationWorkspace({
             </Button>
           </div>
         )}
-        <ApplicationTierTable
-          configurations={configurations}
-          tiers={tiers}
-          orderedIds={orderedIds}
-          failoverEnabled={failoverEnabled}
-          search={search}
-          accountFilter={accountFilter}
-          modelFilter={modelFilter}
-          additive={model.data?.isAdditive ?? false}
-          busy={model.busy}
-          orderBusy={orderBusy}
-          sort={sort}
-          onSort={sortBy}
-          onReorder={(next) => {
-            void changeOrder(next);
-          }}
-          onSelect={(item) => {
-            void model.select(item);
-          }}
-          onOpenAccount={onOpenAccount}
-          onBlockTier={(providerId, blocked) => {
-            void routing
-              .blockTier({ providerId, blocked })
-              .catch(() => undefined);
-          }}
-        />
+        {/* 模型验证的行级宿主：summaries 拉取、验真弹窗与结果变化订阅全在
+            Provider 内部；下线时对外不可见（不拉取、入口/徽章不渲染）。 */}
+        <TierVerificationProvider
+          appId={appId}
+          providerIds={verificationProviderIds}
+        >
+          <ApplicationTierTable
+            configurations={configurations}
+            tiers={tiers}
+            orderedIds={orderedIds}
+            failoverEnabled={failoverEnabled}
+            search={search}
+            accountFilter={accountFilter}
+            modelFilter={modelFilter}
+            additive={model.data?.isAdditive ?? false}
+            busy={model.busy}
+            orderBusy={orderBusy}
+            sort={sort}
+            onSort={sortBy}
+            onReorder={(next) => {
+              void changeOrder(next);
+            }}
+            onSelect={(item) => {
+              void model.select(item);
+            }}
+            onOpenAccount={onOpenAccount}
+            onBlockTier={(providerId, blocked) => {
+              void routing
+                .blockTier({ providerId, blocked })
+                .catch(() => undefined);
+            }}
+          />
+        </TierVerificationProvider>
         <p className="text-xs text-muted-foreground">
           {t("applications.metricsHint")}
         </p>
