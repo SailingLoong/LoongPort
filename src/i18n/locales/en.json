@@ -3876,6 +3876,7 @@
     "tier": "Tier / account",
     "action": "Action",
     "autoFailover": "Automatic failover",
+    "autoFailoverHint": "Failover walks the applied list in order: when a tier fails, the next one is tried automatically. Typical flow: filter a model, sort by Multiplier or First token, then click \"Apply order\".",
     "priorityHint": "Lower numbers are retried first. Automatic failover uses only the tiers and order you saved with \"Apply order\" — filter or rearrange, then apply to update. Tiers showing \"—\" are not retried.",
     "orderHint": "Drag to reorder tiers (saved). Click a metric column for a temporary sort; click again to reverse, once more to restore.",
     "dragTier": "Reorder {{name}}",
