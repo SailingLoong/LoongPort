@@ -53,6 +53,10 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
 vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
   SwitchTierConfirmDialog: () => null,
 }));
+// 验真 Provider 在工作台内拉 summaries；空结果即可（入口按钮只看资格字段）。
+vi.mock("@/lib/api/modelVerification", () => ({
+  modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
+}));
 const config = (id: string, name: string, current = false) => ({
   providerId: id,
   name,
@@ -158,6 +162,26 @@ describe("application workspace", () => {
       );
     },
   );
+  it("renders the verification entry only for tiers the backend marks verifiable", () => {
+    state.routing.tiers = state.routing.tiers.map(
+      (tier: { providerId: string }) => ({
+        ...tier,
+        canVerifyModels: tier.providerId === "b",
+      }),
+    );
+    render(<ApplicationWorkspace {...props} />);
+    const rows = screen.getAllByRole("row").slice(1);
+    // 资格是后端事实（app 类型 ∧ 托管档位）：只有标记了的行出验真入口。
+    expect(
+      within(rows[1]).getByTitle("loongport.modelVerification.title"),
+    ).toBeInTheDocument();
+    expect(
+      within(rows[0]).queryByTitle("loongport.modelVerification.title"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(rows[2]).queryByTitle("loongport.modelVerification.title"),
+    ).not.toBeInTheDocument();
+  });
   it("keeps row actions hover-revealed instead of always visible", async () => {
     render(<ApplicationWorkspace {...props} />);
     // 信息常驻、动作按需出现（2026-09-13 定调）：未悬停的行不摆一排
