@@ -4039,5 +4039,12 @@
     "unsupported": "This service does not support safe deletion. Old backups were kept.",
     "failed": "Cleanup was not completed. Check old backups again before retrying.",
     "success": "Old cloud backup files deleted."
+  },
+  "modelMismatch": {
+    "body": "{{app}} is requesting {{requested}}, but the tier \"{{tier}}\" is set to {{selected}}. Requests are being sent using {{selected}}.",
+    "notAvailable": "This tier does not offer {{requested}}.",
+    "keep": "Keep {{selected}}",
+    "adopt": "Switch to {{requested}}",
+    "switchFailed": "Failed to switch model"
   }
 }

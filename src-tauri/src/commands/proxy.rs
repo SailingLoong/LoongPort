@@ -77,6 +77,33 @@ pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<Proxy
     state.proxy_service.get_status().await
 }
 
+/// 当前活跃的模型不符事实（客户端点名的模型 ≠ 实际计费模型）。
+/// 展示序与字段含义由 `model_alignment` 唯一定义；代理未运行时自然为空。
+#[tauri::command]
+pub async fn get_active_model_mismatches(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::proxy::model_alignment::ModelMismatch>, String> {
+    Ok(state.proxy_service.model_alignment_alerts().list())
+}
+
+/// 用户选择「保持档位模型」：该对不符本会话静默。
+#[tauri::command]
+pub async fn dismiss_model_mismatch(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    provider_id: String,
+    requested_model: String,
+    sent_model: String,
+) -> Result<(), String> {
+    state.proxy_service.model_alignment_alerts().dismiss(
+        &app_type,
+        &provider_id,
+        &requested_model,
+        &sent_model,
+    );
+    Ok(())
+}
+
 /// 获取代理配置
 #[tauri::command]
 pub async fn get_proxy_config(state: tauri::State<'_, AppState>) -> Result<ProxyConfig, String> {

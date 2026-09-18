@@ -1105,6 +1105,9 @@ mod tests {
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             passive_ingress: crate::relay::model_verification::passive::PassiveIngress::channel(1)
                 .0,
+            model_alignment: std::sync::Arc::new(
+                crate::proxy::model_alignment::ModelAlignmentAlerts::new(),
+            ),
         }
     }
 

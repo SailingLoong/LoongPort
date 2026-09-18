@@ -50,6 +50,8 @@ pub struct ProxyState {
     pub failover_manager: Arc<FailoverSwitchManager>,
     /// 被动模型监控入口：响应路径顺路观察托管档流量，满即丢不阻塞转发。
     pub passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
+    /// 模型对齐告警状态（活跃集/节流随请求维护，命令层与转发层共享）。
+    pub model_alignment: Arc<super::model_alignment::ModelAlignmentAlerts>,
 }
 
 /// 代理HTTP服务器
@@ -67,6 +69,7 @@ impl ProxyServer {
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
         passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
+        model_alignment: Arc<super::model_alignment::ModelAlignmentAlerts>,
     ) -> Self {
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
@@ -85,6 +88,7 @@ impl ProxyServer {
             app_handle,
             failover_manager,
             passive_ingress,
+            model_alignment,
         };
 
         Self {
@@ -525,6 +529,7 @@ mod tests {
             db.clone(),
             None,
             crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            std::sync::Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
         let proxy_info = proxy.start().await.expect("start test proxy");
         let client = reqwest::Client::new();

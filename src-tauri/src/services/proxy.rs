@@ -400,6 +400,8 @@ pub struct ProxyService {
     switch_locks: SwitchLockManager,
     /// 被动模型监控入口（从 ModelVerificationCoordinator 单向流入，随 server 组装传下去）
     passive_ingress: crate::relay::model_verification::passive::PassiveIngress,
+    /// 模型对齐告警状态（owner 在代理域；命令层读取、转发层随 server 组装共享）。
+    model_alignment: Arc<crate::proxy::model_alignment::ModelAlignmentAlerts>,
     codex_oauth_manager: Arc<CodexOAuthManager>,
 }
 
@@ -441,6 +443,7 @@ impl ProxyService {
         Self {
             db,
             passive_ingress,
+            model_alignment: Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
             codex_oauth_manager,
             #[cfg(feature = "gui")]
             server: Arc::new(RwLock::new(None)),
@@ -448,6 +451,13 @@ impl ProxyService {
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
         }
+    }
+
+    /// 模型对齐告警状态（命令层入口；转发层经 `ProxyState` 持有同一份）。
+    pub fn model_alignment_alerts(
+        &self,
+    ) -> Arc<crate::proxy::model_alignment::ModelAlignmentAlerts> {
+        self.model_alignment.clone()
     }
 
     #[cfg(test)]
@@ -1002,6 +1012,7 @@ impl ProxyService {
             self.db.clone(),
             app_handle,
             self.passive_ingress.clone(),
+            self.model_alignment.clone(),
         );
         let info = server
             .start()
@@ -4062,6 +4073,7 @@ impl ProxyService {
                 self.db.clone(),
                 app_handle,
                 self.passive_ingress.clone(),
+                self.model_alignment.clone(),
             );
             let info = new_server
                 .start()

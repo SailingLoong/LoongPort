@@ -174,6 +174,8 @@ pub struct RequestForwarder {
     /// `max_attempts = max_retries + 1`，所以 max_retries=0 表示仅尝试一家、
     /// max_retries=3（默认）表示最多 4 家。loop 同时受 providers.len() 自然限制。
     max_attempts: usize,
+    /// 模型对齐告警（客户端模型 ≠ 出站模型时的知情层，与命令层共享同一份）。
+    model_alignment: std::sync::Arc<super::model_alignment::ModelAlignmentAlerts>,
 }
 
 impl RequestForwarder {
@@ -241,6 +243,7 @@ impl RequestForwarder {
         optimizer_config: OptimizerConfig,
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
+        model_alignment: Arc<super::model_alignment::ModelAlignmentAlerts>,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
@@ -264,6 +267,7 @@ impl RequestForwarder {
                 streaming_first_byte_timeout,
             ),
             max_attempts,
+            model_alignment,
         }
     }
 
@@ -1266,23 +1270,71 @@ impl RequestForwarder {
             crate::claude_desktop_config::map_proxy_request_model(body.clone(), provider)
                 .map_err(|e| ProxyError::InvalidRequest(e.to_string()))?
         } else {
-            let (mapped_body, _original_model, _mapped_model) =
-                super::model_mapper::apply_model_mapping(body.clone(), provider);
+            let (mapped_body, original_model, mapped_model, kind) =
+                super::model_mapper::apply_model_mapping_detailed(body.clone(), provider);
+            // claude 的模型不符告知点：只有**默认兜底分支**算（客户端点名的模型
+            // 档位没认、被兜到档位默认模型）；角色命中（opus/sonnet→角色模型）
+            // 是设计本身，每个请求都在发生，计入就是告警疲劳。兜底值恰好与
+            // 客户端点名相同时 observe(requested=sent) 走自愈清除。
+            if matches!(kind, super::model_mapper::ModelMappingKind::Default) {
+                if let Some(requested) = original_model.as_deref() {
+                    let sent = mapped_model.as_deref().unwrap_or(requested);
+                    super::model_alignment::observe_alignment(
+                        &self.model_alignment,
+                        self.app_handle.as_ref(),
+                        app_type.as_str(),
+                        provider,
+                        requested,
+                        sent,
+                    );
+                }
+            }
             mapped_body
         };
 
         // 与 CCH 对齐：请求前不做 thinking 主动改写（仅保留兼容入口）
         let mut mapped_body = normalize_thinking_type(mapped_body);
 
+        let application_model = self.router.preferred_model(app_type.as_str(), provider);
+
         // Grok Build exposes a stable client-side model profile in config.toml.
         // Route requests to the provider's real upstream model before applying
-        // the optional Responses -> Chat/Anthropic bridge.
-        if matches!(app_type, AppType::GrokBuild) {
-            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        // the optional Responses -> Chat/Anthropic bridge. A preferred model
+        // (below) overrides the profile, so the bridge only anchors when none
+        // is set — the outbound value ends up identical either way.
+        if matches!(app_type, AppType::GrokBuild) && application_model.is_none() {
+            if let Some(applied) =
+                super::providers::apply_codex_upstream_model(provider, &mut mapped_body)
+            {
+                if let Some(requested) = super::model_alignment::client_requested_model(body) {
+                    super::model_alignment::observe_alignment(
+                        &self.model_alignment,
+                        self.app_handle.as_ref(),
+                        app_type.as_str(),
+                        provider,
+                        &requested,
+                        &applied,
+                    );
+                }
+            }
         }
 
-        let application_model = self.router.preferred_model(app_type.as_str(), provider);
         if let Some(model) = application_model.as_deref() {
+            // codex 系的模型不符告知点：站点按模型名计费，档位已选模型是契约
+            // （#455）；客户端另选的模型被对齐时告知用户。claude/grok 各有
+            // 自己的对齐与告知点，不在此报。
+            if matches!(app_type, AppType::Codex | AppType::CodexImage) {
+                if let Some(requested) = super::model_alignment::client_requested_model(body) {
+                    super::model_alignment::observe_alignment(
+                        &self.model_alignment,
+                        self.app_handle.as_ref(),
+                        app_type.as_str(),
+                        provider,
+                        &requested,
+                        model,
+                    );
+                }
+            }
             mapped_body["model"] = Value::String(model.to_string());
         }
 
@@ -3835,6 +3887,7 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
+            model_alignment: Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         }
     }
 

@@ -52,3 +52,5 @@ export const MODEL_VERIFICATION_CHANGED = "model-verification-changed";
 export const ONBOARDING_REGISTER_COMPLETED = "onboarding-register-completed";
 /** 看板站点余额后台刷新完成（`useTierBoard` 监听，失效所有看板查询补值；站点余额跨 app 共享，无 payload）。 */
 export const SITE_BALANCES_UPDATED = "site-balances-updated";
+/** 模型对齐新告警（`ModelMismatchBanner` 监听）：客户端点名的模型 ≠ 实际计费模型。 */
+export const MODEL_MISMATCH = "model-mismatch";

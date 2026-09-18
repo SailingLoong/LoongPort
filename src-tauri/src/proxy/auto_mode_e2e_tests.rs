@@ -252,6 +252,8 @@ struct E2eFixture {
     /// 真协调器（被动消费 worker 在跑）；持有它保活 worker 生命周期
     #[allow(dead_code)]
     verification: Arc<crate::relay::model_verification::coordinator::ModelVerificationCoordinator>,
+    /// 模型对齐告警状态（与 server 共享同一份；断言活跃集用）
+    model_alignment: Arc<crate::proxy::model_alignment::ModelAlignmentAlerts>,
 }
 
 impl E2eFixture {
@@ -321,6 +323,8 @@ impl E2eFixture {
                 db.clone(),
             ),
         );
+        let model_alignment =
+            std::sync::Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new());
         let server = ProxyServer::new(
             ProxyConfig {
                 listen_port: 0,
@@ -329,6 +333,7 @@ impl E2eFixture {
             db.clone(),
             None,
             verification.passive_ingress(),
+            model_alignment.clone(),
         );
         let info = server.start().await.expect("start proxy server");
 
@@ -342,6 +347,7 @@ impl E2eFixture {
             cheap_id,
             expensive_id,
             verification,
+            model_alignment,
         }
     }
 
@@ -371,6 +377,11 @@ impl E2eFixture {
 
 /// 走真实代理端口的 Claude 请求；`session` 模拟同一会话的连续请求。
 async fn send_message(port: u16, session: &str) -> reqwest::Response {
+    send_model_message(port, session, "claude-e2e").await
+}
+
+/// [`send_message`] 的点名模型版（模型对齐告警的 e2e 用）。
+async fn send_model_message(port: u16, session: &str, model: &str) -> reqwest::Response {
     reqwest::Client::builder()
         .no_proxy()
         .build()
@@ -380,7 +391,7 @@ async fn send_message(port: u16, session: &str) -> reqwest::Response {
         .header("anthropic-version", "2023-06-01")
         .header("x-claude-code-session-id", session)
         .json(&json!({
-            "model": "claude-e2e",
+            "model": model,
             "max_tokens": 16,
             "stream": false,
             "messages": [{ "role": "user", "content": "hi" }],
@@ -717,6 +728,58 @@ async fn manual_model_intent_is_preserved_across_fallback() {
     fx.server.stop().await.unwrap();
 }
 
+/// 模型对齐告知（claude 默认兜底路径，端到端）：客户端点名档位不认的模型、
+/// 被兜到档位默认模型时产生活跃告警（上游实际收到默认模型）；客户端换回
+/// 档位模型后一致请求自愈清除。角色映射命中是设计内对齐，不产生告警。
+#[tokio::test]
+#[serial]
+async fn claude_default_fallback_produces_and_heals_model_mismatch_alert() {
+    let fx = E2eFixture::new().await;
+    let mut provider = fx
+        .db
+        .get_provider_by_id(&fx.cheap_id, "claude")
+        .unwrap()
+        .unwrap();
+    provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("tier-default-model");
+    provider.settings_config["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] = json!("tier-sonnet-model");
+    fx.db.save_provider("claude", &provider).unwrap();
+    fx.set_current(&fx.cheap_id);
+
+    // 角色命中：设计内的档位对齐，不产生告警。
+    let _ =
+        response_text(send_model_message(fx.port, "sess-mm-role", "claude-sonnet-4-5").await).await;
+    assert_eq!(
+        fx.cheap.state.model.read().await.as_deref(),
+        Some("tier-sonnet-model")
+    );
+    assert!(fx.model_alignment.list().is_empty(), "角色命中不算不符");
+
+    // 默认兜底：客户端点名档位不认的模型 → 告警 + 上游收到默认模型。
+    let _ =
+        response_text(send_model_message(fx.port, "sess-mm-diverge", "strange-model").await).await;
+    let alerts = fx.model_alignment.list();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].app_type, "claude");
+    assert_eq!(alerts[0].provider_id, fx.cheap_id);
+    assert_eq!(alerts[0].requested_model, "strange-model");
+    assert_eq!(alerts[0].sent_model, "tier-default-model");
+    assert_eq!(
+        fx.cheap.state.model.read().await.as_deref(),
+        Some("tier-default-model")
+    );
+
+    // 同一对重复出现不重复告警（活跃集仍是同一条）。
+    let _ = response_text(send_model_message(fx.port, "sess-mm-diverge-2", "strange-model").await)
+        .await;
+    assert_eq!(fx.model_alignment.list().len(), 1);
+
+    // 一致请求：客户端换回档位模型 → 自愈清除。
+    let _ = response_text(send_model_message(fx.port, "sess-mm-heal", "tier-default-model").await)
+        .await;
+    assert!(fx.model_alignment.list().is_empty(), "一致请求自愈清除");
+    fx.server.stop().await.unwrap();
+}
+
 /// 首字/用时归因只算成功档位自己的耗时：便宜档拖 500ms 才回 402、贵档接住
 /// 流式请求 —— 落库的 first_token_ms / latency_ms 归贵档，且不得含那 500ms。
 /// （修复前计时锚点是客户端请求进入时刻：失败尝试的耗时会记进成功档的
@@ -831,6 +894,7 @@ async fn fatal_402_skips_sibling_tiers_of_the_same_account() {
         db.clone(),
         None,
         verification.passive_ingress(),
+        std::sync::Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
     );
     let info = server.start().await.expect("start proxy server");
 

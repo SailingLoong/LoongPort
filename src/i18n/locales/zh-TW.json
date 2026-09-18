@@ -4040,5 +4040,12 @@
     "unsupported": "此服務不支援安全刪除，舊備份已保留。",
     "failed": "清理尚未完成，請重新檢查舊備份後再試。",
     "success": "舊雲端備份檔案已刪除。"
+  },
+  "modelMismatch": {
+    "body": "{{app}} 正在請求 {{requested}}；檔位「{{tier}}」選擇的是 {{selected}}，已按 {{selected}} 使用。",
+    "notAvailable": "該檔位不提供 {{requested}}。",
+    "keep": "保持 {{selected}}",
+    "adopt": "改用 {{requested}}",
+    "switchFailed": "切換模型失敗"
   }
 }
