@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildIssueBody,
+  isValidAssetPath,
   buildIssueTitle,
   dayUtc,
   MAX_DESCRIPTION_CHARS,
@@ -148,5 +149,28 @@ describe("dayUtc", () => {
     expect(dayUtc(0)).toBe("1970-01-01");
     // 2026-09-18T23:30Z = epoch 1789774200（跨日边界前的最后半小时）
     expect(dayUtc(1789774200)).toBe("2026-09-18");
+  });
+});
+
+describe("isValidAssetPath", () => {
+  it("接受恰好两段（day/file）的真实 key 形状", () => {
+    expect(isValidAssetPath("2026-09-18/e4df9808-bd99-4df6-9912-c49f762ea837.zip")).toBe(true);
+    expect(isValidAssetPath("2026-09-18/e4df9808-bd99-4df6-9912-c49f762ea837-shot-1.png")).toBe(true);
+  });
+
+  it("拒绝零段/一段/三段、路径穿越与空段", () => {
+    // 首版 bug 的形状：段间的 `/` 被禁 → 线上所有附件 400（冒烟抓出，钉死防回归）。
+    expect(isValidAssetPath("2026-09-18_only-one-segment.zip")).toBe(false);
+    for (const bad of [
+      "",
+      "2026-09-18/",
+      "/e4df9808.zip",
+      "2026-09-18/e4df9808.zip/extra",
+      "2026-09-18/../secret.zip",
+      "2026-09-18/..%2Fsecret.zip",
+      "2026/09/e4df9808.zip",
+    ]) {
+      expect(isValidAssetPath(bad)).toBe(false);
+    }
   });
 });

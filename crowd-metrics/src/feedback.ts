@@ -316,14 +316,24 @@ export async function handleFeedback(
   return jsonResponse({ accepted: true, issueNumber: issue.number }, 202);
 }
 
+/**
+ * 附件路由的路径闸：恰好 `<day>/<file>` 两段，段内仅 `[0-9a-zA-Z._-]` 且不以
+ * 分隔符开头 —— 防 `..`、多余段与拼 key 穿越。抽成纯函数供单测钉死
+ * （首版把段间的 `/` 也禁了，线上所有附件 400，冒烟抓出）。
+ */
+export function isValidAssetPath(assetPath: string): boolean {
+  return /^[0-9a-zA-Z][0-9a-zA-Z._-]*\/[0-9a-zA-Z][0-9a-zA-Z._-]*$/.test(
+    assetPath,
+  );
+}
+
 /** GET /v1/feedback-asset/<day>/<file>：key 不可猜（uuid 段），与 GitHub 私有仓附件同款模型。 */
 export async function handleFeedbackAsset(
   request: Request,
   env: Pick<FeedbackEnv, "FEEDBACK">,
   assetPath: string,
 ): Promise<Response> {
-  // 归一：只允许单段内的安全字符，防 `..` 与拼 key 穿越。
-  if (!/^[0-9a-zA-Z][0-9a-zA-Z._-]*$/.test(assetPath)) {
+  if (!isValidAssetPath(assetPath)) {
     return jsonResponse({ error: "bad asset path" }, 400);
   }
   const stored = await env.FEEDBACK.getWithMetadata<{ ct?: string }>(
