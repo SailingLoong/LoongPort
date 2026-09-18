@@ -84,3 +84,13 @@ CREATE TABLE IF NOT EXISTS stats_installs (
     first_seen           INTEGER NOT NULL,             -- epoch 秒，首次上报
     last_seen            INTEGER NOT NULL              -- epoch 秒，最近上报（保留期判定键）
 ) WITHOUT ROWID;
+
+-- 问题反馈（/v1/feedback）的独立限流预算：每 IP 哈希每 UTC 日最多 5 次。
+-- 与 upload_ip_hour 分开：反馈每次是 R2 写 + GitHub 建 issue，成本贵一个量级。
+-- 只存 IP 哈希不存 IP（与 upload_ip_hour 同一隐私纪律）；行随 ingest 清理批一起按天过期。
+CREATE TABLE IF NOT EXISTS feedback_ip_day (
+    ip_hash TEXT    NOT NULL,
+    day     TEXT    NOT NULL, -- UTC 'YYYY-MM-DD'（与 R2 key 的日期段同一口径）
+    count   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ip_hash, day)
+) WITHOUT ROWID;

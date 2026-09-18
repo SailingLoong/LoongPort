@@ -85,9 +85,9 @@ fn truncate_at_char_boundary(input: &str, max_bytes: usize) -> &str {
     &input[..end]
 }
 
-/// 所有 Rust 与 WebView 日志在写入 stdout/文件前都会经过这里。
-pub(crate) fn redact_log_text(input: &str) -> String {
-    let bounded = truncate_at_char_boundary(input, MAX_RAW_LOG_INPUT_LENGTH);
+/// 13 条正则的替换链本体。多行敏感块（PEM 私钥、header 行）只有整段文本过链
+/// 才能被完整吃掉 —— 所以这条链不预设输入长度，截断语义由各调用方自带。
+fn apply_redaction_chain(bounded: &str) -> String {
     let mut output = URL_CREDENTIAL_PATTERN
         .replace_all(bounded, "$1[REDACTED]@")
         .into_owned();
@@ -121,16 +121,34 @@ pub(crate) fn redact_log_text(input: &str) -> String {
     output = SECRET_VALUE_PATTERN
         .replace_all(&output, "$1[REDACTED]")
         .into_owned();
-    output = PRIVATE_KEY_PATTERN
+    PRIVATE_KEY_PATTERN
         .replace_all(&output, "[REDACTED PRIVATE KEY]")
-        .into_owned();
+        .into_owned()
+}
 
+/// 所有 Rust 与 WebView 日志在写入 stdout/文件前都会经过这里。
+///
+/// 按单条消息设计：输入超 [`MAX_RAW_LOG_INPUT_LENGTH`] 即截断 —— 那是防「一条日志
+/// 撑爆轮转文件」的闸，**不是**脱敏链的一部分。整文件脱敏走
+/// [`redact_file_for_export`]，别拿这条处理大文件（会把 20MB 日志截成 16KB）。
+pub(crate) fn redact_log_text(input: &str) -> String {
+    let bounded = truncate_at_char_boundary(input, MAX_RAW_LOG_INPUT_LENGTH);
+    let output = apply_redaction_chain(bounded);
     if input.len() > MAX_RAW_LOG_INPUT_LENGTH || output.len() > MAX_LOG_MESSAGE_LENGTH {
         let truncated = truncate_at_char_boundary(&output, MAX_LOG_MESSAGE_LENGTH);
         format!("{truncated}\n[truncated]")
     } else {
         output
     }
+}
+
+/// 诊断包导出用的整文件脱敏：同一条替换链，但不做消息级整体截断。
+///
+/// 与 [`redact_log_text`] 的唯一差别是**截断语义**：日志文件本身受轮转上限约束
+/// （20 MiB × 若干份），调用方另有防御性的单文件体积闸（超限跳过并记录），
+/// 这里再截一次等于把「导出日志排障」变成「导出日志开头」。
+pub(crate) fn redact_file_for_export(contents: &str) -> String {
+    apply_redaction_chain(contents)
 }
 
 /// 统一的单行 JSON 诊断事件；字段排序稳定，便于 grep、脚本和 Issue 排查。
@@ -282,6 +300,25 @@ mod tests {
         assert!(!redacted.contains("private-material"));
         assert!(!redacted.contains("BEGIN PRIVATE KEY"));
         assert!(redacted.contains("[REDACTED PRIVATE KEY]"));
+    }
+
+    #[test]
+    fn file_export_redaction_never_truncates_and_eats_multiline_blocks() {
+        // 远超消息级 16KB 输入上限的正文 —— 文件级脱敏必须原样保留长度。
+        let filler = "normal diagnostic line\n".repeat(4_000);
+        let input = format!(
+            "-----BEGIN PRIVATE KEY-----\nsecret-key-material\n-----END PRIVATE KEY-----\n{filler}url=https://user:pass@example.com/v1"
+        );
+
+        let redacted = redact_file_for_export(&input);
+
+        assert!(!redacted.contains("secret-key-material"));
+        assert!(!redacted.contains("user:pass"));
+        assert!(redacted.contains("[REDACTED PRIVATE KEY]"));
+        // 与 redact_log_text 的行为差就是这条：不出现消息级截断标记、长度不被压扁。
+        assert!(!redacted.ends_with("[truncated]"));
+        assert!(redacted.len() > MAX_LOG_MESSAGE_LENGTH * 2);
+        assert!(redacted.matches("normal diagnostic line").count() == 4_000);
     }
 
     #[test]

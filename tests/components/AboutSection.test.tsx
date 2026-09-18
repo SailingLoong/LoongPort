@@ -44,6 +44,15 @@ vi.mock("@/lib/api", () => ({
     probeToolInstallations: vi.fn().mockResolvedValue([]),
     runToolLifecycleAction: vi.fn(),
   },
+  // 反馈入口按远端配置显隐；测试默认按「端点未下发」隐藏。
+  feedbackApi: {
+    isEndpointConfigured: vi.fn().mockResolvedValue(false),
+    readClipboardImage: vi.fn(),
+    submit: vi.fn(),
+  },
+  diagnosticsApi: {
+    exportDiagnostics: vi.fn(),
+  },
 }));
 
 vi.mock("@tauri-apps/api/app", () => ({

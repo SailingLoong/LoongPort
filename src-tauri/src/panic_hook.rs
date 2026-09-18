@@ -132,6 +132,60 @@ pub fn get_log_dir() -> PathBuf {
     diagnostic_root().join(LOG_DIRECTORY)
 }
 
+/// 诊断根目录（crash.log 与 logs/ 的父目录）。诊断包导出用它枚举全部诊断件。
+pub(crate) fn diagnostic_root_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_root_override::get() {
+        return dir;
+    }
+    diagnostic_root()
+}
+
+/// 测试专用：把诊断根目录指到临时目录（互斥 + 自动复原）。
+///
+/// 诊断包构建器的单测需要喂假日志/假 crash 件，而 `diagnostic_root()` 读进程级
+/// `OnceLock`。形状照 `remote_config` 的 `CacheDirGuard`：安装即持锁（用例串行），
+/// Drop 时复原并清理临时目录。
+#[cfg(test)]
+pub(crate) mod test_root_override {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+
+    static OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    fn lock() -> &'static Mutex<()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
+    }
+
+    pub(crate) struct Guard {
+        dir: PathBuf,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    pub(crate) fn install(dir: PathBuf) -> Guard {
+        let lock_guard = lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *OVERRIDE.lock().unwrap() = Some(dir.clone());
+        Guard {
+            dir,
+            _lock: lock_guard,
+        }
+    }
+
+    pub(crate) fn get() -> Option<PathBuf> {
+        OVERRIDE.lock().ok()?.clone()
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            *OVERRIDE.lock().unwrap() = None;
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
 /// 安全获取环境信息（不会 panic）
 fn get_system_info() -> String {
     let os = std::env::consts::OS;

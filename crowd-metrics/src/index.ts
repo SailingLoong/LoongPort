@@ -11,6 +11,7 @@
 import { buildSnapshot, buildTrends, type RawModelRow, type RawRow } from "./aggregate";
 import { TTFT_BIN_EDGES_MS } from "./bins";
 import { cleanupDue, isFresh } from "./freshness";
+import { handleFeedback, handleFeedbackAsset, cleanupOldFeedback, dayUtc } from "./feedback";
 import { handleIngest, type Env } from "./ingest";
 import { handlePing } from "./ping";
 import { hourFloorUtc } from "./validate";
@@ -77,6 +78,8 @@ async function queryModelRows(env: Env, nowSec: number): Promise<RawModelRow[]> 
 
 /** KV 里记上次清理时间的键（值 = epoch 秒）。 */
 const CLEANUP_LAST_RUN_KEY = "cleanup:last-run";
+/** 反馈附件清理的上次运行键（日级：R2 list 比 D1 delete 贵，用不着每小时跑）。 */
+const FEEDBACK_CLEANUP_LAST_RUN_KEY = "cleanup:feedback-last-run";
 
 /**
  * 现算快照+趋势并写 KV（一次查询喂两个聚合）。清理（保留期删除）折叠在这里、
@@ -93,6 +96,7 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
   const rawCutoff = hourFloorUtc(nowSec - RAW_RETENTION_SECS);
   const rlCutoff = hourFloorUtc(nowSec - RATE_LIMIT_RETENTION_SECS);
   const statsCutoff = nowSec - STATS_INSTALL_RETENTION_SECS;
+  const feedbackDayCutoff = dayUtc(nowSec - RATE_LIMIT_RETENTION_SECS);
   const cleanup = (async () => {
     const lastRun = await env.SNAPSHOT.get(CLEANUP_LAST_RUN_KEY);
     if (!cleanupDue(lastRun == null ? null : Number(lastRun), nowSec)) return;
@@ -102,14 +106,25 @@ async function recomputeSnapshot(env: Env, nowSec: number): Promise<Snapshot> {
       env.DB.prepare("DELETE FROM upload_ip_hour WHERE hour < ?1").bind(rlCutoff),
       // 统计安装行的保留期键是 epoch 秒（last_seen），与上面的小时串不同格式，直绑数值。
       env.DB.prepare("DELETE FROM stats_installs WHERE last_seen < ?1").bind(statsCutoff),
+      env.DB.prepare("DELETE FROM feedback_ip_day WHERE day < ?1").bind(feedbackDayCutoff),
     ]);
     await env.SNAPSHOT.put(CLEANUP_LAST_RUN_KEY, String(nowSec));
+  })();
+
+  // 反馈附件（R2）按天清：超过保留期（90 天）的对象删除，issue 里的旧链接随之失效。
+  const feedbackCleanup = (async () => {
+    const lastRun = await env.SNAPSHOT.get(FEEDBACK_CLEANUP_LAST_RUN_KEY);
+    if (lastRun !== null && nowSec - Number(lastRun) < 86400) return;
+    const deleted = await cleanupOldFeedback(env, nowSec);
+    if (deleted > 0) console.log(`feedback cleanup removed ${deleted} objects`);
+    await env.SNAPSHOT.put(FEEDBACK_CLEANUP_LAST_RUN_KEY, String(nowSec));
   })();
 
   await Promise.all([
     env.SNAPSHOT.put(SNAPSHOT_KEY, JSON.stringify(snapshot)),
     env.SNAPSHOT.put(TREND_KEY, JSON.stringify(trend)),
     cleanup,
+    feedbackCleanup,
   ]);
   return snapshot;
 }
@@ -162,6 +177,15 @@ export default {
     }
     if (request.method === "POST" && pathname === "/v1/ping") {
       return handlePing(request, env);
+    }
+    if (request.method === "POST" && pathname === "/v1/feedback") {
+      return handleFeedback(request, env);
+    }
+    if (
+      request.method === "GET" &&
+      pathname.startsWith("/v1/feedback-asset/")
+    ) {
+      return handleFeedbackAsset(request, env, pathname.slice("/v1/feedback-asset/".length));
     }
     if (request.method === "GET" && pathname === "/v1/snapshot") {
       return serveKvPayload(env, SNAPSHOT_KEY, () => recomputeSnapshot(env, Math.floor(Date.now() / 1000)));

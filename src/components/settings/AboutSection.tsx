@@ -13,6 +13,8 @@ import {
   ArrowUpCircle,
   ChevronDown,
   Stethoscope,
+  Bug,
+  FileArchive,
 } from "lucide-react";
 import { GithubIcon } from "@/components/icons/GithubIcon";
 import { Button } from "@/components/ui/button";
@@ -27,7 +29,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { settingsApi } from "@/lib/api";
+import { settingsApi, feedbackApi } from "@/lib/api";
 import { GITHUB_REPO, OFFICIAL_WEBSITE } from "@/config/constants";
 import type {
   ToolInstallation,
@@ -44,6 +46,8 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 import { isWindows } from "@/lib/platform";
 import { isUpdateAvailable } from "@/lib/version";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
+import { DiagnosticsExportDialog } from "./DiagnosticsExportDialog";
+import { FeedbackDialog } from "./FeedbackDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
 
 interface AboutSectionProps {
@@ -280,6 +284,10 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     Partial<Record<ToolName, ToolInstallation[]>>
   >({});
   const [isDiagnosingAll, setIsDiagnosingAll] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
+  // 反馈入口只在远端配置下发了端点时出现（配置缺键 = 功能休眠）。
+  const [feedbackConfigured, setFeedbackConfigured] = useState(false);
   // 升级前探测到「多处安装需确认」时暂存：toolNames=本次要升级的全部工具，
   // plans=其中需要确认的（≥2 处）那些。用户确认后对 toolNames 整体执行升级。
   // fromBatchEntry=是否来自「全部升级」入口：确认后执行期需据此补 batchAction
@@ -476,6 +484,23 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           "[AboutSection] Failed to load beta update setting",
           error,
         );
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // 反馈回传端点是否已随签名远端配置下发（缺键 = 休眠，按钮整个不渲染）。
+  // 拉不到远端配置时保守隐藏 —— 与后端 load_cached 的回落语义一致。
+  useEffect(() => {
+    let active = true;
+    void feedbackApi
+      .isEndpointConfigured()
+      .then((configured) => {
+        if (active) setFeedbackConfigured(configured);
+      })
+      .catch(() => {
+        if (active) setFeedbackConfigured(false);
       });
     return () => {
       active = false;
@@ -1222,6 +1247,26 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             </Button>
             <Button
               size="sm"
+              variant="outline"
+              className="h-7 gap-1.5 text-xs"
+              onClick={() => setExportDialogOpen(true)}
+            >
+              <FileArchive className="h-3.5 w-3.5" />
+              {t("settings.exportDiagnostics")}
+            </Button>
+            {feedbackConfigured && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => setFeedbackDialogOpen(true)}
+              >
+                <Bug className="h-3.5 w-3.5" />
+                {t("settings.feedback")}
+              </Button>
+            )}
+            <Button
+              size="sm"
               className="h-7 gap-1.5 text-xs"
               onClick={() =>
                 handleRunToolAction(updatableToolNames, "update", {
@@ -1508,6 +1553,17 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         onConfirm={handleConfirmUpgrade}
         onCancel={handleCancelUpgrade}
       />
+
+      <DiagnosticsExportDialog
+        open={exportDialogOpen}
+        onCancel={() => setExportDialogOpen(false)}
+      />
+      {feedbackConfigured && (
+        <FeedbackDialog
+          open={feedbackDialogOpen}
+          onClose={() => setFeedbackDialogOpen(false)}
+        />
+      )}
     </motion.section>
   );
 }
