@@ -6192,6 +6192,11 @@ base_url = "https://production.api/v1"
                     { "model": "glm-5.1" },
                     // Case-insensitive match.
                     { "model": "minimax-m3" },
+                    // 站内家族别名（站点自造、官方目录没有的裸名）按家族对齐：
+                    // gpt-6 = gpt-6-astra 家族别名 → 全档；gpt-5.6 = 5.6 家族
+                    // 裸名 → sol/terra/luna 档位交集（后端不可知，交集保证不 400）。
+                    { "model": "gpt-6" },
+                    { "model": "gpt-5.6" },
                     // A curated set narrower than the conservative template
                     // is applied as-is — vendor truth over template default.
                     { "model": "kimi-k2.7-code" },
@@ -6226,9 +6231,14 @@ base_url = "https://production.api/v1"
         assert_eq!(efforts(0), vec!["low", "high", "max"]);
         assert_eq!(efforts(1), vec!["none", "high"]);
         assert_eq!(efforts(2), vec!["none", "high"]);
-        assert_eq!(efforts(3), vec!["high"]);
-        assert_eq!(efforts(4), vec!["low", "high"]);
-        assert_eq!(efforts(5), vec!["none", "high"]);
+        assert_eq!(
+            efforts(3),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(efforts(4), vec!["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(efforts(5), vec!["high"]);
+        assert_eq!(efforts(6), vec!["low", "high"]);
+        assert_eq!(efforts(7), vec!["none", "high"]);
     }
 
     #[test]
