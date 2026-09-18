@@ -385,6 +385,12 @@ pub struct RemoteConfig {
     /// 双向兼容的理由同 [`RemoteConfig::promo_codes`] 上的注释。
     #[serde(default)]
     pub relay_model_selection: Option<RemoteModelSelection>,
+    /// 问题反馈回传端点（`feedback_url`）。`None`（旧配置/维护者撤键）= 功能整体
+    /// 休眠：前端不显示反馈入口，一个字节不发 —— 这同时是被滥用时的止血开关
+    /// （远端删键即生效，无需发版），与 plaza_visible / blocked_hosts 同一族形状。
+    /// 消费闸见 [`feedback_endpoint`]（HTTPS 硬校验）。双向兼容理由同上。
+    #[serde(default)]
+    pub feedback_url: Option<String>,
 }
 
 /// 端点与公钥都配好了没。任一没配就整条链路 no-op（走缓存/内置）。
@@ -559,6 +565,19 @@ fn write_cache_at(
         log::debug!("远端配置签名缓存写不进去，清掉配置缓存: {e}");
         let _ = std::fs::remove_file(cache_json);
     }
+}
+
+/// 反馈回传端点（签名配置下发）。`None` = 功能休眠（旧配置、维护者撤键、或值没过闸）。
+///
+/// 与 `preset_referral_urls` 同一道 HTTPS 闸：签名是信任根（改不动坏值），
+/// HTTPS 防的是传输面嗅探「谁在用反馈功能」。非 HTTPS / 空值一律当未配置。
+pub fn feedback_endpoint(config: &RemoteConfig) -> Option<String> {
+    let url = config.feedback_url.as_deref()?.trim();
+    if !url.starts_with("https://") {
+        log::warn!("远端配置的 feedback_url 不是 HTTPS，按未配置处理");
+        return None;
+    }
+    Some(url.to_string())
 }
 
 /// 过滤出当前客户端认识且内容完整的公告：未知类型、空 id/标题/正文一律跳过
@@ -946,6 +965,30 @@ mod tests {
         assert_eq!(selection.claude_sonnet, None);
     }
 
+    /// `feedback_url` 的双向兼容 + 消费闸：老配置无此键解出 `None`（功能休眠）；
+    /// 有键但不是 HTTPS / 空值 = 当未配置。
+    #[test]
+    fn feedback_url_is_optional_and_gated_on_https() {
+        let legacy: RemoteConfig = serde_json::from_str("{}").expect("老配置必须可解");
+        assert_eq!(feedback_endpoint(&legacy), None);
+
+        let configured: RemoteConfig =
+            serde_json::from_str(r#"{"feedback_url":"https://metrics.loongport.dev/v1/feedback"}"#)
+                .expect("新配置必须可解");
+        assert_eq!(
+            feedback_endpoint(&configured),
+            Some("https://metrics.loongport.dev/v1/feedback".to_string())
+        );
+
+        for bad in ["", "   ", "http://metrics.loongport.dev/v1/feedback"] {
+            let config = RemoteConfig {
+                feedback_url: Some(bad.to_string()),
+                ..RemoteConfig::default()
+            };
+            assert_eq!(feedback_endpoint(&config), None, "{bad:?} 必须按未配置处理");
+        }
+    }
+
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct DirectoryV2Contract {
@@ -1253,6 +1296,7 @@ mod tests {
             protected_hosts: vec![],
             star_reward: None,
             relay_model_selection: None,
+            feedback_url: None,
         }
     }
 
@@ -1272,6 +1316,7 @@ mod tests {
             protected_hosts: vec![],
             star_reward: None,
             relay_model_selection: None,
+            feedback_url: None,
         }
     }
 

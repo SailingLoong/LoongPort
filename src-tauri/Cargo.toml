@@ -91,7 +91,8 @@ minisign-verify = { version = "0.2", optional = true }
 dirs = "7.0"
 toml = "1.0"
 toml_edit = "0.25"
-reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
+# multipart 供问题反馈回传（诊断包 zip 单文件上传）使用
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks", "multipart"] }
 cookie = "0.18.1"
 arboard = { version = "3.6", optional = true }
 flate2 = "1"

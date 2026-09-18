@@ -18,6 +18,7 @@ mod crowd;
 mod database;
 mod deeplink;
 mod diagnostics;
+mod diagnostics_export;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
@@ -1738,6 +1739,10 @@ pub fn run() {
             commands::star_reward_auto_star,
             commands::relay_check_session,
             commands::crowd_get_snapshot,
+            commands::export_diagnostics,
+            commands::feedback_get_endpoint_configured,
+            commands::read_clipboard_image,
+            commands::submit_feedback,
             commands::relay_stats_endpoint_configured,
             commands::relay_list_sponsors,
             commands::relay_list_directory,

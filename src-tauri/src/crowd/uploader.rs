@@ -151,7 +151,8 @@ pub fn hour_string(hour_epoch: i64) -> String {
 }
 
 /// 当日 source id：同一天复用（跨重启稳定、重传可去重），隔日即换。
-fn ensure_daily_source_id(db: &Database, now_epoch: i64) -> Result<String, AppError> {
+/// crowd 上报与问题反馈回传共用这个身份（同日多份反馈可对号，不另造身份机制）。
+pub(crate) fn ensure_daily_source_id(db: &Database, now_epoch: i64) -> Result<String, AppError> {
     let day = now_epoch / 86400;
     if db.get_setting(SETTING_SOURCE_DAY)?.as_deref() == Some(day.to_string().as_str()) {
         if let Some(id) = db.get_setting(SETTING_SOURCE_ID)? {

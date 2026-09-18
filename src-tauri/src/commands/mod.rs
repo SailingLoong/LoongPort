@@ -20,8 +20,14 @@ mod copilot;
 // 站点实测共建：快照读取（对等门禁在这一层）。上传不走命令 —— maintenance 周期任务。
 mod crowd;
 mod deeplink;
+// 诊断包导出（环境收集在这里，打包在顶层 diagnostics_export）。
+mod diagnostics;
+pub use diagnostics::*;
 mod env;
 mod failover;
+// 问题反馈回传（multipart 上传到签名配置下发的端点）。
+mod feedback;
+pub use feedback::*;
 mod global_proxy;
 mod hermes;
 mod import_export;
