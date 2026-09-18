@@ -4039,5 +4039,12 @@
     "unsupported": "此服务不支持安全删除，旧备份已保留。",
     "failed": "清理未完成，请重新检查旧备份后重试。",
     "success": "旧云端备份文件已删除。"
+  },
+  "modelMismatch": {
+    "body": "{{app}} 正在请求 {{requested}}；档位「{{tier}}」选择的是 {{selected}}，已按 {{selected}} 使用。",
+    "notAvailable": "该档位不提供 {{requested}}。",
+    "keep": "保持 {{selected}}",
+    "adopt": "改用 {{requested}}",
+    "switchFailed": "切换模型失败"
   }
 }

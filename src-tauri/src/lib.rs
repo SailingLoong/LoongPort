@@ -1518,6 +1518,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        // 模型对齐告警的系统通知（Rust 侧发送，前端不调用其 JS API）。
+        .plugin(tauri_plugin_notification::init())
         // Updater 插件。2026-08-04 接上自己的发布渠道时启用 —— 在此之前有意不注册，
         // 因为上游那套端点与 pubkey 指向 cc-switch 自己的发布源，留着会把 LoongPort
         // 的用户自动升级成 cc-switch。
@@ -1992,6 +1994,9 @@ pub fn run() {
             commands::get_proxy_status,
             commands::get_proxy_config,
             commands::update_proxy_config,
+            // 模型对齐告警（客户端模型 ≠ 实际计费模型的知情层）
+            commands::get_active_model_mismatches,
+            commands::dismiss_model_mismatch,
             // Global & Per-App Config
             commands::get_global_proxy_config,
             commands::update_global_proxy_config,

@@ -27,6 +27,7 @@ pub(crate) mod json_canonical;
 pub mod local_tokens;
 pub mod log_codes;
 pub mod media_sanitizer;
+pub mod model_alignment;
 pub mod model_mapper;
 pub mod provider_router;
 pub mod providers;

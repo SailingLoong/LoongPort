@@ -77,6 +77,10 @@ pub struct RegisterCompletedPayload {
 /// 站点余额跨 app 共享，不带 payload —— 监听方把所有 app 的看板一起失效。
 pub const SITE_BALANCES_UPDATED: &str = "site-balances-updated";
 
+/// 模型对齐新告警（`ModelMismatchBanner` 监听）：客户端点名的模型 ≠ 实际
+/// 计费模型。payload [`crate::proxy::model_alignment::ModelMismatch`]（camelCase）。
+pub const MODEL_MISMATCH: &str = "model-mismatch";
+
 /// 广播「当前供应商变了」。
 ///
 /// ## 为什么必须发（2026-08-04 修的 bug）
@@ -183,6 +187,7 @@ mod consistency_tests {
                 super::ONBOARDING_REGISTER_COMPLETED,
             ),
             ("SITE_BALANCES_UPDATED", super::SITE_BALANCES_UPDATED),
+            ("MODEL_MISMATCH", super::MODEL_MISMATCH),
         ];
 
         for (ts_name, rust_value) in pairs {

@@ -116,9 +116,10 @@ fn detect_system_tray_language() -> &'static str {
 /// 解析托盘当前该用的语言码：用户显式设置的 `settings.language` 优先，
 /// 未设置（首次安装）按系统区域回退。
 ///
-/// 菜单构建（`create_tray_menu`）和点击后的确认对话框（`confirm_quit_chatgpt`）
-/// 都从这里取 —— 两处各读一遍 settings 会长出两套判定顺序。
-fn tray_language() -> String {
+/// 菜单构建（`create_tray_menu`）、点击后的确认对话框（`confirm_quit_chatgpt`）
+/// 和模型对齐告警的系统通知（`model_alignment`）都从这里取 —— 各处各读一遍
+/// settings 会长出两套判定顺序。
+pub(crate) fn tray_language() -> String {
     match crate::settings::get_settings().language {
         Some(lang) => lang,
         None => detect_system_tray_language().to_string(),

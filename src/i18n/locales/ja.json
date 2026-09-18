@@ -4039,5 +4039,12 @@
     "unsupported": "このサービスは安全な削除に対応していません。古いバックアップは保持されています。",
     "failed": "削除が完了しませんでした。古いバックアップを再確認してからやり直してください。",
     "success": "古いクラウドバックアップファイルを削除しました。"
+  },
+  "modelMismatch": {
+    "body": "{{app}} は {{requested}} を要求していますが、階層「{{tier}}」の選択は {{selected}} のため、{{selected}} で転送しています。",
+    "notAvailable": "この階層では {{requested}} を利用できません。",
+    "keep": "{{selected}} を維持",
+    "adopt": "{{requested}} に切り替える",
+    "switchFailed": "モデルの切り替えに失敗しました"
   }
 }

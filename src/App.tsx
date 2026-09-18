@@ -105,6 +105,7 @@ import UnifiedSkillsPanel, {
   type SkillsCheckUpdatesState,
 } from "@/components/skills/UnifiedSkillsPanel";
 import { AnnouncementDialog } from "@/components/AnnouncementDialog";
+import { ModelMismatchBanner } from "@/components/ModelMismatchBanner";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { CcSwitchImportEntry } from "@/components/settings/CcSwitchImportEntry";
 import { ImageTabPage } from "@/components/relay/ImageTabPage";
@@ -1732,6 +1733,10 @@ function App() {
 
       {/* 远端公告：状态机在组件内，这里只挂一行。无公告时零存在感。 */}
       <AnnouncementDialog />
+
+      {/* 模型对齐告警横幅：客户端模型 ≠ 档位已选模型（实际计费模型）时常驻
+          告知 + 一键出口。状态机在组件内，这里只挂一行；无不符时零存在感。 */}
+      <ModelMismatchBanner />
 
       {/* 「点 Star 领注册礼」弹窗：新人引导事件与红点点击共用，状态机在组件内；
           这里只持开关（offer 在即弹）。 */}
