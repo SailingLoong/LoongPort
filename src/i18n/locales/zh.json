@@ -3936,6 +3936,7 @@
     "enabled": "已启用",
     "enable": "启用",
     "applyOrder": "应用此顺序",
+    "pendingChanges": "更改尚未生效",
     "applyOrderNoSwitchableTier": "已应用顺序；当前筛选下没有可切换的可用档位",
     "blockTier": "屏蔽",
     "unblockTier": "取消屏蔽",

@@ -200,9 +200,15 @@ describe("failover order staging", () => {
     expect(
       screen.queryByRole("button", { name: /applications\.applyOrder/ }),
     ).not.toBeInTheDocument();
+    // 未生效状态条只在有未应用草稿时出现（沉默=一致，无误报）。
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
     // 拖拽（表格回调）：c 提到最前 → 全序 [c,a,b]；只暂存、不落库。
     await drag(["c", "a", "b"]);
     expect(state.setOrder).not.toHaveBeenCalled();
+    // 状态条出现在表格上方，按钮搬进了状态条（页头不再双摆）。
+    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
     const apply = screen.getByRole("button", {
       name: /applications\.applyOrder/,
     });
@@ -240,6 +246,10 @@ describe("failover order staging", () => {
         screen.queryByRole("button", { name: /applications\.applyOrder/ }),
       ).not.toBeInTheDocument();
     });
+    // 应用生效后状态条整条消失。
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
     view.unmount();
   });
 

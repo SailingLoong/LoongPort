@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   CircleHelp,
@@ -448,33 +449,6 @@ export function ApplicationWorkspace({
                   </TooltipProvider>
                 </div>
               )}
-              {chainEditing && pendingOrderCount > 0 && (
-                <>
-                  {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序/筛选，
-                      回到已应用的链视图。 */}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={discardOrder}
-                    disabled={orderBusy}
-                    className="h-7 text-xs"
-                  >
-                    {t("applications.discardOrder")}
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      void applyOrder();
-                    }}
-                    disabled={orderBusy}
-                    className="h-7 gap-1.5 text-xs"
-                  >
-                    <Check className="h-3.5 w-3.5" />
-                    {t("applications.applyOrder")}
-                    <span className="tabular-nums">({pendingOrderCount})</span>
-                  </Button>
-                </>
-              )}
               {chainEditing && (
                 <OrderProfilesMenu
                   appType={appId}
@@ -630,6 +604,46 @@ export function ApplicationWorkspace({
             </Button>
           </div>
         )}
+        {/* 未生效状态条：拖拽/排序/筛选只是草稿，「当前视图 ≠ 已应用链」这个
+            状态常驻在用户视线所在的表格上方（信息常驻、动作跟着状态走——
+            2026-09-19 用户定调：页头按钮离拖拽现场太远，好多用户不知道要应用）。
+            无未应用更改时整条消失（沉默=一致）。amber=「需留意」既有色彩语义。 */}
+        {chainEditing && pendingOrderCount > 0 && (
+          <div
+            role="status"
+            className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
+          >
+            <span className="inline-flex min-w-0 items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              {t("applications.pendingChanges")}
+            </span>
+            <span className="flex shrink-0 items-center gap-2">
+              {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序/筛选，
+                  回到已应用的链视图。 */}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={discardOrder}
+                disabled={orderBusy}
+                className="h-7 text-xs"
+              >
+                {t("applications.discardOrder")}
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  void applyOrder();
+                }}
+                disabled={orderBusy}
+                className="h-7 gap-1.5 text-xs"
+              >
+                <Check className="h-3.5 w-3.5" />
+                {t("applications.applyOrder")}
+                <span className="tabular-nums">({pendingOrderCount})</span>
+              </Button>
+            </span>
+          </div>
+        )}
         {/* 模型验证的行级宿主：summaries 拉取、验真弹窗与结果变化订阅全在
             Provider 内部；下线时对外不可见（不拉取、入口/徽章不渲染）。 */}
         <TierVerificationProvider
@@ -641,6 +655,7 @@ export function ApplicationWorkspace({
             tiers={tiers}
             orderedIds={orderedIds}
             failoverEnabled={failoverEnabled}
+            orderPending={chainEditing && pendingOrderCount > 0}
             search={search}
             accountFilter={accountFilter}
             modelFilter={modelFilter}
