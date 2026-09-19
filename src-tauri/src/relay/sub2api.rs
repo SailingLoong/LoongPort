@@ -278,8 +278,16 @@ impl Group {
             .and_then(Platform::app_type)
             .as_ref()
             == Some(app_type)
-            && self.status == "active"
-            && self.rate_multiplier <= MAX_SANE_RATE_MULTIPLIER
+            && self.is_usable_ignoring_platform()
+    }
+
+    /// 同 [`is_usable_for`] 的 active / 倍率两道闸，只是没有平台映射这一维。
+    ///
+    /// 给 composite 分组用：它映射不到单一 app（见 [`crate::relay::platform_map`]），
+    /// 落哪些 CLI 由 provision 按模型列表扇出决定（`ensure_composite_tiers`），
+    /// 可用性判据只剩这两道。
+    pub fn is_usable_ignoring_platform(&self) -> bool {
+        self.status == "active" && self.rate_multiplier <= MAX_SANE_RATE_MULTIPLIER
     }
 }
 
