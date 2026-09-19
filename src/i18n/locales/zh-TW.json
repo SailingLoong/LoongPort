@@ -3637,6 +3637,8 @@
       "relay": "中轉站",
       "vendor": "官方 API",
       "detail": "帳號詳情",
+      "importingTiers": "正在取得密鑰並匯入檔位…",
+      "importFailedLine": "匯入失敗：{{reason}}",
       "application": "應用",
       "openApp": "開啟應用設定",
       "loadFailed": "暫時無法讀取帳號，請重試。",

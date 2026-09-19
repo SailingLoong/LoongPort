@@ -3636,6 +3636,8 @@
       "relay": "Relay",
       "vendor": "Official API",
       "detail": "Account details",
+      "importingTiers": "Fetching keys and importing tiers…",
+      "importFailedLine": "Import failed: {{reason}}",
       "application": "Application",
       "openApp": "Open application settings",
       "loadFailed": "Unable to load accounts. Try again.",

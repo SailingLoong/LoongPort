@@ -1,6 +1,14 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeft, ArrowRight, Plus, Server, ShieldCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  Loader2,
+  Plus,
+  Server,
+  ShieldCheck,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -14,6 +22,7 @@ import { getAppDisplayName } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import { RelaySection, type RelaySectionProps } from "../RelaySection";
 import { RowBalance } from "../RowBalance";
+import { useRowBusy } from "../useRowBusy";
 import {
   configuredApps,
   useServiceAccounts,
@@ -32,6 +41,29 @@ export interface ServicesPageProps {
 const accountName = (account: ServiceAccount) =>
   account.kind === "relay" ? account.row.siteName : account.row.vendorName;
 
+/**
+ * 账号卡的进行态/失败态（busy 状态源是模块级的，见 `useRowBusy`）：
+ * 登录或导入任一在跑就算「正在导入」；都不跑但留有失败记录则显示失败行。
+ * 返回 null = 没有任何值得占一行的状态。
+ */
+function useAccountActivity() {
+  const { isBusy, errorOf } = useRowBusy();
+  return (account: ServiceAccount) => {
+    const keys = (["login", "provision"] as const).map((action) =>
+      account.kind === "relay"
+        ? `${action}:${account.id}`
+        : `${action}:vendor:${account.id}`,
+    );
+    if (keys.some((key) => isBusy(key))) {
+      return { state: "busy" as const, error: null };
+    }
+    const error =
+      keys.map((key) => errorOf(key)).find((message) => message !== null) ??
+      null;
+    return error ? { state: "error" as const, error } : null;
+  };
+}
+
 export function ServicesPage({
   appId,
   account,
@@ -42,6 +74,7 @@ export function ServicesPage({
 }: ServicesPageProps) {
   const { t } = useTranslation();
   const { accounts, isPending, error, reload } = useServiceAccounts();
+  const activityOf = useAccountActivity();
   const [localSelection, setLocalSelection] = useState<{
     kind: ServiceAccount["kind"];
     id: number;
@@ -209,6 +242,7 @@ export function ServicesPage({
                 ? appId
                 : account.apps.keys().next().value!;
               const row = account.apps.get(contextApp)!;
+              const activity = activityOf(account);
               return (
                 <article
                   key={`${account.kind}:${account.id}`}
@@ -266,6 +300,26 @@ export function ServicesPage({
                       <ArrowRight className="h-3.5 w-3.5" />
                     </Button>
                   </div>
+                  {activity?.state === "busy" && (
+                    <p
+                      role="status"
+                      className="mt-2 flex items-center gap-2 text-xs text-muted-foreground"
+                    >
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {t("loongport.accounts.importingTiers")}
+                    </p>
+                  )}
+                  {activity?.state === "error" && (
+                    <p
+                      role="alert"
+                      className="mt-2 flex items-start gap-2 text-xs text-destructive"
+                    >
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {t("loongport.accounts.importFailedLine", {
+                        reason: activity.error ?? "",
+                      })}
+                    </p>
+                  )}
                   <div className="mt-2">
                     {account.kind === "relay"
                       ? renderActions({

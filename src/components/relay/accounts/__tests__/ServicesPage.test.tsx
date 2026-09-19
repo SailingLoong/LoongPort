@@ -7,6 +7,7 @@ import type { AppId } from "@/lib/api/types";
 import type { RelayRow } from "@/lib/api/relay";
 import type { VendorAccountRow } from "@/lib/api/vendor";
 import { ServicesPage } from "../ServicesPage";
+import { useRowBusy } from "../../useRowBusy";
 
 const mocks = vi.hoisted(() => ({
   relays: vi.fn(),
@@ -200,4 +201,91 @@ it("shows account details inline without a visibility toggle", async () => {
   expect(
     screen.queryByRole("button", { name: "loongport.accounts.hideDetails" }),
   ).not.toBeInTheDocument();
+});
+
+describe("ServicesPage 账号卡活动状态行", () => {
+  it("登录/导入进行中显示「正在导入」状态行，结束后消失", async () => {
+    mocks.relays.mockResolvedValue([{ ...relay, id: 41 }]);
+    mocks.vendors.mockResolvedValue({ supported: false, accounts: [] });
+    let release!: () => void;
+    function Probe() {
+      const { run } = useRowBusy();
+      return (
+        <button
+          onClick={() =>
+            run("login:41", () => new Promise<void>((resolve) => {
+              release = resolve;
+            }))
+          }
+        >
+          start
+        </button>
+      );
+    }
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <ServicesPage appId="gemini" onOpenApp={() => {}} onOpenAddHub={() => {}} />
+        <Probe />
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("start"));
+    expect(
+      await screen.findByText("loongport.accounts.importingTiers"),
+    ).toBeInTheDocument();
+    release();
+    await waitFor(() =>
+      expect(
+        screen.queryByText("loongport.accounts.importingTiers"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("失败后保留失败行，直到重试同 key 才清除", async () => {
+    mocks.relays.mockResolvedValue([{ ...relay, id: 42 }]);
+    mocks.vendors.mockResolvedValue({ supported: false, accounts: [] });
+    function Probe() {
+      const { run, fail } = useRowBusy();
+      return (
+        <>
+          <button
+            onClick={() =>
+              run("provision:42", () => {
+                fail("provision:42", "HTTP 500");
+                return Promise.resolve();
+              })
+            }
+          >
+            run-and-fail
+          </button>
+          <button onClick={() => run("provision:42", () => Promise.resolve())}>
+            retry
+          </button>
+        </>
+      );
+    }
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <ServicesPage appId="gemini" onOpenApp={() => {}} onOpenAddHub={() => {}} />
+        <Probe />
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("run-and-fail"));
+    expect(
+      await screen.findByText("loongport.accounts.importFailedLine"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByText("retry"));
+    await waitFor(() =>
+      expect(
+        screen.queryByText("loongport.accounts.importFailedLine"),
+      ).not.toBeInTheDocument(),
+    );
+  });
 });

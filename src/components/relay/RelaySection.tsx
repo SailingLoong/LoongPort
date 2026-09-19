@@ -210,7 +210,7 @@ export function RelaySection({
   const { t, i18n } = useTranslation();
   // 余额由各行自己的 query 持有；这里只在「充值窗关了」「刷新」时让它们失效。
   const queryClient = useQueryClient();
-  const { busy, run } = useRowBusy();
+  const { busy, run, fail } = useRowBusy();
   // 待确认「恢复默认配置」的目标。
   //
   // **两类行共用一个确认框**（文案、按钮、语义完全相同 —— 都是「用默认配置覆盖你的
@@ -457,13 +457,25 @@ export function RelaySection({
       toast.success(
         t("loongport.addSite.connected", { name: payload.siteName }),
       );
-      try {
-        presentRefreshResult(await relayApi.refresh(payload.relayId, appId));
-      } catch (reason) {
-        toast.error(
-          t("loongport.directory.provisionFailed", { reason: String(reason) }),
-        );
-      }
+      // 挂上 busy（模块级 store）：用户此刻切到「服务与账号」也能看到
+      // 「正在获取密钥并导入档位」，而不是一张和没登录时一模一样的卡。
+      await run(`provision:${payload.relayId}`, async () => {
+        try {
+          presentRefreshResult(await relayApi.refresh(payload.relayId, appId));
+        } catch (reason) {
+          fail(
+            `provision:${payload.relayId}`,
+            t("loongport.directory.provisionFailed", {
+              reason: String(reason),
+            }),
+          );
+          toast.error(
+            t("loongport.directory.provisionFailed", {
+              reason: String(reason),
+            }),
+          );
+        }
+      });
       void reload();
     },
   );
@@ -488,6 +500,7 @@ export function RelaySection({
         await reloadVendors();
         if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
+        fail(vendorBusyKey("login", rowId), String(e));
         toast.error(String(e));
       }
     });
@@ -499,6 +512,7 @@ export function RelaySection({
         await reload();
         if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (error) {
+        fail(vendorBusyKey("provision", rowId), String(error));
         toast.error(String(error));
       }
     });
@@ -588,6 +602,7 @@ export function RelaySection({
         await reload();
         if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
+        fail(`login:${relayId}`, String(e));
         toast.error(String(e));
       }
     });
@@ -600,6 +615,7 @@ export function RelaySection({
         await reload();
         if (accountSnapshot === undefined) onAccountChanged?.();
       } catch (e) {
+        fail(`provision:${relayId}`, String(e));
         toast.error(String(e));
       }
     });

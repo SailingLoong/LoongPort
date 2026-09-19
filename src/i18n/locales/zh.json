@@ -3636,6 +3636,8 @@
       "relay": "中转站",
       "vendor": "官方 API",
       "detail": "账号详情",
+      "importingTiers": "正在获取密钥并导入档位…",
+      "importFailedLine": "导入失败：{{reason}}",
       "application": "应用",
       "openApp": "打开应用配置",
       "loadFailed": "暂时无法读取账号，请重试。",

@@ -123,6 +123,8 @@ vi.mock("../useRowBusy", () => ({
   useRowBusy: () => ({
     busy: new Set(),
     isBusy: () => false,
+    errorOf: () => null,
+    fail: () => undefined,
     run: async (_key: string, callback: () => Promise<void>) => callback(),
   }),
 }));
