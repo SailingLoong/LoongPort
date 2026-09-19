@@ -115,6 +115,8 @@ interface Props {
   orderedIds: string[];
   /** 故障切换开启才出现优先级列与屏蔽按钮（2026-09-16 用户定调的三隐边界）。 */
   failoverEnabled: boolean;
+  /** 有未应用的顺序草稿：优先级数字着 amber（所见=草稿，与状态条同语义）。 */
+  orderPending: boolean;
   search: string;
   accountFilter: string | null;
   modelFilter: string | null;
@@ -254,6 +256,7 @@ export function ApplicationTierTable(props: Props) {
                   priority={visibleRank.get(item.providerId) ?? null}
                   tier={metrics.get(item.providerId)}
                   failoverEnabled={props.failoverEnabled}
+                  orderPending={props.orderPending}
                   additive={props.additive}
                   current={
                     props.additive
@@ -284,6 +287,7 @@ function TierRow({
   priority,
   tier,
   failoverEnabled,
+  orderPending,
   current,
   additive,
   dragDisabled,
@@ -297,6 +301,7 @@ function TierRow({
   priority: number | null;
   tier?: ApplicationRoutingTier;
   failoverEnabled: boolean;
+  orderPending: boolean;
   current: boolean;
   additive: boolean;
   dragDisabled: boolean;
@@ -343,7 +348,16 @@ function TierRow({
             >
               <GripVertical className="h-4 w-4" />
             </button>
-            <span className="tabular-nums text-muted-foreground">
+            {/* 挂起草稿时数字着 amber：这串号是「将会应用的序」，还没生效
+                （与上方状态条同语义；屏蔽行的「—」保持中性灰）。 */}
+            <span
+              className={cn(
+                "tabular-nums",
+                orderPending && priority != null
+                  ? "text-amber-600 dark:text-amber-400"
+                  : "text-muted-foreground",
+              )}
+            >
               {priority ?? "—"}
             </span>
           </div>

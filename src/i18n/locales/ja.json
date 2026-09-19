@@ -3936,6 +3936,7 @@
     "enabled": "有効",
     "enable": "有効にする",
     "applyOrder": "順序を適用",
+    "pendingChanges": "変更は未適用です",
     "applyOrderNoSwitchableTier": "順序を適用しました。現在のフィルターでは切り替え可能なティアがありません",
     "blockTier": "ブロック",
     "unblockTier": "ブロック解除",
