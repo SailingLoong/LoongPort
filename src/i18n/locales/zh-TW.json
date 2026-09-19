@@ -3656,7 +3656,7 @@
     },
     "onboarding": {
       "domain": "中轉站網址",
-      "domainPlaceholder": "例如 panel.example",
+      "domainPlaceholder": "bestapi.store",
       "browse": "瀏覽中轉站廣場",
       "searchDirectory": "搜尋廣場",
       "noMatch": "沒有找到符合的服務",
