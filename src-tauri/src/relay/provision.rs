@@ -3,11 +3,13 @@
 //! ## 流程
 //!
 //! ```text
-//! 拉分组（只留 platform == openai 且 active）
-//!   └→ 对每个分组：
-//!        ├→ 在已有 Key 里按名字精确认领   ← 正常路径，不发写请求
-//!        └→ 认领不到才 POST 建一把
-//!             └→ 拿到明文 sk → 组装成一条 codex provider 写库
+//! 拉分组（按 platform 归位，active + 倍率不离谱）
+//!   ├─ openai / anthropic / gemini / grok → 一分组一档：
+//!   │     ├→ 在已有 Key 里按名字精确认领   ← 正常路径，不发写请求
+//!   │     └→ 认领不到才 POST 建一把
+//!   │          └→ 拿到明文 sk → 组装成 provider 写库
+//!   └─ composite → 拆档：只建一把 Key，按模型列表扇出多 CLI 档
+//!        （见 [`ensure_composite_tiers`]，档位间共享同一把 Key）
 //! ```
 //!
 //! ## Key 命名契约
@@ -185,8 +187,9 @@ pub struct TargetedTier {
 /// 没有则自动创建，然后在对应的（codex / claude / …）下面展示这个站点的分组。」
 ///
 /// 所以**不接受 app_type 参数** —— 分组落到哪个 CLI 由它自己的 `platform` 决定：
-/// `openai → codex`、`anthropic → claude`、`gemini → gemini`、`grok → grokbuild`。
-/// 认不出映射的（`antigravity` 还没接、`composite` 有意不做）直接跳过。
+/// `openai → codex`、`anthropic → claude`、`gemini → gemini`、`grok → grokbuild`；
+/// 认不出映射的（`antigravity` 还没接）跳过；`composite` 映射不到单一 app，
+/// 由 [`ensure_composite_tiers`] 按模型列表扇出多 CLI 档。
 ///
 /// 这比「按当前 tab 拉」好在：用户在任何一个 tab 登录一次，全部平台的档位都备好了 ——
 /// 不必为每个 tab 各点一次「获取密钥」，也不可能把某个平台的 sk 写成另一个平台的形状。
@@ -205,9 +208,15 @@ pub async fn provision(
     let current_groups: HashSet<(String, i64)> =
         groups.iter().map(|g| (g.platform.clone(), g.id)).collect();
 
-    // 按分组自己的 platform 分派，认不出的跳过（不是错误：composite 是有意不做、
-    // antigravity 是还没接，两者都不该让整个流程失败）。
-    let usable: Vec<(Group, AppType)> = groups
+    // composite 先分流出去（它映射不到单一 app，走拆档），其余照旧按平台归位。
+    let (composite, platform_groups): (Vec<Group>, Vec<Group>) =
+        groups.into_iter().partition(|g| {
+            super::platform_map::parse_platform(&g.platform)
+                == Some(super::platform_map::Platform::Composite)
+        });
+    // 按分组自己的 platform 分派，认不出的跳过（不是错误：antigravity 是还没接，
+    // 不该让整个流程失败）。
+    let usable: Vec<(Group, AppType)> = platform_groups
         .into_iter()
         .filter_map(|g| {
             let app_type = super::platform_map::parse_platform(&g.platform)?.app_type()?;
@@ -215,8 +224,13 @@ pub async fn provision(
             g.is_usable_for(&app_type).then_some((g, app_type))
         })
         .collect();
+    let composite: Vec<Group> = composite
+        .into_iter()
+        // 同一道 active/倍率闸（只是没有平台维），不过闸的连拆档都不进。
+        .filter(|g| g.is_usable_ignoring_platform())
+        .collect();
 
-    if usable.is_empty() {
+    if usable.is_empty() && composite.is_empty() {
         return Err(AppError::Config(
             "这个账号下没有本客户端支持的活跃分组".into(),
         ));
@@ -251,6 +265,15 @@ pub async fn provision(
                 result.tiers.push(TargetedTier { tier, app_type })
             }
             // 一个分组失败不影响其它分组 —— 部分可用优于全部不可用。
+            Err(e) => result.failures.push((group.name.clone(), e.to_string())),
+        }
+    }
+
+    // composite 拆档：一把 Key 扇出多 CLI 档（见 [`ensure_composite_tiers`]）。
+    // 失败语义与上面一致 —— 单组失败只进 failures，不拖垮别的分组。
+    for group in composite {
+        match ensure_composite_tiers(client, account_id, &group, &existing, tables).await {
+            Ok(mut tiers) => result.tiers.append(&mut tiers),
             Err(e) => result.failures.push((group.name.clone(), e.to_string())),
         }
     }
@@ -311,17 +334,19 @@ pub async fn provision(
     Ok(result)
 }
 
-async fn ensure_key_for(
+/// 认领本账号 + 本分组已有的托管 Key；认领不到才建一把。
+///
+/// 单平台（一分组一档）与 composite（一把 Key 扇多档）共用 —— 「认领优先、建为
+/// 兜底」与「为什么没认领到必须落日志」是同一条纪律，不该在第二条路径上走样。
+async fn claim_or_create_key(
     client: &Client,
     account_id: Option<i64>,
-    app_type: &AppType,
     group: &Group,
     existing: &[ApiKey],
-    tables: &ModelSelectionTables,
-) -> Result<Tier, AppError> {
-    let (api_key, created) = match claim_key(existing, account_id, &group.platform, group.id) {
+) -> Result<(String, bool), AppError> {
+    match claim_key(existing, account_id, &group.platform, group.id) {
         // 正常路径：认领到了就直接用，不发任何写请求。
-        Some(k) => (k.key.clone(), false),
+        Some(k) => Ok((k.key.clone(), false)),
         None => {
             let name = key_name_for(account_id, &group.platform, group.id);
             // ⚠️ **「为什么没认领到」必须落日志**（维护者实测抓出）。
@@ -357,9 +382,20 @@ async fn ensure_key_for(
             if created.key.is_empty() {
                 return Err(AppError::Config("服务端返回的密钥是空的".into()));
             }
-            (created.key, true)
+            Ok((created.key, true))
         }
-    };
+    }
+}
+
+async fn ensure_key_for(
+    client: &Client,
+    account_id: Option<i64>,
+    app_type: &AppType,
+    group: &Group,
+    existing: &[ApiKey],
+    tables: &ModelSelectionTables,
+) -> Result<Tier, AppError> {
+    let (api_key, created) = claim_or_create_key(client, account_id, group, existing).await?;
 
     // 拉这个分组能调哪些模型 —— 只为决定写什么模型名（纯生图分组必须写它自己的
     // `gpt-image-*`，写文本模型会 404）。
@@ -402,6 +438,101 @@ async fn ensure_key_for(
         roles: picked.claude_roles,
         allow_image_generation: group.allow_image_generation,
     })
+}
+
+/// composite 分组该落到哪些 CLI（判据 = 该分组的模型列表，纯函数）。
+///
+/// - **codex / claude 无条件落**：composite 的协议翻译在服务端完成（openai /
+///   anthropic 两种请求形状实测同一把 Key 都可用，证据见
+///   `LoongPort-design/spec-composite分组拆档.md`），且这两条的选型器
+///   （[`pick_tier_models_with`]）对任意文本列表都能挑出**列表内**的模型。
+/// - **gemini / grok 只在列表里有对应家族模型时落**：它们的选型器在家族缺席时
+///   回落 `models[0]`，会写错家族的模型名 —— 宁可不落那个档，也不落一个
+///   选中即 404 的档。
+/// - **纯生图列表只出生图档**：判据与 newapi 路径同源
+///   （[`is_pure_image_group`]），把生图模型写进聊天 CLI 是必 404 的档位。
+///
+/// 家族判据（`gemini-` / `grok` 前缀）与 [`pick_tier_models_with`] 里那两条的
+/// 过滤写法是同一份事实 —— 改家族规则时两边一起动。
+fn composite_app_targets(models: &[String]) -> Vec<AppType> {
+    if is_pure_image_group(models) {
+        return vec![AppType::CodexImage];
+    }
+    let mut targets = vec![AppType::Codex, AppType::Claude];
+    if models
+        .iter()
+        .any(|m| m.to_ascii_lowercase().starts_with("gemini-"))
+    {
+        targets.push(AppType::Gemini);
+    }
+    if models
+        .iter()
+        .any(|m| m.to_ascii_lowercase().starts_with("grok"))
+    {
+        targets.push(AppType::GrokBuild);
+    }
+    targets
+}
+
+/// composite（复合）分组的拆档：一把 Key 扇出多 CLI 档。
+///
+/// composite 分组一把 Key 跨多平台，与「一分组一 provider」不对齐，所以在
+/// [`platform_map`] 里映射不到单一 app；这里按模型列表（[`composite_app_targets`]）
+/// 决定落哪些 CLI，各档**共享同一把 Key** —— 订阅额度按 Key 计，按档各建
+/// 等于给用户多开额度，还污染站点密钥列表。
+///
+/// 与单平台路径（[`ensure_key_for`]）的两点语义差异：
+/// - **模型目录拉不到算这个分组的失败**：单平台路径目录只影响「写什么模型名」
+///   （回落默认值仍可用）；composite 的目录是**落哪些 CLI 的判据**，没有它
+///   无法安全落档 —— 回落「全落」或「不落」都是瞎猜。
+/// - **key_was_created 只记在首个扇出档**：批次的「新建密钥」计数按档位条数
+///   统计，扇出 N 档都记 true 会让用户看到「新建了 N 把」。
+async fn ensure_composite_tiers(
+    client: &Client,
+    account_id: Option<i64>,
+    group: &Group,
+    existing: &[ApiKey],
+    tables: &ModelSelectionTables,
+) -> Result<Vec<TargetedTier>, AppError> {
+    let (api_key, created) = claim_or_create_key(client, account_id, group, existing).await?;
+    let models = super::sub2api::list_models(client.site_origin(), &api_key)
+        .await
+        .map_err(|e| AppError::Config(format!("拉不到模型目录，无法判定该落到哪些 CLI: {e}")))?
+        .map(normalize_model_names)
+        // 归一化后为空（全是空白 id）视同没有目录：空列表会让
+        // `is_pure_image_group` 真空真、误判成纯生图分组。
+        .filter(|models: &Vec<String>| !models.is_empty())
+        .ok_or_else(|| AppError::Config("模型目录为空，无法判定该落到哪些 CLI".into()))?;
+
+    let mut tiers = Vec::new();
+    for (index, app_type) in composite_app_targets(&models).into_iter().enumerate() {
+        let picked = pick_tier_models_with(&app_type, Some(&models), tables);
+        if picked.main != tables.default_model {
+            log::info!(
+                "composite 分组 {}（{}）在 {} 落档，模型名写 {}（目录 {:?}）",
+                group.id,
+                group.name,
+                app_type.as_str(),
+                picked.main,
+                models,
+            );
+        }
+        tiers.push(TargetedTier {
+            tier: Tier {
+                group_id: group.id,
+                group_name: group.name.clone(),
+                rate_multiplier: group.rate_multiplier,
+                api_key: api_key.clone(),
+                key_was_created: created && index == 0,
+                model: picked.main,
+                models: Some(models.clone()),
+                roles: picked.claude_roles,
+                allow_image_generation: group.allow_image_generation,
+            },
+            app_type,
+        });
+    }
+    Ok(tiers)
 }
 
 /// Normalize a provider model list before it becomes persisted configuration.
@@ -2354,6 +2485,53 @@ mod tests {
             pick_tier_models_with(&AppType::CodexImage, Some(&image_group), &fallback).main,
             "gpt-image-2"
         );
+    }
+
+    /// ⭐ composite 拆档的落档判据：codex/claude 无条件、gemini/grok 按家族、
+    /// 纯生图只出生图档。列表形状来自实测的订阅型复合分组（17 个国产模型）。
+    #[test]
+    fn composite_targets_follow_model_families() {
+        // 国产模型订阅（glm/deepseek/kimi…，无 gemini/grok 家族）→ 只落 codex + claude。
+        let domestic = [
+            "glm-5.3",
+            "glm-5.3-flash",
+            "deepseek-v4-pro",
+            "kimi-k3",
+            "minimax-m3",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            composite_app_targets(&domestic),
+            vec![AppType::Codex, AppType::Claude]
+        );
+
+        // 有 gemini / grok 家族 → 四个档全落。
+        let mixed = ["glm-5.3", "gemini-3-pro", "grok-4.6", "deepseek-v4-flash"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            composite_app_targets(&mixed),
+            vec![
+                AppType::Codex,
+                AppType::Claude,
+                AppType::Gemini,
+                AppType::GrokBuild
+            ]
+        );
+
+        // 纯生图 → 只出生图档（与 newapi 扇出同判据同源）。
+        let image_only = ["gpt-image-2", "gpt-image-2-mini"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            composite_app_targets(&image_only),
+            vec![AppType::CodexImage]
+        );
+
+        // 家族判据不认大小写（站点目录的大小写不由我们保证）。
+        let upper = ["GEMINI-3-PRO".to_string(), "glm-5.3".to_string()];
+        assert!(composite_app_targets(&upper).contains(&AppType::Gemini));
     }
 
     #[test]

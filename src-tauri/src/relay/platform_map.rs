@@ -25,11 +25,12 @@
 
 use crate::app_config::AppType;
 
-/// sub2api 侧的 platform 标识。取值域来自服务端分组数据（6 个），不是我们自定义的。
+/// sub2api 侧的 platform 标识。取值域来自服务端分组数据，不是我们自定义的。
 ///
 /// **`Composite` 必须是一个变体，而不是解析成「未知」**：`GET /api/v1/groups/available`
-/// 服务端不按 platform 过滤，拉回的列表里真的会出现 composite 组，我们要**显式跳过**它，
-/// 而不是靠「碰巧没遇到」。判为未知就分不清「该跳过的已知平台」与「上游新加的平台」。
+/// 服务端不按 platform 过滤，拉回的列表里真的会出现 composite 组，provision 要**显式
+/// 分流**它走拆档（`ensure_composite_tiers`），而不是靠「碰巧没遇到」。判为未知就分不清
+/// 「要分流的已知平台」与「上游新加的平台」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
     OpenAI,
@@ -44,7 +45,8 @@ pub enum Platform {
 ///
 /// 三个变体**不能压成 `Option<AppType>`**：`Unmapped` 与 `NotPresented` 的语义不同 ——
 /// 前者是「我们还没实现对应的 CLI」（将来支持 antigravity 时会变成 `Mapped`），后者是
-/// 「有意不做」（composite 一把 Key 跨多平台，与「一分组一 provider」的展开模型不对齐）。
+/// 「映射不到单一 app」（composite 一把 Key 跨多平台，它的档位由 provision 按模型列表
+/// 扇出到多个 CLI，不经过这张单 app 映射表）。
 /// **数据层要把两者分开**：将来真要在 UI 上告诉用户「另有 N 个分组不呈现」时，
 /// 「还没实现」与「有意不做」对他是两种含义（前者会变、后者不会）。压成同一个状态
 /// 之后就再也分不回来了。
@@ -61,7 +63,8 @@ pub enum PlatformMapping {
     Mapped(AppType),
     /// 认得这个 platform，但 cc-switch 侧没有对应的 app（→ 计入「本客户端暂不呈现」）。
     Unmapped,
-    /// 有意不呈现：composite 一把 Key 跨多平台，与「一分组一 provider」不对齐。
+    /// 映射不到单一 app：composite 一把 Key 跨多平台，没有单一归属。它的档位由
+    /// provision 按模型列表扇出到多个 CLI（`ensure_composite_tiers`），不经过这张表。
     NotPresented,
 }
 
@@ -124,6 +127,8 @@ pub fn map_platform(platform: Platform) -> PlatformMapping {
         // cc-switch 侧没有 antigravity 对应的 app。将来接了就把这行改成 `Mapped(...)`，
         // 这正是「加平台只改这一处」的兑现方式。
         Platform::Antigravity => PlatformMapping::Unmapped,
+        // composite 不走单 app 映射（没有单一归属）：provision 把它分流出去按模型
+        // 列表扇出多 CLI 档，见 `ensure_composite_tiers`。
         Platform::Composite => PlatformMapping::NotPresented,
     }
 }
@@ -205,7 +210,7 @@ mod tests {
         assert_ne!(
             map_platform(Platform::Composite),
             map_platform(Platform::Antigravity),
-            "composite 是「有意不做」、antigravity 是「还没实现」，语义不同不许压成同一个状态"
+            "composite 走 provision 拆档、不映射单一 app；antigravity 是「还没实现」，语义不同不许压成同一个状态"
         );
         // 但两者对「能不能拿到 app_type」的回答一致 —— UI 合并计数正是建立在这上面。
         assert_eq!(Platform::Composite.app_type(), None);
