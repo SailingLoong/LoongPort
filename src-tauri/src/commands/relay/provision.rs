@@ -48,6 +48,9 @@ pub(crate) struct ManagedProvisionCandidate {
     pub(crate) roles: Option<provision::ClaudeRoleModels>,
     pub(crate) allow_image_generation: Option<bool>,
     pub(crate) api_base_url: String,
+    /// 订阅限额的重置窗口（`newapi` 等后端没有时间窗语义 ⇒ 空；
+    /// 见 `relay/tier_windows.rs` 的横向扩展位说明）。
+    pub(crate) windows: Vec<crate::relay::tier_windows::SubscriptionWindow>,
 }
 
 #[derive(Default)]
@@ -137,6 +140,7 @@ pub(crate) fn newapi_candidates_for_group(
                 // NewAPI exposes one OpenAI-compatible root. Per-app suffixes are projected by
                 // `sub2api::base_url_for`, so no persisted sub2api base belongs here.
                 api_base_url: String::new(),
+                windows: Vec::new(),
             }
         })
         .collect()
@@ -217,6 +221,7 @@ pub(crate) async fn provision_backend(
                         roles: tier.roles,
                         allow_image_generation: Some(tier.allow_image_generation),
                         api_base_url: site_account.api_base_url.clone(),
+                        windows: tier.windows,
                     }
                 })
                 .collect();
@@ -600,6 +605,17 @@ pub(crate) fn persist_provision_batch(
             }
         }
 
+        // 订阅重置窗口（服务端事实，非用户可编辑配置）：**每次都覆盖写**——
+        // 与 patch_api_key 同语义，用户编辑保留的是「怎么连」，窗口是「还剩多少」。
+        if !candidate.windows.is_empty() {
+            settings_config["subscriptionWindows"] =
+                serde_json::to_value(&candidate.windows).unwrap_or(serde_json::Value::Null);
+        } else {
+            settings_config
+                .as_object_mut()
+                .map(|map| map.remove("subscriptionWindows"));
+        }
+
         let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
 
         let provider = Provider {
@@ -715,6 +731,8 @@ pub(crate) fn persist_provision_batch(
             refresh_live.push(app_type.clone());
         }
 
+        let subscription_windows =
+            provision::subscription_windows_from_settings(&provider.settings_config);
         tiers.push(TierInfo {
             is_current,
             provider_id,
@@ -736,6 +754,10 @@ pub(crate) fn persist_provision_batch(
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.site_declared_origin.clone()),
+            // provision 刚把窗口写进 settings（上面的覆盖写），这里原样读回 ——
+            // 与下一次 listRelays 读到的是同一份。
+            subscription_windows: subscription_windows.clone(),
+            next_reset_at: crate::relay::tier_windows::next_reset_at(&subscription_windows),
         });
     }
 
@@ -2457,6 +2479,7 @@ mod tests {
                 roles: None,
                 allow_image_generation: Some(false),
                 api_base_url: site.into(),
+                windows: Vec::new(),
             }],
             observed_keep: Default::default(),
             failures: Vec::new(),

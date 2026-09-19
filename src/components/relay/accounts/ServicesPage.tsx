@@ -13,6 +13,8 @@ import type { AccountRoute } from "@/components/shell/navigation";
 import { getAppDisplayName } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import { RelaySection, type RelaySectionProps } from "../RelaySection";
+import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
+import { formatResetAt } from "@/components/applications/tierMetrics";
 import { RowBalance } from "../RowBalance";
 import {
   configuredApps,
@@ -130,6 +132,9 @@ export function ServicesPage({
             </div>
           )}
         </div>
+        {selected?.kind === "relay" && (
+          <SubscriptionWindowsCard tiers={[...selected.apps.values()]} />
+        )}
         <RelaySection
           key={`${selection.kind}:${selection.id}:${selection.appId}`}
           appId={selection.appId}
@@ -311,5 +316,82 @@ export function ServicesPage({
         </section>
       )}
     />
+  );
+}
+
+/**
+ * 账号详情的「订阅限额与重置」区：聚合该账号全部档位的窗口。
+ *
+ * composite 拆档的多个档共享同一把 key ⇒ 窗口数组逐字节相同，按内容去重；
+ * 非订阅账号（全部档位窗口为空）整区不渲染，不留空壳。
+ */
+function SubscriptionWindowsCard({
+  tiers,
+}: {
+  tiers: { tiers: { subscriptionWindows: SubscriptionWindow[] }[] }[];
+}) {
+  const { t } = useTranslation();
+  const windows = (() => {
+    const seen = new Set<string>();
+    const result: SubscriptionWindow[] = [];
+    for (const row of tiers) {
+      for (const tier of row.tiers) {
+        for (const window of tier.subscriptionWindows) {
+          const key = JSON.stringify(window);
+          if (!seen.has(key)) {
+            seen.add(key);
+            result.push(window);
+          }
+        }
+      }
+    }
+    return result.sort(
+      (a, b) =>
+        (a.resetAt ?? Number.MAX_SAFE_INTEGER) -
+        (b.resetAt ?? Number.MAX_SAFE_INTEGER),
+    );
+  })();
+  if (windows.length === 0) return null;
+  return (
+    <section className="rounded-xl border border-border bg-card">
+      <h3 className="border-b border-border/60 px-4 py-3 text-sm font-medium">
+        {t("loongport.accounts.subscriptionWindows")}
+      </h3>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-muted-foreground">
+          <tr className="border-b border-border/60">
+            <th scope="col" className="px-4 py-2 text-left font-medium">
+              {t("loongport.accounts.windowColumn")}
+            </th>
+            <th scope="col" className="px-4 py-2 text-right font-medium">
+              {t("loongport.accounts.usedLimitColumn")}
+            </th>
+            <th scope="col" className="px-4 py-2 text-right font-medium">
+              {t("loongport.accounts.resetColumn")}
+            </th>
+          </tr>
+        </thead>
+        <tbody className="tabular-nums">
+          {windows.map((window) => (
+            <tr
+              key={window.kind}
+              className="border-b border-border/40 last:border-0"
+            >
+              <td className="px-4 py-2.5">
+                {t(`loongport.accounts.windowKind.${window.kind}`)}
+              </td>
+              <td className="px-4 py-2.5 text-right">
+                {window.usedUsd == null
+                  ? `— / ${window.limitUsd.toFixed(2)}`
+                  : `${window.usedUsd.toFixed(2)} / ${window.limitUsd.toFixed(2)}`}
+              </td>
+              <td className="px-4 py-2.5 text-right">
+                {window.resetAt == null ? "—" : formatResetAt(window.resetAt)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }

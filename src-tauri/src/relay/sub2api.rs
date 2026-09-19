@@ -244,6 +244,16 @@ pub struct Group {
     /// 标记。保守方向：漏说一个能力无害，错说一个不存在的能力会让用户白试。
     #[serde(default)]
     pub allow_image_generation: bool,
+    /// 订阅型分组的窗口限额（美元，`None`/0 = 该窗口没有限额）。
+    ///
+    /// 服务端 `daily_limit_usd` / `weekly_limit_usd` / `monthly_limit_usd`；
+    /// 非订阅分组这些字段是 null 或 0。喂给 [`super::tier_windows`] 算重置时刻。
+    #[serde(default)]
+    pub daily_limit_usd: Option<f64>,
+    #[serde(default)]
+    pub weekly_limit_usd: Option<f64>,
+    #[serde(default)]
+    pub monthly_limit_usd: Option<f64>,
 }
 
 /// 倍率高于这个值的分组不呈现给用户。
@@ -295,7 +305,7 @@ impl Group {
 ///
 /// `key` 字段是**明文完整 sk、未脱敏**（`dto/mappers.go` 没有 mask），所以「认领已有 Key」
 /// 拿得到可直接用的 sk，不必重建。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ApiKey {
     pub id: i64,
     pub key: String,
@@ -303,6 +313,27 @@ pub struct ApiKey {
     pub name: String,
     #[serde(default)]
     pub status: String,
+    /// 各窗口已花掉的钱（美元）。`0` = 没用过或服务端不吐。
+    #[serde(default)]
+    pub usage_5h: f64,
+    #[serde(default)]
+    pub usage_1d: f64,
+    #[serde(default)]
+    pub usage_7d: f64,
+    /// key 级窗口限额（美元）；`0` = 沿用分组限额。
+    #[serde(default)]
+    pub rate_limit_5h: f64,
+    #[serde(default)]
+    pub rate_limit_1d: f64,
+    #[serde(default)]
+    pub rate_limit_7d: f64,
+    /// 当前窗口的起点（epoch 秒）。`None` = 这个窗口还没开始过（没用过）。
+    #[serde(default)]
+    pub window_5h_start: Option<f64>,
+    #[serde(default)]
+    pub window_1d_start: Option<f64>,
+    #[serde(default)]
+    pub window_7d_start: Option<f64>,
 }
 
 impl ApiKey {
@@ -1619,6 +1650,9 @@ mod tests {
             status: status.into(),
             // 这些测试只关心 platform / status / 倍率那三道过滤，生图开关与它们无关。
             allow_image_generation: false,
+            daily_limit_usd: None,
+            weekly_limit_usd: None,
+            monthly_limit_usd: None,
         }
     }
 
@@ -2189,6 +2223,7 @@ mod tests {
             key: "sk-x".into(),
             name: "n".into(),
             status: status.into(),
+            ..ApiKey::default()
         };
         assert!(mk("active").is_usable());
         assert!(!mk("disabled").is_usable());

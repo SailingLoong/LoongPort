@@ -3651,7 +3651,17 @@
       "recharge": "チャージ",
       "removeRelay": "「{{label}}」を削除しますか？ログイン情報と、すべてのアプリの関連グループおよび接続設定を削除します。サービスの残高には影響しません。",
       "removeRelayInUse": "「{{label}}」を削除しますか？ログイン情報と、すべてのアプリの関連グループおよび接続設定を削除します。現在の使用状況：{{usages}}。対象アプリは公式ログインに戻り、再ログインや再起動が必要になる場合があります。残高には影響しません。",
-      "removeVendor": "「{{label}}」を削除しますか？ログイン情報、ローカル API キー、すべてのアプリの関連プランと接続設定を削除します。サービス側の API キーは削除されません。"
+      "removeVendor": "「{{label}}」を削除しますか？ログイン情報、ローカル API キー、すべてのアプリの関連プランと接続設定を削除します。サービス側の API キーは削除されません。",
+      "subscriptionWindows": "サブスクリプション枠とリセット",
+      "windowColumn": "ウィンドウ",
+      "usedLimitColumn": "使用量 / 上限",
+      "resetColumn": "次回リセット",
+      "windowKind": {
+        "fiveHour": "5時間ウィンドウ",
+        "daily": "日次ウィンドウ",
+        "weekly": "週次ウィンドウ",
+        "monthly": "月次ウィンドウ"
+      }
     },
     "onboarding": {
       "domain": "中継サービスの URL",
@@ -3921,7 +3931,8 @@
       "avgFirstTokenMs": "初回トークン",
       "balanceUsd": "残高",
       "cacheHitRate": "キャッシュヒット",
-      "todayCostUsd": "本日の費用"
+      "todayCostUsd": "本日の費用",
+      "nextResetAt": "次回リセット"
     },
     "skipReasons": {
       "official_account": "この公式アカウントは手動切り替えのみ対応",
@@ -3955,7 +3966,13 @@
     "orderProfilesImported": "{{count}} 件のプロファイルをインポートしました",
     "orderProfileExported": "プロファイルをエクスポートしました",
     "orderProfileImport": "インポート…",
-    "orderProfileExport": "エクスポート…"
+    "orderProfileExport": "エクスポート…",
+    "windowKind": {
+      "fiveHour": "5時間ウィンドウ",
+      "daily": "日次ウィンドウ",
+      "weekly": "週次ウィンドウ",
+      "monthly": "月次ウィンドウ"
+    }
   },
   "secrets": {
     "unlockTitle": "認証情報のロック解除",

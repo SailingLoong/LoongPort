@@ -235,6 +235,9 @@ mod tests {
             rate_multiplier: 1.2,
             status: "active".into(),
             allow_image_generation: false,
+            daily_limit_usd: None,
+            weekly_limit_usd: None,
+            monthly_limit_usd: None,
         }];
         let user_rates = HashMap::from([(42, 0.8)]);
 
@@ -259,6 +262,9 @@ mod tests {
             rate_multiplier: 1.2,
             status: "active".into(),
             allow_image_generation: false,
+            daily_limit_usd: None,
+            weekly_limit_usd: None,
+            monthly_limit_usd: None,
         }];
 
         let updates = sub2api_rate_updates(&relay, groups, HashMap::new());

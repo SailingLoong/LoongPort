@@ -3651,7 +3651,17 @@
       "recharge": "Recharge",
       "removeRelay": "Delete “{{label}}”? This removes its login information and all groups and tiers across all applications. The provider balance is unaffected.",
       "removeRelayInUse": "Delete “{{label}}”? This removes its login information and all groups and tiers across all applications. Currently used by: {{usages}}. Affected applications return to official login and may require signing in again and restarting. The provider balance is unaffected.",
-      "removeVendor": "Delete “{{label}}”? This removes its login information, local API keys and all plans and configurations across all applications. API keys on the provider’s website will remain."
+      "removeVendor": "Delete “{{label}}”? This removes its login information, local API keys and all plans and configurations across all applications. API keys on the provider’s website will remain.",
+      "subscriptionWindows": "Subscription limits & resets",
+      "windowColumn": "Window",
+      "usedLimitColumn": "Used / limit",
+      "resetColumn": "Next reset",
+      "windowKind": {
+        "fiveHour": "5-hour window",
+        "daily": "Daily window",
+        "weekly": "Weekly window",
+        "monthly": "Monthly window"
+      }
     },
     "onboarding": {
       "domain": "Relay URL",
@@ -3921,7 +3931,8 @@
       "avgFirstTokenMs": "First token",
       "balanceUsd": "Balance",
       "cacheHitRate": "Cache hits",
-      "todayCostUsd": "Today’s cost"
+      "todayCostUsd": "Today’s cost",
+      "nextResetAt": "Next reset"
     },
     "skipReasons": {
       "official_account": "This official account requires manual switching",
@@ -3955,7 +3966,13 @@
     "orderProfilesImported": "Imported {{count}} profiles",
     "orderProfileExported": "Profiles exported",
     "orderProfileImport": "Import…",
-    "orderProfileExport": "Export…"
+    "orderProfileExport": "Export…",
+    "windowKind": {
+      "fiveHour": "5-hour window",
+      "daily": "Daily window",
+      "weekly": "Weekly window",
+      "monthly": "Monthly window"
+    }
   },
   "secrets": {
     "unlockTitle": "Unlock credentials",

@@ -219,6 +219,8 @@ const tier = (
   rateMultiplier: null,
   isCurrent: false,
   canVerifyModels: appId === "codex" || appId === "claude",
+  subscriptionWindows: [],
+  nextResetAt: null,
   userEdited: false,
   allowImageGeneration: false,
   siteDeclaredOrigin: null,

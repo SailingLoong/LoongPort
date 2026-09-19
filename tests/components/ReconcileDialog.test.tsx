@@ -112,6 +112,8 @@ function relayWithCodexTier(): RelayRowData {
     rateMultiplier: 1,
     isCurrent: true,
     canVerifyModels: true,
+    subscriptionWindows: [],
+    nextResetAt: null,
     userEdited: false,
     allowImageGeneration: false,
     siteDeclaredOrigin: null,

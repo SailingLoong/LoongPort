@@ -78,6 +78,7 @@ pub mod newapi_provision;
 pub mod newapi_purchase;
 pub mod onboarding;
 pub mod sub2api;
+pub mod tier_windows;
 // Phase 1 defines this crate-internal contract before Phase 2 consumes it.
 #[allow(dead_code)]
 pub mod model_verification;

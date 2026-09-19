@@ -113,6 +113,8 @@ const tier = {
   rateMultiplier: 1,
   isCurrent: false,
   canVerifyModels: true,
+  subscriptionWindows: [],
+  nextResetAt: null,
   userEdited: false,
   allowImageGeneration: false,
   siteDeclaredOrigin: null,

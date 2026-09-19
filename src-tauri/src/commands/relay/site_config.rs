@@ -390,6 +390,7 @@ mod tests {
                 roles: None,
                 allow_image_generation: Some(false),
                 api_base_url: site.into(),
+                windows: Vec::new(),
             }],
             observed_keep: Default::default(),
             failures: Vec::new(),

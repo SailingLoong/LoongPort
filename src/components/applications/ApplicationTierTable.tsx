@@ -25,7 +25,11 @@ import {
   Settings2,
 } from "lucide-react";
 import type { ApplicationConfiguration } from "@/lib/api/applicationOverview";
-import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
+import type {
+  ApplicationRoutingTier,
+  SubscriptionWindow,
+} from "@/lib/api/applicationRouting";
+import { formatResetAt } from "./tierMetrics";
 import type { AccountRoute } from "@/components/shell/navigation";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -33,6 +37,28 @@ import { TierVerifyButton } from "@/components/relay/model-verification/TierVeri
 import { TierVerdictChip } from "@/components/relay/model-verification/TierVerdictChip";
 import { useTierVerification } from "@/components/relay/model-verification/TierVerificationProvider";
 import { tierMetrics, type TierMetric, type TierSort } from "./tierMetrics";
+
+/**
+ * 订阅窗口的多行 tooltip 文案（native title）：主列只显示最早的那个，
+ * 全量窗口（限额/已用/各自的重置）hover 可见——主显示做减法、细节有去处。
+ */
+function subscriptionWindowsTitle(
+  t: (key: string) => string,
+  windows: SubscriptionWindow[],
+): string {
+  return windows
+    .map((window) => {
+      const kind = t(`applications.windowKind.${window.kind}`);
+      const used =
+        window.usedUsd == null
+          ? ""
+          : ` · ${window.usedUsd.toFixed(2)}/${window.limitUsd.toFixed(2)}`;
+      const reset =
+        window.resetAt == null ? "" : ` · ${formatResetAt(window.resetAt)}`;
+      return `${kind}${used}${reset}`;
+    })
+    .join("\\n");
+}
 
 /**
  * 可见行之间换位、未显示行原位不动（splice 语义）：筛选视图里拖拽只改
@@ -417,7 +443,13 @@ function TierRow({
           key={metric.key}
           className="whitespace-nowrap px-3 py-3 text-right align-top tabular-nums"
         >
-          <span className="inline-block py-1.5">
+          <span
+            className="inline-block py-1.5"
+            {...(metric.key === "nextResetAt" &&
+            tier?.subscriptionWindows?.length
+              ? { title: subscriptionWindowsTitle(t, tier.subscriptionWindows) }
+              : {})}
+          >
             {tier?.[metric.key] == null ? (
               <span className="text-muted-foreground">—</span>
             ) : (

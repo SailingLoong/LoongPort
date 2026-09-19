@@ -20,6 +20,12 @@ pub struct ApplicationRoutingTier {
     /// 的模型筛选按它命中「分组支持」，而非只看当前 `effective_model`；
     /// 空目录（非 Codex 系/未嗅探）回落单模型语义。
     pub models: Vec<String>,
+    /// 订阅限额的重置窗口（provision 从服务端限额 × key 用量算出落库；
+    /// 非订阅档位为空）。工作台「下次重置」列与 tooltip、账号详情的窗口表都读它。
+    pub subscription_windows: Vec<crate::relay::tier_windows::SubscriptionWindow>,
+    /// 所有窗口里最早的重置时刻（epoch 秒）——「优先消耗即将作废的额度」的排序键；
+    /// 窗口都没开始 / 非订阅档位为 `None`（排序时排最后，稳定）。
+    pub next_reset_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -102,6 +108,13 @@ pub(crate) async fn application_routing_impl(
                 None
             };
             let error_rate = stats.get(&tier.provider_id).copied();
+            let subscription_windows = providers
+                .get(&tier.provider_id)
+                .map(|p| {
+                    crate::relay::provision::subscription_windows_from_settings(&p.settings_config)
+                })
+                .unwrap_or_default();
+            let next_reset_at = crate::relay::tier_windows::next_reset_at(&subscription_windows);
             ApplicationRoutingTier {
                 can_failover: supports_proxy
                     && providers.get(&tier.provider_id).is_some_and(|p| {
@@ -115,6 +128,8 @@ pub(crate) async fn application_routing_impl(
                     .get(&tier.provider_id)
                     .map(crate::proxy::auto_strategy::tier_models)
                     .unwrap_or_default(),
+                subscription_windows,
+                next_reset_at,
                 tier,
                 skip_reason,
                 error_rate,
@@ -256,6 +271,13 @@ mod tests {
             can_failover: true,
             can_verify_models: true,
             models: vec!["gpt-5.6-sol".into(), "gpt-5.5".into()],
+            subscription_windows: vec![crate::relay::tier_windows::SubscriptionWindow {
+                kind: crate::relay::tier_windows::WindowKind::Daily,
+                limit_usd: 500.0,
+                used_usd: Some(31.0),
+                reset_at: Some(1_789_864_000),
+            }],
+            next_reset_at: Some(1_789_864_000),
         };
         let json = serde_json::to_value(&tier).expect("要能序列化");
         let obj = json.as_object().expect("是个对象");
@@ -273,5 +295,25 @@ mod tests {
             "模型目录必须以 models 数组下发，实际键：{:?}",
             obj.keys().collect::<Vec<_>>()
         );
+        // 订阅窗口与「下次重置」是工作台重置列的数据源：camelCase 随档位下发。
+        let windows = obj
+            .get("subscriptionWindows")
+            .and_then(|v| v.as_array())
+            .expect("subscriptionWindows 必须以数组下发");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(
+            windows[0].get("kind").and_then(|v| v.as_str()),
+            Some("daily"),
+            "窗口 kind 以 camelCase 枚举下发"
+        );
+        assert_eq!(
+            windows[0].get("limitUsd").and_then(|v| v.as_f64()),
+            Some(500.0)
+        );
+        assert_eq!(
+            obj.get("nextResetAt").and_then(|v| v.as_i64()),
+            Some(1_789_864_000)
+        );
+        assert!(!obj.contains_key("next_reset_at"));
     }
 }

@@ -99,6 +99,8 @@ describe("reconciliation with manual routing", () => {
     rateMultiplier: null,
     isCurrent: false,
     canVerifyModels: false,
+    subscriptionWindows: [],
+    nextResetAt: null,
     userEdited: false,
     allowImageGeneration: false,
     siteDeclaredOrigin: null,
