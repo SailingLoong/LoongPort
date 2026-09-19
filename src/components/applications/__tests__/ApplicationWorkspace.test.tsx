@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   setOrder: vi.fn(),
   setFailover: vi.fn(),
   blockTier: vi.fn(),
+  resetTierErrors: vi.fn(),
 }));
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
@@ -35,6 +36,7 @@ vi.mock("../useApplicationRouting", () => ({
     setOrder: state.setOrder,
     setFailover: state.setFailover,
     blockTier: state.blockTier,
+    resetTierErrors: state.resetTierErrors,
   }),
 }));
 vi.mock("react-i18next", () => ({
@@ -92,6 +94,7 @@ beforeEach(() => {
   state.setFailover.mockResolvedValue(undefined);
   state.setOrder.mockResolvedValue(undefined);
   state.blockTier.mockResolvedValue(undefined);
+  state.resetTierErrors.mockResolvedValue(undefined);
   state.data = {
     configurations: [
       config("a", "Standard", true),
@@ -179,6 +182,27 @@ describe("application workspace", () => {
       );
     },
   );
+  it("offers clearing error history on errored tiers and re-admits them without moving positions", async () => {
+    state.routing.autoFailoverEnabled = true;
+    // c 有限流中的真实错误 → 行内出「清除错误记录」；健康行 a/b 不出。
+    state.routing.tiers[2] = {
+      ...state.routing.tiers[2],
+      skipReason: "circuit_open",
+      lastError: "boom",
+      consecutiveFailures: 3,
+    };
+    render(<ApplicationWorkspace {...props} />);
+    const reset = screen.getByTitle("applications.resetTierErrors");
+    expect(reset).toBeInTheDocument();
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(
+      within(rows[0]).queryByTitle("applications.resetTierErrors"),
+    ).not.toBeInTheDocument();
+    await userEvent.click(reset);
+    expect(state.resetTierErrors).toHaveBeenCalledWith({
+      providerId: "c",
+    });
+  });
   it("renders the verification entry only for tiers the backend marks verifiable", () => {
     state.routing.tiers = state.routing.tiers.map(
       (tier: { providerId: string }) => ({

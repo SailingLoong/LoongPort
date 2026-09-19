@@ -3927,7 +3927,6 @@
       "official_account": "この公式アカウントは手動切り替えのみ対応",
       "model_incompatible": "スキップ：選択したモデルに非対応",
       "circuit_open": "一時スキップ：接続の回復を待機中",
-      "before_current": "現在の設定より前のため、後続の切り替え対象外",
       "current_official_account": "現在の公式ログインでは自動フェイルオーバーを利用できません。",
       "native_configuration": "アプリの標準ログインを使用するため、自動フェイルオーバーの対象外です。",
       "blocked": "ブロック済み：自動切り替えの対象外"
@@ -3940,6 +3939,7 @@
     "pendingChanges": "変更は未適用です",
     "applyOrderNoSwitchableTier": "順序を適用しました。現在のフィルターでは切り替え可能なティアがありません",
     "blockTier": "ブロック",
+    "resetTierErrors": "エラー記録をクリア",
     "unblockTier": "ブロック解除",
     "discardOrder": "キャンセル",
     "orderProfiles": "順序プロファイル",

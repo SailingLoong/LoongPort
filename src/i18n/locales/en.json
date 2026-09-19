@@ -3927,7 +3927,6 @@
       "official_account": "This official account requires manual switching",
       "model_incompatible": "Skipped: selected model is not supported",
       "circuit_open": "Temporarily skipped: waiting for connection recovery",
-      "before_current": "Before the current tier; excluded from subsequent failover",
       "current_official_account": "Automatic failover is unavailable while using the current official sign-in.",
       "native_configuration": "Uses native application sign-in; unavailable for automatic failover.",
       "blocked": "Blocked: skipped by automatic failover"
@@ -3940,6 +3939,7 @@
     "pendingChanges": "Changes not applied yet",
     "applyOrderNoSwitchableTier": "Order applied; no available tier to switch to under the current filter",
     "blockTier": "Block",
+    "resetTierErrors": "Clear error history",
     "unblockTier": "Unblock",
     "discardOrder": "Cancel",
     "orderProfiles": "Order profiles",

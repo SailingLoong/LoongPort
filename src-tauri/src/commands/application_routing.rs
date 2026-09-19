@@ -74,16 +74,6 @@ pub(crate) async fn application_routing_impl(
         .unwrap_or_default();
     let blocked = routing::blocked_tier_ids(&state.db, app_type);
     let chain = routing::chain_ids(&state.db, app_type).map_err(|e| e.to_string())?;
-    let chain_position: std::collections::HashMap<&str, usize> = chain
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (id.as_str(), index))
-        .collect();
-    // 「已在当前档之前」按链位置判（链外档位不是重试候选，不参与比较）；
-    // 当前档被应用出链时取不到链位 → 没有档位算 before_current（整条链都是后继）。
-    let current_chain_position = current_position
-        .and_then(|index| board.tiers.get(index))
-        .and_then(|tier| chain_position.get(tier.provider_id.as_str()).copied());
     let tiers = board
         .tiers
         .into_iter()
@@ -94,6 +84,8 @@ pub(crate) async fn application_routing_impl(
             let circuit_open = tier.breaker_state.as_deref() == Some("open")
                 && tier.breaker_reopen_in_secs.is_some_and(|s| s > 0);
             // 屏蔽是用户显式动作：当前档被屏蔽也照常显示原因（其余排除不压过当前档）。
+            // 不存在「位于当前档之前」这类位置性跳过：重新路由从链头扫，
+            // 位置不是跳过理由（2026-09-19 用户定调）。
             let skip_reason = if !supports_proxy {
                 None
             } else if exclusion == Some("blocked") {
@@ -106,12 +98,6 @@ pub(crate) async fn application_routing_impl(
                 Some("current_official_account".to_string())
             } else if circuit_open {
                 Some("circuit_open".to_string())
-            } else if enabled
-                && chain_position.contains_key(tier.provider_id.as_str())
-                && current_chain_position
-                    .is_some_and(|current| chain_position[tier.provider_id.as_str()] < current)
-            {
-                Some("before_current".to_string())
             } else {
                 None
             };

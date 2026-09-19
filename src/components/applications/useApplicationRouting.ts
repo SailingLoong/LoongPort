@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { applicationRoutingApi } from "@/lib/api/applicationRouting";
+import { failoverApi } from "@/lib/api/failover";
 import { proxyApi } from "@/lib/api/proxy";
 import { proxyKeys } from "@/lib/query/proxy";
 import type { AppId } from "@/lib/api";
@@ -51,6 +52,14 @@ export function useApplicationRouting(appId: AppId) {
     onSuccess: refresh,
     onError,
   });
+  // 清除档位错误记录（内存熔断器 + DB 健康行）：用户显式动作，清完立刻
+  // 重新参与选路。复用 proxy 侧现成的 reset_circuit_breaker 命令——语义就是「错误置空」。
+  const resetTierErrors = useMutation({
+    mutationFn: ({ providerId }: { providerId: string }) =>
+      failoverApi.resetCircuitBreaker(providerId, appId),
+    onSuccess: refresh,
+    onError,
+  });
   const failover = useMutation({
     mutationFn: async (enabled: boolean) => {
       if (enabled) {
@@ -85,5 +94,6 @@ export function useApplicationRouting(appId: AppId) {
     setOrder: order.mutateAsync,
     setFailover: failover.mutateAsync,
     blockTier: blockTier.mutateAsync,
+    resetTierErrors: resetTierErrors.mutateAsync,
   };
 }

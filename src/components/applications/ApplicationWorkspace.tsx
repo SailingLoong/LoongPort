@@ -678,6 +678,11 @@ export function ApplicationWorkspace({
                 .blockTier({ providerId, blocked })
                 .catch(() => undefined);
             }}
+            onResetTierErrors={(providerId) => {
+              void routing
+                .resetTierErrors({ providerId })
+                .catch(() => undefined);
+            }}
           />
         </TierVerificationProvider>
         <p className="text-xs text-muted-foreground">

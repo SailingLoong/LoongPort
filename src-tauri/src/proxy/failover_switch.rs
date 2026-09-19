@@ -109,24 +109,17 @@ impl FailoverSwitchManager {
         if let Some(app) = app_handle {
             if let Some(app_state) = app.try_state::<crate::store::AppState>() {
                 let guard = app_state.proxy_service.lock_switch_for_app(app_type).await;
-                // A completed request must not overwrite a newer explicit selection or
-                // move back to a priority that another request has already passed.
+                // A completed request must not overwrite a newer explicit selection:
+                // expected_current 与库里的当前档不一致（别的请求/用户已切走）就放弃。
                 let current = super::application_routing::current_provider_id(&self.db, app_type);
                 if current.as_deref().unwrap_or_default() != expected_current {
                     return Ok(false);
                 }
-                // 只沿链前进（链 = 用户已应用的列表，链外档位不是切换候选）。
-                // 当前档被应用出链时在链内取不到位置 → 任意链内目标都算前进。
+                // 目标必须在链内（链外档位不是切换候选——用户应用的列表才是全集）。
+                // 不再比较链内位置：重新路由从链头扫，切回用户排位更靠前的健康
+                // 档位正是本义（2026-09-19 用户定调，废除「只沿链前进」）。
                 let chain = super::application_routing::chain_providers(&self.db, app_type)?;
-                let target_index = chain.iter().position(|p| p.id == provider_id);
-                let current_index = chain
-                    .iter()
-                    .position(|p| Some(p.id.as_str()) == current.as_deref());
-                if target_index.is_none()
-                    || current_index
-                        .zip(target_index)
-                        .is_some_and(|(from, to)| to <= from)
-                {
+                if !chain.iter().any(|p| p.id == provider_id) {
                     return Ok(false);
                 }
 
