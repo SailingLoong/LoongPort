@@ -3661,7 +3661,9 @@
         "daily": "Daily window",
         "weekly": "Weekly window",
         "monthly": "Monthly window"
-      }
+      },
+      "usageTitle": "Usage summary",
+      "usageHeadline": "7 days {{seven}} · 30 days {{thirty}}"
     },
     "onboarding": {
       "domain": "Relay URL",

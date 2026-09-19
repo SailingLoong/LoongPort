@@ -15,6 +15,9 @@ import type { AppId } from "@/lib/api/types";
 import { RelaySection, type RelaySectionProps } from "../RelaySection";
 import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 import { formatResetAt } from "@/components/applications/tierMetrics";
+import { usageApi } from "@/lib/api/usage";
+import { useQuery } from "@tanstack/react-query";
+import { fmtUsd } from "@/components/usage/format";
 import { RowBalance } from "../RowBalance";
 import {
   configuredApps,
@@ -132,6 +135,9 @@ export function ServicesPage({
             </div>
           )}
         </div>
+        {selected?.kind === "relay" && (
+          <AccountUsageCard tiers={[...selected.apps.values()]} />
+        )}
         {selected?.kind === "relay" && (
           <SubscriptionWindowsCard tiers={[...selected.apps.values()]} />
         )}
@@ -392,6 +398,85 @@ function SubscriptionWindowsCard({
           ))}
         </tbody>
       </table>
+    </section>
+  );
+}
+
+/**
+ * 账号详情的「用量摘要」区：该账号全部档位近 7/30 天的花费与占比。
+ *
+ * 数据是一条按 provider id 的窗口聚合命令（明细 + 日汇总双表求和，与使用统计页
+ * 同口径）；档位清单来自页面已有的账号快照，不在组件里反查归属。
+ * 全部档位窗口内零花费 ⇒ 整区不渲染（新账号不背一张空表）。
+ */
+function AccountUsageCard({
+  tiers,
+}: {
+  tiers: { tiers: { providerId: string; displayName: string }[] }[];
+}) {
+  const { t } = useTranslation();
+  const entries = tiers.flatMap((row) =>
+    row.tiers.map((tier) => ({
+      providerId: tier.providerId,
+      displayName: tier.displayName,
+    })),
+  );
+  const { data } = useQuery({
+    queryKey: ["account-usage", entries.map((entry) => entry.providerId)],
+    queryFn: () =>
+      usageApi.providersWindowCost(entries.map((e) => e.providerId)),
+    staleTime: 60_000,
+  });
+  const byId = new Map((data ?? []).map((entry) => [entry.providerId, entry]));
+  const rows = entries
+    .map((entry) => ({
+      ...entry,
+      cost7: byId.get(entry.providerId)?.stats.costUsd7d ?? 0,
+      cost30: byId.get(entry.providerId)?.stats.costUsd30d ?? 0,
+    }))
+    .filter((row) => row.cost30 > 0);
+  if (rows.length === 0) return null;
+  const total7 = rows.reduce((sum, row) => sum + row.cost7, 0);
+  const total30 = rows.reduce((sum, row) => sum + row.cost30, 0);
+  const max = Math.max(...rows.map((row) => row.cost30));
+  return (
+    <section className="rounded-xl border border-border bg-card">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border/60 px-4 py-3">
+        <h3 className="text-sm font-medium">
+          {t("loongport.accounts.usageTitle")}
+        </h3>
+        <p className="text-xs text-muted-foreground tabular-nums">
+          {t("loongport.accounts.usageHeadline", {
+            seven: fmtUsd(total7, 2),
+            thirty: fmtUsd(total30, 2),
+          })}
+        </p>
+      </div>
+      <ul className="divide-y divide-border/40">
+        {rows
+          .slice()
+          .sort((a, b) => b.cost30 - a.cost30)
+          .map((row) => (
+            <li
+              key={row.providerId}
+              className="flex items-center gap-3 px-4 py-2.5"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm">
+                {row.displayName}
+              </span>
+              <span
+                className="h-1.5 rounded-full bg-primary/60"
+                style={{
+                  width: `${Math.max(4, Math.round((row.cost30 / max) * 100))}%`,
+                }}
+                aria-hidden="true"
+              />
+              <span className="w-16 text-right text-sm tabular-nums">
+                {fmtUsd(row.cost30, 2)}
+              </span>
+            </li>
+          ))}
+      </ul>
     </section>
   );
 }

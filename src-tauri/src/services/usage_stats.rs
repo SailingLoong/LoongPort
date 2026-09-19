@@ -101,6 +101,18 @@ pub struct ProviderStats {
     pub avg_first_token_ms: u64,
 }
 
+/// 一个 provider 在 7 天 / 30 天两个窗口内的花费与请求数
+/// （[`UsageStatsStore::get_providers_window_stats`] 的返回项；账号详情
+/// 「用量摘要」读它）。`Default` 全零供 HashMap entry 聚合。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderWindowStats {
+    pub cost_usd_7d: f64,
+    pub requests_7d: u64,
+    pub cost_usd_30d: f64,
+    pub requests_30d: u64,
+}
+
 /// 模型统计
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1299,6 +1311,78 @@ impl Database {
         for row in rows {
             let (provider_id, avg) = row?;
             result.insert(provider_id, avg.max(0) as u64);
+        }
+        Ok(result)
+    }
+
+    /// 账号详情「用量摘要」：一批 provider 在两个窗口（7 天 / 30 天）内的花费与请求数。
+    ///
+    /// ## 为什么是双表求和而不是单表
+    ///
+    /// 明细表只保 `retain_days`（启动序列里是 30）以内的行，更早的整日已折进
+    /// `usage_daily_rollups`；rollup 又**只含**被折掉的那些天 ⇒ 两表各查各的再相加，
+    /// 恰好无重叠。这与使用统计页（`get_provider_stats`）的取数口径同源。
+    ///
+    /// 窗口起点用 `localtime` 对齐自然日，与 [`Self::get_provider_today_stats`]
+    /// 的「今天」同口径。不在 `provider_ids` 里的行 SQL 侧直接过滤（id 集来自
+    /// 调用方已聚合好的档位清单，不在这里反查归属）。
+    pub fn get_providers_window_stats(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<HashMap<String, ProviderWindowStats>, AppError> {
+        if provider_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let filter = effective_usage_log_filter("l");
+        let placeholders = vec!["?"; provider_ids.len()].join(",");
+        let detail_sql = format!(
+            "SELECT l.provider_id,
+                    SUM(CAST(l.total_cost_usd AS REAL)),
+                    COUNT(*),
+                    SUM(CASE WHEN l.created_at >= strftime('%s','now','localtime','-7 days')
+                             THEN CAST(l.total_cost_usd AS REAL) ELSE 0 END),
+                    SUM(CASE WHEN l.created_at >= strftime('%s','now','localtime','-7 days')
+                             THEN 1 ELSE 0 END)
+             FROM proxy_request_logs l
+             WHERE {filter}
+               AND l.created_at >= strftime('%s','now','localtime','-30 days')
+               AND l.provider_id IN ({placeholders})
+             GROUP BY l.provider_id"
+        );
+        let rollup_sql = format!(
+            "SELECT provider_id,
+                    SUM(CAST(total_cost_usd AS REAL)),
+                    SUM(request_count),
+                    SUM(CASE WHEN date >= date('now','localtime','-7 days')
+                             THEN CAST(total_cost_usd AS REAL) ELSE 0 END),
+                    SUM(CASE WHEN date >= date('now','localtime','-7 days')
+                             THEN request_count ELSE 0 END)
+             FROM usage_daily_rollups
+             WHERE date >= date('now','localtime','-30 days')
+               AND provider_id IN ({placeholders})
+             GROUP BY provider_id"
+        );
+        let conn = lock_conn!(self.conn);
+        let mut result: HashMap<String, ProviderWindowStats> = HashMap::new();
+        for sql in [&detail_sql, &rollup_sql] {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(provider_ids.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0).max(0) as u64,
+                    row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                    row.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0) as u64,
+                ))
+            })?;
+            for row in rows {
+                let (id, cost30, requests30, cost7, requests7) = row?;
+                let entry = result.entry(id).or_default();
+                entry.cost_usd_30d += cost30;
+                entry.requests_30d += requests30;
+                entry.cost_usd_7d += cost7;
+                entry.requests_7d += requests7;
+            }
         }
         Ok(result)
     }
@@ -2662,6 +2746,78 @@ mod tests {
             )",
             [],
         )?;
+        Ok(())
+    }
+
+    /// ⭐ 账号用量摘要的双表口径：明细（近期）+ 日汇总（更早整日）各查各的再相加，
+    /// 恰好无重叠；7/30 两个窗口各自过滤。
+    #[test]
+    fn providers_window_stats_sum_detail_and_rollups() -> Result<(), AppError> {
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let now = Local::now().timestamp();
+            // 明细：今天 $1.25 + 6 天前 $0.75（都在 7 天窗内）。
+            insert_usage_log(
+                &conn, "r1", "codex", "tierA", "glm-5.3", "proxy", now, 10, 2, 0, 0, 200, "1.25",
+            )?;
+            insert_usage_log(
+                &conn,
+                "r2",
+                "codex",
+                "tierA",
+                "glm-5.3",
+                "proxy",
+                now - 6 * 86400,
+                10,
+                2,
+                0,
+                0,
+                200,
+                "0.75",
+            )?;
+            // 日汇总：25 天前 $4.00 / 10 次（30 天窗内、7 天窗外）。
+            conn.execute(
+                "INSERT INTO usage_daily_rollups
+                    (date, app_type, provider_id, model, request_count, success_count,
+                     input_tokens, output_tokens, total_cost_usd, avg_latency_ms)
+                 VALUES (date('now','localtime','-25 days'), 'codex', 'tierA', 'glm-5.3',
+                         10, 10, 0, 0, '4.00', 100)",
+                [],
+            )?;
+            // 31 天前的日汇总：在 30 天窗外，不计入。
+            conn.execute(
+                "INSERT INTO usage_daily_rollups
+                    (date, app_type, provider_id, model, request_count, success_count,
+                     input_tokens, output_tokens, total_cost_usd, avg_latency_ms)
+                 VALUES (date('now','localtime','-31 days'), 'codex', 'tierA', 'glm-5.3',
+                         5, 5, 0, 0, '9.00', 100)",
+                [],
+            )?;
+            // 别的档位：不该出现在结果里。
+            insert_usage_log(
+                &conn, "r3", "codex", "tierB", "glm-5.3", "proxy", now, 1, 1, 0, 0, 200, "8.00",
+            )?;
+        }
+        let stats = db
+            .get_providers_window_stats(&["tierA".to_string(), "tierC".to_string()])
+            .unwrap();
+        let tier_a = stats.get("tierA").expect("tierA 必须有聚合");
+        assert!(
+            (tier_a.cost_usd_7d - 2.00).abs() < 1e-9,
+            "7 天窗 = 1.25+0.75"
+        );
+        assert_eq!(tier_a.requests_7d, 2);
+        assert!(
+            (tier_a.cost_usd_30d - 6.00).abs() < 1e-9,
+            "30 天窗加 25 天前的汇总"
+        );
+        assert_eq!(tier_a.requests_30d, 12, "明细 2 次 + 汇总 10 次");
+        assert!(!stats.contains_key("tierB"), "不在 id 清单里的不查");
+        assert!(
+            !stats.contains_key("tierC"),
+            "没流量的不出现（命令层补默认值）"
+        );
         Ok(())
     }
 

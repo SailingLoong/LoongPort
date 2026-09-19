@@ -21,10 +21,27 @@ import type { UsageResult } from "@/types";
 import type { AppId } from "./types";
 import type { TemplateType } from "@/config/constants";
 
+export interface ProviderWindowStatsEntry {
+  providerId: string;
+  stats: {
+    costUsd7d: number;
+    requests7d: number;
+    costUsd30d: number;
+    requests30d: number;
+  };
+}
+
 export const usageApi = {
   // Provider usage script methods
   query: async (providerId: string, appId: AppId): Promise<UsageResult> => {
     return invoke("queryProviderUsage", { providerId, app: appId });
+  },
+
+  /** 一批档位在 7/30 天窗口内的花费（账号详情「用量摘要」）。 */
+  providersWindowCost: async (
+    providerIds: string[],
+  ): Promise<ProviderWindowStatsEntry[]> => {
+    return invoke("get_providers_window_cost", { providerIds });
   },
 
   testScript: async (

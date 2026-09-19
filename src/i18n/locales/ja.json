@@ -3661,7 +3661,9 @@
         "daily": "日次ウィンドウ",
         "weekly": "週次ウィンドウ",
         "monthly": "月次ウィンドウ"
-      }
+      },
+      "usageTitle": "使用量サマリー",
+      "usageHeadline": "7日 {{seven}} · 30日 {{thirty}}"
     },
     "onboarding": {
       "domain": "中継サービスの URL",
