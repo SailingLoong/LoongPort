@@ -1094,6 +1094,18 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               <ExternalLink className="h-3.5 w-3.5" />
               {t("settings.releaseNotes")}
             </Button>
+            {feedbackConfigured && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setFeedbackDialogOpen(true)}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <Bug className="h-3.5 w-3.5" />
+                {t("settings.feedback")}
+              </Button>
+            )}
             <Button
               type="button"
               size="sm"
