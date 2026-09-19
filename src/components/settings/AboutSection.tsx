@@ -1106,46 +1106,48 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 {t("settings.feedback")}
               </Button>
             )}
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleCheckUpdate}
-              disabled={isChecking || isDownloading}
-              className="h-8 gap-1.5 text-xs"
-            >
-              {isDownloading ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {t("settings.updating")}
-                </>
-              ) : hasUpdate ? (
-                <>
-                  <Download className="h-3.5 w-3.5" />
-                  {t("settings.updateTo", {
-                    version: updateInfo?.availableVersion ?? "",
-                  })}
-                </>
-              ) : isChecking ? (
-                <>
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  {t("settings.checking")}
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  {t("settings.checkForUpdates")}
-                </>
+            {/* 更新按钮与进度竖排：进度只在下载期间出现在按钮正下方——
+                按钮与同行图标的水平位置全程固定（2026-09-19 用户定调：
+                放右边时长短变化会推着周边走，体感晃）。不在同一行后不再
+                需要 min-w 固宽；tabular-nums 仍留着防数字本身跳宽。 */}
+            <div className="flex flex-col items-end gap-1">
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleCheckUpdate}
+                disabled={isChecking || isDownloading}
+                className="h-8 gap-1.5 text-xs"
+              >
+                {isDownloading ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    {t("settings.updating")}
+                  </>
+                ) : hasUpdate ? (
+                  <>
+                    <Download className="h-3.5 w-3.5" />
+                    {t("settings.updateTo", {
+                      version: updateInfo?.availableVersion ?? "",
+                    })}
+                  </>
+                ) : isChecking ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    {t("settings.checking")}
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    {t("settings.checkForUpdates")}
+                  </>
+                )}
+              </Button>
+              {downloadStatusText && (
+                <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+                  {downloadStatusText}
+                </span>
               )}
-            </Button>
-            {/* 进度文案放按钮外：贴主按钮底色对比度不足，且数字长短变化会撑动
-                按钮宽度。span 再给固定最小宽度（19ch）：`9%`↔`100%`、KB/s↔MB/s
-                这类长短变化在已知总量场景全被吃进盒子里——按钮与图标全程不动，
-                不随每个进度事件横移。 */}
-            {downloadStatusText && (
-              <span className="min-w-[19ch] whitespace-nowrap text-xs tabular-nums text-muted-foreground">
-                {downloadStatusText}
-              </span>
-            )}
+            </div>
           </div>
         </div>
 
