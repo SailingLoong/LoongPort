@@ -3655,7 +3655,7 @@
     },
     "onboarding": {
       "domain": "中継サービスの URL",
-      "domainPlaceholder": "例: panel.example",
+      "domainPlaceholder": "bestapi.store",
       "browse": "中継サービスを探す",
       "searchDirectory": "ディレクトリを検索",
       "noMatch": "一致するサービスがありません",

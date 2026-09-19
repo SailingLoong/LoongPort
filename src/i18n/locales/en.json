@@ -3655,7 +3655,7 @@
     },
     "onboarding": {
       "domain": "Relay URL",
-      "domainPlaceholder": "e.g. panel.example",
+      "domainPlaceholder": "bestapi.store",
       "browse": "Browse relay directory",
       "searchDirectory": "Search directory",
       "noMatch": "No matching services",
