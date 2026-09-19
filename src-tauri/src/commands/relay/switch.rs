@@ -94,6 +94,7 @@ pub(crate) async fn switch_tier_model_command(
         &app_type,
         user_choice,
         chatgpt_app::needs_user_attention(),
+        crate::services::provider::is_app_taken_over(&app_handle.state::<AppState>(), &app_type),
     ) {
         let state = app_handle.state::<AppState>();
         let target_name = state
@@ -118,8 +119,20 @@ pub(crate) fn should_request_switch_confirmation(
     app_type: &AppType,
     user_choice: Option<bool>,
     needs_attention: bool,
+    taken_over: bool,
 ) -> bool {
-    matches!(app_type, AppType::Codex) && user_choice.is_none() && needs_attention
+    // 确认弹窗的唯一职责是授权「退你正开着的 ChatGPT」。代管（takeover）态的
+    // 切换是热切换——不写 CLI 配置（见 [`ProviderService::switch`] 的
+    // `is_app_taken_over` 分支），退了重开 codex 也不会加载任何新东西，
+    // 弹窗问的就是一件不需要做的事 ⇒ 一并跳过。
+    !taken_over && matches!(app_type, AppType::Codex) && user_choice.is_none() && needs_attention
+}
+
+/// 代管态下即使传了 `quit_chatgpt=true`（确认弹窗时代留下的入参）也不退：
+/// 热切换不碰 CLI 配置，退/重开纯属打断。判据与 `ProviderService::switch`
+/// 内部同源（[`crate::services::provider::is_app_taken_over`]），别在这层再判一份。
+fn wants_chatgpt_quit(quit_chatgpt: bool, app_type: &AppType, taken_over: bool) -> bool {
+    !taken_over && should_quit_chatgpt(quit_chatgpt, app_type)
 }
 
 pub(crate) async fn switch_tier_command(
@@ -137,6 +150,7 @@ pub(crate) async fn switch_tier_command(
         &app_type,
         user_choice,
         chatgpt_app::needs_user_attention(),
+        crate::services::provider::is_app_taken_over(&state, &app_type),
     ) {
         return Ok(SwitchTierCommandResult::ConfirmationRequired {
             target_name: provider.name,
@@ -230,7 +244,11 @@ async fn switch_tier_impl(
     app_type: AppType,
     quit_chatgpt: bool,
 ) -> Result<SwitchTierResult, AppError> {
-    let quit_chatgpt = should_quit_chatgpt(quit_chatgpt, &app_type);
+    let quit_chatgpt = wants_chatgpt_quit(
+        quit_chatgpt,
+        &app_type,
+        crate::services::provider::is_app_taken_over(&app_handle.state::<AppState>(), &app_type),
+    );
     // `AppType` 没派生 Copy（上游结构，别为此改它），而下面 `ProviderService::list`
     // 会把它 move 掉 —— 事件那一步要用，先留一份。
     let app_type_for_event = app_type.clone();
@@ -351,17 +369,47 @@ mod tests {
         assert!(should_request_switch_confirmation(
             &AppType::Codex,
             None,
-            true
+            true,
+            false
         ));
         assert!(!should_request_switch_confirmation(
             &AppType::Claude,
             None,
-            true
+            true,
+            false
         ));
         assert!(!should_request_switch_confirmation(
             &AppType::Codex,
             Some(false),
+            true,
+            false
+        ));
+    }
+
+    /// 代管（热切换）态：确认弹窗与退/重开一并跳过 —— 热切换不写 CLI 配置，
+    /// 退了重开 codex 也不会加载任何新东西，两样都是纯打断。
+    /// 回归背景：v6.26.0 前代管态切档/换模型仍弹「退出并切换」并真的退重开。
+    #[test]
+    fn takeover_hot_switch_skips_confirmation_and_quit() {
+        // codex + 用户未选 + ChatGPT 在跑：非代管 ⇒ 弹确认（旧状照旧）。
+        assert!(should_request_switch_confirmation(
+            &AppType::Codex,
+            None,
+            true,
+            false
+        ));
+        // 同样条件下代管 ⇒ 不弹。
+        assert!(!should_request_switch_confirmation(
+            &AppType::Codex,
+            None,
+            true,
             true
         ));
+        // 用户已确认要退（quit=true），代管 ⇒ 也不退。
+        assert!(!wants_chatgpt_quit(true, &AppType::Codex, true));
+        // 非代管照旧退；非 codex 照旧不退。
+        assert!(wants_chatgpt_quit(true, &AppType::Codex, false));
+        assert!(!wants_chatgpt_quit(true, &AppType::Claude, false));
+        assert!(!wants_chatgpt_quit(false, &AppType::Codex, false));
     }
 }
