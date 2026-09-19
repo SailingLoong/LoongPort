@@ -213,9 +213,13 @@ describe("ServicesPage 账号卡活动状态行", () => {
       return (
         <button
           onClick={() =>
-            run("login:41", () => new Promise<void>((resolve) => {
-              release = resolve;
-            }))
+            run(
+              "login:41",
+              () =>
+                new Promise<void>((resolve) => {
+                  release = resolve;
+                }),
+            )
           }
         >
           start
@@ -227,7 +231,11 @@ describe("ServicesPage 账号卡活动状态行", () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <ServicesPage appId="gemini" onOpenApp={() => {}} onOpenAddHub={() => {}} />
+        <ServicesPage
+          appId="gemini"
+          onOpenApp={() => {}}
+          onOpenAddHub={() => {}}
+        />
         <Probe />
       </QueryClientProvider>,
     );
@@ -272,7 +280,11 @@ describe("ServicesPage 账号卡活动状态行", () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <ServicesPage appId="gemini" onOpenApp={() => {}} onOpenAddHub={() => {}} />
+        <ServicesPage
+          appId="gemini"
+          onOpenApp={() => {}}
+          onOpenAddHub={() => {}}
+        />
         <Probe />
       </QueryClientProvider>,
     );
