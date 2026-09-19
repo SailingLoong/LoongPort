@@ -140,13 +140,13 @@ describe("AboutSection manual update download progress", () => {
     });
 
     const updating = screen.getByRole("button", { name: /settings.updating/ });
-    // 进度文案在按钮外的独立文本上（对比度 + 按钮宽度稳定），按钮本体只有转圈与「更新中」。
+    // 进度文案在按钮外的独立文本上（按钮正下方一行——2026-09-19 定调：
+    // 不放右边，按钮与同行图标水平位置全程固定），按钮本体只有转圈与「更新中」。
     expect(updating).not.toHaveTextContent("20%");
     const status = screen.getByText(/20% · 4\.0 MB\/s/);
     expect(updating).not.toContainElement(status);
-    // 固定最小宽度：`9%`↔`100%`、KB/s↔MB/s 的长短变化全被盒子吃掉，
-    // 按钮和图标不随进度事件横移（2026-09-17 用户报「icon 飘」）。
-    expect(status.className).toContain("min-w-[19ch]");
+    // tabular-nums 防数字本身跳宽；不再需要 min-w 固宽（不在同一行，
+    // 长短变化撑不到按钮——min-w-[19ch] 是旧「同行右放」布局的遗产）。
     expect(status.className).toContain("tabular-nums");
 
     nowSpy.mockRestore();
