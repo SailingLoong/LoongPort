@@ -3636,6 +3636,8 @@
       "relay": "中継サービス",
       "vendor": "公式 API",
       "detail": "アカウント詳細",
+      "importingTiers": "ティアを自動取り込み中…",
+      "importFailedLine": "取り込みに失敗しました：{{reason}}",
       "application": "アプリ",
       "openApp": "アプリ設定を開く",
       "loadFailed": "アカウントを読み込めません。再試行してください。",
