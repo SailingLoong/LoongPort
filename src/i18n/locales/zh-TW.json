@@ -3928,7 +3928,6 @@
       "official_account": "此官方帳號僅支援手動切換",
       "model_incompatible": "已略過：不支援目前選擇的模型",
       "circuit_open": "暫時略過：等待連線恢復",
-      "before_current": "位於目前檔位之前，不參與後續故障切換",
       "current_official_account": "目前使用官方登入，不進行自動故障切換",
       "native_configuration": "使用應用程式原生登入，不參與自動故障切換",
       "blocked": "已屏蔽：不參與自動切換"
@@ -3941,6 +3940,7 @@
     "pendingChanges": "變更尚未生效",
     "applyOrderNoSwitchableTier": "已套用順序；目前篩選下沒有可切換的可用檔位",
     "blockTier": "屏蔽",
+    "resetTierErrors": "清除錯誤記錄",
     "unblockTier": "取消屏蔽",
     "discardOrder": "取消",
     "orderProfiles": "配置檔",

@@ -691,7 +691,9 @@ async fn native_official_is_excluded_before_retry_budget() {
         response_text(send_message(fx.port, "native-current-skip").await).await,
         "served-by-expensive"
     );
-    assert_eq!(fx.cheap.hits(), 1, "must not wrap to earlier priority");
+    // 重新路由从链头扫：排在当前档之前的 cheap 会被重试（它的熔断器没开——
+    // 错误才是跳过理由，位置不是），失败后继续向后走到 expensive。
+    assert_eq!(fx.cheap.hits(), 2, "wrap to chain top until breaker opens");
     fx.server.stop().await.unwrap();
 }
 

@@ -100,12 +100,14 @@ impl ProviderRouter {
         } else if !enabled {
             return Err(AppError::NoProvidersConfigured);
         }
-        let start = current
-            .as_ref()
-            .and_then(|p| chain.iter().position(|entry| entry.id == p.id))
-            .map_or(0, |index| index + 1);
+        // 候选 = 当前档（健康时钉住首位，保护会话与提示词缓存）+ **从链头全量扫**：
+        // 重新路由一律从用户排的第一名开始往后找，只有屏蔽/熔断等真实错误才跳过
+        // ——位置本身不是跳过理由（2026-09-19 用户定调，废除「当前档之前不参与」）。
         let blocked = application_routing::blocked_tier_ids(&self.db, app_type);
-        for provider in chain.into_iter().skip(start) {
+        for provider in chain.into_iter() {
+            if Some(provider.id.as_str()) == current_id.as_deref() {
+                continue; // 已钉在候选首位，不重复入列
+            }
             if application_routing::fallback_exclusion_with(&self.db, app_type, &provider, &blocked)
                 .is_none()
                 && self.tier_and_account_available(app_type, &provider).await
@@ -738,7 +740,9 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn application_routing_honors_current_and_only_later_priorities() {
+    async fn application_routing_walks_from_chain_top_after_current() {
+        // 重新路由从链头扫（2026-09-19 用户定调）：当前档钉首位（会话亲和），
+        // 其余候选=用户顺序全量——当前档**之前**的档位一样参与故障切换。
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
         for (index, id) in ["a", "b", "c"].iter().enumerate() {
@@ -755,13 +759,14 @@ mod tests {
         let selected = router.select_providers("claude").await.unwrap();
         assert_eq!(
             selected.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["b", "c"]
+            vec!["b", "a", "c"],
+            "当前档(b)钉首位，其余按用户顺序从链头排队——a 在 b 之前也参与"
         );
         db.set_current_provider("claude", "c").unwrap();
         let selected = router.select_providers("claude").await.unwrap();
         assert_eq!(
             selected.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["c"]
+            vec!["c", "a", "b"]
         );
     }
 
@@ -1029,8 +1034,11 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
         let providers = router.select_providers("claude").await.unwrap();
 
-        assert_eq!(providers.len(), 1);
+        // 当前档钉首位（会话亲和）；排在它之前的 b 也是后备候选——
+        // 重新路由从链头扫，位置不是跳过理由（2026-09-19 用户定调）。
+        assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].id, "a");
+        assert_eq!(providers[1].id, "b");
     }
 
     #[tokio::test]
@@ -1059,8 +1067,10 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
         let providers = router.select_providers("claude").await.unwrap();
 
-        assert_eq!(providers.len(), 1);
+        // 链外当前档钉首位 + 链内全量按用户顺序排队（从链头扫）。
+        assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].id, "a");
+        assert_eq!(providers[1].id, "b");
     }
 
     /// 队列里的托管档位必须能被选路（自动模式选路的地基）。
@@ -1334,12 +1344,14 @@ mod tests {
             .select_providers("codex")
             .await
             .unwrap();
+        // official 仍被排除（本测试的立意）；排在当前档之前的 fallback
+        // 照常参与后备——位置不是跳过理由（2026-09-19 用户定调）。
         assert_eq!(
             providers
                 .iter()
                 .map(|provider| provider.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["third-party"]
+            vec!["third-party", "fallback"]
         );
     }
 

@@ -21,6 +21,7 @@ import {
   Ban,
   Check,
   GripVertical,
+  RotateCcw,
   Settings2,
 } from "lucide-react";
 import type { ApplicationConfiguration } from "@/lib/api/applicationOverview";
@@ -129,6 +130,7 @@ interface Props {
   onSelect: (item: ApplicationConfiguration) => void;
   onOpenAccount: (account: AccountRoute) => void;
   onBlockTier: (providerId: string, blocked: boolean) => void;
+  onResetTierErrors: (providerId: string) => void;
 }
 export function ApplicationTierTable(props: Props) {
   const { t } = useTranslation();
@@ -257,6 +259,9 @@ export function ApplicationTierTable(props: Props) {
                   tier={metrics.get(item.providerId)}
                   failoverEnabled={props.failoverEnabled}
                   orderPending={props.orderPending}
+                  onResetTierErrors={(providerId) =>
+                    props.onResetTierErrors(providerId)
+                  }
                   additive={props.additive}
                   current={
                     props.additive
@@ -295,6 +300,7 @@ function TierRow({
   onSelect,
   onOpenAccount,
   onBlockTier,
+  onResetTierErrors,
 }: {
   item: ApplicationConfiguration;
   /** 列表位置号；null = 被屏蔽，不占号（下一行顶上）。 */
@@ -309,6 +315,7 @@ function TierRow({
   onSelect: Props["onSelect"];
   onOpenAccount: Props["onOpenAccount"];
   onBlockTier: Props["onBlockTier"];
+  onResetTierErrors: Props["onResetTierErrors"];
 }) {
   const { t } = useTranslation();
   const {
@@ -459,6 +466,22 @@ function TierRow({
               onClick={() => onBlockTier(item.providerId, !blocked)}
             >
               <Ban className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {/* 清除错误记录（用户显式动作）：熔断器与健康行一起置空，立刻重新
+              参与选路——错误只跳过、位置永不动（2026-09-19 用户定调）。 */}
+          {(tier?.skipReason === "circuit_open" ||
+            tier?.lastError ||
+            (tier?.consecutiveFailures ?? 0) > 0) && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              aria-label={t("applications.resetTierErrors")}
+              title={t("applications.resetTierErrors")}
+              onClick={() => onResetTierErrors(item.providerId)}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
             </Button>
           )}
           {/* 模型验证入口：模块自持（下线/档位不可验证时不渲染）。 */}
