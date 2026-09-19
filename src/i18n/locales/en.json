@@ -353,6 +353,10 @@
         "running": "Running",
         "stopped": "Stopped"
       },
+      "diagnostics": {
+        "title": "Diagnostics & troubleshooting",
+        "description": "Low-frequency config for connectivity checks, logging, and request rectifying"
+      },
       "connectivityCheck": {
         "title": "Connectivity Check Settings",
         "description": "Configure timeout, retries, and the slow-response threshold for provider reachability checks"
@@ -2478,7 +2482,8 @@
     "uninstallPiCleanupIncomplete": "Pi cleanup could not be completed. Check the Pi Skills directory manually for a leftover copy.",
     "installedSearchPlaceholder": "Search installed skill name, description, or repo...",
     "installedSearchAriaLabel": "Search installed skills",
-    "noInstalledSearchResults": "No installed skills match your search"
+    "noInstalledSearchResults": "No installed skills match your search",
+    "storageSyncSettings": "Skill storage & sync"
   },
   "deeplink": {
     "confirmImport": "Confirm Import Provider",
@@ -3824,6 +3829,7 @@
     "services": "Services & accounts",
     "image": "Images",
     "records": "Activity",
+    "usage": "Usage",
     "resources": "Resources",
     "plaza": "Relay directory",
     "help": "Help",

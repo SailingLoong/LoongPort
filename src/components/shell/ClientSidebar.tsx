@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AppWindow,
+  BarChart3,
   CircleHelp,
   Compass,
   Image,
@@ -34,6 +35,7 @@ const items = [
     icon: History,
     key: "records",
   },
+  { view: "usage", icon: BarChart3, key: "usage" },
   {
     view: "resources",
     icon: Plug,

@@ -7,10 +7,20 @@ import {
   RefreshCw,
   Loader2,
   Search,
+  Settings2,
+  ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { SkillStorageLocationSettings } from "@/components/settings/SkillStorageLocationSettings";
+import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
+import { useSettings } from "@/hooks/useSettings";
 import {
   type ImportSkillSelection,
   type SkillBackupEntry,
@@ -107,6 +117,8 @@ const UnifiedSkillsPanel = React.forwardRef<
   const checkUpdatesLockRef = React.useRef(false);
 
   const { data: skills, isLoading } = useInstalledSkills();
+  // Skill 专属设置（存储位置/同步方式）的值与保存通道。
+  const { settings, autoSaveSettings, updateSettings } = useSettings();
   const {
     data: skillBackups = [],
     refetch: refetchSkillBackups,
@@ -715,6 +727,37 @@ const UnifiedSkillsPanel = React.forwardRef<
           )}
         </div>
       </ScrollArea>
+
+      {/* Skill 专属设置（存储位置 / 同步方式）：从设置页常规区挪来 ——
+          改它们的场景是「在管 skills 的时候」，就近才找得到。默认收起。 */}
+      <div className="shrink-0 pt-3">
+        <Collapsible>
+          <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg border border-border-default bg-background/50 px-4 py-2.5 text-sm hover:bg-muted/50">
+            <Settings2 className="h-4 w-4 text-muted-foreground" />
+            <span className="font-medium">
+              {t("skills.storageSyncSettings")}
+            </span>
+            <ChevronDown className="ml-auto h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="mt-3 space-y-5 rounded-lg border border-border-default bg-background/50 px-4 py-4">
+              <SkillStorageLocationSettings
+                value={settings?.skillStorageLocation ?? "loongport"}
+                installedCount={skills?.length ?? 0}
+                onMigrated={(location) =>
+                  updateSettings({ skillStorageLocation: location })
+                }
+              />
+              <SkillSyncMethodSettings
+                value={settings?.skillSyncMethod ?? "auto"}
+                onChange={(method) =>
+                  autoSaveSettings({ skillSyncMethod: method })
+                }
+              />
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      </div>
 
       {confirmDialog && (
         <ConfirmDialog

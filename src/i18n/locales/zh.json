@@ -353,6 +353,10 @@
         "running": "运行中",
         "stopped": "已停止"
       },
+      "diagnostics": {
+        "title": "诊断与排障",
+        "description": "连通性检查、日志与请求修正的低频配置"
+      },
       "connectivityCheck": {
         "title": "连通检测配置",
         "description": "配置供应商地址探测的超时、重试和较慢阈值"
@@ -2478,7 +2482,8 @@
     "uninstallPiCleanupIncomplete": "Pi 清理未能完成，请手动检查 Pi Skills 目录中是否有残留副本。",
     "installedSearchPlaceholder": "搜索已安装技能的名称、描述或仓库...",
     "installedSearchAriaLabel": "搜索已安装技能",
-    "noInstalledSearchResults": "未找到匹配的已安装技能"
+    "noInstalledSearchResults": "未找到匹配的已安装技能",
+    "storageSyncSettings": "Skill 存储与同步"
   },
   "deeplink": {
     "confirmImport": "确认导入供应商配置",
@@ -3824,6 +3829,7 @@
     "services": "服务与账号",
     "image": "生图",
     "records": "使用记录",
+    "usage": "用量",
     "resources": "扩展资源",
     "plaza": "中转站广场",
     "help": "帮助",

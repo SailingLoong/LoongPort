@@ -11,12 +11,9 @@ import {
   Save,
   FolderSearch,
   Database,
-  Download,
   Cloud,
-  ScrollText,
   HardDriveDownload,
   FlaskConical,
-  Zap,
   Globe,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -40,8 +37,6 @@ import { LanguageSettings } from "@/components/settings/LanguageSettings";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { WindowSettings } from "@/components/settings/WindowSettings";
 import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
-import { SkillStorageLocationSettings } from "@/components/settings/SkillStorageLocationSettings";
-import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
 import { PlazaSettings } from "@/components/settings/PlazaSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
@@ -55,11 +50,9 @@ import { SecretProtectionSettings } from "@/components/settings/SecretProtection
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConnectivityCheckConfigPanel } from "@/components/usage/ConnectivityCheckConfigPanel";
-import { UsageDashboard } from "@/components/usage/UsageDashboard";
 import { LogConfigPanel } from "@/components/settings/LogConfigPanel";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import { CodexAuthSettings } from "@/components/settings/CodexAuthSettings";
-import { useInstalledSkills } from "@/hooks/useSkills";
 import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
 import { useTranslation } from "react-i18next";
@@ -111,8 +104,6 @@ export function SettingsPage({
     clearSelection,
     resetStatus,
   } = useImportExport({ onImportSuccess });
-
-  const { data: installedSkills } = useInstalledSkills();
 
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
@@ -231,7 +222,7 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full mb-6 shrink-0 grid-cols-6">
+          <TabsList className="grid w-full mb-6 shrink-0 grid-cols-5">
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
             </TabsTrigger>
@@ -244,7 +235,6 @@ export function SettingsPage({
             <TabsTrigger value="advanced">
               {t("settings.tabAdvanced")}
             </TabsTrigger>
-            <TabsTrigger value="usage">{t("usage.title")}</TabsTrigger>
             <TabsTrigger value="about">{t("common.about")}</TabsTrigger>
           </TabsList>
 
@@ -265,19 +255,8 @@ export function SettingsPage({
                       settings={settings}
                       onChange={handleAutoSave}
                     />
-                    <SkillStorageLocationSettings
-                      value={settings.skillStorageLocation ?? "loongport"}
-                      installedCount={installedSkills?.length ?? 0}
-                      onMigrated={(location) =>
-                        updateSettings({ skillStorageLocation: location })
-                      }
-                    />
-                    <SkillSyncMethodSettings
-                      value={settings.skillSyncMethod ?? "auto"}
-                      onChange={(method) =>
-                        handleAutoSave({ skillSyncMethod: method })
-                      }
-                    />
+                    {/* skill 存储位置 / 同步方式两块已挪去 skills 管理页就近
+                        （改它们的场景是「在管 skills 的时候」）。 */}
                     <CodexAuthSettings
                       settings={settings}
                       onChange={handleAutoSave}
@@ -394,32 +373,9 @@ export function SettingsPage({
                         </AccordionContent>
                       </AccordionItem>
 
-                      <AccordionItem
-                        value="ccSwitchImport"
-                        className="rounded-xl glass-card overflow-hidden"
-                      >
-                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                          <div className="flex items-center gap-3">
-                            <Download className="h-5 w-5 text-blue-500" />
-                            <div className="text-left">
-                              <h3 className="text-base font-semibold">
-                                {t("settings.ccSwitchImport.title", {
-                                  defaultValue: "从 cc-switch 导入",
-                                })}
-                              </h3>
-                              <p className="text-sm text-muted-foreground font-normal">
-                                {t("settings.ccSwitchImport.description", {
-                                  defaultValue:
-                                    "把 cc-switch 的配置一次性复制过来，不动 cc-switch 那边",
-                                })}
-                              </p>
-                            </div>
-                          </div>
-                        </AccordionTrigger>
-                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                          <CcSwitchImportSection />
-                        </AccordionContent>
-                      </AccordionItem>
+                      {/* 一次性迁移入口：组件自带 AccordionItem，只在检测到 cc-switch
+                          源库且可导入时才渲染 —— 没装过的用户不占一眼。 */}
+                      <CcSwitchImportSection />
 
                       <AccordionItem
                         value="backup"
@@ -481,8 +437,10 @@ export function SettingsPage({
                         </AccordionContent>
                       </AccordionItem>
 
+                      {/* 排障/调参类的低频配置合并成一格：三个面板一年动不了几次，
+                          各占一个抽屉把高频项（数据/备份/云同步）挤远了。 */}
                       <AccordionItem
-                        value="connectivityCheck"
+                        value="diagnostics"
                         className="rounded-xl glass-card overflow-hidden"
                       >
                         <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
@@ -490,62 +448,35 @@ export function SettingsPage({
                             <FlaskConical className="h-5 w-5 text-emerald-500" />
                             <div className="text-left">
                               <h3 className="text-base font-semibold">
+                                {t("settings.advanced.diagnostics.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.diagnostics.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <div className="space-y-6">
+                            <section className="space-y-3">
+                              <h4 className="text-sm font-medium">
                                 {t("settings.advanced.connectivityCheck.title")}
-                              </h3>
-                              <p className="text-sm text-muted-foreground font-normal">
-                                {t(
-                                  "settings.advanced.connectivityCheck.description",
-                                )}
-                              </p>
-                            </div>
-                          </div>
-                        </AccordionTrigger>
-                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                          <ConnectivityCheckConfigPanel />
-                        </AccordionContent>
-                      </AccordionItem>
-
-                      <AccordionItem
-                        value="logConfig"
-                        className="rounded-xl glass-card overflow-hidden"
-                      >
-                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                          <div className="flex items-center gap-3">
-                            <ScrollText className="h-5 w-5 text-cyan-500" />
-                            <div className="text-left">
-                              <h3 className="text-base font-semibold">
+                              </h4>
+                              <ConnectivityCheckConfigPanel />
+                            </section>
+                            <section className="space-y-3">
+                              <h4 className="text-sm font-medium">
                                 {t("settings.advanced.logConfig.title")}
-                              </h3>
-                              <p className="text-sm text-muted-foreground font-normal">
-                                {t("settings.advanced.logConfig.description")}
-                              </p>
-                            </div>
-                          </div>
-                        </AccordionTrigger>
-                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                          <LogConfigPanel />
-                        </AccordionContent>
-                      </AccordionItem>
-
-                      <AccordionItem
-                        value="rectifier"
-                        className="rounded-xl glass-card overflow-hidden"
-                      >
-                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                          <div className="flex items-center gap-3">
-                            <Zap className="h-5 w-5 text-purple-500" />
-                            <div className="text-left">
-                              <h3 className="text-base font-semibold">
+                              </h4>
+                              <LogConfigPanel />
+                            </section>
+                            <section className="space-y-3">
+                              <h4 className="text-sm font-medium">
                                 {t("settings.advanced.rectifier.title")}
-                              </h3>
-                              <p className="text-sm text-muted-foreground font-normal">
-                                {t("settings.advanced.rectifier.description")}
-                              </p>
-                            </div>
+                              </h4>
+                              <RectifierConfigPanel />
+                            </section>
                           </div>
-                        </AccordionTrigger>
-                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                          <RectifierConfigPanel />
                         </AccordionContent>
                       </AccordionItem>
 
@@ -577,15 +508,6 @@ export function SettingsPage({
 
               <TabsContent value="about" className="mt-0">
                 <AboutSection isPortable={isPortable} />
-              </TabsContent>
-
-              <TabsContent value="usage" className="mt-0">
-                <UsageDashboard
-                  refreshIntervalMs={settings?.usageDashboardRefreshIntervalMs}
-                  onRefreshIntervalChange={(usageDashboardRefreshIntervalMs) =>
-                    handleAutoSave({ usageDashboardRefreshIntervalMs })
-                  }
-                />
               </TabsContent>
             </div>
 

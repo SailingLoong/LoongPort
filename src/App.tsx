@@ -83,6 +83,7 @@ import { ProviderList } from "@/components/providers/ProviderList";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
+import { UsagePage } from "@/components/usage/UsagePage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
 import { AddHubPage, type AddHubTab } from "@/components/relay/AddHubPage";
@@ -1075,13 +1076,12 @@ function App() {
               kind={currentView}
               appId={sharedFeatureApp}
               onNavigate={setCurrentView}
-              onUsage={() => {
-                setSettingsDefaultTab("usage");
-                setCurrentView("settings");
-              }}
+              onUsage={() => setCurrentView("usage")}
               onLaunchDashboard={() => void openHermesWebUI()}
             />
           );
+        case "usage":
+          return <UsagePage />;
         case "settings":
           return (
             <SettingsPage
@@ -1387,6 +1387,7 @@ function App() {
                 <h1 className="text-lg font-semibold">
                   {currentView === "services" && t("client.services")}
                   {currentView === "records" && t("client.records")}
+                  {currentView === "usage" && t("usage.title")}
                   {currentView === "resources" && t("client.resources")}
                   {currentView === "plaza" && t("client.plaza")}
                   {currentView === "settings" && t("settings.title")}
