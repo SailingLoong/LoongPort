@@ -65,7 +65,10 @@ export function useApplicationRouting(appId: AppId) {
       }
       await applicationRoutingApi.setFailover(appId, enabled);
     },
-    onSuccess: async () => {
+    onSuccess: async (_data, enabled) => {
+      // 开启即生效（未初始化的链回落=当前全量显示序，开关同时带起代理与接管）；
+      // toast 只报「已生效」——干净视图下没有可应用的挂起，弹「尚未生效」是假话。
+      if (enabled) toast.success(t("applications.failoverEnabled"));
       await Promise.all([
         refresh(),
         client.invalidateQueries({ queryKey: proxyKeys.status }),

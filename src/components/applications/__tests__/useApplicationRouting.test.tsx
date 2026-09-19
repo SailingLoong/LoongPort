@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   start: vi.fn(),
   setTakeover: vi.fn(),
   error: vi.fn(),
+  success: vi.fn(),
 }));
 vi.mock("@/lib/api/applicationRouting", () => ({
   applicationRoutingApi: {
@@ -29,7 +30,9 @@ vi.mock("@/lib/api/proxy", () => ({
   },
 }));
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
-vi.mock("sonner", () => ({ toast: { error: mocks.error } }));
+vi.mock("sonner", () => ({
+  toast: { error: mocks.error, success: mocks.success },
+}));
 let client: QueryClient;
 const wrapper = ({ children }: { children: ReactNode }) => (
   <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -73,6 +76,8 @@ describe("application routing controls", () => {
     expect(mocks.setTakeover.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.failover.mock.invocationCallOrder[0],
     );
+    // 开启即生效（链回落=当前显示序）：toast 报「已生效」，不弹「尚未生效」。
+    expect(mocks.success).toHaveBeenCalledWith("applications.failoverEnabled");
   });
   it("disabling changes only fallback permission", async () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
