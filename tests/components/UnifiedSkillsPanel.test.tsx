@@ -110,6 +110,16 @@ vi.mock("@/hooks/useSkills", () => ({
   }),
 }));
 
+// 面板底部的「Skill 存储与同步」设置区读 settings —— mock 掉避免真拉
+// QueryClient/后端（设置值用缺省即可，测试不驱动这块）。
+vi.mock("@/hooks/useSettings", () => ({
+  useSettings: () => ({
+    settings: null,
+    autoSaveSettings: vi.fn().mockResolvedValue({ requiresRestart: false }),
+    updateSettings: vi.fn(),
+  }),
+}));
+
 type InstalledSkillOverrides = Omit<Partial<InstalledSkill>, "apps"> & {
   apps?: Partial<InstalledSkill["apps"]>;
 };

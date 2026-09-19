@@ -6,6 +6,7 @@ export type ClientView =
   | "services"
   | "image"
   | "records"
+  | "usage"
   | "resources"
   | "plaza"
   | "settings"
@@ -28,6 +29,7 @@ export const CLIENT_VIEWS: ClientView[] = [
   "services",
   "image",
   "records",
+  "usage",
   "resources",
   "plaza",
   "settings",

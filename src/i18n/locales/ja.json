@@ -353,6 +353,10 @@
         "running": "実行中",
         "stopped": "停止中"
       },
+      "diagnostics": {
+        "title": "診断とトラブルシューティング",
+        "description": "接続性チェック・ログ・リクエスト修正の低頻度設定"
+      },
       "connectivityCheck": {
         "title": "接続チェック設定",
         "description": "プロバイダー接続チェックのタイムアウト、リトライ、低速判定しきい値を設定"
@@ -2478,7 +2482,8 @@
     "uninstallPiCleanupIncomplete": "Pi のクリーンアップを完了できませんでした。Pi Skills ディレクトリにコピーが残っていないか手動で確認してください。",
     "installedSearchPlaceholder": "インストール済みスキルの名前、説明、リポジトリを検索...",
     "installedSearchAriaLabel": "インストール済みスキルを検索",
-    "noInstalledSearchResults": "検索に一致するインストール済みスキルがありません"
+    "noInstalledSearchResults": "検索に一致するインストール済みスキルがありません",
+    "storageSyncSettings": "Skill ストレージと同期"
   },
   "deeplink": {
     "confirmImport": "プロバイダーのインポートを確認",
@@ -3824,6 +3829,7 @@
     "services": "サービスとアカウント",
     "image": "画像生成",
     "records": "利用履歴",
+    "usage": "使用量",
     "resources": "拡張機能",
     "plaza": "中継サービス一覧",
     "help": "ヘルプ",
