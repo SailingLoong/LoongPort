@@ -94,6 +94,7 @@ beforeEach(() => {
   state.setFailover.mockResolvedValue(undefined);
   state.setOrder.mockResolvedValue(undefined);
   state.blockTier.mockResolvedValue(undefined);
+  state.resetTierErrors.mockResolvedValue(undefined);
   state.data = {
     configurations: [
       config("a", "Standard", true),
