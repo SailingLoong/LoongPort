@@ -1,23 +1,22 @@
 //! 订阅限额的「重置窗口」：一个档位在哪些时间窗内各有多少额度、什么时候重置。
 //!
-//! ## 数据从哪来（零新增请求）
+//! ## 两个数据源，谁是真源（2026-09-20 真站实测定调）
 //!
-//! 分组限额在 `GET /groups/available` 的响应里（`daily/weekly/monthly_limit_usd`），
-//! 用量与窗口起点在 `GET /keys` 的响应里（`usage_5h/1d/7d` + `window_*_start`）——
-//! 两者 provision 本来就要拉，这里只是把字段接出来。
+//! - **订阅型分组**：用量与窗口起点在 `GET /api/v1/subscriptions`（服务端
+//!   `user_subscriptions` 表，按 用户×分组 跟踪日/周/月三窗）。api_keys 上的
+//!   `usage_*` / `window_*_start` **不是**这一路的数据——它们只服务 key 级限额
+//!   （没有人给 key 设独立限额的站点上恒为零）。
+//! - **key 级限额**（`rate_limit_* > 0`）：用 api_keys 自己的窗口字段。
 //!
-//! ## 限额的裁决序：key 覆盖分组
-//!
-//! key 的 `rate_limit_*` 大于 0 时覆盖分组限额（服务端语义：key 级限额优先），
-//! 为 0 表示沿用分组。5 小时窗只有 key 级限额；月限额只有分组级（key 侧没有
-//! 月窗用量跟踪）。
+//! 两者都来自 provision 本来就要拉的响应之外**多一个** `/subscriptions` 请求，
+//! 与专属倍率（`/groups/rates`）同款的一次 provision 一个请求的量级。
 //!
 //! ## 重置时刻怎么算（不猜服务端的锚点策略）
 //!
 //! 服务端给的是「当前窗口的起点」：`reset_at = window_start + 窗口时长`。
-//! 窗口还没开始过（起点 null、用量 0）就没有可算的重置——如实返回 `None`，
-//! 不按「自然日边界」之类的假设编一个。月窗没有窗口跟踪，重置时刻同样
-//! `None`（限额照常显示）。
+//! 窗口还没开始过（起点 null）就没有可算的重置——如实返回 `None`，
+//! 不按「自然日边界」之类的假设编一个。月窗的时长是**一个日历月**
+//! （`checked_add_months`），起点随订阅锚定漂移。
 //!
 //! ## 横向扩展位：别的站点后端
 //!
@@ -30,7 +29,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::sub2api::{ApiKey, Group};
+use super::sub2api::{ApiKey, Group, UserSubscription};
 
 /// 一条时间窗（serde camelCase：进 settings JSON 与前端 DTO 用同一形状）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +38,9 @@ pub struct SubscriptionWindow {
     pub kind: WindowKind,
     /// 窗口限额（美元）。
     pub limit_usd: f64,
-    /// 已用（美元）。`None` = 该窗口没有用量跟踪（月窗）。
+    /// 已用（美元）。`None` = 该窗口没有用量跟踪。
     pub used_usd: Option<f64>,
-    /// 重置时刻（epoch 秒）。`None` = 窗口未开始 / 无窗口跟踪，算不出来。
+    /// 重置时刻（epoch 秒）。`None` = 窗口未开始，算不出来。
     pub reset_at: Option<i64>,
 }
 
@@ -54,12 +53,16 @@ pub enum WindowKind {
     Monthly,
 }
 
-const FIVE_HOURS_SECS: i64 = 5 * 3600;
-const DAY_SECS: i64 = 24 * 3600;
-const WEEK_SECS: i64 = 7 * DAY_SECS;
-
-/// 分组 × 那把 key 的用量 → 该档位的窗口列表（无限额的窗口不出现）。
-pub fn windows_for(group: &Group, key: &ApiKey) -> Vec<SubscriptionWindow> {
+/// 分组 × key × 用户订阅 → 该档位的窗口列表（无限额的窗口不出现）。
+///
+/// 裁决序：**订阅行在就用订阅行**（订阅型分组的真源）；否则落回 key 自己的
+/// 窗口字段（只有设了 key 级限额的站点会有值）。5 小时窗只有 key 级一种，
+/// 两种情况下都看 key 限额。
+pub fn windows_for(
+    group: &Group,
+    key: &ApiKey,
+    subscription: Option<&UserSubscription>,
+) -> Vec<SubscriptionWindow> {
     let mut windows = Vec::new();
     let push = |windows: &mut Vec<SubscriptionWindow>,
                 kind: WindowKind,
@@ -76,34 +79,73 @@ pub fn windows_for(group: &Group, key: &ApiKey) -> Vec<SubscriptionWindow> {
             });
         }
     };
+
+    // 5 小时窗：key 级限额独有。
     push(
         &mut windows,
         WindowKind::FiveHour,
         key.rate_limit_5h,
         Some(key.usage_5h),
-        key.window_5h_start.map(|s| (s as i64) + FIVE_HOURS_SECS),
+        key.window_5h_start.map(|s| (s as i64) + 5 * 3600),
     );
+
+    let group_limit = |key_limit: f64, group_limit: Option<f64>| {
+        if key_limit > 0.0 {
+            key_limit
+        } else {
+            group_limit.unwrap_or(0.0)
+        }
+    };
+
+    if let Some(sub) = subscription {
+        // 订阅行：三窗的用量与起点都在这里。
+        push(
+            &mut windows,
+            WindowKind::Daily,
+            group_limit(key.rate_limit_1d, group.daily_limit_usd),
+            Some(sub.daily_usage_usd),
+            sub.daily_window_start
+                .map(|start| (start + chrono::Duration::hours(24)).timestamp()),
+        );
+        push(
+            &mut windows,
+            WindowKind::Weekly,
+            group_limit(key.rate_limit_7d, group.weekly_limit_usd),
+            Some(sub.weekly_usage_usd),
+            sub.weekly_window_start
+                .map(|start| (start + chrono::Duration::hours(7 * 24)).timestamp()),
+        );
+        push(
+            &mut windows,
+            WindowKind::Monthly,
+            group.monthly_limit_usd.unwrap_or(0.0),
+            Some(sub.monthly_usage_usd),
+            sub.monthly_window_start
+                // 一个日历月，不是 30 天：订阅的月窗随订阅锚定（9-10 开的订阅，
+                // 10-10 重置），30 天会在月末附近漂移。
+                .and_then(|start| {
+                    start
+                        .checked_add_months(chrono::Months::new(1))
+                        .map(|end| end.timestamp())
+                }),
+        );
+        return windows;
+    }
+
+    // 没有订阅行：key 自己的窗口字段（只有 key 级限额的站点会跟踪它们）。
     push(
         &mut windows,
         WindowKind::Daily,
-        if key.rate_limit_1d > 0.0 {
-            key.rate_limit_1d
-        } else {
-            group.daily_limit_usd.unwrap_or(0.0)
-        },
+        group_limit(key.rate_limit_1d, group.daily_limit_usd),
         Some(key.usage_1d),
-        key.window_1d_start.map(|s| (s as i64) + DAY_SECS),
+        key.window_1d_start.map(|s| (s as i64) + 24 * 3600),
     );
     push(
         &mut windows,
         WindowKind::Weekly,
-        if key.rate_limit_7d > 0.0 {
-            key.rate_limit_7d
-        } else {
-            group.weekly_limit_usd.unwrap_or(0.0)
-        },
+        group_limit(key.rate_limit_7d, group.weekly_limit_usd),
         Some(key.usage_7d),
-        key.window_7d_start.map(|s| (s as i64) + WEEK_SECS),
+        key.window_7d_start.map(|s| (s as i64) + 7 * 24 * 3600),
     );
     push(
         &mut windows,
@@ -142,56 +184,93 @@ mod tests {
         ApiKey::default()
     }
 
-    /// 真实订阅分组的形状：分组给 日/周/月 限额、key 无覆盖、窗口已开。
+    fn subscription(
+        daily_start: Option<&str>,
+        weekly_start: Option<&str>,
+        monthly_start: Option<&str>,
+    ) -> UserSubscription {
+        let parse = |value: Option<&str>| {
+            value
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        };
+        UserSubscription {
+            group_id: 28,
+            status: "active".into(),
+            daily_usage_usd: 0.0000264,
+            weekly_usage_usd: 305.6383104,
+            monthly_usage_usd: 335.6282007,
+            daily_window_start: parse(daily_start),
+            weekly_window_start: parse(weekly_start),
+            monthly_window_start: parse(monthly_start),
+        }
+    }
+
+    /// 真站实测形状（2026-09-20，coding-api 订阅分组）：订阅行三窗齐备，
+    /// 月窗锚定订阅起点（+1 日历月），下次重置取最早（日窗）。
     #[test]
-    fn subscription_group_yields_daily_weekly_monthly() {
+    fn subscription_row_drives_windows() {
         let g = group(Some(500.0), Some(2000.0), Some(5000.0));
-        let mut k = key();
-        k.usage_1d = 31.0;
-        k.window_1d_start = Some(1_789_000_000.0);
-        let windows = windows_for(&g, &k);
+        let sub = subscription(
+            Some("2026-09-20T00:00:00+08:00"),
+            Some("2026-09-17T16:59:20.771607+08:00"),
+            Some("2026-09-10T16:59:20.771607+08:00"),
+        );
+        let windows = windows_for(&g, &key(), Some(&sub));
         assert_eq!(
             windows.iter().map(|w| w.kind).collect::<Vec<_>>(),
             vec![WindowKind::Daily, WindowKind::Weekly, WindowKind::Monthly]
         );
         let daily = &windows[0];
         assert_eq!(daily.limit_usd, 500.0);
-        assert_eq!(daily.used_usd, Some(31.0));
-        assert_eq!(daily.reset_at, Some(1_789_000_000 + DAY_SECS));
-        // 周窗没开始 → 重置算不出；月窗永远没有用量跟踪。
-        assert_eq!(windows[1].reset_at, None);
-        assert_eq!(windows[2].used_usd, None);
-        // 下次重置取最早：只有日窗可算。
-        assert_eq!(next_reset_at(&windows), Some(1_789_000_000 + DAY_SECS));
+        assert_eq!(daily.used_usd, Some(0.0000264));
+        assert_eq!(
+            daily.reset_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-21T00:00:00+08:00")
+                    .unwrap()
+                    .timestamp()
+            )
+        );
+        // 月窗 = 起点 + 1 日历月（9-10 → 10-10），不是 30 天。
+        assert_eq!(
+            windows[2].reset_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-10T16:59:20.771607+08:00")
+                    .unwrap()
+                    .timestamp()
+            )
+        );
+        // 下次重置 = 日窗（最早）。
+        assert_eq!(next_reset_at(&windows), daily.reset_at);
     }
 
-    /// key 级限额覆盖分组；5 小时窗只有 key 级。
+    /// 没有订阅行：落回 key 窗口字段；月窗无跟踪、used 如实为 None。
     #[test]
-    fn key_limits_override_group() {
-        let g = group(Some(100.0), None, None);
+    fn key_windows_without_subscription_row() {
+        let g = group(Some(100.0), None, Some(300.0));
         let mut k = key();
         k.rate_limit_5h = 5.0;
-        k.rate_limit_1d = 20.0;
-        k.usage_5h = 3.0;
         k.window_5h_start = Some(1_789_000_000.0);
-        let windows = windows_for(&g, &k);
-        let five = &windows[0];
-        assert_eq!(five.limit_usd, 5.0);
-        assert_eq!(five.reset_at, Some(1_789_000_000 + FIVE_HOURS_SECS));
-        let daily = &windows[1];
-        assert_eq!(daily.limit_usd, 20.0, "key 覆盖分组的 100");
-        // 最早的 = 5 小时窗。
+        k.usage_1d = 31.0;
+        k.window_1d_start = Some(1_789_000_000.0);
+        let windows = windows_for(&g, &k, None);
         assert_eq!(
-            next_reset_at(&windows),
-            Some(1_789_000_000 + FIVE_HOURS_SECS)
+            windows.iter().map(|w| w.kind).collect::<Vec<_>>(),
+            vec![WindowKind::FiveHour, WindowKind::Daily, WindowKind::Monthly]
         );
+        assert_eq!(windows[1].used_usd, Some(31.0));
+        assert_eq!(windows[1].reset_at, Some(1_789_000_000 + 24 * 3600));
+        assert_eq!(windows[2].used_usd, None, "无订阅行 ⇒ 月窗无用量跟踪");
+        // 最早的 = 5 小时窗。
+        assert_eq!(next_reset_at(&windows), Some(1_789_000_000 + 5 * 3600));
     }
 
-    /// 非订阅分组（限额全空/0）→ 无窗口、无下次重置。
+    /// key 级限额覆盖分组；非订阅分组（限额全空/0）→ 无窗口。
     #[test]
     fn plain_group_yields_no_windows() {
         let g = group(None, None, Some(0.0));
-        assert!(windows_for(&g, &key()).is_empty());
+        assert!(windows_for(&g, &key(), None).is_empty());
         assert_eq!(next_reset_at(&[]), None);
     }
 }

@@ -256,6 +256,34 @@ pub struct Group {
     pub monthly_limit_usd: Option<f64>,
 }
 
+/// 用户在这站点上的**订阅**（`GET /api/v1/subscriptions`）：订阅型分组的三窗用量与
+/// 窗口起点都在这里——**不是**在 api_keys 的 usage 字段上（那组字段只服务 key 级
+/// 限额；没有人给 key 设独立限额的站点上恒为零，2026-09-20 真站实测）。
+///
+/// 喂给 [`super::tier_windows`] 算订阅分组的重置窗口。
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserSubscription {
+    pub group_id: i64,
+    /// 订阅状态。暂未参与判定（拉取即视为生效；过期订阅由服务端从列表里摘掉），
+    /// 留着是给将来「显示订阅有效期」用的事实字段。
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub status: String,
+    #[serde(default)]
+    pub daily_usage_usd: f64,
+    #[serde(default)]
+    pub weekly_usage_usd: f64,
+    #[serde(default)]
+    pub monthly_usage_usd: f64,
+    /// 各窗口当前起点（RFC3339 带时区）。`None` = 窗口还没开始。
+    #[serde(default)]
+    pub daily_window_start: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub weekly_window_start: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub monthly_window_start: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// 倍率高于这个值的分组不呈现给用户。
 ///
 /// 中转站会建「渠道监控专用分组」这类探针池，故意把 `rate_multiplier` 设成 100 之类的惩罚性
@@ -754,6 +782,15 @@ impl Client {
     pub async fn list_groups(&self) -> Result<Vec<Group>, AppError> {
         self.send(self.http.get(self.url("/groups/available")), "获取分组列表")
             .await
+    }
+
+    /// 拉当前用户的订阅（`GET /api/v1/subscriptions`，平数组）：订阅型分组的
+    /// 三窗用量与窗口起点。**没有订阅的用户返回 `data: null`** ⇒ 与专属倍率
+    /// 同款走 `send_optional`，拉不到按「没有订阅」处理，不打断 provision。
+    pub async fn list_subscriptions(&self) -> Result<Vec<UserSubscription>, AppError> {
+        self.send_optional(self.http.get(self.url("/subscriptions")), "获取订阅")
+            .await
+            .map(|subscriptions| subscriptions.unwrap_or_default())
     }
 
     /// 拉当前用户的**分组专属倍率**（`GET /api/v1/groups/rates`），键是分组 id。

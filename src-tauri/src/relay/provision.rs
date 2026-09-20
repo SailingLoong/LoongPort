@@ -252,9 +252,25 @@ pub async fn provision(
         usable.len(),
     );
 
+    // 订阅行是订阅分组三窗用量/起点的真源（api_keys 的 usage 字段只管 key 级限额）。
+    // 拉不到按「没有订阅」处理——非订阅站点 / 老版本服务端本来就没有，不阻断。
+    let subscriptions = client.list_subscriptions().await.unwrap_or_else(|e| {
+        log::debug!("查询用户订阅失败（订阅窗口回落 key 级字段）: {e}");
+        Default::default()
+    });
     let mut result = ProvisionResult::default();
     for (group, app_type) in usable {
-        match ensure_key_for(client, account_id, &app_type, &group, &existing, tables).await {
+        match ensure_key_for(
+            client,
+            account_id,
+            &app_type,
+            &group,
+            &existing,
+            tables,
+            &subscriptions,
+        )
+        .await
+        {
             Ok(tier) => {
                 // **纯生图分组落到生图那一栏**，不是 codex。
                 //
@@ -277,7 +293,16 @@ pub async fn provision(
     // composite 拆档：一把 Key 扇出多 CLI 档（见 [`ensure_composite_tiers`]）。
     // 失败语义与上面一致 —— 单组失败只进 failures，不拖垮别的分组。
     for group in composite {
-        match ensure_composite_tiers(client, account_id, &group, &existing, tables).await {
+        match ensure_composite_tiers(
+            client,
+            account_id,
+            &group,
+            &existing,
+            tables,
+            &subscriptions,
+        )
+        .await
+        {
             Ok(mut tiers) => result.tiers.append(&mut tiers),
             Err(e) => result.failures.push((group.name.clone(), e.to_string())),
         }
@@ -403,6 +428,7 @@ async fn ensure_key_for(
     group: &Group,
     existing: &[ApiKey],
     tables: &ModelSelectionTables,
+    subscriptions: &[super::sub2api::UserSubscription],
 ) -> Result<Tier, AppError> {
     let (api_key, created, key_meta) =
         claim_or_create_key(client, account_id, group, existing).await?;
@@ -447,7 +473,11 @@ async fn ensure_key_for(
         models,
         roles: picked.claude_roles,
         allow_image_generation: group.allow_image_generation,
-        windows: super::tier_windows::windows_for(group, &key_meta),
+        windows: super::tier_windows::windows_for(
+            group,
+            &key_meta,
+            subscriptions.iter().find(|sub| sub.group_id == group.id),
+        ),
     })
 }
 
@@ -504,6 +534,7 @@ async fn ensure_composite_tiers(
     group: &Group,
     existing: &[ApiKey],
     tables: &ModelSelectionTables,
+    subscriptions: &[super::sub2api::UserSubscription],
 ) -> Result<Vec<TargetedTier>, AppError> {
     let (api_key, created, key_meta) =
         claim_or_create_key(client, account_id, group, existing).await?;
@@ -516,7 +547,11 @@ async fn ensure_composite_tiers(
         .filter(|models: &Vec<String>| !models.is_empty())
         .ok_or_else(|| AppError::Config("模型目录为空，无法判定该落到哪些 CLI".into()))?;
 
-    let windows = super::tier_windows::windows_for(group, &key_meta);
+    let windows = super::tier_windows::windows_for(
+        group,
+        &key_meta,
+        subscriptions.iter().find(|sub| sub.group_id == group.id),
+    );
     let mut tiers = Vec::new();
     for (index, app_type) in composite_app_targets(&models).into_iter().enumerate() {
         let picked = pick_tier_models_with(&app_type, Some(&models), tables);
