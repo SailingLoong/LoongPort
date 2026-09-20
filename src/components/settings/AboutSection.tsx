@@ -1109,8 +1109,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             {/* 更新按钮与进度竖排：进度只在下载期间出现在按钮正下方——
                 按钮与同行图标的水平位置全程固定（2026-09-19 用户定调：
                 放右边时长短变化会推着周边走，体感晃）。不在同一行后不再
-                需要 min-w 固宽；tabular-nums 仍留着防数字本身跳宽。 */}
-            <div className="flex flex-col items-end gap-1">
+                需要 min-w 固宽；tabular-nums 仍留着防数字本身跳宽。
+                进度行必须脱流（2026-09-20）：留在流内会让列高在下载开始/
+                结束时变化，整行重新垂直居中、更新按钮上浮一跳；绝对定位
+                后列高恒为按钮高，行内零位移，进度落在按钮下方空隙里。 */}
+            <div className="relative flex flex-col items-end">
               <Button
                 type="button"
                 size="sm"
@@ -1143,7 +1146,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                 )}
               </Button>
               {downloadStatusText && (
-                <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+                <span className="absolute right-0 top-full mt-1 whitespace-nowrap text-xs tabular-nums text-muted-foreground">
                   {downloadStatusText}
                 </span>
               )}
