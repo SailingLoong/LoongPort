@@ -20,12 +20,18 @@ import { isProxyAppId } from "@/config/appConfig";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Command,
+  CommandEmpty,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
@@ -72,6 +78,107 @@ function ModelAvailability({
       <span className={numerator}>{available}</span>
       <span className="text-muted-foreground">/{total}</span>
     </span>
+  );
+}
+
+/** 档位工作台的筛选下拉：Popover + Command（cmdk），列表顶部自带输入筛选。
+ *  模型目录（「分组支持」）和账号名单都可能很长，Radix Select 没有筛选能力
+ *  （2026-09-21 用户点单）。触发器保持 ListFilter + 当前值 + 尾部箭头的原
+ *  形状；「全部」恒为第一项（测试与既有交互都默认它在首位）。 */
+function FilterCombobox({
+  ariaLabel,
+  triggerClassName,
+  searchPlaceholder,
+  noMatchText,
+  allLabel,
+  value,
+  onChange,
+  items,
+}: {
+  ariaLabel: string;
+  triggerClassName?: string;
+  searchPlaceholder: string;
+  noMatchText: string;
+  allLabel: string;
+  value: string | null;
+  onChange: (value: string | null) => void;
+  items: {
+    value: string;
+    label: string;
+    content?: ReactNode;
+    itemClassName?: string;
+  }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = items.find((item) => item.value === value);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          aria-label={ariaLabel}
+          className={cn("justify-between font-normal", triggerClassName)}
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <ListFilter className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="truncate">
+              {selected ? selected.label : allLabel}
+            </span>
+          </span>
+          <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        collisionPadding={8}
+        className="w-72 p-0"
+      >
+        <Command label={ariaLabel}>
+          <CommandInput placeholder={searchPlaceholder} />
+          <CommandList>
+            <CommandEmpty>{noMatchText}</CommandEmpty>
+            <CommandItem
+              value="all"
+              onSelect={() => {
+                onChange(null);
+                setOpen(false);
+              }}
+            >
+              <Check
+                className={cn(
+                  "h-4 w-4 shrink-0",
+                  value ? "opacity-0" : "opacity-100",
+                )}
+              />
+              {allLabel}
+            </CommandItem>
+            {items.map((item) => (
+              <CommandItem
+                key={item.value}
+                value={item.label}
+                className={item.itemClassName}
+                onSelect={() => {
+                  onChange(item.value);
+                  setOpen(false);
+                }}
+              >
+                <Check
+                  className={cn(
+                    "h-4 w-4 shrink-0",
+                    value === item.value ? "opacity-100" : "opacity-0",
+                  )}
+                />
+                {item.content ?? item.label}
+              </CommandItem>
+            ))}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -480,76 +587,49 @@ export function ApplicationWorkspace({
         </header>
         <div className="flex flex-wrap items-center gap-3">
           {accounts.length > 1 && (
-            <Select
-              value={accountFilter ?? "all"}
-              onValueChange={(value) =>
-                setAccountFilter(value === "all" ? null : value)
-              }
-            >
-              <SelectTrigger
-                className="w-48"
-                aria-label={t("applications.accountFilter")}
-              >
-                <span className="flex items-center gap-2 truncate">
-                  <ListFilter className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <SelectValue />
-                </span>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  {t("applications.allAccounts")}
-                </SelectItem>
-                {accounts.map((account) => (
-                  <SelectItem key={account.key} value={account.key}>
-                    {account.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <FilterCombobox
+              ariaLabel={t("applications.accountFilter")}
+              triggerClassName="w-48"
+              searchPlaceholder={t("applications.accountFilterPlaceholder")}
+              noMatchText={t("applications.filterNoMatch")}
+              allLabel={t("applications.allAccounts")}
+              value={accountFilter}
+              onChange={setAccountFilter}
+              items={accounts.map((account) => ({
+                value: account.key,
+                label: account.label,
+              }))}
+            />
           )}
           {hasMultipleModelsOverall && (
-            <Select
-              value={modelFilter ?? "all"}
-              onValueChange={(value) =>
-                setModelFilter(value === "all" ? null : value)
-              }
-            >
-              <SelectTrigger
-                className="w-64"
-                aria-label={t("applications.modelFilter")}
-              >
-                <span className="flex items-center gap-2 truncate">
-                  <ListFilter className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <SelectValue />
-                </span>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  {t("applications.allModels")}
-                </SelectItem>
-                {tierModels.map((option) => (
-                  <SelectItem
-                    key={option.model}
-                    value={option.model}
-                    className={
-                      option.available === 0 ? "text-muted-foreground" : ""
-                    }
-                  >
-                    <span className="flex items-center gap-2">
-                      <span className="truncate">
-                        {option.model === routingModel
-                          ? `⚡ ${option.model}`
-                          : option.model}
-                      </span>
-                      <ModelAvailability
-                        available={option.available}
-                        total={option.total}
-                      />
+            <FilterCombobox
+              ariaLabel={t("applications.modelFilter")}
+              triggerClassName="w-64"
+              searchPlaceholder={t("applications.modelFilterPlaceholder")}
+              noMatchText={t("applications.filterNoMatch")}
+              allLabel={t("applications.allModels")}
+              value={modelFilter}
+              onChange={setModelFilter}
+              items={tierModels.map((option) => ({
+                value: option.model,
+                label: option.model,
+                itemClassName:
+                  option.available === 0 ? "text-muted-foreground" : undefined,
+                content: (
+                  <span className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="truncate">
+                      {option.model === routingModel
+                        ? `⚡ ${option.model}`
+                        : option.model}
                     </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+                    <ModelAvailability
+                      available={option.available}
+                      total={option.total}
+                    />
+                  </span>
+                ),
+              }))}
+            />
           )}
           <div className="relative min-w-60 max-w-md flex-1">
             <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
