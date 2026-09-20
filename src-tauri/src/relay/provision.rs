@@ -122,6 +122,11 @@ pub struct Tier {
     ///
     /// 与「这是纯生图档位」是两件事，见 [`super::sub2api::Group::allow_image_generation`]。
     pub allow_image_generation: bool,
+    /// 订阅限额的重置窗口（分组限额 × 这把 key 的用量），见 [`super::tier_windows`]。
+    ///
+    /// composite 拆档的各档共享同一把 key ⇒ 窗口相同（同一个事实，各档各存一份投影）。
+    /// 非订阅分组为空。
+    pub windows: Vec<super::tier_windows::SubscriptionWindow>,
 }
 
 /// 展开的整体结果。**失败项不阻断成功项**，两者都如实带出来。
@@ -338,15 +343,18 @@ pub async fn provision(
 ///
 /// 单平台（一分组一档）与 composite（一把 Key 扇多档）共用 —— 「认领优先、建为
 /// 兜底」与「为什么没认领到必须落日志」是同一条纪律，不该在第二条路径上走样。
+///
+/// 返回 `(明文 sk, 是否新建, key 元数据)`。元数据给 [`super::tier_windows`] 算
+/// 订阅窗口用：认领到的带真实用量；新建的按零用量（刚出生的 key 没花过钱）。
 async fn claim_or_create_key(
     client: &Client,
     account_id: Option<i64>,
     group: &Group,
     existing: &[ApiKey],
-) -> Result<(String, bool), AppError> {
+) -> Result<(String, bool, ApiKey), AppError> {
     match claim_key(existing, account_id, &group.platform, group.id) {
         // 正常路径：认领到了就直接用，不发任何写请求。
-        Some(k) => Ok((k.key.clone(), false)),
+        Some(k) => Ok((k.key.clone(), false, k.clone())),
         None => {
             let name = key_name_for(account_id, &group.platform, group.id);
             // ⚠️ **「为什么没认领到」必须落日志**（维护者实测抓出）。
@@ -382,7 +390,8 @@ async fn claim_or_create_key(
             if created.key.is_empty() {
                 return Err(AppError::Config("服务端返回的密钥是空的".into()));
             }
-            Ok((created.key, true))
+            // 新建 key 的服务端响应自带用量字段（零值、窗口未开始）——原样透传。
+            Ok((created.key.clone(), true, created))
         }
     }
 }
@@ -395,7 +404,8 @@ async fn ensure_key_for(
     existing: &[ApiKey],
     tables: &ModelSelectionTables,
 ) -> Result<Tier, AppError> {
-    let (api_key, created) = claim_or_create_key(client, account_id, group, existing).await?;
+    let (api_key, created, key_meta) =
+        claim_or_create_key(client, account_id, group, existing).await?;
 
     // 拉这个分组能调哪些模型 —— 只为决定写什么模型名（纯生图分组必须写它自己的
     // `gpt-image-*`，写文本模型会 404）。
@@ -437,6 +447,7 @@ async fn ensure_key_for(
         models,
         roles: picked.claude_roles,
         allow_image_generation: group.allow_image_generation,
+        windows: super::tier_windows::windows_for(group, &key_meta),
     })
 }
 
@@ -494,7 +505,8 @@ async fn ensure_composite_tiers(
     existing: &[ApiKey],
     tables: &ModelSelectionTables,
 ) -> Result<Vec<TargetedTier>, AppError> {
-    let (api_key, created) = claim_or_create_key(client, account_id, group, existing).await?;
+    let (api_key, created, key_meta) =
+        claim_or_create_key(client, account_id, group, existing).await?;
     let models = super::sub2api::list_models(client.site_origin(), &api_key)
         .await
         .map_err(|e| AppError::Config(format!("拉不到模型目录，无法判定该落到哪些 CLI: {e}")))?
@@ -504,6 +516,7 @@ async fn ensure_composite_tiers(
         .filter(|models: &Vec<String>| !models.is_empty())
         .ok_or_else(|| AppError::Config("模型目录为空，无法判定该落到哪些 CLI".into()))?;
 
+    let windows = super::tier_windows::windows_for(group, &key_meta);
     let mut tiers = Vec::new();
     for (index, app_type) in composite_app_targets(&models).into_iter().enumerate() {
         let picked = pick_tier_models_with(&app_type, Some(&models), tables);
@@ -528,6 +541,7 @@ async fn ensure_composite_tiers(
                 models: Some(models.clone()),
                 roles: picked.claude_roles,
                 allow_image_generation: group.allow_image_generation,
+                windows: windows.clone(),
             },
             app_type,
         });
@@ -1517,6 +1531,20 @@ pub fn pick_tier_models_with(
 /// 从档位 settings_config 里读 `modelCatalog.models` 的模型 id 清单。
 ///
 /// 托盘子菜单与自动模式策略共用这份解析（同一份 `modelCatalog` 多个消费者）。
+/// 从档位 settings_config 里读 `subscriptionWindows`（provision 写入的订阅窗口投影）。
+///
+/// 与 [`models_from_settings`] 同一条纪律：解析失败按「没有窗口」处理，绝不因
+/// 一段坏 JSON 让档位列表整条失效。
+pub(crate) fn subscription_windows_from_settings(
+    settings: &serde_json::Value,
+) -> Vec<super::tier_windows::SubscriptionWindow> {
+    settings
+        .get("subscriptionWindows")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
 pub(crate) fn models_from_settings(settings: &serde_json::Value) -> Vec<String> {
     settings
         .get("modelCatalog")
@@ -1954,6 +1982,7 @@ mod tests {
             key: format!("sk-{id}"),
             name: name.into(),
             status: status.into(),
+            ..ApiKey::default()
         }
     }
 
@@ -2547,6 +2576,7 @@ mod tests {
             models: None,
             roles: None,
             allow_image_generation: false,
+            windows: Vec::new(),
         };
         let targeted = |id: i64, rate: f64| TargetedTier {
             tier: mk(id, rate),

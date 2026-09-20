@@ -1,6 +1,26 @@
 import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
 import { fmtUsd } from "@/components/usage/format";
 
+const relativeTime = new Intl.RelativeTimeFormat(undefined, {
+  numeric: "always",
+});
+
+/** 重置时刻的相对显示：分/时/天自动选档，太久远落到日期。已过期显示 —（快照过期）。 */
+export function formatResetAt(epochSecs: number): string {
+  const deltaSecs = epochSecs - Date.now() / 1000;
+  if (deltaSecs <= 0) return "—";
+  if (deltaSecs < 3600) {
+    return relativeTime.format(Math.round(deltaSecs / 60), "minute");
+  }
+  if (deltaSecs < 48 * 3600) {
+    return relativeTime.format(Math.round(deltaSecs / 3600), "hour");
+  }
+  if (deltaSecs < 45 * 86400) {
+    return relativeTime.format(Math.round(deltaSecs / 86400), "day");
+  }
+  return new Date(epochSecs * 1000).toLocaleDateString();
+}
+
 export const tierMetrics = [
   {
     key: "rateMultiplier",
@@ -31,6 +51,12 @@ export const tierMetrics = [
     key: "todayCostUsd",
     descending: false,
     format: (value: number) => fmtUsd(value, 2),
+  },
+  {
+    // 下次重置（epoch 秒）：升序 = 最早重置在前——「优先消耗即将作废的额度」。
+    key: "nextResetAt",
+    descending: false,
+    format: formatResetAt,
   },
 ] as const;
 export type TierMetric = (typeof tierMetrics)[number]["key"];

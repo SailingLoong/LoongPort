@@ -3653,7 +3653,19 @@
       "recharge": "充值",
       "removeRelay": "删除“{{label}}”？这将删除该账号的登录信息，以及所有应用中的全部分组和档位。中转站余额不会受影响。",
       "removeRelayInUse": "删除“{{label}}”？这将删除该账号的登录信息，以及所有应用中的全部分组和档位。当前使用情况：{{usages}}。受影响的应用将切回官方登录，可能需要重新登录并重启。中转站余额不会受影响。",
-      "removeVendor": "删除“{{label}}”？这将删除该账号的登录信息、本地 API 密钥，以及所有应用中的全部套餐与接入配置。服务商网站上的 API 密钥不会被删除。"
+      "removeVendor": "删除“{{label}}”？这将删除该账号的登录信息、本地 API 密钥，以及所有应用中的全部套餐与接入配置。服务商网站上的 API 密钥不会被删除。",
+      "subscriptionWindows": "订阅限额与重置",
+      "windowColumn": "窗口",
+      "usedLimitColumn": "已用 / 上限",
+      "resetColumn": "下次重置",
+      "windowKind": {
+        "fiveHour": "5 小时窗",
+        "daily": "日窗口",
+        "weekly": "周窗口",
+        "monthly": "月窗口"
+      },
+      "usageTitle": "用量摘要",
+      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}"
     },
     "onboarding": {
       "domain": "中转站网址",
@@ -3923,7 +3935,8 @@
       "avgFirstTokenMs": "首字耗时",
       "balanceUsd": "账号余额",
       "cacheHitRate": "缓存命中率",
-      "todayCostUsd": "今日花费"
+      "todayCostUsd": "今日花费",
+      "nextResetAt": "下次重置"
     },
     "skipReasons": {
       "official_account": "仅支持手动切换此官方账号",
@@ -3957,7 +3970,13 @@
     "orderProfilesImported": "已导入 {{count}} 份配置档",
     "orderProfileExported": "已导出配置档",
     "orderProfileImport": "导入…",
-    "orderProfileExport": "导出…"
+    "orderProfileExport": "导出…",
+    "windowKind": {
+      "fiveHour": "5 小时窗",
+      "daily": "日窗口",
+      "weekly": "周窗口",
+      "monthly": "月窗口"
+    }
   },
   "secrets": {
     "unlockTitle": "解锁凭据",

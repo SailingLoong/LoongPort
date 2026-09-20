@@ -3654,7 +3654,19 @@
       "recharge": "儲值",
       "removeRelay": "刪除「{{label}}」？這將刪除該帳號的登入資訊，以及所有應用程式中的全部分組和檔位。中轉站餘額不受影響。",
       "removeRelayInUse": "刪除「{{label}}」？這將刪除該帳號的登入資訊，以及所有應用程式中的全部分組和檔位。目前使用情況：{{usages}}。受影響的應用程式將切回官方登入，可能需要重新登入並重新啟動。中轉站餘額不受影響。",
-      "removeVendor": "刪除「{{label}}」？這將刪除該帳號的登入資訊、本機 API 金鑰，以及所有應用程式中的全部方案與接入設定。服務商網站上的 API 金鑰不會被刪除。"
+      "removeVendor": "刪除「{{label}}」？這將刪除該帳號的登入資訊、本機 API 金鑰，以及所有應用程式中的全部方案與接入設定。服務商網站上的 API 金鑰不會被刪除。",
+      "subscriptionWindows": "訂閱限額與重置",
+      "windowColumn": "窗口",
+      "usedLimitColumn": "已用 / 上限",
+      "resetColumn": "下次重置",
+      "windowKind": {
+        "fiveHour": "5 小時窗",
+        "daily": "日窗口",
+        "weekly": "週窗口",
+        "monthly": "月窗口"
+      },
+      "usageTitle": "用量摘要",
+      "usageHeadline": "近 7 天 {{seven}} · 近 30 天 {{thirty}}"
     },
     "onboarding": {
       "domain": "中轉站網址",
@@ -3924,7 +3936,8 @@
       "avgFirstTokenMs": "首字耗時",
       "balanceUsd": "帳號餘額",
       "cacheHitRate": "快取命中率",
-      "todayCostUsd": "今日花費"
+      "todayCostUsd": "今日花費",
+      "nextResetAt": "下次重置"
     },
     "skipReasons": {
       "official_account": "此官方帳號僅支援手動切換",
@@ -3958,7 +3971,13 @@
     "orderProfilesImported": "已匯入 {{count}} 份配置檔",
     "orderProfileExported": "已匯出配置檔",
     "orderProfileImport": "匯入…",
-    "orderProfileExport": "匯出…"
+    "orderProfileExport": "匯出…",
+    "windowKind": {
+      "fiveHour": "5 小時窗",
+      "daily": "日窗口",
+      "weekly": "週窗口",
+      "monthly": "月窗口"
+    }
   },
   "secrets": {
     "unlockTitle": "解鎖憑證",

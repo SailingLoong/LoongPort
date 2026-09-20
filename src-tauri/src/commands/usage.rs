@@ -6,6 +6,14 @@ use crate::services::model_pricing::{
 };
 use crate::services::models_dev::{ModelsDevEntry, ModelsDevSyncResult};
 use crate::services::usage_stats::*;
+
+/// [`get_providers_window_cost`] 的返回项：provider id + 两个窗口的聚合。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderWindowStatsEntry {
+    pub provider_id: String,
+    pub stats: ProviderWindowStats,
+}
 use crate::store::AppState;
 use tauri::State;
 
@@ -43,6 +51,25 @@ pub fn get_usage_summary_by_app(
         provider_name.as_deref(),
         model.as_deref(),
     )
+}
+
+/// 一批 provider 在 7 天 / 30 天窗口内的花费与请求数（账号详情「用量摘要」）。
+///
+/// `provider_ids` 来自调用方已聚合好的档位清单（跨 app 的该账号全部档位）——
+/// 归属判定不在这里做，这里只做纯窗口聚合。
+#[tauri::command]
+pub fn get_providers_window_cost(
+    state: State<'_, AppState>,
+    provider_ids: Vec<String>,
+) -> Result<Vec<ProviderWindowStatsEntry>, AppError> {
+    let stats = state.db.get_providers_window_stats(&provider_ids)?;
+    Ok(provider_ids
+        .into_iter()
+        .map(|provider_id| {
+            let stats = stats.get(&provider_id).cloned().unwrap_or_default();
+            ProviderWindowStatsEntry { provider_id, stats }
+        })
+        .collect())
 }
 
 /// 获取每日趋势

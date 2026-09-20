@@ -82,6 +82,11 @@ pub struct TierInfo {
     /// 与 `user_edited` 不同，它是**存库事实**（meta.siteDeclaredOrigin），
     /// 不是现算判据。
     pub site_declared_origin: Option<String>,
+    /// 订阅限额的重置窗口（provision 落库的 `subscriptionWindows` 投影；
+    /// 非订阅档位为空）。账号详情的窗口表读它，与工作台「下次重置」列同源。
+    pub subscription_windows: Vec<crate::relay::tier_windows::SubscriptionWindow>,
+    /// 最早的窗口重置时刻（epoch 秒）；没有可算窗口时 `None`。
+    pub next_reset_at: Option<i64>,
 }
 
 /// 「中转站 × 分组」页的一行中转站，连带它在当前 app 下的档位。
@@ -753,43 +758,51 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
     let mut tiers: Vec<OwnedTier> = providers
         .values()
         .filter(|p| is_managed(p))
-        .map(|p| OwnedTier {
-            tier: TierInfo {
-                provider_id: p.id.clone(),
-                app_id: app_id.clone(),
-                // 倍率读**上次 provision 写下的那个值**（`providers.tier_rate_multiplier`）。
-                //
-                // 它是服务端定价，不是实时量 —— 所以「刷新倍率」就等于「重新拉分组」，
-                // 界面上是顶部刷新 / 更新可用分组 / 登录成功那几下。这条命令仍然
-                // **只读本地不发网络**，首屏契约不变，但首屏现在就有倍率可显示了。
-                //
-                // 读不出来（旧库、行刚被别处删掉）⇒ `None`，UI 显示「倍率未知」。
-                // **绝不能退化成 0** —— 那会让用户以为这是最便宜的一档。
-                rate_multiplier: state
-                    .db
-                    .get_tier_rate_multiplier(&app_id, &p.id)
-                    .unwrap_or(None),
-                group_name: p.name.clone(),
-                display_name: p.name.clone(),
-                model: provision::selected_model(&app_type, &p.settings_config).unwrap_or_default(),
-                // 目录没有就返回空 —— UI/托盘按「无目录」处理，不用按 app 分支
-                models: crate::relay::model_catalog::available_models(p),
-                is_current: current == p.id,
-                can_verify_models,
-                // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
-                // 由 `tiers_of_site` 在按站分组时填。见该字段的文档。
-                user_edited: None,
-                // **这个在本地就能算**（判据是配置里的 `model`），所以首屏就有真值 ——
-                // 不像倍率那样留 None 等异步填。见该字段的文档：入口忽隐忽现是有害的。
-                // 纯服务端信息，本地推不出来 ⇒ None（UI 不显示标记）。
-                allow_image_generation: None,
-                site_declared_origin: p
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.site_declared_origin.clone()),
-            },
-            site_origin: p.website_url.clone(),
-            account_id: p.meta.as_ref().and_then(|m| m.loongport_account_id),
+        .map(|p| {
+            let subscription_windows =
+                crate::relay::provision::subscription_windows_from_settings(&p.settings_config);
+            let next_reset_at = crate::relay::tier_windows::next_reset_at(&subscription_windows);
+            OwnedTier {
+                tier: TierInfo {
+                    provider_id: p.id.clone(),
+                    app_id: app_id.clone(),
+                    // 倍率读**上次 provision 写下的那个值**（`providers.tier_rate_multiplier`）。
+                    //
+                    // 它是服务端定价，不是实时量 —— 所以「刷新倍率」就等于「重新拉分组」，
+                    // 界面上是顶部刷新 / 更新可用分组 / 登录成功那几下。这条命令仍然
+                    // **只读本地不发网络**，首屏契约不变，但首屏现在就有倍率可显示了。
+                    //
+                    // 读不出来（旧库、行刚被别处删掉）⇒ `None`，UI 显示「倍率未知」。
+                    // **绝不能退化成 0** —— 那会让用户以为这是最便宜的一档。
+                    rate_multiplier: state
+                        .db
+                        .get_tier_rate_multiplier(&app_id, &p.id)
+                        .unwrap_or(None),
+                    group_name: p.name.clone(),
+                    display_name: p.name.clone(),
+                    model: provision::selected_model(&app_type, &p.settings_config)
+                        .unwrap_or_default(),
+                    // 目录没有就返回空 —— UI/托盘按「无目录」处理，不用按 app 分支
+                    models: crate::relay::model_catalog::available_models(p),
+                    is_current: current == p.id,
+                    can_verify_models,
+                    // 判据要 `api_base_url`（按站点存），这里拿不到 ⇒ 留 None，
+                    // 由 `tiers_of_site` 在按站分组时填。见该字段的文档。
+                    user_edited: None,
+                    // **这个在本地就能算**（判据是配置里的 `model`），所以首屏就有真值 ——
+                    // 不像倍率那样留 None 等异步填。见该字段的文档：入口忽隐忽现是有害的。
+                    // 纯服务端信息，本地推不出来 ⇒ None（UI 不显示标记）。
+                    allow_image_generation: None,
+                    site_declared_origin: p
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.site_declared_origin.clone()),
+                    subscription_windows,
+                    next_reset_at,
+                },
+                site_origin: p.website_url.clone(),
+                account_id: p.meta.as_ref().and_then(|m| m.loongport_account_id),
+            }
         })
         .collect();
 
@@ -1270,6 +1283,8 @@ mod tests {
             user_edited: None,
             allow_image_generation: None,
             site_declared_origin: None,
+            subscription_windows: Vec::new(),
+            next_reset_at: None,
         };
 
         let json = serde_json::to_value(&tier).expect("要能序列化");

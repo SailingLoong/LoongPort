@@ -13,6 +13,18 @@ export interface ApplicationRoutingTier extends TierBoardTier {
   /** 档位模型目录（provision 嗅探落库）。模型筛选按它命中「分组支持」；
    * 空 = 无目录（非 Codex 系/未嗅探），筛选回落单模型（effectiveModel）语义。 */
   models: string[];
+  /** 订阅限额的重置窗口（非订阅档位为空数组）。与账号详情的窗口表同源。 */
+  subscriptionWindows: SubscriptionWindow[];
+  /** 所有窗口里最早的重置时刻（epoch 秒）——重置列的排序键；无可算窗口为 null。 */
+  nextResetAt: number | null;
+}
+
+/** 一条订阅限额的时间窗（后端 `relay/tier_windows.rs` 的同形投影）。 */
+export interface SubscriptionWindow {
+  kind: "fiveHour" | "daily" | "weekly" | "monthly";
+  limitUsd: number;
+  usedUsd: number | null;
+  resetAt: number | null;
 }
 
 export interface ApplicationRouting {

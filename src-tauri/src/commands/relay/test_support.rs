@@ -55,6 +55,8 @@ pub(crate) fn tier(id: &str) -> TierInfo {
         // 同上：归属判定与生图无关。
         allow_image_generation: None,
         site_declared_origin: None,
+        subscription_windows: Vec::new(),
+        next_reset_at: None,
     }
 }
 

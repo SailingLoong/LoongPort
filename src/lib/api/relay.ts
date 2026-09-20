@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 
 import type { UsageResult } from "@/types";
 
@@ -173,6 +174,10 @@ export interface TierInfo {
    */
   rateMultiplier: number | null;
   isCurrent: boolean;
+  /** 订阅限额的重置窗口（非订阅档位为空数组）；账号详情的窗口表读它。 */
+  subscriptionWindows: SubscriptionWindow[];
+  /** 最早的窗口重置时刻（epoch 秒）；无可算窗口为 null。 */
+  nextResetAt: number | null;
   /** 后端是否允许对这个档位执行模型验证。 */
   canVerifyModels: boolean;
   /**

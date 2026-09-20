@@ -2045,6 +2045,7 @@ pub fn run() {
             commands::set_easy_mode_manual_order,
             // Usage statistics
             commands::get_usage_summary,
+            commands::get_providers_window_cost,
             commands::get_usage_summary_by_app,
             commands::get_usage_trends,
             commands::get_provider_stats,
