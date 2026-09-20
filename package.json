@@ -32,7 +32,7 @@
     "autoprefixer": "^10.6.1",
     "code-inspector-plugin": "^2.0.9",
     "cross-fetch": "^4.1.0",
-    "jsdom": "^30.1.0",
+    "jsdom": "^30.0.1",
     "msw": "^2.15.0",
     "postcss": "^8.5.28",
     "prettier": "^3.9.7",
