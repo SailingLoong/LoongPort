@@ -839,6 +839,30 @@ fn schema_model_pricing_is_seeded_on_init() {
         "应该包含 Gemini 模型定价，实际数量: {}",
         gemini_count
     );
+
+    // 2026-09 新增种子：开放权重 Qwen3.8 两款与混元 Hy4 preview（阿里国际站/官方地域页单价）
+    let query_price = |model_id: &str| -> (String, String, String) {
+        conn.query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = ?1",
+            [model_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap_or_else(|e| panic!("seed {model_id} should exist: {e}"))
+    };
+    assert_eq!(
+        query_price("qwen3.8-2.4t-a95b"),
+        ("2".to_string(), "6".to_string(), "0.25".to_string())
+    );
+    assert_eq!(
+        query_price("qwen3.8-27b"),
+        ("0.50".to_string(), "3".to_string(), "0.10".to_string())
+    );
+    assert_eq!(
+        query_price("hy4-preview"),
+        ("0.84".to_string(), "2.52".to_string(), "0.042".to_string())
+    );
 }
 
 #[test]
