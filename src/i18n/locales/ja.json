@@ -3229,6 +3229,7 @@
         "contactSupport": "運営者に連絡"
       },
       "compatibilityNote": "一部の非互換サイトは表示されません",
+      "applyToList": "掲載を申請",
       "provisionFailed": "アカウントは追加されましたが、接続設定の作成に失敗しました：{{reason}}。中継サイト一覧から再試行できます。",
       "actions": {
         "authenticate": "登録またはログイン",

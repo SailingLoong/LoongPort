@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   ChevronLeft,
   ChevronRight,
+  ExternalLink,
   Loader2,
   RefreshCw,
   Search,
@@ -14,6 +15,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { FOR_RELAYS_URL } from "@/config/constants";
 import { PLAZA_VISIBLE_DEFAULT, relayApi, settingsApi } from "@/lib/api";
 import { crowdApi } from "@/lib/api/crowd";
 import type { AppId } from "@/lib/api";
@@ -34,6 +36,7 @@ import { RelayDirectoryRow } from "./RelayDirectoryRow";
 import { FirstVisitDomainDialog } from "./FirstVisitDomainDialog";
 import { serviceOnboardingApi } from "@/lib/api/serviceOnboarding";
 import { serviceOnboardingKey } from "../onboarding/useServiceOnboarding";
+import { openInBrowser } from "../openInBrowser";
 import type { ConnectedService } from "../onboarding/useServiceOnboarding";
 import { TransitDetailDialog } from "./TransitDetailDialog";
 
@@ -471,7 +474,19 @@ export function RelayDirectoryPage({
           </section>
 
           <div className="flex items-center justify-between gap-4 py-3 text-xs text-muted-foreground">
-            <span>{t("loongport.directory.compatibilityNote")}</span>
+            <span className="flex items-center gap-3">
+              {t("loongport.directory.compatibilityNote")}
+              {/* 面向站长的「申请入驻」：与用户挑站接入的主流程并列但低权重。
+                  渠道细节唯源官网 for-relays 页，这里只负责把人送去。 */}
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
+                onClick={() => openInBrowser(FOR_RELAYS_URL)}
+              >
+                {t("loongport.directory.applyToList")}
+                <ExternalLink className="h-3 w-3" />
+              </button>
+            </span>
             <div className="flex items-center gap-2">
               <span>
                 {t("loongport.directory.pagination.range", {

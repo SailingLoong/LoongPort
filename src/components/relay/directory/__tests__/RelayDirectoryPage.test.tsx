@@ -375,6 +375,27 @@ describe("RelayDirectoryPage", () => {
     expect(screen.queryByText("站点 13")).not.toBeInTheDocument();
   });
 
+  it("offers the plaza apply entry for site owners", async () => {
+    const view = renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+    await screen.findByText("loongport.directory.compatibilityNote");
+    await userEvent.click(
+      screen.getByRole("button", { name: "loongport.directory.applyToList" }),
+    );
+    expect(openInBrowser).toHaveBeenCalledTimes(1);
+    expect(openInBrowser).toHaveBeenCalledWith(
+      "https://loongport.dev/for-relays",
+    );
+
+    // 广场被用户藏掉时入口跟着消失 —— 对不可见的广场申请入驻没有意义。
+    view.unmount();
+    useSettingsMock.mockReturnValue({ settings: { plazaVisible: false } });
+    renderDirectory({ sourceAppId: "codex", onBack: () => {} });
+    await screen.findByText("loongport.onboarding.browse");
+    expect(
+      screen.queryByRole("button", { name: "loongport.directory.applyToList" }),
+    ).toBeNull();
+  });
+
   it("shows the snapshot sync time only when there is a snapshot", async () => {
     listDirectory.mockResolvedValue(listing({ items: [item(1)] }));
     const first = renderDirectory({ sourceAppId: "claude", onBack: () => {} });

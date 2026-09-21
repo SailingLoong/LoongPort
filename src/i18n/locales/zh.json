@@ -3229,6 +3229,7 @@
         "contactSupport": "联系站长"
       },
       "compatibilityNote": "部分不兼容站点不会展示",
+      "applyToList": "申请入驻",
       "provisionFailed": "账号已添加，但创建接入配置失败：{{reason}}。可返回中转站列表重试。",
       "actions": {
         "authenticate": "注册或登录",

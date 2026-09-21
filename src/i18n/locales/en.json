@@ -3229,6 +3229,7 @@
         "contactSupport": "Contact operator"
       },
       "compatibilityNote": "Some incompatible sites are not shown",
+      "applyToList": "List your site",
       "provisionFailed": "The account was added, but connection setup failed: {{reason}}. Retry from the relay list.",
       "actions": {
         "authenticate": "Register or sign in",
