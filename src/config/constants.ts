@@ -15,6 +15,12 @@
 export const OFFICIAL_WEBSITE = "https://loongport.dev";
 
 /**
+ * 官网「给中转站运营方」页 —— 广场页「申请入驻」的落点。申请渠道（QQ 群、issue）
+ * 唯源在那页，这里只链到页面本身；以后换渠道零客户端发版。
+ */
+export const FOR_RELAYS_URL = "https://loongport.dev/for-relays";
+
+/**
  * LoongPort 的 GitHub 仓库。
  *
  * ⚠️ **别改成指上游**（`farion1231/cc-switch`）：那边的 release notes 是**另一份

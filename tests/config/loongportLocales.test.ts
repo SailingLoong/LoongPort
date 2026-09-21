@@ -65,6 +65,8 @@ const requiredKeys = [
   "directory.transit.viewPricePage",
   "directory.transit.contactSupport",
   "directory.compatibilityNote",
+  // 广场底部的「申请入驻」链接（面向站长，链官网 for-relays 页）。
+  "directory.applyToList",
   // 新人首启的「手填域名直达」弹窗（广场列表动态加载期间的捷径）。
   "firstSite.title",
   "firstSite.placeholder",

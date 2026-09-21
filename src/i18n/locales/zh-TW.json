@@ -3230,6 +3230,7 @@
         "contactSupport": "聯絡站長"
       },
       "compatibilityNote": "部分不相容站點不會顯示",
+      "applyToList": "申請入駐",
       "provisionFailed": "帳號已加入，但建立連線設定失敗：{{reason}}。可返回中轉站列表重試。",
       "actions": {
         "authenticate": "註冊或登入",
