@@ -405,6 +405,17 @@ export function RelayDirectoryPage({
           </div>
 
           <div className="flex items-center justify-end gap-4 py-4">
+            {/* 面向站长的「申请入驻」：与搜索框同排、搜索框左侧 —— 站长从广场
+                发现入口的主要视线区，不再沉在页底（用户 09-21 点名上移）。
+                渠道细节唯源官网 for-relays 页，这里只负责把人送去。 */}
+            <button
+              type="button"
+              className="inline-flex shrink-0 items-center gap-1 text-xs text-blue-600 hover:underline dark:text-blue-400"
+              onClick={() => openInBrowser(FOR_RELAYS_URL)}
+            >
+              {t("loongport.directory.applyToList")}
+              <ExternalLink className="h-3 w-3" />
+            </button>
             <div className="relative w-full max-w-xs">
               <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -474,19 +485,7 @@ export function RelayDirectoryPage({
           </section>
 
           <div className="flex items-center justify-between gap-4 py-3 text-xs text-muted-foreground">
-            <span className="flex items-center gap-3">
-              {t("loongport.directory.compatibilityNote")}
-              {/* 面向站长的「申请入驻」：与用户挑站接入的主流程并列但低权重。
-                  渠道细节唯源官网 for-relays 页，这里只负责把人送去。 */}
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
-                onClick={() => openInBrowser(FOR_RELAYS_URL)}
-              >
-                {t("loongport.directory.applyToList")}
-                <ExternalLink className="h-3 w-3" />
-              </button>
-            </span>
+            <span>{t("loongport.directory.compatibilityNote")}</span>
             <div className="flex items-center gap-2">
               <span>
                 {t("loongport.directory.pagination.range", {
