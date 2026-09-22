@@ -111,7 +111,7 @@ pub struct DeepLinkImportRequest {
     /// 两个字段同写时 Claude Code 优先 Bearer，被只认 x-api-key 的网关
     /// 静默忽略后就是一条必 401 的配置（opencode Go 网关实测如此）。
     ///
-    /// LoongPort 新增；生成侧的传入口是 `relay::provision::ProvisionStyle`。
+    /// LoongPort 新增；生成侧的传入口是 `relay::provider_config::ProvisionStyle`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_api_key_auth: Option<bool>,
 

@@ -2,7 +2,7 @@
 //! 更大的图景与约束见本目录 mod.rs 的总览。
 
 use super::*;
-use crate::relay::provision;
+
 use crate::relay::site_config;
 
 /// 应用站长自报调用配置（`relay/site_config.rs`）的摘要：哪些档位吃到了声明段。
@@ -158,7 +158,8 @@ pub(crate) fn rebuild_inputs_from_settings(
                 serde_json::from_str(settings.get("config")?.as_str()?).ok()?;
             let api_key = inner.get("apiKey")?.as_str()?.to_string();
             let base_url = inner.get("baseUrl")?.as_str()?.to_string();
-            let model = provision::selected_model(app_type, settings).unwrap_or_default();
+            let model = crate::relay::provider_config::selected_model(app_type, settings)
+                .unwrap_or_default();
             Some((api_key, base_url, model))
         }
         _ => None,
@@ -179,10 +180,10 @@ pub async fn relay_reset_site_config(
     let state = app_handle.state::<crate::store::AppState>();
 
     let mut applied = Vec::new();
-    // 遍历名单从 [`provision::model_catalog_apps`] 派生（不再是手写字符串数组 ——
+    // 遍历名单从 [`crate::relay::provider_config::model_catalog_apps`] 派生（不再是手写字符串数组 ——
     // 那份曾经漏过生图档、和别处的平台名单各自漂移）。生图档位本来就从
     // `rebuild_inputs_from_settings` 读不出重建要素，不在此列。
-    for app_type in provision::model_catalog_apps() {
+    for app_type in crate::relay::provider_config::model_catalog_apps() {
         let providers = ProviderService::list(&state, app_type.clone())?;
         for mut provider in providers.into_values() {
             if !is_managed(&provider) {
@@ -200,7 +201,7 @@ pub async fn relay_reset_site_config(
                 );
                 continue;
             };
-            let Some(defaults) = provision::settings_config_for(
+            let Some(defaults) = crate::relay::provider_config::settings_config_for(
                 app_type,
                 &api_key,
                 &provider.name,
@@ -248,8 +249,8 @@ mod tests {
         let site = "https://api.example.com";
 
         // 直接造一条「应用过声明」的托管档位（不跑 persist，那段已有专测）。
-        let provider_id = provision::provider_id_for(site, Some(7), 1);
-        let mut settings = provision::settings_config_for(
+        let provider_id = crate::relay::managed::provider_id_for(site, Some(7), 1);
+        let mut settings = crate::relay::provider_config::settings_config_for(
             &AppType::Codex,
             "sk-test",
             "Example·Pro池",
@@ -301,7 +302,7 @@ mod tests {
         assert_eq!(base_url, "https://api.example.com/v1");
         // 模型提取自声明覆盖后的值——重建以现状为基线，不回滚站长的模型选择
         assert_eq!(model, "gpt-5.6-codex");
-        let defaults = provision::settings_config_for(
+        let defaults = crate::relay::provider_config::settings_config_for(
             &AppType::Codex,
             &api_key,
             "Example·Pro池",
@@ -374,7 +375,7 @@ mod tests {
         )
         .expect("declaration");
 
-        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let provider_id = crate::relay::managed::provider_id_for(site, Some(7), 1);
         let batch = ManagedProvisionBatch {
             account_id: Some(7),
             site_declaration: Some(declaration),

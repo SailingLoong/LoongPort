@@ -263,7 +263,7 @@ fn add_provider_internal_impl(
 ) -> Result<bool, AppError> {
     // ⚠️ **新增一条 `loongport-*` id 的 provider 必须拒**（review 抓出这里一直没守卫）。
     //
-    // 那些 id 由 `provision::provider_id_for` 从「站点 + 账号 + 分组」派生，只有
+    // 那些 id 由 `crate::relay::managed::provider_id_for` 从「站点 + 账号 + 分组」派生，只有
     // provision 有资格生成。手工造一条同前缀的记录会**伪装成托管档位**：
     // 它从普通 provider 列表里消失（前端按前缀过滤）、转而出现在中转站区里，
     // 而那一区的「恢复默认配置」会拿中转站的默认值把用户自己配的东西整份覆盖掉。
@@ -306,7 +306,7 @@ fn update_provider_internal(
     //
     // 原来这里两头都拦（连内容编辑一起拒），理由写的是「手工改了下次 provision 就被
     // 覆盖，与其让用户白改一次不如当场指路」。**那个前提后来不成立了**：provision
-    // 改成了「已存在的档位只换 sk、保住用户的编辑」（`provision::patch_api_key`），
+    // 改成了「已存在的档位只换 sk、保住用户的编辑」（`crate::relay::provider_config::patch_api_key`），
     // 所以手工编辑现在是安全的、能留住的 —— 拦着它只是在挡一件已经做对了的事。
     //
     // 中转站区的「编辑配置」按钮走的正是这条命令（跳 cc-switch 的编辑页，
@@ -315,7 +315,7 @@ fn update_provider_internal(
     //
     // ## 但**不许凭空造出一个托管 id**
     //
-    // id 是托管判据本身（`provision::provider_id_for` 生成的前缀），所以：
+    // id 是托管判据本身（`crate::relay::managed::provider_id_for` 生成的前缀），所以：
     //
     // - 托管 → 普通 id：那条记录**脱管** —— provision 认不出它，于是给同一个分组
     //   再插一条新记录，用户会看到两个一模一样的档位，而旧那条永远清不掉。
@@ -361,9 +361,9 @@ fn update_provider_internal(
     if let Some(existing) = existing_managed {
         provider.website_url = existing.website_url;
         if let Some(api_key) =
-            crate::relay::provision::extract_api_key(&existing.settings_config, &app_type)
+            crate::relay::provider_config::extract_api_key(&existing.settings_config, &app_type)
         {
-            if !crate::relay::provision::ensure_api_key(
+            if !crate::relay::provider_config::ensure_api_key(
                 &mut provider.settings_config,
                 &app_type,
                 &api_key,
@@ -601,7 +601,7 @@ mod managed_guard_tests {
     /// 真的调生成器拿 id，而不是手写一个 `loongport-xxx` 字面量：
     /// 这样前缀真变了的那天，测试跟着生成器走、守卫失配才会被别的断言抓到。
     fn managed_id() -> String {
-        crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 42)
+        crate::relay::managed::provider_id_for("https://bestapi.store", Some(1), 42)
     }
 
     #[test]
@@ -645,7 +645,7 @@ mod managed_guard_tests {
     ///
     /// 旧行为是连内容编辑一起拒，理由是「手工改了下次 provision 就被覆盖」。
     /// 那个前提后来不成立了：provision 改成「已存在的档位只换 sk、保住用户的编辑」
-    /// （`provision::patch_api_key`）—— 于是那道守卫变成在挡一件已经安全的事。
+    /// （`crate::relay::provider_config::patch_api_key`）—— 于是那道守卫变成在挡一件已经安全的事。
     ///
     /// 中转站区的「编辑配置」按钮走的就是这条命令。它红了说明守卫被改回原样，
     /// 而那会让那个按钮的保存**静默失败**（用户改完点保存，收到一条「请在供应商页
@@ -705,7 +705,7 @@ mod managed_guard_tests {
         let id = managed_id();
         let state = empty_state();
         let site_origin = "https://bestapi.store";
-        let existing_settings = crate::relay::provision::settings_config_for(
+        let existing_settings = crate::relay::provider_config::settings_config_for(
             &AppType::Codex,
             "sk-managed",
             "provision 生成的名字",
@@ -750,7 +750,7 @@ mod managed_guard_tests {
             .expect("托管档位仍应存在");
         assert_eq!(saved.website_url.as_deref(), Some(site_origin));
         assert_eq!(
-            crate::relay::provision::extract_api_key(&saved.settings_config, &AppType::Codex)
+            crate::relay::provider_config::extract_api_key(&saved.settings_config, &AppType::Codex)
                 .as_deref(),
             Some("sk-managed")
         );

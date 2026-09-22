@@ -1,5 +1,5 @@
 //! Remote model availability is a relay-owned snapshot, separate from editable routing mappings.
-use super::{managed, provision};
+use super::{managed, model_selection::filter_models};
 use crate::{app_config::AppType, database::Database, error::AppError, provider::Provider};
 
 /// Vendor catalogs are authored by the vendor domain, rather than discovered from relay keys.
@@ -8,23 +8,8 @@ pub(crate) fn available_models(provider: &Provider) -> Vec<String> {
     if managed::is_managed(&provider.id) && !managed::is_managed_vendor(&provider.id) {
         provider.available_models.clone().unwrap_or_default()
     } else {
-        provision::models_from_settings(&provider.settings_config)
+        crate::relay::provider_config::models_from_settings(&provider.settings_config)
     }
-}
-
-/// The same platform filtering is used by configuration generation and availability snapshots.
-pub(crate) fn filter_models(app: &AppType, models: &[String]) -> Vec<String> {
-    models
-        .iter()
-        .filter(|model| {
-            if matches!(app, AppType::Gemini) {
-                model.to_ascii_lowercase().starts_with("gemini-")
-            } else {
-                !provision::is_image_model(model)
-            }
-        })
-        .cloned()
-        .collect()
 }
 
 /// Validate against remote availability, then modify only the user's explicit model selection.
@@ -49,7 +34,7 @@ pub(crate) fn select_model(
     let mut settings = provider.settings_config.clone();
     match app {
         AppType::Codex => {
-            if !provision::models_from_settings(&settings)
+            if !crate::relay::provider_config::models_from_settings(&settings)
                 .iter()
                 .any(|candidate| candidate == model)
             {
@@ -115,7 +100,12 @@ pub(crate) fn select_model(
                 crate::grok_config::update_selected_model_string(config, "model", model)?.into();
             Ok(settings)
         }
-        _ => provision::select_env_model(app, &settings, model),
+        _ => crate::relay::provider_config::select_env_model(
+            app,
+            &settings,
+            model,
+            &super::remote_config::model_selection_tables(),
+        ),
     }
 }
 
@@ -139,13 +129,16 @@ pub(crate) fn seed_legacy_inventories(conn: &rusqlite::Connection) -> Result<(),
         let Ok(app_type) = app.parse::<AppType>() else {
             continue;
         };
-        if !provision::supports_model_catalog(&app_type) {
+        if !crate::relay::provider_config::supports_model_catalog(&app_type) {
             continue;
         }
         let Ok(settings) = serde_json::from_str(&settings) else {
             continue;
         };
-        let models = filter_models(&app_type, &provision::models_from_settings(&settings));
+        let models = filter_models(
+            &app_type,
+            &crate::relay::provider_config::models_from_settings(&settings),
+        );
         if models.is_empty() {
             continue;
         }
@@ -182,7 +175,7 @@ where
         super::creds::list(&conn, &vault)?
     };
     let mut targets = Vec::new();
-    for app in provision::model_catalog_apps() {
+    for app in crate::relay::provider_config::model_catalog_apps() {
         for provider in db.get_all_providers(app.as_str())?.into_values() {
             if !managed::is_managed(&provider.id)
                 || managed::is_managed_vendor(&provider.id)
@@ -214,8 +207,9 @@ where
             if expected_url.origin() != endpoint_url.origin() {
                 continue;
             }
-            let Some(key) = provision::extract_api_key(&provider.settings_config, app)
-                .filter(|key| !key.trim().is_empty())
+            let Some(key) =
+                crate::relay::provider_config::extract_api_key(&provider.settings_config, app)
+                    .filter(|key| !key.trim().is_empty())
             else {
                 continue;
             };
@@ -235,7 +229,10 @@ where
         .buffer_unordered(2);
     while let Some((app, provider, owner, result)) = requests.next().await {
         if let Ok(Ok(Some(models))) = result {
-            let models = filter_models(&app, &provision::normalize_model_names(models));
+            let models = filter_models(
+                &app,
+                &crate::relay::model_selection::normalize_model_names(models),
+            );
             if db.fill_missing_available_models(app.as_str(), &provider, &owner, &models)? {
                 changed.push((app, provider.id));
             }
@@ -251,7 +248,7 @@ mod tests {
 
     fn relay() -> Provider {
         Provider::with_id(
-            provision::provider_id_for("https://relay.example", Some(1), 2),
+            crate::relay::managed::provider_id_for("https://relay.example", Some(1), 2),
             "Example".into(),
             json!({"auth":{"OPENAI_API_KEY":"example-key"},"config":"model = \"custom\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"relay\"\n[model_providers.relay]\nbase_url = \"https://relay.example/v1\"\n", "modelCatalog":{"models":[{"model":"custom", "contextWindow":100000}]}}),
             Some("https://relay.example".into()),
@@ -428,7 +425,7 @@ mod tests {
             json!({"model":"remote-model"})
         );
         assert_eq!(
-            provision::selected_model(&AppType::Codex, &selected).as_deref(),
+            crate::relay::provider_config::selected_model(&AppType::Codex, &selected).as_deref(),
             Some("remote-model")
         );
         assert!(select_model(&AppType::Codex, &provider, "unknown").is_err());

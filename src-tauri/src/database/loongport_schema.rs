@@ -539,8 +539,6 @@ fn remove_legacy_runtime_verification_state(conn: &Connection) -> Result<(), App
 /// 迁移跑在 `Database::init` 里，那时 `AppState` 还不存在（`ProviderService` 要它）。
 /// 这也是上游全部迁移的做法。
 fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppError> {
-    use crate::relay::provision;
-
     // ⚠️ **`providers` 表不存在时直接返回**，不报错。
     //
     // 实际启动顺序里它一定在（上游的 `create_tables_on_conn` 跑在本模块之前），
@@ -590,10 +588,10 @@ fn move_image_tiers_to_their_own_column(conn: &Connection) -> Result<(), AppErro
             log::warn!("档位 {id} 的 settings_config 不是合法 JSON，迁移跳过它");
             continue;
         };
-        let Some(model) = provision::extract_model(&settings) else {
+        let Some(model) = crate::relay::provider_config::extract_model(&settings) else {
             continue;
         };
-        if !provision::is_image_model(&model) {
+        if !crate::relay::model_selection::is_image_model(&model) {
             continue;
         }
 
@@ -1597,7 +1595,7 @@ mod tests {
     }
 
     fn insert_codex_tier(conn: &Connection, id: &str, name: &str, model: &str) {
-        let settings = crate::relay::provision::settings_config_for(
+        let settings = crate::relay::provider_config::settings_config_for(
             &crate::app_config::AppType::Codex,
             "sk-test",
             name,
@@ -1640,7 +1638,7 @@ mod tests {
             &conn,
             "loongport-bbbbbbbbbbbbbbbb",
             "聊天档",
-            crate::relay::provision::DEFAULT_MODEL,
+            crate::relay::model_selection::DEFAULT_MODEL,
         );
 
         apply(&conn).expect("迁移");
@@ -2389,9 +2387,8 @@ mod tests {
         conn.execute("ALTER TABLE providers DROP COLUMN available_models", [])
             .unwrap();
         conn.execute("INSERT INTO providers(id,app_type,name,settings_config) VALUES('legacy','codex','Legacy','{}')", []).unwrap();
-        let generated =
-            crate::relay::provision::provider_id_for("https://relay.example", Some(1), 1);
-        let edited = crate::relay::provision::provider_id_for("https://relay.example", Some(1), 2);
+        let generated = crate::relay::managed::provider_id_for("https://relay.example", Some(1), 1);
+        let edited = crate::relay::managed::provider_id_for("https://relay.example", Some(1), 2);
         for (id, user_edited) in [(&generated, false), (&edited, true)] {
             conn.execute("INSERT INTO providers(id,app_type,name,settings_config,user_edited) VALUES(?1,'codex','Example',?2,?3)",
                 rusqlite::params![id, r#"{"modelCatalog":{"models":[{"model":"remote-model"}]}}"#, user_edited]).unwrap();

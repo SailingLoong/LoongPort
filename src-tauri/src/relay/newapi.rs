@@ -292,12 +292,10 @@ fn validate_self_account(account: &SelfAccount, operation: &str) -> Result<(), A
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GroupIdentity(pub String);
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub identity: GroupIdentity,
@@ -306,14 +304,12 @@ pub struct Group {
     pub description: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Deserialize)]
 struct GroupWire {
     ratio: RatioWire,
     desc: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RatioWire {
@@ -321,7 +317,6 @@ enum RatioWire {
     Text(String),
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl RatioWire {
     fn into_rate_multiplier(self) -> Result<Option<f64>, AppError> {
         match self {
@@ -335,7 +330,6 @@ impl RatioWire {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_groups(body: &str) -> Result<Vec<Group>, AppError> {
     let groups = parse_envelope::<BTreeMap<String, GroupWire>>(body, "groups", true)?
         .expect("requires_data guarantees groups data");
@@ -352,7 +346,6 @@ pub fn parse_groups(body: &str) -> Result<Vec<Group>, AppError> {
         .collect()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Token {
     pub id: i64,
@@ -385,7 +378,6 @@ pub struct Token {
     pub allow_ips: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenPage {
     pub page: i64,
@@ -394,29 +386,24 @@ pub struct TokenPage {
     pub items: Vec<Token>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_list(body: &str) -> Result<TokenPage, AppError> {
     Ok(parse_envelope::<TokenPage>(body, "token list", true)?
         .expect("requires_data guarantees token list data"))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenCreate;
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_create(body: &str) -> Result<TokenCreate, AppError> {
     parse_envelope::<serde_json::Value>(body, "token create", false)?;
     Ok(TokenCreate)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenReveal {
     pub key: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_reveal(body: &str) -> Result<TokenReveal, AppError> {
     let reveal = parse_envelope::<TokenReveal>(body, "token reveal", true)?
         .expect("requires_data guarantees token reveal data");
@@ -426,11 +413,9 @@ pub fn parse_token_reveal(body: &str) -> Result<TokenReveal, AppError> {
     Ok(reveal)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenDelete;
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_token_delete(body: &str) -> Result<TokenDelete, AppError> {
     parse_envelope::<serde_json::Value>(body, "token delete", false)?;
     Ok(TokenDelete)
@@ -439,8 +424,6 @@ pub fn parse_token_delete(body: &str) -> Result<TokenDelete, AppError> {
 pub struct RefreshedSession {
     pub access_token: String,
     pub access_expires_at: Option<i64>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub session_id: String,
     pub account: SelfAccount,
     pub refresh_cookie: String,
 }
@@ -507,7 +490,6 @@ pub async fn exchange_session(
     Ok(RefreshedSession {
         access_token,
         access_expires_at: None,
-        session_id: String::new(),
         account,
         refresh_cookie: String::new(),
     })
@@ -594,7 +576,6 @@ pub async fn refresh_session(
     Ok(RefreshedSession {
         access_token: refreshed.access_token,
         access_expires_at: Some(refreshed.access_expires_at),
-        session_id: refreshed.session.sid,
         account: refreshed.user,
         refresh_cookie: rotated_cookie,
     })
@@ -673,9 +654,7 @@ pub async fn fetch_status(site_origin: &str) -> Result<Status, AppError> {
     parse_status(&body)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 const TOKEN_PAGE_SIZE: i64 = 100;
-#[cfg_attr(not(test), allow(dead_code))]
 const TOKEN_PAGE_LIMIT: i64 = 100;
 
 pub struct NewApiClient {
@@ -685,7 +664,6 @@ pub struct NewApiClient {
     http: reqwest::Client,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Serialize)]
 struct CreateTokenPayload<'a> {
     name: &'a str,
@@ -700,7 +678,6 @@ struct CreateTokenPayload<'a> {
     cross_group_retry: bool,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl NewApiClient {
     pub fn new(site_origin: &str, access_token: &str) -> Result<Self, AppError> {
         let site_origin = site_origin.trim().trim_end_matches('/').to_string();
@@ -1151,7 +1128,6 @@ mod tests {
 
         assert_eq!(refreshed.access_token, "access-123");
         assert_eq!(refreshed.access_expires_at, Some(1_700_000_001));
-        assert_eq!(refreshed.session_id, "sid-123");
         assert_eq!(refreshed.refresh_cookie, "sid-123.rotated-secret");
         assert_eq!(refreshed.account.username, "alice");
 

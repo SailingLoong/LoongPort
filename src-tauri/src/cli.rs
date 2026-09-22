@@ -24,7 +24,7 @@
 //! - 协议探测：[`discovery::probe_site`]（纯 HTTP，GUI 同一条）
 //! - base_url 约定：[`sub2api::base_url_for`]（claude/gemini 拿站点根、codex/grok
 //!   拿 `/v1` 根 —— 唯一数据源，别在这里重写）
-//! - 配置生成：[`provision::settings_config_for`]（复用上游 deeplink 构造器，
+//! - 配置生成：[`crate::relay::provider_config::settings_config_for`]（复用上游 deeplink 构造器，
 //!   全部 CLI 一份形状）
 //! - 落盘：[`write_standalone_live_snapshot`](crate::services::provider::write_standalone_live_snapshot)
 //!   （与 GUI 切档共用 app 分派，但不创建 LoongPort 自有备份）
@@ -40,7 +40,7 @@ use std::str::FromStr;
 
 use crate::app_config::AppType;
 use crate::provider::Provider;
-use crate::relay::{discovery, provision, sub2api};
+use crate::relay::{discovery, sub2api};
 
 /// 触发标志，与 `--add-site <域名>` 的值成对出现。
 pub const ADD_SITE_FLAG: &str = "--add-site";
@@ -218,13 +218,15 @@ fn write_config(prepared: Prepared) -> Result<(), String> {
         model,
     } = prepared;
 
-    let settings = provision::settings_config_for(&app, &key, &site_name, &base_url, &model)
-        .ok_or_else(|| {
-            format!(
-                "无法为 {} 生成配置（该 CLI 暂不支持 CLI 接入）",
-                app.as_str()
-            )
-        })?;
+    let settings = crate::relay::provider_config::settings_config_for(
+        &app, &key, &site_name, &base_url, &model,
+    )
+    .ok_or_else(|| {
+        format!(
+            "无法为 {} 生成配置（该 CLI 暂不支持 CLI 接入）",
+            app.as_str()
+        )
+    })?;
 
     let provider = Provider::with_id(
         CLI_PROVIDER_ID.to_string(),

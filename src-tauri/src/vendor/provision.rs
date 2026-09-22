@@ -51,7 +51,7 @@ pub const VENDOR_APPS: [AppType; 6] = [
 ///
 /// ⚠️ **分隔符不能省** —— 没有它 `(vendor="a", account="bc")` 与
 /// `(vendor="ab", account="c")` 喂进哈希的字节流完全相同
-/// （同型于 `relay::provision::provider_id_for` 那个闸）。
+/// （同型于 `relay::managed::provider_id_for` 那个闸）。
 pub fn provider_id_for(id_segment: &str, account_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -106,7 +106,7 @@ pub fn claude_roles_for(
     vendor: Vendor,
     id_segment: &str,
     app: &AppType,
-) -> Option<crate::relay::provision::ClaudeRoleModels> {
+) -> Option<crate::relay::model_selection::ClaudeRoleModels> {
     matches!(app, AppType::Claude | AppType::ClaudeDesktop)
         .then(|| crate::vendor::claude_role_models(vendor, id_segment))
 }
@@ -123,7 +123,7 @@ pub struct PlanRows {
 /// 一把 sk 按厂商的全部 plan 展开。单 plan 厂商返回一个 bundle（与旧世界的
 /// `provider_rows_for` 等价）；多 plan 厂商（opencode）返回 Zen + Go 两个。
 ///
-/// 走 `relay::provision::settings_config_with_roles_and_models` —— 它的非 codex
+/// 走 `relay::provider_config::settings_config_with_roles_and_models` —— 它的非 codex
 /// 分支复用上游 `deeplink::build_provider_from_request`，而那个 match 覆盖全部
 /// 8 个平台（`deeplink/provider.rs:147`）⇒ 我们要的六个都在里面，不需要新写分派。
 /// plan 的生成风格（鉴权字段 / wire）由 [`crate::vendor::plan_style`] 一并传下去。
@@ -141,16 +141,17 @@ pub fn plan_rows_for(vendor: Vendor, account_id: &str, api_key: &str) -> Vec<Pla
                     .filter_map(|app| {
                         let (base_url, model) =
                             crate::vendor::config_for(vendor, plan.id_segment, app)?;
-                        let cfg = crate::relay::provision::settings_config_with_roles_and_models(
-                            app,
-                            api_key,
-                            plan.display_name,
-                            &base_url,
-                            &model,
-                            claude_roles_for(vendor, plan.id_segment, app),
-                            Some(catalog.as_slice()),
-                            crate::vendor::plan_style(vendor, plan.id_segment),
-                        )?;
+                        let cfg =
+                            crate::relay::provider_config::settings_config_with_roles_and_models(
+                                app,
+                                api_key,
+                                plan.display_name,
+                                &base_url,
+                                &model,
+                                claude_roles_for(vendor, plan.id_segment, app),
+                                Some(catalog.as_slice()),
+                                crate::vendor::plan_style(vendor, plan.id_segment),
+                            )?;
                         Some((app.clone(), cfg))
                     })
                     .collect(),

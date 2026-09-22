@@ -279,7 +279,7 @@ pub fn config_for(
 pub fn claude_role_models(
     vendor: Vendor,
     id_segment: &str,
-) -> crate::relay::provision::ClaudeRoleModels {
+) -> crate::relay::model_selection::ClaudeRoleModels {
     match vendor {
         Vendor::DeepSeek => deepseek::claude_role_models(),
         Vendor::BigModel => bigmodel::claude_role_models(),
@@ -291,9 +291,14 @@ pub fn claude_role_models(
 }
 
 /// 该厂商**某个 plan**的生成风格（鉴权字段 / wire 协议）。
-pub fn plan_style(vendor: Vendor, id_segment: &str) -> crate::relay::provision::ProvisionStyle {
+pub fn plan_style(
+    vendor: Vendor,
+    id_segment: &str,
+) -> crate::relay::provider_config::ProvisionStyle {
     match vendor {
-        Vendor::DeepSeek | Vendor::BigModel => crate::relay::provision::ProvisionStyle::default(),
+        Vendor::DeepSeek | Vendor::BigModel => {
+            crate::relay::provider_config::ProvisionStyle::default()
+        }
         Vendor::OpenCode => opencode::Plan::from_id_segment(id_segment)
             .unwrap_or(opencode::Plan::Zen)
             .style(),

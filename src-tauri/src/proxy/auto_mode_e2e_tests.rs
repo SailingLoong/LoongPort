@@ -268,10 +268,9 @@ impl E2eFixture {
         let cheap = MockUpstream::spawn("served-by-cheap").await;
         let expensive = MockUpstream::spawn("served-by-expensive").await;
 
-        let cheap_id =
-            crate::relay::provision::provider_id_for("https://cheap.example", Some(1), 11);
+        let cheap_id = crate::relay::managed::provider_id_for("https://cheap.example", Some(1), 11);
         let expensive_id =
-            crate::relay::provision::provider_id_for("https://expensive.example", Some(1), 22);
+            crate::relay::managed::provider_id_for("https://expensive.example", Some(1), 22);
 
         let tier_provider = |id: &str, name: &str, mock: &MockUpstream, token: &str| {
             Provider::with_id(
@@ -840,7 +839,7 @@ async fn fatal_402_skips_sibling_tiers_of_the_same_account() {
 
     // 托管档形状对齐 provision 建档：website_url=站点 origin + meta 账号身份
     let account_tier = |mock: &MockUpstream, site: &str, account: i64, group: i64| {
-        let id = crate::relay::provision::provider_id_for(site, Some(account), group);
+        let id = crate::relay::managed::provider_id_for(site, Some(account), group);
         let mut provider = Provider::with_id(
             id,
             format!("{site} · {group}"),

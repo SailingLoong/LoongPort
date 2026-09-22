@@ -456,8 +456,8 @@ fn builtin_config_for(app: &crate::app_config::AppType) -> Option<(&'static str,
 
 /// Claude 系四角色 → GLM 模型（与 `deepseek::claude_role_models` 同构）。
 /// 远端 `tier_configs` 键 `bigmodel/claude` 的 `claude_roles` 可覆盖。
-pub fn claude_role_models() -> crate::relay::provision::ClaudeRoleModels {
-    let builtin = crate::relay::provision::ClaudeRoleModels {
+pub fn claude_role_models() -> crate::relay::model_selection::ClaudeRoleModels {
+    let builtin = crate::relay::model_selection::ClaudeRoleModels {
         opus: FLAGSHIP.to_string(),
         fable: FLAGSHIP.to_string(),
         sonnet: TURBO.to_string(),
@@ -471,7 +471,7 @@ pub fn claude_role_models() -> crate::relay::provision::ClaudeRoleModels {
         return builtin;
     };
 
-    crate::relay::provision::ClaudeRoleModels {
+    crate::relay::model_selection::ClaudeRoleModels {
         opus: remote
             .opus
             .filter(|v| !v.trim().is_empty())

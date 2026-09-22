@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::relay::balance;
-use crate::relay::provision;
 
 /// 一行名下**全部托管档位**里的 base_url 与 sk。
 ///
@@ -27,7 +26,9 @@ pub(crate) fn relay_balance_inputs(
             if !belongs_to_relay(provider, &relay.site_origin, relay.account_id) {
                 continue;
             }
-            if let Some(sk) = provision::extract_api_key(&provider.settings_config, &app_type) {
+            if let Some(sk) =
+                crate::relay::provider_config::extract_api_key(&provider.settings_config, &app_type)
+            {
                 if base_url.is_none() {
                     base_url = crate::proxy::providers::get_adapter(&app_type)
                         .and_then(|adapter| adapter.extract_base_url(provider).ok());

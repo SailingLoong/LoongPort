@@ -16,7 +16,8 @@ pub(crate) fn for_provider(provider: &Provider, app_type: &AppType) -> Option<(S
         .extract_base_url(provider)
         .ok()?;
     let origin = crate::relay::sub2api::normalize_site_origin(&base_url).ok()?;
-    let api_key = crate::relay::provision::extract_api_key(&provider.settings_config, app_type)?;
+    let api_key =
+        crate::relay::provider_config::extract_api_key(&provider.settings_config, app_type)?;
     if origin.is_empty() || api_key.is_empty() {
         return None;
     }
@@ -122,7 +123,7 @@ mod tests {
         let settings = serde_json::json!({"env":{"ANTHROPIC_BASE_URL":"https://api.example", "ANTHROPIC_AUTH_TOKEN":"fingerprint-canary"}});
         let duplicate = Provider::with_id("manual".into(), "Manual".into(), settings.clone(), None);
         let managed = Provider::with_id(
-            crate::relay::provision::provider_id_for("https://api.example", Some(1), 1),
+            crate::relay::managed::provider_id_for("https://api.example", Some(1), 1),
             "Managed".into(),
             settings,
             None,

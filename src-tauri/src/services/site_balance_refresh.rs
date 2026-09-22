@@ -198,7 +198,7 @@ mod tests {
         // 同站同账号两档（不同分组）：去重成一个键
         tier(
             managed_tier(
-                &crate::relay::provision::provider_id_for("https://a.example", Some(1), 1),
+                &crate::relay::managed::provider_id_for("https://a.example", Some(1), 1),
                 "https://a.example",
                 Some(1),
             ),
@@ -206,7 +206,7 @@ mod tests {
         );
         tier(
             managed_tier(
-                &crate::relay::provision::provider_id_for("https://a.example", Some(1), 2),
+                &crate::relay::managed::provider_id_for("https://a.example", Some(1), 2),
                 "https://a.example/v1",
                 Some(1),
             ),
@@ -215,7 +215,7 @@ mod tests {
         // 同站另一个账号的档：独立成键，不许被同站去重吞掉
         tier(
             managed_tier(
-                &crate::relay::provision::provider_id_for("https://a.example", Some(2), 1),
+                &crate::relay::managed::provider_id_for("https://a.example", Some(2), 1),
                 "https://a.example",
                 Some(2),
             ),
@@ -228,7 +228,7 @@ mod tests {
         );
         tier(
             managed_tier(
-                &crate::relay::provision::provider_id_for("http://c.example", Some(1), 3),
+                &crate::relay::managed::provider_id_for("http://c.example", Some(1), 3),
                 "http://c.example",
                 Some(1),
             ),
@@ -237,7 +237,7 @@ mod tests {
         // 无账号归属的托管档：定位不了钱包归谁，不进链
         tier(
             managed_tier(
-                &crate::relay::provision::provider_id_for("https://d.example", Some(1), 1),
+                &crate::relay::managed::provider_id_for("https://d.example", Some(1), 1),
                 "https://d.example",
                 None,
             ),
@@ -272,7 +272,7 @@ mod tests {
             db.save_provider(
                 "claude",
                 &managed_tier(
-                    &crate::relay::provision::provider_id_for(&origin, Some(account_id), group_id),
+                    &crate::relay::managed::provider_id_for(&origin, Some(account_id), group_id),
                     &origin,
                     Some(account_id),
                 ),

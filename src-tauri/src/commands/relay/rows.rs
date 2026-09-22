@@ -2,7 +2,7 @@
 //! 更大的图景与约束见本目录 mod.rs 的总览。
 
 use super::*;
-use crate::relay::provision;
+use crate::relay::{model_selection, provider_config};
 
 /// 一个已添加站点的后端摘要。
 ///
@@ -69,7 +69,7 @@ pub struct TierInfo {
     /// 服务端说这个分组允许生图（`allow_image_generation`）。
     ///
     /// ⚠️ **纯生图分组不靠这个字段识别** —— 它们在 `codex-image` 那一栏，
-    /// 所在的列表本身就说明了这件事（见 [`provision::image_tier_app_type`]）。
+    /// 所在的列表本身就说明了这件事（见 [`model_selection::image_tier_app_type`]）。
     /// 这个字段的价值在**混合分组**：实测 `pro池` 这类有文本模型的分组也是 `true`，
     /// 它们留在 codex 栏而同时支持生图。
     ///
@@ -434,18 +434,18 @@ pub(crate) fn reset_tier_config_in_state(
 
     // sk 从现有配置里取。取不到就让用户走「获取密钥」重建 —— 生成一份没有 sk 的
     // 「默认配置」比保持现状更糟（那是一条必定 401 的记录）。
-    let api_key =
-        provision::extract_api_key(&existing.settings_config, &app_type).ok_or_else(|| {
+    let api_key = provider_config::extract_api_key(&existing.settings_config, &app_type)
+        .ok_or_else(|| {
             AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
         })?;
 
-    // 带模型目录的档位（唯一源 [`provision::model_catalog_apps`]）：远端目录已经
+    // 带模型目录的档位（唯一源 [`provider_config::model_catalog_apps`]）：远端目录已经
     // 存进 `modelCatalog`，恢复默认时按同一份目录重新挑默认模型，并保留目录本身。
     // 否则这个动作会把刚外露的模型列表清空，还可能把不支持 `DEFAULT_MODEL` 的分组
     // 重置成一条选中即 404 的配置。claude / gemini 的角色分档（roles）是官网直连
     // 才有的概念、中转站档位恒 `None`（`settings_config_with_models` 内部就是走
-    // `roles = None`），所以这里统一用 [`provision::settings_config_with_models`]。
-    let catalog_models = if provision::supports_model_catalog(&app_type) {
+    // `roles = None`），所以这里统一用 [`provider_config::settings_config_with_models`]。
+    let catalog_models = if provider_config::supports_model_catalog(&app_type) {
         crate::relay::model_catalog::available_models(&existing)
     } else {
         Vec::new()
@@ -458,16 +458,16 @@ pub(crate) fn reset_tier_config_in_state(
     // 即「恢复默认」这个专门用来救砖的按钮，反过来把生图档位弄砖。
     //
     // 判据用配置里现有的模型名：是 `gpt-image-*` 就留着（那个值本就是这个档位的正解，
-    // 由 `provision::pick_model` 按服务端的模型列表定），否则回落 `DEFAULT_MODEL`。
+    // 由 `model_selection::pick_model` 按服务端的模型列表定），否则回落 `DEFAULT_MODEL`。
     //
     // 这**不是**「保留用户改的模型名」—— 用户把模型改成任何文本模型时仍然会被重置成
     // 默认值，那正是这个按钮该做的事。
     let model = if catalog_models.is_empty() {
-        provision::extract_model(&existing.settings_config)
-            .filter(|m| provision::is_image_model(m))
+        provider_config::extract_model(&existing.settings_config)
+            .filter(|m| model_selection::is_image_model(m))
             .unwrap_or_else(|| DEFAULT_MODEL.to_string())
     } else {
-        provision::pick_tier_models(&app_type, Some(&catalog_models)).main
+        model_selection::pick_tier_models(&app_type, Some(&catalog_models)).main
     };
     let base_url = sub2api::base_url_for(
         &app_type,
@@ -476,7 +476,7 @@ pub(crate) fn reset_tier_config_in_state(
     );
 
     let settings_config = if !catalog_models.is_empty() {
-        provision::settings_config_with_models(
+        provider_config::settings_config_with_models(
             &app_type,
             &api_key,
             &existing.name,
@@ -485,7 +485,7 @@ pub(crate) fn reset_tier_config_in_state(
             Some(&catalog_models),
         )
     } else {
-        provision::settings_config_for(&app_type, &api_key, &existing.name, &base_url, &model)
+        provider_config::settings_config_for(&app_type, &api_key, &existing.name, &base_url, &model)
     }
     .ok_or_else(|| {
         AppError::Config(format!(
@@ -599,7 +599,7 @@ pub(crate) struct OwnedTier {
 /// 点进去用的还是别人的 sk。
 ///
 /// ⚠️ **不能靠 `provider_id` 反推**：它是 sha256 的前 16 位 hex
-/// （`provision::provider_id_for`），单向不可逆 —— 那不是判据。
+/// （`managed::provider_id_for`），单向不可逆 —— 那不是判据。
 ///
 /// `website_url` 为 `None` 的档位**不归任何行**（历史数据或手工造的），
 /// 宁可不显示也不能猜着塞给某个站 —— 塞错了用户会以为自己在 A 站买的档位属于 B 站。
@@ -652,7 +652,7 @@ pub(crate) fn tiers_of_site(
 // 拿一份不带归属的扁平列表没法渲染。2026-08-04 删掉命令壳，
 // `list_tiers_impl` 留着（`list_relays_impl` 在用它）。
 // （托盘「模型」子菜单与自动模式共用的目录解析已搬到
-// `relay::provision::models_from_settings`。）
+// `relay::provider_config::models_from_settings`。）
 
 /// A LoongPort model-chip click is a managed preference, so refreshing the
 /// tier should keep it while the newly fetched catalog still advertises it.
@@ -661,7 +661,7 @@ pub(crate) fn preserve_supported_codex_model(
     defaults: serde_json::Value,
     previous: &serde_json::Value,
 ) -> serde_json::Value {
-    let Some(model) = provision::extract_model(previous) else {
+    let Some(model) = provider_config::extract_model(previous) else {
         return defaults;
     };
     select_codex_model(&defaults, &model).unwrap_or(defaults)
@@ -670,7 +670,7 @@ pub(crate) fn preserve_supported_codex_model(
 /// [`preserve_supported_codex_model`] 的跨平台版：claude / gemini 走 env 形状
 /// （剥掉 `[1M]` 声明后对新目录查成员资格），grokbuild 走 TOML 形状，其余平台
 /// 没有「选模型」概念，新默认直接接管。四个 arm 与
-/// [`provision::model_catalog_apps`] 对齐（那边是名单唯一源，这里按形状分派）。
+/// [`provider_config::model_catalog_apps`] 对齐（那边是名单唯一源，这里按形状分派）。
 pub(crate) fn preserve_supported_model(
     app_type: &AppType,
     defaults: serde_json::Value,
@@ -680,7 +680,13 @@ pub(crate) fn preserve_supported_model(
         AppType::Codex => preserve_supported_codex_model(defaults, previous),
         AppType::Claude | AppType::Gemini => {
             let catalog = models_from_settings(&defaults);
-            provision::preserve_supported_env_model(app_type, defaults, previous, &catalog)
+            provider_config::preserve_supported_env_model(
+                app_type,
+                defaults,
+                previous,
+                &catalog,
+                &remote_config::model_selection_tables(),
+            )
         }
         AppType::GrokBuild => preserve_supported_grok_model(defaults, previous),
         _ => defaults,
@@ -688,13 +694,13 @@ pub(crate) fn preserve_supported_model(
 }
 
 /// [`preserve_supported_codex_model`] 的 grok 版：读旧选中值（TOML 选中模型表的
-/// `model` 字段，[`provision::selected_model`]）对新目录查成员资格，命中就把新
+/// `model` 字段，[`provider_config::selected_model`]）对新目录查成员资格，命中就把新
 /// 默认的该字段改回旧值 —— profile 名、端点、密钥都不动。
 pub(crate) fn preserve_supported_grok_model(
     defaults: serde_json::Value,
     previous: &serde_json::Value,
 ) -> serde_json::Value {
-    let Some(old) = provision::selected_model(&AppType::GrokBuild, previous) else {
+    let Some(old) = provider_config::selected_model(&AppType::GrokBuild, previous) else {
         return defaults;
     };
     if !models_from_settings(&defaults).iter().any(|m| m == &old) {
@@ -760,7 +766,7 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
         .filter(|p| is_managed(p))
         .map(|p| {
             let subscription_windows =
-                crate::relay::provision::subscription_windows_from_settings(&p.settings_config);
+                crate::relay::tier_windows::subscription_windows_from_settings(&p.settings_config);
             let next_reset_at = crate::relay::tier_windows::next_reset_at(&subscription_windows);
             OwnedTier {
                 tier: TierInfo {
@@ -780,7 +786,7 @@ fn list_tiers_impl(state: &AppState, app_type: AppType) -> Result<Vec<OwnedTier>
                         .unwrap_or(None),
                     group_name: p.name.clone(),
                     display_name: p.name.clone(),
-                    model: provision::selected_model(&app_type, &p.settings_config)
+                    model: provider_config::selected_model(&app_type, &p.settings_config)
                         .unwrap_or_default(),
                     // 目录没有就返回空 —— UI/托盘按「无目录」处理，不用按 app 分支
                     models: crate::relay::model_catalog::available_models(p),
@@ -1061,6 +1067,7 @@ fn switch_affected_apps_to_official(
 mod tests {
     use super::*;
     use crate::commands::relay::test_support::*;
+    use crate::relay::managed;
 
     fn sub2api_with_session() -> creds::RelayAccount {
         purchase_capability_relay(creds::BackendKind::Sub2Api)
@@ -1182,7 +1189,7 @@ mod tests {
 
         let selected = select_codex_model(&settings, " gpt-b ").expect("supported model");
         assert_eq!(
-            provision::extract_model(&selected).as_deref(),
+            provider_config::extract_model(&selected).as_deref(),
             Some("gpt-b")
         );
         assert_eq!(selected["modelCatalog"], settings["modelCatalog"]);
@@ -1196,11 +1203,17 @@ mod tests {
         let defaults = codex_settings("gpt-a", &["gpt-a", "gpt-b"]);
         let previous = codex_settings("gpt-b", &["gpt-a", "gpt-b"]);
         let kept = preserve_supported_codex_model(defaults.clone(), &previous);
-        assert_eq!(provision::extract_model(&kept).as_deref(), Some("gpt-b"));
+        assert_eq!(
+            provider_config::extract_model(&kept).as_deref(),
+            Some("gpt-b")
+        );
 
         let removed = codex_settings("gpt-removed", &["gpt-removed"]);
         let reset = preserve_supported_codex_model(defaults, &removed);
-        assert_eq!(provision::extract_model(&reset).as_deref(), Some("gpt-a"));
+        assert_eq!(
+            provider_config::extract_model(&reset).as_deref(),
+            Some("gpt-a")
+        );
     }
 
     /// 形状对齐 [`relay::provision`] 生成侧（`deeplink::build_grokbuild_settings`
@@ -1222,7 +1235,7 @@ mod tests {
 
         let selected = select_grok_model(&settings, "grok-4.6").expect("supported model");
         assert_eq!(
-            provision::selected_model(&AppType::GrokBuild, &selected).as_deref(),
+            provider_config::selected_model(&AppType::GrokBuild, &selected).as_deref(),
             Some("grok-4.6")
         );
         // profile 名（models.default 指向的表）、端点、密钥、目录都不动 ——
@@ -1240,14 +1253,14 @@ mod tests {
         let previous = grok_settings("grok-4.6", &["grok-4.5", "grok-4.6"]);
         let kept = preserve_supported_grok_model(defaults.clone(), &previous);
         assert_eq!(
-            provision::selected_model(&AppType::GrokBuild, &kept).as_deref(),
+            provider_config::selected_model(&AppType::GrokBuild, &kept).as_deref(),
             Some("grok-4.6")
         );
 
         let removed = grok_settings("grok-gone", &["grok-gone"]);
         let reset = preserve_supported_grok_model(defaults, &removed);
         assert_eq!(
-            provision::selected_model(&AppType::GrokBuild, &reset).as_deref(),
+            provider_config::selected_model(&AppType::GrokBuild, &reset).as_deref(),
             Some("grok-4.5")
         );
     }
@@ -1514,10 +1527,10 @@ mod tests {
         })
         .expect("save credentials");
 
-        let provider_id = provision::provider_id_for(site, Some(7), 1);
-        let other_provider_id = provision::provider_id_for(site, Some(7), 2);
+        let provider_id = managed::provider_id_for(site, Some(7), 1);
+        let other_provider_id = managed::provider_id_for(site, Some(7), 2);
         let settings_config = if valid_key {
-            provision::settings_config_for(
+            provider_config::settings_config_for(
                 &AppType::Codex,
                 "sk-reset",
                 "Reset tier",
@@ -1536,7 +1549,7 @@ mod tests {
         db.save_provider(
             "codex",
             &Provider {
-                settings_config: provision::settings_config_for(
+                settings_config: provider_config::settings_config_for(
                     &AppType::Codex,
                     "sk-other",
                     "Other tier",
@@ -1692,7 +1705,7 @@ mod tests {
     ///
     /// 回归背景：PR #237 给 grok 补目录时只改了 persist 侧的平台名单、漏了 reset 侧
     /// ——「恢复默认」把 Claude / Gemini / Grok 的模型芯片清空到下次 provision。
-    /// 名单唯源是 [`provision::model_catalog_apps`]，这条测试按平台全量遍历：
+    /// 名单唯源是 [`provider_config::model_catalog_apps`]，这条测试按平台全量遍历：
     /// 以后名单加平台，新平台自动被覆盖，不会再出现「persist 改了 reset 没跟」。
     #[test]
     fn reset_tier_config_keeps_the_model_catalog_for_every_catalog_app() {
@@ -1728,8 +1741,8 @@ mod tests {
             })
             .expect("save credentials");
 
-            let provider_id = provision::provider_id_for(site, Some(7), 1);
-            let settings = provision::settings_config_with_models(
+            let provider_id = managed::provider_id_for(site, Some(7), 1);
+            let settings = provider_config::settings_config_with_models(
                 &app_type,
                 "sk-catalog",
                 "Catalog·Pro",
@@ -1821,7 +1834,7 @@ mod tests {
         .expect("save credentials");
 
         // 这个账号在 codex 下的档位，且**它就是 codex 的当前项**。
-        let codex_tier = provision::provider_id_for(site, Some(7), 1);
+        let codex_tier = managed::provider_id_for(site, Some(7), 1);
         db.save_provider(
             "codex",
             &seeded_owned(&codex_tier, "BestApi · Pro", Some(site), 7),
@@ -1871,7 +1884,7 @@ mod tests {
         })
         .expect("save site");
 
-        let tier = provision::provider_id_for(site, None, 1);
+        let tier = managed::provider_id_for(site, None, 1);
         db.save_provider("codex", &seeded(&tier, "BestApi · Pro", Some(site)))
             .expect("seed");
         // **不设 current** —— 别的 provider 是当前项，或压根没有当前项。
@@ -1933,7 +1946,7 @@ mod tests {
         })
         .expect("save credentials");
 
-        let codex_tier = provision::provider_id_for(site, Some(7), 1);
+        let codex_tier = managed::provider_id_for(site, Some(7), 1);
         db.save_provider(
             "codex",
             &seeded_owned(&codex_tier, "BestApi · Pro", Some(site), 7),
@@ -1976,7 +1989,7 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
 
         // 账号 9 的档位是 codex 的当前项。
-        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        let b_tier = managed::provider_id_for(site, Some(9), 1);
         db.save_provider("codex", &seeded_owned(&b_tier, "B 的档位", Some(site), 9))
             .expect("seed");
         db.set_current_provider("codex", &b_tier)
@@ -1992,7 +2005,7 @@ mod tests {
 
         // 而删除方向的语义不变：`prune_stale_tiers` 传 `None` 时仍会清同站没记归属的档位。
         // 这条只是确认上面那个改动没顺手改掉 `belongs_to_account` 本身。
-        let legacy = provision::provider_id_for(site, None, 5);
+        let legacy = managed::provider_id_for(site, None, 5);
         db.save_provider("codex", &seeded(&legacy, "旧数据", Some(site)))
             .expect("seed legacy");
         let legacy_provider = db
@@ -2047,8 +2060,8 @@ mod tests {
         })
         .expect("save credentials");
 
-        let tier_id = provision::provider_id_for(site, Some(7), 1);
-        let settings_config = provision::settings_config_for(
+        let tier_id = managed::provider_id_for(site, Some(7), 1);
+        let settings_config = provider_config::settings_config_for(
             &AppType::Codex,
             "sk-valid",
             "Pro池",
@@ -2093,8 +2106,8 @@ mod tests {
             creds::save_site(conn, site, "BestAPI", site)
         })
         .expect("site");
-        let provider_id = provision::provider_id_for(site, None, 1);
-        let settings = provision::settings_config_for(
+        let provider_id = managed::provider_id_for(site, None, 1);
+        let settings = provider_config::settings_config_for(
             &AppType::Codex,
             "sk-test",
             "Pro池",
@@ -2206,7 +2219,7 @@ mod tests {
         })
         .expect("credentials");
 
-        let tier_id = provision::provider_id_for(site, Some(7), 1);
+        let tier_id = managed::provider_id_for(site, Some(7), 1);
         db.save_provider(
             "codex",
             &Provider {

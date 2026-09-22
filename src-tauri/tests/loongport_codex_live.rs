@@ -26,7 +26,7 @@ use cc_switch_lib::{
 mod support;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
-/// 复刻 `relay::provision::codex_config_toml` 的产物形态。
+/// 复刻 `relay::provider_config::codex_config_toml` 的产物形态。
 ///
 /// 有意不直接调那个函数：这里要断言的是「落到磁盘上的 config.toml 长什么样」，
 /// 复刻一份输入能让测试在有人改了生成器时**照样跑**，然后由断言指出行为变了。

@@ -162,6 +162,17 @@ pub fn next_reset_at(windows: &[SubscriptionWindow]) -> Option<i64> {
     windows.iter().filter_map(|window| window.reset_at).min()
 }
 
+/// Read stored subscription windows; malformed or missing projections have no windows.
+pub(crate) fn subscription_windows_from_settings(
+    settings: &serde_json::Value,
+) -> Vec<SubscriptionWindow> {
+    settings
+        .get("subscriptionWindows")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
