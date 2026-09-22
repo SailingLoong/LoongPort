@@ -235,7 +235,7 @@ pub struct Group {
     /// ⚠️ **它不等于「这是个纯生图分组」** —— 实测 `pro池`（6 个文本模型）也是 `true`：
     /// 它的生图走 sub2api 的 codex 生图桥（给 `/v1/responses` 请求注入
     /// `image_generation` tool），主模型仍是文本模型。而纯生图分组是「`/v1/models`
-    /// 里只有 `gpt-image-*`」，那是另一件事（见 [`super::provision::pick_model`]）。
+    /// 里只有 `gpt-image-*`」，那是另一件事（见 [`super::model_selection::pick_model_with`]）。
     ///
     /// 两者压成一个字段就分不回来了：`福利Pro-禁luna` 是 `false`（选它生图会拿 403
     /// `permission_error`），而它同样不是纯生图分组。
@@ -468,7 +468,7 @@ impl Account {
 ///
 /// 直觉上该剥：带不带 `www.` 会让同一个站变成两行（`site_origin` 进了
 /// `creds.rs` 的 `UNIQUE(site_origin, account_id)`，也进了
-/// [`super::provision::provider_id_for`] 的哈希）⇒ 界面上两行同名中转站、
+/// [`super::managed::provider_id_for`] 的哈希）⇒ 界面上两行同名中转站、
 /// 各存一套凭据、同一分组在两行下各有一条档位。那个困扰是真的。
 ///
 /// **但剥掉的代价高一个量级，而且是静默的**（2026-08-05 review 抓出）：
@@ -1360,7 +1360,7 @@ fn is_bot_blocked(status: reqwest::StatusCode, body: &str) -> bool {
 ///
 /// `None` = 还没拿到 `account_id`（登录回填之前）。用 `"anon"` 参与哈希而不是跳过，
 /// 免得「未知账号」与「account_id 恰好是某个值」撞到同一个键上 ——
-/// 与 [`provision::provider_id_for`](super::provision::provider_id_for) 同一套理由。
+/// 与 [`crate::relay::managed::provider_id_for`](super::managed::provider_id_for) 同一套理由。
 fn idempotency_key_for(account_id: Option<i64>, name: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

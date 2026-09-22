@@ -337,7 +337,7 @@ pub(crate) async fn tier_board_impl(state: &AppState, app_type: &str) -> Result<
                     crate::app_config::AppType::from_str(app_type)
                         .ok()
                         .and_then(|app| {
-                            crate::relay::provision::selected_model(&app, &p.settings_config)
+                            crate::relay::provider_config::selected_model(&app, &p.settings_config)
                         })
                 });
             let unit_price_per_million = effective_model
@@ -451,7 +451,7 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let id = crate::relay::provision::provider_id_for("https://cache.example", Some(1), 1);
+        let id = crate::relay::managed::provider_id_for("https://cache.example", Some(1), 1);
         let mut tier = crate::provider::Provider::with_id(
             id.clone(),
             "缓存档".to_string(),
@@ -499,8 +499,8 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let expensive = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let cheap = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let expensive = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let cheap = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         // http 端点（fetch_site_balances 只对 https 发请求）
         let tier = |id: &str, name: &str, config: serde_json::Value| {
             crate::provider::Provider::with_id(id.to_string(), name.to_string(), config, None)
@@ -602,8 +602,8 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let expensive = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let cheap = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let expensive = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let cheap = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         let tier = |id: &str| {
             crate::provider::Provider::with_id(
                 id.to_string(),
@@ -648,8 +648,8 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let dead = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let fine = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let dead = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let fine = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         let tier = |id: &str| {
             crate::provider::Provider::with_id(
                 id.to_string(),
@@ -700,8 +700,8 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let current = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let other = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let current = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let other = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         let tier = |id: &str| {
             crate::provider::Provider::with_id(
                 id.to_string(),
@@ -787,8 +787,8 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let busy = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let cold = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let busy = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let cold = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         let tier = |id: &str| {
             crate::provider::Provider::with_id(
                 id.to_string(),
@@ -866,8 +866,8 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let cheap = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let expensive = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let cheap = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let expensive = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         let with_catalog = |id: &str, models: &[&str]| {
             crate::provider::Provider::with_id(
                 id.to_string(),
@@ -928,8 +928,8 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let state = AppState::new(db.clone()).unwrap();
 
-        let busy = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let cold = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let busy = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let cold = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         let tier = |id: &str| {
             crate::provider::Provider::with_id(
                 id.to_string(),

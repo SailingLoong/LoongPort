@@ -42,11 +42,11 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::events::{emit_provider_switched, PURCHASE_CLOSED};
 use crate::provider::Provider;
-use crate::relay::provision::models_from_settings;
+use crate::relay::provider_config::models_from_settings;
 // ⚠️ 这里**有意不导入** `balance` / `imagegen` / `login` / `provision` / `site_config`
 // 这五个 crate::relay 子模块 —— 本目录有同名领域模块，`use super::*` 会让子模块名
 // 遮蔽它们。需要那五个模块的文件各自 `use crate::relay::<名>;`。
-use crate::relay::provision::DEFAULT_MODEL;
+use crate::relay::model_selection::DEFAULT_MODEL;
 use crate::relay::{
     backend, browser_bridge, chatgpt_app, creds, discovery, imagegen_mcp,
     model_verification::target as verification_target, newapi, newapi_provision, newapi_purchase,

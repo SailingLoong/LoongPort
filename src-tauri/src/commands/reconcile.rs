@@ -103,7 +103,7 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
 
         // 账号 9 的托管档位（id 由 provision 的生成端产出，满足 is_managed 形状）。
-        let b_tier = crate::relay::provision::provider_id_for(site, Some(9), 1);
+        let b_tier = crate::relay::managed::provider_id_for(site, Some(9), 1);
         let provider: crate::provider::Provider = serde_json::from_value(serde_json::json!({
             "id": b_tier,
             "name": "B 的档位",

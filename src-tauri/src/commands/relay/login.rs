@@ -2609,7 +2609,6 @@ mod tests {
         let refreshed = crate::relay::newapi::RefreshedSession {
             access_token: "new-access-token".into(),
             access_expires_at: Some(1_900_000_000),
-            session_id: "session-id".into(),
             account: crate::relay::newapi::SelfAccount {
                 id: 84,
                 username: "newapi-login".into(),
@@ -2659,7 +2658,6 @@ mod tests {
         let session = crate::relay::newapi::RefreshedSession {
             access_token: "long-lived-access-token".into(),
             access_expires_at: None,
-            session_id: String::new(),
             account: crate::relay::newapi::SelfAccount {
                 id: 42,
                 username: "legacy-login".into(),

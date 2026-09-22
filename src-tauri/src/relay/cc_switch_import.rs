@@ -523,7 +523,7 @@ pub fn execute_import(
 mod tests {
     use super::*;
     use crate::app_config::AppType;
-    use crate::relay::provision;
+
     use rusqlite::Connection;
     use serde_json::json;
     use serial_test::serial;
@@ -531,14 +531,26 @@ mod tests {
 
     /// 造一份「codex 形状」的 settings_config（auth.OPENAI_API_KEY + config TOML）。
     fn codex_settings(base_url: &str, sk: &str) -> Value {
-        provision::settings_config_for(&AppType::Codex, sk, "BestAPI", base_url, "gpt-5.6-sol")
-            .expect("codex 必须有形状")
+        crate::relay::provider_config::settings_config_for(
+            &AppType::Codex,
+            sk,
+            "BestAPI",
+            base_url,
+            "gpt-5.6-sol",
+        )
+        .expect("codex 必须有形状")
     }
 
     /// 造一份「grokbuild 形状」的 settings_config（sk 藏在 config 字段的 TOML 文本里）。
     fn grok_settings(base_url: &str, sk: &str) -> Value {
-        provision::settings_config_for(&AppType::GrokBuild, sk, "GrokX", base_url, "grok-4.5")
-            .expect("grokbuild 必须有形状")
+        crate::relay::provider_config::settings_config_for(
+            &AppType::GrokBuild,
+            sk,
+            "GrokX",
+            base_url,
+            "grok-4.5",
+        )
+        .expect("grokbuild 必须有形状")
     }
 
     fn provider(

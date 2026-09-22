@@ -180,7 +180,7 @@ fn configuration_for_provider(
     };
     let can_select = view.presentation.switch_blocked_reason.is_none()
         && owner.as_ref().map(|o| o.can_select).unwrap_or(true);
-    let model = crate::relay::provision::selected_model(app_type, &provider.settings_config)
+    let model = crate::relay::provider_config::selected_model(app_type, &provider.settings_config)
         .and_then(nonempty);
     let (account, service_name, account_label, configuration_name, selection) = match owner {
         Some(owner) => (
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn failed_selection_and_provisioning_do_not_create_history() {
         let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
-        let id = crate::relay::provision::provider_id_for("https://relay.example", Some(1), 2);
+        let id = crate::relay::managed::provider_id_for("https://relay.example", Some(1), 2);
         let provider = Provider::with_id(
             id.clone(),
             "Example tier".into(),
@@ -414,7 +414,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let id = crate::relay::provision::provider_id_for(site, None, 3);
+        let id = crate::relay::managed::provider_id_for(site, None, 3);
         state.db.save_provider("codex", &Provider::with_id(id.clone(), "Legacy tier".into(), serde_json::json!({"auth":{"OPENAI_API_KEY":"example-token"},"config":"model = \"example-model\""}), Some(site.into()))).unwrap();
         let overview = application_overview(&state, &AppType::Codex).unwrap();
         let entry = overview

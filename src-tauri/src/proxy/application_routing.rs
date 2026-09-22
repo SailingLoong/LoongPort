@@ -331,9 +331,9 @@ pub fn effective_model(db: &Database, app: &str) -> Option<String> {
     if auto_strategy::tier_models(&current).contains(&pref) {
         Some(pref)
     } else {
-        AppType::from_str(app)
-            .ok()
-            .and_then(|app| crate::relay::provision::selected_model(&app, &current.settings_config))
+        AppType::from_str(app).ok().and_then(|app| {
+            crate::relay::provider_config::selected_model(&app, &current.settings_config)
+        })
     }
 }
 
@@ -371,7 +371,7 @@ fn codex_tier_selected_model(app: &str, provider: &Provider) -> Option<String> {
     if super::providers::is_codex_official_provider(provider) {
         return None;
     }
-    crate::relay::provision::selected_model(&app_type, &provider.settings_config)
+    crate::relay::provider_config::selected_model(&app_type, &provider.settings_config)
         .filter(|model| !model.trim().is_empty())
 }
 

@@ -2,7 +2,6 @@
 //! 更大的图景与约束见本目录 mod.rs 的总览。
 
 use super::*;
-use crate::relay::provision;
 
 /// 切换结果，前端据此出话。
 #[derive(Debug, Serialize)]
@@ -174,10 +173,10 @@ async fn select_tier_model_impl(
     quit_chatgpt: bool,
 ) -> Result<SwitchTierResult, AppError> {
     // 支持选模型的平台 = 带模型目录的平台（唯一源
-    // [`provision::model_catalog_apps`]）：codex（config TOML）/ claude
+    // [`crate::relay::provider_config::model_catalog_apps`]）：codex（config TOML）/ claude
     // （env.ANTHROPIC_MODEL）/ gemini（env.GEMINI_MODEL）/ grokbuild（config TOML
     // 选中模型表的 model 字段）。目录（modelCatalog）各平台同一份形状。
-    if !provision::supports_model_catalog(&app_type) {
+    if !crate::relay::provider_config::supports_model_catalog(&app_type) {
         return Err(AppError::Config(
             "模型选择目前只支持 Codex / Claude / Gemini / Grok 档位".to_string(),
         ));

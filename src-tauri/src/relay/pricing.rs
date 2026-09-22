@@ -5,7 +5,7 @@ use rusqlite::params;
 use crate::{
     database::{lock_conn, Database},
     error::AppError,
-    relay::{backend::BackendKind, creds::RelayAccount, newapi, provision, sub2api},
+    relay::{backend::BackendKind, creds::RelayAccount, newapi, sub2api},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +33,7 @@ fn sub2api_rate_updates(
                         .then_some(group.rate_multiplier)
                 });
             RateUpdate {
-                provider_id: provision::provider_id_for(
+                provider_id: crate::relay::managed::provider_id_for(
                     &relay.site_origin,
                     relay.account_id,
                     group.id,
@@ -51,7 +51,7 @@ fn newapi_rate_updates(relay: &RelayAccount, groups: Vec<newapi::Group>) -> Vec<
     groups
         .into_iter()
         .map(|group| RateUpdate {
-            provider_id: provision::newapi_provider_id_for(
+            provider_id: crate::relay::managed::newapi_provider_id_for(
                 &relay.site_origin,
                 account_id,
                 &group.identity.0,
@@ -121,7 +121,7 @@ mod tests {
         backend::BackendKind,
         creds::RelayAccount,
         newapi::{Group as NewApiGroup, GroupIdentity},
-        provision, sub2api,
+        sub2api,
     };
     use axum::{
         extract::State,
@@ -246,7 +246,11 @@ mod tests {
         assert_eq!(
             updates,
             vec![RateUpdate {
-                provider_id: provision::provider_id_for(&relay.site_origin, Some(7), 42),
+                provider_id: crate::relay::managed::provider_id_for(
+                    &relay.site_origin,
+                    Some(7),
+                    42
+                ),
                 rate_multiplier: Some(0.8),
             }]
         );
@@ -287,7 +291,11 @@ mod tests {
         assert_eq!(
             updates[0],
             RateUpdate {
-                provider_id: provision::newapi_provider_id_for(&relay.site_origin, 7, "Pro / 特价"),
+                provider_id: crate::relay::managed::newapi_provider_id_for(
+                    &relay.site_origin,
+                    7,
+                    "Pro / 特价"
+                ),
                 rate_multiplier: Some(0.75),
             }
         );

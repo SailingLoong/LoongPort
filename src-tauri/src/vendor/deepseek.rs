@@ -240,8 +240,8 @@ const FLASH_1M: &str = "deepseek-v4-flash[1M]";
 /// 1M 上下文，默认配置就该声明它 —— 复用 cc-switch 的 `[1M]` 后缀机制
 /// （Claude Code 认后缀、Claude Desktop 由 `suggested_claude_desktop_routes`
 /// 翻译成 `supports1m`），我们自己不写判定逻辑。
-pub fn claude_role_models() -> crate::relay::provision::ClaudeRoleModels {
-    let builtin = crate::relay::provision::ClaudeRoleModels {
+pub fn claude_role_models() -> crate::relay::model_selection::ClaudeRoleModels {
+    let builtin = crate::relay::model_selection::ClaudeRoleModels {
         opus: PRO_1M.to_string(),
         fable: PRO_1M.to_string(),
         sonnet: FLASH_1M.to_string(),
@@ -256,7 +256,7 @@ pub fn claude_role_models() -> crate::relay::provision::ClaudeRoleModels {
         return builtin;
     };
 
-    crate::relay::provision::ClaudeRoleModels {
+    crate::relay::model_selection::ClaudeRoleModels {
         opus: remote
             .opus
             .filter(|value| !value.trim().is_empty())

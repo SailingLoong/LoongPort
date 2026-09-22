@@ -169,7 +169,7 @@ fn tier_unit_price(
 ) -> Option<f64> {
     let model = model_pref
         .map(str::to_string)
-        .or_else(|| crate::relay::provision::extract_model(&tier.settings_config))?;
+        .or_else(|| crate::relay::provider_config::extract_model(&tier.settings_config))?;
     let (input, output, _cache_read, _cache_creation) =
         crate::services::usage_stats::find_model_pricing_row(conn, &model).ok()??;
     let input: f64 = input.parse().ok()?;

@@ -308,7 +308,7 @@ pub fn create_site_balance_cache_table(conn: &rusqlite::Connection) -> Result<()
 /// 缓存键：站点 origin × 账号 id。
 ///
 /// 钱包余额归**账号**所有 —— 同一个站挂两个账号是两个独立事实，只按站点键控
-/// 会让后写的账号把先写的顶掉（档位层 `provision::provider_id_for` 修过同款
+/// 会让后写的账号把先写的顶掉（档位层 `crate::relay::managed::provider_id_for` 修过同款
 /// 前科，见它那边的注释）。账号维度取自行的 `RelayAccount::account_id` /
 /// 档位的 `meta.loongport_account_id`；没有账号身份的（未登录行、vendor 档）
 /// 不参与这张缓存，各走自己的真查路径。

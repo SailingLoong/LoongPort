@@ -801,7 +801,7 @@ mod tests {
     /// 托管档（中转站 tier）：`website_url`=站点 origin、meta 带账号身份 ——
     /// 形状对齐 provision 建档路径（commands/relay.rs 落库字段）。
     fn managed_tier(site: &str, account: i64, group: i64) -> Provider {
-        let id = crate::relay::provision::provider_id_for(site, Some(account), group);
+        let id = crate::relay::managed::provider_id_for(site, Some(account), group);
         let mut provider = Provider::with_id(
             id,
             format!("{site} · group {group}"),
@@ -1086,7 +1086,7 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
 
         let managed_id =
-            crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 42);
+            crate::relay::managed::provider_id_for("https://bestapi.store", Some(1), 42);
         assert!(
             crate::relay::is_managed(&managed_id),
             "fixture 必须是托管形状的 id"
@@ -1120,8 +1120,8 @@ mod tests {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 
-        let cheap = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let expensive = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let cheap = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let expensive = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
         db.save_provider(
             "claude",
             &Provider::with_id(expensive.clone(), "Expensive".to_string(), json!({}), None),

@@ -540,11 +540,11 @@ impl Plan {
             .find(|plan| plan.id_segment() == segment)
     }
 
-    /// 生成配置时与默认风格的差异（[`crate::relay::provision::ProvisionStyle`]）。
-    pub fn style(self) -> crate::relay::provision::ProvisionStyle {
+    /// 生成配置时与默认风格的差异（[`crate::relay::provider_config::ProvisionStyle`]）。
+    pub fn style(self) -> crate::relay::provider_config::ProvisionStyle {
         match self {
-            Plan::Zen => crate::relay::provision::ProvisionStyle::default(),
-            Plan::Go => crate::relay::provision::ProvisionStyle {
+            Plan::Zen => crate::relay::provider_config::ProvisionStyle::default(),
+            Plan::Go => crate::relay::provider_config::ProvisionStyle {
                 // Go 网关 /v1/messages 只认 x-api-key（Bearer 被静默忽略，仓内
                 // OpenCode Go preset 的注释实测钉过）。
                 claude_auth_via_api_key: true,
@@ -610,7 +610,7 @@ impl Plan {
 
     /// Claude 系四角色 → 本档的角色模型（Zen 用 claude 系，Go 落开源双档）。
     /// 远端 `tier_configs` 键 `{id_segment}/claude` 的 `claude_roles` 可覆盖。
-    pub fn claude_role_models(self) -> crate::relay::provision::ClaudeRoleModels {
+    pub fn claude_role_models(self) -> crate::relay::model_selection::ClaudeRoleModels {
         let builtin = self.builtin_claude_roles();
         let key = format!("{}/claude", self.id_segment());
         let Some(remote) = crate::relay::remote_config::load_cached()
@@ -620,7 +620,7 @@ impl Plan {
             return builtin;
         };
 
-        crate::relay::provision::ClaudeRoleModels {
+        crate::relay::model_selection::ClaudeRoleModels {
             opus: remote
                 .opus
                 .filter(|v| !v.trim().is_empty())
@@ -644,16 +644,16 @@ impl Plan {
         }
     }
 
-    fn builtin_claude_roles(self) -> crate::relay::provision::ClaudeRoleModels {
+    fn builtin_claude_roles(self) -> crate::relay::model_selection::ClaudeRoleModels {
         match self {
-            Plan::Zen => crate::relay::provision::ClaudeRoleModels {
+            Plan::Zen => crate::relay::model_selection::ClaudeRoleModels {
                 opus: "claude-opus-5".to_string(),
                 fable: "claude-fable-5".to_string(),
                 sonnet: FLAGSHIP.to_string(),
                 haiku: HAIKU.to_string(),
                 subagent: HAIKU.to_string(),
             },
-            Plan::Go => crate::relay::provision::ClaudeRoleModels {
+            Plan::Go => crate::relay::model_selection::ClaudeRoleModels {
                 opus: GO_CLAUDE_MAIN.to_string(),
                 fable: GO_CLAUDE_MAIN.to_string(),
                 sonnet: GO_CLAUDE_MAIN.to_string(),
@@ -879,7 +879,7 @@ mod tests {
     fn plan_styles_match_the_gateway_requirements() {
         assert_eq!(
             Plan::Zen.style(),
-            crate::relay::provision::ProvisionStyle::default()
+            crate::relay::provider_config::ProvisionStyle::default()
         );
         let go = Plan::Go.style();
         assert!(go.claude_auth_via_api_key, "Go 只认 x-api-key");

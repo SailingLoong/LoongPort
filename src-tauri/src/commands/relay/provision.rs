@@ -4,6 +4,7 @@
 use super::*;
 use crate::relay::provision;
 use crate::relay::site_config;
+use crate::relay::{managed, model_selection, provider_config};
 
 /// 备好密钥的结果。
 #[derive(Debug, Serialize)]
@@ -45,7 +46,7 @@ pub(crate) struct ManagedProvisionCandidate {
     pub(crate) api_key: String,
     pub(crate) model: String,
     pub(crate) models: Option<Vec<String>>,
-    pub(crate) roles: Option<provision::ClaudeRoleModels>,
+    pub(crate) roles: Option<model_selection::ClaudeRoleModels>,
     pub(crate) allow_image_generation: Option<bool>,
     pub(crate) api_base_url: String,
     /// 订阅限额的重置窗口（`newapi` 等后端没有时间窗语义 ⇒ 空；
@@ -80,7 +81,7 @@ pub(crate) fn newapi_app_types() -> [AppType; 3] {
 /// - 分类未知（`models = None`：目录拉不到、或分组对账没走完）：保全四个槽位 ——
 ///   keep 的语义是「观察到了就别删」，宁可留旧档也不误删。
 ///
-/// ⚠️ `Some` 必须非空：空目录的 [`provision::is_pure_image_group`] 是真空真，
+/// ⚠️ `Some` 必须非空：空目录的 [`model_selection::is_pure_image_group`] 是真空真，
 /// 会把「读不出目录」误判成「纯生图」（见该函数文档的闸说明）。
 pub(crate) fn newapi_keep_insert(
     keep: &mut std::collections::HashSet<(String, String)>,
@@ -89,9 +90,11 @@ pub(crate) fn newapi_keep_insert(
     identity: &newapi::GroupIdentity,
     models: Option<&[String]>,
 ) {
-    let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &identity.0);
+    let provider_id = managed::newapi_provider_id_for(site_origin, account_id, &identity.0);
     let app_types: Vec<AppType> = match models {
-        Some(models) if provision::is_pure_image_group(models) => vec![AppType::CodexImage],
+        Some(models) if model_selection::is_pure_image_group(models) => {
+            vec![AppType::CodexImage]
+        }
         Some(_) => newapi_app_types().into(),
         // 分类未知：保全四个槽位（上面那份名单 + 生图栏），不再手写第二遍。
         None => {
@@ -110,14 +113,14 @@ pub(crate) fn newapi_candidates_for_group(
     account_id: i64,
     group: &newapi_provision::ReconciledGroup,
     models: &[String],
-    tables: &provision::ModelSelectionTables,
+    tables: &model_selection::ModelSelectionTables,
 ) -> Vec<ManagedProvisionCandidate> {
-    let provider_id = provision::newapi_provider_id_for(site_origin, account_id, &group.identity.0);
+    let provider_id = managed::newapi_provider_id_for(site_origin, account_id, &group.identity.0);
     // 纯生图分组只出生图候选，不扇出到三个聊天栏：把生图模型写成聊天模型是**调用必
     // 404** 的档位（claude 拿 nano-banana-2 当 ANTHROPIC_MODEL、gemini 拿 gpt-image-2
     // 当 GEMINI_MODEL —— 2026-09-05 真实 new-api 站点的生图分组实测踩中）。判据与 sub2api 路径的
-    // `image_tier_app_type` 同源：[`provision::is_pure_image_group`]。
-    let app_types: Vec<AppType> = if provision::is_pure_image_group(models) {
+    // `image_tier_app_type` 同源：[`model_selection::is_pure_image_group`]。
+    let app_types: Vec<AppType> = if model_selection::is_pure_image_group(models) {
         vec![AppType::CodexImage]
     } else {
         newapi_app_types().into()
@@ -125,7 +128,7 @@ pub(crate) fn newapi_candidates_for_group(
     app_types
         .into_iter()
         .map(|app_type| {
-            let picked = provision::pick_tier_models_with(&app_type, Some(models), tables);
+            let picked = model_selection::pick_tier_models_with(&app_type, Some(models), tables);
             ManagedProvisionCandidate {
                 provider_id: provider_id.clone(),
                 app_type,
@@ -148,7 +151,7 @@ pub(crate) fn newapi_candidates_for_group(
 
 pub(crate) fn normalize_newapi_model_catalog(models: Option<Vec<String>>) -> Option<Vec<String>> {
     models
-        .map(provision::normalize_model_names)
+        .map(model_selection::normalize_model_names)
         .filter(|models| !models.is_empty())
 }
 
@@ -167,7 +170,7 @@ pub(crate) async fn provision_backend(
 ) -> Result<ManagedProvisionBatch, AppError> {
     // 一次 provision 解析一次选型表（内置 + 远端覆盖），两个 backend 共用 ——
     // sub2api 与 newapi 的选型纪律必须来自同一份数据（尺子 1.4：一个事实一个 owner）。
-    let tables = provision::ModelSelectionTables::resolve();
+    let tables = remote_config::model_selection_tables();
     // 站点声明探测与 backend 无关（约定路径是 LoongPort 的约定，newapi 站长同样能放）：
     // 404/失败/格式不认都是 None，绝不打断登录主流程。
     let site_declaration =
@@ -206,7 +209,7 @@ pub(crate) async fn provision_backend(
                 .map(|targeted| {
                     let tier = targeted.tier;
                     ManagedProvisionCandidate {
-                        provider_id: provision::provider_id_for(
+                        provider_id: managed::provider_id_for(
                             &site_account.site_origin,
                             site_account.account_id,
                             tier.group_id,
@@ -445,67 +448,26 @@ pub(crate) fn persist_provision_batch(
         // 而倍率在那之后还要用。
         let rate_multiplier = candidate.rate_multiplier;
         let display_name =
-            provision::provider_display_name(&site_account.site_name, &candidate.group_name);
+            provider_config::provider_display_name(&site_account.site_name, &candidate.group_name);
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
 
         let base_url =
             sub2api::base_url_for(app_type, &site_account.site_origin, &candidate.api_base_url);
-        // 下面这串分支是「带目录平台」的**生成器形状分派**（claude/gemini 走
-        // roles+models、codex/grokbuild 走 models）——「哪些平台带目录」这个名单
-        // 的事实唯源是 [`provision::model_catalog_apps`]，加平台时两边一起动
-        //（reset 侧与回归测试都按那份名单对齐）。
-        let defaults = if matches!(app_type, AppType::Claude) {
-            provision::settings_config_with_roles_and_models(
-                app_type,
-                &candidate.api_key,
-                &display_name,
-                &base_url,
-                &candidate.model,
-                candidate.roles.clone(),
-                candidate.models.as_deref(),
-                provision::ProvisionStyle::default(),
-            )
-        } else if matches!(app_type, AppType::Codex) {
-            provision::settings_config_with_models(
-                app_type,
-                &candidate.api_key,
-                &display_name,
-                &base_url,
-                &candidate.model,
-                candidate.models.as_deref(),
-            )
-        } else if matches!(app_type, AppType::Gemini) {
-            // gemini 同样落模型目录（只收 gemini-* 家族，见生成侧注释）
-            provision::settings_config_with_roles_and_models(
-                app_type,
-                &candidate.api_key,
-                &display_name,
-                &base_url,
-                &candidate.model,
-                None,
-                candidate.models.as_deref(),
-                provision::ProvisionStyle::default(),
-            )
-        } else if matches!(app_type, AppType::GrokBuild) {
-            // grokbuild 同样落模型目录（收全部文本模型，见生成侧注释）——
-            // 主界面「支持的模型」芯片与托盘「模型」子菜单都从它取
-            provision::settings_config_with_models(
-                app_type,
-                &candidate.api_key,
-                &display_name,
-                &base_url,
-                &candidate.model,
-                candidate.models.as_deref(),
-            )
+        let models = if provider_config::supports_model_catalog(app_type) {
+            candidate.models.as_deref()
         } else {
-            provision::settings_config_for(
-                app_type,
-                &candidate.api_key,
-                &display_name,
-                &base_url,
-                &candidate.model,
-            )
+            None
         };
+        let defaults = provider_config::settings_config_with_roles_and_models(
+            app_type,
+            &candidate.api_key,
+            &display_name,
+            &base_url,
+            &candidate.model,
+            candidate.roles.clone(),
+            models,
+            provider_config::ProvisionStyle::default(),
+        );
         let Some(defaults) = defaults else {
             batch.failures.push(FailureInfo {
                 group_name: candidate.group_name,
@@ -540,7 +502,7 @@ pub(crate) fn persist_provision_batch(
         let available_models = candidate
             .models
             .as_ref()
-            .map(|models| crate::relay::model_catalog::filter_models(app_type, models))
+            .map(|models| model_selection::filter_models(app_type, models))
             .or_else(|| {
                 existing
                     .as_ref()
@@ -551,7 +513,7 @@ pub(crate) fn persist_provision_batch(
                 // Remote availability never owns editable routing. An unavailable inventory
                 // also cannot establish that the previously selected model disappeared.
                 let mut kept = old.settings_config;
-                if !provision::patch_api_key(&mut kept, app_type, &candidate.api_key) {
+                if !provider_config::patch_api_key(&mut kept, app_type, &candidate.api_key) {
                     batch.failures.push(FailureInfo {
                         group_name: candidate.group_name,
                         reason: format!(
@@ -659,7 +621,7 @@ pub(crate) fn persist_provision_batch(
         }
 
         if let Some(models) = candidate.models.as_ref() {
-            let models = crate::relay::model_catalog::filter_models(app_type, models);
+            let models = model_selection::filter_models(app_type, models);
             if let Err(error) =
                 state
                     .db
@@ -731,8 +693,9 @@ pub(crate) fn persist_provision_batch(
             refresh_live.push(app_type.clone());
         }
 
-        let subscription_windows =
-            provision::subscription_windows_from_settings(&provider.settings_config);
+        let subscription_windows = crate::relay::tier_windows::subscription_windows_from_settings(
+            &provider.settings_config,
+        );
         tiers.push(TierInfo {
             is_current,
             provider_id,
@@ -741,7 +704,7 @@ pub(crate) fn persist_provision_batch(
             app_id: app_type.as_str().to_string(),
             group_name: candidate.group_name,
             display_name,
-            model: provision::selected_model(app_type, &provider.settings_config)
+            model: provider_config::selected_model(app_type, &provider.settings_config)
                 .unwrap_or_default(),
             models: crate::relay::model_catalog::available_models(&provider),
             rate_multiplier,
@@ -912,7 +875,7 @@ pub(crate) fn belongs_to_account(
 ///
 /// 判据即 `relay_balance_inputs` 原内联那份（`(None, Some(_)) => false`），收成函数
 /// 供余额与 `relay_reconciliation`（`commands/reconcile.rs`）共用 —— 归属口径只有一份。
-pub(crate) use crate::relay::managed::belongs_to_relay;
+pub(crate) use managed::belongs_to_relay;
 
 /// 两个可选 origin 是否指向**同一站点**（注册域身份，None 与任何值都不相等）。
 ///
@@ -1118,7 +1081,7 @@ mod tests {
     #[test]
     fn managed_detection_matches_generated_ids_only() {
         // 正面：provision 生成的 id 必须被认出来。
-        let real = provision::provider_id_for("https://bestapi.store", Some(1), 42);
+        let real = managed::provider_id_for("https://bestapi.store", Some(1), 42);
         assert!(is_managed(&provider_with_id(&real)));
 
         // 反面：用户自己加的 provider 不能被当成托管的（否则会被 provision 覆盖）。
@@ -1133,7 +1096,7 @@ mod tests {
         let app_type = AppType::Codex;
         let site = "https://relay.example";
         let key = "sk-same";
-        let settings = provision::settings_config_for(
+        let settings = provider_config::settings_config_for(
             &app_type,
             key,
             "Imported",
@@ -1160,7 +1123,7 @@ mod tests {
         let different_key = Provider {
             id: "cc-switch-different-key".into(),
             name: "Keep different key".into(),
-            settings_config: provision::settings_config_for(
+            settings_config: provider_config::settings_config_for(
                 &app_type,
                 "sk-other",
                 "Other",
@@ -1171,7 +1134,7 @@ mod tests {
             ..duplicate.clone()
         };
         let managed_duplicate = Provider {
-            id: provision::provider_id_for(site, Some(1), 42),
+            id: managed::provider_id_for(site, Some(1), 42),
             name: "Managed duplicate".into(),
             meta: Some(managed_meta(&app_type, Some(1), None)),
             ..duplicate.clone()
@@ -1207,7 +1170,7 @@ mod tests {
     fn provision_merge_reports_when_duplicate_was_current() {
         let db = crate::database::Database::memory().expect("内存库");
         let app_type = AppType::Codex;
-        let settings = provision::settings_config_for(
+        let settings = provider_config::settings_config_for(
             &app_type,
             "sk-current",
             "Imported",
@@ -1236,7 +1199,7 @@ mod tests {
             .expect("设为当前");
 
         let managed = Provider {
-            id: provision::provider_id_for("https://relay.example", Some(1), 99),
+            id: managed::provider_id_for("https://relay.example", Some(1), 99),
             name: "Managed replacement".into(),
             meta: Some(managed_meta(&app_type, Some(1), None)),
             ..duplicate.clone()
@@ -1261,7 +1224,7 @@ mod tests {
     fn provision_merge_rolls_back_duplicate_deletion_when_current_transfer_fails() {
         let db = crate::database::Database::memory().expect("内存库");
         let app_type = AppType::Codex;
-        let settings = provision::settings_config_for(
+        let settings = provider_config::settings_config_for(
             &app_type,
             "sk-current",
             "Imported",
@@ -1290,7 +1253,7 @@ mod tests {
             .expect("设为当前");
 
         let managed = Provider {
-            id: provision::provider_id_for("https://relay.example", Some(1), 99),
+            id: managed::provider_id_for("https://relay.example", Some(1), 99),
             name: "Managed replacement".into(),
             meta: Some(managed_meta(&app_type, Some(1), None)),
             ..duplicate.clone()
@@ -1332,7 +1295,7 @@ mod tests {
     fn provision_merge_never_uses_an_unmanaged_provider_as_the_owner() {
         let db = crate::database::Database::memory().expect("内存库");
         let app_type = AppType::Codex;
-        let settings = provision::settings_config_for(
+        let settings = provider_config::settings_config_for(
             &app_type,
             "sk-shared",
             "Imported",
@@ -1530,7 +1493,7 @@ mod tests {
     }
 
     fn newapi_models() -> Vec<String> {
-        provision::normalize_model_names(vec![
+        model_selection::normalize_model_names(vec![
             "gemini-2.5-pro".into(),
             "claude-haiku-4-5".into(),
             "gpt-5.4".into(),
@@ -1577,7 +1540,7 @@ mod tests {
                     group,
                     &models,
                     // 测试钉内置表：选型断言不随本机真实远端缓存漂移。
-                    &provision::ModelSelectionTables::builtin(),
+                    &model_selection::ModelSelectionTables::builtin(),
                 )
             })
             .collect();
@@ -1601,8 +1564,10 @@ mod tests {
     fn newapi_pure_image_group_lands_only_in_the_image_column_and_migrates_legacy_tiers() {
         let site_account = test_newapi_relay(7);
         let group = test_newapi_group("图", "sk-image");
-        let image_models =
-            provision::normalize_model_names(vec!["nano-banana-2".into(), "gpt-image-2".into()]);
+        let image_models = model_selection::normalize_model_names(vec![
+            "nano-banana-2".into(),
+            "gpt-image-2".into(),
+        ]);
         let account_id = 7;
 
         let candidates = newapi_candidates_for_group(
@@ -1610,7 +1575,7 @@ mod tests {
             account_id,
             &group,
             &image_models,
-            &provision::ModelSelectionTables::builtin(),
+            &model_selection::ModelSelectionTables::builtin(),
         );
         assert_eq!(candidates.len(), 1, "纯生图分组不该再扇出到聊天栏");
         assert_eq!(candidates[0].app_type, AppType::CodexImage);
@@ -1627,7 +1592,7 @@ mod tests {
             newapi_batch(&site_account, std::slice::from_ref(&group)),
         )
         .expect("seed legacy three-column projections");
-        let provider_id = provision::newapi_provider_id_for(
+        let provider_id = managed::newapi_provider_id_for(
             &site_account.site_origin,
             account_id,
             &group.identity.0,
@@ -1674,11 +1639,11 @@ mod tests {
             .expect("read image projection")
             .expect("image projection exists");
         assert_eq!(
-            provision::extract_model(&image_provider.settings_config).as_deref(),
+            provider_config::extract_model(&image_provider.settings_config).as_deref(),
             Some("gpt-image-2")
         );
         assert_eq!(
-            provision::extract_api_key(&image_provider.settings_config, &AppType::CodexImage)
+            provider_config::extract_api_key(&image_provider.settings_config, &AppType::CodexImage)
                 .as_deref(),
             Some("sk-image")
         );
@@ -1719,7 +1684,7 @@ mod tests {
                 .expect("read provider")
                 .expect("projection exists");
             assert_eq!(
-                provision::extract_api_key(&provider.settings_config, &app_type).as_deref(),
+                provider_config::extract_api_key(&provider.settings_config, &app_type).as_deref(),
                 Some("sk-shared")
             );
             assert_eq!(
@@ -1760,11 +1725,11 @@ mod tests {
             models_from_settings(&before.settings_config)
         );
         assert_eq!(
-            provision::selected_model(&AppType::Codex, &after.settings_config),
-            provision::selected_model(&AppType::Codex, &before.settings_config)
+            provider_config::selected_model(&AppType::Codex, &after.settings_config),
+            provider_config::selected_model(&AppType::Codex, &before.settings_config)
         );
         assert_eq!(
-            provision::extract_api_key(&after.settings_config, &AppType::Codex).as_deref(),
+            provider_config::extract_api_key(&after.settings_config, &AppType::Codex).as_deref(),
             Some("sk-second")
         );
     }
@@ -1841,7 +1806,7 @@ mod tests {
             .get_provider_by_id(&provider_id, AppType::Codex.as_str())
             .expect("read edited provider")
             .expect("edited provider exists");
-        edited.settings_config = provision::settings_config_for(
+        edited.settings_config = provider_config::settings_config_for(
             &AppType::Codex,
             "sk-first",
             "Custom Name",
@@ -1850,7 +1815,7 @@ mod tests {
         )
         .expect("custom codex config");
         let mut expected_edited = edited.settings_config.clone();
-        assert!(provision::patch_api_key(
+        assert!(provider_config::patch_api_key(
             &mut expected_edited,
             &AppType::Codex,
             "sk-second"
@@ -1883,7 +1848,7 @@ mod tests {
             .expect("read refreshed default provider")
             .expect("refreshed default provider exists");
         assert_eq!(
-            provision::extract_api_key(&unedited_after.settings_config, &AppType::Gemini)
+            provider_config::extract_api_key(&unedited_after.settings_config, &AppType::Gemini)
                 .as_deref(),
             Some("sk-second")
         );
@@ -1930,9 +1895,8 @@ mod tests {
 
         let observed = crate::relay::newapi::GroupIdentity("observed".into());
         let retained_id =
-            provision::newapi_provider_id_for(&account_seven.site_origin, 7, &observed.0);
-        let removed_id =
-            provision::newapi_provider_id_for(&account_seven.site_origin, 7, "removed");
+            managed::newapi_provider_id_for(&account_seven.site_origin, 7, &observed.0);
+        let removed_id = managed::newapi_provider_id_for(&account_seven.site_origin, 7, "removed");
         // 对账没走完（拿到 observed 清单但没拿到 sk）：分类未知，保全四个槽位。
         let mut failure_keep = std::collections::HashSet::new();
         newapi_keep_insert(
@@ -1969,7 +1933,7 @@ mod tests {
                 .is_none());
 
             let other_account_id =
-                provision::newapi_provider_id_for(&account_eight.site_origin, 8, "removed");
+                managed::newapi_provider_id_for(&account_eight.site_origin, 8, "removed");
             assert!(db
                 .get_provider_by_id(&other_account_id, app_type.as_str())
                 .expect("read other account provider")
@@ -2055,7 +2019,7 @@ mod tests {
     fn pruning_removes_a_stale_tier_even_when_it_is_the_current_one() {
         let site = "https://prune.example";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let stale = provision::provider_id_for(site, Some(7), 1);
+        let stale = managed::provider_id_for(site, Some(7), 1);
         db.save_provider("codex", &seeded_owned(&stale, "Prune·废", Some(site), 7))
             .expect("seed");
         db.set_current_provider("codex", &stale)
@@ -2083,10 +2047,10 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
 
         // 账号 7 的两条：一条这次仍在（keep 里），一条已失效。
-        let a_kept = provision::provider_id_for(site, Some(7), 1);
-        let a_stale = provision::provider_id_for(site, Some(7), 2);
+        let a_kept = managed::provider_id_for(site, Some(7), 1);
+        let a_stale = managed::provider_id_for(site, Some(7), 2);
         // 账号 9 的一条：**这次压根没查它**（不同账号、不同分组集合）。
-        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        let b_tier = managed::provider_id_for(site, Some(9), 1);
 
         for p in [
             seeded_owned(&a_kept, "A·留", Some(site), 7),
@@ -2127,11 +2091,11 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
 
         // 这次 provision 生成的（该留）。
-        let kept_id = provision::provider_id_for(site, Some(1), 1);
+        let kept_id = managed::provider_id_for(site, Some(1), 1);
         // 同一个站的托管项，但这次没生成（该删 —— 分组已被中转站删掉 / 旧版本写错的）。
-        let stale_id = provision::provider_id_for(site, Some(1), 2);
+        let stale_id = managed::provider_id_for(site, Some(1), 2);
         // **别的站**的托管项：这次压根没查它的分组，凭「这次没生成」删它是错的。
-        let other_site_id = provision::provider_id_for(other_site, Some(1), 3);
+        let other_site_id = managed::provider_id_for(other_site, Some(1), 3);
 
         for (app, p) in [
             ("codex", seeded(&kept_id, "留下", Some(site))),
@@ -2142,11 +2106,7 @@ mod tests {
             // 托管项但没有 website_url（历史数据）⇒ 归属不明，不删（宁可漏删不可错删）。
             (
                 "codex",
-                seeded(
-                    &provision::provider_id_for(site, Some(1), 9),
-                    "无归属",
-                    None,
-                ),
+                seeded(&managed::provider_id_for(site, Some(1), 9), "无归属", None),
             ),
             // **另一个 app_type 下的脏记录** —— 正是用户撞见的那种（openai 分组被
             // 旧代码写进了 claude 下）。必须也被清掉，所以不能只扫参数指定的那个 app。
@@ -2177,7 +2137,7 @@ mod tests {
             "用户手工配的 provider 绝不能删"
         );
         assert!(
-            codex_ids.contains(&provision::provider_id_for(site, Some(1), 9)),
+            codex_ids.contains(&managed::provider_id_for(site, Some(1), 9)),
             "没有 website_url 的托管项归属不明，不该删"
         );
 
@@ -2208,7 +2168,7 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
 
         // 同一个分组（group_id = 1）⇒ 两个 app 下**同一个 id**。
-        let shared_id = provision::provider_id_for(site, Some(1), 1);
+        let shared_id = managed::provider_id_for(site, Some(1), 1);
         db.save_provider("codex", &seeded(&shared_id, "pro池", Some(site)))
             .expect("seed codex");
         db.save_provider("claude", &seeded(&shared_id, "pro池", Some(site)))
@@ -2248,7 +2208,7 @@ mod tests {
     fn prune_deletes_the_current_tier_too() {
         let site = "https://bestapi.store";
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
-        let stale_id = provision::provider_id_for(site, Some(1), 7);
+        let stale_id = managed::provider_id_for(site, Some(1), 7);
 
         db.save_provider("codex", &seeded(&stale_id, "过期的当前项", Some(site)))
             .expect("seed");
@@ -2331,7 +2291,7 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
 
         // 账号 9 的档位是 codex 的当前项。
-        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        let b_tier = managed::provider_id_for(site, Some(9), 1);
         db.save_provider("codex", &seeded_owned(&b_tier, "B 的档位", Some(site), 9))
             .expect("seed");
         db.set_current_provider("codex", &b_tier)
@@ -2367,14 +2327,14 @@ mod tests {
         let db = std::sync::Arc::new(crate::database::Database::memory().expect("init db"));
 
         // 账号 9 的档位，带真实 sk（否则「没收走」的断言没有判别力）。
-        let b_tier = provision::provider_id_for(site, Some(9), 1);
+        let b_tier = managed::provider_id_for(site, Some(9), 1);
         let mut b_provider = seeded_owned(&b_tier, "B 的档位", Some(site), 9);
         b_provider.settings_config = serde_json::json!({ "auth": { "OPENAI_API_KEY": "sk-b" } });
         db.save_provider("codex", &b_provider).expect("seed B");
 
         // 同站一条没记账号的旧档位（升级前生成），也没有 sk —— 只用于钉住
         // `(None, None) => true` 这格没被顺手改掉。
-        let legacy = provision::provider_id_for(site, None, 5);
+        let legacy = managed::provider_id_for(site, None, 5);
         db.save_provider("codex", &seeded(&legacy, "旧数据", Some(site)))
             .expect("seed legacy");
 
@@ -2463,7 +2423,7 @@ mod tests {
             .expect("load")
             .expect("exists");
 
-        let provider_id = provision::provider_id_for(site, Some(7), 1);
+        let provider_id = managed::provider_id_for(site, Some(7), 1);
         let batch = ManagedProvisionBatch {
             account_id: Some(7),
             site_declaration: None,

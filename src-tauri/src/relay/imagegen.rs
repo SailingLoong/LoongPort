@@ -27,7 +27,7 @@ use serde_json::Value;
 /// 走哪个模型生图。
 ///
 /// **不是常量而是从档位配置里读**：档位的 `model` 已经由 provision 写成了该分组真实的
-/// `gpt-image-*`（见 [`super::provision::pick_model`]），中转站上 `gpt-image-3` 那天
+/// `gpt-image-*`（见 [`super::model_selection::pick_model_with`]），中转站上 `gpt-image-3` 那天
 /// 自动跟上。读不出来时才回落到这个值。
 const FALLBACK_IMAGE_MODEL: &str = "gpt-image-2";
 
@@ -202,7 +202,7 @@ fn open_readonly(db_path: &std::path::Path) -> Result<rusqlite::Connection, Stri
 ///
 /// 代价是对 `providers` 表的形状有了第二处依赖。可接受：读的是 `id` /
 /// `settings_config` 这两个最稳定的列（`settings_config` 的结构还共用
-/// [`super::provision::extract_api_key`]，没有另写一份解析）。
+/// [`super::provider_config::extract_api_key`]，没有另写一份解析）。
 fn load_tier(
     conn: &rusqlite::Connection,
     vault: &crate::secrets::VaultContext,
@@ -216,7 +216,7 @@ fn load_tier(
     // （重新 provision 只会再造出同样的多行），且成败取决于返回顺序、无法复现。
     //
     // 取 `codex-image` 是因为**生图档位就存在那一栏**（provision 按
-    // `provision::image_tier_app_type` 分流）。取 codex 会查不到，症状是
+    // `crate::relay::model_selection::image_tier_app_type` 分流）。取 codex 会查不到，症状是
     // 「档位已经不在了」而它明明在界面上。
     let (name, settings_raw): (String, String) = conn
         .query_row(
@@ -256,12 +256,13 @@ fn load_tier(
 
     // sk 的位置按 CLI 分派，复用那一处定义 —— 硬编码 `auth.OPENAI_API_KEY` 会让将来
     // 挂到 claude 档位上时静默取不到（那个在 `env.ANTHROPIC_AUTH_TOKEN`）。
-    let api_key = super::provision::extract_api_key(&settings, &crate::app_config::AppType::Codex)
-        .ok_or_else(|| {
-            format!(
-                "接入配置「{name}」的配置里读不出密钥。请在 LoongPort 里对它点「获取密钥」重新生成。"
-            )
-        })?;
+    let api_key =
+        super::provider_config::extract_api_key(&settings, &crate::app_config::AppType::Codex)
+            .ok_or_else(|| {
+                format!(
+            "接入配置「{name}」的配置里读不出密钥。请在 LoongPort 里对它点「获取密钥」重新生成。"
+        )
+            })?;
 
     let config_toml = settings
         .get("config")

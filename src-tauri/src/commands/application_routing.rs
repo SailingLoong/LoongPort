@@ -111,7 +111,9 @@ pub(crate) async fn application_routing_impl(
             let subscription_windows = providers
                 .get(&tier.provider_id)
                 .map(|p| {
-                    crate::relay::provision::subscription_windows_from_settings(&p.settings_config)
+                    crate::relay::tier_windows::subscription_windows_from_settings(
+                        &p.settings_config,
+                    )
                 })
                 .unwrap_or_default();
             let next_reset_at = crate::relay::tier_windows::next_reset_at(&subscription_windows);

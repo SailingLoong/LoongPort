@@ -277,7 +277,7 @@ pub struct Announcement {
 ///
 /// 服务的场景：外部模型代际更替（新模型在中转站目录里铺开）快于客户端发版节奏，
 /// 维护者查证后可以直接调表，不必等一版客户端。合并纪律在
-/// `provision::ModelSelectionTables::merge`：字段级部分覆盖、缺席/清洗后为空回落内置。
+/// `merge_model_selection`：字段级部分覆盖、缺席/清洗后为空回落内置。
 ///
 /// 安全前提（为什么敢远程化，而生图家族表不敢）：候选的选中规则是「分组目录里
 /// **第一个精确命中**的」—— 远端给一个目录里不存在的名字会被自然顺延，坏值的
@@ -592,6 +592,52 @@ pub fn effective_announcements(cfg: &RemoteConfig) -> Vec<&Announcement> {
                 && !a.body.trim().is_empty()
         })
         .collect()
+}
+
+/// Apply optional signed configuration to built-in model policy; empty overrides retain defaults.
+fn merge_model_selection(
+    remote: Option<&RemoteModelSelection>,
+) -> super::model_selection::ModelSelectionTables {
+    let mut tables = super::model_selection::ModelSelectionTables::builtin();
+    let Some(remote) = remote else {
+        return tables;
+    };
+    if let Some(value) = remote
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        tables.default_model = value.to_string();
+    }
+    for (target, overrides) in [
+        (&mut tables.codex_main, &remote.codex_main),
+        (&mut tables.claude_opus, &remote.claude_opus),
+        (&mut tables.claude_sonnet, &remote.claude_sonnet),
+        (&mut tables.claude_haiku, &remote.claude_haiku),
+        (&mut tables.one_m_prefixes, &remote.one_m_prefixes),
+    ] {
+        if let Some(overrides) = overrides {
+            let cleaned: Vec<String> = overrides
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
+            if !cleaned.is_empty() {
+                *target = cleaned;
+            }
+        }
+    }
+    tables
+}
+
+/// Resolve model-selection policy from the verified local cache, without refreshing it.
+pub(crate) fn model_selection_tables() -> super::model_selection::ModelSelectionTables {
+    merge_model_selection(
+        load_cached()
+            .as_ref()
+            .and_then(|config| config.relay_model_selection.as_ref()),
+    )
 }
 
 /// 读上次成功拉取的缓存，**并重新验签**。
@@ -2319,6 +2365,45 @@ mod tests {
         assert!(
             uncovered.is_empty(),
             "v1 墓碑有缺口 —— 这些受管 host 不在 blocked_hosts 里，老客户端的广场会             凭空多出行（新收录站点必须同步扩 v1 的 blocked，README 的 plaza 节有流程）：             {uncovered:?}"
+        );
+    }
+
+    #[test]
+    fn model_selection_tables_partial_override_with_sanitization() {
+        use crate::relay::model_selection::ModelSelectionTables;
+        let builtin = ModelSelectionTables::builtin();
+        let remote = crate::relay::remote_config::RemoteModelSelection {
+            // 空白值 → 回落内置。
+            default_model: Some("   ".into()),
+            // 有实条目 → 生效（空白条目被剔除）。
+            codex_main: Some(vec![" gpt-6-astra ".into(), " ".into()]),
+            // 整张清洗后为空 → 当没给。
+            claude_opus: Some(vec!["".into(), "  ".into()]),
+            claude_sonnet: None,
+            claude_haiku: None,
+            // 前缀表同样字段级覆盖；清洗后为空回落内置。
+            one_m_prefixes: Some(vec!["".into(), "  ".into()]),
+        };
+        let merged = merge_model_selection(Some(&remote));
+        assert_eq!(merged.default_model, builtin.default_model);
+        assert_eq!(merged.codex_main, vec!["gpt-6-astra".to_string()]);
+        assert_eq!(merged.claude_opus, builtin.claude_opus);
+        assert_eq!(merged.claude_sonnet, builtin.claude_sonnet);
+        assert_eq!(merged.claude_haiku, builtin.claude_haiku);
+        assert_eq!(merged.one_m_prefixes, builtin.one_m_prefixes);
+
+        let trimmed = crate::relay::remote_config::RemoteModelSelection {
+            default_model: Some(" gpt-6-astra ".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            merge_model_selection(Some(&trimmed)).default_model,
+            "gpt-6-astra"
+        );
+        assert_eq!(
+            merge_model_selection(None),
+            builtin,
+            "远端缺席 = 内置表，这是三层回落（远端 > 缓存 > 内置）落到选型的形态"
         );
     }
 }

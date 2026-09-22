@@ -939,7 +939,7 @@ async fn provision_impl(
                     let mut kept = old.settings_config;
                     // patch 失败（形状被改坏 / 该放 sk 的 section 没了）⇒ 回落默认配置。
                     // 否则用户会留着一把旧 sk 却以为刷新成功了。
-                    if crate::relay::provision::patch_api_key(&mut kept, app_type, &api_key) {
+                    if crate::relay::provider_config::patch_api_key(&mut kept, app_type, &api_key) {
                         kept
                     } else {
                         log::warn!(
@@ -1118,15 +1118,18 @@ fn vendor_reset_plan_config_impl(
 
     // sk 从现有配置里取（照 relay 那条）。取不到就让用户走「获取密钥」重建 ——
     // 生成一份没有 sk 的「默认配置」比保持现状更糟（那是一条必定 401 的记录）。
-    let api_key = crate::relay::provision::extract_api_key(&existing.settings_config, &app_type)
-        .ok_or_else(|| {
-            AppError::Config("这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into())
-        })?;
+    let api_key =
+        crate::relay::provider_config::extract_api_key(&existing.settings_config, &app_type)
+            .ok_or_else(|| {
+                AppError::Config(
+                    "这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into(),
+                )
+            })?;
 
     // ⚠️ **`roles` 与生成风格必须与生成时同一份 plan**，否则「恢复默认」写出的
     // 配置与 `user_edited` 的基准不同 ⇒ 恢复完立刻又显示「已手工维护」
     // （Go 档的鉴权字段再走 Bearer 就是静默 401）。
-    let defaults = crate::relay::provision::settings_config_with_roles_and_models(
+    let defaults = crate::relay::provider_config::settings_config_with_roles_and_models(
         &app_type,
         &api_key,
         &existing.name,
@@ -1379,7 +1382,7 @@ fn vendor_plan_by_provider_id(
 fn vendor_meta(
     app_type: &AppType,
     account_id: Option<String>,
-    style: crate::relay::provision::ProvisionStyle,
+    style: crate::relay::provider_config::ProvisionStyle,
 ) -> crate::provider::ProviderMeta {
     crate::provider::ProviderMeta {
         // `api_format` **只被 `codex_config.rs` 消费**（`CodexCatalogToolProfile::from_api_format`），
@@ -1726,7 +1729,7 @@ mod tests {
 
     #[test]
     fn only_codex_gets_an_api_format() {
-        let style = crate::relay::provision::ProvisionStyle::default();
+        let style = crate::relay::provider_config::ProvisionStyle::default();
         let codex = vendor_meta(&AppType::Codex, Some("uuid-a".into()), style);
         assert_eq!(codex.api_format.as_deref(), Some("openai_responses"));
         for app in [AppType::Claude, AppType::OpenCode, AppType::Hermes] {
@@ -1752,7 +1755,7 @@ mod tests {
         let meta = vendor_meta(
             &AppType::Claude,
             Some(uuid.to_string()),
-            crate::relay::provision::ProvisionStyle::default(),
+            crate::relay::provider_config::ProvisionStyle::default(),
         );
         assert_eq!(meta.loongport_vendor_account.as_deref(), Some(uuid));
         assert!(
@@ -1772,7 +1775,7 @@ mod tests {
         let json = serde_json::to_string(&vendor_meta(
             &AppType::Claude,
             None,
-            crate::relay::provision::ProvisionStyle::default(),
+            crate::relay::provider_config::ProvisionStyle::default(),
         ))
         .expect("序列化");
         assert!(

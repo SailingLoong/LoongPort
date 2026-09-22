@@ -4,7 +4,7 @@ use crate::{
     app_config::AppType,
     database::Database,
     error::AppError,
-    relay::{creds, provision, sub2api},
+    relay::{creds, sub2api},
 };
 
 use super::types::{ModelFitness, TargetKey, TargetScope, VerificationModelOption};
@@ -155,11 +155,12 @@ impl ResolvedScope {
             .and_then(|meta| meta.loongport_account_id);
         let relay = resolve_relay(db, site_origin, account_id)?;
         let api_key =
-            provision::extract_api_key(&provider.settings_config, &app_type).ok_or_else(|| {
-                AppError::Config(
-                    "这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into(),
-                )
-            })?;
+            crate::relay::provider_config::extract_api_key(&provider.settings_config, &app_type)
+                .ok_or_else(|| {
+                    AppError::Config(
+                        "这个档位的配置里读不出密钥了，请用「获取密钥」重新生成它。".into(),
+                    )
+                })?;
 
         Ok(Self {
             api_root: sub2api::site_api_root(&relay.site_origin, &relay.api_base_url),

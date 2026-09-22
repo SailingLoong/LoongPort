@@ -505,7 +505,7 @@ fn tier_model_choices(
         return None;
     }
     Some((
-        crate::relay::provision::selected_model(app_type, &provider.settings_config),
+        crate::relay::provider_config::selected_model(app_type, &provider.settings_config),
         models,
     ))
 }
@@ -850,7 +850,8 @@ fn handle_tier_model_click(
         .db
         .get_provider_by_id(&provider_id, app_type.as_str())?;
     if let Some(provider) = current {
-        if crate::relay::provision::selected_model(app_type, &provider.settings_config).as_deref()
+        if crate::relay::provider_config::selected_model(app_type, &provider.settings_config)
+            .as_deref()
             == Some(model)
         {
             crate::proxy::application_routing::set_model(
@@ -1498,7 +1499,7 @@ mod tests {
     /// （菜单构建需要 `AppHandle`，单测只能守列表这一半；路由那一半靠代码评审守。）
     #[test]
     fn tray_menu_includes_loongport_managed_providers() {
-        let managed = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 1);
+        let managed = crate::relay::managed::provider_id_for("https://bestapi.store", Some(1), 1);
         let providers = provider_map(&["custom-1", &managed, "codex-official"]);
 
         let listed = tray_menu_providers(&providers);
@@ -1513,8 +1514,8 @@ mod tests {
     /// 真的一无所有才显示「(无供应商)」，不能因为托管档位而误判为空。
     #[test]
     fn tray_menu_is_empty_only_when_there_are_no_providers_at_all() {
-        let a = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 1);
-        let b = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 2);
+        let a = crate::relay::managed::provider_id_for("https://bestapi.store", Some(1), 1);
+        let b = crate::relay::managed::provider_id_for("https://bestapi.store", Some(1), 2);
         let providers = provider_map(&[&a, &b]);
 
         assert!(!tray_menu_providers(&providers).is_empty());
@@ -1555,8 +1556,8 @@ mod tests {
     /// Application model catalogs include every configured provider, deduplicated in order.
     #[test]
     fn auto_mode_models_unions_all_provider_catalogs_deduped() {
-        let a = crate::relay::provision::provider_id_for("https://a.example", Some(1), 1);
-        let b = crate::relay::provision::provider_id_for("https://b.example", Some(1), 2);
+        let a = crate::relay::managed::provider_id_for("https://a.example", Some(1), 1);
+        let b = crate::relay::managed::provider_id_for("https://b.example", Some(1), 2);
 
         let mut providers = indexmap::IndexMap::new();
         providers.insert(
@@ -1601,7 +1602,7 @@ mod tests {
     /// 「模型」子菜单只挂在「托管 Codex 档位 + 目录非空」上，三道闸各自单独验证。
     #[test]
     fn tier_model_choices_requires_managed_codex_tier_with_catalog() {
-        let managed = crate::relay::provision::provider_id_for("https://bestapi.store", Some(1), 1);
+        let managed = crate::relay::managed::provider_id_for("https://bestapi.store", Some(1), 1);
 
         // 托管 Codex 档位 + 有目录 → (当前模型, 目录)
         let provider =

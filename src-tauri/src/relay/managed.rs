@@ -2,7 +2,7 @@
 //!
 //! ## 为什么要单独一个文件
 //!
-//! 判据是 **id 前缀 + 恰好 16 位小写 hex**（[`provision::provider_id_for`](super::provision::provider_id_for)
+//! 判据是 **id 前缀 + 恰好 16 位小写 hex**（[`crate::relay::managed::provider_id_for`](super::managed::provider_id_for)
 //! 与 [`crate::vendor::provision::provider_id_for`] 两个生成端的输出形状），
 //! 用前缀而不是往 `ProviderMeta` 里加字段：那是上游的结构，加字段会扩大与上游 merge 的接触面。
 //!
@@ -123,10 +123,52 @@ pub(crate) fn belongs_to_relay(
     }
 }
 
+/// Stable sub2api identity scoped by site, account and group. Preserve the persisted hash format.
+pub fn provider_id_for(site_origin: &str, account_id: Option<i64>, group_id: i64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(site_origin.as_bytes());
+    h.update(b"/");
+    // 分隔符不可省：没有它 `(account=1, group=23)` 与 `(account=12, group=3)`
+    // 喂进哈希的字节流完全相同。
+    match account_id {
+        Some(id) => h.update(id.to_string().as_bytes()),
+        None => h.update(b"anon"),
+    }
+    h.update(b"/");
+    h.update(group_id.to_string().as_bytes());
+    // 取前 16 个 hex 字符：够避免碰撞，又不至于让 id 长得没法读。
+    format!(
+        "{}{}",
+        MANAGED_ID_PREFIX,
+        &hex::encode(h.finalize())[..HEX_LEN]
+    )
+}
+
+/// Stable NewAPI identity scoped by protocol, site, account and exact raw group.
+pub fn newapi_provider_id_for(
+    site_origin: &str,
+    account_id: i64,
+    raw_group_identity: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"newapi/");
+    h.update(site_origin.as_bytes());
+    h.update(b"/");
+    h.update(account_id.to_string().as_bytes());
+    h.update(b"/");
+    h.update(raw_group_identity.as_bytes());
+    format!(
+        "{}{}",
+        MANAGED_ID_PREFIX,
+        &hex::encode(h.finalize())[..HEX_LEN]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::relay::provision;
 
     /// 前缀在**前后端各存一份**（Rust 这里 + `src/config/constants.ts` 的
     /// `MANAGED_PROVIDER_ID_PREFIX`），跨语言编译器管不到 —— 两处不一致的后果是
@@ -194,7 +236,7 @@ mod tests {
     fn managed_detection_matches_generated_ids_only() {
         // 正面：provision 真正生成的 id 必须被认出来 —— 这条把判据钉在生成器上，
         // 而不是钉在一个手写的字面量上。
-        let real = provision::provider_id_for("https://bestapi.store", Some(1), 42);
+        let real = crate::relay::managed::provider_id_for("https://relay.example", Some(1), 42);
         assert!(is_managed(&real));
 
         // 反面：用户手工配置的 provider 不能被误判成托管（否则托盘里会凭空少一项、
@@ -267,11 +309,11 @@ mod tests {
     /// 而漏掉的后果是官网直连那些行的守卫全线失效（能从托盘直接切、能被删）。
     #[test]
     fn both_generators_produce_ids_the_guard_recognizes() {
-        let relay_id = provision::provider_id_for("https://bestapi.store", Some(1), 42);
+        let relay_id = crate::relay::managed::provider_id_for("https://relay.example", Some(1), 42);
         assert!(is_managed(&relay_id), "relay: {relay_id}");
 
         // 未登录那支走 "anon" 命名空间，形状必须一样。
-        let anon = provision::provider_id_for("https://bestapi.store", None, 42);
+        let anon = crate::relay::managed::provider_id_for("https://relay.example", None, 42);
         assert!(is_managed(&anon), "relay/anon: {anon}");
 
         let vendor_id = crate::vendor::provision::provider_id_for("deepseek", "acct-1");
@@ -280,7 +322,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_managed_ids_with_actionable_message() {
-        let real = provision::provider_id_for("https://bestapi.store", Some(1), 7);
+        let real = crate::relay::managed::provider_id_for("https://relay.example", Some(1), 7);
         let err = reject_if_managed(&real).expect_err("托管 id 必须被拦下");
         // 文案要指路，不能只说「不允许」。
         assert!(err.to_string().contains("LoongPort"), "err: {err}");
@@ -296,4 +338,116 @@ mod tests {
     // 不可达。留在仓里的契约由 `provider_router` 的
     // `select_providers_serves_managed_tiers_in_failover_queue` 钉住：队列里的
     // 托管档位必须能被选路（这是自动模式选路的地基）。
+
+    #[test]
+    fn provider_id_is_stable_and_scoped_to_site() {
+        let a = provider_id_for("https://relay.example", Some(1), 42);
+        // 稳定：重复 provision 必须得到同一个 id，否则列表里堆满重复项。
+        assert_eq!(a, provider_id_for("https://relay.example", Some(1), 42));
+        assert_ne!(a, provider_id_for("https://relay.example", Some(1), 43));
+        // 不同站的同号分组必须不同 id。
+        assert_ne!(a, provider_id_for("https://other.example", Some(1), 42));
+        // 走**真判据**而不是 `starts_with(前缀)` —— 判据已收紧成「前缀 + 16 位小写
+        // hex」，只验前缀的断言比它弱，改坏格式时不会红（形状那条由
+        // `generated_ids_always_have_exactly_sixteen_lowercase_hex_chars` 专门钉）。
+        assert!(crate::relay::is_managed(&a), "id: {a}");
+    }
+
+    #[test]
+    fn newapi_provider_id_preserves_raw_group_identity_and_backend_scope() {
+        let site = "https://newapi.example";
+        let raw_group = " vip/中文 🚀 ";
+        let id = newapi_provider_id_for(site, 7, raw_group);
+
+        assert_eq!(id, newapi_provider_id_for(site, 7, raw_group));
+        assert_ne!(id, newapi_provider_id_for(site, 7, raw_group.trim()));
+        assert_ne!(id, newapi_provider_id_for(site, 8, raw_group));
+        assert_ne!(
+            id,
+            newapi_provider_id_for("https://other.example", 7, raw_group)
+        );
+        assert!(crate::relay::is_managed(&id), "id: {id}");
+
+        // The backend tag must keep a numeric NewAPI identity distinct from the
+        // existing sub2api namespace without changing sub2api's persisted id.
+        assert_ne!(
+            newapi_provider_id_for("https://relay.example", 1, "42"),
+            provider_id_for("https://relay.example", Some(1), 42)
+        );
+        assert_eq!(
+            provider_id_for("https://relay.example", Some(1), 42),
+            "loongport-70fadab6016b8305"
+        );
+    }
+
+    #[test]
+    fn provider_id_separates_two_accounts_on_the_same_site() {
+        let site = "https://relay.example";
+        let acct7 = provider_id_for(site, Some(7), 42);
+        let acct9 = provider_id_for(site, Some(9), 42);
+        assert_ne!(
+            acct7, acct9,
+            "同站不同账号的同号分组必须是两条 provider —— 否则后来的会覆盖先来的"
+        );
+
+        // 未登录（`None`）也要与任何已登录账号区分开。
+        let anon = provider_id_for(site, None, 42);
+        assert_ne!(anon, acct7);
+        assert_ne!(anon, acct9);
+
+        // ⚠️ 分隔符不能省：没有它 `(account=1, group=23)` 与 `(account=12, group=3)`
+        // 喂进哈希的字节流完全相同 ⇒ 两个不相关的档位撞成一条。
+        assert_ne!(
+            provider_id_for(site, Some(1), 23),
+            provider_id_for(site, Some(12), 3),
+            "拼接必须有分隔符，否则 (1,23) 与 (12,3) 会撞号"
+        );
+    }
+
+    #[test]
+    fn generated_ids_always_have_exactly_sixteen_lowercase_hex_chars() {
+        let prefix = crate::relay::managed::MANAGED_ID_PREFIX;
+
+        // 扫一批输入：不同站点、账号（含未登录的 `None`）、分组号。
+        // 2000 组足够覆盖「首字节为 0」这类前导零情形（概率 1/256，期望约 8 次）。
+        for i in 0..2000i64 {
+            for (site, account) in [
+                ("https://relay.example", Some(i)),
+                ("https://x.example", None),
+            ] {
+                let id = provider_id_for(site, account, i);
+                let hex = id
+                    .strip_prefix(prefix)
+                    .expect("id 必须带托管前缀，否则守卫认不出它");
+
+                assert_eq!(
+                    hex.len(),
+                    16,
+                    "hex 段不是 16 位 ⇒ 这条记录会脱管（守卫失效 + 重复插记录）：{id}"
+                );
+                // 大小写敏感是判据的一部分（`{:x}` 恒小写，放行大写会把判据
+                // 重新放宽到用户填得出的形状上）。
+                assert!(
+                    hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                    "hex 段含非小写十六进制字符：{id}"
+                );
+                // 端到端：判据本身必须认它。
+                assert!(
+                    crate::relay::is_managed(&id),
+                    "生成的 id 没被判据认出来：{id}"
+                );
+            }
+        }
+
+        // vendor 那支形状不同（多一段 `vendor-`），同样钉住。
+        for i in 0..500 {
+            let id = crate::vendor::provision::provider_id_for("deepseek", &format!("acct-{i}"));
+            let hex = id
+                .strip_prefix(prefix)
+                .and_then(|r| r.strip_prefix("vendor-"))
+                .unwrap_or_else(|| panic!("vendor id 形状变了：{id}"));
+            assert_eq!(hex.len(), 16, "vendor 的 hex 段不是 16 位：{id}");
+            assert!(crate::relay::is_managed(&id), "vendor id 没被认出来：{id}");
+        }
+    }
 }
