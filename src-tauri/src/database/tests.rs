@@ -1038,6 +1038,191 @@ fn model_pricing_seed_includes_claude_5_1_and_standard_sonnet_5_prices() {
 }
 
 #[test]
+fn model_pricing_seed_includes_claude_opus_5_5() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let price: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'claude-opus-5-5'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("query Opus 5.5 price");
+
+    // 缓存读 0.05x = $0.20：不是常规 0.1x 的 $0.40，也不是 Opus 5 的 $0.50
+    assert_eq!(
+        price,
+        (
+            "4".to_string(),
+            "20".to_string(),
+            "0.20".to_string(),
+            "5".to_string(),
+        )
+    );
+}
+
+#[test]
+fn model_pricing_seed_includes_gpt_6_astra() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let price: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gpt-6-astra'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("query GPT-6 Astra price");
+
+    assert_eq!(
+        price,
+        (
+            "10".to_string(),
+            "50".to_string(),
+            "1".to_string(),
+            "12.5".to_string(),
+        )
+    );
+}
+
+#[test]
+fn model_pricing_seed_includes_glm_5_3_flash() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let price: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'glm-5.3-flash'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("query GLM-5.3-Flash price");
+
+    assert_eq!(
+        price,
+        (
+            "0.15".to_string(),
+            "0.50".to_string(),
+            "0.03".to_string(),
+            "0".to_string(),
+        )
+    );
+}
+
+#[test]
+fn model_pricing_seed_includes_gemini_3_8_flash() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let price: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gemini-3.8-flash'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("query Gemini 3.8 Flash price");
+
+    assert_eq!(
+        price,
+        (
+            "0.75".to_string(),
+            "3.75".to_string(),
+            "0.075".to_string(),
+            "0".to_string(),
+        )
+    );
+}
+
+#[test]
+fn model_pricing_seed_repairs_sonnet_5_list_price_but_keeps_custom_price() {
+    let db = Database::memory().expect("create memory db");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        // 旧 seed 按 list 价录入的行 → 应被修正
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '3',
+                 output_cost_per_million = '15',
+                 cache_read_cost_per_million = '0.30',
+                 cache_creation_cost_per_million = '3.75'
+             WHERE model_id = 'claude-sonnet-5'",
+            [],
+        )
+        .expect("restore old Sonnet 5 list price");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        let sonnet: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = 'claude-sonnet-5'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("query repaired Sonnet 5 price");
+        assert_eq!(
+            sonnet,
+            (
+                "2".to_string(),
+                "10".to_string(),
+                "0.20".to_string(),
+                "2.50".to_string(),
+            )
+        );
+
+        // 用户手改过的价（不匹配旧 seed 值）不动
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9',
+                 output_cost_per_million = '9',
+                 cache_read_cost_per_million = '9',
+                 cache_creation_cost_per_million = '9'
+             WHERE model_id = 'claude-sonnet-5'",
+            [],
+        )
+        .expect("set custom Sonnet 5 price");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded again");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let custom: (String, String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'claude-sonnet-5'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("query custom Sonnet 5 price");
+    assert_eq!(
+        custom,
+        (
+            "9".to_string(),
+            "9".to_string(),
+            "9".to_string(),
+            "9".to_string(),
+        )
+    );
+}
+
+#[test]
 fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
     let temp = NamedTempFile::new().expect("create temp db file");
     let path = temp.path().to_path_buf();
