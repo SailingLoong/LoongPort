@@ -12,8 +12,12 @@ use super::{
     log_codes::fwd as log_fwd,
     provider_router::ProviderRouter,
     providers::{
-        codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore, get_adapter,
-        AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
+        codex_chat_history::CodexChatHistoryStore,
+        codex_tool_carriers::{
+            rejected_carriers_from_error, strip_carriers, CodexToolCarrierStore,
+        },
+        gemini_shadow::GeminiShadowStore,
+        get_adapter, AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
     },
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
@@ -148,6 +152,10 @@ pub struct RequestForwarder {
     current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
     gemini_shadow: Arc<GeminiShadowStore>,
     codex_chat_history: Arc<CodexChatHistoryStore>,
+    /// 按 (app, provider) 学习到的「网关拒绝过的 codex 工具载体」（web_search /
+    /// tool_search 等），原生 Responses 透传路径据此预剥离，见
+    /// [`providers::codex_tool_carriers`]。
+    codex_tool_carriers: Arc<CodexToolCarrierStore>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -224,6 +232,75 @@ impl RequestForwarder {
             && super::media_sanitizer::is_unsupported_image_error(error)
     }
 
+    /// 本次尝试是否为「原生 Responses 透传」：codex 形状的请求不经 Chat /
+    /// Anthropic 转换直达上游。只有这条路径会把 codex 私有工具载体
+    /// （web_search / tool_search 及其历史项）原样交给三方网关——转换路径
+    /// 在各自转换器里已经处理了这些载体。
+    fn is_native_codex_responses(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+        endpoint: &str,
+    ) -> bool {
+        matches!(app_type, AppType::Codex | AppType::GrokBuild)
+            && !super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+            && !super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
+    }
+
+    /// 单次尝试成功后的收尾：闭合熔断、刷新当前 provider 与统计、按需触发
+    /// 故障转移切换并构造 ForwardResult。主路径、media 降级重试、工具载体
+    /// 剥离重试共用同一份语义。
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_provider_success(
+        &self,
+        app_type_str: &str,
+        current_provider_id_at_start: &str,
+        provider: &Provider,
+        used_half_open_permit: bool,
+        attempt_started_at: std::time::Instant,
+        response: ProxyResponse,
+        claude_api_format: Option<String>,
+        outbound_model: Option<String>,
+    ) -> ForwardResult {
+        // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；HalfOpen
+        // 探测仍同步等待，保证 permit 与熔断状态及时释放。
+        self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
+            .await;
+
+        {
+            let mut current_providers = self.current_providers.write().await;
+            current_providers.insert(
+                app_type_str.to_string(),
+                (provider.id.clone(), provider.name.clone()),
+            );
+        }
+
+        {
+            let mut status = self.status.write().await;
+            status.success_requests += 1;
+            status.last_error = None;
+            let should_switch = current_provider_id_at_start != provider.id.as_str();
+            if should_switch {
+                status.failover_count += 1;
+                // 异步触发供应商切换，更新 UI/托盘，并把「当前供应商」同步为实际使用的 provider
+                self.spawn_failover_switch(app_type_str, provider);
+            }
+            if status.total_requests > 0 {
+                status.success_rate =
+                    (status.success_requests as f32 / status.total_requests as f32) * 100.0;
+            }
+        }
+
+        ForwardResult {
+            response,
+            provider: provider.clone(),
+            attempt_started_at,
+            claude_api_format,
+            outbound_model,
+            connection_guard: None,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         router: Arc<ProviderRouter>,
@@ -232,6 +309,7 @@ impl RequestForwarder {
         current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
         gemini_shadow: Arc<GeminiShadowStore>,
         codex_chat_history: Arc<CodexChatHistoryStore>,
+        codex_tool_carriers: Arc<CodexToolCarrierStore>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -250,6 +328,7 @@ impl RequestForwarder {
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
             router,
+            codex_tool_carriers,
             status,
             current_providers,
             gemini_shadow,
@@ -501,6 +580,7 @@ impl RequestForwarder {
             let mut rectifier_retried = false;
             let mut budget_rectifier_retried = false;
             let mut media_rectifier_retried = false;
+            let mut tool_carrier_retried = false;
 
             // 上限检查：尊重用户在 AppProxyConfig.max_retries 上配置的「重试次数」。
             // 放在熔断器 allow 检查之前，避免在已经超限时还占用 HalfOpen 探测名额。
@@ -546,6 +626,22 @@ impl RequestForwarder {
                     body.clone()
                 };
 
+            // 原生 Responses 透传且该网关已学习到「拒绝过 codex 工具载体」：
+            // 发送前预剥离，省掉一次必然失败的往返（首次发现由 Err 分支的
+            // 剥离重试自愈并学习）。
+            if self.is_native_codex_responses(app_type, provider, endpoint) {
+                let learned = self
+                    .codex_tool_carriers
+                    .carriers_for(app_type_str, &provider.id)
+                    .await;
+                if strip_carriers(&mut provider_body, &learned) {
+                    log::debug!(
+                        "[{app_type_str}] [ToolCarrier] Pre-stripped learned carrier(s) {learned:?} for provider={}",
+                        provider.id
+                    );
+                }
+            }
+
             attempted_providers += 1;
 
             // 本次尝试的计时锚点：从「开始向这家发起请求」起算。同一家内部的
@@ -579,49 +675,19 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, claude_api_format, outbound_model)) => {
-                    // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
-                    // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
-                    self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
+                    let result = self
+                        .finish_provider_success(
+                            app_type_str,
+                            &self.current_provider_id_at_start,
+                            provider,
+                            used_half_open_permit,
+                            attempt_started_at,
+                            response,
+                            claude_api_format,
+                            outbound_model,
+                        )
                         .await;
-
-                    // 更新当前应用类型使用的 provider
-                    {
-                        let mut current_providers = self.current_providers.write().await;
-                        current_providers.insert(
-                            app_type_str.to_string(),
-                            (provider.id.clone(), provider.name.clone()),
-                        );
-                    }
-
-                    // 更新成功统计
-                    {
-                        let mut status = self.status.write().await;
-                        status.success_requests += 1;
-                        status.last_error = None;
-                        let should_switch =
-                            self.current_provider_id_at_start.as_str() != provider.id.as_str();
-                        if should_switch {
-                            status.failover_count += 1;
-
-                            // 异步触发供应商切换，更新 UI/托盘，并把“当前供应商”同步为实际使用的 provider
-                            self.spawn_failover_switch(app_type_str, provider);
-                        }
-                        // 重新计算成功率
-                        if status.total_requests > 0 {
-                            status.success_rate = (status.success_requests as f32
-                                / status.total_requests as f32)
-                                * 100.0;
-                        }
-                    }
-
-                    return Ok(ForwardResult {
-                        response,
-                        provider: provider.clone(),
-                        attempt_started_at,
-                        claude_api_format,
-                        outbound_model,
-                        connection_guard: None,
-                    });
+                    return Ok(result);
                 }
                 Err(e) => {
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
@@ -674,48 +740,19 @@ impl RequestForwarder {
                                     log::info!(
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
-                                    self.record_success_result(
-                                        &provider.id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                    )
-                                    .await;
-
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            self.spawn_failover_switch(app_type_str, provider);
-                                        }
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
-
-                                    return Ok(ForwardResult {
-                                        response,
-                                        provider: provider.clone(),
-                                        attempt_started_at,
-                                        claude_api_format,
-                                        outbound_model,
-                                        connection_guard: None,
-                                    });
+                                    let result = self
+                                        .finish_provider_success(
+                                            app_type_str,
+                                            &self.current_provider_id_at_start,
+                                            provider,
+                                            used_half_open_permit,
+                                            attempt_started_at,
+                                            response,
+                                            claude_api_format,
+                                            outbound_model,
+                                        )
+                                        .await;
+                                    return Ok(result);
                                 }
                                 Err(retry_err) => {
                                     log::warn!(
@@ -728,6 +765,81 @@ impl RequestForwarder {
                                             app_type_str,
                                             used_half_open_permit,
                                             "media 降级",
+                                            &mut last_error,
+                                            &mut last_provider,
+                                        )
+                                        .await
+                                    {
+                                        return Err(err);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    // codex 工具载体被网关拒绝（严格三方 Responses 网关 400 整单
+                    // 拒绝 web_search / tool_search 载体或其历史项）：剥离被点名
+                    // 载体后同 provider 重试。学习在检测时落——网关确实拒过，
+                    // 与重试成败无关。
+                    if !tool_carrier_retried
+                        && self.is_native_codex_responses(app_type, provider, endpoint)
+                    {
+                        let rejected = rejected_carriers_from_error(&e, &provider_body);
+                        if !rejected.is_empty() {
+                            let _ = std::mem::replace(&mut tool_carrier_retried, true);
+                            self.codex_tool_carriers
+                                .record(app_type_str, &provider.id, &rejected)
+                                .await;
+                            let mut compat_body = provider_body.clone();
+                            strip_carriers(&mut compat_body, &rejected);
+                            log::info!(
+                                "[{app_type_str}] [ToolCarrier] Upstream rejected codex tool carrier(s) {rejected:?}; retrying provider={} with them stripped",
+                                provider.id
+                            );
+
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &compat_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                )
+                                .await
+                            {
+                                Ok((response, claude_api_format, outbound_model)) => {
+                                    log::info!(
+                                        "[{app_type_str}] [ToolCarrier] Carrier-stripped retry succeeded"
+                                    );
+                                    let result = self
+                                        .finish_provider_success(
+                                            app_type_str,
+                                            &self.current_provider_id_at_start,
+                                            provider,
+                                            used_half_open_permit,
+                                            attempt_started_at,
+                                            response,
+                                            claude_api_format,
+                                            outbound_model,
+                                        )
+                                        .await;
+                                    return Ok(result);
+                                }
+                                Err(retry_err) => {
+                                    log::warn!(
+                                        "[{app_type_str}] [ToolCarrier] Carrier-stripped retry still failed: {retry_err}"
+                                    );
+                                    if let Some(err) = self
+                                        .handle_rectifier_retry_failure(
+                                            retry_err,
+                                            provider,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                            "tool 载体剥离重试",
                                             &mut last_error,
                                             &mut last_provider,
                                         )
@@ -3876,6 +3988,7 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            codex_tool_carriers: Arc::new(CodexToolCarrierStore::default()),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),

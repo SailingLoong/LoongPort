@@ -409,7 +409,7 @@ fn replace_image_block_with_text_marker(block: &mut Value, text_type: &str) {
     }
 }
 
-fn extract_error_text(body: &str) -> String {
+pub(crate) fn extract_error_text(body: &str) -> String {
     if let Ok(value) = serde_json::from_str::<Value>(body) {
         let candidates = [
             value.pointer("/error/message"),
