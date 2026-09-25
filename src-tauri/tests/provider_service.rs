@@ -2436,7 +2436,7 @@ model_provider = "aprov"
 wire_api = "chat"
 experimental_bearer_token = "sk-a-live-secret"
 model_catalog_json = "cc-switch-model-catalog.json"
-web_search = "disabled"
+web_search = "disabled" # cc-switch:managed
 disable_response_storage = true
 
 [tui]

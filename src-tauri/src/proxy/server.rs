@@ -13,7 +13,10 @@ use super::{
     handlers,
     log_codes::srv as log_srv,
     provider_router::ProviderRouter,
-    providers::{codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore},
+    providers::{
+        codex_chat_history::CodexChatHistoryStore, codex_tool_carriers::CodexToolCarrierStore,
+        gemini_shadow::GeminiShadowStore,
+    },
     types::*,
     ProxyError,
 };
@@ -44,6 +47,9 @@ pub struct ProxyState {
     pub gemini_shadow: Arc<GeminiShadowStore>,
     /// Codex Chat bridge history，用于恢复 previous_response_id 指向的 tool call
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
+    /// 按 (app, provider) 学习到的「网关拒绝过的 codex 工具载体」，见
+    /// [`providers::codex_tool_carriers`]。
+    pub codex_tool_carriers: Arc<CodexToolCarrierStore>,
     /// AppHandle，用于发射事件和更新托盘菜单
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
@@ -85,6 +91,7 @@ impl ProxyServer {
             provider_router,
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            codex_tool_carriers: Arc::new(CodexToolCarrierStore::default()),
             app_handle,
             failover_manager,
             passive_ingress,
@@ -446,6 +453,147 @@ mod tests {
         path_and_query: String,
         authorization: Option<String>,
         body: Value,
+    }
+
+    /// 端到端自愈：严格三方 Responses 网关对 codex 私有工具载体回 400 整单
+    /// 拒绝（实测形状 `unknown type: tool_search_call`，见上游 cc-switch issue #7560）。
+    /// 代理应剥离载体后同 provider 重试成功，并记住该网关——后续请求预先
+    /// 剥离、不再吃那次必然失败的 400。
+    #[tokio::test]
+    async fn codex_tool_carrier_rejection_self_heals_and_is_learned() {
+        // 每次上游命中记录「请求里是否还带 codex 私有载体」
+        let hits = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let mock_app = Router::new().route(
+            "/v1/responses",
+            post({
+                let hits = hits.clone();
+                move |request: axum::extract::Request| {
+                    let hits = hits.clone();
+                    async move {
+                        let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+                            .await
+                            .expect("read mock request body");
+                        let body: Value =
+                            serde_json::from_slice(&body).expect("parse mock request body");
+                        // 忠实于实测报错形状：只拒 codex 私有的 tool_search 族
+                        // 条目（报错也点名它）；托管 web_search 工具照单全收
+                        let has_carrier = body["tools"]
+                            .as_array()
+                            .is_some_and(|tools| {
+                                tools
+                                    .iter()
+                                    .any(|tool| tool["type"].as_str() == Some("tool_search"))
+                            })
+                            || body["input"].as_array().is_some_and(|input| {
+                                input.iter().any(|item| {
+                                    matches!(
+                                        item["type"].as_str(),
+                                        Some("tool_search_call") | Some("tool_search_output")
+                                    )
+                                })
+                            });
+                        hits.lock().await.push(has_carrier);
+
+                        if has_carrier {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                HeaderMap::new(),
+                                r#"{"error":{"message":"unknown type: tool_search_call","type":"invalid_request_error"}}"#,
+                            )
+                        } else {
+                            (
+                                StatusCode::OK,
+                                HeaderMap::new(),
+                                r#"{"id":"resp_ok","output":[]}"#,
+                            )
+                        }
+                    }
+                }
+            }),
+        );
+        let mock_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind mock upstream");
+        let mock_addr = mock_listener.local_addr().expect("mock upstream address");
+        let mock_handle = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_app)
+                .await
+                .expect("serve mock upstream");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let provider = Provider::with_id(
+            "strict-responses-relay".to_string(),
+            "Strict Responses Relay".to_string(),
+            json!({
+                "base_url": format!("http://{mock_addr}/v1"),
+                "auth": {"OPENAI_API_KEY": "upstream-secret"}
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save test provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("select test provider");
+
+        let proxy = ProxyServer::new(
+            ProxyConfig {
+                listen_port: 0,
+                enable_logging: false,
+                non_streaming_timeout: 10,
+                ..ProxyConfig::default()
+            },
+            db.clone(),
+            None,
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+            std::sync::Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
+        );
+        let proxy_info = proxy.start().await.expect("start test proxy");
+        let client = reqwest::Client::new();
+
+        let codex_request = json!({
+            "model": "gpt-5.5",
+            "stream": false,
+            "store": false,
+            "tools": [
+                {"type": "function", "name": "shell"},
+                {"type": "tool_search"},
+                {"type": "web_search"}
+            ],
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "hi"}
+                ]},
+                {"type": "tool_search_call", "call_id": "c1", "arguments": {}},
+                {"type": "tool_search_output", "call_id": "c1", "output": {}}
+            ]
+        });
+
+        // 第一个请求：上游 400 → 代理剥离 tool_search 载体（含历史项对）重试 → 200
+        let response = client
+            .post(format!("http://127.0.0.1:{}/v1/responses", proxy_info.port))
+            .json(&codex_request)
+            .send()
+            .await
+            .expect("send first proxied request");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.text().await.expect("read first proxy response"),
+            r#"{"id":"resp_ok","output":[]}"#
+        );
+
+        // 第二个请求：同一 provider 已学习，发送前预剥离——上游只被再打一次且直接 200
+        let response = client
+            .post(format!("http://127.0.0.1:{}/v1/responses", proxy_info.port))
+            .json(&codex_request)
+            .send()
+            .await
+            .expect("send second proxied request");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let hits = hits.lock().await.clone();
+        assert_eq!(hits, vec![true, false, false]);
+        mock_handle.abort();
     }
 
     #[tokio::test]

@@ -85,6 +85,47 @@ pub(crate) const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
 /// ownership sentinel: we only ever remove a `web_search` key whose value equals
 /// this string, never a user's own setting.
 pub(crate) const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
+/// Ownership marker written as a trailing TOML comment on the `web_search`
+/// sentinel we inject. The value alone is NOT proof of ownership: a user may
+/// write `web_search = "disabled"` themselves for a gateway we do not know
+/// about, and deleting it on the next switch puts the hosted tool back on the
+/// wire and earns a hard 400. Only a sentinel carrying this marker is ours to
+/// remove. The marker string matches upstream cc-switch (#7592) so future
+/// upstream merges unify cleanly.
+pub(crate) const CODEX_WEB_SEARCH_MANAGED_MARKER: &str = "cc-switch:managed";
+
+/// The exact comment stamped on the sentinel we inject.
+fn codex_web_search_managed_comment() -> String {
+    format!("# {CODEX_WEB_SEARCH_MANAGED_MARKER}")
+}
+
+/// Trailing suffix (leading space + marker comment) for the injected sentinel.
+fn codex_web_search_managed_suffix() -> String {
+    format!(" {}", codex_web_search_managed_comment())
+}
+
+/// Whether a top-level `web_search` item is the sentinel we injected: the
+/// `"disabled"` value whose trailing comment begins with our marker comment as
+/// a whole token — the trimmed comment either equals the marker exactly or
+/// continues with whitespace (`# cc-switch:managed (note)`). Neither a
+/// substring match (`# not cc-switch:managed at all`) nor a bare prefix match
+/// (`# cc-switch:managed-by-user`) counts, so a user's own remark is never
+/// mistaken for ours. Everything else — including a bare `"disabled"` written
+/// by hand or by pre-marker app releases — is the user's and stays.
+pub(crate) fn is_managed_web_search_sentinel(item: &toml_edit::Item) -> bool {
+    if item.as_str() != Some(CODEX_WEB_SEARCH_DISABLED) {
+        return false;
+    }
+    item.as_value()
+        .and_then(|value| value.decor().suffix())
+        .and_then(|suffix| suffix.as_str())
+        .and_then(|suffix| {
+            suffix
+                .trim()
+                .strip_prefix(codex_web_search_managed_comment().as_str())
+        })
+        .is_some_and(|rest| rest.chars().next().is_none_or(char::is_whitespace))
+}
 
 /// Native `/responses` gateways whose first-party models do NOT support the Codex
 /// `web_search` hosted tool. A BLACKLIST (default-on): everything not listed keeps
@@ -2670,15 +2711,18 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
     if disable {
-        doc[CODEX_WEB_SEARCH_FIELD] = toml_edit::value(CODEX_WEB_SEARCH_DISABLED);
-    } else {
-        let owned = doc
-            .get(CODEX_WEB_SEARCH_FIELD)
-            .and_then(|item| item.as_str())
-            == Some(CODEX_WEB_SEARCH_DISABLED);
-        if owned {
-            doc.as_table_mut().remove(CODEX_WEB_SEARCH_FIELD);
+        let mut value = toml_edit::value(CODEX_WEB_SEARCH_DISABLED);
+        if let Some(string_value) = value.as_value_mut() {
+            string_value
+                .decor_mut()
+                .set_suffix(codex_web_search_managed_suffix());
         }
+        doc[CODEX_WEB_SEARCH_FIELD] = value;
+    } else if doc
+        .get(CODEX_WEB_SEARCH_FIELD)
+        .is_some_and(is_managed_web_search_sentinel)
+    {
+        doc.as_table_mut().remove(CODEX_WEB_SEARCH_FIELD);
     }
 
     Ok(doc.to_string())
@@ -7222,6 +7266,55 @@ name = "any"
     }
 
     #[test]
+    fn managed_web_search_sentinel_is_written_with_marker_and_removed_by_owner() {
+        let input = "model = \"gpt-5.5\"\n";
+        let disabled = set_codex_native_web_search_field(input, true).unwrap();
+        assert!(
+            disabled.contains("web_search = \"disabled\" # cc-switch:managed"),
+            "injected sentinel must carry the ownership marker, got: {disabled}"
+        );
+        // 再切回支持 web_search 的网关：带标记的哨兵被我们删除
+        let re_enabled = set_codex_native_web_search_field(&disabled, false).unwrap();
+        assert!(
+            !re_enabled.contains("web_search"),
+            "owned sentinel must be removed on re-enable, got: {re_enabled}"
+        );
+    }
+
+    #[test]
+    fn user_set_bare_disabled_web_search_is_never_deleted() {
+        // 用户为未知网关手写的裸 "disabled"：无归属标记，不是我们的，不删——
+        // 删了等于把托管工具塞回一个已知会 400 的网关
+        let input = "web_search = \"disabled\"\nmodel = \"gpt-5.5\"\n";
+        let result = set_codex_native_web_search_field(input, false).unwrap();
+        assert!(
+            result.contains("web_search = \"disabled\""),
+            "user-set bare disabled must survive, got: {result}"
+        );
+    }
+
+    #[test]
+    fn user_remark_containing_marker_text_is_not_ours() {
+        // 子串 / 前缀续写都不算归属标记
+        let input = "web_search = \"disabled\" # not cc-switch:managed at all\n";
+        let doc = input.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(!is_managed_web_search_sentinel(
+            doc.get("web_search").unwrap()
+        ));
+        let input = "web_search = \"disabled\" # cc-switch:managed-by-user\n";
+        let doc = input.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(!is_managed_web_search_sentinel(
+            doc.get("web_search").unwrap()
+        ));
+        // 带尾注的完整标记是我们的
+        let input = "web_search = \"disabled\" # cc-switch:managed (auto)\n";
+        let doc = input.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(is_managed_web_search_sentinel(
+            doc.get("web_search").unwrap()
+        ));
+    }
+
+    #[test]
     fn native_web_search_field_disables_at_top_level() {
         // Native `/responses` gateways reject the web_search tool, so the
         // NativeResponses profile must write the top-level disable line even
@@ -7252,7 +7345,7 @@ name = "xiaomi_mimo"
         // Switching away from a native provider must re-enable web search by
         // removing cc-switch's own "disabled" sentinel.
         let input = r#"model = "gpt-5.5"
-web_search = "disabled"
+web_search = "disabled" # cc-switch:managed
 "#;
         let result = set_codex_native_web_search_field(input, false).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
