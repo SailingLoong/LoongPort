@@ -1946,7 +1946,7 @@ GEMINI_TIMEOUT_MS=30000
     #[test]
     fn extract_codex_common_config_strips_provider_fields_and_injected_artifacts() {
         // 顶层 experimental_bearer_token 模拟无活跃路由时的 fallback 注入；
-        // web_search = "disabled" 是 cc-switch 对黑名单网关注入的哨兵；
+        // web_search = "disabled"（带归属标记）是 cc-switch 对黑名单网关注入的哨兵；
         // 顶层 wire_api 模拟无 model_provider 时的 fallback 写法；
         // [mcp.servers] 是历史错误格式，sync_all_enabled 清不掉它。
         let config_toml = r#"model_provider = "azure"
@@ -1955,7 +1955,7 @@ wire_api = "chat"
 disable_response_storage = true
 experimental_bearer_token = "sk-live-secret"
 model_catalog_json = "cc-switch-model-catalog.json"
-web_search = "disabled"
+web_search = "disabled" # cc-switch:managed
 
 [model_providers.azure]
 name = "Azure OpenAI"
@@ -2022,6 +2022,19 @@ command = "legacy-cmd"
         assert!(
             extracted.contains("disable_response_storage = true"),
             "shareable keys must survive extraction, got: {extracted}"
+        );
+    }
+
+    #[test]
+    fn extract_codex_common_config_keeps_user_set_bare_disabled_web_search() {
+        // 裸 "disabled"（无归属标记）可能是用户手设，不能当注入哨兵剥离
+        let config_toml = "web_search = \"disabled\"\ndisable_response_storage = true\n";
+        let settings = json!({ "config": config_toml });
+        let extracted = ProviderService::extract_codex_common_config(&settings)
+            .expect("extract_codex_common_config should succeed");
+        assert!(
+            extracted.contains("web_search"),
+            "a user-set bare disabled web_search is a shareable preference, got: {extracted}"
         );
     }
 
@@ -6697,12 +6710,11 @@ impl ProviderService {
         root.remove("experimental_bearer_token");
         // - model_catalog_json 指向按供应商生成的 catalog 投影文件（DB 为 SSOT）。
         root.remove("model_catalog_json");
-        // - web_search 只剥 cc-switch 注入的 "disabled" 哨兵；用户手设的其它值
-        //   属于可共享偏好，保留。
+        // - web_search 只剥我们注入且带归属标记的 "disabled" 哨兵；用户手设的
+        //   任何值（含裸 "disabled"）都是可共享偏好，保留。
         if root
             .get(crate::codex_config::CODEX_WEB_SEARCH_FIELD)
-            .and_then(|item| item.as_str())
-            == Some(crate::codex_config::CODEX_WEB_SEARCH_DISABLED)
+            .is_some_and(crate::codex_config::is_managed_web_search_sentinel)
         {
             root.remove(crate::codex_config::CODEX_WEB_SEARCH_FIELD);
         }
