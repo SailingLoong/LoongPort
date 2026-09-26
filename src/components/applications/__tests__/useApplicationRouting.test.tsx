@@ -6,6 +6,7 @@ import { useApplicationRouting } from "../useApplicationRouting";
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   order: vi.fn(),
+  apply: vi.fn(),
   failover: vi.fn(),
   status: vi.fn(),
   takeover: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@/lib/api/applicationRouting", () => ({
   applicationRoutingApi: {
     get: mocks.get,
     setOrder: mocks.order,
+    apply: mocks.apply,
     setFailover: mocks.failover,
   },
 }));
@@ -60,23 +62,16 @@ describe("application routing controls", () => {
     expect(mocks.setTakeover).not.toHaveBeenCalled();
     expect(mocks.failover).not.toHaveBeenCalled();
   });
-  it("starts and takes over on explicit enable before enabling fallback", async () => {
+  it("enables routing through the backend operation", async () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
       wrapper,
     });
     await act(async () => {
       await result.current.setFailover(true);
     });
-    expect(mocks.start).toHaveBeenCalledTimes(1);
-    expect(mocks.setTakeover).toHaveBeenCalledWith("codex", true);
     expect(mocks.failover).toHaveBeenCalledWith("codex", true);
-    expect(mocks.start.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.setTakeover.mock.invocationCallOrder[0],
-    );
-    expect(mocks.setTakeover.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.failover.mock.invocationCallOrder[0],
-    );
-    // 开启即生效（链回落=当前显示序）：toast 报「已生效」，不弹「尚未生效」。
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.setTakeover).not.toHaveBeenCalled();
     expect(mocks.success).toHaveBeenCalledWith("applications.failoverEnabled");
   });
   it("disabling changes only fallback permission", async () => {
@@ -90,8 +85,9 @@ describe("application routing controls", () => {
     expect(mocks.start).not.toHaveBeenCalled();
     expect(mocks.setTakeover).not.toHaveBeenCalled();
   });
-  it("does not enable fallback when takeover fails and exposes failure to the caller", async () => {
-    mocks.setTakeover.mockRejectedValue(new Error("configuration is busy"));
+  it("exposes backend activation failure without reporting success", async () => {
+    mocks.failover.mockRejectedValue(new Error("configuration is busy"));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
     const { result } = renderHook(() => useApplicationRouting("codex"), {
       wrapper,
     });
@@ -100,8 +96,11 @@ describe("application routing controls", () => {
         "configuration is busy",
       );
     });
-    expect(mocks.failover).not.toHaveBeenCalled();
+    expect(mocks.success).not.toHaveBeenCalled();
     expect(mocks.error).toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["applicationRouting", "codex"],
+    });
   });
   it("saves the complete priority order without changing fallback or current tier", async () => {
     const { result } = renderHook(() => useApplicationRouting("codex"), {
@@ -113,5 +112,59 @@ describe("application routing controls", () => {
     expect(mocks.order).toHaveBeenCalledWith("codex", ["b", "a"]);
     expect(mocks.failover).not.toHaveBeenCalled();
     expect(mocks.setTakeover).not.toHaveBeenCalled();
+  });
+  it("refreshes application state after success or failure but not while awaiting confirmation", async () => {
+    mocks.apply
+      .mockResolvedValueOnce({
+        status: "confirmationRequired",
+        targetName: "Example",
+      })
+      .mockResolvedValueOnce({
+        status: "switched",
+        providerName: "Example",
+        warnings: [],
+        chatgptWasRunning: false,
+        chatgptRelaunched: false,
+      })
+      .mockRejectedValueOnce(new Error("configuration write failed"));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const { result } = renderHook(() => useApplicationRouting("codex"), {
+      wrapper,
+    });
+    const change = {
+      order: { profileName: "Travel", providerIds: ["b"] },
+      selection: { providerId: "b", model: "model-b" },
+    };
+    await act(async () => {
+      await result.current.apply(change);
+    });
+    expect(invalidate).not.toHaveBeenCalled();
+    await act(async () => {
+      await result.current.apply(change, false);
+    });
+    expect(mocks.apply).toHaveBeenLastCalledWith("codex", change, false);
+    for (const owner of [
+      "applicationRouting",
+      "applicationOverview",
+      "providers",
+      "orderProfiles",
+    ]) {
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: [owner, "codex"] });
+    }
+    expect(mocks.order).not.toHaveBeenCalled();
+    invalidate.mockClear();
+    await act(async () => {
+      await expect(result.current.apply(change, false)).rejects.toThrow(
+        "configuration write failed",
+      );
+    });
+    for (const owner of [
+      "applicationRouting",
+      "applicationOverview",
+      "providers",
+      "orderProfiles",
+    ]) {
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: [owner, "codex"] });
+    }
   });
 });

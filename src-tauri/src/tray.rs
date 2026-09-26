@@ -487,17 +487,12 @@ fn tray_menu_providers(
     sort_providers(providers)
 }
 
-/// 「模型」子菜单的数据来源：当前档位是**托管项**且落库模型目录非空时，
-/// 返回 `(当前模型, 目录)`；其余情况 `None`（不挂子菜单）。
-///
-/// 与主界面 `TierInfo.models` 共用后端的可用模型快照。
-/// 目录按平台落库（codex / claude / gemini / grokbuild），没有目录的 app 自然不挂；
-/// 非托管 provider 没有「选模型」这个概念，不预埋。
+/// The current provider's model choices share the application's native/catalog inventory.
 fn tier_model_choices(
     provider: &crate::provider::Provider,
     app_type: &AppType,
 ) -> Option<(Option<String>, Vec<String>)> {
-    if !crate::relay::is_managed(&provider.id) {
+    if !crate::relay::provider_config::supports_model_catalog(app_type) {
         return None;
     }
     let models = crate::relay::model_catalog::available_models(provider);
@@ -699,33 +694,12 @@ fn handle_auto_click(app: &tauri::AppHandle, app_type: &AppType) -> Result<(), A
     if let Some(app_state) = app.try_state::<AppState>() {
         let app_type_str = app_type.as_str();
 
-        // 真正启用 failover：启动代理服务 + 执行接管 + 开启 auto_failover
-        let proxy_service = &app_state.proxy_service;
-
-        // 1) 确保代理服务运行（会自动设置 proxy_enabled = true）
-        let is_running = futures::executor::block_on(proxy_service.is_running());
-        if !is_running {
-            log::info!("[Tray] Auto 模式：启动代理服务");
-            if let Err(e) = futures::executor::block_on(proxy_service.start()) {
-                log::error!("[Tray] 启动代理服务失败: {e}");
-                return Err(AppError::Message(format!("启动代理服务失败: {e}")));
-            }
-        }
-
-        // 2) 执行 Live 配置接管（确保该 app 被代理接管）
-        log::info!("[Tray] Auto 模式：对 {app_type_str} 执行接管");
-        if let Err(e) =
-            futures::executor::block_on(proxy_service.set_takeover_for_app(app_type_str, true))
-        {
-            log::error!("[Tray] 执行接管失败: {e}");
-            return Err(AppError::Message(format!("执行接管失败: {e}")));
-        }
-
-        futures::executor::block_on(crate::proxy::application_routing::set_failover(
-            &app_state.db,
-            app_type_str,
-            true,
-        ))?;
+        futures::executor::block_on(
+            app_state
+                .proxy_service
+                .set_failover_for_app(app_type_str, true),
+        )
+        .map_err(AppError::Message)?;
         refresh_tray_menu(app);
     }
     Ok(())
@@ -821,10 +795,7 @@ fn handle_managed_tier_click(
     }
 }
 
-/// 托盘点「模型」子菜单：对**当前**托管档位执行 `switch_tier_model_command`
-/// （校验模型 ∈ 落库目录 → 更新 provider → 走切档位编排，失败回滚）。
-/// 模型子菜单只在当前档位是托管项且目录非空时才会挂出来，这里再验一遍是防
-/// 菜单陈旧（刚切走、菜单还没重建）时点了个已不属于当前档位的模型。
+/// Tray model choices use the same validated, reversible application operation as the page.
 fn handle_tier_model_click(
     app: &tauri::AppHandle,
     app_type: &AppType,
@@ -838,30 +809,6 @@ fn handle_tier_model_click(
     else {
         return Ok(());
     };
-    if !crate::relay::is_managed(&provider_id) {
-        return Ok(());
-    }
-
-    // 点的就是当前模型 → 无操作（与主界面 `handleSelectTierModel` 的守卫对齐，
-    // 否则每次误点都会走一遍「退 ChatGPT」确认）。读当前模型走按平台分派的
-    // `selected_model`（grok 档位的 config TOML 与 codex 不同形，codex 专用的
-    // `extract_model` 在那边读对只是靠行序的巧合）。
-    let current = app_state
-        .db
-        .get_provider_by_id(&provider_id, app_type.as_str())?;
-    if let Some(provider) = current {
-        if crate::relay::provider_config::selected_model(app_type, &provider.settings_config)
-            .as_deref()
-            == Some(model)
-        {
-            crate::proxy::application_routing::set_model(
-                &app_state.db,
-                app_type.as_str(),
-                Some(model),
-            )?;
-            return Ok(());
-        }
-    }
 
     let mut user_choice = None;
     loop {
@@ -883,11 +830,6 @@ fn handle_tier_model_click(
                 for warning in &result.warnings {
                     log::warn!("[Tray] 切换档位模型后警告: {warning}");
                 }
-                crate::proxy::application_routing::set_model(
-                    &app_state.db,
-                    app_type.as_str(),
-                    Some(model),
-                )?;
                 return Ok(());
             }
         }
@@ -1601,7 +1543,7 @@ mod tests {
 
     /// 「模型」子菜单只挂在「托管 Codex 档位 + 目录非空」上，三道闸各自单独验证。
     #[test]
-    fn tier_model_choices_requires_managed_codex_tier_with_catalog() {
+    fn tier_model_choices_follow_native_and_managed_inventory() {
         let managed = crate::relay::managed::provider_id_for("https://bestapi.store", Some(1), 1);
 
         // 托管 Codex 档位 + 有目录 → (当前模型, 目录)
@@ -1623,9 +1565,12 @@ mod tests {
         assert_eq!(current, None);
         assert_eq!(models.len(), 2);
 
-        // 自建 provider → 不挂
+        // Custom native model choices are also available.
         let custom = codex_tier_provider("custom-1", "gpt-5.6-sol", &["gpt-5.6-sol"]);
-        assert!(tier_model_choices(&custom, &AppType::Codex).is_none());
+        assert_eq!(
+            tier_model_choices(&custom, &AppType::Codex).unwrap().1,
+            vec!["gpt-5.6-sol"]
+        );
 
         // 目录为空 → 不挂
         let no_catalog = codex_tier_provider(&managed, "gpt-5.6-sol", &[]);

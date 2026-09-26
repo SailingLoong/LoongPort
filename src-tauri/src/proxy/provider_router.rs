@@ -88,10 +88,11 @@ impl ProviderRouter {
             .get_proxy_config_for_app(app_type)
             .await?
             .auto_failover_enabled;
+        let blocked = application_routing::blocked_tier_ids(&self.db, app_type);
         let mut result = Vec::new();
         if let Some(current) = current
             .as_ref()
-            .filter(|p| provider_supports_proxy_routing(app_type, p))
+            .filter(|p| !blocked.contains(&p.id) && provider_supports_proxy_routing(app_type, p))
         {
             result.push(current.clone());
             if !enabled || !provider_supports_failover(app_type, current) {
@@ -103,7 +104,6 @@ impl ProviderRouter {
         // 候选 = 当前档（健康时钉住首位，保护会话与提示词缓存）+ **从链头全量扫**：
         // 重新路由一律从用户排的第一名开始往后找，只有屏蔽/熔断等真实错误才跳过
         // ——位置本身不是跳过理由（2026-09-19 用户定调，废除「当前档之前不参与」）。
-        let blocked = application_routing::blocked_tier_ids(&self.db, app_type);
         for provider in chain.into_iter() {
             if Some(provider.id.as_str()) == current_id.as_deref() {
                 continue; // 已钉在候选首位，不重复入列
@@ -597,6 +597,38 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn blocked_current_provider_never_receives_new_requests() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        for id in ["current", "backup"] {
+            db.save_provider(
+                "claude",
+                &Provider::with_id(
+                    id.into(),
+                    id.into(),
+                    json!({"env":{"ANTHROPIC_MODEL":"example-model"}}),
+                    None,
+                ),
+            )
+            .unwrap();
+        }
+        db.set_current_provider("claude", "current").unwrap();
+        super::super::application_routing::set_tier_blocked(&db, "claude", "current", true)
+            .unwrap();
+        let router = ProviderRouter::new(db.clone());
+        assert!(router.select_providers("claude").await.is_err());
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        let candidates = router.select_providers("claude").await.unwrap();
+        assert_eq!(
+            candidates.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["backup"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn application_routing_manual_selection_ignores_model_and_breaker() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
@@ -625,12 +657,14 @@ mod tests {
         let providers = router.select_providers("claude").await.unwrap();
         assert_eq!(
             providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["b"]
+            vec!["b", "a", "c"]
         );
-        assert!(
-            super::super::application_routing::set_model(&db, "claude", Some("other-model"))
-                .is_err()
-        );
+        assert!(!super::super::application_routing::current_supports_model(
+            &db,
+            "claude",
+            "other-model"
+        )
+        .unwrap());
         assert_eq!(
             super::super::auto_strategy::get_model_pref(&db, "claude").as_deref(),
             Some("selected-model")

@@ -1378,36 +1378,29 @@ impl RequestForwarder {
         // 应用模型映射（独立于格式转换）
         // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
         // 映射成真实上游模型名，并且未知 route 要直接报错，不能使用默认模型兜底。
+        let mut preserve_claude_role = false;
+        let mut claude_default_mapping = false;
         let mapped_body = if matches!(app_type, AppType::ClaudeDesktop) {
             crate::claude_desktop_config::map_proxy_request_model(body.clone(), provider)
                 .map_err(|e| ProxyError::InvalidRequest(e.to_string()))?
         } else {
-            let (mapped_body, original_model, mapped_model, kind) =
+            let (mapped_body, _, _, kind) =
                 super::model_mapper::apply_model_mapping_detailed(body.clone(), provider);
-            // claude 的模型不符告知点：只有**默认兜底分支**算（客户端点名的模型
-            // 档位没认、被兜到档位默认模型）；角色命中（opus/sonnet→角色模型）
-            // 是设计本身，每个请求都在发生，计入就是告警疲劳。兜底值恰好与
-            // 客户端点名相同时 observe(requested=sent) 走自愈清除。
-            if matches!(kind, super::model_mapper::ModelMappingKind::Default) {
-                if let Some(requested) = original_model.as_deref() {
-                    let sent = mapped_model.as_deref().unwrap_or(requested);
-                    super::model_alignment::observe_alignment(
-                        &self.model_alignment,
-                        self.app_handle.as_ref(),
-                        app_type.as_str(),
-                        provider,
-                        requested,
-                        sent,
-                    );
-                }
-            }
+            preserve_claude_role = matches!(app_type, AppType::Claude)
+                && !matches!(kind, super::model_mapper::ModelMappingKind::Default);
+            claude_default_mapping = matches!(app_type, AppType::Claude)
+                && matches!(kind, super::model_mapper::ModelMappingKind::Default);
             mapped_body
         };
 
         // 与 CCH 对齐：请求前不做 thinking 主动改写（仅保留兼容入口）
         let mut mapped_body = normalize_thinking_type(mapped_body);
 
-        let application_model = self.router.preferred_model(app_type.as_str(), provider);
+        let application_model = if preserve_claude_role {
+            None
+        } else {
+            self.router.preferred_model(app_type.as_str(), provider)
+        };
 
         // Grok Build exposes a stable client-side model profile in config.toml.
         // Route requests to the provider's real upstream model before applying
@@ -1447,7 +1440,44 @@ impl RequestForwarder {
                     );
                 }
             }
-            mapped_body["model"] = Value::String(model.to_string());
+            if !matches!(app_type, AppType::Gemini) {
+                mapped_body["model"] = Value::String(model.to_string());
+            }
+        }
+
+        // Report the effective model after application intent has been applied.
+        // Role mappings are intentional and do not produce mismatch alerts.
+        if claude_default_mapping {
+            if let (Some(requested), Some(sent)) = (
+                body.get("model").and_then(Value::as_str),
+                mapped_body.get("model").and_then(Value::as_str),
+            ) {
+                super::model_alignment::observe_alignment(
+                    &self.model_alignment,
+                    self.app_handle.as_ref(),
+                    app_type.as_str(),
+                    provider,
+                    requested,
+                    sent,
+                );
+            }
+        }
+
+        if application_model.is_none() {
+            if codex_responses_to_chat {
+                super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
+            } else if codex_responses_to_anthropic {
+                super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            }
+        }
+        if matches!(app_type, AppType::Codex | AppType::CodexImage) {
+            let model_changed = body.get("model") != mapped_body.get("model");
+            super::providers::normalize_request_reasoning(
+                provider,
+                &mut mapped_body,
+                model_changed,
+            )
+            .map_err(ProxyError::InvalidRequest)?;
         }
 
         if is_copilot {
@@ -1670,7 +1700,9 @@ impl RequestForwarder {
         let is_codex_alpha_search = matches!(app_type, AppType::Codex)
             && split_endpoint_and_query(&effective_endpoint).0 == "/alpha/search";
 
-        let url = if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
+        let url = if matches!(app_type, AppType::Gemini)
+            || matches!(resolved_claude_api_format.as_deref(), Some("gemini_native"))
+        {
             super::gemini_url::resolve_gemini_native_url(
                 &base_url,
                 &effective_endpoint,
@@ -1698,6 +1730,22 @@ impl RequestForwarder {
 
         // Codex→Anthropic: when the model name carries the [1m] marker, strip the
         // suffix and add the context-1m beta header.
+        // Model intent applies to the final native URL, including Vertex routes
+        // whose project and location prefix must remain intact.
+        let gemini_model_url = if matches!(app_type, AppType::Gemini) {
+            application_model
+                .as_deref()
+                .and_then(|model| super::gemini_url::with_selected_model(&url, model))
+        } else {
+            None
+        };
+        if gemini_model_url.is_some() {
+            outbound_model = application_model
+                .as_deref()
+                .map(super::gemini_url::normalize_gemini_model_id)
+                .map(str::to_owned);
+        }
+        let url = gemini_model_url.unwrap_or(url);
         let mut codex_anthropic_one_m = false;
 
         // 转换请求体（如果需要）
@@ -1716,9 +1764,6 @@ impl RequestForwarder {
                     "[Codex] Restored or enriched {restored} cached function call item(s) for Chat upstream"
                 );
             }
-            if application_model.is_none() {
-                super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
-            }
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
             let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
@@ -1735,9 +1780,6 @@ impl RequestForwarder {
             chat_body
         } else if codex_responses_to_anthropic {
             let mut mapped_body = mapped_body;
-            if application_model.is_none() {
-                super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
-            }
             // Per-provider output ceiling override. Codex does not forward its
             // `model_max_output_tokens` in the request body, so honor the value
             // configured on the provider here — it takes precedence over any

@@ -6,7 +6,9 @@ mod endpoints;
 mod gemini_auth;
 mod live;
 mod pi;
+mod transaction;
 mod usage;
+pub(crate) use transaction::with_provider_config_transaction;
 
 /// 给 `--add-site` CLI 用的落盘入口：不经过 DB/切换流程，直接把一份
 /// in-memory provider 写成各 CLI 的 live 配置（与 GUI 切档共用内部 app 分派）。
@@ -56,9 +58,24 @@ use live::{
 };
 use usage::validate_usage_script;
 
-/// Codex official providers are safe to select during takeover: Codex keeps
-/// ownership of the active ChatGPT login and the proxy only forwards the
-/// authenticated request. Other apps' official providers retain the block.
+/// Reject explicitly blocked providers at every selection entry point.
+pub(crate) fn validate_provider_selection(
+    db: &crate::database::Database,
+    app: &AppType,
+    id: &str,
+) -> Result<(), AppError> {
+    if app.supports_local_proxy()
+        && crate::proxy::application_routing::blocked_tier_ids(db, app.as_str()).contains(id)
+    {
+        return Err(AppError::localized(
+            "routing.provider_blocked",
+            "请先取消屏蔽此档位，再切换使用。",
+            "Unblock this configuration before selecting it.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn official_provider_supports_proxy_takeover(app_type: &AppType, provider: &Provider) -> bool {
     matches!(app_type, AppType::Codex)
         && crate::proxy::providers::is_codex_official_provider(provider)
@@ -404,6 +421,7 @@ pub fn refresh_current_codex_catalog_projection(state: &AppState) -> Result<bool
         &config_text,
         profile,
         live_taken_over,
+        Some(provider),
     )
 }
 
@@ -2058,6 +2076,8 @@ command = "legacy-cmd"
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
+        crate::settings::unlock_settings_for_test(db.secrets.clone())
+            .expect("unlock isolated settings");
         let state = AppState::new(db.clone()).unwrap();
 
         let original = Provider::with_id(
@@ -2167,11 +2187,12 @@ command = "legacy-cmd"
             Some(format!("http://127.0.0.1:{}", proxy_info.port).as_str()),
             "proxy base URL should stay intact"
         );
-        assert!(
+        assert_eq!(
             live.get("env")
                 .and_then(|env| env.get("ANTHROPIC_MODEL"))
-                .is_none(),
-            "model override should be removed in takeover live config"
+                .and_then(Value::as_str),
+            Some("model-updated"),
+            "takeover live config should expose the edited primary model"
         );
     }
 
@@ -5252,6 +5273,42 @@ impl ProviderService {
         original_id: Option<&str>,
         provider: Provider,
     ) -> Result<bool, AppError> {
+        if !app_type.supports_local_proxy() {
+            return Self::update_locked(state, app_type, original_id, provider);
+        }
+        let _guard =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
+        let id = original_id.unwrap_or(&provider.id);
+        let existing = state
+            .db
+            .get_provider_by_id(id, app_type.as_str())?
+            .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        let current =
+            crate::proxy::application_routing::current_provider_id(&state.db, app_type.as_str());
+        if current.as_deref() != Some(existing.id.as_str()) {
+            return Self::update_locked(state, app_type, original_id, provider);
+        }
+        with_provider_config_transaction(state, &app_type, &existing, || {
+            let selected_model_changed =
+                crate::relay::provider_config::selected_model(&app_type, &existing.settings_config)
+                    != crate::relay::provider_config::selected_model(
+                        &app_type,
+                        &provider.settings_config,
+                    );
+            let result = Self::update_locked(state, app_type.clone(), original_id, provider)?;
+            if selected_model_changed && current.as_deref() == Some(existing.id.as_str()) {
+                crate::proxy::auto_strategy::set_model_pref(&state.db, app_type.as_str(), None)?;
+            }
+            Ok(result)
+        })
+    }
+
+    fn update_locked(
+        state: &AppState,
+        app_type: AppType,
+        original_id: Option<&str>,
+        provider: Provider,
+    ) -> Result<bool, AppError> {
         if app_type == AppType::Pi {
             return pi::update(state, original_id, provider);
         }
@@ -5259,19 +5316,6 @@ impl ProviderService {
         let mut provider = provider;
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let provider_id_changed = original_id != provider.id;
-        // Serialize the read/decide/commit window for every Codex update. We do
-        // not yet know whether the stored row is managed (the request may be an
-        // unbind), so the existing row and effective current must both be read
-        // only after this lock is held. Non-managed Codex updates release it
-        // before entering the legacy path, whose proxy helpers take the lock
-        // themselves.
-        let codex_update_switch_guard = if matches!(app_type, AppType::Codex) {
-            Some(futures::executor::block_on(
-                state.proxy_service.lock_switch_for_app(app_type.as_str()),
-            ))
-        } else {
-            None
-        };
         let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
@@ -5567,8 +5611,6 @@ impl ProviderService {
             return Ok(true);
         }
 
-        drop(codex_update_switch_guard);
-
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
 
@@ -5594,9 +5636,11 @@ impl ProviderService {
                     write_live_with_common_config_for_state(state, &app_type, &provider)?;
                 } else {
                     let update_backup_result = futures::executor::block_on(
-                        state
-                            .proxy_service
-                            .update_live_backup_from_provider(app_type.as_str(), &provider),
+                        state.proxy_service.update_live_backup_from_provider_inner(
+                            app_type.as_str(),
+                            &provider,
+                            None,
+                        ),
                     );
                     update_backup_result
                         .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
@@ -5623,6 +5667,20 @@ impl ProviderService {
                                 .sync_codex_live_from_provider_while_proxy_active(&provider),
                         )
                         .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
+                    } else if live_taken_over && matches!(app_type, AppType::Gemini) {
+                        futures::executor::block_on(
+                            state
+                                .proxy_service
+                                .sync_gemini_live_from_provider_while_proxy_active(&provider),
+                        )
+                        .map_err(AppError::Config)?;
+                    } else if live_taken_over && matches!(app_type, AppType::GrokBuild) {
+                        futures::executor::block_on(
+                            state
+                                .proxy_service
+                                .sync_grok_live_from_provider_while_proxy_active(&provider),
+                        )
+                        .map_err(AppError::Config)?;
                     }
                 }
             } else {
@@ -5730,7 +5788,14 @@ impl ProviderService {
             return Ok(());
         }
 
-        // For other apps: Check both local settings and database
+        let _guard = if app_type.supports_local_proxy() {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        } else {
+            None
+        };
+        // Check current and delete under the same lock as configuration selection.
         let local_current = crate::settings::get_current_provider(&app_type);
         let db_current = state.db.get_current_provider(app_type.as_str())?;
 
@@ -5823,6 +5888,39 @@ impl ProviderService {
     ///    d. Write target provider config to live files
     ///    e. Sync MCP configuration
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
+        // Provider switches and takeover toggles both mutate live config and the
+        // restore backup. Serialize them per app, then decide from the locked
+        // current state so a just-started takeover cannot be overwritten by a
+        // normal live write.
+        let _switch_guard = if app_type.supports_local_proxy() {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        } else {
+            None
+        };
+
+        if app_type.supports_local_proxy() {
+            let provider = state
+                .db
+                .get_provider_by_id(id, app_type.as_str())?
+                .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+            validate_provider_selection(&state.db, &app_type, id)?;
+            with_provider_config_transaction(state, &app_type, &provider, || {
+                crate::proxy::auto_strategy::set_model_pref(&state.db, app_type.as_str(), None)?;
+                Self::switch_locked(state, app_type.clone(), id)
+            })
+        } else {
+            Self::switch_locked(state, app_type, id)
+        }
+    }
+
+    /// The caller owns the application's switch lock for the complete operation.
+    pub(crate) fn switch_locked(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<SwitchResult, AppError> {
         if app_type == AppType::Pi {
             return pi::enable(state, id);
         }
@@ -5832,6 +5930,8 @@ impl ProviderService {
         let _provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+
+        validate_provider_selection(&state.db, &app_type, id)?;
 
         // OMO providers are switched through their own exclusive path.
         if matches!(app_type, AppType::OpenCode) && _provider.category.as_deref() == Some("omo") {
@@ -5848,18 +5948,6 @@ impl ProviderService {
         if matches!(app_type, AppType::ClaudeDesktop) {
             return Self::switch_normal(state, app_type, id, &providers);
         }
-
-        // Provider switches and takeover toggles both mutate live config and the
-        // restore backup. Serialize them per app, then decide from the locked
-        // current state so a just-started takeover cannot be overwritten by a
-        // normal live write.
-        let _switch_guard = if app_type.supports_local_proxy() {
-            Some(futures::executor::block_on(
-                state.proxy_service.lock_switch_for_app(app_type.as_str()),
-            ))
-        } else {
-            None
-        };
 
         // Backup or live placeholders mean the live file is owned by proxy
         // takeover, even if the proxy server is temporarily stopped or is in the

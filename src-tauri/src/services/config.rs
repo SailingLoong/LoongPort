@@ -187,6 +187,7 @@ impl ConfigService {
             auth,
             cfg_text,
             profile,
+            Some(provider),
         )?;
         // 注意：MCP 同步在 v3.7.0 中已通过 McpService 进行，不再在此调用
         // sync_enabled_to_codex 使用旧的 config.mcp.codex 结构，在新架构中为空

@@ -1339,6 +1339,7 @@ fn write_live_snapshot_inner(
                 auth,
                 config_str,
                 profile,
+                Some(provider),
             )?;
             if provider
                 .meta
@@ -1626,18 +1627,8 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
         }
     }
 
-    // MCP sync is already best-effort per application. Preserve its aggregate
-    // error while continuing with Skills.
-    if let Err(error) = McpService::sync_all_enabled(state) {
-        failures.push(format!("mcp: {error}"));
-    }
-
-    // Skill sync
-    for app_type in AppType::all() {
-        if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.db, &app_type) {
-            log::warn!("同步 Skill 到 {app_type:?} 失败: {e}");
-            failures.push(format!("skill/{}: {e}", app_type.as_str()));
-        }
+    if let Err(error) = super::ProviderService::sync_non_provider_live(state) {
+        failures.push(error.to_string());
     }
 
     if failures.is_empty() {
@@ -1647,6 +1638,123 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
             "部分 live 配置同步失败: {}",
             failures.join("; ")
         )))
+    }
+}
+
+impl super::ProviderService {
+    /// Resolve application model intent once for native writes and restore backups.
+    /// The stored provider remains the source of its default configuration.
+    pub(crate) fn provider_for_native_projection(
+        db: &Database,
+        app: &AppType,
+        provider: &Provider,
+    ) -> Result<Provider, AppError> {
+        let mut effective = provider.clone();
+        if let Some(model) =
+            crate::proxy::application_routing::model_for_provider(db, app.as_str(), provider)
+        {
+            if crate::relay::provider_config::selected_model(app, &provider.settings_config)
+                .as_deref()
+                != Some(model.as_str())
+            {
+                effective.settings_config =
+                    crate::relay::model_catalog::select_model(app, provider, &model)?;
+            }
+        }
+        Ok(effective)
+    }
+
+    pub(crate) fn validate_proxy_takeover_target(
+        app: &AppType,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        if provider.category.as_deref() == Some("official")
+            && !super::official_provider_supports_proxy_takeover(app, provider)
+        {
+            return Err(AppError::localized(
+                "switch.official_blocked_by_proxy",
+                "代理接管模式下不能切换到官方供应商。",
+                "Cannot switch to an official provider during proxy takeover.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate the complete staged target before an import publishes its database.
+    pub(crate) fn validate_imported_current_provider(
+        db: &Database,
+        app: &AppType,
+        provider: &Provider,
+        taken_over: bool,
+    ) -> Result<(), AppError> {
+        if taken_over {
+            super::validate_provider_selection(db, app, &provider.id)?;
+            Self::validate_proxy_takeover_target(app, provider)?;
+        }
+        let effective = Self::provider_for_native_projection(db, app, provider)?;
+        Self::validate_provider_settings(app, &effective)
+    }
+
+    /// Apply an imported current provider while the import owns all application
+    /// locks. Auxiliary MCP/Skill projections run after those locks are released.
+    pub(crate) fn sync_imported_current_provider(
+        state: &AppState,
+        app: &AppType,
+        provider: Option<&Provider>,
+        previous: Option<&Provider>,
+        previous_local_id: Option<&str>,
+        taken_over: bool,
+    ) -> Result<(), AppError> {
+        if matches!(app, AppType::Pi) {
+            return Ok(());
+        }
+        if app.is_additive_mode() {
+            return sync_all_providers_to_live(state, app);
+        }
+        let Some(provider) = provider else {
+            return crate::settings::set_current_provider(app, None);
+        };
+        if taken_over {
+            futures::executor::block_on(
+                state.proxy_service.hot_switch_provider_from_snapshot_inner(
+                    app.as_str(),
+                    &provider.id,
+                    previous,
+                    previous_local_id,
+                ),
+            )
+            .map_err(AppError::Message)?;
+        } else {
+            let effective = Self::provider_for_native_projection(&state.db, app, provider)?;
+            write_live_with_common_config_for_state(state, app, &effective)?;
+            crate::settings::set_current_provider(app, Some(&provider.id))?;
+        }
+        Ok(())
+    }
+
+    /// Shared post-import projection of configuration owned outside providers.
+    pub(crate) fn sync_non_provider_live(state: &AppState) -> Result<(), AppError> {
+        let mut failures = Vec::new();
+        // MCP sync is already best-effort per application. Preserve its aggregate
+        // error while continuing with Skills.
+        if let Err(error) = McpService::sync_all_enabled(state) {
+            failures.push(format!("mcp: {error}"));
+        }
+
+        // Skill sync
+        for app_type in AppType::all() {
+            if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.db, &app_type)
+            {
+                log::warn!("同步 Skill 到 {app_type:?} 失败: {e}");
+                failures.push(format!("skill/{}: {e}", app_type.as_str()));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(failures.join("; ")))
+        }
     }
 }
 

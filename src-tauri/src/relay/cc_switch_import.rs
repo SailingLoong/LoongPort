@@ -17,21 +17,14 @@
 //!
 //! providers / MCP / prompts / skills 以 cc-switch 为准整体替换，走
 //! [`Database::import_sql_string_from_cc_switch`]（备份 + 原子替换 + 迁移 + authorizer +
-//! 版本校验全在里头）；`loongport_relay` / `loongport_vendor` / `settings` 通过
-//! preserve 保住；本地**托管档位**的 provider 记录（`loongport-*`）在导入后回填。
+//! 版本校验全在里头）；本地站点、设置和代理运行配置通过 preserve 保住。
+//! 本地**托管档位**的 provider 记录（`loongport-*`）在暂存库发布前回填。
 //!
-//! ## 不导入的两类：站点归并 与 指纹冲突
+//! ## 去重以完整配置为准
 //!
-//! 判定顺序（命中即停，见 [`classify_source`]）：
-//!
-//! 1. **站点归并**：cc-switch provider 的 base_url 归一化 origin 命中某个**已登录中转站**的
-//!    `api_base_url`（如 `https://api.guazi.shop`）⇒ 那个站点已由中转站组整体维护，
-//!    导入一份只会让用户在界面上看到两个「瓜子内部 api」。归入 `merged_to_relay`。
-//! 2. **指纹冲突**：同指纹（`(origin, sk)`，base_url 归一化到 origin 再比）的 cc-switch
-//!    provider 与托管档位 ⇒ 托管侧胜，归入 `skipped`。
-//!
-//! 两类都不导入、都在报告里列出。**指纹只用于导入这一刻比一次**，不建唯一索引 —— sk 会变
-//! （provision「只换 sk」），身份仍是派生 provider_id，见 `TODO.md` 冲突归属规则。
+//! 只有同应用、同连接身份且 `settings_config` / `meta` 完全一致的托管档位才去重。
+//! 同站点或同密钥不能证明配置相同：源配置里的模型、角色映射和协议选择必须保留。
+//! 完全相同的条目按站点归属计入 `merged_to_relay` 或 `skipped`；其他条目原样导入。
 //!
 //! ## 与「已手动维护」（`user_edited`）的解耦
 //!
@@ -44,7 +37,7 @@
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::app_config::AppType;
@@ -53,13 +46,20 @@ use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use crate::relay::provider_fingerprint;
 
-/// 导入时保留的本地表：LoongPort 的两张明文凭据表 + settings。
+/// Import preserves local accounts, preferences and proxy runtime configuration.
 ///
 /// - `loongport_relay` / `loongport_vendor`：登录态 / 明文 sk，cc-switch 里没有这两张
 ///   表，不保留 = 被替换成空表。
+/// - `proxy_config` / `proxy_live_backup`: this process owns its listener, takeover and restore state.
 /// - `settings`：LoongPort 的 current-provider / config snippet，不该被 cc-switch 的覆盖
 ///   （cc-switch 的 current-provider 指它自己的 provider id，照搬会造成悬空指针）。
-const PRESERVE_TABLES: &[&str] = &["loongport_relay", "loongport_vendor", "settings"];
+const PRESERVE_TABLES: &[&str] = &[
+    "loongport_relay",
+    "loongport_vendor",
+    "settings",
+    "proxy_config",
+    "proxy_live_backup",
+];
 
 /// 一条被收编（跳过不导入）的 cc-switch provider。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,9 +90,9 @@ pub struct ImportPlan {
 pub struct ProviderPlan {
     /// 会导入的 provider 条数（含取不到指纹、原样导入的那些）。
     pub will_import: usize,
-    /// 因与托管档位同指纹而跳过不导入的。
+    /// 与已有托管档位的连接、模型和协议配置完全相同，无需重复导入。
     pub skipped: Vec<SkippedProvider>,
-    /// 站点命中已登录中转站（base_url 同源）而**归入中转站组维护**、不导入的。
+    /// 与已登录中转站的托管档位配置完全相同，已归并的条目。
     pub merged_to_relay: Vec<SkippedProvider>,
     /// 取不到指纹（base_url / sk 提取失败）的条数，这些原样导入、不参与冲突检测。
     pub cannot_fingerprint: usize,
@@ -107,7 +107,7 @@ pub struct ImportReport {
     pub backup_id: String,
     pub providers_imported: usize,
     pub providers_skipped: Vec<SkippedProvider>,
-    /// 站点命中已登录中转站、归入中转站组维护而未导入的。
+    /// 与已登录中转站的托管配置完全相同，已归并的条目。
     pub relays_merged: Vec<SkippedProvider>,
     pub mcp_imported: i64,
     pub prompts_imported: i64,
@@ -138,8 +138,8 @@ struct SourceProvider {
 /// 判据是 `域名 + sk` 合起来（TODO.md 冲突归属规则）：单看 sk 会撞（不同站点的 key 格式
 /// 相同）、单看域名会把同站点的多个档位误并成一个。
 ///
-/// 比之前 base_url **必须归一化到 origin**：cc-switch 侧是 `https://bestapi.store/v1`
-/// （带 path），托管侧是 `site_origin`（`https://bestapi.store`），不归一化全漏检。
+/// 比之前 base_url **必须归一化到 origin**：cc-switch 侧是 `https://provider.example/v1`
+/// （带 path），托管侧是 `site_origin`（`https://provider.example`），不归一化全漏检。
 ///
 /// 返回 `None` = 取不到（base_url / sk 提取失败，或这个 CLI 还没接线）—— 那条原样导入、
 /// 不参与冲突检测。
@@ -152,54 +152,41 @@ fn fingerprint_of(provider: &Provider, app_type: &AppType) -> Option<(String, St
 struct SourceClass {
     /// 取到指纹且不与托管档位冲突 —— 原样导入。
     will_import: Vec<usize>,
-    /// 与托管档位同指纹（域名 + sk）—— 托管侧胜，跳过。
+    /// 与已有托管档位配置完全相同，跳过重复条目。
     skipped: Vec<usize>,
-    /// base_url 站点命中已登录中转站 —— 归入中转站组维护，跳过导入。
+    /// 与已登录中转站的托管配置完全相同，跳过导入。
     merged_to_relay: Vec<usize>,
     /// 取不到指纹 —— 原样导入、不参与冲突检测。
     cannot_fingerprint: Vec<usize>,
 }
 
-/// 把读到的 source provider 按「与托管档位 / 已登录中转站的关系」分类。
-///
-/// 判定顺序（命中即停）：
-/// 1. **站点归并优先**：base_url 归一化 origin 命中某中转站的 `api_base_url`
-///    （如 `https://api.guazi.shop` 命中瓜子内部 api）⇒ 归入中转站组，不导入为独立
-///    provider —— 同一个站点已被中转站组维护，导入一份只会让用户看到两个「瓜子内部 api」。
-/// 2. **指纹冲突**：域名 + sk 命中托管档位 ⇒ 托管侧胜，跳过（按 app_type 分组比：
-///    托管档位在 codex / anthropic / gemini / grok 各平台是**不同**的 key）。
-/// 3. 否则原样导入（取不到指纹的归入 `cannot_fingerprint`）。
+/// Deduplicate only equivalent configurations. A shared origin or credential
+/// identifies a connection, not the model/protocol settings the user authored.
 fn classify_source(
     source: &[SourceProvider],
     managed: &[SourceProvider],
     relay_origins: &HashSet<String>,
 ) -> SourceClass {
-    let mut managed_fp: HashMap<AppType, HashSet<(String, String)>> = HashMap::new();
-    for m in managed {
-        if let Some(fp) = fingerprint_of(&m.provider, &m.app_type) {
-            managed_fp.entry(m.app_type.clone()).or_default().insert(fp);
-        }
-    }
-
     let mut out = SourceClass::default();
-    for (i, s) in source.iter().enumerate() {
-        // 站点归并优先 —— 同一站点已被中转站组维护。
-        if let Some(origin) = source_origin(s) {
-            if relay_origins.contains(&origin) {
-                out.merged_to_relay.push(i);
-                continue;
-            }
-        }
-        match fingerprint_of(&s.provider, &s.app_type) {
-            Some(fp)
-                if managed_fp
-                    .get(&s.app_type)
-                    .is_some_and(|set| set.contains(&fp)) =>
-            {
-                out.skipped.push(i)
-            }
-            Some(_) => out.will_import.push(i),
-            None => out.cannot_fingerprint.push(i),
+    for (i, source) in source.iter().enumerate() {
+        let Some(fingerprint) = fingerprint_of(&source.provider, &source.app_type) else {
+            out.cannot_fingerprint.push(i);
+            continue;
+        };
+        let duplicate = managed.iter().any(|managed| {
+            managed.app_type == source.app_type
+                && fingerprint_of(&managed.provider, &managed.app_type).as_ref()
+                    == Some(&fingerprint)
+                && managed.provider.settings_config == source.provider.settings_config
+                && serde_json::to_value(&managed.provider.meta).ok()
+                    == serde_json::to_value(&source.provider.meta).ok()
+        });
+        if !duplicate {
+            out.will_import.push(i);
+        } else if source_origin(source).is_some_and(|origin| relay_origins.contains(&origin)) {
+            out.merged_to_relay.push(i);
+        } else {
+            out.skipped.push(i);
         }
     }
     out
@@ -412,6 +399,45 @@ pub fn plan_import(db: &Database, source_path: &Path) -> Result<ImportPlan, AppE
     })
 }
 
+/// Values captured under the import lock, before any database publication.
+struct ImportApplicationState {
+    app: AppType,
+    current: Option<Provider>,
+    local_current_id: Option<String>,
+    taken_over: bool,
+}
+
+fn import_application_states(
+    state: &crate::store::AppState,
+) -> Result<Vec<ImportApplicationState>, AppError> {
+    AppType::all()
+        .map(|app| {
+            let local_current_id = crate::settings::get_current_provider(&app);
+            let current = crate::settings::get_effective_current_provider(&state.db, &app)?
+                .map(|id| state.db.get_provider_by_id(&id, app.as_str()))
+                .transpose()?
+                .flatten();
+            let taken_over = if app.supports_local_proxy() {
+                futures::executor::block_on(state.db.get_proxy_config_for_app(app.as_str()))?
+                    .enabled
+                    || futures::executor::block_on(state.db.get_live_backup(app.as_str()))?
+                        .is_some()
+                    || state
+                        .proxy_service
+                        .detect_takeover_in_live_config_for_app(&app)
+            } else {
+                false
+            };
+            Ok(ImportApplicationState {
+                app,
+                current,
+                local_current_id,
+                taken_over,
+            })
+        })
+        .collect()
+}
+
 /// 执行导入。返回报告；失败时（含源库不可读 / 版本不兼容）返回 Err，用户可凭
 /// `restore_db_backup` 恢复 —— 导入前的备份由 `import_sql_string_from_cc_switch` 自动建。
 pub fn execute_import(
@@ -425,15 +451,29 @@ pub fn execute_import(
         ));
     }
 
-    let conn = open_source_read_only(source_path)?;
-    let source = read_source(&conn)?;
+    let mut conn = open_source_read_only(source_path)?;
+    // Classification and the exported SQL must observe the same source revision,
+    // even when the source application edits its database during the import.
+    let source_transaction = conn
+        .transaction()
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let source = read_source(&source_transaction)?;
+    let import_guard =
+        futures::executor::block_on(app_state.proxy_service.lock_configuration_import());
+    let applications = import_application_states(&app_state)?;
     let managed = read_managed_rows(&db)?;
     let relay_origins = managed_relay_origins(&db)?;
     let classified = classify_source(&source, &managed, &relay_origins);
+    let mut existing = std::collections::HashSet::new();
+    for app in AppType::all() {
+        for id in db.get_all_providers(app.as_str())?.keys() {
+            existing.insert((app.as_str().to_owned(), id.clone()));
+        }
+    }
 
-    let mcp = count_table_if_exists(&conn, "mcp_servers");
-    let prompts = count_table_if_exists(&conn, "prompts");
-    let skills = count_table_if_exists(&conn, "skills");
+    let mcp = count_table_if_exists(&source_transaction, "mcp_servers");
+    let prompts = count_table_if_exists(&source_transaction, "prompts");
+    let skills = count_table_if_exists(&source_transaction, "skills");
 
     // 源库里既没有 provider 也没有 MCP ⇒ 没什么可搬的，别走进导入路径
     // （`validate_cc_switch_sql_export` 对 provider/mcp 全空会报错，而那是「没东西」不是错）。
@@ -453,38 +493,82 @@ pub fn execute_import(
 
     // 覆盖式导入：dump 源库（只读）→ 走同一条导入路径。备份 + 原子替换 + 迁移 +
     // authorizer + 版本校验全在 `import_sql_string_from_cc_switch` 里。
-    let sql = Database::dump_sql(&conn, &[])?;
-    let backup_id = db.import_sql_string_from_cc_switch(&sql, PRESERVE_TABLES)?;
+    let sql = Database::dump_sql(&source_transaction, &[])?;
+    source_transaction
+        .commit()
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let mut targets = Vec::new();
+    let backup_id = db.import_sql_string_from_cc_switch(&sql, PRESERVE_TABLES, |staged| {
+        // Remove source duplicates before restoring local managed rows, including
+        // the case where a source happens to use the same provider ID.
+        for &index in classified.skipped.iter().chain(&classified.merged_to_relay) {
+            let source = &source[index];
+            staged.delete_provider(source.app_type.as_str(), &source.provider.id)?;
+        }
+        for managed in &managed {
+            staged.save_provider(managed.app_type.as_str(), &managed.provider)?;
+        }
+        for &index in classified.will_import.iter().chain(&classified.cannot_fingerprint) {
+            let imported = &source[index];
+            if !existing.contains(&(imported.app_type.as_str().to_owned(), imported.provider.id.clone())) {
+                crate::proxy::application_routing::note_provider_created(staged, imported.app_type.as_str(), &imported.provider.id)?;
+            }
+        }
+        for before in &applications {
+            let retained = before.current.as_ref().map(|provider| {
+                staged.get_provider_by_id(&provider.id, before.app.as_str())
+            }).transpose()?.flatten();
+            let target = match retained {
+                Some(provider) => Some(provider),
+                None => staged.get_current_provider(before.app.as_str())?
+                    .map(|id| staged.get_provider_by_id(&id, before.app.as_str())).transpose()?.flatten(),
+            };
+            if before.taken_over && target.is_none() {
+                return Err(AppError::Config(format!(
+                    "Import would remove the current provider for active {} routing; select a replacement before importing",
+                    before.app.as_str(),
+                )));
+            }
+            if let Some(provider) = &target {
+                staged.set_current_provider(before.app.as_str(), &provider.id)?;
+            }
+            let previous_model = before.current.as_ref().and_then(|provider| {
+                crate::relay::provider_config::selected_model(&before.app, &provider.settings_config)
+            });
+            let next_model = target.as_ref().and_then(|provider| {
+                crate::relay::provider_config::selected_model(&before.app, &provider.settings_config)
+            });
+            if before.current.as_ref().map(|provider| &provider.id) != target.as_ref().map(|provider| &provider.id)
+                || previous_model != next_model {
+                crate::proxy::auto_strategy::set_model_pref(staged, before.app.as_str(), None)?;
+            }
+            if let Some(provider) = &target {
+                crate::services::ProviderService::validate_imported_current_provider(
+                    staged, &before.app, provider, before.taken_over,
+                )?;
+            }
+            targets.push(target);
+        }
+        Ok(())
+    })?;
 
-    // 回填托管档位 + 删掉与托管档位同指纹的 cc-switch 重复行。
-    //
-    // ⚠️ 回填走**裸** `save_provider`，不做 `ProviderService::add` 的 normalize ——
-    // settings_config 必须原样写回，否则「已手动维护」的纯内容判定会被改掉。
     let mut warnings = Vec::new();
-    for m in &managed {
-        if let Err(e) = db.save_provider(m.app_type.as_str(), &m.provider) {
-            warnings.push(format!("托管档位「{}」回填失败: {e}", m.provider.name));
-            log::error!(
-                "[cc-switch-import] 回填托管档位「{}」失败: {e}",
-                m.provider.name
-            );
+    for (before, target) in applications.iter().zip(&targets) {
+        if let Err(error) = crate::services::ProviderService::sync_imported_current_provider(
+            &app_state,
+            &before.app,
+            target.as_ref(),
+            before.current.as_ref(),
+            before.local_current_id.as_deref(),
+            before.taken_over,
+        ) {
+            warnings.push(format!("导入后同步 {} 失败: {error}", before.app.as_str()));
         }
     }
-    // 同指纹跳过的（托管侧胜）与归入中转站的（站点已被中转站组维护）都不该留下，
-    // 一并删掉 —— 它们只是「不该作为独立 provider 存在」，不是要保留的东西。
-    for &i in classified.skipped.iter().chain(&classified.merged_to_relay) {
-        let s = &source[i];
-        if let Err(e) = db.delete_provider(s.app_type.as_str(), &s.provider.id) {
-            warnings.push(format!("删除重复档位「{}」失败: {e}", s.provider.name));
-            log::error!(
-                "[cc-switch-import] 删除重复档位「{}」失败: {e}",
-                s.provider.name
-            );
-        }
-    }
-
+    drop(import_guard);
     #[cfg(feature = "gui")]
-    if let Err(e) = crate::commands::sync_support::run_post_import_sync(&app_state) {
+    if let Err(e) = crate::commands::sync_support::run_post_import_sync_after_providers(&app_state)
+    {
         warnings.push(format!("导入后同步失败: {e}"));
         log::warn!("[cc-switch-import] post-import sync: {e}");
     }
@@ -534,7 +618,7 @@ mod tests {
         crate::relay::provider_config::settings_config_for(
             &AppType::Codex,
             sk,
-            "BestAPI",
+            "Example Provider",
             base_url,
             "gpt-5.6-sol",
         )
@@ -618,18 +702,18 @@ mod tests {
 
     #[test]
     fn fingerprint_normalizes_base_url_to_origin() {
-        // `https://bestapi.store/v1`（带 path）与裸 `https://bestapi.store` 必须归一成同一个。
+        // `https://provider.example/v1`（带 path）与裸 `https://provider.example` 必须归一成同一个。
         let a = provider(
             "a",
             "A",
-            codex_settings("https://bestapi.store/v1", "sk-1"),
-            Some("https://bestapi.store"),
+            codex_settings("https://provider.example/v1", "sk-1"),
+            Some("https://provider.example"),
         );
         let b = provider(
             "b",
             "B",
-            codex_settings("https://bestapi.store", "sk-1"),
-            Some("https://bestapi.store"),
+            codex_settings("https://provider.example", "sk-1"),
+            Some("https://provider.example"),
         );
         assert_eq!(
             fingerprint_of(&a, &AppType::Codex),
@@ -643,14 +727,14 @@ mod tests {
         let a = provider(
             "a",
             "A",
-            codex_settings("https://bestapi.store/v1", "sk-1"),
-            Some("https://bestapi.store"),
+            codex_settings("https://provider.example/v1", "sk-1"),
+            Some("https://provider.example"),
         );
         let b = provider(
             "b",
             "B",
-            codex_settings("https://bestapi.store/v1", "sk-2"),
-            Some("https://bestapi.store"),
+            codex_settings("https://provider.example/v1", "sk-2"),
+            Some("https://provider.example"),
         );
         assert_ne!(
             fingerprint_of(&a, &AppType::Codex),
@@ -669,7 +753,7 @@ mod tests {
         let env_key_only = provider(
             "b",
             "B",
-            json!({"config": "[models]\ndefault = \"p\"\n\n[model.p]\nmodel = \"m\"\nbase_url = \"https://g.dev/v1\"\nname = \"n\"\nenv_key = \"GROK_SK\"\napi_backend = \"openai-compliant\"\ncontext_window = 1000000\n"}),
+            json!({"config": "[models]\ndefault = \"p\"\n\n[model.p]\nmodel = \"m\"\nbase_url = \"https://grok.example/v1\"\nname = \"n\"\nenv_key = \"GROK_SK\"\napi_backend = \"openai-compliant\"\ncontext_window = 1000000\n"}),
             None,
         );
         assert_eq!(fingerprint_of(&env_key_only, &AppType::GrokBuild), None);
@@ -682,14 +766,14 @@ mod tests {
         let a = provider(
             "a",
             "A",
-            grok_settings("https://g.dev/v1", "sk-1"),
-            Some("https://g.dev"),
+            grok_settings("https://grok.example/v1", "sk-1"),
+            Some("https://grok.example"),
         );
         let b = provider(
             "b",
             "B",
-            grok_settings("https://g.dev", "sk-1"),
-            Some("https://g.dev"),
+            grok_settings("https://grok.example", "sk-1"),
+            Some("https://grok.example"),
         );
         assert_eq!(
             fingerprint_of(&a, &AppType::GrokBuild),
@@ -700,8 +784,8 @@ mod tests {
         let c = provider(
             "c",
             "C",
-            grok_settings("https://g.dev/v1", "sk-2"),
-            Some("https://g.dev"),
+            grok_settings("https://grok.example/v1", "sk-2"),
+            Some("https://grok.example"),
         );
         assert_ne!(
             fingerprint_of(&a, &AppType::GrokBuild),
@@ -710,8 +794,41 @@ mod tests {
         );
     }
 
-    /// 托管 grok 档位与 cc-switch 导入源同指纹 ⇒ 托管侧胜、跳过导入
+    /// 托管 Grok 档位与导入源配置完全相同，只保留已有档位。
     /// （接线前 grokbuild 取不到指纹，这条判重对它不生效）。
+    #[test]
+    fn edited_source_configuration_is_not_discarded_as_a_managed_duplicate() {
+        let managed = [SourceProvider {
+            app_type: AppType::Codex,
+            provider: provider(
+                "loongport-managed",
+                "Managed",
+                codex_settings("https://relay.example/v1", "test-key"),
+                None,
+            ),
+        }];
+        let mut edited = managed[0].provider.clone();
+        edited.id = "custom".into();
+        edited.settings_config["config"] = edited.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .replace("gpt-5.6-sol", "custom-model")
+            .into();
+        let source = [SourceProvider {
+            app_type: AppType::Codex,
+            provider: edited,
+        }];
+        for origins in [
+            HashSet::new(),
+            HashSet::from(["https://relay.example".to_string()]),
+        ] {
+            let plan = classify_source(&source, &managed, &origins);
+            assert_eq!(plan.will_import, vec![0]);
+            assert!(plan.skipped.is_empty());
+            assert!(plan.merged_to_relay.is_empty());
+        }
+    }
+
     #[test]
     fn classify_dedups_grokbuild_by_fingerprint() {
         let managed = [SourceProvider {
@@ -719,8 +836,8 @@ mod tests {
             provider: provider(
                 "loongport-aaaaaaaaaaaaaaaa",
                 "托管档",
-                grok_settings("https://g.dev/v1", "sk-managed"),
-                Some("https://g.dev"),
+                grok_settings("https://grok.example/v1", "sk-managed"),
+                Some("https://grok.example"),
             ),
         }];
         let source = vec![
@@ -729,8 +846,8 @@ mod tests {
                 provider: provider(
                     "grok-dup",
                     "GrokDup",
-                    grok_settings("https://g.dev/v1", "sk-managed"),
-                    Some("https://g.dev"),
+                    grok_settings("https://grok.example/v1", "sk-managed"),
+                    Some("https://grok.example"),
                 ),
             },
             SourceProvider {
@@ -738,15 +855,15 @@ mod tests {
                 provider: provider(
                     "grok-own",
                     "GrokOwn",
-                    grok_settings("https://g.dev/v1", "sk-other"),
-                    Some("https://g.dev"),
+                    grok_settings("https://grok.example/v1", "sk-other"),
+                    Some("https://grok.example"),
                 ),
             },
         ];
 
         let out = classify_source(&source, &managed, &HashSet::new());
         assert_eq!(out.will_import, vec![1], "不同 sk 的那条该导入");
-        assert_eq!(out.skipped, vec![0], "同指纹那条该跳过");
+        assert_eq!(out.skipped, vec![0], "相同配置无需重复导入");
         assert!(out.cannot_fingerprint.is_empty());
         assert!(out.merged_to_relay.is_empty());
     }
@@ -758,30 +875,30 @@ mod tests {
             provider: provider(
                 "loongport-aaaaaaaaaaaaaaaa",
                 "托管档",
-                codex_settings("https://bestapi.store/v1", "sk-managed"),
-                Some("https://bestapi.store"),
+                codex_settings("https://provider.example/v1", "sk-managed"),
+                Some("https://provider.example"),
             ),
         }];
 
         let source = vec![
             SourceProvider {
                 app_type: AppType::Codex,
-                // 同站同 sk ⇒ 命中托管 ⇒ 跳过。
+                // 与已有托管配置完全相同，无需重复导入。
                 provider: provider(
-                    "bestapi",
-                    "BestAPI",
-                    codex_settings("https://bestapi.store/v1", "sk-managed"),
-                    Some("https://bestapi.store"),
+                    "example-provider",
+                    "Example Provider",
+                    codex_settings("https://provider.example/v1", "sk-managed"),
+                    Some("https://provider.example"),
                 ),
             },
             SourceProvider {
                 app_type: AppType::Codex,
                 // 同站不同 sk ⇒ 不是同一个东西 ⇒ 导入。
                 provider: provider(
-                    "bestapi-2",
-                    "BestAPI 2",
-                    codex_settings("https://bestapi.store/v1", "sk-other"),
-                    Some("https://bestapi.store"),
+                    "example-provider-2",
+                    "Example Provider 2",
+                    codex_settings("https://provider.example/v1", "sk-other"),
+                    Some("https://provider.example"),
                 ),
             },
             SourceProvider {
@@ -793,7 +910,7 @@ mod tests {
 
         let out = classify_source(&source, &managed, &HashSet::new());
         assert_eq!(out.will_import, vec![1], "不同 sk 的那条该导入");
-        assert_eq!(out.skipped, vec![0], "同指纹那条该跳过");
+        assert_eq!(out.skipped, vec![0], "相同配置无需重复导入");
         assert_eq!(
             out.cannot_fingerprint,
             vec![2],
@@ -803,19 +920,20 @@ mod tests {
     }
 
     #[test]
-    fn classify_merges_providers_whose_site_is_an_relay() {
-        // 站点已被中转站组维护 ⇒ 无论 sk 是不是同一个，都归入中转站组、不导入。
-        let relay_origins: HashSet<String> =
-            ["https://api.guazi.shop".to_string()].into_iter().collect();
+    fn classify_preserves_distinct_configurations_on_an_existing_relay() {
+        // A known relay does not own independently authored client configurations.
+        let relay_origins: HashSet<String> = ["https://api.relay.example".to_string()]
+            .into_iter()
+            .collect();
         let source = [
             SourceProvider {
                 app_type: AppType::Codex,
                 // 同站、sk 与任何托管档位都不同 —— 旧逻辑会当成新 provider 导入。
                 provider: provider(
-                    "guazi",
-                    "瓜子",
-                    codex_settings("https://api.guazi.shop/v1", "sk-a90e"),
-                    Some("https://api.guazi.shop"),
+                    "example-relay",
+                    "Example Relay",
+                    codex_settings("https://api.relay.example/v1", "sk-a90e"),
+                    Some("https://api.relay.example"),
                 ),
             },
             SourceProvider {
@@ -824,38 +942,35 @@ mod tests {
                 provider: provider(
                     "other",
                     "Other",
-                    codex_settings("https://bestapi.store/v1", "sk-b"),
-                    Some("https://bestapi.store"),
+                    codex_settings("https://provider.example/v1", "sk-b"),
+                    Some("https://provider.example"),
                 ),
             },
         ];
 
         let out = classify_source(&source, &[], &relay_origins);
-        assert_eq!(
-            out.merged_to_relay,
-            vec![0],
-            "站点命中中转站的那条该归入中转站组"
-        );
-        assert_eq!(out.will_import, vec![1], "别的站点照常导入");
+        assert!(out.merged_to_relay.is_empty());
+        assert_eq!(out.will_import, vec![0, 1]);
     }
 
     #[test]
-    fn classify_merges_by_origin_regardless_of_base_url_path() {
+    fn classify_preserves_a_distinct_api_path_on_an_existing_relay() {
         // 中转站存的是裸 origin，cc-switch 那条带 `/v1` —— 归一后必须命中。
-        let relay_origins: HashSet<String> =
-            ["https://api.guazi.shop".to_string()].into_iter().collect();
+        let relay_origins: HashSet<String> = ["https://api.relay.example".to_string()]
+            .into_iter()
+            .collect();
         let source = [SourceProvider {
             app_type: AppType::Claude,
             provider: provider(
-                "guazi-claude",
-                "瓜子 Claude",
-                json!({"env": {"ANTHROPIC_BASE_URL": "https://api.guazi.shop/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-z"}}),
-                Some("https://api.guazi.shop"),
+                "example-relay-claude",
+                "Example Relay Claude",
+                json!({"env": {"ANTHROPIC_BASE_URL": "https://api.relay.example/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-z"}}),
+                Some("https://api.relay.example"),
             ),
         }];
         let out = classify_source(&source, &[], &relay_origins);
-        assert_eq!(out.merged_to_relay, vec![0]);
-        assert!(out.will_import.is_empty());
+        assert!(out.merged_to_relay.is_empty());
+        assert_eq!(out.will_import, vec![0]);
     }
 
     #[test]
@@ -866,17 +981,17 @@ mod tests {
             provider: provider(
                 "loongport-bbbbbbbbbbbbbbbb",
                 "托管 Claude",
-                json!({"env": {"ANTHROPIC_BASE_URL": "https://bestapi.store/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-x"}}),
-                Some("https://bestapi.store"),
+                json!({"env": {"ANTHROPIC_BASE_URL": "https://provider.example/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-x"}}),
+                Some("https://provider.example"),
             ),
         }];
         let source = [SourceProvider {
             app_type: AppType::Codex,
             provider: provider(
-                "bestapi",
-                "BestAPI",
-                codex_settings("https://bestapi.store/v1", "sk-x"),
-                Some("https://bestapi.store"),
+                "example-provider",
+                "Example Provider",
+                codex_settings("https://provider.example/v1", "sk-x"),
+                Some("https://provider.example"),
             ),
         }];
         let out = classify_source(&source, &managed, &HashSet::new());
@@ -918,26 +1033,26 @@ mod tests {
             .unwrap();
 
         create_providers_table(&conn);
-        // 与托管档位（sk-managed @ bestapi.store）同指纹 ⇒ 导入时跳过。
+        // 与托管档位连接和设置完全相同，导入时跳过重复条目。
         insert_provider(
             &conn,
             "codex",
             &provider(
-                "bestapi",
-                "BestAPI",
-                codex_settings("https://bestapi.store/v1", "sk-managed"),
-                Some("https://bestapi.store"),
+                "example-provider",
+                "Example Provider",
+                codex_settings("https://provider.example/v1", "sk-managed"),
+                Some("https://provider.example"),
             ),
         );
-        // 同站点、不同 sk ⇒ 站点已由中转站组维护 ⇒ 归入中转站组，不导入。
+        // 同站点不同凭据仍是独立配置，必须导入。
         insert_provider(
             &conn,
             "codex",
             &provider(
                 "other",
                 "Other",
-                codex_settings("https://bestapi.store/v1", "sk-other"),
-                Some("https://bestapi.store"),
+                codex_settings("https://provider.example/v1", "sk-other"),
+                Some("https://provider.example"),
             ),
         );
         // 别的站点，与任何中转站 / 托管档位都不沾 ⇒ 照常导入。
@@ -975,7 +1090,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('currentProviderCodex', 'bestapi')",
+            "INSERT INTO settings (key, value) VALUES ('currentProviderCodex', 'example-provider')",
             [],
         )
         .unwrap();
@@ -1007,6 +1122,227 @@ mod tests {
         assert!(!plan.can_import);
     }
 
+    fn source_with_current_provider(path: &Path, selected: &Provider, current: bool) {
+        let conn = Connection::open(path).unwrap();
+        conn.pragma_update(None, "user_version", 16).unwrap();
+        create_providers_table(&conn);
+        insert_provider(&conn, "claude", selected);
+        if current {
+            conn.execute("UPDATE providers SET is_current=1", [])
+                .unwrap();
+        }
+    }
+
+    fn imported_claude(model: &str) -> Provider {
+        provider(
+            "imported",
+            "Imported",
+            json!({"env": {
+                "ANTHROPIC_BASE_URL":"https://provider.example/v1",
+                "ANTHROPIC_AUTH_TOKEN":"fixture-key",
+                "ANTHROPIC_MODEL":model,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL":"old-model"
+            }}),
+            None,
+        )
+    }
+
+    #[test]
+    #[serial]
+    fn repeated_direct_import_preserves_the_selected_model_in_native_configuration() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeGuard::set(home.path());
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
+        let original = imported_claude("default-model");
+        db.save_provider("claude", &original).unwrap();
+        db.set_current_provider("claude", &original.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Claude, Some(&original.id)).unwrap();
+        crate::proxy::auto_strategy::set_model_pref(&db, "claude", Some("old-model")).unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let mut edited = original.clone();
+        edited.settings_config["env"]["ANTHROPIC_BASE_URL"] = json!("https://updated.example/v1");
+        source_with_current_provider(source.path(), &edited, true);
+
+        execute_import(state, source.path()).unwrap();
+
+        let live: Value =
+            crate::config::read_json_file(&crate::config::get_claude_settings_path()).unwrap();
+        assert_eq!(live["env"]["ANTHROPIC_MODEL"], "old-model");
+        assert_eq!(
+            live["env"]["ANTHROPIC_BASE_URL"],
+            "https://updated.example/v1"
+        );
+        assert_eq!(
+            crate::proxy::auto_strategy::get_model_pref(&db, "claude").as_deref(),
+            Some("old-model")
+        );
+        assert_eq!(
+            db.get_provider_by_id(&original.id, "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config["env"]["ANTHROPIC_MODEL"],
+            "default-model"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn import_rejects_official_or_blocked_active_targets_before_publication() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeGuard::set(home.path());
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
+        let original = imported_claude("original-model");
+        db.save_provider("claude", &original).unwrap();
+        db.set_current_provider("claude", &original.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Claude, Some(&original.id)).unwrap();
+        let mut runtime =
+            futures::executor::block_on(db.get_proxy_config_for_app("claude")).unwrap();
+        runtime.enabled = true;
+        futures::executor::block_on(db.update_proxy_config_for_app(runtime)).unwrap();
+        futures::executor::block_on(
+            db.save_live_backup("claude", &original.settings_config.to_string()),
+        )
+        .unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        source_with_current_provider(source.path(), &imported_claude("replacement-model"), true);
+        Connection::open(source.path())
+            .unwrap()
+            .execute("UPDATE providers SET category='official'", [])
+            .unwrap();
+        assert!(execute_import(state.clone(), source.path()).is_err());
+        assert_eq!(
+            db.get_provider_by_id(&original.id, "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            original.settings_config
+        );
+
+        let mut blocked = imported_claude("blocked-model");
+        blocked.id = "blocked".into();
+        db.save_provider("claude", &blocked).unwrap();
+        crate::proxy::application_routing::set_tier_blocked(&db, "claude", &blocked.id, true)
+            .unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        source_with_current_provider(source.path(), &blocked, true);
+        assert!(execute_import(state, source.path()).is_err());
+        assert_eq!(
+            db.get_current_provider("claude").unwrap().as_deref(),
+            Some(original.id.as_str())
+        );
+        let backup = futures::executor::block_on(db.get_live_backup("claude"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&backup.original_config).unwrap(),
+            original.settings_config
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn repeated_import_keeps_local_takeover_and_projects_the_changed_current_model() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeGuard::set(home.path());
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
+        let original = imported_claude("old-model");
+        db.save_provider("claude", &original).unwrap();
+        db.set_current_provider("claude", &original.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Claude, Some(&original.id)).unwrap();
+        crate::proxy::auto_strategy::set_model_pref(&db, "claude", Some("old-model")).unwrap();
+        let mut runtime =
+            futures::executor::block_on(db.get_proxy_config_for_app("claude")).unwrap();
+        runtime.enabled = true;
+        runtime.auto_failover_enabled = true;
+        futures::executor::block_on(db.update_proxy_config_for_app(runtime)).unwrap();
+        futures::executor::block_on(
+            db.save_live_backup("claude", &original.settings_config.to_string()),
+        )
+        .unwrap();
+        let mut taken_over = original.settings_config.clone();
+        taken_over["env"]["ANTHROPIC_BASE_URL"] = json!("http://127.0.0.1:15721");
+        taken_over["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("PROXY_MANAGED");
+        crate::config::write_json_file(&crate::config::get_claude_settings_path(), &taken_over)
+            .unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        source_with_current_provider(source.path(), &original, true);
+        execute_import(state.clone(), source.path()).unwrap();
+        assert_eq!(
+            crate::proxy::auto_strategy::get_model_pref(&db, "claude").as_deref(),
+            Some("old-model")
+        );
+        let edited = imported_claude("new-model");
+        Connection::open(source.path())
+            .unwrap()
+            .execute(
+                "UPDATE providers SET settings_config=?1 WHERE id='imported'",
+                [edited.settings_config.to_string()],
+            )
+            .unwrap();
+        let source_before = std::fs::read(source.path()).unwrap();
+        execute_import(state, source.path()).unwrap();
+        let runtime = futures::executor::block_on(db.get_proxy_config_for_app("claude")).unwrap();
+        assert!(runtime.enabled && runtime.auto_failover_enabled);
+        let live: Value =
+            crate::config::read_json_file(&crate::config::get_claude_settings_path()).unwrap();
+        assert_eq!(live["env"]["ANTHROPIC_MODEL"], "new-model");
+        assert_eq!(live["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:15721");
+        let backup = futures::executor::block_on(db.get_live_backup("claude"))
+            .unwrap()
+            .unwrap();
+        let backup: Value = serde_json::from_str(&backup.original_config).unwrap();
+        assert_eq!(backup["env"]["ANTHROPIC_MODEL"], "new-model");
+        assert_eq!(
+            backup["env"]["ANTHROPIC_BASE_URL"],
+            "https://provider.example/v1"
+        );
+        assert!(crate::proxy::auto_strategy::get_model_pref(&db, "claude").is_none());
+        assert_eq!(std::fs::read(source.path()).unwrap(), source_before);
+    }
+
+    #[test]
+    #[serial]
+    fn import_rejects_removing_an_active_target_without_a_source_selection_before_publish() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeGuard::set(home.path());
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let state = crate::store::AppState::new(db.clone()).unwrap();
+        let original = imported_claude("old-model");
+        db.save_provider("claude", &original).unwrap();
+        db.set_current_provider("claude", &original.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Claude, Some(&original.id)).unwrap();
+        let mut runtime =
+            futures::executor::block_on(db.get_proxy_config_for_app("claude")).unwrap();
+        runtime.enabled = true;
+        futures::executor::block_on(db.update_proxy_config_for_app(runtime)).unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let mut other = imported_claude("new-model");
+        other.id = "another".into();
+        source_with_current_provider(source.path(), &other, false);
+        let error = execute_import(state, source.path()).unwrap_err();
+        assert!(error.to_string().contains("current provider"));
+        assert_eq!(
+            db.get_current_provider("claude").unwrap().as_deref(),
+            Some("imported")
+        );
+        assert!(db
+            .get_provider_by_id("another", "claude")
+            .unwrap()
+            .is_none());
+        assert!(
+            futures::executor::block_on(db.get_proxy_config_for_app("claude"))
+                .unwrap()
+                .enabled
+        );
+    }
+
     /// ⭐ 核心闸：导入把 cc-switch 的搬进来，同时托管档位回填、冲突项删掉、
     /// LoongPort 自己的表/settings 保留、**源库字节不变**、**「已手动维护」判定不变**。
     /// ⚠️ `#[serial]`：本测试要临时改进程级 `CC_SWITCH_TEST_HOME`（备份/设置读写用），
@@ -1023,14 +1359,14 @@ mod tests {
 
         // ── LoongPort 侧：内存库 + 一条托管 codex 档位 + relay 行 + settings ──
         let db = Arc::new(Database::memory().expect("内存库"));
-        let managed_settings = codex_settings("https://bestapi.store/v1", "sk-managed");
+        let managed_settings = codex_settings("https://provider.example/v1", "sk-managed");
         db.save_provider(
             "codex",
             &provider(
                 "loongport-aaaaaaaaaaaaaaaa",
                 "托管档",
                 managed_settings.clone(),
-                Some("https://bestapi.store"),
+                Some("https://provider.example"),
             ),
         )
         .unwrap();
@@ -1038,9 +1374,9 @@ mod tests {
             let conn = crate::database::lock_conn!(db.conn);
             crate::relay::creds::save_site(
                 &conn,
-                "https://bestapi.store",
-                "BestAPI",
-                "https://bestapi.store/v1",
+                "https://provider.example",
+                "Example Provider",
+                "https://provider.example/v1",
             )
             .unwrap();
             conn.execute(
@@ -1066,7 +1402,7 @@ mod tests {
         let after = std::fs::read(src.path()).expect("重读源库字节");
         assert_eq!(after, before, "cc-switch.db 绝不能被改动");
 
-        // 2. providers：非冲突的进来了、托管档位回填了、同站点的归入中转站组没进来。
+        // 2. 不同配置导入，托管档位保留，相同配置跳过。
         let providers = db.get_all_providers("codex").expect("读 codex 档位");
         assert!(
             providers.contains_key("elsewhere"),
@@ -1077,12 +1413,12 @@ mod tests {
             "托管档位该被回填"
         );
         assert!(
-            !providers.contains_key("bestapi"),
+            !providers.contains_key("example-provider"),
             "站点已由中转站组维护的条目不导入"
         );
         assert!(
-            !providers.contains_key("other"),
-            "同站点不同 sk 的也归入中转站组，不另起一条"
+            providers.contains_key("other"),
+            "A distinct credential must remain available after import"
         );
         let merged: Vec<&str> = report
             .relays_merged
@@ -1091,8 +1427,8 @@ mod tests {
             .collect();
         assert_eq!(
             merged.len(),
-            2,
-            "bestapi / Other 两条都该报成「归入中转站组」，实际：{merged:?}"
+            1,
+            "Only the equivalent configuration is merged: {merged:?}"
         );
 
         // 3. LoongPort 自己的表 / settings 保留。
@@ -1141,12 +1477,20 @@ mod tests {
             "导入不置「已手工维护」标记 —— 它只在用户手工编辑时置位"
         );
 
+        let chain = crate::proxy::application_routing::chain_ids(&db, "codex").unwrap();
+        assert_eq!(
+            chain.first().map(String::as_str),
+            Some("loongport-aaaaaaaaaaaaaaaa")
+        );
+        assert!(chain.contains(&"other".to_string()));
+        assert!(chain.contains(&"elsewhere".to_string()));
+
         // 5. 报告。
         assert!(report.success);
-        assert_eq!(report.providers_imported, 1, "只有 Elsewhere 一条该导入");
+        assert_eq!(report.providers_imported, 2);
         assert!(
             report.providers_skipped.is_empty(),
-            "同站点先被中转站归并接走，不再落到「同指纹跳过」"
+            "相同配置按中转站归属计入归并结果，不重复计入其他跳过项"
         );
         assert_eq!(report.mcp_imported, 1, "MCP 该搬进来");
         Ok(())

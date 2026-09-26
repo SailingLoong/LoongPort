@@ -10,7 +10,7 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::provider::Provider;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
@@ -30,6 +30,7 @@ struct MockUpstreamState {
     status: Arc<RwLock<u16>>,
     auth_header: Arc<RwLock<Option<String>>>,
     model: Arc<RwLock<Option<String>>>,
+    uri: Arc<RwLock<String>>,
     foreign: Arc<RwLock<bool>>,
     stream: Arc<RwLock<bool>>,
     delay_ms: Arc<std::sync::atomic::AtomicU64>,
@@ -48,6 +49,7 @@ impl MockUpstream {
             status: Arc::new(RwLock::new(200)),
             auth_header: Arc::new(RwLock::new(None)),
             model: Arc::new(RwLock::new(None)),
+            uri: Arc::new(RwLock::new(String::new())),
             foreign: Arc::new(RwLock::new(false)),
             stream: Arc::new(RwLock::new(false)),
             delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -100,9 +102,11 @@ impl MockUpstream {
 async fn handle_mock(
     State(state): State<MockUpstreamState>,
     headers: HeaderMap,
+    uri: Uri,
     _body: axum::body::Bytes,
 ) -> axum::response::Response {
     state.hits.fetch_add(1, Ordering::SeqCst);
+    *state.uri.write().await = uri.to_string();
     *state.model.write().await = serde_json::from_slice::<Value>(&_body)
         .ok()
         .and_then(|body| {
@@ -726,6 +730,121 @@ async fn manual_model_intent_is_preserved_across_fallback() {
         fx.expensive.state.model.read().await.as_deref(),
         Some("manual-model")
     );
+    fx.server.stop().await.unwrap();
+}
+
+/// Application selection controls the main model; role and subagent requests keep their contracts.
+#[tokio::test]
+#[serial]
+async fn main_model_preference_preserves_role_and_subagent_models() {
+    let fx = E2eFixture::new().await;
+    let mut provider = fx
+        .db
+        .get_provider_by_id(&fx.cheap_id, "claude")
+        .unwrap()
+        .unwrap();
+    provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("main-model");
+    provider.settings_config["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] = json!("role-model");
+    provider.settings_config["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = json!("worker-sonnet");
+    provider.settings_config["modelCatalog"] = json!({"models":[{"model":"chosen-main"}]});
+    let available_models = vec![
+        "chosen-main".into(),
+        "main-model".into(),
+        "role-model".into(),
+        "worker-sonnet".into(),
+    ];
+    fx.db.save_provider("claude", &provider).unwrap();
+    fx.db
+        .set_available_models("claude", &provider.id, &available_models)
+        .unwrap();
+    fx.set_current(&fx.cheap_id);
+    auto_strategy::set_model_pref(&fx.db, "claude", Some("chosen-main")).unwrap();
+    for (requested, expected) in [
+        ("unknown-main", "chosen-main"),
+        ("chosen-main", "chosen-main"),
+        ("claude-sonnet", "role-model"),
+        ("worker-sonnet", "worker-sonnet"),
+    ] {
+        let response = send_model_message(fx.port, requested, requested).await;
+        assert!(response.status().is_success());
+        let _ = response_text(response).await;
+        assert_eq!(fx.cheap.state.model.read().await.as_deref(), Some(expected));
+        let alerts = fx.model_alignment.list();
+        if requested == "unknown-main" {
+            assert_eq!(alerts[0].sent_model, "chosen-main");
+        } else {
+            assert!(
+                alerts.is_empty(),
+                "matching model and role calls must not report a mismatch"
+            );
+        }
+    }
+    fx.server.stop().await.unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_model_selection_updates_native_url_for_base_and_full_endpoints() {
+    let fx = E2eFixture::new().await;
+    let mut provider = Provider::with_id(
+        "gemini-custom".into(),
+        "Gemini example".into(),
+        json!({"env": {
+            "GOOGLE_GEMINI_BASE_URL": fx.cheap.base_url(),
+            "GEMINI_API_KEY": "test-key",
+            "GEMINI_MODEL": "selected-model"
+        }, "modelCatalog": {"models": [{"model": "preferred-model"}]}}),
+        None,
+    );
+    for (full_url, path_prefix) in [
+        (false, "/v1beta"),
+        (true, "/v1beta"),
+        (
+            true,
+            "/v1/projects/example/locations/global/publishers/google",
+        ),
+    ] {
+        provider.settings_config["env"]["GOOGLE_GEMINI_BASE_URL"] = json!(if full_url {
+            format!(
+                "{}{path_prefix}/models/old-model:generateContent",
+                fx.cheap.base_url()
+            )
+        } else {
+            fx.cheap.base_url()
+        });
+        provider.meta = Some(crate::provider::ProviderMeta {
+            is_full_url: Some(full_url),
+            ..Default::default()
+        });
+        fx.db.save_provider("gemini", &provider).unwrap();
+        fx.db.set_current_provider("gemini", &provider.id).unwrap();
+        for preference in [None, Some("preferred-model")] {
+            auto_strategy::set_model_pref(&fx.db, "gemini", preference).unwrap();
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(format!(
+                    "http://127.0.0.1:{}/v1beta/models/client-model:generateContent?trace=kept",
+                    fx.port
+                ))
+                .json(&json!({"contents": [{"parts": [{"text": "hello"}]}]}))
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "{}",
+                response_text(response).await
+            );
+            let expected_model = preference.unwrap_or("selected-model");
+            assert_eq!(
+                *fx.cheap.state.uri.read().await,
+                format!("{path_prefix}/models/{expected_model}:generateContent?trace=kept")
+            );
+            assert_eq!(*fx.cheap.state.model.read().await, None);
+        }
+    }
     fx.server.stop().await.unwrap();
 }
 

@@ -53,6 +53,13 @@ pub(crate) fn validate_pricing_source(value: &str) -> Result<&str, AppError> {
 }
 
 impl Database {
+    /// Update only the listener state; addresses and per-app policy have separate owners.
+    pub fn set_proxy_enabled(&self, enabled: bool) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute("UPDATE proxy_config SET proxy_enabled = ?1", [enabled])?;
+        Ok(())
+    }
+
     // ==================== Global Proxy Config ====================
 
     /// 获取全局代理配置（统一字段）

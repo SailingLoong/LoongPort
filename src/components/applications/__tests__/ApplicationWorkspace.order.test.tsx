@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   data: {} as any,
   routing: {} as any,
   select: vi.fn(),
+  apply: vi.fn(),
   setOrder: vi.fn(),
   setFailover: vi.fn(),
   blockTier: vi.fn(),
@@ -49,6 +50,7 @@ vi.mock("../useApplicationRouting", () => ({
     refetch: vi.fn(),
     busy: false,
     setOrder: state.setOrder,
+    apply: state.apply,
     setFailover: state.setFailover,
     blockTier: state.blockTier,
   }),
@@ -76,7 +78,6 @@ vi.mock("@/lib/api/orderProfiles", () => ({
         new Promise<void>((resolve) => {
           profilesApi.saveCalls.push({ appType, name, ids: providerIds });
           profilesApi.saved.push({ name, providerIds });
-          profilesApi.current = name;
           resolve();
         }),
     ),
@@ -101,7 +102,13 @@ vi.mock("@/lib/api/orderProfiles", () => ({
   },
 }));
 vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
-  SwitchTierConfirmDialog: () => null,
+  SwitchTierConfirmDialog: ({ targetName, onCancel, onSwitch }: any) =>
+    targetName ? (
+      <div role="dialog">
+        <button onClick={onCancel}>Cancel switch</button>
+        <button onClick={() => onSwitch(false)}>Confirm switch</button>
+      </div>
+    ) : null,
 }));
 
 const config = (id: string, name: string, current = false) => ({
@@ -146,6 +153,13 @@ describe("failover order staging", () => {
     vi.clearAllMocks();
     queryClient = new QueryClient();
     state.setOrder.mockResolvedValue(undefined);
+    state.apply.mockResolvedValue({
+      status: "switched",
+      providerName: "Example",
+      warnings: [],
+      chatgptWasRunning: false,
+      chatgptRelaunched: false,
+    });
     state.setFailover.mockResolvedValue(undefined);
     state.blockTier.mockResolvedValue(undefined);
     profilesApi.saved = [];
@@ -195,41 +209,23 @@ describe("failover order staging", () => {
     };
   });
 
-  it("stages drags without persisting until Apply order is clicked", async () => {
+  it("submits a reordered chain and its profile together, and converges after readback", async () => {
     const view = renderWorkspace();
-    expect(
-      screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-    ).not.toBeInTheDocument();
-    // 未生效状态条只在有未应用草稿时出现（沉默=一致，无误报）。
-    expect(
-      screen.queryByText("applications.pendingChanges"),
-    ).not.toBeInTheDocument();
-    // 拖拽（表格回调）：c 提到最前 → 全序 [c,a,b]；只暂存、不落库。
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(["orderProfiles", "codex"]),
+      ).toBeDefined(),
+    );
     await drag(["c", "a", "b"]);
-    expect(state.setOrder).not.toHaveBeenCalled();
-    // 状态条出现在表格上方，按钮搬进了状态条（页头不再双摆）。
-    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
-    const apply = screen.getByRole("button", {
-      name: /applications\.applyOrder/,
-    });
-    // 计数 = 应用目标的大小（链里将有 3 个）。
-    expect(apply).toHaveTextContent("(3)");
-    await userEvent.click(apply);
-    await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["c", "a", "b"]),
+    expect(state.apply).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
     );
-    // 应用即保存进当前配置档（2026-09-17 定调：default 是落点）。
-    await waitFor(() =>
-      expect(profilesApi.saveCalls).toContainEqual({
-        appType: "codex",
-        name: "default",
-        ids: ["c", "a", "b"],
-      }),
+    expect(state.apply).toHaveBeenCalledWith(
+      { order: { profileName: "default", providerIds: ["c", "a", "b"] } },
+      undefined,
     );
-    // 没选模型筛选的应用不碰当前档（调序 ≠ 换用途）。
-    expect(state.select).not.toHaveBeenCalled();
-    // 模拟真实链路的应用后刷新：routing 查询换新对象、链与 tiers 序=已应用序，
-    // 乐观快照随之失效、待应用归零、按钮消失。
+    expect(profilesApi.saveCalls).toEqual([]);
     state.routing = {
       ...state.routing,
       chainIds: ["c", "a", "b"],
@@ -240,287 +236,177 @@ describe("failover order staging", () => {
       ],
     };
     rerenderWorkspace(view);
-    await waitFor(() => {
-      expect(tableProps.current.orderedIds).toEqual(["c", "a", "b"]);
-      expect(
-        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-      ).not.toBeInTheDocument();
-    });
-    // 应用生效后状态条整条消失。
     expect(
       screen.queryByText("applications.pendingChanges"),
     ).not.toBeInTheDocument();
-    view.unmount();
   });
 
-  it("hides chain editing entirely when failover is off (order has no runtime effect)", async () => {
-    const view = renderWorkspace();
-    await drag(["b", "a", "c"]);
-    expect(
-      screen.getByRole("button", { name: /applications\.applyOrder/ }),
-    ).toBeInTheDocument();
-    // 关掉故障切换：顺序与配置档没有任何运行时作用（2026-09-17 定调）——
-    // 整套链编辑面消失，未应用草稿随之丢弃。
-    state.routing.autoFailoverEnabled = false;
-    rerenderWorkspace(view);
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: /applications\.discardOrder/ }),
-      ).not.toBeInTheDocument();
-      expect(screen.queryByTitle("applications.orderProfiles")).toBeNull();
-    });
-    expect(state.setOrder).not.toHaveBeenCalled();
-    // 重新打开：无幽灵待应用（草稿已在关闭时丢弃），配置档回来。
-    state.routing.autoFailoverEnabled = true;
-    rerenderWorkspace(view);
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-      ).not.toBeInTheDocument();
-      expect(screen.getByTitle("applications.orderProfiles")).toBeVisible();
-    });
-    expect(state.setOrder).not.toHaveBeenCalled();
-    view.unmount();
-  });
-
-  it("offers Apply for a metric-sorted view and applies the displayed order", async () => {
-    const view = renderWorkspace();
-    // 倍率升序：b(1), a(2), c(3)——显示序不同于存储序 [a,b,c]。
-    await act(async () => {
-      tableProps.current.onSort("rateMultiplier");
-    });
-    const apply = await screen.findByRole("button", {
-      name: /applications\.applyOrder/,
-    });
-    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-    await userEvent.click(apply);
-    await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
-    );
-    // 应用后临时排序与暂存一起清空；模拟刷新后链与显示序=已应用的排序序。
-    state.routing = {
-      ...state.routing,
-      chainIds: ["b", "a", "c"],
-      tiers: [
-        state.routing.tiers[1],
-        state.routing.tiers[0],
-        state.routing.tiers[2],
-      ],
-    };
-    rerenderWorkspace(view);
-    await waitFor(() => {
-      expect(tableProps.current.sort).toBeNull();
-      expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
-      expect(
-        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-      ).not.toBeInTheDocument();
-    });
-    view.unmount();
-  });
-
-  it("discarding drops staged drags, sorting and filters back to the stored chain", async () => {
-    const view = renderWorkspace();
-    await drag(["b", "a", "c"]);
-    await act(async () => {
-      tableProps.current.onSort("rateMultiplier");
-    });
-    await userEvent.type(
-      screen.getByRole("searchbox", { name: "applications.search" }),
-      "Premium",
-    );
-    expect(
-      screen.getByRole("button", { name: /applications\.discardOrder/ }),
-    ).toBeInTheDocument();
+  it("loads a profile locally and immediately applies to that exact profile", async () => {
+    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
+    renderWorkspace();
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
     await userEvent.click(
-      screen.getByRole("button", { name: /applications\.discardOrder/ }),
+      await screen.findByRole("menuitem", { name: /Travel/ }),
     );
-    await waitFor(() => {
-      expect(tableProps.current.sort).toBeNull();
-      expect(tableProps.current.search).toBe("");
-      expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
-      expect(
-        screen.queryByRole("button", { name: /applications\.applyOrder/ }),
-      ).not.toBeInTheDocument();
-    });
-    expect(state.setOrder).not.toHaveBeenCalled();
-    view.unmount();
+    expect(profilesApi.setCurrent).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    expect(state.apply).toHaveBeenCalledWith(
+      { order: { profileName: "Travel", providerIds: ["c", "b"] } },
+      undefined,
+    );
+    expect(profilesApi.saveCalls).toEqual([]);
   });
 
-  it("lights Apply from filtering alone and narrows the chain to the visible tiers", async () => {
+  it("keeps a partial applied list after refresh and exposes all tiers explicitly", async () => {
+    state.routing.chainIds = ["b", "c"];
     const view = renderWorkspace();
-    // 筛选（搜索）一变目标就变：可见只剩 b，不需要先拖一下。
-    await userEvent.type(
-      screen.getByRole("searchbox", { name: "applications.search" }),
-      "Premium",
-    );
-    const apply = screen.getByRole("button", {
-      name: /applications\.applyOrder/,
-    });
-    expect(apply).toHaveTextContent("(1)");
-    await userEvent.click(apply);
-    // 应用写入 = 可见 ∧ 未屏蔽的显示序——链收窄为 [b]，其余档位出链（不是后备）。
-    await waitFor(() => expect(state.setOrder).toHaveBeenCalledWith(["b"]));
-    view.unmount();
-  });
-
-  it("blocked tiers are excluded from the applied chain and blocking alone does not nag", async () => {
-    state.routing.tiers[2].skipReason = "blocked";
-    const view = renderWorkspace();
-    // 屏蔽即时生效且不制造待应用：目标与参照都剔除 c，两者一致 → 无按钮。
+    expect(tableProps.current.orderedIds).toEqual(["b", "c"]);
     expect(
-      screen.queryByRole("button", { name: /applications\.applyOrder/ }),
+      screen.queryByText("applications.pendingChanges"),
     ).not.toBeInTheDocument();
-    // 拖拽后应用：写入的目标不含被屏蔽的 c。
-    await drag(["b", "a", "c"]);
     await userEvent.click(
-      screen.getByRole("button", { name: /applications\.applyOrder/ }),
+      screen.getByRole("button", { name: "applications.showAllTiers" }),
     );
-    await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["b", "a"]),
-    );
-    view.unmount();
-  });
-
-  it("chain ghosts from upstream deletions light Apply until the user re-applies", async () => {
-    state.routing.chainIds = ["a", "b", "c", "ghost"];
-    const view = renderWorkspace();
-    // 幽灵不在视图里（configurations 没有它）→ 目标 [a,b,c] ≠ 参照 [a,b,c,ghost]。
-    const apply = screen.getByRole("button", {
-      name: /applications\.applyOrder/,
-    });
-    expect(apply).toHaveTextContent("(3)");
-    await userEvent.click(apply);
-    // 应用即清理幽灵。
-    await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["a", "b", "c"]),
-    );
-    view.unmount();
-  });
-
-  it("loads an order profile into the draft (filtered to known tiers, no padding), then applies", async () => {
-    profilesApi.saved = [
-      { name: "便宜优先", providerIds: ["c", "ghost", "b"] },
-    ];
-    const view = renderWorkspace();
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(screen.getByRole("menuitem", { name: /便宜优先/ }));
-    // 载入 = 进草稿 + 切换当前配置档：认不出的 id 滤掉、不垫底——链外档位（a）从视图消失。
-    expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
-    expect(profilesApi.setCurrent).toHaveBeenCalledWith("codex", "便宜优先");
-    expect(state.setOrder).not.toHaveBeenCalled();
+    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
     await userEvent.click(
-      screen.getByRole("button", { name: /applications\.applyOrder/ }),
+      screen.getByRole("button", { name: "applications.discardOrder" }),
     );
-    // 应用写入就是档内这批——链 = [c,b]，a 出链；落进切换后的当前档。
-    await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["c", "b"]),
-    );
-    await waitFor(() =>
-      expect(profilesApi.saveCalls).toContainEqual({
-        appType: "codex",
-        name: "便宜优先",
-        ids: ["c", "b"],
-      }),
-    );
-    view.unmount();
+    state.routing = { ...state.routing };
+    rerenderWorkspace(view);
+    expect(tableProps.current.orderedIds).toEqual(["b", "c"]);
   });
 
-  it("renames a profile from the row action", async () => {
-    profilesApi.saved = [{ name: "便宜优先", providerIds: ["c", "b"] }];
-    const view = renderWorkspace();
+  it("allows cancelling an empty profile draft without changing the current profile", async () => {
+    profilesApi.saved = [{ name: "Other device", providerIds: ["unknown"] }];
+    renderWorkspace();
     await userEvent.click(screen.getByTitle("applications.orderProfiles"));
     await userEvent.click(
-      screen.getByRole("button", { name: "applications.orderProfileRename" }),
+      await screen.findByRole("menuitem", { name: /Other device/ }),
     );
-    const input = screen.getByRole("textbox", {
-      name: "applications.orderProfileNamePlaceholder",
-    });
-    await userEvent.clear(input);
-    await userEvent.type(input, "快的优先");
-    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
-    await waitFor(() =>
-      expect(profilesApi.rename).toHaveBeenCalledWith(
-        "codex",
-        "便宜优先",
-        "快的优先",
-      ),
+    expect(tableProps.current.orderedIds).toEqual([]);
+    expect(screen.getByText("applications.emptyChain")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    ).toBeDisabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.discardOrder" }),
     );
-    view.unmount();
+    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+    expect(profilesApi.setCurrent).not.toHaveBeenCalled();
   });
 
-  it("applying with a model filter switches current to the first available tier of that model", async () => {
-    // a(当前)=gpt-4、b=gpt-5、c=gpt-4：选 gpt-5 后应用 = 切到 b，
-    // 走标准切换编排（select → 确认框 → 退 ChatGPT → 切 → 重开）。
-    state.routing.tiers[0].effectiveModel = "gpt-4";
-    state.routing.tiers[1].effectiveModel = "gpt-5";
-    state.routing.tiers[2].effectiveModel = "gpt-4";
-    const view = renderWorkspace();
+  it("applies a model-only change even when all chain members support the model", async () => {
+    state.routing.model = "model-a";
+    state.routing.tiers.forEach((tier: any) => {
+      tier.models = ["model-a", "model-b"];
+      tier.effectiveModel = "model-a";
+    });
+    renderWorkspace();
     await userEvent.click(
       screen.getByRole("combobox", { name: "applications.modelFilter" }),
     );
-    await userEvent.click(screen.getByRole("option", { name: /gpt-5/ }));
-    const apply = screen.getByRole("button", {
-      name: /applications\.applyOrder/,
-    });
-    expect(apply).toHaveTextContent("(1)");
-    await userEvent.click(apply);
-    await waitFor(() => expect(state.setOrder).toHaveBeenCalledWith(["b"]));
-    await waitFor(() =>
-      expect(state.select).toHaveBeenCalledWith(
-        expect.objectContaining({ providerId: "b" }),
+    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    expect(state.apply).toHaveBeenCalledWith(
+      {
+        order: { profileName: "default", providerIds: ["a", "b", "c"] },
+        selection: { providerId: "a", model: "model-b" },
+      },
+      undefined,
+    );
+    expect(state.select).not.toHaveBeenCalled();
+  });
+
+  it.each(["relay", "provider", "vendor"])(
+    "passes the selected model for %s configurations",
+    async (kind) => {
+      state.data.configurations[1].selection = { kind };
+      state.routing.tiers.forEach((tier: any) => {
+        tier.models = ["model-a", "model-b"];
+        tier.effectiveModel = "model-a";
+      });
+      renderWorkspace();
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "applications.modelFilter" }),
+      );
+      await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
+      await act(async () => {
+        tableProps.current.onSelect(state.data.configurations[1]);
+      });
+      expect(state.apply).toHaveBeenCalledWith(
+        { selection: { providerId: "b", model: "model-b" } },
         undefined,
-        // 模型筛选下切换把模型一起带过去（switchTierModel 链）。
-        "gpt-5",
-      ),
+      );
+    },
+  );
+
+  it("holds the complete change through confirmation and cancellation writes nothing else", async () => {
+    state.apply.mockResolvedValue({
+      status: "confirmationRequired",
+      targetName: "Example",
+    });
+    renderWorkspace();
+    await drag(["b", "a", "c"]);
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
     );
-    view.unmount();
+    expect(screen.getByRole("dialog")).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Cancel switch" }),
+    );
+    expect(state.apply).toHaveBeenCalledTimes(1);
+    expect(profilesApi.saveCalls).toEqual([]);
+    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Confirm switch" }),
+    );
+    expect(state.apply).toHaveBeenLastCalledWith(
+      { order: { profileName: "default", providerIds: ["b", "a", "c"] } },
+      false,
+    );
   });
 
-  it("applying with a model filter keeps current when it already serves that model", async () => {
-    state.routing.tiers[0].effectiveModel = "gpt-4";
-    state.routing.tiers[1].effectiveModel = "gpt-5";
-    state.routing.tiers[2].effectiveModel = "gpt-4";
-    const view = renderWorkspace();
+  it("retains the draft on failure", async () => {
+    state.apply.mockRejectedValue(new Error("Cannot update"));
+    renderWorkspace();
+    await drag(["b", "a", "c"]);
     await userEvent.click(
-      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
     );
-    await userEvent.click(screen.getByRole("option", { name: /gpt-4/ }));
-    // 当前档 a 就在应用目标里（它服务 gpt-4）→ 不折腾、零打扰。
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications\.applyOrder/ }),
-    );
-    await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["a", "c"]),
-    );
-    expect(state.select).not.toHaveBeenCalled();
-    view.unmount();
+    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
+    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
   });
 
-  it("applying with a model filter skips circuit-open tiers and does not switch when none is available", async () => {
-    state.routing.tiers[0].effectiveModel = "gpt-4";
-    state.routing.tiers[1].effectiveModel = "gpt-5";
-    state.routing.tiers[2].effectiveModel = "gpt-4";
-    // gpt-5 只有一个档位且正熔断 → 链照常应用，但不切换（熔断档位不算可用）。
-    state.routing.tiers[1].skipReason = "circuit_open";
-    const view = renderWorkspace();
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "applications.modelFilter" }),
-    );
-    await userEvent.click(screen.getByRole("option", { name: /gpt-5/ }));
-    await userEvent.click(
-      screen.getByRole("button", { name: /applications\.applyOrder/ }),
-    );
-    await waitFor(() => expect(state.setOrder).toHaveBeenCalledWith(["b"]));
-    expect(state.select).not.toHaveBeenCalled();
-    view.unmount();
-  });
-
-  it("saves the apply target (visible and unblocked) as a named profile and switches to it", async () => {
+  it("discards chain drafts when failover is disabled", async () => {
     const view = renderWorkspace();
     await drag(["b", "a", "c"]);
+    state.routing = { ...state.routing, autoFailoverEnabled: false };
+    rerenderWorkspace(view);
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
+    state.routing = { ...state.routing, autoFailoverEnabled: true };
+    rerenderWorkspace(view);
+    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+  });
+
+  it("keeps a staged draft across routing refresh", async () => {
+    const view = renderWorkspace();
+    await drag(["b", "a", "c"]);
+    state.routing = { ...state.routing };
+    rerenderWorkspace(view);
+    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
+  });
+  it("saving as a new profile creates a draft without replacing the applied profile", async () => {
+    renderWorkspace();
+    await drag(["c", "b", "a"]);
     await userEvent.click(screen.getByTitle("applications.orderProfiles"));
     await userEvent.click(
       screen.getByRole("menuitem", {
@@ -531,31 +417,114 @@ describe("failover order staging", () => {
       screen.getByRole("textbox", {
         name: "applications.orderProfileNamePlaceholder",
       }),
-      "快的优先",
+      "Travel",
     );
     await userEvent.click(screen.getByRole("button", { name: "common.save" }));
     await waitFor(() =>
-      expect(profilesApi.saved).toEqual([
-        { name: "快的优先", providerIds: ["b", "a", "c"] },
-      ]),
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
-    // 另存为新档 = 切换过去（后端 save 设当前，mock 同步 current）。
-    expect(profilesApi.current).toBe("快的优先");
-    view.unmount();
-  });
-
-  it("staged draft survives provider refresh until applied", async () => {
-    const view = renderWorkspace();
-    await drag(["b", "a", "c"]);
-    // 5s 轮询换新 routing 对象（引用变化）——草稿是独立 state，不随之丢失。
-    state.routing = { ...state.routing };
-    rerenderWorkspace(view);
+    expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
+      "Travel",
+    );
+    expect(state.apply).not.toHaveBeenCalled();
     await userEvent.click(
-      screen.getByRole("button", { name: /applications\.applyOrder/ }),
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
     );
+    expect(state.apply).toHaveBeenCalledWith(
+      { order: { profileName: "Travel", providerIds: ["c", "b", "a"] } },
+      undefined,
+    );
+  });
+  it("explains why a model-filtered draft cannot be applied when no tier is available", async () => {
+    state.routing.tiers[0].effectiveModel = "model-a";
+    state.routing.tiers[1].effectiveModel = "model-b";
+    state.routing.tiers[1].skipReason = "circuit_open";
+    renderWorkspace();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
+    expect(screen.getByText("applications.noSwitchableTier")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    ).toBeDisabled();
+    expect(state.apply).not.toHaveBeenCalled();
+  });
+  it("converges after applying a partial profile and reading the backend result", async () => {
+    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
+    const view = renderWorkspace();
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: /Travel/ }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    state.routing = {
+      ...state.routing,
+      chainIds: ["c", "b"],
+      tiers: [
+        state.routing.tiers[2],
+        state.routing.tiers[1],
+        state.routing.tiers[0],
+      ],
+    };
+    profilesApi.current = "Travel";
+    rerenderWorkspace(view);
+    expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.showAllTiers" }),
+    );
+    expect(tableProps.current.orderedIds).toEqual(["c", "b", "a"]);
+  });
+  it("does not report a change after dragging back to the applied order", async () => {
+    renderWorkspace();
+    await drag(["b", "a", "c"]);
+    expect(screen.getByText("applications.pendingChanges")).toBeVisible();
+    await drag(["a", "b", "c"]);
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
+  });
+  it("preserves the selected model when saving the current draft under a new name", async () => {
+    state.routing.model = "model-a";
+    state.routing.tiers.forEach((tier: any) => {
+      tier.models = ["model-a", "model-b"];
+      tier.effectiveModel = "model-a";
+    });
+    renderWorkspace();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /model-b/ }));
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      screen.getByRole("menuitem", {
+        name: "applications.orderProfileSaveCurrent",
+      }),
+    );
+    await userEvent.type(
+      screen.getByRole("textbox", {
+        name: "applications.orderProfileNamePlaceholder",
+      }),
+      "Travel",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
     await waitFor(() =>
-      expect(state.setOrder).toHaveBeenCalledWith(["b", "a", "c"]),
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
-    view.unmount();
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    expect(state.apply).toHaveBeenCalledWith(
+      {
+        order: { profileName: "Travel", providerIds: ["a", "b", "c"] },
+        selection: { providerId: "a", model: "model-b" },
+      },
+      undefined,
+    );
   });
 });

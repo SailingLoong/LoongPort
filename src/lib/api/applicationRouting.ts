@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SwitchTierCommandResult } from "./relay";
 import type { TierBoardModelOption, TierBoardTier } from "./autoMode";
 
 export interface ApplicationRoutingTier extends TierBoardTier {
@@ -41,7 +42,18 @@ export interface ApplicationRouting {
   tiers: ApplicationRoutingTier[];
 }
 
+export interface ApplicationRoutingChange {
+  order?: { profileName: string; providerIds: string[] };
+  selection?: { providerId: string; model?: string };
+}
+
 export const applicationRoutingApi = {
+  apply: (
+    appType: string,
+    change: ApplicationRoutingChange,
+    quitChatgpt?: boolean,
+  ): Promise<SwitchTierCommandResult> =>
+    invoke("apply_application_routing", { appType, change, quitChatgpt }),
   get: (appType: string): Promise<ApplicationRouting> =>
     invoke("get_application_routing", { appType }),
   setOrder: (appType: string, orderedIds: string[]): Promise<void> =>

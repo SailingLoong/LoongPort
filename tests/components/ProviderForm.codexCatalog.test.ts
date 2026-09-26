@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeCodexCatalogModelsForSave } from "@/components/providers/forms/ProviderForm";
+import {
+  normalizeCodexCatalogModelsForSave,
+  normalizeCodexChatReasoningForSave,
+} from "@/components/providers/forms/ProviderForm";
 import { mapCodexCatalogModelForForm } from "@/components/providers/forms/hooks/useCodexConfigState";
 
 describe("ProviderForm Codex catalog helpers", () => {
@@ -115,5 +118,35 @@ describe("ProviderForm Codex catalog helpers", () => {
         { model: "glm-5.2", reasoningLevels: [" high ", "max"] },
       ]),
     ).toEqual([{ model: "glm-5.2", reasoningLevels: ["high", "max"] }]);
+  });
+});
+
+describe("reasoning capability editing", () => {
+  it("preserves protocol mappings while disabled so enabling can restore them", () => {
+    const disabled = normalizeCodexChatReasoningForSave({
+      supportsThinking: false,
+      supportsEffort: false,
+      thinkingParam: "enable_thinking",
+      effortParam: "reasoning.effort",
+      effortValueMode: "openrouter",
+    });
+    expect(disabled?.thinkingParam).toBe("enable_thinking");
+    expect(disabled?.effortParam).toBe("reasoning.effort");
+    const enabled = normalizeCodexChatReasoningForSave({
+      ...disabled,
+      supportsThinking: true,
+      supportsEffort: true,
+    });
+    expect(enabled?.effortParam).toBe("reasoning.effort");
+    expect(enabled?.effortValueMode).toBe("openrouter");
+  });
+  it("repairs enabled legacy effort settings and permits restoring automatic detection", () => {
+    expect(
+      normalizeCodexChatReasoningForSave({
+        supportsEffort: true,
+        effortParam: "none",
+      })?.effortParam,
+    ).toBe("reasoning_effort");
+    expect(normalizeCodexChatReasoningForSave({})).toBeUndefined();
   });
 });

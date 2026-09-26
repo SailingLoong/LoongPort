@@ -1,6 +1,8 @@
 #[cfg(feature = "gui")]
 pub mod app_update;
 pub mod application_overview;
+#[cfg(feature = "gui")]
+pub mod application_selection;
 pub(crate) mod backup_transfer;
 pub mod balance;
 pub mod codex_oauth_models;
@@ -13,6 +15,7 @@ pub mod model_fetch;
 pub mod model_pricing;
 pub mod models_dev;
 pub mod omo;
+pub mod order_profiles;
 pub mod pi_prompt_files;
 pub(crate) mod pi_state;
 pub mod profile;
