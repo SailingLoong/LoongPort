@@ -263,7 +263,7 @@ impl Database {
         if &staged.destination != vault.metadata() {
             return Err(AppError::Config("sync.vault_metadata_conflict".into()));
         }
-        self.replace_from_staging(&staged.connection, SYNC_PRESERVE_TABLES, vault)
+        self.replace_from_staging(staged.connection, SYNC_PRESERVE_TABLES, vault)
     }
 
     /// 导出为 SQLite 兼容的 SQL 文本
@@ -313,20 +313,19 @@ impl Database {
     /// 源头是刚打开并校验过的真实 cc-switch.db（真实性由 cc_switch_import 保证），
     /// 旧版 cc-switch 缺 skills 等新表属正常；导入路径随后的 create_tables 会补齐。
     /// 因此只要求 providers 表，不走面向手工 SQL 文件的严格七表校验。
-    pub(crate) fn import_sql_string_from_cc_switch(
+    pub(crate) fn import_sql_string_from_cc_switch<F>(
         &self,
         sql_raw: &str,
         preserve_tables: &[&str],
-    ) -> Result<String, AppError> {
-        self.import_sql_string_inner_relaxed(sql_raw, preserve_tables)
-    }
-
-    fn import_sql_string_inner_relaxed(
-        &self,
-        sql_raw: &str,
-        preserve_tables: &[&str],
-    ) -> Result<String, AppError> {
-        self.import_sql_with_validation_mode(sql_raw, preserve_tables, false, || Ok(()))
+        prepare: F,
+    ) -> Result<String, AppError>
+    where
+        F: FnOnce(&Database) -> Result<(), AppError>,
+    {
+        let vault = self.secrets.read()?;
+        let staged = Self::stage_import_sql(sql_raw, false)?;
+        super::vault::upgrade_staging(&staged, &vault)?;
+        self.replace_prepared_staging(staged, preserve_tables, &vault, prepare)
     }
 
     fn import_sql_string_inner(
@@ -363,7 +362,7 @@ impl Database {
         let temp_conn = Self::stage_import_sql(sql_raw, strict_schema)?;
         super::vault::upgrade_staging(&temp_conn, &vault)?;
         on_staging_ready()?;
-        self.replace_from_staging(&temp_conn, preserve_tables, &vault)
+        self.replace_from_staging(temp_conn, preserve_tables, &vault)
     }
 
     fn stage_import_sql(sql_raw: &str, strict_schema: bool) -> Result<Connection, AppError> {
@@ -423,10 +422,33 @@ impl Database {
 
     fn replace_from_staging(
         &self,
-        temp_conn: &Connection,
+        temp_conn: Connection,
         preserve_tables: &[&str],
         vault: &VaultContext,
     ) -> Result<String, AppError> {
+        self.replace_prepared_staging(temp_conn, preserve_tables, vault, |_| Ok(()))
+    }
+
+    /// Finish import-specific configuration changes before publishing one complete
+    /// database. The callback uses the normal DAOs with this device's pinned vault.
+    fn replace_prepared_staging<F>(
+        &self,
+        temp_conn: Connection,
+        preserve_tables: &[&str],
+        vault: &VaultContext,
+        prepare: F,
+    ) -> Result<String, AppError>
+    where
+        F: FnOnce(&Database) -> Result<(), AppError>,
+    {
+        // DAOs may acquire their own vault read guard. Give the unpublished
+        // staging database a snapshot of the already pinned generation so a
+        // waiting key rotation cannot deadlock a recursive read of the live lock.
+        let staged_secrets = crate::secrets::session::SecretSession::from_context(
+            self.secrets.root().to_path_buf(),
+            vault.clone(),
+        );
+        let staged = Database::from_connection(temp_conn, staged_secrets);
         let backup_file_guard = lock_backup_file_operations()?;
         // Keep one main-DB guard across the safety snapshot, local-table read,
         // and final replacement so neither the rollback point nor preserved
@@ -434,6 +456,13 @@ impl Database {
         let backup_path = {
             let mut main_conn = lock_conn!(self.conn);
             super::vault::check_identity(&main_conn, vault)?;
+            if !preserve_tables.is_empty() {
+                let staged_conn = lock_conn!(staged.conn);
+                Self::restore_tables(&main_conn, &staged_conn, preserve_tables)?;
+            }
+            prepare(&staged)?;
+            let temp_conn = lock_conn!(staged.conn);
+            crate::secrets::inventory::validate_database(&temp_conn, vault)?;
             let backup_path = Self::backup_database_file_from_conn(
                 &backup_file_guard,
                 &main_conn,
@@ -441,10 +470,7 @@ impl Database {
                 vault,
                 &[],
             )?;
-            if !preserve_tables.is_empty() {
-                Self::restore_tables(&main_conn, temp_conn, preserve_tables)?;
-            }
-            let backup = Backup::new(temp_conn, &mut main_conn)
+            let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             Self::complete_backup(&backup, "替换主数据库")?;
             backup_path

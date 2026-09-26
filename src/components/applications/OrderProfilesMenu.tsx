@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -26,21 +26,19 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-/**
- * 档位顺序配置档 = 命名的链快照，其中一份是「当前配置文件」（2026-09-17 定调）：
- *
- * - **当前档**：触发器上直接显示名称；「应用此顺序」默认保存进它（工作台负责）
- * - **切换**：点某档 = 载入草稿 + 切当前指针，照常「应用/取消」
- * - **新建/另存为**：把应用目标存成新档并切换过去（后端 save 即设当前）
- * - **重命名**：行内铅笔；改当前档时指针跟着走；撞名拒绝
- * - 导入导出走 JSON 文件（跨机导入的 id 解析不了会自愈滤掉，只剩同机备份意义）
- */
+/** Named candidate snapshots. Loading is local; only Apply changes the active profile. */
 export function OrderProfilesMenu({
   appType,
   state,
   targetIds,
   storedIds,
   onLoadDraft,
+  onSaved,
+  selectedName,
+  disabled = false,
+  onBusyChange,
+  onProfileRenamed,
+  onProfileRemoved,
 }: {
   appType: string;
   /** 工作台持有的配置档状态（列表 + 当前），与本菜单共享同一个 query key。 */
@@ -49,7 +47,13 @@ export function OrderProfilesMenu({
   targetIds: string[];
   /** 已知档位全集（存储序），载入时滤掉认不出的 id 用。 */
   storedIds: string[];
-  onLoadDraft: (ids: string[]) => void;
+  onLoadDraft: (name: string, ids: string[]) => void;
+  onSaved: (name: string, ids: string[]) => void;
+  selectedName?: string;
+  disabled?: boolean;
+  onBusyChange: (busy: boolean) => void;
+  onProfileRenamed: (from: string, to: string) => void;
+  onProfileRemoved: (name: string) => void;
 }) {
   const { t } = useTranslation();
   const client = useQueryClient();
@@ -58,7 +62,23 @@ export function OrderProfilesMenu({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameTo, setRenameTo] = useState("");
   const profiles = state?.profiles ?? [];
-  const current = state?.current ?? "";
+  const current = selectedName ?? state?.current ?? "";
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const locked = disabled || busy;
+  const run = async (operation: () => Promise<void>) => {
+    if (pending.current || disabled) return;
+    pending.current = true;
+    setBusy(true);
+    onBusyChange(true);
+    try {
+      await operation();
+    } finally {
+      pending.current = false;
+      setBusy(false);
+      onBusyChange(false);
+    }
+  };
   const refresh = () =>
     client.invalidateQueries({ queryKey: ["orderProfiles", appType] });
   const onError = (error: unknown) =>
@@ -67,14 +87,14 @@ export function OrderProfilesMenu({
     });
 
   const load = (profileName: string, providerIds: string[]) => {
+    if (pending.current || disabled) return;
     // 载入顺序 = 配置档里认得出的档位（按档内序），不垫底：配置档是链快照，
     // 应用后链就是档内这批——垫底会把链外档位拉回链里，违背链语义。
     const known = new Set(storedIds);
-    onLoadDraft(providerIds.filter((id) => known.has(id)));
-    void orderProfilesApi
-      .setCurrent(appType, profileName)
-      .then(refresh)
-      .catch(onError);
+    onLoadDraft(
+      profileName,
+      providerIds.filter((id) => known.has(id)),
+    );
   };
 
   const save = async () => {
@@ -82,6 +102,7 @@ export function OrderProfilesMenu({
     if (!trimmed) return;
     try {
       await orderProfilesApi.save(appType, trimmed, targetIds);
+      onSaved(trimmed, targetIds);
       toast.success(t("applications.orderProfileSaved", { name: trimmed }));
       setSaveOpen(false);
       setName("");
@@ -96,6 +117,7 @@ export function OrderProfilesMenu({
     if (!to || renaming == null) return;
     try {
       await orderProfilesApi.rename(appType, renaming, to);
+      onProfileRenamed(renaming, to);
       setRenaming(null);
       await refresh();
     } catch (error) {
@@ -106,6 +128,7 @@ export function OrderProfilesMenu({
   const remove = async (profileName: string) => {
     try {
       await orderProfilesApi.remove(appType, profileName);
+      onProfileRemoved(profileName);
       await refresh();
     } catch (error) {
       onError(error);
@@ -141,6 +164,7 @@ export function OrderProfilesMenu({
         <DropdownMenuTrigger asChild>
           <Button
             size="sm"
+            disabled={locked || !state}
             variant="outline"
             className="h-7 max-w-48 gap-1.5 text-xs"
             title={t("applications.orderProfiles")}
@@ -162,6 +186,7 @@ export function OrderProfilesMenu({
             return (
               <DropdownMenuItem
                 key={profile.name}
+                disabled={locked}
                 className="gap-2"
                 onSelect={() => load(profile.name, profile.providerIds)}
               >
@@ -178,6 +203,7 @@ export function OrderProfilesMenu({
                 </span>
                 <Button
                   size="icon"
+                  disabled={locked}
                   variant="ghost"
                   className="h-6 w-6 shrink-0"
                   aria-label={t("applications.orderProfileRename", {
@@ -189,6 +215,7 @@ export function OrderProfilesMenu({
                   // 下拉里的行内动作不能触发外层 onSelect 的载入：截断事件。
                   onClick={(event) => {
                     event.stopPropagation();
+                    if (pending.current || disabled) return;
                     setRenaming(profile.name);
                     setRenameTo(profile.name);
                   }}
@@ -197,6 +224,7 @@ export function OrderProfilesMenu({
                 </Button>
                 <Button
                   size="icon"
+                  disabled={locked}
                   variant="ghost"
                   className="h-6 w-6 shrink-0"
                   aria-label={t("applications.orderProfileDelete", {
@@ -207,7 +235,7 @@ export function OrderProfilesMenu({
                   })}
                   onClick={(event) => {
                     event.stopPropagation();
-                    void remove(profile.name);
+                    void run(() => remove(profile.name));
                   }}
                 >
                   <Trash2 className="h-3 w-3" />
@@ -216,20 +244,36 @@ export function OrderProfilesMenu({
             );
           })}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => setSaveOpen(true)}>
+          <DropdownMenuItem
+            disabled={locked}
+            onSelect={() => {
+              if (!pending.current && !disabled) setSaveOpen(true);
+            }}
+          >
             <Save className="h-3.5 w-3.5" />
             {t("applications.orderProfileSaveCurrent")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void importFromFile()}>
+          <DropdownMenuItem
+            disabled={locked}
+            onSelect={() => void run(importFromFile)}
+          >
             {t("applications.orderProfileImport")}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void exportToFile()}>
+          <DropdownMenuItem
+            disabled={locked}
+            onSelect={() => void run(exportToFile)}
+          >
             {t("applications.orderProfileExport")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
+      <Dialog
+        open={saveOpen}
+        onOpenChange={(open) => {
+          if (!busy) setSaveOpen(open);
+        }}
+      >
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>
@@ -247,10 +291,17 @@ export function OrderProfilesMenu({
             autoFocus
           />
           <DialogFooter className="gap-2">
-            <Button variant="ghost" onClick={() => setSaveOpen(false)}>
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setSaveOpen(false)}
+            >
               {t("common.cancel")}
             </Button>
-            <Button disabled={!name.trim()} onClick={() => void save()}>
+            <Button
+              disabled={locked || !name.trim()}
+              onClick={() => void run(save)}
+            >
               {t("common.save")}
             </Button>
           </DialogFooter>
@@ -260,7 +311,7 @@ export function OrderProfilesMenu({
       <Dialog
         open={renaming != null}
         onOpenChange={(open) => {
-          if (!open) setRenaming(null);
+          if (!open && !busy) setRenaming(null);
         }}
       >
         <DialogContent className="max-w-md">
@@ -277,12 +328,18 @@ export function OrderProfilesMenu({
             autoFocus
           />
           <DialogFooter className="gap-2">
-            <Button variant="ghost" onClick={() => setRenaming(null)}>
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setRenaming(null)}
+            >
               {t("common.cancel")}
             </Button>
             <Button
-              disabled={!renameTo.trim() || renameTo.trim() === renaming}
-              onClick={() => void rename()}
+              disabled={
+                locked || !renameTo.trim() || renameTo.trim() === renaming
+              }
+              onClick={() => void run(rename)}
             >
               {t("common.save")}
             </Button>

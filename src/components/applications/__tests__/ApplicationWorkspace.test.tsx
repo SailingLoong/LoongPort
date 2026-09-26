@@ -1,17 +1,20 @@
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { ApplicationWorkspace } from "../ApplicationWorkspace";
 import { reorderWithinVisible } from "../ApplicationTierTable";
+import { OrderProfilesMenu } from "../OrderProfilesMenu";
 
 const state = vi.hoisted(() => ({
   data: {} as any,
   routing: {} as any,
   select: vi.fn(),
+  apply: vi.fn(),
   setOrder: vi.fn(),
   setFailover: vi.fn(),
   blockTier: vi.fn(),
   resetTierErrors: vi.fn(),
+  removeProfile: vi.fn(),
 }));
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
@@ -34,6 +37,7 @@ vi.mock("../useApplicationRouting", () => ({
     refetch: vi.fn(),
     busy: false,
     setOrder: state.setOrder,
+    apply: state.apply,
     setFailover: state.setFailover,
     blockTier: state.blockTier,
     resetTierErrors: state.resetTierErrors,
@@ -58,6 +62,9 @@ vi.mock("@/components/relay/SwitchTierConfirmDialog", () => ({
 // 验真 Provider 在工作台内拉 summaries；空结果即可（入口按钮只看资格字段）。
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
+}));
+vi.mock("@/lib/api/orderProfiles", () => ({
+  orderProfilesApi: { remove: state.removeProfile },
 }));
 const config = (id: string, name: string, current = false) => ({
   providerId: id,
@@ -93,6 +100,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.setFailover.mockResolvedValue(undefined);
   state.setOrder.mockResolvedValue(undefined);
+  state.apply.mockResolvedValue({
+    status: "switched",
+    providerName: "Example",
+    chatgptWasRunning: false,
+    chatgptRelaunched: false,
+    warnings: [],
+  });
   state.blockTier.mockResolvedValue(undefined);
   state.resetTierErrors.mockResolvedValue(undefined);
   state.data = {
@@ -174,10 +188,8 @@ describe("application workspace", () => {
       await userEvent.click(
         screen.getByRole("button", { name: "applications.use Premium" }),
       );
-      expect(state.select).toHaveBeenCalledWith(
-        expect.objectContaining({ providerId: "b" }),
-        // 未筛选模型 → 第三参不传模型（纯切档位）。
-        undefined,
+      expect(state.apply).toHaveBeenCalledWith(
+        { selection: { providerId: "b" } },
         undefined,
       );
     },
@@ -425,12 +437,12 @@ describe("application workspace", () => {
     const unknownRow = screen.getByText("Unknown").closest("tr")!;
     expect(within(standardRow).getByText("1")).toBeVisible();
     expect(within(unknownRow).getByText("2")).toBeVisible();
-    // 屏蔽只挡自动切换：手动「设为当前」仍在。
+    // 屏蔽禁止新请求，手动使用入口同样不可用。
     expect(
       within(premiumRow).getByRole("button", {
         name: "applications.use Premium",
       }),
-    ).toBeVisible();
+    ).toBeDisabled();
     // 取消屏蔽走行动作（即时生效，不经「应用此顺序」）。
     await userEvent.click(
       within(premiumRow).getByRole("button", {
@@ -452,6 +464,28 @@ describe("application workspace", () => {
       blocked: true,
     });
   });
+  it.each([false, true])(
+    "blocked tiers stay unavailable and can be unblocked when failover is %s",
+    async (enabled) => {
+      state.routing.autoFailoverEnabled = enabled;
+      state.routing.tiers[1].skipReason = "blocked";
+      render(<ApplicationWorkspace {...props} />);
+      const row = screen.getByText("Premium").closest("tr")!;
+      const use = within(row).getByRole("button", {
+        name: "applications.use Premium",
+      });
+      expect(use).toBeDisabled();
+      await userEvent.click(use);
+      expect(state.apply).not.toHaveBeenCalled();
+      await userEvent.click(
+        within(row).getByRole("button", { name: "applications.unblockTier" }),
+      );
+      expect(state.blockTier).toHaveBeenCalledWith({
+        providerId: "b",
+        blocked: false,
+      });
+    },
+  );
   it("filters tiers by account and shows all again from the dropdown", async () => {
     state.data.configurations = [
       config("a", "Standard", true),
@@ -529,6 +563,72 @@ describe("application workspace", () => {
     );
     expect(screen.getByText("Advanced configuration actions")).toBeVisible();
   });
+  it("permits changing the current tier's model while failover is disabled", async () => {
+    state.routing.tiers[0].models = ["gpt-5.6-sol", "gpt-5.5"];
+    render(<ApplicationWorkspace {...props} />);
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.modelFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /gpt-5.5/ }));
+    const button = screen.getByRole("button", {
+      name: "applications.use Standard",
+    });
+    expect(button).toBeEnabled();
+    await userEvent.click(button);
+    expect(state.apply).toHaveBeenCalledWith(
+      { selection: { providerId: "a", model: "gpt-5.5" } },
+      undefined,
+    );
+  });
+  it("keeps drag handles and native selection on non-proxy applications", async () => {
+    state.data.isAdditive = true;
+    render(<ApplicationWorkspace {...props} appId="pi" />);
+    expect(
+      screen.getAllByRole("button", { name: "applications.dragTier" }),
+    ).toHaveLength(3);
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.enable Premium" }),
+    );
+    expect(state.select).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "b" }),
+      undefined,
+      undefined,
+    );
+    expect(state.apply).not.toHaveBeenCalled();
+  });
+  it("clears an account filter when that account disappears", async () => {
+    state.data.configurations[1] = {
+      ...state.data.configurations[1],
+      account: { kind: "relay", id: 8 },
+      accountLabel: "Other",
+    };
+    const view = render(<ApplicationWorkspace {...props} />);
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "applications.accountFilter" }),
+    );
+    await userEvent.click(screen.getByRole("option", { name: /Personal/ }));
+    expect(screen.queryByText("Premium")).not.toBeInTheDocument();
+    state.data = {
+      ...state.data,
+      configurations: [state.data.configurations[1]],
+    };
+    view.rerender(<ApplicationWorkspace {...props} />);
+    await waitFor(() => expect(screen.getByText("Premium")).toBeVisible());
+    expect(
+      screen.queryByRole("combobox", { name: "applications.accountFilter" }),
+    ).not.toBeInTheDocument();
+  });
+  it("searches the effective model displayed in the row", async () => {
+    state.data.configurations[0].model = "old-model";
+    state.routing.tiers[0].effectiveModel = "selected-model";
+    render(<ApplicationWorkspace {...props} />);
+    await userEvent.type(
+      screen.getByRole("searchbox", { name: "applications.search" }),
+      "selected-model",
+    );
+    expect(screen.getByText("Standard")).toBeVisible();
+    expect(screen.queryByText("Premium")).not.toBeInTheDocument();
+  });
 });
 
 describe("reorderWithinVisible (splice semantics)", () => {
@@ -546,5 +646,61 @@ describe("reorderWithinVisible (splice semantics)", () => {
     expect(fn(["A", "B", "C"], ["A", "B", "C"], 2, 0)).toEqual(["C", "A", "B"]);
     // 非法下标原样返回。
     expect(fn(["A", "B"], ["A", "B"], -1, 0)).toEqual(["A", "B"]);
+  });
+});
+
+describe("order profile menu pending state", () => {
+  it("disables an already open menu while deleting and cannot load the pending profile", async () => {
+    let finish!: () => void;
+    state.removeProfile.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onLoadDraft = vi.fn();
+    const onProfileRemoved = vi.fn();
+    render(
+      <OrderProfilesMenu
+        appType="codex"
+        state={{
+          current: "",
+          profiles: [{ name: "Saved", providerIds: ["a", "b"] }],
+        }}
+        targetIds={["a", "b"]}
+        storedIds={["a", "b"]}
+        onLoadDraft={onLoadDraft}
+        onSaved={vi.fn()}
+        onBusyChange={vi.fn()}
+        onProfileRenamed={vi.fn()}
+        onProfileRemoved={onProfileRemoved}
+      />,
+    );
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.orderProfileDelete" }),
+    );
+    expect(state.removeProfile).toHaveBeenCalledWith("codex", "Saved");
+    const row = screen.getByText("Saved").closest('[role="menuitem"]')!;
+    expect(row).toHaveAttribute("data-disabled");
+    expect(
+      screen.getByRole("button", { name: "applications.orderProfileRename" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "applications.orderProfileDelete" }),
+    ).toBeDisabled();
+    for (const action of [
+      "orderProfileSaveCurrent",
+      "orderProfileImport",
+      "orderProfileExport",
+    ]) {
+      expect(
+        screen.getByRole("menuitem", { name: `applications.${action}` }),
+      ).toHaveAttribute("data-disabled");
+    }
+    await userEvent.click(row);
+    expect(onLoadDraft).not.toHaveBeenCalled();
+    await act(async () => finish());
+    expect(onProfileRemoved).toHaveBeenCalledWith("Saved");
   });
 });

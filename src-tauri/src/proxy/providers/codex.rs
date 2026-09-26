@@ -413,284 +413,88 @@ pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
-    let mut config = if let Some(config) = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_chat_reasoning.clone())
-    {
-        normalize_codex_chat_reasoning_config(config)
-    } else {
-        infer_codex_chat_reasoning_config(provider, body)?
-    };
-
-    // zen 的合法 effort 档位是逐模型的（models.dev：glm-5.2 仅 high|max、
-    // kimi-k3 仅 max、qwen/glm-5.1 等为 toggle 型无 effort），opencode 客户端
-    // 也严格按模型声明发值。按请求模型从 modelCatalog 的 reasoningLevels
-    // （#6228 引入的逐模型声明）查表附上；查不到（模型未收录 / 条目未声明
-    // effort）→ None，转换层将完全不发 reasoning_effort。
-    if config.effort_value_mode.as_deref() == Some("zen") {
-        config.effort_levels = zen_catalog_effort_levels(provider, body);
-    }
-
-    Some(config)
-}
-
-/// 按请求模型从供应商 modelCatalog 查 Zen 合法 effort 档位（逐模型数据镜像
-/// models.dev 的 reasoning_options effort values）。仅做档位查表，不参与平台
-/// 判定——平台身份仍只由 name/base_url 决定（见 infer_aggregator_platform_config）。
-/// DB SSOT 为 camelCase，手写/旧数据可能为 snake_case，双格式兼容（与表单加载侧一致）。
-fn zen_catalog_effort_levels(provider: &Provider, body: &JsonValue) -> Option<Vec<String>> {
-    let model = body.get("model")?.as_str()?.trim();
-    if model.is_empty() {
-        return None;
-    }
-    let entries = provider
-        .settings_config
-        .get("modelCatalog")?
-        .get("models")?
-        .as_array()?;
-    let entry = entries.iter().find(|entry| {
-        entry
-            .get("model")
-            .and_then(|value| value.as_str())
-            .is_some_and(|name| name.eq_ignore_ascii_case(model))
-    })?;
-    let levels_value = entry
-        .get("reasoningLevels")
-        .or_else(|| entry.get("reasoning_levels"))?;
-    let levels: Vec<String> = levels_value
-        .as_array()?
-        .iter()
-        .filter_map(|level| level.as_str().map(str::to_string))
-        .collect();
-    (!levels.is_empty()).then_some(levels)
-}
-
-fn normalize_codex_chat_reasoning_config(
-    mut config: CodexChatReasoningConfig,
-) -> CodexChatReasoningConfig {
-    if config.supports_effort.unwrap_or(false) && config.supports_thinking.is_none() {
-        config.supports_thinking = Some(true);
-    }
-    config
-}
-
-fn infer_codex_chat_reasoning_config(
-    provider: &Provider,
-    body: &JsonValue,
-) -> Option<CodexChatReasoningConfig> {
     let model = body
         .get("model")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
         .or_else(|| codex_provider_upstream_model(provider))
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+        .unwrap_or_default();
     let base_url = provider
         .settings_config
         .get("base_url")
         .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
         .or_else(|| {
             provider
                 .settings_config
                 .get("config")
-                .and_then(|v| v.as_str())
+                .and_then(JsonValue::as_str)
                 .and_then(extract_codex_base_url_from_toml)
         })
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let name = provider.name.to_ascii_lowercase();
-
-    // 平台优先：聚合 / 托管平台的 reasoning 接口由平台的推理框架决定，而非模型官方实现，
-    // 因此先按平台标识（仅 name + base_url，不含 model 名）判定并覆盖模型规则。
-    if let Some(config) = infer_aggregator_platform_config(&name, &base_url) {
-        return Some(config);
-    }
-
-    let haystack = format!("{name} {base_url} {model}");
-
-    if haystack.contains("deepseek") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(true),
-            thinking_param: Some("thinking".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("deepseek".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    // StepFun：官方 reasoning 指南与两站模型页（2026-08-15 盘点）——
-    // step-3.5-flash-2603 支持 low/high 两档；step-3.7-flash 支持
-    // low/medium/high 三档（官方默认 medium）；其余 step 模型（含无后缀
-    // step-3.5-flash）不暴露 effort。2603 沿用 low_high 收敛映射；
-    // 3.7-flash 必须 passthrough——套 low_high 会把 medium 塌成 high，
-    // 造出 wire 上无差异的假档位。全系无思考开关（thinking_param 恒 none）。
-    // 第二个 OR 分支覆盖「经中转/聚合跑该模型、但平台 name/base_url 不含 stepfun」的情况。
-    if haystack.contains("stepfun") || haystack.contains("step-3.5-flash-2603") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(model.contains("2603") || model.contains("step-3.7-flash")),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some(
-                if model.contains("2603") {
-                    "low_high"
-                } else {
-                    "passthrough"
-                }
-                .to_string(),
-            ),
-            output_format: Some("reasoning".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    if haystack.contains("kimi") || haystack.contains("moonshot") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(false),
-            thinking_param: Some("thinking".to_string()),
-            effort_param: Some("none".to_string()),
-            effort_value_mode: None,
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    if haystack.contains("glm") || haystack.contains("zhipu") || haystack.contains("z.ai") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(false),
-            thinking_param: Some("thinking".to_string()),
-            effort_param: Some("none".to_string()),
-            effort_value_mode: None,
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    if haystack.contains("qwen") || haystack.contains("dashscope") || haystack.contains("bailian") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(false),
-            thinking_param: Some("enable_thinking".to_string()),
-            effort_param: Some("none".to_string()),
-            effort_value_mode: None,
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    if haystack.contains("minimax") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(false),
-            thinking_param: Some("reasoning_split".to_string()),
-            effort_param: Some("none".to_string()),
-            effort_value_mode: None,
-            output_format: Some("reasoning_details".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    if haystack.contains("mimo") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(false),
-            thinking_param: Some("thinking".to_string()),
-            effort_param: Some("none".to_string()),
-            effort_value_mode: None,
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    None
+        .unwrap_or_default();
+    crate::codex_reasoning::chat_transport(
+        &provider.name,
+        &base_url,
+        &model,
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_chat_reasoning.as_ref()),
+        &provider.settings_config,
+        crate::codex_config::official_reasoning_capabilities(&model),
+    )
 }
 
-/// 聚合 / 托管平台的 reasoning 接口由平台决定：同一个模型在不同平台参数可能完全不同
-/// （DeepSeek 官方用 `thinking:{type}`、SiliconFlow 用 `enable_thinking`、
-/// OpenRouter 用原生 `reasoning:{effort}` 对象）。仅以平台标识（name / base_url）判定，
-/// 绝不掺入 model 名——model 名属于模型厂商，会把托管平台误判成模型官方接口。
-fn infer_aggregator_platform_config(
-    name: &str,
-    base_url: &str,
-) -> Option<CodexChatReasoningConfig> {
-    let platform = format!("{name} {base_url}");
-
-    // OpenRouter：用原生归一化对象 `reasoning: { effort }`（由 OpenRouter 翻译成各底层
-    // 模型的正确推理参数，比顶层 OpenAI 别名 reasoning_effort 覆盖面更全）。effort 走
-    // "openrouter" 值映射：枚举为 xhigh|high|medium|low|minimal，无 max——max 会触发
-    // `400 reasoning_effort: Invalid option`（见 openclaw#77350），故钳到 xhigh。
-    // 安全降级：不发 `thinking:{type}`（OpenRouter 不认该字段），避免误配导致请求被拒。
-    if platform.contains("openrouter") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(false),
-            supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning.effort".to_string()),
-            effort_value_mode: Some("openrouter".to_string()),
-            output_format: Some("auto".to_string()),
-            effort_levels: None,
-        });
+/// Validate a changed final model before native forwarding or protocol conversion.
+pub fn normalize_request_reasoning(
+    provider: &Provider,
+    body: &mut JsonValue,
+    model_changed: bool,
+) -> Result<(), String> {
+    // Same-model adapter mappings (for example xhigh -> max) are protocol encoding,
+    // not an incompatible model selection, and retain their existing semantics.
+    if !model_changed {
+        return Ok(());
     }
-
-    // SiliconFlow：平台级统一 `enable_thinking`，思维回传 reasoning_content。
-    // 安全降级：不按 reasoning_effort 发 effort（平台用 thinking_budget 控制深度，
-    // 发 reasoning_effort 反而可能不被接受）。
-    if platform.contains("siliconflow") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(false),
-            thinking_param: Some("enable_thinking".to_string()),
-            effort_param: Some("none".to_string()),
-            effort_value_mode: None,
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
+    let Some(model) = body.get("model").and_then(JsonValue::as_str) else {
+        return Ok(());
+    };
+    let Some(effort) = body
+        .pointer("/reasoning/effort")
+        .and_then(JsonValue::as_str)
+    else {
+        return Ok(());
+    };
+    let declared = crate::codex_reasoning::model_row(&provider.settings_config, model)
+        .and_then(crate::codex_reasoning::declared_capabilities);
+    let transport = codex_provider_uses_chat_completions(provider)
+        .then(|| resolve_codex_chat_reasoning_config(provider, body))
+        .flatten();
+    let official = if codex_provider_uses_anthropic(provider) {
+        None
+    } else if codex_provider_uses_chat_completions(provider) {
+        crate::codex_config::official_reasoning_capabilities(model)
+    } else {
+        crate::codex_config::native_reasoning_capabilities(
+            provider
+                .settings_config
+                .get("config")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default(),
+            model,
+        )
+    };
+    let Some(capabilities) =
+        crate::codex_reasoning::resolve(model, declared, official, transport.as_ref())
+    else {
+        return Ok(()); // Unknown is not an assertion that reasoning is unsupported.
+    };
+    let selected = capabilities.selected_effort(model, effort)?;
+    if selected != effort {
+        body["reasoning"]["effort"] = JsonValue::String(selected);
     }
-
-    // ModelScope 魔搭 API-Inference：与 SiliconFlow 同构——平台级统一
-    // `enable_thinking` 布尔（官方模型页范例 extra_body {"enable_thinking": bool}，
-    // OpenAI SDK 的 extra_body 合并进请求体顶层），思维回传 reasoning_content。
-    // 智谱风格 thinking:{type} 是模型厂商自家方言，平台文档零出现——没有这条
-    // 分支时挂 GLM 的 ModelScope 供应商会被下方 glm 模型规则错误注入该形态。
-    if platform.contains("modelscope") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(false),
-            thinking_param: Some("enable_thinking".to_string()),
-            effort_param: Some("none".to_string()),
-            effort_value_mode: None,
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    // OpenCode Zen（opencode.ai 网关，issue #6112）：其自家客户端对该传输发顶层
-    // `reasoning_effort`（provider/transform.ts），平台归一参数；不发厂商原生
-    // thinking 形状（glm 模型走 zen 时套智谱 thinking:{type} 网关不认）。
-    // 合法档位逐模型（models.dev 的 reasoning_options，opencode 客户端同样严格
-    // 按模型声明发值）：具体档位表见供应商 modelCatalog 各条目的 reasoningLevels，
-    // 代理由此按请求模型查表钳制（resolve 处附上 effort_levels），无表不发字段。
-    // 匹配域名而非裸 "opencode"，避免误伤名字含 opencode 的无关供应商。
-    if platform.contains("opencode.ai") {
-        return Some(CodexChatReasoningConfig {
-            supports_thinking: Some(true),
-            supports_effort: Some(true),
-            thinking_param: Some("none".to_string()),
-            effort_param: Some("reasoning_effort".to_string()),
-            effort_value_mode: Some("zen".to_string()),
-            output_format: Some("reasoning_content".to_string()),
-            effort_levels: None,
-        });
-    }
-
-    None
+    Ok(())
 }
 
 fn is_chat_wire_api(value: &str) -> bool {
@@ -1698,6 +1502,71 @@ wire_api = "responses"
 
         assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));
+    }
+
+    #[test]
+    fn changed_model_reasoning_uses_declared_default_or_requires_choice() {
+        let provider = create_provider(json!({
+            "modelCatalog":{"models":[
+                {"model":"target","reasoningLevels":["low","high"],"defaultReasoningLevel":"low"},
+                {"model":"no-default","reasoningLevels":["low","high"]}
+            ]}
+        }));
+        let mut body = json!({"model":"target","reasoning":{"effort":"ultra","summary":"auto"}});
+        normalize_request_reasoning(&provider, &mut body, true).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        body["model"] = json!("no-default");
+        body["reasoning"]["effort"] = json!("ultra");
+        assert!(normalize_request_reasoning(&provider, &mut body, true).is_err());
+        normalize_request_reasoning(&provider, &mut body, false).unwrap();
+        assert_eq!(
+            body["reasoning"]["effort"], "ultra",
+            "same-model protocol encoding remains owned by the adapter"
+        );
+    }
+
+    #[test]
+    fn declared_alias_reasoning_reaches_chat_request() {
+        let provider = create_provider(json!({
+            "modelCatalog": { "models": [{
+                "model": "custom-alias", "reasoningLevels": ["low", "medium", "high"],
+                "defaultReasoningLevel": "medium"
+            }] }
+        }));
+        let body = json!({"model":"custom-alias", "input":"hello", "reasoning":{"effort":"low"}});
+        let config = resolve_codex_chat_reasoning_config(&provider, &body);
+        let sent =
+            super::super::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                body,
+                config.as_ref(),
+            )
+            .unwrap();
+        assert_eq!(sent["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn reenabled_reasoning_repairs_legacy_none_parameters() {
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(true),
+                thinking_param: Some("none".into()),
+                effort_param: Some("none".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let body = json!({"model":"custom-alias", "input":"hello", "reasoning":{"effort":"high"}});
+        let config = resolve_codex_chat_reasoning_config(&provider, &body);
+        let sent =
+            super::super::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                body,
+                config.as_ref(),
+            )
+            .unwrap();
+        assert_eq!(sent["reasoning_effort"], "high");
     }
 
     #[test]

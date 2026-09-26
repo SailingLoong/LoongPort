@@ -8,8 +8,46 @@ pub(crate) fn available_models(provider: &Provider) -> Vec<String> {
     if managed::is_managed(&provider.id) && !managed::is_managed_vendor(&provider.id) {
         provider.available_models.clone().unwrap_or_default()
     } else {
-        crate::relay::provider_config::models_from_settings(&provider.settings_config)
+        configured_models(&provider.settings_config)
     }
+}
+
+/// Custom configurations have no remote inventory contract. Their native model
+/// selections and role mappings are explicit choices, just like catalog rows.
+fn configured_models(settings: &serde_json::Value) -> Vec<String> {
+    let mut models = super::provider_config::models_from_settings(settings);
+    let mut add = |model: &str| {
+        let model = crate::proxy::model_mapper::strip_one_m_suffix_for_upstream(model).trim();
+        if !model.is_empty() && !models.iter().any(|existing| existing == model) {
+            models.push(model.to_string());
+        }
+    };
+    if let Some(env) = settings.get("env") {
+        for key in ["ANTHROPIC_MODEL", "GEMINI_MODEL"]
+            .into_iter()
+            .chain(
+                crate::claude_desktop_config::DEFAULT_PROXY_ROUTES
+                    .iter()
+                    .map(|route| route.env_key),
+            )
+            .chain(["CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"])
+        {
+            if let Some(model) = env.get(key).and_then(serde_json::Value::as_str) {
+                add(model);
+            }
+        }
+    }
+    if let Some(model) = super::provider_config::extract_model(settings) {
+        add(&model);
+    }
+    if let Some(model) = settings
+        .get("config")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::grok_config::extract_model_config)
+    {
+        add(&model.model);
+    }
+    models
 }
 
 /// Validate against remote availability, then modify only the user's explicit model selection.
@@ -79,10 +117,23 @@ pub(crate) fn select_model(
                         "Could not read the model configuration. Please check its contents.",
                     )
                 })?;
-            settings["config"] =
-                crate::codex_config::update_codex_toml_field(config, "model", model)
-                    .map_err(AppError::Config)?
-                    .into();
+            let model_changed =
+                crate::relay::provider_config::selected_model(app, &provider.settings_config)
+                    .as_deref()
+                    != Some(model);
+            let config = crate::codex_config::update_codex_toml_field(config, "model", model)
+                .map_err(AppError::Config)?;
+            let mut selected_provider = provider.clone();
+            selected_provider.settings_config = settings.clone();
+            let profile =
+                crate::proxy::providers::resolve_codex_catalog_tool_profile(&selected_provider);
+            settings["config"] = crate::codex_config::normalize_selected_model_reasoning(
+                &selected_provider,
+                &config,
+                profile,
+                model_changed,
+            )?
+            .into();
             Ok(settings)
         }
         AppType::GrokBuild => {
@@ -386,6 +437,43 @@ mod tests {
             .unwrap()
             .available_models
             .is_none());
+    }
+
+    #[test]
+    fn custom_native_model_configuration_is_selectable_without_catalog() {
+        let provider = Provider::with_id(
+            "custom".into(),
+            "Custom".into(),
+            json!({"env": {
+                "ANTHROPIC_MODEL": "vendor-main[1M]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "vendor-main[1M]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "vendor-fast",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Display name",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "vendor-worker"
+            }}),
+            None,
+        );
+        assert_eq!(
+            available_models(&provider),
+            vec!["vendor-main", "vendor-fast", "vendor-worker"]
+        );
+        let selected = select_model(&AppType::Claude, &provider, "vendor-fast").unwrap();
+        assert_eq!(selected["env"]["ANTHROPIC_MODEL"], "vendor-fast");
+        assert_eq!(
+            selected["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+            "vendor-worker"
+        );
+
+        let codex = Provider::with_id(
+            "custom-codex".into(),
+            "Custom".into(),
+            json!({
+                "config": "model = \"custom-model\"\nmodel_provider = \"custom\"\n"
+            }),
+            None,
+        );
+        assert_eq!(available_models(&codex), vec!["custom-model"]);
+        assert!(select_model(&AppType::Codex, &codex, "custom-model").is_ok());
     }
 
     #[test]

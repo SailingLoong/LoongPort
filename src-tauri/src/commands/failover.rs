@@ -123,7 +123,8 @@ pub async fn set_auto_failover_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let _ = app;
-    crate::proxy::application_routing::set_failover(&state.db, &app_type, enabled)
+    state
+        .proxy_service
+        .set_failover_for_app(&app_type, enabled)
         .await
-        .map_err(|e| e.to_string())
 }

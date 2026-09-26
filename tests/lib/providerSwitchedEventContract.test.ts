@@ -56,12 +56,15 @@ describe("provider-switched 的跨页面契约", () => {
         "中转站区里那个档位会一直显示「使用中」、删除按钮一直是灰的",
     ).toMatch(/emit_provider_switched\(&emit_handle/);
 
-    // `relay_switch_tier`（中转站区切档位）—— 镜像方向。commands::relay 已按领域
-    // 拆成目录（2026-09-07），切换路径在 switch.rs。
+    // 托管档位命令委托应用选择服务；事件由执行选择的 owner 发出。
     const switchRs = read("src-tauri/src/commands/relay/switch.rs");
+    expect(switchRs).toMatch(/services::application_selection/);
+    expect(switchRs).toMatch(/switch_tier_command\(&app_handle/);
+    expect(switchRs).not.toMatch(/emit_provider_switched\(/);
+    const selectionRs = read("src-tauri/src/services/application_selection.rs");
     expect(
-      switchRs,
-      "relay_switch_tier 没有广播 —— 切完档位之后 provider 列表会陈旧",
+      selectionRs,
+      "应用选择服务没有广播 —— 切完档位之后 provider 列表会陈旧",
     ).toMatch(/emit_provider_switched\(/);
   });
 

@@ -59,8 +59,16 @@ export function useSetProxyTakeoverForApp() {
   return useMutation({
     mutationFn: ({ appType, enabled }: { appType: string; enabled: boolean }) =>
       proxyApi.setProxyTakeoverForApp(appType, enabled),
-    onSuccess: () => {
+    onSuccess: (_, { appType }) => {
       queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
+      queryClient.invalidateQueries({ queryKey: proxyKeys.status });
+      queryClient.invalidateQueries({
+        queryKey: ["applicationRouting", appType],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["autoFailoverEnabled", appType],
+      });
+      queryClient.invalidateQueries({ queryKey: proxyKeys.appConfig(appType) });
     },
   });
 }

@@ -1,6 +1,7 @@
 //! Compatibility commands and TierBoard facts for application routing.
 //! Priority and fallback mutations belong to `proxy::application_routing`.
 
+use crate::app_config::AppType;
 use crate::proxy::auto_strategy;
 use crate::store::AppState;
 use std::str::FromStr;
@@ -86,15 +87,15 @@ pub async fn get_auto_mode_status(
 /// Legacy toggle delegates to application fallback permission without switching.
 #[tauri::command]
 pub async fn set_auto_mode_enabled(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let _ = app;
-    crate::proxy::application_routing::set_failover(&state.db, &app_type, enabled)
+    state
+        .proxy_service
+        .set_failover_for_app(&app_type, enabled)
         .await
-        .map_err(|e| e.to_string())
 }
 
 /// Policy reranking is retired; callers must submit an explicit priority order.
@@ -132,8 +133,26 @@ pub(crate) async fn set_auto_mode_model_impl(
     {
         return Err("Model routing requires a running application proxy and takeover".into());
     }
-    crate::proxy::application_routing::set_model(&state.db, app_type, model)
-        .map_err(|e| e.to_string())
+    let provider_id = crate::proxy::application_routing::current_provider_id(&state.db, app_type)
+        .ok_or_else(|| "Select a provider before choosing a model".to_string())?;
+    let app_type = app_type
+        .parse::<AppType>()
+        .map_err(|error| error.to_string())?;
+    crate::services::application_selection::apply_application_routing(
+        &app,
+        app_type,
+        crate::services::application_selection::ApplicationRoutingChange {
+            order: None,
+            selection: Some(crate::services::application_selection::TierSelection {
+                provider_id,
+                model: model.map(str::to_owned),
+            }),
+        },
+        Some(false),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 /// Only persistent manual ordering remains supported.

@@ -80,6 +80,23 @@ impl ModelMapping {
     /// 模型对齐告知——只有**默认兜底**（客户端点名的模型档位没认）算「不符」，
     /// 角色命中是设计内的档位对齐。
     fn map_model_with_kind(&self, original_model: &str) -> (String, ModelMappingKind) {
+        // A configured target is already resolved. In particular, subagent and
+        // Fable targets can contain another role's name; do not map them twice.
+        for (target, kind) in [
+            (&self.subagent_model, ModelMappingKind::Unchanged),
+            (&self.default_model, ModelMappingKind::Default),
+            (&self.haiku_model, ModelMappingKind::Role),
+            (&self.sonnet_model, ModelMappingKind::Role),
+            (&self.opus_model, ModelMappingKind::Role),
+            (&self.fable_model, ModelMappingKind::Role),
+        ] {
+            if target.as_ref().is_some_and(|target| {
+                strip_one_m_suffix_for_upstream(original_model)
+                    == strip_one_m_suffix_for_upstream(target)
+            }) {
+                return (original_model.to_string(), kind);
+            }
+        }
         let model_lower = original_model.to_lowercase();
 
         // 1. 按模型类型匹配
@@ -106,13 +123,6 @@ impl ModelMapping {
         if model_lower.contains("sonnet") {
             if let Some(ref m) = self.sonnet_model {
                 return (m.clone(), ModelMappingKind::Role);
-            }
-        }
-
-        if let Some(ref m) = self.subagent_model {
-            if strip_one_m_suffix_for_upstream(original_model) == strip_one_m_suffix_for_upstream(m)
-            {
-                return (original_model.to_string(), ModelMappingKind::Unchanged);
             }
         }
 
@@ -234,6 +244,29 @@ mod tests {
             in_failover_queue: false,
             available_models: None,
         }
+    }
+
+    #[test]
+    fn configured_targets_are_not_remapped_by_role_substrings() {
+        let mut provider = create_provider_with_mapping();
+        provider.settings_config = json!({"env": {
+            "ANTHROPIC_MODEL": "vendor-default",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "vendor-opus-primary",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "vendor-opus-premium",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "vendor-opus-worker"
+        }});
+        for requested in [
+            "vendor-opus-worker",
+            "vendor-opus-worker[1M]",
+            "vendor-opus-premium",
+        ] {
+            let (body, _, _, _) =
+                apply_model_mapping_detailed(json!({"model": requested}), &provider);
+            assert_eq!(body["model"], requested);
+        }
+        let (body, _, _, _) =
+            apply_model_mapping_detailed(json!({"model": "claude-opus-client"}), &provider);
+        assert_eq!(body["model"], "vendor-opus-primary");
     }
 
     #[test]
