@@ -19,6 +19,34 @@ pub fn normalize_gemini_model_id(model: &str) -> &str {
     trimmed.strip_prefix("models/").unwrap_or(trimmed)
 }
 
+/// Apply model intent to native Gemini calls while retaining method and query.
+/// Discovery and non-model endpoints remain unchanged.
+pub fn with_selected_model(endpoint: &str, model: &str) -> Option<String> {
+    let (path, query) = split_query(endpoint);
+    let (prefix, call) = path.rsplit_once("/models/")?;
+    let (_, method) = call.rsplit_once(':')?;
+    if !matches!(
+        method,
+        "generateContent" | "streamGenerateContent" | "countTokens"
+    ) {
+        return None;
+    }
+    let mut encoded = url::Url::parse("http://localhost/").expect("static URL");
+    encoded
+        .path_segments_mut()
+        .expect("hierarchical URL")
+        .clear()
+        .push(normalize_gemini_model_id(model));
+    let path = format!(
+        "{prefix}/models/{}:{method}",
+        encoded.path().trim_start_matches('/')
+    );
+    Some(match query {
+        Some(query) => format!("{path}?{query}"),
+        None => path,
+    })
+}
+
 pub fn resolve_gemini_native_url(base_url: &str, endpoint: &str, is_full_url: bool) -> String {
     if !is_full_url || should_normalize_gemini_full_url(base_url) {
         return build_gemini_native_url(base_url, endpoint);
@@ -700,5 +728,28 @@ mod tests {
         // surfaces at the request layer rather than producing a misleading
         // empty segment here.
         assert_eq!(normalize_gemini_model_id(""), "");
+    }
+}
+
+#[cfg(test)]
+mod selected_model_tests {
+    #[test]
+    fn model_selection_preserves_native_method_query_and_discovery() {
+        assert_eq!(
+            super::with_selected_model(
+                "/v1beta/models/old:streamGenerateContent?alt=sse",
+                "models/new"
+            ),
+            Some("/v1beta/models/new:streamGenerateContent?alt=sse".into())
+        );
+        assert_eq!(
+            super::with_selected_model("/v1beta/models/old:countTokens", "new"),
+            Some("/v1beta/models/new:countTokens".into())
+        );
+        assert_eq!(
+            super::with_selected_model("/v1beta/models/old", "new"),
+            None
+        );
+        assert_eq!(super::with_selected_model("/v1beta/models", "new"), None);
     }
 }

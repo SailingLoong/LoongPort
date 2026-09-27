@@ -310,7 +310,7 @@ pub fn responses_to_chat_completions_with_reasoning(
         }
     }
 
-    apply_reasoning_options(&mut result, &body, model, reasoning_config);
+    apply_reasoning_options(&mut result, &body, reasoning_config);
 
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
@@ -353,14 +353,13 @@ pub fn responses_to_chat_completions_with_reasoning(
 fn apply_reasoning_options(
     result: &mut Value,
     body: &Value,
-    model: &str,
     config: Option<&CodexChatReasoningConfig>,
 ) {
     let Some(config) = config else {
-        if super::transform::supports_reasoning_effort(model) {
-            if let Some(effort) = body.pointer("/reasoning/effort") {
-                result["reasoning_effort"] = effort.clone();
-            }
+        // Unknown capabilities do not authorize model choices or erase an explicit
+        // client value: only convert the standard protocol field here.
+        if let Some(effort) = body.pointer("/reasoning/effort") {
+            result["reasoning_effort"] = effort.clone();
         }
         return;
     };
@@ -408,11 +407,18 @@ fn apply_reasoning_options(
         // 上游显式发 effort=none/off/disabled（或 reasoning=null）时 reasoning_enabled 为 false，
         // 直接 return 会丢失关闭意图——OpenRouter 部分模型默认开思考，不带字段无法关闭，
         // 造成行为与成本偏差；故对该形态忠实转发 {"reasoning":{"effort":"none"}}。
-        // 顶层 reasoning_effort 平台的枚举不含 none，仍走上方 thinking 关闭路径、不发 effort。
+        // 有独立 thinking 开关的平台由上方字段关闭；只有 effort 参数的平台保留 none。
         // 注意：完全不带 reasoning 字段时 reasoning_requested 返回 None 已提前 return，
         // 不会走到这里，故只有上游「显式」表达关闭才透传 none。
-        if effort_param == "reasoning.effort" {
+        if supports_effort && effort_param == "reasoning.effort" {
             result["reasoning"] = json!({ "effort": "none" });
+        } else if supports_effort
+            && effort_param == "reasoning_effort"
+            && config.thinking_param.as_deref() == Some("none")
+        {
+            // This transport has no independent switch. Preserve the explicit
+            // disabled value even when model capabilities have not been declared.
+            result["reasoning_effort"] = json!("none");
         }
         return;
     }
@@ -534,17 +540,9 @@ fn map_reasoning_effort<'a>(
 
 /// Codex 规范档位序（minimal < low < medium < high < xhigh < max < ultra），供 zen
 /// 逐模型钳制做大小比较；目录里的非法/扩展值（如 "none"）返回 None，查表时被滤掉。
-fn zen_effort_rank(effort: &str) -> Option<u8> {
-    match effort.trim().to_ascii_lowercase().as_str() {
-        "minimal" => Some(0),
-        "low" => Some(1),
-        "medium" => Some(2),
-        "high" => Some(3),
-        "xhigh" => Some(4),
-        "max" => Some(5),
-        "ultra" => Some(6),
-        _ => None,
-    }
+fn zen_effort_rank(effort: &str) -> Option<usize> {
+    crate::codex_reasoning::effort_rank(&effort.trim().to_ascii_lowercase())
+        .filter(|rank| *rank > 0)
 }
 
 /// MiniMax 严格要求 messages 中只能首条出现 `role=system`，
@@ -2074,6 +2072,28 @@ mod tests {
     }
 
     #[test]
+    fn disabled_effort_does_not_send_an_off_parameter() {
+        let input = json!({"model":"alias", "input":"hello", "reasoning":{"effort":"none"}});
+        let config = CodexChatReasoningConfig {
+            supports_effort: Some(false),
+            supports_thinking: Some(false),
+            effort_param: Some("reasoning.effort".into()),
+            ..Default::default()
+        };
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+        assert!(result.get("reasoning").is_none());
+        assert!(result.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn unknown_model_reasoning_preserves_explicit_effort_without_inference() {
+        let input =
+            json!({"model": "unlisted-alias", "input": "hello", "reasoning": {"effort": "high"}});
+        let result = responses_to_chat_completions(input).unwrap();
+        assert_eq!(result["reasoning_effort"], "high");
+    }
+
+    #[test]
     fn map_reasoning_effort_handles_ultra_per_mode() {
         // passthrough 面向枚举未知的通用上游：ultra 与 max/xhigh 一样原值透传，
         // 让声明了该档位的上游能收到用户选择。
@@ -2292,7 +2312,12 @@ mod tests {
             "stream": true
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let reasoning = CodexChatReasoningConfig {
+            supports_effort: Some(true),
+            thinking_param: Some("none".into()),
+            ..Default::default()
+        };
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&reasoning)).unwrap();
 
         assert_eq!(result["model"], "gpt-5.4");
         assert_eq!(result["messages"][0]["role"], "system");
@@ -2681,16 +2706,14 @@ mod tests {
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
         assert_eq!(result["reasoning"]["effort"], "none");
-        // none 不是 OpenAI 顶层 reasoning_effort 的合法枚举，不写顶层别名；也不写 thinking。
+        // 该传输使用嵌套 reasoning.effort，不同时发送顶层别名或 thinking。
         assert!(result.get("reasoning_effort").is_none());
         assert!(result.get("thinking").is_none());
     }
 
     #[test]
-    fn responses_request_to_chat_drops_explicit_none_for_top_level_effort_provider() {
-        // 对照：顶层 reasoning_effort 平台（DeepSeek/OpenAI 风格）的 effort 枚举不含 none，
-        // 显式 none 不应透传成 reasoning_effort:"none"（会被上游拒），仅走 thinking 关闭路径。
-        // 锁定「none 透传仅限 reasoning.effort 形态」的边界，防止回归。
+    fn responses_request_to_chat_uses_independent_thinking_switch_for_none() {
+        // 有独立开关的 DeepSeek 传输通过 thinking 关闭思考，不另发 effort。
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
             supports_effort: Some(true),

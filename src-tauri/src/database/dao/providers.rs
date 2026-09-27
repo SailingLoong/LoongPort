@@ -9,6 +9,20 @@ use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::{HashMap, HashSet};
 
+/// Delete one row in a caller-owned inventory mutation. The final inventory
+/// must be reconciled before that mutation is committed or published.
+pub(crate) fn delete_provider_row_on(
+    conn: &rusqlite::Connection,
+    app: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    conn.execute(
+        "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
+        params![id, app],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn insert_endpoint_on_tx(
     tx: &Transaction<'_>,
     vault: &VaultContext,
@@ -505,12 +519,11 @@ impl Database {
     }
 
     pub fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
-        conn.execute(
-            "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
-            params![id, app_type],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn.transaction()?;
+        delete_provider_row_on(&tx, app_type, id)?;
+        super::order_profiles::reconcile_on(&tx, app_type)?;
+        tx.commit()?;
         Ok(())
     }
 

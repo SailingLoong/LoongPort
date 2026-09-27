@@ -512,7 +512,8 @@ pub async fn switch_provider(
     if should_request_chatgpt_confirmation(
         &app_type,
         quit_chatgpt,
-        crate::relay::chatgpt_app::needs_user_attention(),
+        crate::relay::chatgpt_app::needs_user_attention()
+            && !crate::services::provider::is_app_taken_over(&state, &app_type),
     ) {
         return Ok(ProviderSwitchCommandResult::ConfirmationRequired {
             target_name: provider.name,
@@ -526,7 +527,8 @@ pub async fn switch_provider(
         crate::services::provider::is_app_taken_over(state.inner(), &app_type)
     };
     let routing_notice = routing_requirement.filter(|_| !routing_ready);
-    let quit_chatgpt = quit_chatgpt.unwrap_or(false) && matches!(app_type, AppType::Codex);
+    let quit_chatgpt =
+        quit_chatgpt.unwrap_or(false) && matches!(app_type, AppType::Codex) && !routing_ready;
 
     let emit_handle = app_handle.clone();
     let emit_app_type = app_type.clone();

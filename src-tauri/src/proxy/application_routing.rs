@@ -77,7 +77,7 @@ pub fn ordered_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppE
     Ok(providers)
 }
 
-/// 存储链的原始 id 列表（可能含上游已删除的幽灵）；链未初始化时为 None。
+/// 存储链的原始 id 列表；未初始化时返回空列表。
 fn stored_order(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
     Ok(db
         .get_setting(&priority_key(app))?
@@ -89,18 +89,35 @@ fn stored_order(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
 
 /// 故障切换链的有效 id 全集（2026-09-16 用户定调：链 = 用户已应用的列表）。
 ///
-/// - 链已初始化：严格按存储链返回，幽灵原样带出（调用方各自跳过）。
-///   `set_order` 拒绝空列表，所以已初始化的链绝不退化成空表。
+/// - 链已初始化：严格按存储链返回；最后一个成员删除后保留空链。
 /// - 链未初始化：回落全量显示序——与启动 migrate 的全量播种等价的读时默认，
 ///   让「从没应用过」和「应用了全部」在读取侧无歧义地同形。
 pub fn chain_ids(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
+    let conn = lock_conn!(db.conn);
+    chain_ids_on(&conn, app)
+}
+
+pub(crate) fn chain_ids_on(
+    conn: &rusqlite::Connection,
+    app: &str,
+) -> Result<Vec<String>, AppError> {
     AppType::from_str(app)?;
-    match db.get_setting(&priority_key(app))? {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [priority_key(app)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match raw {
         Some(raw) => serde_json::from_str(&raw).map_err(|e| AppError::Config(e.to_string())),
-        None => Ok(ordered_providers(db, app)?
-            .into_iter()
-            .map(|p| p.id)
-            .collect()),
+        None => {
+            let mut stmt = conn.prepare("SELECT id FROM providers WHERE app_type = ?1 ORDER BY sort_index IS NULL, sort_index, id")?;
+            let ids = stmt
+                .query_map([app], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok(ids)
+        }
     }
 }
 
@@ -121,20 +138,23 @@ pub fn chain_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppErr
 /// 只由 [`crate::database::Database::save_provider`] 的插入分支调用——编辑更新
 /// 不追加，否则被用户应用出链的档位一刷新就爬回链里。
 pub fn note_provider_created(db: &Database, app: &str, id: &str) -> Result<(), AppError> {
+    let conn = lock_conn!(db.conn);
     let key = priority_key(app);
-    let Some(raw) = db.get_setting(&key)? else {
+    let raw: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [&key], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let Some(raw) = raw else {
         return Ok(());
     };
     let mut order: Vec<String> =
         serde_json::from_str(&raw).map_err(|e| AppError::Config(e.to_string()))?;
-    if order.iter().any(|entry| entry == id) {
-        return Ok(());
+    if !order.iter().any(|entry| entry == id) {
+        order.push(id.to_string());
+        write_order_on(&conn, app, &order)?;
     }
-    order.push(id.to_string());
-    db.set_setting(
-        &key,
-        &serde_json::to_string(&order).map_err(|e| AppError::Config(e.to_string()))?,
-    )
+    Ok(())
 }
 
 /// Read local selection without the legacy getter's stale-setting cleanup.
@@ -215,6 +235,7 @@ pub fn migrate(db: &Database, app: &str) -> Result<(), AppError> {
         "UPDATE providers SET in_failover_queue = 0 WHERE app_type = ?1",
         [app],
     )?;
+    crate::database::order_profiles::reconcile_on(&tx, app)?;
     tx.commit()?;
     Ok(())
 }
@@ -222,27 +243,45 @@ pub fn migrate(db: &Database, app: &str) -> Result<(), AppError> {
 /// 写入链 = 用户「应用此顺序」的载荷：当前可见且未屏蔽的档位按显示序，恰好这么多。
 ///
 /// 不再垫底（2026-09-16 定调）：被筛出视图的档位不是后备，链外档位永不参与自动重试。
-/// 新档位由 [`note_provider_created`] 在创建时自动垫底；上游删掉的档位以幽灵形式
-/// 留在链里（选路跳过），用户下次应用即清理。空列表拒绝——故障切换链至少要有一个成员。
+/// 新档位由 [`note_provider_created`] 在创建时自动垫底；删除时同事务维护链和配置档。
+/// 显式应用拒绝空列表；删除最后一个成员可以让已有链变空。
 pub fn set_order(db: &Database, app: &str, ids: &[String]) -> Result<(), AppError> {
+    crate::services::order_profiles::apply_current_order(db, app, ids)
+}
+
+pub(crate) fn validate_order_on(
+    conn: &rusqlite::Connection,
+    app: &str,
+    ids: &[String],
+) -> Result<(), AppError> {
+    AppType::from_str(app)?;
     if ids.is_empty() {
         return Err(AppError::Config("Application chain cannot be empty".into()));
     }
-    let providers = ordered_providers(db, app)?;
+    let mut stmt = conn.prepare("SELECT id FROM providers WHERE app_type = ?1")?;
+    let known = stmt
+        .query_map([app], |row| row.get(0))?
+        .collect::<Result<HashSet<String>, _>>()?;
     let mut seen = HashSet::new();
-    if ids
-        .iter()
-        .any(|id| !seen.insert(id.clone()) || !providers.iter().any(|p| p.id == *id))
-    {
+    if ids.iter().any(|id| !known.contains(id) || !seen.insert(id)) {
         return Err(AppError::Config(
             "Priority contains duplicate or unknown providers".into(),
         ));
     }
-    migrate(db, app)?;
-    db.set_setting(
-        &priority_key(app),
-        &serde_json::to_string(ids).map_err(|e| AppError::Config(e.to_string()))?,
-    )
+    Ok(())
+}
+
+pub(crate) fn write_order_on(
+    conn: &rusqlite::Connection,
+    app: &str,
+    ids: &[String],
+) -> Result<(), AppError> {
+    let raw = serde_json::to_string(ids).map_err(|e| AppError::Config(e.to_string()))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params![priority_key(app), raw],
+    )?;
+    Ok(())
 }
 
 pub async fn set_failover(db: &Database, app: &str, enabled: bool) -> Result<(), AppError> {
@@ -306,19 +345,6 @@ pub fn current_supports_model(db: &Database, app: &str, model: &str) -> Result<b
         .any(|entry| entry == model))
 }
 
-pub fn set_model(db: &Database, app: &str, model: Option<&str>) -> Result<(), AppError> {
-    AppType::from_str(app)?;
-    if let Some(model) = model {
-        if !current_supports_model(db, app, model)? {
-            return Err(AppError::Config(
-                "Selected provider does not support this model".into(),
-            ));
-        }
-    }
-    migrate(db, app)?;
-    auto_strategy::set_model_pref(db, app, model)
-}
-
 /// Resolve saved intent against the explicit selection. An incompatible manual
 /// choice establishes its own model instead of carrying a stale preference.
 pub fn effective_model(db: &Database, app: &str) -> Option<String> {
@@ -342,6 +368,12 @@ pub fn model_for_provider(db: &Database, app: &str, provider: &Provider) -> Opti
         if auto_strategy::tier_models(provider).contains(&model) {
             return Some(model);
         }
+    }
+    if app == AppType::Gemini.as_str() {
+        return crate::relay::provider_config::selected_model(
+            &AppType::Gemini,
+            &provider.settings_config,
+        );
     }
     codex_tier_selected_model(app, provider)
 }
@@ -465,10 +497,10 @@ mod tests {
         );
     }
 
-    /// 上游删掉的档位以幽灵形式留在链里（选路自然跳过），用户下次应用即清理。
+    /// Deleting a tier updates both the stored and effective chain.
     #[test]
     #[serial_test::serial]
-    fn deleted_tiers_linger_as_ghosts_until_next_apply() {
+    fn deleted_tiers_are_removed_from_the_stored_chain() {
         let db = crate::Database::memory().unwrap();
         for id in ["a", "b"] {
             db.save_provider("claude", &provider(id)).unwrap();
@@ -478,8 +510,8 @@ mod tests {
         db.delete_provider("claude", "b").unwrap();
         assert_eq!(
             chain_ids(&db, "claude").unwrap(),
-            vec!["a", "b"],
-            "幽灵留在存储链里，等用户应用清理"
+            vec!["a"],
+            "deleted members are removed atomically"
         );
         assert_eq!(
             chain_providers(&db, "claude")
@@ -577,7 +609,7 @@ mod tests {
     /// 的模型在 URL 里，body 改写触达不到。
     #[test]
     #[serial_test::serial]
-    fn claude_and_gemini_without_preference_keep_client_choice() {
+    fn native_model_defaults_preserve_claude_roles_and_select_gemini() {
         let db = crate::Database::memory().unwrap();
         let claude = Provider::with_id(
             "relay".into(),
@@ -592,7 +624,10 @@ mod tests {
             serde_json::json!({ "env": { "GEMINI_MODEL": "gemini-3.5-flash" } }),
             None,
         );
-        assert_eq!(model_for_provider(&db, "gemini", &gemini), None);
+        assert_eq!(
+            model_for_provider(&db, "gemini", &gemini),
+            Some("gemini-3.5-flash".into())
+        );
     }
 
     /// 显式模型偏好照旧优先；偏好不被目标档位服务时（故障切换到服务

@@ -1,12 +1,11 @@
 import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
 import { fmtUsd } from "@/components/usage/format";
 
-const relativeTime = new Intl.RelativeTimeFormat(undefined, {
-  numeric: "always",
-});
-
 /** 重置时刻的相对显示：分/时/天自动选档，太久远落到日期。已过期显示 —（快照过期）。 */
-export function formatResetAt(epochSecs: number): string {
+export function formatResetAt(epochSecs: number, locale?: string): string {
+  const relativeTime = new Intl.RelativeTimeFormat(locale, {
+    numeric: "always",
+  });
   const deltaSecs = epochSecs - Date.now() / 1000;
   if (deltaSecs <= 0) return "—";
   if (deltaSecs < 3600) {
@@ -18,7 +17,7 @@ export function formatResetAt(epochSecs: number): string {
   if (deltaSecs < 45 * 86400) {
     return relativeTime.format(Math.round(deltaSecs / 86400), "day");
   }
-  return new Date(epochSecs * 1000).toLocaleDateString();
+  return new Date(epochSecs * 1000).toLocaleDateString(locale);
 }
 
 export const tierMetrics = [

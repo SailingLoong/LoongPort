@@ -524,6 +524,10 @@ export function CodexFormFields({
       onCodexChatReasoningChange({
         ...codexChatReasoning,
         supportsThinking: checked,
+        thinkingParam:
+          checked && codexChatReasoning.thinkingParam === "none"
+            ? "thinking"
+            : codexChatReasoning.thinkingParam,
         supportsEffort: checked ? codexChatReasoning.supportsEffort : false,
       });
     },
@@ -537,9 +541,6 @@ export function CodexFormFields({
         ...codexChatReasoning,
         supportsThinking: checked ? true : codexChatReasoning.supportsThinking,
         supportsEffort: checked,
-        effortParam: checked
-          ? (codexChatReasoning.effortParam ?? "reasoning_effort")
-          : "none",
       });
     },
     [codexChatReasoning, onCodexChatReasoningChange],
@@ -1119,6 +1120,15 @@ export function CodexFormFields({
                   </p>
                 </div>
 
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onCodexChatReasoningChange?.({})}
+                  disabled={Object.keys(codexChatReasoning).length === 0}
+                >
+                  {t("codexConfig.reasoningAutomatic")}
+                </Button>
                 <div className="flex items-center justify-between gap-4">
                   <div className="space-y-1">
                     <FormLabel>

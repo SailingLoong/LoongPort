@@ -132,6 +132,7 @@ fn application_overview(
             );
         }
     }
+    let blocked = crate::proxy::application_routing::blocked_tier_ids(&state.db, app_type.as_str());
     let configurations = providers
         .into_values()
         .map(|provider| {
@@ -141,14 +142,17 @@ fn application_overview(
                 app_type,
                 &provider,
             );
-            configuration_for_provider(
+            let blocked = app_type.supports_local_proxy() && blocked.contains(&provider.id);
+            let mut configuration = configuration_for_provider(
                 app_type,
                 super::provider::ProviderView {
                     provider,
                     presentation,
                 },
                 owner,
-            )
+            );
+            configuration.can_select &= !blocked;
+            configuration
         })
         .collect();
     let recent_provider_ids =

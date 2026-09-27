@@ -241,26 +241,12 @@ pub fn settings_config_with_roles_and_models(
 /// Read the model from a generated Codex configuration.
 pub fn extract_model(settings_config: &serde_json::Value) -> Option<String> {
     let config = settings_config.get("config")?.as_str()?;
-    for line in config.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        let Some((lhs, rhs)) = line.split_once('=') else {
-            continue;
-        };
-        // 严格相等：`model_provider` / `model_reasoning_effort` 都以 `model` 开头。
-        if lhs.trim() != "model" {
-            continue;
-        }
-        let value = rhs.trim();
-        let unquoted = value.strip_prefix('"')?.strip_suffix('"')?;
-        if unquoted.is_empty() {
-            return None;
-        }
-        return Some(unquoted.to_string());
-    }
-    None
+    let parsed: toml::Value = toml::from_str(config).ok()?;
+    parsed
+        .get("model")?
+        .as_str()
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
 }
 
 /// Clients supporting managed model selection. Consumers must use this list.
@@ -541,6 +527,25 @@ mod tests {
         )
         .expect("codex 必须有默认形状");
         assert_eq!(extract_model(&cfg).as_deref(), Some("gpt-image-2"));
+    }
+
+    #[test]
+    fn extract_model_reads_native_toml_syntax_and_only_the_root_selection() {
+        for config in [
+            "model = 'chosen' # user selection\n",
+            "model = \"chosen\" # comment\n",
+        ] {
+            assert_eq!(
+                extract_model(&serde_json::json!({"config": config})).as_deref(),
+                Some("chosen")
+            );
+        }
+        assert_eq!(
+            extract_model(
+                &serde_json::json!({"config": "[profiles.other]\nmodel = 'not-selected'\n"})
+            ),
+            None
+        );
     }
 
     #[test]

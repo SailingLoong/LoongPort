@@ -42,6 +42,24 @@ pub struct ApplicationRouting {
 }
 
 #[tauri::command]
+pub async fn apply_application_routing(
+    app_handle: tauri::AppHandle,
+    app_type: String,
+    change: crate::services::application_selection::ApplicationRoutingChange,
+    quit_chatgpt: Option<bool>,
+) -> Result<crate::services::application_selection::SwitchTierCommandResult, String> {
+    let app = AppType::from_str(&app_type).map_err(|error| error.to_string())?;
+    crate::services::application_selection::apply_application_routing(
+        &app_handle,
+        app,
+        change,
+        quit_chatgpt,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn get_application_routing(
     state: tauri::State<'_, AppState>,
     app_type: String,
@@ -168,6 +186,7 @@ pub async fn set_application_tier_blocked(
     provider_id: String,
     blocked: bool,
 ) -> Result<(), String> {
+    let _guard = state.proxy_service.lock_switch_for_app(&app_type).await;
     routing::set_tier_blocked(&state.db, &app_type, &provider_id, blocked)
         .map_err(|e| e.to_string())
 }
@@ -178,9 +197,10 @@ pub async fn set_application_failover(
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
-    routing::set_failover(&state.db, &app_type, enabled)
+    state
+        .proxy_service
+        .set_failover_for_app(&app_type, enabled)
         .await
-        .map_err(|e| e.to_string())
 }
 
 fn current_model_options(
@@ -230,9 +250,9 @@ mod tests {
             vec!["shared", "current-only"]
         );
         for option in advertised {
-            super::routing::set_model(&db, "claude", Some(&option.model)).unwrap();
+            assert!(super::routing::current_supports_model(&db, "claude", &option.model).unwrap());
         }
-        assert!(super::routing::set_model(&db, "claude", Some("other-only")).is_err());
+        assert!(!super::routing::current_supports_model(&db, "claude", "other-only").unwrap());
         assert_eq!(
             super::routing::ordered_providers(&db, "claude")
                 .unwrap()

@@ -198,38 +198,20 @@ export const normalizeCodexCatalogModelsForSave = (
   return normalized;
 };
 
-const normalizeCodexChatReasoningForSave = (
+export const normalizeCodexChatReasoningForSave = (
   value?: CodexChatReasoning,
 ): CodexChatReasoning | undefined => {
-  const supportsEffort = value?.supportsEffort === true;
-  const supportsThinking = value?.supportsThinking === true || supportsEffort;
-  const hasExplicitConfig = value && Object.keys(value).length > 0;
-
-  if (!supportsThinking && !supportsEffort) {
-    return hasExplicitConfig
-      ? {
-          supportsThinking: false,
-          supportsEffort: false,
-          thinkingParam: "none",
-          effortParam: "none",
-          outputFormat: value?.outputFormat ?? "auto",
-        }
-      : undefined;
-  }
-
+  if (!value || Object.keys(value).length === 0) return undefined;
+  const supportsEffort = value.supportsEffort === true;
+  const supportsThinking = value.supportsThinking === true || supportsEffort;
   return {
+    ...value,
     supportsThinking,
     supportsEffort,
-    thinkingParam: supportsThinking
-      ? (value?.thinkingParam ?? "thinking")
-      : "none",
-    effortParam: supportsEffort
-      ? (value?.effortParam ?? "reasoning_effort")
-      : "none",
-    effortValueMode: supportsEffort
-      ? (value?.effortValueMode ?? "passthrough")
-      : undefined,
-    outputFormat: value?.outputFormat ?? "auto",
+    effortParam:
+      supportsEffort && (!value.effortParam || value.effortParam === "none")
+        ? "reasoning_effort"
+        : value.effortParam,
   };
 };
 

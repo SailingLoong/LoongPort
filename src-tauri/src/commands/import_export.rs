@@ -82,7 +82,7 @@ pub async fn import_config_from_file(
 }
 
 /// 从 cc-switch 一键导入的**预览**：读 `~/.cc-switch/cc-switch.db`（只读）+ 本地托管行，
-/// 算「域名 + sk」冲突，返回会搬什么、跳过什么。**不写任何东西**。
+/// 按完整配置判断重复条目，返回导入与跳过的内容。**不写任何东西**。
 ///
 /// 源库不存在 ⇒ `sourceExists: false`（前端据此决定显不显入口）。
 #[tauri::command]
@@ -104,8 +104,8 @@ pub async fn get_cc_switch_import_preview(
 /// 从 cc-switch 一键导入（**拷贝，不动 cc-switch 那边**）。
 ///
 /// 覆盖式：providers / MCP / prompts / skills 以 cc-switch 为准整体替换；LoongPort 的
-/// `loongport_relay` / `loongport_vendor` / `settings` 保留；本地托管档位回填；
-/// 与托管档位同指纹（域名 + sk）的 cc-switch 条目不导入、报告列出。
+/// 本地账号、偏好、代理状态和托管档位由导入服务统一保留；
+/// 与托管档位的连接、模型和协议配置完全相同的条目无需重复导入，报告会列出。
 /// 导入前自动备份（返回 `backupId`），失败可 `restore_db_backup` 恢复。
 #[tauri::command]
 pub async fn import_from_cc_switch(

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Check,
@@ -46,18 +45,13 @@ import {
 } from "@/components/ui/collapsible";
 import { SwitchTierConfirmDialog } from "@/components/relay/SwitchTierConfirmDialog";
 import { orderProfilesApi } from "@/lib/api/orderProfiles";
-import { extractErrorMessage } from "@/utils/errorUtils";
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
+import { useApplicationRoutingDraft } from "./useApplicationRoutingDraft";
 import { ApplicationTierTable, visibleTierIds } from "./ApplicationTierTable";
 import { TierVerificationProvider } from "@/components/relay/model-verification/TierVerificationProvider";
 import { OrderProfilesMenu } from "./OrderProfilesMenu";
-import {
-  defaultDescending,
-  sortTierIds,
-  type TierMetric,
-  type TierSort,
-} from "./tierMetrics";
+import { defaultDescending, sortTierIds, type TierMetric } from "./tierMetrics";
 
 /** 模型可用性分数：分子着色（全可用绿 / 部分可用橙 / 全不可用灰，同 utilizationColor 语义），分母恒灰。 */
 function ModelAvailability({
@@ -94,7 +88,9 @@ function FilterCombobox({
   value,
   onChange,
   items,
+  disabled = false,
 }: {
+  disabled?: boolean;
   ariaLabel: string;
   triggerClassName?: string;
   searchPlaceholder: string;
@@ -117,6 +113,7 @@ function FilterCombobox({
         <Button
           type="button"
           variant="outline"
+          disabled={disabled}
           role="combobox"
           aria-expanded={open}
           aria-label={ariaLabel}
@@ -209,19 +206,24 @@ export function ApplicationWorkspace({
   const model = useApplicationOverview(appId, providers, onSwitchProvider);
   const routing = useApplicationRouting(appId);
   const [managing, setManaging] = useState(false);
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<TierSort | null>(null);
-  const [accountFilter, setAccountFilter] = useState<string | null>(null);
-  const [modelFilter, setModelFilter] = useState<string | null>(null);
+  const draft = useApplicationRoutingDraft(routing.apply);
+  const {
+    search,
+    setSearch,
+    sort,
+    setSort,
+    accountFilter,
+    setAccountFilter,
+    modelFilter,
+    setModelFilter,
+    stagedIds,
+    setStagedIds,
+  } = draft;
   const [saving, setSaving] = useState(false);
-  // This is an optimistic UI snapshot, replaced by the next backend result.
   const [order, setOrder] = useState<{
     source: typeof routing.data;
     ids: string[];
   } | null>(null);
-  // 顺序草稿（路由类应用）：拖拽只改这里；载入配置档会整体替换成档内 id 集
-  // （不垫底——链外档位从视图消失，应用后即出链）；点「应用」才写库。
-  const [stagedIds, setStagedIds] = useState<string[] | null>(null);
   const configurations = model.data?.configurations ?? [];
   // 引用稳定性：tiers 下游有效应依赖链（验真 summaries 重拉），identity 必须只随
   // routing.data 变 —— `?? []` 每渲染换新引用会在加载期造成「effect→setState→渲染」循环。
@@ -254,13 +256,17 @@ export function ApplicationWorkspace({
   // 故障切换一关就丢弃未应用的草稿：不留幽灵待应用，重开时从存储链干净起步。
   useEffect(() => {
     if (draftOrdering && !failoverEnabled) {
-      setStagedIds(null);
-      setSort(null);
+      draft.discard();
     }
   }, [draftOrdering, failoverEnabled]);
+  const appliedIds = routing.data?.chainIds ?? storedIds;
   const baseIds =
     stagedIds ??
-    (order && order.source === routing.data ? order.ids : storedIds);
+    (chainEditing && !draft.showAll
+      ? appliedIds.filter((id) => ids.has(id))
+      : order && order.source === routing.data
+        ? order.ids
+        : storedIds);
   // 视图排序只重排展示，不落库；默认序 = 数据库档位序（拖拽维护）。
   const orderedIds = sort ? sortTierIds(baseIds, tiers, sort) : baseIds;
   const changeOrder = async (next: string[]) => {
@@ -306,104 +312,66 @@ export function ApplicationWorkspace({
   const matchesAppliedChain =
     targetIds.length === referenceIds.length &&
     targetIds.every((id, index) => id === referenceIds[index]);
-  // 待应用计数 = 应用目标的大小（「链里将有几个」），视图与已应用链一致时为 0。
-  const pendingOrderCount =
-    chainEditing && targetIds.length > 0 && !matchesAppliedChain
-      ? targetIds.length
-      : 0;
-  // 配置档状态（列表 + 当前配置文件名）：应用此顺序默认保存进当前档。
-  const client = useQueryClient();
-  const { data: profilesState } = useQuery({
+  const currentConfig = configurations.find(
+    (item) => item.presentation.isCurrent,
+  );
+  const currentModel =
+    routing.data?.model ??
+    tiers.find((tier) => tier.providerId === currentConfig?.providerId)
+      ?.effectiveModel ??
+    currentConfig?.model;
+  const modelChanged = Boolean(modelFilter && currentModel !== modelFilter);
+  const profilesQuery = useQuery({
     queryKey: ["orderProfiles", appId],
     queryFn: () => orderProfilesApi.list(appId),
+    enabled: chainEditing,
   });
-  const refreshProfiles = () =>
-    client.invalidateQueries({ queryKey: ["orderProfiles", appId] });
-  const applyOrder = async () => {
-    if (pendingOrderCount === 0 || saving || routing.busy) return;
-    const previousOrder = order;
-    const appliedSet = new Set(targetIds);
-    const switchModel = modelFilter;
-    setSaving(true);
-    // 乐观快照 = 应用目标在前、链外档位跟后（镜像后端展示序），后端结果一到即替换。
-    setOrder({
-      source: routing.data,
-      ids: [...targetIds, ...storedIds.filter((id) => !appliedSet.has(id))],
-    });
-    try {
-      await routing.setOrder(targetIds);
-      setStagedIds(null);
-      setSort(null);
-      // 链已生效；快照进当前配置档失败只警告——链是活事实，配置档可手动再存。
-      const currentProfile = profilesState?.current;
-      if (currentProfile) {
-        try {
-          await orderProfilesApi.save(appId, currentProfile, targetIds);
-        } catch (error) {
-          toast.warning(t("applications.orderProfileSaveFailed"), {
-            description: extractErrorMessage(error) || undefined,
-          });
-        }
-        void refreshProfiles();
-      }
-      // 筛选模型 + 应用 = 切模型（2026-09-17 用户定调；模型筛选命中「分组
-      // 支持」后语义补全）：筛选模型下应用，最终要**正在服务**这个模型——
-      //   - 当前档不在目标里（被筛出）：目标里第一个可用档位设为当前；
-      //   - 当前档在目标里但没在用这个模型：就地把它切到该模型。
-      // 两种都把模型一起传给切换编排（codex 弹「退出并切换」确认 → 退 → 切 →
-      // 重开；后端校验目录成员）。只有调序/筛账号的应用不碰进程；切换弹窗
-      // 该取消取消，取消不影响已应用的链。
-      if (switchModel) {
-        const currentId = configurations.find(
-          (item) => item.presentation.isCurrent,
-        )?.providerId;
-        const tierById = new Map(tiers.map((tier) => [tier.providerId, tier]));
-        const serving = (id: string | undefined) =>
-          id ? (tierById.get(id)?.effectiveModel ?? null) : null;
-        const currentConfig = currentId
-          ? configurations.find((item) => item.providerId === currentId)
-          : undefined;
-        if (
-          currentId != null &&
-          // 在应用目标里 = 过滤器放行 = 它支持这个模型；此时没在用才就地切。
-          // 不在目标里的当前档走下面换档位分支，别对它强写不支持的模型。
-          appliedSet.has(currentId) &&
-          currentConfig?.selection.kind === "relay" &&
-          serving(currentId) !== switchModel
-        ) {
-          void model.select(currentConfig, undefined, switchModel);
-        } else if (currentId == null || !appliedSet.has(currentId)) {
-          const unavailable = new Set(
-            tiers
-              .filter((tier) => tier.skipReason === "circuit_open")
-              .map((tier) => tier.providerId),
+  const profilesState = profilesQuery.data;
+  const profileName = draft.profileName ?? profilesState?.current ?? "default";
+  const profileChanged =
+    draft.profileName != null && draft.profileName !== profilesState?.current;
+  const hasPendingChanges =
+    chainEditing &&
+    (!matchesAppliedChain ||
+      modelChanged ||
+      profileChanged ||
+      stagedIds?.length === 0 ||
+      (targetIds.length === 0 &&
+        (Boolean(search) || Boolean(accountFilter) || Boolean(modelFilter))));
+  const modelCandidate =
+    currentConfig && targetIds.includes(currentConfig.providerId)
+      ? currentConfig
+      : targetIds
+          .map((id) => configurations.find((item) => item.providerId === id))
+          .find(
+            (item) =>
+              item?.canSelect &&
+              tiers.find((tier) => tier.providerId === item.providerId)
+                ?.skipReason !== "circuit_open",
           );
-          const candidate = targetIds
-            .filter((id) => id !== currentId && !unavailable.has(id))
-            .map((id) => configurations.find((item) => item.providerId === id))
-            .find((item) => item?.canSelect);
-          if (candidate) {
-            void model.select(candidate, undefined, switchModel);
-          } else {
-            toast.info(t("applications.applyOrderNoSwitchableTier"));
-          }
-        }
+  const missingModelCandidate = Boolean(modelFilter && !modelCandidate);
+  const applyOrder = () => {
+    if (
+      !hasPendingChanges ||
+      targetIds.length === 0 ||
+      missingModelCandidate ||
+      orderBusy
+    )
+      return;
+    let selection: { providerId: string; model: string } | undefined;
+    if (modelFilter) {
+      const candidate = modelCandidate;
+      if (!candidate) return;
+      if (candidate.providerId !== currentConfig?.providerId || modelChanged) {
+        selection = { providerId: candidate.providerId, model: modelFilter };
       }
-    } catch {
-      setOrder(previousOrder);
-    } finally {
-      setSaving(false);
     }
+    void draft.submit({
+      order: { profileName, providerIds: targetIds },
+      ...(selection ? { selection } : {}),
+    });
   };
-  // 撤回 = 丢弃未应用的改动（拖拽暂存、临时排序、筛选与搜索一起清），
-  // 回到存储链的全量视图。
-  const discardOrder = () => {
-    setStagedIds(null);
-    setSort(null);
-    setAccountFilter(null);
-    setModelFilter(null);
-    setSearch("");
-  };
+  const discardOrder = draft.discard;
   // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
   const sortBy = (key: TierMetric) => {
     if (sort?.key !== key) {
@@ -500,9 +468,27 @@ export function ApplicationWorkspace({
     }
     return models.size > 1;
   }, [configurations, tiers]);
+  useEffect(() => {
+    if (
+      !model.isPending &&
+      !model.error &&
+      accountFilter &&
+      !accounts.some((account) => account.key === accountFilter)
+    )
+      setAccountFilter(null);
+  }, [accounts, accountFilter, model.isPending, model.error, setAccountFilter]);
   const routingModel = routing.data?.model ?? null;
   const orderBusy =
-    saving || routing.busy || routing.isPending || Boolean(routing.error);
+    saving ||
+    draft.submitting ||
+    Boolean(draft.confirmation) ||
+    routing.busy ||
+    model.busy ||
+    model.isPending ||
+    Boolean(model.error) ||
+    routing.isPending ||
+    Boolean(routing.error) ||
+    (chainEditing && (profilesQuery.isPending || Boolean(profilesQuery.error)));
   return (
     <div className="space-y-5">
       <section className="space-y-4" aria-labelledby={`tiers-${appId}`}>
@@ -520,11 +506,7 @@ export function ApplicationWorkspace({
                   <label className="inline-flex cursor-pointer items-center gap-2 text-sm">
                     <Switch
                       checked={routing.data?.autoFailoverEnabled ?? false}
-                      disabled={
-                        routing.busy ||
-                        routing.isPending ||
-                        Boolean(routing.error)
-                      }
+                      disabled={orderBusy}
                       aria-label={t("applications.autoFailover")}
                       onCheckedChange={(checked) => {
                         void routing
@@ -560,13 +542,19 @@ export function ApplicationWorkspace({
                 <OrderProfilesMenu
                   appType={appId}
                   state={profilesState}
+                  selectedName={profileName}
+                  disabled={orderBusy}
+                  onBusyChange={setSaving}
+                  onProfileRenamed={(from, to) => {
+                    if (draft.profileName === from) draft.setProfileName(to);
+                  }}
+                  onProfileRemoved={(name) => {
+                    if (draft.profileName === name) draft.discard();
+                  }}
                   targetIds={targetIds}
                   storedIds={storedIds}
-                  onLoadDraft={(ids) => {
-                    // 载入配置档 = 进草稿：清临时排序，照常「应用/取消」。
-                    setSort(null);
-                    setStagedIds(ids);
-                  }}
+                  onLoadDraft={draft.load}
+                  onSaved={draft.saveAs}
                 />
               )}
             </div>
@@ -586,8 +574,25 @@ export function ApplicationWorkspace({
           </Button>
         </header>
         <div className="flex flex-wrap items-center gap-3">
+          {chainEditing && (
+            <Button
+              variant="outline"
+              disabled={orderBusy}
+              onClick={() => {
+                draft.discard();
+                draft.setShowAll(!draft.showAll);
+              }}
+            >
+              {t(
+                draft.showAll
+                  ? "applications.showAppliedTiers"
+                  : "applications.showAllTiers",
+              )}
+            </Button>
+          )}
           {accounts.length > 1 && (
             <FilterCombobox
+              disabled={orderBusy}
               ariaLabel={t("applications.accountFilter")}
               triggerClassName="w-48"
               searchPlaceholder={t("applications.accountFilterPlaceholder")}
@@ -603,6 +608,7 @@ export function ApplicationWorkspace({
           )}
           {hasMultipleModelsOverall && (
             <FilterCombobox
+              disabled={orderBusy}
               ariaLabel={t("applications.modelFilter")}
               triggerClassName="w-64"
               searchPlaceholder={t("applications.modelFilterPlaceholder")}
@@ -634,6 +640,7 @@ export function ApplicationWorkspace({
           <div className="relative min-w-60 max-w-md flex-1">
             <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
             <Input
+              disabled={orderBusy}
               type="search"
               aria-label={t("applications.search")}
               placeholder={t("applications.search")}
@@ -662,12 +669,16 @@ export function ApplicationWorkspace({
               </Button>
             </div>
           )}
-        {(model.isPending || routing.isPending) && (
+        {(model.isPending ||
+          routing.isPending ||
+          (chainEditing && profilesQuery.isPending)) && (
           <p role="status" className="text-sm text-muted-foreground">
             {t("common.loading")}
           </p>
         )}
-        {(model.error || routing.error) && (
+        {(model.error ||
+          routing.error ||
+          (chainEditing && profilesQuery.error)) && (
           <div
             role="alert"
             className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 p-3 text-sm"
@@ -678,6 +689,7 @@ export function ApplicationWorkspace({
               onClick={() => {
                 void model.refetch();
                 void routing.refetch();
+                void profilesQuery.refetch();
               }}
             >
               {t("common.retry")}
@@ -688,14 +700,20 @@ export function ApplicationWorkspace({
             状态常驻在用户视线所在的表格上方（信息常驻、动作跟着状态走——
             2026-09-19 用户定调：页头按钮离拖拽现场太远，好多用户不知道要应用）。
             无未应用更改时整条消失（沉默=一致）。amber=「需留意」既有色彩语义。 */}
-        {chainEditing && pendingOrderCount > 0 && (
+        {hasPendingChanges && (
           <div
             role="status"
             className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
           >
             <span className="inline-flex min-w-0 items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0" />
-              {t("applications.pendingChanges")}
+              {t(
+                targetIds.length === 0
+                  ? "applications.emptyChain"
+                  : missingModelCandidate
+                    ? "applications.noSwitchableTier"
+                    : "applications.pendingChanges",
+              )}
             </span>
             <span className="flex shrink-0 items-center gap-2">
               {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序/筛选，
@@ -714,12 +732,14 @@ export function ApplicationWorkspace({
                 onClick={() => {
                   void applyOrder();
                 }}
-                disabled={orderBusy}
+                disabled={
+                  orderBusy || targetIds.length === 0 || missingModelCandidate
+                }
                 className="h-7 gap-1.5 text-xs"
               >
                 <Check className="h-3.5 w-3.5" />
                 {t("applications.applyOrder")}
-                <span className="tabular-nums">({pendingOrderCount})</span>
+                <span className="tabular-nums">({targetIds.length})</span>
               </Button>
             </span>
           </div>
@@ -735,12 +755,17 @@ export function ApplicationWorkspace({
             tiers={tiers}
             orderedIds={orderedIds}
             failoverEnabled={failoverEnabled}
-            orderPending={chainEditing && pendingOrderCount > 0}
+            orderPending={hasPendingChanges}
+            reorderEnabled={!draftOrdering || chainEditing}
+            selectedModel={draftOrdering ? modelFilter : null}
+            loading={model.isPending || routing.isPending}
+            failed={Boolean(model.error || routing.error)}
+            appliedIds={chainEditing ? appliedIds : undefined}
             search={search}
             accountFilter={accountFilter}
             modelFilter={modelFilter}
             additive={model.data?.isAdditive ?? false}
-            busy={model.busy}
+            busy={orderBusy}
             orderBusy={orderBusy}
             sort={sort}
             onSort={sortBy}
@@ -750,7 +775,16 @@ export function ApplicationWorkspace({
             onSelect={(item) => {
               // 模型筛选下点「设为当前」：档位与筛选模型一次切过去（用户视角
               // 就是「用这个档位跑这个模型」）；未筛选时纯切档位。
-              void model.select(item, undefined, modelFilter ?? undefined);
+              if (isProxyAppId(appId)) {
+                void draft.submit({
+                  selection: {
+                    providerId: item.providerId,
+                    ...(modelFilter ? { model: modelFilter } : {}),
+                  },
+                });
+              } else {
+                void model.select(item, undefined, modelFilter ?? undefined);
+              }
             }}
             onOpenAccount={onOpenAccount}
             onBlockTier={(providerId, blocked) => {
@@ -789,9 +823,9 @@ export function ApplicationWorkspace({
         </CollapsibleContent>
       </Collapsible>
       <SwitchTierConfirmDialog
-        targetName={model.confirmation}
-        onCancel={model.cancel}
-        onSwitch={model.confirm}
+        targetName={draft.confirmation?.name ?? model.confirmation}
+        onCancel={draft.confirmation ? draft.cancel : model.cancel}
+        onSwitch={draft.confirmation ? draft.confirm : model.confirm}
       />
     </div>
   );

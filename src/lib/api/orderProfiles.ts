@@ -15,12 +15,9 @@ export interface OrderProfilesState {
 export const orderProfilesApi = {
   list: (appType: string): Promise<OrderProfilesState> =>
     invoke("get_order_profiles", { appType }),
-  /** 保存（同名覆盖）并把该档设为当前——「新建/另存为」与应用落进当前档共用。 */
+  /** 保存命名快照（同名覆盖）；应用成功才改变当前配置档。 */
   save: (appType: string, name: string, providerIds: string[]): Promise<void> =>
     invoke("save_order_profile", { appType, name, providerIds }),
-  /** 切换当前配置文件（内容载入是前端草稿，不在这）。 */
-  setCurrent: (appType: string, name: string): Promise<void> =>
-    invoke("set_current_order_profile", { appType, name }),
   /** 重命名配置档；目标名已存在会拒绝。 */
   rename: (appType: string, from: string, to: string): Promise<void> =>
     invoke("rename_order_profile", { appType, from, to }),

@@ -271,6 +271,13 @@ export function useSetAutoFailoverEnabled() {
 
     // 无论成功失败，都重新获取
     onSettled: (_, __, variables) => {
+      for (const queryKey of [
+        proxyKeys.takeoverStatus,
+        ["applicationRouting", variables.appType],
+        ["appConfig", variables.appType],
+      ]) {
+        void queryClient.invalidateQueries({ queryKey });
+      }
       queryClient.invalidateQueries({
         queryKey: ["autoFailoverEnabled", variables.appType],
       });

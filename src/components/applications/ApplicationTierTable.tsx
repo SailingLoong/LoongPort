@@ -45,6 +45,7 @@ import { tierMetrics, type TierMetric, type TierSort } from "./tierMetrics";
 function subscriptionWindowsTitle(
   t: (key: string) => string,
   windows: SubscriptionWindow[],
+  locale?: string,
 ): string {
   return windows
     .map((window) => {
@@ -54,10 +55,12 @@ function subscriptionWindowsTitle(
           ? ""
           : ` · ${window.usedUsd.toFixed(2)}/${window.limitUsd.toFixed(2)}`;
       const reset =
-        window.resetAt == null ? "" : ` · ${formatResetAt(window.resetAt)}`;
+        window.resetAt == null
+          ? ""
+          : ` · ${formatResetAt(window.resetAt, locale)}`;
       return `${kind}${used}${reset}`;
     })
-    .join("\\n");
+    .join("\n");
 }
 
 /**
@@ -127,7 +130,7 @@ export function visibleTierIds({
         item.serviceName,
         item.accountLabel,
         item.configurationName,
-        item.model,
+        metrics.get(id)?.effectiveModel ?? item.model,
       ].some((value) => value?.toLocaleLowerCase().includes(needle))
     ) {
       return false;
@@ -142,6 +145,11 @@ interface Props {
   orderedIds: string[];
   /** 故障切换开启才出现优先级列与屏蔽按钮（2026-09-16 用户定调的三隐边界）。 */
   failoverEnabled: boolean;
+  reorderEnabled?: boolean;
+  selectedModel?: string | null;
+  loading?: boolean;
+  failed?: boolean;
+  appliedIds?: string[];
   /** 有未应用的顺序草稿：优先级数字着 amber（所见=草稿，与状态条同语义）。 */
   orderPending: boolean;
   search: string;
@@ -194,7 +202,9 @@ export function ApplicationTierTable(props: Props) {
   );
   // 拖拽只在指标排序期间禁用：排序是临时视图序，与拖拽打架；筛选是稳定子集，
   // 可见行之间换位（未显示行原位不动）。
-  const dragDisabled = props.orderBusy || Boolean(props.sort);
+  const reorderEnabled = props.reorderEnabled ?? props.failoverEnabled;
+  const dragDisabled =
+    !reorderEnabled || props.orderBusy || Boolean(props.sort);
   return (
     <DndContext
       sensors={sensors}
@@ -219,12 +229,16 @@ export function ApplicationTierTable(props: Props) {
         >
           <thead className="bg-muted/50 text-xs text-muted-foreground">
             <tr>
-              {props.failoverEnabled && (
+              {reorderEnabled && (
                 <th
                   scope="col"
                   className="min-w-24 px-3 py-3 text-left font-medium"
                 >
-                  {t("applications.priority")}
+                  {t(
+                    props.failoverEnabled
+                      ? "applications.priority"
+                      : "applications.order",
+                  )}
                 </th>
               )}
               <th
@@ -284,6 +298,14 @@ export function ApplicationTierTable(props: Props) {
                   priority={visibleRank.get(item.providerId) ?? null}
                   tier={metrics.get(item.providerId)}
                   failoverEnabled={props.failoverEnabled}
+                  reorderEnabled={reorderEnabled}
+                  modelChanged={Boolean(
+                    props.selectedModel &&
+                    props.selectedModel !==
+                      (metrics.get(item.providerId)?.effectiveModel ??
+                        item.model),
+                  )}
+                  inAppliedChain={props.appliedIds?.includes(item.providerId)}
                   orderPending={props.orderPending}
                   onResetTierErrors={(providerId) =>
                     props.onResetTierErrors(providerId)
@@ -304,9 +326,13 @@ export function ApplicationTierTable(props: Props) {
             </tbody>
           </SortableContext>
         </table>
-        {visible.length === 0 && (
+        {visible.length === 0 && !props.loading && !props.failed && (
           <p className="p-10 text-center text-sm text-muted-foreground">
-            {t("applications.noMatches")}
+            {t(
+              props.configurations.length === 0
+                ? "applications.noTiers"
+                : "applications.noMatches",
+            )}
           </p>
         )}
       </div>
@@ -318,6 +344,9 @@ function TierRow({
   priority,
   tier,
   failoverEnabled,
+  reorderEnabled,
+  modelChanged,
+  inAppliedChain,
   orderPending,
   current,
   additive,
@@ -333,6 +362,9 @@ function TierRow({
   priority: number | null;
   tier?: ApplicationRoutingTier;
   failoverEnabled: boolean;
+  reorderEnabled: boolean;
+  modelChanged: boolean;
+  inAppliedChain?: boolean;
   orderPending: boolean;
   current: boolean;
   additive: boolean;
@@ -343,7 +375,7 @@ function TierRow({
   onBlockTier: Props["onBlockTier"];
   onResetTierErrors: Props["onResetTierErrors"];
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const {
     attributes,
     listeners,
@@ -368,7 +400,7 @@ function TierRow({
         isDragging && "relative z-20 bg-card shadow-lg",
       )}
     >
-      {failoverEnabled && (
+      {reorderEnabled && (
         <td className="px-3 py-3 align-top">
           <div className="flex h-8 items-center gap-3">
             <button
@@ -391,7 +423,7 @@ function TierRow({
                   : "text-muted-foreground",
               )}
             >
-              {priority ?? "—"}
+              {failoverEnabled ? (priority ?? "—") : null}
             </span>
           </div>
         </td>
@@ -403,6 +435,11 @@ function TierRow({
             <span className="inline-flex items-center gap-1 whitespace-nowrap rounded bg-blue-500/10 px-1.5 py-0.5 text-xs text-blue-600 dark:text-blue-400">
               <Check className="h-3 w-3" />
               {t(additive ? "applications.enabled" : "applications.configured")}
+            </span>
+          )}
+          {inAppliedChain === false && (
+            <span className="text-xs text-muted-foreground">
+              {t("applications.outsideChain")}
             </span>
           )}
           {/* 验真结论 chip：模块自持（下线/无结论时不渲染）。 */}
@@ -447,11 +484,19 @@ function TierRow({
             className="inline-block py-1.5"
             {...(metric.key === "nextResetAt" &&
             tier?.subscriptionWindows?.length
-              ? { title: subscriptionWindowsTitle(t, tier.subscriptionWindows) }
+              ? {
+                  title: subscriptionWindowsTitle(
+                    t,
+                    tier.subscriptionWindows,
+                    i18n?.resolvedLanguage,
+                  ),
+                }
               : {})}
           >
             {tier?.[metric.key] == null ? (
               <span className="text-muted-foreground">—</span>
+            ) : metric.key === "nextResetAt" ? (
+              formatResetAt(tier[metric.key]!, i18n?.resolvedLanguage)
             ) : (
               metric.format(tier[metric.key]!)
             )}
@@ -483,7 +528,7 @@ function TierRow({
               <Settings2 className="h-3.5 w-3.5" />
             </Button>
           )}
-          {failoverEnabled && (
+          {(failoverEnabled || blocked) && (
             <Button
               size="icon"
               variant="ghost"
@@ -509,6 +554,7 @@ function TierRow({
               size="icon"
               variant="ghost"
               className="h-8 w-8"
+              disabled={busy}
               aria-label={t("applications.resetTierErrors")}
               title={t("applications.resetTierErrors")}
               onClick={() => onResetTierErrors(item.providerId)}
@@ -524,8 +570,14 @@ function TierRow({
           <Button
             size="sm"
             variant={current ? "outline" : "default"}
-            disabled={busy || !item.canSelect || (!additive && current)}
+            disabled={
+              busy ||
+              blocked ||
+              !item.canSelect ||
+              (!additive && current && !modelChanged)
+            }
             aria-label={`${t(additive ? "applications.enable" : "applications.use")} ${name}`}
+            title={blocked ? t("applications.unblockTier") : undefined}
             onClick={() => onSelect(item)}
           >
             {t(additive ? "applications.enable" : "applications.use")}

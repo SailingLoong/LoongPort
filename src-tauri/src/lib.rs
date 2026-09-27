@@ -10,6 +10,7 @@ mod claude_plugin;
 pub mod cli;
 mod codex_config;
 mod codex_history_migration;
+mod codex_reasoning;
 mod codex_state_db;
 #[cfg(feature = "gui")]
 mod commands;
@@ -2030,12 +2031,12 @@ pub fn run() {
             commands::acknowledge_announcement,
             commands::get_order_profiles,
             commands::save_order_profile,
-            commands::set_current_order_profile,
             commands::rename_order_profile,
             commands::delete_order_profile,
             commands::export_order_profiles,
             commands::import_order_profiles,
             commands::set_application_failover,
+            commands::apply_application_routing,
             commands::get_auto_mode_status,
             commands::set_auto_mode_enabled,
             commands::set_auto_mode_strategy,

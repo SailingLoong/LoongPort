@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { applicationRoutingApi } from "@/lib/api/applicationRouting";
+import {
+  applicationRoutingApi,
+  type ApplicationRoutingChange,
+} from "@/lib/api/applicationRouting";
 import { failoverApi } from "@/lib/api/failover";
-import { proxyApi } from "@/lib/api/proxy";
 import { proxyKeys } from "@/lib/query/proxy";
 import type { AppId } from "@/lib/api";
 import {
@@ -35,6 +37,26 @@ export function useApplicationRouting(appId: AppId) {
     toast.error(t("applications.updateFailed"), {
       description: extractErrorMessage(error),
     });
+  const apply = useMutation({
+    mutationFn: ({
+      change,
+      quitChatgpt,
+    }: {
+      change: ApplicationRoutingChange;
+      quitChatgpt?: boolean;
+    }) => applicationRoutingApi.apply(appId, change, quitChatgpt),
+    onSettled: async (result) => {
+      if (result?.status === "confirmationRequired") return;
+      await Promise.all([
+        refresh(),
+        client.invalidateQueries({ queryKey: ["applicationOverview", appId] }),
+        client.invalidateQueries({ queryKey: ["providers", appId] }),
+        client.invalidateQueries({ queryKey: ["orderProfiles", appId] }),
+        client.invalidateQueries({ queryKey: ["autoModeStatus", appId] }),
+      ]);
+    },
+    onError,
+  });
   const order = useMutation({
     mutationFn: (ids: string[]) => applicationRoutingApi.setOrder(appId, ids),
     onSuccess: refresh,
@@ -49,7 +71,11 @@ export function useApplicationRouting(appId: AppId) {
       providerId: string;
       blocked: boolean;
     }) => applicationRoutingApi.setTierBlocked(appId, providerId, blocked),
-    onSuccess: refresh,
+    onSettled: () =>
+      Promise.all([
+        refresh(),
+        client.invalidateQueries({ queryKey: ["applicationOverview", appId] }),
+      ]),
     onError,
   });
   // 清除档位错误记录（内存熔断器 + DB 健康行）：用户显式动作，清完立刻
@@ -61,24 +87,17 @@ export function useApplicationRouting(appId: AppId) {
     onError,
   });
   const failover = useMutation({
-    mutationFn: async (enabled: boolean) => {
-      if (enabled) {
-        // Read fresh state at click time; the view's cached status may be stale.
-        const [status, takeover] = await Promise.all([
-          proxyApi.getProxyStatus(),
-          proxyApi.getProxyTakeoverStatus(),
-        ]);
-        if (!status.running) await proxyApi.startProxyServer();
-        if (!takeover[appId as keyof typeof takeover])
-          await proxyApi.setProxyTakeoverForApp(appId, true);
-      }
-      await applicationRoutingApi.setFailover(appId, enabled);
-    },
-    onSuccess: async (_data, enabled) => {
+    mutationFn: (enabled: boolean) =>
+      applicationRoutingApi.setFailover(appId, enabled),
+    onSuccess: (_data, enabled) => {
       // 开启即生效（未初始化的链回落=当前全量显示序，开关同时带起代理与接管）；
       // toast 只报「已生效」——干净视图下没有可应用的挂起，弹「尚未生效」是假话。
       if (enabled) toast.success(t("applications.failoverEnabled"));
+    },
+    onSettled: async () => {
       await Promise.all([
+        client.invalidateQueries({ queryKey: ["applicationOverview", appId] }),
+        client.invalidateQueries({ queryKey: ["providers", appId] }),
         refresh(),
         client.invalidateQueries({ queryKey: proxyKeys.status }),
         client.invalidateQueries({ queryKey: proxyKeys.takeoverStatus }),
@@ -90,7 +109,14 @@ export function useApplicationRouting(appId: AppId) {
   });
   return {
     ...query,
-    busy: order.isPending || failover.isPending || blockTier.isPending,
+    busy:
+      apply.isPending ||
+      order.isPending ||
+      failover.isPending ||
+      blockTier.isPending ||
+      resetTierErrors.isPending,
+    apply: (change: ApplicationRoutingChange, quitChatgpt?: boolean) =>
+      apply.mutateAsync({ change, quitChatgpt }),
     setOrder: order.mutateAsync,
     setFailover: failover.mutateAsync,
     blockTier: blockTier.mutateAsync,

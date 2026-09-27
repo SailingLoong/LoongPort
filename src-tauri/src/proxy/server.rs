@@ -295,12 +295,19 @@ impl ProxyServer {
     ///
     /// 注意：这不代表该供应商一定已经处理过请求，而是用于“热切换/启用故障转移立即切 P1”
     /// 等场景下，让 UI 能立刻反映最新目标。
-    pub async fn set_active_target(&self, app_type: &str, provider_id: &str, provider_name: &str) {
+    pub async fn set_active_target(&self, app_type: &str, target: Option<(&str, &str)>) {
         let mut current_providers = self.state.current_providers.write().await;
-        current_providers.insert(
-            app_type.to_string(),
-            (provider_id.to_string(), provider_name.to_string()),
-        );
+        match target {
+            Some((provider_id, provider_name)) => {
+                current_providers.insert(
+                    app_type.to_string(),
+                    (provider_id.to_string(), provider_name.to_string()),
+                );
+            }
+            None => {
+                current_providers.remove(app_type);
+            }
+        }
     }
 
     fn build_router(&self) -> Router {
