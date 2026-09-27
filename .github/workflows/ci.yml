@@ -214,6 +214,20 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
+      # windows-arm64 的 rquickjs 在 Cargo.toml 里有两段声明（主依赖 +
+      # [target] 段），dependabot 只升主依赖不同步 target 段 ⇒ 依赖图出现
+      # 两个 rquickjs 单元，rustc E0464。三平台 CI 都不编译该目标，假绿，
+      # 只在发版 windows-11-arm 腿爆发（v3.27.0 / #397 / #505 三次实锤）。
+      # 这里在 PR 时解析该目标依赖图，rquickjs 必须只有一个单元。
+      - name: Windows arm64 dep-graph guard (rquickjs single unit)
+        if: runner.os == 'Linux'
+        run: |
+          units=$(cargo tree --manifest-path src-tauri/Cargo.toml --target aarch64-pc-windows-msvc --locked -i rquickjs | grep -c '^rquickjs v' || true)
+          if [ "$units" -ne 1 ]; then
+            echo "::error::rquickjs resolves to $units units for aarch64-pc-windows-msvc — the [target] section in Cargo.toml diverged from the main dependency (E0464 on the release arm64 leg). Align both declarations to the same version."
+            exit 1
+          fi
+
       - name: Clippy
         run: cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
 
