@@ -1749,17 +1749,15 @@ impl ProxyService {
                     }
                 }
             }
-            AppType::Codex => {
-                if !Self::is_codex_live_taken_over(live_config) {
-                    let native =
-                        crate::services::ProviderService::read_live_settings(AppType::Codex)
-                            .map_err(|error| error.to_string())?;
-                    crate::services::ProviderService::adopt_codex_native_configuration(
-                        &self.db, native,
-                    )
+            AppType::Codex if !Self::is_codex_live_taken_over(live_config) => {
+                let native = crate::services::ProviderService::read_live_settings(AppType::Codex)
                     .map_err(|error| error.to_string())?;
-                }
+                crate::services::ProviderService::adopt_codex_native_configuration(
+                    &self.db, native,
+                )
+                .map_err(|error| error.to_string())?;
             }
+            AppType::Codex => {}
             AppType::Gemini => {
                 let provider_id =
                     crate::settings::get_effective_current_provider(&self.db, &AppType::Gemini)

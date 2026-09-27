@@ -1176,7 +1176,7 @@ mod tests {
             &db,
             "claude",
             &profiles.current,
-            &[old.id.clone()],
+            std::slice::from_ref(&old.id),
         )
         .unwrap();
         let mut replacement = imported_claude("new-model");

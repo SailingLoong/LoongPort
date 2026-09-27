@@ -15,19 +15,22 @@ fn comparable_settings(settings: &Value) -> Result<Value, AppError> {
     Ok(value)
 }
 
-fn active_route_field<'a>(config: &'a toml::Value, field: &str) -> Option<&'a toml::Value> {
-    config
-        .get("model_provider")
-        .and_then(toml::Value::as_str)
-        .and_then(|name| config.get("model_providers")?.get(name)?.get(field))
-        .or_else(|| config.get(field))
-}
-
-fn external_catalog_pointer(config: &toml::Value) -> Option<&str> {
-    config
+fn comparable_managed_config(config: &str) -> Result<toml::Value, AppError> {
+    let config = crate::codex_config::strip_codex_unified_session_bucket(config)?;
+    let mut parsed: toml::Value = toml::from_str(&config)
+        .map_err(|error| AppError::Config(format!("Invalid Codex configuration: {error}")))?;
+    let generated_catalog = parsed
         .get("model_catalog_json")
         .and_then(toml::Value::as_str)
-        .filter(|name| !crate::codex_config::is_our_model_catalog_filename(name))
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(crate::codex_config::is_our_model_catalog_filename);
+    if generated_catalog {
+        if let Some(table) = parsed.as_table_mut() {
+            table.remove("model_catalog_json");
+        }
+    }
+    Ok(parsed)
 }
 
 impl super::ProviderService {
@@ -61,26 +64,8 @@ impl super::ProviderService {
                         .and_then(Value::as_str)
                         .zip(effective.get("config").and_then(Value::as_str))
                         .is_some_and(|(native, expected)| {
-                            let Ok(native_owned_fields) =
-                                crate::codex_config::strip_codex_unified_session_bucket(native)
-                            else {
-                                return false;
-                            };
-                            let (Ok(native_doc), Ok(expected_doc)) = (
-                                toml::from_str::<toml::Value>(&native_owned_fields),
-                                toml::from_str::<toml::Value>(expected),
-                            ) else {
-                                return false;
-                            };
-                            ["model", "model_reasoning_effort"]
-                                .into_iter()
-                                .all(|field| native_doc.get(field) == expected_doc.get(field))
-                                && crate::codex_config::extract_codex_base_url(&native_owned_fields)
-                                    == crate::codex_config::extract_codex_base_url(expected)
-                                && active_route_field(&native_doc, "wire_api")
-                                    == active_route_field(&expected_doc, "wire_api")
-                                && external_catalog_pointer(&native_doc)
-                                    == external_catalog_pointer(&expected_doc)
+                            comparable_managed_config(native).ok()
+                                == comparable_managed_config(expected).ok()
                         });
                     if owned_auth && same_config {
                         return Ok(current);
