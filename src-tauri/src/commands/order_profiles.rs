@@ -49,9 +49,7 @@ pub async fn export_order_profiles<R: tauri::Runtime>(
     state: State<'_, AppState>,
     app_type: String,
 ) -> Result<Option<String>, String> {
-    let profiles = profiles::get(&state.db, &app_type)
-        .map_err(|e| e.to_string())?
-        .profiles;
+    let json = profiles::export_json(&state.db, &app_type).map_err(|e| e.to_string())?;
     let Some(path) = app
         .dialog()
         .file()
@@ -62,7 +60,6 @@ pub async fn export_order_profiles<R: tauri::Runtime>(
     else {
         return Ok(None);
     };
-    let json = serde_json::to_string_pretty(&profiles).map_err(|e| e.to_string())?;
     std::fs::write(PathBuf::from(&path), json).map_err(|e| e.to_string())?;
     Ok(Some(path))
 }

@@ -1355,15 +1355,11 @@ fn codex_supported_reasoning_levels(levels: &[String]) -> Value {
 }
 
 /// Apply a reasoning-level set onto a catalog entry. Returns true when the
-/// set yielded at least one canonical effort, so callers can skip further
-/// fallbacks. `template_default` is the base entry's `default_reasoning_level`
-/// (from the profile template or an official vendor entry) used as the
-/// fallback when no explicit default applies; `explicit_default` is the
-/// caller's own declared default (validated against the canonical set).
+/// set yielded at least one canonical effort. The resolver owns the default;
+/// catalog serialization does not introduce another fallback.
 fn apply_codex_reasoning_levels(
     entry_obj: &mut serde_json::Map<String, Value>,
-    template_default: Option<&str>,
-    explicit_default: Option<&str>,
+    resolved_default: Option<&str>,
     levels: &[String],
 ) -> bool {
     let canonical = codex_canonical_efforts(levels);
@@ -1373,38 +1369,12 @@ fn apply_codex_reasoning_levels(
     let supported = codex_supported_reasoning_levels(levels);
     entry_obj.insert("supported_reasoning_levels".to_string(), supported);
 
-    // Default: explicit value wins; otherwise keep the base default when it
-    // is still supported; otherwise fall back to the highest supported level
-    // in canonical order. All candidates are validated against the canonical
-    // set so the default can never reference a dropped effort.
-    let default_level = explicit_default
-        .filter(|level| canonical.iter().any(|candidate| candidate == *level))
-        .or_else(|| {
-            template_default.filter(|level| canonical.iter().any(|candidate| candidate == *level))
-        })
-        .or_else(|| canonical.last().map(String::as_str));
-    if let Some(default_level) = default_level {
-        entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
-    }
+    // Only a declared or authoritative base default can choose an effort.
+    // A missing default leaves the selection to the client/user.
+    let default_level =
+        resolved_default.filter(|level| canonical.iter().any(|candidate| candidate == *level));
+    entry_obj.insert("default_reasoning_level".to_string(), json!(default_level));
     true
-}
-
-/// Apply a per-model reasoning-level override onto a catalog entry. Returns
-/// true when the override was applied (so callers can skip further work).
-fn apply_codex_reasoning_level_override(
-    entry_obj: &mut serde_json::Map<String, Value>,
-    template_default: Option<&str>,
-    spec: &CodexCatalogModelSpec,
-) -> bool {
-    let Some(levels) = spec.reasoning_levels.as_deref() else {
-        return false;
-    };
-    apply_codex_reasoning_levels(
-        entry_obj,
-        template_default,
-        spec.default_reasoning_level.as_deref(),
-        levels,
-    )
 }
 
 /// The official catalog entry whose slug matches, if any. Case-insensitive —
@@ -1570,13 +1540,9 @@ fn codex_catalog_model_entry(
     if let Some(capabilities) =
         crate::codex_reasoning::resolve(&spec.model, declared, official, None)
     {
-        let template_default = template
-            .get("default_reasoning_level")
-            .and_then(Value::as_str);
         apply_codex_reasoning_levels(
             entry_obj,
-            template_default,
-            spec.default_reasoning_level.as_deref(),
+            capabilities.default_level.as_deref(),
             &capabilities.levels,
         );
         // Descriptions are presentation from the same official entry; the resolver
@@ -1592,6 +1558,10 @@ fn codex_catalog_model_entry(
                 );
             }
         }
+    } else {
+        // A template supplies the native schema, not capabilities for another model.
+        entry_obj.insert("supported_reasoning_levels".into(), json!([]));
+        entry_obj.insert("default_reasoning_level".into(), Value::Null);
     }
 
     entry
@@ -1622,14 +1592,13 @@ struct CodexCatalogModelSpec {
     base_instructions: Option<String>,
     /// Per-row override for the generated catalog's `supported_reasoning_levels`
     /// (e.g. ["none", "low", "medium", "high", "xhigh", "max"]). When omitted
-    /// the template's conservative default (none/high) is kept. Consulted for
+    /// capabilities come from an exact official/curated model match. Consulted for
     /// every profile; the vendor-catalog path applies it on top of the
     /// official entry.
     reasoning_levels: Option<Vec<String>>,
     /// Per-row override for the generated catalog's `default_reasoning_level`.
-    /// Only meaningful together with `reasoning_levels`; when absent the
-    /// template default is kept if it is still in the list, otherwise the last
-    /// (highest) declared level wins.
+    /// Only meaningful together with `reasoning_levels`; absent or invalid
+    /// values leave the default unset, without borrowing another model's value.
     default_reasoning_level: Option<String>,
 }
 
@@ -2099,12 +2068,16 @@ fn codex_vendor_catalog_model_entry(
         Some(found) => found.clone(),
         None => vendor_models.first().cloned().unwrap_or_else(|| json!({})),
     };
-    // Capture before the mutable borrow: the vendor entry's own default is the
-    // fallback when the user declares reasoning levels without a default.
-    let vendor_default = entry
-        .get("default_reasoning_level")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
+    let declared = spec.reasoning_levels.as_ref().map(|levels| {
+        crate::codex_reasoning::ReasoningCapabilities {
+            levels: levels.clone(),
+            default_level: spec.default_reasoning_level.clone(),
+        }
+    });
+    // An unmatched vendor entry supplies schema/harness only. Model capabilities
+    // require an exact vendor match, just as request normalization does.
+    let official = matched.and_then(crate::codex_reasoning::native_capabilities);
+    let reasoning = crate::codex_reasoning::resolve(&spec.model, declared, official, None);
     let Some(entry_obj) = entry.as_object_mut() else {
         return json!({});
     };
@@ -2148,10 +2121,22 @@ fn codex_vendor_catalog_model_entry(
         entry_obj.insert("base_instructions".to_string(), json!(base_instructions));
     }
 
-    // Per-model reasoning levels win over the official vendor entry too.
-    // The vendor file is the base (its own levels stay when no override is
-    // declared); its default_reasoning_level is the fallback.
-    apply_codex_reasoning_level_override(entry_obj, vendor_default.as_deref(), spec);
+    if let Some(reasoning) = reasoning {
+        entry_obj.insert(
+            "default_reasoning_level".into(),
+            json!(reasoning.default_level),
+        );
+        if spec.reasoning_levels.is_some() || matched.is_none() {
+            apply_codex_reasoning_levels(
+                entry_obj,
+                reasoning.default_level.as_deref(),
+                &reasoning.levels,
+            );
+        }
+    } else {
+        entry_obj.insert("supported_reasoning_levels".into(), json!([]));
+        entry_obj.insert("default_reasoning_level".into(), Value::Null);
+    }
 
     // Defensive: if a future codex parser requires a field the vendor file
     // predates, backfill only whitelisted parser-required keys.
@@ -2471,12 +2456,7 @@ fn codex_catalog_projection_from_settings(
                     }
                     let default = capabilities.default_level.as_deref();
                     if let Some(object) = entry.as_object_mut() {
-                        apply_codex_reasoning_levels(
-                            object,
-                            default,
-                            default,
-                            &capabilities.levels,
-                        );
+                        apply_codex_reasoning_levels(object, default, &capabilities.levels);
                     }
                 }
             }
@@ -2523,10 +2503,8 @@ fn codex_catalog_projection_with_official(
 
     if official_models.is_empty() {
         // bundled 与 models_cache.json 都没拿到官方数据（最常见：本机找不到
-        // codex CLI）。官方 slug 将落保守档位——这应当可见，而不是静默降级。
-        log::warn!(
-            "官方 codex 目录不可用（codex CLI 未发现且无 models_cache.json）：官方模型将使用保守档位"
-        );
+        // codex CLI）。没有明确能力的模型不展示推理强度选项。
+        log::warn!("官方 codex 目录不可用：仅使用模型明确声明的推理能力");
     }
 
     let configured_context_window =
@@ -3192,7 +3170,6 @@ pub(crate) fn native_reasoning_capabilities(
         codex_official_vendor_catalog_models(config_text, CodexCatalogToolProfile::NativeResponses)
     {
         return official_model_entry_for_slug(model, &models)
-            .or_else(|| models.first())
             .and_then(crate::codex_reasoning::native_capabilities);
     }
     official_reasoning_capabilities(model)
@@ -6316,44 +6293,40 @@ base_url = "https://production.api/v1"
             Some("xhigh")
         );
 
-        // No explicit default: falls back to the last (highest) declared level.
+        // Missing defaults remain unset rather than selecting a stronger effort.
         assert_eq!(efforts(1), vec!["low", "medium", "high"]);
         assert_eq!(
             models[1]
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
-            Some("high")
+            None
         );
 
-        // Template default ("high") is kept when it is still in the list.
+        // A different model's template is not a default declaration.
         assert_eq!(efforts(2), vec!["none", "high", "xhigh"]);
         assert_eq!(
             models[2]
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
-            Some("high")
+            None
         );
 
-        // Unknown / empty efforts are dropped; the default still resolves to
-        // a supported level (the template default, "high").
+        // Unknown / empty efforts are dropped without inventing a default.
         assert_eq!(efforts(3), vec!["none", "high"]);
         assert_eq!(
             models[3]
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
-            Some("high")
+            None
         );
 
-        // Declaration order is normalized to canonical order, duplicates and
-        // an unknown explicit default are dropped, and the fallback picks the
-        // highest supported level in canonical order (not the last declared
-        // one, and never an unknown effort).
+        // Declaration order is canonical; invalid explicit defaults stay unset.
         assert_eq!(efforts(4), vec!["low", "xhigh"]);
         assert_eq!(
             models[4]
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
-            Some("xhigh")
+            None
         );
     }
 
@@ -6409,7 +6382,7 @@ base_url = "https://production.api/v1"
                         "model": "gpt-mini-fast",
                         "reasoningLevels": ["none", "high"]
                     },
-                    // Unknown slug: conservative template levels stay.
+                    // Unknown slug: no capability declaration.
                     { "model": "mystery-relay-model" }
                 ]
             }
@@ -6437,8 +6410,7 @@ base_url = "https://production.api/v1"
                 .and_then(|v| v.as_str())
         };
 
-        // Official levels are mirrored verbatim, and the template default is
-        // kept because it stays inside the mirrored set.
+        // Official levels are mirrored verbatim; this entry has no default.
         assert_eq!(
             efforts(0),
             vec!["low", "medium", "high", "xhigh", "max", "ultra"]
@@ -6447,16 +6419,47 @@ base_url = "https://production.api/v1"
             models[0]["supported_reasoning_levels"][5]["description"],
             json!("Maximum reasoning with automatic task delegation")
         );
-        assert_eq!(default_level(0), Some("high"));
+        assert_eq!(default_level(0), None);
 
         // The declared subset wins over the official mirror (the official
         // gpt-mini-fast set is not consulted for this row).
         assert_eq!(efforts(1), vec!["none", "high"]);
-        assert_eq!(default_level(1), Some("high"));
+        assert_eq!(default_level(1), None);
 
-        // Unknown slug: template's conservative none/high stays.
-        assert_eq!(efforts(2), vec!["none", "high"]);
-        assert_eq!(default_level(2), Some("high"));
+        // Unknown slugs do not inherit another model's controls.
+        assert!(efforts(2).is_empty());
+        assert_eq!(default_level(2), None);
+    }
+
+    #[test]
+    fn reasoning_catalog_preserves_authoritative_default_and_unknown_has_no_controls() {
+        let template = json!({"default_reasoning_level":"high",
+            "supported_reasoning_levels":[{"effort":"none"},{"effort":"high"}]});
+        let official = vec![json!({"slug":"gpt-6-astra",
+            "default_reasoning_level":"medium",
+            "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]})];
+        let settings = json!({"modelCatalog":{"models":[
+            {"model":"gpt-6-astra"}, {"model":"custom-unknown"},
+            {"model":"custom-declared", "reasoningLevels":["low","high"]}
+        ]}});
+        let catalog = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &official,
+        );
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "medium");
+        assert_eq!(
+            catalog["models"][0]["supported_reasoning_levels"][5]["effort"],
+            "ultra"
+        );
+        assert_eq!(
+            catalog["models"][1]["supported_reasoning_levels"],
+            json!([])
+        );
+        assert!(catalog["models"][1]["default_reasoning_level"].is_null());
+        assert!(catalog["models"][2]["default_reasoning_level"].is_null());
     }
 
     #[test]
@@ -6482,9 +6485,7 @@ base_url = "https://production.api/v1"
                     { "model": "glm-5.1" },
                     // Case-insensitive match.
                     { "model": "minimax-m3" },
-                    // 站内家族别名（站点自造、官方目录没有的裸名）按家族对齐：
-                    // gpt-6 = gpt-6-astra 家族别名 → 全档；gpt-5.6 = 5.6 家族
-                    // 裸名 → sol/terra/luna 档位交集（后端不可知，交集保证不 400）。
+                    // Family aliases need a provider declaration; they are not official slugs.
                     { "model": "gpt-6" },
                     { "model": "gpt-5.6" },
                     // A curated set narrower than the conservative template
@@ -6495,7 +6496,7 @@ base_url = "https://production.api/v1"
                         "model": "deepseek-v4-flash",
                         "reasoningLevels": ["low", "high"]
                     },
-                    // Unknown third-party slug: conservative none/high stays.
+                    // Unknown third-party slug: no unsupported capability claim.
                     { "model": "not-in-any-table" }
                 ]
             }
@@ -6521,21 +6522,16 @@ base_url = "https://production.api/v1"
         assert_eq!(efforts(0), vec!["low", "high", "max"]);
         assert_eq!(efforts(1), vec!["none", "high"]);
         assert_eq!(efforts(2), vec!["none", "high"]);
-        assert_eq!(
-            efforts(3),
-            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
-        );
-        assert_eq!(efforts(4), vec!["low", "medium", "high", "xhigh", "max"]);
+        assert!(efforts(3).is_empty());
+        assert!(efforts(4).is_empty());
         assert_eq!(efforts(5), vec!["high"]);
         assert_eq!(efforts(6), vec!["low", "high"]);
-        assert_eq!(efforts(7), vec!["none", "high"]);
+        assert!(efforts(7).is_empty());
     }
 
     #[test]
     fn official_reasoning_level_mirror_fixes_inconsistent_default() {
-        // When the mirrored official set does not contain the template's
-        // default, the default falls back to the set's highest level so it can
-        // never reference an effort the picker does not offer.
+        // The official entry has no default; the template cannot supply one.
         let template = json!({
             "slug": "tpl",
             "default_reasoning_level": "high",
@@ -6572,7 +6568,7 @@ base_url = "https://production.api/v1"
             entry
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
-            Some("low")
+            None
         );
     }
 
@@ -6618,12 +6614,12 @@ base_url = "https://production.api/v1"
             .iter()
             .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
             .collect();
-        assert_eq!(efforts, vec!["low", "medium", "high", "xhigh"]);
+        assert!(efforts.is_empty());
         assert_eq!(
             entry
                 .get("default_reasoning_level")
                 .and_then(|v| v.as_str()),
-            Some("medium")
+            None
         );
     }
 
@@ -6987,6 +6983,62 @@ wire_api = "responses"
                 .and_then(|v| v.as_str()),
             Some("xhigh")
         );
+    }
+
+    #[test]
+    fn vendor_reasoning_uses_the_same_default_and_exact_model_facts_as_requests() {
+        for (model, declared) in [("deepseek-v4-flash", true), ("custom-vendor-alias", false)] {
+            let row = if declared {
+                json!({"model":model,"reasoningLevels":["low","high"]})
+            } else {
+                json!({"model":model})
+            };
+            let mut config = DEEPSEEK_NATIVE_CONFIG.parse::<DocumentMut>().unwrap();
+            config["model"] = toml_edit::value(model);
+            config["model_reasoning_effort"] = toml_edit::value("max");
+            let config = config.to_string();
+            let settings = json!({"config":config,"modelCatalog":{"models":[row]}});
+            let catalog = codex_model_catalog_from_settings(
+                &settings,
+                &config,
+                CodexCatalogToolProfile::NativeResponses,
+            )
+            .unwrap()
+            .unwrap();
+            let entry = &catalog["models"][0];
+            assert!(entry["default_reasoning_level"].is_null());
+            let provider = crate::provider::Provider::with_id(
+                "fixture".into(),
+                "Fixture".into(),
+                settings,
+                None,
+            );
+            let normalized = normalize_selected_model_reasoning(
+                &provider,
+                &config,
+                CodexCatalogToolProfile::NativeResponses,
+                true,
+            );
+            let mut request = json!({"model":model,"reasoning":{"effort":"max"}});
+            let forwarded =
+                crate::proxy::providers::normalize_request_reasoning(&provider, &mut request, true);
+            if declared {
+                assert_eq!(
+                    crate::codex_reasoning::native_capabilities(entry)
+                        .unwrap()
+                        .levels,
+                    vec!["low", "high"]
+                );
+                assert!(normalized.is_err());
+                assert!(forwarded.is_err());
+            } else {
+                assert_eq!(entry["supported_reasoning_levels"], json!([]));
+                assert!(native_reasoning_capabilities(&config, model).is_none());
+                assert_eq!(normalized.unwrap(), config);
+                forwarded.unwrap();
+                assert_eq!(request["reasoning"]["effort"], "max");
+            }
+        }
     }
 
     #[test]

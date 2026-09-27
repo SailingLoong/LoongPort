@@ -1322,6 +1322,16 @@ impl ProxyService {
     async fn set_takeover_for_app_inner(&self, app: &AppType, enabled: bool) -> Result<(), String> {
         let app_type_str = app.as_str();
         if enabled {
+            let external_codex =
+                matches!(app, AppType::Codex) && !self.detect_takeover_in_live_config_for_app(app);
+            if external_codex {
+                let native = crate::services::ProviderService::read_live_settings(AppType::Codex)
+                    .map_err(|error| error.to_string())?;
+                crate::services::ProviderService::adopt_codex_native_configuration(
+                    &self.db, native,
+                )
+                .map_err(|error| error.to_string())?;
+            }
             // 1) 代理服务未运行则自动启动
             #[cfg(feature = "gui")]
             if !self.is_running().await {
@@ -1360,7 +1370,7 @@ impl ProxyService {
                     self.refresh_active_target_from_current_provider(app).await;
                     return Ok(());
                 }
-                restore_existing_backup_before_takeover = has_backup;
+                restore_existing_backup_before_takeover = has_backup && !external_codex;
 
                 log::warn!(
                     "{app_type_str} 标记为已接管，但 backup={has_backup} live_matches_current_proxy={live_matches_current_proxy}，正在重新接管并补齐 Live"
@@ -1374,7 +1384,11 @@ impl ProxyService {
                 self.backup_live_config_strict(app).await?;
 
                 // 4) 同步 Live Token 到数据库（仅当前 app）
-                if let Err(e) = self.sync_live_to_provider(app).await {
+                if let Err(e) = if matches!(app, AppType::Codex) {
+                    Ok(())
+                } else {
+                    self.sync_live_to_provider(app).await
+                } {
                     self.db.delete_live_backup(app_type_str).await.error_on_err(
                         DiagnosticEvent::new("proxy.takeover.rollback", "delete_backup_failed")
                             .field("phase", "sync_live_to_provider")
@@ -1736,61 +1750,14 @@ impl ProxyService {
                 }
             }
             AppType::Codex => {
-                let provider_id =
-                    crate::settings::get_effective_current_provider(&self.db, &AppType::Codex)
-                        .map_err(|e| format!("获取 Codex 当前供应商失败: {e}"))?;
-
-                if let Some(provider_id) = provider_id {
-                    if let Ok(Some(mut provider)) =
-                        self.db.get_provider_by_id(&provider_id, "codex")
-                    {
-                        // Official rows are routing/account selectors, not
-                        // credential stores. Their auth must remain empty even
-                        // when the live Codex login uses OPENAI_API_KEY mode.
-                        if crate::proxy::providers::is_codex_official_provider(&provider) {
-                            return Ok(());
-                        }
-                        if let Some(token) = live_config
-                            .get("auth")
-                            .and_then(|v| v.get("OPENAI_API_KEY"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.trim())
-                            .filter(|s| !s.is_empty() && *s != PROXY_TOKEN_PLACEHOLDER)
-                        {
-                            if let Some(auth_obj) = provider
-                                .settings_config
-                                .get_mut("auth")
-                                .and_then(|v| v.as_object_mut())
-                            {
-                                auth_obj.insert("OPENAI_API_KEY".to_string(), json!(token));
-                            } else {
-                                if provider.settings_config.is_null() {
-                                    provider.settings_config = json!({});
-                                }
-
-                                if let Some(root) = provider.settings_config.as_object_mut() {
-                                    root.insert(
-                                        "auth".to_string(),
-                                        json!({ "OPENAI_API_KEY": token }),
-                                    );
-                                } else {
-                                    log::warn!(
-                                        "Codex provider settings_config 格式异常（非对象），跳过写入 Token (provider: {provider_id})"
-                                    );
-                                }
-                            }
-
-                            if let Err(e) = self.db.update_provider_settings_config(
-                                "codex",
-                                &provider_id,
-                                &provider.settings_config,
-                            ) {
-                                log::warn!("同步 Codex Token 到数据库失败: {e}");
-                            } else {
-                                log::info!("已同步 Codex Token 到数据库 (provider: {provider_id})");
-                            }
-                        }
-                    }
+                if !Self::is_codex_live_taken_over(live_config) {
+                    let native =
+                        crate::services::ProviderService::read_live_settings(AppType::Codex)
+                            .map_err(|error| error.to_string())?;
+                    crate::services::ProviderService::adopt_codex_native_configuration(
+                        &self.db, native,
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
             }
             AppType::Gemini => {
@@ -2492,6 +2459,15 @@ impl ProxyService {
             AppType::Gemini,
             AppType::GrokBuild,
         ] {
+            // Crash recovery may find an old backup after another editor has
+            // already replaced native Codex files. Release that stale backup
+            // without restoring it over the editor's newer configuration.
+            if matches!(app_type, AppType::Codex)
+                && !self.detect_takeover_in_live_config_for_app(&app_type)
+                && crate::codex_config::read_codex_live_settings().is_ok()
+            {
+                continue;
+            }
             if let Err(e) = self
                 .restore_live_config_for_app_with_fallback(&app_type)
                 .await
@@ -4357,6 +4333,89 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn codex_native_handoff_preserves_external_identity_and_catalog() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(
+            db.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        )
+        .unwrap();
+        let old_config = "model='old-model'\nmodel_provider='gateway'\n[model_providers.gateway]\nbase_url='https://old.example/v1'\nwire_api='responses'\n";
+        let old = Provider::with_id(
+            "old".into(),
+            "Old".into(),
+            json!({"auth":{"OPENAI_API_KEY":"old-key"},"config":old_config}),
+            None,
+        );
+        db.save_provider("codex", &old).unwrap();
+        db.set_current_provider("codex", &old.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&old.id)).unwrap();
+        crate::proxy::auto_strategy::set_model_pref(&db, "codex", Some("old-model")).unwrap();
+        let new_config = "model='new-model'\nmodel_reasoning_effort='max'\nmodel_catalog_json='external-catalog.json'\nmodel_provider='gateway'\n[model_providers.gateway]\nbase_url='https://new.example/v2'\nwire_api='chat'\n";
+        let new_auth = json!({"OPENAI_API_KEY":"new-key"});
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &new_auth)
+            .unwrap();
+        crate::config::write_text_file(&crate::codex_config::get_codex_config_path(), new_config)
+            .unwrap();
+        // An old takeover backup must not overwrite a subsequent external edit.
+        db.save_live_backup("codex", &old.settings_config.to_string())
+            .await
+            .unwrap();
+        service.recover_from_crash().await.unwrap();
+        assert_eq!(service.read_codex_live().unwrap()["config"], new_config);
+        service.set_takeover_for_app("codex", true).await.unwrap();
+        let id = db.get_current_provider("codex").unwrap().unwrap();
+        assert_ne!(id, old.id);
+        let selected = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
+        assert_eq!(
+            selected.settings_config["auth"]["OPENAI_API_KEY"],
+            "new-key"
+        );
+        let selected_config: toml::Value =
+            toml::from_str(selected.settings_config["config"].as_str().unwrap()).unwrap();
+        assert_eq!(selected_config["model"].as_str(), Some("new-model"));
+        assert_eq!(
+            selected_config["model_reasoning_effort"].as_str(),
+            Some("max")
+        );
+        assert_eq!(
+            selected_config["model_providers"]["gateway"]["base_url"].as_str(),
+            Some("https://new.example/v2")
+        );
+        assert_eq!(
+            selected_config["model_providers"]["gateway"]["wire_api"].as_str(),
+            Some("chat")
+        );
+        assert_eq!(
+            db.get_provider_by_id(&old.id, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            old.settings_config
+        );
+        let live = service.read_codex_live().unwrap();
+        let live: toml::Value = toml::from_str(live["config"].as_str().unwrap()).unwrap();
+        assert_eq!(live["model"].as_str(), Some("new-model"));
+        assert_eq!(live["model_reasoning_effort"].as_str(), Some("max"));
+        assert_eq!(
+            live["model_catalog_json"].as_str(),
+            Some("external-catalog.json")
+        );
+        service.set_takeover_for_app("codex", false).await.unwrap();
+        assert_eq!(service.read_codex_live().unwrap()["config"], new_config);
+        service.set_takeover_for_app("codex", true).await.unwrap();
+        assert_eq!(
+            db.get_current_provider("codex").unwrap().as_deref(),
+            Some(id.as_str())
+        );
+        service.set_takeover_for_app("codex", false).await.unwrap();
+    }
+
     struct TempHome {
         #[allow(dead_code)]
         dir: TempDir,
@@ -4375,6 +4434,8 @@ mod tests {
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
             env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            crate::secrets::testing::initialize_database()
+                .expect("initialize isolated test secret storage");
 
             Self {
                 dir,

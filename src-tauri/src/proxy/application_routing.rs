@@ -77,7 +77,7 @@ pub fn ordered_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppE
     Ok(providers)
 }
 
-/// 存储链的原始 id 列表（可能含上游已删除的幽灵）；链未初始化时为 None。
+/// 存储链的原始 id 列表；未初始化时返回空列表。
 fn stored_order(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
     Ok(db
         .get_setting(&priority_key(app))?
@@ -89,8 +89,7 @@ fn stored_order(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
 
 /// 故障切换链的有效 id 全集（2026-09-16 用户定调：链 = 用户已应用的列表）。
 ///
-/// - 链已初始化：严格按存储链返回，幽灵原样带出（调用方各自跳过）。
-///   `set_order` 拒绝空列表，所以已初始化的链绝不退化成空表。
+/// - 链已初始化：严格按存储链返回；最后一个成员删除后保留空链。
 /// - 链未初始化：回落全量显示序——与启动 migrate 的全量播种等价的读时默认，
 ///   让「从没应用过」和「应用了全部」在读取侧无歧义地同形。
 pub fn chain_ids(db: &Database, app: &str) -> Result<Vec<String>, AppError> {
@@ -236,6 +235,7 @@ pub fn migrate(db: &Database, app: &str) -> Result<(), AppError> {
         "UPDATE providers SET in_failover_queue = 0 WHERE app_type = ?1",
         [app],
     )?;
+    crate::database::order_profiles::reconcile_on(&tx, app)?;
     tx.commit()?;
     Ok(())
 }
@@ -243,8 +243,8 @@ pub fn migrate(db: &Database, app: &str) -> Result<(), AppError> {
 /// 写入链 = 用户「应用此顺序」的载荷：当前可见且未屏蔽的档位按显示序，恰好这么多。
 ///
 /// 不再垫底（2026-09-16 定调）：被筛出视图的档位不是后备，链外档位永不参与自动重试。
-/// 新档位由 [`note_provider_created`] 在创建时自动垫底；上游删掉的档位以幽灵形式
-/// 留在链里（选路跳过），用户下次应用即清理。空列表拒绝——故障切换链至少要有一个成员。
+/// 新档位由 [`note_provider_created`] 在创建时自动垫底；删除时同事务维护链和配置档。
+/// 显式应用拒绝空列表；删除最后一个成员可以让已有链变空。
 pub fn set_order(db: &Database, app: &str, ids: &[String]) -> Result<(), AppError> {
     crate::services::order_profiles::apply_current_order(db, app, ids)
 }
@@ -497,10 +497,10 @@ mod tests {
         );
     }
 
-    /// 上游删掉的档位以幽灵形式留在链里（选路自然跳过），用户下次应用即清理。
+    /// Deleting a tier updates both the stored and effective chain.
     #[test]
     #[serial_test::serial]
-    fn deleted_tiers_linger_as_ghosts_until_next_apply() {
+    fn deleted_tiers_are_removed_from_the_stored_chain() {
         let db = crate::Database::memory().unwrap();
         for id in ["a", "b"] {
             db.save_provider("claude", &provider(id)).unwrap();
@@ -510,8 +510,8 @@ mod tests {
         db.delete_provider("claude", "b").unwrap();
         assert_eq!(
             chain_ids(&db, "claude").unwrap(),
-            vec!["a", "b"],
-            "幽灵留在存储链里，等用户应用清理"
+            vec!["a"],
+            "deleted members are removed atomically"
         );
         assert_eq!(
             chain_providers(&db, "claude")

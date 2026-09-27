@@ -407,11 +407,18 @@ fn apply_reasoning_options(
         // 上游显式发 effort=none/off/disabled（或 reasoning=null）时 reasoning_enabled 为 false，
         // 直接 return 会丢失关闭意图——OpenRouter 部分模型默认开思考，不带字段无法关闭，
         // 造成行为与成本偏差；故对该形态忠实转发 {"reasoning":{"effort":"none"}}。
-        // 顶层 reasoning_effort 平台的枚举不含 none，仍走上方 thinking 关闭路径、不发 effort。
+        // 有独立 thinking 开关的平台由上方字段关闭；只有 effort 参数的平台保留 none。
         // 注意：完全不带 reasoning 字段时 reasoning_requested 返回 None 已提前 return，
         // 不会走到这里，故只有上游「显式」表达关闭才透传 none。
         if supports_effort && effort_param == "reasoning.effort" {
             result["reasoning"] = json!({ "effort": "none" });
+        } else if supports_effort
+            && effort_param == "reasoning_effort"
+            && config.thinking_param.as_deref() == Some("none")
+        {
+            // This transport has no independent switch. Preserve the explicit
+            // disabled value even when model capabilities have not been declared.
+            result["reasoning_effort"] = json!("none");
         }
         return;
     }
@@ -2699,16 +2706,14 @@ mod tests {
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
         assert_eq!(result["reasoning"]["effort"], "none");
-        // none 不是 OpenAI 顶层 reasoning_effort 的合法枚举，不写顶层别名；也不写 thinking。
+        // 该传输使用嵌套 reasoning.effort，不同时发送顶层别名或 thinking。
         assert!(result.get("reasoning_effort").is_none());
         assert!(result.get("thinking").is_none());
     }
 
     #[test]
-    fn responses_request_to_chat_drops_explicit_none_for_top_level_effort_provider() {
-        // 对照：顶层 reasoning_effort 平台（DeepSeek/OpenAI 风格）的 effort 枚举不含 none，
-        // 显式 none 不应透传成 reasoning_effort:"none"（会被上游拒），仅走 thinking 关闭路径。
-        // 锁定「none 透传仅限 reasoning.effort 形态」的边界，防止回归。
+    fn responses_request_to_chat_uses_independent_thinking_switch_for_none() {
+        // 有独立开关的 DeepSeek 传输通过 thinking 关闭思考，不另发 effort。
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
             supports_effort: Some(true),

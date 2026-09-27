@@ -4,6 +4,7 @@
 
 pub mod failover;
 pub mod mcp;
+pub mod order_profiles;
 pub mod profiles;
 pub mod prompts;
 pub mod provider_attempts;

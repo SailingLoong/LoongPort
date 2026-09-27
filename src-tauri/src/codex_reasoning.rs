@@ -196,11 +196,6 @@ pub(crate) fn resolve(
                 .default_level
                 .take()
                 .filter(|value| capabilities.levels.contains(value));
-        } else {
-            capabilities = Some(ReasoningCapabilities {
-                levels: allowed.iter().map(|level| (*level).into()).collect(),
-                default_level: None,
-            });
         }
     }
     capabilities
@@ -476,6 +471,26 @@ fn infer_aggregator_platform_config(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn gpt_family_aliases_require_model_specific_reasoning_facts() {
+        for model in ["gpt-6", "gpt-5.6", "gpt-future"] {
+            assert!(resolve(model, None, None, None).is_none(), "{model}");
+            let declared = declared_capabilities(&json!({
+                "reasoningLevels":["low","high","ultra"],
+                "defaultReasoningLevel":"high"
+            }));
+            let known = resolve(model, declared, None, None).unwrap();
+            assert_eq!(known.levels, vec!["low", "high", "ultra"]);
+        }
+    }
+
+    #[test]
+    fn gateway_effort_vocabulary_does_not_declare_unknown_model_capabilities() {
+        let transport =
+            infer_chat_transport("OpenRouter", "https://openrouter.ai/api/v1", "gpt-6").unwrap();
+        assert!(resolve("gpt-6", None, None, Some(&transport)).is_none());
+    }
 
     #[test]
     fn reasoning_without_a_switch_does_not_offer_disabled() {

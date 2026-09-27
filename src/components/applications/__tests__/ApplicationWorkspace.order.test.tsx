@@ -58,6 +58,9 @@ vi.mock("../useApplicationRouting", () => ({
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
+vi.mock("@/lib/api/modelVerification", () => ({
+  modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
+}));
 const profilesApi = vi.hoisted(() => ({
   saved: [] as { name: string; providerIds: string[] }[],
   current: "default",
@@ -88,12 +91,19 @@ vi.mock("@/lib/api/orderProfiles", () => ({
     },
     rename: (appType: string, from: string, to: string): Promise<void> => {
       profilesApi.rename(appType, from, to);
+      profilesApi.saved = profilesApi.saved.map((profile) =>
+        profile.name === from ? { ...profile, name: to } : profile,
+      );
+      if (profilesApi.current === from) profilesApi.current = to;
       return Promise.resolve();
     },
     remove: vi.fn(
       (_appType: string, name: string) =>
         new Promise<void>((resolve) => {
           profilesApi.saved = profilesApi.saved.filter((p) => p.name !== name);
+          if (profilesApi.current === name) {
+            profilesApi.current = profilesApi.saved[0]?.name ?? "default";
+          }
           resolve();
         }),
     ),
@@ -526,5 +536,130 @@ describe("failover order staging", () => {
       },
       undefined,
     );
+  });
+
+  it("applies the displayed metric order after filtering and excludes blocked tiers", async () => {
+    state.routing.tiers[2].skipReason = "blocked";
+    state.data.configurations[0].name = "Plan Standard";
+    state.data.configurations[1].name = "Plan Premium";
+    renderWorkspace();
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(["orderProfiles", "codex"]),
+      ).toBeDefined(),
+    );
+    await act(async () => tableProps.current.onSort("rateMultiplier"));
+    expect(tableProps.current.orderedIds).toEqual(["b", "a", "c"]);
+    await userEvent.type(screen.getByRole("searchbox"), "Plan");
+    expect(state.apply).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    expect(state.apply).toHaveBeenCalledWith(
+      { order: { profileName: "default", providerIds: ["b", "a"] } },
+      undefined,
+    );
+  });
+
+  it("cancels a filtered metric sort back to the applied list without changing runtime selection", async () => {
+    renderWorkspace();
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(["orderProfiles", "codex"]),
+      ).toBeDefined(),
+    );
+    await act(async () => tableProps.current.onSort("rateMultiplier"));
+    await userEvent.type(screen.getByRole("searchbox"), "Premium");
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.discardOrder" }),
+    );
+    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+    expect(tableProps.current.sort).toBeNull();
+    expect(screen.getByRole("searchbox")).toHaveValue("");
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
+    expect(state.apply).not.toHaveBeenCalled();
+    expect(state.select).not.toHaveBeenCalled();
+  });
+
+  it("renames the loaded draft and applies its members under the new identity", async () => {
+    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
+    renderWorkspace();
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: /Travel/ }),
+    );
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.orderProfileRename" }),
+    );
+    await userEvent.clear(screen.getByRole("textbox"));
+    await userEvent.type(screen.getByRole("textbox"), "Remote");
+    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
+      "Remote",
+    );
+    expect(tableProps.current.orderedIds).toEqual(["c", "b"]);
+    expect(state.apply).not.toHaveBeenCalled();
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(
+      screen.getByRole("button", { name: /applications.applyOrder/ }),
+    );
+    expect(state.apply).toHaveBeenCalledWith(
+      { order: { profileName: "Remote", providerIds: ["c", "b"] } },
+      undefined,
+    );
+  });
+
+  it("deleting the loaded draft returns to the active profile and applied chain", async () => {
+    profilesApi.saved = [{ name: "Travel", providerIds: ["c", "b"] }];
+    renderWorkspace();
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: /Travel/ }),
+    );
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.orderProfileDelete" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
+        "default",
+      ),
+    );
+    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
+    expect(state.apply).not.toHaveBeenCalled();
+  });
+
+  it("deleting the active profile reads the surviving identity while preserving the runtime chain", async () => {
+    profilesApi.current = "Daily";
+    profilesApi.saved = [
+      { name: "Daily", providerIds: ["a", "b", "c"] },
+      { name: "Travel", providerIds: ["c", "b"] },
+    ];
+    renderWorkspace();
+    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
+    await userEvent.click(
+      screen.getAllByRole("button", {
+        name: "applications.orderProfileDelete",
+      })[0],
+    );
+    await waitFor(() =>
+      expect(screen.getByTitle("applications.orderProfiles")).toHaveTextContent(
+        "Travel",
+      ),
+    );
+    expect(tableProps.current.orderedIds).toEqual(["a", "b", "c"]);
+    expect(
+      screen.queryByText("applications.pendingChanges"),
+    ).not.toBeInTheDocument();
+    expect(state.apply).not.toHaveBeenCalled();
   });
 });

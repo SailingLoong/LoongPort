@@ -5,6 +5,7 @@
 mod endpoints;
 mod gemini_auth;
 mod live;
+mod native;
 mod pi;
 mod transaction;
 mod usage;
@@ -397,6 +398,15 @@ fn provider_uses_official_subscription_usage(app_type: &AppType, provider: &Prov
 /// [`crate::codex_config::refresh_codex_catalog_projection`]）。无当前供应商、
 /// 投影不出 catalog、或内容与磁盘一致时为 no-op。
 pub fn refresh_current_codex_catalog_projection(state: &AppState) -> Result<bool, AppError> {
+    let _guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
+    // Unclaimed native configuration belongs to its external editor. Its next
+    // takeover accepts the complete snapshot before any catalog projection.
+    if !state
+        .proxy_service
+        .detect_takeover_in_live_config_for_app(&AppType::Codex)
+    {
+        return Ok(false);
+    }
     let current_id = ProviderService::current(state, AppType::Codex)?;
     if current_id.is_empty() {
         return Ok(false);

@@ -503,7 +503,8 @@ pub fn execute_import(
         // the case where a source happens to use the same provider ID.
         for &index in classified.skipped.iter().chain(&classified.merged_to_relay) {
             let source = &source[index];
-            staged.delete_provider(source.app_type.as_str(), &source.provider.id)?;
+            let conn = crate::database::lock_conn!(staged.conn);
+            crate::database::delete_provider_row_on(&conn, source.app_type.as_str(), &source.provider.id)?;
         }
         for managed in &managed {
             staged.save_provider(managed.app_type.as_str(), &managed.provider)?;
@@ -513,6 +514,14 @@ pub fn execute_import(
             if !existing.contains(&(imported.app_type.as_str().to_owned(), imported.provider.id.clone())) {
                 crate::proxy::application_routing::note_provider_created(staged, imported.app_type.as_str(), &imported.provider.id)?;
             }
+        }
+        {
+            let mut conn = crate::database::lock_conn!(staged.conn);
+            let tx = conn.transaction()?;
+            for app in AppType::all() {
+                crate::database::order_profiles::reconcile_on(&tx, app.as_str())?;
+            }
+            tx.commit()?;
         }
         for before in &applications {
             let retained = before.current.as_ref().map(|provider| {
@@ -1145,6 +1154,92 @@ mod tests {
             }}),
             None,
         )
+    }
+
+    #[test]
+    #[serial]
+    fn replacement_import_maintains_saved_orders_before_export_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = TestHomeGuard::set(home.path());
+        crate::settings::reload_settings().unwrap();
+        let db = Arc::new(crate::secrets::testing::initialize_database().unwrap());
+        crate::settings::mutate_settings(|settings| {
+            settings.claude_config_dir =
+                Some(home.path().join("claude").to_string_lossy().into_owned());
+        })
+        .unwrap();
+        let state = crate::store::AppState::new(db.clone()).unwrap();
+        let old = imported_claude("old-model");
+        db.save_provider("claude", &old).unwrap();
+        let profiles = crate::services::order_profiles::get(&db, "claude").unwrap();
+        crate::services::order_profiles::apply_order(
+            &db,
+            "claude",
+            &profiles.current,
+            &[old.id.clone()],
+        )
+        .unwrap();
+        let mut replacement = imported_claude("new-model");
+        replacement.id = "replacement".into();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        source_with_current_provider(source.path(), &replacement, true);
+        execute_import(state.clone(), source.path()).unwrap();
+        let after = crate::services::order_profiles::get(&db, "claude").unwrap();
+        assert_eq!(after.current, "default");
+        assert_eq!(after.profiles[0].provider_ids, vec!["replacement"]);
+        let exported = crate::services::order_profiles::export_json(&db, "claude").unwrap();
+        crate::services::order_profiles::import(
+            &db,
+            "claude",
+            serde_json::from_str(&exported).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::services::order_profiles::get(&db, "claude").unwrap(),
+            after
+        );
+
+        // An equivalent source row is temporarily removed before restoring the
+        // local managed row with the same ID. Its saved identity must survive.
+        let mut managed = imported_claude("managed-model");
+        managed.id = "loongport-aaaaaaaaaaaaaaaa".into();
+        db.save_provider("claude", &managed).unwrap();
+        crate::services::order_profiles::save(
+            &db,
+            "claude",
+            "Travel",
+            &[managed.id.clone(), replacement.id.clone()],
+        )
+        .unwrap();
+        crate::services::order_profiles::apply_order(
+            &db,
+            "claude",
+            "Travel",
+            &[managed.id.clone()],
+        )
+        .unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        source_with_current_provider(source.path(), &managed, true);
+        execute_import(state, source.path()).unwrap();
+        let after = crate::services::order_profiles::get(&db, "claude").unwrap();
+        assert_eq!(after.current, "Travel");
+        assert_eq!(after.profiles.len(), 1);
+        assert_eq!(after.profiles[0].provider_ids, vec![managed.id.clone()]);
+        assert_eq!(
+            crate::proxy::application_routing::chain_ids(&db, "claude").unwrap(),
+            vec![managed.id]
+        );
+        let exported = crate::services::order_profiles::export_json(&db, "claude").unwrap();
+        crate::services::order_profiles::import(
+            &db,
+            "claude",
+            serde_json::from_str(&exported).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::services::order_profiles::get(&db, "claude").unwrap(),
+            after
+        );
     }
 
     #[test]

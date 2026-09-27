@@ -15,13 +15,17 @@ const state = vi.hoisted(() => ({
   blockTier: vi.fn(),
   resetTierErrors: vi.fn(),
   removeProfile: vi.fn(),
+  overviewError: null as Error | null,
+  refetchOverview: vi.fn(),
+  refetchRouting: vi.fn(),
+  refetchProfiles: vi.fn(),
 }));
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
     data: state.data,
     isPending: false,
-    error: null,
-    refetch: vi.fn(),
+    error: state.overviewError,
+    refetch: state.refetchOverview,
     select: state.select,
     busy: false,
     confirmation: null,
@@ -34,7 +38,7 @@ vi.mock("../useApplicationRouting", () => ({
     data: state.routing,
     isPending: false,
     error: null,
-    refetch: vi.fn(),
+    refetch: state.refetchRouting,
     busy: false,
     setOrder: state.setOrder,
     apply: state.apply,
@@ -52,7 +56,11 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-query")>();
   return {
     ...actual,
-    useQuery: () => ({ data: undefined, isPending: false }),
+    useQuery: () => ({
+      data: undefined,
+      isPending: false,
+      refetch: state.refetchProfiles,
+    }),
     useQueryClient: () => ({ invalidateQueries: vi.fn() }),
   };
 });
@@ -98,6 +106,7 @@ const names = () =>
     );
 beforeEach(() => {
   vi.clearAllMocks();
+  state.overviewError = null;
   state.setFailover.mockResolvedValue(undefined);
   state.setOrder.mockResolvedValue(undefined);
   state.apply.mockResolvedValue({
@@ -299,6 +308,66 @@ describe("application workspace", () => {
       "applications.use Unknown",
     ]);
     expect(state.select).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["rateMultiplier", "ascending"],
+    ["errorRate", "ascending"],
+    ["avgFirstTokenMs", "descending"],
+    ["balanceUsd", "descending"],
+    ["cacheHitRate", "descending"],
+    ["todayCostUsd", "ascending"],
+    ["nextResetAt", "ascending"],
+  ] as const)(
+    "cycles %s through its initial direction, reverse and original order with unknown values last",
+    async (key, direction) => {
+      state.routing.tiers[0][key] = 2;
+      state.routing.tiers[1][key] = 0;
+      state.routing.tiers[2][key] = null;
+      render(<ApplicationWorkspace {...props} />);
+      const header = screen.getByRole("button", {
+        name: `applications.metrics.${key}`,
+      });
+      await userEvent.click(header);
+      expect(header.closest("th")).toHaveAttribute("aria-sort", direction);
+      const ascending = [
+        "applications.use Premium",
+        "applications.use Standard",
+        "applications.use Unknown",
+      ];
+      const descending = [
+        "applications.use Standard",
+        "applications.use Premium",
+        "applications.use Unknown",
+      ];
+      expect(names()).toEqual(
+        direction === "ascending" ? ascending : descending,
+      );
+      await userEvent.click(header);
+      expect(names()).toEqual(
+        direction === "ascending" ? descending : ascending,
+      );
+      await userEvent.click(header);
+      expect(header.closest("th")).toHaveAttribute("aria-sort", "none");
+      expect(names()).toEqual(descending);
+      expect(state.setOrder).not.toHaveBeenCalled();
+      expect(state.apply).not.toHaveBeenCalled();
+      expect(state.select).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retries page data after a loading failure without changing routing", async () => {
+    state.overviewError = new Error("configuration unavailable");
+    render(<ApplicationWorkspace {...props} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "applications.loadFailed",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "common.retry" }));
+    expect(state.refetchOverview).toHaveBeenCalledOnce();
+    expect(state.refetchRouting).toHaveBeenCalledOnce();
+    expect(state.refetchProfiles).toHaveBeenCalledOnce();
+    expect(state.apply).not.toHaveBeenCalled();
+    expect(state.setFailover).not.toHaveBeenCalled();
   });
   it("switching to another metric drops the previous sort and applies that metric's default direction", async () => {
     render(<ApplicationWorkspace {...props} />);

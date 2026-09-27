@@ -15,7 +15,7 @@ pub mod model_fetch;
 pub mod model_pricing;
 pub mod models_dev;
 pub mod omo;
-pub mod order_profiles;
+pub use crate::database::order_profiles;
 pub mod pi_prompt_files;
 pub(crate) mod pi_state;
 pub mod profile;

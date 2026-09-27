@@ -1,5 +1,6 @@
 //! Named order snapshots and their applied identity. Reads only project state;
 //! explicit mutations commit profiles, current identity and routing order together.
+//! Provider inventory changes maintain references on the same SQLite connection.
 use crate::{
     app_config::AppType, database::lock_conn, error::AppError, proxy::application_routing, Database,
 };
@@ -83,10 +84,72 @@ fn mutate(
     let tx = conn.transaction()?;
     let mut state = read_state(&tx, app)?;
     change(&tx, &mut state)?;
-    write_json(&tx, &profiles_key(app), &state.profiles)?;
-    write_json(&tx, &current_key(app), &state.current)?;
+    write_state(&tx, app, &mut state)?;
     tx.commit()?;
     Ok(())
+}
+
+/// Empty defaults are a presentation placeholder, never a saved snapshot.
+fn write_state(
+    conn: &Connection,
+    app: &str,
+    state: &mut OrderProfilesState,
+) -> Result<(), AppError> {
+    state
+        .profiles
+        .retain(|profile| !profile.provider_ids.is_empty());
+    if !state
+        .profiles
+        .iter()
+        .any(|profile| profile.name == state.current)
+    {
+        state.current = state
+            .profiles
+            .first()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "default".into());
+    }
+    write_json(conn, &profiles_key(app), &state.profiles)?;
+    write_json(conn, &current_key(app), &state.current)
+}
+
+/// Maintain references after the final inventory is known. The caller owns the
+/// transaction; temporary removal followed by restoration must finish first.
+pub(crate) fn reconcile_on(conn: &Connection, app: &str) -> Result<(), AppError> {
+    let mut statement = conn.prepare("SELECT id FROM providers WHERE app_type = ?1")?;
+    let known = statement
+        .query_map([app], |row| row.get::<_, String>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    let mut state = read_state(conn, app)?;
+    let mut chain = application_routing::chain_ids_on(conn, app)?;
+    chain.retain(|id| known.contains(id));
+    // Persist [] rather than deleting the key: no selected survivors is not an
+    // uninitialized order and must not fall back to the whole inventory.
+    application_routing::write_order_on(conn, app, &chain)?;
+    for profile in &mut state.profiles {
+        profile.provider_ids.retain(|id| known.contains(id));
+    }
+    state
+        .profiles
+        .retain(|profile| !profile.provider_ids.is_empty());
+    if state.profiles.is_empty() && !chain.is_empty() {
+        state.profiles.push(OrderProfile {
+            name: "default".into(),
+            provider_ids: chain,
+        });
+    }
+    write_state(conn, app, &mut state)
+}
+
+/// Return the complete validated snapshot before the desktop opens its dialog.
+pub fn export_json(db: &Database, app: &str) -> Result<String, AppError> {
+    let conn = lock_conn!(db.conn);
+    let state = read_state(&conn, app)?;
+    for profile in &state.profiles {
+        application_routing::validate_order_on(&conn, app, &profile.provider_ids)?;
+    }
+    serde_json::to_string_pretty(&state.profiles)
+        .map_err(|error| AppError::Config(error.to_string()))
 }
 
 fn profile_name(name: &str) -> Result<&str, AppError> {
@@ -415,5 +478,193 @@ mod tests {
             1
         );
         assert_eq!(get(&db, "claude").unwrap().current, "default");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn exported_json_round_trip_preserves_named_members_without_applying_them() {
+        let source = database();
+        save(
+            &source,
+            "claude",
+            "Travel \"备用\"",
+            &["b".into(), "a".into()],
+        )
+        .unwrap();
+        save(&source, "claude", "Single", &["b".into()]).unwrap();
+        let exported = get(&source, "claude").unwrap().profiles;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            serde_json::to_string_pretty(&exported).unwrap(),
+        )
+        .unwrap();
+
+        let destination = database();
+        save(&destination, "claude", "Travel \"备用\"", &["a".into()]).unwrap();
+        apply_order(&destination, "claude", "default", &["a".into()]).unwrap();
+        let raw = std::fs::read_to_string(file.path()).unwrap();
+        let parsed: Vec<OrderProfile> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(import(&destination, "claude", parsed).unwrap(), 3);
+        let imported = get(&destination, "claude").unwrap();
+        assert_eq!(imported.profiles, exported);
+        assert_eq!(imported.current, "default");
+        assert_eq!(
+            application_routing::chain_ids(&destination, "claude").unwrap(),
+            vec!["a"]
+        );
+        apply_order(
+            &destination,
+            "claude",
+            "Travel \"备用\"",
+            &["b".into(), "a".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            application_routing::chain_ids(&destination, "claude").unwrap(),
+            vec!["b", "a"]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn invalid_imported_file_never_overwrites_an_existing_snapshot_or_applied_chain() {
+        let db = database();
+        save(&db, "claude", "Daily", &["a".into()]).unwrap();
+        apply_order(&db, "claude", "Daily", &["a".into()]).unwrap();
+        let before = get(&db, "claude").unwrap();
+        for invalid in [
+            r#"[]"#,
+            r#"[{"name":"Daily","providerIds":["b"]},{"name":"Empty","providerIds":[]}]"#,
+            r#"[{"name":"Daily","providerIds":["b"]},{"name":"Duplicate","providerIds":["a","a"]}]"#,
+            r#"[{"name":"Daily","providerIds":["b"]},{"name":"Missing","providerIds":["removed"]}]"#,
+        ] {
+            let parsed: Vec<OrderProfile> = serde_json::from_str(invalid).unwrap();
+            assert!(import(&db, "claude", parsed).is_err());
+            assert_eq!(get(&db, "claude").unwrap(), before);
+            assert_eq!(
+                application_routing::chain_ids(&db, "claude").unwrap(),
+                vec!["a"]
+            );
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn deleting_provider_prunes_snapshots_and_preserves_surviving_identity() {
+        let db = database();
+        save(&db, "claude", "Travel", &["b".into(), "a".into()]).unwrap();
+        save(&db, "claude", "Single", &["b".into()]).unwrap();
+        apply_order(&db, "claude", "Travel", &["a".into(), "b".into()]).unwrap();
+        // Saving over the active name does not apply its new snapshot.
+        save(&db, "claude", "Travel", &["b".into(), "a".into()]).unwrap();
+        db.delete_provider("claude", "b").unwrap();
+        let state = get(&db, "claude").unwrap();
+        assert_eq!(state.current, "Travel");
+        assert_eq!(
+            state
+                .profiles
+                .iter()
+                .map(|p| (p.name.as_str(), p.provider_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![("default", vec!["a".into()]), ("Travel", vec!["a".into()])]
+        );
+        assert_eq!(
+            application_routing::chain_ids(&db, "claude").unwrap(),
+            vec!["a"]
+        );
+        let parsed = serde_json::from_str(&export_json(&db, "claude").unwrap()).unwrap();
+        import(&db, "claude", parsed).unwrap();
+        assert_eq!(get(&db, "claude").unwrap(), state);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn deleting_last_chain_member_never_expands_to_unselected_providers() {
+        let db = database();
+        apply_order(&db, "claude", "default", &["b".into()]).unwrap();
+        db.delete_provider("claude", "b").unwrap();
+        assert!(application_routing::chain_ids(&db, "claude")
+            .unwrap()
+            .is_empty());
+        assert!(get(&db, "claude").unwrap().profiles[0]
+            .provider_ids
+            .is_empty());
+        assert!(export_json(&db, "claude").is_err());
+        application_routing::migrate(&db, "claude").unwrap();
+        assert!(application_routing::chain_ids(&db, "claude")
+            .unwrap()
+            .is_empty());
+        // Saving a new snapshot must not persist the empty display placeholder.
+        save(&db, "claude", "Single", &["a".into()]).unwrap();
+        assert_eq!(get(&db, "claude").unwrap().profiles.len(), 1);
+        assert!(export_json(&db, "claude").is_ok());
+        remove(&db, "claude", "Single").unwrap();
+        // An explicit application can still populate the empty default draft.
+        apply_order(&db, "claude", "default", &["a".into()]).unwrap();
+        db.delete_provider("claude", "a").unwrap();
+        assert!(export_json(&db, "claude").is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn deletion_falls_back_only_when_the_current_snapshot_loses_every_member() {
+        let db = database();
+        save(&db, "claude", "Single", &["b".into()]).unwrap();
+        apply_order(&db, "claude", "Single", &["b".into()]).unwrap();
+        db.delete_provider("claude", "b").unwrap();
+        let state = get(&db, "claude").unwrap();
+        assert_eq!(state.current, "default");
+        assert_eq!(state.profiles.len(), 1);
+        assert_eq!(state.profiles[0].provider_ids, vec!["a"]);
+        assert!(application_routing::chain_ids(&db, "claude")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn failed_reference_maintenance_rolls_back_provider_deletion() {
+        let db = database();
+        apply_order(&db, "claude", "default", &["a".into(), "b".into()]).unwrap();
+        let before = get(&db, "claude").unwrap();
+        reject_pointer(&db);
+        assert!(db.delete_provider("claude", "b").is_err());
+        assert!(db.get_provider_by_id("b", "claude").unwrap().is_some());
+        assert_eq!(get(&db, "claude").unwrap(), before);
+        assert_eq!(
+            application_routing::chain_ids(&db, "claude").unwrap(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn startup_repairs_historical_references_while_get_stays_read_only() {
+        let db = database();
+        apply_order(&db, "claude", "default", &["b".into(), "a".into()]).unwrap();
+        let key = profiles_key("claude");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM providers WHERE id='b'", [])
+            .unwrap();
+        let stale = db.get_setting(&key).unwrap();
+        let state = get(&db, "claude").unwrap();
+        assert_eq!(state.profiles[0].provider_ids, vec!["b", "a"]);
+        assert_eq!(db.get_setting(&key).unwrap(), stale);
+        application_routing::migrate(&db, "claude").unwrap();
+        let repaired = get(&db, "claude").unwrap();
+        assert_eq!(repaired.profiles[0].provider_ids, vec!["a"]);
+        let persisted = db.get_setting(&key).unwrap();
+        get(&db, "claude").unwrap();
+        assert_eq!(db.get_setting(&key).unwrap(), persisted);
+        application_routing::migrate(&db, "claude").unwrap();
+        assert_eq!(get(&db, "claude").unwrap(), repaired);
+        import(
+            &db,
+            "claude",
+            serde_json::from_str(&export_json(&db, "claude").unwrap()).unwrap(),
+        )
+        .unwrap();
     }
 }

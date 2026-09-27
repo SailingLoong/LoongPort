@@ -1546,6 +1546,55 @@ wire_api = "responses"
     }
 
     #[test]
+    fn gpt_alias_reasoning_preserves_every_explicit_effort_on_the_wire() {
+        for declared in [false, true] {
+            let settings = if declared {
+                json!({"modelCatalog":{"models":[{"model":"gpt-6",
+                    "reasoningLevels":crate::codex_reasoning::EFFORTS,
+                    "defaultReasoningLevel":"medium"}]}})
+            } else {
+                json!({})
+            };
+            let provider = create_provider(settings);
+            for effort in crate::codex_reasoning::EFFORTS {
+                let mut body = json!({"model":"gpt-6","input":"hello",
+                    "reasoning":{"effort":effort}});
+                normalize_request_reasoning(&provider, &mut body, true).unwrap();
+                assert_eq!(body["reasoning"]["effort"], *effort);
+                let config = resolve_codex_chat_reasoning_config(&provider, &body);
+                let sent = super::super::transform_codex_chat::responses_to_chat_completions_with_reasoning(body, config.as_ref()).unwrap();
+                assert_eq!(sent["reasoning_effort"], *effort, "declared={declared}");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_effort_transport_preserves_none_without_a_model_declaration() {
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_effort: Some(true),
+                supports_thinking: Some(false),
+                thinking_param: Some("none".into()),
+                effort_param: Some("reasoning_effort".into()),
+                effort_value_mode: Some("passthrough".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let body = json!({"model":"custom-model", "input":"hello", "reasoning":{"effort":"none"}});
+        let config = resolve_codex_chat_reasoning_config(&provider, &body);
+        let sent =
+            super::super::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                body,
+                config.as_ref(),
+            )
+            .unwrap();
+        assert_eq!(sent["reasoning_effort"], "none");
+        assert!(sent.get("thinking").is_none());
+    }
+
+    #[test]
     fn reenabled_reasoning_repairs_legacy_none_parameters() {
         let mut provider = create_provider(json!({}));
         provider.meta = Some(crate::provider::ProviderMeta {
