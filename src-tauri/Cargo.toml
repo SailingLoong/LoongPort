@@ -11,6 +11,14 @@ members = ["cli"]
 # 发版 bump 时改这一处 + package.json + tauri.conf.json。
 version = "6.26.2-beta.2"
 
+[workspace.dependencies]
+# rquickjs 版本唯源：主依赖与 windows-arm64 target 段都从这里继承
+# （`workspace = true`，target 段只额外加 bindgen feature）。此前版本在两段
+# 各写一份，dependabot 只升主依赖段，依赖图分叉出两个单元、发版 arm64 腿
+# E0464（v3.27.0 / #397 / #505 三次实锤）。CI 的「Windows arm64 dep-graph
+# guard」步骤守着这条不变式。
+rquickjs = { version = "0.14", features = ["array-buffer", "classes"] }
+
 [package]
 # ⚠️ crate name 保持上游的 `cc-switch`，别改 —— 118 处引用、改了收益为零
 # （裁决见 CLAUDE.md「三点五」）。面向用户的二进制名走下方 [[bin]]
@@ -120,7 +128,7 @@ rustls = "0.23"
 webpki-roots = "1.0"
 rustls-native-certs = "0.8"
 regex = "1.10"
-rquickjs = { version = "0.14", features = ["array-buffer", "classes"] }
+rquickjs = { workspace = true }
 thiserror = "2.0"
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 argon2 = { version = "0.6", features = ["zeroize"] }
@@ -186,12 +194,10 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
-# 必须与主依赖同版本：两段同时命中这个 target 时，版本分叉会让依赖图里
-# 同时出现 rquickjs 两个单元，rustc 对 `use rquickjs` 产生
-# E0464（v3.27.0 发版实测）。同版本时 features 在两段间自动合并
-# （array-buffer + classes + bindgen）。主依赖升版本时这段必须跟着——
-# #397 只升了主依赖留下 0.12，撞的正是本注释警告的坑。
-rquickjs = { version = "0.14", features = ["bindgen"] }
+# 该目标没有 quickjs 预编译库，须开 bindgen 从源码构建。版本与主 feature
+# 全部继承 [workspace.dependencies]（版本唯源）；本段只补 bindgen，两段
+# 命中同一 target 时 features 自动合并（array-buffer + classes + bindgen）。
+rquickjs = { workspace = true, features = ["bindgen"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
