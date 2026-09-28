@@ -8,6 +8,7 @@ import {
   MAX_DESCRIPTION_CHARS,
   MAX_META_BYTES,
   MAX_SCREENSHOTS,
+  MAX_SIGNALS_BYTES,
   parseFeedbackForm,
   type FeedbackForm,
 } from "./feedback";
@@ -118,6 +119,25 @@ describe("parseFeedbackForm", () => {
     ).toBe(false);
     expect(expectOk(parseFeedbackForm(makeForm())).bundle).toBeNull();
   });
+
+  it("signals 可选：缺省 null、合法对象收下、任何异常降级 null 而不拒收", () => {
+    expect(expectOk(parseFeedbackForm(makeForm())).signals).toBeNull();
+
+    const signals = JSON.stringify({
+      lastCrash: { at: "2026-09-15 20:00:17", appVersion: "6.24.0", message: "boom" },
+      recentErrors: ["[2026-09-21][ERROR][m] x"],
+    });
+    const parsed = expectOk(parseFeedbackForm(makeForm({ signals })));
+    expect(parsed.signals).toEqual(JSON.parse(signals));
+
+    // 坏 JSON / 非对象 / 超长：都不该把用户的反馈拒掉
+    expect(expectOk(parseFeedbackForm(makeForm({ signals: "not-json" }))).signals).toBeNull();
+    expect(expectOk(parseFeedbackForm(makeForm({ signals: "[1,2]" }))).signals).toBeNull();
+    expect(
+      expectOk(parseFeedbackForm(makeForm({ signals: "x".repeat(MAX_SIGNALS_BYTES + 1) })))
+        .signals,
+    ).toBeNull();
+  });
 });
 
 describe("issue 组装", () => {
@@ -141,6 +161,47 @@ describe("issue 组装", () => {
     const body = buildIssueBody(base, [], null);
     expect(body).not.toContain("### 截图");
     expect(body).not.toContain("### 诊断包");
+  });
+
+  it("signals 渲染「最近异常」节：崩溃带时间与当时版本、错误逐条列出", () => {
+    const form = expectOk(
+      parseFeedbackForm(
+        makeForm({
+          signals: JSON.stringify({
+            lastCrash: {
+              at: "2026-09-15 20:00:17.229",
+              appVersion: "6.24.0",
+              message: "cannot execute `LocalPool` executor",
+            },
+            recentErrors: [
+              "[2026-09-21][14:49:20][ERROR][proxy] 流式响应静默期超时 (120秒)",
+            ],
+          }),
+        }),
+      ),
+    );
+    const body = buildIssueBody(form, [], null);
+    expect(body).toContain("### 最近异常");
+    expect(body).toContain("- 上次崩溃：2026-09-15 20:00:17.229（v6.24.0）：cannot execute `LocalPool` executor");
+    expect(body).toContain("- [2026-09-21][14:49:20][ERROR][proxy] 流式响应静默期超时 (120秒)");
+    // 摘要节在诊断包与环境之间
+    expect(body.indexOf("### 最近异常")).toBeGreaterThan(0);
+  });
+
+  it("signals 形状未知或为空时正文不出现「最近异常」节", () => {
+    expect(buildIssueBody(base, [], null)).not.toContain("### 最近异常");
+
+    const weird = expectOk(
+      parseFeedbackForm(makeForm({ signals: JSON.stringify({ whatever: 1 }) })),
+    );
+    expect(buildIssueBody(weird, [], null)).not.toContain("### 最近异常");
+
+    const emptyCrash = expectOk(
+      parseFeedbackForm(
+        makeForm({ signals: JSON.stringify({ lastCrash: {}, recentErrors: [] }) }),
+      ),
+    );
+    expect(buildIssueBody(emptyCrash, [], null)).not.toContain("### 最近异常");
   });
 });
 
