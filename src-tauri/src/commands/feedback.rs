@@ -2,6 +2,7 @@
 //!
 //! 载荷形状（与服务端 `crowd-metrics/src/feedback.ts` 同一契约）：
 //! 文本字段 `sourceId` / `appVersion` / `description` / `meta`（环境事实 JSON）+
+//! 可选文本字段 `signals`（分诊摘要 JSON，见 [`crate::diagnostics_export::build_triage_summary`]）+
 //! 图片部件 `screenshots`（≤6 张）+ 可选 `bundle`（诊断包 zip）。截图走独立部件
 //! 而不是打进 zip —— 服务端要把它们单独存 R2 引进 issue 正文内联渲染。
 //!
@@ -161,19 +162,23 @@ pub async fn submit_feedback(
     let meta_text =
         serde_json::to_string(&facts.manifest).map_err(|e| format!("环境摘要序列化失败: {e}"))?;
 
-    let bundle = if include_diagnostics {
+    // 分诊摘要与诊断包同一开关：内容派生自日志，走同一同意边界。空摘要（Null）
+    // 不发送该字段——服务端把缺省视为老客户端。
+    let (bundle, signals) = if include_diagnostics {
         let manifest = facts.manifest.clone();
         let origins = include_sites.then(|| facts.site_origins.clone());
-        Some(
-            tauri::async_runtime::spawn_blocking(move || {
-                collect_diagnostics(manifest, origins).and_then(build_diagnostics_zip)
-            })
-            .await
-            .map_err(|e| AppError::Message(format!("诊断包构建任务失败: {e}")))?
-            .map_err(|e| e.to_string())?,
-        )
+        let (zip, signals) = tauri::async_runtime::spawn_blocking(move || {
+            let signals = crate::diagnostics_export::build_triage_summary();
+            collect_diagnostics(manifest, origins)
+                .and_then(build_diagnostics_zip)
+                .map(|zip| (zip, signals))
+        })
+        .await
+        .map_err(|e| AppError::Message(format!("诊断包构建任务失败: {e}")))?
+        .map_err(|e| e.to_string())?;
+        (Some(zip), signals)
     } else {
-        None
+        (None, Value::Null)
     };
 
     let total_bytes = attachments.iter().map(|a| a.bytes.len()).sum::<usize>()
@@ -190,6 +195,11 @@ pub async fn submit_feedback(
         .text("appVersion", env!("CARGO_PKG_VERSION").to_string())
         .text("description", description.clone())
         .text("meta", meta_text);
+    if !signals.is_null() {
+        let signals_text =
+            serde_json::to_string(&signals).map_err(|e| format!("分诊摘要序列化失败: {e}"))?;
+        form = form.text("signals", signals_text);
+    }
     for attachment in &attachments {
         let part = reqwest::multipart::Part::bytes(attachment.bytes.clone())
             .file_name(attachment.name.clone())

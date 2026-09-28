@@ -108,6 +108,17 @@ GitHub 通知即达：issue 在 `SailingLoong/loongport-feedback`（标题=描�
 正文含环境摘要 JSON、截图内联、诊断包 zip 下载链接；`sourceId` 可与同日后续反馈对号）。
 附件 90 天过期（KV TTL），issue 本体不删。
 
+**分诊读 issue 本身即可**：客户端勾选附带诊断信息时，正文还有「最近异常」节
+（最后一次崩溃的时间/当时版本/消息 + 去重后的最近 ERROR 行，均过脱敏链）——
+不必先下载 zip 解压翻日志；zip 留给需要完整上下文的深挖。
+
+CLI 查看不必切换 gh 账号（仓在 SailingLoong 名下、日常活跃账号可能是另一个）：
+
+```sh
+GH_TOKEN="$(gh auth token --user SailingLoong)" \
+  gh issue list -R SailingLoong/loongport-feedback --state all
+```
+
 ## 本地与 staging 验证
 
 本机 workerd 沙箱起不了监听（维护者机器已知问题），集成验证走 **staging Worker**：

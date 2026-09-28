@@ -4,6 +4,9 @@
  *
  * 载荷形状（与客户端 commands/feedback.rs 同一契约）：
  * - 文本字段 sourceId（32 hex）/ appVersion / description / meta（环境事实 JSON）
+ * - 可选文本字段 signals（分诊摘要 JSON：lastCrash + recentErrors）——维护者读
+ *   issue 本身即可分诊，不必先下载诊断包解压翻日志；仅客户端勾选附带诊断信息
+ *   时随行，缺省 = 老客户端 / 无信号
  * - 图片部件 screenshots（≤6 张、单张 ≤5MB、image/*）
  * - 可选 bundle 部件（诊断包 zip ≤10MB）
  *
@@ -38,6 +41,8 @@ export const MAX_SCREENSHOTS = 6;
 export const MAX_DESCRIPTION_CHARS = 8_000;
 /** 环境摘要上限：issue 正文总长 65536 字符，meta + description 要留得住。 */
 export const MAX_META_BYTES = 32 * 1024;
+/** 分诊摘要上限：客户端侧已按条数/单行截断，这里再兜一道体积闸。 */
+export const MAX_SIGNALS_BYTES = 8 * 1024;
 /** 每来源 IP 每自然日（UTC）的提交上限。 */
 export const MAX_SUBMITS_PER_IP_DAY = 5;
 /** 附件保留期：KV expirationTtl 原生过期（issue 不删，正文旧链接随之失效）。 */
@@ -55,10 +60,32 @@ export type FeedbackForm =
       appVersion: string;
       description: string;
       meta: unknown;
+      /** 分诊摘要（lastCrash / recentErrors）。可选增强字段，异常时降级为 null。 */
+      signals: unknown | null;
       bundle: File | null;
       screenshots: File[];
     }
   | { ok: false; error: string };
+
+/**
+ * 解析可选的 signals 字段。**任何异常（缺省/超长/坏 JSON/非对象）都降级为
+ * null 而不是拒收**：其余字段按白名单严格拒，唯独摘要是锦上添花——不能让
+ * 用户的反馈因客户端摘要 bug 提交失败。
+ */
+function parseSignalsField(form: FormData): unknown | null {
+  const text = form.get("signals");
+  if (typeof text !== "string" || text.length === 0) return null;
+  if (text.length > MAX_SIGNALS_BYTES) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 /** 表单校验（纯函数，无 IO）。白名单形状 + 上限，与 validate.ts 同一原则。 */
 export function parseFeedbackForm(form: FormData): FeedbackForm {
@@ -119,6 +146,7 @@ export function parseFeedbackForm(form: FormData): FeedbackForm {
     appVersion,
     description,
     meta,
+    signals: parseSignalsField(form),
     bundle,
     screenshots,
   };
@@ -190,6 +218,40 @@ export function buildIssueTitle(description: string): string {
   return `[App 反馈] ${firstLine.slice(0, 50)}`;
 }
 
+/** issue 正文里的单行截断（按字符），客户端已截过一道，这里按正文预算再兜一道。 */
+function capIssueLine(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
+}
+
+/**
+ * 渲染「最近异常」分诊节。只认 lastCrash / recentErrors 两个已知键且逐字段
+ * 校验形状——signals 来自客户端任意版本，未知形状宁可不渲染（issue 还有完整
+ * 诊断包兜底），也不把无法预料的内容拼进正文。
+ */
+function renderSignalsSection(signals: unknown): string[] | null {
+  if (typeof signals !== "object" || signals === null) return null;
+  const { lastCrash, recentErrors } = signals as {
+    lastCrash?: unknown;
+    recentErrors?: unknown;
+  };
+  const lines: string[] = [];
+  if (typeof lastCrash === "object" && lastCrash !== null) {
+    const { at, appVersion, message } = lastCrash as Record<string, unknown>;
+    if (typeof at === "string" && typeof appVersion === "string" && at && appVersion) {
+      const detail = typeof message === "string" && message ? `：${capIssueLine(message, 200)}` : "";
+      lines.push(`- 上次崩溃：${at}（v${appVersion}）${detail}`);
+    }
+  }
+  if (Array.isArray(recentErrors)) {
+    for (const error of recentErrors) {
+      if (typeof error === "string" && error.trim()) {
+        lines.push(`- ${capIssueLine(error.trim(), 240)}`);
+      }
+    }
+  }
+  return lines.length > 0 ? lines : null;
+}
+
 export function buildIssueBody(
   form: Extract<FeedbackForm, { ok: true }>,
   imageUrls: string[],
@@ -203,6 +265,10 @@ export function buildIssueBody(
   }
   if (bundleUrl) {
     lines.push("### 诊断包", "", `[diagnostics.zip](${bundleUrl})`, "");
+  }
+  const signalLines = renderSignalsSection(form.signals);
+  if (signalLines) {
+    lines.push("### 最近异常", "", ...signalLines, "");
   }
   lines.push(
     "### 环境",
