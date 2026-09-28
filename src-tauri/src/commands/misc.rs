@@ -788,7 +788,14 @@ async fn get_single_tool_version_impl(
             //    resolved by `where` (App Execution Aliases filtered out), so
             //    it never `cmd /C tool` into a protocol handler.
             match probe_path_default_version(tool) {
-                ShellProbe::NotFound(_) => scan_cli_version(tool),
+                ShellProbe::NotFound(_) => match scan_cli_version(tool) {
+                    // 注册表 PATH 与已知安装目录都看不见时，最后问一次用户自己的
+                    // shell（profile 注入的 PATH 只有它知道，见
+                    // `probe_user_shell_profile_version`）。scan 已带诊断
+                    // （FoundButFailed = 装了跑不起来）则如实上报，不让兜底掩盖。
+                    ShellProbe::NotFound(_) => probe_user_shell_profile_version(tool),
+                    found => found,
+                },
                 found => found,
             }
         }
@@ -2035,25 +2042,210 @@ fn probe_path_default_version(tool: &str) -> ShellProbe {
     };
     let current_path = effective_path_string();
     match run_windows_tool_version_command(&path_default, &current_path) {
-        Ok(out) => {
-            let stdout = decode_command_output(&out.stdout).trim().to_string();
-            let stderr = decode_command_output(&out.stderr).trim().to_string();
-            if out.status.success() {
-                let raw = if stdout.is_empty() { &stderr } else { &stdout };
-                if raw.is_empty() {
-                    ShellProbe::NotFound(NOT_INSTALLED.to_string())
-                } else {
-                    ShellProbe::Found(extract_version(raw))
-                }
-            } else {
-                let err = if stderr.is_empty() { stdout } else { stderr };
-                if err.is_empty() {
-                    ShellProbe::NotFound(NOT_INSTALLED.to_string())
-                } else {
-                    ShellProbe::FoundButFailed(last_lines(err.trim(), 4))
-                }
-            }
+        Ok(out) => shell_probe_from_version_output(out),
+        Err(_) => ShellProbe::NotFound(NOT_INSTALLED.to_string()),
+    }
+}
+
+/// 把一次 `--version` 子进程的输出映射成 `ShellProbe` 三态。
+/// `probe_path_default_version` 与 profile 兜底探测共用同一映射，避免两份
+/// 「成功取 stdout/stdstderr、非零取末尾四行」各自演化。
+#[cfg(target_os = "windows")]
+fn shell_probe_from_version_output(out: std::process::Output) -> ShellProbe {
+    let stdout = decode_command_output(&out.stdout).trim().to_string();
+    let stderr = decode_command_output(&out.stderr).trim().to_string();
+    if out.status.success() {
+        let raw = if stdout.is_empty() { &stderr } else { &stdout };
+        if raw.is_empty() {
+            ShellProbe::NotFound(NOT_INSTALLED.to_string())
+        } else {
+            ShellProbe::Found(extract_version(raw))
         }
+    } else {
+        let err = if stderr.is_empty() { stdout } else { stderr };
+        if err.is_empty() {
+            ShellProbe::NotFound(NOT_INSTALLED.to_string())
+        } else {
+            ShellProbe::FoundButFailed(last_lines(err.trim(), 4))
+        }
+    }
+}
+
+/// 用户 shell profile 探测的两个哨兵：profile 脚本在载荷之前打印的任何内容
+/// 都不能与之混淆，解析取**最后一次**出现（与 `VERSION_PROBE_SENTINEL` 同一手法）。
+#[cfg(target_os = "windows")]
+const PROFILE_PROBE_SRC_SENTINEL: &str = "__CCSWITCH_PROFILE_SRC__";
+#[cfg(target_os = "windows")]
+const PROFILE_PROBE_PATH_SENTINEL: &str = "__CCSWITCH_PROFILE_PATH__";
+
+/// 用户 shell profile 探测的解析结果：命令在 profile 组装后的环境里解析到的
+/// 真实可执行文件，与该环境最终合成出的 PATH。
+#[cfg(target_os = "windows")]
+struct UserProfileProbe {
+    source: PathBuf,
+    composed_path: String,
+}
+
+/// profile 探测载荷。执行的是 `Get-Command -CommandType Application`（只解析
+/// 可执行文件、不执行它），因此不会踩 `cmd /C {tool}` 拉起 App Execution Alias /
+/// 协议处理器的雷（上游曾因此整体禁用 Windows 版）；不带 `-CommandType` 时
+/// `where` 这类内建别名（Where-Object）会先于 where.exe 命中且没有 Source
+/// （allen-windows 真机实测抓出）。`tool` 来自 `VALID_TOOLS` 白名单
+/// （字母/连字符），单引号内无注入面。
+#[cfg(target_os = "windows")]
+fn build_user_profile_probe_payload(tool: &str) -> String {
+    debug_assert!(
+        tool.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "unexpected tool name in profile probe: {tool}"
+    );
+    format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+         $c = Get-Command -Name '{tool}' -CommandType Application -ErrorAction SilentlyContinue; \
+         if ($c) {{ '{PROFILE_PROBE_SRC_SENTINEL}' + $c.Source }}; \
+         '{PROFILE_PROBE_PATH_SENTINEL}' + $env:PATH"
+    )
+}
+
+/// 从 profile 探测输出解析哨兵行（纯函数，供单测钉死）。source 必须是绝对路径
+/// （盘符或 UNC 开头）——profile 里定义的函数/别名没有 Source，会被跳过。
+#[cfg(target_os = "windows")]
+fn parse_user_profile_probe_output(output: &str) -> Option<UserProfileProbe> {
+    let source = output
+        .lines()
+        .filter_map(|line| line.strip_prefix(PROFILE_PROBE_SRC_SENTINEL))
+        .next_back()?
+        .trim()
+        .to_string();
+    let composed_path = output
+        .lines()
+        .filter_map(|line| line.strip_prefix(PROFILE_PROBE_PATH_SENTINEL))
+        .next_back()?
+        .trim()
+        .to_string();
+    if source.is_empty() || composed_path.is_empty() {
+        return None;
+    }
+    let is_absolute =
+        source.as_bytes().get(1).is_some_and(|&colon| colon == b':') || source.starts_with(r"\\");
+    if !is_absolute {
+        return None;
+    }
+    Some(UserProfileProbe {
+        source: PathBuf::from(&source),
+        composed_path,
+    })
+}
+
+/// profile 探测要试的 shell 主机：系统 Windows PowerShell 5.1 恒在、排第一；
+/// pwsh（PowerShell 7）用户只有 pwsh 版 profile，PATH 上存在才补一台。
+/// 都走系统绝对路径/`where` 解析结果，不吃当前目录。
+#[cfg(target_os = "windows")]
+fn user_shell_profile_probe_hosts() -> Vec<PathBuf> {
+    let mut hosts = Vec::new();
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let powershell = system_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if powershell.is_file() {
+        hosts.push(powershell);
+    }
+    if let Some(pwsh) = resolve_path_default(
+        "pwsh",
+        CommandDeadline::from_timeout(Some(INSTALL_PROBE_TIMEOUT)),
+    )
+    .ok()
+    .flatten()
+    {
+        if pwsh.is_file() {
+            hosts.push(pwsh);
+        }
+    }
+    hosts
+}
+
+/// 对单台 shell 主机跑 profile 探测。profile 默认加载（**不带** `-NoProfile`）
+/// —— 这正是本探测的意义：fnm/volta 这类版本管理器只在 profile 里注入 PATH，
+/// 注册表与静态目录结构性看不见。继承的 PATH 先垫上注册表合并结果，profile
+/// 的前置注入叠加其上；组装后的最终 PATH 随结果带回（运行 shim 时要用它，
+/// fnm 布局里的 node 才解析得到）。
+#[cfg(target_os = "windows")]
+fn user_profile_probe_command(host: &Path, tool: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(host);
+    cmd.arg("-NoLogo")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(build_user_profile_probe_payload(tool))
+        .env("PATH", effective_path_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+/// 逐台主机问用户 shell「这个命令解析到哪」，取第一个有效结果。
+/// App Execution Alias 命中与无扩展名 shim 的 `.cmd` 兄弟优先，沿用
+/// `resolve_path_default` 的既有语义。
+#[cfg(target_os = "windows")]
+fn resolve_via_user_shell_profile(tool: &str) -> Option<UserProfileProbe> {
+    for host in user_shell_profile_probe_hosts() {
+        let child = match user_profile_probe_command(&host, tool).spawn() {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+        // profile 脚本可以任意慢/挂死（慢 nvm、交互式欢迎语），到点整组击杀、
+        // 按未发现处理——兜底探测不能反向拖垮版本检测。
+        let Ok(out) = wait_child_output(
+            child,
+            CommandDeadline::from_timeout(Some(INSTALL_PROBE_TIMEOUT)),
+        ) else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let Some(mut probe) = parse_user_profile_probe_output(&decode_command_output(&out.stdout))
+        else {
+            continue;
+        };
+        if probe
+            .source
+            .parent()
+            .is_some_and(is_windows_app_execution_alias_dir)
+        {
+            continue;
+        }
+        let preferred = windows_runnable_sibling_for_extensionless_tool(&probe.source)
+            .unwrap_or_else(|| probe.source.clone());
+        let Ok(canonical) = std::fs::canonicalize(preferred) else {
+            continue;
+        };
+        probe.source = canonical;
+        return Some(probe);
+    }
+    None
+}
+
+/// Windows 版本检测的最后一层兜底：静态来源（注册表 PATH + 已知安装目录）
+/// 全部落空后，问用户自己的 shell。真实反馈案例：codex 装在 fnm 管理的
+/// node 目录里，profile 注入的 PATH 注册表里没有，终端能跑、app 报「未安装」。
+/// 非 Windows 侧的 `try_get_version` 走登录 shell 天然覆盖这类布局，这里是
+/// Windows 的等价物。
+#[cfg(target_os = "windows")]
+fn probe_user_shell_profile_version(tool: &str) -> ShellProbe {
+    let Some(resolved) = resolve_via_user_shell_profile(tool) else {
+        return ShellProbe::NotFound(NOT_INSTALLED.to_string());
+    };
+    match run_windows_tool_version_command(&resolved.source, &resolved.composed_path) {
+        Ok(out) => shell_probe_from_version_output(out),
         Err(_) => ShellProbe::NotFound(NOT_INSTALLED.to_string()),
     }
 }
@@ -6748,6 +6940,81 @@ mod tests {
         assert_eq!(
             std::fs::canonicalize(&matches[0]).expect("where.exe match should canonicalize"),
             std::fs::canonicalize(&expected).expect("expected PATH shim should canonicalize")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parse_user_profile_probe_output_takes_last_sentinel_and_rejects_relative_source() {
+        let junk = "welcome junk __CCSWITCH_PROFILE_SRC__relative\\codex.cmd\nmore junk";
+        let output = format!(
+            "{junk}\n{PROFILE_PROBE_SRC_SENTINEL}C:\\Users\\dev\\AppData\\fnm\\codex.cmd\n\
+             {PROFILE_PROBE_PATH_SENTINEL}C:\\node;C:\\Windows\\System32;C:\\Windows"
+        );
+        let probe = parse_user_profile_probe_output(&output)
+            .expect("最后一次哨兵出现应生效，profile 噪音被忽略");
+        assert_eq!(
+            probe.source,
+            PathBuf::from(r"C:\Users\dev\AppData\fnm\codex.cmd")
+        );
+        assert!(probe.composed_path.starts_with("C:\\node"));
+
+        // profile 定义的同名函数没有 Source → 只有 PATH 哨兵 → 解析不出
+        assert!(parse_user_profile_probe_output(&format!(
+            "{PROFILE_PROBE_PATH_SENTINEL}C:\\Windows"
+        ))
+        .is_none());
+
+        // 相对路径 source 不可信（函数/别名/损坏输出），拒绝
+        assert!(parse_user_profile_probe_output(&format!(
+            "{PROFILE_PROBE_SRC_SENTINEL}codex.cmd\n{PROFILE_PROBE_PATH_SENTINEL}C:\\Windows"
+        ))
+        .is_none());
+
+        // UNC 绝对路径放行
+        assert!(parse_user_profile_probe_output(&format!(
+            "{PROFILE_PROBE_SRC_SENTINEL}\\\\server\\share\\codex.exe\n\
+                 {PROFILE_PROBE_PATH_SENTINEL}C:\\Windows"
+        ))
+        .is_some());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn user_profile_probe_resolves_real_command_through_powershell() {
+        // 真机冒烟：载荷经真实 Windows PowerShell 执行（profile 默认加载），
+        // 解析一个恒存在的系统命令并取回其绝对路径。
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let host = system_root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        if !host.is_file() {
+            // 剥离了 Windows PowerShell 的极端环境（Nano Server 类）——跳过而非失败
+            return;
+        }
+        let child = user_profile_probe_command(&host, "where")
+            .spawn()
+            .expect("powershell should spawn");
+        let out = wait_child_output(
+            child,
+            CommandDeadline::from_timeout(Some(std::time::Duration::from_secs(20))),
+        )
+        .expect("powershell probe should finish");
+        assert!(
+            out.status.success(),
+            "powershell failed: {}",
+            decode_command_output(&out.stderr)
+        );
+        let probe = parse_user_profile_probe_output(&decode_command_output(&out.stdout))
+            .expect("where should resolve through the profile probe payload");
+        let expected = system_root.join("System32").join("where.exe");
+        assert_eq!(
+            std::fs::canonicalize(&probe.source).expect("probe source should canonicalize"),
+            std::fs::canonicalize(&expected).expect("where.exe should canonicalize")
         );
     }
 
