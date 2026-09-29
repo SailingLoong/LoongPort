@@ -4,7 +4,6 @@ import {
   Activity,
   MessageSquare,
   Plug,
-  Sparkles,
   FileText,
   Bot,
   Layers3,
@@ -13,11 +12,11 @@ import {
   Wrench,
   Brain,
   LayoutDashboard,
-  type LucideIcon,
 } from "lucide-react";
 import type { AppId } from "@/lib/api";
 import type { ClientView } from "./navigation";
 import { Button } from "@/components/ui/button";
+import { SkillsIcon } from "@/components/BrandIcons";
 
 export function FeatureHub({
   kind,
@@ -33,7 +32,11 @@ export function FeatureHub({
   onLaunchDashboard: () => void;
 }) {
   const { t } = useTranslation();
-  const entries: { key: string; icon: LucideIcon; action: () => void }[] =
+  const entries: {
+    key: string;
+    icon: React.ComponentType<{ className?: string }>;
+    action: () => void;
+  }[] =
     kind === "records"
       ? [
           { key: "usage", icon: Activity, action: onUsage },
@@ -51,7 +54,11 @@ export function FeatureHub({
           ...(appId !== "pi"
             ? [{ key: "mcp", icon: Plug, action: () => onNavigate("mcp") }]
             : []),
-          { key: "skills", icon: Sparkles, action: () => onNavigate("skills") },
+          {
+            key: "skills",
+            icon: SkillsIcon,
+            action: () => onNavigate("skills"),
+          },
           {
             key: "prompts",
             icon: FileText,
