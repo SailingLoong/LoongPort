@@ -9,7 +9,7 @@ members = ["cli"]
 [workspace.package]
 # 版本唯源：两个 crate 都从这里继承（`version.workspace = true`）。
 # 发版 bump 时改这一处 + package.json + tauri.conf.json。
-version = "6.26.2-beta.2"
+version = "6.26.2-beta.3"
 
 [workspace.dependencies]
 # rquickjs 版本唯源：主依赖与 windows-arm64 target 段都从这里继承
