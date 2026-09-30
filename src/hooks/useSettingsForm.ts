@@ -26,7 +26,7 @@ const DEFAULT_CODEX_APP_ENHANCEMENTS: CodexAppEnhancementSettings = {
 };
 
 const normalizeLanguage = (lang?: string | null): Language => {
-  if (!lang) return "zh";
+  if (!lang) return "en";
   const normalized = lang.toLowerCase().replace(/_/g, "-");
 
   if (normalized === "zh") {
@@ -50,7 +50,7 @@ const normalizeLanguage = (lang?: string | null): Language => {
     return "zh";
   }
 
-  return "zh";
+  return "en";
 };
 
 const isSupportedLanguage = (lang?: string | null): boolean => {

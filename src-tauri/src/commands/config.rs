@@ -18,9 +18,7 @@ pub async fn get_claude_config_status() -> Result<ConfigStatus, String> {
 use std::str::FromStr;
 
 fn invalid_json_format_error(error: serde_json::Error) -> String {
-    let lang = settings::get_settings()
-        .language
-        .unwrap_or_else(|| "zh".to_string());
+    let lang = settings::effective_language();
 
     match lang.as_str() {
         "en" => format!("Invalid JSON format: {error}"),
@@ -30,9 +28,7 @@ fn invalid_json_format_error(error: serde_json::Error) -> String {
 }
 
 fn invalid_toml_format_error(error: toml_edit::TomlError) -> String {
-    let lang = settings::get_settings()
-        .language
-        .unwrap_or_else(|| "zh".to_string());
+    let lang = settings::effective_language();
 
     match lang.as_str() {
         "en" => format!("Invalid TOML format: {error}"),

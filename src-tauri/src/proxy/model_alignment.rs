@@ -198,7 +198,7 @@ fn notify_os(handle: &tauri::AppHandle, mismatch: &ModelMismatch) {
     use tauri_plugin_notification::NotificationExt;
     // 语言判定唯源托盘那份（settings.language 优先、系统区域回退），
     // 别在这里长出第二套判定顺序。
-    let language = crate::tray::tray_language();
+    let language = crate::settings::effective_language();
     let (title, body) = notification_text(&language, mismatch);
     if let Err(error) = handle
         .notification()

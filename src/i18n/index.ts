@@ -8,7 +8,9 @@ import zhTW from "./locales/zh-TW.json";
 
 type Language = "zh" | "zh-TW" | "en" | "ja";
 
-const DEFAULT_LANGUAGE: Language = "zh";
+// 系统语言不属于任何已支持语言（中/繁中/日/英）时的回退语言。
+// 与 Rust 侧 settings::DEFAULT_LANGUAGE 保持一致（两侧各自检测系统语言，常量互见）。
+const DEFAULT_LANGUAGE: Language = "en";
 
 const getInitialLanguage = (): Language => {
   if (typeof window !== "undefined") {

@@ -1328,6 +1328,60 @@ fn refresh_bootstrap_from(store: &SettingsStore) -> Result<(), AppError> {
     Ok(())
 }
 
+// ===== 语言判定（唯源）=====
+
+/// 系统区域不属于任何已支持语言（中/繁中/日/英）时的回退语言。
+/// 前端 `i18n/getInitialLanguage` 维护同一常量（两侧各自检测系统区域，常量互见）。
+pub(crate) const DEFAULT_LANGUAGE: &str = "en";
+
+/// 将系统区域标识映射为已支持的语言码。
+///
+/// 镜像前端 `i18n/getInitialLanguage` 的判定顺序，确保首次安装
+/// （`settings.language` 尚未写入）时后端文案语言与界面语言一致：
+/// 繁中系统（zh-TW/HK/MO/Hant）→ `zh-TW`，其余 zh → `zh`，
+/// 日文 → `ja`，英文 → `en`，未知区域回退到 `DEFAULT_LANGUAGE`。
+fn map_locale_to_language(locale: &str) -> &'static str {
+    let locale = locale.to_lowercase();
+    if locale == "zh" {
+        "zh"
+    } else if locale.starts_with("zh-tw")
+        || locale.starts_with("zh-hk")
+        || locale.starts_with("zh-mo")
+        || locale.starts_with("zh-hant")
+    {
+        "zh-TW"
+    } else if locale.starts_with("zh") {
+        "zh"
+    } else if locale.starts_with("ja") {
+        "ja"
+    } else if locale.starts_with("en") {
+        "en"
+    } else {
+        DEFAULT_LANGUAGE
+    }
+}
+
+/// 读取系统区域并映射为语言码；取不到区域时回退 `DEFAULT_LANGUAGE`。
+fn detect_system_language() -> &'static str {
+    sys_locale::get_locale()
+        .as_deref()
+        .map(map_locale_to_language)
+        .unwrap_or(DEFAULT_LANGUAGE)
+}
+
+/// 应用当前生效的语言码：用户显式设置的 `settings.language` 优先，
+/// 未设置（首次安装）按系统区域回退。
+///
+/// 后端所有语言敏感的文案都从这里取 —— 托盘菜单（`tray`）、模型对齐告警
+/// （`model_alignment`）、配置校验错误（`commands::config`）、usage 错误
+/// 文案（`services::provider::usage`）；各处各读 settings 会长出多套判定顺序。
+pub(crate) fn effective_language() -> String {
+    match get_settings().language {
+        Some(lang) => lang,
+        None => detect_system_language().to_string(),
+    }
+}
+
 pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {
     get_settings()
         .local_migrations
@@ -1712,6 +1766,55 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+
+    #[test]
+    fn locale_maps_traditional_chinese_variants_to_zh_tw() {
+        for locale in [
+            "zh-TW",
+            "zh-HK",
+            "zh-MO",
+            "zh-Hant",
+            "zh-Hant-TW",
+            "zh-hant-hk",
+        ] {
+            assert_eq!(
+                map_locale_to_language(locale),
+                "zh-TW",
+                "expected {locale} -> zh-TW"
+            );
+        }
+    }
+
+    #[test]
+    fn locale_maps_simplified_chinese_variants_to_zh() {
+        for locale in ["zh", "zh-CN", "zh-SG", "zh-Hans", "zh-Hans-CN"] {
+            assert_eq!(
+                map_locale_to_language(locale),
+                "zh",
+                "expected {locale} -> zh"
+            );
+        }
+    }
+
+    #[test]
+    fn locale_maps_japanese_and_english() {
+        assert_eq!(map_locale_to_language("ja-JP"), "ja");
+        assert_eq!(map_locale_to_language("ja"), "ja");
+        assert_eq!(map_locale_to_language("en-US"), "en");
+        assert_eq!(map_locale_to_language("en"), "en");
+    }
+
+    #[test]
+    fn locale_unknown_falls_back_to_default_language() {
+        // 与前端 getInitialLanguage 的默认值保持一致。
+        for locale in ["de-DE", "fr", "ko-KR", ""] {
+            assert_eq!(
+                map_locale_to_language(locale),
+                DEFAULT_LANGUAGE,
+                "expected {locale} -> {DEFAULT_LANGUAGE} (default)"
+            );
+        }
+    }
 
     fn credential_settings() -> AppSettings {
         AppSettings {
