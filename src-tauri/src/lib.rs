@@ -46,6 +46,8 @@ mod relay;
 mod rt;
 mod secrets;
 mod services;
+#[cfg(any(feature = "gui", test))]
+mod zcode_config;
 pub use secrets::key_store::{KeyStore, KeyStoreError};
 pub use secrets::session::SecretSession;
 mod session_manager;
@@ -1892,6 +1894,9 @@ pub fn run() {
             commands::delete_pi_prompt_template,
             // Pi native provider and session views
             commands::get_pi_current_state,
+            commands::get_zcode_config,
+            commands::save_zcode_provider,
+            commands::remove_zcode_provider,
             commands::update_pi_provider_usage_script,
             commands::get_pi_session_discovery,
             // Profile management (项目配置方案)

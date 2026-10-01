@@ -16,6 +16,7 @@ const allVisible: VisibleApps = {
   openclaw: true,
   hermes: true,
   pi: true,
+  zcode: true,
 };
 
 /** 测试环境 i18n 资源为空，t() 回落成键名本身；× 的 title 即 "appSwitcher.hide" */
@@ -70,6 +71,7 @@ describe("AppSwitcher", () => {
       openclaw: false,
       hermes: false,
       pi: false,
+      zcode: false,
     };
     const { container } = render(
       <AppSwitcher
@@ -116,6 +118,7 @@ describe("AppSwitcher", () => {
     const partlyHidden: VisibleApps = {
       ...allVisible,
       pi: false,
+      zcode: false,
       hermes: false,
     };
     render(

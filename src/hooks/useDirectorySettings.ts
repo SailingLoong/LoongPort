@@ -12,7 +12,10 @@ import type { SettingsFormState } from "./useSettingsForm";
  * `codex-image`（生图栏与 codex 共用 `~/.codex`，没有自己的目录 ——
  * 给它一个可改的目录设置只会让用户以为那是两个独立的地方）。
  */
-export type DirectoryAppId = Exclude<AppId, "claude-desktop" | "codex-image">;
+export type DirectoryAppId = Exclude<
+  AppId,
+  "claude-desktop" | "codex-image" | "zcode"
+>;
 type AppDirectoryKey =
   | "claude"
   | "codex"

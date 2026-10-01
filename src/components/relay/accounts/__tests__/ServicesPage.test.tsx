@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { APP_IDS } from "@/config/appConfig";
+import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api/types";
 import type { RelayRow } from "@/lib/api/relay";
 import type { VendorAccountRow } from "@/lib/api/vendor";
@@ -113,7 +113,9 @@ describe("ServicesPage", () => {
     expect(screen.getByText("Example Official")).toBeInTheDocument();
     expect(screen.getByText("loongport.accounts.relay")).toBeInTheDocument();
     expect(screen.getByText("loongport.accounts.vendor")).toBeInTheDocument();
-    expect(mocks.vendors.mock.calls.map(([app]) => app)).toEqual(APP_IDS);
+    expect(mocks.vendors.mock.calls.map(([app]) => app)).toEqual(
+      PROVIDER_STORE_APP_IDS,
+    );
     expect(mocks.balance).toHaveBeenCalledWith({
       rowKind: "vendor",
       rowId: 1,

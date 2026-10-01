@@ -9,7 +9,7 @@ import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import type { CustomEndpoint, EndpointCandidate } from "@/types";
 
 // 端点测速超时配置（秒）
-const ENDPOINT_TIMEOUT_SECS: Record<AppId, number> = {
+const ENDPOINT_TIMEOUT_SECS: Partial<Record<AppId, number>> = {
   codex: 12,
   // 与 codex 同一个值：生图档位的端点就是同一个中转站（`/v1/images/generations`
   // 与 `/v1/responses` 同域）。这个表被 provider 编辑页用，走到这里说明用户在编辑

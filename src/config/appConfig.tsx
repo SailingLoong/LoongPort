@@ -28,7 +28,17 @@ export const APP_IDS: AppId[] = [
   "opencode",
   "openclaw",
   "hermes",
+  "zcode",
 ];
+
+/** Apps backed by LoongPort's provider store; native configuration has its own owner. */
+export type ProviderStoreAppId = Exclude<AppId, "zcode">;
+export const PROVIDER_STORE_APP_IDS = APP_IDS.filter(
+  (app): app is ProviderStoreAppId => app !== "zcode",
+);
+export function usesProviderStore(app: AppId): app is ProviderStoreAppId {
+  return PROVIDER_STORE_APP_IDS.includes(app as ProviderStoreAppId);
+}
 
 /** tab 栏 / 提示语里展示的应用名（静态表，产品名不翻译）。 */
 export const APP_DISPLAY_NAME: Record<AppId, string> = {
@@ -42,6 +52,7 @@ export const APP_DISPLAY_NAME: Record<AppId, string> = {
   openclaw: "OpenClaw",
   hermes: "Hermes",
   pi: "Pi",
+  zcode: "ZCode",
 };
 
 /** 应用展示名的唯一来源：「生图」是功能描述，四语各有说法（apps.codex-image）；
@@ -65,10 +76,11 @@ export const DEFAULT_VISIBLE_APPS: VisibleApps = {
   openclaw: false,
   hermes: false,
   pi: false,
+  zcode: false,
 };
 
 /** App IDs shown in Skills panels. */
-export const SKILLS_APP_IDS: AppId[] = [
+export const SKILLS_APP_IDS: ProviderStoreAppId[] = [
   "claude",
   "codex",
   "gemini",
@@ -112,7 +124,10 @@ export function isAdditiveAppId(appId: string): appId is AdditiveAppId {
 }
 
 /** Pi has no native MCP registry; do not manufacture a disabled mirror. */
-export type McpAppId = Exclude<AppId, "claude-desktop" | "openclaw" | "pi">;
+export type McpAppId = Exclude<
+  AppId,
+  "claude-desktop" | "openclaw" | "pi" | "zcode"
+>;
 export const MCP_APP_IDS: McpAppId[] = [
   "claude",
   "codex",
@@ -127,6 +142,14 @@ export function isMcpAppId(appId: string): appId is McpAppId {
 }
 
 export const APP_ICON_MAP: Record<AppId, AppConfig> = {
+  zcode: {
+    label: "ZCode",
+    icon: <ProviderIcon icon="zhipu" name="ZCode" size={14} />,
+    activeClass:
+      "bg-blue-500/10 ring-1 ring-blue-500/20 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400",
+    badgeClass:
+      "bg-blue-500/10 text-blue-700 dark:text-blue-300 hover:bg-blue-500/20 border-0 gap-1.5",
+  },
   claude: {
     label: "Claude",
     icon: <ClaudeIcon size={14} />,

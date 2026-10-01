@@ -61,6 +61,8 @@ pub struct VisibleApps {
     pub hermes: bool,
     #[serde(default = "default_true")]
     pub pi: bool,
+    #[serde(default)]
+    pub zcode: bool,
 }
 
 impl Default for VisibleApps {
@@ -82,13 +84,33 @@ impl Default for VisibleApps {
             openclaw: false,
             hermes: false,
             pi: false,
+            zcode: false,
         }
     }
 }
 
 impl VisibleApps {
+    /// Native-only apps participate in visibility without gaining provider-store capabilities.
+    pub fn set_visible_id(&mut self, app: &str, visible: bool) -> Result<(), AppError> {
+        if app != "zcode" {
+            return self.set_visible(&app.parse()?, visible);
+        }
+        if !visible
+            && !AppType::all().any(|candidate| {
+                !matches!(candidate, AppType::CodexImage) && self.is_visible(&candidate)
+            })
+        {
+            return Err(AppError::Message(
+                "Keep at least one application visible".into(),
+            ));
+        }
+        self.zcode = visible;
+        Ok(())
+    }
+
     pub fn set_visible(&mut self, app: &AppType, visible: bool) -> Result<(), AppError> {
         if !visible
+            && !self.zcode
             && !matches!(app, AppType::CodexImage)
             && !AppType::all().any(|candidate| {
                 candidate != *app
@@ -2059,6 +2081,20 @@ mod tests {
     }
 
     #[test]
+    fn zcode_visibility_is_opt_in_and_preserves_one_application() {
+        let mut visible: VisibleApps = serde_json::from_str("{}").unwrap();
+        assert!(!visible.zcode);
+        visible.set_visible_id("zcode", true).unwrap();
+        for app in AppType::all() {
+            visible.set_visible(&app, false).unwrap();
+        }
+        assert!(visible.set_visible_id("zcode", false).is_err());
+        visible.set_visible_id("codex", true).unwrap();
+        visible.set_visible_id("zcode", false).unwrap();
+        assert!(visible.set_visible_id("unknown", true).is_err());
+    }
+
+    #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {
         let visible: VisibleApps = serde_json::from_value(serde_json::json!({
             "claude": true,
@@ -2142,6 +2178,7 @@ mod tests {
             ("openclaw", defaults.openclaw),
             ("hermes", defaults.hermes),
             ("pi", defaults.pi),
+            ("zcode", defaults.zcode),
         ] {
             // 键名与 serde 序列化一致；TS 里含连字符的键带引号（"claude-desktop"）
             let expected = if key.contains('-') {

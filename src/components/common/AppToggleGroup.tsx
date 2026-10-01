@@ -5,7 +5,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { AppId } from "@/lib/api/types";
-import { APP_IDS, APP_ICON_MAP } from "@/config/appConfig";
+import { PROVIDER_STORE_APP_IDS, APP_ICON_MAP } from "@/config/appConfig";
 
 interface AppToggleGroupProps {
   apps: Partial<Record<AppId, boolean>>;
@@ -17,7 +17,7 @@ interface AppToggleGroupProps {
 export const AppToggleGroup: React.FC<AppToggleGroupProps> = ({
   apps,
   onToggle,
-  appIds = APP_IDS,
+  appIds = PROVIDER_STORE_APP_IDS,
   disabled = false,
 }) => {
   return (

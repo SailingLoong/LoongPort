@@ -1,6 +1,12 @@
 import { Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
@@ -233,6 +239,135 @@ describe("App integration with MSW", () => {
     // Start each independent flow from the persisted application view.
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
+  });
+
+  it("opens ZCode without using provider-store or environment commands", async () => {
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "zcode");
+    const unsupported = vi.fn();
+    server.use(
+      http.post("http://tauri.local/get_zcode_config", () =>
+        HttpResponse.json({ revision: "missing", providers: [] }),
+      ),
+      http.post("http://tauri.local/get_providers", async ({ request }) => {
+        const body = (await request.json()) as { app?: string };
+        if (body.app === "zcode") unsupported("get_providers");
+        return HttpResponse.json({});
+      }),
+      http.post(
+        "http://tauri.local/check_env_conflicts",
+        async ({ request }) => {
+          const body = (await request.json()) as { app?: string };
+          if (body.app === "zcode") unsupported("check_env_conflicts");
+          return HttpResponse.json([]);
+        },
+      ),
+    );
+    renderApp();
+    expect(
+      await screen.findByText("No personal providers yet"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("provider-list")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "loongport.addEntry.title" }),
+    ).not.toBeInTheDocument();
+    expect(unsupported).not.toHaveBeenCalled();
+  });
+
+  it.each(["save", "remove"] as const)(
+    "keeps a pending ZCode %s and its error visible across the settings shortcut",
+    async (operation) => {
+      localStorage.setItem(LAST_APP_STORAGE_KEY, "zcode");
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const started = vi.fn();
+      server.use(
+        http.post("http://tauri.local/get_zcode_config", () =>
+          HttpResponse.json({
+            revision: "fixture-revision",
+            providers: [
+              {
+                id: "loongport-test",
+                name: "Native fixture",
+                apiType: "openai-responses",
+                baseUrl: "https://api.example/v1",
+                models: ["example-model"],
+                hasApiKey: true,
+                managed: true,
+              },
+            ],
+          }),
+        ),
+        http.post(
+          `http://tauri.local/${operation}_zcode_provider`,
+          async () => {
+            started();
+            await pending;
+            return HttpResponse.text(
+              "Configuration changed; refresh before writing",
+              { status: 409 },
+            );
+          },
+        ),
+      );
+      renderApp();
+      await screen.findByText("Native fixture");
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: operation === "save" ? "Edit" : "Remove",
+        }),
+      );
+      fireEvent.click(
+        operation === "save"
+          ? within(screen.getByRole("dialog")).getByRole("button", {
+              name: "Save",
+            })
+          : screen.getByText("confirm-delete"),
+      );
+      await waitFor(() => expect(started).toHaveBeenCalledTimes(1));
+      fireEvent.keyDown(window, { key: ",", ctrlKey: true });
+      const keptView = localStorage.getItem(LAST_VIEW_STORAGE_KEY);
+      finish();
+      expect(keptView).toBe("providers");
+      expect(
+        await screen.findByText(
+          "Configuration changed; refresh before writing",
+        ),
+      ).toBeInTheDocument();
+      fireEvent.click(
+        operation === "save"
+          ? within(screen.getByRole("dialog")).getByRole("button", {
+              name: "Cancel",
+            })
+          : screen.getByText("cancel-delete"),
+      );
+      fireEvent.keyDown(window, { key: ",", metaKey: true });
+      await waitFor(() =>
+        expect(localStorage.getItem(LAST_VIEW_STORAGE_KEY)).toBe("settings"),
+      );
+    },
+  );
+
+  it("opens service onboarding from a saved native app without a blank page", async () => {
+    localStorage.setItem(LAST_APP_STORAGE_KEY, "zcode");
+    server.use(
+      http.post("http://tauri.local/get_zcode_config", () =>
+        HttpResponse.json({ revision: "missing", providers: [] }),
+      ),
+      http.post("http://tauri.local/service_onboarding_status", () =>
+        HttpResponse.json({
+          shouldPrompt: true,
+          completed: false,
+          plazaVisible: false,
+        }),
+      ),
+    );
+    renderApp();
+    expect(
+      await screen.findByTestId("add-provider-dialog"),
+    ).toBeInTheDocument();
+    expect(localStorage.getItem(LAST_APP_STORAGE_KEY)).toBe("codex");
   });
 
   it.fails(

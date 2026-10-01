@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { APP_IDS } from "@/config/appConfig";
+import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api";
 import { relayApi } from "@/lib/api/relay";
 import { vendorApi } from "@/lib/api/vendor";
@@ -61,7 +61,7 @@ export function useServiceConfiguration(
       mounted.current && lifecycle.current === activeLifecycle;
     setBusy(true);
     try {
-      for (const app of APP_IDS) {
+      for (const app of PROVIDER_STORE_APP_IDS) {
         const id = selectFor(app);
         if (!id) continue;
         const switchConfig = (quitChatgpt?: boolean) =>

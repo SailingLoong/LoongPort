@@ -969,7 +969,8 @@
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "pi": "Pi"
+    "pi": "Pi",
+    "zcode": "ZCode"
   },
   "grokBuild": {
     "apiBackend": "API Backend",
@@ -4088,5 +4089,23 @@
     "keep": "{{selected}} を維持",
     "adopt": "{{requested}} に切り替える",
     "switchFailed": "モデルの切り替えに失敗しました"
+  },
+  "zcode": {
+    "description": "ZCode の個人プロバイダーとモデルを設定します。アカウントとデフォルトモデルは ZCode で管理してください。",
+    "refresh": "更新",
+    "add": "プロバイダーを追加",
+    "empty": "個人プロバイダーはまだありません",
+    "native": "ZCode で管理",
+    "edit": "編集",
+    "remove": "削除",
+    "keyHelp": "キーはローカルの ZCode 設定に保存されます。既存のキーを保持するには空欄にしてください。",
+    "name": "名前",
+    "baseUrl": "ベース URL",
+    "apiKey": "API Key",
+    "protocol": "プロトコル",
+    "models": "モデル（1 行に 1 つ）",
+    "cancel": "キャンセル",
+    "save": "保存",
+    "removeConfirm": "ZCode から {{name}} を削除しますか？"
   }
 }
