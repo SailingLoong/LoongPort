@@ -25,6 +25,8 @@ export const settings = {
     openclaw: false,
     hermes: false,
     pi: false,
+    zcode:
+      new URLSearchParams(window.location.search).get("scenario") === "zcode",
   },
   webdavSync: { enabled: false },
   s3Sync: { enabled: false },
@@ -55,7 +57,7 @@ export const providers = () =>
           canConfigureUsage: false,
           usesOfficialSubscriptionUsage: false,
           canSetAsDefault: false,
-          routingBadge: "proxy",
+          routingBadge: null,
           routingReason: null,
           switchBlockedReason: null,
         },
@@ -161,7 +163,9 @@ export async function fixture(command: string, args: any = {}) {
   if (command.startsWith("plugin:window|"))
     return command.endsWith("scale_factor") ? 1 : false;
   if (command.startsWith("plugin:app|"))
-    return command.endsWith("version") ? "6.26.2" : "LoongPort";
+    return command.endsWith("version")
+      ? import.meta.env.DOCS_UI_VERSION
+      : "LoongPort";
   if (command.startsWith("plugin:log|")) return null;
   if (command === "plugin:path|resolve_directory") return "~";
   if (command === "plugin:path|join") return args.paths.join("/");
@@ -212,6 +216,21 @@ export async function fixture(command: string, args: any = {}) {
       };
     case "list_db_backups":
       return [];
+    case "get_zcode_config":
+      return {
+        revision: "demo-revision",
+        providers: [
+          {
+            id: "demo-personal-provider",
+            name: "演示服务",
+            apiType: "openai-responses",
+            baseUrl: "https://api.example.com/v1",
+            models: ["gpt-5.4", "gpt-5.4-mini"],
+            hasApiKey: true,
+            managed: true,
+          },
+        ],
+      };
     case "get_settings":
       return settings;
     case "save_settings":
@@ -322,7 +341,7 @@ export async function fixture(command: string, args: any = {}) {
     case "get_star_reward_offer":
       return null;
     case "get_app_version":
-      return "6.26.2";
+      return import.meta.env.DOCS_UI_VERSION;
     case "get_secret_protection_status":
       return { mode: "system", unlocked: true, passwordConfigured: false };
     case "model_verification_summaries":

@@ -8,9 +8,8 @@ existing user data are read. Browser requests outside the local renderer are
 blocked. A screenshot proves UI rendering only, not native integration, login,
 configuration writes, billing, routing or an API request.
 
-The workflow pins the source to stable v6.26.2's exact commit and records it in the
-artifact. Do not update that pin or label without reviewing the guide. ZCode
-requires a separate beta capture and must never appear in a stable screenshot.
+The workflow pins stable v6.26.2 and the ZCode-only v6.26.3-beta.2 appendix to
+their exact release commits and records each source/version in its artifact. Do not update that pin or label without reviewing the guide. ZCode has a separate beta job and must never appear in a stable screenshot.
 
 Run the workflow in a draft pull request. It uses Chromium with its sandbox on,
 CJK fonts, and a short-lived artifact. Review actual pixels and run OCR before

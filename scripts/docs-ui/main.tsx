@@ -1,7 +1,9 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { fixture } from "./fixtures";
 mockWindows("main");
-mockIPC(fixture);
+mockIPC(async (command, payload) =>
+  structuredClone(await fixture(command, payload)),
+);
 window.fetch = async () => {
   throw Error("Network disabled in documentation fixture");
 };
@@ -15,7 +17,13 @@ import { Toaster } from "@/components/ui/sonner";
 import { FrontendErrorBoundary } from "@/components/FrontendErrorBoundary";
 import i18n from "@/i18n";
 import "@/index.css";
-localStorage.setItem("loongport-last-app", "codex");
+localStorage.setItem(
+  "loongport-last-app",
+  new URLSearchParams(location.search).get("scenario") === "zcode"
+    ? "zcode"
+    : "codex",
+);
+document.title = `LoongPort ${import.meta.env.DOCS_UI_VERSION} · 演示界面`;
 localStorage.setItem("loongport-last-view", "providers");
 localStorage.setItem("loongport-theme", "light");
 i18n.changeLanguage("zh");
