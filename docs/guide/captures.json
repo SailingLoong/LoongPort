@@ -1,7 +1,5 @@
 {
   "schemaVersion": 1,
-  "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
-  "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59",
   "runtime": "Released production React components with isolated mock Tauri IPC; not a native end-to-end login or API request test",
   "data": "All accounts, services, balances and usage are synthetic. No credentials were supplied.",
   "annotation": "Numbered outlines and a version/data footer only; production UI pixels are otherwise unchanged.",
@@ -20,7 +18,9 @@
         "自动故障切换",
         "悬停一行后：设为当前"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "02-resources.png",
@@ -35,7 +35,9 @@
         "Prompts：常用指令",
         "Agents：尚未开放"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "03-settings-general.png",
@@ -51,7 +53,9 @@
         "保留 Codex 官方登录",
         "统一 Codex 会话历史"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "04-connection-settings.png",
@@ -66,7 +70,9 @@
         "按应用退出路由",
         "确认本地服务地址"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "05-settings-advanced.png",
@@ -76,7 +82,9 @@
       "width": 1440,
       "height": 1126,
       "callouts": ["高级设置", "数据管理：导入/导出", "备份与恢复", "云同步"],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "06-add-service.png",
@@ -90,13 +98,15 @@
         "输入自己的服务网址",
         "进入注册 / 登录"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "07-manual-provider.png",
       "version": "6.26.2",
-      "rawSha256": "a8a1f146ec212d1cf63572875b6bcd1a7fbd30d7933fd68e83d2d34678fa5782",
-      "sha256": "5bf766abf752bc4681a2a0219cd67161a1d7089a0f5a2b679032a773ed046b13",
+      "rawSha256": "1882b2f174ff41ac31edca62455c041257d634128ab408adf6054bf01980c59c",
+      "sha256": "3c71a6aaadbaf9aebd2aad43b96033a6907f596c6b01cf957d9e91384b0d3f98",
       "width": 1440,
       "height": 1126,
       "callouts": [
@@ -105,7 +115,9 @@
         "核对真实可用的默认模型",
         "按服务接口选择上游格式"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36900902796",
+      "fixtureCommit": "283d21435537d8e8e2f6fe515af5179e4a8515c4"
     },
     {
       "file": "08-pending-changes.png",
@@ -120,7 +132,9 @@
         "取消调整",
         "核对后应用更改"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "09-backup-settings.png",
@@ -130,7 +144,9 @@
       "width": 1440,
       "height": 1126,
       "callouts": ["备份与恢复", "自动备份间隔", "保留数量", "立即备份"],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "10-first-service.png",
@@ -144,7 +160,9 @@
         "已有官方账号可选择官方 API",
         "进入该服务的注册 / 登录"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "11-confirm-application.png",
@@ -159,7 +177,9 @@
         "阅读可选分享；可取消勾选",
         "完成设置后做真实对话测试"
       ],
-      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "12-zcode-providers.png",
@@ -174,7 +194,9 @@
         "确认地址、协议与模型",
         "编辑供应商"
       ],
-      "sourceCommit": "0fec68ef8142c95b99ad4356571bd3f3ab8f58df"
+      "sourceCommit": "0fec68ef8142c95b99ad4356571bd3f3ab8f58df",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     },
     {
       "file": "13-zcode-edit.png",
@@ -190,7 +212,9 @@
         "模型 ID：每行一个",
         "保存后回 ZCode 测试"
       ],
-      "sourceCommit": "0fec68ef8142c95b99ad4356571bd3f3ab8f58df"
+      "sourceCommit": "0fec68ef8142c95b99ad4356571bd3f3ab8f58df",
+      "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+      "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59"
     }
   ]
 }
