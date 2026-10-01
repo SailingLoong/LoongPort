@@ -14,6 +14,8 @@
 
 ### 🌐 Official website: **[loongport.dev](https://loongport.dev)**
 
+### 📖 [Illustrated product guide (Chinese)](docs/guide/README.md)
+
 ### 💬 QQ group: **773696474**
 
 <img src="assets/qq-group.jpeg" alt="QR code for the LoongPort QQ group" width="240">
@@ -36,13 +38,12 @@ file along the way.
 
 Beyond relay tiers, LoongPort ships built-in
 [official-direct tiers](#official-direct-official-apis) (DeepSeek, BigModel, opencode);
-both kinds take part in [Easy Mode](#easy-mode-let-the-system-pick-the-tier)
-scheduling side by side. If your site has an image tier, you can also
+both are managed from the application page, with [automatic failover](#automatic-failover-follow-the-applied-priority-list) for compatible configurations. If your site has an image tier, you can also
 [**generate images right inside your CLI**](#generating-images-in-your-cli) — without
 giving up the tier you chat on.
 
 <div align="center">
-  <img src="assets/screenshots/main-zh.png" alt="LoongPort main window: the relay list, each row showing its balance and tier count" width="820">
+  <img src="docs/guide/images/01-application-workspace.png" alt="LoongPort 6.26.2 application workspace, rendered from released components with synthetic data" width="820">
   <br>
   <sub>Chinese UI shown; the app also ships English, Traditional Chinese and Japanese.</sub>
 </div>
@@ -54,16 +55,17 @@ giving up the tier you chat on.
 > CLI is the four steps below, and they only ever deal with **your** site.
 > To have them land on your site by default, see [If you run a relay](#if-you-run-a-relay).
 
-1. **Download and open it** — see [Install](#install). On first launch you get a
-   "pick a service site" dialog.
+1. **Download and open it** — see [Install](#install). Initialize the target CLI first, then use
+   "Connect your first service" in LoongPort.
 2. **Paste the relay's domain** — copying straight from your browser's address bar works
-   (`https://bestapi.store/usage` and the like; any trailing path is stripped for you).
+   (`https://example.com/usage` and the like; any trailing path is stripped for you).
 3. **Register or sign in** — LoongPort opens **that site's own** registration page.
    If you already have an account, a banner at the top takes you to the sign-in page in
    one click. The whole thing happens on the site's real pages; LoongPort receives the
    post-login credentials and **never handles your password**.
-4. **Done** — every tier your account can use already has a key, and the configs are
-   written. From there:
+4. **Confirm application configuration** — select a configuration for your target app,
+   review the optional data-sharing choice, and finish setup. Restart the target app
+   and send a test message to confirm it works. From there:
    - **Switch tiers**: one click on **Use tier**
    - **Top up**: the button next to the balance opens the site's own payment page
    - **Generate images** (when the site has image tiers): see
@@ -83,7 +85,8 @@ and is not tied to any particular relay:
   thing, and three of them happen on your site.
 - **It does not come between you and your users.** LoongPort has no accounts and no
   server. Users register on **your** site, top up through **your** payment page, and
-  their credentials never leave their own machine (SQLite under `~/.loongport/`).
+  credentials are stored locally and sent to the selected service when authenticating
+  requests. They are not sent to a LoongPort account server.
 - **To have users land on your site by default**: LoongPort fetches a signed remote
   config that can carry a "recommended sites" list — it appears at the top of the
   "pick a service site" screen, one click to connect. Just [open an issue](../../issues).
@@ -178,42 +181,31 @@ Full install and usage guide (in Chinese): **[docs/loongport-cli.md](docs/loongp
 > the process is force-terminated**, with no dialog, so the app warns you before switching.
 > Claude tier switches do not involve it.
 
-The system tray switches tiers for each app without opening the main window, and adjusts
-Easy Mode strategy and model preferences directly.
+The system tray offers quick tier switching for supported applications. See the
+[product guide](docs/guide/README.md) for model selection and configuration recovery.
 
 Credentials and site data live in a local SQLite database under `~/.loongport/` and are
 sent only to the relay site you chose, as the Bearer token on its API calls. LoongPort
 has no account system and no server of its own, so it never receives them.
 
-## Easy Mode: let the system pick the tier
+## Automatic failover: follow the applied priority list
 
-Once sites are connected, "which tier should I be on" remains a recurring decision:
-tiers differ in multiplier, unit price and live health. Easy Mode hands that decision to
-the system:
+Enable automatic failover on the application page to try other compatible tiers in
+the applied priority order when the current request fails. This is available for
+Claude Code, Codex, Gemini and Grok Build; individual configurations may be excluded,
+with the reason shown in the interface.
 
-- **Automatic tier selection** — managed tiers are chosen automatically by one of two
-  strategies, "lowest cost (multiplier × model unit price)" or "fastest response (recent
-  average time to first token)"; strategy and model preferences are configured per app.
-- **Session stickiness** — the current tier is kept for the duration of a session, so the
-  prompt cache is never thrown away.
-- **Failover** — when the current tier keeps failing, the next one in strategy order
-  takes over automatically, and traffic switches back once it recovers.
-- **Tier board** — with Easy Mode on, the home page becomes a tier board showing each
-  tier's multiplier, estimated unit price, balance, time to first token and current
-  hit, along with [model verification](#model-verification) anomaly flags.
-- **Manual ordering** — prefer to decide yourself? Switch to manual ordering and drag
-  tiers into your preferred priority; it takes effect on release. Session stickiness and
-  failover keep working.
-- **Always at hand** — a toggle in the top bar turns Easy Mode on or off per app at any
-  time. Turning it on also starts the local router and takes over that CLI's config;
-  turning it off restores the original config.
+- Add at least two usable, compatible tiers before relying on a backup
+- Filtering, sorting or selecting a model can create pending changes. Review the
+  list and choose **Apply changes**, or cancel
+- Enabling prepares the local router and application takeover. **Disabling automatic
+  failover stops tier fallback; it does not restore direct configuration**
+- Restore one application's direct configuration, or stop routing and restore all
+  configurations, under **Settings → Connection settings → Local routing**
 
-The Easy Mode toggle sits at the top of the application page; the master switch is
-**Settings → Advanced → Local Routing** — once the router is on, that persistent toggle
-appears (the same section has "Show Routing Toggle on Main Page" to control whether it
-shows). With Easy Mode off, everything works as before: manual switching and the failover
-queue remain available, and the underlying routing config likewise sits in the Advanced
-settings page.
+**Version note: v6.26.2 does not provide the retired Easy Mode lowest-cost or
+fastest-response selection strategies.** See the [illustrated guide](docs/guide/README.md#3-让故障时自动换到备用档位)
+for current controls and step-by-step recovery.
 
 ## Official-direct (Official APIs)
 
@@ -223,8 +215,9 @@ expands into two tiers: Zen pay-as-you-go and the Go subscription). Sign in once
 "Official APIs" page and LoongPort provisions the key and each platform's config
 automatically.
 
-Official-direct tiers have the same standing as relay tiers: both join Easy Mode's
-price comparison, ordering and failover at official list prices.
+Official-direct and relay configurations can both be selected on the application
+page. Configurations that support local routing may participate in the applied
+failover list; check each row's capability and exclusion information.
 
 ## Model verification
 
@@ -241,15 +234,15 @@ output quality. LoongPort verifies it on two levels:
 
 ## Usage statistics and billing reconciliation
 
-Traffic through the local router (Easy Mode included) is fully recorded, locally only:
+With request logging enabled, traffic through the local router is recorded locally:
 request count, success rate, cost, input/output and cache tokens, daily trends, and
 per-provider and per-model breakdowns.
 
 Each relay account row offers "billing reconciliation": estimated local cost is compared
 against the actual deductions in the site's balance snapshots per time window, with the
 ratio shown; windows where the actual deduction is markedly higher than the estimate are
-flagged. The feature becomes available once Easy Mode is on for a relevant app and
-reconciliation data exists.
+flagged. Reconciliation needs local request records and site balance snapshots;
+no conclusion is available without those records.
 
 ## Data and privacy
 
@@ -265,10 +258,10 @@ reconciliation data exists.
   the file directly means the file has to stay readable — that part is mitigated by tight
   file permissions, not by encryption. Likewise, credentials must be sent to the site you
   chose when you call upstream, so "keys never leave this machine" does not hold.
-- **Usage records stay on your machine.** Request counts, cost and token statistics from
-  the local router never leave it, and neither does billing reconciliation.
+- **Full usage records and billing reconciliation stay local.** If the optional
+  sharing below is enabled, the disclosed aggregate measurements are transmitted.
 - **Two reports do leave the machine, and both can be switched off.** Installation
-  statistics: site domains, site count, app version, operating system, plus a randomly
+  statistics: configured service domains, account counts, app version, OS family, plus a randomly
   generated install ID with no hardware fingerprint (it exists for de-duplication, so it
   is persistent). Crowd measurements: time to first token, error rate, tokens and cost
   aggregated per "site × hour", with a source ID that rotates daily. Neither includes
@@ -278,7 +271,7 @@ reconciliation data exists.
   **Settings → General → Window Behavior**.
 - The accurate word is **pseudonymised**, not "anonymous": there are no direct identity
   fields, but the install ID is persistent and an unusual combination of sites can itself
-  form a quasi-identifier. The local router used by Easy Mode binds to **`127.0.0.1`**
+  form a quasi-identifier. The local router binds to **`127.0.0.1`**
   only.
 - For the full picture, including what happens if you lose both the passphrase and the
   system credential entry, see the user manual's security section.

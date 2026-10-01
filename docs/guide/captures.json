@@ -1,0 +1,196 @@
+{
+  "schemaVersion": 1,
+  "captureWorkflow": "https://github.com/SailingLoong/LoongPort/actions/runs/36898143103",
+  "fixtureCommit": "fa0deaa35dcd8817871122cb3bb83a3e7b73ab59",
+  "runtime": "Released production React components with isolated mock Tauri IPC; not a native end-to-end login or API request test",
+  "data": "All accounts, services, balances and usage are synthetic. No credentials were supplied.",
+  "annotation": "Numbered outlines and a version/data footer only; production UI pixels are otherwise unchanged.",
+  "images": [
+    {
+      "file": "01-application-workspace.png",
+      "version": "6.26.2",
+      "rawSha256": "ab3d2e6bc6962ec9a2119d7009aa1a25a139c98de43eddcff3e4c93aa56fd0ca",
+      "sha256": "37c1d918be28fece62ce3d9fc3c9bf1a5c3a77967a279dd0682ae58e0da80de7",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "先选应用",
+        "添加服务",
+        "确认“当前”档位",
+        "自动故障切换",
+        "悬停一行后：设为当前"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "02-resources.png",
+      "version": "6.26.2",
+      "rawSha256": "a6bc426ae743c3408a3f7330e661d3e0f41f027ead3ca0b6dcba8740ae3b10ca",
+      "sha256": "33211f978217dc7bea03c985a8755a0d7ad6f190e173d4da3828f61c5db01409",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "MCP：工具与数据源",
+        "Skills：技能管理",
+        "Prompts：常用指令",
+        "Agents：尚未开放"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "03-settings-general.png",
+      "version": "6.26.2",
+      "rawSha256": "760eac3048941bf65b01ebde901100ba6d77d0037d6793e901c8ae2ccfd8d066",
+      "sha256": "9b60ed0e9ff4b370d9bb54e98f145b6853692a3bf83326dc1f6dbb5db0bee694",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "通用设置",
+        "界面语言",
+        "主页面显示与项目入口",
+        "保留 Codex 官方登录",
+        "统一 Codex 会话历史"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "04-connection-settings.png",
+      "version": "6.26.2",
+      "rawSha256": "9c950accb7ff5c81db708ce7053d2d4071edbf02dab362a8f544216ceb4be14f",
+      "sha256": "d49cdf4fac7b329b58f661648bfac9ca78af70a3d0d28dea176af64782aded00",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "连接设置",
+        "路由总开关：影响全部接管应用",
+        "按应用退出路由",
+        "确认本地服务地址"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "05-settings-advanced.png",
+      "version": "6.26.2",
+      "rawSha256": "d6b60f60801ed336869ec7cc40b6aff8178608b54f476ad50b73de98687a6dc9",
+      "sha256": "67490e5cf305132362e6f80024b932cc21b4a092551331c963885974fc41121a",
+      "width": 1440,
+      "height": 1126,
+      "callouts": ["高级设置", "数据管理：导入/导出", "备份与恢复", "云同步"],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "06-add-service.png",
+      "version": "6.26.2",
+      "rawSha256": "5b83b81fedb69310c052c91235940f68340d838181fac8b7abdcd9f8c9c076ca",
+      "sha256": "6d84d40fa434488984e5ae5e6da40dabd0f67099bc8f0fab64c0df5f95d555c7",
+      "width": 1440,
+      "height": 1100,
+      "callouts": [
+        "按已有条件选接入方式",
+        "输入自己的服务网址",
+        "进入注册 / 登录"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "07-manual-provider.png",
+      "version": "6.26.2",
+      "rawSha256": "a8a1f146ec212d1cf63572875b6bcd1a7fbd30d7933fd68e83d2d34678fa5782",
+      "sha256": "5bf766abf752bc4681a2a0219cd67161a1d7089a0f5a2b679032a773ed046b13",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "API Key：由你本人填写",
+        "填写服务商指定的 API 请求地址",
+        "核对真实可用的默认模型",
+        "按服务接口选择上游格式"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "08-pending-changes.png",
+      "version": "6.26.2",
+      "rawSha256": "2d1797cb635584b20eeb53a97c8fbfcb9f45159ed9e75a728485ace966fca0ac",
+      "sha256": "fc61c8a687948f94c635f39fd13f5e9c1bd2fe47484818a77e5b3bfdcb2c1e26",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "筛选要使用的档位",
+        "这是待生效草稿",
+        "取消调整",
+        "核对后应用更改"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "09-backup-settings.png",
+      "version": "6.26.2",
+      "rawSha256": "4e9e3198380b37ef5d9ab866590e57d954f24e3e6d417be252ee467c99e0b845",
+      "sha256": "07e3308f56035350a64ca0543feed9105c28c7c6e535d7f677f57dcfb5df0822",
+      "width": 1440,
+      "height": 1126,
+      "callouts": ["备份与恢复", "自动备份间隔", "保留数量", "立即备份"],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "10-first-service.png",
+      "version": "6.26.2",
+      "rawSha256": "9aadd63a24acd901ffdaa898fb59d608e909a0f879ac56f576e68f989687bee0",
+      "sha256": "aaccb385335ef21a3bdb91860483ec0cf18740e9a04681393eeb0e0a39ba5bd9",
+      "width": 1440,
+      "height": 1100,
+      "callouts": [
+        "填写你信任的服务网址",
+        "已有官方账号可选择官方 API",
+        "进入该服务的注册 / 登录"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "11-confirm-application.png",
+      "version": "6.26.2",
+      "rawSha256": "bb574c3c10ed76d4a5f6d37342ae60e1c3e472f717329e50bd993cfc0d20b21a",
+      "sha256": "7fe20baf2acf8c1305bfdbe0289e2e3fa753524bd0438ccd520dd2d622504ba3",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "不用的应用先保留暂不配置",
+        "为目标应用选一个可用档位",
+        "阅读可选分享；可取消勾选",
+        "完成设置后做真实对话测试"
+      ],
+      "sourceCommit": "e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897"
+    },
+    {
+      "file": "12-zcode-providers.png",
+      "version": "6.26.3-beta.2",
+      "rawSha256": "26d2cdb57c7eb03edc8b9df3165f37c5384e487df441b59f569242e7a64afcf8",
+      "sha256": "e17c4b9024e4818babc6d90cb1ea45c946c8c2ab987b2af697c4ac4ee4d921f0",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "选择 ZCode",
+        "添加个人供应商",
+        "确认地址、协议与模型",
+        "编辑供应商"
+      ],
+      "sourceCommit": "0fec68ef8142c95b99ad4356571bd3f3ab8f58df"
+    },
+    {
+      "file": "13-zcode-edit.png",
+      "version": "6.26.3-beta.2",
+      "rawSha256": "62a598be9cbb2c154d1243a2f0d2be27f849dbb94ea9cc28490861dacdca0539",
+      "sha256": "ec20ebc88602724f20d2f16a8fbabf4fa8fbc5dbf78ee279a93dbd54b1d7accb",
+      "width": 1440,
+      "height": 1126,
+      "callouts": [
+        "服务商提供的 API 地址",
+        "编辑时留空保留现有 Key",
+        "选择匹配的协议",
+        "模型 ID：每行一个",
+        "保存后回 ZCode 测试"
+      ],
+      "sourceCommit": "0fec68ef8142c95b99ad4356571bd3f3ab8f58df"
+    }
+  ]
+}
