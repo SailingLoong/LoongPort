@@ -1,0 +1,68 @@
+name: Product guide screenshots
+
+on:
+  pull_request:
+    paths:
+      - "scripts/docs-ui/**"
+      - ".github/workflows/docs-ui.yml"
+      - "docs/guide/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-ui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LOONGPORT_SOURCE_SHA: e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897
+    steps:
+      - uses: actions/checkout@v6
+      - name: Checkout exact stable UI source
+        uses: actions/checkout@v6
+        with:
+          ref: e8d636fe4fddcc22f5d44c9d153dc7f7f7ef7897
+          path: .docs-ui-source
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - name: Install repository dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          ln -s "$GITHUB_WORKSPACE/node_modules" .docs-ui-source/node_modules
+      - name: Install isolated browser test tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/docs-browser" --ignore-scripts --no-audit --no-fund @playwright/test@1.63.0
+          node "$RUNNER_TEMP/docs-browser/node_modules/@playwright/test/cli.js" install --with-deps chromium
+          sudo apt-get install -y fonts-noto-cjk
+      - name: Build the released UI with synthetic IPC
+        run: |
+          export LOONGPORT_UI_SOURCE="$GITHUB_WORKSPACE/.docs-ui-source"
+          export DOCS_UI_OUTPUT="$RUNNER_TEMP/docs-ui"
+          pnpm exec vite build --config scripts/docs-ui/vite.config.mts
+      - name: Capture real components in sandboxed Chromium
+        run: |
+          python3 -m http.server 4198 --bind 127.0.0.1 --directory "$RUNNER_TEMP/docs-ui" > "$RUNNER_TEMP/docs-ui-server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          for attempt in {1..30}; do
+            if curl -fsS http://127.0.0.1:4198/ > /dev/null; then break; fi
+            sleep 1
+          done
+          export PLAYWRIGHT_MODULE="$RUNNER_TEMP/docs-browser/node_modules/playwright/index.mjs"
+          export DOCS_SCREENSHOTS="$RUNNER_TEMP/docs-ui-artifact"
+          node scripts/docs-ui/capture.mjs
+      - name: Save short-lived review artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: loongport-stable-guide-ui
+          path: ${{ runner.temp }}/docs-ui-artifact
+          retention-days: 7
+          if-no-files-found: error
