@@ -129,6 +129,9 @@ try {
     await page.getByRole("dialog").waitFor({ state: "hidden" });
     await page.getByLabel("供应商名称", { exact: true }).fill("演示服务");
     await page
+      .getByLabel("API 请求地址", { exact: true })
+      .fill("https://api.example.com/v1");
+    await page
       .getByLabel("供应商名称", { exact: true })
       .evaluate((element) => element.scrollIntoView({ block: "start" }));
     await capture("07-manual-provider");
