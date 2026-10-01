@@ -93,26 +93,28 @@ impl PromptService {
             return upsert_pi_prompt(state, id, prompt);
         }
 
-        // 检查是否为已启用的提示词
-        let is_enabled = prompt.enabled;
+        // 只有停用最后一条启用中的提示词时才清空文件；新建、导入或重存
+        // 停用条目时，文件可能是用户自己写的，必须原样保留
+        let previous_prompts = state.db.get_prompts(app.as_str())?;
+        let clear_live = !prompt.enabled
+            && previous_prompts
+                .get(id)
+                .is_some_and(|previous| previous.enabled)
+            && !previous_prompts
+                .iter()
+                .any(|(key, prompt)| key != id && prompt.enabled);
 
         state.db.save_prompt(app.as_str(), &prompt)?;
 
-        if is_enabled {
+        if prompt.enabled {
             // 启用提示词：写入内容到文件
             let target_path = prompt_file_path(&app)?;
             write_text_file(&target_path, &prompt.content)?;
-        } else {
-            // 禁用提示词：检查是否还有其他已启用的提示词
-            let prompts = state.db.get_prompts(app.as_str())?;
-            let any_enabled = prompts.values().any(|p| p.enabled);
-
-            if !any_enabled {
-                // 所有提示词都已禁用，清空文件
-                let target_path = prompt_file_path(&app)?;
-                if target_path.exists() {
-                    write_text_file(&target_path, "")?;
-                }
+        } else if clear_live {
+            // 本次保存停用了最后一条启用中的提示词，清空文件
+            let target_path = prompt_file_path(&app)?;
+            if target_path.exists() {
+                write_text_file(&target_path, "")?;
             }
         }
 
