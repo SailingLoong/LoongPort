@@ -56,6 +56,7 @@ const APP_ICON_NAME: Record<Exclude<AppId, "codex-image">, string> = {
   openclaw: "openclaw",
   hermes: "hermes",
   pi: "pi",
+  zcode: "zhipu",
 };
 
 /** 应用图标 + 角标（Claude Code / Desktop 用角标区分终端与桌面） */

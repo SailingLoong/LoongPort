@@ -318,6 +318,7 @@ export interface VisibleApps {
   openclaw: boolean;
   hermes: boolean;
   pi: boolean;
+  zcode: boolean;
 }
 
 // WebDAV 同步状态

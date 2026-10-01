@@ -969,7 +969,8 @@
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "pi": "Pi"
+    "pi": "Pi",
+    "zcode": "ZCode"
   },
   "grokBuild": {
     "apiBackend": "API backend",
@@ -4088,5 +4089,23 @@
     "keep": "Keep {{selected}}",
     "adopt": "Switch to {{requested}}",
     "switchFailed": "Failed to switch model"
+  },
+  "zcode": {
+    "description": "Configure personal providers and models in ZCode. Manage accounts and the default model in ZCode.",
+    "refresh": "Refresh",
+    "add": "Add provider",
+    "empty": "No personal providers yet",
+    "native": "Managed in ZCode",
+    "edit": "Edit",
+    "remove": "Remove",
+    "keyHelp": "Keys are saved locally in ZCode. Leave the key blank to keep an existing key.",
+    "name": "Name",
+    "baseUrl": "Base URL",
+    "apiKey": "API Key",
+    "protocol": "Protocol",
+    "models": "Models (one per line)",
+    "cancel": "Cancel",
+    "save": "Save",
+    "removeConfirm": "Remove {{name}} from ZCode?"
   }
 }

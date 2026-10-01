@@ -192,7 +192,7 @@ import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
 import { RelaySection } from "../RelaySection";
 import { ServicesPage } from "../accounts/ServicesPage";
 import { useAccountSessionStartup } from "../accounts/useAccountSessionStartup";
-import { APP_IDS } from "@/config/appConfig";
+import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 
 /**
  * 各行的余额走 react-query（`useRowBalanceQuery`）⇒ 这一层要有 provider。
@@ -411,17 +411,19 @@ describe("RelaySection model verification ownership", () => {
       await screen.findAllByRole("button", { name: "common.refresh" }),
     ).toHaveLength(2);
     // The public account query is the only snapshot owner.
-    expect(api.listRelays).toHaveBeenCalledTimes(APP_IDS.length);
-    expect(api.list).toHaveBeenCalledTimes(APP_IDS.length);
+    expect(api.listRelays).toHaveBeenCalledTimes(PROVIDER_STORE_APP_IDS.length);
+    expect(api.list).toHaveBeenCalledTimes(PROVIDER_STORE_APP_IDS.length);
     expect(api.checkSession).not.toHaveBeenCalled();
     fireEvent.click(
       screen.getAllByRole("button", { name: "common.refresh" })[1],
     );
     await waitFor(() => expect(api.refresh).toHaveBeenCalledWith(2, "codex"));
     await waitFor(() =>
-      expect(api.listRelays).toHaveBeenCalledTimes(APP_IDS.length * 2),
+      expect(api.listRelays).toHaveBeenCalledTimes(
+        PROVIDER_STORE_APP_IDS.length * 2,
+      ),
     );
-    expect(api.list).toHaveBeenCalledTimes(APP_IDS.length * 2);
+    expect(api.list).toHaveBeenCalledTimes(PROVIDER_STORE_APP_IDS.length * 2);
   });
 
   it.each([
@@ -472,7 +474,9 @@ describe("RelaySection model verification ownership", () => {
       expect(api.refresh).not.toHaveBeenCalled();
       expect(api.refreshAll).not.toHaveBeenCalled();
       expect(api.vendorRefresh).not.toHaveBeenCalled();
-      expect(api.listRelays).toHaveBeenCalledTimes(APP_IDS.length * 2);
+      expect(api.listRelays).toHaveBeenCalledTimes(
+        PROVIDER_STORE_APP_IDS.length * 2,
+      );
     },
   );
 

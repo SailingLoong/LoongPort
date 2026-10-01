@@ -1,3 +1,4 @@
+import { ZCodeProviderPanel } from "@/components/zcode/ZCodeProviderPanel";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
@@ -128,6 +129,8 @@ import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
 import {
   APP_IDS,
+  PROVIDER_STORE_APP_IDS,
+  usesProviderStore,
   DEFAULT_VISIBLE_APPS,
   isProxyAppId,
 } from "@/config/appConfig";
@@ -170,6 +173,7 @@ function App() {
   const navigation = useClientNavigation(getInitialView, getInitialApp);
   const activeApp = navigation.app;
   const setActiveApp = navigation.setApp;
+  const usesStore = usesProviderStore(activeApp);
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const currentView = navigation.view;
@@ -189,6 +193,7 @@ function App() {
   const [skillsNavigationBusy, setSkillsNavigationBusy] = useState(false);
   const [promptManagementBusy, setPromptManagementBusy] = useState(false);
   const [promptNavigationBusy, setPromptNavigationBusy] = useState(false);
+  const [zcodeNavigationBusy, setZcodeNavigationBusy] = useState(false);
   const [skillsCheckUpdatesState, setSkillsCheckUpdatesState] =
     useState<SkillsCheckUpdatesState>({
       isChecking: false,
@@ -289,6 +294,7 @@ function App() {
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning: currentAppUsesProxy && isProxyRunning,
+    enabled: usesStore,
   });
   const { data: piCurrentState } = usePiCurrentState(activeApp === "pi");
   const providers = useMemo(() => data?.providers ?? {}, [data]);
@@ -698,12 +704,15 @@ function App() {
       }
     };
 
-    checkEnvOnSwitch();
-  }, [activeApp]);
+    if (usesStore) void checkEnvOnSwitch();
+  }, [activeApp, usesStore]);
 
   const canGoBackRef = useRef(navigation.canGoBack);
   const managementBusy =
-    mcpManagementBusy || skillsNavigationBusy || promptNavigationBusy;
+    mcpManagementBusy ||
+    skillsNavigationBusy ||
+    promptNavigationBusy ||
+    zcodeNavigationBusy;
   const managementBusyRef = useRef(false);
   managementBusyRef.current = managementBusy;
 
@@ -955,15 +964,16 @@ function App() {
   /** 打开聚合页；`tab` 缺省落「中转站」（首启引导同）。 */
   const handleOpenAddHub = useCallback(
     (tab: AddHubTab = "directory", opts?: { firstVisit?: boolean }) => {
+      const app = usesProviderStore(activeApp) ? activeApp : "codex";
       setAddHubEntries((entries) => ({
         ...entries,
-        [activeApp]: {
-          id: (entries[activeApp]?.id ?? 0) + 1,
+        [app]: {
+          id: (entries[app]?.id ?? 0) + 1,
           tab,
           firstVisit: opts?.firstVisit === true,
         },
       }));
-      setCurrentView("addHub");
+      setCurrentView("addHub", app);
     },
     [activeApp, setCurrentView],
   );
@@ -988,7 +998,8 @@ function App() {
       view,
       view === "image"
         ? "codex-image"
-        : activeApp === "codex-image"
+        : activeApp === "codex-image" ||
+            (!usesStore && view !== "providers" && view !== "settings")
           ? "codex"
           : activeApp,
     );
@@ -1188,7 +1199,11 @@ function App() {
                     transition={{ duration: 0.15 }}
                     className="space-y-4"
                   >
-                    {activeApp === "codex-image" ? (
+                    {activeApp === "zcode" ? (
+                      <ZCodeProviderPanel
+                        onNavigationBlockedChange={setZcodeNavigationBusy}
+                      />
+                    ) : activeApp === "codex-image" ? (
                       <>
                         <ImageTabPage onOpenAddHub={handleOpenAddHub} />
                         {providerList}
@@ -1444,6 +1459,7 @@ function App() {
                 </div>
               )}
             {currentView === "providers" &&
+              usesStore &&
               (settingsData?.showProfileSwitcher ?? false) && (
                 <div
                   className="flex shrink-0 items-center"
@@ -1604,7 +1620,7 @@ function App() {
                     )}
                   </>
                 )}
-                {currentView === "providers" && (
+                {currentView === "providers" && usesStore && (
                   <>
                     <Button
                       onClick={() => handleOpenAddHub()}
@@ -1642,7 +1658,7 @@ function App() {
             }
           />
         </PreservedView>
-        {APP_IDS.map((app) => (
+        {PROVIDER_STORE_APP_IDS.map((app) => (
           <PreservedView
             key={`add-${app}`}
             active={currentView === "addHub" && activeApp === app}
@@ -1656,7 +1672,7 @@ function App() {
             />
           </PreservedView>
         ))}
-        {APP_IDS.map((app) => (
+        {PROVIDER_STORE_APP_IDS.map((app) => (
           <PreservedView
             key={`plaza-${app}`}
             active={currentView === "plaza" && activeApp === app}

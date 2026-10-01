@@ -2,7 +2,7 @@ import React from "react";
 import { useTranslation } from "react-i18next";
 import { Badge, badgeVariants } from "@/components/ui/badge";
 import type { AppId } from "@/lib/api/types";
-import { APP_IDS, APP_ICON_MAP } from "@/config/appConfig";
+import { PROVIDER_STORE_APP_IDS, APP_ICON_MAP } from "@/config/appConfig";
 import { cn } from "@/lib/utils";
 
 interface AppCountBarProps {
@@ -18,7 +18,7 @@ interface AppCountBarProps {
 export const AppCountBar: React.FC<AppCountBarProps> = ({
   totalLabel,
   counts,
-  appIds = APP_IDS,
+  appIds = PROVIDER_STORE_APP_IDS,
   totalCount,
   onToggleAll,
   pendingApp,

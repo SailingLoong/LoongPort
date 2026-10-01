@@ -970,7 +970,8 @@
     "opencode": "OpenCode",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "pi": "Pi"
+    "pi": "Pi",
+    "zcode": "ZCode"
   },
   "grokBuild": {
     "apiBackend": "API Backend",
@@ -4089,5 +4090,23 @@
     "keep": "保持 {{selected}}",
     "adopt": "改用 {{requested}}",
     "switchFailed": "切換模型失敗"
+  },
+  "zcode": {
+    "description": "設定 ZCode 的個人供應商和模型。帳號和預設模型請在 ZCode 中管理。",
+    "refresh": "重新整理",
+    "add": "新增供應商",
+    "empty": "尚無個人供應商",
+    "native": "在 ZCode 中管理",
+    "edit": "編輯",
+    "remove": "移除",
+    "keyHelp": "金鑰儲存在本機 ZCode 設定中。編輯時留空可保留現有金鑰。",
+    "name": "名稱",
+    "baseUrl": "API 位址",
+    "apiKey": "API Key",
+    "protocol": "協定",
+    "models": "模型（每行一個）",
+    "cancel": "取消",
+    "save": "儲存",
+    "removeConfirm": "從 ZCode 中移除 {{name}}？"
   }
 }

@@ -146,7 +146,11 @@ export function useClientNavigation(
     const savedView = initial();
     const app = initialApp();
     const view =
-      savedView === "providers" && app === "codex-image" ? "image" : savedView;
+      app === "zcode" && savedView !== "settings"
+        ? "providers"
+        : savedView === "providers" && app === "codex-image"
+          ? "image"
+          : savedView;
     return {
       current: { view, app: view === "image" ? "codex-image" : app },
       history: [],

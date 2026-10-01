@@ -1,5 +1,10 @@
+import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { navigationReducer, type NavigationState } from "../navigation";
+import {
+  navigationReducer,
+  useClientNavigation,
+  type NavigationState,
+} from "../navigation";
 
 const initial: NavigationState = {
   current: { view: "providers", app: "claude" },
@@ -141,4 +146,15 @@ it("changes app context within the same account without adding a Back step", () 
   });
   expect(state.current.app).toBe("claude");
   expect(navigationReducer(state, { type: "back" })).toEqual(accounts);
+});
+
+it("restores native configuration on an unsupported saved view", () => {
+  const { result } = renderHook(() =>
+    useClientNavigation(
+      () => "mcp",
+      () => "zcode",
+    ),
+  );
+  expect(result.current.view).toBe("providers");
+  expect(result.current.app).toBe("zcode");
 });

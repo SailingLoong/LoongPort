@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { APP_IDS } from "@/config/appConfig";
+import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { relayApi, type RelayRow } from "@/lib/api/relay";
 import { vendorApi, type VendorAccountRow } from "@/lib/api/vendor";
@@ -25,7 +25,7 @@ export function useServiceAccounts() {
     queryKey: serviceAccountsKey,
     queryFn: () =>
       Promise.all(
-        APP_IDS.map(async (appId) => {
+        PROVIDER_STORE_APP_IDS.map(async (appId) => {
           const [relays, vendors] = await Promise.all([
             relayApi.listRelays(appId),
             vendorApi.list(appId),
@@ -82,7 +82,7 @@ export function useServiceAccounts() {
 export function configuredApps(account: ServiceAccount): AppId[] {
   // These are existing configurations reported by the backend, not a frontend
   // registry of supported protocols or an inferred login/current status.
-  return APP_IDS.filter((appId) =>
+  return PROVIDER_STORE_APP_IDS.filter((appId) =>
     account.kind === "relay"
       ? Boolean(account.apps.get(appId)?.tiers.length)
       : account.apps

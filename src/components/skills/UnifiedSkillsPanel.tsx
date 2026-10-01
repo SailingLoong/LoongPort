@@ -44,7 +44,7 @@ import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { settingsApi, skillsApi } from "@/lib/api";
 import { toast } from "sonner";
-import { SKILLS_APP_IDS } from "@/config/appConfig";
+import { SKILLS_APP_IDS, usesProviderStore } from "@/config/appConfig";
 import { AppCountBar } from "@/components/common/AppCountBar";
 import { AppToggleGroup } from "@/components/common/AppToggleGroup";
 import { ListItemRow } from "@/components/common/ListItemRow";
@@ -287,7 +287,7 @@ const UnifiedSkillsPanel = React.forwardRef<
   };
 
   const handleToggleAll = async (app: AppId, enabled: boolean) => {
-    if (!skills || !beginWrite()) return;
+    if (!skills || !usesProviderStore(app) || !beginWrite()) return;
 
     const ids = skills
       .filter((skill) => Boolean(skill.apps[app]) !== enabled)

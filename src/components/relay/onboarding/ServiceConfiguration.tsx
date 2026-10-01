@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { getAppDisplayName, APP_IDS } from "@/config/appConfig";
+import { getAppDisplayName, PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -82,7 +82,7 @@ export function ServiceConfiguration({
         </div>
       )}
       <div className="my-6 divide-y rounded-lg border bg-background px-4">
-        {APP_IDS.map((app) => {
+        {PROVIDER_STORE_APP_IDS.map((app) => {
           const available =
             choices.data?.filter((choice) => choice.app === app) ?? [];
           if (!available.length) return null;

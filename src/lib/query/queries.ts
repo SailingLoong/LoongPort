@@ -48,6 +48,7 @@ export interface ProvidersQueryData {
 }
 
 export interface UseProvidersQueryOptions {
+  enabled?: boolean;
   isProxyRunning?: boolean; // 代理服务是否运行中
 }
 
@@ -55,10 +56,11 @@ export const useProvidersQuery = (
   appId: AppId,
   options?: UseProvidersQueryOptions,
 ): UseQueryResult<ProvidersQueryData> => {
-  const { isProxyRunning = false } = options || {};
+  const { isProxyRunning = false, enabled = true } = options || {};
 
   return useQuery({
     queryKey: ["providers", appId],
+    enabled,
     placeholderData: keepPreviousData,
     // 当代理服务运行时，每 10 秒刷新一次供应商列表
     // 这样可以自动反映后端熔断器自动禁用代理目标的变更

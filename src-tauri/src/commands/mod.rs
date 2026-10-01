@@ -39,6 +39,8 @@ mod omo;
 mod onboarding;
 mod openclaw;
 mod pi;
+mod zcode;
+pub use zcode::*;
 mod plugin;
 mod profile;
 mod prompt;

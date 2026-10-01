@@ -76,6 +76,7 @@ const createDefaultProviders = (): ProvidersByApp => ({
   // 生图栏：msw 的默认夹具里不放档位（那一栏只由 provision 填）。
   "codex-image": {},
   pi: {},
+  zcode: {},
 });
 
 const createDefaultCurrent = (): CurrentProviderState => ({
@@ -89,6 +90,7 @@ const createDefaultCurrent = (): CurrentProviderState => ({
   openclaw: "",
   hermes: "",
   pi: "",
+  zcode: "",
 });
 
 let providers = createDefaultProviders();
@@ -111,6 +113,7 @@ const createDefaultSettings = (): Settings => ({
     codex: true,
     "codex-image": true,
     pi: true,
+    zcode: false,
     gemini: true,
     grokbuild: true,
     opencode: true,
@@ -218,6 +221,7 @@ let mcpConfigs: McpConfigState = {
   // 生图栏不装 MCP（它不是一个 CLI）—— 夹具里恒为空。
   "codex-image": {},
   pi: {},
+  zcode: {},
 };
 
 const cloneProviders = (value: ProvidersByApp) =>
@@ -282,6 +286,7 @@ export const resetProviderState = () => {
     hermes: {},
     "codex-image": {},
     pi: {},
+    zcode: {},
   };
 };
 
