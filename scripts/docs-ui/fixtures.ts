@@ -190,6 +190,8 @@ export async function fixture(command: string, args: any = {}) {
       return "";
     case "preset_referral_urls":
       return {};
+    case "plaza_seed_from_first_site":
+      return true;
     case "service_onboarding_complete":
       onboardingCompleted = true;
       return { shouldPrompt: false, completed: true, plazaVisible: true };
@@ -266,11 +268,20 @@ export async function fixture(command: string, args: any = {}) {
         profiles: [{ name: "日常使用", providerIds: ids }],
       };
     case "service_onboarding_status":
-      return { shouldPrompt: false, completed: true, plazaVisible: true };
+      return {
+        shouldPrompt: !onboardingCompleted,
+        completed: onboardingCompleted,
+        plazaVisible: true,
+      };
     case "relay_status":
-      return { defaultSite: "https://example.com", shouldPromptAddSite: false };
+      return {
+        defaultSite: "https://example.com",
+        shouldPromptAddSite: !connected,
+      };
     case "relay_list_sites":
-      return [{ siteOrigin: "https://example.com", accountCount: 1 }];
+      return connected
+        ? [{ siteOrigin: "https://example.com", accountCount: 1 }]
+        : [];
     case "relay_list_relays":
       return connected &&
         ["codex", "claude"].includes(args.appType || args.appId || args.app)

@@ -130,7 +130,7 @@ try {
     await page.getByLabel("供应商名称", { exact: true }).fill("演示服务");
     await page
       .getByLabel("供应商名称", { exact: true })
-      .scrollIntoViewIfNeeded();
+      .evaluate((element) => element.scrollIntoView({ block: "start" }));
     await capture("07-manual-provider");
     await page.goto("http://127.0.0.1:4198/?scenario=first-run", {
       waitUntil: "load",
