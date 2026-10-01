@@ -2,6 +2,13 @@
 import { IconMetadata } from "@/types/icon";
 
 export const iconMetadata: Record<string, IconMetadata> = {
+  zcode: {
+    name: "zcode",
+    displayName: "ZCode",
+    category: "ai-provider",
+    keywords: ["zcode", "z.ai", "agent", "coding"],
+    defaultColor: "currentColor",
+  },
   a6api: {
     name: "a6api",
     displayName: "A6API",

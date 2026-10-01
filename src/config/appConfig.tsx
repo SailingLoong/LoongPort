@@ -144,7 +144,7 @@ export function isMcpAppId(appId: string): appId is McpAppId {
 export const APP_ICON_MAP: Record<AppId, AppConfig> = {
   zcode: {
     label: "ZCode",
-    icon: <ProviderIcon icon="zhipu" name="ZCode" size={14} />,
+    icon: <ProviderIcon icon="zcode" name="ZCode" size={14} />,
     activeClass:
       "bg-blue-500/10 ring-1 ring-blue-500/20 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400",
     badgeClass:
