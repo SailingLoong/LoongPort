@@ -1,6 +1,10 @@
 import type { ProxyStatus } from "@/types/proxy";
 // Isolated UI documentation fixtures. No external services or filesystem access.
-export let enabled = true;
+const firstRun =
+  new URLSearchParams(window.location.search).get("scenario") === "first-run";
+let connected = !firstRun;
+let onboardingCompleted = !firstRun;
+export let enabled = !firstRun;
 export const settings = {
   language: "zh",
   showInTray: true,
@@ -182,20 +186,46 @@ export async function fixture(command: string, args: any = {}) {
       return "";
     case "preset_referral_urls":
       return {};
+    case "service_onboarding_complete":
+      onboardingCompleted = true;
+      return { shouldPrompt: false, completed: true, plazaVisible: true };
+    case "relay_import_site":
+      connected = true;
+      return {
+        relayId: 1,
+        siteOrigin: "https://example.com",
+        siteName: "演示服务",
+        backendKind: "sub2api",
+      };
+    case "relay_refresh":
+      return {
+        summary: {
+          notice: "updated",
+          refreshedAccounts: 1,
+          tiers: 1,
+          keysCreated: 0,
+          otherPlatformTiers: 0,
+          mergedProviders: 0,
+          failures: [],
+        },
+        balances: [],
+      };
+    case "list_db_backups":
+      return [];
     case "get_settings":
       return settings;
     case "save_settings":
       Object.assign(settings, args.settings);
       return true;
     case "get_providers":
-      return providers();
+      return connected ? providers() : {};
     case "get_current_provider":
       return current;
     case "get_application_overview":
       return {
         isAdditive: false,
         recentProviderIds: [],
-        configurations: configurations(),
+        configurations: connected ? configurations() : [],
       };
     case "get_application_routing":
       return {
@@ -206,7 +236,7 @@ export async function fixture(command: string, args: any = {}) {
           { model: "gpt-5.4", tierCount: 2, cheapestPricePerMillion: 12 },
         ],
         chainIds: ids,
-        tiers: tiers(),
+        tiers: connected ? tiers() : [],
       };
     case "set_application_failover":
       enabled = args.enabled;
@@ -223,9 +253,8 @@ export async function fixture(command: string, args: any = {}) {
     case "relay_list_sites":
       return [{ siteOrigin: "https://example.com", accountCount: 1 }];
     case "relay_list_relays":
-      return ["codex", "claude"].includes(
-        args.appType || args.appId || args.app,
-      )
+      return connected &&
+        ["codex", "claude"].includes(args.appType || args.appId || args.app)
         ? relayRows()
         : [];
     case "vendor_list":
