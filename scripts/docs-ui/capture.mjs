@@ -10,6 +10,7 @@ const output = process.env.DOCS_SCREENSHOTS ?? "docs-ui-artifact";
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({
   headless: true,
+  executablePath: process.env.DOCS_UI_CHROME,
   chromiumSandbox: true,
 });
 const context = await browser.newContext({
