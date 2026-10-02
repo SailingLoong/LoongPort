@@ -11,12 +11,20 @@ if (!["chromium", "webkit"].includes(engine))
   throw new Error("Unknown browser engine");
 const browser = await { chromium, webkit }[engine].launch({
   headless: true,
+  chromiumSandbox: true,
   ...(process.env.BROWSER_EXECUTABLE
     ? { executablePath: process.env.BROWSER_EXECUTABLE }
     : {}),
 });
 try {
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  await context.route("**/*", (route) => {
+    const url = new URL(route.request().url());
+    return url.hostname === "127.0.0.1" && url.port === "4314"
+      ? route.continue()
+      : route.abort();
+  });
+  const page = await context.newPage();
   for (const options of [
     { height: 650, models: 80 },
     { height: 800, models: 80, resolution: "Use external values" },
