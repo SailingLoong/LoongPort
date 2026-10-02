@@ -176,6 +176,102 @@
         "none",
         "high"
       ]
+    },
+    {
+      "model": "gpt-6-astra",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "low",
+      "source": "openai-codex-ca466061"
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "low",
+      "source": "openai-codex-ca466061"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-ca466061"
+    },
+    {
+      "model": "gpt-6-luna",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-ca466061"
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "low",
+      "source": "openai-codex-ca466061"
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-ca466061"
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-ca466061"
     }
-  ]
+  ],
+  "sources": {
+    "openai-codex-ca466061": {
+      "authority": "openai-codex",
+      "revision": "ca466061d64f0b44f416135c7fd06aa7af850bbc",
+      "url": "https://github.com/openai/codex/blob/ca466061d64f0b44f416135c7fd06aa7af850bbc/codex-rs/models-manager/models.json"
+    }
+  }
 }
