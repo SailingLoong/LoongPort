@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   switch: vi.fn(),
   state: vi.fn(),
   complete: vi.fn(),
+  vendorSwitch: vi.fn(),
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -34,6 +35,24 @@ vi.mock("@/lib/api/relay", () => ({
         ? [{ id: 7, tiers: [{ providerId: app, displayName: app }] }]
         : [],
     switchTier: mocks.switch,
+  },
+}));
+vi.mock("@/lib/api/vendor", () => ({
+  vendorApi: {
+    list: async (app: string) => ({
+      accounts:
+        app === "claude"
+          ? [
+              {
+                id: 9,
+                plans: [
+                  { planId: "standard", planName: "Standard", canSwitch: true },
+                ],
+              },
+            ]
+          : [],
+    }),
+    switch: mocks.vendorSwitch,
   },
 }));
 function snapshot(app: string, revision = "written", current = true) {
@@ -76,6 +95,9 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation(async (app: string) => snapshot(app));
   mocks.complete.mockReset().mockResolvedValue({ completed: true });
+  mocks.vendorSwitch
+    .mockReset()
+    .mockResolvedValue({ status: "switched", warnings: [] });
 });
 
 it("shows partial success and retries B without applying still-matching A again", async () => {
@@ -240,4 +262,40 @@ it("requires explicit reapplication when a completed switch cannot be verified",
   );
   await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
   expect(mocks.switch).toHaveBeenCalledTimes(3);
+});
+
+it("verifies a vendor plan using its account and selection identity rather than its generated provider ID", async () => {
+  mocks.state.mockResolvedValue({
+    configurationRevision: "vendor-written",
+    isAdditive: false,
+    configurations: [
+      {
+        providerId: "vendor-generated-provider",
+        selection: { kind: "vendor", rowId: 9, planId: "standard" },
+        presentation: { isCurrent: true },
+      },
+    ],
+  });
+  const onDone = vi.fn();
+  render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      <ServiceConfiguration
+        account={{ kind: "vendor", rowId: 9, name: "Example vendor" }}
+        sourceAppId="claude"
+        onBack={vi.fn()}
+        onDone={onDone}
+      />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("combobox", { name: "Claude Code" });
+  fireEvent.click(
+    screen.getByRole("button", { name: "loongport.onboarding.finish" }),
+  );
+  await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+  expect(mocks.vendorSwitch).toHaveBeenCalledWith(
+    9,
+    "standard",
+    "claude",
+    undefined,
+  );
 });

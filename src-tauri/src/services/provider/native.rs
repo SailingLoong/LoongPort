@@ -71,65 +71,6 @@ pub(crate) fn service_configuration_revision(
     Ok(format!("{native}:{catalog}"))
 }
 
-#[cfg(test)]
-mod revision_tests {
-    use super::*;
-    #[test]
-    fn revisions_detect_native_file_and_selection_changes_without_reading_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("native.json");
-        let paths = vec![path.clone()];
-        let missing = native_file_revision(&paths, Some("a")).unwrap();
-        std::fs::write(&path, b"synthetic configuration").unwrap();
-        let first = native_file_revision(&paths, Some("a")).unwrap();
-        assert_ne!(missing, first);
-        assert_eq!(first, native_file_revision(&paths, Some("a")).unwrap());
-        assert_ne!(first, native_file_revision(&paths, Some("b")).unwrap());
-        std::fs::write(&path, b"changed synthetic configuration").unwrap();
-        assert_ne!(first, native_file_revision(&paths, Some("a")).unwrap());
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(missing, native_file_revision(&paths, Some("a")).unwrap());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-    }
-    #[test]
-    fn database_owned_image_receipt_changes_on_configuration_edits_without_writes() {
-        let state =
-            crate::store::AppState::new(std::sync::Arc::new(Database::memory().unwrap())).unwrap();
-        let mut provider = Provider::with_id(
-            "fixture".into(),
-            "Synthetic image configuration".into(),
-            json!({"apiKey":"synthetic-key","model":"synthetic-model"}),
-            None,
-        );
-        state.db.save_provider("codex-image", &provider).unwrap();
-        let before_changes = state.db.conn.lock().unwrap().total_changes();
-        let first = service_configuration_revision(&state, &AppType::CodexImage).unwrap();
-        assert_eq!(
-            first,
-            service_configuration_revision(&state, &AppType::CodexImage).unwrap()
-        );
-        assert_eq!(
-            before_changes,
-            state.db.conn.lock().unwrap().total_changes()
-        );
-        assert!(!first.contains("synthetic-key"));
-        provider.settings_config["model"] = json!("changed-model");
-        state.db.save_provider("codex-image", &provider).unwrap();
-        assert_ne!(
-            first,
-            service_configuration_revision(&state, &AppType::CodexImage).unwrap()
-        );
-    }
-
-    #[test]
-    fn inaccessible_revision_is_not_an_empty_configuration() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("parent");
-        std::fs::write(&path, b"not a directory").unwrap();
-        assert!(native_file_revision(&[path.join("native.json")], None).is_err());
-    }
-}
-
 fn comparable_settings(settings: &Value) -> Result<Value, AppError> {
     let mut value = settings.clone();
     if let Some(config) = settings.get("config").and_then(Value::as_str) {
@@ -261,5 +202,64 @@ impl super::ProviderService {
         crate::settings::set_current_provider(&AppType::Codex, Some(&selected.id))?;
         crate::proxy::auto_strategy::set_model_pref(db, "codex", None)?;
         Ok(selected)
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+    #[test]
+    fn revisions_detect_native_file_and_selection_changes_without_reading_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("native.json");
+        let paths = vec![path.clone()];
+        let missing = native_file_revision(&paths, Some("a")).unwrap();
+        std::fs::write(&path, b"synthetic configuration").unwrap();
+        let first = native_file_revision(&paths, Some("a")).unwrap();
+        assert_ne!(missing, first);
+        assert_eq!(first, native_file_revision(&paths, Some("a")).unwrap());
+        assert_ne!(first, native_file_revision(&paths, Some("b")).unwrap());
+        std::fs::write(&path, b"changed synthetic configuration").unwrap();
+        assert_ne!(first, native_file_revision(&paths, Some("a")).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(missing, native_file_revision(&paths, Some("a")).unwrap());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+    #[test]
+    fn database_owned_image_receipt_changes_on_configuration_edits_without_writes() {
+        let state =
+            crate::store::AppState::new(std::sync::Arc::new(Database::memory().unwrap())).unwrap();
+        let mut provider = Provider::with_id(
+            "fixture".into(),
+            "Synthetic image configuration".into(),
+            json!({"apiKey":"synthetic-key","model":"synthetic-model"}),
+            None,
+        );
+        state.db.save_provider("codex-image", &provider).unwrap();
+        let before_changes = state.db.conn.lock().unwrap().total_changes();
+        let first = service_configuration_revision(&state, &AppType::CodexImage).unwrap();
+        assert_eq!(
+            first,
+            service_configuration_revision(&state, &AppType::CodexImage).unwrap()
+        );
+        assert_eq!(
+            before_changes,
+            state.db.conn.lock().unwrap().total_changes()
+        );
+        assert!(!first.contains("synthetic-key"));
+        provider.settings_config["model"] = json!("changed-model");
+        state.db.save_provider("codex-image", &provider).unwrap();
+        assert_ne!(
+            first,
+            service_configuration_revision(&state, &AppType::CodexImage).unwrap()
+        );
+    }
+
+    #[test]
+    fn inaccessible_revision_is_not_an_empty_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parent");
+        std::fs::write(&path, b"not a directory").unwrap();
+        assert!(native_file_revision(&[path.join("native.json")], None).is_err());
     }
 }

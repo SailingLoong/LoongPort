@@ -108,8 +108,12 @@ export function useServiceConfiguration(
       const snapshot = await applicationOverviewApi.state(app);
       if (!snapshot.configurationRevision)
         throw new Error(t("loongport.onboarding.cannotVerify"));
-      const target = snapshot.configurations.find(
-        (item) => item.providerId === id,
+      const target = snapshot.configurations.find((item) =>
+        account.kind === "vendor"
+          ? item.selection.kind === "vendor" &&
+            item.selection.rowId === account.rowId &&
+            item.selection.planId === id
+          : item.providerId === id,
       );
       const applied = snapshot.isAdditive
         ? target?.presentation.isInConfig
