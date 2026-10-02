@@ -30,8 +30,8 @@ const REASONING_VENDOR_HINTS: &[&str] = &["deepseek", "mimo", "xiaomimimo"];
 // ChatGPT Codex 后端按 originator+version 组合做模型 cohort 路由：非官方身份会把
 // gpt-5.6-luna 解析到未部署的内部引擎（HTTP 404 Model not found，openai/codex#31967，
 // 本机 A/B 实测确认）。两个头必须成对发送，缺一即 404；version 需 ≥ 目标模型
-// catalog 的 minimal_client_version（gpt-6-sol/luna=0.155.0），新模型抬门槛时同步
-// bump——常量唯源在 codex_oauth_auth.rs，模型发现路径共用同一身份。
+// catalog 的 minimal_client_version（gpt-6.1-sol 目录门槛=0.159.0），新模型抬门槛
+// 时同步 bump——常量唯源在 codex_oauth_auth.rs，模型发现路径共用同一身份。
 use super::codex_oauth_auth::{CODEX_OAUTH_CLIENT_VERSION, CODEX_OAUTH_ORIGINATOR};
 
 /// 获取 Claude 供应商的 API 格式
