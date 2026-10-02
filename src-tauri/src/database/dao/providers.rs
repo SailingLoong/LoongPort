@@ -135,6 +135,28 @@ type OmoProviderRow = (
 );
 
 impl Database {
+    /// Read-only change receipt for the existing encrypted configuration owner.
+    /// Hash ciphertext without opening credentials or returning stored values.
+    pub(crate) fn configuration_catalog_revision(&self, app: &str) -> Result<String, AppError> {
+        use std::hash::{Hash, Hasher};
+        let conn = lock_conn!(self.conn);
+        let mut statement = conn.prepare(
+            "SELECT id, settings_config, meta FROM providers WHERE app_type=?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([app], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        for row in rows {
+            row?.hash(&mut hash);
+        }
+        Ok(format!("{:016x}", hash.finish()))
+    }
+
     fn decode_provider_json<T: serde::de::DeserializeOwned + Default>(
         vault: &VaultContext,
         column: &str,

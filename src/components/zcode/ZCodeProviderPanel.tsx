@@ -51,6 +51,8 @@ export function ZCodeProviderPanel({
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const [latest, setLatest] = useState<ZCodeConfig | null>(null);
   useEffect(() => {
     onNavigationBlockedChange?.(busy);
   }, [busy, onNavigationBlockedChange]);
@@ -61,6 +63,8 @@ export function ZCodeProviderPanel({
   const startEdit = (provider?: ZCodeProvider) => {
     if (!query.data || query.isError || inFlight.current) return;
     setError(null);
+    setConflict(false);
+    setLatest(null);
     setDraft({
       id: provider?.id ?? null,
       revision: query.data.revision,
@@ -83,14 +87,28 @@ export function ZCodeProviderPanel({
       setDraft(null);
       setRemoving(null);
     } catch (cause) {
-      setError(extractErrorMessage(cause));
+      if (
+        typeof cause === "object" &&
+        cause !== null &&
+        "code" in cause &&
+        cause.code === "zcode.configuration_changed"
+      ) {
+        setConflict(true);
+        setLatest(null);
+        setError(
+          t("zcode.conflict", {
+            defaultValue:
+              "ZCode configuration was changed elsewhere. Read the latest configuration before saving again.",
+          }),
+        );
+      } else setError(extractErrorMessage(cause) || t("common.error"));
     } finally {
       inFlight.current = false;
       setBusy(false);
     }
   };
   const save = () => {
-    if (!draft) return;
+    if (!draft || conflict) return;
     const { modelText, ...input } = draft;
     void write(() =>
       zcodeApi.save({
@@ -107,7 +125,49 @@ export function ZCodeProviderPanel({
     if (!inFlight.current) {
       setDraft(null);
       setError(null);
+      setConflict(false);
+      setLatest(null);
     }
+  };
+  const readLatest = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await client.cancelQueries({ queryKey });
+      const result = await zcodeApi.read();
+      client.setQueryData(queryKey, result);
+      setLatest(result);
+    } catch (cause) {
+      setError(extractErrorMessage(cause) || t("common.error"));
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+  const external = latest?.providers.find(
+    (provider) => provider.id === draft?.id,
+  );
+  const unavailable = Boolean(latest && draft?.id && !external?.managed);
+  const resolveConflict = (keep: boolean) => {
+    if (!draft || !latest || unavailable || inFlight.current) return;
+    setDraft(
+      keep || !external
+        ? { ...draft, revision: latest.revision }
+        : {
+            id: external.id,
+            revision: latest.revision,
+            name: external.name,
+            apiType: external.apiType as Draft["apiType"],
+            baseUrl: external.baseUrl,
+            apiKey: "",
+            modelText: external.models.join("\n"),
+          },
+    );
+    setConflict(false);
+    setLatest(null);
+    setError(null);
   };
   return (
     <section className="space-y-4">
@@ -303,6 +363,105 @@ export function ZCodeProviderPanel({
                   {error}
                 </p>
               )}
+              {conflict && (
+                <div className="space-y-3 rounded-md border p-3 text-sm">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void readLatest()}
+                  >
+                    {t("zcode.readLatest", {
+                      defaultValue: "Read latest configuration",
+                    })}
+                  </Button>
+                  {unavailable ? (
+                    <p role="alert">
+                      {t("zcode.targetUnavailable", {
+                        defaultValue:
+                          "This provider was removed or is now managed in ZCode. Your input has not been saved.",
+                      })}
+                    </p>
+                  ) : (
+                    latest && (
+                      <>
+                        <table className="w-full table-fixed text-left text-xs">
+                          <thead>
+                            <tr>
+                              <th>
+                                {t("zcode.field", { defaultValue: "Field" })}
+                              </th>
+                              <th>
+                                {t("zcode.myInput", {
+                                  defaultValue: "My input",
+                                })}
+                              </th>
+                              <th>
+                                {t("zcode.externalValue", {
+                                  defaultValue: "External value",
+                                })}
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(
+                              [
+                                ["name", draft.name, external?.name],
+                                ["baseUrl", draft.baseUrl, external?.baseUrl],
+                                ["protocol", draft.apiType, external?.apiType],
+                                [
+                                  "models",
+                                  draft.modelText,
+                                  external?.models.join("\n"),
+                                ],
+                              ] as const
+                            ).map(([field, mine, theirs]) => (
+                              <tr key={field} className="align-top">
+                                <th className="py-2">{t(`zcode.${field}`)}</th>
+                                <td className="break-all whitespace-pre-wrap py-2">
+                                  {mine || "—"}
+                                </td>
+                                <td className="break-all whitespace-pre-wrap py-2">
+                                  {theirs || "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <p className="text-muted-foreground">
+                          {t("zcode.keyNotCompared", {
+                            defaultValue:
+                              "Keys are not shown or compared. Keeping your input retains a key you entered; using external values clears it. Save again only after reviewing.",
+                          })}
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => resolveConflict(true)}
+                          >
+                            {t("zcode.keepInput", {
+                              defaultValue: "Keep my input",
+                            })}
+                          </Button>
+                          {external && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              disabled={busy}
+                              onClick={() => resolveConflict(false)}
+                            >
+                              {t("zcode.useExternal", {
+                                defaultValue: "Use external values",
+                              })}
+                            </Button>
+                          )}
+                        </div>
+                      </>
+                    )
+                  )}
+                </div>
+              )}
               <DialogFooter>
                 <Button
                   type="button"
@@ -312,7 +471,7 @@ export function ZCodeProviderPanel({
                 >
                   {t("zcode.cancel", { defaultValue: "Cancel" })}
                 </Button>
-                <Button type="submit" disabled={busy}>
+                <Button type="submit" disabled={busy || conflict}>
                   {t("zcode.save", { defaultValue: "Save" })}
                 </Button>
               </DialogFooter>

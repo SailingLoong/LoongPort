@@ -22,6 +22,8 @@ export interface ApplicationConfiguration {
 }
 
 export interface ApplicationOverview {
+  /** Optional read-only receipt from native configuration owners; never contains keys. */
+  configurationRevision?: string;
   configurations: ApplicationConfiguration[];
   recentProviderIds: string[];
   isAdditive: boolean;
@@ -30,4 +32,9 @@ export interface ApplicationOverview {
 export const applicationOverviewApi = {
   get: (app: AppId) =>
     invoke<ApplicationOverview>("get_application_overview", { app }),
+  state: (app: AppId) =>
+    invoke<ApplicationOverview>("get_application_overview", {
+      app,
+      includeRevision: true,
+    }),
 };

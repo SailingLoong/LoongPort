@@ -30,6 +30,9 @@ export function ServiceConfiguration({
     shareData,
     setShareData,
     busy,
+    results,
+    completionError,
+    reapply,
     confirmation,
     selectFor,
     resolveConfirmation,
@@ -87,14 +90,44 @@ export function ServiceConfiguration({
             choices.data?.filter((choice) => choice.app === app) ?? [];
           if (!available.length) return null;
           return (
-            <label
+            <div
               key={app}
               className="flex items-center justify-between gap-4 py-4 text-sm"
             >
-              <span>{getAppDisplayName(app, t)}</span>
+              <span className="space-y-1">
+                <span className="block">{getAppDisplayName(app, t)}</span>
+                {results[app] && (
+                  <span
+                    role="status"
+                    className="block text-xs text-muted-foreground"
+                  >
+                    {t(`loongport.onboarding.results.${results[app]!.state}`)}
+                  </span>
+                )}
+                {results[app]?.error && (
+                  <span role="alert" className="block text-xs text-destructive">
+                    {results[app]!.error}
+                  </span>
+                )}
+                {(results[app]?.state === "changed" ||
+                  results[app]?.state === "unverified") && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      reapply(app);
+                    }}
+                  >
+                    {t("loongport.onboarding.reapply")}
+                  </Button>
+                )}
+              </span>
               <select
                 aria-label={getAppDisplayName(app, t)}
-                disabled={busy}
+                disabled={busy || Object.keys(results).length > 0}
                 value={selectFor(app)}
                 onChange={(event) =>
                   setSelection({ ...selection, [app]: event.target.value })
@@ -108,13 +141,23 @@ export function ServiceConfiguration({
                   </option>
                 ))}
               </select>
-            </label>
+            </div>
           );
         })}
       </div>
       {choices.data?.length === 0 && (
         <p className="my-5 text-sm text-muted-foreground">
           {t("loongport.onboarding.noConfigurations")}
+        </p>
+      )}
+      {Object.keys(results).length > 0 && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          {t("loongport.onboarding.resultsHint")}
+        </p>
+      )}
+      {completionError && (
+        <p role="alert" className="mb-4 text-sm text-destructive">
+          {completionError}
         </p>
       )}
       {status.data && !status.data.completed && (
@@ -147,7 +190,11 @@ export function ServiceConfiguration({
           disabled={busy || !choices.data || !status.data}
         >
           {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-          {t("loongport.onboarding.finish")}
+          {t(
+            Object.keys(results).length > 0
+              ? "loongport.onboarding.continueSetup"
+              : "loongport.onboarding.finish",
+          )}
         </Button>
       </div>
       <SwitchTierConfirmDialog

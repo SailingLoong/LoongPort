@@ -6,6 +6,7 @@ mod endpoints;
 mod gemini_auth;
 mod live;
 mod native;
+pub(crate) use native::service_configuration_revision;
 mod pi;
 mod transaction;
 mod usage;
@@ -231,7 +232,7 @@ pub fn provider_presentation_context(
     let current_provider_id = if app_type.is_additive_mode() {
         None
     } else {
-        crate::settings::get_effective_current_provider(&state.db, app_type)
+        crate::settings::get_effective_current_provider_readonly(&state.db, app_type)
             .ok()
             .flatten()
     };
@@ -5138,7 +5139,7 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
-        crate::settings::get_effective_current_provider(&state.db, &app_type)
+        crate::settings::get_effective_current_provider_readonly(&state.db, &app_type)
             .map(|opt| opt.unwrap_or_default())
     }
 
