@@ -82,7 +82,8 @@ pub(crate) fn declared_capabilities(row: &Value) -> Option<ReasoningCapabilities
 }
 
 pub(crate) fn native_capabilities(entry: &Value) -> Option<ReasoningCapabilities> {
-    let levels = entry.get("supported_reasoning_levels")?.as_array()?;
+    let raw_levels = entry.get("supported_reasoning_levels")?.as_array()?;
+    let levels = raw_levels;
     let levels = canonical_levels(
         &levels
             .iter()
@@ -90,7 +91,7 @@ pub(crate) fn native_capabilities(entry: &Value) -> Option<ReasoningCapabilities
             .map(str::to_string)
             .collect::<Vec<_>>(),
     );
-    if levels.is_empty() {
+    if levels.is_empty() && !raw_levels.is_empty() {
         return None;
     }
     let default_level = entry
@@ -130,9 +131,9 @@ pub(crate) fn curated_capabilities(model: &str) -> Option<ReasoningCapabilities>
         .and_then(declared_capabilities)
 }
 
-/// Complete reasoning records from one fixed official revision. Installation
-/// versions and cache fetch times cannot establish a newer model definition.
-pub(crate) fn pinned_official_model_facts() -> Vec<Value> {
+/// Seed facts from a real versioned official release. The loader compares this
+/// version with installed CLI/cache sources without inventing model-family rules.
+pub(crate) fn seed_official_model_facts() -> Vec<Value> {
     let catalog: Value = serde_json::from_str(include_str!(
         "resources/codex_curated_reasoning_levels.json"
     ))
@@ -184,7 +185,15 @@ pub(crate) fn resolve(
     };
     let mut capabilities = declared
         .and_then(normalize)
-        .or_else(|| official.and_then(normalize))
+        .or_else(|| {
+            official.map(|mut capabilities| {
+                capabilities.levels = canonical_levels(&capabilities.levels);
+                capabilities.default_level = capabilities
+                    .default_level
+                    .filter(|value| capabilities.levels.contains(value));
+                capabilities
+            })
+        })
         .or_else(|| curated_capabilities(model));
     let Some(transport) = transport else {
         return capabilities;
