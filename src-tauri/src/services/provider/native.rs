@@ -32,7 +32,20 @@ fn native_file_revision(
                     metadata.ctime_nsec().hash(&mut hash);
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false.hash(&mut hash),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Windows also reports a missing path when an ancestor is a
+                // regular file. Such a path is invalid, not an empty config.
+                for ancestor in path.ancestors().skip(1) {
+                    match std::fs::metadata(ancestor) {
+                        Ok(metadata) if metadata.is_dir() => break,
+                        Ok(_) => return Err(AppError::io(path, error)),
+                        Err(parent_error)
+                            if parent_error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(parent_error) => return Err(AppError::io(ancestor, parent_error)),
+                    }
+                }
+                false.hash(&mut hash);
+            }
             Err(error) => return Err(AppError::io(path, error)),
         }
     }
@@ -253,6 +266,18 @@ mod revision_tests {
             first,
             service_configuration_revision(&state, &AppType::CodexImage).unwrap()
         );
+    }
+
+    #[test]
+    fn missing_native_directories_are_valid_empty_state_and_are_not_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [dir
+            .path()
+            .join("missing")
+            .join("nested")
+            .join("native.json")];
+        assert!(native_file_revision(&paths, None).is_ok());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
