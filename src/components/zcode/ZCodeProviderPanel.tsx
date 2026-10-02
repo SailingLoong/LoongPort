@@ -287,7 +287,7 @@ export function ZCodeProviderPanel({
           </DialogHeader>
           {draft && (
             <form
-              className="space-y-4"
+              className="min-h-0 space-y-4 overflow-y-auto"
               onSubmit={(event) => {
                 event.preventDefault();
                 save();
