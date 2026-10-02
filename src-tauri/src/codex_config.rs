@@ -1377,6 +1377,30 @@ fn apply_codex_reasoning_levels(
     true
 }
 
+const CODEX_REASONING_PROJECTION_FIELD: &str = "loongport_reasoning_projection";
+
+/// Remember the generated values so a native edit can still become an explicit
+/// override. This is provenance for a projection, not another capability table.
+fn record_inferred_codex_reasoning(entry: &mut serde_json::Map<String, Value>) {
+    entry.insert(
+        CODEX_REASONING_PROJECTION_FIELD.into(),
+        json!({
+            "supported_reasoning_levels": entry.get("supported_reasoning_levels"),
+            "default_reasoning_level": entry.get("default_reasoning_level"),
+        }),
+    );
+}
+
+fn has_unchanged_codex_reasoning_projection(entry: &Value) -> bool {
+    entry
+        .get(CODEX_REASONING_PROJECTION_FIELD)
+        .is_some_and(|source| {
+            ["supported_reasoning_levels", "default_reasoning_level"]
+                .iter()
+                .all(|key| source.get(*key).is_some() && source.get(*key) == entry.get(*key))
+        })
+}
+
 /// The official catalog entry whose slug matches, if any. Case-insensitive —
 /// mirrors how `official_context_for_slug` resolved slugs historically. Shared
 /// by the window-facts lookup and the reasoning-level mirror so both read the
@@ -1562,6 +1586,10 @@ fn codex_catalog_model_entry(
         // A template supplies the native schema, not capabilities for another model.
         entry_obj.insert("supported_reasoning_levels".into(), json!([]));
         entry_obj.insert("default_reasoning_level".into(), Value::Null);
+    }
+
+    if profile == CodexCatalogToolProfile::NativeResponses && spec.reasoning_levels.is_none() {
+        record_inferred_codex_reasoning(entry_obj);
     }
 
     entry
@@ -1802,6 +1830,11 @@ fn push_home_codex_cli_candidates(
         ".codex/plugins/.plugin-appserver/codex"
     };
     for relative in [
+        if cfg!(windows) {
+            ".codex/plugins/.plugin-appserver/codex-cli/bin/codex.exe"
+        } else {
+            ".codex/plugins/.plugin-appserver/codex-cli/bin/codex"
+        },
         codex_plugin_appserver,
         ".nvm/current/bin/codex",
         ".volta/bin/codex",
@@ -2138,6 +2171,10 @@ fn codex_vendor_catalog_model_entry(
         entry_obj.insert("default_reasoning_level".into(), Value::Null);
     }
 
+    if spec.reasoning_levels.is_none() {
+        record_inferred_codex_reasoning(entry_obj);
+    }
+
     // Defensive: if a future codex parser requires a field the vendor file
     // predates, backfill only whitelisted parser-required keys.
     fill_template_fields_from_static(&mut entry);
@@ -2328,6 +2365,16 @@ fn merge_official_models(primary: Vec<Value>, fallback: Vec<Value>) -> Vec<Value
     merged
 }
 
+/// Startup and projection publish the same read-only official capability snapshot.
+fn load_codex_official_model_sources() -> (Vec<Value>, Vec<Value>) {
+    let bundled = load_codex_official_models_bundled();
+    let models = merge_official_models(bundled.clone(), load_codex_official_models_from_cache());
+    if let Ok(mut snapshot) = CODEX_OFFICIAL_MODELS_SNAPSHOT.write() {
+        *snapshot = models.clone();
+    }
+    (bundled, models)
+}
+
 /// What a provider's catalog projection amounts to.
 #[derive(Debug)]
 enum CodexCatalogProjection {
@@ -2365,12 +2412,7 @@ fn codex_catalog_projection_from_settings(
     profile: CodexCatalogToolProfile,
     provider: Option<&crate::provider::Provider>,
 ) -> Result<CodexCatalogProjection, AppError> {
-    let bundled = load_codex_official_models_bundled();
-    let official_models =
-        merge_official_models(bundled.clone(), load_codex_official_models_from_cache());
-    if let Ok(mut snapshot) = CODEX_OFFICIAL_MODELS_SNAPSHOT.write() {
-        *snapshot = official_models.clone();
-    }
+    let (bundled, official_models) = load_codex_official_model_sources();
     let base_url = provider
         .and_then(|provider| {
             provider
@@ -2596,18 +2638,81 @@ pub fn refresh_codex_catalog_projection(
     if settings.get("modelCatalog").is_none() {
         // Startup still publishes official capabilities for native configurations
         // that rely on Codex's own catalog and therefore have no inline rows.
-        let models = merge_official_models(
-            load_codex_official_models_bundled(),
-            load_codex_official_models_from_cache(),
-        );
-        if let Ok(mut snapshot) = CODEX_OFFICIAL_MODELS_SNAPSHOT.write() {
-            *snapshot = models;
-        }
+        load_codex_official_model_sources();
         return Ok(false);
     }
     let projection =
         codex_catalog_projection_from_settings(settings, config_text, profile, provider)?;
     apply_codex_catalog_refresh(projection, config_text, live_taken_over)
+}
+
+/// An unclaimed native configuration is authoritative. Refresh only unchanged
+/// inferred reasoning in its owned catalog, without consulting a stale DB row
+/// or changing config.toml. Legacy entries have no provenance and stay intact.
+pub(crate) fn refresh_native_codex_reasoning_projection() -> Result<bool, AppError> {
+    let (_, official) = load_codex_official_model_sources();
+    let config_text = read_codex_config_text()?;
+    let Some(path) = resolve_cc_switch_catalog_path(&config_text, &get_codex_config_dir()) else {
+        return Ok(false);
+    };
+    // The resolver is shared with read-only import and can resolve an owned
+    // filename symlink to a user catalog. Writing needs ownership of the target.
+    if !path.exists()
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_our_model_catalog_filename)
+    {
+        return Ok(false);
+    }
+    let text = read_codex_model_catalog_text(&path)?;
+    let mut catalog: Value =
+        serde_json::from_str(&text).map_err(|error| AppError::json(&path, error))?;
+    let original = catalog.clone();
+    let Some(entries) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+        return Ok(false);
+    };
+    let official = codex_official_vendor_catalog_models(
+        &config_text,
+        CodexCatalogToolProfile::NativeResponses,
+    )
+    .unwrap_or(official);
+    for entry in entries {
+        if !has_unchanged_codex_reasoning_projection(entry) {
+            continue;
+        }
+        let Some(model) = entry.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let base = official_model_entry_for_slug(model, &official);
+        let capabilities = crate::codex_reasoning::resolve(
+            model,
+            None,
+            base.and_then(crate::codex_reasoning::native_capabilities),
+            None,
+        );
+        // Unavailable metadata does not revoke previously authoritative facts.
+        let Some(capabilities) = capabilities else {
+            continue;
+        };
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        apply_codex_reasoning_levels(
+            object,
+            capabilities.default_level.as_deref(),
+            &capabilities.levels,
+        );
+        if let Some(levels) = base.and_then(|row| row.get("supported_reasoning_levels")) {
+            object.insert("supported_reasoning_levels".into(), levels.clone());
+        }
+        record_inferred_codex_reasoning(object);
+    }
+    if catalog == original {
+        return Ok(false);
+    }
+    write_json_file_private(&path, &catalog)?;
+    Ok(true)
 }
 
 /// Apply-side of [`refresh_codex_catalog_projection`], split out so tests can
@@ -3007,6 +3112,7 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
         if let Some(levels) = entry
             .get("supported_reasoning_levels")
             .and_then(Value::as_array)
+            .filter(|_| !has_unchanged_codex_reasoning_projection(entry))
         {
             let declared: Vec<String> = levels
                 .iter()
@@ -7812,6 +7918,230 @@ web_search = "disabled" # cc-switch:managed
     }
 
     #[test]
+    fn inferred_reasoning_does_not_become_an_explicit_override_on_reopen() {
+        let template = load_codex_native_responses_template();
+        let settings = json!({"modelCatalog":{"models":[
+            {"model":"gpt-6.1-sol"},
+            {"model":"gpt-6-sol","reasoningLevels":["low","high"],"defaultReasoningLevel":"high"},
+            {"model":"custom-alias","reasoningLevels":["low","high"]},
+            {"model":"gpt-6"},
+            {"model":"gpt-6.1-sol-next"},
+            {"model":"openai/gpt-6.1-sol"},
+            {"model":"non-reasoning-fixture"}
+        ]}});
+        let old_official = vec![json!({"slug":"gpt-6.1-sol",
+            "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],
+            "default_reasoning_level":"low"})];
+        let saved = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &old_official,
+        );
+        let reopened = build_simplified_catalog_from_texts("", &saved.to_string()).unwrap();
+        assert!(
+            reopened["models"][0].get("reasoningLevels").is_none(),
+            "official projection must not become a user declaration"
+        );
+        assert_eq!(
+            reopened["models"][1]["reasoningLevels"],
+            json!(["low", "high"])
+        );
+        assert_eq!(reopened["models"][1]["defaultReasoningLevel"], "high");
+        assert_eq!(
+            reopened["models"][2]["reasoningLevels"],
+            json!(["low", "high"])
+        );
+
+        let official = vec![
+            json!({"slug":"gpt-6.1-sol",
+            "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},
+                {"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],
+            "default_reasoning_level":"low"}),
+            json!({"slug":"non-reasoning-fixture", "supported_reasoning_levels":[],
+                "default_reasoning_level":null}),
+        ];
+        let updated = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&json!({"modelCatalog":reopened})),
+            &template,
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &official,
+        );
+        assert_eq!(
+            updated["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(
+            updated["models"][1]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        for row in &updated["models"].as_array().unwrap()[3..] {
+            assert_eq!(row["supported_reasoning_levels"], json!([]));
+            assert_eq!(row["default_reasoning_level"], Value::Null);
+        }
+    }
+
+    #[test]
+    fn edited_projected_reasoning_becomes_an_explicit_override() {
+        let settings = json!({"modelCatalog":{"models":[{"model":"gpt-6.1-sol"}]}});
+        let official = vec![json!({"slug":"gpt-6.1-sol",
+            "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],
+            "default_reasoning_level":"low"})];
+        let mut saved = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &load_codex_native_responses_template(),
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &official,
+        );
+        saved["models"][0]["supported_reasoning_levels"] = json!([{"effort":"high"}]);
+        saved["models"][0]["default_reasoning_level"] = json!("high");
+        let reopened = build_simplified_catalog_from_texts("", &saved.to_string()).unwrap();
+        assert_eq!(reopened["models"][0]["reasoningLevels"], json!(["high"]));
+        assert_eq!(reopened["models"][0]["defaultReasoningLevel"], "high");
+    }
+
+    #[test]
+    #[serial]
+    fn native_startup_refreshes_inferred_reasoning_without_rewriting_config() {
+        let _home = CodexLiveTestHome::new();
+        let settings = json!({"modelCatalog":{"models":[
+            {"model":"gpt-6.1-sol"},
+            {"model":"gpt-6-astra", "reasoningLevels":["low","high"], "defaultReasoningLevel":"high"},
+            {"model":"gpt-6-sol"},
+            {"model":"gpt-6-luna"}
+        ]}});
+        let old_official = vec![json!({"slug":"gpt-6.1-sol",
+            "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],
+            "default_reasoning_level":"low"})];
+        let mut saved = codex_model_catalog_from_specs(
+            &codex_catalog_model_specs(&settings),
+            &load_codex_native_responses_template(),
+            CodexCatalogToolProfile::NativeResponses,
+            None,
+            &old_official,
+        );
+        // Both explicit declarations and later native edits remain authoritative.
+        saved["models"][2]["supported_reasoning_levels"] = json!([{"effort":"high"}]);
+        saved["models"][2]["default_reasoning_level"] = json!("high");
+        saved["models"][3]
+            .as_object_mut()
+            .unwrap()
+            .remove(CODEX_REASONING_PROJECTION_FIELD);
+        let config = "# user choice\nmodel='gpt-6.1-sol'\nmodel_reasoning_effort='high'\nmodel_catalog_json='loongport-model-catalog.json'\n";
+        write_text_file(&get_codex_config_path(), config).unwrap();
+        write_json_file(&get_codex_model_catalog_path(), &saved).unwrap();
+        write_json_file(
+            &get_codex_config_dir().join("models_cache.json"),
+            &json!({"models":[{
+                "slug":"gpt-6.1-sol", "default_reasoning_level":"low",
+                "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},
+                    {"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]
+            }]}),
+        )
+        .unwrap();
+        // Exercise the public startup entry, including its unclaimed-native branch.
+        let state = crate::store::AppState::new(std::sync::Arc::new(
+            crate::database::Database::memory().unwrap(),
+        ))
+        .unwrap();
+        assert!(
+            crate::services::provider::refresh_current_codex_catalog_projection(&state).unwrap()
+        );
+        assert_eq!(read_codex_config_text().unwrap(), config);
+        let updated: Value = read_json_file(&get_codex_model_catalog_path()).unwrap();
+        assert_eq!(
+            updated["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        for index in 1..4 {
+            assert_eq!(updated["models"][index], saved["models"][index]);
+        }
+        assert!(
+            !crate::services::provider::refresh_current_codex_catalog_projection(&state).unwrap()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn native_startup_preserves_legacy_and_external_catalogs() {
+        let _home = CodexLiveTestHome::new();
+        write_json_file(
+            &get_codex_config_dir().join("models_cache.json"),
+            &json!({"models":[{
+                "slug":"gpt-6.1-sol", "default_reasoning_level":"low",
+                "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},
+                    {"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]
+            }]}),
+        )
+        .unwrap();
+        let state = crate::store::AppState::new(std::sync::Arc::new(
+            crate::database::Database::memory().unwrap(),
+        ))
+        .unwrap();
+        let legacy = json!({"models":[{"slug":"gpt-6.1-sol",
+            "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],
+            "default_reasoning_level":"high"}]});
+        for filename in ["loongport-model-catalog.json", "my-models.json"] {
+            let config = format!("model='gpt-6.1-sol'\nmodel_catalog_json='{filename}'\n");
+            let path = get_codex_config_dir().join(filename);
+            write_text_file(&get_codex_config_path(), &config).unwrap();
+            let mut catalog = legacy.clone();
+            if filename == "my-models.json" {
+                record_inferred_codex_reasoning(catalog["models"][0].as_object_mut().unwrap());
+            }
+            write_json_file(&path, &catalog).unwrap();
+            assert!(
+                !crate::services::provider::refresh_current_codex_catalog_projection(&state)
+                    .unwrap()
+            );
+            assert_eq!(read_codex_config_text().unwrap(), config);
+            assert_eq!(read_json_file::<Value>(&path).unwrap(), catalog);
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn native_startup_does_not_write_through_owned_catalog_symlink() {
+        let _home = CodexLiveTestHome::new();
+        let mut catalog = json!({"models":[{"slug":"gpt-6.1-sol",
+            "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],
+            "default_reasoning_level":"low"}]});
+        record_inferred_codex_reasoning(catalog["models"][0].as_object_mut().unwrap());
+        let custom_path = get_codex_config_dir().join("my-models.json");
+        write_json_file(&custom_path, &catalog).unwrap();
+        std::os::unix::fs::symlink(&custom_path, get_codex_model_catalog_path()).unwrap();
+        write_text_file(
+            &get_codex_config_path(),
+            "model='gpt-6.1-sol'\nmodel_catalog_json='loongport-model-catalog.json'\n",
+        )
+        .unwrap();
+        write_json_file(
+            &get_codex_config_dir().join("models_cache.json"),
+            &json!({"models":[{"slug":"gpt-6.1-sol", "default_reasoning_level":"low",
+                "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},
+                    {"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]
+            }]}),
+        )
+        .unwrap();
+        let original = fs::read(&custom_path).unwrap();
+        assert!(!refresh_native_codex_reasoning_projection().unwrap());
+        assert_eq!(fs::read(&custom_path).unwrap(), original);
+    }
+
+    #[test]
     fn imported_reasoning_levels_survive_catalog_round_trip() {
         let catalog = r#"{"models":[{"slug":"example-model","supported_reasoning_levels":[{"effort":"low","description":"Low"},{"effort":"high","description":"High"}],"default_reasoning_level":"low"}]}"#;
         let result = build_simplified_catalog_from_texts("", catalog).unwrap();
@@ -8092,6 +8422,24 @@ web_search = "disabled" # cc-switch:managed
             candidates.contains(&expected),
             "app-server plugin Codex CLI candidate should be discovered: {}",
             expected.display()
+        );
+    }
+
+    #[test]
+    fn codex_cli_candidates_include_packaged_plugin_appserver_install() {
+        let home = tempfile::tempdir().unwrap();
+        let binary_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+        let expected = home
+            .path()
+            .join(".codex/plugins/.plugin-appserver/codex-cli/bin")
+            .join(binary_name);
+        fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        fs::write(&expected, "").unwrap();
+        let mut candidates = Vec::new();
+        push_home_codex_cli_candidates(&mut candidates, &mut HashSet::new(), home.path());
+        assert!(
+            candidates.contains(&expected),
+            "packaged app-server binary must be discovered"
         );
     }
 
