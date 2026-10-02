@@ -14,7 +14,9 @@
 
 ### 🌐 Official website: **[loongport.dev](https://loongport.dev)**
 
-### 📖 [Illustrated product guide (Chinese)](docs/guide/README.md)
+### 📖 [Illustrated product guide](docs/guide/README.en.md)
+
+[English](docs/guide/README.en.md) · [简体中文](docs/guide/README.md) · [繁體中文](docs/guide/README.zh-TW.md) · [日本語](docs/guide/README.ja.md)
 
 ### 💬 QQ group: **773696474**
 
@@ -182,7 +184,7 @@ Full install and usage guide (in Chinese): **[docs/loongport-cli.md](docs/loongp
 > Claude tier switches do not involve it.
 
 The system tray offers quick tier switching for supported applications. See the
-[product guide](docs/guide/README.md) for model selection and configuration recovery.
+[product guide](docs/guide/README.en.md) for model selection and configuration recovery.
 
 Credentials and site data live in a local SQLite database under `~/.loongport/` and are
 sent only to the relay site you chose, as the Bearer token on its API calls. LoongPort
@@ -204,7 +206,7 @@ with the reason shown in the interface.
   configurations, under **Settings → Connection settings → Local routing**
 
 **Version note: v6.26.2 does not provide the retired Easy Mode lowest-cost or
-fastest-response selection strategies.** See the [illustrated guide](docs/guide/README.md#3-让故障时自动换到备用档位)
+fastest-response selection strategies.** See the [illustrated guide](docs/guide/README.en.md#3-switch-to-a-backup-tier-automatically-after-a-failure)
 for current controls and step-by-step recovery.
 
 ## Official-direct (Official APIs)

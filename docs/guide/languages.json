@@ -1,0 +1,26 @@
+{
+  "zh": {
+    "file": "README.md",
+    "label": "简体中文",
+    "languageTag": "zh-CN",
+    "websitePath": "/zh/how-to"
+  },
+  "zh-TW": {
+    "file": "README.zh-TW.md",
+    "label": "繁體中文",
+    "languageTag": "zh-TW",
+    "websitePath": "/zh/how-to?guide=zh-TW"
+  },
+  "en": {
+    "file": "README.en.md",
+    "label": "English",
+    "languageTag": "en",
+    "websitePath": "/en/how-to"
+  },
+  "ja": {
+    "file": "README.ja.md",
+    "label": "日本語",
+    "languageTag": "ja",
+    "websitePath": "/ja/how-to"
+  }
+}

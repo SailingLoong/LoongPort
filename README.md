@@ -16,6 +16,8 @@
 
 ### 📖 图文教程：**[从安装到第一次对话、自动故障切换、扩展资源与备份](docs/guide/README.md)**
 
+[简体中文](docs/guide/README.md) · [繁體中文](docs/guide/README.zh-TW.md) · [English](docs/guide/README.en.md) · [日本語](docs/guide/README.ja.md)
+
 ### 💬 QQ 群：**773696474**
 
 <img src="assets/qq-group.jpeg" alt="LoongPort QQ 群二维码" width="240">
