@@ -130,6 +130,42 @@ pub(crate) fn curated_capabilities(model: &str) -> Option<ReasoningCapabilities>
         .and_then(declared_capabilities)
 }
 
+/// Complete reasoning records from one fixed official revision. Installation
+/// versions and cache fetch times cannot establish a newer model definition.
+pub(crate) fn pinned_official_model_facts() -> Vec<Value> {
+    let catalog: Value = serde_json::from_str(include_str!(
+        "resources/codex_curated_reasoning_levels.json"
+    ))
+    .expect("bundled reasoning capabilities must be valid JSON");
+    let Some(rows) = catalog.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let source = catalog.get("sources")?.get(row.get("source")?.as_str()?)?;
+            if source.get("authority").and_then(Value::as_str) != Some("openai-codex") {
+                return None;
+            }
+            let model = row.get("model")?.as_str()?;
+            let capabilities = declared_capabilities(row)?;
+            let levels: Vec<_> = capabilities
+                .levels
+                .iter()
+                .map(|effort| {
+                    serde_json::json!({
+                        "effort": effort, "description": format!("{effort} reasoning")
+                    })
+                })
+                .collect();
+            Some(serde_json::json!({
+                "slug": model, "supported_reasoning_levels": levels,
+                "default_reasoning_level": capabilities.default_level,
+                "loongport_reasoning_source": source
+            }))
+        })
+        .collect()
+}
+
 /// Explicit model facts win over official/curated facts. Transport restrictions still win:
 /// a model capability does not authorize parameters its gateway explicitly does not support.
 pub(crate) fn resolve(
