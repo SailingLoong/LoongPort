@@ -3356,13 +3356,31 @@ fn terminate_child_tree(child: &mut std::process::Child) -> bool {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let status = Command::new("taskkill")
+    let mut killer = Command::new("taskkill")
         .args(["/PID", &child.id().to_string(), "/T", "/F"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    matches!(status, Ok(status) if status.success()) || child.kill().is_ok()
+        .spawn();
+    // Cleanup has its own short bound; taskkill must not turn a probe timeout
+    // into an unbounded wait. Later probes consume the remaining total budget.
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    if let Ok(killer) = &mut killer {
+        loop {
+            match killer.try_wait() {
+                Ok(Some(status)) if status.success() => return true,
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) if std::time::Instant::now() < cleanup_deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let _ = killer.kill();
+                    break;
+                }
+            }
+        }
+    }
+    child.kill().is_ok()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -3491,6 +3509,35 @@ fn wait_child_output(
         stdout,
         stderr,
     })
+}
+
+/// Run one already-discovered installation with the shared bounded process and
+/// pipe cleanup. Fixed metadata arguments do not invoke the normal tool locator.
+pub(crate) fn run_tool_at_path_with_timeout(
+    path: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use std::process::Stdio;
+    let deadline = CommandDeadline::from_timeout(Some(timeout));
+    #[cfg(target_os = "windows")]
+    let mut cmd =
+        build_windows_tool_command(path, args, &std::env::var("PATH").unwrap_or_default());
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new(path);
+        cmd.args(args);
+        cmd
+    };
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(not(target_os = "windows"))]
+    isolate_child_process_group(&mut cmd);
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to run {}: {e}", path.display()))?;
+    wait_child_output(child, deadline)
 }
 
 fn apply_extra_env(cmd: &mut std::process::Command, extra_env: &[(&str, String)]) {
