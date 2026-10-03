@@ -3688,7 +3688,21 @@
       "shareDetails": "瞭解分享內容",
       "shareUsage": "使用統計包含已設定服務的網域、帳號數量、應用版本與作業系統，並使用固定的隨機安裝識別碼去重。",
       "shareMeasurements": "實測資料按服務、應用、模型和小時彙總請求量、錯誤、延遲、速度、Token 與估算費用，使用每日輪換的隨機識別碼。",
-      "shareControl": "不上傳帳號身分、金鑰或對話內容。隨機識別碼可關聯同一時期的上報，接收端能看到來源 IP。完成設定後才儲存選擇；不勾選也能正常使用，之後可在設定中分別調整。"
+      "shareControl": "不上傳帳號身分、金鑰或對話內容。隨機識別碼可關聯同一時期的上報，接收端能看到來源 IP。完成設定後才儲存選擇；不勾選也能正常使用，之後可在設定中分別調整。",
+      "results": {
+        "pending": "待設定",
+        "applying": "正在設定",
+        "success": "已設定",
+        "failed": "設定失敗",
+        "cancelled": "已取消",
+        "changed": "設定已變更，請檢查",
+        "verificationFailed": "無法驗證，請重試讀取",
+        "unverified": "設定結果未驗證，請檢查"
+      },
+      "reapply": "重新套用此設定",
+      "continueSetup": "繼續設定",
+      "resultsHint": "重試前會核對已完成客戶端。已變更或無法驗證的設定，需要你明確選擇重新套用。",
+      "cannotVerify": "無法驗證目前設定。"
     }
   },
   "firstRunNotice": {
@@ -4107,6 +4121,15 @@
     "models": "模型（每行一個）",
     "cancel": "取消",
     "save": "儲存",
-    "removeConfirm": "從 ZCode 中移除 {{name}}？"
+    "removeConfirm": "從 ZCode 中移除 {{name}}？",
+    "conflict": "ZCode 設定已在其他地方變更。請讀取最新設定，再確認儲存。",
+    "readLatest": "讀取最新設定",
+    "targetUnavailable": "此供應商已被刪除或已由 ZCode 管理。你的輸入尚未儲存。",
+    "field": "欄位",
+    "myInput": "我的輸入",
+    "externalValue": "外部值",
+    "keyNotCompared": "不顯示或比較金鑰。保留輸入會保留你輸入的金鑰；使用外部值會清空該輸入。請檢查後再儲存。",
+    "keepInput": "保留我的輸入",
+    "useExternal": "使用外部值"
   }
 }

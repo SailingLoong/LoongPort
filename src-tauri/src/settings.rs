@@ -1663,6 +1663,23 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
     })
 }
 
+/// Resolve presentation state without cleaning stale local selections. Reads of
+/// the application overview must never mutate a user's configuration.
+pub fn get_effective_current_provider_readonly(
+    db: &crate::database::Database,
+    app_type: &AppType,
+) -> Result<Option<String>, AppError> {
+    if let Some(local_id) = get_current_provider(app_type) {
+        if db
+            .get_all_providers(app_type.as_str())?
+            .contains_key(&local_id)
+        {
+            return Ok(Some(local_id));
+        }
+    }
+    db.get_current_provider(app_type.as_str())
+}
+
 /// 获取有效的当前供应商 ID（验证存在性）
 ///
 /// 逻辑：

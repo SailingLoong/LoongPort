@@ -59,6 +59,139 @@ beforeEach(() => {
   });
 });
 describe("ZCode native provider panel", () => {
+  it("reloads a conflict in the editor, preserves input and requires explicit resolution and save", async () => {
+    const client = mount();
+    await screen.findByText("Managed example");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "My draft" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "fake-private-draft" },
+    });
+    vi.mocked(zcodeApi.save).mockRejectedValueOnce({
+      code: "zcode.configuration_changed",
+      message: "conflict",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const reload = await screen.findByRole("button", {
+      name: "Read latest configuration",
+    });
+    vi.mocked(zcodeApi.read).mockResolvedValueOnce({
+      ...fixture,
+      revision: "external-revision",
+      providers: [{ ...fixture.providers[0], name: "External name" }],
+    });
+    fireEvent.click(reload);
+    await screen.findAllByText("External name");
+    expect(screen.getByLabelText("Name")).toHaveValue("My draft");
+    expect(screen.queryByText("fake-private-draft")).not.toBeInTheDocument();
+    expect(JSON.stringify(client.getQueryData(["zcodeConfig"]))).not.toContain(
+      "fake-private-draft",
+    );
+    expect(zcodeApi.save).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Keep my input" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(zcodeApi.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          revision: "external-revision",
+          name: "My draft",
+          apiKey: "fake-private-draft",
+        }),
+      ),
+    );
+  });
+
+  it("lets the user adopt external values without exposing or retaining a replacement key", async () => {
+    mount();
+    await screen.findByText("Managed example");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "fake-private-draft" },
+    });
+    vi.mocked(zcodeApi.save).mockRejectedValueOnce({
+      code: "zcode.configuration_changed",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    vi.mocked(zcodeApi.read).mockResolvedValueOnce({
+      ...fixture,
+      revision: "external",
+      providers: [{ ...fixture.providers[0], name: "External name" }],
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Read latest configuration" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Use external values" }),
+    );
+    expect(screen.getByLabelText("Name")).toHaveValue("External name");
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(zcodeApi.save).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { providers: [] },
+    { providers: [{ ...fixture.providers[0], managed: false }] },
+  ])(
+    "does not revive or take over a removed or no longer managed provider",
+    async ({ providers }) => {
+      mount();
+      await screen.findByText("Managed example");
+      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      vi.mocked(zcodeApi.save).mockRejectedValueOnce({
+        code: "zcode.configuration_changed",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      vi.mocked(zcodeApi.read).mockResolvedValueOnce({
+        revision: "external",
+        providers,
+      });
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "Read latest configuration",
+        }),
+      );
+      await screen.findByText(
+        "This provider was removed or is now managed in ZCode. Your input has not been saved.",
+      );
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+      expect(zcodeApi.save).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps a failed reload read-only and protects against another external change", async () => {
+    mount();
+    await screen.findByText("Managed example");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    vi.mocked(zcodeApi.save).mockRejectedValue({
+      code: "zcode.configuration_changed",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    vi.mocked(zcodeApi.read).mockRejectedValueOnce(
+      new Error("Cannot read file"),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Read latest configuration" }),
+    );
+    await screen.findByText("Cannot read file");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    vi.mocked(zcodeApi.read).mockResolvedValueOnce({
+      ...fixture,
+      revision: "external",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Read latest configuration" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Keep my input" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Read latest configuration" });
+    expect(zcodeApi.save).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
   it("shows native providers read-only and edits with the original revision without retrieving a key", async () => {
     mount();
     await screen.findByText("Managed example");

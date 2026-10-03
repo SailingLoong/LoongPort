@@ -10,6 +10,8 @@ pub struct ApplicationOverview {
     pub configurations: Vec<ApplicationConfiguration>,
     pub recent_provider_ids: Vec<String>,
     pub is_additive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration_revision: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,11 +71,30 @@ fn nonempty(value: String) -> Option<String> {
 pub async fn get_application_overview(
     state: State<'_, AppState>,
     app: String,
+    include_revision: Option<bool>,
 ) -> Result<ApplicationOverview, String> {
     let app_type: AppType = app
         .parse()
         .map_err(|e: crate::error::AppError| e.to_string())?;
-    application_overview(state.inner(), &app_type)
+    let revision = if include_revision.unwrap_or(false) {
+        Some(
+            crate::services::provider::service_configuration_revision(state.inner(), &app_type)
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let mut overview = application_overview(state.inner(), &app_type)?;
+    if let Some(before) = revision {
+        let after =
+            crate::services::provider::service_configuration_revision(state.inner(), &app_type)
+                .map_err(|error| error.to_string())?;
+        if before != after {
+            return Err("Configuration changed while reading. Read it again.".into());
+        }
+        overview.configuration_revision = Some(after);
+    }
+    Ok(overview)
 }
 
 fn application_overview(
@@ -162,6 +183,7 @@ fn application_overview(
         configurations,
         recent_provider_ids,
         is_additive: app_type.is_additive_mode(),
+        configuration_revision: None,
     })
 }
 
@@ -400,6 +422,36 @@ mod tests {
             .get_provider_by_id("native-only", "pi")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn overview_does_not_repair_a_stale_local_selection() {
+        struct TestHome(Option<std::ffi::OsString>);
+        impl Drop for TestHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
+                    None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                }
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _restore = TestHome(std::env::var_os("CC_SWITCH_TEST_HOME"));
+        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
+        crate::settings::unlock_settings_for_test(state.db.secrets.clone()).unwrap();
+        let app = AppType::Codex;
+        let original = crate::settings::get_current_provider(&app);
+        crate::settings::set_current_provider(&app, Some("stale-test-selection")).unwrap();
+        let before = state.db.conn.lock().unwrap().total_changes();
+        let _overview = application_overview(&state, &app).unwrap();
+        assert_eq!(
+            crate::settings::get_current_provider(&app).as_deref(),
+            Some("stale-test-selection")
+        );
+        assert_eq!(state.db.conn.lock().unwrap().total_changes(), before);
+        crate::settings::set_current_provider(&app, original.as_deref()).unwrap();
     }
 
     #[test]

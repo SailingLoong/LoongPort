@@ -6,6 +6,7 @@ mod endpoints;
 mod gemini_auth;
 mod live;
 mod native;
+pub(crate) use native::service_configuration_revision;
 mod pi;
 mod transaction;
 mod usage;
@@ -231,7 +232,7 @@ pub fn provider_presentation_context(
     let current_provider_id = if app_type.is_additive_mode() {
         None
     } else {
-        crate::settings::get_effective_current_provider(&state.db, app_type)
+        crate::settings::get_effective_current_provider_readonly(&state.db, app_type)
             .ok()
             .flatten()
     };
@@ -399,13 +400,13 @@ fn provider_uses_official_subscription_usage(app_type: &AppType, provider: &Prov
 /// 投影不出 catalog、或内容与磁盘一致时为 no-op。
 pub fn refresh_current_codex_catalog_projection(state: &AppState) -> Result<bool, AppError> {
     let _guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
-    // Unclaimed native configuration belongs to its external editor. Its next
-    // takeover accepts the complete snapshot before any catalog projection.
+    // Native config remains authoritative. Its generated reasoning can refresh
+    // independently, with provenance protecting explicit and legacy overrides.
     if !state
         .proxy_service
         .detect_takeover_in_live_config_for_app(&AppType::Codex)
     {
-        return Ok(false);
+        return crate::codex_config::refresh_native_codex_reasoning_projection();
     }
     let current_id = ProviderService::current(state, AppType::Codex)?;
     if current_id.is_empty() {
@@ -5138,7 +5139,7 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
-        crate::settings::get_effective_current_provider(&state.db, &app_type)
+        crate::settings::get_effective_current_provider_readonly(&state.db, &app_type)
             .map(|opt| opt.unwrap_or_default())
     }
 

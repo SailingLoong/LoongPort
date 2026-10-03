@@ -3687,7 +3687,21 @@
       "shareDetails": "What is shared",
       "shareUsage": "Usage statistics include configured service domains, account counts, app version and operating system, with a persistent random installation ID for deduplication.",
       "shareMeasurements": "Measurements aggregate requests, errors, latency, speed, tokens and estimated costs by service, application, model and hour, using a random ID that changes daily.",
-      "shareControl": "Account identities, keys and conversation content are not uploaded. Random IDs can link reports within their lifetime; the receiver can see the source IP. Your choice is saved only when setup is completed. Sharing is optional and both settings can be changed separately later."
+      "shareControl": "Account identities, keys and conversation content are not uploaded. Random IDs can link reports within their lifetime; the receiver can see the source IP. Your choice is saved only when setup is completed. Sharing is optional and both settings can be changed separately later.",
+      "results": {
+        "pending": "Pending",
+        "applying": "Applying",
+        "success": "Configured",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+        "changed": "Configuration changed — review required",
+        "verificationFailed": "Could not verify — retry reading",
+        "unverified": "Applied result not verified — review required"
+      },
+      "reapply": "Apply this configuration again",
+      "continueSetup": "Continue setup",
+      "resultsHint": "Completed clients are checked before retrying. Changed or unverified configurations require your explicit choice to apply again.",
+      "cannotVerify": "Could not verify the current configuration."
     }
   },
   "firstRunNotice": {
@@ -4106,6 +4120,15 @@
     "models": "Models (one per line)",
     "cancel": "Cancel",
     "save": "Save",
-    "removeConfirm": "Remove {{name}} from ZCode?"
+    "removeConfirm": "Remove {{name}} from ZCode?",
+    "conflict": "ZCode configuration was changed elsewhere. Read the latest configuration before saving again.",
+    "readLatest": "Read latest configuration",
+    "targetUnavailable": "This provider was removed or is now managed in ZCode. Your input has not been saved.",
+    "field": "Field",
+    "myInput": "My input",
+    "externalValue": "External value",
+    "keyNotCompared": "Keys are not shown or compared. Keeping your input retains a key you entered; using external values clears it. Save again only after reviewing.",
+    "keepInput": "Keep my input",
+    "useExternal": "Use external values"
   }
 }

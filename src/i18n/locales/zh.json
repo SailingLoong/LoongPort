@@ -3687,7 +3687,21 @@
       "shareDetails": "了解分享内容",
       "shareUsage": "使用统计包含已配置服务的域名、账号数量、应用版本与操作系统，并使用固定的随机安装标识去重。",
       "shareMeasurements": "实测数据按服务、应用、模型和小时汇总请求量、错误、延迟、速度、Token 与估算费用，使用每日轮换的随机标识。",
-      "shareControl": "不上传账号身份、密钥或对话内容。随机标识可关联同一时期的上报，接收端能看到来源 IP。完成设置后才保存选择；不勾选也能正常使用，之后可在设置中分别调整。"
+      "shareControl": "不上传账号身份、密钥或对话内容。随机标识可关联同一时期的上报，接收端能看到来源 IP。完成设置后才保存选择；不勾选也能正常使用，之后可在设置中分别调整。",
+      "results": {
+        "pending": "待配置",
+        "applying": "正在配置",
+        "success": "已配置",
+        "failed": "配置失败",
+        "cancelled": "已取消",
+        "changed": "配置已更改，请检查",
+        "verificationFailed": "无法验证，请重试读取",
+        "unverified": "配置结果未验证，请检查"
+      },
+      "reapply": "重新应用此配置",
+      "continueSetup": "继续配置",
+      "resultsHint": "重试前会核对已完成客户端。已更改或无法验证的配置，需要你明确选择重新应用。",
+      "cannotVerify": "无法验证当前配置。"
     }
   },
   "firstRunNotice": {
@@ -4106,6 +4120,15 @@
     "models": "模型（每行一个）",
     "cancel": "取消",
     "save": "保存",
-    "removeConfirm": "从 ZCode 中移除 {{name}}？"
+    "removeConfirm": "从 ZCode 中移除 {{name}}？",
+    "conflict": "ZCode 配置已在其他地方更改。请读取最新配置，再确认保存。",
+    "readLatest": "读取最新配置",
+    "targetUnavailable": "此供应商已被删除或已由 ZCode 管理。你的输入尚未保存。",
+    "field": "字段",
+    "myInput": "我的输入",
+    "externalValue": "外部值",
+    "keyNotCompared": "不显示或比较密钥。保留输入会保留你输入的密钥；使用外部值会清空该输入。请检查后再保存。",
+    "keepInput": "保留我的输入",
+    "useExternal": "使用外部值"
   }
 }

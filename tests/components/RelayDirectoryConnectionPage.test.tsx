@@ -27,6 +27,15 @@ vi.mock("@/lib/api", () => ({
   settingsApi: api,
 }));
 vi.mock("@/lib/api/relay", () => ({ relayApi: api }));
+vi.mock("@/lib/api/applicationOverview", () => ({
+  applicationOverviewApi: {
+    state: async () => ({
+      configurationRevision: "synthetic-written",
+      isAdditive: false,
+      configurations: [{ providerId: "p1", presentation: { isCurrent: true } }],
+    }),
+  },
+}));
 vi.mock("@/lib/api/serviceOnboarding", () => ({
   serviceOnboardingApi: { status: async () => ({ completed: true }) },
 }));

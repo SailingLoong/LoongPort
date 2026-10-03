@@ -6,6 +6,10 @@ on:
       - "scripts/docs-ui/**"
       - ".github/workflows/docs-ui.yml"
       - "docs/guide/**"
+      - "tests/browser/**"
+      - "src/components/zcode/**"
+      - "src/components/ui/dialog.tsx"
+      - "src/index.css"
   workflow_dispatch:
 
 permissions:
@@ -73,6 +77,21 @@ jobs:
           export PLAYWRIGHT_MODULE="$RUNNER_TEMP/docs-browser/node_modules/playwright-core/index.mjs"
           export DOCS_SCREENSHOTS="$RUNNER_TEMP/docs-ui-artifact"
           node scripts/docs-ui/capture.mjs
+      - name: Check current ZCode conflict layout with synthetic data
+        if: matrix.kind == 'zcode'
+        run: |
+          export ZCODE_LAYOUT_OUTPUT="$RUNNER_TEMP/zcode-layout"
+          pnpm exec vite build --config tests/browser/vite.config.mjs
+          python3 -m http.server 4314 --bind 127.0.0.1 --directory "$ZCODE_LAYOUT_OUTPUT" > "$RUNNER_TEMP/zcode-layout-server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          curl --fail --silent --show-error --retry 30 --retry-connrefused \
+            --retry-delay 1 http://127.0.0.1:4314/tests/browser/zcode-provider.html > /dev/null
+          BROWSER_EXECUTABLE="$(command -v google-chrome)"
+          export BROWSER_EXECUTABLE
+          export PLAYWRIGHT_MODULE="$RUNNER_TEMP/docs-browser/node_modules/playwright-core/index.mjs"
+          git rev-parse HEAD > "$RUNNER_TEMP/docs-ui-artifact/zcode-layout-source.txt"
+          node tests/browser/run-zcode-layout.mjs | tee "$RUNNER_TEMP/docs-ui-artifact/zcode-layout-results.jsonl"
       - name: Save short-lived review artifacts
         if: always()
         uses: actions/upload-artifact@v7

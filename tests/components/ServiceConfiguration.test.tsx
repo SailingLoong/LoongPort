@@ -13,6 +13,15 @@ import { createTestQueryClient } from "../utils/testQueryClient";
 import { ServiceConfiguration } from "@/components/relay/onboarding/ServiceConfiguration";
 const switchTier = vi.fn();
 const complete = vi.fn();
+vi.mock("@/lib/api/applicationOverview", () => ({
+  applicationOverviewApi: {
+    state: async () => ({
+      configurationRevision: "fixture-revision",
+      configurations: [{ providerId: "p1", presentation: { isCurrent: true } }],
+      isAdditive: false,
+    }),
+  },
+}));
 vi.mock("@/lib/api/serviceOnboarding", () => ({
   serviceOnboardingApi: {
     status: async () => ({ completed: false }),
@@ -108,7 +117,9 @@ describe("ServiceConfiguration", () => {
     expect(complete).not.toHaveBeenCalled();
     expect(onDone).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("button", { name: "loongport.onboarding.finish" }),
+      screen.getByRole("button", {
+        name: "loongport.onboarding.continueSetup",
+      }),
     ).toBeEnabled();
   });
   it("keeps the consent draft and configuration choices after a failed switch", async () => {
@@ -121,7 +132,9 @@ describe("ServiceConfiguration", () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "loongport.onboarding.finish" }),
+        screen.getByRole("button", {
+          name: "loongport.onboarding.continueSetup",
+        }),
       ).toBeEnabled(),
     );
     expect(complete).not.toHaveBeenCalled();
@@ -202,6 +215,6 @@ it("does not resume an abandoned finish operation after returning to the page", 
   expect(complete).not.toHaveBeenCalled();
   expect(onDone).not.toHaveBeenCalled();
   expect(
-    screen.getByRole("button", { name: "loongport.onboarding.finish" }),
+    screen.getByRole("button", { name: "loongport.onboarding.continueSetup" }),
   ).toBeEnabled();
 });
