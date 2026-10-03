@@ -2,7 +2,9 @@
 //! Backend probes produce admission evidence; no real probe or IPC bypass lives here.
 use super::admission::{BlockedReason, ContextObservation, ContractEntry, VerifiedContext};
 use super::core::{AccountIdentity, JournalOrigin};
-use super::transaction::{AccountStore, Admission, SwitchOutcome, TransactionError};
+use super::transaction::{
+    AccountStore, Admission, CaptureOutcome, CatalogStatus, SwitchOutcome, TransactionError,
+};
 use crate::database::Database;
 use std::sync::Arc;
 
@@ -32,7 +34,15 @@ impl From<TransactionError> for RuntimeError {
 }
 enum Operation {
     Switch(AccountIdentity),
+    Status,
+    Capture { revision: String },
+    SwitchSaved { id: String, revision: String },
     Recover,
+}
+enum OperationResult {
+    Status(CatalogStatus),
+    Captured(CaptureOutcome),
+    Switched(SwitchOutcome),
 }
 
 pub(super) async fn switch_account(
@@ -41,21 +51,68 @@ pub(super) async fn switch_account(
     contracts: Vec<ContractEntry>,
     target: AccountIdentity,
 ) -> Result<SwitchOutcome, RuntimeError> {
-    run(db, probe, contracts, Operation::Switch(target)).await
+    match run(db, probe, contracts, Operation::Switch(target)).await? {
+        OperationResult::Switched(outcome) => Ok(outcome),
+        _ => Err(RuntimeError::TaskFailed),
+    }
+}
+pub(super) async fn account_status(
+    db: Arc<Database>,
+    probe: Arc<dyn ContextProbe>,
+    contracts: Vec<ContractEntry>,
+) -> Result<CatalogStatus, RuntimeError> {
+    match run(db, probe, contracts, Operation::Status).await? {
+        OperationResult::Status(status) => Ok(status),
+        _ => Err(RuntimeError::TaskFailed),
+    }
+}
+/// Only an explicit capture action calls this entry; passive status never does.
+pub(super) async fn capture_account(
+    db: Arc<Database>,
+    probe: Arc<dyn ContextProbe>,
+    contracts: Vec<ContractEntry>,
+    revision: String,
+) -> Result<CaptureOutcome, RuntimeError> {
+    match run(db, probe, contracts, Operation::Capture { revision }).await? {
+        OperationResult::Captured(outcome) => Ok(outcome),
+        _ => Err(RuntimeError::TaskFailed),
+    }
+}
+pub(super) async fn switch_saved_account(
+    db: Arc<Database>,
+    probe: Arc<dyn ContextProbe>,
+    contracts: Vec<ContractEntry>,
+    id: String,
+    revision: String,
+) -> Result<SwitchOutcome, RuntimeError> {
+    match run(
+        db,
+        probe,
+        contracts,
+        Operation::SwitchSaved { id, revision },
+    )
+    .await?
+    {
+        OperationResult::Switched(outcome) => Ok(outcome),
+        _ => Err(RuntimeError::TaskFailed),
+    }
 }
 pub(super) async fn recover_account(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,
     contracts: Vec<ContractEntry>,
 ) -> Result<SwitchOutcome, RuntimeError> {
-    run(db, probe, contracts, Operation::Recover).await
+    match run(db, probe, contracts, Operation::Recover).await? {
+        OperationResult::Switched(outcome) => Ok(outcome),
+        _ => Err(RuntimeError::TaskFailed),
+    }
 }
 async fn run(
     db: Arc<Database>,
     probe: Arc<dyn ContextProbe>,
     contracts: Vec<ContractEntry>,
     operation: Operation,
-) -> Result<SwitchOutcome, RuntimeError> {
+) -> Result<OperationResult, RuntimeError> {
     let sync = crate::services::sync_protocol::sync_mutex().lock().await;
     tauri::async_runtime::spawn_blocking(move || {
         // The physical worker owns the existing mutex. Dropping/cancelling its
@@ -74,6 +131,7 @@ async fn run(
                 }
                 None => return Err(RuntimeError::OriginUnverified),
             },
+            Operation::Status | Operation::Capture { .. } | Operation::SwitchSaved { .. } => None,
         };
         // Admission is established before obtaining a cipher or reading a native
         // credential. The existing session guard fixes the vault generation through IO.
@@ -96,9 +154,25 @@ async fn run(
         )?;
         context.confirm_root(store.native_root_identity())?;
         match operation {
-            Operation::Switch(target) => store.switch(&target).map_err(Into::into),
+            Operation::Switch(target) => store
+                .switch(&target)
+                .map(OperationResult::Switched)
+                .map_err(Into::into),
+            Operation::Status => store
+                .status()
+                .map(OperationResult::Status)
+                .map_err(Into::into),
+            Operation::Capture { revision } => store
+                .capture(context.family(), &revision)
+                .map(OperationResult::Captured)
+                .map_err(Into::into),
+            Operation::SwitchSaved { id, revision } => store
+                .switch_saved(&id, &revision, context.family())
+                .map(OperationResult::Switched)
+                .map_err(Into::into),
             Operation::Recover => store
                 .recover(origin.ok_or(RuntimeError::OriginUnverified)?)
+                .map(OperationResult::Switched)
                 .map_err(Into::into),
         }
     })

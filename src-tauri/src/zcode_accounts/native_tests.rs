@@ -220,3 +220,161 @@ fn native_checks_optional_scoped_credentials_and_rejects_empty_secrets() {
         ))
         .is_err());
 }
+
+mod profile_labels {
+    use super::*;
+
+    fn snapshot(
+        native: &NativeCipher,
+        family: OAuthFamily,
+        profile: serde_json::Value,
+    ) -> AccountSnapshot {
+        let document = native_document(family, "account-a", "fresh");
+        let key = AccountIdentity::new(TEST_CONTEXT, family, "account-a")
+            .unwrap()
+            .credential_keys()[3]
+            .clone();
+        native
+            .inspect(&replace(
+                &document,
+                &key,
+                encrypt_synthetic(&profile.to_string()),
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn profile_label_prefers_display_name_for_both_standard_families() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+            let saved = snapshot(
+                &native,
+                family,
+                serde_json::json!({
+                    "id":"account-a", "username":"fallback", "displayName":" Display name "
+                }),
+            );
+            assert_eq!(
+                native.profile_label(&saved).unwrap().as_deref(),
+                Some("Display name")
+            );
+        }
+    }
+
+    #[test]
+    fn profile_label_reads_only_existing_raw_zai_display_fields() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        for (profile, expected) in [
+            (
+                serde_json::json!({"user_id":"account-a", "displayName":"Raw display", "username":"raw-user"}),
+                Some("Raw display"),
+            ),
+            (
+                serde_json::json!({"user_id":"account-a", "username":"raw-user"}),
+                Some("raw-user"),
+            ),
+            (
+                serde_json::json!({"user_id":"account-a", "name":"SYNTHETIC_NAME_CANARY", "email":"synthetic@example.invalid"}),
+                None,
+            ),
+        ] {
+            let saved = snapshot(&native, OAuthFamily::Zai, profile);
+            assert_eq!(native.profile_label(&saved).unwrap().as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn profile_label_removes_controls_and_uses_nonempty_username_fallback() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        for (display, username, expected) in [
+            (
+                " \u{feff}\nDi\0sp\u{0085}lay\t ",
+                "fallback",
+                Some("Display"),
+            ),
+            (" \n\0\u{0085} ", " \nUser\0name\t ", Some("Username")),
+            (" \n\0 ", " \t\u{0085} ", None),
+        ] {
+            let saved = snapshot(
+                &native,
+                OAuthFamily::BigModel,
+                serde_json::json!({
+                    "id":"account-a", "username":username, "displayName":display
+                }),
+            );
+            assert_eq!(native.profile_label(&saved).unwrap().as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn profile_label_caps_unicode_scalars_without_breaking_utf8() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        let long = format!(" \n{}tail\t ", "中😀".repeat(50));
+        let saved = snapshot(
+            &native,
+            OAuthFamily::Zai,
+            serde_json::json!({
+                "id":"account-a", "username":"fallback", "displayName":long
+            }),
+        );
+        let label = native.profile_label(&saved).unwrap().unwrap();
+        assert_eq!(label, "中😀".repeat(40));
+        assert_eq!(label.chars().count(), 80);
+    }
+
+    #[test]
+    fn profile_label_never_uses_unknown_token_fields_or_nested_labels() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        for display in [serde_json::Value::Null, serde_json::json!("Safe label")] {
+            let expected = display.as_str().map(str::to_owned);
+            let saved = snapshot(
+                &native,
+                OAuthFamily::Zai,
+                serde_json::json!({
+                    "user_id":"account-a", "displayName":display,
+                    "username":{"displayName":"SYNTHETIC_NESTED_CANARY"},
+                    "access_token":"SYNTHETIC_ACCESS_CANARY", "refresh_token":"SYNTHETIC_REFRESH_CANARY",
+                    "name":"SYNTHETIC_NAME_CANARY", "future":{"username":"SYNTHETIC_FUTURE_CANARY"}
+                }),
+            );
+            let label = native.profile_label(&saved).unwrap();
+            assert_eq!(label, expected);
+            assert!(!label.unwrap_or_default().contains("CANARY"));
+        }
+    }
+
+    #[test]
+    fn profile_label_reauthenticates_every_present_scoped_credential() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        let identity = AccountIdentity::new(TEST_CONTEXT, OAuthFamily::Zai, "account-a").unwrap();
+        let document = native_document(OAuthFamily::Zai, "account-a", "fresh");
+        for key in identity.credential_keys() {
+            let changed = replace(
+                &document,
+                &key,
+                encrypt_synthetic_with_secret("synthetic-tamper", "wrong-secret"),
+            );
+            let saved = AccountSnapshot::capture(identity.clone(), &changed).unwrap();
+            assert_eq!(
+                native.profile_label(&saved),
+                Err(NativeError::AuthenticationFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn profile_label_rejects_snapshot_identity_or_context_substitution() {
+        let native = NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap();
+        let document = native_document(OAuthFamily::Zai, "account-a", "fresh");
+        for identity in [
+            AccountIdentity::new(TEST_CONTEXT, OAuthFamily::Zai, "other-account").unwrap(),
+            AccountIdentity::new("other-context", OAuthFamily::Zai, "account-a").unwrap(),
+        ] {
+            let saved = AccountSnapshot::capture(identity, &document).unwrap();
+            assert_eq!(
+                native.profile_label(&saved),
+                Err(NativeError::InvalidSession)
+            );
+        }
+    }
+}

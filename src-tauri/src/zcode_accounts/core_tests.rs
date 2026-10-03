@@ -4,6 +4,57 @@ fn account(family: OAuthFamily, id: &str) -> AccountIdentity {
     AccountIdentity::new("synthetic-context", family, id).unwrap()
 }
 
+mod profile_identity {
+    use super::*;
+
+    #[test]
+    fn opaque_id_is_stable_normalized_and_does_not_expose_identity() {
+        let identity = account(OAuthFamily::Zai, "account-a");
+        let opaque = identity.opaque_id();
+        assert_eq!(
+            opaque,
+            "bf32cce0c349a747af07c7d00e79924c81d3251f691071856dbe59d3e78015bd"
+        );
+        assert_eq!(opaque, identity.clone().opaque_id());
+        assert_eq!(opaque, account(OAuthFamily::Zai, " account-a ").opaque_id());
+        assert!(!opaque.contains("account-a"));
+        assert!(!opaque.contains("synthetic-context"));
+    }
+
+    #[test]
+    fn opaque_id_distinguishes_each_identity_component_and_ambiguous_delimiters() {
+        let cases = [
+            ("scope", OAuthFamily::Zai, "account"),
+            ("other", OAuthFamily::Zai, "account"),
+            ("scope", OAuthFamily::BigModel, "account"),
+            ("scope", OAuthFamily::Zai, "different-account"),
+            ("scopezai", OAuthFamily::Zai, "account"),
+            ("scope", OAuthFamily::Zai, "zaiaccount"),
+            ("scope:zai", OAuthFamily::Zai, "account"),
+            ("scope", OAuthFamily::Zai, "zai:account"),
+            ("scope\0zai", OAuthFamily::Zai, "account"),
+            ("scope", OAuthFamily::Zai, "zai\0account"),
+            ("中😀", OAuthFamily::Zai, "account"),
+        ];
+        let ids: std::collections::BTreeSet<_> = cases
+            .iter()
+            .map(|(context, family, id)| {
+                AccountIdentity::new(context, *family, id)
+                    .unwrap()
+                    .opaque_id()
+            })
+            .collect();
+        assert_eq!(ids.len(), cases.len());
+    }
+
+    #[test]
+    fn family_reports_the_authenticated_identity_family() {
+        for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+            assert_eq!(account(family, "account-a").family(), family);
+        }
+    }
+}
+
 mod recovery {
     use super::*;
 

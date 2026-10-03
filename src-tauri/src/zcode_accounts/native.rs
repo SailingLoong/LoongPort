@@ -32,6 +32,14 @@ pub struct NativeCipher {
 }
 
 impl NativeCipher {
+    pub fn profile_label(&self, snapshot: &AccountSnapshot) -> Result<Option<String>, NativeError> {
+        let (checked, label) = self.inspect_profile(&snapshot.scoped_document())?;
+        if checked.identity() != snapshot.identity() {
+            return Err(NativeError::InvalidSession);
+        }
+        Ok(label)
+    }
+
     pub(super) fn context(&self) -> &str {
         &self.context
     }
@@ -88,6 +96,13 @@ impl NativeCipher {
     }
 
     pub fn inspect(&self, document: &CredentialDocument) -> Result<AccountSnapshot, NativeError> {
+        self.inspect_profile(document).map(|(snapshot, _)| snapshot)
+    }
+
+    fn inspect_profile(
+        &self,
+        document: &CredentialDocument,
+    ) -> Result<(AccountSnapshot, Option<String>), NativeError> {
         let active = self.decrypt(
             document
                 .get("oauth:active_provider")
@@ -133,8 +148,20 @@ impl NativeCipher {
                 }
             }
         }
-        AccountSnapshot::capture(identity, document).map_err(NativeError::Core)
+        let snapshot = AccountSnapshot::capture(identity, document).map_err(NativeError::Core)?;
+        let label = ["displayName", "username"]
+            .into_iter()
+            .filter_map(string)
+            .find_map(sanitized_profile_label);
+        Ok((snapshot, label))
     }
+}
+
+fn sanitized_profile_label(value: &str) -> Option<String> {
+    let without_controls: String = value.chars().filter(|c| !c.is_control()).collect();
+    let limited: String = js_trim(&without_controls).trim().chars().take(80).collect();
+    let label = js_trim(&limited).trim();
+    (!label.is_empty()).then(|| label.to_owned())
 }
 
 #[cfg(test)]

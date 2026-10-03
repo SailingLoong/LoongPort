@@ -11,6 +11,7 @@ use std::fmt;
 
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use sha2::{Digest, Sha256};
 
 pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -96,6 +97,29 @@ pub struct AccountIdentity {
 }
 
 impl AccountIdentity {
+    /// Stable display/lookup identifier, never an authorization token.
+    pub fn opaque_id(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"zcode-account-profile-id:v1\0");
+        let family = match self.family {
+            OAuthFamily::Zai => "zai",
+            OAuthFamily::BigModel => "bigmodel",
+        };
+        for part in [self.context.as_str(), family, self.account_id.as_str()] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    pub(super) fn family(&self) -> OAuthFamily {
+        self.family
+    }
+
     /// Normalizes the official key identity; does not authenticate it.
     pub fn new(context: &str, family: OAuthFamily, account_id: &str) -> Result<Self, CoreError> {
         let account_id = js_trim(account_id);

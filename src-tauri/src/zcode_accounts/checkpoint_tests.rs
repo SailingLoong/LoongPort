@@ -6,6 +6,40 @@ fn native() -> NativeCipher {
     NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap()
 }
 
+#[test]
+fn profile_catalog_iterates_borrowed_unique_fresh_snapshots_without_schema_changes() {
+    let native = native();
+    let mut catalog = ProfileCatalog::default();
+    assert_eq!(catalog.profiles().count(), 0);
+    for (id, version) in [("a", "old"), ("b", "fresh"), ("a", "fresh")] {
+        catalog.upsert(
+            native
+                .inspect(&native_document(OAuthFamily::Zai, id, version))
+                .unwrap(),
+        );
+    }
+    assert_eq!(catalog.profiles().count(), 2);
+    for saved in catalog.profiles() {
+        assert!(std::ptr::eq(saved, catalog.get(saved.identity()).unwrap()));
+        let document = saved.scoped_document();
+        let key = &saved.identity().credential_keys()[1];
+        assert!(native
+            .decrypt(document.get(key).unwrap())
+            .unwrap()
+            .contains("_fresh_"));
+    }
+    let vault = VaultContext::generate().unwrap();
+    let encoded = catalog.seal(&vault, &native).unwrap();
+    let reopened = ProfileCatalog::open(&encoded, &vault, &native).unwrap();
+    let ids = |catalog: &ProfileCatalog| {
+        catalog
+            .profiles()
+            .map(|p| p.identity().opaque_id())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&catalog), ids(&reopened));
+}
+
 fn mutate_payload(
     encoded: &str,
     file: &str,

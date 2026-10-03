@@ -69,6 +69,10 @@ pub(crate) struct ProfileCatalog {
 }
 
 impl ProfileCatalog {
+    pub(crate) fn profiles(&self) -> impl Iterator<Item = &AccountSnapshot> {
+        self.profiles.values()
+    }
+
     pub(crate) fn upsert(&mut self, snapshot: AccountSnapshot) {
         self.profiles.insert(snapshot.identity().clone(), snapshot);
     }

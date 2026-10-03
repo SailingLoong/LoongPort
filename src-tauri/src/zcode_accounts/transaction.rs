@@ -8,8 +8,8 @@ use super::checkpoint::{
     CheckpointError, ProfileCatalog, RecoveryOutcome, SwitchCheckpoint, TransactionBinding,
 };
 use super::core::{
-    AccountIdentity, AccountSnapshot, CredentialDocument, JournalOrigin, RecoveryAction,
-    TransactionPhase,
+    AccountIdentity, AccountSnapshot, CredentialDocument, JournalOrigin, OAuthFamily,
+    RecoveryAction, TransactionPhase,
 };
 use super::native::NativeCipher;
 use crate::config_file_io::write_durable;
@@ -18,6 +18,7 @@ use crate::secrets::{
     VaultContext,
 };
 use crate::zcode_file_lock::FileLock;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 #[cfg(unix)]
@@ -46,6 +47,7 @@ pub(crate) enum TransactionError {
     Imported,
     MissingSavedSource,
     MissingTarget,
+    CatalogChanged,
     Checkpoint(CheckpointError),
 }
 impl From<CheckpointError> for TransactionError {
@@ -59,6 +61,36 @@ pub(crate) enum SwitchOutcome {
     Refreshed,
     Recovered,
     NothingPending,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CaptureOutcome {
+    Saved,
+    Refreshed,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SavedAccount {
+    pub id: String,
+    pub family: &'static str,
+    pub label: Option<String>,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogStatus {
+    pub revision: String,
+    pub profiles: Vec<SavedAccount>,
+    /// Passive status never reads native credentials to claim a current identity.
+    pub current: Option<String>,
+    pub pending: bool,
+}
+enum SwitchTarget<'a> {
+    Identity(&'a AccountIdentity),
+    Saved {
+        id: &'a str,
+        revision: &'a str,
+        family: OAuthFamily,
+    },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WritePoint {
@@ -167,6 +199,83 @@ impl<'a> AccountStore<'a> {
         self.native_id
     }
 
+    pub(crate) fn status(&self) -> Result<CatalogStatus, TransactionError> {
+        (self.gate)().map_err(TransactionError::Admission)?;
+        let bytes = self.read(Role::Profiles)?;
+        let catalog = self.open_catalog(bytes.as_deref())?;
+        let profiles = catalog
+            .profiles()
+            .map(|snapshot| {
+                Ok(SavedAccount {
+                    id: snapshot.identity().opaque_id(),
+                    family: match snapshot.identity().family() {
+                        OAuthFamily::Zai => "zai",
+                        OAuthFamily::BigModel => "bigmodel",
+                    },
+                    label: self.native.profile_label(snapshot).map_err(|error| {
+                        TransactionError::Checkpoint(CheckpointError::Native(error))
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>, TransactionError>>()?;
+        Ok(CatalogStatus {
+            revision: catalog_revision(bytes.as_deref()),
+            profiles,
+            current: None,
+            pending: self.read(Role::Journal)?.is_some(),
+        })
+    }
+
+    pub(crate) fn capture(
+        &self,
+        family: OAuthFamily,
+        expected_revision: &str,
+    ) -> Result<CaptureOutcome, TransactionError> {
+        let _lock = self.lock()?;
+        if self.read(Role::Journal)?.is_some() {
+            return Err(TransactionError::RecoveryRequired);
+        }
+        self.valid_recovery_record()?;
+        let (bytes, mut catalog) = self.checked_catalog(expected_revision)?;
+        let current_bytes = self.required(Role::Credentials)?;
+        let current = document(&current_bytes)?;
+        let fresh = self
+            .native
+            .inspect(&current)
+            .map_err(|error| TransactionError::Checkpoint(CheckpointError::Native(error)))?;
+        if !fresh
+            .identity()
+            .matches_scope(self.native.context(), family)
+        {
+            return Err(TransactionError::UnsupportedScope);
+        }
+        let outcome = if catalog.get(fresh.identity()).is_some() {
+            CaptureOutcome::Refreshed
+        } else {
+            CaptureOutcome::Saved
+        };
+        catalog.upsert(fresh);
+        let encoded = catalog.seal(self.vault, self.native)?;
+        self.publish_profile(&current_bytes, bytes.as_ref(), encoded.as_bytes())?;
+        Ok(outcome)
+    }
+
+    pub(crate) fn switch_saved(
+        &self,
+        profile_id: &str,
+        expected_revision: &str,
+        family: OAuthFamily,
+    ) -> Result<SwitchOutcome, TransactionError> {
+        self.switch_selected(
+            SwitchTarget::Saved {
+                id: profile_id,
+                revision: expected_revision,
+                family,
+            },
+            &mut |_| Ok(()),
+        )
+    }
+
     pub(crate) fn switch(
         &self,
         target: &AccountIdentity,
@@ -193,7 +302,7 @@ impl<'a> AccountStore<'a> {
             RecoveryOutcome::Restore(ref restored) => {
                 // Check conflicts before touching either file. A newer saved source is
                 // not silently replaced by this older pending transaction.
-                self.preserve_fresh_source(&checkpoint)?;
+                self.preserve_fresh_source(&checkpoint, &current_bytes)?;
                 self.publish(
                     Role::Credentials,
                     Some(&current_bytes),
@@ -220,32 +329,60 @@ impl<'a> AccountStore<'a> {
         target_id: &AccountIdentity,
         hook: &mut dyn FnMut(WritePoint) -> Result<(), TransactionError>,
     ) -> Result<SwitchOutcome, TransactionError> {
+        self.switch_selected(SwitchTarget::Identity(target_id), hook)
+    }
+    fn switch_selected(
+        &self,
+        selection: SwitchTarget<'_>,
+        hook: &mut dyn FnMut(WritePoint) -> Result<(), TransactionError>,
+    ) -> Result<SwitchOutcome, TransactionError> {
         let _lock = self.lock()?;
         if self.read(Role::Journal)?.is_some() {
             return Err(TransactionError::RecoveryRequired);
         }
         let recovery = self.valid_recovery_record()?;
+        let (catalog_bytes, mut catalog, target_id) = match selection {
+            SwitchTarget::Identity(identity) => {
+                let bytes = self.read(Role::Profiles)?;
+                let catalog = self.open_catalog(bytes.as_deref())?;
+                (bytes, catalog, identity.clone())
+            }
+            SwitchTarget::Saved {
+                id,
+                revision,
+                family,
+            } => {
+                let (bytes, catalog) = self.checked_catalog(revision)?;
+                let identity = catalog
+                    .profiles()
+                    .find(|profile| profile.identity().opaque_id() == id)
+                    .ok_or(TransactionError::MissingTarget)?
+                    .identity()
+                    .clone();
+                if !identity.matches_scope(self.native.context(), family) {
+                    return Err(TransactionError::UnsupportedScope);
+                }
+                (bytes, catalog, identity)
+            }
+        };
+        let target = catalog
+            .get(&target_id)
+            .ok_or(TransactionError::MissingTarget)?
+            .clone();
         let current_bytes = self.required(Role::Credentials)?;
         let current = document(&current_bytes)?;
         let fresh = self
             .native
             .inspect(&current)
             .map_err(|e| TransactionError::Checkpoint(CheckpointError::Native(e)))?;
-        let catalog_bytes = self.read(Role::Profiles)?;
-        let mut catalog = self.open_catalog(catalog_bytes.as_deref())?;
         let saved_source = catalog
             .get(fresh.identity())
             .ok_or(TransactionError::MissingSavedSource)?;
         let source_profile_revision = snapshot_hash(saved_source)?;
-        let target = catalog
-            .get(target_id)
-            .ok_or(TransactionError::MissingTarget)?
-            .clone();
-        if fresh.identity() == target_id {
+        if fresh.identity() == &target_id {
             catalog.upsert(fresh);
             let next = catalog.seal(self.vault, self.native)?;
-            self.expect(Role::Credentials, Some(&current_bytes))?;
-            self.publish(Role::Profiles, catalog_bytes.as_ref(), next.as_bytes())?;
+            self.publish_profile(&current_bytes, catalog_bytes.as_ref(), next.as_bytes())?;
             return Ok(SwitchOutcome::Refreshed);
         }
         let mut checkpoint = SwitchCheckpoint::prepare(&current, &target, self.native)?;
@@ -260,8 +397,8 @@ impl<'a> AccountStore<'a> {
         let mut journal = self.publish(Role::Journal, None, prepared.as_bytes())?;
         hook(WritePoint::Prepared)?;
         catalog.upsert(checkpoint.fresh_source().clone());
-        self.publish(
-            Role::Profiles,
+        self.publish_profile(
+            &current_bytes,
             catalog_bytes.as_ref(),
             catalog.seal(self.vault, self.native)?.as_bytes(),
         )?;
@@ -309,7 +446,22 @@ impl<'a> AccountStore<'a> {
             .map_err(|_| TransactionError::CommittedNeedsCleanup)?;
         Ok(SwitchOutcome::Switched)
     }
-    fn preserve_fresh_source(&self, checkpoint: &SwitchCheckpoint) -> Result<(), TransactionError> {
+    fn checked_catalog(
+        &self,
+        expected_revision: &str,
+    ) -> Result<(Option<FileImage>, ProfileCatalog), TransactionError> {
+        let bytes = self.read(Role::Profiles)?;
+        if catalog_revision(bytes.as_deref()) != expected_revision {
+            return Err(TransactionError::CatalogChanged);
+        }
+        let catalog = self.open_catalog(bytes.as_deref())?;
+        Ok((bytes, catalog))
+    }
+    fn preserve_fresh_source(
+        &self,
+        checkpoint: &SwitchCheckpoint,
+        current: &FileImage,
+    ) -> Result<(), TransactionError> {
         let before = self.read(Role::Profiles)?;
         let mut catalog = self.open_catalog(before.as_deref())?;
         let fresh = checkpoint.fresh_source();
@@ -328,8 +480,8 @@ impl<'a> AccountStore<'a> {
         }
         if saved_hash != snapshot_hash(fresh)? {
             catalog.upsert(fresh.clone());
-            self.publish(
-                Role::Profiles,
+            self.publish_profile(
+                current,
                 before.as_ref(),
                 catalog.seal(self.vault, self.native)?.as_bytes(),
             )?;
@@ -437,7 +589,29 @@ impl<'a> AccountStore<'a> {
         before: Option<&FileImage>,
         bytes: &[u8],
     ) -> Result<FileImage, TransactionError> {
+        self.publish_checked(role, before, bytes, None)
+    }
+    fn publish_profile(
+        &self,
+        native_source: &FileImage,
+        before: Option<&FileImage>,
+        bytes: &[u8],
+    ) -> Result<FileImage, TransactionError> {
+        self.publish_checked(Role::Profiles, before, bytes, Some(native_source))
+    }
+    fn publish_checked(
+        &self,
+        role: Role,
+        before: Option<&FileImage>,
+        bytes: &[u8],
+        native_source: Option<&FileImage>,
+    ) -> Result<FileImage, TransactionError> {
         (self.gate)().map_err(TransactionError::Admission)?;
+        // The final probe can take time. Revalidate a captured native source only
+        // after it returns, alongside the catalog CAS immediately before writing.
+        if let Some(source) = native_source {
+            self.expect(Role::Credentials, Some(source))?;
+        }
         self.expect(role, before)?;
         write_durable(&self.root(role).join(role.name()), bytes)
             .map_err(|_| TransactionError::Storage)?;
@@ -456,6 +630,12 @@ fn text(bytes: &[u8]) -> Result<&str, TransactionError> {
 fn document(bytes: &[u8]) -> Result<CredentialDocument, TransactionError> {
     CredentialDocument::parse(bytes)
         .map_err(|e| TransactionError::Checkpoint(CheckpointError::Core(e)))
+}
+fn catalog_revision(bytes: Option<&[u8]>) -> String {
+    match bytes {
+        Some(bytes) => format!("sha256:{}", URL_SAFE_NO_PAD.encode(hash(bytes))),
+        None => "absent".to_owned(),
+    }
 }
 fn hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
