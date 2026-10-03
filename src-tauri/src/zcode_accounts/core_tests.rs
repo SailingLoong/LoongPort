@@ -4,6 +4,186 @@ fn account(family: OAuthFamily, id: &str) -> AccountIdentity {
     AccountIdentity::new("synthetic-context", family, id).unwrap()
 }
 
+mod recovery {
+    use super::*;
+
+    fn switch_plan() -> (CredentialDocument, SwitchPlan) {
+        let a = account(OAuthFamily::Zai, "a");
+        let b = account(OAuthFamily::Zai, "b");
+        let source = session(&a, "fresh");
+        let target = AccountSnapshot::capture(b.clone(), &session(&b, "fresh")).unwrap();
+        let plan = SwitchPlan::prepare(&source, &a, &target).unwrap();
+        (source, plan)
+    }
+
+    #[test]
+    fn restores_every_before_after_combination_and_exact_target_cache_preimages() {
+        for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
+            for cache_present in [false, true] {
+                let a = account(family, "a");
+                let b = account(family, "b");
+                let mut source = session(&a, "fresh");
+                if cache_present {
+                    source
+                        .0
+                        .insert(b.credential_keys()[5].clone(), "previous-b-cache".into());
+                }
+                let mut target_doc = session(&b, "fresh");
+                target_doc.0.remove(&b.credential_keys()[2]);
+                target_doc.0.remove(&b.credential_keys()[6]);
+                let target = AccountSnapshot::capture(b.clone(), &target_doc).unwrap();
+                let plan = SwitchPlan::prepare(&source, &a, &target).unwrap();
+                for mask in 0..128 {
+                    let mut partial = source.clone();
+                    for (index, key) in b.credential_keys().iter().enumerate() {
+                        if mask & (1 << index) == 0 {
+                            continue;
+                        }
+                        match target_doc.0.get(key) {
+                            Some(value) => {
+                                partial.0.insert(key.clone(), value.clone());
+                            }
+                            None => {
+                                partial.0.remove(key);
+                            }
+                        }
+                    }
+                    assert_same_document(&plan.rollback(&partial).unwrap(), &source);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_later_changes_outside_the_target_key_scope() {
+        let (source, plan) = switch_plan();
+        let mut current = plan.apply(&source).unwrap();
+        current
+            .0
+            .insert("ssh:new".into(), "newer-unrelated-value".into());
+        let mut expected = source.clone();
+        expected
+            .0
+            .insert("ssh:new".into(), "newer-unrelated-value".into());
+        assert_same_document(&plan.rollback(&current).unwrap(), &expected);
+    }
+
+    #[test]
+    fn any_unknown_touched_value_blocks_the_whole_rollback() {
+        let (source, plan) = switch_plan();
+        for key in plan.target.identity.credential_keys() {
+            let mut current = plan.apply(&source).unwrap();
+            current.0.insert(key, "external-refreshed-value".into());
+            let before = current.clone();
+            assert!(matches!(
+                plan.rollback(&current),
+                Err(CoreError::RecoveryConflict)
+            ));
+            assert_same_document(&current, &before);
+        }
+    }
+
+    #[test]
+    fn committed_and_uncertain_states_can_never_request_rollback() {
+        assert_eq!(
+            recovery_action(JournalOrigin::Live, TransactionPhase::Committed),
+            RecoveryAction::CleanupOnly
+        );
+        assert_eq!(
+            recovery_action(JournalOrigin::Live, TransactionPhase::CommitUncertain),
+            RecoveryAction::ReconcileCommit
+        );
+        for phase in [
+            TransactionPhase::Prepared,
+            TransactionPhase::Captured,
+            TransactionPhase::CredentialsPublished,
+        ] {
+            assert_eq!(
+                recovery_action(JournalOrigin::Live, phase),
+                RecoveryAction::RestorePreimage
+            );
+        }
+    }
+
+    #[test]
+    fn restored_journals_are_inert_even_when_their_phase_says_committed() {
+        for phase in [
+            TransactionPhase::Prepared,
+            TransactionPhase::Captured,
+            TransactionPhase::CredentialsPublished,
+            TransactionPhase::CommitUncertain,
+            TransactionPhase::Committed,
+        ] {
+            assert_eq!(
+                recovery_action(JournalOrigin::Restored, phase),
+                RecoveryAction::Quarantine
+            );
+        }
+    }
+
+    #[test]
+    fn same_identity_noop_does_not_revert_a_later_refresh() {
+        let a = account(OAuthFamily::Zai, "a");
+        let source = session(&a, "fresh");
+        let old = AccountSnapshot::capture(a.clone(), &session(&a, "old")).unwrap();
+        let plan = SwitchPlan::prepare(&source, &a, &old).unwrap();
+        let refreshed_again = session(&a, "newer");
+        assert_same_document(&plan.rollback(&refreshed_again).unwrap(), &refreshed_again);
+    }
+
+    #[test]
+    fn refuses_recovery_that_would_exceed_the_document_limit() {
+        let a = account(OAuthFamily::Zai, "a");
+        let b = account(OAuthFamily::Zai, "b");
+        let mut source = session(&a, "fresh");
+        source.0.insert(
+            a.credential_keys()[1].clone(),
+            "x".repeat(MAX_DOCUMENT_BYTES / 2 + 10),
+        );
+        let target = AccountSnapshot::capture(b.clone(), &session(&b, "fresh")).unwrap();
+        let plan = SwitchPlan::prepare(&source, &a, &target).unwrap();
+        let mut current = plan.apply(&source).unwrap();
+        current.0.insert(
+            "unrelated:large".into(),
+            "y".repeat(MAX_DOCUMENT_BYTES / 2 + 10),
+        );
+        assert!(matches!(
+            plan.rollback(&current),
+            Err(CoreError::DocumentTooLarge)
+        ));
+    }
+
+    #[test]
+    fn phase_decisions_work_on_explicit_synthetic_files_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic-credentials.json");
+        let (source, plan) = switch_plan();
+        let published = plan.apply(&source).unwrap();
+        for phase in [
+            TransactionPhase::Prepared,
+            TransactionPhase::Captured,
+            TransactionPhase::CredentialsPublished,
+            TransactionPhase::CommitUncertain,
+            TransactionPhase::Committed,
+        ] {
+            std::fs::write(&path, published.to_bytes().unwrap()).unwrap();
+            let current = CredentialDocument::parse(&std::fs::read(&path).unwrap()).unwrap();
+            let action = recovery_action(JournalOrigin::Live, phase);
+            if action == RecoveryAction::RestorePreimage {
+                std::fs::write(&path, plan.rollback(&current).unwrap().to_bytes().unwrap())
+                    .unwrap();
+            }
+            let actual = CredentialDocument::parse(&std::fs::read(&path).unwrap()).unwrap();
+            let expected = if action == RecoveryAction::RestorePreimage {
+                &source
+            } else {
+                &published
+            };
+            assert_same_document(&actual, expected);
+        }
+    }
+}
+
 fn session(identity: &AccountIdentity, version: &str) -> CredentialDocument {
     CredentialDocument(
         identity
