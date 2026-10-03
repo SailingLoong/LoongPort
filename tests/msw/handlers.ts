@@ -132,6 +132,41 @@ function duplicateProvider(app: AppId, id: string): boolean {
 }
 
 export const handlers = [
+  http.post(`${TAURI_ENDPOINT}/get_common_config_snippet`, () => success(null)),
+  http.post(`${TAURI_ENDPOINT}/preset_referral_urls`, () => success({})),
+  http.post(`${TAURI_ENDPOINT}/get_claude_desktop_default_routes`, () =>
+    success([
+      {
+        routeId: "claude-sonnet-5",
+        envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        supports1m: true,
+      },
+      {
+        routeId: "claude-opus-5",
+        envKey: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        supports1m: true,
+      },
+      {
+        routeId: "claude-haiku-4-5",
+        envKey: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        supports1m: true,
+      },
+      {
+        routeId: "claude-fable-5",
+        envKey: "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        supports1m: true,
+      },
+    ]),
+  ),
+  http.post(`${TAURI_ENDPOINT}/auth_get_status`, async ({ request }) => {
+    const { authProvider } = (await request.json()) as { authProvider: string };
+    return success({
+      provider: authProvider,
+      authenticated: false,
+      default_account_id: null,
+      accounts: [],
+    });
+  }),
   http.get(MODELS_DEV_API_URL, () => success({})),
   http.post(`${TAURI_ENDPOINT}/get_migration_result`, () => success(false)),
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
