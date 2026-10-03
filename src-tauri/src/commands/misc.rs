@@ -4,12 +4,12 @@ use crate::app_config::AppType;
 use crate::init_status::{InitErrorPayload, SkillsMigrationPayload};
 #[cfg(not(target_os = "windows"))]
 use crate::process::isolate_child_process_group;
-use crate::process::{wait_child_output, CommandDeadline};
 #[cfg(target_os = "windows")]
 use crate::process::{
     build_windows_tool_command, is_windows_command_script, win_quote_path_for_batch,
     windows_cmd_double_quote_arg, windows_shell_compatible_path, CREATE_NO_WINDOW,
 };
+use crate::process::{wait_child_output, CommandDeadline};
 use crate::services::ProviderService;
 use once_cell::sync::Lazy;
 use regex::Regex;
