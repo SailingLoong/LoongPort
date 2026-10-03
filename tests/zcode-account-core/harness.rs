@@ -5,6 +5,9 @@
 #[path = "../../src-tauri/src/error.rs"]
 pub mod error;
 
+#[path = "../../src-tauri/src/config_file_io.rs"]
+mod config_file_io;
+
 // Existing product lifecycle helpers have callers outside this narrow graph.
 #[allow(dead_code)]
 #[path = "../../src-tauri/src/secrets/error.rs"]

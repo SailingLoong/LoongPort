@@ -15,6 +15,7 @@ mod codex_state_db;
 #[cfg(feature = "gui")]
 mod commands;
 mod config;
+mod config_file_io;
 mod crowd;
 mod database;
 mod deeplink;

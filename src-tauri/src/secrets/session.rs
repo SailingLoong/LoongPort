@@ -2,6 +2,7 @@
 
 use super::key_store::{save_verified, KeyStore};
 use super::{VaultContext, VaultMetadata};
+pub(crate) use crate::config_file_io::write_durable;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -279,22 +280,6 @@ pub(crate) fn write_metadata(root: &Path, saved: &LocalVault) -> Result<(), AppE
     let bytes = serde_json::to_vec(saved)
         .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
     write_durable(&root.join("vault.json"), &bytes)
-}
-
-pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    crate::config::atomic_write_private(path, bytes)?;
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| AppError::io(path, e))?;
-    file.sync_all().map_err(|e| AppError::io(path, e))?;
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|e| AppError::io(parent, e))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
