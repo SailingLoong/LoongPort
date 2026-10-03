@@ -745,14 +745,70 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn acquisition_preserves_non_utf8_path_identity() {
-        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
         let root = tempfile::tempdir().unwrap();
         let path = root
             .path()
             .join(std::ffi::OsString::from_vec(b"native-\xff.json".to_vec()));
-        let guard = FileLock::acquire(&path, Duration::ZERO).unwrap();
-        assert!(lock_dir(&path).is_dir());
-        drop(guard);
-        assert!(!lock_dir(&path).exists());
+        let raw_lock = root.path().join(std::ffi::OsString::from_vec(
+            b"native-\xff.json.lock".to_vec(),
+        ));
+        let entries = || {
+            fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>()
+        };
+        // Probe this filesystem with the exact bytes independently of FileLock.
+        // Darwin filesystems can reject them; Linux filesystems generally retain them.
+        match fs::create_dir(&raw_lock) {
+            Ok(()) => {
+                assert_eq!(entries().len(), 1);
+                assert_eq!(entries()[0].as_bytes(), b"native-\xff.json.lock");
+                let owner = raw_lock.join("owner-native.json");
+                let payload =
+                    json!({"pid":std::process::id(),"createdAt":now_ms(),"token":"native"})
+                        .to_string();
+                fs::write(&owner, &payload).unwrap();
+                assert!(FileLock::acquire(&path, Duration::ZERO).is_err());
+                assert!(FileLock::acquire_recoverable(&path, Duration::from_millis(1)).is_err());
+                assert_eq!(fs::read_to_string(&owner).unwrap(), payload);
+                assert_eq!(entries().len(), 1);
+                assert_eq!(entries()[0].as_bytes(), b"native-\xff.json.lock");
+                fs::remove_file(&owner).unwrap();
+                fs::remove_dir(&raw_lock).unwrap();
+
+                let guard = FileLock::acquire(&path, Duration::ZERO).unwrap();
+                assert_eq!(entries().len(), 1);
+                assert_eq!(entries()[0].as_bytes(), b"native-\xff.json.lock");
+                assert!(FileLock::acquire(&path, Duration::ZERO).is_err());
+                drop(guard);
+                assert!(entries().is_empty());
+                let guard = FileLock::acquire_recoverable(&path, Duration::ZERO).unwrap();
+                assert_eq!(entries().len(), 1);
+                assert_eq!(entries()[0].as_bytes(), b"native-\xff.json.lock");
+                drop(guard);
+                assert!(entries().is_empty());
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+                // Rejection is a checked result, not a skip: neither acquisition
+                // policy may create any entry, including a lossy UTF-8 substitute.
+                assert!(entries().is_empty());
+                assert!(matches!(FileLock::acquire(&path, Duration::ZERO),
+                    Err(AppError::Config(message)) if message == "ZCode: cannot acquire file lock"));
+                assert!(entries().is_empty());
+                assert!(
+                    matches!(FileLock::acquire_recoverable(&path, Duration::ZERO),
+                    Err(AppError::Config(message)) if message == "ZCode: cannot acquire file lock")
+                );
+                assert!(entries().is_empty());
+                assert_eq!(
+                    fs::create_dir(&raw_lock).unwrap_err().raw_os_error(),
+                    Some(libc::EILSEQ)
+                );
+                assert!(entries().is_empty());
+            }
+            Err(error) => panic!("unexpected raw-path creation error: {error}"),
+        }
     }
 }
