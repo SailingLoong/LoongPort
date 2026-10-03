@@ -1,11 +1,9 @@
-# ZCode account pure-core checks
+# ZCode account checks
 
-This lightweight Rust 1.95 harness compiles the product sources under
-`src-tauri/src/zcode_accounts/` plus the existing `secrets/crypto.rs`,
-`secrets/error.rs` and application error types directly. It does not copy the
-vault implementation or compile Tauri. Its entire source graph is test-only.
-
-Run from the repository root:
+This lightweight Rust 1.95 harness compiles the actual product account modules,
+existing vault crypto/error modules, OwnedFile registry/codec, private file writer
+and shared ZCode directory lock. It contains no parallel vault or IO implementation.
+The harness source graph is test-only and does not compile the Tauri application.
 
 ```sh
 cargo test --locked --manifest-path tests/zcode-account-core/Cargo.toml -- --test-threads=2
@@ -13,32 +11,40 @@ cargo clippy --locked --manifest-path tests/zcode-account-core/Cargo.toml --all-
 cargo fmt --manifest-path tests/zcode-account-core/Cargo.toml --check
 ```
 
-Set `CARGO_TARGET_DIR` to an explicit disposable build directory if space is
-limited. `tempfile` is used only to round-trip synthetic documents and encrypted
-catalogs/journals in a new test directory. Test vault keys remain in memory;
-no system keychain is used. Rusqlite is compiled solely to reuse the actual
-application error types; no database is opened.
+Use an explicit `CARGO_TARGET_DIR` when disk space is limited. All account fixtures
+use newly created private temporary directories. The subprocess matrix supplies
+synthetic vault keys through a pipe, exits without destructors at each publication
+point, and then authenticates/reopens actual files. Both ignored child fixtures
+are invoked by ordinary parent tests; they are not skipped coverage. No real home,
+credentials, keychain, ZCode process or database is accessed by this harness.
 
-The module is preparation for a future adapter, not a user-accessible switch.
-It is not registered in the main crate or any Tauri command. The caller must
-resolve the correct native context, enforce version/process/lock gates, register
-the files with the vault lifecycle, classify the live journal, and persist the
-returned decisions safely. The codec tests verify actual native AES-GCM framing,
-local identity extraction, existing-vault AEAD, context/scope validation, and
-encrypted checkpoint reopening using synthetic data. They do not prove remote
-OAuth/JWT validity, OS key custody, native filesystem locks, atomic durability,
-process-crash recovery or power-failure safety. Dropping and reopening test
-objects is not a native application restart acceptance test.
+Coverage includes native AES-GCM framing and local identity extraction, scoped
+A/B/A refresh, existing-vault AEAD, OwnedFile AAD and registration, bounded payloads,
+file permissions/CAS, scoped rollback, uncertain commit-marker reconciliation,
+restored-origin rejection, private path checks, and dead-owner lock reclamation.
+Windows account IO refuses admission until a native adapter is implemented and
+verified. Unix synthetic tests do not establish macOS live application acceptance.
+Unknown/ownerless locks are preserved. Process-crash recovery is not a cross-file
+power-loss guarantee or protection against a malicious process under the same UID.
 
-The native codec uses exactly `aes-gcm = 0.11.1` from RustCrypto (Apache-2.0 OR
-MIT), locked with its registry checksum. Other cryptographic dependencies match
-the existing product's version families. Unknown cipher/envelope/schema values
-never fall back to plaintext. No new key manager, CLI login, or environment
-secret resolver is present.
+The actual account modules also participate in the main crate's unit-test graph.
+They have no live command or capture entry yet. Production registry and lifecycle
+guards are present, with main-crate regressions for rotation, rewrap, reset and
+bootstrap restore; these require the normal platform build. Main/native validation
+is a separate gate and is not replaced by a green lightweight harness. The caller
+must eventually supply verified contract/process/individual-account admission,
+trusted journal provenance, and the existing sync owner plus SecretSession read
+guard before entering account IO. API-key cards and local JWT parsing are not
+proof of those conditions or of remote OAuth validity.
 
-The independent Rust key implementation follows the interface at pinned
-`zai-org/ZCode@29628c9acdb81b703bbd4080c207a0e7ce5e276e`:
-`packages/services/src/model-provider/accountProviderCredentialKey.ts` and
-`packages/services/src/oauth/repo/oauthCredentialRepo.ts`. No upstream source
-implementation is vendored in this slice. The Unicode fixtures were checked
-against that exact official TypeScript function using Node's type stripping.
+Current SQL/sync imports contain database and skills/settings payloads, not these
+account files. A future account-file import must quarantine journals/recovery and
+archive profiles before activation. Arbitrary manual filesystem copies are not
+classified as trusted local journals by this test suite.
+
+The native codec pins RustCrypto `aes-gcm = 0.11.1` (Apache-2.0 OR MIT); the main and
+harness locks use the same added cryptographic package versions and checksums.
+Other cryptographic families match the existing product. No new key manager,
+login flow or environment-secret resolver is present. Contract facts come from
+`zai-org/ZCode@29628c9acdb81b703bbd4080c207a0e7ce5e276e`; no upstream source
+implementation is vendored. Existing license files remain unchanged.

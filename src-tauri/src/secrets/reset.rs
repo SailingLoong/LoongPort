@@ -281,6 +281,7 @@ fn reset_with_hook(
     password: &str,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<PathBuf, AppError> {
+    super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     let journal = intent_path(root)?;
     if regular(&journal)? {
         return Err(AppError::Config("secret.recovery_required".into()));
@@ -602,6 +603,67 @@ mod tests {
             }
         }
     }
+    #[test]
+    #[serial]
+    fn pending_zcode_transaction_blocks_reset_before_mutation() {
+        let fixture = Fixture::new();
+        let pending = fixture.root.join("zcode_account_transaction.json");
+        session::write_durable(&pending, b"pending transaction fixture").unwrap();
+        let expected = preview(&fixture.root).unwrap().fingerprint;
+        let metadata = std::fs::read(fixture.root.join("vault.json")).unwrap();
+        let database = std::fs::read(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
+        let settings = read_optional(&crate::settings::settings_path()).unwrap();
+        let tree = tree_hash(&fixture.root).unwrap();
+        let entries = || {
+            std::fs::read_dir(parent(&fixture.root).unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let names = entries();
+
+        let error = reset_with_hook(
+            &fixture.root,
+            &expected,
+            "new protection password",
+            &mut |_| panic!("pending transaction must block reset publication"),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join("vault.json")).unwrap(),
+            metadata
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap(),
+            database
+        );
+        assert_eq!(
+            read_optional(&crate::settings::settings_path()).unwrap(),
+            settings
+        );
+        assert_eq!(tree_hash(&fixture.root).unwrap(), tree);
+        assert_eq!(
+            std::fs::read(&pending).unwrap(),
+            b"pending transaction fixture"
+        );
+        assert_eq!(entries(), names);
+        assert!(!intent_path(&fixture.root).unwrap().exists());
+        let reopened = SecretSession::open_existing(
+            &fixture.root,
+            &MemoryKeyStore::default(),
+            Some("old protection password"),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.read().unwrap().metadata(),
+            fixture.original_key.metadata()
+        );
+    }
+
     #[test]
     #[serial]
     fn reset_retains_plain_facts_and_archives_ciphertext_without_old_key() {

@@ -261,3 +261,33 @@ fn checkpoint_rejects_oversized_envelopes_before_decoding() {
         Err(CheckpointError::ResourceLimit)
     ));
 }
+
+#[test]
+fn checkpoint_transaction_binding_roundtrips_and_cannot_be_rebound() {
+    let vault = VaultContext::generate().unwrap();
+    let native = native();
+    let current = native_document(OAuthFamily::Zai, "a", "fresh");
+    let target = native
+        .inspect(&native_document(OAuthFamily::Zai, "b", "saved"))
+        .unwrap();
+    let mut checkpoint = SwitchCheckpoint::prepare(&current, &target, &native).unwrap();
+    let binding = TransactionBinding {
+        operation: uuid::Uuid::new_v4().to_string(),
+        native_root: [11, 22],
+        vault_root: [33, 44],
+        source_revision: [55; 32],
+        source_profile_revision: [66; 32],
+    };
+    checkpoint.bind(binding.clone()).unwrap();
+    assert!(checkpoint.bind(binding.clone()).is_err());
+    let encoded = checkpoint.seal(&vault, &native).unwrap();
+    let mut reopened = SwitchCheckpoint::open(&encoded, &vault, &native).unwrap();
+    assert!(reopened.binding() == Some(&binding));
+    assert!(reopened.bind(binding).is_err());
+    for field in ["operation", "native_root", "source_revision"] {
+        let invalid = mutate_payload(&encoded, JOURNAL_FILE, &vault, |payload| {
+            payload["binding"][field] = serde_json::json!("invalid");
+        });
+        assert!(SwitchCheckpoint::open(&invalid, &vault, &native).is_err());
+    }
+}

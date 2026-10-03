@@ -49,8 +49,13 @@ mod relay;
 mod rt;
 mod secrets;
 mod services;
+// Staged account IO has no runtime entry until native admission/capture is wired.
+#[cfg(test)]
+mod zcode_accounts;
 #[cfg(any(feature = "gui", test))]
 mod zcode_config;
+#[cfg(any(feature = "gui", test))]
+mod zcode_file_lock;
 pub use secrets::key_store::{KeyStore, KeyStoreError};
 pub use secrets::session::SecretSession;
 mod session_manager;

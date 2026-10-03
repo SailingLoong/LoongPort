@@ -72,9 +72,7 @@ pub(crate) const TABLES: &[ProtectedTable] = &[
     },
 ];
 
-pub(crate) fn secret_error(error: super::SecretError) -> AppError {
-    AppError::Config(error.code().to_owned())
-}
+pub(crate) use super::error::secret_error;
 
 pub(crate) fn seal_db(
     vault: &VaultContext,

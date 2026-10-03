@@ -7,6 +7,7 @@ pub(crate) mod files;
 pub(crate) mod inventory;
 pub(crate) mod key_store;
 pub(crate) mod migration;
+pub(crate) mod owned_file;
 pub(crate) mod reset;
 pub(crate) mod rewrap;
 pub(crate) mod session;

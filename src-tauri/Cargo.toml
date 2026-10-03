@@ -131,6 +131,7 @@ rustls-native-certs = "0.8"
 regex = "1.10"
 rquickjs = { workspace = true }
 thiserror = "2.0"
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 argon2 = { version = "0.6", features = ["zeroize"] }
 zeroize = "1.8"

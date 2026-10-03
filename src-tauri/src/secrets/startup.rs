@@ -270,6 +270,7 @@ pub(crate) async fn reset_secret_vault(
     password: String,
 ) -> Result<String, StartupError> {
     let password = zeroize::Zeroizing::new(password);
+    let _sync = crate::services::sync_protocol::sync_mutex().lock().await;
     tauri::async_runtime::spawn_blocking(move || {
         let coordinator = app.state::<StartupCoordinator>();
         let mut phase = coordinator.phase.lock().map_err(|_| StartupError {

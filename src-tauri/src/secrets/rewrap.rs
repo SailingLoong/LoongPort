@@ -104,6 +104,7 @@ pub(crate) fn change_password(
 ) -> Result<(), AppError> {
     let session = &db.secrets;
     let mut current = session.write()?;
+    super::owned_file::ensure_no_pending_zcode_transaction(session.root())?;
     if session.root().join(".vault-transition").exists() || session.root().join(INTENT).exists() {
         return Err(AppError::Config("secret.recovery_required".into()));
     }
@@ -307,6 +308,58 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn pending_zcode_transaction_blocks_password_change_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryKeyStore::default();
+        let db = fixture(dir.path(), &store);
+        let pending = dir.path().join("zcode_account_transaction.json");
+        write_durable(&pending, b"pending transaction fixture").unwrap();
+        let original = db.secrets.read().unwrap().metadata().clone();
+        let key = store.load(&original.vault_id, &original.key_id).unwrap();
+        let metadata = std::fs::read(dir.path().join("vault.json")).unwrap();
+        let database = db
+            .conn
+            .lock()
+            .unwrap()
+            .serialize(rusqlite::MAIN_DB)
+            .unwrap()
+            .to_vec();
+        let ciphertext = raw_secret(&db);
+
+        let error = change_password(&db, &store, "new protection password", false).unwrap_err();
+
+        assert!(
+            matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
+        );
+        assert_eq!(db.secrets.read().unwrap().metadata(), &original);
+        assert_eq!(
+            store.load(&original.vault_id, &original.key_id).unwrap(),
+            key
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("vault.json")).unwrap(),
+            metadata
+        );
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .serialize(rusqlite::MAIN_DB)
+                .unwrap()
+                .to_vec(),
+            database
+        );
+        assert_eq!(raw_secret(&db), ciphertext);
+        assert_eq!(
+            std::fs::read(pending).unwrap(),
+            b"pending transaction fixture"
+        );
+        assert!(!dir.path().join(INTENT).exists());
+        let reopened = SecretSession::open_existing(dir.path(), &store, None).unwrap();
+        assert_eq!(reopened.read().unwrap().metadata(), &original);
     }
 
     #[test]

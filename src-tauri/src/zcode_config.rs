@@ -4,13 +4,16 @@
 
 use crate::config::{atomic_write_private, get_home_dir};
 use crate::error::AppError;
+#[cfg(test)]
+use crate::zcode_file_lock::now_ms;
+use crate::zcode_file_lock::{unique_token, FileLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const MANAGED_PREFIX: &str = "loongport-";
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -388,84 +391,6 @@ fn write_document(path: &Path, doc: &Value) -> Result<(), AppError> {
         ));
     }
     atomic_write_private(path, &bytes)
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-fn unique_token() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    format!(
-        "{}-{}-{}",
-        std::process::id(),
-        now_ms(),
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
-}
-
-struct FileLock {
-    directory: PathBuf,
-    owner: PathBuf,
-}
-impl FileLock {
-    fn acquire(path: &Path, timeout: Duration) -> Result<Self, AppError> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| config_error("invalid file path"))?;
-        fs::create_dir_all(parent)
-            .map_err(|_| config_error("cannot create configuration directory"))?;
-        let directory = PathBuf::from(format!("{}.lock", path.display()));
-        let started = Instant::now();
-        loop {
-            match fs::create_dir(&directory) {
-                Ok(()) => {
-                    let token = unique_token();
-                    let owner = directory.join(format!("owner-{token}.json"));
-                    let payload =
-                        json!({"pid":std::process::id(),"createdAt":now_ms(),"token":token})
-                            .to_string();
-                    let result = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&owner)
-                        .and_then(|mut f| f.write_all(payload.as_bytes()));
-                    if result.is_err() {
-                        let _ = fs::remove_dir(&directory);
-                        return Err(config_error("cannot establish file lock"));
-                    }
-                    let guard = Self {
-                        directory: directory.clone(),
-                        owner,
-                    };
-                    let entries = fs::read_dir(&directory)
-                        .map_err(|_| config_error("cannot verify file lock"))?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|_| config_error("cannot verify file lock"))?;
-                    if entries.len() != 1 || entries[0].path() != guard.owner {
-                        return Err(config_error("file lock ownership changed"));
-                    }
-                    return Ok(guard);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Fail closed on abandoned locks. ZCode can reclaim them using its native liveness policy.
-                    if started.elapsed() >= timeout {
-                        return Err(config_error("file lock timeout; configuration preserved"));
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(_) => return Err(config_error("cannot acquire file lock")),
-            }
-        }
-    }
-}
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.owner);
-        let _ = fs::remove_dir(&self.directory);
-    }
 }
 
 #[cfg(test)]

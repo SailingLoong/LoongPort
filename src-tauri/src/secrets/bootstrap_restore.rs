@@ -263,6 +263,7 @@ fn finalize_with_hook(
     automatic_unlock: bool,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<Arc<SecretSession>, AppError> {
+    super::owned_file::ensure_no_pending_zcode_transaction(root)?;
     directory(root)?;
     if pending(root)? || super::reset::pending(root)? {
         return Err(AppError::Config("secret.recovery_required".into()));
@@ -623,6 +624,86 @@ mod tests {
             ..Default::default()
         })
     }
+    #[test]
+    #[serial_test::serial]
+    fn pending_zcode_transaction_blocks_bootstrap_restore_before_mutation() {
+        let fixture = Fixture::new();
+        let root = fixture.root();
+        let store = MemoryKeyStore::default();
+        let session = SecretSession::open(&root, &store, None).unwrap();
+        let original = session.read().unwrap().metadata().clone();
+        let connection = vault::prepare(
+            &root.join(crate::config::DB_FILE_NAME),
+            &session.read().unwrap(),
+        )
+        .unwrap();
+        let db = Database::from_connection(connection, session.clone());
+        db.set_setting("global_proxy_url", "local-restore-canary")
+            .unwrap();
+        session.complete_migration().unwrap();
+        let pending = root.join("zcode_account_transaction.json");
+        session::write_durable(&pending, b"pending transaction fixture").unwrap();
+        let key = store.load(&original.vault_id, &original.key_id).unwrap();
+        let metadata = std::fs::read(root.join("vault.json")).unwrap();
+        let database = db
+            .conn
+            .lock()
+            .unwrap()
+            .serialize(rusqlite::MAIN_DB)
+            .unwrap()
+            .to_vec();
+        let settings = optional(&crate::settings::settings_path()).unwrap();
+        let entries = || {
+            std::fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let names = entries();
+        let snapshot = fixture.snapshot();
+        let expected = snapshot.manifest.snapshot_id.clone();
+        let prepared =
+            prepare_snapshot(snapshot, source(), "remote recovery password", &expected).unwrap();
+
+        let error = finalize_with_hook(&root, prepared, &store, true, &mut |_| {
+            panic!("pending transaction must block restore publication")
+        })
+        .err()
+        .expect("pending transaction must block restore");
+
+        assert!(
+            matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
+        );
+        assert_eq!(session.read().unwrap().metadata(), &original);
+        assert_eq!(
+            store.load(&original.vault_id, &original.key_id).unwrap(),
+            key
+        );
+        assert_eq!(std::fs::read(root.join("vault.json")).unwrap(), metadata);
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .serialize(rusqlite::MAIN_DB)
+                .unwrap()
+                .to_vec(),
+            database
+        );
+        assert_eq!(
+            db.get_setting("global_proxy_url").unwrap().as_deref(),
+            Some("local-restore-canary")
+        );
+        assert_eq!(
+            optional(&crate::settings::settings_path()).unwrap(),
+            settings
+        );
+        assert_eq!(
+            std::fs::read(pending).unwrap(),
+            b"pending transaction fixture"
+        );
+        assert_eq!(entries(), names);
+    }
+
     #[test]
     #[serial_test::serial]
     fn password_only_first_restore_does_not_require_a_system_key_store() {
