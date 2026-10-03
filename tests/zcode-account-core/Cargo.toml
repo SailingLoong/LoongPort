@@ -1,0 +1,19 @@
+[package]
+name = "loongport-zcode-account-core-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Compile the product source itself; this harness contains no second implementation.
+[lib]
+path = "../../src-tauri/src/zcode_accounts/core.rs"
+
+[dependencies]
+serde = "1.0"
+serde_json = "1.0"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[workspace]
