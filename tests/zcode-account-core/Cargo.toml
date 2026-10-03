@@ -32,3 +32,8 @@ debug = 0
 incremental = false
 
 [workspace]
+
+# The product's GUI runtime owner is compiled/tested by the main crate, not this
+# dependency-minimal harness. Recognize that existing feature name without a bypass.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gui"))'] }

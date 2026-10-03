@@ -561,3 +561,89 @@ fn io_same_bytes_replacement_of_any_observed_file_fails_identity_cas() {
         f.store().recover(JournalOrigin::Live).unwrap();
     }
 }
+
+#[test]
+fn io_publication_gate_blocks_restarted_writer_without_native_write() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let running = std::cell::Cell::new(false);
+    let gate = || {
+        if running.get() {
+            Err(BlockedReason::AppRunning)
+        } else {
+            Ok(())
+        }
+    };
+    let store = AccountStore::new_guarded(
+        f.native_root.path(),
+        f.vault_root.path(),
+        &f.vault,
+        &f.native,
+        ADMITTED,
+        &gate,
+    )
+    .unwrap();
+    let result = store.switch_with_hook(&f.b, &mut |point| {
+        if point == WritePoint::Captured {
+            running.set(true);
+        }
+        Ok(())
+    });
+    assert_eq!(
+        result,
+        Err(TransactionError::Admission(BlockedReason::AppRunning))
+    );
+    assert!(f.current() == f.fresh);
+    assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
+    running.set(false);
+    store.recover(JournalOrigin::Live).unwrap();
+}
+#[test]
+fn io_postcommit_gate_failure_keeps_committed_marker_and_target() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let changed = std::cell::Cell::new(false);
+    let gate = || {
+        if changed.get() {
+            Err(BlockedReason::ContextChanged)
+        } else {
+            Ok(())
+        }
+    };
+    let store = AccountStore::new_guarded(
+        f.native_root.path(),
+        f.vault_root.path(),
+        &f.vault,
+        &f.native,
+        ADMITTED,
+        &gate,
+    )
+    .unwrap();
+    let result = store.switch_with_hook(&f.b, &mut |point| {
+        if point == WritePoint::Committed {
+            changed.set(true);
+        }
+        Ok(())
+    });
+    assert_eq!(
+        result,
+        Err(TransactionError::Admission(BlockedReason::ContextChanged))
+    );
+    let current = f.current();
+    assert!(f.native.inspect(&current).unwrap().identity() == &f.b);
+    changed.set(false);
+    store.recover(JournalOrigin::Live).unwrap();
+    assert!(f.current() == current);
+}
+#[test]
+fn io_visible_committed_marker_reconciliation_does_not_read_native_credentials() {
+    let f = Fixture::new(OAuthFamily::Zai);
+    let result = f.store().switch_with_hook(&f.b, &mut |point| {
+        if point == WritePoint::Committed {
+            fs::remove_file(f.native_root.path().join("credentials.json")).unwrap();
+            return Err(TransactionError::Storage);
+        }
+        Ok(())
+    });
+    assert_eq!(result, Err(TransactionError::CommittedNeedsCleanup));
+    assert!(!f.native_root.path().join("credentials.json").exists());
+    assert!(f.vault_root.path().join(JOURNAL_FILE).exists());
+}

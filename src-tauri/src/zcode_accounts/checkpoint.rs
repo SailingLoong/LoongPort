@@ -316,13 +316,17 @@ impl SwitchCheckpoint {
         })
     }
 
+    pub(super) fn recovery_policy(&self, origin: JournalOrigin) -> RecoveryAction {
+        recovery_action(origin, self.phase)
+    }
+
     /// Origin is a trusted lifecycle input, never deserialized from the payload.
     pub(crate) fn recover(
         &self,
         current: &CredentialDocument,
         origin: JournalOrigin,
     ) -> Result<RecoveryOutcome, CheckpointError> {
-        match recovery_action(origin, self.phase) {
+        match self.recovery_policy(origin) {
             RecoveryAction::RestorePreimage => self
                 .plan
                 .rollback(current)

@@ -13,11 +13,14 @@ pub(crate) const TEST_SECRET: &str = "test-native-secret";
 pub(crate) const TEST_CONTEXT: &str = "synthetic-native-context";
 
 pub(crate) fn encrypt_synthetic(value: &str) -> String {
+    encrypt_synthetic_with_secret(value, TEST_SECRET)
+}
+fn encrypt_synthetic_with_secret(value: &str, secret: &str) -> String {
     // Only synthetic tests create native ciphertext; there is no production encrypt API.
     static NONCE: AtomicU64 = AtomicU64::new(100);
     let mut iv = [0u8; 12];
     iv[4..].copy_from_slice(&NONCE.fetch_add(1, Ordering::Relaxed).to_be_bytes());
-    let cipher = Aes256Gcm::new_from_slice(&Sha256::digest(TEST_SECRET.as_bytes())).unwrap();
+    let cipher = Aes256Gcm::new_from_slice(&Sha256::digest(secret.as_bytes())).unwrap();
     let mut encrypted = cipher.encrypt(&Nonce::from(iv), value.as_bytes()).unwrap();
     let tag = encrypted.split_off(encrypted.len() - 16);
     format!(
@@ -29,11 +32,20 @@ pub(crate) fn encrypt_synthetic(value: &str) -> String {
 }
 
 pub(crate) fn native_document(family: OAuthFamily, id: &str, version: &str) -> CredentialDocument {
+    native_document_with_context(TEST_CONTEXT, TEST_SECRET, family, id, version)
+}
+pub(crate) fn native_document_with_context(
+    context: &str,
+    secret: &str,
+    family: OAuthFamily,
+    id: &str,
+    version: &str,
+) -> CredentialDocument {
     let provider = match family {
         OAuthFamily::Zai => "zai",
         OAuthFamily::BigModel => "bigmodel",
     };
-    let identity = AccountIdentity::new(TEST_CONTEXT, family, id).unwrap();
+    let identity = AccountIdentity::new(context, family, id).unwrap();
     let mut data = BTreeMap::new();
     for key in identity.credential_keys() {
         let plaintext = if key == "oauth:active_provider" {
@@ -44,7 +56,7 @@ pub(crate) fn native_document(family: OAuthFamily, id: &str, version: &str) -> C
         } else {
             format!("SYNTHETIC_CANARY_{id}_{version}_{key}")
         };
-        data.insert(key, encrypt_synthetic(&plaintext));
+        data.insert(key, encrypt_synthetic_with_secret(&plaintext, secret));
     }
     data.insert("ssh:unrelated".into(), "unrelated-opaque-format".into());
     CredentialDocument::parse(&serde_json::to_vec(&data).unwrap()).unwrap()

@@ -3,11 +3,13 @@
 //! this operation. No home, environment, key store, process shutdown or UI lookup.
 //! Process-crash recovery is supported; this does not promise cross-file power-loss
 //! atomicity or defend against a malicious process already running as this user.
+use super::admission::BlockedReason;
 use super::checkpoint::{
     CheckpointError, ProfileCatalog, RecoveryOutcome, SwitchCheckpoint, TransactionBinding,
 };
 use super::core::{
-    AccountIdentity, AccountSnapshot, CredentialDocument, JournalOrigin, TransactionPhase,
+    AccountIdentity, AccountSnapshot, CredentialDocument, JournalOrigin, RecoveryAction,
+    TransactionPhase,
 };
 use super::native::NativeCipher;
 use crate::config_file_io::write_durable;
@@ -34,6 +36,8 @@ pub(crate) struct Admission {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransactionError {
     NotAdmitted,
+    Admission(BlockedReason),
+    CommittedNeedsCleanup,
     UnsupportedScope,
     UnsafePath,
     Storage,
@@ -107,8 +111,10 @@ pub(crate) struct AccountStore<'a> {
     vault_id: [u64; 2],
     vault: &'a VaultContext,
     native: &'a NativeCipher,
+    gate: &'a dyn Fn() -> Result<(), BlockedReason>,
 }
 impl<'a> AccountStore<'a> {
+    #[cfg(test)]
     pub(crate) fn new(
         native_root: &'a Path,
         vault_root: &'a Path,
@@ -116,12 +122,32 @@ impl<'a> AccountStore<'a> {
         native: &'a NativeCipher,
         admission: Admission,
     ) -> Result<Self, TransactionError> {
+        static SYNTHETIC_GATE: fn() -> Result<(), BlockedReason> = || Ok(());
+        Self::new_guarded(
+            native_root,
+            vault_root,
+            vault,
+            native,
+            admission,
+            &SYNTHETIC_GATE,
+        )
+    }
+
+    pub(super) fn new_guarded(
+        native_root: &'a Path,
+        vault_root: &'a Path,
+        vault: &'a VaultContext,
+        native: &'a NativeCipher,
+        admission: Admission,
+        gate: &'a dyn Fn() -> Result<(), BlockedReason>,
+    ) -> Result<Self, TransactionError> {
         if !admission.contract_verified || !admission.app_stopped || !admission.native_gate_passed {
             return Err(TransactionError::NotAdmitted);
         }
         if !admission.individual_scope_verified {
             return Err(TransactionError::UnsupportedScope);
         }
+        gate().map_err(TransactionError::Admission)?;
         let native_id = root_identity(native_root)?;
         let vault_id = root_identity(vault_root)?;
         if native_id == vault_id {
@@ -134,6 +160,7 @@ impl<'a> AccountStore<'a> {
             vault_id,
             vault,
             native,
+            gate,
         })
     }
     pub(crate) fn switch(
@@ -252,10 +279,13 @@ impl<'a> AccountStore<'a> {
             if let Ok(Some(actual)) = self.read(Role::Journal) {
                 if let Ok(actual) = self.open_checkpoint(&actual) {
                     if actual.binding() == checkpoint.binding() {
-                        let _ = actual.recover(
-                            &document(&self.required(Role::Credentials)?)?,
-                            JournalOrigin::Live,
-                        )?;
+                        // Marker authentication is local-vault work. Do not read native
+                        // credentials here: a failed gate may mean its writer restarted.
+                        if actual.recovery_policy(JournalOrigin::Live)
+                            == RecoveryAction::CleanupOnly
+                        {
+                            return Err(TransactionError::CommittedNeedsCleanup);
+                        }
                     }
                 }
             }
@@ -307,6 +337,7 @@ impl<'a> AccountStore<'a> {
                 .as_bytes(),
         )?;
         hook(WritePoint::RecoveryRecord)?;
+        (self.gate)().map_err(TransactionError::Admission)?;
         self.expect(Role::Journal, Some(journal))?;
         fs::remove_file(self.vault_root.join(JOURNAL_FILE))
             .map_err(|_| TransactionError::Storage)?;
@@ -343,12 +374,16 @@ impl<'a> AccountStore<'a> {
         }
     }
     fn lock(&self) -> Result<FileLock, TransactionError> {
+        (self.gate)().map_err(TransactionError::Admission)?;
         self.validate_roots()?;
-        FileLock::acquire_recoverable(
+        let lock = FileLock::acquire_recoverable(
             &self.native_root.join("credentials.json"),
             Duration::from_millis(500),
         )
-        .map_err(|_| TransactionError::RecoveryRequired)
+        .map_err(|_| TransactionError::RecoveryRequired)?;
+        // The app may have restarted while the operation waited for its native lock.
+        (self.gate)().map_err(TransactionError::Admission)?;
+        Ok(lock)
     }
     fn root(&self, role: Role) -> &Path {
         match role {
@@ -388,6 +423,7 @@ impl<'a> AccountStore<'a> {
         before: Option<&FileImage>,
         bytes: &[u8],
     ) -> Result<FileImage, TransactionError> {
+        (self.gate)().map_err(TransactionError::Admission)?;
         self.expect(role, before)?;
         write_durable(&self.root(role).join(role.name()), bytes)
             .map_err(|_| TransactionError::Storage)?;

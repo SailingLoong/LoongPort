@@ -109,6 +109,10 @@ impl AccountIdentity {
         })
     }
 
+    pub(super) fn matches_scope(&self, context: &str, family: OAuthFamily) -> bool {
+        self.context == context && self.family == family
+    }
+
     pub fn credential_keys(&self) -> Vec<String> {
         let provider = match self.family {
             OAuthFamily::Zai => "zai",
