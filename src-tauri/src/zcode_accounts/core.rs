@@ -34,7 +34,7 @@ impl CredentialDocument {
         if bytes.len() > MAX_DOCUMENT_BYTES {
             return Err(CoreError::DocumentTooLarge);
         }
-        serde_json::from_slice::<StrictRecord>(bytes)
+        serde_json::from_slice::<StrictRecord<String>>(bytes)
             .map(|record| Self(record.0))
             .map_err(|_| CoreError::InvalidDocument)
     }
@@ -52,29 +52,29 @@ impl CredentialDocument {
     }
 }
 
-struct StrictRecord(BTreeMap<String, String>);
+pub(super) struct StrictRecord<T>(pub(super) BTreeMap<String, T>);
 
-impl<'de> Deserialize<'de> for StrictRecord {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for StrictRecord<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct RecordVisitor;
-        impl<'de> Visitor<'de> for RecordVisitor {
-            type Value = StrictRecord;
+        struct RecordVisitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for RecordVisitor<T> {
+            type Value = StrictRecord<T>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a credential string map without duplicate keys")
+                formatter.write_str("an object without duplicate keys")
             }
 
             fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
                 let mut values = BTreeMap::new();
-                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                while let Some((key, value)) = map.next_entry::<String, T>()? {
                     if values.insert(key, value).is_some() {
-                        return Err(serde::de::Error::custom("duplicate credential key"));
+                        return Err(serde::de::Error::custom("duplicate object key"));
                     }
                 }
                 Ok(StrictRecord(values))
             }
         }
-        deserializer.deserialize_map(RecordVisitor)
+        deserializer.deserialize_map(RecordVisitor(std::marker::PhantomData))
     }
 }
 
@@ -130,6 +130,10 @@ pub struct AccountSnapshot {
 }
 
 impl AccountSnapshot {
+    pub fn identity(&self) -> &AccountIdentity {
+        &self.identity
+    }
+
     /// The caller must already have authenticated this document's native identity.
     pub fn capture(
         identity: AccountIdentity,
@@ -279,7 +283,7 @@ pub fn recovery_action(origin: JournalOrigin, phase: TransactionPhase) -> Recove
 }
 
 // Rust's is_whitespace differs from ECMAScript trim (notably U+0085 and U+FEFF).
-fn js_trim(value: &str) -> &str {
+pub(super) fn js_trim(value: &str) -> &str {
     value.trim_matches(|c| {
         matches!(c,
             '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' |
