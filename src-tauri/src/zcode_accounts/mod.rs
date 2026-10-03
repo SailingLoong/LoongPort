@@ -3,3 +3,6 @@
 pub(crate) mod checkpoint;
 pub mod core;
 pub mod native;
+
+#[cfg(test)]
+mod roundtrip_tests;
