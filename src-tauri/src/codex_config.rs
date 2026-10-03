@@ -2329,7 +2329,7 @@ fn probe_codex_cli_sources(
             let remaining = deadline
                 .checked_duration_since(std::time::Instant::now())
                 .ok_or_else(|| "Codex metadata probe deadline expired".to_string())?;
-            crate::commands::run_tool_at_path_with_timeout(candidate, args, remaining)
+            crate::process::run_tool_at_path_with_timeout(candidate, args, remaining)
         };
         let version = run(&["--version"])
             .ok()
@@ -10432,7 +10432,7 @@ base_url = "https://idle.example/v1"
             old_path,
             plugin,
         ];
-        let direct = crate::commands::run_tool_at_path_with_timeout(
+        let direct = crate::process::run_tool_at_path_with_timeout(
             &candidates[3],
             &["--version"],
             std::time::Duration::from_secs(1),
