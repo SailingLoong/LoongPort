@@ -55,17 +55,23 @@ describe("ProviderForm draft retention", () => {
           </PreservedView>
         </QueryClientProvider>
       );
-      const { rerender } = render(view(true));
-      const name = await screen.findByPlaceholderText(
-        "provider.namePlaceholder",
-      );
-      await user.clear(name);
-      await user.type(name, "Draft service");
-      rerender(view(false));
-      rerender(view(true));
-      expect(
-        await screen.findByPlaceholderText("provider.namePlaceholder"),
-      ).toHaveValue("Draft service");
+      const { rerender, unmount } = render(view(true));
+      try {
+        const name = await screen.findByPlaceholderText(
+          "provider.namePlaceholder",
+        );
+        await user.clear(name);
+        await user.type(name, "Draft service");
+        rerender(view(false));
+        rerender(view(true));
+        expect(
+          await screen.findByPlaceholderText("provider.namePlaceholder"),
+        ).toHaveValue("Draft service");
+      } finally {
+        unmount();
+        await client.cancelQueries();
+        client.clear();
+      }
     },
   );
 });
